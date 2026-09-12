@@ -805,6 +805,12 @@ def _components_3d(raw: Optional[Sequence[dict]]) -> Optional[list[dict]]:
         return None
     components = []
     for entry in raw:
+        if not isinstance(entry, dict):
+            # Con liste lunghe (30-50 elementi richiesti) il modello a volte
+            # deraglia dallo schema e infila una voce come semplice stringa
+            # invece che come oggetto: si scarta quella voce, non l'intera
+            # estrazione -- gli altri componenti restano validi.
+            continue
         try:
             component = {
                 "name": str(entry.get("name") or "Componente"),

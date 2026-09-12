@@ -193,3 +193,21 @@ def test_components_without_a_real_volume_are_discarded():
     })
     assert len(params.components_3d) == 1
     assert params.components_3d[0]["x_mm"] == 1
+
+
+def test_components_that_are_not_objects_are_skipped_not_fatal():
+    """Su liste lunghe (30-50 elementi richiesti) il modello a volte infila
+    una voce fuori schema (una stringa invece di un oggetto): non deve far
+    fallire l'intera estrazione, solo quella voce."""
+    params = _params_from_tool_arguments({
+        "layout": "castellated", "confidence": "low",
+        "castellated_sides": [{"edge": "left", "count": 2, "pitch_mm": 2.54}],
+        "components_3d": [
+            "SP3485E",
+            {"x_mm": 1, "y_mm": 1, "length_mm": 2, "width_mm": 2, "height_mm": 1},
+            None,
+            42,
+        ],
+    })
+    assert len(params.components_3d) == 1
+    assert params.components_3d[0]["x_mm"] == 1
