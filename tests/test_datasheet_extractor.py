@@ -14,7 +14,7 @@ import pytest
 
 from kicadgen.services.datasheet_extractor import (
     MAX_FILES, ExtractionError, extract_pin_header_params, _file_to_content_block,
-    _openai_tool, _params_from_tool_arguments,
+    _openai_tool, _params_from_tool_arguments, _merge_photo_components,
 )
 
 
@@ -211,3 +211,17 @@ def test_components_that_are_not_objects_are_skipped_not_fatal():
     })
     assert len(params.components_3d) == 1
     assert params.components_3d[0]["x_mm"] == 1
+
+
+def test_tiled_photo_components_are_deduplicated_and_enriched():
+    groups = [
+        [{"name": "R1", "kind": "resistor", "x_mm": 1, "y_mm": 2,
+          "length_mm": 1.6, "width_mm": 0.8, "height_mm": 0.5}],
+        [{"name": "resistore", "kind": "generic", "x_mm": 1.08, "y_mm": 2.04,
+          "length_mm": 1.5, "width_mm": 0.8, "height_mm": 0.5,
+          "marking": "102"}],
+    ]
+    merged = _merge_photo_components(groups)
+    assert len(merged) == 1
+    assert merged[0]["kind"] == "resistor"
+    assert merged[0]["marking"] == "102"

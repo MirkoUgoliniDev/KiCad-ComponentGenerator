@@ -131,21 +131,31 @@ def find_board(image, body_length: float, body_width: float) -> Optional[BoardFr
     contours, _ = cv2.findContours(dark, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
-    contour = max(contours, key=cv2.contourArea)
-    (_, _), (rw, rh), angle = cv2.minAreaRect(contour)
-    if min(rw, rh) < 20:
+    expected = body_length / body_width
+    # Le foto dei moduli sono spesso corredate da quote: linee e frecce possono
+    # formare il contorno più grande, ma con un rapporto molto diverso da quello
+    # reale della scheda. Scegliamo quindi il candidato più grande tra quelli
+    # geometricamente compatibili, invece di usare sempre max(contourArea).
+    candidates = []
+    for contour in contours:
+        (_, _), (rw, rh), angle = cv2.minAreaRect(contour)
+        if min(rw, rh) < 20:
+            continue
+        tilt = min(abs(angle) % 90, 90 - abs(angle) % 90)
+        if tilt > 6:
+            continue
+        bx, by, bw, bh = cv2.boundingRect(contour)
+        w, h = float(bw), float(bh)
+        long_px, short_px = max(w, h), min(w, h)
+        found = long_px / short_px
+        error = abs(found - expected) / expected
+        if error <= MAX_BOARD_ASPECT_ERROR:
+            candidates.append((cv2.contourArea(contour), error, bx, by, w, h))
+    if not candidates:
         return None
-    tilt = min(abs(angle) % 90, 90 - abs(angle) % 90)
-    if tilt > 6:
-        return None
-    bx, by, bw, bh = cv2.boundingRect(contour)
-    w, h = float(bw), float(bh)
+    _, _, bx, by, w, h = max(candidates, key=lambda item: item[0])
     cx, cy = bx + w / 2, by + h / 2
     long_px, short_px = max(w, h), min(w, h)
-    expected = body_length / body_width
-    found = long_px / short_px
-    if abs(found - expected) / expected > MAX_BOARD_ASPECT_ERROR:
-        return None
     scale = (long_px / body_length + short_px / body_width) / 2
     return BoardFrame(cx=cx, cy=cy, scale=scale, width_px=long_px, height_px=short_px)
 
