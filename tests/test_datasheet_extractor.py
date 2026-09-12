@@ -14,7 +14,7 @@ import pytest
 
 from kicadgen.services.datasheet_extractor import (
     MAX_FILES, ExtractionError, extract_pin_header_params, _file_to_content_block,
-    _openai_tool,
+    _openai_tool, _params_from_tool_arguments,
 )
 
 
@@ -85,3 +85,80 @@ def test_openai_tool_wraps_schema_for_openrouter():
     properties = function["parameters"]["properties"]
     for key in ("rows", "cols", "pitch_mm", "row_spacing_mm", "pad_diameter_mm", "drill_mm"):
         assert key in properties
+
+
+# ── Disposizione dei contatti (layout) ──────────────────────────────
+
+def _matrix_payload(**extra):
+    data = {
+        "layout": "matrix", "rows": 2, "cols": 4, "pitch_mm": 2.54,
+        "row_spacing_mm": 2.54, "pad_diameter_mm": 1.7, "drill_mm": 1.0,
+        "confidence": "high",
+    }
+    data.update(extra)
+    return data
+
+
+def test_matrix_layout_requires_the_grid_fields():
+    data = _matrix_payload()
+    del data["row_spacing_mm"]
+    with pytest.raises(ExtractionError, match="row_spacing_mm"):
+        _params_from_tool_arguments(data)
+
+
+def test_matrix_layout_is_the_default_when_missing():
+    data = _matrix_payload()
+    del data["layout"]
+    params = _params_from_tool_arguments(data)
+    assert params.layout == "matrix"
+    assert not params.is_castellated()
+
+
+def test_castellated_layout_keeps_one_pitch_per_side():
+    """Il caso che la matrice non sa rappresentare: due lati, due passi."""
+    params = _params_from_tool_arguments({
+        "layout": "castellated",
+        "name": "RS485_TTL",
+        "confidence": "medium",
+        "body_length_mm": 42.8, "body_width_mm": 15.2, "body_height_mm": 4.75,
+        "castellated_sides": [
+            {"edge": "left", "count": 3, "pitch_mm": 5.08,
+             "pin_names": ["PE", "B-", "A+"]},
+            {"edge": "right", "count": 5, "pitch_mm": 2.54},
+        ],
+    })
+    assert params.is_castellated()
+    assert params.rows is None and params.pitch_mm is None
+    left, right = params.castellated_sides
+    assert (left["edge"], left["count"], left["pitch_mm"]) == ("left", 3, 5.08)
+    assert (right["edge"], right["count"], right["pitch_mm"]) == ("right", 5, 2.54)
+    assert left["pin_names"] == ["PE", "B-", "A+"]
+
+
+def test_castellated_sides_get_progressive_numbering_when_missing():
+    params = _params_from_tool_arguments({
+        "layout": "castellated", "confidence": "low",
+        "castellated_sides": [
+            {"edge": "left", "count": 3, "pitch_mm": 5.08},
+            {"edge": "right", "count": 5, "pitch_mm": 2.54},
+        ],
+    })
+    assert params.castellated_sides[0]["first_pin"] == 1
+    assert params.castellated_sides[1]["first_pin"] == 4
+
+
+def test_castellated_without_sides_is_reported():
+    with pytest.raises(ExtractionError, match="non ha descritto alcun lato"):
+        _params_from_tool_arguments({"layout": "castellated", "confidence": "low"})
+
+
+def test_unusable_sides_are_discarded():
+    params = _params_from_tool_arguments({
+        "layout": "castellated", "confidence": "low",
+        "castellated_sides": [
+            {"edge": "left", "count": 3, "pitch_mm": 5.08},
+            {"edge": "diagonale", "count": 2, "pitch_mm": 2.54},
+            {"edge": "right", "count": 4, "pitch_mm": 0},
+        ],
+    })
+    assert [s["edge"] for s in params.castellated_sides] == ["left"]

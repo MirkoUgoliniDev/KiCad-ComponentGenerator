@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from ..cad3d.annotations import EDGE_NAMES
+from ..generators.castellated_module import EDGES
 from .openrouter import DEFAULT_MODEL, OpenRouterError, api_key, call_tool
 
 MAX_FILES = 5
@@ -42,6 +43,23 @@ _EXTRACTION_TOOL = {
     "input_schema": {
         "type": "object",
         "properties": {
+            "layout": {
+                "type": "string",
+                "enum": ["matrix", "castellated"],
+                "description": (
+                    "Come sono disposti i contatti del componente.\n"
+                    "- \"matrix\": pin su una griglia regolare righe x colonne con UN "
+                    "SOLO passo (pin header, moduli DIP-style, componenti THT o SMD "
+                    "a due file simmetriche). Compila rows, cols, pitch_mm, "
+                    "row_spacing_mm, pad_diameter_mm, drill_mm.\n"
+                    "- \"castellated\": modulo su PCB con semi-fori metallizzati sul "
+                    "bordo (es. moduli WiFi/BLE, convertitori isolati). Compila "
+                    "castellated_sides e i campi body_*; NON forzare i contatti in una "
+                    "matrice, perche' lati diversi hanno spesso numero di contatti e "
+                    "passo diversi (es. 3 contatti a 5.08mm a sinistra e 5 a 2.54mm a "
+                    "destra): in quel caso \"matrix\" darebbe un footprint sbagliato."
+                ),
+            },
             "name": {
                 "type": "string",
                 "description": (
@@ -250,6 +268,94 @@ _EXTRACTION_TOOL = {
                     "Ometti se non c'e' una foto o non si leggono scritte."
                 ),
             },
+            "castellated_sides": {
+                "type": "array",
+                "description": (
+                    "SOLO con layout=\"castellated\": un elemento per ogni lato del "
+                    "modulo che porta contatti, letto dal disegno/foto visto DALL'ALTO "
+                    "(top view). Ogni lato ha il suo numero di contatti e il suo passo: "
+                    "e' proprio il motivo per cui questi moduli non stanno in una "
+                    "matrice. L'origine e' il centro del corpo."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "edge": {
+                            "type": "string",
+                            "enum": list(EDGES),
+                            "description": (
+                                "Lato del modulo visto dall'alto: \"left\"/\"right\" i "
+                                "due lati corti o lunghi verticali, \"top\"/\"bottom\" "
+                                "quelli orizzontali. \"top\" e' il lato in alto nel "
+                                "disegno."
+                            ),
+                        },
+                        "count": {
+                            "type": "integer",
+                            "description": "Numero di contatti su questo lato.",
+                        },
+                        "pitch_mm": {
+                            "type": "number",
+                            "description": (
+                                "Passo tra contatti adiacenti SU QUESTO LATO, in "
+                                "millimetri: puo' essere diverso da quello degli altri "
+                                "lati (es. 5.08 su un lato e 2.54 sull'altro)."
+                            ),
+                        },
+                        "first_pin": {
+                            "type": "integer",
+                            "description": (
+                                "Numero del primo contatto di questo lato, seguendo il "
+                                "bordo dall'alto in basso (lati verticali) o da sinistra "
+                                "a destra (lati orizzontali)."
+                            ),
+                        },
+                        "reverse": {
+                            "type": "boolean",
+                            "description": (
+                                "true se su questo lato la numerazione cresce nel verso "
+                                "opposto (dal basso verso l'alto, o da destra a sinistra)."
+                            ),
+                        },
+                        "offset_mm": {
+                            "type": "number",
+                            "description": (
+                                "Spostamento del gruppo di contatti lungo il bordo "
+                                "rispetto alla posizione centrata, in millimetri "
+                                "(positivo verso il basso o verso destra). Ometti o 0 "
+                                "se i contatti sono centrati sul lato."
+                            ),
+                        },
+                        "pad_length_mm": {
+                            "type": "number",
+                            "description": (
+                                "Lunghezza della piazzola perpendicolarmente al bordo "
+                                "(quanto entra sotto il modulo piu' quanto sporge), "
+                                "dalla \"Recommended PCB land pattern\". Ometti se il "
+                                "datasheet non la riporta."
+                            ),
+                        },
+                        "pad_width_mm": {
+                            "type": "number",
+                            "description": (
+                                "Larghezza della piazzola lungo il bordo (di norma poco "
+                                "piu' del diametro del semi-foro). Ometti se assente."
+                            ),
+                        },
+                        "pin_names": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Sigle serigrafate accanto ai contatti di questo lato, "
+                                "nell'ordine in cui si incontrano lungo il bordo (es. "
+                                "[\"PE\", \"B-\", \"A+\"]). Servono a documentare il "
+                                "pinout, non a numerare i pad."
+                            ),
+                        },
+                    },
+                    "required": ["edge", "count", "pitch_mm"],
+                },
+            },
             "confidence": {
                 "type": "string",
                 "enum": ["high", "medium", "low"],
@@ -260,7 +366,10 @@ _EXTRACTION_TOOL = {
                 "description": "Ambiguita', assunzioni fatte o valori non trovati nel datasheet",
             },
         },
-        "required": ["rows", "cols", "pitch_mm", "row_spacing_mm", "pad_diameter_mm", "drill_mm", "confidence"],
+        # Obbligatori sempre; i campi della matrice e quelli dei lati
+        # castellated sono richiesti a seconda del layout, e il controllo
+        # si fa in _params_from_tool_arguments() dove si conosce il valore.
+        "required": ["layout", "confidence"],
     },
 }
 
@@ -315,6 +424,14 @@ _SYSTEM_PROMPT = (
     "Dalla stessa foto ricava anche body_color_hex (colore del case) e "
     "text_color_hex (colore delle scritte serigrafate sul case): servono per dare "
     "al modello 3D l'aspetto del componente reale. "
+    "PRIMA DI TUTTO scegli la disposizione dei contatti (campo layout): "
+    "\"matrix\" per i pin su griglia regolare con un solo passo (pin header, "
+    "moduli DIP-style), \"castellated\" per i moduli su PCB con semi-fori "
+    "metallizzati sul bordo. Nei moduli castellated ogni lato ha spesso un "
+    "numero di contatti e un passo diversi dagli altri (es. 3 contatti a 5.08mm "
+    "su un lato e 5 a 2.54mm sull'altro): descrivili in castellated_sides, un "
+    "elemento per lato, invece di comprimerli in una matrice righe x colonne che "
+    "non li rappresenta e produrrebbe un footprint sbagliato. "
     "Rispondi SOLO chiamando lo strumento fornito."
 )
 
@@ -325,17 +442,27 @@ DEFAULT_SYSTEM_PROMPT = _SYSTEM_PROMPT
 
 @dataclass
 class ExtractedParams:
+    """Risultato dell'estrazione, per entrambe le disposizioni di contatti.
+
+    `layout` dice quali campi sono significativi: "matrix" valorizza
+    righe/colonne/passo/pad/drill, "castellated" valorizza
+    `castellated_sides` (un elemento per lato del modulo) e lascia a None i
+    campi della matrice, che per quei componenti non esistono.
+    """
+
     name: str
     description: str
     tags: str
-    rows: int
-    cols: int
-    pitch_mm: float
-    row_spacing_mm: float
-    pad_diameter_mm: float
-    drill_mm: float
     confidence: str
     notes: str
+    layout: str = "matrix"
+    rows: Optional[int] = None
+    cols: Optional[int] = None
+    pitch_mm: Optional[float] = None
+    row_spacing_mm: Optional[float] = None
+    pad_diameter_mm: Optional[float] = None
+    drill_mm: Optional[float] = None
+    castellated_sides: Optional[Sequence[dict]] = None
     populated_pins: Optional[Sequence[int]] = None
     body_length_mm: Optional[float] = None
     body_width_mm: Optional[float] = None
@@ -351,6 +478,9 @@ class ExtractedParams:
 
     def has_3d_body(self) -> bool:
         return self.body_length_mm is not None and self.body_width_mm is not None and self.body_height_mm is not None
+
+    def is_castellated(self) -> bool:
+        return self.layout == "castellated"
 
 
 class ExtractionError(Exception):
@@ -497,34 +627,91 @@ def extract_pin_header_params(
     return _params_from_tool_arguments(data)
 
 
+def _castellated_sides(raw: Optional[Sequence[dict]]) -> list[dict]:
+    """Normalizza i lati di un modulo castellated, scartando quelli inutilizzabili.
+
+    Il modello puo' restituire un lato senza passo o con zero contatti: si
+    preferisce ignorarlo e dirlo, piuttosto che propagare un lato che
+    farebbe fallire la generazione con un errore geometrico oscuro.
+    """
+    if not raw:
+        raise ExtractionError(
+            "Il modello ha indicato un modulo con piazzole a mezzo foro ma non ha "
+            "descritto alcun lato. Riprova, eventualmente con un modello piu' capace."
+        )
+
+    sides = []
+    for entry in raw:
+        edge = str(entry.get("edge") or "").strip().lower()
+        count = int(entry.get("count") or 0)
+        pitch = float(entry.get("pitch_mm") or 0)
+        if edge not in EDGES or count < 1 or (count > 1 and pitch <= 0):
+            continue
+        side = {"edge": edge, "count": count, "pitch_mm": pitch}
+        for key in ("first_pin", "offset_mm", "pad_length_mm", "pad_width_mm"):
+            if entry.get(key) is not None:
+                side[key] = entry[key]
+        if entry.get("reverse"):
+            side["reverse"] = True
+        if entry.get("pin_names"):
+            side["pin_names"] = [str(n) for n in entry["pin_names"]]
+        sides.append(side)
+
+    if not sides:
+        raise ExtractionError(
+            "Nessun lato valido tra quelli restituiti dal modello (servono lato, "
+            "numero di contatti e passo)."
+        )
+
+    # Numerazione progressiva sui lati privi di first_pin, nell'ordine in cui
+    # sono stati elencati: meglio una numerazione coerente da correggere a
+    # mano che dei pad senza numero.
+    next_pin = 1
+    for side in sides:
+        if "first_pin" not in side:
+            side["first_pin"] = next_pin
+        next_pin = int(side["first_pin"]) + side["count"]
+    return sides
+
+
 def _params_from_tool_arguments(data: dict) -> ExtractedParams:
     """Costruisce ExtractedParams dagli argomenti dello strumento.
 
     Separato dalla chiamata di rete per poterlo collaudare senza API.
     """
-    for key in ("rows", "cols", "pitch_mm", "row_spacing_mm", "pad_diameter_mm", "drill_mm"):
-        if data.get(key) is None:
-            raise ExtractionError(
-                f"La risposta del modello non contiene il campo obbligatorio '{key}'. "
-                "Riprova, eventualmente con un modello piu' capace."
-            )
-
-    populated = data.get("populated_pins")
+    layout = data.get("layout") or "matrix"
+    if layout not in ("matrix", "castellated"):
+        raise ExtractionError(f"Disposizione dei contatti sconosciuta: {layout!r}.")
 
     def _opt_float(key: str) -> Optional[float]:
         value = data.get(key)
         return float(value) if value is not None else None
 
+    if layout == "castellated":
+        sides = _castellated_sides(data.get("castellated_sides"))
+    else:
+        sides = None
+        for key in ("rows", "cols", "pitch_mm", "row_spacing_mm", "pad_diameter_mm", "drill_mm"):
+            if data.get(key) is None:
+                raise ExtractionError(
+                    f"La risposta del modello non contiene il campo obbligatorio "
+                    f"'{key}'. Riprova, eventualmente con un modello piu' capace."
+                )
+
+    populated = data.get("populated_pins")
+
     return ExtractedParams(
         name=data.get("name") or "",
         description=data.get("description") or "",
         tags=data.get("tags") or "",
-        rows=int(data["rows"]),
-        cols=int(data["cols"]),
-        pitch_mm=float(data["pitch_mm"]),
-        row_spacing_mm=float(data["row_spacing_mm"]),
-        pad_diameter_mm=float(data["pad_diameter_mm"]),
-        drill_mm=float(data["drill_mm"]),
+        layout=layout,
+        rows=int(data["rows"]) if data.get("rows") is not None else None,
+        cols=int(data["cols"]) if data.get("cols") is not None else None,
+        pitch_mm=_opt_float("pitch_mm"),
+        row_spacing_mm=_opt_float("row_spacing_mm"),
+        pad_diameter_mm=_opt_float("pad_diameter_mm"),
+        drill_mm=_opt_float("drill_mm"),
+        castellated_sides=sides,
         confidence=data.get("confidence", "low"),
         notes=data.get("notes", ""),
         populated_pins=[int(p) for p in populated] if populated else None,
@@ -536,9 +723,11 @@ def _params_from_tool_arguments(data: dict) -> ExtractedParams:
         pin_length_3d_mm=_opt_float("pin_length_3d_mm"),
         edge_fillets=data.get("edge_fillets") or None,
         pinout=data.get("pinout") or None,
+        # La specchiatura di pin_map ha senso solo sulla matrice: per i moduli
+        # castellated le posizioni vengono dai lati, non da righe/colonne.
         pin_map=_pin_map_seen_from_top(
             data.get("pin_map"), int(data["cols"]), data.get("pin_map_view"),
-        ),
+        ) if layout == "matrix" else None,
         body_color_hex=data.get("body_color_hex") or None,
         text_color_hex=data.get("text_color_hex") or None,
     )
