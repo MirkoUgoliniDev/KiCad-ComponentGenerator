@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import base64
 import mimetypes
+import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -62,6 +64,15 @@ _EXTRACTION_TOOL = {
                     "matrice, perche' lati diversi hanno spesso numero di contatti e "
                     "passo diversi (es. 3 contatti a 5.08mm a sinistra e 5 a 2.54mm a "
                     "destra): in quel caso \"matrix\" darebbe un footprint sbagliato."
+                ),
+            },
+            "top_photo_index": {
+                "type": "integer", "minimum": -1,
+                "description": (
+                    "Indice FILE (0-based, etichetta FILE nel messaggio) della migliore FOTO "
+                    "dall'alto del lato con componenti montati, asse lungo orizzontale. "
+                    "Escludi vista inferiore, laterale, prospettica e disegni. "
+                    "Usa -1 se nessuna foto e' adatta. Non scegliere solo per risoluzione."
                 ),
             },
             "name": {
@@ -371,7 +382,7 @@ _EXTRACTION_TOOL = {
                     "integrati, connettori, LED e anche OGNI singolo passivo piccolo "
                     "(resistenze e condensatori chip 0402/0603/0805, diodi), ciascuno "
                     "con la propria posizione e il proprio orientamento (length_mm "
-                    "lungo X, width_mm lungo Y). Un modulo tipico ne ha 30-50: la "
+                    "asse lungo locale, width_mm asse corto, rotation_deg orientamento). Un modulo tipico ne ha 30-50: la "
                     "lista e' lunga ed e' giusto cosi'. Nessuna quota di questi e' "
                     "data dal datasheet -- sono stime visive in proporzione alle "
                     "dimensioni note del modulo, ed e' normale che sia cosi'. "
@@ -499,39 +510,6 @@ def _openai_tool() -> dict:
     }
 
 
-_PHOTO_COMPONENT_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "report_photo_components",
-        "description": "Elenca tutti i componenti visibili in una zona di una foto PCB.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "components_3d": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "kind": {"type": "string", "enum": list(COMPONENT_KINDS)},
-                            "x_mm": {"type": "number"},
-                            "y_mm": {"type": "number"},
-                            "length_mm": {"type": "number"},
-                            "width_mm": {"type": "number"},
-                            "height_mm": {"type": "number"},
-                            "rotation_deg": {"type": "number", "enum": [0, 90, 180, 270]},
-                            "color_hex": {"type": "string"},
-                            "marking": {"type": "string"},
-                        },
-                        "required": ["x_mm", "y_mm", "length_mm", "width_mm", "height_mm"],
-                    },
-                },
-                "notes": {"type": "string"},
-            },
-            "required": ["components_3d"],
-        },
-    },
-}
 
 
 _SYSTEM_PROMPT = (
@@ -619,6 +597,8 @@ class ExtractedParams:
     drill_mm: Optional[float] = None
     castellated_sides: Optional[Sequence[dict]] = None
     components_3d: Optional[Sequence[dict]] = None
+    photo_overlay_png: Optional[bytes] = None
+    photo_source: str = ""
     populated_pins: Optional[Sequence[int]] = None
     body_length_mm: Optional[float] = None
     body_width_mm: Optional[float] = None
@@ -703,206 +683,10 @@ def _pin_map_seen_from_top(
     return entries
 
 
-def _photo_tiles(path: Path, body_length: float, body_width: float) -> list[tuple[dict, str]]:
-    """Crea crop sovrapposti della sola PCB e restituisce data-url + coordinate.
-
-    Le quote esterne presenti in molte foto prodotto (come le frecce 42.8/15.2)
-    confondono la visione globale. I crop vengono invece passati al modello con
-    il loro intervallo in millimetri, così le coordinate restano riferite al
-    centro del modulo e possono essere unite deterministicamente.
-    """
-    try:
-        import cv2
-        from .photo_refine import find_board
-    except ImportError:
-        return []
-
-    image = cv2.imread(str(path))
-    if image is None or body_length <= 0 or body_width <= 0:
-        return []
-    frame = find_board(image, body_length, body_width)
-    if frame is None:
-        return []
-
-    # Tre colonne per due righe con sovrapposizione: ogni passivo piccolo deve
-    # comparire interamente in almeno un crop, mentre il bordo comune permette
-    # di deduplicare i componenti visti due volte.
-    cols, rows, overlap = 3, 2, 0.22
-    x0 = frame.cx - frame.width_px / 2
-    y0 = frame.cy - frame.height_px / 2
-    tile_w = frame.width_px / (cols - (cols - 1) * overlap)
-    tile_h = frame.height_px / (rows - (rows - 1) * overlap)
-    stride_x = tile_w * (1 - overlap)
-    stride_y = tile_h * (1 - overlap)
-    tiles: list[tuple[dict, str]] = []
-    for row in range(rows):
-        for col in range(cols):
-            px0 = int(round(x0 + col * stride_x))
-            py0 = int(round(y0 + row * stride_y))
-            px1 = int(round(min(frame.cx + frame.width_px / 2, px0 + tile_w)))
-            py1 = int(round(min(frame.cy + frame.height_px / 2, py0 + tile_h)))
-            px0, py0 = max(0, px0), max(0, py0)
-            crop = image[py0:py1, px0:px1]
-            if crop.size == 0:
-                continue
-            ok, encoded = cv2.imencode(
-                ".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), 95]
-            )
-            if not ok:
-                continue
-            tx0, ty0 = frame.to_mm(px0, py0)
-            tx1, ty1 = frame.to_mm(px1, py1)
-            metadata = {
-                "id": f"{Path(path).stem}_{row}_{col}",
-                "x0_mm": round(tx0, 2), "y0_mm": round(ty0, 2),
-                "x1_mm": round(tx1, 2), "y1_mm": round(ty1, 2),
-            }
-            data_url = "data:image/jpeg;base64," + base64.b64encode(encoded.tobytes()).decode("ascii")
-            tiles.append((metadata, data_url))
-    return tiles
-
-
-def _merge_photo_components(groups: Sequence[Sequence[dict]]) -> list[dict]:
-    """Unisce i risultati dei crop eliminando i duplicati nelle sovrapposizioni."""
-    merged: list[dict] = []
-    for group in groups:
-        for item in _components_3d(group) or ():
-            duplicate = None
-            for existing in merged:
-                distance = ((item["x_mm"] - existing["x_mm"]) ** 2 +
-                            (item["y_mm"] - existing["y_mm"]) ** 2) ** 0.5
-                item_size = max(item["length_mm"], item["width_mm"])
-                existing_size = max(existing["length_mm"], existing["width_mm"])
-                small, large = sorted((item_size, existing_size))
-                kinds_differ = (
-                    item.get("kind") not in (None, "generic") and
-                    existing.get("kind") not in (None, "generic") and
-                    item.get("kind") != existing.get("kind")
-                )
-                # La distanza da sola non basta: su una PCB densa componenti
-                # diversi sono spesso a meno di mezzo millimetro. Richiediamo
-                # anche dimensioni compatibili e tipo compatibile.
-                if (not kinds_differ and large <= small * 1.8 and
-                        distance <= max(0.30, small * 0.28)):
-                    duplicate = existing
-                    break
-            if duplicate is None:
-                merged.append(item)
-                continue
-            # Conserva la descrizione più informativa ottenuta in uno dei crop.
-            if (not duplicate.get("marking") and item.get("marking")):
-                duplicate["marking"] = item["marking"]
-            if duplicate.get("kind") == "generic" and item.get("kind") != "generic":
-                duplicate["kind"] = item["kind"]
-            if duplicate.get("name") in (None, "", "Componente") and item.get("name"):
-                duplicate["name"] = item["name"]
-    return merged
-
-
-def _extract_photo_components(
-    doc_paths: Sequence[Path], model: str, body_length: float, body_width: float,
-    progress: Optional[Callable[[str], None]] = None,
-) -> Optional[list[dict]]:
-    """Secondo passaggio: analizza le foto a tile, indipendentemente dal datasheet."""
-    groups: list[list[dict]] = []
-    photo_paths = [
-        path for path in doc_paths
-        if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
-    ]
-    photo_count = len(photo_paths)
-    photo_candidates = []
-    for path in photo_paths:
-        tiles = _photo_tiles(path, body_length, body_width)
-        if tiles:
-            # La migliore vista per l'inventario è quella con più pixel reali
-            # sulla PCB. Le altre possono essere la vista inferiore, laterale
-            # o una seconda illustrazione della stessa scheda: sommarle crea
-            # duplicati e porta facilmente a 100+ componenti fantasma.
-            try:
-                import cv2
-                from .photo_refine import find_board
-                image = cv2.imread(str(path))
-                frame = find_board(image, body_length, body_width) if image is not None else None
-                board_area = frame.width_px * frame.height_px if frame else 0
-            except ImportError:
-                board_area = 0
-            photo_candidates.append((board_area, path, tiles))
-    if not photo_candidates:
-        if progress and photo_count:
-            progress("Nessuna foto superiore utilizzabile per l'analisi a crop.")
-        return None
-    _, selected_path, selected_tiles = max(photo_candidates, key=lambda item: item[0])
-    if progress:
-        progress(
-            f"Inventario componenti: scelta la vista superiore {selected_path.name} "
-            f"tra {photo_count} immagini; le altre non verranno sommate."
-        )
-    photo_paths = [selected_path]
-    groups: list[list[dict]] = []
-    for path in photo_paths:
-        tiles = selected_tiles
-        if progress:
-            progress(
-                f"Foto {path.name}: PCB riconosciuta, {len(tiles)} crop sovrapposti "
-                f"(vista selezionata)."
-            )
-        for index, (metadata, data_url) in enumerate(tiles, start=1):
-            if progress:
-                progress(
-                    f"AI crop {index}/{len(tiles)} {metadata['id']}: analisi componenti..."
-                )
-            prompt = (
-                "Analizza SOLO la zona ritagliata della foto PCB allegata. "
-                "Elenca ogni componente visibile, uno per uno, inclusi TUTTI i "
-                "resistori, condensatori, diodi e piccoli passivi SMD. Non fermarti "
-                "agli IC e al trasformatore. Le coordinate x_mm/y_mm devono essere "
-                "quelle del modulo completo, con origine al centro: il crop copre "
-                f"x={metadata['x0_mm']}..{metadata['x1_mm']} mm e "
-                f"y={metadata['y0_mm']}..{metadata['y1_mm']} mm. "
-                "Non contare piazzole, pad, vie, fori castellated, contatti del bordo, "
-                "serigrafia o connettori disegnati: conta solo componenti realmente "
-                "montati sopra la PCB. Non duplicare lo stesso componente. Non inventare "
-                "componenti fuori da questa zona. Prima conta gli "
-                "elementi, poi elencali tutti; una lista vuota è ammessa solo se "
-                "non c'è davvero alcun componente. Rispondi chiamando lo strumento."
-            )
-            try:
-                result = call_tool(
-                    model=model,
-                    system_prompt=(
-                        "Sei un ispettore ottico PCB. Riconosci componenti montati "
-                        "in una foto ravvicinata. Le quote sono stime visive; non "
-                        "omettere i passivi piccoli. Restituisci solo dati strutturati."
-                    ),
-                    content_blocks=[
-                        {"type": "image_url", "image_url": {"url": data_url}},
-                        {"type": "text", "text": prompt},
-                    ],
-                    tool=_PHOTO_COMPONENT_TOOL,
-                    max_tokens=4096,
-                    has_pdf=False,
-                )
-            except OpenRouterError as exc:
-                # Un crop problematico non deve annullare l'estrazione del resto.
-                if progress:
-                    progress(f"AI crop {index}/{len(tiles)}: errore ignorato ({exc}).")
-                continue
-            found = result.get("components_3d") or []
-            groups.append(found)
-            if progress:
-                names = [str(c.get("name") or c.get("kind") or "componente")
-                         for c in found if isinstance(c, dict)]
-                preview = ", ".join(names[:8])
-                if len(names) > 8:
-                    preview += f", ... (+{len(names) - 8})"
-                progress(
-                    f"AI crop {index}/{len(tiles)}: trovati {len(names)} componenti"
-                    + (f" [{preview}]" if preview else ".")
-                )
-    merged = _merge_photo_components(groups)
-    if progress:
-        progress(f"Fusione crop completata: {len(merged)} componenti distinti.")
-    return merged or None
+def _merge_photo_components(groups):
+    """Compatibilita' per chiamanti che usano l'inventario in millimetri."""
+    from .photo_inventory import merge_components
+    return merge_components([_components_3d(g) or [] for g in groups])
 
 
 def extract_pin_header_params(
@@ -949,7 +733,10 @@ def extract_pin_header_params(
 
     if progress:
         progress(f"Invio a AI {len(doc_paths)} file per layout, quote e pinout...")
-    content_blocks = [_file_to_content_block(p) for p in doc_paths]
+    content_blocks = []
+    for index, path in enumerate(doc_paths):
+        content_blocks.append({"type": "text", "text": f"FILE {index}: {path.name}"})
+        content_blocks.append(_file_to_content_block(path))
     request = "Estrai i parametri del pin header da questi documenti e chiama lo strumento."
     if include_nc_pins:
         request += (
@@ -994,22 +781,34 @@ def extract_pin_header_params(
     # La foto richiede un passaggio separato: nell'estrazione globale il modello
     # deve anche leggere quote, pinout e layout, e tende a sacrificare i passivi
     # piccoli. I crop sono best-effort: se falliscono, resta il risultato globale.
+    photo_report = None
     if (data.get("layout") == "castellated" and data.get("body_length_mm")
             and data.get("body_width_mm")):
-        tiled = _extract_photo_components(
-            doc_paths, model or DEFAULT_MODEL,
-            float(data["body_length_mm"]), float(data["body_width_mm"]),
-            progress=progress,
+        from .photo_inventory import extract_inventory
+        photo_report = extract_inventory(
+            doc_paths, model or DEFAULT_MODEL, float(data["body_length_mm"]),
+            float(data["body_width_mm"]), COMPONENT_KINDS, call_tool,
+            progress=progress, top_photo_index=data.get("top_photo_index"),
+            extra_instructions=extra_instructions,
         )
-        if tiled:
-            data["components_3d"] = tiled
+        if photo_report.components:
+            data["components_3d"] = photo_report.components
             old_notes = str(data.get("notes") or "").strip()
-            suffix = f"Analizzati anche {len(tiled)} componenti tramite crop fotografici sovrapposti."
+            suffix = f"Inventario fotografico: {len(photo_report.components)} componenti su {photo_report.photo}."
             data["notes"] = f"{old_notes} {suffix}".strip()
+        if photo_report.warnings:
+            details = "\n".join(photo_report.warnings[:6])
+            if len(photo_report.warnings) > 6:
+                details += f"\nAltri {len(photo_report.warnings)-6} avvisi nel log AI."
+            data["notes"] = (str(data.get("notes") or "") + "\n" + details).strip()
     elif progress and data.get("layout") == "castellated":
         progress("Secondo passaggio fotografico non avviato: mancano body_length/body_width.")
 
-    return _params_from_tool_arguments(data)
+    params = _params_from_tool_arguments(data)
+    if photo_report and photo_report.components:
+        params.photo_overlay_png = photo_report.overlay_png
+        params.photo_source = photo_report.photo
+    return params
 
 
 def _castellated_sides(raw: Optional[Sequence[dict]]) -> list[dict]:
@@ -1091,11 +890,12 @@ def _components_3d(raw: Optional[Sequence[dict]]) -> Optional[list[dict]]:
         # schema, eliminarli qui evita che finiscano nella tabella 3D come
         # scatole. I componenti reali devono avere un package sopra la scheda.
         label = component["name"].strip().lower()
-        non_component_terms = (
-            "via", "pad", "piazzola", "terminal pad", "contact", "contatto",
-            "castellated", "semi-hole", "semiforo", "serigraphy", "serigrafia",
-        )
-        if any(term in label for term in non_component_terms):
+        if (entry.get("object_type") == "pcb_feature" or
+                ("object_type" not in entry and re.match(
+                    r"^(?:via|pad|piazzola|terminal pad|contatto|castellated|semiforo|serigrafia)\b", label))):
+            continue
+        if not all(math.isfinite(component[k]) for k in
+                   ("x_mm", "y_mm", "length_mm", "width_mm", "height_mm")):
             continue
         if min(component["length_mm"], component["width_mm"], component["height_mm"]) <= 0:
             continue

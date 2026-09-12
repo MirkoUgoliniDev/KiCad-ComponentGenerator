@@ -43,7 +43,7 @@ import webbrowser
 from pathlib import Path
 
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
-from PyQt6.QtGui import QBrush, QColor, QPen
+from PyQt6.QtGui import QBrush, QColor, QPen, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QGraphicsEllipseItem, QGraphicsRectItem, QGraphicsScene,
@@ -559,8 +559,19 @@ class MainWindow(QMainWindow):
         self.btn_extract_ai.setObjectName("primary")
         self.btn_extract_ai.clicked.connect(self._extract_with_ai)
         ai_row.addWidget(self.btn_extract_ai)
+        self.btn_photo_comparison = QPushButton("Confronta foto...")
+        self.btn_photo_comparison.setEnabled(False)
+        self.btn_photo_comparison.clicked.connect(self._show_photo_comparison)
+        self._photo_overlay_png = None
+        self._photo_source = ""
+        ai_row.addWidget(self.btn_photo_comparison)
         ai_row.addStretch()
         docs_layout.addLayout(ai_row)
+        self.ai_progress_text = QTextEdit()
+        self.ai_progress_text.setReadOnly(True)
+        self.ai_progress_text.setMaximumHeight(100)
+        self.ai_progress_text.setPlaceholderText("Qui compariranno i passi dell'analisi AI e i componenti trovati.")
+        docs_layout.addWidget(self.ai_progress_text)
 
         docs_layout.addWidget(QLabel(
             "Prompt specifico di QUESTO componente -- ci finisce il testo della "
@@ -593,7 +604,10 @@ class MainWindow(QMainWindow):
         self._refresh_model_combo()
         self._restore_component_type()
         self._update_project_path_label()
-        return tab
+        scroll = QScrollArea()
+        scroll.setWidget(tab)
+        scroll.setWidgetResizable(True)
+        return scroll
 
     # ── Tipologia componente ────────────────────────────────────────
 
@@ -726,6 +740,9 @@ class MainWindow(QMainWindow):
 
         self.btn_extract_ai.setEnabled(False)
         self.btn_extract_ai.setText("Analisi in corso...")
+        self.ai_progress_text.clear()
+        self.btn_photo_comparison.setEnabled(False)
+        self._photo_overlay_png = None
 
         model = self._effective_model()
         self._append_log(
@@ -742,13 +759,42 @@ class MainWindow(QMainWindow):
         )
         self._extract_worker.done.connect(self._on_extracted)
         self._extract_worker.error.connect(self._on_extract_error)
-        self._extract_worker.progress.connect(self._append_log)
+        self._extract_worker.progress.connect(self._on_ai_progress)
         self._extract_worker.finished.connect(self._on_extract_finished)
         self._extract_worker.start()
 
     def _on_extract_finished(self) -> None:
         self.btn_extract_ai.setEnabled(True)
         self.btn_extract_ai.setText("✨ Estrai parametri con AI dal datasheet")
+
+    def _on_ai_progress(self, message: str) -> None:
+        # Testo del modello: inserimento letterale, mai interpretato come HTML.
+        self.ai_progress_text.moveCursor(QTextCursor.MoveOperation.End)
+        self.ai_progress_text.insertPlainText(message + "\n")
+        self.ai_progress_text.ensureCursorVisible()
+        self._append_log(message)
+
+    def _show_photo_comparison(self) -> None:
+        if not self._photo_overlay_png:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Ultima estrazione: {self._photo_source}")
+        dialog.resize(1100, 650)
+        layout = QVBoxLayout(dialog)
+        note = QLabel(
+            "Rettangoli dell'ultima estrazione: verde = rilevato, arancione = da verificare. "
+            "I numeri corrispondono alle righe della tabella componenti prima delle modifiche manuali."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        area = QScrollArea()
+        label = QLabel()
+        pixmap = QPixmap()
+        pixmap.loadFromData(self._photo_overlay_png, "PNG")
+        label.setPixmap(pixmap)
+        area.setWidget(label)
+        layout.addWidget(area)
+        dialog.exec()
 
     def _migrate_docs_to_new_name(self, new_name: str) -> None:
         """Sposta i documenti nella cartella del nuovo nome componente.
@@ -789,6 +835,9 @@ class MainWindow(QMainWindow):
             shutil.move(str(f), str(target))
 
     def _on_extracted(self, params: ExtractedParams) -> None:
+        self._photo_overlay_png = params.photo_overlay_png
+        self._photo_source = params.photo_source
+        self.btn_photo_comparison.setEnabled(bool(params.photo_overlay_png))
         if params.name and params.name != self._component_name():
             self._migrate_docs_to_new_name(params.name)
         if params.name:
@@ -939,6 +988,7 @@ class MainWindow(QMainWindow):
             self._append_log(f"Sigle serigrafate {line}")
 
     def _on_extract_error(self, message: str) -> None:
+        self._on_ai_progress(f"Estrazione fallita: {message}")
         QMessageBox.warning(self, "Estrazione fallita", message)
 
     # ── Tab 2: Footprint 2D ────────────────────────────────────────
@@ -1434,7 +1484,8 @@ class MainWindow(QMainWindow):
         # "Genera" non esiste ancora.
         if not hasattr(self, "log_text"):
             return
-        self.log_text.append(msg)
+        self.log_text.moveCursor(QTextCursor.MoveOperation.End)
+        self.log_text.insertPlainText(msg + "\n")
 
     def _parse_populated_pins(self) -> set | None:
         text = self.field_populated_pins.text().strip()

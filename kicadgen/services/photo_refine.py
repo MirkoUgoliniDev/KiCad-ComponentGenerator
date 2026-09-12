@@ -117,6 +117,8 @@ class RefineReport:
 
 def find_board(image, body_length: float, body_width: float) -> Optional[BoardFrame]:
     """Trova il rettangolo della scheda nella foto; None se non e' una vista dall'alto."""
+    if not all(math.isfinite(v) and v > 0 for v in (body_length, body_width)):
+        return None
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     _, dark = cv2.threshold(gray, 70, 255, cv2.THRESH_BINARY_INV)
     # CLOSE riempie i buchi chiari (componenti, serigrafia) dentro la scheda;
@@ -146,6 +148,10 @@ def find_board(image, body_length: float, body_width: float) -> Optional[BoardFr
             continue
         bx, by, bw, bh = cv2.boundingRect(contour)
         w, h = float(bw), float(bh)
+        # I consumatori usano X orizzontale. Non fingere che una scheda
+        # verticale sia orizzontale scambiando solo width_px e height_px.
+        if w < h:
+            continue
         long_px, short_px = max(w, h), min(w, h)
         found = long_px / short_px
         error = abs(found - expected) / expected
