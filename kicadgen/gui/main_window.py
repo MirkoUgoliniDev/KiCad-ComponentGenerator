@@ -65,7 +65,8 @@ from ..generators.castellated_module import (
 from ..generators.pin_header import PinHeaderParams, build_pin_header, pin_positions
 from ..services import component_types
 from ..services.datasheet_extractor import (
-    DEFAULT_SYSTEM_PROMPT, ExtractedParams, ExtractionError, extract_pin_header_params,
+    COMPONENT_KINDS, DEFAULT_SYSTEM_PROMPT, ExtractedParams, ExtractionError,
+    extract_pin_header_params,
 )
 from ..services.openrouter import DEFAULT_MODEL
 from .app_config import CONFIG_PATH, load_config, save_config
@@ -891,10 +892,12 @@ class MainWindow(QMainWindow):
             )
             for c in params.components_3d or ()
         ]
+        self._refresh_components_table()
         if self.castellated_components:
             self._append_log(
                 f"{len(self.castellated_components)} componenti letti dalla foto "
-                "(stime visive): compariranno nel modello 3D."
+                "(stime visive): compariranno nel modello 3D, modificabili nel "
+                "tab Modello 3D."
             )
 
         self._append_log(
@@ -1111,6 +1114,8 @@ class MainWindow(QMainWindow):
             self._add_side_row({"edge": "left", "count": 3, "pitch_mm": 2.54, "first_pin": 1})
             self._add_side_row({"edge": "right", "count": 3, "pitch_mm": 2.54, "first_pin": 4})
         self._sync_3d_fields_for_castellated(checked)
+        if hasattr(self, "group_components"):
+            self.group_components.setVisible(checked)
         self._update_summary()
         self._draw_preview()
 
@@ -1216,7 +1221,7 @@ class MainWindow(QMainWindow):
             pcb_thickness=self.field_cast_pcb.value(),
             component_inset=self.field_cast_inset.value(),
             component_color_hex=self.field_body_color.text().strip() or "#303030",
-            components=list(self.castellated_components),
+            components=self._components_from_table(),
             silk_labels=self._silk_labels(),
             sides=self._sides_from_table(),
         )
@@ -1673,6 +1678,7 @@ class MainWindow(QMainWindow):
         outer.addWidget(self.label_3d_status)
 
         outer.addWidget(self._build_annotations_group())
+        outer.addWidget(self._build_components_group())
 
         regen_row = QHBoxLayout()
         self.btn_regen_3d = QPushButton("Rigenera modello 3D (STEP) con queste annotazioni")
@@ -1783,6 +1789,113 @@ class MainWindow(QMainWindow):
     def _on_regen_3d_error(self, message: str) -> None:
         self._append_log(f"ERRORE 3D: {message}")
         self.label_3d_status.setText(f"Generazione STEP fallita: {message.splitlines()[0]}")
+
+    # ── Componenti del modulo (3D) ─────────────────────────────────
+
+    _COMPONENT_COLUMNS = ("Nome", "Tipo", "X", "Y", "Lung.", "Larg.", "Alt.", "Colore", "Marcatura")
+
+    def _build_components_group(self) -> QGroupBox:
+        """Tabella dei componenti montati sul modulo, letti dalla foto.
+
+        Le stime dell'estrazione sono visive e ogni tanto sbagliano (un diodo
+        letto come "varistore" e disegnato come una scatola): qui si corregge
+        il singolo componente -- tipo, posizione, ingombro, colore, marcatura
+        -- invece di rilanciare l'estrazione e sperare. Vale solo per i moduli
+        castellated: e' nascosta negli altri casi.
+        """
+        group = QGroupBox(
+            "Componenti sul modulo (letti dalla foto, modificabili) -- "
+            "origine al centro del modulo, X a destra, Y in basso come nel footprint"
+        )
+        self.group_components = group
+        layout = QVBoxLayout(group)
+
+        self.table_components = QTableWidget(0, len(self._COMPONENT_COLUMNS))
+        self.table_components.setHorizontalHeaderLabels(list(self._COMPONENT_COLUMNS))
+        header = self.table_components.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(8, QHeaderView.ResizeMode.Stretch)
+        self.table_components.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table_components.setMinimumHeight(160)
+        layout.addWidget(self.table_components)
+
+        buttons = QHBoxLayout()
+        btn_add = QPushButton("Aggiungi componente")
+        btn_add.clicked.connect(lambda: self._add_component_row())
+        btn_remove = QPushButton("Rimuovi componente selezionato")
+        btn_remove.clicked.connect(self._remove_component_row)
+        buttons.addWidget(btn_add)
+        buttons.addWidget(btn_remove)
+        buttons.addStretch()
+        layout.addLayout(buttons)
+
+        group.setVisible(False)
+        return group
+
+    def _add_component_row(self, component: ComponentBox | None = None) -> None:
+        component = component or ComponentBox(x=0.0, y=0.0, length=2.0, width=1.2, height=0.6)
+        table = self.table_components
+        row = table.rowCount()
+        table.insertRow(row)
+
+        name = QLineEdit(component.name)
+        table.setCellWidget(row, 0, name)
+
+        kind = QComboBox()
+        for key in COMPONENT_KINDS:
+            kind.addItem(key, key)
+        kind.setCurrentIndex(max(kind.findData(component.kind), 0))
+        table.setCellWidget(row, 1, kind)
+
+        for column, value, minimum in (
+            (2, component.x, -300.0), (3, component.y, -300.0),
+            (4, component.length, 0.05), (5, component.width, 0.05), (6, component.height, 0.05),
+        ):
+            spin = QDoubleSpinBox()
+            spin.setRange(minimum, 300.0)
+            spin.setDecimals(2)
+            spin.setSingleStep(0.1)
+            spin.setValue(float(value))
+            table.setCellWidget(row, column, spin)
+
+        color = QLineEdit(component.color_hex)
+        color.setMaxLength(7)
+        table.setCellWidget(row, 7, color)
+        marking = QLineEdit(component.marking)
+        table.setCellWidget(row, 8, marking)
+
+    def _remove_component_row(self) -> None:
+        row = self.table_components.currentRow()
+        if row >= 0:
+            self.table_components.removeRow(row)
+
+    def _refresh_components_table(self) -> None:
+        """Riscrive la tabella dall'elenco appena estratto."""
+        if not hasattr(self, "table_components"):
+            return
+        self.table_components.setRowCount(0)
+        for component in self.castellated_components:
+            self._add_component_row(component)
+
+    def _components_from_table(self) -> list[ComponentBox]:
+        """Componenti come sono ORA nella tabella (con le correzioni a mano)."""
+        if not hasattr(self, "table_components"):
+            return list(self.castellated_components)
+        table = self.table_components
+        components = []
+        for row in range(table.rowCount()):
+            components.append(ComponentBox(
+                name=table.cellWidget(row, 0).text().strip() or "Componente",
+                kind=table.cellWidget(row, 1).currentData() or "generic",
+                x=table.cellWidget(row, 2).value(),
+                y=table.cellWidget(row, 3).value(),
+                length=table.cellWidget(row, 4).value(),
+                width=table.cellWidget(row, 5).value(),
+                height=table.cellWidget(row, 6).value(),
+                color_hex=table.cellWidget(row, 7).text().strip() or "#303030",
+                marking=table.cellWidget(row, 8).text().strip(),
+            ))
+        return components
 
     def _build_annotations_group(self) -> QGroupBox:
         group = QGroupBox(

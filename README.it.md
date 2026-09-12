@@ -391,12 +391,18 @@ decide la forma in `kicadgen/cad3d/freecad_parts.py`: `ic_soic` (corpo con
 reofori a L e tacca del pin 1), `ic_qfn`, `transformer`/`module`/`inductor`
 (case raccordato), `led` (base chiara e lente colorata), `capacitor_tantalum`
 (striscia di polarita'), `capacitor`/`resistor`/`diode` (chip con terminazioni
-metalliche e contorno serigrafico), `connector`, `crystal`, `generic`. La
-`marking` (es. "SP3485"), solo se leggibile in foto, viene stampata sopra.
+metalliche e contorno serigrafico), `diode_melf` (cilindro di vetro con
+cappucci e banda), `connector`, `crystal`, `generic`. La `marking` (es.
+"SP3485"), solo se leggibile in foto, viene stampata sopra.
 
 Sono **stime visive**, non quote di datasheet: servono all'aspetto e al
-controllo di interferenza grossolano, non alla verifica meccanica.
-Restano nella sessione e non sono ancora modificabili dalla GUI.
+controllo di interferenza grossolano, non alla verifica meccanica. Per
+questo nel tab **Modello 3D** c'e' la tabella "Componenti sul modulo"
+(visibile solo per i moduli castellated): ogni riga -- nome, tipo,
+posizione, ingombro, altezza, colore, marcatura -- si corregge, si elimina
+o si aggiunge a mano, e "Rigenera modello 3D" usa quello che c'e' nella
+tabella. Un diodo letto come "varistore" e disegnato come scatola si
+sistema cambiandogli il tipo in `diode_melf`, senza rifare l'estrazione.
 
 Dalla stessa foto vengono le **sigle serigrafate** accanto ai contatti
 (PE, B-, A+, G, R, T...): popolano la tabella pinout (pulsante "Tabella
