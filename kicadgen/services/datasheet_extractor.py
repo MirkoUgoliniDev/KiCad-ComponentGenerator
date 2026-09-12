@@ -356,6 +356,66 @@ _EXTRACTION_TOOL = {
                     "required": ["edge", "count", "pitch_mm"],
                 },
             },
+            "components_3d": {
+                "type": "array",
+                "description": (
+                    "SOLO per i moduli su PCB (layout=\"castellated\") e solo se tra i "
+                    "file c'e' una FOTO del lato superiore: i componenti visibili, "
+                    "approssimati a blocchi rettangolari, per dare al modello 3D "
+                    "l'aspetto del modulo reale invece di una lastra liscia. "
+                    "Elenca i componenti che si vedono chiaramente (trasformatore, "
+                    "integrati, connettori, LED, i condensatori piu' grossi): non "
+                    "serve mapparli tutti, e nessuna quota di questi e' data dal "
+                    "datasheet -- sono stime visive fatte in proporzione alle "
+                    "dimensioni note del modulo, ed e' normale che sia cosi'. "
+                    "Ometti il campo se non c'e' una foto dall'alto."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": (
+                                "Sigla o tipo del componente, es. \"trasformatore\", "
+                                "\"SP3485\", \"LED_R\": finisce nel nome del solido."
+                            ),
+                        },
+                        "x_mm": {
+                            "type": "number",
+                            "description": (
+                                "Posizione del CENTRO del componente lungo X rispetto al "
+                                "centro del modulo, in millimetri: negativa verso "
+                                "sinistra, positiva verso destra nella foto vista "
+                                "dall'alto (il modulo e' lungo body_length_mm)."
+                            ),
+                        },
+                        "y_mm": {
+                            "type": "number",
+                            "description": (
+                                "Posizione del CENTRO lungo Y rispetto al centro del "
+                                "modulo: negativa verso l'alto della foto, positiva "
+                                "verso il basso (il modulo e' largo body_width_mm)."
+                            ),
+                        },
+                        "length_mm": {"type": "number", "description": "Ingombro lungo X."},
+                        "width_mm": {"type": "number", "description": "Ingombro lungo Y."},
+                        "height_mm": {
+                            "type": "number",
+                            "description": (
+                                "Altezza sopra il PCB, stimata dal tipo di package (es. "
+                                "~1.0mm per un SOIC, ~0.5mm per resistenze/LED 0805, "
+                                "qualche mm per un trasformatore). Non superare "
+                                "l'altezza totale del modulo meno lo spessore del PCB."
+                            ),
+                        },
+                        "color_hex": {
+                            "type": "string",
+                            "description": "Colore visto in foto, '#rrggbb'.",
+                        },
+                    },
+                    "required": ["x_mm", "y_mm", "length_mm", "width_mm", "height_mm"],
+                },
+            },
             "confidence": {
                 "type": "string",
                 "enum": ["high", "medium", "low"],
@@ -432,6 +492,14 @@ _SYSTEM_PROMPT = (
     "su un lato e 5 a 2.54mm sull'altro): descrivili in castellated_sides, un "
     "elemento per lato, invece di comprimerli in una matrice righe x colonne che "
     "non li rappresenta e produrrebbe un footprint sbagliato. "
+    "Per i moduli su PCB, se c'e' una foto del lato superiore, elenca in "
+    "components_3d i componenti visibili come blocchi rettangolari stimati a "
+    "occhio in proporzione alle dimensioni note del modulo: servono a dare al "
+    "modello 3D l'aspetto del pezzo reale, e nessuna di quelle quote e' "
+    "riportata dal datasheet -- e' normale e atteso stimarle. Compila sempre "
+    "anche pinout con la funzione di ogni contatto, leggendola dalle sigle "
+    "serigrafate accanto ai contatti nella foto (es. PE, B-, A+, G, R, T, P, V) "
+    "o dalle etichette di un'immagine descrittiva del prodotto. "
     "Rispondi SOLO chiamando lo strumento fornito."
 )
 
@@ -463,6 +531,7 @@ class ExtractedParams:
     pad_diameter_mm: Optional[float] = None
     drill_mm: Optional[float] = None
     castellated_sides: Optional[Sequence[dict]] = None
+    components_3d: Optional[Sequence[dict]] = None
     populated_pins: Optional[Sequence[int]] = None
     body_length_mm: Optional[float] = None
     body_width_mm: Optional[float] = None
@@ -674,6 +743,35 @@ def _castellated_sides(raw: Optional[Sequence[dict]]) -> list[dict]:
     return sides
 
 
+def _components_3d(raw: Optional[Sequence[dict]]) -> Optional[list[dict]]:
+    """Componenti letti dalla foto, scartando quelli senza un ingombro reale.
+
+    Sono stime visive: un blocco con una dimensione nulla o negativa non e'
+    un componente mal misurato, e' rumore, e nel solido 3D darebbe errore.
+    """
+    if not raw:
+        return None
+    components = []
+    for entry in raw:
+        try:
+            component = {
+                "name": str(entry.get("name") or "Componente"),
+                "x_mm": float(entry["x_mm"]),
+                "y_mm": float(entry["y_mm"]),
+                "length_mm": float(entry["length_mm"]),
+                "width_mm": float(entry["width_mm"]),
+                "height_mm": float(entry["height_mm"]),
+            }
+        except (KeyError, TypeError, ValueError):
+            continue
+        if min(component["length_mm"], component["width_mm"], component["height_mm"]) <= 0:
+            continue
+        if entry.get("color_hex"):
+            component["color_hex"] = str(entry["color_hex"])
+        components.append(component)
+    return components or None
+
+
 def _params_from_tool_arguments(data: dict) -> ExtractedParams:
     """Costruisce ExtractedParams dagli argomenti dello strumento.
 
@@ -712,6 +810,7 @@ def _params_from_tool_arguments(data: dict) -> ExtractedParams:
         pad_diameter_mm=_opt_float("pad_diameter_mm"),
         drill_mm=_opt_float("drill_mm"),
         castellated_sides=sides,
+        components_3d=_components_3d(data.get("components_3d")),
         confidence=data.get("confidence", "low"),
         notes=data.get("notes", ""),
         populated_pins=[int(p) for p in populated] if populated else None,

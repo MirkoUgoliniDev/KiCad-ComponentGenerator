@@ -160,3 +160,24 @@ def test_footprint_writes_valid_file(tmp_path):
     assert "(attr smd)" in content
     assert "F.CrtYd" in content
     assert "thru_hole" not in content
+
+
+# ── Componenti sul modulo (solo modello 3D) ─────────────────────────
+
+def test_component_box_requires_a_real_volume():
+    from kicadgen.generators.castellated_module import ComponentBox
+    assert ComponentBox(x=0, y=0, length=2, width=2, height=1).is_usable()
+    assert not ComponentBox(x=0, y=0, length=2, width=0, height=1).is_usable()
+
+
+def test_components_do_not_affect_the_footprint():
+    """I componenti servono al 3D: il footprint 2D non deve cambiare."""
+    from kicadgen.generators.castellated_module import ComponentBox
+    plain = build_castellated_module(rs485_module())
+    with_components = rs485_module()
+    with_components.components = [
+        ComponentBox(x=0, y=0, length=9, width=6, height=4.5, name="trasformatore")
+    ]
+    populated = build_castellated_module(with_components)
+    assert len(plain.pads) == len(populated.pads)
+    assert [(p.number, p.at) for p in plain.pads] == [(p.number, p.at) for p in populated.pads]

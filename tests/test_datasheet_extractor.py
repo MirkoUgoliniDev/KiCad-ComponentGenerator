@@ -162,3 +162,34 @@ def test_unusable_sides_are_discarded():
         ],
     })
     assert [s["edge"] for s in params.castellated_sides] == ["left"]
+
+
+# ── Componenti letti dalla foto (modello 3D) ────────────────────────
+
+def test_photo_components_are_kept_with_their_box_and_color():
+    params = _params_from_tool_arguments({
+        "layout": "castellated", "confidence": "high",
+        "castellated_sides": [{"edge": "left", "count": 2, "pitch_mm": 2.54}],
+        "components_3d": [
+            {"name": "trasformatore", "x_mm": 2.0, "y_mm": 0.0, "length_mm": 9.0,
+             "width_mm": 6.0, "height_mm": 4.5, "color_hex": "#0a0a0a"},
+        ],
+    })
+    component = params.components_3d[0]
+    assert component["name"] == "trasformatore"
+    assert (component["length_mm"], component["width_mm"], component["height_mm"]) == (9.0, 6.0, 4.5)
+    assert component["color_hex"] == "#0a0a0a"
+
+
+def test_components_without_a_real_volume_are_discarded():
+    """Un blocco con una dimensione nulla non e' un componente: e' rumore."""
+    params = _params_from_tool_arguments({
+        "layout": "castellated", "confidence": "low",
+        "castellated_sides": [{"edge": "left", "count": 2, "pitch_mm": 2.54}],
+        "components_3d": [
+            {"x_mm": 0, "y_mm": 0, "length_mm": 5, "width_mm": 0, "height_mm": 1},
+            {"x_mm": 1, "y_mm": 1, "length_mm": 2, "width_mm": 2, "height_mm": 1},
+        ],
+    })
+    assert len(params.components_3d) == 1
+    assert params.components_3d[0]["x_mm"] == 1

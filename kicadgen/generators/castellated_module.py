@@ -57,6 +57,30 @@ class PadPlacement(NamedTuple):
 
 
 @dataclass
+class ComponentBox:
+    """Un componente montato sul modulo, approssimato a parallelepipedo.
+
+    Serve solo al modello 3D: un modulo reale non e' una lastra liscia, e
+    riconoscerlo a colpo d'occhio (il trasformatore, gli integrati, i LED)
+    aiuta a capire da che lato va montato e quanto ingombra davvero.
+
+    Le coordinate sono quelle del footprint: origine al centro del modulo,
+    X verso destra, Y verso il basso, Z dal piano del PCB verso l'alto.
+    """
+
+    x: float
+    y: float
+    length: float
+    width: float
+    height: float
+    name: str = "Componente"
+    color_hex: str = "#303030"
+
+    def is_usable(self) -> bool:
+        return self.length > 0 and self.width > 0 and self.height > 0
+
+
+@dataclass
 class CastellatedSide:
     """I contatti su un lato del modulo.
 
@@ -114,6 +138,10 @@ class CastellatedModuleParams:
     # somiglia al pezzo reale ne' serve a valutare gli ingombri.
     pcb_thickness: float = 1.0
     component_inset: float = 1.0
+    component_color_hex: str = "#303030"
+    # Componenti letti dalla foto del modulo: se ci sono, il 3D li disegna
+    # uno per uno invece del blocco unico ricavato da component_inset.
+    components: List[ComponentBox] = field(default_factory=list)
     margin: float = 0.25
 
     def side_pad_length(self, side: CastellatedSide) -> float:

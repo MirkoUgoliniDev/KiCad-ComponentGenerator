@@ -29,6 +29,12 @@ _SCRIPT_PATH = Path(__file__).parent / "freecad_build_body.py"
 _CFLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
+def _safe_name(name: str, index: int) -> str:
+    """Nome usabile come nome di oggetto FreeCAD (solo lettere, cifre, _)."""
+    cleaned = "".join(c if c.isalnum() else "_" for c in (name or "").strip())
+    return f"Cmp{index}_{cleaned}"[:40] if cleaned else f"Cmp{index}"
+
+
 class Cad3DError(Exception):
     """Errore applicativo: freecadcmd non trovato, o generazione fallita."""
 
@@ -98,7 +104,25 @@ def generate_castellated_3d_model(
     extra_boxes = []
     component_height = body.height_mm - params.pcb_thickness
     inset = params.component_inset
-    if component_height > 0 and params.body_length > 2 * inset and params.body_width > 2 * inset:
+
+    usable = [c for c in params.components if c.is_usable()]
+    if usable:
+        # Componenti letti dalla foto: ognuno il suo blocco, appoggiato sul
+        # PCB. Le quote sono stime visive, non quotate dal datasheet.
+        for index, component in enumerate(usable):
+            extra_boxes.append({
+                "name": _safe_name(component.name, index),
+                "x": component.x - component.length / 2,
+                "y": component.y - component.width / 2,
+                "z": params.pcb_thickness,
+                "length_mm": component.length,
+                "width_mm": component.width,
+                "height_mm": component.height,
+                "color_hex": component.color_hex,
+            })
+    elif component_height > 0 and params.body_length > 2 * inset and params.body_width > 2 * inset:
+        # Senza l'elenco dei componenti resta il blocco unico: approssima
+        # l'ingombro, che e' comunque meglio di una lastra nuda.
         extra_boxes.append({
             "name": "Componenti",
             "x": -params.body_length / 2 + inset,
@@ -107,7 +131,7 @@ def generate_castellated_3d_model(
             "length_mm": params.body_length - 2 * inset,
             "width_mm": params.body_width - 2 * inset,
             "height_mm": component_height,
-            "color_hex": body.color_hex,
+            "color_hex": params.component_color_hex,
         })
 
     return _run_freecad(

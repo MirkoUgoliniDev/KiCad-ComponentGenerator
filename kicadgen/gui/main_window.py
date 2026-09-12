@@ -60,7 +60,7 @@ from ..cad3d.step_generator import (
 )
 from ..generators.castellated_module import (
     EDGE_LABELS, EDGES as CASTELLATED_EDGES, CastellatedModuleParams,
-    CastellatedSide, build_castellated_module, pad_positions,
+    CastellatedSide, ComponentBox, build_castellated_module, pad_positions,
 )
 from ..generators.pin_header import PinHeaderParams, build_pin_header, pin_positions
 from ..services import component_types
@@ -81,6 +81,23 @@ APP_DIR = Path(__file__).resolve().parent.parent.parent
 DEFAULT_LIBRARY_ROOT = APP_DIR / "generated"
 DEFAULT_EXPORT_ROOT = APP_DIR.parent  # .../CustomComponents
 DOCS_SUBDIR = "docs"
+
+
+def _side_pinout(side: dict) -> list[dict]:
+    """Numero pin -> sigla serigrafata, per un lato del modulo.
+
+    Le sigle arrivano nell'ordine in cui si incontrano lungo il bordo, la
+    stessa convenzione con cui il generatore numera i pad: basta appaiarle
+    ai numeri, rispettando l'eventuale numerazione inversa.
+    """
+    first = int(side.get("first_pin", 1))
+    numbers = list(range(first, first + int(side["count"])))
+    if side.get("reverse"):
+        numbers.reverse()
+    return [
+        {"pin": number, "name": name}
+        for number, name in zip(numbers, side.get("pin_names") or ())
+    ]
 
 
 def _generate_3d(params, body: Body3DParams, project_dir: Path, fillets, face_texts):
@@ -260,6 +277,9 @@ class MainWindow(QMainWindow):
         self.fillet_annotations: list[EdgeFilletAnnotation] = []
         self.face_text_annotations: list[FaceTextAnnotation] = []
         self.pinout: list[dict] = []
+        # Componenti del modulo letti dalla foto: alimentano il 3D, non il
+        # footprint, quindi non vivono nei campi del tab Footprint 2D.
+        self.castellated_components: list[ComponentBox] = []
         self.pin_map: dict | None = None
         self._last_mesh_path: Path | None = None
         self._config = load_config()
@@ -843,11 +863,33 @@ class MainWindow(QMainWindow):
 
         self.table_sides.setRowCount(0)
         names = []
+        pinout = []
         for side in params.castellated_sides or ():
             self._add_side_row(side)
             label = EDGE_LABELS.get(side["edge"], side["edge"])
             if side.get("pin_names"):
                 names.append(f"{label}: {', '.join(side['pin_names'])}")
+                pinout.extend(_side_pinout(side))
+
+        # Tabella pinout: se il modello non l'ha compilata a parte, la si
+        # ricava dalle sigle serigrafate accanto ai contatti di ogni lato.
+        if pinout:
+            self.pinout = pinout
+
+        self.castellated_components = [
+            ComponentBox(
+                x=c["x_mm"], y=c["y_mm"], length=c["length_mm"],
+                width=c["width_mm"], height=c["height_mm"],
+                name=c.get("name", "Componente"),
+                color_hex=c.get("color_hex") or "#303030",
+            )
+            for c in params.components_3d or ()
+        ]
+        if self.castellated_components:
+            self._append_log(
+                f"{len(self.castellated_components)} componenti letti dalla foto "
+                "(stime visive): compariranno nel modello 3D."
+            )
 
         self._append_log(
             "Modulo con piazzole a mezzo foro: "
@@ -1163,6 +1205,8 @@ class MainWindow(QMainWindow):
             hole_diameter=self.field_cast_hole.value(),
             pcb_thickness=self.field_cast_pcb.value(),
             component_inset=self.field_cast_inset.value(),
+            component_color_hex=self.field_body_color.text().strip() or "#303030",
+            components=list(self.castellated_components),
             sides=self._sides_from_table(),
         )
 

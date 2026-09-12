@@ -355,6 +355,24 @@ lunghezza pin del gruppo "Modello 3D" si disabilitano: vengono dal modulo,
 cosi' il solido non puo' divergere dal footprint. Gli eventuali fillet
 letti dalla foto si applicano agli spigoli del PCB.
 
+### Componenti dalla foto
+
+Se tra i file c'e' una **foto del lato superiore**, l'estrazione compila
+anche `components_3d`: i componenti visibili (trasformatore, integrati,
+LED, i condensatori piu' grossi) come blocchi rettangolari con posizione,
+ingombro, altezza stimata dal tipo di package e colore. Ognuno diventa un
+solido a se' nel modello 3D, al posto del blocco unico: il modulo si
+riconosce a colpo d'occhio e l'ingombro in altezza e' quello vero,
+componente per componente.
+
+Sono **stime visive**, non quote di datasheet: servono all'aspetto e al
+controllo di interferenza grossolano, non alla verifica meccanica.
+Restano nella sessione e non sono ancora modificabili dalla GUI.
+
+Dalla stessa foto vengono le **sigle serigrafate** accanto ai contatti
+(PE, B-, A+, G, R, T...): popolano la tabella pinout (pulsante "Tabella
+pinout..."), associate ai numeri di pin di ogni lato.
+
 Limiti applicativi (in `datasheet_extractor.py`): max 5 file per
 chiamata, max 20 MB per file, formati supportati PDF/PNG/JPG/WEBP/GIF.
 La risposta include sempre un livello di confidenza e note testuali

@@ -36,6 +36,12 @@ class Preview3DVtk(QtInteractor):
         super().__init__(parent)
         self.set_background(_BG_COLOR)
         self.show_pin_numbers = True
+        try:
+            # Illuminazione a tre punti: da' rilievo ai pezzi scuri, dove la
+            # luce frontale singola appiattisce tutto.
+            self.enable_lightkit()
+        except Exception:  # noqa: BLE001 - illuminazione di default
+            pass
         self._label_actor = None
         # Le etichette si aggiornano anche quando l'utente ruota col mouse, non
         # solo premendo i pulsanti di vista.
@@ -199,10 +205,14 @@ class Preview3DVtk(QtInteractor):
             mesh = mesh.compute_normals(
                 feature_angle=30, split_vertices=True, consistent_normals=True,
             )
+            # ambient alto: i moduli reali sono quasi neri (#1a1a1a) e con la
+            # sola luce diffusa, su sfondo scuro, diventavano una macchia
+            # indistinguibile.
             self.add_mesh(
                 mesh,
                 color=part.get("color", _APPROX_BODY_COLOR),
-                smooth_shading=True, specular=0.5, specular_power=30,
+                smooth_shading=True, specular=0.4, specular_power=20,
+                ambient=0.35, diffuse=0.75,
             )
             drawn += 1
 
