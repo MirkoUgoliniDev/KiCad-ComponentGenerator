@@ -56,7 +56,7 @@ from PyQt6.QtWidgets import (
 from ..cad3d.annotations import EDGE_NAMES, FACE_NAMES, EdgeFilletAnnotation, FaceTextAnnotation
 from ..cad3d.body_params import Body3DParams
 from ..cad3d.step_generator import (
-    Cad3DError, generate_3d_model, generate_castellated_3d_model,
+    Cad3DError, find_freecadcmd, generate_3d_model, generate_castellated_3d_model,
 )
 from ..generators.castellated_module import (
     EDGE_LABELS, EDGES as CASTELLATED_EDGES, CastellatedModuleParams,
@@ -1246,7 +1246,20 @@ class MainWindow(QMainWindow):
     def _build_3d_group(self) -> QGroupBox:
         group = QGroupBox("Modello 3D (opzionale, richiede FreeCAD installato)")
         group.setCheckable(True)
-        group.setChecked(False)
+        # Attivo di default se FreeCAD c'e': chi lo ha installato vuole il 3D,
+        # e scoprire a generazione finita che era spento e' solo tempo perso.
+        # Senza FreeCAD resta spento, cosi' la generazione non fallisce.
+        try:
+            find_freecadcmd()
+            freecad_available = True
+        except Cad3DError:
+            freecad_available = False
+        group.setChecked(freecad_available)
+        group.setToolTip(
+            "FreeCAD trovato: il modello 3D viene generato insieme al footprint."
+            if freecad_available else
+            "freecadcmd non trovato: installa FreeCAD o imposta FREECAD_CMD_PATH."
+        )
         self.group_3d = group
         form3d = QFormLayout(group)
 
