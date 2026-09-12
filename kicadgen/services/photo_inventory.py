@@ -19,8 +19,10 @@ from .openrouter import OpenRouterError
 class InventoryResult:
     components: list[dict] = field(default_factory=list)
     overlay_png: bytes | None = None
+    photo_png: bytes | None = None
     photo: str = ""
     warnings: list[str] = field(default_factory=list)
+    calibration: dict = field(default_factory=dict)
 
 
 def detection_tool(kinds):
@@ -127,7 +129,7 @@ def overlap(a, b):
     return intersection / max(1e-12, aa+ba-intersection), intersection / max(1e-12, min(aa,ba))
 
 
-def merge_components(groups, log=lambda message: None):
+def merge_components(groups, log=lambda message: None, containment=False):
     """Associazione uno-a-uno tra viste, con IoU e rapporto area.
 
     Due pezzi della stessa vista rimangono distinti. Una resistenza accanto a un
@@ -143,8 +145,17 @@ def merge_components(groups, log=lambda message: None):
             for i, existing in enumerate(merged[:previous]):
                 if i in matched:
                     continue
-                iou, _ = overlap(item, existing)
-                if iou >= 0.60:
+                iou, coverage = overlap(item, existing)
+                containment_match = False
+                if containment and coverage >= .7 and iou >= .4:
+                    ax0,ay0,ax1,ay1 = box_of(item)
+                    bx0,by0,bx1,by1 = box_of(existing)
+                    aw,ah,bw,bh = ax1-ax0,ay1-ay0,bx1-bx0,by1-by0
+                    ratio = max(aw*ah,bw*bh)/max(1e-12,min(aw*ah,bw*bh))
+                    containment_match = (ratio <= 2.5 and
+                        abs((ax0+ax1-bx0-bx1)/2) <= .5*min(aw,bw) and
+                        abs((ay0+ay1-by0-by1)/2) <= .5*min(ah,bh))
+                if iou >= 0.60 or containment_match:
                     candidates.append((iou, i))
             if not candidates:
                 merged.append(dict(item))
@@ -180,12 +191,13 @@ def merge_components(groups, log=lambda message: None):
     return merged
 
 
-def prepare_photo(path, length, width):
+def prepare_photo(path, length, width, metadata=None):
     import cv2
     import numpy as np
     from .photo_refine import find_board
     # imdecode supporta anche percorsi Unicode su Windows.
-    image = cv2.imdecode(np.fromfile(str(path), dtype=np.uint8), cv2.IMREAD_COLOR)
+    encoded = np.fromfile(str(path), dtype=np.uint8)
+    image = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
     if image is None:
         return None
     frame = find_board(image, length, width)
@@ -197,6 +209,11 @@ def prepare_photo(path, length, width):
     x1, y1 = round(frame.cx+frame.width_px/2), round(frame.cy+frame.height_px/2)
     if x0 < 0 or y0 < 0 or x1 > image.shape[1] or y1 > image.shape[0]:
         return None
+    if metadata is not None:
+        import hashlib
+        metadata.update(source_sha256=hashlib.sha256(encoded.tobytes()).hexdigest(),
+                        crop_bbox_original_px=[x0,y0,x1,y1],
+                        image_width=x1-x0,image_height=y1-y0)
     return image[y0:y1, x0:x1].copy()
 
 
@@ -214,19 +231,25 @@ def regions(image):
 
 def image_block(image):
     import cv2
-    ok, encoded = cv2.imencode(".png", image)
-    if not ok:
-        raise ValueError("Impossibile codificare la foto")
+    if isinstance(image, bytes):
+        encoded_bytes = image
+    else:
+        ok, encoded = cv2.imencode(".png", image)
+        if not ok:
+            raise ValueError("Impossibile codificare la foto")
+        encoded_bytes = encoded.tobytes()
     return {"type": "image_url", "image_url": {
-        "url": "data:image/png;base64," + base64.b64encode(encoded.tobytes()).decode("ascii"),
+        "url": "data:image/png;base64," + base64.b64encode(encoded_bytes).decode("ascii"),
     }}
 
 
-def draw_inventory(image, components):
+def draw_inventory(image, components, use_ids=False):
     import cv2
     canvas = image.copy()
     h, w = canvas.shape[:2]
     for i, c in enumerate(components, 1):
+        if use_ids:
+            i = c.get("_id", i)
         x0,y0,x1,y1 = box_of(c)
         p0, p1 = (round(x0*w), round(y0*h)), (round(x1*w),round(y1*h))
         color = (0, 150, 255) if c.get("_uncertain") or c.get("confidence") == "low" else (40, 230, 70)
@@ -239,7 +262,8 @@ def draw_inventory(image, components):
 
 
 def extract_inventory(paths, model, length, width, kinds, call, progress=None,
-                      top_photo_index=None, extra_instructions=None):
+                      top_photo_index=None, extra_instructions=None,
+                      grounding=True, cache_dir=None, classifier_model=None, mechanical=True):
     log = progress or (lambda message: None)
     report = InventoryResult()
     def warn(message):
@@ -258,9 +282,10 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     try:
         candidates = []
         for i,path in photos:
-            photo = prepare_photo(path,length,width)
+            calibration = {}
+            photo = prepare_photo(path,length,width,calibration)
             if photo is not None:
-                candidates.append((photo.shape[0]*photo.shape[1],path,photo))
+                candidates.append((photo.shape[0]*photo.shape[1],path,photo,calibration))
         if not candidates:
             warn("Foto superiore non calibrabile: resta l'inventario principale.")
             return report
@@ -270,12 +295,35 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     except (OSError, ValueError) as exc:
         warn(f"Foto non leggibile: {exc}")
         return report
-    _, path, photo = max(candidates, key=lambda c:c[0])
+    _, path, photo, report.calibration = max(candidates, key=lambda c:c[0])
     report.photo = path.name
     if top_photo_index is None:
         warn(f"Vista superiore non specificata: scelta euristica {path.name}, verificare la foto nel confronto.")
     else:
         log(f"Vista superiore indicata dall'AI: {path.name}.")
+    import cv2
+    ok, encoded = cv2.imencode(".png", photo)
+    report.photo_png = encoded.tobytes() if ok else None
+    if grounding:
+        from .photo_grounding import grounded_components
+        def report_progress(message):
+            log(message)
+            if any(word in message for word in ("fallita", "Da verificare:", "non valida", "discordante")):
+                report.warnings.append(message)
+        report.components = grounded_components(photo,model,length,width,kinds,call,
+                                               report_progress,cache_dir,extra_instructions,classifier_model,mechanical)
+        for i,c in enumerate(report.components,1):
+            log(f"#{i} {c['name']} [{c['kind']}] centro ({c['x_mm']:.2f}, {c['y_mm']:.2f}) mm; "
+                f"{c['length_mm']:.2f} x {c['width_mm']:.2f} mm; "
+                + ("DA VERIFICARE" if c.get('_uncertain') else "verificato dall'AI, non certificato"))
+        report.overlay_png = draw_inventory(photo, report.components)
+        log(f"Inventario concluso: {len(report.components)} package; "
+            f"{sum(bool(c.get('_uncertain')) for c in report.components)} dubbi sulla presenza/geometria. "
+            "Altezze tutte stimate e da controllare. "
+            "Apri Confronta foto per controllare o correggere.")
+        return report
+    # Legacy path retained only for reproducible comparisons and integrations
+    # explicitly requesting grounding=False.
     groups = []
     for label,region,crop in regions(photo):
         log(f"{label}: localizzazione rettangoli sulla foto...")

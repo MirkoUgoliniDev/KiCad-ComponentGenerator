@@ -104,7 +104,7 @@ def test_full_photo_keeps_large_component_when_tiles_are_cut(monkeypatch):
     def call(**kwargs):
         calls.append(kwargs)
         return {"components": [detection(fully_visible=len(calls)==1)]}
-    result = inv.extract_inventory([Path("top.png")],"mock",40,20,["resistor"],call,top_photo_index=0)
+    result = inv.extract_inventory([Path("top.png")],"mock",40,20,["resistor"],call,top_photo_index=0,grounding=False)
     assert len(calls) == 7
     assert len(result.components) == 1
     assert result.overlay_png.startswith(b"\x89PNG")
@@ -140,7 +140,7 @@ def test_failed_crop_keeps_successes(monkeypatch):
         if count > 1:
             raise OpenRouterError("simulated failure")
         return {"components":[detection()]}
-    result = inv.extract_inventory([Path("top.png")],"mock",40,20,["resistor"],call,top_photo_index=0)
+    result = inv.extract_inventory([Path("top.png")],"mock",40,20,["resistor"],call,top_photo_index=0,grounding=False)
     assert len(result.components) == 1
     assert len(result.warnings) == 6
 
@@ -167,13 +167,17 @@ def test_pipeline_passes_source_selection_and_retains_overlay(monkeypatch,tmp_pa
             assert kw["content_blocks"][0]["text"] == "FILE 0: top.png"
             return dict(layout="castellated",body_length_mm=40,body_width_mm=20,
                         top_photo_index=0,castellated_sides=[dict(edge="left",count=2,pitch_mm=2.54)])
-        return {"components":[detection()] if len(requests)==2 else []}
+        if kw['tool']['function']['name'] == 'classify_fixed_packages':
+            return {'components': []}  # A missing verification must retain the box as uncertain.
+        return {"components":[dict(label='R',kind='resistor',box_2d=[200,100,400,300])] if len(requests)==2 else []}
     monkeypatch.setattr(ext,"call_tool",call)
-    result = ext.extract_pin_header_params([photo])
-    assert len(requests)==8
+    result = ext.extract_pin_header_params([photo],photo_cache_dir=tmp_path/'cache')
+    assert len(requests)==5  # The two identical uniform side crops share a cache entry.
     assert len(result.components_3d)==1
     assert result.photo_source=="top.png"
     assert result.photo_overlay_png.startswith(b"\x89PNG")
+    assert result.photo_png.startswith(b"\x89PNG")
+    assert result.components_3d[0]['_uncertain']
 
 
 def test_pipeline_keeps_global_inventory_when_all_photo_calls_fail(monkeypatch,tmp_path):
@@ -189,7 +193,7 @@ def test_pipeline_keeps_global_inventory_when_all_photo_calls_fail(monkeypatch,t
                         components_3d=[dict(name="R",x_mm=1,y_mm=2,length_mm=2,width_mm=1,height_mm=.5)])
         raise OpenRouterError("simulated failure")
     monkeypatch.setattr(ext,"call_tool",call)
-    result = ext.extract_pin_header_params([photo])
+    result = ext.extract_pin_header_params([photo],photo_cache_dir=tmp_path/'cache')
     assert len(result.components_3d)==1
     assert result.photo_overlay_png is None
     assert "simulated failure" in result.notes

@@ -1,11 +1,15 @@
 """Verifica Qt del confronto e del log; il renderer VTK non e' coinvolto."""
+from copy import deepcopy
 import os
+from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 pytest.importorskip("PyQt6")
 pytest.importorskip("pyvistaqt")
-from PyQt6.QtWidgets import QApplication, QWidget, QDialog, QLabel, QMessageBox
+from PyQt6.QtCore import Qt
+from PyQt6.QtTest import QSignalSpy
+from PyQt6.QtWidgets import QApplication, QWidget, QDialog, QLabel, QMessageBox, QListWidgetItem
 from kicadgen.gui import main_window as gui
 from kicadgen.services.datasheet_extractor import ExtractedParams
 from kicadgen.services.photo_inventory import draw_inventory
@@ -54,3 +58,200 @@ def test_comparison_button_opens_valid_image_and_resets_on_next_result(window,mo
     params.photo_overlay_png = None
     window._on_extracted(params)
     assert not window.btn_photo_comparison.isEnabled()
+
+
+@pytest.fixture
+def raw_params():
+    params = ExtractedParams(
+        name="", description="", tags="", confidence="medium", notes="",
+        layout="castellated", castellated_sides=[], body_length_mm=40, body_width_mm=20,
+        photo_source="raw-top.png", components_3d=[
+            dict(name="U1", kind="ic", x_mm=-4, y_mm=2, length_mm=6, width_mm=2,
+                 height_mm=1.5, rotation_deg=90, confidence="low", _uncertain=True,
+                 vendor_data={"pins": [1, 2]}, _box=(.2, .3, .5, .6)),
+            dict(name="R1", kind="resistor", x_mm=8, y_mm=0, length_mm=2, width_mm=1,
+                 height_mm=.5, rotation_deg=0, vendor_data={"pins": [3, 4]}),
+        ],
+    )
+    # Assignment also supports the parent landing the dataclass field separately.
+    params.photo_png = draw_inventory(np.full((100, 400, 3), 40, np.uint8), [])
+    return params
+
+
+def test_raw_photo_opens_with_current_table_dimensions_and_cancel_is_unchanged(window, raw_params, monkeypatch):
+    window._on_extracted(raw_params)
+    window.table_components.cellWidget(0, 2).setValue(-7.5)
+    window.field_cast_body_length.setValue(50)
+    window._last_mesh_path = Path("previous.preview.json")
+    before = window._photo_components_from_table()
+    before_status = window.label_3d_status.text()
+    assert window._photo_png == raw_params.photo_png
+    assert window.btn_photo_comparison.isEnabled()
+
+    def inspect(dialog):
+        assert isinstance(dialog, gui.PhotoReviewDialog)
+        assert "raw-top.png" in dialog.windowTitle()
+        assert dialog.photo_transform.body_length_mm == 50
+        assert dialog.photo_transform.body_width_mm == 20
+        assert dialog.get_components() == before
+        assert dialog.get_components()[0]["x_mm"] == -7.5
+        assert dialog._items[0].pen().color().name() == "#ffad33"
+        dialog.fields["x_mm"].setValue(4)
+        dialog.delete_selected()
+        dialog.reject()
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(gui.PhotoReviewDialog, "exec", inspect)
+    window.btn_photo_comparison.click()
+    assert window._photo_components_from_table() == before
+    assert window._last_mesh_path == Path("previous.preview.json")
+    assert window.label_3d_status.text() == before_status
+
+
+def test_photo_apply_updates_table_metadata_arbitrary_rotation_and_invalidates_mesh(window, raw_params, monkeypatch):
+    original = deepcopy(raw_params.components_3d)
+    window._on_extracted(raw_params)
+    window._last_mesh_path = Path("old.preview.json")
+    cleared = []
+    monkeypatch.setattr(window.preview_3d, "clear_preview", lambda: cleared.append(True))
+
+    def edit(dialog):
+        dialog.fields["x_mm"].setValue(1.234567)
+        dialog.fields["rotation_deg"].setValue(37)
+        dialog.fields["width_mm"].setValue(.025)
+        dialog.component_list.setCurrentRow(1)
+        dialog.delete_selected()
+        dialog.add_component()
+        dialog.text_fields["name"].setText("Manual part")
+        dialog.text_fields["kind"].setText("custom-package")
+        dialog.accept()
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(gui.PhotoReviewDialog, "exec", edit)
+    window.btn_photo_comparison.click()
+    actual = window._photo_components_from_table()
+    assert len(actual) == 2
+    assert actual[0]["x_mm"] == pytest.approx(1.234567)
+    assert actual[0]["width_mm"] == .025
+    assert actual[0]["rotation_deg"] == 37
+    assert actual[0]["vendor_data"] == original[0]["vendor_data"]
+    assert actual[1]["name"] == "Manual part"
+    assert actual[1]["kind"] == "custom-package"
+    assert window.castellated_components[0].rotation == 37
+    assert window._last_mesh_path is None
+    assert cleared == [True]
+    assert "da rigenerare" in window.label_3d_status.text()
+    assert raw_params.components_3d == original
+    actual[0]["vendor_data"]["pins"].append(99)
+    assert window._photo_components_from_table()[0]["vendor_data"] == original[0]["vendor_data"]
+
+
+def test_row_metadata_survives_deleting_earlier_row_and_adding_table_row(window, raw_params):
+    window._on_extracted(raw_params)
+    window.table_components.setCurrentCell(0, 0)
+    window._remove_component_row()
+    window._add_component_row()
+    actual = window._photo_components_from_table()
+    assert actual[0]["name"] == "R1"
+    assert actual[0]["vendor_data"] == {"pins": [3, 4]}
+    assert "vendor_data" not in actual[1]
+
+
+def test_no_photo_next_extraction_clears_raw_and_disables_editor(window, raw_params):
+    window._on_extracted(raw_params)
+    raw_params.photo_png = None
+    raw_params.photo_overlay_png = None
+    raw_params.photo_source = ""
+    window._on_extracted(raw_params)
+    assert window._photo_png is None
+    assert window._photo_overlay_png is None
+    assert window._photo_source == ""
+    assert not window.btn_photo_comparison.isEnabled()
+
+
+def test_table_changes_refresh_normalized_geometry_cache(window, raw_params):
+    window._on_extracted(raw_params)
+    window.table_components.cellWidget(0, 2).setValue(0)
+    window.table_components.cellWidget(0, 3).setValue(0)
+    # Local 6 x 2 at 90 degrees has board-aligned span 2 x 6 mm.
+    assert window._photo_components_from_table()[0]["_box"] == pytest.approx((.475, .35, .525, .65))
+
+
+def test_invalid_raw_image_warns_without_modifying_table(window, raw_params, monkeypatch):
+    window._on_extracted(raw_params)
+    original = window._photo_components_from_table()
+    window._photo_png = b"invalid"
+    messages = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: messages.append(args))
+    window.btn_photo_comparison.click()
+    assert len(messages) == 1
+    assert window._photo_components_from_table() == original
+
+
+def test_worker_forwards_separate_photo_and_datasheet_models(monkeypatch):
+    calls = []
+    expected = object()
+    def extract(paths, **kwargs):
+        calls.append((paths, kwargs))
+        return expected
+    monkeypatch.setattr(gui, "extract_pin_header_params", extract)
+    worker = gui.ExtractWorker([Path("board.png")], model="vendor/datasheet", vision_model="vendor/photo")
+    spy = QSignalSpy(worker.done)
+    worker.run()
+    assert spy[0][0] is expected
+    assert calls[0][1]["model"] == "vendor/datasheet"
+    assert calls[0][1]["vision_model"] == "vendor/photo"
+
+
+def test_settings_pass_save_and_display_separate_vision_model(window, monkeypatch):
+    window._config["vision_model"] = "vendor/old-photo"
+    window._session_model = "vendor/session-datasheet"
+    saved = []
+    class SettingsStub:
+        def __init__(self, prompt, model, parent, *, current_vision_model):
+            assert current_vision_model == "vendor/old-photo"
+            assert parent is window
+        def exec(self): return QDialog.DialogCode.Accepted
+        def prompt(self): return "prompt"
+        def model(self): return "vendor/new-datasheet"
+        def vision_model(self): return "vendor/new-photo"
+    monkeypatch.setattr(gui, "LlmSettingsDialog", SettingsStub)
+    monkeypatch.setattr(gui, "save_config", lambda config: saved.append(deepcopy(config)))
+    window._edit_llm_settings()
+    assert saved[0]["vision_model"] == "vendor/new-photo"
+    assert saved[0]["model"] == "vendor/new-datasheet"
+    assert window._effective_model() == "vendor/session-datasheet"
+    assert window._vision_model() == "vendor/new-photo"
+    assert window.label_vision_model.text() == "vendor/new-photo"
+    assert "Modello foto: vendor/new-photo" in window.log_text.toPlainText()
+
+
+def test_vision_default_and_real_settings_interface(window):
+    from kicadgen.services.photo_grounding import DEFAULT_VISION_MODEL
+    window._config["vision_model"] = "  "
+    assert window._vision_model() == DEFAULT_VISION_MODEL
+    settings = gui.LlmSettingsDialog("prompt", "vendor/datasheet", window,
+                                     current_vision_model=window._vision_model())
+    try:
+        assert settings.vision_model() == DEFAULT_VISION_MODEL
+    finally:
+        settings.close()
+
+
+def test_start_extraction_uses_vision_config_and_resets_photo_state(window, raw_params, monkeypatch):
+    window._on_extracted(raw_params)
+    window._config["vision_model"] = "vendor/photo"
+    window._session_model = "vendor/datasheet"
+    # Suppress only thread execution: inspect the real constructed worker.
+    monkeypatch.setattr(gui.ExtractWorker, "start", lambda self: None)
+    row = QListWidgetItem("board.png")
+    row.setCheckState(Qt.CheckState.Checked)
+    window.docs_list.addItem(row)
+    window._extract_with_ai()
+    assert window._extract_worker.model == "vendor/datasheet"
+    assert window._extract_worker.vision_model == "vendor/photo"
+    assert window._photo_png is None
+    assert window._photo_overlay_png is None
+    assert not window.btn_photo_comparison.isEnabled()
+    assert "Modello foto: vendor/photo" in window.ai_progress_text.toPlainText()
+    assert "modello datasheet vendor/datasheet" in window.log_text.toPlainText()

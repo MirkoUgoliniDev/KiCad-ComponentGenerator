@@ -36,6 +36,7 @@ OPENROUTER_API_KEY.
 
 from __future__ import annotations
 
+from copy import deepcopy
 import math
 import shutil
 import sys
@@ -69,9 +70,10 @@ from ..services.datasheet_extractor import (
     extract_pin_header_params,
 )
 from ..services.openrouter import DEFAULT_MODEL
-from .app_config import CONFIG_PATH, load_config, save_config
+from .app_config import CONFIG_PATH, DEFAULTS, load_config, save_config
 from .model_dialog import pick_model
 from .pinout_dialog import PinoutDialog
+from .photo_review_dialog import PhotoReviewDialog, PhotoTransform
 from .preview_3d_vtk import Preview3DVtk
 from .settings_dialog import LlmSettingsDialog
 from .theme import BASE, BLUE, SURFACE0, SURFACE1, SURFACE2, TEXT, YELLOW, APP_QSS
@@ -243,7 +245,7 @@ class ExtractWorker(QThread):
     def __init__(
         self, doc_paths: list[Path], system_prompt: str | None = None,
         extra_instructions: str | None = None, include_nc_pins: bool = True,
-        model: str | None = None,
+        model: str | None = None, vision_model: str | None = None,
     ):
         super().__init__()
         self.doc_paths = doc_paths
@@ -251,12 +253,14 @@ class ExtractWorker(QThread):
         self.extra_instructions = extra_instructions
         self.include_nc_pins = include_nc_pins
         self.model = model
+        self.vision_model = vision_model
 
     def run(self) -> None:
         try:
             params = extract_pin_header_params(
                 self.doc_paths,
                 model=self.model,
+                vision_model=self.vision_model,
                 system_prompt=self.system_prompt,
                 extra_instructions=self.extra_instructions,
                 include_nc_pins=self.include_nc_pins,
@@ -343,18 +347,21 @@ class MainWindow(QMainWindow):
 
     def _edit_llm_settings(self) -> None:
         dialog = LlmSettingsDialog(
-            self._config["system_prompt"], self._default_model(), self
+            self._config["system_prompt"], self._default_model(), self,
+            current_vision_model=self._vision_model(),
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
         self._config["system_prompt"] = dialog.prompt() or DEFAULT_SYSTEM_PROMPT
         self._config["model"] = dialog.model()
+        self._config["vision_model"] = dialog.vision_model()
         save_config(self._config)
         self._refresh_model_combo()
         self._append_log(
             f"Impostazioni LLM aggiornate (config.json). "
-            f"Modello di default: {self._default_model()}."
+            f"Modello datasheet: {self._default_model()}. "
+            f"Modello foto: {self._vision_model() or 'default del servizio foto'}."
         )
 
     # ── Modello LLM ─────────────────────────────────────────────────
@@ -371,6 +378,10 @@ class MainWindow(QMainWindow):
         """
         return self._session_model or self._default_model()
 
+    def _vision_model(self) -> str:
+        """Photo grounding uses its own configured model, never the session override."""
+        return (self._config.get("vision_model") or "").strip() or DEFAULTS["vision_model"]
+
     def _refresh_model_combo(self) -> None:
         """Riallinea la tendina del tab Progetto a default + scelta di sessione."""
         if not hasattr(self, "combo_model"):
@@ -386,6 +397,8 @@ class MainWindow(QMainWindow):
         else:
             self.combo_model.setCurrentIndex(0)
         self.combo_model.blockSignals(blocked)
+        if hasattr(self, "label_vision_model"):
+            self.label_vision_model.setText(self._vision_model() or "Default del servizio foto")
 
     def _on_model_combo_changed(self) -> None:
         self._session_model = self.combo_model.currentData()
@@ -537,7 +550,7 @@ class MainWindow(QMainWindow):
 
         self.combo_model = QComboBox()
         self.combo_model.setToolTip(
-            "Modello usato per l'estrazione. Il default si imposta da "
+            "Modello usato per il datasheet. Il default si imposta da "
             "Configurazione -> Modello e prompt di sistema LLM."
         )
         self.combo_model.currentIndexChanged.connect(self._on_model_combo_changed)
@@ -550,7 +563,15 @@ class MainWindow(QMainWindow):
         model_row = QHBoxLayout()
         model_row.addWidget(self.combo_model, 1)
         model_row.addWidget(btn_pick_model)
-        ai_form.addRow("Modello LLM:", model_row)
+        ai_form.addRow("Modello datasheet:", model_row)
+        self.label_vision_model = QLabel(self._vision_model() or "Default del servizio foto")
+        self.label_vision_model.setTextFormat(Qt.TextFormat.PlainText)
+        self.label_vision_model.setWordWrap(True)
+        self.label_vision_model.setToolTip(
+            "Modello dedicato alla localizzazione dei componenti nella foto. "
+            "Si imposta da Configurazione -> Modello e prompt di sistema LLM."
+        )
+        ai_form.addRow("Modello foto:", self.label_vision_model)
 
         docs_layout.addLayout(ai_form)
 
@@ -562,6 +583,7 @@ class MainWindow(QMainWindow):
         self.btn_photo_comparison = QPushButton("Confronta foto...")
         self.btn_photo_comparison.setEnabled(False)
         self.btn_photo_comparison.clicked.connect(self._show_photo_comparison)
+        self._photo_png = None
         self._photo_overlay_png = None
         self._photo_source = ""
         ai_row.addWidget(self.btn_photo_comparison)
@@ -742,17 +764,21 @@ class MainWindow(QMainWindow):
         self.btn_extract_ai.setText("Analisi in corso...")
         self.ai_progress_text.clear()
         self.btn_photo_comparison.setEnabled(False)
+        self._photo_png = None
         self._photo_overlay_png = None
+        self._photo_source = ""
 
         model = self._effective_model()
         self._append_log(
-            f"Estrazione da {len(doc_paths)} file con il modello {model}"
+            f"Estrazione da {len(doc_paths)} file con il modello datasheet {model}"
             + (" (solo questa sessione)." if self._session_model else ".")
         )
+        self._on_ai_progress(f"Modello foto: {self._vision_model() or 'default del servizio foto'}.")
 
         self._extract_worker = ExtractWorker(
             doc_paths,
             model=model,
+            vision_model=self._vision_model(),
             system_prompt=self._current_system_prompt(),
             extra_instructions=self.field_component_prompt.toPlainText().strip() or None,
             include_nc_pins=self.action_nc_pins.isChecked(),
@@ -775,6 +801,22 @@ class MainWindow(QMainWindow):
         self._append_log(message)
 
     def _show_photo_comparison(self) -> None:
+        if self._photo_png:
+            length = (self.field_cast_body_length.value() if self._is_castellated()
+                      else self.field_body_length.value())
+            width = (self.field_cast_body_width.value() if self._is_castellated()
+                     else self.field_body_width.value())
+            try:
+                dialog = PhotoReviewDialog(
+                    self._photo_png, self._photo_components_from_table(), length, width, self,
+                )
+            except ValueError as exc:
+                QMessageBox.warning(self, "Revisione foto non disponibile", str(exc))
+                return
+            dialog.setWindowTitle(f"Revisione componenti: {self._photo_source}")
+            dialog.components_applied.connect(self._apply_photo_review)
+            dialog.exec()
+            return
         if not self._photo_overlay_png:
             return
         dialog = QDialog(self)
@@ -795,6 +837,40 @@ class MainWindow(QMainWindow):
         area.setWidget(label)
         layout.addWidget(area)
         dialog.exec()
+
+    def _photo_components_from_table(self) -> list[dict]:
+        """Current table geometry plus detection metadata attached to each row."""
+        length = (self.field_cast_body_length.value() if self._is_castellated()
+                  else self.field_body_length.value())
+        width = (self.field_cast_body_width.value() if self._is_castellated()
+                 else self.field_body_width.value())
+        transform = PhotoTransform(1, 1, length, width)
+        result = []
+        for row, component in enumerate(self._components_from_table()):
+            cell = self.table_components.item(row, 0)
+            entry = deepcopy(cell.data(Qt.ItemDataRole.UserRole) or {}) if cell else {}
+            entry.update(
+                name=component.name, kind=component.kind,
+                x_mm=component.x, y_mm=component.y,
+                length_mm=component.length, width_mm=component.width,
+                height_mm=component.height, rotation_deg=component.rotation,
+                color_hex=component.color_hex, marking=component.marking,
+            )
+            if "_box" in entry:
+                entry["_box"] = transform.normalized_box(entry)
+            result.append(entry)
+        return result
+
+    def _apply_photo_review(self, components: list[dict]) -> None:
+        self._set_photo_components(components)
+        # The exported mesh no longer describes the manually corrected inventory.
+        self._last_mesh_path = None
+        self.preview_3d.clear_preview()
+        self.label_3d_status.setText(
+            "Componenti corretti dalla foto. Modello 3D da rigenerare: "
+            "premi \"Rigenera modello 3D\" per aggiornare STEP e anteprima."
+        )
+        self._append_log(f"Revisione fotografica applicata: {len(components)} componenti; 3D da rigenerare.")
 
     def _migrate_docs_to_new_name(self, new_name: str) -> None:
         """Sposta i documenti nella cartella del nuovo nome componente.
@@ -835,9 +911,11 @@ class MainWindow(QMainWindow):
             shutil.move(str(f), str(target))
 
     def _on_extracted(self, params: ExtractedParams) -> None:
+        self._photo_png = getattr(params, "photo_png", None)
         self._photo_overlay_png = params.photo_overlay_png
         self._photo_source = params.photo_source
-        self.btn_photo_comparison.setEnabled(bool(params.photo_overlay_png))
+        self.btn_photo_comparison.setEnabled(bool(self._photo_png or self._photo_overlay_png))
+        self.btn_photo_comparison.setText("Rivedi componenti su foto..." if self._photo_png else "Confronta foto...")
         if params.name and params.name != self._component_name():
             self._migrate_docs_to_new_name(params.name)
         if params.name:
@@ -949,19 +1027,7 @@ class MainWindow(QMainWindow):
         if pinout:
             self.pinout = pinout
 
-        self.castellated_components = [
-            ComponentBox(
-                x=c["x_mm"], y=c["y_mm"], length=c["length_mm"],
-                width=c["width_mm"], height=c["height_mm"],
-                name=c.get("name", "Componente"),
-                color_hex=c.get("color_hex") or "#303030",
-                kind=c.get("kind", "generic"),
-                marking=c.get("marking", ""),
-                rotation=float(c.get("rotation_deg", 0.0)),
-            )
-            for c in params.components_3d or ()
-        ]
-        self._refresh_components_table()
+        self._set_photo_components(params.components_3d or [])
         if not self.castellated_components:
             self._append_log(
                 "ATTENZIONE: il modello non ha restituito alcun componente dalla foto "
@@ -1926,11 +1992,15 @@ class MainWindow(QMainWindow):
         group.setVisible(False)
         return group
 
-    def _add_component_row(self, component: ComponentBox | None = None) -> None:
+    def _add_component_row(self, component: ComponentBox | None = None,
+                           photo_metadata: dict | None = None) -> None:
         component = component or ComponentBox(x=0.0, y=0.0, length=2.0, width=1.2, height=0.6)
         table = self.table_components
         row = table.rowCount()
         table.insertRow(row)
+        metadata = QTableWidgetItem()
+        metadata.setData(Qt.ItemDataRole.UserRole, deepcopy(photo_metadata or {}))
+        table.setItem(row, 0, metadata)
 
         name = QLineEdit(component.name)
         table.setCellWidget(row, 0, name)
@@ -1938,6 +2008,8 @@ class MainWindow(QMainWindow):
         kind = QComboBox()
         for key in COMPONENT_KINDS:
             kind.addItem(key, key)
+        if kind.findData(component.kind) < 0:
+            kind.addItem(component.kind, component.kind)
         kind.setCurrentIndex(max(kind.findData(component.kind), 0))
         table.setCellWidget(row, 1, kind)
 
@@ -1946,8 +2018,9 @@ class MainWindow(QMainWindow):
             (4, component.length, 0.05), (5, component.width, 0.05), (6, component.height, 0.05),
         ):
             spin = QDoubleSpinBox()
-            spin.setRange(minimum, 300.0)
-            spin.setDecimals(2)
+            # Keep precision and small packages from manual photo corrections.
+            spin.setDecimals(6)
+            spin.setRange(min(minimum, float(value)), max(300.0, float(value)))
             spin.setSingleStep(0.1)
             spin.setValue(float(value))
             table.setCellWidget(row, column, spin)
@@ -1955,6 +2028,9 @@ class MainWindow(QMainWindow):
         rotation = QComboBox()
         for degrees in (0, 90, 180, 270):
             rotation.addItem(f"{degrees}\u00b0", float(degrees))
+        angle = float(component.rotation) % 360
+        if rotation.findData(angle) < 0:
+            rotation.addItem(f"{angle:g}\u00b0", angle)
         rotation.setCurrentIndex(max(rotation.findData(float(component.rotation) % 360), 0))
         table.setCellWidget(row, 7, rotation)
         color = QLineEdit(component.color_hex)
@@ -1968,13 +2044,26 @@ class MainWindow(QMainWindow):
         if row >= 0:
             self.table_components.removeRow(row)
 
-    def _refresh_components_table(self) -> None:
+    def _set_photo_components(self, components: list[dict]) -> None:
+        """Replace component rows, retaining unknown metadata beside each row."""
+        self.castellated_components = [
+            ComponentBox(
+                x=c["x_mm"], y=c["y_mm"], length=c["length_mm"], width=c["width_mm"],
+                height=c.get("height_mm", 1.0), name=c.get("name", "Componente"),
+                color_hex=c.get("color_hex") or "#303030", kind=c.get("kind", "generic"),
+                marking=c.get("marking", ""), rotation=float(c.get("rotation_deg", 0.0)),
+            ) for c in components
+        ]
+        self._refresh_components_table(components)
+
+    def _refresh_components_table(self, photo_components: list[dict] | None = None) -> None:
         """Riscrive la tabella dall'elenco appena estratto."""
         if not hasattr(self, "table_components"):
             return
         self.table_components.setRowCount(0)
-        for component in self.castellated_components:
-            self._add_component_row(component)
+        for index, component in enumerate(self.castellated_components):
+            metadata = photo_components[index] if photo_components is not None else None
+            self._add_component_row(component, metadata)
 
     def _components_from_table(self) -> list[ComponentBox]:
         """Componenti come sono ORA nella tabella (con le correzioni a mano)."""

@@ -598,6 +598,7 @@ class ExtractedParams:
     castellated_sides: Optional[Sequence[dict]] = None
     components_3d: Optional[Sequence[dict]] = None
     photo_overlay_png: Optional[bytes] = None
+    photo_png: Optional[bytes] = None
     photo_source: str = ""
     populated_pins: Optional[Sequence[int]] = None
     body_length_mm: Optional[float] = None
@@ -696,6 +697,8 @@ def extract_pin_header_params(
     extra_instructions: Optional[str] = None,
     include_nc_pins: bool = True,
     progress: Optional[Callable[[str], None]] = None,
+    vision_model: Optional[str] = None,
+    photo_cache_dir: Optional[Path] = None,
 ) -> ExtractedParams:
     """Chiama il modello via OpenRouter e ritorna i parametri estratti.
 
@@ -785,16 +788,21 @@ def extract_pin_header_params(
     if (data.get("layout") == "castellated" and data.get("body_length_mm")
             and data.get("body_width_mm")):
         from .photo_inventory import extract_inventory
+        from .photo_grounding import DEFAULT_VISION_MODEL
         photo_report = extract_inventory(
-            doc_paths, model or DEFAULT_MODEL, float(data["body_length_mm"]),
+            doc_paths, vision_model or DEFAULT_VISION_MODEL, float(data["body_length_mm"]),
             float(data["body_width_mm"]), COMPONENT_KINDS, call_tool,
             progress=progress, top_photo_index=data.get("top_photo_index"),
             extra_instructions=extra_instructions,
+            cache_dir=photo_cache_dir if photo_cache_dir is not None else Path(__file__).resolve().parents[2]/"generated"/"photo-cache",
+            classifier_model=model or DEFAULT_MODEL,
         )
         if photo_report.components:
             data["components_3d"] = photo_report.components
             old_notes = str(data.get("notes") or "").strip()
-            suffix = f"Inventario fotografico: {len(photo_report.components)} componenti su {photo_report.photo}."
+            suffix = (f"Inventario fotografico: {len(photo_report.components)} ingombri su {photo_report.photo}. "
+                      "Modello meccanico semplificato, senza marcature. XY stimati dalla foto calibrata; "
+                      "altezze indicative, non misure certificate: verificare con vista laterale o misura.")
             data["notes"] = f"{old_notes} {suffix}".strip()
         if photo_report.warnings:
             details = "\n".join(photo_report.warnings[:6])
@@ -807,6 +815,7 @@ def extract_pin_header_params(
     params = _params_from_tool_arguments(data)
     if photo_report and photo_report.components:
         params.photo_overlay_png = photo_report.overlay_png
+        params.photo_png = photo_report.photo_png
         params.photo_source = photo_report.photo
     return params
 
@@ -909,6 +918,10 @@ def _components_3d(raw: Optional[Sequence[dict]]) -> Optional[list[dict]]:
             component["rotation_deg"] = float(entry.get("rotation_deg") or 0) % 360
         except (TypeError, ValueError):
             component["rotation_deg"] = 0.0
+        for key in ("_box", "_id", "_candidate_id", "_source", "_uncertain", "_review_reason",
+                    "_height_source", "_grounding_kind", "_alternative_kind", "confidence"):
+            if key in entry:
+                component[key] = entry[key]
         components.append(component)
     return components or None
 
