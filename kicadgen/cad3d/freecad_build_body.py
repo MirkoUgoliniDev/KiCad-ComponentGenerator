@@ -377,6 +377,10 @@ def main():
     # (oggetto FreeCAD, colore): ogni pezzo resta separato per poter avere
     # un colore proprio in STEP, VRML e anteprima.
     colored = []
+    # Punto in cui la GUI scrive il numero di un contatto: accanto al foro,
+    # verso l'interno della scheda, non sopra al foro dove coprirebbe il
+    # metallo che serve a riconoscerlo.
+    label_anchors = {}
 
     def add(name, shape, color):
         obj = doc.addObject("Part::Feature", name)
@@ -431,6 +435,9 @@ def main():
             pieces.append(pad_box(-pad_t).cut(hole))
             shape = Part.makeCompound([piece for piece in pieces if piece.Volume > 0])
             add(f"Pin{contact['number']}", shape, contact.get("color_hex", pin_color))
+            gap = radius + 0.9
+            inward = {"left": (gap, 0), "right": (-gap, 0), "top": (0, gap), "bottom": (0, -gap)}.get(edge, (0, 0))
+            label_anchors[f"Pin{contact['number']}"] = [cx + inward[0], cy + inward[1], -pad_t]
         except Exception as exc:  # noqa: BLE001 - un contatto in meno non e' fatale
             print(f"KICADGEN_WARN:contatto {contact.get('number')} non generato: {exc}")
 
@@ -527,6 +534,7 @@ def main():
                     "name": obj.Name,
                     "color": color,
                     "solids": len(obj.Shape.Solids),
+                    "label": label_anchors.get(obj.Name),
                     "vertices": [[p.x, p.y, p.z] for p in verts],
                     "triangles": [list(f) for f in facets],
                 })

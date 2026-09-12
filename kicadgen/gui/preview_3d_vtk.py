@@ -191,11 +191,17 @@ class Preview3DVtk(QtInteractor):
             # alla punta del pin.
             name = str(part.get("name", ""))
             if name.startswith("Pin") and name[3:].isdigit():
-                centre = vertices.mean(axis=0)
-                anchors.append(
-                    (int(name[3:]), float(centre[0]), float(centre[1]),
-                     float(vertices[:, 2].min()))
-                )
+                label = part.get("label")
+                if label:
+                    # Punto scelto da chi ha costruito il pezzo (es. accanto al
+                    # semi-foro di un modulo, non sopra): il numero non copre il metallo.
+                    anchors.append((int(name[3:]), float(label[0]), float(label[1]), float(label[2])))
+                else:
+                    centre = vertices.mean(axis=0)
+                    anchors.append(
+                        (int(name[3:]), float(centre[0]), float(centre[1]),
+                         float(vertices[:, 2].min()))
+                    )
             # PyVista vuole le facce come [n_punti, i, j, k, n_punti, ...]
             faces = np.hstack([np.full((len(triangles), 1), 3), triangles]).ravel()
             mesh = pv.PolyData(vertices, faces)
