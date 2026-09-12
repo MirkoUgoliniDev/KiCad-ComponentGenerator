@@ -383,6 +383,47 @@ stesso ordine. Viene salvato anche il sorgente `.FCStd`.
 
 ### Componenti dalla foto
 
+L'inventario fotografico usa ora **rettangoli sulla foto**, convertiti dal
+codice in coordinate e dimensioni in millimetri. L'analisi principale indica
+quale allegato mostra il lato superiore popolato; le altre viste restano utili
+per quote e pinout. Se il modello non indica la vista, viene usata una scelta
+euristica per area del PCB, esplicitamente segnalata nel log: non garantisce
+che sia il lato corretto.
+
+La fase fotografica esegue **sette chiamate aggiuntive**: una sulla scheda
+completa e sei su ritagli sovrapposti. La vista completa serve anche a
+conservare i package grandi tagliati nei dettagli. La fusione associa i
+rettangoli sovrapposti tra viste; classificazioni discordanti e sovrapposizioni
+residue sono segnalate, senza eliminare automaticamente componenti vicini.
+Non viene imposto un numero atteso di componenti.
+
+Un orientamento in conflitto con un rettangolo chiaramente allungato non
+elimina più il componente: gli assi locali vengono riallineati al rettangolo
+e il verso viene segnalato come dubbio nel confronto fotografico. Sui package
+quasi quadrati resta l'orientamento proposto dal modello. Questa correzione
+non garantisce che il rettangolo individuato sia corretto.
+
+Nel tab **Progetto** il log mostra avanzamento, scarti e ogni componente finale
+con posizione e ingombro. Dopo l'estrazione, **Confronta foto...** apre la
+fotografia con rettangoli numerati: verde per le rilevazioni, arancione per i
+casi da verificare. I numeri corrispondono alle righe iniziali della tabella
+componenti; il confronto è una fotografia dell'ultima estrazione e non si
+aggiorna dopo le modifiche manuali. Non certifica la completezza dell'inventario.
+
+La calibrazione automatica richiede una foto dall'alto, quasi allineata, con
+asse lungo orizzontale e contorno PCB riconoscibile. Non viene eseguita una
+rettifica prospettica. Se OpenCV manca o la foto non è calibrabile, il log lo
+segnala e resta disponibile il risultato dell'analisi principale. Errori nei
+singoli crop non annullano le altre viste riuscite.
+
+Per una prova esplicita da terminale (usa l'API e consuma credito):
+
+```powershell
+python examples/inspect_photo_inventory.py "foto.png" --length 42.8 --width 15.2
+```
+
+Salva inventario JSON e confronto PNG in `generated/photo-review/`.
+
 Se tra i file c'e' una **foto del lato superiore**, l'estrazione compila
 anche `components_3d`: **tutti** i componenti visibili, uno per uno,
 passivi piccoli compresi (su un modulo tipico 30-50 elementi; la risposta

@@ -59,6 +59,10 @@ except ImportError:  # pragma: no cover - dipendenza opzionale (opencv-python)
 #: Scarto massimo ammesso tra il rapporto lunghezza/larghezza della scheda
 #: trovata e quello del modulo: oltre, la foto non e' una vista dall'alto.
 MAX_BOARD_ASPECT_ERROR = 0.12
+#: Deriva massima del bordo dovuta a rasterizzazione/contorno irregolare.
+#: Il limite angolare evita di accettare vere rotazioni su immagini piccole.
+MAX_BOARD_EDGE_DRIFT_PX = 5.0
+MAX_BOARD_TILT_DEG = 1.0
 #: Quanto ci si allontana dalla posizione stimata nel cercare i bordi,
 #: oltre il semi-ingombro del componente.
 SEARCH_MARGIN_MM = 2.0
@@ -117,6 +121,8 @@ class RefineReport:
 
 def find_board(image, body_length: float, body_width: float) -> Optional[BoardFrame]:
     """Trova il rettangolo della scheda nella foto; None se non e' una vista dall'alto."""
+    if not all(math.isfinite(v) and v > 0 for v in (body_length, body_width)):
+        return None
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     _, dark = cv2.threshold(gray, 70, 255, cv2.THRESH_BINARY_INV)
     # CLOSE riempie i buchi chiari (componenti, serigrafia) dentro la scheda;
@@ -131,21 +137,38 @@ def find_board(image, body_length: float, body_width: float) -> Optional[BoardFr
     contours, _ = cv2.findContours(dark, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
-    contour = max(contours, key=cv2.contourArea)
-    (_, _), (rw, rh), angle = cv2.minAreaRect(contour)
-    if min(rw, rh) < 20:
+    expected = body_length / body_width
+    # Le foto dei moduli sono spesso corredate da quote: linee e frecce possono
+    # formare il contorno più grande, ma con un rapporto molto diverso da quello
+    # reale della scheda. Scegliamo quindi il candidato più grande tra quelli
+    # geometricamente compatibili, invece di usare sempre max(contourArea).
+    candidates = []
+    for contour in contours:
+        (_, _), (rw, rh), angle = cv2.minAreaRect(contour)
+        if min(rw, rh) < 20:
+            continue
+        tilt = min(abs(angle) % 90, 90 - abs(angle) % 90)
+        # BoardFrame non rettifica la rotazione: tollerare solo pochi pixel
+        # di deriva sul lato lungo, non inclinazioni che falsano scala e XY.
+        edge_drift = max(rw, rh) * math.sin(math.radians(tilt))
+        if tilt > MAX_BOARD_TILT_DEG or edge_drift > MAX_BOARD_EDGE_DRIFT_PX:
+            continue
+        bx, by, bw, bh = cv2.boundingRect(contour)
+        w, h = float(bw), float(bh)
+        # I consumatori usano X orizzontale. Non fingere che una scheda
+        # verticale sia orizzontale scambiando solo width_px e height_px.
+        if w < h:
+            continue
+        long_px, short_px = max(w, h), min(w, h)
+        found = long_px / short_px
+        error = abs(found - expected) / expected
+        if error <= MAX_BOARD_ASPECT_ERROR:
+            candidates.append((cv2.contourArea(contour), error, bx, by, w, h))
+    if not candidates:
         return None
-    tilt = min(abs(angle) % 90, 90 - abs(angle) % 90)
-    if tilt > 6:
-        return None
-    bx, by, bw, bh = cv2.boundingRect(contour)
-    w, h = float(bw), float(bh)
+    _, _, bx, by, w, h = max(candidates, key=lambda item: item[0])
     cx, cy = bx + w / 2, by + h / 2
     long_px, short_px = max(w, h), min(w, h)
-    expected = body_length / body_width
-    found = long_px / short_px
-    if abs(found - expected) / expected > MAX_BOARD_ASPECT_ERROR:
-        return None
     scale = (long_px / body_length + short_px / body_width) / 2
     return BoardFrame(cx=cx, cy=cy, scale=scale, width_px=long_px, height_px=short_px)
 

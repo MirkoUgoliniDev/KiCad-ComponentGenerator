@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
 
 from ..services.datasheet_extractor import DEFAULT_SYSTEM_PROMPT
 from ..services.openrouter import DEFAULT_MODEL
+from ..services.photo_grounding import DEFAULT_VISION_MODEL
 from .model_dialog import pick_model
 
 
@@ -26,12 +27,14 @@ class LlmSettingsDialog(QDialog):
       disegno) senza dover toccare il codice.
     """
 
-    def __init__(self, current_prompt: str, current_model: str | None = None, parent=None):
+    def __init__(self, current_prompt: str, current_model: str | None = None, parent=None,
+                 current_vision_model: str | None = None):
         super().__init__(parent)
         self.setWindowTitle("Modello e prompt di sistema LLM")
         self.resize(760, 620)
 
         self._model = (current_model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        self._vision_model = (current_vision_model or DEFAULT_VISION_MODEL).strip() or DEFAULT_VISION_MODEL
 
         layout = QVBoxLayout(self)
 
@@ -47,6 +50,14 @@ class LlmSettingsDialog(QDialog):
         model_row.addWidget(self.field_model)
         model_row.addWidget(btn_pick)
         model_form.addRow("Modello di default:", model_row)
+        self.field_vision_model = QLineEdit(self._vision_model)
+        self.field_vision_model.setReadOnly(True)
+        vision_button = QPushButton("Scegli modello foto...")
+        vision_button.clicked.connect(self._pick_vision_model)
+        vision_row = QHBoxLayout()
+        vision_row.addWidget(self.field_vision_model)
+        vision_row.addWidget(vision_button)
+        model_form.addRow("Localizzazione foto:", vision_row)
         layout.addLayout(model_form)
 
         model_note = QLabel(
@@ -58,6 +69,17 @@ class LlmSettingsDialog(QDialog):
         )
         model_note.setWordWrap(True)
         layout.addWidget(model_note)
+        vision_note = QLabel(
+            "Le foto usano un modello dedicato alla localizzazione; il modello datasheet verifica "
+            "poi solo la presenza di corpi montati, senza spostarli o riconoscere il circuito. "
+            "Il default Gemini 3.1 Pro è stato verificato sul modulo di esempio; altri modelli "
+            "possono produrre coordinate meno affidabili. Le risposte foto sono memorizzate "
+            "in generated/photo-cache; a input invariati non vengono ripetute le chiamate. "
+            "Il 3D usa ingombri semplici senza scritte. Le quote XY sono stime calibrate; "
+            "le altezze sono indicative e richiedono una vista laterale o una misura."
+        )
+        vision_note.setWordWrap(True)
+        layout.addWidget(vision_note)
 
         intro = QLabel(
             "Prompt di sistema: istruzioni inviate al modello durante "
@@ -100,6 +122,17 @@ class LlmSettingsDialog(QDialog):
         self.editor.setPlainText(DEFAULT_SYSTEM_PROMPT)
         self._model = DEFAULT_MODEL
         self.field_model.setText(DEFAULT_MODEL)
+        self._vision_model = DEFAULT_VISION_MODEL
+        self.field_vision_model.setText(DEFAULT_VISION_MODEL)
+
+    def _pick_vision_model(self) -> None:
+        chosen = pick_model(self._vision_model, self, title="Modello per localizzazione fotografica")
+        if chosen:
+            self._vision_model = chosen
+            self.field_vision_model.setText(chosen)
+
+    def vision_model(self) -> str:
+        return self._vision_model.strip() or DEFAULT_VISION_MODEL
 
     def prompt(self) -> str:
         return self.editor.toPlainText().strip()

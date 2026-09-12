@@ -12,6 +12,11 @@ The generator can produce KiCad footprints (`.kicad_mod`), symbols (`.kicad_sym`
 - FreeCAD-based STEP/VRML model generation
 - Pinout and 3D preview support
 - Automated validation for pin maps, footprints, annotations and CAD output
+- Calibrated photo inventories with simple mechanical envelopes, response caching,
+  per-stage logs and a draggable photo-review editor (no component markings)
+
+See [Photo mechanical workflow](docs/photo-mechanical-workflow.md) for operation,
+reproducible checks, measured example results and limitations of height estimates.
 
 ## Repository layout
 
