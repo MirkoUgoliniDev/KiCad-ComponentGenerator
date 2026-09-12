@@ -15,6 +15,7 @@ KicadWizard/
       footprint.py         # modello dati footprint (Pad, FpLine/Rect/Circle/Text) -> .kicad_mod
     generators/
       pin_header.py        # generatore parametrico: header/modulo THT RxC (+ pin_positions() condivisa)
+      castellated_module.py # generatore per moduli con piazzole a mezzo foro (pad SMD per lato)
     cad3d/
       body_params.py        # Body3DParams: corpo scatolare + pin cilindrici
       freecad_build_body.py # script eseguito DENTRO freecadcmd (Part.export STEP/VRML)
@@ -295,11 +296,49 @@ tipologia si riscrive solo quel blocco, lasciando intatte le note
 aggiunte a mano (definizioni in
 `kicadgen/services/component_types.py`).
 
-> Nota: il generatore di footprint produce oggi **pad THT**. Per le
-> tipologie SMD e castellated la tipologia serve a guidare la lettura del
-> datasheet (le quote del land pattern finiscono nei parametri e nelle
-> note, con `drill = 0`), ma la generazione di pad SMD veri e propri non
-> e' ancora implementata.
+> Nota: per i componenti **SMD singoli** la tipologia guida ancora solo la
+> lettura del datasheet (le quote del land pattern finiscono nelle note,
+> con `drill = 0`): la generazione dei relativi pad SMD non e' implementata.
+> I moduli **castellated** hanno invece il loro generatore, descritto qui
+> sotto.
+
+## Moduli castellated (piazzole a mezzo foro)
+
+Un modulo su PCB con semi-fori metallizzati sul bordo non entra in una
+matrice righe x colonne: ogni lato ha il suo numero di contatti e il suo
+passo. Un convertitore RS485/TTL isolato da 42.8 x 15.2 mm, per esempio,
+ha 3 contatti a 5.08 mm sul lato sinistro e 5 a 2.54 mm su quello destro;
+forzandolo nella matrice si ottengono pin fuori posto e pad THT dove
+servono piazzole SMD.
+
+Per questi componenti c'e' `kicadgen/generators/castellated_module.py`,
+che descrive il modulo **lato per lato**:
+
+- origine del footprint al **centro del corpo** (convenzione SMD KiCad),
+  X = lunghezza, Y = larghezza con Y verso il basso;
+- ogni lato (`left`/`right`/`top`/`bottom`) ha numero di contatti, passo,
+  offset lungo il bordo e numerazione propri (sequenziale, invertita o
+  esplicita);
+- pad rettangolari su `F.Cu`/`F.Paste`/`F.Mask`, **senza drill**,
+  sporgenti di `pad_overhang` oltre il bordo del modulo perche' il menisco
+  di saldatura resti ispezionabile;
+- contorno del corpo su `F.SilkS`/`F.Fab` e courtyard che comprende i pad
+  sporgenti.
+
+Nella GUI si usa il gruppo **"Modulo castellated"** del tab Footprint 2D:
+e' alternativo alla matrice (attivandolo il gruppo a matrice si disabilita)
+e contiene le quote del corpo, quelle dei pad e la tabella dei lati.
+Selezionando la tipologia "aggregato con piazzole a mezzo foro" nel tab
+Progetto il gruppo si attiva da solo, e l'estrazione AI (layout
+`castellated`) lo riempie con i lati letti dal datasheet.
+
+La validazione rifiuta i casi che darebbero un footprint inutilizzabile:
+pad sovrapposti (passo minore della larghezza pad), pad che non entrano
+nel bordo, numeri di pin duplicati tra lati.
+
+> Limite attuale: per i moduli castellated si genera il **footprint 2D**;
+> il modello 3D (che oggi posiziona pin cilindrici a partire dai parametri
+> della matrice) non viene prodotto e il gruppo "Modello 3D" si disattiva.
 
 Limiti applicativi (in `datasheet_extractor.py`): max 5 file per
 chiamata, max 20 MB per file, formati supportati PDF/PNG/JPG/WEBP/GIF.

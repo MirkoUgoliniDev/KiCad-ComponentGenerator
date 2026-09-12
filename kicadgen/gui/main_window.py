@@ -56,6 +56,10 @@ from PyQt6.QtWidgets import (
 from ..cad3d.annotations import EDGE_NAMES, FACE_NAMES, EdgeFilletAnnotation, FaceTextAnnotation
 from ..cad3d.body_params import Body3DParams
 from ..cad3d.step_generator import Cad3DError, generate_3d_model
+from ..generators.castellated_module import (
+    EDGE_LABELS, EDGES as CASTELLATED_EDGES, CastellatedModuleParams,
+    CastellatedSide, build_castellated_module, pad_positions,
+)
 from ..generators.pin_header import PinHeaderParams, build_pin_header, pin_positions
 from ..services import component_types
 from ..services.datasheet_extractor import (
@@ -98,7 +102,8 @@ class GenerateWorker(QThread):
     warning = pyqtSignal(str)
 
     def __init__(
-        self, params: PinHeaderParams, project_dir: Path, body: Body3DParams | None = None,
+        self, params: PinHeaderParams | CastellatedModuleParams, project_dir: Path,
+        body: Body3DParams | None = None,
         fillets: list | None = None, face_texts: list | None = None,
     ):
         super().__init__()
@@ -110,7 +115,11 @@ class GenerateWorker(QThread):
 
     def run(self) -> None:
         try:
-            footprint = build_pin_header(self.params)
+            footprint = (
+                build_castellated_module(self.params)
+                if isinstance(self.params, CastellatedModuleParams)
+                else build_pin_header(self.params)
+            )
             pretty_dir = self.project_dir / f"{self.params.name}.pretty"
             out_path = pretty_dir / f"{self.params.name}.kicad_mod"
             footprint.save(str(out_path))
@@ -119,7 +128,9 @@ class GenerateWorker(QThread):
             self.error.emit(str(exc))
             return
 
-        if self.body is not None:
+        # Il modello 3D esiste per ora solo per i footprint a matrice: il
+        # generatore 3D posiziona i pin a partire da PinHeaderParams.
+        if self.body is not None and not isinstance(self.params, CastellatedModuleParams):
             try:
                 result = generate_3d_model(
                     self.params, self.body, self.project_dir,
@@ -561,6 +572,11 @@ class MainWindow(QMainWindow):
             )
         )
 
+        # La tipologia decide anche quale gruppo di parametri si usa nel tab
+        # "Footprint 2D": i moduli castellated non stanno in una matrice.
+        if key and hasattr(self, "group_castellated"):
+            self.group_castellated.setChecked(key == "aggregate_castellated")
+
         self._config["component_type"] = key
         save_config(self._config)
         if component_type is not None:
@@ -720,17 +736,25 @@ class MainWindow(QMainWindow):
         self.field_description.setText(params.description)
         if params.tags:
             self.field_tags.setText(params.tags)
-        self.field_rows.setValue(params.rows)
-        self.field_cols.setValue(params.cols)
-        self.field_pitch.setValue(params.pitch_mm)
-        self.field_row_spacing.setValue(params.row_spacing_mm)
-        self.field_pad.setValue(params.pad_diameter_mm)
-        self.field_drill.setValue(params.drill_mm)
-        self.field_populated_pins.setText(
-            ",".join(str(p) for p in sorted(params.populated_pins)) if params.populated_pins else ""
-        )
 
-        if params.has_3d_body():
+        # Le due disposizioni riempiono gruppi di campi diversi; tutto il
+        # resto (corpo 3D, pinout, colori, fillet, riepilogo) e' comune.
+        if params.is_castellated():
+            self._apply_extracted_castellated(params)
+        else:
+            self.group_castellated.setChecked(False)
+            self.field_rows.setValue(params.rows)
+            self.field_cols.setValue(params.cols)
+            self.field_pitch.setValue(params.pitch_mm)
+            self.field_row_spacing.setValue(params.row_spacing_mm)
+            self.field_pad.setValue(params.pad_diameter_mm)
+            self.field_drill.setValue(params.drill_mm)
+            self.field_populated_pins.setText(
+                ",".join(str(p) for p in sorted(params.populated_pins))
+                if params.populated_pins else ""
+            )
+
+        if params.has_3d_body() and not params.is_castellated():
             self.group_3d.setChecked(True)
             self.field_body_length.setValue(params.body_length_mm)
             self.field_body_width.setValue(params.body_width_mm)
@@ -780,6 +804,45 @@ class MainWindow(QMainWindow):
             f"{fillet_note}\n\n"
             "Controlla i valori nel tab \"Footprint 2D\" prima di generare."
         )
+
+    def _apply_extracted_castellated(self, params: ExtractedParams) -> None:
+        """Riempie il gruppo "Modulo castellated" con i lati estratti.
+
+        Le quote del corpo arrivano dagli stessi campi body_* della matrice
+        (li' descrivono l'ingombro del case, qui il contorno del modulo), e
+        le dimensioni dei pad dal primo lato che le riporta: il datasheet di
+        norma da' un solo land pattern valido per tutti i contatti.
+        """
+        self.group_castellated.setChecked(True)
+
+        if params.body_length_mm:
+            self.field_cast_body_length.setValue(params.body_length_mm)
+        if params.body_width_mm:
+            self.field_cast_body_width.setValue(params.body_width_mm)
+        for side in params.castellated_sides or ():
+            if side.get("pad_length_mm"):
+                self.field_cast_pad_length.setValue(float(side["pad_length_mm"]))
+            if side.get("pad_width_mm"):
+                self.field_cast_pad_width.setValue(float(side["pad_width_mm"]))
+
+        self.table_sides.setRowCount(0)
+        names = []
+        for side in params.castellated_sides or ():
+            self._add_side_row(side)
+            label = EDGE_LABELS.get(side["edge"], side["edge"])
+            if side.get("pin_names"):
+                names.append(f"{label}: {', '.join(side['pin_names'])}")
+
+        self._append_log(
+            "Modulo con piazzole a mezzo foro: "
+            + ", ".join(
+                f"lato {EDGE_LABELS.get(s['edge'], s['edge'])} "
+                f"{s['count']} contatti a {s['pitch_mm']}mm"
+                for s in params.castellated_sides or ()
+            )
+        )
+        for line in names:
+            self._append_log(f"Sigle serigrafate {line}")
 
     def _on_extract_error(self, message: str) -> None:
         QMessageBox.warning(self, "Estrazione fallita", message)
@@ -860,10 +923,197 @@ class MainWindow(QMainWindow):
         form.addRow("Diametro pad:", self.field_pad)
         form.addRow("Drill:", self.field_drill)
 
+        self.group_matrix = form_group
         outer.addWidget(form_group)
+        outer.addWidget(self._build_castellated_group())
         outer.addWidget(self._build_3d_group())
         outer.addStretch()
         return tab
+
+    # ── Modulo castellated ──────────────────────────────────────────
+
+    def _build_castellated_group(self) -> QGroupBox:
+        """Gruppo alternativo alla matrice, per i moduli con semi-fori sul bordo.
+
+        Quando e' attivo la matrice righe x colonne non viene usata: i due
+        modelli geometrici si escludono, perche' in un modulo castellated
+        ogni lato ha il suo numero di contatti e il suo passo -- ed e'
+        esattamente quello che una griglia a passo unico non sa descrivere.
+        """
+        group = QGroupBox("Modulo castellated (piazzole a mezzo foro sul bordo)")
+        group.setCheckable(True)
+        group.setChecked(False)
+        group.toggled.connect(self._on_castellated_toggled)
+        self.group_castellated = group
+
+        layout = QVBoxLayout(group)
+        form = QFormLayout()
+
+        def _mm(value: float, maximum: float = 300.0, minimum: float = 0.0) -> QDoubleSpinBox:
+            spin = QDoubleSpinBox()
+            spin.setRange(minimum, maximum)
+            spin.setDecimals(2)
+            spin.setSingleStep(0.05)
+            spin.setSuffix(" mm")
+            spin.setValue(value)
+            return spin
+
+        self.field_cast_body_length = _mm(42.8)
+        self.field_cast_body_length.setToolTip(
+            "Lunghezza del corpo del modulo, asse X (lati \"top\"/\"bottom\")."
+        )
+        self.field_cast_body_width = _mm(15.2)
+        self.field_cast_body_width.setToolTip(
+            "Larghezza del corpo del modulo, asse Y (lati \"left\"/\"right\")."
+        )
+        self.field_cast_pad_length = _mm(1.8, maximum=20.0)
+        self.field_cast_pad_length.setToolTip(
+            "Lunghezza della piazzola perpendicolarmente al bordo."
+        )
+        self.field_cast_pad_width = _mm(1.2, maximum=20.0)
+        self.field_cast_pad_width.setToolTip(
+            "Larghezza della piazzola lungo il bordo (poco piu' del semi-foro)."
+        )
+        self.field_cast_overhang = _mm(0.5, maximum=5.0)
+        self.field_cast_overhang.setToolTip(
+            "Quanto la piazzola sporge oltre il bordo del modulo: serve a lasciare "
+            "ispezionabile il menisco di saldatura."
+        )
+
+        form.addRow("Lunghezza corpo:", self.field_cast_body_length)
+        form.addRow("Larghezza corpo:", self.field_cast_body_width)
+        form.addRow("Lunghezza pad:", self.field_cast_pad_length)
+        form.addRow("Larghezza pad:", self.field_cast_pad_width)
+        form.addRow("Sporgenza pad dal bordo:", self.field_cast_overhang)
+        layout.addLayout(form)
+
+        layout.addWidget(QLabel(
+            "Contatti lato per lato (ogni lato ha il suo passo). Il primo pin di "
+            "ogni lato si conta dall'alto in basso sui lati verticali, da sinistra "
+            "a destra su quelli orizzontali."
+        ))
+
+        self.table_sides = QTableWidget(0, 6)
+        self.table_sides.setHorizontalHeaderLabels(
+            ["Lato", "N. contatti", "Passo", "Offset", "Primo pin", "Numerazione inversa"]
+        )
+        self.table_sides.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        self.table_sides.setMaximumHeight(170)
+        layout.addWidget(self.table_sides)
+
+        buttons = QHBoxLayout()
+        btn_add = QPushButton("Aggiungi lato")
+        btn_add.clicked.connect(lambda: self._add_side_row())
+        btn_remove = QPushButton("Rimuovi lato selezionato")
+        btn_remove.clicked.connect(self._remove_side_row)
+        buttons.addWidget(btn_add)
+        buttons.addWidget(btn_remove)
+        buttons.addStretch()
+        layout.addLayout(buttons)
+
+        return group
+
+    def _on_castellated_toggled(self, checked: bool) -> None:
+        """La matrice e i moduli castellated sono alternativi, mai insieme."""
+        if hasattr(self, "group_matrix"):
+            self.group_matrix.setEnabled(not checked)
+        if checked and self.table_sides.rowCount() == 0:
+            # Due lati opposti sono la configurazione di gran lunga piu' comune.
+            self._add_side_row({"edge": "left", "count": 3, "pitch_mm": 2.54, "first_pin": 1})
+            self._add_side_row({"edge": "right", "count": 3, "pitch_mm": 2.54, "first_pin": 4})
+        if checked and self.group_3d.isChecked():
+            self.group_3d.setChecked(False)
+            self._append_log(
+                "Modello 3D disattivato: per i moduli castellated e' ancora "
+                "disponibile solo il footprint 2D."
+            )
+        self._update_summary()
+        self._draw_preview()
+
+    def _add_side_row(self, side: dict | None = None) -> None:
+        side = side or {}
+        row = self.table_sides.rowCount()
+        self.table_sides.insertRow(row)
+
+        combo = QComboBox()
+        for edge in CASTELLATED_EDGES:
+            combo.addItem(EDGE_LABELS.get(edge, edge), edge)
+        index = combo.findData(side.get("edge", "left"))
+        combo.setCurrentIndex(max(index, 0))
+        combo.currentIndexChanged.connect(self._on_sides_changed)
+        self.table_sides.setCellWidget(row, 0, combo)
+
+        count = QSpinBox()
+        count.setRange(1, 100)
+        count.setValue(int(side.get("count", 2)))
+        count.valueChanged.connect(self._on_sides_changed)
+        self.table_sides.setCellWidget(row, 1, count)
+
+        for column, key, default, minimum in (
+            (2, "pitch_mm", 2.54, 0.0), (3, "offset_mm", 0.0, -200.0),
+        ):
+            spin = QDoubleSpinBox()
+            spin.setRange(minimum, 200.0)
+            spin.setDecimals(2)
+            spin.setSingleStep(0.01)
+            spin.setSuffix(" mm")
+            spin.setValue(float(side.get(key, default)))
+            spin.valueChanged.connect(self._on_sides_changed)
+            self.table_sides.setCellWidget(row, column, spin)
+
+        first_pin = QSpinBox()
+        first_pin.setRange(1, 999)
+        first_pin.setValue(int(side.get("first_pin", 1)))
+        first_pin.valueChanged.connect(self._on_sides_changed)
+        self.table_sides.setCellWidget(row, 4, first_pin)
+
+        reverse = QCheckBox()
+        reverse.setChecked(bool(side.get("reverse")))
+        reverse.toggled.connect(self._on_sides_changed)
+        self.table_sides.setCellWidget(row, 5, reverse)
+
+        self._on_sides_changed()
+
+    def _remove_side_row(self) -> None:
+        row = self.table_sides.currentRow()
+        if row >= 0:
+            self.table_sides.removeRow(row)
+            self._on_sides_changed()
+
+    def _on_sides_changed(self) -> None:
+        self._update_summary()
+        self._draw_preview()
+
+    def _sides_from_table(self) -> list[CastellatedSide]:
+        sides = []
+        for row in range(self.table_sides.rowCount()):
+            sides.append(CastellatedSide(
+                edge=self.table_sides.cellWidget(row, 0).currentData(),
+                count=self.table_sides.cellWidget(row, 1).value(),
+                pitch=self.table_sides.cellWidget(row, 2).value(),
+                offset=self.table_sides.cellWidget(row, 3).value(),
+                first_pin=self.table_sides.cellWidget(row, 4).value(),
+                reverse=self.table_sides.cellWidget(row, 5).isChecked(),
+            ))
+        return sides
+
+    def _current_castellated_params(self) -> CastellatedModuleParams:
+        return CastellatedModuleParams(
+            name=self.field_name.text().strip(),
+            description=self.field_description.text().strip(),
+            tags=self.field_tags.text().strip(),
+            body_length=self.field_cast_body_length.value(),
+            body_width=self.field_cast_body_width.value(),
+            pad_length=self.field_cast_pad_length.value(),
+            pad_width=self.field_cast_pad_width.value(),
+            pad_overhang=self.field_cast_overhang.value(),
+            sides=self._sides_from_table(),
+        )
+
+    def _is_castellated(self) -> bool:
+        return hasattr(self, "group_castellated") and self.group_castellated.isChecked()
 
     def _build_3d_group(self) -> QGroupBox:
         group = QGroupBox("Modello 3D (opzionale, richiede FreeCAD installato)")
@@ -1061,6 +1311,9 @@ class MainWindow(QMainWindow):
         )
 
     def _update_summary(self) -> None:
+        if self._is_castellated():
+            self._update_summary_castellated()
+            return
         try:
             params = self._current_params()
         except ValueError as exc:
@@ -1079,12 +1332,34 @@ class MainWindow(QMainWindow):
             f"drill {params.drill}mm{populated}"
         )
 
+    def _update_summary_castellated(self) -> None:
+        params = self._current_castellated_params()
+        sides = ", ".join(
+            f"{EDGE_LABELS.get(s.edge, s.edge)}: {s.count} contatti a {s.pitch}mm"
+            for s in params.sides
+        ) or "nessun lato definito"
+        try:
+            params.validate()
+            error = ""
+        except ValueError as exc:
+            error = f"<br><b>Errore parametri:</b> {exc}"
+        self.label_summary.setText(
+            f"<b>{params.name or '(nome vuoto)'}</b><br>"
+            f"Cartella: {self._project_dir()}<br>"
+            f"Modulo castellated {params.body_length}x{params.body_width}mm, "
+            f"pad {params.pad_length}x{params.pad_width}mm "
+            f"(sporgenza {params.pad_overhang}mm)<br>{sides}{error}"
+        )
+
     def _generate(self) -> None:
         if self._worker is not None and self._worker.isRunning():
             return
 
         try:
-            params = self._current_params()
+            params = (
+                self._current_castellated_params() if self._is_castellated()
+                else self._current_params()
+            )
             params.validate()
         except ValueError as exc:
             self._append_log(f"ERRORE: {exc}")
@@ -1093,13 +1368,23 @@ class MainWindow(QMainWindow):
         project_dir = self._project_dir()
 
         self.btn_generate.setEnabled(False)
-        self._append_log(
-            f"Generazione {params.name}: {params.rows}x{params.cols}, "
-            f"pitch={params.pitch}mm, row_spacing={params.effective_row_spacing()}mm, "
-            f"pad={params.pad_diameter}mm, drill={params.drill}mm"
-        )
+        if isinstance(params, CastellatedModuleParams):
+            self._append_log(
+                f"Generazione {params.name}: modulo castellated "
+                f"{params.body_length}x{params.body_width}mm, "
+                + ", ".join(
+                    f"{EDGE_LABELS.get(s.edge, s.edge)} {s.count}x{s.pitch}mm"
+                    for s in params.sides
+                )
+            )
+        else:
+            self._append_log(
+                f"Generazione {params.name}: {params.rows}x{params.cols}, "
+                f"pitch={params.pitch}mm, row_spacing={params.effective_row_spacing()}mm, "
+                f"pad={params.pad_diameter}mm, drill={params.drill}mm"
+            )
 
-        body = self._current_body_params()
+        body = None if isinstance(params, CastellatedModuleParams) else self._current_body_params()
         if body is not None:
             try:
                 body.validate()
@@ -1539,8 +1824,70 @@ class MainWindow(QMainWindow):
             )
             line.setZValue(-10)
 
+    def _draw_preview_castellated(self, p: CastellatedModuleParams) -> None:
+        """Anteprima del modulo castellated: corpo, piazzole e quote d'ingombro.
+
+        Disegno separato da quello a matrice perche' la geometria e' diversa
+        (origine al centro del corpo, pad rettangolari su piu' lati con passi
+        indipendenti), ma come la' i pad vengono da pad_positions(): l'anteprima
+        non puo' divergere dal footprint che verra' scritto.
+        """
+        self.preview_scene.clear()
+        mm_to_px = 20.0
+
+        silk_pen = QPen(QColor(TEXT))
+        silk_pen.setWidthF(1.5)
+        half_l = p.body_length / 2 * mm_to_px
+        half_w = p.body_width / 2 * mm_to_px
+        self.preview_scene.addRect(-half_l, -half_w, 2 * half_l, 2 * half_w, silk_pen)
+
+        pad_pen = QPen(QColor(SURFACE1))
+        pad_brush = QBrush(QColor(BLUE))
+        first_number = None
+        xs_px, ys_px = [], []
+
+        for placement in pad_positions(p):
+            if first_number is None:
+                first_number = placement.number
+            w = placement.width * mm_to_px
+            h = placement.height * mm_to_px
+            x = placement.x * mm_to_px
+            y = placement.y * mm_to_px
+            xs_px.extend([x - w / 2, x + w / 2])
+            ys_px.extend([y - h / 2, y + h / 2])
+
+            item = QGraphicsRectItem(x - w / 2, y - h / 2, w, h)
+            item.setPen(pad_pen)
+            item.setBrush(pad_brush)
+            self.preview_scene.addItem(item)
+
+            number = self.preview_scene.addSimpleText(placement.number)
+            number.setBrush(QBrush(QColor(BASE)))
+            font = number.font()
+            font.setPointSizeF(max(6.0, min(w, h) * 0.45))
+            font.setBold(placement.number == first_number)
+            number.setFont(font)
+            rect = number.boundingRect()
+            number.setPos(x - rect.width() / 2, y - rect.height() / 2)
+            number.setZValue(5)
+
+        if xs_px and ys_px:
+            left, right = min(xs_px + [-half_l]), max(xs_px + [half_l])
+            top, bottom = min(ys_px + [-half_w]), max(ys_px + [half_w])
+            self._add_dim_h(-half_l, half_l, top - 40, f"corpo {p.body_length:.2f} mm")
+            self._add_dim_v(-half_w, half_w, left - 40, f"corpo {p.body_width:.2f} mm")
+            self._add_dim_h(left, right, bottom + 60, f"totale {(right - left) / mm_to_px:.2f} mm")
+
+        self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
+        self.preview_view.fitInView(
+            self.preview_scene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio
+        )
+
     def _draw_preview(self) -> None:
         if self._last_params is None:
+            return
+        if isinstance(self._last_params, CastellatedModuleParams):
+            self._draw_preview_castellated(self._last_params)
             return
         p = self._last_params
         self.preview_scene.clear()
@@ -1673,6 +2020,14 @@ class MainWindow(QMainWindow):
         label.setPos(x + 6, (y1 + y2) / 2 + rect.width() / 2)
 
     def _draw_preview_3d(self) -> None:
+        if self._is_castellated():
+            self.preview_3d.clear_preview()
+            self.label_3d_status.setText(
+                "Per i moduli castellated e' disponibile per ora solo il "
+                "footprint 2D: il modello 3D non viene generato."
+            )
+            return
+
         body = self._current_body_params()
         if body is None:
             self.preview_3d.clear_preview()
