@@ -367,10 +367,13 @@ _EXTRACTION_TOOL = {
                     "file c'e' una FOTO del lato superiore: i componenti visibili, "
                     "approssimati a blocchi rettangolari, per dare al modello 3D "
                     "l'aspetto del modulo reale invece di una lastra liscia. "
-                    "Elenca i componenti che si vedono chiaramente (trasformatore, "
-                    "integrati, connettori, LED, i condensatori piu' grossi): non "
-                    "serve mapparli tutti, e nessuna quota di questi e' data dal "
-                    "datasheet -- sono stime visive fatte in proporzione alle "
+                    "Elenca TUTTI i componenti visibili, uno per uno: trasformatore, "
+                    "integrati, connettori, LED e anche OGNI singolo passivo piccolo "
+                    "(resistenze e condensatori chip 0402/0603/0805, diodi), ciascuno "
+                    "con la propria posizione e il proprio orientamento (length_mm "
+                    "lungo X, width_mm lungo Y). Un modulo tipico ne ha 30-50: la "
+                    "lista e' lunga ed e' giusto cosi'. Nessuna quota di questi e' "
+                    "data dal datasheet -- sono stime visive in proporzione alle "
                     "dimensioni note del modulo, ed e' normale che sia cosi'. "
                     "Ometti il campo se non c'e' una foto dall'alto."
                 ),
@@ -516,10 +519,12 @@ _SYSTEM_PROMPT = (
     "elemento per lato, invece di comprimerli in una matrice righe x colonne che "
     "non li rappresenta e produrrebbe un footprint sbagliato. "
     "Per i moduli su PCB, se c'e' una foto del lato superiore, elenca in "
-    "components_3d i componenti visibili come blocchi rettangolari stimati a "
-    "occhio in proporzione alle dimensioni note del modulo: servono a dare al "
-    "modello 3D l'aspetto del pezzo reale, e nessuna di quelle quote e' "
-    "riportata dal datasheet -- e' normale e atteso stimarle. Compila sempre "
+    "components_3d TUTTI i componenti visibili, uno per uno, compresi i passivi "
+    "piccoli (resistenze, condensatori chip, diodi): posizione, ingombro, "
+    "orientamento e colore stimati a occhio in proporzione alle dimensioni note "
+    "del modulo. Servono a dare al modello 3D l'aspetto del pezzo reale, e "
+    "nessuna di quelle quote e' riportata dal datasheet -- e' normale e atteso "
+    "stimarle; una lista di 30-50 elementi e' il risultato giusto. Compila sempre "
     "anche pinout con la funzione di ogni contatto, leggendola dalle sigle "
     "serigrafate accanto ai contatti nella foto (es. PE, B-, A+, G, R, T, P, V) "
     "o dalle etichette di un'immagine descrittiva del prodotto. "
@@ -710,7 +715,7 @@ def extract_pin_header_params(
             system_prompt=system_prompt or _SYSTEM_PROMPT,
             content_blocks=content_blocks,
             tool=_openai_tool(),
-            max_tokens=2048,
+            max_tokens=16384,
             has_pdf=has_pdf,
         )
     except OpenRouterError as exc:

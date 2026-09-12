@@ -378,8 +378,9 @@ stesso ordine. Viene salvato anche il sorgente `.FCStd`.
 ### Componenti dalla foto
 
 Se tra i file c'e' una **foto del lato superiore**, l'estrazione compila
-anche `components_3d`: i componenti visibili (trasformatore, integrati,
-LED, i condensatori piu' grossi) come blocchi rettangolari con posizione,
+anche `components_3d`: **tutti** i componenti visibili, uno per uno,
+passivi piccoli compresi (su un modulo tipico 30-50 elementi; la risposta
+ha un limite di 16k token per contenerli), come blocchi con posizione,
 ingombro, altezza stimata dal tipo di package e colore. Ognuno diventa un
 solido a se' nel modello 3D, al posto del blocco unico: il modulo si
 riconosce a colpo d'occhio e l'ingombro in altezza e' quello vero,

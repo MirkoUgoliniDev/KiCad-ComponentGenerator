@@ -27,6 +27,8 @@ CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config.json"
 LEGACY_DEFAULT_PROMPT_HASHES = {
     # Default fino alla versione senza il campo "layout" (solo matrice).
     "c744e556d5e1eba95f41d69b5eb635c2ab8bcc0cf77f5c1d163b18ca3a41feea",
+    # Default che chiedeva solo i componenti principali ("non serve mapparli tutti").
+    "eefd487b98f9217c71c14976fe71ac0095a14dd8ed9b8bd1b5d58e8231c0aafa",
 }
 
 
