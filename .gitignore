@@ -1,0 +1,40 @@
+# Python caches and environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Local configuration and secrets
+.env
+.env.*
+config.json
+
+# Generated component output and local exports
+generated/
+examples/output/
+dist/
+build/
+*.tmp
+*.log
+
+# FreeCAD temporary files
+*.FCStd1
+*.FCStd~
+
+# KiCad local state
+*.kicad_prl
+*.lck
+*.bak
+*-bak
+~*
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/

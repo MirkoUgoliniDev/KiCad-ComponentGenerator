@@ -1,0 +1,1551 @@
+"""Finestra principale della GUI di KiCadGen-Tool.
+
+Stesso linguaggio grafico di Pm3ToWav (C:\\Lavori\\Python\\Pm3ToWav):
+tema scuro Catppuccin Mocha (kicadgen.gui.theme), QTabWidget con tab
+arrotondati e bordo inferiore blu sulla tab attiva, generazione
+eseguita in un QThread worker per non bloccare la UI (stesso pattern
+di ConvertWorker in Pm3ToWav/main.py), log in una QTextEdit.
+
+Cinque tab:
+    1. Progetto     -- cartella che ospitera' il componente + documentazione (docs/)
+    2. Footprint 2D -- parametri del generatore (kicadgen.generators.pin_header)
+                       + gruppo opzionale "Modello 3D" (corpo/offset/pin length)
+    3. Genera       -- riepilogo, pulsante Genera, log (footprint 2D + STEP 3D)
+    4. Anteprima    -- disegno 2D dei pad a scala, con quote (margini, span, totali)
+    5. Modello 3D   -- anteprima 3D interattiva (VTK, kicadgen.gui.preview_3d_vtk)
+                       + annotazioni di post-elaborazione (fillet su spigoli,
+                       serigrafie sulle facce) con tabella di revisione prima di generare
+
+La cartella del componente segue la stessa convenzione gia' usata nel
+resto del repo (es. ESP32-S3-N16R8/ESP32_S3_N16R8.pretty/): il nome
+della cartella coincide con il nome del footprint. Il campo "Nome" vive
+nel tab Progetto (determina anche il path); il tab Footprint 2D ne
+mostra solo uno specchio in sola lettura.
+
+Il tab Progetto include anche "Estrai parametri con AI dal datasheet"
+(kicadgen.services.datasheet_extractor): manda i file selezionati in
+docs/ all'API Claude e pre-compila righe/colonne/passo/pad/drill (+ i
+campi del corpo 3D, se il datasheet ha un disegno meccanico quotato).
+Richiede la variabile d'ambiente ANTHROPIC_API_KEY.
+"""
+
+from __future__ import annotations
+
+import math
+import shutil
+import sys
+import webbrowser
+from pathlib import Path
+
+from PyQt6.QtCore import QThread, pyqtSignal, Qt
+from PyQt6.QtGui import QBrush, QColor, QPen
+from PyQt6.QtWidgets import (
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
+    QFormLayout, QGraphicsEllipseItem, QGraphicsRectItem, QGraphicsScene,
+    QGraphicsView, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+    QDialog, QListWidget, QMainWindow, QMessageBox, QPushButton, QScrollArea,
+    QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QVBoxLayout,
+    QWidget,
+)
+
+from ..cad3d.annotations import EDGE_NAMES, FACE_NAMES, EdgeFilletAnnotation, FaceTextAnnotation
+from ..cad3d.body_params import Body3DParams
+from ..cad3d.step_generator import Cad3DError, generate_3d_model
+from ..generators.pin_header import PinHeaderParams, build_pin_header, pin_positions
+from ..services.datasheet_extractor import (
+    DEFAULT_SYSTEM_PROMPT, ExtractedParams, ExtractionError, extract_pin_header_params,
+)
+from .app_config import CONFIG_PATH, load_config, save_config
+from .pinout_dialog import PinoutDialog
+from .preview_3d_vtk import Preview3DVtk
+from .settings_dialog import SystemPromptDialog
+from .theme import BASE, BLUE, SURFACE0, SURFACE1, SURFACE2, TEXT, YELLOW, APP_QSS
+
+APP_DIR = Path(__file__).resolve().parent.parent.parent
+# Area di lavoro: i componenti si generano qui dentro, e si esportano nella
+# libreria vera solo quando sono stati verificati (pulsante "Esporta in libreria").
+DEFAULT_LIBRARY_ROOT = APP_DIR / "generated"
+DEFAULT_EXPORT_ROOT = APP_DIR.parent  # .../CustomComponents
+DOCS_SUBDIR = "docs"
+
+
+class GenerateWorker(QThread):
+    """QThread che costruisce/salva un Footprint e, se richiesto, il modello 3D.
+
+    Il footprint 2D e il modello 3D sono riportati separatamente: un
+    fallimento della generazione 3D (es. freecadcmd non trovato) non deve
+    invalidare un footprint 2D generato correttamente.
+
+    Segnali:
+        done(str)       -- percorso assoluto del file .kicad_mod scritto
+        error(str)      -- errore nella generazione del footprint 2D
+        cad3d_done(str) -- percorso assoluto del file .step scritto
+        cad3d_error(str) -- errore nella generazione del modello 3D
+    """
+
+    done = pyqtSignal(str)
+    error = pyqtSignal(str)
+    cad3d_done = pyqtSignal(str)
+    cad3d_error = pyqtSignal(str)
+    warning = pyqtSignal(str)
+
+    def __init__(
+        self, params: PinHeaderParams, project_dir: Path, body: Body3DParams | None = None,
+        fillets: list | None = None, face_texts: list | None = None,
+    ):
+        super().__init__()
+        self.params = params
+        self.project_dir = project_dir
+        self.body = body
+        self.fillets = fillets or []
+        self.face_texts = face_texts or []
+
+    def run(self) -> None:
+        try:
+            footprint = build_pin_header(self.params)
+            pretty_dir = self.project_dir / f"{self.params.name}.pretty"
+            out_path = pretty_dir / f"{self.params.name}.kicad_mod"
+            footprint.save(str(out_path))
+            self.done.emit(str(out_path))
+        except Exception as exc:  # noqa: BLE001 - riportato in UI, non e' fatale
+            self.error.emit(str(exc))
+            return
+
+        if self.body is not None:
+            try:
+                result = generate_3d_model(
+                    self.params, self.body, self.project_dir,
+                    fillets=self.fillets, face_texts=self.face_texts,
+                )
+                self.cad3d_done.emit(str(result["step_path"]))
+            except Cad3DError as exc:
+                self.cad3d_error.emit(str(exc))
+            except Exception as exc:  # noqa: BLE001 - riportato in UI, non e' fatale
+                self.cad3d_error.emit(f"Errore inatteso: {exc}")
+
+
+class Cad3DWorker(QThread):
+    """QThread che rigenera solo il modello 3D (STEP/VRML), senza rifare il footprint.
+
+    Serve al pulsante "Rigenera modello 3D" del tab Modello 3D: dopo aver
+    aggiunto/tolto annotazioni non ha senso riscrivere anche il .kicad_mod.
+
+    Segnali:
+        done(str)    -- percorso assoluto del file .step scritto
+        error(str)   -- messaggio di errore leggibile
+        warning(str) -- annotazione non applicata (es. fillet impossibile)
+    """
+
+    done = pyqtSignal(str)
+    error = pyqtSignal(str)
+    warning = pyqtSignal(str)
+
+    def __init__(
+        self, params: PinHeaderParams, body: Body3DParams, project_dir: Path,
+        fillets: list, face_texts: list,
+    ):
+        super().__init__()
+        self.params = params
+        self.body = body
+        self.project_dir = project_dir
+        self.fillets = fillets
+        self.face_texts = face_texts
+
+    def run(self) -> None:
+        try:
+            result = generate_3d_model(
+                self.params, self.body, self.project_dir,
+                fillets=self.fillets, face_texts=self.face_texts,
+            )
+            for warning in result.get("warnings", []):
+                self.warning.emit(warning)
+            self.done.emit(str(result["step_path"]))
+        except Cad3DError as exc:
+            self.error.emit(str(exc))
+        except Exception as exc:  # noqa: BLE001 - riportato in UI, non e' fatale
+            self.error.emit(f"Errore inatteso: {exc}")
+
+
+class ExtractWorker(QThread):
+    """QThread che chiama l'API Claude per estrarre i parametri dal datasheet.
+
+    Segnali:
+        done(ExtractedParams) -- parametri estratti con successo
+        error(str)            -- messaggio di errore leggibile
+    """
+
+    done = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+    def __init__(
+        self, doc_paths: list[Path], system_prompt: str | None = None,
+        extra_instructions: str | None = None, include_nc_pins: bool = True,
+    ):
+        super().__init__()
+        self.doc_paths = doc_paths
+        self.system_prompt = system_prompt
+        self.extra_instructions = extra_instructions
+        self.include_nc_pins = include_nc_pins
+
+    def run(self) -> None:
+        try:
+            params = extract_pin_header_params(
+                self.doc_paths,
+                system_prompt=self.system_prompt,
+                extra_instructions=self.extra_instructions,
+                include_nc_pins=self.include_nc_pins,
+            )
+            self.done.emit(params)
+        except ExtractionError as exc:
+            self.error.emit(str(exc))
+        except Exception as exc:  # noqa: BLE001 - errori rete/API riportati in UI
+            self.error.emit(f"Errore API: {exc}")
+
+
+class MainWindow(QMainWindow):
+    """Finestra principale: 4 tab, Progetto / Footprint 2D / Genera / Anteprima."""
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("KiCadGen-Tool")
+        self.resize(760, 780)
+        self.setMinimumSize(660, 700)
+
+        self._worker: GenerateWorker | None = None
+        self._extract_worker: ExtractWorker | None = None
+        self._cad3d_worker: Cad3DWorker | None = None
+        self._last_params: PinHeaderParams | None = None
+        self.fillet_annotations: list[EdgeFilletAnnotation] = []
+        self.face_text_annotations: list[FaceTextAnnotation] = []
+        self.pinout: list[dict] = []
+        self.pin_map: dict | None = None
+        self._last_mesh_path: Path | None = None
+        self._config = load_config()
+
+        self._build_menu()
+        self._build_central()
+        self._refresh_docs_list()
+
+    # ── Menu ────────────────────────────────────────────────────────
+
+    def _build_menu(self) -> None:
+        file_menu = self.menuBar().addMenu("&File")
+        file_menu.addAction("Apri cartella componente", self._open_project_dir)
+        file_menu.addAction("Esporta in libreria...", self._export_component)
+        file_menu.addSeparator()
+        file_menu.addAction("Esci", self.close)
+
+        config_menu = self.menuBar().addMenu("&Configurazione")
+        config_menu.addAction("Prompt di sistema LLM...", self._edit_system_prompt)
+        config_menu.addSeparator()
+
+        self.action_nc_pins = config_menu.addAction("Genera anche i pin NC (Not Connected)")
+        self.action_nc_pins.setCheckable(True)
+        self.action_nc_pins.setChecked(bool(self._config.get("include_nc_pins", True)))
+        self.action_nc_pins.setToolTip(
+            "I pin NC non sono collegati elettricamente ma sono fisicamente presenti: "
+            "senza il loro pad il componente non entra nella scheda."
+        )
+        self.action_nc_pins.toggled.connect(self._on_nc_pins_toggled)
+
+        config_menu.addSeparator()
+        config_menu.addAction("Apri config.json", self._open_config_file)
+
+        help_menu = self.menuBar().addMenu("&?")
+        help_menu.addAction(
+            "Apri cartella progetto tool", lambda: webbrowser.open(APP_DIR.as_uri())
+        )
+        help_menu.addSeparator()
+        help_menu.addAction("About", self._show_about)
+
+    def _on_nc_pins_toggled(self, checked: bool) -> None:
+        self._config["include_nc_pins"] = checked
+        save_config(self._config)
+        self._append_log(
+            "Pin NC: verranno generati." if checked
+            else "Pin NC: NON verranno generati (attenzione: il piedino fisico resta)."
+        )
+
+    def _edit_system_prompt(self) -> None:
+        dialog = SystemPromptDialog(self._config["system_prompt"], self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._config["system_prompt"] = dialog.prompt() or DEFAULT_SYSTEM_PROMPT
+            save_config(self._config)
+            self._append_log("Prompt di sistema aggiornato (config.json).")
+
+    def _open_config_file(self) -> None:
+        if not CONFIG_PATH.is_file():
+            save_config(self._config)
+        webbrowser.open(CONFIG_PATH.as_uri())
+
+    def _show_about(self) -> None:
+        QMessageBox.about(
+            self, "About",
+            "KiCadGen-Tool\n\n"
+            "Genera componenti KiCad (impronta 2D + modello 3D)\n"
+            "a partire da dimensioni e quote.\n\n"
+            "Modulo attivo: generatore footprint 2D (.kicad_mod)."
+        )
+
+    # ── Layout ──────────────────────────────────────────────────────
+
+    def _build_central(self) -> None:
+        central = QWidget()
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        project_tab = self._build_project_tab()
+        footprint_tab = self._build_footprint_tab()
+        generate_tab = self._build_generate_tab()
+        preview_tab = self._build_preview_tab()
+        model_3d_tab = self._build_3d_tab()
+
+        self.tabs = QTabWidget()
+        self.tabs.addTab(project_tab, "\U0001F4C1 Progetto")
+        self.tabs.addTab(footprint_tab, "\u25a6 Footprint 2D")
+        self.tabs.addTab(generate_tab, "\u2699 Genera")
+        self.tabs.addTab(preview_tab, "\U0001F441 Anteprima FootPrint")
+        self.tabs.addTab(model_3d_tab, "\U0001F9CA Modello 3D")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+        layout.addWidget(self.tabs)
+
+        self.setCentralWidget(central)
+
+    # ── Tab 1: Progetto ────────────────────────────────────────────
+
+    def _build_project_tab(self) -> QWidget:
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setSpacing(8)
+
+        folder_group = QGroupBox("Cartella componente")
+        folder_layout = QFormLayout(folder_group)
+
+        self.field_name = QLineEdit("PinHeader_2x04_P2.54mm_THT")
+        self.field_name.textChanged.connect(self._on_name_changed)
+        folder_layout.addRow("Nome componente:", self.field_name)
+
+        self.field_library_root = QLineEdit(str(DEFAULT_LIBRARY_ROOT))
+        self.field_library_root.textChanged.connect(self._update_project_path_label)
+        btn_browse_root = QPushButton("Sfoglia...")
+        btn_browse_root.clicked.connect(self._browse_library_root)
+        root_row = QHBoxLayout()
+        root_row.addWidget(self.field_library_root)
+        root_row.addWidget(btn_browse_root)
+        root_row_widget = QWidget()
+        root_row_widget.setLayout(root_row)
+        folder_layout.addRow("Area di lavoro:", root_row_widget)
+
+        self.label_project_path = QLabel()
+        self.label_project_path.setWordWrap(True)
+        self.label_project_path.setStyleSheet(f"color: {BLUE};")
+        folder_layout.addRow("Cartella componente:", self.label_project_path)
+
+        note = QLabel(
+            "Il nome del componente e' anche il nome del footprint generato "
+            "(es. area_di_lavoro/MioComponente/MioComponente.pretty/...). "
+            "Tutto viene generato qui; per portarlo nella libreria vera usa "
+            "\"Esporta in libreria...\" nel tab \"Genera\"."
+        )
+        note.setWordWrap(True)
+        folder_layout.addRow(note)
+
+        outer.addWidget(folder_group)
+
+        docs_group = QGroupBox(f"Documentazione ({DOCS_SUBDIR}/)")
+        docs_layout = QVBoxLayout(docs_group)
+
+        self.docs_list = QListWidget()
+        self.docs_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        docs_layout.addWidget(self.docs_list)
+
+        docs_btn_row = QHBoxLayout()
+        btn_add_docs = QPushButton("Aggiungi documentazione...")
+        btn_add_docs.clicked.connect(self._add_docs)
+        btn_remove_doc = QPushButton("Rimuovi selezionato")
+        btn_remove_doc.clicked.connect(self._remove_doc)
+        btn_open_docs = QPushButton("Apri cartella docs")
+        btn_open_docs.clicked.connect(self._open_docs_folder)
+        docs_btn_row.addWidget(btn_add_docs)
+        docs_btn_row.addWidget(btn_remove_doc)
+        docs_btn_row.addWidget(btn_open_docs)
+        docs_btn_row.addStretch()
+        docs_layout.addLayout(docs_btn_row)
+
+        ai_row = QHBoxLayout()
+        self.btn_extract_ai = QPushButton("✨ Estrai parametri con AI dal datasheet")
+        self.btn_extract_ai.setObjectName("primary")
+        self.btn_extract_ai.clicked.connect(self._extract_with_ai)
+        ai_row.addWidget(self.btn_extract_ai)
+        ai_row.addStretch()
+        docs_layout.addLayout(ai_row)
+
+        docs_layout.addWidget(QLabel(
+            "Note per l'estrazione di QUESTO componente (opzionale) -- il prompt "
+            "generale si imposta da Configurazione -> Prompt di sistema LLM:"
+        ))
+        self.field_component_prompt = QTextEdit()
+        self.field_component_prompt.setPlaceholderText(
+            "es. il case e' metallico, non plastico -- oppure: ignora il connettore "
+            "laterale, considera solo i pin del lato inferiore"
+        )
+        self.field_component_prompt.setMaximumHeight(70)
+        docs_layout.addWidget(self.field_component_prompt)
+
+        ai_note = QLabel(
+            "Seleziona uno o piu' file in lista (PDF o immagini del disegno "
+            "meccanico) e premi il pulsante: i campi righe/colonne/passo/pad/drill "
+            "nel tab \"Footprint 2D\" verranno pre-compilati. Richiede la variabile "
+            "d'ambiente ANTHROPIC_API_KEY. Verifica sempre i valori prima di generare."
+        )
+        ai_note.setWordWrap(True)
+        ai_note.setStyleSheet(f"color: {TEXT}; font-style: italic;")
+        docs_layout.addWidget(ai_note)
+
+        outer.addWidget(docs_group)
+
+        self._update_project_path_label()
+        return tab
+
+    def _component_name(self) -> str:
+        return self.field_name.text().strip() if hasattr(self, "field_name") else ""
+
+    def _project_dir(self) -> Path:
+        root = self.field_library_root.text().strip() or str(DEFAULT_LIBRARY_ROOT)
+        name = self._component_name() or "NUOVO_COMPONENTE"
+        return Path(root) / name
+
+    def _docs_dir(self) -> Path:
+        return self._project_dir() / DOCS_SUBDIR
+
+    def _update_project_path_label(self) -> None:
+        self.label_project_path.setText(str(self._project_dir()))
+        self._refresh_docs_list()
+
+    def _on_name_changed(self, text: str) -> None:
+        if hasattr(self, "field_name_mirror"):
+            self.field_name_mirror.setText(text)
+        self._update_project_path_label()
+
+    def _browse_library_root(self) -> None:
+        path = QFileDialog.getExistingDirectory(
+            self, "Scegli la cartella libreria", self.field_library_root.text()
+        )
+        if path:
+            self.field_library_root.setText(path)
+
+    def _refresh_docs_list(self) -> None:
+        if not hasattr(self, "docs_list"):
+            return
+        self.docs_list.clear()
+        docs_dir = self._docs_dir()
+        if docs_dir.is_dir():
+            for f in sorted(docs_dir.iterdir()):
+                if f.is_file():
+                    self.docs_list.addItem(f.name)
+
+    def _add_docs(self) -> None:
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Seleziona documentazione (datasheet, PDF, immagini...)", "",
+            "Documenti (*.pdf *.png *.jpg *.jpeg *.txt *.md *.xlsx *.csv);;Tutti i file (*)"
+        )
+        if not files:
+            return
+        docs_dir = self._docs_dir()
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        for f in files:
+            shutil.copy2(f, docs_dir / Path(f).name)
+        self._refresh_docs_list()
+
+    def _remove_doc(self) -> None:
+        item = self.docs_list.currentItem()
+        if item is None:
+            return
+        target = self._docs_dir() / item.text()
+        confirm = QMessageBox.question(
+            self, "Rimuovi file",
+            f"Eliminare definitivamente \"{item.text()}\" da {self._docs_dir()}?",
+        )
+        if confirm == QMessageBox.StandardButton.Yes:
+            target.unlink(missing_ok=True)
+            self._refresh_docs_list()
+
+    def _open_docs_folder(self) -> None:
+        docs_dir = self._docs_dir()
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        webbrowser.open(docs_dir.as_uri())
+
+    def _extract_with_ai(self) -> None:
+        if self._extract_worker is not None and self._extract_worker.isRunning():
+            return
+
+        selected = self.docs_list.selectedItems()
+        if not selected:
+            QMessageBox.information(
+                self, "Nessun file selezionato",
+                "Seleziona nella lista uno o piu' file di documentazione da analizzare."
+            )
+            return
+
+        docs_dir = self._docs_dir()
+        doc_paths = [docs_dir / item.text() for item in selected]
+
+        self.btn_extract_ai.setEnabled(False)
+        self.btn_extract_ai.setText("Analisi in corso...")
+
+        self._extract_worker = ExtractWorker(
+            doc_paths,
+            system_prompt=self._current_system_prompt(),
+            extra_instructions=self.field_component_prompt.toPlainText().strip() or None,
+            include_nc_pins=self.action_nc_pins.isChecked(),
+        )
+        self._extract_worker.done.connect(self._on_extracted)
+        self._extract_worker.error.connect(self._on_extract_error)
+        self._extract_worker.finished.connect(self._on_extract_finished)
+        self._extract_worker.start()
+
+    def _on_extract_finished(self) -> None:
+        self.btn_extract_ai.setEnabled(True)
+        self.btn_extract_ai.setText("✨ Estrai parametri con AI dal datasheet")
+
+    def _migrate_docs_to_new_name(self, new_name: str) -> None:
+        """Sposta i documenti nella cartella del nuovo nome componente.
+
+        La cartella docs/ vive dentro la cartella del componente, che prende il
+        nome dal campo "Nome": quando l'estrazione AI propone un nome diverso,
+        senza questo spostamento i file caricati prima resterebbero nella
+        vecchia cartella e sparirebbero dalla lista (e non sarebbero piu'
+        selezionabili per una nuova estrazione).
+        """
+        old_docs = self._docs_dir()
+        if not old_docs.is_dir():
+            return
+        files = [f for f in old_docs.iterdir() if f.is_file()]
+        if not files:
+            return
+
+        old_name = self._component_name()
+        new_docs = Path(self.field_library_root.text().strip()) / new_name / DOCS_SUBDIR
+        if new_docs.resolve() == old_docs.resolve():
+            return
+
+        answer = QMessageBox.question(
+            self, "Rinomina componente",
+            f"L'estrazione propone il nome \"{new_name}\" (adesso e' \"{old_name}\").\n\n"
+            f"In {old_docs} ci sono {len(files)} file di documentazione.\n"
+            "Li sposto nella cartella del nuovo nome? (altrimenti resteranno "
+            "dove sono e spariranno dalla lista)",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        new_docs.mkdir(parents=True, exist_ok=True)
+        for f in files:
+            target = new_docs / f.name
+            if target.exists():
+                continue
+            shutil.move(str(f), str(target))
+
+    def _on_extracted(self, params: ExtractedParams) -> None:
+        if params.name and params.name != self._component_name():
+            self._migrate_docs_to_new_name(params.name)
+        if params.name:
+            self.field_name.setText(params.name)
+        self.field_description.setText(params.description)
+        if params.tags:
+            self.field_tags.setText(params.tags)
+        self.field_rows.setValue(params.rows)
+        self.field_cols.setValue(params.cols)
+        self.field_pitch.setValue(params.pitch_mm)
+        self.field_row_spacing.setValue(params.row_spacing_mm)
+        self.field_pad.setValue(params.pad_diameter_mm)
+        self.field_drill.setValue(params.drill_mm)
+        self.field_populated_pins.setText(
+            ",".join(str(p) for p in sorted(params.populated_pins)) if params.populated_pins else ""
+        )
+
+        if params.has_3d_body():
+            self.group_3d.setChecked(True)
+            self.field_body_length.setValue(params.body_length_mm)
+            self.field_body_width.setValue(params.body_width_mm)
+            self.field_body_height.setValue(params.body_height_mm)
+            if params.body_offset_x_mm is not None:
+                self.field_body_offset_x.setValue(params.body_offset_x_mm)
+            if params.body_offset_y_mm is not None:
+                self.field_body_offset_y.setValue(params.body_offset_y_mm)
+            if params.pin_length_3d_mm is not None:
+                self.field_pin_length_3d.setValue(params.pin_length_3d_mm)
+
+        if params.pinout:
+            self.pinout = [dict(entry) for entry in params.pinout]
+
+        if params.pin_map:
+            self.pin_map = {
+                int(e["pin"]): (int(e["row"]), int(e["col"])) for e in params.pin_map
+            }
+            self._append_log(
+                f"Posizione dei pin letta dal disegno ({len(self.pin_map)} pin): "
+                "la numerazione non segue l'ordine colonna per colonna."
+            )
+
+        if params.body_color_hex:
+            self.field_body_color.setText(params.body_color_hex)
+        if params.text_color_hex:
+            self.field_text_color.setText(params.text_color_hex)
+
+        if params.edge_fillets:
+            for f in params.edge_fillets:
+                ann = EdgeFilletAnnotation(edge=f["edge"], radius_mm=float(f["radius_mm"]))
+                try:
+                    ann.validate()
+                except ValueError:
+                    continue
+                self.fillet_annotations.append(ann)
+            self._refresh_annotations_table()
+
+        fillet_note = (
+            f"\n\n{len(params.edge_fillets)} fillet suggeriti dalla foto -> tab \"Modello 3D\", tabella annotazioni."
+            if params.edge_fillets else ""
+        )
+        QMessageBox.information(
+            self, "Estrazione completata",
+            f"Confidenza: {params.confidence}\n\n"
+            f"{params.notes or 'Nessuna nota.'}"
+            f"{fillet_note}\n\n"
+            "Controlla i valori nel tab \"Footprint 2D\" prima di generare."
+        )
+
+    def _on_extract_error(self, message: str) -> None:
+        QMessageBox.warning(self, "Estrazione fallita", message)
+
+    # ── Tab 2: Footprint 2D ────────────────────────────────────────
+
+    def _build_footprint_tab(self) -> QWidget:
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setSpacing(8)
+
+        form_group = QGroupBox("Parametri footprint (header THT a matrice)")
+        form = QFormLayout(form_group)
+
+        self.field_name_mirror = QLineEdit(self.field_name.text())
+        self.field_name_mirror.setReadOnly(True)
+        self.field_name_mirror.setToolTip("Modificabile nel tab \"Progetto\"")
+        form.addRow("Nome (da tab Progetto):", self.field_name_mirror)
+
+        self.field_description = QLineEdit()
+        self.field_description.setPlaceholderText("(auto-generata se vuota)")
+        self.field_tags = QLineEdit("pin header THT")
+
+        self.field_rows = QSpinBox()
+        self.field_rows.setRange(1, 40)
+        self.field_rows.setValue(2)
+
+        self.field_cols = QSpinBox()
+        self.field_cols.setRange(1, 40)
+        self.field_cols.setValue(4)
+
+        self.field_pitch = QDoubleSpinBox()
+        self.field_pitch.setRange(0.5, 20.0)
+        self.field_pitch.setSingleStep(0.01)
+        self.field_pitch.setDecimals(2)
+        self.field_pitch.setSuffix(" mm")
+        self.field_pitch.setValue(2.54)
+        self.field_pitch.setToolTip("Passo tra pin adiacenti sulla stessa riga")
+
+        self.field_row_spacing = QDoubleSpinBox()
+        self.field_row_spacing.setRange(0.5, 50.0)
+        self.field_row_spacing.setSingleStep(0.01)
+        self.field_row_spacing.setDecimals(2)
+        self.field_row_spacing.setSuffix(" mm")
+        self.field_row_spacing.setValue(2.54)
+        self.field_row_spacing.setToolTip(
+            "Distanza perpendicolare tra le due file di pin. Nei moduli DIP-style "
+            "(es. convertitori DC/DC) e' quasi sempre molto maggiore del passo."
+        )
+
+        self.field_populated_pins = QLineEdit()
+        self.field_populated_pins.setPlaceholderText(
+            "(vuoto = tutte le posizioni popolate) es. 1,7,8,9,10,16"
+        )
+
+        self.field_pad = QDoubleSpinBox()
+        self.field_pad.setRange(0.2, 10.0)
+        self.field_pad.setSingleStep(0.05)
+        self.field_pad.setDecimals(2)
+        self.field_pad.setSuffix(" mm")
+        self.field_pad.setValue(1.7)
+
+        self.field_drill = QDoubleSpinBox()
+        self.field_drill.setRange(0.1, 8.0)
+        self.field_drill.setSingleStep(0.05)
+        self.field_drill.setDecimals(2)
+        self.field_drill.setSuffix(" mm")
+        self.field_drill.setValue(1.0)
+
+        form.addRow("Descrizione:", self.field_description)
+        form.addRow("Tag:", self.field_tags)
+        form.addRow("Righe:", self.field_rows)
+        form.addRow("Colonne:", self.field_cols)
+        form.addRow("Passo (pitch, tra pin nella riga):", self.field_pitch)
+        form.addRow("Distanza tra righe:", self.field_row_spacing)
+        form.addRow("Pin popolati:", self.field_populated_pins)
+        form.addRow("Diametro pad:", self.field_pad)
+        form.addRow("Drill:", self.field_drill)
+
+        outer.addWidget(form_group)
+        outer.addWidget(self._build_3d_group())
+        outer.addStretch()
+        return tab
+
+    def _build_3d_group(self) -> QGroupBox:
+        group = QGroupBox("Modello 3D (opzionale, richiede FreeCAD installato)")
+        group.setCheckable(True)
+        group.setChecked(False)
+        self.group_3d = group
+        form3d = QFormLayout(group)
+
+        self.field_body_length = QDoubleSpinBox()
+        self.field_body_length.setRange(0.5, 300.0)
+        self.field_body_length.setDecimals(2)
+        self.field_body_length.setSuffix(" mm")
+        self.field_body_length.setValue(10.0)
+        self.field_body_length.setToolTip("Lunghezza corpo, asse X (stessa direzione del pitch)")
+
+        self.field_body_width = QDoubleSpinBox()
+        self.field_body_width.setRange(0.5, 300.0)
+        self.field_body_width.setDecimals(2)
+        self.field_body_width.setSuffix(" mm")
+        self.field_body_width.setValue(10.0)
+        self.field_body_width.setToolTip("Larghezza corpo, asse Y (stessa direzione della distanza tra righe)")
+
+        self.field_body_height = QDoubleSpinBox()
+        self.field_body_height.setRange(0.5, 100.0)
+        self.field_body_height.setDecimals(2)
+        self.field_body_height.setSuffix(" mm")
+        self.field_body_height.setValue(5.0)
+
+        self.field_body_offset_x = QDoubleSpinBox()
+        self.field_body_offset_x.setRange(-150.0, 150.0)
+        self.field_body_offset_x.setDecimals(2)
+        self.field_body_offset_x.setSuffix(" mm")
+        self.field_body_offset_x.setValue(0.0)
+        self.field_body_offset_x.setToolTip("Posizione del bordo corpo lungo X rispetto al pin 1 (x=0)")
+
+        self.field_body_offset_y = QDoubleSpinBox()
+        self.field_body_offset_y.setRange(-150.0, 150.0)
+        self.field_body_offset_y.setDecimals(2)
+        self.field_body_offset_y.setSuffix(" mm")
+        self.field_body_offset_y.setValue(0.0)
+        self.field_body_offset_y.setToolTip("Posizione del bordo corpo lungo Y rispetto alla prima riga di pin (y=0)")
+
+        self.field_pin_length_3d = QDoubleSpinBox()
+        self.field_pin_length_3d.setRange(0.1, 20.0)
+        self.field_pin_length_3d.setDecimals(2)
+        self.field_pin_length_3d.setSuffix(" mm")
+        self.field_pin_length_3d.setValue(3.0)
+        self.field_pin_length_3d.setToolTip("Lunghezza pin che sporge sotto il corpo, verso il PCB")
+
+        form3d.addRow("Lunghezza corpo:", self.field_body_length)
+        form3d.addRow("Larghezza corpo:", self.field_body_width)
+        form3d.addRow("Altezza corpo:", self.field_body_height)
+        form3d.addRow("Offset X (da pin 1):", self.field_body_offset_x)
+        form3d.addRow("Offset Y (da riga pin):", self.field_body_offset_y)
+        self.field_body_color = QLineEdit("#1a1a1a")
+        self.field_body_color.setToolTip("Colore del case, formato #rrggbb (estratto dalla foto)")
+
+        self.field_pin_color = QLineEdit("#b0b0b0")
+        self.field_pin_color.setToolTip("Colore dei pin, formato #rrggbb")
+
+        form3d.addRow("Lunghezza pin (3D):", self.field_pin_length_3d)
+        form3d.addRow("Colore corpo:", self.field_body_color)
+        form3d.addRow("Colore pin:", self.field_pin_color)
+
+        return group
+
+    # ── Tab 3: Genera ──────────────────────────────────────────────
+
+    def _build_generate_tab(self) -> QWidget:
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setSpacing(8)
+
+        self.label_summary = QLabel()
+        self.label_summary.setWordWrap(True)
+        outer.addWidget(self.label_summary)
+
+        btn_row = QHBoxLayout()
+        self.btn_generate = QPushButton("Genera footprint")
+        self.btn_generate.setObjectName("primary")
+        self.btn_generate.clicked.connect(self._generate)
+        self.btn_open_output = QPushButton("Apri cartella componente")
+        self.btn_open_output.clicked.connect(self._open_project_dir)
+        self.btn_export = QPushButton("Esporta in libreria...")
+        self.btn_export.clicked.connect(self._export_component)
+        btn_row.addWidget(self.btn_generate)
+        btn_row.addWidget(self.btn_open_output)
+        btn_row.addWidget(self.btn_export)
+        btn_row.addStretch()
+        outer.addLayout(btn_row)
+
+        outer.addWidget(QLabel("Log:"))
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        outer.addWidget(self.log_text)
+
+        return tab
+
+    def _open_project_dir(self) -> None:
+        project_dir = self._project_dir()
+        project_dir.mkdir(parents=True, exist_ok=True)
+        webbrowser.open(project_dir.as_uri())
+
+    def _export_component(self) -> None:
+        """Copia la cartella del componente dall'area di lavoro alla libreria scelta.
+
+        La generazione avviene sempre in `generated/` (area di lavoro): l'export
+        e' un passo separato ed esplicito, cosi' la libreria vera riceve solo
+        componenti gia' verificati.
+        """
+        source = self._project_dir()
+        if not source.is_dir():
+            self._append_log(f"ERRORE export: {source} non esiste, genera prima il componente.")
+            return
+
+        destination_root = QFileDialog.getExistingDirectory(
+            self, "Scegli la libreria di destinazione", str(DEFAULT_EXPORT_ROOT)
+        )
+        if not destination_root:
+            return
+
+        target = Path(destination_root) / source.name
+        if target.resolve() == source.resolve():
+            self._append_log("ERRORE export: origine e destinazione coincidono.")
+            return
+
+        if target.exists():
+            answer = QMessageBox.question(
+                self, "Destinazione esistente",
+                f"{target} esiste gia'.\n\nSovrascrivo i file con lo stesso nome? "
+                "(i file presenti solo nella destinazione restano)",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        try:
+            shutil.copytree(source, target, dirs_exist_ok=True)
+        except OSError as exc:
+            self._append_log(f"ERRORE export: {exc}")
+            return
+
+        self._append_log(f"Esportato -> {target}")
+
+    def _append_log(self, msg: str) -> None:
+        self.log_text.append(msg)
+
+    def _parse_populated_pins(self) -> set | None:
+        text = self.field_populated_pins.text().strip()
+        if not text:
+            return None
+        pins = set()
+        for token in text.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            if not token.isdigit():
+                raise ValueError(f"\"{token}\" in \"Pin popolati\" non e' un numero valido.")
+            pins.add(int(token))
+        return pins or None
+
+    def _current_params(self) -> PinHeaderParams:
+        return PinHeaderParams(
+            name=self.field_name.text().strip(),
+            description=self.field_description.text().strip(),
+            tags=self.field_tags.text().strip(),
+            rows=self.field_rows.value(),
+            cols=self.field_cols.value(),
+            pitch=self.field_pitch.value(),
+            row_spacing=self.field_row_spacing.value(),
+            pad_diameter=self.field_pad.value(),
+            drill=self.field_drill.value(),
+            populated_pins=self._parse_populated_pins(),
+            pin_map=self.pin_map,
+        )
+
+    def _current_body_params(self) -> Body3DParams | None:
+        if not self.group_3d.isChecked():
+            return None
+        return Body3DParams(
+            length_mm=self.field_body_length.value(),
+            width_mm=self.field_body_width.value(),
+            height_mm=self.field_body_height.value(),
+            offset_x_mm=self.field_body_offset_x.value(),
+            offset_y_mm=self.field_body_offset_y.value(),
+            pin_diameter_mm=self.field_drill.value(),
+            pin_length_mm=self.field_pin_length_3d.value(),
+            color_hex=self.field_body_color.text().strip(),
+            pin_color_hex=self.field_pin_color.text().strip(),
+        )
+
+    def _update_summary(self) -> None:
+        try:
+            params = self._current_params()
+        except ValueError as exc:
+            self.label_summary.setText(f"<b>Errore parametri:</b> {exc}")
+            return
+        row_spacing = params.effective_row_spacing()
+        populated = (
+            f", {len(params.populated_pins)}/{params.rows * params.cols} pin popolati"
+            if params.populated_pins else ""
+        )
+        self.label_summary.setText(
+            f"<b>{params.name or '(nome vuoto)'}</b><br>"
+            f"Cartella: {self._project_dir()}<br>"
+            f"Griglia: {params.rows}x{params.cols}, passo {params.pitch}mm, "
+            f"distanza righe {row_spacing}mm, pad {params.pad_diameter}mm, "
+            f"drill {params.drill}mm{populated}"
+        )
+
+    def _generate(self) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            return
+
+        try:
+            params = self._current_params()
+            params.validate()
+        except ValueError as exc:
+            self._append_log(f"ERRORE: {exc}")
+            return
+
+        project_dir = self._project_dir()
+
+        self.btn_generate.setEnabled(False)
+        self._append_log(
+            f"Generazione {params.name}: {params.rows}x{params.cols}, "
+            f"pitch={params.pitch}mm, row_spacing={params.effective_row_spacing()}mm, "
+            f"pad={params.pad_diameter}mm, drill={params.drill}mm"
+        )
+
+        body = self._current_body_params()
+        if body is not None:
+            try:
+                body.validate()
+            except ValueError as exc:
+                self._append_log(f"ERRORE parametri 3D: {exc}")
+                return
+
+        if body is None and (self.fillet_annotations or self.face_text_annotations):
+            self._append_log(
+                "ATTENZIONE: annotazioni 3D presenti ma \"Modello 3D\" non e' attivo "
+                "nel tab Footprint 2D -- verranno ignorate."
+            )
+
+        self._last_params = params
+        self._worker = GenerateWorker(
+            params, project_dir, body,
+            fillets=list(self.fillet_annotations), face_texts=list(self.face_text_annotations),
+        )
+        self._worker.done.connect(self._on_generated)
+        self._worker.error.connect(self._on_error)
+        self._worker.cad3d_done.connect(self._on_cad3d_generated)
+        self._worker.warning.connect(self._on_cad3d_warning)
+        self._worker.cad3d_error.connect(self._on_cad3d_error)
+        self._worker.finished.connect(lambda: self.btn_generate.setEnabled(True))
+        self._worker.start()
+
+    def _on_generated(self, path: str) -> None:
+        self._append_log(f"OK -> {path}")
+        self._draw_preview()
+        self._draw_preview_3d()
+
+    def _on_error(self, message: str) -> None:
+        self._append_log(f"ERRORE: {message}")
+
+    def _on_cad3d_generated(self, path: str) -> None:
+        self._append_log(f"OK (3D) -> {path}")
+        self.label_3d_status.setText(f"Modello STEP aggiornato: {path}")
+        self._show_generated_mesh(Path(path))
+
+    def _on_cad3d_error(self, message: str) -> None:
+        self._append_log(f"ERRORE 3D: {message}")
+
+    def _on_cad3d_warning(self, message: str) -> None:
+        """Annotazione non applicata: il modello c'e' comunque, ma va detto."""
+        self._append_log(f"ATTENZIONE 3D: {message}")
+
+    # ── Tab 4: Anteprima ───────────────────────────────────────────
+
+    def _build_preview_tab(self) -> QWidget:
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.addWidget(QLabel("Anteprima 2D (silkscreen + pad, scala fissa, con quote):"))
+        header.addStretch()
+        btn_pinout = QPushButton("Tabella pinout...")
+        btn_pinout.clicked.connect(self._show_pinout_dialog)
+        header.addWidget(btn_pinout)
+        self.chk_grid = QCheckBox("Griglia")
+        self.chk_grid.setChecked(bool(self._config.get("show_grid", True)))
+        self.chk_grid.toggled.connect(self._on_grid_toggled)
+        header.addWidget(self.chk_grid)
+
+        self.combo_grid_unit = QComboBox()
+        # Il passo da 0.1" (2.54mm) e' quello dei componenti THT standard: con
+        # quella griglia i pad cadono esattamente sulle intersezioni.
+        self.combo_grid_unit.addItem("1 mm", "mm")
+        self.combo_grid_unit.addItem("0.1 in (2.54 mm)", "inch")
+        index = self.combo_grid_unit.findData(self._config.get("grid_unit", "mm"))
+        self.combo_grid_unit.setCurrentIndex(max(index, 0))
+        self.combo_grid_unit.setEnabled(self.chk_grid.isChecked())
+        self.combo_grid_unit.currentIndexChanged.connect(self._on_grid_unit_changed)
+        header.addWidget(self.combo_grid_unit)
+        outer.addLayout(header)
+
+        self.preview_scene = QGraphicsScene()
+        self.preview_view = QGraphicsView(self.preview_scene)
+        self.preview_view.setMinimumHeight(500)
+        self.preview_view.setRenderHints(self.preview_view.renderHints())
+        outer.addWidget(self.preview_view)
+
+        return tab
+
+    def _show_pinout_dialog(self) -> None:
+        PinoutDialog(self.pinout, self._component_name(), self).exec()
+
+    # ── Tab 5: Modello 3D ──────────────────────────────────────────
+
+    def _build_3d_tab(self) -> QWidget:
+        # Il contenuto (anteprima + annotazioni + pulsanti) supera in altezza la
+        # finestra: senza QScrollArea i pulsanti in fondo restano tagliati fuori.
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setSpacing(8)
+
+        header = QHBoxLayout()
+        self.chk_pin_numbers = QCheckBox("Numeri pin (vista da sotto)")
+        self.chk_pin_numbers.setToolTip(
+            "I numeri compaiono solo guardando il componente dal lato dei piedini: "
+            "usa il pulsante \"Sotto\" o ruota la vista sotto il piano della scheda."
+        )
+        self.chk_pin_numbers.setChecked(bool(self._config.get("show_pin_numbers_3d", True)))
+        self.chk_pin_numbers.toggled.connect(self._on_pin_numbers_toggled)
+        header.addWidget(self.chk_pin_numbers)
+
+        # Il pulsante compare solo con i numeri attivi: e' li' che serve sapere
+        # a quale funzione corrisponde il numero letto sul piedino.
+        self.btn_pinout_3d = QPushButton("Tabella pinout...")
+        self.btn_pinout_3d.clicked.connect(self._show_pinout_dialog)
+        self.btn_pinout_3d.setVisible(self.chk_pin_numbers.isChecked())
+        header.addWidget(self.btn_pinout_3d)
+        header.addStretch()
+        outer.addLayout(header)
+
+        outer.addWidget(QLabel(
+            "Anteprima 3D (ruotabile col mouse) -- dopo la generazione mostra il "
+            "solido reale con fillet e serigrafie:"
+        ))
+        self.preview_3d = Preview3DVtk()
+        self.preview_3d.show_pin_numbers = self.chk_pin_numbers.isChecked()
+        self.preview_3d.setMinimumHeight(320)
+        outer.addWidget(self.preview_3d)
+
+        view_row = QHBoxLayout()
+        view_row.addWidget(QLabel("Vista:"))
+        for label, key in (
+            ("Iso", "iso"), ("Sopra", "top"), ("Sotto", "bottom"),
+            ("Fronte", "front"), ("Retro", "back"),
+            ("Sinistra", "left"), ("Destra", "right"),
+        ):
+            button = QPushButton(label)
+            button.clicked.connect(lambda _, k=key: self.preview_3d.show_view(k))
+            view_row.addWidget(button)
+        btn_fit = QPushButton("Centra")
+        btn_fit.clicked.connect(self.preview_3d.fit_view)
+        view_row.addWidget(btn_fit)
+        view_row.addStretch()
+        outer.addLayout(view_row)
+
+        self.label_3d_status = QLabel(
+            "Attiva \"Modello 3D\" nel tab \"Footprint 2D\" per vedere l'anteprima qui."
+        )
+        self.label_3d_status.setWordWrap(True)
+        self.label_3d_status.setStyleSheet(f"color: {TEXT}; font-style: italic;")
+        outer.addWidget(self.label_3d_status)
+
+        outer.addWidget(self._build_annotations_group())
+
+        regen_row = QHBoxLayout()
+        self.btn_regen_3d = QPushButton("Rigenera modello 3D (STEP) con queste annotazioni")
+        self.btn_regen_3d.setObjectName("primary")
+        self.btn_regen_3d.clicked.connect(self._regenerate_3d)
+        regen_row.addWidget(self.btn_regen_3d)
+        btn_open_3d = QPushButton("Apri cartella 3dshapes")
+        btn_open_3d.clicked.connect(self._open_3dshapes_dir)
+        regen_row.addWidget(btn_open_3d)
+        regen_row.addStretch()
+        outer.addLayout(regen_row)
+
+        scroll = QScrollArea()
+        scroll.setWidget(tab)
+        scroll.setWidgetResizable(True)
+        return scroll
+
+    def _on_pin_numbers_toggled(self, checked: bool) -> None:
+        self._config["show_pin_numbers_3d"] = checked
+        save_config(self._config)
+        self.preview_3d.set_pin_numbers(checked)
+        self.btn_pinout_3d.setVisible(checked)
+        # Ridisegna la vista corrente: mesh generata se c'e', altrimenti
+        # l'approssimazione dai parametri.
+        if self._last_mesh_path and Path(self._last_mesh_path).is_file():
+            try:
+                self.preview_3d.render_mesh(self._last_mesh_path)
+                return
+            except Exception as exc:  # noqa: BLE001 - si ricade sull'anteprima parametrica
+                self._append_log(f"Anteprima mesh non disponibile: {exc}")
+        self._draw_preview_3d()
+
+    def _open_3dshapes_dir(self) -> None:
+        shapes_dir = self._project_dir() / f"{self._component_name()}.3dshapes"
+        shapes_dir.mkdir(parents=True, exist_ok=True)
+        webbrowser.open(shapes_dir.as_uri())
+
+    def _regenerate_3d(self) -> None:
+        """Rigenera solo lo STEP con le annotazioni correnti (il footprint resta com'e')."""
+        if self._cad3d_worker is not None and self._cad3d_worker.isRunning():
+            return
+
+        body = self._current_body_params()
+        if body is None:
+            QMessageBox.information(
+                self, "Modello 3D non attivo",
+                "Attiva il gruppo \"Modello 3D\" nel tab \"Footprint 2D\" "
+                "e compila le dimensioni del corpo prima di generare."
+            )
+            return
+
+        try:
+            params = self._current_params()
+            params.validate()
+            body.validate()
+        except ValueError as exc:
+            self.label_3d_status.setText(f"Errore parametri: {exc}")
+            self._append_log(f"ERRORE 3D: {exc}")
+            return
+
+        self.btn_regen_3d.setEnabled(False)
+        self.btn_regen_3d.setText("Generazione in corso (FreeCAD)...")
+        self.label_3d_status.setText("Generazione STEP in corso tramite FreeCAD...")
+        self._append_log(
+            f"Rigenerazione 3D {params.name}: {len(self.fillet_annotations)} fillet, "
+            f"{len(self.face_text_annotations)} testi incisi"
+        )
+
+        self._cad3d_worker = Cad3DWorker(
+            params, body, self._project_dir(),
+            list(self.fillet_annotations), list(self.face_text_annotations),
+        )
+        self._cad3d_worker.done.connect(self._on_regen_3d_done)
+        self._cad3d_worker.warning.connect(self._on_cad3d_warning)
+        self._cad3d_worker.error.connect(self._on_regen_3d_error)
+        self._cad3d_worker.finished.connect(self._on_regen_3d_finished)
+        self._cad3d_worker.start()
+
+    def _on_regen_3d_finished(self) -> None:
+        self.btn_regen_3d.setEnabled(True)
+        self.btn_regen_3d.setText("Rigenera modello 3D (STEP) con queste annotazioni")
+
+    def _on_regen_3d_done(self, path: str) -> None:
+        self._append_log(f"OK (3D) -> {path}")
+        self.label_3d_status.setText(f"Modello STEP aggiornato: {path}")
+        self._show_generated_mesh(Path(path))
+
+    def _show_generated_mesh(self, step_path: Path) -> None:
+        """Mostra in anteprima la mesh del solido appena generato (fillet e testo inclusi)."""
+        mesh_path = step_path.with_suffix("").with_suffix(".preview.json")
+        if not mesh_path.is_file():
+            mesh_path = step_path.parent / f"{step_path.stem}.preview.json"
+        if not mesh_path.is_file():
+            return
+        try:
+            self.preview_3d.render_mesh(mesh_path)
+            self._last_mesh_path = mesh_path
+            self.label_3d_status.setText(
+                f"{self.label_3d_status.text()}\n"
+                "Anteprima aggiornata con la geometria reale esportata (fillet e testo inclusi)."
+            )
+        except Exception as exc:  # noqa: BLE001 - anteprima non critica
+            self._append_log(f"Anteprima mesh non disponibile: {exc}")
+
+    def _on_regen_3d_error(self, message: str) -> None:
+        self._append_log(f"ERRORE 3D: {message}")
+        self.label_3d_status.setText(f"Generazione STEP fallita: {message.splitlines()[0]}")
+
+    def _build_annotations_group(self) -> QGroupBox:
+        group = QGroupBox(
+            "Annotazioni per il modello 3D (fillet su spigoli, testo inciso su facce) "
+            "-- rivedi la lista prima di generare"
+        )
+        layout = QVBoxLayout(group)
+
+        fillet_row = QHBoxLayout()
+        fillet_row.addWidget(QLabel("Spigolo:"))
+        self.combo_fillet_edge = QComboBox()
+        self.combo_fillet_edge.addItems(EDGE_NAMES)
+        fillet_row.addWidget(self.combo_fillet_edge)
+        fillet_row.addWidget(QLabel("Raggio:"))
+        self.spin_fillet_radius = QDoubleSpinBox()
+        self.spin_fillet_radius.setRange(0.05, 20.0)
+        self.spin_fillet_radius.setDecimals(2)
+        self.spin_fillet_radius.setSuffix(" mm")
+        self.spin_fillet_radius.setValue(0.5)
+        fillet_row.addWidget(self.spin_fillet_radius)
+        btn_add_fillet = QPushButton("Aggiungi fillet")
+        btn_add_fillet.clicked.connect(self._add_fillet_annotation)
+        fillet_row.addWidget(btn_add_fillet)
+        fillet_row.addStretch()
+        layout.addLayout(fillet_row)
+
+        text_row = QHBoxLayout()
+        text_row.addWidget(QLabel("Faccia:"))
+        self.combo_text_face = QComboBox()
+        self.combo_text_face.addItems(FACE_NAMES)
+        text_row.addWidget(self.combo_text_face)
+        text_row.addWidget(QLabel("Testo da incidere:"))
+        self.field_annotation_text = QLineEdit()
+        self.field_annotation_text.setPlaceholderText("scrivi qui (es. TEL8WI)")
+        self.field_annotation_text.setMinimumWidth(180)
+        self.field_annotation_text.setStyleSheet(
+            f"border: 1px solid {BLUE}; background: {SURFACE0};"
+        )
+        text_row.addWidget(self.field_annotation_text, 1)
+        text_row.addWidget(QLabel("Dim.:"))
+        self.spin_text_size = QDoubleSpinBox()
+        self.spin_text_size.setRange(0.5, 30.0)
+        self.spin_text_size.setDecimals(2)
+        self.spin_text_size.setSuffix(" mm")
+        self.spin_text_size.setValue(2.0)
+        text_row.addWidget(self.spin_text_size)
+        text_row.addWidget(QLabel("Spessore:"))
+        self.spin_text_depth = QDoubleSpinBox()
+        self.spin_text_depth.setRange(0.02, 5.0)
+        self.spin_text_depth.setDecimals(2)
+        self.spin_text_depth.setSuffix(" mm")
+        self.spin_text_depth.setValue(0.06)
+        self.spin_text_depth.setToolTip("Spessore dello strato di vernice serigrafata")
+        text_row.addWidget(self.spin_text_depth)
+        text_row.addWidget(QLabel("Colore:"))
+        self.field_text_color = QLineEdit("#ffffff")
+        self.field_text_color.setMaximumWidth(90)
+        self.field_text_color.setToolTip("Colore della scritta, formato #rrggbb")
+        text_row.addWidget(self.field_text_color)
+        btn_add_text = QPushButton("Aggiungi testo")
+        btn_add_text.clicked.connect(self._add_text_annotation)
+        text_row.addWidget(btn_add_text)
+        layout.addLayout(text_row)
+
+        self.table_annotations = QTableWidget(0, 3)
+        self.table_annotations.setHorizontalHeaderLabels(["Tipo", "Target", "Dettagli"])
+        self.table_annotations.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table_annotations.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table_annotations.setMinimumHeight(120)
+        layout.addWidget(self.table_annotations)
+
+        btn_remove = QPushButton("Rimuovi annotazione selezionata")
+        btn_remove.clicked.connect(self._remove_selected_annotation)
+        layout.addWidget(btn_remove)
+
+        return group
+
+    def _refresh_annotations_table(self) -> None:
+        rows = (
+            [("Fillet", f.edge, f"raggio {f.radius_mm:.2f} mm") for f in self.fillet_annotations]
+            + [
+                (
+                    "Serigrafia", t.face,
+                    f"\"{t.text}\", {t.size_mm:.2f}mm, spessore {t.thickness_mm:.2f}mm, {t.color_hex}",
+                )
+                for t in self.face_text_annotations
+            ]
+        )
+        self.table_annotations.setRowCount(len(rows))
+        for i, (tipo, target, dettagli) in enumerate(rows):
+            self.table_annotations.setItem(i, 0, QTableWidgetItem(tipo))
+            self.table_annotations.setItem(i, 1, QTableWidgetItem(target))
+            self.table_annotations.setItem(i, 2, QTableWidgetItem(dettagli))
+
+    def _add_fillet_annotation(self) -> None:
+        ann = EdgeFilletAnnotation(edge=self.combo_fillet_edge.currentText(), radius_mm=self.spin_fillet_radius.value())
+        try:
+            ann.validate()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Fillet non valido", str(exc))
+            return
+        self.fillet_annotations.append(ann)
+        self._refresh_annotations_table()
+
+    def _add_text_annotation(self) -> None:
+        ann = FaceTextAnnotation(
+            face=self.combo_text_face.currentText(),
+            text=self.field_annotation_text.text().strip(),
+            size_mm=self.spin_text_size.value(),
+            thickness_mm=self.spin_text_depth.value(),
+            color_hex=self.field_text_color.text().strip(),
+        )
+        try:
+            ann.validate()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Testo non valido", str(exc))
+            return
+        self.face_text_annotations.append(ann)
+        self.field_annotation_text.clear()
+        self._refresh_annotations_table()
+
+    def _remove_selected_annotation(self) -> None:
+        row = self.table_annotations.currentRow()
+        if row < 0:
+            return
+        n_fillets = len(self.fillet_annotations)
+        if row < n_fillets:
+            del self.fillet_annotations[row]
+        else:
+            del self.face_text_annotations[row - n_fillets]
+        self._refresh_annotations_table()
+
+    def _current_system_prompt(self) -> str | None:
+        """Prompt globale da usare per l'estrazione: None se e' quello di default."""
+        text = (self._config.get("system_prompt") or "").strip()
+        if not text or text == DEFAULT_SYSTEM_PROMPT.strip():
+            return None
+        return text
+
+    def _on_grid_toggled(self, checked: bool) -> None:
+        self._config["show_grid"] = checked
+        save_config(self._config)
+        self.combo_grid_unit.setEnabled(checked)
+        self._draw_preview()
+
+    def _on_grid_unit_changed(self) -> None:
+        self._config["grid_unit"] = self.combo_grid_unit.currentData()
+        save_config(self._config)
+        self._draw_preview()
+
+    def _draw_grid(self, mm_to_px: float, width: float, height: float, margin: float) -> None:
+        """Griglia di riferimento, con passo in mm o in decimi di pollice.
+
+        Una linea marcata ogni 5 passi fa da riferimento grosso (5mm oppure
+        mezzo pollice), le altre sono sottili.
+        """
+        step = 2.54 if self.combo_grid_unit.currentData() == "inch" else 1.0
+
+        minor = QPen(QColor(SURFACE1))
+        minor.setWidthF(0.5)
+        major = QPen(QColor(SURFACE2))
+        major.setWidthF(1.0)
+
+        pad = margin + 2.0
+        i_min, i_max = math.floor(-pad / step), math.ceil((width + pad) / step)
+        j_min, j_max = math.floor(-pad / step), math.ceil((height + pad) / step)
+
+        for i in range(i_min, i_max + 1):
+            pen = major if i % 5 == 0 else minor
+            x = i * step * mm_to_px
+            line = self.preview_scene.addLine(
+                x, j_min * step * mm_to_px, x, j_max * step * mm_to_px, pen
+            )
+            line.setZValue(-10)  # dietro pad, silkscreen e quote
+        for j in range(j_min, j_max + 1):
+            pen = major if j % 5 == 0 else minor
+            y = j * step * mm_to_px
+            line = self.preview_scene.addLine(
+                i_min * step * mm_to_px, y, i_max * step * mm_to_px, y, pen
+            )
+            line.setZValue(-10)
+
+    def _draw_preview(self) -> None:
+        if self._last_params is None:
+            return
+        p = self._last_params
+        self.preview_scene.clear()
+
+        mm_to_px = 20.0
+        margin = 1.0
+        row_spacing = p.effective_row_spacing()
+        width = (p.cols - 1) * p.pitch
+        height = (p.rows - 1) * row_spacing
+
+        if self.chk_grid.isChecked():
+            self._draw_grid(mm_to_px, width, height, margin)
+
+        silk_pen = QPen(QColor(TEXT))
+        silk_pen.setWidthF(1.5)
+        self.preview_scene.addRect(
+            -margin * mm_to_px, -margin * mm_to_px,
+            (width + 2 * margin) * mm_to_px, (height + 2 * margin) * mm_to_px,
+            silk_pen,
+        )
+
+        pad_pen = QPen(QColor(SURFACE1))
+        pad_brush = QBrush(QColor(BLUE))
+
+        # Stessa funzione usata dal generatore 2D e da quello 3D: l'anteprima non
+        # deve poter divergere dal footprint realmente prodotto (e cosi' rispetta
+        # anche la mappa esplicita dei pin letta dal datasheet).
+        xs_px, ys_px = [], []
+        r = (p.pad_diameter / 2) * mm_to_px
+        for pin, x_mm, y_mm in pin_positions(p):
+            x, y = x_mm * mm_to_px, y_mm * mm_to_px
+            xs_px.append(x)
+            ys_px.append(y)
+
+            if pin == 1:
+                item: QGraphicsRectItem | QGraphicsEllipseItem = QGraphicsRectItem(
+                    x - r, y - r, 2 * r, 2 * r
+                )
+            else:
+                item = QGraphicsEllipseItem(x - r, y - r, 2 * r, 2 * r)
+            item.setPen(pad_pen)
+            item.setBrush(pad_brush)
+            self.preview_scene.addItem(item)
+
+            # Numero del pin sul pad: scuro sul blu del pad, e insieme alla
+            # tabella pinout rende verificabile la corrispondenza con il
+            # datasheet senza aprire KiCad.
+            number = self.preview_scene.addSimpleText(str(pin))
+            number.setBrush(QBrush(QColor(BASE)))
+            font = number.font()
+            font.setPointSizeF(max(6.0, r * 0.55))
+            font.setBold(True)
+            number.setFont(font)
+            number_rect = number.boundingRect()
+            number.setPos(x - number_rect.width() / 2, y - number_rect.height() / 2)
+            number.setZValue(5)
+
+        left = -margin * mm_to_px
+        right = (width + margin) * mm_to_px
+        top = -margin * mm_to_px
+        bottom = (height + margin) * mm_to_px
+
+        # Quota vicina al componente: passo (in alto) e distanza righe (a sinistra)
+        if p.cols >= 2:
+            self._add_dim_h(0, p.pitch * mm_to_px, top - 20, f"passo {p.pitch:.2f} mm")
+        if p.rows >= 2:
+            self._add_dim_v(0, row_spacing * mm_to_px, left - 20, f"righe {row_spacing:.2f} mm")
+
+        # Catena di quote: margine sinistro / span pin / margine destro (sotto)
+        if xs_px:
+            leftmost_x, rightmost_x = min(xs_px), max(xs_px)
+            chain_y = bottom + 25
+            if leftmost_x - left > 1:
+                self._add_dim_h(left, leftmost_x, chain_y, f"{(leftmost_x - left) / mm_to_px:.2f} mm")
+            if rightmost_x - leftmost_x > 1:
+                self._add_dim_h(leftmost_x, rightmost_x, chain_y, f"{(rightmost_x - leftmost_x) / mm_to_px:.2f} mm")
+            if right - rightmost_x > 1:
+                self._add_dim_h(rightmost_x, right, chain_y, f"{(right - rightmost_x) / mm_to_px:.2f} mm")
+
+        # Catena di quote: margine superiore / span pin / margine inferiore (a destra)
+        if ys_px:
+            topmost_y, bottommost_y = min(ys_px), max(ys_px)
+            chain_x = right + 25
+            if topmost_y - top > 1:
+                self._add_dim_v(top, topmost_y, chain_x, f"{(topmost_y - top) / mm_to_px:.2f} mm")
+            if bottommost_y - topmost_y > 1:
+                self._add_dim_v(topmost_y, bottommost_y, chain_x, f"{(bottommost_y - topmost_y) / mm_to_px:.2f} mm")
+            if bottom - bottommost_y > 1:
+                self._add_dim_v(bottommost_y, bottom, chain_x, f"{(bottom - bottommost_y) / mm_to_px:.2f} mm")
+
+        # Quote totali (piu' lontane): larghezza/altezza silkscreen
+        self._add_dim_h(left, right, bottom + 60, f"totale {width + 2 * margin:.2f} mm")
+        self._add_dim_v(top, bottom, right + 60, f"totale {height + 2 * margin:.2f} mm")
+
+        self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
+        self.preview_view.fitInView(self.preview_scene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+    def _add_dim_h(self, x1: float, x2: float, y: float, text: str) -> None:
+        """Disegna una linea di quota orizzontale con tacche e testo centrato."""
+        pen = QPen(QColor(YELLOW))
+        pen.setWidthF(1.0)
+        tick = 5
+        self.preview_scene.addLine(x1, y - tick, x1, y + tick, pen)
+        self.preview_scene.addLine(x2, y - tick, x2, y + tick, pen)
+        self.preview_scene.addLine(x1, y, x2, y, pen)
+        label = self.preview_scene.addSimpleText(text)
+        label.setBrush(QBrush(QColor(YELLOW)))
+        label.setPos((x1 + x2) / 2 - label.boundingRect().width() / 2, y - 18)
+
+    def _add_dim_v(self, y1: float, y2: float, x: float, text: str) -> None:
+        """Disegna una linea di quota verticale con tacche e testo ruotato.
+
+        Il testo corre lungo la quota (come nei disegni tecnici): scritto in
+        orizzontale, le etichette di quote verticali vicine tra loro -- catena
+        dei margini e quota totale -- finivano una sopra l'altra.
+        """
+        pen = QPen(QColor(YELLOW))
+        pen.setWidthF(1.0)
+        tick = 5
+        self.preview_scene.addLine(x - tick, y1, x + tick, y1, pen)
+        self.preview_scene.addLine(x - tick, y2, x + tick, y2, pen)
+        self.preview_scene.addLine(x, y1, x, y2, pen)
+
+        label = self.preview_scene.addSimpleText(text)
+        label.setBrush(QBrush(QColor(YELLOW)))
+        label.setRotation(-90)
+        # Ruotando di -90 attorno all'origine, il testo si estende verso l'alto
+        # (altezza -> larghezza): si riposiziona per centrarlo sulla quota.
+        rect = label.boundingRect()
+        label.setPos(x + 6, (y1 + y2) / 2 + rect.width() / 2)
+
+    def _draw_preview_3d(self) -> None:
+        body = self._current_body_params()
+        if body is None:
+            self.preview_3d.clear_preview()
+            self.label_3d_status.setText(
+                "Attiva \"Modello 3D\" nel tab \"Footprint 2D\" per vedere l'anteprima qui."
+            )
+            return
+
+        try:
+            params = self._current_params()
+            params.validate()
+            self.preview_3d.render_params(params, body)
+        except ValueError as exc:
+            self.preview_3d.clear_preview()
+            self.label_3d_status.setText(f"Errore parametri: {exc}")
+            return
+
+        self.label_3d_status.setText(
+            "Anteprima approssimata (poligoni, per farsi un'idea dell'ingombro). "
+            "Premi \"Genera footprint\" per ottenere il modello .step esatto via FreeCAD."
+        )
+
+    # ── Cambio tab ─────────────────────────────────────────────────
+
+    def _on_tab_changed(self, index: int) -> None:
+        if index == 0:
+            self._refresh_docs_list()
+        elif index == 2:
+            self._update_summary()
+        elif index == 3:
+            self._draw_preview()
+        elif index == 4:
+            self._draw_preview_3d()
+
+
+def main() -> None:
+    app = QApplication(sys.argv)
+    app.setStyleSheet(APP_QSS)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

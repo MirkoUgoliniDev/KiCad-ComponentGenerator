@@ -1,0 +1,17 @@
+# Modulo 2D (footprint generator) - nessuna dipendenza esterna, solo stdlib.
+
+# Modulo GUI
+PyQt6
+Pillow
+opencv-python
+
+# Anteprima 3D interattiva (VTK): z-buffer reale, vista ruotabile col mouse
+pyvista
+pyvistaqt
+
+# Estrazione parametri da datasheet via API Claude (richiede ANTHROPIC_API_KEY)
+anthropic
+python-dotenv
+
+# Test
+pytest
