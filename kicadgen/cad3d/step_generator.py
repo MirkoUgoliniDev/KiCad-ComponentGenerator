@@ -60,6 +60,52 @@ def clamp_component_position(
     return max(-half_x, min(half_x, x)), max(-half_y, min(half_y, y))
 
 
+#: Sovrapposizione minima, su entrambi gli assi, perche' due componenti
+#: contino come sovrapposti (non solo adiacenti/a contatto).
+OVERLAP_TOLERANCE_MM = 0.05
+
+
+def find_overlapping_components(components: list) -> list[str]:
+    """Coppie di componenti le cui sagome (gia' clampate, gia' ruotate) si
+    sovrappongono, come avvisi pronti per il log.
+
+    Le posizioni vengono dalla stima dell'estrazione, presa componente per
+    componente: nulla impedisce a due stime indipendenti di finire una
+    sopra l'altra. Non si tenta di risolverlo spostando qualcosa (sarebbe
+    una scelta arbitraria, non geometria) -- si segnala la coppia, cosi'
+    si corregge nella tabella componenti invece di scoprirlo solo nel
+    modello 3D finito.
+
+    Le rotazioni ammesse sono multipli di 90 gradi, quindi il rettangolo
+    ruotato resta sempre allineato agli assi: il confronto tra bounding box
+    e' esatto, non un'approssimazione.
+    """
+    boxes = []
+    for component in components:
+        rotation = float(component.get("rotation_deg") or 0.0)
+        length = float(component["length_mm"])
+        width = float(component["width_mm"])
+        fx = width if rotation % 180 == 90 else length
+        fy = length if rotation % 180 == 90 else width
+        x, y = float(component["x"]), float(component["y"])
+        boxes.append((component.get("name", "?"), x - fx / 2, x + fx / 2, y - fy / 2, y + fy / 2))
+
+    warnings = []
+    for i in range(len(boxes)):
+        name_a, ax0, ax1, ay0, ay1 = boxes[i]
+        for j in range(i + 1, len(boxes)):
+            name_b, bx0, bx1, by0, by1 = boxes[j]
+            overlap_x = min(ax1, bx1) - max(ax0, bx0)
+            overlap_y = min(ay1, by1) - max(ay0, by0)
+            if overlap_x > OVERLAP_TOLERANCE_MM and overlap_y > OVERLAP_TOLERANCE_MM:
+                warnings.append(
+                    f"componenti sovrapposti: '{name_a}' e '{name_b}' "
+                    f"({overlap_x:.2f}x{overlap_y:.2f}mm in comune) -- correggi "
+                    "posizione o rotazione nella tabella componenti."
+                )
+    return warnings
+
+
 def _hex_to_rgb(color: str) -> tuple[float, float, float]:
     try:
         h = color.lstrip("#")
@@ -272,7 +318,13 @@ def generate_castellated_3d_model(
             "color_hex": params.component_color_hex,
         })
 
-    return _run_freecad(
+    # Rilevato PRIMA di chiamare FreeCAD: e' un controllo geometrico sui dati
+    # gia' pronti, non serve costruire il solido per accorgersene, e cosi'
+    # l'avviso arriva anche se la sovrapposizione manda in errore una delle
+    # forme (fillet/taglio che si scontrano) piu' avanti nello script.
+    overlap_warnings = find_overlapping_components(components)
+
+    result = _run_freecad(
         params.name, [], pcb, output_dir,
         freecadcmd_path=freecadcmd_path, fillets=fillets, face_texts=face_texts,
         font_file=font_file, notches=notches, extra_boxes=extra_boxes,
@@ -285,6 +337,8 @@ def generate_castellated_3d_model(
             "components": components,
         },
     )
+    result["warnings"] = overlap_warnings + result["warnings"]
+    return result
 
 def generate_3d_model(
     pin_params: PinHeaderParams,

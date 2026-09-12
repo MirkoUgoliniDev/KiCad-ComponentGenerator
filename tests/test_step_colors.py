@@ -12,7 +12,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 
-from kicadgen.cad3d.step_generator import clamp_component_position, colorize_step
+from kicadgen.cad3d.step_generator import (
+    clamp_component_position, colorize_step, find_overlapping_components,
+)
 from kicadgen.services.datasheet_extractor import COMPONENT_KINDS, _params_from_tool_arguments
 
 FAKE_STEP = (
@@ -132,3 +134,57 @@ def test_clamp_never_produces_a_positive_half_width_below_zero():
         body_length=10.0, body_width=10.0,
     )
     assert x == 0.0 and y == 0.0
+
+
+# ── Rilevamento componenti sovrapposti ───────────────────────────────
+
+def test_non_overlapping_components_produce_no_warning():
+    components = [
+        {"name": "R1", "x": 0.0, "y": 0.0, "length_mm": 1.6, "width_mm": 0.8, "rotation_deg": 0.0},
+        {"name": "R2", "x": 5.0, "y": 0.0, "length_mm": 1.6, "width_mm": 0.8, "rotation_deg": 0.0},
+    ]
+    assert find_overlapping_components(components) == []
+
+
+def test_overlapping_components_are_reported_by_name():
+    """Il caso reale: un diodo la cui stima di posizione lo fa cadere
+    sopra un altro componente vicino."""
+    components = [
+        {"name": "D1", "x": 18.0, "y": -4.5, "length_mm": 2.0, "width_mm": 0.9, "rotation_deg": 90.0},
+        {"name": "R3", "x": 18.5, "y": -4.5, "length_mm": 1.6, "width_mm": 0.8, "rotation_deg": 0.0},
+    ]
+    warnings = find_overlapping_components(components)
+    assert len(warnings) == 1
+    assert "D1" in warnings[0] and "R3" in warnings[0]
+
+
+def test_components_only_touching_at_the_edge_do_not_count_as_overlapping():
+    """Adiacenti ma non sovrapposti: normale su una scheda densa, non un errore."""
+    components = [
+        {"name": "R1", "x": 0.0, "y": 0.0, "length_mm": 1.6, "width_mm": 0.8, "rotation_deg": 0.0},
+        {"name": "R2", "x": 1.6, "y": 0.0, "length_mm": 1.6, "width_mm": 0.8, "rotation_deg": 0.0},
+    ]
+    assert find_overlapping_components(components) == []
+
+
+def test_overlap_check_accounts_for_rotation():
+    """Senza tener conto della rotazione, un componente ruotato di 90 gradi
+    (ingombro stretto su X) sembrerebbe sovrapporsi a un vicino che in
+    realta' e' fuori dal suo ingombro reale."""
+    components = [
+        # Se preso orizzontale (8x1) si sovrappone al vicino a x=5; ruotato
+        # a 90 gradi (ingombro 1x8 su X/Y) non lo tocca.
+        {"name": "Long", "x": 0.0, "y": 0.0, "length_mm": 8.0, "width_mm": 1.0, "rotation_deg": 90.0},
+        {"name": "Near", "x": 5.0, "y": 0.0, "length_mm": 1.6, "width_mm": 0.8, "rotation_deg": 0.0},
+    ]
+    assert find_overlapping_components(components) == []
+
+
+def test_three_way_overlap_reports_every_pair():
+    components = [
+        {"name": "A", "x": 0.0, "y": 0.0, "length_mm": 2.0, "width_mm": 2.0, "rotation_deg": 0.0},
+        {"name": "B", "x": 0.5, "y": 0.0, "length_mm": 2.0, "width_mm": 2.0, "rotation_deg": 0.0},
+        {"name": "C", "x": 0.5, "y": 0.5, "length_mm": 2.0, "width_mm": 2.0, "rotation_deg": 0.0},
+    ]
+    warnings = find_overlapping_components(components)
+    assert len(warnings) == 3  # A-B, A-C, B-C
