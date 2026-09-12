@@ -805,24 +805,46 @@ def _extract_photo_components(
 ) -> Optional[list[dict]]:
     """Secondo passaggio: analizza le foto a tile, indipendentemente dal datasheet."""
     groups: list[list[dict]] = []
-    photo_count = sum(
-        1 for path in doc_paths
+    photo_paths = [
+        path for path in doc_paths
         if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
-    )
-    processed_photos = 0
-    for path in doc_paths:
-        if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
-            continue
+    ]
+    photo_count = len(photo_paths)
+    photo_candidates = []
+    for path in photo_paths:
         tiles = _photo_tiles(path, body_length, body_width)
-        processed_photos += 1
-        if not tiles:
-            if progress:
-                progress(f"Foto {path.name}: PCB non riconosciuta, crop saltati.")
-            continue
+        if tiles:
+            # La migliore vista per l'inventario è quella con più pixel reali
+            # sulla PCB. Le altre possono essere la vista inferiore, laterale
+            # o una seconda illustrazione della stessa scheda: sommarle crea
+            # duplicati e porta facilmente a 100+ componenti fantasma.
+            try:
+                import cv2
+                from .photo_refine import find_board
+                image = cv2.imread(str(path))
+                frame = find_board(image, body_length, body_width) if image is not None else None
+                board_area = frame.width_px * frame.height_px if frame else 0
+            except ImportError:
+                board_area = 0
+            photo_candidates.append((board_area, path, tiles))
+    if not photo_candidates:
+        if progress and photo_count:
+            progress("Nessuna foto superiore utilizzabile per l'analisi a crop.")
+        return None
+    _, selected_path, selected_tiles = max(photo_candidates, key=lambda item: item[0])
+    if progress:
+        progress(
+            f"Inventario componenti: scelta la vista superiore {selected_path.name} "
+            f"tra {photo_count} immagini; le altre non verranno sommate."
+        )
+    photo_paths = [selected_path]
+    groups: list[list[dict]] = []
+    for path in photo_paths:
+        tiles = selected_tiles
         if progress:
             progress(
                 f"Foto {path.name}: PCB riconosciuta, {len(tiles)} crop sovrapposti "
-                f"({processed_photos}/{photo_count})."
+                f"(vista selezionata)."
             )
         for index, (metadata, data_url) in enumerate(tiles, start=1):
             if progress:
@@ -837,7 +859,10 @@ def _extract_photo_components(
                 "quelle del modulo completo, con origine al centro: il crop copre "
                 f"x={metadata['x0_mm']}..{metadata['x1_mm']} mm e "
                 f"y={metadata['y0_mm']}..{metadata['y1_mm']} mm. "
-                "Non inventare componenti fuori da questa zona. Prima conta gli "
+                "Non contare piazzole, pad, vie, fori castellated, contatti del bordo, "
+                "serigrafia o connettori disegnati: conta solo componenti realmente "
+                "montati sopra la PCB. Non duplicare lo stesso componente. Non inventare "
+                "componenti fuori da questa zona. Prima conta gli "
                 "elementi, poi elencali tutti; una lista vuota è ammessa solo se "
                 "non c'è davvero alcun componente. Rispondi chiamando lo strumento."
             )
@@ -1060,6 +1085,17 @@ def _components_3d(raw: Optional[Sequence[dict]]) -> Optional[list[dict]]:
                 "height_mm": float(entry["height_mm"]),
             }
         except (KeyError, TypeError, ValueError):
+            continue
+        # Il modello vede anche elementi della PCB che non sono componenti
+        # montati: pad, via, semi-fori e contatti del bordo. Se passano dallo
+        # schema, eliminarli qui evita che finiscano nella tabella 3D come
+        # scatole. I componenti reali devono avere un package sopra la scheda.
+        label = component["name"].strip().lower()
+        non_component_terms = (
+            "via", "pad", "piazzola", "terminal pad", "contact", "contatto",
+            "castellated", "semi-hole", "semiforo", "serigraphy", "serigrafia",
+        )
+        if any(term in label for term in non_component_terms):
             continue
         if min(component["length_mm"], component["width_mm"], component["height_mm"]) <= 0:
             continue

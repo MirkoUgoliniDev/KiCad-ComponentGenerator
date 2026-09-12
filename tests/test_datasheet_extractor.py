@@ -213,6 +213,21 @@ def test_components_that_are_not_objects_are_skipped_not_fatal():
     assert params.components_3d[0]["x_mm"] == 1
 
 
+def test_photo_inventory_discards_pads_and_vias():
+    params = _params_from_tool_arguments({
+        "layout": "castellated", "confidence": "low",
+        "castellated_sides": [{"edge": "left", "count": 2, "pitch_mm": 2.54}],
+        "components_3d": [
+            {"name": "via rotonda", "x_mm": 0, "y_mm": 0,
+             "length_mm": 1, "width_mm": 1, "height_mm": 0.1},
+            {"name": "R1", "kind": "resistor", "x_mm": 1, "y_mm": 1,
+             "length_mm": 1.6, "width_mm": 0.8, "height_mm": 0.5},
+        ],
+    })
+    assert len(params.components_3d) == 1
+    assert params.components_3d[0]["name"] == "R1"
+
+
 def test_tiled_photo_components_are_deduplicated_and_enriched():
     groups = [
         [{"name": "R1", "kind": "resistor", "x_mm": 1, "y_mm": 2,
