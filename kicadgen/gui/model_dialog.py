@@ -15,8 +15,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QGuiApplication
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
@@ -27,6 +26,30 @@ from ..services.openrouter import ModelInfo, OpenRouterError, list_models
 
 #: Colonne della tabella.
 _COL_ID, _COL_NAME, _COL_IN, _COL_OUT, _COL_CTX = range(5)
+
+
+class _ModelsWorker(QThread):
+    """Scarica l'elenco modelli fuori dal thread grafico.
+
+    L'elenco e' circa un megabyte e il timeout arriva a 30 secondi: farlo
+    sul thread della GUI significherebbe una finestra congelata, senza
+    nemmeno il modo di annullare.
+    """
+
+    done = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+    def __init__(self, force_refresh: bool = False):
+        super().__init__()
+        self.force_refresh = force_refresh
+
+    def run(self) -> None:
+        try:
+            self.done.emit(list_models(force_refresh=self.force_refresh))
+        except OpenRouterError as exc:
+            self.error.emit(str(exc))
+        except Exception as exc:  # noqa: BLE001 - riportato nel dialogo
+            self.error.emit(f"Errore inatteso: {exc}")
 
 
 class _NumericItem(QTableWidgetItem):
@@ -65,6 +88,7 @@ class ModelPickerDialog(QDialog):
 
         self._models: list[ModelInfo] = []
         self._selected = current_model or ""
+        self._worker: Optional[_ModelsWorker] = None
 
         layout = QVBoxLayout(self)
 
@@ -112,10 +136,12 @@ class ModelPickerDialog(QDialog):
         options_row.addWidget(self.check_compatible)
         options_row.addStretch()
 
-        btn_refresh = QPushButton("Aggiorna elenco")
-        btn_refresh.setToolTip("Riscarica l'elenco da OpenRouter ignorando la cache locale.")
-        btn_refresh.clicked.connect(lambda: self._load_models(force_refresh=True))
-        options_row.addWidget(btn_refresh)
+        self.btn_refresh = QPushButton("Aggiorna elenco")
+        self.btn_refresh.setToolTip(
+            "Riscarica l'elenco da OpenRouter ignorando la cache locale."
+        )
+        self.btn_refresh.clicked.connect(lambda: self._load_models(force_refresh=True))
+        options_row.addWidget(self.btn_refresh)
         layout.addLayout(options_row)
 
         self.table = QTableWidget(0, 5)
@@ -144,25 +170,31 @@ class ModelPickerDialog(QDialog):
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
 
-        self._load_models()
         self._update_selected_label()
+        self._load_models()
 
     # ── Dati ────────────────────────────────────────────────────────
 
     def _load_models(self, force_refresh: bool = False) -> None:
-        error: Optional[str] = None
-        QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            self._models = list_models(force_refresh=force_refresh)
-        except OpenRouterError as exc:
-            error = str(exc)
-        finally:
-            QGuiApplication.restoreOverrideCursor()
-
-        if error is not None:
-            QMessageBox.warning(self, "Elenco modelli", error)
+        if self._worker is not None and self._worker.isRunning():
             return
+        self.label_selected.setText("Caricamento elenco modelli da OpenRouter...")
+        self.btn_refresh.setEnabled(False)
+
+        self._worker = _ModelsWorker(force_refresh)
+        self._worker.done.connect(self._on_models_loaded)
+        self._worker.error.connect(self._on_models_error)
+        self._worker.finished.connect(lambda: self.btn_refresh.setEnabled(True))
+        self._worker.start()
+
+    def _on_models_loaded(self, models: list) -> None:
+        self._models = models
         self._apply_filters()
+        self._update_selected_label()
+
+    def _on_models_error(self, message: str) -> None:
+        self._update_selected_label()
+        QMessageBox.warning(self, "Elenco modelli", message)
 
     def _visible_models(self) -> list[ModelInfo]:
         needle = self.field_search.text().strip().lower()
