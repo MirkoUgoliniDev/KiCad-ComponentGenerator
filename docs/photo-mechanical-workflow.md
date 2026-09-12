@@ -9,8 +9,11 @@ dai pixel, le altezze sono stime grossolane della classe visiva.
 
 1. Caricare una foto dall'alto e le eventuali viste quotate. I nuovi allegati sono
    selezionati con una spunta per default.
-2. Premere **Estrai parametri con AI**. Il log nel tab Progetto mostra sorgente,
-   localizzazioni, duplicati riconciliati, esclusioni e ingombri finali.
+2. Premere **Estrai parametri con AI**. Il pulsante **≡ Log AI** nel tab Progetto
+   apre una finestra modale con sorgente, localizzazioni, duplicati riconciliati,
+   esclusioni e ingombri finali. Il log si aggiorna anche mentre è aperto e resta
+   disponibile dopo la chiusura. Il pulsante **ⓘ** accanto alla cartella componente
+   apre le informazioni sulla cartella e sull'esportazione.
 3. Aprire **Confronta foto**: selezionare/spostare i rettangoli, modificarne quote,
    aggiungere o eliminare elementi. Annulla non modifica i dati; Applica aggiorna
    la tabella e invalida la vecchia anteprima, da rigenerare.

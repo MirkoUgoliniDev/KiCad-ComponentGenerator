@@ -44,6 +44,108 @@ def test_progress_is_visible_on_project_tab_and_literal(window):
     assert "<b>R1</b> & C1" in window.log_text.toPlainText()
 
 
+def test_startup_size_fits_available_screen(window):
+    available = window.screen().availableGeometry()
+    assert window.width() == min(1390, max(1, available.width() - 40))
+    assert window.height() == min(1050, max(1, available.height() - 40))
+
+
+def test_project_no_longer_has_bottom_ai_help(window):
+    assert not any(label.text().startswith("Spunta uno o piu' file in lista")
+                   for label in window.findChildren(QLabel))
+
+
+@pytest.mark.parametrize("action", ["Salva", "Annulla", "escape", "close"])
+def test_component_prompt_modal_save_and_cancel(window, action):
+    from PyQt6.QtCore import QTimer
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QPushButton
+    dialog = window.component_prompt_dialog
+    field = window.field_component_prompt
+    field.setPlainText("Originale\nNota personale")
+    assert field.parentWidget() is dialog
+    assert not dialog.isVisible()
+    assert dialog.isModal()
+    observed = []
+    def edit_and_finish():
+        observed.append(dialog.isVisible())
+        field.setPlainText("Modificato <testo>")
+        if action == "escape":
+            QTest.keyClick(dialog, Qt.Key.Key_Escape)
+        elif action == "close":
+            dialog.close()
+        else:
+            next(button for button in dialog.findChildren(QPushButton)
+                 if button.text() == action).click()
+    QTimer.singleShot(0, edit_and_finish)
+    window.btn_component_prompt.click()
+    assert observed == [True]
+    expected = "Modificato <testo>" if action == "Salva" else "Originale\nNota personale"
+    assert field.toPlainText() == expected
+    # Reopening keeps the committed value, even after a previous rejection.
+    QTimer.singleShot(0, dialog.reject)
+    window.btn_component_prompt.click()
+    assert field.toPlainText() == expected
+
+
+def test_project_info_is_only_in_modal(window):
+    from PyQt6.QtCore import QTimer
+    dialog = window.project_info_dialog
+    assert not dialog.isVisible()
+    notes = [label for label in dialog.findChildren(QLabel)
+             if "Il nome del componente" in label.text()]
+    assert len(notes) == 1
+    assert dialog.isModal()
+    observed = []
+    def close():
+        observed.append(dialog.isVisible())
+        dialog.accept()
+    QTimer.singleShot(0, close)
+    window.btn_project_info.click()
+    assert observed == [True]
+    assert not dialog.isVisible()
+
+
+def test_ai_log_modal_preserves_history_and_receives_live_updates(window):
+    from PyQt6.QtCore import QTimer
+    dialog = window.ai_log_dialog
+    assert window.ai_progress_text.parentWidget() is dialog
+    assert window.ai_progress_text.isReadOnly()
+    assert not dialog.isVisible()
+    assert dialog.isModal()
+    window._on_ai_progress("Prima dell'apertura")
+    observed = []
+    def update_and_close():
+        observed.append(dialog.isVisible())
+        window._on_ai_progress("Durante: <b>testo letterale</b>")
+        dialog.accept()
+    QTimer.singleShot(0, update_and_close)
+    window.btn_ai_log.click()
+    assert observed == [True]
+    window._on_ai_progress("Dopo la chiusura")
+    QTimer.singleShot(0, dialog.reject)
+    window.btn_ai_log.click()
+    text = window.ai_progress_text.toPlainText()
+    assert "Prima dell'apertura" in text
+    assert "Durante: <b>testo letterale</b>" in text
+    assert "Dopo la chiusura" in text
+
+
+def test_3d_viewport_is_not_inside_scrolling_settings(window):
+    from PyQt6.QtWidgets import QScrollArea, QSplitter
+    parent = window.preview_3d.parentWidget()
+    splitter = None
+    while parent is not None:
+        assert not isinstance(parent, QScrollArea)
+        if isinstance(parent, QSplitter):
+            splitter = parent
+            break
+        parent = parent.parentWidget()
+    assert splitter is not None
+    assert isinstance(splitter.widget(1), QScrollArea)
+    assert splitter.widget(1).widget() is not splitter.widget(0)
+
+
 def test_comparison_button_opens_valid_image_and_resets_on_next_result(window,monkeypatch):
     png = draw_inventory(np.full((80,160,3),40,np.uint8), [])
     params = ExtractedParams(name="",description="",tags="",confidence="medium",notes="",
@@ -226,8 +328,26 @@ def test_settings_pass_save_and_display_separate_vision_model(window, monkeypatc
     assert saved[0]["model"] == "vendor/new-datasheet"
     assert window._effective_model() == "vendor/session-datasheet"
     assert window._vision_model() == "vendor/new-photo"
-    assert window.label_vision_model.text() == "vendor/new-photo"
+    assert window.combo_vision_model.currentText() == "Default: vendor/new-photo"
     assert "Modello foto: vendor/new-photo" in window.log_text.toPlainText()
+
+
+def test_photo_model_selection_is_independent_and_can_return_to_default(window, monkeypatch):
+    window._config["vision_model"] = "vendor/default-photo"
+    window._session_model = "vendor/session-datasheet"
+    window._refresh_model_combo()
+    monkeypatch.setattr(gui, "pick_model", lambda *args, **kwargs: "vendor/session-photo")
+    window.btn_pick_vision_model.click()
+    assert window._vision_model() == "vendor/session-photo"
+    assert window._effective_model() == "vendor/session-datasheet"
+    assert window._config["vision_model"] == "vendor/default-photo"
+    assert window.combo_vision_model.currentData() == "vendor/session-photo"
+    monkeypatch.setattr(gui, "pick_model", lambda *args, **kwargs: None)
+    window.btn_pick_vision_model.click()
+    assert window._vision_model() == "vendor/session-photo"
+    window.combo_vision_model.setCurrentIndex(0)
+    assert window._vision_model() == "vendor/default-photo"
+    assert window._effective_model() == "vendor/session-datasheet"
 
 
 def test_vision_default_and_real_settings_interface(window):

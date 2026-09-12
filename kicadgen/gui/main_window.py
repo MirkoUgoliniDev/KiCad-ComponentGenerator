@@ -43,14 +43,14 @@ import sys
 import webbrowser
 from pathlib import Path
 
-from PyQt6.QtCore import QThread, pyqtSignal, Qt
-from PyQt6.QtGui import QBrush, QColor, QPen, QPixmap, QTextCursor
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QSize
+from PyQt6.QtGui import QBrush, QColor, QIcon, QPen, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QGraphicsEllipseItem, QGraphicsRectItem, QGraphicsScene,
     QGraphicsView, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QDialog, QListWidget, QMainWindow, QMessageBox, QPushButton, QScrollArea,
-    QSpinBox, QTableWidget, QTableWidgetItem, QListWidgetItem, QTabWidget, QTextEdit, QVBoxLayout,
+    QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QListWidgetItem, QTabWidget, QTextEdit, QVBoxLayout,
     QWidget,
 )
 
@@ -279,8 +279,12 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("KiCadGen-Tool")
-        self.resize(760, 780)
-        self.setMinimumSize(660, 700)
+        # Size requested for startup; reserve space for the native frame/taskbar.
+        screen = self.screen()
+        available = screen.availableGeometry() if screen is not None else None
+        self.resize(min(1390, max(1, available.width() - 40)) if available else 1390,
+                    min(1050, max(1, available.height() - 40)) if available else 1050)
+        self.setMinimumSize(min(660, self.width()), min(700, self.height()))
 
         self._worker: GenerateWorker | None = None
         self._extract_worker: ExtractWorker | None = None
@@ -299,6 +303,7 @@ class MainWindow(QMainWindow):
         # Modello scelto solo per questa sessione (datasheet difficile): non
         # viene salvato in config.json e si perde alla chiusura, per scelta.
         self._session_model: str | None = None
+        self._session_vision_model: str | None = None
 
         self._build_menu()
         self._build_central()
@@ -349,7 +354,7 @@ class MainWindow(QMainWindow):
     def _edit_llm_settings(self) -> None:
         dialog = LlmSettingsDialog(
             self._config["system_prompt"], self._default_model(), self,
-            current_vision_model=self._vision_model(),
+            current_vision_model=self._default_vision_model(),
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -380,7 +385,10 @@ class MainWindow(QMainWindow):
         return self._session_model or self._default_model()
 
     def _vision_model(self) -> str:
-        """Photo grounding uses its own configured model, never the session override."""
+        """Photo model has an independent session selection."""
+        return self._session_vision_model or self._default_vision_model()
+
+    def _default_vision_model(self) -> str:
         return (self._config.get("vision_model") or "").strip() or DEFAULTS["vision_model"]
 
     def _refresh_model_combo(self) -> None:
@@ -398,8 +406,29 @@ class MainWindow(QMainWindow):
         else:
             self.combo_model.setCurrentIndex(0)
         self.combo_model.blockSignals(blocked)
-        if hasattr(self, "label_vision_model"):
-            self.label_vision_model.setText(self._vision_model() or "Default del servizio foto")
+        if hasattr(self, "combo_vision_model"):
+            combo = self.combo_vision_model
+            blocked = combo.blockSignals(True)
+            combo.clear()
+            combo.addItem(f"Default: {self._default_vision_model()}", None)
+            if self._session_vision_model:
+                combo.addItem(f"{self._session_vision_model} (solo questa sessione)",
+                              self._session_vision_model)
+                combo.setCurrentIndex(1)
+            combo.blockSignals(blocked)
+
+    def _on_vision_model_combo_changed(self) -> None:
+        self._session_vision_model = self.combo_vision_model.currentData()
+        self._append_log(f"Modello foto: {self._vision_model()} (il default globale non cambia).")
+
+    def _pick_session_vision_model(self) -> None:
+        chosen = pick_model(self._vision_model(), self,
+                            title="Modello foto solo per questa sessione")
+        if not chosen:
+            return
+        self._session_vision_model = None if chosen == self._default_vision_model() else chosen
+        self._refresh_model_combo()
+        self._on_vision_model_combo_changed()
 
     def _on_model_combo_changed(self) -> None:
         self._session_model = self.combo_model.currentData()
@@ -497,7 +526,22 @@ class MainWindow(QMainWindow):
         self.label_project_path = QLabel()
         self.label_project_path.setWordWrap(True)
         self.label_project_path.setStyleSheet(f"color: {BLUE};")
-        folder_layout.addRow("Cartella componente:", self.label_project_path)
+        path_row = QHBoxLayout()
+        path_row.addWidget(self.label_project_path, 1)
+        self.btn_project_info = QPushButton()
+        self.btn_project_info.setIcon(QIcon(str(Path(__file__).resolve().parent / "assets" / "info.svg")))
+        self.btn_project_info.setIconSize(QSize(22, 22))
+        self.btn_project_info.setStyleSheet("QPushButton { padding: 4px; }")
+        self.btn_project_info.setToolTip("Informazioni sulla cartella componente e sull'esportazione")
+        self.btn_project_info.setAccessibleName("Informazioni sulla cartella componente")
+        self.btn_project_info.setFixedSize(36, 32)
+        path_row.addWidget(self.btn_project_info)
+        folder_layout.addRow("Cartella componente:", path_row)
+
+        self.project_info_dialog = QDialog(self)
+        self.project_info_dialog.setWindowTitle("Informazioni sulla cartella componente")
+        self.project_info_dialog.setModal(True)
+        info_layout = QVBoxLayout(self.project_info_dialog)
 
         note = QLabel(
             "Il nome del componente e' anche il nome del footprint generato "
@@ -506,7 +550,12 @@ class MainWindow(QMainWindow):
             "\"Esporta in libreria...\" nel tab \"Genera\"."
         )
         note.setWordWrap(True)
-        folder_layout.addRow(note)
+        info_layout.addWidget(note)
+        info_close = QPushButton("Chiudi")
+        info_close.clicked.connect(self.project_info_dialog.accept)
+        info_layout.addWidget(info_close, alignment=Qt.AlignmentFlag.AlignRight)
+        self.project_info_dialog.resize(540, 160)
+        self.btn_project_info.clicked.connect(self.project_info_dialog.exec)
 
         outer.addWidget(folder_group)
 
@@ -514,6 +563,7 @@ class MainWindow(QMainWindow):
         docs_layout = QVBoxLayout(docs_group)
 
         self.docs_list = QListWidget()
+        self.docs_list.setFixedHeight(140)
         self.docs_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.docs_list.setToolTip(
             "Spunta i file da inviare all'AI. I nuovi file vengono selezionati automaticamente."
@@ -565,14 +615,19 @@ class MainWindow(QMainWindow):
         model_row.addWidget(self.combo_model, 1)
         model_row.addWidget(btn_pick_model)
         ai_form.addRow("Modello datasheet:", model_row)
-        self.label_vision_model = QLabel(self._vision_model() or "Default del servizio foto")
-        self.label_vision_model.setTextFormat(Qt.TextFormat.PlainText)
-        self.label_vision_model.setWordWrap(True)
-        self.label_vision_model.setToolTip(
+        self.combo_vision_model = QComboBox()
+        self.combo_vision_model.setToolTip(
             "Modello dedicato alla localizzazione dei componenti nella foto. "
-            "Si imposta da Configurazione -> Modello e prompt di sistema LLM."
+            "La scelta vale per questa sessione; il default si imposta da Configurazione."
         )
-        ai_form.addRow("Modello foto:", self.label_vision_model)
+        self.combo_vision_model.currentIndexChanged.connect(self._on_vision_model_combo_changed)
+        self.btn_pick_vision_model = QPushButton("Modello diverso...")
+        self.btn_pick_vision_model.setToolTip("Scegli un modello foto per questa sessione")
+        self.btn_pick_vision_model.clicked.connect(self._pick_session_vision_model)
+        vision_row = QHBoxLayout()
+        vision_row.addWidget(self.combo_vision_model, 1)
+        vision_row.addWidget(self.btn_pick_vision_model)
+        ai_form.addRow("Modello foto:", vision_row)
 
         docs_layout.addLayout(ai_form)
 
@@ -589,40 +644,62 @@ class MainWindow(QMainWindow):
         self._photo_source = ""
         ai_row.addWidget(self.btn_photo_comparison)
         ai_row.addStretch()
+        self.btn_ai_log = QPushButton("≡ Log AI")
+        self.btn_ai_log.setToolTip("Apri il log completo dell'analisi AI, aggiornato in tempo reale")
+        self.btn_ai_log.setAccessibleName("Apri log analisi AI")
+        ai_row.addWidget(self.btn_ai_log)
         docs_layout.addLayout(ai_row)
+        self.ai_log_dialog = QDialog(self)
+        self.ai_log_dialog.setWindowTitle("Log analisi AI")
+        self.ai_log_dialog.setModal(True)
+        log_layout = QVBoxLayout(self.ai_log_dialog)
         self.ai_progress_text = QTextEdit()
         self.ai_progress_text.setReadOnly(True)
-        self.ai_progress_text.setMaximumHeight(100)
         self.ai_progress_text.setPlaceholderText("Qui compariranno i passi dell'analisi AI e i componenti trovati.")
-        docs_layout.addWidget(self.ai_progress_text)
+        log_layout.addWidget(self.ai_progress_text)
+        log_close = QPushButton("Chiudi")
+        log_close.clicked.connect(self.ai_log_dialog.accept)
+        log_layout.addWidget(log_close, alignment=Qt.AlignmentFlag.AlignRight)
+        self.ai_log_dialog.resize(820, 460)
+        self.btn_ai_log.clicked.connect(self.ai_log_dialog.exec)
 
-        docs_layout.addWidget(QLabel(
+        self.btn_component_prompt = QPushButton("Modifica prompt…")
+        self.btn_component_prompt.setToolTip("Modifica le istruzioni AI specifiche di questo componente")
+        docs_layout.addWidget(self.btn_component_prompt, alignment=Qt.AlignmentFlag.AlignRight)
+        self.component_prompt_dialog = QDialog(self)
+        self.component_prompt_dialog.setWindowTitle("Prompt specifico del componente")
+        self.component_prompt_dialog.setModal(True)
+        prompt_layout = QVBoxLayout(self.component_prompt_dialog)
+        prompt_note = QLabel(
             "Prompt specifico di QUESTO componente -- ci finisce il testo della "
             "tipologia scelta qui sopra, modificabile, piu' le note che vuoi "
             "aggiungere. Il prompt generale si imposta da Configurazione -> "
             "Modello e prompt di sistema LLM:"
-        ))
+        )
+        prompt_note.setWordWrap(True)
+        prompt_layout.addWidget(prompt_note)
         self.field_component_prompt = QTextEdit()
+        self.field_component_prompt.setAcceptRichText(False)
         self.field_component_prompt.setPlaceholderText(
             "es. il case e' metallico, non plastico -- oppure: ignora il connettore "
             "laterale, considera solo i pin del lato inferiore"
         )
-        self.field_component_prompt.setMinimumHeight(120)
-        self.field_component_prompt.setMaximumHeight(220)
-        docs_layout.addWidget(self.field_component_prompt)
-
-        ai_note = QLabel(
-            "Spunta uno o piu' file in lista (i nuovi file sono gia' spuntati) e "
-            "premi il pulsante: i campi righe/colonne/passo/pad/drill "
-            "nel tab \"Footprint 2D\" verranno pre-compilati. Richiede la variabile "
-            "d'ambiente OPENROUTER_API_KEY (file .env). Verifica sempre i valori "
-            "prima di generare."
-        )
-        ai_note.setWordWrap(True)
-        ai_note.setStyleSheet(f"color: {TEXT}; font-style: italic;")
-        docs_layout.addWidget(ai_note)
+        prompt_layout.addWidget(self.field_component_prompt)
+        prompt_buttons = QHBoxLayout()
+        prompt_buttons.addStretch()
+        cancel_prompt = QPushButton("Annulla")
+        cancel_prompt.clicked.connect(self.component_prompt_dialog.reject)
+        save_prompt = QPushButton("Salva")
+        save_prompt.setObjectName("primary")
+        save_prompt.clicked.connect(self.component_prompt_dialog.accept)
+        prompt_buttons.addWidget(cancel_prompt)
+        prompt_buttons.addWidget(save_prompt)
+        prompt_layout.addLayout(prompt_buttons)
+        self.component_prompt_dialog.resize(900, 560)
+        self.btn_component_prompt.clicked.connect(self._edit_component_prompt)
 
         outer.addWidget(docs_group)
+        outer.addStretch()
 
         self._refresh_model_combo()
         self._restore_component_type()
@@ -633,6 +710,12 @@ class MainWindow(QMainWindow):
         return scroll
 
     # ── Tipologia componente ────────────────────────────────────────
+
+    def _edit_component_prompt(self) -> None:
+        original = self.field_component_prompt.toPlainText()
+        if self.component_prompt_dialog.exec() != QDialog.DialogCode.Accepted:
+            # Annulla, Escape and the window close button all discard edits.
+            self.field_component_prompt.setPlainText(original)
 
     def _restore_component_type(self) -> None:
         """Ripropone l'ultima tipologia usata, inserendone il testo nel prompt."""
@@ -1798,8 +1881,8 @@ class MainWindow(QMainWindow):
     # ── Tab 5: Modello 3D ──────────────────────────────────────────
 
     def _build_3d_tab(self) -> QWidget:
-        # Il contenuto (anteprima + annotazioni + pulsanti) supera in altezza la
-        # finestra: senza QScrollArea i pulsanti in fondo restano tagliati fuori.
+        # Only the settings scroll. The renderer must occupy its actual visible
+        # viewport, not a clipped portion of a taller scrollable document.
         tab = QWidget()
         outer = QVBoxLayout(tab)
         outer.setContentsMargins(10, 10, 10, 10)
@@ -1830,8 +1913,8 @@ class MainWindow(QMainWindow):
         ))
         self.preview_3d = Preview3DVtk()
         self.preview_3d.show_pin_numbers = self.chk_pin_numbers.isChecked()
-        self.preview_3d.setMinimumHeight(320)
-        outer.addWidget(self.preview_3d)
+        self.preview_3d.setMinimumHeight(120)
+        outer.addWidget(self.preview_3d, 1)
 
         view_row = QHBoxLayout()
         view_row.addWidget(QLabel("Vista:"))
@@ -1856,8 +1939,10 @@ class MainWindow(QMainWindow):
         self.label_3d_status.setStyleSheet(f"color: {TEXT}; font-style: italic;")
         outer.addWidget(self.label_3d_status)
 
-        outer.addWidget(self._build_annotations_group())
-        outer.addWidget(self._build_components_group())
+        settings = QWidget()
+        settings_layout = QVBoxLayout(settings)
+        settings_layout.addWidget(self._build_annotations_group())
+        settings_layout.addWidget(self._build_components_group())
 
         regen_row = QHBoxLayout()
         self.btn_regen_3d = QPushButton("Rigenera modello 3D (STEP) con queste annotazioni")
@@ -1868,12 +1953,19 @@ class MainWindow(QMainWindow):
         btn_open_3d.clicked.connect(self._open_3dshapes_dir)
         regen_row.addWidget(btn_open_3d)
         regen_row.addStretch()
-        outer.addLayout(regen_row)
+        settings_layout.addLayout(regen_row)
 
         scroll = QScrollArea()
-        scroll.setWidget(tab)
+        scroll.setWidget(settings)
         scroll.setWidgetResizable(True)
-        return scroll
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.addWidget(tab)
+        splitter.addWidget(scroll)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([600, 200])
+        splitter.setCollapsible(0, False)
+        return splitter
 
     def _on_pin_numbers_toggled(self, checked: bool) -> None:
         self._config["show_pin_numbers_3d"] = checked

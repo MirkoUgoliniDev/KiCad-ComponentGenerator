@@ -6,6 +6,10 @@ Pm3ToWav/main.py) cosi' le due app hanno lo stesso look coerente anche
 se una gira su Windows con tema chiaro di sistema.
 """
 
+from pathlib import Path
+
+_COMBO_ARROW = (Path(__file__).resolve().parent / "assets" / "combo-arrow.svg").as_posix()
+
 # Palette Catppuccin Mocha (stessi valori esadecimali usati in Pm3ToWav)
 BASE = "#1e1e2e"       # sfondo finestra
 MANTLE = "#181825"     # sfondo piu' scuro (menu, barre)
@@ -99,9 +103,19 @@ APP_QSS = f"""
     QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus, QTextEdit:focus {{
         border: 1px solid {BLUE};
     }}
+    QComboBox {{
+        padding-right: 30px;
+    }}
     QComboBox::drop-down {{
+        subcontrol-origin: padding;
+        subcontrol-position: top right;
         border: none;
-        width: 20px;
+        width: 26px;
+    }}
+    QComboBox::down-arrow {{
+        image: url("{_COMBO_ARROW}");
+        width: 12px;
+        height: 8px;
     }}
     QComboBox QAbstractItemView {{
         background: {SURFACE0};

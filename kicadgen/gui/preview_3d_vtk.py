@@ -29,6 +29,17 @@ _APPROX_PIN_COLOR = "#f9e2af"
 _LABEL_COLOR = "#f9e2af"
 
 
+def _spaced_label(label, vertices):
+    """Keep legacy mesh labels away from the contact, without changing CAD."""
+    point = np.asarray(label, dtype=float).copy()
+    centre = (vertices.min(axis=0) + vertices.max(axis=0)) / 2
+    direction = point[:2] - centre[:2]
+    distance = np.linalg.norm(direction)
+    if distance > 1e-6:
+        point[:2] += 1.2 * direction / distance
+    return point
+
+
 class Preview3DVtk(QtInteractor):
     """Vista 3D interattiva: mostra la mesh reale generata o l'approssimazione."""
 
@@ -79,12 +90,7 @@ class Preview3DVtk(QtInteractor):
         self.render()
 
     def _add_pin_labels(self, anchors) -> None:
-        """Etichetta ogni pin col suo numero, ancorata alla punta del piedino.
-
-        `always_visible` tiene le etichette leggibili anche quando il pin e'
-        nascosto dal corpo: guardando il componente dall'alto i piedini stanno
-        sotto, ed e' proprio li' che serve sapere quale numero e' quale.
-        """
+        """Numeri centrati sugli ancoraggi, visibili solo dal lato piedini."""
         self._label_actor = None
         if not self.show_pin_numbers or not anchors:
             return
@@ -95,6 +101,7 @@ class Preview3DVtk(QtInteractor):
         self._label_actor = self.add_point_labels(
             points, labels, font_size=13, bold=True, text_color=_LABEL_COLOR,
             shape=None, show_points=False, always_visible=True,
+            justification_horizontal="center", justification_vertical="center",
         )
 
     def _reset(self) -> None:
@@ -112,13 +119,16 @@ class Preview3DVtk(QtInteractor):
         """Inquadra tutto il componente lasciando un margine."""
         # VTK puo' avere in cache una dimensione della render window diversa
         # da quella attuale del widget Qt -- capita quando il widget vive
-        # dentro un layout che cambia dimensione dopo il primo render (qui,
-        # una QScrollArea che avvolge l'intero tab). Senza risincronizzarla,
+        # dentro un layout che cambia dimensione dopo il primo render.
+        # Il renderer non e' contenuto nell'area scorrevole delle impostazioni.
+        # Senza risincronizzarla,
         # reset_camera() inquadra rispetto alla vecchia area: il modello
         # finisce centrato in un riquadro che non e' piu' quello visibile,
         # e appare spostato rispetto alla finestra vera.
         try:
-            self.window_size = (max(1, self.width()), max(1, self.height()))
+            ratio = self.devicePixelRatioF()
+            self.window_size = (max(1, round(self.width() * ratio)),
+                                max(1, round(self.height() * ratio)))
         except Exception:  # noqa: BLE001 - risincronizzazione best-effort
             pass
         self.reset_camera()
@@ -206,7 +216,8 @@ class Preview3DVtk(QtInteractor):
                 if label:
                     # Punto scelto da chi ha costruito il pezzo (es. accanto al
                     # semi-foro di un modulo, non sopra): il numero non copre il metallo.
-                    anchors.append((int(name[3:]), float(label[0]), float(label[1]), float(label[2])))
+                    point = _spaced_label(label, vertices)
+                    anchors.append((int(name[3:]), *point))
                 else:
                     centre = vertices.mean(axis=0)
                     anchors.append(
