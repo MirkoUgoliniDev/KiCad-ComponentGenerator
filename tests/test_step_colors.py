@@ -64,3 +64,21 @@ def test_component_kind_and_marking_are_kept():
     # Un tipo sconosciuto non deve far fallire il 3D: diventa una scatola.
     assert unknown["kind"] == "generic"
     assert "ic_soic" in COMPONENT_KINDS and "led" in COMPONENT_KINDS
+
+
+def test_component_rotation_is_explicit_not_inferred():
+    """Un diodo verticale e' 2.0 (asse lungo) x 0.9 con rotation 90: non si
+    deduce dalle proporzioni, che con stime quasi quadrate ingannano."""
+    params = _params_from_tool_arguments({
+        "layout": "castellated", "confidence": "high",
+        "castellated_sides": [{"edge": "left", "count": 2, "pitch_mm": 2.54}],
+        "components_3d": [
+            {"name": "D1", "kind": "diode_melf", "rotation_deg": 90,
+             "x_mm": 18, "y_mm": -5, "length_mm": 2.0, "width_mm": 0.9, "height_mm": 0.9},
+            {"name": "R1", "kind": "resistor",
+             "x_mm": 0, "y_mm": 0, "length_mm": 1.6, "width_mm": 0.8, "height_mm": 0.5},
+        ],
+    })
+    diode, resistor = params.components_3d
+    assert diode["rotation_deg"] == 90.0
+    assert resistor["rotation_deg"] == 0.0  # assente = orizzontale

@@ -889,6 +889,7 @@ class MainWindow(QMainWindow):
                 color_hex=c.get("color_hex") or "#303030",
                 kind=c.get("kind", "generic"),
                 marking=c.get("marking", ""),
+                rotation=float(c.get("rotation_deg", 0.0)),
             )
             for c in params.components_3d or ()
         ]
@@ -1814,7 +1815,7 @@ class MainWindow(QMainWindow):
 
     # ── Componenti del modulo (3D) ─────────────────────────────────
 
-    _COMPONENT_COLUMNS = ("Nome", "Tipo", "X", "Y", "Lung.", "Larg.", "Alt.", "Colore", "Marcatura")
+    _COMPONENT_COLUMNS = ("Nome", "Tipo", "X", "Y", "Lung.", "Larg.", "Alt.", "Rot.", "Colore", "Marcatura")
 
     def _build_components_group(self) -> QGroupBox:
         """Tabella dei componenti montati sul modulo, letti dalla foto.
@@ -1827,7 +1828,8 @@ class MainWindow(QMainWindow):
         """
         group = QGroupBox(
             "Componenti sul modulo (letti dalla foto, modificabili) -- "
-            "origine al centro del modulo, X a destra, Y in basso come nel footprint"
+            "origine al centro del modulo, X a destra, Y in basso come nel footprint; "
+            "Lung. = asse lungo del componente, Rot. = come sta sul modulo"
         )
         self.group_components = group
         layout = QVBoxLayout(group)
@@ -1836,7 +1838,7 @@ class MainWindow(QMainWindow):
         self.table_components.setHorizontalHeaderLabels(list(self._COMPONENT_COLUMNS))
         header = self.table_components.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(8, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(9, QHeaderView.ResizeMode.Stretch)
         self.table_components.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table_components.setMinimumHeight(160)
         layout.addWidget(self.table_components)
@@ -1880,11 +1882,16 @@ class MainWindow(QMainWindow):
             spin.setValue(float(value))
             table.setCellWidget(row, column, spin)
 
+        rotation = QComboBox()
+        for degrees in (0, 90, 180, 270):
+            rotation.addItem(f"{degrees}\u00b0", float(degrees))
+        rotation.setCurrentIndex(max(rotation.findData(float(component.rotation) % 360), 0))
+        table.setCellWidget(row, 7, rotation)
         color = QLineEdit(component.color_hex)
         color.setMaxLength(7)
-        table.setCellWidget(row, 7, color)
+        table.setCellWidget(row, 8, color)
         marking = QLineEdit(component.marking)
-        table.setCellWidget(row, 8, marking)
+        table.setCellWidget(row, 9, marking)
 
     def _remove_component_row(self) -> None:
         row = self.table_components.currentRow()
@@ -1914,8 +1921,9 @@ class MainWindow(QMainWindow):
                 length=table.cellWidget(row, 4).value(),
                 width=table.cellWidget(row, 5).value(),
                 height=table.cellWidget(row, 6).value(),
-                color_hex=table.cellWidget(row, 7).text().strip() or "#303030",
-                marking=table.cellWidget(row, 8).text().strip(),
+                rotation=float(table.cellWidget(row, 7).currentData() or 0.0),
+                color_hex=table.cellWidget(row, 8).text().strip() or "#303030",
+                marking=table.cellWidget(row, 9).text().strip(),
             ))
         return components
 

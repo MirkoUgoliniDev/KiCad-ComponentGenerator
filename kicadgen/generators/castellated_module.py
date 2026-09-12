@@ -66,6 +66,8 @@ class ComponentBox:
 
     Le coordinate sono quelle del footprint: origine al centro del modulo,
     X verso destra, Y verso il basso, Z dal piano del PCB verso l'alto.
+    `length` x `width` e' l'ingombro del componente nel SUO sistema (asse
+    lungo x asse corto); `rotation` lo orienta sul modulo.
     """
 
     x: float
@@ -79,6 +81,11 @@ class ComponentBox:
     kind: str = "generic"
     # Scritta stampata sul componente (es. "SP3485", "VPT"), se leggibile.
     marking: str = ""
+    # Orientamento nella foto: `length` e' l'asse LUNGO del componente e
+    # `width` quello corto, sempre; rotation dice come sta sul modulo
+    # (0 = asse lungo parallelo a X, 90 = verticale). Esplicito, non dedotto
+    # dalle proporzioni: con stime quasi quadrate la deduzione sbaglia.
+    rotation: float = 0.0
 
     def is_usable(self) -> bool:
         return self.length > 0 and self.width > 0 and self.height > 0

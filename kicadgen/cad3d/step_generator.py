@@ -224,6 +224,7 @@ def generate_castellated_3d_model(
             "length_mm": component.length, "width_mm": component.width,
             "height_mm": min(component.height, component_height) if component_height > 0 else component.height,
             "color_hex": component.color_hex, "marking": component.marking,
+            "rotation_deg": component.rotation,
         })
 
     extra_boxes = []

@@ -307,6 +307,8 @@ def _flip_y(data):
                 item["angle"] = -float(item["angle"])
             if "marking_angle" in item:
                 item["marking_angle"] = -float(item["marking_angle"])
+            if "rotation_deg" in item:
+                item["rotation_deg"] = -float(item["rotation_deg"])
             if item.get("edge") in _FB_SWAP:
                 item["edge"] = _FB_SWAP[item["edge"]]
     for c in data.get("edge_contacts", []):
@@ -477,15 +479,24 @@ def main():
         import freecad_parts
         for index, component in enumerate(components):
             base = _safe(component.get("name"), index)
+            rotation = float(component.get("rotation_deg") or 0.0)
+            centre = FreeCAD.Vector(component["x"], component["y"], 0)
+            # Le forme nascono con l'asse lungo parallelo a X e si ruotano
+            # attorno al centro del componente: e' l'orientamento letto dalla
+            # foto, non una deduzione dalle proporzioni.
             for j, (shape, color) in enumerate(freecad_parts.build_component(component, z1)):
+                if rotation:
+                    shape.rotate(centre, FreeCAD.Vector(0, 0, 1), rotation)
                 add(f"{base}_{j}", shape, color)
             kind = component.get("kind", "generic")
-            if kind in ("capacitor", "resistor", "diode", "led", "capacitor_tantalum"):
+            if kind in ("capacitor", "resistor", "diode", "diode_melf", "led", "capacitor_tantalum"):
                 try:
-                    add(f"{base}_silk", _rim(component["x"], component["y"],
-                                              component["length_mm"] + 0.36,
-                                              component["width_mm"] + 0.32,
-                                              silk_z, line=0.08), silk_color)
+                    rim = _rim(component["x"], component["y"],
+                               component["length_mm"] + 0.36, component["width_mm"] + 0.32,
+                               silk_z, line=0.08)
+                    if rotation:
+                        rim.rotate(centre, FreeCAD.Vector(0, 0, 1), rotation)
+                    add(f"{base}_silk", rim, silk_color)
                 except Exception:  # noqa: BLE001
                     pass
             marking = (component.get("marking") or "").strip()
@@ -495,7 +506,7 @@ def main():
                                          0.9 * float(component["length_mm"]) / max(1, len(marking))))
                     ztop = z1 + float(component["height_mm"]) + 0.004
                     shape = _place_text(marking, size, component["x"], component["y"], ztop,
-                                        float(component.get("marking_angle", 0)), font_file)
+                                        rotation + float(component.get("marking_angle", 0)), font_file)
                     if shape is not None:
                         add(f"{base}_mark", shape, component.get("marking_color_hex", "#c8c8c0"))
                 except Exception as exc:  # noqa: BLE001

@@ -404,8 +404,29 @@ _EXTRACTION_TOOL = {
                                 "verso il basso (il modulo e' largo body_width_mm)."
                             ),
                         },
-                        "length_mm": {"type": "number", "description": "Ingombro lungo X."},
-                        "width_mm": {"type": "number", "description": "Ingombro lungo Y."},
+                        "length_mm": {
+                            "type": "number",
+                            "description": (
+                                "Lunghezza del componente lungo il SUO asse lungo (es. 1.6 "
+                                "per un chip 0603, 2.0 per un diodo MELF), indipendentemente "
+                                "da come e' ruotato sul modulo: l'orientamento va in rotation_deg."
+                            ),
+                        },
+                        "width_mm": {
+                            "type": "number",
+                            "description": "Larghezza lungo l'asse corto del componente.",
+                        },
+                        "rotation_deg": {
+                            "type": "number",
+                            "enum": [0, 90, 180, 270],
+                            "description": (
+                                "Come il componente sta sul modulo visto dall'alto: 0 se il "
+                                "suo asse lungo e' orizzontale (parallelo al lato lungo del "
+                                "modulo, X), 90 se e' verticale (Y). Guardalo nella foto: un "
+                                "diodo o una resistenza \"in piedi\" e' 90. 180/270 solo se "
+                                "conta il verso (banda del diodo, pin 1) e lo vedi."
+                            ),
+                        },
                         "height_mm": {
                             "type": "number",
                             "description": (
@@ -522,8 +543,9 @@ _SYSTEM_PROMPT = (
     "non li rappresenta e produrrebbe un footprint sbagliato. "
     "Per i moduli su PCB, se c'e' una foto del lato superiore, elenca in "
     "components_3d TUTTI i componenti visibili, uno per uno, compresi i passivi "
-    "piccoli (resistenze, condensatori chip, diodi): posizione, ingombro, "
-    "orientamento e colore stimati a occhio in proporzione alle dimensioni note "
+    "piccoli (resistenze, condensatori chip, diodi): posizione, ingombro (asse "
+    "lungo x asse corto), orientamento in rotation_deg (0 orizzontale, 90 "
+    "verticale, letto dalla foto) e colore stimati a occhio in proporzione alle dimensioni note "
     "del modulo. Servono a dare al modello 3D l'aspetto del pezzo reale, e "
     "nessuna di quelle quote e' riportata dal datasheet -- e' normale e atteso "
     "stimarle; una lista di 30-50 elementi e' il risultato giusto. Compila sempre "
@@ -802,6 +824,10 @@ def _components_3d(raw: Optional[Sequence[dict]]) -> Optional[list[dict]]:
         component["kind"] = kind if kind in COMPONENT_KINDS else "generic"
         if entry.get("marking"):
             component["marking"] = str(entry["marking"]).strip()
+        try:
+            component["rotation_deg"] = float(entry.get("rotation_deg") or 0) % 360
+        except (TypeError, ValueError):
+            component["rotation_deg"] = 0.0
         components.append(component)
     return components or None
 
