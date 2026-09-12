@@ -9,8 +9,8 @@ opencv-python
 pyvista
 pyvistaqt
 
-# Estrazione parametri da datasheet via API Claude (richiede ANTHROPIC_API_KEY)
-anthropic
+# Estrazione parametri da datasheet via OpenRouter (richiede OPENROUTER_API_KEY):
+# le chiamate HTTP usano solo la stdlib (urllib), serve solo leggere il .env
 python-dotenv
 
 # Test

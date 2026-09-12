@@ -24,9 +24,14 @@ mostra solo uno specchio in sola lettura.
 
 Il tab Progetto include anche "Estrai parametri con AI dal datasheet"
 (kicadgen.services.datasheet_extractor): manda i file selezionati in
-docs/ all'API Claude e pre-compila righe/colonne/passo/pad/drill (+ i
-campi del corpo 3D, se il datasheet ha un disegno meccanico quotato).
-Richiede la variabile d'ambiente ANTHROPIC_API_KEY.
+docs/ a un modello LLM via OpenRouter e pre-compila
+righe/colonne/passo/pad/drill (+ i campi del corpo 3D, se il datasheet ha
+un disegno meccanico quotato). Prima di lanciarla si dichiara la
+tipologia di componente (THT/SMD, singolo/aggregato, castellated), il cui
+testo finisce nel prompt specifico del componente, dove resta
+modificabile; il modello si sceglie fra il default globale e uno piu'
+capace valido solo per la sessione. Richiede la variabile d'ambiente
+OPENROUTER_API_KEY.
 """
 
 from __future__ import annotations
@@ -52,13 +57,16 @@ from ..cad3d.annotations import EDGE_NAMES, FACE_NAMES, EdgeFilletAnnotation, Fa
 from ..cad3d.body_params import Body3DParams
 from ..cad3d.step_generator import Cad3DError, generate_3d_model
 from ..generators.pin_header import PinHeaderParams, build_pin_header, pin_positions
+from ..services import component_types
 from ..services.datasheet_extractor import (
     DEFAULT_SYSTEM_PROMPT, ExtractedParams, ExtractionError, extract_pin_header_params,
 )
+from ..services.openrouter import DEFAULT_MODEL
 from .app_config import CONFIG_PATH, load_config, save_config
+from .model_dialog import pick_model
 from .pinout_dialog import PinoutDialog
 from .preview_3d_vtk import Preview3DVtk
-from .settings_dialog import SystemPromptDialog
+from .settings_dialog import LlmSettingsDialog
 from .theme import BASE, BLUE, SURFACE0, SURFACE1, SURFACE2, TEXT, YELLOW, APP_QSS
 
 APP_DIR = Path(__file__).resolve().parent.parent.parent
@@ -167,7 +175,11 @@ class Cad3DWorker(QThread):
 
 
 class ExtractWorker(QThread):
-    """QThread che chiama l'API Claude per estrarre i parametri dal datasheet.
+    """QThread che chiama OpenRouter per estrarre i parametri dal datasheet.
+
+    `model` e' l'id OpenRouter da usare per questa estrazione: puo' essere
+    il default di config.json oppure un modello piu' capace scelto solo per
+    la sessione corrente.
 
     Segnali:
         done(ExtractedParams) -- parametri estratti con successo
@@ -180,17 +192,20 @@ class ExtractWorker(QThread):
     def __init__(
         self, doc_paths: list[Path], system_prompt: str | None = None,
         extra_instructions: str | None = None, include_nc_pins: bool = True,
+        model: str | None = None,
     ):
         super().__init__()
         self.doc_paths = doc_paths
         self.system_prompt = system_prompt
         self.extra_instructions = extra_instructions
         self.include_nc_pins = include_nc_pins
+        self.model = model
 
     def run(self) -> None:
         try:
             params = extract_pin_header_params(
                 self.doc_paths,
+                model=self.model,
                 system_prompt=self.system_prompt,
                 extra_instructions=self.extra_instructions,
                 include_nc_pins=self.include_nc_pins,
@@ -221,6 +236,9 @@ class MainWindow(QMainWindow):
         self.pin_map: dict | None = None
         self._last_mesh_path: Path | None = None
         self._config = load_config()
+        # Modello scelto solo per questa sessione (datasheet difficile): non
+        # viene salvato in config.json e si perde alla chiusura, per scelta.
+        self._session_model: str | None = None
 
         self._build_menu()
         self._build_central()
@@ -236,7 +254,9 @@ class MainWindow(QMainWindow):
         file_menu.addAction("Esci", self.close)
 
         config_menu = self.menuBar().addMenu("&Configurazione")
-        config_menu.addAction("Prompt di sistema LLM...", self._edit_system_prompt)
+        config_menu.addAction(
+            "Modello e prompt di sistema LLM...", self._edit_llm_settings
+        )
         config_menu.addSeparator()
 
         self.action_nc_pins = config_menu.addAction("Genera anche i pin NC (Not Connected)")
@@ -266,12 +286,79 @@ class MainWindow(QMainWindow):
             else "Pin NC: NON verranno generati (attenzione: il piedino fisico resta)."
         )
 
-    def _edit_system_prompt(self) -> None:
-        dialog = SystemPromptDialog(self._config["system_prompt"], self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._config["system_prompt"] = dialog.prompt() or DEFAULT_SYSTEM_PROMPT
-            save_config(self._config)
-            self._append_log("Prompt di sistema aggiornato (config.json).")
+    def _edit_llm_settings(self) -> None:
+        dialog = LlmSettingsDialog(
+            self._config["system_prompt"], self._default_model(), self
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        self._config["system_prompt"] = dialog.prompt() or DEFAULT_SYSTEM_PROMPT
+        self._config["model"] = dialog.model()
+        save_config(self._config)
+        self._refresh_model_combo()
+        self._append_log(
+            f"Impostazioni LLM aggiornate (config.json). "
+            f"Modello di default: {self._default_model()}."
+        )
+
+    # ── Modello LLM ─────────────────────────────────────────────────
+
+    def _default_model(self) -> str:
+        """Modello di default globale (config.json)."""
+        return (self._config.get("model") or "").strip() or DEFAULT_MODEL
+
+    def _effective_model(self) -> str:
+        """Modello da usare per la prossima estrazione.
+
+        E' il modello di sessione, se ne e' stato scelto uno dal tab
+        "Progetto" per questo componente; altrimenti il default globale.
+        """
+        return self._session_model or self._default_model()
+
+    def _refresh_model_combo(self) -> None:
+        """Riallinea la tendina del tab Progetto a default + scelta di sessione."""
+        if not hasattr(self, "combo_model"):
+            return
+        blocked = self.combo_model.blockSignals(True)
+        self.combo_model.clear()
+        self.combo_model.addItem(f"Default: {self._default_model()}", None)
+        if self._session_model:
+            self.combo_model.addItem(
+                f"{self._session_model} (solo questa sessione)", self._session_model
+            )
+            self.combo_model.setCurrentIndex(1)
+        else:
+            self.combo_model.setCurrentIndex(0)
+        self.combo_model.blockSignals(blocked)
+
+    def _on_model_combo_changed(self) -> None:
+        self._session_model = self.combo_model.currentData()
+        if self._session_model:
+            self._append_log(
+                f"Modello per questa sessione: {self._session_model} "
+                "(il default globale non cambia)."
+            )
+        else:
+            self._append_log(f"Modello: default globale ({self._default_model()}).")
+
+    def _pick_session_model(self) -> None:
+        """Sceglie un modello valido solo per le estrazioni di questa sessione.
+
+        Serve per i datasheet difficili: si passa a un modello piu' capace
+        (e piu' costoso) senza cambiare il default salvato in config.json.
+        """
+        chosen = pick_model(
+            self._effective_model(), self, title="Modello solo per questa sessione"
+        )
+        if not chosen:
+            return
+        if chosen == self._default_model():
+            self._session_model = None
+        else:
+            self._session_model = chosen
+        self._refresh_model_combo()
+        self._on_model_combo_changed()
 
     def _open_config_file(self) -> None:
         if not CONFIG_PATH.is_file():
@@ -374,6 +461,41 @@ class MainWindow(QMainWindow):
         docs_btn_row.addStretch()
         docs_layout.addLayout(docs_btn_row)
 
+        ai_form = QFormLayout()
+
+        self.combo_component_type = QComboBox()
+        self.combo_component_type.addItem("(non specificata)", "")
+        for component_type in component_types.COMPONENT_TYPES:
+            self.combo_component_type.addItem(component_type.label, component_type.key)
+        self.combo_component_type.setToolTip(
+            "Dice al modello che cosa sta leggendo: da questo dipende quali quote "
+            "cercare nel datasheet (fori e drill per un THT, land pattern per un "
+            "SMD, semi-fori sul bordo per un modulo castellated)."
+        )
+        self.combo_component_type.currentIndexChanged.connect(
+            self._on_component_type_changed
+        )
+        ai_form.addRow("Tipologia componente:", self.combo_component_type)
+
+        self.combo_model = QComboBox()
+        self.combo_model.setToolTip(
+            "Modello usato per l'estrazione. Il default si imposta da "
+            "Configurazione -> Modello e prompt di sistema LLM."
+        )
+        self.combo_model.currentIndexChanged.connect(self._on_model_combo_changed)
+        btn_pick_model = QPushButton("Modello diverso...")
+        btn_pick_model.setToolTip(
+            "Sceglie un modello (filtrabile per costo) valido solo per le "
+            "estrazioni di questa sessione: il default globale non cambia."
+        )
+        btn_pick_model.clicked.connect(self._pick_session_model)
+        model_row = QHBoxLayout()
+        model_row.addWidget(self.combo_model, 1)
+        model_row.addWidget(btn_pick_model)
+        ai_form.addRow("Modello LLM:", model_row)
+
+        docs_layout.addLayout(ai_form)
+
         ai_row = QHBoxLayout()
         self.btn_extract_ai = QPushButton("✨ Estrai parametri con AI dal datasheet")
         self.btn_extract_ai.setObjectName("primary")
@@ -383,22 +505,26 @@ class MainWindow(QMainWindow):
         docs_layout.addLayout(ai_row)
 
         docs_layout.addWidget(QLabel(
-            "Note per l'estrazione di QUESTO componente (opzionale) -- il prompt "
-            "generale si imposta da Configurazione -> Prompt di sistema LLM:"
+            "Prompt specifico di QUESTO componente -- ci finisce il testo della "
+            "tipologia scelta qui sopra, modificabile, piu' le note che vuoi "
+            "aggiungere. Il prompt generale si imposta da Configurazione -> "
+            "Modello e prompt di sistema LLM:"
         ))
         self.field_component_prompt = QTextEdit()
         self.field_component_prompt.setPlaceholderText(
             "es. il case e' metallico, non plastico -- oppure: ignora il connettore "
             "laterale, considera solo i pin del lato inferiore"
         )
-        self.field_component_prompt.setMaximumHeight(70)
+        self.field_component_prompt.setMinimumHeight(120)
+        self.field_component_prompt.setMaximumHeight(220)
         docs_layout.addWidget(self.field_component_prompt)
 
         ai_note = QLabel(
             "Seleziona uno o piu' file in lista (PDF o immagini del disegno "
             "meccanico) e premi il pulsante: i campi righe/colonne/passo/pad/drill "
             "nel tab \"Footprint 2D\" verranno pre-compilati. Richiede la variabile "
-            "d'ambiente ANTHROPIC_API_KEY. Verifica sempre i valori prima di generare."
+            "d'ambiente OPENROUTER_API_KEY (file .env). Verifica sempre i valori "
+            "prima di generare."
         )
         ai_note.setWordWrap(True)
         ai_note.setStyleSheet(f"color: {TEXT}; font-style: italic;")
@@ -406,8 +532,39 @@ class MainWindow(QMainWindow):
 
         outer.addWidget(docs_group)
 
+        self._refresh_model_combo()
+        self._restore_component_type()
         self._update_project_path_label()
         return tab
+
+    # ── Tipologia componente ────────────────────────────────────────
+
+    def _restore_component_type(self) -> None:
+        """Ripropone l'ultima tipologia usata, inserendone il testo nel prompt."""
+        saved = (self._config.get("component_type") or "").strip()
+        index = self.combo_component_type.findData(saved) if saved else 0
+        self.combo_component_type.setCurrentIndex(max(index, 0))
+
+    def _on_component_type_changed(self) -> None:
+        """Sostituisce nel prompt specifico il blocco della tipologia scelta.
+
+        Il blocco e' delimitato da marcatori: cambiando tipologia si riscrive
+        solo quello, mentre le note aggiunte a mano restano al loro posto. Da
+        qui in avanti il testo e' liberamente modificabile.
+        """
+        key = self.combo_component_type.currentData() or ""
+        component_type = component_types.get(key)
+
+        self.field_component_prompt.setPlainText(
+            component_types.apply_block(
+                self.field_component_prompt.toPlainText(), component_type
+            )
+        )
+
+        self._config["component_type"] = key
+        save_config(self._config)
+        if component_type is not None:
+            self._append_log(f"Tipologia componente: {component_type.label}.")
 
     def _component_name(self) -> str:
         return self.field_name.text().strip() if hasattr(self, "field_name") else ""
@@ -495,8 +652,15 @@ class MainWindow(QMainWindow):
         self.btn_extract_ai.setEnabled(False)
         self.btn_extract_ai.setText("Analisi in corso...")
 
+        model = self._effective_model()
+        self._append_log(
+            f"Estrazione da {len(doc_paths)} file con il modello {model}"
+            + (" (solo questa sessione)." if self._session_model else ".")
+        )
+
         self._extract_worker = ExtractWorker(
             doc_paths,
+            model=model,
             system_prompt=self._current_system_prompt(),
             extra_instructions=self.field_component_prompt.toPlainText().strip() or None,
             include_nc_pins=self.action_nc_pins.isChecked(),
@@ -845,6 +1009,11 @@ class MainWindow(QMainWindow):
         self._append_log(f"Esportato -> {target}")
 
     def _append_log(self, msg: str) -> None:
+        # I tab si costruiscono in ordine: quello "Progetto" puo' gia' emettere
+        # messaggi (tipologia componente, modello) quando il log del tab
+        # "Genera" non esiste ancora.
+        if not hasattr(self, "log_text"):
+            return
         self.log_text.append(msg)
 
     def _parse_populated_pins(self) -> set | None:

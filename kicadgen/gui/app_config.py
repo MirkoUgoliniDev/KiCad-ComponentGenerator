@@ -14,11 +14,19 @@ import json
 from pathlib import Path
 
 from ..services.datasheet_extractor import DEFAULT_SYSTEM_PROMPT
+from ..services.openrouter import DEFAULT_MODEL
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config.json"
 
 DEFAULTS = {
     "system_prompt": DEFAULT_SYSTEM_PROMPT,
+    # Modello di default dell'estrazione AI: id OpenRouter, scelto dalla
+    # finestra "Modello e prompt di sistema LLM". Per una singola estrazione
+    # se ne puo' usare un altro senza toccare questo valore.
+    "model": DEFAULT_MODEL,
+    # Ultima tipologia di componente selezionata: si ripropone all'avvio,
+    # perche' di solito si generano in serie componenti dello stesso tipo.
+    "component_type": "",
     # I pin NC (Not Connected) sono elettricamente scollegati ma fisicamente
     # presenti: di default vanno generati, altrimenti manca il foro e il
     # componente non entra nella scheda.

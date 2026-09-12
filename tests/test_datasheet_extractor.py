@@ -1,7 +1,8 @@
 """Test per la logica di validazione di kicadgen.services.datasheet_extractor.
 
-Non chiamano l'API Anthropic reale: verificano solo i controlli locali
-(chiave mancante, file non supportati, troppo grandi, troppi file).
+Non chiamano l'API OpenRouter reale: verificano solo i controlli locali
+(chiave mancante, file non supportati, troppo grandi, troppi file) e la
+forma dei blocchi di contenuto inviati al modello.
 """
 
 import os
@@ -13,6 +14,7 @@ import pytest
 
 from kicadgen.services.datasheet_extractor import (
     MAX_FILES, ExtractionError, extract_pin_header_params, _file_to_content_block,
+    _openai_tool,
 )
 
 
@@ -22,7 +24,7 @@ def test_extract_requires_at_least_one_file():
 
 
 def test_extract_rejects_too_many_files(tmp_path, monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fake-key-for-test")
     files = []
     for i in range(MAX_FILES + 1):
         f = tmp_path / f"doc{i}.pdf"
@@ -33,10 +35,10 @@ def test_extract_rejects_too_many_files(tmp_path, monkeypatch):
 
 
 def test_extract_requires_api_key(tmp_path, monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     f = tmp_path / "doc.pdf"
     f.write_bytes(b"%PDF-1.4")
-    with pytest.raises(ExtractionError, match="ANTHROPIC_API_KEY"):
+    with pytest.raises(ExtractionError, match="OPENROUTER_API_KEY"):
         extract_pin_header_params([f])
 
 
@@ -57,17 +59,29 @@ def test_content_block_rejects_oversized_file(tmp_path, monkeypatch):
         _file_to_content_block(f)
 
 
-def test_content_block_builds_pdf_document_block(tmp_path):
+def test_content_block_builds_pdf_file_block(tmp_path):
     f = tmp_path / "doc.pdf"
     f.write_bytes(b"%PDF-1.4 fake content")
     block = _file_to_content_block(f)
-    assert block["type"] == "document"
-    assert block["source"]["media_type"] == "application/pdf"
+    assert block["type"] == "file"
+    assert block["file"]["filename"] == "doc.pdf"
+    assert block["file"]["file_data"].startswith("data:application/pdf;base64,")
 
 
 def test_content_block_builds_image_block(tmp_path):
     f = tmp_path / "drawing.png"
     f.write_bytes(b"\x89PNG\r\n\x1a\nfake")
     block = _file_to_content_block(f)
-    assert block["type"] == "image"
-    assert block["source"]["media_type"] == "image/png"
+    assert block["type"] == "image_url"
+    assert block["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_openai_tool_wraps_schema_for_openrouter():
+    """Lo schema deve arrivare nel formato "function" dell'API OpenAI."""
+    tool = _openai_tool()
+    assert tool["type"] == "function"
+    function = tool["function"]
+    assert function["name"] == "report_pin_header_params"
+    properties = function["parameters"]["properties"]
+    for key in ("rows", "cols", "pitch_mm", "row_spacing_mm", "pad_diameter_mm", "drill_mm"):
+        assert key in properties

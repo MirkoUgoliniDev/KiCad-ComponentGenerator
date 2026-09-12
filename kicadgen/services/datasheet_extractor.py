@@ -1,13 +1,18 @@
-"""Estrazione parametri footprint da datasheet tramite l'API Claude.
+"""Estrazione parametri footprint da datasheet tramite l'API OpenRouter.
 
-Manda i file di documentazione (PDF/immagini) all'API Anthropic e
-richiede di compilare uno strumento (tool use) con lo schema dei
-parametri del pin header, cosi' la risposta e' sempre JSON strutturato
-valido, mai testo libero da fare il parsing a mano.
+Manda i file di documentazione (PDF/immagini) a OpenRouter -- che con una
+sola chiave da' accesso ai modelli di tutti i fornitori -- e richiede di
+compilare uno strumento (tool calling) con lo schema dei parametri del
+pin header, cosi' la risposta e' sempre JSON strutturato valido, mai
+testo libero da fare il parsing a mano.
 
-Richiede la variabile d'ambiente ANTHROPIC_API_KEY (la libreria
-`anthropic` la legge automaticamente). Nessuna chiave viene letta da
-file o inserita nel codice.
+Il modello si sceglie dalla GUI (id OpenRouter, es.
+"anthropic/claude-sonnet-5"): l'impostazione globale sta in config.json,
+mentre per una singola estrazione se ne puo' usare uno piu' potente senza
+cambiare il default.
+
+Richiede la variabile d'ambiente OPENROUTER_API_KEY (di norma nel file
+.env accanto a main.py). Nessuna chiave viene inserita nel codice.
 """
 
 from __future__ import annotations
@@ -19,8 +24,8 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from ..cad3d.annotations import EDGE_NAMES
+from .openrouter import DEFAULT_MODEL, OpenRouterError, api_key, call_tool
 
-DEFAULT_MODEL = "claude-sonnet-5"
 MAX_FILES = 5
 MAX_FILE_BYTES = 20 * 1024 * 1024  # 20 MB, limite ragionevole per singolo file API
 
@@ -259,6 +264,23 @@ _EXTRACTION_TOOL = {
     },
 }
 
+def _openai_tool() -> dict:
+    """Lo stesso schema nel formato "function" richiesto da OpenRouter.
+
+    Lo schema JSON dei parametri e' identico: cambia solo l'involucro
+    (Anthropic usa ``input_schema``, l'API OpenAI-compatible di OpenRouter
+    usa ``function.parameters``).
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": _EXTRACTION_TOOL["name"],
+            "description": _EXTRACTION_TOOL["description"],
+            "parameters": _EXTRACTION_TOOL["input_schema"],
+        },
+    }
+
+
 _SYSTEM_PROMPT = (
     "Sei un assistente che legge datasheet di connettori/header/moduli elettronici "
     "(PDF o immagini di disegni meccanici quotati) ed estrae i parametri "
@@ -345,6 +367,12 @@ def _guess_media_type(path: Path) -> str:
 
 
 def _file_to_content_block(path: Path) -> dict:
+    """Un file di documentazione come blocco di contenuto per OpenRouter.
+
+    Le immagini viaggiano come ``image_url`` con una data-URL base64, i PDF
+    come blocco ``file``: sono i due formati previsti dall'API
+    OpenAI-compatible di OpenRouter.
+    """
     if path.suffix.lower() not in _SUPPORTED_SUFFIXES:
         raise ExtractionError(
             f"Formato non supportato: {path.name} (ammessi: {', '.join(sorted(_SUPPORTED_SUFFIXES))})"
@@ -355,12 +383,11 @@ def _file_to_content_block(path: Path) -> dict:
 
     data_b64 = base64.b64encode(path.read_bytes()).decode("ascii")
     media_type = _guess_media_type(path)
+    data_url = f"data:{media_type};base64,{data_b64}"
 
-    block_type = "document" if media_type == "application/pdf" else "image"
-    return {
-        "type": block_type,
-        "source": {"type": "base64", "media_type": media_type, "data": data_b64},
-    }
+    if media_type == "application/pdf":
+        return {"type": "file", "file": {"filename": path.name, "file_data": data_url}}
+    return {"type": "image_url", "image_url": {"url": data_url}}
 
 
 def _pin_map_seen_from_top(
@@ -397,7 +424,7 @@ def extract_pin_header_params(
     extra_instructions: Optional[str] = None,
     include_nc_pins: bool = True,
 ) -> ExtractedParams:
-    """Chiama l'API Claude sui file indicati e ritorna i parametri estratti.
+    """Chiama il modello via OpenRouter e ritorna i parametri estratti.
 
     Due livelli di istruzioni, entrambi opzionali:
     - `system_prompt` sovrascrive DEFAULT_SYSTEM_PROMPT ed e' l'impostazione
@@ -410,13 +437,16 @@ def extract_pin_header_params(
     vanno comunque generati: sono fisicamente presenti sul componente, e senza
     il loro pad il pezzo non entrerebbe nella scheda.
 
+    `model` e' un id OpenRouter (es. "anthropic/claude-sonnet-5"): serve a
+    usare un modello piu' capace sui datasheet difficili senza toccare il
+    default globale.
+
     Lo schema del tool resta invece fisso: e' quello che garantisce che la
     risposta sia sempre JSON strutturato valido.
 
-    Solleva ExtractionError per problemi applicativi (chiave mancante, file
-    non supportati/troppo grandi, nessuna chiamata allo strumento nella
-    risposta). Le eccezioni della libreria `anthropic` (rete, auth, rate
-    limit) si propagano cosi' come sono.
+    Solleva ExtractionError per qualunque problema applicativo: chiave
+    mancante, file non supportati o troppo grandi, errori di rete/API,
+    risposta senza la chiamata allo strumento.
     """
     if not doc_paths:
         raise ExtractionError("Nessun file selezionato.")
@@ -424,19 +454,9 @@ def extract_pin_header_params(
         raise ExtractionError(f"Troppi file selezionati (max {MAX_FILES} per chiamata).")
 
     try:
-        import anthropic
-    except ImportError as exc:
-        raise ExtractionError(
-            "Libreria 'anthropic' non installata. Esegui: pip install anthropic"
-        ) from exc
-
-    import os
-
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise ExtractionError(
-            "Variabile d'ambiente ANTHROPIC_API_KEY non impostata. "
-            "Imposta la tua API key Anthropic prima di usare l'estrazione AI."
-        )
+        api_key()
+    except OpenRouterError as exc:
+        raise ExtractionError(str(exc)) from exc
 
     content_blocks = [_file_to_content_block(p) for p in doc_paths]
     request = "Estrai i parametri del pin header da questi documenti e chiama lo strumento."
@@ -461,51 +481,64 @@ def extract_pin_header_params(
         )
     content_blocks.append({"type": "text", "text": request})
 
-    client = anthropic.Anthropic()
-    response = client.messages.create(
-        model=model or DEFAULT_MODEL,
-        max_tokens=1024,
-        system=system_prompt or _SYSTEM_PROMPT,
-        tools=[_EXTRACTION_TOOL],
-        tool_choice={"type": "tool", "name": _TOOL_NAME},
-        messages=[{"role": "user", "content": content_blocks}],
-    )
+    has_pdf = any(p.suffix.lower() == ".pdf" for p in doc_paths)
+    try:
+        data = call_tool(
+            model=model or DEFAULT_MODEL,
+            system_prompt=system_prompt or _SYSTEM_PROMPT,
+            content_blocks=content_blocks,
+            tool=_openai_tool(),
+            max_tokens=2048,
+            has_pdf=has_pdf,
+        )
+    except OpenRouterError as exc:
+        raise ExtractionError(str(exc)) from exc
 
-    for block in response.content:
-        if block.type == "tool_use" and block.name == _TOOL_NAME:
-            data = block.input
-            populated = data.get("populated_pins")
+    return _params_from_tool_arguments(data)
 
-            def _opt_float(key: str) -> Optional[float]:
-                value = data.get(key)
-                return float(value) if value is not None else None
 
-            return ExtractedParams(
-                name=data.get("name") or "",
-                description=data.get("description") or "",
-                tags=data.get("tags") or "",
-                rows=int(data["rows"]),
-                cols=int(data["cols"]),
-                pitch_mm=float(data["pitch_mm"]),
-                row_spacing_mm=float(data["row_spacing_mm"]),
-                pad_diameter_mm=float(data["pad_diameter_mm"]),
-                drill_mm=float(data["drill_mm"]),
-                confidence=data.get("confidence", "low"),
-                notes=data.get("notes", ""),
-                populated_pins=[int(p) for p in populated] if populated else None,
-                body_length_mm=_opt_float("body_length_mm"),
-                body_width_mm=_opt_float("body_width_mm"),
-                body_height_mm=_opt_float("body_height_mm"),
-                body_offset_x_mm=_opt_float("body_offset_x_mm"),
-                body_offset_y_mm=_opt_float("body_offset_y_mm"),
-                pin_length_3d_mm=_opt_float("pin_length_3d_mm"),
-                edge_fillets=data.get("edge_fillets") or None,
-                pinout=data.get("pinout") or None,
-                pin_map=_pin_map_seen_from_top(
-                    data.get("pin_map"), int(data["cols"]), data.get("pin_map_view"),
-                ),
-                body_color_hex=data.get("body_color_hex") or None,
-                text_color_hex=data.get("text_color_hex") or None,
+def _params_from_tool_arguments(data: dict) -> ExtractedParams:
+    """Costruisce ExtractedParams dagli argomenti dello strumento.
+
+    Separato dalla chiamata di rete per poterlo collaudare senza API.
+    """
+    for key in ("rows", "cols", "pitch_mm", "row_spacing_mm", "pad_diameter_mm", "drill_mm"):
+        if data.get(key) is None:
+            raise ExtractionError(
+                f"La risposta del modello non contiene il campo obbligatorio '{key}'. "
+                "Riprova, eventualmente con un modello piu' capace."
             )
 
-    raise ExtractionError("La risposta dell'API non contiene i parametri attesi.")
+    populated = data.get("populated_pins")
+
+    def _opt_float(key: str) -> Optional[float]:
+        value = data.get(key)
+        return float(value) if value is not None else None
+
+    return ExtractedParams(
+        name=data.get("name") or "",
+        description=data.get("description") or "",
+        tags=data.get("tags") or "",
+        rows=int(data["rows"]),
+        cols=int(data["cols"]),
+        pitch_mm=float(data["pitch_mm"]),
+        row_spacing_mm=float(data["row_spacing_mm"]),
+        pad_diameter_mm=float(data["pad_diameter_mm"]),
+        drill_mm=float(data["drill_mm"]),
+        confidence=data.get("confidence", "low"),
+        notes=data.get("notes", ""),
+        populated_pins=[int(p) for p in populated] if populated else None,
+        body_length_mm=_opt_float("body_length_mm"),
+        body_width_mm=_opt_float("body_width_mm"),
+        body_height_mm=_opt_float("body_height_mm"),
+        body_offset_x_mm=_opt_float("body_offset_x_mm"),
+        body_offset_y_mm=_opt_float("body_offset_y_mm"),
+        pin_length_3d_mm=_opt_float("pin_length_3d_mm"),
+        edge_fillets=data.get("edge_fillets") or None,
+        pinout=data.get("pinout") or None,
+        pin_map=_pin_map_seen_from_top(
+            data.get("pin_map"), int(data["cols"]), data.get("pin_map_view"),
+        ),
+        body_color_hex=data.get("body_color_hex") or None,
+        text_color_hex=data.get("text_color_hex") or None,
+    )

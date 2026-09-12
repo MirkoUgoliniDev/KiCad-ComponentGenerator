@@ -3,7 +3,7 @@ KiCadGen-Tool - GUI
 
 Run:  python main.py
 
-Legge ANTHROPIC_API_KEY (e altre variabili) da un file .env nella
+Legge OPENROUTER_API_KEY (e altre variabili) da un file .env nella
 cartella del progetto, se presente (vedi .env.example). Se python-dotenv
 non e' installato, si prosegue usando solo le variabili d'ambiente reali.
 """

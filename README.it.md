@@ -20,12 +20,15 @@ KicadWizard/
       freecad_build_body.py # script eseguito DENTRO freecadcmd (Part.export STEP/VRML)
       step_generator.py     # orchestrazione: trova freecadcmd, lancia il subprocess, valida l'output
     services/
-      datasheet_extractor.py # estrazione parametri (2D + 3D) da datasheet via API Claude
+      datasheet_extractor.py # estrazione parametri (2D + 3D) da datasheet via OpenRouter
+      openrouter.py          # client OpenRouter: elenco modelli con prezzi + tool calling
+      component_types.py     # tipologie di componente (THT/SMD, singolo/aggregato, castellated)
     gui/
       theme.py             # QSS Catppuccin Mocha (stessa palette di Pm3ToWav)
       preview_3d_vtk.py     # anteprima 3D interattiva (VTK/PyVista)
       app_config.py         # config.json: impostazioni globali persistenti
-      settings_dialog.py    # dialog di configurazione (prompt di sistema)
+      settings_dialog.py    # dialog di configurazione (modello di default + prompt di sistema)
+      model_dialog.py       # scelta del modello LLM con filtro per costo
       main_window.py        # QMainWindow con le 5 tab
   examples/
     generate_pin_header.py   # esempio da riga di comando: header THT 2x4 passo 2.54mm
@@ -87,8 +90,10 @@ Cinque tab:
    della documentazione: bottone "Aggiungi documentazione..." copia i
    file scelti (datasheet PDF, immagini, ecc.) in `NomeComponente/docs/`;
    lista con rimozione (richiede conferma) e apertura cartella.
+   Prima dell'estrazione si dichiarano **tipologia del componente**
+   (singolo/aggregato, THT/SMD/castellated) e **modello LLM** da usare.
    Bottone **"✨ Estrai parametri con AI dal datasheet"**: manda i file
-   selezionati in lista all'API Claude
+   selezionati in lista a OpenRouter
    (`kicadgen.services.datasheet_extractor`) e pre-compila
    righe/colonne/passo/pad/drill nel tab Footprint 2D — vedi sezione
    "Estrazione da datasheet (AI)" sotto.
@@ -181,10 +186,11 @@ Copertura in `tests/test_pin_map.py`, sul layout reale del TEL8WI.
 ### Menu
 
 - **File** — apri cartella componente, esporta in libreria, esci.
-- **Configurazione** — *Prompt di sistema LLM...* apre l'editor delle
-  istruzioni globali inviate al modello (salvate in `config.json`, che è
-  in `.gitignore`); *Genera anche i pin NC* (vedi sotto); *Apri
-  config.json* per modificarlo a mano.
+- **Configurazione** — *Modello e prompt di sistema LLM...* apre
+  l'editor del **modello di default** (scelto dall'elenco OpenRouter,
+  filtrabile per costo) e delle istruzioni globali inviate al modello
+  (salvate in `config.json`, che è in `.gitignore`); *Genera anche i pin
+  NC* (vedi sotto); *Apri config.json* per modificarlo a mano.
 - **?** — cartella del progetto tool, About.
 
 ### Due livelli di istruzioni per l'LLM
@@ -193,11 +199,12 @@ Copertura in `tests/test_pin_map.py`, sul layout reale del TEL8WI.
   componente e persiste tra le sessioni. Si usa per correggere
   comportamenti sistematici del modello, es. una quota letta dalla vista
   sbagliata del disegno.
-- **Per componente** (campo note nel tab Progetto, sotto la lista
-  documenti) — istruzioni sul singolo pezzo, es. "il case è metallico" o
-  "ignora il connettore laterale". Vengono accodate al messaggio con i
-  documenti e **hanno la precedenza** se contraddicono quanto il modello
-  deduce dai file.
+- **Per componente** (prompt specifico nel tab Progetto, sotto il
+  pulsante di estrazione) — il blocco della **tipologia** selezionata
+  (inserito automaticamente e modificabile) più le istruzioni sul
+  singolo pezzo, es. "il case è metallico" o "ignora il connettore
+  laterale". Vengono accodate al messaggio con i documenti e **hanno la
+  precedenza** se contraddicono quanto il modello deduce dai file.
 
 Lo **schema dei campi** restituiti resta fisso e non editabile da nessuno
 dei due — è quello che garantisce risposte sempre in JSON strutturato
@@ -226,9 +233,9 @@ QSS: e' Qt, la sintassi dei fogli di stile e' identica.
 
 ## Estrazione da datasheet (AI)
 
-Usa l'API Claude (multimodale: legge PDF e immagini di disegni
-meccanici quotati) per estrarre i parametri del pin header da un
-datasheet, tramite tool-use forzato (`report_pin_header_params`) cosi'
+Usa un modello multimodale via **OpenRouter** (legge PDF e immagini di
+disegni meccanici quotati) per estrarre i parametri del pin header da un
+datasheet, tramite tool calling forzato (`report_pin_header_params`) cosi'
 la risposta e' sempre JSON strutturato valido, mai testo da fare il
 parsing a mano. Implementato in
 `kicadgen/services/datasheet_extractor.py`, chiamato dalla GUI in un
@@ -237,13 +244,62 @@ parsing a mano. Implementato in
 Setup della API key (una delle due):
 
 1. **File `.env`** (consigliato): copia `.env.example` in `.env` nella
-   cartella `KicadWizard/` e inserisci `ANTHROPIC_API_KEY=sk-ant-...`.
+   cartella del progetto e inserisci `OPENROUTER_API_KEY=sk-or-v1-...`.
    Il file `.env` e' in `.gitignore`, non finisce mai in git. Viene
    caricato automaticamente da `main.py` (richiede `python-dotenv`,
    gia' in `requirements.txt`).
 2. **Variabile d'ambiente di sistema**: se preferisci non usare `.env`,
-   imposta `ANTHROPIC_API_KEY` nell'ambiente prima di lanciare
-   `python main.py` — la libreria `anthropic` la legge da sola.
+   imposta `OPENROUTER_API_KEY` nell'ambiente prima di lanciare
+   `python main.py`.
+
+Con OpenRouter una sola chiave da' accesso ai modelli di tutti i
+fornitori (Anthropic, OpenAI, Google, ...): le chiamate HTTP usano solo
+la stdlib, non serve alcun SDK.
+
+### Scelta del modello
+
+**Configurazione -> Modello e prompt di sistema LLM** contiene le due
+impostazioni globali: il **modello di default** (salvato in
+`config.json` come `model`) e il prompt di sistema. Il modello si
+sceglie da un elenco scaricato da OpenRouter, con **ricerca e filtro sul
+costo massimo di input** ($/milione di token) e, di default, solo i
+modelli realmente utilizzabili (tool calling + immagini + PDF). L'elenco
+e' messo in cache un giorno in `.openrouter_models.json` (ignorato da
+git); "Aggiorna elenco" lo riscarica.
+
+Nel tab **Progetto** la tendina "Modello LLM" mostra il default; il
+pulsante **"Modello diverso..."** permette di usare un modello piu'
+capace **solo per questa sessione** (datasheet difficile), senza toccare
+il default globale: alla chiusura dell'app la scelta si perde.
+
+### Tipologia di componente
+
+Prima di lanciare l'estrazione si dichiara nel tab **Progetto** che cosa
+si sta leggendo, perche' da questo dipendono le quote che il modello
+deve cercare:
+
+- **Componente singolo a fori passanti (THT)** — pad con foro, quote da
+  "Recommended PCB layout";
+- **Componente singolo SMD** — nessun foro, dimensioni dal
+  "Recommended Land Pattern";
+- **Componente aggregato a fori passanti** — moduli/schede DIP-style,
+  numerazione a U, bottom view, `row_spacing` molto maggiore del pitch;
+- **Componente aggregato con piazzole a mezzo foro (castellated
+  holes)** — moduli tipo ESP32: semi-fori metallizzati sul bordo,
+  saldati come SMD.
+
+Il testo della tipologia scelta viene inserito nel **prompt specifico
+del componente** (la casella di testo sotto il pulsante di estrazione),
+delimitato da marcatori: resta **liberamente modificabile** e cambiando
+tipologia si riscrive solo quel blocco, lasciando intatte le note
+aggiunte a mano (definizioni in
+`kicadgen/services/component_types.py`).
+
+> Nota: il generatore di footprint produce oggi **pad THT**. Per le
+> tipologie SMD e castellated la tipologia serve a guidare la lettura del
+> datasheet (le quote del land pattern finiscono nei parametri e nelle
+> note, con `drill = 0`), ma la generazione di pad SMD veri e propri non
+> e' ancora implementata.
 
 Limiti applicativi (in `datasheet_extractor.py`): max 5 file per
 chiamata, max 20 MB per file, formati supportati PDF/PNG/JPG/WEBP/GIF.
