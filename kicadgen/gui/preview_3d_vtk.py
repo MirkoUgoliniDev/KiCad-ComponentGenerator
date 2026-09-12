@@ -110,6 +110,17 @@ class Preview3DVtk(QtInteractor):
 
     def fit_view(self) -> None:
         """Inquadra tutto il componente lasciando un margine."""
+        # VTK puo' avere in cache una dimensione della render window diversa
+        # da quella attuale del widget Qt -- capita quando il widget vive
+        # dentro un layout che cambia dimensione dopo il primo render (qui,
+        # una QScrollArea che avvolge l'intero tab). Senza risincronizzarla,
+        # reset_camera() inquadra rispetto alla vecchia area: il modello
+        # finisce centrato in un riquadro che non e' piu' quello visibile,
+        # e appare spostato rispetto alla finestra vera.
+        try:
+            self.window_size = (max(1, self.width()), max(1, self.height()))
+        except Exception:  # noqa: BLE001 - risincronizzazione best-effort
+            pass
         self.reset_camera()
         self.camera.zoom(0.85)  # senza margine i pin restano fuori inquadratura
         self._update_label_visibility()
