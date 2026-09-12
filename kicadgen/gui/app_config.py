@@ -16,7 +16,7 @@ from pathlib import Path
 
 from ..services.datasheet_extractor import DEFAULT_SYSTEM_PROMPT
 from ..services.openrouter import DEFAULT_MODEL
-from ..services.photo_grounding import DEFAULT_VISION_MODEL
+from ..services.photo_grounding import DEFAULT_VISION_MODEL, GROUNDING_PROMPT, VERIFICATION_PROMPT
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config.json"
 
@@ -43,6 +43,8 @@ DEFAULTS = {
     # se ne puo' usare un altro senza toccare questo valore.
     "model": DEFAULT_MODEL,
     "vision_model": DEFAULT_VISION_MODEL,
+    "grounding_prompt": GROUNDING_PROMPT,
+    "verification_prompt": VERIFICATION_PROMPT,
     # Ultima tipologia di componente selezionata: si ripropone all'avvio,
     # perche' di solito si generano in serie componenti dello stesso tipo.
     "component_type": "",

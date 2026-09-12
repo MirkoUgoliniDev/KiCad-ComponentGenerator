@@ -97,6 +97,29 @@ def test_startup_size_fits_available_screen(window):
     assert window.height() == min(1050, max(1, available.height() - 40))
 
 
+@pytest.mark.parametrize("accept", [True, False])
+def test_generation_options_save_or_cancel(window, monkeypatch, accept):
+    from PyQt6.QtCore import QTimer
+    from PyQt6.QtWidgets import QDialogButtonBox
+    saved = []
+    window._config["include_nc_pins"] = True
+    monkeypatch.setattr(gui, "save_config", lambda data: saved.append(dict(data)))
+    observed = []
+    def edit():
+        dialog = window.findChild(gui.GenerationOptionsDialog)
+        observed.append(dialog.isVisible() and dialog.isModal())
+        assert dialog.include_nc_checkbox.isChecked()
+        dialog.include_nc_checkbox.setChecked(False)
+        role = (QDialogButtonBox.StandardButton.Save if accept
+                else QDialogButtonBox.StandardButton.Cancel)
+        dialog.buttons.button(role).click()
+    QTimer.singleShot(0, edit)
+    window.action_generation_options.trigger()
+    assert observed == [True]
+    assert window._config["include_nc_pins"] is (not accept)
+    assert len(saved) == int(accept)
+
+
 def test_output_actions_require_current_footprint(window, tmp_path, monkeypatch):
     controls = (window.btn_open_output, window.btn_export,
                 window.action_open_output, window.action_export)
@@ -473,12 +496,15 @@ def test_worker_forwards_separate_photo_and_datasheet_models(monkeypatch):
         calls.append((paths, kwargs))
         return expected
     monkeypatch.setattr(gui, "extract_pin_header_params", extract)
-    worker = gui.ExtractWorker([Path("board.png")], model="vendor/datasheet", vision_model="vendor/photo")
+    worker = gui.ExtractWorker([Path("board.png")], model="vendor/datasheet", vision_model="vendor/photo",
+                               grounding_prompt="localize", verification_prompt="verify")
     spy = QSignalSpy(worker.done)
     worker.run()
     assert spy[0][0] is expected
     assert calls[0][1]["model"] == "vendor/datasheet"
     assert calls[0][1]["vision_model"] == "vendor/photo"
+    assert calls[0][1]["grounding_prompt"] == "localize"
+    assert calls[0][1]["verification_prompt"] == "verify"
 
 
 def test_settings_pass_save_and_display_separate_vision_model(window, monkeypatch):
@@ -486,17 +512,22 @@ def test_settings_pass_save_and_display_separate_vision_model(window, monkeypatc
     window._session_model = "vendor/session-datasheet"
     saved = []
     class SettingsStub:
-        def __init__(self, prompt, model, parent, *, current_vision_model):
+        def __init__(self, prompt, model, parent, *, current_vision_model,
+                     current_grounding_prompt, current_verification_prompt):
             assert current_vision_model == "vendor/old-photo"
             assert parent is window
         def exec(self): return QDialog.DialogCode.Accepted
         def prompt(self): return "prompt"
         def model(self): return "vendor/new-datasheet"
         def vision_model(self): return "vendor/new-photo"
+        def grounding_prompt(self): return "localize"
+        def verification_prompt(self): return "verify"
     monkeypatch.setattr(gui, "LlmSettingsDialog", SettingsStub)
     monkeypatch.setattr(gui, "save_config", lambda config: saved.append(deepcopy(config)))
     window._edit_llm_settings()
     assert saved[0]["vision_model"] == "vendor/new-photo"
+    assert saved[0]["grounding_prompt"] == "localize"
+    assert saved[0]["verification_prompt"] == "verify"
     assert saved[0]["model"] == "vendor/new-datasheet"
     assert window._effective_model() == "vendor/session-datasheet"
     assert window._vision_model() == "vendor/new-photo"

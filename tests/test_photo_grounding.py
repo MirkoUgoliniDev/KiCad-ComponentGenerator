@@ -1208,6 +1208,24 @@ def test_inventory_mechanical_default_uses_only_occupancy_and_keeps_pngs(monkeyp
     assert result.photo_png.startswith(b"\x89PNG") and result.overlay_png.startswith(b"\x89PNG")
 
 
+def test_custom_stage_prompts_reach_only_their_api_calls(monkeypatch, photo, tmp_path):
+    monkeypatch.setattr(inventory, "prepare_photo", lambda *args: photo)
+    call, calls = api_script({"components": [native()]}, *([{"components": []}]*3),
+                            {"components": [occupancy()]})
+    result = inventory.extract_inventory(["top.png"], "photo-model", 40, 20, KINDS, call,
+        top_photo_index=0, classifier_model="verify-model", cache_dir=tmp_path,
+        grounding_prompt="Locate only", verification_prompt="Verify only")
+    assert result.components
+    assert [c["system_prompt"] for c in calls] == ["Locate only"] * 4 + ["Verify only"]
+    # A prompt change invalidates only the matching stage's cache.
+    changed_call, changed_calls = api_script({"components": [occupancy()]})
+    inventory.extract_inventory(["top.png"], "photo-model", 40, 20, KINDS, changed_call,
+        top_photo_index=0, classifier_model="verify-model", cache_dir=tmp_path,
+        grounding_prompt="Locate only", verification_prompt="Verify differently")
+    assert len(changed_calls) == 1
+    assert changed_calls[0]["system_prompt"] == "Verify differently"
+
+
 def test_inventory_mechanical_occupancy_failure_retains_envelope_and_warning(monkeypatch, photo):
     monkeypatch.setattr(inventory, "prepare_photo", lambda *args: photo)
     call, _ = api_script({"components": [native()]}, *([{"components": []}]*3),

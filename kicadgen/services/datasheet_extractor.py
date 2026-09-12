@@ -699,6 +699,8 @@ def extract_pin_header_params(
     progress: Optional[Callable[[str], None]] = None,
     vision_model: Optional[str] = None,
     photo_cache_dir: Optional[Path] = None,
+    grounding_prompt: Optional[str] = None,
+    verification_prompt: Optional[str] = None,
 ) -> ExtractedParams:
     """Chiama il modello via OpenRouter e ritorna i parametri estratti.
 
@@ -810,6 +812,7 @@ def extract_pin_header_params(
                 extra_instructions=extra_instructions,
                 cache_dir=photo_cache_dir if photo_cache_dir is not None else Path(__file__).resolve().parents[2]/"generated"/"photo-cache",
                 classifier_model=model or DEFAULT_MODEL,
+                grounding_prompt=grounding_prompt, verification_prompt=verification_prompt,
             )
         except (OpenRouterError, ValueError, OSError) as exc:
             data["notes"] = (str(data.get("notes") or "") + f"\nInventario fotografico fallito: {exc}").strip()

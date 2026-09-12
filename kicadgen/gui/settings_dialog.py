@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from PyQt6.QtWidgets import (
     QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QTextEdit, QVBoxLayout,
+    QPushButton, QTextEdit, QVBoxLayout, QTabWidget, QWidget,
 )
 
 from ..services.datasheet_extractor import DEFAULT_SYSTEM_PROMPT
 from ..services.openrouter import DEFAULT_MODEL
-from ..services.photo_grounding import DEFAULT_VISION_MODEL
+from ..services.photo_grounding import DEFAULT_VISION_MODEL, GROUNDING_PROMPT, VERIFICATION_PROMPT
 from .model_dialog import pick_model
 
 
@@ -28,15 +28,25 @@ class LlmSettingsDialog(QDialog):
     """
 
     def __init__(self, current_prompt: str, current_model: str | None = None, parent=None,
-                 current_vision_model: str | None = None):
+                 current_vision_model: str | None = None,
+                 current_grounding_prompt=None, current_verification_prompt=None):
         super().__init__(parent)
         self.setWindowTitle("Modello e prompt di sistema LLM")
-        self.resize(760, 620)
+        self.resize(820, 680)
+        self.setModal(True)
 
         self._model = (current_model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
         self._vision_model = (current_vision_model or DEFAULT_VISION_MODEL).strip() or DEFAULT_VISION_MODEL
 
         layout = QVBoxLayout(self)
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+        pages = []
+        for title in ("Datasheet", "Localizzazione foto", "Verifica foto"):
+            page = QWidget()
+            pages.append(QVBoxLayout(page))
+            self.tabs.addTab(page, title)
+        datasheet_layout, photo_layout, verify_layout = pages
 
         model_form = QFormLayout()
         self.field_model = QLineEdit(self._model)
@@ -57,8 +67,10 @@ class LlmSettingsDialog(QDialog):
         vision_row = QHBoxLayout()
         vision_row.addWidget(self.field_vision_model)
         vision_row.addWidget(vision_button)
-        model_form.addRow("Localizzazione foto:", vision_row)
-        layout.addLayout(model_form)
+        photo_form = QFormLayout()
+        photo_form.addRow("Modello foto:", vision_row)
+        photo_layout.addLayout(photo_form)
+        datasheet_layout.addLayout(model_form)
 
         model_note = QLabel(
             "Il modello si sceglie dall'elenco OpenRouter, filtrabile per costo. "
@@ -68,7 +80,7 @@ class LlmSettingsDialog(QDialog):
             "Serve la chiave OPENROUTER_API_KEY nel file .env."
         )
         model_note.setWordWrap(True)
-        layout.addWidget(model_note)
+        datasheet_layout.addWidget(model_note)
         vision_note = QLabel(
             "Le foto usano un modello dedicato alla localizzazione; il modello datasheet verifica "
             "poi solo la presenza di corpi montati, senza spostarli o riconoscere il circuito. "
@@ -79,7 +91,7 @@ class LlmSettingsDialog(QDialog):
             "le altezze sono indicative e richiedono una vista laterale o una misura."
         )
         vision_note.setWordWrap(True)
-        layout.addWidget(vision_note)
+        photo_layout.addWidget(vision_note)
 
         intro = QLabel(
             "Prompt di sistema: istruzioni inviate al modello durante "
@@ -91,11 +103,29 @@ class LlmSettingsDialog(QDialog):
             "che garantisce che la risposta arrivi sempre come JSON strutturato valido."
         )
         intro.setWordWrap(True)
-        layout.addWidget(intro)
+        datasheet_layout.addWidget(intro)
 
         self.editor = QTextEdit()
+        self.editor.setAcceptRichText(False)
         self.editor.setPlainText(current_prompt)
-        layout.addWidget(self.editor)
+        datasheet_layout.addWidget(self.editor)
+        self.grounding_editor = QTextEdit()
+        self.grounding_editor.setAcceptRichText(False)
+        self.grounding_editor.setPlainText(current_grounding_prompt or GROUNDING_PROMPT)
+        photo_layout.addWidget(self.grounding_editor)
+        self.verification_model_label = QLabel()
+        self._refresh_verification_label()
+        verify_layout.addWidget(self.verification_model_label)
+        verify_note = QLabel("Conferma solo la presenza dei corpi montati nei rettangoli proposti. "
+                            "Non modifica coordinate né aggiunge ID. Usa il modello datasheet, "
+                            "inclusa l'eventuale scelta per la sessione.\n\n"
+                            "Lo schema JSON e i controlli geometrici restano gestiti dal codice.")
+        verify_note.setWordWrap(True)
+        verify_layout.addWidget(verify_note)
+        self.verification_editor = QTextEdit()
+        self.verification_editor.setAcceptRichText(False)
+        self.verification_editor.setPlainText(current_verification_prompt or VERIFICATION_PROMPT)
+        verify_layout.addWidget(self.verification_editor)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.RestoreDefaults
@@ -103,7 +133,7 @@ class LlmSettingsDialog(QDialog):
             | QDialogButtonBox.StandardButton.Cancel
         )
         buttons.button(QDialogButtonBox.StandardButton.RestoreDefaults).setText(
-            "Ripristina default"
+            "Ripristina default di questo tab"
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -117,13 +147,29 @@ class LlmSettingsDialog(QDialog):
         if chosen:
             self._model = chosen
             self.field_model.setText(chosen)
+            self._refresh_verification_label()
 
     def _restore_defaults(self) -> None:
-        self.editor.setPlainText(DEFAULT_SYSTEM_PROMPT)
-        self._model = DEFAULT_MODEL
-        self.field_model.setText(DEFAULT_MODEL)
-        self._vision_model = DEFAULT_VISION_MODEL
-        self.field_vision_model.setText(DEFAULT_VISION_MODEL)
+        if self.tabs.currentIndex() == 0:
+            self.editor.setPlainText(DEFAULT_SYSTEM_PROMPT)
+            self._model = DEFAULT_MODEL
+            self.field_model.setText(DEFAULT_MODEL)
+            self._refresh_verification_label()
+        elif self.tabs.currentIndex() == 1:
+            self.grounding_editor.setPlainText(GROUNDING_PROMPT)
+            self._vision_model = DEFAULT_VISION_MODEL
+            self.field_vision_model.setText(DEFAULT_VISION_MODEL)
+        else:
+            self.verification_editor.setPlainText(VERIFICATION_PROMPT)
+
+    def _refresh_verification_label(self):
+        self.verification_model_label.setText(f"Modello condiviso con Datasheet: {self._model}")
+
+    def grounding_prompt(self):
+        return self.grounding_editor.toPlainText().strip() or GROUNDING_PROMPT
+
+    def verification_prompt(self):
+        return self.verification_editor.toPlainText().strip() or VERIFICATION_PROMPT
 
     def _pick_vision_model(self) -> None:
         chosen = pick_model(self._vision_model, self, title="Modello per localizzazione fotografica")

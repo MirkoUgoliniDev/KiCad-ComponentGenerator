@@ -72,6 +72,7 @@ from ..services.datasheet_extractor import (
 from ..services.openrouter import DEFAULT_MODEL
 from .app_config import CONFIG_PATH, DEFAULTS, load_config, save_config
 from .analysis_overlay import AnalysisOverlay
+from .generation_options_dialog import GenerationOptionsDialog
 from .model_dialog import pick_model
 from .pinout_dialog import PinoutDialog
 from .photo_review_dialog import PhotoReviewDialog, PhotoTransform
@@ -247,6 +248,7 @@ class ExtractWorker(QThread):
         self, doc_paths: list[Path], system_prompt: str | None = None,
         extra_instructions: str | None = None, include_nc_pins: bool = True,
         model: str | None = None, vision_model: str | None = None,
+        grounding_prompt: str | None = None, verification_prompt: str | None = None,
     ):
         super().__init__()
         self.doc_paths = doc_paths
@@ -255,6 +257,8 @@ class ExtractWorker(QThread):
         self.include_nc_pins = include_nc_pins
         self.model = model
         self.vision_model = vision_model
+        self.grounding_prompt = grounding_prompt
+        self.verification_prompt = verification_prompt
 
     def run(self) -> None:
         try:
@@ -262,6 +266,7 @@ class ExtractWorker(QThread):
                 self.doc_paths,
                 model=self.model,
                 vision_model=self.vision_model,
+                grounding_prompt=self.grounding_prompt, verification_prompt=self.verification_prompt,
                 system_prompt=self.system_prompt,
                 extra_instructions=self.extra_instructions,
                 include_nc_pins=self.include_nc_pins,
@@ -330,14 +335,8 @@ class MainWindow(QMainWindow):
         )
         config_menu.addSeparator()
 
-        self.action_nc_pins = config_menu.addAction("Genera anche i pin NC (Not Connected)")
-        self.action_nc_pins.setCheckable(True)
-        self.action_nc_pins.setChecked(bool(self._config.get("include_nc_pins", True)))
-        self.action_nc_pins.setToolTip(
-            "I pin NC non sono collegati elettricamente ma sono fisicamente presenti: "
-            "senza il loro pad il componente non entra nella scheda."
-        )
-        self.action_nc_pins.toggled.connect(self._on_nc_pins_toggled)
+        self.action_generation_options = config_menu.addAction(
+            "Opzioni di generazione...", self._edit_generation_options)
 
         config_menu.addSeparator()
         config_menu.addAction("Apri config.json", self._open_config_file)
@@ -349,7 +348,11 @@ class MainWindow(QMainWindow):
         help_menu.addSeparator()
         help_menu.addAction("About", self._show_about)
 
-    def _on_nc_pins_toggled(self, checked: bool) -> None:
+    def _edit_generation_options(self) -> None:
+        dialog = GenerationOptionsDialog(bool(self._config.get("include_nc_pins", True)), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        checked = dialog.include_nc_pins()
         self._config["include_nc_pins"] = checked
         save_config(self._config)
         self._append_log(
@@ -361,6 +364,8 @@ class MainWindow(QMainWindow):
         dialog = LlmSettingsDialog(
             self._config["system_prompt"], self._default_model(), self,
             current_vision_model=self._default_vision_model(),
+            current_grounding_prompt=self._config.get("grounding_prompt"),
+            current_verification_prompt=self._config.get("verification_prompt"),
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -368,6 +373,8 @@ class MainWindow(QMainWindow):
         self._config["system_prompt"] = dialog.prompt() or DEFAULT_SYSTEM_PROMPT
         self._config["model"] = dialog.model()
         self._config["vision_model"] = dialog.vision_model()
+        self._config["grounding_prompt"] = dialog.grounding_prompt()
+        self._config["verification_prompt"] = dialog.verification_prompt()
         save_config(self._config)
         self._refresh_model_combo()
         self._append_log(
@@ -899,9 +906,11 @@ class MainWindow(QMainWindow):
             doc_paths,
             model=model,
             vision_model=self._vision_model(),
+            grounding_prompt=self._config.get("grounding_prompt"),
+            verification_prompt=self._config.get("verification_prompt"),
             system_prompt=self._current_system_prompt(),
             extra_instructions=self.field_component_prompt.toPlainText().strip() or None,
-            include_nc_pins=self.action_nc_pins.isChecked(),
+            include_nc_pins=bool(self._config.get("include_nc_pins", True)),
         )
         self._extract_worker.done.connect(self._on_extracted)
         self._extract_worker.error.connect(self._on_extract_error)

@@ -299,7 +299,8 @@ def draw_inventory(image, components, use_ids=False):
 
 def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                       top_photo_index=None, extra_instructions=None,
-                      grounding=True, cache_dir=None, classifier_model=None, mechanical=True):
+                      grounding=True, cache_dir=None, classifier_model=None, mechanical=True,
+                      grounding_prompt=None, verification_prompt=None):
     log = progress or (lambda message: None)
     report = InventoryResult()
     def warn(message):
@@ -347,7 +348,8 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             if any(word in message for word in ("fallita", "Da verificare:", "non valida", "discordante")):
                 report.warnings.append(message)
         report.components = grounded_components(photo,model,length,width,kinds,call,
-                                               report_progress,cache_dir,extra_instructions,classifier_model,mechanical)
+                                               report_progress,cache_dir,extra_instructions,classifier_model,mechanical,
+                                               grounding_prompt=grounding_prompt, verification_prompt=verification_prompt)
         for i,c in enumerate(report.components,1):
             log(f"#{i} {c['name']} [{c['kind']}] centro ({c['x_mm']:.2f}, {c['y_mm']:.2f}) mm; "
                 f"{c['length_mm']:.2f} x {c['width_mm']:.2f} mm; "

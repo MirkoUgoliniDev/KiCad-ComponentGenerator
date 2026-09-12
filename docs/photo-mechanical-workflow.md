@@ -26,6 +26,14 @@ interferenze meccaniche. Non sono introdotti margini di sicurezza impliciti.
 
 ## Pipeline
 
+In **Configurazione → Modello e prompt di sistema LLM**, i sotto-tab **Datasheet**,
+**Localizzazione foto** e **Verifica foto** espongono prompt globali indipendenti.
+La verifica usa il modello datasheet con un prompt distinto. Il ripristino riguarda
+solo il tab aperto; Annulla non salva modifiche. Le vecchie configurazioni ricevono
+i default dei due nuovi prompt, senza sostituire il prompt datasheet personalizzato.
+Gli schemi JSON restano nel codice. Una modifica al prompt invalida la cache delle
+relative chiamate e può quindi comportare nuove inferenze a pagamento.
+
 - Un solo riferimento superiore; le altre foto servono a quote e pinout, non
   vengono sommate come se contenessero altri componenti.
 - Ritaglio PCB calibrato con dimensioni note. La foto deve avere lato lungo
