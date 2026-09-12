@@ -233,6 +233,22 @@ def main():
         FreeCAD.Vector(x0, y0, 0),
     )
 
+    # Semi-fori metallizzati sul bordo (moduli castellated): cilindri
+    # centrati sul bordo, di cui resta nel solido solo la meta' interna.
+    # Il taglio va fatto PRIMA dei fillet, cosi' i raccordi si applicano
+    # alla forma definitiva.
+    for notch in data.get("notches", []):
+        try:
+            cutter = Part.makeCylinder(
+                notch["radius"], body["height_mm"] + 2.0,
+                FreeCAD.Vector(notch["x"], notch["y"], -1.0),
+                FreeCAD.Vector(0, 0, 1),
+            )
+            body_shape = body_shape.cut(cutter)
+        except Exception as exc:  # noqa: BLE001 - un semi-foro in meno non e' fatale
+            print(f"KICADGEN_WARN:semi-foro non applicato in "
+                  f"({notch.get('x')}, {notch.get('y')}): {exc}")
+
     if fillets:
         body_shape = _apply_fillets(body_shape, fillets, bounds)
 
@@ -253,6 +269,16 @@ def main():
         text_obj = doc.addObject("Part::Feature", f"Serigrafia{i}")
         text_obj.Shape = text_solid
         colored.append((text_obj, color))
+
+    # Solidi aggiuntivi (es. il blocco dei componenti montati sul PCB di un
+    # modulo): box indipendenti, con un colore proprio.
+    for i, box in enumerate(data.get("extra_boxes", [])):
+        box_obj = doc.addObject("Part::Feature", box.get("name", f"Extra{i}"))
+        box_obj.Shape = Part.makeBox(
+            box["length_mm"], box["width_mm"], box["height_mm"],
+            FreeCAD.Vector(box["x"], box["y"], box.get("z", 0)),
+        )
+        colored.append((box_obj, box.get("color_hex", "#1a1a1a")))
 
     pin_radius = pin_diameter / 2.0
     for pin_num, x, y in pins:

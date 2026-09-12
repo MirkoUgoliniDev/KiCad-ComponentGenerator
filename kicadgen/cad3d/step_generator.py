@@ -13,9 +13,11 @@ import os
 import subprocess
 import sys
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
+from ..generators.castellated_module import CastellatedModuleParams, pad_positions
 from ..generators.pin_header import PinHeaderParams, pin_positions
 from .annotations import EdgeFilletAnnotation, FaceTextAnnotation
 from .body_params import Body3DParams
@@ -54,6 +56,67 @@ def find_freecadcmd() -> str:
     )
 
 
+def generate_castellated_3d_model(
+    params: CastellatedModuleParams,
+    body: Body3DParams,
+    output_dir: Path,
+    freecadcmd_path: Optional[str] = None,
+    fillets: Optional[list] = None,
+    face_texts: Optional[list] = None,
+    font_file: str = DEFAULT_FONT_FILE,
+) -> dict:
+    """Genera il 3D di un modulo castellated: lastra con i semi-fori sul bordo.
+
+    Rispetto al modello a matrice cambiano due cose sostanziali: non ci sono
+    pin cilindrici che sporgono sotto il corpo (i contatti sono semi-fori
+    metallizzati sul bordo del PCB del modulo, che appoggia sulla scheda), e
+    quei semi-fori vanno tagliati nel solido, altrimenti il modello sarebbe
+    un parallelepipedo liscio che non somiglia al pezzo reale.
+    """
+    params.validate()
+
+    half_length = params.body_length / 2
+    half_width = params.body_width / 2
+    radius = params.hole_diameter / 2
+    notches = []
+    for placement in pad_positions(params):
+        # Il semi-foro sta sul bordo del modulo: il taglio e' un cilindro
+        # centrato sul bordo, quindi meta' cade fuori dal solido.
+        if placement.edge == "left":
+            notches.append({"x": -half_length, "y": placement.y, "radius": radius})
+        elif placement.edge == "right":
+            notches.append({"x": half_length, "y": placement.y, "radius": radius})
+        elif placement.edge == "top":
+            notches.append({"x": placement.x, "y": -half_width, "radius": radius})
+        else:
+            notches.append({"x": placement.x, "y": half_width, "radius": radius})
+
+    # Il corpo vero e proprio e' il PCB del modulo; i componenti montati
+    # sopra diventano un secondo solido, rientrato rispetto al bordo (dove
+    # ci sono i semi-fori non c'e' nulla montato) e alto quanto resta.
+    pcb = replace(body, height_mm=params.pcb_thickness)
+    extra_boxes = []
+    component_height = body.height_mm - params.pcb_thickness
+    inset = params.component_inset
+    if component_height > 0 and params.body_length > 2 * inset and params.body_width > 2 * inset:
+        extra_boxes.append({
+            "name": "Componenti",
+            "x": -params.body_length / 2 + inset,
+            "y": -params.body_width / 2 + inset,
+            "z": params.pcb_thickness,
+            "length_mm": params.body_length - 2 * inset,
+            "width_mm": params.body_width - 2 * inset,
+            "height_mm": component_height,
+            "color_hex": body.color_hex,
+        })
+
+    return _run_freecad(
+        params.name, [], pcb, output_dir,
+        freecadcmd_path=freecadcmd_path, fillets=fillets, face_texts=face_texts,
+        font_file=font_file, notches=notches, extra_boxes=extra_boxes,
+    )
+
+
 def generate_3d_model(
     pin_params: PinHeaderParams,
     body: Body3DParams,
@@ -74,6 +137,33 @@ def generate_3d_model(
     FreeCAD fallito) con l'output di freecadcmd incluso per debug.
     """
     pin_params.validate()
+    pins = [[pin, x, y] for pin, x, y in pin_positions(pin_params)]
+    return _run_freecad(
+        pin_params.name, pins, body, output_dir,
+        freecadcmd_path=freecadcmd_path, fillets=fillets, face_texts=face_texts,
+        font_file=font_file,
+    )
+
+
+def _run_freecad(
+    name: str,
+    pins: list,
+    body: Body3DParams,
+    output_dir: Path,
+    freecadcmd_path: Optional[str] = None,
+    fillets: Optional[list] = None,
+    face_texts: Optional[list] = None,
+    font_file: str = DEFAULT_FONT_FILE,
+    notches: Optional[list] = None,
+    extra_boxes: Optional[list] = None,
+) -> dict:
+    """Costruisce il JSON e lancia freecadcmd; comune a tutti i generatori 3D.
+
+    `pins` sono i cilindri da aggiungere sotto il corpo (vuoto per i moduli
+    castellated), `notches` i cilindri da SOTTRARRE al corpo per ricavare i
+    semi-fori sul bordo, `extra_boxes` i solidi da aggiungere sopra il corpo
+    (per i moduli, il blocco che rappresenta i componenti montati sul PCB).
+    """
     body.validate()
     fillets = fillets or []
     face_texts = face_texts or []
@@ -84,13 +174,11 @@ def generate_3d_model(
 
     freecadcmd = freecadcmd_path or find_freecadcmd()
 
-    shapes_dir = output_dir / f"{pin_params.name}.3dshapes"
+    shapes_dir = output_dir / f"{name}.3dshapes"
     shapes_dir.mkdir(parents=True, exist_ok=True)
-    step_path = shapes_dir / f"{pin_params.name}.step"
-    wrl_path = shapes_dir / f"{pin_params.name}.wrl"
-    mesh_path = shapes_dir / f"{pin_params.name}.preview.json"
-
-    pins = [[pin, x, y] for pin, x, y in pin_positions(pin_params)]
+    step_path = shapes_dir / f"{name}.step"
+    wrl_path = shapes_dir / f"{name}.wrl"
+    mesh_path = shapes_dir / f"{name}.preview.json"
     payload = {
         "body": {
             "length_mm": body.length_mm,
@@ -101,6 +189,8 @@ def generate_3d_model(
             "color_hex": body.color_hex,
         },
         "pins": pins,
+        "notches": list(notches or []),
+        "extra_boxes": list(extra_boxes or []),
         "pin_diameter_mm": body.pin_diameter_mm,
         "pin_length_mm": body.pin_length_mm,
         "pin_color_hex": body.pin_color_hex,

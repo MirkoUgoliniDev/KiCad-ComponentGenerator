@@ -104,6 +104,16 @@ class CastellatedModuleParams:
     pad_length: float = 1.8
     pad_width: float = 1.0
     pad_overhang: float = 0.5
+    # Diametro del semi-foro metallizzato sul bordo: non serve al footprint
+    # (i pad sono rettangolari) ma al modello 3D, dove i semi-fori vanno
+    # tagliati nel solido perche' il pezzo somigli a quello reale.
+    hole_diameter: float = 1.0
+    # Il modulo non e' un blocco pieno: e' un PCB sottile con sopra i
+    # componenti. Il modello 3D lo costruisce come due solidi, perche' un
+    # parallelepipedo unico alto quanto il componente piu' alto non
+    # somiglia al pezzo reale ne' serve a valutare gli ingombri.
+    pcb_thickness: float = 1.0
+    component_inset: float = 1.0
     margin: float = 0.25
 
     def side_pad_length(self, side: CastellatedSide) -> float:
@@ -123,6 +133,10 @@ class CastellatedModuleParams:
             raise ValueError("Le dimensioni del corpo devono essere > 0.")
         if not self.sides:
             raise ValueError("Serve almeno un lato con dei contatti.")
+        if self.hole_diameter <= 0:
+            raise ValueError("Il diametro del semi-foro deve essere > 0.")
+        if self.pcb_thickness <= 0:
+            raise ValueError("Lo spessore del PCB deve essere > 0.")
 
         seen_numbers: dict[str, str] = {}
         for side in self.sides:

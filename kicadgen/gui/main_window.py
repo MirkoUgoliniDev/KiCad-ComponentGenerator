@@ -55,7 +55,9 @@ from PyQt6.QtWidgets import (
 
 from ..cad3d.annotations import EDGE_NAMES, FACE_NAMES, EdgeFilletAnnotation, FaceTextAnnotation
 from ..cad3d.body_params import Body3DParams
-from ..cad3d.step_generator import Cad3DError, generate_3d_model
+from ..cad3d.step_generator import (
+    Cad3DError, generate_3d_model, generate_castellated_3d_model,
+)
 from ..generators.castellated_module import (
     EDGE_LABELS, EDGES as CASTELLATED_EDGES, CastellatedModuleParams,
     CastellatedSide, build_castellated_module, pad_positions,
@@ -79,6 +81,22 @@ APP_DIR = Path(__file__).resolve().parent.parent.parent
 DEFAULT_LIBRARY_ROOT = APP_DIR / "generated"
 DEFAULT_EXPORT_ROOT = APP_DIR.parent  # .../CustomComponents
 DOCS_SUBDIR = "docs"
+
+
+def _generate_3d(params, body: Body3DParams, project_dir: Path, fillets, face_texts):
+    """Genera il 3D con il generatore adatto al tipo di componente.
+
+    I due modelli sono diversi in modo sostanziale: il pin header e' un
+    corpo con pin cilindrici che sporgono sotto, il modulo castellated e'
+    un PCB con i semi-fori tagliati sul bordo e i componenti sopra.
+    """
+    if isinstance(params, CastellatedModuleParams):
+        return generate_castellated_3d_model(
+            params, body, project_dir, fillets=fillets, face_texts=face_texts,
+        )
+    return generate_3d_model(
+        params, body, project_dir, fillets=fillets, face_texts=face_texts,
+    )
 
 
 class GenerateWorker(QThread):
@@ -128,13 +146,11 @@ class GenerateWorker(QThread):
             self.error.emit(str(exc))
             return
 
-        # Il modello 3D esiste per ora solo per i footprint a matrice: il
-        # generatore 3D posiziona i pin a partire da PinHeaderParams.
-        if self.body is not None and not isinstance(self.params, CastellatedModuleParams):
+        if self.body is not None:
             try:
-                result = generate_3d_model(
+                result = _generate_3d(
                     self.params, self.body, self.project_dir,
-                    fillets=self.fillets, face_texts=self.face_texts,
+                    self.fillets, self.face_texts,
                 )
                 self.cad3d_done.emit(str(result["step_path"]))
             except Cad3DError as exc:
@@ -160,8 +176,8 @@ class Cad3DWorker(QThread):
     warning = pyqtSignal(str)
 
     def __init__(
-        self, params: PinHeaderParams, body: Body3DParams, project_dir: Path,
-        fillets: list, face_texts: list,
+        self, params: PinHeaderParams | CastellatedModuleParams, body: Body3DParams,
+        project_dir: Path, fillets: list, face_texts: list,
     ):
         super().__init__()
         self.params = params
@@ -172,9 +188,9 @@ class Cad3DWorker(QThread):
 
     def run(self) -> None:
         try:
-            result = generate_3d_model(
+            result = _generate_3d(
                 self.params, self.body, self.project_dir,
-                fillets=self.fillets, face_texts=self.face_texts,
+                self.fillets, self.face_texts,
             )
             for warning in result.get("warnings", []):
                 self.warning.emit(warning)
@@ -984,7 +1000,30 @@ class MainWindow(QMainWindow):
         form.addRow("Larghezza corpo:", self.field_cast_body_width)
         form.addRow("Lunghezza pad:", self.field_cast_pad_length)
         form.addRow("Larghezza pad:", self.field_cast_pad_width)
+        self.field_cast_hole = _mm(1.5, maximum=10.0)
+        self.field_cast_hole.setToolTip(
+            "Diametro del semi-foro metallizzato sul bordo: serve al modello 3D, "
+            "dove i semi-fori vengono tagliati nel PCB del modulo."
+        )
+        self.field_cast_pcb = _mm(1.0, maximum=10.0)
+        self.field_cast_pcb.setToolTip(
+            "Spessore del PCB del modulo. Nel 3D il modulo e' un PCB sottile con "
+            "sopra un blocco che rappresenta i componenti montati: l'altezza "
+            "totale si imposta in \"Modello 3D\"."
+        )
+        self.field_cast_inset = _mm(1.0, maximum=20.0)
+        self.field_cast_inset.setToolTip(
+            "Quanto il blocco dei componenti rientra dal bordo del PCB: sul bordo "
+            "ci sono i semi-fori, li' non e' montato nulla."
+        )
+        for field in (self.field_cast_body_length, self.field_cast_body_width,
+                      self.field_cast_hole, self.field_cast_pcb, self.field_cast_inset):
+            field.valueChanged.connect(self._on_sides_changed)
+
         form.addRow("Sporgenza pad dal bordo:", self.field_cast_overhang)
+        form.addRow("Diametro semi-foro (3D):", self.field_cast_hole)
+        form.addRow("Spessore PCB (3D):", self.field_cast_pcb)
+        form.addRow("Rientro componenti (3D):", self.field_cast_inset)
         layout.addLayout(form)
 
         layout.addWidget(QLabel(
@@ -1023,14 +1062,26 @@ class MainWindow(QMainWindow):
             # Due lati opposti sono la configurazione di gran lunga piu' comune.
             self._add_side_row({"edge": "left", "count": 3, "pitch_mm": 2.54, "first_pin": 1})
             self._add_side_row({"edge": "right", "count": 3, "pitch_mm": 2.54, "first_pin": 4})
-        if checked and self.group_3d.isChecked():
-            self.group_3d.setChecked(False)
-            self._append_log(
-                "Modello 3D disattivato: per i moduli castellated e' ancora "
-                "disponibile solo il footprint 2D."
-            )
+        self._sync_3d_fields_for_castellated(checked)
         self._update_summary()
         self._draw_preview()
+
+    def _sync_3d_fields_for_castellated(self, castellated: bool) -> None:
+        """Nei moduli castellated il corpo 3D viene dal modulo, non a mano.
+
+        Lunghezza, larghezza e offset descrivono il PCB del modulo, che e'
+        gia' definito nel gruppo qui sopra: lasciarli modificabili
+        permetterebbe di generare un 3D scollegato dal footprint. La
+        lunghezza dei pin non serve: non ci sono pin che sporgono.
+        """
+        for field in (self.field_body_length, self.field_body_width,
+                      self.field_body_offset_x, self.field_body_offset_y,
+                      self.field_pin_length_3d):
+            field.setEnabled(not castellated)
+            field.setToolTip(
+                "Per i moduli castellated questo valore viene dal gruppo "
+                "\"Modulo castellated\"." if castellated else ""
+            )
 
     def _add_side_row(self, side: dict | None = None) -> None:
         side = side or {}
@@ -1109,6 +1160,9 @@ class MainWindow(QMainWindow):
             pad_length=self.field_cast_pad_length.value(),
             pad_width=self.field_cast_pad_width.value(),
             pad_overhang=self.field_cast_overhang.value(),
+            hole_diameter=self.field_cast_hole.value(),
+            pcb_thickness=self.field_cast_pcb.value(),
+            component_inset=self.field_cast_inset.value(),
             sides=self._sides_from_table(),
         )
 
@@ -1298,6 +1352,21 @@ class MainWindow(QMainWindow):
     def _current_body_params(self) -> Body3DParams | None:
         if not self.group_3d.isChecked():
             return None
+        if self._is_castellated():
+            # Il PCB del modulo e' centrato sull'origine come il footprint:
+            # ingombro e offset si ricavano da li', non dai campi a mano.
+            module = self._current_castellated_params()
+            return Body3DParams(
+                length_mm=module.body_length,
+                width_mm=module.body_width,
+                height_mm=self.field_body_height.value(),
+                offset_x_mm=-module.body_length / 2,
+                offset_y_mm=-module.body_width / 2,
+                pin_diameter_mm=module.hole_diameter,
+                pin_length_mm=module.pcb_thickness,
+                color_hex=self.field_body_color.text().strip(),
+                pin_color_hex=self.field_pin_color.text().strip(),
+            )
         return Body3DParams(
             length_mm=self.field_body_length.value(),
             width_mm=self.field_body_width.value(),
@@ -1384,7 +1453,7 @@ class MainWindow(QMainWindow):
                 f"pad={params.pad_diameter}mm, drill={params.drill}mm"
             )
 
-        body = None if isinstance(params, CastellatedModuleParams) else self._current_body_params()
+        body = self._current_body_params()
         if body is not None:
             try:
                 body.validate()
@@ -1587,7 +1656,10 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            params = self._current_params()
+            params = (
+                self._current_castellated_params() if self._is_castellated()
+                else self._current_params()
+            )
             params.validate()
             body.validate()
         except ValueError as exc:
@@ -1792,11 +1864,18 @@ class MainWindow(QMainWindow):
         save_config(self._config)
         self._draw_preview()
 
-    def _draw_grid(self, mm_to_px: float, width: float, height: float, margin: float) -> None:
+    def _draw_grid(
+        self, mm_to_px: float, width: float, height: float, margin: float,
+        x0: float = 0.0, y0: float = 0.0,
+    ) -> None:
         """Griglia di riferimento, con passo in mm o in decimi di pollice.
 
         Una linea marcata ogni 5 passi fa da riferimento grosso (5mm oppure
         mezzo pollice), le altre sono sottili.
+
+        (x0, y0) e' l'angolo da cui parte l'area da coprire: zero per il
+        footprint a matrice, che ha il pin 1 nell'origine, negativo per i
+        moduli castellated, centrati sull'origine.
         """
         step = 2.54 if self.combo_grid_unit.currentData() == "inch" else 1.0
 
@@ -1806,8 +1885,8 @@ class MainWindow(QMainWindow):
         major.setWidthF(1.0)
 
         pad = margin + 2.0
-        i_min, i_max = math.floor(-pad / step), math.ceil((width + pad) / step)
-        j_min, j_max = math.floor(-pad / step), math.ceil((height + pad) / step)
+        i_min, i_max = math.floor((x0 - pad) / step), math.ceil((x0 + width + pad) / step)
+        j_min, j_max = math.floor((y0 - pad) / step), math.ceil((y0 + height + pad) / step)
 
         for i in range(i_min, i_max + 1):
             pen = major if i % 5 == 0 else minor
@@ -1834,6 +1913,12 @@ class MainWindow(QMainWindow):
         """
         self.preview_scene.clear()
         mm_to_px = 20.0
+
+        if self.chk_grid.isChecked():
+            self._draw_grid(
+                mm_to_px, p.body_length, p.body_width, p.pad_overhang + p.pad_length,
+                x0=-p.body_length / 2, y0=-p.body_width / 2,
+            )
 
         silk_pen = QPen(QColor(TEXT))
         silk_pen.setWidthF(1.5)
@@ -2021,10 +2106,24 @@ class MainWindow(QMainWindow):
 
     def _draw_preview_3d(self) -> None:
         if self._is_castellated():
+            # Per i moduli non esiste un'approssimazione parametrica da
+            # disegnare al volo (il solido nasce dal taglio dei semi-fori):
+            # si mostra la geometria reale appena generata, se c'e'.
+            if self._last_mesh_path and Path(self._last_mesh_path).is_file():
+                try:
+                    self.preview_3d.render_mesh(self._last_mesh_path)
+                    self.label_3d_status.setText(
+                        "Geometria reale del modulo (PCB con semi-fori sul bordo "
+                        "e blocco dei componenti)."
+                    )
+                    return
+                except Exception as exc:  # noqa: BLE001 - anteprima best-effort
+                    self._append_log(f"Anteprima mesh non disponibile: {exc}")
             self.preview_3d.clear_preview()
             self.label_3d_status.setText(
-                "Per i moduli castellated e' disponibile per ora solo il "
-                "footprint 2D: il modello 3D non viene generato."
+                "Attiva \"Modello 3D\" e premi \"Genera footprint\": il modello "
+                "del modulo (PCB con semi-fori + componenti) si vede qui dopo la "
+                "generazione con FreeCAD."
             )
             return
 

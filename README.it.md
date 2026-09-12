@@ -336,9 +336,24 @@ La validazione rifiuta i casi che darebbero un footprint inutilizzabile:
 pad sovrapposti (passo minore della larghezza pad), pad che non entrano
 nel bordo, numeri di pin duplicati tra lati.
 
-> Limite attuale: per i moduli castellated si genera il **footprint 2D**;
-> il modello 3D (che oggi posiziona pin cilindrici a partire dai parametri
-> della matrice) non viene prodotto e il gruppo "Modello 3D" si disattiva.
+### Modello 3D del modulo
+
+Il 3D di questi moduli non e' il corpo con pin cilindrici del pin header:
+un modulo e' un **PCB sottile con sopra i componenti**, e i contatti sono
+semi-fori sul bordo, non piedini che sporgono. `generate_castellated_3d_model()`
+costruisce quindi due solidi:
+
+- il **PCB**, spesso `pcb_thickness` (campo "Spessore PCB"), con i
+  **semi-fori tagliati** sul bordo in corrispondenza di ogni contatto
+  (diametro dal campo "Diametro semi-foro");
+- il **blocco dei componenti**, dal PCB fino all'altezza totale del modulo
+  (campo "Altezza corpo" del gruppo Modello 3D, es. 4.75mm), rientrato di
+  `component_inset` dal bordo, dove i semi-fori non lasciano spazio.
+
+Con il gruppo castellated attivo, i campi lunghezza/larghezza/offset e
+lunghezza pin del gruppo "Modello 3D" si disabilitano: vengono dal modulo,
+cosi' il solido non puo' divergere dal footprint. Gli eventuali fillet
+letti dalla foto si applicano agli spigoli del PCB.
 
 Limiti applicativi (in `datasheet_extractor.py`): max 5 file per
 chiamata, max 20 MB per file, formati supportati PDF/PNG/JPG/WEBP/GIF.
