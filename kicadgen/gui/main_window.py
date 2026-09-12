@@ -82,6 +82,10 @@ DEFAULT_LIBRARY_ROOT = APP_DIR / "generated"
 DEFAULT_EXPORT_ROOT = APP_DIR.parent  # .../CustomComponents
 DOCS_SUBDIR = "docs"
 
+#: Chiave con cui si marcano le linee della griglia nell'anteprima 2D, per
+#: poterle escludere dal calcolo dell'inquadratura.
+_GRID_ITEM = 0
+
 
 def _side_pinout(side: dict) -> list[dict]:
     """Numero pin -> sigla serigrafata, per un lato del modulo.
@@ -882,6 +886,8 @@ class MainWindow(QMainWindow):
                 width=c["width_mm"], height=c["height_mm"],
                 name=c.get("name", "Componente"),
                 color_hex=c.get("color_hex") or "#303030",
+                kind=c.get("kind", "generic"),
+                marking=c.get("marking", ""),
             )
             for c in params.components_3d or ()
         ]
@@ -1024,15 +1030,15 @@ class MainWindow(QMainWindow):
         self.field_cast_body_width.setToolTip(
             "Larghezza del corpo del modulo, asse Y (lati \"left\"/\"right\")."
         )
-        self.field_cast_pad_length = _mm(1.8, maximum=20.0)
+        self.field_cast_pad_length = _mm(3.6, maximum=20.0)
         self.field_cast_pad_length.setToolTip(
             "Lunghezza della piazzola perpendicolarmente al bordo."
         )
-        self.field_cast_pad_width = _mm(1.2, maximum=20.0)
+        self.field_cast_pad_width = _mm(1.8, maximum=20.0)
         self.field_cast_pad_width.setToolTip(
             "Larghezza della piazzola lungo il bordo (poco piu' del semi-foro)."
         )
-        self.field_cast_overhang = _mm(0.5, maximum=5.0)
+        self.field_cast_overhang = _mm(1.4, maximum=5.0)
         self.field_cast_overhang.setToolTip(
             "Quanto la piazzola sporge oltre il bordo del modulo: serve a lasciare "
             "ispezionabile il menisco di saldatura."
@@ -1042,7 +1048,7 @@ class MainWindow(QMainWindow):
         form.addRow("Larghezza corpo:", self.field_cast_body_width)
         form.addRow("Lunghezza pad:", self.field_cast_pad_length)
         form.addRow("Larghezza pad:", self.field_cast_pad_width)
-        self.field_cast_hole = _mm(1.5, maximum=10.0)
+        self.field_cast_hole = _mm(1.7, maximum=10.0)
         self.field_cast_hole.setToolTip(
             "Diametro del semi-foro metallizzato sul bordo: serve al modello 3D, "
             "dove i semi-fori vengono tagliati nel PCB del modulo."
@@ -1116,6 +1122,10 @@ class MainWindow(QMainWindow):
         permetterebbe di generare un 3D scollegato dal footprint. La
         lunghezza dei pin non serve: non ci sono pin che sporgono.
         """
+        # I contatti dei moduli sono quasi sempre dorati (ENIG): se il colore
+        # pin e' ancora quello di default dei piedini stagnati, si passa all'oro.
+        if castellated and self.field_pin_color.text().strip().lower() == "#b0b0b0":
+            self.field_pin_color.setText("#c9a227")
         for field in (self.field_body_length, self.field_body_width,
                       self.field_body_offset_x, self.field_body_offset_y,
                       self.field_pin_length_3d):
@@ -1207,8 +1217,23 @@ class MainWindow(QMainWindow):
             component_inset=self.field_cast_inset.value(),
             component_color_hex=self.field_body_color.text().strip() or "#303030",
             components=list(self.castellated_components),
+            silk_labels=self._silk_labels(),
             sides=self._sides_from_table(),
         )
+
+    def _silk_labels(self) -> dict[str, str]:
+        """Sigla serigrafata per ogni pad, dalla tabella pinout.
+
+        Sul modulo accanto al contatto c'e' la sigla corta (PE, B-, A+, G...),
+        non la descrizione: si tiene la prima parola, senza parentesi.
+        """
+        labels = {}
+        for entry in self.pinout:
+            name = str(entry.get("name", "")).split("(")[0].strip()
+            short = name.split()[0] if name else ""
+            if short:
+                labels[str(entry.get("pin"))] = short[:6]
+        return labels
 
     def _is_castellated(self) -> bool:
         return hasattr(self, "group_castellated") and self.group_castellated.isChecked()
@@ -1908,6 +1933,24 @@ class MainWindow(QMainWindow):
         save_config(self._config)
         self._draw_preview()
 
+    def _fit_preview(self) -> None:
+        """Inquadra il footprint, ignorando la griglia.
+
+        La griglia si estende oltre il componente: includendola
+        nell'inquadratura, attivarla e disattivarla cambiava la dimensione
+        del disegno a parita' di footprint -- confondente proprio quando la
+        griglia serve a valutare le distanze.
+        """
+        rect = None
+        for item in self.preview_scene.items():
+            if item.data(_GRID_ITEM):
+                continue
+            bounds = item.sceneBoundingRect()
+            rect = bounds if rect is None else rect.united(bounds)
+        if rect is None or rect.isEmpty():
+            rect = self.preview_scene.itemsBoundingRect()
+        self.preview_view.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
+
     def _draw_grid(
         self, mm_to_px: float, width: float, height: float, margin: float,
         x0: float = 0.0, y0: float = 0.0,
@@ -1939,6 +1982,7 @@ class MainWindow(QMainWindow):
                 x, j_min * step * mm_to_px, x, j_max * step * mm_to_px, pen
             )
             line.setZValue(-10)  # dietro pad, silkscreen e quote
+            line.setData(_GRID_ITEM, True)
         for j in range(j_min, j_max + 1):
             pen = major if j % 5 == 0 else minor
             y = j * step * mm_to_px
@@ -1946,6 +1990,7 @@ class MainWindow(QMainWindow):
                 i_min * step * mm_to_px, y, i_max * step * mm_to_px, y, pen
             )
             line.setZValue(-10)
+            line.setData(_GRID_ITEM, True)
 
     def _draw_preview_castellated(self, p: CastellatedModuleParams) -> None:
         """Anteprima del modulo castellated: corpo, piazzole e quote d'ingombro.
@@ -2008,9 +2053,7 @@ class MainWindow(QMainWindow):
             self._add_dim_h(left, right, bottom + 60, f"totale {(right - left) / mm_to_px:.2f} mm")
 
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
-        self.preview_view.fitInView(
-            self.preview_scene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio
-        )
+        self._fit_preview()
 
     def _draw_preview(self) -> None:
         if self._last_params is None:
@@ -2112,7 +2155,7 @@ class MainWindow(QMainWindow):
         self._add_dim_v(top, bottom, right + 60, f"totale {height + 2 * margin:.2f} mm")
 
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
-        self.preview_view.fitInView(self.preview_scene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        self._fit_preview()
 
     def _add_dim_h(self, x1: float, x2: float, y: float, text: str) -> None:
         """Disegna una linea di quota orizzontale con tacche e testo centrato."""

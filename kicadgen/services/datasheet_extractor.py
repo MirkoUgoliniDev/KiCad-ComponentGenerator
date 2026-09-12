@@ -28,6 +28,10 @@ from ..generators.castellated_module import EDGES
 from .openrouter import DEFAULT_MODEL, OpenRouterError, api_key, call_tool
 
 MAX_FILES = 5
+
+#: Tipi di package che il modello 3D sa disegnare (cad3d/freecad_parts.py:
+#: BUILDERS). Duplicato qui perche' quel modulo gira solo dentro FreeCAD.
+COMPONENT_KINDS = ('generic', 'ic_soic', 'ic_qfn', 'transformer', 'module', 'led', 'capacitor_tantalum', 'capacitor', 'resistor', 'inductor', 'diode', 'connector', 'crystal')
 MAX_FILE_BYTES = 20 * 1024 * 1024  # 20 MB, limite ragionevole per singolo file API
 
 _SUPPORTED_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -412,6 +416,25 @@ _EXTRACTION_TOOL = {
                             "type": "string",
                             "description": "Colore visto in foto, '#rrggbb'.",
                         },
+                        "kind": {
+                            "type": "string",
+                            "enum": ['generic', 'ic_soic', 'ic_qfn', 'transformer', 'module', 'led', 'capacitor_tantalum', 'capacitor', 'resistor', 'inductor', 'diode', 'connector', 'crystal'],
+                            "description": (
+                                "Tipo di package, riconosciuto dalla foto: decide la forma "
+                                "nel modello 3D (un SOIC ha i reofori sui lati, un LED la "
+                                "lente, un tantalio la striscia di polarita'). "
+                                "\"capacitor\"/\"resistor\" sono i chip SMD con le due "
+                                "terminazioni metalliche; \"generic\" se non riconoscibile."
+                            ),
+                        },
+                        "marking": {
+                            "type": "string",
+                            "description": (
+                                "Scritta stampata sul componente, SOLO se leggibile nella "
+                                "foto (es. \"SP3485\", \"VPT\", \"102\"): viene stampata "
+                                "sul solido. Non inventare codici."
+                            ),
+                        },
                     },
                     "required": ["x_mm", "y_mm", "length_mm", "width_mm", "height_mm"],
                 },
@@ -768,6 +791,10 @@ def _components_3d(raw: Optional[Sequence[dict]]) -> Optional[list[dict]]:
             continue
         if entry.get("color_hex"):
             component["color_hex"] = str(entry["color_hex"])
+        kind = str(entry.get("kind") or "generic")
+        component["kind"] = kind if kind in COMPONENT_KINDS else "generic"
+        if entry.get("marking"):
+            component["marking"] = str(entry["marking"]).strip()
         components.append(component)
     return components or None
 

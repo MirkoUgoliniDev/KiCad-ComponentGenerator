@@ -319,9 +319,10 @@ che descrive il modulo **lato per lato**:
 - ogni lato (`left`/`right`/`top`/`bottom`) ha numero di contatti, passo,
   offset lungo il bordo e numerazione propri (sequenziale, invertita o
   esplicita);
-- pad rettangolari su `F.Cu`/`F.Paste`/`F.Mask`, **senza drill**,
-  sporgenti di `pad_overhang` oltre il bordo del modulo perche' il menisco
-  di saldatura resti ispezionabile;
+- pad roundrect su `F.Cu`/`F.Paste`/`F.Mask`, **senza drill**, sporgenti
+  di `pad_overhang` oltre il bordo perche' il menisco resti ispezionabile;
+  default 3.6 x 1.8 mm con 1.4 mm fuori dal bordo, il land pattern gia'
+  verificato sul convertitore RS485/TTL;
 - contorno del corpo su `F.SilkS`/`F.Fab` e courtyard che comprende i pad
   sporgenti.
 
@@ -339,21 +340,40 @@ nel bordo, numeri di pin duplicati tra lati.
 ### Modello 3D del modulo
 
 Il 3D di questi moduli non e' il corpo con pin cilindrici del pin header:
-un modulo e' un **PCB sottile con sopra i componenti**, e i contatti sono
-semi-fori sul bordo, non piedini che sporgono. `generate_castellated_3d_model()`
-costruisce quindi due solidi:
+un modulo e' un **PCB con sopra i componenti**, e i contatti sono semi-fori
+sul bordo. `generate_castellated_3d_model()` ricostruisce quello che si vede
+in un modulo reale (riferimento: la ricostruzione a mano del Waveshare TTL
+TO RS485 in `KiCad-CustomComponents/WAWESHARE`):
 
-- il **PCB**, spesso `pcb_thickness` (campo "Spessore PCB"), con i
-  **semi-fori tagliati** sul bordo in corrispondenza di ogni contatto
-  (diametro dal campo "Diametro semi-foro");
-- il **blocco dei componenti**, dal PCB fino all'altezza totale del modulo
-  (campo "Altezza corpo" del gruppo Modello 3D, es. 4.75mm), rientrato di
-  `component_inset` dal bordo, dove i semi-fori non lasciano spazio.
+- il **PCB** a strati: substrato FR4 (colore `substrate_color_hex`, visibile
+  di taglio) tra due film di soldermask del colore del corpo, spesso
+  `pcb_thickness`, con i **semi-fori tagliati** sul bordo (diametro
+  `hole_diameter`, centro rientrato di `hole_inset`: un castellated e' un
+  foro normale forato vicino al bordo e poi tagliato);
+- i **contatti**: manicotto metallizzato nel foro piu' piazzola sulla faccia
+  superiore e inferiore, cosi' si vedono da entrambi i lati; colore dal campo
+  "Colore pin" (portato all'oro ENIG `#c9a227` quando si attiva il gruppo);
+- la **serigrafia**: sigla accanto a ogni contatto (dalla tabella pinout,
+  prima parola del nome) e cornice del bordo;
+- i **componenti** letti dalla foto, ognuno con la forma del suo tipo
+  (sotto) e l'eventuale marcatura stampata sopra.
 
-Con il gruppo castellated attivo, i campi lunghezza/larghezza/offset e
+Attivando il gruppo castellated, i campi lunghezza/larghezza/offset e
 lunghezza pin del gruppo "Modello 3D" si disabilitano: vengono dal modulo,
-cosi' il solido non puo' divergere dal footprint. Gli eventuali fillet
-letti dalla foto si applicano agli spigoli del PCB.
+cosi' il solido non puo' divergere dal footprint. Resta tuo il campo "Altezza
+corpo" (altezza totale del modulo, es. 4.75 mm). Gli eventuali fillet letti
+dalla foto si applicano agli spigoli del PCB.
+
+**Convenzione degli assi.** KiCad mostra i modelli 3D con Y verso l'alto,
+mentre il footprint ha Y verso il basso: lo script FreeCAD costruisce tutto
+con Y negata (`_flip_y`), altrimenti il modulo appare specchiato nel viewer
+-- invisibile su una griglia simmetrica, evidente con lati diversi e
+scritte. Vale anche per il pin header.
+
+**Colori nello STEP.** `Part.export` scrive la sola geometria e KiCad
+mostrerebbe tutto grigio: `colorize_step()` aggiunge le entita' AP214
+(`STYLED_ITEM` per solido) leggendo i colori dalla mesh esportata, nello
+stesso ordine. Viene salvato anche il sorgente `.FCStd`.
 
 ### Componenti dalla foto
 
@@ -364,6 +384,14 @@ ingombro, altezza stimata dal tipo di package e colore. Ognuno diventa un
 solido a se' nel modello 3D, al posto del blocco unico: il modulo si
 riconosce a colpo d'occhio e l'ingombro in altezza e' quello vero,
 componente per componente.
+
+Ogni componente ha un **tipo** (`kind`), riconosciuto dalla foto, che ne
+decide la forma in `kicadgen/cad3d/freecad_parts.py`: `ic_soic` (corpo con
+reofori a L e tacca del pin 1), `ic_qfn`, `transformer`/`module`/`inductor`
+(case raccordato), `led` (base chiara e lente colorata), `capacitor_tantalum`
+(striscia di polarita'), `capacitor`/`resistor`/`diode` (chip con terminazioni
+metalliche e contorno serigrafico), `connector`, `crystal`, `generic`. La
+`marking` (es. "SP3485"), solo se leggibile in foto, viene stampata sopra.
 
 Sono **stime visive**, non quote di datasheet: servono all'aspetto e al
 controllo di interferenza grossolano, non alla verifica meccanica.

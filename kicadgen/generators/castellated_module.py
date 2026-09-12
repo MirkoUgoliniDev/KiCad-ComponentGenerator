@@ -29,7 +29,7 @@ Convenzioni geometriche:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterator, List, NamedTuple, Optional, Sequence
+from typing import Dict, Iterator, List, NamedTuple, Optional, Sequence
 
 from ..core.footprint import Footprint, FpCircle, FpRect, Pad
 
@@ -75,6 +75,10 @@ class ComponentBox:
     height: float
     name: str = "Componente"
     color_hex: str = "#303030"
+    # Tipo di package: decide la forma nel 3D (vedi cad3d/freecad_parts.py).
+    kind: str = "generic"
+    # Scritta stampata sul componente (es. "SP3485", "VPT"), se leggibile.
+    marking: str = ""
 
     def is_usable(self) -> bool:
         return self.length > 0 and self.width > 0 and self.height > 0
@@ -125,13 +129,19 @@ class CastellatedModuleParams:
     body_width: float = 15.2
     sides: List[CastellatedSide] = field(default_factory=list)
     # Dimensioni di default dei pad, sovrascrivibili lato per lato.
-    pad_length: float = 1.8
-    pad_width: float = 1.0
-    pad_overhang: float = 0.5
+    # Land pattern di default: 3.6 x 1.8 mm con 1.4 mm fuori dal bordo, cioe'
+    # il pad centrato 0.4 mm fuori dal modulo -- e' il pattern gia' verificato
+    # sul convertitore RS485/TTL, un buon punto di partenza per moduli simili.
+    pad_length: float = 3.6
+    pad_width: float = 1.8
+    pad_overhang: float = 1.4
     # Diametro del semi-foro metallizzato sul bordo: non serve al footprint
     # (i pad sono rettangolari) ma al modello 3D, dove i semi-fori vanno
     # tagliati nel solido perche' il pezzo somigli a quello reale.
-    hole_diameter: float = 1.0
+    hole_diameter: float = 1.7
+    # Distanza del centro del semi-foro dal bordo (None = 0.76 * raggio): un
+    # castellated e' un foro normale forato vicino al bordo e poi tagliato.
+    hole_inset: Optional[float] = None
     # Il modulo non e' un blocco pieno: e' un PCB sottile con sopra i
     # componenti. Il modello 3D lo costruisce come due solidi, perche' un
     # parallelepipedo unico alto quanto il componente piu' alto non
@@ -139,6 +149,11 @@ class CastellatedModuleParams:
     pcb_thickness: float = 1.0
     component_inset: float = 1.0
     component_color_hex: str = "#303030"
+    # Aspetto del PCB nel 3D: colore del substrato visibile di taglio, sigle
+    # serigrafate accanto ai contatti (numero pad -> testo) e loro colore.
+    substrate_color_hex: str = "#2f3f1f"
+    silk_labels: Dict[str, str] = field(default_factory=dict)
+    silk_color_hex: str = "#e8e8e0"
     # Componenti letti dalla foto del modulo: se ci sono, il 3D li disegna
     # uno per uno invece del blocco unico ricavato da component_inset.
     components: List[ComponentBox] = field(default_factory=list)
@@ -287,10 +302,11 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
         fp.add_pad(Pad(
             number=placement.number,
             pad_type="smd",
-            shape="rect",
+            shape="roundrect",
             at=(placement.x, placement.y),
             size=(placement.width, placement.height),
             layers=["F.Cu", "F.Paste", "F.Mask"],
+            roundrect_rratio=0.25,
         ))
         if placement.number == first_number:
             # Marcatore del pin 1, affiancato al suo pad lungo il bordo

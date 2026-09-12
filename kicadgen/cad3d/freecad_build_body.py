@@ -207,10 +207,124 @@ def _write_vrml(path, tessellated):
             fh.write("    ]\n  }\n}\n\n")
 
 
+def _slab(outline, z_from, z_to, bounds):
+    """Fetta orizzontale del prisma del PCB, tra due quote Z.
+
+    Substrato e soldermask sono lo STESSO contorno (raccordi e semi-fori
+    compresi) tagliato a quote diverse: cosi' i tre strati combaciano sempre.
+    """
+    x0, y0, x1, y1, _ = bounds
+    clip = Part.makeBox(x1 - x0 + 4, y1 - y0 + 4, z_to - z_from,
+                        FreeCAD.Vector(x0 - 2, y0 - 2, z_from))
+    return outline.common(clip)
+
+
+def _text_solid(text, size, thickness, font_file, bold_font=None):
+    """Scritta come compound di solidi sottili, centrata sull'origine XY, base a Z=0."""
+    wires = None
+    for font in (bold_font, font_file):
+        if not font:
+            continue
+        try:
+            wires = Part.makeWireString(text, font, size, 0.0)
+            break
+        except Exception:  # noqa: BLE001 - font mancante: si prova il successivo
+            continue
+    if wires is None:
+        return None
+    solids = []
+    for glyph in wires:
+        if not glyph:
+            continue
+        try:
+            face = Part.makeFace(glyph, "Part::FaceMakerBullseye")
+        except Exception:  # noqa: BLE001 - glifo non chiudibile: si salta
+            continue
+        solids.append(face.extrude(FreeCAD.Vector(0, 0, thickness)))
+    if not solids:
+        return None
+    shape = Part.makeCompound(solids)
+    bb = shape.BoundBox
+    shape.translate(FreeCAD.Vector(-(bb.XMin + bb.XMax) / 2, -(bb.YMin + bb.YMax) / 2, -bb.ZMin))
+    return shape
+
+
+def _place_text(text, size, x, y, z, angle, font_file, thickness=0.012):
+    bold = None
+    if font_file.lower().endswith("arial.ttf"):
+        bold = font_file[:-len("arial.ttf")] + "arialbd.ttf"
+    shape = _text_solid(text, size, thickness, font_file, bold)
+    if shape is None:
+        return None
+    if angle:
+        shape.rotate(FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(0, 0, 1), angle)
+    shape.translate(FreeCAD.Vector(x, y, z))
+    return shape
+
+
+def _rim(cx, cy, length, width, z, line=0.12, thickness=0.008):
+    """Cornice serigrafica rettangolare (contorno di un componente o del modulo)."""
+    outer = Part.makeBox(length, width, thickness,
+                         FreeCAD.Vector(cx - length / 2, cy - width / 2, z))
+    inner = Part.makeBox(length - 2 * line, width - 2 * line, thickness + 0.02,
+                         FreeCAD.Vector(cx - length / 2 + line, cy - width / 2 + line, z - 0.01))
+    return outer.cut(inner)
+
+
+def _safe(name, index):
+    cleaned = "".join(c if c.isalnum() else "_" for c in str(name or "").strip())
+    return f"Cmp{index}_{cleaned}"[:40] if cleaned else f"Cmp{index}"
+
+
+_FB_SWAP = {"front": "back", "back": "front"}
+
+
+def _swap_front_back(name):
+    return "-".join(_FB_SWAP.get(part, part) for part in str(name).split("-"))
+
+
+def _flip_y(data):
+    """Porta il payload dal sistema del footprint (Y verso il basso, come in
+    KiCad) a quello del modello 3D (Y verso l'alto).
+
+    KiCad mostra i modelli con l'asse Y invertito rispetto al footprint: un
+    modello costruito con le coordinate del footprint appare specchiato nel
+    viewer 3D -- invisibile sulle griglie simmetriche, evidente su un modulo
+    con lati diversi e scritte. Le forme sono simmetriche e non cambiano; si
+    negano le posizioni Y, gli angoli, e si scambiano i nomi front/back di
+    fillet e testi (che l'utente sceglie guardando l'anteprima 2D).
+    """
+    body = data["body"]
+    body["offset_y_mm"] = -(body["offset_y_mm"] + body["width_mm"])
+    for f in data.get("fillets", []):
+        f["edge"] = _swap_front_back(f["edge"])
+    for t in data.get("face_texts", []):
+        t["face"] = _swap_front_back(t["face"])
+    for key in ("notches", "edge_contacts", "silk_texts", "components"):
+        for item in data.get(key, []) or []:
+            item["y"] = -item["y"]
+            if "angle" in item:
+                item["angle"] = -float(item["angle"])
+            if "marking_angle" in item:
+                item["marking_angle"] = -float(item["marking_angle"])
+            if item.get("edge") in _FB_SWAP:
+                item["edge"] = _FB_SWAP[item["edge"]]
+    for c in data.get("edge_contacts", []):
+        # top/bottom del modulo (bordi orizzontali) si scambiano come front/back
+        c["edge"] = {"top": "bottom", "bottom": "top"}.get(c["edge"], c["edge"])
+    rim = data.get("silk_outline")
+    if rim:
+        rim["y"] = -rim["y"]
+    for box in data.get("extra_boxes", []):
+        box["y"] = -(box["y"] + box["width_mm"])
+    data["pins"] = [[n, x, -y] for n, x, y in data.get("pins", [])]
+    return data
+
+
 def main():
     json_path = sys.argv[2]
     with open(json_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+        data = _flip_y(json.load(f))
 
     body = data["body"]
     pins = data["pins"]
@@ -218,9 +332,12 @@ def main():
     pin_length = data["pin_length_mm"]
     step_path = data["step_path"]
     wrl_path = data.get("wrl_path")
+    fcstd_path = data.get("fcstd_path")
     fillets = data.get("fillets", [])
     face_texts = data.get("face_texts", [])
     font_file = data.get("font_file", r"C:\Windows\Fonts\arial.ttf")
+    substrate = data.get("substrate")  # solo per i moduli su PCB
+    silk_color = data.get("silk_color_hex", "#e8e8e0")
 
     doc = FreeCAD.newDocument("kicadgen_body")
 
@@ -232,11 +349,16 @@ def main():
         body["length_mm"], body["width_mm"], body["height_mm"],
         FreeCAD.Vector(x0, y0, 0),
     )
+    # Il box intatto serve a ritagliare le metallizzazioni: dopo i tagli dei
+    # semi-fori, nel solido quello spazio non c'e' piu'.
+    uncut_body = body_shape.copy()
 
-    # Semi-fori metallizzati sul bordo (moduli castellated): cilindri
-    # centrati sul bordo, di cui resta nel solido solo la meta' interna.
-    # Il taglio va fatto PRIMA dei fillet, cosi' i raccordi si applicano
-    # alla forma definitiva.
+    if fillets:
+        body_shape = _apply_fillets(body_shape, fillets, bounds)
+
+    # Semi-fori metallizzati sul bordo (moduli castellated): cilindri di cui
+    # resta nel solido solo la parte interna. Dopo i fillet, cosi' i raccordi
+    # d'angolo non si sovrappongono al taglio.
     for notch in data.get("notches", []):
         try:
             cutter = Part.makeCylinder(
@@ -249,46 +371,134 @@ def main():
             print(f"KICADGEN_WARN:semi-foro non applicato in "
                   f"({notch.get('x')}, {notch.get('y')}): {exc}")
 
-    if fillets:
-        body_shape = _apply_fillets(body_shape, fillets, bounds)
-
     body_color = body.get("color_hex", "#1a1a1a")
     pin_color = data.get("pin_color_hex", "#b0b0b0")
 
     # (oggetto FreeCAD, colore): ogni pezzo resta separato per poter avere
-    # un colore proprio in VRML e nell'anteprima.
+    # un colore proprio in STEP, VRML e anteprima.
     colored = []
 
-    body_obj = doc.addObject("Part::Feature", "Body")
-    body_obj.Shape = body_shape
-    colored.append((body_obj, body_color))
+    def add(name, shape, color):
+        obj = doc.addObject("Part::Feature", name)
+        obj.Shape = shape
+        colored.append((obj, color))
+        return obj
+
+    if substrate:
+        # PCB vero: substrato FR4 tra due strati sottili di soldermask. Visto
+        # di taglio si legge come una scheda, non come un blocco verniciato.
+        mask_t = float(substrate.get("mask_thickness_mm", 0.02))
+        add("Bottom_mask", _slab(body_shape, 0.0, mask_t, bounds), body_color)
+        add("FR4_substrate", _slab(body_shape, mask_t, z1 - mask_t, bounds),
+            substrate.get("color_hex", "#2f3f1f"))
+        add("Body", _slab(body_shape, z1 - mask_t, z1, bounds), body_color)
+    else:
+        add("Body", body_shape, body_color)
 
     for i, (text_solid, color) in enumerate(
         _build_face_text_solids(body_shape, face_texts, bounds, font_file)
     ):
-        text_obj = doc.addObject("Part::Feature", f"Serigrafia{i}")
-        text_obj.Shape = text_solid
-        colored.append((text_obj, color))
+        add(f"Serigrafia{i}", text_solid, color)
 
-    # Solidi aggiuntivi (es. il blocco dei componenti montati sul PCB di un
-    # modulo): box indipendenti, con un colore proprio.
+    # Contatti dei semi-fori: manicotto metallizzato nel foro + piazzola sulla
+    # faccia superiore e inferiore, tutto dello stesso metallo (ENIG dorato o
+    # stagno). Senza, i contatti non si vedrebbero ne' da sopra ne' da sotto.
+    plating = data.get("plating_thickness_mm", 0.06)
+    pad_t = 0.025
+    for contact in data.get("edge_contacts", []):
+        try:
+            cx, cy, radius = contact["x"], contact["y"], contact["radius"]
+            hole = Part.makeCylinder(radius, z1 + 2.0, FreeCAD.Vector(cx, cy, -1.0),
+                                     FreeCAD.Vector(0, 0, 1))
+            sleeve = (Part.makeCylinder(radius + plating, z1, FreeCAD.Vector(cx, cy, 0),
+                                        FreeCAD.Vector(0, 0, 1))
+                      .cut(hole).common(uncut_body))
+            pieces = [sleeve]
+            edge = contact.get("edge")
+            pad_len = float(contact.get("pad_length_mm", 2.4))
+            pad_w = float(contact.get("pad_width_mm", 1.8))
+
+            def pad_box(z):
+                if edge in ("left", "right"):
+                    px = x0 + pad_len / 2 if edge == "left" else x1 - pad_len / 2
+                    return Part.makeBox(pad_len, pad_w, pad_t,
+                                        FreeCAD.Vector(px - pad_len / 2, cy - pad_w / 2, z))
+                py = y0 + pad_len / 2 if edge == "top" else y1 - pad_len / 2
+                return Part.makeBox(pad_w, pad_len, pad_t,
+                                    FreeCAD.Vector(cx - pad_w / 2, py - pad_len / 2, z))
+
+            pieces.append(pad_box(z1).cut(hole))
+            pieces.append(pad_box(-pad_t).cut(hole))
+            shape = Part.makeCompound([piece for piece in pieces if piece.Volume > 0])
+            add(f"Pin{contact['number']}", shape, contact.get("color_hex", pin_color))
+        except Exception as exc:  # noqa: BLE001 - un contatto in meno non e' fatale
+            print(f"KICADGEN_WARN:contatto {contact.get('number')} non generato: {exc}")
+
+    # Serigrafia del modulo: sigle accanto ai contatti e cornice del bordo.
+    silk_z = z1 + 0.004
+    for i, item in enumerate(data.get("silk_texts", [])):
+        try:
+            shape = _place_text(item["text"], float(item.get("size_mm", 0.7)),
+                                item["x"], item["y"], silk_z,
+                                float(item.get("angle", 0)), font_file)
+            if shape is not None:
+                add(f"Silk_{i}", shape, item.get("color_hex", silk_color))
+        except Exception as exc:  # noqa: BLE001
+            print(f"KICADGEN_WARN:serigrafia '{item.get('text')}' non generata: {exc}")
+    rim = data.get("silk_outline")
+    if rim:
+        try:
+            add("Silk_outline", _rim(rim["x"], rim["y"], rim["length_mm"], rim["width_mm"],
+                                     silk_z, line=0.1), silk_color)
+        except Exception as exc:  # noqa: BLE001
+            print(f"KICADGEN_WARN:cornice serigrafica non generata: {exc}")
+
+    # Componenti montati sul modulo: forma per tipo (vedi freecad_parts).
+    components = data.get("components", [])
+    if components:
+        import os
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import freecad_parts
+        for index, component in enumerate(components):
+            base = _safe(component.get("name"), index)
+            for j, (shape, color) in enumerate(freecad_parts.build_component(component, z1)):
+                add(f"{base}_{j}", shape, color)
+            kind = component.get("kind", "generic")
+            if kind in ("capacitor", "resistor", "diode", "led", "capacitor_tantalum"):
+                try:
+                    add(f"{base}_silk", _rim(component["x"], component["y"],
+                                              component["length_mm"] + 0.36,
+                                              component["width_mm"] + 0.32,
+                                              silk_z, line=0.08), silk_color)
+                except Exception:  # noqa: BLE001
+                    pass
+            marking = (component.get("marking") or "").strip()
+            if marking:
+                try:
+                    size = max(0.35, min(0.8, 0.32 * float(component["width_mm"]),
+                                         0.9 * float(component["length_mm"]) / max(1, len(marking))))
+                    ztop = z1 + float(component["height_mm"]) + 0.004
+                    shape = _place_text(marking, size, component["x"], component["y"], ztop,
+                                        float(component.get("marking_angle", 0)), font_file)
+                    if shape is not None:
+                        add(f"{base}_mark", shape, component.get("marking_color_hex", "#c8c8c0"))
+                except Exception as exc:  # noqa: BLE001
+                    print(f"KICADGEN_WARN:marcatura '{marking}' non generata: {exc}")
+
+    # Solidi aggiuntivi generici (box con colore proprio).
     for i, box in enumerate(data.get("extra_boxes", [])):
-        box_obj = doc.addObject("Part::Feature", box.get("name", f"Extra{i}"))
-        box_obj.Shape = Part.makeBox(
+        add(box.get("name", f"Extra{i}"), Part.makeBox(
             box["length_mm"], box["width_mm"], box["height_mm"],
             FreeCAD.Vector(box["x"], box["y"], box.get("z", 0)),
-        )
-        colored.append((box_obj, box.get("color_hex", "#1a1a1a")))
+        ), box.get("color_hex", "#1a1a1a"))
 
     pin_radius = pin_diameter / 2.0
     for pin_num, x, y in pins:
-        pin_obj = doc.addObject("Part::Feature", f"Pin{pin_num}")
-        pin_obj.Shape = Part.makeCylinder(
+        add(f"Pin{pin_num}", Part.makeCylinder(
             pin_radius, pin_length,
             FreeCAD.Vector(x, y, -pin_length),
             FreeCAD.Vector(0, 0, 1),
-        )
-        colored.append((pin_obj, pin_color))
+        ), pin_color)
 
     doc.recompute()
     objects = [obj for obj, _ in colored]
@@ -296,11 +506,18 @@ def main():
     Part.export(objects, step_path)
     print(f"KICADGEN_STEP_OK:{step_path}")
 
-    tessellated = [(obj, color, obj.Shape.tessellate(0.05)) for obj, color in colored]
+    if fcstd_path:
+        try:
+            doc.saveAs(fcstd_path)
+            print(f"KICADGEN_FCSTD_OK:{fcstd_path}")
+        except Exception as exc:  # noqa: BLE001 - sorgente FreeCAD e' best-effort
+            print(f"KICADGEN_FCSTD_FAILED:{exc}")
 
-    # Mesh tassellata: la GUI la usa per mostrare in anteprima la geometria
-    # REALE (fillet e serigrafie incluse), non l'approssimazione a
-    # parallelepipedo costruita dai soli parametri.
+    tessellated = [(obj, color, obj.Shape.tessellate(0.03)) for obj, color in colored]
+
+    # Mesh tassellata: la GUI la usa per l'anteprima della geometria REALE, e il
+    # generatore Python la usa per colorare lo STEP (un colore per solido, nello
+    # stesso ordine di export).
     mesh_path = data.get("mesh_path")
     if mesh_path:
         try:
@@ -309,6 +526,7 @@ def main():
                 parts.append({
                     "name": obj.Name,
                     "color": color,
+                    "solids": len(obj.Shape.Solids),
                     "vertices": [[p.x, p.y, p.z] for p in verts],
                     "triangles": [list(f) for f in facets],
                 })
