@@ -225,3 +225,13 @@ def test_tiled_photo_components_are_deduplicated_and_enriched():
     assert len(merged) == 1
     assert merged[0]["kind"] == "resistor"
     assert merged[0]["marking"] == "102"
+
+
+def test_tiled_merge_does_not_collapse_adjacent_different_components():
+    groups = [[
+        {"name": "R1", "kind": "resistor", "x_mm": 1, "y_mm": 2,
+         "length_mm": 1.6, "width_mm": 0.8, "height_mm": 0.5},
+        {"name": "C1", "kind": "capacitor", "x_mm": 1.32, "y_mm": 2.02,
+         "length_mm": 1.6, "width_mm": 0.8, "height_mm": 0.5},
+    ]]
+    assert len(_merge_photo_components(groups)) == 2

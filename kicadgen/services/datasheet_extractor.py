@@ -21,7 +21,7 @@ import base64
 import mimetypes
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from ..cad3d.annotations import EDGE_NAMES
 from ..generators.castellated_module import EDGES
@@ -771,9 +771,19 @@ def _merge_photo_components(groups: Sequence[Sequence[dict]]) -> list[dict]:
             for existing in merged:
                 distance = ((item["x_mm"] - existing["x_mm"]) ** 2 +
                             (item["y_mm"] - existing["y_mm"]) ** 2) ** 0.5
-                size = max(item["length_mm"], item["width_mm"],
-                           existing["length_mm"], existing["width_mm"])
-                if distance <= max(0.45, size * 0.35):
+                item_size = max(item["length_mm"], item["width_mm"])
+                existing_size = max(existing["length_mm"], existing["width_mm"])
+                small, large = sorted((item_size, existing_size))
+                kinds_differ = (
+                    item.get("kind") not in (None, "generic") and
+                    existing.get("kind") not in (None, "generic") and
+                    item.get("kind") != existing.get("kind")
+                )
+                # La distanza da sola non basta: su una PCB densa componenti
+                # diversi sono spesso a meno di mezzo millimetro. Richiediamo
+                # anche dimensioni compatibili e tipo compatibile.
+                if (not kinds_differ and large <= small * 1.8 and
+                        distance <= max(0.30, small * 0.28)):
                     duplicate = existing
                     break
             if duplicate is None:
@@ -791,13 +801,34 @@ def _merge_photo_components(groups: Sequence[Sequence[dict]]) -> list[dict]:
 
 def _extract_photo_components(
     doc_paths: Sequence[Path], model: str, body_length: float, body_width: float,
+    progress: Optional[Callable[[str], None]] = None,
 ) -> Optional[list[dict]]:
     """Secondo passaggio: analizza le foto a tile, indipendentemente dal datasheet."""
     groups: list[list[dict]] = []
+    photo_count = sum(
+        1 for path in doc_paths
+        if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+    )
+    processed_photos = 0
     for path in doc_paths:
         if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
             continue
-        for metadata, data_url in _photo_tiles(path, body_length, body_width):
+        tiles = _photo_tiles(path, body_length, body_width)
+        processed_photos += 1
+        if not tiles:
+            if progress:
+                progress(f"Foto {path.name}: PCB non riconosciuta, crop saltati.")
+            continue
+        if progress:
+            progress(
+                f"Foto {path.name}: PCB riconosciuta, {len(tiles)} crop sovrapposti "
+                f"({processed_photos}/{photo_count})."
+            )
+        for index, (metadata, data_url) in enumerate(tiles, start=1):
+            if progress:
+                progress(
+                    f"AI crop {index}/{len(tiles)} {metadata['id']}: analisi componenti..."
+                )
             prompt = (
                 "Analizza SOLO la zona ritagliata della foto PCB allegata. "
                 "Elenca ogni componente visibile, uno per uno, inclusi TUTTI i "
@@ -826,11 +857,27 @@ def _extract_photo_components(
                     max_tokens=4096,
                     has_pdf=False,
                 )
-            except OpenRouterError:
+            except OpenRouterError as exc:
                 # Un crop problematico non deve annullare l'estrazione del resto.
+                if progress:
+                    progress(f"AI crop {index}/{len(tiles)}: errore ignorato ({exc}).")
                 continue
-            groups.append(result.get("components_3d") or [])
-    return _merge_photo_components(groups) or None
+            found = result.get("components_3d") or []
+            groups.append(found)
+            if progress:
+                names = [str(c.get("name") or c.get("kind") or "componente")
+                         for c in found if isinstance(c, dict)]
+                preview = ", ".join(names[:8])
+                if len(names) > 8:
+                    preview += f", ... (+{len(names) - 8})"
+                progress(
+                    f"AI crop {index}/{len(tiles)}: trovati {len(names)} componenti"
+                    + (f" [{preview}]" if preview else ".")
+                )
+    merged = _merge_photo_components(groups)
+    if progress:
+        progress(f"Fusione crop completata: {len(merged)} componenti distinti.")
+    return merged or None
 
 
 def extract_pin_header_params(
@@ -839,6 +886,7 @@ def extract_pin_header_params(
     system_prompt: Optional[str] = None,
     extra_instructions: Optional[str] = None,
     include_nc_pins: bool = True,
+    progress: Optional[Callable[[str], None]] = None,
 ) -> ExtractedParams:
     """Chiama il modello via OpenRouter e ritorna i parametri estratti.
 
@@ -874,6 +922,8 @@ def extract_pin_header_params(
     except OpenRouterError as exc:
         raise ExtractionError(str(exc)) from exc
 
+    if progress:
+        progress(f"Invio a AI {len(doc_paths)} file per layout, quote e pinout...")
     content_blocks = [_file_to_content_block(p) for p in doc_paths]
     request = "Estrai i parametri del pin header da questi documenti e chiama lo strumento."
     if include_nc_pins:
@@ -910,6 +960,12 @@ def extract_pin_header_params(
     except OpenRouterError as exc:
         raise ExtractionError(str(exc)) from exc
 
+    if progress:
+        progress(
+            f"Analisi principale completata: layout={data.get('layout', 'matrix')}, "
+            f"componenti iniziali={len(data.get('components_3d') or [])}."
+        )
+
     # La foto richiede un passaggio separato: nell'estrazione globale il modello
     # deve anche leggere quote, pinout e layout, e tende a sacrificare i passivi
     # piccoli. I crop sono best-effort: se falliscono, resta il risultato globale.
@@ -918,12 +974,15 @@ def extract_pin_header_params(
         tiled = _extract_photo_components(
             doc_paths, model or DEFAULT_MODEL,
             float(data["body_length_mm"]), float(data["body_width_mm"]),
+            progress=progress,
         )
         if tiled:
             data["components_3d"] = tiled
             old_notes = str(data.get("notes") or "").strip()
             suffix = f"Analizzati anche {len(tiled)} componenti tramite crop fotografici sovrapposti."
             data["notes"] = f"{old_notes} {suffix}".strip()
+    elif progress and data.get("layout") == "castellated":
+        progress("Secondo passaggio fotografico non avviato: mancano body_length/body_width.")
 
     return _params_from_tool_arguments(data)
 

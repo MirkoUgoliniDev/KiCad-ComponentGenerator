@@ -233,10 +233,12 @@ class ExtractWorker(QThread):
     Segnali:
         done(ExtractedParams) -- parametri estratti con successo
         error(str)            -- messaggio di errore leggibile
+        progress(str)        -- avanzamento dell'analisi AI, incluso ogni crop
     """
 
     done = pyqtSignal(object)
     error = pyqtSignal(str)
+    progress = pyqtSignal(str)
 
     def __init__(
         self, doc_paths: list[Path], system_prompt: str | None = None,
@@ -258,6 +260,7 @@ class ExtractWorker(QThread):
                 system_prompt=self.system_prompt,
                 extra_instructions=self.extra_instructions,
                 include_nc_pins=self.include_nc_pins,
+                progress=self.progress.emit,
             )
             self.done.emit(params)
         except ExtractionError as exc:
@@ -724,6 +727,7 @@ class MainWindow(QMainWindow):
         )
         self._extract_worker.done.connect(self._on_extracted)
         self._extract_worker.error.connect(self._on_extract_error)
+        self._extract_worker.progress.connect(self._append_log)
         self._extract_worker.finished.connect(self._on_extract_finished)
         self._extract_worker.start()
 
