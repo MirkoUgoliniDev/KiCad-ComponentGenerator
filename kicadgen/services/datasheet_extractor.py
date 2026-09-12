@@ -31,7 +31,7 @@ MAX_FILES = 5
 
 #: Tipi di package che il modello 3D sa disegnare (cad3d/freecad_parts.py:
 #: BUILDERS). Duplicato qui perche' quel modulo gira solo dentro FreeCAD.
-COMPONENT_KINDS = ('generic', 'ic_soic', 'ic_qfn', 'transformer', 'module', 'led', 'capacitor_tantalum', 'capacitor', 'resistor', 'inductor', 'diode', 'connector', 'crystal')
+COMPONENT_KINDS = ('generic', 'ic_soic', 'ic_qfn', 'transformer', 'module', 'led', 'capacitor_tantalum', 'capacitor', 'resistor', 'inductor', 'diode', 'diode_melf', 'connector', 'crystal')
 MAX_FILE_BYTES = 20 * 1024 * 1024  # 20 MB, limite ragionevole per singolo file API
 
 _SUPPORTED_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -421,13 +421,15 @@ _EXTRACTION_TOOL = {
                         },
                         "kind": {
                             "type": "string",
-                            "enum": ['generic', 'ic_soic', 'ic_qfn', 'transformer', 'module', 'led', 'capacitor_tantalum', 'capacitor', 'resistor', 'inductor', 'diode', 'connector', 'crystal'],
+                            "enum": ['generic', 'ic_soic', 'ic_qfn', 'transformer', 'module', 'led', 'capacitor_tantalum', 'capacitor', 'resistor', 'inductor', 'diode', 'diode_melf', 'connector', 'crystal'],
                             "description": (
                                 "Tipo di package, riconosciuto dalla foto: decide la forma "
                                 "nel modello 3D (un SOIC ha i reofori sui lati, un LED la "
                                 "lente, un tantalio la striscia di polarita'). "
-                                "\"capacitor\"/\"resistor\" sono i chip SMD con le due "
-                                "terminazioni metalliche; \"generic\" se non riconoscibile."
+                                "\"capacitor\"/\"resistor\" sono i chip SMD rettangolari con le "
+                                "due terminazioni metalliche; \"diode_melf\" e' il diodo "
+                                "CILINDRICO di vetro (spesso rosso o nero) con banda e cappucci, "
+                                "da non confondere con un chip; \"generic\" se non riconoscibile."
                             ),
                         },
                         "marking": {

@@ -187,6 +187,31 @@ def _diode(cx, cy, z0, length, width, height, color):
     return parts
 
 
+def _diode_melf(cx, cy, z0, length, width, height, color):
+    """Diodo MELF: cilindro di vetro sdraiato lungo X, cappucci metallici e banda.
+
+    Il diametro e' la dimensione minore dell'ingombro; l'altezza dichiarata
+    non conta, un cilindro sdraiato e' alto quanto il suo diametro.
+    """
+    along_x = length >= width
+    span = length if along_x else width
+    radius = min(width if along_x else length, height) / 2
+    zc = z0 + radius
+    axis = V(1, 0, 0) if along_x else V(0, 1, 0)
+    start = V(cx - span / 2, cy, zc) if along_x else V(cx, cy - span / 2, zc)
+    glass = Part.makeCylinder(radius * 0.96, span, start, axis)
+    parts = [(glass, color or "#b01818")]
+    cap = max(0.25, span * 0.2)
+    for offset in (0.0, span - cap):
+        base = V(cx - span / 2 + offset, cy, zc) if along_x else V(cx, cy - span / 2 + offset, zc)
+        parts.append((Part.makeCylinder(radius, cap, base, axis), METAL))
+    band_w = max(0.12, span * 0.08)
+    band_at = cap + span * 0.08
+    base = V(cx - span / 2 + band_at, cy, zc) if along_x else V(cx, cy - span / 2 + band_at, zc)
+    parts.append((Part.makeCylinder(radius * 0.98, band_w, base, axis), "#1c1c1c"))
+    return parts
+
+
 def _connector(cx, cy, z0, length, width, height, color):
     shell = _box(cx, cy, z0, length, width, height)
     cavity = _box(cx, cy, z0 + height * 0.5, length * 0.8, width * 0.7, height)
@@ -218,6 +243,7 @@ BUILDERS = {
     "resistor": _chip,
     "inductor": _transformer,
     "diode": _diode,
+    "diode_melf": _diode_melf,
     "connector": _connector,
     "crystal": _crystal,
 }
