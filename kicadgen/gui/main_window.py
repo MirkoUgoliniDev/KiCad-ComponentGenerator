@@ -49,7 +49,7 @@ from PyQt6.QtWidgets import (
     QFormLayout, QGraphicsEllipseItem, QGraphicsRectItem, QGraphicsScene,
     QGraphicsView, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QDialog, QListWidget, QMainWindow, QMessageBox, QPushButton, QScrollArea,
-    QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QVBoxLayout,
+    QSpinBox, QTableWidget, QTableWidgetItem, QListWidgetItem, QTabWidget, QTextEdit, QVBoxLayout,
     QWidget,
 )
 
@@ -501,6 +501,9 @@ class MainWindow(QMainWindow):
 
         self.docs_list = QListWidget()
         self.docs_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.docs_list.setToolTip(
+            "Spunta i file da inviare all'AI. I nuovi file vengono selezionati automaticamente."
+        )
         docs_layout.addWidget(self.docs_list)
 
         docs_btn_row = QHBoxLayout()
@@ -575,8 +578,8 @@ class MainWindow(QMainWindow):
         docs_layout.addWidget(self.field_component_prompt)
 
         ai_note = QLabel(
-            "Seleziona uno o piu' file in lista (PDF o immagini del disegno "
-            "meccanico) e premi il pulsante: i campi righe/colonne/passo/pad/drill "
+            "Spunta uno o piu' file in lista (i nuovi file sono gia' spuntati) e "
+            "premi il pulsante: i campi righe/colonne/passo/pad/drill "
             "nel tab \"Footprint 2D\" verranno pre-compilati. Richiede la variabile "
             "d'ambiente OPENROUTER_API_KEY (file .env). Verifica sempre i valori "
             "prima di generare."
@@ -661,7 +664,15 @@ class MainWindow(QMainWindow):
         if docs_dir.is_dir():
             for f in sorted(docs_dir.iterdir()):
                 if f.is_file():
-                    self.docs_list.addItem(f.name)
+                    item = QListWidgetItem(f.name)
+                    item.setFlags(
+                        item.flags() | Qt.ItemFlag.ItemIsUserCheckable
+                    )
+                    # La documentazione appena caricata deve essere inclusa
+                    # nell'estrazione senza richiedere anche una selezione
+                    # temporanea della riga.
+                    item.setCheckState(Qt.CheckState.Checked)
+                    self.docs_list.addItem(item)
 
     def _add_docs(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
@@ -698,16 +709,20 @@ class MainWindow(QMainWindow):
         if self._extract_worker is not None and self._extract_worker.isRunning():
             return
 
-        selected = self.docs_list.selectedItems()
-        if not selected:
+        checked = [
+            self.docs_list.item(index)
+            for index in range(self.docs_list.count())
+            if self.docs_list.item(index).checkState() == Qt.CheckState.Checked
+        ]
+        if not checked:
             QMessageBox.information(
                 self, "Nessun file selezionato",
-                "Seleziona nella lista uno o piu' file di documentazione da analizzare."
+                "Spunta nella lista uno o piu' file di documentazione da analizzare."
             )
             return
 
         docs_dir = self._docs_dir()
-        doc_paths = [docs_dir / item.text() for item in selected]
+        doc_paths = [docs_dir / item.text() for item in checked]
 
         self.btn_extract_ai.setEnabled(False)
         self.btn_extract_ai.setText("Analisi in corso...")
