@@ -36,6 +36,30 @@ def _safe_name(name: str, index: int) -> str:
     return f"Cmp{index}_{cleaned}"[:40] if cleaned else f"Cmp{index}"
 
 
+#: Distanza minima tenuta tra il bordo di un componente e il bordo del modulo.
+COMPONENT_EDGE_MARGIN_MM = 0.2
+
+
+def clamp_component_position(
+    x: float, y: float, length: float, width: float, rotation: float,
+    body_length: float, body_width: float, margin: float = COMPONENT_EDGE_MARGIN_MM,
+) -> tuple[float, float]:
+    """Tiene il centro di un componente dentro il perimetro del modulo.
+
+    Le stime di posizione dell'estrazione a volte cadono a cavallo del
+    bordo (letto vicino al margine della foto, o con un componente grande
+    vicino a un contatto): e' un vincolo geometrico generico, applicabile a
+    qualunque componente di qualunque modulo, non una correzione per un
+    pezzo particolare. Tiene conto della rotazione: a 90/270 gradi
+    lunghezza e larghezza si scambiano nell'ingombro sugli assi X/Y.
+    """
+    footprint_x = width if rotation % 180 == 90 else length
+    footprint_y = length if rotation % 180 == 90 else width
+    half_x = max(0.0, body_length / 2 - footprint_x / 2 - margin)
+    half_y = max(0.0, body_width / 2 - footprint_y / 2 - margin)
+    return max(-half_x, min(half_x, x)), max(-half_y, min(half_y, y))
+
+
 def _hex_to_rgb(color: str) -> tuple[float, float, float]:
     try:
         h = color.lstrip("#")
@@ -218,9 +242,13 @@ def generate_castellated_3d_model(
     for component in params.components:
         if not component.is_usable():
             continue
+        x, y = clamp_component_position(
+            component.x, component.y, component.length, component.width,
+            component.rotation, params.body_length, params.body_width,
+        )
         components.append({
             "name": component.name, "kind": component.kind,
-            "x": component.x, "y": component.y,
+            "x": x, "y": y,
             "length_mm": component.length, "width_mm": component.width,
             "height_mm": min(component.height, component_height) if component_height > 0 else component.height,
             "color_hex": component.color_hex, "marking": component.marking,

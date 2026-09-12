@@ -481,36 +481,41 @@ def main():
             base = _safe(component.get("name"), index)
             rotation = float(component.get("rotation_deg") or 0.0)
             centre = FreeCAD.Vector(component["x"], component["y"], 0)
-            # Le forme nascono con l'asse lungo parallelo a X e si ruotano
-            # attorno al centro del componente: e' l'orientamento letto dalla
-            # foto, non una deduzione dalle proporzioni.
-            for j, (shape, color) in enumerate(freecad_parts.build_component(component, z1)):
-                if rotation:
-                    shape.rotate(centre, FreeCAD.Vector(0, 0, 1), rotation)
-                add(f"{base}_{j}", shape, color)
-            kind = component.get("kind", "generic")
-            if kind in ("capacitor", "resistor", "diode", "diode_melf", "led", "capacitor_tantalum"):
-                try:
-                    rim = _rim(component["x"], component["y"],
-                               component["length_mm"] + 0.36, component["width_mm"] + 0.32,
-                               silk_z, line=0.08)
+            try:
+                # Le forme nascono con l'asse lungo parallelo a X e si ruotano
+                # attorno al centro del componente: e' l'orientamento letto
+                # dalla foto, non una deduzione dalle proporzioni.
+                #
+                # Tutto il blocco e' isolato: un componente con quote
+                # degeneri (stima dell'estrazione fuori scala) non deve far
+                # sparire quelli successivi ne' l'intero modello.
+                for j, (shape, color) in enumerate(freecad_parts.build_component(component, z1)):
                     if rotation:
-                        rim.rotate(centre, FreeCAD.Vector(0, 0, 1), rotation)
-                    add(f"{base}_silk", rim, silk_color)
-                except Exception:  # noqa: BLE001
-                    pass
-            marking = (component.get("marking") or "").strip()
-            if marking:
-                try:
+                        shape.rotate(centre, FreeCAD.Vector(0, 0, 1), rotation)
+                    add(f"{base}_{j}", shape, color)
+
+                # Contorno serigrafico su TUTTI i componenti, non solo sui
+                # passivi: molti case reali sono neri quanto il PCB (colore
+                # corretto, letto dalla foto) e senza una cornice chiara
+                # sparirebbero nel modello, anche se la geometria e' giusta.
+                rim = _rim(component["x"], component["y"],
+                           component["length_mm"] + 0.36, component["width_mm"] + 0.32,
+                           silk_z, line=0.08)
+                if rotation:
+                    rim.rotate(centre, FreeCAD.Vector(0, 0, 1), rotation)
+                add(f"{base}_silk", rim, silk_color)
+
+                marking = (component.get("marking") or "").strip()
+                if marking:
                     size = max(0.35, min(0.8, 0.32 * float(component["width_mm"]),
                                          0.9 * float(component["length_mm"]) / max(1, len(marking))))
                     ztop = z1 + float(component["height_mm"]) + 0.004
-                    shape = _place_text(marking, size, component["x"], component["y"], ztop,
-                                        rotation + float(component.get("marking_angle", 0)), font_file)
-                    if shape is not None:
-                        add(f"{base}_mark", shape, component.get("marking_color_hex", "#c8c8c0"))
-                except Exception as exc:  # noqa: BLE001
-                    print(f"KICADGEN_WARN:marcatura '{marking}' non generata: {exc}")
+                    text_shape = _place_text(marking, size, component["x"], component["y"], ztop,
+                                             rotation + float(component.get("marking_angle", 0)), font_file)
+                    if text_shape is not None:
+                        add(f"{base}_mark", text_shape, component.get("marking_color_hex", "#c8c8c0"))
+            except Exception as exc:  # noqa: BLE001 - un componente in meno non e' fatale
+                print(f"KICADGEN_WARN:componente '{component.get('name')}' non generato: {exc}")
 
     # Solidi aggiuntivi generici (box con colore proprio).
     for i, box in enumerate(data.get("extra_boxes", [])):

@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 
-from kicadgen.cad3d.step_generator import colorize_step
+from kicadgen.cad3d.step_generator import clamp_component_position, colorize_step
 from kicadgen.services.datasheet_extractor import COMPONENT_KINDS, _params_from_tool_arguments
 
 FAKE_STEP = (
@@ -82,3 +82,53 @@ def test_component_rotation_is_explicit_not_inferred():
     diode, resistor = params.components_3d
     assert diode["rotation_deg"] == 90.0
     assert resistor["rotation_deg"] == 0.0  # assente = orizzontale
+
+
+# ── Vincolo di posizione dei componenti dentro il modulo ────────────
+
+def test_component_inside_the_board_is_left_untouched():
+    x, y = clamp_component_position(
+        x=0.0, y=0.0, length=2.0, width=1.0, rotation=0.0,
+        body_length=42.8, body_width=15.2,
+    )
+    assert (x, y) == (0.0, 0.0)
+
+
+def test_component_hanging_off_the_right_edge_is_pulled_in():
+    """Caso reale: un resistore stimato a x=21 su un modulo lungo 42.8mm
+    (bordo a 21.4) con lunghezza 1.6mm sconfina di 0.4mm oltre il bordo."""
+    x, y = clamp_component_position(
+        x=21.0, y=2.5, length=1.6, width=0.8, rotation=0.0,
+        body_length=42.8, body_width=15.2,
+    )
+    assert x < 21.0
+    assert x + 1.6 / 2 <= 42.8 / 2 - 0.2 + 1e-9
+    assert y == 2.5  # solo l'asse che sconfina viene corretto
+
+
+def test_clamp_accounts_for_rotation_swapping_the_footprint():
+    """A 90 gradi l'asse lungo del componente e' su Y, non su X: il
+    vincolo su X deve usare la larghezza, non la lunghezza."""
+    body_length, body_width = 20.0, 10.0
+    # Lunga 8mm, se orizzontale (0 gradi) sconfinerebbe da un bordo lungo 20mm
+    # centrata a x=8; ruotata a 90 gradi il suo ingombro su X e' la larghezza.
+    x0, _ = clamp_component_position(
+        x=8.0, y=0.0, length=8.0, width=1.0, rotation=0.0,
+        body_length=body_length, body_width=body_width,
+    )
+    x90, _ = clamp_component_position(
+        x=8.0, y=0.0, length=8.0, width=1.0, rotation=90.0,
+        body_length=body_length, body_width=body_width,
+    )
+    assert x0 < x90  # a 0 gradi il vincolo e' piu' stretto (ingombro maggiore su X)
+    assert x90 == 8.0  # a 90 gradi (ingombro 1mm su X) il centro originale ci sta
+
+
+def test_clamp_never_produces_a_positive_half_width_below_zero():
+    """Un componente piu' grande del modulo stesso non deve dare un
+    intervallo invertito: il centro resta 0, non un valore assurdo."""
+    x, y = clamp_component_position(
+        x=100.0, y=100.0, length=50.0, width=50.0, rotation=0.0,
+        body_length=10.0, body_width=10.0,
+    )
+    assert x == 0.0 and y == 0.0
