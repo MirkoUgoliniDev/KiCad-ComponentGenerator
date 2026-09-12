@@ -397,6 +397,12 @@ rettangoli sovrapposti tra viste; classificazioni discordanti e sovrapposizioni
 residue sono segnalate, senza eliminare automaticamente componenti vicini.
 Non viene imposto un numero atteso di componenti.
 
+Un orientamento in conflitto con un rettangolo chiaramente allungato non
+elimina più il componente: gli assi locali vengono riallineati al rettangolo
+e il verso viene segnalato come dubbio nel confronto fotografico. Sui package
+quasi quadrati resta l'orientamento proposto dal modello. Questa correzione
+non garantisce che il rettangolo individuato sia corretto.
+
 Nel tab **Progetto** il log mostra avanzamento, scarti e ogni componente finale
 con posizione e ingombro. Dopo l'estrazione, **Confronta foto...** apre la
 fotografia con rettangoli numerati: verde per le rilevazioni, arancione per i

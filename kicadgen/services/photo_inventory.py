@@ -84,10 +84,18 @@ def decode_detections(raw, region, body_length, body_width, source, log):
             y0, y1 = ry0 + top * (ry1-ry0), ry0 + bottom * (ry1-ry0)
             sx, sy = (x1-x0)*body_length, (y1-y0)*body_width
             length, width = (sx, sy) if angle % 180 == 0 else (sy, sx)
-            # Asse lungo e verso restano coerenti anche per box quasi quadrati.
-            if width > length * 1.2:
-                raise ValueError("orientamento in conflitto con il rettangolo")
             item = dict(entry)
+            # Un angolo incoerente non rende inutilizzabile il rettangolo. Per
+            # forme chiaramente allungate conserviamo la geometria misurata,
+            # normalizziamo gli assi locali e segnaliamo il verso come dubbio.
+            # Sui quasi quadrati resta invece l'orientamento letto dall'AI.
+            if width > length * 1.2:
+                length, width = width, length
+                angle = (angle + 90) % 360
+                item["_uncertain"] = True
+                item["_reported_rotation_deg"] = entry["rotation_deg"]
+                log(f"{source}: {label} conservato; orientamento incoerente, "
+                    "assi allineati al rettangolo e verso da verificare.")
             item["name"] = str(entry.get("name") or "Componente")
             item["marking"] = str(entry.get("marking") or "")
             if not re.fullmatch(r"#[0-9a-fA-F]{6}", str(entry.get("color_hex", ""))):

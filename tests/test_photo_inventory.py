@@ -35,6 +35,31 @@ def test_vertical_component_keeps_long_axis_and_polarity():
     assert item["rotation_deg"] == 270
 
 
+def test_conflicting_orientation_keeps_measured_box_and_flags_polarity():
+    messages = []
+    result = inv.decode_detections(
+        [detection(bbox=[.1,.1,.12,.3], rotation_deg=0)],
+        (0,0,1,1),40,20,"crop",messages.append,
+    )
+    assert len(result) == 1
+    c = result[0]
+    assert c["_uncertain"]
+    assert c["rotation_deg"] == 90
+    assert c["_reported_rotation_deg"] == 0
+    assert c["length_mm"] == pytest.approx(4)
+    assert c["width_mm"] == pytest.approx(.8)
+    assert c["x_mm"] == pytest.approx(-15.6)
+    assert c["y_mm"] == pytest.approx(-6)
+    assert messages
+
+
+def test_nearly_square_box_keeps_reported_axis():
+    # 2 x 2.2 mm: troppo simile per correggere un verso dalla sola proporzione.
+    c = decode([detection(bbox=[.1,.1,.15,.21], rotation_deg=180)])[0]
+    assert c["rotation_deg"] == 180
+    assert not c.get("_uncertain")
+
+
 @pytest.mark.parametrize("bad", [
     None, "R1", detection(bbox=[0,0,0,.1]), detection(bbox=[0,0,2,.1]),
     detection(bbox=[float('nan'),0,.2,.1]), detection(bbox=[0,0,.2]),
