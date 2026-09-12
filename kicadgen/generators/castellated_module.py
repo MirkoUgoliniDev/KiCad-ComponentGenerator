@@ -31,7 +31,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, Iterator, List, NamedTuple, Optional, Sequence
 
-from ..core.footprint import Footprint, FpCircle, FpRect, Pad
+from ..core.footprint import Footprint, FpCircle, FpRect, FpText, Pad
 
 #: Lati del modulo su cui possono stare i contatti.
 EDGES = ("left", "right", "top", "bottom")
@@ -304,6 +304,11 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
         width=0.05,
     ))
 
+    # Riferimento al centro del corpo su F.Fab (KLC F5.2): la serigrafia
+    # finisce coperta a modulo montato, F.Fab resta leggibile nei disegni
+    # di assemblaggio.
+    fp.add_graphic(FpText(kind="user", text="${REFERENCE}", at=(0, 0), layer="F.Fab"))
+
     first_number = placements[0].number if placements else None
     for placement in placements:
         fp.add_pad(Pad(
@@ -324,6 +329,26 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
                 center = (placement.x - placement.width / 2 - 0.5, placement.y)
             fp.add_graphic(FpCircle(
                 center=center, radius=0.25, layer="F.SilkS", fill=True,
+            ))
+
+        # Sigla del contatto (PE, B-, A+, GND...) su F.Fab, oltre il bordo
+        # interno del pad: leggibile nel disegno di assemblaggio senza
+        # dover consultare a parte la tabella pinout. Solo se l'estrazione
+        # (o l'utente) l'ha fornita per questo numero di pin.
+        label = params.silk_labels.get(placement.number, "").strip()
+        if label:
+            gap = 0.6
+            if placement.edge == "left":
+                label_at = (placement.x + placement.width / 2 + gap, placement.y)
+            elif placement.edge == "right":
+                label_at = (placement.x - placement.width / 2 - gap, placement.y)
+            elif placement.edge == "top":
+                label_at = (placement.x, placement.y + placement.height / 2 + gap)
+            else:
+                label_at = (placement.x, placement.y - placement.height / 2 - gap)
+            fp.add_graphic(FpText(
+                kind="user", text=label, at=label_at, layer="F.Fab",
+                size=0.8, thickness=0.12,
             ))
 
     return fp

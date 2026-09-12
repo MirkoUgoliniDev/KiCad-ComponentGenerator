@@ -324,7 +324,13 @@ che descrive il modulo **lato per lato**:
   default 3.6 x 1.8 mm con 1.4 mm fuori dal bordo, il land pattern gia'
   verificato sul convertitore RS485/TTL;
 - contorno del corpo su `F.SilkS`/`F.Fab` e courtyard che comprende i pad
-  sporgenti.
+  sporgenti;
+- `${REFERENCE}` su F.Fab al centro del corpo (KLC F5.2: la serigrafia
+  finisce coperta a modulo montato, F.Fab resta leggibile nei disegni di
+  assemblaggio) e, per ogni contatto con una sigla in `silk_labels` (PE,
+  B-, A+, GND...), la sigla stampata su F.Fab oltre il bordo interno del
+  pad -- stessa convenzione usata nel modello 3D, ma sul file `.kicad_mod`
+  vero che KiCad carica, non solo nell'anteprima.
 
 Nella GUI si usa il gruppo **"Modulo castellated"** del tab Footprint 2D:
 e' alternativo alla matrice (attivandolo il gruppo a matrice si disabilita)

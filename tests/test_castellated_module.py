@@ -162,6 +162,35 @@ def test_footprint_writes_valid_file(tmp_path):
     assert "thru_hole" not in content
 
 
+def test_footprint_has_reference_on_fab_layer():
+    """KLC F5.2: la serigrafia finisce coperta dal modulo montato, il
+    riferimento su F.Fab resta leggibile nei disegni di assemblaggio."""
+    fp = build_castellated_module(rs485_module())
+    text_items = [g for g in fp.graphics if getattr(g, "kind", None) == "user"]
+    assert any(t.text == "${REFERENCE}" and t.layer == "F.Fab" for t in text_items)
+
+
+def test_footprint_prints_silk_labels_next_to_their_pad():
+    params = rs485_module()
+    params.silk_labels = {"1": "PE", "4": "GND"}
+    fp = build_castellated_module(params)
+    text_items = [g for g in fp.graphics if getattr(g, "kind", None) == "user"]
+    labels = {t.text: t for t in text_items if t.text in ("PE", "GND")}
+    assert set(labels) == {"PE", "GND"}
+    # Pin 1 e' sul lato sinistro: l'etichetta sta oltre il bordo interno del
+    # pad, verso il centro del modulo (x maggiore del centro del pad).
+    pad1 = next(p for p in pad_positions(params) if p.number == "1")
+    assert labels["PE"].at[0] > pad1.x
+    assert labels["PE"].layer == "F.Fab"
+
+
+def test_footprint_omits_label_for_pins_without_a_silk_label():
+    """Senza silk_labels (nessuna sigla nota) non si stampa nulla di inventato."""
+    fp = build_castellated_module(rs485_module())
+    text_items = [g for g in fp.graphics if getattr(g, "kind", None) == "user"]
+    assert not any(t.text not in ("${REFERENCE}",) for t in text_items)
+
+
 # ── Componenti sul modulo (solo modello 3D) ─────────────────────────
 
 def test_component_box_requires_a_real_volume():
