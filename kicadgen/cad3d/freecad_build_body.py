@@ -435,9 +435,18 @@ def main():
             pieces.append(pad_box(-pad_t).cut(hole))
             shape = Part.makeCompound([piece for piece in pieces if piece.Volume > 0])
             add(f"Pin{contact['number']}", shape, contact.get("color_hex", pin_color))
-            gap = radius + 0.9
-            inward = {"left": (gap, 0), "right": (-gap, 0), "top": (0, gap), "bottom": (0, -gap)}.get(edge, (0, 0))
-            label_anchors[f"Pin{contact['number']}"] = [cx + inward[0], cy + inward[1], -pad_t]
+            # Il numero va oltre la fine della piazzola, non a distanza fissa
+            # dal foro: le piazzole possono avere lunghezze diverse per lato.
+            clearance = pad_len + 0.8
+            if edge == "left":
+                anchor = (x0 + clearance, cy)
+            elif edge == "right":
+                anchor = (x1 - clearance, cy)
+            elif edge == "top":
+                anchor = (cx, y0 + clearance)
+            else:
+                anchor = (cx, y1 - clearance)
+            label_anchors[f"Pin{contact['number']}"] = [anchor[0], anchor[1], -pad_t]
         except Exception as exc:  # noqa: BLE001 - un contatto in meno non e' fatale
             print(f"KICADGEN_WARN:contatto {contact.get('number')} non generato: {exc}")
 

@@ -893,6 +893,13 @@ class MainWindow(QMainWindow):
             for c in params.components_3d or ()
         ]
         self._refresh_components_table()
+        if not self.castellated_components:
+            self._append_log(
+                "ATTENZIONE: il modello non ha restituito alcun componente dalla foto "
+                "(components_3d vuoto): nel 3D andra' un blocco unico. Rilancia "
+                "l'estrazione con la foto del lato superiore selezionata, oppure "
+                "aggiungi i componenti a mano nel tab Modello 3D."
+            )
         if self.castellated_components:
             self._append_log(
                 f"{len(self.castellated_components)} componenti letti dalla foto "
@@ -1220,7 +1227,9 @@ class MainWindow(QMainWindow):
             hole_diameter=self.field_cast_hole.value(),
             pcb_thickness=self.field_cast_pcb.value(),
             component_inset=self.field_cast_inset.value(),
-            component_color_hex=self.field_body_color.text().strip() or "#303030",
+            # Volutamente NON il colore del corpo: il blocco di ripiego (senza
+            # componenti dalla foto) deve distinguersi dal PCB, non sparirci sopra.
+            component_color_hex="#3a3a3a",
             components=self._components_from_table(),
             silk_labels=self._silk_labels(),
             sides=self._sides_from_table(),
