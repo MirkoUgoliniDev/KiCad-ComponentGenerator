@@ -42,12 +42,150 @@ def test_progress_is_visible_on_project_tab_and_literal(window):
     window._on_ai_progress("Crop 1: <b>R1</b> & C1")
     assert "<b>R1</b> & C1" in window.ai_progress_text.toPlainText()
     assert "<b>R1</b> & C1" in window.log_text.toPlainText()
+    assert window.analysis_overlay.status.text() == "Crop 1: <b>R1</b> & C1"
+
+
+def test_extraction_action_is_centered_below_separate_tools(window):
+    assert window.group_component_analysis.isAncestorOf(window.combo_component_type)
+    assert window.group_component_analysis.isAncestorOf(window.group_ai_tools)
+    assert window.group_component_analysis.isAncestorOf(window.btn_extract_ai)
+    assert not window.group_component_analysis.isAncestorOf(window.docs_list)
+    assert window.group_ai_tools.isAncestorOf(window.combo_model)
+    assert window.group_ai_tools.isAncestorOf(window.combo_vision_model)
+    assert window.group_ai_tools.isAncestorOf(window.btn_pick_vision_model)
+    assert not window.group_ai_tools.isAncestorOf(window.combo_component_type)
+    assert window.group_ai_tools.isAncestorOf(window.btn_ai_log)
+    assert window.group_ai_tools.isAncestorOf(window.btn_component_prompt)
+    assert window.group_ai_tools.isAncestorOf(window.btn_photo_comparison)
+    assert not window.group_ai_tools.isAncestorOf(window.btn_extract_ai)
+    layout = window.btn_extract_ai.parentWidget().layout()
+    tools_index = layout.indexOf(window.group_ai_tools)
+    action_index = layout.indexOf(window.btn_extract_ai)
+    assert tools_index < action_index
+    assert layout.itemAt(action_index).alignment() & Qt.AlignmentFlag.AlignHCenter
+    assert not window.btn_extract_ai.icon().isNull()
+    assert window.btn_extract_ai.minimumHeight() >= 44
+    window._on_extract_finished()
+    assert window.btn_extract_ai.text() == "Estrai parametri con AI"
+
+
+@pytest.mark.parametrize("outcome", ["finished", "error", "done"])
+def test_analysis_overlay_closes_on_all_worker_outcomes(window, monkeypatch, outcome):
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: None)
+    window._analysis_tabs_enabled = window.tabs.isEnabled()
+    window.tabs.setEnabled(False)
+    window.analysis_overlay.start()
+    assert window.analysis_overlay.timer.isActive()
+    if outcome == "error":
+        window._on_extract_error("Errore simulato")
+    elif outcome == "done":
+        params = ExtractedParams(name="", description="", tags="", confidence="low", notes="",
+                                 layout="castellated", castellated_sides=[])
+        window._on_extracted(params)
+    else:
+        window._on_extract_finished()
+    assert window.analysis_overlay.isHidden()
+    assert not window.analysis_overlay.timer.isActive()
+    assert window.tabs.isEnabled()
+    window._on_extract_finished()
+    assert window.btn_extract_ai.isEnabled()
 
 
 def test_startup_size_fits_available_screen(window):
     available = window.screen().availableGeometry()
     assert window.width() == min(1390, max(1, available.width() - 40))
     assert window.height() == min(1050, max(1, available.height() - 40))
+
+
+def test_output_actions_require_current_footprint(window, tmp_path, monkeypatch):
+    controls = (window.btn_open_output, window.btn_export,
+                window.action_open_output, window.action_export)
+    assert all(not control.isEnabled() for control in controls)
+    window._docs_dir().mkdir(parents=True, exist_ok=True)
+    window._refresh_output_actions()
+    assert all(not control.isEnabled() for control in controls)
+    name = window._component_name()
+    footprint = window._project_dir() / f"{name}.pretty" / f"{name}.kicad_mod"
+    footprint.parent.mkdir()
+    footprint.write_text("(footprint test)", encoding="utf-8")
+    monkeypatch.setattr(window, "_draw_preview", lambda: None)
+    monkeypatch.setattr(window, "_draw_preview_3d", lambda: None)
+    window._on_generated(str(footprint))
+    assert all(control.isEnabled() for control in controls)
+    window.field_name.setText("AltroComponente")
+    assert all(not control.isEnabled() for control in controls)
+    window.field_name.setText(name)
+    assert all(control.isEnabled() for control in controls)
+    window.field_library_root.setText(str(tmp_path / "altro"))
+    assert all(not control.isEnabled() for control in controls)
+
+
+def test_output_handlers_do_not_open_or_export_without_footprint(window, monkeypatch):
+    calls = []
+    monkeypatch.setattr(gui.webbrowser, "open", lambda *args: calls.append(args))
+    monkeypatch.setattr(gui.QFileDialog, "getExistingDirectory", lambda *args: calls.append(args))
+    window._open_project_dir()
+    window._export_component()
+    assert calls == []
+
+
+def test_footprint_sections_have_independent_scroll_tabs(window):
+    from PyQt6.QtWidgets import QScrollArea
+    tabs = window.footprint_subtabs
+    assert [tabs.tabText(i) for i in range(tabs.count())] == [
+        "Generale", "Matrice THT", "Modulo castellated", "Parametri 3D"]
+    for index, field in enumerate((window.field_description, window.field_pitch,
+                                   window.table_sides, window.field_body_height)):
+        page = tabs.widget(index)
+        assert isinstance(page, QScrollArea)
+        assert page.widgetResizable()
+        assert page.widget().isAncestorOf(field)
+    assert window.table_sides.minimumHeight() >= 150
+
+
+def test_footprint_tab_navigation_does_not_change_layout_or_values(window):
+    window.group_castellated.setChecked(True)
+    assert window.footprint_subtabs.currentIndex() == 2
+    window.field_cast_body_length.setValue(42.8)
+    window.field_description.setText("Descrizione modificabile")
+    for index in range(4):
+        window.footprint_subtabs.setCurrentIndex(index)
+        assert window._is_castellated()
+        assert window.field_cast_body_length.value() == 42.8
+        assert window.field_description.isEnabled()
+        assert not window.field_pitch.isEnabled()
+    window.group_castellated.setChecked(False)
+    assert window.footprint_subtabs.currentIndex() == 1
+    assert window.field_pitch.isEnabled()
+    assert window.field_description.text() == "Descrizione modificabile"
+
+
+def test_only_relevant_geometry_subtab_is_visible(window):
+    tabs = window.footprint_subtabs
+    assert tabs.isTabVisible(1)
+    assert not tabs.isTabVisible(2)
+    combo = window.combo_component_type
+    combo.setCurrentIndex(combo.findData("aggregate_castellated"))
+    assert not tabs.isTabVisible(1)
+    assert tabs.isTabVisible(2)
+    assert tabs.currentIndex() == 2
+    assert tabs.isTabVisible(0) and tabs.isTabVisible(3)
+    window.group_castellated.setChecked(False)
+    assert tabs.isTabVisible(1)
+    assert not tabs.isTabVisible(2)
+    assert tabs.currentIndex() == 1
+
+
+def test_saved_castellated_type_restores_matching_subtab(window, monkeypatch):
+    monkeypatch.setattr(gui, "load_config", lambda: {
+        "component_type": "aggregate_castellated", "system_prompt": ""})
+    restored = gui.MainWindow()
+    try:
+        assert restored._is_castellated()
+        assert restored.footprint_subtabs.isTabVisible(2)
+        assert not restored.footprint_subtabs.isTabVisible(1)
+    finally:
+        restored.close()
 
 
 def test_project_no_longer_has_bottom_ai_help(window):
@@ -106,6 +244,24 @@ def test_project_info_is_only_in_modal(window):
     assert not dialog.isVisible()
 
 
+def test_generate_summary_is_in_modal_and_refreshed_on_open(window):
+    from PyQt6.QtCore import QTimer
+    dialog = window.generate_info_dialog
+    assert window.label_summary.parentWidget() is dialog
+    assert dialog.isModal() and not dialog.isVisible()
+    assert not window.btn_generate_info.icon().isNull()
+    window.field_name.setText("Modulo_verifica")
+    observed = []
+    def check_and_close():
+        observed.append((dialog.isVisible(), window.label_summary.text()))
+        dialog.accept()
+    QTimer.singleShot(0, check_and_close)
+    window.btn_generate_info.click()
+    assert observed[0][0]
+    assert "Modulo_verifica" in observed[0][1]
+    assert not dialog.isVisible()
+
+
 def test_ai_log_modal_preserves_history_and_receives_live_updates(window):
     from PyQt6.QtCore import QTimer
     dialog = window.ai_log_dialog
@@ -144,6 +300,22 @@ def test_3d_viewport_is_not_inside_scrolling_settings(window):
     assert splitter is not None
     assert isinstance(splitter.widget(1), QScrollArea)
     assert splitter.widget(1).widget() is not splitter.widget(0)
+
+
+def test_3d_actions_are_centered_outside_scroll_and_splitter(window):
+    from PyQt6.QtWidgets import QScrollArea, QSplitter
+    bar = window.model_3d_action_bar
+    assert bar.isAncestorOf(window.btn_regen_3d)
+    layout = bar.layout()
+    assert layout.itemAt(0).spacerItem() is not None
+    assert layout.itemAt(layout.count() - 1).spacerItem() is not None
+    parent = bar.parentWidget()
+    while parent is not None:
+        assert not isinstance(parent, (QScrollArea, QSplitter))
+        parent = parent.parentWidget()
+    container_layout = bar.parentWidget().layout()
+    assert isinstance(container_layout.itemAt(0).widget(), QSplitter)
+    assert container_layout.itemAt(1).widget() is bar
 
 
 def test_comparison_button_opens_valid_image_and_resets_on_next_result(window,monkeypatch):

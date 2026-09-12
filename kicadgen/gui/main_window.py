@@ -71,6 +71,7 @@ from ..services.datasheet_extractor import (
 )
 from ..services.openrouter import DEFAULT_MODEL
 from .app_config import CONFIG_PATH, DEFAULTS, load_config, save_config
+from .analysis_overlay import AnalysisOverlay
 from .model_dialog import pick_model
 from .pinout_dialog import PinoutDialog
 from .photo_review_dialog import PhotoReviewDialog, PhotoTransform
@@ -307,14 +308,19 @@ class MainWindow(QMainWindow):
 
         self._build_menu()
         self._build_central()
+        # Project type is restored before the footprint widgets exist.
+        self.group_castellated.setChecked(
+            self.combo_component_type.currentData() == "aggregate_castellated"
+        )
+        self._sync_footprint_subtabs()
         self._refresh_docs_list()
 
     # ── Menu ────────────────────────────────────────────────────────
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
-        file_menu.addAction("Apri cartella componente", self._open_project_dir)
-        file_menu.addAction("Esporta in libreria...", self._export_component)
+        self.action_open_output = file_menu.addAction("Apri cartella componente", self._open_project_dir)
+        self.action_export = file_menu.addAction("Esporta in libreria...", self._export_component)
         file_menu.addSeparator()
         file_menu.addAction("Esci", self.close)
 
@@ -496,6 +502,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.tabs)
 
         self.setCentralWidget(central)
+        self.analysis_overlay = AnalysisOverlay(central)
+        self.analysis_overlay.log_requested.connect(self.ai_log_dialog.exec)
+        self._analysis_tabs_enabled = None
 
     # ── Tab 1: Progetto ────────────────────────────────────────────
 
@@ -582,6 +591,9 @@ class MainWindow(QMainWindow):
         docs_btn_row.addWidget(btn_open_docs)
         docs_btn_row.addStretch()
         docs_layout.addLayout(docs_btn_row)
+        outer.addWidget(docs_group)
+        self.group_component_analysis = QGroupBox("Analisi componente")
+        analysis_layout = QVBoxLayout(self.group_component_analysis)
 
         ai_form = QFormLayout()
 
@@ -598,6 +610,7 @@ class MainWindow(QMainWindow):
             self._on_component_type_changed
         )
         ai_form.addRow("Tipologia componente:", self.combo_component_type)
+        models_form = QFormLayout()
 
         self.combo_model = QComboBox()
         self.combo_model.setToolTip(
@@ -614,7 +627,7 @@ class MainWindow(QMainWindow):
         model_row = QHBoxLayout()
         model_row.addWidget(self.combo_model, 1)
         model_row.addWidget(btn_pick_model)
-        ai_form.addRow("Modello datasheet:", model_row)
+        models_form.addRow("Modello datasheet:", model_row)
         self.combo_vision_model = QComboBox()
         self.combo_vision_model.setToolTip(
             "Modello dedicato alla localizzazione dei componenti nella foto. "
@@ -627,28 +640,35 @@ class MainWindow(QMainWindow):
         vision_row = QHBoxLayout()
         vision_row.addWidget(self.combo_vision_model, 1)
         vision_row.addWidget(self.btn_pick_vision_model)
-        ai_form.addRow("Modello foto:", vision_row)
+        models_form.addRow("Modello foto:", vision_row)
 
-        docs_layout.addLayout(ai_form)
+        analysis_layout.addLayout(ai_form)
 
-        ai_row = QHBoxLayout()
-        self.btn_extract_ai = QPushButton("✨ Estrai parametri con AI dal datasheet")
+        self.group_ai_tools = QGroupBox("Strumenti AI")
+        tools_layout = QVBoxLayout(self.group_ai_tools)
+        tools_layout.addLayout(models_form)
+        tools_row = QHBoxLayout()
+        tools_layout.addLayout(tools_row)
+        tools_row.addStretch()
+        analysis_layout.addWidget(self.group_ai_tools)
+
+        self.btn_extract_ai = QPushButton("Estrai parametri con AI")
         self.btn_extract_ai.setObjectName("primary")
+        self.btn_extract_ai.setIcon(QIcon(str(Path(__file__).resolve().parent / "assets" / "extract-ai.svg")))
+        self.btn_extract_ai.setIconSize(QSize(24, 24))
+        self.btn_extract_ai.setMinimumHeight(46)
+        self.btn_extract_ai.setToolTip("Avvia l'estrazione dai documenti e dalle foto selezionati")
         self.btn_extract_ai.clicked.connect(self._extract_with_ai)
-        ai_row.addWidget(self.btn_extract_ai)
         self.btn_photo_comparison = QPushButton("Confronta foto...")
         self.btn_photo_comparison.setEnabled(False)
         self.btn_photo_comparison.clicked.connect(self._show_photo_comparison)
         self._photo_png = None
         self._photo_overlay_png = None
         self._photo_source = ""
-        ai_row.addWidget(self.btn_photo_comparison)
-        ai_row.addStretch()
         self.btn_ai_log = QPushButton("≡ Log AI")
         self.btn_ai_log.setToolTip("Apri il log completo dell'analisi AI, aggiornato in tempo reale")
         self.btn_ai_log.setAccessibleName("Apri log analisi AI")
-        ai_row.addWidget(self.btn_ai_log)
-        docs_layout.addLayout(ai_row)
+        tools_row.addWidget(self.btn_ai_log)
         self.ai_log_dialog = QDialog(self)
         self.ai_log_dialog.setWindowTitle("Log analisi AI")
         self.ai_log_dialog.setModal(True)
@@ -665,7 +685,11 @@ class MainWindow(QMainWindow):
 
         self.btn_component_prompt = QPushButton("Modifica prompt…")
         self.btn_component_prompt.setToolTip("Modifica le istruzioni AI specifiche di questo componente")
-        docs_layout.addWidget(self.btn_component_prompt, alignment=Qt.AlignmentFlag.AlignRight)
+        tools_row.addWidget(self.btn_component_prompt)
+        tools_row.addWidget(self.btn_photo_comparison)
+        tools_row.addStretch()
+        analysis_layout.addSpacing(10)
+        analysis_layout.addWidget(self.btn_extract_ai, alignment=Qt.AlignmentFlag.AlignHCenter)
         self.component_prompt_dialog = QDialog(self)
         self.component_prompt_dialog.setWindowTitle("Prompt specifico del componente")
         self.component_prompt_dialog.setModal(True)
@@ -698,7 +722,7 @@ class MainWindow(QMainWindow):
         self.component_prompt_dialog.resize(900, 560)
         self.btn_component_prompt.clicked.connect(self._edit_component_prompt)
 
-        outer.addWidget(docs_group)
+        outer.addWidget(self.group_component_analysis)
         outer.addStretch()
 
         self._refresh_model_combo()
@@ -762,7 +786,19 @@ class MainWindow(QMainWindow):
 
     def _update_project_path_label(self) -> None:
         self.label_project_path.setText(str(self._project_dir()))
+        self._refresh_output_actions()
         self._refresh_docs_list()
+
+    def _refresh_output_actions(self) -> bool:
+        name = self._component_name()
+        footprint = self._project_dir() / f"{name}.pretty" / f"{name}.kicad_mod"
+        available = bool(name) and footprint.is_file()
+        for attr in ("btn_open_output", "btn_export", "action_open_output", "action_export"):
+            action = getattr(self, attr, None)
+            if action is not None:
+                action.setEnabled(available)
+                action.setToolTip("" if available else "Genera prima il footprint del componente corrente")
+        return available
 
     def _on_name_changed(self, text: str) -> None:
         if hasattr(self, "field_name_mirror"):
@@ -871,13 +907,28 @@ class MainWindow(QMainWindow):
         self._extract_worker.error.connect(self._on_extract_error)
         self._extract_worker.progress.connect(self._on_ai_progress)
         self._extract_worker.finished.connect(self._on_extract_finished)
-        self._extract_worker.start()
+        self._analysis_tabs_enabled = self.tabs.isEnabled()
+        self.tabs.setEnabled(False)
+        self.analysis_overlay.start()
+        try:
+            self._extract_worker.start()
+        except Exception as exc:
+            self._on_extract_finished()
+            self._on_extract_error(str(exc))
+
+    def _hide_analysis_overlay(self) -> None:
+        self.analysis_overlay.stop()
+        if self._analysis_tabs_enabled is not None:
+            self.tabs.setEnabled(self._analysis_tabs_enabled)
+            self._analysis_tabs_enabled = None
 
     def _on_extract_finished(self) -> None:
+        self._hide_analysis_overlay()
         self.btn_extract_ai.setEnabled(True)
-        self.btn_extract_ai.setText("✨ Estrai parametri con AI dal datasheet")
+        self.btn_extract_ai.setText("Estrai parametri con AI")
 
     def _on_ai_progress(self, message: str) -> None:
+        self.analysis_overlay.set_status(message)
         # Testo del modello: inserimento letterale, mai interpretato come HTML.
         self.ai_progress_text.moveCursor(QTextCursor.MoveOperation.End)
         self.ai_progress_text.insertPlainText(message + "\n")
@@ -1004,6 +1055,7 @@ class MainWindow(QMainWindow):
             shutil.move(str(f), str(target))
 
     def _on_extracted(self, params: ExtractedParams) -> None:
+        self._hide_analysis_overlay()
         self._invalidate_generated_mesh()
         self._photo_png = getattr(params, "photo_png", None)
         self._photo_overlay_png = params.photo_overlay_png
@@ -1148,6 +1200,7 @@ class MainWindow(QMainWindow):
             self._append_log(f"Sigle serigrafate {line}")
 
     def _on_extract_error(self, message: str) -> None:
+        self._hide_analysis_overlay()
         self._on_ai_progress(f"Estrazione fallita: {message}")
         QMessageBox.warning(self, "Estrazione fallita", message)
 
@@ -1161,11 +1214,13 @@ class MainWindow(QMainWindow):
 
         form_group = QGroupBox("Parametri footprint (header THT a matrice)")
         form = QFormLayout(form_group)
+        general_group = QGroupBox("Dati del componente")
+        general_form = QFormLayout(general_group)
 
         self.field_name_mirror = QLineEdit(self.field_name.text())
         self.field_name_mirror.setReadOnly(True)
         self.field_name_mirror.setToolTip("Modificabile nel tab \"Progetto\"")
-        form.addRow("Nome (da tab Progetto):", self.field_name_mirror)
+        general_form.addRow("Nome (da tab Progetto):", self.field_name_mirror)
 
         self.field_description = QLineEdit()
         self.field_description.setPlaceholderText("(auto-generata se vuota)")
@@ -1217,8 +1272,8 @@ class MainWindow(QMainWindow):
         self.field_drill.setSuffix(" mm")
         self.field_drill.setValue(1.0)
 
-        form.addRow("Descrizione:", self.field_description)
-        form.addRow("Tag:", self.field_tags)
+        general_form.addRow("Descrizione:", self.field_description)
+        general_form.addRow("Tag:", self.field_tags)
         form.addRow("Righe:", self.field_rows)
         form.addRow("Colonne:", self.field_cols)
         form.addRow("Passo (pitch, tra pin nella riga):", self.field_pitch)
@@ -1228,10 +1283,24 @@ class MainWindow(QMainWindow):
         form.addRow("Drill:", self.field_drill)
 
         self.group_matrix = form_group
-        outer.addWidget(form_group)
-        outer.addWidget(self._build_castellated_group())
-        outer.addWidget(self._build_3d_group())
-        outer.addStretch()
+        castellated_group = self._build_castellated_group()
+        body_group = self._build_3d_group()
+        self.footprint_subtabs = QTabWidget()
+        for title, group in (
+            ("Generale", general_group),
+            ("Matrice THT", form_group),
+            ("Modulo castellated", castellated_group),
+            ("Parametri 3D", body_group),
+        ):
+            page = QWidget()
+            page_layout = QVBoxLayout(page)
+            page_layout.addWidget(group)
+            page_layout.addStretch()
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(page)
+            self.footprint_subtabs.addTab(scroll, title)
+        outer.addWidget(self.footprint_subtabs)
         return tab
 
     # ── Modulo castellated ──────────────────────────────────────────
@@ -1314,11 +1383,13 @@ class MainWindow(QMainWindow):
         form.addRow("Rientro componenti (3D):", self.field_cast_inset)
         layout.addLayout(form)
 
-        layout.addWidget(QLabel(
+        side_note = QLabel(
             "Contatti lato per lato (ogni lato ha il suo passo). Il primo pin di "
             "ogni lato si conta dall'alto in basso sui lati verticali, da sinistra "
             "a destra su quelli orizzontali."
-        ))
+        )
+        side_note.setWordWrap(True)
+        layout.addWidget(side_note)
 
         self.table_sides = QTableWidget(0, 6)
         self.table_sides.setHorizontalHeaderLabels(
@@ -1327,7 +1398,8 @@ class MainWindow(QMainWindow):
         self.table_sides.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch
         )
-        self.table_sides.setMaximumHeight(170)
+        self.table_sides.setMinimumHeight(150)
+        self.table_sides.setMaximumHeight(200)
         layout.addWidget(self.table_sides)
 
         buttons = QHBoxLayout()
@@ -1346,6 +1418,9 @@ class MainWindow(QMainWindow):
         """La matrice e i moduli castellated sono alternativi, mai insieme."""
         if hasattr(self, "group_matrix"):
             self.group_matrix.setEnabled(not checked)
+        if hasattr(self, "footprint_subtabs"):
+            self._sync_footprint_subtabs()
+            self.footprint_subtabs.setCurrentIndex(2 if checked else 1)
         if checked and self.table_sides.rowCount() == 0:
             # Due lati opposti sono la configurazione di gran lunga piu' comune.
             self._add_side_row({"edge": "left", "count": 3, "pitch_mm": 2.54, "first_pin": 1})
@@ -1355,6 +1430,12 @@ class MainWindow(QMainWindow):
             self.group_components.setVisible(checked)
         self._update_summary()
         self._draw_preview()
+
+    def _sync_footprint_subtabs(self) -> None:
+        """Only expose the geometry editor used by the current layout."""
+        castellated = self._is_castellated()
+        self.footprint_subtabs.setTabVisible(1, not castellated)
+        self.footprint_subtabs.setTabVisible(2, castellated)
 
     def _sync_3d_fields_for_castellated(self, castellated: bool) -> None:
         """Nei moduli castellated il corpo 3D viene dal modulo, non a mano.
@@ -1570,7 +1651,16 @@ class MainWindow(QMainWindow):
 
         self.label_summary = QLabel()
         self.label_summary.setWordWrap(True)
-        outer.addWidget(self.label_summary)
+        self.label_summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.generate_info_dialog = QDialog(self)
+        self.generate_info_dialog.setWindowTitle("Riepilogo della generazione")
+        self.generate_info_dialog.setModal(True)
+        summary_layout = QVBoxLayout(self.generate_info_dialog)
+        summary_layout.addWidget(self.label_summary)
+        summary_close = QPushButton("Chiudi")
+        summary_close.clicked.connect(self.generate_info_dialog.accept)
+        summary_layout.addWidget(summary_close, alignment=Qt.AlignmentFlag.AlignRight)
+        self.generate_info_dialog.resize(680, 240)
 
         btn_row = QHBoxLayout()
         self.btn_generate = QPushButton("Genera footprint")
@@ -1584,6 +1674,15 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self.btn_open_output)
         btn_row.addWidget(self.btn_export)
         btn_row.addStretch()
+        self.btn_generate_info = QPushButton()
+        self.btn_generate_info.setIcon(QIcon(str(Path(__file__).resolve().parent / "assets" / "info.svg")))
+        self.btn_generate_info.setIconSize(QSize(22, 22))
+        self.btn_generate_info.setFixedSize(36, 32)
+        self.btn_generate_info.setStyleSheet("QPushButton { padding: 4px; }")
+        self.btn_generate_info.setToolTip("Riepilogo del componente e dei parametri di generazione")
+        self.btn_generate_info.setAccessibleName("Riepilogo della generazione")
+        self.btn_generate_info.clicked.connect(self._show_generate_info)
+        btn_row.addWidget(self.btn_generate_info)
         outer.addLayout(btn_row)
 
         outer.addWidget(QLabel("Log:"))
@@ -1591,11 +1690,19 @@ class MainWindow(QMainWindow):
         self.log_text.setReadOnly(True)
         outer.addWidget(self.log_text)
 
+        self._refresh_output_actions()
+
         return tab
 
+    def _show_generate_info(self) -> None:
+        self._update_summary()
+        self.generate_info_dialog.exec()
+
     def _open_project_dir(self) -> None:
+        if not self._refresh_output_actions():
+            self._append_log("Genera prima il footprint del componente corrente.")
+            return
         project_dir = self._project_dir()
-        project_dir.mkdir(parents=True, exist_ok=True)
         webbrowser.open(project_dir.as_uri())
 
     def _export_component(self) -> None:
@@ -1605,6 +1712,9 @@ class MainWindow(QMainWindow):
         e' un passo separato ed esplicito, cosi' la libreria vera riceve solo
         componenti gia' verificati.
         """
+        if not self._refresh_output_actions():
+            self._append_log("Genera prima il footprint del componente corrente.")
+            return
         source = self._project_dir()
         if not source.is_dir():
             self._append_log(f"ERRORE export: {source} non esiste, genera prima il componente.")
@@ -1809,6 +1919,7 @@ class MainWindow(QMainWindow):
         self._worker.start()
 
     def _on_generated(self, path: str) -> None:
+        self._refresh_output_actions()
         self._append_log(f"OK -> {path}")
         if not self._cad_result_is_current():
             return
@@ -1945,6 +2056,7 @@ class MainWindow(QMainWindow):
         settings_layout.addWidget(self._build_components_group())
 
         regen_row = QHBoxLayout()
+        regen_row.addStretch()
         self.btn_regen_3d = QPushButton("Rigenera modello 3D (STEP) con queste annotazioni")
         self.btn_regen_3d.setObjectName("primary")
         self.btn_regen_3d.clicked.connect(self._regenerate_3d)
@@ -1953,7 +2065,6 @@ class MainWindow(QMainWindow):
         btn_open_3d.clicked.connect(self._open_3dshapes_dir)
         regen_row.addWidget(btn_open_3d)
         regen_row.addStretch()
-        settings_layout.addLayout(regen_row)
 
         scroll = QScrollArea()
         scroll.setWidget(settings)
@@ -1965,7 +2076,14 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([600, 200])
         splitter.setCollapsible(0, False)
-        return splitter
+        container = QWidget()
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.addWidget(splitter, 1)
+        self.model_3d_action_bar = QWidget()
+        self.model_3d_action_bar.setLayout(regen_row)
+        container_layout.addWidget(self.model_3d_action_bar)
+        return container
 
     def _on_pin_numbers_toggled(self, checked: bool) -> None:
         self._config["show_pin_numbers_3d"] = checked
@@ -2658,6 +2776,7 @@ class MainWindow(QMainWindow):
     # ── Cambio tab ─────────────────────────────────────────────────
 
     def _on_tab_changed(self, index: int) -> None:
+        self._refresh_output_actions()
         if index == 0:
             self._refresh_docs_list()
         elif index == 2:
