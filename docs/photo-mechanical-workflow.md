@@ -27,12 +27,15 @@ interferenze meccaniche. Non sono introdotti margini di sicurezza impliciti.
   vengono sommate come se contenessero altri componenti.
 - Ritaglio PCB calibrato con dimensioni note. La foto deve avere lato lungo
   orizzontale ed essere quasi ortogonale: non viene rettificata la prospettiva.
+  Inclinazioni significative vengono rifiutate; resta una piccola tolleranza
+  di rasterizzazione. Una foto rifiutata non viene usata per calibrare le quote.
 - Localizzazione dedicata: una vista completa e tre strisce sovrapposte. I grandi
   package restano nella vista completa; i piccoli sono assegnati per centro alla
   propria zona, evitando il conteggio ripetuto tra strisce.
 - Associazione geometrica uno-a-uno tra viste: IoU oppure contenimento con limiti
   su rapporto delle aree e distanza dei centri. Un piccolo passivo non viene
-  assorbito da un grande IC solo perché gli sta vicino.
+  assorbito da un grande IC solo perché gli sta vicino. L'assegnazione considera
+  l'intera vista per evitare duplicati causati dall'ordine dei rilevamenti.
 - Verifica della sola presenza di corpi montati, in gruppi di massimo 24.
   Piazzole vuote/vie/scritte possono essere escluse; non vengono inventate nuove
   coordinate. In caso di errore la geometria disponibile resta come dubbia.
@@ -51,6 +54,13 @@ pixel; una ripetizione identica riusa la cache. Risposte incomplete non sono
 trattate come successi riutilizzabili. La cache può contenere informazioni estratte
 dai documenti: resta locale e ignorata da Git. Per una nuova inferenza degli stessi
 input si può rimuovere esplicitamente la cache locale.
+
+Anche il fallback dall'estrazione globale conserva ingombri generici senza
+marcature e segnala le altezze come stimate. Quote opzionali non valide vengono
+scartate e segnalate; un lato malformato non elimina gli altri lati validi.
+Nuove estrazioni e correzioni applicate invalidano l'anteprima precedente:
+completamenti CAD riferiti ai dati precedenti non la ripristinano. I controlli
+CAD di bordo e sovrapposizione supportano anche rotazioni non multiple di 90°.
 
 ## Prova sull'immagine fornita
 

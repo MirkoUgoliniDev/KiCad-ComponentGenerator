@@ -294,6 +294,7 @@ class MainWindow(QMainWindow):
         self.castellated_components: list[ComponentBox] = []
         self.pin_map: dict | None = None
         self._last_mesh_path: Path | None = None
+        self._model_revision = 0
         self._config = load_config()
         # Modello scelto solo per questa sessione (datasheet difficile): non
         # viene salvato in config.json e si perde alla chiusura, per scelta.
@@ -863,14 +864,23 @@ class MainWindow(QMainWindow):
 
     def _apply_photo_review(self, components: list[dict]) -> None:
         self._set_photo_components(components)
-        # The exported mesh no longer describes the manually corrected inventory.
-        self._last_mesh_path = None
-        self.preview_3d.clear_preview()
+        self._invalidate_generated_mesh()
         self.label_3d_status.setText(
             "Componenti corretti dalla foto. Modello 3D da rigenerare: "
             "premi \"Rigenera modello 3D\" per aggiornare STEP e anteprima."
         )
         self._append_log(f"Revisione fotografica applicata: {len(components)} componenti; 3D da rigenerare.")
+
+    def _invalidate_generated_mesh(self) -> None:
+        # Running CAD workers still describe the previous input revision.
+        self._model_revision += 1
+        self._last_mesh_path = None
+        self.preview_3d.clear_preview()
+        self.label_3d_status.setText("Dati modificati. Modello 3D da rigenerare.")
+
+    def _cad_result_is_current(self) -> bool:
+        worker = self.sender()
+        return worker is None or worker._model_revision == self._model_revision
 
     def _migrate_docs_to_new_name(self, new_name: str) -> None:
         """Sposta i documenti nella cartella del nuovo nome componente.
@@ -911,6 +921,7 @@ class MainWindow(QMainWindow):
             shutil.move(str(f), str(target))
 
     def _on_extracted(self, params: ExtractedParams) -> None:
+        self._invalidate_generated_mesh()
         self._photo_png = getattr(params, "photo_png", None)
         self._photo_overlay_png = params.photo_overlay_png
         self._photo_source = params.photo_source
@@ -1705,6 +1716,7 @@ class MainWindow(QMainWindow):
             params, project_dir, body,
             fillets=list(self.fillet_annotations), face_texts=list(self.face_text_annotations),
         )
+        self._worker._model_revision = self._model_revision
         self._worker.done.connect(self._on_generated)
         self._worker.error.connect(self._on_error)
         self._worker.cad3d_done.connect(self._on_cad3d_generated)
@@ -1715,6 +1727,8 @@ class MainWindow(QMainWindow):
 
     def _on_generated(self, path: str) -> None:
         self._append_log(f"OK -> {path}")
+        if not self._cad_result_is_current():
+            return
         self._draw_preview()
         self._draw_preview_3d()
 
@@ -1722,15 +1736,21 @@ class MainWindow(QMainWindow):
         self._append_log(f"ERRORE: {message}")
 
     def _on_cad3d_generated(self, path: str) -> None:
+        if not self._cad_result_is_current():
+            return
         self._append_log(f"OK (3D) -> {path}")
         self.label_3d_status.setText(f"Modello STEP aggiornato: {path}")
         self._show_generated_mesh(Path(path))
 
     def _on_cad3d_error(self, message: str) -> None:
+        if not self._cad_result_is_current():
+            return
         self._append_log(f"ERRORE 3D: {message}")
 
     def _on_cad3d_warning(self, message: str) -> None:
         """Annotazione non applicata: il modello c'e' comunque, ma va detto."""
+        if not self._cad_result_is_current():
+            return
         self._append_log(f"ATTENZIONE 3D: {message}")
 
     # ── Tab 4: Anteprima ───────────────────────────────────────────
@@ -1913,6 +1933,7 @@ class MainWindow(QMainWindow):
             params, body, self._project_dir(),
             list(self.fillet_annotations), list(self.face_text_annotations),
         )
+        self._cad3d_worker._model_revision = self._model_revision
         self._cad3d_worker.done.connect(self._on_regen_3d_done)
         self._cad3d_worker.warning.connect(self._on_cad3d_warning)
         self._cad3d_worker.error.connect(self._on_regen_3d_error)
@@ -1924,6 +1945,8 @@ class MainWindow(QMainWindow):
         self.btn_regen_3d.setText("Rigenera modello 3D (STEP) con queste annotazioni")
 
     def _on_regen_3d_done(self, path: str) -> None:
+        if not self._cad_result_is_current():
+            return
         self._append_log(f"OK (3D) -> {path}")
         self.label_3d_status.setText(f"Modello STEP aggiornato: {path}")
         self._show_generated_mesh(Path(path))
@@ -1946,6 +1969,8 @@ class MainWindow(QMainWindow):
             self._append_log(f"Anteprima mesh non disponibile: {exc}")
 
     def _on_regen_3d_error(self, message: str) -> None:
+        if not self._cad_result_is_current():
+            return
         self._append_log(f"ERRORE 3D: {message}")
         self.label_3d_status.setText(f"Generazione STEP fallita: {message.splitlines()[0]}")
 

@@ -4,6 +4,7 @@ No real photo, credentials or model responses are required. All external calls
 are injected; an autouse guard also fails accidental OpenRouter/HTTP access.
 """
 from copy import deepcopy
+import hashlib
 import json
 from pathlib import Path
 from unittest.mock import Mock
@@ -435,6 +436,101 @@ def test_cache_disabled_never_reads_or_writes_paths(monkeypatch, cache_kwargs):
     call = Mock(return_value={"components": []})
     for _ in range(2):
         grounding.cached_call(call, cache_kwargs, None, "stage", lambda message: None)
+    assert call.call_count == 2
+
+
+@pytest.mark.parametrize("stage", ["presence", "classification"])
+@pytest.mark.parametrize("defect", ["partial", "duplicate", "unknown", "bool-id", "verdict", "confidence", "empty"])
+def test_cache_rejects_old_invalid_id_responses_without_retry(tmp_path, cache_kwargs, stage, defect):
+    if stage == "classification":
+        cache_kwargs["tool"] = grounding.classification_tool(KINDS)
+        entries = [vote(1), vote(2)]
+        verdict_key = "is_component"
+    else:
+        cache_kwargs["tool"] = {"function": {"name": "verify_mounted_bodies", "parameters": {
+            "type": "object", "required": ["components"], "properties": {"components": {
+                "type": "array", "items": {"type": "object", "required": ["id", "present", "confidence"],
+                    "properties": {"id": {"type": "integer"}, "present": {"type": "boolean"},
+                        "confidence": {"type": "string", "enum": ["high", "medium", "low"]}}}}}}}}
+        entries = [dict(id=i, present=True, confidence="high") for i in (1, 2)]
+        verdict_key = "present"
+    valid_response = {"components": deepcopy(entries)}
+    if defect == "partial":
+        entries.pop()
+    elif defect == "duplicate":
+        entries[1]["id"] = 1
+    elif defect == "unknown":
+        entries[1]["id"] = 99
+    elif defect == "bool-id":
+        entries[0]["id"] = True
+    elif defect == "verdict":
+        entries[0][verdict_key] = "false"
+    elif defect == "confidence":
+        entries[0]["confidence"] = "certain"
+    else:
+        entries.clear()
+    invalid_response = {"components": entries}
+    key = hashlib.sha256(json.dumps(cache_kwargs, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
+    path = tmp_path / f"{key}.json"
+    path.write_text(json.dumps(dict(key=key, response=invalid_response)), encoding="utf-8")
+    call = Mock(return_value=invalid_response)
+    assert grounding.cached_call(call, cache_kwargs, tmp_path, "test", lambda m: None,
+                                 expected_ids=[1, 2]) == invalid_response
+    call.assert_called_once_with(**cache_kwargs)
+    # A fresh partial response is neither retried nor made reusable.
+    call.return_value = valid_response
+    assert grounding.cached_call(call, cache_kwargs, tmp_path, "test", lambda m: None,
+                                 expected_ids=[1, 2]) == valid_response
+    grounding.cached_call(call, cache_kwargs, tmp_path, "test", lambda m: None, expected_ids=[1, 2])
+    assert call.call_count == 2
+    assert list(tmp_path.glob("*.json")) == [path]  # Original key is retained.
+
+
+@pytest.mark.parametrize("entry", [
+    native([400, 100, 200, 300]), native([True, 100, 400, 300]),
+    native([200, 100, float("inf"), 300]), native(kind="invented"), native(label=[]),
+    vote(height_mm=True), vote(height_mm=float("nan")), vote(rotation_deg=45),
+    vote(color_hex="#bad"), vote(name=[]),
+])
+def test_semantically_invalid_entries_are_not_cached(tmp_path, cache_kwargs, entry):
+    if "id" in entry:
+        cache_kwargs["tool"] = grounding.classification_tool(KINDS)
+    call = Mock(return_value={"components": [entry]})
+    grounding.cached_call(call, cache_kwargs, tmp_path, "test", lambda m: None)
+    assert call.call_count == 1 and not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("present", [True, False])
+def test_mechanical_integral_float_id_is_applied_on_fresh_and_cached_response(photo, tmp_path, present):
+    call = Mock(return_value={"components": [dict(id=1.0, present=present, confidence="high")]})
+    first = grounding.mechanical_envelopes(photo, [component()], "test-model", call, lambda m: None, tmp_path)
+    second = grounding.mechanical_envelopes(photo, [component()], "test-model", call, lambda m: None, tmp_path)
+    assert first == second and call.call_count == 1
+    if present:
+        assert len(first) == 1 and not first[0]["_uncertain"]
+        assert first[0]["confidence"] == "high"
+    else:
+        assert first == []
+
+
+def test_mechanical_integer_and_integral_float_duplicate_votes_preserve_body(photo):
+    call = Mock(return_value={"components": [dict(id=1, present=False, confidence="high"),
+                                            dict(id=1.0, present=True, confidence="high")]})
+    result = grounding.mechanical_envelopes(photo, [component()], "test-model", call, lambda m: None, None)
+    assert len(result) == 1 and result[0]["_uncertain"]
+
+
+def test_cached_partial_grounding_with_bad_box_is_refetched_and_valid_sibling_survives(tmp_path, cache_kwargs):
+    response = {"components": [native(), native([400, 100, 200, 300])]}
+    key = hashlib.sha256(json.dumps(cache_kwargs, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
+    path = tmp_path / f"{key}.json"
+    path.write_text(json.dumps(dict(key=key, response=response)), encoding="utf-8")
+    call = Mock(return_value=response)
+    result = grounding.cached_call(call, cache_kwargs, tmp_path, "test", lambda m: None)
+    assert decode(result["components"]) == decode([native()])
+    call.assert_called_once_with(**cache_kwargs)
+    # Neither the old mixed response nor the fresh one qualifies for reuse.
+    grounding.cached_call(call, cache_kwargs, tmp_path, "test", lambda m: None)
     assert call.call_count == 2
 
 

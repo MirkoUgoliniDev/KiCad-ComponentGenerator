@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import math
 import re
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -129,6 +130,58 @@ def overlap(a, b):
     return intersection / max(1e-12, aa+ba-intersection), intersection / max(1e-12, min(aa,ba))
 
 
+def _associate_view(group, previous, containment):
+    """Maximum-cardinality association on a frozen pairwise overlap graph.
+
+    Canonical geometric ordering breaks ties independently of AI list order.
+    Augmenting paths let a flexible detection relinquish a match needed by a
+    constrained detection, instead of appending a false extra component.
+    """
+    def key(item):
+        return (*box_of(item), str(item.get('name', '')), str(item.get('kind', '')),
+                str(item.get('_source', '')), str(item.get('confidence', '')))
+
+    edges = {}
+    for current, item in enumerate(group):
+        candidates = []
+        for index, existing in enumerate(previous):
+            iou, coverage = overlap(item, existing)
+            contained = False
+            if containment and coverage >= .7 and iou >= .4:
+                ax0,ay0,ax1,ay1 = box_of(item)
+                bx0,by0,bx1,by1 = box_of(existing)
+                aw,ah,bw,bh = ax1-ax0,ay1-ay0,bx1-bx0,by1-by0
+                ratio = max(aw*ah,bw*bh)/max(1e-12,min(aw*ah,bw*bh))
+                contained = (ratio <= 2.5 and
+                    abs((ax0+ax1-bx0-bx1)/2) <= .5*min(aw,bw) and
+                    abs((ay0+ay1-by0-by1)/2) <= .5*min(ah,bh))
+            if iou >= .60 or contained:
+                candidates.append((index, iou))
+        edges[current] = [i for i, _ in sorted(candidates, key=lambda pair: (-pair[1], key(previous[pair[0]])))]
+
+    assignments, owners = {}, {}
+    for root in sorted(range(len(group)), key=lambda i: (len(edges[i]), key(group[i]))):
+        pending, parents = deque([root]), {}
+        while pending:
+            current = pending.popleft()
+            for target in edges[current]:
+                if target in parents:
+                    continue
+                parents[target] = current
+                if target in owners:
+                    pending.append(owners[target])
+                    continue
+                # Reassign the entire alternating path without changing boxes.
+                while target is not None:
+                    owner = parents[target]
+                    old = assignments.get(owner)
+                    assignments[owner], owners[target] = target, owner
+                    target = old
+                pending.clear()
+                break
+    return assignments
+
+
 def merge_components(groups, log=lambda message: None, containment=False):
     """Associazione uno-a-uno tra viste, con IoU e rapporto area.
 
@@ -138,30 +191,13 @@ def merge_components(groups, log=lambda message: None, containment=False):
     merged = []
     duplicates = 0
     for group in groups:
-        previous = len(merged)
-        matched = set()
-        for item in group:
-            candidates = []
-            for i, existing in enumerate(merged[:previous]):
-                if i in matched:
-                    continue
-                iou, coverage = overlap(item, existing)
-                containment_match = False
-                if containment and coverage >= .7 and iou >= .4:
-                    ax0,ay0,ax1,ay1 = box_of(item)
-                    bx0,by0,bx1,by1 = box_of(existing)
-                    aw,ah,bw,bh = ax1-ax0,ay1-ay0,bx1-bx0,by1-by0
-                    ratio = max(aw*ah,bw*bh)/max(1e-12,min(aw*ah,bw*bh))
-                    containment_match = (ratio <= 2.5 and
-                        abs((ax0+ax1-bx0-bx1)/2) <= .5*min(aw,bw) and
-                        abs((ay0+ay1-by0-by1)/2) <= .5*min(ah,bh))
-                if iou >= 0.60 or containment_match:
-                    candidates.append((iou, i))
-            if not candidates:
+        group = list(group)
+        assignments = _associate_view(group, merged, containment)
+        for current, item in enumerate(group):
+            if current not in assignments:
                 merged.append(dict(item))
                 continue
-            _, index = max(candidates)
-            matched.add(index)
+            index = assignments[current]
             duplicates += 1
             existing = merged[index]
             if existing.get("kind") != item.get("kind"):

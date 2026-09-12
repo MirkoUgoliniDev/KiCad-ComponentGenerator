@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import glob
 import json
+import math
 import os
 import re
 import subprocess
@@ -40,6 +41,16 @@ def _safe_name(name: str, index: int) -> str:
 COMPONENT_EDGE_MARGIN_MM = 0.2
 
 
+def _rectangle_axes(rotation: float) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Assi unitari locali, esatti per le rotazioni cardinali."""
+    angle = rotation % 360
+    if angle % 90 == 0:
+        c, s = ((1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0))[int(angle / 90)]
+    else:
+        c, s = math.cos(math.radians(angle)), math.sin(math.radians(angle))
+    return (c, s), (-s, c)
+
+
 def clamp_component_position(
     x: float, y: float, length: float, width: float, rotation: float,
     body_length: float, body_width: float, margin: float = COMPONENT_EDGE_MARGIN_MM,
@@ -50,11 +61,12 @@ def clamp_component_position(
     bordo (letto vicino al margine della foto, o con un componente grande
     vicino a un contatto): e' un vincolo geometrico generico, applicabile a
     qualunque componente di qualunque modulo, non una correzione per un
-    pezzo particolare. Tiene conto della rotazione: a 90/270 gradi
-    lunghezza e larghezza si scambiano nell'ingombro sugli assi X/Y.
+    pezzo particolare. Proietta il rettangolo ruotato sugli assi X/Y;
+    a 90/270 gradi lunghezza e larghezza si scambiano.
     """
-    footprint_x = width if rotation % 180 == 90 else length
-    footprint_y = length if rotation % 180 == 90 else width
+    (c, s), _ = _rectangle_axes(rotation)
+    footprint_x = abs(c) * length + abs(s) * width
+    footprint_y = abs(s) * length + abs(c) * width
     half_x = max(0.0, body_length / 2 - footprint_x / 2 - margin)
     half_y = max(0.0, body_width / 2 - footprint_y / 2 - margin)
     return max(-half_x, min(half_x, x)), max(-half_y, min(half_y, y))
@@ -76,28 +88,37 @@ def find_overlapping_components(components: list) -> list[str]:
     si corregge nella tabella componenti invece di scoprirlo solo nel
     modello 3D finito.
 
-    Le rotazioni ammesse sono multipli di 90 gradi, quindi il rettangolo
-    ruotato resta sempre allineato agli assi: il confronto tra bounding box
-    e' esatto, non un'approssimazione.
+    Il test degli assi separatori confronta i rettangoli orientati, evitando
+    falsi positivi tra componenti diagonali con bounding box sovrapposte.
     """
     boxes = []
     for component in components:
         rotation = float(component.get("rotation_deg") or 0.0)
         length = float(component["length_mm"])
         width = float(component["width_mm"])
-        fx = width if rotation % 180 == 90 else length
-        fy = length if rotation % 180 == 90 else width
+        u, v = _rectangle_axes(rotation)
         x, y = float(component["x"]), float(component["y"])
-        boxes.append((component.get("name", "?"), x - fx / 2, x + fx / 2, y - fy / 2, y + fy / 2))
+        corners = [
+            (x + a * length / 2 * u[0] + b * width / 2 * v[0],
+             y + a * length / 2 * u[1] + b * width / 2 * v[1])
+            for a, b in ((-1, -1), (-1, 1), (1, 1), (1, -1))
+        ]
+        boxes.append((component.get("name", "?"), corners, (u, v)))
 
     warnings = []
     for i in range(len(boxes)):
-        name_a, ax0, ax1, ay0, ay1 = boxes[i]
+        name_a, corners_a, axes_a = boxes[i]
         for j in range(i + 1, len(boxes)):
-            name_b, bx0, bx1, by0, by1 = boxes[j]
-            overlap_x = min(ax1, bx1) - max(ax0, bx0)
-            overlap_y = min(ay1, by1) - max(ay0, by0)
-            if overlap_x > OVERLAP_TOLERANCE_MM and overlap_y > OVERLAP_TOLERANCE_MM:
+            name_b, corners_b, axes_b = boxes[j]
+            overlaps = []
+            # X/Y mantengono le misure del messaggio per i casi cardinali;
+            # gli assi locali eliminano i falsi positivi delle bounding box.
+            for ux, uy in ((1.0, 0.0), (0.0, 1.0)) + axes_a + axes_b:
+                pa = [x * ux + y * uy for x, y in corners_a]
+                pb = [x * ux + y * uy for x, y in corners_b]
+                overlaps.append(min(max(pa), max(pb)) - max(min(pa), min(pb)))
+            if all(overlap > OVERLAP_TOLERANCE_MM for overlap in overlaps):
+                overlap_x, overlap_y = overlaps[:2]
                 warnings.append(
                     f"componenti sovrapposti: '{name_a}' e '{name_b}' "
                     f"({overlap_x:.2f}x{overlap_y:.2f}mm in comune) -- correggi "

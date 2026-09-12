@@ -775,6 +775,19 @@ def extract_pin_header_params(
     except OpenRouterError as exc:
         raise ExtractionError(str(exc)) from exc
 
+    if not isinstance(data, dict):
+        raise ExtractionError("Risposta AI non strutturata.")
+    # Validate geometry before it can be used to calibrate a photograph.
+    for key in ("body_length_mm", "body_width_mm", "body_height_mm"):
+        original = data.get(key)
+        data[key] = _optional_number(original, positive=True)
+        if original is not None and data[key] is None:
+            warning = f"{key} scartato: dimensione non valida (serve un numero positivo finito, non booleano)."
+            data["notes"] = (str(data.get("notes") or "") + "\n" + warning).strip()
+            if progress:
+                progress(warning)
+    _params_from_tool_arguments(data)
+
     if progress:
         progress(
             f"Analisi principale completata: layout={data.get('layout', 'matrix')}, "
@@ -789,22 +802,25 @@ def extract_pin_header_params(
             and data.get("body_width_mm")):
         from .photo_inventory import extract_inventory
         from .photo_grounding import DEFAULT_VISION_MODEL
-        photo_report = extract_inventory(
-            doc_paths, vision_model or DEFAULT_VISION_MODEL, float(data["body_length_mm"]),
-            float(data["body_width_mm"]), COMPONENT_KINDS, call_tool,
-            progress=progress, top_photo_index=data.get("top_photo_index"),
-            extra_instructions=extra_instructions,
-            cache_dir=photo_cache_dir if photo_cache_dir is not None else Path(__file__).resolve().parents[2]/"generated"/"photo-cache",
-            classifier_model=model or DEFAULT_MODEL,
-        )
-        if photo_report.components:
+        try:
+            photo_report = extract_inventory(
+                doc_paths, vision_model or DEFAULT_VISION_MODEL, data["body_length_mm"],
+                data["body_width_mm"], COMPONENT_KINDS, call_tool,
+                progress=progress, top_photo_index=data.get("top_photo_index"),
+                extra_instructions=extra_instructions,
+                cache_dir=photo_cache_dir if photo_cache_dir is not None else Path(__file__).resolve().parents[2]/"generated"/"photo-cache",
+                classifier_model=model or DEFAULT_MODEL,
+            )
+        except (OpenRouterError, ValueError, OSError) as exc:
+            data["notes"] = (str(data.get("notes") or "") + f"\nInventario fotografico fallito: {exc}").strip()
+        if photo_report and photo_report.components:
             data["components_3d"] = photo_report.components
             old_notes = str(data.get("notes") or "").strip()
             suffix = (f"Inventario fotografico: {len(photo_report.components)} ingombri su {photo_report.photo}. "
                       "Modello meccanico semplificato, senza marcature. XY stimati dalla foto calibrata; "
                       "altezze indicative, non misure certificate: verificare con vista laterale o misura.")
             data["notes"] = f"{old_notes} {suffix}".strip()
-        if photo_report.warnings:
+        if photo_report and photo_report.warnings:
             details = "\n".join(photo_report.warnings[:6])
             if len(photo_report.warnings) > 6:
                 details += f"\nAltri {len(photo_report.warnings)-6} avvisi nel log AI."
@@ -813,11 +829,35 @@ def extract_pin_header_params(
         progress("Secondo passaggio fotografico non avviato: mancano body_length/body_width.")
 
     params = _params_from_tool_arguments(data)
+    if params.is_castellated() and not (photo_report and photo_report.components):
+        for index, component in enumerate(params.components_3d or [], 1):
+            component.update(kind="generic", name=f"Ingombro {index}", marking="",
+                             confidence="low", _uncertain=True,
+                             _height_source="global_visual_estimate_not_measured")
+        if params.components_3d:
+            params.notes = (str(params.notes or "") + "\nIngombri dall'estrazione globale, "
+                            "senza verifica fotografica e senza marcature; altezze indicative, "
+                            "non misure certificate.").strip()
     if photo_report and photo_report.components:
         params.photo_overlay_png = photo_report.overlay_png
         params.photo_png = photo_report.photo_png
         params.photo_source = photo_report.photo
     return params
+
+
+def _optional_number(value, *, positive=False, integer=False):
+    """Discard malformed optional numerics; signed offsets remain valid."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+        if not math.isfinite(number) or (positive and number <= 0):
+            return None
+        if integer and number != int(number):
+            return None
+        return int(number) if integer else number
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _castellated_sides(raw: Optional[Sequence[dict]]) -> list[dict]:
@@ -827,7 +867,7 @@ def _castellated_sides(raw: Optional[Sequence[dict]]) -> list[dict]:
     preferisce ignorarlo e dirlo, piuttosto che propagare un lato che
     farebbe fallire la generazione con un errore geometrico oscuro.
     """
-    if not raw:
+    if not isinstance(raw, (list, tuple)) or not raw:
         raise ExtractionError(
             "Il modello ha indicato un modulo con piazzole a mezzo foro ma non ha "
             "descritto alcun lato. Riprova, eventualmente con un modello piu' capace."
@@ -835,18 +875,21 @@ def _castellated_sides(raw: Optional[Sequence[dict]]) -> list[dict]:
 
     sides = []
     for entry in raw:
+        if not isinstance(entry, dict):
+            continue
         edge = str(entry.get("edge") or "").strip().lower()
-        count = int(entry.get("count") or 0)
-        pitch = float(entry.get("pitch_mm") or 0)
-        if edge not in EDGES or count < 1 or (count > 1 and pitch <= 0):
+        count = _optional_number(entry.get("count"), positive=True, integer=True)
+        pitch = _optional_number(entry.get("pitch_mm", 0))
+        if edge not in EDGES or count is None or pitch is None or pitch < 0 or (count > 1 and pitch == 0):
             continue
         side = {"edge": edge, "count": count, "pitch_mm": pitch}
         for key in ("first_pin", "offset_mm", "pad_length_mm", "pad_width_mm"):
-            if entry.get(key) is not None:
-                side[key] = entry[key]
-        if entry.get("reverse"):
+            value = _optional_number(entry.get(key), positive=key != "offset_mm", integer=key == "first_pin")
+            if value is not None:
+                side[key] = value
+        if entry.get("reverse") is True:
             side["reverse"] = True
-        if entry.get("pin_names"):
+        if isinstance(entry.get("pin_names"), (list, tuple)) and entry["pin_names"]:
             side["pin_names"] = [str(n) for n in entry["pin_names"]]
         sides.append(side)
 
@@ -873,7 +916,7 @@ def _components_3d(raw: Optional[Sequence[dict]]) -> Optional[list[dict]]:
     Sono stime visive: un blocco con una dimensione nulla o negativa non e'
     un componente mal misurato, e' rumore, e nel solido 3D darebbe errore.
     """
-    if not raw:
+    if not isinstance(raw, (list, tuple)) or not raw:
         return None
     components = []
     for entry in raw:
@@ -884,6 +927,9 @@ def _components_3d(raw: Optional[Sequence[dict]]) -> Optional[list[dict]]:
             # estrazione -- gli altri componenti restano validi.
             continue
         try:
+            if any(isinstance(entry.get(k), bool) for k in
+                   ("x_mm", "y_mm", "length_mm", "width_mm", "height_mm")):
+                continue
             component = {
                 "name": str(entry.get("name") or "Componente"),
                 "x_mm": float(entry["x_mm"]),
@@ -892,7 +938,7 @@ def _components_3d(raw: Optional[Sequence[dict]]) -> Optional[list[dict]]:
                 "width_mm": float(entry["width_mm"]),
                 "height_mm": float(entry["height_mm"]),
             }
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, OverflowError):
             continue
         # Il modello vede anche elementi della PCB che non sono componenti
         # montati: pad, via, semi-fori e contatti del bordo. Se passano dallo
@@ -914,10 +960,7 @@ def _components_3d(raw: Optional[Sequence[dict]]) -> Optional[list[dict]]:
         component["kind"] = kind if kind in COMPONENT_KINDS else "generic"
         if entry.get("marking"):
             component["marking"] = str(entry["marking"]).strip()
-        try:
-            component["rotation_deg"] = float(entry.get("rotation_deg") or 0) % 360
-        except (TypeError, ValueError):
-            component["rotation_deg"] = 0.0
+        component["rotation_deg"] = (_optional_number(entry.get("rotation_deg")) or 0.0) % 360
         for key in ("_box", "_id", "_candidate_id", "_source", "_uncertain", "_review_reason",
                     "_height_source", "_grounding_kind", "_alternative_kind", "confidence"):
             if key in entry:
@@ -931,13 +974,15 @@ def _params_from_tool_arguments(data: dict) -> ExtractedParams:
 
     Separato dalla chiamata di rete per poterlo collaudare senza API.
     """
+    if not isinstance(data, dict):
+        raise ExtractionError("Risposta AI non strutturata.")
     layout = data.get("layout") or "matrix"
     if layout not in ("matrix", "castellated"):
         raise ExtractionError(f"Disposizione dei contatti sconosciuta: {layout!r}.")
 
     def _opt_float(key: str) -> Optional[float]:
-        value = data.get(key)
-        return float(value) if value is not None else None
+        return _optional_number(data.get(key), positive=key in (
+            "body_length_mm", "body_width_mm", "body_height_mm", "pin_length_3d_mm"))
 
     if layout == "castellated":
         sides = _castellated_sides(data.get("castellated_sides"))

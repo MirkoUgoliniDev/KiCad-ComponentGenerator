@@ -59,6 +59,10 @@ except ImportError:  # pragma: no cover - dipendenza opzionale (opencv-python)
 #: Scarto massimo ammesso tra il rapporto lunghezza/larghezza della scheda
 #: trovata e quello del modulo: oltre, la foto non e' una vista dall'alto.
 MAX_BOARD_ASPECT_ERROR = 0.12
+#: Deriva massima del bordo dovuta a rasterizzazione/contorno irregolare.
+#: Il limite angolare evita di accettare vere rotazioni su immagini piccole.
+MAX_BOARD_EDGE_DRIFT_PX = 5.0
+MAX_BOARD_TILT_DEG = 1.0
 #: Quanto ci si allontana dalla posizione stimata nel cercare i bordi,
 #: oltre il semi-ingombro del componente.
 SEARCH_MARGIN_MM = 2.0
@@ -144,7 +148,10 @@ def find_board(image, body_length: float, body_width: float) -> Optional[BoardFr
         if min(rw, rh) < 20:
             continue
         tilt = min(abs(angle) % 90, 90 - abs(angle) % 90)
-        if tilt > 6:
+        # BoardFrame non rettifica la rotazione: tollerare solo pochi pixel
+        # di deriva sul lato lungo, non inclinazioni che falsano scala e XY.
+        edge_drift = max(rw, rh) * math.sin(math.radians(tilt))
+        if tilt > MAX_BOARD_TILT_DEG or edge_drift > MAX_BOARD_EDGE_DRIFT_PX:
             continue
         bx, by, bw, bh = cv2.boundingRect(contour)
         w, h = float(bw), float(bh)

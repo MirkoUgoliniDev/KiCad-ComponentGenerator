@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 pytest.importorskip("PyQt6")
 pytest.importorskip("pyvistaqt")
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, Q_ARG, QMetaObject
 from PyQt6.QtTest import QSignalSpy
 from PyQt6.QtWidgets import QApplication, QWidget, QDialog, QLabel, QMessageBox, QListWidgetItem
 from kicadgen.gui import main_window as gui
@@ -20,6 +20,8 @@ class PreviewStub(QWidget):
     def fit_view(self): pass
     def clear_preview(self): pass
     def render_params(self, *args): pass
+    def render_mesh(self, path): pass
+    def set_pin_numbers(self, checked): pass
 
 
 @pytest.fixture
@@ -65,6 +67,8 @@ def raw_params():
     params = ExtractedParams(
         name="", description="", tags="", confidence="medium", notes="",
         layout="castellated", castellated_sides=[], body_length_mm=40, body_width_mm=20,
+        rows=2, cols=4, pitch_mm=2.54, row_spacing_mm=2.54,
+        pad_diameter_mm=1.7, drill_mm=1.0,
         photo_source="raw-top.png", components_3d=[
             dict(name="U1", kind="ic", x_mm=-4, y_mm=2, length_mm=6, width_mm=2,
                  height_mm=1.5, rotation_deg=90, confidence="low", _uncertain=True,
@@ -255,3 +259,107 @@ def test_start_extraction_uses_vision_config_and_resets_photo_state(window, raw_
     assert not window.btn_photo_comparison.isEnabled()
     assert "Modello foto: vendor/photo" in window.ai_progress_text.toPlainText()
     assert "modello datasheet vendor/datasheet" in window.log_text.toPlainText()
+
+
+@pytest.mark.parametrize("layout", ["castellated", "matrix"])
+def test_extraction_discards_previous_mesh(window, raw_params, monkeypatch, tmp_path, layout):
+    raw_params.layout = layout
+    old_mesh = tmp_path / "old.preview.json"
+    old_mesh.touch()
+    window._last_mesh_path = old_mesh
+    cleared, rendered = [], []
+    monkeypatch.setattr(window.preview_3d, "clear_preview", lambda: cleared.append(True))
+    monkeypatch.setattr(window.preview_3d, "render_mesh", rendered.append)
+
+    window._on_extracted(raw_params)
+
+    assert window._last_mesh_path is None
+    assert cleared
+    assert "da rigenerare" in window.label_3d_status.text()
+    window._draw_preview_3d()
+    window._on_pin_numbers_toggled(True)
+    assert rendered == []
+
+
+@pytest.mark.parametrize("layout", ["castellated", "matrix"])
+@pytest.mark.parametrize("regenerate", [False, True], ids=["initial", "regen"])
+@pytest.mark.parametrize("change", ["apply", "extraction", "cancel"])
+def test_queued_cad_result_respects_photo_revision(
+    window, raw_params, monkeypatch, tmp_path, layout, regenerate, change,
+):
+    raw_params.layout = layout
+    raw_params.body_height_mm = 2
+    raw_params.castellated_sides = [dict(edge="left", count=4, pitch_mm=2.54, first_pin=1)]
+    window._on_extracted(raw_params)
+    window.group_3d.setChecked(True)
+    monkeypatch.setattr(gui.GenerateWorker, "start", lambda self: None)
+    monkeypatch.setattr(gui.Cad3DWorker, "start", lambda self: None)
+    rendered = []
+    monkeypatch.setattr(window.preview_3d, "render_mesh", rendered.append)
+    step = tmp_path / "board.step"
+    mesh = tmp_path / "board.preview.json"
+    mesh.touch()
+
+    def start():
+        if regenerate:
+            window._regenerate_3d()
+            worker = window._cad3d_worker
+        else:
+            window._generate()
+            worker = window._worker
+        assert worker is not None, window.log_text.toPlainText()
+        return worker
+
+    worker = start()
+    # Deliver real Qt signals only after the user action, without running CAD.
+    if not regenerate:
+        QMetaObject.invokeMethod(
+            worker, "done", Qt.ConnectionType.QueuedConnection,
+            Q_ARG(str, str(tmp_path / "board.kicad_mod")),
+        )
+    QMetaObject.invokeMethod(
+        worker, "done" if regenerate else "cad3d_done",
+        Qt.ConnectionType.QueuedConnection, Q_ARG(str, str(step)),
+    )
+    if change == "apply":
+        components = window._photo_components_from_table()
+        if components:
+            components[0]["x_mm"] += 1
+        window._apply_photo_review(components)
+    elif change == "extraction":
+        raw_params.body_width_mm = 25
+        window._on_extracted(raw_params)
+    else:
+        def cancel(dialog):
+            dialog.add_component()
+            dialog.reject()
+            return QDialog.DialogCode.Rejected
+        monkeypatch.setattr(gui.PhotoReviewDialog, "exec", cancel)
+        window._show_photo_comparison()
+    status = window.label_3d_status.text()
+    QApplication.processEvents()
+
+    if change == "cancel":
+        assert rendered == [mesh]
+        assert window._last_mesh_path == mesh
+        assert "Modello STEP aggiornato" in window.label_3d_status.text()
+    else:
+        assert rendered == []
+        assert window._last_mesh_path is None
+        assert window.label_3d_status.text() == status
+        assert "OK (3D)" not in window.log_text.toPlainText()
+        # Stale failures/warnings must not overwrite the pending revision either.
+        (worker.error if regenerate else worker.cad3d_error).emit("obsolete error")
+        worker.warning.emit("obsolete warning")
+        assert window.label_3d_status.text() == status
+        assert "obsolete" not in window.log_text.toPlainText()
+
+    worker.finished.emit()
+    assert (window.btn_regen_3d if regenerate else window.btn_generate).isEnabled()
+    if change != "cancel":
+        current_worker = start()
+        (current_worker.done if regenerate else current_worker.cad3d_done).emit(str(step))
+        assert rendered == [mesh]
+        assert window._last_mesh_path == mesh
+        assert "Modello STEP aggiornato" in window.label_3d_status.text()
+        current_worker.finished.emit()

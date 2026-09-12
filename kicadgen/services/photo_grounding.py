@@ -90,22 +90,63 @@ def grounding_regions(photo):
         yield f"Dettaglio {col+1}/3", (left/width,0.,right/width,1.), (col/3,(col+1)/3), photo[:,left:right]
 
 
-def cached_call(call, kwargs, cache_dir, stage, log):
+def cached_call(call, kwargs, cache_dir, stage, log, expected_ids=None):
     """Content-addressed parsed response cache; never stores API keys/images.
 
     Changing model, prompt, schema, image pixels or parameters invalidates it.
-    Network/API errors are not cached. Corrupt cache entries are ignored.
+    Network/API errors are not cached. Corrupt or partial cache entries are
+    ignored. Fresh partial responses still reach the per-entry decoders without
+    a retry. expected_ids is local validation metadata, not part of the key.
     """
     key = hashlib.sha256(json.dumps(kwargs, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
     path = Path(cache_dir)/f"{key}.json" if cache_dir else None
-    def reusable(data):
-        schema = kwargs.get("tool",{}).get("function",{}).get("parameters",{}).get("properties",{}).get("components",{})
-        if not schema:
-            return isinstance(data,dict)
-        entries = data.get("components") if isinstance(data,dict) else None
-        required = schema.get("items",{}).get("required",[])
-        if not isinstance(entries,list) or any(not isinstance(c,dict) or any(k not in c for k in required) for c in entries):
+    def valid(value, schema):
+        kind = schema.get("type")
+        if kind == "object":
+            return (isinstance(value, dict)
+                    and all(k in value for k in schema.get("required", []))
+                    and all(valid(value[k], s) for k, s in schema.get("properties", {}).items() if k in value))
+        if kind == "array":
+            return (isinstance(value, list)
+                    and schema.get("minItems", 0) <= len(value) <= schema.get("maxItems", math.inf)
+                    and all(valid(v, schema.get("items", {})) for v in value))
+        if kind in ("number", "integer"):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return False
+            try:
+                if not math.isfinite(value) or (kind == "integer" and value != int(value)):
+                    return False
+            except OverflowError:
+                return False
+            if not schema.get("minimum", -math.inf) <= value <= schema.get("maximum", math.inf):
+                return False
+        elif kind == "boolean" and type(value) is not bool:
             return False
+        elif kind == "string" and not isinstance(value, str):
+            return False
+        return "enum" not in schema or value in schema["enum"]
+
+    def reusable(data):
+        schema = kwargs.get("tool",{}).get("function",{}).get("parameters",{})
+        if not isinstance(data, dict) or not valid(data, schema):
+            return False
+        if "components" not in schema.get("properties", {}):
+            return True
+        entries = data.get("components") if isinstance(data,dict) else None
+        if not isinstance(entries, list):
+            return False
+        for entry in entries:
+            if "box_2d" in entry:
+                top, left, bottom, right = entry["box_2d"]
+                if top >= bottom or left >= right:
+                    return False
+            if "color_hex" in entry and not re.fullmatch(r"#[0-9a-fA-F]{6}", entry["color_hex"]):
+                return False
+        if expected_ids is not None:
+            ids = [entry.get("id") for entry in entries]
+            if (any(isinstance(i, bool) or not isinstance(i, (int, float)) for i in ids)
+                    or len(ids) != len(set(ids)) or set(ids) != set(expected_ids)):
+                return False
         return bool(entries) or kwargs.get('tool',{}).get('function',{}).get('name') == 'locate_components'
     if path:
         try:
@@ -294,14 +335,16 @@ def mechanical_envelopes(photo, components, model, call, log, cache_dir):
         try:
             data = cached_call(call,dict(model=model,system_prompt=prompt,
                 content_blocks=[image_block(contact_sheet(photo,batch))],tool=tool,max_tokens=4096,has_pdf=False),
-                cache_dir,label,log)
+                cache_dir,label,log,expected_ids=[c['_id'] for c in batch])
             entries = data.get('components')
             if not isinstance(entries,list):
                 raise ValueError('verdetti di presenza mancanti')
             votes = {}
             for entry in entries:
-                if isinstance(entry,dict) and type(entry.get('id')) is int:
-                    votes.setdefault(entry['id'],[]).append(entry)
+                identity = entry.get('id') if isinstance(entry, dict) else None
+                if (not isinstance(identity, bool) and isinstance(identity, (int, float))
+                        and math.isfinite(identity) and identity == int(identity)):
+                    votes.setdefault(int(identity),[]).append(entry)
             for c in batch:
                 responses = votes.get(c['_id'],[])
                 if len(responses)==1 and type(responses[0].get('present')) is bool:
@@ -364,7 +407,8 @@ def reconcile_packages(photo, components, model, length, width, kinds, call, log
         data = cached_call(call,dict(model=model,system_prompt=prompt,content_blocks=[
             {"type":"text","text":json.dumps(hints)},
             image_block(draw_inventory(photo,components,use_ids=True)), image_block(contact_sheet(photo,batch)),
-        ],tool=tool,max_tokens=8192,has_pdf=False),cache_dir,label,log)
+        ],tool=tool,max_tokens=8192,has_pdf=False),cache_dir,label,log,
+            expected_ids=[c['_id'] for c in batch])
         # Contextual classification settles prior kind disagreements; no geometry
         # is changed and unsuccessful review keeps the previous uncertainty.
         revised = apply_classifications(batch,data,kinds,length,width,log)
@@ -373,8 +417,10 @@ def reconcile_packages(photo, components, model, length, width, kinds, call, log
         entries = data.get("components",[])
         unique = {}
         for entry in entries:
-            if isinstance(entry,dict) and type(entry.get("id")) is int:
-                unique.setdefault(entry["id"],[]).append(entry)
+            identity = entry.get('id') if isinstance(entry, dict) else None
+            if (not isinstance(identity, bool) and isinstance(identity, (int, float))
+                    and math.isfinite(identity) and identity == int(identity)):
+                unique.setdefault(int(identity),[]).append(entry)
         remove = set()
         for cid,entries in unique.items():
             if len(entries)!=1 or cid not in by_id:
@@ -457,7 +503,8 @@ def grounded_components(photo, model, length, width, kinds, call, log, cache_dir
         try:
             data = cached_call(call,dict(model=classifier_model,system_prompt=prompt,
                 content_blocks=[image_block(contact_sheet(photo,batch))],tool=classification_tool(kinds),
-                max_tokens=8192,has_pdf=False),cache_dir,label,log)
+                max_tokens=8192,has_pdf=False),cache_dir,label,log,
+                expected_ids=[c['_id'] for c in batch])
             result.extend(apply_classifications(batch,data,kinds,length,width,log))
         except (OpenRouterError,ValueError) as exc:
             log(f"{label}: fallita ({exc}); candidati conservati come dubbi.")
