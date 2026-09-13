@@ -247,15 +247,18 @@ class TerminalDetailWorker(QThread):
     error = pyqtSignal(str)
     progress = pyqtSignal(str)
 
-    def __init__(self, photo, components, model):
+    def __init__(self, photo, components, model, only_leads=False):
         super().__init__()
         self.photo, self.components, self.model = photo, deepcopy(components), model
+        self.only_leads = only_leads
 
     def run(self):
         from ..services.photo_terminals import observe_terminals
+        from ..services.photo_leads import refine_leads
         from ..services.openrouter import call_tool
         try:
-            self.done.emit(observe_terminals(self.photo, self.components, self.model,
+            operation = refine_leads if self.only_leads else observe_terminals
+            self.done.emit(operation(self.photo, self.components, self.model,
                 call_tool, self.progress.emit,
                 Path(__file__).resolve().parents[2] / 'generated' / 'photo-cache'))
         except Exception as exc:
@@ -2212,6 +2215,9 @@ class MainWindow(QMainWindow):
             "Analisi AI della foto calibrata tramite OpenRouter; conserva posizioni e footprint.")
         self.btn_terminal_detail.clicked.connect(self._refine_photo_terminals)
         regen_row.addWidget(self.btn_terminal_detail)
+        # User decision 2026-09-13 (MEMORY.md): hide manual AI refinement
+        # actions, keeping handlers and the automatic extraction unchanged.
+        self.btn_terminal_detail.hide()
         self.btn_regen_3d = QPushButton("Rigenera modello 3D (STEP) con queste annotazioni")
         self.btn_regen_3d.setObjectName("primary")
         self.btn_regen_3d.clicked.connect(self._regenerate_3d)
@@ -2269,6 +2275,12 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def _refine_photo_terminals(self) -> None:
+        self._start_terminal_refinement(only_leads=False)
+
+    def _refine_photo_leads(self) -> None:
+        self._start_terminal_refinement(only_leads=True)
+
+    def _start_terminal_refinement(self, only_leads=False) -> None:
         if self._terminal_worker is not None and self._terminal_worker.isRunning():
             return
         if self._extract_worker is not None and self._extract_worker.isRunning():
@@ -2277,15 +2289,24 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Foto non disponibile",
                 "Acquisisci prima i componenti dalla foto nel tab Progetto.")
             return
+        components = self._photo_components_from_table()
+        if only_leads and not any(c.get('terminal_geometry') for c in components):
+            QMessageBox.information(self, "Terminali non disponibili",
+                "Usa prima Rileva terminali dalla foto. L'affinamento conserva corpo e terminali esistenti.")
+            return
+        question = ("Inviare i ritagli a OpenRouter per separare reofori e saldature? "
+                    "Corpi, conteggi e ingombri restano invariati; i dettagli incerti sono conservati. "
+                    if only_leads else "Inviare i ritagli della foto a OpenRouter per osservare corpo e terminali? ")
         if QMessageBox.question(self, "Dettaglio terminali AI",
-                "Inviare i ritagli della foto a OpenRouter per osservare corpo e terminali? "
+                question +
                 "La chiamata usa il modello selezionato e può avere un costo. "
                 "Posizioni e footprint restano invariati.") != QMessageBox.StandardButton.Yes:
             return
         self.btn_terminal_detail.setEnabled(False)
+        self.btn_lead_refinement.setEnabled(False)
         self.label_3d_status.setText("Analisi dei terminali nella foto in corso...")
-        worker = TerminalDetailWorker(self._photo_png, self._photo_components_from_table(),
-                                      self._vision_model())
+        worker = TerminalDetailWorker(self._photo_png, components,
+                                      self._vision_model(), only_leads=only_leads)
         worker._model_revision = self._model_revision
         worker._photo_snapshot = self._photo_png
         self._terminal_worker = worker
@@ -2293,6 +2314,7 @@ class MainWindow(QMainWindow):
         worker.done.connect(self._on_terminal_detail_done)
         worker.error.connect(self._on_terminal_detail_error)
         worker.finished.connect(lambda: self.btn_terminal_detail.setEnabled(True))
+        worker.finished.connect(lambda: self.btn_lead_refinement.setEnabled(True))
         worker.start()
 
     def _on_terminal_detail_error(self, message):
@@ -2307,12 +2329,22 @@ class MainWindow(QMainWindow):
             self._append_log("Dettaglio terminali scartato: i dati sono cambiati durante l'analisi.")
             self.label_3d_status.setText("Dati modificati durante l'analisi: ripeti Rileva terminali.")
             return
+        if getattr(worker, 'only_leads', False) and components == worker.components:
+            self.label_3d_status.setText(
+                "Nessun nuovo dettaglio dei reofori applicabile: geometria e anteprima conservate.")
+            return
         self._set_photo_components(components)
         self._invalidate_generated_mesh()
         count = sum(bool(c.get('terminal_geometry')) for c in components)
         self.label_3d_status.setText(
             f"{count} componenti con terminali osservati. Premi Rigenera modello 3D per applicarli. "
             "Le geometrie non risolte restano semplificate.")
+        if getattr(worker, 'only_leads', False):
+            count = sum(1 for c in components for t in (c.get('terminal_geometry') or {}).get('terminals',[])
+                        if t.get('lead_detail'))
+            self.label_3d_status.setText(
+                f"{count} reofori con dettaglio separato dalla saldatura (stime AI). "
+                "Corpi e ingombri invariati. Premi Rigenera modello 3D per applicarli.")
 
     def _regenerate_3d(self) -> None:
         """Rigenera solo lo STEP con le annotazioni correnti (il footprint resta com'e')."""
@@ -2430,6 +2462,13 @@ class MainWindow(QMainWindow):
         btn_remove.clicked.connect(self._remove_component_row)
         buttons.addWidget(btn_add)
         buttons.addWidget(btn_remove)
+        self.btn_lead_refinement = QPushButton("Affina reofori / saldature...")
+        self.btn_lead_refinement.setToolTip(
+            "Passaggio AI facoltativo: conserva corpi e conteggio, separa solo i reofori distinguibili.")
+        self.btn_lead_refinement.clicked.connect(self._refine_photo_leads)
+        buttons.addWidget(self.btn_lead_refinement)
+        # Intentionally hidden, not removed: see project MEMORY.md.
+        self.btn_lead_refinement.hide()
         buttons.addStretch()
         layout.addLayout(buttons)
 

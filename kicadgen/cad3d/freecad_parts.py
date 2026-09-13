@@ -98,7 +98,18 @@ def _validated_terminal_geometry(geometry):
     for terminal in terminals:
         if not isinstance(terminal, dict):
             raise ValueError("terminal_geometry terminal must be an object with bbox")
-        boxes.append(_normalized_box(terminal.get("bbox")))
+        envelope = _normalized_box(terminal.get("bbox"))
+        detail = terminal.get('lead_detail')
+        if detail is not None:
+            try:
+                try:
+                    from kicadgen.cad3d.lead_geometry import validated_lead_bbox
+                except ModuleNotFoundError:
+                    from lead_geometry import validated_lead_bbox
+                envelope = validated_lead_bbox(body, envelope, detail)
+            except (ValueError,TypeError) as exc:
+                print(f'KICADGEN_WARN: dettaglio reoforo ignorato ({exc}); terminale originale conservato')
+        boxes.append(envelope)
     return body, boxes
 
 

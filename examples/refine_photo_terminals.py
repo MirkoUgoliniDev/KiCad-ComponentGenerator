@@ -19,6 +19,7 @@ def main():
     parser.add_argument('photo', type=Path)
     parser.add_argument('output', type=Path)
     parser.add_argument('--model', default=DEFAULT_VISION_MODEL)
+    parser.add_argument('--leads-only',action='store_true',help='Keep bodies and envelopes fixed; refine only lead/solder separation')
     parser.add_argument('--indices', type=int, nargs='+',
                         help='Optional 1-based component indices for a focused diagnostic; others stay unchanged')
     args = parser.parse_args()
@@ -31,7 +32,9 @@ def main():
     if len(indices) != len(set(indices)) or any(i < 0 or i >= len(data['components']) for i in indices):
         parser.error('indices must be unique, existing 1-based component indices')
     selected = [data['components'][i] for i in indices]
-    refined = observe_terminals(args.photo.read_bytes(), selected,
+    from kicadgen.services.photo_leads import refine_leads
+    operation = refine_leads if args.leads_only else observe_terminals
+    refined = operation(args.photo.read_bytes(), selected,
         args.model, call_tool, log, ROOT / 'generated' / 'photo-cache')
     for index, component in zip(indices, refined):
         data['components'][index] = component
@@ -51,6 +54,7 @@ def main():
         x0,y0,x1,y1 = component['_box']
         rectangles = [(geometry['body_bbox'], (0,255,0))]
         rectangles += [(t['bbox'], (255,255,0)) for t in geometry['terminals']]
+        rectangles += [(t['lead_detail']['bbox'], (0,0,255)) for t in geometry['terminals'] if t.get('lead_detail')]
         for box, color in rectangles:
             left,top,right,bottom = _local_box(box, -component.get('rotation_deg',0))
             cv2.rectangle(audit, (round((x0+left*(x1-x0))*w), round((y0+top*(y1-y0))*h)),
