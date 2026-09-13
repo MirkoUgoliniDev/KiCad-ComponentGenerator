@@ -7,9 +7,11 @@ from copy import deepcopy
 from .openrouter import OpenRouterError
 
 PROMPT = (
-    "Inspect mounted package bodies and individual visible metal leads in the numbered crops. "
-    "For each ID use ONLY the area inside its cyan target rectangle. Coordinates bbox=[left,top,right,bottom] "
-    "are normalized 0..1 RELATIVE TO THAT CYAN RECTANGLE, x right, y down, in the photograph orientation. "
+    "Inspect the single mounted package in the supplied tightly cropped image. "
+    "The text gives the target ID. Coordinates bbox=[left,top,right,bottom] "
+    "are normalized 0..1 RELATIVE TO THE ENTIRE IMAGE: left image edge=0, right=1, "
+    "top image edge=0, bottom=1; x right, y down, in photograph orientation. "
+    "There is no inset rectangle, contact sheet, padding or second coordinate frame. "
     "Report a tight body_bbox excluding leads and each distinct attached terminal bbox separately. "
     "Scan each of the four body edges independently, including terminals halfway along an edge, "
     "not only its corners. Check each terminal's side and position against the actual pixels. "
@@ -61,6 +63,52 @@ def _local_box(box, angle):
             max(x for x,y in corners), max(y for x,y in corners)]
 
 
+def target_crop(photo, box):
+    """Return unadorned target pixels and their exact full-photo coordinates.
+
+    Pixel rounding is reported explicitly so normalization is never delegated
+    to the vision model. Partially outside targets are intersected with the photo.
+    """
+    if (not isinstance(box, (list, tuple)) or len(box) != 4
+            or any(type(v) not in (int, float) or not math.isfinite(v) for v in box)):
+        raise ValueError("ritaglio terminali non valido")
+    left, top, right, bottom = box
+    if left >= right or top >= bottom or getattr(photo, 'ndim', 0) < 2:
+        raise ValueError("ritaglio terminali vuoto")
+    h, w = photo.shape[:2]
+    if h <= 0 or w <= 0:
+        raise ValueError("foto terminali vuota")
+    x0, y0 = max(0, min(w, math.floor(left*w))), max(0, min(h, math.floor(top*h)))
+    x1, y1 = max(0, min(w, math.ceil(right*w))), max(0, min(h, math.ceil(bottom*h)))
+    if x0 >= x1 or y0 >= y1:
+        raise ValueError("ritaglio terminali fuori dalla foto")
+    return photo[y0:y1, x0:x1].copy(), [x0/w, y0/h, x1/w, y1/h]
+
+
+def _to_target_frame(entry, image_box, target_box):
+    """Map crop-normalized observations to the unchanged component envelope."""
+    result = deepcopy(entry)
+    if result.get('resolved') is not True:
+        return result
+    x0,y0,x1,y1 = target_box
+    ix0,iy0,ix1,iy1 = image_box
+    def convert(value):
+        l,t,r,b = _box(value)
+        # Only the subpixel fringe added by floor/ceil can be outside the
+        # original envelope. Intersect it, without enlarging or moving a part.
+        mapped = [(ix0+l*(ix1-ix0)-x0)/(x1-x0),
+                  (iy0+t*(iy1-iy0)-y0)/(y1-y0),
+                  (ix0+r*(ix1-ix0)-x0)/(x1-x0),
+                  (iy0+b*(iy1-iy0)-y0)/(y1-y0)]
+        return _box([min(1, max(0, v)) for v in mapped])
+    result['body_bbox'] = convert(result.get('body_bbox'))
+    raw = result.get('terminals')
+    if not isinstance(raw, list) or not 3 <= len(raw) <= 128:
+        raise ValueError("conteggio terminali non supportato dalla foto")
+    result['terminals'] = [{'bbox': convert(t.get('bbox') if isinstance(t,dict) else None)} for t in raw]
+    return result
+
+
 def decode_terminal_geometry(entry, rotation):
     if entry.get("resolved") is not True or entry.get("confidence") not in ("high", "medium"):
         return None
@@ -96,7 +144,7 @@ def observe_terminals(photo_png, components, model, call, log, cache_dir=None):
     """Enrich fixed components independently; missing evidence retains envelopes."""
     import cv2
     import numpy as np
-    from .photo_grounding import cached_call, contact_sheet
+    from .photo_grounding import cached_call
     from .photo_inventory import image_block
     image = cv2.imdecode(np.frombuffer(photo_png, np.uint8), cv2.IMREAD_COLOR)
     if image is None:
@@ -104,19 +152,20 @@ def observe_terminals(photo_png, components, model, call, log, cache_dir=None):
     result = deepcopy(components)
     candidates = []
     for index,c in enumerate(result):
-        hint = c.get("_detected_kind", c.get("kind", "generic"))
+        hint = c.get("_detected_kind") or c.get("kind", "generic")
         if hint in {"ic", "ic_soic", "ic_qfn", "generic", "module", "transformer"} and "_box" in c:
             target = dict(c, _id=index+1)
             candidates.append(target)
     accepted = 0
     for start in range(len(candidates)):
         batch = candidates[start:start+1]
-        label = f"Dettaglio terminali {start+1}-{start+len(batch)}/{len(candidates)}"
+        label = f"Dettaglio terminali {start+1}/{len(candidates)}"
         log(label + ": corpo e reofori osservati nella foto.")
         try:
+            crop, image_box = target_crop(image, batch[0]['_box'])
             data = cached_call(call, dict(model=model, system_prompt=PROMPT,
-                content_blocks=[image_block(contact_sheet(image,batch, cell_width=640,
-                                                          cell_height=480, columns=1))], tool=terminal_tool(),
+                content_blocks=[{'type':'text', 'text':f"Target ID: {batch[0]['_id']}. Coordinates refer to the entire attached image."},
+                                image_block(crop)], tool=terminal_tool(),
                 max_tokens=8192, has_pdf=False), cache_dir, label, log,
                 expected_ids=[c['_id'] for c in batch])
             entries = data.get("components")
@@ -128,11 +177,13 @@ def observe_terminals(photo_png, components, model, call, log, cache_dir=None):
                     log(f"#{c['_id']}: terminali assenti/ambigui; ingombro conservato.")
                     continue
                 try:
-                    geometry = decode_terminal_geometry(votes[0], c.get('rotation_deg',0))
+                    entry = _to_target_frame(votes[0], image_box, c['_box'])
+                    geometry = decode_terminal_geometry(entry, c.get('rotation_deg',0))
                     if geometry:
+                        geometry['coordinate_frame'] = 'target_image_v2'
                         result[c['_id']-1]['terminal_geometry'] = geometry
                         accepted += 1
-                        log(f"#{c['_id']}: {len(geometry['terminals'])} terminali osservati, confidenza {geometry['confidence']}.")
+                        log(f"#{c['_id']}: {len(geometry['terminals'])} terminali proposti, confidenza AI {geometry['confidence']}; fedeltà visiva da verificare.")
                     else:
                         log(f"#{c['_id']}: terminali non risolti nella foto.")
                 except ValueError as exc:

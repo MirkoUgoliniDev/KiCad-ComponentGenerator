@@ -19,14 +19,22 @@ def main():
     parser.add_argument('photo', type=Path)
     parser.add_argument('output', type=Path)
     parser.add_argument('--model', default=DEFAULT_VISION_MODEL)
+    parser.add_argument('--indices', type=int, nargs='+',
+                        help='Optional 1-based component indices for a focused diagnostic; others stay unchanged')
     args = parser.parse_args()
     data = json.loads(args.inventory.read_text(encoding='utf-8'))
     messages = []
     def log(message):
         messages.append(message)
         print(message, flush=True)
-    data['components'] = observe_terminals(args.photo.read_bytes(), data['components'],
+    indices = [i-1 for i in args.indices] if args.indices else list(range(len(data['components'])))
+    if len(indices) != len(set(indices)) or any(i < 0 or i >= len(data['components']) for i in indices):
+        parser.error('indices must be unique, existing 1-based component indices')
+    selected = [data['components'][i] for i in indices]
+    refined = observe_terminals(args.photo.read_bytes(), selected,
         args.model, call_tool, log, ROOT / 'generated' / 'photo-cache')
+    for index, component in zip(indices, refined):
+        data['components'][index] = component
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / 'inventory.json').write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
     (args.output / 'analysis.log').write_text('\n'.join(messages), encoding='utf-8')
