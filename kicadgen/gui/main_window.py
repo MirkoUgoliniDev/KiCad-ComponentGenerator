@@ -70,6 +70,7 @@ from ..generators.package import build_package
 from ..core.package_geometry import PackageGeometry, package_from_mapping
 from ..services import component_types
 from ..services.analysis_profiles import ProfileStore, ProfileError
+from ..services.i18n import I18n, LANGUAGES
 from ..services.document_roles import DocumentSet, MANIFEST, SUFFIXES
 from ..services.datasheet_extractor import (
     COMPONENT_KINDS, DEFAULT_SYSTEM_PROMPT, ExtractedParams, ExtractionError,
@@ -86,6 +87,7 @@ from .photo_review_dialog import PhotoReviewDialog, PhotoTransform
 from .preview_3d_vtk import Preview3DVtk
 from .settings_dialog import LlmSettingsDialog
 from .profile_dialog import ProfilesDialog, icon_button
+from .translation_dialog import TranslationDialog
 from .theme import BASE, BLUE, SURFACE0, SURFACE1, SURFACE2, TEXT, YELLOW, APP_QSS
 
 APP_DIR = Path(__file__).resolve().parent.parent.parent
@@ -371,6 +373,7 @@ class MainWindow(QMainWindow):
         self._acquisition_completed = False
         self._config = load_config()
         self.profile_store = profile_store or ProfileStore(legacy_config=self._config, legacy_path=config_path())
+        self.i18n = I18n(self.profile_store, self._config.get("language", "it"))
         # Modello scelto solo per questa sessione (datasheet difficile): non
         # viene salvato in config.json e si perde alla chiusura, per scelta.
         self._session_model: str | None = None
@@ -398,37 +401,39 @@ class MainWindow(QMainWindow):
     # ── Menu ────────────────────────────────────────────────────────
 
     def _build_menu(self) -> None:
-        file_menu = self.menuBar().addMenu("&File")
-        self.action_open_output = file_menu.addAction("Apri cartella componente", self._open_project_dir)
-        self.action_export = file_menu.addAction("Esporta in libreria...", self._export_component)
+        file_menu = self.menuBar().addMenu(self.i18n.tr("app.file"))
+        self.action_open_output = file_menu.addAction(self.i18n.text("Apri cartella componente"), self._open_project_dir)
+        self.action_export = file_menu.addAction(self.i18n.text("Esporta in libreria..."), self._export_component)
         file_menu.addSeparator()
-        file_menu.addAction("Esci", self.close)
+        self.action_exit = file_menu.addAction(self.i18n.text("Esci"), self.close)
 
-        config_menu = self.menuBar().addMenu("&Configurazione")
+        config_menu = self.menuBar().addMenu(self.i18n.tr("app.configuration"))
         self.action_profiles = config_menu.addAction(
             QIcon(str(Path(__file__).parent / 'assets' / 'profile-edit.svg')),
             "Gestione tipologie e profili AI...", self._edit_profiles)
-        config_menu.addAction(
-            "Default generali AI...", self._edit_llm_settings
-        )
+        self.action_translations = config_menu.addAction(
+            self.i18n.text("Manage translations..."), self._edit_translations)
+        self.action_defaults = config_menu.addAction(
+            self.i18n.text("Default generali AI..."), self._edit_llm_settings)
         config_menu.addSeparator()
 
         self.action_generation_options = config_menu.addAction(
             "Opzioni di generazione...", self._edit_generation_options)
 
         config_menu.addSeparator()
-        config_menu.addAction("Apri config.json", self._open_config_file)
+        self.action_open_config = config_menu.addAction(self.i18n.text("Apri config.json"), self._open_config_file)
 
-        help_menu = self.menuBar().addMenu("&?")
+        help_menu = self.menuBar().addMenu(self.i18n.tr("app.help"))
         help_menu.addAction(
             "Apri cartella progetto tool", lambda: webbrowser.open(APP_DIR.as_uri())
         )
         help_menu.addSeparator()
-        help_menu.addAction("About", self._show_about)
+        self.action_about = help_menu.addAction(self.i18n.text("About"), self._show_about)
 
     def _edit_generation_options(self) -> None:
         dialog = GenerationOptionsDialog(bool(self._config.get("include_nc_pins", True)), self,
                                          advanced_user=self._advanced_user())
+        self.i18n.retranslate_widgets(dialog)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         checked = dialog.include_nc_pins()
@@ -454,6 +459,7 @@ class MainWindow(QMainWindow):
             current_verification_prompt=defaults["verification_prompt"],
             current_verification_model=defaults["verification_model"],
         )
+        self.i18n.retranslate_widgets(dialog)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
@@ -486,13 +492,14 @@ class MainWindow(QMainWindow):
         self.group_annotations.setVisible(advanced)
         self.group_components.setVisible(advanced and self._is_castellated())
         self.btn_photo_comparison.setVisible(advanced)
+        if hasattr(self, "action_translations"):
+            self.action_translations.setVisible(advanced)
 
     def _background_work_running(self):
         return any(worker is not None and worker.isRunning() for worker in
                    (self._worker, self._extract_worker, self._cad3d_worker, self._terminal_worker))
 
     def closeEvent(self, event):
-        """@brief Provide the closeEvent operation for this workflow."""
         """@brief Provide the closeEvent operation for this workflow."""
         if self._background_work_running():
             QMessageBox.information(self, 'Operazione in corso', 'Attendi la conclusione dell’operazione prima di chiudere.')
@@ -505,6 +512,7 @@ class MainWindow(QMainWindow):
         try:
             previous = self.profile_store.get_type(self._profile_key())
             dialog = ProfilesDialog(self.profile_store, self)
+            self.i18n.retranslate_widgets(dialog)
             dialog.exec()
             if dialog.changed:
                 current = self.profile_store.get_type(self._profile_key())
@@ -516,6 +524,13 @@ class MainWindow(QMainWindow):
         finally:
             if dialog is not None:
                 dialog.deleteLater()
+
+    def _edit_translations(self) -> None:
+        """@brief Open the Advanced-user translation catalog editor."""
+        dialog = TranslationDialog(self.profile_store, self)
+        self.i18n.retranslate_widgets(dialog)
+        dialog.exec()
+        dialog.deleteLater()
 
     def _reload_profile_types(self, *, update_prompt=True):
         combo = self.combo_component_type
@@ -685,12 +700,30 @@ class MainWindow(QMainWindow):
         preview_tab = self._build_preview_tab()
         model_3d_tab = self._build_3d_tab()
 
+        language_row = QHBoxLayout()
+        language_row.setSpacing(10)
+        language_row.addStretch()
+        self.language_label = QLabel(self.i18n.tr("language.label"))
+        self.language_label.setProperty("i18n_source", "Lingua:")
+        self.language_label.setMinimumWidth(62)
+        language_row.addWidget(self.language_label)
+        self.language_combo = QComboBox()
+        for code, label in LANGUAGES.items():
+            self.language_combo.addItem(label, code)
+        self.language_combo.setCurrentIndex(max(0, self.language_combo.findData(self.i18n.language)))
+        self.language_combo.setToolTip("Select the interface language")
+        self.language_combo.setAccessibleName("Interface language")
+        self.language_combo.setMinimumWidth(120)
+        self.language_combo.currentIndexChanged.connect(self._on_language_changed)
+        language_row.addWidget(self.language_combo)
+        layout.addLayout(language_row)
+
         self.tabs = QTabWidget()
-        self.tabs.addTab(project_tab, "\U0001F4C1 Progetto")
-        self.tabs.addTab(footprint_tab, "\u25a6 Footprint 2D")
-        self.tabs.addTab(generate_tab, "\u2699 Genera")
-        self.tabs.addTab(preview_tab, "\U0001F441 Anteprima FootPrint")
-        self.tabs.addTab(model_3d_tab, "\U0001F9CA Modello 3D")
+        self.tabs.addTab(project_tab, self.i18n.tr("tab.project"))
+        self.tabs.addTab(footprint_tab, self.i18n.tr("tab.footprint"))
+        self.tabs.addTab(generate_tab, self.i18n.tr("tab.generate"))
+        self.tabs.addTab(preview_tab, self.i18n.tr("tab.preview"))
+        self.tabs.addTab(model_3d_tab, self.i18n.tr("tab.model3d"))
         self._set_acquisition_tabs_enabled(False)
         self.tabs.currentChanged.connect(self._on_tab_changed)
         layout.addWidget(self.tabs)
@@ -699,6 +732,36 @@ class MainWindow(QMainWindow):
         self.analysis_overlay = AnalysisOverlay(central)
         self.analysis_overlay.log_requested.connect(self.ai_log_dialog.exec)
         self._analysis_tabs_enabled = None
+        # Apply the persisted language to all catalogued widgets on first render.
+        self.i18n.retranslate_widgets(self)
+
+    def _on_language_changed(self, index: int) -> None:
+        """@brief Persist the selected language and refresh navigation labels."""
+        language = self.language_combo.itemData(index)
+        if not language or language == self.i18n.language:
+            return
+        self.i18n.set_language(language)
+        self._config["language"] = language
+        save_config(self._config)
+        self.tabs.setTabText(0, self.i18n.tr("tab.project"))
+        self.tabs.setTabText(1, self.i18n.tr("tab.footprint"))
+        self.tabs.setTabText(2, self.i18n.tr("tab.generate"))
+        self.tabs.setTabText(3, self.i18n.tr("tab.preview"))
+        self.tabs.setTabText(4, self.i18n.tr("tab.model3d"))
+        self.language_label.setText(self.i18n.tr("language.label"))
+        self.i18n.retranslate_widgets(self)
+        self.menuBar().actions()[0].setText(self.i18n.tr("app.file"))
+        self.menuBar().actions()[1].setText(self.i18n.tr("app.configuration"))
+        self.menuBar().actions()[2].setText(self.i18n.tr("app.help"))
+        self.action_open_output.setText(self.i18n.text("Apri cartella componente"))
+        self.action_export.setText(self.i18n.text("Esporta in libreria..."))
+        self.action_exit.setText(self.i18n.text("Esci"))
+        self.action_profiles.setText(self.i18n.text("Gestione tipologie e profili AI..."))
+        self.action_translations.setText(self.i18n.text("Manage translations..."))
+        self.action_defaults.setText(self.i18n.text("Default generali AI..."))
+        self.action_generation_options.setText(self.i18n.text("Opzioni di generazione..."))
+        self.action_open_config.setText(self.i18n.text("Apri config.json"))
+        self.action_about.setText(self.i18n.text("About"))
 
     def _set_acquisition_tabs_enabled(self, enabled: bool) -> None:
         """Enable previews only after the first successful parameter acquisition."""
@@ -819,7 +882,13 @@ class MainWindow(QMainWindow):
             "Configurazione -> Gestione tipologie e profili AI."
         )
         self.combo_model.currentIndexChanged.connect(self._on_model_combo_changed)
-        btn_pick_model = QPushButton("Modello diverso...")
+        btn_pick_model = QPushButton()
+        btn_pick_model.setIcon(QIcon(str(Path(__file__).parent / 'assets' / 'model-edit.svg')))
+        btn_pick_model.setIconSize(QSize(20, 20))
+        btn_pick_model.setFixedSize(40, 32)
+        btn_pick_model.setAutoDefault(False)
+        btn_pick_model.setToolTip("Change the datasheet model for this session")
+        btn_pick_model.setAccessibleName("Change datasheet model")
         btn_pick_model.setToolTip(
             "Sceglie un modello (filtrabile per costo) valido solo per le "
             "estrazioni di questa sessione: il default globale non cambia."
@@ -835,8 +904,13 @@ class MainWindow(QMainWindow):
             "La scelta vale per questa sessione; il default si imposta da Configurazione."
         )
         self.combo_vision_model.currentIndexChanged.connect(self._on_vision_model_combo_changed)
-        self.btn_pick_vision_model = QPushButton("Modello diverso...")
-        self.btn_pick_vision_model.setToolTip("Scegli un modello foto per questa sessione")
+        self.btn_pick_vision_model = QPushButton()
+        self.btn_pick_vision_model.setIcon(QIcon(str(Path(__file__).parent / 'assets' / 'model-edit.svg')))
+        self.btn_pick_vision_model.setIconSize(QSize(20, 20))
+        self.btn_pick_vision_model.setFixedSize(40, 32)
+        self.btn_pick_vision_model.setAutoDefault(False)
+        self.btn_pick_vision_model.setToolTip("Change the photo model for this session")
+        self.btn_pick_vision_model.setAccessibleName("Change photo model")
         self.btn_pick_vision_model.clicked.connect(self._pick_session_vision_model)
         vision_row = QHBoxLayout()
         vision_row.addWidget(self.combo_vision_model, 1)
@@ -845,7 +919,13 @@ class MainWindow(QMainWindow):
         self.combo_verification_model = QComboBox()
         self.combo_verification_model.setToolTip('Modello di verifica foto, indipendente dalle altre analisi. Scelta solo per questa sessione.')
         self.combo_verification_model.currentIndexChanged.connect(self._on_verification_model_combo_changed)
-        self.btn_pick_verification_model = QPushButton('Modello diverso...')
+        self.btn_pick_verification_model = QPushButton()
+        self.btn_pick_verification_model.setIcon(QIcon(str(Path(__file__).parent / 'assets' / 'model-edit.svg')))
+        self.btn_pick_verification_model.setIconSize(QSize(20, 20))
+        self.btn_pick_verification_model.setFixedSize(40, 32)
+        self.btn_pick_verification_model.setAutoDefault(False)
+        self.btn_pick_verification_model.setToolTip("Change the photo verification model for this session")
+        self.btn_pick_verification_model.setAccessibleName("Change photo verification model")
         self.btn_pick_verification_model.clicked.connect(self._pick_session_verification_model)
         verification_row = QHBoxLayout()
         verification_row.addWidget(self.combo_verification_model, 1)
