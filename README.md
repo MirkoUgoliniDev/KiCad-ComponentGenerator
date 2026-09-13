@@ -185,6 +185,44 @@ ComponentName/
 Generated libraries remain local until the user explicitly exports them to a
 KiCad library, keeping unverified results separate from production libraries.
 
+## Review and install in KiCad
+
+After both the footprint and STEP model have been generated, open the **KiCad**
+tab. The workflow deliberately separates review from installation:
+
+1. **Test in KiCad** creates an isolated preview project under the generated
+   component directory and opens it in the KiCad PCB Editor. It does not edit
+   any footprint library table. Press `Alt+3` in KiCad to inspect the real STEP
+   model.
+2. **Install in KiCad project** creates or updates `KiCadGen.pretty` and
+   `KiCadGen.3dshapes` in the selected project and registers the footprint
+   library in that project's `fp-lib-table`. The generated 3D reference uses
+   `${KIPRJMOD}`, so the project remains portable.
+3. **Install as global library** copies the same artifacts to a stable folder
+   selected by the user and registers `KiCadGen.pretty` in the detected KiCad
+   global library table. Global model references use an absolute path on that
+   computer.
+
+Only the current component files are replaced after explicit confirmation;
+other components in the library are preserved. Before changing an existing
+`fp-lib-table`, the application keeps a one-time `.kicadgen-backup` copy.
+
+The installed library has this structure:
+
+~~~text
+KiCad project or global library root/
+├── KiCadGen.pretty/
+│   └── ComponentName.kicad_mod
+├── KiCadGen.3dshapes/
+│   ├── ComponentName.step
+│   └── ComponentName.wrl
+└── fp-lib-table                 # project mode; global table lives in KiCad config
+~~~
+
+This is a footprint and 3D-model library. A schematic symbol library
+(`.kicad_sym`) is not generated yet; assign the installed footprint to an
+existing or custom symbol in the Schematic Editor.
+
 ## Repository layout
 
 ~~~text
