@@ -7,12 +7,14 @@ from PyQt6.QtWidgets import QFrame, QLabel, QPushButton, QVBoxLayout, QWidget
 
 
 class AnalysisSpinner(QWidget):
+    """@brief Show an indeterminate animated indicator during AI work."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedSize(56, 56)
         self.angle = 0
 
     def paintEvent(self, event):
+        """@brief Provide the paintEvent operation for this workflow."""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = QRectF(7, 7, 42, 42)
@@ -25,6 +27,7 @@ class AnalysisSpinner(QWidget):
 
 
 class AnalysisOverlay(QWidget):
+    """@brief Present analysis progress and expose the AI log action."""
     log_requested = pyqtSignal()
 
     def __init__(self, parent):
@@ -75,11 +78,13 @@ class AnalysisOverlay(QWidget):
         self.hide()
 
     def eventFilter(self, watched, event):
+        """@brief Provide the eventFilter operation for this workflow."""
         if watched is self.parentWidget() and event.type() == QEvent.Type.Resize:
             self.setGeometry(watched.rect())
         return super().eventFilter(watched, event)
 
     def start(self, title='Analisi AI in corso', status='Preparazione dei documenti…'):
+        """@brief Provide the start operation for this workflow."""
         self.title.setText(title)
         self.started_at = monotonic()
         self.spinner.angle = 0
@@ -92,6 +97,7 @@ class AnalysisOverlay(QWidget):
         self.timer.start()
 
     def set_status(self, message):
+        """@brief Provide the set status operation for this workflow."""
         # Full messages stay in the log; keep the card stable for long replies.
         text = " ".join(str(message).split())
         self.status.setText(text if len(text) <= 220 else text[:217] + "…")
@@ -103,9 +109,11 @@ class AnalysisOverlay(QWidget):
         self.spinner.update()
 
     def stop(self):
+        """@brief Provide the stop operation for this workflow."""
         self.timer.stop()
         self.hide()
 
     def hideEvent(self, event):
+        """@brief Provide the hideEvent operation for this workflow."""
         self.timer.stop()
         super().hideEvent(event)

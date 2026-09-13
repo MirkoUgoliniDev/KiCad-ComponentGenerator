@@ -24,6 +24,7 @@ CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config.json"
 
 
 def config_path() -> Path:
+    """@brief Provide the config path operation for this workflow."""
     return Path(os.environ.get("KICADGEN_CONFIG_PATH", CONFIG_PATH))
 
 #: SHA-256 dei prompt di sistema che sono stati il default in passato.
@@ -85,6 +86,7 @@ def load_config() -> dict:
 
 
 def save_config(config: dict) -> None:
+    """@brief Provide the save config operation for this workflow."""
     # AI profiles are persisted only in SQLite after startup migration.
     from ..services.analysis_profiles import PROFILE_FIELDS
     preferences = {k: v for k, v in config.items() if k not in PROFILE_FIELDS}

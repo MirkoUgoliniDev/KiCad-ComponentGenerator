@@ -651,9 +651,11 @@ class ExtractedParams:
     package_geometry: Optional[dict] = None
 
     def has_3d_body(self) -> bool:
+        """@brief Provide the has 3d body operation for this workflow."""
         return self.body_length_mm is not None and self.body_width_mm is not None and self.body_height_mm is not None
 
     def is_castellated(self) -> bool:
+        """@brief Provide the is castellated operation for this workflow."""
         return self.layout == "castellated"
 
 

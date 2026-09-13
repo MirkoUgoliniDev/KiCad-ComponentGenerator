@@ -7,6 +7,7 @@ from ..core.package_geometry import PackageGeometry
 
 
 def build_package(geometry: PackageGeometry, name: str | None = None) -> Footprint:
+    """@brief Provide the build package operation for this workflow."""
     geometry.validate()
     pins = geometry.pins_seen_from_top()
     attr = "through_hole" if any(p.pad_type == "thru_hole" for p in pins) else "smd"

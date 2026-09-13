@@ -7,6 +7,7 @@ import math
 
 
 def rect(value):
+    """@brief Provide the rect operation for this workflow."""
     if (not isinstance(value, (list, tuple)) or len(value) != 4
             or any(isinstance(v, bool) or not isinstance(v, (int, float))
                    or not math.isfinite(v) or not 0 <= v <= 1 for v in value)):

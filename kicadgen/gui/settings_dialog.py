@@ -217,12 +217,15 @@ class LlmSettingsDialog(QDialog):
             self.field_verification_model.setText(chosen)
 
     def verification_model(self):
+        """@brief Provide the verification model operation for this workflow."""
         return self._verification_model
 
     def grounding_prompt(self):
+        """@brief Provide the grounding prompt operation for this workflow."""
         return self.grounding_editor.toPlainText().strip() or GROUNDING_PROMPT
 
     def verification_prompt(self):
+        """@brief Provide the verification prompt operation for this workflow."""
         return self.verification_editor.toPlainText().strip() or VERIFICATION_PROMPT
 
     def _pick_vision_model(self) -> None:
@@ -232,12 +235,15 @@ class LlmSettingsDialog(QDialog):
             self.field_vision_model.setText(chosen)
 
     def vision_model(self) -> str:
+        """@brief Provide the vision model operation for this workflow."""
         return self._vision_model.strip() or DEFAULT_VISION_MODEL
 
     def prompt(self) -> str:
+        """@brief Provide the prompt operation for this workflow."""
         return self.editor.toPlainText().strip()
 
     def model(self) -> str:
+        """@brief Provide the model operation for this workflow."""
         return self._model.strip() or DEFAULT_MODEL
 
 

@@ -50,10 +50,12 @@ class PhotoTransform:
             raise ValueError("Photo and PCB dimensions must be finite and positive")
 
     def mm_to_pixel(self, x: float, y: float) -> QPointF:
+        """@brief Provide the mm to pixel operation for this workflow."""
         return QPointF((x / self.body_length_mm + .5) * self.pixel_width,
                        (y / self.body_width_mm + .5) * self.pixel_height)
 
     def pixel_to_mm(self, x: float, y: float) -> QPointF:
+        """@brief Provide the pixel to mm operation for this workflow."""
         return QPointF((x / self.pixel_width - .5) * self.body_length_mm,
                        (y / self.pixel_height - .5) * self.body_width_mm)
 
@@ -98,6 +100,7 @@ class _PhotoView(QGraphicsView):
         self._resize_fit_timer.timeout.connect(self._apply_fit)
 
     def fit_photo(self, rect):
+        """@brief Provide the fit photo operation for this workflow."""
         self._fit_rect = QRectF(rect)
         self._auto_fit = True
         self._apply_fit()
@@ -109,6 +112,7 @@ class _PhotoView(QGraphicsView):
         self._fit_scale = self.transform().m11()
 
     def resizeEvent(self, event):
+        """@brief Provide the resizeEvent operation for this workflow."""
         super().resizeEvent(event)
         if self._auto_fit:
             # Scrollbar visibility can resize the viewport during fitInView;
@@ -116,12 +120,14 @@ class _PhotoView(QGraphicsView):
             self._resize_fit_timer.start(0)
 
     def zoom(self, factor):
+        """@brief Provide the zoom operation for this workflow."""
         self._auto_fit = False
         current = self.transform().m11()
         target = min(self._fit_scale * 64, max(self._fit_scale / 8, current * factor))
         self.scale(target / current, target / current)
 
     def wheelEvent(self, event):
+        """@brief Provide the wheelEvent operation for this workflow."""
         delta = event.angleDelta().y() or event.pixelDelta().y()
         if delta:
             self.zoom(1.2 ** max(-4, min(4, delta / 120)))
@@ -130,6 +136,7 @@ class _PhotoView(QGraphicsView):
             super().wheelEvent(event)
 
     def mousePressEvent(self, event):
+        """@brief Provide the mousePressEvent operation for this workflow."""
         if event.button() == Qt.MouseButton.MiddleButton:
             self._auto_fit = False
             self._pan_position = event.position()
@@ -139,6 +146,7 @@ class _PhotoView(QGraphicsView):
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        """@brief Provide the mouseMoveEvent operation for this workflow."""
         if self._pan_position is not None:
             delta = event.position() - self._pan_position
             self._pan_position = event.position()
@@ -149,6 +157,7 @@ class _PhotoView(QGraphicsView):
             super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        """@brief Provide the mouseReleaseEvent operation for this workflow."""
         if event.button() == Qt.MouseButton.MiddleButton and self._pan_position is not None:
             self._pan_position = None
             self.viewport().unsetCursor()
@@ -168,6 +177,7 @@ class _NumberLabel(QGraphicsSimpleTextItem):
         self.setBrush(QColor("white"))
 
     def paint(self, painter, option, widget=None):
+        """@brief Provide the paint operation for this workflow."""
         painter.save()
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor("#101318"))
@@ -192,6 +202,7 @@ class _ComponentItem(QGraphicsPolygonItem):
         self.sync_geometry()
 
     def sync_geometry(self):
+        """@brief Provide the sync geometry operation for this workflow."""
         self._syncing = True
         try:
             self.setPolygon(self.editor.photo_transform.local_polygon(self.component))
@@ -202,10 +213,12 @@ class _ComponentItem(QGraphicsPolygonItem):
             self._syncing = False
 
     def photo_bounds(self):
+        """@brief Provide the photo bounds operation for this workflow."""
         # No pen or label padding: this is the physical package envelope.
         return self.mapToScene(self.polygon()).boundingRect()
 
     def itemChange(self, change, value):
+        """@brief Provide the itemChange operation for this workflow."""
         result = super().itemChange(change, value)
         if (change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged
                 and not self._syncing):
@@ -354,10 +367,12 @@ class PhotoReviewDialog(QDialog):
         return deepcopy(self._components)
 
     def showEvent(self, event):
+        """@brief Provide the showEvent operation for this workflow."""
         super().showEvent(event)
         self.fit_photo()
 
     def fit_photo(self):
+        """@brief Provide the fit photo operation for this workflow."""
         self.view.fit_photo(self.photo_rect)
 
     def _append_item(self, component):
@@ -505,6 +520,7 @@ class PhotoReviewDialog(QDialog):
         self.text_fields["name"].selectAll()
 
     def delete_selected(self):
+        """@brief Provide the delete selected operation for this workflow."""
         item = self._selected_item()
         if item is None:
             return
@@ -518,6 +534,7 @@ class PhotoReviewDialog(QDialog):
         self._update_scene_rect()
 
     def accept(self):
+        """@brief Provide the accept operation for this workflow."""
         if self._applied:
             return
         # Commit text still being typed, including calls made without focus loss.

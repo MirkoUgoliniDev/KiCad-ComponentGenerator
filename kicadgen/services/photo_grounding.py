@@ -30,6 +30,7 @@ GROUNDING_PROMPT = (
 
 
 def grounding_tool(kinds):
+    """@brief Provide the grounding tool operation for this workflow."""
     return {"type": "function", "function": {
         "name": "locate_components", "description": "PCB component bounding boxes",
         "parameters": {"type": "object", "properties": {
@@ -41,6 +42,7 @@ def grounding_tool(kinds):
 
 
 def decode_boxes(data, region, length, width, kinds, source, log):
+    """@brief Provide the decode boxes operation for this workflow."""
     out = []
     raw = data.get("components") if isinstance(data, dict) else None
     if not isinstance(raw, list):
@@ -170,6 +172,7 @@ def cached_call(call, kwargs, cache_dir, stage, log, expected_ids=None):
 
 
 def classification_tool(kinds):
+    """@brief Provide the classification tool operation for this workflow."""
     properties = {
         "id": {"type": "integer"},
         "is_component": {"type": "boolean"},
@@ -190,6 +193,7 @@ def classification_tool(kinds):
 
 
 def contact_sheet(photo, components, *, cell_width=240, cell_height=180, columns=4):
+    """@brief Provide the contact sheet operation for this workflow."""
     import cv2
     import numpy as np
     cell_w, cell_h = cell_width, cell_height
@@ -212,6 +216,7 @@ def contact_sheet(photo, components, *, cell_width=240, cell_height=180, columns
 
 
 def apply_classifications(components, response, kinds, length, width, log):
+    """@brief Provide the apply classifications operation for this workflow."""
     raw = response.get("components") if isinstance(response,dict) else None
     if not isinstance(raw,list):
         raise ValueError("classificazioni mancanti")
@@ -460,6 +465,7 @@ def reconcile_packages(photo, components, model, length, width, kinds, call, log
 def grounded_components(photo, model, length, width, kinds, call, log, cache_dir=None,
                         extra_instructions=None, classifier_model=None, mechanical=True,
                         grounding_prompt=None, verification_prompt=None):
+    """@brief Provide the grounded components operation for this workflow."""
     from .photo_inventory import image_block, merge_components
     classifier_model = classifier_model or DEFAULT_MODEL
     log(f"Localizzazione fotografica dedicata: {model}. Geometria e classificazione separate.")

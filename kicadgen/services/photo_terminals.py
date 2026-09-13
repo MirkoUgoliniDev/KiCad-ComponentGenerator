@@ -26,6 +26,7 @@ PROMPT = (
 
 
 def terminal_tool():
+    """@brief Provide the terminal tool operation for this workflow."""
     # Use the portable tool-schema subset; all geometric constraints are
     # enforced locally by decode_terminal_geometry before a CAD payload exists.
     box = {"type": "array", "items": {"type": "number"},
@@ -110,6 +111,7 @@ def _to_target_frame(entry, image_box, target_box):
 
 
 def decode_terminal_geometry(entry, rotation):
+    """@brief Provide the decode terminal geometry operation for this workflow."""
     if entry.get("resolved") is not True or entry.get("confidence") not in ("high", "medium"):
         return None
     if type(rotation) not in (int, float) or not math.isfinite(rotation) or rotation % 90:

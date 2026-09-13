@@ -26,6 +26,7 @@ from ..core.footprint import Footprint, FpCircle, FpRect, Pad
 
 @dataclass
 class PinHeaderParams:
+    """@brief Store validated parameters for a through-hole pin header."""
     name: str = "PinHeader"
     description: str = ""
     tags: str = "pin header THT"
@@ -48,6 +49,7 @@ class PinHeaderParams:
         return self.row_spacing if self.row_spacing is not None else self.pitch
 
     def validate(self) -> None:
+        """@brief Validate the object against its supported contract."""
         if not self.name.strip():
             raise ValueError("Il nome del footprint non puo' essere vuoto.")
         if self.rows < 1 or self.cols < 1:

@@ -19,6 +19,7 @@ from kicadgen.services.photo_inventory import extract_inventory
 
 
 def main():
+    """@brief Run the public entry point for this workflow."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("photo", type=Path)
     parser.add_argument("--length",type=float,required=True)

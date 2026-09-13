@@ -324,6 +324,7 @@ def _flip_y(data):
 
 
 def main():
+    """@brief Run the public entry point for this workflow."""
     json_path = sys.argv[2]
     with open(json_path, "r", encoding="utf-8") as f:
         data = _flip_y(json.load(f))

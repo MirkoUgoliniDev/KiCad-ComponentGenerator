@@ -75,14 +75,17 @@ class ModelInfo:
 
     @property
     def supports_images(self) -> bool:
+        """@brief Provide the supports images operation for this workflow."""
         return "image" in self.input_modalities
 
     @property
     def supports_pdf(self) -> bool:
+        """@brief Provide the supports pdf operation for this workflow."""
         return "file" in self.input_modalities
 
     @property
     def is_free(self) -> bool:
+        """@brief Provide the is free operation for this workflow."""
         return self.prompt_usd_per_mtok <= 0 and self.completion_usd_per_mtok <= 0
 
     def usable_for_datasheets(self) -> bool:

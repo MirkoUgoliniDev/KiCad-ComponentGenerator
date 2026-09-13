@@ -176,6 +176,9 @@ class GenerateWorker(QThread):
         self.face_texts = face_texts or []
 
     def run(self) -> None:
+        """@brief Provide the run operation for this workflow."""
+        """@brief Provide the run operation for this workflow."""
+        """@brief Provide the run operation for this workflow."""
         try:
             self.progress.emit('Generazione del footprint KiCad…')
             footprint = (
@@ -264,6 +267,7 @@ class TerminalDetailWorker(QThread):
         self.system_prompt = system_prompt
 
     def run(self):
+        """@brief Provide the run operation for this workflow."""
         from ..services.photo_terminals import observe_terminals
         from ..services.photo_leads import refine_leads
         from ..services.openrouter import call_tool
@@ -488,6 +492,8 @@ class MainWindow(QMainWindow):
                    (self._worker, self._extract_worker, self._cad3d_worker, self._terminal_worker))
 
     def closeEvent(self, event):
+        """@brief Provide the closeEvent operation for this workflow."""
+        """@brief Provide the closeEvent operation for this workflow."""
         if self._background_work_running():
             QMessageBox.information(self, 'Operazione in corso', 'Attendi la conclusione dell’operazione prima di chiudere.')
             event.ignore()
@@ -3454,6 +3460,7 @@ class MainWindow(QMainWindow):
 
 
 def main() -> None:
+    """@brief Provide the main operation for this workflow."""
     app = QApplication(sys.argv)
     app.setStyleSheet(APP_QSS)
     try:

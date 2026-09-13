@@ -16,6 +16,7 @@ from kicadgen.cad3d.step_generator import generate_castellated_3d_model
 
 
 def main():
+    """@brief Run the public entry point for this workflow."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('inventory',type=Path)
     parser.add_argument('--side',action='append',required=True,help='edge:count:pitch_mm')

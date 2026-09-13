@@ -85,6 +85,12 @@ class Pad:
             raise ValueError(f"pad {self.number!r}: drill obbligatorio per pad_type={self.pad_type!r}")
 
     def to_sexpr(self) -> SExpr:
+        """@brief Provide the to sexpr operation for this workflow."""
+        """@brief Provide the to sexpr operation for this workflow."""
+        """@brief Provide the to sexpr operation for this workflow."""
+        """@brief Provide the to sexpr operation for this workflow."""
+        """@brief Provide the to sexpr operation for this workflow."""
+        """@brief Provide the to sexpr operation for this workflow."""
         node = sx("pad", self.number, Symbol(self.pad_type), Symbol(self.shape))
         node.add(_at_node(self.at, self.rotation))
         node.add(sx("size", *self.size))
@@ -107,6 +113,7 @@ class FpLine:
     width: float = 0.12
 
     def to_sexpr(self) -> SExpr:
+        """@brief Serialize this line graphic to a KiCad S-expression."""
         node = sx("fp_line", sx("start", *self.start), sx("end", *self.end))
         node.add(_stroke_node(self.width))
         node.add(sx("layer", self.layer))
@@ -125,6 +132,7 @@ class FpRect:
     fill: bool = False
 
     def to_sexpr(self) -> SExpr:
+        """@brief Serialize this rectangle graphic to a KiCad S-expression."""
         node = sx("fp_rect", sx("start", *self.start), sx("end", *self.end))
         node.add(_stroke_node(self.width))
         node.add(sx("fill", bare(self.fill)))
@@ -144,6 +152,7 @@ class FpCircle:
     fill: bool = False
 
     def to_sexpr(self) -> SExpr:
+        """@brief Serialize this circle graphic to a KiCad S-expression."""
         end = (self.center[0] + self.radius, self.center[1])
         node = sx("fp_circle", sx("center", *self.center), sx("end", *end))
         node.add(_stroke_node(self.width))
@@ -165,6 +174,7 @@ class FpText:
     thickness: float = 0.15
 
     def to_sexpr(self) -> SExpr:
+        """@brief Serialize this text graphic to a KiCad S-expression."""
         node = sx("fp_text", Symbol(self.kind), self.text)
         node.add(_at_node(self.at))
         node.add(sx("layer", self.layer))
@@ -188,10 +198,12 @@ class Footprint:
     graphics: list = field(default_factory=list)  # FpLine | FpRect | FpCircle | FpText
 
     def add_pad(self, pad: Pad) -> "Footprint":
+        """@brief Provide the add pad operation for this workflow."""
         self.pads.append(pad)
         return self
 
     def add_graphic(self, item) -> "Footprint":
+        """@brief Provide the add graphic operation for this workflow."""
         self.graphics.append(item)
         return self
 
@@ -207,6 +219,7 @@ class Footprint:
         return node
 
     def to_sexpr(self) -> SExpr:
+        """@brief Serialize the complete footprint to a KiCad S-expression."""
         root = sx("footprint", self.name)
         root.add(sx("version", KICAD_VERSION))
         root.add(sx("generator", "kicadgen_tool"))
@@ -233,6 +246,7 @@ class Footprint:
         return root
 
     def render(self) -> str:
+        """@brief Provide the render operation for this workflow."""
         return self.to_sexpr().render(0) + "\n"
 
     def save(self, path: str) -> None:

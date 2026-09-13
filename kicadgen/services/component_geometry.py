@@ -60,6 +60,7 @@ class GeometryConfig:
 
 @dataclass(frozen=True)
 class GeometryCandidate:
+    """@brief Hold one candidate component envelope from image analysis."""
     bbox: Box
     source: str  # silkscreen_frame or edge_rectangle; always requires review
     side_support: tuple[float, float, float, float]
@@ -69,6 +70,7 @@ class GeometryCandidate:
 
 @dataclass(frozen=True)
 class GeometryDecision:
+    """@brief Record the selected geometry and its review state."""
     original_box: Box
     bbox: Box
     accepted: bool
@@ -80,6 +82,7 @@ class GeometryDecision:
 
 @dataclass(frozen=True)
 class GeometryAnalysis:
+    """@brief Aggregate candidates and diagnostics for one analysis run."""
     decisions: tuple[GeometryDecision, ...]
     candidates: tuple[GeometryCandidate, ...]
 

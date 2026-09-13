@@ -12,6 +12,7 @@ from kicadgen.services.photo_terminals import observe_terminals
 
 
 def main():
+    """@brief Run the public entry point for this workflow."""
     from dotenv import load_dotenv
     load_dotenv(ROOT / '.env')
     parser = argparse.ArgumentParser(description=__doc__)

@@ -22,6 +22,7 @@ PROMPT = (
 
 
 def separation_tool():
+    """@brief Provide the separation tool operation for this workflow."""
     props = dict(id={'type':'integer'}, resolved={'type':'boolean'},
         confidence={'type':'string','enum':['high','low']},
         lead_bbox={'type':'array','items':{'type':'number'},

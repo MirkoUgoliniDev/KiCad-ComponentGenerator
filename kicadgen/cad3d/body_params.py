@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 @dataclass
 class Body3DParams:
+    """@brief Define the dimensions and colors of a generated 3D body."""
     length_mm: float
     width_mm: float
     height_mm: float
@@ -28,6 +29,7 @@ class Body3DParams:
     pin_color_hex: str = "#b0b0b0"   # colore dei pin (metallo)
 
     def validate(self) -> None:
+        """@brief Validate dimensions, colors and pin extrusion constraints."""
         from .annotations import validate_hex_color
 
         validate_hex_color(self.color_hex, "Colore del corpo")
