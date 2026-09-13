@@ -52,6 +52,7 @@ class FaceTextAnnotation:
     color_hex: str = "#ffffff"
 
     def validate(self) -> None:
+        """@brief Validate the object against its supported contract."""
         if self.face not in FACE_NAMES:
             raise ValueError(f"Faccia non valida: {self.face!r} (ammesse: {FACE_NAMES})")
         if not self.text.strip():
@@ -71,6 +72,7 @@ class EdgeFilletAnnotation:
     radius_mm: float = 0.5
 
     def validate(self) -> None:
+        """@brief Validate the object against its supported contract."""
         if self.edge not in EDGE_NAMES:
             raise ValueError(f"Spigolo non valido: {self.edge!r} (ammessi: {EDGE_NAMES})")
         if self.radius_mm <= 0:

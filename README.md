@@ -1,170 +1,235 @@
-# KiCad Component Generator
+# KiCadGen-Tool
 
-Python application for generating complete KiCad component libraries from datasheets, mechanical drawings and product images.
+KiCadGen-Tool is a desktop application for creating reusable KiCad component
+footprints and optional 3D models from datasheets, mechanical drawings and
+calibrated product photographs.
 
-The generator can produce KiCad footprints (`.kicad_mod`), symbols (`.kicad_sym`) and optional parametric 3D models (`.step` and `.wrl`). It includes a GUI for component data entry and previews, reusable geometry/serialization code, datasheet extraction services and automated tests.
+The workflow is engineering-oriented: source documents are assigned explicit
+roles, AI extracts candidate geometry, code validates the result, and
+KiCad-compatible files are generated locally for human review.
 
-## Features
+> AI-assisted extraction is a starting point, not a metrology instrument.
+> Always verify pin numbering, dimensions, orientation and clearances against
+> the manufacturer's documentation before using an output in a PCB design.
 
-- Parametric THT pin-header and module footprint generation
-- KiCad S-expression serialization helpers
-- Datasheet and image-based geometry extraction workflow
-- FreeCAD-based STEP/VRML model generation
-- Pinout and 3D preview support
-- Automated validation for pin maps, footprints, annotations and CAD output
-- Calibrated photo inventories with simple mechanical envelopes, response caching,
-  per-stage logs and a draggable photo-review editor (no component markings)
+## What the tool does
 
-See [Photo mechanical workflow](docs/photo-mechanical-workflow.md) for operation,
-reproducible checks, measured example results and limitations of height estimates.
+~~~mermaid
+flowchart LR
+    A[Datasheet / drawings] --> D[Guided document slots]
+    B[Top-view photo] --> D
+    C[Side-view photo] --> D
+    D --> E[AI extraction]
+    E --> F[Validated parameters]
+    F --> G[KiCad footprint]
+    F --> H[Optional 3D model]
+    G --> I[2D preview]
+    H --> J[3D preview]
+    I --> K[Human verification]
+    J --> K
+~~~
 
-## Repository layout
+Current geometry families:
 
-```text
-main.py                         Application entry point
-kicadgen/core/                   KiCad data models and S-expression writers
-kicadgen/generators/             Parametric component generators
-kicadgen/cad3d/                 FreeCAD and 3D model generation
-kicadgen/services/               Datasheet extraction services
-kicadgen/gui/                    Desktop GUI and previews
-examples/                       Small usage examples
-tests/                          Automated tests
-generated/                      Local generated output (ignored by Git)
-.claude/                        Project-specific skills and review agents
-```
+- regular THT pin-header matrices;
+- castellated modules with independent contact rows on each side;
+- individual SMD/THT package geometries with explicit pad coordinates.
 
-## Requirements
-
-- Python 3.11 or newer
-- Packages listed in `requirements.txt`
-- FreeCAD with `freecadcmd` available when generating 3D models
-- KiCad 8 or newer for inspecting generated libraries
-
-Install Python dependencies:
-
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-## Run the application
-
-```bash
-python main.py
-```
-
-The GUI uses local settings and prompts. Keep `.env` and `config.json` local; they are intentionally excluded from version control.
-
-### Component types and AI profiles (SQLite)
-
-Open **Configurazione → Gestione tipologie e profili AI…** to create, edit,
-duplicate, deactivate or delete component types. Double-click a row to edit it.
-Each type maps to an existing supported geometry family; adding a type does not
-add a new generator. Confirmed operations are saved immediately; **Annulla** in
-an editor discards its unsaved changes. Deletion requires confirmation and does
-not remove generated components.
-
-The three analyses — **Datasheet**, **Localizzazione foto**, **Verifica foto** —
-have independent models and base prompts. Per-type fields can inherit the global
-default (**Eredita default generale**) or override it. Datasheet type instructions
-are added to the editable component instructions in Progetto. Photo instructions
-are appended to photographic prompts, including verification; advanced terminal
-and lead prompts live under Localizzazione foto. Schema and geometry validation
-remain in code. The Info icons open modal explanations without cluttering editors.
-
-Model selections in Progetto override only the current session. Each extraction
-receives a resolved snapshot, so later profile edits do not change an ongoing
-request. **Default generali AI…** is a shortcut for editing the global models and
-the three main prompts; the catalog editor exposes all profile fields.
-
-When no profile database exists, the app imports existing models/prompts and the four original
-types into `data/analysis_profiles.sqlite3`. The verification model initially
-matches the previous datasheet default, preserving the initial model choice.
-Before import, the original JSON is copied to `data/config-before-sqlite-<hash>.json`.
-Migration runs only once; an existing versioned database is reused instead of
-importing local JSON values. Later JSON saves contain UI preferences, not AI profiles.
-The API key remains in `.env`. The profile database `data/analysis_profiles.sqlite3`
-is versioned with its configured types, prompts and models. Migration backups and
-SQLite journal/WAL files remain git-ignored. Changes made through the profile editor
-modify this tracked database; review them before committing or pulling updates.
-
-Use **Backup DB…** to save a consistent SQLite copy to a new filename. To restore,
-close the application, preserve the current DB, and replace it with a verified
-backup. Unknown/newer or damaged databases are reported rather than silently reset.
-`KICADGEN_PROFILE_DB` can select another database path; `KICADGEN_CONFIG_PATH`
-selects the preferences/migration source. Tests isolate both paths automatically.
-
-### Standard and advanced workflow
-
-In **Configurazione → Opzioni di generazione**, **Advanced user** controls the
-workflow (saved in UI preferences, off by default). Standard mode hides
-**Footprint 2D** and **Genera**, keeping their data intact. A successful, validated
-AI extraction automatically starts footprint and 3D generation; progress remains
-visible, and the app opens the resulting preview. Existing output files require
-confirmation before automatic overwriting. Changing mode alone never generates files.
-
-Missing required dimensions or unsupported 3D geometries stop automatic generation
-with an explanation. Enable Advanced user and repeat the analysis to review the
-parameters and use the existing manual workflow. A CAD failure is reported separately
-from an already generated footprint. No new geometry generators are introduced.
+The application can generate a KiCad .kicad_mod footprint and, when the required
+geometry and FreeCAD installation are available, .step, .wrl and preview
+metadata for the 3D model.
 
 ## Guided source documents
 
-The Project tab has three document slots: **Pinout**, **Top view**, and **Side view**.
-Use **Carica** to assign a file to each slot, or mark it **Non disponibile** when
-that view is unavailable. At least one document is required before AI analysis.
+The Project tab currently has exactly three source-document roles:
 
-Uploads are copied into the component's `docs/` directory as `pinout`, `top`, and
-`front`, preserving the actual extension (PNG, JPEG, WEBP, GIF or PDF, up to 20 MB).
-Original files are not moved or renamed. Each slot offers a preview, replacement,
-and removal; PDF previews show the first page. Replacements and removals require
-confirmation and retain recoverable copies in `docs/.history/`.
+| Role | Local filename | Intended use |
+| --- | --- | --- |
+| Pinout | pinout.extension | Contact numbering, labels and pinout dimensions |
+| Top view | top.extension | Calibrated XY localization of mounted components |
+| Side view | front.extension | Component profile and height estimates |
 
-Role assignments persist in `docs/.document-roles.json` and are sent explicitly
-to the AI. Photo localization uses the user-assigned **top** image, not an AI guess
-or a different view. This stage requires a PNG/JPEG/WEBP top image; PDFs remain
-available to the general extraction stage. `front` is the conventional filename
-for a side view, not a guarantee of a particular viewing direction.
+Supported uploads are PNG, JPEG, WEBP, GIF and PDF files up to 20 MB. Files are
+copied into the component docs folder with the canonical role name while
+preserving their real extension. Original files are never moved or renamed.
+Each role offers preview, replacement, recoverable removal and an explicit
+Not available option.
 
-Existing documents are preserved: assign them through **Carica** before the next
-analysis. Unassigned documents and history copies are not sent to the AI. The Info
-button explains the roles and limitations. No additional document roles are enabled.
+~~~mermaid
+flowchart TD
+    S[Select source file] --> V{Valid image or PDF?}
+    V -- No --> E[Explain the problem]
+    V -- Yes --> C[Copy to docs role filename]
+    C --> M[Save role metadata]
+    M --> P[Preview / replace / remove]
+    P --> A[Send explicit roles to AI]
+    N[Mark Not available] --> A
+~~~
 
-## Run tests
+Assignments are authoritative. Photo localization uses the user-assigned top
+file and never substitutes a pinout or side view because an AI response guessed
+a different image. Existing unassigned documents remain untouched and must be
+assigned manually. Replacement and removal archives are retained under
+docs/.history/.
 
-```bash
-pytest
-```
+## AI-assisted analysis
 
-Run a focused test file when iterating:
+The pipeline separates three analysis stages:
 
-```bash
-pytest tests/test_footprint.py
-pytest tests/test_cad3d.py
-```
+1. **Datasheet** — dimensions, contact layout, pin map and mechanical data.
+2. **Photo localization** — mounted package envelopes on the assigned top view.
+3. **Photo verification** — checks whether proposed rectangles contain real bodies.
 
-## Generated library layout
+Each stage has its own model and prompt. Defaults and per-component-type
+overrides are stored in the tracked SQLite catalog at
+data/analysis_profiles.sqlite3. The Configuration catalog supports creating,
+editing, duplicating, deactivating and deleting component types, with inheritance
+from global defaults.
 
-A generated component normally follows this structure:
+~~~mermaid
+flowchart LR
+    DB[(SQLite profile catalog)] --> R[Resolve model and prompts]
+    R --> D[Datasheet]
+    R --> L[Photo localization]
+    R --> V[Photo verification]
+    D --> X[Structured extraction]
+    L --> X
+    V --> X
+    X --> Q[Code validation]
+    Q --> O[Generation or review]
+~~~
 
-```text
+The API key is read from the local .env file and is never stored in the profile
+database. Cached AI responses and generated output are local data.
+
+## Standard and Advanced user modes
+
+~~~mermaid
+stateDiagram-v2
+    [*] --> Standard
+    Standard --> AIExtraction: Run extraction
+    AIExtraction --> AutomaticGeneration: Valid result
+    AutomaticGeneration --> Preview: Footprint and 3D complete
+    AutomaticGeneration --> ReviewRequired: Missing or unsupported data
+    ReviewRequired --> Advanced: Enable Advanced user
+    Advanced --> ManualReview: Inspect parameters
+    ManualReview --> Preview: Generate explicitly
+~~~
+
+Standard mode hides the detailed Footprint 2D, Generate, 3D annotation and
+component-editing panels while preserving their data and implementation. A valid
+extraction starts the existing footprint and 3D generation flow automatically.
+Existing output files require confirmation before replacement.
+
+Advanced user mode exposes the detailed editors and the Review photo detection
+action. This action inspects and corrects detected component envelopes; it is not
+a generation command. The AI Log is available in both modes and includes copy
+buttons for analysis and detected elements.
+
+## Installation
+
+Requirements:
+
+- Python 3.11 or newer;
+- packages listed in requirements.txt;
+- FreeCAD with freecadcmd on PATH for STEP/VRML generation;
+- KiCad 8 or newer for inspecting the generated footprint.
+
+~~~bash
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install -r requirements.txt
+~~~
+
+Create a local .env file with an OpenRouter key:
+
+~~~text
+OPENROUTER_API_KEY=your-key-here
+~~~
+
+Do not commit .env, API keys, generated output or migration backups.
+
+## Run the application
+
+~~~bash
+python main.py
+~~~
+
+The standard path keeps the first-run experience focused on documents,
+extraction and verification. Advanced user mode exposes detailed geometry
+editors and manual generation.
+
+## Output structure
+
+~~~text
 ComponentName/
-├── ComponentName.kicad_sym
 ├── ComponentName.pretty/
 │   └── ComponentName.kicad_mod
 ├── ComponentName.3dshapes/
 │   ├── ComponentName.step
-│   └── ComponentName.wrl
+│   ├── ComponentName.wrl
+│   └── ComponentName.preview.json
 └── docs/
-```
+    ├── pinout.extension
+    ├── top.extension
+    ├── front.extension
+    ├── .document-roles.json
+    └── .history/
+~~~
 
-Always verify pin numbering, pitch, row spacing, body dimensions, model orientation and mechanical clearances against the manufacturer documentation before using a generated component in a PCB.
+Generated libraries remain local until the user explicitly exports them to a
+KiCad library, keeping unverified results separate from production libraries.
 
-## Notes on estimates
+## Repository layout
 
-If the source does not provide a dimension, the generator may use a documented engineering estimate. Estimates must remain clearly identified and must not be treated as manufacturer-certified geometry.
+~~~text
+main.py                         GUI entry point
+kicadgen/core/                   KiCad data models and S-expression writers
+kicadgen/generators/             Parametric footprint generators
+kicadgen/cad3d/                 FreeCAD orchestration and 3D builders
+kicadgen/services/               AI, profiles, document roles and photo analysis
+kicadgen/gui/                    Qt desktop interface and previews
+data/analysis_profiles.sqlite3  Versioned AI profile catalog
+examples/                       Small command-line examples
+tests/                          Automated regression and GUI tests
+~~~
+
+## Testing
+
+~~~bash
+pytest
+~~~
+
+The tests cover serialization, geometry validation, AI response parsing, SQLite
+profile CRUD, guided document roles, photo review, automatic generation, 2D/3D
+preview behavior and worker lifecycle handling.
+
+## Engineering limitations
+
+- AI output can contain uncertain classifications, estimated package heights or
+  incomplete mechanical information.
+- A photograph can localize visible bodies but cannot reliably establish hidden
+  geometry, electrical identity or certified dimensions.
+- FreeCAD is required for the real STEP/VRML generation path.
+- Generated footprints and models must be checked against the source datasheet,
+  especially pin numbering, pitch, body orientation, solder clearances and 3D
+  alignment.
+- Datasheets, photographs, product markings, generated models and third-party
+  libraries may have separate copyright or usage restrictions.
+
+## Roadmap
+
+The current three-role document workflow is deliberately small and explicit.
+Future extensions can add more source roles, richer review tools, additional
+geometry families and project-level reproducibility metadata without changing
+the existing role contract.
 
 ## License
 
-No project license has been assigned yet. Add an explicit license before redistributing the code or generated libraries.
+This project is licensed under the MIT License in LICENSE.
+
+Copyright (c) 2026 Mirko Ugolini.
+
+The license applies to this project's source code and documentation. Generated
+footprints, 3D models, datasheets, images and other third-party materials may
+have separate licenses or usage restrictions and must be checked independently.

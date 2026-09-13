@@ -12,6 +12,7 @@ from .profile_dialog import icon_button, show_info
 
 
 def document_pixmap(path, size):
+    """@brief Provide the document pixmap operation for this workflow."""
     if path.suffix.lower() == '.pdf':
         try:
             from PyQt6.QtPdf import QPdfDocument
@@ -32,6 +33,7 @@ def document_pixmap(path, size):
 
 
 class GuidedDocuments(QWidget):
+    """@brief Manage the guided pinout, top-view and front-view documents."""
     changed = pyqtSignal()
 
     def __init__(self, directory, parent=None):
@@ -84,9 +86,11 @@ class GuidedDocuments(QWidget):
         self.refresh()
 
     def store(self):
+        """@brief Provide the store operation for this workflow."""
         return DocumentSet(self.directory())
 
     def refresh(self):
+        """@brief Provide the refresh operation for this workflow."""
         try:
             rows = self.store().read()['roles']
             self.status.setText('Assegna un file a ogni ruolo, oppure indica “Non disponibile”.')

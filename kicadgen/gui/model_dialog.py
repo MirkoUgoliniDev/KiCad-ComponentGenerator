@@ -44,6 +44,7 @@ class _ModelsWorker(QThread):
         self.force_refresh = force_refresh
 
     def run(self) -> None:
+        """@brief Provide the run operation for this workflow."""
         try:
             self.done.emit(list_models(force_refresh=self.force_refresh))
         except OpenRouterError as exc:
@@ -271,6 +272,7 @@ class ModelPickerDialog(QDialog):
             ok_button.setEnabled(bool(self._selected))
 
     def selected_model(self) -> str:
+        """@brief Provide the selected model operation for this workflow."""
         return self._selected
 
 

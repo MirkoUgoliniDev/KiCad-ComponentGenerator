@@ -93,6 +93,7 @@ class ComponentBox:
     terminal_geometry: Optional[dict] = None
 
     def is_usable(self) -> bool:
+        """@brief Provide the is usable operation for this workflow."""
         return self.length > 0 and self.width > 0 and self.height > 0
 
 
@@ -172,9 +173,11 @@ class CastellatedModuleParams:
     margin: float = 0.25
 
     def side_pad_length(self, side: CastellatedSide) -> float:
+        """@brief Provide the side pad length operation for this workflow."""
         return side.pad_length if side.pad_length is not None else self.pad_length
 
     def side_pad_width(self, side: CastellatedSide) -> float:
+        """@brief Provide the side pad width operation for this workflow."""
         return side.pad_width if side.pad_width is not None else self.pad_width
 
     def edge_length(self, edge: str) -> float:
@@ -182,6 +185,7 @@ class CastellatedModuleParams:
         return self.body_width if edge in ("left", "right") else self.body_length
 
     def validate(self) -> None:
+        """@brief Provide the validate operation for this workflow."""
         if not self.name.strip():
             raise ValueError("Il nome del footprint non puo' essere vuoto.")
         if self.body_length <= 0 or self.body_width <= 0:

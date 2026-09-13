@@ -34,6 +34,7 @@ HELP = (
 
 
 def icon_button(text, asset, callback):
+    """@brief Provide the icon button operation for this workflow."""
     button = QPushButton(text)
     button.setIcon(QIcon(str(ASSETS / asset)))
     button.setIconSize(QSize(20, 20))
@@ -43,6 +44,7 @@ def icon_button(text, asset, callback):
 
 
 def show_info(parent, title, text):
+    """@brief Provide the show info operation for this workflow."""
     dialog = QDialog(parent)
     dialog.setWindowTitle('Informazioni — ' + title)
     dialog.setModal(True)
@@ -63,6 +65,7 @@ def show_info(parent, title, text):
 
 
 class ProfileEditor(QDialog):
+    """@brief Edit one AI profile or the shared defaults."""
     def __init__(self, store, key='', parent=None, *, new=False):
         super().__init__(parent)
         self.store, self.key, self.new = store, key, new
@@ -213,6 +216,7 @@ class ProfileEditor(QDialog):
 
 
 class ProfilesDialog(QDialog):
+    """@brief Provide CRUD management for AI analysis profiles."""
     def __init__(self, store, parent=None):
         super().__init__(parent)
         self.store = store

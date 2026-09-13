@@ -14,6 +14,22 @@ This repository generates KiCad component libraries from mechanical and electric
 
 Run the focused test suite with `pytest`. For changes affecting geometry, run the relevant CAD/footprint tests and inspect generated output under `generated/` locally.
 
+## Documentation standard — mandatory Doxygen-compatible comments
+
+All production Python code and maintained examples must use Doxygen-compatible
+documentation. Every module, public class, public function, public method and
+Qt override must have a docstring beginning with `@brief`. Document parameters
+with `@param`, return values with `@return`, raised exceptions with `@throws`,
+and important invariants with `@note` where applicable. Private helpers may use
+short explanatory docstrings when their behavior is non-obvious.
+
+Comments must explain intent, contracts, safety boundaries or engineering
+assumptions; do not restate the implementation line by line. Keep documentation
+in English in source code, use precise units for geometry, and update the
+docstring whenever behavior, inputs, outputs or side effects change. New public
+APIs without Doxygen-compatible documentation are not complete and must not be
+merged. Run the documentation test together with the relevant functional tests.
+
 Use the project skills in `.claude/skills/` for generation and verification workflows. Use the reviewer agent for read-only audits before publishing a component.
 
 # Strategia del progetto e consegna agli agenti

@@ -94,20 +94,24 @@ class BoardFrame:
     height_px: float
 
     def to_px(self, x_mm: float, y_mm: float) -> tuple[float, float]:
+        """@brief Provide the to px operation for this workflow."""
         # Y del footprint verso il basso, come le righe dell'immagine.
         return self.cx + x_mm * self.scale, self.cy + y_mm * self.scale
 
     def to_mm(self, x_px: float, y_px: float) -> tuple[float, float]:
+        """@brief Provide the to mm operation for this workflow."""
         return (x_px - self.cx) / self.scale, (y_px - self.cy) / self.scale
 
 
 @dataclass
 class RefineReport:
+    """@brief Report terminal-refinement changes and unresolved items."""
     photo: Optional[str] = None
     measured: int = 0
     skipped: list = field(default_factory=list)
 
     def summary(self) -> str:
+        """@brief Provide the summary operation for this workflow."""
         if not self.photo:
             return "nessuna foto dall'alto utilizzabile per rifinire i componenti (bordi misurati dalla vista dall'alto: nessuna trovata)"
         text = (

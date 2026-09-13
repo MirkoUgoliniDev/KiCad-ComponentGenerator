@@ -27,6 +27,7 @@ PROMPT = (
 
 
 def tool():
+    """@brief Provide the tool operation for this workflow."""
     return {"type":"function","function":{
         "name":"locate_components", "description":"PCB component bounding boxes",
         "parameters":{"type":"object","properties":{
@@ -39,6 +40,7 @@ def tool():
 
 
 def components_from_response(data, length, width, region=(0,0,1,1)):
+    """@brief Provide the components from response operation for this workflow."""
     out=[]
     rx0,ry0,rx1,ry1=region
     for d in data.get("components",[]):
@@ -60,6 +62,7 @@ def components_from_response(data, length, width, region=(0,0,1,1)):
 
 
 def main():
+    """@brief Provide the main operation for this workflow."""
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("photo",type=Path)
     parser.add_argument("--model",required=True)

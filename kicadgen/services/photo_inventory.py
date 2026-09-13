@@ -18,6 +18,7 @@ from .openrouter import OpenRouterError
 
 @dataclass
 class InventoryResult:
+    """@brief Return the detected component inventory and analysis warnings."""
     components: list[dict] = field(default_factory=list)
     overlay_png: bytes | None = None
     photo_png: bytes | None = None
@@ -27,6 +28,7 @@ class InventoryResult:
 
 
 def detection_tool(kinds):
+    """@brief Provide the detection tool operation for this workflow."""
     properties = {
         "name": {"type": "string"},
         "kind": {"type": "string", "enum": list(kinds)},
@@ -143,6 +145,7 @@ def decode_detections(raw, region, body_length, body_width, source, log):
 
 
 def box_of(item):
+    """@brief Provide the box of operation for this workflow."""
     if "_box" in item:
         return item["_box"]
     x, y, length, width = (item[k] for k in ("x_mm", "y_mm", "length_mm", "width_mm"))
@@ -151,6 +154,7 @@ def box_of(item):
 
 
 def overlap(a, b):
+    """@brief Provide the overlap operation for this workflow."""
     ax0, ay0, ax1, ay1 = box_of(a)
     bx0, by0, bx1, by1 = box_of(b)
     intersection = max(0, min(ax1,bx1)-max(ax0,bx0))*max(0, min(ay1,by1)-max(ay0,by0))
@@ -256,6 +260,7 @@ def merge_components(groups, log=lambda message: None, containment=False):
 
 
 def prepare_photo(path, length, width, metadata=None):
+    """@brief Provide the prepare photo operation for this workflow."""
     import cv2
     import numpy as np
     from .photo_refine import find_board
@@ -282,6 +287,7 @@ def prepare_photo(path, length, width, metadata=None):
 
 
 def regions(image):
+    """@brief Provide the regions operation for this workflow."""
     h, w = image.shape[:2]
     yield "Vista completa", (0.,0.,1.,1.), image
     # Contesto extra attorno a una griglia 3x2. Il passaggio completo conserva
@@ -294,6 +300,7 @@ def regions(image):
 
 
 def image_block(image):
+    """@brief Provide the image block operation for this workflow."""
     import cv2
     if isinstance(image, bytes):
         encoded_bytes = image
@@ -308,6 +315,7 @@ def image_block(image):
 
 
 def draw_inventory(image, components, use_ids=False):
+    """@brief Provide the draw inventory operation for this workflow."""
     import cv2
     canvas = image.copy()
     h, w = canvas.shape[:2]
@@ -329,6 +337,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                       top_photo_index=None, extra_instructions=None,
                       grounding=True, cache_dir=None, classifier_model=None, mechanical=True,
                       grounding_prompt=None, verification_prompt=None, top_photo_source='AI'):
+    """@brief Provide the extract inventory operation for this workflow."""
     log = progress or (lambda message: None)
     report = InventoryResult()
     def warn(message):

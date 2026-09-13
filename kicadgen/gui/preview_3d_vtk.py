@@ -157,6 +157,7 @@ class Preview3DVtk(QtInteractor):
         self.fit_view()
 
     def clear_preview(self) -> None:
+        """@brief Provide the clear preview operation for this workflow."""
         self._reset()
         self.render()
 

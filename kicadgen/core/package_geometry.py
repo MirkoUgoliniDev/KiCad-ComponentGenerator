@@ -34,6 +34,7 @@ def _finite(value: float, name: str, positive: bool = False) -> float:
 
 @dataclass(frozen=True)
 class PinSpec:
+    """@brief Describe one package pin and its physical pad geometry."""
     number: str
     x_mm: float
     y_mm: float
@@ -47,6 +48,7 @@ class PinSpec:
     drill_mm: Optional[float] = None
 
     def validate(self) -> None:
+        """@brief Validate the object against its supported contract."""
         if not str(self.number).strip():
             raise ValueError("il numero del pin non puo' essere vuoto")
         _finite(self.x_mm, "x_mm")
@@ -68,6 +70,7 @@ class PinSpec:
 
 @dataclass
 class PackageGeometry:
+    """@brief Describe a package body and its ordered pins."""
     name: str = "Package"
     family: str = "unknown"
     body_length_mm: Optional[float] = None
@@ -82,6 +85,7 @@ class PackageGeometry:
     pins: list[PinSpec] = field(default_factory=list)
 
     def validate(self) -> None:
+        """@brief Validate the object against its supported contract."""
         if self.family not in PACKAGE_FAMILIES:
             raise ValueError(f"famiglia package non supportata: {self.family}")
         if self.source_view not in {"top", "bottom"}:

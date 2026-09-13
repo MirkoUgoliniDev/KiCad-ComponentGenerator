@@ -7,6 +7,7 @@ from .profile_dialog import icon_button, show_info
 
 
 class GenerationOptionsDialog(QDialog):
+    """@brief Edit generation options before a component is produced."""
     def __init__(self, include_nc_pins=True, parent=None, *, advanced_user=False):
         super().__init__(parent)
         self.setWindowTitle("Opzioni di generazione")
@@ -57,7 +58,9 @@ class GenerationOptionsDialog(QDialog):
         layout.addWidget(self.buttons)
 
     def include_nc_pins(self):
+        """@brief Provide the include nc pins operation for this workflow."""
         return self.include_nc_checkbox.isChecked()
 
     def advanced_user(self):
+        """@brief Provide the advanced user operation for this workflow."""
         return self.advanced_user_checkbox.isChecked()

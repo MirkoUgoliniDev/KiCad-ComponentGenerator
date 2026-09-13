@@ -20,15 +20,18 @@ MANIFEST = '.document-roles.json'
 
 
 class DocumentError(ValueError):
+    """@brief Report invalid guided-document assignments."""
     pass
 
 
 class DocumentSet:
+    """@brief Represent the canonical pinout, top and front source files."""
     def __init__(self, directory):
         self.directory = Path(directory)
         self.path = self.directory / MANIFEST
 
     def read(self):
+        """@brief Provide the read operation for this workflow."""
         if not self.path.exists():
             return {'version': 1, 'roles': {}}
         try:
@@ -73,6 +76,7 @@ class DocumentSet:
         return directory
 
     def import_file(self, role, source, *, replace=False):
+        """@brief Provide the import file operation for this workflow."""
         if role not in ROLES:
             raise DocumentError('Ruolo non riconosciuto.')
         source = Path(source)
@@ -129,6 +133,7 @@ class DocumentSet:
         return target
 
     def clear(self, role, *, unavailable=False):
+        """@brief Provide the clear operation for this workflow."""
         if role not in ROLES:
             raise DocumentError('Ruolo non riconosciuto.')
         data = self.read()
@@ -142,6 +147,7 @@ class DocumentSet:
         return archive
 
     def selected(self):
+        """@brief Provide the selected operation for this workflow."""
         rows = self.read()['roles']
         paths, roles = [], {}
         for role, label in ROLES.items():
