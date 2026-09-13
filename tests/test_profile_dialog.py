@@ -114,7 +114,7 @@ def test_manager_duplicate_disable_and_confirmed_delete(app, store, monkeypatch)
 @pytest.mark.parametrize('index', range(3))
 def test_info_buttons_route_to_correct_stage_without_changing_fields(app, store, monkeypatch, index):
     calls = []
-    monkeypatch.setattr(gui, 'show_info', lambda *args: calls.append(args))
+    monkeypatch.setattr(gui, 'show_info', lambda *args, **kwargs: calls.append(args))
     editor = gui.ProfileEditor(store, 'single_smd')
     try:
         editor.tabs.setCurrentIndex(index)

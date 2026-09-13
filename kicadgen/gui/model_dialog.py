@@ -28,6 +28,17 @@ from ..services.openrouter import ModelInfo, OpenRouterError, list_models
 _COL_ID, _COL_NAME, _COL_IN, _COL_OUT, _COL_CTX = range(5)
 
 
+def _find_i18n(widget):
+    """@brief Return the translation service owned by the nearest parent."""
+    current = widget
+    while current is not None:
+        i18n = getattr(current, "i18n", None)
+        if i18n is not None:
+            return i18n
+        current = current.parentWidget() if hasattr(current, "parentWidget") else None
+    return None
+
+
 class _ModelsWorker(QThread):
     """Scarica l'elenco modelli fuori dal thread grafico.
 
@@ -84,6 +95,7 @@ class ModelPickerDialog(QDialog):
 
     def __init__(self, current_model: Optional[str] = None, parent=None, title: str = "Scegli il modello LLM"):
         super().__init__(parent)
+        self.i18n = _find_i18n(parent)
         self.setWindowTitle(title)
         self.resize(900, 620)
 
@@ -171,6 +183,9 @@ class ModelPickerDialog(QDialog):
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
 
+        if self.i18n is not None:
+            self.i18n.retranslate_widgets(self)
+            self.spin_max_cost.setSpecialValueText(self.i18n.text("nessun limite"))
         self._update_selected_label()
         self._load_models()
 
@@ -179,7 +194,10 @@ class ModelPickerDialog(QDialog):
     def _load_models(self, force_refresh: bool = False) -> None:
         if self._worker is not None and self._worker.isRunning():
             return
-        self.label_selected.setText("Caricamento elenco modelli da OpenRouter...")
+        self.label_selected.setText(
+            self.i18n.text("Caricamento elenco modelli da OpenRouter...")
+            if self.i18n is not None else "Caricamento elenco modelli da OpenRouter..."
+        )
         self.btn_refresh.setEnabled(False)
 
         self._worker = _ModelsWorker(force_refresh)
@@ -195,7 +213,8 @@ class ModelPickerDialog(QDialog):
 
     def _on_models_error(self, message: str) -> None:
         self._update_selected_label()
-        QMessageBox.warning(self, "Elenco modelli", message)
+        title = self.i18n.text("Elenco modelli") if self.i18n is not None else "Elenco modelli"
+        QMessageBox.warning(self, title, message)
 
     def _visible_models(self) -> list[ModelInfo]:
         needle = self.field_search.text().strip().lower()
@@ -225,12 +244,16 @@ class ModelPickerDialog(QDialog):
             self.table.setItem(row, _COL_NAME, QTableWidgetItem(model.name))
             self.table.setItem(
                 row, _COL_IN,
-                _NumericItem(_price_text(model.prompt_usd_per_mtok), model.prompt_usd_per_mtok),
+                _NumericItem(
+                    _price_text(model.prompt_usd_per_mtok, self.i18n),
+                    model.prompt_usd_per_mtok,
+                ),
             )
             self.table.setItem(
                 row, _COL_OUT,
                 _NumericItem(
-                    _price_text(model.completion_usd_per_mtok), model.completion_usd_per_mtok
+                    _price_text(model.completion_usd_per_mtok, self.i18n),
+                    model.completion_usd_per_mtok,
                 ),
             )
             self.table.setItem(
@@ -264,9 +287,15 @@ class ModelPickerDialog(QDialog):
 
     def _update_selected_label(self) -> None:
         if self._selected:
-            self.label_selected.setText(f"Modello scelto: {self._selected}")
+            self.label_selected.setText(
+                self.i18n.tr("model.selected", model=self._selected)
+                if self.i18n is not None else f"Modello scelto: {self._selected}"
+            )
         else:
-            self.label_selected.setText("Nessun modello scelto.")
+            self.label_selected.setText(
+                self.i18n.text("Nessun modello scelto.")
+                if self.i18n is not None else "Nessun modello scelto."
+            )
         ok_button = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
         if ok_button is not None:
             ok_button.setEnabled(bool(self._selected))
@@ -276,10 +305,10 @@ class ModelPickerDialog(QDialog):
         return self._selected
 
 
-def _price_text(value: float) -> str:
+def _price_text(value: float, i18n=None) -> str:
     """Prezzo leggibile: 'gratis' a costo zero, altrimenti in dollari."""
     if value <= 0:
-        return "gratis"
+        return i18n.text("gratis") if i18n is not None else "gratis"
     if value < 1:
         return f"{value:.3f}"
     return f"{value:.2f}"

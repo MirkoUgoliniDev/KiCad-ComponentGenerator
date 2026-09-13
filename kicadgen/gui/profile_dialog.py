@@ -33,6 +33,17 @@ HELP = (
 )
 
 
+def _find_i18n(widget):
+    """@brief Return the translation service owned by the nearest parent."""
+    current = widget
+    while current is not None:
+        i18n = getattr(current, "i18n", None)
+        if i18n is not None:
+            return i18n
+        current = current.parentWidget() if hasattr(current, "parentWidget") else None
+    return None
+
+
 def icon_button(text, asset, callback):
     """@brief Provide the icon button operation for this workflow."""
     button = QPushButton(text)
@@ -43,21 +54,30 @@ def icon_button(text, asset, callback):
     return button
 
 
-def show_info(parent, title, text):
+def show_info(parent, title, text, *, text_key=None, **values):
     """@brief Provide the show info operation for this workflow."""
+    i18n = _find_i18n(parent)
     dialog = QDialog(parent)
-    dialog.setWindowTitle('Informazioni — ' + title)
+    dialog.setWindowTitle(
+        (i18n.text('Informazioni') + ' — ' + i18n.text(title))
+        if i18n is not None else 'Informazioni — ' + title
+    )
     dialog.setModal(True)
     dialog.resize(660, 380)
     layout = QVBoxLayout(dialog)
     editor = QTextEdit()
     editor.setReadOnly(True)
-    editor.setPlainText(text)
+    editor.setPlainText(
+        i18n.tr(text_key, default=text, **values)
+        if i18n is not None and text_key else text
+    )
     layout.addWidget(editor)
     buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
     buttons.button(QDialogButtonBox.StandardButton.Close).setText('Chiudi')
     buttons.rejected.connect(dialog.reject)
     layout.addWidget(buttons)
+    if i18n is not None:
+        i18n.retranslate_widgets(dialog)
     try:
         dialog.exec()
     finally:
@@ -68,6 +88,7 @@ class ProfileEditor(QDialog):
     """@brief Edit one AI profile or the shared defaults."""
     def __init__(self, store, key='', parent=None, *, new=False):
         super().__init__(parent)
+        self.i18n = _find_i18n(parent)
         self.store, self.key, self.new = store, key, new
         self.is_type = bool(key) or new
         self.setWindowTitle('Tipologia e profilo AI' if self.is_type else 'Default generali AI')
@@ -83,7 +104,8 @@ class ProfileEditor(QDialog):
             self.name = QLineEdit(row['label'] if row else '')
             self.family = QComboBox()
             for family, label in FAMILIES.items():
-                self.family.addItem(label, family)
+                localized = self.i18n.component_type(family, label) if self.i18n else label
+                self.family.addItem(localized, family)
             if row:
                 self.family.setCurrentIndex(self.family.findData(row['family']))
             self.active = QCheckBox('Attiva nell’elenco di importazione')
@@ -102,8 +124,12 @@ class ProfileEditor(QDialog):
             header = QHBoxLayout()
             header.addWidget(QLabel('Modello LLM:'), 1)
             info = icon_button('', 'info.svg', lambda checked=False, i=index: self._info(i))
-            info.setAccessibleName('Informazioni: ' + title)
-            info.setToolTip('Informazioni: ' + title)
+            info_label = (
+                self.i18n.tr("tooltip.info_section", section=self.i18n.text(title))
+                if self.i18n is not None else 'Informazioni: ' + title
+            )
+            info.setAccessibleName(info_label)
+            info.setToolTip(info_label)
             info.setFixedSize(32, 32)
             self.info_buttons.append(info)
             header.addWidget(info)
@@ -138,6 +164,8 @@ class ProfileEditor(QDialog):
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        if self.i18n is not None:
+            self.i18n.retranslate_widgets(self)
 
     def _add_field(self, layout, key, overrides, model=False):
         value = overrides.get(key, self.defaults[key])
@@ -194,7 +222,8 @@ class ProfileEditor(QDialog):
                   'Salva conferma le modifiche; Annulla le scarta. '
                   'La famiglia geometrica deve essere una di quelle supportate dal generatore. '
                   'Gli schemi JSON e i controlli geometrici sono gestiti dal codice, non dai prompt. '
-                  'La chiave OPENROUTER_API_KEY resta nel file .env, mai nel database.')
+                  'La chiave OPENROUTER_API_KEY resta nel file .env, mai nel database.',
+                  text_key=f'help.profile.stage.{index}')
 
     def _save(self):
         values = {}
@@ -210,7 +239,8 @@ class ProfileEditor(QDialog):
             else:
                 self.store.save_defaults(values)
         except (ProfileError, sqlite3.Error, OSError) as exc:
-            QMessageBox.warning(self, 'Profilo non salvato', str(exc))
+            title = self.i18n.text('Profilo non salvato') if self.i18n else 'Profilo non salvato'
+            QMessageBox.warning(self, title, str(exc))
             return
         self.accept()
 
@@ -219,6 +249,7 @@ class ProfilesDialog(QDialog):
     """@brief Provide CRUD management for AI analysis profiles."""
     def __init__(self, store, parent=None):
         super().__init__(parent)
+        self.i18n = _find_i18n(parent)
         self.store = store
         self.changed = False
         self.setWindowTitle('Gestione tipologie e profili AI')
@@ -256,7 +287,12 @@ class ProfilesDialog(QDialog):
     def _reload(self, key=''):
         self.list.clear()
         for data in [dict(key='', label='Default generali AI', active=True)] + self.store.list_types(True):
-            caption = data['label'] + (' — disattivata' if not data['active'] else '')
+            label = data['label']
+            if self.i18n is not None:
+                label = (self.i18n.text('Default generali AI') if not data['key']
+                         else self.i18n.component_type(data['key'], label))
+            disabled = self.i18n.text('disattivata') if self.i18n is not None else 'disattivata'
+            caption = label + (f' — {disabled}' if not data['active'] else '')
             item = QListWidgetItem(caption)
             item.setData(Qt.ItemDataRole.UserRole, data['key'])
             self.list.addItem(item)
@@ -273,11 +309,14 @@ class ProfilesDialog(QDialog):
         dialog = None
         try:
             dialog = ProfileEditor(self.store, key, self, new=new)
+            if self.i18n is not None:
+                self.i18n.retranslate_widgets(dialog)
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 self.changed = True
                 self._reload(dialog.key)
         except (ProfileError, sqlite3.Error, OSError) as exc:
-            QMessageBox.warning(self, 'Profilo non disponibile', str(exc))
+            title = self.i18n.text('Profilo non disponibile') if self.i18n else 'Profilo non disponibile'
+            QMessageBox.warning(self, title, str(exc))
         finally:
             if dialog is not None:
                 dialog.deleteLater()
@@ -295,15 +334,22 @@ class ProfilesDialog(QDialog):
                 self.changed = True
                 self._reload(key)
             except (ProfileError, sqlite3.Error, OSError) as exc:
-                QMessageBox.warning(self, 'Duplicazione non riuscita', str(exc))
+                title = self.i18n.text('Duplicazione non riuscita') if self.i18n else 'Duplicazione non riuscita'
+                QMessageBox.warning(self, title, str(exc))
 
     def _delete(self):
         key = self._key()
         if not key:
             return
-        answer = QMessageBox.question(self, 'Elimina tipologia',
-            f'Eliminare “{self.list.currentItem().text()}” e il relativo profilo custom?\n'
-            'I componenti e i file già generati non verranno modificati.',
+        type_name = self.list.currentItem().text()
+        title = self.i18n.text('Elimina tipologia') if self.i18n else 'Elimina tipologia'
+        question = (
+            self.i18n.tr('profile.delete_question', name=type_name)
+            if self.i18n else
+            f'Eliminare “{type_name}” e il relativo profilo custom?\n'
+            'I componenti e i file già generati non verranno modificati.'
+        )
+        answer = QMessageBox.question(self, title, question,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No)
         if answer != QMessageBox.StandardButton.Yes:
@@ -313,17 +359,21 @@ class ProfilesDialog(QDialog):
             self.changed = True
             self._reload()
         except (ProfileError, sqlite3.Error, OSError) as exc:
-            QMessageBox.warning(self, 'Eliminazione non riuscita', str(exc))
+            title = self.i18n.text('Eliminazione non riuscita') if self.i18n else 'Eliminazione non riuscita'
+            QMessageBox.warning(self, title, str(exc))
 
     def _backup(self):
-        path, _ = QFileDialog.getSaveFileName(self, 'Nuovo backup database', '', 'SQLite (*.sqlite3)')
+        title = self.i18n.text('Nuovo backup database') if self.i18n else 'Nuovo backup database'
+        path, _ = QFileDialog.getSaveFileName(self, title, '', 'SQLite (*.sqlite3)')
         if not path:
             return
         try:
             self.store.backup(path)
-            QMessageBox.information(self, 'Backup completato', path)
+            title = self.i18n.text('Backup completato') if self.i18n else 'Backup completato'
+            QMessageBox.information(self, title, path)
         except (ProfileError, sqlite3.Error, OSError) as exc:
-            QMessageBox.warning(self, 'Backup non riuscito', str(exc))
+            title = self.i18n.text('Backup non riuscito') if self.i18n else 'Backup non riuscito'
+            QMessageBox.warning(self, title, str(exc))
 
     def _info(self):
         show_info(self, 'Gestione profili',
@@ -331,4 +381,5 @@ class ProfilesDialog(QDialog):
             'Per disattivare una tipologia senza cancellarla, apri Modifica e togli Attiva. '
             'Ogni operazione confermata viene salvata subito in SQLite; Chiudi non annulla '
             'le operazioni già salvate. I default generali non si possono eliminare. '
-            'Per conservare una copia usa Backup DB.\n\nDatabase: ' + str(self.store.path))
+            'Per conservare una copia usa Backup DB.\n\nDatabase: ' + str(self.store.path),
+            text_key='help.profile.management', database=str(self.store.path))

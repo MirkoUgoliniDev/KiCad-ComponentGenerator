@@ -111,6 +111,60 @@ def test_startup_size_fits_available_screen(window):
     assert window.height() == min(1050, max(1, available.height() - 40))
 
 
+def test_startup_dependency_warning_is_localized_and_shown_once(
+        window, monkeypatch, tmp_path):
+    """@brief Explain missing applications without blocking application startup."""
+    from kicadgen.services.system_dependencies import ExternalApplications
+
+    kicad = tmp_path / "kicad-cli.exe"
+    kicad.write_bytes(b"")
+    monkeypatch.setattr(
+        gui, "detect_external_applications",
+        lambda: ExternalApplications(str(kicad), None),
+    )
+    captured = []
+
+    def capture(message):
+        captured.append((
+            message.windowTitle(), message.text(), message.informativeText(),
+            tuple(button.text() for button in message.buttons()),
+        ))
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec", capture)
+    window.i18n.set_language("fr")
+
+    assert window._warn_missing_external_applications()
+    assert not window._warn_missing_external_applications()
+    assert len(captured) == 1
+    title, heading, explanation, buttons = captured[0]
+    assert title == "Applications requises"
+    assert heading == "Non détectées : FreeCAD"
+    assert "KiCad détecté" in explanation
+    assert "FreeCAD non détecté" in explanation
+    assert "Continuer" in buttons
+
+
+def test_startup_dependency_warning_is_skipped_when_both_are_found(
+        window, monkeypatch, tmp_path):
+    """@brief Keep startup silent when both applications are installed."""
+    from kicadgen.services.system_dependencies import ExternalApplications
+
+    kicad = tmp_path / "kicad-cli.exe"
+    freecad = tmp_path / "freecadcmd.exe"
+    kicad.write_bytes(b"")
+    freecad.write_bytes(b"")
+    monkeypatch.setattr(
+        gui, "detect_external_applications",
+        lambda: ExternalApplications(str(kicad), str(freecad)),
+    )
+    shown = []
+    monkeypatch.setattr(QMessageBox, "exec", lambda message: shown.append(message))
+
+    assert not window._warn_missing_external_applications()
+    assert not shown
+
+
 @pytest.mark.parametrize("accept", [True, False])
 def test_generation_options_save_or_cancel(window, monkeypatch, accept):
     from PyQt6.QtCore import QTimer
@@ -586,7 +640,7 @@ def test_settings_pass_save_and_display_separate_vision_model(window, monkeypatc
     assert defaults["model"] == "vendor/new-datasheet"
     assert window._effective_model() == "vendor/session-datasheet"
     assert window._vision_model() == "vendor/new-photo"
-    assert window.combo_vision_model.currentText() == "Default: vendor/new-photo"
+    assert window.combo_vision_model.currentText() == "Predefinito: vendor/new-photo"
     assert "Modello foto: vendor/new-photo" in window.log_text.toPlainText()
 
 
@@ -633,7 +687,7 @@ def test_custom_profile_drives_geometry_family_and_worker_snapshot(window, monke
     assert window.group_castellated.isChecked()
     assert 'istruzioni specifiche' in window.field_component_prompt.toPlainText()
     assert 'note libere' in window.field_component_prompt.toPlainText()
-    assert window.combo_verification_model.currentText() == 'Default: type/verify'
+    assert window.combo_verification_model.currentText() == 'Predefinito: type/verify'
     monkeypatch.setattr(gui.ExtractWorker, 'start', lambda self: None)
     item = QListWidgetItem('board.png')
     item.setCheckState(Qt.CheckState.Checked)

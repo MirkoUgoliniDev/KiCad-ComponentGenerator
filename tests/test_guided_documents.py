@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
-from PyQt6.QtWidgets import QFileDialog, QMessageBox
+from PyQt6.QtWidgets import QFileDialog, QGroupBox, QMessageBox
 from test_photo_inventory_gui import window, gui
 from kicadgen.services.document_roles import DocumentSet
 
@@ -101,3 +101,53 @@ def test_pdf_has_first_page_thumbnail(window, tmp_path):
     card = window.guided_docs.cards['pinout']
     assert card['filename'].text() == 'pinout.pdf'
     assert not card['preview'].pixmap().isNull()
+
+
+@pytest.mark.parametrize(
+    ('language', 'unavailable', 'empty', 'load', 'component_type', 'roles', 'groups'),
+    (
+        ('it', 'Non disponibile', 'Nessun file', 'Carica…',
+         '(non specificata)',
+         ('Pinout / disposizione contatti', 'Vista superiore', 'Vista laterale'),
+         ('Cartella componente', 'Documentazione (docs/)', 'Analisi componente', 'Strumenti AI')),
+        ('en', 'Not available', 'No file', 'Load…',
+         '(not specified)',
+         ('Pinout / contact layout', 'Top view', 'Side view'),
+         ('Component folder', 'Documentation (docs/)', 'Component analysis', 'AI tools')),
+        ('fr', 'Indisponible', 'Aucun fichier', 'Charger…',
+         '(non spécifié)',
+         ('Brochage / disposition des contacts', 'Vue de dessus', 'Vue latérale'),
+         ('Dossier composant', 'Documentation (docs/)', 'Analyse du composant', 'Outils IA')),
+        ('de', 'Nicht verfügbar', 'Keine Datei', 'Laden …',
+         '(nicht angegeben)',
+         ('Pinbelegung / Kontaktanordnung', 'Draufsicht', 'Seitenansicht'),
+         ('Komponentenordner', 'Dokumentation (docs/)', 'Komponentenanalyse', 'KI-Werkzeuge')),
+    ),
+)
+def test_guided_document_cards_retranslate_after_every_refresh(
+        window, language, unavailable, empty, load, component_type, roles, groups):
+    """@brief Keep dynamic document controls in the selected UI language."""
+    window.language_combo.setCurrentIndex(window.language_combo.findData(language))
+    window._refresh_docs_list()
+
+    cards = window.guided_docs.cards
+    assert tuple(cards[role]['unavailable'].text() for role in cards) == (unavailable,) * 3
+    assert tuple(cards[role]['preview'].text() for role in cards) == (empty,) * 3
+    assert tuple(cards[role]['load'].text() for role in cards) == (load,) * 3
+    assert tuple(cards[role]['unavailable'].parentWidget().title() for role in cards) == roles
+    assert window.combo_component_type.currentText() == component_type
+    titles = {group.title() for group in window.findChildren(QGroupBox)}
+    assert set(groups) <= titles
+
+
+def test_refresh_repairs_one_stale_unavailable_checkbox(window):
+    """@brief Prevent one document card from retaining a previous language."""
+    window.language_combo.setCurrentIndex(window.language_combo.findData('fr'))
+    stale = window.guided_docs.cards['front']['unavailable']
+    stale.setText('Non disponibile')
+
+    window._refresh_docs_list()
+
+    assert tuple(
+        card['unavailable'].text() for card in window.guided_docs.cards.values()
+    ) == ('Indisponible',) * 3

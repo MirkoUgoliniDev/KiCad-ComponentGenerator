@@ -45,7 +45,7 @@ import sys
 import webbrowser
 from pathlib import Path
 
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QSize
+from PyQt6.QtCore import QThread, QTimer, pyqtSignal, Qt, QSize
 from PyQt6.QtGui import QBrush, QColor, QIcon, QPen, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
@@ -70,13 +70,14 @@ from ..generators.package import build_package
 from ..core.package_geometry import PackageGeometry, package_from_mapping
 from ..services import component_types
 from ..services.analysis_profiles import ProfileStore, ProfileError
-from ..services.i18n import I18n, LANGUAGES
+from ..services.i18n import DEFAULT_TRANSLATIONS, I18n, LANGUAGES
 from ..services.document_roles import DocumentSet, MANIFEST, SUFFIXES
 from ..services.datasheet_extractor import (
     COMPONENT_KINDS, DEFAULT_SYSTEM_PROMPT, ExtractedParams, ExtractionError,
     extract_pin_header_params,
 )
 from ..services.openrouter import DEFAULT_MODEL
+from ..services.system_dependencies import detect_external_applications
 from .app_config import CONFIG_PATH, DEFAULTS, config_path, load_config, save_config
 from .analysis_overlay import AnalysisOverlay
 from .generation_options_dialog import GenerationOptionsDialog
@@ -387,6 +388,7 @@ class MainWindow(QMainWindow):
         self._automatic_footprint_done = False
         self._automatic_3d_done = False
         self._automatic_generation_errors = []
+        self._startup_dependencies_checked = False
 
         self._build_menu()
         self._build_central()
@@ -410,7 +412,7 @@ class MainWindow(QMainWindow):
         config_menu = self.menuBar().addMenu(self.i18n.tr("app.configuration"))
         self.action_profiles = config_menu.addAction(
             QIcon(str(Path(__file__).parent / 'assets' / 'profile-edit.svg')),
-            "Gestione tipologie e profili AI...", self._edit_profiles)
+            self.i18n.text("Gestione tipologie e profili AI..."), self._edit_profiles)
         self.action_translations = config_menu.addAction(
             self.i18n.text("Manage translations..."), self._edit_translations)
         self.action_defaults = config_menu.addAction(
@@ -418,14 +420,15 @@ class MainWindow(QMainWindow):
         config_menu.addSeparator()
 
         self.action_generation_options = config_menu.addAction(
-            "Opzioni di generazione...", self._edit_generation_options)
+            self.i18n.text("Opzioni di generazione..."), self._edit_generation_options)
 
         config_menu.addSeparator()
         self.action_open_config = config_menu.addAction(self.i18n.text("Apri config.json"), self._open_config_file)
 
         help_menu = self.menuBar().addMenu(self.i18n.tr("app.help"))
-        help_menu.addAction(
-            "Apri cartella progetto tool", lambda: webbrowser.open(APP_DIR.as_uri())
+        self.action_open_tool_dir = help_menu.addAction(
+            self.i18n.text("Apri cartella progetto tool"),
+            lambda: webbrowser.open(APP_DIR.as_uri()),
         )
         help_menu.addSeparator()
         self.action_about = help_menu.addAction(self.i18n.text("About"), self._show_about)
@@ -450,7 +453,7 @@ class MainWindow(QMainWindow):
         try:
             defaults = self.profile_store.defaults()
         except (ProfileError, sqlite3.Error, OSError) as exc:
-            QMessageBox.warning(self, 'Database profili', str(exc))
+            QMessageBox.warning(self, self.i18n.text('Database profili'), str(exc))
             return
         dialog = LlmSettingsDialog(
             defaults["system_prompt"], defaults["model"], self,
@@ -469,7 +472,8 @@ class MainWindow(QMainWindow):
                 vision_model=dialog.vision_model(), verification_model=dialog.verification_model(),
                 grounding_prompt=dialog.grounding_prompt(), verification_prompt=dialog.verification_prompt()))
         except (ProfileError, sqlite3.Error, OSError) as exc:
-            QMessageBox.warning(self, "Impostazioni non salvate", str(exc))
+            QMessageBox.warning(
+                self, self.i18n.text("Impostazioni non salvate"), str(exc))
             return
         self._refresh_model_combo()
         self._append_log(
@@ -502,7 +506,9 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """@brief Provide the closeEvent operation for this workflow."""
         if self._background_work_running():
-            QMessageBox.information(self, 'Operazione in corso', 'Attendi la conclusione dell’operazione prima di chiudere.')
+            QMessageBox.information(
+                self, self.i18n.text('Operazione in corso'),
+                self.i18n.text('Attendi la conclusione dell’operazione prima di chiudere.'))
             event.ignore()
         else:
             super().closeEvent(event)
@@ -520,7 +526,7 @@ class MainWindow(QMainWindow):
                 self._reload_profile_types(update_prompt=changed_instructions)
                 self._append_log("Tipologie e profili AI aggiornati nel database SQLite.")
         except (ProfileError, sqlite3.Error, OSError) as exc:
-            QMessageBox.warning(self, 'Database profili', str(exc))
+            QMessageBox.warning(self, self.i18n.text('Database profili'), str(exc))
         finally:
             if dialog is not None:
                 dialog.deleteLater()
@@ -539,9 +545,9 @@ class MainWindow(QMainWindow):
         rows = self.profile_store.list_types()
         blocked = combo.blockSignals(True)
         combo.clear()
-        combo.addItem('(non specificata)', '')
+        combo.addItem(self.i18n.component_type('', '(non specificata)'), '')
         for row in rows:
-            combo.addItem(row['label'], row['key'])
+            combo.addItem(self.i18n.component_type(row['key'], row['label']), row['key'])
         index = combo.findData(selected)
         combo.setCurrentIndex(max(index, 0))
         combo.blockSignals(blocked)
@@ -602,10 +608,12 @@ class MainWindow(QMainWindow):
             return
         blocked = self.combo_model.blockSignals(True)
         self.combo_model.clear()
-        self.combo_model.addItem(f"Default: {self._default_model()}", None)
+        self.combo_model.addItem(
+            self.i18n.tr("model.default", model=self._default_model()), None
+        )
         if self._session_model:
             self.combo_model.addItem(
-                f"{self._session_model} (solo questa sessione)", self._session_model
+                self.i18n.tr("model.session", model=self._session_model), self._session_model
             )
             self.combo_model.setCurrentIndex(1)
         else:
@@ -615,9 +623,11 @@ class MainWindow(QMainWindow):
             combo = self.combo_vision_model
             blocked = combo.blockSignals(True)
             combo.clear()
-            combo.addItem(f"Default: {self._default_vision_model()}", None)
+            combo.addItem(
+                self.i18n.tr("model.default", model=self._default_vision_model()), None
+            )
             if self._session_vision_model:
-                combo.addItem(f"{self._session_vision_model} (solo questa sessione)",
+                combo.addItem(self.i18n.tr("model.session", model=self._session_vision_model),
                               self._session_vision_model)
                 combo.setCurrentIndex(1)
             combo.blockSignals(blocked)
@@ -625,9 +635,17 @@ class MainWindow(QMainWindow):
             combo = self.combo_verification_model
             blocked = combo.blockSignals(True)
             combo.clear()
-            combo.addItem(f"Default: {self._profile_values()['verification_model']}", None)
+            combo.addItem(
+                self.i18n.tr(
+                    "model.default", model=self._profile_values()["verification_model"]
+                ),
+                None,
+            )
             if self._session_verification_model:
-                combo.addItem(f'{self._session_verification_model} (solo questa sessione)', self._session_verification_model)
+                combo.addItem(
+                    self.i18n.tr("model.session", model=self._session_verification_model),
+                    self._session_verification_model,
+                )
                 combo.setCurrentIndex(1)
             combo.blockSignals(blocked)
 
@@ -679,12 +697,48 @@ class MainWindow(QMainWindow):
 
     def _show_about(self) -> None:
         QMessageBox.about(
-            self, "About",
-            "KiCadGen-Tool\n\n"
-            "Genera componenti KiCad (impronta 2D + modello 3D)\n"
-            "a partire da dimensioni e quote.\n\n"
-            "Modulo attivo: generatore footprint 2D (.kicad_mod)."
+            self, self.i18n.text("About"),
+            self.i18n.tr("about.description")
         )
+
+    def _warn_missing_external_applications(self) -> bool:
+        """@brief Warn once when KiCad or FreeCAD is not installed.
+
+        @return True when the warning was displayed, otherwise False.
+        """
+        if self._startup_dependencies_checked:
+            return False
+        self._startup_dependencies_checked = True
+
+        applications = detect_external_applications()
+        if not applications.missing:
+            return False
+
+        def status(name: str, path: str | None) -> str:
+            if path:
+                return self.i18n.tr(
+                    "dependencies.detected", application=name, path=path)
+            return self.i18n.tr(
+                "dependencies.not_detected", application=name)
+
+        statuses = "\n".join((
+            status("KiCad", applications.kicad_cli),
+            status("FreeCAD", applications.freecadcmd),
+        ))
+        message = QMessageBox(self)
+        message.setIcon(QMessageBox.Icon.Warning)
+        message.setWindowTitle(self.i18n.tr("dependencies.title"))
+        message.setText(self.i18n.tr(
+            "dependencies.missing", applications=", ".join(applications.missing)))
+        message.setInformativeText(self.i18n.tr(
+            "dependencies.explanation", statuses=statuses))
+        message.setTextFormat(Qt.TextFormat.PlainText)
+        message.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        continue_button = message.addButton(
+            self.i18n.text("Continua"), QMessageBox.ButtonRole.AcceptRole)
+        message.setDefaultButton(continue_button)
+        message.exec()
+        return True
 
     # ── Layout ──────────────────────────────────────────────────────
 
@@ -719,6 +773,8 @@ class MainWindow(QMainWindow):
         layout.addLayout(language_row)
 
         self.tabs = QTabWidget()
+        # Navigation tabs use stable translation keys and are refreshed explicitly.
+        self.tabs.setProperty("i18n_skip_tabs", True)
         self.tabs.addTab(project_tab, self.i18n.tr("tab.project"))
         self.tabs.addTab(footprint_tab, self.i18n.tr("tab.footprint"))
         self.tabs.addTab(generate_tab, self.i18n.tr("tab.generate"))
@@ -729,7 +785,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.tabs)
 
         self.setCentralWidget(central)
-        self.analysis_overlay = AnalysisOverlay(central)
+        self.analysis_overlay = AnalysisOverlay(central, i18n=self.i18n)
         self.analysis_overlay.log_requested.connect(self.ai_log_dialog.exec)
         self._analysis_tabs_enabled = None
         # Apply the persisted language to all catalogued widgets on first render.
@@ -748,7 +804,6 @@ class MainWindow(QMainWindow):
         self.tabs.setTabText(2, self.i18n.tr("tab.generate"))
         self.tabs.setTabText(3, self.i18n.tr("tab.preview"))
         self.tabs.setTabText(4, self.i18n.tr("tab.model3d"))
-        self.language_label.setText(self.i18n.tr("language.label"))
         self.i18n.retranslate_widgets(self)
         self.menuBar().actions()[0].setText(self.i18n.tr("app.file"))
         self.menuBar().actions()[1].setText(self.i18n.tr("app.configuration"))
@@ -761,7 +816,23 @@ class MainWindow(QMainWindow):
         self.action_defaults.setText(self.i18n.text("Default generali AI..."))
         self.action_generation_options.setText(self.i18n.text("Opzioni di generazione..."))
         self.action_open_config.setText(self.i18n.text("Apri config.json"))
+        self.action_open_tool_dir.setText(self.i18n.text("Apri cartella progetto tool"))
         self.action_about.setText(self.i18n.text("About"))
+        self._retranslate_component_types()
+        self._refresh_model_combo()
+
+    def _retranslate_component_types(self) -> None:
+        """@brief Refresh built-in component type labels without changing selection."""
+        if not hasattr(self, "combo_component_type"):
+            return
+        combo = self.combo_component_type
+        blocked = combo.blockSignals(True)
+        for index in range(combo.count()):
+            key = combo.itemData(index) or ""
+            row = self.profile_store.get_type(key) if key else None
+            fallback = row["label"] if row else "(non specificata)"
+            combo.setItemText(index, self.i18n.component_type(key, fallback))
+        combo.blockSignals(blocked)
 
     def _set_acquisition_tabs_enabled(self, enabled: bool) -> None:
         """Enable previews only after the first successful parameter acquisition."""
@@ -851,7 +922,7 @@ class MainWindow(QMainWindow):
         # Keep the old document index for compatibility, never as an AI selection UI.
         self.docs_list = QListWidget(docs_group)
         self.docs_list.hide()
-        self.guided_docs = GuidedDocuments(self._docs_dir, docs_group)
+        self.guided_docs = GuidedDocuments(self._docs_dir, docs_group, i18n=self.i18n)
         self.guided_docs.changed.connect(self._refresh_docs_list)
         docs_layout.addWidget(self.guided_docs)
         outer.addWidget(docs_group)
@@ -861,9 +932,11 @@ class MainWindow(QMainWindow):
         ai_form = QFormLayout()
 
         self.combo_component_type = QComboBox()
-        self.combo_component_type.addItem("(non specificata)", "")
+        self.combo_component_type.addItem(self.i18n.component_type("", "(non specificata)"), "")
         for component_type in self.profile_store.list_types():
-            self.combo_component_type.addItem(component_type['label'], component_type['key'])
+            self.combo_component_type.addItem(
+                self.i18n.component_type(component_type['key'], component_type['label']),
+                component_type['key'])
         self.combo_component_type.setToolTip(
             "Dice al modello che cosa sta leggendo: da questo dipende quali quote "
             "cercare nel datasheet (fori e drill per un THT, land pattern per un "
@@ -1134,7 +1207,9 @@ class MainWindow(QMainWindow):
             action = getattr(self, attr, None)
             if action is not None:
                 action.setEnabled(available)
-                action.setToolTip("" if available else "Genera prima il footprint del componente corrente")
+                action.setToolTip(
+                    "" if available else
+                    self.i18n.text("Genera prima il footprint del componente corrente"))
         return available
 
     def _on_name_changed(self, text: str) -> None:
@@ -1144,7 +1219,8 @@ class MainWindow(QMainWindow):
 
     def _browse_library_root(self) -> None:
         path = QFileDialog.getExistingDirectory(
-            self, "Scegli la cartella libreria", self.field_library_root.text()
+            self, self.i18n.text("Scegli la cartella libreria"),
+            self.field_library_root.text()
         )
         if path:
             self.field_library_root.setText(path)
@@ -1168,14 +1244,17 @@ class MainWindow(QMainWindow):
                     self.docs_list.addItem(item)
         if hasattr(self, 'guided_docs'):
             self.guided_docs.refresh()
+            if hasattr(self, 'i18n'):
+                self.i18n.retranslate_widgets(self.guided_docs)
 
     def _selected_documents(self):
         return DocumentSet(self._docs_dir()).selected()
 
     def _add_docs(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
-            self, "Seleziona documentazione (datasheet, PDF, immagini...)", "",
-            "Documenti (*.pdf *.png *.jpg *.jpeg *.txt *.md *.xlsx *.csv);;Tutti i file (*)"
+            self, self.i18n.text("Seleziona documentazione (datasheet, PDF, immagini...)"), "",
+            self.i18n.text(
+                "Documenti (*.pdf *.png *.jpg *.jpeg *.txt *.md *.xlsx *.csv);;Tutti i file (*)")
         )
         if not files:
             return
@@ -1191,8 +1270,9 @@ class MainWindow(QMainWindow):
             return
         target = self._docs_dir() / item.text()
         confirm = QMessageBox.question(
-            self, "Rimuovi file",
-            f"Eliminare definitivamente \"{item.text()}\" da {self._docs_dir()}?",
+            self, self.i18n.text("Rimuovi file"),
+            self.i18n.tr(
+                "document.delete_permanently", name=item.text(), directory=self._docs_dir()),
         )
         if confirm == QMessageBox.StandardButton.Yes:
             target.unlink(missing_ok=True)
@@ -1211,21 +1291,22 @@ class MainWindow(QMainWindow):
             doc_paths, document_roles = self._selected_documents()
         except (OSError, ValueError) as exc:
             QMessageBox.information(
-                self, "Completa la documentazione", str(exc)
+                self, self.i18n.text("Completa la documentazione"), str(exc)
             )
             return
 
         try:
             profile = self.profile_store.snapshot(self._profile_key())
         except (ProfileError, sqlite3.Error, OSError) as exc:
-            QMessageBox.warning(self, 'Profilo AI non disponibile', str(exc))
+            QMessageBox.warning(
+                self, self.i18n.text('Profilo AI non disponibile'), str(exc))
             return
 
         self.btn_extract_ai.setEnabled(False)
         self._auto_after_extraction = not self._advanced_user()
         self._auto_generation_params = None
         self._extract_finish_pending = False
-        self.btn_extract_ai.setText("Analisi in corso...")
+        self.btn_extract_ai.setText(self.i18n.text("Analisi in corso..."))
         self.ai_progress_text.clear()
         self.ai_elements_list.clear()
         self.btn_photo_comparison.setEnabled(False)
@@ -1285,7 +1366,7 @@ class MainWindow(QMainWindow):
             return
         self._hide_analysis_overlay()
         self.btn_extract_ai.setEnabled(True)
-        self.btn_extract_ai.setText("Estrai parametri con AI")
+        self.btn_extract_ai.setText(self.i18n.text("Estrai parametri con AI"))
         params = self._auto_generation_params
         self._auto_generation_params = None
         self._auto_after_extraction = False
@@ -1324,16 +1405,22 @@ class MainWindow(QMainWindow):
                     self._photo_png, self._photo_components_from_table(), length, width, self,
                 )
             except ValueError as exc:
-                QMessageBox.warning(self, "Revisione foto non disponibile", str(exc))
+                QMessageBox.warning(
+                    self, self.i18n.text("Revisione foto non disponibile"), str(exc))
                 return
-            dialog.setWindowTitle(f"Revisione componenti: {self._photo_source}")
+            dialog.setWindowTitle(
+                self.i18n.tr("photo_review.title", source=self._photo_source)
+            )
             dialog.components_applied.connect(self._apply_photo_review)
+            self.i18n.retranslate_widgets(dialog)
             dialog.exec()
             return
         if not self._photo_overlay_png:
             return
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"Ultima estrazione: {self._photo_source}")
+        dialog.setWindowTitle(
+            self.i18n.tr("photo_review.last_extraction", source=self._photo_source)
+        )
         dialog.resize(1100, 650)
         layout = QVBoxLayout(dialog)
         note = QLabel(
@@ -1349,6 +1436,7 @@ class MainWindow(QMainWindow):
         label.setPixmap(pixmap)
         area.setWidget(label)
         layout.addWidget(area)
+        self.i18n.retranslate_widgets(dialog)
         dialog.exec()
 
     def _photo_components_from_table(self) -> list[dict]:
@@ -1377,10 +1465,10 @@ class MainWindow(QMainWindow):
     def _apply_photo_review(self, components: list[dict]) -> None:
         self._set_photo_components(components)
         self._invalidate_generated_mesh()
-        self.label_3d_status.setText(
+        self.label_3d_status.setText(self.i18n.text(
             "Componenti corretti dalla foto. Modello 3D da rigenerare: "
             "premi \"Rigenera modello 3D\" per aggiornare STEP e anteprima."
-        )
+        ))
         self._append_log(f"Revisione fotografica applicata: {len(components)} componenti; 3D da rigenerare.")
 
     def _invalidate_generated_mesh(self) -> None:
@@ -1388,7 +1476,8 @@ class MainWindow(QMainWindow):
         self._model_revision += 1
         self._last_mesh_path = None
         self.preview_3d.clear_preview()
-        self.label_3d_status.setText("Dati modificati. Modello 3D da rigenerare.")
+        self.label_3d_status.setText(
+            self.i18n.text("Dati modificati. Modello 3D da rigenerare."))
 
     def _cad_result_is_current(self) -> bool:
         worker = self.sender()
@@ -1418,22 +1507,21 @@ class MainWindow(QMainWindow):
             return old_name
 
         answer = QMessageBox.question(
-            self, "Rinomina componente",
-            f"L'estrazione propone il nome \"{new_name}\" (adesso e' \"{old_name}\").\n\n"
-            f"In {old_docs} ci sono {len(files)} file di documentazione.\n"
-            "Li sposto nella cartella del nuovo nome? Se scegli No, manterrò "
-            "il nome e la cartella attuali e userò comunque i nuovi dati estratti.",
+            self, self.i18n.text("Rinomina componente"),
+            self.i18n.tr(
+                "component.rename_question", new_name=new_name, old_name=old_name,
+                directory=old_docs, count=len(files)),
         )
         if answer != QMessageBox.StandardButton.Yes:
             self._on_ai_progress(f'Rinomina non eseguita: mantenuto il progetto {old_name}. Dati AI acquisiti.')
             return old_name
 
         if (old_docs / MANIFEST).is_file() and any((new_docs / f.name).exists() for f in files):
-            message = (f'La cartella proposta “{new_name}” contiene già documenti con gli stessi nomi. '
-                       f'Mantengo il progetto corrente “{old_name}”: nessun documento spostato o sovrascritto. '
-                       'I dati AI vengono comunque acquisiti.')
+            message = self.i18n.tr(
+                'component.rename_conflict', new_name=new_name, old_name=old_name)
             self._on_ai_progress(message)
-            QMessageBox.information(self, 'Nome corrente mantenuto', message)
+            QMessageBox.information(
+                self, self.i18n.text('Nome corrente mantenuto'), message)
             return old_name
         new_docs.mkdir(parents=True, exist_ok=True)
         for f in files:
@@ -1563,7 +1651,8 @@ class MainWindow(QMainWindow):
             self._refresh_annotations_table()
 
         fillet_note = (
-            f"\n\n{len(params.edge_fillets)} fillet suggeriti dalla foto -> tab \"Modello 3D\", tabella annotazioni."
+            self.i18n.tr(
+                "extraction.fillet_note", count=len(params.edge_fillets))
             if params.edge_fillets else ""
         )
         if self._auto_after_extraction:
@@ -1571,11 +1660,11 @@ class MainWindow(QMainWindow):
             self._on_ai_progress(f'Estrazione completata. Confidenza: {params.confidence}. {params.notes or ""}{fillet_note}')
             return
         QMessageBox.information(
-            self, "Estrazione completata",
-            f"Confidenza: {params.confidence}\n\n"
-            f"{params.notes or 'Nessuna nota.'}"
-            f"{fillet_note}\n\n"
-            "Controlla i valori nel tab \"Footprint 2D\" prima di generare."
+            self, self.i18n.text("Estrazione completata"),
+            self.i18n.tr(
+                "extraction.completed", confidence=params.confidence,
+                notes=params.notes or self.i18n.text('Nessuna nota.'),
+                fillet_note=fillet_note)
         )
 
     def _apply_extracted_castellated(self, params: ExtractedParams) -> None:
@@ -1644,7 +1733,7 @@ class MainWindow(QMainWindow):
         self._auto_after_extraction = False
         self._hide_analysis_overlay()
         self._on_ai_progress(f"Estrazione fallita: {message}")
-        QMessageBox.warning(self, "Estrazione fallita", message)
+        QMessageBox.warning(self, self.i18n.text("Estrazione fallita"), message)
 
     # ── Tab 2: Footprint 2D ────────────────────────────────────────
 
@@ -2163,7 +2252,8 @@ class MainWindow(QMainWindow):
             return
 
         destination_root = QFileDialog.getExistingDirectory(
-            self, "Scegli la libreria di destinazione", str(DEFAULT_EXPORT_ROOT)
+            self, self.i18n.text("Scegli la libreria di destinazione"),
+            str(DEFAULT_EXPORT_ROOT)
         )
         if not destination_root:
             return
@@ -2175,9 +2265,8 @@ class MainWindow(QMainWindow):
 
         if target.exists():
             answer = QMessageBox.question(
-                self, "Destinazione esistente",
-                f"{target} esiste gia'.\n\nSovrascrivo i file con lo stesso nome? "
-                "(i file presenti solo nella destinazione restano)",
+                self, self.i18n.text("Destinazione esistente"),
+                self.i18n.tr("export.destination_exists", target=target),
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
@@ -2265,46 +2354,47 @@ class MainWindow(QMainWindow):
         try:
             params = self._current_params()
         except ValueError as exc:
-            self.label_summary.setText(f"<b>Errore parametri:</b> {exc}")
+            self.label_summary.setText(
+                self.i18n.tr("summary.parameter_error", error=exc))
             return
         row_spacing = params.effective_row_spacing()
         populated = (
-            f", {len(params.populated_pins)}/{params.rows * params.cols} pin popolati"
+            self.i18n.tr(
+                "summary.populated_pins", count=len(params.populated_pins),
+                total=params.rows * params.cols)
             if params.populated_pins else ""
         )
-        self.label_summary.setText(
-            f"<b>{params.name or '(nome vuoto)'}</b><br>"
-            f"Cartella: {self._project_dir()}<br>"
-            f"Griglia: {params.rows}x{params.cols}, passo {params.pitch}mm, "
-            f"distanza righe {row_spacing}mm, pad {params.pad_diameter}mm, "
-            f"drill {params.drill}mm{populated}"
-        )
+        self.label_summary.setText(self.i18n.tr(
+            "summary.pin_header", name=params.name or self.i18n.text('(nome vuoto)'),
+            folder=self._project_dir(), rows=params.rows, cols=params.cols,
+            pitch=params.pitch, row_spacing=row_spacing, pad=params.pad_diameter,
+            drill=params.drill, populated=populated))
 
     def _update_summary_castellated(self) -> None:
         params = self._current_castellated_params()
         sides = ", ".join(
-            f"{EDGE_LABELS.get(s.edge, s.edge)}: {s.count} contatti a {s.pitch}mm"
+            self.i18n.tr(
+                "summary.side", side=self.i18n.text(EDGE_LABELS.get(s.edge, s.edge)),
+                count=s.count, pitch=s.pitch)
             for s in params.sides
-        ) or "nessun lato definito"
+        ) or self.i18n.text("nessun lato definito")
         try:
             params.validate()
             error = ""
         except ValueError as exc:
-            error = f"<br><b>Errore parametri:</b> {exc}"
-        self.label_summary.setText(
-            f"<b>{params.name or '(nome vuoto)'}</b><br>"
-            f"Cartella: {self._project_dir()}<br>"
-            f"Modulo castellated {params.body_length}x{params.body_width}mm, "
-            f"pad {params.pad_length}x{params.pad_width}mm "
-            f"(sporgenza {params.pad_overhang}mm)<br>{sides}{error}"
-        )
+            error = self.i18n.tr("summary.parameter_error_line", error=exc)
+        self.label_summary.setText(self.i18n.tr(
+            "summary.castellated", name=params.name or self.i18n.text('(nome vuoto)'),
+            folder=self._project_dir(), length=params.body_length,
+            width=params.body_width, pad_length=params.pad_length,
+            pad_width=params.pad_width, overhang=params.pad_overhang,
+            sides=sides, error=error))
 
     def _automatic_generation_blocked(self, message):
-        text = (message + '\n\nNessun file generato. Integra i documenti e ripeti l’analisi, '
-                'oppure attiva Advanced user in Configurazione → Opzioni di generazione '
-                'e ripeti l’analisi per rivedere i parametri.')
+        text = self.i18n.tr("generation.blocked", reason=message)
         self._on_ai_progress('Generazione automatica non avviata: ' + message)
-        QMessageBox.warning(self, 'Generazione automatica non avviata', text)
+        QMessageBox.warning(
+            self, self.i18n.text('Generazione automatica non avviata'), text)
 
     @staticmethod
     def _validate_output_name(name):
@@ -2374,8 +2464,9 @@ class MainWindow(QMainWindow):
         existing = [str(path) for path in targets if path.exists()]
         if not existing:
             return True
-        answer = QMessageBox.question(self, 'Conferma sovrascrittura',
-            'Questi file esistono già e verranno sovrascritti:\n\n' + '\n'.join(existing),
+        answer = QMessageBox.question(
+            self, self.i18n.text('Conferma sovrascrittura'),
+            self.i18n.tr('generation.overwrite_files', files='\n'.join(existing)),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
         return answer == QMessageBox.StandardButton.Yes
 
@@ -2477,9 +2568,12 @@ class MainWindow(QMainWindow):
         elif self._automatic_footprint_done:
             self.tabs.setCurrentIndex(3)
         if self._automatic_generation_errors or not (self._automatic_footprint_done and self._automatic_3d_done):
-            details = '\n'.join(self._automatic_generation_errors) or 'La generazione non ha prodotto entrambi i risultati.'
-            prefix = 'Footprint generato, modello 3D non completato.\n' if self._automatic_footprint_done else ''
-            QMessageBox.warning(self, 'Generazione incompleta', prefix + details)
+            details = ('\n'.join(self._automatic_generation_errors)
+                       or self.i18n.text('La generazione non ha prodotto entrambi i risultati.'))
+            prefix = (self.i18n.text('Footprint generato, modello 3D non completato.') + '\n'
+                      if self._automatic_footprint_done else '')
+            QMessageBox.warning(
+                self, self.i18n.text('Generazione incompleta'), prefix + details)
         else:
             self._on_ai_progress('Footprint e modello 3D generati. Verifica le anteprime prima dell’utilizzo.')
 
@@ -2504,7 +2598,8 @@ class MainWindow(QMainWindow):
         if self._automatic_generation_active:
             self._automatic_3d_done = True
         self._append_log(f"OK (3D) -> {path}")
-        self.label_3d_status.setText(f"Modello STEP aggiornato: {path}")
+        self.label_3d_status.setText(
+            self.i18n.tr("status.step_updated", path=path))
         self._show_generated_mesh(Path(path))
 
     def _on_cad3d_error(self, message: str) -> None:
@@ -2560,7 +2655,9 @@ class MainWindow(QMainWindow):
         return tab
 
     def _show_pinout_dialog(self) -> None:
-        PinoutDialog(self.pinout, self._component_name(), self).exec()
+        dialog = PinoutDialog(self.pinout, self._component_name(), self)
+        self.i18n.retranslate_widgets(dialog)
+        dialog.exec()
 
     # ── Tab 5: Modello 3D ──────────────────────────────────────────
 
@@ -2690,7 +2787,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         # A QThread doing a network request must not be destroyed mid-request.
         if self._terminal_worker is not None and self._terminal_worker.isRunning():
-            self.label_3d_status.setText("Attendi la fine dell'analisi terminali prima di chiudere.")
+            self.label_3d_status.setText(self.i18n.text(
+                "Attendi la fine dell'analisi terminali prima di chiudere."))
             event.ignore()
             return
         super().closeEvent(event)
@@ -2707,30 +2805,33 @@ class MainWindow(QMainWindow):
         if self._extract_worker is not None and self._extract_worker.isRunning():
             return
         if not self._photo_png:
-            QMessageBox.information(self, "Foto non disponibile",
-                "Acquisisci prima i componenti dalla foto nel tab Progetto.")
+            QMessageBox.information(
+                self, self.i18n.text("Foto non disponibile"),
+                self.i18n.text("Acquisisci prima i componenti dalla foto nel tab Progetto."))
             return
         components = self._photo_components_from_table()
         if only_leads and not any(c.get('terminal_geometry') for c in components):
-            QMessageBox.information(self, "Terminali non disponibili",
-                "Usa prima Rileva terminali dalla foto. L'affinamento conserva corpo e terminali esistenti.")
+            QMessageBox.information(
+                self, self.i18n.text("Terminali non disponibili"),
+                self.i18n.text(
+                    "Usa prima Rileva terminali dalla foto. L'affinamento conserva corpo e terminali esistenti."))
             return
-        question = ("Inviare i ritagli a OpenRouter per separare reofori e saldature? "
-                    "Corpi, conteggi e ingombri restano invariati; i dettagli incerti sono conservati. "
-                    if only_leads else "Inviare i ritagli della foto a OpenRouter per osservare corpo e terminali? ")
-        if QMessageBox.question(self, "Dettaglio terminali AI",
-                question +
-                "La chiamata usa il modello selezionato e può avere un costo. "
-                "Posizioni e footprint restano invariati.") != QMessageBox.StandardButton.Yes:
+        question_key = ('terminal.confirm_leads' if only_leads
+                        else 'terminal.confirm_geometry')
+        if QMessageBox.question(
+                self, self.i18n.text("Dettaglio terminali AI"),
+                self.i18n.tr(question_key)) != QMessageBox.StandardButton.Yes:
             return
         try:
             profile = self.profile_store.snapshot(self._profile_key())
         except (ProfileError, sqlite3.Error, OSError) as exc:
-            QMessageBox.warning(self, 'Profilo AI non disponibile', str(exc))
+            QMessageBox.warning(
+                self, self.i18n.text('Profilo AI non disponibile'), str(exc))
             return
         self.btn_terminal_detail.setEnabled(False)
         self.btn_lead_refinement.setEnabled(False)
-        self.label_3d_status.setText("Analisi dei terminali nella foto in corso...")
+        self.label_3d_status.setText(
+            self.i18n.text("Analisi dei terminali nella foto in corso..."))
         worker = TerminalDetailWorker(self._photo_png, components,
                                       self._vision_model(), only_leads=only_leads,
                                       system_prompt=profile['lead_prompt' if only_leads else 'terminal_prompt'])
@@ -2754,24 +2855,23 @@ class MainWindow(QMainWindow):
                 or worker._photo_snapshot != self._photo_png
                 or worker.components != self._photo_components_from_table()):
             self._append_log("Dettaglio terminali scartato: i dati sono cambiati durante l'analisi.")
-            self.label_3d_status.setText("Dati modificati durante l'analisi: ripeti Rileva terminali.")
+            self.label_3d_status.setText(self.i18n.text(
+                "Dati modificati durante l'analisi: ripeti Rileva terminali."))
             return
         if getattr(worker, 'only_leads', False) and components == worker.components:
-            self.label_3d_status.setText(
-                "Nessun nuovo dettaglio dei reofori applicabile: geometria e anteprima conservate.")
+            self.label_3d_status.setText(self.i18n.text(
+                "Nessun nuovo dettaglio dei reofori applicabile: geometria e anteprima conservate."))
             return
         self._set_photo_components(components)
         self._invalidate_generated_mesh()
         count = sum(bool(c.get('terminal_geometry')) for c in components)
-        self.label_3d_status.setText(
-            f"{count} componenti con terminali osservati. Premi Rigenera modello 3D per applicarli. "
-            "Le geometrie non risolte restano semplificate.")
+        self.label_3d_status.setText(self.i18n.tr(
+            "status.terminals_observed", count=count))
         if getattr(worker, 'only_leads', False):
             count = sum(1 for c in components for t in (c.get('terminal_geometry') or {}).get('terminals',[])
                         if t.get('lead_detail'))
-            self.label_3d_status.setText(
-                f"{count} reofori con dettaglio separato dalla saldatura (stime AI). "
-                "Corpi e ingombri invariati. Premi Rigenera modello 3D per applicarli.")
+            self.label_3d_status.setText(self.i18n.tr(
+                "status.leads_observed", count=count))
 
     def _regenerate_3d(self) -> None:
         """Rigenera solo lo STEP con le annotazioni correnti (il footprint resta com'e')."""
@@ -2781,9 +2881,10 @@ class MainWindow(QMainWindow):
         body = self._current_body_params()
         if body is None:
             QMessageBox.information(
-                self, "Modello 3D non attivo",
-                "Attiva il gruppo \"Modello 3D\" nel tab \"Footprint 2D\" "
-                "e compila le dimensioni del corpo prima di generare."
+                self, self.i18n.text("Modello 3D non attivo"),
+                self.i18n.text(
+                    "Attiva il gruppo \"Modello 3D\" nel tab \"Footprint 2D\" "
+                    "e compila le dimensioni del corpo prima di generare.")
             )
             return
 
@@ -2795,13 +2896,16 @@ class MainWindow(QMainWindow):
             params.validate()
             body.validate()
         except ValueError as exc:
-            self.label_3d_status.setText(f"Errore parametri: {exc}")
+            self.label_3d_status.setText(
+                self.i18n.tr("status.parameter_error", error=exc))
             self._append_log(f"ERRORE 3D: {exc}")
             return
 
         self.btn_regen_3d.setEnabled(False)
-        self.btn_regen_3d.setText("Generazione in corso (FreeCAD)...")
-        self.label_3d_status.setText("Generazione STEP in corso tramite FreeCAD...")
+        self.btn_regen_3d.setText(
+            self.i18n.text("Generazione in corso (FreeCAD)..."))
+        self.label_3d_status.setText(
+            self.i18n.text("Generazione STEP in corso tramite FreeCAD..."))
         self._append_log(
             f"Rigenerazione 3D {params.name}: {len(self.fillet_annotations)} fillet, "
             f"{len(self.face_text_annotations)} testi incisi"
@@ -2820,13 +2924,15 @@ class MainWindow(QMainWindow):
 
     def _on_regen_3d_finished(self) -> None:
         self.btn_regen_3d.setEnabled(True)
-        self.btn_regen_3d.setText("Rigenera modello 3D (STEP) con queste annotazioni")
+        self.btn_regen_3d.setText(self.i18n.text(
+            "Rigenera modello 3D (STEP) con queste annotazioni"))
 
     def _on_regen_3d_done(self, path: str) -> None:
         if not self._cad_result_is_current():
             return
         self._append_log(f"OK (3D) -> {path}")
-        self.label_3d_status.setText(f"Modello STEP aggiornato: {path}")
+        self.label_3d_status.setText(
+            self.i18n.tr("status.step_updated", path=path))
         self._show_generated_mesh(Path(path))
 
     def _show_generated_mesh(self, step_path: Path) -> None:
@@ -2841,7 +2947,8 @@ class MainWindow(QMainWindow):
             self._last_mesh_path = mesh_path
             self.label_3d_status.setText(
                 f"{self.label_3d_status.text()}\n"
-                "Anteprima aggiornata con la geometria reale esportata (fillet e testo inclusi)."
+                + self.i18n.text(
+                    "Anteprima aggiornata con la geometria reale esportata (fillet e testo inclusi).")
             )
         except Exception as exc:  # noqa: BLE001 - anteprima non critica
             self._append_log(f"Anteprima mesh non disponibile: {exc}")
@@ -2850,7 +2957,8 @@ class MainWindow(QMainWindow):
         if not self._cad_result_is_current():
             return
         self._append_log(f"ERRORE 3D: {message}")
-        self.label_3d_status.setText(f"Generazione STEP fallita: {message.splitlines()[0]}")
+        self.label_3d_status.setText(self.i18n.tr(
+            "status.step_failed", error=message.splitlines()[0]))
 
     # ── Componenti del modulo (3D) ─────────────────────────────────
 
@@ -3108,7 +3216,8 @@ class MainWindow(QMainWindow):
         try:
             ann.validate()
         except ValueError as exc:
-            QMessageBox.warning(self, "Fillet non valido", str(exc))
+            QMessageBox.warning(
+                self, self.i18n.text("Fillet non valido"), str(exc))
             return
         self.fillet_annotations.append(ann)
         self._refresh_annotations_table()
@@ -3124,7 +3233,8 @@ class MainWindow(QMainWindow):
         try:
             ann.validate()
         except ValueError as exc:
-            QMessageBox.warning(self, "Testo non valido", str(exc))
+            QMessageBox.warning(
+                self, self.i18n.text("Testo non valido"), str(exc))
             return
         self.face_text_annotations.append(ann)
         self.field_annotation_text.clear()
@@ -3488,27 +3598,27 @@ class MainWindow(QMainWindow):
             if self._last_mesh_path and Path(self._last_mesh_path).is_file():
                 try:
                     self.preview_3d.render_mesh(self._last_mesh_path)
-                    self.label_3d_status.setText(
+                    self.label_3d_status.setText(self.i18n.text(
                         "Geometria reale del modulo (PCB con semi-fori sul bordo "
                         "e blocco dei componenti)."
-                    )
+                    ))
                     return
                 except Exception as exc:  # noqa: BLE001 - anteprima best-effort
                     self._append_log(f"Anteprima mesh non disponibile: {exc}")
             self.preview_3d.clear_preview()
-            self.label_3d_status.setText(
+            self.label_3d_status.setText(self.i18n.text(
                 "Attiva \"Modello 3D\" e premi \"Genera footprint\": il modello "
                 "del modulo (PCB con semi-fori + componenti) si vede qui dopo la "
                 "generazione con FreeCAD."
-            )
+            ))
             return
 
         body = self._current_body_params()
         if body is None:
             self.preview_3d.clear_preview()
-            self.label_3d_status.setText(
+            self.label_3d_status.setText(self.i18n.text(
                 "Attiva \"Modello 3D\" nel tab \"Footprint 2D\" per vedere l'anteprima qui."
-            )
+            ))
             return
 
         try:
@@ -3517,13 +3627,14 @@ class MainWindow(QMainWindow):
             self.preview_3d.render_params(params, body)
         except ValueError as exc:
             self.preview_3d.clear_preview()
-            self.label_3d_status.setText(f"Errore parametri: {exc}")
+            self.label_3d_status.setText(
+                self.i18n.tr("status.parameter_error", error=exc))
             return
 
-        self.label_3d_status.setText(
+        self.label_3d_status.setText(self.i18n.text(
             "Anteprima approssimata (poligoni, per farsi un'idea dell'ingombro). "
             "Premi \"Genera footprint\" per ottenere il modello .step esatto via FreeCAD."
-        )
+        ))
 
     # ── Cambio tab ─────────────────────────────────────────────────
 
@@ -3546,10 +3657,15 @@ def main() -> None:
     try:
         window = MainWindow()
     except (ProfileError, sqlite3.Error, OSError, ValueError) as exc:
-        QMessageBox.critical(None, 'Database profili non disponibile',
-                             f'Avvio interrotto senza ripristinare o sovrascrivere i profili.\n{exc}')
+        language = load_config().get("language", "it")
+        title = DEFAULT_TRANSLATIONS["ui:Database profili non disponibile"].get(
+            language, DEFAULT_TRANSLATIONS["ui:Database profili non disponibile"]["en"])
+        template = DEFAULT_TRANSLATIONS["startup.profile_database_error"].get(
+            language, DEFAULT_TRANSLATIONS["startup.profile_database_error"]["en"])
+        QMessageBox.critical(None, title, template.format(error=exc))
         sys.exit(1)
     window.show()
+    QTimer.singleShot(0, window._warn_missing_external_applications)
     sys.exit(app.exec())
 
 

@@ -250,6 +250,7 @@ class PhotoReviewDialog(QDialog):
     def __init__(self, photo_png: bytes, components: list[dict],
                  body_length_mm: float, body_width_mm: float, parent=None):
         super().__init__(parent)
+        self.i18n = getattr(parent, "i18n", None)
         pixmap = QPixmap()
         if not isinstance(photo_png, bytes) or not pixmap.loadFromData(photo_png, "PNG"):
             raise ValueError("A valid raw PCB crop PNG is required")
@@ -413,17 +414,17 @@ class PhotoReviewDialog(QDialog):
             for key, field in self.text_fields.items():
                 field.setText(str(selected.component.get(key, "")))
         else:
-            self.warning_label.setText("Seleziona o aggiungi un componente.")
+            self.warning_label.setText(self._tr("Seleziona o aggiungi un componente."))
         for item in self._items:
             self._refresh_item(item)
 
     def _warnings(self, item):
         warnings = []
         if not self.photo_rect.adjusted(-1e-7, -1e-7, 1e-7, 1e-7).contains(item.photo_bounds()):
-            warnings.append("Fuori dai bordi PCB: verificare posizione e dimensioni.")
+            warnings.append(self._tr("Fuori dai bordi PCB: verificare posizione e dimensioni."))
         component = item.component
         if component.get("_uncertain") or str(component.get("confidence", "")).lower() == "low":
-            warnings.append("Rilevamento incerto / bassa confidenza: verifica manuale richiesta.")
+            warnings.append(self._tr("Rilevamento incerto / bassa confidenza: verifica manuale richiesta."))
         if component.get("warnings"):
             warnings.append(str(component["warnings"]))
         return warnings
@@ -443,7 +444,7 @@ class PhotoReviewDialog(QDialog):
         item.setBrush(QBrush(fill))
         item.setZValue(2 if item.isSelected() else 1)
         item.number.setText(str(index + 1))
-        name = item.component.get("name") or item.component.get("kind") or "Componente"
+        name = item.component.get("name") or item.component.get("kind") or self._tr("Componente")
         text = f"{index + 1}. {name}" + (" [!]" if warnings else "")
         self.component_list.item(index).setText(text)
         self.component_list.item(index).setForeground(color)
@@ -451,8 +452,15 @@ class PhotoReviewDialog(QDialog):
         item.setToolTip(escape(text + ("\n" + "\n".join(warnings) if warnings else "")))
         if item.isSelected():
             if item.component.get('_height_source'):
-                warnings.append("Altezza indicativa: verificare con vista laterale o misura.")
-            self.warning_label.setText("\n".join(warnings) if warnings else "Nessun avviso per questo componente.")
+                warnings.append(self._tr("Altezza indicativa: verificare con vista laterale o misura."))
+            self.warning_label.setText(
+                "\n".join(warnings)
+                if warnings else self._tr("Nessun avviso per questo componente.")
+            )
+
+    def _tr(self, source):
+        """@brief Translate runtime status text without modifying component data."""
+        return self.i18n.text(source) if self.i18n is not None else source
 
     def _update_scene_rect(self):
         rect = QRectF(self.photo_rect)
@@ -509,7 +517,7 @@ class PhotoReviewDialog(QDialog):
                         min(self.photo_transform.body_length_mm / 2 - length / 2, center.x())))
         center.setY(max(-self.photo_transform.body_width_mm / 2 + width / 2,
                         min(self.photo_transform.body_width_mm / 2 - width / 2, center.y())))
-        component = dict(name="Nuovo componente", kind="generic", x_mm=center.x(), y_mm=center.y(),
+        component = dict(name=self._tr("Nuovo componente"), kind="generic", x_mm=center.x(), y_mm=center.y(),
                          length_mm=length, width_mm=width, height_mm=1.0, rotation_deg=0.0,
                          confidence="low", _uncertain=True)
         self._components.append(component)
