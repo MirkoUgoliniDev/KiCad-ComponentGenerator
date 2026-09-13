@@ -154,9 +154,11 @@ class ProfileStore:
                              (key, language)).fetchone()
             if row:
                 return row['text']
+            if fallback is not None:
+                return fallback
             row = db.execute('SELECT text FROM translations WHERE key=? AND language=?',
                              (key, 'en')).fetchone()
-            return row['text'] if row else (fallback if fallback is not None else key)
+            return row['text'] if row else key
 
     def save_translation(self, key, language, text):
         """@brief Create or update one translation in the catalog."""

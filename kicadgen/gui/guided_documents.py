@@ -36,9 +36,10 @@ class GuidedDocuments(QWidget):
     """@brief Manage the guided pinout, top-view and front-view documents."""
     changed = pyqtSignal()
 
-    def __init__(self, directory, parent=None):
+    def __init__(self, directory, parent=None, *, i18n=None):
         super().__init__(parent)
         self.directory = directory
+        self.i18n = i18n
         self.cards = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -48,8 +49,12 @@ class GuidedDocuments(QWidget):
         self.status.setWordWrap(True)
         top.addWidget(self.status, 1)
         top.addWidget(icon_button('', 'info.svg', self._info))
-        top.itemAt(1).widget().setAccessibleName('Informazioni caricamento guidato')
-        top.itemAt(1).widget().setToolTip('Informazioni caricamento guidato')
+        info_label = (
+            self.i18n.text('Informazioni caricamento guidato')
+            if self.i18n is not None else 'Informazioni caricamento guidato'
+        )
+        top.itemAt(1).widget().setAccessibleName(info_label)
+        top.itemAt(1).widget().setToolTip(info_label)
         layout.addLayout(top)
         row = QHBoxLayout()
         layout.addLayout(row)
@@ -62,6 +67,8 @@ class GuidedDocuments(QWidget):
             preview.setTextFormat(Qt.TextFormat.PlainText)
             column.addWidget(preview)
             filename = QLabel('—')
+            # File names are user data, never localization source strings.
+            filename.setProperty('i18n_skip', True)
             filename.setTextFormat(Qt.TextFormat.PlainText)
             filename.setWordWrap(True)
             column.addWidget(filename)
@@ -70,9 +77,16 @@ class GuidedDocuments(QWidget):
             view = icon_button('', 'docs-open.svg', lambda checked=False, r=role: self._preview(r))
             remove = icon_button('', 'docs-remove.svg', lambda checked=False, r=role: self._remove(r))
             view.setToolTip('Anteprima documento')
-            view.setAccessibleName('Anteprima: ' + label)
+            localized_label = self.i18n.text(label) if self.i18n is not None else label
+            view.setAccessibleName(
+                self.i18n.tr('tooltip.preview_role', role=localized_label)
+                if self.i18n is not None else 'Anteprima: ' + label
+            )
             remove.setToolTip('Rimuovi copia locale (recuperabile)')
-            remove.setAccessibleName('Rimuovi: ' + label)
+            remove.setAccessibleName(
+                self.i18n.tr('tooltip.remove_role', role=localized_label)
+                if self.i18n is not None else 'Rimuovi: ' + label
+            )
             actions.addWidget(load, 1)
             actions.addWidget(view)
             actions.addWidget(remove)
@@ -89,6 +103,10 @@ class GuidedDocuments(QWidget):
         """@brief Provide the store operation for this workflow."""
         return DocumentSet(self.directory())
 
+    def _tr(self, source):
+        """@brief Translate a visible source string when i18n is available."""
+        return self.i18n.text(source) if self.i18n is not None else source
+
     def refresh(self):
         """@brief Provide the refresh operation for this workflow."""
         try:
@@ -102,11 +120,21 @@ class GuidedDocuments(QWidget):
             filename = entry.get('filename')
             path = Path(self.directory()) / filename if filename else None
             exists = bool(path and path.is_file())
+            # Reset the stable source on every refresh. A card may have been
+            # refreshed after a language switch, so never trust its rendered text.
+            unavailable_text = self._tr('Non disponibile')
+            widgets['unavailable'].setText(unavailable_text)
+            widgets['unavailable'].setProperty('i18n_source', 'Non disponibile')
+            widgets['unavailable'].setProperty('i18n_rendered', unavailable_text)
             widgets['unavailable'].blockSignals(True)
             widgets['unavailable'].setChecked(entry.get('unavailable', False))
             widgets['unavailable'].blockSignals(False)
             widgets['filename'].setText(filename or ('Non disponibile' if entry.get('unavailable') else '—'))
-            widgets['filename'].setToolTip('Originale: ' + str(entry.get('original_name', '')))
+            original_name = str(entry.get('original_name', ''))
+            widgets['filename'].setToolTip(
+                self.i18n.tr('tooltip.original_name', name=original_name)
+                if self.i18n is not None else 'Originale: ' + original_name
+            )
             widgets['load'].setText('Sostituisci…' if filename else 'Carica…')
             widgets['view'].setEnabled(exists)
             widgets['remove'].setEnabled(bool(filename))
@@ -122,19 +150,38 @@ class GuidedDocuments(QWidget):
                     widgets['preview'].setText('Anteprima non disponibile')
             else:
                 widgets['preview'].setText('File mancante' if filename else 'Nessun file')
+            # These labels are state-dependent; refresh their localization source.
+            widgets['load'].setProperty('i18n_source', widgets['load'].text())
+            widgets['preview'].setProperty('i18n_source', widgets['preview'].text())
+            role_label = self._tr(ROLES[role])
+            widgets['view'].setAccessibleName(
+                self.i18n.tr('tooltip.preview_role', role=role_label)
+                if self.i18n is not None else 'Anteprima: ' + ROLES[role]
+            )
+            widgets['remove'].setAccessibleName(
+                self.i18n.tr('tooltip.remove_role', role=role_label)
+                if self.i18n is not None else 'Rimuovi: ' + ROLES[role]
+            )
         if not self.store().path.exists() and Path(self.directory()).is_dir():
             if any(p.is_file() and p.suffix.lower() in SUFFIXES for p in Path(self.directory()).iterdir()):
                 self.status.setText('Documenti precedenti conservati: usa Carica per assegnarli ai tre ruoli.')
+        self.status.setProperty('i18n_source', self.status.text())
+        if self.i18n is not None:
+            self.i18n.retranslate_widgets(self)
 
     def _load(self, role):
-        source, _ = QFileDialog.getOpenFileName(self, ROLES[role], str(self.directory()),
-            'Immagini e PDF (*.png *.jpg *.jpeg *.webp *.gif *.pdf)')
+        source, _ = QFileDialog.getOpenFileName(
+            self, self._tr(ROLES[role]), str(self.directory()),
+            self._tr('Immagini e PDF (*.png *.jpg *.jpeg *.webp *.gif *.pdf)'))
         if not source:
             return
         try:
             store = self.store()
             replace = bool(store.read()['roles'].get(role, {}).get('filename')) or (store.directory / (role + Path(source).suffix.lower())).exists()
-            if replace and QMessageBox.question(self, 'Sostituisci documento',
+            role_label = self._tr(ROLES[role])
+            if replace and QMessageBox.question(self, self._tr('Sostituisci documento'),
+                    self.i18n.tr('document.replace_question', role=role_label)
+                    if self.i18n is not None else
                     f'Sostituire il file per “{ROLES[role]}”? La copia precedente resterà in docs/.history.',
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
@@ -142,7 +189,7 @@ class GuidedDocuments(QWidget):
             store.import_file(role, source, replace=replace)
             self.changed.emit()
         except (OSError, ValueError) as exc:
-            QMessageBox.warning(self, 'Documento non caricato', str(exc))
+            QMessageBox.warning(self, self._tr('Documento non caricato'), str(exc))
         finally:
             self.refresh()
 
@@ -150,7 +197,10 @@ class GuidedDocuments(QWidget):
         try:
             store = self.store()
             if store.read()['roles'].get(role, {}).get('filename'):
-                if QMessageBox.question(self, 'Rimuovi documento',
+                role_label = self._tr(ROLES[role])
+                if QMessageBox.question(self, self._tr('Rimuovi documento'),
+                        self.i18n.tr('document.remove_question', role=role_label)
+                        if self.i18n is not None else
                         f'Rimuovere la copia locale di “{ROLES[role]}”? L’originale non verrà modificato. '
                         'La copia resterà recuperabile in docs/.history.',
                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -159,7 +209,7 @@ class GuidedDocuments(QWidget):
             store.clear(role, unavailable=unavailable)
             self.changed.emit()
         except (OSError, ValueError) as exc:
-            QMessageBox.warning(self, 'Documento non aggiornato', str(exc))
+            QMessageBox.warning(self, self._tr('Documento non aggiornato'), str(exc))
         finally:
             self.refresh()
 
@@ -175,7 +225,8 @@ class GuidedDocuments(QWidget):
             if not path.is_file():
                 raise ValueError('Il file non è più presente. Caricalo nuovamente.')
             dialog = QDialog(self)
-            dialog.setWindowTitle(f'{ROLES[role]} — {name}')
+            role_label = self.i18n.text(ROLES[role]) if self.i18n is not None else ROLES[role]
+            dialog.setWindowTitle(f'{role_label} — {name}')
             dialog.resize(900, 700)
             layout = QVBoxLayout(dialog)
             label = QLabel()
@@ -196,12 +247,14 @@ class GuidedDocuments(QWidget):
             buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
             buttons.rejected.connect(dialog.reject)
             layout.addWidget(buttons)
+            if self.i18n is not None:
+                self.i18n.retranslate_widgets(dialog)
             try:
                 dialog.exec()
             finally:
                 dialog.deleteLater()
         except (OSError, ValueError) as exc:
-            QMessageBox.warning(self, 'Anteprima non disponibile', str(exc))
+            QMessageBox.warning(self, self._tr('Anteprima non disponibile'), str(exc))
 
     def _info(self):
         show_info(self, 'Documenti per l’AI', '\n\n'.join(ROLE_HELP.values()) + '\n\n'
@@ -209,4 +262,5 @@ class GuidedDocuments(QWidget):
             'Gli originali restano invariati. Sostituzioni e rimozioni sono recuperabili in docs/.history. '
             'Per il rilevamento fotografico dei componenti, top deve essere un’immagine PNG/JPEG/WEBP. '
             'Un PDF viene letto nell’analisi generale (l’anteprima mostra la prima pagina). '
-            'L’AI riceve i ruoli esplicitamente. Le viste non disponibili non vengono sostituite con altri file.')
+            'L’AI riceve i ruoli esplicitamente. Le viste non disponibili non vengono sostituite con altri file.',
+            text_key='help.guided_documents')

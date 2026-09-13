@@ -30,8 +30,9 @@ class AnalysisOverlay(QWidget):
     """@brief Present analysis progress and expose the AI log action."""
     log_requested = pyqtSignal()
 
-    def __init__(self, parent):
+    def __init__(self, parent, *, i18n=None):
         super().__init__(parent)
+        self.i18n = i18n
         self.setObjectName("analysisOverlay")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet("""
@@ -75,6 +76,8 @@ class AnalysisOverlay(QWidget):
         self.timer.timeout.connect(self._tick)
         self.started_at = 0.0
         parent.installEventFilter(self)
+        if self.i18n is not None:
+            self.i18n.retranslate_widgets(self)
         self.hide()
 
     def eventFilter(self, watched, event):
@@ -85,7 +88,7 @@ class AnalysisOverlay(QWidget):
 
     def start(self, title='Analisi AI in corso', status='Preparazione dei documenti…'):
         """@brief Provide the start operation for this workflow."""
-        self.title.setText(title)
+        self.title.setText(self.i18n.text(title) if self.i18n is not None else title)
         self.started_at = monotonic()
         self.spinner.angle = 0
         self.set_status(status)
@@ -99,12 +102,17 @@ class AnalysisOverlay(QWidget):
     def set_status(self, message):
         """@brief Provide the set status operation for this workflow."""
         # Full messages stay in the log; keep the card stable for long replies.
-        text = " ".join(str(message).split())
+        source = " ".join(str(message).split())
+        text = self.i18n.text(source) if self.i18n is not None else source
         self.status.setText(text if len(text) <= 220 else text[:217] + "…")
 
     def _tick(self):
         seconds = max(0, int(monotonic() - self.started_at))
-        self.elapsed.setText(f"Tempo trascorso  {seconds // 60:02d}:{seconds % 60:02d}")
+        elapsed = (
+            self.i18n.tr("analysis.elapsed", time=f"{seconds // 60:02d}:{seconds % 60:02d}")
+            if self.i18n is not None else f"Tempo trascorso  {seconds // 60:02d}:{seconds % 60:02d}"
+        )
+        self.elapsed.setText(elapsed)
         self.spinner.angle = (self.spinner.angle + 9) % 360
         self.spinner.update()
 

@@ -26,7 +26,8 @@ class GenerationOptionsDialog(QDialog):
             "fisicamente presenti. Includerli permette di mantenere le relative "
             "piazzole nel footprint.\n\n"
             "L'opzione viene usata dalla prossima estrazione AI: non modifica "
-            "automaticamente i componenti già estratti o i file generati."
+            "automaticamente i componenti già estratti o i file generati.",
+            text_key='help.generation.include_nc'
         )))
         page_layout.addWidget(contacts)
         mode = QGroupBox('Modalità di utilizzo')
@@ -42,7 +43,8 @@ class GenerationOptionsDialog(QDialog):
             'Cambiare modalità non genera file e non cancella i parametri già acquisiti. '
             'La scelta viene salvata e vale dal prossimo avvio dell’analisi.\n\n'
             'Se mancano dati necessari o la geometria non supporta il 3D, la generazione '
-            'automatica si ferma. Attiva Advanced user per rivedere i dati e generare manualmente.')))
+            'automatica si ferma. Attiva Advanced user per rivedere i dati e generare manualmente.',
+            text_key='help.generation.advanced_user')))
         page_layout.addWidget(mode)
         page_layout.addStretch()
         scroll = QScrollArea()

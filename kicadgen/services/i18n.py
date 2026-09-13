@@ -9,7 +9,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PyQt6.QtWidgets import QCheckBox, QGroupBox, QLabel, QPushButton, QRadioButton, QWidget
+from PyQt6.QtWidgets import (
+    QAbstractButton,
+    QAbstractSpinBox,
+    QComboBox,
+    QDialog,
+    QGroupBox,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QPlainTextEdit,
+    QTableWidget,
+    QTabWidget,
+    QTextEdit,
+    QTreeWidget,
+    QWidget,
+)
 
 
 LANGUAGES = {
@@ -29,8 +44,79 @@ DEFAULT_TRANSLATIONS = {
     "tab.preview": {"en": "👁 Footprint preview", "it": "👁 Anteprima FootPrint", "fr": "👁 Aperçu empreinte", "de": "👁 Footprint-Vorschau"},
     "tab.model3d": {"en": "🧊 3D model", "it": "🧊 Modello 3D", "fr": "🧊 Modèle 3D", "de": "🧊 3D-Modell"},
     "language.label": {"en": "Language:", "it": "Lingua:", "fr": "Langue :", "de": "Sprache:"},
+    "component_type.none": {"en": "(not specified)", "it": "(non specificata)", "fr": "(non spécifié)", "de": "(nicht angegeben)"},
+    "component_type.single_tht": {"en": "Single through-hole component (THT)", "it": "Componente singolo a fori passanti (THT)", "fr": "Composant traversant individuel (THT)", "de": "Einzelnes Durchsteckbauteil (THT)"},
+    "component_type.single_smd": {"en": "Single SMD component", "it": "Componente singolo SMD", "fr": "Composant CMS individuel", "de": "Einzelnes SMD-Bauteil"},
+    "component_type.aggregate_tht": {"en": "Through-hole module / board", "it": "Componente aggregato a fori passanti (modulo/scheda)", "fr": "Module / carte à trous traversants", "de": "Durchsteckmodul / Platine"},
+    "component_type.aggregate_castellated": {"en": "Module with castellated half-hole pads", "it": "Componente aggregato con piazzole a mezzo foro (castellated holes)", "fr": "Module avec pastilles castellées à demi-trou", "de": "Modul mit castellated Halbloch-Pads"},
+    "model.default": {"en": "Default: {model}", "it": "Predefinito: {model}", "fr": "Par défaut : {model}", "de": "Standard: {model}"},
+    "model.session": {"en": "{model} (this session only)", "it": "{model} (solo questa sessione)", "fr": "{model} (cette session uniquement)", "de": "{model} (nur für diese Sitzung)"},
+    "model.selected": {"en": "Selected model: {model}", "it": "Modello scelto: {model}", "fr": "Modèle sélectionné : {model}", "de": "Ausgewähltes Modell: {model}"},
+    "analysis.elapsed": {"en": "Elapsed time  {time}", "it": "Tempo trascorso  {time}", "fr": "Temps écoulé  {time}", "de": "Verstrichene Zeit  {time}"},
+    "photo_review.title": {"en": "Review components: {source}", "it": "Revisione componenti: {source}", "fr": "Révision des composants : {source}", "de": "Komponenten prüfen: {source}"},
+    "photo_review.last_extraction": {"en": "Last extraction: {source}", "it": "Ultima estrazione: {source}", "fr": "Dernière extraction : {source}", "de": "Letzte Extraktion: {source}"},
+    "help.guided_documents": {
+        "en": "Use the pinout document for contacts, numbering and pinout dimensions; do not assume the drawing is a top view. Use the declared top-view image to locate component outlines on the module. Use the declared side view for heights and profile; the name front is conventional and does not certify a particular side.\n\nThe app copies files into docs using the names pinout, top and front while preserving their real extension. Originals remain unchanged; replacements and removals are recoverable from docs/.history. For photographic component detection, top must be a PNG/JPEG/WEBP image. A PDF is read during general analysis and its first page is shown in the preview. The AI receives the roles explicitly, and unavailable views are not replaced with other files.",
+        "it": "Usa il documento pinout per contatti, numerazione e quote; non assumere che il disegno sia visto dall’alto. Usa l’immagine dichiarata come vista superiore per localizzare gli ingombri dei componenti sul modulo. Usa la vista laterale dichiarata per altezze e profilo; il nome front è convenzionale e non certifica un particolare lato.\n\nL’app copia i file in docs con i nomi pinout, top e front, mantenendo l’estensione reale. Gli originali restano invariati; sostituzioni e rimozioni sono recuperabili in docs/.history. Per il rilevamento fotografico, top deve essere un’immagine PNG/JPEG/WEBP. Un PDF viene letto nell’analisi generale e l’anteprima mostra la prima pagina. L’AI riceve i ruoli esplicitamente e le viste non disponibili non vengono sostituite con altri file.",
+        "fr": "Utilisez le document de brochage pour les contacts, la numérotation et les cotes ; ne supposez pas que le dessin est une vue de dessus. Utilisez l’image déclarée comme vue de dessus pour localiser les encombrements des composants. Utilisez la vue latérale déclarée pour les hauteurs et le profil ; le nom front est conventionnel et ne certifie aucun côté particulier.\n\nL’application copie les fichiers dans docs sous les noms pinout, top et front tout en conservant leur extension réelle. Les originaux restent inchangés ; les remplacements et suppressions sont récupérables dans docs/.history. Pour la détection photo, top doit être une image PNG/JPEG/WEBP. Un PDF est lu pendant l’analyse générale et sa première page apparaît dans l’aperçu. Les rôles sont transmis explicitement à l’IA et les vues indisponibles ne sont pas remplacées par d’autres fichiers.",
+        "de": "Verwenden Sie das Pinbelegungsdokument für Kontakte, Nummerierung und Maße; nehmen Sie nicht an, dass die Zeichnung eine Draufsicht ist. Verwenden Sie das als Draufsicht angegebene Bild zur Lokalisierung der Komponentenumrisse. Die angegebene Seitenansicht dient für Höhen und Profil; der Name front ist nur eine Konvention und bestätigt keine bestimmte Seite.\n\nDie App kopiert Dateien unter den Namen pinout, top und front nach docs und behält die tatsächliche Erweiterung bei. Originale bleiben unverändert; Ersetzungen und Löschungen können aus docs/.history wiederhergestellt werden. Für die Fotoerkennung muss top ein PNG/JPEG/WEBP-Bild sein. Ein PDF wird in der allgemeinen Analyse gelesen, die Vorschau zeigt die erste Seite. Die Rollen werden der KI ausdrücklich übermittelt; nicht verfügbare Ansichten werden nicht durch andere Dateien ersetzt."
+    },
+    "help.generation.include_nc": {
+        "en": "NC pins are not electrically connected, but may be physically present. Including them preserves the corresponding pads in the footprint.\n\nThis option is used by the next AI extraction; it does not automatically change components already extracted or files already generated.",
+        "it": "I pin NC non sono collegati elettricamente, ma possono essere fisicamente presenti. Includerli permette di mantenere le relative piazzole nel footprint.\n\nL’opzione viene usata dalla prossima estrazione AI: non modifica automaticamente i componenti già estratti o i file generati.",
+        "fr": "Les broches NC ne sont pas connectées électriquement, mais peuvent être physiquement présentes. Les inclure conserve les pastilles correspondantes dans l’empreinte.\n\nCette option sera utilisée lors de la prochaine extraction IA ; elle ne modifie pas automatiquement les composants déjà extraits ni les fichiers déjà générés.",
+        "de": "NC-Pins sind elektrisch nicht angeschlossen, können aber physisch vorhanden sein. Durch das Einschließen bleiben die zugehörigen Pads im Footprint erhalten.\n\nDiese Option wird bei der nächsten KI-Extraktion verwendet; bereits extrahierte Komponenten oder erzeugte Dateien werden nicht automatisch geändert."
+    },
+    "help.generation.advanced_user": {
+        "en": "Disabled: the Footprint 2D and Generate tabs are hidden. After a valid analysis, the footprint and 3D model are generated automatically with progress and previews. Existing files require confirmation before they are overwritten.\n\nEnabled: both tabs are visible and generation remains manual. Changing mode neither generates files nor deletes acquired parameters. The choice is saved and applies from the next analysis.\n\nIf required data is missing or the geometry does not support 3D, automatic generation stops. Enable Advanced user to review the data and generate manually.",
+        "it": "Disattivato: Footprint 2D e Genera sono nascosti. Dopo un’analisi valida vengono generati automaticamente footprint e modello 3D, con avanzamento e anteprime. I file esistenti richiedono conferma prima della sovrascrittura.\n\nAttivato: i due tab sono visibili e la generazione rimane manuale. Cambiare modalità non genera file e non cancella i parametri già acquisiti. La scelta viene salvata e vale dalla prossima analisi.\n\nSe mancano dati necessari o la geometria non supporta il 3D, la generazione automatica si ferma. Attiva Utente avanzato per rivedere i dati e generare manualmente.",
+        "fr": "Désactivé : les onglets Empreinte 2D et Générer sont masqués. Après une analyse valide, l’empreinte et le modèle 3D sont générés automatiquement avec progression et aperçus. Une confirmation est demandée avant d’écraser des fichiers existants.\n\nActivé : les deux onglets sont visibles et la génération reste manuelle. Le changement de mode ne génère aucun fichier et ne supprime aucun paramètre acquis. Le choix est enregistré et s’applique dès l’analyse suivante.\n\nSi des données requises manquent ou si la géométrie ne prend pas en charge la 3D, la génération automatique s’arrête. Activez Utilisateur avancé pour vérifier les données et générer manuellement.",
+        "de": "Deaktiviert: Die Registerkarten Footprint 2D und Generieren sind ausgeblendet. Nach einer gültigen Analyse werden Footprint und 3D-Modell automatisch mit Fortschrittsanzeige und Vorschau erzeugt. Vor dem Überschreiben vorhandener Dateien ist eine Bestätigung erforderlich.\n\nAktiviert: Beide Registerkarten sind sichtbar und die Generierung bleibt manuell. Ein Moduswechsel erzeugt keine Dateien und löscht keine erfassten Parameter. Die Auswahl wird gespeichert und gilt ab der nächsten Analyse.\n\nFehlen erforderliche Daten oder unterstützt die Geometrie kein 3D, stoppt die automatische Generierung. Aktivieren Sie Erweiterter Benutzer, um die Daten zu prüfen und manuell zu generieren."
+    },
+    "help.profile.stage.0": {
+        "en": "Reads dimensions and parameters from documents. The base prompt defines the analysis behavior; type-specific instructions are added to the component prompt in the Project tab, where notes can be added for an individual extraction.\n\nGeneral defaults apply to every profile that inherits them. Clear Inherit general default to save a custom value for this type. Model choices in the Project tab apply only to the session. Save confirms changes; Cancel discards them. Geometry family must be supported by the generator. JSON schemas and geometric checks are managed by code, not prompts. OPENROUTER_API_KEY remains in .env and is never stored in the database.",
+        "it": "Legge quote e parametri dai documenti. Il prompt base definisce il comportamento dell’analisi; le istruzioni specifiche della tipologia vengono aggiunte al prompt del componente nel tab Progetto, dove puoi aggiungere note per la singola estrazione.\n\nI default generali valgono per tutti i profili che li ereditano. Togli Eredita default generale per salvare un valore personalizzato nella tipologia. Le scelte di modello nel tab Progetto valgono solo per la sessione. Salva conferma le modifiche; Annulla le scarta. La famiglia geometrica deve essere supportata dal generatore. Gli schemi JSON e i controlli geometrici sono gestiti dal codice, non dai prompt. OPENROUTER_API_KEY resta nel file .env e non viene mai salvata nel database.",
+        "fr": "Lit les cotes et paramètres dans les documents. Le prompt de base définit le comportement de l’analyse ; les instructions propres au type sont ajoutées au prompt du composant dans l’onglet Projet, où vous pouvez ajouter des notes pour une extraction.\n\nLes valeurs générales s’appliquent aux profils qui en héritent. Décochez Hériter du réglage général pour enregistrer une valeur personnalisée. Les choix de modèle de l’onglet Projet ne valent que pour la session. Enregistrer confirme les modifications ; Annuler les ignore. La famille géométrique doit être prise en charge par le générateur. Les schémas JSON et contrôles géométriques sont gérés par le code, pas par les prompts. OPENROUTER_API_KEY reste dans .env et n’est jamais enregistrée dans la base.",
+        "de": "Liest Maße und Parameter aus Dokumenten. Der Basis-Prompt bestimmt das Analyseverhalten; typspezifische Anweisungen werden dem Komponenten-Prompt in der Registerkarte Projekt hinzugefügt, wo Hinweise für eine einzelne Extraktion ergänzt werden können.\n\nAllgemeine Standards gelten für alle Profile, die sie übernehmen. Deaktivieren Sie Allgemeinen Standard übernehmen, um einen eigenen Wert für den Typ zu speichern. Modellauswahlen in Projekt gelten nur für die Sitzung. Speichern übernimmt Änderungen; Abbrechen verwirft sie. Die Geometriefamilie muss vom Generator unterstützt werden. JSON-Schemata und Geometrieprüfungen werden vom Code und nicht von Prompts verwaltet. OPENROUTER_API_KEY bleibt in .env und wird nie in der Datenbank gespeichert."
+    },
+    "help.profile.stage.1": {
+        "en": "Locates component outlines in calibrated photos. The same model is used for terminal details. Photo instructions are appended to the photographic prompts, including verification. The advanced Terminal and Lead prompts do not re-enable hidden manual actions. XY values are calibrated estimates and heights require confirmation. The cache under generated/photo-cache distinguishes input, model and prompt.\n\nGeneral defaults and profile inheritance follow the same rules as the Datasheet stage. JSON schemas and geometric checks remain controlled by code.",
+        "it": "Localizza gli ingombri nelle foto calibrate. Lo stesso modello è usato per i dettagli dei terminali. Le istruzioni foto sono aggiunte ai prompt fotografici, inclusa la verifica. I prompt tecnici Terminali e Reofori non riattivano le azioni manuali nascoste. XY sono stime calibrate e le altezze richiedono conferma. La cache in generated/photo-cache distingue input, modello e prompt.\n\nDefault generali ed ereditarietà seguono le stesse regole dello stadio Datasheet. Schemi JSON e controlli geometrici restano gestiti dal codice.",
+        "fr": "Localise les encombrements dans les photos calibrées. Le même modèle sert aux détails des bornes. Les instructions photo sont ajoutées aux prompts photographiques, y compris la vérification. Les prompts techniques Bornes et Pattes ne réactivent pas les actions manuelles masquées. Les valeurs XY sont des estimations calibrées et les hauteurs doivent être confirmées. Le cache generated/photo-cache distingue l’entrée, le modèle et le prompt.\n\nLes valeurs générales et l’héritage suivent les mêmes règles que l’étape Fiche technique. Les schémas JSON et contrôles géométriques restent gérés par le code.",
+        "de": "Lokalisiert Komponentenumrisse in kalibrierten Fotos. Dasselbe Modell wird für Anschlussdetails verwendet. Fotoanweisungen werden den Foto-Prompts einschließlich der Prüfung hinzugefügt. Die technischen Prompts Anschlüsse und Anschlussdrähte aktivieren ausgeblendete manuelle Aktionen nicht erneut. XY-Werte sind kalibrierte Schätzungen; Höhen müssen bestätigt werden. Der Cache unter generated/photo-cache unterscheidet Eingabe, Modell und Prompt.\n\nAllgemeine Standards und Vererbung folgen denselben Regeln wie beim Datenblatt. JSON-Schemata und Geometrieprüfungen bleiben unter Kontrolle des Codes."
+    },
+    "help.profile.stage.2": {
+        "en": "Confirms the presence of mounted bodies inside the proposed rectangles without moving coordinates or adding IDs. The model is independent of Datasheet and Photo localization. General defaults and profile inheritance follow the same rules as the other stages. JSON schemas and geometric checks remain controlled by code.",
+        "it": "Conferma la presenza dei corpi montati nei rettangoli proposti senza spostare coordinate né aggiungere ID. Il modello è indipendente da Datasheet e Localizzazione foto. Default generali ed ereditarietà seguono le stesse regole degli altri stadi. Schemi JSON e controlli geometrici restano gestiti dal codice.",
+        "fr": "Confirme la présence des corps montés dans les rectangles proposés sans déplacer les coordonnées ni ajouter d’ID. Le modèle est indépendant de Fiche technique et Localisation photo. Les valeurs générales et l’héritage suivent les mêmes règles que les autres étapes. Les schémas JSON et contrôles géométriques restent gérés par le code.",
+        "de": "Bestätigt vorhandene bestückte Gehäuse in den vorgeschlagenen Rechtecken, ohne Koordinaten zu verschieben oder IDs hinzuzufügen. Das Modell ist von Datenblatt und Fotolokalisierung unabhängig. Allgemeine Standards und Vererbung folgen denselben Regeln wie in den anderen Stufen. JSON-Schemata und Geometrieprüfungen bleiben unter Kontrolle des Codes."
+    },
+    "help.profile.management": {
+        "en": "Create, edit, duplicate or delete component types. To disable a type without deleting it, open Edit and clear Enable. Every confirmed operation is saved immediately to SQLite; Close does not undo saved operations. General defaults cannot be deleted. Use Back up database to keep a copy.\n\nDatabase: {database}",
+        "it": "Crea, modifica, duplica o elimina le tipologie di componente. Per disattivare una tipologia senza cancellarla, apri Modifica e togli Attiva. Ogni operazione confermata viene salvata subito in SQLite; Chiudi non annulla le operazioni già salvate. I default generali non si possono eliminare. Per conservare una copia usa Backup DB.\n\nDatabase: {database}",
+        "fr": "Créez, modifiez, dupliquez ou supprimez des types de composant. Pour désactiver un type sans le supprimer, ouvrez Modifier et décochez Activer. Chaque opération confirmée est immédiatement enregistrée dans SQLite ; Fermer n’annule pas les opérations enregistrées. Les valeurs générales ne peuvent pas être supprimées. Utilisez Sauvegarder la base pour conserver une copie.\n\nBase de données : {database}",
+        "de": "Komponententypen erstellen, bearbeiten, duplizieren oder löschen. Um einen Typ ohne Löschen zu deaktivieren, Bearbeiten öffnen und Aktivieren abwählen. Jede bestätigte Aktion wird sofort in SQLite gespeichert; Schließen macht gespeicherte Aktionen nicht rückgängig. Allgemeine Standards können nicht gelöscht werden. Mit Datenbank sichern erstellen Sie eine Kopie.\n\nDatenbank: {database}"
+    },
+    "help.settings.stage.0": {
+        "en": "Choose the model from the OpenRouter list, which can be filtered by cost. This is the general default inherited by types without an override. A more capable model can be selected in the Project tab for one session without changing this default. OPENROUTER_API_KEY is required in .env.\n\nThe system prompt is sent to the model during datasheet extraction. These general defaults are stored in SQLite and can be customized per type under Manage AI types and profiles. The returned-field schema is fixed in code and is not changed here; this ensures a valid structured JSON response.",
+        "it": "Scegli il modello dall’elenco OpenRouter, filtrabile per costo. È il default generale ereditato dalle tipologie senza override. Dal tab Progetto puoi scegliere per una sessione un modello più potente senza cambiare questo default. Serve OPENROUTER_API_KEY nel file .env.\n\nIl prompt di sistema viene inviato al modello durante l’estrazione del datasheet. Questi default generali sono salvati in SQLite e possono essere personalizzati per tipologia da Gestione tipologie e profili AI. Lo schema dei campi restituiti è fisso nel codice e non viene modificato qui; ciò garantisce una risposta JSON strutturata valida.",
+        "fr": "Choisissez le modèle dans la liste OpenRouter, filtrable par coût. Il s’agit de la valeur générale héritée par les types sans remplacement. Un modèle plus puissant peut être sélectionné dans l’onglet Projet pour une session sans modifier cette valeur. OPENROUTER_API_KEY est requis dans .env.\n\nLe prompt système est envoyé au modèle pendant l’extraction de la fiche technique. Ces valeurs générales sont enregistrées dans SQLite et peuvent être personnalisées par type dans Gérer les types et profils IA. Le schéma des champs retournés est fixé par le code et n’est pas modifié ici, afin de garantir une réponse JSON structurée valide.",
+        "de": "Wählen Sie das Modell aus der nach Kosten filterbaren OpenRouter-Liste. Dies ist der allgemeine Standard für Typen ohne Überschreibung. In der Registerkarte Projekt kann für eine Sitzung ein leistungsfähigeres Modell gewählt werden, ohne diesen Standard zu ändern. OPENROUTER_API_KEY muss in .env vorhanden sein.\n\nDer System-Prompt wird während der Datenblattextraktion an das Modell gesendet. Diese allgemeinen Standards werden in SQLite gespeichert und können unter KI-Typen und -Profile verwalten je Typ angepasst werden. Das Schema der zurückgegebenen Felder ist im Code festgelegt und wird hier nicht geändert; so bleibt eine gültige strukturierte JSON-Antwort gewährleistet."
+    },
+    "help.settings.stage.1": {
+        "en": "Photos use a dedicated model to locate components. The photo-verification model only confirms mounted bodies without moving them or identifying the circuit. Coordinate reliability depends on the model and photo quality. Responses are cached under generated/photo-cache for unchanged input, model and prompt. The 3D model uses simple unmarked bodies. XY dimensions are calibrated estimates; heights are indicative and require a side view or measurement.",
+        "it": "Le foto usano un modello dedicato alla localizzazione dei componenti. Il modello di verifica conferma soltanto i corpi montati senza spostarli o riconoscere il circuito. L’affidabilità delle coordinate dipende dal modello e dalla qualità della foto. Le risposte sono memorizzate in generated/photo-cache per input, modello e prompt invariati. Il 3D usa ingombri semplici senza scritte. Le quote XY sono stime calibrate; le altezze sono indicative e richiedono una vista laterale o una misura.",
+        "fr": "Les photos utilisent un modèle dédié à la localisation des composants. Le modèle de vérification confirme uniquement les corps montés, sans les déplacer ni identifier le circuit. La fiabilité des coordonnées dépend du modèle et de la qualité de la photo. Les réponses sont mises en cache dans generated/photo-cache lorsque l’entrée, le modèle et le prompt sont inchangés. Le modèle 3D utilise des volumes simples sans marquage. Les cotes XY sont des estimations calibrées ; les hauteurs sont indicatives et nécessitent une vue latérale ou une mesure.",
+        "de": "Für Fotos wird ein eigenes Modell zur Lokalisierung von Komponenten verwendet. Das Fotoprüfungsmodell bestätigt nur bestückte Gehäuse, ohne sie zu verschieben oder die Schaltung zu erkennen. Die Zuverlässigkeit der Koordinaten hängt von Modell und Fotoqualität ab. Antworten werden bei unveränderter Eingabe, Modell und Prompt unter generated/photo-cache zwischengespeichert. Das 3D-Modell verwendet einfache unbeschriftete Körper. XY-Maße sind kalibrierte Schätzungen; Höhen sind Richtwerte und benötigen eine Seitenansicht oder Messung."
+    },
+    "help.settings.stage.2": {
+        "en": "Confirms only the presence of mounted bodies in the proposed rectangles. It does not change coordinates or add IDs. It uses an independent model, including any session-specific verification selection. The JSON schema and geometric checks remain managed by code.",
+        "it": "Conferma solo la presenza dei corpi montati nei rettangoli proposti. Non modifica coordinate né aggiunge ID. Usa un modello indipendente, inclusa l’eventuale scelta di verifica per la sessione. Lo schema JSON e i controlli geometrici restano gestiti dal codice.",
+        "fr": "Confirme uniquement la présence des corps montés dans les rectangles proposés. Ne modifie pas les coordonnées et n’ajoute aucun ID. Utilise un modèle indépendant, y compris une éventuelle sélection propre à la session. Le schéma JSON et les contrôles géométriques restent gérés par le code.",
+        "de": "Bestätigt nur bestückte Gehäuse in den vorgeschlagenen Rechtecken. Koordinaten werden nicht geändert und IDs nicht hinzugefügt. Verwendet ein unabhängiges Modell einschließlich einer sitzungsspezifischen Prüfauswahl. JSON-Schema und Geometrieprüfungen bleiben unter Kontrolle des Codes."
+    },
     "ui:Lingua:": {"en": "Language:", "it": "Lingua:", "fr": "Langue :", "de": "Sprache:"},
-    "ui:Cartella componente": {"en": "Component folder", "it": "Cartella componente", "fr": "Dossier composant", "de": "Komponentenordner"},
+    "ui:Cartella componente:": {"en": "Component folder:", "it": "Cartella componente:", "fr": "Dossier du composant :", "de": "Komponentenordner:"},
     "ui:Documentazione (docs/)": {"en": "Documentation (docs/)", "it": "Documentazione (docs/)", "fr": "Documentation (docs/)", "de": "Dokumentation (docs/)"},
     "ui:Analisi componente": {"en": "Component analysis", "it": "Analisi componente", "fr": "Analyse du composant", "de": "Komponentenanalyse"},
     "ui:Strumenti AI": {"en": "AI tools", "it": "Strumenti AI", "fr": "Outils IA", "de": "KI-Werkzeuge"},
@@ -53,8 +139,6 @@ DEFAULT_TRANSLATIONS = {
     "ui:Vista:": {"en": "View:", "it": "Vista:", "fr": "Vue :", "de": "Ansicht:"},
     "ui:Centra": {"en": "Fit", "it": "Centra", "fr": "Centrer", "de": "Zentrieren"},
     "ui:Tabella pinout...": {"en": "Pinout table...", "it": "Tabella pinout...", "fr": "Table de brochage…", "de": "Pinbelegungstabelle …"},
-    "ui:Vista superiore": {"en": "Top view", "it": "Vista superiore", "fr": "Vue de dessus", "de": "Draufsicht"},
-    "ui:Vista laterale": {"en": "Side view", "it": "Vista laterale", "fr": "Vue latérale", "de": "Seitenansicht"},
     "ui:Modello 3D (opzionale, richiede FreeCAD installato)": {"en": "3D model (optional, requires FreeCAD)", "it": "Modello 3D (opzionale, richiede FreeCAD installato)", "fr": "Modèle 3D (optionnel, FreeCAD requis)", "de": "3D-Modell (optional, FreeCAD erforderlich)"},
     "ui:Modulo castellated (piazzole a mezzo foro sul bordo)": {"en": "Castellated module (half-hole edge pads)", "it": "Modulo castellated (piazzole a mezzo foro sul bordo)", "fr": "Module castellated (pastilles demi-trou sur le bord)", "de": "Castellated-Modul (Halbloch-Pads am Rand)"},
     "ui:Aggiungi lato": {"en": "Add side", "it": "Aggiungi lato", "fr": "Ajouter un côté", "de": "Seite hinzufügen"},
@@ -104,15 +188,351 @@ DEFAULT_TRANSLATIONS = {
     "ui:Vista laterale": {"en": "Side view", "it": "Vista laterale", "fr": "Vue latérale", "de": "Seitenansicht"},
     "ui:Nessun file": {"en": "No file", "it": "Nessun file", "fr": "Aucun fichier", "de": "Keine Datei"},
     "ui:Carica...": {"en": "Load...", "it": "Carica...", "fr": "Charger…", "de": "Laden …"},
-    "ui:Non disponibile": {"en": "Not available", "it": "Non disponibile", "fr": "Non disponible", "de": "Nicht verfügbar"},
-    "ui:Analisi componente": {"en": "Component analysis", "it": "Analisi componente", "fr": "Analyse du composant", "de": "Komponentenanalyse"},
-    "ui:Strumenti AI": {"en": "AI tools", "it": "Strumenti AI", "fr": "Outils IA", "de": "KI-Werkzeuge"},
+    "ui:Carica…": {"en": "Load…", "it": "Carica…", "fr": "Charger…", "de": "Laden …"},
+    "ui:Sostituisci…": {"en": "Replace…", "it": "Sostituisci…", "fr": "Remplacer…", "de": "Ersetzen …"},
+    "ui:Non disponibile": {"en": "Not available", "it": "Non disponibile", "fr": "Indisponible", "de": "Nicht verfügbar"},
     "ui:Type di componente:": {"en": "Component type:", "it": "Type di componente:", "fr": "Type de composant :", "de": "Komponententyp:"},
-    "ui:Informazioni sulla cartella componente": {"en": "Component folder information", "it": "Informazioni sulla cartella componente", "fr": "Informations sur le dossier du composant", "de": "Informationen zum Komponentenordner"},
-    "ui:Log analisi AI": {"en": "AI analysis log", "it": "Log analisi AI", "fr": "Journal d’analyse IA", "de": "KI-Analyseprotokoll"},
     "ui:Prompt specifico del componente": {"en": "Component-specific prompt", "it": "Prompt specifico del componente", "fr": "Prompt spécifique au composant", "de": "Komponentenspezifischer Prompt"},
     "ui:Riepilogo della generazione": {"en": "Generation summary", "it": "Riepilogo della generazione", "fr": "Résumé de la génération", "de": "Zusammenfassung der Generierung"},
-    "ui:Revisione componenti da foto": {"en": "Review components from photo", "it": "Revisione componenti da foto", "fr": "Réviser les composants de la photo", "de": "Komponenten aus Foto prüfen"},
+    "ui:Da caricare": {"en": "To be loaded", "it": "Da caricare", "fr": "À charger", "de": "Noch zu laden"},
+    "ui:File mancante": {"en": "Missing file", "it": "File mancante", "fr": "Fichier manquant", "de": "Fehlende Datei"},
+    "ui:Anteprima non disponibile": {"en": "Preview not available", "it": "Anteprima non disponibile", "fr": "Aperçu indisponible", "de": "Vorschau nicht verfügbar"},
+    "ui:Anteprima documento": {"en": "Preview document", "it": "Anteprima documento", "fr": "Aperçu du document", "de": "Dokumentvorschau"},
+    "ui:Rimuovi copia locale (recuperabile)": {"en": "Remove local copy (recoverable)", "it": "Rimuovi copia locale (recuperabile)", "fr": "Supprimer la copie locale (récupérable)", "de": "Lokale Kopie entfernen (wiederherstellbar)"},
+    "ui:Informazioni caricamento guidato": {"en": "Guided upload information", "it": "Informazioni caricamento guidato", "fr": "Informations sur le chargement guidé", "de": "Informationen zum geführten Laden"},
+    "ui:Apri file completo": {"en": "Open full file", "it": "Apri file completo", "fr": "Ouvrir le fichier complet", "de": "Vollständige Datei öffnen"},
+    "ui:Dati del componente": {"en": "Component data", "it": "Dati del componente", "fr": "Données du composant", "de": "Komponentendaten"},
+    "ui:Nome (da tab Progetto):": {"en": "Name (from Project tab):", "it": "Nome (da tab Progetto):", "fr": "Nom (depuis l’onglet Projet) :", "de": "Name (aus Registerkarte Projekt):"},
+    "ui:Descrizione:": {"en": "Description:", "it": "Descrizione:", "fr": "Description :", "de": "Beschreibung:"},
+    "ui:Tag:": {"en": "Tags:", "it": "Tag:", "fr": "Étiquettes :", "de": "Tags:"},
+    "ui:Righe:": {"en": "Rows:", "it": "Righe:", "fr": "Rangées :", "de": "Reihen:"},
+    "ui:Colonne:": {"en": "Columns:", "it": "Colonne:", "fr": "Colonnes :", "de": "Spalten:"},
+    "ui:Passo (pitch, tra pin nella riga):": {"en": "Pitch (between pins in a row):", "it": "Passo (pitch, tra pin nella riga):", "fr": "Pas (entre broches d’une rangée) :", "de": "Rastermaß (zwischen Pins einer Reihe):"},
+    "ui:Distanza tra righe:": {"en": "Row spacing:", "it": "Distanza tra righe:", "fr": "Espacement des rangées :", "de": "Reihenabstand:"},
+    "ui:Pin popolati:": {"en": "Populated pins:", "it": "Pin popolati:", "fr": "Broches présentes :", "de": "Bestückte Pins:"},
+    "ui:Diametro pad:": {"en": "Pad diameter:", "it": "Diametro pad:", "fr": "Diamètre de pastille :", "de": "Pad-Durchmesser:"},
+    "ui:Drill:": {"en": "Drill:", "it": "Drill:", "fr": "Perçage :", "de": "Bohrung:"},
+    "ui:Lunghezza corpo:": {"en": "Body length:", "it": "Lunghezza corpo:", "fr": "Longueur du corps :", "de": "Gehäuselänge:"},
+    "ui:Larghezza corpo:": {"en": "Body width:", "it": "Larghezza corpo:", "fr": "Largeur du corps :", "de": "Gehäusebreite:"},
+    "ui:Altezza corpo:": {"en": "Body height:", "it": "Altezza corpo:", "fr": "Hauteur du corps :", "de": "Gehäusehöhe:"},
+    "ui:Lunghezza pad:": {"en": "Pad length:", "it": "Lunghezza pad:", "fr": "Longueur de pastille :", "de": "Pad-Länge:"},
+    "ui:Larghezza pad:": {"en": "Pad width:", "it": "Larghezza pad:", "fr": "Largeur de pastille :", "de": "Pad-Breite:"},
+    "ui:Sporgenza pad dal bordo:": {"en": "Pad projection from edge:", "it": "Sporgenza pad dal bordo:", "fr": "Dépassement de pastille du bord :", "de": "Pad-Überstand am Rand:"},
+    "ui:Diametro semi-foro (3D):": {"en": "Half-hole diameter (3D):", "it": "Diametro semi-foro (3D):", "fr": "Diamètre du demi-trou (3D) :", "de": "Halbloch-Durchmesser (3D):"},
+    "ui:Spessore PCB (3D):": {"en": "PCB thickness (3D):", "it": "Spessore PCB (3D):", "fr": "Épaisseur du PCB (3D) :", "de": "PCB-Dicke (3D):"},
+    "ui:Rientro componenti (3D):": {"en": "Component inset (3D):", "it": "Rientro componenti (3D):", "fr": "Retrait des composants (3D) :", "de": "Komponentenrücksprung (3D):"},
+    "ui:Offset X (da pin 1):": {"en": "X offset (from pin 1):", "it": "Offset X (da pin 1):", "fr": "Décalage X (depuis la broche 1) :", "de": "X-Versatz (ab Pin 1):"},
+    "ui:Offset Y (da riga pin):": {"en": "Y offset (from pin row):", "it": "Offset Y (da riga pin):", "fr": "Décalage Y (depuis la rangée) :", "de": "Y-Versatz (ab Pin-Reihe):"},
+    "ui:Lunghezza pin (3D):": {"en": "Pin length (3D):", "it": "Lunghezza pin (3D):", "fr": "Longueur de broche (3D) :", "de": "Pin-Länge (3D):"},
+    "ui:Colore corpo:": {"en": "Body color:", "it": "Colore corpo:", "fr": "Couleur du corps :", "de": "Gehäusefarbe:"},
+    "ui:Colore pin:": {"en": "Pin color:", "it": "Colore pin:", "fr": "Couleur des broches :", "de": "Pin-Farbe:"},
+    "ui:Generale": {"en": "General", "it": "Generale", "fr": "Général", "de": "Allgemein"},
+    "ui:Matrice THT": {"en": "THT matrix", "it": "Matrice THT", "fr": "Matrice THT", "de": "THT-Matrix"},
+    "ui:Modulo castellated": {"en": "Castellated module", "it": "Modulo castellated", "fr": "Module castellé", "de": "Castellated-Modul"},
+    "ui:Parametri 3D": {"en": "3D parameters", "it": "Parametri 3D", "fr": "Paramètres 3D", "de": "3D-Parameter"},
+    "ui:Griglia": {"en": "Grid", "it": "Griglia", "fr": "Grille", "de": "Raster"},
+    "ui:Numeri pin (vista da sotto)": {"en": "Pin numbers (bottom view)", "it": "Numeri pin (vista da sotto)", "fr": "Numéros de broches (vue de dessous)", "de": "Pin-Nummern (Ansicht von unten)"},
+    "ui:Iso": {"en": "Iso", "it": "Iso", "fr": "Iso", "de": "Iso"},
+    "ui:Sopra": {"en": "Top", "it": "Sopra", "fr": "Dessus", "de": "Oben"},
+    "ui:Sotto": {"en": "Bottom", "it": "Sotto", "fr": "Dessous", "de": "Unten"},
+    "ui:Fronte": {"en": "Front", "it": "Fronte", "fr": "Avant", "de": "Vorne"},
+    "ui:Retro": {"en": "Back", "it": "Retro", "fr": "Arrière", "de": "Hinten"},
+    "ui:Sinistra": {"en": "Left", "it": "Sinistra", "fr": "Gauche", "de": "Links"},
+    "ui:Destra": {"en": "Right", "it": "Destra", "fr": "Droite", "de": "Rechts"},
+    "ui:Log:": {"en": "Log:", "it": "Log:", "fr": "Journal :", "de": "Protokoll:"},
+    "ui:Analisi AI in corso": {"en": "AI analysis in progress", "it": "Analisi AI in corso", "fr": "Analyse IA en cours", "de": "KI-Analyse läuft"},
+    "ui:Apri log AI": {"en": "Open AI log", "it": "Apri log AI", "fr": "Ouvrir le journal IA", "de": "KI-Protokoll öffnen"},
+    "ui:Preparazione dei documenti…": {"en": "Preparing documents…", "it": "Preparazione dei documenti…", "fr": "Préparation des documents…", "de": "Dokumente werden vorbereitet …"},
+    "ui:Generazione footprint e modello 3D": {"en": "Generating footprint and 3D model", "it": "Generazione footprint e modello 3D", "fr": "Génération de l’empreinte et du modèle 3D", "de": "Footprint und 3D-Modell werden erzeugt"},
+    "ui:Preparazione della generazione…": {"en": "Preparing generation…", "it": "Preparazione della generazione…", "fr": "Préparation de la génération…", "de": "Generierung wird vorbereitet …"},
+    "ui:≡ Log AI": {"en": "≡ AI log", "it": "≡ Log AI", "fr": "≡ Journal IA", "de": "≡ KI-Protokoll"},
+    "ui:Azioni analisi": {"en": "Analysis actions", "it": "Azioni analisi", "fr": "Actions de l’analyse", "de": "Analyseschritte"},
+    "ui:Elementi rilevati": {"en": "Detected items", "it": "Elementi rilevati", "fr": "Éléments détectés", "de": "Erkannte Elemente"},
+    "ui:Advanced user": {"en": "Advanced user", "it": "Utente avanzato", "fr": "Utilisateur avancé", "de": "Erweiterter Benutzer"},
+    "ui:Nome:": {"en": "Name:", "it": "Nome:", "fr": "Nom :", "de": "Name:"},
+    "ui:Famiglia geometrica:": {"en": "Geometry family:", "it": "Famiglia geometrica:", "fr": "Famille géométrique :", "de": "Geometriefamilie:"},
+    "ui:Attiva nell’elenco di importazione": {"en": "Enable in import list", "it": "Attiva nell’elenco di importazione", "fr": "Activer dans la liste d’importation", "de": "In Importliste aktivieren"},
+    "ui:Eredita default generale": {"en": "Inherit general default", "it": "Eredita default generale", "fr": "Hériter du réglage général", "de": "Allgemeinen Standard übernehmen"},
+    "ui:Prompt base": {"en": "Base prompt", "it": "Prompt base", "fr": "Prompt de base", "de": "Basis-Prompt"},
+    "ui:Istruzioni foto": {"en": "Photo instructions", "it": "Istruzioni foto", "fr": "Instructions photo", "de": "Fotoanweisungen"},
+    "ui:Terminali": {"en": "Terminals", "it": "Terminali", "fr": "Bornes", "de": "Anschlüsse"},
+    "ui:Reofori": {"en": "Leads", "it": "Reofori", "fr": "Pattes", "de": "Anschlussdrähte"},
+    "ui:Nuova": {"en": "New", "it": "Nuova", "fr": "Nouveau", "de": "Neu"},
+    "ui:Modifica": {"en": "Edit", "it": "Modifica", "fr": "Modifier", "de": "Bearbeiten"},
+    "ui:Duplica": {"en": "Duplicate", "it": "Duplica", "fr": "Dupliquer", "de": "Duplizieren"},
+    "ui:Elimina": {"en": "Delete", "it": "Elimina", "fr": "Supprimer", "de": "Löschen"},
+    "ui:Backup DB…": {"en": "Back up database…", "it": "Backup DB…", "fr": "Sauvegarder la base…", "de": "Datenbank sichern …"},
+    "ui:Translation catalog": {"en": "Translation catalog", "it": "Catalogo traduzioni", "fr": "Catalogue des traductions", "de": "Übersetzungskatalog"},
+    "ui:Translation catalog editor": {"en": "Translation catalog editor", "it": "Editor del catalogo traduzioni", "fr": "Éditeur du catalogue de traductions", "de": "Editor für den Übersetzungskatalog"},
+    "ui:Language:": {"en": "Language:", "it": "Lingua:", "fr": "Langue :", "de": "Sprache:"},
+    "ui:Add key": {"en": "Add key", "it": "Aggiungi chiave", "fr": "Ajouter une clé", "de": "Schlüssel hinzufügen"},
+    "ui:Remove selected": {"en": "Remove selected", "it": "Rimuovi selezionata", "fr": "Supprimer la sélection", "de": "Auswahl entfernen"},
+    "ui:Key": {"en": "Key", "it": "Chiave", "fr": "Clé", "de": "Schlüssel"},
+    "ui:Text": {"en": "Text", "it": "Testo", "fr": "Texte", "de": "Text"},
+    "ui:Funzione": {"en": "Function", "it": "Funzione", "fr": "Fonction", "de": "Funktion"},
+    "ui:Pin": {"en": "Pin", "it": "Pin", "fr": "Broche", "de": "Pin"},
+    "ui:Corrispondenza estratta dalla documentazione:": {"en": "Mapping extracted from the documentation:", "it": "Corrispondenza estratta dalla documentazione:", "fr": "Correspondance extraite de la documentation :", "de": "Aus der Dokumentation extrahierte Zuordnung:"},
+    "ui:Nessun pinout disponibile.\n\nViene estratto dalla documentazione insieme agli altri parametri: seleziona i file nel tab \"Progetto\" e premi \"Estrai parametri con AI\".": {"en": "No pinout is available.\n\nIt is extracted from the documentation together with the other parameters: select the files in the Project tab and click Extract parameters with AI.", "it": "Nessun pinout disponibile.\n\nViene estratto dalla documentazione insieme agli altri parametri: seleziona i file nel tab \"Progetto\" e premi \"Estrai parametri con AI\".", "fr": "Aucun brochage n’est disponible.\n\nIl est extrait de la documentation avec les autres paramètres : sélectionnez les fichiers dans l’onglet Projet et cliquez sur Extraire les paramètres avec l’IA.", "de": "Keine Pinbelegung verfügbar.\n\nSie wird zusammen mit den anderen Parametern aus der Dokumentation extrahiert: Dateien in der Registerkarte Projekt auswählen und Parameter mit KI extrahieren anklicken."},
+    "ui:Modello (id)": {"en": "Model (ID)", "it": "Modello (id)", "fr": "Modèle (ID)", "de": "Modell (ID)"},
+    "ui:Nome": {"en": "Name", "it": "Nome", "fr": "Nom", "de": "Name"},
+    "ui:Contesto": {"en": "Context", "it": "Contesto", "fr": "Contexte", "de": "Kontext"},
+    "ui:Input $/Mtok": {"en": "Input $/Mtok", "it": "Input $/Mtok", "fr": "Entrée $/Mtok", "de": "Eingabe $/Mtok"},
+    "ui:Output $/Mtok": {"en": "Output $/Mtok", "it": "Output $/Mtok", "fr": "Sortie $/Mtok", "de": "Ausgabe $/Mtok"},
+    "ui:Costo input max ($/Mtok):": {"en": "Maximum input cost ($/Mtok):", "it": "Costo input max ($/Mtok):", "fr": "Coût d’entrée maximal ($/Mtok) :", "de": "Maximale Eingabekosten ($/Mtok):"},
+    "ui:Solo modelli compatibili (tool calling + immagini + PDF)": {"en": "Compatible models only (tool calling + images + PDF)", "it": "Solo modelli compatibili (tool calling + immagini + PDF)", "fr": "Modèles compatibles uniquement (outils + images + PDF)", "de": "Nur kompatible Modelle (Tool Calling + Bilder + PDF)"},
+    "ui:Zoom +": {"en": "Zoom +", "it": "Zoom +", "fr": "Zoom +", "de": "Zoom +"},
+    "ui:Zoom −": {"en": "Zoom −", "it": "Zoom −", "fr": "Zoom −", "de": "Zoom −"},
+    "ui:Spigolo:": {"en": "Edge:", "it": "Spigolo:", "fr": "Arête :", "de": "Kante:"},
+    "ui:Raggio:": {"en": "Radius:", "it": "Raggio:", "fr": "Rayon :", "de": "Radius:"},
+    "ui:Faccia:": {"en": "Face:", "it": "Faccia:", "fr": "Face :", "de": "Fläche:"},
+    "ui:Testo da incidere:": {"en": "Text to engrave:", "it": "Testo da incidere:", "fr": "Texte à graver :", "de": "Zu gravierender Text:"},
+    "ui:Dim.:": {"en": "Size:", "it": "Dim.:", "fr": "Taille :", "de": "Größe:"},
+    "ui:Spessore:": {"en": "Thickness:", "it": "Spessore:", "fr": "Épaisseur :", "de": "Dicke:"},
+    "ui:Colore:": {"en": "Color:", "it": "Colore:", "fr": "Couleur :", "de": "Farbe:"},
+    "ui:Tipo": {"en": "Type", "it": "Tipo", "fr": "Type", "de": "Typ"},
+    "ui:Target": {"en": "Target", "it": "Target", "fr": "Cible", "de": "Ziel"},
+    "ui:Dettagli": {"en": "Details", "it": "Dettagli", "fr": "Détails", "de": "Details"},
+    "ui:Scegli il modello LLM": {"en": "Choose the LLM model", "it": "Scegli il modello LLM", "fr": "Choisir le modèle LLM", "de": "LLM-Modell auswählen"},
+    "ui:Modello solo per questa sessione": {"en": "Model for this session only", "it": "Modello solo per questa sessione", "fr": "Modèle pour cette session uniquement", "de": "Modell nur für diese Sitzung"},
+    "ui:Modello foto solo per questa sessione": {"en": "Photo model for this session only", "it": "Modello foto solo per questa sessione", "fr": "Modèle photo pour cette session uniquement", "de": "Fotomodell nur für diese Sitzung"},
+    "ui:Modello verifica foto per questa sessione": {"en": "Photo verification model for this session", "it": "Modello verifica foto per questa sessione", "fr": "Modèle de vérification photo pour cette session", "de": "Fotoprüfungsmodell für diese Sitzung"},
+    "ui:Modello di questa analisi": {"en": "Model for this analysis", "it": "Modello di questa analisi", "fr": "Modèle de cette analyse", "de": "Modell für diese Analyse"},
+    "ui:Modelli disponibili su OpenRouter. I prezzi sono in dollari per milione di token (input / output): un'estrazione da datasheet consuma soprattutto token di input, perche' manda il PDF o le immagini del disegno meccanico.": {"en": "Models available on OpenRouter. Prices are in dollars per million tokens (input / output): datasheet extraction mainly uses input tokens because it sends the PDF or mechanical-drawing images.", "it": "Modelli disponibili su OpenRouter. I prezzi sono in dollari per milione di token (input / output): un'estrazione da datasheet consuma soprattutto token di input, perche' manda il PDF o le immagini del disegno meccanico.", "fr": "Modèles disponibles sur OpenRouter. Les prix sont en dollars par million de jetons (entrée / sortie) : l’extraction d’une fiche technique consomme surtout des jetons d’entrée, car elle envoie le PDF ou les images du dessin mécanique.", "de": "Auf OpenRouter verfügbare Modelle. Die Preise sind Dollar pro Million Token (Eingabe / Ausgabe): Eine Datenblattextraktion verbraucht hauptsächlich Eingabe-Token, da sie das PDF oder Bilder der mechanischen Zeichnung sendet."},
+    "ui:es. claude, gemini, gpt...": {"en": "e.g. claude, gemini, gpt...", "it": "es. claude, gemini, gpt...", "fr": "p. ex. claude, gemini, gpt…", "de": "z. B. claude, gemini, gpt …"},
+    "ui:nessun limite": {"en": "no limit", "it": "nessun limite", "fr": "aucune limite", "de": "keine Begrenzung"},
+    "ui:0 = nessun limite. Filtra sui soli modelli il cui costo di input non supera il valore indicato.": {"en": "0 = no limit. Show only models whose input cost does not exceed the specified value.", "it": "0 = nessun limite. Filtra sui soli modelli il cui costo di input non supera il valore indicato.", "fr": "0 = aucune limite. Affiche uniquement les modèles dont le coût d’entrée ne dépasse pas la valeur indiquée.", "de": "0 = keine Begrenzung. Zeigt nur Modelle, deren Eingabekosten den angegebenen Wert nicht überschreiten."},
+    "ui:L'estrazione manda disegni meccanici e pretende una risposta strutturata: un modello senza queste capacita' non puo' funzionare.": {"en": "Extraction sends mechanical drawings and requires a structured response: a model without these capabilities cannot work.", "it": "L'estrazione manda disegni meccanici e pretende una risposta strutturata: un modello senza queste capacita' non puo' funzionare.", "fr": "L’extraction envoie des dessins mécaniques et exige une réponse structurée : un modèle dépourvu de ces capacités ne peut pas fonctionner.", "de": "Die Extraktion sendet mechanische Zeichnungen und erfordert eine strukturierte Antwort: Ein Modell ohne diese Fähigkeiten kann nicht funktionieren."},
+    "ui:Riscarica l'elenco da OpenRouter ignorando la cache locale.": {"en": "Download the list from OpenRouter again, ignoring the local cache.", "it": "Riscarica l'elenco da OpenRouter ignorando la cache locale.", "fr": "Télécharge à nouveau la liste depuis OpenRouter en ignorant le cache local.", "de": "Lädt die Liste erneut von OpenRouter und ignoriert den lokalen Cache."},
+    "ui:Caricamento elenco modelli da OpenRouter...": {"en": "Loading model list from OpenRouter...", "it": "Caricamento elenco modelli da OpenRouter...", "fr": "Chargement de la liste des modèles depuis OpenRouter…", "de": "Modellliste wird von OpenRouter geladen …"},
+    "ui:Elenco modelli": {"en": "Model list", "it": "Elenco modelli", "fr": "Liste des modèles", "de": "Modellliste"},
+    "ui:gratis": {"en": "free", "it": "gratis", "fr": "gratuit", "de": "kostenlos"},
+    "ui:Nessun modello scelto.": {"en": "No model selected.", "it": "Nessun modello scelto.", "fr": "Aucun modèle sélectionné.", "de": "Kein Modell ausgewählt."},
+    "ui:OK": {"en": "OK", "it": "OK", "fr": "OK", "de": "OK"},
+    "ui:Cancel": {"en": "Cancel", "it": "Annulla", "fr": "Annuler", "de": "Abbrechen"},
+    "ui:Apri cartella progetto tool": {"en": "Open tool project folder", "it": "Apri cartella progetto tool", "fr": "Ouvrir le dossier du projet de l’outil", "de": "Projektordner des Tools öffnen"},
+    "ui:Select the interface language": {"en": "Select the interface language", "it": "Seleziona la lingua dell’interfaccia", "fr": "Sélectionner la langue de l’interface", "de": "Sprache der Benutzeroberfläche auswählen"},
+    "ui:Interface language": {"en": "Interface language", "it": "Lingua dell’interfaccia", "fr": "Langue de l’interface", "de": "Sprache der Benutzeroberfläche"},
+    "ui:Scegli la cartella di lavoro": {"en": "Choose the workspace folder", "it": "Scegli la cartella di lavoro", "fr": "Choisir le dossier de travail", "de": "Arbeitsordner auswählen"},
+    "ui:Informazioni sulla cartella componente e sull'esportazione": {"en": "Information about the component folder and export", "it": "Informazioni sulla cartella componente e sull'esportazione", "fr": "Informations sur le dossier du composant et l’exportation", "de": "Informationen zu Komponentenordner und Export"},
+    "ui:Dice al modello che cosa sta leggendo: da questo dipende quali quote cercare nel datasheet (fori e drill per un THT, land pattern per un SMD, semi-fori sul bordo per un modulo castellated).": {"en": "Tells the model what it is reading; this determines which dimensions to find in the datasheet (holes and drill for THT, land pattern for SMD, edge half-holes for a castellated module).", "it": "Dice al modello che cosa sta leggendo: da questo dipende quali quote cercare nel datasheet (fori e drill per un THT, land pattern per un SMD, semi-fori sul bordo per un modulo castellated).", "fr": "Indique au modèle ce qu’il analyse ; cela détermine les cotes à rechercher dans la fiche technique (trous et perçage THT, land pattern CMS, demi-trous de bord pour un module castellé).", "de": "Teilt dem Modell mit, was es analysiert; davon hängt ab, welche Maße im Datenblatt gesucht werden (Löcher und Bohrung für THT, Land Pattern für SMD, Rand-Halblöcher für ein Castellated-Modul)."},
+    "ui:Modello usato per il datasheet. Il default si imposta da Configurazione -> Gestione tipologie e profili AI.": {"en": "Model used for the datasheet. Set the default under Configuration -> Manage AI types and profiles.", "it": "Modello usato per il datasheet. Il default si imposta da Configurazione -> Gestione tipologie e profili AI.", "fr": "Modèle utilisé pour la fiche technique. Définissez la valeur par défaut dans Configuration -> Gérer les types et profils IA.", "de": "Für das Datenblatt verwendetes Modell. Den Standard unter Konfiguration -> KI-Typen und -Profile verwalten festlegen."},
+    "ui:Sceglie un modello (filtrabile per costo) valido solo per le estrazioni di questa sessione: il default globale non cambia.": {"en": "Choose a model, filterable by cost, for extractions in this session only; the global default does not change.", "it": "Sceglie un modello (filtrabile per costo) valido solo per le estrazioni di questa sessione: il default globale non cambia.", "fr": "Choisit un modèle, filtrable par coût, valable uniquement pour les extractions de cette session ; la valeur globale ne change pas.", "de": "Wählt ein nach Kosten filterbares Modell nur für Extraktionen dieser Sitzung; der globale Standard bleibt unverändert."},
+    "ui:Modello dedicato alla localizzazione dei componenti nella foto. La scelta vale per questa sessione; il default si imposta da Configurazione.": {"en": "Model dedicated to locating components in the photo. The selection applies to this session; set the default under Configuration.", "it": "Modello dedicato alla localizzazione dei componenti nella foto. La scelta vale per questa sessione; il default si imposta da Configurazione.", "fr": "Modèle dédié à la localisation des composants sur la photo. Le choix vaut pour cette session ; définissez la valeur par défaut dans Configuration.", "de": "Modell zur Lokalisierung von Komponenten im Foto. Die Auswahl gilt für diese Sitzung; der Standard wird unter Konfiguration festgelegt."},
+    "ui:Modello di verifica foto, indipendente dalle altre analisi. Scelta solo per questa sessione.": {"en": "Photo verification model, independent of the other analyses. Selection applies only to this session.", "it": "Modello di verifica foto, indipendente dalle altre analisi. Scelta solo per questa sessione.", "fr": "Modèle de vérification photo, indépendant des autres analyses. Choix valable uniquement pour cette session.", "de": "Fotoprüfungsmodell, unabhängig von den anderen Analysen. Auswahl nur für diese Sitzung."},
+    "ui:Avvia l'estrazione dai documenti e dalle foto selezionati": {"en": "Start extraction from the selected documents and photos", "it": "Avvia l'estrazione dai documenti e dalle foto selezionati", "fr": "Démarrer l’extraction depuis les documents et photos sélectionnés", "de": "Extraktion aus den ausgewählten Dokumenten und Fotos starten"},
+    "ui:Mostra gli ingombri rilevati sulla foto superiore e, quando disponibile, permette di correggerli. Non avvia la generazione del footprint o del modello 3D.": {"en": "Show the outlines detected in the top photo and, when available, allow corrections. This does not start footprint or 3D-model generation.", "it": "Mostra gli ingombri rilevati sulla foto superiore e, quando disponibile, permette di correggerli. Non avvia la generazione del footprint o del modello 3D.", "fr": "Affiche les encombrements détectés sur la photo supérieure et permet de les corriger lorsqu’ils sont disponibles. Ne lance pas la génération de l’empreinte ni du modèle 3D.", "de": "Zeigt die im Draufsichtfoto erkannten Umrisse und ermöglicht gegebenenfalls Korrekturen. Startet weder die Footprint- noch die 3D-Modell-Generierung."},
+    "ui:Apri il log completo dell'analisi AI, aggiornato in tempo reale": {"en": "Open the complete AI analysis log, updated in real time", "it": "Apri il log completo dell'analisi AI, aggiornato in tempo reale", "fr": "Ouvrir le journal complet de l’analyse IA, mis à jour en temps réel", "de": "Vollständiges, in Echtzeit aktualisiertes KI-Analyseprotokoll öffnen"},
+    "ui:Apri log analisi AI": {"en": "Open AI analysis log", "it": "Apri log analisi AI", "fr": "Ouvrir le journal d’analyse IA", "de": "KI-Analyseprotokoll öffnen"},
+    "ui:Copia tutte le azioni analisi negli appunti": {"en": "Copy all analysis actions to the clipboard", "it": "Copia tutte le azioni analisi negli appunti", "fr": "Copier toutes les actions d’analyse dans le presse-papiers", "de": "Alle Analyseschritte in die Zwischenablage kopieren"},
+    "ui:Copia log azioni analisi": {"en": "Copy analysis action log", "it": "Copia log azioni analisi", "fr": "Copier le journal des actions d’analyse", "de": "Protokoll der Analyseschritte kopieren"},
+    "ui:Qui compariranno i passi dell'analisi AI.": {"en": "AI analysis steps will appear here.", "it": "Qui compariranno i passi dell'analisi AI.", "fr": "Les étapes de l’analyse IA apparaîtront ici.", "de": "Hier werden die Schritte der KI-Analyse angezeigt."},
+    "ui:Copia tutti gli elementi rilevati negli appunti": {"en": "Copy all detected items to the clipboard", "it": "Copia tutti gli elementi rilevati negli appunti", "fr": "Copier tous les éléments détectés dans le presse-papiers", "de": "Alle erkannten Elemente in die Zwischenablage kopieren"},
+    "ui:Copia elementi rilevati": {"en": "Copy detected items", "it": "Copia elementi rilevati", "fr": "Copier les éléments détectés", "de": "Erkannte Elemente kopieren"},
+    "ui:Elementi e ingombri individuati durante l'analisi fotografica": {"en": "Items and outlines found during photo analysis", "it": "Elementi e ingombri individuati durante l'analisi fotografica", "fr": "Éléments et encombrements identifiés pendant l’analyse photo", "de": "Bei der Fotoanalyse erkannte Elemente und Umrisse"},
+    "ui:Modifica le istruzioni AI specifiche di questo componente": {"en": "Edit the AI instructions specific to this component", "it": "Modifica le istruzioni AI specifiche di questo componente", "fr": "Modifier les instructions IA propres à ce composant", "de": "KI-Anweisungen für diese Komponente bearbeiten"},
+    "ui:es. il case e' metallico, non plastico -- oppure: ignora il connettore laterale, considera solo i pin del lato inferiore": {"en": "e.g. the case is metal, not plastic -- or: ignore the side connector and consider only the bottom pins", "it": "es. il case e' metallico, non plastico -- oppure: ignora il connettore laterale, considera solo i pin del lato inferiore", "fr": "p. ex. le boîtier est métallique, pas en plastique -- ou : ignorer le connecteur latéral et ne considérer que les broches inférieures", "de": "z. B. das Gehäuse ist aus Metall, nicht aus Kunststoff -- oder: seitlichen Anschluss ignorieren und nur die unteren Pins berücksichtigen"},
+    "ui:Modificabile nel tab \"Progetto\"": {"en": "Editable in the Project tab", "it": "Modificabile nel tab \"Progetto\"", "fr": "Modifiable dans l’onglet Projet", "de": "In der Registerkarte Projekt bearbeitbar"},
+    "ui:(auto-generata se vuota)": {"en": "(generated automatically when empty)", "it": "(auto-generata se vuota)", "fr": "(générée automatiquement si vide)", "de": "(wird bei leerem Feld automatisch erzeugt)"},
+    "ui:Passo tra pin adiacenti sulla stessa riga": {"en": "Pitch between adjacent pins in the same row", "it": "Passo tra pin adiacenti sulla stessa riga", "fr": "Pas entre broches adjacentes d’une même rangée", "de": "Rastermaß zwischen benachbarten Pins derselben Reihe"},
+    "ui:(vuoto = tutte le posizioni popolate) es. 1,7,8,9,10,16": {"en": "(empty = all positions populated), e.g. 1,7,8,9,10,16", "it": "(vuoto = tutte le posizioni popolate) es. 1,7,8,9,10,16", "fr": "(vide = toutes les positions présentes), p. ex. 1,7,8,9,10,16", "de": "(leer = alle Positionen bestückt), z. B. 1,7,8,9,10,16"},
+    "ui:Distanza perpendicolare tra le due file di pin. Nei moduli DIP-style (es. convertitori DC/DC) e' quasi sempre molto maggiore del passo.": {"en": "Perpendicular distance between the two pin rows. In DIP-style modules (e.g. DC/DC converters) it is almost always much greater than the pitch.", "it": "Distanza perpendicolare tra le due file di pin. Nei moduli DIP-style (es. convertitori DC/DC) e' quasi sempre molto maggiore del passo.", "fr": "Distance perpendiculaire entre les deux rangées de broches. Dans les modules de type DIP (p. ex. convertisseurs CC/CC), elle est presque toujours bien supérieure au pas.", "de": "Senkrechter Abstand zwischen den beiden Pin-Reihen. Bei DIP-Modulen (z. B. DC/DC-Wandlern) ist er fast immer deutlich größer als das Rastermaß."},
+    "ui:Lunghezza del corpo del modulo, asse X (lati \"top\"/\"bottom\").": {"en": "Module body length along X (top/bottom sides).", "it": "Lunghezza del corpo del modulo, asse X (lati \"top\"/\"bottom\").", "fr": "Longueur du corps du module sur X (côtés haut/bas).", "de": "Länge des Modulgehäuses entlang X (Seiten oben/unten)."},
+    "ui:Larghezza del corpo del modulo, asse Y (lati \"left\"/\"right\").": {"en": "Module body width along Y (left/right sides).", "it": "Larghezza del corpo del modulo, asse Y (lati \"left\"/\"right\").", "fr": "Largeur du corps du module sur Y (côtés gauche/droite).", "de": "Breite des Modulgehäuses entlang Y (Seiten links/rechts)."},
+    "ui:Lunghezza della piazzola perpendicolarmente al bordo.": {"en": "Pad length perpendicular to the edge.", "it": "Lunghezza della piazzola perpendicolarmente al bordo.", "fr": "Longueur de la pastille perpendiculairement au bord.", "de": "Pad-Länge senkrecht zum Rand."},
+    "ui:Larghezza della piazzola lungo il bordo (poco piu' del semi-foro).": {"en": "Pad width along the edge (slightly larger than the half-hole).", "it": "Larghezza della piazzola lungo il bordo (poco piu' del semi-foro).", "fr": "Largeur de la pastille le long du bord (légèrement supérieure au demi-trou).", "de": "Pad-Breite entlang des Randes (etwas größer als das Halbloch)."},
+    "ui:Quanto la piazzola sporge oltre il bordo del modulo: serve a lasciare ispezionabile il menisco di saldatura.": {"en": "How far the pad projects beyond the module edge, leaving the solder fillet visible for inspection.", "it": "Quanto la piazzola sporge oltre il bordo del modulo: serve a lasciare ispezionabile il menisco di saldatura.", "fr": "Dépassement de la pastille au-delà du bord du module, afin de laisser le ménisque de soudure visible pour l’inspection.", "de": "Wie weit das Pad über den Modulrand hinausragt, damit der Lötmeniskus prüfbar bleibt."},
+    "ui:Diametro del semi-foro metallizzato sul bordo: serve al modello 3D, dove i semi-fori vengono tagliati nel PCB del modulo.": {"en": "Diameter of the plated half-hole at the edge; used by the 3D model to cut the half-holes into the module PCB.", "it": "Diametro del semi-foro metallizzato sul bordo: serve al modello 3D, dove i semi-fori vengono tagliati nel PCB del modulo.", "fr": "Diamètre du demi-trou métallisé au bord ; utilisé par le modèle 3D pour découper les demi-trous dans le PCB du module.", "de": "Durchmesser des metallisierten Halblochs am Rand; das 3D-Modell schneidet damit die Halblöcher in die Modulplatine."},
+    "ui:Spessore del PCB del modulo. Nel 3D il modulo e' un PCB sottile con sopra un blocco che rappresenta i componenti montati: l'altezza totale si imposta in \"Modello 3D\".": {"en": "Module PCB thickness. In 3D the module is a thin PCB with a block representing mounted components; set the total height under 3D model.", "it": "Spessore del PCB del modulo. Nel 3D il modulo e' un PCB sottile con sopra un blocco che rappresenta i componenti montati: l'altezza totale si imposta in \"Modello 3D\".", "fr": "Épaisseur du PCB du module. En 3D, le module est un PCB fin surmonté d’un bloc représentant les composants montés ; réglez la hauteur totale dans Modèle 3D.", "de": "Dicke der Modulplatine. Im 3D-Modell ist das Modul eine dünne PCB mit einem Block für die bestückten Komponenten; die Gesamthöhe wird unter 3D-Modell eingestellt."},
+    "ui:Quanto il blocco dei componenti rientra dal bordo del PCB: sul bordo ci sono i semi-fori, li' non e' montato nulla.": {"en": "How far the component block is inset from the PCB edge; the half-holes are at the edge, where nothing is mounted.", "it": "Quanto il blocco dei componenti rientra dal bordo del PCB: sul bordo ci sono i semi-fori, li' non e' montato nulla.", "fr": "Retrait du bloc de composants par rapport au bord du PCB ; les demi-trous se trouvent au bord, où rien n’est monté.", "de": "Rücksprung des Komponentenblocks vom PCB-Rand; am Rand befinden sich die Halblöcher, dort ist nichts bestückt."},
+    "ui:Contatti lato per lato (ogni lato ha il suo passo). Il primo pin di ogni lato si conta dall'alto in basso sui lati verticali, da sinistra a destra su quelli orizzontali.": {"en": "Contacts by side (each side has its own pitch). The first pin on each side is counted top to bottom on vertical sides and left to right on horizontal sides.", "it": "Contatti lato per lato (ogni lato ha il suo passo). Il primo pin di ogni lato si conta dall'alto in basso sui lati verticali, da sinistra a destra su quelli orizzontali.", "fr": "Contacts par côté (chaque côté a son propre pas). La première broche de chaque côté est comptée de haut en bas sur les côtés verticaux et de gauche à droite sur les côtés horizontaux.", "de": "Kontakte nach Seite (jede Seite hat ihr eigenes Rastermaß). Der erste Pin jeder Seite wird an vertikalen Seiten von oben nach unten und an horizontalen Seiten von links nach rechts gezählt."},
+    "ui:Lato": {"en": "Side", "it": "Lato", "fr": "Côté", "de": "Seite"},
+    "ui:N. contatti": {"en": "Contact count", "it": "N. contatti", "fr": "Nb de contacts", "de": "Anzahl Kontakte"},
+    "ui:Passo": {"en": "Pitch", "it": "Passo", "fr": "Pas", "de": "Rastermaß"},
+    "ui:Offset": {"en": "Offset", "it": "Offset", "fr": "Décalage", "de": "Versatz"},
+    "ui:Primo pin": {"en": "First pin", "it": "Primo pin", "fr": "Première broche", "de": "Erster Pin"},
+    "ui:Numerazione inversa": {"en": "Reverse numbering", "it": "Numerazione inversa", "fr": "Numérotation inversée", "de": "Umgekehrte Nummerierung"},
+    "ui:Lunghezza corpo, asse X (stessa direzione del pitch)": {"en": "Body length along X (same direction as pitch)", "it": "Lunghezza corpo, asse X (stessa direzione del pitch)", "fr": "Longueur du corps sur X (même direction que le pas)", "de": "Gehäuselänge entlang X (gleiche Richtung wie das Rastermaß)"},
+    "ui:Larghezza corpo, asse Y (stessa direzione della distanza tra righe)": {"en": "Body width along Y (same direction as row spacing)", "it": "Larghezza corpo, asse Y (stessa direzione della distanza tra righe)", "fr": "Largeur du corps sur Y (même direction que l’espacement des rangées)", "de": "Gehäusebreite entlang Y (gleiche Richtung wie der Reihenabstand)"},
+    "ui:Posizione del bordo corpo lungo X rispetto al pin 1 (x=0)": {"en": "Body-edge position along X relative to pin 1 (x=0)", "it": "Posizione del bordo corpo lungo X rispetto al pin 1 (x=0)", "fr": "Position du bord du corps sur X par rapport à la broche 1 (x=0)", "de": "Position der Gehäusekante entlang X relativ zu Pin 1 (x=0)"},
+    "ui:Posizione del bordo corpo lungo Y rispetto alla prima riga di pin (y=0)": {"en": "Body-edge position along Y relative to the first pin row (y=0)", "it": "Posizione del bordo corpo lungo Y rispetto alla prima riga di pin (y=0)", "fr": "Position du bord du corps sur Y par rapport à la première rangée de broches (y=0)", "de": "Position der Gehäusekante entlang Y relativ zur ersten Pin-Reihe (y=0)"},
+    "ui:Lunghezza pin che sporge sotto il corpo, verso il PCB": {"en": "Pin length protruding below the body toward the PCB", "it": "Lunghezza pin che sporge sotto il corpo, verso il PCB", "fr": "Longueur de broche dépassant sous le corps vers le PCB", "de": "Pin-Länge, die unter dem Gehäuse zur PCB hervorsteht"},
+    "ui:Colore del case, formato #rrggbb (estratto dalla foto)": {"en": "Case color in #rrggbb format (extracted from the photo)", "it": "Colore del case, formato #rrggbb (estratto dalla foto)", "fr": "Couleur du boîtier au format #rrggbb (extraite de la photo)", "de": "Gehäusefarbe im Format #rrggbb (aus dem Foto extrahiert)"},
+    "ui:Colore dei pin, formato #rrggbb": {"en": "Pin color in #rrggbb format", "it": "Colore dei pin, formato #rrggbb", "fr": "Couleur des broches au format #rrggbb", "de": "Pin-Farbe im Format #rrggbb"},
+    "ui:Riepilogo del componente e dei parametri di generazione": {"en": "Summary of the component and generation parameters", "it": "Riepilogo del componente e dei parametri di generazione", "fr": "Résumé du composant et des paramètres de génération", "de": "Zusammenfassung der Komponente und Generierungsparameter"},
+    "ui:I numeri compaiono solo guardando il componente dal lato dei piedini: usa il pulsante \"Sotto\" o ruota la vista sotto il piano della scheda.": {"en": "Pin numbers appear only when viewing the component from the pin side: use Bottom or rotate the view below the board plane.", "it": "I numeri compaiono solo guardando il componente dal lato dei piedini: usa il pulsante \"Sotto\" o ruota la vista sotto il piano della scheda.", "fr": "Les numéros de broches n’apparaissent qu’en regardant le composant côté broches : utilisez Dessous ou faites pivoter la vue sous le plan de la carte.", "de": "Pin-Nummern erscheinen nur bei Ansicht von der Pin-Seite: Unten wählen oder die Ansicht unter die Platinenebene drehen."},
+    "ui:Anteprima 3D (ruotabile col mouse) -- dopo la generazione mostra il solido reale con fillet e serigrafie:": {"en": "3D preview (rotate with mouse) -- after generation it shows the actual solid with fillets and markings:", "it": "Anteprima 3D (ruotabile col mouse) -- dopo la generazione mostra il solido reale con fillet e serigrafie:", "fr": "Aperçu 3D (rotation à la souris) -- après génération, il affiche le solide réel avec congés et marquages :", "de": "3D-Vorschau (mit der Maus drehbar) -- nach der Generierung zeigt sie den tatsächlichen Körper mit Rundungen und Beschriftungen:"},
+    "ui:Attiva \"Modello 3D\" nel tab \"Footprint 2D\" per vedere l'anteprima qui.": {"en": "Enable 3D model in the Footprint 2D tab to see the preview here.", "it": "Attiva \"Modello 3D\" nel tab \"Footprint 2D\" per vedere l'anteprima qui.", "fr": "Activez Modèle 3D dans l’onglet Empreinte 2D pour afficher l’aperçu ici.", "de": "Aktivieren Sie 3D-Modell in der Registerkarte Footprint 2D, um hier die Vorschau zu sehen."},
+    "ui:Analisi AI della foto calibrata tramite OpenRouter; conserva posizioni e footprint.": {"en": "AI analysis of the calibrated photo through OpenRouter; preserves positions and footprint.", "it": "Analisi AI della foto calibrata tramite OpenRouter; conserva posizioni e footprint.", "fr": "Analyse IA de la photo calibrée via OpenRouter ; conserve les positions et l’empreinte.", "de": "KI-Analyse des kalibrierten Fotos über OpenRouter; Positionen und Footprint bleiben erhalten."},
+    "ui:Passaggio AI facoltativo: conserva corpi e conteggio, separa solo i reofori distinguibili.": {"en": "Optional AI step: preserves bodies and count, separating only distinguishable leads.", "it": "Passaggio AI facoltativo: conserva corpi e conteggio, separa solo i reofori distinguibili.", "fr": "Étape IA facultative : conserve les corps et leur nombre, et sépare uniquement les pattes identifiables.", "de": "Optionaler KI-Schritt: erhält Gehäuse und Anzahl und trennt nur erkennbare Anschlussdrähte."},
+    "ui:scrivi qui (es. TEL8WI)": {"en": "type here (e.g. TEL8WI)", "it": "scrivi qui (es. TEL8WI)", "fr": "saisissez ici (p. ex. TEL8WI)", "de": "hier eingeben (z. B. TEL8WI)"},
+    "ui:Spessore dello strato di vernice serigrafata": {"en": "Thickness of the silkscreen paint layer", "it": "Spessore dello strato di vernice serigrafata", "fr": "Épaisseur de la couche de peinture sérigraphiée", "de": "Dicke der Siebdruck-Farbschicht"},
+    "ui:Colore della scritta, formato #rrggbb": {"en": "Text color in #rrggbb format", "it": "Colore della scritta, formato #rrggbb", "fr": "Couleur du texte au format #rrggbb", "de": "Textfarbe im Format #rrggbb"},
+    "ui:Change datasheet model": {"en": "Change datasheet model", "it": "Cambia modello datasheet", "fr": "Changer le modèle datasheet", "de": "Datenblattmodell ändern"},
+    "ui:Change photo model": {"en": "Change photo model", "it": "Cambia modello foto", "fr": "Changer le modèle photo", "de": "Fotomodell ändern"},
+    "ui:Change photo verification model": {"en": "Change photo verification model", "it": "Cambia modello di verifica foto", "fr": "Changer le modèle de vérification photo", "de": "Fotoprüfungsmodell ändern"},
+    "ui:Il nome del componente e' anche il nome del footprint generato (es. area_di_lavoro/MioComponente/MioComponente.pretty/...). Tutto viene generato qui; per portarlo nella libreria vera usa \"Esporta in libreria...\" nel tab \"Genera\".": {"en": "The component name is also the generated footprint name (e.g. workspace/MyComponent/MyComponent.pretty/...). Everything is generated here; use Export to library in the Generate tab to copy it to the actual library.", "it": "Il nome del componente e' anche il nome del footprint generato (es. area_di_lavoro/MioComponente/MioComponente.pretty/...). Tutto viene generato qui; per portarlo nella libreria vera usa \"Esporta in libreria...\" nel tab \"Genera\".", "fr": "Le nom du composant est également celui de l’empreinte générée (p. ex. espace_de_travail/MonComposant/MonComposant.pretty/…). Tout est généré ici ; utilisez Exporter vers la bibliothèque dans l’onglet Générer pour le copier dans la bibliothèque réelle.", "de": "Der Komponentenname ist zugleich der Name des erzeugten Footprints (z. B. Arbeitsbereich/MeineKomponente/MeineKomponente.pretty/…). Alles wird hier erzeugt; mit In Bibliothek exportieren in der Registerkarte Generieren wird es in die eigentliche Bibliothek kopiert."},
+    "ui:Prompt specifico di QUESTO componente -- ci finisce il testo della tipologia scelta qui sopra, modificabile, piu' le note che vuoi aggiungere. Il prompt generale si imposta da Configurazione -> Modello e prompt di sistema LLM:": {"en": "Prompt specific to THIS component -- it contains the editable text of the selected type plus any notes you add. Set the general prompt under Configuration -> LLM system model and prompt:", "it": "Prompt specifico di QUESTO componente -- ci finisce il testo della tipologia scelta qui sopra, modificabile, piu' le note che vuoi aggiungere. Il prompt generale si imposta da Configurazione -> Modello e prompt di sistema LLM:", "fr": "Prompt propre à CE composant -- il contient le texte modifiable du type sélectionné ci-dessus, ainsi que les notes que vous ajoutez. Définissez le prompt général dans Configuration -> Modèle et prompt système LLM :", "de": "Prompt speziell für DIESE Komponente -- er enthält den bearbeitbaren Text des oben ausgewählten Typs sowie Ihre zusätzlichen Hinweise. Den allgemeinen Prompt legen Sie unter Konfiguration -> LLM-Systemmodell und Prompt fest:"},
+    "ui:Rettangoli dell'ultima estrazione: verde = rilevato, arancione = da verificare. I numeri corrispondono alle righe della tabella componenti prima delle modifiche manuali.": {"en": "Rectangles from the last extraction: green = detected, orange = review required. Numbers refer to component-table rows before manual edits.", "it": "Rettangoli dell'ultima estrazione: verde = rilevato, arancione = da verificare. I numeri corrispondono alle righe della tabella componenti prima delle modifiche manuali.", "fr": "Rectangles de la dernière extraction : vert = détecté, orange = à vérifier. Les numéros correspondent aux lignes du tableau des composants avant les modifications manuelles.", "de": "Rechtecke der letzten Extraktion: Grün = erkannt, Orange = prüfen. Die Nummern entsprechen den Zeilen der Komponententabelle vor manuellen Änderungen."},
+    "ui:Componenti sul modulo (letti dalla foto, modificabili) -- origine al centro del modulo, X a destra, Y in basso come nel footprint; Lung. = asse lungo del componente, Rot. = come sta sul modulo": {"en": "Components on the module (read from the photo, editable) -- origin at module center, X right, Y down as in the footprint; Length = component long axis, Rotation = orientation on the module", "it": "Componenti sul modulo (letti dalla foto, modificabili) -- origine al centro del modulo, X a destra, Y in basso come nel footprint; Lung. = asse lungo del componente, Rot. = come sta sul modulo", "fr": "Composants sur le module (lus sur la photo, modifiables) -- origine au centre du module, X à droite, Y vers le bas comme dans l’empreinte ; Long. = axe long du composant, Rot. = orientation sur le module", "de": "Komponenten auf dem Modul (aus dem Foto, bearbeitbar) -- Ursprung in der Modulmitte, X rechts, Y unten wie im Footprint; Länge = Längsachse der Komponente, Drehung = Ausrichtung auf dem Modul"},
+    "ui:Annotazioni per il modello 3D (fillet su spigoli, testo inciso su facce) -- rivedi la lista prima di generare": {"en": "3D-model annotations (edge fillets, engraved face text) -- review the list before generating", "it": "Annotazioni per il modello 3D (fillet su spigoli, testo inciso su facce) -- rivedi la lista prima di generare", "fr": "Annotations du modèle 3D (congés sur les arêtes, texte gravé sur les faces) -- vérifiez la liste avant de générer", "de": "Anmerkungen für das 3D-Modell (Kantenrundungen, gravierter Text auf Flächen) -- Liste vor der Generierung prüfen"},
+    "ui:Datasheet": {"en": "Datasheet", "it": "Datasheet", "fr": "Fiche technique", "de": "Datenblatt"},
+    "ui:Localizzazione foto": {"en": "Photo localization", "it": "Localizzazione foto", "fr": "Localisation photo", "de": "Fotolokalisierung"},
+    "ui:Verifica foto": {"en": "Photo verification", "it": "Verifica foto", "fr": "Vérification photo", "de": "Fotoprüfung"},
+    "ui:Default generali AI": {"en": "General AI defaults", "it": "Default generali AI", "fr": "Paramètres IA généraux", "de": "Allgemeine KI-Standards"},
+    "ui:disattivata": {"en": "disabled", "it": "disattivata", "fr": "désactivé", "de": "deaktiviert"},
+    "ui:Gestione tipologie e profili AI": {"en": "Manage AI types and profiles", "it": "Gestione tipologie e profili AI", "fr": "Gérer les types et profils IA", "de": "KI-Typen und -Profile verwalten"},
+    "ui:Scegli modello…": {"en": "Choose model…", "it": "Scegli modello…", "fr": "Choisir un modèle…", "de": "Modell auswählen …"},
+    "ui:Scegli modello foto...": {"en": "Choose photo model...", "it": "Scegli modello foto...", "fr": "Choisir le modèle photo…", "de": "Fotomodell auswählen …"},
+    "ui:Modello di default:": {"en": "Default model:", "it": "Modello di default:", "fr": "Modèle par défaut :", "de": "Standardmodell:"},
+    "ui:Modello verifica:": {"en": "Verification model:", "it": "Modello verifica:", "fr": "Modèle de vérification :", "de": "Prüfmodell:"},
+    "ui:Id OpenRouter del modello usato di default dall'estrazione AI.": {"en": "OpenRouter ID of the model used by default for AI extraction.", "it": "Id OpenRouter del modello usato di default dall'estrazione AI.", "fr": "ID OpenRouter du modèle utilisé par défaut pour l’extraction IA.", "de": "OpenRouter-ID des standardmäßig für die KI-Extraktion verwendeten Modells."},
+    "ui:Informazioni gestione profili": {"en": "Profile management information", "it": "Informazioni gestione profili", "fr": "Informations sur la gestion des profils", "de": "Informationen zur Profilverwaltung"},
+    "ui:Info": {"en": "Info", "it": "Info", "fr": "Info", "de": "Info"},
+    "ui:Ripristina default di questo tab": {"en": "Restore defaults for this tab", "it": "Ripristina default di questo tab", "fr": "Restaurer les valeurs par défaut de cet onglet", "de": "Standardwerte dieser Registerkarte wiederherstellen"},
+    "ui:Close": {"en": "Close", "it": "Chiudi", "fr": "Fermer", "de": "Schließen"},
+    "ui:Save": {"en": "Save", "it": "Salva", "fr": "Enregistrer", "de": "Speichern"},
+    "ui:Apply": {"en": "Apply", "it": "Applica", "fr": "Appliquer", "de": "Anwenden"},
+    "ui:Restore Defaults": {"en": "Restore Defaults", "it": "Ripristina predefiniti", "fr": "Restaurer les valeurs par défaut", "de": "Standardwerte wiederherstellen"},
+    "ui:Lung.": {"en": "Length", "it": "Lung.", "fr": "Long.", "de": "Länge"},
+    "ui:Larg.": {"en": "Width", "it": "Larg.", "fr": "Larg.", "de": "Breite"},
+    "ui:Alt.": {"en": "Height", "it": "Alt.", "fr": "Haut.", "de": "Höhe"},
+    "ui:Rot.": {"en": "Rotation", "it": "Rot.", "fr": "Rot.", "de": "Drehung"},
+    "ui:Colore": {"en": "Color", "it": "Colore", "fr": "Couleur", "de": "Farbe"},
+    "ui:Seleziona un rettangolo o una voce; trascina per spostare. Modifica le quote per ridimensionare.\nRotella: zoom · Tasto centrale: panoramica · Origine: centro PCB, X destra, Y basso; rotazione oraria.": {"en": "Select a rectangle or list item; drag to move it. Edit the dimensions to resize it.\nMouse wheel: zoom · Middle button: pan · Origin: PCB center, X right, Y down; clockwise rotation.", "it": "Seleziona un rettangolo o una voce; trascina per spostare. Modifica le quote per ridimensionare.\nRotella: zoom · Tasto centrale: panoramica · Origine: centro PCB, X destra, Y basso; rotazione oraria.", "fr": "Sélectionnez un rectangle ou un élément ; faites-le glisser pour le déplacer. Modifiez les dimensions pour le redimensionner.\nMolette : zoom · Bouton central : déplacement · Origine : centre du PCB, X à droite, Y vers le bas ; rotation horaire.", "de": "Wählen Sie ein Rechteck oder einen Eintrag aus und ziehen Sie ihn zum Verschieben. Ändern Sie die Maße zum Skalieren.\nMausrad: Zoom · Mittlere Taste: Verschieben · Ursprung: PCB-Mitte, X rechts, Y unten; Drehung im Uhrzeigersinn."},
+    "ui:Centro X": {"en": "Center X", "it": "Centro X", "fr": "Centre X", "de": "Mitte X"},
+    "ui:Centro Y": {"en": "Center Y", "it": "Centro Y", "fr": "Centre Y", "de": "Mitte Y"},
+    "ui:Lunghezza locale": {"en": "Local length", "it": "Lunghezza locale", "fr": "Longueur locale", "de": "Lokale Länge"},
+    "ui:Larghezza locale": {"en": "Local width", "it": "Larghezza locale", "fr": "Largeur locale", "de": "Lokale Breite"},
+    "ui:Altezza": {"en": "Height", "it": "Altezza", "fr": "Hauteur", "de": "Höhe"},
+    "ui:Rotazione": {"en": "Rotation", "it": "Rotazione", "fr": "Rotation", "de": "Drehung"},
+    "ui:Marcatura": {"en": "Marking", "it": "Marcatura", "fr": "Marquage", "de": "Beschriftung"},
+    "ui:Verde: rilevato · Arancione: da verificare\nRosso: fuori PCB · Tratteggio: selezionato": {"en": "Green: detected · Orange: review required\nRed: outside PCB · Dashed: selected", "it": "Verde: rilevato · Arancione: da verificare\nRosso: fuori PCB · Tratteggio: selezionato", "fr": "Vert : détecté · Orange : à vérifier\nRouge : hors PCB · Pointillé : sélectionné", "de": "Grün: erkannt · Orange: prüfen\nRot: außerhalb der PCB · Gestrichelt: ausgewählt"},
+    "ui:Applica correzioni": {"en": "Apply corrections", "it": "Applica correzioni", "fr": "Appliquer les corrections", "de": "Korrekturen anwenden"},
+    "ui:Seleziona o aggiungi un componente.": {"en": "Select or add a component.", "it": "Seleziona o aggiungi un componente.", "fr": "Sélectionnez ou ajoutez un composant.", "de": "Komponente auswählen oder hinzufügen."},
+    "ui:Fuori dai bordi PCB: verificare posizione e dimensioni.": {"en": "Outside PCB bounds: check position and dimensions.", "it": "Fuori dai bordi PCB: verificare posizione e dimensioni.", "fr": "Hors des limites du PCB : vérifiez la position et les dimensions.", "de": "Außerhalb der PCB-Grenzen: Position und Abmessungen prüfen."},
+    "ui:Rilevamento incerto / bassa confidenza: verifica manuale richiesta.": {"en": "Uncertain detection / low confidence: manual review required.", "it": "Rilevamento incerto / bassa confidenza: verifica manuale richiesta.", "fr": "Détection incertaine / faible confiance : vérification manuelle requise.", "de": "Unsichere Erkennung / geringe Konfidenz: manuelle Prüfung erforderlich."},
+    "ui:Altezza indicativa: verificare con vista laterale o misura.": {"en": "Estimated height: verify with a side view or measurement.", "it": "Altezza indicativa: verificare con vista laterale o misura.", "fr": "Hauteur indicative : vérifiez avec une vue latérale ou une mesure.", "de": "Geschätzte Höhe: mit Seitenansicht oder Messung prüfen."},
+    "ui:Nessun avviso per questo componente.": {"en": "No warnings for this component.", "it": "Nessun avviso per questo componente.", "fr": "Aucun avertissement pour ce composant.", "de": "Keine Warnungen für diese Komponente."},
+    "ui:Componente": {"en": "Component", "it": "Componente", "fr": "Composant", "de": "Komponente"},
+    "ui:Nuovo componente": {"en": "New component", "it": "Nuovo componente", "fr": "Nouveau composant", "de": "Neue Komponente"},
+    "tooltip.info_section": {"en": "Information: {section}", "it": "Informazioni: {section}", "fr": "Informations : {section}", "de": "Informationen: {section}"},
+    "tooltip.preview_role": {"en": "Preview: {role}", "it": "Anteprima: {role}", "fr": "Aperçu : {role}", "de": "Vorschau: {role}"},
+    "tooltip.remove_role": {"en": "Remove: {role}", "it": "Rimuovi: {role}", "fr": "Supprimer : {role}", "de": "Entfernen: {role}"},
+    "tooltip.original_name": {"en": "Original: {name}", "it": "Originale: {name}", "fr": "Original : {name}", "de": "Original: {name}"},
+    "document.replace_question": {"en": "Replace the file for “{role}”? The previous copy will remain in docs/.history.", "it": "Sostituire il file per “{role}”? La copia precedente resterà in docs/.history.", "fr": "Remplacer le fichier pour « {role} » ? La copie précédente restera dans docs/.history.", "de": "Datei für „{role}“ ersetzen? Die vorherige Kopie bleibt in docs/.history erhalten."},
+    "document.remove_question": {"en": "Remove the local copy of “{role}”? The original will not be changed. The copy remains recoverable from docs/.history.", "it": "Rimuovere la copia locale di “{role}”? L’originale non verrà modificato. La copia resterà recuperabile in docs/.history.", "fr": "Supprimer la copie locale de « {role} » ? L’original ne sera pas modifié. La copie restera récupérable dans docs/.history.", "de": "Lokale Kopie von „{role}“ entfernen? Das Original wird nicht geändert. Die Kopie bleibt in docs/.history wiederherstellbar."},
+    "profile.delete_question": {"en": "Delete “{name}” and its custom profile?\nGenerated components and files will not be changed.", "it": "Eliminare “{name}” e il relativo profilo custom?\nI componenti e i file già generati non verranno modificati.", "fr": "Supprimer « {name} » et son profil personnalisé ?\nLes composants et fichiers déjà générés ne seront pas modifiés.", "de": "„{name}“ und das zugehörige benutzerdefinierte Profil löschen?\nBereits erzeugte Komponenten und Dateien werden nicht geändert."},
+    "ui:Profilo non salvato": {"en": "Profile not saved", "it": "Profilo non salvato", "fr": "Profil non enregistré", "de": "Profil nicht gespeichert"},
+    "ui:Profilo non disponibile": {"en": "AI profile unavailable", "it": "Profilo non disponibile", "fr": "Profil indisponible", "de": "Profil nicht verfügbar"},
+    "ui:Duplicazione non riuscita": {"en": "Duplication failed", "it": "Duplicazione non riuscita", "fr": "Échec de la duplication", "de": "Duplizieren fehlgeschlagen"},
+    "ui:Elimina tipologia": {"en": "Delete component type", "it": "Elimina tipologia", "fr": "Supprimer le type de composant", "de": "Komponententyp löschen"},
+    "ui:Eliminazione non riuscita": {"en": "Deletion failed", "it": "Eliminazione non riuscita", "fr": "Échec de la suppression", "de": "Löschen fehlgeschlagen"},
+    "ui:Nuovo backup database": {"en": "New database backup", "it": "Nuovo backup database", "fr": "Nouvelle sauvegarde de la base", "de": "Neue Datenbanksicherung"},
+    "ui:Backup completato": {"en": "Backup complete", "it": "Backup completato", "fr": "Sauvegarde terminée", "de": "Sicherung abgeschlossen"},
+    "ui:Backup non riuscito": {"en": "Backup failed", "it": "Backup non riuscito", "fr": "Échec de la sauvegarde", "de": "Sicherung fehlgeschlagen"},
+    "about.description": {"en": "KiCadGen-Tool\n\nGenerates KiCad components (2D footprint + 3D model) from dimensions and drawings.\n\nActive module: 2D footprint generator (.kicad_mod).", "it": "KiCadGen-Tool\n\nGenera componenti KiCad (impronta 2D + modello 3D) a partire da dimensioni e quote.\n\nModulo attivo: generatore footprint 2D (.kicad_mod).", "fr": "KiCadGen-Tool\n\nGénère des composants KiCad (empreinte 2D + modèle 3D) à partir de dimensions et de plans.\n\nModule actif : générateur d’empreinte 2D (.kicad_mod).", "de": "KiCadGen-Tool\n\nErzeugt KiCad-Komponenten (2D-Footprint + 3D-Modell) aus Abmessungen und Zeichnungen.\n\nAktives Modul: 2D-Footprint-Generator (.kicad_mod)."},
+    "document.delete_permanently": {"en": "Permanently delete \"{name}\" from {directory}?", "it": "Eliminare definitivamente \"{name}\" da {directory}?", "fr": "Supprimer définitivement « {name} » de {directory} ?", "de": "„{name}“ dauerhaft aus {directory} löschen?"},
+    "component.rename_question": {"en": "The extraction proposes the name \"{new_name}\" (currently \"{old_name}\").\n\n{directory} contains {count} documentation files.\nMove them to the folder for the new name? If you select No, the current name and folder are retained while the newly extracted data is still used.", "it": "L'estrazione propone il nome \"{new_name}\" (adesso è \"{old_name}\").\n\nIn {directory} ci sono {count} file di documentazione.\nLi sposto nella cartella del nuovo nome? Se scegli No, manterrò il nome e la cartella attuali e userò comunque i nuovi dati estratti.", "fr": "L’extraction propose le nom « {new_name} » (actuellement « {old_name} »).\n\n{directory} contient {count} fichiers de documentation.\nLes déplacer vers le dossier du nouveau nom ? Si vous sélectionnez Non, le nom et le dossier actuels seront conservés, tout en utilisant les nouvelles données extraites.", "de": "Die Extraktion schlägt den Namen „{new_name}“ vor (aktuell „{old_name}“).\n\n{directory} enthält {count} Dokumentationsdateien.\nIn den Ordner des neuen Namens verschieben? Bei Nein bleiben aktueller Name und Ordner erhalten; die neu extrahierten Daten werden dennoch verwendet."},
+    "component.rename_conflict": {"en": "The proposed folder “{new_name}” already contains documents with the same names. The current project “{old_name}” is retained: no document was moved or overwritten. The AI data is still acquired.", "it": "La cartella proposta “{new_name}” contiene già documenti con gli stessi nomi. Mantengo il progetto corrente “{old_name}”: nessun documento spostato o sovrascritto. I dati AI vengono comunque acquisiti.", "fr": "Le dossier proposé « {new_name} » contient déjà des documents portant les mêmes noms. Le projet actuel « {old_name} » est conservé : aucun document n’a été déplacé ni écrasé. Les données IA sont tout de même acquises.", "de": "Der vorgeschlagene Ordner „{new_name}“ enthält bereits Dokumente mit denselben Namen. Das aktuelle Projekt „{old_name}“ bleibt erhalten: Kein Dokument wurde verschoben oder überschrieben. Die KI-Daten werden dennoch übernommen."},
+    "extraction.completed": {"en": "Confidence: {confidence}\n\n{notes}{fillet_note}\n\nReview the values on the \"Footprint 2D\" tab before generating.", "it": "Confidenza: {confidence}\n\n{notes}{fillet_note}\n\nControlla i valori nel tab \"Footprint 2D\" prima di generare.", "fr": "Confiance : {confidence}\n\n{notes}{fillet_note}\n\nVérifiez les valeurs dans l’onglet « Empreinte 2D » avant de générer.", "de": "Konfidenz: {confidence}\n\n{notes}{fillet_note}\n\nPrüfen Sie die Werte in der Registerkarte \"Footprint 2D\" vor der Erzeugung."},
+    "extraction.fillet_note": {"en": "\n\n{count} fillets suggested from the photo → 3D model tab, annotations table.", "it": "\n\n{count} fillet suggeriti dalla foto → tab Modello 3D, tabella annotazioni.", "fr": "\n\n{count} congés suggérés à partir de la photo → onglet Modèle 3D, tableau des annotations.", "de": "\n\n{count} aus dem Foto vorgeschlagene Rundungen → Registerkarte 3D-Modell, Anmerkungstabelle."},
+    "export.destination_exists": {"en": "{target} already exists.\n\nOverwrite files with the same name? Files that exist only at the destination will be retained.", "it": "{target} esiste già.\n\nSovrascrivo i file con lo stesso nome? I file presenti solo nella destinazione resteranno invariati.", "fr": "{target} existe déjà.\n\nÉcraser les fichiers portant le même nom ? Les fichiers présents uniquement dans la destination seront conservés.", "de": "{target} ist bereits vorhanden.\n\nDateien mit gleichem Namen überschreiben? Dateien, die nur am Ziel vorhanden sind, bleiben erhalten."},
+    "generation.blocked": {"en": "{reason}\n\nNo files were generated. Complete the documents and repeat the analysis, or enable Advanced user under Configuration → Generation options and repeat the analysis to review the parameters.", "it": "{reason}\n\nNessun file generato. Integra i documenti e ripeti l’analisi, oppure attiva Advanced user in Configurazione → Opzioni di generazione e ripeti l’analisi per rivedere i parametri.", "fr": "{reason}\n\nAucun fichier n’a été généré. Complétez les documents et relancez l’analyse, ou activez Utilisateur avancé dans Configuration → Options de génération puis relancez l’analyse pour vérifier les paramètres.", "de": "{reason}\n\nEs wurden keine Dateien erzeugt. Vervollständigen Sie die Dokumente und wiederholen Sie die Analyse, oder aktivieren Sie Erweiterter Benutzer unter Konfiguration → Generierungsoptionen und wiederholen Sie die Analyse zur Prüfung der Parameter."},
+    "generation.overwrite_files": {"en": "These files already exist and will be overwritten:\n\n{files}", "it": "Questi file esistono già e verranno sovrascritti:\n\n{files}", "fr": "Ces fichiers existent déjà et seront écrasés :\n\n{files}", "de": "Diese Dateien sind bereits vorhanden und werden überschrieben:\n\n{files}"},
+    "terminal.confirm_geometry": {"en": "Send photo crops to OpenRouter to observe bodies and terminals? The call uses the selected model and may incur a cost. Positions and footprint remain unchanged.", "it": "Inviare i ritagli della foto a OpenRouter per osservare corpo e terminali? La chiamata usa il modello selezionato e può avere un costo. Posizioni e footprint restano invariati.", "fr": "Envoyer les extraits de la photo à OpenRouter pour observer les corps et les bornes ? L’appel utilise le modèle sélectionné et peut entraîner un coût. Les positions et l’empreinte restent inchangées.", "de": "Fotoausschnitte an OpenRouter senden, um Gehäuse und Anschlüsse zu untersuchen? Der Aufruf verwendet das ausgewählte Modell und kann Kosten verursachen. Positionen und Footprint bleiben unverändert."},
+    "terminal.confirm_leads": {"en": "Send the crops to OpenRouter to separate leads from solder? Bodies, counts and outlines remain unchanged; uncertain details are preserved. The call uses the selected model and may incur a cost. Positions and footprint remain unchanged.", "it": "Inviare i ritagli a OpenRouter per separare reofori e saldature? Corpi, conteggi e ingombri restano invariati; i dettagli incerti sono conservati. La chiamata usa il modello selezionato e può avere un costo. Posizioni e footprint restano invariati.", "fr": "Envoyer les extraits à OpenRouter pour séparer les pattes des soudures ? Les corps, nombres et encombrements restent inchangés ; les détails incertains sont conservés. L’appel utilise le modèle sélectionné et peut entraîner un coût. Les positions et l’empreinte restent inchangées.", "de": "Ausschnitte an OpenRouter senden, um Anschlussdrähte und Lot zu trennen? Gehäuse, Anzahl und Umrisse bleiben unverändert; unsichere Details bleiben erhalten. Der Aufruf verwendet das ausgewählte Modell und kann Kosten verursachen. Positionen und Footprint bleiben unverändert."},
+    "ui:Database profili": {"en": "Profile database", "it": "Database profili", "fr": "Base de profils", "de": "Profildatenbank"},
+    "ui:Impostazioni non salvate": {"en": "Settings not saved", "it": "Impostazioni non salvate", "fr": "Paramètres non enregistrés", "de": "Einstellungen nicht gespeichert"},
+    "ui:Operazione in corso": {"en": "Operation in progress", "it": "Operazione in corso", "fr": "Opération en cours", "de": "Vorgang läuft"},
+    "ui:Attendi la conclusione dell’operazione prima di chiudere.": {"en": "Wait for the operation to finish before closing.", "it": "Attendi la conclusione dell’operazione prima di chiudere.", "fr": "Attendez la fin de l’opération avant de fermer.", "de": "Warten Sie vor dem Schließen, bis der Vorgang abgeschlossen ist."},
+    "ui:Rimuovi file": {"en": "Remove file", "it": "Rimuovi file", "fr": "Supprimer le fichier", "de": "Datei entfernen"},
+    "ui:Completa la documentazione": {"en": "Complete the documentation", "it": "Completa la documentazione", "fr": "Compléter la documentation", "de": "Dokumentation vervollständigen"},
+    "ui:Profilo AI non disponibile": {"en": "AI profile unavailable", "it": "Profilo AI non disponibile", "fr": "Profil IA indisponible", "de": "KI-Profil nicht verfügbar"},
+    "ui:Revisione foto non disponibile": {"en": "Photo review unavailable", "it": "Revisione foto non disponibile", "fr": "Révision photo indisponible", "de": "Fotoprüfung nicht verfügbar"},
+    "ui:Rinomina componente": {"en": "Rename component", "it": "Rinomina componente", "fr": "Renommer le composant", "de": "Komponente umbenennen"},
+    "ui:Nome corrente mantenuto": {"en": "Current name retained", "it": "Nome corrente mantenuto", "fr": "Nom actuel conservé", "de": "Aktueller Name beibehalten"},
+    "ui:Estrazione completata": {"en": "Extraction complete", "it": "Estrazione completata", "fr": "Extraction terminée", "de": "Extraktion abgeschlossen"},
+    "ui:Estrazione fallita": {"en": "Extraction failed", "it": "Estrazione fallita", "fr": "Échec de l’extraction", "de": "Extraktion fehlgeschlagen"},
+    "ui:Nessuna nota.": {"en": "No notes.", "it": "Nessuna nota.", "fr": "Aucune note.", "de": "Keine Hinweise."},
+    "ui:Scegli la libreria di destinazione": {"en": "Choose destination library", "it": "Scegli la libreria di destinazione", "fr": "Choisir la bibliothèque de destination", "de": "Zielbibliothek auswählen"},
+    "ui:Destinazione esistente": {"en": "Destination exists", "it": "Destinazione esistente", "fr": "Destination existante", "de": "Ziel ist vorhanden"},
+    "ui:Generazione automatica non avviata": {"en": "Automatic generation not started", "it": "Generazione automatica non avviata", "fr": "Génération automatique non démarrée", "de": "Automatische Erzeugung nicht gestartet"},
+    "ui:Conferma sovrascrittura": {"en": "Confirm overwrite", "it": "Conferma sovrascrittura", "fr": "Confirmer l’écrasement", "de": "Überschreiben bestätigen"},
+    "ui:Generazione incompleta": {"en": "Incomplete generation", "it": "Generazione incompleta", "fr": "Génération incomplète", "de": "Unvollständige Erzeugung"},
+    "ui:La generazione non ha prodotto entrambi i risultati.": {"en": "Generation did not produce both results.", "it": "La generazione non ha prodotto entrambi i risultati.", "fr": "La génération n’a pas produit les deux résultats.", "de": "Die Erzeugung hat nicht beide Ergebnisse geliefert."},
+    "ui:Footprint generato, modello 3D non completato.": {"en": "Footprint generated; 3D model not completed.", "it": "Footprint generato, modello 3D non completato.", "fr": "Empreinte générée ; modèle 3D non terminé.", "de": "Footprint erzeugt; 3D-Modell nicht abgeschlossen."},
+    "ui:Foto non disponibile": {"en": "Photo unavailable", "it": "Foto non disponibile", "fr": "Photo indisponible", "de": "Foto nicht verfügbar"},
+    "ui:Acquisisci prima i componenti dalla foto nel tab Progetto.": {"en": "First acquire the components from the photo on the Project tab.", "it": "Acquisisci prima i componenti dalla foto nel tab Progetto.", "fr": "Commencez par acquérir les composants depuis la photo dans l’onglet Projet.", "de": "Erfassen Sie zuerst die Komponenten aus dem Foto in der Registerkarte Projekt."},
+    "ui:Terminali non disponibili": {"en": "Terminals unavailable", "it": "Terminali non disponibili", "fr": "Bornes indisponibles", "de": "Anschlüsse nicht verfügbar"},
+    "ui:Usa prima Rileva terminali dalla foto. L'affinamento conserva corpo e terminali esistenti.": {"en": "Run Detect terminals from photo first. Refinement preserves the existing body and terminals.", "it": "Usa prima Rileva terminali dalla foto. L'affinamento conserva corpo e terminali esistenti.", "fr": "Exécutez d’abord Détecter les bornes sur la photo. L’affinage conserve le corps et les bornes existants.", "de": "Führen Sie zuerst Anschlüsse im Foto erkennen aus. Die Verfeinerung behält vorhandenes Gehäuse und Anschlüsse bei."},
+    "ui:Dettaglio terminali AI": {"en": "AI terminal details", "it": "Dettaglio terminali AI", "fr": "Détails IA des bornes", "de": "KI-Anschlussdetails"},
+    "ui:Modello 3D non attivo": {"en": "3D model inactive", "it": "Modello 3D non attivo", "fr": "Modèle 3D inactif", "de": "3D-Modell inaktiv"},
+    "ui:Attiva il gruppo \"Modello 3D\" nel tab \"Footprint 2D\" e compila le dimensioni del corpo prima di generare.": {"en": "Enable the \"3D model\" group on the \"Footprint 2D\" tab and enter the body dimensions before generating.", "it": "Attiva il gruppo \"Modello 3D\" nel tab \"Footprint 2D\" e compila le dimensioni del corpo prima di generare.", "fr": "Activez le groupe « Modèle 3D » dans l’onglet « Empreinte 2D » et saisissez les dimensions du corps avant de générer.", "de": "Aktivieren Sie die Gruppe \"3D-Modell\" in der Registerkarte \"Footprint 2D\" und geben Sie vor der Erzeugung die Gehäuseabmessungen ein."},
+    "ui:Fillet non valido": {"en": "Invalid fillet", "it": "Fillet non valido", "fr": "Congé non valide", "de": "Ungültige Rundung"},
+    "ui:Testo non valido": {"en": "Invalid text", "it": "Testo non valido", "fr": "Texte non valide", "de": "Ungültiger Text"},
+    "ui:Database profili non disponibile": {"en": "Profile database unavailable", "it": "Database profili non disponibile", "fr": "Base de profils indisponible", "de": "Profildatenbank nicht verfügbar"},
+    "startup.profile_database_error": {"en": "Startup stopped without restoring or overwriting the profiles.\n{error}", "it": "Avvio interrotto senza ripristinare o sovrascrivere i profili.\n{error}", "fr": "Démarrage interrompu sans restaurer ni écraser les profils.\n{error}", "de": "Start abgebrochen, ohne Profile wiederherzustellen oder zu überschreiben.\n{error}"},
+    "summary.parameter_error": {"en": "<b>Parameter error:</b> {error}", "it": "<b>Errore parametri:</b> {error}", "fr": "<b>Erreur de paramètres :</b> {error}", "de": "<b>Parameterfehler:</b> {error}"},
+    "summary.parameter_error_line": {"en": "<br><b>Parameter error:</b> {error}", "it": "<br><b>Errore parametri:</b> {error}", "fr": "<br><b>Erreur de paramètres :</b> {error}", "de": "<br><b>Parameterfehler:</b> {error}"},
+    "summary.populated_pins": {"en": ", {count}/{total} populated pins", "it": ", {count}/{total} pin popolati", "fr": ", {count}/{total} broches présentes", "de": ", {count}/{total} bestückte Pins"},
+    "summary.pin_header": {"en": "<b>{name}</b><br>Folder: {folder}<br>Grid: {rows}x{cols}, pitch {pitch}mm, row spacing {row_spacing}mm, pad {pad}mm, drill {drill}mm{populated}", "it": "<b>{name}</b><br>Cartella: {folder}<br>Griglia: {rows}x{cols}, passo {pitch}mm, distanza righe {row_spacing}mm, pad {pad}mm, drill {drill}mm{populated}", "fr": "<b>{name}</b><br>Dossier : {folder}<br>Grille : {rows}x{cols}, pas {pitch}mm, écartement des rangées {row_spacing}mm, pastille {pad}mm, perçage {drill}mm{populated}", "de": "<b>{name}</b><br>Ordner: {folder}<br>Raster: {rows}x{cols}, Teilung {pitch}mm, Reihenabstand {row_spacing}mm, Pad {pad}mm, Bohrung {drill}mm{populated}"},
+    "summary.side": {"en": "{side}: {count} contacts at {pitch}mm", "it": "{side}: {count} contatti a {pitch}mm", "fr": "{side} : {count} contacts au pas de {pitch}mm", "de": "{side}: {count} Kontakte mit {pitch}mm Teilung"},
+    "summary.castellated": {"en": "<b>{name}</b><br>Folder: {folder}<br>Castellated module {length}x{width}mm, pad {pad_length}x{pad_width}mm (overhang {overhang}mm)<br>{sides}{error}", "it": "<b>{name}</b><br>Cartella: {folder}<br>Modulo castellated {length}x{width}mm, pad {pad_length}x{pad_width}mm (sporgenza {overhang}mm)<br>{sides}{error}", "fr": "<b>{name}</b><br>Dossier : {folder}<br>Module castellé {length}x{width}mm, pastille {pad_length}x{pad_width}mm (débord {overhang}mm)<br>{sides}{error}", "de": "<b>{name}</b><br>Ordner: {folder}<br>Castellated-Modul {length}x{width}mm, Pad {pad_length}x{pad_width}mm (Überstand {overhang}mm)<br>{sides}{error}"},
+    "ui:(nome vuoto)": {"en": "(empty name)", "it": "(nome vuoto)", "fr": "(nom vide)", "de": "(leerer Name)"},
+    "ui:nessun lato definito": {"en": "no side defined", "it": "nessun lato definito", "fr": "aucun côté défini", "de": "keine Seite definiert"},
+    "ui:sinistro": {"en": "left", "it": "sinistro", "fr": "gauche", "de": "links"},
+    "ui:destro": {"en": "right", "it": "destro", "fr": "droite", "de": "rechts"},
+    "ui:superiore": {"en": "top", "it": "superiore", "fr": "haut", "de": "oben"},
+    "ui:inferiore": {"en": "bottom", "it": "inferiore", "fr": "bas", "de": "unten"},
+    "ui:Scegli la cartella libreria": {"en": "Choose library folder", "it": "Scegli la cartella libreria", "fr": "Choisir le dossier de la bibliothèque", "de": "Bibliotheksordner auswählen"},
+    "dependencies.title": {"en": "Required applications", "it": "Applicazioni richieste", "fr": "Applications requises", "de": "Erforderliche Anwendungen"},
+    "dependencies.missing": {"en": "Not detected: {applications}", "it": "Non rilevate: {applications}", "fr": "Non détectées : {applications}", "de": "Nicht erkannt: {applications}"},
+    "dependencies.detected": {"en": "✓ {application} detected: {path}", "it": "✓ {application} rilevato: {path}", "fr": "✓ {application} détecté : {path}", "de": "✓ {application} erkannt: {path}"},
+    "dependencies.not_detected": {"en": "✗ {application} not detected", "it": "✗ {application} non rilevato", "fr": "✗ {application} non détecté", "de": "✗ {application} nicht erkannt"},
+    "dependencies.explanation": {
+        "en": "KiCad is needed to inspect and use the generated footprints. FreeCAD is needed to generate STEP/WRL models and the real 3D preview.\n\n{statuses}\n\nYou can continue using the available features. Install the missing applications and restart KiCadGen-Tool to enable the complete workflow.",
+        "it": "KiCad è necessario per controllare e utilizzare i footprint generati. FreeCAD è necessario per generare i modelli STEP/WRL e l’anteprima 3D reale.\n\n{statuses}\n\nPuoi continuare a utilizzare le funzioni disponibili. Installa le applicazioni mancanti e riavvia KiCadGen-Tool per abilitare il flusso completo.",
+        "fr": "KiCad est nécessaire pour contrôler et utiliser les empreintes générées. FreeCAD est nécessaire pour générer les modèles STEP/WRL et l’aperçu 3D réel.\n\n{statuses}\n\nVous pouvez continuer à utiliser les fonctions disponibles. Installez les applications manquantes, puis redémarrez KiCadGen-Tool pour activer le flux complet.",
+        "de": "KiCad wird benötigt, um die erzeugten Footprints zu prüfen und zu verwenden. FreeCAD wird für STEP/WRL-Modelle und die reale 3D-Vorschau benötigt.\n\n{statuses}\n\nSie können die verfügbaren Funktionen weiterhin verwenden. Installieren Sie die fehlenden Anwendungen und starten Sie KiCadGen-Tool neu, um den vollständigen Ablauf zu aktivieren."
+    },
+    "ui:Continua": {"en": "Continue", "it": "Continua", "fr": "Continuer", "de": "Fortfahren"},
+    "ui:Seleziona documentazione (datasheet, PDF, immagini...)": {"en": "Select documentation (datasheets, PDF, images...)", "it": "Seleziona documentazione (datasheet, PDF, immagini...)", "fr": "Sélectionner la documentation (fiches techniques, PDF, images…)", "de": "Dokumentation auswählen (Datenblätter, PDF, Bilder …)"},
+    "ui:Documenti (*.pdf *.png *.jpg *.jpeg *.txt *.md *.xlsx *.csv);;Tutti i file (*)": {"en": "Documents (*.pdf *.png *.jpg *.jpeg *.txt *.md *.xlsx *.csv);;All files (*)", "it": "Documenti (*.pdf *.png *.jpg *.jpeg *.txt *.md *.xlsx *.csv);;Tutti i file (*)", "fr": "Documents (*.pdf *.png *.jpg *.jpeg *.txt *.md *.xlsx *.csv);;Tous les fichiers (*)", "de": "Dokumente (*.pdf *.png *.jpg *.jpeg *.txt *.md *.xlsx *.csv);;Alle Dateien (*)"},
+    "ui:Immagini e PDF (*.png *.jpg *.jpeg *.webp *.gif *.pdf)": {"en": "Images and PDF (*.png *.jpg *.jpeg *.webp *.gif *.pdf)", "it": "Immagini e PDF (*.png *.jpg *.jpeg *.webp *.gif *.pdf)", "fr": "Images et PDF (*.png *.jpg *.jpeg *.webp *.gif *.pdf)", "de": "Bilder und PDF (*.png *.jpg *.jpeg *.webp *.gif *.pdf)"},
+    "ui:Sostituisci documento": {"en": "Replace document", "it": "Sostituisci documento", "fr": "Remplacer le document", "de": "Dokument ersetzen"},
+    "ui:Rimuovi documento": {"en": "Remove document", "it": "Rimuovi documento", "fr": "Supprimer le document", "de": "Dokument entfernen"},
+    "ui:Documento non caricato": {"en": "Document not loaded", "it": "Documento non caricato", "fr": "Document non chargé", "de": "Dokument nicht geladen"},
+    "ui:Documento non aggiornato": {"en": "Document not updated", "it": "Documento non aggiornato", "fr": "Document non mis à jour", "de": "Dokument nicht aktualisiert"},
+    "status.step_updated": {"en": "STEP model updated: {path}", "it": "Modello STEP aggiornato: {path}", "fr": "Modèle STEP mis à jour : {path}", "de": "STEP-Modell aktualisiert: {path}"},
+    "status.step_failed": {"en": "STEP generation failed: {error}", "it": "Generazione STEP fallita: {error}", "fr": "Échec de la génération STEP : {error}", "de": "STEP-Erzeugung fehlgeschlagen: {error}"},
+    "status.parameter_error": {"en": "Parameter error: {error}", "it": "Errore parametri: {error}", "fr": "Erreur de paramètres : {error}", "de": "Parameterfehler: {error}"},
+    "status.terminals_observed": {
+        "en": "{count} components with observed terminals. Select Regenerate 3D model to apply them. Unresolved geometries remain simplified.",
+        "it": "{count} componenti con terminali osservati. Premi Rigenera modello 3D per applicarli. Le geometrie non risolte restano semplificate.",
+        "fr": "{count} composants avec bornes observées. Sélectionnez Régénérer le modèle 3D pour les appliquer. Les géométries non résolues restent simplifiées.",
+        "de": "{count} Komponenten mit erkannten Anschlüssen. Wählen Sie 3D-Modell neu erzeugen, um sie anzuwenden. Nicht aufgelöste Geometrien bleiben vereinfacht."
+    },
+    "status.leads_observed": {
+        "en": "{count} leads with detail separated from solder (AI estimates). Bodies and outlines are unchanged. Select Regenerate 3D model to apply them.",
+        "it": "{count} reofori con dettaglio separato dalla saldatura (stime AI). Corpi e ingombri invariati. Premi Rigenera modello 3D per applicarli.",
+        "fr": "{count} pattes dont le détail est séparé de la soudure (estimations IA). Les corps et encombrements sont inchangés. Sélectionnez Régénérer le modèle 3D pour les appliquer.",
+        "de": "{count} Anschlussdrähte mit vom Lot getrennten Details (KI-Schätzungen). Gehäuse und Umrisse bleiben unverändert. Wählen Sie 3D-Modell neu erzeugen, um sie anzuwenden."
+    },
+    "ui:Analisi in corso...": {"en": "Analysis in progress...", "it": "Analisi in corso...", "fr": "Analyse en cours…", "de": "Analyse läuft …"},
+    "ui:Componenti corretti dalla foto. Modello 3D da rigenerare: premi \"Rigenera modello 3D\" per aggiornare STEP e anteprima.": {"en": "Components corrected from the photo. The 3D model must be regenerated: select \"Regenerate 3D model\" to update the STEP file and preview.", "it": "Componenti corretti dalla foto. Modello 3D da rigenerare: premi \"Rigenera modello 3D\" per aggiornare STEP e anteprima.", "fr": "Composants corrigés à partir de la photo. Le modèle 3D doit être régénéré : sélectionnez « Régénérer le modèle 3D » pour mettre à jour le fichier STEP et l’aperçu.", "de": "Komponenten anhand des Fotos korrigiert. Das 3D-Modell muss neu erzeugt werden: Wählen Sie \"3D-Modell neu erzeugen\", um STEP-Datei und Vorschau zu aktualisieren."},
+    "ui:Dati modificati. Modello 3D da rigenerare.": {"en": "Data changed. The 3D model must be regenerated.", "it": "Dati modificati. Modello 3D da rigenerare.", "fr": "Données modifiées. Le modèle 3D doit être régénéré.", "de": "Daten geändert. Das 3D-Modell muss neu erzeugt werden."},
+    "ui:Attendi la fine dell'analisi terminali prima di chiudere.": {"en": "Wait for terminal analysis to finish before closing.", "it": "Attendi la fine dell'analisi terminali prima di chiudere.", "fr": "Attendez la fin de l’analyse des bornes avant de fermer.", "de": "Warten Sie vor dem Schließen, bis die Anschlussanalyse abgeschlossen ist."},
+    "ui:Analisi dei terminali nella foto in corso...": {"en": "Analyzing terminals in the photo...", "it": "Analisi dei terminali nella foto in corso...", "fr": "Analyse des bornes sur la photo…", "de": "Anschlüsse im Foto werden analysiert …"},
+    "ui:Dati modificati durante l'analisi: ripeti Rileva terminali.": {"en": "Data changed during analysis: run Detect terminals again.", "it": "Dati modificati durante l'analisi: ripeti Rileva terminali.", "fr": "Les données ont changé pendant l’analyse : relancez Détecter les bornes.", "de": "Daten wurden während der Analyse geändert: Anschlüsse erkennen erneut ausführen."},
+    "ui:Nessun nuovo dettaglio dei reofori applicabile: geometria e anteprima conservate.": {"en": "No applicable new lead details: geometry and preview were preserved.", "it": "Nessun nuovo dettaglio dei reofori applicabile: geometria e anteprima conservate.", "fr": "Aucun nouveau détail de patte applicable : la géométrie et l’aperçu ont été conservés.", "de": "Keine neuen anwendbaren Anschlussdrahtdetails: Geometrie und Vorschau wurden beibehalten."},
+    "ui:Generazione in corso (FreeCAD)...": {"en": "Generating (FreeCAD)...", "it": "Generazione in corso (FreeCAD)...", "fr": "Génération en cours (FreeCAD)…", "de": "Erzeugung läuft (FreeCAD) …"},
+    "ui:Generazione STEP in corso tramite FreeCAD...": {"en": "Generating STEP with FreeCAD...", "it": "Generazione STEP in corso tramite FreeCAD...", "fr": "Génération STEP en cours avec FreeCAD…", "de": "STEP wird mit FreeCAD erzeugt …"},
+    "ui:Anteprima aggiornata con la geometria reale esportata (fillet e testo inclusi).": {"en": "Preview updated with the exported real geometry, including fillets and text.", "it": "Anteprima aggiornata con la geometria reale esportata (fillet e testo inclusi).", "fr": "Aperçu mis à jour avec la géométrie réelle exportée, congés et texte compris.", "de": "Vorschau mit der exportierten realen Geometrie einschließlich Rundungen und Text aktualisiert."},
+    "ui:Geometria reale del modulo (PCB con semi-fori sul bordo e blocco dei componenti).": {"en": "Real module geometry (PCB with edge half-holes and component bodies).", "it": "Geometria reale del modulo (PCB con semi-fori sul bordo e blocco dei componenti).", "fr": "Géométrie réelle du module (PCB avec demi-trous en bordure et corps des composants).", "de": "Reale Modulgeometrie (PCB mit Halblöchern am Rand und Komponentenkörpern)."},
+    "ui:Attiva \"Modello 3D\" e premi \"Genera footprint\": il modello del modulo (PCB con semi-fori + componenti) si vede qui dopo la generazione con FreeCAD.": {"en": "Enable \"3D model\" and select \"Generate footprint\": the module model (PCB with half-holes and components) appears here after FreeCAD generation.", "it": "Attiva \"Modello 3D\" e premi \"Genera footprint\": il modello del modulo (PCB con semi-fori + componenti) si vede qui dopo la generazione con FreeCAD.", "fr": "Activez « Modèle 3D » puis sélectionnez « Générer l’empreinte » : le modèle du module (PCB avec demi-trous et composants) apparaîtra ici après la génération FreeCAD.", "de": "Aktivieren Sie \"3D-Modell\" und wählen Sie \"Footprint erzeugen\": Das Modulmodell (PCB mit Halblöchern und Komponenten) erscheint hier nach der FreeCAD-Erzeugung."},
+    "ui:Anteprima approssimata (poligoni, per farsi un'idea dell'ingombro). Premi \"Genera footprint\" per ottenere il modello .step esatto via FreeCAD.": {"en": "Approximate preview (polygons for an outline estimate). Select \"Generate footprint\" to obtain the exact .step model through FreeCAD.", "it": "Anteprima approssimata (poligoni, per farsi un'idea dell'ingombro). Premi \"Genera footprint\" per ottenere il modello .step esatto via FreeCAD.", "fr": "Aperçu approximatif (polygones pour estimer l’encombrement). Sélectionnez « Générer l’empreinte » pour obtenir le modèle .step exact avec FreeCAD.", "de": "Ungefähre Vorschau (Polygone zur Abschätzung des Umrisses). Wählen Sie \"Footprint erzeugen\", um das genaue .step-Modell mit FreeCAD zu erhalten."},
+    "ui:Documenti precedenti conservati: usa Carica per assegnarli ai tre ruoli.": {"en": "Previous documents were preserved: use Load to assign them to the three roles.", "it": "Documenti precedenti conservati: usa Carica per assegnarli ai tre ruoli.", "fr": "Les documents précédents ont été conservés : utilisez Charger pour les attribuer aux trois rôles.", "de": "Vorherige Dokumente wurden beibehalten: Weisen Sie sie mit Laden den drei Rollen zu."},
+    "ui:Anteprima non disponibile. Usa “Apri file completo” per consultare il documento.": {"en": "Preview unavailable. Use “Open full file” to view the document.", "it": "Anteprima non disponibile. Usa “Apri file completo” per consultare il documento.", "fr": "Aperçu indisponible. Utilisez « Ouvrir le fichier complet » pour consulter le document.", "de": "Vorschau nicht verfügbar. Öffnen Sie das Dokument über „Vollständige Datei öffnen“."},
 }
 
 
@@ -135,7 +555,8 @@ class I18n:
         @param default Optional source text used when the key is unknown.
         @return Localized text with optional named substitutions applied.
         """
-        fallback = default or DEFAULT_TRANSLATIONS.get(key, {}).get("en", key)
+        bundled = DEFAULT_TRANSLATIONS.get(key, {})
+        fallback = bundled.get(self.language) or bundled.get("en") or default or key
         value = self.store.translation(key, self.language, fallback)
         try:
             return value.format(**values)
@@ -152,35 +573,149 @@ class I18n:
         """@brief Translate a visible source string from the UI catalog."""
         return self.tr("ui:" + source, default=source)
 
+    def component_type(self, key: str, fallback: str) -> str:
+        """@brief Translate a built-in component type while preserving custom labels."""
+        translation_key = "component_type." + key if key else "component_type.none"
+        return self.tr(translation_key, default=fallback)
+
     def retranslate_widgets(self, root) -> None:
-        """@brief Refresh translatable widget text without touching user data."""
-        translatable_types = (QCheckBox, QGroupBox, QLabel, QPushButton, QRadioButton)
-        title = root.property("i18n_window_title_source") if hasattr(root, "property") else None
-        if title is None and hasattr(root, "windowTitle"):
-            title = root.windowTitle()
-            if title and hasattr(root, "setProperty"):
-                root.setProperty("i18n_window_title_source", title)
-        if title and hasattr(root, "setWindowTitle"):
-            root.setWindowTitle(self.text(title))
+        """@brief Refresh catalogued widget text without touching user data.
+
+        @details Source strings are captured once in dynamic Qt properties. This
+        allows repeated language changes without using an already translated
+        value as the next lookup key. Data-bearing controls such as model combo
+        boxes and table cells are deliberately left untouched.
+        """
         if not hasattr(root, "findChildren"):
             return
-        for widget in root.findChildren(QWidget):
+        widgets = [root] if isinstance(root, QWidget) else []
+        widgets.extend(root.findChildren(QWidget))
+        translatable_types = (
+            QAbstractButton,
+            QAbstractSpinBox,
+            QComboBox,
+            QDialog,
+            QGroupBox,
+            QLabel,
+            QLineEdit,
+            QMainWindow,
+            QPlainTextEdit,
+            QTableWidget,
+            QTabWidget,
+            QTextEdit,
+            QTreeWidget,
+        )
+        for widget in widgets:
+            if widget.property("i18n_skip") is True:
+                continue
             if not isinstance(widget, translatable_types):
                 continue
-            source = widget.property("i18n_source")
-            if source is None:
-                try:
+
+            if isinstance(widget, (QDialog, QMainWindow)):
+                title = widget.property("i18n_window_title_source")
+                if title is None and widget.windowTitle():
+                    title = widget.windowTitle()
+                    widget.setProperty("i18n_window_title_source", title)
+                if title:
+                    widget.setWindowTitle(self.text(title))
+
+            if isinstance(widget, QGroupBox):
+                source = widget.property("i18n_title_source")
+                if source is None:
+                    source = widget.title()
+                    if source:
+                        widget.setProperty("i18n_title_source", source)
+                if source:
+                    rendered = self.text(source)
+                    widget.setTitle(rendered)
+                    widget.setProperty("i18n_title_rendered", rendered)
+
+            if isinstance(widget, (QAbstractButton, QLabel)):
+                source = widget.property("i18n_source")
+                previous = widget.property("i18n_rendered")
+                if source is not None and previous is not None and widget.text() != previous:
                     source = widget.text()
-                except (AttributeError, TypeError):
-                    continue
-                if not source:
-                    continue
-                widget.setProperty("i18n_source", source)
-            widget.setText(self.text(source))
+                    widget.setProperty("i18n_source", source)
+                if source is None and widget.text():
+                    source = widget.text()
+                    widget.setProperty("i18n_source", source)
+                if source:
+                    rendered = self.text(source)
+                    widget.setText(rendered)
+                    widget.setProperty("i18n_rendered", rendered)
+
+            if isinstance(widget, (QLineEdit, QTextEdit, QPlainTextEdit, QComboBox)):
+                placeholder = widget.property("i18n_placeholder_source")
+                previous = widget.property("i18n_placeholder_rendered")
+                if (placeholder is not None and previous is not None
+                        and widget.placeholderText() != previous):
+                    placeholder = widget.placeholderText()
+                    widget.setProperty("i18n_placeholder_source", placeholder)
+                if placeholder is None and widget.placeholderText():
+                    placeholder = widget.placeholderText()
+                    widget.setProperty("i18n_placeholder_source", placeholder)
+                if placeholder:
+                    rendered = self.text(placeholder)
+                    widget.setPlaceholderText(rendered)
+                    widget.setProperty("i18n_placeholder_rendered", rendered)
+
+            if isinstance(widget, QTabWidget) and widget.property("i18n_skip_tabs") is not True:
+                sources = getattr(widget, "_i18n_tab_sources", None)
+                if sources is None:
+                    sources = tuple(widget.tabText(index) for index in range(widget.count()))
+                    widget._i18n_tab_sources = sources
+                for index, source in enumerate(sources[:widget.count()]):
+                    widget.setTabText(index, self.text(source))
+
+            if isinstance(widget, QTableWidget):
+                sources = getattr(widget, "_i18n_header_sources", None)
+                if sources is None:
+                    sources = tuple(
+                        widget.horizontalHeaderItem(index).text()
+                        if widget.horizontalHeaderItem(index) else ""
+                        for index in range(widget.columnCount())
+                    )
+                    widget._i18n_header_sources = sources
+                for index, source in enumerate(sources[:widget.columnCount()]):
+                    item = widget.horizontalHeaderItem(index)
+                    if item is not None and source:
+                        item.setText(self.text(source))
+
+            if isinstance(widget, QTreeWidget):
+                sources = getattr(widget, "_i18n_header_sources", None)
+                if sources is None:
+                    header = widget.headerItem()
+                    sources = tuple(header.text(index) for index in range(widget.columnCount()))
+                    widget._i18n_header_sources = sources
+                header = widget.headerItem()
+                for index, source in enumerate(sources[:widget.columnCount()]):
+                    if source:
+                        header.setText(index, self.text(source))
+
             tooltip = widget.property("i18n_tooltip_source")
+            previous = widget.property("i18n_tooltip_rendered")
+            if tooltip is not None and previous is not None and widget.toolTip() != previous:
+                tooltip = widget.toolTip()
+                widget.setProperty("i18n_tooltip_source", tooltip)
             if tooltip is None:
                 tooltip = widget.toolTip()
                 if tooltip:
                     widget.setProperty("i18n_tooltip_source", tooltip)
             if tooltip:
-                widget.setToolTip(self.text(tooltip))
+                rendered = self.text(tooltip)
+                widget.setToolTip(rendered)
+                widget.setProperty("i18n_tooltip_rendered", rendered)
+
+            accessible_name = widget.property("i18n_accessible_name_source")
+            previous = widget.property("i18n_accessible_name_rendered")
+            if (accessible_name is not None and previous is not None
+                    and widget.accessibleName() != previous):
+                accessible_name = widget.accessibleName()
+                widget.setProperty("i18n_accessible_name_source", accessible_name)
+            if accessible_name is None and widget.accessibleName():
+                accessible_name = widget.accessibleName()
+                widget.setProperty("i18n_accessible_name_source", accessible_name)
+            if accessible_name:
+                rendered = self.text(accessible_name)
+                widget.setAccessibleName(rendered)
+                widget.setProperty("i18n_accessible_name_rendered", rendered)

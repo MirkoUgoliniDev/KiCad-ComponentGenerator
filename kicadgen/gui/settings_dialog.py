@@ -36,6 +36,7 @@ class LlmSettingsDialog(QDialog):
                  current_grounding_prompt=None, current_verification_prompt=None,
                  current_verification_model=None):
         super().__init__(parent)
+        self.i18n = getattr(parent, 'i18n', None)
         self.setWindowTitle("Modello e prompt di sistema LLM")
         self.resize(820, 680)
         self.setModal(True)
@@ -159,8 +160,12 @@ class LlmSettingsDialog(QDialog):
         button.setIcon(QIcon(str(Path(__file__).parent / "assets" / "info.svg")))
         button.setIconSize(QSize(20, 20))
         button.setFixedSize(32, 32)
-        button.setToolTip(f"Informazioni: {title}")
-        button.setAccessibleName(f"Informazioni: {title}")
+        info_label = (
+            self.i18n.tr("tooltip.info_section", section=self.i18n.text(title))
+            if self.i18n is not None else f"Informazioni: {title}"
+        )
+        button.setToolTip(info_label)
+        button.setAccessibleName(info_label)
         button.setObjectName(f"analysis_info_{index}")
         button.clicked.connect(lambda checked=False: self._show_info(index))
         self.info_buttons.append(button)
@@ -168,18 +173,24 @@ class LlmSettingsDialog(QDialog):
 
     def _show_info(self, index: int) -> None:
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"Informazioni — {self.tabs.tabText(index)}")
+        prefix = self.i18n.text("Informazioni") if self.i18n is not None else "Informazioni"
+        dialog.setWindowTitle(f"{prefix} — {self.tabs.tabText(index)}")
         dialog.setModal(True)
         dialog.resize(640, 360)
         layout = QVBoxLayout(dialog)
         explanation = QTextEdit()
         explanation.setReadOnly(True)
-        explanation.setPlainText(self._help_texts[index])
+        explanation.setPlainText(
+            self.i18n.tr(f"help.settings.stage.{index}", default=self._help_texts[index])
+            if self.i18n is not None else self._help_texts[index]
+        )
         layout.addWidget(explanation)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.button(QDialogButtonBox.StandardButton.Close).setText("Chiudi")
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
+        if self.i18n is not None:
+            self.i18n.retranslate_widgets(dialog)
         try:
             dialog.exec()
         finally:
@@ -208,7 +219,10 @@ class LlmSettingsDialog(QDialog):
             self.field_verification_model.setText(DEFAULT_MODEL)
 
     def _refresh_verification_label(self):
-        self.verification_model_label.setText('Modello verifica:')
+        source = 'Modello verifica:'
+        self.verification_model_label.setText(
+            self.i18n.text(source) if self.i18n is not None else source
+        )
 
     def _pick_verification_model(self):
         chosen = pick_model(self._verification_model, self, title='Modello per verifica foto')
