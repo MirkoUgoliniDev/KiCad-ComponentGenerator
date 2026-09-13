@@ -9,10 +9,17 @@ This repository generates KiCad component libraries from mechanical and electric
 - Keep generated footprint, symbol and 3D model names consistent.
 - Treat estimated mechanical dimensions as estimates and record them in notes.
 - Do not commit `.env`, `config.json`, Python caches, generated output or local KiCad state.
+- Keep generated KiCad output isolated until it has been reviewed in the KiCad tab.
+- Preview must not modify `fp-lib-table`; project installation uses `${KIPRJMOD}` and
+  global installation uses explicit absolute paths with overwrite confirmation.
+- Preserve unrelated library entries and make packaging operations rollback-safe.
 
 ## Validation
 
 Run the focused test suite with `pytest`. For changes affecting geometry, run the relevant CAD/footprint tests and inspect generated output under `generated/` locally.
+For KiCad packaging changes, also run `tests/test_kicad_library.py`, validate the
+SQLite translation catalog for all four languages, and use KiCad CLI read-only
+render/export checks when KiCad is installed.
 
 ## Documentation standard — mandatory Doxygen-compatible comments
 
@@ -80,6 +87,8 @@ Non ottimizzare il semplice conteggio dei componenti a scapito della geometria.
 - `kicadgen/services/datasheet_extractor.py`: estrazione generale e fallback.
 - `kicadgen/gui/photo_review_dialog.py`: revisione fotografica interattiva.
 - `kicadgen/gui/main_window.py`: integrazione, log, worker e revisioni anteprima.
+- `kicadgen/services/kicad_library.py`: isolated KiCad preview, portable project
+  installation, global library registration and rollback-safe file handling.
 - `kicadgen/cad3d/step_generator.py`: geometria CAD, bordo e sovrapposizioni;
   supportare anche rotazioni non multiple di 90 gradi.
 - `docs/photo-mechanical-workflow.md`: dettagli, limiti e comandi di riproduzione.
@@ -100,6 +109,8 @@ configurati nel repository.
 Per proseguire: assegnare file disgiunti, chiedere riproduzioni dei difetti e test,
 poi integrare centralmente. Non far modificare contemporaneamente lo stesso file
 a più agenti. Non delegare commit/push indipendenti sullo stesso checkout.
+Per le modifiche al packaging KiCad, usare l'agente read-only
+`kicad-workflow-reviewer` prima della pubblicazione.
 
 ## Skill e strumenti effettivamente usati
 
@@ -127,6 +138,16 @@ per configurazione e valori predefiniti.
 - Il riferimento non è una BOM validata né una misura metrologica. Verificare
   altezze e distanze critiche con viste quotate o misure; testare altri moduli
   prima di sostenere prestazioni generali o industriali.
+
+## Current KiCad delivery baseline
+
+The repository now includes a dedicated KiCad tab with three operations: test
+the generated result in an isolated PCB Editor project, install a portable
+project library, or install a global library. The current full-suite baseline
+is 1061 passed, 2 expected failures and 19 subtests. The last published
+integration is merge commit `692ca95` on `main`, with implementation commit
+`0513e89` on `FIX`. Update these historical values after future packaging
+changes.
 
 Eseguire la suite dalla radice del repository:
 

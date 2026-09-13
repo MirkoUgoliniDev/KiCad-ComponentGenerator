@@ -16,6 +16,9 @@ Use this skill when implementing or adapting a component generator in this repos
 5. Keep output names and folder layout KiCad-compatible: symbol file, `.pretty` footprint directory, `.3dshapes` model directory, and optional docs/verification files.
 6. Record estimates and missing source data in component notes or documentation; do not present estimates as manufacturer-certified dimensions.
 7. Run the smallest relevant tests, then the full test suite when the shared core or CAD code changes.
+8. When delivery is requested, use the KiCad tab workflow: review in an
+   isolated preview first, then install into a project or global library only
+   after explicit confirmation.
 
 ## Geometry rules
 
@@ -28,3 +31,8 @@ Use this skill when implementing or adapting a component generator in this repos
 ## Safety
 
 Do not overwrite source documents or unrelated generated components. Do not read or commit secrets from `.env` or `config.json`.
+
+For library delivery, use `kicadgen.services.kicad_library` rather than hand-
+writing KiCad library tables. Preserve unrelated `fp-lib-table` entries, use
+`${KIPRJMOD}` for project model references, and keep staging rollback-safe.
+Do not change LLM prompts as part of packaging work.
