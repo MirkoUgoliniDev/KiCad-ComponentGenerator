@@ -12,6 +12,8 @@ env/
 .env
 .env.*
 config.json
+data/*.sqlite3*
+data/config-before-sqlite-*.json
 
 # Cache locale dell'elenco modelli OpenRouter
 .openrouter_models.json

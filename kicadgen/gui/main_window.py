@@ -40,6 +40,7 @@ from copy import deepcopy
 import math
 import re
 import shutil
+import sqlite3
 import sys
 import webbrowser
 from pathlib import Path
@@ -68,19 +69,23 @@ from ..generators.pin_header import PinHeaderParams, build_pin_header, pin_posit
 from ..generators.package import build_package
 from ..core.package_geometry import PackageGeometry, package_from_mapping
 from ..services import component_types
+from ..services.analysis_profiles import ProfileStore, ProfileError
+from ..services.document_roles import DocumentSet, MANIFEST, SUFFIXES
 from ..services.datasheet_extractor import (
     COMPONENT_KINDS, DEFAULT_SYSTEM_PROMPT, ExtractedParams, ExtractionError,
     extract_pin_header_params,
 )
 from ..services.openrouter import DEFAULT_MODEL
-from .app_config import CONFIG_PATH, DEFAULTS, load_config, save_config
+from .app_config import CONFIG_PATH, DEFAULTS, config_path, load_config, save_config
 from .analysis_overlay import AnalysisOverlay
 from .generation_options_dialog import GenerationOptionsDialog
+from .guided_documents import GuidedDocuments
 from .model_dialog import pick_model
 from .pinout_dialog import PinoutDialog
 from .photo_review_dialog import PhotoReviewDialog, PhotoTransform
 from .preview_3d_vtk import Preview3DVtk
 from .settings_dialog import LlmSettingsDialog
+from .profile_dialog import ProfilesDialog, icon_button
 from .theme import BASE, BLUE, SURFACE0, SURFACE1, SURFACE2, TEXT, YELLOW, APP_QSS
 
 APP_DIR = Path(__file__).resolve().parent.parent.parent
@@ -156,6 +161,7 @@ class GenerateWorker(QThread):
     cad3d_done = pyqtSignal(str)
     cad3d_error = pyqtSignal(str)
     warning = pyqtSignal(str)
+    progress = pyqtSignal(str)
 
     def __init__(
         self, params: PinHeaderParams | CastellatedModuleParams | PackageGeometry, project_dir: Path,
@@ -171,6 +177,7 @@ class GenerateWorker(QThread):
 
     def run(self) -> None:
         try:
+            self.progress.emit('Generazione del footprint KiCad…')
             footprint = (
                 build_castellated_module(self.params)
                 if isinstance(self.params, CastellatedModuleParams)
@@ -188,10 +195,13 @@ class GenerateWorker(QThread):
 
         if self.body is not None:
             try:
+                self.progress.emit('Generazione del modello 3D tramite FreeCAD…')
                 result = _generate_3d(
                     self.params, self.body, self.project_dir,
                     self.fillets, self.face_texts,
                 )
+                for warning in result.get('warnings', []):
+                    self.warning.emit(warning)
                 self.cad3d_done.emit(str(result["step_path"]))
             except Cad3DError as exc:
                 self.cad3d_error.emit(str(exc))
@@ -247,10 +257,11 @@ class TerminalDetailWorker(QThread):
     error = pyqtSignal(str)
     progress = pyqtSignal(str)
 
-    def __init__(self, photo, components, model, only_leads=False):
+    def __init__(self, photo, components, model, only_leads=False, system_prompt=None):
         super().__init__()
         self.photo, self.components, self.model = photo, deepcopy(components), model
         self.only_leads = only_leads
+        self.system_prompt = system_prompt
 
     def run(self):
         from ..services.photo_terminals import observe_terminals
@@ -260,7 +271,8 @@ class TerminalDetailWorker(QThread):
             operation = refine_leads if self.only_leads else observe_terminals
             self.done.emit(operation(self.photo, self.components, self.model,
                 call_tool, self.progress.emit,
-                Path(__file__).resolve().parents[2] / 'generated' / 'photo-cache'))
+                Path(__file__).resolve().parents[2] / 'generated' / 'photo-cache',
+                **({'system_prompt': self.system_prompt} if self.system_prompt else {})))
         except Exception as exc:
             self.error.emit(f"Dettaglio terminali fallito: {exc}")
 
@@ -269,7 +281,7 @@ class ExtractWorker(QThread):
     """QThread che chiama OpenRouter per estrarre i parametri dal datasheet.
 
     `model` e' l'id OpenRouter da usare per questa estrazione: puo' essere
-    il default di config.json oppure un modello piu' capace scelto solo per
+    il default del profilo SQLite oppure un modello diverso scelto solo per
     la sessione corrente.
 
     Segnali:
@@ -287,6 +299,8 @@ class ExtractWorker(QThread):
         extra_instructions: str | None = None, include_nc_pins: bool = True,
         model: str | None = None, vision_model: str | None = None,
         grounding_prompt: str | None = None, verification_prompt: str | None = None,
+        verification_model: str | None = None, terminal_prompt: str | None = None,
+        document_roles: dict | None = None,
     ):
         super().__init__()
         self.doc_paths = doc_paths
@@ -297,6 +311,9 @@ class ExtractWorker(QThread):
         self.vision_model = vision_model
         self.grounding_prompt = grounding_prompt
         self.verification_prompt = verification_prompt
+        self.verification_model = verification_model
+        self.terminal_prompt = terminal_prompt
+        self.document_roles = dict(document_roles) if document_roles is not None else None
 
     def run(self) -> None:
         try:
@@ -305,6 +322,8 @@ class ExtractWorker(QThread):
                 model=self.model,
                 vision_model=self.vision_model,
                 grounding_prompt=self.grounding_prompt, verification_prompt=self.verification_prompt,
+                verification_model=self.verification_model, terminal_prompt=self.terminal_prompt,
+                document_roles=self.document_roles,
                 system_prompt=self.system_prompt,
                 extra_instructions=self.extra_instructions,
                 include_nc_pins=self.include_nc_pins,
@@ -320,7 +339,7 @@ class ExtractWorker(QThread):
 class MainWindow(QMainWindow):
     """Finestra principale: 4 tab, Progetto / Footprint 2D / Genera / Anteprima."""
 
-    def __init__(self):
+    def __init__(self, profile_store=None):
         super().__init__()
         self.setWindowTitle("KiCadGen-Tool")
         # Size requested for startup; reserve space for the native frame/taskbar.
@@ -347,16 +366,27 @@ class MainWindow(QMainWindow):
         self._model_revision = 0
         self._acquisition_completed = False
         self._config = load_config()
+        self.profile_store = profile_store or ProfileStore(legacy_config=self._config, legacy_path=config_path())
         # Modello scelto solo per questa sessione (datasheet difficile): non
         # viene salvato in config.json e si perde alla chiusura, per scelta.
         self._session_model: str | None = None
         self._session_vision_model: str | None = None
+        self._session_verification_model: str | None = None
+        self._auto_after_extraction = False
+        self._auto_generation_params = None
+        self._applying_extraction = False
+        self._extract_finish_pending = False
+        self._automatic_generation_active = False
+        self._automatic_footprint_done = False
+        self._automatic_3d_done = False
+        self._automatic_generation_errors = []
 
         self._build_menu()
         self._build_central()
+        self._apply_user_mode()
         # Project type is restored before the footprint widgets exist.
         self.group_castellated.setChecked(
-            self.combo_component_type.currentData() == "aggregate_castellated"
+            self._selected_family() == "aggregate_castellated"
         )
         self._sync_footprint_subtabs()
         self._refresh_docs_list()
@@ -371,8 +401,11 @@ class MainWindow(QMainWindow):
         file_menu.addAction("Esci", self.close)
 
         config_menu = self.menuBar().addMenu("&Configurazione")
+        self.action_profiles = config_menu.addAction(
+            QIcon(str(Path(__file__).parent / 'assets' / 'profile-edit.svg')),
+            "Gestione tipologie e profili AI...", self._edit_profiles)
         config_menu.addAction(
-            "Modello e prompt di sistema LLM...", self._edit_llm_settings
+            "Default generali AI...", self._edit_llm_settings
         )
         config_menu.addSeparator()
 
@@ -390,45 +423,128 @@ class MainWindow(QMainWindow):
         help_menu.addAction("About", self._show_about)
 
     def _edit_generation_options(self) -> None:
-        dialog = GenerationOptionsDialog(bool(self._config.get("include_nc_pins", True)), self)
+        dialog = GenerationOptionsDialog(bool(self._config.get("include_nc_pins", True)), self,
+                                         advanced_user=self._advanced_user())
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         checked = dialog.include_nc_pins()
         self._config["include_nc_pins"] = checked
+        self._config['advanced_user'] = dialog.advanced_user()
         save_config(self._config)
+        self._apply_user_mode()
         self._append_log(
             "Pin NC: verranno generati." if checked
             else "Pin NC: NON verranno generati (attenzione: il piedino fisico resta)."
         )
 
     def _edit_llm_settings(self) -> None:
+        try:
+            defaults = self.profile_store.defaults()
+        except (ProfileError, sqlite3.Error, OSError) as exc:
+            QMessageBox.warning(self, 'Database profili', str(exc))
+            return
         dialog = LlmSettingsDialog(
-            self._config["system_prompt"], self._default_model(), self,
-            current_vision_model=self._default_vision_model(),
-            current_grounding_prompt=self._config.get("grounding_prompt"),
-            current_verification_prompt=self._config.get("verification_prompt"),
+            defaults["system_prompt"], defaults["model"], self,
+            current_vision_model=defaults["vision_model"],
+            current_grounding_prompt=defaults["grounding_prompt"],
+            current_verification_prompt=defaults["verification_prompt"],
+            current_verification_model=defaults["verification_model"],
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
-        self._config["system_prompt"] = dialog.prompt() or DEFAULT_SYSTEM_PROMPT
-        self._config["model"] = dialog.model()
-        self._config["vision_model"] = dialog.vision_model()
-        self._config["grounding_prompt"] = dialog.grounding_prompt()
-        self._config["verification_prompt"] = dialog.verification_prompt()
-        save_config(self._config)
+        try:
+            self.profile_store.save_defaults(dict(
+                system_prompt=dialog.prompt() or DEFAULT_SYSTEM_PROMPT, model=dialog.model(),
+                vision_model=dialog.vision_model(), verification_model=dialog.verification_model(),
+                grounding_prompt=dialog.grounding_prompt(), verification_prompt=dialog.verification_prompt()))
+        except (ProfileError, sqlite3.Error, OSError) as exc:
+            QMessageBox.warning(self, "Impostazioni non salvate", str(exc))
+            return
         self._refresh_model_combo()
         self._append_log(
-            f"Impostazioni LLM aggiornate (config.json). "
+            f"Impostazioni LLM aggiornate (SQLite). "
             f"Modello datasheet: {self._default_model()}. "
             f"Modello foto: {self._vision_model() or 'default del servizio foto'}."
         )
 
+    def _advanced_user(self):
+        return self._config.get('advanced_user', False) is True
+
+    def _apply_user_mode(self):
+        advanced = self._advanced_user()
+        # Keep widget instances and numeric tab indexes stable for existing handlers.
+        if not advanced and self.tabs.currentIndex() in (1, 2):
+            self.tabs.setCurrentIndex(0)
+        self.tabs.setTabVisible(1, advanced)
+        self.tabs.setTabVisible(2, advanced)
+        self.model_3d_settings_scroll.setVisible(advanced)
+        self.group_annotations.setVisible(advanced)
+        self.group_components.setVisible(advanced and self._is_castellated())
+        self.btn_photo_comparison.setVisible(advanced)
+
+    def _background_work_running(self):
+        return any(worker is not None and worker.isRunning() for worker in
+                   (self._worker, self._extract_worker, self._cad3d_worker, self._terminal_worker))
+
+    def closeEvent(self, event):
+        if self._background_work_running():
+            QMessageBox.information(self, 'Operazione in corso', 'Attendi la conclusione dell’operazione prima di chiudere.')
+            event.ignore()
+        else:
+            super().closeEvent(event)
+
+    def _edit_profiles(self):
+        dialog = None
+        try:
+            previous = self.profile_store.get_type(self._profile_key())
+            dialog = ProfilesDialog(self.profile_store, self)
+            dialog.exec()
+            if dialog.changed:
+                current = self.profile_store.get_type(self._profile_key())
+                changed_instructions = previous != current
+                self._reload_profile_types(update_prompt=changed_instructions)
+                self._append_log("Tipologie e profili AI aggiornati nel database SQLite.")
+        except (ProfileError, sqlite3.Error, OSError) as exc:
+            QMessageBox.warning(self, 'Database profili', str(exc))
+        finally:
+            if dialog is not None:
+                dialog.deleteLater()
+
+    def _reload_profile_types(self, *, update_prompt=True):
+        combo = self.combo_component_type
+        original_prompt = self.field_component_prompt.toPlainText()
+        selected = combo.currentData() or ''
+        rows = self.profile_store.list_types()
+        blocked = combo.blockSignals(True)
+        combo.clear()
+        combo.addItem('(non specificata)', '')
+        for row in rows:
+            combo.addItem(row['label'], row['key'])
+        index = combo.findData(selected)
+        combo.setCurrentIndex(max(index, 0))
+        combo.blockSignals(blocked)
+        if selected and index < 0:
+            self._append_log('Tipologia eliminata o disattivata: selezionare una tipologia attiva.')
+        self._on_component_type_changed()
+        if not update_prompt and index >= 0:
+            self.field_component_prompt.setPlainText(original_prompt)
+
+    def _profile_key(self):
+        return (self.combo_component_type.currentData() or '') if hasattr(self, 'combo_component_type') else ''
+
+    def _profile_values(self):
+        return self.profile_store.resolve(self._profile_key())
+
+    def _selected_family(self):
+        row = self.profile_store.get_type(self._profile_key())
+        return row['family'] if row else ''
+
     # ── Modello LLM ─────────────────────────────────────────────────
 
     def _default_model(self) -> str:
-        """Modello di default globale (config.json)."""
-        return (self._config.get("model") or "").strip() or DEFAULT_MODEL
+        """Resolved profile default; session selection remains separate."""
+        return self._profile_values()['model']
 
     def _effective_model(self) -> str:
         """Modello da usare per la prossima estrazione.
@@ -443,7 +559,21 @@ class MainWindow(QMainWindow):
         return self._session_vision_model or self._default_vision_model()
 
     def _default_vision_model(self) -> str:
-        return (self._config.get("vision_model") or "").strip() or DEFAULTS["vision_model"]
+        return self._profile_values()['vision_model']
+
+    def _verification_model(self):
+        return self._session_verification_model or self._profile_values()['verification_model']
+
+    def _on_verification_model_combo_changed(self):
+        self._session_verification_model = self.combo_verification_model.currentData()
+        self._append_log(f'Modello verifica foto: {self._verification_model()} (default invariato).')
+
+    def _pick_session_verification_model(self):
+        chosen = pick_model(self._verification_model(), self, title='Modello verifica foto per questa sessione')
+        if chosen:
+            self._session_verification_model = None if chosen == self._profile_values()['verification_model'] else chosen
+            self._refresh_model_combo()
+            self._on_verification_model_combo_changed()
 
     def _refresh_model_combo(self) -> None:
         """Riallinea la tendina del tab Progetto a default + scelta di sessione."""
@@ -468,6 +598,15 @@ class MainWindow(QMainWindow):
             if self._session_vision_model:
                 combo.addItem(f"{self._session_vision_model} (solo questa sessione)",
                               self._session_vision_model)
+                combo.setCurrentIndex(1)
+            combo.blockSignals(blocked)
+        if hasattr(self, 'combo_verification_model'):
+            combo = self.combo_verification_model
+            blocked = combo.blockSignals(True)
+            combo.clear()
+            combo.addItem(f"Default: {self._profile_values()['verification_model']}", None)
+            if self._session_verification_model:
+                combo.addItem(f'{self._session_verification_model} (solo questa sessione)', self._session_verification_model)
                 combo.setCurrentIndex(1)
             combo.blockSignals(blocked)
 
@@ -498,7 +637,7 @@ class MainWindow(QMainWindow):
         """Sceglie un modello valido solo per le estrazioni di questa sessione.
 
         Serve per i datasheet difficili: si passa a un modello piu' capace
-        (e piu' costoso) senza cambiare il default salvato in config.json.
+        (e piu' costoso) senza cambiare il default salvato nel profilo SQLite.
         """
         chosen = pick_model(
             self._effective_model(), self, title="Modello solo per questa sessione"
@@ -513,9 +652,9 @@ class MainWindow(QMainWindow):
         self._on_model_combo_changed()
 
     def _open_config_file(self) -> None:
-        if not CONFIG_PATH.is_file():
+        if not config_path().is_file():
             save_config(self._config)
-        webbrowser.open(CONFIG_PATH.as_uri())
+        webbrowser.open(config_path().as_uri())
 
     def _show_about(self) -> None:
         QMessageBox.about(
@@ -640,61 +779,12 @@ class MainWindow(QMainWindow):
         docs_group = QGroupBox(f"Documentazione ({DOCS_SUBDIR}/)")
         docs_layout = QVBoxLayout(docs_group)
 
-        self.docs_list = QListWidget()
-        self.docs_list.setFixedHeight(140)
-        self.docs_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.docs_list.setToolTip(
-            "Spunta i file da inviare all'AI. I nuovi file vengono selezionati automaticamente."
-        )
-        docs_content = QHBoxLayout()
-        docs_content.setContentsMargins(0, 0, 0, 0)
-        docs_content.addWidget(self.docs_list, 1)
-
-        docs_toolbar = QWidget()
-        docs_toolbar.setObjectName("docsActionToolbar")
-        docs_toolbar.setFixedWidth(40)
-        docs_toolbar.setFixedHeight(140)
-        docs_toolbar.setStyleSheet(
-            "QPushButton {"
-            " background: #313244; border: 1px solid #45475a; border-radius: 4px;"
-            " padding: 4px; }"
-            "QPushButton:hover { background: #45475a; border-color: #89b4fa; }"
-            "QPushButton:pressed { background: #585b70; }"
-        )
-        docs_toolbar_layout = QVBoxLayout(docs_toolbar)
-        docs_toolbar_layout.setContentsMargins(0, 0, 0, 0)
-        docs_toolbar_layout.setSpacing(4)
-
-        btn_add_docs = QPushButton()
-        btn_add_docs.setIcon(QIcon(str(Path(__file__).resolve().parent / "assets" / "docs-add.svg")))
-        btn_add_docs.setIconSize(QSize(20, 20))
-        btn_add_docs.setFixedSize(36, 32)
-        btn_add_docs.setToolTip("Aggiungi documentazione...")
-        btn_add_docs.setAccessibleName("Aggiungi documentazione")
-        btn_add_docs.clicked.connect(self._add_docs)
-        docs_toolbar_layout.addWidget(btn_add_docs)
-
-        btn_remove_doc = QPushButton()
-        btn_remove_doc.setIcon(QIcon(str(Path(__file__).resolve().parent / "assets" / "docs-remove.svg")))
-        btn_remove_doc.setIconSize(QSize(20, 20))
-        btn_remove_doc.setFixedSize(36, 32)
-        btn_remove_doc.setToolTip("Rimuovi il documento selezionato")
-        btn_remove_doc.setAccessibleName("Rimuovi documento selezionato")
-        btn_remove_doc.clicked.connect(self._remove_doc)
-        docs_toolbar_layout.addWidget(btn_remove_doc)
-
-        btn_open_docs = QPushButton()
-        btn_open_docs.setIcon(QIcon(str(Path(__file__).resolve().parent / "assets" / "docs-open.svg")))
-        btn_open_docs.setIconSize(QSize(20, 20))
-        btn_open_docs.setFixedSize(36, 32)
-        btn_open_docs.setToolTip("Apri la cartella docs")
-        btn_open_docs.setAccessibleName("Apri la cartella docs")
-        btn_open_docs.clicked.connect(self._open_docs_folder)
-        docs_toolbar_layout.addWidget(btn_open_docs)
-        docs_toolbar_layout.addStretch()
-
-        docs_content.addWidget(docs_toolbar)
-        docs_layout.addLayout(docs_content)
+        # Keep the old document index for compatibility, never as an AI selection UI.
+        self.docs_list = QListWidget(docs_group)
+        self.docs_list.hide()
+        self.guided_docs = GuidedDocuments(self._docs_dir, docs_group)
+        self.guided_docs.changed.connect(self._refresh_docs_list)
+        docs_layout.addWidget(self.guided_docs)
         outer.addWidget(docs_group)
         self.group_component_analysis = QGroupBox("Analisi componente")
         analysis_layout = QVBoxLayout(self.group_component_analysis)
@@ -703,8 +793,8 @@ class MainWindow(QMainWindow):
 
         self.combo_component_type = QComboBox()
         self.combo_component_type.addItem("(non specificata)", "")
-        for component_type in component_types.COMPONENT_TYPES:
-            self.combo_component_type.addItem(component_type.label, component_type.key)
+        for component_type in self.profile_store.list_types():
+            self.combo_component_type.addItem(component_type['label'], component_type['key'])
         self.combo_component_type.setToolTip(
             "Dice al modello che cosa sta leggendo: da questo dipende quali quote "
             "cercare nel datasheet (fori e drill per un THT, land pattern per un "
@@ -720,7 +810,7 @@ class MainWindow(QMainWindow):
         self.combo_model = QComboBox()
         self.combo_model.setToolTip(
             "Modello usato per il datasheet. Il default si imposta da "
-            "Configurazione -> Modello e prompt di sistema LLM."
+            "Configurazione -> Gestione tipologie e profili AI."
         )
         self.combo_model.currentIndexChanged.connect(self._on_model_combo_changed)
         btn_pick_model = QPushButton("Modello diverso...")
@@ -746,17 +836,27 @@ class MainWindow(QMainWindow):
         vision_row.addWidget(self.combo_vision_model, 1)
         vision_row.addWidget(self.btn_pick_vision_model)
         models_form.addRow("Modello foto:", vision_row)
+        self.combo_verification_model = QComboBox()
+        self.combo_verification_model.setToolTip('Modello di verifica foto, indipendente dalle altre analisi. Scelta solo per questa sessione.')
+        self.combo_verification_model.currentIndexChanged.connect(self._on_verification_model_combo_changed)
+        self.btn_pick_verification_model = QPushButton('Modello diverso...')
+        self.btn_pick_verification_model.clicked.connect(self._pick_session_verification_model)
+        verification_row = QHBoxLayout()
+        verification_row.addWidget(self.combo_verification_model, 1)
+        verification_row.addWidget(self.btn_pick_verification_model)
+        models_form.addRow('Verifica foto:', verification_row)
         _align_form_labels(models_form)
 
         analysis_layout.addLayout(ai_form)
 
         self.group_ai_tools = QGroupBox("Strumenti AI")
         tools_layout = QVBoxLayout(self.group_ai_tools)
-        # Il riquadro annidato introduce il proprio rientro. Lo compensiamo
-        # per mantenere la stessa colonna dei campi del form soprastante.
-        tools_layout.setContentsMargins(-10, 0, 0, 0)
+        tools_layout.setContentsMargins(12, 16, 12, 12)
+        tools_layout.setSpacing(12)
         tools_layout.addLayout(models_form)
         tools_row = QHBoxLayout()
+        tools_row.setSpacing(16)
+        tools_row.setContentsMargins(0, 4, 0, 4)
         tools_layout.addLayout(tools_row)
         tools_row.addStretch()
         analysis_layout.addWidget(self.group_ai_tools)
@@ -768,7 +868,11 @@ class MainWindow(QMainWindow):
         self.btn_extract_ai.setMinimumHeight(46)
         self.btn_extract_ai.setToolTip("Avvia l'estrazione dai documenti e dalle foto selezionati")
         self.btn_extract_ai.clicked.connect(self._extract_with_ai)
-        self.btn_photo_comparison = QPushButton("Confronta foto...")
+        self.btn_photo_comparison = QPushButton("Rivedi rilevamento foto…")
+        self.btn_photo_comparison.setToolTip(
+            "Mostra gli ingombri rilevati sulla foto superiore e, quando disponibile, "
+            "permette di correggerli. Non avvia la generazione del footprint o del modello 3D."
+        )
         self.btn_photo_comparison.setEnabled(False)
         self.btn_photo_comparison.clicked.connect(self._show_photo_comparison)
         self._photo_png = None
@@ -787,17 +891,36 @@ class MainWindow(QMainWindow):
         actions_panel = QWidget()
         actions_layout = QVBoxLayout(actions_panel)
         actions_layout.setContentsMargins(0, 0, 0, 0)
-        actions_layout.addWidget(QLabel("Azioni analisi"))
+        actions_header = QHBoxLayout()
+        actions_header.addWidget(QLabel("Azioni analisi"), 1)
+        self.btn_copy_ai_log = icon_button('', 'profile-copy.svg', lambda: self._copy_ai_output())
+        self.btn_copy_ai_log.setToolTip('Copia tutte le azioni analisi negli appunti')
+        self.btn_copy_ai_log.setAccessibleName('Copia log azioni analisi')
+        self.btn_copy_ai_log.setEnabled(False)
+        actions_header.addWidget(self.btn_copy_ai_log)
+        actions_layout.addLayout(actions_header)
         self.ai_progress_text = QTextEdit()
         self.ai_progress_text.setReadOnly(True)
         self.ai_progress_text.setPlaceholderText("Qui compariranno i passi dell'analisi AI.")
+        self.ai_progress_text.textChanged.connect(self._refresh_ai_copy_buttons)
         actions_layout.addWidget(self.ai_progress_text)
         elements_panel = QWidget()
         elements_layout = QVBoxLayout(elements_panel)
         elements_layout.setContentsMargins(0, 0, 0, 0)
-        elements_layout.addWidget(QLabel("Elementi rilevati"))
+        elements_header = QHBoxLayout()
+        elements_header.addWidget(QLabel("Elementi rilevati"), 1)
+        self.btn_copy_ai_elements = icon_button('', 'profile-copy.svg', lambda: self._copy_ai_output(elements=True))
+        self.btn_copy_ai_elements.setToolTip('Copia tutti gli elementi rilevati negli appunti')
+        self.btn_copy_ai_elements.setAccessibleName('Copia elementi rilevati')
+        self.btn_copy_ai_elements.setEnabled(False)
+        elements_header.addWidget(self.btn_copy_ai_elements)
+        elements_layout.addLayout(elements_header)
         self.ai_elements_list = QListWidget()
         self.ai_elements_list.setToolTip("Elementi e ingombri individuati durante l'analisi fotografica")
+        for signal in (self.ai_elements_list.model().rowsInserted,
+                       self.ai_elements_list.model().rowsRemoved,
+                       self.ai_elements_list.model().modelReset):
+            signal.connect(self._refresh_ai_copy_buttons)
         elements_layout.addWidget(self.ai_elements_list)
         log_splitter.addWidget(actions_panel)
         log_splitter.addWidget(elements_panel)
@@ -881,7 +1004,8 @@ class MainWindow(QMainWindow):
         qui in avanti il testo e' liberamente modificabile.
         """
         key = self.combo_component_type.currentData() or ""
-        component_type = component_types.get(key)
+        row = self.profile_store.get_type(key)
+        component_type = component_types.ComponentType(key, row['label'], row['instructions']) if row else None
 
         self.field_component_prompt.setPlainText(
             component_types.apply_block(
@@ -892,10 +1016,11 @@ class MainWindow(QMainWindow):
         # La tipologia decide anche quale gruppo di parametri si usa nel tab
         # "Footprint 2D": i moduli castellated non stanno in una matrice.
         if key and hasattr(self, "group_castellated"):
-            self.group_castellated.setChecked(key == "aggregate_castellated")
+            self.group_castellated.setChecked(self._selected_family() == "aggregate_castellated")
 
         self._config["component_type"] = key
         save_config(self._config)
+        self._refresh_model_combo()
         if component_type is not None:
             self._append_log(f"Tipologia componente: {component_type.label}.")
 
@@ -945,7 +1070,7 @@ class MainWindow(QMainWindow):
         docs_dir = self._docs_dir()
         if docs_dir.is_dir():
             for f in sorted(docs_dir.iterdir()):
-                if f.is_file():
+                if f.is_file() and f.suffix.lower() in SUFFIXES:
                     item = QListWidgetItem(f.name)
                     item.setFlags(
                         item.flags() | Qt.ItemFlag.ItemIsUserCheckable
@@ -955,6 +1080,11 @@ class MainWindow(QMainWindow):
                     # temporanea della riga.
                     item.setCheckState(Qt.CheckState.Checked)
                     self.docs_list.addItem(item)
+        if hasattr(self, 'guided_docs'):
+            self.guided_docs.refresh()
+
+    def _selected_documents(self):
+        return DocumentSet(self._docs_dir()).selected()
 
     def _add_docs(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
@@ -988,25 +1118,27 @@ class MainWindow(QMainWindow):
         webbrowser.open(docs_dir.as_uri())
 
     def _extract_with_ai(self) -> None:
-        if self._extract_worker is not None and self._extract_worker.isRunning():
+        if self._background_work_running() or self._automatic_generation_active:
             return
 
-        checked = [
-            self.docs_list.item(index)
-            for index in range(self.docs_list.count())
-            if self.docs_list.item(index).checkState() == Qt.CheckState.Checked
-        ]
-        if not checked:
+        try:
+            doc_paths, document_roles = self._selected_documents()
+        except (OSError, ValueError) as exc:
             QMessageBox.information(
-                self, "Nessun file selezionato",
-                "Spunta nella lista uno o piu' file di documentazione da analizzare."
+                self, "Completa la documentazione", str(exc)
             )
             return
 
-        docs_dir = self._docs_dir()
-        doc_paths = [docs_dir / item.text() for item in checked]
+        try:
+            profile = self.profile_store.snapshot(self._profile_key())
+        except (ProfileError, sqlite3.Error, OSError) as exc:
+            QMessageBox.warning(self, 'Profilo AI non disponibile', str(exc))
+            return
 
         self.btn_extract_ai.setEnabled(False)
+        self._auto_after_extraction = not self._advanced_user()
+        self._auto_generation_params = None
+        self._extract_finish_pending = False
         self.btn_extract_ai.setText("Analisi in corso...")
         self.ai_progress_text.clear()
         self.ai_elements_list.clear()
@@ -1015,20 +1147,26 @@ class MainWindow(QMainWindow):
         self._photo_overlay_png = None
         self._photo_source = ""
 
-        model = self._effective_model()
+        model = self._session_model or profile['model']
+        photo_model = self._session_vision_model or profile['vision_model']
+        verification_model = self._session_verification_model or profile['verification_model']
         self._append_log(
             f"Estrazione da {len(doc_paths)} file con il modello datasheet {model}"
             + (" (solo questa sessione)." if self._session_model else ".")
         )
-        self._on_ai_progress(f"Modello foto: {self._vision_model() or 'default del servizio foto'}.")
+        self._on_ai_progress(f"Profilo AI: {self.combo_component_type.currentText()}.")
+        self._on_ai_progress(f"Modello foto: {photo_model}.")
+        self._on_ai_progress(f"Modello verifica foto: {verification_model}.")
 
         self._extract_worker = ExtractWorker(
             doc_paths,
             model=model,
-            vision_model=self._vision_model(),
-            grounding_prompt=self._config.get("grounding_prompt"),
-            verification_prompt=self._config.get("verification_prompt"),
-            system_prompt=self._current_system_prompt(),
+            vision_model=photo_model, verification_model=verification_model,
+            grounding_prompt=profile['grounding_prompt'],
+            verification_prompt=profile['verification_prompt'],
+            terminal_prompt=profile['terminal_prompt'],
+            document_roles=document_roles,
+            system_prompt=profile['system_prompt'],
             extra_instructions=self.field_component_prompt.toPlainText().strip() or None,
             include_nc_pins=bool(self._config.get("include_nc_pins", True)),
         )
@@ -1052,9 +1190,21 @@ class MainWindow(QMainWindow):
             self._analysis_tabs_enabled = None
 
     def _on_extract_finished(self) -> None:
+        # Modal rename/validation dialogs run a nested Qt event loop. The worker
+        # may finish there, before _on_extracted has populated all fields.
+        if self._applying_extraction:
+            self._extract_finish_pending = True
+            return
+        if self._automatic_generation_active:
+            return
         self._hide_analysis_overlay()
         self.btn_extract_ai.setEnabled(True)
         self.btn_extract_ai.setText("Estrai parametri con AI")
+        params = self._auto_generation_params
+        self._auto_generation_params = None
+        self._auto_after_extraction = False
+        if params is not None:
+            self._start_automatic_generation(params)
 
     def _on_ai_progress(self, message: str) -> None:
         self.analysis_overlay.set_status(message)
@@ -1066,6 +1216,16 @@ class MainWindow(QMainWindow):
             self.ai_progress_text.insertPlainText(message + "\n")
             self.ai_progress_text.ensureCursorVisible()
         self._append_log(message)
+
+    def _refresh_ai_copy_buttons(self, *args) -> None:
+        self.btn_copy_ai_log.setEnabled(bool(self.ai_progress_text.toPlainText()))
+        self.btn_copy_ai_elements.setEnabled(self.ai_elements_list.count() > 0)
+
+    def _copy_ai_output(self, *, elements=False) -> None:
+        text = ('\n'.join(self.ai_elements_list.item(i).text() for i in range(self.ai_elements_list.count()))
+                if elements else self.ai_progress_text.toPlainText())
+        if text:
+            QApplication.clipboard().setText(text)
 
     def _show_photo_comparison(self) -> None:
         if self._photo_png:
@@ -1148,46 +1308,85 @@ class MainWindow(QMainWindow):
         worker = self.sender()
         return worker is None or worker._model_revision == self._model_revision
 
-    def _migrate_docs_to_new_name(self, new_name: str) -> None:
+    def _migrate_docs_to_new_name(self, new_name: str) -> str:
         """Sposta i documenti nella cartella del nuovo nome componente.
 
         La cartella docs/ vive dentro la cartella del componente, che prende il
         nome dal campo "Nome": quando l'estrazione AI propone un nome diverso,
         senza questo spostamento i file caricati prima resterebbero nella
         vecchia cartella e sparirebbero dalla lista (e non sarebbero piu'
-        selezionabili per una nuova estrazione).
+        selezionabili per una nuova estrazione). Restituisce il nome effettivo:
+        rinomina rifiutata o documenti in conflitto mantengono il progetto corrente,
+        senza scartare il risultato AI e senza interrompere la generazione.
         """
         old_docs = self._docs_dir()
         if not old_docs.is_dir():
-            return
+            return new_name
         files = [f for f in old_docs.iterdir() if f.is_file()]
         if not files:
-            return
+            return new_name
 
         old_name = self._component_name()
         new_docs = Path(self.field_library_root.text().strip()) / new_name / DOCS_SUBDIR
         if new_docs.resolve() == old_docs.resolve():
-            return
+            return old_name
 
         answer = QMessageBox.question(
             self, "Rinomina componente",
             f"L'estrazione propone il nome \"{new_name}\" (adesso e' \"{old_name}\").\n\n"
             f"In {old_docs} ci sono {len(files)} file di documentazione.\n"
-            "Li sposto nella cartella del nuovo nome? (altrimenti resteranno "
-            "dove sono e spariranno dalla lista)",
+            "Li sposto nella cartella del nuovo nome? Se scegli No, manterrò "
+            "il nome e la cartella attuali e userò comunque i nuovi dati estratti.",
         )
         if answer != QMessageBox.StandardButton.Yes:
-            return
+            self._on_ai_progress(f'Rinomina non eseguita: mantenuto il progetto {old_name}. Dati AI acquisiti.')
+            return old_name
 
+        if (old_docs / MANIFEST).is_file() and any((new_docs / f.name).exists() for f in files):
+            message = (f'La cartella proposta “{new_name}” contiene già documenti con gli stessi nomi. '
+                       f'Mantengo il progetto corrente “{old_name}”: nessun documento spostato o sovrascritto. '
+                       'I dati AI vengono comunque acquisiti.')
+            self._on_ai_progress(message)
+            QMessageBox.information(self, 'Nome corrente mantenuto', message)
+            return old_name
         new_docs.mkdir(parents=True, exist_ok=True)
         for f in files:
             target = new_docs / f.name
             if target.exists():
                 continue
             shutil.move(str(f), str(target))
+        return new_name
 
     def _on_extracted(self, params: ExtractedParams) -> None:
+        self._applying_extraction = True
+        try:
+            self._apply_extracted_result(params)
+        except Exception as exc:
+            self._auto_generation_params = None
+            self._on_extract_error(f'Impossibile applicare i dati estratti: {exc}')
+        finally:
+            self._applying_extraction = False
+            if self._extract_finish_pending:
+                self._extract_finish_pending = False
+                self._on_extract_finished()
+
+    def _apply_extracted_result(self, params: ExtractedParams) -> None:
         self._hide_analysis_overlay()
+        if self._auto_after_extraction:
+            try:
+                self._validate_automatic_input(params)
+            except (ValueError, TypeError) as exc:
+                self._auto_generation_params = None
+                self._automatic_generation_blocked(str(exc))
+                return
+            # A new acquisition must not silently reuse previous pin maps or annotations.
+            self.pinout, self.pin_map = [], None
+            self.fillet_annotations.clear()
+            self.face_text_annotations.clear()
+            self._refresh_annotations_table()
+            self.field_body_offset_x.setValue(0)
+            self.field_body_offset_y.setValue(0)
+            self.field_pin_length_3d.setValue(3.0)
         self._acquisition_completed = True
         self._set_acquisition_tabs_enabled(True)
         self._invalidate_generated_mesh()
@@ -1195,9 +1394,10 @@ class MainWindow(QMainWindow):
         self._photo_overlay_png = params.photo_overlay_png
         self._photo_source = params.photo_source
         self.btn_photo_comparison.setEnabled(bool(self._photo_png or self._photo_overlay_png))
-        self.btn_photo_comparison.setText("Rivedi componenti su foto..." if self._photo_png else "Confronta foto...")
         if params.name and params.name != self._component_name():
-            self._migrate_docs_to_new_name(params.name)
+            # Keep the output name and the active document directory consistent.
+            # A naming collision must not discard a successful (paid) extraction.
+            params.name = self._migrate_docs_to_new_name(params.name)
         if params.name:
             self.field_name.setText(params.name)
         self.field_description.setText(params.description)
@@ -1234,6 +1434,9 @@ class MainWindow(QMainWindow):
                 if params.populated_pins else ""
             )
 
+        if self._auto_after_extraction and params.is_castellated():
+            self.group_3d.setChecked(True)
+            self.field_body_height.setValue(params.body_height_mm)
         if params.has_3d_body() and not params.is_castellated():
             self.group_3d.setChecked(True)
             self.field_body_length.setValue(params.body_length_mm)
@@ -1277,6 +1480,10 @@ class MainWindow(QMainWindow):
             f"\n\n{len(params.edge_fillets)} fillet suggeriti dalla foto -> tab \"Modello 3D\", tabella annotazioni."
             if params.edge_fillets else ""
         )
+        if self._auto_after_extraction:
+            self._auto_generation_params = params
+            self._on_ai_progress(f'Estrazione completata. Confidenza: {params.confidence}. {params.notes or ""}{fillet_note}')
+            return
         QMessageBox.information(
             self, "Estrazione completata",
             f"Confidenza: {params.confidence}\n\n"
@@ -1347,6 +1554,8 @@ class MainWindow(QMainWindow):
             self._append_log(f"Sigle serigrafate {line}")
 
     def _on_extract_error(self, message: str) -> None:
+        self._auto_generation_params = None
+        self._auto_after_extraction = False
         self._hide_analysis_overlay()
         self._on_ai_progress(f"Estrazione fallita: {message}")
         QMessageBox.warning(self, "Estrazione fallita", message)
@@ -1574,7 +1783,7 @@ class MainWindow(QMainWindow):
             self._add_side_row({"edge": "right", "count": 3, "pitch_mm": 2.54, "first_pin": 4})
         self._sync_3d_fields_for_castellated(checked)
         if hasattr(self, "group_components"):
-            self.group_components.setVisible(checked)
+            self.group_components.setVisible(checked and self._advanced_user())
         self._update_summary()
         self._draw_preview()
 
@@ -2004,8 +2213,88 @@ class MainWindow(QMainWindow):
             f"(sporgenza {params.pad_overhang}mm)<br>{sides}{error}"
         )
 
-    def _generate(self) -> None:
-        if self._worker is not None and self._worker.isRunning():
+    def _automatic_generation_blocked(self, message):
+        text = (message + '\n\nNessun file generato. Integra i documenti e ripeti l’analisi, '
+                'oppure attiva Advanced user in Configurazione → Opzioni di generazione '
+                'e ripeti l’analisi per rivedere i parametri.')
+        self._on_ai_progress('Generazione automatica non avviata: ' + message)
+        QMessageBox.warning(self, 'Generazione automatica non avviata', text)
+
+    @staticmethod
+    def _validate_output_name(name):
+        if (not name or name in ('.', '..') or name != name.rstrip(' .')
+                or re.search(r'[<>:"/\\|?*\x00-\x1f]', name)):
+            raise ValueError('Il nome del componente non è un nome di file valido.')
+
+    def _validate_automatic_input(self, params):
+        self._validate_output_name(params.name or self._component_name())
+        if params.package_geometry:
+            raise ValueError('Per questa geometria a pad espliciti il generatore 3D non è ancora supportato. '
+                             'Il footprint può essere generato manualmente in modalità avanzata.')
+        for field in ('body_length_mm', 'body_width_mm', 'body_height_mm'):
+            value = getattr(params, field)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f'Manca una dimensione valida del corpo 3D: {field}.')
+        dimensions = ((params.body_length_mm, self.field_cast_body_length if params.is_castellated() else self.field_body_length),
+                      (params.body_width_mm, self.field_cast_body_width if params.is_castellated() else self.field_body_width),
+                      (params.body_height_mm, self.field_body_height))
+        if any(not widget.minimum() <= value <= widget.maximum() for value, widget in dimensions):
+            raise ValueError('Le dimensioni estratte superano i limiti dell’editor: serve una revisione.')
+        if params.is_castellated():
+            if not params.castellated_sides:
+                raise ValueError('Non sono stati estratti i contatti del modulo castellated.')
+            for side in params.castellated_sides:
+                if not isinstance(side, dict) or side.get('edge') not in CASTELLATED_EDGES:
+                    raise ValueError('Lato del modulo non valido.')
+                for field in ('count', 'pitch_mm'):
+                    value = side.get(field)
+                    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                        raise ValueError(f'Contatti del modulo incompleti: {field}.')
+                if side['count'] != int(side['count']) or side['count'] > 100:
+                    raise ValueError('Il numero di contatti estratto non è supportato dall’editor.')
+        else:
+            for field in ('rows', 'cols', 'pitch_mm', 'row_spacing_mm', 'pad_diameter_mm', 'drill_mm'):
+                value = getattr(params, field)
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                    raise ValueError(f'Parametro footprint mancante o non valido: {field}.')
+            for field, widget in (('rows', self.field_rows), ('cols', self.field_cols),
+                                  ('pitch_mm', self.field_pitch), ('row_spacing_mm', self.field_row_spacing),
+                                  ('pad_diameter_mm', self.field_pad), ('drill_mm', self.field_drill)):
+                value = getattr(params, field)
+                if not widget.minimum() <= value <= widget.maximum() or (field in ('rows', 'cols') and value != int(value)):
+                    raise ValueError(f'Parametro fuori dai limiti dell’editor: {field}.')
+
+    def _start_automatic_generation(self, extracted):
+        try:
+            self._validate_automatic_input(extracted)
+            body = self._current_body_params()
+            if body is None:
+                raise ValueError('I parametri del modello 3D non sono disponibili.')
+            # QSpinBox limits must not silently replace extracted dimensions.
+            if any(not math.isclose(actual, expected, abs_tol=.011) for actual, expected in (
+                    (body.length_mm, extracted.body_length_mm), (body.width_mm, extracted.body_width_mm),
+                    (body.height_mm, extracted.body_height_mm))):
+                raise ValueError('Le dimensioni estratte superano i limiti dell’editor: serve una revisione.')
+        except (ValueError, TypeError) as exc:
+            self._automatic_generation_blocked(str(exc))
+            return
+        self._generate(automatic=True)
+
+    def _confirm_output_overwrite(self, params, project_dir, body):
+        targets = [project_dir / f'{params.name}.pretty' / f'{params.name}.kicad_mod']
+        if body is not None:
+            targets.extend(project_dir / f'{params.name}.3dshapes' / f'{params.name}{suffix}'
+                           for suffix in ('.step', '.wrl', '.preview.json'))
+        existing = [str(path) for path in targets if path.exists()]
+        if not existing:
+            return True
+        answer = QMessageBox.question(self, 'Conferma sovrascrittura',
+            'Questi file esistono già e verranno sovrascritti:\n\n' + '\n'.join(existing),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _generate(self, automatic=False) -> None:
+        if self._background_work_running() or self._automatic_generation_active:
             return
 
         try:
@@ -2015,11 +2304,22 @@ class MainWindow(QMainWindow):
                 else self._current_params()
             )
             params.validate()
+            self._validate_output_name(params.name)
+            body = None if isinstance(params, PackageGeometry) else self._current_body_params()
+            if body is not None:
+                body.validate()
+            if automatic and body is None:
+                raise ValueError('Mancano i parametri 3D.')
         except ValueError as exc:
             self._append_log(f"ERRORE: {exc}")
+            if automatic:
+                self._automatic_generation_blocked(str(exc))
             return
 
         project_dir = self._project_dir()
+        if automatic and not self._confirm_output_overwrite(params, project_dir, body):
+            self._on_ai_progress('Generazione annullata: file esistenti conservati.')
+            return
 
         self.btn_generate.setEnabled(False)
         if isinstance(params, PackageGeometry):
@@ -2043,14 +2343,6 @@ class MainWindow(QMainWindow):
                 f"pad={params.pad_diameter}mm, drill={params.drill}mm"
             )
 
-        body = None if isinstance(params, PackageGeometry) else self._current_body_params()
-        if body is not None:
-            try:
-                body.validate()
-            except ValueError as exc:
-                self._append_log(f"ERRORE parametri 3D: {exc}")
-                return
-
         if body is None and (self.fillet_annotations or self.face_text_annotations):
             self._append_log(
                 "ATTENZIONE: annotazioni 3D presenti ma \"Modello 3D\" non e' attivo "
@@ -2068,10 +2360,46 @@ class MainWindow(QMainWindow):
         self._worker.cad3d_done.connect(self._on_cad3d_generated)
         self._worker.warning.connect(self._on_cad3d_warning)
         self._worker.cad3d_error.connect(self._on_cad3d_error)
-        self._worker.finished.connect(lambda: self.btn_generate.setEnabled(True))
-        self._worker.start()
+        self._worker.progress.connect(self._on_ai_progress)
+        self._worker.finished.connect(self._on_generation_finished)
+        if automatic:
+            self._automatic_generation_active = True
+            self._automatic_footprint_done = self._automatic_3d_done = False
+            self._automatic_generation_errors = []
+            self._analysis_tabs_enabled = self.tabs.isEnabled()
+            self.tabs.setEnabled(False)
+            self._generation_menu_enabled = self.menuBar().isEnabled()
+            self.menuBar().setEnabled(False)
+            self.btn_extract_ai.setEnabled(False)
+            self.analysis_overlay.start('Generazione footprint e modello 3D', 'Preparazione della generazione…')
+        try:
+            self._worker.start()
+        except Exception as exc:
+            self._on_error(str(exc))
+            self._on_generation_finished()
+
+    def _on_generation_finished(self):
+        self.btn_generate.setEnabled(True)
+        if not self._automatic_generation_active:
+            return
+        self._automatic_generation_active = False
+        self._hide_analysis_overlay()
+        self.menuBar().setEnabled(self._generation_menu_enabled)
+        self.btn_extract_ai.setEnabled(True)
+        if self._automatic_3d_done:
+            self.tabs.setCurrentIndex(4)
+        elif self._automatic_footprint_done:
+            self.tabs.setCurrentIndex(3)
+        if self._automatic_generation_errors or not (self._automatic_footprint_done and self._automatic_3d_done):
+            details = '\n'.join(self._automatic_generation_errors) or 'La generazione non ha prodotto entrambi i risultati.'
+            prefix = 'Footprint generato, modello 3D non completato.\n' if self._automatic_footprint_done else ''
+            QMessageBox.warning(self, 'Generazione incompleta', prefix + details)
+        else:
+            self._on_ai_progress('Footprint e modello 3D generati. Verifica le anteprime prima dell’utilizzo.')
 
     def _on_generated(self, path: str) -> None:
+        if self._automatic_generation_active:
+            self._automatic_footprint_done = True
         self._refresh_output_actions()
         self._append_log(f"OK -> {path}")
         if not self._cad_result_is_current():
@@ -2081,10 +2409,14 @@ class MainWindow(QMainWindow):
 
     def _on_error(self, message: str) -> None:
         self._append_log(f"ERRORE: {message}")
+        if self._automatic_generation_active:
+            self._automatic_generation_errors.append(message)
 
     def _on_cad3d_generated(self, path: str) -> None:
         if not self._cad_result_is_current():
             return
+        if self._automatic_generation_active:
+            self._automatic_3d_done = True
         self._append_log(f"OK (3D) -> {path}")
         self.label_3d_status.setText(f"Modello STEP aggiornato: {path}")
         self._show_generated_mesh(Path(path))
@@ -2093,6 +2425,8 @@ class MainWindow(QMainWindow):
         if not self._cad_result_is_current():
             return
         self._append_log(f"ERRORE 3D: {message}")
+        if self._automatic_generation_active:
+            self._automatic_generation_errors.append(message)
 
     def _on_cad3d_warning(self, message: str) -> None:
         """Annotazione non applicata: il modello c'e' comunque, ma va detto."""
@@ -2230,6 +2564,7 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidget(settings)
         scroll.setWidgetResizable(True)
+        self.model_3d_settings_scroll = scroll
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.addWidget(tab)
         splitter.addWidget(scroll)
@@ -2302,11 +2637,17 @@ class MainWindow(QMainWindow):
                 "La chiamata usa il modello selezionato e può avere un costo. "
                 "Posizioni e footprint restano invariati.") != QMessageBox.StandardButton.Yes:
             return
+        try:
+            profile = self.profile_store.snapshot(self._profile_key())
+        except (ProfileError, sqlite3.Error, OSError) as exc:
+            QMessageBox.warning(self, 'Profilo AI non disponibile', str(exc))
+            return
         self.btn_terminal_detail.setEnabled(False)
         self.btn_lead_refinement.setEnabled(False)
         self.label_3d_status.setText("Analisi dei terminali nella foto in corso...")
         worker = TerminalDetailWorker(self._photo_png, components,
-                                      self._vision_model(), only_leads=only_leads)
+                                      self._vision_model(), only_leads=only_leads,
+                                      system_prompt=profile['lead_prompt' if only_leads else 'terminal_prompt'])
         worker._model_revision = self._model_revision
         worker._photo_snapshot = self._photo_png
         self._terminal_worker = worker
@@ -2348,7 +2689,7 @@ class MainWindow(QMainWindow):
 
     def _regenerate_3d(self) -> None:
         """Rigenera solo lo STEP con le annotazioni correnti (il footprint resta com'e')."""
-        if self._cad3d_worker is not None and self._cad3d_worker.isRunning():
+        if self._background_work_running() or self._automatic_generation_active:
             return
 
         body = self._current_body_params()
@@ -2587,6 +2928,7 @@ class MainWindow(QMainWindow):
             "Annotazioni per il modello 3D (fillet su spigoli, testo inciso su facce) "
             "-- rivedi la lista prima di generare"
         )
+        self.group_annotations = group
         layout = QVBoxLayout(group)
 
         fillet_row = QHBoxLayout()
@@ -2715,7 +3057,7 @@ class MainWindow(QMainWindow):
 
     def _current_system_prompt(self) -> str | None:
         """Prompt globale da usare per l'estrazione: None se e' quello di default."""
-        text = (self._config.get("system_prompt") or "").strip()
+        text = self._profile_values()['system_prompt'].strip()
         if not text or text == DEFAULT_SYSTEM_PROMPT.strip():
             return None
         return text
@@ -3097,7 +3439,12 @@ class MainWindow(QMainWindow):
 def main() -> None:
     app = QApplication(sys.argv)
     app.setStyleSheet(APP_QSS)
-    window = MainWindow()
+    try:
+        window = MainWindow()
+    except (ProfileError, sqlite3.Error, OSError, ValueError) as exc:
+        QMessageBox.critical(None, 'Database profili non disponibile',
+                             f'Avvio interrotto senza ripristinare o sovrascrivere i profili.\n{exc}')
+        sys.exit(1)
     window.show()
     sys.exit(app.exec())
 

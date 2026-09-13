@@ -37,6 +37,9 @@ def test_overlay_animation_resize_literal_status_and_cleanup():
         overlay.start()
         assert overlay.status.text() == "Preparazione dei documenti…"
         assert overlay.elapsed.text().endswith("00:00")
+        overlay.start('Generazione footprint e modello 3D', 'Generazione…')
+        assert overlay.title.text() == 'Generazione footprint e modello 3D'
+        assert overlay.status.text() == 'Generazione…'
     finally:
         overlay.stop()
         parent.close()

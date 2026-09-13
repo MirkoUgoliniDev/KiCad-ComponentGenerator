@@ -7,7 +7,7 @@ pin header, cosi' la risposta e' sempre JSON strutturato valido, mai
 testo libero da fare il parsing a mano.
 
 Il modello si sceglie dalla GUI (id OpenRouter, es.
-"anthropic/claude-sonnet-5"): l'impostazione globale sta in config.json,
+"anthropic/claude-sonnet-5"): l'impostazione della GUI sta nei profili SQLite,
 mentre per una singola estrazione se ne puo' usare uno piu' potente senza
 cambiare il default.
 
@@ -738,6 +738,9 @@ def extract_pin_header_params(
     photo_cache_dir: Optional[Path] = None,
     grounding_prompt: Optional[str] = None,
     verification_prompt: Optional[str] = None,
+    verification_model: Optional[str] = None,
+    terminal_prompt: Optional[str] = None,
+    document_roles: Optional[dict[str, str]] = None,
 ) -> ExtractedParams:
     """Chiama il modello via OpenRouter e ritorna i parametri estratti.
 
@@ -767,6 +770,12 @@ def extract_pin_header_params(
         raise ExtractionError("Nessun file selezionato.")
     if len(doc_paths) > MAX_FILES:
         raise ExtractionError(f"Troppi file selezionati (max {MAX_FILES} per chiamata).")
+    from .document_roles import ROLES, ROLE_HELP
+    if document_roles is not None:
+        if (set(document_roles) != {p.name for p in doc_paths}
+                or len(set(document_roles.values())) != len(doc_paths)
+                or any(role not in ROLES for role in document_roles.values())):
+            raise ExtractionError('Ruoli documenti incompleti, duplicati o non validi.')
 
     try:
         api_key()
@@ -777,9 +786,20 @@ def extract_pin_header_params(
         progress(f"Invio a AI {len(doc_paths)} file per layout, quote e pinout...")
     content_blocks = []
     for index, path in enumerate(doc_paths):
-        content_blocks.append({"type": "text", "text": f"FILE {index}: {path.name}"})
+        description = f"FILE {index}: {path.name}"
+        if document_roles is not None:
+            role = document_roles[path.name]
+            description += f'\nRUOLO DICHIARATO DALL’UTENTE: {ROLES[role]}. {ROLE_HELP[role]}'
+        content_blocks.append({"type": "text", "text": description})
         content_blocks.append(_file_to_content_block(path))
     request = "Estrai i parametri del pin header da questi documenti e chiama lo strumento."
+    if document_roles is not None:
+        missing = [label for role, label in ROLES.items() if role not in document_roles.values()]
+        request += ('\nI ruoli dei file sono espliciti: rispettali, non dedurli dai nomi originali. '
+                    'Non usare il pinout o la vista laterale come foto superiore per gli ingombri. '
+                    'Segnala dati mancanti e incongruenze, senza inventare quote per completare le viste assenti.')
+        if missing:
+            request += '\nViste non fornite: ' + ', '.join(missing) + '.'
     if include_nc_pins:
         request += (
             "\n\nPin NC: i pin marcati NC (Not Connected) nella tabella pinout sono "
@@ -837,6 +857,13 @@ def extract_pin_header_params(
     # deve anche leggere quote, pinout e layout, e tende a sacrificare i passivi
     # piccoli. I crop sono best-effort: se falliscono, resta il risultato globale.
     photo_report = None
+    top_index = data.get('top_photo_index')
+    if document_roles is not None:
+        # User-assigned roles are authoritative. Never calibrate the wrong view.
+        top_index = next((i for i, path in enumerate(doc_paths) if document_roles[path.name] == 'top'), -1)
+        if progress:
+            progress('Vista superiore: ' + (doc_paths[top_index].name + ' (assegnata dall’utente).' if top_index >= 0
+                                          else 'non fornita; nessun’altra vista verrà usata al suo posto.'))
     if (data.get("layout") == "castellated" and data.get("body_length_mm")
             and data.get("body_width_mm")):
         from .photo_inventory import extract_inventory
@@ -845,10 +872,11 @@ def extract_pin_header_params(
             photo_report = extract_inventory(
                 doc_paths, vision_model or DEFAULT_VISION_MODEL, data["body_length_mm"],
                 data["body_width_mm"], COMPONENT_KINDS, call_tool,
-                progress=progress, top_photo_index=data.get("top_photo_index"),
+                progress=progress, top_photo_index=top_index,
+                **({'top_photo_source': 'utente'} if document_roles is not None else {}),
                 extra_instructions=extra_instructions,
                 cache_dir=photo_cache_dir if photo_cache_dir is not None else Path(__file__).resolve().parents[2]/"generated"/"photo-cache",
-                classifier_model=model or DEFAULT_MODEL,
+                classifier_model=verification_model or model or DEFAULT_MODEL,
                 grounding_prompt=grounding_prompt, verification_prompt=verification_prompt,
             )
         except (OpenRouterError, ValueError, OSError) as exc:
@@ -861,6 +889,7 @@ def extract_pin_header_params(
                         photo_report.photo_png, photo_report.components, vision_model or DEFAULT_VISION_MODEL,
                         call_tool, progress or (lambda message: None),
                         photo_cache_dir if photo_cache_dir is not None else Path(__file__).resolve().parents[2]/"generated"/"photo-cache",
+                        **({'system_prompt': terminal_prompt} if terminal_prompt else {}),
                     )
                 except (OpenRouterError, ValueError, OSError) as exc:
                     photo_report.warnings.append(f"Dettaglio terminali non disponibile: {exc}")

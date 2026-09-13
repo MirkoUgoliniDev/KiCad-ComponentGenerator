@@ -40,7 +40,7 @@ def _frame_box(box, source, destination):
             (sx+r*(sr-sx)-dx)/(dr-dx), (sy+b*(sb-sy)-dy)/(db-dy)]
 
 
-def refine_leads(photo_png, components, model, call, log, cache_dir=None):
+def refine_leads(photo_png, components, model, call, log, cache_dir=None, system_prompt=None):
     """Only attach optional lead_detail; preserve every existing field on failure."""
     import cv2
     import numpy as np
@@ -72,7 +72,7 @@ def refine_leads(photo_png, components, model, call, log, cache_dir=None):
             total += len(terminals)
             label = f'Separazione reofori componente {index}'
             log(label + ': geometria esistente bloccata; dettagli ambigui conservati.')
-            data = cached_call(call,dict(model=model,system_prompt=PROMPT,
+            data = cached_call(call,dict(model=model,system_prompt=(system_prompt or '').strip() or PROMPT,
                 content_blocks=[{'type':'text','text':json.dumps(reference)},image_block(crop)],
                 tool=separation_tool(),max_tokens=8192,has_pdf=False),cache_dir,label,log)
             entries = data.get('terminals') if isinstance(data,dict) else None

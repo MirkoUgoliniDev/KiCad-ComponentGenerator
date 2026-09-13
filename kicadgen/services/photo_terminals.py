@@ -140,7 +140,7 @@ def decode_terminal_geometry(entry, rotation):
             "confidence": entry["confidence"], "source": "photo_observation"}
 
 
-def observe_terminals(photo_png, components, model, call, log, cache_dir=None):
+def observe_terminals(photo_png, components, model, call, log, cache_dir=None, system_prompt=None):
     """Enrich fixed components independently; missing evidence retains envelopes."""
     import cv2
     import numpy as np
@@ -163,7 +163,7 @@ def observe_terminals(photo_png, components, model, call, log, cache_dir=None):
         log(label + ": corpo e reofori osservati nella foto.")
         try:
             crop, image_box = target_crop(image, batch[0]['_box'])
-            data = cached_call(call, dict(model=model, system_prompt=PROMPT,
+            data = cached_call(call, dict(model=model, system_prompt=(system_prompt or '').strip() or PROMPT,
                 content_blocks=[{'type':'text', 'text':f"Target ID: {batch[0]['_id']}. Coordinates refer to the entire attached image."},
                                 image_block(crop)], tool=terminal_tool(),
                 max_tokens=8192, has_pdf=False), cache_dir, label, log,

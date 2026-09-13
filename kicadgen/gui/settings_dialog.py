@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from PyQt6.QtCore import QSize
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QTextEdit, QVBoxLayout, QTabWidget, QWidget,
@@ -16,8 +20,8 @@ from .model_dialog import pick_model
 class LlmSettingsDialog(QDialog):
     """Editor del modello di default e del prompt di sistema.
 
-    Sono le due impostazioni globali dell'estrazione AI (valgono per ogni
-    componente e restano salvate in config.json):
+    Ogni analisi ha modello e prompt globali, ereditati dalle tipologie
+    che non hanno un override nel profilo SQLite:
 
     * il **modello di default**, scelto dall'elenco OpenRouter filtrando per
       costo -- e' quello usato quando nel tab "Progetto" non se ne indica
@@ -29,7 +33,8 @@ class LlmSettingsDialog(QDialog):
 
     def __init__(self, current_prompt: str, current_model: str | None = None, parent=None,
                  current_vision_model: str | None = None,
-                 current_grounding_prompt=None, current_verification_prompt=None):
+                 current_grounding_prompt=None, current_verification_prompt=None,
+                 current_verification_model=None):
         super().__init__(parent)
         self.setWindowTitle("Modello e prompt di sistema LLM")
         self.resize(820, 680)
@@ -37,6 +42,7 @@ class LlmSettingsDialog(QDialog):
 
         self._model = (current_model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
         self._vision_model = (current_vision_model or DEFAULT_VISION_MODEL).strip() or DEFAULT_VISION_MODEL
+        self._verification_model = (current_verification_model or self._model).strip() or self._model
 
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
@@ -59,6 +65,8 @@ class LlmSettingsDialog(QDialog):
         model_row = QHBoxLayout()
         model_row.addWidget(self.field_model)
         model_row.addWidget(btn_pick)
+        self.info_buttons = []
+        model_row.addWidget(self._info_button(0))
         model_form.addRow("Modello di default:", model_row)
         self.field_vision_model = QLineEdit(self._vision_model)
         self.field_vision_model.setReadOnly(True)
@@ -67,44 +75,37 @@ class LlmSettingsDialog(QDialog):
         vision_row = QHBoxLayout()
         vision_row.addWidget(self.field_vision_model)
         vision_row.addWidget(vision_button)
+        vision_row.addWidget(self._info_button(1))
         photo_form = QFormLayout()
         photo_form.addRow("Modello foto:", vision_row)
         photo_layout.addLayout(photo_form)
         datasheet_layout.addLayout(model_form)
 
-        model_note = QLabel(
+        model_note = (
             "Il modello si sceglie dall'elenco OpenRouter, filtrabile per costo. "
-            "Questo e' il default di tutte le estrazioni; per un datasheet "
+            "Questo e' il default generale, ereditato dalle tipologie senza override. Per un datasheet "
             "difficile se ne puo' usare uno piu' potente dal tab \"Progetto\", "
             "solo per quella sessione, senza cambiare il default. "
             "Serve la chiave OPENROUTER_API_KEY nel file .env."
         )
-        model_note.setWordWrap(True)
-        datasheet_layout.addWidget(model_note)
-        vision_note = QLabel(
-            "Le foto usano un modello dedicato alla localizzazione; il modello datasheet verifica "
+        vision_note = (
+            "Le foto usano un modello dedicato alla localizzazione; il modello di verifica foto conferma "
             "poi solo la presenza di corpi montati, senza spostarli o riconoscere il circuito. "
-            "Il default Gemini 3.1 Pro è stato verificato sul modulo di esempio; altri modelli "
-            "possono produrre coordinate meno affidabili. Le risposte foto sono memorizzate "
+            "L'affidabilità delle coordinate dipende dal modello e dalla qualità della foto. "
+            "Le risposte foto sono memorizzate "
             "in generated/photo-cache; a input invariati non vengono ripetute le chiamate. "
             "Il 3D usa ingombri semplici senza scritte. Le quote XY sono stime calibrate; "
             "le altezze sono indicative e richiedono una vista laterale o una misura."
         )
-        vision_note.setWordWrap(True)
-        photo_layout.addWidget(vision_note)
-
-        intro = QLabel(
+        intro = (
             "Prompt di sistema: istruzioni inviate al modello durante "
             "l'estrazione dal datasheet (tab Progetto -> \"Estrai parametri con "
-            "AI\"). Valgono per tutti i componenti e restano salvate tra una "
-            "sessione e l'altra.\n\n"
+            "AI\"). Sono default generali salvati in SQLite, personalizzabili "
+            "per tipologia da Gestione tipologie e profili AI.\n\n"
             "Nota: lo schema dei campi restituiti (righe, colonne, pitch, body_*, "
             "edge_fillets, colori...) e' fisso e NON si modifica da qui -- e' quello "
             "che garantisce che la risposta arrivi sempre come JSON strutturato valido."
         )
-        intro.setWordWrap(True)
-        datasheet_layout.addWidget(intro)
-
         self.editor = QTextEdit()
         self.editor.setAcceptRichText(False)
         self.editor.setPlainText(current_prompt)
@@ -115,13 +116,21 @@ class LlmSettingsDialog(QDialog):
         photo_layout.addWidget(self.grounding_editor)
         self.verification_model_label = QLabel()
         self._refresh_verification_label()
-        verify_layout.addWidget(self.verification_model_label)
-        verify_note = QLabel("Conferma solo la presenza dei corpi montati nei rettangoli proposti. "
-                            "Non modifica coordinate né aggiunge ID. Usa il modello datasheet, "
-                            "inclusa l'eventuale scelta per la sessione.\n\n"
+        self.field_verification_model = QLineEdit(self._verification_model)
+        self.field_verification_model.setReadOnly(True)
+        verification_button = QPushButton('Scegli modello...')
+        verification_button.clicked.connect(self._pick_verification_model)
+        verify_row = QHBoxLayout()
+        verify_row.addWidget(self.verification_model_label)
+        verify_row.addWidget(self.field_verification_model, 1)
+        verify_row.addWidget(verification_button)
+        verify_row.addWidget(self._info_button(2))
+        verify_layout.addLayout(verify_row)
+        verify_note = ("Conferma solo la presenza dei corpi montati nei rettangoli proposti. "
+                            "Non modifica coordinate né aggiunge ID. Usa un modello indipendente, "
+                            "inclusa l'eventuale scelta di verifica per la sessione.\n\n"
                             "Lo schema JSON e i controlli geometrici restano gestiti dal codice.")
-        verify_note.setWordWrap(True)
-        verify_layout.addWidget(verify_note)
+        self._help_texts = (model_note + "\n\n" + intro, vision_note, verify_note)
         self.verification_editor = QTextEdit()
         self.verification_editor.setAcceptRichText(False)
         self.verification_editor.setPlainText(current_verification_prompt or VERIFICATION_PROMPT)
@@ -142,6 +151,40 @@ class LlmSettingsDialog(QDialog):
         )
         layout.addWidget(buttons)
 
+    def _info_button(self, index: int) -> QPushButton:
+        """Keep explanations out of the editor, with keyboard-accessible help."""
+        title = self.tabs.tabText(index)
+        button = QPushButton()
+        button.setAutoDefault(False)
+        button.setIcon(QIcon(str(Path(__file__).parent / "assets" / "info.svg")))
+        button.setIconSize(QSize(20, 20))
+        button.setFixedSize(32, 32)
+        button.setToolTip(f"Informazioni: {title}")
+        button.setAccessibleName(f"Informazioni: {title}")
+        button.setObjectName(f"analysis_info_{index}")
+        button.clicked.connect(lambda checked=False: self._show_info(index))
+        self.info_buttons.append(button)
+        return button
+
+    def _show_info(self, index: int) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Informazioni — {self.tabs.tabText(index)}")
+        dialog.setModal(True)
+        dialog.resize(640, 360)
+        layout = QVBoxLayout(dialog)
+        explanation = QTextEdit()
+        explanation.setReadOnly(True)
+        explanation.setPlainText(self._help_texts[index])
+        layout.addWidget(explanation)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.button(QDialogButtonBox.StandardButton.Close).setText("Chiudi")
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
+
     def _pick_model(self) -> None:
         chosen = pick_model(self._model, self, title="Modello di default")
         if chosen:
@@ -161,9 +204,20 @@ class LlmSettingsDialog(QDialog):
             self.field_vision_model.setText(DEFAULT_VISION_MODEL)
         else:
             self.verification_editor.setPlainText(VERIFICATION_PROMPT)
+            self._verification_model = DEFAULT_MODEL
+            self.field_verification_model.setText(DEFAULT_MODEL)
 
     def _refresh_verification_label(self):
-        self.verification_model_label.setText(f"Modello condiviso con Datasheet: {self._model}")
+        self.verification_model_label.setText('Modello verifica:')
+
+    def _pick_verification_model(self):
+        chosen = pick_model(self._verification_model, self, title='Modello per verifica foto')
+        if chosen:
+            self._verification_model = chosen
+            self.field_verification_model.setText(chosen)
+
+    def verification_model(self):
+        return self._verification_model
 
     def grounding_prompt(self):
         return self.grounding_editor.toPlainText().strip() or GROUNDING_PROMPT

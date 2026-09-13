@@ -33,6 +33,15 @@ def window(monkeypatch, tmp_path):
     monkeypatch.setattr(QMessageBox, "information", lambda *args: None)
     monkeypatch.setattr(gui, "DEFAULT_LIBRARY_ROOT", tmp_path)
     w = gui.MainWindow()
+    # Geometry/lifecycle tests inject their document selection independently of
+    # the guided uploader; uploader integration has dedicated tests.
+    def selected_documents():
+        paths = [w._docs_dir() / w.docs_list.item(i).text() for i in range(w.docs_list.count())
+                 if w.docs_list.item(i).checkState() == Qt.CheckState.Checked]
+        if not paths:
+            raise ValueError('Nessun documento nel test.')
+        return paths, None
+    monkeypatch.setattr(w, '_selected_documents', selected_documents)
     yield w
     w.close()
     app.processEvents()
@@ -57,6 +66,11 @@ def test_extraction_action_is_centered_below_separate_tools(window):
     assert window.group_ai_tools.isAncestorOf(window.btn_ai_log)
     assert window.group_ai_tools.isAncestorOf(window.btn_component_prompt)
     assert window.group_ai_tools.isAncestorOf(window.btn_photo_comparison)
+    assert window.btn_photo_comparison.text() == 'Rivedi rilevamento foto…'
+    assert 'Non avvia la generazione' in window.btn_photo_comparison.toolTip()
+    tools_layout = window.group_ai_tools.layout()
+    assert tools_layout.contentsMargins().bottom() >= 12
+    assert tools_layout.itemAt(1).layout().spacing() >= 16
     assert not window.group_ai_tools.isAncestorOf(window.btn_extract_ai)
     layout = window.btn_extract_ai.parentWidget().layout()
     tools_index = layout.indexOf(window.group_ai_tools)
@@ -110,6 +124,8 @@ def test_generation_options_save_or_cancel(window, monkeypatch, accept):
         observed.append(dialog.isVisible() and dialog.isModal())
         assert dialog.include_nc_checkbox.isChecked()
         dialog.include_nc_checkbox.setChecked(False)
+        assert not dialog.advanced_user_checkbox.isChecked()
+        dialog.advanced_user_checkbox.setChecked(True)
         role = (QDialogButtonBox.StandardButton.Save if accept
                 else QDialogButtonBox.StandardButton.Cancel)
         dialog.buttons.button(role).click()
@@ -118,6 +134,9 @@ def test_generation_options_save_or_cancel(window, monkeypatch, accept):
     assert observed == [True]
     assert window._config["include_nc_pins"] is (not accept)
     assert len(saved) == int(accept)
+    assert window._advanced_user() is accept
+    assert window.tabs.isTabVisible(1) is accept
+    assert window.tabs.isTabVisible(2) is accept
 
 
 def test_output_actions_require_current_footprint(window, tmp_path, monkeypatch):
@@ -288,7 +307,8 @@ def test_generate_summary_is_in_modal_and_refreshed_on_open(window):
 def test_ai_log_modal_preserves_history_and_receives_live_updates(window):
     from PyQt6.QtCore import QTimer
     dialog = window.ai_log_dialog
-    assert window.ai_progress_text.parentWidget() is dialog
+    # The log lives in the splitter's actions panel, inside this modal.
+    assert dialog.isAncestorOf(window.ai_progress_text)
     assert window.ai_progress_text.isReadOnly()
     assert not dialog.isVisible()
     assert dialog.isModal()
@@ -308,6 +328,34 @@ def test_ai_log_modal_preserves_history_and_receives_live_updates(window):
     assert "Prima dell'apertura" in text
     assert "Durante: <b>testo letterale</b>" in text
     assert "Dopo la chiusura" in text
+
+
+def test_copy_ai_panels_copies_all_plain_text_without_modifying_logs(window, monkeypatch):
+    from unittest.mock import Mock
+    clipboard = Mock()
+    monkeypatch.setattr(QApplication, 'clipboard', lambda: clipboard)
+    assert not window.btn_copy_ai_log.isEnabled()
+    assert not window.btn_copy_ai_elements.isEnabled()
+    window._copy_ai_output()
+    clipboard.setText.assert_not_called()
+    window._on_ai_progress('Analisi: <b>testo</b> & quote')
+    window._on_ai_progress('#1 Ingombro: 2 mm')
+    window._on_ai_progress('#2 Componente: 3 mm')
+    assert window.btn_copy_ai_log.isEnabled() and window.btn_copy_ai_elements.isEnabled()
+    assert not window.btn_copy_ai_log.icon().isNull()
+    assert not window.btn_copy_ai_elements.icon().isNull()
+    window.ai_elements_list.setCurrentRow(0)  # Copy all rows, not just the selection.
+    actions = window.ai_progress_text.toPlainText()
+    window.btn_copy_ai_log.click()
+    clipboard.setText.assert_called_with(actions)
+    window.btn_copy_ai_elements.click()
+    clipboard.setText.assert_called_with('#1 Ingombro: 2 mm\n#2 Componente: 3 mm')
+    assert window.ai_progress_text.toPlainText() == actions
+    assert window.ai_elements_list.count() == 2
+    window.ai_progress_text.clear()
+    window.ai_elements_list.clear()
+    assert not window.btn_copy_ai_log.isEnabled()
+    assert not window.btn_copy_ai_elements.isEnabled()
 
 
 def test_3d_viewport_is_not_inside_scrolling_settings(window):
@@ -497,7 +545,8 @@ def test_worker_forwards_separate_photo_and_datasheet_models(monkeypatch):
         return expected
     monkeypatch.setattr(gui, "extract_pin_header_params", extract)
     worker = gui.ExtractWorker([Path("board.png")], model="vendor/datasheet", vision_model="vendor/photo",
-                               grounding_prompt="localize", verification_prompt="verify")
+                               grounding_prompt="localize", verification_prompt="verify",
+                               verification_model="vendor/verifier", terminal_prompt="terminals")
     spy = QSignalSpy(worker.done)
     worker.run()
     assert spy[0][0] is expected
@@ -505,30 +554,36 @@ def test_worker_forwards_separate_photo_and_datasheet_models(monkeypatch):
     assert calls[0][1]["vision_model"] == "vendor/photo"
     assert calls[0][1]["grounding_prompt"] == "localize"
     assert calls[0][1]["verification_prompt"] == "verify"
+    assert calls[0][1]["verification_model"] == "vendor/verifier"
+    assert calls[0][1]["terminal_prompt"] == "terminals"
 
 
 def test_settings_pass_save_and_display_separate_vision_model(window, monkeypatch):
-    window._config["vision_model"] = "vendor/old-photo"
+    window.profile_store.save_defaults({'vision_model': 'vendor/old-photo'})
     window._session_model = "vendor/session-datasheet"
     saved = []
     class SettingsStub:
         def __init__(self, prompt, model, parent, *, current_vision_model,
-                     current_grounding_prompt, current_verification_prompt):
+                     current_grounding_prompt, current_verification_prompt, current_verification_model):
             assert current_vision_model == "vendor/old-photo"
             assert parent is window
         def exec(self): return QDialog.DialogCode.Accepted
         def prompt(self): return "prompt"
         def model(self): return "vendor/new-datasheet"
         def vision_model(self): return "vendor/new-photo"
+        def verification_model(self): return "vendor/new-verify"
         def grounding_prompt(self): return "localize"
         def verification_prompt(self): return "verify"
     monkeypatch.setattr(gui, "LlmSettingsDialog", SettingsStub)
     monkeypatch.setattr(gui, "save_config", lambda config: saved.append(deepcopy(config)))
     window._edit_llm_settings()
-    assert saved[0]["vision_model"] == "vendor/new-photo"
-    assert saved[0]["grounding_prompt"] == "localize"
-    assert saved[0]["verification_prompt"] == "verify"
-    assert saved[0]["model"] == "vendor/new-datasheet"
+    assert saved == []  # No AI profile writes to legacy JSON.
+    defaults = window.profile_store.defaults()
+    assert defaults["vision_model"] == "vendor/new-photo"
+    assert defaults["verification_model"] == "vendor/new-verify"
+    assert defaults["grounding_prompt"] == "localize"
+    assert defaults["verification_prompt"] == "verify"
+    assert defaults["model"] == "vendor/new-datasheet"
     assert window._effective_model() == "vendor/session-datasheet"
     assert window._vision_model() == "vendor/new-photo"
     assert window.combo_vision_model.currentText() == "Default: vendor/new-photo"
@@ -536,14 +591,14 @@ def test_settings_pass_save_and_display_separate_vision_model(window, monkeypatc
 
 
 def test_photo_model_selection_is_independent_and_can_return_to_default(window, monkeypatch):
-    window._config["vision_model"] = "vendor/default-photo"
+    window.profile_store.save_defaults({'vision_model': 'vendor/default-photo'})
     window._session_model = "vendor/session-datasheet"
     window._refresh_model_combo()
     monkeypatch.setattr(gui, "pick_model", lambda *args, **kwargs: "vendor/session-photo")
     window.btn_pick_vision_model.click()
     assert window._vision_model() == "vendor/session-photo"
     assert window._effective_model() == "vendor/session-datasheet"
-    assert window._config["vision_model"] == "vendor/default-photo"
+    assert window.profile_store.defaults()["vision_model"] == "vendor/default-photo"
     assert window.combo_vision_model.currentData() == "vendor/session-photo"
     monkeypatch.setattr(gui, "pick_model", lambda *args, **kwargs: None)
     window.btn_pick_vision_model.click()
@@ -555,7 +610,6 @@ def test_photo_model_selection_is_independent_and_can_return_to_default(window, 
 
 def test_vision_default_and_real_settings_interface(window):
     from kicadgen.services.photo_grounding import DEFAULT_VISION_MODEL
-    window._config["vision_model"] = "  "
     assert window._vision_model() == DEFAULT_VISION_MODEL
     settings = gui.LlmSettingsDialog("prompt", "vendor/datasheet", window,
                                      current_vision_model=window._vision_model())
@@ -565,9 +619,75 @@ def test_vision_default_and_real_settings_interface(window):
         settings.close()
 
 
+def test_custom_profile_drives_geometry_family_and_worker_snapshot(window, monkeypatch):
+    store = window.profile_store
+    key = store.save_type(None, label='Modulo personale', family='aggregate_castellated',
+                         instructions='istruzioni specifiche', overrides={
+                             'model': 'type/data', 'vision_model': 'type/photo',
+                             'verification_model': 'type/verify', 'system_prompt': 'type prompt',
+                             'grounding_prompt': 'ground', 'verification_prompt': 'verify',
+                             'terminal_prompt': 'terminals', 'image_instructions': 'extra foto'})
+    window._reload_profile_types()
+    window.field_component_prompt.setPlainText('note libere')
+    window.combo_component_type.setCurrentIndex(window.combo_component_type.findData(key))
+    assert window.group_castellated.isChecked()
+    assert 'istruzioni specifiche' in window.field_component_prompt.toPlainText()
+    assert 'note libere' in window.field_component_prompt.toPlainText()
+    assert window.combo_verification_model.currentText() == 'Default: type/verify'
+    monkeypatch.setattr(gui.ExtractWorker, 'start', lambda self: None)
+    item = QListWidgetItem('board.png')
+    item.setCheckState(Qt.CheckState.Checked)
+    window.docs_list.addItem(item)
+    window._extract_with_ai()
+    worker = window._extract_worker
+    assert (worker.model, worker.vision_model, worker.verification_model) == ('type/data', 'type/photo', 'type/verify')
+    assert worker.system_prompt == 'type prompt'
+    assert worker.grounding_prompt.startswith('ground') and 'extra foto' in worker.grounding_prompt
+    assert worker.verification_prompt.startswith('verify') and 'extra foto' in worker.verification_prompt
+    assert worker.terminal_prompt.startswith('terminals') and 'extra foto' in worker.terminal_prompt
+    assert 'istruzioni specifiche' in worker.extra_instructions
+    store.save_type(key, label='changed', family='single_smd', overrides={'model': 'next'})
+    assert worker.model == 'type/data'  # Running request is isolated from later edits.
+    window._on_extract_finished()
+
+
+def test_verification_session_is_independent_and_does_not_persist(window, monkeypatch):
+    before = window.profile_store.defaults()
+    window._session_model = 'session/data'
+    window._session_vision_model = 'session/photo'
+    monkeypatch.setattr(gui, 'pick_model', lambda *a, **kw: 'session/verify')
+    window.btn_pick_verification_model.click()
+    assert window._verification_model() == 'session/verify'
+    assert window._effective_model() == 'session/data'
+    assert window._vision_model() == 'session/photo'
+    assert window.profile_store.defaults() == before
+    window.combo_verification_model.setCurrentIndex(0)
+    assert window._verification_model() == before['verification_model']
+    assert window._effective_model() == 'session/data'
+
+
+def test_removed_type_refresh_preserves_free_notes_and_falls_back(window):
+    window.combo_component_type.setCurrentIndex(window.combo_component_type.findData('single_smd'))
+    window.field_component_prompt.append('note da conservare')
+    window.profile_store.delete_type('single_smd')
+    window._reload_profile_types()
+    assert window.combo_component_type.currentData() == ''
+    assert 'note da conservare' in window.field_component_prompt.toPlainText()
+    assert window.combo_component_type.findData('single_smd') == -1
+
+
+def test_only_defaults_refresh_does_not_replace_session_prompt(window):
+    window.combo_component_type.setCurrentIndex(window.combo_component_type.findData('single_smd'))
+    window.field_component_prompt.setPlainText('custom edited session instructions')
+    window.profile_store.save_defaults({'model': 'new/default'})
+    window._reload_profile_types(update_prompt=False)
+    assert window.field_component_prompt.toPlainText() == 'custom edited session instructions'
+    assert window._effective_model() == 'new/default'
+
+
 def test_start_extraction_uses_vision_config_and_resets_photo_state(window, raw_params, monkeypatch):
     window._on_extracted(raw_params)
-    window._config["vision_model"] = "vendor/photo"
+    window.profile_store.save_defaults({'vision_model': 'vendor/photo'})
     window._session_model = "vendor/datasheet"
     # Suppress only thread execution: inspect the real constructed worker.
     monkeypatch.setattr(gui.ExtractWorker, "start", lambda self: None)

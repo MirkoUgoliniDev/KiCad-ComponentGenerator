@@ -1,8 +1,9 @@
 """Configurazione applicativa persistente (config.json accanto a main.py).
 
-Qui stanno le impostazioni GLOBALI, che valgono per tutti i componenti e
-sopravvivono alla chiusura dell'app -- a differenza dei parametri del singolo
-footprint, che vivono solo nei campi della finestra.
+Qui restano le preferenze dell'interfaccia. Prompt e modelli precedenti vengono
+letti solo per la migrazione iniziale al database SQLite dei profili AI;
+save_config non li riscrive nel JSON. I parametri del singolo footprint
+vivono nei campi della finestra.
 
 Il file e' un JSON in chiaro, cosi' e' ispezionabile e modificabile a mano;
 non contiene segreti (la API key resta nel .env).
@@ -12,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 from ..services.datasheet_extractor import DEFAULT_SYSTEM_PROMPT
@@ -19,6 +21,10 @@ from ..services.openrouter import DEFAULT_MODEL
 from ..services.photo_grounding import DEFAULT_VISION_MODEL, GROUNDING_PROMPT, VERIFICATION_PROMPT
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config.json"
+
+
+def config_path() -> Path:
+    return Path(os.environ.get("KICADGEN_CONFIG_PATH", CONFIG_PATH))
 
 #: SHA-256 dei prompt di sistema che sono stati il default in passato.
 #: Un config.json che contiene ancora uno di questi non e' stato
@@ -34,7 +40,7 @@ LEGACY_DEFAULT_PROMPT_HASHES = {
 
 
 def _prompt_hash(prompt: str) -> str:
-    return hashlib.sha256(prompt.strip().encode("utf-8")).hexdigest()
+    return hashlib.sha256((prompt if isinstance(prompt, str) else '').strip().encode("utf-8")).hexdigest()
 
 DEFAULTS = {
     "system_prompt": DEFAULT_SYSTEM_PROMPT,
@@ -52,6 +58,7 @@ DEFAULTS = {
     # presenti: di default vanno generati, altrimenti manca il foro e il
     # componente non entra nella scheda.
     "include_nc_pins": True,
+    "advanced_user": False,
     "show_grid": True,
     "grid_unit": "mm",  # "mm" oppure "inch" (passo 2.54mm, standard THT)
     "show_pin_numbers_3d": True,
@@ -61,10 +68,13 @@ DEFAULTS = {
 def load_config() -> dict:
     """Legge config.json, completando le chiavi mancanti con i default."""
     config = dict(DEFAULTS)
-    if CONFIG_PATH.is_file():
+    if config_path().is_file():
         try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
-                config.update(json.load(fh))
+            with open(config_path(), "r", encoding="utf-8") as fh:
+                loaded = json.load(fh)
+                if not isinstance(loaded, dict):
+                    raise ValueError('La configurazione deve essere un oggetto JSON.')
+                config.update(loaded)
             if _prompt_hash(config.get("system_prompt") or "") in LEGACY_DEFAULT_PROMPT_HASHES:
                 config["system_prompt"] = DEFAULT_SYSTEM_PROMPT
         except (OSError, ValueError):
@@ -75,5 +85,8 @@ def load_config() -> dict:
 
 
 def save_config(config: dict) -> None:
-    with open(CONFIG_PATH, "w", encoding="utf-8") as fh:
-        json.dump(config, fh, indent=2, ensure_ascii=False)
+    # AI profiles are persisted only in SQLite after startup migration.
+    from ..services.analysis_profiles import PROFILE_FIELDS
+    preferences = {k: v for k, v in config.items() if k not in PROFILE_FIELDS}
+    with open(config_path(), "w", encoding="utf-8") as fh:
+        json.dump(preferences, fh, indent=2, ensure_ascii=False)

@@ -286,7 +286,76 @@ def test_invalid_main_response_raises_application_error_before_photo(monkeypatch
     photo.assert_not_called()
 
 
+@pytest.mark.parametrize('verification_model', [None, 'vendor/verify'])
+def test_three_stage_models_and_custom_prompts_reach_services(monkeypatch, tmp_path, verification_model):
+    from unittest.mock import Mock
+    from kicadgen.services import datasheet_extractor as ext, photo_inventory as inv, photo_terminals
+    path = tmp_path / 'drawing.png'
+    path.write_bytes(b'offline fixture')
+    payload = dict(layout='castellated', body_length_mm=40, body_width_mm=20,
+                   castellated_sides=[dict(edge='left', count=2, pitch_mm=2.54)])
+    component = dict(name='body', kind='generic', x_mm=0, y_mm=0, length_mm=2, width_mm=1, height_mm=.5)
+    report = inv.InventoryResult(components=[component], photo_png=b'photo', photo='fixture')
+    main_call, photo, terminals = Mock(return_value=payload), Mock(return_value=report), Mock(return_value=[component])
+    monkeypatch.setattr(ext, 'api_key', lambda: 'offline')
+    monkeypatch.setattr(ext, 'call_tool', main_call)
+    monkeypatch.setattr(inv, 'extract_inventory', photo)
+    monkeypatch.setattr(photo_terminals, 'observe_terminals', terminals)
+    ext.extract_pin_header_params([path], model='vendor/data', vision_model='vendor/photo',
+        verification_model=verification_model, system_prompt='datasheet prompt', grounding_prompt='ground prompt',
+        verification_prompt='verify prompt', terminal_prompt='terminal prompt', photo_cache_dir=tmp_path / 'cache')
+    assert main_call.call_args.kwargs['model'] == 'vendor/data'
+    assert main_call.call_args.kwargs['system_prompt'] == 'datasheet prompt'
+    assert photo.call_args.args[1] == 'vendor/photo'
+    assert photo.call_args.kwargs['classifier_model'] == (verification_model or 'vendor/data')
+    assert photo.call_args.kwargs['grounding_prompt'] == 'ground prompt'
+    assert photo.call_args.kwargs['verification_prompt'] == 'verify prompt'
+    assert terminals.call_args.args[2] == 'vendor/photo'
+    assert terminals.call_args.kwargs['system_prompt'] == 'terminal prompt'
+
+
 # ── Componenti letti dalla foto (modello 3D) ────────────────────────
+
+
+@pytest.mark.parametrize('with_top', [True, False])
+def test_explicit_document_roles_override_ai_top_selection(monkeypatch, tmp_path, with_top):
+    from unittest.mock import Mock
+    from kicadgen.services import datasheet_extractor as ext, photo_inventory as inv
+    paths = [tmp_path / 'contacts.png', tmp_path / 'side.png']
+    roles = {'contacts.png': 'pinout', 'side.png': 'front'}
+    if with_top:
+        paths.append(tmp_path / 'random-photo.png')
+        roles['random-photo.png'] = 'top'
+    for path in paths:
+        path.write_bytes(b'offline fixture')
+    payload = dict(layout='castellated', body_length_mm=40, body_width_mm=20,
+                   top_photo_index=0, castellated_sides=[dict(edge='left', count=2, pitch_mm=2.54)])
+    call = Mock(return_value=payload)
+    photo = Mock(return_value=inv.InventoryResult())
+    monkeypatch.setattr(ext, 'api_key', lambda: 'offline')
+    monkeypatch.setattr(ext, 'call_tool', call)
+    monkeypatch.setattr(inv, 'extract_inventory', photo)
+    ext.extract_pin_header_params(paths, document_roles=roles, photo_cache_dir=tmp_path / 'cache')
+    assert photo.call_args.kwargs['top_photo_index'] == (2 if with_top else -1)
+    assert photo.call_args.kwargs['top_photo_source'] == 'utente'
+    blocks = call.call_args.kwargs['content_blocks']
+    assert 'Pinout / disposizione contatti' in blocks[0]['text']
+    assert 'Vista laterale' in blocks[2]['text']
+    if with_top:
+        assert 'Vista superiore' in blocks[4]['text']
+    else:
+        assert 'Viste non fornite: Vista superiore' in blocks[-1]['text']
+
+
+def test_ambiguous_roles_fail_before_network(monkeypatch, tmp_path):
+    from unittest.mock import Mock
+    from kicadgen.services import datasheet_extractor as ext
+    network = Mock()
+    monkeypatch.setattr(ext, 'api_key', network)
+    with pytest.raises(ext.ExtractionError, match='Ruoli documenti'):
+        ext.extract_pin_header_params([tmp_path / 'a.png', tmp_path / 'b.png'],
+                                      document_roles={'a.png': 'top', 'b.png': 'top'})
+    network.assert_not_called()
 
 def test_photo_components_are_kept_with_their_box_and_color():
     params = _params_from_tool_arguments({

@@ -328,7 +328,7 @@ def draw_inventory(image, components, use_ids=False):
 def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                       top_photo_index=None, extra_instructions=None,
                       grounding=True, cache_dir=None, classifier_model=None, mechanical=True,
-                      grounding_prompt=None, verification_prompt=None):
+                      grounding_prompt=None, verification_prompt=None, top_photo_source='AI'):
     log = progress or (lambda message: None)
     report = InventoryResult()
     def warn(message):
@@ -365,7 +365,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     if top_photo_index is None:
         warn(f"Vista superiore non specificata: scelta euristica {path.name}, verificare la foto nel confronto.")
     else:
-        log(f"Vista superiore indicata dall'AI: {path.name}.")
+        log(f"Vista superiore indicata da {top_photo_source}: {path.name}.")
     import cv2
     ok, encoded = cv2.imencode(".png", photo)
     report.photo_png = encoded.tobytes() if ok else None
@@ -386,7 +386,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         log(f"Inventario concluso: {len(report.components)} package; "
             f"{sum(bool(c.get('_uncertain')) for c in report.components)} dubbi sulla presenza/geometria. "
             "Altezze tutte stimate e da controllare. "
-            "Apri Confronta foto per controllare o correggere.")
+            "Apri Rivedi rilevamento foto per controllare o correggere.")
         return report
     # Legacy path retained only for reproducible comparisons and integrations
     # explicitly requesting grounding=False.

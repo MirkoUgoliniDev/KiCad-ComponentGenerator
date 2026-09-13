@@ -48,7 +48,7 @@ class AnalysisOverlay(QWidget):
         content.setSpacing(16)
         self.spinner = AnalysisSpinner()
         content.addWidget(self.spinner, alignment=Qt.AlignmentFlag.AlignHCenter)
-        title = QLabel("Analisi AI in corso")
+        self.title = title = QLabel("Analisi AI in corso")
         title.setStyleSheet("font-size: 18pt; font-weight: 600;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         content.addWidget(title)
@@ -79,10 +79,11 @@ class AnalysisOverlay(QWidget):
             self.setGeometry(watched.rect())
         return super().eventFilter(watched, event)
 
-    def start(self):
+    def start(self, title='Analisi AI in corso', status='Preparazione dei documenti…'):
+        self.title.setText(title)
         self.started_at = monotonic()
         self.spinner.angle = 0
-        self.set_status("Preparazione dei documenti…")
+        self.set_status(status)
         self.setGeometry(self.parentWidget().rect())
         self._tick()
         self.show()
