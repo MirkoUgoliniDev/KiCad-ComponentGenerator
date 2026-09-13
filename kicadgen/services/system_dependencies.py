@@ -17,6 +17,7 @@ class ExternalApplications:
 
     kicad_cli: str | None
     freecadcmd: str | None
+    pcbnew: str | None = None
 
     @property
     def missing(self) -> tuple[str, ...]:
@@ -77,13 +78,57 @@ def find_kicad_cli() -> str | None:
     return sorted(candidates, reverse=True)[0] if candidates else None
 
 
+def find_pcbnew(kicad_cli: str | None = None) -> str | None:
+    """@brief Find the KiCad PCB Editor used for isolated visual previews."""
+    override = _existing_file(os.environ.get("KICAD_PCBNEW_PATH"))
+    if override:
+        return override
+
+    if kicad_cli:
+        sibling = _existing_file(
+            Path(kicad_cli).with_name("pcbnew.exe" if os.name == "nt" else "pcbnew"))
+        if sibling:
+            return sibling
+
+    from_path = shutil.which("pcbnew") or shutil.which("pcbnew.exe")
+    resolved = _existing_file(from_path)
+    if resolved:
+        return resolved
+
+    patterns = []
+    for root in filter(None, (
+            os.environ.get("ProgramFiles"),
+            os.environ.get("ProgramFiles(x86)"),
+            r"C:\Program Files",
+            r"C:\Program Files (x86)",
+    )):
+        patterns.extend((
+            str(Path(root) / "KiCad" / "*" / "bin" / "pcbnew.exe"),
+            str(Path(root) / "KiCad" / "bin" / "pcbnew.exe"),
+        ))
+    patterns.extend((
+        "/usr/bin/pcbnew",
+        "/usr/local/bin/pcbnew",
+        "/Applications/KiCad/KiCad.app/Contents/MacOS/pcbnew",
+    ))
+    candidates = {
+        resolved_path
+        for pattern in patterns
+        for match in glob.glob(pattern)
+        if (resolved_path := _existing_file(match)) is not None
+    }
+    return sorted(candidates, reverse=True)[0] if candidates else None
+
+
 def detect_external_applications() -> ExternalApplications:
     """@brief Detect KiCad and FreeCAD without starting either application."""
+    kicad_cli = find_kicad_cli()
     try:
         freecadcmd = find_freecadcmd()
     except (Cad3DError, OSError):
         freecadcmd = None
     return ExternalApplications(
-        kicad_cli=find_kicad_cli(),
+        kicad_cli=kicad_cli,
         freecadcmd=_existing_file(freecadcmd),
+        pcbnew=find_pcbnew(kicad_cli),
     )

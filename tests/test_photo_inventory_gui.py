@@ -194,8 +194,13 @@ def test_generation_options_save_or_cancel(window, monkeypatch, accept):
 
 
 def test_output_actions_require_current_footprint(window, tmp_path, monkeypatch):
-    controls = (window.btn_open_output, window.btn_export,
-                window.action_open_output, window.action_export)
+    footprint_controls = (window.btn_open_output, window.action_open_output)
+    complete_controls = (
+        window.btn_test_kicad, window.btn_export, window.btn_install_global,
+        window.action_test_kicad, window.action_export,
+        window.action_install_global,
+    )
+    controls = footprint_controls + complete_controls
     assert all(not control.isEnabled() for control in controls)
     window._docs_dir().mkdir(parents=True, exist_ok=True)
     window._refresh_output_actions()
@@ -207,6 +212,12 @@ def test_output_actions_require_current_footprint(window, tmp_path, monkeypatch)
     monkeypatch.setattr(window, "_draw_preview", lambda: None)
     monkeypatch.setattr(window, "_draw_preview_3d", lambda: None)
     window._on_generated(str(footprint))
+    assert all(control.isEnabled() for control in footprint_controls)
+    assert all(not control.isEnabled() for control in complete_controls)
+    step = window._project_dir() / f"{name}.3dshapes" / f"{name}.step"
+    step.parent.mkdir()
+    step.write_bytes(b"STEP")
+    window._refresh_output_actions()
     assert all(control.isEnabled() for control in controls)
     window.field_name.setText("AltroComponente")
     assert all(not control.isEnabled() for control in controls)
@@ -216,6 +227,28 @@ def test_output_actions_require_current_footprint(window, tmp_path, monkeypatch)
     assert all(not control.isEnabled() for control in controls)
 
 
+def test_kicad_tab_is_visible_in_standard_user_mode(window):
+    """@brief Keep the final review workflow available outside advanced mode."""
+    assert not window._advanced_user()
+    assert window.tabs.count() == 6
+    assert window.tabs.isTabVisible(5)
+    assert window.tabs.tabText(5) == "🔌 KiCad"
+    assert window.tabs.widget(5).isAncestorOf(window.btn_test_kicad)
+
+
+def test_kicad_workflow_errors_follow_selected_language(window):
+    """@brief Translate structured service failures before displaying them."""
+    from kicadgen.services.kicad_library import KiCadLibraryError
+
+    window.i18n.set_language("fr")
+    error = KiCadLibraryError(
+        "STEP model not found: C:/Demo.step",
+        code="step_missing", path="C:/Demo.step",
+    )
+    assert window._kicad_error_text(error) == (
+        "Modèle STEP introuvable : C:/Demo.step")
+
+
 def test_output_handlers_do_not_open_or_export_without_footprint(window, monkeypatch):
     calls = []
     monkeypatch.setattr(gui.webbrowser, "open", lambda *args: calls.append(args))
@@ -223,6 +256,65 @@ def test_output_handlers_do_not_open_or_export_without_footprint(window, monkeyp
     window._open_project_dir()
     window._export_component()
     assert calls == []
+
+
+def _write_complete_kicad_output(window):
+    """@brief Create the minimal footprint/STEP pair required by KiCad actions."""
+    name = window._component_name()
+    footprint = window._project_dir() / f"{name}.pretty" / f"{name}.kicad_mod"
+    step = window._project_dir() / f"{name}.3dshapes" / f"{name}.step"
+    footprint.parent.mkdir(parents=True, exist_ok=True)
+    step.parent.mkdir(parents=True, exist_ok=True)
+    footprint.write_text(
+        f'(footprint "{name}"\n\t(version 20260206)\n'
+        '\t(generator "test")\n\t(layer "F.Cu")\n)\n',
+        encoding="utf-8",
+    )
+    step.write_bytes(b"STEP")
+    window._refresh_output_actions()
+    return footprint, step
+
+
+def test_kicad_tab_opens_isolated_preview(window, tmp_path, monkeypatch):
+    """@brief Test in KiCad creates a preview without touching a library table."""
+    from kicadgen.services.system_dependencies import ExternalApplications
+
+    _write_complete_kicad_output(window)
+    pcbnew = tmp_path / "pcbnew.exe"
+    pcbnew.touch()
+    monkeypatch.setattr(
+        gui, "detect_external_applications",
+        lambda: ExternalApplications(None, None, str(pcbnew)),
+    )
+    launched = []
+    monkeypatch.setattr(
+        gui, "launch_preview",
+        lambda executable, board: launched.append((Path(executable), Path(board))),
+    )
+    window._test_in_kicad()
+    assert launched and launched[0][0] == pcbnew
+    assert launched[0][1].is_file()
+    assert ".kicad-preview" in launched[0][1].parts
+    assert not (window._project_dir() / "fp-lib-table").exists()
+
+
+def test_kicad_tab_installs_portable_project_library(window, tmp_path, monkeypatch):
+    """@brief Project installation creates both libraries and fp-lib-table."""
+    _write_complete_kicad_output(window)
+    project = tmp_path / "DestinationProject"
+    project.mkdir()
+    (project / "DestinationProject.kicad_pro").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        gui.QFileDialog, "getExistingDirectory", lambda *args: str(project))
+    window._install_project_library()
+    name = window._component_name()
+    installed = project / "KiCadGen.pretty" / f"{name}.kicad_mod"
+    assert installed.is_file()
+    assert f'${{KIPRJMOD}}/KiCadGen.3dshapes/{name}.step' in installed.read_text(
+        encoding="utf-8")
+    assert (project / "KiCadGen.3dshapes" / f"{name}.step").is_file()
+    assert '(name "KiCadGen")' in (project / "fp-lib-table").read_text(
+        encoding="utf-8")
 
 
 def test_footprint_sections_have_independent_scroll_tabs(window):

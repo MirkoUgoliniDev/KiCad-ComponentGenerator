@@ -1,37 +1,10 @@
-"""Finestra principale della GUI di KiCadGen-Tool.
+"""@brief Provide the main KiCadGen-Tool desktop window.
 
-Stesso linguaggio grafico di Pm3ToWav (C:\\Lavori\\Python\\Pm3ToWav):
-tema scuro Catppuccin Mocha (kicadgen.gui.theme), QTabWidget con tab
-arrotondati e bordo inferiore blu sulla tab attiva, generazione
-eseguita in un QThread worker per non bloccare la UI (stesso pattern
-di ConvertWorker in Pm3ToWav/main.py), log in una QTextEdit.
-
-Cinque tab:
-    1. Progetto     -- cartella che ospitera' il componente + documentazione (docs/)
-    2. Footprint 2D -- parametri del generatore (kicadgen.generators.pin_header)
-                       + gruppo opzionale "Modello 3D" (corpo/offset/pin length)
-    3. Genera       -- riepilogo, pulsante Genera, log (footprint 2D + STEP 3D)
-    4. Anteprima    -- disegno 2D dei pad a scala, con quote (margini, span, totali)
-    5. Modello 3D   -- anteprima 3D interattiva (VTK, kicadgen.gui.preview_3d_vtk)
-                       + annotazioni di post-elaborazione (fillet su spigoli,
-                       serigrafie sulle facce) con tabella di revisione prima di generare
-
-La cartella del componente segue la stessa convenzione gia' usata nel
-resto del repo (es. ESP32-S3-N16R8/ESP32_S3_N16R8.pretty/): il nome
-della cartella coincide con il nome del footprint. Il campo "Nome" vive
-nel tab Progetto (determina anche il path); il tab Footprint 2D ne
-mostra solo uno specchio in sola lettura.
-
-Il tab Progetto include anche "Estrai parametri con AI dal datasheet"
-(kicadgen.services.datasheet_extractor): manda i file selezionati in
-docs/ a un modello LLM via OpenRouter e pre-compila
-righe/colonne/passo/pad/drill (+ i campi del corpo 3D, se il datasheet ha
-un disegno meccanico quotato). Prima di lanciarla si dichiara la
-tipologia di componente (THT/SMD, singolo/aggregato, castellated), il cui
-testo finisce nel prompt specifico del componente, dove resta
-modificabile; il modello si sceglie fra il default globale e uno piu'
-capace valido solo per la sessione. Richiede la variabile d'ambiente
-OPENROUTER_API_KEY.
+@details The window uses the shared dark Qt theme and runs long generation and
+AI operations in worker threads. Its six stable tabs cover project input,
+advanced footprint parameters, generation, 2D review, 3D review and the final
+KiCad validation/installation workflow. Standard-user mode hides only the two
+advanced parameter tabs while preserving their indexes for existing handlers.
 """
 
 from __future__ import annotations
@@ -78,6 +51,14 @@ from ..services.datasheet_extractor import (
 )
 from ..services.openrouter import DEFAULT_MODEL
 from ..services.system_dependencies import detect_external_applications
+from ..services.kicad_library import (
+    KiCadLibraryError,
+    create_preview_project,
+    discover_component_artifacts,
+    global_fp_lib_table_path,
+    install_component_library,
+    launch_preview,
+)
 from .app_config import CONFIG_PATH, DEFAULTS, config_path, load_config, save_config
 from .analysis_overlay import AnalysisOverlay
 from .generation_options_dialog import GenerationOptionsDialog
@@ -92,10 +73,8 @@ from .translation_dialog import TranslationDialog
 from .theme import BASE, BLUE, SURFACE0, SURFACE1, SURFACE2, TEXT, YELLOW, APP_QSS
 
 APP_DIR = Path(__file__).resolve().parent.parent.parent
-# Area di lavoro: i componenti si generano qui dentro, e si esportano nella
-# libreria vera solo quando sono stati verificati (pulsante "Esporta in libreria").
+# Generated working files stay separate from installed KiCad libraries.
 DEFAULT_LIBRARY_ROOT = APP_DIR / "generated"
-DEFAULT_EXPORT_ROOT = APP_DIR.parent  # .../CustomComponents
 DOCS_SUBDIR = "docs"
 
 
@@ -107,8 +86,7 @@ def _align_form_labels(form: QFormLayout, width: int = 132) -> None:
         if label is not None:
             label.setFixedWidth(width)
 
-#: Chiave con cui si marcano le linee della griglia nell'anteprima 2D, per
-#: poterle escludere dal calcolo dell'inquadratura.
+#: Marks preview grid lines so fit-to-content calculations can exclude them.
 _GRID_ITEM = 0
 
 
@@ -344,7 +322,7 @@ class ExtractWorker(QThread):
 
 
 class MainWindow(QMainWindow):
-    """Finestra principale: 4 tab, Progetto / Footprint 2D / Genera / Anteprima."""
+    """@brief Coordinate the six-tab component generation workflow."""
 
     def __init__(self, profile_store=None):
         super().__init__()
@@ -405,7 +383,12 @@ class MainWindow(QMainWindow):
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu(self.i18n.tr("app.file"))
         self.action_open_output = file_menu.addAction(self.i18n.text("Apri cartella componente"), self._open_project_dir)
-        self.action_export = file_menu.addAction(self.i18n.text("Esporta in libreria..."), self._export_component)
+        self.action_test_kicad = file_menu.addAction(
+            self.i18n.text("Prova in KiCad..."), self._test_in_kicad)
+        self.action_export = file_menu.addAction(
+            self.i18n.text("Installa nel progetto KiCad..."), self._install_project_library)
+        self.action_install_global = file_menu.addAction(
+            self.i18n.text("Installa come libreria globale..."), self._install_global_library)
         file_menu.addSeparator()
         self.action_exit = file_menu.addAction(self.i18n.text("Esci"), self.close)
 
@@ -753,6 +736,7 @@ class MainWindow(QMainWindow):
         generate_tab = self._build_generate_tab()
         preview_tab = self._build_preview_tab()
         model_3d_tab = self._build_3d_tab()
+        kicad_tab = self._build_kicad_tab()
 
         language_row = QHBoxLayout()
         language_row.setSpacing(10)
@@ -780,6 +764,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(generate_tab, self.i18n.tr("tab.generate"))
         self.tabs.addTab(preview_tab, self.i18n.tr("tab.preview"))
         self.tabs.addTab(model_3d_tab, self.i18n.tr("tab.model3d"))
+        self.tabs.addTab(kicad_tab, self.i18n.tr("tab.kicad"))
         self._set_acquisition_tabs_enabled(False)
         self.tabs.currentChanged.connect(self._on_tab_changed)
         layout.addWidget(self.tabs)
@@ -804,12 +789,16 @@ class MainWindow(QMainWindow):
         self.tabs.setTabText(2, self.i18n.tr("tab.generate"))
         self.tabs.setTabText(3, self.i18n.tr("tab.preview"))
         self.tabs.setTabText(4, self.i18n.tr("tab.model3d"))
+        self.tabs.setTabText(5, self.i18n.tr("tab.kicad"))
         self.i18n.retranslate_widgets(self)
         self.menuBar().actions()[0].setText(self.i18n.tr("app.file"))
         self.menuBar().actions()[1].setText(self.i18n.tr("app.configuration"))
         self.menuBar().actions()[2].setText(self.i18n.tr("app.help"))
         self.action_open_output.setText(self.i18n.text("Apri cartella componente"))
-        self.action_export.setText(self.i18n.text("Esporta in libreria..."))
+        self.action_test_kicad.setText(self.i18n.text("Prova in KiCad..."))
+        self.action_export.setText(self.i18n.text("Installa nel progetto KiCad..."))
+        self.action_install_global.setText(
+            self.i18n.text("Installa come libreria globale..."))
         self.action_exit.setText(self.i18n.text("Esci"))
         self.action_profiles.setText(self.i18n.text("Gestione tipologie e profili AI..."))
         self.action_translations.setText(self.i18n.text("Manage translations..."))
@@ -820,6 +809,7 @@ class MainWindow(QMainWindow):
         self.action_about.setText(self.i18n.text("About"))
         self._retranslate_component_types()
         self._refresh_model_combo()
+        self._refresh_output_actions()
 
     def _retranslate_component_types(self) -> None:
         """@brief Refresh built-in component type labels without changing selection."""
@@ -1202,15 +1192,43 @@ class MainWindow(QMainWindow):
     def _refresh_output_actions(self) -> bool:
         name = self._component_name()
         footprint = self._project_dir() / f"{name}.pretty" / f"{name}.kicad_mod"
-        available = bool(name) and footprint.is_file()
-        for attr in ("btn_open_output", "btn_export", "action_open_output", "action_export"):
+        step = self._project_dir() / f"{name}.3dshapes" / f"{name}.step"
+        footprint_available = bool(name) and footprint.is_file()
+        complete_available = footprint_available and step.is_file()
+        for attr in ("btn_open_output", "action_open_output"):
             action = getattr(self, attr, None)
             if action is not None:
-                action.setEnabled(available)
+                action.setEnabled(footprint_available)
                 action.setToolTip(
-                    "" if available else
+                    "" if footprint_available else
                     self.i18n.text("Genera prima il footprint del componente corrente"))
-        return available
+        for attr in (
+                "btn_test_kicad", "btn_export", "btn_install_global",
+                "action_test_kicad", "action_export", "action_install_global"):
+            action = getattr(self, attr, None)
+            if action is not None:
+                action.setEnabled(complete_available)
+                enabled_tooltips = {
+                    "btn_test_kicad": "Apre un progetto temporaneo: non installa e non modifica librerie KiCad",
+                    "btn_export": "Crea KiCadGen.pretty e KiCadGen.3dshapes nel progetto selezionato",
+                    "btn_install_global": "Installa nella cartella scelta e registra la libreria globale di KiCad",
+                }
+                source = (enabled_tooltips.get(attr, "") if complete_available else
+                          "Genera prima footprint e modello STEP del componente corrente")
+                rendered = self.i18n.text(source) if source else ""
+                if isinstance(action, QWidget):
+                    action.setProperty("i18n_tooltip_source", source)
+                    action.setProperty("i18n_tooltip_rendered", rendered)
+                action.setToolTip(rendered)
+        if hasattr(self, "label_kicad_footprint"):
+            self.label_kicad_footprint.setText(
+                str(footprint) if footprint_available else "—")
+            self.label_kicad_step.setText(str(step) if step.is_file() else "—")
+            self.label_kicad_status.setText(
+                self.i18n.text("Footprint e modello STEP pronti per la verifica.")
+                if complete_available else
+                self.i18n.text("Genera footprint e modello STEP per continuare."))
+        return footprint_available
 
     def _on_name_changed(self, text: str) -> None:
         if hasattr(self, "field_name_mirror"):
@@ -2197,13 +2215,7 @@ class MainWindow(QMainWindow):
         self.btn_generate = QPushButton("Genera footprint")
         self.btn_generate.setObjectName("primary")
         self.btn_generate.clicked.connect(self._generate)
-        self.btn_open_output = QPushButton("Apri cartella componente")
-        self.btn_open_output.clicked.connect(self._open_project_dir)
-        self.btn_export = QPushButton("Esporta in libreria...")
-        self.btn_export.clicked.connect(self._export_component)
         btn_row.addWidget(self.btn_generate)
-        btn_row.addWidget(self.btn_open_output)
-        btn_row.addWidget(self.btn_export)
         btn_row.addStretch()
         self.btn_generate_info = QPushButton()
         self.btn_generate_info.setIcon(QIcon(str(Path(__file__).resolve().parent / "assets" / "info.svg")))
@@ -2221,8 +2233,95 @@ class MainWindow(QMainWindow):
         self.log_text.setReadOnly(True)
         outer.addWidget(self.log_text)
 
-        self._refresh_output_actions()
+        return tab
 
+    # ── Tab 6: KiCad ──────────────────────────────────────────────
+
+    def _build_kicad_tab(self) -> QWidget:
+        """@brief Build the preflight, preview and installation workflow."""
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(14, 14, 14, 14)
+        outer.setSpacing(14)
+
+        intro = QLabel(
+            "Controlla il risultato in KiCad prima di aggiungerlo a una libreria. "
+            "Il test usa un progetto isolato e non modifica la configurazione di KiCad.")
+        intro.setWordWrap(True)
+        outer.addWidget(intro)
+
+        artifacts_group = QGroupBox("File pronti per KiCad")
+        artifacts_form = QFormLayout(artifacts_group)
+        self.label_kicad_footprint = QLabel("—")
+        self.label_kicad_footprint.setProperty("i18n_skip", True)
+        self.label_kicad_footprint.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.label_kicad_footprint.setWordWrap(True)
+        self.label_kicad_step = QLabel("—")
+        self.label_kicad_step.setProperty("i18n_skip", True)
+        self.label_kicad_step.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.label_kicad_step.setWordWrap(True)
+        artifacts_form.addRow("Footprint:", self.label_kicad_footprint)
+        artifacts_form.addRow("Modello STEP:", self.label_kicad_step)
+        _align_form_labels(artifacts_form)
+        outer.addWidget(artifacts_group)
+
+        review_group = QGroupBox("Verifica prima dell’installazione")
+        review_layout = QVBoxLayout(review_group)
+        review_note = QLabel(
+            "Crea un piccolo progetto temporaneo con il footprint e il modello 3D, "
+            "quindi lo apre nel PCB Editor. In KiCad premi Alt+3 per la vista 3D.")
+        review_note.setWordWrap(True)
+        review_layout.addWidget(review_note)
+        self.btn_test_kicad = QPushButton("Prova in KiCad...")
+        self.btn_test_kicad.setObjectName("primary")
+        self.btn_test_kicad.setMinimumHeight(42)
+        self.btn_test_kicad.setToolTip(
+            "Apre un progetto temporaneo: non installa e non modifica librerie KiCad")
+        self.btn_test_kicad.clicked.connect(self._test_in_kicad)
+        review_layout.addWidget(
+            self.btn_test_kicad, alignment=Qt.AlignmentFlag.AlignHCenter)
+        outer.addWidget(review_group)
+
+        install_group = QGroupBox("Installazione nella libreria")
+        install_layout = QVBoxLayout(install_group)
+        install_note = QLabel(
+            "La libreria di progetto è portabile ed è la scelta consigliata. "
+            "La libreria globale rende il footprint disponibile in tutti i progetti "
+            "di questo computer.")
+        install_note.setWordWrap(True)
+        install_layout.addWidget(install_note)
+        install_buttons = QHBoxLayout()
+        install_buttons.setSpacing(14)
+        self.btn_export = QPushButton("Installa nel progetto KiCad...")
+        self.btn_export.setToolTip(
+            "Crea KiCadGen.pretty e KiCadGen.3dshapes nel progetto selezionato")
+        self.btn_export.clicked.connect(self._install_project_library)
+        self.btn_install_global = QPushButton("Installa come libreria globale...")
+        self.btn_install_global.setToolTip(
+            "Installa nella cartella scelta e registra la libreria globale di KiCad")
+        self.btn_install_global.clicked.connect(self._install_global_library)
+        install_buttons.addStretch()
+        install_buttons.addWidget(self.btn_export)
+        install_buttons.addWidget(self.btn_install_global)
+        install_buttons.addStretch()
+        install_layout.addLayout(install_buttons)
+        outer.addWidget(install_group)
+
+        footer = QHBoxLayout()
+        self.btn_open_output = QPushButton("Apri cartella componente")
+        self.btn_open_output.clicked.connect(self._open_project_dir)
+        footer.addWidget(self.btn_open_output)
+        footer.addStretch()
+        self.label_kicad_status = QLabel()
+        self.label_kicad_status.setProperty("i18n_skip", True)
+        self.label_kicad_status.setWordWrap(True)
+        self.label_kicad_status.setStyleSheet(f"color: {YELLOW};")
+        footer.addWidget(self.label_kicad_status, 1)
+        outer.addLayout(footer)
+        outer.addStretch()
+        self._refresh_output_actions()
         return tab
 
     def _show_generate_info(self) -> None:
@@ -2236,48 +2335,166 @@ class MainWindow(QMainWindow):
         project_dir = self._project_dir()
         webbrowser.open(project_dir.as_uri())
 
-    def _export_component(self) -> None:
-        """Copia la cartella del componente dall'area di lavoro alla libreria scelta.
+    def _current_kicad_artifacts(self):
+        """@brief Return the complete footprint/STEP set or report the problem."""
+        try:
+            return discover_component_artifacts(
+                self._project_dir(), self._component_name(), require_3d=True)
+        except (KiCadLibraryError, OSError) as exc:
+            QMessageBox.warning(
+                self, self.i18n.text("File KiCad incompleti"),
+                self._kicad_error_text(exc))
+            return None
 
-        La generazione avviene sempre in `generated/` (area di lavoro): l'export
-        e' un passo separato ed esplicito, cosi' la libreria vera riceve solo
-        componenti gia' verificati.
-        """
-        if not self._refresh_output_actions():
-            self._append_log("Genera prima il footprint del componente corrente.")
-            return
-        source = self._project_dir()
-        if not source.is_dir():
-            self._append_log(f"ERRORE export: {source} non esiste, genera prima il componente.")
-            return
+    def _kicad_error_text(self, error: Exception) -> str:
+        """@brief Translate expected KiCad workflow failures for display."""
+        if isinstance(error, KiCadLibraryError):
+            return self.i18n.tr(
+                f"kicad.error.{error.code}", **error.context)
+        return self.i18n.tr("kicad.error.unexpected", error=error)
 
-        destination_root = QFileDialog.getExistingDirectory(
-            self, self.i18n.text("Scegli la libreria di destinazione"),
-            str(DEFAULT_EXPORT_ROOT)
+    def _kicad_output_complete(self) -> bool:
+        """@brief Return whether the current footprint and STEP both exist."""
+        name = self._component_name()
+        if not name:
+            return False
+        project = self._project_dir()
+        return (
+            project / f"{name}.pretty" / f"{name}.kicad_mod").is_file() and (
+            project / f"{name}.3dshapes" / f"{name}.step").is_file()
+
+    def _test_in_kicad(self) -> None:
+        """@brief Open an isolated preview board without installing a library."""
+        if not self._kicad_output_complete():
+            return
+        artifacts = self._current_kicad_artifacts()
+        if artifacts is None:
+            return
+        applications = detect_external_applications()
+        if not applications.pcbnew:
+            QMessageBox.warning(
+                self, self.i18n.text("KiCad non disponibile"),
+                self.i18n.text(
+                    "PCB Editor non rilevato. Installa KiCad e riavvia l'applicazione."))
+            return
+        try:
+            preview = create_preview_project(artifacts)
+            launch_preview(applications.pcbnew, preview.board_path)
+        except (KiCadLibraryError, OSError) as exc:
+            QMessageBox.warning(
+                self, self.i18n.text("Impossibile aprire KiCad"),
+                self._kicad_error_text(exc))
+            return
+        message = self.i18n.tr(
+            "kicad.preview_opened", path=preview.board_path)
+        self._append_log(message)
+        self.label_kicad_status.setText(message)
+
+    def _install_project_library(self) -> None:
+        """@brief Install the current artifacts as a portable project library."""
+        if not self._kicad_output_complete():
+            return
+        artifacts = self._current_kicad_artifacts()
+        if artifacts is None:
+            return
+        destination = QFileDialog.getExistingDirectory(
+            self, self.i18n.text("Scegli la cartella del progetto KiCad"),
+            str(Path.home() / "Documents"),
         )
-        if not destination_root:
+        if not destination:
             return
-
-        target = Path(destination_root) / source.name
-        if target.resolve() == source.resolve():
-            self._append_log("ERRORE export: origine e destinazione coincidono.")
-            return
-
-        if target.exists():
+        root = Path(destination)
+        if not (list(root.glob("*.kicad_pro")) or list(root.glob("*.pro"))):
             answer = QMessageBox.question(
-                self, self.i18n.text("Destinazione esistente"),
-                self.i18n.tr("export.destination_exists", target=target),
+                self, self.i18n.text("Cartella di progetto non riconosciuta"),
+                self.i18n.text(
+                    "La cartella non contiene un progetto KiCad. Vuoi installare qui comunque?"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
+        self._install_kicad_library(
+            root, project_library=True, artifacts=artifacts)
 
-        try:
-            shutil.copytree(source, target, dirs_exist_ok=True)
-        except OSError as exc:
-            self._append_log(f"ERRORE export: {exc}")
+    def _install_global_library(self) -> None:
+        """@brief Install the current artifacts in the global KiCad table."""
+        if not self._kicad_output_complete():
             return
+        artifacts = self._current_kicad_artifacts()
+        if artifacts is None:
+            return
+        applications = detect_external_applications()
+        if not applications.kicad_cli:
+            QMessageBox.warning(
+                self, self.i18n.text("KiCad non disponibile"),
+                self.i18n.text(
+                    "KiCad non è stato rilevato: la libreria globale non può essere registrata."))
+            return
+        destination = QFileDialog.getExistingDirectory(
+            self, self.i18n.text("Scegli la cartella per le librerie globali"),
+            str(Path.home() / "Documents" / "KiCad"),
+        )
+        if not destination:
+            return
+        try:
+            table_path = global_fp_lib_table_path(applications.kicad_cli)
+        except KiCadLibraryError as exc:
+            QMessageBox.warning(
+                self, self.i18n.text("Configurazione KiCad non disponibile"),
+                self._kicad_error_text(exc))
+            return
+        self._install_kicad_library(
+            Path(destination), project_library=False, table_path=table_path,
+            artifacts=artifacts)
 
-        self._append_log(f"Esportato -> {target}")
+    def _install_kicad_library(
+            self, destination: Path, *, project_library: bool,
+            table_path: Path | None = None, artifacts=None) -> None:
+        """@brief Install with an explicit overwrite decision and final report."""
+        artifacts = artifacts or self._current_kicad_artifacts()
+        if artifacts is None:
+            return
+        targets = (
+            destination / "KiCadGen.pretty" / f"{artifacts.name}.kicad_mod",
+            destination / "KiCadGen.3dshapes" / f"{artifacts.name}.step",
+            destination / "KiCadGen.3dshapes" / f"{artifacts.name}.wrl",
+        )
+        existing = [path for path in targets if path.exists()]
+        overwrite = False
+        if existing:
+            answer = QMessageBox.question(
+                self, self.i18n.text("Componente già presente"),
+                self.i18n.tr(
+                    "kicad.overwrite_component", files="\n".join(map(str, existing))),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            overwrite = True
+        try:
+            result = install_component_library(
+                artifacts, destination, library_name="KiCadGen",
+                project_library=project_library, table_path=table_path,
+                overwrite=overwrite,
+            )
+        except (KiCadLibraryError, OSError) as exc:
+            QMessageBox.warning(
+                self, self.i18n.text("Installazione KiCad non riuscita"),
+                self._kicad_error_text(exc))
+            return
+        message = self.i18n.tr(
+            "kicad.install_complete", identifier=result.identifier,
+            footprint=result.footprint_path, table=result.table_path)
+        self._append_log(message)
+        self.label_kicad_status.setText(message)
+        QMessageBox.information(
+            self, self.i18n.text("Installazione KiCad completata"), message)
+
+    def _export_component(self) -> None:
+        """@brief Preserve the previous handler as a project-install alias."""
+        self._install_project_library()
 
     def _append_log(self, msg: str) -> None:
         # I tab si costruiscono in ordine: quello "Progetto" puo' gia' emettere
@@ -2600,6 +2817,7 @@ class MainWindow(QMainWindow):
         self._append_log(f"OK (3D) -> {path}")
         self.label_3d_status.setText(
             self.i18n.tr("status.step_updated", path=path))
+        self._refresh_output_actions()
         self._show_generated_mesh(Path(path))
 
     def _on_cad3d_error(self, message: str) -> None:
@@ -2933,6 +3151,7 @@ class MainWindow(QMainWindow):
         self._append_log(f"OK (3D) -> {path}")
         self.label_3d_status.setText(
             self.i18n.tr("status.step_updated", path=path))
+        self._refresh_output_actions()
         self._show_generated_mesh(Path(path))
 
     def _show_generated_mesh(self, step_path: Path) -> None:

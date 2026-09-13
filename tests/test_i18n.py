@@ -12,6 +12,7 @@ def test_translation_catalog_seeds_all_supported_languages(tmp_path):
     i18n = I18n(store, "fr")
     assert i18n.tr("tab.project") == "📁 Projet"
     assert i18n.tr("tab.model3d") == "🧊 Modèle 3D"
+    assert i18n.tr("tab.kicad") == "🔌 KiCad"
 
 
 def test_translation_falls_back_to_english_and_persists_edits(tmp_path):

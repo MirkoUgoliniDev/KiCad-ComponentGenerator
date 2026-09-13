@@ -31,6 +31,7 @@ def test_find_kicad_cli_uses_path(tmp_path, monkeypatch):
 def test_dependency_report_lists_each_missing_application(monkeypatch):
     """@brief Report KiCad and FreeCAD independently."""
     monkeypatch.setattr(dependencies, "find_kicad_cli", lambda: None)
+    monkeypatch.setattr(dependencies, "find_pcbnew", lambda _cli=None: None)
     monkeypatch.setattr(
         dependencies, "find_freecadcmd",
         lambda: (_ for _ in ()).throw(dependencies.Cad3DError("missing")),
@@ -50,6 +51,7 @@ def test_dependency_report_keeps_detected_paths(tmp_path, monkeypatch):
     kicad.write_bytes(b"")
     freecad.write_bytes(b"")
     monkeypatch.setattr(dependencies, "find_kicad_cli", lambda: str(kicad))
+    monkeypatch.setattr(dependencies, "find_pcbnew", lambda _cli=None: None)
     monkeypatch.setattr(dependencies, "find_freecadcmd", lambda: str(freecad))
 
     report = dependencies.detect_external_applications()
@@ -57,3 +59,13 @@ def test_dependency_report_keeps_detected_paths(tmp_path, monkeypatch):
     assert Path(report.kicad_cli) == kicad.resolve()
     assert Path(report.freecadcmd) == freecad.resolve()
     assert report.missing == ()
+
+
+def test_find_pcbnew_next_to_kicad_cli(tmp_path, monkeypatch):
+    """@brief Prefer the PCB Editor shipped beside the detected KiCad CLI."""
+    cli = tmp_path / "kicad-cli.exe"
+    pcbnew = tmp_path / "pcbnew.exe"
+    cli.touch()
+    pcbnew.touch()
+    monkeypatch.delenv("KICAD_PCBNEW_PATH", raising=False)
+    assert dependencies.find_pcbnew(str(cli)) == str(pcbnew.resolve())
