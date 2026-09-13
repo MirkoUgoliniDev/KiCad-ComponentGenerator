@@ -1,5 +1,29 @@
 # Memoria delle decisioni del progetto
 
+## 2026-09-13 — Tab KiCad e consegna verificabile
+
+- Aggiungere un tab permanente **KiCad**, disponibile anche in modalità standard,
+  per separare verifica, installazione nel progetto e installazione globale.
+- **Prova in KiCad** crea un progetto isolato sotto `.kicad-preview`, copia il
+  modello STEP e apre il PCB Editor senza modificare `fp-lib-table`; la vista 3D
+  si controlla in KiCad con `Alt+3`.
+- L'installazione nel progetto crea `KiCadGen.pretty` e `KiCadGen.3dshapes`,
+  aggiorna la tabella del progetto e usa riferimenti `${KIPRJMOD}` portabili.
+- L'installazione globale usa un percorso assoluto per il modello e aggiorna
+  solo l'entry `KiCadGen` nella tabella globale di KiCad. Le entry estranee sono
+  conservate; la sovrascrittura richiede conferma e la tabella esistente riceve
+  un backup `.kicadgen-backup`.
+- Staging atomico e rollback devono impedire componenti parziali o file
+  temporanei lasciati dopo un errore. Il tab deve restare disabilitato finché
+  footprint e STEP non sono entrambi disponibili.
+- La logica è generale per ogni componente generato: non introdurre assunzioni
+  specifiche per il PCB RS485 usato nei test.
+- Verifica corrente: KiCad 10 ha esportato il footprint e renderizzato il
+  progetto di anteprima reale; suite completa `1061 passed, 2 xfailed, 19
+  subtests passed`. Il database contiene 480 chiavi × 4 lingue = 1920 righe.
+- Commit pubblicati: implementazione `0513e89` su `FIX`, merge `692ca95` su
+  `main`; dopo il merge il lavoro riprende su `FIX`.
+
 ## 2026-09-13 — Griglia dell'anteprima 2D senza variazioni di zoom
 
 - Spunta e passo della griglia devono aggiornare solo le linee di riferimento,

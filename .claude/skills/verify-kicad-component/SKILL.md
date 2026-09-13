@@ -15,7 +15,14 @@ Use this skill for read-only review of generated symbols, footprints and 3D mode
 - Check 3D model placement, scale, orientation, body dimensions and visible pin geometry when a model is present.
 - Verify that output paths are portable and do not contain local secrets or machine-specific configuration.
 - Run the relevant pytest tests and report failures with file paths and line numbers.
+- Review the KiCad tab's isolated preview and project/global installation
+  paths. Confirm that preview does not alter `fp-lib-table`, that project model
+  references use `${KIPRJMOD}`, and that global installation preserves other
+  library entries.
 
 ## Reporting
 
 Separate confirmed facts, estimates and missing evidence. Report each issue with severity and a concrete suggested correction. Do not edit files, regenerate output or silently repair a failing component during an audit.
+
+Use KiCad CLI only for read-only export/render validation. Check overwrite
+confirmation, backups, rollback cleanup and complete IT/EN/FR/DE translations.
