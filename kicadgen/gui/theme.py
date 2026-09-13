@@ -48,6 +48,11 @@ TAB_QSS = f"""
     QTabBar::tab:hover:!selected {{
         background: #252536;
     }}
+    QTabBar::tab:disabled {{
+        background: #171722;
+        color: #626477;
+        border-color: #2b2c3b;
+    }}
 """
 
 
@@ -140,6 +145,12 @@ APP_QSS = f"""
     QPushButton:disabled {{
         color: {SUBTEXT};
         background: {MANTLE};
+    }}
+    QToolTip {{
+        background: {MANTLE};
+        color: {TEXT};
+        border: 1px solid {SURFACE1};
+        padding: 5px 8px;
     }}
     QPushButton#primary {{
         background: {BLUE};

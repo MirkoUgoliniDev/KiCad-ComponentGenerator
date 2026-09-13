@@ -38,6 +38,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import math
+import re
 import shutil
 import sys
 import webbrowser
@@ -86,6 +87,15 @@ APP_DIR = Path(__file__).resolve().parent.parent.parent
 DEFAULT_LIBRARY_ROOT = APP_DIR / "generated"
 DEFAULT_EXPORT_ROOT = APP_DIR.parent  # .../CustomComponents
 DOCS_SUBDIR = "docs"
+
+
+def _align_form_labels(form: QFormLayout, width: int = 132) -> None:
+    """Keep fields aligned when several forms are shown in the same panel."""
+    for row in range(form.rowCount()):
+        label_item = form.itemAt(row, QFormLayout.ItemRole.LabelRole)
+        label = label_item.widget() if label_item is not None else None
+        if label is not None:
+            label.setFixedWidth(width)
 
 #: Chiave con cui si marcano le linee della griglia nell'anteprima 2D, per
 #: poterle escludere dal calcolo dell'inquadratura.
@@ -305,6 +315,7 @@ class MainWindow(QMainWindow):
         self.pin_map: dict | None = None
         self._last_mesh_path: Path | None = None
         self._model_revision = 0
+        self._acquisition_completed = False
         self._config = load_config()
         # Modello scelto solo per questa sessione (datasheet difficile): non
         # viene salvato in config.json e si perde alla chiusura, per scelta.
@@ -505,6 +516,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(generate_tab, "\u2699 Genera")
         self.tabs.addTab(preview_tab, "\U0001F441 Anteprima FootPrint")
         self.tabs.addTab(model_3d_tab, "\U0001F9CA Modello 3D")
+        self._set_acquisition_tabs_enabled(False)
         self.tabs.currentChanged.connect(self._on_tab_changed)
         layout.addWidget(self.tabs)
 
@@ -512,6 +524,11 @@ class MainWindow(QMainWindow):
         self.analysis_overlay = AnalysisOverlay(central)
         self.analysis_overlay.log_requested.connect(self.ai_log_dialog.exec)
         self._analysis_tabs_enabled = None
+
+    def _set_acquisition_tabs_enabled(self, enabled: bool) -> None:
+        """Enable previews only after the first successful parameter acquisition."""
+        for index in (3, 4):
+            self.tabs.setTabEnabled(index, enabled)
 
     # ── Tab 1: Progetto ────────────────────────────────────────────
 
@@ -530,9 +547,23 @@ class MainWindow(QMainWindow):
 
         self.field_library_root = QLineEdit(str(DEFAULT_LIBRARY_ROOT))
         self.field_library_root.textChanged.connect(self._update_project_path_label)
-        btn_browse_root = QPushButton("Sfoglia...")
+        btn_browse_root = QPushButton()
+        btn_browse_root.setObjectName("browseRootButton")
+        btn_browse_root.setIcon(QIcon(str(Path(__file__).resolve().parent / "assets" / "docs-open.svg")))
+        btn_browse_root.setIconSize(QSize(20, 20))
+        btn_browse_root.setFixedSize(36, 32)
+        btn_browse_root.setToolTip("Scegli la cartella di lavoro")
+        btn_browse_root.setAccessibleName("Scegli la cartella di lavoro")
+        btn_browse_root.setStyleSheet(
+            "QPushButton { background: #313244; border: 1px solid #45475a;"
+            " border-radius: 4px; padding: 4px; }"
+            "QPushButton:hover { background: #45475a; border-color: #89b4fa; }"
+            "QPushButton:pressed { background: #585b70; }"
+        )
         btn_browse_root.clicked.connect(self._browse_library_root)
         root_row = QHBoxLayout()
+        root_row.setContentsMargins(0, 0, 0, 0)
+        root_row.setSpacing(6)
         root_row.addWidget(self.field_library_root)
         root_row.addWidget(btn_browse_root)
         root_row_widget = QWidget()
@@ -553,6 +584,7 @@ class MainWindow(QMainWindow):
         self.btn_project_info.setFixedSize(36, 32)
         path_row.addWidget(self.btn_project_info)
         folder_layout.addRow("Cartella componente:", path_row)
+        _align_form_labels(folder_layout)
 
         self.project_info_dialog = QDialog(self)
         self.project_info_dialog.setWindowTitle("Informazioni sulla cartella componente")
@@ -584,20 +616,55 @@ class MainWindow(QMainWindow):
         self.docs_list.setToolTip(
             "Spunta i file da inviare all'AI. I nuovi file vengono selezionati automaticamente."
         )
-        docs_layout.addWidget(self.docs_list)
+        docs_content = QHBoxLayout()
+        docs_content.setContentsMargins(0, 0, 0, 0)
+        docs_content.addWidget(self.docs_list, 1)
 
-        docs_btn_row = QHBoxLayout()
-        btn_add_docs = QPushButton("Aggiungi documentazione...")
+        docs_toolbar = QWidget()
+        docs_toolbar.setObjectName("docsActionToolbar")
+        docs_toolbar.setFixedWidth(40)
+        docs_toolbar.setFixedHeight(140)
+        docs_toolbar.setStyleSheet(
+            "QPushButton {"
+            " background: #313244; border: 1px solid #45475a; border-radius: 4px;"
+            " padding: 4px; }"
+            "QPushButton:hover { background: #45475a; border-color: #89b4fa; }"
+            "QPushButton:pressed { background: #585b70; }"
+        )
+        docs_toolbar_layout = QVBoxLayout(docs_toolbar)
+        docs_toolbar_layout.setContentsMargins(0, 0, 0, 0)
+        docs_toolbar_layout.setSpacing(4)
+
+        btn_add_docs = QPushButton()
+        btn_add_docs.setIcon(QIcon(str(Path(__file__).resolve().parent / "assets" / "docs-add.svg")))
+        btn_add_docs.setIconSize(QSize(20, 20))
+        btn_add_docs.setFixedSize(36, 32)
+        btn_add_docs.setToolTip("Aggiungi documentazione...")
+        btn_add_docs.setAccessibleName("Aggiungi documentazione")
         btn_add_docs.clicked.connect(self._add_docs)
-        btn_remove_doc = QPushButton("Rimuovi selezionato")
+        docs_toolbar_layout.addWidget(btn_add_docs)
+
+        btn_remove_doc = QPushButton()
+        btn_remove_doc.setIcon(QIcon(str(Path(__file__).resolve().parent / "assets" / "docs-remove.svg")))
+        btn_remove_doc.setIconSize(QSize(20, 20))
+        btn_remove_doc.setFixedSize(36, 32)
+        btn_remove_doc.setToolTip("Rimuovi il documento selezionato")
+        btn_remove_doc.setAccessibleName("Rimuovi documento selezionato")
         btn_remove_doc.clicked.connect(self._remove_doc)
-        btn_open_docs = QPushButton("Apri cartella docs")
+        docs_toolbar_layout.addWidget(btn_remove_doc)
+
+        btn_open_docs = QPushButton()
+        btn_open_docs.setIcon(QIcon(str(Path(__file__).resolve().parent / "assets" / "docs-open.svg")))
+        btn_open_docs.setIconSize(QSize(20, 20))
+        btn_open_docs.setFixedSize(36, 32)
+        btn_open_docs.setToolTip("Apri la cartella docs")
+        btn_open_docs.setAccessibleName("Apri la cartella docs")
         btn_open_docs.clicked.connect(self._open_docs_folder)
-        docs_btn_row.addWidget(btn_add_docs)
-        docs_btn_row.addWidget(btn_remove_doc)
-        docs_btn_row.addWidget(btn_open_docs)
-        docs_btn_row.addStretch()
-        docs_layout.addLayout(docs_btn_row)
+        docs_toolbar_layout.addWidget(btn_open_docs)
+        docs_toolbar_layout.addStretch()
+
+        docs_content.addWidget(docs_toolbar)
+        docs_layout.addLayout(docs_content)
         outer.addWidget(docs_group)
         self.group_component_analysis = QGroupBox("Analisi componente")
         analysis_layout = QVBoxLayout(self.group_component_analysis)
@@ -617,6 +684,7 @@ class MainWindow(QMainWindow):
             self._on_component_type_changed
         )
         ai_form.addRow("Tipologia componente:", self.combo_component_type)
+        _align_form_labels(ai_form)
         models_form = QFormLayout()
 
         self.combo_model = QComboBox()
@@ -648,11 +716,15 @@ class MainWindow(QMainWindow):
         vision_row.addWidget(self.combo_vision_model, 1)
         vision_row.addWidget(self.btn_pick_vision_model)
         models_form.addRow("Modello foto:", vision_row)
+        _align_form_labels(models_form)
 
         analysis_layout.addLayout(ai_form)
 
         self.group_ai_tools = QGroupBox("Strumenti AI")
         tools_layout = QVBoxLayout(self.group_ai_tools)
+        # Il riquadro annidato introduce il proprio rientro. Lo compensiamo
+        # per mantenere la stessa colonna dei campi del form soprastante.
+        tools_layout.setContentsMargins(-10, 0, 0, 0)
         tools_layout.addLayout(models_form)
         tools_row = QHBoxLayout()
         tools_layout.addLayout(tools_row)
@@ -680,14 +752,31 @@ class MainWindow(QMainWindow):
         self.ai_log_dialog.setWindowTitle("Log analisi AI")
         self.ai_log_dialog.setModal(True)
         log_layout = QVBoxLayout(self.ai_log_dialog)
+
+        log_splitter = QSplitter(Qt.Orientation.Horizontal)
+        actions_panel = QWidget()
+        actions_layout = QVBoxLayout(actions_panel)
+        actions_layout.setContentsMargins(0, 0, 0, 0)
+        actions_layout.addWidget(QLabel("Azioni analisi"))
         self.ai_progress_text = QTextEdit()
         self.ai_progress_text.setReadOnly(True)
-        self.ai_progress_text.setPlaceholderText("Qui compariranno i passi dell'analisi AI e i componenti trovati.")
-        log_layout.addWidget(self.ai_progress_text)
+        self.ai_progress_text.setPlaceholderText("Qui compariranno i passi dell'analisi AI.")
+        actions_layout.addWidget(self.ai_progress_text)
+        elements_panel = QWidget()
+        elements_layout = QVBoxLayout(elements_panel)
+        elements_layout.setContentsMargins(0, 0, 0, 0)
+        elements_layout.addWidget(QLabel("Elementi rilevati"))
+        self.ai_elements_list = QListWidget()
+        self.ai_elements_list.setToolTip("Elementi e ingombri individuati durante l'analisi fotografica")
+        elements_layout.addWidget(self.ai_elements_list)
+        log_splitter.addWidget(actions_panel)
+        log_splitter.addWidget(elements_panel)
+        log_splitter.setSizes([540, 380])
+        log_layout.addWidget(log_splitter)
         log_close = QPushButton("Chiudi")
         log_close.clicked.connect(self.ai_log_dialog.accept)
         log_layout.addWidget(log_close, alignment=Qt.AlignmentFlag.AlignRight)
-        self.ai_log_dialog.resize(820, 460)
+        self.ai_log_dialog.resize(1000, 520)
         self.btn_ai_log.clicked.connect(self.ai_log_dialog.exec)
 
         self.btn_component_prompt = QPushButton("Modifica prompt…")
@@ -890,6 +979,7 @@ class MainWindow(QMainWindow):
         self.btn_extract_ai.setEnabled(False)
         self.btn_extract_ai.setText("Analisi in corso...")
         self.ai_progress_text.clear()
+        self.ai_elements_list.clear()
         self.btn_photo_comparison.setEnabled(False)
         self._photo_png = None
         self._photo_overlay_png = None
@@ -939,9 +1029,12 @@ class MainWindow(QMainWindow):
     def _on_ai_progress(self, message: str) -> None:
         self.analysis_overlay.set_status(message)
         # Testo del modello: inserimento letterale, mai interpretato come HTML.
-        self.ai_progress_text.moveCursor(QTextCursor.MoveOperation.End)
-        self.ai_progress_text.insertPlainText(message + "\n")
-        self.ai_progress_text.ensureCursorVisible()
+        if re.match(r"^#\d+", message.strip()):
+            self.ai_elements_list.addItem(message)
+        else:
+            self.ai_progress_text.moveCursor(QTextCursor.MoveOperation.End)
+            self.ai_progress_text.insertPlainText(message + "\n")
+            self.ai_progress_text.ensureCursorVisible()
         self._append_log(message)
 
     def _show_photo_comparison(self) -> None:
@@ -1065,6 +1158,8 @@ class MainWindow(QMainWindow):
 
     def _on_extracted(self, params: ExtractedParams) -> None:
         self._hide_analysis_overlay()
+        self._acquisition_completed = True
+        self._set_acquisition_tabs_enabled(True)
         self._invalidate_generated_mesh()
         self._photo_png = getattr(params, "photo_png", None)
         self._photo_overlay_png = params.photo_overlay_png
