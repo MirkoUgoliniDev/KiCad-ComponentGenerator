@@ -78,12 +78,16 @@ receives a resolved snapshot, so later profile edits do not change an ongoing
 request. **Default generali AI…** is a shortcut for editing the global models and
 the three main prompts; the catalog editor exposes all profile fields.
 
-At first startup, the app imports existing models/prompts and the four original
+When no profile database exists, the app imports existing models/prompts and the four original
 types into `data/analysis_profiles.sqlite3`. The verification model initially
 matches the previous datasheet default, preserving the initial model choice.
 Before import, the original JSON is copied to `data/config-before-sqlite-<hash>.json`.
-Migration runs only once; later JSON saves contain UI preferences, not AI profiles.
-The API key remains in `.env`. The DB and migration backups are git-ignored.
+Migration runs only once; an existing versioned database is reused instead of
+importing local JSON values. Later JSON saves contain UI preferences, not AI profiles.
+The API key remains in `.env`. The profile database `data/analysis_profiles.sqlite3`
+is versioned with its configured types, prompts and models. Migration backups and
+SQLite journal/WAL files remain git-ignored. Changes made through the profile editor
+modify this tracked database; review them before committing or pulling updates.
 
 Use **Backup DB…** to save a consistent SQLite copy to a new filename. To restore,
 close the application, preserve the current DB, and replace it with a verified

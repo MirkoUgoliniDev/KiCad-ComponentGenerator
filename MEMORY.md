@@ -59,6 +59,10 @@ delle geometrie ricavate dalle foto e non autorizza commit, merge o push automat
 ## 2026-09-13 — Tipologie e profili AI SQLite
 
 - Fonte delle tipologie e dei profili: `data/analysis_profiles.sqlite3`.
+- Su richiesta esplicita dell'utente, includere questo database in Git con i
+  profili, prompt e modelli configurati. Escludere ancora backup di migrazione,
+  journal/WAL, `.env` e configurazioni locali; verificare l'assenza di credenziali
+  prima di pubblicare aggiornamenti del database.
 - Tre analisi con LLM indipendenti: Datasheet, Localizzazione foto, Verifica foto.
 - Default generali ed override per tipologia; selezioni di sessione non persistenti.
 - Gestione CRUD in Configurazione, con icone coerenti e spiegazioni solo nelle modali Info.
