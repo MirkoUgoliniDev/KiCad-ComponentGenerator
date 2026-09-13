@@ -65,6 +65,8 @@ from ..generators.castellated_module import (
     CastellatedSide, ComponentBox, build_castellated_module, pad_positions,
 )
 from ..generators.pin_header import PinHeaderParams, build_pin_header, pin_positions
+from ..generators.package import build_package
+from ..core.package_geometry import PackageGeometry, package_from_mapping
 from ..services import component_types
 from ..services.datasheet_extractor import (
     COMPONENT_KINDS, DEFAULT_SYSTEM_PROMPT, ExtractedParams, ExtractionError,
@@ -156,7 +158,7 @@ class GenerateWorker(QThread):
     warning = pyqtSignal(str)
 
     def __init__(
-        self, params: PinHeaderParams | CastellatedModuleParams, project_dir: Path,
+        self, params: PinHeaderParams | CastellatedModuleParams | PackageGeometry, project_dir: Path,
         body: Body3DParams | None = None,
         fillets: list | None = None, face_texts: list | None = None,
     ):
@@ -172,6 +174,8 @@ class GenerateWorker(QThread):
             footprint = (
                 build_castellated_module(self.params)
                 if isinstance(self.params, CastellatedModuleParams)
+                else build_package(self.params)
+                if isinstance(self.params, PackageGeometry)
                 else build_pin_header(self.params)
             )
             pretty_dir = self.project_dir / f"{self.params.name}.pretty"
@@ -235,6 +239,27 @@ class Cad3DWorker(QThread):
             self.error.emit(str(exc))
         except Exception as exc:  # noqa: BLE001 - riportato in UI, non e' fatale
             self.error.emit(f"Errore inatteso: {exc}")
+
+
+class TerminalDetailWorker(QThread):
+    """Optional photo detail pass; never regenerates the footprint."""
+    done = pyqtSignal(object)
+    error = pyqtSignal(str)
+    progress = pyqtSignal(str)
+
+    def __init__(self, photo, components, model):
+        super().__init__()
+        self.photo, self.components, self.model = photo, deepcopy(components), model
+
+    def run(self):
+        from ..services.photo_terminals import observe_terminals
+        from ..services.openrouter import call_tool
+        try:
+            self.done.emit(observe_terminals(self.photo, self.components, self.model,
+                call_tool, self.progress.emit,
+                Path(__file__).resolve().parents[2] / 'generated' / 'photo-cache'))
+        except Exception as exc:
+            self.error.emit(f"Dettaglio terminali fallito: {exc}")
 
 
 class ExtractWorker(QThread):
@@ -305,7 +330,9 @@ class MainWindow(QMainWindow):
         self._worker: GenerateWorker | None = None
         self._extract_worker: ExtractWorker | None = None
         self._cad3d_worker: Cad3DWorker | None = None
-        self._last_params: PinHeaderParams | None = None
+        self._terminal_worker: TerminalDetailWorker | None = None
+        self._last_params: PinHeaderParams | CastellatedModuleParams | PackageGeometry | None = None
+        self.package_geometry: PackageGeometry | None = None
         self.fillet_annotations: list[EdgeFilletAnnotation] = []
         self.face_text_annotations: list[FaceTextAnnotation] = []
         self.pinout: list[dict] = []
@@ -1174,6 +1201,19 @@ class MainWindow(QMainWindow):
         if params.tags:
             self.field_tags.setText(params.tags)
 
+        self.package_geometry = None
+        if params.package_geometry:
+            try:
+                geometry_data = dict(params.package_geometry)
+                geometry_data.setdefault("name", params.name or self._component_name())
+                self.package_geometry = package_from_mapping(geometry_data)
+                self._append_log(
+                    f"Geometria package acquisita: {self.package_geometry.family}, "
+                    f"{len(self.package_geometry.pins)} pad espliciti."
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                self._append_log(f"ATTENZIONE geometria package ignorata: {exc}")
+
         # Le due disposizioni riempiono gruppi di campi diversi; tutto il
         # resto (corpo 3D, pinout, colori, fillet, riepilogo) e' comune.
         if params.is_castellated():
@@ -1967,6 +2007,7 @@ class MainWindow(QMainWindow):
 
         try:
             params = (
+                self.package_geometry if self.package_geometry is not None else
                 self._current_castellated_params() if self._is_castellated()
                 else self._current_params()
             )
@@ -1978,7 +2019,12 @@ class MainWindow(QMainWindow):
         project_dir = self._project_dir()
 
         self.btn_generate.setEnabled(False)
-        if isinstance(params, CastellatedModuleParams):
+        if isinstance(params, PackageGeometry):
+            self._append_log(
+                f"Generazione {params.name}: package {params.family}, "
+                f"{len(params.pins)} pad espliciti"
+            )
+        elif isinstance(params, CastellatedModuleParams):
             self._append_log(
                 f"Generazione {params.name}: modulo castellated "
                 f"{params.body_length}x{params.body_width}mm, "
@@ -1994,7 +2040,7 @@ class MainWindow(QMainWindow):
                 f"pad={params.pad_diameter}mm, drill={params.drill}mm"
             )
 
-        body = self._current_body_params()
+        body = None if isinstance(params, PackageGeometry) else self._current_body_params()
         if body is not None:
             try:
                 body.validate()
@@ -2161,6 +2207,11 @@ class MainWindow(QMainWindow):
 
         regen_row = QHBoxLayout()
         regen_row.addStretch()
+        self.btn_terminal_detail = QPushButton("Rileva terminali dalla foto...")
+        self.btn_terminal_detail.setToolTip(
+            "Analisi AI della foto calibrata tramite OpenRouter; conserva posizioni e footprint.")
+        self.btn_terminal_detail.clicked.connect(self._refine_photo_terminals)
+        regen_row.addWidget(self.btn_terminal_detail)
         self.btn_regen_3d = QPushButton("Rigenera modello 3D (STEP) con queste annotazioni")
         self.btn_regen_3d.setObjectName("primary")
         self.btn_regen_3d.clicked.connect(self._regenerate_3d)
@@ -2208,6 +2259,60 @@ class MainWindow(QMainWindow):
         shapes_dir = self._project_dir() / f"{self._component_name()}.3dshapes"
         shapes_dir.mkdir(parents=True, exist_ok=True)
         webbrowser.open(shapes_dir.as_uri())
+
+    def closeEvent(self, event):
+        # A QThread doing a network request must not be destroyed mid-request.
+        if self._terminal_worker is not None and self._terminal_worker.isRunning():
+            self.label_3d_status.setText("Attendi la fine dell'analisi terminali prima di chiudere.")
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+    def _refine_photo_terminals(self) -> None:
+        if self._terminal_worker is not None and self._terminal_worker.isRunning():
+            return
+        if self._extract_worker is not None and self._extract_worker.isRunning():
+            return
+        if not self._photo_png:
+            QMessageBox.information(self, "Foto non disponibile",
+                "Acquisisci prima i componenti dalla foto nel tab Progetto.")
+            return
+        if QMessageBox.question(self, "Dettaglio terminali AI",
+                "Inviare i ritagli della foto a OpenRouter per osservare corpo e terminali? "
+                "La chiamata usa il modello selezionato e può avere un costo. "
+                "Posizioni e footprint restano invariati.") != QMessageBox.StandardButton.Yes:
+            return
+        self.btn_terminal_detail.setEnabled(False)
+        self.label_3d_status.setText("Analisi dei terminali nella foto in corso...")
+        worker = TerminalDetailWorker(self._photo_png, self._photo_components_from_table(),
+                                      self._vision_model())
+        worker._model_revision = self._model_revision
+        worker._photo_snapshot = self._photo_png
+        self._terminal_worker = worker
+        worker.progress.connect(self._on_ai_progress)
+        worker.done.connect(self._on_terminal_detail_done)
+        worker.error.connect(self._on_terminal_detail_error)
+        worker.finished.connect(lambda: self.btn_terminal_detail.setEnabled(True))
+        worker.start()
+
+    def _on_terminal_detail_error(self, message):
+        self._append_log(message)
+        self.label_3d_status.setText(message)
+
+    def _on_terminal_detail_done(self, components):
+        worker = self._terminal_worker
+        if (worker._model_revision != self._model_revision
+                or worker._photo_snapshot != self._photo_png
+                or worker.components != self._photo_components_from_table()):
+            self._append_log("Dettaglio terminali scartato: i dati sono cambiati durante l'analisi.")
+            self.label_3d_status.setText("Dati modificati durante l'analisi: ripeti Rileva terminali.")
+            return
+        self._set_photo_components(components)
+        self._invalidate_generated_mesh()
+        count = sum(bool(c.get('terminal_geometry')) for c in components)
+        self.label_3d_status.setText(
+            f"{count} componenti con terminali osservati. Premi Rigenera modello 3D per applicarli. "
+            "Le geometrie non risolte restano semplificate.")
 
     def _regenerate_3d(self) -> None:
         """Rigenera solo lo STEP con le annotazioni correnti (il footprint resta com'e')."""
@@ -2338,7 +2443,11 @@ class MainWindow(QMainWindow):
         row = table.rowCount()
         table.insertRow(row)
         metadata = QTableWidgetItem()
-        metadata.setData(Qt.ItemDataRole.UserRole, deepcopy(photo_metadata or {}))
+        row_metadata = deepcopy(photo_metadata or {})
+        row_metadata.update(pin_count=component.pin_count, pins_by_side=component.pins_by_side,
+                            _detected_kind=component.detected_kind,
+                            terminal_geometry=component.terminal_geometry)
+        metadata.setData(Qt.ItemDataRole.UserRole, row_metadata)
         table.setItem(row, 0, metadata)
 
         name = QLineEdit(component.name)
@@ -2391,6 +2500,9 @@ class MainWindow(QMainWindow):
                 height=c.get("height_mm", 1.0), name=c.get("name", "Componente"),
                 color_hex=c.get("color_hex") or "#303030", kind=c.get("kind", "generic"),
                 marking=c.get("marking", ""), rotation=float(c.get("rotation_deg", 0.0)),
+                pin_count=c.get("pin_count"), pins_by_side=c.get("pins_by_side"),
+                detected_kind=c.get("_detected_kind"),
+                terminal_geometry=deepcopy(c.get("terminal_geometry")),
             ) for c in components
         ]
         self._refresh_components_table(components)
@@ -2411,6 +2523,8 @@ class MainWindow(QMainWindow):
         table = self.table_components
         components = []
         for row in range(table.rowCount()):
+            cell = table.item(row, 0)
+            metadata = deepcopy(cell.data(Qt.ItemDataRole.UserRole) or {}) if cell else {}
             components.append(ComponentBox(
                 name=table.cellWidget(row, 0).text().strip() or "Componente",
                 kind=table.cellWidget(row, 1).currentData() or "generic",
@@ -2422,6 +2536,10 @@ class MainWindow(QMainWindow):
                 rotation=float(table.cellWidget(row, 7).currentData() or 0.0),
                 color_hex=table.cellWidget(row, 8).text().strip() or "#303030",
                 marking=table.cellWidget(row, 9).text().strip(),
+                pin_count=metadata.get("pin_count"),
+                pins_by_side=metadata.get("pins_by_side"),
+                detected_kind=metadata.get("_detected_kind"),
+                terminal_geometry=metadata.get("terminal_geometry"),
             ))
         return components
 
@@ -2699,6 +2817,9 @@ class MainWindow(QMainWindow):
     def _draw_preview(self) -> None:
         if self._last_params is None:
             return
+        if isinstance(self._last_params, PackageGeometry):
+            self._draw_preview_package(self._last_params)
+            return
         if isinstance(self._last_params, CastellatedModuleParams):
             self._draw_preview_castellated(self._last_params)
             return
@@ -2795,6 +2916,49 @@ class MainWindow(QMainWindow):
         self._add_dim_h(left, right, bottom + 60, f"totale {width + 2 * margin:.2f} mm")
         self._add_dim_v(top, bottom, right + 60, f"totale {height + 2 * margin:.2f} mm")
 
+        self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
+        self._fit_preview()
+
+    def _draw_preview_package(self, package: PackageGeometry) -> None:
+        """Disegna il package generico con la stessa geometria del builder."""
+        self.preview_scene.clear()
+        mm_to_px = 20.0
+        pins = package.pins_seen_from_top()
+        body_l = package.body_length_mm or max((abs(p.x_mm) for p in pins), default=2.0) * 2 + 2
+        body_w = package.body_width_mm or max((abs(p.y_mm) for p in pins), default=2.0) * 2 + 2
+        margin = 1.0
+        silk_pen = QPen(QColor(TEXT))
+        silk_pen.setWidthF(1.5)
+        self.preview_scene.addRect(
+            -body_l / 2 * mm_to_px, -body_w / 2 * mm_to_px,
+            body_l * mm_to_px, body_w * mm_to_px, silk_pen,
+        )
+        pad_pen = QPen(QColor(SURFACE1))
+        pad_brush = QBrush(QColor(BLUE))
+        xs, ys = [], []
+        for pin in pins:
+            x, y = pin.x_mm * mm_to_px, pin.y_mm * mm_to_px
+            w, h = pin.pad_length_mm * mm_to_px, pin.pad_width_mm * mm_to_px
+            item = QGraphicsRectItem(x - w / 2, y - h / 2, w, h)
+            item.setTransformOriginPoint(x, y)
+            item.setRotation(pin.rotation_deg)
+            item.setPen(pad_pen)
+            item.setBrush(pad_brush)
+            self.preview_scene.addItem(item)
+            xs.append(x); ys.append(y)
+            number = self.preview_scene.addSimpleText(str(pin.number))
+            number.setBrush(QBrush(QColor(BASE)))
+            font = number.font(); font.setPointSizeF(max(6.0, min(w, h) * .45)); font.setBold(True)
+            number.setFont(font)
+            rect = number.boundingRect(); number.setPos(x - rect.width() / 2, y - rect.height() / 2); number.setZValue(5)
+        left = (-body_l / 2 - margin) * mm_to_px
+        top = (-body_w / 2 - margin) * mm_to_px
+        right = (body_l / 2 + margin) * mm_to_px
+        bottom = (body_w / 2 + margin) * mm_to_px
+        if self.chk_grid.isChecked():
+            self._draw_grid(mm_to_px, body_l, body_w, margin)
+        self._add_dim_h(left, right, bottom + 40, f"totale {body_l + 2 * margin:.2f} mm")
+        self._add_dim_v(top, bottom, right + 40, f"totale {body_w + 2 * margin:.2f} mm")
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
 

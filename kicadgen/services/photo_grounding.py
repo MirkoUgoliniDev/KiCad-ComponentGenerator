@@ -189,10 +189,10 @@ def classification_tool(kinds):
         }, "required": ["components"]}}}
 
 
-def contact_sheet(photo, components):
+def contact_sheet(photo, components, *, cell_width=240, cell_height=180, columns=4):
     import cv2
     import numpy as np
-    columns, cell_w, cell_h = 4, 240, 180
+    cell_w, cell_h = cell_width, cell_height
     canvas = np.full((((len(components)+columns-1)//columns)*cell_h, columns*cell_w, 3), 238, np.uint8)
     h, w = photo.shape[:2]
     for index, component in enumerate(components):
@@ -316,6 +316,10 @@ def mechanical_envelopes(photo, components, model, call, log, cache_dir, verific
         c = dict(original)
         c["_detected_kind"] = c["kind"]
         c["height_mm"] = height_priors.get(c["kind"],1.5)
+        # La verifica meccanica non certifica l'identita' elettrica: la
+        # classificazione pubblica resta generic. _detected_kind conserva pero'
+        # il suggerimento geometrico per il renderer, senza trasformarlo in una
+        # pretesa di riconoscimento elettrico.
         c["kind"] = "generic"
         c["name"] = f"Ingombro {c['_id']}"
         c["marking"] = ""

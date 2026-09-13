@@ -42,10 +42,29 @@ def detection_tool(kinds):
         "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
         "object_type": {"type": "string", "enum": ["component", "pcb_feature"]},
         "fully_visible": {"type": "boolean"},
+        "pin_count": {
+            "type": "integer", "minimum": 1,
+            "description": "Per un IC: numero di terminali fisicamente visibili/attesi; ometti per i passivi.",
+        },
+        "pins_by_side": {
+            "type": "object",
+            "properties": {
+                "left": {"type": "integer", "minimum": 0},
+                "right": {"type": "integer", "minimum": 0},
+                "top": {"type": "integer", "minimum": 0},
+                "bottom": {"type": "integer", "minimum": 0},
+            },
+            "additionalProperties": False,
+            "description": "Conteggio terminali per lato, solo quando distinguibile dalla foto.",
+        },
     }
     return {"type": "function", "function": {
         "name": "report_photo_components",
-        "description": "Localizza componenti montati mediante rettangoli sulla fotografia.",
+        "description": (
+            "Localizza componenti montati mediante rettangoli sulla fotografia. "
+            "Per gli IC, quando i terminali sono distinguibili, riporta anche "
+            "pin_count e pins_by_side; non inventare la numerazione elettrica."
+        ),
         "parameters": {"type": "object", "properties": {
             "components": {"type": "array", "items": {
                 "type": "object", "properties": properties,
@@ -108,6 +127,15 @@ def decode_detections(raw, region, body_length, body_width, source, log):
                         y_mm=((y0+y1)/2-.5)*body_width,
                         length_mm=length, width_mm=width, height_mm=height,
                         rotation_deg=angle, _box=(x0,y0,x1,y1), _source=source)
+            if isinstance(entry.get("pin_count"), int) and not isinstance(entry.get("pin_count"), bool):
+                if entry["pin_count"] > 0:
+                    item["pin_count"] = entry["pin_count"]
+            if isinstance(entry.get("pins_by_side"), dict):
+                sides = {k: v for k, v in entry["pins_by_side"].items()
+                         if k in {"left", "right", "top", "bottom"}
+                         and isinstance(v, int) and not isinstance(v, bool) and v >= 0}
+                if sides and sum(sides.values()) > 0:
+                    item["pins_by_side"] = sides
             result.append(item)
         except (KeyError, TypeError, ValueError, OverflowError) as exc:
             log(f"{source}: scartato {label} (voce {index}: {exc}).")

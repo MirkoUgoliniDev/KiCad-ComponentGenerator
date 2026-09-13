@@ -20,6 +20,8 @@ def main():
     parser.add_argument('inventory',type=Path)
     parser.add_argument('--side',action='append',required=True,help='edge:count:pitch_mm')
     parser.add_argument('--output',type=Path)
+    parser.add_argument('--observed-packages',action='store_true',
+                        help='Use observed terminals and geometric hints, not only envelopes')
     parser.add_argument('--pcb-thickness',type=float,default=1.0,help='Estimated unless measured, default 1mm')
     args = parser.parse_args()
     data = json.loads(args.inventory.read_text(encoding='utf-8'))
@@ -30,7 +32,10 @@ def main():
         pin += int(count)
     components = [ComponentBox(x=c['x_mm'],y=c['y_mm'],length=c['length_mm'],width=c['width_mm'],
         height=c['height_mm'],name=c['name'],kind='generic',marking='',rotation=c['rotation_deg'],
-        color_hex=c.get('color_hex','#303030')) for c in data['components']]
+        color_hex=c.get('color_hex','#303030'),
+        detected_kind=c.get('_detected_kind') if args.observed_packages else None,
+        terminal_geometry=c.get('terminal_geometry') if args.observed_packages else None)
+        for c in data['components']]
     params = CastellatedModuleParams(name='PhotoMechanicalEnvelope',body_length=data['body_length_mm'],
         body_width=data['body_width_mm'],sides=sides,components=components,pcb_thickness=args.pcb_thickness)
     body = Body3DParams(params.body_length,params.body_width,args.pcb_thickness+max(c.height for c in components),
@@ -60,6 +65,9 @@ def main():
         plot.screenshot(str(output/'mechanical-3d.png'))
         plot.view_xy()
         plot.reset_camera()
+        plot.camera.parallel_scale = max(params.body_width / 2,
+                                         params.body_length / (2 * 1440 / 650)) * 1.12
+        plot.render()
         plot.screenshot(str(output/'mechanical-top.png'))
         plot.close()
 

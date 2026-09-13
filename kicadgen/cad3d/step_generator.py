@@ -313,13 +313,24 @@ def generate_castellated_3d_model(
             component.x, component.y, component.length, component.width,
             component.rotation, params.body_length, params.body_width,
         )
+        render_kind = component.kind
+        if render_kind == "generic" and component.detected_kind:
+            render_kind = component.detected_kind
+            if render_kind in {"ic_soic", "ic_qfn"} and not component.terminal_geometry:
+                # A photographic kind hint is not evidence of count/pitch/sides.
+                # Keep explicit, manually selected legacy packages unchanged.
+                render_kind = "ic"
         components.append({
-            "name": component.name, "kind": component.kind,
+            "name": component.name,
+            "kind": render_kind,
             "x": x, "y": y,
             "length_mm": component.length, "width_mm": component.width,
             "height_mm": min(component.height, component_height) if component_height > 0 else component.height,
             "color_hex": component.color_hex, "marking": component.marking,
             "rotation_deg": component.rotation,
+            "pin_count": component.pin_count,
+            "pins_by_side": component.pins_by_side,
+            "terminal_geometry": component.terminal_geometry,
         })
 
     extra_boxes = []

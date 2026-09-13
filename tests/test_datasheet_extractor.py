@@ -335,6 +335,17 @@ def test_components_that_are_not_objects_are_skipped_not_fatal():
     assert params.components_3d[0]["x_mm"] == 1
 
 
+def test_mechanical_detected_kind_is_preserved_for_3d_renderer():
+    from kicadgen.services.datasheet_extractor import _components_3d
+    result = _components_3d([{
+        "name": "Ingombro 1", "kind": "generic", "_detected_kind": "ic_soic",
+        "x_mm": 0, "y_mm": 0, "length_mm": 5, "width_mm": 3,
+        "height_mm": 1.5,
+    }])
+    assert result[0]["kind"] == "generic"
+    assert result[0]["_detected_kind"] == "ic_soic"
+
+
 def test_photo_inventory_discards_pads_and_vias():
     params = _params_from_tool_arguments({
         "layout": "castellated", "confidence": "low",

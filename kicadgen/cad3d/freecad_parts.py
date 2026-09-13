@@ -16,6 +16,8 @@ Ogni builder ritorna una lista di (shape, color_hex): i pezzi restano
 separati per poter avere ciascuno il proprio colore in STEP e VRML.
 """
 
+import math
+
 import FreeCAD
 import Part
 
@@ -67,6 +69,81 @@ def _rounded_box(cx, cy, z0, length, width, height, color, ratio=0.15, cap=0.6):
 
 def _generic(cx, cy, z0, length, width, height, color):
     return [(_box(cx, cy, z0, length, width, height), color)]
+
+
+def _normalized_box(value):
+    """Validate a local image rectangle without clipping or guessing coordinates."""
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        raise ValueError("terminal_geometry bbox must contain four coordinates")
+    if any(isinstance(v, bool) or not isinstance(v, (int, float))
+           or not math.isfinite(v) or not 0 <= v <= 1 for v in value):
+        raise ValueError("terminal_geometry bbox coordinates must be finite numbers in [0, 1]")
+    left, top, right, bottom = value
+    if left >= right or top >= bottom:
+        raise ValueError("terminal_geometry bbox must have positive area")
+    return tuple(value)
+
+
+def _validated_terminal_geometry(geometry):
+    """Validate the complete observation before constructing any CAD shapes."""
+    if not isinstance(geometry, dict):
+        raise ValueError("terminal_geometry must be an object")
+    if geometry.get("confidence") not in ("high", "medium"):
+        raise ValueError("terminal_geometry confidence must be high or medium")
+    body = _normalized_box(geometry.get("body_bbox"))
+    terminals = geometry.get("terminals")
+    if not isinstance(terminals, list) or len(terminals) > 128:
+        raise ValueError("terminal_geometry terminals must be a list of at most 128 boxes")
+    boxes = []
+    for terminal in terminals:
+        if not isinstance(terminal, dict):
+            raise ValueError("terminal_geometry terminal must be an object with bbox")
+        boxes.append(_normalized_box(terminal.get("bbox")))
+    return body, boxes
+
+
+def _observed_terminals(cx, cy, z0, length, width, height, color, geometry):
+    """Render observed boxes in the existing total envelope, with no pin inference.
+
+    Rectangles use local X-right/Y-down coordinates. The caller has already
+    converted the component centre to CAD Y-up and rotates all returned shapes
+    once. Only the local Y offset is inverted here; axes are never swapped based
+    on aspect ratio. Heights and small risers are conservative visual estimates.
+    """
+    body_bbox, terminal_boxes = _validated_terminal_geometry(geometry)
+
+    def bounds(bbox):
+        left, top, right, bottom = bbox
+        return (cx + (left - 0.5) * length, cy + (0.5 - bottom) * width,
+                cx + (right - 0.5) * length, cy + (0.5 - top) * width)
+
+    def box_at(rect, base, thickness):
+        left, bottom, right, top = rect
+        return Part.makeBox(right - left, top - bottom, thickness,
+                            V(left, bottom, base))
+
+    body_bounds = bounds(body_bbox)
+    standoff = min(0.12, height * 0.1)
+    lead_t = min(0.08, height * 0.05)
+    riser_h = min(height * 0.3, standoff + 0.1)
+    parts = [(box_at(body_bounds, z0 + standoff, height - standoff), color)]
+    for bbox in terminal_boxes:
+        rect = bounds(bbox)
+        foot = box_at(rect, z0, lead_t)
+        left, bottom, right, top = rect
+        # Raise only a small area where the observed terminal touches/overlaps
+        # the body. Do not bridge a gap or extend metal beyond the observation.
+        near_x = min(max((left + right) / 2, body_bounds[0]), body_bounds[2])
+        near_y = min(max((bottom + top) / 2, body_bounds[1]), body_bounds[3])
+        if left <= near_x <= right and bottom <= near_y <= top:
+            dx = min(0.12, (right - left) * 0.5)
+            dy = min(0.12, (top - bottom) * 0.5)
+            rx = min(max(near_x - dx / 2, left), right - dx)
+            ry = min(max(near_y - dy / 2, bottom), top - dy)
+            riser = box_at((rx, ry, rx + dx, ry + dy), z0, riser_h)
+            foot = foot.fuse(riser)
+        parts.append((foot, METAL))
+    return parts
 
 
 def _ic_soic(cx, cy, z0, length, width, height, color):
@@ -136,6 +213,46 @@ def _ic_qfn(cx, cy, z0, length, width, height, color):
     except Exception:  # noqa: BLE001
         pass
     return [(body, color)]
+
+
+def _ic_observed_pins(cx, cy, z0, length, width, height, color, kind, pin_count=None, pins_by_side=None):
+    """IC body plus terminals counted from the photo, when supplied by AI."""
+    parts = [(_box(cx, cy, z0, length, width, height), color)]
+    sides = dict(pins_by_side or {})
+    if not sides and pin_count:
+        if kind == "ic_qfn":
+            base = pin_count // 4
+            sides = {s: base for s in ("left", "right", "top", "bottom")}
+            for side in ("left", "right", "top", "bottom")[:pin_count % 4]:
+                sides[side] += 1
+        else:
+            left = pin_count // 2
+            sides = {"left": left, "right": pin_count - left}
+    lead_t = min(0.18, max(0.08, height * 0.12))
+    lead_out = min(0.8, max(0.3, min(length, width) * 0.16))
+    metal_w = min(0.42, max(0.18, min(length, width) / 8))
+    for side in ("left", "right", "top", "bottom"):
+        count = int(sides.get(side, 0) or 0)
+        if count <= 0:
+            continue
+        span = width if side in ("left", "right") else length
+        pitch = span / (count + 1)
+        for index in range(count):
+            along = -span / 2 + (index + 1) * pitch
+            if side == "left":
+                pad = Part.makeBox(lead_out, metal_w, lead_t,
+                                   V(cx - length / 2 - lead_out, cy + along - metal_w / 2, z0))
+            elif side == "right":
+                pad = Part.makeBox(lead_out, metal_w, lead_t,
+                                   V(cx + length / 2, cy + along - metal_w / 2, z0))
+            elif side == "top":
+                pad = Part.makeBox(metal_w, lead_out, lead_t,
+                                   V(cx + along - metal_w / 2, cy - width / 2 - lead_out, z0))
+            else:
+                pad = Part.makeBox(metal_w, lead_out, lead_t,
+                                   V(cx + along - metal_w / 2, cy + width / 2, z0))
+            parts.append((pad, METAL))
+    return parts
 
 
 def _led(cx, cy, z0, length, width, height, color):
@@ -233,6 +350,8 @@ def _crystal(cx, cy, z0, length, width, height, color):
 
 BUILDERS = {
     "generic": _generic,
+    # An unidentified IC does not establish a package or terminal layout.
+    "ic": _generic,
     "ic_soic": _ic_soic,
     "ic_qfn": _ic_qfn,
     "transformer": _transformer,
@@ -255,7 +374,15 @@ KINDS = tuple(BUILDERS)
 
 
 def build_component(component, z0):
-    """Costruisce le parti di un componente descritto dal payload JSON."""
+    """Costruisce le parti di un componente descritto dal payload JSON.
+
+    Optional ``terminal_geometry`` overrides kind/count-based approximations:
+    ``{body_bbox: [l,t,r,b], terminals: [{bbox: [l,t,r,b]}],
+    confidence: 'high'|'medium'}``. Boxes are normalized to the total local
+    length/width envelope, X-right/Y-down, before the caller's rotation.
+    Missing/None observations retain legacy behavior. Invalid non-None
+    observations produce a warning and a generic envelope box.
+    """
     kind = str(component.get("kind") or "generic")
     builder = BUILDERS.get(kind, _generic)
     color = component.get("color_hex") or "#303030"
@@ -265,6 +392,21 @@ def build_component(component, z0):
     cx = float(component["x"])
     cy = float(component["y"])
     try:
+        if component.get("terminal_geometry") is not None:
+            return _observed_terminals(cx, cy, z0, length, width, height, color,
+                                       component["terminal_geometry"])
+        if kind == "ic":
+            print(f"KICADGEN_WARN:componente {component.get('name')} (ic): "
+                  "package sconosciuto, geometria generica senza terminali")
+            return _generic(cx, cy, z0, length, width, height, color)
+        if kind in BUILDERS and kind != "generic":
+            print(f"KICADGEN_WARN:componente {component.get('name')} ({kind}): "
+                  "geometria approssimata, terminal_geometry assente")
+        pin_count = component.get("pin_count")
+        pins_by_side = component.get("pins_by_side")
+        if kind in {"ic_soic", "ic_qfn"} and (pin_count or pins_by_side):
+            return _ic_observed_pins(cx, cy, z0, length, width, height, color, kind,
+                                     pin_count=pin_count, pins_by_side=pins_by_side)
         return builder(cx, cy, z0, length, width, height, color)
     except Exception as exc:  # noqa: BLE001 - si ripiega sulla scatola
         print(f"KICADGEN_WARN:componente {component.get('name')} ({kind}) semplificato: {exc}")

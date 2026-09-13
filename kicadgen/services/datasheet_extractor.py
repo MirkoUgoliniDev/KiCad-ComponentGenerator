@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 from ..cad3d.annotations import EDGE_NAMES
+from ..core.package_geometry import package_from_mapping
 from ..generators.castellated_module import EDGES
 from .openrouter import DEFAULT_MODEL, OpenRouterError, api_key, call_tool
 
@@ -33,7 +34,7 @@ MAX_FILES = 5
 
 #: Tipi di package che il modello 3D sa disegnare (cad3d/freecad_parts.py:
 #: BUILDERS). Duplicato qui perche' quel modulo gira solo dentro FreeCAD.
-COMPONENT_KINDS = ('generic', 'ic_soic', 'ic_qfn', 'transformer', 'module', 'led', 'capacitor_tantalum', 'capacitor', 'resistor', 'inductor', 'diode', 'diode_melf', 'connector', 'crystal')
+COMPONENT_KINDS = ('generic', 'ic', 'ic_soic', 'ic_qfn', 'transformer', 'module', 'led', 'capacitor_tantalum', 'capacitor', 'resistor', 'inductor', 'diode', 'diode_melf', 'connector', 'crystal')
 MAX_FILE_BYTES = 20 * 1024 * 1024  # 20 MB, limite ragionevole per singolo file API
 
 _SUPPORTED_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -65,6 +66,41 @@ _EXTRACTION_TOOL = {
                     "passo diversi (es. 3 contatti a 5.08mm a sinistra e 5 a 2.54mm a "
                     "destra): in quel caso \"matrix\" darebbe un footprint sbagliato."
                 ),
+            },
+            "package_geometry": {
+                "type": "object",
+                "description": (
+                    "Geometria generica opzionale per IC e package non rappresentabili "
+                    "come matrice. Usala per SOIC, TSSOP, QFN, QFP, DIP irregolari e "
+                    "package custom: riporta un pad per pin con coordinate locali "
+                    "viste dall'alto o indica source_view=bottom. Non inventare "
+                    "coordinate non supportate dal documento."
+                ),
+                "properties": {
+                    "family": {"type": "string", "enum": [
+                        "unknown", "dip", "sip", "soic", "tssop", "qfn", "qfp",
+                        "module", "castellated", "custom"]},
+                    "body_length_mm": {"type": "number", "exclusiveMinimum": 0},
+                    "body_width_mm": {"type": "number", "exclusiveMinimum": 0},
+                    "body_height_mm": {"type": "number", "exclusiveMinimum": 0},
+                    "origin": {"type": "string", "enum": ["body_center", "pin1", "custom"]},
+                    "source_view": {"type": "string", "enum": ["top", "bottom"]},
+                    "orientation_deg": {"type": "number"},
+                    "mirrored": {"type": "boolean"},
+                    "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                    "needs_review": {"type": "boolean"},
+                    "pins": {"type": "array", "items": {"type": "object", "properties": {
+                        "number": {"type": "string"}, "name": {"type": "string"},
+                        "x_mm": {"type": "number"}, "y_mm": {"type": "number"},
+                        "pad_length_mm": {"type": "number", "exclusiveMinimum": 0},
+                        "pad_width_mm": {"type": "number", "exclusiveMinimum": 0},
+                        "side": {"type": "string", "enum": ["left", "right", "top", "bottom", "center"]},
+                        "pad_type": {"type": "string", "enum": ["smd", "thru_hole", "np_thru_hole", "connect"]},
+                        "shape": {"type": "string", "enum": ["circle", "rect", "oval", "roundrect", "trapezoid", "custom"]},
+                        "rotation_deg": {"type": "number"}, "drill_mm": {"type": "number", "exclusiveMinimum": 0},
+                    }, "required": ["number", "x_mm", "y_mm", "pad_length_mm", "pad_width_mm"]}},
+                },
+                "required": ["family", "source_view", "pins"],
             },
             "top_photo_index": {
                 "type": "integer", "minimum": -1,
@@ -453,7 +489,7 @@ _EXTRACTION_TOOL = {
                         },
                         "kind": {
                             "type": "string",
-                            "enum": ['generic', 'ic_soic', 'ic_qfn', 'transformer', 'module', 'led', 'capacitor_tantalum', 'capacitor', 'resistor', 'inductor', 'diode', 'diode_melf', 'connector', 'crystal'],
+                            "enum": ['generic', 'ic', 'ic_soic', 'ic_qfn', 'transformer', 'module', 'led', 'capacitor_tantalum', 'capacitor', 'resistor', 'inductor', 'diode', 'diode_melf', 'connector', 'crystal'],
                             "description": (
                                 "Tipo di package, riconosciuto dalla foto: decide la forma "
                                 "nel modello 3D (un SOIC ha i reofori sui lati, un LED la "
@@ -612,6 +648,7 @@ class ExtractedParams:
     pin_map: Optional[Sequence[dict]] = None
     body_color_hex: Optional[str] = None
     text_color_hex: Optional[str] = None
+    package_geometry: Optional[dict] = None
 
     def has_3d_body(self) -> bool:
         return self.body_length_mm is not None and self.body_width_mm is not None and self.body_height_mm is not None
@@ -817,9 +854,21 @@ def extract_pin_header_params(
         except (OpenRouterError, ValueError, OSError) as exc:
             data["notes"] = (str(data.get("notes") or "") + f"\nInventario fotografico fallito: {exc}").strip()
         if photo_report and photo_report.components:
+            if isinstance(getattr(photo_report, "photo_png", None), bytes):
+                from .photo_terminals import observe_terminals
+                try:
+                    photo_report.components = observe_terminals(
+                        photo_report.photo_png, photo_report.components, vision_model or DEFAULT_VISION_MODEL,
+                        call_tool, progress or (lambda message: None),
+                        photo_cache_dir if photo_cache_dir is not None else Path(__file__).resolve().parents[2]/"generated"/"photo-cache",
+                    )
+                except (OpenRouterError, ValueError, OSError) as exc:
+                    photo_report.warnings.append(f"Dettaglio terminali non disponibile: {exc}")
             data["components_3d"] = photo_report.components
             old_notes = str(data.get("notes") or "").strip()
-            suffix = (f"Inventario fotografico: {len(photo_report.components)} ingombri su {photo_report.photo}. "
+            detailed = sum(bool(c.get("terminal_geometry")) for c in photo_report.components)
+            suffix = (f"Inventario fotografico: {len(photo_report.components)} ingombri su {photo_report.photo}; "
+                      f"{detailed} con terminali osservati. "
                       "Modello meccanico semplificato, senza marcature. XY stimati dalla foto calibrata; "
                       "altezze indicative, non misure certificate: verificare con vista laterale o misura.")
             data["notes"] = f"{old_notes} {suffix}".strip()
@@ -965,9 +1014,18 @@ def _components_3d(raw: Optional[Sequence[dict]]) -> Optional[list[dict]]:
             component["marking"] = str(entry["marking"]).strip()
         component["rotation_deg"] = (_optional_number(entry.get("rotation_deg")) or 0.0) % 360
         for key in ("_box", "_id", "_candidate_id", "_source", "_uncertain", "_review_reason",
+                    "_detected_kind", "terminal_geometry",
                     "_height_source", "_grounding_kind", "_alternative_kind", "confidence"):
             if key in entry:
                 component[key] = entry[key]
+        if isinstance(entry.get("pin_count"), int) and not isinstance(entry.get("pin_count"), bool) and entry["pin_count"] > 0:
+            component["pin_count"] = entry["pin_count"]
+        if isinstance(entry.get("pins_by_side"), dict):
+            sides = {k: v for k, v in entry["pins_by_side"].items()
+                     if k in {"left", "right", "top", "bottom"}
+                     and isinstance(v, int) and not isinstance(v, bool) and v >= 0}
+            if sides and sum(sides.values()) > 0:
+                component["pins_by_side"] = sides
         components.append(component)
     return components or None
 
@@ -1000,6 +1058,15 @@ def _params_from_tool_arguments(data: dict) -> ExtractedParams:
 
     populated = data.get("populated_pins")
 
+    package_geometry = data.get("package_geometry")
+    if package_geometry is not None:
+        try:
+            # Validate now, while the source response and its warnings are still
+            # available; the GUI must never receive malformed pad coordinates.
+            package_from_mapping(package_geometry)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ExtractionError(f"Geometria package non valida: {exc}") from exc
+
     return ExtractedParams(
         name=data.get("name") or "",
         description=data.get("description") or "",
@@ -1031,4 +1098,5 @@ def _params_from_tool_arguments(data: dict) -> ExtractedParams:
         ) if layout == "matrix" else None,
         body_color_hex=data.get("body_color_hex") or None,
         text_color_hex=data.get("text_color_hex") or None,
+        package_geometry=package_geometry,
     )

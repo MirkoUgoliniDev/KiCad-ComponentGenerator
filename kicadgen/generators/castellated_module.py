@@ -86,6 +86,11 @@ class ComponentBox:
     # (0 = asse lungo parallelo a X, 90 = verticale). Esplicito, non dedotto
     # dalle proporzioni: con stime quasi quadrate la deduzione sbaglia.
     rotation: float = 0.0
+    # Conteggio opzionale dei terminali osservati per un IC; serve al modello 3D.
+    pin_count: Optional[int] = None
+    pins_by_side: Optional[Dict[str, int]] = None
+    detected_kind: Optional[str] = None
+    terminal_geometry: Optional[dict] = None
 
     def is_usable(self) -> bool:
         return self.length > 0 and self.width > 0 and self.height > 0
