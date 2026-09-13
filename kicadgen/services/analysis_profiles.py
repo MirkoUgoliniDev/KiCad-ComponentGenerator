@@ -16,7 +16,15 @@ from .component_types import COMPONENT_TYPES
 PROFILE_FIELDS = ('model','vision_model','verification_model','system_prompt','grounding_prompt',
                   'verification_prompt','terminal_prompt','lead_prompt','image_instructions')
 FAMILIES = {t.key:t.label for t in COMPONENT_TYPES}
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+
+def _default_translations():
+    """@brief Return the bundled translation catalog for a new database."""
+    from .i18n import DEFAULT_TRANSLATIONS
+    return [(key, language, text)
+            for key, values in DEFAULT_TRANSLATIONS.items()
+            for language, text in values.items()]
 
 
 def factory_defaults():
@@ -65,6 +73,12 @@ class ProfileStore:
             if version == 1:
                 db.execute("INSERT INTO ai_defaults SELECT 'verification_model',value FROM ai_defaults WHERE name='model'")
                 db.execute("INSERT INTO ai_overrides SELECT type_key,'verification_model',value FROM ai_overrides WHERE name='model'")
+                version = 2
+            if version == 2:
+                db.execute('CREATE TABLE IF NOT EXISTS translations '
+                           '(key TEXT NOT NULL, language TEXT NOT NULL, text TEXT NOT NULL, '
+                           'PRIMARY KEY(key,language))')
+                db.executemany('INSERT OR IGNORE INTO translations VALUES (?,?,?)', _default_translations())
                 db.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
                 version = SCHEMA_VERSION
             if version == SCHEMA_VERSION:
@@ -72,6 +86,9 @@ class ProfileStore:
                 db.execute('SELECT key,label,family,instructions,active,builtin,position FROM component_types LIMIT 1')
                 db.execute('SELECT type_key,name,value FROM ai_overrides LIMIT 1')
                 db.execute('SELECT name,value FROM metadata LIMIT 1')
+                db.execute('SELECT key,language,text FROM translations LIMIT 1')
+                # Add newly bundled UI keys without overwriting user edits.
+                db.executemany('INSERT OR IGNORE INTO translations VALUES (?,?,?)', _default_translations())
                 defaults = dict(db.execute('SELECT name,value FROM ai_defaults'))
                 if set(defaults) != set(PROFILE_FIELDS):
                     raise ProfileError('Default del database incompleti: ripristinare un backup.')
@@ -117,12 +134,49 @@ class ProfileStore:
             db.execute('CREATE TABLE ai_overrides (type_key TEXT NOT NULL REFERENCES component_types(key) ON DELETE CASCADE, '
                        'name TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(type_key,name))')
             db.execute('CREATE TABLE metadata (name TEXT PRIMARY KEY, value TEXT NOT NULL)')
+            db.execute('CREATE TABLE translations (key TEXT NOT NULL, language TEXT NOT NULL, '
+                       'text TEXT NOT NULL, PRIMARY KEY(key,language))')
             db.executemany('INSERT INTO ai_defaults VALUES (?,?)',defaults.items())
             for index,t in enumerate(COMPONENT_TYPES):
                 db.execute('INSERT INTO component_types VALUES (?,?,?,?,1,1,?)',
                            (t.key,t.label,t.key,t.prompt,index))
             db.execute('INSERT INTO metadata VALUES (?,?)',('legacy_backup',str(backup or '')))
+            db.executemany('INSERT INTO translations VALUES (?,?,?)', _default_translations())
             db.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
+
+    def translation(self, key, language, fallback=None):
+        """@brief Resolve one translation with an English fallback."""
+        from .i18n import LANGUAGES
+        if language not in LANGUAGES:
+            language = 'en'
+        with self._connect() as db:
+            row = db.execute('SELECT text FROM translations WHERE key=? AND language=?',
+                             (key, language)).fetchone()
+            if row:
+                return row['text']
+            row = db.execute('SELECT text FROM translations WHERE key=? AND language=?',
+                             (key, 'en')).fetchone()
+            return row['text'] if row else (fallback if fallback is not None else key)
+
+    def save_translation(self, key, language, text):
+        """@brief Create or update one translation in the catalog."""
+        from .i18n import LANGUAGES
+        if not key or language not in LANGUAGES or not isinstance(text, str) or not text.strip():
+            raise ProfileError('Translation key, language and text are required.')
+        with self._connect() as db:
+            db.execute('INSERT INTO translations(key,language,text) VALUES (?,?,?) '
+                       'ON CONFLICT(key,language) DO UPDATE SET text=excluded.text',
+                       (key, language, text))
+
+    def list_translations(self, language=None):
+        """@brief List translation rows, optionally filtered by language."""
+        with self._connect() as db:
+            if language:
+                rows = db.execute('SELECT key,language,text FROM translations WHERE language=? '
+                                  'ORDER BY key', (language,)).fetchall()
+            else:
+                rows = db.execute('SELECT key,language,text FROM translations ORDER BY key,language').fetchall()
+            return [dict(row) for row in rows]
 
     def defaults(self):
         """@brief Provide the defaults operation for this workflow."""

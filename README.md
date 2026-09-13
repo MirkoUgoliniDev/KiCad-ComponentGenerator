@@ -86,9 +86,14 @@ data/analysis_profiles.sqlite3. The Configuration catalog supports creating,
 editing, duplicating, deactivating and deleting component types, with inheritance
 from global defaults.
 
+The same SQLite catalog stores the user-interface translation keys for Italian,
+English, French and German. Select the active language from the selector in the
+top-right corner. Advanced users can edit the catalog through
+Configuration -> Manage translations; missing entries fall back to English.
+
 ~~~mermaid
 flowchart LR
-    DB[(SQLite profile catalog)] --> R[Resolve model and prompts]
+    DB[(SQLite profile and translation catalog)] --> R[Resolve model, prompts and UI text]
     R --> D[Datasheet]
     R --> L[Photo localization]
     R --> V[Photo verification]
