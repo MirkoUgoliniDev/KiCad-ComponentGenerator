@@ -3066,12 +3066,20 @@ class MainWindow(QMainWindow):
         self._config["show_grid"] = checked
         save_config(self._config)
         self.combo_grid_unit.setEnabled(checked)
-        self._draw_preview()
+        # Grid visibility is not a request to redraw/refit the footprint.
+        for item in self.preview_scene.items():
+            if item.data(_GRID_ITEM):
+                item.setVisible(checked)
 
     def _on_grid_unit_changed(self) -> None:
         self._config["grid_unit"] = self.combo_grid_unit.currentData()
         save_config(self._config)
-        self._draw_preview()
+        spec = getattr(self, '_preview_grid_spec', None)
+        if spec is not None:
+            for item in self.preview_scene.items():
+                if item.data(_GRID_ITEM):
+                    self.preview_scene.removeItem(item)
+            self._draw_grid(**spec)
 
     def _fit_preview(self) -> None:
         """Inquadra il footprint, ignorando la griglia.
@@ -3089,6 +3097,13 @@ class MainWindow(QMainWindow):
             rect = bounds if rect is None else rect.united(bounds)
         if rect is None or rect.isEmpty():
             rect = self.preview_scene.itemsBoundingRect()
+        if rect.isEmpty():
+            return
+        # Keep the scrollable extent independent of grid visibility/spacing.
+        # An implicit scene rect can grow with previously drawn grid items.
+        rect = rect.adjusted(-12, -12, 12, 12)
+        self.preview_scene.setSceneRect(rect)
+        self.preview_view.resetTransform()
         self.preview_view.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
 
     def _draw_grid(
@@ -3104,6 +3119,8 @@ class MainWindow(QMainWindow):
         footprint a matrice, che ha il pin 1 nell'origine, negativo per i
         moduli castellated, centrati sull'origine.
         """
+        self._preview_grid_spec = dict(mm_to_px=mm_to_px, width=width, height=height,
+                                       margin=margin, x0=x0, y0=y0)
         step = 2.54 if self.combo_grid_unit.currentData() == "inch" else 1.0
 
         minor = QPen(QColor(SURFACE1))
@@ -3123,6 +3140,7 @@ class MainWindow(QMainWindow):
             )
             line.setZValue(-10)  # dietro pad, silkscreen e quote
             line.setData(_GRID_ITEM, True)
+            line.setVisible(self.chk_grid.isChecked())
         for j in range(j_min, j_max + 1):
             pen = major if j % 5 == 0 else minor
             y = j * step * mm_to_px
@@ -3131,6 +3149,7 @@ class MainWindow(QMainWindow):
             )
             line.setZValue(-10)
             line.setData(_GRID_ITEM, True)
+            line.setVisible(self.chk_grid.isChecked())
 
     def _draw_preview_castellated(self, p: CastellatedModuleParams) -> None:
         """Anteprima del modulo castellated: corpo, piazzole e quote d'ingombro.
@@ -3143,11 +3162,10 @@ class MainWindow(QMainWindow):
         self.preview_scene.clear()
         mm_to_px = 20.0
 
-        if self.chk_grid.isChecked():
-            self._draw_grid(
-                mm_to_px, p.body_length, p.body_width, p.pad_overhang + p.pad_length,
-                x0=-p.body_length / 2, y0=-p.body_width / 2,
-            )
+        self._draw_grid(
+            mm_to_px, p.body_length, p.body_width, p.pad_overhang + p.pad_length,
+            x0=-p.body_length / 2, y0=-p.body_width / 2,
+        )
 
         silk_pen = QPen(QColor(TEXT))
         silk_pen.setWidthF(1.5)
@@ -3213,8 +3231,7 @@ class MainWindow(QMainWindow):
         width = (p.cols - 1) * p.pitch
         height = (p.rows - 1) * row_spacing
 
-        if self.chk_grid.isChecked():
-            self._draw_grid(mm_to_px, width, height, margin)
+        self._draw_grid(mm_to_px, width, height, margin)
 
         silk_pen = QPen(QColor(TEXT))
         silk_pen.setWidthF(1.5)
@@ -3336,8 +3353,8 @@ class MainWindow(QMainWindow):
         top = (-body_w / 2 - margin) * mm_to_px
         right = (body_l / 2 + margin) * mm_to_px
         bottom = (body_w / 2 + margin) * mm_to_px
-        if self.chk_grid.isChecked():
-            self._draw_grid(mm_to_px, body_l, body_w, margin)
+        self._draw_grid(mm_to_px, body_l, body_w, margin,
+                        x0=-body_l / 2, y0=-body_w / 2)
         self._add_dim_h(left, right, bottom + 40, f"totale {body_l + 2 * margin:.2f} mm")
         self._add_dim_v(top, bottom, right + 40, f"totale {body_w + 2 * margin:.2f} mm")
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))

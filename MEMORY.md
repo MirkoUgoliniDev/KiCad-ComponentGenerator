@@ -1,5 +1,14 @@
 # Memoria delle decisioni del progetto
 
+## 2026-09-13 — Griglia dell'anteprima 2D senza variazioni di zoom
+
+- Spunta e passo della griglia devono aggiornare solo le linee di riferimento,
+  senza ridisegnare il footprint o richiamare l'adattamento dell'inquadratura.
+- Mantenere scala, posizione e rettangolo della scena indipendenti dalla griglia.
+  L'inquadratura iniziale usa solo pad, corpo e quote con un margine costante.
+- Applicare la stessa regola a matrice, castellated e package a pad espliciti;
+  nessuna modifica ai file generati o alle geometrie 3D.
+
 ## 2026-09-13 — Documentazione guidata: solo tre ruoli
 
 - Per ora offrire esclusivamente Pinout, Vista superiore e Vista laterale.
