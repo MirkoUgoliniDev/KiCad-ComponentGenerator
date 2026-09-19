@@ -59,6 +59,11 @@ DEFAULTS = {
     # presenti: di default vanno generati, altrimenti manca il foro e il
     # componente non entra nella scheda.
     "include_nc_pins": True,
+    # Ultima cartella da cui si sono presi documenti da caricare. I file
+    # arrivano quasi sempre in serie dalla stessa cartella (le viste di uno
+    # stesso componente), mentre la cartella del progetto -- dove le copie
+    # finiscono -- non e' mai quella da cui si pesca.
+    "last_document_dir": "",
     "advanced_user": False,
     "show_grid": True,
     "grid_unit": "mm",  # "mm" oppure "inch" (passo 2.54mm, standard THT)
@@ -85,6 +90,47 @@ def load_config() -> dict:
             # impedire l'avvio dell'applicazione.
             pass
     return config
+
+
+def browse_start_dir(config, fallback="") -> str:
+    """Cartella da cui far partire un dialogo di caricamento documenti.
+
+    Vale l'ultima cartella usata, ma solo se esiste ancora: una cartella
+    rimossa o su un disco scollegato aprirebbe il dialogo in un punto morto,
+    ed e' meglio ripiegare sul `fallback` del chiamante.
+    """
+    remembered = (config or {}).get("last_document_dir") or ""
+    try:
+        if remembered and Path(remembered).is_dir():
+            return remembered
+    except OSError:
+        pass
+    return str(fallback or "")
+
+
+def remember_browse_dir(config, selected) -> None:
+    """Memorizza la cartella del file scelto, aggiornando anche config.json.
+
+    `config` e' il dizionario vivo della finestra: aggiornarlo qui evita che
+    un salvataggio successivo, fatto con la copia in memoria, riscriva sopra
+    la preferenza appena registrata.
+    """
+    if config is None or not selected:
+        return
+    try:
+        directory = Path(selected)
+        directory = str(directory if directory.is_dir() else directory.parent)
+    except OSError:
+        return
+    if config.get("last_document_dir") == directory:
+        return
+    config["last_document_dir"] = directory
+    try:
+        save_config(config)
+    except OSError:
+        # Preferenza di comodita': se il file non e' scrivibile, la sessione
+        # corrente la usa comunque e non si interrompe il caricamento.
+        pass
 
 
 def save_config(config: dict) -> None:

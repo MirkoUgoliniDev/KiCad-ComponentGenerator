@@ -44,3 +44,6 @@ Thumbs.db
 Desktop.ini
 .vscode/
 .idea/
+
+# Immagini di lavoro dei componenti: input locali, non sorgenti del progetto.
+docs/ESP32/

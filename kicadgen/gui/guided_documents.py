@@ -36,10 +36,14 @@ class GuidedDocuments(QWidget):
     """@brief Manage the guided pinout, top-view and front-view documents."""
     changed = pyqtSignal()
 
-    def __init__(self, directory, parent=None, *, i18n=None):
+    def __init__(self, directory, parent=None, *, i18n=None, config=None):
         super().__init__(parent)
         self.directory = directory
         self.i18n = i18n
+        # Dizionario vivo delle preferenze della finestra, per ricordare la
+        # cartella di provenienza dei documenti. None nei test e negli usi
+        # isolati del widget: il dialogo parte allora dalla cartella docs.
+        self.config = config
         self.cards = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -170,11 +174,14 @@ class GuidedDocuments(QWidget):
             self.i18n.retranslate_widgets(self)
 
     def _load(self, role):
+        from .app_config import browse_start_dir, remember_browse_dir
         source, _ = QFileDialog.getOpenFileName(
-            self, self._tr(ROLES[role]), str(self.directory()),
+            self, self._tr(ROLES[role]),
+            browse_start_dir(self.config, self.directory()),
             self._tr('Immagini e PDF (*.png *.jpg *.jpeg *.webp *.gif *.pdf)'))
         if not source:
             return
+        remember_browse_dir(self.config, source)
         try:
             store = self.store()
             replace = bool(store.read()['roles'].get(role, {}).get('filename')) or (store.directory / (role + Path(source).suffix.lower())).exists()

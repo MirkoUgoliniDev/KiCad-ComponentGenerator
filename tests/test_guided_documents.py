@@ -151,3 +151,44 @@ def test_refresh_repairs_one_stale_unavailable_checkbox(window):
     assert tuple(
         card['unavailable'].text() for card in window.guided_docs.cards.values()
     ) == ('Indisponible',) * 3
+
+
+def test_load_dialog_reopens_on_the_last_source_folder(window, monkeypatch, tmp_path):
+    """La cartella da cui si pescano i documenti viene ricordata.
+
+    Le viste di uno stesso componente stanno insieme: dopo la prima, il
+    dialogo deve ripartire da li' invece che dalla cartella del progetto,
+    che e' la destinazione delle copie e non contiene mai gli originali.
+    """
+    panel = window.guided_docs
+    sources = tmp_path / 'viste-esp32'
+    sources.mkdir()
+    opened = []
+
+    def fake_dialog(*args):
+        opened.append(args[2])
+        return (str(image_file(sources / 'pinout.png')), '')
+
+    monkeypatch.setattr(QFileDialog, 'getOpenFileName', fake_dialog)
+    panel.cards['pinout']['load'].click()
+    # Prima apertura: nessuna preferenza, si parte dalla cartella del progetto.
+    assert Path(opened[0]) == Path(window._docs_dir())
+    assert Path(window._config['last_document_dir']) == sources
+
+    panel.cards['front']['load'].click()
+    assert Path(opened[1]) == sources, 'il dialogo non e\' ripartito dall\'ultima cartella'
+
+
+def test_forgotten_folder_falls_back_instead_of_opening_nowhere(window, monkeypatch, tmp_path):
+    """Una cartella non piu' raggiungibile non deve aprire il dialogo nel vuoto."""
+    panel = window.guided_docs
+    window._config['last_document_dir'] = str(tmp_path / 'disco-scollegato')
+    opened = []
+
+    def fake_dialog(*args):
+        opened.append(args[2])
+        return ('', '')
+
+    monkeypatch.setattr(QFileDialog, 'getOpenFileName', fake_dialog)
+    panel.cards['top']['load'].click()
+    assert Path(opened[0]) == Path(window._docs_dir())

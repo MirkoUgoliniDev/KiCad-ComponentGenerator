@@ -59,7 +59,8 @@ from ..services.kicad_library import (
     install_component_library,
     launch_preview,
 )
-from .app_config import CONFIG_PATH, DEFAULTS, config_path, load_config, save_config
+from .app_config import (CONFIG_PATH, DEFAULTS, browse_start_dir, config_path, load_config,
+                         remember_browse_dir, save_config)
 from .analysis_overlay import AnalysisOverlay
 from .generation_options_dialog import GenerationOptionsDialog
 from .guided_documents import GuidedDocuments
@@ -912,7 +913,8 @@ class MainWindow(QMainWindow):
         # Keep the old document index for compatibility, never as an AI selection UI.
         self.docs_list = QListWidget(docs_group)
         self.docs_list.hide()
-        self.guided_docs = GuidedDocuments(self._docs_dir, docs_group, i18n=self.i18n)
+        self.guided_docs = GuidedDocuments(self._docs_dir, docs_group, i18n=self.i18n,
+                                           config=self._config)
         self.guided_docs.changed.connect(self._refresh_docs_list)
         docs_layout.addWidget(self.guided_docs)
         outer.addWidget(docs_group)
@@ -1270,12 +1272,14 @@ class MainWindow(QMainWindow):
 
     def _add_docs(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
-            self, self.i18n.text("Seleziona documentazione (datasheet, PDF, immagini...)"), "",
+            self, self.i18n.text("Seleziona documentazione (datasheet, PDF, immagini...)"),
+            browse_start_dir(self._config),
             self.i18n.text(
                 "Documenti (*.pdf *.png *.jpg *.jpeg *.txt *.md *.xlsx *.csv);;Tutti i file (*)")
         )
         if not files:
             return
+        remember_browse_dir(self._config, files[0])
         docs_dir = self._docs_dir()
         docs_dir.mkdir(parents=True, exist_ok=True)
         for f in files:
