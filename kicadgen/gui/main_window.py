@@ -1351,6 +1351,11 @@ class MainWindow(QMainWindow):
         self._auto_after_extraction = not self._advanced_user()
         self._auto_generation_params = None
         self._extract_finish_pending = False
+        # Il consuntivo si azzera qui, all'inizio di una NUOVA analisi: farlo
+        # quando la modale riparte lo cancellava subito dopo averlo mostrato,
+        # perche' la modale riparte anche per la generazione FreeCAD.
+        self.analysis_overlay.clear_cost()
+        self.lbl_ai_cost.hide()
         self.btn_extract_ai.setText(self.i18n.text("Analisi in corso..."))
         self.ai_progress_text.clear()
         self.ai_elements_list.clear()
@@ -1592,11 +1597,12 @@ class MainWindow(QMainWindow):
             f'{len(files)} documenti spostati nella nuova cartella.')
 
         if (old_docs / MANIFEST).is_file() and any((new_docs / f.name).exists() for f in files):
+            # Avviso, non domanda: non c'e' nulla da decidere e nulla e' stato
+            # toccato. Una modale qui interrompeva l'analisi e copriva il
+            # consuntivo appena mostrato.
             message = self.i18n.tr(
                 'component.rename_conflict', new_name=new_name, old_name=old_name)
             self._on_ai_progress(message)
-            QMessageBox.information(
-                self, self.i18n.text('Nome corrente mantenuto'), message)
             return old_name
         new_docs.mkdir(parents=True, exist_ok=True)
         for f in files:

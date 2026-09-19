@@ -82,11 +82,24 @@ def test_the_progress_messages_do_not_overwrite_the_cost(window):
     assert '0.0417' in window.analysis_overlay.cost.text()
 
 
-def test_a_new_run_clears_the_previous_cost(window):
+def test_the_cost_survives_the_modal_restarting_for_the_freecad_phase(window):
+    """La modale riparte per la generazione, che non fa chiamate al modello.
+
+    Azzerare il consuntivo in start() lo faceva sparire una frazione di
+    secondo dopo averlo mostrato.
+    """
+    openrouter._record_usage(response(0.05, prompt=10))
+    window.analysis_overlay.start('Analisi AI in corso', 'in corso…')
+    window._on_extract_finished()
+    window.analysis_overlay.start('Generazione modello 3D', 'Avvio di FreeCAD…')
+    assert '0.05' in window.analysis_overlay.cost.text()
+
+
+def test_a_new_analysis_clears_the_previous_cost(window):
     """Il consuntivo della corsa precedente non deve restare appeso."""
     openrouter._record_usage(response(0.05, prompt=10))
     window.analysis_overlay.start('Analisi AI in corso', 'in corso…')
     window._on_extract_finished()
-    window.analysis_overlay.start('Analisi AI in corso', 'nuova corsa…')
+    window.analysis_overlay.clear_cost()
     assert window.analysis_overlay.cost.text() == ''
     assert window.analysis_overlay.cost.isHidden()

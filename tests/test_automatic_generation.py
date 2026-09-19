@@ -225,43 +225,55 @@ def test_mode_preference_survives_restart(window, monkeypatch):
         restored.close()
 
 
-def test_extract_finish_inside_a_nested_modal_does_not_drop_autogeneration(window, monkeypatch):
+def test_extract_finish_inside_a_nested_event_loop_does_not_drop_autogeneration(window, monkeypatch):
     """Una modale apre un ciclo di eventi annidato mentre il worker lavora.
 
     Se il segnale finished arrivasse li' e venisse gestito subito, la
-    generazione automatica partirebbe su campi applicati solo a meta'. La
-    rinomina non chiede piu' conferma, ma restano altre modali su questo
-    percorso: qui si usa quella del conflitto di nomi.
+    generazione automatica partirebbe su campi applicati solo a meta'. Il test
+    simula il ciclo annidato invece di dipendere da quale modale sopravvive
+    sul percorso: le modali vanno e vengono, il meccanismo deve restare.
     """
-    from PyQt6.QtCore import QTimer
+    begin(window, monkeypatch)
+    observed = []
+    original = window._apply_extracted_result
+
+    def apply_with_nested_loop(params):
+        window._extract_worker.finished.emit()
+        observed.append(window._worker is None)
+        return original(params)
+
+    monkeypatch.setattr(window, '_apply_extracted_result', apply_with_nested_loop)
+    monkeypatch.setattr(QMessageBox, 'warning', lambda *args: None)
+    window._on_extracted(acquired())
+    assert observed == [True]  # Never generate until all fields have been applied.
+    assert window._worker is not None
+    assert window._worker.body.height_mm == 3
+    window._on_error('test stopped')
+    window._on_generation_finished()
+
+
+def test_the_name_conflict_no_longer_opens_a_modal(window, monkeypatch):
+    """Avviso, non domanda: non c'e' nulla da decidere e nulla e' stato toccato."""
     begin(window, monkeypatch)
     original_name = window._component_name()
     docs = window._docs_dir()
     docs.mkdir(parents=True, exist_ok=True)
     (docs / 'photo.png').write_bytes(b'offline fixture')
     (docs / MANIFEST).write_text('{"version": 1, "roles": {}}', encoding='utf-8')
-    # Stessi nomi nella cartella di destinazione: la rinomina va in conflitto.
     target = Path(window.field_library_root.text().strip()) / 'AutoModule' / 'docs'
     target.mkdir(parents=True, exist_ok=True)
     (target / 'photo.png').write_bytes(b'altro progetto')
-    observed = []
-    def information(parent, title, text, *args):
-        box = QMessageBox(parent)
-        box.setWindowTitle(title)
-        box.setText(text)
-        def finish_thread_inside_modal():
-            window._extract_worker.finished.emit()
-            observed.append(window._worker is None)
-            box.done(QMessageBox.StandardButton.Ok)
-        QTimer.singleShot(0, finish_thread_inside_modal)
-        return box.exec()
-    monkeypatch.setattr(QMessageBox, 'information', information)
+
+    def refuse(*args, **kwargs):
+        pytest.fail('Il conflitto di nomi non deve aprire una modale')
+
+    monkeypatch.setattr(QMessageBox, 'information', refuse)
     monkeypatch.setattr(QMessageBox, 'warning', lambda *args: None)
     window._on_extracted(acquired())
-    assert observed == [True]  # Never generate until all fields have been applied.
-    assert window._worker is not None
-    assert window._worker.params.name == original_name  # conflitto: nome conservato
-    assert window._worker.body.height_mm == 3
+    assert window._component_name() == original_name, 'il conflitto deve conservare il nome'
+    assert (target / 'photo.png').read_bytes() == b'altro progetto', 'documento sovrascritto'
+    assert any('già documenti' in line or 'conten' in line
+               for line in window.ai_progress_text.toPlainText().splitlines())
     window._on_error('test stopped')
     window._on_generation_finished()
 

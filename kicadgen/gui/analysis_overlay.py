@@ -103,8 +103,6 @@ class AnalysisOverlay(QWidget):
         self.title.setText(self.i18n.text(title) if self.i18n is not None else title)
         self.started_at = monotonic()
         self.spinner.angle = 0
-        self.cost.clear()
-        self.cost.hide()
         self.set_status(status)
         self.setGeometry(self.parentWidget().rect())
         self._tick()
@@ -112,6 +110,16 @@ class AnalysisOverlay(QWidget):
         self.raise_()
         self.log_button.setFocus()
         self.timer.start()
+
+    def clear_cost(self):
+        """Azzera il consuntivo all'inizio di una NUOVA analisi AI.
+
+        Non in start(): la modale riparte anche per la generazione FreeCAD,
+        che non fa chiamate al modello. Azzerare li' faceva sparire il costo
+        un attimo dopo averlo mostrato.
+        """
+        self.cost.clear()
+        self.cost.hide()
 
     def set_cost(self, text):
         """Mostra il consuntivo dell'analisi AI dentro la modale.
