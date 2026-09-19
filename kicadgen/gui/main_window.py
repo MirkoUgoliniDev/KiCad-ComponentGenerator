@@ -188,10 +188,10 @@ class GenerateWorker(QThread):
                 for warning in result.get('warnings', []):
                     self.warning.emit(warning)
                 # Le note della risoluzione modelli vanno nel log anche nella
-            # generazione completa, non solo nella rigenerazione 3D.
-            for note in result.get("notes", []):
-                self.progress.emit(note)
-            self.cad3d_done.emit(str(result["step_path"]))
+                # generazione completa, non solo nella rigenerazione 3D.
+                for note in result.get('notes', []):
+                    self.progress.emit(note)
+                self.cad3d_done.emit(str(result["step_path"]))
             except Cad3DError as exc:
                 self.cad3d_error.emit(str(exc))
             except Exception as exc:  # noqa: BLE001 - riportato in UI, non e' fatale
