@@ -66,6 +66,18 @@ class AnalysisOverlay(QWidget):
         self.elapsed.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.elapsed.setStyleSheet("color: #a6adc8;")
         content.addWidget(self.elapsed)
+        # Il consuntivo dell'analisi AI resta qui finche' la modale e' aperta.
+        # Sta in una riga propria, non nello stato, perche' i messaggi di
+        # avanzamento della generazione lo sovrascriverebbero subito: e' il
+        # motivo per cui il costo non si riusciva a leggere.
+        self.cost = QLabel()
+        self.cost.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.cost.setWordWrap(True)
+        self.cost.setTextFormat(Qt.TextFormat.PlainText)
+        self.cost.setStyleSheet("color: #a6e3a1;")
+        self.cost.setProperty('i18n_skip', True)
+        self.cost.hide()
+        content.addWidget(self.cost)
         self.log_button = QPushButton("Apri log AI")
         self.log_button.clicked.connect(self.log_requested.emit)
         content.addWidget(self.log_button, alignment=Qt.AlignmentFlag.AlignHCenter)
@@ -91,6 +103,8 @@ class AnalysisOverlay(QWidget):
         self.title.setText(self.i18n.text(title) if self.i18n is not None else title)
         self.started_at = monotonic()
         self.spinner.angle = 0
+        self.cost.clear()
+        self.cost.hide()
         self.set_status(status)
         self.setGeometry(self.parentWidget().rect())
         self._tick()
@@ -98,6 +112,16 @@ class AnalysisOverlay(QWidget):
         self.raise_()
         self.log_button.setFocus()
         self.timer.start()
+
+    def set_cost(self, text):
+        """Mostra il consuntivo dell'analisi AI dentro la modale.
+
+        Durante la generazione automatica la modale resta aperta e copre la
+        label sotto il pulsante: senza questa riga il costo passava senza
+        essere visto, pur essendo gia' calcolato.
+        """
+        self.cost.setText(str(text or ""))
+        self.cost.setVisible(bool(text))
 
     def set_status(self, message):
         """@brief Provide the set status operation for this workflow."""

@@ -167,12 +167,18 @@ class GuidedDocuments(QWidget):
         None per i ruoli che non vengono calibrati: pinout e vista laterale
         non sono viste dall'alto e un esito li' sarebbe fuorviante.
         """
-        from ..services.document_roles import INVENTORY_ROLES
-        if role not in INVENTORY_ROLES or path is None:
+        from ..services.document_roles import INVENTORY_ROLES, ROLE_HELP
+        if path is None:
             return None
+        if role not in INVENTORY_ROLES:
+            # Pinout e vista laterale non vengono calibrati, ma "nessun segno"
+            # non distingue "non serve" da "non l'ho guardata": si dichiara
+            # che il file e' a posto e a cosa serve.
+            return ('✓', '', self._tr('documento caricato; non richiede calibrazione.')
+                    + ' ' + ROLE_HELP.get(role, ''), '#a6adc8')
         size = self.body_size() if callable(self.body_size) else None
         if not size or not all(isinstance(v, (int, float)) and v > 0 for v in size):
-            return ('·', self._tr('quote del corpo non ancora note'), '#a6adc8')
+            return ('·', '', self._tr('quote del corpo non ancora note'), '#a6adc8')
         length, width = float(size[0]), float(size[1])
         try:
             key = (str(path), path.stat().st_mtime_ns, path.stat().st_size, length, width)
@@ -194,14 +200,15 @@ class GuidedDocuments(QWidget):
         except (OSError, ValueError):
             crop = None
         if crop is None:
-            return ('✗', self._tr('non calibrabile: la scheda non è riconoscibile qui'),
-                    '#f38ba8')
+            return ('✗', '',
+                    self._tr('non calibrabile: la scheda non è riconoscibile qui'), '#f38ba8')
         scale = crop.shape[1] / length
         readable = scale * 0.5  # lato corto di un 0402
+        summary = f'{scale:.0f} px/mm'
         if readable < MIN_PACKAGE_PIXELS_HINT:
-            return ('⚠', self._tr('calibrata, ma grossolana:') +
-                    f' {scale:.0f} px/mm ' + self._tr('(i passivi piccoli sfuggono)'), '#f9e2af')
-        return ('✓', self._tr('utilizzabile:') + f' {scale:.0f} px/mm', '#a6e3a1')
+            return ('⚠', summary, self._tr('calibrata, ma grossolana:') + f' {summary} '
+                    + self._tr('(i passivi piccoli sfuggono)'), '#f9e2af')
+        return ('✓', summary, self._tr('utilizzabile:') + f' {summary}', '#a6e3a1')
 
     def refresh(self):
         """@brief Provide the refresh operation for this workflow."""
@@ -229,8 +236,12 @@ class GuidedDocuments(QWidget):
             if verdict is None:
                 widgets['verdict'].hide()
             else:
-                icon, text, colour = verdict
-                widgets['verdict'].setText(f'{icon}  {text}')
+                icon, summary, explanation, colour = verdict
+                # La card e' stretta: la spiegazione per esteso mandava il
+                # testo a capo su due righe. Resta l'icona con il dato che
+                # conta, il resto si legge passandoci sopra.
+                widgets['verdict'].setText(f'{icon}  {summary}'.rstrip())
+                widgets['verdict'].setToolTip(explanation)
                 widgets['verdict'].setStyleSheet(f'color: {colour};')
                 widgets['verdict'].show()
             widgets['filename'].setText(filename or ('Non disponibile' if entry.get('unavailable') else '—'))

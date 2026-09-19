@@ -1446,6 +1446,10 @@ class MainWindow(QMainWindow):
                                     missing=totals.calls_without_cost)
         self.lbl_ai_cost.setText(text)
         self.lbl_ai_cost.show()
+        # La label sotto il pulsante puo' essere fuori dall'area visibile e
+        # durante la generazione e' comunque coperta dalla modale: il dato va
+        # anche dove l'utente sta gia' guardando.
+        self.analysis_overlay.set_cost(text)
 
     def _on_ai_progress(self, message: str) -> None:
         self.analysis_overlay.set_status(message)

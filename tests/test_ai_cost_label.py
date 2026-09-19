@@ -58,3 +58,35 @@ def test_every_language_has_the_cost_strings(window, language):
 
     for key in ("analysis.cost", "analysis.cost.cached", "analysis.cost.partial"):
         assert DEFAULT_TRANSLATIONS[key].get(language), f"{key} manca in {language}"
+
+
+def test_the_cost_also_appears_inside_the_progress_modal(window):
+    """Durante la generazione la modale copre la label sotto il pulsante.
+
+    Il costo era gia' calcolato al momento giusto ma finiva dietro la modale,
+    e sembrava non esserci.
+    """
+    openrouter._record_usage(response(0.0417, prompt=14820, completion=530))
+    window.analysis_overlay.start('Analisi AI in corso', 'in corso…')
+    window._on_extract_finished()
+    assert '0.0417' in window.analysis_overlay.cost.text()
+    assert not window.analysis_overlay.cost.isHidden()
+
+
+def test_the_progress_messages_do_not_overwrite_the_cost(window):
+    """Sta in una riga propria: lo stato scorre, il consuntivo resta."""
+    openrouter._record_usage(response(0.0417, prompt=100, completion=10))
+    window.analysis_overlay.start('Analisi AI in corso', 'in corso…')
+    window._on_extract_finished()
+    window.analysis_overlay.set_status('Generazione STEP tramite FreeCAD…')
+    assert '0.0417' in window.analysis_overlay.cost.text()
+
+
+def test_a_new_run_clears_the_previous_cost(window):
+    """Il consuntivo della corsa precedente non deve restare appeso."""
+    openrouter._record_usage(response(0.05, prompt=10))
+    window.analysis_overlay.start('Analisi AI in corso', 'in corso…')
+    window._on_extract_finished()
+    window.analysis_overlay.start('Analisi AI in corso', 'nuova corsa…')
+    assert window.analysis_overlay.cost.text() == ''
+    assert window.analysis_overlay.cost.isHidden()

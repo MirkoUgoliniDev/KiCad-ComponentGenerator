@@ -198,6 +198,7 @@ DEFAULT_TRANSLATIONS = {
     "ui:Assegna un file a ogni ruolo, oppure indica “Non disponibile”.": {"en": "Assign one file to each role, or choose ‘Not available’.", "it": "Assegna un file a ogni ruolo, oppure indica “Non disponibile”.", "fr": "Attribuez un fichier à chaque rôle ou choisissez « Non disponible ».", "de": "Weisen Sie jeder Rolle eine Datei zu oder wählen Sie „Nicht verfügbar“."},
     "ui:Pinout / disposizione contatti": {"en": "Pinout / contact layout", "it": "Pinout / disposizione contatti", "fr": "Brochage / disposition des contacts", "de": "Pinbelegung / Kontaktanordnung"},
     "ui:Vista superiore": {"en": "Top view", "it": "Vista superiore", "fr": "Vue de dessus", "de": "Draufsicht"},
+    "ui:documento caricato; non richiede calibrazione.": {"en": "document loaded; no calibration needed.", "it": "documento caricato; non richiede calibrazione.", "fr": "document chargé ; aucun calibrage requis.", "de": "Dokument geladen; keine Kalibrierung nötig."},
     "ui:utilizzabile:": {"en": "usable:", "it": "utilizzabile:", "fr": "utilisable :", "de": "nutzbar:"},
     "ui:calibrata, ma grossolana:": {"en": "calibrated, but coarse:", "it": "calibrata, ma grossolana:", "fr": "calibrée, mais grossière :", "de": "kalibriert, aber grob:"},
     "ui:(i passivi piccoli sfuggono)": {"en": "(small passives are missed)", "it": "(i passivi piccoli sfuggono)", "fr": "(les petits passifs échappent)", "de": "(kleine Passive entgehen)"},
