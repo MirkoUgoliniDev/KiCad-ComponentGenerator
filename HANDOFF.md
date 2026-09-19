@@ -101,25 +101,27 @@ va detto — è il motivo per cui ora esistono `_warn_if_too_coarse`,
 
 ## 3. Aperto — richiesto dall'utente, non ancora fatto
 
-### 3.1 Connettore antenna (U.FL / IPEX) non riconosciuto
-Visibile nella foto ad alta risoluzione sul bordo destro del modulo ESP32; nel 3D
-appare come un rettangolo marrone piatto.
+### 3.1 Connettore antenna (U.FL / IPEX) — RISOLTO, ma con una euristica
 
-**Verificato**: nella cache non c'è **nessuna** rilevazione con `u.fl`, `ipex`,
-`antenna`, `coax` o `rf`. Il modello non lo identifica affatto — è probabilmente
-finito in `generic`. Quindi **nessuna regola di forma può funzionare finché non
-viene classificato**.
+**Correzione a quanto avevo scritto prima**: il modello *lo identifica*. La
+ricerca per parole chiave (`u.fl`, `ipex`, `antenna`) era il metodo sbagliato:
+l'etichetta e' il generico `"connector"`, e nei crop di dettaglio le coordinate
+sono relative al ritaglio, non alla scheda.
 
-Due strade, da valutare:
-- aggiungere un kind `rf_connector` alla tassonomia (tre punti da allineare:
-  `COMPONENT_KINDS`, l'enum dello schema, `BUILDERS`; più l'altezza tipica in
-  `photo_grounding.py`) e citarlo nel prompt di localizzazione;
-- oppure una regola di forma su `connector`: quadrato, piccolo (~2-3 mm), innesto
-  verticale → base quadrata + barilotto cilindrico. Ma vale solo se prima viene
-  classificato `connector`.
+Cercando **per posizione**, nella corsa delle 11:51, `Dettaglio 3/3`:
 
-Il builder `_connector` attuale gli darebbe comunque una bocca **laterale**, che
-per un U.FL è sbagliata: si innesta dall'alto.
+    kind=connector  label=connector  crop x=70%  ->  scheda x=90%
+
+e nel modello finale `Cmp42` a (+23.76, -6.01), 4.57 x 4.05 x 2.35 mm.
+
+Il difetto era la **forma**: `_connector` gli dava una bocca laterale, mentre un
+U.FL si innesta dall'alto. Aggiunto `_coaxial_connector` (base squadrata +
+barilotto metallico con cavita' centrale), scelto quando il connettore e'
+piccolo e quasi quadrato.
+
+**Lezione di metodo**: cercare per nome nelle rilevazioni e' inaffidabile. Il
+modello etichetta genericamente, e le coordinate dei crop sono locali. Cercare
+per **posizione nel modello finale** (`preview.json`) e' il metodo giusto.
 
 ### 3.2 Nomi dei pin sulla serigrafia superiore
 L'utente vuole evitarli: su una 2×22 castellated i nomi lunghi (`GPIO38`,

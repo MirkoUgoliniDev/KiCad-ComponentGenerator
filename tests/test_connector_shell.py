@@ -96,7 +96,9 @@ def test_a_flat_wide_mouth_gets_the_contact_tongue(cad):
     La regola guarda la forma misurata, non il nome del componente.
     """
     assert len(boxes_for(cad, -27.65, 0.0, USB_C)) == 3      # guscio, cavita', linguetta
-    assert len(boxes_for(cad, -5.0, 0.0, (4.0, 4.2, 3.5))) == 2   # niente linguetta
+    # Jack tozzo da bordo: bocca quasi quadrata, nessuna linguetta. Non un
+    # quadratino piccolo, che ora e' un coassiale verticale.
+    assert len(boxes_for(cad, -5.0, 0.0, (5.0, 7.0, 6.0))) == 2
 
 
 def test_the_tongue_faces_the_mouth_instead_of_hiding_at_the_back(cad):
@@ -180,3 +182,57 @@ def test_without_rotation_the_behaviour_is_unchanged(cad):
     module, _ = cad
     assert module._outward_sign(-5.0, 0.0, 0, 0) == -1.0
     assert module._outward_sign(+5.0, 0.0, 0, 0) == +1.0
+
+
+#: Connettore d'antenna U.FL misurato dall'inventario sulla foto reale.
+UFL = (4.57, 4.05, 2.35)
+
+
+def test_a_small_square_connector_mates_from_above_not_from_the_side(cad):
+    """Un coassiale da circuito stampato accoglie il cavo dall'alto.
+
+    Dargli la bocca laterale degli altri connettori lo rendeva
+    irriconoscibile e apriva il guscio nella direzione sbagliata.
+    """
+    module, made = cad
+    made.clear()
+    parts = module._connector(23.76, -6.01, 0.96, *UFL, '#79582b')
+    assert len(parts) == 2, 'base e barilotto devono restare pezzi distinti'
+    base = made[0]
+    # La base non occupa tutta l'altezza: sopra ci va il barilotto.
+    assert base[5] < UFL[2]
+    # Nessuna cavita' laterale: le scatole sono solo base e cilindri.
+    assert len(made) == 1, 'una bocca laterale non deve essere scavata'
+
+
+def test_the_barrel_is_metal_whatever_the_photo_sampled(cad):
+    """Su un pezzo cosi' piccolo il colore campionato e' quello del PCB."""
+    module, _ = cad
+    (_, base_colour), (_, barrel_colour) = module._connector(
+        23.76, -6.01, 0.96, *UFL, '#79582b')
+    assert base_colour == '#79582b'
+    assert barrel_colour == module.METAL
+
+
+def test_an_edge_connector_keeps_the_side_mouth(cad):
+    """La regola non deve rubare i connettori da bordo scheda."""
+    module, made = cad
+    for size in (USB_C, (5.0, 9.0, 3.0), (5.0, 7.0, 6.0)):
+        made.clear()
+        module._connector(-27.65, 0.0, 0.96, *size, '#d8d8d8')
+        assert len(made) >= 2, f'{size}: manca la cavita\' laterale'
+
+
+@pytest.mark.parametrize("size, vertical", [
+    ((4.57, 4.05, 2.35), True),    # U.FL reale
+    ((3.0, 3.0, 2.5), True),       # U.FL nominale
+    ((7.61, 9.98, 2.35), False),   # USB-C: quadrato ma troppo grande
+    ((5.0, 9.0, 3.0), False),      # da bordo: troppo allungato
+    ((6.5, 6.0, 3.0), False),      # oltre il limite di dimensione
+])
+def test_the_rule_reads_the_measured_shape_not_the_name(cad, size, vertical):
+    module, made = cad
+    made.clear()
+    module._connector(10.0, 0.0, 0.96, *size, '#79582b')
+    # Il percorso verticale non scava nulla: una sola scatola fra le chiamate.
+    assert (len(made) == 1) is vertical, f'{size}: percorso sbagliato'

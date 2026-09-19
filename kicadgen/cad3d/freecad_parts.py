@@ -382,6 +382,45 @@ def _diode_melf(cx, cy, z0, length, width, height, color):
     return parts
 
 
+#: Oltre questo lato un connettore quadrato non e' piu' un coassiale da
+#: circuito stampato ma un modulo o un connettore da bordo.
+VERTICAL_CONNECTOR_MAX_MM = 6.0
+#: Quanto puo' essere allungato restando "quadrato". Un connettore da bordo
+#: scheda e' sempre nettamente piu' lungo che largo.
+VERTICAL_CONNECTOR_SQUARENESS = 1.35
+
+
+def _coaxial_connector(cx, cy, z0, length, width, height, color):
+    """Coassiale verticale: base squadrata piu' il barilotto di innesto.
+
+    E' la forma del connettore d'antenna U.FL/IPEX che sta sul bordo dei
+    moduli WiFi. Il cavo entra dall'alto, non di lato: dargli la bocca
+    laterale degli altri connettori lo rendeva irriconoscibile e per giunta
+    apriva il guscio nella direzione sbagliata.
+
+    Il barilotto e' metallico a prescindere dal colore letto sulla foto:
+    su un pezzo cosi' piccolo il colore campionato e' quasi sempre quello
+    del PCB circostante.
+    """
+    base_height = height * 0.55
+    base = _box(cx, cy, z0, length, width, base_height)
+    base = _fillet(base, min(length, width) * 0.12, _vertical_edges(base))
+    parts = [(base, color)]
+    radius = min(length, width) * 0.34
+    barrel = height - base_height
+    if radius <= 0.05 or barrel <= 0.05:
+        return [(_box(cx, cy, z0, length, width, height), color)]
+    ring = Part.makeCylinder(radius, barrel, V(cx, cy, z0 + base_height))
+    # Cavita' centrale: il contatto a molla si vede dentro l'anello.
+    try:
+        ring = ring.cut(Part.makeCylinder(radius * 0.55, barrel,
+                                          V(cx, cy, z0 + base_height + barrel * 0.35)))
+    except Exception:  # noqa: BLE001 - anello pieno, non fatale
+        pass
+    parts.append((ring, METAL))
+    return parts
+
+
 def _outward_sign(cx, cy, axis, rotation_deg):
     """Verso locale che, DOPO la rotazione del chiamante, guarda fuori scheda.
 
@@ -416,6 +455,15 @@ def _connector(cx, cy, z0, length, width, height, color, rotation_deg=0):
     pareti di spessore `wall` su fondo, fianchi, cielo e base: il pezzo e'
     un guscio, non un tubo passante.
     """
+    # Un connettore quasi quadrato e piccolo non si innesta di lato: e' un
+    # coassiale da circuito stampato (U.FL/IPEX, SMA verticale), che accoglie
+    # il cavo dall'alto. Regola sulla forma misurata, come per la linguetta:
+    # un connettore da bordo scheda e' sempre piu' lungo che largo. Va deciso
+    # prima di costruire il guscio, per non modellare una forma da scartare.
+    if (max(length, width) <= VERTICAL_CONNECTOR_MAX_MM
+            and max(length, width) / min(length, width) <= VERTICAL_CONNECTOR_SQUARENESS):
+        return _coaxial_connector(cx, cy, z0, length, width, height, color)
+
     shell = _box(cx, cy, z0, length, width, height)
     wall = max(0.2, min(length, width, height) * 0.15)
     # Un package troppo piccolo per avere pareti resta pieno: meglio una
