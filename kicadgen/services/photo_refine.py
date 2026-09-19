@@ -61,8 +61,28 @@ except ImportError:  # pragma: no cover - dipendenza opzionale (opencv-python)
 MAX_BOARD_ASPECT_ERROR = 0.12
 #: Deriva massima del bordo dovuta a rasterizzazione/contorno irregolare.
 #: Il limite angolare evita di accettare vere rotazioni su immagini piccole.
+#:
+#: La deriva cresce con la lunghezza del contorno: un bordo seghettato dai pad
+#: castellati fa leggere a minAreaRect qualche decimo di grado, che su un lato
+#: lungo 770 px vale gia' 5.6 px. Con una soglia in pixel *assoluta* la stessa
+#: scheda, perfettamente allineata agli assi, passava a bassa risoluzione e
+#: veniva scartata ad alta: il criterio diventava la dimensione dell'immagine,
+#: non la geometria. L'allowance e' quindi la maggiore tra un minimo in pixel
+#: (immagini piccole, dove pochi pixel di rasterizzazione pesano molto) e una
+#: frazione del lato lungo. Il limite angolare resta e continua a dominare:
+#: 1 deg vale 1.75% di deriva, piu' del rapporto qui sotto.
 MAX_BOARD_EDGE_DRIFT_PX = 5.0
+MAX_BOARD_EDGE_DRIFT_RATIO = 0.01
 MAX_BOARD_TILT_DEG = 1.0
+#: Risoluzione minima del ritaglio: sotto, misurare i package non ha senso.
+#: A 1.9 px/mm un passivo da 1 mm occupa 2 px, e l'inventario misurerebbe
+#: rumore. Serve anche a smascherare i falsi positivi: un rettangolino scuro
+#: con il rapporto d'aspetto giusto supera ogni altro filtro, ma non questo.
+MIN_BOARD_SCALE_PX_PER_MM = 4.0
+#: Frazione minima dell'immagine occupata dalla scheda. In una vista dall'alto
+#: la scheda e' il soggetto: un candidato che ne copre una porzione irrisoria
+#: e' un dettaglio interno (un connettore, un'etichetta), non il modulo.
+MIN_BOARD_IMAGE_FRACTION = 0.02
 #: Quanto ci si allontana dalla posizione stimata nel cercare i bordi,
 #: oltre il semi-ingombro del componente.
 SEARCH_MARGIN_MM = 2.0
@@ -152,10 +172,14 @@ def find_board(image, body_length: float, body_width: float) -> Optional[BoardFr
         if min(rw, rh) < 20:
             continue
         tilt = min(abs(angle) % 90, 90 - abs(angle) % 90)
-        # BoardFrame non rettifica la rotazione: tollerare solo pochi pixel
-        # di deriva sul lato lungo, non inclinazioni che falsano scala e XY.
+        # BoardFrame non rettifica la rotazione: tollerare solo una deriva
+        # marginale sul lato lungo, non inclinazioni che falsano scala e XY.
+        # L'allowance scala con il contorno, altrimenti il filtro misurerebbe
+        # la risoluzione dell'immagine invece dell'inclinazione della scheda.
         edge_drift = max(rw, rh) * math.sin(math.radians(tilt))
-        if tilt > MAX_BOARD_TILT_DEG or edge_drift > MAX_BOARD_EDGE_DRIFT_PX:
+        drift_allowance = max(MAX_BOARD_EDGE_DRIFT_PX,
+                              MAX_BOARD_EDGE_DRIFT_RATIO * max(rw, rh))
+        if tilt > MAX_BOARD_TILT_DEG or edge_drift > drift_allowance:
             continue
         bx, by, bw, bh = cv2.boundingRect(contour)
         w, h = float(bw), float(bh)
@@ -166,8 +190,18 @@ def find_board(image, body_length: float, body_width: float) -> Optional[BoardFr
         long_px, short_px = max(w, h), min(w, h)
         found = long_px / short_px
         error = abs(found - expected) / expected
-        if error <= MAX_BOARD_ASPECT_ERROR:
-            candidates.append((cv2.contourArea(contour), error, bx, by, w, h))
+        if error > MAX_BOARD_ASPECT_ERROR:
+            continue
+        # Il solo rapporto d'aspetto non identifica la scheda: su una foto
+        # reale un connettore o un'etichetta scura possono avere lo stesso
+        # rapporto. Senza questi due filtri il candidato sbagliato veniva
+        # accettato in silenzio e calibrava tutto l'inventario su un ritaglio
+        # di pochi pixel -- un errore muto, peggiore di un rifiuto.
+        if long_px / body_length < MIN_BOARD_SCALE_PX_PER_MM:
+            continue
+        if (w * h) < MIN_BOARD_IMAGE_FRACTION * image.shape[0] * image.shape[1]:
+            continue
+        candidates.append((cv2.contourArea(contour), error, bx, by, w, h))
     if not candidates:
         return None
     _, _, bx, by, w, h = max(candidates, key=lambda item: item[0])

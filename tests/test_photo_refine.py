@@ -177,3 +177,50 @@ def test_refine_components_preserves_name_kind_and_marking(tmp_path):
     assert refined[0]["kind"] == "ic_soic"
     assert refined[0]["marking"] == "SP3485E"
     assert refined[0]["color_hex"] == "#1a1a1a"
+
+
+def _tilted_board(scale: float, tilt_deg: float = 0.4):
+    """Scheda inclinata di una frazione di grado, alla scala richiesta.
+
+    E' la geometria che rompeva il rilevamento: bordi lunghi resi irregolari
+    da pad castellati e angoli raccordati fanno leggere a `minAreaRect`
+    qualche decimo di grado anche su una scheda posata dritta. La deriva che
+    ne risulta sul lato lungo cresce con la risoluzione, mentre
+    l'inclinazione -- cioe' l'errore geometrico vero -- resta la stessa.
+    """
+    margin = int(round(8 * scale))
+    board_w, board_h = int(BODY_LENGTH_MM * scale), int(BODY_WIDTH_MM * scale)
+    img = np.full((board_h + 2 * margin, board_w + 2 * margin, 3), 235, dtype="uint8")
+    cv2.rectangle(img, (margin, margin), (margin + board_w, margin + board_h), (22,) * 3, -1)
+    center = (img.shape[1] / 2, img.shape[0] / 2)
+    matrix = cv2.getRotationMatrix2D(center, tilt_deg, 1.0)
+    return cv2.warpAffine(img, matrix, (img.shape[1], img.shape[0]),
+                          flags=cv2.INTER_LINEAR, borderValue=(235, 235, 235))
+
+
+@pytest.mark.parametrize("scale", [6.0, 12.0, 20.0, 34.0])
+def test_find_board_verdict_does_not_depend_on_resolution(scale):
+    """Stessa scheda, stessa inclinazione, risoluzioni diverse: stesso esito.
+
+    Con una soglia di deriva in pixel assoluta la scheda passava a bassa
+    risoluzione e veniva scartata ad alta: il filtro misurava la dimensione
+    dell'immagine invece della geometria.
+    """
+    frame = find_board(_tilted_board(scale), BODY_LENGTH_MM, BODY_WIDTH_MM)
+    assert frame is not None, f"scheda non trovata a {scale} px/mm"
+    assert frame.scale == pytest.approx(scale, rel=0.06)
+
+
+def test_find_board_rejects_a_small_lookalike_instead_of_calibrating_on_it():
+    """Un dettaglio scuro con il rapporto d'aspetto giusto non e' la scheda.
+
+    Senza il filtro sulla risoluzione minima veniva accettato in silenzio e
+    l'inventario finiva calibrato su un ritaglio di pochi pixel: un errore
+    muto, peggiore di un rifiuto esplicito.
+    """
+    img = np.full((1536, 2708, 3), 200, dtype="uint8")
+    # Rapporto d'aspetto identico a quello del modulo, ma minuscolo.
+    w = 119
+    h = int(round(w / (BODY_LENGTH_MM / BODY_WIDTH_MM)))
+    cv2.rectangle(img, (1078, 893), (1078 + w, 893 + h), (20,) * 3, -1)
+    assert find_board(img, BODY_LENGTH_MM, BODY_WIDTH_MM) is None
