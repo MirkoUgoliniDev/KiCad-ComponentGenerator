@@ -341,8 +341,33 @@ def _diode_melf(cx, cy, z0, length, width, height, color):
 
 
 def _connector(cx, cy, z0, length, width, height, color):
+    """Guscio di connettore con l'apertura sulla faccia di accoppiamento.
+
+    Un connettore si innesta lateralmente (USB, jack, header schermato): la
+    bocca sta sulla faccia rivolta verso l'esterno della scheda, non sul
+    coperchio. Scavarla dall'alto produceva una scatola con un incasso
+    superiore, che in anteprima non si distingue da un package generico.
+
+    L'asse di innesto e' la dimensione orizzontale minore -- la profondita'
+    di inserimento -- e il verso e' quello che si allontana dal centro della
+    scheda, che per un connettore da bordo e' il bordo stesso. Restano
+    pareti di spessore `wall` su fondo, fianchi, cielo e base: il pezzo e'
+    un guscio, non un tubo passante.
+    """
     shell = _box(cx, cy, z0, length, width, height)
-    cavity = _box(cx, cy, z0 + height * 0.5, length * 0.8, width * 0.7, height)
+    wall = max(0.2, min(length, width, height) * 0.15)
+    # Un package troppo piccolo per avere pareti resta pieno: meglio una
+    # scatola onesta di un guscio degenere con facce che si compenetrano.
+    if min(length, width, height) <= 2.5 * wall:
+        return [(shell, color)]
+    if length <= width:
+        sign = -1.0 if cx < 0 else 1.0
+        cavity = _box(cx + sign * wall, cy, z0 + wall,
+                      length, width - 2 * wall, height - 2 * wall)
+    else:
+        sign = -1.0 if cy < 0 else 1.0
+        cavity = _box(cx, cy + sign * wall, z0 + wall,
+                      length - 2 * wall, width, height - 2 * wall)
     try:
         shell = shell.cut(cavity)
     except Exception:  # noqa: BLE001
