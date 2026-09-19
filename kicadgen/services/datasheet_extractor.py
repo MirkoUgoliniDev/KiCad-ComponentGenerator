@@ -1073,6 +1073,9 @@ def _components_3d(raw: Optional[Sequence[dict]]) -> Optional[list[dict]]:
         # connettore non bastano. Valori diversi da questi due si ignorano.
         if entry.get("mating") in ("edge", "top"):
             component["mating"] = entry["mating"]
+        # Sigla standard del package: apre la libreria 3D di KiCad.
+        if entry.get("package"):
+            component["package"] = str(entry["package"]).strip()[:64]
         for key in ("_box", "_id", "_candidate_id", "_source", "_uncertain", "_review_reason",
                     "_detected_kind", "terminal_geometry",
                     "_height_source", "_grounding_kind", "_alternative_kind", "confidence"):

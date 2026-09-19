@@ -186,6 +186,15 @@ def classification_tool(kinds):
         # Il verso di innesto NON si deduce dall'ingombro: un coassiale U.FL e
         # un jack da bordo possono misurare uguale. Dalla foto invece si vede.
         # Chiederlo evita di indovinarlo con soglie sulle dimensioni.
+        # Il nome standard del package apre la libreria 3D di KiCad, che
+        # contiene il modello vero gia' disegnato. `kind` non basta: e' una
+        # lista chiusa di famiglie, e "ic" non corrisponde ad alcun file.
+        "package": {"type": "string",
+                    "description": ("Sigla standard del package come si usa nelle "
+                                    "librerie (SOT-223, SOIC-8, R_0402, C_0603, "
+                                    "U.FL, USB_C_Receptacle, ESP32-S3-WROOM-1). "
+                                    "Stringa vuota se non la si riconosce con "
+                                    "certezza: meglio vuota che inventata.")},
         "mating": {"type": "string", "enum": ["edge", "top", "none"],
                    "description": ("Solo per i connettori: dove si affaccia l'apertura. "
                                    "\"edge\" se guarda il bordo della scheda (USB, jack "
@@ -275,8 +284,9 @@ def apply_classifications(components, response, kinds, length, width, log):
             mating = entry.get("mating")
             if mating not in ("edge", "top"):
                 mating = None
+            package = str(entry.get("package") or "").strip()[:64]
             c.update(name=str(entry.get("name") or c["name"]),kind=kind,height_mm=height,
-                     mating=mating,
+                     mating=mating,package=package,
                      rotation_deg=angle,length_mm=long,width_mm=short,color_hex=color,
                      marking="",confidence=entry["confidence"],
                      _uncertain=inconsistent or entry["confidence"]=="low",_review_reason=observation,

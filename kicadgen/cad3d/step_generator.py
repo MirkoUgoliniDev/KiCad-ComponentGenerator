@@ -356,6 +356,16 @@ def generate_castellated_3d_model(
     # forme (fillet/taglio che si scontrano) piu' avanti nello script.
     overlap_warnings = find_overlapping_components(components)
 
+    # Modelli 3D reali dalla libreria di KiCad, quando il package e' noto e
+    # l'ingombro lo conferma. La risoluzione avviene QUI e non dentro
+    # freecad_parts: misurare un modello richiede a sua volta FreeCAD, e non
+    # si puo' lanciarlo da dentro l'istanza che sta gia' costruendo il solido.
+    try:
+        from .kicad_models import attach_models
+        attach_models(components)
+    except Exception:  # noqa: BLE001 - la libreria e' un di piu', mai un requisito
+        pass
+
     result = _run_freecad(
         params.name, [], pcb, output_dir,
         freecadcmd_path=freecadcmd_path, fillets=fillets, face_texts=face_texts,

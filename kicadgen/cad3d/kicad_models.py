@@ -59,6 +59,10 @@ MODEL_SUFFIXES = (".step", ".stp", ".wrl")
 #: conferma piu' nulla, non il criterio di scelta.
 DEFAULT_SIZE_TOLERANCE = 0.30
 
+#: Entro questo scarto due candidati sono sostenuti dalla misura allo stesso
+#: modo: la fotografia non puo' distinguerli, quindi a decidere e' il nome.
+NAME_TIEBREAK_MARGIN = 0.05
+
 #: Indice degli ingombri gia' misurati, accanto alla libreria o nella cache
 #: utente. Misurare un STEP richiede FreeCAD: si fa una volta per modello.
 INDEX_FILENAME = ".kicadgen-model-sizes-v3.json"
@@ -357,7 +361,16 @@ def resolve_model(package: str, length_mm: float, width_mm: float, *,
         note(f"{package}: {len(found)} modelli trovati, nessuno compatibile con "
              f"{length_mm:.2f} x {width_mm:.2f} mm{detail}; si usa la forma approssimata.")
         return None
-    distance, _, path = min(scored)
+    # La misura non distingue due varianti con lo stesso corpo (SOT-223 e
+    # SOT-223-8 differiscono per il numero di reofori, non per l'ingombro).
+    # Fra candidati che la misura sostiene allo stesso modo decide il nome:
+    # la corrispondenza esatta prima, poi quella piu' corta.
+    best = min(d for d, _, _ in scored)
+    wanted = _normalize(package)
+    scored.sort(key=lambda item: (item[0] > best + NAME_TIEBREAK_MARGIN,
+                                  _normalize(item[2].stem) != wanted,
+                                  len(item[2].stem), item[1]))
+    distance, _, path = scored[0]
     note(f"{package}: modello reale {path.name}, {describe_size(sizes[str(path)])} "
          f"contro misura {length_mm:.2f} x {width_mm:.2f} mm, scarto {distance*100:.0f}%.")
     return path
@@ -375,3 +388,38 @@ def describe_size(size) -> str:
     if size and len(size) >= 2:
         return f"{size[0]:.2f} x {size[1]:.2f}"
     return "ingombro ignoto"
+
+
+def attach_models(components, log=None, library: Optional[Path] = None) -> int:
+    """Associa a ogni componente il modello 3D reale, quando esiste.
+
+    Aggiunge `model_path` ai componenti risolti; gli altri restano senza e il
+    generatore ripiega sulla forma sintetica. Non solleva mai: la libreria e'
+    un miglioramento, non un requisito.
+
+    Ritorna quanti componenti hanno ottenuto un modello reale.
+    """
+    note = log or (lambda message: None)
+    library = library or find_library()
+    if library is None:
+        note("Libreria 3D di KiCad non trovata: si usano le forme approssimate.")
+        return 0
+    resolved = 0
+    for component in components or []:
+        if not isinstance(component, dict):
+            continue
+        package = str(component.get("package") or "").strip()
+        if not package:
+            continue
+        try:
+            path = resolve_model(package, float(component["length_mm"]),
+                                 float(component["width_mm"]),
+                                 library=library, log=note)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if path is not None:
+            component["model_path"] = str(path)
+            resolved += 1
+    note(f"Modelli reali dalla libreria KiCad: {resolved} su "
+         f"{len(components or [])} componenti.")
+    return resolved

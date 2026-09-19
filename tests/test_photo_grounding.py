@@ -64,7 +64,7 @@ def vote(identifier=1, **updates):
     result = dict(id=identifier, is_component=True, is_complete_package=True,
                   name="Resistor", kind="resistor", height_mm=.7,
                   rotation_deg=0, color_hex="#A0b1C2", confidence="high",
-                  mating="none",
+                  mating="none", package="R_0402",
                   observation="Rectangular package with two visible terminals")
     result.update(updates)
     return result

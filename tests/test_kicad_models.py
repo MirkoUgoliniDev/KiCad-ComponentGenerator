@@ -137,3 +137,81 @@ def test_step_is_preferred_over_the_display_mesh(library):
     if not found:
         pytest.skip("libreria priva di R_0402")
     assert found[0].suffix.lower() in (".step", ".stp")
+
+
+# ── preferenza al nome esatto quando la misura non discrimina ─────────
+
+def test_the_exact_name_wins_when_the_measurement_cannot_tell(monkeypatch, tmp_path):
+    """SOT-223 e SOT-223-8 hanno lo stesso corpo: li distingue solo il nome."""
+    variant, exact = tmp_path / "SOT-223-8.step", tmp_path / "SOT-223.step"
+    for path in (variant, exact):
+        path.write_bytes(b"")
+    monkeypatch.setattr(km, "candidates", lambda package, library=None: [variant, exact])
+    monkeypatch.setattr(km, "model_sizes", lambda paths, library=None: {
+        # La variante e' pure marginalmente piu' vicina: non deve bastare.
+        str(variant): {"body": [3.45, 6.45, 1.8], "total": [7.0, 6.5, 1.8]},
+        str(exact): {"body": [3.47, 6.47, 1.7], "total": [7.0, 6.5, 1.7]}})
+    assert km.resolve_model("SOT-223", 6.55, 3.21) == exact
+
+
+def test_a_clearly_closer_model_still_wins_over_the_exact_name(monkeypatch, tmp_path):
+    """Il nome decide solo a parita' di prove, non contro la misura."""
+    exact, better = tmp_path / "R_0402.step", tmp_path / "R_0402_1005Metric.step"
+    for path in (exact, better):
+        path.write_bytes(b"")
+    monkeypatch.setattr(km, "candidates", lambda package, library=None: [exact, better])
+    monkeypatch.setattr(km, "model_sizes", lambda paths, library=None: {
+        str(exact): {"body": [1.25, 0.62, 0.3]},     # 25% di scarto
+        str(better): {"body": [1.00, 0.50, 0.3]}})   # esatto
+    assert km.resolve_model("R_0402", 1.0, 0.5) == better
+
+
+# ── lettura doppia: corpo ed estensione coi reofori ───────────────────
+
+def test_either_reading_of_the_model_can_confirm_the_measurement():
+    """Il rettangolo sulla foto puo' aver seguito il corpo o i reofori."""
+    sot223 = {"body": [3.47, 6.47, 1.7], "total": [7.00, 6.50, 1.7]}
+    assert km.size_matches(sot223, 6.55, 3.21), "misura sul corpo rifiutata"
+    assert km.size_matches(sot223, 6.50, 7.00), "misura coi reofori rifiutata"
+
+
+def test_a_wrong_package_is_refused_by_both_readings():
+    sot223 = {"body": [3.47, 6.47, 1.7], "total": [7.00, 6.50, 1.7]}
+    assert not km.size_matches(sot223, 2.9, 1.3), "un SOT-23 non e' un SOT-223"
+
+
+# ── associazione ai componenti ────────────────────────────────────────
+
+def test_components_without_a_package_are_left_to_the_synthetic_shapes(monkeypatch):
+    monkeypatch.setattr(km, "find_library", lambda: Path("qualunque"))
+    components = [{"length_mm": 1.0, "width_mm": 0.5},
+                  {"package": "", "length_mm": 1.0, "width_mm": 0.5}]
+    assert km.attach_models(components) == 0
+    assert not any("model_path" in c for c in components)
+
+
+def test_a_resolved_component_carries_the_model_path(monkeypatch, tmp_path):
+    model = tmp_path / "R_0402_1005Metric.step"
+    model.write_bytes(b"")
+    monkeypatch.setattr(km, "find_library", lambda: tmp_path)
+    monkeypatch.setattr(km, "resolve_model",
+                        lambda *a, **k: model)
+    components = [{"package": "R_0402", "length_mm": 1.0, "width_mm": 0.5}]
+    assert km.attach_models(components) == 1
+    assert components[0]["model_path"] == str(model)
+
+
+def test_attaching_never_raises_on_broken_entries(monkeypatch, tmp_path):
+    """Un componente malformato non deve fermare gli altri."""
+    monkeypatch.setattr(km, "find_library", lambda: tmp_path)
+    monkeypatch.setattr(km, "resolve_model", lambda *a, **k: None)
+    assert km.attach_models([None, "stringa", {"package": "X"},
+                             {"package": "Y", "length_mm": "no", "width_mm": 1}]) == 0
+
+
+def test_without_the_library_nothing_is_attached_and_it_is_said(monkeypatch):
+    monkeypatch.setattr(km, "find_library", lambda: None)
+    messages = []
+    assert km.attach_models([{"package": "R_0402", "length_mm": 1, "width_mm": 0.5}],
+                            log=messages.append) == 0
+    assert any("non trovata" in m for m in messages)

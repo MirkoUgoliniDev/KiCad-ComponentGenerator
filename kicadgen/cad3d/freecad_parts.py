@@ -628,6 +628,34 @@ BUILDERS = {
 KINDS = tuple(BUILDERS)
 
 
+def _library_model(component, cx, cy, z0, color):
+    """Solido letto dalla libreria 3D di KiCad, oppure None.
+
+    Il percorso arriva gia' risolto e verificato contro l'ingombro misurato:
+    qui si legge il file e lo si posa al posto giusto. Il modello e'
+    orientato secondo la convenzione del suo footprint, quindi si centra in
+    pianta sul componente e si appoggia con la base sulla scheda; la
+    rotazione la applica il chiamante, come per tutte le altre forme.
+
+    Un file illeggibile non ferma la generazione: si torna alla forma
+    sintetica, che e' approssimata ma sempre disponibile.
+    """
+    path = component.get("model_path")
+    if not path:
+        return None
+    try:
+        shape = Part.read(str(path))
+        box = shape.BoundBox
+        shape.translate(V(cx - (box.XMin + box.XMax) / 2,
+                          cy - (box.YMin + box.YMax) / 2,
+                          z0 - box.ZMin))
+        return [(shape, color)]
+    except Exception as exc:  # noqa: BLE001 - si ripiega sulla forma sintetica
+        print(f"KICADGEN_WARN:modello {path} non caricabile ({exc}); "
+              "si usa la forma approssimata")
+        return None
+
+
 def build_component(component, z0):
     """Costruisce le parti di un componente descritto dal payload JSON.
 
@@ -647,6 +675,11 @@ def build_component(component, z0):
     cx = float(component["x"])
     cy = float(component["y"])
     try:
+        # Modello reale della libreria KiCad, gia' risolto e verificato dal
+        # chiamante: e' geometria vera, batte qualunque forma approssimata.
+        real = _library_model(component, cx, cy, z0, color)
+        if real is not None:
+            return real
         if component.get("terminal_geometry") is not None:
             return _observed_terminals(cx, cy, z0, length, width, height, color,
                                        component["terminal_geometry"])
