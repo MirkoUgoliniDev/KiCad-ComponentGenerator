@@ -503,7 +503,8 @@ def test_semantically_invalid_entries_are_not_cached(tmp_path, cache_kwargs, ent
 
 @pytest.mark.parametrize("present", [True, False])
 def test_mechanical_integral_float_id_is_applied_on_fresh_and_cached_response(photo, tmp_path, present):
-    call = Mock(return_value={"components": [dict(id=1.0, present=present, confidence="high")]})
+    call = Mock(return_value={"components": [
+        dict(id=1.0, present=present, confidence="high", package="")]})
     first = grounding.mechanical_envelopes(photo, [component()], "test-model", call, lambda m: None, tmp_path)
     second = grounding.mechanical_envelopes(photo, [component()], "test-model", call, lambda m: None, tmp_path)
     assert first == second and call.call_count == 1
@@ -1040,8 +1041,9 @@ def test_grounded_path_enables_containment_only_for_cross_view_merge(monkeypatch
     assert flags == [True, False]
 
 
-def occupancy(identifier=1, present=True, confidence="high", **updates):
-    return dict(id=identifier, present=present, confidence=confidence, **updates)
+def occupancy(identifier=1, present=True, confidence="high", package="", **updates):
+    return dict(id=identifier, present=present, confidence=confidence,
+                package=package, **updates)
 
 
 def run_mechanical(photo, components, responses, *, cache_dir=None, log=None):
@@ -1089,14 +1091,36 @@ def test_mechanical_color_uses_center_pixel_median_not_silkscreen_or_outliers():
     assert result[0]["color_hex"] == "#502814"
 
 
-def test_mechanical_schema_requests_occupancy_only(photo):
+def test_mechanical_schema_asks_occupancy_and_the_body_outline_only(photo):
+    """Il mandato resta meccanico: occupazione piu' sigla del CORPO.
+
+    `package` e' una sagoma standard (SOT-223 e' un contorno JEDEC), non una
+    funzione di circuito: serve ad aprire la libreria 3D di KiCad, dove il
+    modello vero esiste gia' disegnato. Il divieto sull'identita' elettrica
+    resta in vigore, nel prompt e nella descrizione del campo.
+    """
     _, calls = run_mechanical(photo, [component()], [{"components": [occupancy()]}])
     tool = calls[0]["tool"]["function"]
     assert tool["name"] == "verify_mounted_bodies"
     item = tool["parameters"]["properties"]["components"]["items"]
-    assert set(item["properties"]) == set(item["required"]) == {"id", "present", "confidence"}
+    assert set(item["properties"]) == set(item["required"]) == {
+        "id", "present", "confidence", "package"}
+    assert "forma fisica, non una funzione" in item["properties"]["package"]["description"]
     assert "Do NOT identify electrical type" in calls[0]["system_prompt"]
     assert calls[0]["max_tokens"] == 4096
+
+
+def test_the_declared_body_outline_reaches_the_component(photo):
+    result, _ = run_mechanical(photo, [component()],
+                               [{"components": [occupancy(package="SOT-223")]}])
+    assert result[0]["package"] == "SOT-223"
+
+
+def test_an_empty_body_outline_is_not_stored(photo):
+    """Meglio nessun package di uno inventato: il 3D ripiega e basta."""
+    result, _ = run_mechanical(photo, [component()],
+                               [{"components": [occupancy(package="   ")]}])
+    assert "package" not in result[0]
 
 
 def test_mechanical_occupancy_drops_only_explicit_empty_body_and_keeps_unknowns(photo):

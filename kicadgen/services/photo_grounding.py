@@ -331,12 +331,22 @@ def mechanical_envelopes(photo, components, model, call, log, cache_dir, verific
     height_priors = {"ic_soic":1.75,"ic_qfn":1.0,"module":4.0,"transformer":4.0,
         "led":1.0,"capacitor_tantalum":1.5,"capacitor":.8,"resistor":.6,
         "inductor":1.5,"diode":1.2,"diode_melf":1.5,"connector":3.0,"switch":1.7,"crystal":1.5}
+    # `package` e' una identificazione MECCANICA, non elettrica: dice quale
+    # corpo standard e' quel volume, non che funzione svolge nel circuito.
+    # Sta quindi dentro il mandato di questa verifica, e apre la libreria 3D
+    # di KiCad dove il modello vero esiste gia' disegnato.
     tool = {"type":"function","function":{"name":"verify_mounted_bodies",
         "description":"Verify physical mounted bodies, not electrical identities",
         "parameters":{"type":"object","properties":{"components":{"type":"array","items":{
             "type":"object","properties":{"id":{"type":"integer"},"present":{"type":"boolean"},
-                "confidence":{"type":"string","enum":["high","medium","low"]}},
-            "required":["id","present","confidence"]}}},"required":["components"]}}}
+                "confidence":{"type":"string","enum":["high","medium","low"]},
+                "package":{"type":"string","description":(
+                    "Sigla standard del CORPO come si usa nelle librerie "
+                    "(SOT-223, SOIC-8, R_0402, C_0603, U.FL, USB_C_Receptacle, "
+                    "ESP32-S3-WROOM-1). E' una forma fisica, non una funzione "
+                    "elettrica. Stringa vuota se non la si riconosce con "
+                    "certezza: meglio vuota che inventata.")}},
+            "required":["id","present","confidence","package"]}}},"required":["components"]}}}
     prompt = (verification_prompt or "").strip() or VERIFICATION_PROMPT
     envelopes = []
     h,w = photo.shape[:2]
@@ -389,6 +399,9 @@ def mechanical_envelopes(photo, components, model, call, log, cache_dir, verific
                         continue
                     c['confidence'] = verdict.get('confidence','low')
                     c['_uncertain'] = c['confidence'] not in ('high','medium')
+                    package = str(verdict.get('package') or '').strip()[:64]
+                    if package:
+                        c['package'] = package
                 else:
                     log(f"#{c['_id']}: presenza non confermata, conservato come dubbio.")
                 result.append(c)

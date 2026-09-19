@@ -1,5 +1,38 @@
 # Memoria delle decisioni del progetto
 
+## 2026-09-19 — Modelli 3D reali dalla libreria KiCad
+
+Idea dell'utente: smettere di approssimare i package dal bounding box e usare
+i modelli che KiCad installa gia' sul disco (105 cartelle, 7251 file).
+
+- Non e' un'API: sono file locali. Nessuna rete, nessun costo per pezzo.
+- `resolve_model` NON si fida del nome: confronta l'ingombro del candidato con
+  quello misurato sulla fotografia. Fra i candidati vince il piu' vicino; a
+  parita' di prove (entro il 5%) decide la corrispondenza esatta di nome,
+  perche' SOT-223 e SOT-223-8 hanno lo stesso corpo.
+- Tolleranza 0.30 **derivata**: fra due taglie adiacenti corre almeno il 60%.
+- Ogni modello porta due letture, corpo ed estensione coi reofori, e vale la
+  piu' vicina: il rettangolo sulla foto puo' aver seguito l'una o l'altra. Il
+  corpo si misura con una sezione al **65%** dell'altezza, non a meta'.
+- Rifiutare e' l'esito sicuro: meglio una forma dichiaratamente approssimata
+  di un modello reale ma sbagliato. Senza KiCad si ripiega e basta.
+
+### Emendamento a una decisione precedente
+
+`verify_mounted_bodies` chiedeva solo occupazione (`id`, `present`,
+`confidence`), per non certificare identita' elettriche. Ora chiede anche
+`package`.
+
+Motivazione: la sigla di package e' una **sagoma meccanica** standard (un
+SOT-223 e' un contorno JEDEC), non una funzione di circuito. Sta quindi dentro
+il mandato "verify physical mounted bodies". Il divieto sull'identita'
+elettrica resta in vigore, nel prompt e nella descrizione del campo, e il test
+del contratto lo verifica.
+
+Senza questo campo tutto il resto era inerte: in modalita' ingombri `kind` e'
+forzato a `generic` di proposito, e "generic" non corrisponde ad alcun file
+della libreria.
+
 ## 2026-09-19 — Quarto ruolo: foto ad alta risoluzione
 
 Supera la decisione del 2026-09-13 "solo tre ruoli, non inventare nuove
