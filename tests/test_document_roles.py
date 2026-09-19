@@ -21,7 +21,6 @@ def test_copies_standard_names_keeps_original_and_persists_roles(tmp_path):
     assert source.read_bytes() == target.read_bytes() == original
     store.clear('pinout', unavailable=True)
     store.clear('hires', unavailable=True)
-    store.clear('front', unavailable=True)
     paths, roles = DocumentSet(store.directory).selected()
     assert paths == [target] and roles == {'top.png': 'top'}
     assert store.read()['roles']['top']['original_name'] == source.name

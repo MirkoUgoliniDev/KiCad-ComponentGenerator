@@ -222,14 +222,20 @@ def test_cancel_never_emits_or_mutates_inputs(dialog, components, cancel):
     assert dialog.get_components()[0]["marking"] == "100"
 
 
-def test_warning_colors_and_outside_bounds_are_live(dialog):
+def test_warning_colors_and_outside_bounds_are_live(dialog, tmp_path):
+    # Detection confidence is not a confirmed CAD match.
+    assert dialog._items[0].pen().color().name() == "#ffad33"
+    chosen = tmp_path/'chosen.step'
+    chosen.touch()
+    dialog._items[0].component['model_selection'] = {'status':'confirmed','path':str(chosen)}
+    dialog._refresh_item(dialog._items[0])
     assert dialog._items[0].pen().color().name() == "#40dc80"
     assert dialog._items[1].pen().color().name() == "#ffad33"
     dialog.fields["x_mm"].setValue(20)
     assert dialog._items[0].pen().color().name() == "#ef5350"
     assert "Fuori" in dialog.warning_label.text()
     dialog.fields["x_mm"].setValue(0)
-    assert dialog._items[0].pen().color().name() == "#40dc80"
+    assert dialog._items[0].pen().color().name() == "#ffad33"
     dialog.component_list.setCurrentRow(1)
     assert "incerto" in dialog.warning_label.text()
 

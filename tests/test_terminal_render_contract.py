@@ -61,26 +61,49 @@ def renderer(monkeypatch):
     # loop, not a test reimplementation of the caller's sign/pivot/order.
     tree = ast.parse((CAD_DIR / "freecad_build_body.py").read_text(encoding="utf-8"))
     reflection = [n for n in tree.body if isinstance(n, ast.FunctionDef)
-                  and n.name in {"_flip_y", "_swap_front_back"}]
+                  and n.name in {"_flip_y", "_swap_front_back", "_safe"}]
     reflection += [n for n in tree.body if isinstance(n, ast.Assign)
                    and any(isinstance(t, ast.Name) and t.id == "_FB_SWAP" for t in n.targets)]
     ns = {}
     exec(compile(ast.Module(body=reflection, type_ignores=[]), "<reflection>", "exec"), ns)
-    loops = [n for n in ast.walk(tree) if isinstance(n, ast.For)
-             and any(isinstance(a, ast.Call) and isinstance(a.func, ast.Attribute)
-                     and a.func.attr == "build_component" for a in ast.walk(n.iter))]
-    assert len(loops) == 1
-    compiled = compile(ast.Module(body=loops, type_ignores=[]), "<component-loop>", "exec")
+    # Select the caller through its build operation, not the iterable's syntax.
+    # Keep the production build, empty-result guard, rotation/pivot assignments,
+    # and entire shape loop. Exclude only subsequent silk/marking decoration.
+    build_blocks = [n for n in ast.walk(tree) if isinstance(n, ast.Try)
+                    and any(isinstance(statement, ast.Assign)
+                            and isinstance(statement.value, ast.Call)
+                            and isinstance(statement.value.func, ast.Attribute)
+                            and statement.value.func.attr == "build_component"
+                            for statement in n.body)]
+    assert len(build_blocks) == 1, "Expected one production component build block"
+    build_block = build_blocks[0]
+    shape_loops = [n for n in build_block.body if isinstance(n, ast.For)
+                   and any(isinstance(call, ast.Call)
+                           and isinstance(call.func, ast.Attribute)
+                           and call.func.attr == "rotate" for call in ast.walk(n))]
+    assert len(shape_loops) == 1, "Expected one component shape rotation loop"
+    callers = [n for n in ast.walk(tree) if isinstance(n, ast.For)
+               and build_block in n.body]
+    assert len(callers) == 1
+    caller = deepcopy(callers[0])
+    # Leave exceptions uncaught in the fixture so caller errors fail the test;
+    # retain the outer loop so the actual empty-result `continue` stays valid.
+    caller.body = (deepcopy(callers[0].body[:callers[0].body.index(build_block)])
+                   + deepcopy(build_block.body[:build_block.body.index(shape_loops[0]) + 1]))
+    compiled = compile(ast.Module(body=[caller], type_ignores=[]), "<component-loop>", "exec")
 
     def render(source, z0=1.6):
         data = {"body": {"offset_y_mm": 0, "width_mm": 20}, "components": [deepcopy(source)]}
-        component = ns["_flip_y"](data)["components"][0]
+        reflected = ns["_flip_y"](data)
         output = []
+
+        def add(name, shape, color):
+            output.append((shape, color))
+            return SimpleNamespace(Name=name)
+
         exec(compiled, {"FreeCAD": freecad, "freecad_parts": parts,
-                       "component": component, "z1": z0, "base": "test",
-                       "centre": (component["x"], component["y"], 0),
-                       "rotation": component.get("rotation_deg", 0),
-                       "add": lambda name, shape, color: output.append((shape, color))})
+                       "components": reflected["components"], "z1": z0,
+                       "_safe": ns["_safe"], "metadata": {}, "add": add})
         return output
 
     return parts, render

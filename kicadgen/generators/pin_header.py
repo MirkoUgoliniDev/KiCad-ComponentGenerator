@@ -1,4 +1,4 @@
-"""Generatore parametrico: header/modulo THT a matrice RxC.
+"""@brief Generate a parametric through-hole header or module on a pin grid.
 
 Usato sia da examples/generate_pin_header.py sia dalla GUI
 (kicadgen.gui.main_window) per costruire footprint THT a matrice di pin
@@ -19,6 +19,7 @@ posizioni vengono generate (comportamento di un normale pin header).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import isfinite
 from typing import Iterator, Optional, Tuple
 
 from ..core.footprint import Footprint, FpCircle, FpRect, Pad
@@ -26,7 +27,17 @@ from ..core.footprint import Footprint, FpCircle, FpRect, Pad
 
 @dataclass
 class PinHeaderParams:
-    """@brief Store validated parameters for a through-hole pin header."""
+    """@brief Store parameters for a through-hole pin header, in millimetres.
+
+    @param body_length Optional body extent along X; requires body_width.
+    @param body_width Optional body extent along Y; requires body_length.
+    @param body_offset_x Minimum body X relative to the pin-grid origin.
+    @param body_offset_y Minimum body Y relative to the pin-grid origin.
+    @note Offsets match Body3DParams, with positive Y downward in KiCad.
+    Without body dimensions, offsets are ignored and the legacy silk remains.
+    margin expands the courtyard beyond the union of body and populated pads;
+    without a body, the legacy silk rectangle serves as the body envelope.
+    """
     name: str = "PinHeader"
     description: str = ""
     tags: str = "pin header THT"
@@ -42,14 +53,33 @@ class PinHeaderParams:
     # numerazione non e' quella colonna-per-colonna dei pin header, per esempio
     # nei package DIP-style che numerano a U. Se None si usa l'ordine automatico.
     pin_map: Optional[dict] = field(default=None)
+    body_length: Optional[float] = None
+    body_width: Optional[float] = None
+    body_offset_x: float = 0.0
+    body_offset_y: float = 0.0
 
     def effective_row_spacing(self) -> float:
-        """Distanza tra le righe: se non impostata, uguale al pitch (griglia quadrata,
-        comportamento di un semplice pin header a 2 file)."""
+        """@brief Return row spacing in mm, defaulting to the pin pitch."""
         return self.row_spacing if self.row_spacing is not None else self.pitch
 
     def validate(self) -> None:
-        """@brief Validate the object against its supported contract."""
+        """@brief Validate finite geometry and a complete optional body.
+
+        @throws ValueError If dimensions, offsets or pin mapping are invalid.
+        """
+        for name in ("pitch", "row_spacing", "pad_diameter", "drill", "margin",
+                     "body_length", "body_width", "body_offset_x", "body_offset_y"):
+            value = getattr(self, name)
+            if value is None and name in ("row_spacing", "body_length", "body_width"):
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value):
+                raise ValueError(f"{name} must be a finite number in mm.")
+        if (self.body_length is None) != (self.body_width is None):
+            raise ValueError("body_length and body_width must be supplied together.")
+        if self.body_length is not None and (self.body_length <= 0 or self.body_width <= 0):
+            raise ValueError("body_length and body_width must be > 0.")
+        if self.margin < 0:
+            raise ValueError("margin must be >= 0.")
         if not self.name.strip():
             raise ValueError("Il nome del footprint non puo' essere vuoto.")
         if self.rows < 1 or self.cols < 1:
@@ -87,7 +117,7 @@ class PinHeaderParams:
 
 
 def pin_positions(params: PinHeaderParams) -> Iterator[Tuple[int, float, float]]:
-    """Genera (numero_pin, x_mm, y_mm) per ogni pin effettivamente popolato.
+    """@brief Yield (pin number, x_mm, y_mm) for each populated pin.
 
     Stessa geometria usata da build_pin_header() per il footprint 2D e dal
     generatore 3D (kicadgen.cad3d) per posizionare i pin cilindrici -- unica
@@ -114,7 +144,12 @@ def pin_positions(params: PinHeaderParams) -> Iterator[Tuple[int, float, float]]
 
 
 def build_pin_header(params: PinHeaderParams) -> Footprint:
-    """Costruisce il Footprint per un header/modulo THT RxC in base a `params`."""
+    """@brief Build a THT footprint with body contours and a union courtyard.
+
+    @param params Grid, pad and optional body dimensions in mm.
+    @return Footprint with unchanged pin coordinates and numbering.
+    @throws ValueError If params contain invalid geometry.
+    """
     params.validate()
     row_spacing = params.effective_row_spacing()
 
@@ -131,14 +166,19 @@ def build_pin_header(params: PinHeaderParams) -> Footprint:
     width = (params.cols - 1) * params.pitch
     height = (params.rows - 1) * row_spacing
     m = params.margin
+    start, end = (-m, -m), (width + m, height + m)
+    if params.body_length is not None:
+        start = (params.body_offset_x, params.body_offset_y)
+        end = (start[0] + params.body_length, start[1] + params.body_width)
+        fp.add_graphic(FpRect(start=start, end=end, layer="F.Fab", width=0.1))
 
     fp.add_graphic(FpRect(
-        start=(-m, -m),
-        end=(width + m, height + m),
+        start=start,
+        end=end,
         layer="F.SilkS",
     ))
     fp.add_graphic(FpCircle(
-        center=(-m - 0.5, -m - 0.5),
+        center=(start[0] - 0.5, start[1] - 0.5),
         radius=0.25,
         layer="F.SilkS",
         fill=True,
@@ -156,4 +196,20 @@ def build_pin_header(params: PinHeaderParams) -> Footprint:
             layers=["*.Cu", "*.Mask"],
         ))
 
+    # Include full copper extents, even when pads protrude beyond the body.
+    # Only emitted pads contribute; sparse pin maps retain their exact layout.
+    min_x, min_y = start
+    max_x, max_y = end
+    for pad in fp.pads:
+        min_x = min(min_x, pad.at[0] - pad.size[0] / 2)
+        min_y = min(min_y, pad.at[1] - pad.size[1] / 2)
+        max_x = max(max_x, pad.at[0] + pad.size[0] / 2)
+        max_y = max(max_y, pad.at[1] + pad.size[1] / 2)
+    courtyard_start = (min_x - m, min_y - m)
+    courtyard_end = (max_x + m, max_y + m)
+    if not all(isfinite(v) for v in (*start, *end, *courtyard_start, *courtyard_end)):
+        raise ValueError("Computed footprint bounds must be finite.")
+    fp.add_graphic(FpRect(
+        start=courtyard_start, end=courtyard_end, layer="F.CrtYd", width=0.05,
+    ))
     return fp

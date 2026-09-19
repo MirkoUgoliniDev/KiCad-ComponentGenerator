@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 os.environ.setdefault("QT_API", "pyqt6")
 
 import numpy as np
+from PyQt6.QtCore import pyqtSignal
 from pyvistaqt import QtInteractor
 
 from ..cad3d.body_params import Body3DParams
@@ -27,6 +29,32 @@ _BG_COLOR = "#1e1e2e"
 _APPROX_BODY_COLOR = "#89b4fa"
 _APPROX_PIN_COLOR = "#f9e2af"
 _LABEL_COLOR = "#f9e2af"
+
+
+def _component_index(name):
+    """Parse only FreeCAD component names; board bodies and pins are not rows."""
+    match = re.fullmatch(r'Cmp([0-9]+)_.+', name) if isinstance(name, str) else None
+    if match is None:
+        return None
+    try:
+        index = int(match.group(1))
+        return index if index <= 2_147_483_647 else None
+    except ValueError:
+        return None
+
+
+def _component_row(part):
+    """Prefer original photo rows over filtered CAD indices and legacy names.
+
+    Only nonnegative JSON integers fitting the Qt int signal are accepted;
+    booleans, numeric strings and floats are not row identifiers. Invalid or
+    absent metadata falls back to the next source, never to render order.
+    """
+    for field in ('source_row', 'component_index'):
+        value = part.get(field)
+        if type(value) is int and 0 <= value <= 2_147_483_647:
+            return value
+    return _component_index(part.get('name'))
 
 
 def _spaced_label(label, vertices):
@@ -43,8 +71,17 @@ def _spaced_label(label, vertices):
 class Preview3DVtk(QtInteractor):
     """Vista 3D interattiva: mostra la mesh reale generata o l'approssimazione."""
 
+    component_requested = pyqtSignal(int)
+
     def __init__(self, parent=None):
+        """@brief Initialize the viewport and optional component picking.
+
+        @param parent Optional Qt parent widget.
+        """
+        self._component_actors = {}
         super().__init__(parent)
+        self.setToolTip('Tasto destro su componente: scegli modello KiCad')
+        self._configure_component_picking()
         self.set_background(_BG_COLOR)
         self.show_pin_numbers = True
         try:
@@ -63,6 +100,27 @@ class Preview3DVtk(QtInteractor):
 
     def _on_interaction_end(self, *_args) -> None:
         self._update_label_visibility()
+
+    def _configure_component_picking(self):
+        # Actor callbacks identify all subparts without replacing shaders or
+        # adding a highlighted mesh. Left-button camera rotation stays enabled.
+        try:
+            self.enable_mesh_picking(callback=self._component_picked, use_actor=True,
+                                     left_clicking=False, show=False, show_message=False)
+        except (AttributeError, RuntimeError, ImportError):
+            pass  # Optional interaction must not prevent rendering a model.
+
+    def _component_picked(self, actor):
+        if actor is None:
+            return
+        index = self._component_actors.get(actor.GetAddressAsString(''))
+        if index is not None:
+            self.component_requested.emit(index)
+
+    def clear(self) -> None:
+        """@brief Clear actors and invalidate component picking for the old mesh."""
+        self._component_actors.clear()
+        super().clear()
 
     def set_pin_numbers(self, enabled: bool) -> None:
         """Attiva/disattiva le etichette dei pin (restano comunque limitate alla
@@ -237,12 +295,15 @@ class Preview3DVtk(QtInteractor):
             # ambient alto: i moduli reali sono quasi neri (#1a1a1a) e con la
             # sola luce diffusa, su sfondo scuro, diventavano una macchia
             # indistinguibile.
-            self.add_mesh(
+            actor = self.add_mesh(
                 mesh,
                 color=part.get("color", _APPROX_BODY_COLOR),
                 smooth_shading=True, specular=0.4, specular_power=20,
                 ambient=0.35, diffuse=0.75,
             )
+            index = _component_row(part)
+            if index is not None:
+                self._component_actors[actor.GetAddressAsString('')] = index
             drawn += 1
 
         if not drawn:

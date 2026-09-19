@@ -47,3 +47,6 @@ Desktop.ini
 
 # Immagini di lavoro dei componenti: input locali, non sorgenti del progetto.
 docs/ESP32/
+
+# Local detector weights (large binaries; review upstream licences before redistribution).
+models/*.onnx

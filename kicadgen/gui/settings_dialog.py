@@ -96,7 +96,7 @@ class LlmSettingsDialog(QDialog):
             "Le risposte foto sono memorizzate "
             "in generated/photo-cache; a input invariati non vengono ripetute le chiamate. "
             "Il 3D usa ingombri semplici senza scritte. Le quote XY sono stime calibrate; "
-            "le altezze sono indicative e richiedono una vista laterale o una misura."
+            "le altezze sono indicative e richiedono una misura diretta."
         )
         intro = (
             "Prompt di sistema: istruzioni inviate al modello durante "

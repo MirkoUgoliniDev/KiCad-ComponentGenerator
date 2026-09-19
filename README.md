@@ -46,8 +46,8 @@ The Project tab currently has exactly three source-document roles:
 | Role | Local filename | Intended use |
 | --- | --- | --- |
 | Pinout | pinout.extension | Contact numbering, labels and pinout dimensions |
-| Top view | top.extension | Calibrated XY localization of mounted components |
-| Side view | front.extension | Component profile and height estimates |
+| Dimensioned drawing | top.extension | Mechanical dimensions and calibrated XY localization |
+| High-resolution photo | hires.extension | Detection of small mounted components |
 
 Supported uploads are PNG, JPEG, WEBP, GIF and PDF files up to 20 MB. Files are
 copied into the component docs folder with the canonical role name while
@@ -67,7 +67,7 @@ flowchart TD
 ~~~
 
 Assignments are authoritative. Photo localization uses the user-assigned top
-file and never substitutes a pinout or side view because an AI response guessed
+file and never substitutes a pinout because an AI response guessed
 a different image. Existing unassigned documents remain untouched and must be
 assigned manually. Replacement and removal archives are retained under
 docs/.history/.

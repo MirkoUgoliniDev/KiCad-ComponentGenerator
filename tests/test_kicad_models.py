@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Risoluzione dei modelli 3D reali dalla libreria installata con KiCad.
+"""@brief Test legacy proposals and explicit attachment using a tiny mock library.
 
-La logica di confronto si prova senza KiCad e senza FreeCAD: sono funzioni
-pure su numeri. Le prove sulla libreria vera vengono saltate quando KiCad non
-e' installato, perche' la sua assenza non e' un errore -- il chiamante
-ripiega sulle forme sintetiche.
+No installed KiCad library or FreeCAD measurement is needed. Dimensional
+proposals remain available, but attaching a solid requires explicit selection.
 """
 
 from pathlib import Path
@@ -12,6 +10,18 @@ from pathlib import Path
 import pytest
 
 from kicadgen.cad3d import kicad_models as km
+
+
+@pytest.fixture(autouse=True)
+def isolated_library_discovery(monkeypatch, tmp_path):
+    """Use a tiny named library so legacy proposal tests never scan an installation."""
+    root = tmp_path / "models"
+    folder = root / "Package_TO_SOT_SMD.3dshapes"
+    folder.mkdir(parents=True)
+    for name in ("SOT-223.step", "SOT-223-8.step", "R_0402.step", "R_0402.wrl"):
+        (folder / name).touch()
+    monkeypatch.setattr(km, "find_library", lambda: root)
+    monkeypatch.setattr(km, "footprint_sizes", lambda *a, **k: {})
 
 
 # ── confronto delle misure, senza dipendenze esterne ──────────────────
@@ -110,7 +120,7 @@ def test_an_unmeasurable_candidate_does_not_break_the_others(monkeypatch, tmp_pa
     assert km.resolve_model("R_0402", 1.0, 0.5) == good
 
 
-# ── prove sulla libreria vera, saltate se KiCad non c'e' ──────────────
+# ── name discovery against the bounded fixture library ──────────────
 
 @pytest.fixture
 def library():
@@ -190,15 +200,23 @@ def test_components_without_a_package_are_left_to_the_synthetic_shapes(monkeypat
     assert not any("model_path" in c for c in components)
 
 
-def test_a_resolved_component_carries_the_model_path(monkeypatch, tmp_path):
+def test_a_candidate_requires_selection_before_carrying_the_model_path(monkeypatch, tmp_path):
     model = tmp_path / "R_0402_1005Metric.step"
     model.write_bytes(b"")
     monkeypatch.setattr(km, "find_library", lambda: tmp_path)
-    monkeypatch.setattr(km, "resolve_model",
-                        lambda *a, **k: model)
+    monkeypatch.setattr(km, "model_sizes", lambda *a, **k: {str(model): [1, .5, .3]})
     components = [{"package": "R_0402", "length_mm": 1.0, "width_mm": 0.5}]
+    assert km.attach_models(components) == 0
+    component = components[0]
+    assert "model_path" not in component
+    assert component["color_hex"] == "#FF00FF"
+    assert component["model_match"]["status"] == "review_required"
+    assert component["model_match"]["candidates"][0]["dimensions_mm"] == [1, .5, .3]
+    component["model_selection"] = {"status": "confirmed", "path": str(model), "rotation_deg": -90}
     assert km.attach_models(components) == 1
     assert components[0]["model_path"] == str(model)
+    assert component["model_match"]["status"] == "confirmed"
+    assert component["model_rotation_deg"] == -90
 
 
 def test_attaching_never_raises_on_broken_entries(monkeypatch, tmp_path):

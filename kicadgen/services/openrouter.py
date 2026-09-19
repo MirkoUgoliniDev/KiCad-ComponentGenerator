@@ -1,4 +1,4 @@
-"""Client minimale per l'API OpenRouter (https://openrouter.ai/api/v1).
+"""@brief Minimal OpenRouter client with privacy-safe provider diagnostics.
 
 OpenRouter espone con una sola chiave (OPENROUTER_API_KEY) i modelli di
 tutti i fornitori (Anthropic, OpenAI, Google, ...) dietro un'API
@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -39,7 +40,7 @@ KEY_STATUS_URL = f"{API_BASE}/auth/key"
 API_KEY_ENV = "OPENROUTER_API_KEY"
 
 #: Modello usato quando l'utente non ne ha ancora scelto uno.
-DEFAULT_MODEL = "anthropic/claude-sonnet-5"
+DEFAULT_MODEL = "anthropic/claude-opus-5"
 
 #: Cache locale dell'elenco modelli (e' lungo ~1 MB e cambia di rado).
 MODELS_CACHE_PATH = Path(__file__).resolve().parents[2] / ".openrouter_models.json"
@@ -73,7 +74,15 @@ _credit_cache: Optional[tuple[float, "CreditStatus"]] = None
 
 
 class OpenRouterError(Exception):
-    """Errore di configurazione, rete o risposta inattesa da OpenRouter."""
+    """@brief Report an OpenRouter failure without exposing request content.
+
+    @param message Privacy-safe diagnostic text.
+    @param retryable Whether one controlled application retry may be attempted.
+    """
+
+    def __init__(self, message: str, *, retryable: bool = False):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 @dataclass(frozen=True)
@@ -302,11 +311,12 @@ def _get_json(url: str, timeout: int) -> dict:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.load(response)
     except urllib.error.HTTPError as exc:
-        raise OpenRouterError(_error_message(exc)) from exc
+        raise OpenRouterError(_error_message(exc)) from None
     except urllib.error.URLError as exc:
-        raise OpenRouterError(f"connessione fallita: {exc.reason}") from exc
+        raise OpenRouterError(f"connessione fallita: {_safe_error_text(exc.reason)}"
+                              + _diagnostic_context()) from None
     except (ValueError, OSError) as exc:
-        raise OpenRouterError(f"risposta non decodificabile: {exc}") from exc
+        raise OpenRouterError("risposta non decodificabile" + _diagnostic_context()) from None
     return payload if isinstance(payload, dict) else {}
 
 
@@ -471,7 +481,10 @@ def list_models(force_refresh: bool = False) -> list[ModelInfo]:
         except (urllib.error.URLError, ValueError, OSError) as exc:
             payload = _load_models_cache(ignore_ttl=True)
             if payload is None:
-                raise OpenRouterError(f"Elenco modelli non scaricabile: {exc}") from exc
+                detail = (_error_message(exc) if isinstance(exc, urllib.error.HTTPError)
+                          else _safe_error_text(getattr(exc, "reason", None)) + _diagnostic_context())
+                raise OpenRouterError("Elenco modelli non scaricabile: "
+                                      + detail) from None
         else:
             _write_models_cache(payload)
 
@@ -480,16 +493,103 @@ def list_models(force_refresh: bool = False) -> list[ModelInfo]:
     return models
 
 
+def _safe_error_text(value):
+    """Return a fixed error category, never arbitrary provider/request text.
+
+    Redaction alone cannot identify an echoed private prompt. After removing
+    known credentials/media, recognize only fixed categories and discard the
+    remainder. Do not stringify containers or exception objects.
+    """
+    if not isinstance(value, str):
+        return "dettagli del provider omessi"
+    key = os.environ.get(API_KEY_ENV, "").strip()
+    if key:
+        value = value.replace(key, "[redacted]")
+    value = value[:65536]
+    value = re.sub(r"(?i)\b(?:authorization\s*[:=]\s*|bearer\s+)\S+", "[redacted]", value)
+    value = re.sub(r"(?i)\bsk-[a-z0-9_-]+|data:[^\s]+", "[redacted]", value)
+    lower = value.lower()
+    for phrase in ("credito esaurito", "insufficient credits", "insufficient quota",
+                   "rate limit", "too many requests", "invalid api key", "unauthorized",
+                   "authentication failed", "context length", "content filter",
+                   "bad gateway", "service unavailable", "timed out", "timeout",
+                   "image exceeds", "image too large", "maximum image size",
+                   "invalid base64", "invalid image", "unsupported image",
+                   "invalid schema", "invalid tool", "tool_choice",
+                   "max_tokens", "too many images", "request too large",
+                   "invalid_request_error", "provider returned error",
+                   "content-length header is required"):
+        if phrase in lower:
+            return phrase
+    return "dettagli del provider omessi"
+
+
+def _diagnostic_context(payload=None, status=None):
+    """Allowlist completion reasons and provider codes without inspecting raw metadata."""
+    payload = payload if isinstance(payload, dict) else {}
+    error = payload.get("error")
+    error = error if isinstance(error, dict) else {}
+    metadata = error.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    code = error.get("code", metadata.get("code", status))
+    allowed_codes = {"rate_limit_exceeded", "insufficient_quota", "invalid_api_key",
+                     "authentication_error", "permission_denied", "invalid_request_error",
+                     "context_length_exceeded", "content_filter", "server_error",
+                     "model_not_found", "provider_error", "timeout"}
+    if type(code) is int and 100 <= code <= 599:
+        code = str(code)
+    elif type(code) is str and re.fullmatch(r"[1-5][0-9]{2}", code):
+        pass
+    elif not isinstance(code, str) or code not in allowed_codes:
+        code = "unknown"
+    choices = payload.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices else {}
+    choice = choice if isinstance(choice, dict) else {}
+    allowed_reasons = {"stop", "length", "tool_calls", "function_call", "content_filter",
+                       "error", "max_tokens", "end_turn", "stop_sequence", "tool_use"}
+    reason = choice.get("finish_reason")
+    if not isinstance(reason, str) or reason not in allowed_reasons:
+        reason = "unknown"
+    native = choice.get("native_finish_reason")
+    suffix = f"; native_finish_reason={native}" if isinstance(native, str) and native in allowed_reasons else ""
+    return f" [provider_code={code}; finish_reason={reason}{suffix}]"
+
+
 def _error_message(exc: urllib.error.HTTPError) -> str:
-    """Estrae il messaggio d'errore dal corpo JSON della risposta, se c'e'."""
+    """Read a bounded error body and expose only safe categories and codes."""
+    status = exc.code if type(exc.code) is int and 100 <= exc.code <= 599 else "unknown"
     try:
-        body = json.loads(exc.read().decode("utf-8", "replace"))
-        message = (body.get("error") or {}).get("message")
-        if message:
-            return f"{exc.code} {message}"
+        body = json.loads(exc.read(65536).decode("utf-8", "replace"))
+        error = body.get("error") if isinstance(body, dict) else None
+        message = error.get("message") if isinstance(error, dict) else error
+        metadata = error.get("metadata", {}) if isinstance(error, dict) else {}
+        raw = metadata.get("raw") if isinstance(metadata, dict) else None
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except ValueError:
+                pass
+        nested = raw.get("error", raw) if isinstance(raw, dict) else raw
+        detail = nested.get("message") if isinstance(nested, dict) else nested
+        # Provider envelopes often hide the actionable reason in metadata.raw.
+        # Log fixed categories and numeric limits only, never echoed input.
+        category = _safe_error_text(detail)
+        limits = ""
+        if isinstance(detail, str):
+            matches = re.findall(r"(?i)\b\d+(?:\.\d+)?\s*(?:MB|MiB|bytes|pixels)\b", detail[:65536])
+            if matches:
+                limits = "; limits=" + ",".join(matches[:6])
+        previous = metadata.get("previous_errors", []) if isinstance(metadata, dict) else []
+        history = []
+        for item in previous[:8] if isinstance(previous, list) else []:
+            if isinstance(item, dict):
+                history.append(_safe_error_text(item.get("raw")))
+        previous_text = "; previous_errors=" + ",".join(history) if history else ""
+        return (f"HTTP {status} {_safe_error_text(message)}; provider_detail={category}{limits}{previous_text}"
+                + _diagnostic_context(body, status))
     except (ValueError, OSError):
         pass
-    return f"HTTP {exc.code} {exc.reason}"
+    return f"HTTP {status} {_safe_error_text(exc.reason)}" + _diagnostic_context(status=status)
 
 
 def call_tool(
@@ -500,8 +600,22 @@ def call_tool(
     max_tokens: int = 2048,
     has_pdf: bool = False,
     pdf_engine: str = "native",
+    compatibility_retry: bool = False,
 ) -> dict:
-    """Chiama il modello forzando la risposta come chiamata allo strumento.
+    """@brief Call the model once and decode explicit structured tool arguments.
+
+    @param model Provider model identifier.
+    @param system_prompt Private instructions, excluded from error diagnostics.
+    @param content_blocks Request text/images/files, excluded from error diagnostics.
+    @param tool OpenAI-compatible function schema.
+    @param max_tokens Maximum completion tokens.
+    @param has_pdf Whether PDF parsing is required.
+    @param pdf_engine PDF parser selection.
+    @param compatibility_retry Use the less provider-specific required-tool form.
+    @return Explicit argument object; an explicitly supplied empty object is valid.
+    @throws OpenRouterError Safe network/provider diagnostics or invalid/missing arguments.
+    @note Retry orchestration belongs to the logged application wrapper; paid response
+        usage is recorded before argument validation.
 
     `tool` e' lo schema in formato OpenAI
     (``{"type": "function", "function": {"name", "description", "parameters"}}``);
@@ -521,10 +635,8 @@ def call_tool(
             {"role": "user", "content": list(content_blocks)},
         ],
         "tools": [tool],
-        "tool_choice": {
-            "type": "function",
-            "function": {"name": tool["function"]["name"]},
-        },
+        "tool_choice": "required" if compatibility_retry else {
+            "type": "function", "function": {"name": tool["function"]["name"]}},
     }
     if has_pdf:
         body["plugins"] = [{"id": "file-parser", "pdf": {"engine": pdf_engine}}]
@@ -546,13 +658,25 @@ def call_tool(
         with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_CHAT_S) as response:
             payload = json.load(response)
     except urllib.error.HTTPError as exc:
+        status = exc.code if type(exc.code) is int else 0
+        image_sizes = [len(block.get("image_url", {}).get("url", ""))
+                       for block in content_blocks if block.get("type") == "image_url"]
         raise OpenRouterError(
             f"OpenRouter ha risposto con un errore: {_error_message(exc)}"
-        ) from exc
+            f" [request_bytes={len(request.data)}; images={len(image_sizes)}; "
+            f"largest_image_encoded_bytes={max(image_sizes, default=0)}]",
+            retryable=status in {400, 408, 409, 429, 500, 502, 503, 504},
+        ) from None
     except urllib.error.URLError as exc:
-        raise OpenRouterError(f"Connessione a OpenRouter fallita: {exc.reason}") from exc
+        raise OpenRouterError(f"Connessione a OpenRouter fallita: {_safe_error_text(exc.reason)}"
+                              + _diagnostic_context()) from None
     except ValueError as exc:
-        raise OpenRouterError("Risposta non decodificabile da OpenRouter.") from exc
+        raise OpenRouterError("Risposta non decodificabile da OpenRouter."
+                              + _diagnostic_context()) from None
+    except OSError as exc:
+        raise OpenRouterError("Connessione a OpenRouter fallita: "
+                              + _safe_error_text(str(exc) if isinstance(exc, TimeoutError) else None)
+                              + _diagnostic_context()) from None
 
     # Prima di tool_arguments, che puo' sollevare: la chiamata e' stata pagata
     # comunque, e un consuntivo che ignora i tentativi falliti e' falso.
@@ -561,33 +685,64 @@ def call_tool(
 
 
 def tool_arguments(payload: dict, tool_name: str) -> dict:
-    """Estrae gli argomenti della chiamata allo strumento dalla risposta."""
+    """@brief Extract explicit object arguments with safe provider diagnostics.
+
+    @param payload Decoded provider response; message/prompt bodies are never logged.
+    @param tool_name Expected function name.
+    @return Parsed argument object, including an explicitly supplied empty object.
+    @throws OpenRouterError Missing/empty arguments, invalid JSON/envelope, truncation
+        without a usable tool call, or provider error.
+    @note No fallback empty object and no automatic retry on incomplete responses.
+    """
+    context = _diagnostic_context(payload)
+    if not isinstance(payload, dict):
+        raise OpenRouterError("La risposta di OpenRouter non contiene alcun risultato." + context)
     if payload.get("error"):
         error = payload["error"]
         message = error.get("message") if isinstance(error, dict) else error
-        raise OpenRouterError(str(message))
+        raise OpenRouterError(_safe_error_text(message) + context)
 
     choices = payload.get("choices") or []
-    if not choices:
-        raise OpenRouterError("La risposta di OpenRouter non contiene alcun risultato.")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise OpenRouterError("La risposta di OpenRouter non contiene alcun risultato." + context)
 
     message = choices[0].get("message") or {}
-    for call in message.get("tool_calls") or ():
+    message = message if isinstance(message, dict) else {}
+    calls = message.get("tool_calls")
+    for call in calls if isinstance(calls, list) else ():
+        if not isinstance(call, dict):
+            continue
         function = call.get("function") or {}
-        if function.get("name") != tool_name:
+        if not isinstance(function, dict) or function.get("name") != tool_name:
             continue
         arguments = function.get("arguments")
         if isinstance(arguments, dict):
             return arguments
+        if arguments is None or (isinstance(arguments, str) and not arguments.strip()):
+            raise OpenRouterError("Gli argomenti dello strumento sono assenti o vuoti." + context)
+        if not isinstance(arguments, str):
+            raise OpenRouterError("Gli argomenti dello strumento non sono JSON valido (atteso oggetto)." + context)
         try:
-            return json.loads(arguments or "{}")
+            decoded = json.loads(arguments)
         except ValueError as exc:
             raise OpenRouterError(
-                "Gli argomenti dello strumento non sono JSON valido."
-            ) from exc
+                "Gli argomenti dello strumento non sono JSON valido." + context
+            ) from None
+        if not isinstance(decoded, dict):
+            raise OpenRouterError("Gli argomenti dello strumento non sono JSON valido (atteso oggetto)." + context)
+        return decoded
+
+    if choices[0].get("finish_reason") == "length":
+        # A reasoning model can spend its entire completion budget before
+        # emitting a tool call. This does not establish lack of tool support.
+        raise OpenRouterError(
+            "Risposta troncata: budget di token di completamento esaurito prima "
+            "di restituire la chiamata allo strumento richiesto. "
+            "Nessun tentativo automatico aggiuntivo." + context
+        )
 
     raise OpenRouterError(
         "Il modello non ha chiamato lo strumento richiesto (potrebbe non "
         "supportare il tool calling con immagini/PDF): scegline un altro "
-        "dall'elenco, filtrando per costo se serve."
+        "dall'elenco, filtrando per costo se serve." + context
     )

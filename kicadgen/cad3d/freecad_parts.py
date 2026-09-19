@@ -1,4 +1,4 @@
-"""Forme 3D dei componenti montati su un modulo -- eseguito DENTRO freecadcmd.
+"""@brief Build mounted component geometry inside headless FreeCAD.
 
 Non e' importabile da codice normale: lo carica freecad_build_body.py
 (stessa cartella) mentre gira nell'interprete embedded di FreeCAD, dove
@@ -382,14 +382,6 @@ def _diode_melf(cx, cy, z0, length, width, height, color):
     return parts
 
 
-#: Oltre questo lato un connettore quadrato non e' piu' un coassiale da
-#: circuito stampato ma un modulo o un connettore da bordo.
-VERTICAL_CONNECTOR_MAX_MM = 6.0
-#: Quanto puo' essere allungato restando "quadrato". Un connettore da bordo
-#: scheda e' sempre nettamente piu' lungo che largo.
-VERTICAL_CONNECTOR_SQUARENESS = 1.35
-
-
 def _coaxial_connector(cx, cy, z0, length, width, height, color):
     """Coassiale verticale: base squadrata piu' il barilotto di innesto.
 
@@ -442,7 +434,12 @@ def _outward_sign(cx, cy, axis, rotation_deg):
 
 
 def _connector(cx, cy, z0, length, width, height, color, rotation_deg=0, mating=None):
-    """Guscio di connettore con l'apertura sulla faccia di accoppiamento.
+    """Approximate an observed entry; unknown entry stays a generic envelope.
+
+    Top-entry barrels and edge-entry shells are visual estimates, not observed
+    connector identities. The short-axis/outward direction below remains a
+    legacy heuristic from the USB example; an observed entry vector would
+    replace it. Mating alone does not establish barrel shape or entry polarity.
 
     Un connettore si innesta lateralmente (USB, jack, header schermato): la
     bocca sta sulla faccia rivolta verso l'esterno della scheda, non sul
@@ -455,15 +452,10 @@ def _connector(cx, cy, z0, length, width, height, color, rotation_deg=0, mating=
     pareti di spessore `wall` su fondo, fianchi, cielo e base: il pezzo e'
     un guscio, non un tubo passante.
     """
-    # Il verso di innesto viene dalla FOTO quando il modello lo dichiara: dal
-    # solo ingombro non e' deducibile, perche' un coassiale U.FL e un jack da
-    # bordo possono misurare uguale. L'euristica sulle dimensioni resta solo
-    # come ripiego per i risultati che non portano il campo -- estrazioni
-    # vecchie, o un modello che non lo compila.
+    # Dimensions cannot distinguish a top entry from an edge entry.
     if mating not in ("edge", "top"):
-        mating = ("top" if (max(length, width) <= VERTICAL_CONNECTOR_MAX_MM
-                            and max(length, width) / min(length, width)
-                            <= VERTICAL_CONNECTOR_SQUARENESS) else "edge")
+        print("KICADGEN_WARN:connector mating sconosciuto; ingombro generico", flush=True)
+        return _generic(cx, cy, z0, length, width, height, color)
     if mating == "top":
         return _coaxial_connector(cx, cy, z0, length, width, height, color)
 
@@ -628,8 +620,53 @@ BUILDERS = {
 KINDS = tuple(BUILDERS)
 
 
+class _ModelColor(str):
+    """Keep the existing hex-color contract while carrying native face styles."""
+
+    def __new__(cls, fallback, face_colors, path):
+        value = super().__new__(cls, fallback)
+        value.face_colors = face_colors
+        value.model_path = str(path)
+        return value
+
+
+def _read_library_parts(path, color):
+    """Copy shapes and face colors out of an isolated headless import document."""
+    import Import
+
+    previous = FreeCAD.ActiveDocument
+    doc = FreeCAD.newDocument("kicadgen_library_import")
+    try:
+        imported = Import.insert(str(path), doc.Name, merge=False)
+        if not imported:
+            raise ValueError("headless importer returned no colored shapes")
+        parts = []
+        for obj, colors in imported:
+            shape = obj.Shape.copy()
+            if shape.isNull() or not shape.Solids or not shape.isValid():
+                raise ValueError("library model contains invalid or non-solid geometry")
+            # Imported assembly objects may have placements inherited from a parent.
+            shape.Placement = obj.getGlobalPlacement()
+            colors = list(colors)
+            if len(colors) == 1:
+                colors *= len(shape.Faces)
+            if len(colors) != len(shape.Faces):
+                raise ValueError("native face-color count does not match geometry")
+            parts.append((shape, _ModelColor(color, colors, path)))
+        return parts
+    finally:
+        FreeCAD.closeDocument(doc.Name)
+        if previous is not None:
+            FreeCAD.setActiveDocument(previous.Name)
+
+
 def _library_model(component, cx, cy, z0, color):
-    """Solido letto dalla libreria 3D di KiCad, oppure None.
+    """Import resolved STEP geometry and styles, or return None on failure.
+
+    Native Z=0 stays at the PCB datum, including pins below it. Local
+    model_rotation_deg overrides inferred body/total axis alignment; the caller
+    then rotates the component once. Side lengths cannot determine 180-degree
+    polarity or square-model orientation.
 
     Il percorso arriva gia' risolto e verificato contro l'ingombro misurato:
     qui si legge il file e lo si posa al posto giusto. Il modello e'
@@ -643,21 +680,77 @@ def _library_model(component, cx, cy, z0, color):
     path = component.get("model_path")
     if not path:
         return None
+    print(f"KICADGEN_IMPORT_START:{path}", flush=True)
     try:
-        shape = Part.read(str(path))
-        box = shape.BoundBox
-        shape.translate(V(cx - (box.XMin + box.XMax) / 2,
-                          cy - (box.YMin + box.YMax) / 2,
-                          z0 - box.ZMin))
-        return [(shape, color)]
+        try:
+            parts = _read_library_parts(path, color)
+        except Exception as exc:
+            print(f"KICADGEN_WARN:colori nativi {path} non disponibili ({exc}); "
+                  "si conserva la geometria con colore fotografico", flush=True)
+            shape = Part.read(str(path))
+            if shape.isNull() or not shape.Solids or not shape.isValid():
+                raise ValueError("library model has no valid solids")
+            parts = [(shape, _ModelColor(color, None, path))]
+        combined = Part.makeCompound([shape for shape, _ in parts])
+        box = combined.BoundBox
+        # Compare unsorted axes of both supported observations. A lead envelope
+        # can have a different long axis from the plastic body (e.g. SOT-223).
+        references = [box]
+        try:
+            section = combined.slice(V(0, 0, 1), box.ZMin + box.ZLength * 0.65)
+            if section:
+                references.append(Part.makeCompound(section).BoundBox)
+        except Exception:
+            pass
+        length, width = float(component["length_mm"]), float(component["width_mm"])
+        choices = []
+        for reference in references:
+            for angle, x, y in ((0, reference.XLength, reference.YLength),
+                                (90, reference.YLength, reference.XLength)):
+                choices.append((abs(x / length - 1) + abs(y / width - 1), angle, reference))
+        _, inferred, reference = min(choices, key=lambda choice: choice[0])
+        angle = float(component.get("model_rotation_deg", inferred))
+        dz = float(component.get("model_z_offset_mm", 0))
+        if not math.isfinite(angle) or not math.isfinite(dz):
+            raise ValueError("non-finite library placement")
+        centre = V((reference.XMin + reference.XMax) / 2,
+                   (reference.YMin + reference.YMax) / 2, 0)
+        for shape, _ in parts:
+            shape.translate(-centre)
+            shape.rotate(V(0, 0, 0), V(0, 0, 1), angle)
+            # KiCad models use Z=0 as the PCB seating plane. Do not lift
+            # through-hole pins or board locks by aligning their lowest point.
+            shape.translate(V(cx, cy, z0 + dz))
+        print(f"KICADGEN_IMPORT_OK:{path}; parts={len(parts)}; "
+              f"local_rotation_deg={angle:g}", flush=True)
+        return parts
     except Exception as exc:  # noqa: BLE001 - si ripiega sulla forma sintetica
+        component["_model_import_error"] = _safe_import_error(exc)
         print(f"KICADGEN_WARN:modello {path} non caricabile ({exc}); "
-              "si usa la forma approssimata")
+              "si usa la forma approssimata", flush=True)
         return None
 
 
+def _safe_import_error(exc):
+    """Keep import diagnostics bounded, printable and JSON-safe without a traceback."""
+    try:
+        message = str(exc)
+    except Exception:
+        message = "Unable to read exception message"
+    return (type(exc).__name__ + ": " + " ".join(
+        "".join(c if c.isprintable() else " " for c in message).split()))[:500]
+
+
 def build_component(component, z0):
-    """Costruisce le parti di un componente descritto dal payload JSON.
+    """@brief Build shapes, skipping invalid envelopes without raising.
+
+    @param component Component payload with local dimensions in mm, CAD centre,
+        optional mating observation and resolved STEP path. model_rotation_deg
+        is a local CAD Z rotation before the caller's component rotation.
+    @param z0 PCB seating plane in mm; native model Z=0 is placed here.
+    @return List of (shape, hex color); imported colors also carry face styles.
+    @note Failed model imports mark _model_import_failed and _model_import_error
+        on the payload and produce a magenta approximation. Retry clears old markers.
 
     Optional ``terminal_geometry`` overrides kind/count-based approximations:
     ``{body_bbox: [l,t,r,b], terminals: [{bbox: [l,t,r,b]}],
@@ -666,20 +759,42 @@ def build_component(component, z0):
     Missing/None observations retain legacy behavior. Invalid non-None
     observations produce a warning and a generic envelope box.
     """
+    component.pop("_model_import_failed", None)
+    component.pop("_model_import_error", None)
     kind = str(component.get("kind") or "generic")
     builder = BUILDERS.get(kind, _generic)
     color = component.get("color_hex") or "#303030"
-    length = float(component["length_mm"])
-    width = float(component["width_mm"])
-    height = float(component["height_mm"])
-    cx = float(component["x"])
-    cy = float(component["y"])
+    try:
+        values = [component[key] for key in ("length_mm", "width_mm", "height_mm", "x", "y")]
+        values += [z0, component.get("rotation_deg") or 0]
+        if any(isinstance(value, bool) for value in values):
+            raise ValueError("boolean geometry value")
+        length, width, height, cx, cy, z0, rotation = map(float, values)
+        if not all(math.isfinite(value) for value in (length, width, height, cx, cy, z0, rotation)):
+            raise ValueError("non-finite geometry value")
+        if min(length, width, height) <= 0:
+            raise ValueError("dimensions must be positive")
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        print(f"KICADGEN_WARN:componente {component.get('name')} skipped: "
+              f"invalid geometry ({exc})", flush=True)
+        return []
     try:
         # Modello reale della libreria KiCad, gia' risolto e verificato dal
         # chiamante: e' geometria vera, batte qualunque forma approssimata.
-        real = _library_model(component, cx, cy, z0, color)
+        try:
+            real = _library_model(component, cx, cy, z0, color)
+        except Exception as exc:
+            if not component.get("model_path"):
+                raise
+            component["_model_import_error"] = _safe_import_error(exc)
+            real = None
         if real is not None:
             return real
+        if component.get("model_path"):
+            component["_model_import_failed"] = True
+            component.setdefault("_model_import_error", "Model import produced no usable solids")
+            color = component["color_hex"] = "#FF00FF"
+            return _generic(cx, cy, z0, length, width, height, color)
         if component.get("terminal_geometry") is not None:
             return _observed_terminals(cx, cy, z0, length, width, height, color,
                                        component["terminal_geometry"])
@@ -687,7 +802,12 @@ def build_component(component, z0):
             print(f"KICADGEN_WARN:componente {component.get('name')} (ic): "
                   "package sconosciuto, geometria generica senza terminali")
             return _generic(cx, cy, z0, length, width, height, color)
-        if kind == "connector":
+        if kind == "connector" or (kind == "generic" and (
+                component.get("_detected_kind") == "connector"
+                or component.get("mating") in ("edge", "top"))):
+            if component.get("mating") in ("edge", "top"):
+                print(f"KICADGEN_WARN:componente {component.get('name')}: "
+                      "mating osservato; dettagli connettore approssimati", flush=True)
             # Unico builder il cui orientamento dipende da dove si trova il
             # componente: la bocca deve guardare fuori scheda DOPO la
             # rotazione applicata dal chiamante, non prima.
@@ -705,4 +825,9 @@ def build_component(component, z0):
         return builder(cx, cy, z0, length, width, height, color)
     except Exception as exc:  # noqa: BLE001 - si ripiega sulla scatola
         print(f"KICADGEN_WARN:componente {component.get('name')} ({kind}) semplificato: {exc}")
-        return _generic(cx, cy, z0, length, width, height, color)
+        try:
+            return _generic(cx, cy, z0, length, width, height, color)
+        except Exception as fallback_exc:
+            print(f"KICADGEN_WARN:componente {component.get('name')} skipped: "
+                  f"generic fallback failed ({fallback_exc})", flush=True)
+            return []

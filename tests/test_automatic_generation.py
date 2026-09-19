@@ -42,18 +42,18 @@ def test_standard_tabs_hidden_and_advanced_toggle_preserves_fields(window, monke
     generate.assert_not_called()
 
 
-def test_photo_review_is_advanced_only_and_preserves_acquired_photo(window):
-    assert window.btn_photo_comparison.isHidden()
+def test_photo_model_review_is_available_in_both_modes_and_preserves_photo(window):
+    assert not window.btn_photo_comparison.isHidden()
     assert not window.btn_photo_comparison.isEnabled()
     params = acquired('castellated')
     params.photo_png = b'photo fixture'
     window._on_extracted(params)
-    assert window.btn_photo_comparison.isHidden()
+    assert not window.btn_photo_comparison.isHidden()
     assert window.btn_photo_comparison.isEnabled()
     for advanced in (True, False, True):
         window._config['advanced_user'] = advanced
         window._apply_user_mode()
-        assert window.btn_photo_comparison.isHidden() is (not advanced)
+        assert not window.btn_photo_comparison.isHidden()
         assert window.btn_photo_comparison.isEnabled()
         assert window._photo_png == b'photo fixture'
         assert not window.btn_ai_log.isHidden()
@@ -124,6 +124,17 @@ def test_advanced_keeps_manual_generation(window, monkeypatch):
     window._on_extract_finished()
     assert window._worker is None
     assert window.tabs.isTabVisible(1) and window.tabs.isTabVisible(2)
+
+
+def test_castellated_missing_overall_height_starts_generation(window, monkeypatch):
+    begin(window, monkeypatch)
+    window.field_body_height.setValue(99)
+    params = acquired('castellated')
+    params.body_height_mm = None
+    window._on_extracted(params)
+    window._on_extract_finished()
+    assert window._worker is not None
+    assert window._worker.body.height_mm == window.field_cast_pcb.value()
 
 
 @pytest.mark.parametrize('failure', ['missing_body', 'invalid_footprint', 'failed_extraction', 'unsupported_3d', 'unsafe_name'])
@@ -302,7 +313,7 @@ def test_real_qthread_handoff_generates_footprint_and_requests_3d(window, monkey
     monkeypatch.setattr(gui.ExtractWorker, 'run', lambda self: self.done.emit(acquired()))
     cad_calls = []
     warnings = []
-    def cad(params, body, project, fillets, texts):
+    def cad(params, body, project, fillets, texts, progress=None):
         cad_calls.append((params, body))
         path = project / 'AutoModule.3dshapes' / 'AutoModule.step'
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -380,7 +391,7 @@ def test_guided_name_collision_keeps_documents_and_generates_after_real_thread(w
     warnings = []
     monkeypatch.setattr(QMessageBox, 'warning', lambda *a: warnings.append(a))
     cad_calls = []
-    def cad(params, body, project, fillets, texts):
+    def cad(params, body, project, fillets, texts, progress=None):
         cad_calls.append((params.name, project))
         path = project / f'{params.name}.3dshapes' / f'{params.name}.step'
         path.parent.mkdir(parents=True)

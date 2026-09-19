@@ -46,7 +46,7 @@ _SINGLE_THT = ComponentType(
         "terminale, stima drill_mm = diametro terminale + 0.2..0.3 mm e "
         "pad_diameter_mm = drill_mm + 0.7..0.9 mm, scrivendolo nelle note.\n"
         "- pitch_mm e row_spacing_mm si leggono dalla vista dall'alto/dal basso del "
-        "disegno meccanico del componente, non dalla vista laterale.\n"
+        "disegno meccanico quotato del componente o da una misura diretta.\n"
         "- Le quote del corpo (body_*) sono l'ingombro del componente reale, "
         "non quello dei pad."
     ),

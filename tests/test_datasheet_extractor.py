@@ -23,6 +23,47 @@ def test_extract_requires_at_least_one_file():
         extract_pin_header_params([])
 
 
+def test_overlapping_explicit_pad_ranges_are_rejected():
+    from kicadgen.services.datasheet_extractor import _castellated_sides
+    with pytest.raises(ExtractionError, match="pad duplicato"):
+        _castellated_sides([dict(edge="top", count=22, pitch_mm=2.54, first_pin=1),
+                           dict(edge="bottom", count=22, pitch_mm=2.54, first_pin=1)])
+
+
+def test_missing_pad_range_reserves_later_explicit_numbers():
+    from kicadgen.services.datasheet_extractor import _castellated_sides
+    sides = _castellated_sides([dict(edge="top", count=3, pitch_mm=2.54),
+        dict(edge="bottom", count=3, pitch_mm=2.54, first_pin=1, reverse=True)])
+    assert [s["first_pin"] for s in sides] == [4, 1]
+    assert sides[1]["reverse"] is True
+
+
+@pytest.mark.parametrize("corrected_start", [3, 1])
+def test_duplicate_pin_repair_preserves_geometry_and_labels(tmp_path, monkeypatch, corrected_start):
+    from kicadgen.services import datasheet_extractor as ext
+    from unittest.mock import Mock
+    source = tmp_path / "drawing.pdf"
+    source.write_bytes(b"%PDF-1.4 offline")
+    sides = [dict(edge="top", count=2, pitch_mm=2.54, first_pin=1, pin_names=["G", "1"]),
+             dict(edge="bottom", count=2, pitch_mm=2.54, first_pin=1, pin_names=["G", "TX"])]
+    call = Mock(side_effect=[dict(layout="castellated", castellated_sides=sides),
+        dict(castellated_sides=[sides[0], dict(sides[1], first_pin=corrected_start, pitch_mm=99)])])
+    monkeypatch.setattr(ext, "api_key", lambda: "offline")
+    monkeypatch.setattr(ext, "check_credit", lambda **kw: None)
+    monkeypatch.setattr(ext, "call_tool", call)
+    if corrected_start == 1:
+        with pytest.raises(ExtractionError, match="pad duplicato"):
+            ext.extract_pin_header_params([source])
+        assert call.call_count == 2
+        return
+    result = ext.extract_pin_header_params([source])
+    assert call.call_count == 2
+    assert result.castellated_sides[1]["first_pin"] == 3
+    assert result.castellated_sides[1]["pitch_mm"] == 2.54
+    assert result.castellated_sides[1]["pin_names"] == ["G", "TX"]
+    assert "Numerazione contatti corretta" in result.notes
+
+
 def test_extract_rejects_too_many_files(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "fake-key-for-test")
     files = []
@@ -321,8 +362,8 @@ def test_three_stage_models_and_custom_prompts_reach_services(monkeypatch, tmp_p
 def test_explicit_document_roles_override_ai_top_selection(monkeypatch, tmp_path, with_top):
     from unittest.mock import Mock
     from kicadgen.services import datasheet_extractor as ext, photo_inventory as inv
-    paths = [tmp_path / 'contacts.png', tmp_path / 'side.png']
-    roles = {'contacts.png': 'pinout', 'side.png': 'front'}
+    paths = [tmp_path / 'contacts.png']
+    roles = {'contacts.png': 'pinout'}
     if with_top:
         paths.append(tmp_path / 'random-photo.png')
         roles['random-photo.png'] = 'top'
@@ -338,13 +379,12 @@ def test_explicit_document_roles_override_ai_top_selection(monkeypatch, tmp_path
     ext.extract_pin_header_params(paths, document_roles=roles, photo_cache_dir=tmp_path / 'cache')
     # Ora si passa l'elenco delle viste dall'alto assegnate: l'inventario
     # sceglie la piu' dettagliata fra quelle che riesce a calibrare.
-    assert photo.call_args.kwargs['top_photo_index'] == ([2] if with_top else [-1])
+    assert photo.call_args.kwargs['top_photo_index'] == ([1] if with_top else [-1])
     assert photo.call_args.kwargs['top_photo_source'] == 'utente'
     blocks = call.call_args.kwargs['content_blocks']
     assert 'Pinout / disposizione contatti' in blocks[0]['text']
-    assert 'Vista laterale' in blocks[2]['text']
     if with_top:
-        assert 'Immagine con quote' in blocks[4]['text']
+        assert 'Immagine con quote' in blocks[2]['text']
     else:
         assert 'Viste non fornite: Immagine con quote' in blocks[-1]['text']
 

@@ -91,6 +91,19 @@ class ComponentBox:
     pins_by_side: Optional[Dict[str, int]] = None
     detected_kind: Optional[str] = None
     terminal_geometry: Optional[dict] = None
+    package: str = ""
+    mating: str = ""
+    bbox_basis: str = "unknown"
+    package_evidence: str = ""
+    # Confidence/source belong to the observed contact count, not package identity.
+    pin_count_confidence: str = ""
+    pin_count_source: str = ""
+    # Reviewed native-model placement overrides, not inferred photo pin-1.
+    model_rotation_deg: Optional[float] = None
+    model_z_offset_mm: float = 0.0
+    # Explicit local user choice; absence never establishes a verified identity.
+    model_selection: Optional[dict] = None
+    model_match: Optional[dict] = None
 
     def is_usable(self) -> bool:
         """@brief Provide the is usable operation for this workflow."""
@@ -167,6 +180,7 @@ class CastellatedModuleParams:
     substrate_color_hex: str = "#2f3f1f"
     silk_labels: Dict[str, str] = field(default_factory=dict)
     silk_color_hex: str = "#e8e8e0"
+    show_silk_labels_3d: bool = False
     # Componenti letti dalla foto del modulo: se ci sono, il 3D li disegna
     # uno per uno invece del blocco unico ricavato da component_inset.
     components: List[ComponentBox] = field(default_factory=list)

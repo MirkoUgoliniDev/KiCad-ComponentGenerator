@@ -274,7 +274,10 @@ def test_terminal_worker_run_uses_snapshot_and_emits_result_or_error(
     assert len(observations) == 1
     assert observations[0][:3] == (b"photo-bytes", expected_snapshot, "mock-model")
     assert calls == [{"model": "mock-model"}]
-    assert progress == ["mock terminal progress"]
+    assert progress[0] == "mock terminal progress"
+    assert len(progress) == 3
+    assert progress[1].startswith("AI_CALL_START ")
+    assert progress[2].startswith("AI_CALL_FAILURE " if fails else "AI_CALL_END ")
     assert worker.components == expected_snapshot
     if fails:
         assert not done

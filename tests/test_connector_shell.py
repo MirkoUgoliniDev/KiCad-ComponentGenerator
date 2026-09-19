@@ -19,7 +19,7 @@ USB_C = (7.61, 9.98, 2.35)
 def boxes_for(cad, cx, cy, size):
     module, made = cad
     made.clear()
-    module._connector(cx, cy, Z0, *size, "#f4f1f0")
+    module._connector(cx, cy, Z0, *size, "#f4f1f0", mating="edge")
     return made
 
 
@@ -196,7 +196,7 @@ def test_a_small_square_connector_mates_from_above_not_from_the_side(cad):
     """
     module, made = cad
     made.clear()
-    parts = module._connector(23.76, -6.01, 0.96, *UFL, '#79582b')
+    parts = module._connector(23.76, -6.01, 0.96, *UFL, '#79582b', mating="top")
     assert len(parts) == 2, 'base e barilotto devono restare pezzi distinti'
     base = made[0]
     # La base non occupa tutta l'altezza: sopra ci va il barilotto.
@@ -209,7 +209,7 @@ def test_the_barrel_is_metal_whatever_the_photo_sampled(cad):
     """Su un pezzo cosi' piccolo il colore campionato e' quello del PCB."""
     module, _ = cad
     (_, base_colour), (_, barrel_colour) = module._connector(
-        23.76, -6.01, 0.96, *UFL, '#79582b')
+        23.76, -6.01, 0.96, *UFL, '#79582b', mating="top")
     assert base_colour == '#79582b'
     assert barrel_colour == module.METAL
 
@@ -219,23 +219,18 @@ def test_an_edge_connector_keeps_the_side_mouth(cad):
     module, made = cad
     for size in (USB_C, (5.0, 9.0, 3.0), (5.0, 7.0, 6.0)):
         made.clear()
-        module._connector(-27.65, 0.0, 0.96, *size, '#d8d8d8')
+        module._connector(-27.65, 0.0, 0.96, *size, '#d8d8d8', mating="edge")
         assert len(made) >= 2, f'{size}: manca la cavita\' laterale'
 
 
-@pytest.mark.parametrize("size, vertical", [
-    ((4.57, 4.05, 2.35), True),    # U.FL reale
-    ((3.0, 3.0, 2.5), True),       # U.FL nominale
-    ((7.61, 9.98, 2.35), False),   # USB-C: quadrato ma troppo grande
-    ((5.0, 9.0, 3.0), False),      # da bordo: troppo allungato
-    ((6.5, 6.0, 3.0), False),      # oltre il limite di dimensione
-])
-def test_the_rule_reads_the_measured_shape_not_the_name(cad, size, vertical):
+@pytest.mark.parametrize("size", [UFL, (3, 3, 2.5), USB_C, (5, 9, 3), (6.5, 6, 3)])
+@pytest.mark.parametrize("mating", ["top", "edge"])
+def test_mating_observation_is_independent_of_size(cad, size, mating):
     module, made = cad
     made.clear()
-    module._connector(10.0, 0.0, 0.96, *size, '#79582b')
+    module._connector(10.0, 0.0, 0.96, *size, '#79582b', mating=mating)
     # Il percorso verticale non scava nulla: una sola scatola fra le chiamate.
-    assert (len(made) == 1) is vertical, f'{size}: percorso sbagliato'
+    assert (len(made) == 1) is (mating == "top"), f'{size}: percorso sbagliato'
 
 
 @pytest.mark.parametrize("size, mating, coaxial", [
@@ -253,16 +248,18 @@ def test_the_mating_direction_declared_by_the_model_wins(cad, size, mating, coax
     assert is_coaxial is coaxial
 
 
-@pytest.mark.parametrize("size, coaxial", [(UFL, True), (USB_C, False)])
-def test_without_the_field_the_geometric_heuristic_still_answers(cad, size, coaxial):
-    """Ripiego per le estrazioni vecchie e per un modello che non lo compila."""
+@pytest.mark.parametrize("size", [UFL, USB_C])
+def test_without_observation_the_connector_is_an_envelope(cad, size, capsys):
+    """Missing observations do not establish either entry direction."""
     module, _ = cad
     parts = module._connector(10.0, 0.0, 0.96, *size, '#79582b', mating=None)
-    assert (len(parts) == 2 and parts[1][1] == module.METAL) is coaxial
+    assert len(parts) == 1 and parts[0][1] == '#79582b'
+    assert "mating sconosciuto" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("bad", ['', 'sideways', 'TOP', 42, None])
-def test_an_unusable_mating_value_falls_back_instead_of_breaking(cad, bad):
+@pytest.mark.parametrize("bad", ['', 'sideways', 'TOP', 42, None, 'none'])
+def test_an_unusable_mating_value_falls_back_instead_of_breaking(cad, bad, capsys):
     module, _ = cad
     parts = module._connector(10.0, 0.0, 0.96, *UFL, '#79582b', mating=bad)
-    assert len(parts) == 2 and parts[1][1] == module.METAL
+    assert len(parts) == 1 and parts[0][1] == '#79582b'
+    assert "mating sconosciuto" in capsys.readouterr().out

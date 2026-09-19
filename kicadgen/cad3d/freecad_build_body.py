@@ -1,4 +1,4 @@
-"""Script eseguito DENTRO l'interprete Python embedded di FreeCAD (freecadcmd).
+"""@brief Build and export colored board geometry inside headless FreeCAD.
 
 Non e' pensato per essere importato da codice normale: gira solo tramite
 `freecadcmd freecad_build_body.py <percorso_json>` (vedi step_generator.py),
@@ -302,13 +302,20 @@ def _flip_y(data):
         t["face"] = _swap_front_back(t["face"])
     for key in ("notches", "edge_contacts", "silk_texts", "components"):
         for item in data.get(key, []) or []:
-            item["y"] = -item["y"]
+            try:
+                if not isinstance(item.get("y"), bool):
+                    item["y"] = -float(item["y"])
+            except (TypeError, ValueError, OverflowError):
+                pass  # Preserve invalid component data for build_component to skip.
             if "angle" in item:
                 item["angle"] = -float(item["angle"])
             if "marking_angle" in item:
                 item["marking_angle"] = -float(item["marking_angle"])
             if "rotation_deg" in item:
-                item["rotation_deg"] = -float(item["rotation_deg"])
+                try:
+                    item["rotation_deg"] = -float(item["rotation_deg"])
+                except (TypeError, ValueError, OverflowError):
+                    pass  # Component validation emits the warning and skips it.
             if item.get("edge") in _FB_SWAP:
                 item["edge"] = _FB_SWAP[item["edge"]]
     for c in data.get("edge_contacts", []):
@@ -325,6 +332,8 @@ def _flip_y(data):
 
 def main():
     """@brief Run the public entry point for this workflow."""
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
     json_path = sys.argv[2]
     with open(json_path, "r", encoding="utf-8") as f:
         data = _flip_y(json.load(f))
@@ -384,6 +393,7 @@ def main():
     # verso l'interno della scheda, non sopra al foro dove coprirebbe il
     # metallo che serve a riconoscerlo.
     label_anchors = {}
+    metadata = {}
 
     def add(name, shape, color):
         obj = doc.addObject("Part::Feature", name)
@@ -426,6 +436,12 @@ def main():
             pad_w = float(contact.get("pad_width_mm", 1.8))
 
             def pad_box(z):
+                if edge == "through":
+                    # Through contacts use an observed circular land diameter,
+                    # independent of board-edge orientation or pad length.
+                    if pad_w <= 2 * radius:
+                        raise ValueError("through pad diameter must exceed hole diameter")
+                    return Part.makeCylinder(pad_w / 2, pad_t, FreeCAD.Vector(cx, cy, z))
                 if edge in ("left", "right"):
                     px = x0 + pad_len / 2 if edge == "left" else x1 - pad_len / 2
                     return Part.makeBox(pad_len, pad_w, pad_t,
@@ -441,7 +457,9 @@ def main():
             # Il numero va oltre la fine della piazzola, non a distanza fissa
             # dal foro: le piazzole possono avere lunghezze diverse per lato.
             clearance = pad_len + 0.8
-            if edge == "left":
+            if edge == "through":
+                anchor = (cx, cy)
+            elif edge == "left":
                 anchor = (x0 + clearance, cy)
             elif edge == "right":
                 anchor = (x1 - clearance, cy)
@@ -480,9 +498,14 @@ def main():
         import freecad_parts
         for index, component in enumerate(components):
             base = _safe(component.get("name"), index)
-            rotation = float(component.get("rotation_deg") or 0.0)
-            centre = FreeCAD.Vector(component["x"], component["y"], 0)
+            print(f"KICADGEN_COMPONENT_START:{index + 1}/{len(components)}:{base}", flush=True)
             try:
+                built = freecad_parts.build_component(component, z1)
+                if not built:
+                    print(f"KICADGEN_COMPONENT_SKIPPED:{base}", flush=True)
+                    continue
+                rotation = float(component.get("rotation_deg") or 0.0)
+                centre = FreeCAD.Vector(float(component["x"]), float(component["y"]), 0)
                 # Le forme nascono con l'asse lungo parallelo a X e si ruotano
                 # attorno al centro del componente: e' l'orientamento letto
                 # dalla foto, non una deduzione dalle proporzioni.
@@ -490,10 +513,23 @@ def main():
                 # Tutto il blocco e' isolato: un componente con quote
                 # degeneri (stima dell'estrazione fuori scala) non deve far
                 # sparire quelli successivi ne' l'intero modello.
-                for j, (shape, color) in enumerate(freecad_parts.build_component(component, z1)):
+                for j, (shape, color) in enumerate(built):
                     if rotation:
                         shape.rotate(centre, FreeCAD.Vector(0, 0, 1), rotation)
-                    add(f"{base}_{j}", shape, color)
+                    obj = add(f"{base}_{j}", shape, color)
+                    path = getattr(color, "model_path", None)
+                    metadata[obj.Name] = {
+                        "source": "kicad_library" if path else "approximation",
+                        "model_path": path,
+                        "native_colors": bool(getattr(color, "face_colors", None)),
+                        "component_index": index,
+                        "source_row": component.get("source_row", index),
+                    }
+                    if component.get("_model_import_failed"):
+                        metadata[obj.Name]["model_import_failed"] = True
+                        metadata[obj.Name]["model_import_error"] = component.get(
+                            "_model_import_error", "Model import failed")
+                print(f"KICADGEN_COMPONENT_OK:{base}; parts={len(built)}", flush=True)
 
                 # Contorno serigrafico su TUTTI i componenti, non solo sui
                 # passivi: molti case reali sono neri quanto il PCB (colore
@@ -504,7 +540,8 @@ def main():
                            silk_z, line=0.08)
                 if rotation:
                     rim.rotate(centre, FreeCAD.Vector(0, 0, 1), rotation)
-                add(f"{base}_silk", rim, silk_color)
+                silk_obj = add(f"{base}_silk", rim, silk_color)
+                metadata[silk_obj.Name] = {"source_row": component.get("source_row", index)}
 
                 marking = (component.get("marking") or "").strip()
                 if marking:
@@ -514,7 +551,8 @@ def main():
                     text_shape = _place_text(marking, size, component["x"], component["y"], ztop,
                                              rotation + float(component.get("marking_angle", 0)), font_file)
                     if text_shape is not None:
-                        add(f"{base}_mark", text_shape, component.get("marking_color_hex", "#c8c8c0"))
+                        mark_obj = add(f"{base}_mark", text_shape, component.get("marking_color_hex", "#c8c8c0"))
+                        metadata[mark_obj.Name] = {"source_row": component.get("source_row", index)}
             except Exception as exc:  # noqa: BLE001 - un componente in meno non e' fatale
                 print(f"KICADGEN_WARN:componente '{component.get('name')}' non generato: {exc}")
 
@@ -536,8 +574,19 @@ def main():
     doc.recompute()
     objects = [obj for obj, _ in colored]
 
-    Part.export(objects, step_path)
-    print(f"KICADGEN_STEP_OK:{step_path}")
+    step_colors_exported = False
+    print(f"KICADGEN_EXPORT_START:{step_path}", flush=True)
+    try:
+        import Import
+        styled = [(obj, getattr(color, "face_colors", None)
+                   or [_hex_to_rgb(color)] * len(obj.Shape.Faces)) for obj, color in colored]
+        Import.export(styled, step_path)
+        step_colors_exported = True
+        print(f"KICADGEN_STEP_COLORS_OK:{step_path}", flush=True)
+    except Exception as exc:
+        print(f"KICADGEN_WARN:export colori STEP fallito ({exc}); solo geometria", flush=True)
+        Part.export(objects, step_path)
+    print(f"KICADGEN_STEP_OK:{step_path}", flush=True)
 
     if fcstd_path:
         try:
@@ -546,7 +595,18 @@ def main():
         except Exception as exc:  # noqa: BLE001 - sorgente FreeCAD e' best-effort
             print(f"KICADGEN_FCSTD_FAILED:{exc}")
 
-    tessellated = [(obj, color, obj.Shape.tessellate(0.03)) for obj, color in colored]
+    tessellated = []
+    for obj, color in colored:
+        face_colors = getattr(color, "face_colors", None)
+        if face_colors:
+            groups = {}
+            for face, rgba in zip(obj.Shape.Faces, face_colors):
+                rgb = "#" + "".join(f"{round(max(0, min(1, c)) * 255):02x}" for c in rgba[:3])
+                groups.setdefault(rgb, []).append(face)
+            for rgb, faces in groups.items():
+                tessellated.append((obj, rgb, Part.makeCompound(faces).tessellate(0.03)))
+        else:
+            tessellated.append((obj, color, obj.Shape.tessellate(0.03)))
 
     # Mesh tassellata: la GUI la usa per l'anteprima della geometria REALE, e il
     # generatore Python la usa per colorare lo STEP (un colore per solido, nello
@@ -555,17 +615,20 @@ def main():
     if mesh_path:
         try:
             parts = []
+            counted = set()
             for obj, color, (verts, facets) in tessellated:
                 parts.append({
-                    "name": obj.Name,
+                    "name": obj.Name if obj.Name not in counted else f"{obj.Name}_color{len(parts)}",
                     "color": color,
-                    "solids": len(obj.Shape.Solids),
+                    "solids": len(obj.Shape.Solids) if obj.Name not in counted else 0,
+                    **metadata.get(obj.Name, {}),
                     "label": label_anchors.get(obj.Name),
                     "vertices": [[p.x, p.y, p.z] for p in verts],
                     "triangles": [list(f) for f in facets],
                 })
+                counted.add(obj.Name)
             with open(mesh_path, "w", encoding="utf-8") as fh:
-                json.dump({"parts": parts}, fh)
+                json.dump({"parts": parts, "step_colors_exported": step_colors_exported}, fh)
             print(f"KICADGEN_MESH_OK:{mesh_path}")
         except Exception as exc:  # noqa: BLE001 - anteprima e' best-effort
             print(f"KICADGEN_MESH_FAILED:{exc}")

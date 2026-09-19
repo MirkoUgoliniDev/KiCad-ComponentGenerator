@@ -501,5 +501,11 @@ def refine_components(
             report.skipped.append(component.get("name", "?"))
             continue
         report.measured += 1
+        # Edge snapping does not establish whether the new contour follows body,
+        # attached terminals or solder pads; old box evidence no longer applies.
+        if any(component.get(key) != value for key, value in measured.items()):
+            if "bbox_basis" in component:
+                component["bbox_basis"] = "unknown"
+            component.pop("package_evidence", None)
         component.update(measured)
     return refined, report

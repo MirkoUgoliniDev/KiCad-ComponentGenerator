@@ -168,11 +168,15 @@ _EXTRACTION_TOOL = {
                     "perche' il case e' piu' largo della sola distanza tra i pin."
                 ),
             },
+            "pcb_thickness_mm": {
+                "type": "number", "exclusiveMinimum": 0,
+                "description": "Spessore del solo PCB, esclusi componenti e pin. Ometti se non quotato; non confonderlo con l'altezza totale.",
+            },
             "body_height_mm": {
                 "type": "number",
                 "description": (
                     "Spessore/altezza del corpo lungo l'asse Z (perpendicolare al PCB, "
-                    "vista laterale/side view del disegno meccanico) -- e' una quota "
+                    "disegno meccanico quotato o misura diretta) -- e' una quota "
                     "COMPLETAMENTE DIVERSA da row_spacing_mm e body_width_mm (che sono "
                     "quote della vista dall'alto, assi X/Y). Cercala nella vista "
                     "laterale del disegno, di solito la quota piu' piccola vicino ai "
@@ -359,7 +363,10 @@ _EXTRACTION_TOOL = {
                             "description": (
                                 "Numero del primo contatto di questo lato, seguendo il "
                                 "bordo dall'alto in basso (lati verticali) o da sinistra "
-                                "a destra (lati orizzontali)."
+                                "a destra (lati orizzontali). Deve essere il minimo della "
+                                "sequenza anche con reverse=true. I numeri fisici devono "
+                                "essere univoci tra TUTTI i lati: non ricominciare da 1 "
+                                "su ogni lato e non usare i numeri GPIO come numeri pad."
                             ),
                         },
                         "reverse": {
@@ -411,7 +418,7 @@ _EXTRACTION_TOOL = {
             "components_3d": {
                 "type": "array",
                 "description": (
-                    "SOLO per i moduli su PCB (layout=\"castellated\") e solo se tra i "
+                    "Per schede popolate, sia THT (matrix) sia castellated, solo se tra i "
                     "file c'e' una FOTO del lato superiore: i componenti visibili, "
                     "approssimati a blocchi rettangolari, per dare al modello 3D "
                     "l'aspetto del modulo reale invece di una lastra liscia. "
@@ -641,6 +648,7 @@ class ExtractedParams:
     body_length_mm: Optional[float] = None
     body_width_mm: Optional[float] = None
     body_height_mm: Optional[float] = None
+    pcb_thickness_mm: Optional[float] = None
     body_offset_x_mm: Optional[float] = None
     body_offset_y_mm: Optional[float] = None
     pin_length_3d_mm: Optional[float] = None
@@ -744,8 +752,15 @@ def extract_pin_header_params(
     verification_model: Optional[str] = None,
     terminal_prompt: Optional[str] = None,
     document_roles: Optional[dict[str, str]] = None,
+    component_family: Optional[str] = None,
+    photo_detector: str = "ai",
+    yolo_model_path: Optional[Path] = None,
 ) -> ExtractedParams:
-    """Chiama il modello via OpenRouter e ritorna i parametri estratti.
+    """@brief Extract dimensions and pinout, optionally using local YOLO photo proposals.
+
+    @param photo_detector Photo localization backend: ai (legacy) or yolo (local).
+    @param yolo_model_path Optional compatible ONNX file; validated before paid calls.
+    @note YOLO localization is local; datasheet, package and terminal review still use AI.
 
     Due livelli di istruzioni, entrambi opzionali:
     - `system_prompt` sovrascrive DEFAULT_SYSTEM_PROMPT ed e' l'impostazione
@@ -771,6 +786,16 @@ def extract_pin_header_params(
     """
     if not doc_paths:
         raise ExtractionError("Nessun file selezionato.")
+    if photo_detector not in ("ai", "yolo"):
+        raise ExtractionError("Rilevatore fotografico non supportato.")
+    if photo_detector == "yolo":
+        from .photo_yolo import validate_yolo_setup
+        try:
+            validate_yolo_setup(yolo_model_path)
+        except (ValueError, OSError, ImportError) as exc:
+            raise ExtractionError(f"YOLO locale non disponibile: {exc}") from exc
+    from .ai_diagnostics import make_logged_call
+    diagnostic_call = make_logged_call(call_tool, progress)
     if len(doc_paths) > MAX_FILES:
         raise ExtractionError(f"Troppi file selezionati (max {MAX_FILES} per chiamata).")
     from .document_roles import ROLES, ROLE_HELP
@@ -807,7 +832,7 @@ def extract_pin_header_params(
     if document_roles is not None:
         missing = [label for role, label in ROLES.items() if role not in document_roles.values()]
         request += ('\nI ruoli dei file sono espliciti: rispettali, non dedurli dai nomi originali. '
-                    'Non usare il pinout o la vista laterale come vista dall’alto per gli ingombri. '
+                    'Non usare il pinout come vista dall’alto per gli ingombri. '
                     'Segnala dati mancanti e incongruenze, senza inventare quote per completare le viste assenti.')
         if missing:
             request += '\nViste non fornite: ' + ', '.join(missing) + '.'
@@ -834,7 +859,7 @@ def extract_pin_header_params(
 
     has_pdf = any(p.suffix.lower() == ".pdf" for p in doc_paths)
     try:
-        data = call_tool(
+        data = diagnostic_call(
             model=model or DEFAULT_MODEL,
             system_prompt=system_prompt or _SYSTEM_PROMPT,
             content_blocks=content_blocks,
@@ -856,6 +881,41 @@ def extract_pin_header_params(
             data["notes"] = (str(data.get("notes") or "") + "\n" + warning).strip()
             if progress:
                 progress(warning)
+    if data.get("layout") == "castellated":
+        try:
+            _castellated_sides(data.get("castellated_sides"))
+        except _PinNumberConflict as exc:
+            if progress:
+                progress(f"Numerazione contatti incoerente: {exc}. Richiesta correzione prima dell'analisi foto.")
+            repair_blocks = list(content_blocks) + [{"type": "text", "text": (
+                "Correggi esclusivamente la numerazione fisica dei contatti della risposta precedente. "
+                "Confronta il pinout originale: GPIO e sigle elettriche sono pin_names, non numeri pad. "
+                "first_pin e' il minimo della sequenza; reverse ne inverte l'ordine spaziale. "
+                "Non cambiare lati, conteggi, geometria o ordine delle sigle. "
+                "Se i documenti non stabiliscono la numerazione, ometti first_pin su TUTTI i lati "
+                "per adottare una convenzione progressiva esplicitamente da verificare. "
+                f"Conflitto: {exc}. Lati precedenti: {data.get('castellated_sides')!r}"
+            )}]
+            try:
+                repaired = diagnostic_call(model=model or DEFAULT_MODEL,
+                    system_prompt=system_prompt or _SYSTEM_PROMPT,
+                    content_blocks=repair_blocks, tool=_openai_tool(),
+                    max_tokens=16384, has_pdf=has_pdf)
+                corrected = _castellated_sides(repaired.get("castellated_sides"))
+                original = data["castellated_sides"]
+                if len(corrected) != len(original) or any(
+                    row["edge"] != old.get("edge") or row["count"] != old.get("count")
+                    for row, old in zip(corrected, original)
+                ):
+                    raise ExtractionError("La correzione della numerazione ha cambiato i lati o i conteggi.")
+                data["castellated_sides"] = [dict(old, first_pin=row["first_pin"],
+                    reverse=row.get("reverse", False)) for old, row in zip(original, corrected)]
+                warning = "Numerazione contatti corretta dopo conflitto AI; verificare la tabella pinout prima dell'utilizzo."
+                data["notes"] = (str(data.get("notes") or "") + "\n" + warning).strip()
+                if progress:
+                    progress(warning)
+            except (OpenRouterError, AttributeError) as repair_error:
+                raise ExtractionError("Correzione numerazione non riuscita; analisi foto non avviata.") from repair_error
     _params_from_tool_arguments(data)
 
     if progress:
@@ -888,30 +948,35 @@ def extract_pin_header_params(
             progress('Viste dall’alto disponibili: ' + (
                 chosen + '. Verrà usata la più dettagliata fra quelle calibrabili.'
                 if chosen else 'nessuna; nessun’altra vista verrà usata al suo posto.'))
-    if (data.get("layout") == "castellated" and data.get("body_length_mm")
+    populated_board = data.get("layout") == "castellated" or component_family == "aggregate_tht"
+    if (populated_board and data.get("body_length_mm")
             and data.get("body_width_mm")):
         from .photo_inventory import extract_inventory
         from .photo_grounding import DEFAULT_VISION_MODEL
         try:
             photo_report = extract_inventory(
                 doc_paths, vision_model or DEFAULT_VISION_MODEL, data["body_length_mm"],
-                data["body_width_mm"], COMPONENT_KINDS, call_tool,
+                data["body_width_mm"], COMPONENT_KINDS, diagnostic_call,
                 progress=progress, top_photo_index=top_index,
                 **({'top_photo_source': 'utente'} if document_roles is not None else {}),
                 extra_instructions=extra_instructions,
                 cache_dir=photo_cache_dir if photo_cache_dir is not None else Path(__file__).resolve().parents[2]/"generated"/"photo-cache",
                 classifier_model=verification_model or model or DEFAULT_MODEL,
                 grounding_prompt=grounding_prompt, verification_prompt=verification_prompt,
+                **({'detector': photo_detector, 'yolo_model_path': yolo_model_path}
+                   if photo_detector == 'yolo' else {}),
             )
         except (OpenRouterError, ValueError, OSError) as exc:
             data["notes"] = (str(data.get("notes") or "") + f"\nInventario fotografico fallito: {exc}").strip()
         if photo_report and photo_report.components:
-            if isinstance(getattr(photo_report, "photo_png", None), bytes):
+            # The global YOLO reconciliation already reports terminal evidence.
+            # Further paid crop calls are an explicit optional UI action only.
+            if photo_detector != 'yolo' and isinstance(getattr(photo_report, "photo_png", None), bytes):
                 from .photo_terminals import observe_terminals
                 try:
                     photo_report.components = observe_terminals(
                         photo_report.photo_png, photo_report.components, vision_model or DEFAULT_VISION_MODEL,
-                        call_tool, progress or (lambda message: None),
+                        diagnostic_call, progress or (lambda message: None),
                         photo_cache_dir if photo_cache_dir is not None else Path(__file__).resolve().parents[2]/"generated"/"photo-cache",
                         **({'system_prompt': terminal_prompt} if terminal_prompt else {}),
                     )
@@ -923,18 +988,18 @@ def extract_pin_header_params(
             suffix = (f"Inventario fotografico: {len(photo_report.components)} ingombri su {photo_report.photo}; "
                       f"{detailed} con terminali osservati. "
                       "Modello meccanico semplificato, senza marcature. XY stimati dalla foto calibrata; "
-                      "altezze indicative, non misure certificate: verificare con vista laterale o misura.")
+                      "altezze indicative, non misure certificate: verificare con una misura diretta.")
             data["notes"] = f"{old_notes} {suffix}".strip()
         if photo_report and photo_report.warnings:
             details = "\n".join(photo_report.warnings[:6])
             if len(photo_report.warnings) > 6:
                 details += f"\nAltri {len(photo_report.warnings)-6} avvisi nel log AI."
             data["notes"] = (str(data.get("notes") or "") + "\n" + details).strip()
-    elif progress and data.get("layout") == "castellated":
+    elif progress and populated_board:
         progress("Secondo passaggio fotografico non avviato: mancano body_length/body_width.")
 
     params = _params_from_tool_arguments(data)
-    if params.is_castellated() and not (photo_report and photo_report.components):
+    if populated_board and not (photo_report and photo_report.components):
         for index, component in enumerate(params.components_3d or [], 1):
             component.update(kind="generic", name=f"Ingombro {index}", marking="",
                              confidence="low", _uncertain=True,
@@ -965,6 +1030,10 @@ def _optional_number(value, *, positive=False, integer=False):
         return int(number) if integer else number
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+class _PinNumberConflict(ExtractionError):
+    """@brief Reject overlapping physical pad ranges before photographic analysis."""
 
 
 def _castellated_sides(raw: Optional[Sequence[dict]]) -> list[dict]:
@@ -1009,10 +1078,21 @@ def _castellated_sides(raw: Optional[Sequence[dict]]) -> list[dict]:
     # Numerazione progressiva sui lati privi di first_pin, nell'ordine in cui
     # sono stati elencati: meglio una numerazione coerente da correggere a
     # mano che dei pad senza numero.
+    used = set()
+    for side in sides:
+        if "first_pin" in side:
+            numbers = set(range(side["first_pin"], side["first_pin"] + side["count"]))
+            overlap = used & numbers
+            if overlap:
+                raise _PinNumberConflict(f"Numero pad duplicato tra lati: {min(overlap)}.")
+            used.update(numbers)
     next_pin = 1
     for side in sides:
         if "first_pin" not in side:
+            while used.intersection(range(next_pin, next_pin + side["count"])):
+                next_pin += 1
             side["first_pin"] = next_pin
+            used.update(range(next_pin, next_pin + side["count"]))
         next_pin = int(side["first_pin"]) + side["count"]
     return sides
 
@@ -1052,8 +1132,16 @@ def _components_3d(raw: Optional[Sequence[dict]]) -> Optional[list[dict]]:
         # schema, eliminarli qui evita che finiscano nella tabella 3D come
         # scatole. I componenti reali devono avere un package sopra la scheda.
         label = component["name"].strip().lower()
+        # Global component IDs are arbitrary display labels; retained detector
+        # proposals are physical hypotheses, even when their class is unknown.
+        # Preserve explicit PCB-feature rejection and the geometry checks below.
+        physical_hypothesis = (
+            entry.get("_global_inventory_status") in ("validated_hypotheses", "partial")
+            or (isinstance(entry.get("_yolo_proposal_id"), str)
+                and bool(entry["_yolo_proposal_id"].strip())
+                and entry.get("_yolo_origin") in ("operating_threshold", "low_confidence_review")))
         if (entry.get("object_type") == "pcb_feature" or
-                ("object_type" not in entry and re.match(
+                (not physical_hypothesis and "object_type" not in entry and re.match(
                     r"^(?:via|pad|piazzola|terminal pad|contatto|castellated|semiforo|serigrafia)\b", label))):
             continue
         if not all(math.isfinite(component[k]) for k in
@@ -1071,14 +1159,29 @@ def _components_3d(raw: Optional[Sequence[dict]]) -> Optional[list[dict]]:
         # Verso di innesto dichiarato dal modello guardando la foto. Senza,
         # la forma 3D dovrebbe indovinarlo dalle sole dimensioni, che per un
         # connettore non bastano. Valori diversi da questi due si ignorano.
-        if entry.get("mating") in ("edge", "top"):
+        if entry.get("mating") in ("edge", "top", "none"):
             component["mating"] = entry["mating"]
-        # Sigla standard del package: apre la libreria 3D di KiCad.
+        # Keep the complete description: the matcher extracts declared tokens,
+        # which may occur after dimensions or beyond a short display label.
         if entry.get("package"):
-            component["package"] = str(entry["package"]).strip()[:64]
+            component["package"] = str(entry["package"]).strip()
+        if entry.get("bbox_basis") in ("body", "leads", "pads", "unknown"):
+            component["bbox_basis"] = entry["bbox_basis"]
+        if isinstance(entry.get("package_evidence"), str):
+            component["package_evidence"] = entry["package_evidence"][:500]
         for key in ("_box", "_id", "_candidate_id", "_source", "_uncertain", "_review_reason",
                     "_detected_kind", "terminal_geometry",
                     "_height_source", "_grounding_kind", "_alternative_kind", "confidence"):
+            if key in entry:
+                component[key] = entry[key]
+        for key in ('_yolo_class', '_yolo_confidence', '_yolo_original_box', '_geometry_source',
+                    'presence_confidence', 'class_confidence', '_yolo_proposal_id',
+                    '_yolo_class_ambiguous', '_yolo_review_only', '_yolo_origin',
+                    '_package_verified', '_orientation_verified', 'pin_count_confidence', 'pin_count_source',
+                    'class', 'component_id', 'source_candidate_ids', 'terminal_count', 'terminal_layout',
+                    '_reported_rotation_deg', '_height_estimated', '_global_inventory_status',
+                    '_global_inventory_errors', '_global_inventory_uncertainties',
+                    '_global_inventory_prompt_version', '_global_inventory_prompt_hash'):
             if key in entry:
                 component[key] = entry[key]
         if isinstance(entry.get("pin_count"), int) and not isinstance(entry.get("pin_count"), bool) and entry["pin_count"] > 0:
@@ -1149,6 +1252,7 @@ def _params_from_tool_arguments(data: dict) -> ExtractedParams:
         body_length_mm=_opt_float("body_length_mm"),
         body_width_mm=_opt_float("body_width_mm"),
         body_height_mm=_opt_float("body_height_mm"),
+        pcb_thickness_mm=_optional_number(data.get("pcb_thickness_mm"), positive=True),
         body_offset_x_mm=_opt_float("body_offset_x_mm"),
         body_offset_y_mm=_opt_float("body_offset_y_mm"),
         pin_length_3d_mm=_opt_float("pin_length_3d_mm"),

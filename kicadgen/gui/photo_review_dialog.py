@@ -13,8 +13,11 @@ caller's dictionaries (including nested metadata).
 The crop edges correspond to the PCB body edges: origin at the board center,
 X right, Y down, positive rotation clockwise in the photo. Length and width
 remain LOCAL dimensions, including at arbitrary angles. Source metadata is
-preserved; an existing normalized full-board ``_box`` cache is refreshed after
-geometry edits. Source-crop ``bbox`` metadata is left as detection provenance.
+preserved except for evidence tied to an edited photograph rectangle:
+``bbox_basis`` becomes unknown and ``package_evidence``/``terminal_geometry``
+are discarded after position, size or rotation edits. An existing normalized
+full-board ``_box`` cache is refreshed. Source-crop ``bbox`` metadata is left
+as detection provenance. Height and text edits do not change that rectangle.
 """
 
 from __future__ import annotations
@@ -23,15 +26,38 @@ from copy import deepcopy
 from dataclasses import dataclass
 from html import escape
 import math
+from pathlib import Path
 
-from PyQt6.QtCore import QPointF, QRectF, QSignalBlocker, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QPointF, QRectF, QSignalBlocker, Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QPolygonF
 from PyQt6.QtWidgets import (
     QAbstractItemView, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
     QGraphicsItem, QGraphicsPolygonItem, QGraphicsScene, QGraphicsSimpleTextItem,
     QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton,
-    QVBoxLayout, QWidget,
+    QVBoxLayout, QWidget, QApplication, QMessageBox,
 )
+
+
+class _MatchWorker(QThread):
+    """@brief Compute CAD candidates off the UI thread from a detached snapshot."""
+    done = pyqtSignal(dict)
+    failed = pyqtSignal(str)
+
+    def __init__(self, component):
+        super().__init__(QApplication.instance())
+        self.component = deepcopy(component)
+
+    def run(self):
+        """@brief Find candidates locally; no AI requests are made."""
+        try:
+            from ..cad3d.kicad_models import model_candidates
+            # A previous rejection/selection controls generation, not whether
+            # the user may reopen this dialog to explore alternatives.
+            proposal = deepcopy(self.component)
+            proposal.pop('model_selection', None)
+            self.done.emit(model_candidates(proposal, limit=5))
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 @dataclass(frozen=True)
@@ -217,6 +243,12 @@ class _ComponentItem(QGraphicsPolygonItem):
         # No pen or label padding: this is the physical package envelope.
         return self.mapToScene(self.polygon()).boundingRect()
 
+    def mouseDoubleClickEvent(self, event):
+        """@brief Open KiCad alternatives for the clicked photographic component."""
+        self.editor._select_row(self.editor._items.index(self))
+        self.editor.choose_model()
+        event.accept()
+
     def itemChange(self, change, value):
         """@brief Provide the itemChange operation for this workflow."""
         result = super().itemChange(change, value)
@@ -273,6 +305,8 @@ class PhotoReviewDialog(QDialog):
             raise ValueError("Invalid PCB dimensions or component geometry") from exc
         self._items = []
         self._applied = False
+        self._closing = False
+        self._match_worker = None
         self.setWindowTitle("Revisione componenti da foto")
         self.resize(1120, 740)
         layout = QVBoxLayout(self)
@@ -330,6 +364,14 @@ class PhotoReviewDialog(QDialog):
             form.addRow(label, field)
             self.fields[key] = field
         sidebar.addWidget(self.form_widget)
+        self.model_button = QPushButton("Scegli modello KiCad…")
+        self.model_button.setAutoDefault(False)
+        self.model_button.clicked.connect(self.choose_model)
+        sidebar.addWidget(self.model_button)
+        self.model_status = QLabel("Doppio clic su un componente per confrontare i modelli 3D.")
+        self.model_status.setWordWrap(True)
+        self.model_status.setTextFormat(Qt.TextFormat.PlainText)
+        sidebar.addWidget(self.model_status)
         self.warning_label = QLabel()
         self.warning_label.setWordWrap(True)
         self.warning_label.setTextFormat(Qt.TextFormat.PlainText)
@@ -356,6 +398,7 @@ class PhotoReviewDialog(QDialog):
         self.zoom_in_button.clicked.connect(lambda: self.view.zoom(1.2))
         self.zoom_out_button.clicked.connect(lambda: self.view.zoom(1 / 1.2))
         self.component_list.currentRowChanged.connect(self._select_row)
+        self.component_list.itemDoubleClicked.connect(lambda _item: self.choose_model())
         self.scene.selectionChanged.connect(self._selection_changed)
         for component in self._components:
             self._append_item(component)
@@ -407,6 +450,7 @@ class PhotoReviewDialog(QDialog):
             self.component_list.setCurrentRow(self._items.index(selected) if selected else -1)
         self.form_widget.setEnabled(selected is not None)
         self.delete_button.setEnabled(selected is not None)
+        self.model_button.setEnabled(selected is not None and self._match_worker is None)
         if selected:
             for key, field in self.fields.items():
                 with QSignalBlocker(field):
@@ -423,6 +467,18 @@ class PhotoReviewDialog(QDialog):
         if not self.photo_rect.adjusted(-1e-7, -1e-7, 1e-7, 1e-7).contains(item.photo_bounds()):
             warnings.append(self._tr("Fuori dai bordi PCB: verificare posizione e dimensioni."))
         component = item.component
+        selection = component.get('model_selection') or {}
+        if (component.get('model_match') or {}).get('status') == 'import_failed':
+            warnings.append(self._tr("Importazione STEP fallita: il 3D mostra un segnaposto, non il modello scelto."))
+        if selection.get('status') != 'confirmed':
+            warnings.append(self._tr("Modello KiCad non confermato: doppio clic per scegliere."))
+        else:
+            try:
+                available = Path(selection.get('path', '')).is_file()
+            except (OSError, TypeError, ValueError):
+                available = False
+            if not available:
+                warnings.append(self._tr("Il file STEP scelto non è disponibile: scegliere nuovamente."))
         if component.get("_uncertain") or str(component.get("confidence", "")).lower() == "low":
             warnings.append(self._tr("Rilevamento incerto / bassa confidenza: verifica manuale richiesta."))
         if component.get("warnings"):
@@ -452,7 +508,7 @@ class PhotoReviewDialog(QDialog):
         item.setToolTip(escape(text + ("\n" + "\n".join(warnings) if warnings else "")))
         if item.isSelected():
             if item.component.get('_height_source'):
-                warnings.append(self._tr("Altezza indicativa: verificare con vista laterale o misura."))
+                warnings.append(self._tr("Altezza indicativa: verificare con una misura diretta."))
             self.warning_label.setText(
                 "\n".join(warnings)
                 if warnings else self._tr("Nessun avviso per questo componente.")
@@ -470,6 +526,15 @@ class PhotoReviewDialog(QDialog):
         self.scene.setSceneRect(rect.adjusted(-margin, -margin, margin, margin))
 
     def _geometry_changed(self, item):
+        # The original pixel region no longer supports its boundary evidence or
+        # normalized terminal boxes. Keep package/mating identity, but do not
+        # stretch or relocate observed metal as if it had been measured again.
+        if "bbox_basis" in item.component:
+            item.component["bbox_basis"] = "unknown"
+        item.component.pop("package_evidence", None)
+        item.component.pop("terminal_geometry", None)
+        item.component.pop("model_match", None)
+        item.component.pop("model_selection", None)
         if "_box" in item.component:
             bounds = item.photo_bounds()
             item.component["_box"] = (
@@ -480,6 +545,9 @@ class PhotoReviewDialog(QDialog):
         self._update_scene_rect()
 
     def _item_moved(self, item):
+        if item.pos() == self.photo_transform.mm_to_pixel(
+                float(item.component["x_mm"]), float(item.component["y_mm"])):
+            return
         point = self.photo_transform.pixel_to_mm(item.pos().x(), item.pos().y())
         item.component.update(x_mm=point.x(), y_mm=point.y())
         if item.isSelected():
@@ -492,6 +560,8 @@ class PhotoReviewDialog(QDialog):
         item = self._selected_item()
         if item is None:
             return
+        if value == float(item.component.get(key, 0 if key == "rotation_deg" else 1)):
+            return
         item.component[key] = value
         if key in self._GEOMETRY_FIELDS:
             item.sync_geometry()
@@ -503,7 +573,63 @@ class PhotoReviewDialog(QDialog):
             value = self.text_fields[key].text()
             if value != str(item.component.get(key, "")):
                 item.component[key] = value
+                if key == 'kind':
+                    item.component.pop('model_match', None)
+                    item.component.pop('model_selection', None)
                 self._refresh_item(item)
+
+    def choose_model(self):
+        """@brief Resolve plausible local CAD models for the selected component asynchronously."""
+        item = self._selected_item()
+        if item is None or self._match_worker is not None:
+            return
+        snapshot = deepcopy(item.component)
+        worker = _MatchWorker(snapshot)
+        self._match_worker = worker
+        self.model_button.setEnabled(False)
+        self.model_status.setText("Ricerca candidati KiCad e misure STEP…")
+        worker.done.connect(lambda report: self._show_model_candidates(item, snapshot, report))
+        worker.failed.connect(self._match_failed)
+        worker.finished.connect(self._match_finished)
+        worker.finished.connect(worker.deleteLater)
+        # A dismissed editor must not destroy a running measurement thread.
+        QApplication.instance().aboutToQuit.connect(worker.wait)
+        worker.start()
+
+    def _match_failed(self, message):
+        if not self._closing:
+            self.model_status.setText("Ricerca KiCad fallita: " + message)
+
+    def _match_finished(self):
+        self._match_worker = None
+        if not self._closing:
+            self.model_button.setEnabled(self._selected_item() is not None)
+
+    def _show_model_candidates(self, item, snapshot, report):
+        if self._closing or item not in self._items or item.component != snapshot:
+            return
+        from .model_candidates_dialog import ModelCandidatesDialog
+        bounds = item.photo_bounds()
+        # Context exposes missed leads/tabs and makes a too-small AI box visible.
+        margin = max(12, max(bounds.width(), bounds.height()) * .30)
+        crop = self.photo_item.pixmap().copy(
+            bounds.adjusted(-margin, -margin, margin, margin).intersected(self.photo_rect).toAlignedRect())
+        dialog = ModelCandidatesDialog(item.component, report, photo_crop=crop, parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            selection = deepcopy(dialog.selected_selection())
+            previous = item.component.get('model_match') or {}
+            same_failure = (previous.get('status') == 'import_failed'
+                            and selection == item.component.get('model_selection'))
+            if not same_failure:
+                item.component['model_match'] = deepcopy(report)
+            item.component['model_selection'] = selection
+        self.model_status.setText("Candidati pronti. Premi Applica correzioni per salvare le scelte.")
+        self._refresh_item(item)
+
+    def reject(self):
+        """@brief Discard the editing transaction without applying pending worker results."""
+        self._closing = True
+        super().reject()
 
     def add_component(self):
         """Add a generic package at the visible center, then select its controls."""
@@ -551,5 +677,6 @@ class PhotoReviewDialog(QDialog):
         for key in self.text_fields:
             self._text_edited(key)
         self._applied = True
+        self._closing = True
         self.components_applied.emit(self.get_components())
         super().accept()

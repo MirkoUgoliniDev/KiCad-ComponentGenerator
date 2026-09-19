@@ -60,13 +60,15 @@ def test_extraction_action_is_centered_below_separate_tools(window):
     assert window.group_component_analysis.isAncestorOf(window.btn_extract_ai)
     assert not window.group_component_analysis.isAncestorOf(window.docs_list)
     assert window.group_ai_tools.isAncestorOf(window.combo_model)
-    assert window.group_ai_tools.isAncestorOf(window.combo_vision_model)
-    assert window.group_ai_tools.isAncestorOf(window.btn_pick_vision_model)
+    assert window.group_ai_tools.isAncestorOf(window.btn_pick_model)
+    assert not hasattr(window, 'combo_vision_model')
+    assert not hasattr(window, 'combo_verification_model')
     assert not window.group_ai_tools.isAncestorOf(window.combo_component_type)
     assert window.group_ai_tools.isAncestorOf(window.btn_ai_log)
     assert window.group_ai_tools.isAncestorOf(window.btn_component_prompt)
     assert window.group_ai_tools.isAncestorOf(window.btn_photo_comparison)
-    assert window.btn_photo_comparison.text() == 'Rivedi rilevamento foto…'
+    assert window.btn_photo_comparison.text() == 'Rivedi foto / scegli modelli KiCad…'
+    assert not window.btn_photo_comparison.isHidden()
     assert 'Non avvia la generazione' in window.btn_photo_comparison.toolTip()
     tools_layout = window.group_ai_tools.layout()
     assert tools_layout.contentsMargins().bottom() >= 12
@@ -704,7 +706,7 @@ def test_worker_forwards_separate_photo_and_datasheet_models(monkeypatch):
     assert calls[0][1]["terminal_prompt"] == "terminals"
 
 
-def test_settings_pass_save_and_display_separate_vision_model(window, monkeypatch):
+def test_settings_preserve_legacy_defaults_but_runtime_uses_one_model(window, monkeypatch):
     window.profile_store.save_defaults({'vision_model': 'vendor/old-photo'})
     window._session_model = "vendor/session-datasheet"
     saved = []
@@ -731,36 +733,34 @@ def test_settings_pass_save_and_display_separate_vision_model(window, monkeypatc
     assert defaults["verification_prompt"] == "verify"
     assert defaults["model"] == "vendor/new-datasheet"
     assert window._effective_model() == "vendor/session-datasheet"
-    assert window._vision_model() == "vendor/new-photo"
-    assert window.combo_vision_model.currentText() == "Predefinito: vendor/new-photo"
-    assert "Modello foto: vendor/new-photo" in window.log_text.toPlainText()
+    assert window._vision_model() == "vendor/session-datasheet"
+    assert window._verification_model() == "vendor/session-datasheet"
 
 
-def test_photo_model_selection_is_independent_and_can_return_to_default(window, monkeypatch):
-    window.profile_store.save_defaults({'vision_model': 'vendor/default-photo'})
-    window._session_model = "vendor/session-datasheet"
+def test_single_model_selection_drives_all_ai_stages_and_can_return_to_default(window, monkeypatch):
+    window.profile_store.save_defaults({'model': 'vendor/default'})
     window._refresh_model_combo()
-    monkeypatch.setattr(gui, "pick_model", lambda *args, **kwargs: "vendor/session-photo")
-    window.btn_pick_vision_model.click()
-    assert window._vision_model() == "vendor/session-photo"
-    assert window._effective_model() == "vendor/session-datasheet"
-    assert window.profile_store.defaults()["vision_model"] == "vendor/default-photo"
-    assert window.combo_vision_model.currentData() == "vendor/session-photo"
+    monkeypatch.setattr(gui, "pick_model", lambda *args, **kwargs: "vendor/session")
+    window.btn_pick_model.click()
+    assert window._vision_model() == "vendor/session"
+    assert window._verification_model() == "vendor/session"
+    assert window._effective_model() == "vendor/session"
+    assert window.profile_store.defaults()["model"] == "vendor/default"
+    assert window.combo_model.currentData() == "vendor/session"
     monkeypatch.setattr(gui, "pick_model", lambda *args, **kwargs: None)
-    window.btn_pick_vision_model.click()
-    assert window._vision_model() == "vendor/session-photo"
-    window.combo_vision_model.setCurrentIndex(0)
-    assert window._vision_model() == "vendor/default-photo"
-    assert window._effective_model() == "vendor/session-datasheet"
+    window.btn_pick_model.click()
+    assert window._vision_model() == "vendor/session"
+    window.combo_model.setCurrentIndex(0)
+    assert window._vision_model() == "vendor/default"
+    assert window._effective_model() == "vendor/default"
 
 
-def test_vision_default_and_real_settings_interface(window):
-    from kicadgen.services.photo_grounding import DEFAULT_VISION_MODEL
-    assert window._vision_model() == DEFAULT_VISION_MODEL
+def test_single_default_model_is_used_for_vision(window):
+    assert window._vision_model() == window._default_model()
     settings = gui.LlmSettingsDialog("prompt", "vendor/datasheet", window,
                                      current_vision_model=window._vision_model())
     try:
-        assert settings.vision_model() == DEFAULT_VISION_MODEL
+        assert settings.vision_model() == window._default_model()
     finally:
         settings.close()
 
@@ -779,14 +779,14 @@ def test_custom_profile_drives_geometry_family_and_worker_snapshot(window, monke
     assert window.group_castellated.isChecked()
     assert 'istruzioni specifiche' in window.field_component_prompt.toPlainText()
     assert 'note libere' in window.field_component_prompt.toPlainText()
-    assert window.combo_verification_model.currentText() == 'Predefinito: type/verify'
+    assert window.combo_model.currentText() == 'Predefinito: type/data'
     monkeypatch.setattr(gui.ExtractWorker, 'start', lambda self: None)
     item = QListWidgetItem('board.png')
     item.setCheckState(Qt.CheckState.Checked)
     window.docs_list.addItem(item)
     window._extract_with_ai()
     worker = window._extract_worker
-    assert (worker.model, worker.vision_model, worker.verification_model) == ('type/data', 'type/photo', 'type/verify')
+    assert (worker.model, worker.vision_model, worker.verification_model) == ('type/data', 'type/data', 'type/data')
     assert worker.system_prompt == 'type prompt'
     assert worker.grounding_prompt.startswith('ground') and 'extra foto' in worker.grounding_prompt
     assert worker.verification_prompt.startswith('verify') and 'extra foto' in worker.verification_prompt
@@ -797,19 +797,17 @@ def test_custom_profile_drives_geometry_family_and_worker_snapshot(window, monke
     window._on_extract_finished()
 
 
-def test_verification_session_is_independent_and_does_not_persist(window, monkeypatch):
+def test_single_session_model_does_not_persist(window, monkeypatch):
     before = window.profile_store.defaults()
-    window._session_model = 'session/data'
-    window._session_vision_model = 'session/photo'
-    monkeypatch.setattr(gui, 'pick_model', lambda *a, **kw: 'session/verify')
-    window.btn_pick_verification_model.click()
-    assert window._verification_model() == 'session/verify'
-    assert window._effective_model() == 'session/data'
-    assert window._vision_model() == 'session/photo'
+    monkeypatch.setattr(gui, 'pick_model', lambda *a, **kw: 'session/all')
+    window.btn_pick_model.click()
+    assert window._verification_model() == 'session/all'
+    assert window._effective_model() == 'session/all'
+    assert window._vision_model() == 'session/all'
     assert window.profile_store.defaults() == before
-    window.combo_verification_model.setCurrentIndex(0)
-    assert window._verification_model() == before['verification_model']
-    assert window._effective_model() == 'session/data'
+    window.combo_model.setCurrentIndex(0)
+    assert window._verification_model() == before['model']
+    assert window._effective_model() == before['model']
 
 
 def test_removed_type_refresh_preserves_free_notes_and_falls_back(window):
@@ -831,7 +829,7 @@ def test_only_defaults_refresh_does_not_replace_session_prompt(window):
     assert window._effective_model() == 'new/default'
 
 
-def test_start_extraction_uses_vision_config_and_resets_photo_state(window, raw_params, monkeypatch):
+def test_start_extraction_uses_single_model_and_resets_photo_state(window, raw_params, monkeypatch):
     window._on_extracted(raw_params)
     window.profile_store.save_defaults({'vision_model': 'vendor/photo'})
     window._session_model = "vendor/datasheet"
@@ -842,12 +840,13 @@ def test_start_extraction_uses_vision_config_and_resets_photo_state(window, raw_
     window.docs_list.addItem(row)
     window._extract_with_ai()
     assert window._extract_worker.model == "vendor/datasheet"
-    assert window._extract_worker.vision_model == "vendor/photo"
+    assert window._extract_worker.vision_model == "vendor/datasheet"
+    assert window._extract_worker.verification_model == "vendor/datasheet"
     assert window._photo_png is None
     assert window._photo_overlay_png is None
     assert not window.btn_photo_comparison.isEnabled()
-    assert "Modello foto: vendor/photo" in window.ai_progress_text.toPlainText()
-    assert "modello datasheet vendor/datasheet" in window.log_text.toPlainText()
+    assert "Modello AI unico: vendor/datasheet" in window.ai_progress_text.toPlainText()
+    assert "modello AI vendor/datasheet" in window.log_text.toPlainText()
 
 
 @pytest.mark.parametrize("layout", ["castellated", "matrix"])

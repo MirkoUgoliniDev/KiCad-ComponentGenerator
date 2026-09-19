@@ -13,6 +13,7 @@ estendono da Z=-pin_length_mm a Z=0, il corpo da Z=0 a Z=height_mm.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 
 @dataclass
@@ -27,6 +28,9 @@ class Body3DParams:
     pin_length_mm: float = 3.0
     color_hex: str = "#1a1a1a"       # colore del case
     pin_color_hex: str = "#b0b0b0"   # colore dei pin (metallo)
+    pcb_thickness_mm: float | None = None
+    components: list | None = None
+    populated_board: bool = False
 
     def validate(self) -> None:
         """@brief Validate dimensions, colors and pin extrusion constraints."""
@@ -34,6 +38,9 @@ class Body3DParams:
 
         validate_hex_color(self.color_hex, "Colore del corpo")
         validate_hex_color(self.pin_color_hex, "Colore dei pin")
+        if self.pcb_thickness_mm is not None and (
+                not math.isfinite(self.pcb_thickness_mm) or self.pcb_thickness_mm <= 0):
+            raise ValueError("Spessore PCB non valido.")
         if self.length_mm <= 0 or self.width_mm <= 0 or self.height_mm <= 0:
             raise ValueError(
                 "Le dimensioni del corpo (lunghezza/larghezza/altezza) devono essere > 0."

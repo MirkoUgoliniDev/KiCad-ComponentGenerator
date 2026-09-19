@@ -1,7 +1,659 @@
 # Handoff — sessione 2026-09-19
 
+## Copertura dei corpi prima della classificazione — integrazione20/09
+
+Ultimo stato: implementate e ritestate anche le correzioni del reviewer.
+Suite completa checkpoint2248 passed,2 xfailed,19 subtests; dopo le ultime
+patch394 test integrazione superati (28.48s), agente parser499, detector183.
+Detectorcall produzione include_review_candidates=True: replay locale63
+ordinarie+48 deboli=111 ipotesi (NON111 componenti reali). Include i due corpi
+esaminati nel replay, senza garantire completezza sulla foto dell'utente.
+Nessun cambio pesi/soglia ordinaria; candidati.05-.25 distinti con metadata.
+Promptv3/schema2 invalida cache precedenti: prossimo avvio verifica AI a pagamento
+normale, payload maggiore ma stesso numero di viste/chiamate. UI conserva
+incerti generici. Test API simulata e inferenza detector reale, NON nuova
+verifica AI reale. Handoff storico seguente descrive checkpoint precedenti.
+Commit/push richiesti, in preparazione dopo controllo segreti e revisione.
+
+Checkpoint integrazione20/09: suite completa2248 passed,2 xfailed,19 subtests
+(159.44s). Restano ultime patch/retest integrazione candidati deboli e filtro
+nomi legacy: review read-only ha trovato corpi globali persi quando ID/nome
+contiene 'pad', e shorthand0603-class non normalizzato. Bernoulli corregge.
+Feynman replay locale sul crop storico: due corpi vicini IC con score.205/.177
+persi primaNMS, da confrontare con screenshot attuale; coda review da.05
+ora collegata al detectorcall produzione, metadata review_only espliciti.
+Laplace promptv3/schema2: presenza separata da classe e cancellazione solo con
+categoria fisica esplicita, fallback conserva geometrie. Nessuna nuova API pagata.
+
+Utente prioritizza rilevare tutti i corpi fisici, mantenendo sconosciuti quelli
+non classificabili; nessun cambio modello. Metadati del file ONNX verificati:
+21 classi elettroniche, input640, SHA256
+bfc398bb93ce61d9d7d00389db51b651bd90c4e2141163a0ae6dad79a247ae29.
+Non dimostrano accuratezza sui package. Agenti attivi: Feynman detector/audit,
+Laplace contratto verifica globale, Bernoulli normalizzazione package/matcher.
+Screenshot utente mostra due piccoli corpi senza box; causa ancora da provare.
+generated risulta vuota nella verifica corrente: non dichiarare ispezionato
+l'audit della nuova esecuzione. Precedente diagnosi package descrittivi da
+confermare con replay disponibile. Commit e push sul branch YOLO-SOLUTION
+richiesti e autorizzati, ancora NON eseguiti; escludere segreti e artefatti.
+Ultima suite completa resta quella documentata sotto, non quella delle
+correzioni attualmente in corso.
+
+## Integrazione candidati interattivi — completata, pronta per prova utente
+
+Branch YOLO-SOLUTION, HEAD 2ffc123, worktree preesistente sporco da preservare.
+Utente richiede integrazione app: JSON fino a5 modelli plausibili, revisione
+grafica con scelta/nessuno e rotazione persistenti, prompt globale aggiornato,
+default anthropic/claude-opus-5. Agenti Einstein matcher, Cicero dialogo,
+Linnaeus inventario globale; coordinatore integrazione/persistenza/test.
+Nessun commit/push. Default Opus aggiornato anche nel DB reale via ProfileStore,
+nessun override per tipologia presente. Inventario globale integrato nel ramo
+YOLO; observe_terminals automatico escluso in questa modalita' (resta manuale).
+Scelte/report passano da foto a tabella/ComponentBox/CAD e sono salvati in JSON
+con hash foto e chiave geometria/package; cambi geometria invalidano le scelte.
+Dialogo candidati con ritaglio e STEP thumbnail reale; doppio clic foto apre la
+scelta, bottone revisione ora visibile anche senza Advanced. Integrazione click
+3D completata (tasto destro), inclusi solidi/serigrafie con source_row originale
+preservato quando altre righe sono escluse. Una scelta confermata con rotazione
+null usa inferenza assi nativa;0 e' override esplicito. Report JSON danneggiati
+non bloccano anteprima. Import STEP fallito -> segnaposto magenta + stato
+import_failed nel report e avviso GUI; aprire/annullare non cancella l'avviso.
+
+Verifica finale:2195 passed,2 xfailed noti,19 subtests (138.16s), poi52 test
+mirati sulle ultime correzioni audit (5.89s). Include generazione FreeCAD reale
+con modello confermato, colori/geometria verificati, e file STEP corrotto.
+Primi run rossi erano contratto autoattach obsoleto + regressioni ora corrette.
+git diff --check pulito al controllo intermedio. Nessuna chiamata AI pagata
+durante integrazione, nessun cambio branch/commit/push.
+
+Replay offline risposta Opus v2: controllo link piu' rigoroso trova candidato33
+incoerente;50 corpi+1 proposta irrisolta conservata=51 ipotesi,33 con candidati.
+Non e' una nuova analisi ne' prova di accuratezza. Regolatore offre SOT-223;
+SOT-223-8 escluso per terminali incompatibili. Non promettere tutti i corpi
+corretti: foto/bbox/angoli restano ipotesi e WROOM-1U non ha STEP preciso locale.
+Il nuovo flusso richiede conferma manuale per i match dimensionali; fino a
+conferma le geometrie sono segnaposto, anche se un candidato e' unico.
+
+Guida:docs/interactive-kicad-models.md. Ripartire con python main.py; default
+Opus e YOLO. Rivedi foto/scegli modelli -> doppio clic su corpo -> seleziona
+STEP o nessuno, rotazione -> Applica correzioni -> Rigenera modello 3D.
+Stato su disco kicad-model-choices.json, report kicad-model-candidates.json
+nella cartella componente. Restore solo foto/geometria/package identici,
+nessun riutilizzo per geometria duplicata ambigua. Crop/prompt/risposta audit
+in generated/photo-cache/yolo-audit. Screenshot dialogo reale verificato nel
+workspace chat outputs/app-candidates-replay/candidate-dialog.png.
+
+Prova standalone v2 completata: Opus50 componenti,37 candidati dimensionali,
+13 irrisolti,0.459675USD. Regolatore ora SOT-223, candidato STEP con erroreXY21%,
+non identita' elettrica certificata. Prompt e output in workspace chat
+outputs/ESP32-global-inventory-Opus-v2. Precedente CAD Opus generato con38 STEP
+e14 placeholder,10 sovrapposizioni; WROOM-1U placeholder. Correzione rispetto
+alla sezione storica seguente: CAD standalone e seconda prova sono avvenuti,
+ma non erano ancora integrati nell'app prima di questa richiesta.
+
+## Confronto modello Opus — completato
+
+Utente richiede modello migliore. Catalogo live OpenRouter conferma
+anthropic/claude-opus-5 con immagini e tools, prezzo 5/25 USD per M token.
+Stessa richiesta globale (63 candidati,5 immagini,prompt/schema invariati),
+output separato outputs/ESP32-global-inventory-Opus; una chiamata autorizzata.
+Input JSON/prompt/schema identici verificati byte per byte. Opus:52 componenti,
+63 decisioni senza errori strutturali, costo0.419895USD,108.07s. Sonnet45,
+0.162124USD,86.07s. Matcher identico:38 candidati dimensionali Opus contro20;
+conflitti angolo/bbox nel controllo grossolano1 contro12 (non validazione CAD).
+Opus propone2transistor, mantiene WROOM; U4 ancora ic con evidenza crystal/
+oscillator incerta,14matching irrisolti. Non prova accuratezza dei52 oggetti.
+CONFRONTO.md,comparison.json,RISULTATI.md,MATCHING-KICAD.md salvati nella
+cartella output Opus. Nessun cambio del modello predefinito app, nessun CAD.
+
+## Matching standalone JSON globale — completato
+
+Richiesto utente prima del CAD. work/map_global_inventory.py usa misure del
+matcher KiCad con prefiltro esplicito famiglia/package (no substring generiche,
+no array per singoli passivi, no fusibili/distanziali). Confronto rispetta
+bbox_basis body o body_and_leads; tolleranza preesistente 30%. 27 STEP distinti
+esaminati, 20/45 candidati dimensionali, 25 irrisolti; non sono 20 identita'
+certificate. Nessun S3-WROOM-1U nella libreria RF installata (presenti 1 e 2,
+non sostituiti). 12 angoli AI confliggono con asse lungo bbox; rotazione KiCad
+resta null. Output chat outputs/ESP32-global-inventory/kicad-matching.json e
+MATCHING-KICAD.md. Nessuna modifica funzionale app o nuova API pagata; CAD non
+assemblato: richiesta corrente era provare prima il mapping del JSON.
+
+## Prova inventario globale unico — in corso
+
+Utente autorizza una richiesta unica con JSON YOLO, classe/package/rotazione e
+relazioni. Script standalone nel workspace chat work/global_inventory_trial.py;
+output outputs/ESP32-global-inventory. Modello sonnet-5 come precedente prova,
+63 candidati ricreati localmente (generated era stato svuotato), 5 immagini:
+foto, overlay e tre pannelli. Quote 63.3x25.4 riprese dalla precedente analisi
+e dichiarate stimate. Schema impone decisione per ogni ID e riferimenti a
+componenti finali. Nessuna integrazione app o generazione CAD in questo test.
+
+## Audit risultato 20:05 — difetti riprodotti, non corretti in questo audit
+
+Branch YOLO-SOLUTION HEAD 2ffc123. Utente richiede diagnosi con agenti esperti.
+Boole verifica omissione WROOM: coverage restituisce solo box [590,1010,660,1070]
+fuori 0..1000, scartato; review elimina #2/#23/#35 come frammenti di un modulo
+"presente altrove", ma nessun modulo sopravvive. apply_review elimina present=false
+high senza ID sostitutivo o controllo globale. FreeCAD riceve gia' 51 componenti.
+Cilindro identificato nel freecad.log: Cmp25_capacitor_30 importa
+Mounting_Wuerth_WA-SMSE-ExternalM3_H6mm_9771060360.step. Ricerca 0603 per
+sottostringa intercetta il codice 9771060360; famiglia Mounting_Wuerth non
+riconosciuta, filtro non pone veto; confronto body 3x3 accetta misura 2.49x2.82
+pur importando ingombro totale 6x6. Averroes conferma nel mesh un solido
+6x6x12.5mm e path distanziale (H6 nel nome non e' l'altezza totale).
+Altri importi errati: capacitor51 -> Fuse_0402; resistor19/45 -> R_Array.
+size_distance sceglie body/total/lands senza rispettare bbox_basis; famiglie
+sconosciute ammesse anche da test esistente. Audit completati, nessuna patch
+funzionale in questo turno diagnostico; occorrono regressioni su questi casi.
+Nessuna nuova inferenza pagata, nessun file generato sostituito durante audit.
+
+## HTTP 400 copertura — causa riprodotta e corretta
+
+Prova isolata autorizzata su docs/ESP32/AltaRisoluzione.jpg: PNG base64
+11904936 bytes rifiutato dai provider (limiti 5/10 MB). OpenRouter esponeva
+solo ultimo errore Azure Content-Length, occultando i precedenti in metadata.
+Ora image_block comprime immagini oltre 5 MiB base64 in JPEG, prima di ridurre
+eventualmente risoluzione; immagini piccole restano PNG lossless. Prova reale
+con stessa foto e schema: 2553639 caratteri URL, 3487x1391 invariati, SUCCESS.
+Probe usa due copie foto invece dell'overlay e verifica accettazione API,
+non accuratezza o completezza inventario. Log errori ora include categorie
+metadata.raw/previous_errors, limiti numerici e dimensioni richiesta/immagini.
+Nessun contenuto immagini o chiave registrato nei log applicativi.
+
+## Moduli castellated senza altezza complessiva
+
+Rimosso su richiesta il blocco automatico body_height_mm per castellated:
+il modello usa spessore PCB e componenti. Eliminato anche il confronto finale
+con altezza estratta assente; editor inizializzato allo spessore PCB anziche'
+riutilizzare un'altezza precedente. Dimensioni XY e validazioni dei corpi
+non castellated conservate. Verifica: 25 test automatic-generation/documentation
+passati. Nessuna nuova analisi pagata eseguita.
+
+## Fix numeri pad duplicati — completato
+
+Su YOLO-SOLUTION: first_pin espliciti sovrapposti passavano il parser e
+fallivano soltanto dopo tutta l'analisi foto. Ora il parser verifica gli
+intervalli globalmente, riserva i numeri espliciti prima di assegnare quelli
+mancanti e richiede una sola correzione AI sui documenti prima della foto.
+La correzione importa solo first_pin/reverse, preservando geometria e sigle;
+il generatore continua a rifiutare duplicati. Nessuna nuova API reale eseguita.
+HTTP400 e matching package restano aperti, fuori da questo fix richiesto.
+Verifica mirata: 108 test passati, inclusa correzione riuscita e secondo
+tentativo ancora duplicato (rifiutato senza ulteriori chiamate).
+
+## Semplificazione AI, prompt crop v3 e retry HTTP — completati
+
+Branch attuale `YOLO-SOLUTION`; nessun commit o push. La schermata principale
+usa ora un solo `Modello AI` per analisi documenti, foto e verifica dei crop;
+YOLO resta il localizzatore locale separato. I campi di configurazione legacy
+per modello foto/verifica restano nei dati per compatibilita', ma il runtime
+della nuova analisi usa sempre il modello unico selezionato.
+
+I documenti guidati sono ora soltanto pinout, immagine quotata e foto ad alta
+risoluzione. Eliminati il quarto ruolo e i relativi testi, traduzioni, prompt,
+test e documentazione. Le altezze non deducibili vengono richieste come misura
+diretta.
+
+Prompt revisione YOLO aggiornato a `yolo-package-review-3` e riallineato al
+test standalone Opus v3: misure calibrate prima del package, distinzione corpo /
+terminali, end-cap inclusi per i passivi, marcature solo letterali, package vuoto
+se incerto. Corretto il difetto principale: le note profilo dell'intera board e
+le istruzioni utente sul modulo non vengono piu' accodate a ogni singolo crop,
+evitando conflitti come "tratta il modulo RF come un solo oggetto" durante la
+classificazione dei componenti montati.
+
+`OpenRouterError` espone ora `retryable`. Gli HTTP 400/408/409/429/5xx previsti
+generano un solo retry applicativo, sempre visibile nel log con
+`AI_CALL_RETRY ... attempt=2`; il secondo tentativo usa `tool_choice=required`,
+piu' compatibile fra provider. Un secondo errore termina esplicitamente con
+`AI_CALL_FAILURE ... attempts=2`; errori di autenticazione/credito e risposte
+strutturalmente non valide non vengono ripetuti. Nessun loop e nessuna chiamata
+AI reale eseguita durante questa modifica.
+
+Verifiche: suite completa prima dell'ultima pulizia 1997 passed, 2 xfailed e 19
+subtests; suite finale mirata dopo la rimozione documentale 282 passed.
+`git diff --check` senza errori (soli avvisi CRLF del working tree).
+
+## Prova talisma YOLOv5 — pesi assenti, test non eseguito
+
+Utente autorizza prova prima sulla propria foto, senza integrazione app.
+Branch PCB-CD invariato. Verifica GitHub API: best.pt e last.pt sono ENTRAMBI
+0 byte, blob e69de29bb2d1d6434b8b29ae775ad8c2e48c5391. Anche unico commit
+storico per best.pt (ec1b16f,17/08/2022) contiene0byte. Nessuna release trovata.
+Issue2 'Weights missing' conferma segnalazione pubblica. Corregge nostra precedente
+affermazione 'pesi disponibili': erano soltanto nomi file, non checkpointusabili.
+Non installato/eseguito modello; nessuna foto inviata, nessun costoAI, nessuna
+modifica pipeline. Serve checkpoint effettivo o sceltaaltrorepo (SRPCB_GUI ha
+asset reale158MB, ma modello alternativo non ancora eseguito).
+
+## PCB-CD — verifica preliminare, premessa tecnica smentita
+
+Branch attuale PCB-CD, creato da YOLO-SOLUTION su richiesta; HEAD2ffc123,
+modifiche non committate conservate. Utente propone integrazione repository
+s39674/PCB-Component-Detection descrivendolo come Faster R-CNN e autorizza agenti.
+Lettura diretta upstream train.py/predict.py: NON Faster R-CNN. CNN con due
+Conv2d e tre Linear, immagini32x32,20classi; predict.py legge boundingbox da
+CSV preesistente. Nessuna RPN o regressione boundingbox nel modello indicato.
+Fonti https://github.com/s39674/PCB-Component-Detection e raw main/train.py,
+main/predict.py. Audit indipendente Descartes conferma: peso.pth presente248KB
+per classificatore,20classi senza background, nessuna licenza esplicita trovata
+per codice/pesi. Contenuto checkpoint e accuratezza non verificati.
+Nessun codice esterno eseguito, nessun peso deserializzato, nessuna API pagata.
+Nessuna integrazione app implementata: scegliere fra classificatorePCB-CD su
+ritagli gia localizzati e ricerca di un vero detectorFasterRCNN con pesiPCB.
+La descrizione utente non dimostra superiorita geometrica; necessaria prova.
+Test non rilanciati: solo verifica read-only e questo aggiornamento handoff.
+
+## Default GUI YOLO — richiesto e applicato
+
+Su richiesta utente ogni nuovo avvio seleziona YOLO locale + verifica AI.
+Supera il precedente default AI: nessun cambio ai modelli LLM e nessun intervento
+sull'analisi gia in esecuzione. Scelta AI resta disponibile; preflight invariato.
+Default dei servizi Python lasciati compatibili; GUI passa scelta esplicita.
+Branch YOLO-SOLUTION; 108 test GUI/inventario/documentazione passati in41.33s.
+
+## Avvio semplice python main.py — completato
+
+Utente chiede comando standard senza attivazione manuale. Causa verificata:
+app avviata con Python313 globale, privo di onnxruntime; .venv ha runtime1.30.
+main.py ora rilancia con .venv prima degli import GUI/dotenv, preservando args,
+cwd, ambiente e exitcode. Guardia contro cicli; nessuna installazione globale.
+--check-runtime verifica dipendenze senza GUI/.env/API. Branch YOLO-SOLUTION.
+7 test launcher/documentazione passati. Prova reale `python main.py --check-runtime`
+passata: rilancio nel .venv, PyQt6/PIL/cv2/pyvista/pyvistaqt/numpy/onnxruntime OK.
+Nessuna nuova GUI aperta e nessuna API invocata. Suite completa non ripetuta per
+questo solo cambio entrypoint; precedente suite1987passed2xfailed19subtests.
+
+## Integrazione YOLO nell'app + anteprima FreeCAD — completata, da provare con AI reale
+
+Branch rinominato su richiesta esplicita utente: FIX-WITH_FREECAD -> YOLO-SOLUTION.
+HEAD invariato 2ffc123; modifiche locali preservate, nessun commit/push.
+Suite finale: 1987 passed, 2 xfailed, 19 subtests in137.83s; ulteriore controllo
+overflow overrideCAD 7passed. Audit indipendente347passed: tutti5rilievi risolti
+(copertura involucroespanso, rifiutiAIincompleti, overflow, cachebboxinvertiti,
+NaNnegli audit). GUIroundtrip123passed. Agenti conclusi echiusi.
+App pronta per riavvio e selezione YOLO locale+verificaAI. Prova AI reale ancora
+non eseguita: il consenso autorizza il flusso futuro nell'app, non dichiara
+verificata la precisione finale. Preview/output reali eguidaITALIANA in
+chat outputs/ESP32-YOLO-FreeCAD/INTEGRAZIONE.md. Nessun modello pagato imposto.
+
+Blocco egress RISOLTO: utente ha esplicitamente autorizzato overview/ritagli a
+OpenRouter quando seleziona YOLO+verifica AI e avvia analisi. Modulo
+photo_yolo_review.py implementato dopo consenso. Nessuna nuova chiamata pagata
+eseguita in questo turno: prove API con mock, CAD con inventario revisionato.
+Prima suite completa: 1947 passed, 2 xfailed, 19 subtests (143.15s).
+Successive aggiunte in verifica: controllo AI di copertura prima dei ritagli,
+audit univoci con prompt/risposte, override nativo rotazione/Z e sporgenza di
+connettori con mating=edge. 17 test revisione/doc e 27 test CAD/doc passati.
+
+Smoke detector reale sull'attuale prepare_photo: 3487x1391, 30 viste, 6.827s,
+63 PROPOSTE (non 63 componenti), 2265 proposte grezze registrate. Modulo RF
+intero sotto soglia (~0.176) e frammenti/FP presenti. Per questo aggiunta una
+verifica globale AI dei corpi mancanti, non abbassata soglia sul singolo caso.
+La nuova verifica globale non e stata ancora valutata con chiamata reale.
+
+Demo FreeCAD completata sotto chat outputs/ESP32-YOLO-FreeCAD: 43 elementi,
+41 candidati dimensionali STEP da14file e due segnaposto (WROOM-1U ciano,
+LED2020 magenta). STEP/FCStd riaperti validi; volumi dei41importi invariati,
+orientamento terminali verificato geometricamente. NON41identita elettroniche.
+Demo usa annotazioni e orientamenti revisionati, NON nuova analisi autonoma.
+Integrazione non implementa omografia manuale del demo; calibrazione app resta
+quella esistente. Guida nuova docs/yolo-photo-workflow.md.
+
+GUIagentAmpere completato: sceltaAIdefault/YOLO+verificaAI eONNX session-only,
+preflightprimadiAPI. 79testGUI/documentazione passati. RuntimeONNX1.30installato
+.venv; pesi copiati localmodels ehashverificato, ignoratiGit.
+
+Nuova autorizzazione utente: integrare approccio locale nell'app e mostrare3D.
+Contratto photo_detector='ai' defaultcompatibile oppure'yolo', yolo_model_path
+opzionale. Preflightlocale prima diAPIpagate. ModelloONNX locale repo/models/
+pcb_yolov8s.onnx (da ignorareGit, no ridistribuzione finchelicenzaMIT/AGPLambigua).
+Agenti file-disgiunti: Goodall photo_yolo.py/tests/requirements-yolo;
+Ampere main_window/app_config/UItests; Helmholtz solo script/output demoFreeCAD.
+Main gestisce datasheet_extractor/photo_inventory/revisioneYOLO/docs/testintegrazione.
+Replaydemo43usa annotazioni revisionate, NON nuova estrazioneAIautonoma.
+Nessuna nuovaAPIpagata prevista in turno; futuro clickapp usa verificatoreAIconfigurato.
+Nessun commit/push/installazioneKiCad globale. BranchFIX-WITH_FREECAD HEAD2ffc123.
+
+## Matching inventario YOLO -> KiCad — prova conclusa, non integrata
+
+Consegna: outputs/ESP32-KiCad-matching/CONFRONTO.html (43schede foto+renderSTEP),
+CORRISPONDENZE.md (tabella43 misure/assi/candidati), matching.json (alternative e
+provenienza), matching.log/freecad-measure.log. Tutto nel workspacechat corrente.
+Esito finale:41/43 passano filtroXY nelle famiglie selezionate visivamente;
+59STEP effettivamente validi misurati,15modelli distinti renderizzati. Proposte
+passivi:9x0402 e20x0603;R27 resta vicino anche0805. Non41identita certificate.
+8test sperimentali passati;92test test_kicad_model_compatibility.py+
+test_kicad_model_footprints.py passati in134,49s (ultimo scansiona libreriareale).
+Nessuna suite completa app eseguita: nessuna modifica codiceproduzione in turno.
+Noether audit read-only completato echiuso. Risolti: geometrie YOLO/revisionate
+separate in JSON, poligoni/centri coerenti; V010 corpo revisionato invece di
+spanterminali tagliato; ambiguity rinominata score_tie; package_uncertain sempre
+vero; SOT/TSOT altezza ignota esplicita; cristalli2/4pin ammessi conteggioignoto;
+coordinateframe esplicito e kicad_rotation_deg=null; associazioni multiple ai
+footprint preservate. Immagini galleria di geometrieSTEP reali in grigio, non
+montaggio board ne colori reali. Nessun nuovo STEPassemblato o installazione.
+Aperto richiesto nel percorso complessivo: validare varianti/quote incerte,
+recuperare STEP esatti mancanti WROOM1U/LED2020, verificare assi/pin1/mounting prima
+di applicare modelli al layout FreeCAD. App non modificata; zeroassegnazioni.
+
+Prima analisi completata: 43elementi,41con almeno candidato STEP entro filtro
+dimensionale30% preesistente;58STEP letti validi conFreeCAD1.1.1. NON41identita
+verificate: classificazione/bodybounds assistente in visual-observations.json.
+7casi a pari merito geometrico; altezze/EP/pin1 non osservabili. SOT/TSOT differenze
+di sezione65% non provano altezza: non promuovere vincitore numerico aidentita.
+Calibrazione4fori manuali+omografia sperimentale, controllo passo2,542/2,533mm.
+WROOM1U eLED2020 hanno footprint maSTEP assente. Non sostituire1U con1.
+Correzione: regioni non numerate sottoIC/a sinistraquarzo erano gia escluse dal
+riferimento come possibili piazzole non popolate; NON componenti mancanti provati.
+Log live matching.log efreecad-measure.log; matching.json conalternative/quote/hash.
+Stato iniziale58STEP superato da59 dopo inclusione cristalli2pin. App non modificata.
+
+Branch FIX-WITH_FREECAD, HEAD2ffc123, worktree sporco preservato. Utente autorizza
+prova sui43ritagli: calibrazione con Dimensioni.png e fori della foto, famiglie/
+terminali, ricerca STEP locale e report perID con incertezze. Output isolato nel
+workspacechat outputs/ESP32-KiCad-matching; non installare librerie ne sovrascrivere
+modelloapp. Nessuna nuova AIpagata prevista. Suite nuova non ancora eseguita.
+Dimensioni.png indica63,30x25,40, fori a1,80 dai bordi (59,70x21,80 fra centri).
+La foto quotata e una variante diversa: verificare scala tramite passo contatti,
+non usare la disposizione componenti di quella foto come prova del package.
+Riferimento43 non esaustivo; non dichiarare completata identificazione di tutti.
+
+## YOLO nuovo riesame multiscala/rotazioni — concluso, NON completo
+
+Inferenza 708 viste completata in137,7s. A conf0,25:123proposte,
+41abbinati/2mancanti/82extra aIoU0,5 contro43annotazioni assistente.
+Consenso multivista64proposte:40abbinati/3mancanti/24extra. Non migliora precisione.
+work/review_yolo_inventory.py seleziona43osservazioni usando il riferimento:
+REVISIONE ASSISTITA, non43rilevamenti autonomi verificati. QA4contactsheet eoverlay.
+Overlay finale mostra ulteriori piccoli elementi non numerati sottoICgrande e
+a sinistra quarzo: riferimento43 NON esaustivo, non dichiarare trovati tutti.
+Boxcorpo non sempre terminali completi (V025 aletta esclusa). Identita/package
+non verificati, WROOM1U indicato utente; associazioniKiCad0. Nessuna modificaapp.
+Report outputs/ESP32-YOLO-riesame/ESITO.md con lista43, overlay eJSONprovenienza.
+Script riesame supporta --replay dopo fix riferimenti circolari NMS shallowcopy.
+
+### Ricetta del riesame
+
+Utente chiede rielaborare con YOLO per estrarre tutti i componenti visibili.
+Script isolato work/reprocess_yolo.py, sessione57615; outputs/ESP32-YOLO-riesame.
+Stessi pesi ONNX locali.177crop/708viste: overview e320/640/1280px, overlap25%,
+rotazioni0/90/180/270. Soglie prefissate0,10proposte/0,25primaria; NMS0,5.
+Consenso almeno2crop econf>=0,25 marcato ipotesi supportata, NON verifica fisica.
+Mai cancellare candidati incerti solo per mancato consenso. Test inversione
+rotazioni/coprertura griglia/NMSvicini passati. NoAIpagate, noapp/CAD/library edits.
+Previsto confronto riferimento dopo inferenza e QAcontatti; non promettere
+completezza sulla base del conteggio. LibrerieKiCad ancora nessuna nuova associazione.
+
+## Grounding DINO + SAM — conclusa, NON promossa (17:02)
+
+Completate41visteDINO e75maschereSAM su47contesti. CPU: DINO419,7s,
+SAM456,8s (~14,6min esclusi setup/download), nessuna API pagata/foto inviata.
+Confronto box IoU>=0,5 contro43annotazioni assistente: DINOcombinato0,25
+75proposte/9abbinati/34mancanti/66extra; YOLOcombinato0,25 52/41/2/11.
+Box derivati dalle75maschere: ancora9abbinati/34mancanti/66extra; non e
+metrica di accuratezza maschere (nessuna groundtruthpixel). QAoverlay conferma
+fori/sfondo/porzioniPCB scambiati per corpi. Non adottare questa configurazione.
+Prova Tiny+ViTBase con prompt congiunto Transformers, NON esatta replica wrapper
+Autodistill percaption, NON SAM2. Non generalizzare risultato a tutti GroundedSAM.
+Report CONFRONTO.md, overlaybox/maschere,75PNG, raw e log live completi sotto
+outputs/ESP32-test-GroundedSAM nel workspacechat. Metadata revisioni/hash presenti.
+Script corretto dopo run solo per warninglabels e replaycache senzadelfvariabile
+noninizializzata; nessuna modifica risultati. Nessuna associazioneKiCad/CAD/app.
+
+Runtime isolato pronto: torch2.14.0+cpu, transformers4.57.6. GPU AMD integrata,
+CPU4thread. Pesi safetensors ufficiali scaricati, revisioni in
+work/grounded-sam-models/revisions.json. Foto non inviata. Sessione exec8860,
+script work/test_grounded_sam.py; output outputs/ESP32-test-GroundedSAM.
+Al16:53 DINO30/41viste processate, ~10s/vista. Log live inference.log;
+risposte pervista in detections/. SAM seguira sui candidati combinati0,25.
+Prompt congiunto12categorie, non loop Autodistill percaption. NMS/coordinate/
+copertura tile smokecheck passati. Reportgenerator work/report_grounded_sam.py.
+Non dichiarare successo/comparazione finale prima di risultati e QAvisuale.
+
+Utente chiede eseguire pipeline Grounded-SAM sulla foto ad alta risoluzione.
+Prova isolata work/grounded-sam-env e pesi ufficiali HuggingFace in work; nessuna
+API pagata, foto solo locale, nessuna modifica pipeline app. Pianificata versione
+Transformers Grounding DINO tiny + SAM ViT-base (non SAM2, non wrapper Autodistill),
+con crop per SMD e ontologia esplicita; report deve dichiarare modelli/limiti.
+Abbinamento KiCad richiesto prima ma NON eseguito: solo disponibilita candidati
+verificata (SOT23/SOT223/R/C0402/0603); modello esatto WROOM1U non trovato locale.
+Non confondere41localizzazioni YOLO con41modelli KiCad associati: associazioni0.
+
+## Prova locale YOLOv8s conclusa — promettente, NON integrata
+
+Esito16:36:41viste CPU in7,04s, costoAPI0. A conf0,25 overview+tile52proposte,
+41/43abbinamenti IoU>=0,5 contro riferimento visivo assistente,2mancanti,11extra.
+Solooverview40proposte/35abbinati; solotile42/35. A conf0,10 combinato64/42,
+22extra: non adottare soglia bassa come soluzione. Riferimento NON BOM certificata.
+Due transistor campione localizzati/classificati transistor; anche un due-terminali
+falsamente transistor. Mancanti V005/V006 piccoli passivi sinistra IC grande.
+Numerosi SMD rilevati; quarzo classificatoIC, RF localizzatoIC non WROOMidentificato.
+Report/foto/log/raw/metriche: outputs/ESP32-test-YOLOv8s nel workspace chat.
+Script work/test_pcb_yolo.py; smoke test NMS/letterbox/copertura passati.
+Nessun codice app o predefiniti cambiati; suite app non rilanciata.
+Runtime isolato infine include-system-site-packages=false, dipendenze solo nel
+venv esperimento. ModelcardMIT vs metadatiONNX AGPL3: chiarire prima distribuzione.
+
+Utente chiede provare Arshia82sbn/pcb-yolov8s-detection con attenzione agli SMD.
+Autorizzata prova locale, NON integrazione app o addestramento. Scaricati metadata
+HuggingFace e best.onnx sotto Documents/Codex/2026-09-19/new-chat/work/pcb-yolo-model.
+Runtime separato work/pcb-yolo-env; foto resta locale, nessuna API a pagamento.
+Previsto confronto overview e tile nativi, esclusione pads/pins dal conteggio corpi,
+QA su passivi SMD e transistor. Risultati ancora da verificare, nessuna promessa
+su 0402/package nominali; le 21 classi del modello sono famiglie, non package.
+
+## Pausa richiesta utente — valutazione detector specializzati (dopo run 16:26)
+
+Branch verificato FIX-WITH_FREECAD, HEAD 2ffc123; nessun commit/push.
+Utente ha chiesto agenti per inventario TOP, poi ha fermato il lavoro mostrando
+repository YOLO. Fermate nuove modifiche applicative e chiamate pagate; nessun
+detector scaricato/installato. Verifica fonti: SanderGi/PCB-Detection rileva la PCB
+intera, NON i suoi componenti; amraskar/PCB-Defect-Detection rileva sei tipi di
+difetti del rame/fori, NON componenti. talisma-cassoma propone realmente YOLOv5
+per componenti, ancora da valutare per pesi, licenza e copertura sul campione.
+
+Lavoro sperimentale presente, NON integrato nella GUI: photo_top_inventory.py
+(overview + tile nativi + review + ricerca omissioni) e photo_detection_contract.py
+(agente Socrates: trasformazioni, core/halo, validazione conservativa ID/parent).
+Test del primo:17 passed insieme a documentation; agente riporta289 passed per
+contratto/documentation/regressioni. Suite completa NON rilanciata in questa fase.
+Run Opus5 completata:56chiamate,1,3225USD,78 candidati mantenuti,28 scarti,
+0stadi falliti. NON successo qualitativo: duplicati, pin modulo contati come corpi,
+aletta regolatore separata. Non promuovere nel percorso standard.
+Output e log live: Documents/Codex/2026-09-19/new-chat/outputs/ESP32-inventory-strategy/run-1.
+Riferimento indipendente agente Turing:43 corpi annotati in reference-reviewer.json,
+NON BOM/ground truth certificata. Le metriche vanno lette dal suo report se presente.
+Sorgente run: docs/ESP32/AltaRisoluzione.jpg (4000x1848); vecchia generated/.../hires.jpg
+non era piu presente. Non ricreare/ripristinare dati generated senza richiesta.
+Richiesto ma aperto: strategia affidabile completa TOP e successivo tipo/package/CAD.
+Non autorizzato da questa pausa: installazione/addestramento di nuovi detector.
+Preservare tutte le modifiche pregresse. Non presentare il conteggio come recall.
+
+## Concluse prove prompt Opus v2/v3 — NON promosse (16:13)
+
+v3:38 proposte,0 box locali fuori limite,2chiamate parallele,0,2795USD. Risolto
+spostamento sistematico v2, ma ID10 corpo potenza interpretato header con bbox
+parziale; ID36-38 header non confermati/null box; omessi piccoli passivi.
+Nessuna promozione dei prompt nell'app, nessuna modifica codice app o predefiniti.
+Costo iterazione v2+v3=0,7389USD. Registro finale outputs/ESP32-test-Opus-v3/TRACCIA.md,
+prompt e raw per versione, QA visuale annotata. STOP retry a pagamento per questa
+iterazione. Non presentare più candidati come miglioramento o inferire completezza.
+
+Aggiornamento16:11: v2 fallita qualitativamente:47 proposte,0,4594USD,166,97s,
+coordinate parte superiore sembrano in scala overview0,6; bbox formalmente validi
+ma su PCB vuoto/serigrafie. NON promossa. Traccia conservata STORICO-PROMPT.md.
+v3 in corso, due chiamate indipendenti UN crop nativo ciascuna, coordinate LOCALI,
+conversione fullframe in codice. Prompt più breve; confronto cambia metodologia,
+non sostenere che si misura effetto solo-prompt. Output ESP32-test-Opus-v3.
+
+Utente chiede forte miglioramento prompt e tracciabilità. Creata prova sperimentale
+separata ESP32-test-Opus-v2: prompt-v2.txt, STORICO-PROMPT.md, metadata con hash
+prompt/foto, risposta e log. Stesso modello/foto/crop/schema/20k token della v1;
+prompt v2 distingue proprietà corpo/terminali, scala indipendente esplicita,
+limiti coordinate, body/lead/pad, pacchetti condizionati alle quote e orientamenti.
+Nessun conteggio/ID corretto v1 dato al modello. Prompt app ancora invariati in
+questa iterazione, finché la prova non è valutata. Script rifiuta sovrascrittura
+risposte pagate e report-only non modifica metadata; scarti v1 non trasferiti a v2.
+
+## Prova Opus 5 — inventario completo richiesto (16:03)
+
+Utente non vuole Astra; autorizzata prova Opus con elenco, orientamenti, quote/package.
+Una chiamata `anthropic/claude-opus-5`: overview + 3 crop original-pixel, inventario
+TOP completo richiesto. 46 proposte, costo 0,3171 USD, 102,8s. Risposta conservata.
+QA visivo: ID27/28/29 sono piedini ID7, ID30 sua aletta, ID46 zona vuota: 5 scarti.
+41 candidati residui NON sono distinta verificata; mancano alcuni piccoli passivi.
+ID1 modulo bbox oltre larghezza foto (4230>4000): quote invalide, non clampare.
+J3Y letto; SOT23 proposto per coppia; SOT223 grande. Box della coppia troppo larghi
+(includono probabilmente piazzole), LED RGB nominale proposto incompatibile con bbox.
+Report evidenzia discrepanze corpo/nominale >30%, non forza match KiCad.
+Orientamento è asse modulo180, NON rotazione KiCad/pin1; altezze non misurate.
+Scala locale derivata indipendentemente con OpenCV: primo/ultimo di 12 centri
+contatti x543,5..2072,5; 11 passi da2,54mm =>54,72px/mm. Scala isotropa resta
+approssimata; passo coerente con disegno (63,30-5,05-4,91)/21.
+Output Documents/Codex/2026-09-19/new-chat/outputs/ESP32-test-Opus/INVENTARIO.md,
+inventario-numerato.jpg, response.json, request-metadata.json, analisi-ai.log.
+Primo rendering report fermato da validazione bbox: risolto localmente segnalando
+quote NON VALIDE, nessuna seconda chiamata AI. Nessuna modifica app/predefiniti/CAD.
+
+## Confronto DeepSeek richiesto dall'utente (15:56)
+
+Provato ultimo modello vision disponibile `deepseek/deepseek-v4.1-flash`, stessa
+foto/prompt/schema/detail della prova Astra. Primo tentativo 10k: finish_reason=length,
+10k token tutti reasoning, 147,9s, 0,004462 USD, nessuna risposta. Un solo retry
+a 20k: successo, 13 voci, 177s, 0,005965 USD. Totale 0,010427 USD.
+Le 13 voci NON significano quattro componenti reali in più rispetto ai 9 Astra:
+campionamento non fissato, elementi fuori obiettivo e coordinate errate per i
+candidati transistor; J3Y non letto; SOT-223 rimane ambiguo. Astra più utile in
+questa prova mirata, non benchmark generale. Nessun modello salvato modificato.
+Report: Documents/Codex/2026-09-19/new-chat/outputs/ESP32-test-DeepSeek-20k/CONFRONTO.md.
+
+## Completato — prompt marcature e prova mirata 0402/transistor
+
+Nuova richiesta esplicita: usare le marcature visibili come evidenza per tipo/package.
+Il vecchio divieto di lettura marcature era troppo restrittivo. Aggiornato il prompt
+di verifica: testo osservato distinto da ipotesi in `package_evidence`, numero e
+disposizione terminali, corpo distinto da piazzole/saldature/serigrafia PCB, nessuna
+identità certa da una sigla ambigua. Migrazione in memoria delle due clausole legacy;
+nessuna riscrittura dei profili salvati. Test mirati: **313 passed** (grounding,
+verified_family, mechanical_metadata, documentation); diff --check pulito.
+Primo lancio interrotto per errori setup nel percorso temporaneo non scrivibile:
+rilanciare con --basetemp nuovo sotto Documents/Codex e -p no:cacheprovider.
+0402 rifiutato dal resolver per incongruenza con rettangoli fotografici: NON prova
+che il componente reale non sia 0402. Tolleranza non modificata.
+Categoria `transistor` assente dallo schema: per ora il prompt conserva l'ipotesi
+in evidenza e richiede generic + package meccanico, evitando falsi SOIC/diodi.
+Prova isolata GPT-6 Astra su hires.jpg 4000x1848 detail=original, una chiamata,
+autorizzazione esplicita utente a invio OpenRouter e costo. Log/risposta in
+Documents/Codex/2026-09-19/new-chat/outputs/ESP32-test-Astra. Nessun cambio modello
+predefinito. Nessuna rigenerazione CAD in questa prova.
+Esito: una chiamata riuscita, 85,4 s, **0,3452 USD**. Due probabili transistor
+SOT-23 (inferiore marcato J3Y), un SOT-223 con tre piedini e aletta, due passivi
+campionati compatibili con 0402 e altri con 0603. Interpretazioni fotografiche,
+non identificazioni commerciali certificate. La prova cambia anche il prompt:
+NON benchmark controllato che dimostri superiorità del modello. Report ESITO.md.
+Avvertenza: nella risposta diagnostica le quote `estimated_body_mm` dei passivi
+riguardano il nucleo senza metallizzazioni; usare il chip completo per il package.
+
+## Conferma utente successiva alla prova
+
+Variante confermata esplicitamente: **ESP32-S3-WROOM-1U**. Non è più un'ipotesi.
+Corretto il package del modulo nell'inventario diagnostico
+`extracted-gemini-verification.json`, con provenienza `user_confirmed`.
+Verifica dell'intera libreria 3D KiCad 10 locale: presenti S3-WROOM-1 e
+S3-WROOM-2, **nessun modello S3-WROOM-1U**. Non sostituirlo con WROOM-1,
+WROOM-32U o C3-WROOM-02U. Il CAD già prodotto resta un'approssimazione per
+questo modulo; non è stato rigenerato né è stato aggiunto un modello esterno.
+La conferma riguarda questo componente, non è una regola hardcoded del resolver.
+
+## In corso — Codex, revisione completa e prova live autorizzate
+
+L'utente ha autorizzato la correzione di tutti i punti aperti e la verifica
+foto ad alta risoluzione → modelli locali KiCad → assemblaggio FreeCAD.
+Quattro agenti hanno coperto risolutore libreria, importazione CAD, inventario
+fotografico/revisione e footprint. Il coordinatore integra GUI, estrazione,
+logging e prova completa. Nessun commit/push richiesto; albero MODIFICATO.
+
+Diagnosi confermata: `package` veniva perso nella conversione AI → ComponentBox
+→ tabella GUI → payload CAD. Inoltre il passaggio fotografico era limitato ai
+castellated: una scheda THT con layout `matrix` poteva restare senza inventario.
+Ora i metadati arrivano al risolutore e la famiglia `aggregate_tht` attiva
+inventario e assemblaggio PCB anche senza componenti rilevati.
+
+Implementati: confronto con inviluppi piazzole footprint, alias cristalli,
+colori nativi STEP (marker `KICADGEN_STEP_COLORS_OK` evita recoloring distruttivo),
+substrato THT forato e piazzole, contorni corpo footprint, diagnostica duplicati
+senza eliminazione automatica, evidenze invalidate dopo revisione geometrica,
+anteprima invalidata dopo modifica manuale. Etichette 3D disattivate per default.
+`analisi-ai.log` ora riceve tutti i messaggi GUI con timestamp e flush immediato;
+`freecad.log` riceve stdout/stderr in streaming durante la generazione.
+
+Verifiche in corso: 281 test prima integrazione; 195 test CAD con vero roundtrip
+STEP SOT-223 (tre colori conservati), 83 resolver e 49 revisione foto.
+Prima suite completa: 1330 pass, 68 errori da fixture AST non aggiornata;
+fixture corretta, relativi 68 test passano (2 xfail preesistenti).
+Non usare questi conteggi come risultato della suite finale.
+
+Prova live e confronto Gemini autorizzati dall'utente il 19/09/2026: output isolati in
+`C:/Users/mirko/Documents/Codex/2026-09-19/new-chat/outputs/ESP32-verifica-live`.
+Log leggibile durante la prova: `analisi-ai.log` nella stessa cartella.
+I documenti sorgente e le preferenze reali non vengono modificati.
+Il controllo credito ha risposto positivamente. Preferenze reali non modificate.
+
+Risultati diagnostici IMPORTANTI:
+- Gemini `google/gemini-3.1-pro-preview` ha localizzato 44 candidati. La verifica
+  iniziale `anthropic/claude-sonnet-5` non forniva l'array richiesto. Un retry
+  circoscritto ha fornito package ma confondeva molti passivi con SOD-123.
+- I vecchi prompt salvati non ricevevano il supplemento meccanico. Ora si
+  aggiungono sempre contratto JSON, famiglia visibile PRIMA del package,
+  dimensioni calibrate per ID e conteggi terminali disponibili. Il prompt
+  storico incompatibile viene corretto solo nella sua frase nota, non nel DB.
+- Nel confronto Gemini il limite 4096 era consumato interamente dal
+  ragionamento: `finish_reason=length`, nessuna tool call. Il limite della
+  verifica è ora 16384; l'errore distingue troncamento da tool non supportato.
+- Con il limite corretto Gemini ha restituito 44 candidati e 33 proposte di
+  package, distinguendo molte famiglie di passivi. NON certifica identità o
+  variante esatta. Per esempio il modulo RF proposto ha un'antenna diversa:
+  non promuovere la sola corrispondenza di dimensioni a identificazione certa.
+- La pipeline GUI → resolver reale → FreeCAD è stata eseguita sia con un
+  fixture offline R_0603 sia con l'inventario fotografico. STEP/preview riportano
+  provenienza `kicad_library` vs `approximation` e colori nativi.
+- Aggiunti veto per famiglia/topologia/terminali incompatibili e controllo
+  dell'ingombro TOTALE dei moduli su PCB: una sezione alta del solo schermo RF
+  e le sole piazzole non certificano l'intero modulo.
+
+Log completo: timestamp/flush per riga in `analisi-ai.log`, stdout/stderr CAD in
+`freecad.log`, eventi AI_CALL_START/END/FAILURE con modello/tool/tempo/conteggi.
+Anche errori e avvisi di generazione entrano nel dialogo Log AI e nel file;
+rinomina senza docs conserva il log, fallimento del trasferimento blocca la
+rinomina. Credenziali, immagini codificate e testo grezzo degli errori provider
+sono esclusi dalla diagnostica; errori conservano codici/finish_reason sicuri.
+
+Suite completa finale: **1643 passed, 2 xfailed, 19 subtests passed** in 102.57s.
+JUnit salvato in `outputs/ESP32-verifica-live/test-results.xml` della chat.
+Un passaggio precedente ha mostrato un intermittente nel pulsante Cancel in
+francese (`test_i18n`): i 7 test i18n isolati e la successiva suite completa
+sono passati senza modificare il codice i18n. Non nascondere questa osservazione.
+Ultima protezione aggiunta dopo la suite: una famiglia IC verificata dalla foto
+non autorizza terminali sintetici inventati; senza osservazioni si conserva
+l'ingombro IC e la famiglia per il resolver. Due regressioni matrice/castellated
+aggiunte, verifica focalizzata CAD/terminali/GUI separata: **27 passed** in 11.27s.
+NON committato/pushato.
+
+Prova reale finale completata: **29 modelli KiCad / 44 candidati**, 15
+approssimazioni. Output STEP (5.27 MB), FCStd, VRML e preview presenti in
+`outputs/ESP32-verifica-live/gemini/ESP32_Verifica_Gemini/` sotto la cartella
+chat citata sopra. Colori nativi STEP verificati. Il nome diagnostico corto
+evita i limiti di percorso di FreeCAD su Windows; i documenti rimangono intatti.
+Rifiutati modulo RF sovradimensionato e QFN senza topologia disambiguata.
+Costo complessivo registrato delle prove: 0.7841 USD su 20 chiamate.
+Rapporto leggibile: `outputs/ESP32-verifica-live/VERIFICA.md`.
+
+## Baseline storico Claude — prima delle modifiche descritte sopra
+
 Branch **`FIX-WITH_FREECAD`**, allineato col remoto. Ultimo commit `e05724c`.
-Suite: **1235 passed, 2 xfailed**. Albero pulito.
+Baseline Claude precedente alle modifiche: **1235 passed, 2 xfailed**.
 
 `FIX` resta fermo a `801dd5f` come punto di ritorno.
 

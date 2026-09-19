@@ -41,6 +41,20 @@ def _safe_name(name: str, index: int) -> str:
 COMPONENT_EDGE_MARGIN_MM = 0.2
 
 
+def _model_placement(component):
+    """Keep only explicit finite native-model overrides; None means infer axes."""
+    result = {}
+    for field in ("model_rotation_deg", "model_z_offset_mm"):
+        value = getattr(component, field, None)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            try:
+                if math.isfinite(value):
+                    result[field] = value
+            except OverflowError:
+                pass
+    return result
+
+
 def _rectangle_axes(rotation: float) -> tuple[tuple[float, float], tuple[float, float]]:
     """Assi unitari locali, esatti per le rotazioni cardinali."""
     angle = rotation % 360
@@ -225,6 +239,7 @@ def generate_castellated_3d_model(
     fillets: Optional[list] = None,
     face_texts: Optional[list] = None,
     font_file: str = DEFAULT_FONT_FILE,
+    progress=None,
 ) -> dict:
     """Genera il 3D di un modulo castellated come PCB vero e proprio.
 
@@ -281,7 +296,7 @@ def generate_castellated_3d_model(
             "color_hex": body.pin_color_hex,
         })
         text = params.silk_labels.get(placement.number, "").strip()
-        if text:
+        if text and params.show_silk_labels_3d:
             silk_texts.append({
                 "x": label[0], "y": label[1], "text": text, "size_mm": 0.7,
                 "angle": 0, "color_hex": params.silk_color_hex,
@@ -306,21 +321,28 @@ def generate_castellated_3d_model(
     component_height = body.height_mm - params.pcb_thickness
 
     components = []
-    for component in params.components:
+    for source_row, component in enumerate(params.components):
         if not component.is_usable():
             continue
-        x, y = clamp_component_position(
-            component.x, component.y, component.length, component.width,
-            component.rotation, params.body_length, params.body_width,
-        )
+        # An observed edge-mating connector can legitimately project beyond
+        # the PCB. Do not move its measured centre to fit the entire envelope.
+        if component.mating == "edge":
+            x, y = component.x, component.y
+        else:
+            x, y = clamp_component_position(
+                component.x, component.y, component.length, component.width,
+                component.rotation, params.body_length, params.body_width,
+            )
         render_kind = component.kind
         if render_kind == "generic" and component.detected_kind:
             render_kind = component.detected_kind
-            if render_kind in {"ic_soic", "ic_qfn"} and not component.terminal_geometry:
-                # A photographic kind hint is not evidence of count/pitch/sides.
-                # Keep explicit, manually selected legacy packages unchanged.
-                render_kind = "ic"
+        if (component.detected_kind and render_kind in {"ic_soic", "ic_qfn"}
+                and not component.terminal_geometry):
+            # A verified family still does not establish terminal count/pitch.
+            # Manually selected legacy packages have no photographic hint.
+            render_kind = "ic"
         components.append({
+            "source_row": source_row,
             "name": component.name,
             "kind": render_kind,
             "x": x, "y": y,
@@ -329,8 +351,18 @@ def generate_castellated_3d_model(
             "color_hex": component.color_hex, "marking": component.marking,
             "rotation_deg": component.rotation,
             "pin_count": component.pin_count,
+            "pin_count_confidence": component.pin_count_confidence,
+            "pin_count_source": component.pin_count_source,
             "pins_by_side": component.pins_by_side,
             "terminal_geometry": component.terminal_geometry,
+            "package": component.package,
+            "detected_kind": component.detected_kind,
+            "mating": component.mating,
+            "bbox_basis": component.bbox_basis,
+            "package_evidence": component.package_evidence,
+            "model_selection": component.model_selection,
+            "model_match": component.model_match,
+            **_model_placement(component),
         })
 
     extra_boxes = []
@@ -361,18 +393,25 @@ def generate_castellated_3d_model(
     # freecad_parts: misurare un modello richiede a sua volta FreeCAD, e non
     # si puo' lanciarlo da dentro l'istanza che sta gia' costruendo il solido.
     model_notes = []
+    def report_model(message):
+        model_notes.append(message)
+        if progress:
+            progress(message)
     try:
         from .kicad_models import attach_models
-        attach_models(components, log=model_notes.append)
+        attach_models(components, log=report_model)
     except Exception as exc:  # noqa: BLE001 - la libreria e' un di piu', mai un requisito
-        model_notes.append(f"Libreria 3D KiCad non utilizzabile ({exc}); "
+        report_model(f"Libreria 3D KiCad non utilizzabile ({exc}); "
                            "si usano le forme approssimate.")
 
+    from ..services.model_choices import save_candidate_report
+    candidate_report = save_candidate_report(output_dir, components)
     result = _run_freecad(
         params.name, [], pcb, output_dir,
         freecadcmd_path=freecadcmd_path, fillets=fillets, face_texts=face_texts,
         font_file=font_file, notches=notches, extra_boxes=extra_boxes,
         edge_contacts=contacts,
+        progress=progress,
         extra_payload={
             "substrate": {"color_hex": params.substrate_color_hex, "mask_thickness_mm": 0.02},
             "silk_texts": silk_texts,
@@ -382,10 +421,12 @@ def generate_castellated_3d_model(
         },
     )
     result["warnings"] = overlap_warnings + result["warnings"]
+    result["candidate_report_path"] = candidate_report
+    _reconcile_model_imports(result, components, output_dir)
     # Annotazioni informative, distinte dagli avvisi: dicono quanti modelli
     # reali sono stati usati. Senza, l'esito della risoluzione non arriva
     # all'utente e il meccanismo sembra non essere entrato in funzione.
-    result["notes"] = model_notes + list(result.get("notes", []))
+    result["notes"] = ([] if progress else model_notes) + list(result.get("notes", []))
     return result
 
 def generate_3d_model(
@@ -396,6 +437,7 @@ def generate_3d_model(
     fillets: Optional[list] = None,
     face_texts: Optional[list] = None,
     font_file: str = DEFAULT_FONT_FILE,
+    progress=None,
 ) -> dict:
     """Genera <Nome>.step (e best-effort <Nome>.wrl) in output_dir/<Nome>.3dshapes/.
 
@@ -409,11 +451,101 @@ def generate_3d_model(
     """
     pin_params.validate()
     pins = [[pin, x, y] for pin, x, y in pin_positions(pin_params)]
+    if body.populated_board or body.components:
+        return _generate_populated_tht(pin_params, body, pins, output_dir,
+            freecadcmd_path=freecadcmd_path, fillets=fillets, face_texts=face_texts,
+            font_file=font_file, progress=progress)
     return _run_freecad(
         pin_params.name, pins, body, output_dir,
         freecadcmd_path=freecadcmd_path, fillets=fillets, face_texts=face_texts,
         font_file=font_file,
+        progress=progress,
     )
+
+
+def _generate_populated_tht(params, body, pins, output_dir, **options):
+    """Build a populated PCB using matrix pin coordinates and centered photo boxes."""
+    from .kicad_models import attach_models
+    progress = options.get("progress")
+    notes = []
+    def report(message):
+        notes.append(message)
+        if progress:
+            progress(message)
+    thickness = body.pcb_thickness_mm or 1.6
+    if body.pcb_thickness_mm is None:
+        report("Spessore PCB stimato: 1.6 mm (non quotato).")
+    pcb = replace(body, height_mm=thickness)
+    centre_x = body.offset_x_mm + body.length_mm / 2
+    centre_y = body.offset_y_mm + body.width_mm / 2
+    components = []
+    for source_row, c in enumerate(body.components or []):
+        if not c.is_usable():
+            report(f"Componente {c.name}: dimensioni non valide, escluso.")
+            continue
+        kind = c.kind
+        if kind == "generic" and c.detected_kind:
+            kind = c.detected_kind
+        if c.detected_kind and kind in {"ic_soic", "ic_qfn"} and not c.terminal_geometry:
+            kind = "ic"
+        components.append({
+            "source_row": source_row,
+            "name": c.name, "kind": kind, "package": c.package, "mating": c.mating,
+            "detected_kind": c.detected_kind,
+            "bbox_basis": c.bbox_basis, "package_evidence": c.package_evidence,
+            "model_selection": c.model_selection, "model_match": c.model_match,
+            "x": centre_x + c.x, "y": centre_y + c.y,
+            "length_mm": c.length, "width_mm": c.width, "height_mm": c.height,
+            "rotation_deg": c.rotation, "color_hex": c.color_hex, "marking": c.marking,
+            "pin_count": c.pin_count, "pins_by_side": c.pins_by_side,
+            "pin_count_confidence": c.pin_count_confidence,
+            "pin_count_source": c.pin_count_source,
+            "terminal_geometry": c.terminal_geometry,
+            **_model_placement(c),
+        })
+    attach_models(components, log=report)
+    from ..services.model_choices import save_candidate_report
+    candidate_report = save_candidate_report(output_dir, components)
+    holes = [{"x": x, "y": y, "radius": params.drill / 2} for _, x, y in pins]
+    contacts = [dict(hole, number=str(pin), edge="through",
+                     pad_width_mm=params.pad_diameter, pad_length_mm=params.pad_diameter,
+                     color_hex=body.pin_color_hex)
+                for (pin, _, _), hole in zip(pins, holes)]
+    result = _run_freecad(params.name, pins, pcb, output_dir,
+        notches=holes, edge_contacts=contacts,
+        extra_payload={"components": components,
+                       "substrate": {"color_hex": "#2f3f1f", "mask_thickness_mm": .02}},
+        **options)
+    result["warnings"] = find_overlapping_components(components) + result.get("warnings", [])
+    result["notes"] = [] if progress else notes
+    result["candidate_report_path"] = candidate_report
+    _reconcile_model_imports(result, components, output_dir)
+    return result
+
+
+def _reconcile_model_imports(result, components, output_dir):
+    """A selected file is not an imported solid: expose runtime fallback in the JSON."""
+    mesh_path = result.get('mesh_path')
+    if not mesh_path or not Path(mesh_path).is_file():
+        return
+    try:
+        mesh = json.loads(Path(mesh_path).read_text(encoding='utf-8'))
+        failed = {part.get('source_row', part.get('component_index'))
+                  for part in mesh.get('parts', []) if isinstance(part, dict)
+                  and part.get('model_import_failed')}
+        for index, component in enumerate(components):
+            if component.get('source_row', index) not in failed:
+                continue
+            report = dict(component.get('model_match') or {})
+            report.update(status='import_failed', selected_path=None,
+                          error='Il file STEP selezionato non è stato importato; visualizzato un segnaposto.')
+            component['model_match'] = report
+            result.setdefault('warnings', []).append(f"{component.get('name')}: {report['error']}")
+        if failed:
+            from ..services.model_choices import save_candidate_report
+            save_candidate_report(output_dir, components)
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        result.setdefault('warnings', []).append(f'Verifica importazione modelli non disponibile: {exc}')
 
 
 def _run_freecad(
@@ -429,6 +561,7 @@ def _run_freecad(
     extra_boxes: Optional[list] = None,
     edge_contacts: Optional[list] = None,
     extra_payload: Optional[dict] = None,
+    progress=None,
 ) -> dict:
     """Costruisce il JSON e lancia freecadcmd; comune a tutti i generatori 3D.
 
@@ -496,11 +629,19 @@ def _run_freecad(
         json_path = tmp.name
 
     try:
-        result = subprocess.run(
-            [freecadcmd, str(_SCRIPT_PATH), json_path],
-            capture_output=True, text=True, timeout=120,
-            creationflags=_CFLAGS,
-        )
+        if progress:
+            from .process_log import run_logged
+            result = run_logged(
+                [freecadcmd, str(_SCRIPT_PATH), json_path],
+                output_dir / "freecad.log", progress=progress,
+                timeout=300, creationflags=_CFLAGS,
+            )
+        else:
+            result = subprocess.run(
+                [freecadcmd, str(_SCRIPT_PATH), json_path],
+                capture_output=True, text=True, timeout=300,
+                creationflags=_CFLAGS,
+            )
     finally:
         try:
             os.unlink(json_path)
@@ -524,7 +665,8 @@ def _run_freecad(
     # Colori nello STEP: Part.export scrive la sola geometria, e KiCad
     # mostrerebbe tutto grigio. Si aggiungono le entita' AP214 a partire
     # dai colori della mesh, che elenca i pezzi nello stesso ordine.
-    if "KICADGEN_MESH_OK" in output and mesh_path.is_file():
+    if ("KICADGEN_STEP_COLORS_OK" not in output
+            and "KICADGEN_MESH_OK" in output and mesh_path.is_file()):
         try:
             with open(mesh_path, "r", encoding="utf-8") as fh:
                 parts = json.load(fh).get("parts", [])

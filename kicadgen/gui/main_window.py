@@ -10,6 +10,7 @@ advanced parameter tabs while preserving their indexes for existing handlers.
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 import math
 import re
 import shutil
@@ -78,6 +79,48 @@ APP_DIR = Path(__file__).resolve().parent.parent.parent
 DEFAULT_LIBRARY_ROOT = APP_DIR / "generated"
 DOCS_SUBDIR = "docs"
 
+# Local fallbacks use I18n.tr without adding rows to the profile database.
+_PHOTO_DETECTOR_TRANSLATIONS = {
+    "label": {"it": "Rilevamento foto:", "en": "Photo detection:",
+              "fr": "Détection photo :", "de": "Fotoerkennung:"},
+    "ai": {"it": "AI (attuale)", "en": "AI (current)",
+           "fr": "IA (actuelle)", "de": "KI (bisherig)"},
+    "yolo": {"it": "YOLO locale + verifica AI", "en": "Local YOLO + AI verification",
+             "fr": "YOLO local + vérification IA", "de": "Lokales YOLO + KI-Prüfung"},
+    "model": {"it": "Modello YOLO:", "en": "YOLO model:",
+              "fr": "Modèle YOLO :", "de": "YOLO-Modell:"},
+    "browse": {"it": "Sfoglia…", "en": "Browse…",
+               "fr": "Parcourir…", "de": "Durchsuchen…"},
+    "picker": {"it": "Seleziona modello YOLO ONNX per questa sessione",
+               "en": "Select a YOLO ONNX model for this session",
+               "fr": "Choisir un modèle YOLO ONNX pour cette session",
+               "de": "YOLO-ONNX-Modell für diese Sitzung auswählen"},
+    "filter": {"it": "Modelli ONNX (*.onnx)", "en": "ONNX models (*.onnx)",
+               "fr": "Modèles ONNX (*.onnx)", "de": "ONNX-Modelle (*.onnx)"},
+    "default": {"it": "Predefinito: {path}", "en": "Default: {path}",
+                "fr": "Par défaut : {path}", "de": "Standard: {path}"},
+    "path_help": {
+        "it": "File .onnx facoltativo, solo per questa sessione. Lascia vuoto per usare {path}. La presenza del file non attiva YOLO automaticamente.",
+        "en": "Optional .onnx file, for this session only. Leave empty to use {path}. An existing file does not enable YOLO automatically.",
+        "fr": "Fichier .onnx facultatif, pour cette session uniquement. Laisser vide pour utiliser {path}. La présence du fichier n’active pas YOLO automatiquement.",
+        "de": "Optionale .onnx-Datei, nur für diese Sitzung. Leer lassen, um {path} zu verwenden. Eine vorhandene Datei aktiviert YOLO nicht automatisch.",
+    },
+    "help": {
+        "it": "YOLO locale propone i riquadri dei componenti. Il verificatore AI configurato continua a consumare credito AI. L’abbinamento ai modelli KiCad avviene dopo; i rilevamenti incerti richiedono revisione. La scelta vale solo per questa sessione.",
+        "en": "Local YOLO proposes component boxes. The configured AI verifier still uses AI credit. KiCad model matching happens afterwards; uncertain detections require review. This choice applies only to this session.",
+        "fr": "YOLO local propose les rectangles des composants. Le vérificateur IA configuré consomme toujours du crédit IA. L’association aux modèles KiCad intervient ensuite ; les détections incertaines nécessitent une révision. Ce choix s’applique uniquement à cette session.",
+        "de": "Lokales YOLO schlägt Begrenzungsrahmen für Bauteile vor. Die konfigurierte KI-Prüfung verbraucht weiterhin KI-Guthaben. Die Zuordnung zu KiCad-Modellen erfolgt anschließend; unsichere Erkennungen müssen überprüft werden. Diese Auswahl gilt nur für diese Sitzung.",
+    },
+    "error_title": {"it": "YOLO locale non disponibile", "en": "Local YOLO unavailable",
+                    "fr": "YOLO local indisponible", "de": "Lokales YOLO nicht verfügbar"},
+    "error": {
+        "it": "Impossibile avviare YOLO locale: {error}\nSeleziona un modello ONNX valido e verifica che onnxruntime sia installato, oppure scegli AI. Nessuna richiesta AI è stata avviata; i risultati precedenti sono conservati.",
+        "en": "Cannot start local YOLO: {error}\nSelect a valid ONNX model and check that onnxruntime is installed, or choose AI. No AI request was started; previous results are preserved.",
+        "fr": "Impossible de démarrer YOLO local : {error}\nChoisir un modèle ONNX valide et vérifier qu’onnxruntime est installé, ou choisir IA. Aucune requête IA n’a été lancée ; les résultats précédents sont conservés.",
+        "de": "Lokales YOLO kann nicht gestartet werden: {error}\nWählen Sie ein gültiges ONNX-Modell und prüfen Sie, ob onnxruntime installiert ist, oder wählen Sie KI. Es wurde keine KI-Anfrage gestartet; bisherige Ergebnisse bleiben erhalten.",
+    },
+}
+
 
 def _align_form_labels(form: QFormLayout, width: int = 132) -> None:
     """Keep fields aligned when several forms are shown in the same panel."""
@@ -108,7 +151,8 @@ def _side_pinout(side: dict) -> list[dict]:
     ]
 
 
-def _generate_3d(params, body: Body3DParams, project_dir: Path, fillets, face_texts):
+def _generate_3d(params, body: Body3DParams, project_dir: Path, fillets, face_texts,
+                 progress=None):
     """Genera il 3D con il generatore adatto al tipo di componente.
 
     I due modelli sono diversi in modo sostanziale: il pin header e' un
@@ -118,9 +162,11 @@ def _generate_3d(params, body: Body3DParams, project_dir: Path, fillets, face_te
     if isinstance(params, CastellatedModuleParams):
         return generate_castellated_3d_model(
             params, body, project_dir, fillets=fillets, face_texts=face_texts,
+            progress=progress,
         )
     return generate_3d_model(
         params, body, project_dir, fillets=fillets, face_texts=face_texts,
+        progress=progress,
     )
 
 
@@ -184,6 +230,7 @@ class GenerateWorker(QThread):
                 result = _generate_3d(
                     self.params, self.body, self.project_dir,
                     self.fillets, self.face_texts,
+                    progress=self.progress.emit,
                 )
                 for warning in result.get('warnings', []):
                     self.warning.emit(warning)
@@ -234,6 +281,7 @@ class Cad3DWorker(QThread):
             result = _generate_3d(
                 self.params, self.body, self.project_dir,
                 self.fillets, self.face_texts,
+                progress=self.progress.emit,
             )
             for note in result.get("notes", []):
                 self.progress.emit(note)
@@ -263,10 +311,11 @@ class TerminalDetailWorker(QThread):
         from ..services.photo_terminals import observe_terminals
         from ..services.photo_leads import refine_leads
         from ..services.openrouter import call_tool
+        from ..services.ai_diagnostics import make_logged_call
         try:
             operation = refine_leads if self.only_leads else observe_terminals
             self.done.emit(operation(self.photo, self.components, self.model,
-                call_tool, self.progress.emit,
+                make_logged_call(call_tool, self.progress.emit), self.progress.emit,
                 Path(__file__).resolve().parents[2] / 'generated' / 'photo-cache',
                 **({'system_prompt': self.system_prompt} if self.system_prompt else {})))
         except Exception as exc:
@@ -274,7 +323,7 @@ class TerminalDetailWorker(QThread):
 
 
 class ExtractWorker(QThread):
-    """QThread che chiama OpenRouter per estrarre i parametri dal datasheet.
+    """@brief Extract datasheet parameters with session-selected photo detection.
 
     `model` e' l'id OpenRouter da usare per questa estrazione: puo' essere
     il default del profilo SQLite oppure un modello diverso scelto solo per
@@ -297,7 +346,27 @@ class ExtractWorker(QThread):
         grounding_prompt: str | None = None, verification_prompt: str | None = None,
         verification_model: str | None = None, terminal_prompt: str | None = None,
         document_roles: dict | None = None,
+        component_family: str | None = None,
+        *, photo_detector: str = "ai", yolo_model_path: Path | None = None,
     ):
+        """@brief Snapshot extraction settings before starting background work.
+
+        @param doc_paths Documents selected for extraction.
+        @param system_prompt Optional datasheet system prompt.
+        @param extra_instructions Optional component instructions.
+        @param include_nc_pins Whether to include physically present NC pins.
+        @param model Datasheet AI model identifier.
+        @param vision_model Photo AI model identifier.
+        @param grounding_prompt Optional photo localization prompt.
+        @param verification_prompt Optional photo verification prompt.
+        @param verification_model Configured AI verifier model identifier.
+        @param terminal_prompt Optional terminal observation prompt.
+        @param document_roles Selected document roles, copied for this request.
+        @param component_family Selected component geometry family.
+        @param photo_detector Photo proposal backend, ai by default or yolo.
+        @param yolo_model_path Optional session ONNX path; None uses the service default.
+        @note YOLO changes photo proposals only; AI verification remains configured.
+        """
         super().__init__()
         self.doc_paths = doc_paths
         self.system_prompt = system_prompt
@@ -310,8 +379,12 @@ class ExtractWorker(QThread):
         self.verification_model = verification_model
         self.terminal_prompt = terminal_prompt
         self.document_roles = dict(document_roles) if document_roles is not None else None
+        self.component_family = component_family
+        self.photo_detector = photo_detector
+        self.yolo_model_path = yolo_model_path
 
     def run(self) -> None:
+        """@brief Forward the captured settings and emit extracted data or an error."""
         try:
             params = extract_pin_header_params(
                 self.doc_paths,
@@ -320,6 +393,9 @@ class ExtractWorker(QThread):
                 grounding_prompt=self.grounding_prompt, verification_prompt=self.verification_prompt,
                 verification_model=self.verification_model, terminal_prompt=self.terminal_prompt,
                 document_roles=self.document_roles,
+                component_family=self.component_family,
+                photo_detector=self.photo_detector,
+                yolo_model_path=self.yolo_model_path,
                 system_prompt=self.system_prompt,
                 extra_instructions=self.extra_instructions,
                 include_nc_pins=self.include_nc_pins,
@@ -357,6 +433,7 @@ class MainWindow(QMainWindow):
         # Componenti del modulo letti dalla foto: alimentano il 3D, non il
         # footprint, quindi non vivono nei campi del tab Footprint 2D.
         self.castellated_components: list[ComponentBox] = []
+        self._extracted_pcb_thickness = None
         self.pin_map: dict | None = None
         self._last_mesh_path: Path | None = None
         self._model_revision = 0
@@ -367,8 +444,6 @@ class MainWindow(QMainWindow):
         # Modello scelto solo per questa sessione (datasheet difficile): non
         # viene salvato in config.json e si perde alla chiusura, per scelta.
         self._session_model: str | None = None
-        self._session_vision_model: str | None = None
-        self._session_verification_model: str | None = None
         self._auto_after_extraction = False
         self._auto_generation_params = None
         self._applying_extraction = False
@@ -388,6 +463,15 @@ class MainWindow(QMainWindow):
         )
         self._sync_footprint_subtabs()
         self._refresh_docs_list()
+
+        # Connect after initialization so construction does not invalidate a worker.
+        for key, widget in vars(self).copy().items():
+            if key.startswith("field_"):
+                if isinstance(widget, QDoubleSpinBox) or isinstance(widget, QSpinBox):
+                    widget.valueChanged.connect(self._invalidate_generated_mesh)
+                elif isinstance(widget, QLineEdit) and key in {
+                        "field_body_color", "field_pin_color", "field_populated_pins"}:
+                    widget.textChanged.connect(self._invalidate_generated_mesh)
 
     # ── Menu ────────────────────────────────────────────────────────
 
@@ -490,8 +574,9 @@ class MainWindow(QMainWindow):
         self.tabs.setTabVisible(2, advanced)
         self.model_3d_settings_scroll.setVisible(advanced)
         self.group_annotations.setVisible(advanced)
-        self.group_components.setVisible(advanced and self._is_castellated())
-        self.btn_photo_comparison.setVisible(advanced)
+        self.group_components.setVisible(advanced and (
+            self._is_castellated() or self._selected_family() == "aggregate_tht"))
+        self.btn_photo_comparison.setVisible(True)
         if hasattr(self, "action_translations"):
             self.action_translations.setVisible(advanced)
 
@@ -578,25 +663,15 @@ class MainWindow(QMainWindow):
         return self._session_model or self._default_model()
 
     def _vision_model(self) -> str:
-        """Photo model has an independent session selection."""
-        return self._session_vision_model or self._default_vision_model()
+        """@brief Return the single AI model also used for photo analysis."""
+        return self._effective_model()
 
     def _default_vision_model(self) -> str:
         return self._profile_values()['vision_model']
 
-    def _verification_model(self):
-        return self._session_verification_model or self._profile_values()['verification_model']
-
-    def _on_verification_model_combo_changed(self):
-        self._session_verification_model = self.combo_verification_model.currentData()
-        self._append_log(f'Modello verifica foto: {self._verification_model()} (default invariato).')
-
-    def _pick_session_verification_model(self):
-        chosen = pick_model(self._verification_model(), self, title='Modello verifica foto per questa sessione')
-        if chosen:
-            self._session_verification_model = None if chosen == self._profile_values()['verification_model'] else chosen
-            self._refresh_model_combo()
-            self._on_verification_model_combo_changed()
+    def _verification_model(self) -> str:
+        """@brief Return the single AI model also used for photo verification."""
+        return self._effective_model()
 
     def _refresh_model_combo(self) -> None:
         """Riallinea la tendina del tab Progetto a default + scelta di sessione."""
@@ -615,48 +690,57 @@ class MainWindow(QMainWindow):
         else:
             self.combo_model.setCurrentIndex(0)
         self.combo_model.blockSignals(blocked)
-        if hasattr(self, "combo_vision_model"):
-            combo = self.combo_vision_model
-            blocked = combo.blockSignals(True)
-            combo.clear()
-            combo.addItem(
-                self.i18n.tr("model.default", model=self._default_vision_model()), None
-            )
-            if self._session_vision_model:
-                combo.addItem(self.i18n.tr("model.session", model=self._session_vision_model),
-                              self._session_vision_model)
-                combo.setCurrentIndex(1)
-            combo.blockSignals(blocked)
-        if hasattr(self, 'combo_verification_model'):
-            combo = self.combo_verification_model
-            blocked = combo.blockSignals(True)
-            combo.clear()
-            combo.addItem(
-                self.i18n.tr(
-                    "model.default", model=self._profile_values()["verification_model"]
-                ),
-                None,
-            )
-            if self._session_verification_model:
-                combo.addItem(
-                    self.i18n.tr("model.session", model=self._session_verification_model),
-                    self._session_verification_model,
-                )
-                combo.setCurrentIndex(1)
-            combo.blockSignals(blocked)
 
-    def _on_vision_model_combo_changed(self) -> None:
-        self._session_vision_model = self.combo_vision_model.currentData()
-        self._append_log(f"Modello foto: {self._vision_model()} (il default globale non cambia).")
+        if hasattr(self, "combo_photo_detector"):
+            self._refresh_photo_detector_controls()
 
-    def _pick_session_vision_model(self) -> None:
-        chosen = pick_model(self._vision_model(), self,
-                            title="Modello foto solo per questa sessione")
-        if not chosen:
-            return
-        self._session_vision_model = None if chosen == self._default_vision_model() else chosen
-        self._refresh_model_combo()
-        self._on_vision_model_combo_changed()
+    def _photo_detector_text(self, key: str, **values: object) -> str:
+        """Resolve local fallbacks through the existing translation mechanism."""
+        translations = _PHOTO_DETECTOR_TRANSLATIONS[key]
+        return self.i18n.tr(
+            "photo_detector." + key,
+            default=translations.get(self.i18n.language, translations["en"]),
+            **values,
+        )
+
+    def _refresh_photo_detector_controls(self) -> None:
+        """Translate session controls without changing selected data or paths."""
+        self.label_photo_detector.setText(self._photo_detector_text("label"))
+        for index, key in enumerate(("ai", "yolo")):
+            self.combo_photo_detector.setItemText(index, self._photo_detector_text(key))
+        self.combo_photo_detector.setToolTip(self._photo_detector_text("help"))
+        self.label_yolo_model.setText(self._photo_detector_text("model"))
+        self.btn_pick_yolo_model.setText(self._photo_detector_text("browse"))
+        self.btn_pick_yolo_model.setAccessibleName(self._photo_detector_text("picker"))
+        self.btn_pick_yolo_model.setToolTip(self._photo_detector_text("picker"))
+        default_path = APP_DIR / "models" / "pcb_yolov8s.onnx"
+        self.field_yolo_model.setPlaceholderText(
+            self._photo_detector_text("default", path=default_path))
+        self.field_yolo_model.setToolTip(
+            self._photo_detector_text("path_help", path=default_path))
+        self._on_photo_detector_changed()
+
+    def _on_photo_detector_changed(self) -> None:
+        """Enable the session path only when the user explicitly selects YOLO."""
+        enabled = self.combo_photo_detector.currentData() == "yolo"
+        self.field_yolo_model.setEnabled(enabled)
+        self.btn_pick_yolo_model.setEnabled(enabled)
+
+    def _pick_session_yolo_model(self) -> None:
+        """Select optional ONNX weights without reading or saving preferences."""
+        selected, _ = QFileDialog.getOpenFileName(
+            self, self._photo_detector_text("picker"),
+            self.field_yolo_model.text().strip() or str(APP_DIR / "models"),
+            self._photo_detector_text("filter"),
+        )
+        if selected:
+            self.field_yolo_model.setText(selected)
+
+    def _photo_detector_options(self) -> tuple[str, Path | None]:
+        """Snapshot the selected backend; AI ignores any remembered ONNX path."""
+        detector = self.combo_photo_detector.currentData() or "ai"
+        path = self.field_yolo_model.text().strip()
+        return detector, Path(path) if detector == "yolo" and path else None
 
     def _on_model_combo_changed(self) -> None:
         self._session_model = self.combo_model.currentData()
@@ -955,59 +1039,49 @@ class MainWindow(QMainWindow):
 
         self.combo_model = QComboBox()
         self.combo_model.setToolTip(
-            "Modello usato per il datasheet. Il default si imposta da "
-            "Configurazione -> Gestione tipologie e profili AI."
+            "Unico modello AI usato per datasheet, analisi foto e verifica. "
+            "Il default si imposta da Configurazione -> Gestione tipologie e profili AI."
         )
         self.combo_model.currentIndexChanged.connect(self._on_model_combo_changed)
-        btn_pick_model = QPushButton()
-        btn_pick_model.setIcon(QIcon(str(Path(__file__).parent / 'assets' / 'model-edit.svg')))
-        btn_pick_model.setIconSize(QSize(20, 20))
-        btn_pick_model.setFixedSize(40, 32)
-        btn_pick_model.setAutoDefault(False)
-        btn_pick_model.setToolTip("Change the datasheet model for this session")
-        btn_pick_model.setAccessibleName("Change datasheet model")
-        btn_pick_model.setToolTip(
+        self.btn_pick_model = QPushButton()
+        self.btn_pick_model.setIcon(QIcon(str(Path(__file__).parent / 'assets' / 'model-edit.svg')))
+        self.btn_pick_model.setIconSize(QSize(20, 20))
+        self.btn_pick_model.setFixedSize(40, 32)
+        self.btn_pick_model.setAutoDefault(False)
+        self.btn_pick_model.setToolTip("Change the AI model for this session")
+        self.btn_pick_model.setAccessibleName("Change AI model")
+        self.btn_pick_model.setToolTip(
             "Sceglie un modello (filtrabile per costo) valido solo per le "
             "estrazioni di questa sessione: il default globale non cambia."
         )
-        btn_pick_model.clicked.connect(self._pick_session_model)
+        self.btn_pick_model.clicked.connect(self._pick_session_model)
         model_row = QHBoxLayout()
         model_row.addWidget(self.combo_model, 1)
-        model_row.addWidget(btn_pick_model)
-        models_form.addRow("Modello datasheet:", model_row)
-        self.combo_vision_model = QComboBox()
-        self.combo_vision_model.setToolTip(
-            "Modello dedicato alla localizzazione dei componenti nella foto. "
-            "La scelta vale per questa sessione; il default si imposta da Configurazione."
-        )
-        self.combo_vision_model.currentIndexChanged.connect(self._on_vision_model_combo_changed)
-        self.btn_pick_vision_model = QPushButton()
-        self.btn_pick_vision_model.setIcon(QIcon(str(Path(__file__).parent / 'assets' / 'model-edit.svg')))
-        self.btn_pick_vision_model.setIconSize(QSize(20, 20))
-        self.btn_pick_vision_model.setFixedSize(40, 32)
-        self.btn_pick_vision_model.setAutoDefault(False)
-        self.btn_pick_vision_model.setToolTip("Change the photo model for this session")
-        self.btn_pick_vision_model.setAccessibleName("Change photo model")
-        self.btn_pick_vision_model.clicked.connect(self._pick_session_vision_model)
-        vision_row = QHBoxLayout()
-        vision_row.addWidget(self.combo_vision_model, 1)
-        vision_row.addWidget(self.btn_pick_vision_model)
-        models_form.addRow("Modello foto:", vision_row)
-        self.combo_verification_model = QComboBox()
-        self.combo_verification_model.setToolTip('Modello di verifica foto, indipendente dalle altre analisi. Scelta solo per questa sessione.')
-        self.combo_verification_model.currentIndexChanged.connect(self._on_verification_model_combo_changed)
-        self.btn_pick_verification_model = QPushButton()
-        self.btn_pick_verification_model.setIcon(QIcon(str(Path(__file__).parent / 'assets' / 'model-edit.svg')))
-        self.btn_pick_verification_model.setIconSize(QSize(20, 20))
-        self.btn_pick_verification_model.setFixedSize(40, 32)
-        self.btn_pick_verification_model.setAutoDefault(False)
-        self.btn_pick_verification_model.setToolTip("Change the photo verification model for this session")
-        self.btn_pick_verification_model.setAccessibleName("Change photo verification model")
-        self.btn_pick_verification_model.clicked.connect(self._pick_session_verification_model)
-        verification_row = QHBoxLayout()
-        verification_row.addWidget(self.combo_verification_model, 1)
-        verification_row.addWidget(self.btn_pick_verification_model)
-        models_form.addRow('Verifica foto:', verification_row)
+        model_row.addWidget(self.btn_pick_model)
+        models_form.addRow("Modello AI:", model_row)
+        self.label_photo_detector = QLabel()
+        self.combo_photo_detector = QComboBox()
+        self.combo_photo_detector.addItem("", "ai")
+        self.combo_photo_detector.addItem("", "yolo")
+        # User-selected startup default; explicit AI fallback remains available.
+        self.combo_photo_detector.setCurrentIndex(self.combo_photo_detector.findData("yolo"))
+        self.combo_photo_detector.currentIndexChanged.connect(self._on_photo_detector_changed)
+        models_form.addRow(self.label_photo_detector, self.combo_photo_detector)
+        self.label_yolo_model = QLabel()
+        self.field_yolo_model = QLineEdit()
+        self.field_yolo_model.setClearButtonEnabled(True)
+        self.btn_pick_yolo_model = QPushButton()
+        self.btn_pick_yolo_model.setAutoDefault(False)
+        self.btn_pick_yolo_model.clicked.connect(self._pick_session_yolo_model)
+        yolo_row = QHBoxLayout()
+        yolo_row.addWidget(self.field_yolo_model, 1)
+        yolo_row.addWidget(self.btn_pick_yolo_model)
+        models_form.addRow(self.label_yolo_model, yolo_row)
+        # These data-bearing widgets use explicit keys and local I18n fallbacks.
+        for widget in (self.label_photo_detector, self.combo_photo_detector,
+                       self.label_yolo_model, self.field_yolo_model, self.btn_pick_yolo_model):
+            widget.setProperty("i18n_skip", True)
+        self._refresh_photo_detector_controls()
         _align_form_labels(models_form)
 
         analysis_layout.addLayout(ai_form)
@@ -1031,7 +1105,7 @@ class MainWindow(QMainWindow):
         self.btn_extract_ai.setMinimumHeight(46)
         self.btn_extract_ai.setToolTip("Avvia l'estrazione dai documenti e dalle foto selezionati")
         self.btn_extract_ai.clicked.connect(self._extract_with_ai)
-        self.btn_photo_comparison = QPushButton("Rivedi rilevamento foto…")
+        self.btn_photo_comparison = QPushButton("Rivedi foto / scegli modelli KiCad…")
         self.btn_photo_comparison.setToolTip(
             "Mostra gli ingombri rilevati sulla foto superiore e, quando disponibile, "
             "permette di correggerli. Non avvia la generazione del footprint o del modello 3D."
@@ -1344,6 +1418,20 @@ class MainWindow(QMainWindow):
         if self._background_work_running() or self._automatic_generation_active:
             return
 
+        photo_detector, yolo_model_path = self._photo_detector_options()
+        if photo_detector == "yolo":
+            try:
+                # Optional runtime stays lazy: AI-only sessions do not require it.
+                # Validate before paid requests or clearing any previous results.
+                from ..services.photo_yolo import validate_yolo_setup
+                validate_yolo_setup(yolo_model_path)
+            except Exception as exc:
+                QMessageBox.warning(
+                    self, self._photo_detector_text("error_title"),
+                    self._photo_detector_text("error", error=str(exc)),
+                )
+                return
+
         try:
             doc_paths, document_roles = self._selected_documents()
         except (OSError, ValueError) as exc:
@@ -1378,15 +1466,14 @@ class MainWindow(QMainWindow):
         self._photo_source = ""
 
         model = self._session_model or profile['model']
-        photo_model = self._session_vision_model or profile['vision_model']
-        verification_model = self._session_verification_model or profile['verification_model']
+        photo_model = model
+        verification_model = model
         self._append_log(
-            f"Estrazione da {len(doc_paths)} file con il modello datasheet {model}"
+            f"Estrazione da {len(doc_paths)} file con il modello AI {model}"
             + (" (solo questa sessione)." if self._session_model else ".")
         )
         self._on_ai_progress(f"Profilo AI: {self.combo_component_type.currentText()}.")
-        self._on_ai_progress(f"Modello foto: {photo_model}.")
-        self._on_ai_progress(f"Modello verifica foto: {verification_model}.")
+        self._on_ai_progress(f"Modello AI unico: {model}.")
 
         self._extract_worker = ExtractWorker(
             doc_paths,
@@ -1396,6 +1483,9 @@ class MainWindow(QMainWindow):
             verification_prompt=profile['verification_prompt'],
             terminal_prompt=profile['terminal_prompt'],
             document_roles=document_roles,
+            component_family=self._selected_family(),
+            photo_detector=photo_detector,
+            yolo_model_path=yolo_model_path,
             system_prompt=profile['system_prompt'],
             extra_instructions=self.field_component_prompt.toPlainText().strip() or None,
             include_nc_pins=bool(self._config.get("include_nc_pins", True)),
@@ -1474,11 +1564,6 @@ class MainWindow(QMainWindow):
         # Testo del modello: inserimento letterale, mai interpretato come HTML.
         if re.match(r"^#\d+", message.strip()):
             self.ai_elements_list.addItem(message)
-        else:
-            self.ai_progress_text.moveCursor(QTextCursor.MoveOperation.End)
-            self.ai_progress_text.insertPlainText(message + "\n")
-            self.ai_progress_text.ensureCursorVisible()
-        self._write_log_line(message)
         self._append_log(message)
 
     def _refresh_ai_copy_buttons(self, *args) -> None:
@@ -1491,7 +1576,7 @@ class MainWindow(QMainWindow):
         if text:
             QApplication.clipboard().setText(text)
 
-    def _show_photo_comparison(self) -> None:
+    def _show_photo_comparison(self, _checked=False, *, component_row=None) -> None:
         if self._photo_png:
             length = (self.field_cast_body_length.value() if self._is_castellated()
                       else self.field_body_length.value())
@@ -1510,6 +1595,9 @@ class MainWindow(QMainWindow):
             )
             dialog.components_applied.connect(self._apply_photo_review)
             self.i18n.retranslate_widgets(dialog)
+            if component_row is not None and 0 <= component_row < len(dialog._items):
+                dialog._select_row(component_row)
+                QTimer.singleShot(0, dialog.choose_model)
             dialog.exec()
             return
         if not self._photo_overlay_png:
@@ -1561,6 +1649,13 @@ class MainWindow(QMainWindow):
 
     def _apply_photo_review(self, components: list[dict]) -> None:
         self._set_photo_components(components)
+        if self._photo_png:
+            from ..services.model_choices import save_choices
+            try:
+                path = save_choices(self._docs_dir().parent, self._photo_png, components)
+                self._append_log(f"Scelte e candidati KiCad salvati: {path}")
+            except (OSError, ValueError) as exc:
+                QMessageBox.warning(self, "Scelte KiCad non salvate", str(exc))
         self._invalidate_generated_mesh()
         self.label_3d_status.setText(self.i18n.text(
             "Componenti corretti dalla foto. Modello 3D da rigenerare: "
@@ -1592,16 +1687,13 @@ class MainWindow(QMainWindow):
         senza scartare il risultato AI e senza interrompere la generazione.
         """
         old_docs = self._docs_dir()
-        if not old_docs.is_dir():
-            return new_name
-        files = [f for f in old_docs.iterdir() if f.is_file()]
-        if not files:
-            return new_name
-
         old_name = self._component_name()
         new_docs = Path(self.field_library_root.text().strip()) / new_name / DOCS_SUBDIR
         if new_docs.resolve() == old_docs.resolve():
             return old_name
+        files = [f for f in old_docs.iterdir() if f.is_file()] if old_docs.is_dir() else []
+        if not files:
+            return new_name if self._move_log_to(new_docs.parent) else old_name
 
         # La rinomina non chiede conferma: interrompeva l'analisi a meta' con
         # una modale, proprio mentre il worker stava ancora lavorando. Resta
@@ -1618,7 +1710,8 @@ class MainWindow(QMainWindow):
                 'component.rename_conflict', new_name=new_name, old_name=old_name)
             self._on_ai_progress(message)
             return old_name
-        self._move_log_to(new_docs.parent)
+        if not self._move_log_to(new_docs.parent):
+            return old_name
         new_docs.mkdir(parents=True, exist_ok=True)
         for f in files:
             target = new_docs / f.name
@@ -1670,6 +1763,13 @@ class MainWindow(QMainWindow):
             params.name = self._migrate_docs_to_new_name(params.name)
         if params.name:
             self.field_name.setText(params.name)
+        if self._photo_png and params.components_3d:
+            from ..services.model_choices import restore_choices
+            try:
+                params.components_3d = restore_choices(
+                    self._docs_dir().parent, self._photo_png, params.components_3d)
+            except (OSError, ValueError, TypeError) as exc:
+                self._append_log(f"Scelte KiCad precedenti non ripristinate: {exc}")
         self.field_description.setText(params.description)
         if params.tags:
             self.field_tags.setText(params.tags)
@@ -1692,6 +1792,7 @@ class MainWindow(QMainWindow):
         if params.is_castellated():
             self._apply_extracted_castellated(params)
         else:
+            self._set_photo_components(params.components_3d or [])
             self.group_castellated.setChecked(False)
             self.field_rows.setValue(params.rows)
             self.field_cols.setValue(params.cols)
@@ -1704,9 +1805,17 @@ class MainWindow(QMainWindow):
                 if params.populated_pins else ""
             )
 
+        self._extracted_pcb_thickness = params.pcb_thickness_mm
+        if params.pcb_thickness_mm:
+            self.field_cast_pcb.setValue(params.pcb_thickness_mm)
+        if params.components_3d and params.pcb_thickness_mm is None:
+            self._append_log("Spessore PCB non quotato: stima 1.6 mm per la scheda THT; verificare con una misura diretta.")
+
         if self._auto_after_extraction and params.is_castellated():
             self.group_3d.setChecked(True)
-            self.field_body_height.setValue(params.body_height_mm)
+            # A board assembly uses PCB thickness and individual component heights.
+            # Missing overall height must neither block it nor reuse an old value.
+            self.field_body_height.setValue(params.body_height_mm or self.field_cast_pcb.value())
         if params.has_3d_body() and not params.is_castellated():
             self.group_3d.setChecked(True)
             self.field_body_length.setValue(params.body_length_mm)
@@ -2054,7 +2163,8 @@ class MainWindow(QMainWindow):
             self._add_side_row({"edge": "right", "count": 3, "pitch_mm": 2.54, "first_pin": 4})
         self._sync_3d_fields_for_castellated(checked)
         if hasattr(self, "group_components"):
-            self.group_components.setVisible(checked and self._advanced_user())
+            self.group_components.setVisible(self._advanced_user() and (
+                checked or self._selected_family() == "aggregate_tht"))
         self._update_summary()
         self._draw_preview()
 
@@ -2602,12 +2712,18 @@ class MainWindow(QMainWindow):
         un aiuto, non un requisito.
         """
         try:
+            from datetime import datetime
             path = self._log_file()
             path.parent.mkdir(parents=True, exist_ok=True)
             with open(path, "a", encoding="utf-8") as handle:
-                handle.write(str(message).rstrip() + "\n")
-        except OSError:
-            pass
+                stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+                handle.write(f"[{stamp}] {str(message).rstrip()}\n")
+                handle.flush()
+        except (OSError, AttributeError) as exc:
+            # Startup can emit messages before project widgets exist.
+            if hasattr(self, "log_text") and not getattr(self, "_log_write_failed", False):
+                self._log_write_failed = True
+                self.log_text.insertPlainText(f"Log file non disponibile: {exc}\n")
 
     def _start_log_session(self, title: str) -> None:
         """@brief Open a dated section so separate runs stay distinguishable."""
@@ -2618,7 +2734,7 @@ class MainWindow(QMainWindow):
         self._write_log_line(stamp + "  " + str(title))
         self._write_log_line("=" * 78)
 
-    def _move_log_to(self, destination: Path) -> None:
+    def _move_log_to(self, destination: Path) -> bool:
         """Porta il diario nella nuova cartella quando il componente e' rinominato.
 
         Senza, il racconto di una stessa analisi resterebbe spezzato fra la
@@ -2628,19 +2744,28 @@ class MainWindow(QMainWindow):
         try:
             source = self._log_file()
             if not source.is_file():
-                return
+                return True
             destination.mkdir(parents=True, exist_ok=True)
             target = destination / self.LOG_FILENAME
+            if target.resolve() == source.resolve():
+                return True
             if target.exists():
                 target.write_text(target.read_text(encoding="utf-8")
                                   + source.read_text(encoding="utf-8"), encoding="utf-8")
                 source.unlink()
             else:
                 shutil.move(str(source), str(target))
-        except OSError:
-            pass
+            return True
+        except OSError as exc:
+            self._append_log(f"Rinomina annullata: impossibile trasferire il log ({exc}).")
+            return False
 
     def _append_log(self, msg: str) -> None:
+        self._write_log_line(msg)
+        if hasattr(self, "ai_progress_text") and not re.match(r"^#\d+", msg.strip()):
+            self.ai_progress_text.moveCursor(QTextCursor.MoveOperation.End)
+            self.ai_progress_text.insertPlainText(msg + "\n")
+            self.ai_progress_text.ensureCursorVisible()
         # I tab si costruiscono in ordine: quello "Progetto" puo' gia' emettere
         # messaggi (tipologia componente, modello) quando il log del tab
         # "Genera" non esiste ancora.
@@ -2676,6 +2801,10 @@ class MainWindow(QMainWindow):
             drill=self.field_drill.value(),
             populated_pins=self._parse_populated_pins(),
             pin_map=self.pin_map,
+            body_length=self.field_body_length.value() if self.group_3d.isChecked() else None,
+            body_width=self.field_body_width.value() if self.group_3d.isChecked() else None,
+            body_offset_x=self.field_body_offset_x.value(),
+            body_offset_y=self.field_body_offset_y.value(),
         )
 
     def _current_body_params(self) -> Body3DParams | None:
@@ -2706,6 +2835,9 @@ class MainWindow(QMainWindow):
             pin_length_mm=self.field_pin_length_3d.value(),
             color_hex=self.field_body_color.text().strip(),
             pin_color_hex=self.field_pin_color.text().strip(),
+            pcb_thickness_mm=self._extracted_pcb_thickness,
+            components=self._components_from_table(),
+            populated_board=self._selected_family() == "aggregate_tht",
         )
 
     def _update_summary(self) -> None:
@@ -2768,13 +2900,17 @@ class MainWindow(QMainWindow):
         if params.package_geometry:
             raise ValueError('Per questa geometria a pad espliciti il generatore 3D non è ancora supportato. '
                              'Il footprint può essere generato manualmente in modalità avanzata.')
-        for field in ('body_length_mm', 'body_width_mm', 'body_height_mm'):
+        required_dimensions = ('body_length_mm', 'body_width_mm')
+        if not params.is_castellated():
+            required_dimensions += ('body_height_mm',)
+        for field in required_dimensions:
             value = getattr(params, field)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f'Manca una dimensione valida del corpo 3D: {field}.')
         dimensions = ((params.body_length_mm, self.field_cast_body_length if params.is_castellated() else self.field_body_length),
-                      (params.body_width_mm, self.field_cast_body_width if params.is_castellated() else self.field_body_width),
-                      (params.body_height_mm, self.field_body_height))
+                      (params.body_width_mm, self.field_cast_body_width if params.is_castellated() else self.field_body_width))
+        if not params.is_castellated():
+            dimensions += ((params.body_height_mm, self.field_body_height),)
         if any(not widget.minimum() <= value <= widget.maximum() for value, widget in dimensions):
             raise ValueError('Le dimensioni estratte superano i limiti dell’editor: serve una revisione.')
         if params.is_castellated():
@@ -2808,9 +2944,11 @@ class MainWindow(QMainWindow):
             if body is None:
                 raise ValueError('I parametri del modello 3D non sono disponibili.')
             # QSpinBox limits must not silently replace extracted dimensions.
-            if any(not math.isclose(actual, expected, abs_tol=.011) for actual, expected in (
-                    (body.length_mm, extracted.body_length_mm), (body.width_mm, extracted.body_width_mm),
-                    (body.height_mm, extracted.body_height_mm))):
+            dimensions = ((body.length_mm, extracted.body_length_mm),
+                          (body.width_mm, extracted.body_width_mm))
+            if not extracted.is_castellated():
+                dimensions += ((body.height_mm, extracted.body_height_mm),)
+            if any(not math.isclose(actual, expected, abs_tol=.011) for actual, expected in dimensions):
                 raise ValueError('Le dimensioni estratte superano i limiti dell’editor: serve una revisione.')
         except (ValueError, TypeError) as exc:
             self._automatic_generation_blocked(str(exc))
@@ -3055,6 +3193,9 @@ class MainWindow(QMainWindow):
             "solido reale con fillet e serigrafie:"
         ))
         self.preview_3d = Preview3DVtk()
+        if hasattr(self.preview_3d, 'component_requested'):
+            self.preview_3d.component_requested.connect(
+                lambda row: QTimer.singleShot(0, lambda: self._show_photo_comparison(component_row=row)))
         self.preview_3d.show_pin_numbers = self.chk_pin_numbers.isChecked()
         self.preview_3d.setMinimumHeight(120)
         outer.addWidget(self.preview_3d, 1)
@@ -3317,6 +3458,33 @@ class MainWindow(QMainWindow):
 
     def _show_generated_mesh(self, step_path: Path) -> None:
         """Mostra in anteprima la mesh del solido appena generato (fillet e testo inclusi)."""
+        report_path = step_path.parent.parent / 'kicad-model-candidates.json'
+        if report_path.is_file():
+            try:
+                records = json.loads(report_path.read_text(encoding='utf-8'))['components']
+                if not isinstance(records, list) or not all(isinstance(r, dict) for r in records):
+                    raise ValueError('Elenco componenti non valido nel report KiCad')
+                current = self._components_from_table()
+                for fallback_index, record in enumerate(records):
+                    index = record.get('source_row', fallback_index)
+                    if type(index) is not int or not 0 <= index < len(current):
+                        continue
+                    component = current[index]
+                    if (record.get('name') != component.name
+                            or record.get('package') != component.package
+                            or record.get('length_mm') != component.length
+                            or record.get('width_mm') != component.width):
+                        continue
+                    cell = self.table_components.item(index, 0)
+                    metadata = deepcopy(cell.data(Qt.ItemDataRole.UserRole) or {})
+                    match = record.get('model_match')
+                    if match is not None and not isinstance(match, dict):
+                        raise ValueError('Report modello KiCad non valido')
+                    metadata['model_match'] = match
+                    cell.setData(Qt.ItemDataRole.UserRole, metadata)
+                self._append_log(f'Candidati KiCad e decisioni: {report_path}')
+            except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+                self._append_log(f'Report candidati non caricato: {exc}')
         mesh_path = step_path.with_suffix("").with_suffix(".preview.json")
         if not mesh_path.is_file():
             mesh_path = step_path.parent / f"{step_path.stem}.preview.json"
@@ -3399,8 +3567,25 @@ class MainWindow(QMainWindow):
         metadata = QTableWidgetItem()
         row_metadata = deepcopy(photo_metadata or {})
         row_metadata.update(pin_count=component.pin_count, pins_by_side=component.pins_by_side,
+                            pin_count_confidence=component.pin_count_confidence,
+                            pin_count_source=component.pin_count_source,
                             _detected_kind=component.detected_kind,
-                            terminal_geometry=component.terminal_geometry)
+                            terminal_geometry=component.terminal_geometry,
+                            package=component.package, mating=component.mating,
+                            bbox_basis=component.bbox_basis,
+                            model_selection=deepcopy(component.model_selection),
+                            model_match=deepcopy(component.model_match),
+                            package_evidence=component.package_evidence)
+        # None leaves native-model axis inference enabled; zero is an explicit
+        # local CAD override, independent of the photo rectangle's rotation.
+        if component.model_rotation_deg is None:
+            row_metadata.pop("model_rotation_deg", None)
+        else:
+            row_metadata["model_rotation_deg"] = component.model_rotation_deg
+        if component.model_z_offset_mm:
+            row_metadata["model_z_offset_mm"] = component.model_z_offset_mm
+        else:
+            row_metadata.pop("model_z_offset_mm", None)
         metadata.setData(Qt.ItemDataRole.UserRole, row_metadata)
         table.setItem(row, 0, metadata)
 
@@ -3440,11 +3625,42 @@ class MainWindow(QMainWindow):
         table.setCellWidget(row, 8, color)
         marking = QLineEdit(component.marking)
         table.setCellWidget(row, 9, marking)
+        for column in range(10):
+            widget = table.cellWidget(row, column)
+            if isinstance(widget, QDoubleSpinBox):
+                widget.valueChanged.connect(
+                    lambda _value, item=metadata, geometry=column in (4, 5):
+                    self._component_edited(item, geometry))
+            elif isinstance(widget, QComboBox):
+                widget.currentIndexChanged.connect(
+                    lambda _value, item=metadata: self._component_edited(item, match=True))
+            elif isinstance(widget, QLineEdit):
+                widget.textChanged.connect(self._invalidate_generated_mesh)
+        if not getattr(self, "_refreshing_component_rows", False):
+            self._invalidate_generated_mesh()
+
+    def _component_edited(self, item, geometry=False, match=False) -> None:
+        """@brief Invalidate CAD and evidence tied to an edited photo rectangle."""
+        if geometry:
+            metadata = deepcopy(item.data(Qt.ItemDataRole.UserRole) or {})
+            metadata["bbox_basis"] = "unknown"
+            metadata.pop("package_evidence", None)
+            metadata.pop("terminal_geometry", None)
+            metadata.pop("model_match", None)
+            metadata.pop("model_selection", None)
+            item.setData(Qt.ItemDataRole.UserRole, metadata)
+        elif match:
+            metadata = deepcopy(item.data(Qt.ItemDataRole.UserRole) or {})
+            metadata.pop("model_match", None)
+            metadata.pop("model_selection", None)
+            item.setData(Qt.ItemDataRole.UserRole, metadata)
+        self._invalidate_generated_mesh()
 
     def _remove_component_row(self) -> None:
         row = self.table_components.currentRow()
         if row >= 0:
             self.table_components.removeRow(row)
+            self._invalidate_generated_mesh()
 
     def _set_photo_components(self, components: list[dict]) -> None:
         """Replace component rows, retaining unknown metadata beside each row."""
@@ -3454,9 +3670,19 @@ class MainWindow(QMainWindow):
                 height=c.get("height_mm", 1.0), name=c.get("name", "Componente"),
                 color_hex=c.get("color_hex") or "#303030", kind=c.get("kind", "generic"),
                 marking=c.get("marking", ""), rotation=float(c.get("rotation_deg", 0.0)),
+                model_rotation_deg=c.get("model_rotation_deg"),
+                model_selection=deepcopy(c.get("model_selection")),
+                model_match=deepcopy(c.get("model_match")),
+                model_z_offset_mm=float(c.get("model_z_offset_mm") or 0.0),
                 pin_count=c.get("pin_count"), pins_by_side=c.get("pins_by_side"),
+                pin_count_confidence=str(c.get("pin_count_confidence") or ""),
+                pin_count_source=str(c.get("pin_count_source") or ""),
                 detected_kind=c.get("_detected_kind"),
                 terminal_geometry=deepcopy(c.get("terminal_geometry")),
+                package=str(c.get("package") or ""),
+                mating=str(c.get("mating") or ""),
+                bbox_basis=str(c.get("bbox_basis") or "unknown"),
+                package_evidence=str(c.get("package_evidence") or ""),
             ) for c in components
         ]
         self._refresh_components_table(components)
@@ -3465,10 +3691,14 @@ class MainWindow(QMainWindow):
         """Riscrive la tabella dall'elenco appena estratto."""
         if not hasattr(self, "table_components"):
             return
-        self.table_components.setRowCount(0)
-        for index, component in enumerate(self.castellated_components):
-            metadata = photo_components[index] if photo_components is not None else None
-            self._add_component_row(component, metadata)
+        self._refreshing_component_rows = True
+        try:
+            self.table_components.setRowCount(0)
+            for index, component in enumerate(self.castellated_components):
+                metadata = photo_components[index] if photo_components is not None else None
+                self._add_component_row(component, metadata)
+        finally:
+            self._refreshing_component_rows = False
 
     def _components_from_table(self) -> list[ComponentBox]:
         """Componenti come sono ORA nella tabella (con le correzioni a mano)."""
@@ -3488,12 +3718,22 @@ class MainWindow(QMainWindow):
                 width=table.cellWidget(row, 5).value(),
                 height=table.cellWidget(row, 6).value(),
                 rotation=float(table.cellWidget(row, 7).currentData() or 0.0),
+                model_rotation_deg=metadata.get("model_rotation_deg"),
+                model_selection=deepcopy(metadata.get("model_selection")),
+                model_match=deepcopy(metadata.get("model_match")),
+                model_z_offset_mm=float(metadata.get("model_z_offset_mm") or 0.0),
                 color_hex=table.cellWidget(row, 8).text().strip() or "#303030",
                 marking=table.cellWidget(row, 9).text().strip(),
                 pin_count=metadata.get("pin_count"),
+                pin_count_confidence=str(metadata.get("pin_count_confidence") or ""),
+                pin_count_source=str(metadata.get("pin_count_source") or ""),
                 pins_by_side=metadata.get("pins_by_side"),
                 detected_kind=metadata.get("_detected_kind"),
                 terminal_geometry=metadata.get("terminal_geometry"),
+                package=str(metadata.get("package") or ""),
+                mating=str(metadata.get("mating") or ""),
+                bbox_basis=str(metadata.get("bbox_basis") or "unknown"),
+                package_evidence=str(metadata.get("package_evidence") or ""),
             ))
         return components
 
@@ -3971,6 +4211,14 @@ class MainWindow(QMainWindow):
         label.setPos(x + 6, (y1 + y2) / 2 + rect.width() / 2)
 
     def _draw_preview_3d(self) -> None:
+        # Never replace a generated model with a synthetic matrix preview
+        # simply because the user revisits the 3D tab.
+        if self._last_mesh_path and Path(self._last_mesh_path).is_file():
+            try:
+                self.preview_3d.render_mesh(self._last_mesh_path)
+                return
+            except Exception as exc:
+                self._append_log(f"Anteprima mesh non disponibile: {exc}")
         if self._is_castellated():
             # Per i moduli non esiste un'approssimazione parametrica da
             # disegnare al volo (il solido nasce dal taglio dei semi-fori):

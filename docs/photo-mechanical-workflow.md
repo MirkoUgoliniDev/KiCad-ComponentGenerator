@@ -17,7 +17,7 @@ dai pixel, le altezze sono stime grossolane della classe visiva.
 3. Aprire **Confronta foto**: selezionare/spostare i rettangoli, modificarne quote,
    aggiungere o eliminare elementi. Annulla non modifica i dati; Applica aggiorna
    la tabella e invalida la vecchia anteprima, da rigenerare.
-4. Verificare le altezze con una vista laterale o una misura, poi rigenerare il 3D.
+4. Verificare le altezze con una misura diretta, poi rigenerare il 3D.
 
 Il verde indica un rilevamento, **non una misura certificata**. L'arancione indica
 un dubbio automatico sulla presenza/geometria. Anche un inventario senza elementi

@@ -16,6 +16,51 @@ from pathlib import Path
 from .openrouter import OpenRouterError
 
 
+def mechanical_metadata_properties():
+    """@brief Describe optional visual evidence used for mechanical matching.
+
+    @return Tool-schema properties; dimensions always retain their measured box.
+    @note Unknown evidence must not imply a body, lead or PCB-pad measurement.
+    """
+    return {
+        "package": {"type": "string", "description":
+            "Recognizable standard mechanical package, not electrical identity. Empty if unknown."},
+        "mating": {"type": "string", "enum": ["edge", "top", "none"], "description":
+            "Visible connector opening: edge faces board edge, top faces upward; omit if unknown. "
+            "none means visibly not applicable. Never infer from size."},
+        "bbox_basis": {"type": "string", "enum": ["body", "leads", "pads", "unknown"],
+            "description": "What the supplied rectangle actually encloses: body only, body plus attached "
+            "leads, or PCB solder-pad extent. Use unknown if these boundaries are unresolved."},
+        "package_evidence": {"type": "string", "description":
+            "Brief visible mechanical evidence: body edges versus attached leads versus PCB pads, "
+            "visible terminal arrangement and mating opening where useful. No electrical inference."},
+    }
+
+
+def copy_mechanical_metadata(target, source, *, overwrite=True, geometry=True):
+    """@brief Copy valid optional evidence without erasing it on partial responses.
+
+    @param target Component dictionary to enrich in place.
+    @param source Response or component containing optional evidence.
+    @param overwrite Whether supplied nonempty evidence supersedes existing evidence.
+    @param geometry Whether both dictionaries describe the same measured rectangle.
+    @note Box evidence cannot migrate to a different box during cross-view matching.
+    """
+    for key in ("package", "mating", "bbox_basis", "package_evidence"):
+        if not geometry and key in ("bbox_basis", "package_evidence"):
+            continue
+        value = source.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        value = value.strip()
+        if key == "mating" and value not in ("edge", "top", "none"):
+            continue
+        if key == "bbox_basis" and value not in ("body", "leads", "pads", "unknown"):
+            continue
+        if overwrite or not target.get(key):
+            target[key] = value[:500] if key == "package_evidence" else value
+
+
 @dataclass
 class InventoryResult:
     """@brief Return the detected component inventory and analysis warnings."""
@@ -60,6 +105,8 @@ def detection_tool(kinds):
             "description": "Conteggio terminali per lato, solo quando distinguibile dalla foto.",
         },
     }
+    required = list(properties)
+    properties.update(mechanical_metadata_properties())
     return {"type": "function", "function": {
         "name": "report_photo_components",
         "description": (
@@ -70,7 +117,7 @@ def detection_tool(kinds):
         "parameters": {"type": "object", "properties": {
             "components": {"type": "array", "items": {
                 "type": "object", "properties": properties,
-                "required": list(properties), "additionalProperties": False,
+                "required": required, "additionalProperties": False,
             }},
         }, "required": ["components"]},
     }}
@@ -109,6 +156,9 @@ def decode_detections(raw, region, body_length, body_width, source, log):
             sx, sy = (x1-x0)*body_length, (y1-y0)*body_width
             length, width = (sx, sy) if angle % 180 == 0 else (sy, sx)
             item = dict(entry)
+            for key in mechanical_metadata_properties():
+                item.pop(key, None)
+            copy_mechanical_metadata(item, entry)
             # Un angolo incoerente non rende inutilizzabile il rettangolo. Per
             # forme chiaramente allungate conserviamo la geometria misurata,
             # normalizziamo gli assi locali e segnaliamo il verso come dubbio.
@@ -273,6 +323,11 @@ def merge_components(groups, log=lambda message: None, containment=False):
             index = assignments[current]
             duplicates += 1
             existing = merged[index]
+            for field in ("package", "mating"):
+                if existing.get(field) and item.get(field) and existing[field] != item[field]:
+                    log(f"Da verificare: {field} discordante tra viste: {existing[field]} / {item[field]}.")
+                    existing["_uncertain"] = True
+                    item = dict(item, _uncertain=True)
             if existing.get("kind") != item.get("kind"):
                 log(f"Classificazione discordante nello stesso punto: {existing.get('name')} / {item.get('name')}.")
                 existing["_uncertain"] = True
@@ -281,6 +336,8 @@ def merge_components(groups, log=lambda message: None, containment=False):
             rank = {"low": 0, "medium": 1, "high": 2}
             if rank.get(item.get("confidence"), 1) >= rank.get(existing.get("confidence"), 1):
                 replacement = dict(item)
+                copy_mechanical_metadata(replacement, existing, overwrite=False,
+                                         geometry=box_of(item) == box_of(existing))
                 if not replacement.get("marking"):
                     replacement["marking"] = existing.get("marking", "")
                 if replacement.get("kind") == "generic":
@@ -288,12 +345,24 @@ def merge_components(groups, log=lambda message: None, containment=False):
                 if existing.get("_uncertain"):
                     replacement["_uncertain"] = True
                 merged[index] = replacement
-            elif not existing.get("marking"):
-                existing["marking"] = item.get("marking", "")
+            else:
+                copy_mechanical_metadata(existing, item, overwrite=False,
+                                         geometry=box_of(item) == box_of(existing))
+                if not existing.get("marking"):
+                    existing["marking"] = item.get("marking", "")
     log(f"Fusione geometrica: {duplicates} duplicati riconciliati, {len(merged)} componenti.")
     for i, a in enumerate(merged):
         for j, b in enumerate(merged[i+1:], i+1):
             _, coverage = overlap(a, b)
+            ax0, ay0, ax1, ay1 = box_of(a)
+            bx0, by0, bx1, by1 = box_of(b)
+            # Mutual center containment is a diagnostic, never proof of identity.
+            # It excludes small peripheral overlaps without an empirical IoU cutoff.
+            if (ax0 < (bx0+bx1)/2 < ax1 and ay0 < (by0+by1)/2 < ay1
+                    and bx0 < (ax0+ax1)/2 < bx1 and by0 < (ay0+ay1)/2 < by1):
+                a["_uncertain"] = b["_uncertain"] = True
+                log(f"Da verificare: possibile doppione #{i+1}/#{j+1}; centri reciprocamente "
+                    "inclusi, corpi conservati distinti. Confermare sulla foto corpo e piazzole.")
             if coverage > 0.3:
                 a["_uncertain"] = b["_uncertain"] = True
                 log(f"Da verificare: sovrapposizione tra #{i+1} {a.get('name')} e #{j+1} {b.get('name')}.")
@@ -359,8 +428,31 @@ def image_block(image):
         if not ok:
             raise ValueError("Impossibile codificare la foto")
         encoded_bytes = encoded.tobytes()
+    mime = "image/png"
+    # Providers count base64 bytes toward the 5 MiB per-image limit.
+    # Compress before reducing resolution so tiny component detail survives.
+    budget = 5 * 1024 * 1024
+    if 4 * ((len(encoded_bytes) + 2) // 3) > budget:
+        import numpy as np
+        pixels = cv2.imdecode(np.frombuffer(encoded_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if pixels is None:
+            raise ValueError("Impossibile decodificare la foto")
+        while True:
+            for quality in (95, 90, 85, 75):
+                ok, encoded = cv2.imencode(".jpg", pixels, [cv2.IMWRITE_JPEG_QUALITY, quality])
+                if not ok:
+                    raise ValueError("Impossibile comprimere la foto")
+                encoded_bytes = encoded.tobytes()
+                if 4 * ((len(encoded_bytes) + 2) // 3) <= budget:
+                    break
+            else:
+                pixels = cv2.resize(pixels, (max(1, pixels.shape[1] * 3 // 4),
+                                            max(1, pixels.shape[0] * 3 // 4)), interpolation=cv2.INTER_AREA)
+                continue
+            break
+        mime = "image/jpeg"
     return {"type": "image_url", "image_url": {
-        "url": "data:image/png;base64," + base64.b64encode(encoded_bytes).decode("ascii"),
+        "url": "data:" + mime + ";base64," + base64.b64encode(encoded_bytes).decode("ascii"),
     }}
 
 
@@ -386,9 +478,17 @@ def draw_inventory(image, components, use_ids=False):
 def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                       top_photo_index=None, extra_instructions=None,
                       grounding=True, cache_dir=None, classifier_model=None, mechanical=True,
-                      grounding_prompt=None, verification_prompt=None, top_photo_source='AI'):
-    """@brief Provide the extract inventory operation for this workflow."""
+                      grounding_prompt=None, verification_prompt=None, top_photo_source='AI',
+                      detector='ai', yolo_model_path=None):
+    """@brief Calibrate the photo and extract reviewed component envelopes.
+
+    @param detector ai preserves the existing localization; yolo uses local ONNX proposals.
+    @param yolo_model_path Optional compatible ONNX weight file for the local detector.
+    @note Local detections are hypotheses, not package identities; AI review may cost credit.
+    """
     log = progress or (lambda message: None)
+    if detector not in ('ai', 'yolo'):
+        raise ValueError('Rilevatore fotografico non supportato.')
     report = InventoryResult()
     def warn(message):
         report.warnings.append(message)
@@ -435,6 +535,32 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     import cv2
     ok, encoded = cv2.imencode(".png", photo)
     report.photo_png = encoded.tobytes() if ok else None
+    if detector == 'yolo':
+        from .photo_yolo import detect_yolo_components
+        from .photo_global_inventory import review_global_inventory
+        audit = Path(cache_dir)/'yolo-audit' if cache_dir else None
+        log('YOLO locale: localizzazione senza invio della foto; verifica package AI successiva.')
+        proposals = detect_yolo_components(photo, length, width, model_path=yolo_model_path,
+                                          log=log, audit_dir=audit, include_review_candidates=True)
+        report.components = review_global_inventory(
+            photo, proposals, length, width, classifier_model or model, call, log,
+            cache_dir, verification_prompt=verification_prompt,
+            extra_instructions=extra_instructions)
+        report.calibration['detector'] = 'yolo'
+        report.calibration['proposal_count'] = len(proposals)
+        report.calibration['coverage_added_count'] = sum(
+            not c.get('source_candidate_ids', [True]) for c in report.components)
+        report.calibration['inventory_strategy'] = 'global-one-call'
+        issues = sorted({str(issue) for c in report.components
+                         for issue in c.get('_global_inventory_errors', [])})
+        if issues:
+            warn('Inventario globale parziale: ' + '; '.join(issues)
+                 + '. Componenti irrisolti conservati per revisione manuale.')
+        report.overlay_png = draw_inventory(photo, report.components)
+        log(f'Inventario ibrido revisionato: {len(report.components)} ipotesi da {len(proposals)} proposte YOLO '
+            'con riconciliazione globale in una richiesta; '
+            'completezza non certificata. Package, altezze e orientamenti dubbi da rivedere.')
+        return report
     if grounding:
         from .photo_grounding import grounded_components
         def report_progress(message):

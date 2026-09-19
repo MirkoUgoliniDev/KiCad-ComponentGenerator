@@ -25,7 +25,6 @@ def test_three_cards_load_unavailable_and_forward_roles(window, monkeypatch, tmp
     assert not panel.cards['top']['preview'].pixmap().isNull()
     panel.cards['pinout']['unavailable'].setChecked(True)
     panel.cards['hires']['unavailable'].setChecked(True)
-    panel.cards['front']['unavailable'].setChecked(True)
     monkeypatch.setattr(window, '_selected_documents', gui.MainWindow._selected_documents.__get__(window))
     monkeypatch.setattr(gui.ExtractWorker, 'start', lambda self: None)
     window._extract_with_ai()
@@ -70,7 +69,6 @@ def test_guided_metadata_follows_document_migration(window, monkeypatch, tmp_pat
     store.import_file('top', source)
     store.clear('pinout', unavailable=True)
     store.clear('hires', unavailable=True)
-    store.clear('front', unavailable=True)
     monkeypatch.setattr(QMessageBox, 'question', lambda *a: QMessageBox.StandardButton.Yes)
     window._migrate_docs_to_new_name('NewName')
     window.field_name.setText('NewName')
@@ -111,21 +109,19 @@ def test_pdf_has_first_page_thumbnail(window, tmp_path):
     (
         ('it', 'Non disponibile', 'Nessun file', 'Carica…',
          '(non specificata)',
-         ('Pinout / disposizione contatti', 'Immagine con quote', 'Foto ad alta risoluzione',
-          'Vista laterale'),
+         ('Pinout / disposizione contatti', 'Immagine con quote', 'Foto ad alta risoluzione'),
          ('Cartella componente', 'Documentazione (docs/)', 'Analisi componente', 'Strumenti AI')),
         ('en', 'Not available', 'No file', 'Load…',
          '(not specified)',
-         ('Pinout / contact layout', 'Dimensioned drawing', 'High-resolution photo', 'Side view'),
+         ('Pinout / contact layout', 'Dimensioned drawing', 'High-resolution photo'),
          ('Component folder', 'Documentation (docs/)', 'Component analysis', 'AI tools')),
         ('fr', 'Indisponible', 'Aucun fichier', 'Charger…',
          '(non spécifié)',
-         ('Brochage / disposition des contacts', 'Image cotée', 'Photo haute résolution',
-          'Vue latérale'),
+         ('Brochage / disposition des contacts', 'Image cotée', 'Photo haute résolution'),
          ('Dossier composant', 'Documentation (docs/)', 'Analyse du composant', 'Outils IA')),
         ('de', 'Nicht verfügbar', 'Keine Datei', 'Laden …',
          '(nicht angegeben)',
-         ('Pinbelegung / Kontaktanordnung', 'Bemaßte Zeichnung', 'Hochauflösendes Foto', 'Seitenansicht'),
+         ('Pinbelegung / Kontaktanordnung', 'Bemaßte Zeichnung', 'Hochauflösendes Foto'),
          ('Komponentenordner', 'Dokumentation (docs/)', 'Komponentenanalyse', 'KI-Werkzeuge')),
     ),
 )
@@ -148,7 +144,7 @@ def test_guided_document_cards_retranslate_after_every_refresh(
 def test_refresh_repairs_one_stale_unavailable_checkbox(window):
     """@brief Prevent one document card from retaining a previous language."""
     window.language_combo.setCurrentIndex(window.language_combo.findData('fr'))
-    stale = window.guided_docs.cards['front']['unavailable']
+    stale = window.guided_docs.cards['hires']['unavailable']
     stale.setText('Non disponibile')
 
     window._refresh_docs_list()
@@ -180,7 +176,7 @@ def test_load_dialog_reopens_on_the_last_source_folder(window, monkeypatch, tmp_
     assert Path(opened[0]) == Path(window._docs_dir())
     assert Path(window._config['last_document_dir']) == sources
 
-    panel.cards['front']['load'].click()
+    panel.cards['hires']['load'].click()
     assert Path(opened[1]) == sources, 'il dialogo non e\' ripartito dall\'ultima cartella'
 
 

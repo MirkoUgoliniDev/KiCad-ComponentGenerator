@@ -1,4 +1,4 @@
-"""Three explicit document roles per project, with recoverable local copies."""
+"""Explicit document roles per project, with recoverable local copies."""
 import json
 import os
 from pathlib import Path
@@ -7,7 +7,7 @@ import tempfile
 import uuid
 
 ROLES = {'pinout': 'Pinout / disposizione contatti', 'top': 'Immagine con quote',
-         'hires': 'Foto ad alta risoluzione', 'front': 'Vista laterale'}
+         'hires': 'Foto ad alta risoluzione'}
 #: Ruolo preferito per l'inventario fotografico, quando disponibile: a
 #: parita' di algoritmo e' la risoluzione a decidere quanti passivi
 #: piccoli si riescono a distinguere.
@@ -17,14 +17,12 @@ ROLE_HELP = {
               'Non assumere che il disegno sia visto dall’alto: verifica le indicazioni presenti.',
     'top': 'Immagine quotata vista dall’alto, dichiarata dall’utente: usa questa per le '
            'quote meccaniche -- lunghezza e larghezza del corpo, posizione dei fori, offset '
-           'delle file di contatti. Non sostituirla con pinout o vista laterale. Serve anche '
+           'delle file di contatti. Non sostituirla con il pinout. Serve anche '
            'a localizzare i componenti quando manca la foto ad alta risoluzione.',
     'hires': 'Foto dall’alto ad alta risoluzione, dichiarata dall’utente: usa questa '
              'immagine per individuare i componenti piccoli, che in una vista a bassa '
              'risoluzione non sono distinguibili. Deve essere una fotografia del pezzo '
              'reale, non un disegno tecnico a tratto.',
-    'front': 'Vista laterale dichiarata dall’utente: usa questo documento per altezze e profilo. '
-             'Il nome front è convenzionale, non certifica un particolare lato del componente.',
 }
 SUFFIXES = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.pdf'}
 MANIFEST = '.document-roles.json'
@@ -36,7 +34,7 @@ class DocumentError(ValueError):
 
 
 class DocumentSet:
-    """@brief Represent the canonical pinout, top and front source files."""
+    """@brief Represent the canonical pinout and top-view source files."""
     def __init__(self, directory):
         self.directory = Path(directory)
         self.path = self.directory / MANIFEST

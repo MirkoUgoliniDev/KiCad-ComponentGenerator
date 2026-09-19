@@ -1,0 +1,4 @@
+# Optional local CPU detector; provide compatible .onnx weights separately.
+numpy
+opencv-python
+onnxruntime

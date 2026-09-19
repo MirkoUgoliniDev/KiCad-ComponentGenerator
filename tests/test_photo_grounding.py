@@ -209,7 +209,8 @@ def test_tile_ownership_is_half_open_without_merging_to_hide_duplicates(monkeypa
 def test_classifier_schema_has_no_geometry_or_marking_fields():
     schema = grounding.classification_tool(KINDS)["function"]["parameters"]["properties"]["components"]["items"]
     assert not ({"marking", "bbox", "_box", "box_2d", "x_mm", "y_mm", "length_mm", "width_mm"} & schema["properties"].keys())
-    assert set(schema["required"]) == set(schema["properties"])
+    assert set(schema["required"]) <= set(schema["properties"])
+    assert set(schema["properties"]) - set(schema["required"]) <= {"bbox_basis", "package_evidence", "mating"}
 
 
 def test_classification_updates_semantics_but_cannot_move_boxes_or_restore_marking():
@@ -547,7 +548,7 @@ def test_grounded_path_keeps_successes_when_detail_api_calls_fail(photo):
     assert result[0]["marking"] == ""
     assert [c["tool"]["function"]["name"] for c in calls] == ["locate_components"]*4+["classify_fixed_packages"]
     assert "Do not guess values" in calls[-1]["system_prompt"]
-    assert "Do NOT transcribe markings" in calls[-1]["system_prompt"]
+    assert "Record legible markings only as supporting package_evidence" in calls[-1]["system_prompt"]
     assert sum("localizzazione fallita" in m for m in messages) == 2
 
 
@@ -905,7 +906,7 @@ def test_reconciliation_requests_context_and_only_immutable_ids_without_markings
     assert "duplicate_of" in schema["required"]
     assert "marking" not in schema["properties"]
     assert not ({"_box", "box_2d", "x_mm", "y_mm"} & schema["properties"].keys())
-    assert "Do not transcribe markings" in kwargs["system_prompt"]
+    assert "Record legible markings only as supporting package_evidence" in kwargs["system_prompt"]
     blocks = kwargs["content_blocks"]
     assert [b["type"] for b in blocks] == ["text", "image_url", "image_url"]
     assert json.loads(blocks[0]["text"]) == [{"id": 11, "initial_type": "capacitor", "reviewed_type": "resistor"}]
@@ -1053,7 +1054,7 @@ def run_mechanical(photo, components, responses, *, cache_dir=None, log=None):
     return result, calls
 
 
-def test_mechanical_envelopes_are_generic_unmarked_fixed_geometry_and_nonmutating():
+def test_mechanical_envelopes_accept_verified_family_but_keep_unmarked_fixed_geometry():
     photo = np.full((100, 200, 3), (9, 19, 29), np.uint8)
     original = dict(component(), name="SP3485E", marking="DO NOT RETAIN", height_mm=99,
                     color_hex="#ffffff")
@@ -1062,7 +1063,7 @@ def test_mechanical_envelopes_are_generic_unmarked_fixed_geometry_and_nonmutatin
         kind="ic_soic", marking="MODEL TEXT", color_hex="#000000", height_mm=88,
         _box=[0, 0, 1, 1], x_mm=999)]}])
     c = result[0]
-    assert c["kind"] == "generic" and c["name"] == "Ingombro 1" and c["marking"] == ""
+    assert c["kind"] == "ic_soic" and c["name"] == "Ingombro 1" and c["marking"] == ""
     assert c["color_hex"] == "#1d1309" and c["height_mm"] == .6
     assert c["_height_source"] == "coarse_visual_prior_not_measured"
     for key in ("_box", "x_mm", "y_mm", "length_mm", "width_mm", "rotation_deg", "_id"):
@@ -1103,11 +1104,11 @@ def test_mechanical_schema_asks_occupancy_and_the_body_outline_only(photo):
     tool = calls[0]["tool"]["function"]
     assert tool["name"] == "verify_mounted_bodies"
     item = tool["parameters"]["properties"]["components"]["items"]
-    assert set(item["properties"]) == set(item["required"]) == {
-        "id", "present", "confidence", "package"}
+    assert set(item["required"]) == {"id", "present", "confidence", "package"}
+    assert set(item["properties"]) == set(item["required"]) | {"mating", "bbox_basis", "package_evidence", "kind"}
     assert "forma fisica, non una funzione" in item["properties"]["package"]["description"]
-    assert "Do NOT identify electrical type" in calls[0]["system_prompt"]
-    assert calls[0]["max_tokens"] == 4096
+    assert "Do NOT invent exact electrical function" in calls[0]["system_prompt"]
+    assert calls[0]["max_tokens"] == grounding.MECHANICAL_MAX_TOKENS
 
 
 def test_the_declared_body_outline_reaches_the_component(photo):
@@ -1241,14 +1242,14 @@ def test_custom_stage_prompts_reach_only_their_api_calls(monkeypatch, photo, tmp
         top_photo_index=0, classifier_model="verify-model", cache_dir=tmp_path,
         grounding_prompt="Locate only", verification_prompt="Verify only")
     assert result.components
-    assert [c["system_prompt"] for c in calls] == ["Locate only"] * 4 + ["Verify only"]
+    assert [c["system_prompt"] for c in calls] == ["Locate only"] * 4 + ["Verify only" + grounding.MECHANICAL_EVIDENCE_PROMPT]
     # A prompt change invalidates only the matching stage's cache.
     changed_call, changed_calls = api_script({"components": [occupancy()]})
     inventory.extract_inventory(["top.png"], "photo-model", 40, 20, KINDS, changed_call,
         top_photo_index=0, classifier_model="verify-model", cache_dir=tmp_path,
         grounding_prompt="Locate only", verification_prompt="Verify differently")
     assert len(changed_calls) == 1
-    assert changed_calls[0]["system_prompt"] == "Verify differently"
+    assert changed_calls[0]["system_prompt"] == "Verify differently" + grounding.MECHANICAL_EVIDENCE_PROMPT
 
 
 def test_inventory_mechanical_occupancy_failure_retains_envelope_and_warning(monkeypatch, photo):
@@ -1266,7 +1267,5 @@ def test_the_classification_schema_asks_where_the_connector_opens():
     schema = grounding.classification_tool(KINDS)["function"]["parameters"]
     item = schema["properties"]["components"]["items"]["properties"]
     assert item["mating"]["enum"] == ["edge", "top", "none"]
-    # Obbligatorio come ogni altro campo: il contratto del classificatore e'
-    # che il modello risponda a tutto, senza omissioni silenziose. Per i non
-    # connettori l'enum prevede "none".
-    assert "mating" in schema["properties"]["components"]["items"]["required"]
+    # Occlusion does not establish a mating direction: omission means unknown.
+    assert "mating" not in schema["properties"]["components"]["items"]["required"]

@@ -1,4 +1,4 @@
-"""Three document slots, with explicit roles and local-copy previews."""
+"""Guided document slots with explicit roles and local-copy previews."""
 from pathlib import Path
 import webbrowser
 
@@ -33,7 +33,7 @@ def document_pixmap(path, size):
 
 
 class GuidedDocuments(QWidget):
-    """@brief Manage the guided pinout, top-view and front-view documents."""
+    """@brief Manage the guided pinout and top-view documents."""
     changed = pyqtSignal()
 
     def __init__(self, directory, parent=None, *, i18n=None, config=None, body_size=None):
@@ -164,14 +164,14 @@ class GuidedDocuments(QWidget):
         rifiutata resta indistinguibile da una accettata e si scopre il
         problema solo dal risultato.
 
-        None per i ruoli che non vengono calibrati: pinout e vista laterale
-        non sono viste dall'alto e un esito li' sarebbe fuorviante.
+        None per i ruoli che non vengono calibrati: il pinout non e' una vista
+        dall'alto e un esito li' sarebbe fuorviante.
         """
         from ..services.document_roles import INVENTORY_ROLES, ROLE_HELP
         if path is None:
             return None
         if role not in INVENTORY_ROLES:
-            # Pinout e vista laterale non vengono calibrati, ma "nessun segno"
+            # Il pinout non viene calibrato, ma "nessun segno"
             # non distingue "non serve" da "non l'ho guardata": si dichiara
             # che il file e' a posto e a cosa serve.
             return ('✓', '', self._tr('documento caricato; non richiede calibrazione.')
@@ -279,7 +279,7 @@ class GuidedDocuments(QWidget):
             )
         if not self.store().path.exists() and Path(self.directory()).is_dir():
             if any(p.is_file() and p.suffix.lower() in SUFFIXES for p in Path(self.directory()).iterdir()):
-                self.status.setText('Documenti precedenti conservati: usa Carica per assegnarli ai tre ruoli.')
+                self.status.setText('Documenti precedenti conservati: usa Carica per assegnarli ai ruoli disponibili.')
         self.status.setProperty('i18n_source', self.status.text())
         if self.i18n is not None:
             self.i18n.retranslate_widgets(self)
@@ -378,7 +378,7 @@ class GuidedDocuments(QWidget):
 
     def _info(self):
         show_info(self, 'Documenti per l’AI', '\n\n'.join(ROLE_HELP.values()) + '\n\n'
-            'L’app copia i file in docs con nomi pinout, top e front, mantenendo l’estensione reale. '
+            'L’app copia i file in docs con nomi pinout, top e hires, mantenendo l’estensione reale. '
             'Gli originali restano invariati. Sostituzioni e rimozioni sono recuperabili in docs/.history. '
             'Per il rilevamento fotografico dei componenti, top deve essere un’immagine PNG/JPEG/WEBP. '
             'Un PDF viene letto nell’analisi generale (l’anteprima mostra la prima pagina). '
