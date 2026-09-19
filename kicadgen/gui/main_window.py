@@ -1369,6 +1369,7 @@ class MainWindow(QMainWindow):
         self.analysis_overlay.clear_cost()
         self.lbl_ai_cost.hide()
         self.btn_extract_ai.setText(self.i18n.text("Analisi in corso..."))
+        self._start_log_session("Analisi AI")
         self.ai_progress_text.clear()
         self.ai_elements_list.clear()
         self.btn_photo_comparison.setEnabled(False)
@@ -1477,6 +1478,7 @@ class MainWindow(QMainWindow):
             self.ai_progress_text.moveCursor(QTextCursor.MoveOperation.End)
             self.ai_progress_text.insertPlainText(message + "\n")
             self.ai_progress_text.ensureCursorVisible()
+        self._write_log_line(message)
         self._append_log(message)
 
     def _refresh_ai_copy_buttons(self, *args) -> None:
@@ -1616,6 +1618,7 @@ class MainWindow(QMainWindow):
                 'component.rename_conflict', new_name=new_name, old_name=old_name)
             self._on_ai_progress(message)
             return old_name
+        self._move_log_to(new_docs.parent)
         new_docs.mkdir(parents=True, exist_ok=True)
         for f in files:
             target = new_docs / f.name
@@ -2580,6 +2583,63 @@ class MainWindow(QMainWindow):
         """@brief Preserve the previous handler as a project-install alias."""
         self._install_project_library()
 
+    #: Nome del diario scritto nella cartella del componente. Sta li' e non in
+    #: una cartella di sistema perche' appartiene al componente: chi apre quella
+    #: cartella trova accanto ai file generati il racconto di come sono stati
+    #: prodotti, senza doverlo ricopiare dall'interfaccia.
+    LOG_FILENAME = "analisi-ai.log"
+
+    def _log_file(self) -> Path:
+        """@brief Return the per-component log file inside the project folder."""
+        return self._project_dir() / self.LOG_FILENAME
+
+    def _write_log_line(self, message: str) -> None:
+        """Aggiunge una riga al diario del componente.
+
+        Scrive subito invece di accumulare in memoria: se l'analisi si
+        interrompe a meta', quello che e' successo fino a quel punto resta
+        leggibile. Un errore di scrittura non ferma l'analisi -- il diario e'
+        un aiuto, non un requisito.
+        """
+        try:
+            path = self._log_file()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(str(message).rstrip() + "\n")
+        except OSError:
+            pass
+
+    def _start_log_session(self, title: str) -> None:
+        """@brief Open a dated section so separate runs stay distinguishable."""
+        from datetime import datetime
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._write_log_line("")
+        self._write_log_line("=" * 78)
+        self._write_log_line(stamp + "  " + str(title))
+        self._write_log_line("=" * 78)
+
+    def _move_log_to(self, destination: Path) -> None:
+        """Porta il diario nella nuova cartella quando il componente e' rinominato.
+
+        Senza, il racconto di una stessa analisi resterebbe spezzato fra la
+        cartella vecchia e quella nuova.
+        """
+        import shutil
+        try:
+            source = self._log_file()
+            if not source.is_file():
+                return
+            destination.mkdir(parents=True, exist_ok=True)
+            target = destination / self.LOG_FILENAME
+            if target.exists():
+                target.write_text(target.read_text(encoding="utf-8")
+                                  + source.read_text(encoding="utf-8"), encoding="utf-8")
+                source.unlink()
+            else:
+                shutil.move(str(source), str(target))
+        except OSError:
+            pass
+
     def _append_log(self, msg: str) -> None:
         # I tab si costruiscono in ordine: quello "Progetto" puo' gia' emettere
         # messaggi (tipologia componente, modello) quando il log del tab
@@ -3231,6 +3291,7 @@ class MainWindow(QMainWindow):
         # mentre il solido viene costruito su quelli vecchi.
         self._analysis_tabs_enabled = self.tabs.isEnabled()
         self.tabs.setEnabled(False)
+        self._start_log_session("Rigenerazione modello 3D")
         self.analysis_overlay.start('Generazione modello 3D',
                                     'Avvio di FreeCAD…')
         self._cad3d_worker.start()
