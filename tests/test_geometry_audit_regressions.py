@@ -85,12 +85,30 @@ def test_tilted_board_cannot_supply_axis_aligned_metric_frame(angle, size):
     assert find_board(_board_image(angle, size), 40, 16) is None
 
 
+def test_a_moderately_tilted_photo_is_rectified_instead_of_rejected(tmp_path):
+    """Una foto a mano libera e' quasi sempre storta di qualche grado.
+
+    Rifiutarla costringeva a ripiegare su un disegno a bassa risoluzione. Il
+    raddrizzamento e' una rotazione rigida: la scala resta quella vera, e
+    infatti la misura torna quella attesa.
+    """
+    cv2 = pytest.importorskip("cv2")
+    from kicadgen.services.photo_inventory import prepare_photo
+    path = tmp_path / "tilted.png"
+    assert cv2.imwrite(str(path), _board_image(3))
+    crop = prepare_photo(path, 40, 16, {})
+    assert crop is not None, "una foto storta di 3 gradi e' ancora rifiutata"
+    assert crop.shape[1] / 40 == pytest.approx(20, rel=0.05)
+
+
 def test_tilt_rejection_uses_existing_calibration_warning_without_api(tmp_path):
     cv2 = pytest.importorskip("cv2")
     from kicadgen.services.photo_inventory import extract_inventory, prepare_photo
     from kicadgen.services.photo_refine import refine_components
+    # Oltre il limite di raddrizzamento non e' una vista dall'alto storta ma
+    # un'inquadratura prospettica, che una rotazione rigida non correggerebbe.
     path = tmp_path / "tilted.png"
-    assert cv2.imwrite(str(path), _board_image(3))
+    assert cv2.imwrite(str(path), _board_image(35))
     metadata = {}
     assert prepare_photo(path, 40, 16, metadata) is None
     assert metadata == {}

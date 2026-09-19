@@ -312,7 +312,16 @@ def prepare_photo(path, length, width, metadata=None):
         return None
     frame = find_board(image, length, width)
     if frame is None:
-        return None
+        # Una foto scattata a mano libera e' quasi sempre storta di qualche
+        # grado, e find_board ne tollera meno di uno. Si raddrizza e si
+        # riprova: e' una rotazione rigida, la scala resta quella vera.
+        from .photo_refine import deskew_board
+        straight = deskew_board(image, length, width)
+        if straight is None:
+            return None
+        image, frame = straight, find_board(straight, length, width)
+        if frame is None:
+            return None
     # find_board non rettifica la prospettiva: rifiuta le foto verticali anziché
     # scambiarne implicitamente gli assi. La convenzione richiede X orizzontale.
     x0, y0 = round(frame.cx-frame.width_px/2), round(frame.cy-frame.height_px/2)

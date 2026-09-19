@@ -36,7 +36,7 @@ class GuidedDocuments(QWidget):
     """@brief Manage the guided pinout, top-view and front-view documents."""
     changed = pyqtSignal()
 
-    def __init__(self, directory, parent=None, *, i18n=None, config=None):
+    def __init__(self, directory, parent=None, *, i18n=None, config=None, body_size=None):
         super().__init__(parent)
         self.directory = directory
         self.i18n = i18n
@@ -44,6 +44,12 @@ class GuidedDocuments(QWidget):
         # cartella di provenienza dei documenti. None nei test e negli usi
         # isolati del widget: il dialogo parte allora dalla cartella docs.
         self.config = config
+        # Quote del corpo (lunghezza, larghezza) per verificare se una
+        # vista dall'alto e' calibrabile. None quando non sono note.
+        self.body_size = body_size
+        # La verifica costa ~150 ms su una foto da 4 Mpx: si ricalcola
+        # solo quando cambiano file o quote, non a ogni refresh.
+        self._calibration_cache = {}
         self.cards = {}
         # Ruolo attualmente in caricamento, per non sbilanciare lo
         # stack dei cursori di override di Qt.
@@ -79,6 +85,12 @@ class GuidedDocuments(QWidget):
             filename.setTextFormat(Qt.TextFormat.PlainText)
             filename.setWordWrap(True)
             column.addWidget(filename)
+            verdict = QLabel()
+            verdict.setTextFormat(Qt.TextFormat.PlainText)
+            verdict.setWordWrap(True)
+            verdict.setProperty('i18n_skip', True)
+            verdict.hide()
+            column.addWidget(verdict)
             actions = QHBoxLayout()
             load = icon_button('Carica…', 'docs-add.svg', lambda checked=False, r=role: self._load(r))
             view = icon_button('', 'docs-open.svg', lambda checked=False, r=role: self._preview(r))
@@ -102,7 +114,7 @@ class GuidedDocuments(QWidget):
             unavailable.toggled.connect(lambda checked, r=role: self._unavailable(r, checked))
             column.addWidget(unavailable)
             self.cards[role] = dict(preview=preview, filename=filename, load=load, view=view,
-                                    remove=remove, unavailable=unavailable)
+                                    remove=remove, unavailable=unavailable, verdict=verdict)
             row.addWidget(card, 1)
         self.refresh()
 
@@ -144,6 +156,53 @@ class GuidedDocuments(QWidget):
         # verrebbe ridisegnata prima della fine, e l'attesa non si vedrebbe.
         QApplication.processEvents()
 
+    def _calibration_verdict(self, role, path):
+        """Esito della calibrazione per una vista dall'alto: (icona, testo, colore).
+
+        Risponde alla domanda che conta guardando la card: questa immagine
+        verra' davvero usata per individuare i componenti? Senza, una foto
+        rifiutata resta indistinguibile da una accettata e si scopre il
+        problema solo dal risultato.
+
+        None per i ruoli che non vengono calibrati: pinout e vista laterale
+        non sono viste dall'alto e un esito li' sarebbe fuorviante.
+        """
+        from ..services.document_roles import INVENTORY_ROLES
+        if role not in INVENTORY_ROLES or path is None:
+            return None
+        size = self.body_size() if callable(self.body_size) else None
+        if not size or not all(isinstance(v, (int, float)) and v > 0 for v in size):
+            return ('·', self._tr('quote del corpo non ancora note'), '#a6adc8')
+        length, width = float(size[0]), float(size[1])
+        try:
+            key = (str(path), path.stat().st_mtime_ns, path.stat().st_size, length, width)
+        except OSError:
+            return None
+        if key in self._calibration_cache:
+            return self._calibration_cache[key]
+        verdict = self._measure_calibration(path, length, width)
+        self._calibration_cache[key] = verdict
+        return verdict
+
+    def _measure_calibration(self, path, length, width):
+        try:
+            from ..services.photo_inventory import prepare_photo
+            from ..services.photo_refine import MIN_PACKAGE_PIXELS_HINT
+            crop = prepare_photo(path, length, width, None)
+        except ImportError:
+            return None
+        except (OSError, ValueError):
+            crop = None
+        if crop is None:
+            return ('✗', self._tr('non calibrabile: la scheda non è riconoscibile qui'),
+                    '#f38ba8')
+        scale = crop.shape[1] / length
+        readable = scale * 0.5  # lato corto di un 0402
+        if readable < MIN_PACKAGE_PIXELS_HINT:
+            return ('⚠', self._tr('calibrata, ma grossolana:') +
+                    f' {scale:.0f} px/mm ' + self._tr('(i passivi piccoli sfuggono)'), '#f9e2af')
+        return ('✓', self._tr('utilizzabile:') + f' {scale:.0f} px/mm', '#a6e3a1')
+
     def refresh(self):
         """@brief Provide the refresh operation for this workflow."""
         try:
@@ -166,6 +225,14 @@ class GuidedDocuments(QWidget):
             widgets['unavailable'].blockSignals(True)
             widgets['unavailable'].setChecked(entry.get('unavailable', False))
             widgets['unavailable'].blockSignals(False)
+            verdict = self._calibration_verdict(role, path if exists else None)
+            if verdict is None:
+                widgets['verdict'].hide()
+            else:
+                icon, text, colour = verdict
+                widgets['verdict'].setText(f'{icon}  {text}')
+                widgets['verdict'].setStyleSheet(f'color: {colour};')
+                widgets['verdict'].show()
             widgets['filename'].setText(filename or ('Non disponibile' if entry.get('unavailable') else '—'))
             original_name = str(entry.get('original_name', ''))
             widgets['filename'].setToolTip(

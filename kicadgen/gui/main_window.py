@@ -914,7 +914,7 @@ class MainWindow(QMainWindow):
         self.docs_list = QListWidget(docs_group)
         self.docs_list.hide()
         self.guided_docs = GuidedDocuments(self._docs_dir, docs_group, i18n=self.i18n,
-                                           config=self._config)
+                                           config=self._config, body_size=self._body_size)
         self.guided_docs.changed.connect(self._refresh_docs_list)
         docs_layout.addWidget(self.guided_docs)
         outer.addWidget(docs_group)
@@ -1253,6 +1253,21 @@ class MainWindow(QMainWindow):
         if path:
             self.field_library_root.setText(path)
 
+    def _body_size(self):
+        """Quote correnti del corpo, per giudicare le viste dall'alto.
+
+        None finche' non sono note: senza di esse non si puo' dire se una
+        foto sia calibrabile, e dichiararlo comunque sarebbe una supposizione.
+        """
+        try:
+            length = (self.field_cast_body_length.value() if self._is_castellated()
+                      else self.field_body_length.value())
+            width = (self.field_cast_body_width.value() if self._is_castellated()
+                     else self.field_body_width.value())
+        except AttributeError:
+            return None
+        return (length, width) if length > 0 and width > 0 else None
+
     def _refresh_docs_list(self) -> None:
         if not hasattr(self, "docs_list"):
             return
@@ -1392,10 +1407,13 @@ class MainWindow(QMainWindow):
         if self._applying_extraction:
             self._extract_finish_pending = True
             return
+        # Il consuntivo riguarda l'analisi AI, che a questo punto e' conclusa:
+        # va mostrato anche quando parte subito la generazione automatica, che
+        # non fa alcuna chiamata al modello e uscirebbe da qui senza dirlo.
+        self._show_ai_cost()
         if self._automatic_generation_active:
             return
         self._hide_analysis_overlay()
-        self._show_ai_cost()
         self.btn_extract_ai.setEnabled(True)
         self.btn_extract_ai.setText(self.i18n.text("Estrai parametri con AI"))
         params = self._auto_generation_params

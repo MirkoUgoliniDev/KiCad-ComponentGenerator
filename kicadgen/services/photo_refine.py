@@ -83,6 +83,10 @@ MIN_BOARD_SCALE_PX_PER_MM = 4.0
 #: la scheda e' il soggetto: un candidato che ne copre una porzione irrisoria
 #: e' un dettaglio interno (un connettore, un'etichetta), non il modulo.
 MIN_BOARD_IMAGE_FRACTION = 0.02
+#: Pixel minimi sul lato corto di un passivo 0402 perche' sia distinguibile.
+#: Duplicato della soglia usata dall'inventario, esposto qui perche' la
+#: GUI possa giudicare una foto senza importare l'intera catena.
+MIN_PACKAGE_PIXELS_HINT = 12
 #: Quanto ci si allontana dalla posizione stimata nel cercare i bordi,
 #: oltre il semi-ingombro del componente.
 SEARCH_MARGIN_MM = 2.0
@@ -143,25 +147,137 @@ class RefineReport:
         return text
 
 
-def find_board(image, body_length: float, body_width: float) -> Optional[BoardFrame]:
-    """Trova il rettangolo della scheda nella foto; None se non e' una vista dall'alto."""
-    if not all(math.isfinite(v) and v > 0 for v in (body_length, body_width)):
-        return None
+#: Inclinazione massima che si prova a raddrizzare. Oltre, la foto non e'
+#: una vista dall'alto storta ma un'inquadratura prospettica, che una
+#: rotazione rigida non puo' correggere.
+MAX_DESKEW_DEG = 20.0
+
+
+def _board_mask(image):
+    """Maschera del rettangolo scuro della scheda, come la vede find_board."""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     _, dark = cv2.threshold(gray, 70, 255, cv2.THRESH_BINARY_INV)
-    # CLOSE riempie i buchi chiari (componenti, serigrafia) dentro la scheda;
-    # OPEN con un kernel proporzionale al lato corto toglie le linee sottili
-    # attaccate al contorno (frecce di quota, ombre) che altrimenti
-    # allargherebbero il rettangolo e falserebbero la scala.
     close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
     open_size = max(9, int(min(image.shape[:2]) * 0.02) | 1)
     open_k = cv2.getStructuringElement(cv2.MORPH_RECT, (open_size, open_size))
     dark = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, close_k)
-    dark = cv2.morphologyEx(dark, cv2.MORPH_OPEN, open_k)
-    contours, _ = cv2.findContours(dark, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
+    return cv2.morphologyEx(dark, cv2.MORPH_OPEN, open_k)
+
+
+def _texture_mask(image):
+    """Maschera della scheda per tessitura, non per luminosita'.
+
+    Su una fotografia la scheda e' fitta di componenti, serigrafie e piste,
+    mentre gli sfondi -- sia il piano chiaro sia l'ombra scura accanto --
+    sono lisci. L'energia del gradiente separa le due cose anche quando i
+    livelli di grigio si sovrappongono: su questo modulo lo schermo metallico
+    sta a 201 e lo sfondo a 204, indistinguibili per soglia, ma il primo e'
+    pieno di bordi e il secondo no.
+
+    La chiusura morfologica con kernel largo ricuce l'interno della scheda,
+    compreso lo schermo: quello che conta e' la sagoma esterna.
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    gradient = cv2.magnitude(cv2.Sobel(blurred, cv2.CV_32F, 1, 0, ksize=3),
+                             cv2.Sobel(blurred, cv2.CV_32F, 0, 1, ksize=3))
+    window = max(9, int(min(image.shape[:2]) * 0.012) | 1)
+    energy = cv2.boxFilter(gradient, cv2.CV_32F, (window, window))
+    energy = cv2.normalize(energy, None, 0, 255, cv2.NORM_MINMAX).astype("uint8")
+    _, mask = cv2.threshold(energy, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    close = cv2.getStructuringElement(cv2.MORPH_RECT, (window * 3 | 1, window * 3 | 1))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close)
+    open_k = cv2.getStructuringElement(cv2.MORPH_RECT, (window, window))
+    return cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_k)
+
+
+def deskew_board(image, body_length: float, body_width: float):
+    """Raddrizza la foto quando la scheda e' inquadrata storta.
+
+    `find_board` non rettifica la rotazione, per non falsare scala e
+    coordinate: tollera percio' meno di un grado. Su una foto scattata a mano
+    libera bastano due o tre gradi per far rifiutare l'immagine, ed e' il
+    motivo per cui una foto vera ad alta risoluzione veniva scartata in favore
+    di un disegno a bassa risoluzione.
+
+    Qui si misura l'inclinazione del rettangolo scuro piu' grande compatibile
+    con le proporzioni del modulo e si ruota l'intera immagine. E' una
+    trasformazione rigida: lunghezze e proporzioni restano quelle vere, quindi
+    la scala ricavata dopo il raddrizzamento e' altrettanto valida. La tela
+    viene allargata, cosi' la rotazione non taglia gli angoli.
+
+    Ritorna l'immagine raddrizzata, oppure None se non c'e' niente da
+    raddrizzare o l'inclinazione e' troppo grande per essere una vista
+    dall'alto.
+    """
+    if cv2 is None or not all(math.isfinite(v) and v > 0 for v in (body_length, body_width)):
         return None
     expected = body_length / body_width
+    contours = []
+    for mask in (_board_mask(image), _texture_mask(image)):
+        found, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours.extend(found)
+    best = None
+    for contour in contours:
+        (cx, cy), (rw, rh), angle = cv2.minAreaRect(contour)
+        if min(rw, rh) < 20:
+            continue
+        # Sul rettangolo ruotato il rapporto e' quello vero della scheda: il
+        # bounding box assiale di un rettangolo storto e' sempre piu' tozzo.
+        found = max(rw, rh) / min(rw, rh)
+        if abs(found - expected) / expected > MAX_BOARD_ASPECT_ERROR:
+            continue
+        area = rw * rh
+        if best is None or area > best[0]:
+            best = (area, cx, cy, rw, rh, angle)
+    if best is None:
+        return None
+    _, cx, cy, rw, rh, angle = best
+    # minAreaRect riporta l'angolo del lato, non della scheda: si porta la
+    # correzione nel quarto piu' vicino allo zero.
+    tilt = angle % 90
+    if tilt > 45:
+        tilt -= 90
+    if abs(tilt) <= MAX_BOARD_TILT_DEG or abs(tilt) > MAX_DESKEW_DEG:
+        return None
+    matrix = cv2.getRotationMatrix2D((cx, cy), tilt, 1.0)
+    radians = math.radians(abs(tilt))
+    height, width = image.shape[:2]
+    new_w = int(width * math.cos(radians) + height * math.sin(radians)) + 2
+    new_h = int(width * math.sin(radians) + height * math.cos(radians)) + 2
+    matrix[0, 2] += new_w / 2 - cx
+    matrix[1, 2] += new_h / 2 - cy
+    return cv2.warpAffine(image, matrix, (new_w, new_h), flags=cv2.INTER_CUBIC,
+                          borderValue=(255, 255, 255))
+
+
+def find_board(image, body_length: float, body_width: float) -> Optional[BoardFrame]:
+    """Trova il rettangolo della scheda nella foto; None se non e' una vista dall'alto."""
+    if not all(math.isfinite(v) and v > 0 for v in (body_length, body_width)):
+        return None
+    expected = body_length / body_width
+    # Due segmentazioni, provate in quest'ordine. La soglia sul buio e' esatta
+    # su disegni e rendering, dove il PCB e' nero uniforme. Su una fotografia
+    # reale fallisce: uno schermo metallico e' chiaro quanto lo sfondo e
+    # un'ombra sul tavolo e' scura quanto la scheda, cosi' il "rettangolo
+    # scuro piu' grande" diventa un blob senza significato. La tessitura non
+    # ha quel problema, ma su un disegno pulito e' meno precisa: resta il
+    # ripiego, non il criterio principale.
+    for mask in (_board_mask(image), _texture_mask(image)):
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            candidates = _board_candidates(contours, image, expected, body_length)
+            if candidates:
+                break
+    else:
+        return None
+    if not candidates:
+        return None
+    return _frame_from(candidates, body_length, body_width)
+
+
+def _board_candidates(contours, image, expected, body_length):
+    """Rettangoli compatibili col modulo, filtrati come da contratto."""
     # Le foto dei moduli sono spesso corredate da quote: linee e frecce possono
     # formare il contorno più grande, ma con un rapporto molto diverso da quello
     # reale della scheda. Scegliamo quindi il candidato più grande tra quelli
@@ -202,8 +318,11 @@ def find_board(image, body_length: float, body_width: float) -> Optional[BoardFr
         if (w * h) < MIN_BOARD_IMAGE_FRACTION * image.shape[0] * image.shape[1]:
             continue
         candidates.append((cv2.contourArea(contour), error, bx, by, w, h))
-    if not candidates:
-        return None
+    return candidates
+
+
+def _frame_from(candidates, body_length, body_width):
+    """Il candidato piu' grande diventa il riferimento della scheda."""
     _, _, bx, by, w, h = max(candidates, key=lambda item: item[0])
     cx, cy = bx + w / 2, by + h / 2
     long_px, short_px = max(w, h), min(w, h)
