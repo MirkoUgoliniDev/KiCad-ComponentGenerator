@@ -142,7 +142,11 @@ def test_failed_crop_keeps_successes(monkeypatch):
         return {"components":[detection()]}
     result = inv.extract_inventory([Path("top.png")],"mock",40,20,["resistor"],call,top_photo_index=0,grounding=False)
     assert len(result.components) == 1
-    assert len(result.warnings) == 6
+    # Un avviso per ciascuno dei sei crop falliti. La foto sintetica e' a
+    # 10 px/mm, quindi si aggiunge quello sulla risoluzione insufficiente.
+    assert sum("analisi fallita" in w for w in result.warnings) == 6
+    assert sum("Risoluzione della foto usata" in w for w in result.warnings) == 1
+    assert len(result.warnings) == 7
 
 
 def test_vertical_board_is_rejected(tmp_path):
@@ -197,3 +201,49 @@ def test_pipeline_keeps_global_inventory_when_all_photo_calls_fail(monkeypatch,t
     assert len(result.components_3d)==1
     assert result.photo_overlay_png is None
     assert "simulated failure" in result.notes
+
+
+def test_same_package_seen_twice_with_slightly_different_boxes_is_reconciled():
+    """Caso reale: stesso package, due rettangoli concentrici, aree 2.53x.
+
+    Con il tetto a 2.5 le due rilevazioni restavano due componenti distinti
+    e nel modello 3D si compenetravano al 100%: il piu' piccolo spariva
+    dentro il piu' grande. Il discriminante e' la coincidenza dei centri,
+    non il rapporto esatto delle aree.
+    """
+    big = decode([detection(bbox=[.200, .200, .288, .258], kind="capacitor")])
+    small = decode([detection(bbox=[.217, .212, .270, .246], kind="capacitor")],
+                   source="B")
+    merged = inv.merge_components([big, small], containment=True)
+    assert len(merged) == 1, "la stessa rilevazione e' rimasta duplicata"
+
+
+def test_a_small_part_inside_a_generous_module_box_is_still_kept():
+    """Il contenimento da solo non basta: qui sono due pezzi veri.
+
+    Le aree differiscono di tre ordini di grandezza, non di un fattore 2.5:
+    e' un passivo dentro il rettangolo di un modulo, non un doppione.
+    """
+    big = decode([detection(bbox=[.1, .1, .8, .8], kind="module")])
+    small = decode([detection(bbox=[.2, .2, .25, .25])], source="B")
+    assert len(inv.merge_components([big, small], containment=True)) == 2
+
+
+def test_a_coarse_top_view_is_declared_incomplete_instead_of_looking_complete():
+    """Il limite e' nei pixel, non nell'algoritmo: va detto, non nascosto."""
+    messages = []
+    # Caso reale ESP32: ritaglio da 770 px per una scheda da 63.3 mm.
+    inv._warn_if_too_coarse(770, 63.30, messages.append)
+    assert messages, "nessun avviso su una vista troppo grossolana"
+    assert "12.2 px/mm" in messages[0] and "incompleto" in messages[0]
+
+
+def test_a_sharp_enough_top_view_says_nothing():
+    messages = []
+    inv._warn_if_too_coarse(3200, 63.30, messages.append)
+    assert not messages
+
+
+@pytest.mark.parametrize("crop_px, length", [(0, 63.3), (-5, 63.3), (770, 0), (770, float("nan"))])
+def test_degenerate_calibration_does_not_raise(crop_px, length):
+    inv._warn_if_too_coarse(crop_px, length, lambda m: None)

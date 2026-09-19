@@ -1090,6 +1090,14 @@ class MainWindow(QMainWindow):
         tools_row.addStretch()
         analysis_layout.addSpacing(10)
         analysis_layout.addWidget(self.btn_extract_ai, alignment=Qt.AlignmentFlag.AlignHCenter)
+        # Consuntivo dell'ultima analisi: resta visibile dopo la chiusura
+        # della modale, che sparisce appena il lavoro finisce.
+        self.lbl_ai_cost = QLabel()
+        self.lbl_ai_cost.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.lbl_ai_cost.setStyleSheet("color: #a6adc8;")
+        self.lbl_ai_cost.setTextFormat(Qt.TextFormat.PlainText)
+        self.lbl_ai_cost.hide()
+        analysis_layout.addWidget(self.lbl_ai_cost)
         self.component_prompt_dialog = QDialog(self)
         self.component_prompt_dialog.setWindowTitle("Prompt specifico del componente")
         self.component_prompt_dialog.setModal(True)
@@ -1387,6 +1395,7 @@ class MainWindow(QMainWindow):
         if self._automatic_generation_active:
             return
         self._hide_analysis_overlay()
+        self._show_ai_cost()
         self.btn_extract_ai.setEnabled(True)
         self.btn_extract_ai.setText(self.i18n.text("Estrai parametri con AI"))
         params = self._auto_generation_params
@@ -1394,6 +1403,31 @@ class MainWindow(QMainWindow):
         self._auto_after_extraction = False
         if params is not None:
             self._start_automatic_generation(params)
+
+    def _show_ai_cost(self) -> None:
+        """Mostra il consuntivo dell'ultima analisi sotto il pulsante.
+
+        La modale di avanzamento sparisce appena il lavoro finisce: il costo
+        deve restare leggibile dopo, senza dover aprire il Log AI. Il testo si
+        compone dai valori grezzi, non dalla frase del servizio, cosi' segue
+        la lingua scelta nell'interfaccia.
+        """
+        from ..services.openrouter import usage_totals
+
+        totals = usage_totals()
+        if not totals.calls:
+            text = self.i18n.tr("analysis.cost.cached")
+        else:
+            amount = (f"{totals.cost_usd:.4f}" if totals.cost_usd >= 0.01
+                      else f"{totals.cost_usd:.6f}")
+            text = self.i18n.tr(
+                "analysis.cost", amount=amount, calls=totals.calls,
+                tokens=totals.prompt_tokens + totals.completion_tokens)
+            if not totals.complete:
+                text = self.i18n.tr("analysis.cost.partial", summary=text,
+                                    missing=totals.calls_without_cost)
+        self.lbl_ai_cost.setText(text)
+        self.lbl_ai_cost.show()
 
     def _on_ai_progress(self, message: str) -> None:
         self.analysis_overlay.set_status(message)
@@ -3139,12 +3173,26 @@ class MainWindow(QMainWindow):
         )
         self._cad3d_worker._model_revision = self._model_revision
         self._cad3d_worker.done.connect(self._on_regen_3d_done)
+        self._cad3d_worker.warning.connect(self._on_regen_3d_progress)
         self._cad3d_worker.warning.connect(self._on_cad3d_warning)
         self._cad3d_worker.error.connect(self._on_regen_3d_error)
         self._cad3d_worker.finished.connect(self._on_regen_3d_finished)
+        # FreeCAD gira nel worker, quindi la GUI resta viva: lo spinner si
+        # anima davvero e il tempo trascorso scorre. Le schede si bloccano
+        # come nella generazione completa, per non cambiare i parametri
+        # mentre il solido viene costruito su quelli vecchi.
+        self._analysis_tabs_enabled = self.tabs.isEnabled()
+        self.tabs.setEnabled(False)
+        self.analysis_overlay.start('Generazione modello 3D',
+                                    'Avvio di FreeCAD…')
         self._cad3d_worker.start()
 
+    def _on_regen_3d_progress(self, message: str) -> None:
+        """Porta sulla modale i messaggi che arrivano durante la generazione."""
+        self.analysis_overlay.set_status(message)
+
     def _on_regen_3d_finished(self) -> None:
+        self._hide_analysis_overlay()
         self.btn_regen_3d.setEnabled(True)
         self.btn_regen_3d.setText(self.i18n.text(
             "Rigenera modello 3D (STEP) con queste annotazioni"))

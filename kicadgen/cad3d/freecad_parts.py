@@ -44,10 +44,52 @@ def _fillet(shape, radius, edges):
 
 
 def _vertical_edges(shape):
-    return [
-        e for e in shape.Edges
-        if e.BoundBox.ZLength > max(e.BoundBox.XLength, e.BoundBox.YLength) + 1e-6
-    ]
+    return _edges_along(shape, 2)
+
+
+def _edges_along(shape, axis):
+    """Spigoli paralleli all'asse indicato (0=X, 1=Y, 2=Z).
+
+    Raccordarli trasforma la sezione perpendicolare a quell'asse: su un
+    prisma a base rettangolare con raggio pari a meta' del lato corto si
+    ottiene una sezione a stadio, che e' la forma della bocca di un USB.
+    """
+    selected = []
+    for edge in shape.Edges:
+        box = edge.BoundBox
+        spans = (box.XLength, box.YLength, box.ZLength)
+        others = max(spans[(axis + 1) % 3], spans[(axis + 2) % 3])
+        if spans[axis] > others + 1e-6:
+            selected.append(edge)
+    return selected
+
+
+def _fillet_best(shape, radius, edges):
+    """Raccordo che ripiega su un raggio minore invece che sullo spigolo vivo.
+
+    Un raggio pari a meta' del lato corto e' esattamente il caso degenere:
+    i due raccordi si incontrano in tangenza e OCC rifiuta l'operazione.
+    Con `_fillet` il risultato era uno spigolo vivo, cioe' un foro squadrato
+    al posto dell'asola -- un fallimento silenzioso proprio nel caso che
+    interessa di piu'. Qui si riprova a scalare finche' non riesce.
+    """
+    for factor in (1.0, 0.96, 0.9, 0.8, 0.65, 0.5):
+        candidate = _fillet(shape, radius * factor, edges)
+        if candidate is not shape:
+            return candidate
+    return shape
+
+
+def _upper_edges_along(shape, axis):
+    """Solo i due spigoli lunghi in alto.
+
+    Il guscio di un USB ha il fondo piatto -- appoggia sulla scheda -- e gli
+    spigoli superiori molto stondati. Raccordare anche quelli in basso lo
+    farebbe sembrare un tubo sospeso.
+    """
+    ztop = shape.BoundBox.ZMax
+    return [e for e in _edges_along(shape, axis)
+            if abs(e.BoundBox.ZMax - ztop) < 1e-6]
 
 
 def _top_edges(shape):
@@ -340,7 +382,27 @@ def _diode_melf(cx, cy, z0, length, width, height, color):
     return parts
 
 
-def _connector(cx, cy, z0, length, width, height, color):
+def _outward_sign(cx, cy, axis, rotation_deg):
+    """Verso locale che, DOPO la rotazione del chiamante, guarda fuori scheda.
+
+    Il builder lavora nel sistema locale non ruotato: e' il chiamante che
+    ruota la forma di `rotation_deg` attorno al centro del componente. Se il
+    verso si decidesse dalla sola posizione globale, una rotazione di 180
+    gradi ribalterebbe la bocca verso l'interno della scheda -- dove stanno i
+    pin, non il cavo.
+
+    Qui si proietta la posizione del componente sull'asse di innesto cosi'
+    come apparira' DOPO la rotazione: il segno di quella proiezione e' il
+    verso locale da costruire.
+    """
+    angle = math.radians(rotation_deg or 0)
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    # Immagine globale degli assi locali X e Y dopo la rotazione.
+    projection = (cx * cos_a + cy * sin_a) if axis == 0 else (-cx * sin_a + cy * cos_a)
+    return -1.0 if projection < 0 else 1.0
+
+
+def _connector(cx, cy, z0, length, width, height, color, rotation_deg=0):
     """Guscio di connettore con l'apertura sulla faccia di accoppiamento.
 
     Un connettore si innesta lateralmente (USB, jack, header schermato): la
@@ -360,19 +422,124 @@ def _connector(cx, cy, z0, length, width, height, color):
     # scatola onesta di un guscio degenere con facce che si compenetrano.
     if min(length, width, height) <= 2.5 * wall:
         return [(shell, color)]
-    if length <= width:
-        sign = -1.0 if cx < 0 else 1.0
-        cavity = _box(cx + sign * wall, cy, z0 + wall,
-                      length, width - 2 * wall, height - 2 * wall)
+
+    axis = 0 if length <= width else 1
+    sign = _outward_sign(cx, cy, axis, rotation_deg)
+    if axis == 0:
+        mating = length
+        cross_w, cross_h = width - 2 * wall, height - 2 * wall
+        cavity = _box(cx + sign * wall, cy, z0 + wall, mating, cross_w, cross_h)
     else:
-        sign = -1.0 if cy < 0 else 1.0
-        cavity = _box(cx, cy + sign * wall, z0 + wall,
-                      length - 2 * wall, width, height - 2 * wall)
+        mating = width
+        cross_w, cross_h = length - 2 * wall, height - 2 * wall
+        cavity = _box(cx, cy + sign * wall, z0 + wall, cross_w, mating, cross_h)
+
+    # Bocca ad asola: raccordando gli spigoli paralleli all'asse di innesto
+    # con meta' del lato corto, la sezione rettangolare diventa uno stadio.
+    # E' il profilo di un USB, non un foro squadrato.
+    cavity = _fillet_best(cavity, min(cross_w, cross_h) / 2, _edges_along(cavity, axis))
+    # Il guscio ha il fondo piatto e il cielo molto stondato: raccordare solo
+    # i due spigoli lunghi superiori. Il raggio e' una frazione grande del
+    # lato corto, altrimenti resta una scatola con gli angoli smussati.
+    shell = _fillet_best(shell, min(cross_w, cross_h) * 0.45, _upper_edges_along(shell, axis))
     try:
         shell = shell.cut(cavity)
     except Exception:  # noqa: BLE001
-        pass
-    return [(shell, color)]
+        return [(_box(cx, cy, z0, length, width, height), color)]
+
+    # Una bocca larga e bassa e' quella della famiglia USB, che ha la
+    # linguetta dei contatti al centro. E' una regola sulla forma misurata,
+    # non sul nome del componente: un jack cilindrico non la riceve.
+    if max(cross_w, cross_h) < 2.5 * min(cross_w, cross_h):
+        return [(shell, color)]
+    shell = _dimples(shell, cx, cy, z0, axis, sign, mating, cross_w, height, wall)
+    parts = [(shell, color)]
+    tongue = _tongue(cx, cy, z0, axis, sign, mating, cross_w, cross_h, wall)
+    if tongue is not None:
+        parts.append((tongue, "#2a2a2a"))
+    return parts
+
+
+def _dimples(shell, cx, cy, z0, axis, sign, mating, cross_w, height, wall):
+    """Le due bugne stampate sul cielo del guscio.
+
+    Sono il dettaglio che si riconosce subito su un ricettacolo USB. Poco
+    profonde: servono a spezzare il riflesso della faccia superiore, non a
+    riprodurre una quota. Se la sottrazione fallisce resta il cielo liscio.
+    """
+    radius = min(cross_w * 0.10, mating * 0.10)
+    depth = min(wall * 0.6, height * 0.08)
+    if radius < 0.12 or depth < 0.03:
+        return shell
+    # Arretrate rispetto alla bocca, simmetriche sull'asse trasversale.
+    back = -sign * mating * 0.18
+    for offset in (-cross_w * 0.26, cross_w * 0.26):
+        px, py = ((cx + back, cy + offset) if axis == 0 else (cx + offset, cy + back))
+        try:
+            shell = shell.cut(Part.makeCylinder(radius, depth * 2,
+                                                V(px, py, z0 + height - depth)))
+        except Exception:  # noqa: BLE001 - cielo liscio, non fatale
+            return shell
+    return shell
+
+
+def _tongue(cx, cy, z0, axis, sign, mating, cross_w, cross_h, wall):
+    """Linguetta dei contatti, arretrata rispetto alla bocca.
+
+    Non arriva a filo: si vede in fondo all'asola, come nel pezzo reale.
+    Ritorna None quando la cavita' e' troppo sottile per ospitarla senza
+    toccare le pareti.
+    """
+    thickness = cross_h * 0.34 if cross_w >= cross_h else cross_w * 0.34
+    depth = mating * 0.55
+    if thickness < 0.08 or depth <= wall:
+        return None
+    inset = wall  # quanto la linguetta resta indietro rispetto al filo bocca
+    # Il verso e' quello della bocca: la linguetta si affaccia sull'asola,
+    # non si nasconde in fondo alla cavita'.
+    centre = sign * (mating / 2 - inset - depth / 2)
+    span = (cross_w if cross_w >= cross_h else cross_h) * 0.72
+    if axis == 0:
+        return _box(cx + centre, cy, z0 + wall + (cross_h - thickness) / 2,
+                    depth, span, thickness)
+    return _box(cx, cy + centre, z0 + wall + (cross_h - thickness) / 2,
+                span, depth, thickness)
+
+
+def _shade(color, factor):
+    """Variante piu' chiara o piu' scura dello stesso colore.
+
+    Serve a staccare due parti dello stesso pezzo (base e pulsante) senza
+    inventare un colore che la foto non ha mai mostrato.
+    """
+    text = str(color or "").lstrip("#")
+    if len(text) != 6:
+        return color
+    try:
+        channels = [int(text[i:i + 2], 16) for i in (0, 2, 4)]
+    except ValueError:
+        return color
+    return "#" + "".join(f"{min(255, max(0, round(c * factor))):02x}" for c in channels)
+
+
+def _tactile_switch(cx, cy, z0, length, width, height, color):
+    """Micro-switch: base squadrata piu' il pulsante cilindrico che sporge.
+
+    E' la forma che si riconosce a colpo d'occhio in anteprima -- BOOT e
+    RESET su una scheda di sviluppo -- e che una scatola liscia perde.
+    Il cilindro e' centrato: il pulsante decentrato esiste, ma non si
+    deduce dal rettangolo misurato sulla foto.
+    """
+    radius = min(length, width) * 0.32
+    travel = height * 0.38
+    # Senza il pulsante la base deve prendersi tutta l'altezza: un pezzo che
+    # rimpicciolisce falserebbe l'ingombro misurato sulla foto.
+    if radius <= 0.05 or travel <= 0.05:
+        return [(_box(cx, cy, z0, length, width, height), color)]
+    base = _box(cx, cy, z0, length, width, height - travel)
+    base = _fillet(base, min(length, width) * 0.10, _vertical_edges(base))
+    plunger = Part.makeCylinder(radius, travel, V(cx, cy, z0 + height - travel))
+    return [(base, color), (plunger, _shade(color, 1.45))]
 
 
 def _transformer(cx, cy, z0, length, width, height, color):
@@ -400,6 +567,7 @@ BUILDERS = {
     "diode": _diode,
     "diode_melf": _diode_melf,
     "connector": _connector,
+    "switch": _tactile_switch,
     "crystal": _crystal,
 }
 
@@ -435,6 +603,12 @@ def build_component(component, z0):
             print(f"KICADGEN_WARN:componente {component.get('name')} (ic): "
                   "package sconosciuto, geometria generica senza terminali")
             return _generic(cx, cy, z0, length, width, height, color)
+        if kind == "connector":
+            # Unico builder il cui orientamento dipende da dove si trova il
+            # componente: la bocca deve guardare fuori scheda DOPO la
+            # rotazione applicata dal chiamante, non prima.
+            return _connector(cx, cy, z0, length, width, height, color,
+                              rotation_deg=float(component.get("rotation_deg") or 0))
         if kind in BUILDERS and kind != "generic":
             print(f"KICADGEN_WARN:componente {component.get('name')} ({kind}): "
                   "geometria approssimata, terminal_geometry assente")

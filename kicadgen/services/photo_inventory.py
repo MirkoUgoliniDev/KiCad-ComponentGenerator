@@ -144,6 +144,47 @@ def decode_detections(raw, region, body_length, body_width, source, log):
     return result
 
 
+#: Quanto possono differire le aree di due rettangoli perche' restino
+#: candidati a essere lo stesso pezzo. Il discriminante forte e' la
+#: coincidenza dei centri, verificata subito sotto; questo tetto serve solo a
+#: non assorbire un pezzo piccolo dentro il rettangolo generoso di un modulo,
+#: caso che sta tre ordini di grandezza piu' in la'. A 2.5 restavano fuori
+#: rilevazioni doppie dello stesso package per pochi centesimi.
+CONTAINMENT_MAX_AREA_RATIO = 3.5
+
+
+#: Pixel minimi sul lato corto di un package perche' l'AI possa distinguerlo
+#: dal soldermask. Sotto, il pezzo e' qualche pixel scuro: non lo riconosce
+#: un modello e non lo riconoscerebbe una persona.
+MIN_PACKAGE_PIXELS = 12
+#: Lato corto del passivo piu' piccolo che ci si aspetta di trovare montato
+#: su una scheda di sviluppo (0402).
+SMALLEST_PASSIVE_MM = 0.5
+
+
+def _warn_if_too_coarse(crop_px, body_length, warn):
+    """Segnala quando la foto usata non puo' contenere i pezzi piccoli.
+
+    L'inventario non e' limitato dall'algoritmo ma dai pixel disponibili: a
+    12 px/mm un 0402 occupa 6 px sul lato corto. Senza questo avviso un
+    inventario necessariamente incompleto sembra completo, ed e' l'errore
+    piu' costoso -- si finisce a cercare il difetto nel codice invece che
+    nella fotografia.
+    """
+    if not (crop_px > 0 and math.isfinite(body_length) and body_length > 0):
+        return
+    scale = crop_px / body_length
+    readable = scale * SMALLEST_PASSIVE_MM
+    if readable >= MIN_PACKAGE_PIXELS:
+        return
+    needed = MIN_PACKAGE_PIXELS / SMALLEST_PASSIVE_MM * body_length
+    warn(f"Risoluzione della foto usata per l'inventario: {scale:.1f} px/mm. Un passivo 0402 "
+         f"misura {readable:.0f} px sul lato corto, meno dei {MIN_PACKAGE_PIXELS} "
+         f"necessari per distinguerlo: i componenti piu' piccoli non verranno "
+         f"rilevati e l'inventario resta incompleto. Servirebbe una foto con la "
+         f"scheda larga almeno {needed:.0f} px (questa ne ha {crop_px}).")
+
+
 def box_of(item):
     """@brief Provide the box of operation for this workflow."""
     if "_box" in item:
@@ -179,12 +220,12 @@ def _associate_view(group, previous, containment):
         for index, existing in enumerate(previous):
             iou, coverage = overlap(item, existing)
             contained = False
-            if containment and coverage >= .7 and iou >= .4:
+            if containment and coverage >= .7 and iou >= 1 / CONTAINMENT_MAX_AREA_RATIO:
                 ax0,ay0,ax1,ay1 = box_of(item)
                 bx0,by0,bx1,by1 = box_of(existing)
                 aw,ah,bw,bh = ax1-ax0,ay1-ay0,bx1-bx0,by1-by0
                 ratio = max(aw*ah,bw*bh)/max(1e-12,min(aw*ah,bw*bh))
-                contained = (ratio <= 2.5 and
+                contained = (ratio <= CONTAINMENT_MAX_AREA_RATIO and
                     abs((ax0+ax1-bx0-bx1)/2) <= .5*min(aw,bw) and
                     abs((ay0+ay1-by0-by1)/2) <= .5*min(ah,bh))
             if iou >= .60 or contained:
@@ -346,13 +387,19 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     if not all(math.isfinite(v) and v > 0 for v in (length,width)):
         warn("Quote PCB non valide: inventario fotografico saltato.")
         return report
-    if top_photo_index == -1:
-        warn("Nessuna vista superiore indicata dall'analisi principale: crop saltati.")
+    # L'utente puo' indicare piu' viste dall'alto: la foto ad alta risoluzione
+    # per i componenti piccoli e la vista superiore come riserva. Si provano
+    # tutte e vince la piu' dettagliata FRA QUELLE CALIBRABILI: un primo piano
+    # parziale o storto non deve lasciare l'inventario senza alcuna vista.
+    allowed = ({top_photo_index} if type(top_photo_index) is int
+               else set(top_photo_index) if top_photo_index is not None else None)
+    if allowed is not None and (not allowed or allowed == {-1}):
+        warn("Nessuna vista dall'alto indicata dall'analisi principale: crop saltati.")
         return report
     photos = [(i,Path(p)) for i,p in enumerate(paths)
               if Path(p).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}]
-    if type(top_photo_index) is int:
-        photos = [(i,p) for i,p in photos if i == top_photo_index]
+    if allowed is not None:
+        photos = [(i,p) for i,p in photos if i in allowed]
     try:
         candidates = []
         for i,path in photos:
@@ -361,7 +408,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             if photo is not None:
                 candidates.append((photo.shape[0]*photo.shape[1],path,photo,calibration))
         if not candidates:
-            warn("Foto superiore non calibrabile: resta l'inventario principale.")
+            warn("Nessuna vista dall'alto calibrabile: resta l'inventario principale.")
             return report
     except ImportError:
         warn("OpenCV non disponibile: resta l'inventario principale.")
@@ -372,9 +419,10 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     _, path, photo, report.calibration = max(candidates, key=lambda c:c[0])
     report.photo = path.name
     if top_photo_index is None:
-        warn(f"Vista superiore non specificata: scelta euristica {path.name}, verificare la foto nel confronto.")
+        warn(f"Vista dall'alto non specificata: scelta euristica {path.name}, verificare la foto nel confronto.")
     else:
-        log(f"Vista superiore indicata da {top_photo_source}: {path.name}.")
+        log(f"Vista dall'alto usata, indicata da {top_photo_source}: {path.name}.")
+    _warn_if_too_coarse(photo.shape[1], length, warn)
     import cv2
     ok, encoded = cv2.imencode(".png", photo)
     report.photo_png = encoded.tobytes() if ok else None

@@ -6,12 +6,23 @@ import shutil
 import tempfile
 import uuid
 
-ROLES = {'pinout': 'Pinout / disposizione contatti', 'top': 'Vista superiore', 'front': 'Vista laterale'}
+ROLES = {'pinout': 'Pinout / disposizione contatti', 'top': 'Immagine con quote',
+         'hires': 'Foto ad alta risoluzione', 'front': 'Vista laterale'}
+#: Ruolo preferito per l'inventario fotografico, quando disponibile: a
+#: parita' di algoritmo e' la risoluzione a decidere quanti passivi
+#: piccoli si riescono a distinguere.
+INVENTORY_ROLES = ('hires', 'top')
 ROLE_HELP = {
     'pinout': 'Usa questo documento per contatti, numerazione e quote del pinout. '
               'Non assumere che il disegno sia visto dall’alto: verifica le indicazioni presenti.',
-    'top': 'Vista superiore dichiarata dall’utente: usa questa immagine per localizzare '
-           'gli ingombri dei componenti sul modulo. Non sostituirla con pinout o vista laterale.',
+    'top': 'Immagine quotata vista dall’alto, dichiarata dall’utente: usa questa per le '
+           'quote meccaniche -- lunghezza e larghezza del corpo, posizione dei fori, offset '
+           'delle file di contatti. Non sostituirla con pinout o vista laterale. Serve anche '
+           'a localizzare i componenti quando manca la foto ad alta risoluzione.',
+    'hires': 'Foto dall’alto ad alta risoluzione, dichiarata dall’utente: usa questa '
+             'immagine per individuare i componenti piccoli, che in una vista a bassa '
+             'risoluzione non sono distinguibili. Deve essere una fotografia del pezzo '
+             'reale, non un disegno tecnico a tratto.',
     'front': 'Vista laterale dichiarata dall’utente: usa questo documento per altezze e profilo. '
              'Il nome front è convenzionale, non certifica un particolare lato del componente.',
 }

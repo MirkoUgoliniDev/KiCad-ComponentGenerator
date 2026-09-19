@@ -307,7 +307,7 @@ def mechanical_envelopes(photo, components, model, call, log, cache_dir, verific
     from .photo_inventory import image_block
     height_priors = {"ic_soic":1.75,"ic_qfn":1.0,"module":4.0,"transformer":4.0,
         "led":1.0,"capacitor_tantalum":1.5,"capacitor":.8,"resistor":.6,
-        "inductor":1.5,"diode":1.2,"diode_melf":1.5,"connector":3.0,"crystal":1.5}
+        "inductor":1.5,"diode":1.2,"diode_melf":1.5,"connector":3.0,"switch":1.7,"crystal":1.5}
     tool = {"type":"function","function":{"name":"verify_mounted_bodies",
         "description":"Verify physical mounted bodies, not electrical identities",
         "parameters":{"type":"object","properties":{"components":{"type":"array","items":{

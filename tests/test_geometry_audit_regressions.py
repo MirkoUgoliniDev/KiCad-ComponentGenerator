@@ -101,7 +101,7 @@ def test_tilt_rejection_uses_existing_calibration_warning_without_api(tmp_path):
     report = extract_inventory([path], "unused", 40, 16, [], no_api, top_photo_index=0)
     assert report.components == []
     assert report.calibration == {}
-    assert report.warnings == ["Foto superiore non calibrabile: resta l'inventario principale."]
+    assert report.warnings == ["Nessuna vista dall'alto calibrabile: resta l'inventario principale."]
     components = [dict(name="R1", x_mm=2, y_mm=1, length_mm=2, width_mm=1)]
     refined, refinement = refine_components([path], 40, 16, components)
     assert refined == components

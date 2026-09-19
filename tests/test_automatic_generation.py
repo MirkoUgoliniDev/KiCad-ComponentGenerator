@@ -2,6 +2,7 @@
 from pathlib import Path
 from unittest.mock import Mock
 
+from kicadgen.services.document_roles import ROLES
 import pytest
 from test_photo_inventory_gui import window, gui, ExtractedParams, QApplication
 from PyQt6.QtCore import Qt
@@ -324,7 +325,7 @@ def test_guided_name_collision_keeps_documents_and_generates_after_real_thread(w
     original_name = window._component_name()
     original_project = window._project_dir()
     store = DocumentSet(window._docs_dir())
-    for role in ('pinout', 'top', 'front'):
+    for role in ROLES:
         source = tmp_path / f'source-{role}.png'
         Image.new('RGB', (30, 20), 'blue').save(source)
         store.import_file(role, source)
@@ -371,5 +372,5 @@ def test_guided_name_collision_keeps_documents_and_generates_after_real_thread(w
     assert (original_project / f'{original_name}.3dshapes' / f'{original_name}.step').is_file()
     assert all(path.read_bytes() == content for path, content in before.items())
     assert conflict.read_bytes() == b'other project: must never change'
-    assert window._extract_worker.document_roles == {'pinout.png': 'pinout', 'top.png': 'top', 'front.png': 'front'}
+    assert window._extract_worker.document_roles == {f'{role}.png': role for role in ROLES}
     assert window.tabs.currentIndex() == 4

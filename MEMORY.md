@@ -1,5 +1,26 @@
 # Memoria delle decisioni del progetto
 
+## 2026-09-19 — Quarto ruolo: foto ad alta risoluzione
+
+Supera la decisione del 2026-09-13 "solo tre ruoli, non inventare nuove
+categorie": richiesta esplicita dell'utente.
+
+- Nuovo ruolo `hires` ("Foto ad alta risoluzione") fra `top` e `front`,
+  opzionale come gli altri. Etichetta tradotta IT/EN/FR/DE.
+- Serve SOLO a individuare meglio i componenti piccoli. Non deve essere
+  quotata: la calibrazione ricava i px/mm dal contorno della scheda piu' le
+  quote del datasheet, non legge mai annotazioni dall'immagine.
+- Deve essere una fotografia del pezzo reale: un disegno tecnico a tratto ad
+  alta risoluzione non serve all'inventario (caso Dimensioni2.jpeg).
+- `INVENTORY_ROLES = ('hires', 'top')` e' una PREFERENZA, non un'esclusiva:
+  si passano tutte le viste dall'alto assegnate e vince la piu' dettagliata
+  FRA QUELLE CALIBRABILI. Una foto ravvicinata puo' non inquadrare tutta la
+  scheda: senza il ripiego si resterebbe senza inventario.
+- Il limite dell'inventario e' la risoluzione, non l'algoritmo: a 12 px/mm un
+  0402 misura 6 px sul lato corto. `_warn_if_too_coarse` lo dichiara invece
+  di lasciar credere che l'inventario sia completo.
+- Le asserzioni dei test sui ruoli sono guidate da `ROLES`, non dal numero 3.
+
 ## 2026-09-13 — Tab KiCad e consegna verificabile
 
 - Aggiungere un tab permanente **KiCad**, disponibile anche in modalità standard,

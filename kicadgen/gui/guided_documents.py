@@ -4,8 +4,8 @@ import webbrowser
 
 from PyQt6.QtCore import Qt, QSize, pyqtSignal
 from PyQt6.QtGui import QPixmap
-from PyQt6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QGroupBox,
-    QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget)
+from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
+    QGroupBox, QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget)
 
 from ..services.document_roles import DocumentSet, ROLES, ROLE_HELP, SUFFIXES
 from .profile_dialog import icon_button, show_info
@@ -45,6 +45,9 @@ class GuidedDocuments(QWidget):
         # isolati del widget: il dialogo parte allora dalla cartella docs.
         self.config = config
         self.cards = {}
+        # Ruolo attualmente in caricamento, per non sbilanciare lo
+        # stack dei cursori di override di Qt.
+        self._busy_role = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         top = QHBoxLayout()
@@ -110,6 +113,36 @@ class GuidedDocuments(QWidget):
     def _tr(self, source):
         """@brief Translate a visible source string when i18n is available."""
         return self.i18n.text(source) if self.i18n is not None else source
+
+    def set_busy(self, role, busy):
+        """Mette la card in attesa mentre il file viene copiato e letto.
+
+        La copia e' immediata, ma generare l'anteprima costa decine di
+        millisecondi per una foto e puo' arrivare a secondi su un PDF: senza
+        un segnale la card resta muta e sembra che il pulsante non abbia
+        fatto nulla. I comandi vengono disabilitati per non accodare una
+        seconda richiesta sullo stesso ruolo.
+        """
+        widgets = self.cards.get(role)
+        if not widgets or busy == (self._busy_role == role):
+            # Ripristinare un cursore mai impostato -- il caso dell'utente che
+            # annulla la conferma di sostituzione -- toglierebbe dallo stack
+            # quello di qualcun altro.
+            return
+        for key in ('load', 'view', 'remove', 'unavailable'):
+            widgets[key].setEnabled(not busy)
+        if busy:
+            # L'anteprima precedente sparisce subito: e' gia' superata.
+            widgets['preview'].setPixmap(QPixmap())
+            widgets['preview'].setText(self._tr('Caricamento…'))
+            widgets['filename'].setText('…')
+            QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
+        else:
+            QApplication.restoreOverrideCursor()
+        self._busy_role = role if busy else None
+        # Il lavoro blocca il thread della GUI: senza questo la card non
+        # verrebbe ridisegnata prima della fine, e l'attesa non si vedrebbe.
+        QApplication.processEvents()
 
     def refresh(self):
         """@brief Provide the refresh operation for this workflow."""
@@ -193,11 +226,13 @@ class GuidedDocuments(QWidget):
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
                 return
+            self.set_busy(role, True)
             store.import_file(role, source, replace=replace)
             self.changed.emit()
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, self._tr('Documento non caricato'), str(exc))
         finally:
+            self.set_busy(role, False)
             self.refresh()
 
     def _remove(self, role, unavailable=False):

@@ -336,15 +336,17 @@ def test_explicit_document_roles_override_ai_top_selection(monkeypatch, tmp_path
     monkeypatch.setattr(ext, 'call_tool', call)
     monkeypatch.setattr(inv, 'extract_inventory', photo)
     ext.extract_pin_header_params(paths, document_roles=roles, photo_cache_dir=tmp_path / 'cache')
-    assert photo.call_args.kwargs['top_photo_index'] == (2 if with_top else -1)
+    # Ora si passa l'elenco delle viste dall'alto assegnate: l'inventario
+    # sceglie la piu' dettagliata fra quelle che riesce a calibrare.
+    assert photo.call_args.kwargs['top_photo_index'] == ([2] if with_top else [-1])
     assert photo.call_args.kwargs['top_photo_source'] == 'utente'
     blocks = call.call_args.kwargs['content_blocks']
     assert 'Pinout / disposizione contatti' in blocks[0]['text']
     assert 'Vista laterale' in blocks[2]['text']
     if with_top:
-        assert 'Vista superiore' in blocks[4]['text']
+        assert 'Immagine con quote' in blocks[4]['text']
     else:
-        assert 'Viste non fornite: Vista superiore' in blocks[-1]['text']
+        assert 'Viste non fornite: Immagine con quote' in blocks[-1]['text']
 
 
 def test_ambiguous_roles_fail_before_network(monkeypatch, tmp_path):

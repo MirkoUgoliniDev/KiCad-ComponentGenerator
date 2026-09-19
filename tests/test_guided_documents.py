@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from kicadgen.services.document_roles import ROLES
 import pytest
 from PIL import Image
 from PyQt6.QtWidgets import QFileDialog, QGroupBox, QMessageBox
@@ -14,7 +15,7 @@ def image_file(path):
 
 def test_three_cards_load_unavailable_and_forward_roles(window, monkeypatch, tmp_path):
     panel = window.guided_docs
-    assert list(panel.cards) == ['pinout', 'top', 'front']
+    assert list(panel.cards) == list(ROLES)
     assert window.docs_list.isHidden()
     source = image_file(tmp_path / 'random.png')
     monkeypatch.setattr(QFileDialog, 'getOpenFileName', lambda *a: (str(source), ''))
@@ -23,6 +24,7 @@ def test_three_cards_load_unavailable_and_forward_roles(window, monkeypatch, tmp
     assert panel.cards['top']['view'].isEnabled()
     assert not panel.cards['top']['preview'].pixmap().isNull()
     panel.cards['pinout']['unavailable'].setChecked(True)
+    panel.cards['hires']['unavailable'].setChecked(True)
     panel.cards['front']['unavailable'].setChecked(True)
     monkeypatch.setattr(window, '_selected_documents', gui.MainWindow._selected_documents.__get__(window))
     monkeypatch.setattr(gui.ExtractWorker, 'start', lambda self: None)
@@ -67,6 +69,7 @@ def test_guided_metadata_follows_document_migration(window, monkeypatch, tmp_pat
     store = DocumentSet(window._docs_dir())
     store.import_file('top', source)
     store.clear('pinout', unavailable=True)
+    store.clear('hires', unavailable=True)
     store.clear('front', unavailable=True)
     monkeypatch.setattr(QMessageBox, 'question', lambda *a: QMessageBox.StandardButton.Yes)
     window._migrate_docs_to_new_name('NewName')
@@ -108,19 +111,21 @@ def test_pdf_has_first_page_thumbnail(window, tmp_path):
     (
         ('it', 'Non disponibile', 'Nessun file', 'Carica…',
          '(non specificata)',
-         ('Pinout / disposizione contatti', 'Vista superiore', 'Vista laterale'),
+         ('Pinout / disposizione contatti', 'Immagine con quote', 'Foto ad alta risoluzione',
+          'Vista laterale'),
          ('Cartella componente', 'Documentazione (docs/)', 'Analisi componente', 'Strumenti AI')),
         ('en', 'Not available', 'No file', 'Load…',
          '(not specified)',
-         ('Pinout / contact layout', 'Top view', 'Side view'),
+         ('Pinout / contact layout', 'Dimensioned drawing', 'High-resolution photo', 'Side view'),
          ('Component folder', 'Documentation (docs/)', 'Component analysis', 'AI tools')),
         ('fr', 'Indisponible', 'Aucun fichier', 'Charger…',
          '(non spécifié)',
-         ('Brochage / disposition des contacts', 'Vue de dessus', 'Vue latérale'),
+         ('Brochage / disposition des contacts', 'Image cotée', 'Photo haute résolution',
+          'Vue latérale'),
          ('Dossier composant', 'Documentation (docs/)', 'Analyse du composant', 'Outils IA')),
         ('de', 'Nicht verfügbar', 'Keine Datei', 'Laden …',
          '(nicht angegeben)',
-         ('Pinbelegung / Kontaktanordnung', 'Draufsicht', 'Seitenansicht'),
+         ('Pinbelegung / Kontaktanordnung', 'Bemaßte Zeichnung', 'Hochauflösendes Foto', 'Seitenansicht'),
          ('Komponentenordner', 'Dokumentation (docs/)', 'Komponentenanalyse', 'KI-Werkzeuge')),
     ),
 )
@@ -131,9 +136,9 @@ def test_guided_document_cards_retranslate_after_every_refresh(
     window._refresh_docs_list()
 
     cards = window.guided_docs.cards
-    assert tuple(cards[role]['unavailable'].text() for role in cards) == (unavailable,) * 3
-    assert tuple(cards[role]['preview'].text() for role in cards) == (empty,) * 3
-    assert tuple(cards[role]['load'].text() for role in cards) == (load,) * 3
+    assert tuple(cards[role]['unavailable'].text() for role in cards) == (unavailable,) * len(ROLES)
+    assert tuple(cards[role]['preview'].text() for role in cards) == (empty,) * len(ROLES)
+    assert tuple(cards[role]['load'].text() for role in cards) == (load,) * len(ROLES)
     assert tuple(cards[role]['unavailable'].parentWidget().title() for role in cards) == roles
     assert window.combo_component_type.currentText() == component_type
     titles = {group.title() for group in window.findChildren(QGroupBox)}
@@ -150,7 +155,7 @@ def test_refresh_repairs_one_stale_unavailable_checkbox(window):
 
     assert tuple(
         card['unavailable'].text() for card in window.guided_docs.cards.values()
-    ) == ('Indisponible',) * 3
+    ) == ('Indisponible',) * len(ROLES)
 
 
 def test_load_dialog_reopens_on_the_last_source_folder(window, monkeypatch, tmp_path):
@@ -192,3 +197,36 @@ def test_forgotten_folder_falls_back_instead_of_opening_nowhere(window, monkeypa
     monkeypatch.setattr(QFileDialog, 'getOpenFileName', fake_dialog)
     panel.cards['top']['load'].click()
     assert Path(opened[0]) == Path(window._docs_dir())
+
+
+def test_the_card_shows_a_loading_state_while_the_file_is_read(window, monkeypatch, tmp_path):
+    """Generare l'anteprima blocca la GUI: senza segnale sembra non aver fatto nulla."""
+    panel = window.guided_docs
+    seen = {}
+
+    def fake_import(self, role, source, replace=False):
+        card = panel.cards[role]
+        seen['text'] = card['preview'].text()
+        seen['load_enabled'] = card['load'].isEnabled()
+
+    monkeypatch.setattr(QFileDialog, 'getOpenFileName',
+                        lambda *a: (str(image_file(tmp_path / 'v.png')), ''))
+    monkeypatch.setattr(DocumentSet, 'import_file', fake_import)
+    panel.cards['top']['load'].click()
+    assert 'aricament' in seen['text'], 'la card non segnala il caricamento'
+    assert seen['load_enabled'] is False, 'si puo\' accodare una seconda richiesta'
+    # Ripristino: la card torna operativa e il cursore non resta a clessidra.
+    assert panel.cards['top']['load'].isEnabled()
+    assert panel._busy_role is None
+
+
+def test_cancelling_the_replace_dialog_leaves_the_cursor_alone(window, monkeypatch, tmp_path):
+    """Ripristinare un cursore mai impostato toglierebbe quello di altri."""
+    panel = window.guided_docs
+    monkeypatch.setattr(QFileDialog, 'getOpenFileName',
+                        lambda *a: (str(image_file(tmp_path / 'v.png')), ''))
+    panel.cards['top']['load'].click()
+    monkeypatch.setattr(QMessageBox, 'question', lambda *a: QMessageBox.StandardButton.No)
+    panel.cards['top']['load'].click()
+    assert panel._busy_role is None
+    assert panel.cards['top']['load'].isEnabled()

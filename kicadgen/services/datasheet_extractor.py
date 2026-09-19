@@ -35,7 +35,7 @@ MAX_FILES = 5
 
 #: Tipi di package che il modello 3D sa disegnare (cad3d/freecad_parts.py:
 #: BUILDERS). Duplicato qui perche' quel modulo gira solo dentro FreeCAD.
-COMPONENT_KINDS = ('generic', 'ic', 'ic_soic', 'ic_qfn', 'transformer', 'module', 'led', 'capacitor_tantalum', 'capacitor', 'resistor', 'inductor', 'diode', 'diode_melf', 'connector', 'crystal')
+COMPONENT_KINDS = ('generic', 'ic', 'ic_soic', 'ic_qfn', 'transformer', 'module', 'led', 'capacitor_tantalum', 'capacitor', 'resistor', 'inductor', 'diode', 'diode_melf', 'connector', 'switch', 'crystal')
 MAX_FILE_BYTES = 20 * 1024 * 1024  # 20 MB, limite ragionevole per singolo file API
 
 _SUPPORTED_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -490,7 +490,7 @@ _EXTRACTION_TOOL = {
                         },
                         "kind": {
                             "type": "string",
-                            "enum": ['generic', 'ic', 'ic_soic', 'ic_qfn', 'transformer', 'module', 'led', 'capacitor_tantalum', 'capacitor', 'resistor', 'inductor', 'diode', 'diode_melf', 'connector', 'crystal'],
+                            "enum": ['generic', 'ic', 'ic_soic', 'ic_qfn', 'transformer', 'module', 'led', 'capacitor_tantalum', 'capacitor', 'resistor', 'inductor', 'diode', 'diode_melf', 'connector', 'switch', 'crystal'],
                             "description": (
                                 "Tipo di package, riconosciuto dalla foto: decide la forma "
                                 "nel modello 3D (un SOIC ha i reofori sui lati, un LED la "
@@ -807,7 +807,7 @@ def extract_pin_header_params(
     if document_roles is not None:
         missing = [label for role, label in ROLES.items() if role not in document_roles.values()]
         request += ('\nI ruoli dei file sono espliciti: rispettali, non dedurli dai nomi originali. '
-                    'Non usare il pinout o la vista laterale come foto superiore per gli ingombri. '
+                    'Non usare il pinout o la vista laterale come vista dall’alto per gli ingombri. '
                     'Segnala dati mancanti e incongruenze, senza inventare quote per completare le viste assenti.')
         if missing:
             request += '\nViste non fornite: ' + ', '.join(missing) + '.'
@@ -871,10 +871,23 @@ def extract_pin_header_params(
     top_index = data.get('top_photo_index')
     if document_roles is not None:
         # User-assigned roles are authoritative. Never calibrate the wrong view.
-        top_index = next((i for i, path in enumerate(doc_paths) if document_roles[path.name] == 'top'), -1)
+        # Tra le viste dall'alto vince la piu' dettagliata: a parita' di
+        # algoritmo e' la risoluzione a decidere quanti passivi piccoli si
+        # riescono a distinguere. Se manca, si ricade sulla vista superiore.
+        # Si passano TUTTE le viste dall'alto assegnate: l'inventario sceglie
+        # la piu' dettagliata fra quelle che riesce a calibrare. Indicare solo
+        # la foto ad alta risoluzione lascerebbe senza inventario quando e'
+        # un primo piano parziale, invece di ricadere sulla vista superiore.
+        from .document_roles import INVENTORY_ROLES
+        by_role = {role: i for i, path in enumerate(doc_paths)
+                   if (role := document_roles[path.name]) in INVENTORY_ROLES}
+        top_index = [by_role[r] for r in INVENTORY_ROLES if r in by_role] or [-1]
         if progress:
-            progress('Vista superiore: ' + (doc_paths[top_index].name + ' (assegnata dall’utente).' if top_index >= 0
-                                          else 'non fornita; nessun’altra vista verrà usata al suo posto.'))
+            chosen = ', '.join(f'{doc_paths[by_role[r]].name} ({ROLES[r]})'
+                               for r in INVENTORY_ROLES if r in by_role)
+            progress('Viste dall’alto disponibili: ' + (
+                chosen + '. Verrà usata la più dettagliata fra quelle calibrabili.'
+                if chosen else 'nessuna; nessun’altra vista verrà usata al suo posto.'))
     if (data.get("layout") == "castellated" and data.get("body_length_mm")
             and data.get("body_width_mm")):
         from .photo_inventory import extract_inventory

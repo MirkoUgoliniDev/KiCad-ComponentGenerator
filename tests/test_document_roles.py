@@ -1,3 +1,4 @@
+from kicadgen.services.document_roles import ROLES
 import json
 from pathlib import Path
 
@@ -19,6 +20,7 @@ def test_copies_standard_names_keeps_original_and_persists_roles(tmp_path):
     assert target.name == 'top.png'
     assert source.read_bytes() == target.read_bytes() == original
     store.clear('pinout', unavailable=True)
+    store.clear('hires', unavailable=True)
     store.clear('front', unavailable=True)
     paths, roles = DocumentSet(store.directory).selected()
     assert paths == [target] and roles == {'top.png': 'top'}
@@ -81,7 +83,7 @@ def test_unassigned_legacy_files_are_never_silently_selected(tmp_path):
 
 def test_empty_and_missing_roles_are_explicit(tmp_path):
     store = DocumentSet(tmp_path / 'docs')
-    for role in ('pinout', 'top', 'front'):
+    for role in ROLES:
         store.clear(role, unavailable=True)
     with pytest.raises(DocumentError, match='almeno'):
         store.selected()

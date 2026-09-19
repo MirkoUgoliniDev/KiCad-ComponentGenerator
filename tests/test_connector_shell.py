@@ -36,7 +36,7 @@ def test_cavity_opens_towards_the_board_edge_it_sits_on(cad):
     in cui si infila il cavo.
     """
     for cx, edge in ((-27.65, "min"), (27.65, "max")):
-        shell, cavity = boxes_for(cad, cx, 0.0, USB_C)
+        shell, cavity = boxes_for(cad, cx, 0.0, USB_C)[:2]
         shell_min, shell_max = span(shell, "x")
         cavity_min, cavity_max = span(cavity, "x")
         if edge == "min":
@@ -54,7 +54,7 @@ def test_the_lid_stays_closed(cad):
     scatola con un incasso sul coperchio, indistinguibile da un package
     generico.
     """
-    shell, cavity = boxes_for(cad, -27.65, 0.0, USB_C)
+    shell, cavity = boxes_for(cad, -27.65, 0.0, USB_C)[:2]
     assert span(cavity, "z")[1] < span(shell, "z")[1], "la cavita' sfonda il cielo"
     assert span(cavity, "z")[0] > span(shell, "z")[0], "la cavita' sfonda la base"
 
@@ -63,7 +63,7 @@ def test_mating_axis_follows_the_shorter_horizontal_side(cad):
     """La profondita' di inserimento e' il lato orizzontale minore."""
     length, width, height = USB_C
     # Package ruotato: il lato lungo passa su X, quindi l'innesto va su Y.
-    shell, cavity = boxes_for(cad, 0.0, -9.0, (width, length, height))
+    shell, cavity = boxes_for(cad, 0.0, -9.0, (width, length, height))[:2]
     assert span(cavity, "y")[0] < span(shell, "y")[0]
     assert span(cavity, "x")[0] > span(shell, "x")[0], "i fianchi devono restare pieni"
 
@@ -75,5 +75,108 @@ def test_a_package_too_small_for_walls_stays_solid(cad):
 
 def test_the_shell_never_grows_beyond_the_component_envelope(cad):
     """La bocca non deve allargare l'ingombro dichiarato dall'inventario."""
-    shell, _ = boxes_for(cad, -27.65, 0.0, USB_C)
+    shell = boxes_for(cad, -27.65, 0.0, USB_C)[0]
     assert (shell[3], shell[4], shell[5]) == pytest.approx(USB_C)
+
+
+def test_the_mouth_is_a_rounded_slot_not_a_square_hole(cad):
+    """La bocca di un USB e' un'asola a stadio, non un foro squadrato."""
+    module, _ = cad
+    filleted = []
+    module._fillet = lambda shape, radius, edges: filleted.append(radius) or shape
+    boxes_for(cad, -27.65, 0.0, USB_C)
+    # Raggio pari a meta' del lato corto della cavita': sezione a stadio.
+    wall = max(0.2, min(USB_C) * 0.15)
+    assert pytest.approx(min(USB_C[1] - 2 * wall, USB_C[2] - 2 * wall) / 2) in filleted
+
+
+def test_a_flat_wide_mouth_gets_the_contact_tongue(cad):
+    """La famiglia USB ha la linguetta; un jack squadrato no.
+
+    La regola guarda la forma misurata, non il nome del componente.
+    """
+    assert len(boxes_for(cad, -27.65, 0.0, USB_C)) == 3      # guscio, cavita', linguetta
+    assert len(boxes_for(cad, -5.0, 0.0, (4.0, 4.2, 3.5))) == 2   # niente linguetta
+
+
+def test_the_tongue_faces_the_mouth_instead_of_hiding_at_the_back(cad):
+    """Deve affacciarsi sull'asola, arretrata di poco: si vede in fondo."""
+    shell, _cavity, tongue = boxes_for(cad, -27.65, 0.0, USB_C)
+    mouth = span(shell, "x")[0]
+    assert span(tongue, "x")[0] > mouth, "la linguetta sporge dalla bocca"
+    assert span(tongue, "x")[0] - mouth < USB_C[0] * 0.25, "la linguetta e' in fondo"
+
+
+def test_the_tongue_never_touches_the_cavity_walls(cad):
+    _shell, cavity, tongue = boxes_for(cad, -27.65, 0.0, USB_C)
+    for axis in ("y", "z"):
+        assert span(tongue, axis)[0] > span(cavity, axis)[0]
+        assert span(tongue, axis)[1] < span(cavity, axis)[1]
+
+
+class _PickyShape:
+    """makeFillet che rifiuta i raggi grandi, come fa OCC sul caso tangente."""
+
+    def __init__(self, limit):
+        self.limit = limit
+        self.attempts = []
+
+    def makeFillet(self, radius, edges):
+        self.attempts.append(radius)
+        if radius > self.limit:
+            raise RuntimeError("radius too large for the edge")
+        return f"filetto r={radius:.3f}"
+
+
+def test_a_refused_fillet_retries_smaller_instead_of_giving_a_square_hole(cad):
+    """Il raggio tangente veniva rifiutato e restava uno spigolo vivo.
+
+    Era un fallimento silenzioso proprio nel caso che conta: l'asola
+    diventava un foro squadrato senza che nulla lo segnalasse.
+    """
+    module, _ = cad
+    shape = _PickyShape(limit=0.75)
+    result = module._fillet_best(shape, 0.82, ["edge"])
+    assert result is not shape, "ha rinunciato invece di riprovare piu' piccolo"
+    assert len(shape.attempts) > 1, "non ha riprovato"
+    assert max(shape.attempts) == pytest.approx(0.82)
+    assert result.endswith(f"r={shape.attempts[-1]:.3f}")
+
+
+def test_an_impossible_fillet_still_degrades_to_a_sharp_edge(cad):
+    """Se nessun raggio passa, il pezzo resta spigoloso ma viene prodotto."""
+    module, _ = cad
+    shape = _PickyShape(limit=0.0)
+    assert module._fillet_best(shape, 0.82, ["edge"]) is shape
+
+
+@pytest.mark.parametrize("cx, cy, rotation, expected", [
+    # Bordo sinistro: la bocca deve finire a -X comunque sia ruotato il pezzo.
+    (-27.65, 0.0, 0, -1.0), (-27.65, 0.0, 180, +1.0),
+    # Bordo destro, speculare.
+    (+27.65, 0.0, 0, +1.0), (+27.65, 0.0, 180, -1.0),
+])
+def test_the_mouth_compensates_the_rotation_applied_by_the_caller(cad, cx, cy, rotation,
+                                                                  expected):
+    """Il builder lavora nel sistema locale; e' il chiamante che ruota.
+
+    Decidendo il verso dalla sola posizione globale, una rotazione di 180
+    gradi ribaltava la bocca verso l'interno della scheda -- dove stanno i
+    pin, non il cavo.
+    """
+    module, _ = cad
+    assert module._outward_sign(cx, cy, 0, rotation) == expected
+
+
+@pytest.mark.parametrize("rotation", [90, 270])
+def test_a_connector_on_a_short_edge_also_faces_outwards(cad, rotation):
+    module, _ = cad
+    # Asse di innesto locale Y, componente sul bordo inferiore della scheda.
+    assert module._outward_sign(0.0, -9.0, 1, rotation) == (-1.0 if rotation == 90 else 1.0)
+
+
+def test_without_rotation_the_behaviour_is_unchanged(cad):
+    """La rotazione e' opzionale: senza, vale la posizione come prima."""
+    module, _ = cad
+    assert module._outward_sign(-5.0, 0.0, 0, 0) == -1.0
+    assert module._outward_sign(+5.0, 0.0, 0, 0) == +1.0
