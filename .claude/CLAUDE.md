@@ -14,6 +14,28 @@ This repository generates KiCad component libraries from mechanical and electric
   global installation uses explicit absolute paths with overwrite confirmation.
 - Preserve unrelated library entries and make packaging operations rollback-safe.
 
+## Handoff sempre aggiornato
+
+**Regola dell'utente, vincolante.** `HANDOFF.md` nella radice del progetto va
+tenuto allineato al lavoro in corso, non scritto alla fine.
+
+- **Aggiornarlo appena lo stato cambia in modo sostanziale**: un pezzo
+  completato, una diagnosi che ribalta quella precedente, una decisione presa
+  dall'utente, un difetto trovato e non risolto.
+- **Prima di qualunque interruzione prevedibile** (fine del credito, fine
+  sessione, cambio di argomento) l'handoff deve gia' essere valido: chi
+  riprende non deve ricostruire nulla dalla conversazione.
+- **Deve contenere**, come minimo: branch e ultimo commit, esito della suite,
+  la catena di cause dei problemi affrontati, il lavoro aperto diviso fra
+  *richiesto dall'utente* e *segnalato ma mai autorizzato*, le decisioni prese
+  dall'utente, e le trappole operative che farebbero perdere tempo a chi
+  riprende.
+- **Correggere l'handoff quando si scopre che conteneva un errore**, citando
+  la correzione: una diagnosi sbagliata lasciata li' e' peggio di nessuna
+  diagnosi.
+- I numeri in testa al file (commit, conteggio test) vanno riallineati quando
+  si committa, altrimenti invecchiano in silenzio.
+
 ## Correzioni: generalizzare, non far combaciare il caso corrente
 
 **Regola dell'utente, vincolante.** Ogni correzione deve risolvere la *classe*

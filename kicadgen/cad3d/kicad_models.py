@@ -61,7 +61,7 @@ DEFAULT_SIZE_TOLERANCE = 0.30
 
 #: Indice degli ingombri gia' misurati, accanto alla libreria o nella cache
 #: utente. Misurare un STEP richiede FreeCAD: si fa una volta per modello.
-INDEX_FILENAME = ".kicadgen-model-sizes.json"
+INDEX_FILENAME = ".kicadgen-model-sizes-v3.json"
 
 
 def _candidate_roots() -> Iterable[Path]:
@@ -183,15 +183,45 @@ def index_key(path: Path) -> str:
 #: non inoltra gli argomenti allo script come farebbe python.
 _MEASURE_SCRIPT = """
 import json, os
+import FreeCAD
 import Part
 folder = os.environ["KICADGEN_MEASURE_DIR"]
 with open(os.path.join(folder, "in.json"), encoding="utf-8") as handle:
     paths = json.load(handle)
+
+
+def measure(path):
+    shape = Part.read(path)
+    box = shape.BoundBox
+    total = [box.XLength, box.YLength, box.ZLength]
+    # Ingombro del solo corpo: sezione presa in alto, non a meta'. I reofori
+    # stanno bassi e a meta' altezza rientrano ancora nella sezione; sopra lo
+    # standoff resta il solo corpo. Verificato: al 65% un SOT-223 da' 3.47 x
+    # 6.47 (corpo reale 3.5 x 6.5) e un SOIC-8 da' 3.75 x 4.75 (3.9 x 4.9),
+    # mentre al 50% davano rispettivamente 5.25 e 5.02 sul lato corto.
+    #
+    # Serve perche' un rettangolo misurato sulla foto puo' aver seguito il
+    # corpo oppure l'estensione totale coi reofori aperti: sono due letture
+    # entrambe legittime dello stesso pezzo, e confrontarne una sola faceva
+    # rifiutare package giusti.
+    body = None
+    try:
+        middle = box.ZMin + box.ZLength * 0.65
+        slab = Part.makeBox(box.XLength + 2, box.YLength + 2, max(box.ZLength * 0.02, 1e-3),
+                            FreeCAD.Vector(box.XMin - 1, box.YMin - 1, middle))
+        section = shape.common(slab)
+        if section.Volume > 0:
+            inner = section.BoundBox
+            body = [inner.XLength, inner.YLength, box.ZLength]
+    except Exception:
+        body = None
+    return {"total": total, "body": body}
+
+
 sizes = {}
 for path in paths:
     try:
-        box = Part.read(path).BoundBox
-        sizes[path] = [box.XLength, box.YLength, box.ZLength]
+        sizes[path] = measure(path)
     except Exception:
         sizes[path] = None
 with open(os.path.join(folder, "out.json"), "w", encoding="utf-8") as handle:
@@ -252,11 +282,21 @@ def model_sizes(paths, library: Optional[Path] = None) -> dict:
 def size_distance(model_size, length_mm, width_mm) -> Optional[float]:
     """Quanto il modello si discosta dalla misura, in scarto relativo.
 
+    `model_size` puo' essere una coppia di lati oppure il dizionario prodotto
+    dalla misura, con `total` (reofori compresi) e `body` (solo corpo). In
+    quel caso vince la lettura piu' vicina: il rettangolo tracciato sulla
+    foto puo' aver seguito l'uno o l'altro, e sono entrambe legittime.
+
     Confronta lato lungo con lato lungo: il modello della libreria segue la
     convenzione del suo footprint, la misura fotografica segue come il pezzo
     e' posato. Confrontare X con X scarterebbe un modello giusto solo perche'
     ruotato di novanta gradi.
     """
+    if isinstance(model_size, dict):
+        readings = [v for v in (model_size.get("body"), model_size.get("total")) if v]
+        distances = [d for d in (size_distance(r, length_mm, width_mm) for r in readings)
+                     if d is not None]
+        return min(distances) if distances else None
     if not model_size or len(model_size) < 2:
         return None
     try:
@@ -318,7 +358,20 @@ def resolve_model(package: str, length_mm: float, width_mm: float, *,
              f"{length_mm:.2f} x {width_mm:.2f} mm{detail}; si usa la forma approssimata.")
         return None
     distance, _, path = min(scored)
-    size = sizes[str(path)]
-    note(f"{package}: modello reale {path.name} ({size[0]:.2f} x {size[1]:.2f} mm) "
+    note(f"{package}: modello reale {path.name}, {describe_size(sizes[str(path)])} "
          f"contro misura {length_mm:.2f} x {width_mm:.2f} mm, scarto {distance*100:.0f}%.")
     return path
+
+
+def describe_size(size) -> str:
+    """@brief Render a measured model size for the log, body and total."""
+    if isinstance(size, dict):
+        parts = []
+        for key, label in (("body", "corpo"), ("total", "con reofori")):
+            value = size.get(key)
+            if value:
+                parts.append(f"{label} {value[0]:.2f} x {value[1]:.2f}")
+        return "; ".join(parts) or "ingombro ignoto"
+    if size and len(size) >= 2:
+        return f"{size[0]:.2f} x {size[1]:.2f}"
+    return "ingombro ignoto"

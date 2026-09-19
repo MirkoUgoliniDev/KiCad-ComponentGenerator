@@ -1,9 +1,86 @@
 # Handoff — sessione 2026-09-19
 
-Branch `FIX`, allineato con `origin/FIX`. Ultimo commit `2e55830`.
-Suite: **1176 passed, 2 xfailed**. Albero pulito.
+Branch **`FIX-WITH_FREECAD`** (creato da `FIX` a `801dd5f`), allineato col remoto.
+Suite: **1225 passed, 2 xfailed**. Albero pulito.
 
-Nove commit sopra `eeec783`. Tutto pushato.
+`FIX` resta fermo a `801dd5f` come punto di ritorno.
+
+---
+
+## 0. Cambio di approccio in corso: modelli 3D reali di KiCad
+
+**Idea dell'utente, condivisa.** Smettere di approssimare i package a partire
+dal bounding box e usare i modelli veri che KiCad installa sul disco.
+
+Non e' un'API: non c'e' nessun servizio da interrogare. Sono file locali --
+su questa macchina `C:/Program Files/KiCad.0\share\kicaddmodels`,
+105 cartelle, **7251 modelli** STEP/WRL. Niente rete, niente costo per pezzo.
+
+Cosa risolve: il vocabolario smette di essere la lista di 16 `kind` inventata
+nel progetto e diventa la nomenclatura standard dell'industria (`SOT-223`,
+`0402`, `USB_C_Receptacle`), che un modello linguistico conosce molto meglio.
+Era il collo di bottiglia vero -- per il regolatore il modello scriveva
+"voltage regulator" ma doveva ripiegare su `kind=ic`, che si disegna come
+scatola liscia *per scelta esplicita* del codice.
+
+### Fatto: `kicadgen/cad3d/kicad_models.py` (commit `e7cad70` e seguenti)
+
+Risolutore autonomo, **non ancora agganciato alla generazione**. Verificato
+con `grep`: nessun chiamante, `build_component` usa ancora `BUILDERS`.
+
+- `find_library()` — trova la libreria, assenza non e' errore
+- `candidates(package)` — ricerca per nome normalizzato, piu' attinenti prima
+- `measure_models()` — misura con FreeCAD **in un solo processo per lotto**,
+  indice su disco. I percorsi passano da un file di scambio perche'
+  `freecadcmd` **non inoltra argv** allo script come farebbe python.
+- `resolve_model()` — fra i candidati vince **il piu' vicino alla misura**,
+  non il primo che rientra. La tolleranza (0.30) e' **derivata, non tarata**:
+  fra due taglie adiacenti corre almeno il 60%, quindi perche' la scelta per
+  vicinanza sbagli servirebbe un errore di misura oltre il 30%.
+
+### Il problema che ha fatto perdere piu' tempo, e come e' stato risolto
+
+Il modello KiCad di un SOT-223 ha bounding box **7.00 x 6.50** perche'
+comprende i reofori aperti; la fotografia aveva misurato **6.55 x 3.21**,
+cioe' il corpo. Scarto 102%, package giusto rifiutato.
+
+Soluzione: misurare **due letture** per ogni modello e accettare la piu'
+vicina. Il corpo si ottiene con una sezione **al 65% dell'altezza**, non a
+meta': i reofori stanno bassi e a meta' rientrano ancora nella sezione.
+Verificato -- al 65% un SOT-223 da' 3.47 x 6.47 (corpo reale 3.5 x 6.5) e un
+SOIC-8 da' 3.75 x 4.75 (3.9 x 4.9); al 50% davano 5.25 e 5.02.
+
+### Risultati sui pezzi reali della ESP32
+
+    SOT-223           6.55 x 3.21  ->  SOT-223-8.step        scarto  7%
+    USB_C_Receptacle  7.61 x 9.98  ->  USB_C_Receptacle_GCT  scarto 10%
+    ESP32-S3-WROOM-1 20.01 x 17.97 ->  ESP32-S3-WROOM-1.step scarto 12%
+    R_0402            1.00 x 0.50  ->  R_0402_1005Metric     scarto  0%
+    R_0402 con quote di un 0603    ->  RIFIUTATO (38%)
+    U.FL              4.57 x 4.05  ->  RIFIUTATO (32%)
+
+Le due righe di rifiuto sono la prova che la discriminazione funziona.
+
+### Aperto su questo fronte
+
+1. **`SOT-223` risolve a `SOT-223-8.step`**, che e' un altro componente (otto
+   reofori invece di quattro). Hanno lo stesso corpo, quindi la misura non
+   puo' distinguerli: serve preferire la corrispondenza **esatta di nome**
+   quando gli scarti sono comparabili, invece del solo piu' vicino.
+2. **Chiedere il nome del package al modello.** Oggi `resolve_model` riceve il
+   nome a mano nei test; in produzione non esiste -- `kind=ic` non e' un
+   package. Serve un campo aperto nello schema del classificatore, come si e'
+   fatto per `mating`.
+3. **Agganciare alla generazione**: caricare lo STEP invece della forma
+   sintetica, con le forme attuali come ripiego. `freecad_parts` gira dentro
+   FreeCAD e puo' fare `Part.read`; la risoluzione va fatta fuori e il
+   percorso passato nel dizionario del componente.
+4. **U.FL**: la misura fotografica (4.57) e' lontana dal pezzo vero (3.10),
+   probabilmente perche' il rettangolo ha incluso la nicchia attorno. Va
+   guardato dopo, non forzando la tolleranza.
+
+**Le forme sintetiche non si buttano**: diventano il ripiego, che e' il loro
+posto naturale.
 
 ---
 
