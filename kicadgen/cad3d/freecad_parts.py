@@ -441,7 +441,7 @@ def _outward_sign(cx, cy, axis, rotation_deg):
     return -1.0 if projection < 0 else 1.0
 
 
-def _connector(cx, cy, z0, length, width, height, color, rotation_deg=0):
+def _connector(cx, cy, z0, length, width, height, color, rotation_deg=0, mating=None):
     """Guscio di connettore con l'apertura sulla faccia di accoppiamento.
 
     Un connettore si innesta lateralmente (USB, jack, header schermato): la
@@ -455,13 +455,16 @@ def _connector(cx, cy, z0, length, width, height, color, rotation_deg=0):
     pareti di spessore `wall` su fondo, fianchi, cielo e base: il pezzo e'
     un guscio, non un tubo passante.
     """
-    # Un connettore quasi quadrato e piccolo non si innesta di lato: e' un
-    # coassiale da circuito stampato (U.FL/IPEX, SMA verticale), che accoglie
-    # il cavo dall'alto. Regola sulla forma misurata, come per la linguetta:
-    # un connettore da bordo scheda e' sempre piu' lungo che largo. Va deciso
-    # prima di costruire il guscio, per non modellare una forma da scartare.
-    if (max(length, width) <= VERTICAL_CONNECTOR_MAX_MM
-            and max(length, width) / min(length, width) <= VERTICAL_CONNECTOR_SQUARENESS):
+    # Il verso di innesto viene dalla FOTO quando il modello lo dichiara: dal
+    # solo ingombro non e' deducibile, perche' un coassiale U.FL e un jack da
+    # bordo possono misurare uguale. L'euristica sulle dimensioni resta solo
+    # come ripiego per i risultati che non portano il campo -- estrazioni
+    # vecchie, o un modello che non lo compila.
+    if mating not in ("edge", "top"):
+        mating = ("top" if (max(length, width) <= VERTICAL_CONNECTOR_MAX_MM
+                            and max(length, width) / min(length, width)
+                            <= VERTICAL_CONNECTOR_SQUARENESS) else "edge")
+    if mating == "top":
         return _coaxial_connector(cx, cy, z0, length, width, height, color)
 
     shell = _box(cx, cy, z0, length, width, height)
@@ -656,7 +659,8 @@ def build_component(component, z0):
             # componente: la bocca deve guardare fuori scheda DOPO la
             # rotazione applicata dal chiamante, non prima.
             return _connector(cx, cy, z0, length, width, height, color,
-                              rotation_deg=float(component.get("rotation_deg") or 0))
+                              rotation_deg=float(component.get("rotation_deg") or 0),
+                              mating=component.get("mating"))
         if kind in BUILDERS and kind != "generic":
             print(f"KICADGEN_WARN:componente {component.get('name')} ({kind}): "
                   "geometria approssimata, terminal_geometry assente")

@@ -64,6 +64,7 @@ def vote(identifier=1, **updates):
     result = dict(id=identifier, is_component=True, is_complete_package=True,
                   name="Resistor", kind="resistor", height_mm=.7,
                   rotation_deg=0, color_hex="#A0b1C2", confidence="high",
+                  mating="none",
                   observation="Rectangular package with two visible terminals")
     result.update(updates)
     return result
@@ -1234,3 +1235,14 @@ def test_inventory_mechanical_occupancy_failure_retains_envelope_and_warning(mon
     assert len(result.components) == 1 and result.components[0]["_uncertain"]
     assert result.components[0]["kind"] == "generic" and result.components[0]["marking"] == ""
     assert any("occupancy offline" in message for message in result.warnings)
+
+
+def test_the_classification_schema_asks_where_the_connector_opens():
+    """Il verso di innesto si vede nella foto; dedurlo dall'ingombro no."""
+    schema = grounding.classification_tool(KINDS)["function"]["parameters"]
+    item = schema["properties"]["components"]["items"]["properties"]
+    assert item["mating"]["enum"] == ["edge", "top", "none"]
+    # Obbligatorio come ogni altro campo: il contratto del classificatore e'
+    # che il modello risponda a tutto, senza omissioni silenziose. Per i non
+    # connettori l'enum prevede "none".
+    assert "mating" in schema["properties"]["components"]["items"]["required"]

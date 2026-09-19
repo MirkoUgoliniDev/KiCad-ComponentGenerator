@@ -236,3 +236,33 @@ def test_the_rule_reads_the_measured_shape_not_the_name(cad, size, vertical):
     module._connector(10.0, 0.0, 0.96, *size, '#79582b')
     # Il percorso verticale non scava nulla: una sola scatola fra le chiamate.
     assert (len(made) == 1) is vertical, f'{size}: percorso sbagliato'
+
+
+@pytest.mark.parametrize("size, mating, coaxial", [
+    (UFL,   'top',  True),    # coassiale, come lo vede il modello
+    (UFL,   'edge', False),   # il campo vince sulle dimensioni
+    (USB_C, 'edge', False),
+    (USB_C, 'top',  True),    # anche al contrario: comanda la foto
+])
+def test_the_mating_direction_declared_by_the_model_wins(cad, size, mating, coaxial):
+    """Dal solo ingombro il verso non e' deducibile: un U.FL e un jack da
+    bordo possono misurare uguale. Dalla foto invece si vede."""
+    module, _ = cad
+    parts = module._connector(10.0, 0.0, 0.96, *size, '#79582b', mating=mating)
+    is_coaxial = len(parts) == 2 and parts[1][1] == module.METAL
+    assert is_coaxial is coaxial
+
+
+@pytest.mark.parametrize("size, coaxial", [(UFL, True), (USB_C, False)])
+def test_without_the_field_the_geometric_heuristic_still_answers(cad, size, coaxial):
+    """Ripiego per le estrazioni vecchie e per un modello che non lo compila."""
+    module, _ = cad
+    parts = module._connector(10.0, 0.0, 0.96, *size, '#79582b', mating=None)
+    assert (len(parts) == 2 and parts[1][1] == module.METAL) is coaxial
+
+
+@pytest.mark.parametrize("bad", ['', 'sideways', 'TOP', 42, None])
+def test_an_unusable_mating_value_falls_back_instead_of_breaking(cad, bad):
+    module, _ = cad
+    parts = module._connector(10.0, 0.0, 0.96, *UFL, '#79582b', mating=bad)
+    assert len(parts) == 2 and parts[1][1] == module.METAL

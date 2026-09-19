@@ -14,6 +14,39 @@ This repository generates KiCad component libraries from mechanical and electric
   global installation uses explicit absolute paths with overwrite confirmation.
 - Preserve unrelated library entries and make packaging operations rollback-safe.
 
+## Correzioni: generalizzare, non far combaciare il caso corrente
+
+**Regola dell'utente, vincolante.** Ogni correzione deve risolvere la *classe*
+di problema, non il singolo esemplare in lavorazione. È vietato tarare il
+codice perché torni il componente che si ha sotto mano.
+
+In pratica:
+
+- **Nessuna soglia scelta perché il caso osservato ci ricada dentro.** Se un
+  valore viene alzato o abbassato per far passare un pezzo specifico, è un
+  sintomo, non una soluzione: va trovato il criterio fisico che distingue
+  davvero i due casi.
+- **Nessuna regola basata su nomi, sigle o marche.** Le regole si fondano su
+  grandezze misurate o su attributi dichiarati, mai su `if name == "ESP32"`.
+- **Quando l'informazione non è deducibile dai dati disponibili, chiederla**
+  invece di indovinarla. Esempio concreto: il verso di innesto di un
+  connettore non si ricava dall'ingombro — un coassiale U.FL e un jack da
+  bordo possono misurare uguale — ma si vede nella fotografia, quindi va
+  chiesto al modello (campo `mating`) e non dedotto da soglie dimensionali.
+- **Se resta un'euristica, va dichiarata tale**: commento che spiega perché è
+  un ripiego, su quali dati è stata tarata e cosa la renderebbe superflua. Non
+  va spacciata per una regola generale.
+- **Un test che passa solo sul caso osservato non è una verifica.** Servono un
+  caso positivo e un caso negativo che la regola deve distinguere per ragioni
+  strutturali, non per coincidenza numerica.
+- **Riconoscere quando una separazione è fragile.** Se due casi vengono
+  distinti da un solo criterio su due, o con un margine risicato, va detto
+  all'utente invece di lasciarlo scoprire dopo.
+
+Vale anche per i test: se una modifica li rompe, si aggiorna il *contratto*
+che esprimono capendo perché è cambiato — non si allenta l'asserzione finché
+non diventa verde.
+
 ## Validation
 
 Run the focused test suite with `pytest`. For changes affecting geometry, run the relevant CAD/footprint tests and inspect generated output under `generated/` locally.

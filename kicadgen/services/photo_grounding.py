@@ -183,6 +183,15 @@ def classification_tool(kinds):
         "color_hex": {"type": "string"},
         "confidence": {"type": "string", "enum": ["high","medium","low"]},
         "observation": {"type": "string", "description": "Short visible evidence or ambiguity, not internal reasoning"},
+        # Il verso di innesto NON si deduce dall'ingombro: un coassiale U.FL e
+        # un jack da bordo possono misurare uguale. Dalla foto invece si vede.
+        # Chiederlo evita di indovinarlo con soglie sulle dimensioni.
+        "mating": {"type": "string", "enum": ["edge", "top", "none"],
+                   "description": ("Solo per i connettori: dove si affaccia l'apertura. "
+                                   "\"edge\" se guarda il bordo della scheda (USB, jack "
+                                   "laterale), \"top\" se il cavo entra dall'alto "
+                                   "(coassiale U.FL/IPEX, header verticale). "
+                                   "\"none\" per tutto il resto.")},
     }
     return {"type": "function", "function": {
         "name": "classify_fixed_packages", "description": "Review numbered fixed package crops without changing coordinates",
@@ -263,7 +272,11 @@ def apply_classifications(components, response, kinds, length, width, log):
             if inconsistent:
                 angle = (angle+90)%360
                 long,short = short,long
+            mating = entry.get("mating")
+            if mating not in ("edge", "top"):
+                mating = None
             c.update(name=str(entry.get("name") or c["name"]),kind=kind,height_mm=height,
+                     mating=mating,
                      rotation_deg=angle,length_mm=long,width_mm=short,color_hex=color,
                      marking="",confidence=entry["confidence"],
                      _uncertain=inconsistent or entry["confidence"]=="low",_review_reason=observation,
