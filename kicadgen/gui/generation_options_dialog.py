@@ -8,7 +8,8 @@ from .profile_dialog import icon_button, show_info
 
 class GenerationOptionsDialog(QDialog):
     """@brief Edit generation options before a component is produced."""
-    def __init__(self, include_nc_pins=True, parent=None, *, advanced_user=False):
+    def __init__(self, include_nc_pins=True, parent=None, *, advanced_user=False,
+                 silk_pin_labels=False):
         super().__init__(parent)
         self.setWindowTitle("Opzioni di generazione")
         self.setModal(True)
@@ -30,6 +31,21 @@ class GenerationOptionsDialog(QDialog):
             text_key='help.generation.include_nc'
         )))
         page_layout.addWidget(contacts)
+        silk = QGroupBox("Serigrafia del modello 3D")
+        silk_layout = QHBoxLayout(silk)
+        self.silk_labels_checkbox = QCheckBox("Incidi le sigle dei pin")
+        self.silk_labels_checkbox.setChecked(silk_pin_labels)
+        silk_layout.addWidget(self.silk_labels_checkbox, 1)
+        silk_layout.addWidget(icon_button('Info', 'info.svg', lambda: show_info(self,
+            'Serigrafia del modello 3D',
+            "Incide accanto a ogni contatto la sigla presa dalla tabella pinout.\n\n"
+            "Disattivata di default: su un modulo a passo fitto le sigle lunghe si "
+            "sovrappongono fra loro e finiscono sopra i componenti, rendendo il solido "
+            "meno leggibile invece che piu'. I numeri dei pin restano disponibili "
+            "nell'anteprima 3D, che e' una cosa diversa dal testo inciso nel file STEP.\n\n"
+            "L'opzione vale dalla prossima generazione: non modifica i file gia' prodotti.",
+            text_key='help.generation.silk_labels')))
+        page_layout.addWidget(silk)
         mode = QGroupBox('Modalità di utilizzo')
         mode_layout = QHBoxLayout(mode)
         self.advanced_user_checkbox = QCheckBox('Advanced user')
@@ -66,3 +82,7 @@ class GenerationOptionsDialog(QDialog):
     def advanced_user(self):
         """@brief Provide the advanced user operation for this workflow."""
         return self.advanced_user_checkbox.isChecked()
+
+    def silk_pin_labels(self):
+        """@brief Tell whether pin names must be engraved on the 3D silkscreen."""
+        return self.silk_labels_checkbox.isChecked()

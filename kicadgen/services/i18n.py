@@ -204,6 +204,8 @@ DEFAULT_TRANSLATIONS = {
     "ui:(i passivi piccoli sfuggono)": {"en": "(small passives are missed)", "it": "(i passivi piccoli sfuggono)", "fr": "(les petits passifs échappent)", "de": "(kleine Passive entgehen)"},
     "ui:non calibrabile: la scheda non è riconoscibile qui": {"en": "not calibratable: the board is not recognisable here", "it": "non calibrabile: la scheda non è riconoscibile qui", "fr": "non calibrable : la carte n’est pas reconnaissable ici", "de": "nicht kalibrierbar: die Platine ist hier nicht erkennbar"},
     "ui:quote del corpo non ancora note": {"en": "body dimensions not known yet", "it": "quote del corpo non ancora note", "fr": "cotes du corps encore inconnues", "de": "Körpermaße noch unbekannt"},
+    "ui:Serigrafia del modello 3D": {"en": "3D model silkscreen", "it": "Serigrafia del modello 3D", "fr": "Sérigraphie du modèle 3D", "de": "Bedruckung des 3D-Modells"},
+    "ui:Incidi le sigle dei pin": {"en": "Engrave pin names", "it": "Incidi le sigle dei pin", "fr": "Graver les noms des broches", "de": "Pinnamen gravieren"},
     "ui:Immagine con quote": {"en": "Dimensioned drawing", "it": "Immagine con quote", "fr": "Image cotée", "de": "Bemaßte Zeichnung"},
     "ui:Foto ad alta risoluzione": {"en": "High-resolution photo", "it": "Foto ad alta risoluzione", "fr": "Photo haute résolution", "de": "Hochauflösendes Foto"},
     "ui:Vista laterale": {"en": "Side view", "it": "Vista laterale", "fr": "Vue latérale", "de": "Seitenansicht"},

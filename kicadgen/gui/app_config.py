@@ -64,6 +64,10 @@ DEFAULTS = {
     # stesso componente), mentre la cartella del progetto -- dove le copie
     # finiscono -- non e' mai quella da cui si pesca.
     "last_document_dir": "",
+    # Sigle dei pin incise sulla serigrafia del modello 3D. Spente: su un
+    # modulo a passo fitto i nomi lunghi si sovrappongono fra loro e finiscono
+    # sopra i componenti, rendendo il solido meno leggibile invece che piu'.
+    "silk_pin_labels": False,
     "advanced_user": False,
     "show_grid": True,
     "grid_unit": "mm",  # "mm" oppure "inch" (passo 2.54mm, standard THT)

@@ -419,13 +419,15 @@ class MainWindow(QMainWindow):
 
     def _edit_generation_options(self) -> None:
         dialog = GenerationOptionsDialog(bool(self._config.get("include_nc_pins", True)), self,
-                                         advanced_user=self._advanced_user())
+                                         advanced_user=self._advanced_user(),
+                                         silk_pin_labels=self._silk_pin_labels())
         self.i18n.retranslate_widgets(dialog)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         checked = dialog.include_nc_pins()
         self._config["include_nc_pins"] = checked
         self._config['advanced_user'] = dialog.advanced_user()
+        self._config['silk_pin_labels'] = dialog.silk_pin_labels()
         save_config(self._config)
         self._apply_user_mode()
         self._append_log(
@@ -2158,12 +2160,21 @@ class MainWindow(QMainWindow):
             sides=self._sides_from_table(),
         )
 
+    def _silk_pin_labels(self) -> bool:
+        """@brief Tell whether pin names are engraved on the 3D silkscreen."""
+        return self._config.get('silk_pin_labels', False) is True
+
     def _silk_labels(self) -> dict[str, str]:
         """Sigla serigrafata per ogni pad, dalla tabella pinout.
 
         Sul modulo accanto al contatto c'e' la sigla corta (PE, B-, A+, G...),
         non la descrizione: si tiene la prima parola, senza parentesi.
+
+        Vuoto quando l'opzione e' spenta: su un modulo a passo fitto le sigle
+        si sovrappongono fra loro e finiscono sopra i componenti.
         """
+        if not self._silk_pin_labels():
+            return {}
         labels = {}
         for entry in self.pinout:
             name = str(entry.get("name", "")).split("(")[0].strip()
