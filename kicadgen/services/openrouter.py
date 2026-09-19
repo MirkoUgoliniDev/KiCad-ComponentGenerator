@@ -20,7 +20,9 @@ dipendenza esterna per due chiamate non si giustifica.
 from __future__ import annotations
 
 import json
+import math
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -31,6 +33,8 @@ from typing import Any, Optional, Sequence
 API_BASE = "https://openrouter.ai/api/v1"
 MODELS_URL = f"{API_BASE}/models"
 CHAT_URL = f"{API_BASE}/chat/completions"
+CREDITS_URL = f"{API_BASE}/credits"
+KEY_STATUS_URL = f"{API_BASE}/auth/key"
 
 API_KEY_ENV = "OPENROUTER_API_KEY"
 
@@ -50,6 +54,22 @@ _APP_HEADERS = {
 
 _HTTP_TIMEOUT_MODELS_S = 30
 _HTTP_TIMEOUT_CHAT_S = 300
+_HTTP_TIMEOUT_CREDITS_S = 20
+
+#: Credito minimo (USD) sotto il quale un'estrazione non viene nemmeno avviata.
+#: Una singola estrazione con foto e crop costa tipicamente pochi centesimi, ma
+#: partire con il serbatoio quasi vuoto significa fallire a meta' catena, dopo
+#: aver gia' speso: meglio fermarsi prima con un messaggio chiaro.
+MIN_CREDIT_USD = 0.50
+
+#: Sopra MIN_CREDIT_USD ma sotto questa soglia il lavoro parte comunque,
+#: segnalando che il credito sta per finire.
+LOW_CREDIT_USD = 2.00
+
+#: Il credito cambia solo quando si spende: una catena di decine di chiamate
+#: non deve interrogare l'endpoint a ogni passo.
+_CREDIT_CACHE_TTL_S = 60
+_credit_cache: Optional[tuple[float, "CreditStatus"]] = None
 
 
 class OpenRouterError(Exception):
@@ -107,6 +127,276 @@ def api_key() -> str:
             "Inseriscila nel file .env accanto a main.py (vedi .env.example)."
         )
     return key
+
+
+@dataclass(frozen=True)
+class CreditStatus:
+    """Credito residuo su OpenRouter, visto dai due vincoli indipendenti.
+
+    Il saldo dell'account (``/credits``) e il tetto di spesa della singola
+    chiave (``/auth/key``) sono limiti separati e non coincidono: una chiave
+    con 13.73 USD ancora concessi su un account che ne ha 11.92 puo' spendere
+    solo 11.92. Il vincolo che conta e' quindi il **minimo** dei due, ed e'
+    quello che :attr:`remaining` espone.
+
+    Un valore ``None`` significa "nessun limite di questo tipo" (chiave senza
+    tetto) oppure "non riportato dall'API": in entrambi i casi non partecipa al
+    minimo, e se nessuno dei due e' noto :attr:`remaining` resta ``None``.
+    """
+
+    account_remaining: Optional[float] = None
+    key_remaining: Optional[float] = None
+    total_credits: Optional[float] = None
+    total_usage: Optional[float] = None
+    is_free_tier: bool = False
+    expires_at: str = ""
+
+    @property
+    def remaining(self) -> Optional[float]:
+        """@brief Return the binding credit limit, or None when unknown."""
+        known = [v for v in (self.account_remaining, self.key_remaining) if v is not None]
+        return min(known) if known else None
+
+    @property
+    def limiting_factor(self) -> str:
+        """@brief Name which of the two ceilings is the binding one."""
+        remaining = self.remaining
+        if remaining is None:
+            return ""
+        if self.key_remaining is not None and remaining == self.key_remaining:
+            return "tetto della chiave" if self.account_remaining is None or \
+                self.key_remaining < self.account_remaining else "account e chiave"
+        return "saldo dell'account"
+
+    def describe(self) -> str:
+        """@brief Render the credit status as one line for the AI log."""
+        remaining = self.remaining
+        if remaining is None:
+            return "Credito OpenRouter: nessun limite riportato dall'API."
+        detail = f"Credito OpenRouter: {remaining:.2f} USD residui ({self.limiting_factor})"
+        if self.total_credits is not None and self.total_usage is not None:
+            detail += f"; account {self.total_usage:.2f}/{self.total_credits:.2f} USD usati"
+        if self.key_remaining is not None and self.key_remaining != remaining:
+            detail += f"; chiave {self.key_remaining:.2f} USD"
+        return detail + "."
+
+
+def _calls(count: int) -> str:
+    """@brief Render a call count with the right Italian plural."""
+    return f"{count} chiamata" if count == 1 else f"{count} chiamate"
+
+
+@dataclass
+class UsageTotals:
+    """Consuntivo di una elaborazione: chiamate, token e costo effettivo.
+
+    Il costo arriva da OpenRouter con la risposta di ogni chiamata (campo
+    ``usage.cost``, in USD), non da una stima sui listini: tiene gia' conto
+    del provider che ha effettivamente servito la richiesta, degli sconti sui
+    token letti dalla cache del modello e dei token di ragionamento.
+
+    Le risposte servite dalla cache locale su disco non passano di qui e
+    valgono zero, che e' corretto: non hanno toccato l'API.
+    """
+
+    calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    reasoning_tokens: int = 0
+    cached_tokens: int = 0
+    cost_usd: float = 0.0
+    calls_without_cost: int = 0
+
+    @property
+    def complete(self) -> bool:
+        """@brief Tell whether every call reported its own cost."""
+        return self.calls_without_cost == 0
+
+    def describe(self) -> str:
+        """@brief Render the run total as one line for the AI log."""
+        if not self.calls:
+            return ("Costo elaborazione AI: nessuna chiamata all'API "
+                    "(risposte servite dalla cache locale).")
+        # Sotto il centesimo le quattro cifre non bastano a distinguere nulla.
+        amount = f"{self.cost_usd:.4f}" if self.cost_usd >= 0.01 else f"{self.cost_usd:.6f}"
+        detail = (f"Costo elaborazione AI: {amount} USD su {_calls(self.calls)}; "
+                  f"{self.prompt_tokens} token in ingresso, {self.completion_tokens} in uscita")
+        extra = []
+        if self.cached_tokens:
+            extra.append(f"{self.cached_tokens} letti dalla cache del modello")
+        if self.reasoning_tokens:
+            extra.append(f"{self.reasoning_tokens} di ragionamento")
+        if extra:
+            detail += " (" + ", ".join(extra) + ")"
+        if not self.complete:
+            detail += (f"; {_calls(self.calls_without_cost)} senza costo riportato, "
+                       "totale sottostimato")
+        return detail + "."
+
+
+#: L'estrazione gira in un thread di lavoro mentre la GUI resta viva: il
+#: consuntivo va protetto, non lasciato a un aggiornamento non atomico.
+_usage_lock = threading.Lock()
+_usage_totals = UsageTotals()
+
+
+def reset_usage() -> None:
+    """@brief Start a new accounting run, discarding the previous totals."""
+    global _usage_totals
+    with _usage_lock:
+        _usage_totals = UsageTotals()
+
+
+def usage_totals() -> UsageTotals:
+    """@brief Return a snapshot of the current run totals."""
+    with _usage_lock:
+        return UsageTotals(**vars(_usage_totals))
+
+
+def _usage_int(container: Any, key: str) -> int:
+    value = (container or {}).get(key) if isinstance(container, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return int(value) if math.isfinite(value) and value > 0 else 0
+
+
+def _record_usage(payload: Any) -> None:
+    """Somma al consuntivo l'uso dichiarato da una risposta dell'API.
+
+    Va chiamata per ogni risposta ricevuta, anche quando poi risultera'
+    inutilizzabile: una chiamata che non ha prodotto la tool call e' stata
+    comunque pagata, e tacerla renderebbe il consuntivo piu' basso del vero.
+    """
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    cost = _credit_number((usage or {}).get("cost")) if isinstance(usage, dict) else None
+    with _usage_lock:
+        _usage_totals.calls += 1
+        if cost is None:
+            _usage_totals.calls_without_cost += 1
+        else:
+            _usage_totals.cost_usd += cost
+        if isinstance(usage, dict):
+            _usage_totals.prompt_tokens += _usage_int(usage, "prompt_tokens")
+            _usage_totals.completion_tokens += _usage_int(usage, "completion_tokens")
+            _usage_totals.cached_tokens += _usage_int(
+                usage.get("prompt_tokens_details"), "cached_tokens")
+            _usage_totals.reasoning_tokens += _usage_int(
+                usage.get("completion_tokens_details"), "reasoning_tokens")
+
+
+def _credit_number(value: Any) -> Optional[float]:
+    """Numero finito dalla risposta API, oppure None: i booleani non valgono."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _get_json(url: str, timeout: int) -> dict:
+    """GET autenticata che ritorna il corpo JSON; solleva OpenRouterError."""
+    request = urllib.request.Request(
+        url,
+        headers={"Authorization": f"Bearer {api_key()}", **_APP_HEADERS},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.load(response)
+    except urllib.error.HTTPError as exc:
+        raise OpenRouterError(_error_message(exc)) from exc
+    except urllib.error.URLError as exc:
+        raise OpenRouterError(f"connessione fallita: {exc.reason}") from exc
+    except (ValueError, OSError) as exc:
+        raise OpenRouterError(f"risposta non decodificabile: {exc}") from exc
+    return payload if isinstance(payload, dict) else {}
+
+
+def credit_status(force_refresh: bool = False) -> CreditStatus:
+    """Interroga i due endpoint di credito e ne ricava il vincolo effettivo.
+
+    I due endpoint sono indipendenti: basta che ne risponda uno perche' il
+    controllo abbia comunque un limite da applicare. Solleva OpenRouterError
+    solo quando falliscono entrambi, cosi' il chiamante puo' distinguere
+    "credito esaurito" da "credito non verificabile".
+
+    Il risultato resta in cache per :data:`_CREDIT_CACHE_TTL_S` secondi: una
+    catena di decine di chiamate non deve interrogare l'API a ogni passo.
+    """
+    global _credit_cache
+    if not force_refresh and _credit_cache is not None:
+        stamp, cached = _credit_cache
+        if time.time() - stamp <= _CREDIT_CACHE_TTL_S:
+            return cached
+
+    failures = []
+    account_remaining = total_credits = total_usage = None
+    try:
+        data = _get_json(CREDITS_URL, _HTTP_TIMEOUT_CREDITS_S).get("data") or {}
+        total_credits = _credit_number(data.get("total_credits"))
+        total_usage = _credit_number(data.get("total_usage"))
+        if total_credits is not None and total_usage is not None:
+            account_remaining = total_credits - total_usage
+    except OpenRouterError as exc:
+        failures.append(f"saldo account ({exc})")
+
+    key_remaining, is_free_tier, expires_at = None, False, ""
+    try:
+        data = _get_json(KEY_STATUS_URL, _HTTP_TIMEOUT_CREDITS_S).get("data") or {}
+        # limit = None significa chiave senza tetto proprio: non e' un vincolo.
+        if _credit_number(data.get("limit")) is not None:
+            key_remaining = _credit_number(data.get("limit_remaining"))
+        is_free_tier = bool(data.get("is_free_tier"))
+        expires_at = str(data.get("expires_at") or "")
+    except OpenRouterError as exc:
+        failures.append(f"stato chiave ({exc})")
+
+    if len(failures) == 2:
+        raise OpenRouterError("; ".join(failures))
+
+    status = CreditStatus(
+        account_remaining=account_remaining, key_remaining=key_remaining,
+        total_credits=total_credits, total_usage=total_usage,
+        is_free_tier=is_free_tier, expires_at=expires_at,
+    )
+    _credit_cache = (time.time(), status)
+    return status
+
+
+def check_credit(minimum_usd: float = MIN_CREDIT_USD, progress=None,
+                 force_refresh: bool = False) -> Optional[CreditStatus]:
+    """Verifica il credito PRIMA di spendere; solleva se non basta.
+
+    Tre esiti distinti, perche' vanno trattati in modo diverso:
+
+    * credito noto e sotto `minimum_usd` -> OpenRouterError: il lavoro non
+      parte, invece di fallire a meta' catena dopo aver gia' speso;
+    * credito noto ma basso -> passa, con un avviso su `progress`;
+    * credito **non verificabile** (rete giu', endpoint cambiato) -> passa con
+      un avviso. Un controllo di cortesia non deve rendere l'applicazione meno
+      utilizzabile di quando il controllo non c'era: e' l'API stessa a
+      rifiutare la chiamata se davvero non c'e' credito.
+
+    Ritorna lo stato letto, oppure None se non e' stato possibile leggerlo.
+    """
+    log = progress or (lambda message: None)
+    try:
+        status = credit_status(force_refresh=force_refresh)
+    except OpenRouterError as exc:
+        log(f"Credito OpenRouter non verificabile: {exc}. Si prosegue comunque.")
+        return None
+
+    log(status.describe())
+    remaining = status.remaining
+    if remaining is not None and remaining < minimum_usd:
+        raise OpenRouterError(
+            f"Credito OpenRouter insufficiente: {remaining:.2f} USD residui "
+            f"({status.limiting_factor}), ne servono almeno {minimum_usd:.2f}. "
+            "Ricarica il credito su https://openrouter.ai/settings/credits "
+            "oppure alza il tetto di spesa della chiave."
+        )
+    if remaining is not None and remaining < LOW_CREDIT_USD:
+        log(f"Attenzione: credito quasi esaurito ({remaining:.2f} USD). "
+            "L'estrazione parte, ma potrebbe non bastare per quelle successive.")
+    return status
 
 
 def _parse_price(value: Any) -> float:
@@ -238,6 +528,9 @@ def call_tool(
     }
     if has_pdf:
         body["plugins"] = [{"id": "file-parser", "pdf": {"engine": pdf_engine}}]
+    # Senza questo flag la risposta porta i token ma non il costo, e il
+    # consuntivo finale dovrebbe stimarlo dai listini invece di leggerlo.
+    body["usage"] = {"include": True}
 
     request = urllib.request.Request(
         CHAT_URL,
@@ -261,6 +554,9 @@ def call_tool(
     except ValueError as exc:
         raise OpenRouterError("Risposta non decodificabile da OpenRouter.") from exc
 
+    # Prima di tool_arguments, che puo' sollevare: la chiamata e' stata pagata
+    # comunque, e un consuntivo che ignora i tentativi falliti e' falso.
+    _record_usage(payload)
     return tool_arguments(payload, tool["function"]["name"])
 
 

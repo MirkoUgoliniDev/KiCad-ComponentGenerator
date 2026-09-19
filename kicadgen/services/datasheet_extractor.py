@@ -28,7 +28,8 @@ from typing import Callable, Optional, Sequence
 from ..cad3d.annotations import EDGE_NAMES
 from ..core.package_geometry import package_from_mapping
 from ..generators.castellated_module import EDGES
-from .openrouter import DEFAULT_MODEL, OpenRouterError, api_key, call_tool
+from .openrouter import (DEFAULT_MODEL, OpenRouterError, api_key, call_tool, check_credit,
+                         reset_usage, usage_totals)
 
 MAX_FILES = 5
 
@@ -779,8 +780,16 @@ def extract_pin_header_params(
                 or any(role not in ROLES for role in document_roles.values())):
             raise ExtractionError('Ruoli documenti incompleti, duplicati o non validi.')
 
+    # Il consuntivo riguarda questa elaborazione: azzerarlo qui, non alla fine,
+    # cosi' un'estrazione interrotta non lascia residui nella successiva.
+    reset_usage()
     try:
         api_key()
+        # Il credito va verificato qui, prima del primo blocco di contenuto:
+        # l'estrazione e' una catena di decine di chiamate (analisi principale,
+        # crop, verifica, terminali) e restare a secco a meta' strada significa
+        # aver speso senza ottenere un componente.
+        check_credit(progress=progress)
     except OpenRouterError as exc:
         raise ExtractionError(str(exc)) from exc
 
@@ -925,6 +934,8 @@ def extract_pin_header_params(
         params.photo_overlay_png = photo_report.overlay_png
         params.photo_png = photo_report.photo_png
         params.photo_source = photo_report.photo
+    if progress:
+        progress(usage_totals().describe())
     return params
 
 
