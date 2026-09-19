@@ -1,86 +1,146 @@
 # Handoff — sessione 2026-09-19
 
-Branch **`FIX-WITH_FREECAD`** (creato da `FIX` a `801dd5f`), allineato col remoto.
-Suite: **1225 passed, 2 xfailed**. Albero pulito.
+Branch **`FIX-WITH_FREECAD`**, allineato col remoto. Ultimo commit `e05724c`.
+Suite: **1235 passed, 2 xfailed**. Albero pulito.
 
 `FIX` resta fermo a `801dd5f` come punto di ritorno.
 
+> **STATO ONESTO.** Il meccanismo dei modelli reali KiCad è completo e
+> verificato pezzo per pezzo, ma **non è mai stato visto funzionare in
+> un'esecuzione completa dell'applicazione**. L'utente non è soddisfatto e ha
+> ragione: nel 3D vede ancora forme sintetiche. Leggere **0.4** prima di
+> qualunque altra cosa.
+
 ---
 
-## 0. Cambio di approccio in corso: modelli 3D reali di KiCad
+## 0. Modelli 3D reali dalla libreria KiCad
 
-**Idea dell'utente, condivisa.** Smettere di approssimare i package a partire
-dal bounding box e usare i modelli veri che KiCad installa sul disco.
+Idea dell'utente: smettere di approssimare i package dal bounding box e usare
+i modelli veri che KiCad installa già sul disco.
 
-Non e' un'API: non c'e' nessun servizio da interrogare. Sono file locali --
-su questa macchina `C:/Program Files/KiCad/10.0/share/kicad/3dmodels`,
-105 cartelle, **7251 modelli** STEP/WRL. Niente rete, niente costo per pezzo.
+Non è un'API: sono file locali. Su questa macchina
+`C:/Program Files/KiCad/10.0/share/kicad/3dmodels`, 105 cartelle,
+**7251 modelli** STEP/WRL. Niente rete, niente costo per pezzo.
 
-Cosa risolve: il vocabolario smette di essere la lista di 16 `kind` inventata
-nel progetto e diventa la nomenclatura standard dell'industria (`SOT-223`,
-`0402`, `USB_C_Receptacle`), che un modello linguistico conosce molto meglio.
-Era il collo di bottiglia vero -- per il regolatore il modello scriveva
-"voltage regulator" ma doveva ripiegare su `kind=ic`, che si disegna come
-scatola liscia *per scelta esplicita* del codice.
+### 0.1 Com'è fatto
 
-### Fatto: `kicadgen/cad3d/kicad_models.py` (commit `e7cad70` e seguenti)
+`kicadgen/cad3d/kicad_models.py`, modulo nuovo:
 
-Risolutore autonomo, **non ancora agganciato alla generazione**. Verificato
-con `grep`: nessun chiamante, `build_component` usa ancora `BUILDERS`.
+- `find_library()` — trova la libreria; l'assenza **non è un errore**, si ripiega
+- `candidates(package)` — ricerca per nome normalizzato (`SOT-223`, `SOT_223`,
+  `U.FL` collassano sulla stessa forma), i più attinenti prima
+- `measure_models()` — misura con FreeCAD **un solo processo per lotto**,
+  indice su disco versionato (`.kicadgen-model-sizes-v3.json`)
+- `resolve_model()` — sceglie **e verifica**
+- `attach_models(components)` — aggiunge `model_path` ai componenti risolti
 
-- `find_library()` — trova la libreria, assenza non e' errore
-- `candidates(package)` — ricerca per nome normalizzato, piu' attinenti prima
-- `measure_models()` — misura con FreeCAD **in un solo processo per lotto**,
-  indice su disco. I percorsi passano da un file di scambio perche'
-  `freecadcmd` **non inoltra argv** allo script come farebbe python.
-- `resolve_model()` — fra i candidati vince **il piu' vicino alla misura**,
-  non il primo che rientra. La tolleranza (0.30) e' **derivata, non tarata**:
-  fra due taglie adiacenti corre almeno il 60%, quindi perche' la scelta per
-  vicinanza sbagli servirebbe un errore di misura oltre il 30%.
+**Due trappole già pagate, da non ripetere:**
 
-### Il problema che ha fatto perdere piu' tempo, e come e' stato risolto
+1. **`freecadcmd` NON inoltra `sys.argv` allo script.** I percorsi passano da
+   un file di scambio (`in.json` / `out.json`), cartella in
+   `KICADGEN_MEASURE_DIR`.
+2. **La risoluzione deve avvenire FUORI da FreeCAD.** Misurare un modello
+   richiede FreeCAD a sua volta, e non si può lanciarlo dall'istanza che sta
+   già costruendo il solido. Per questo `attach_models` sta in
+   `step_generator`, prima di `_run_freecad`, e `freecad_parts` si limita a
+   fare `Part.read` di un percorso già risolto.
 
-Il modello KiCad di un SOT-223 ha bounding box **7.00 x 6.50** perche'
-comprende i reofori aperti; la fotografia aveva misurato **6.55 x 3.21**,
-cioe' il corpo. Scarto 102%, package giusto rifiutato.
+### 0.2 Come sceglie, e perché così
 
-Soluzione: misurare **due letture** per ogni modello e accettare la piu'
-vicina. Il corpo si ottiene con una sezione **al 65% dell'altezza**, non a
-meta': i reofori stanno bassi e a meta' rientrano ancora nella sezione.
-Verificato -- al 65% un SOT-223 da' 3.47 x 6.47 (corpo reale 3.5 x 6.5) e un
-SOIC-8 da' 3.75 x 4.75 (3.9 x 4.9); al 50% davano 5.25 e 5.02.
+- Fra i candidati vince **il più vicino alla misura**, non il primo.
+- A parità di prove (entro il 5%) decide il **nome esatto**: `SOT-223` e
+  `SOT-223-8` hanno lo stesso corpo, li distingue solo il nome.
+- Tolleranza **0.30 derivata, non tarata**: fra due taglie adiacenti corre
+  almeno il 60%, quindi perché la scelta per vicinanza sbagli servirebbe un
+  errore di misura oltre il 30%.
+- Ogni modello porta **due letture**, `body` e `total`, e vale la più vicina:
+  il rettangolo sulla foto può aver seguito il corpo oppure l'estensione coi
+  reofori. Il corpo si misura con una sezione **al 65% dell'altezza**, non a
+  metà — i reofori stanno bassi e a metà rientrano ancora nella sezione.
+  Verificato: al 65% `SOT-223` dà 3.47×6.47 contro 3.5×6.5 reali; al 50%
+  dava 5.25 sul lato corto.
+- **Rifiutare è l'esito sicuro**: meglio una forma dichiaratamente
+  approssimata di un modello reale ma sbagliato.
 
-### Risultati sui pezzi reali della ESP32
+### 0.3 Il campo `package`: dove va chiesto DAVVERO
 
-    SOT-223           6.55 x 3.21  ->  SOT-223-8.step        scarto  7%
-    USB_C_Receptacle  7.61 x 9.98  ->  USB_C_Receptacle_GCT  scarto 10%
-    ESP32-S3-WROOM-1 20.01 x 17.97 ->  ESP32-S3-WROOM-1.step scarto 12%
-    R_0402            1.00 x 0.50  ->  R_0402_1005Metric     scarto  0%
-    R_0402 con quote di un 0603    ->  RIFIUTATO (38%)
-    U.FL              4.57 x 4.05  ->  RIFIUTATO (32%)
+Errore commesso e corretto. Il campo era finito in `classify_fixed_packages`,
+che sui moduli **castellated non viene mai chiamato**: quella famiglia passa
+da `mechanical_envelopes`, che usa `verify_mounted_bodies` e forza
+`kind = "generic"` di proposito.
 
-Le due righe di rifiuto sono la prova che la discriminazione funziona.
+Sintomo che lo ha rivelato: nel log reale **tutti i 43 componenti erano
+`[generic]`** e nessun package veniva raccolto.
 
-### Aperto su questo fronte
+**Emendamento esplicito a una decisione di progetto.** `verify_mounted_bodies`
+chiedeva solo occupazione per non certificare identità elettriche; ora chiede
+anche `package`. Motivazione: una sigla di package è una **sagoma meccanica**
+standard (un SOT-223 è un contorno JEDEC), non una funzione di circuito. Il
+divieto sull'identità elettrica resta nel prompt e nella descrizione del
+campo, e il test del contratto lo verifica. Registrato in `MEMORY.md`.
 
-1. **`SOT-223` risolve a `SOT-223-8.step`**, che e' un altro componente (otto
-   reofori invece di quattro). Hanno lo stesso corpo, quindi la misura non
-   puo' distinguerli: serve preferire la corrispondenza **esatta di nome**
-   quando gli scarti sono comparabili, invece del solo piu' vicino.
-2. **Chiedere il nome del package al modello.** Oggi `resolve_model` riceve il
-   nome a mano nei test; in produzione non esiste -- `kind=ic` non e' un
-   package. Serve un campo aperto nello schema del classificatore, come si e'
-   fatto per `mating`.
-3. **Agganciare alla generazione**: caricare lo STEP invece della forma
-   sintetica, con le forme attuali come ripiego. `freecad_parts` gira dentro
-   FreeCAD e puo' fare `Part.read`; la risoluzione va fatta fuori e il
-   percorso passato nel dizionario del componente.
-4. **U.FL**: la misura fotografica (4.57) e' lontana dal pezzo vero (3.10),
-   probabilmente perche' il rettangolo ha incluso la nicchia attorno. Va
-   guardato dopo, non forzando la tolleranza.
+### 0.4 CHE COSA È VERIFICATO E CHE COSA NO
 
-**Le forme sintetiche non si buttano**: diventano il ripiego, che e' il loro
-posto naturale.
+**Verificato con prove dirette:**
+
+- `build_component` carica davvero lo STEP: senza `model_path` **8 vertici**
+  (scatola), con `model_path` **125 vertici**, posizione X +10.00 Y −5.00 e
+  base Z 0.96 esatte. Percorso rotto → ripiega sulla scatola con avviso.
+- La catena `package` → componente → `_components_3d` → `attach_models` →
+  `model_path` passa tutti e quattro i passaggi.
+- Nella corsa reale il modello **ha compilato `package`** con nomi di
+  libreria, non descrizioni: R_0603 (12), SOD-323 (11), R_0402 (6), SOT-23
+  (6), SW_TACT (3), SOIC-8 (2), SMD_Crystal, SOT-223, ESP32-S3-WROOM-1,
+  C_0805, U.FL.
+- Di quelle 11 sigle **7 si risolvono** con le quote reali: SOD-323, SOT-23,
+  SW_TACT, SOIC-8, ESP32-S3-WROOM-1, C_0805, **U.FL**.
+
+**NON verificato — ed è il punto dolente:**
+
+- **Nessuna esecuzione completa dell'applicazione ha mai prodotto un modello
+  3D contenente STEP reali.** L'utente vede ancora forme sintetiche. Cause
+  possibili, da escludere in quest'ordine:
+  1. l'app non è stata riavviata dopo i commit che agganciano il risolutore;
+  2. la generazione 3D è stata lanciata su dati estratti **prima** che il
+     campo `package` esistesse — in quel caso non c'è nulla da risolvere e il
+     ripiego è corretto;
+  3. un difetto non ancora trovato fra `attach_models` e `build_component`.
+- La riga `Modelli reali dalla libreria KiCad: N su M componenti` **non è mai
+  stata vista comparire**. Era chiamata senza log (corretto in `b83ae40`).
+
+### 0.5 Diario per la diagnosi
+
+Ogni riga del Log AI finisce in **`analisi-ai.log` dentro la cartella del
+componente**, con intestazione datata per corsa. Serve esattamente a
+rispondere alle domande di 0.4 **senza dipendere dal copia-incolla**
+dell'utente. Il diario segue il componente quando viene rinominato.
+
+### 0.6 Aperto su questo fronte
+
+1. **Le quote fotografiche sono sistematicamente più grandi dei corpi**,
+   perché i rettangoli includono le piazzole di saldatura:
+
+   ```
+   R_0603   misurato 2.62 x 1.25   reale 1.60 x 0.80   +64%
+   R_0402   misurato 1.50 x 0.84   reale 1.00 x 0.50   +68%
+   SOT-223  misurato 4.26 x 1.63   reale 6.50 x 3.50   -35%
+   ```
+
+   Sono **25 componenti su 45**, il grosso della scheda. **Non** si risolve
+   allentando la tolleranza: un 0402 diventerebbe indistinguibile da un 0603.
+   Si risolve aggiungendo una **terza lettura** — l'estensione con le
+   piazzole, dal footprint KiCad accanto al modello — e confrontando
+   grandezze omogenee. È lo stesso ragionamento che ha portato SOT-223 da
+   102% a 7%, applicato all'altro estremo.
+2. **`SMD_Crystal` non esiste in libreria**: i cristalli si chiamano
+   `Crystal_SMD_3225-4Pin_3.2x2.5mm`. Unico caso di sigla plausibile ma non
+   reale; una normalizzazione dei nomi più comuni aiuterebbe.
+3. **Colori**: `Part.read` restituisce geometria senza colori, quindi il
+   modello reale prende il colore campionato dalla foto. Accettabile, ma i
+   modelli KiCad sono multicolore e l'informazione si perde.
+
+**Le forme sintetiche non si buttano**: sono il ripiego quando manca KiCad,
+manca il package o l'ingombro non conferma.
 
 ---
 
@@ -266,6 +326,20 @@ empirica** tarata su un caso osservato). Restano:
 - **Chiave OpenRouter in scadenza**: `2026-12-11`.
 
 ---
+
+- **Diario del componente**: `analisi-ai.log` nella cartella del componente
+  contiene tutto il Log AI, con intestazione datata per corsa. E' la via piu'
+  rapida per diagnosticare senza chiedere il copia-incolla.
+- **`pytest tests`, non `pytest`**: la seconda forma tenta di collezionare le
+  cartelle sotto `generated/` e fallisce con PermissionError.
+- **Controllare l'esito di pytest, non dell'ultimo comando della pipe.** Un
+  commit rotto (`14b05da`) e' stato pushato perche' `tail` riusciva anche con
+  i test rossi.
+- **Attenzione all'escaping quando si genera codice o testo con script.**
+  Sequenze come `
+`, `.0`, `dmodels` sono state interpretate piu'
+  volte, producendo file corrotti. Preferire edit per riga o la scrittura
+  diretta del file.
 
 ## 6. Decisioni prese dall'utente in questa sessione
 
