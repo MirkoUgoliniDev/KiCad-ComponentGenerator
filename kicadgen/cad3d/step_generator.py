@@ -360,11 +360,13 @@ def generate_castellated_3d_model(
     # l'ingombro lo conferma. La risoluzione avviene QUI e non dentro
     # freecad_parts: misurare un modello richiede a sua volta FreeCAD, e non
     # si puo' lanciarlo da dentro l'istanza che sta gia' costruendo il solido.
+    model_notes = []
     try:
         from .kicad_models import attach_models
-        attach_models(components)
-    except Exception:  # noqa: BLE001 - la libreria e' un di piu', mai un requisito
-        pass
+        attach_models(components, log=model_notes.append)
+    except Exception as exc:  # noqa: BLE001 - la libreria e' un di piu', mai un requisito
+        model_notes.append(f"Libreria 3D KiCad non utilizzabile ({exc}); "
+                           "si usano le forme approssimate.")
 
     result = _run_freecad(
         params.name, [], pcb, output_dir,
@@ -380,6 +382,10 @@ def generate_castellated_3d_model(
         },
     )
     result["warnings"] = overlap_warnings + result["warnings"]
+    # Annotazioni informative, distinte dagli avvisi: dicono quanti modelli
+    # reali sono stati usati. Senza, l'esito della risoluzione non arriva
+    # all'utente e il meccanismo sembra non essere entrato in funzione.
+    result["notes"] = model_notes + list(result.get("notes", []))
     return result
 
 def generate_3d_model(

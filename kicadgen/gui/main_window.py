@@ -187,7 +187,11 @@ class GenerateWorker(QThread):
                 )
                 for warning in result.get('warnings', []):
                     self.warning.emit(warning)
-                self.cad3d_done.emit(str(result["step_path"]))
+                # Le note della risoluzione modelli vanno nel log anche nella
+            # generazione completa, non solo nella rigenerazione 3D.
+            for note in result.get("notes", []):
+                self.progress.emit(note)
+            self.cad3d_done.emit(str(result["step_path"]))
             except Cad3DError as exc:
                 self.cad3d_error.emit(str(exc))
             except Exception as exc:  # noqa: BLE001 - riportato in UI, non e' fatale
@@ -209,6 +213,10 @@ class Cad3DWorker(QThread):
     done = pyqtSignal(str)
     error = pyqtSignal(str)
     warning = pyqtSignal(str)
+    #: Annotazioni informative (es. quanti modelli reali di KiCad sono stati
+    #: usati): vanno nel log senza il prefisso di avviso, perche' non c'e'
+    #: nulla che richieda attenzione.
+    progress = pyqtSignal(str)
 
     def __init__(
         self, params: PinHeaderParams | CastellatedModuleParams, body: Body3DParams,
@@ -227,6 +235,8 @@ class Cad3DWorker(QThread):
                 self.params, self.body, self.project_dir,
                 self.fillets, self.face_texts,
             )
+            for note in result.get("notes", []):
+                self.progress.emit(note)
             for warning in result.get("warnings", []):
                 self.warning.emit(warning)
             self.done.emit(str(result["step_path"]))
@@ -3209,6 +3219,8 @@ class MainWindow(QMainWindow):
         )
         self._cad3d_worker._model_revision = self._model_revision
         self._cad3d_worker.done.connect(self._on_regen_3d_done)
+        self._cad3d_worker.progress.connect(self._on_ai_progress)
+        self._cad3d_worker.progress.connect(self._on_regen_3d_progress)
         self._cad3d_worker.warning.connect(self._on_regen_3d_progress)
         self._cad3d_worker.warning.connect(self._on_cad3d_warning)
         self._cad3d_worker.error.connect(self._on_regen_3d_error)
