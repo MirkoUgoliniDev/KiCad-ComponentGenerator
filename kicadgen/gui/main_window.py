@@ -1580,15 +1580,12 @@ class MainWindow(QMainWindow):
         if new_docs.resolve() == old_docs.resolve():
             return old_name
 
-        answer = QMessageBox.question(
-            self, self.i18n.text("Rinomina componente"),
-            self.i18n.tr(
-                "component.rename_question", new_name=new_name, old_name=old_name,
-                directory=old_docs, count=len(files)),
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            self._on_ai_progress(f'Rinomina non eseguita: mantenuto il progetto {old_name}. Dati AI acquisiti.')
-            return old_name
+        # La rinomina non chiede conferma: interrompeva l'analisi a meta' con
+        # una modale, proprio mentre il worker stava ancora lavorando. Resta
+        # tracciata nel Log AI, cosi' si sa sempre quale cartella e' in uso.
+        self._on_ai_progress(
+            f'Rinomina automatica: il progetto {old_name} diventa {new_name}; '
+            f'{len(files)} documenti spostati nella nuova cartella.')
 
         if (old_docs / MANIFEST).is_file() and any((new_docs / f.name).exists() for f in files):
             message = self.i18n.tr(

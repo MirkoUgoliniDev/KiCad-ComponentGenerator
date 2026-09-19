@@ -2,7 +2,7 @@
 from pathlib import Path
 from unittest.mock import Mock
 
-from kicadgen.services.document_roles import ROLES
+from kicadgen.services.document_roles import MANIFEST, ROLES
 import pytest
 from test_photo_inventory_gui import window, gui, ExtractedParams, QApplication
 from PyQt6.QtCore import Qt
@@ -225,38 +225,66 @@ def test_mode_preference_survives_restart(window, monkeypatch):
         restored.close()
 
 
-@pytest.mark.parametrize('answer', [QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No])
-def test_extract_finish_during_rename_modal_does_not_drop_autogeneration(window, monkeypatch, answer):
+def test_extract_finish_inside_a_nested_modal_does_not_drop_autogeneration(window, monkeypatch):
+    """Una modale apre un ciclo di eventi annidato mentre il worker lavora.
+
+    Se il segnale finished arrivasse li' e venisse gestito subito, la
+    generazione automatica partirebbe su campi applicati solo a meta'. La
+    rinomina non chiede piu' conferma, ma restano altre modali su questo
+    percorso: qui si usa quella del conflitto di nomi.
+    """
     from PyQt6.QtCore import QTimer
     begin(window, monkeypatch)
     original_name = window._component_name()
     docs = window._docs_dir()
     docs.mkdir(parents=True, exist_ok=True)
     (docs / 'photo.png').write_bytes(b'offline fixture')
+    (docs / MANIFEST).write_text('{"version": 1, "roles": {}}', encoding='utf-8')
+    # Stessi nomi nella cartella di destinazione: la rinomina va in conflitto.
+    target = Path(window.field_library_root.text().strip()) / 'AutoModule' / 'docs'
+    target.mkdir(parents=True, exist_ok=True)
+    (target / 'photo.png').write_bytes(b'altro progetto')
     observed = []
-    def question(parent, title, text, *args):
+    def information(parent, title, text, *args):
         box = QMessageBox(parent)
         box.setWindowTitle(title)
         box.setText(text)
-        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         def finish_thread_inside_modal():
             window._extract_worker.finished.emit()
             observed.append(window._worker is None)
-            box.done(answer)
+            box.done(QMessageBox.StandardButton.Ok)
         QTimer.singleShot(0, finish_thread_inside_modal)
         return box.exec()
-    monkeypatch.setattr(QMessageBox, 'question', question)
+    monkeypatch.setattr(QMessageBox, 'information', information)
     monkeypatch.setattr(QMessageBox, 'warning', lambda *args: None)
     window._on_extracted(acquired())
     assert observed == [True]  # Never generate until all fields have been applied.
     assert window._worker is not None
-    assert window._worker.params.name == ('AutoModule' if answer == QMessageBox.StandardButton.Yes else original_name)
+    assert window._worker.params.name == original_name  # conflitto: nome conservato
     assert window._worker.body.height_mm == 3
     window._on_error('test stopped')
     window._on_generation_finished()
 
 
-@pytest.mark.parametrize('rename_dialog', [False, True])
+def test_the_rename_no_longer_interrupts_the_analysis_with_a_question(window, monkeypatch):
+    """Scelta dell'utente: rinominare sempre, senza chiedere."""
+    begin(window, monkeypatch)
+    docs = window._docs_dir()
+    docs.mkdir(parents=True, exist_ok=True)
+    (docs / 'photo.png').write_bytes(b'offline fixture')
+    def refuse(*args, **kwargs):
+        pytest.fail("La rinomina non deve piu' aprire una modale")
+    monkeypatch.setattr(QMessageBox, 'question', refuse)
+    monkeypatch.setattr(QMessageBox, 'warning', lambda *args: None)
+    window._on_extracted(acquired())
+    assert window._component_name() == 'AutoModule'
+    assert any('Rinomina automatica' in line for line in
+               window.ai_progress_text.toPlainText().splitlines())
+    window._on_error('test stopped')
+    window._on_generation_finished()
+
+
+@pytest.mark.parametrize('rename_dialog', [False])
 def test_real_qthread_handoff_generates_footprint_and_requests_3d(window, monkeypatch, rename_dialog):
     from PyQt6.QtCore import QEventLoop, QTimer
     monkeypatch.setattr(gui.ExtractWorker, 'run', lambda self: self.done.emit(acquired()))
