@@ -1,5 +1,21 @@
 # Handoff — sessione 2026-09-19
 
+## Consegna20/09 — stato corrente (precede tutti i checkpoint storici)
+
+Branch YOLO-SOLUTION. Commit implementazione09ac162, seguito dal presente
+checkpoint documentale. Commit include81 file del lavoro cumulativo autorizzato;
+foto, pesi, output generati e configurazione privata esclusi. Scansione177 file
+senza pattern credenziali; DB contiene profili/traduzioni. Review finale Faraday
+senza blocchi residui. Test:2248 completi al checkpoint,394 mirati dopo ultime
+patch;2 xfailed noti,19 subtests. Nessuna nuova chiamata AI a pagamento.
+Utente puo' riavviare python main.py e rilanciare YOLO locale+verificaAI:
+cache prompt precedente invalidata, analisi richiede credito del provider.
+La nuova verifica reale e il controllo visivo finale sono ancora da eseguire
+dall'utente; completezza e classificazione non certificate. Segnaposti magenta
+restano intenzionali fino alla scelta del modello KiCad. Nessun lavoro extra
+non autorizzato avviato. Push richiesto su origin/YOLO-SOLUTION subito dopo
+questo checkpoint; verificarne esito remoto prima di dichiararlo concluso.
+
 ## Copertura dei corpi prima della classificazione — integrazione20/09
 
 Ultimo stato: implementate e ritestate anche le correzioni del reviewer.
