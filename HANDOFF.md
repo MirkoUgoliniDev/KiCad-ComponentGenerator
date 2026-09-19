@@ -13,7 +13,7 @@ Suite: **1225 passed, 2 xfailed**. Albero pulito.
 dal bounding box e usare i modelli veri che KiCad installa sul disco.
 
 Non e' un'API: non c'e' nessun servizio da interrogare. Sono file locali --
-su questa macchina `C:/Program Files/KiCad.0\share\kicaddmodels`,
+su questa macchina `C:/Program Files/KiCad/10.0/share/kicad/3dmodels`,
 105 cartelle, **7251 modelli** STEP/WRL. Niente rete, niente costo per pezzo.
 
 Cosa risolve: il vocabolario smette di essere la lista di 16 `kind` inventata
