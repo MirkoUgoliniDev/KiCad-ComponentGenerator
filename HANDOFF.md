@@ -1,3 +1,50 @@
+# 2026-09-20 (15) — prove eseguite, non solo scritte
+
+Due prove reali, entrambe **senza chiamate AI**, sui dati e sul codice veri.
+
+## 1. Il rilevatore sulla fotografia vera (VM dell'utente, CPU)
+
+`prepare_photo` + `detect_yolo_components` su `hires.jpg`, scheda 63,3 x 25,4:
+
+* 128 proposte;
+* **21 dichiarano almeno un lato tagliato** (prima nessuno lo diceva): 10
+  sinistro, 7 destro, 4 sotto, 4 sopra;
+* i due frammenti che finiscono a **x1 = 0,8715** -- il confine di tessera che
+  l'AI aveva adottato come bordo del modulo -- ora si dichiarano
+  `lati tagliati = ['right']`;
+* il riquadro d'insieme che arriva a x1 = 1,0000 **non** e' marcato: li' il
+  bordo dell'immagine e' reale;
+* contatti: 44 dichiarati, striscia 3,85 mm, **42 proposte tolte**, restano 86.
+
+## 2. La scelta del modello con i cinque candidati veri (contenitore)
+
+Quote prese da `kicad-model-candidates.json` della corsa, non inventate.
+
+| misura data al matcher | vincitore | scarto |
+|---|---|---|
+| **18,08 x 16,33** (la corsa) | ZETA-433-SO_SMD | xy 0,0876 |
+| **19,23 x 18,08** (bordo vero) | **ESP32-WROOM-32U** | xy **0,0044** |
+| 18,08 x 16,33 **+ altezza 3,1 osservata** | **ESP32-WROOM-32U** | xy 0,1022, z 0,032 |
+
+Tre cose che questa prova stabilisce:
+
+1. il difetto e' **riprodotto** dal codice attuale: con la misura troncata
+   vince il modulo sbagliato, e lo stato e' `provisional_matched`;
+2. **verificata** l'ipotesi che l'agente aveva solo dedotto: il "pareggio" che
+   produce `provisional_matched` e' fra le **due varianti ZETA** (SMD e THT,
+   identiche di quota), e l'ESP32-WROOM-32U non ha mai partecipato;
+3. le due correzioni sono **indipendenti e ciascuna sufficiente**: con il bordo
+   giusto il solido corretto vince di misura; con la misura ancora sbagliata ma
+   l'altezza osservata, vince lo stesso.
+
+Nella corsa vera l'altezza era `None`, quindi **oggi conta solo la prima**.
+
+## Il caso e' ora un test permanente
+
+`tests/test_kicad_model_candidates_backend.py::test_the_module_of_the_real_run_with_its_real_numbers`
+rigioca i tre stati con i cinque candidati e le loro quote vere. Registra anche
+il caso sbagliato: e' l'unico modo di accorgersi se tornasse.
+
 # 2026-09-20 (14) — il modulo ESP32: catena chiusa e tre correzioni
 
 Tre agenti in parallelo (misura, criterio di scelta, libreria) hanno chiuso la

@@ -1,6 +1,7 @@
 """@brief Review-first candidate matching against a mocked KiCad library."""
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -707,3 +708,71 @@ def test_the_height_never_promotes_a_solid_the_measurement_discarded(library):
     report = km.model_candidates(
         _module(height_mm=3.1, height_source="visual_estimate"), library=root)
     assert report["candidates"][0]["package"] == "NEAR-BUT-UNKNOWN-Z_19.0x18.0mm"
+
+
+#: Le cinque quote misurate davvero dai solidi KiCad nella corsa dell'utente,
+#: lette da kicad-model-candidates.json. Non sono inventate per il test.
+_REAL_RF_MODELS = {
+    'ZETA-433-SO_THT': [16.5, 16.0, 1.3],
+    'ZETA-433-SO_SMD': [16.5, 16.0, 1.3],
+    'ESP32-WROOM-32U': [18.0, 19.2, 3.2],
+    'ESP-WROOM-02': [18.0, 20.0, 2.927],
+    'ESP32-C3-WROOM-02': [18.0, 20.0, 3.235],
+}
+
+
+@pytest.fixture
+def rf_library(tmp_path, monkeypatch):
+    """@brief La famiglia RF della libreria vera, con le sue quote misurate."""
+    sizes = {}
+    for name, dims in _REAL_RF_MODELS.items():
+        path = tmp_path/'RF_Module.3dshapes'/(name + '.step')
+        path.parent.mkdir(exist_ok=True)
+        path.touch()
+        sizes[str(path)] = {'total': list(dims)}
+    monkeypatch.setattr(km, 'model_sizes', lambda paths, library=None: {str(p): sizes[str(p)] for p in paths})
+    monkeypatch.setattr(km, 'footprint_sizes', lambda *a, **k: {})
+    monkeypatch.setattr(km, 'load_index',
+                        lambda lib: {km.index_key(Path(k)): v for k, v in sizes.items()})
+    return tmp_path
+
+
+def _radio(length_mm, width_mm, **extra):
+    return dict(kind='rf_module', package='shielded daughterboard/module with attached coaxial jack',
+                length_mm=length_mm, width_mm=width_mm, bbox_basis='body_and_leads',
+                presence_confidence='high', class_confidence='medium', **extra)
+
+
+def test_the_module_of_the_real_run_with_its_real_numbers(rf_library):
+    """@brief Regressione sul caso vero, nei tre stati in cui si e' trovato.
+
+    Il modulo misura 18,0 x 19,2 mm. La pipeline gli aveva consegnato
+    18,08 x 16,33 perche' il bordo destro era il confine di una tessera YOLO,
+    non il bordo del corpo.
+
+    1. Con quella misura vince un modulo radio 16,5 x 16,0 alto 1,3 mm: il
+       difetto che si vedeva nel 3D. Vale la pena registrarlo, perche' e'
+       l'unico modo di accorgersi se un domani tornasse.
+    2. Con il bordo giusto vince il solido corretto, e non di misura.
+    3. Anche con la misura sbagliata, se l'altezza e' stata osservata il solido
+       corretto torna primo: la vista dall'alto non misura l'altezza, e i due
+       candidati sono dentro la banda in cui non li distingue.
+    """
+    wrong = km.model_candidates(_radio(18.0848, 16.3314), library=rf_library)
+    assert Path(wrong['selected_path']).stem.startswith('ZETA-433')
+    errors = {c['package']: c['relative_xy_error'] for c in wrong['candidates']}
+    assert errors['ZETA-433-SO_THT'] == pytest.approx(.0876, abs=1e-3)
+    assert errors['ESP32-WROOM-32U'] == pytest.approx(.1022, abs=1e-3)
+    # Il distacco e' sotto il margine entro cui il codice stesso dichiara di
+    # non saper distinguere: la scelta era gia' una moneta lanciata.
+    assert errors['ESP32-WROOM-32U'] - errors['ZETA-433-SO_THT'] < km.NAME_TIEBREAK_MARGIN
+
+    right = km.model_candidates(_radio(19.23, 18.08), library=rf_library)
+    assert Path(right['selected_path']).stem == 'ESP32-WROOM-32U'
+    assert right['candidates'][0]['relative_xy_error'] == pytest.approx(.0044, abs=1e-3)
+
+    rescued = km.model_candidates(
+        _radio(18.0848, 16.3314, height_mm=3.1, height_source='visual_estimate'),
+        library=rf_library)
+    assert Path(rescued['selected_path']).stem == 'ESP32-WROOM-32U'
+    assert rescued['candidates'][0]['relative_z_error'] == pytest.approx(.0323, abs=1e-3)
