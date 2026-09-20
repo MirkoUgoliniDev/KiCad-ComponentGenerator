@@ -7,6 +7,8 @@ from types import ModuleType
 
 import pytest
 
+from kicadgen.services.photo_grounding import DEFAULT_PHOTO_DETECTOR_MODEL
+
 from test_photo_inventory_gui import window
 from kicadgen.gui import main_window as gui
 
@@ -168,7 +170,12 @@ def test_preflight_happens_before_worker_and_busy_controls_restore(window, monke
     assert events == [("validate", path), ("start", worker)]
     assert worker.photo_detector == "yolo"
     assert worker.yolo_model_path == path
-    assert worker.model == worker.vision_model == worker.verification_model == "configured/model"
+    # Il datasheet resta al modello configurato; la chiamata che GUARDA la
+    # fotografia -- qui la riconciliazione delle proposte locali -- va al
+    # modello di visione scelto nel pannello. E' una chiamata sola, e non e'
+    # detto che debba costare quanto quella che legge i documenti.
+    assert worker.model == worker.vision_model == "configured/model"
+    assert worker.verification_model == window._vlm_model == DEFAULT_PHOTO_DETECTOR_MODEL
     for control in (window.combo_photo_detector, window.field_yolo_model, window.btn_pick_yolo_model):
         assert not control.isEnabled()
     window._on_extract_finished()
@@ -387,3 +394,16 @@ def test_gui_preserves_full_component_body_overhang_at_each_board_edge(window, k
     assert result.mating == "edge"
     assert result.bbox_basis == "body"
     assert window._photo_detector_options() == ("yolo", None)
+
+
+def test_without_a_vision_model_the_photo_call_falls_back_to_the_configured_one(window, monkeypatch):
+    """@brief Caso negativo: svuotare il campo non deve lasciare la chiamata senza modello."""
+    _fake_yolo(monkeypatch, lambda path: None)
+    monkeypatch.setattr(window, "_selected_documents", lambda: ([Path("board.png")], None))
+    monkeypatch.setattr(gui.ExtractWorker, "start", lambda self: None)
+    window.combo_photo_detector.setCurrentIndex(window.combo_photo_detector.findData("yolo"))
+    window._session_model = "configured/model"
+    window._vlm_model = ""
+    window._extract_with_ai()
+    worker = window._extract_worker
+    assert worker.model == worker.vision_model == worker.verification_model == "configured/model"

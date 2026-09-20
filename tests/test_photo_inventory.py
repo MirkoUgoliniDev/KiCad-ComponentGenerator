@@ -271,6 +271,7 @@ def test_the_inventory_leaves_a_photo_an_overlay_and_a_json_on_disk(tmp_path):
     assert saved['count'] == 1 and saved['components'][0]['name'] == 'U1'
     stamps = {path.name.split('-')[1] for path in written}
     assert len(stamps) == 1
+    assert all(path.name.startswith('inventory-') for path in written)
     assert str(document) in messages[0]
 
 
@@ -284,3 +285,38 @@ def test_a_disk_error_is_reported_and_never_wastes_an_analysis_already_paid(tmp_
     # Senza cartella non si scrive e non si dice nulla: non e' un errore.
     assert inv.save_inventory_evidence(None, b'x', b'y', [], messages.append) == []
     assert len(messages) == 1
+
+
+def test_the_detector_preview_shows_what_was_kept_and_what_was_removed():
+    """@brief Un filtro che toglie la cosa sbagliata si vede solo se mostra cosa toglie.
+
+    L'anteprima del rilevatore serve a guardare il rilevatore, non il risultato
+    finale: le proposte deboli restano distinguibili da quelle sicure, e le
+    scartate perche' cadute su un contatto dichiarato restano visibili.
+    """
+    import cv2
+    photo = np.zeros((100, 200, 3), np.uint8)
+    kept = [dict(_box=(.10, .10, .20, .30), _yolo_class='resistor', _yolo_review_only=False),
+            dict(_box=(.40, .10, .50, .30), _yolo_class='capacitor', _yolo_review_only=True)]
+    dropped = [dict(_box=(.80, .80, .85, .90), _yolo_class='switch')]
+    png = inv.draw_detector_proposals(photo, kept, dropped)
+    assert png and png[:8] == b'\x89PNG\r\n\x1a\n'
+    drawn = cv2.imdecode(np.frombuffer(png, np.uint8), cv2.IMREAD_COLOR)
+    assert drawn.shape == photo.shape
+    # Ogni zona disegnata smette di essere nera; le tre sono distinte fra loro.
+    regions = [drawn[10:30, 20:40], drawn[10:30, 80:100], drawn[80:90, 160:170]]
+    assert all(region.any() for region in regions)
+    colours = {tuple(region.reshape(-1, 3)[region.reshape(-1, 3).any(axis=1)][0])
+               for region in regions}
+    assert len(colours) == 3
+
+
+def test_the_two_previews_do_not_overwrite_each_other(tmp_path):
+    """@brief Rilevatore e inventario finale convivono nella stessa cartella."""
+    messages = []
+    first = inv.save_inventory_evidence(tmp_path, b'a', b'b', [], messages.append, label='detector')
+    second = inv.save_inventory_evidence(tmp_path, b'c', b'd', [], messages.append)
+    assert {path.name.split('-')[0] for path in first} == {'detector'}
+    assert {path.name.split('-')[0] for path in second} == {'inventory'}
+    assert 'Proposte del rilevatore salvate' in messages[0]
+    assert 'Inventario salvato' in messages[1]

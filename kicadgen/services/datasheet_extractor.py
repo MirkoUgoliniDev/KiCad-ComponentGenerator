@@ -981,7 +981,7 @@ def extract_pin_header_params(
                 classifier_model=verification_model or model or DEFAULT_MODEL,
                 grounding_prompt=grounding_prompt, verification_prompt=verification_prompt,
                 **({'detector': photo_detector, 'yolo_model_path': yolo_model_path,
-                    'review_proposals': review_proposals}
+                    'review_proposals': review_proposals, 'declared': data}
                    if photo_detector in ('yolo', 'vlm') else {}),
             )
         except ReviewCancelled as exc:

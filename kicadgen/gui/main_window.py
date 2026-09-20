@@ -825,7 +825,10 @@ class MainWindow(QMainWindow):
         self.btn_pick_yolo_model.setEnabled(detector == "yolo")
         if hasattr(self, "_models_form"):
             self._models_form.setRowVisible(self._row_yolo_model, detector == "yolo")
-            self._models_form.setRowVisible(self._row_vlm_model, detector == "vlm")
+            # Il modello di visione serve in entrambi i percorsi fotografici:
+            # con vlm rileva ed elenca, con yolo riconcilia le proposte locali.
+            # E' sempre «il modello che guarda la fotografia».
+            self._models_form.setRowVisible(self._row_vlm_model, detector in ("yolo", "vlm"))
 
     def _pick_session_yolo_model(self) -> None:
         """Select optional ONNX weights without reading or saving preferences."""
@@ -1621,10 +1624,12 @@ class MainWindow(QMainWindow):
 
         model = self._session_model or profile['model']
         photo_model = model
-        # Con il rilevatore 'vlm' e' questo modello a guardare la fotografia ed
-        # elencare i corpi: e' la stessa chiamata che altrove fa la verifica,
-        # ma qui e' anche il rilevatore, quindi lo si sceglie dal pannello.
-        verification_model = (self._vlm_model if photo_detector == 'vlm' and self._vlm_model
+        # E' questo modello a guardare la fotografia: con 'vlm' rileva ed
+        # elenca i corpi, con 'yolo' riconcilia le proposte locali. In
+        # entrambi i casi e' una chiamata sola, e non e' detto che debba
+        # costare quanto il modello che legge i datasheet.
+        verification_model = (self._vlm_model
+                              if photo_detector in ('yolo', 'vlm') and self._vlm_model
                               else model)
         self._append_log(
             f"Estrazione da {len(doc_paths)} file con il modello AI {model}"

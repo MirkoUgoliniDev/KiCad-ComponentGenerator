@@ -430,7 +430,7 @@ def regions(image):
             y0, y1 = max(0, round((row/2-.12)*h)), min(h, round(((row+1)/2+.12)*h))
             yield f"Crop {row*3+col+1}/6", (x0/w,y0/h,x1/w,y1/h), image[y0:y1,x0:x1]
 
-def save_inventory_evidence(cache_dir, photo_png, overlay_png, components, log):
+def save_inventory_evidence(cache_dir, photo_png, overlay_png, components, log, label='inventory'):
     """@brief Salva su disco cio' che l'inventario ha trovato, per poterlo guardare.
 
     @param cache_dir Cartella dell'analisi; senza, non si scrive nulla.
@@ -438,6 +438,8 @@ def save_inventory_evidence(cache_dir, photo_png, overlay_png, components, log):
     @param overlay_png Stessa fotografia con sopra i rettangoli trovati.
     @param components Ipotesi di componente, come arrivano dall'inventario.
     @param log Callback di avanzamento: riceve i percorsi scritti.
+    @param label Prefisso dei nomi: distingue l'anteprima del rilevatore da
+        quella dell'inventario finale, che convivono nella stessa cartella.
     @return I percorsi scritti, in ordine: foto, sovrapposizione, JSON.
     @note Il modello non restituisce immagini: l'annotazione la disegniamo noi
         dal JSON, che resta l'unica cosa che il modello ha davvero detto. I due
@@ -453,17 +455,18 @@ def save_inventory_evidence(cache_dir, photo_png, overlay_png, components, log):
         directory = Path(cache_dir)
         directory.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime('%Y%m%d-%H%M%S')
-        for name, payload in ((f'inventory-{stamp}-photo.png', photo_png),
-                              (f'inventory-{stamp}-overlay.png', overlay_png)):
+        for name, payload in ((f'{label}-{stamp}-photo.png', photo_png),
+                              (f'{label}-{stamp}-overlay.png', overlay_png)):
             if payload:
                 (directory/name).write_bytes(payload)
                 written.append(directory/name)
         document = {'components': components, 'count': len(components)}
-        path = directory/f'inventory-{stamp}.json'
+        path = directory/f'{label}-{stamp}.json'
         path.write_text(json.dumps(document, indent=2, ensure_ascii=False, default=str),
                         encoding='utf-8')
         written.append(path)
-        log('Inventario salvato: ' + '; '.join(str(p) for p in written))
+        log(('Proposte del rilevatore salvate: ' if label == 'detector' else 'Inventario salvato: ')
+            + '; '.join(str(p) for p in written))
     except (OSError, TypeError, ValueError) as exc:
         log(f'Inventario non salvato su disco: {exc}')
     return written
@@ -527,15 +530,63 @@ def draw_inventory(image, components, use_ids=False):
     return encoded.tobytes() if ok else None
 
 
+def draw_detector_proposals(image, kept, dropped=()):
+    """@brief Disegna cio' che il rilevatore locale ha proposto, e cio' che e' stato tolto.
+
+    @param image Fotografia calibrata (BGR).
+    @param kept Proposte sopravvissute, con `_box` normalizzato.
+    @param dropped Proposte scartate perche' cadute su un contatto dichiarato.
+    @return PNG codificato, o None se la codifica fallisce.
+    @note Serve a guardare il rilevatore, non il risultato finale: le deboli
+        sono tratteggiate come nella vista di revisione e le scartate restano
+        visibili in rosso, perche' un filtro che toglie la cosa sbagliata si
+        vede solo se si vede anche cosa ha tolto.
+    """
+    import cv2
+    canvas = image.copy()
+    h, w = canvas.shape[:2]
+    for proposal in dropped:
+        x0, y0, x1, y1 = box_of(proposal)
+        cv2.rectangle(canvas, (round(x0*w), round(y0*h)), (round(x1*w), round(y1*h)),
+                      (60, 60, 235), 1)
+    for index, proposal in enumerate(kept, 1):
+        x0, y0, x1, y1 = box_of(proposal)
+        p0, p1 = (round(x0*w), round(y0*h)), (round(x1*w), round(y1*h))
+        weak = bool(proposal.get('_yolo_review_only'))
+        color = (0, 200, 255) if weak else (40, 230, 70)
+        if weak:
+            # Tratteggio povero ma leggibile: segmenti sui quattro lati.
+            for start, end in (((p0[0], p0[1]), (p1[0], p0[1])), ((p0[0], p1[1]), (p1[0], p1[1])),
+                               ((p0[0], p0[1]), (p0[0], p1[1])), ((p1[0], p0[1]), (p1[0], p1[1]))):
+                steps = max(2, int(max(abs(end[0]-start[0]), abs(end[1]-start[1])) / 6))
+                for step in range(0, steps, 2):
+                    a = (start[0] + (end[0]-start[0])*step//steps, start[1] + (end[1]-start[1])*step//steps)
+                    b = (start[0] + (end[0]-start[0])*(step+1)//steps, start[1] + (end[1]-start[1])*(step+1)//steps)
+                    cv2.line(canvas, a, b, color, 1)
+        else:
+            cv2.rectangle(canvas, p0, p1, color, 1)
+        label = str(proposal.get('_yolo_class') or index)
+        x, y = max(0, p0[0]), max(14, p0[1])
+        cv2.putText(canvas, label, (x, y), cv2.FONT_HERSHEY_SIMPLEX, .4, (0, 0, 0), 3)
+        cv2.putText(canvas, label, (x, y), cv2.FONT_HERSHEY_SIMPLEX, .4, color, 1)
+    ok, encoded = cv2.imencode(".png", canvas)
+    return encoded.tobytes() if ok else None
+
+
 def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                       top_photo_index=None, extra_instructions=None,
                       grounding=True, cache_dir=None, classifier_model=None, mechanical=True,
                       grounding_prompt=None, verification_prompt=None, top_photo_source='AI',
-                      detector='ai', yolo_model_path=None, review_proposals=None):
+                      detector='ai', yolo_model_path=None, review_proposals=None,
+                      declared=None):
     """@brief Calibrate the photo and extract reviewed component envelopes.
 
     @param detector ai preserves the existing localization; yolo uses local ONNX proposals.
     @param yolo_model_path Optional compatible ONNX weight file for the local detector.
+    @param declared Extracted board parameters, used to recognize the module's
+        own declared contacts among the local detector's proposals. Without
+        them nothing is filtered: guessing where the contacts are would delete
+        real components.
     @param review_proposals Optional callable(photo_png, proposals, length_mm,
         width_mm) -> proposals kept. Runs between the local detector and the
         paid reconciliation, so a body removed here is never sent nor paid for.
@@ -608,6 +659,27 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             # enumera i corpi da solo. Stessa richiesta, stesso schema, stessa
             # conversione in millimetri: cambia solo chi propone i rettangoli.
             log('Nessun rilevatore locale: i corpi li enumera il modello di visione, in una sola richiesta.')
+        if proposals:
+            from .contact_zones import contact_positions, contact_proposals
+            positions = contact_positions(declared, length, width)
+            dropped = contact_proposals(proposals, positions, length, width)
+            before_filter = list(proposals)
+            if dropped:
+                # Non e' un filtro per classe: il rilevatore chiama le file di
+                # piazzole «switch» o «battery», quindi la classe non aiuta.
+                # Qui si usa dove i contatti SONO, secondo le quote dichiarate.
+                proposals = [row for i, row in enumerate(proposals) if i not in dropped]
+                log(f'Contatti dichiarati: {len(dropped)} proposte cadevano sulle piazzole '
+                    f'del modulo ({len(positions)} contatti su quote dichiarate) e sono state tolte.')
+            elif positions:
+                log(f'Contatti dichiarati: {len(positions)}; nessuna proposta ci cadeva sopra.')
+            # L'anteprima di cio' che ha proposto il rilevatore, prima della
+            # riconciliazione: e' l'unico modo per capire se il filtro dei
+            # contatti ha tolto le piazzole o qualcosa di buono.
+            detector_png = draw_detector_proposals(
+                photo, proposals, [row for i, row in enumerate(before_filter) if i in dropped])
+            save_inventory_evidence(cache_dir, None, detector_png, proposals, log,
+                                    label='detector')
         if proposals and review_proposals is not None:
             # Potare qui, non dopo: la riconciliazione che segue si paga, e
             # riceverla piu' pulita costa meno e le da' meno rumore da
