@@ -2223,23 +2223,32 @@ class MainWindow(QMainWindow):
             "Diametro della piazzola attorno al foro passante: deve essere maggiore "
             "del foro, altrimenti non resta rame su cui saldare."
         )
-        self.field_cast_thru_offset = _mm(1.27, maximum=20.0)
+        self.field_cast_thru_offset = _mm(0.0, maximum=20.0)
         self.field_cast_thru_offset.setToolTip(
-            "Distanza del centro del foro passante dal bordo del corpo. Deve almeno "
-            "pareggiare il raggio della sua piazzola, se no il foro resta aperto sul "
-            "bordo invece di essere chiuso."
+            "Distanza del centro del foro passante dal bordo del corpo. A zero la "
+            "calcola il programma, tenendo il foro abbastanza lontano dal semi-foro "
+            "perche' i due non si fondano in un'unica cavita' aperta: con un semi-foro "
+            "piu' stretto il minimo scende da solo. Un valore scritto a mano viene "
+            "rispettato, ma rifiutato se i due fori si toccherebbero."
+        )
+        self.field_cast_hole_inset = _mm(0.0, maximum=10.0)
+        self.field_cast_hole_inset.setToolTip(
+            "Quanto il centro del semi-foro sta DENTRO il bordo: e' cio' che decide "
+            "quanto la mezzaluna resta aperta. A zero vale la convenzione (0,76 raggi); "
+            "a zero vero il semi-foro diventa una mezzaluna esatta."
         )
         for field in (self.field_cast_body_length, self.field_cast_body_width,
                       self.field_cast_hole, self.field_cast_pcb, self.field_cast_inset,
                       self.field_cast_thru_drill, self.field_cast_thru_pad,
-                      self.field_cast_thru_offset):
+                      self.field_cast_thru_offset, self.field_cast_hole_inset):
             field.valueChanged.connect(self._on_sides_changed)
 
         form.addRow("Sporgenza pad dal bordo:", self.field_cast_overhang)
         form.addRow("Diametro semi-foro (3D):", self.field_cast_hole)
         form.addRow("Foro passante (0 = nessuno):", self.field_cast_thru_drill)
         form.addRow("Piazzola foro passante:", self.field_cast_thru_pad)
-        form.addRow("Foro passante dal bordo:", self.field_cast_thru_offset)
+        form.addRow("Foro passante dal bordo (0 = auto):", self.field_cast_thru_offset)
+        form.addRow("Semi-foro dentro il bordo (0 = auto):", self.field_cast_hole_inset)
         form.addRow("Spessore PCB (3D):", self.field_cast_pcb)
         form.addRow("Rientro componenti (3D):", self.field_cast_inset)
         layout.addLayout(form)
@@ -2401,6 +2410,7 @@ class MainWindow(QMainWindow):
             thru_hole_drill=self.field_cast_thru_drill.value(),
             thru_pad_diameter=self.field_cast_thru_pad.value(),
             thru_hole_offset=self.field_cast_thru_offset.value(),
+            hole_inset=(self.field_cast_hole_inset.value() or None),
             pcb_thickness=self.field_cast_pcb.value(),
             component_inset=self.field_cast_inset.value(),
             # Volutamente NON il colore del corpo: il blocco di ripiego (senza

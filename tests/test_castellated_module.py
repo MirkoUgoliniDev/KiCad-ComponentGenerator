@@ -7,6 +7,7 @@ generatore a matrice non puo' rappresentare, perche' i due lati hanno
 passi diversi.
 """
 
+import math
 import os
 import sys
 
@@ -297,3 +298,59 @@ def test_a_module_without_thru_holes_keeps_one_cylinder_per_contact(monkeypatch,
     params = rs485_module()
     params.thru_hole_drill = 0
     assert len(_notches_for(params, monkeypatch, tmp_path)) == 8
+
+
+def test_the_two_holes_cannot_merge_into_one_keyhole(monkeypatch, tmp_path):
+    """@brief Due cilindri passanti restano distinti solo se gli assi distano
+    piu' della somma dei raggi.
+
+    Misurato sul solido generato prima di questa correzione: 44 pareti da
+    164,7 gradi invece di 44 fori chiusi, perche' gli assi distavano 0,624 mm
+    contro una somma dei raggi di 1,350. Non era un caso limite: con quei
+    valori si fondono sempre, su qualunque scheda.
+    """
+    params = rs485_module()
+    assert params.thru_hole_offset == 0, "il default si ricava, non e' un numero fisso"
+    gap = (params.thru_hole_centre_offset - params.half_hole_inset
+           - params.hole_diameter / 2 - params.thru_hole_drill / 2)
+    assert gap >= 0.2 - 1e-9
+
+    # Nessuna coppia di cilindri si tocca: e' l'invariante, e vale fra tutti,
+    # non solo fra il semi-foro e il suo foro.
+    notches = _notches_for(params, monkeypatch, tmp_path)
+    assert len(notches) == 2 * 8
+    for i, a in enumerate(notches):
+        for b in notches[i + 1:]:
+            distance = math.hypot(a["x"] - b["x"], a["y"] - b["y"])
+            assert distance > a["radius"] + b["radius"], (a, b, distance)
+
+
+@pytest.mark.parametrize("offset,expected", [
+    (1.27, True),    # il valore che generava il buco di serratura
+    (2.196, False),  # il minimo calcolato con i parametri predefiniti
+    (3.0, False),
+])
+def test_an_explicit_offset_that_would_merge_is_refused(offset, expected):
+    """Un numero scritto a mano viene rispettato, ma controllato."""
+    params = rs485_module()
+    params.body_width = 20.0
+    params.thru_hole_offset = offset
+    if expected:
+        with pytest.raises(ValueError, match="si toccano"):
+            params.validate()
+    else:
+        params.validate()
+
+
+def test_a_smaller_half_hole_lets_the_closed_hole_come_closer():
+    """Il minimo si RICAVA dal semi-foro scelto, non e' una quota fissa.
+
+    E' la differenza fra una regola e un numero tarato: cambiando il semi-foro
+    cambia da solo, e resta valido.
+    """
+    params = rs485_module()
+    wide = params.thru_hole_centre_offset
+    params.hole_diameter = 1.0
+    narrow = params.thru_hole_centre_offset
+    assert narrow < wide
+    assert narrow == pytest.approx(params.half_hole_inset + 0.5 + 0.5 + 0.2, abs=1e-3)

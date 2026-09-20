@@ -33,6 +33,14 @@ from typing import Dict, Iterator, List, NamedTuple, Optional, Sequence
 
 from ..core.footprint import Footprint, FpCircle, FpRect, FpText, Pad
 
+#: Parete di rame minima fra il semi-foro sul bordo e il foro passante. Due
+#: cilindri passanti sottratti allo stesso solido restano distinti solo se la
+#: distanza fra gli assi supera la somma dei raggi: sotto quella soglia non si
+#: ottengono due feature ma un unico buco di serratura aperto sul bordo, che e'
+#: esattamente il difetto trovato misurando il solido generato (44 pareti da
+#: 164,7 gradi invece di 44 fori chiusi).
+MIN_HOLE_WALL_MM = 0.2
+
 #: Lati del modulo su cui possono stare i contatti.
 EDGES = ("left", "right", "top", "bottom")
 
@@ -190,9 +198,11 @@ class CastellatedModuleParams:
     # e' il caso comune e si spegne mettendo il diametro a zero.
     thru_hole_drill: float = 1.0
     thru_pad_diameter: float = 1.7
-    # Distanza del centro del foro chiuso dal bordo del corpo. Il default
-    # tiene il foro appena dentro il semi-foro, senza che i due si fondano.
-    thru_hole_offset: float = 1.27
+    # Distanza del centro del foro chiuso dal bordo. A zero la calcola il
+    # programma: e' l'unico modo di essere sicuri che i due fori non si
+    # tocchino qualunque semi-foro si sia scelto. Un numero esplicito viene
+    # rispettato, ma controllato.
+    thru_hole_offset: float = 0.0
     # Il modulo non e' un blocco pieno: e' un PCB sottile con sopra i
     # componenti. Il modello 3D lo costruisce come due solidi, perche' un
     # parallelepipedo unico alto quanto il componente piu' alto non
@@ -212,6 +222,35 @@ class CastellatedModuleParams:
     margin: float = 0.25
 
     @property
+    def half_hole_inset(self) -> float:
+        """@brief Distanza dal bordo del centro del semi-foro, in mm.
+
+        @return Il valore dichiarato, oppure 0.76 raggi come da convenzione.
+        @note Un castellated e' un foro normale forato vicino al bordo e poi
+            tagliato: il centro sta DENTRO la scheda. La stessa formula era
+            scritta nel generatore 3D e non era visibile da qui, quindi la
+            validazione non poteva tenerne conto -- ed e' per questo che due
+            fori sovrapposti passavano senza che nessuno se ne accorgesse.
+        """
+        return (self.hole_inset if self.hole_inset is not None
+                else round(self.hole_diameter / 2 * 0.76, 3))
+
+    @property
+    def thru_hole_centre_offset(self) -> float:
+        """@brief Distanza dal bordo del centro del foro passante, in mm.
+
+        @return Il valore dichiarato, oppure il minimo che tiene separati i
+            due fori lasciando MIN_HOLE_WALL_MM di parete fra loro.
+        @note Non e' una quota scelta su una scheda: e' la distanza sotto la
+            quale le due cavita' si fondono, piu' una parete. Derivarla invece
+            di fissarla la rende giusta con qualunque semi-foro.
+        """
+        if self.thru_hole_offset > 0:
+            return self.thru_hole_offset
+        return round(self.half_hole_inset + self.hole_diameter / 2
+                     + self.thru_hole_drill / 2 + MIN_HOLE_WALL_MM, 3)
+
+    @property
     def has_thru_holes(self) -> bool:
         """@brief True quando ogni contatto porta anche un foro passante chiuso.
 
@@ -229,7 +268,7 @@ class CastellatedModuleParams:
         @return (x, y) in mm: il foro sta sulla stessa riga del contatto, ma
             spostato verso l'interno del corpo.
         """
-        offset = self.thru_hole_offset
+        offset = self.thru_hole_centre_offset
         if placement.edge == "left":
             return (-self.body_length / 2 + offset, placement.y)
         if placement.edge == "right":
@@ -273,17 +312,30 @@ class CastellatedModuleParams:
                 )
             # Un foro il cui bordo esce dal corpo non e' un foro chiuso: e' un
             # secondo semi-foro, e allora tanto vale non dichiararlo.
-            if self.thru_hole_offset < self.thru_pad_diameter / 2:
+            gap = (self.thru_hole_centre_offset - self.half_hole_inset
+                   - self.hole_diameter / 2 - self.thru_hole_drill / 2)
+            if gap < 0:
+                minimum = (self.half_hole_inset + self.hole_diameter / 2
+                           + self.thru_hole_drill / 2 + MIN_HOLE_WALL_MM)
                 raise ValueError(
-                    f"Il centro del foro passante dista {self.thru_hole_offset}mm dal bordo, "
+                    f"Il foro passante e il semi-foro si toccano: i loro assi distano "
+                    f"{self.thru_hole_centre_offset - self.half_hole_inset:.2f}mm ma la somma "
+                    f"dei raggi e' {self.hole_diameter / 2 + self.thru_hole_drill / 2:.2f}mm, "
+                    f"quindi si fonderebbero in un'unica cavita' aperta sul bordo invece di "
+                    f"restare due fori. Porta la distanza dal bordo ad almeno "
+                    f"{minimum:.2f}mm, oppure riduci il semi-foro."
+                )
+            if self.thru_hole_centre_offset < self.thru_pad_diameter / 2:
+                raise ValueError(
+                    f"Il centro del foro passante dista {self.thru_hole_centre_offset}mm dal bordo, "
                     f"meno del raggio della sua piazzola ({self.thru_pad_diameter / 2}mm): "
                     "resterebbe aperto sul bordo invece di essere chiuso."
                 )
             shortest = min(self.body_length, self.body_width)
-            if 2 * self.thru_hole_offset + self.thru_pad_diameter > shortest + 1e-6:
+            if 2 * self.thru_hole_centre_offset + self.thru_pad_diameter > shortest + 1e-6:
                 raise ValueError(
                     f"I fori passanti dei due lati opposti non stanno in {shortest}mm: "
-                    f"servono almeno {2 * self.thru_hole_offset + self.thru_pad_diameter:.2f}mm."
+                    f"servono almeno {2 * self.thru_hole_centre_offset + self.thru_pad_diameter:.2f}mm."
                 )
 
         seen_numbers: dict[str, str] = {}

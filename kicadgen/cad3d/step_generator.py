@@ -297,7 +297,7 @@ def generate_castellated_3d_model(
     # Il foro di un castellated non e' centrato sul bordo: e' un foro normale
     # forato vicino al bordo e poi tagliato via, quindi il suo centro sta
     # DENTRO la scheda di una frazione del diametro.
-    inset = params.hole_inset if params.hole_inset is not None else round(radius * 0.76, 3)
+    inset = params.half_hole_inset
 
     notches = []
     contacts = []

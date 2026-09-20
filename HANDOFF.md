@@ -1,3 +1,138 @@
+# 2026-09-20 (9) — i due fori si fondevano, e la revisione dei riquadri YOLO
+
+Branch `YOLO-SOLUTION`, sopra `3ae0f9e`. Quattro agenti di sola analisi lanciati
+sul run reale `generated/TEST/`; tre hanno consegnato, uno e' stato fermato
+dall'utente. Qui il primo esito integrato, piu' le decisioni prese.
+
+## 1. I fori castellated si fondevano: misurato, non ipotizzato
+
+Il checkpoint (6) dichiarava fatto il doppio aggancio. **Era sbagliato**, e la
+misura sul solido generato lo dimostra: aprendo `TEST.step` e contando le facce
+cilindriche con asse Z, i cilindri a rivoluzione completa di raggio 0,5 sono
+**zero**. I 44 fori vengono tagliati ma si fondono col semi-foro adiacente, e ne
+resta una parete che copre **164,7 gradi invece di 360**. Quello che si vede non
+e' "mezzo foro piu' foro chiuso": e' un **unico buco di serratura** profondo
+1,770 mm. La mesh dell'anteprima concorda col solido: l'anteprima era fedele, il
+difetto stava nella geometria richiesta.
+
+Il criterio e' elementare e non ammette casi limite: due cilindri passanti
+sottratti allo stesso solido restano distinti **solo se la distanza fra gli assi
+supera la somma dei raggi**. Coi valori in uso: `1,270 - 0,646 = 0,624` contro
+`0,850 + 0,500 = 1,350`. Violato di 0,726 mm, cioe' sempre.
+
+Perche' la validazione non se n'era accorta: controllava il foro rispetto al
+**bordo** e alla sua piazzola, mai rispetto al semi-foro. E `hole_inset` non era
+esposto da nessuna parte -- nessun campo, nessun chiamante -- quindi restava
+inchiodato a `0,76 x raggio` e la validazione non poteva nemmeno leggerlo,
+perche' la formula viveva dentro `step_generator`.
+
+**Correzione.** `half_hole_inset` e `thru_hole_centre_offset` sono ora proprieta'
+del parametro, quindi generatore 2D, generatore 3D e validazione leggono gli
+stessi numeri. La distanza del foro passante dal bordo **si ricava** invece di
+essere un numero fisso: `inset + raggio semi-foro + raggio foro + MIN_HOLE_WALL_MM`.
+Con i valori predefiniti viene **2,196 mm** invece di 1,27. Non e' una quota
+tarata su una scheda: cambiando il semi-foro cambia da sola. Uno zero significa
+"calcolalo tu"; un numero esplicito viene rispettato ma rifiutato se i due fori
+si toccherebbero, con un messaggio che dice di quanto distano gli assi, quanto
+vale la somma dei raggi e quale sarebbe il minimo. `hole_inset` ha finalmente un
+campo nel wizard, anch'esso con lo zero come "automatico".
+
+**Difetto latente segnalato e NON corretto**: il foro passante non ha
+metallizzazione ne' piazzola nel 3D (`step_generator` popola `contacts` solo per
+il semi-foro). Anche ora che sara' un foro vero, uscira' come foro nudo nel FR4.
+
+## 2. Zero agganci automatici: non e' una regressione, e' la risposta del modello
+
+Diff verificato fra i due run: il codice che decide `auto_matched` e'
+**bit-identico**. E' cambiata la risposta AI, perche' il bump di
+`PROMPT_VERSION` a 6 ha invalidato la cache e provocato una chiamata nuova:
+`package` da `"0603"` a `"0603 chip"`, e soprattutto `terminal_layout` da
+"end caps" a **"two end terminations left and right"**. La regex di
+`_tentative_endcap_family` pretende il lemma `end cap` e ha detto no a **28
+componenti su 28**; da li' scoperta di famiglia, `omitted`, `search_truncated`,
+e nessun aggancio possibile. Controfattuale eseguito: cambiando solo quella
+stringa, a codice fermo, si riproduce il prima e il dopo.
+
+**E' la terza volta che una proprieta' strutturale viene decisa leggendo prosa
+libera.** Allargare la regex sarebbe la stessa taratura per la terza volta.
+
+Regola da applicare (non ancora implementata): il conteggio e la completezza si
+leggono dai campi **gia' tipizzati** nello schema (`lead_count`,
+`lead_count_complete`, `lead_count_confidence`, `terminal_count`,
+`terminal_count_basis`), che su tutti i 28 chip erano corretti e coerenti; e la
+**morfologia del terminale** va chiesta come campo enumerato
+(`terminal_style` fra end_cap / gull_wing / j_lead / projecting_lead /
+leadless_pad / castellated / unknown), perche' due terminali visibili non
+distinguono un endcap da due reofori sporgenti ne' da un MELF.
+
+**Avvertenza importante**: tornare a 23 agganci NON e' l'obiettivo. Su questa
+scheda, per 11 chip su 25 la fotografia non separa 0603 da 0805 (scarti 17-25%,
+entrambi dentro il 30% di tolleranza) e **devono** restare in revisione.
+
+Incoerenza interna trovata a parte: lo shim che legge il conteggio dichiarato
+copre solo `[RC]_...`, mentre i LED sono nel catalogo endcap per la scoperta.
+Un LED a due terminali non puo' quindi mai agganciarsi da solo.
+
+## 3. La ricerca senza chiave, quantificata
+
+34 componenti su 45 troncati: **33** per `omitted` in `_family_paths`, **1** per
+il tetto dei 64 (U4, induttore, 382 nomi compatibili). Per J2/J3 si scandiscono
+**3332** percorsi e se ne scartano **3236** perche' non hanno **alcun** token
+dimensionale nel nome -- non perche' la quota sia lontana, come dice la nota.
+I 96 ammessi sono **tutti DSUB**, ammessi perche' il regex legge il **passo**
+come ingombro: `P2.77x2.54mm` su un connettore che misura davvero 30,80x18,34.
+
+Misura sulla libreria (7251 file): 884 contengono un token `NxMmm`, **112** lo
+hanno etichettato (`P` 100, `EP` 3, `Cylinder-` 7, 2 vendor) e vengono letti
+male; 772 sono ingombri veri.
+
+Criterio proposto: nella nomenclatura KiCad lo stem e' una sequenza di campi
+separati da `_`, e l'etichetta alfabetica iniziale dichiara **quale grandezza**
+il numero rappresenta. Un token `NxMmm` e' un ingombro **solo se costituisce
+l'intero campo**. Verificato: la regola non perde nessuno dei 772 hint corretti
+e rifiuta esattamente i 112 dubbi.
+
+Difetto gemello segnalato: l'hint viene confrontato **ignorando `basis`**, mentre
+il campo nudo KiCad dichiara il corpo e il bbox STEP il totale.
+
+**Decisione dell'utente**: quando i candidati determinati dagli attributi
+dichiarati superano il budget, **la ricerca non parte** e lo dichiara
+(`no_search_key`), invece di misurarne 64 a caso e riportare un troncamento.
+Conseguenza da aspettarsi: J2/J3 passano da 96 candidati a zero. Sono candidati
+falsi, quindi e' corretto, ma va detto prima o sembra un peggioramento.
+
+## 4. Deciso con l'utente, da fare: revisione dei riquadri YOLO
+
+**Un passo intermedio, prima della chiamata AI.** Oggi le 111 proposte -- 63
+sopra soglia e 48 nella coda di revisione, da 2265 rilevamenti grezzi su 30
+viste, 1238 soppressi dalla NMS -- finiscono tutte dentro la riconciliazione,
+che su questo run e' costata 1,00 USD. Potarle prima costa meno e da' al modello
+un problema piu' pulito.
+
+Deciso: la vista sta **prima della chiamata AI**, il che richiede di spezzare
+l'estrazione in due fasi (oggi e' una corsa unica dentro un worker). Deve
+permettere di **eliminare** un riquadro, **distinguere le deboli dalle sicure**,
+**aggiungere** un corpo mancato e **correggere la categoria**.
+
+Materiale gia' pronto: `photo_review_dialog.py` disegna i riquadri sovrapposti
+alla foto e permette sposta/modifica/elimina, ma arriva **dopo** la
+riconciliazione. Il disegno c'e', manca il momento.
+
+Nota da tenere presente: la categoria YOLO serve solo a restringere la famiglia
+di modelli; il package lo decide comunque la chiamata AI dopo.
+
+## 5. Verifica
+
+* Suite senza GUI: **2434 passati**, con i soliti 2 falliti e 1 errore di
+  raccolta identici alla baseline. Moduli GUI verdi.
+* Coppia positivo/negativo nuova: nessuna coppia di cilindri si tocca (invariante
+  geometrica su tutti, non solo sulla coppia); un offset esplicito di 1,27 viene
+  rifiutato e uno di 2,196 accettato; con un semi-foro piu' stretto il minimo
+  scende da solo, che e' la differenza fra una regola e un numero tarato.
+* **Non verificato**: nessun run end-to-end dopo questa correzione.
+
+---
+
 # 2026-09-20 (8) — il verso si misura sul solido: cosa funziona e cosa no
 
 Branch `YOLO-SOLUTION`, sopra `61728a6`. Il criterio del baricentro introdotto
