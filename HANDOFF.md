@@ -82,6 +82,23 @@ stretti contro uno largo). È un'altra indagine, non un'altra soglia.
   "Modello 3D"), tenendo il nome dello strumento dov'e' adesso.
 * Valutare nello stesso giro se numerare i passi ("Passo 1 di 3"): l'utente non
   si e' ancora pronunciato, ed e' stato offerto.
+* **Il costo compare durante la generazione FreeCAD e li' si legge male.**
+  Segnalato dall'utente guardando la fase 3D: sopra c'e' scritto "FreeCAD
+  (modellazione locale)" e sotto "Costo ultima analisi: 1,0084 USD", che
+  sembra il costo di FreeCAD. FreeCAD non costa nulla.
+
+  **Non e' un difetto vecchio: e' una conseguenza di aver aggiunto il nome
+  dello strumento.** Quella riga era stata messa apposta perche' durante la
+  generazione automatica la modale copre la label sotto il pulsante e il costo
+  passava senza essere visto (vedi `clear_cost`, che per questo NON sta in
+  `start()`); finche' la scheda era indistinta, "un'unica operazione in corso"
+  reggeva. Ora non regge piu'.
+
+  Proposta discussa con l'utente, da confermare: tenerlo visibile ma al passato
+  esplicito -- "Analisi AI conclusa: 1,0084 USD - 2 chiamate" -- invece di
+  farlo sparire, perche' a fine lavoro e' proprio il momento in cui lo si
+  cerca. L'alternativa e' nasconderlo quando lo strumento al lavoro non e' il
+  modello. **Decisione dell'utente non ancora presa.**
 
 Contesto di come ci si e' arrivati: l'utente ha chiesto se il primo passo non
 fosse YOLO, vedendo la modale mostrare una chiamata AI. **Non e' un difetto**:
