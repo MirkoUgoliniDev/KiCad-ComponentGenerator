@@ -680,6 +680,48 @@ def _readings(size):
         yield "total", size
 
 
+def declared_height(component):
+    """@brief Altezza del componente, solo quando e' una stima dichiarata.
+
+    @param component Componente come esce dall'inventario fotografico.
+    @return Altezza in mm, oppure None se non e' stata osservata.
+    @note Quando il modello non sa dire l'altezza, l'inventario scrive 1.0 con
+        provenienza `estimated_placeholder_not_measured`: e' un segnaposto per
+        far esistere un solido, non una misura, e usarlo per scegliere un
+        modello significherebbe scegliere sul nulla.
+    """
+    source = str(component.get("_height_source") or component.get("height_source") or "")
+    if not source or source in ("unknown", "estimated_placeholder_not_measured"):
+        return None
+    height = component.get("height_mm")
+    if isinstance(height, bool) or not isinstance(height, (int, float)):
+        return None
+    height = float(height)
+    return height if math.isfinite(height) and height > 0 else None
+
+
+def height_distance(dimensions, height_mm) -> Optional[float]:
+    """@brief Scarto relativo fra l'altezza di un solido e quella osservata.
+
+    @param dimensions Quote del candidato; la terza, se c'e', e' l'altezza.
+    @param height_mm Altezza osservata, o None.
+    @return Scarto relativo, oppure None quando il confronto non si puo' fare.
+    @note Serve solo a ordinare i candidati che la misura XY non distingue: un
+        corpo alto 1,3 mm e uno alto 3,2 mm possono avere lo stesso ingombro
+        visto dall'alto, e la fotografia dall'alto non li separa. Non esclude
+        nessuno, perche' l'altezza qui e' una stima visiva e non una quota.
+    """
+    if height_mm is None or len(dimensions) < 3:
+        return None
+    model = dimensions[2]
+    if isinstance(model, bool) or not isinstance(model, (int, float)):
+        return None
+    model = float(model)
+    if not math.isfinite(model) or model <= 0:
+        return None
+    return abs(model - height_mm) / height_mm
+
+
 def size_distance(model_size, length_mm, width_mm) -> Optional[float]:
     """@brief Return the smallest worst-axis relative error across valid readings.
 
@@ -1629,6 +1671,10 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dic
     sizes = model_sizes(paths, root)
     complete = not (result.get("search_truncated") or result.get("topology_incomplete"))
     lands = footprint_sizes(paths, root, log=note) if basis in ("unknown", "pads") else {}
+    # L'altezza non esclude nessun candidato -- e' una stima visiva, non una
+    # quota -- ma dentro la banda in cui la misura dall'alto non distingue
+    # due solidi resta l'unica grandezza che li separa davvero.
+    observed_height = declared_height(component)
     for path in paths:
         size = sizes.get(str(path))
         if size_distance(size, 1, 1) is None:
@@ -1652,7 +1698,9 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dic
             dimensions.append(float(value[2]))
         result["candidates"].append({
             "path": str(path), "package": path.stem, "dimensions_mm": dimensions,
-            "relative_xy_error": distance, "measurement_basis": label,
+            "relative_xy_error": distance,
+            "relative_z_error": height_distance(dimensions, observed_height),
+            "measurement_basis": label,
             "measurement_method": size.get("body_method", "provided_body") if label == "body" else "measured_total" if label == "total" else "footprint_copper",
             "family": _candidate_family_for_component(path, component), "status": "review_required",
             "reasons": ["Family and dimension discovery" if fallback else "Package name compatible", "No declared family or terminal conflict",
@@ -1674,7 +1722,19 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dic
         equivalent = item["relative_xy_error"] <= closest + NAME_TIEBREAK_MARGIN
         declared = _declared_count(Path(item["path"]))
         supported = bool(counts) and declared is not None and declared in counts
-        return (not equivalent, not (equivalent and supported), item["relative_xy_error"],
+        # Dentro la banda la fotografia dall'alto ha gia' detto tutto quello
+        # che sa: fra due solidi che le sembrano uguali decide l'altezza, che
+        # la vista dall'alto non misura affatto. Fuori dalla banda comanda
+        # ancora la misura, e un'altezza vicina non promuove mai un solido che
+        # la misura ha gia' scartato.
+        height_error = item.get("relative_z_error")
+        # Fuori dalla banda il criterio deve essere NEUTRO, altrimenti
+        # riordinerebbe candidati che la misura ha gia' separato solo perche'
+        # di uno si conosce l'altezza.
+        height_rank = ((height_error is None, height_error) if equivalent and height_error is not None
+                       else (True, 0.0) if equivalent else (False, 0.0))
+        return (not equivalent, not (equivalent and supported), height_rank,
+                item["relative_xy_error"],
                 _normalize(item["package"]) != _package_name(package), item["path"])
 
     result["candidates"].sort(key=_rank)

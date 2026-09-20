@@ -639,3 +639,44 @@ def test_production_inventory_sends_weak_bodies_to_global_review(setup, monkeypa
     assert weak['_yolo_origin'] == 'low_confidence_review' and weak['_uncertain']
     assert weak['kind'] == 'generic' and weak['package'] == ''
     assert weak['_global_inventory_status'] == 'validated_hypotheses'
+
+
+def test_a_clipped_edge_is_named_so_that_nobody_mistakes_it_for_a_measure(setup):
+    """@brief Un bordo sul confine della tessera non e' un bordo del corpo.
+
+    E' l'errore che ha rimpicciolito del 15% il modulo radio della scheda di
+    prova: tre frammenti tagliati sulla stessa cucitura «concordavano» su un
+    bordo che era solo il taglio della tessera, e chi li ha fusi lo ha preso
+    per buono. Chi riceve le proposte deve sapere quali lati sono artefatti.
+    """
+    session, _ = setup
+    # Un corpo tagliato dal bordo DESTRO della prima tessera (x=640).
+    outputs = [_raw(), _raw(([620, 320, 80, 60], 10, .9)), _raw(), _raw()]
+    session.raw = lambda index: outputs[index]
+    row = yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64,
+                                      include_review_candidates=True)[0]
+    assert row['_yolo_clipped_recovery'] and row['_yolo_clipped_sides'] == ['right']
+
+
+def test_an_edge_another_view_saw_beyond_is_not_clipped_any_more(setup):
+    """@brief Caso negativo: la ricomposizione non deve marcare cio' che e' misurato.
+
+    Se un secondo frammento vede oltre quella cucitura, quel bordo e' stato
+    osservato davvero e non va dichiarato artefatto: dichiararlo tale
+    inviterebbe chi sta a valle a ignorare una misura buona.
+    """
+    session, _ = setup
+    # Due frammenti dello stesso corpo: il primo tagliato dal bordo destro
+    # della sua tessera (x=640), il secondo tagliato a sinistra ma che il
+    # bordo destro lo VEDE, a x=700.
+    outputs = [_raw(), _raw(([570, 320, 140, 60], 10, .9)),
+               _raw(([170.5, 320, 339, 60], 10, .8)), _raw()]
+    session.raw = lambda index: outputs[index]
+    rows = yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64,
+                                       include_review_candidates=True)
+    merged = [row for row in rows if row['_yolo_clipped_recovery']]
+    assert len(merged) == 1, 'i due frammenti dovevano essere ricomposti in uno'
+    sides = merged[0]['_yolo_clipped_sides']
+    assert 'right' not in sides, 'quel bordo lo ha misurato il secondo frammento'
+    assert 'left' in sides, 'quello sinistro resta un taglio di tessera'
+    assert merged[0]['_box'][2] == pytest.approx(.7)

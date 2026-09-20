@@ -741,3 +741,34 @@ def test_fractions_are_left_alone_and_a_broken_answer_stays_broken():
     for broken in ([0, 0, 10**400, 1], [0, 0, float('nan'), 1], ['x', 0, 1, 1]):
         rows = _boxed(broken)
         assert inventory._rescale_boxes(rows, 2000, 1000, messages.append) is None
+
+
+def test_a_merged_box_that_throws_away_its_own_sources_is_reported():
+    """@brief La fusione che esclude meta' di una sorgente e' una contraddizione.
+
+    Sul modulo radio della scheda di prova la bbox fusa era il 47% dell'area
+    dell'unione delle proposte che dichiarava di fondere, e passava senza un
+    avviso perche' la validazione controlla solo la SOVRAPPOSIZIONE. Non si
+    corregge il rettangolo -- allargarlo all'unione importerebbe gli errori dei
+    frammenti -- ma non deve restare invisibile.
+    """
+    # La sorgente 2 sta quasi tutta fuori dalla bbox dichiarata.
+    boxes = {1: [.10, .10, .30, .30], 2: [.30, .10, .80, .30]}
+    row = dict(component_id='M1', source_candidate_ids=[1, 2], grouping_basis='assembly',
+               bbox=[.10, .10, .35, .30], bbox_basis='body', rotation_deg=None,
+               **{'class': 'rf_module'}, package='', marking='', terminal_layout='',
+               terminal_count=None, lead_count=None, lead_count_complete=False,
+               lead_count_confidence='low', height_mm=None, height_source='unknown',
+               confidence='medium', evidence='one shielded assembly',
+               presence_confidence='high', class_confidence='medium', asymmetry_landmark=None)
+    data = dict(components=[row], uncertainties=[], candidate_decisions=[
+        dict(candidate_id=i, status='merge', component_id='M1', reason='fragment',
+             rejection_category=None) for i in (1, 2)])
+    _, _, errors = inventory._validate(data, {1, 2}, boxes)
+    assert any('excludes most of' in message and '[2]' in message for message in errors)
+
+    # Caso negativo: la stessa fusione che contiene le sue sorgenti non segnala
+    # nulla, e un pezzo che sporge un po' resta accettabile.
+    data['components'][0]['bbox'] = [.10, .08, .82, .32]
+    _, _, clean = inventory._validate(data, {1, 2}, boxes)
+    assert not [message for message in clean if 'excludes most of' in message]

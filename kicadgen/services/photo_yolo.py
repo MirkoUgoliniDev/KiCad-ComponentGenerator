@@ -260,7 +260,17 @@ def _recover_clipped(retained, fragments):
         best = max(group, key=lambda row: row["confidence"])
         box = [min(row["box"][0] for row in group), min(row["box"][1] for row in group),
                max(row["box"][2] for row in group), max(row["box"][3] for row in group)]
+        # Dopo l'unione un lato resta artificiale solo se TUTTI i frammenti che
+        # lo toccano erano tagliati li': se un altro pezzo vede oltre, quel
+        # bordo e' stato misurato davvero.
+        outer = {'left': box[0], 'top': box[1], 'right': box[2], 'bottom': box[3]}
+        index_of = {'left': 0, 'top': 1, 'right': 2, 'bottom': 3}
+        still_clipped = [side for side in outer
+                         if all(side in row.get('clipped_sides', ())
+                                for row in group
+                                if row['box'][index_of[side]] == outer[side])]
         recovered.append(dict(best, box=box, clipped_by_tile=True,
+                              clipped_sides=still_clipped,
                               recovered_from=[row["proposal_id"] for row in group],
                               rejection=(None if best["confidence"] >= _CONFIDENCE
                                          else "below_confidence")))
@@ -295,9 +305,16 @@ def _proposals(raw, bounds, image_size, transform, view, np):
         cx, cy, bw, bh = map(float, prediction[:4])
         local = [(cx - bw / 2 - left) / ratio, (cy - bh / 2 - top) / ratio,
                  (cx + bw / 2 - left) / ratio, (cy + bh / 2 - top) / ratio]
-        cut = ((x > 0 and local[0] <= 1) or (y > 0 and local[1] <= 1)
-               or (x1 < width and local[2] >= x1 - x - 1)
-               or (y1 < height and local[3] >= y1 - y - 1))
+        # Quali lati poggiano sul CONFINE DELLA TESSERA e non sul corpo: sono
+        # artefatti del ritaglio, non bordi misurati, e chi li riceve deve
+        # saperlo. Un bordo interno della tessera resta escluso dal conteggio
+        # quando coincide con il bordo dell'immagine, che invece e' reale.
+        clipped_sides = [name for name, touching in (
+            ('left', x > 0 and local[0] <= 1),
+            ('top', y > 0 and local[1] <= 1),
+            ('right', x1 < width and local[2] >= x1 - x - 1),
+            ('bottom', y1 < height and local[3] >= y1 - y - 1)) if touching]
+        cut = bool(clipped_sides)
         # Clip letterbox padding to this view's actual image, then to the board.
         # Interior boundary fragments remain excluded even after clipping.
         box = [max(x, min(x1, local[0] + x)), max(y, min(y1, local[1] + y)),
@@ -319,6 +336,7 @@ def _proposals(raw, bounds, image_size, transform, view, np):
                      "best_body_class": _CLASSES[body_id], "best_body_confidence": body_confidence,
                      "class_scores": [float(score) for score in scores[index]],
                      "class_ambiguous": ambiguous_body, "clipped_by_tile": bool(cut),
+                     "clipped_sides": clipped_sides,
                      "rejection": reason})
     return rows, invalid_count
 
@@ -476,6 +494,8 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
             # L'ingombro di un corpo ricomposto e' troncato dal bordo che lo ha
             # tagliato: e' un'ipotesi da rivedere, non una misura.
             "_yolo_clipped_recovery": bool(row.get("recovered_from")),
+            # Lati che poggiano sul confine di una tessera: non sono misure.
+            "_yolo_clipped_sides": list(row.get("clipped_sides") or ()),
             "_yolo_origin": ("low_confidence_review" if row["rejection"] == "below_confidence"
                              else "operating_threshold"),
             "_yolo_review_only": row["rejection"] == "below_confidence",

@@ -54,6 +54,11 @@ Add real bodies missed by the detector. For fragments of ONE assembly retain ONE
 COMPLETE assembly bbox and link ALL fragments to its component_id with merge.
 Never reject a fragment as 'already represented' without a retained parent:
 use merge. source_candidate_ids must exactly match candidate_decisions links.
+detector_metadata may list clipped_sides: those edges lie on the local
+detector's tile boundary, NOT on the body. They are an artifact of how the
+photograph was cut into views, so several fragments agreeing on such an edge
+agree on nothing. Never adopt a clipped edge as a component boundary: read that
+side from the photograph, and expect the true edge to lie beyond it.
 Every source must spatially overlap its retained parent. Never collect unrelated
 or unresolved proposals into a bounding rectangle merely to account for their IDs.
 An incorrect source ID does not erase an independently visible body: retain that
@@ -343,6 +348,14 @@ def _rescale_boxes(rows, width, height, log):
     return None
 
 
+def _covered(inner, outer):
+    """@brief Frazione del primo rettangolo che sta dentro il secondo."""
+    wide = max(0.0, min(inner[2], outer[2]) - max(inner[0], outer[0]))
+    high = max(0.0, min(inner[3], outer[3]) - max(inner[1], outer[1]))
+    area = (inner[2] - inner[0]) * (inner[3] - inner[1])
+    return (wide * high / area) if area > 0 else 0.0
+
+
 def _component_valid(row, known):
     from .photo_yolo_review import _valid_box
     if not isinstance(row, dict):
@@ -490,6 +503,15 @@ def _validate_geometry(rows, safe, boxes):
         #                 may be retained on that basis
         outside = [i for i in sources if not overlaps(row['bbox'], boxes[i])]
         backed = [i for i in sources if i not in outside]
+        # Una fusione che lascia fuori la maggior parte di una sorgente e' una
+        # contraddizione dichiarata: il modello dice di aver fuso quel pezzo e
+        # poi ne esclude piu' di meta'. Non si corregge la bbox -- allargarla
+        # all'unione importerebbe gli errori dei frammenti -- ma non deve
+        # passare in silenzio.
+        dropped = [i for i in backed if _covered(boxes[i], row['bbox']) < .5]
+        if dropped:
+            errors.append(f"component {row['component_id']}: merged box excludes most of "
+                          f"sources {sorted(dropped)}")
         visible_body = (row.get('presence_confidence') == 'high' and
                         row['bbox_basis'] != 'unknown' and basis != 'unresolved')
         # Presence declared above 'low' with an observed housing. Same bar the

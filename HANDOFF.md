@@ -1,3 +1,82 @@
+# 2026-09-20 (14) — il modulo ESP32: catena chiusa e tre correzioni
+
+Tre agenti in parallelo (misura, criterio di scelta, libreria) hanno chiuso la
+catena. Il modulo reale e' **18,0 x 19,2 mm**; misurando i bordi sulla foto
+calibrata viene **19,23 x 18,08** (0,2% dal nominale: la fotografia e'
+perfetta). La pipeline ha consegnato al matcher **18,08 x 16,33**.
+
+## La catena, misurata
+
+1. Il bordo destro vero del modulo sta a **x = 0,9183**. La pipeline ha usato
+   **0,872**, che e' il **confine della tessera YOLO** che parte a 2400 px
+   (2400+640 = 3040 px → 0,8718). Deficit **161 px = 2,93 mm = 15,2%**.
+2. YOLO ha visto il modulo intero **una volta sola** (passata d'insieme) e lo
+   ha sovrastimato a 24,4 mm perche' l'**intaglio dell'antenna**, chiaro e
+   uniforme, si fonde con lo schermo metallico. Tutto il resto sono frammenti
+   tagliati sulle cuciture.
+3. L'AI ha scartato entrambe le informazioni corrette e ha preso il bordo su
+   cui **tre frammenti "concordano"** -- un artefatto del nostro tiling.
+4. La validazione non se ne accorge: controlla la **sovrapposizione** con le
+   sorgenti, mai il contenimento. La bbox finale e' il **46,7% dell'area
+   dell'unione** delle proposte che dichiara di fondere.
+5. Con 18,08 x 16,33 il matcher sceglie ZETA-433 (16,5 x 16,0 x 1,3, errore
+   0,0876) invece di ESP32-WROOM-32U (18,0 x 19,2 x 3,2, errore 0,1023). Con
+   il bordo giusto il WROOM vincerebbe con **0,4%**.
+
+## Tre correzioni
+
+**a. I bordi artificiali hanno un nome.** Ogni proposta porta ora
+`_yolo_clipped_sides`: quali lati poggiano sul confine di una tessera. Dopo la
+ricomposizione un lato resta artificiale **solo se tutti i frammenti che lo
+toccano erano tagliati li'**: se un altro pezzo vede oltre, quel bordo e' stato
+misurato e non va dichiarato falso. Il prompt della riconciliazione dice
+esplicitamente che quei lati non sono misure e che **piu' frammenti d'accordo
+su un bordo tagliato non concordano su nulla**.
+
+**b. Una fusione che butta via le sue sorgenti viene segnalata.** Se la bbox
+fusa esclude piu' di meta' dell'area di una sorgente che dichiara di fondere,
+e' una contraddizione e finisce negli errori. **Non** si allarga la bbox
+all'unione: importerebbe l'errore dei frammenti (l'unione qui faceva 27 x 23
+mm, peggio del vero).
+
+**c. L'altezza entra nella scelta, ma solo dentro la banda.** La vista
+dall'alto non misura l'altezza: fra due solidi che le sembrano uguali (entro
+`NAME_TIEBREAK_MARGIN`) decide `relative_z_error`. Non esclude nessuno, perche'
+l'altezza qui e' una stima visiva; fuori dalla banda il criterio e' **neutro**,
+altrimenti riordinerebbe candidati che la misura ha gia' separato. Un'altezza
+segnaposto (`estimated_placeholder_not_measured`, il valore 1.0 che l'inventario
+scrive quando il modello non sa dire) **non decide nulla**: sceglierebbe sul
+nulla, e per giunta premierebbe il solido piatto.
+
+## Verifica
+
+Test nuovi, tutti con coppia positivo/negativo:
+- il lato tagliato e' nominato; un lato che un'altra vista ha misurato **non**
+  viene piu' dichiarato artefatto;
+- la fusione che esclude meta' di una sorgente segnala, quella che le contiene no;
+- **con i numeri veri della corsa** (18,08 x 16,33, scarti 0,0876 e 0,1023,
+  distanza pari al 29% del margine) l'altezza ribalta la scelta; il test e'
+  stato **verificato nei due versi**: senza la correzione fallisce. Un
+  segnaposto non decide; fuori dalla banda l'altezza non promuove nulla.
+
+Suite file per file: **2757 passati, 6 falliti, 8 saltati**; i 6 sono i noti
+preesistenti (2 `test_board_pipeline` castellated, 3 `test_preview_component_picking`
+che vogliono pyvista vero, 1 `test_system_dependencies`).
+
+## Aperto su questo fronte
+
+* Il ritaglio **non e' allineato alla scheda**: il passo delle piazzole misura
+  139,5 px in alto e 145,3 in basso (**4% di prospettiva residua**), e in basso
+  e a sinistra la scheda e' troncata (USB-C e fila inferiore). Non e' la causa
+  del 15%, ma e' un errore di scala che si porta dietro tutto il resto.
+* `provisional_matched` viene trattato come `auto_matched` in `attach_models`:
+  il solido finisce nello STEP anche quando il codice ha dichiarato di non
+  saper distinguere. La via del "pareggio" guarda **solo i primi due**
+  candidati della lista: nel caso reale il modello giusto era terzo e non ha
+  mai partecipato al confronto che ha deciso. Segnalato, non corretto.
+* Le marcature vengono stampate sul 3D mentre la strategia prevede volumi
+  generici senza scritte.
+
 # 2026-09-20 (13) — la striscia del contatto, non il suo centro
 
 Prima corsa con il filtro dei contatti: **22 proposte tolte su 44 contatti**,

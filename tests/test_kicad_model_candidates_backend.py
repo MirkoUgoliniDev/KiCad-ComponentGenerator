@@ -639,3 +639,71 @@ def test_dominance_over_models_nobody_measured_is_not_dominance(library, monkeyp
     assert unreadable.exists()
     assert report["status"] == "review_required"
     assert report["selected_path"] is None
+
+
+def _module(**changes):
+    """@brief Un modulo radio come lo consegna l'inventario fotografico."""
+    row = dict(kind="rf_module", package="shielded module with attached coaxial jack",
+               length_mm=18.08, width_mm=16.33, bbox_basis="body",
+               presence_confidence="high", class_confidence="medium")
+    row.update(changes)
+    return row
+
+
+def test_between_two_solids_the_photo_cannot_separate_the_height_decides(library):
+    """@brief La vista dall'alto non misura l'altezza: dentro la banda decide lei.
+
+    Numeri della corsa vera: modulo alto ~3,1 mm, rettangolo fotografico
+    18,08 x 16,33. Sull'ingombro il solido piatto sbaglia 0,0876 e quello alto
+    0,1023 -- distanza 0,0146, cioe' il 29% del margine entro cui il codice
+    stesso dichiara di non saper distinguere. Dentro quella banda vinceva il
+    piatto per una frazione di percento; l'altezza, che la vista dall'alto non
+    misura affatto, li separa di venti volte tanto.
+    """
+    root, add, _ = library
+    flat = add("RF_Module", "FLAT-RADIO_16.5x16.0mm",
+               {"body": [16.5, 16.0, 1.3], "total": [16.5, 16.0, 1.3]})
+    tall = add("RF_Module", "TALL-MODULE_18.0x19.2mm",
+               {"body": [18.0, 19.2, 3.2], "total": [18.0, 19.2, 3.2]})
+    report = km.model_candidates(
+        _module(height_mm=3.1, height_source="visual_estimate"), library=root)
+    order = [item["package"] for item in report["candidates"]]
+    xy = {item["package"]: item["relative_xy_error"] for item in report["candidates"]}
+    assert xy["FLAT-RADIO_16.5x16.0mm"] < xy["TALL-MODULE_18.0x19.2mm"]
+    assert xy["TALL-MODULE_18.0x19.2mm"] - xy["FLAT-RADIO_16.5x16.0mm"] < km.NAME_TIEBREAK_MARGIN
+    errors = {item["package"]: item["relative_z_error"] for item in report["candidates"]}
+    assert errors["TALL-MODULE_18.0x19.2mm"] == pytest.approx(.0323, abs=1e-3)
+    assert errors["FLAT-RADIO_16.5x16.0mm"] == pytest.approx(.5806, abs=1e-3)
+    assert order[:2] == ["TALL-MODULE_18.0x19.2mm", "FLAT-RADIO_16.5x16.0mm"]
+    assert flat.exists() and tall.exists()
+
+
+def test_a_placeholder_height_decides_nothing(library):
+    """@brief Caso negativo: senza un'altezza osservata l'ordine non cambia.
+
+    Quando il modello non sa dire l'altezza, l'inventario scrive 1.0 con
+    provenienza di segnaposto. Usarla vorrebbe dire scegliere sul nulla -- e
+    premierebbe proprio il solido piatto.
+    """
+    root, add, _ = library
+    add("RF_Module", "FLAT-RADIO_16.5x16.0mm",
+        {"body": [16.5, 16.0, 1.3], "total": [16.5, 16.0, 1.3]})
+    add("RF_Module", "TALL-MODULE_18.0x19.2mm",
+        {"body": [18.0, 19.2, 3.2], "total": [18.0, 19.2, 3.2]})
+    report = km.model_candidates(
+        _module(height_mm=1.0, _height_source="estimated_placeholder_not_measured"), library=root)
+    assert all(item["relative_z_error"] is None for item in report["candidates"])
+    # Resta l'ordine della sola misura dall'alto: il piu' vicino per ingombro.
+    best = min(report["candidates"], key=lambda item: item["relative_xy_error"])
+    assert report["candidates"][0]["package"] == best["package"]
+
+
+def test_the_height_never_promotes_a_solid_the_measurement_discarded(library):
+    """@brief Fuori dalla banda comanda ancora l'ingombro."""
+    root, add, _ = library
+    add("RF_Module", "NEAR-BUT-UNKNOWN-Z_19.0x18.0mm", {"body": [19.0, 18.0], "total": [19.0, 18.0]})
+    add("RF_Module", "FAR-BUT-RIGHT-Z_22.5x21.0mm",
+        {"body": [22.5, 21.0, 3.1], "total": [22.5, 21.0, 3.1]})
+    report = km.model_candidates(
+        _module(height_mm=3.1, height_source="visual_estimate"), library=root)
+    assert report["candidates"][0]["package"] == "NEAR-BUT-UNKNOWN-Z_19.0x18.0mm"
