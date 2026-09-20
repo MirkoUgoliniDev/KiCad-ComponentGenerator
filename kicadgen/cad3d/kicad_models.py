@@ -1424,6 +1424,10 @@ def _synchronize_preview_variants(components, note) -> None:
     """
     groups = {}
     for component in components or []:
+        # Stesso contratto di attach_models: una voce malformata non deve
+        # fermare le altre. Qui arriva la lista grezza, non quella filtrata.
+        if not isinstance(component, dict):
+            continue
         report = component.get("model_match") or {}
         if (str(component.get("kind") or "").lower() != "switch"
                 or report.get("status") != "provisional_matched"
@@ -1679,7 +1683,13 @@ def attach_models(components, log=None, library: Optional[Path] = None) -> int:
     for component in components or []:
         if not isinstance(component, dict):
             continue
-        component["render_3d"] = True
+        # Il ripristino a True ripulisce lo stato calcolato nella corsa
+        # precedente, non la scelta dell'utente: render_3d_override e' l'unico
+        # canale esplicito e vince in entrambe le direzioni, sia per togliere
+        # dal solido un falso positivo del rilevatore sia per rimettere un
+        # pezzo che l'automatismo aveva omesso.
+        override = component.get("render_3d_override")
+        component["render_3d"] = True if override is None else bool(override)
         component.pop("model_path", None)
         report = model_candidates(component, library=library, log=note)
         component["model_match"] = report
@@ -1707,7 +1717,7 @@ def attach_models(components, log=None, library: Optional[Path] = None) -> int:
             resolved += 1
         else:
             component["color_hex"] = "#FF00FF"
-            if _is_yolo_only_hypothesis(component):
+            if _is_yolo_only_hypothesis(component) and override is not True:
                 # Keep detector-only hypotheses in the JSON/review evidence,
                 # but never turn an unclassified proposal into a misleading
                 # magenta CAD body which looks like a real component.

@@ -44,6 +44,11 @@ def save_choices(directory, photo_png, components):
                 'model_rotation_deg': c.get('model_rotation_deg'),
                 'render_3d': c.get('render_3d', True),
                 'rotation_deg': c.get('rotation_deg'),
+                # Scelte dirette dell'utente sul solido, distinte da
+                # render_3d/model_rotation_deg che sopra sono l'esito
+                # calcolato: solo queste vengono riapplicate al rientro.
+                'render_3d_override': c.get('render_3d_override'),
+                'model_rotation_delta_deg': c.get('model_rotation_delta_deg') or 0,
             } for c in components]}
     target = directory / FILENAME
     fd, temporary = tempfile.mkstemp(prefix='.model-choices-', suffix='.json', dir=directory)
@@ -88,6 +93,15 @@ def restore_choices(directory, photo_png, components):
             component['model_selection'] = deepcopy(selection)
         if isinstance(record.get('model_match'), dict):
             component['model_match'] = deepcopy(record['model_match'])
+        # Esclusione e rotazione manuali: sono scelte dell'utente come la
+        # selezione del modello, quindi devono sopravvivere alla rigenerazione
+        # esattamente come quella. Un valore assente o di tipo sbagliato non
+        # sovrascrive nulla: si torna al comportamento automatico.
+        if isinstance(record.get('render_3d_override'), bool):
+            component['render_3d_override'] = record['render_3d_override']
+        delta = record.get('model_rotation_delta_deg')
+        if isinstance(delta, (int, float)) and not isinstance(delta, bool):
+            component['model_rotation_delta_deg'] = float(delta)
     return result
 
 

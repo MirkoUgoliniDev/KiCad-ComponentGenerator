@@ -122,3 +122,43 @@ def test_render_maps_all_component_subparts_but_not_board_or_pins(tmp_path, meta
     viewer._reset = lambda: viewer._component_actors.clear()
     Preview3DVtk.render_mesh(viewer, path)
     assert viewer._component_actors == expected
+
+
+# ── menu contestuale: individuare la riga sotto il cursore ───────────
+
+def _viewer_at(hit, *, height=400, ratio=1.0, mapping=None):
+    picked = []
+    return picked, SimpleNamespace(
+        _component_actors=mapping if mapping is not None else {'body': 7},
+        height=lambda: height,
+        devicePixelRatioF=lambda: ratio,
+        _component_actor_at=lambda x, y: (picked.append((x, y)) or hit))
+
+
+def test_the_context_menu_looks_up_the_row_under_the_cursor():
+    picked, viewer = _viewer_at(_actor('body'))
+    assert Preview3DVtk._component_row_at_widget_point(viewer, 120, 50) == 7
+    # Qt conta dall'alto, VTK dal basso: senza il ribaltamento si prenderebbe
+    # il componente speculare rispetto al centro della vista.
+    assert picked == [(120, 350)]
+
+
+def test_a_high_density_screen_scales_the_pick_point():
+    picked, viewer = _viewer_at(_actor('body'), ratio=2.0)
+    Preview3DVtk._component_row_at_widget_point(viewer, 120, 50)
+    assert picked == [(240, 700)]
+
+
+def test_an_unusable_scale_factor_falls_back_to_one_to_one():
+    picked, viewer = _viewer_at(_actor('body'))
+    viewer.devicePixelRatioF = lambda: None
+    assert Preview3DVtk._component_row_at_widget_point(viewer, 120, 50) == 7
+    assert picked == [(120, 350)]
+
+
+def test_empty_space_and_unknown_actors_open_no_component_menu():
+    """Il negativo: fuori dai componenti il tasto destro resta quello di VTK."""
+    _, empty = _viewer_at(None)
+    assert Preview3DVtk._component_row_at_widget_point(empty, 1, 1) is None
+    _, foreign = _viewer_at(_actor('pcb'))
+    assert Preview3DVtk._component_row_at_widget_point(foreign, 1, 1) is None

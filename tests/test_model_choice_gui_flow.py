@@ -90,3 +90,33 @@ def test_cancel_candidate_dialog_keeps_import_failure(monkeypatch):
     editor._show_model_candidates(item,deepcopy(item.component),{'status':'review_required','candidates':[]})
     assert editor.get_components()==source
     editor.reject()
+
+
+def _castellated_payload(monkeypatch, tmp_path, component):
+    """Payload consegnato a FreeCAD per un modulo castellated."""
+    from kicadgen.cad3d import kicad_models
+    monkeypatch.setattr(kicad_models, 'attach_models', lambda *a, **k: 0)
+    captured = {}
+    monkeypatch.setattr(step, '_run_freecad',
+                        lambda *a, **k: captured.update(k['extra_payload']) or {'warnings': []})
+    params = CastellatedModuleParams(name='test', body_length=20, body_width=10,
+        sides=[CastellatedSide('top', 2, 2.54, 1)], components=[component])
+    step.generate_castellated_3d_model(params, Body3DParams(20, 10, 1.6), tmp_path)
+    return captured['components'][0]
+
+
+def test_castellated_payload_carries_the_manual_exclusion_and_rotation(monkeypatch, tmp_path):
+    """Il caso reale e' un modulo castellated: le scelte del menu contestuale
+    devono arrivare a FreeCAD da questo costruttore, non solo dall'altro."""
+    row = _castellated_payload(monkeypatch, tmp_path, ComponentBox(
+        0, 0, 2, 1, 1, render_3d_override=False, model_rotation_delta_deg=90.0))
+    assert row['render_3d'] is False
+    assert row['render_3d_override'] is False
+    assert row['model_rotation_delta_deg'] == 90.0
+
+
+def test_without_manual_choices_the_payload_stays_automatic(monkeypatch, tmp_path):
+    """Il negativo: nessuna chiave inventata quando l'utente non ha scelto."""
+    row = _castellated_payload(monkeypatch, tmp_path, ComponentBox(0, 0, 2, 1, 1))
+    assert 'render_3d_override' not in row
+    assert 'model_rotation_delta_deg' not in row

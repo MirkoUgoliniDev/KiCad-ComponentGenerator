@@ -233,3 +233,41 @@ def test_without_the_library_nothing_is_attached_and_it_is_said(monkeypatch):
     assert km.attach_models([{"package": "R_0402", "length_mm": 1, "width_mm": 0.5}],
                             log=messages.append) == 0
     assert any("non trovata" in m for m in messages)
+
+
+# ── scelta esplicita dell'utente sul solido ───────────────────────────
+
+@pytest.fixture
+def no_library(monkeypatch):
+    """Senza libreria nessun componente si risolve: resta solo la scelta."""
+    monkeypatch.setattr(km, "find_library", lambda: None)
+
+
+def test_an_explicit_exclusion_survives_the_next_attachment(no_library):
+    """Togliere un falso positivo dal 3D e' una scelta, non stato calcolato.
+
+    attach_models riparte da capo a ogni rigenerazione: senza questo il
+    componente eliminato tornerebbe al primo "Rigenera modello 3D".
+    """
+    component = {"package": "R_0402", "length_mm": 1.0, "width_mm": 0.5,
+                 "render_3d_override": False}
+    km.attach_models([component])
+    assert component["render_3d"] is False
+
+
+def test_without_an_explicit_choice_visibility_stays_automatic(no_library):
+    """Il negativo: nessuna scelta dell'utente, decide l'automatismo."""
+    component = {"package": "R_0402", "length_mm": 1.0, "width_mm": 0.5}
+    km.attach_models([component])
+    assert component["render_3d"] is True
+
+
+def test_an_explicit_inclusion_overrides_the_detector_only_omission(no_library):
+    """La scelta vale in entrambi i versi, non solo per nascondere."""
+    omitted = {"name": "YOLO candidate 12", "package": "", "length_mm": 1.0, "width_mm": 0.5}
+    km.attach_models([omitted])
+    assert omitted["render_3d"] is False, "ipotesi del solo rilevatore: fuori dal 3D"
+
+    forced = dict(omitted, render_3d_override=True)
+    km.attach_models([forced])
+    assert forced["render_3d"] is True

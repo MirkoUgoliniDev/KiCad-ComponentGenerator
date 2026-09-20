@@ -198,6 +198,12 @@ DEFAULT_TRANSLATIONS = {
     "ui:Assegna un file a ogni ruolo, oppure indica “Non disponibile”.": {"en": "Assign one file to each role, or choose ‘Not available’.", "it": "Assegna un file a ogni ruolo, oppure indica “Non disponibile”.", "fr": "Attribuez un fichier à chaque rôle ou choisissez « Non disponible ».", "de": "Weisen Sie jeder Rolle eine Datei zu oder wählen Sie „Nicht verfügbar“."},
     "ui:Pinout / disposizione contatti": {"en": "Pinout / contact layout", "it": "Pinout / disposizione contatti", "fr": "Brochage / disposition des contacts", "de": "Pinbelegung / Kontaktanordnung"},
     "ui:Vista superiore": {"en": "Top view", "it": "Vista superiore", "fr": "Vue de dessus", "de": "Draufsicht"},
+    # Menu contestuale della vista 3D (tasto destro su un componente).
+    "ui:Elimina dal modello 3D (falso positivo)": {"en": "Remove from the 3D model (false positive)", "it": "Elimina dal modello 3D (falso positivo)", "fr": "Retirer du modèle 3D (faux positif)", "de": "Aus dem 3D-Modell entfernen (Fehlerkennung)"},
+    "ui:Rimetti nel modello 3D": {"en": "Put back into the 3D model", "it": "Rimetti nel modello 3D", "fr": "Remettre dans le modèle 3D", "de": "Wieder ins 3D-Modell aufnehmen"},
+    "ui:Ruota il solido": {"en": "Rotate the solid", "it": "Ruota il solido", "fr": "Faire pivoter le solide", "de": "Körper drehen"},
+    "ui:Azzera la correzione": {"en": "Clear the correction", "it": "Azzera la correzione", "fr": "Annuler la correction", "de": "Korrektur zurücksetzen"},
+    "ui:Cambia modello KiCad...": {"en": "Change KiCad model...", "it": "Cambia modello KiCad...", "fr": "Changer de modèle KiCad…", "de": "KiCad-Modell wechseln …"},
     "ui:documento caricato; non richiede calibrazione.": {"en": "document loaded; no calibration needed.", "it": "documento caricato; non richiede calibrazione.", "fr": "document chargé ; aucun calibrage requis.", "de": "Dokument geladen; keine Kalibrierung nötig."},
     "ui:utilizzabile:": {"en": "usable:", "it": "utilizzabile:", "fr": "utilisable :", "de": "nutzbar:"},
     "ui:calibrata, ma grossolana:": {"en": "calibrated, but coarse:", "it": "calibrata, ma grossolana:", "fr": "calibrée, mais grossière :", "de": "kalibriert, aber grob:"},

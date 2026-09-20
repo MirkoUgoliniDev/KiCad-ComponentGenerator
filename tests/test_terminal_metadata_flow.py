@@ -275,9 +275,16 @@ def test_terminal_worker_run_uses_snapshot_and_emits_result_or_error(
     assert observations[0][:3] == (b"photo-bytes", expected_snapshot, "mock-model")
     assert calls == [{"model": "mock-model"}]
     assert progress[0] == "mock terminal progress"
-    assert len(progress) == 3
-    assert progress[1].startswith("AI_CALL_START ")
-    assert progress[2].startswith("AI_CALL_FAILURE " if fails else "AI_CALL_END ")
+    # Il ciclo di vita si verifica per posizione relativa, non per conteggio:
+    # l'audit dei prompt e' un canale facoltativo e puo' aggiungere righe in
+    # mezzo senza che questo sia una regressione.
+    closing = "AI_CALL_FAILURE " if fails else "AI_CALL_END "
+    started = [i for i, m in enumerate(progress) if m.startswith("AI_CALL_START ")]
+    closed = [i for i, m in enumerate(progress) if m.startswith(closing)]
+    assert len(started) == 1 and len(closed) == 1 and started[0] < closed[0]
+    assert started[0] == 1, "il ciclo di vita apre subito dopo il progresso applicativo"
+    assert closed[0] == len(progress) - 1, "nulla dopo la chiusura della chiamata"
+    assert all(m.startswith("AI_CALL_") for m in progress[started[0]:closed[0]])
     assert worker.components == expected_snapshot
     if fails:
         assert not done

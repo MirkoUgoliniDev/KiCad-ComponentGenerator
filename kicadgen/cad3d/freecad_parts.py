@@ -709,7 +709,12 @@ def _library_model(component, cx, cy, z0, color):
                                 (90, reference.YLength, reference.XLength)):
                 choices.append((abs(x / length - 1) + abs(y / width - 1), angle, reference))
         _, inferred, reference = min(choices, key=lambda choice: choice[0])
-        angle = float(component.get("model_rotation_deg", inferred))
+        # La correzione manuale e' un DELTA, non un angolo assoluto: l'angolo
+        # di partenza lo deduce qui FreeCAD confrontando il modello con la
+        # misura, e l'interfaccia non lo conosce. "Ruota di 90 gradi" si
+        # somma quindi a qualunque sia la base, dedotta o gia' forzata.
+        angle = (float(component.get("model_rotation_deg", inferred))
+                 + float(component.get("model_rotation_delta_deg") or 0))
         dz = float(component.get("model_z_offset_mm", 0))
         if not math.isfinite(angle) or not math.isfinite(dz):
             raise ValueError("non-finite library placement")

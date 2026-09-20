@@ -331,18 +331,32 @@ def _validate_geometry(rows, safe, boxes):
         original_sources = list(sources)
         reason = None
         basis = row.get('grouping_basis')
+        # A wrong source id is a PROVENANCE error, not a presence one. The two
+        # are separated by what survives the bad link, never by how sure the
+        # reading claims to be:
+        #   backed        at least one proposal still inside the envelope: the
+        #                 body is detected regardless of the bad link, so the
+        #                 link is dropped and the row kept
+        #   visible_body  nothing left inside: the row stands on the model's
+        #                 word alone, and only an explicitly visible housing
+        #                 may be retained on that basis
+        outside = [i for i in sources if not overlaps(row['bbox'], boxes[i])]
+        backed = [i for i in sources if i not in outside]
         visible_body = (row.get('presence_confidence') == 'high' and
                         row['bbox_basis'] != 'unknown' and basis != 'unresolved')
-        outside = [i for i in sources if not overlaps(row['bbox'], boxes[i])]
+        # Presence declared above 'low' with an observed housing. Same bar the
+        # assembly rule below already uses; see the note there.
+        stated_presence = (row['bbox_basis'] != 'unknown' and basis != 'unresolved'
+                           and row.get('presence_confidence', row['confidence']) != 'low')
         if basis is not None and basis not in ('single_body', 'assembly', 'unresolved'):
             reason = 'invalid grouping basis'
         elif basis == 'unresolved':
             reason = 'unsupported group of separate or unresolved proposals'
-        elif outside and not visible_body:
+        elif outside and not (backed or visible_body):
             reason = 'source proposal outside retained envelope'
         elif outside:
             # Presence and provenance are independent. Bad IDs must not dismantle
-            # an explicitly visible housing into its detector fragments.
+            # a still-detected or explicitly visible housing into its fragments.
             sources = [i for i in sources if i not in outside]
             row['source_candidate_ids'] = sources
             for identity in outside:
@@ -362,13 +376,16 @@ def _validate_geometry(rows, safe, boxes):
             # rows may express that same contract through module + known body.
             assembly = (basis == 'assembly' or (basis is None and
                         row['class'] in ('module', 'rf_module')))
-            assembly = (assembly and row['bbox_basis'] != 'unknown' and
-                        row.get('presence_confidence', row['confidence']) != 'low')
+            assembly = assembly and stated_presence
             # A visible body with attached leads can have separate detections on
             # its terminals. The returned body is the physical connection, not
             # an arbitrary distance threshold between those detector fragments.
-            single_body = visible_body and (basis == 'single_body' or
-                (basis is None and row['bbox_basis'] == 'body_and_leads'))
+            # Same bar as the assembly rule above: separate onboard parts under
+            # one envelope is a weaker physical claim than a single housing, so
+            # the stronger claim cannot be held to a lower standard of evidence.
+            single_body = (stated_presence and
+                (basis == 'single_body' or
+                 (basis is None and row['bbox_basis'] == 'body_and_leads')))
             uncertain_group = (row['bbox_basis'] == 'unknown' and
                 row.get('presence_confidence', row['confidence']) == 'low' and
                 all(safe.get(i, {}).get('status') == 'uncertain' for i in sources))

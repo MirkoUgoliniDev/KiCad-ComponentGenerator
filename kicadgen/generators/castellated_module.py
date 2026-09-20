@@ -106,6 +106,15 @@ class ComponentBox:
     model_match: Optional[dict] = None
     # Photographic evidence for mechanical matching, never placement overrides.
     match_evidence: Optional[dict] = None
+    # Scelta esplicita dell'utente sul solido: None lascia decidere
+    # l'automatismo, False toglie dal 3D un falso positivo del rilevatore,
+    # True rimette un pezzo che l'automatismo aveva omesso. La riga resta
+    # comunque in tabella: l'esclusione riguarda il modello, non l'inventario.
+    render_3d_override: Optional[bool] = None
+    # Correzione manuale dell'orientamento del solido, in gradi, SOMMATA
+    # all'angolo che il costruttore deduce dal modello nativo. Un delta
+    # resta valido anche se il modello scelto cambia; un angolo assoluto no.
+    model_rotation_delta_deg: float = 0.0
 
     def is_usable(self) -> bool:
         """@brief Provide the is usable operation for this workflow."""

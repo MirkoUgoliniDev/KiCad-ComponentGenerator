@@ -586,3 +586,58 @@ def test_invalid_independent_confidence_keeps_generic_geometry(field, invalid, t
     assert result[0]['presence_confidence'] == result[0]['class_confidence'] == 'low'
     assert result[0]['_global_inventory_status'] == 'partial'
     assert not list(tmp_path.glob('*.json'))
+
+
+# ── provenienza sbagliata vs presenza assente ────────────────────────
+
+def test_a_wrong_link_does_not_delete_a_body_the_detector_still_backs():
+    """Un id sbagliato e' un errore di provenienza, non di presenza.
+
+    Finche' resta almeno una proposta dentro l'inviluppo il corpo e' comunque
+    rilevato: si toglie il legame, non la riga. Caso reale: il tab del
+    regolatore linkato al corpo ma lasciato fuori dal rettangolo.
+    """
+    data = response()
+    data['components'][0].update(source_candidate_ids=[1, 2], bbox=[.1, .1, .5, .5],
+        bbox_basis='body_and_leads', grouping_basis='single_body',
+        presence_confidence='medium', confidence='low')
+    items = [candidate(1), dict(candidate(2), _box=[.85, .85, .95, .95])]
+    result, _, _ = run(data, items)
+    assert [r.get('component_id', r.get('_id')) for r in result] == ['assembly', 2]
+    assert result[0]['source_candidate_ids'] == [1]
+    assert any('links removed' in e for e in result[0]['_global_inventory_errors'])
+
+
+def test_without_any_backing_left_a_merely_probable_body_is_still_dropped():
+    """Il negativo dello stesso contratto: se nessuna proposta resta dentro,
+    la riga si regge solo sulla parola del modello e serve la dichiarazione
+    esplicita di corpo visibile (presence_confidence alta)."""
+    data = response()
+    data['components'][0].update(source_candidate_ids=[1], bbox=[.6, .6, .8, .8],
+        bbox_basis='body_and_leads', grouping_basis='single_body',
+        presence_confidence='medium', confidence='low')
+    data['candidate_decisions'] = data['candidate_decisions'][:1]
+    result, _, _ = run(data, [candidate()])
+    assert [r['_id'] for r in result] == [1]
+    assert any('outside retained envelope' in e for e in result[0]['_global_inventory_errors'])
+
+
+# ── corpo unico dichiarato: stessa asticella dell'assembly ───────────
+
+def test_a_declared_single_body_binds_separate_leads_at_medium_presence():
+    """Un assieme di pezzi distinti passa a 'medium'; un corpo unico, che e'
+    un'affermazione piu' forte, non puo' chiedere piu' prove."""
+    items = [candidate(1), dict(candidate(2), _box=[.6, .6, .7, .7])]
+    data = response()
+    data['components'][0].update(grouping_basis='single_body', bbox_basis='body_and_leads',
+                                 presence_confidence='medium', confidence='low')
+    assert [r['component_id'] for r in run(data, items)[0]] == ['assembly']
+
+
+def test_a_guessed_single_body_cannot_bind_separate_leads():
+    """Sotto 'medium' resta un'ipotesi: i frammenti staccati tornano separati."""
+    items = [candidate(1), dict(candidate(2), _box=[.6, .6, .7, .7])]
+    data = response()
+    data['components'][0].update(grouping_basis='single_body', bbox_basis='body_and_leads',
+                                 presence_confidence='low', confidence='low')
+    assert [r['_id'] for r in run(data, items)[0]] == [1, 2]

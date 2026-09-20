@@ -72,6 +72,10 @@ class Preview3DVtk(QtInteractor):
     """Vista 3D interattiva: mostra la mesh reale generata o l'approssimazione."""
 
     component_requested = pyqtSignal(int)
+    #: Tasto destro su un componente: indice di riga e punto globale dove
+    #: aprire il menu. La vista non sa cosa si possa fare su un componente --
+    #: le voci le costruisce la finestra, che ha la tabella e i modelli.
+    component_menu_requested = pyqtSignal(int, object)
 
     def __init__(self, parent=None):
         """@brief Initialize the viewport and optional component picking.
@@ -80,7 +84,8 @@ class Preview3DVtk(QtInteractor):
         """
         self._component_actors = {}
         super().__init__(parent)
-        self.setToolTip('Doppio clic su un componente: scegli modello KiCad e ruota il modello')
+        self.setToolTip('Doppio clic su un componente: scegli modello KiCad e ruota il modello.\n'
+                        'Tasto destro: elimina, ruota o cambia il modello.')
         self._configure_component_picking()
         self._configure_component_double_click()
         self.set_background(_BG_COLOR)
@@ -121,14 +126,53 @@ class Preview3DVtk(QtInteractor):
 
     def _component_actor_at_cursor(self):
         try:
+            return self._component_actor_at(*self.iren.GetEventPosition())
+        except (AttributeError, RuntimeError, ImportError):
+            return None
+
+    def _component_actor_at(self, x, y):
+        """@brief Attore sotto un punto gia' espresso in coordinate VTK."""
+        try:
             from vtkmodules.vtkRenderingCore import vtkPropPicker
             picker = vtkPropPicker()
-            x, y = self.iren.GetEventPosition()
             if not picker.Pick(x, y, 0, self.renderer):
                 return None
             return picker.GetActor()
         except (AttributeError, RuntimeError, ImportError):
             return None
+
+    def _component_row_at_widget_point(self, x, y):
+        """@brief Riga della tabella sotto un punto in coordinate Qt.
+
+        L'asse Y va rovesciato: Qt conta dall'alto, VTK dal basso. Il
+        rapporto di scala serve sui monitor ad alta densita', dove i pixel
+        logici di Qt non sono quelli del framebuffer.
+        """
+        try:
+            ratio = float(self.devicePixelRatioF())
+        except (AttributeError, TypeError, ValueError):
+            ratio = 1.0
+        actor = self._component_actor_at(x * ratio, (self.height() - y) * ratio)
+        if actor is None:
+            return None
+        return self._component_actors.get(actor.GetAddressAsString(''))
+
+    def contextMenuEvent(self, event):  # noqa: N802 - firma Qt
+        """@brief Chiedi alla finestra il menu del componente sotto il cursore.
+
+        Si passa da contextMenuEvent e non da un osservatore VTK sul tasto
+        destro perche' quello lascerebbe l'interattore a meta' di una
+        manovra di zoom mentre il menu tiene il mouse: Qt consegna questo
+        evento per conto suo, senza interferire con la telecamera.
+        """
+        position = event.pos()
+        index = self._component_row_at_widget_point(position.x(), position.y())
+        if index is None:
+            # Fuori dai componenti il tasto destro resta quello di VTK.
+            super().contextMenuEvent(event)
+            return
+        event.accept()
+        self.component_menu_requested.emit(index, event.globalPos())
 
     def _component_double_clicked(self, *_args):
         actor = self._component_actor_at_cursor()

@@ -53,16 +53,33 @@ def _match_evidence(component):
 
 
 def _model_placement(component):
-    """Keep only explicit finite native-model overrides; None means infer axes."""
+    """Keep only explicit finite native-model overrides; None means infer axes.
+
+    Vi rientrano anche le scelte fatte a mano dal menu contestuale della
+    vista 3D -- esclusione dal solido e correzione d'orientamento -- perche'
+    devono arrivare al costruttore per entrambe le famiglie di componente,
+    non solo per quella che capita di toccare per prima.
+    """
     result = {}
-    for field in ("model_rotation_deg", "model_z_offset_mm"):
+    for field in ("model_rotation_deg", "model_z_offset_mm", "model_rotation_delta_deg"):
         value = getattr(component, field, None)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             try:
-                if math.isfinite(value):
-                    result[field] = value
+                if not math.isfinite(value):
+                    continue
             except OverflowError:
-                pass
+                continue
+            # Una correzione di zero gradi non e' una scelta fatta: si omette,
+            # come si omette un override di visibilita' non impostato. Gli
+            # altri due campi restano com'erano per non cambiare un contratto
+            # gia' in uso altrove.
+            if field == "model_rotation_delta_deg" and not value:
+                continue
+            result[field] = value
+    visible = getattr(component, "render_3d_override", None)
+    if isinstance(visible, bool):
+        result["render_3d_override"] = visible
+        result["render_3d"] = visible
     return result
 
 

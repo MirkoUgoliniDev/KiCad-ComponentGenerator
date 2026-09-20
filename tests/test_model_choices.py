@@ -62,3 +62,40 @@ def test_duplicate_geometry_does_not_transfer_choices(tmp_path):
     fresh=deepcopy(c); fresh.pop('model_selection')
     result=restore_choices(tmp_path,b'photo',[fresh,deepcopy(fresh)])
     assert all('model_selection' not in row for row in result)
+
+
+# ── eliminazione e rotazione manuali: devono tornare dal JSON ─────────
+
+def test_manual_exclusion_and_rotation_survive_the_round_trip(tmp_path):
+    """Sono scelte dell'utente come la selezione del modello: il giro dal
+    JSON deve restituirle, altrimenti "Rigenera modello 3D" le perde."""
+    original = dict(component(), render_3d_override=False, model_rotation_delta_deg=90.0)
+    save_choices(tmp_path, b'photo', [original])
+    fresh = deepcopy(component())
+    restored = restore_choices(tmp_path, b'photo', [fresh])[0]
+    assert restored['render_3d_override'] is False
+    assert restored['model_rotation_delta_deg'] == 90.0
+    assert 'render_3d_override' not in fresh, 'la sorgente non va toccata'
+
+
+def test_a_photo_or_geometry_change_does_not_carry_the_choice_over(tmp_path):
+    """Il negativo: le scelte restano legate a quella foto e a quel corpo."""
+    save_choices(tmp_path, b'photo',
+                 [dict(component(), render_3d_override=False, model_rotation_delta_deg=90.0)])
+    other_photo = restore_choices(tmp_path, b'altra-foto', [deepcopy(component())])[0]
+    assert 'render_3d_override' not in other_photo
+    moved = deepcopy(component()); moved['length_mm'] = 3.2
+    assert 'model_rotation_delta_deg' not in restore_choices(tmp_path, b'photo', [moved])[0]
+
+
+def test_a_malformed_stored_choice_falls_back_to_the_automatic_behaviour(tmp_path):
+    """Un JSON manomesso non deve imporre stati impossibili al costruttore."""
+    save_choices(tmp_path, b'photo', [component()])
+    target = tmp_path / 'kicad-model-choices.json'
+    data = json.loads(target.read_text(encoding='utf-8'))
+    data['components'][0]['render_3d_override'] = 'forse'
+    data['components'][0]['model_rotation_delta_deg'] = 'novanta'
+    target.write_text(json.dumps(data), encoding='utf-8')
+    restored = restore_choices(tmp_path, b'photo', [deepcopy(component())])[0]
+    assert 'render_3d_override' not in restored
+    assert 'model_rotation_delta_deg' not in restored

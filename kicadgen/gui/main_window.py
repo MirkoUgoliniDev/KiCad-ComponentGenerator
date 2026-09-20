@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QGraphicsEllipseItem, QGraphicsRectItem, QGraphicsScene,
     QGraphicsView, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-    QDialog, QListWidget, QMainWindow, QMessageBox, QPushButton, QScrollArea,
+    QDialog, QListWidget, QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea,
     QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QListWidgetItem, QTabWidget, QTextEdit, QVBoxLayout,
     QWidget,
 )
@@ -3196,6 +3196,8 @@ class MainWindow(QMainWindow):
         if hasattr(self.preview_3d, 'component_requested'):
             self.preview_3d.component_requested.connect(
                 lambda row: QTimer.singleShot(0, lambda: self._show_photo_comparison(component_row=row)))
+        if hasattr(self.preview_3d, 'component_menu_requested'):
+            self.preview_3d.component_menu_requested.connect(self._show_component_menu)
         self.preview_3d.show_pin_numbers = self.chk_pin_numbers.isChecked()
         self.preview_3d.setMinimumHeight(120)
         outer.addWidget(self.preview_3d, 1)
@@ -3591,6 +3593,17 @@ class MainWindow(QMainWindow):
             row_metadata["model_z_offset_mm"] = component.model_z_offset_mm
         else:
             row_metadata.pop("model_z_offset_mm", None)
+        # Scelte del menu contestuale della vista 3D: assenti significa
+        # "decide l'automatismo", quindi la chiave si toglie invece di
+        # scriverci un valore neutro che sembrerebbe una scelta fatta.
+        if isinstance(component.render_3d_override, bool):
+            row_metadata["render_3d_override"] = component.render_3d_override
+        else:
+            row_metadata.pop("render_3d_override", None)
+        if component.model_rotation_delta_deg:
+            row_metadata["model_rotation_delta_deg"] = component.model_rotation_delta_deg
+        else:
+            row_metadata.pop("model_rotation_delta_deg", None)
         metadata.setData(Qt.ItemDataRole.UserRole, row_metadata)
         table.setItem(row, 0, metadata)
 
@@ -3692,6 +3705,9 @@ class MainWindow(QMainWindow):
                 mating=str(c.get("mating") or ""),
                 bbox_basis=str(c.get("bbox_basis") or "unknown"),
                 package_evidence=str(c.get("package_evidence") or ""),
+                render_3d_override=(c.get("render_3d_override")
+                                    if isinstance(c.get("render_3d_override"), bool) else None),
+                model_rotation_delta_deg=float(c.get("model_rotation_delta_deg") or 0.0),
             ) for c in components
         ]
         self._refresh_components_table(components)
@@ -3708,6 +3724,109 @@ class MainWindow(QMainWindow):
                 self._add_component_row(component, metadata)
         finally:
             self._refreshing_component_rows = False
+
+    #: Correzioni di orientamento offerte dal menu contestuale. Solo multipli
+    #: di un quarto di giro: i modelli della libreria KiCad seguono la
+    #: convenzione del footprint, quindi uno mal orientato lo e' sempre di
+    #: 90, 180 o 270 gradi, mai di un angolo qualsiasi.
+    MENU_ROTATIONS_DEG = (90, 180, 270)
+
+    def _show_component_menu(self, row: int, position) -> None:
+        """@brief Menu del tasto destro su un componente della vista 3D.
+
+        La vista 3D serve solo a indicare quale riga: le voci agiscono sui
+        metadati della tabella componenti, che resta la fonte di verita'.
+        Ogni scelta viene scritta nel JSON delle scelte e ha effetto dalla
+        rigenerazione FreeCAD successiva, senza ripassare dal modello AI.
+        """
+        table = getattr(self, "table_components", None)
+        if table is None or not 0 <= row < table.rowCount():
+            return
+        cell = table.item(row, 0)
+        metadata = deepcopy(cell.data(Qt.ItemDataRole.UserRole) or {}) if cell else {}
+        label = table.cellWidget(row, 0)
+        name = (label.text().strip() if label is not None else "") or "?"
+        hidden = metadata.get("render_3d_override") is False
+        delta = float(metadata.get("model_rotation_delta_deg") or 0.0)
+
+        menu = QMenu(self)
+        header = menu.addAction(name)
+        header.setEnabled(False)
+        menu.addSeparator()
+
+        if hidden:
+            restore = menu.addAction(self.i18n.text("Rimetti nel modello 3D"))
+            restore.triggered.connect(lambda: self._set_component_visibility(row, True))
+        else:
+            remove = menu.addAction(self.i18n.text("Elimina dal modello 3D (falso positivo)"))
+            remove.triggered.connect(lambda: self._set_component_visibility(row, False))
+
+        rotate = menu.addMenu(self.i18n.text("Ruota il solido"))
+        for degrees in self.MENU_ROTATIONS_DEG:
+            action = rotate.addAction(f"+{degrees}°")
+            action.triggered.connect(
+                lambda _checked=False, d=degrees: self._rotate_component_model(row, d))
+        reset = rotate.addAction(self.i18n.text("Azzera la correzione"))
+        reset.setEnabled(bool(delta))
+        reset.triggered.connect(lambda: self._rotate_component_model(row, None))
+
+        change = menu.addAction(self.i18n.text("Cambia modello KiCad..."))
+        change.triggered.connect(
+            lambda: QTimer.singleShot(0, lambda: self._show_photo_comparison(component_row=row)))
+        menu.exec(position)
+
+    def _set_component_visibility(self, row: int, visible: bool) -> None:
+        """@brief Includi o escludi un componente dal solido, senza perderlo.
+
+        La riga resta in tabella e nel JSON: un falso positivo tolto dal 3D
+        va comunque documentato, altrimenti alla corsa successiva nessuno
+        saprebbe che era stato proposto ed e' stato scartato a ragion veduta.
+        """
+        self._update_component_metadata(row, {"render_3d_override": visible})
+
+    def _rotate_component_model(self, row: int, degrees) -> None:
+        """@brief Somma una correzione d'orientamento, o la azzera con None.
+
+        Si somma invece di sostituire perche' l'angolo di partenza lo deduce
+        FreeCAD confrontando il modello nativo con la misura fotografica:
+        qui quell'angolo non e' noto, e "ruota di 90 gradi" e' comunque cio'
+        che si intende guardando il solido storto.
+        """
+        if degrees is None:
+            self._update_component_metadata(row, {"model_rotation_delta_deg": None})
+            return
+        cell = self.table_components.item(row, 0)
+        metadata = cell.data(Qt.ItemDataRole.UserRole) if cell else None
+        current = float((metadata or {}).get("model_rotation_delta_deg") or 0.0)
+        total = (current + float(degrees)) % 360
+        self._update_component_metadata(
+            row, {"model_rotation_delta_deg": total or None})
+
+    def _update_component_metadata(self, row: int, changes: dict) -> None:
+        """@brief Scrivi i metadati di una riga e propaga la modifica.
+
+        Un valore None toglie la chiave: significa "torna all'automatismo",
+        che non e' la stessa cosa di una scelta esplicita dal valore neutro.
+        """
+        table = getattr(self, "table_components", None)
+        cell = table.item(row, 0) if table is not None else None
+        if cell is None:
+            return
+        metadata = deepcopy(cell.data(Qt.ItemDataRole.UserRole) or {})
+        for key, value in changes.items():
+            if value is None:
+                metadata.pop(key, None)
+            else:
+                metadata[key] = value
+        cell.setData(Qt.ItemDataRole.UserRole, metadata)
+        name = table.cellWidget(row, 0)
+        self._append_log(
+            f"Componente '{name.text().strip() if name else row}': "
+            + ", ".join(f"{k}={metadata.get(k, 'automatico')}" for k in changes))
+        # Stesso percorso della revisione fotografica: salva il JSON delle
+        # scelte e marca il 3D da rigenerare. La rigenerazione e' FreeCAD e
+        # basta -- nessuna chiamata al modello AI.
+        self._apply_photo_review(self._photo_components_from_table())
 
     def _components_from_table(self) -> list[ComponentBox]:
         """Componenti come sono ORA nella tabella (con le correzioni a mano)."""
@@ -3747,6 +3866,9 @@ class MainWindow(QMainWindow):
                 mating=str(metadata.get("mating") or ""),
                 bbox_basis=str(metadata.get("bbox_basis") or "unknown"),
                 package_evidence=str(metadata.get("package_evidence") or ""),
+                render_3d_override=(metadata.get("render_3d_override")
+                                    if isinstance(metadata.get("render_3d_override"), bool) else None),
+                model_rotation_delta_deg=float(metadata.get("model_rotation_delta_deg") or 0.0),
             ))
         return components
 

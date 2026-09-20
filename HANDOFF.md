@@ -1,3 +1,164 @@
+# 2026-09-20 — perché mancano componenti, e menu contestuale sul 3D
+
+Branch **`YOLO-SOLUTION`**. Il lavoro non committato di un'altra sessione
+(849 righe, 17 file) è stato messo in salvo intatto in `58633f7` prima di
+toccare qualunque cosa, per avere un punto di ritorno.
+
+## 1. Dove si perdono i componenti: non nel rilevamento
+
+Censimento visivo sulla foto ad alta risoluzione dell'ESP32-S3-DEV-KIT:
+**44 corpi realmente montati**. Le 51 righe finali sono 44 componenti più
+7 frammenti YOLO non renderizzati.
+
+Bilancio onesto: **42 individuati, 2 persi, 2 fantasma, 1 con geometria
+gravemente sbagliata** (il regolatore, 7,2×3,0 mm invece di ~8,2×8,9 mm).
+
+Il collo di bottiglia **non è YOLO**: ha proposto almeno un box su 44 corpi
+su 44, recall ~100%. Tutta la perdita netta avviene nella **fusione e
+riconciliazione**: 111 proposte → 46 componenti, con **zero aggiunte
+autonome** del modello nonostante il prompt lo chieda esplicitamente.
+
+Numeri del percorso: 252.000 predizioni → 2.265 sopra la soglia di audit →
+1.301 eleggibili → 194 per vista → 63 globali → 111 consegnate all'LLM.
+Costo della corsa: 1,0166 USD, **due sole chiamate LLM**.
+
+### 1.1 Difetto corretto: presenza e provenienza confuse
+
+`photo_global_inventory.py:_validate_geometry` cancellava **l'intero
+componente** quando una sola proposta sorgente non si sovrapponeva
+all'inviluppo dichiarato, a meno che `presence_confidence` fosse `high`.
+
+Così sono spariti due componenti veri:
+
+* **Q1** (regolatore): 5 sorgenti, 4 dentro, 1 fuori — il tab stagnato, che
+  l'AI ha collegato correttamente al pezzo ma ha lasciato fuori dal
+  rettangolo. Cancellato.
+* **C14** (condensatore): 2 sorgenti, 1 dentro, 1 fuori — un secondo
+  condensatore, fuso per errore nello stesso corpo. Cancellato.
+
+**La correzione non è quella che sembrava ovvia.** Allargare la condizione
+a `medium` avrebbe rotto un contratto deliberato e testato
+(`test_outside_source_invalidates_parent_even_for_one_source`), che pretende
+la cancellazione quando l'**unica** sorgente è fuori.
+
+La distinzione giusta non è quanto è sicura la lettura, ma **che cosa
+sopravvive al legame sbagliato**:
+
+* restano proposte dentro l'inviluppo → il corpo è comunque rilevato, si
+  toglie il legame e si tiene la riga;
+* non ne resta nessuna → la riga si regge solo sulla parola del modello, e
+  lì serve davvero la dichiarazione esplicita di corpo visibile.
+
+Così i due contratti convivono: il test esistente continua a passare e
+**Q1 e C14 tornano**, verificato rigiocando `_validate_geometry` sui dati
+veri della corsa (`global-inventory-9f1bea73….json`). Le righe grigie non
+renderizzate scendono da 7 a 2.
+
+Corretta anche un'**incoerenza interna** nella stessa funzione: l'`assembly`
+(pezzi distinti sotto un inviluppo, affermazione debole) accettava
+`medium`, mentre il `single_body` (corpo unico, affermazione forte)
+pretendeva `high`. Ora entrambi usano la stessa asticella.
+
+### 1.2 Cosa resta aperto su questo fronte
+
+1. **Nessun recupero dei corpi mancati dal rilevatore**: la copertura finale
+   è limitata dall'alto dalle proposte YOLO. Oggi non costa pezzi, ma rende
+   fatale ogni futuro buco del detector.
+2. **I 48 componenti della prima chiamata AI vengono sovrascritti senza
+   confronto** (`datasheet_extractor.py:987`): si paga una seconda opinione
+   e la si butta.
+3. **Nessuna verifica piazzola popolata vs vuota**: `R16` accettato su due
+   pad nudi, `R17` su una goccia di stagno. Le categorie esistono solo per i
+   *reject*, non c'è controllo a valle sui *keep*.
+4. **Inviluppo del regolatore mai ricostruito**: nessun candidato copre il
+   corpo plastico nero.
+5. **Dipendenza da confidenze infime**: il regolatore sopravvive grazie a una
+   sola proposta a confidenza 0,055, sotto la soglia operativa 0,25.
+6. **`clipped_by_tile` è un vicolo cieco**: 331 proposte scartate prima
+   della NMS che non entrano nemmeno nel pool di review.
+
+### 1.3 Sul matching dei modelli KiCad (analisi, non ancora corretto)
+
+Su 51 componenti: 10 auto_matched, 4 provisional, 1 confermato, **27
+review_required**, 9 irrisolti. Il blocco dominante è `not complete`
+(26 su 27), non `len(choices)!=1` come avevo ipotizzato — **ipotesi mia
+sbagliata**, corretta dall'analisi.
+
+Prova decisiva: **C1** con package `"0603"` è auto_matched con scarto 10,0%;
+**C6** con `"0603 (long axis vertical)"` è review_required con scarto
+**7,8%**, sullo **stesso identico STEP**. `_package_token` restituisce
+stringa vuota quando c'è prosa attorno alla sigla, e il componente scende
+dalla ricerca per nome a quella per famiglia, che marca la ricerca troncata.
+
+Altri due difetti strutturali trovati e **non ancora corretti**:
+
+* **vicolo cieco nell'indice delle misure**: un modello senza quote nel nome
+  non viene mai misurato, quindi non entra in cache, quindi non verrà mai
+  misurato. **91 LED e 117 diodi permanentemente invisibili.**
+* **il conteggio dei terminali è raccolto e mai usato per ordinare**, solo
+  come veto: U3 ha 6 reofori osservati e l'unico candidato che ne dichiara 6
+  è ultimo in classifica.
+
+## 2. Menu contestuale sulla vista 3D
+
+Tasto destro su un componente: **elimina dal 3D** (falso positivo del
+rilevatore), **ruota** (+90/180/270 e azzeramento), **cambia modello KiCad**.
+Testi tradotti in italiano, inglese, francese e tedesco.
+
+Punti di progetto:
+
+* Si passa da `contextMenuEvent` di Qt e non da un osservatore VTK sul tasto
+  destro: quello lascerebbe l'interattore a metà di una manovra di zoom
+  mentre il menu tiene il mouse. Fuori dai componenti il tasto destro resta
+  quello di VTK.
+* Le voci agiscono sui **metadati della tabella componenti**, che resta la
+  fonte di verità; la vista 3D serve solo a indicare quale riga.
+* L'eliminazione **non cancella la riga**: scrive `render_3d_override=False`.
+  Un falso positivo scartato va comunque documentato, altrimenti alla corsa
+  successiva nessuno saprebbe che era stato proposto.
+* La rotazione è un **delta**, non un angolo assoluto: l'angolo di partenza
+  lo deduce FreeCAD confrontando il modello nativo con la misura, e la GUI
+  non lo conosce. Un delta resta valido anche cambiando modello.
+
+**Trappola pagata:** la prima stesura aveva messo i campi nel costruttore di
+payload sbagliato (`_generate_populated_tht`), mentre il caso reale è un
+modulo **castellated**, che usa un costruttore diverso. Ora entrambi passano
+dallo stesso helper `_model_placement`, e c'è un test che copre proprio il
+percorso castellated.
+
+## 3. "Rigenera modello 3D" non tocca l'AI
+
+Requisito ribadito dall'utente. Verificato **strutturalmente**, non a
+comportamento: l'intero pacchetto `kicadgen/cad3d/` non ha alcun import verso
+OpenRouter o gli altri servizi AI, né legge la chiave API.
+
+`tests/test_regeneration_is_offline.py` lo blinda: fallisce nel momento in cui
+qualcuno aggiunge l'import, non mesi dopo. Include il proprio controllo
+negativo, perché un test del genere passerebbe anche a vuoto.
+
+Le scelte manuali (esclusione e rotazione) fanno il giro completo
+foto → tabella → `kicad-model-choices.json` → rigenerazione, e
+`attach_models` non le sovrascrive più: il ripristino a `render_3d=True`
+ripuliva lo stato calcolato della corsa precedente **e anche la scelta
+dell'utente**.
+
+## 4. Altre correzioni di questa sessione
+
+* **Regressione nel diff non committato**: `_synchronize_preview_variants`
+  iterava la lista grezza senza il guard `isinstance` che `attach_models` ha,
+  quindi una voce malformata sollevava `AttributeError`.
+* **Contratto di test lasciato indietro** dall'audit dei prompt: il test del
+  worker terminali contava le righe di progresso. Ora verifica il ciclo di
+  vita per **posizione relativa**, così un canale facoltativo può aggiungere
+  righe senza che sia una regressione.
+* **`.FCStd` perso in silenzio su Windows**: `saveAs` usa le API Win32
+  classiche e si ferma a MAX_PATH (260 caratteri) mentre l'export STEP passa;
+  il caso reale è a 228. Ora si salva su un percorso corto e si copia a
+  destinazione col prefisso esteso. E soprattutto il fallimento **si vede**:
+  `KICADGEN_FCSTD_FAILED` non finiva fra le righe che arrivano all'utente.
+
+---
+
 # 11:16 — prompt LLM reso auditabile e verifica indipendente bloccata dal limite agenti
 
 Richiesta utente: scrivere nel log il prompt realmente inviato a ogni chiamata

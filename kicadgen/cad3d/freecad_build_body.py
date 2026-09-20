@@ -17,7 +17,10 @@ del punto medio (spigoli) con i bordi noti del box, entro una tolleranza.
 """
 
 import json
+import os
+import shutil
 import sys
+import tempfile
 
 import FreeCAD
 import Part
@@ -354,6 +357,40 @@ def _flip_y(data):
     return data
 
 
+def _long_path(path):
+    """@brief Rendi un percorso Windows immune al limite MAX_PATH.
+
+    Il prefisso esteso disattiva il limite di 260 caratteri per le chiamate
+    Win32; richiede un percorso assoluto con separatori nativi.
+    """
+    path = os.path.abspath(str(path))
+    if os.name != "nt" or path.startswith("\\\\?\\"):
+        return path
+    return "\\\\?\\" + path
+
+
+def _save_fcstd(doc, fcstd_path):
+    """@brief Salva il documento FreeCAD aggirando MAX_PATH su Windows.
+
+    `saveAs` apre il file con le API Win32 classiche e si ferma a 260
+    caratteri, mentre l'export STEP passa: un componente dal nome lungo in
+    una cartella annidata perdeva quindi il solo sorgente FreeCAD. Si tenta
+    prima la via diretta -- dove funziona il comportamento non cambia -- e
+    solo se fallisce si salva su un percorso corto e si copia a destinazione
+    con il prefisso esteso, che quel limite non ce l'ha.
+    """
+    try:
+        doc.saveAs(str(fcstd_path))
+        return
+    except Exception:
+        if os.name != "nt":
+            raise
+    with tempfile.TemporaryDirectory() as staging:
+        staged = os.path.join(staging, "modello.FCStd")
+        doc.saveAs(staged)
+        shutil.copyfile(staged, _long_path(fcstd_path))
+
+
 def main():
     """@brief Run the public entry point for this workflow."""
     if hasattr(sys.stdout, "reconfigure"):
@@ -620,10 +657,15 @@ def main():
 
     if fcstd_path:
         try:
-            doc.saveAs(fcstd_path)
+            _save_fcstd(doc, fcstd_path)
             print(f"KICADGEN_FCSTD_OK:{fcstd_path}")
         except Exception as exc:  # noqa: BLE001 - sorgente FreeCAD e' best-effort
             print(f"KICADGEN_FCSTD_FAILED:{exc}")
+            # Il marcatore sopra resta per chi legge l'output riga per riga,
+            # ma solo le righe KICADGEN_WARN: arrivano all'utente: senza
+            # questa il sorgente FreeCAD spariva senza che nessuno lo dicesse.
+            print(f"KICADGEN_WARN:sorgente FreeCAD non salvata ({exc}); "
+                  "STEP e anteprima non ne risentono", flush=True)
 
     tessellated = []
     for obj, color in colored:
