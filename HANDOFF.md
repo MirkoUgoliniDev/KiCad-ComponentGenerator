@@ -72,7 +72,27 @@ stretti contro uno largo). È un'altra indagine, non un'altra soglia.
   disponibile senza un run end-to-end.
 * **Non verificato**: il run completo. Serve che l'app rigeneri il modulo.
 
-## 5. Nota operativa: FreeCAD
+## 5. Da fare, chiesto dall'utente e rimandato
+
+* **Il titolo della modale dice sempre "Analisi AI in corso"**, anche quando a
+  lavorare e' il rilevatore locale, che AI non e'. La riga sotto dice gia' lo
+  strumento giusto, quindi non e' un'informazione sbagliata -- e' il titolo che
+  resta indietro. Va fatto diventare il nome del passo in corso (per esempio
+  "Quote e pinout", "Rilevamento dei corpi", "Inventario globale",
+  "Modello 3D"), tenendo il nome dello strumento dov'e' adesso.
+* Valutare nello stesso giro se numerare i passi ("Passo 1 di 3"): l'utente non
+  si e' ancora pronunciato, ed e' stato offerto.
+
+Contesto di come ci si e' arrivati: l'utente ha chiesto se il primo passo non
+fosse YOLO, vedendo la modale mostrare una chiamata AI. **Non e' un difetto**:
+YOLO e' il rilevatore, non il primo passo, e non puo' esserlo perche'
+`detect_yolo_components(photo, length, width, ...)` pretende le dimensioni
+reali della scheda per convertire i pixel in millimetri, e quelle arrivano
+dalla prima chiamata. Con `photo_detector='yolo'` all'inizio gira solo
+`validate_yolo_setup()`, che controlla i pesi ONNX senza inferenza, apposta per
+non far pagare una chiamata e fermarsi poi su un avviso.
+
+## 6. Nota operativa: FreeCAD
 
 La misura gira nel `freecadcmd` **headless** che l'app già lancia: non serve
 avere la GUI aperta, il flusso automatico resta automatico. Il server MCP
