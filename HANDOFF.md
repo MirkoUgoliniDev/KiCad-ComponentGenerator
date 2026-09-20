@@ -1,3 +1,41 @@
+# 2026-09-20 (7) — il confronto ha dichiarato «Differenze: 0» su due fallimenti
+
+Prima esecuzione reale di `tools/compare_vision_models.py` sulla scheda TEST
+(`generated/TEST/docs/hires.jpg`, 63,3 x 25,4 mm). **Nessuna chiamata AI e'
+partita**: `OPENROUTER_API_KEY` non era nell'ambiente, perche' l'applicazione
+carica il `.env` all'avvio (`main.py`) mentre uno strumento da riga di comando
+parte da un ambiente nudo. Costo: zero. Ma lo strumento aveva due difetti, e il
+secondo e' peggiore del primo.
+
+1. **Non caricava il `.env`.** Corretto: `require_credentials()` carica il
+   `.env` come fa `main.py` e pretende la chiave **prima** del rilevamento
+   locale, che dura minuti. Ora manca la chiave → si ferma in un secondo.
+
+2. **Ha stampato «--- Differenze: 0» su due esecuzioni entrambe fallite.**
+   Questo e' il difetto grave: il verdetto piu' rassicurante possibile proprio
+   dove non c'era stata nessuna risposta. La causa e' strutturale, non un
+   messaggio mal scelto: quando la riconciliazione fallisce, `review_global_inventory`
+   **conserva le proposte del rilevatore intatte** (comportamento corretto, serve
+   a non perdere geometria), e il confronto le contava come risposte. Due
+   fallimenti restituiscono le stesse 111 proposte, quindi zero differenze.
+
+   Correzione: una riga e' una risposta del modello **solo se ha
+   `component_id`** — lo scrive la riconciliazione, mentre una proposta
+   conservata mantiene il nome del rilevatore («YOLO candidate 7»).
+   `answered_or_stop` ferma il confronto se un modello non riconcilia nulla, e
+   la diagnosi della riconciliazione finisce nel messaggio invece che nei log.
+   Il verdetto guarda solo le righe riconciliate da entrambi; quelle irrisolte
+   vengono contate e segnalate.
+
+`tests/test_compare_vision_models.py` sale a 8 test: una proposta conservata
+non e' una risposta; un'esecuzione senza risposte ferma il confronto e il caso
+positivo (una sola riga riconciliata basta a proseguire); la chiave e'
+pretesa prima del rilevamento, nei due versi.
+
+**Da rifare**: l'esecuzione vera, ora che lo strumento carica il `.env`. Il
+comando e' quello nel checkpoint (5), in PowerShell su una riga sola — `^` non
+continua la riga in PowerShell e `<foto>` verrebbe letto come redirezione.
+
 # 2026-09-20 (6) — l'uscita finiva con un RuntimeError
 
 Visto nella schermata dell'utente, sopra il prompt: «RuntimeError: wrapped
