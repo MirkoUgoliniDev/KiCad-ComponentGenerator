@@ -50,3 +50,6 @@ docs/ESP32/
 
 # Local detector weights (large binaries; review upstream licences before redistribution).
 models/*.onnx
+
+# Alberi di lavoro temporanei e configurazione locale dell agente.
+.claude/

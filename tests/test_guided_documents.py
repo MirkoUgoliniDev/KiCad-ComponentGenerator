@@ -27,6 +27,12 @@ def test_three_cards_load_unavailable_and_forward_roles(window, monkeypatch, tmp
     panel.cards['hires']['unavailable'].setChecked(True)
     monkeypatch.setattr(window, '_selected_documents', gui.MainWindow._selected_documents.__get__(window))
     monkeypatch.setattr(gui.ExtractWorker, 'start', lambda self: None)
+    # Il rilevatore parte forzato su YOLO, che pretende pesi ONNX e runtime
+    # installati: senza, l'estrazione si ferma su un avviso e questo test
+    # fallirebbe per un motivo che col suo oggetto non c'entra. La scelta
+    # predefinita resta verificata in tests/test_photo_detector_ui.py.
+    window.combo_photo_detector.setCurrentIndex(
+        window.combo_photo_detector.findData('ai'))
     window._extract_with_ai()
     assert window._extract_worker.document_roles == {'top.png': 'top'}
     assert window._extract_worker.doc_paths == [window._docs_dir() / 'top.png']

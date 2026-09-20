@@ -16,7 +16,19 @@ def acquired(layout='matrix'):
         body_height_mm=3, castellated_sides=[dict(edge='left', count=3, pitch_mm=2.54, first_pin=1)])
 
 
+def use_ai_detector(window):
+    """Il rilevatore parte forzato su YOLO, che pretende pesi ONNX e runtime
+    installati: senza, l'estrazione si ferma su un avviso e questi test
+    fallirebbero per un motivo che col flusso standard/avanzato non c'entra.
+    Qui si prova il flusso, non il rilevatore, quindi si sceglie quello privo
+    di dipendenze esterne. La scelta predefinita resta verificata altrove, in
+    tests/test_photo_detector_ui.py."""
+    window.combo_photo_detector.setCurrentIndex(
+        window.combo_photo_detector.findData('ai'))
+
+
 def begin(window, monkeypatch):
+    use_ai_detector(window)
     monkeypatch.setattr(gui.ExtractWorker, 'start', lambda self: None)
     monkeypatch.setattr(gui.GenerateWorker, 'start', lambda self: None)
     row = QListWidgetItem('photo.png')
@@ -349,6 +361,7 @@ def test_real_qthread_handoff_generates_footprint_and_requests_3d(window, monkey
     deadline.timeout.connect(loop.quit)
     timer.start()
     deadline.start(5000)
+    use_ai_detector(window)
     window._extract_with_ai()
     loop.exec()
     timer.stop()
@@ -408,6 +421,7 @@ def test_guided_name_collision_keeps_documents_and_generates_after_real_thread(w
     deadline.timeout.connect(loop.quit)
     timer.start()
     deadline.start(5000)
+    use_ai_detector(window)
     window._extract_with_ai()
     loop.exec()
     timer.stop()

@@ -1,0 +1,24 @@
+# Le fini di riga sono normalizzate a LF nel repository e riconvertite a
+# CRLF in copia di lavoro su Windows (core.eol native). Senza questa riga
+# git considera contenuto la conversione fatta da editor e strumenti, e un
+# commit ordinario si porta dietro la riscrittura dell'intero albero: e'
+# accaduto (103 file, ~35.000 righe, di cui reali 4 file e 74 righe).
+* text=auto
+
+# Sorgenti e documentazione: testo, sempre LF nel repository.
+*.py    text diff=python
+*.md    text
+*.txt   text
+*.json  text
+*.svg   text
+*.wrl   text
+*.step  text
+
+# Binari: nessuna conversione, nessun diff testuale.
+*.sqlite3 binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.onnx  binary
+*.pt    binary
+*.fcstd binary

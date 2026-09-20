@@ -784,6 +784,12 @@ def test_custom_profile_drives_geometry_family_and_worker_snapshot(window, monke
     item = QListWidgetItem('board.png')
     item.setCheckState(Qt.CheckState.Checked)
     window.docs_list.addItem(item)
+    # Il rilevatore parte forzato su YOLO, che pretende pesi ONNX e runtime
+    # installati: senza, l'estrazione si ferma su un avviso e questo test
+    # fallirebbe per un motivo che col suo oggetto non c'entra. La scelta
+    # predefinita resta verificata in tests/test_photo_detector_ui.py.
+    window.combo_photo_detector.setCurrentIndex(
+        window.combo_photo_detector.findData('ai'))
     window._extract_with_ai()
     worker = window._extract_worker
     assert (worker.model, worker.vision_model, worker.verification_model) == ('type/data', 'type/data', 'type/data')
@@ -838,6 +844,8 @@ def test_start_extraction_uses_single_model_and_resets_photo_state(window, raw_p
     row = QListWidgetItem("board.png")
     row.setCheckState(Qt.CheckState.Checked)
     window.docs_list.addItem(row)
+    window.combo_photo_detector.setCurrentIndex(
+        window.combo_photo_detector.findData('ai'))
     window._extract_with_ai()
     assert window._extract_worker.model == "vendor/datasheet"
     assert window._extract_worker.vision_model == "vendor/datasheet"
