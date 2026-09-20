@@ -2581,3 +2581,133 @@ Conclusione: il difetto che causava il rendering tutto-magenta è risolto nel
 run reale. Il risultato non è ancora un'identificazione completa: varianti
 QFN/DFN, USB-C e semiconduttori ambigui restano in revisione, come previsto
 dal matching prudente. Nessun commit/push effettuato.
+
+# 20:29 — opzione (b) committata; OpenCV entra come misuratore dei bordi
+
+Branch `YOLO-SOLUTION`. Due consegne in sequenza.
+
+## 1. Commit `ed313ba` — comanda la vista che vede il corpo per intero
+
+Era il lavoro rimasto non committato dalla sessione precedente, verificato ma
+mai chiuso. Un corpo più grande della sovrapposizione fra tessere tocca un
+bordo in OGNI tessera che lo contiene: quella vista non ne conosce
+l'estensione. Quando un'altra vista lo contiene per intero, è quella a
+misurarlo. Il confronto usa i rilevamenti non tagliati di QUALUNQUE vista e a
+QUALUNQUE confidenza — la vista d'insieme vede il modulo intero a 0.18, sotto
+la soglia operativa, e limitando il confronto ai candidati sopra soglia il
+filtro non scartava nulla. Misurato sulla foto reale: settore del modulo da 31
+proposte a 7, zero lati tagliati rimasti. `tests/test_photo_yolo.py`: 90
+passati.
+
+## 2. OpenCV accanto a YOLO: i bordi misurati, non proposti
+
+**Decisione dell'utente.** OpenCV entra nel percorso standard come
+*misuratore* delle proposte del rilevatore, non come rilevatore. Il rilevatore
+dice dove c'è un corpo (serve addestramento); il gradiente dice dove sono i
+suoi bordi (non ne serve).
+
+### Perché adesso e non prima
+
+`photo_refine.refine_components` esisteva già, scritto per il rilevatore AI, ed
+era tenuto **fuori** dal percorso standard: su scheda densa una via o una
+piazzola poteva superare i filtri e *spostare* una stima buona. Mancava il modo
+di dire alla misura dove non guardare. Adesso c'è: `_forbidden_mask` accettava
+già `exclude_rects_mm` e `contact_zones` produce quei rettangoli dalle quote
+**dichiarate** (lato, passo, lunghezza piazzola, offset), non da una fascia
+scelta guardando la foto.
+
+### Modifiche
+
+- `contact_zones.contact_rects_mm(positions, length, width)` — strisce dei
+  contatti di bordo in mm (mezzo passo lungo il bordo × profondità dichiarata).
+  Le **matrici passanti restano escluse**: lì un connettore sta sopra i suoi
+  pin e mascherarli impedirebbe di misurarlo.
+- `photo_refine.crop_frame(image, length, width)` — riferimento di una foto già
+  calibrata e ritagliata, senza ricercare la scheda dentro il proprio ritaglio
+  (dove il rettangolo scuro più grande può essere un componente).
+- `photo_refine.refine_on_frame(image, frame, components, exclude_rects_mm)` —
+  il ciclo di misura estratto da `refine_components`, che ora vi delega.
+- `photo_inventory.measure_proposal_edges(...)` — chiamata dopo il filtro dei
+  contatti e **prima** dell'anteprima e della revisione, così l'utente giudica
+  guardando la geometria misurata. Conserva la proposta originale in
+  `_detector_geometry_mm`, marca `_edges_measured`, ricalcola `_box`.
+- `photo_inventory._normalized_box(...)` — riquadro allineato agli assi che
+  contiene un corpo posato comunque; per le cardinali si riduce allo scambio
+  lunghezza/larghezza.
+
+### Difetto corretto: l'angolo misurato veniva buttato
+
+`refine_component_edges` calcolava l'orientamento con `cv2.minAreaRect` e poi
+lo schiacciava su 0/90, con il commento «l'unica rotazione che il resto della
+catena applica». **Commento scaduto**: `step_generator._rectangle_axes` ha il
+ramo non cardinale e fra le verifiche di consegna c'è una prova FreeCAD reale
+con un volume ruotato di 45°.
+
+Ora l'angolo si tiene come misurato e si riporta alla cardinale solo sotto
+l'incertezza, che è il maggiore fra `MAX_BOARD_TILT_DEG = 1.0` (il residuo di
+inclinazione che la calibrazione stessa ammette sulla scheda) e
+`angular_resolution_deg(lato_corto_px) = atan(CONTOUR_NOISE_PX / (lato −
+2·MORPH_GROWTH_PX))`.
+
+`MORPH_GROWTH_PX = 2.0` è quanto `_edge_mask` gonfia il contorno per lato
+(anello di Canny dopo la sfocatura + dilatazione 3×3); misurato su rettangoli
+sintetici da 10 a 84 px, il contorno risulta più largo di 4.4–4.8 px in tutto.
+
+Nello stesso passaggio, `span_x`/`span_y`, area e allungamento attesi sono
+stati resi validi per una posa qualsiasi (prima assumevano rotazioni cardinali;
+sulle cardinali i valori non cambiano).
+
+### Fragilità dichiarate
+
+- **`CONTOUR_NOISE_PX = 1.0` è un ripiego**: è la quantizzazione del contorno,
+  non una misura del rumore di questa fotocamera. Prova a supporto: su corpi
+  dritti da 14 a 84 px l'unica deviazione falsa osservata è 4.76° su un blob da
+  14 px, contro una risoluzione dichiarata di 5.70° — **margine sottile proprio
+  sul corpo più piccolo**. Diventerebbe superflua misurando l'angolo su un
+  contorno sub-pixel invece che su una maschera rasterizzata.
+- **La polarità resta indeterminata.** `minAreaRect` dà l'asse, non il verso:
+  quale estremo è il pin 1, da che parte guarda l'innesto di un connettore. Va
+  chiesto al modello (campo `mating`), non dedotto qui.
+- **Una misura riuscita NON cancella** `_yolo_clipped_sides` né
+  `_yolo_clipped_recovery`. Il filtro sull'area accetta contorni fra 0.4 e 1.8
+  volte l'ipotesi, quindi un corpo troncato a metà non può essere ricostruito
+  per intero da qui, e dichiararlo misurato sarebbe falso.
+
+### Test
+
+- `tests/test_photo_refine.py` (25): stesso angolo fisico di 2° riportato su un
+  corpo da 6 mm e riassorbito su uno da 1.2 mm — i due casi si distinguono per
+  la taglia del contorno, non per coincidenza numerica; corpo obliquo a 30°
+  dichiarato a 30; parametrico su sette taglie (1.0×0.5 → 10×4 mm): un corpo
+  dritto non riceve mai un angolo inventato — è la prova su cui poggiano le due
+  costanti.
+- `tests/test_detector_edge_measurement.py` (8, nuovo): `crop_frame`; strisce
+  dei contatti sul lato dichiarato e matrici lasciate stare; proposta spostata
+  riportata sui bordi veri; proposta sul nulla lasciata identica; **la stessa
+  piazzola** misurata benissimo senza maschera e invisibile con le zone
+  dichiarate; corpo appena oltre la striscia ancora misurabile.
+
+Esito sul disco dell'utente (`python3` della VM Linux, non il `.venv`
+Windows): 275 passati su otto suite fotografiche. Un fallimento ambientale,
+`test_photo_mechanical_metadata` → `libEGL.so.1` mancante nella VM: importa
+PyQt, non riguarda il codice. Da riverificare con
+`.venv/Scripts/python.exe -m pytest` su Windows.
+
+## Mai verificato su foto reale
+
+Queste misure **non sono ancora passate sul modulo ESP32**. Nel contenitore
+non ci sono i pesi `pcb_yolov8s.onnx`, quindi la catena non è stata eseguita
+end-to-end: serve un run dall'app. Da guardare nel log: la riga «Bordi con
+OpenCV: N proposte su M misurate…» e quante risultano non cardinali.
+
+## Aperto, segnalato e mai autorizzato
+
+- `provisional_matched` trattato come `auto_matched`; il ramo di pareggio
+  guarda solo i primi due candidati.
+- Marcature stampate sul 3D, contro la strategia del progetto.
+- Disallineamento del ritaglio con prospettiva residua del +4% (passo piazzole
+  139.5 px sopra contro 145.3 px sotto); USB-C e fila inferiore troncate.
+- Alimentare il rilevatore con più foto da angolazioni diverse: **scartato**,
+  manca la rettifica prospettica e la calibrazione rifiuta le foto inclinate
+  oltre 1°. Fondere invece più viste DALL'ALTO già calibrate resta un'idea
+  legittima e non implementata: oggi si tiene solo la più dettagliata.

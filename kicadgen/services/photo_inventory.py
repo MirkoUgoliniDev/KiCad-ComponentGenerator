@@ -530,6 +530,82 @@ def draw_inventory(image, components, use_ids=False):
     return encoded.tobytes() if ok else None
 
 
+def _normalized_box(component, length_mm, width_mm):
+    """@brief Riquadro normalizzato che racchiude un corpo posato comunque.
+
+    @param component Ipotesi con x_mm, y_mm, length_mm, width_mm, rotation_deg.
+    @param length_mm Estensione della scheda lungo X.
+    @param width_mm Estensione lungo Y.
+    @return Tupla (x0, y0, x1, y1) in 0..1 sul ritaglio della scheda.
+    @note Per una posa cardinale si riduce a scambiare lunghezza e larghezza;
+        per una posa obliqua e' il rettangolo allineato agli assi che contiene
+        il corpo, che e' quello che il disegno e la revisione mostrano.
+    """
+    rotation = math.radians(float(component.get('rotation_deg') or 0.0))
+    body_length = float(component['length_mm'])
+    body_width = float(component['width_mm'])
+    span_x = abs(body_length * math.cos(rotation)) + abs(body_width * math.sin(rotation))
+    span_y = abs(body_length * math.sin(rotation)) + abs(body_width * math.cos(rotation))
+    centre_x = float(component['x_mm']) / length_mm + 0.5
+    centre_y = float(component['y_mm']) / width_mm + 0.5
+    half_x, half_y = span_x / (2 * length_mm), span_y / (2 * width_mm)
+    clamp = lambda v: min(1.0, max(0.0, v))
+    return (clamp(centre_x - half_x), clamp(centre_y - half_y),
+            clamp(centre_x + half_x), clamp(centre_y + half_y))
+
+
+def measure_proposal_edges(photo, proposals, positions, length_mm, width_mm, log):
+    """@brief Misura i bordi reali delle proposte del rilevatore, con OpenCV.
+
+    @param photo Ritaglio calibrato della scheda.
+    @param proposals Proposte del rilevatore, in millimetri e con `_box`.
+    @param positions Contatti dichiarati, da contact_positions.
+    @param length_mm Estensione della scheda lungo X.
+    @param width_mm Estensione lungo Y.
+    @param log Callback di avanzamento.
+    @return La lista delle proposte, con la geometria misurata dove possibile.
+    @note Divisione del lavoro: il rilevatore dice DOVE c'e' un corpo, cosa che
+        richiede addestramento; i bordi li misura il gradiente, che non ne
+        richiede. Quando il contorno non e' chiaro o non e' compatibile con la
+        proposta, la proposta resta com'era: la misura non puo' fare peggio di
+        non misurare.
+    @note Le piazzole dichiarate vengono escluse dalla ricerca: il loro bordo
+        metallico e' netto quanto quello di un componente ed e' la sorgente
+        principale di contorni falsi. Era il pezzo che mancava quando questa
+        misura fu tolta dal percorso standard.
+    @note Le marcature di taglio (`_yolo_clipped_sides`, `_yolo_clipped_recovery`)
+        NON vengono tolte da una misura riuscita: il filtro sull'area accetta
+        contorni fra 0.4 e 1.8 volte l'ipotesi, quindi un corpo troncato a meta'
+        non puo' essere ricostruito per intero da qui, e dichiararlo misurato
+        sarebbe falso.
+    """
+    from .contact_zones import contact_rects_mm
+    from .photo_refine import crop_frame, refine_on_frame
+    frame = crop_frame(photo, length_mm, width_mm)
+    if frame is None:
+        return proposals
+    measured, report = refine_on_frame(photo, frame, proposals,
+                                       contact_rects_mm(positions, length_mm, width_mm))
+    keys = ('x_mm', 'y_mm', 'length_mm', 'width_mm', 'rotation_deg')
+    changed = 0
+    for before, after in zip(proposals, measured):
+        if all(float(after.get(key) or 0.0) == float(before.get(key) or 0.0) for key in keys):
+            continue
+        changed += 1
+        after['_detector_geometry_mm'] = {key: before.get(key) for key in keys}
+        after['_edges_measured'] = True
+        after['_box'] = _normalized_box(after, length_mm, width_mm)
+    if not report.measured:
+        log('Bordi con OpenCV: nessun contorno utilizzabile; restano le proposte del rilevatore.')
+        return measured
+    oblique = sum(1 for row in measured if float(row.get('rotation_deg') or 0.0) % 90 != 0)
+    log(f'Bordi con OpenCV: {report.measured} proposte su {len(measured)} misurate sul '
+        f'gradiente ({changed} con geometria diversa da quella del rilevatore, '
+        f'{oblique} non cardinali); {len(report.skipped)} lasciate come proposte '
+        'perche\' il contorno non era chiaro o non era compatibile.')
+    return measured
+
+
 def draw_detector_proposals(image, kept, dropped=()):
     """@brief Disegna cio' che il rilevatore locale ha proposto, e cio' che e' stato tolto.
 
@@ -673,6 +749,12 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                     f'del modulo ({len(positions)} contatti su quote dichiarate) e sono state tolte.')
             elif positions:
                 log(f'Contatti dichiarati: {len(positions)}; nessuna proposta ci cadeva sopra.')
+            # Il rilevatore dice dove c'e' un corpo; i bordi li misura il
+            # gradiente, che non ha bisogno di addestramento. Si fa qui, prima
+            # dell'anteprima e della revisione, perche' e' la geometria che
+            # l'utente deve poter contestare guardandola.
+            proposals = measure_proposal_edges(photo, proposals, positions,
+                                               length, width, log)
             # L'anteprima di cio' che ha proposto il rilevatore, prima della
             # riconciliazione: e' l'unico modo per capire se il filtro dei
             # contatti ha tolto le piazzole o qualcosa di buono.

@@ -224,3 +224,118 @@ def test_find_board_rejects_a_small_lookalike_instead_of_calibrating_on_it():
     h = int(round(w / (BODY_LENGTH_MM / BODY_WIDTH_MM)))
     cv2.rectangle(img, (1078, 893), (1078 + w, 893 + h), (20,) * 3, -1)
     assert find_board(img, BODY_LENGTH_MM, BODY_WIDTH_MM) is None
+
+
+# ── orientamento misurato, non arrotondato ───────────────────────────
+
+def _photo_with_oblique_body(center_mm, size_mm, angle_deg, scale=SCALE,
+                             board_gray=22, component_gray=45, seed=0):
+    """Foto sintetica con un corpo posato a un angolo qualsiasi.
+
+    Serve a distinguere due cose che l'arrotondamento a 0/90 confondeva: un
+    pezzo davvero obliquo e un pezzo dritto misurato male.
+    """
+    margin = int(round(2.0 * scale))
+    board_w, board_h = int(BODY_LENGTH_MM * scale), int(BODY_WIDTH_MM * scale)
+    img = np.full((board_h + 2 * margin, board_w + 2 * margin, 3), 235, dtype="uint8")
+    cv2.rectangle(img, (margin, margin), (margin + board_w, margin + board_h),
+                  (board_gray,) * 3, -1)
+    cx_px = margin + (BODY_LENGTH_MM / 2 + center_mm[0]) * scale
+    cy_px = margin + (BODY_WIDTH_MM / 2 + center_mm[1]) * scale
+    box = cv2.boxPoints(((cx_px, cy_px),
+                         (size_mm[0] * scale, size_mm[1] * scale), angle_deg))
+    cv2.fillPoly(img, [np.int32(np.round(box))], (component_gray,) * 3)
+    rng = np.random.default_rng(seed)
+    noise = rng.normal(0, 2.5, img.shape).astype("int16")
+    return np.clip(img.astype("int16") + noise, 0, 255).astype("uint8")
+
+
+def test_angular_resolution_shrinks_as_the_body_grows():
+    """Quanto fine puo' essere l'angolo dipende dalla taglia del contorno."""
+    from kicadgen.services.photo_refine import angular_resolution_deg
+    assert angular_resolution_deg(16) > angular_resolution_deg(40) > angular_resolution_deg(400)
+    # Un corpo lungo un pixel non puo' dichiarare nessun angolo utile.
+    assert angular_resolution_deg(1) == pytest.approx(45.0)
+
+
+def test_edges_report_the_angle_of_a_clearly_oblique_body():
+    """Un corpo posato a 30 gradi va dichiarato a 30, non raddrizzato a 0.
+
+    La catena CAD applica rotazioni qualsiasi: schiacciare la misura sulla
+    cardinale piu' vicina buttava via l'unica informazione che OpenCV da'
+    gratis, senza addestramento.
+    """
+    img = _photo_with_oblique_body((5.0, 0.0), (6.0, 2.0), 30.0)
+    frame = find_board(img, BODY_LENGTH_MM, BODY_WIDTH_MM)
+    assert frame is not None
+    guess = {"x_mm": 5.0, "y_mm": 0.0, "length_mm": 6.0, "width_mm": 2.0,
+             "rotation_deg": 0.0}
+    measured = refine_component_edges(img, frame, guess)
+    assert measured is not None
+    assert measured["rotation_deg"] == pytest.approx(30.0, abs=3.0)
+    assert measured["length_mm"] == pytest.approx(6.0, abs=0.7)
+    assert measured["width_mm"] == pytest.approx(2.0, abs=0.7)
+
+
+def test_the_same_tilt_is_a_measure_on_a_large_body_and_noise_on_a_small_one():
+    """Caso positivo e caso negativo con LO STESSO angolo fisico.
+
+    Due gradi su un corpo lungo 6 mm stanno sopra la risoluzione angolare del
+    suo contorno e vanno riportati; gli stessi due gradi su un passivo
+    minuscolo stanno sotto, e dichiararli sarebbe inventare precisione. La
+    regola distingue i due casi per un motivo strutturale -- la taglia del
+    contorno -- non per coincidenza numerica.
+    """
+    from kicadgen.services.photo_refine import angular_resolution_deg
+    tilt = 2.0
+    large = _photo_with_oblique_body((5.0, 0.0), (6.0, 2.0), tilt, component_gray=70)
+    small = _photo_with_oblique_body((-8.0, 0.0), (1.2, 0.6), tilt, component_gray=70)
+    frame_large = find_board(large, BODY_LENGTH_MM, BODY_WIDTH_MM)
+    frame_small = find_board(small, BODY_LENGTH_MM, BODY_WIDTH_MM)
+
+    # Le due taglie stanno davvero ai due lati della soglia, altrimenti il
+    # test passerebbe per caso invece che per la regola. I lati sono quelli
+    # del contorno, gia' gonfiati dalla chiusura morfologica.
+    assert angular_resolution_deg(2.0 * SCALE + 4) < tilt < angular_resolution_deg(0.6 * SCALE + 4)
+
+    big = refine_component_edges(large, frame_large, {
+        "x_mm": 5.0, "y_mm": 0.0, "length_mm": 6.0, "width_mm": 2.0, "rotation_deg": 0.0})
+    tiny = refine_component_edges(small, frame_small, {
+        "x_mm": -8.0, "y_mm": 0.0, "length_mm": 1.2, "width_mm": 0.6, "rotation_deg": 0.0})
+    assert big is not None and tiny is not None
+    assert big["rotation_deg"] == pytest.approx(tilt, abs=0.5)
+    assert tiny["rotation_deg"] == 0.0
+
+
+@pytest.mark.parametrize("size", [(1.0, 0.5), (1.2, 0.6), (1.6, 0.8), (2.0, 1.0),
+                                  (3.2, 1.6), (6.0, 2.0), (10.0, 4.0)])
+def test_a_straight_body_never_gets_an_invented_angle_at_any_size(size):
+    """La prova su cui poggiano CONTOUR_NOISE_PX e MORPH_GROWTH_PX.
+
+    Un corpo posato dritto, rasterizzato su una griglia di pixel, puo' far
+    leggere a minAreaRect qualche grado di inclinazione, e tanti piu' quanto
+    piu' e' piccolo (su un blob da 14 px si sono misurati fino a 4.8 gradi
+    falsi). Se la risoluzione dichiarata non limitasse quell'errore, il
+    rilevamento inizierebbe a ruotare componenti dritti: e' il modo in cui
+    questa misura puo' peggiorare il risultato invece di migliorarlo.
+    """
+    for seed in range(4):
+        img = _photo_with_oblique_body((5.0, 0.0), size, 0.0, component_gray=70, seed=seed)
+        frame = find_board(img, BODY_LENGTH_MM, BODY_WIDTH_MM)
+        measured = refine_component_edges(img, frame, {
+            "x_mm": 5.0, "y_mm": 0.0, "length_mm": size[0], "width_mm": size[1],
+            "rotation_deg": 0.0})
+        if measured is None:
+            continue
+        assert measured["rotation_deg"] in (0.0, 90.0), (
+            f"corpo dritto {size} dichiarato obliquo (seed {seed})")
+
+
+def test_a_body_laid_straight_keeps_a_cardinal_angle():
+    """Nessun tremolio: un pezzo dritto resta a 0, non a 0.4 gradi."""
+    img = _photo_with_oblique_body((0.0, 0.0), (6.0, 2.0), 0.0)
+    frame = find_board(img, BODY_LENGTH_MM, BODY_WIDTH_MM)
+    measured = refine_component_edges(img, frame, {
+        "x_mm": 0.0, "y_mm": 0.0, "length_mm": 6.0, "width_mm": 2.0, "rotation_deg": 0.0})
+    assert measured is not None
+    assert measured["rotation_deg"] == 0.0

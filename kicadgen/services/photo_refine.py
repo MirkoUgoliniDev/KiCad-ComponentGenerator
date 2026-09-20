@@ -23,8 +23,13 @@ Procedimento, deterministico e indipendente dal modulo:
    dilatano quanto basta a chiudere i contorni spezzati e si cerca il
    contorno chiuso piu' compatibile per area e distanza dal centro;
 3. il rettangolo minimo che lo contiene da' posizione, ingombro e
-   orientamento (arrotondato al multiplo di 90 gradi piu' vicino, unica
-   rotazione che il resto della catena sa applicare) misurati.
+   orientamento misurati. L'angolo si tiene come misurato: il generatore
+   CAD applica rotazioni qualsiasi (`_rectangle_axes` ha il ramo non
+   cardinale). Si riporta alla cardinale solo quando lo scarto e' piu'
+   piccolo dell'incertezza -- il residuo di inclinazione che la
+   calibrazione ammette sulla scheda, o la risoluzione angolare del
+   contorno per quella taglia -- perche' li' un pezzo obliquo e una
+   scheda storta danno la stessa misura.
 
 Quando la misura non e' affidabile -- nessun contorno utile, area troppo
 diversa da quella stimata, spostamento eccessivo rispetto alla stima -- si
@@ -105,6 +110,22 @@ MIN_FILL_RATIO = 0.45
 #: discostarsi da quello stimato: un blob fuso e' quasi sempre molto piu'
 #: allungato o molto meno del componente che dovrebbe rappresentare.
 MAX_ELONGATION_RATIO = 1.5
+#: Incertezza di posizione di un punto di contorno, in pixel. Ripiego
+#: dichiarato: e' la quantizzazione del contorno (un pixel), non una misura
+#: del rumore di questa fotocamera. Serve a ricavare la risoluzione angolare
+#: di un corpo dalla sua dimensione: un corpo corto non puo' dichiarare un
+#: angolo fine. Diventerebbe superflua stimando il rumore di bordo dalla foto
+#: stessa.
+CONTOUR_NOISE_PX = 1.0
+#: Di quanto `_edge_mask` gonfia il contorno rispetto al corpo, per lato:
+#: l'anello di Canny dopo la sfocatura sta circa un pixel fuori dal bordo e
+#: la dilatazione 3x3 ne aggiunge un altro. Va tolta dal lato corto misurato
+#: prima di giudicare quanto fine puo' essere l'angolo, altrimenti un corpo
+#: piccolo sembra piu' grande di quello che e' e si finisce per attribuirgli
+#: una precisione angolare che non ha. Misurato su rettangoli sintetici da 10
+#: a 84 px: il contorno risulta piu' largo di 4.4-4.8 px in tutto, quindi 2.0
+#: per lato e' il valore che il kernel prevede ed e' anche quello osservato.
+MORPH_GROWTH_PX = 2.0
 
 
 @dataclass
@@ -372,6 +393,52 @@ def _forbidden_mask(image, frame: BoardFrame, exclude_rects_mm) -> "np.ndarray":
     return forbidden
 
 
+def angular_resolution_deg(short_side_px: float) -> float:
+    """@brief Angolo piu' fine che un contorno di questa taglia puo' dichiarare.
+
+    @param short_side_px Lato corto del rettangolo minimo, in pixel, gia'
+        misurato sul contorno gonfiato dalla chiusura morfologica.
+    @return Gradi: sotto questo valore l'inclinazione non e' distinguibile
+        dall'incertezza di posizione dei punti di contorno.
+    @note Un chip 0402 alto 10 px non puo' dire che e' ruotato di due gradi:
+        basta che un punto di bordo sia fuori di un pixel. Un modulo lungo 800
+        px si'. La quota nasce dalla geometria del contorno, non da una soglia
+        scelta perche' un caso ci ricada dentro.
+    """
+    body_px = float(short_side_px) - 2 * MORPH_GROWTH_PX
+    return math.degrees(math.atan2(CONTOUR_NOISE_PX, max(body_px, 1.0)))
+
+
+def _axis_rotation(angle: float, rw: float, rh: float, short_side_px: float) -> float:
+    """@brief Orientamento del lato lungo, in gradi, da un minAreaRect.
+
+    @param angle Angolo restituito da cv2.minAreaRect, riferito a un lato
+        qualsiasi del rettangolo.
+    @param rw Larghezza del rettangolo minimo, in pixel.
+    @param rh Altezza del rettangolo minimo, in pixel.
+    @param short_side_px Lato corto, per sapere quanto fine puo' essere l'angolo.
+    @return Rotazione in [0, 180), gia' riportata al lato lungo.
+    @note minAreaRect e' ambiguo di 90 gradi perche' non dice quale lato ha
+        preso come riferimento: si toglie l'ambiguita' prendendo sempre il lato
+        lungo. Resta indeterminata la POLARITA' (quale estremo e' il pin 1, da
+        che parte guarda l'innesto): quella non si ricava dall'ingombro e va
+        chiesta al modello, non dedotta qui.
+    @note Un'inclinazione piu' piccola dell'incertezza -- il residuo che la
+        calibrazione stessa ammette sulla scheda, oppure la risoluzione
+        angolare del contorno, quale delle due e' maggiore -- viene riportata
+        alla cardinale. Non e' un arrotondamento di comodo: sotto quella soglia
+        un corpo davvero obliquo e una scheda leggermente storta danno la
+        stessa misura, e dichiarare un angolo sarebbe inventare precisione.
+    """
+    axis = (angle if rw >= rh else angle + 90) % 180
+    cardinal = 0.0 if (axis < 45 or axis > 135) else 90.0
+    reference = 0.0 if axis < 45 else 180.0 if axis > 135 else 90.0
+    deviation = axis - reference
+    if abs(deviation) <= max(MAX_BOARD_TILT_DEG, angular_resolution_deg(short_side_px)):
+        return cardinal
+    return round(axis, 1)
+
+
 def refine_component_edges(image, frame: BoardFrame, component: dict, forbidden=None) -> Optional[dict]:
     """Cerca i bordi reali di un componente nella foto.
 
@@ -383,8 +450,12 @@ def refine_component_edges(image, frame: BoardFrame, component: dict, forbidden=
     width = float(component["width_mm"])
     rotation = float(component.get("rotation_deg") or 0.0)
     # Ingombro nel sistema dell'immagine (X/Y), non nel sistema del pezzo.
-    span_x = width if rotation % 180 == 90 else length
-    span_y = length if rotation % 180 == 90 else width
+    # Vale per una rotazione qualsiasi; sulle cardinali si riduce esattamente
+    # a scambiare lunghezza e larghezza.
+    cosine = abs(math.cos(math.radians(rotation)))
+    sine = abs(math.sin(math.radians(rotation)))
+    span_x = length * cosine + width * sine
+    span_y = length * sine + width * cosine
 
     px, py = frame.to_px(float(component["x_mm"]), float(component["y_mm"]))
     half_x = (span_x / 2 + SEARCH_MARGIN_MM) * frame.scale
@@ -403,8 +474,11 @@ def refine_component_edges(image, frame: BoardFrame, component: dict, forbidden=
     if not contours:
         return None
 
-    expected_area = span_x * span_y * frame.scale ** 2
-    expected_elongation = max(span_x, span_y) / max(1e-6, min(span_x, span_y))
+    # Area e allungamento sono proprieta' del pezzo, non della sua posa: si
+    # ricavano dall'ingombro dichiarato e non dal rettangolo che lo racchiude
+    # nell'immagine, che per una posa obliqua e' piu' grande del corpo.
+    expected_area = length * width * frame.scale ** 2
+    expected_elongation = max(length, width) / max(1e-6, min(length, width))
     wcx, wcy = px - x0, py - y0
     best, best_score = None, None
     for contour in contours:
@@ -439,13 +513,8 @@ def refine_component_edges(image, frame: BoardFrame, component: dict, forbidden=
     if math.hypot(x_mm - float(component["x_mm"]), y_mm - float(component["y_mm"])) > MAX_SHIFT_MM:
         return None
 
-    # L'angolo di minAreaRect e' arbitrario (dipende da quale lato prende
-    # come riferimento): si arrotonda al multiplo di 90 piu' vicino, l'unica
-    # rotazione che il resto della catena applica.
     long_side, short_side = max(rw, rh), min(rw, rh)
-    axis_angle = (angle if rw >= rh else angle + 90) % 180
-    horizontal = axis_angle < 45 or axis_angle > 135
-    new_rotation = 0.0 if horizontal else 90.0
+    new_rotation = _axis_rotation(angle, rw, rh, short_side)
     measured_length = long_side / frame.scale
     measured_width = short_side / frame.scale
 
@@ -491,6 +560,57 @@ def refine_components(
     if frame is None:
         return refined, report
 
+    measured_components, loop_report = refine_on_frame(image, frame, refined, exclude_rects_mm)
+    loop_report.photo = report.photo
+    return measured_components, loop_report
+
+
+def crop_frame(image, body_length: float, body_width: float) -> Optional[BoardFrame]:
+    """@brief Riferimento di una foto GIA' calibrata e ritagliata sulla scheda.
+
+    @param image Ritaglio in cui la scheda occupa esattamente l'immagine.
+    @param body_length Lunghezza dichiarata della scheda, in millimetri.
+    @param body_width Larghezza dichiarata, in millimetri.
+    @return BoardFrame con origine al centro, o None se le quote non reggono.
+    @note `prepare_photo` ritaglia la scheda sul suo contorno: ricercarla con
+        `find_board` dentro il proprio ritaglio e' sia inutile sia rischioso,
+        perche' li' il rettangolo scuro piu' grande puo' essere un componente.
+        Qui il riferimento si costruisce dalle quote dichiarate e dai pixel del
+        ritaglio, senza nessuna ricerca.
+    @note La scala si prende dal lato lungo, come `find_board`: e' il lato su
+        cui l'errore relativo di ritaglio pesa meno.
+    """
+    if image is None or body_length <= 0 or body_width <= 0:
+        return None
+    height_px, width_px = image.shape[:2]
+    if width_px < 2 or height_px < 2:
+        return None
+    return BoardFrame(cx=width_px / 2, cy=height_px / 2,
+                      scale=width_px / body_length,
+                      width_px=float(width_px), height_px=float(height_px))
+
+
+def refine_on_frame(image, frame: BoardFrame, components: Sequence[dict],
+                    exclude_rects_mm: Sequence[tuple] = ()) -> tuple[list[dict], RefineReport]:
+    """@brief Misura i bordi dei componenti dati, su una foto e un riferimento noti.
+
+    @param image Foto in cui cercare i bordi.
+    @param frame Riferimento della scheda nella foto.
+    @param components Ipotesi con x_mm, y_mm, length_mm, width_mm, rotation_deg.
+    @param exclude_rects_mm Rettangoli (x0,y0,x1,y1) in mm dove i contorni non
+        vanno guardati: tipicamente le strisce dei contatti dichiarati, i cui
+        bordi metallici lucidi si confondono con quelli di un componente.
+    @return Copia della lista con la geometria misurata dove e' stato possibile,
+        e il resoconto di quanti sono stati misurati e quanti lasciati stimati.
+    @note Non tocca nome, tipo, colore, marcatura: solo la geometria, e solo
+        quando la misura e' abbastanza affidabile (vedi `refine_component_edges`).
+        Quando non misura tiene la stima, quindi non puo' fare peggio che non
+        misurare affatto.
+    """
+    report = RefineReport()
+    refined = [dict(c) for c in components]
+    if cv2 is None or frame is None or not refined:
+        return refined, report
     forbidden = _forbidden_mask(image, frame, exclude_rects_mm)
     for component in refined:
         try:

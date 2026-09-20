@@ -118,6 +118,42 @@ def contact_positions(data, length_mm, width_mm):
     return positions
 
 
+def contact_rects_mm(positions, length_mm, width_mm):
+    """@brief Rettangoli (x0,y0,x1,y1) in mm occupati dai contatti di bordo.
+
+    @param positions Uscita di contact_positions.
+    @param length_mm Estensione della scheda lungo X.
+    @param width_mm Estensione lungo Y.
+    @return Lista di rettangoli in millimetri dal centro scheda.
+    @note Serve a dire alla misura dei bordi dove NON guardare: la piazzola
+        dorata ha un contorno netto quanto quello di un componente, e senza
+        questa esclusione una misura buona viene sostituita dal bordo della
+        piazzola vicina. La zona e' quella dichiarata -- mezzo passo lungo il
+        bordo, la profondita' della piazzola con la sua sigla -- non una
+        fascia scelta guardando la foto.
+    @note Le matrici passanti restano fuori: li' un connettore sta proprio
+        sopra i suoi pin, e mascherare la zona impedirebbe di misurarlo.
+    """
+    rects = []
+    for contact in positions or ():
+        edge = contact.get('edge')
+        pitch = _number(contact.get('pitch_mm'))
+        depth = _number(contact.get('depth_mm')) or pitch
+        if edge not in ('left', 'right', 'top', 'bottom') or pitch is None:
+            continue
+        reach = pitch * _BAND_TOLERANCE
+        x, y = contact['x_mm'], contact['y_mm']
+        if edge == 'left':
+            rects.append((x, y - reach, x + depth, y + reach))
+        elif edge == 'right':
+            rects.append((x - depth, y - reach, x, y + reach))
+        elif edge == 'top':
+            rects.append((x - reach, y, x + reach, y + depth))
+        else:
+            rects.append((x - reach, y - depth, x + reach, y))
+    return rects
+
+
 def contact_proposals(proposals, positions, length_mm, width_mm):
     """@brief Indici delle proposte che cadono su un contatto dichiarato.
 
