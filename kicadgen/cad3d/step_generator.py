@@ -677,6 +677,11 @@ def _run_freecad(
     try:
         if progress:
             from .process_log import run_logged
+            # 300 secondi di SILENZIO, non di lavoro: il conto riparte a ogni
+            # riga che FreeCAD stampa. Un limite sulla durata complessiva
+            # uccideva il lavoro dei componenti successivi per colpa del primo
+            # import lento, ed era tanto piu' probabile quanto piu' grande era
+            # il modulo.
             result = run_logged(
                 [freecadcmd, str(_SCRIPT_PATH), json_path],
                 output_dir / "freecad.log", progress=progress,

@@ -96,3 +96,44 @@ def test_process_log_is_readable_before_process_exits(tmp_path):
               "assert p.exists(), 'callback was delayed until process exit'")
     result = run_logged([sys.executable, "-c", script], path, progress=on_line, timeout=6)
     assert result.returncode == 0
+
+
+def test_a_slow_but_talking_process_is_not_killed(tmp_path):
+    """@brief Caso positivo: lavorare a lungo non è un guasto.
+
+    Il limite di prima era sulla durata complessiva: su un modulo vero l'import
+    del primo modello 3D si è mangiato i 300 secondi da solo e il processo è
+    stato ucciso prima del secondo componente dei cinquanta. Qui il processo
+    dura più del limite ma continua ad annunciare quello che fa: deve arrivare
+    in fondo.
+    """
+    path = tmp_path / "freecad.log"
+    script = ("import time,sys\n"
+              "for i in range(6):\n"
+              "    print('KICADGEN_COMPONENT_START:%d/6' % (i + 1), flush=True)\n"
+              "    time.sleep(0.15)\n")
+    result = run_logged([sys.executable, "-c", script], path, progress=lambda _: None,
+                        timeout=0.4)
+    assert result.returncode == 0
+    assert result.stdout.count("KICADGEN_COMPONENT_START") == 6
+    assert "timeout=False" in path.read_text(encoding="utf-8")
+
+
+def test_a_silent_process_is_still_killed(tmp_path):
+    """@brief Caso negativo: il silenzio resta il segnale di un lavoro fermo.
+
+    Distinguere «lento» da «fermo» è tutto il punto della regola: il primo va
+    lasciato finire, il secondo va interrotto.
+    """
+    import subprocess
+    path = tmp_path / "freecad.log"
+    script = ("import time\n"
+              "print('KICADGEN_COMPONENT_START:1/6', flush=True)\n"
+              "time.sleep(30)\n")
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_logged([sys.executable, "-c", script], path, progress=lambda _: None,
+                   timeout=0.5)
+    written = path.read_text(encoding="utf-8")
+    assert "timeout=True" in written
+    # Il diario dice che a mancare era l'output, non il tempo speso.
+    assert "nessun output per" in written

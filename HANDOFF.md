@@ -3019,3 +3019,54 @@ fallisce a volte nella corsa completa sul disco dell'utente e passa sempre da
 solo, a coppie e nel contenitore (anche mettendo da parte le modifiche). Ha
 l'aria di una dipendenza dalla granularità dei tempi di modifica dei file.
 Da guardare quando qualcuno tocca la cache dei footprint.
+
+# 00:10 — il timeout di FreeCAD contava la durata, non il silenzio
+
+Prima corsa completa dopo le correzioni: footprint generato, **3D no**.
+`freecad.log` finisce con `FreeCAD exit=1, timeout=True`, esattamente 300 s dopo
+l'avvio (23:49:03 → 23:54:03).
+
+**Causa.** `step_generator` passava `timeout=300` a `run_logged` come limite
+sulla **durata complessiva** del processo FreeCAD, tutti i 50 componenti
+insieme. Il primo componente era MOD1, cioè l'import di
+`ESP32-S3-WROOM-1U.STEP` (8.8 MB): si è mangiato l'intero budget da solo e il
+processo è stato ucciso prima del secondo componente. Il footprint è salvo
+perché lo scrive Python; `TEST.3dshapes` è rimasta vuota perché l'export STEP
+avviene una sola volta, alla fine, per l'intero assieme.
+
+Un limite unico sbagliava tre cose insieme: non distingueva un lavoro **lento**
+da uno **fermo**; non scalava con la quantità di lavoro (gli stessi 300 s per 3
+o per 50 componenti); e puniva proprio i moduli grandi, quelli in cui rifare
+tutto costa di più.
+
+**Correzione.** I 300 secondi ora contano il **silenzio**: il conto riparte a
+ogni riga che FreeCAD stampa. È il criterio giusto perché questo processo
+annuncia ogni componente e ogni import mentre procede — finché parla, sta
+lavorando. Non c'è un tetto assoluto: un lavoro che avanza non viene interrotto
+per aver avanzato a lungo. Il diario ora scrive anche «(nessun output per N s)»
+quando scatta, così si legge che a mancare era l'output e non il tempo.
+
+**Test** (`tests/test_board_pipeline.py`): un processo che dura più del limite
+ma continua ad annunciare i componenti arriva in fondo; uno che stampa una riga
+e poi tace viene interrotto e il diario lo dichiara. Girati nel contenitore:
+sul disco dell'utente questa suite è saltata perché manca `pyvistaqt`.
+
+## Aperto
+
+- **Perché quell'import ha richiesto più di 5 minuti** resta da capire: nella
+  corsa di stamattina lo stesso file era stato importato con successo. Alzare o
+  togliere il limite non risponde alla domanda, la rimanda.
+- `provisional_matched` è trattato come abbinamento accettato: in questa corsa
+  sono 8 componenti su 50, MOD1 compreso, che prenderanno un modello di
+  libreria sulla base di una corrispondenza **provvisoria**. Segnalato, mai
+  autorizzato.
+- Due test di `test_board_pipeline.py` (`[castellated]`) falliscono nel
+  contenitore anche sulla copia base precedente a queste modifiche: difetto
+  preesistente, e sul disco dell'utente non vengono nemmeno eseguiti.
+
+## Esito della corsa (per riferimento)
+
+50 componenti dall'inventario, da 63 proposte. Presenza alta per 36, media 10,
+bassa 4. Identificazione: alta 7, media 26, bassa 17 — tutte marcate incerte.
+Abbinamento modelli: 25 irrisolti, 14 da rivedere, 8 provvisori, 3 automatici;
+11 con un `model_path` reale. Costo: 0.9568 USD, 2 chiamate, 81209 token.
