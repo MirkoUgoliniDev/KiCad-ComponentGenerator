@@ -24,14 +24,37 @@ def _proposal(identity):
 
 
 def _body(identity='whole-assembly', sources=None, **changes):
-    row = dict(component_id=identity, source_candidate_ids=[1, 2] if sources is None else sources,
+    """@brief Riga di risposta completa rispetto allo schema `inventory_tool()`.
+
+    Ogni campo `required` dello schema e' presente: una risposta che ne omette
+    uno su TUTTE le righe fa ripetere la chiamata a pagamento, e i test di
+    questo file contano le richieste. I valori dei campi aggiunti replicano i
+    ripieghi che il codice applicava quando mancavano (presenza e classe pari
+    alla confidenza complessiva, gruppo `assembly` come un rf_module senza
+    dichiarazione), cosi' le attese dei test non cambiano.
+    """
+    row = dict(component_id=identity, grouping_basis='assembly',
+               source_candidate_ids=[1, 2] if sources is None else sources,
                **{'class': 'rf_module'}, bbox=[.1, .1, .8, .8], bbox_basis='body',
                rotation_deg=25, package='', marking='?', terminal_count=4,
-               terminal_layout='three leads left, one tab right', height_mm=1.8,
-               height_source='visual_estimate', confidence='medium',
-               evidence='One substrate with attached shield; estimated height only')
+               terminal_layout='three leads left, one tab right',
+               lead_count=None, lead_count_complete=False, lead_count_confidence='low',
+               height_mm=1.8, height_source='visual_estimate', confidence='medium',
+               evidence='One substrate with attached shield; estimated height only',
+               presence_confidence='medium', class_confidence='medium',
+               asymmetry_landmark=None)
     row.update(changes)
     return row
+
+
+def test_the_fixture_row_honours_every_required_field_of_the_schema():
+    """@brief Guardia sul builder: se lo schema cresce, il test lo dice subito.
+
+    Senza questa guardia un campo nuovo farebbe scattare il retry in tutti i
+    test del file, e il sintomo sarebbe «tre richieste invece di due», lontano
+    dalla causa.
+    """
+    assert global_inventory.omitted_required_fields(_inventory_response()) == []
 
 
 def _inventory_response():

@@ -331,6 +331,26 @@ def _needs_silk_rim(component_color, substrate_color):
     return (lighter + 0.05) / (darker + 0.05) < SILK_RIM_MIN_CONTRAST
 
 
+def _marking_to_print(component, data):
+    """@brief Testo da stampare sopra un componente, o stringa vuota.
+
+    @param component Voce di `components` del payload (campo `marking`).
+    @param data Payload intero: porta il consenso `show_markings_3d`.
+    @return La marcatura ripulita se il payload chiede di stamparla, altrimenti "".
+    @note Il percorso standard ricostruisce ingombri meccanici generici,
+        senza scritte: la marcatura letta dalla foto ("330?", "123", la
+        stringa completa di un modulo radio) e' un'evidenza per l'abbinamento
+        ai modelli di libreria e un'informazione per l'utente, non geometria.
+        Un payload senza il campo -- come quelli scritti prima che il campo
+        esistesse -- non stampa nulla, perche' l'assenza di una scelta non
+        e' una scelta. Le sigle dei contatti del modulo (`silk_texts`) sono
+        serigrafia del footprint, governata altrove, e non passano di qui.
+    """
+    if data.get("show_markings_3d", False) is not True:
+        return ""
+    return str(component.get("marking") or "").strip()
+
+
 def _rim(cx, cy, length, width, z, line=0.12, thickness=0.008):
     """Cornice serigrafica rettangolare (contorno di un componente o del modulo)."""
     outer = Part.makeBox(length, width, thickness,
@@ -653,7 +673,8 @@ def main():
                     silk_obj = add(f"{base}_silk", rim, silk_color)
                     metadata[silk_obj.Name] = {"source_row": component.get("source_row", index)}
 
-                marking = (component.get("marking") or "").strip()
+                # Solo su richiesta esplicita del payload: vedi _marking_to_print.
+                marking = _marking_to_print(component, data)
                 if marking:
                     size = max(0.35, min(0.8, 0.32 * float(component["width_mm"]),
                                          0.9 * float(component["length_mm"]) / max(1, len(marking))))

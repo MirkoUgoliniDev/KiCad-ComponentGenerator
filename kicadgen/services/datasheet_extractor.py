@@ -512,8 +512,9 @@ _EXTRACTION_TOOL = {
                             "type": "string",
                             "description": (
                                 "Scritta stampata sul componente, SOLO se leggibile nella "
-                                "foto (es. \"SP3485\", \"VPT\", \"102\"): viene stampata "
-                                "sul solido. Non inventare codici."
+                                "foto (es. \"SP3485\", \"VPT\", \"102\"): serve a cercare il "
+                                "modello di libreria per marcatura, non viene stampata sul "
+                                "solido. Non inventare codici."
                             ),
                         },
                     },

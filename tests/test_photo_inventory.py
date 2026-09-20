@@ -320,3 +320,68 @@ def test_the_two_previews_do_not_overwrite_each_other(tmp_path):
     assert {path.name.split('-')[0] for path in second} == {'inventory'}
     assert 'Proposte del rilevatore salvate' in messages[0]
     assert 'Inventario salvato' in messages[1]
+
+
+def _board_with_bodies():
+    """Scheda scura con un corpo chiaro e uno scuro, entrambi con bordo
+    serigrafato bianco: il bordo e' cio' che una media includerebbe e una
+    mediana centrale no."""
+    photo = np.full((100, 200, 3), (20, 40, 30), np.uint8)      # BGR: verde scuro
+    photo[20:60, 20:80] = (255, 255, 255)                        # cornice bianca
+    photo[24:56, 26:74] = (200, 210, 220)                        # corpo chiaro (BGR)
+    photo[20:60, 120:180] = (255, 255, 255)
+    photo[24:56, 126:174] = (25, 25, 25)                          # corpo scuro
+    return photo
+
+
+def test_a_light_body_on_a_dark_board_is_sampled_light_and_a_dark_one_dark():
+    """@brief Positivo: il colore viene dai pixel del corpo, non dalla scheda o
+    dalla cornice serigrafica, e i due corpi ricevono colori diversi."""
+    rows = [dict(name='light', _box=[.10, .20, .40, .60], color_hex='#303030'),
+            dict(name='dark', _box=[.60, .20, .90, .60], color_hex='#303030')]
+    messages = []
+    assert inv.sample_body_colors(_board_with_bodies(), rows, messages.append) == 2
+    assert rows[0]['color_hex'] == '#dcd2c8'          # RGB di (200,210,220) BGR
+    assert rows[1]['color_hex'] == '#191919'
+    assert all(row['_color_source'] == 'photo_median' for row in rows)
+    assert 'Colori campionati dalla foto: 2 corpi su 2' in messages[0]
+
+
+@pytest.mark.parametrize('box', [None, [.5, .5, .4, .6], [.1, .2, .3], [0, 0, 1.5, 1],
+                                 [True, .2, .3, .4], [float('nan'), .2, .3, .4]])
+def test_a_proposal_without_a_valid_box_keeps_its_placeholder(box):
+    """@brief Negativo: senza un rettangolo valido non si inventa un colore."""
+    rows = [dict(name='?', _box=box, color_hex='#303030')]
+    assert inv.sample_body_colors(_board_with_bodies(), rows) == 0
+    assert rows[0]['color_hex'] == '#303030'
+    assert '_color_source' not in rows[0]
+
+
+def test_a_photo_without_colour_channels_leaves_every_placeholder():
+    rows = [dict(name='x', _box=[.1, .2, .4, .6], color_hex='#303030')]
+    assert inv.sample_body_colors(np.zeros((100, 200), np.uint8), rows) == 0
+    assert rows[0]['color_hex'] == '#303030'
+
+
+def test_the_yolo_path_samples_colours_on_the_reconciled_boxes(monkeypatch, tmp_path):
+    """@brief Il colore arriva nel report finale del percorso YOLO -> inventario
+    globale, misurato sui riquadri DOPO la riconciliazione, non sulle proposte."""
+    from kicadgen.services import photo_global_inventory as glob, photo_yolo
+    photo = _board_with_bodies()
+    monkeypatch.setattr(inv, 'prepare_photo', lambda *a: photo.copy())
+    # Il rilevatore propone un riquadro sul corpo scuro; la riconciliazione
+    # lo sposta sul corpo chiaro: e' quest'ultimo che deve essere campionato.
+    monkeypatch.setattr(photo_yolo, 'detect_yolo_components', lambda *a, **k: [
+        dict(_id=1, _box=[.60, .20, .90, .60], name='detector hypothesis', kind='generic',
+             x_mm=10, y_mm=-2, length_mm=12, width_mm=8, height_mm=1, rotation_deg=0,
+             color_hex='#303030')])
+    monkeypatch.setattr(glob, 'review_global_inventory', lambda *a, **k: [
+        dict(_id=1, name='U1', kind='ic', _box=[.10, .20, .40, .60], bbox=[.10, .20, .40, .60],
+             x_mm=0, y_mm=0, length_mm=6, width_mm=4, rotation_deg=0, height_mm=1,
+             color_hex='#303030', confidence='high')])
+    top = tmp_path / 'top.png'
+    top.write_bytes(b'fake')
+    report = inv.extract_inventory([top], 'm', 40, 20, ['ic'], lambda **kw: {},
+                                   top_photo_index=0, detector='yolo', cache_dir=tmp_path)
+    assert [c['color_hex'] for c in report.components] == ['#dcd2c8']
+    assert report.components[0]['_color_source'] == 'photo_median'

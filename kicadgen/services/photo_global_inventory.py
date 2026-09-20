@@ -348,6 +348,88 @@ def _rescale_boxes(rows, width, height, log):
     return None
 
 
+def omitted_required_fields(data):
+    """@brief Campi obbligatori per riga che il modello ha omesso su TUTTE le righe.
+
+    @param data Risposta decodificata del modello.
+    @return Nomi dei campi, nell'ordine dello schema; vuoto se non manca nulla
+        o se non ci sono righe da giudicare.
+    @note Un campo assente su una riga e' un'omissione di quella riga; assente
+        su tutte e' il modello che non ha onorato `required` dello schema, e
+        allora la risposta non e' incompleta per caso: e' scritta in un altro
+        contratto. Su una corsa reale mancavano presence_confidence,
+        class_confidence e lead_count_confidence su 43 righe su 43, e la
+        presenza collassava a 'low' ovunque, spegnendo a valle ogni
+        abbinamento ai modelli KiCad.
+    """
+    if not isinstance(data, dict) or not isinstance(data.get('components'), list):
+        return []
+    rows = [row for row in data['components'] if isinstance(row, dict)]
+    if not rows:
+        return []
+    required = inventory_tool()['function']['parameters']['properties']['components']['items']['required']
+    return [name for name in required if all(name not in row for row in rows)]
+
+
+#: Coda aggiunta al prompt per il secondo tentativo, quando il primo ha omesso
+#: campi obbligatori su ogni riga. Nomina i CAMPI, non la scheda: e' una
+#: correzione di contratto, non un aiuto sul caso.
+_OMISSION_REMINDER = (
+    '\n\nYour previous answer omitted these REQUIRED fields on every component: {fields}. '
+    'Every component object must carry every required field of the schema, with one of '
+    'the enumerated values. Answer again in full.')
+
+
+class _Issue(str):
+    """@brief Messaggio di validazione che sa a quale riga appartiene.
+
+    @note E' una stringa a tutti gli effetti (log, cache, audit e test la
+        trattano come tale) con in piu' la sua attribuzione: il component_id
+        della riga del modello che l'ha causata e gli ID delle proposte del
+        rilevatore coinvolte. Senza attribuzione un errore su una riga
+        finiva addosso all'intero inventario: su una corsa reale una fusione
+        incoerente di UN modulo ha marcato 55 componenti su 55 come parziali.
+    @note Un'istanza senza componente ne' proposte e' un errore della
+        risposta nel suo insieme (oggetto malformato, chiamata fallita), e
+        vale davvero per tutti.
+    """
+    def __new__(cls, message, component=None, candidates=()):
+        issue = super().__new__(cls, message)
+        issue.component = component if isinstance(component, str) else None
+        issue.candidates = frozenset(candidates)
+        return issue
+
+    def concerns(self, component=None, candidates=()):
+        """@brief Vero se l'errore riguarda questa riga.
+        @param component component_id della riga del modello, se ne ha uno.
+        @param candidates ID delle proposte che la riga rappresenta o lega.
+        @return True quando la riga e' quella incriminata o ne lega una proposta.
+        """
+        return ((self.component is not None and self.component == component)
+                or bool(self.candidates.intersection(candidates)))
+
+
+def _presence(row):
+    """@brief Confidenza di presenza dichiarata, o il suo limite inferiore.
+
+    @param row Riga del modello (grezza o riparata).
+    @return 'high', 'medium' o 'low'.
+    @note Lo schema chiede presence_confidence come campo obbligatorio, ma un
+        provider puo' ometterlo pur rispettando tutto il resto, e le risposte
+        in cache anteriori al campo non lo hanno. In quel caso vale la
+        confidenza complessiva: per contratto del prompt e' l'incertezza
+        globale, che comprende anche il dubbio sulla classe, quindi non puo'
+        superare la presenza. E' un limite inferiore, non una stima.
+    @note E' un ripiego, e va dichiarato tale: e' tarato su nulla di
+        specifico e diventa superfluo quando il provider onora il campo
+        obbligatorio. Prima esisteva in due versioni -- 'low' fisso nella
+        normalizzazione, la confidenza complessiva nei controlli geometrici
+        -- e la prima cancellava la presenza di un'intera risposta valida
+        per l'assenza di un campo.
+    """
+    return row.get('presence_confidence', row['confidence'])
+
+
 def _covered(inner, outer):
     """@brief Frazione del primo rettangolo che sta dentro il secondo."""
     wide = max(0.0, min(inner[2], outer[2]) - max(inner[0], outer[0]))
@@ -388,17 +470,21 @@ def _component_valid(row, known):
 
 
 def _validate(data, known, boxes=None):
-    """Return usable bodies, safe decisions and errors without deleting uncertain input."""
+    """Return usable bodies, safe decisions and errors without deleting uncertain input.
+
+    Every error is an ``_Issue`` that names the row or the proposals it is
+    about; only a malformed response as a whole produces an unattributed one.
+    """
     errors = []
     if not isinstance(data, dict):
-        return [], {}, ['response is not an object']
+        return [], {}, [_Issue('response is not an object')]
     rows, decisions = data.get('components'), data.get('candidate_decisions')
     if not isinstance(rows, list):
-        rows = []; errors.append('components missing')
+        rows = []; errors.append(_Issue('components missing'))
     if not isinstance(decisions, list):
-        decisions = []; errors.append('candidate_decisions missing')
+        decisions = []; errors.append(_Issue('candidate_decisions missing'))
     if not isinstance(data.get('uncertainties'), list) or not all(isinstance(x, str) for x in data['uncertainties']):
-        errors.append('uncertainties missing/invalid')
+        errors.append(_Issue('uncertainties missing/invalid'))
     counts = Counter(r.get('component_id') for r in rows
                      if isinstance(r, dict) and isinstance(r.get('component_id'), str))
     # Keep source claims even from malformed rows. Dropping their metadata must
@@ -415,7 +501,8 @@ def _validate(data, known, boxes=None):
         if _component_valid(row, known) and counts[row['component_id']] == 1:
             valid.append(row)
         else:
-            errors.append('invalid or duplicate component')
+            errors.append(_Issue('invalid or duplicate component',
+                                 component=row.get('component_id') if isinstance(row, dict) else None))
             # Valid visible geometry is still useful when optional semantics are
             # malformed. Keep the whole body as a generic hypothesis, so a module
             # is not reduced back to its detector fragments by a bad metadata field.
@@ -442,23 +529,34 @@ def _validate(data, known, boxes=None):
     votes = {}
     for d in decisions:
         if not isinstance(d, dict) or type(d.get('candidate_id')) is not int or d['candidate_id'] not in known:
-            errors.append('unknown/invalid candidate ID'); continue
+            # Una decisione su un ID inesistente non ha una proposta da
+            # incolpare: resta il genitore che nomina, se ne nomina uno.
+            errors.append(_Issue('unknown/invalid candidate ID',
+                                 component=d.get('component_id') if isinstance(d, dict) else None))
+            continue
         votes.setdefault(d['candidate_id'], []).append(d)
     safe = {}
     for identity in known:
         entries = votes.get(identity, [])
         if len(entries) != 1:
-            errors.append(f'candidate {identity}: missing/duplicate decision'); continue
+            errors.append(_Issue(f'candidate {identity}: missing/duplicate decision',
+                                 candidates=(identity,)))
+            continue
         d = entries[0]; parent = d.get('component_id'); status = d.get('status')
         owners = [r['component_id'] for r in valid if identity in r['source_candidate_ids']]
+        # L'errore appartiene alla proposta e, quando la decisione nomina un
+        # genitore, anche a quello: la contabilita' di quella riga e' rimasta
+        # in contraddizione con la decisione, chiunque dei due abbia torto.
+        blame = dict(component=parent, candidates=(identity,))
         if not isinstance(d.get('reason'), str) or not d['reason'].strip():
-            errors.append(f'candidate {identity}: missing evidence'); continue
+            errors.append(_Issue(f'candidate {identity}: missing evidence', **blame)); continue
         if status == 'reject' and parent is None and 'component_id' in d and not claims.get(identity):
             # Free text (including legacy reasons) cannot authorize deletion.
             if d.get('rejection_category') in PHYSICAL_REJECTIONS:
                 safe[identity] = d
             else:
-                errors.append(f'candidate {identity}: missing/invalid physical rejection category')
+                errors.append(_Issue(f'candidate {identity}: missing/invalid physical rejection category',
+                                     **blame))
         elif (status == 'uncertain' and parent is None and 'component_id' in d
               and d.get('rejection_category') is None and not claims.get(identity)):
             safe[identity] = d
@@ -467,7 +565,8 @@ def _validate(data, known, boxes=None):
               and parent in parents and owners == [parent] and claims.get(identity) == [parent]):
             safe[identity] = d
         else:
-            errors.append(f'candidate {identity}: invalid status/retained parent/source link')
+            errors.append(_Issue(f'candidate {identity}: invalid status/retained parent/source link',
+                                 **blame))
     if boxes is not None:
         valid, safe, geometry_errors = _validate_geometry(valid, safe, boxes)
         errors.extend(geometry_errors)
@@ -510,14 +609,15 @@ def _validate_geometry(rows, safe, boxes):
         # passare in silenzio.
         dropped = [i for i in backed if _covered(boxes[i], row['bbox']) < .5]
         if dropped:
-            errors.append(f"component {row['component_id']}: merged box excludes most of "
-                          f"sources {sorted(dropped)}")
-        visible_body = (row.get('presence_confidence') == 'high' and
+            errors.append(_Issue(f"component {row['component_id']}: merged box excludes most of "
+                                 f"sources {sorted(dropped)}",
+                                 component=row['component_id'], candidates=dropped))
+        visible_body = (_presence(row) == 'high' and
                         row['bbox_basis'] != 'unknown' and basis != 'unresolved')
         # Presence declared above 'low' with an observed housing. Same bar the
         # assembly rule below already uses; see the note there.
         stated_presence = (row['bbox_basis'] != 'unknown' and basis != 'unresolved'
-                           and row.get('presence_confidence', row['confidence']) != 'low')
+                           and _presence(row) != 'low')
         if basis is not None and basis not in ('single_body', 'assembly', 'unresolved'):
             reason = 'invalid grouping basis'
         elif basis == 'unresolved':
@@ -531,8 +631,10 @@ def _validate_geometry(rows, safe, boxes):
             row['source_candidate_ids'] = sources
             for identity in outside:
                 safe.pop(identity, None)
-            errors.append(f"component {row['component_id']}: source proposals {outside} outside retained envelope; "
-                          'links removed, visible body and offending originals retained')
+            errors.append(_Issue(
+                f"component {row['component_id']}: source proposals {outside} outside retained envelope; "
+                'links removed, visible body and offending originals retained',
+                component=row['component_id'], candidates=outside))
         if reason is None and len(sources) > 1:
             pending = set(sources)
             reached = {pending.pop()}
@@ -557,12 +659,15 @@ def _validate_geometry(rows, safe, boxes):
                 (basis == 'single_body' or
                  (basis is None and row['bbox_basis'] == 'body_and_leads')))
             uncertain_group = (row['bbox_basis'] == 'unknown' and
-                row.get('presence_confidence', row['confidence']) == 'low' and
+                _presence(row) == 'low' and
                 all(safe.get(i, {}).get('status') == 'uncertain' for i in sources))
             if uncertain_group or (pending and not (assembly or single_body)):
                 reason = 'unsupported group of separate or unresolved proposals'
         if reason:
-            errors.append(f"component {row['component_id']}: {reason}; individual proposals retained")
+            # La riga cade e le sue proposte tornano originali: l'errore deve
+            # seguirle, perche' sono loro a restare nell'inventario.
+            errors.append(_Issue(f"component {row['component_id']}: {reason}; individual proposals retained",
+                                 component=row['component_id'], candidates=original_sources))
             # Drop all decisions pointing at this parent, including inconsistent
             # source lists; neither a dangling merge nor a rejection may hide input.
             safe = {i: d for i, d in safe.items()
@@ -591,7 +696,9 @@ def _inventory_context(text):
 
 
 def _normalize(row, identity, length, width, issues):
-    """@brief Convert AI observations without modifying the raw audit response."""
+    """@brief Convert AI observations without modifying the raw audit response.
+    @param issues Errori di validazione che riguardano QUESTA riga, non l'inventario.
+    """
     marking = row['marking']
     # These whole-field AI sentinels mean no literal marking, not CAD glyphs.
     # Preserve partial readings (e.g. S?) and the original response for audit.
@@ -639,7 +746,9 @@ def _normalize(row, identity, length, width, issues):
         lead_count=row.get('lead_count'), lead_count_complete=row.get('lead_count_complete', False),
         lead_count_confidence=row.get('lead_count_confidence', 'low'),
         confidence=row['confidence'], color_hex='#303030', _uncertain=True,
-        presence_confidence=row.get('presence_confidence', 'low'),
+        # Stessa lettura della presenza usata dai controlli geometrici: un
+        # campo assente non e' una dichiarazione di assenza (vedi _presence).
+        presence_confidence=_presence(row),
         class_confidence=row.get('class_confidence', row['confidence']),
         component_id=row['component_id'], source_candidate_ids=list(row['source_candidate_ids']),
         _source='AI global inventory', _geometry_source='global photographic envelope; not nominal package',
@@ -677,6 +786,13 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     @note Unsupported groups restore individual proposals. Spatially impossible
         links are detached from high-presence bodies without discarding their geometry.
         Body/assembly declarations are hypotheses, not independent visual proof.
+    @note ``_global_inventory_errors`` and ``_global_inventory_status`` are per
+        row: a row carries the errors that name it or one of its proposals, and
+        is ``partial`` only then. Errors no retained row can claim (malformed
+        response, failed call) belong to the inventory and reach every row.
+        The cache still requires a response with no error at all.
+    @note A missing ``presence_confidence`` is read as the overall confidence,
+        its lower bound; see ``_presence``.
     """
     from .photo_yolo_review import _valid_box, _write_audit
     if photo is None or len(photo.shape) < 2 or min(photo.shape[:2]) < 1:
@@ -733,6 +849,7 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     path = Path(cache_dir)/f'global-inventory-{key}.json' if cache_dir else None
     boxes = {c['id']: c['bbox'] for c in candidates}
     data = None
+    omission_issue = None
     if path and path.exists():
         try:
             record = json.loads(path.read_text(encoding='utf-8'))
@@ -749,6 +866,42 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
             data = call(**kwargs)
         except (OpenRouterError, ValueError, OSError) as exc:
             data = {'error': str(exc)}
+        # Una risposta che omette un campo obbligatorio su ogni riga non e'
+        # incompleta per caso: il modello ha ignorato lo schema. Si ritenta
+        # UNA volta, a pagamento, dicendo quali campi mancavano -- e' l'unica
+        # cosa che distingue il secondo tentativo dal primo. Se anche il
+        # secondo li omette, si tiene e si dichiara: a valle la presenza
+        # ripiega sulla confidenza complessiva (vedi _presence).
+        omitted = omitted_required_fields(data)
+        if omitted:
+            log('Global inventory: the model omitted required fields on every component '
+                f'({", ".join(omitted)}); one paid retry naming the omission.')
+            retry_kwargs = dict(kwargs, system_prompt=prompt + _OMISSION_REMINDER.format(
+                fields=', '.join(omitted)))
+            try:
+                second = call(**retry_kwargs)
+            except (OpenRouterError, ValueError, OSError) as exc:
+                second = {'error': str(exc)}
+            still = omitted_required_fields(second)
+            # Il secondo tentativo vale solo se ha righe da giudicare: una
+            # risposta vuota o malformata non «omette nulla», ma non e' una
+            # risposta. La cache resta sotto la chiave della richiesta
+            # originale: e' la risposta accettata PER QUELLA richiesta, e una
+            # corsa successiva con gli stessi input deve rigiocarla, non
+            # ripagare due chiamate.
+            usable = (isinstance(second, dict) and not second.get('error')
+                      and isinstance(second.get('components'), list)
+                      and any(isinstance(row, dict) for row in second['components']))
+            if usable and not still:
+                data = second
+                log('Global inventory: retry carries the required fields; using it.')
+            else:
+                failure = second.get('error') if isinstance(second, dict) else None
+                log('Global inventory: retry ' + (f'failed ({failure})' if failure else
+                    ('still omits ' + ', '.join(still)) if still else 'returned nothing to judge')
+                    + '; keeping the first answer, presence falls back to overall confidence.')
+                omission_issue = _Issue('model omitted required fields on every component: '
+                                        + ', '.join(omitted))
     # Prima di giudicare la risposta, portarla nell'unita' del contratto: un
     # rettangolo giusto consegnato in pixel non e' una risposta sbagliata.
     box_scale = None
@@ -756,7 +909,12 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         box_scale = _rescale_boxes(data['components'], w, h, log)
     rows, safe, errors = _validate(data, known, boxes)
     if isinstance(data, dict) and data.get('error'):
-        errors.append(str(data['error']))
+        errors.append(_Issue(str(data['error'])))
+    if omission_issue is not None:
+        # E' un errore della risposta nel suo insieme: vale per tutte le
+        # righe e impedisce di mettere in cache come buona una risposta che
+        # non rispetta lo schema.
+        errors.append(omission_issue)
     if errors:
         log('Global inventory FAILED/PARTIAL: ' + '; '.join(errors) + '; unresolved proposals retained.')
     elif path:
@@ -771,22 +929,40 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     uncertainties = [u for u in uncertainties if isinstance(u, str)]
     for uncertainty in uncertainties:
         log('Global inventory uncertainty: ' + uncertainty)
+    # Un'incoerenza su una riga degrada QUELLA riga. Ogni errore porta con se'
+    # il component_id e le proposte che lo riguardano, e una riga eredita solo
+    # gli errori che la nominano o che nominano una proposta che essa
+    # rappresenta. Prima l'elenco intero finiva su ogni componente e lo status
+    # era unico per tutto l'inventario: la fusione incoerente di un modulo
+    # marcava come parziali anche i passivi dall'altra parte della scheda.
+    def own(component=None, candidates=()):
+        return [str(e) for e in errors if e.concerns(component, candidates)]
     # New IDs cannot collide with unresolved originals, including malformed merges.
     next_id = max(known, default=0)+1
-    result = [_normalize(r, next_id+i, length, width, errors) for i, r in enumerate(rows)]
+    result = [_normalize(r, next_id+i, length, width,
+                         own(r['component_id'], r['source_candidate_ids']))
+              for i, r in enumerate(rows)]
     for original in components:
         decision = safe.get(original['_id'])
         if decision is None or (decision['status'] == 'uncertain' and decision['component_id'] is None):
             retained = deepcopy(original)
             retained.update(_uncertain=True, confidence='low', package='', _package_verified=False,
-                            _orientation_verified=False, _global_inventory_errors=list(errors),
+                            _orientation_verified=False,
+                            _global_inventory_errors=own(candidates=(original['_id'],)),
                             presence_confidence='low', class_confidence='low',
                             _review_reason=(decision['reason'] if decision else
                                 'Global inventory accounting unresolved; original retained'))
             result.append(retained)
+    # Un errore che nessuna riga trattenuta puo' reclamare -- risposta
+    # malformata, chiamata fallita, riga caduta senza proposte superstiti --
+    # e' un errore dell'inventario, e allora vale davvero per tutti.
+    claimed = {e for c in result for e in c['_global_inventory_errors']}
+    unclaimed = [str(e) for e in errors if str(e) not in claimed]
     for c in result:
+        c['_global_inventory_errors'].extend(unclaimed)
         c['_global_inventory_uncertainties'] = list(uncertainties)
-        c['_global_inventory_status'] = 'partial' if errors else 'validated_hypotheses'
+        c['_global_inventory_status'] = ('partial' if c['_global_inventory_errors']
+                                         else 'validated_hypotheses')
         c['_global_inventory_prompt_version'] = version
         if box_scale:
             c['_global_inventory_box_scale'] = box_scale

@@ -31,6 +31,13 @@ class Body3DParams:
     pcb_thickness_mm: float | None = None
     components: list | None = None
     populated_board: bool = False
+    # Scritte lette sui componenti (campo `marking` di ComponentBox) stampate
+    # sul solido. Spento per contratto: il percorso standard ricostruisce
+    # ingombri meccanici generici, senza marcature -- una sigla letta dalla
+    # foto ("330?", "123", il nome di un modulo radio) e' un'evidenza per
+    # l'abbinamento ai modelli di libreria, non un dato geometrico da
+    # incidere. Chi vuole davvero le scritte lo dichiara qui.
+    show_markings_3d: bool = False
 
     def validate(self) -> None:
         """@brief Validate dimensions, colors and pin extrusion constraints."""

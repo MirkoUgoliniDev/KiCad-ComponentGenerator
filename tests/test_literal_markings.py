@@ -17,6 +17,11 @@ def _observation(marking):
                 terminal_layout='two visible endcaps', height_mm=None,
                 height_source='unknown', confidence='medium',
                 presence_confidence='high', class_confidence='medium',
+                # Campi obbligatori dello schema: una risposta che ne omette
+                # uno su ogni riga fa scattare un secondo tentativo a
+                # pagamento, e questi test contano le chiamate.
+                lead_count=None, lead_count_complete=False,
+                lead_count_confidence='low', asymmetry_landmark=None,
                 evidence='Mounted body with endcaps')
 
 

@@ -3070,3 +3070,166 @@ sul disco dell'utente questa suite è saltata perché manca `pyvistaqt`.
 bassa 4. Identificazione: alta 7, media 26, bassa 17 — tutte marcate incerte.
 Abbinamento modelli: 25 irrisolti, 14 da rivedere, 8 provvisori, 3 automatici;
 11 con un `model_path` reale. Costo: 0.9568 USD, 2 chiamate, 81209 token.
+
+# 2026-09-21 02:30 — notte: perché il 3D era tutto magenta con le scritte sopra
+
+Richiesta dell'utente prima di andare a dormire: «non mi pare un gran
+miglioramento; analizza tutto il codice e cerca di capire perché; scatena gli
+agenti; domattina voglio trovare la soluzione pronta». Schermata: anteprima 3D
+con TUTTI i corpi magenta, marcature stampate sopra («330?», «123», la stringa
+ESPRESSIF intera sul modulo), nessun modello di libreria.
+
+Tre agenti su file disgiunti, un quarto per i test, integrazione e verifica
+centrali. Materiale della corsa (00:04–00:09) copiato in `/home/claude/run-0004`
+nel contenitore: `analisi-ai.log`, `freecad.log`, `kicad-model-candidates.json`,
+`TEST.preview.json`, inventario, risposta grezza del modello nell'audit.
+
+## Catena causale — QUATTRO difetti, non uno
+
+**1. Il modello ha omesso tre campi obbligatori su tutte le righe.**
+`response.components` (43 righe) non contiene `presence_confidence`,
+`class_confidence`, `lead_count_confidence`, benché siano `required` nello
+schema (`inventory_tool()`); la corsa delle 23:48, stesso modello e stesso
+prompt, li aveva. Il provider non onora `required` in modo deterministico.
+`tokens_out=17582` su 24000: non è troncamento.
+
+**2. Il ripiego per il campo assente era `'low'` fisso.**
+`_normalize`: `row.get('presence_confidence', 'low')` → 55/55 presence low.
+Incoerenza interna: `_validate_geometry` leggeva lo stesso campo assente come
+`row['confidence']`. A valle `kicad_models` esige presence `'high'`
+(`_automatic_mechanical` :1308, `_provisional_geometry_choice` :1370) → **0
+model_path su 55** (la corsa prima ne aveva 11) → per ogni corpo non risolto
+`attach_models` (:1842) scrive `color_hex='#FF00FF'`. **Il magenta è una
+sentinella voluta** («modello KiCad non risolto»), non un colore mancante: il
+renderer non lo introduce. Sul `preview.json` reale: tutte le 45 parti-corpo
+sono `#ff00ff`.
+
+**3. Gli errori d'inventario erano una lista piatta.**
+`_validate`/`_validate_geometry` accumulavano stringhe senza attribuzione e
+`review_global_inventory` le passava a OGNI riga: un'incoerenza su U1_MODULE
+(«merged box excludes most of sources [44, 45]») ha marcato 55/55 `partial`.
+Difetto indipendente dal n. 1 (verificato togliendo il legame: status
+`validated`, presence ancora low).
+
+**4. Le marcature venivano stampate sempre, senza alcuna opzione.**
+`freecad_build_body.py:656-668`: `if marking: _place_text(...)`,
+incondizionato. 15 parti `*_mark` nel preview. Contrario alla strategia
+(«volumi generici senza scritte»). Il campo `marking` va comunque conservato:
+serve a `kicad_models._marked_model_paths` (ricerca per marcatura letterale).
+
+Inoltre: **il campionamento del colore dalla foto esiste**
+(`photo_grounding.mechanical_envelopes`, mediana del 40 % centrale) ma il
+percorso YOLO → inventario globale non lo chiamava: 55/55 `#303030`, il
+segnaposto del rilevatore.
+
+## Correzioni (tutte con test positivo e negativo)
+
+- **Omissione di contratto → un secondo tentativo, a pagamento, dichiarato.**
+  `omitted_required_fields(data)`: campi `required` assenti su TUTTE le righe
+  (assenti su alcune = omissione di riga, non scatta). `review_global_inventory`
+  ritenta UNA volta con il prompt che nomina i campi omessi — unica differenza
+  fra le due richieste. Se il secondo vale (dict, senza errore, con righe da
+  giudicare) e non omette, si usa; altrimenti si tiene il primo con un errore
+  d'inventario «model omitted required fields …» (non finisce in cache come
+  buono). La risposta accettata va in cache sotto la chiave della richiesta
+  ORIGINALE: rigiocare non ripaga. Costo quando scatta: una seconda chiamata
+  (~0.6 USD su questa scheda).
+- **`_presence(row)`**: unica lettura della presenza; campo assente → la
+  confidenza complessiva come limite inferiore (per contratto del prompt
+  comprende anche il dubbio sulla classe, quindi non supera la presenza).
+  Dichiarata ripiego: tarata su nulla, superflua quando il provider onora il
+  campo.
+- **`_Issue(str)`**: ogni errore porta `component` e `candidates`; una riga
+  eredita solo gli errori che la nominano o nominano una sua proposta; gli
+  originali trattenuti ereditano quelli della proposta; un errore che nessuna
+  riga reclama è dell'inventario e va su tutte (risposta malformata, chiamata
+  fallita, omissione di contratto).
+- **`Body3DParams.show_markings_3d = False`**: `_run_freecad` lo scrive nel
+  payload, `freecad_build_body._marking_to_print` stampa solo se True; payload
+  vecchi senza campo → nessuna scritta. Le sigle dei contatti
+  (`show_silk_labels_3d`, `silk_texts`) sono un canale separato e restano come
+  erano. Prompt del tool in `datasheet_extractor.py` corretto: `marking` «serve
+  a cercare il modello per marcatura, non viene stampata sul solido».
+- **`photo_inventory.sample_body_colors`**: dopo la riconciliazione, sul
+  ritaglio calibrato, mediana del 40 % centrale del riquadro (stessa regola di
+  `mechanical_envelopes`), `_color_source='photo_median'`; riquadri non validi
+  tengono il segnaposto. Nessuna chiamata AI. Verificato sulla foto della
+  scheda: U1 `#d6c9ad`, LED `#cdc5af`, USB-C `#442a20`, SW `#352e2d`.
+
+## Replay offline della risposta VERA di questa corsa
+
+Prima: 55 `partial`, presence 55 `low`, un errore su tutte.
+Dopo, caso peggiore (retry che omette ancora): presence **1 high / 29 medium /
+25 low**, l'errore geometrico solo su U1_MODULE, l'errore d'inventario
+«omitted required fields» su tutte (giusto: è della risposta).
+Dopo, caso buono (retry con i campi): come la corsa delle 23:48, dove 36/50
+avevano presence high e 11 modelli venivano agganciati.
+
+## Cosa aspettarsi domattina, onestamente
+
+- Le **scritte spariscono** dai corpi generici.
+- I corpi **portano il colore della foto**… ma solo quelli con un modello
+  risolto o non in revisione: per `review_required`/`unresolved`
+  `attach_models` sovrascrive ancora con il magenta. È la convenzione visiva
+  documentata nelle voci precedenti («segnaposto magenta = modello non
+  risolto»), quindi NON l'ho cambiata. Proposta, da autorizzare: riservare il
+  magenta a `unresolved` e import falliti, e segnalare `review_required` con un
+  flag invece che con il colore, così il corpo approssimato mantiene il colore
+  misurato.
+- Quanti corpi escono dal magenta dipende da quanti modelli si agganciano:
+  se il modello onora i campi (o il retry li ottiene) si torna al livello
+  della corsa delle 23:48 (~11 su 50). Con presence `medium` da ripiego,
+  `kicad_models` non aggancia (esige `high`): quel gate NON l'ho toccato, è
+  fra le cose mai autorizzate.
+
+## Test
+
+Nuovi/aggiornati: `test_photo_global_inventory.py` (122: attribuzione per
+riga, presenza da ripiego, replay dell'estratto reale U1+SW_BOOT, la regola del
+retry in 6 casi incluse cache sotto la chiave originale e retry degenere che
+non sostituisce la prima risposta), `test_component_markings_3d.py` (18),
+`test_presence_gate_replay.py` (5, fixture con i 55 componenti reali:
+con `low` 0 abbinamenti, con `high` 4 provvisori nel replay senza libreria),
+`test_photo_inventory.py` (+8 sul colore), fixture di
+`test_global_inventory_pipeline.py`, `test_literal_markings.py`,
+`test_visible_terminal_contract.py`, `test_photo_yolo_review.py` completate
+con i campi obbligatori (contavano le chiamate) e un test guardia che fallisce
+se lo schema cresce e la fixture no.
+
+Sul disco dell'utente, escluse le suite Qt che nella VM non partono e quella
+che vuole KiCad: **2347 passati, 21 saltati, 2 xfail, 19 sottotest**; l'unico
+rosso è il test instabile già annotato (`test_footprint_cache_tracks_edits…`).
+Suite Qt nel contenitore, una per file: photo_inventory_gui 66,
+photo_detector_ui 49, automatic_generation 25, terminal_metadata_flow 15,
+board_edit_lifecycle 26, photo_review_dialog 32, model_candidates_dialog 29.
+
+## Segnalato, mai autorizzato (invariato, con riferimenti)
+
+- `kicad_models.attach_models` :1817 — `provisional_matched` riceve
+  `model_path` come un `auto_matched` (qui 0, nella corsa prima 8 incluso il
+  WROOM). Proposta: `model_path` solo per `confirmed`/`auto_matched`;
+  `provisional` tiene `selected_path` nel report e il segnaposto nel solido.
+- `_provisional_geometry_choice` :1439-1465 — pareggio/dominanza guardano solo
+  `choices[0]`/`[1]`; un terzo candidato entro `NAME_TIEBREAK_MARGIN` non
+  partecipa. Proposta: banda = tutti entro `best + margine`; promuovere solo
+  se la banda è omogenea.
+- `attach_models` :1842 — magenta anche su `review_required` con geometria
+  valida (vedi sopra).
+- `kicad_models` esige presence `high` anche quando la presenza è un ripiego
+  dalla confidenza: da decidere se `confidence='high'` senza il campo debba
+  valere.
+- Barra di avanzamento 3D: `100% · 50/50` mentre FreeCAD è al componente 1
+  (conta i componenti consegnati, non quelli costruiti).
+- `test_board_pipeline.py` `[castellated]` ×2 rossi nel contenitore anche sui
+  sorgenti precedenti (`step_generator.py:337`, `body.pin_color_hex` su
+  `None`): preesistente; sul disco dell'utente non gira (manca pyvistaqt).
+
+## Trappole
+
+- Prima di rilanciare: **riavviare l'app**.
+- Il retry costa: quando nel log compare «one paid retry naming the omission»
+  la seconda chiamata è voluta. «retry carries the required fields; using it»
+  = andata bene; «keeping the first answer, presence falls back» = il modello
+  ha omesso due volte.
+- `generated/photo-cache/confronto-contrasto.json` e `generated/his.md5` sono
+  scarti miei, cancellabili.

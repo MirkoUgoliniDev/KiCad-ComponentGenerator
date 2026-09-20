@@ -17,6 +17,11 @@ def _body(**changes):
                terminal_layout='three ordinary leads and one thermal tab',
                height_mm=None, height_source='unknown', confidence='low',
                presence_confidence='high', class_confidence='low',
+               # Il riferimento asimmetrico e' obbligatorio nello schema: una
+               # risposta che lo omette su ogni riga fa scattare un secondo
+               # tentativo a pagamento, e qui si conta una chiamata sola. I
+               # campi dei terminali restano a carico di ogni test.
+               asymmetry_landmark=None,
                evidence='Mounted body with ordinary leads and a thermal tab')
     row.update(changes)
     return row

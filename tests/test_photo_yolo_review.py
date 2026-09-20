@@ -115,7 +115,11 @@ def test_inventory_yolo_branch_bypasses_ai_localizer(monkeypatch,tmp_path):
     response = dict(components=[dict(component_id='R1',source_candidate_ids=[1],
         **{'class':'resistor'},bbox=[.2,.2,.4,.4],bbox_basis='body',rotation_deg=0,
         package='R_0603',marking='?',terminal_count=2,terminal_layout='two endcaps',
-        height_mm=None,height_source='unknown',confidence='high',evidence='complete body')],
+        height_mm=None,height_source='unknown',confidence='high',evidence='complete body',
+        # Campi obbligatori dello schema: omessi su ogni riga farebbero scattare
+        # un secondo tentativo, e questo test conta una chiamata sola.
+        presence_confidence='high',class_confidence='high',lead_count=2,lead_count_complete=True,
+        lead_count_confidence='high',grouping_basis='single_body',asymmetry_landmark=None)],
         candidate_decisions=[dict(candidate_id=1,status='keep',component_id='R1',reason='body')],uncertainties=[])
     result=inv.extract_inventory([tmp_path/'image.png'],'photo/model',40,20,['generic','resistor'],lambda **kw: seen.append(kw) or response,detector='yolo',classifier_model='verify/model',top_photo_index=0)
     assert result.components[0]['package']=='R_0603'

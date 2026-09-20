@@ -284,8 +284,10 @@ def generate_castellated_3d_model(
     * la **serigrafia**: sigla accanto a ogni contatto (da `silk_labels`) e
       cornice del bordo;
     * i **componenti** letti dalla foto, ognuno con la forma del suo tipo
-      (SOIC con reofori, trasformatore raccordato, LED con lente...) e
-      l'eventuale marcatura stampata sopra.
+      (SOIC con reofori, trasformatore raccordato, LED con lente...); la
+      marcatura letta dalla foto NON viene stampata sopra, a meno che
+      `body.show_markings_3d` non lo chieda: il percorso standard produce
+      volumi generici senza scritte.
 
     Non ci sono pin cilindrici: i contatti sono i semi-fori.
     """
@@ -661,6 +663,10 @@ def _run_freecad(
             for t in face_texts
         ],
         "font_file": font_file,
+        # Le marcature restano nel payload dei componenti (servono a chi
+        # abbina i modelli di libreria e a chi rilegge il JSON), ma lo
+        # script FreeCAD le stampa solo se il corpo lo chiede esplicitamente.
+        "show_markings_3d": bool(body.show_markings_3d),
     }
     payload.update(extra_payload or {})
 

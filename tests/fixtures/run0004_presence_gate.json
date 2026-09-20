@@ -1,0 +1,3667 @@
+{
+ "source": "kicad-model-candidates.json + inventory-20260921-000827.json della corsa 2026-09-21 00:08 (55 componenti); percorsi della libreria resi neutri, nomi file invariati",
+ "components": [
+  {
+   "name": "U1_MODULE (rf_module)",
+   "length_mm": 24.1806,
+   "width_mm": 14.5288,
+   "kind": "module",
+   "class": "rf_module",
+   "class_confidence": "high",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": null,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "castellated pads along left, top and bottom edges of the module substrate; coaxial antenna jack at lower-right of module body",
+   "confidence": "high",
+   "package": "shielded SMD module with castellated/edge pads",
+   "package_evidence": "Large metal-shielded daughterboard module: shield can approx 18x25mm over its own substrate, silkscreened module part text and QR code on the shield, rows of castellated solder pads along its edges, and an integrated U.FL/IPEX coaxial antenna jack on the module substrate at lower right. Substrate, shield and antenna jack are treated as one assembly.",
+   "bbox_basis": "leads",
+   "marking": "ESPRESSIF ESP32-S3-WROOM-1U MCN16R8 FCC ID:2AC7Z-ESP32S3WROOM1U IC:21098-ESP32S3WROOM1U CMIIT ID:2022DP8926(M)",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "discovery_scope": "literal_marking_model",
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3rdparty/3dmodels/com_github_espressif_kicad-libraries/espressif.3dshapes/ESP32-S3-WROOM-1U.STEP",
+      "package": "ESP32-S3-WROOM-1U",
+      "dimensions_mm": [
+       18.00000000000006,
+       19.2,
+       3.2
+      ],
+      "relative_xy_error": 0.23891856175321155,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "module",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "SW_BOOT (switch)",
+   "length_mm": 4.8108,
+   "width_mm": 3.6576,
+   "kind": "switch",
+   "class": "switch",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "gull-wing leads on left and right sides of body (partly off image at left board edge); actuator cap on top face",
+   "confidence": "medium",
+   "package": "SMD tactile switch, ~4.5x3.5mm body",
+   "package_evidence": "Plastic switch housing ~4.5x3.5mm with round metal dome actuator; solder fillets on visible right-side leads; silkscreen 'BOOT' adjacent. Body extends to/past the left image border so left leads are not countable.",
+   "bbox_basis": "leads",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Button_Switch_SMD.3dshapes/SW_SPST_EVQP7A.step",
+      "package": "SW_SPST_EVQP7A",
+      "dimensions_mm": [
+       4.7,
+       3.5500000000000007,
+       1.35
+      ],
+      "relative_xy_error": 0.029418197725284135,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "switch",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Button_Switch_SMD.3dshapes/SW_SPST_EVQP7C.step",
+      "package": "SW_SPST_EVQP7C",
+      "dimensions_mm": [
+       4.7,
+       3.5500000000000007,
+       1.850000000000064
+      ],
+      "relative_xy_error": 0.029418197725284135,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "switch",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Button_Switch_SMD.3dshapes/SW_SPST_EVQPE1.step",
+      "package": "SW_SPST_EVQPE1",
+      "dimensions_mm": [
+       5.1,
+       3.5,
+       2.1
+      ],
+      "relative_xy_error": 0.06011474183088036,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "switch",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Button_Switch_SMD.3dshapes/SW_SPST_PTS810.step",
+      "package": "SW_SPST_PTS810",
+      "dimensions_mm": [
+       4.600000000000129,
+       3.200000000000001,
+       2.5
+      ],
+      "relative_xy_error": 0.12510936132983347,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "switch",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Button_Switch_SMD.3dshapes/SW_SPST_EVQP2_MiddlePushTravel_H2.5mm.step",
+      "package": "SW_SPST_EVQP2_MiddlePushTravel_H2.5mm",
+      "dimensions_mm": [
+       5.5,
+       3.5000000000000004,
+       2.5
+      ],
+      "relative_xy_error": 0.14326099609212595,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "switch",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "SW_RESET (switch)",
+   "length_mm": 5.2539,
+   "width_mm": 3.5814,
+   "kind": "switch",
+   "class": "switch",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "gull-wing leads on right side visible, left side off image; round actuator on top",
+   "confidence": "medium",
+   "package": "SMD tactile switch, ~5x3.5mm body",
+   "package_evidence": "Second tactile switch of same style as BOOT, round dark actuator and bright solder joints at right-side leads; silkscreen 'RESET' adjacent. Left portion clipped by image edge.",
+   "bbox_basis": "leads",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Button_Switch_SMD.3dshapes/SW_SPST_EVQPE1.step",
+      "package": "SW_SPST_EVQPE1",
+      "dimensions_mm": [
+       5.1,
+       3.5,
+       2.1
+      ],
+      "relative_xy_error": 0.029292525552446783,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "switch",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Button_Switch_SMD.3dshapes/SW_SPST_EVQP2_MiddlePushTravel_H2.5mm.step",
+      "package": "SW_SPST_EVQP2_MiddlePushTravel_H2.5mm",
+      "dimensions_mm": [
+       5.5,
+       3.5000000000000004,
+       2.5
+      ],
+      "relative_xy_error": 0.046841394012067265,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "switch",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Button_Switch_SMD.3dshapes/SW_SPST_EVQP2_ShortPushTravel_H2.1mm.step",
+      "package": "SW_SPST_EVQP2_ShortPushTravel_H2.1mm",
+      "dimensions_mm": [
+       5.5,
+       3.5000000000000004,
+       2.1
+      ],
+      "relative_xy_error": 0.046841394012067265,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "switch",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Button_Switch_SMD.3dshapes/SW_SPST_EVQP2_ShortPushTravel_H2.5mm.step",
+      "package": "SW_SPST_EVQP2_ShortPushTravel_H2.5mm",
+      "dimensions_mm": [
+       5.5,
+       3.5000000000000004,
+       2.5
+      ],
+      "relative_xy_error": 0.046841394012067265,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "switch",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Button_Switch_SMD.3dshapes/SW_SPST_EVQP7A.step",
+      "package": "SW_SPST_EVQP7A",
+      "dimensions_mm": [
+       4.7,
+       3.5500000000000007,
+       1.35
+      ],
+      "relative_xy_error": 0.10542644511696067,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "switch",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "J_USBC (connector)",
+   "length_mm": 10.922,
+   "width_mm": 7.0896,
+   "kind": "connector",
+   "class": "connector",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": null,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "row of contact fingers along right side of connector body; shell mounting tabs top and bottom",
+   "confidence": "medium",
+   "package": "USB Type-C receptacle, mid-mount SMD",
+   "package_evidence": "Metal-shelled connector at left board edge with visible plated contact row and two shell anchor tabs soldered to board; mating opening faces off-image left. Body mostly clipped by image edge so full envelope unresolved.",
+   "bbox_basis": "leads",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Connector_USB.3dshapes/USB_C_Receptacle_GCT_USB4135-GF-A_6P_TopMnt_Horizontal.step",
+      "package": "USB_C_Receptacle_GCT_USB4135-GF-A_6P_TopMnt_Horizontal",
+      "dimensions_mm": [
+       11.14,
+       6.900000000000001,
+       3.26000000000018
+      ],
+      "relative_xy_error": 0.026743398781313283,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "connector",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Connector_USB.3dshapes/USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal.step",
+      "package": "USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal",
+      "dimensions_mm": [
+       8.94000019163691,
+       7.780000000000001,
+       4.260000000000001
+      ],
+      "relative_xy_error": 0.1814685779493765,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "connector",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Connector_USB.3dshapes/USB_C_Receptacle_GCT_USB4125-xx-x-0190_6P_TopMnt_Horizontal.step",
+      "package": "USB_C_Receptacle_GCT_USB4125-xx-x-0190_6P_TopMnt_Horizontal",
+      "dimensions_mm": [
+       8.940000000000001,
+       6.900000000000003,
+       5.160000000000011
+      ],
+      "relative_xy_error": 0.18146859549533045,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "connector",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Connector_USB.3dshapes/USB_C_Receptacle_GCT_USB4125-xx-x_6P_TopMnt_Horizontal.step",
+      "package": "USB_C_Receptacle_GCT_USB4125-xx-x_6P_TopMnt_Horizontal",
+      "dimensions_mm": [
+       8.940000000000001,
+       6.900000000000002,
+       4.260000000000002
+      ],
+      "relative_xy_error": 0.18146859549533045,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "connector",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Connector_USB.3dshapes/USB_C_Receptacle_GCT_USB4085.step",
+      "package": "USB_C_Receptacle_GCT_USB4085",
+      "dimensions_mm": [
+       8.940000000000001,
+       9.17,
+       5.5600000000000005
+      ],
+      "relative_xy_error": 0.26100203114421144,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "connector",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "U2_CH334F (ic)",
+   "length_mm": 4.9784,
+   "width_mm": 4.8741,
+   "kind": "ic",
+   "class": "ic",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": null,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "peripheral lead rows on all four sides of the square plastic body",
+   "confidence": "medium",
+   "package": "QFN/LQFN ~4.0x4.0mm, 0.4-0.5mm pitch",
+   "package_evidence": "Plastic body approx 4.0x4.0mm (overall with leads ~4.3x4.3mm), laser-marked 'CH334F'; fine peripheral leads visible on all four edges but individual pins not reliably countable at this resolution, so lead count left null. Package family QFN-24/28 ambiguous.",
+   "bbox_basis": "leads",
+   "marking": "CH334F 13172F42 HDM",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Package_DFN_QFN.3dshapes/QFN-16-1EP_5x5mm_P0.8mm_EP2.7x2.7mm.step",
+      "package": "QFN-16-1EP_5x5mm_P0.8mm_EP2.7x2.7mm",
+      "dimensions_mm": [
+       5.0,
+       5.0,
+       0.92
+      ],
+      "relative_xy_error": 0.025830409716665573,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "ic",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Package_DFN_QFN.3dshapes/QFN-20-1EP_5x5mm_P0.65mm_EP3.35x3.35mm.step",
+      "package": "QFN-20-1EP_5x5mm_P0.65mm_EP3.35x3.35mm",
+      "dimensions_mm": [
+       5.0,
+       5.0,
+       0.77
+      ],
+      "relative_xy_error": 0.025830409716665573,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "ic",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Package_DFN_QFN.3dshapes/QFN-24-1EP_5x5mm_P0.65mm_EP3.2x3.2mm.step",
+      "package": "QFN-24-1EP_5x5mm_P0.65mm_EP3.2x3.2mm",
+      "dimensions_mm": [
+       5.0,
+       5.0,
+       0.77
+      ],
+      "relative_xy_error": 0.025830409716665573,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "ic",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Package_DFN_QFN.3dshapes/QFN-24-1EP_5x5mm_P0.65mm_EP3.6x3.6mm.step",
+      "package": "QFN-24-1EP_5x5mm_P0.65mm_EP3.6x3.6mm",
+      "dimensions_mm": [
+       5.0,
+       5.0,
+       0.925
+      ],
+      "relative_xy_error": 0.025830409716665573,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "ic",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Package_DFN_QFN.3dshapes/QFN-28-1EP_5x5mm_P0.5mm_EP3.35x3.35mm.step",
+      "package": "QFN-28-1EP_5x5mm_P0.5mm_EP3.35x3.35mm",
+      "dimensions_mm": [
+       5.0,
+       5.0,
+       0.92
+      ],
+      "relative_xy_error": 0.025830409716665573,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "ic",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "U3_CH343P (ic)",
+   "length_mm": 4.0386,
+   "width_mm": 3.9879,
+   "kind": "ic",
+   "class": "ic",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": null,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "peripheral leads on all four sides of the square body",
+   "confidence": "medium",
+   "package": "QFN ~3.5x3.5mm",
+   "package_evidence": "Second square plastic QFN body approx 3.5x3.5mm (overall ~3.9x4.0mm) with rotated laser marking reading 'CH343P'; peripheral leads seen on four sides, pins not individually countable. White dot near lower-right corner may be a pin-1 aid on the board rather than the body.",
+   "bbox_basis": "leads",
+   "marking": "CH343P HDM",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Package_DFN_QFN.3dshapes/QFN-16-1EP_4x4mm_P0.65mm_EP2.15x2.15mm.step",
+      "package": "QFN-16-1EP_4x4mm_P0.65mm_EP2.15x2.15mm",
+      "dimensions_mm": [
+       4.0,
+       4.0,
+       0.75
+      ],
+      "relative_xy_error": 0.00955776754320798,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "ic",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Package_DFN_QFN.3dshapes/QFN-16-1EP_4x4mm_P0.65mm_EP2.1x2.1mm.step",
+      "package": "QFN-16-1EP_4x4mm_P0.65mm_EP2.1x2.1mm",
+      "dimensions_mm": [
+       4.0,
+       4.0,
+       0.75
+      ],
+      "relative_xy_error": 0.00955776754320798,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "ic",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Package_DFN_QFN.3dshapes/QFN-16-1EP_4x4mm_P0.65mm_EP2.5x2.5mm.step",
+      "package": "QFN-16-1EP_4x4mm_P0.65mm_EP2.5x2.5mm",
+      "dimensions_mm": [
+       4.0,
+       4.0,
+       0.77
+      ],
+      "relative_xy_error": 0.00955776754320798,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "ic",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Package_DFN_QFN.3dshapes/QFN-20-1EP_4x4mm_P0.5mm.step",
+      "package": "QFN-20-1EP_4x4mm_P0.5mm",
+      "dimensions_mm": [
+       4.0,
+       4.0,
+       0.78
+      ],
+      "relative_xy_error": 0.00955776754320798,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "ic",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Package_DFN_QFN.3dshapes/QFN-20-1EP_4x4mm_P0.5mm_EP2.5x2.5mm.step",
+      "package": "QFN-20-1EP_4x4mm_P0.5mm_EP2.5x2.5mm",
+      "dimensions_mm": [
+       4.0,
+       4.0,
+       0.77
+      ],
+      "relative_xy_error": 0.00955776754320798,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "ic",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "Y1 (crystal)",
+   "length_mm": 2.6586,
+   "width_mm": 2.3876,
+   "kind": "crystal",
+   "class": "crystal",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": null,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "pads hidden beneath the package; metal lid on top, no side leads visible",
+   "confidence": "medium",
+   "package": "metal-lid SMD ~2.5x2.0mm (2-4 pad)",
+   "package_evidence": "Rectangular package ~2.6x2.3mm with a reflective metal lid seated on a ceramic base, marked 'T120 MN6S'; typical of a small SMD crystal/oscillator. Terminals are underneath, none observable from the top.",
+   "bbox_basis": "leads",
+   "marking": "T120 MN6S",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Crystal.3dshapes/Crystal_C26-LF_D2.1mm_L6.5mm_Vertical.step",
+      "package": "Crystal_C26-LF_D2.1mm_L6.5mm_Vertical",
+      "dimensions_mm": [
+       2.2730236206140275,
+       2.2730236206140275,
+       11.05
+      ],
+      "relative_xy_error": 0.1450298575889462,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "crystal",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Crystal.3dshapes/Crystal_SMD_WE_CFPX-218-4Pin_2.5x2.0mm.step",
+      "package": "Crystal_SMD_WE_CFPX-218-4Pin_2.5x2.0mm",
+      "dimensions_mm": [
+       2.500000007221831,
+       2.000000007221831,
+       0.68
+      ],
+      "relative_xy_error": 0.16233874718469124,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "crystal",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Crystal.3dshapes/Crystal_SMD_2520-4Pin_2.5x2.0mm.step",
+      "package": "Crystal_SMD_2520-4Pin_2.5x2.0mm",
+      "dimensions_mm": [
+       2.500000007221831,
+       2.0000000072218302,
+       0.83
+      ],
+      "relative_xy_error": 0.16233874718469163,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "crystal",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Crystal.3dshapes/Crystal_SMD_WE_CFPX-180-4Pin_3.2x2.5mm.step",
+      "package": "Crystal_SMD_WE_CFPX-180-4Pin_3.2x2.5mm",
+      "dimensions_mm": [
+       3.200000009029278,
+       2.500000009029277,
+       0.83
+      ],
+      "relative_xy_error": 0.2036410174638073,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "crystal",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Crystal.3dshapes/Crystal_SMD_3225-4Pin_3.2x2.5mm.step",
+      "package": "Crystal_SMD_3225-4Pin_3.2x2.5mm",
+      "dimensions_mm": [
+       3.200428393034008,
+       2.500839207156007,
+       0.64
+      ],
+      "relative_xy_error": 0.20380214888813972,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "crystal",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "Q1_SOT (semiconductor_unknown)",
+   "length_mm": 3.6081,
+   "width_mm": 3.0226,
+   "kind": "ic",
+   "class": "semiconductor_unknown",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 6,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "three gull-wing leads along the top side and three along the bottom side of the body in this image",
+   "confidence": "medium",
+   "package": "SOT-23-6 / SOT-363-like small outline, body ~2.9x1.6mm",
+   "package_evidence": "Black moulded body approx 2.9x1.6mm, overall with leads ~3.6x3.0mm, three leads visible per long side with clear solder fillets; marking partially legible as '330' plus a character. Six-lead small-outline consistent with SOT-23-6; function (transistor pair, LDO or driver) not determinable.",
+   "bbox_basis": "leads",
+   "marking": "330?",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Package_TO_SOT_SMD.3dshapes/SOT-23-6.step",
+      "package": "SOT-23-6",
+      "dimensions_mm": [
+       2.8,
+       2.9000000000000004,
+       1.55
+      ],
+      "relative_xy_error": 0.19625287547462641,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "semiconductor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Package_TO_SOT_SMD.3dshapes/TSOT-23-6.step",
+      "package": "TSOT-23-6",
+      "dimensions_mm": [
+       2.8,
+       2.9000000000000004,
+       0.95
+      ],
+      "relative_xy_error": 0.19625287547462641,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "semiconductor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "D_RGB (led)",
+   "length_mm": 2.2788,
+   "width_mm": 2.0066,
+   "kind": "led",
+   "class": "led",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": null,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "terminals along left and right edges under the white body; emitter die visible on top face",
+   "confidence": "medium",
+   "package": "PLCC-style white body ~2.3x2.0mm",
+   "package_evidence": "White reflective plastic body approx 2.3x2.0mm with a central clear/phosphor lens and a visible die/bond region; silkscreen 'RGB' beside it. Pads underneath, count not observable.",
+   "bbox_basis": "leads",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "unresolved",
+    "selected_path": null,
+    "search_truncated": true,
+    "candidates": []
+   },
+   "model_path": null
+  },
+  {
+   "name": "D_PWR (led)",
+   "length_mm": 3.2512,
+   "width_mm": 1.9623,
+   "kind": "led",
+   "class": "led",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two terminals at the top and bottom ends of the body in this image",
+   "confidence": "medium",
+   "package": "chip LED ~2.0x1.2mm (0805-like)",
+   "package_evidence": "White-bodied two-terminal chip package with a tinted/greenish emitting surface, silkscreen 'PWR' beside it; solder fillets at both ends.",
+   "bbox_basis": "leads",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/LED_SMD.3dshapes/LED_1206_3216Metric.step",
+      "package": "LED_1206_3216Metric",
+      "dimensions_mm": [
+       3.2,
+       1.6,
+       1.1000000000000032
+      ],
+      "relative_xy_error": 0.18463028079294697,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "led",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/LED_SMD.3dshapes/LED_1206_3216Metric_Castellated.step",
+      "package": "LED_1206_3216Metric_Castellated",
+      "dimensions_mm": [
+       3.2000001361525694,
+       1.6,
+       1.100000132326332
+      ],
+      "relative_xy_error": 0.18463028079294697,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "led",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/LED_SMD.3dshapes/LED_1210_3225Metric.step",
+      "package": "LED_1210_3225Metric",
+      "dimensions_mm": [
+       3.2,
+       2.5,
+       1.1000000000000032
+      ],
+      "relative_xy_error": 0.2740151862610203,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "led",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/LED_SMD.3dshapes/LED_1210_3225Metric_Castellated.step",
+      "package": "LED_1210_3225Metric_Castellated",
+      "dimensions_mm": [
+       3.2000002060620605,
+       2.5,
+       1.100000144273122
+      ],
+      "relative_xy_error": 0.2740151862610203,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "led",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "D1 (diode)",
+   "length_mm": 2.4687,
+   "width_mm": 1.651,
+   "kind": "diode",
+   "class": "diode",
+   "class_confidence": "low",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two terminals at left and right ends; lighter band visible at one end",
+   "confidence": "low",
+   "package": "",
+   "package_evidence": "Small dark two-terminal body ~2.4x1.4mm with bright solder at both ends and a lighter cathode-like band on the left portion; could also be a small-signal diode array or resistor, so identity is uncertain.",
+   "bbox_basis": "leads",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Diode_SMD.3dshapes/D_TUMD2.step",
+      "package": "D_TUMD2",
+      "dimensions_mm": [
+       2.5000000000000004,
+       1.3,
+       0.62
+      ],
+      "relative_xy_error": 0.21259842519685038,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "diode",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Diode_SMD.3dshapes/D_0805_2012Metric.step",
+      "package": "D_0805_2012Metric",
+      "dimensions_mm": [
+       2.0000000713463435,
+       1.27,
+       0.8000001642314619
+      ],
+      "relative_xy_error": 0.23076923076923078,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "diode",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Diode_SMD.3dshapes/D_SOD-323.step",
+      "package": "D_SOD-323",
+      "dimensions_mm": [
+       2.5,
+       1.25,
+       1.11
+      ],
+      "relative_xy_error": 0.2428831011508177,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "diode",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Diode_SMD.3dshapes/D_SOD-323F.step",
+      "package": "D_SOD-323F",
+      "dimensions_mm": [
+       2.5,
+       1.25,
+       0.73
+      ],
+      "relative_xy_error": 0.2428831011508177,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "diode",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "J_HEADER_BLK (connector)",
+   "length_mm": 7.7226,
+   "width_mm": 6.3246,
+   "kind": "connector",
+   "class": "connector",
+   "class_confidence": "low",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 4,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "three wide tinned terminals along the top edge of the body; one additional wide terminal below the body",
+   "confidence": "low",
+   "package": "",
+   "package_evidence": "Large rectangular black moulded body approx 7.5x6.0mm with three broad tinned metal terminals emerging from its upper edge and a further wide tinned tab below; faint top marking unreadable. Could be a connector, relay or a large moulded power part; function unresolved.",
+   "bbox_basis": "leads",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Connector_USB.3dshapes/USB_C_Receptacle_GCT_USB4125-xx-x-0190_6P_TopMnt_Horizontal.step",
+      "package": "USB_C_Receptacle_GCT_USB4125-xx-x-0190_6P_TopMnt_Horizontal",
+      "dimensions_mm": [
+       8.940000000000001,
+       6.900000000000003,
+       5.160000000000011
+      ],
+      "relative_xy_error": 0.15764120891927608,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "connector",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Connector_USB.3dshapes/USB_C_Receptacle_GCT_USB4125-xx-x_6P_TopMnt_Horizontal.step",
+      "package": "USB_C_Receptacle_GCT_USB4125-xx-x_6P_TopMnt_Horizontal",
+      "dimensions_mm": [
+       8.940000000000001,
+       6.900000000000002,
+       4.260000000000002
+      ],
+      "relative_xy_error": 0.15764120891927608,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "connector",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Connector_USB.3dshapes/USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal.step",
+      "package": "USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal",
+      "dimensions_mm": [
+       8.94000019163691,
+       7.780000000000001,
+       4.260000000000001
+      ],
+      "relative_xy_error": 0.2301173196723905,
+      "relative_z_error": null,
+      "measurement_basis": "total",
+      "measurement_method": "measured_total",
+      "family": "connector",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible total dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "J_2PIN_1 (connector)",
+   "length_mm": 2.54,
+   "width_mm": 1.3926,
+   "kind": "connector",
+   "class": "connector",
+   "class_confidence": "low",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two contacts at top and bottom ends of the black body",
+   "confidence": "low",
+   "package": "",
+   "package_evidence": "Small black moulded body straddling two copper pads with bright solder at its ends, matching the second identical body lower on the board; likely a jumper/link or small connector, identity unresolved.",
+   "bbox_basis": "leads",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "unresolved",
+    "selected_path": null,
+    "search_truncated": true,
+    "candidates": []
+   },
+   "model_path": null
+  },
+  {
+   "name": "J_2PIN_2 (connector)",
+   "length_mm": 3.6081,
+   "width_mm": 3.2766,
+   "kind": "connector",
+   "class": "connector",
+   "class_confidence": "low",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "black body with contacts at its top and bottom; a bright metal contact/pad extends to the right",
+   "confidence": "low",
+   "package": "",
+   "package_evidence": "Black moulded part with tinned metal contact soldered to adjacent pad, near silkscreen 'J?Y'; same style as the body above. Likely a jumper/link or 2-pin connector; identity unresolved.",
+   "bbox_basis": "leads",
+   "marking": "J?Y (adjacent silkscreen)",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "unresolved",
+    "selected_path": null,
+    "search_truncated": true,
+    "candidates": []
+   },
+   "model_path": null
+  },
+  {
+   "name": "C1 (capacitor)",
+   "length_mm": 2.5953,
+   "width_mm": 1.1938,
+   "kind": "capacitor",
+   "class": "capacitor",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, left and right",
+   "confidence": "medium",
+   "package": "chip 1608 metric (0603 imperial)",
+   "package_evidence": "Two-terminal chip passive ~1.6x0.8mm with tan dielectric and bright endcaps; resistor/capacitor ambiguity noted.",
+   "bbox_basis": "body",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Capacitor_SMD.3dshapes/C_0805_2012Metric.step",
+      "package": "C_0805_2012Metric",
+      "dimensions_mm": [
+       2.0,
+       1.25,
+       1.25
+      ],
+      "relative_xy_error": 0.22937618001772433,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "capacitor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "C2 (capacitor)",
+   "length_mm": 1.65213,
+   "width_mm": 0.89662,
+   "kind": "capacitor",
+   "class": "capacitor",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, left and right",
+   "confidence": "medium",
+   "package": "chip 1608 metric (0603 imperial)",
+   "package_evidence": "Small two-terminal chip body with visible tan body and metallized ends on its own land pattern.",
+   "bbox_basis": "body",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Capacitor_SMD.3dshapes/C_0603_1608Metric.step",
+      "package": "C_0603_1608Metric",
+      "dimensions_mm": [
+       1.6,
+       0.8,
+       0.8
+      ],
+      "relative_xy_error": 0.10776025518056694,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "capacitor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "C3 (capacitor)",
+   "length_mm": 2.65227,
+   "width_mm": 1.7526,
+   "kind": "capacitor",
+   "class": "capacitor",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, left and right",
+   "confidence": "medium",
+   "package": "chip 1608 metric (0603 imperial)",
+   "package_evidence": "Two-terminal chip passive body with tan dielectric between bright endcaps.",
+   "bbox_basis": "body",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Capacitor_SMD.3dshapes/C_1206_3216Metric.step",
+      "package": "C_1206_3216Metric",
+      "dimensions_mm": [
+       3.2,
+       1.6,
+       1.6
+      ],
+      "relative_xy_error": 0.20651366565244111,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "capacitor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Capacitor_SMD.3dshapes/C_0805_2012Metric.step",
+      "package": "C_0805_2012Metric",
+      "dimensions_mm": [
+       2.0,
+       1.25,
+       1.25
+      ],
+      "relative_xy_error": 0.2867739358667123,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "capacitor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "C4 (capacitor)",
+   "length_mm": 2.26614,
+   "width_mm": 1.70942,
+   "kind": "capacitor",
+   "class": "capacitor",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, left and right",
+   "confidence": "medium",
+   "package": "chip 1608 metric (0603 imperial)",
+   "package_evidence": "Chip passive body with bright solder at both ends on a dedicated footprint.",
+   "bbox_basis": "body",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Capacitor_SMD.3dshapes/C_0805_2012Metric.step",
+      "package": "C_0805_2012Metric",
+      "dimensions_mm": [
+       2.0,
+       1.25,
+       1.25
+      ],
+      "relative_xy_error": 0.26875782429128003,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "capacitor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "C5 (capacitor)",
+   "length_mm": 1.93698,
+   "width_mm": 1.3589,
+   "kind": "capacitor",
+   "class": "capacitor",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, left and right",
+   "confidence": "medium",
+   "package": "chip 1608 metric (0603 imperial)",
+   "package_evidence": "Two-terminal chip passive body, tan dielectric visible.",
+   "bbox_basis": "body",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Capacitor_SMD.3dshapes/C_0805_2012Metric.step",
+      "package": "C_0805_2012Metric",
+      "dimensions_mm": [
+       2.0,
+       1.25,
+       1.25
+      ],
+      "relative_xy_error": 0.08013834719258223,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "capacitor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "C6 (capacitor)",
+   "length_mm": 2.4003,
+   "width_mm": 1.35462,
+   "kind": "capacitor",
+   "class": "capacitor",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, top and bottom",
+   "confidence": "medium",
+   "package": "chip 1608 metric (0603 imperial)",
+   "package_evidence": "Vertically oriented two-terminal chip passive between the two QFN packages, with tan body and metal ends.",
+   "bbox_basis": "body",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Capacitor_SMD.3dshapes/C_0805_2012Metric.step",
+      "package": "C_0805_2012Metric",
+      "dimensions_mm": [
+       2.0,
+       1.25,
+       1.25
+      ],
+      "relative_xy_error": 0.16677082031412743,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "capacitor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "C7 (capacitor)",
+   "length_mm": 1.00584,
+   "width_mm": 0.53805,
+   "kind": "capacitor",
+   "class": "capacitor",
+   "class_confidence": "low",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, top and bottom",
+   "confidence": "low",
+   "package": "",
+   "package_evidence": "Very small two-terminal chip body ~1.0x0.5mm with solder at both ends; passive family ambiguous.",
+   "bbox_basis": "body",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Capacitor_SMD.3dshapes/C_0402_1005Metric.step",
+      "package": "C_0402_1005Metric",
+      "dimensions_mm": [
+       1.0,
+       0.5,
+       0.5
+      ],
+      "relative_xy_error": 0.07071833472725587,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "capacitor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "C8 (capacitor)",
+   "length_mm": 2.46888,
+   "width_mm": 2.25348,
+   "kind": "capacitor",
+   "class": "capacitor",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, top and bottom",
+   "confidence": "medium",
+   "package": "chip 1608 metric (0603 imperial)",
+   "package_evidence": "Chip passive body with visible metal endcaps within a white silkscreen outline.",
+   "bbox_basis": "body",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Capacitor_SMD.3dshapes/C_1206_3216Metric.step",
+      "package": "C_1206_3216Metric",
+      "dimensions_mm": [
+       3.2,
+       1.6,
+       1.6
+      ],
+      "relative_xy_error": 0.29613427951135746,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "capacitor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Capacitor_SMD.3dshapes/C_1210_3225Metric.step",
+      "package": "C_1210_3225Metric",
+      "dimensions_mm": [
+       3.2,
+       2.5,
+       2.5
+      ],
+      "relative_xy_error": 0.29613427951135746,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "capacitor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "C9 (capacitor)",
+   "length_mm": 1.41792,
+   "width_mm": 0.99822,
+   "kind": "capacitor",
+   "class": "capacitor",
+   "class_confidence": "low",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, left and right",
+   "confidence": "low",
+   "package": "",
+   "package_evidence": "Small two-terminal chip body mounted between white silkscreen pads; passive type ambiguous.",
+   "bbox_basis": "body",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Capacitor_SMD.3dshapes/C_0603_1608Metric.step",
+      "package": "C_0603_1608Metric",
+      "dimensions_mm": [
+       1.6,
+       0.8,
+       0.8
+      ],
+      "relative_xy_error": 0.19857346076015303,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "capacitor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "C10 (capacitor)",
+   "length_mm": 1.76022,
+   "width_mm": 0.7596,
+   "kind": "capacitor",
+   "class": "capacitor",
+   "class_confidence": "low",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, top and bottom",
+   "confidence": "low",
+   "package": "",
+   "package_evidence": "Narrow two-terminal chip body with tan dielectric left of the large black moulded part.",
+   "bbox_basis": "body",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Capacitor_SMD.3dshapes/C_0603_1608Metric.step",
+      "package": "C_0603_1608Metric",
+      "dimensions_mm": [
+       1.6,
+       0.8,
+       0.8
+      ],
+      "relative_xy_error": 0.09102271306995706,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "capacitor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "C11 (capacitor)",
+   "length_mm": 2.72034,
+   "width_mm": 1.75341,
+   "kind": "capacitor",
+   "class": "capacitor",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, top and bottom",
+   "confidence": "medium",
+   "package": "chip 1608 metric (0603 imperial)",
+   "package_evidence": "Two-terminal chip passive with tan dielectric and bright endcaps on its own footprint.",
+   "bbox_basis": "body",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Capacitor_SMD.3dshapes/C_1206_3216Metric.step",
+      "package": "C_1206_3216Metric",
+      "dimensions_mm": [
+       3.2,
+       1.6,
+       1.6
+      ],
+      "relative_xy_error": 0.1763235477918201,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "capacitor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Capacitor_SMD.3dshapes/C_0805_2012Metric.step",
+      "package": "C_0805_2012Metric",
+      "dimensions_mm": [
+       2.0,
+       1.25,
+       1.25
+      ],
+      "relative_xy_error": 0.287103415630115,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "capacitor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "C12 (capacitor)",
+   "length_mm": 2.60096,
+   "width_mm": 1.22169,
+   "kind": "capacitor",
+   "class": "capacitor",
+   "class_confidence": "low",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, top and bottom",
+   "confidence": "low",
+   "package": "",
+   "package_evidence": "Two-terminal chip body with tan dielectric visible inside a white silkscreen frame; detector box was clipped at left but the body itself is fully visible in the photo.",
+   "bbox_basis": "body",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Capacitor_SMD.3dshapes/C_0805_2012Metric.step",
+      "package": "C_0805_2012Metric",
+      "dimensions_mm": [
+       2.0,
+       1.25,
+       1.25
+      ],
+      "relative_xy_error": 0.23105314960629925,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "capacitor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "C13 (capacitor)",
+   "length_mm": 2.41046,
+   "width_mm": 1.67112,
+   "kind": "capacitor",
+   "class": "capacitor",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, top and bottom",
+   "confidence": "medium",
+   "package": "chip 1608 metric (0603 imperial)",
+   "package_evidence": "Chip passive body with bright metallized ends on its own land pattern.",
+   "bbox_basis": "body",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Capacitor_SMD.3dshapes/C_0805_2012Metric.step",
+      "package": "C_0805_2012Metric",
+      "dimensions_mm": [
+       2.0,
+       1.25,
+       1.25
+      ],
+      "relative_xy_error": 0.25199865958159795,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "capacitor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "C14 (capacitor)",
+   "length_mm": 1.14808,
+   "width_mm": 0.65832,
+   "kind": "capacitor",
+   "class": "capacitor",
+   "class_confidence": "low",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, top and bottom",
+   "confidence": "low",
+   "package": "",
+   "package_evidence": "Small two-terminal chip body in a row of four similar passives, solder at both ends.",
+   "bbox_basis": "body",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Capacitor_SMD.3dshapes/C_0402_1005Metric.step",
+      "package": "C_0402_1005Metric",
+      "dimensions_mm": [
+       1.0,
+       0.5,
+       0.5
+      ],
+      "relative_xy_error": 0.24049094665208412,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "capacitor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "C15 (capacitor)",
+   "length_mm": 1.28778,
+   "width_mm": 0.54438,
+   "kind": "capacitor",
+   "class": "capacitor",
+   "class_confidence": "low",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, top and bottom",
+   "confidence": "low",
+   "package": "",
+   "package_evidence": "Small two-terminal chip body, rightmost in the row of four, with visible endcaps.",
+   "bbox_basis": "body",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Capacitor_SMD.3dshapes/C_0402_1005Metric.step",
+      "package": "C_0402_1005Metric",
+      "dimensions_mm": [
+       1.0,
+       0.5,
+       0.5
+      ],
+      "relative_xy_error": 0.22346984733417194,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "capacitor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "C16 (capacitor)",
+   "length_mm": 1.0668,
+   "width_mm": 0.67731,
+   "kind": "capacitor",
+   "class": "capacitor",
+   "class_confidence": "low",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, top and bottom",
+   "confidence": "low",
+   "package": "",
+   "package_evidence": "Small two-terminal chip body in the four-passive row with solder fillets both ends.",
+   "bbox_basis": "body",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Capacitor_SMD.3dshapes/C_0402_1005Metric.step",
+      "package": "C_0402_1005Metric",
+      "dimensions_mm": [
+       1.0,
+       0.5,
+       0.5
+      ],
+      "relative_xy_error": 0.2617855930076331,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "capacitor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "C17 (capacitor)",
+   "length_mm": 0.97282,
+   "width_mm": 0.58869,
+   "kind": "capacitor",
+   "class": "capacitor",
+   "class_confidence": "low",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, top and bottom",
+   "confidence": "low",
+   "package": "",
+   "package_evidence": "Leftmost small two-terminal chip body of the four-passive row, endcaps soldered.",
+   "bbox_basis": "body",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Capacitor_SMD.3dshapes/C_0402_1005Metric.step",
+      "package": "C_0402_1005Metric",
+      "dimensions_mm": [
+       1.0,
+       0.5,
+       0.5
+      ],
+      "relative_xy_error": 0.15065654249265326,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "capacitor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "C18 (capacitor)",
+   "length_mm": 2.46888,
+   "width_mm": 1.5192,
+   "kind": "capacitor",
+   "class": "capacitor",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, top and bottom",
+   "confidence": "medium",
+   "package": "chip 1608 metric (0603 imperial)",
+   "package_evidence": "Two-terminal chip passive with bright endcaps in the lower row.",
+   "bbox_basis": "body",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Capacitor_SMD.3dshapes/C_0805_2012Metric.step",
+      "package": "C_0805_2012Metric",
+      "dimensions_mm": [
+       2.0,
+       1.25,
+       1.25
+      ],
+      "relative_xy_error": 0.18991607530540164,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "capacitor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Capacitor_SMD.3dshapes/C_1206_3216Metric.step",
+      "package": "C_1206_3216Metric",
+      "dimensions_mm": [
+       3.2,
+       1.6,
+       1.6
+      ],
+      "relative_xy_error": 0.29613427951135746,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "capacitor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "C19 (capacitor)",
+   "length_mm": 2.14122,
+   "width_mm": 1.22169,
+   "kind": "capacitor",
+   "class": "capacitor",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, top and bottom",
+   "confidence": "medium",
+   "package": "chip 1608 metric (0603 imperial)",
+   "package_evidence": "Chip passive with clearly visible tan dielectric body between two metallized ends.",
+   "bbox_basis": "body",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Capacitor_SMD.3dshapes/C_0805_2012Metric.step",
+      "package": "C_0805_2012Metric",
+      "dimensions_mm": [
+       2.0,
+       1.25,
+       1.25
+      ],
+      "relative_xy_error": 0.06595305480053433,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "capacitor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "C20 (capacitor)",
+   "length_mm": 1.34829,
+   "width_mm": 0.89662,
+   "kind": "capacitor",
+   "class": "capacitor",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, left and right",
+   "confidence": "medium",
+   "package": "chip 1608 metric (0603 imperial)",
+   "package_evidence": "Two-terminal chip passive body with tan dielectric and bright right endcap.",
+   "bbox_basis": "body",
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Capacitor_SMD.3dshapes/C_0603_1608Metric.step",
+      "package": "C_0603_1608Metric",
+      "dimensions_mm": [
+       1.6,
+       0.8,
+       0.8
+      ],
+      "relative_xy_error": 0.1866883237285748,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "capacitor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "R1 (resistor)",
+   "length_mm": 2.16486,
+   "width_mm": 1.21158,
+   "kind": "resistor",
+   "class": "resistor",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, left and right",
+   "confidence": "medium",
+   "package": "chip 1608 metric (0603 imperial)",
+   "package_evidence": "Dark-topped two-terminal chip body with light '0' marking, typical zero-ohm chip resistor; both endcaps soldered.",
+   "bbox_basis": "body",
+   "marking": "0",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_0805_2012Metric.step",
+      "package": "R_0805_2012Metric",
+      "dimensions_mm": [
+       2.0,
+       1.2,
+       0.45000000000000007
+      ],
+      "relative_xy_error": 0.07615273043060522,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_MicroMELF_MMU-0102.step",
+      "package": "R_MicroMELF_MMU-0102",
+      "dimensions_mm": [
+       2.2,
+       1.0493331215586403,
+       1.1
+      ],
+      "relative_xy_error": 0.13391346707717175,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "section_65pct_unverified",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "R2 (resistor)",
+   "length_mm": 1.81671,
+   "width_mm": 1.02108,
+   "kind": "resistor",
+   "class": "resistor",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, left and right",
+   "confidence": "medium",
+   "package": "chip 1608 metric (0603 imperial)",
+   "package_evidence": "Second dark chip resistor marked '0' below R1; a tile-clipped sliver (19) covers the same body and is merged here.",
+   "bbox_basis": "body",
+   "marking": "0",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_0805_2012Metric.step",
+      "package": "R_0805_2012Metric",
+      "dimensions_mm": [
+       2.0,
+       1.2,
+       0.45000000000000007
+      ],
+      "relative_xy_error": 0.175226231049477,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_MicroMELF_MMU-0102.step",
+      "package": "R_MicroMELF_MMU-0102",
+      "dimensions_mm": [
+       2.2,
+       1.0493331215586403,
+       1.1
+      ],
+      "relative_xy_error": 0.2109802885435761,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "section_65pct_unverified",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_0603_1608Metric.step",
+      "package": "R_0603_1608Metric",
+      "dimensions_mm": [
+       1.6,
+       0.8,
+       0.45000000000000007
+      ],
+      "relative_xy_error": 0.21651584596701526,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "R3 (resistor)",
+   "length_mm": 1.80086,
+   "width_mm": 1.27233,
+   "kind": "resistor",
+   "class": "resistor",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, top and bottom",
+   "confidence": "medium",
+   "package": "chip 1608 metric (0603 imperial)",
+   "package_evidence": "Dark chip body with '0' marking mounted vertically, solder fillets at both ends.",
+   "bbox_basis": "body",
+   "marking": "0",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_0805_2012Metric.step",
+      "package": "R_0805_2012Metric",
+      "dimensions_mm": [
+       2.0,
+       1.2,
+       0.45000000000000007
+      ],
+      "relative_xy_error": 0.11058050042757354,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_MicroMELF_MMU-0102.step",
+      "package": "R_MicroMELF_MMU-0102",
+      "dimensions_mm": [
+       2.2,
+       1.0493331215586403,
+       1.1
+      ],
+      "relative_xy_error": 0.221638550470331,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "section_65pct_unverified",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_Cat16-2.step",
+      "package": "R_Cat16-2",
+      "dimensions_mm": [
+       1.6000001210013544,
+       1.6,
+       0.5000000340852521
+      ],
+      "relative_xy_error": 0.2575353878317733,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "section_65pct_unverified",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "R4 (resistor)",
+   "length_mm": 3.19024,
+   "width_mm": 1.87368,
+   "kind": "resistor",
+   "class": "resistor",
+   "class_confidence": "low",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, top and bottom",
+   "confidence": "low",
+   "package": "",
+   "package_evidence": "Dark chip resistor body with white '123' marking; detector box is wider than the body but the body itself is distinct on its pads.",
+   "bbox_basis": "body",
+   "marking": "123",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_Shunt_Ohmite_LVK12.step",
+      "package": "R_Shunt_Ohmite_LVK12",
+      "dimensions_mm": [
+       1.6000002985003063,
+       3.2000000000000033,
+       0.6000001907349001
+      ],
+      "relative_xy_error": 0.14606533746407802,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "section_65pct_unverified",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_Cat16-4.step",
+      "package": "R_Cat16-4",
+      "dimensions_mm": [
+       1.6000001210013544,
+       3.2,
+       0.5000000340852521
+      ],
+      "relative_xy_error": 0.14606543219687762,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "section_65pct_unverified",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_0612_1632Metric.step",
+      "package": "R_0612_1632Metric",
+      "dimensions_mm": [
+       1.6,
+       3.2,
+       0.45000000000000007
+      ],
+      "relative_xy_error": 0.1460654967763972,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_1206_3216Metric.step",
+      "package": "R_1206_3216Metric",
+      "dimensions_mm": [
+       3.2,
+       1.6,
+       0.55
+      ],
+      "relative_xy_error": 0.1460654967763972,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_0815_2038Metric.step",
+      "package": "R_0815_2038Metric",
+      "dimensions_mm": [
+       2.0,
+       3.8,
+       0.45000000000000007
+      ],
+      "relative_xy_error": 0.19113295551431855,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "R5 (resistor)",
+   "length_mm": 2.159,
+   "width_mm": 1.49388,
+   "kind": "resistor",
+   "class": "resistor",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, top and bottom",
+   "confidence": "medium",
+   "package": "chip 1608 metric (0603 imperial)",
+   "package_evidence": "Dark chip resistor with white '123' marking, both endcaps soldered to its pads.",
+   "bbox_basis": "body",
+   "marking": "123",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_0805_2012Metric.step",
+      "package": "R_0805_2012Metric",
+      "dimensions_mm": [
+       2.0,
+       1.2,
+       0.45000000000000007
+      ],
+      "relative_xy_error": 0.19672262832356022,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_Cat16-2.step",
+      "package": "R_Cat16-2",
+      "dimensions_mm": [
+       1.6000001210013544,
+       1.6,
+       0.5000000340852521
+      ],
+      "relative_xy_error": 0.2589161088460609,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "section_65pct_unverified",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_MicroMELF_MMU-0102.step",
+      "package": "R_MicroMELF_MMU-0102",
+      "dimensions_mm": [
+       2.2,
+       1.0493331215586403,
+       1.1
+      ],
+      "relative_xy_error": 0.2975787067511177,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "section_65pct_unverified",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "R6 (resistor)",
+   "length_mm": 2.66954,
+   "width_mm": 1.60782,
+   "kind": "resistor",
+   "class": "resistor",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, top and bottom",
+   "confidence": "medium",
+   "package": "chip 1608 metric (0603 imperial)",
+   "package_evidence": "Dark chip resistor marked '123' in the lower row; two overlapping detector boxes describe the same single body.",
+   "bbox_basis": "body",
+   "marking": "123",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_Shunt_Vishay_WSKW0612.step",
+      "package": "R_Shunt_Vishay_WSKW0612",
+      "dimensions_mm": [
+       3.05,
+       1.5,
+       0.457
+      ],
+      "relative_xy_error": 0.14251893584662517,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "section_65pct_unverified",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_0612_1632Metric.step",
+      "package": "R_0612_1632Metric",
+      "dimensions_mm": [
+       1.6,
+       3.2,
+       0.45000000000000007
+      ],
+      "relative_xy_error": 0.19870839170793475,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_1206_3216Metric.step",
+      "package": "R_1206_3216Metric",
+      "dimensions_mm": [
+       3.2,
+       1.6,
+       0.55
+      ],
+      "relative_xy_error": 0.19870839170793475,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_Cat16-4.step",
+      "package": "R_Cat16-4",
+      "dimensions_mm": [
+       1.6000001210013544,
+       3.2,
+       0.5000000340852521
+      ],
+      "relative_xy_error": 0.19870839170793475,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "section_65pct_unverified",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_Shunt_Ohmite_LVK12.step",
+      "package": "R_Shunt_Ohmite_LVK12",
+      "dimensions_mm": [
+       1.6000002985003063,
+       3.2000000000000033,
+       0.6000001907349001
+      ],
+      "relative_xy_error": 0.19870839170793592,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "section_65pct_unverified",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "R7 (resistor)",
+   "length_mm": 2.27076,
+   "width_mm": 1.15839,
+   "kind": "resistor",
+   "class": "resistor",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, top and bottom",
+   "confidence": "medium",
+   "package": "chip 1608 metric (0603 imperial)",
+   "package_evidence": "Dark chip resistor with white marking reading '01C' (rotated), solder at both ends.",
+   "bbox_basis": "body",
+   "marking": "01C",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_MicroMELF_MMU-0102.step",
+      "package": "R_MicroMELF_MMU-0102",
+      "dimensions_mm": [
+       2.2,
+       1.0493331215586403,
+       1.1
+      ],
+      "relative_xy_error": 0.09414521744952882,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "section_65pct_unverified",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_0805_2012Metric.step",
+      "package": "R_0805_2012Metric",
+      "dimensions_mm": [
+       2.0,
+       1.2,
+       0.45000000000000007
+      ],
+      "relative_xy_error": 0.1192376120770139,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "R8 (resistor)",
+   "length_mm": 2.77876,
+   "width_mm": 1.48755,
+   "kind": "resistor",
+   "class": "resistor",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, top and bottom",
+   "confidence": "medium",
+   "package": "chip 1608 metric (0603 imperial)",
+   "package_evidence": "Dark chip resistor marked '01C' with both endcaps soldered on its footprint.",
+   "bbox_basis": "body",
+   "marking": "01C",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_Shunt_Vishay_WSKW0612.step",
+      "package": "R_Shunt_Vishay_WSKW0612",
+      "dimensions_mm": [
+       3.05,
+       1.5,
+       0.457
+      ],
+      "relative_xy_error": 0.09761188443766274,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "section_65pct_unverified",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_0612_1632Metric.step",
+      "package": "R_0612_1632Metric",
+      "dimensions_mm": [
+       1.6,
+       3.2,
+       0.45000000000000007
+      ],
+      "relative_xy_error": 0.15159279678705612,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_1206_3216Metric.step",
+      "package": "R_1206_3216Metric",
+      "dimensions_mm": [
+       3.2,
+       1.6,
+       0.55
+      ],
+      "relative_xy_error": 0.15159279678705612,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_Cat16-4.step",
+      "package": "R_Cat16-4",
+      "dimensions_mm": [
+       1.6000001210013544,
+       3.2,
+       0.5000000340852521
+      ],
+      "relative_xy_error": 0.15159279678705612,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "section_65pct_unverified",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_Shunt_Ohmite_LVK12.step",
+      "package": "R_Shunt_Ohmite_LVK12",
+      "dimensions_mm": [
+       1.6000002985003063,
+       3.2000000000000033,
+       0.6000001907349001
+      ],
+      "relative_xy_error": 0.15159279678705723,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "section_65pct_unverified",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "R9 (resistor)",
+   "length_mm": 1.62048,
+   "width_mm": 0.92456,
+   "kind": "resistor",
+   "class": "resistor",
+   "class_confidence": "medium",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": 2,
+   "terminal_count_basis": "visible_including_tabs",
+   "terminal_layout": "two endcaps, left and right",
+   "confidence": "medium",
+   "package": "chip 1608 metric (0603 imperial)",
+   "package_evidence": "Horizontal dark chip resistor marked '01C' in a white silkscreen outline near lower centre.",
+   "bbox_basis": "body",
+   "marking": "01C",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "review_required",
+    "selected_path": null,
+    "search_truncated": true,
+    "discovery": "family_dimensions",
+    "candidates": [
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_0603_1608Metric.step",
+      "package": "R_0603_1608Metric",
+      "dimensions_mm": [
+       1.6,
+       0.8,
+       0.45000000000000007
+      ],
+      "relative_xy_error": 0.13472354417236307,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     },
+     {
+      "path": "C:/KiCad/3dmodels/Resistor_SMD.3dshapes/R_0805_2012Metric.step",
+      "package": "R_0805_2012Metric",
+      "dimensions_mm": [
+       2.0,
+       1.2,
+       0.45000000000000007
+      ],
+      "relative_xy_error": 0.2979146837414553,
+      "relative_z_error": null,
+      "measurement_basis": "body",
+      "measurement_method": "total_standard_endcap",
+      "family": "resistor",
+      "status": "review_required",
+      "reasons": [
+       "Family and dimension discovery",
+       "No declared family or terminal conflict",
+       "Compatible body dimensions",
+       "Identity and variant require user review"
+      ]
+     }
+    ]
+   },
+   "model_path": null
+  },
+  {
+   "name": "YOLO candidate 26",
+   "length_mm": 1.23,
+   "width_mm": 0.29,
+   "kind": "generic",
+   "class": null,
+   "class_confidence": "low",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": null,
+   "terminal_count_basis": null,
+   "terminal_layout": null,
+   "confidence": "low",
+   "package": "",
+   "package_evidence": null,
+   "bbox_basis": null,
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "unresolved",
+    "selected_path": null,
+    "candidates": []
+   },
+   "model_path": null
+  },
+  {
+   "name": "YOLO candidate 30",
+   "length_mm": 4.13,
+   "width_mm": 1.39,
+   "kind": "generic",
+   "class": null,
+   "class_confidence": "low",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": null,
+   "terminal_count_basis": null,
+   "terminal_layout": null,
+   "confidence": "low",
+   "package": "",
+   "package_evidence": null,
+   "bbox_basis": null,
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "unresolved",
+    "selected_path": null,
+    "candidates": []
+   },
+   "model_path": null
+  },
+  {
+   "name": "YOLO candidate 32",
+   "length_mm": 1.03,
+   "width_mm": 0.65,
+   "kind": "generic",
+   "class": null,
+   "class_confidence": "low",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": null,
+   "terminal_count_basis": null,
+   "terminal_layout": null,
+   "confidence": "low",
+   "package": "",
+   "package_evidence": null,
+   "bbox_basis": null,
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "unresolved",
+    "selected_path": null,
+    "candidates": []
+   },
+   "model_path": null
+  },
+  {
+   "name": "YOLO candidate 34",
+   "length_mm": 1.012776,
+   "width_mm": 0.459421,
+   "kind": "generic",
+   "class": null,
+   "class_confidence": "low",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": null,
+   "terminal_count_basis": null,
+   "terminal_layout": null,
+   "confidence": "low",
+   "package": "",
+   "package_evidence": null,
+   "bbox_basis": null,
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "unresolved",
+    "selected_path": null,
+    "candidates": []
+   },
+   "model_path": null
+  },
+  {
+   "name": "YOLO candidate 35",
+   "length_mm": 0.879253,
+   "width_mm": 0.650326,
+   "kind": "generic",
+   "class": null,
+   "class_confidence": "low",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": null,
+   "terminal_count_basis": null,
+   "terminal_layout": null,
+   "confidence": "low",
+   "package": "",
+   "package_evidence": null,
+   "bbox_basis": null,
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "unresolved",
+    "selected_path": null,
+    "candidates": []
+   },
+   "model_path": null
+  },
+  {
+   "name": "YOLO candidate 36",
+   "length_mm": 1.04953,
+   "width_mm": 0.279834,
+   "kind": "generic",
+   "class": null,
+   "class_confidence": "low",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": null,
+   "terminal_count_basis": null,
+   "terminal_layout": null,
+   "confidence": "low",
+   "package": "",
+   "package_evidence": null,
+   "bbox_basis": null,
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "unresolved",
+    "selected_path": null,
+    "candidates": []
+   },
+   "model_path": null
+  },
+  {
+   "name": "YOLO candidate 42",
+   "length_mm": 0.958355,
+   "width_mm": 0.157041,
+   "kind": "generic",
+   "class": null,
+   "class_confidence": "low",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": null,
+   "terminal_count_basis": null,
+   "terminal_layout": null,
+   "confidence": "low",
+   "package": "",
+   "package_evidence": null,
+   "bbox_basis": null,
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "unresolved",
+    "selected_path": null,
+    "candidates": []
+   },
+   "model_path": null
+  },
+  {
+   "name": "YOLO candidate 43",
+   "length_mm": 4.59,
+   "width_mm": 3.38,
+   "kind": "generic",
+   "class": null,
+   "class_confidence": "low",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": null,
+   "terminal_count_basis": null,
+   "terminal_layout": null,
+   "confidence": "low",
+   "package": "",
+   "package_evidence": null,
+   "bbox_basis": null,
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "unresolved",
+    "selected_path": null,
+    "candidates": []
+   },
+   "model_path": null
+  },
+  {
+   "name": "YOLO candidate 46",
+   "length_mm": 0.399019,
+   "width_mm": 0.208337,
+   "kind": "generic",
+   "class": null,
+   "class_confidence": "low",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": null,
+   "terminal_count_basis": null,
+   "terminal_layout": null,
+   "confidence": "low",
+   "package": "",
+   "package_evidence": null,
+   "bbox_basis": null,
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "unresolved",
+    "selected_path": null,
+    "candidates": []
+   },
+   "model_path": null
+  },
+  {
+   "name": "YOLO candidate 49",
+   "length_mm": 0.96,
+   "width_mm": 0.58,
+   "kind": "generic",
+   "class": null,
+   "class_confidence": "low",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": null,
+   "terminal_count_basis": null,
+   "terminal_layout": null,
+   "confidence": "low",
+   "package": "",
+   "package_evidence": null,
+   "bbox_basis": null,
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "unresolved",
+    "selected_path": null,
+    "candidates": []
+   },
+   "model_path": null
+  },
+  {
+   "name": "YOLO candidate 56",
+   "length_mm": 1.087169,
+   "width_mm": 0.225941,
+   "kind": "generic",
+   "class": null,
+   "class_confidence": "low",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": null,
+   "terminal_count_basis": null,
+   "terminal_layout": null,
+   "confidence": "low",
+   "package": "",
+   "package_evidence": null,
+   "bbox_basis": null,
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "unresolved",
+    "selected_path": null,
+    "candidates": []
+   },
+   "model_path": null
+  },
+  {
+   "name": "YOLO candidate 60",
+   "length_mm": 4.81,
+   "width_mm": 3.12,
+   "kind": "generic",
+   "class": null,
+   "class_confidence": "low",
+   "presence_confidence": "low",
+   "_global_inventory_status": "partial",
+   "terminal_count": null,
+   "terminal_count_basis": null,
+   "terminal_layout": null,
+   "confidence": "low",
+   "package": "",
+   "package_evidence": null,
+   "bbox_basis": null,
+   "marking": "",
+   "_global_inventory_errors": [
+    "component U1_MODULE: merged box excludes most of sources [44, 45]"
+   ],
+   "model_match": {
+    "status": "unresolved",
+    "selected_path": null,
+    "candidates": []
+   },
+   "model_path": null
+  }
+ ]
+}

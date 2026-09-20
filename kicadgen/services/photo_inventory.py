@@ -649,6 +649,63 @@ def draw_detector_proposals(image, kept, dropped=()):
     return encoded.tobytes() if ok else None
 
 
+#: Frazione del lato del riquadro, per parte, che delimita la finestra di
+#: campionamento del colore attorno al centro: 0.2 per parte = 40% centrale.
+#: Esclude serigrafie di bordo, terminazioni metalliche e ombre del contorno,
+#: che stanno sul perimetro; non e' una soglia tarata su un componente.
+COLOR_SAMPLE_HALF_FRACTION = 0.2
+
+
+def sample_body_colors(photo, components, log=lambda message: None):
+    """@brief Measure each body's colour from the calibrated photograph.
+
+    @param photo Calibrated BGR crop (numpy array) the boxes are normalized against.
+    @param components Component dicts whose `_box` is [left, top, right, bottom]
+        normalized 0..1 on `photo`. Updated in place.
+    @param log Progress callback for the summary line.
+    @return Number of components whose colour was measured.
+    @note The colour is the per-channel median of the central window of the
+        box (see COLOR_SAMPLE_HALF_FRACTION), the same rule as
+        photo_grounding.mechanical_envelopes: a median ignores a silkscreen
+        stroke or a glossy highlight, while a mean would tint the whole body.
+        A row without a valid box, or a photograph without three channels,
+        keeps whatever `color_hex` it already carries (typically the detector
+        placeholder) and is not marked as photographed. A measured colour
+        replaces any earlier textual guess: the photograph is the evidence,
+        the string in the response is not.
+    """
+    import numpy as np
+    if photo is None or getattr(photo, 'ndim', 0) != 3 or photo.shape[2] < 3:
+        return 0
+    h, w = photo.shape[:2]
+    if h < 1 or w < 1:
+        return 0
+    measured = 0
+    for component in components:
+        if not isinstance(component, dict):
+            continue
+        box = component.get('_box')
+        if (not isinstance(box, (list, tuple)) or len(box) != 4
+                or any(isinstance(v, bool) or not isinstance(v, (int, float))
+                       or not math.isfinite(v) or not 0 <= v <= 1 for v in box)
+                or box[0] >= box[2] or box[1] >= box[3]):
+            continue
+        x0, y0, x1, y1 = box
+        cx, cy = (x0 + x1) * w / 2, (y0 + y1) * h / 2
+        dx = max(1, (x1 - x0) * w * COLOR_SAMPLE_HALF_FRACTION)
+        dy = max(1, (y1 - y0) * h * COLOR_SAMPLE_HALF_FRACTION)
+        window = photo[max(0, int(cy - dy)):min(h, math.ceil(cy + dy)),
+                       max(0, int(cx - dx)):min(w, math.ceil(cx + dx)), :3]
+        if window.size == 0:
+            continue
+        b, g, r = np.median(window.reshape(-1, 3), axis=0).astype(int)
+        component['color_hex'] = f"#{r:02x}{g:02x}{b:02x}"
+        component['_color_source'] = 'photo_median'
+        measured += 1
+    log(f'Colori campionati dalla foto: {measured} corpi su {len(components)}.')
+    return measured
+
+
 def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                       top_photo_index=None, extra_instructions=None,
                       grounding=True, cache_dir=None, classifier_model=None, mechanical=True,
@@ -776,6 +833,14 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             photo, proposals, length, width, classifier_model or model, call, log,
             cache_dir, verification_prompt=verification_prompt,
             extra_instructions=extra_instructions)
+        # Il colore si misura QUI e non prima: la riconciliazione fonde e
+        # sposta i riquadri, e un colore campionato sulle proposte grezze
+        # descriverebbe un rettangolo che non esiste piu'. Il rilevatore e il
+        # parser globale scrivono solo un segnaposto (#303030): senza questo
+        # passo ogni corpo, chiaro o scuro, arrivava a FreeCAD dello stesso
+        # grigio, mentre il percorso di grounding (mechanical_envelopes)
+        # campionava gia' la foto. Nessuna chiamata AI: solo pixel del ritaglio.
+        sample_body_colors(photo, report.components, log)
         report.calibration['detector'] = detector
         report.calibration['proposal_count'] = len(proposals)
         report.calibration['coverage_added_count'] = sum(

@@ -17,22 +17,36 @@ from kicadgen.services.photo_yolo_review import review_yolo_components
     ('rf_module', 'unknown', 'low', False),
 ])
 def test_separated_groups_require_physical_assembly(kind, basis, presence, accepted, tmp_path):
+    """@brief Righe legacy senza `grouping_basis`: e' la classe a dire se e' un assieme.
+
+    Il campo resta assente di proposito, perche' e' l'inferenza dalla classe
+    che si verifica. Con il contratto nuovo l'omissione di un campo
+    obbligatorio su ogni riga fa ripetere la chiamata una volta; la risposta
+    finta e' identica, quindi si tiene la prima con l'errore d'inventario, e
+    una risposta cosi' non finisce mai in cache. Una cache «vecchia» gia' su
+    disco, invece, si rilegge senza alcuna chiamata.
+    """
     items = [candidate(1), candidate(2)]
     items[1]['_box'] = [.6, .6, .7, .7]
     data = response()
     data['components'][0].update(**{'class': kind}, bbox_basis=basis,
                                  presence_confidence=presence)
+    data['components'][0].pop('grouping_basis')
     before = deepcopy(items)
     result, calls, _ = run(data, items, cache=tmp_path)
-    assert len(calls) == 1 and items == before
+    assert len(calls) == 2 and items == before
+    assert all(omission_errors(result))
+    assert not list(tmp_path.glob('*.json'))
     if accepted:
         assert len(result) == 1 and result[0]['component_id'] == 'assembly'
-        assert not run(data, items, cache=tmp_path)[1]
+        seed_cache(tmp_path, calls[0], data)
+        replayed, calls, _ = run(data, items, cache=tmp_path)
+        assert not calls and len(replayed) == 1
+        assert replayed[0]['_global_inventory_status'] == 'validated_hypotheses'
     else:
         assert {r['_id'] for r in result} == {1, 2}
         assert [r['_box'] for r in result] == [r['_box'] for r in items]
         assert all(r['_global_inventory_status'] == 'partial' for r in result)
-        assert not list(tmp_path.glob('*.json'))
 
 
 def test_explicit_assembly_is_not_limited_to_module_class():
@@ -225,11 +239,27 @@ def candidate(identity=1):
 
 
 def body(identity='assembly', sources=None, **changes):
-    row = dict(component_id=identity, source_candidate_ids=[1, 2] if sources is None else sources,
+    """@brief Riga di risposta completa rispetto allo schema `inventory_tool()`.
+
+    Ogni campo `required` e' presente: una risposta che ne omette uno su TUTTE
+    le righe non e' piu' accettata in silenzio ma fa ripetere la chiamata, e
+    qui si contano le chiamate. I valori aggiunti replicano i ripieghi che il
+    codice applica quando il campo manca (presenza e classe pari alla
+    confidenza complessiva, `assembly` come un rf_module senza dichiarazione,
+    conteggio dei terminali non osservato), cosi' il significato di ogni test
+    scritto prima di questi campi resta identico. Chi vuole verificare la
+    tolleranza a un campo assente lo toglie con `pop` e attende il retry.
+    """
+    row = dict(component_id=identity, grouping_basis='assembly',
+               source_candidate_ids=[1, 2] if sources is None else sources,
                **{'class': 'rf_module'}, bbox=[.1, .1, .8, .8], bbox_basis='body',
                rotation_deg=0, package='', marking='?', terminal_count=None,
-               terminal_layout='unresolved', height_mm=None, height_source='unknown',
-               confidence='medium', evidence='Contiguous substrate with shield and attached socket')
+               terminal_layout='unresolved',
+               lead_count=None, lead_count_complete=False, lead_count_confidence='low',
+               height_mm=None, height_source='unknown',
+               confidence='medium', evidence='Contiguous substrate with shield and attached socket',
+               presence_confidence='medium', class_confidence='medium',
+               asymmetry_landmark=None)
     row.update(changes)
     return row
 
@@ -241,14 +271,47 @@ def response():
 
 
 def run(data, items=None, cache=None, **kwargs):
+    """@brief Una sola risposta finta, ripetuta tale e quale a ogni chiamata.
+
+    Se `data` omette un campo obbligatorio su tutte le righe il codice ritenta
+    una volta e riceve la stessa risposta: tiene la prima e aggiunge l'errore
+    d'inventario. E' il modo in cui i test sulla tolleranza ai campi assenti
+    esercitano il contratto nuovo senza inventare una seconda risposta.
+    """
+    return run_replies([data], items, cache, **kwargs)
+
+
+def run_replies(replies, items=None, cache=None, **kwargs):
+    """@brief Risposte finte in sequenza; l'ultima si ripete se le chiamate sono di piu'."""
     calls, logs = [], []
     def fake(**request):
         calls.append(request)
-        return deepcopy(data)
+        return deepcopy(replies[min(len(calls), len(replies)) - 1])
     result = review_yolo_components(np.zeros((60, 120, 3), np.uint8),
         [candidate(1), candidate(2)] if items is None else items,
         40, 20, 'unchanged/model', fake, logs.append, cache, strategy='global', **kwargs)
     return result, calls, logs
+
+
+def seed_cache(cache, request, data):
+    """@brief Scrive su disco la cache che una corsa precedente avrebbe lasciato.
+
+    @param cache Directory della cache.
+    @param request I kwargs ricevuti dalla chiamata finta: la chiave e' il loro hash.
+    @param data La risposta da far rileggere.
+    @note Serve a simulare una cache «vecchia», anteriore ai campi obbligatori
+        di oggi: in replay non c'e' nessuna chiamata e quindi nessun retry.
+    """
+    import hashlib
+    key = hashlib.sha256(json.dumps(request, sort_keys=True, allow_nan=False).encode()).hexdigest()
+    (Path(cache)/f'global-inventory-{key}.json').write_text(
+        json.dumps(dict(key=key, response=data)), encoding='utf-8')
+
+
+def omission_errors(result):
+    """@brief Per ogni riga, se porta l'errore d'inventario dei campi omessi."""
+    return [any('omitted required fields' in e for e in r['_global_inventory_errors'])
+            for r in result]
 
 
 def test_single_call_five_images_all_candidates_and_retained_parent():
@@ -689,13 +752,25 @@ def test_the_asymmetry_landmark_is_read_only_when_it_is_complete(landmark, expec
     assert got == expected
 
 
-def test_a_response_without_the_landmark_field_is_still_accepted():
-    """Le risposte in cache sono anteriori al campo: l'assenza non e' un errore."""
+def test_a_response_without_the_landmark_field_is_still_accepted(tmp_path):
+    """@brief Le risposte in cache sono anteriori al campo: l'assenza non cancella la riga.
+
+    Su una risposta fresca il campo omesso su ogni riga fa ripetere la
+    chiamata una volta (contratto nuovo); la seconda finta e' identica, quindi
+    resta la prima con l'errore d'inventario, e la riga sopravvive senza
+    landmark. La cache «vecchia» si rilegge senza chiamate ne' errore.
+    """
     data = response()
     data['components'][0].pop('asymmetry_landmark', None)
-    result, _, _ = run(data)
-    assert len(result) == 1
+    result, calls, _ = run(data)
+    assert len(result) == 1 and len(calls) == 2
     assert not any(k.startswith('landmark_') for k in result[0])
+    assert omission_errors(result) == [True]
+    seed_cache(tmp_path, calls[0], data)
+    replayed, calls, _ = run(data, cache=tmp_path)
+    assert not calls and len(replayed) == 1
+    assert replayed[0]['_global_inventory_errors'] == []
+    assert not any(k.startswith('landmark_') for k in replayed[0])
 
 
 def _boxed(*boxes):
@@ -772,3 +847,390 @@ def test_a_merged_box_that_throws_away_its_own_sources_is_reported():
     data['components'][0]['bbox'] = [.10, .08, .82, .32]
     _, _, clean = inventory._validate(data, {1, 2}, boxes)
     assert not [message for message in clean if 'excludes most of' in message]
+
+
+# ── un errore su una riga degrada quella riga, non l'inventario ────────
+
+def _clean_row(identity, source, box):
+    return body(identity, [source], **{'class': 'resistor'}, bbox=list(box),
+                grouping_basis='single_body', presence_confidence='high',
+                class_confidence='medium')
+
+
+def test_a_geometric_inconsistency_degrades_only_the_row_it_belongs_to():
+    """@brief Caso positivo: l'errore resta sulla riga incriminata.
+
+    Prima l'elenco degli errori era unico e finiva su ogni componente, e lo
+    status era unico per l'inventario: su una corsa reale la fusione
+    incoerente di UN modulo ha marcato 55 componenti su 55 come parziali.
+    Qui M1 dichiara di fondere la proposta 2 e poi la lascia quasi tutta
+    fuori dal suo rettangolo; R1 non c'entra nulla e deve restare com'era.
+    """
+    items = [candidate(1), dict(candidate(2), _box=[.35, .1, .8, .3]),
+             dict(candidate(3), _box=[.1, .6, .3, .7])]
+    items[0]['_box'] = [.1, .1, .3, .3]
+    data = dict(components=[
+        body('M1', [1, 2], bbox=[.1, .1, .36, .3], grouping_basis='assembly',
+             presence_confidence='high', class_confidence='medium'),
+        _clean_row('R1', 3, [.1, .6, .3, .7])],
+        candidate_decisions=[
+            dict(candidate_id=i, status='merge', component_id='M1', reason='fragment',
+                 rejection_category=None) for i in (1, 2)]
+        + [dict(candidate_id=3, status='keep', component_id='R1', reason='chip body',
+                rejection_category=None)],
+        uncertainties=[])
+    result, _, logs = run(data, items)
+    rows = {r['component_id']: r for r in result}
+    assert set(rows) == {'M1', 'R1'}
+    # La riga sana conserva la presenza dichiarata dal modello e passa i
+    # controlli per conto suo.
+    assert rows['R1']['presence_confidence'] == 'high'
+    assert rows['R1']['_global_inventory_status'] == 'validated_hypotheses'
+    assert rows['R1']['_global_inventory_errors'] == []
+    # La riga colpita e' degradata: parziale e con il suo errore. La presenza
+    # resta quella dichiarata, perche' l'incoerenza e' di provenienza, non di
+    # assenza: il corpo e' comunque coperto dalle altre proposte.
+    assert rows['M1']['_global_inventory_status'] == 'partial'
+    assert rows['M1']['_global_inventory_errors'] == [
+        'component M1: merged box excludes most of sources [2]']
+    assert rows['M1']['presence_confidence'] == 'high'
+    # L'inventario nel suo insieme resta non certificato: log e cache non
+    # cambiano contratto.
+    assert any('FAILED/PARTIAL' in line for line in logs)
+
+
+def test_a_dropped_row_hands_its_error_to_the_proposals_that_replace_it():
+    """@brief Quando la riga cade, l'errore segue le proposte che tornano originali."""
+    items = [candidate(1), dict(candidate(2), _box=[.6, .6, .7, .7]),
+             dict(candidate(3), _box=[.1, .8, .2, .9])]
+    data = dict(components=[
+        body('G1', [1, 2], grouping_basis='unresolved', presence_confidence='high'),
+        _clean_row('R1', 3, [.1, .8, .2, .9])],
+        candidate_decisions=[
+            dict(candidate_id=i, status='uncertain', component_id='G1', reason='doubtful',
+                 rejection_category=None) for i in (1, 2)]
+        + [dict(candidate_id=3, status='keep', component_id='R1', reason='chip body',
+                rejection_category=None)],
+        uncertainties=[])
+    result, _, _ = run(data, items)
+    originals = {r['_id']: r for r in result if 'component_id' not in r}
+    assert set(originals) == {1, 2}
+    for original in originals.values():
+        assert original['_global_inventory_status'] == 'partial'
+        assert any('unsupported group' in e for e in original['_global_inventory_errors'])
+    clean = next(r for r in result if r.get('component_id') == 'R1')
+    assert clean['_global_inventory_status'] == 'validated_hypotheses'
+    assert clean['_global_inventory_errors'] == []
+
+
+@pytest.mark.parametrize('damage', ['uncertainties', 'api_error'])
+def test_an_error_of_the_response_itself_still_reaches_every_row(damage):
+    """@brief Caso negativo, per ragione strutturale.
+
+    Un errore che non nomina nessuna riga ne' nessuna proposta -- la risposta
+    e' malformata nel suo insieme, o la chiamata e' fallita -- non ha una riga
+    da incolpare: vale per tutte, come prima. La distinzione non e' il tipo
+    di messaggio ma se esiste una riga trattenuta che lo puo' reclamare.
+    """
+    items = [candidate(1), dict(candidate(2), _box=[.6, .6, .7, .7])]
+    data = dict(components=[_clean_row('R1', 1, [.2, .2, .4, .4]),
+                            _clean_row('R2', 2, [.6, .6, .7, .7])],
+                candidate_decisions=[dict(candidate_id=i, status='keep', component_id=f'R{i}',
+                                          reason='chip body', rejection_category=None)
+                                     for i in (1, 2)],
+                uncertainties=[])
+    if damage == 'uncertainties':
+        data['uncertainties'] = None
+        result, _, _ = run(data, items)
+        assert len(result) == 2
+        assert all(r['_global_inventory_errors'] == ['uncertainties missing/invalid'] for r in result)
+    else:
+        def fail(**kwargs):
+            raise ValueError('provider refused the tool call')
+        result = inventory.review_global_inventory(np.zeros((60, 120, 3), np.uint8), items,
+                                                   40, 20, 'model', fail, lambda _: None)
+        assert len(result) == 2
+        # Con la chiamata fallita mancano anche componenti, decisioni e
+        # incertezze: tutti errori della risposta, tutti su ogni riga. La
+        # decisione mancante, invece, e' di ciascuna proposta e resta sua.
+        for r in result:
+            assert {'provider refused the tool call', 'components missing',
+                    'candidate_decisions missing', 'uncertainties missing/invalid'
+                    }.issubset(r['_global_inventory_errors'])
+            assert [e for e in r['_global_inventory_errors'] if e.startswith('candidate ')] == [
+                f"candidate {r['_id']}: missing/duplicate decision"]
+    assert all(r['_global_inventory_status'] == 'partial' for r in result)
+
+
+def test_a_missing_presence_field_is_read_as_the_overall_confidence(tmp_path):
+    """@brief L'assenza del campo non e' una dichiarazione di assenza.
+
+    Lo schema lo chiede obbligatorio, ma il provider puo' ometterlo e le
+    risposte in cache anteriori al campo non lo hanno. La confidenza
+    complessiva e' per contratto l'incertezza globale, classe compresa:
+    e' un limite inferiore della presenza, e lo stesso che i controlli
+    geometrici usavano gia'. Prima la normalizzazione metteva 'low' fisso e
+    una risposta valida intera perdeva ogni presenza.
+
+    Contratto nuovo: l'omissione su ogni riga non e' accettata in silenzio.
+    Su una risposta fresca la chiamata si ripete una volta; la seconda finta e'
+    identica, quindi si tiene la prima e ogni riga porta l'errore
+    d'inventario, ma il ripiego sulla confidenza resta quello. Una cache
+    anteriore al campo si rilegge invece senza chiamate e senza errore.
+    """
+    for overall in ('high', 'medium', 'low'):
+        data = response()
+        data['components'][0].pop('presence_confidence', None)
+        data['components'][0]['confidence'] = overall
+        result, calls, _ = run(data)
+        assert len(result) == 1 and len(calls) == 2
+        assert result[0]['presence_confidence'] == overall
+        assert omission_errors(result) == [True]
+    # Replay: la cache «vecchia» non paga nessun retry e legge lo stesso ripiego.
+    seed_cache(tmp_path, calls[0], data)
+    replayed, calls, _ = run(data, cache=tmp_path)
+    assert not calls and len(replayed) == 1
+    assert replayed[0]['presence_confidence'] == 'low'
+    assert replayed[0]['_global_inventory_errors'] == []
+    # Il campo dichiarato vince sempre sul ripiego.
+    data = response()
+    data['components'][0].update(confidence='high', presence_confidence='low')
+    assert run(data)[0][0]['presence_confidence'] == 'low'
+
+
+def test_the_real_module_merge_leaves_the_rest_of_the_board_with_its_presence():
+    """@brief Estratto fedele della risposta reale che ha fatto emergere il difetto.
+
+    Righe, rettangoli e decisioni sono copiati dall'audit della corsa: il
+    modello ha fuso nel modulo le proposte 44 e 45 lasciandone fuori piu' di
+    meta'. Con il contratto vecchio 55 componenti su 55 uscivano 'low' e
+    'partial' con lo stesso errore. Nella corsa reale mancavano anche
+    presence_confidence, class_confidence e lead_count_confidence su ogni
+    riga: oggi quell'omissione fa ripetere la chiamata (vedi i test sul retry),
+    percio' qui le righe portano i campi con i valori che il ripiego
+    assegnava, e resta sotto prova solo l'attribuzione per riga dell'errore.
+    """
+    boxes = {2: [0.6885578143483833, 0.007545103707988857, 0.8699513581136185, 0.4159765730308681],
+             3: [0.861069036275362, 0.029376821840177928, 1.0, 0.448181108465133],
+             12: [0.6145262002944946, 0.14233062495266594, 1.0, 0.854081887910899],
+             28: [0.624565560821485, 0.3450787401574803, 0.7248815165876777, 0.7982283464566929],
+             44: [0.6258293838862559, 0.5387795275590551, 0.7324644549763033, 0.8305118110236221],
+             45: [0.8238862160457593, 0.5422589256127561, 1.0, 0.8696284674638299],
+             11: [0.0, 0.13145354207173943, 0.07492483258247375, 0.27030856878443815]}
+    module = dict(component_id='U1_MODULE', grouping_basis='assembly',
+        source_candidate_ids=[2, 3, 12, 28, 44, 45], **{'class': 'rf_module'},
+        bbox=[0.617, 0.108, 0.999, 0.68], bbox_basis='body_and_leads', rotation_deg=0.0,
+        package='shielded SMD module with castellated/edge pads',
+        marking='ESPRESSIF ESP32-S3-WROOM-1U MCN16R8',
+        terminal_layout='castellated pads along left, top and bottom edges; coaxial antenna jack at lower-right',
+        terminal_count=None, lead_count=None, lead_count_complete=False,
+        lead_count_confidence='low', height_mm=3.2, height_source='nominal_package',
+        confidence='high', presence_confidence='high', class_confidence='high',
+        evidence='Large metal-shielded daughterboard module with castellated pads and coaxial jack.',
+        asymmetry_landmark={'feature': 'coaxial_jack', 'side': 'right', 'confidence': 'high'})
+    switch = dict(component_id='SW_BOOT', grouping_basis='single_body', source_candidate_ids=[11],
+        **{'class': 'switch'}, bbox=[0.0, 0.128, 0.076, 0.272], bbox_basis='body_and_leads',
+        rotation_deg=90.0, package='SMD tactile switch, ~4.5x3.5mm body', marking='?',
+        terminal_layout='gull-wing leads on left and right sides of body; actuator cap on top face',
+        terminal_count=2, lead_count=2, lead_count_complete=False, lead_count_confidence='low',
+        height_mm=1.6, height_source='visual_estimate', confidence='medium',
+        presence_confidence='medium', class_confidence='medium',
+        evidence='Plastic switch housing with round metal dome actuator; solder fillets on visible right-side leads.',
+        asymmetry_landmark={'feature': 'other', 'side': 'right', 'confidence': 'medium'})
+    data = dict(components=[module, switch], uncertainties=[], candidate_decisions=[
+        dict(candidate_id=i, status='merge', component_id='U1_MODULE', reason='Fragment of the shielded module assembly.',
+             rejection_category=None) for i in (2, 3, 12, 28, 44, 45)]
+        + [dict(candidate_id=11, status='keep', component_id='SW_BOOT',
+                reason='Tactile pushbutton body with metal cap and visible side leads.', rejection_category=None)])
+    items = [dict(candidate(i), _box=list(box)) for i, box in boxes.items()]
+    result, _, logs = run(data, items)
+    rows = {r['component_id']: r for r in result}
+    assert set(rows) == {'U1_MODULE', 'SW_BOOT'}
+    assert rows['U1_MODULE']['_global_inventory_status'] == 'partial'
+    assert rows['U1_MODULE']['_global_inventory_errors'] == [
+        'component U1_MODULE: merged box excludes most of sources [44, 45]']
+    assert rows['U1_MODULE']['presence_confidence'] == 'high'
+    assert rows['SW_BOOT']['_global_inventory_status'] == 'validated_hypotheses'
+    assert rows['SW_BOOT']['_global_inventory_errors'] == []
+    assert rows['SW_BOOT']['presence_confidence'] == 'medium'
+    assert rows['SW_BOOT']['class_confidence'] == 'medium'
+    assert any('FAILED/PARTIAL: component U1_MODULE' in line for line in logs)
+
+
+# ── campi obbligatori omessi su ogni riga: un retry, poi si dichiara ──────
+
+def test_omitted_required_fields_distinguishes_contract_from_row_omissions():
+    """@brief Unita': omesso su TUTTE le righe, su alcune, su nessuna.
+
+    Un campo assente su una riga e' un'omissione di quella riga; assente su
+    tutte e' il modello che non ha onorato `required` dello schema. Solo il
+    secondo caso e' una violazione di contratto, e l'ordine restituito e'
+    quello dello schema, non quello di scoperta.
+    """
+    complete = dict(components=[_clean_row('R1', 1, [.2, .2, .4, .4]),
+                                _clean_row('R2', 2, [.6, .6, .7, .7])],
+                    candidate_decisions=[], uncertainties=[])
+    assert inventory.omitted_required_fields(complete) == []
+
+    everywhere = deepcopy(complete)
+    for row in everywhere['components']:
+        row.pop('class_confidence'); row.pop('presence_confidence')
+    assert inventory.omitted_required_fields(everywhere) == ['presence_confidence', 'class_confidence']
+
+    somewhere = deepcopy(complete)
+    somewhere['components'][0].pop('presence_confidence')
+    assert inventory.omitted_required_fields(somewhere) == []
+
+    # Senza righe da giudicare non c'e' contratto da violare: una risposta
+    # vuota o malformata e' un altro errore, con un altro nome.
+    for empty in (None, {}, {'components': []}, {'components': 'malformed'},
+                  {'components': ['not a row']}):
+        assert inventory.omitted_required_fields(empty) == []
+
+
+def _without(fields, *rows):
+    """@brief Copie delle righe senza i campi indicati."""
+    stripped = []
+    for row in rows:
+        row = deepcopy(row)
+        for name in fields:
+            row.pop(name, None)
+        stripped.append(row)
+    return stripped
+
+
+def _two_row_response(rows):
+    return dict(components=rows, uncertainties=[],
+                candidate_decisions=[dict(candidate_id=i, status='keep', component_id=f'R{i}',
+                                          reason='chip body', rejection_category=None)
+                                     for i in (1, 2)])
+
+
+def test_a_contract_omission_is_retried_once_and_the_complete_answer_wins(tmp_path):
+    """@brief Positivo: la seconda risposta porta i campi ed e' quella usata.
+
+    La prima risposta omette presence_confidence e class_confidence su ogni
+    riga; la seconda le dichiara 'high' con confidenza complessiva 'medium',
+    cosi' il valore letto a valle dice da sola quale risposta e' stata usata.
+    L'unica differenza fra le due richieste e' la coda del prompt che nomina i
+    campi omessi: e' l'informazione che il primo tentativo non aveva.
+    """
+    items = [candidate(1), dict(candidate(2), _box=[.6, .6, .7, .7])]
+    complete = [dict(_clean_row('R1', 1, [.2, .2, .4, .4]), confidence='medium'),
+                dict(_clean_row('R2', 2, [.6, .6, .7, .7]), confidence='medium')]
+    first = _two_row_response(_without(('presence_confidence', 'class_confidence'), *complete))
+    second = _two_row_response(complete)
+    result, calls, logs = run_replies([first, second], items, cache=tmp_path)
+    assert len(calls) == 2
+    assert 'omitted these REQUIRED fields' not in calls[0]['system_prompt']
+    assert calls[1]['system_prompt'].startswith(calls[0]['system_prompt'])
+    assert 'presence_confidence, class_confidence' in calls[1]['system_prompt']
+    assert calls[1]['content_blocks'] == calls[0]['content_blocks']
+    assert len(result) == 2
+    assert [r['presence_confidence'] for r in result] == ['high', 'high']
+    assert [r['class_confidence'] for r in result] == ['medium', 'medium']
+    assert all(r['_global_inventory_errors'] == [] for r in result)
+    assert all(r['_global_inventory_status'] == 'validated_hypotheses' for r in result)
+    assert any('one paid retry' in line for line in logs)
+    assert any('retry carries the required fields' in line for line in logs)
+
+
+def test_a_complete_answer_is_never_retried(tmp_path):
+    """@brief Negativo: con tutti i campi c'e' una sola chiamata, e la cache si scrive."""
+    items = [candidate(1), dict(candidate(2), _box=[.6, .6, .7, .7])]
+    data = _two_row_response([_clean_row('R1', 1, [.2, .2, .4, .4]),
+                              _clean_row('R2', 2, [.6, .6, .7, .7])])
+    result, calls, logs = run(data, items, cache=tmp_path)
+    assert len(calls) == 1 and len(result) == 2
+    assert 'omitted these REQUIRED fields' not in calls[0]['system_prompt']
+    assert not any('paid retry' in line for line in logs)
+    assert all(r['_global_inventory_errors'] == [] for r in result)
+    assert len(list(tmp_path.glob('*.json'))) == 1
+    assert not run(data, items, cache=tmp_path)[1]
+
+
+def test_a_retry_that_still_omits_keeps_the_first_answer_and_declares_it(tmp_path):
+    """@brief Il secondo tentativo omette ancora: si tiene il primo, si dichiara.
+
+    L'errore e' della risposta nel suo insieme e raggiunge ogni riga; la
+    presenza ripiega sulla confidenza complessiva (vedi `_presence`) e una
+    risposta cosi' non finisce in cache come buona.
+    """
+    items = [candidate(1), dict(candidate(2), _box=[.6, .6, .7, .7])]
+    rows = _without(('presence_confidence', 'class_confidence'),
+                    dict(_clean_row('R1', 1, [.2, .2, .4, .4]), confidence='high'),
+                    dict(_clean_row('R2', 2, [.6, .6, .7, .7]), confidence='low'))
+    result, calls, logs = run(_two_row_response(rows), items, cache=tmp_path)
+    assert len(calls) == 2
+    assert 'presence_confidence, class_confidence' in calls[1]['system_prompt']
+    assert len(result) == 2 and omission_errors(result) == [True, True]
+    assert all(r['_global_inventory_errors'] == [
+        'model omitted required fields on every component: presence_confidence, class_confidence']
+        for r in result)
+    assert all(r['_global_inventory_status'] == 'partial' for r in result)
+    assert [r['presence_confidence'] for r in result] == ['high', 'low']
+    assert [r['class_confidence'] for r in result] == ['high', 'low']
+    assert any('still omits presence_confidence, class_confidence' in line for line in logs)
+    assert not list(tmp_path.glob('*.json'))
+
+
+def test_a_field_missing_on_some_rows_only_is_a_row_omission_not_a_retry(tmp_path):
+    """@brief Un campo assente su ALCUNE righe non e' una violazione di contratto.
+
+    La riga senza il campo ripiega sulla confidenza complessiva, l'altra tiene
+    il valore dichiarato, e nessuno paga una seconda chiamata.
+    """
+    items = [candidate(1), dict(candidate(2), _box=[.6, .6, .7, .7])]
+    declared = _clean_row('R1', 1, [.2, .2, .4, .4])
+    (bare,) = _without(('presence_confidence',),
+                       dict(_clean_row('R2', 2, [.6, .6, .7, .7]), confidence='low'))
+    result, calls, logs = run(_two_row_response([declared, bare]), items, cache=tmp_path)
+    assert len(calls) == 1 and len(result) == 2
+    assert not any('paid retry' in line for line in logs)
+    assert omission_errors(result) == [False, False]
+    assert [r['presence_confidence'] for r in result] == ['high', 'low']
+    assert all(r['_global_inventory_status'] == 'validated_hypotheses' for r in result)
+
+
+def test_the_accepted_retry_is_cached_under_the_original_request(tmp_path):
+    """@brief La corsa successiva con gli stessi input rigioca la cache: zero chiamate.
+
+    La cache e' la risposta accettata PER QUELLA richiesta. Se il retry fosse
+    messo in cache sotto la sua chiave (prompt con la coda che nomina i campi),
+    la lettura -- che usa la chiave della richiesta originale -- non la
+    troverebbe mai, e ogni esecuzione pagherebbe due chiamate per sempre.
+    """
+    items = [candidate(1), dict(candidate(2), _box=[.6, .6, .7, .7])]
+    complete = [dict(_clean_row('R1', 1, [.2, .2, .4, .4]), confidence='medium'),
+                dict(_clean_row('R2', 2, [.6, .6, .7, .7]), confidence='medium')]
+    first = _two_row_response(_without(('presence_confidence', 'class_confidence'), *complete))
+    second = _two_row_response(complete)
+    _, calls, _ = run_replies([first, second], items, cache=tmp_path)
+    assert len(calls) == 2
+    replayed, calls_again, logs = run_replies([first, second], items, cache=tmp_path)
+    assert calls_again == [], 'la risposta accettata deve rigiocarsi dalla cache'
+    assert any('validated cache hit' in line for line in logs)
+    assert [r['presence_confidence'] for r in replayed] == ['high', 'high']
+
+
+@pytest.mark.parametrize('degenerate', [None, {}, {'components': []},
+                                        {'components': [], 'candidate_decisions': [],
+                                         'uncertainties': []}])
+def test_a_degenerate_retry_never_replaces_the_first_answer(tmp_path, degenerate):
+    """@brief Un secondo tentativo senza righe da giudicare non «omette nulla»: non e' una risposta.
+
+    Senza questa guardia una risposta vuota o malformata passava per completa
+    e sostituiva la prima, che aveva due righe valide: si sarebbero perse le
+    righe per far posto al nulla.
+    """
+    items = [candidate(1), dict(candidate(2), _box=[.6, .6, .7, .7])]
+    complete = [dict(_clean_row('R1', 1, [.2, .2, .4, .4]), confidence='medium'),
+                dict(_clean_row('R2', 2, [.6, .6, .7, .7]), confidence='medium')]
+    first = _two_row_response(_without(('presence_confidence', 'class_confidence'), *complete))
+    result, calls, logs = run_replies([first, degenerate], items, cache=tmp_path)
+    assert len(calls) == 2
+    kept = [r for r in result if r.get('component_id') in ('R1', 'R2')]
+    assert len(kept) == 2, 'le righe della prima risposta devono restare'
+    assert all(r['presence_confidence'] == 'medium' for r in kept), \
+        'la presenza ripiega sulla confidenza complessiva della prima risposta'
+    assert any('returned nothing to judge' in line or 'failed' in line for line in logs)
