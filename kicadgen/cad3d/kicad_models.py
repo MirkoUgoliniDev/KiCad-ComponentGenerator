@@ -1277,6 +1277,205 @@ def _automatic_mechanical(component, choices, complete, basis):
     return declared is not None and counts == {declared} and choices[0]["family"] is not None
 
 
+def _provisional_geometry_choice(component, choices, complete, basis):
+    """Return a safe preview candidate without claiming package identity.
+
+    The photo often cannot distinguish variants which have the same XY
+    footprint (for example two tactile switches differing only in height, or
+    two QFN models with the same outline).  Leaving those candidates entirely
+    synthetic made the 3D preview useless even though KiCad had a compatible
+    solid.  This path therefore attaches only a *provisional* model: the
+    report remains reviewable and the UI keeps the candidate picker visible.
+
+    A single candidate is accepted only for a literal manufacturer/model
+    marking.  Otherwise the first two candidates must be from the same KiCad
+    family and have effectively the same XY envelope.  Truncated searches are
+    allowed only under that tie condition; a distant or topology-incomplete
+    search is never promoted to a preview.
+    """
+    if (not choices or basis not in ("body", "total")
+            or component.get("presence_confidence") != "high"
+            or component.get("_yolo_review_only") is True
+            or component.get("_yolo_origin") == "low_confidence_review"
+            or component.get("_global_inventory_status") in ("invalid", "rejected")):
+        return None
+    morphology = " ".join(str(component.get(key) or "")
+                           for key in ("terminal_layout", "package_evidence", "package"))
+    three_lead_tab = bool(re.search(
+        r"\b(?:three|3)\s+(?:wide\s+)?(?:gull[- ]wing\s+)?leads?\b"
+        r".*\b(?:one|1)\s+(?:large\s+)?(?:rectangular\s+)?tab\b",
+        morphology, re.I | re.S,
+    )) and not bool(re.search(
+        r"\b(?:unknown|unresolved|uncertain|unclear|maybe|possibly|not visible|hidden)\b",
+        morphology, re.I,
+    ))
+    # A three-lead body with one large tab is enough to preview the mechanical
+    # SOT-223 family even when the electrical class is still unknown.  It is
+    # deliberately a geometry-only exception: the report remains provisional
+    # and never claims that the device is a regulator or a transistor.
+    morphology_exception = three_lead_tab
+    if (component.get("class_confidence") not in ("medium", "high")
+            and not morphology_exception):
+        return None
+    kind = str(component.get("kind") or "").lower()
+    if kind not in ("ic", "ic_soic", "ic_qfn", "ic_qfp", "ic_bga",
+                    "connector", "switch", "module", "rf_module", "pcb_module"):
+        return None
+    # Multiple explicitly named alternatives are a semantic ambiguity, even
+    # when their measured outlines happen to tie.  Keep those in the picker;
+    # a single QFN-24/LQFN-family declaration is handled by normal package
+    # discovery and is not affected by this guard.
+    package = str(component.get("package") or "")
+    if re.search(r"\s/\s", package) and not _package_token(package):
+        return None
+    first = choices[0]
+    try:
+        best_error = float(first.get("relative_xy_error"))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(best_error) or best_error > DEFAULT_SIZE_TOLERANCE:
+        return None
+    # A literal marking is stronger than a generic visual package guess.  It
+    # may still have a body-only photographic envelope, so do not require an
+    # exact body/total reading here; the report remains explicitly provisional.
+    if (first.get("family") in ("module", "ic")
+            and _marked_model_matches(Path(first["path"]), component)):
+        return first
+    if morphology_exception:
+        # SOT-223 is the only common KiCad semiconductor preview whose
+        # mechanical evidence is three leads plus a large tab.  Do not accept
+        # a distant second family alternative as if it were equivalent.
+        if (first.get("family") == "semiconductor"
+                and best_error <= 0.12
+                and re.search(r"(?:^|[-_])SOT[-_]?223(?:\.|$)",
+                              Path(first["path"]).name, re.I)):
+            return first
+    if len(choices) < 2 or component.get("topology_incomplete"):
+        return None
+    second = choices[1]
+    if first.get("family") != second.get("family"):
+        return None
+    a, b = first.get("dimensions_mm"), second.get("dimensions_mm")
+    if not (isinstance(a, (list, tuple)) and isinstance(b, (list, tuple))
+            and len(a) >= 2 and len(b) >= 2):
+        return None
+    try:
+        a = sorted(float(v) for v in a[:2])
+        b = sorted(float(v) for v in b[:2])
+        tie_error = max(abs(x - y) / max(x, y) for x, y in zip(a, b))
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    if not all(math.isfinite(v) and v > 0 for v in (*a, *b)):
+        return None
+    if tie_error > NAME_TIEBREAK_MARGIN:
+        return None
+    return first
+
+
+def _native_model_rotation_override(component: dict, path: Path) -> Optional[float]:
+    """Return an explicit local STEP rotation when the observed feature fixes it.
+
+    The WROOM-1U STEP has a meaningful asymmetric RF connector.  XY dimensions
+    can infer its long axis but cannot decide between 0 and 180 degrees.  Only
+    an exact literal model marking plus an affirmative observation of the RF
+    jack on the lower/right side is strong enough to apply this local CAD
+    correction.  It never changes the component's photographic rotation.
+    """
+    if not _marked_model_matches(path, component):
+        return None
+    if str(component.get("kind") or component.get("detected_kind") or "").lower() not in (
+            "module", "rf_module", "pcb_module"):
+        return None
+    text = " ".join(str(component.get(key) or "") for key in (
+        "terminal_layout", "package_evidence", "package"))
+    # Vision models commonly emit either "lower right" or "lower-right".
+    # Both describe the same asymmetric RF-jack landmark.
+    if not re.search(r"\b(?:lower|bottom|inferior)(?:[-\s]+)right\b", text, re.I):
+        return None
+    if not re.search(r"\b(?:rf|u\.fl|ipex|coax|antenna)\b", text, re.I):
+        return None
+    return 180.0
+
+
+def _is_yolo_only_hypothesis(component: dict) -> bool:
+    """Identify detector-only rows which are useful for review, not for 3D."""
+    name = str(component.get("name") or "").strip().lower()
+    return name.startswith("yolo candidate") and not (
+        isinstance(component.get("model_selection"), dict)
+        and component["model_selection"].get("status") == "confirmed"
+    )
+
+
+def _switch_group_key(component: dict) -> str:
+    """Normalize descriptive switch prose without using measured dimensions."""
+    text = str(component.get("package") or "").lower()
+    text = re.sub(r"\([^)]*\)", " ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return " ".join(text.split())
+
+
+def _synchronize_preview_variants(components, note) -> None:
+    """Use one common preview variant for visually same-family switches.
+
+    Independent dimensions of cropped buttons often differ by a few tenths of
+    a millimetre.  If their review lists share a compatible native model, using
+    that common candidate avoids rendering two visibly different switches,
+    while keeping the choice explicitly provisional.
+    """
+    groups = {}
+    for component in components or []:
+        report = component.get("model_match") or {}
+        if (str(component.get("kind") or "").lower() != "switch"
+                or report.get("status") != "provisional_matched"
+                or not _switch_group_key(component)):
+            continue
+        selection = component.get("model_selection")
+        if isinstance(selection, dict) and selection.get("status") == "confirmed":
+            continue
+        groups.setdefault(_switch_group_key(component), []).append(component)
+    for key, group in groups.items():
+        if len(group) < 2:
+            continue
+        by_path = []
+        for component in group:
+            choices = {item.get("path"): item for item in
+                       (component.get("model_match", {}).get("candidates") or [])
+                       if item.get("path")}
+            by_path.append(choices)
+        common = set(by_path[0])
+        for choices in by_path[1:]:
+            common &= set(choices)
+        ranked = []
+        for path in common:
+            items = [choices[path] for choices in by_path]
+            try:
+                errors = [float(item.get("relative_xy_error")) for item in items]
+            except (TypeError, ValueError):
+                continue
+            if all(math.isfinite(error) and error <= DEFAULT_SIZE_TOLERANCE
+                   for error in errors):
+                ranked.append((sum(errors), path, items))
+        if not ranked:
+            continue
+        _, selected, items = min(ranked, key=lambda value: (value[0], value[1]))
+        for component, item in zip(group, items):
+            report = component["model_match"]
+            report["status"] = "provisional_matched"
+            report["selected_path"] = selected
+            report["shared_preview_group"] = key
+            report["shared_preview_reason"] = (
+                "Common same-family switch candidate selected for consistent preview; "
+                "package variant remains reviewable")
+            for candidate in report.get("candidates", []):
+                candidate["status"] = "provisional_matched" if candidate.get("path") == selected else "review_required"
+                if candidate.get("path") == selected:
+                    reasons = candidate.setdefault("reasons", [])
+                    reasons[-1:] = [report["shared_preview_reason"]]
+            component["model_path"] = selected
+            component.pop("model_rotation_deg", None)
+        note(f"Switch preview group '{key}': shared candidate {Path(selected).name} for {len(group)} components.")
+
+
 def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dict:
     """@brief Propose bounded, JSON-safe model choices for explicit human review.
 
@@ -1287,7 +1486,9 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dic
     @return Mapping with status, candidates and selected_path. Candidate dimensions_mm
         is the matched XY reading (and Z when available), in native model axes.
     @note Dimensional evidence never confirms identity. Explicit confirmation wins;
-        independently supported unique estimates use auto_matched instead.
+        independently supported unique estimates use auto_matched instead;
+        same-footprint alternatives may use provisional_matched for a real 3D
+        preview while keeping identity and variant reviewable.
         Rejection stops discovery. Missing/descriptive packages use family discovery.
         Unknown basis compares independent readings; body/total/pads are strict.
         leads and body_and_leads mean total. At most 64 structurally compatible
@@ -1430,6 +1631,9 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dic
     result["candidates"].sort(key=lambda item: (item["relative_xy_error"],
         _normalize(item["package"]) != _package_name(package), item["path"]))
     automatic = _automatic_mechanical(component, result["candidates"], complete, basis)
+    provisional = (None if automatic or result.get("topology_incomplete")
+                   else _provisional_geometry_choice(
+                       component, result["candidates"], complete, basis))
     result["candidates"] = result["candidates"][:limit]
     if result["candidates"]:
         result["status"] = "review_required"
@@ -1441,6 +1645,16 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dic
             else:
                 choice["reasons"][-1] = "Mechanical estimate; identity and variant not verified"
             result.update(status="auto_matched", selected_path=choice["path"])
+        elif provisional is not None:
+            # Keep the candidate list and the warning semantics: this is a
+            # rendering aid, not a confirmed package identity.
+            choice = next((item for item in result["candidates"]
+                           if item["path"] == provisional["path"]), None)
+            if choice is not None:
+                choice["status"] = "provisional_matched"
+                choice["reasons"][-1] = (
+                    "Preview geometry only; package variant and orientation require user review")
+                result.update(status="provisional_matched", selected_path=choice["path"])
         note(f"{package}: {len(result['candidates'])} dimensional candidates; {result['status']}; identity not verified.")
     return result
 
@@ -1453,7 +1667,8 @@ def attach_models(components, log=None, library: Optional[Path] = None) -> int:
     @param library Optional library root for API compatibility.
     @return Number of explicit or inferred mechanical paths attached.
     @note Rejected or invalid explicit selections use synthetic geometry. Missing
-        selections permit auto_matched mechanical estimates when evidence supports them. Rotation
+        selections permit auto_matched mechanical estimates or provisional_matched
+        same-footprint previews when evidence supports them. Rotation
         is copied to model_rotation_deg; None or an omitted selection rotation clears
         that override for automatic native-axis inference. Explicit zero is retained.
         Unconfirmed native placement metadata and component photo rotation are preserved.
@@ -1464,6 +1679,7 @@ def attach_models(components, log=None, library: Optional[Path] = None) -> int:
     for component in components or []:
         if not isinstance(component, dict):
             continue
+        component["render_3d"] = True
         component.pop("model_path", None)
         report = model_candidates(component, library=library, log=note)
         component["model_match"] = report
@@ -1476,11 +1692,28 @@ def attach_models(components, log=None, library: Optional[Path] = None) -> int:
             else:
                 component["model_rotation_deg"] = rotation
             resolved += 1
-        elif report["status"] == "auto_matched":
+        elif report["status"] in ("auto_matched", "provisional_matched"):
             component["model_path"] = report["selected_path"]
-            component.pop("model_rotation_deg", None)
+            override = _native_model_rotation_override(
+                component, Path(report["selected_path"] or ""))
+            if override is None:
+                component.pop("model_rotation_deg", None)
+            else:
+                component["model_rotation_deg"] = override
+                report["native_model_rotation_deg"] = override
+                report["native_orientation_note"] = (
+                    "Native STEP rotated 180° to place the observed RF connector "
+                    "on the lower-right side; photo rotation is unchanged")
             resolved += 1
         else:
             component["color_hex"] = "#FF00FF"
+            if _is_yolo_only_hypothesis(component):
+                # Keep detector-only hypotheses in the JSON/review evidence,
+                # but never turn an unclassified proposal into a misleading
+                # magenta CAD body which looks like a real component.
+                component["render_3d"] = False
+                report["render_3d"] = False
+                note(f"YOLO-only hypothesis {component.get('name')}: kept for review, omitted from 3D.")
+    _synchronize_preview_variants(components, note)
     note(f"Attached KiCad models (explicit choices or mechanical estimates): {resolved}.")
     return resolved

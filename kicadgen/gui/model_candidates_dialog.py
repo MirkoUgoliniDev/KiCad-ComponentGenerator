@@ -169,7 +169,7 @@ class ModelCandidatesDialog(QDialog):
         saved = component.get('model_selection')
         saved = saved if isinstance(saved, dict) else {}
         saved_path = str(saved.get('path') or '')
-        if not saved_path and match_report.get('status') == 'auto_matched':
+        if not saved_path and match_report.get('status') in ('auto_matched', 'provisional_matched'):
             saved_path = str(match_report.get('selected_path') or '')
         initial_rotation = saved.get('rotation_deg', component.get('model_rotation_deg'))
         self._candidates = []

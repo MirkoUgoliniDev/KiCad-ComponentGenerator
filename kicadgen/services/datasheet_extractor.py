@@ -795,7 +795,9 @@ def extract_pin_header_params(
         except (ValueError, OSError, ImportError) as exc:
             raise ExtractionError(f"YOLO locale non disponibile: {exc}") from exc
     from .ai_diagnostics import make_logged_call
-    diagnostic_call = make_logged_call(call_tool, progress)
+    # L'analisi applicativa deve essere auditabile: il log persistente conserva
+    # il testo esatto dei prompt/tool e gli hash delle immagini (mai i byte).
+    diagnostic_call = make_logged_call(call_tool, progress, log_prompt=True)
     if len(doc_paths) > MAX_FILES:
         raise ExtractionError(f"Troppi file selezionati (max {MAX_FILES} per chiamata).")
     from .document_roles import ROLES, ROLE_HELP

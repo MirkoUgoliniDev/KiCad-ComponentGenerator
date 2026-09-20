@@ -32,9 +32,19 @@ def save_choices(directory, photo_png, components):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     data = {'version': 1, 'photo_sha256': hashlib.sha256(photo_png).hexdigest(),
-            'components': [{'key': component_key(c), 'name': c.get('name', ''),
-                            'model_selection': deepcopy(c.get('model_selection')),
-                            'model_match': deepcopy(c.get('model_match'))} for c in components]}
+            'components': [{
+                'key': component_key(c),
+                'name': c.get('name', ''),
+                # Keep the complete local CAD state in the audit JSON.  Only
+                # explicit selections are restored automatically below; the
+                # other fields remain evidence for the next replay.
+                'model_selection': deepcopy(c.get('model_selection')),
+                'model_match': deepcopy(c.get('model_match')),
+                'model_path': c.get('model_path'),
+                'model_rotation_deg': c.get('model_rotation_deg'),
+                'render_3d': c.get('render_3d', True),
+                'rotation_deg': c.get('rotation_deg'),
+            } for c in components]}
     target = directory / FILENAME
     fd, temporary = tempfile.mkstemp(prefix='.model-choices-', suffix='.json', dir=directory)
     try:
@@ -90,10 +100,21 @@ def save_candidate_report(directory, components):
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / 'kicad-model-candidates.json'
     data = {'version': 1, 'components': [
-        {'name': c.get('name'), 'source_row': c.get('source_row'), 'x': c.get('x'), 'y': c.get('y'),
-         'length_mm': c.get('length_mm'), 'width_mm': c.get('width_mm'),
-         'package': c.get('package'), 'model_match': c.get('model_match'),
-         'model_selection': c.get('model_selection')} for c in components]}
+        {
+            'name': c.get('name'),
+            'source_row': c.get('source_row'),
+            'x': c.get('x'),
+            'y': c.get('y'),
+            'length_mm': c.get('length_mm'),
+            'width_mm': c.get('width_mm'),
+            'rotation_deg': c.get('rotation_deg'),
+            'package': c.get('package'),
+            'model_match': c.get('model_match'),
+            'model_selection': c.get('model_selection'),
+            'model_path': c.get('model_path'),
+            'model_rotation_deg': c.get('model_rotation_deg'),
+            'render_3d': c.get('render_3d', True),
+        } for c in components]}
     fd, temporary = tempfile.mkstemp(prefix='.model-candidates-', suffix='.json', dir=directory)
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as output:

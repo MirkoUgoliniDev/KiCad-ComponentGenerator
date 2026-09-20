@@ -169,6 +169,32 @@ def _lead_observation_valid(row):
     return not (type(terminals) is int and count is not None and count > terminals)
 
 
+def _repair_nullable_lead_observation(row):
+    """Normalize a provider's nullable confidence for an explicitly incomplete count.
+
+    Some providers return the semantically valid observation with
+    ``lead_count_confidence`` omitted or null, even though the prompt and tool
+    schema describe the confidence as a string. The count may be unknown, or it
+    may be complete but only weakly supported; retaining the component's package,
+    class and geometry is safer than converting the entire body to ``unknown``.
+    Keep this repair local to validation so the raw provider response remains
+    unchanged in the audit file.
+    """
+    if not isinstance(row, dict):
+        return row
+    if (isinstance(row.get('lead_count_complete'), bool)
+            and (row.get('lead_count') is None
+                 or (type(row.get('lead_count')) is int
+                     and 0 <= row.get('lead_count') <= 512))
+            and row.get('lead_count_confidence') is None
+            and ('lead_count_confidence' not in row
+                 or row.get('lead_count_confidence') is None)):
+        repaired = deepcopy(row)
+        repaired['lead_count_confidence'] = 'low'
+        return repaired
+    return row
+
+
 def _component_valid(row, known):
     from .photo_yolo_review import _valid_box
     if not isinstance(row, dict):
@@ -223,7 +249,8 @@ def _validate(data, known, boxes=None):
                 if type(identity) is int and identity in known:
                     claims.setdefault(identity, []).append(row.get('component_id'))
     valid = []
-    for row in rows:
+    for raw_row in rows:
+        row = _repair_nullable_lead_observation(raw_row)
         if _component_valid(row, known) and counts[row['component_id']] == 1:
             valid.append(row)
         else:

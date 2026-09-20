@@ -75,6 +75,104 @@ def test_literal_marking_selects_user_installed_module_model(library):
     assert measured == [exact]
 
 
+def test_literal_module_observed_lower_right_rf_jack_sets_native_rotation(library):
+    root, add, _ = library
+    exact = add("espressif", "ESP32-S3-WROOM-1U",
+                {"total": [19.2, 18.0, 3.2], "body": [19.2, 18.0, 3.2]})
+    c = dict(
+        kind="module", **{"class": "rf_module"},
+        package="Shielded castellated SMD module with U.FL/IPEX antenna connector",
+        package_evidence="Attached RF coaxial jack at lower right.",
+        terminal_layout="Castellated rows on top and bottom; RF coaxial connector at lower right.",
+        marking="ESP32-S3-WROOM-1U", length_mm=19.2, width_mm=18.0,
+        bbox_basis="total", presence_confidence="high", class_confidence="high",
+    )
+    assert km.attach_models([c], library=root) == 1
+    assert c["model_path"] == str(exact)
+    assert c["model_rotation_deg"] == 180.0
+    assert c["model_match"]["native_model_rotation_deg"] == 180.0
+
+
+def test_literal_module_observed_hyphenated_lower_right_rf_jack_sets_native_rotation(library):
+    root, add, _ = library
+    exact = add("espressif", "ESP32-S3-WROOM-1U",
+                {"total": [19.2, 18.0, 3.2], "body": [19.2, 18.0, 3.2]})
+    c = dict(
+        kind="module", **{"class": "rf_module"},
+        package="Shielded castellated SMD module with U.FL/IPEX antenna connector",
+        package_evidence="Attached RF coaxial jack at lower-right.",
+        terminal_layout="Castellated rows on top and bottom; RF coaxial connector at lower-right.",
+        marking="ESP32-S3-WROOM-1U", length_mm=19.2, width_mm=18.0,
+        bbox_basis="total", presence_confidence="high", class_confidence="high",
+    )
+    assert km.attach_models([c], library=root) == 1
+    assert c["model_path"] == str(exact)
+    assert c["model_rotation_deg"] == 180.0
+
+
+def test_three_lead_tab_unknown_semiconductor_gets_sot223_preview(library):
+    root, add, _ = library
+    sot = add("Package_TO_SOT_SMD", "SOT-223",
+              {"total": [7.0, 6.5, 1.7]})
+    add("Package_TO_SOT_SMD", "LFPAK88", {"total": [8.0, 8.0, 1.6]})
+    c = dict(kind="ic", **{"class": "semiconductor_unknown"}, package="",
+             terminal_layout="Three wide gull-wing leads; one large rectangular tab.",
+             package_evidence="Three leads and one large tab are visible.",
+             length_mm=7.37, width_mm=6.91, bbox_basis="total",
+             presence_confidence="high", class_confidence="low")
+    assert km.attach_models([c], library=root) == 1
+    assert c["model_match"]["status"] == "provisional_matched"
+    assert c["model_path"] == str(sot)
+    assert "model variant" in c["model_match"]["candidates"][0]["reasons"][-1].lower() or \
+           "package" in c["model_match"]["candidates"][0]["reasons"][-1].lower()
+
+
+def test_detector_only_yolo_hypothesis_stays_in_report_but_not_3d(library):
+    root, add, _ = library
+    c = dict(kind="generic", name="YOLO candidate 43", package="",
+             length_mm=11.47, width_mm=8.53, bbox_basis="unknown",
+             presence_confidence=None, class_confidence=None)
+    assert km.attach_models([c], library=root) == 0
+    assert c["model_match"]["status"] == "unresolved"
+    assert c["render_3d"] is False
+    assert c["color_hex"] == "#FF00FF"
+
+
+def test_same_family_switches_share_common_preview_variant(library):
+    root, add, _ = library
+    add("Button_Switch_SMD", "SW_SPST_EVQP7A", {"total": [4.7, 3.55, 1.35]})
+    add("Button_Switch_SMD", "SW_SPST_EVQP7C", {"total": [4.7, 3.55, 1.85]})
+    common = add("Button_Switch_SMD", "SW_SPST_PTS810", {"total": [4.6, 3.2, 2.5]})
+    add("Button_Switch_SMD", "SW_SPST_TS-1088-xR020", {"total": [5.0, 3.0, 2.0]})
+    add("Button_Switch_SMD", "SW_SPST_TS-1088-xR025", {"total": [5.0, 3.0, 2.5]})
+    first = dict(kind="switch", package="SMD tactile switch (~4.7x3.5mm visible)",
+                 length_mm=4.74, width_mm=3.53, bbox_basis="total",
+                 presence_confidence="high", class_confidence="medium")
+    second = dict(kind="switch", package="SMD tactile switch (~4.8x3.1mm visible)",
+                  length_mm=4.84, width_mm=3.12, bbox_basis="total",
+                  presence_confidence="high", class_confidence="medium")
+    assert km.attach_models([first, second], library=root) == 2
+    assert first["model_path"] == second["model_path"] == str(common)
+    assert first["model_match"]["shared_preview_group"] == "smd tactile switch"
+
+
+def test_same_xy_variants_attach_a_reviewable_preview_model(library):
+    root, add, measured = library
+    first = add("Button_Switch_SMD", "SW_SPST_EVQP7A",
+                {"total": [4.7, 3.55, 1.35]})
+    add("Button_Switch_SMD", "SW_SPST_EVQP7C",
+        {"total": [4.7, 3.55, 1.85]})
+    c = supported(kind="switch", package="small tactile switch",
+                  length_mm=4.74, width_mm=3.53, bbox_basis="total")
+    assert km.attach_models([c], library=root) == 1
+    assert c["model_match"]["status"] == "provisional_matched"
+    assert c["model_match"]["selected_path"] == str(first)
+    assert c["model_path"] == str(first)
+    assert c["model_match"]["candidates"][0]["status"] == "provisional_matched"
+    assert "variant" in c["model_match"]["candidates"][0]["reasons"][-1]
+    assert measured == [first, first.parent / "SW_SPST_EVQP7C.step"]
+
+
 @pytest.mark.parametrize("fields", [
     {"presence_confidence": "low"}, {"presence_confidence": None},
     {"class_confidence": "low"}, {"class_confidence": None},

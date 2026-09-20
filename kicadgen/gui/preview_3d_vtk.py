@@ -80,8 +80,9 @@ class Preview3DVtk(QtInteractor):
         """
         self._component_actors = {}
         super().__init__(parent)
-        self.setToolTip('Tasto destro su componente: scegli modello KiCad')
+        self.setToolTip('Doppio clic su un componente: scegli modello KiCad e ruota il modello')
         self._configure_component_picking()
+        self._configure_component_double_click()
         self.set_background(_BG_COLOR)
         self.show_pin_numbers = True
         try:
@@ -109,6 +110,29 @@ class Preview3DVtk(QtInteractor):
                                      left_clicking=False, show=False, show_message=False)
         except (AttributeError, RuntimeError, ImportError):
             pass  # Optional interaction must not prevent rendering a model.
+
+    def _configure_component_double_click(self):
+        """Register a real VTK double-click without disabling camera rotation."""
+        try:
+            self.iren.add_observer("LeftButtonDoubleClickEvent",
+                                   self._component_double_clicked)
+        except (AttributeError, RuntimeError, ImportError):
+            pass
+
+    def _component_actor_at_cursor(self):
+        try:
+            from vtkmodules.vtkRenderingCore import vtkPropPicker
+            picker = vtkPropPicker()
+            x, y = self.iren.GetEventPosition()
+            if not picker.Pick(x, y, 0, self.renderer):
+                return None
+            return picker.GetActor()
+        except (AttributeError, RuntimeError, ImportError):
+            return None
+
+    def _component_double_clicked(self, *_args):
+        actor = self._component_actor_at_cursor()
+        self._component_picked(actor)
 
     def _component_picked(self, actor):
         if actor is None:

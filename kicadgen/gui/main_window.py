@@ -315,7 +315,7 @@ class TerminalDetailWorker(QThread):
         try:
             operation = refine_leads if self.only_leads else observe_terminals
             self.done.emit(operation(self.photo, self.components, self.model,
-                make_logged_call(call_tool, self.progress.emit), self.progress.emit,
+                make_logged_call(call_tool, self.progress.emit, log_prompt=True), self.progress.emit,
                 Path(__file__).resolve().parents[2] / 'generated' / 'photo-cache',
                 **({'system_prompt': self.system_prompt} if self.system_prompt else {})))
         except Exception as exc:
@@ -3481,6 +3481,9 @@ class MainWindow(QMainWindow):
                     if match is not None and not isinstance(match, dict):
                         raise ValueError('Report modello KiCad non valido')
                     metadata['model_match'] = match
+                    for key in ('model_path', 'model_rotation_deg', 'render_3d', 'rotation_deg'):
+                        if key in record:
+                            metadata[key] = deepcopy(record[key])
                     cell.setData(Qt.ItemDataRole.UserRole, metadata)
                 self._append_log(f'Candidati KiCad e decisioni: {report_path}')
             except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:

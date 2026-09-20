@@ -39,6 +39,30 @@ def test_start_is_live_and_success_preserves_arguments_result_and_timing(monkeyp
     assert inspect.signature(wrapped) == inspect.signature(call)
 
 
+def test_opt_in_prompt_audit_logs_text_and_schema_but_not_image_bytes():
+    events = []
+    content = [
+        {"type": "text", "text": "FULL_USER_PROMPT with dimensions 18.0 x 19.2 mm"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,PRIVATE_IMAGE_BYTES", "detail": "high"}},
+    ]
+    tool = {"type": "function", "function": {"name": "report_global_inventory",
+        "description": "FULL_TOOL_SCHEMA", "parameters": {"type": "object"}}}
+
+    def call(**kwargs):
+        return {"components": []}
+
+    wrapped = diagnostics.make_logged_call(call, events.append, log_prompt=True)
+    wrapped(model="provider/model", system_prompt="FULL_SYSTEM_PROMPT", content_blocks=content,
+            tool=tool, max_tokens=24000, has_pdf=False, pdf_engine="native")
+    joined = "\n".join(events)
+    assert "AI_CALL_PROMPT_BEGIN" in joined and "AI_CALL_PROMPT_END" in joined
+    assert "FULL_SYSTEM_PROMPT" in joined
+    assert "FULL_USER_PROMPT with dimensions 18.0 x 19.2 mm" in joined
+    assert "FULL_TOOL_SCHEMA" in joined and "report_global_inventory" in joined
+    assert "PRIVATE_IMAGE_BYTES" not in joined
+    assert "sha256=" in joined and "encoded_chars" in joined
+
+
 @pytest.mark.parametrize("error", [RuntimeError("sk-KEY PRIVATE_PROMPT"),
                                   ValueError("Authorization: PRIVATE_HEADER"),
                                   KeyboardInterrupt("PRIVATE_INTERRUPT")])

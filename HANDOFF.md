@@ -1,3 +1,98 @@
+# 11:16 — prompt LLM reso auditabile e verifica indipendente bloccata dal limite agenti
+
+Richiesta utente: scrivere nel log il prompt realmente inviato a ogni chiamata
+LLM e ricontrollare la logica senza dare un esito di facciata. Il wrapper
+centrale `kicadgen/services/ai_diagnostics.py` ora accetta `log_prompt=True`.
+Nell'app questa modalità è attiva sia per l'estrazione principale sia per il
+passaggio di dettaglio terminali, quindi copre anche l'inventario globale YOLO
+perché riceve lo stesso `diagnostic_call`.
+
+Ogni chiamata ora scrive immediatamente nel `analisi-ai.log`:
+`AI_CALL_PROMPT_BEGIN/END` con un hash della richiesta, il system prompt esatto,
+tutti i blocchi testuali esatti, lo schema tool JSON e le opzioni effettive
+(`max_tokens`, PDF, retry). Le immagini e gli eventuali file binari non vengono
+copiati nel log: restano rappresentati da SHA-256 e lunghezza codificata. Sono
+state aggiunte redazioni minime per bearer/API key/`sk-...`; il resto del prompt
+testuale resta leggibile e verificabile. Un retry HTTP 400/408/409/429/5xx
+scrive anche il secondo prompt, con `compatibility_retry=true`.
+
+Prove locali: `tests/test_ai_diagnostics.py` passa (28 test); suite mirata
+prompt + matching + GUI passa **204 test in 4.43s**. `py_compile` e `git diff
+--check` puliti. I due test specifici WROOM/lower-right passano (**2 passed**).
+Il tentativo di includere `tests/test_terminal_metadata_flow.py` è stato
+interrotto perché il test Qt non ha prodotto avanzamento; non viene dichiarato
+passato e non è un errore del wrapper dimostrato.
+
+Audit agenti richiesto dall'utente: non eseguito, perché il servizio agenti ha
+risposto con il limite operativo di utilizzo prima di avviare i tre audit. Non
+inventare quindi un risultato di agenti. La verifica locale indipendente resta
+valida ma non sostituisce quell'audit.
+
+Gli artefatti `generated/` non sono presenti nella working copy in questo
+momento (cartella vuota); perciò non è stato possibile fare un nuovo replay
+FreeCAD sul file prodotto dall'ultima esecuzione in questa sessione. Le evidenze
+del run precedente restano sotto questo handoff: il vecchio run era stato
+eseguito prima della correzione WROOM e mostrava `model_rotation_deg=null` e
+`local_rotation_deg=0`. Dopo il riavvio dell'app e un nuovo run, il log deve
+mostrare i blocchi `AI_CALL_PROMPT_*`; il report WROOM atteso è 180°.
+Nessun nuovo AI a pagamento, commit o push effettuato.
+
+# 11:07 — correzione orientamento WROOM-1U dopo l'ultimo run Opus
+
+L'ultimo run utente ha confermato il problema: il JSON globale descriveva il
+connettore RF come `lower-right` con trattino, mentre la regola precedente
+riconosceva soltanto `lower right` con spazio. Di conseguenza il report salvava
+`model_rotation_deg=null` e FreeCAD registrava `local_rotation_deg=0`, lasciando
+il modello ESP32-S3-WROOM-1U ruotato di 180° rispetto alla foto.
+
+Corretta la regola per accettare entrambe le forme (`lower right` e
+`lower-right`). Il test mirato aggiunto copre la forma con trattino; suite
+mirata aggiornata: 176 passed in 4.10s. Non serve una nuova chiamata AI:
+premere soltanto **Rigenera modello 3D** dopo il riavvio/applicazione del codice.
+Il prossimo report deve mostrare per `MOD1 (rf_module)`
+`model_rotation_deg=180.0`, `native_model_rotation_deg=180.0` e il log FreeCAD
+`local_rotation_deg=180`.
+
+L'ultimo run AI è comunque terminato senza HTTP 400: 53 ipotesi, 5 importazioni
+KiCad reali, 11 ipotesi YOLO escluse dal 3D, STEP completato. Il report originale
+non è stato riscritto manualmente; la correzione verrà applicata dalla
+rigenerazione locale.
+
+# 10:49 — scelte modello e rotazione consolidate nei JSON; replay FreeCAD riuscito
+
+Implementata la persistenza completa dello stato CAD locale richiesta dall'utente.
+`kicad-model-choices.json` ora conserva, per ogni componente e per la stessa foto
+calibrata, oltre a `model_selection`/`model_match`, anche `model_path`,
+`model_rotation_deg`, `rotation_deg` e `render_3d`. Il ripristino automatico continua
+ad applicare soltanto le scelte esplicite `confirmed`/`rejected`: i percorsi automatici
+non vengono trattati come autorizzazione cieca e vengono ricalcolati dal matcher.
+`kicad-model-candidates.json` salva gli stessi campi insieme a dimensioni, package e
+lista delle alternative; la finestra 3D ricarica questi valori nel metadata della riga.
+
+Il doppio clic su un solido continua ad aprire il selettore dei modelli KiCad; scelta
+e rotazione vengono quindi riportate nel JSON quando la revisione viene applicata e
+restano disponibili al successivo replay. La rotazione locale automatica del modello
+esatto `ESP32-S3-WROOM-1U.STEP` è stata verificata a 180° per il connettore RF osservato
+in basso a destra; non altera la rotazione fotografica del componente.
+
+Replay locale dell'inventario globale già salvato, senza AI e senza modificare l'output
+utente: `C:\Users\mirko\AppData\Local\Temp\kicadgen-freecad-replay-z73qt5jo`.
+FreeCAD ha generato STEP, FCStd, WRL e preview JSON reali; nessun import STEP fallito.
+Il report replay contiene 51 righe: U5 mantiene il modello SOT-223 confermato, M1
+usa il modello Espressif WROOM-1U con `model_rotation_deg=180`, mentre le 10 righe
+`YOLO candidate ...` restano nel JSON come ipotesi di revisione ma hanno
+`render_3d=false` e non vengono più disegnate come fantasmi magenta. La preview
+non contiene parti YOLO; M1 e U5 sono presenti come geometria reale.
+
+Test mirati dopo la modifica: 148 passed (scelte JSON, report GUI, flusso scelta
+modello, doppio clic, matcher KiCad). Nessun nuovo modello, chiamata AI, commit o
+push effettuato; output originali preservati. Restano da fare solo il riavvio
+dell'app e una prova manuale del doppio clic con una nuova scelta, così da verificare
+visivamente il salvataggio nel JSON della cartella del componente. La suite completa
+avviata in seguito è stata interrotta dopo oltre due minuti senza avanzamento o
+output del runner; non è stata usata come evidenza di successo. `py_compile` e
+`git diff --check` restano puliti.
+
 # 09:05 — libreria Espressif utente rilevata e WROOM-1U importato in FreeCAD
 
 La libreria locale installata dall'utente contiene il modello esatto:
@@ -1249,3 +1344,153 @@ empirica** tarata su un caso osservato). Restano:
 - `docs/ESP32/` **fuori da Git** (5 MB di immagini di lavoro), aggiunto a
   `.gitignore`.
 - Rinomina componente: **sempre automatica**, senza chiedere.
+# 10:00 — fix preview 3D dei candidati KiCad verificato offline
+
+Il difetto che lasciava USB-C, pulsanti, U1 e WROOM-1U magenta non era nel
+rilevatore YOLO: `model_candidates()` produceva candidati validi ma li lasciava
+tutti `review_required`, quindi `attach_models()` non impostava `model_path` e
+FreeCAD costruiva correttamente il fallback sintetico. Il fix introduce lo
+stato esplicito `provisional_matched`: il primo STEP viene usato per il preview
+solo quando la presenza e la classe sono ad alta confidenza e almeno i primi
+due candidati hanno la stessa famiglia e lo stesso ingombro XY entro il 5%.
+Un singolo modello e' ammesso in preview soltanto quando il nome corrisponde a
+un identificatore letterale nella marcatura (caso ESP32-S3-WROOM-1U). Lo stato
+non equivale a una conferma: il report conserva tutte le alternative, il
+warning UI invita alla revisione e il doppio clic continua ad aprire il picker.
+Ambiguita' esplicite (`SOT23-6 / SC70-6`), topologie incomplete, componenti a
+bassa confidenza e J2 senza candidati restano sintetici/non risolti.
+
+Replay del JSON gia' salvato, senza nuove chiamate AI:
+`generated/photo-cache/yolo-audit/global-inventory-0192402ad16544769111d433229af590.json`
+— 54 componenti, 30 modelli KiCad agganciati: 24 `auto_matched`, 6
+`provisional_matched`, 9 `review_required`, 15 `unresolved`. I componenti
+richiesti risultano: U1 -> QFN-24 5x5, SW1 -> EVQP7A, SW2 -> TS-1088-xR020,
+J1 -> USB4125, M1 -> `ESP32-S3-WROOM-1U.STEP`; J2 resta `unresolved`.
+
+Prova FreeCAD locale reale: output temporaneo
+`C:\Users\mirko\AppData\Local\Temp\kicadgen-provisional-ni7nt3kw\PROVISIONAL_PREVIEW.3dshapes\PROVISIONAL_PREVIEW.preview.json`.
+Il preview contiene importazioni `source=kicad_library`, vertici/triangoli e
+colori nativi per tutti i cinque componenti selezionati; STEP/FCStd/WRL sono
+stati prodotti. Questo dimostra che il nuovo `model_path` arriva fino a
+FreeCAD e non si ferma al JSON.
+
+Test mirati: **176 passed**. `git diff --check` pulito. La suite completa e'
+stata avviata ma interrotta dopo oltre sette minuti senza output finale,
+probabilmente durante un test di integrazione FreeCAD; non viene dichiarata
+verde. Nessuna chiamata AI a pagamento, nessun commit o push aggiuntivo.
+
+Per provare dall'app: riavviare la GUI per caricare il codice, rilanciare la
+generazione 3D sul progetto ESP32 gia' analizzato, poi aprire `Rivedi foto /
+scegli modelli KiCad…` per confermare o sostituire le proposte provvisorie.
+# 10:16 — prima prova completa dell'app dopo il fix: SUCCESSO
+
+L'utente ha rilanciato l'app con Opus e `YOLO locale + verifica AI`. Il log
+reale `generated/Module_ESP32-S3-DEV-KIT-NXRX_Castellated_P2.54mm/analisi-ai.log`
+mostra: credito controllato a 7.98 USD,
+prima chiamata Opus conclusa in 65.867 s, YOLO locale 111 ipotesi globali,
+seconda chiamata `report_global_inventory` conclusa in 196.081 s e FreeCAD terminato con
+`KICADGEN_STEP_OK`, `KICADGEN_FCSTD_OK`, `KICADGEN_MESH_OK` e
+`KICADGEN_WRL_OK`. Nessun HTTP 400 o errore credito.
+
+Output reale:
+`generated/Module_ESP32-S3-DEV-KIT-NXRX_Castellated_P2.54mm/Module_ESP32-S3-DEV-KIT-NXRX_Castellated_P2.54mm.3dshapes/`.
+Il report `kicad-model-candidates.json` contiene 21 `auto_matched`, 6
+`provisional_matched`, 8 `review_required` e 16 `unresolved`. Sono provati
+come proposte reali: U1 -> QFN-24, M1 -> `ESP32-S3-WROOM-1U.STEP`, SW1 ->
+`SW_SPST_EVQP7A.step`, SW2 -> `SW_SPST_TS-1088-xR020.step`, J1 -> USB-C
+`USB4125...step`. J2 resta correttamente irrisolto.
+
+Il preview JSON contiene **328 parti `kicad_library`**, 38 approssimazioni e
+114 elementi di supporto/serigrafia; `native_colors=true` sui modelli importati.
+Questa e' la prima verifica end-to-end nell'app: il fix non si limita piu' a
+preparare candidati, ma li porta realmente in FreeCAD e nell'export finale.
+# 11:36 — causa del rendering tutto-magenta isolata e corretta offline
+
+Richiesta utente: il nuovo rendering mostrava quasi soltanto riquadri magenta;
+analizzare log, risposta KiCad e soluzione senza dare un esito di facciata.
+
+Evidenza del run reale:
+
+- `generated/Module_ESP32-S3-DEV-KIT-NxRX_2x22_P2.54mm_Castellated/analisi-ai.log`
+  conferma che Opus ha completato entrambe le chiamate senza HTTP 400 o errore
+  di credito. La chiamata globale ha restituito 48 componenti semantici.
+- La risposta salvata in
+  `generated/photo-cache/yolo-audit/global-inventory-50beb4c67c2f46e48307aeb756e8e545.json`
+  contiene dati validi per U1 (`QFN-24`, marcatura `CH334F`), U2, U3, U4,
+  M1 (`ESPRESSIF ESP32-S3-WROOM-1U`), USB-C e SW1/SW2.
+- Il report CAD prodotto da quel run contiene 62 righe ma zero `model_path`;
+  il log riporta `Attached KiCad models ...: 0`. Le righe erano state
+  degradate a `class=unknown`, `package=''`, quindi il magenta era un effetto
+  del fallback CAD, non una mancata rilevazione nell'immagine.
+
+Causa concreta: `photo_global_inventory._lead_observation_valid()` rifiutava
+ogni riga in cui il provider ometteva `lead_count_confidence` oppure lo
+restituiva `null`. Il conteggio `lead_count` incompleto/non osservabile è un
+caso valido e non deve cancellare classe, package, marcatura e bbox. `_validate`
+trasformava poi ogni riga rifiutata in un generico `unknown`, impedendo il
+matching KiCad.
+
+Correzione applicata in `kicadgen/services/photo_global_inventory.py`:
+
+- `_repair_nullable_lead_observation()` ripara solo l'osservazione terminali
+  quando il campo è assente/null e il conteggio è coerente; imposta confidenza
+  `low` su una copia interna, lasciando intatta la risposta raw nell'audit.
+- Tipi errati, conteggi fuori range, conflitti e bbox invalide continuano a
+  essere rifiutati.
+- Aggiunta regressione in `tests/test_photo_global_inventory.py` per un modulo
+  ESP32 con `lead_count=null`, `lead_count_complete=false` e confidenza
+  mancante/null.
+
+Verifica senza rete e senza nuova AI a pagamento:
+
+- suite inventario/validazione/matching terminali: **126 passed, 1 skipped**;
+- replay della risposta salvata: **47 componenti semantici** conservati e 8
+  sole ipotesi generiche, invece di 48 righe degradate a `unknown`;
+- matching locale KiCad sui cinque componenti chiave: **5/5 modelli provvisori
+  agganciati** — U1 QFN-24, M1 ESP32-S3-WROOM-1U, SW1, SW2 e USB-C.
+  Il matcher ha lasciato le alternative nel JSON e li marca come
+  `provisional_matched`, quindi non sono identità elettriche certificate.
+
+Gli agenti esperti richiesti non hanno prodotto un audit: il servizio agenti ha
+restituito il limite operativo di utilizzo. Non viene inventato alcun risultato
+di agenti. Nessun commit, push, cambio branch o nuova chiamata AI effettuata.
+
+Stato operativo: la GUI già aperta non ricarica il codice modificato. Serve
+riavviare l'app e rilanciare l'elaborazione (oppure rigenerare il 3D dopo che il
+nuovo report è stato creato). Il problema del tutto-magenta è risolto nel
+percorso dati; resta da verificare nel nuovo run reale la rotazione nativa del
+WROOM e l'eventuale scelta manuale delle varianti marcate provvisorie.
+# 11:43 — nuovo run reale dopo il fix del parser: modelli KiCad agganciati
+
+Run utente verificato in
+`generated/Module_ESP32-S3-DEV-KIT-NXRX_2x22_P2.54mm_Castellated/analisi-ai.log`.
+
+- Credito letto prima della chiamata: 4.94 USD residui sul tetto chiave;
+  nessun HTTP 400, errore credito o `AI_CALL_FAILURE`.
+- Opus: chiamata principale 73.037 s; inventario globale 196.969 s, 46 righe
+  semanticamente restituite.
+- YOLO: 111 proposte iniziali (63 operative + 48 review-only). Il parser non
+  ha più trasformato in `unknown` le righe valide con `lead_count_confidence`
+  assente/null: il risultato finale conserva 51 ipotesi, con 46 componenti
+  globali e 5 proposte provvisorie aggiuntive; 7 sole righe review-only sono
+  marcate `render_3d=false`.
+- Global inventory è `FAILED/PARTIAL` solo per due collegamenti geometrici
+  incoerenti (Q1 e C14) più proposte unresolved; le righe valide non vengono
+  più degradate. Le incertezze esplicite riguardano U5/Q1 sovrapposti, Q3/Q4
+  non classificabili e passivi in ombra.
+- Matching: report `kicad-model-candidates.json` contiene 15 `model_path`
+  reali: 10 `auto_matched`, 5 `provisional_matched`, 27 `review_required`,
+  9 `unresolved`.
+- Import FreeCAD verificati: U1 QFN-24, U2 DFN, ESP32-S3-WROOM-1U, due
+  pulsanti PTS810 e passivi C/R 0603. Il WROOM riporta
+  `local_rotation_deg=180` e `native_model_rotation_deg=180`, quindi la
+  correzione dell'orientamento non è stata persa.
+- Export STEP, mesh preview e WRL completati (`KICADGEN_STEP_OK`,
+  `KICADGEN_MESH_OK`, `KICADGEN_WRL_OK`). Resta il warning noto
+  `KICADGEN_FCSTD_FAILED: Failed to open file`: non ha impedito gli export
+  utilizzabili, ma il formato FCStd non è stato prodotto in questo run.
+
+Conclusione: il difetto che causava il rendering tutto-magenta è risolto nel
+run reale. Il risultato non è ancora un'identificazione completa: varianti
+QFN/DFN, USB-C e semiconduttori ambigui restano in revisione, come previsto
+dal matching prudente. Nessun commit/push effettuato.

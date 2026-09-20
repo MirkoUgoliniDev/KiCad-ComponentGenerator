@@ -267,6 +267,28 @@ def test_single_call_five_images_all_candidates_and_retained_parent():
     assert any('sha256=' in line for line in logs)
 
 
+def test_nullable_incomplete_lead_observation_keeps_semantic_component():
+    """A provider null confidence must not erase package/class/marking data."""
+    data = response()
+    data['components'][0].update(
+        component_id='M1', **{'class': 'rf_module'},
+        package='ESP32-S3-WROOM-1U',
+        marking='ESPRESSIF ESP32-S3-WROOM-1U',
+        confidence='high', presence_confidence='high', class_confidence='high',
+        lead_count=None, lead_count_complete=False, lead_count_confidence=None)
+    for decision in data['candidate_decisions']:
+        decision['component_id'] = 'M1'
+    result, calls, logs = run(data)
+    assert len(calls) == 1 and len(result) == 1
+    assert result[0]['component_id'] == 'M1'
+    assert result[0]['kind'] == 'module'
+    assert result[0]['package'] == 'ESP32-S3-WROOM-1U'
+    assert result[0]['marking'] == 'ESPRESSIF ESP32-S3-WROOM-1U'
+    assert result[0]['lead_count'] is None
+    assert result[0]['lead_count_confidence'] == 'low'
+    assert not any('invalid or duplicate component' in line for line in logs)
+
+
 @pytest.mark.parametrize('bad', [None, [], {}, {'components': []}])
 def test_malformed_response_retains_all_candidates_visibly(bad, tmp_path):
     result, calls, logs = run(bad, cache=tmp_path)

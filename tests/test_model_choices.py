@@ -25,13 +25,25 @@ def test_restore_same_photo_not_other_body_or_photo(tmp_path):
 
 def test_rejected_choice_survives_and_report_is_json(tmp_path):
     c = component()
+    c['model_path'] = 'C:/KiCad/3dmodels/R_0603.step'
+    c['model_rotation_deg'] = 45
+    c['render_3d'] = False
     c['model_selection'] = dict(status='rejected',path='',rotation_deg=0)
     path = save_choices(tmp_path, b'photo', [c])
-    assert json.loads(path.read_text())['components'][0]['model_selection']['status']=='rejected'
+    saved_choices = json.loads(path.read_text())['components'][0]
+    assert saved_choices['model_selection']['status']=='rejected'
+    assert saved_choices['model_path'].endswith('R_0603.step')
+    assert saved_choices['model_rotation_deg'] == 45
+    assert saved_choices['render_3d'] is False
     fresh=deepcopy(c); fresh.pop('model_selection')
     assert restore_choices(tmp_path,b'photo',[fresh])[0]['model_selection']['status']=='rejected'
     report=save_candidate_report(tmp_path,[c])
-    assert json.loads(report.read_text())['components'][0]['model_match']['candidates']
+    saved_report = json.loads(report.read_text())['components'][0]
+    assert saved_report['model_match']['candidates']
+    assert saved_report['model_path'].endswith('R_0603.step')
+    assert saved_report['model_rotation_deg'] == 45
+    assert saved_report['render_3d'] is False
+    assert saved_report['rotation_deg'] == 90
 
 
 def test_reordering_does_not_reassign_selection(tmp_path):

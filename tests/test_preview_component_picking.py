@@ -76,6 +76,16 @@ def test_picking_configuration_preserves_left_rotation_and_existing_mesh():
                           show=False, show_message=False)]
 
 
+def test_double_click_configuration_registers_component_callback():
+    calls = []
+    callback = object()
+    viewer = SimpleNamespace(iren=SimpleNamespace(
+        add_observer=lambda event, handler: calls.append((event, handler))),
+        _component_double_clicked=callback)
+    Preview3DVtk._configure_component_double_click(viewer)
+    assert calls == [("LeftButtonDoubleClickEvent", callback)]
+
+
 def test_clear_and_reset_invalidate_mapping(monkeypatch):
     from pyvistaqt import QtInteractor
 

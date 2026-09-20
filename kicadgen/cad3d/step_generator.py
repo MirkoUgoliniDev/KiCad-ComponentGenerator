@@ -506,6 +506,7 @@ def _generate_populated_tht(params, body, pins, output_dir, **options):
             "detected_kind": c.detected_kind,
             "bbox_basis": c.bbox_basis, "package_evidence": c.package_evidence,
             "model_selection": c.model_selection, "model_match": c.model_match,
+            "render_3d": True,
             "x": centre_x + c.x, "y": centre_y + c.y,
             "length_mm": c.length, "width_mm": c.width, "height_mm": c.height,
             "rotation_deg": c.rotation, "color_hex": c.color_hex, "marking": c.marking,

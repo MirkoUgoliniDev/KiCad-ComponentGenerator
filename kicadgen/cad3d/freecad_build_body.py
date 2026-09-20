@@ -522,6 +522,9 @@ def main():
         import freecad_parts
         for index, component in enumerate(components):
             base = _safe(component.get("name"), index)
+            if component.get("render_3d", True) is False:
+                print(f"KICADGEN_COMPONENT_SKIPPED:{base}; review-only hypothesis", flush=True)
+                continue
             print(f"KICADGEN_COMPONENT_START:{index + 1}/{len(components)}:{base}", flush=True)
             try:
                 built = freecad_parts.build_component(component, z1)
