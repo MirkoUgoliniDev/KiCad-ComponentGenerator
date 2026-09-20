@@ -1,3 +1,85 @@
+# 2026-09-20 (6) — i contatti castellated hanno due appigli, non uno
+
+Branch `YOLO-SOLUTION`, sopra `ee4c564`. Segnalazione dell'utente con
+fotografia: «i connettori che fa il wizard sono troppo aperti, qui è un foro
+chiuso e un mezzo foro aperto».
+
+## 1. Cosa mancava
+
+Il wizard generava **una sola feature per contatto**: un cilindro col centro a
+`0.76 · raggio` dentro il bordo, che tagliato dal bordo lascia una U spalancata.
+Nel footprint 2D non c'era nulla di tutto ciò: solo piazzole SMD rettangolari,
+nessun foro.
+
+Sulla scheda dell'utente ogni contatto ne ha **due**: il mezzo foro sul bordo,
+che serve alla rifusione SMD, e un **foro passante chiuso** poco più dentro, in
+cui si salda uno strip a passo 2,54. È il doppio aggancio tipico delle schede
+di sviluppo, e senza il secondo il bordo resta tutto aperto e i pin non si
+possono saldare.
+
+## 2. Decisioni dell'utente
+
+* **Due feature per posizione**: foro chiuso più mezzo foro al bordo.
+* **Il footprint 2D cambia di conseguenza**: i pad THT entrano davvero nel
+  `.kicad_mod`, non solo nel 3D.
+* **Le quote sono campi del wizard con default standard**, non rapporti
+  derivati dal passo né misure chieste al modello.
+
+## 3. Cosa è cambiato
+
+`CastellatedModuleParams` ha tre campi nuovi: `thru_hole_drill` (default 1,0
+mm), `thru_pad_diameter` (1,7 mm) e `thru_hole_offset` (1,27 mm, distanza del
+centro dal bordo). La proprietà `has_thru_holes` è vera quando foro e piazzola
+sono entrambi dichiarati; **mettere il diametro a zero è il modo di dire «questo
+modulo ha solo i semi-fori»** — un foro di diametro nullo non esiste, quindi lo
+zero non può essere scambiato per una quota.
+
+Nel footprint ogni contatto riceve un pad `thru_hole` circolare su `*.Cu` e
+`*.Mask`, **con lo stesso numero del pad SMD**: sono due appigli di un contatto,
+non due contatti, e KiCad li tratta come una sola rete. Nel solido 3D si
+sottrae un secondo cilindro, quello del foro chiuso, accanto a quello del
+semi-foro.
+
+Tre validazioni nuove, tutte geometriche: la piazzola dev'essere più larga del
+foro (senza corona non c'è rame su cui saldare); il centro dev'essere distante
+dal bordo almeno quanto il raggio della piazzola (altrimenti non è un foro
+chiuso, è un secondo semi-foro); i fori dei due lati opposti devono starci
+dentro la dimensione più corta del corpo.
+
+Il `hole_inset` del semi-foro **non è stato toccato**: resta il parametro già
+documentato. Se la U va resa più profonda si abbassa quello.
+
+## 4. Verifica
+
+* Suite senza GUI: **2386 passati**, con i soliti 2 falliti e 1 errore di
+  raccolta identici alla baseline.
+* Moduli GUI uno per uno: verdi, tranne `test_board_pipeline` (2) che fallisce
+  **identico anche sulla baseline** (`body.pin_color_hex` con body None: è
+  l'ambiente, non il codice).
+* Contratti aggiornati capendo perché: `test_footprint_has_smd_pads_without_drill`
+  e l'asserzione `"thru_hole" not in content` esprimevano il vecchio contratto
+  «solo SMD» e ora verificano il footprint ibrido.
+* Coppie positivo/negativo nuove: contatto con entrambi i fori contro modulo
+  che dichiara zero fori passanti; cilindri che attraversano il bordo contro
+  cilindri interamente dentro il corpo.
+* **Non verificato**: nessun run end-to-end, serve FreeCAD.
+
+## 5. Resta aperto su questo fronte
+
+* **Quante feature abbia un contatto è una cosa che si vede nella fotografia**,
+  e secondo la regola del CLAUDE.md andrebbe chiesta al modello invece che
+  decisa da un default. Oggi il default è «tutte e due», che è il caso comune
+  delle schede di sviluppo ma non di tutti i moduli: un convertitore RS485 con
+  i soli semi-fori ora riceve dei fori che non ha, finché non si mette il
+  diametro a zero a mano. È un ripiego dichiarato, non una regola generale.
+* L'attributo del footprint resta `smd` anche col pad passante: il montaggio
+  primario del modulo è la rifusione sui semi-fori. Se si volesse coerenza con
+  KLC per i footprint ibridi andrebbe deciso a parte.
+* Le quote di default (1,0 / 1,7 / 1,27) sono i valori standard di uno strip a
+  passo 2,54. Su una scheda fuori standard vanno corrette a mano nei tre campi.
+
+---
+
 # 2026-09-20 (5) — USB-C, regolatore e orientamento ESP32
 
 Branch `YOLO-SOLUTION`, sopra `cb7c185`. Tre difetti segnalati dall'utente sul

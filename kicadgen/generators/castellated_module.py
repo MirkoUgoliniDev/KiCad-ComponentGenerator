@@ -179,6 +179,20 @@ class CastellatedModuleParams:
     # Distanza del centro del semi-foro dal bordo (None = 0.76 * raggio): un
     # castellated e' un foro normale forato vicino al bordo e poi tagliato.
     hole_inset: Optional[float] = None
+    # Foro passante CHIUSO accanto al semi-foro. Sulle schede di sviluppo ogni
+    # contatto ne ha due: il mezzo foro sul bordo per la rifusione SMD e un
+    # foro intero poco piu' dentro, dove si salda uno strip a passo 2.54.
+    # Generarne uno solo dava un bordo tutto aperto, che non somiglia al pezzo
+    # reale ne' permette di saldarci i pin.
+    #
+    # Quante feature abbia davvero un contatto si vede nella fotografia e
+    # andrebbe chiesto al modello, non deciso qui: finche' non lo e', questo
+    # e' il caso comune e si spegne mettendo il diametro a zero.
+    thru_hole_drill: float = 1.0
+    thru_pad_diameter: float = 1.7
+    # Distanza del centro del foro chiuso dal bordo del corpo. Il default
+    # tiene il foro appena dentro il semi-foro, senza che i due si fondano.
+    thru_hole_offset: float = 1.27
     # Il modulo non e' un blocco pieno: e' un PCB sottile con sopra i
     # componenti. Il modello 3D lo costruisce come due solidi, perche' un
     # parallelepipedo unico alto quanto il componente piu' alto non
@@ -196,6 +210,33 @@ class CastellatedModuleParams:
     # uno per uno invece del blocco unico ricavato da component_inset.
     components: List[ComponentBox] = field(default_factory=list)
     margin: float = 0.25
+
+    @property
+    def has_thru_holes(self) -> bool:
+        """@brief True quando ogni contatto porta anche un foro passante chiuso.
+
+        @return True se sia il foro sia la sua piazzola sono dichiarati.
+        @note Mettere il diametro a zero e' il modo di dire "questo modulo ha
+            solo i semi-fori": non esiste un foro di diametro nullo, quindi lo
+            zero non puo' essere confuso con una quota.
+        """
+        return self.thru_hole_drill > 0 and self.thru_pad_diameter > 0
+
+    def thru_hole_centre(self, placement: "PadPlacement") -> tuple:
+        """@brief Centro del foro chiuso di un contatto, in coordinate footprint.
+
+        @param placement Contatto gia' posizionato sul suo bordo.
+        @return (x, y) in mm: il foro sta sulla stessa riga del contatto, ma
+            spostato verso l'interno del corpo.
+        """
+        offset = self.thru_hole_offset
+        if placement.edge == "left":
+            return (-self.body_length / 2 + offset, placement.y)
+        if placement.edge == "right":
+            return (self.body_length / 2 - offset, placement.y)
+        if placement.edge == "top":
+            return (placement.x, -self.body_width / 2 + offset)
+        return (placement.x, self.body_width / 2 - offset)
 
     def side_pad_length(self, side: CastellatedSide) -> float:
         """@brief Provide the side pad length operation for this workflow."""
@@ -221,6 +262,29 @@ class CastellatedModuleParams:
             raise ValueError("Il diametro del semi-foro deve essere > 0.")
         if self.pcb_thickness <= 0:
             raise ValueError("Lo spessore del PCB deve essere > 0.")
+        if self.thru_hole_drill < 0 or self.thru_pad_diameter < 0:
+            raise ValueError("Le quote del foro passante non possono essere negative.")
+        if self.has_thru_holes:
+            if self.thru_pad_diameter <= self.thru_hole_drill:
+                raise ValueError(
+                    f"La piazzola del foro passante ({self.thru_pad_diameter}mm) deve essere "
+                    f"piu' larga del foro ({self.thru_hole_drill}mm): senza corona non c'e' "
+                    "rame su cui saldare."
+                )
+            # Un foro il cui bordo esce dal corpo non e' un foro chiuso: e' un
+            # secondo semi-foro, e allora tanto vale non dichiararlo.
+            if self.thru_hole_offset < self.thru_pad_diameter / 2:
+                raise ValueError(
+                    f"Il centro del foro passante dista {self.thru_hole_offset}mm dal bordo, "
+                    f"meno del raggio della sua piazzola ({self.thru_pad_diameter / 2}mm): "
+                    "resterebbe aperto sul bordo invece di essere chiuso."
+                )
+            shortest = min(self.body_length, self.body_width)
+            if 2 * self.thru_hole_offset + self.thru_pad_diameter > shortest + 1e-6:
+                raise ValueError(
+                    f"I fori passanti dei due lati opposti non stanno in {shortest}mm: "
+                    f"servono almeno {2 * self.thru_hole_offset + self.thru_pad_diameter:.2f}mm."
+                )
 
         seen_numbers: dict[str, str] = {}
         for side in self.sides:
@@ -354,6 +418,18 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
             layers=["F.Cu", "F.Paste", "F.Mask"],
             roundrect_rratio=0.25,
         ))
+        if params.has_thru_holes:
+            # Stesso numero del pad SMD: sono due appigli dello stesso
+            # contatto, non due contatti. KiCad li tratta come una sola rete.
+            fp.add_pad(Pad(
+                number=placement.number,
+                pad_type="thru_hole",
+                shape="circle",
+                at=params.thru_hole_centre(placement),
+                size=(params.thru_pad_diameter, params.thru_pad_diameter),
+                layers=["*.Cu", "*.Mask"],
+                drill=params.thru_hole_drill,
+            ))
         if placement.number == first_number:
             # Marcatore del pin 1, affiancato al suo pad lungo il bordo
             # (non verso l'esterno, dove finirebbe sotto il pad stesso).

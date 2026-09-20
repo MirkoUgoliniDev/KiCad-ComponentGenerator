@@ -141,14 +141,52 @@ def test_unknown_edge_is_rejected():
 
 # ── Footprint ───────────────────────────────────────────────────────
 
-def test_footprint_has_smd_pads_without_drill():
+def test_every_contact_gets_a_half_hole_and_a_closed_hole():
+    """@brief Due appigli per contatto, come sulle schede vere.
+
+    Il mezzo foro sul bordo serve alla rifusione SMD, il foro intero poco piu'
+    dentro a saldarci uno strip. Generando solo il primo il bordo restava tutto
+    aperto e i pin non si potevano saldare. I due pad portano lo STESSO numero:
+    sono due appigli di un contatto, non due contatti.
+    """
     fp = build_castellated_module(rs485_module())
     assert fp.attr == "smd"
-    assert len(fp.pads) == 8
-    for pad in fp.pads:
-        assert pad.pad_type == "smd"
+    smd = [p for p in fp.pads if p.pad_type == "smd"]
+    thru = [p for p in fp.pads if p.pad_type == "thru_hole"]
+    assert len(smd) == 8 and len(thru) == 8
+    assert sorted(p.number for p in smd) == sorted(p.number for p in thru)
+    for pad in smd:
         assert pad.drill is None
         assert list(pad.layers) == ["F.Cu", "F.Paste", "F.Mask"]
+    for pad in thru:
+        assert pad.shape == "circle" and pad.drill == 1.0
+        assert pad.size == (1.7, 1.7)
+        assert list(pad.layers) == ["*.Cu", "*.Mask"]
+
+
+def test_a_module_with_only_half_holes_declares_it_with_a_zero():
+    """Caso negativo: non tutti i moduli hanno il foro passante.
+
+    Lo si dice mettendo a zero il diametro -- un foro di diametro nullo non
+    esiste, quindi lo zero non puo' essere scambiato per una quota.
+    """
+    params = rs485_module()
+    params.thru_hole_drill = 0
+    fp = build_castellated_module(params)
+    assert len(fp.pads) == 8
+    assert all(pad.pad_type == "smd" and pad.drill is None for pad in fp.pads)
+
+
+def test_the_closed_hole_stays_inside_the_body_on_every_edge():
+    """Un foro il cui bordo esce dal corpo sarebbe un secondo mezzo foro."""
+    params = rs485_module()
+    fp = build_castellated_module(params)
+    half_l, half_w = params.body_length / 2, params.body_width / 2
+    ring = params.thru_pad_diameter / 2
+    for pad in (p for p in fp.pads if p.pad_type == "thru_hole"):
+        x, y = pad.at
+        assert abs(x) + ring <= half_l + 1e-6
+        assert abs(y) + ring <= half_w + 1e-6
 
 
 def test_footprint_writes_valid_file(tmp_path):
@@ -159,7 +197,8 @@ def test_footprint_writes_valid_file(tmp_path):
     assert content.startswith("(footprint")
     assert "(attr smd)" in content
     assert "F.CrtYd" in content
-    assert "thru_hole" not in content
+    # Il footprint e' ibrido: rifusione sui mezzi fori, strip nei fori interi.
+    assert "thru_hole" in content and "(drill 1)" in content
 
 
 def test_footprint_has_reference_on_fab_layer():
@@ -210,3 +249,51 @@ def test_components_do_not_affect_the_footprint():
     populated = build_castellated_module(with_components)
     assert len(plain.pads) == len(populated.pads)
     assert [(p.number, p.at) for p in plain.pads] == [(p.number, p.at) for p in populated.pads]
+
+
+def _notches_for(params, monkeypatch, tmp_path):
+    """Cattura i cilindri che il 3D sottrae al PCB, senza lanciare FreeCAD."""
+    from kicadgen.cad3d import step_generator
+    from kicadgen.cad3d.body_params import Body3DParams
+    captured = {}
+
+    def fake_run(name, pins, body, output_dir, **options):
+        captured.update(options)
+        return {"step_path": tmp_path / "x.step", "warnings": [], "notes": []}
+
+    monkeypatch.setattr(step_generator, "_run_freecad", fake_run)
+    step_generator.generate_castellated_3d_model(
+        params, Body3DParams(length_mm=params.body_length, width_mm=params.body_width,
+                             height_mm=3.0), tmp_path)
+    return captured["notches"]
+
+
+def test_the_solid_gets_both_holes_for_every_contact(monkeypatch, tmp_path):
+    """@brief Il bordo non e' tutto aperto: mezzo foro fuori, foro intero dentro.
+
+    Un cilindro solo per contatto lasciava una U spalancata sul bordo, che non
+    somiglia al pezzo reale. I due cilindri si distinguono per dove stanno, non
+    per come si chiamano: quello del semi-foro tocca il bordo, l'altro no.
+    """
+    params = rs485_module()
+    notches = _notches_for(params, monkeypatch, tmp_path)
+    assert len(notches) == 2 * 8
+    half_l, half_w = params.body_length / 2, params.body_width / 2
+    def crosses_the_edge(n):
+        return (abs(n["x"]) + n["radius"] > half_l + 1e-6
+                or abs(n["y"]) + n["radius"] > half_w + 1e-6)
+
+    touching = [n for n in notches if crosses_the_edge(n)]
+    inside = [n for n in notches if not crosses_the_edge(n)]
+    assert len(touching) == len(inside) == 8
+    assert all(n["radius"] == params.thru_hole_drill / 2 for n in inside)
+    for n in inside:
+        assert abs(n["x"]) + n["radius"] < half_l + 1e-6
+        assert abs(n["y"]) + n["radius"] < half_w + 1e-6
+
+
+def test_a_module_without_thru_holes_keeps_one_cylinder_per_contact(monkeypatch, tmp_path):
+    """Caso negativo: dichiarare zero fori passanti non ne aggiunge nessuno."""
+    params = rs485_module()
+    params.thru_hole_drill = 0
+    assert len(_notches_for(params, monkeypatch, tmp_path)) == 8

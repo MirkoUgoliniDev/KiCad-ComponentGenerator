@@ -318,6 +318,13 @@ def generate_castellated_3d_model(
             centre = (placement.x, half_width - inset)
             label = (placement.x, half_width - inner_len - label_gap)
         notches.append({"x": centre[0], "y": centre[1], "radius": radius})
+        if params.has_thru_holes:
+            # Il foro intero non tocca il bordo: e' l'altra meta' del contatto,
+            # quella in cui si salda uno strip. Senza, il bordo resta tutto
+            # aperto e non somiglia al pezzo reale.
+            hole_x, hole_y = params.thru_hole_centre(placement)
+            notches.append({"x": hole_x, "y": hole_y,
+                            "radius": params.thru_hole_drill / 2})
         contacts.append({
             "x": centre[0], "y": centre[1], "radius": radius,
             "number": placement.number, "edge": placement.edge,
