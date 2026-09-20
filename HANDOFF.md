@@ -1,3 +1,26 @@
+# 2026-09-20 (6) — l'uscita finiva con un RuntimeError
+
+Visto nella schermata dell'utente, sopra il prompt: «RuntimeError: wrapped
+C/C++ object of type _MatchWorker has been deleted», dopo «CAD measurement
+cache: atomic write failed; trying next path (path #1)».
+
+`PhotoReviewDialog.choose_model` collegava `QApplication.aboutToQuit` a
+`worker.wait` — giusto: un thread di misura in corso non deve essere distrutto
+con la finestra. Ma quella connessione **sopravviveva a `deleteLater`**: alla
+chiusura Qt chiamava `wait` su un oggetto C++ gia' distrutto. Ora la promessa
+si scioglie quando il thread finisce, e la connessione che la scioglie e' presa
+**prima** di quella che distrugge, perche' i gestori scattano nell'ordine di
+connessione.
+
+`tests/test_photo_review_dialog.py`: verificato che il test **fallisce** senza
+la correzione e passa con essa — non e' un test che sarebbe verde comunque.
+
+Resta da guardare, **non corretto**: «CAD measurement cache: atomic write
+failed; trying next path». La cache ripiega da sola sul percorso successivo,
+quindi non blocca nulla, ma su Windows la scrittura atomica che fallisce al
+primo tentativo merita una diagnosi: probabilmente un file ancora aperto o un
+antivirus che lo tiene.
+
 # 2026-09-20 (5) — Qwen3-VL: cosa lo bloccava, e la prova pronta
 
 Richiesta dell'utente (20/09, mentre era fuori): «proviamo a usare Qwen3-VL per

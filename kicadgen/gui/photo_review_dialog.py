@@ -607,9 +607,16 @@ class PhotoReviewDialog(QDialog):
         worker.done.connect(lambda report: self._show_model_candidates(item, snapshot, report))
         worker.failed.connect(self._match_failed)
         worker.finished.connect(self._match_finished)
-        worker.finished.connect(worker.deleteLater)
         # A dismissed editor must not destroy a running measurement thread.
-        QApplication.instance().aboutToQuit.connect(worker.wait)
+        application = QApplication.instance()
+        application.aboutToQuit.connect(worker.wait)
+        # ...ma la promessa vale finche' il thread esiste. Senza scioglierla,
+        # alla chiusura Qt chiamerebbe wait su un oggetto gia' eliminato da
+        # deleteLater e l'uscita finirebbe con RuntimeError: wrapped C/C++
+        # object of type _MatchWorker has been deleted. Sciolta prima della
+        # distruzione, perche' i gestori scattano nell'ordine di connessione.
+        worker.finished.connect(lambda: application.aboutToQuit.disconnect(worker.wait))
+        worker.finished.connect(worker.deleteLater)
         worker.start()
 
     def _match_failed(self, message):

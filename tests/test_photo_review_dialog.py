@@ -339,3 +339,50 @@ def test_invalid_component_geometry_rejected(app, png, components, key, value):
 def test_invalid_image_rejected(app):
     with pytest.raises(ValueError, match="PNG"):
         PhotoReviewDialog(b"not a PNG", [], 40, 20)
+
+
+def test_the_quit_promise_is_released_when_the_measurement_thread_ends(dialog, app, monkeypatch):
+    """@brief La promessa di aspettare vale finche' il thread esiste.
+
+    `aboutToQuit` teneva un riferimento a `worker.wait` che sopravviveva a
+    `deleteLater`: alla chiusura dell'applicazione Qt chiamava quel metodo su
+    un oggetto C++ gia' distrutto e l'uscita finiva con
+    «RuntimeError: wrapped C/C++ object of type _MatchWorker has been deleted».
+    Il thread vero non serve a dimostrarlo: serve che la connessione presa
+    all'avvio venga sciolta alla fine.
+    """
+    from kicadgen.gui import photo_review_dialog as module
+
+    started = []
+
+    class _Idle(module.QThread):
+        """@brief Thread che non fa nulla: qui conta solo il ciclo di vita."""
+
+        done = module.pyqtSignal(object)
+        failed = module.pyqtSignal(str)
+
+        def __init__(self, snapshot):
+            super().__init__()
+            self.snapshot = snapshot
+
+        def start(self):
+            started.append(self)
+
+        def run(self):
+            return None
+
+    monkeypatch.setattr(module, '_MatchWorker', _Idle)
+    dialog._select_row(0)
+    dialog.choose_model()
+    assert len(started) == 1
+    worker = started[0]
+
+    # Finche' il thread e' in corso la promessa c'e': disconnetterla riesce.
+    app.aboutToQuit.disconnect(worker.wait)
+    app.aboutToQuit.connect(worker.wait)
+
+    worker.finished.emit()
+    app.processEvents()
+    # Sciolta: una seconda disconnessione non ha piu' nulla da sciogliere.
+    with pytest.raises(TypeError):
+        app.aboutToQuit.disconnect(worker.wait)
