@@ -1,3 +1,29 @@
+# 2026-09-20 (16) — la validazione nuova rigiocata sulla risposta AI vera
+
+Terza prova offline, sui dati della corsa che ha prodotto il modulo sbagliato.
+Presa la **risposta AI registrata nell'audit** (106 candidati, 48 componenti) e
+passata alla validazione con il controllo nuovo:
+
+```
+component C05: merged box excludes most of sources [11, 47]
+```
+
+C05 e' il modulo ESP32, e le sorgenti 11 e 47 sono proprio i due frammenti il
+cui bordo destro arrivava a x1 = 1,0000 -- cioe' quelli che portavano il bordo
+vero -- e che la bbox fusa aveva tagliato via. Prima quella fusione passava
+**senza un avviso**, perche' la validazione controllava solo la sovrapposizione.
+
+La diagnostica non e' quindi teorica: sulla corsa che ha sbagliato, punta il
+componente giusto e nomina le sorgenti giuste.
+
+## Cosa resta non verificabile da qui
+
+Se il modello, ricevendo `clipped_sides`, smetta di adottare il bordo di
+tessera: serve una chiamata vera. **Il controllo del desktop e' spento** sulla
+macchina dell'utente (Impostazioni → Computer use nell'app Claude), quindi
+nemmeno guidando l'applicazione si puo' lanciare: o lo accende, o preme lui
+«Estrai parametri con AI».
+
 # 2026-09-20 (15) — prove eseguite, non solo scritte
 
 Due prove reali, entrambe **senza chiamate AI**, sui dati e sul codice veri.
