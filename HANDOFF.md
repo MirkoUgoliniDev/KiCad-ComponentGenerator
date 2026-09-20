@@ -1,674 +1,110 @@
-# 2026-09-20 (9) — i due fori si fondevano, e la revisione dei riquadri YOLO
+# 2026-09-20 (4) — la revisione dei corpi rilevati, prima di pagare
+
+Branch `YOLO-SOLUTION`. Ultimo commit prima di questo lavoro: `9416ea8`.
+Richiesta dell'utente: «facciamo uno step intermedio, una vista dopo YOLO con i
+riquadri sui componenti individuati, e la possibilità di eliminare quelli che
+riteniamo non validi». Collocazione decisa dall'utente: **prima della chiamata
+AI**. Azioni chieste: eliminare un riquadro, distinguere le deboli dalle
+sicure, aggiungere un corpo mancato, correggere la categoria.
+
+## Perché sta prima della chiamata e non dopo
+
+Il rilevatore locale consegna molto più di quanto ci sia: sul run reale 2265
+rilevamenti grezzi su 30 viste, 1238 soppressi come doppioni, 111 consegnati —
+63 sopra la soglia operativa e 48 tenuti apposta sotto soglia, perché una
+confidenza bassa non è prova di assenza (un regolatore nero su PCB nero è
+sopravvissuto a 0,055). Quelle 111 finivano tutte nella riconciliazione
+globale, che si paga. Potare prima costa meno e dà al modello un problema più
+pulito; potare dopo non avrebbe evitato nessun costo.
+
+## Com'è fatta
+
+* `kicadgen/gui/yolo_review_dialog.py` (nuovo): `BoardView` disegna la foto e
+  sopra i riquadri in coordinate normalizzate [0,1], le stesse del rilevatore,
+  così la vista si ridimensiona senza spostare nulla. Un clic sceglie, un
+  trascinamento aggiunge. `box_pen` decide il tratto: **i deboli sono
+  tratteggiati**, non solo di un altro colore, perché il colore da solo non
+  separa i due casi per chi non lo distingue.
+* `photo_inventory.extract_inventory(..., review_proposals=...)` chiama il
+  gancio subito dopo `detect_yolo_components` e prima di
+  `review_global_inventory`. Firma: `(photo_png, proposals, length_mm,
+  width_mm)`.
+* **Le quote viaggiano con la chiamata** e non si leggono dai campi della GUI:
+  durante l'estrazione quei campi non sono ancora compilati, e un corpo
+  aggiunto a mano finirebbe su una scala diversa da quelli del rilevatore.
+  Questo era un difetto della prima stesura, corretto.
+* `ReviewCancelled` (in `photo_inventory`) **non è un ValueError** di
+  proposito: `datasheet_extractor` degrada gli errori dell'inventario
+  fotografico in una nota e prosegue, e proseguire qui vorrebbe dire pagare la
+  riconciliazione sulle proposte appena rifiutate. Viene rilanciata come
+  `ExtractionError`, quindi annullare ferma l'estrazione con un messaggio
+  pulito.
+* `ExtractWorker.review_requested` attraversa i thread; il worker si ferma su
+  un `threading.Event` finché `deliver_review` non risponde.
+  `MainWindow._on_review_requested` consegna la risposta **in un `finally`**:
+  un worker lasciato in attesa non finirebbe più. Se la vista non si apre
+  affatto si prosegue con tutte le proposte — un difetto della revisione non
+  deve buttare via l'analisi già pagata fin qui.
+* `photo_yolo.detector_classes()` espone le categorie proponibili, **escluse
+  `pads` e `pins`**: non sono corpi montati, e sceglierle sarebbe un errore
+  che nessuno a valle saprebbe correggere.
+
+## Verifica
+
+* `tests/test_yolo_review_dialog.py` (nuovo, 7 test): la lista di chi chiama
+  resta intatta qualunque cosa accada nella revisione; un riquadro eliminato
+  esce e gli altri restano identici; debole/sicuro separati da testo, colore e
+  **stile del tratto**; la categoria corretta arriva a valle; un corpo
+  aggiunto a mano è misurato con la calibrazione della scheda (20 mm × 2 mm su
+  una scheda 40×20) e ha le stesse chiavi degli altri. Coppia positivo/negativo
+  sulla rotazione: riquadro largo → 0°, riquadro alto → 90°. Un clic andato
+  storto (sotto `MIN_NEW_BOX`) non entra nell'inventario.
+* `tests/test_global_inventory_pipeline.py`: coppia positivo/negativo sulla
+  catena reale — tolta una proposta, quella non compare fra i candidati
+  inviati e la chiamata parte comunque; annullata la revisione, la
+  riconciliazione **non parte affatto**.
+
+## Suite
+
+Eseguita file per file nel contenitore (un'unica esecuzione intera va in
+segfault su VTK, difetto d'ambiente, non del codice): **2764 passati, 6
+falliti, 8 saltati**. I 6 falliti sono tutti preesistenti o d'ambiente,
+verificati identici sulla copia di riferimento `kgen-base`:
+
+* `test_board_pipeline.py` × 2 (`castellated`): `_current_body_params()`
+  restituisce `None` e `step_generator` esplode su `body.pin_color_hex`.
+  **Preesistente**, riprodotto identico su `kgen-base`. Non diagnosticato a
+  fondo: va guardato, potrebbe essere un difetto vero e non solo del test.
+* `test_preview_component_picking.py` × 3: serve `pyvista` vero, non
+  installato nel contenitore.
+* `test_system_dependencies.py` × 1: cerca `pcbnew` accanto a `kicad-cli`.
+
+Nota d'ambiente: lo stub `pyvistaqt` usato nel contenitore ha dovuto ricevere
+`clear`, `close` e `render` come metodi veri — `super().clear()` cerca sulla
+classe e non passa da `__getattr__`. Senza, cinque test di
+`test_docs_migration.py` fallivano per il solo stub, mascherando la verifica
+della proposta del nome. Lo stub **non fa parte del repository**.
+
+## Aperto, chiesto dall'utente
+
+* **Qwen3-VL** per individuare con precisione tipo, dimensioni e orientamento
+  del componente: chiesto il 20/09, da provare.
+* Smettere di leggere prosa libera per riconoscere i chip: usare i campi
+  tipizzati (`lead_count`, `terminal_count*`) e aggiungere `terminal_style`
+  come enum nello schema.
+* `no_search_key`: una ricerca il cui insieme di candidati per attributi
+  dichiarati supera il budget non deve partire (deciso dall'utente).
+* La regex `NxMmm` legge un **passo** come ingombro (112 file); il suggerimento
+  ignora `basis`.
+* Titolo della modale: deve nominare il passo. La riga del costo durante
+  FreeCAD deve leggere «Analisi AI conclusa» (segnato, non ancora fatto).
+
+## Segnalato, mai autorizzato
 
-Branch `YOLO-SOLUTION`, sopra `3ae0f9e`. Quattro agenti di sola analisi lanciati
-sul run reale `generated/TEST/`; tre hanno consegnato, uno e' stato fermato
-dall'utente. Qui il primo esito integrato, piu' le decisioni prese.
-
-## 1. I fori castellated si fondevano: misurato, non ipotizzato
-
-Il checkpoint (6) dichiarava fatto il doppio aggancio. **Era sbagliato**, e la
-misura sul solido generato lo dimostra: aprendo `TEST.step` e contando le facce
-cilindriche con asse Z, i cilindri a rivoluzione completa di raggio 0,5 sono
-**zero**. I 44 fori vengono tagliati ma si fondono col semi-foro adiacente, e ne
-resta una parete che copre **164,7 gradi invece di 360**. Quello che si vede non
-e' "mezzo foro piu' foro chiuso": e' un **unico buco di serratura** profondo
-1,770 mm. La mesh dell'anteprima concorda col solido: l'anteprima era fedele, il
-difetto stava nella geometria richiesta.
-
-Il criterio e' elementare e non ammette casi limite: due cilindri passanti
-sottratti allo stesso solido restano distinti **solo se la distanza fra gli assi
-supera la somma dei raggi**. Coi valori in uso: `1,270 - 0,646 = 0,624` contro
-`0,850 + 0,500 = 1,350`. Violato di 0,726 mm, cioe' sempre.
-
-Perche' la validazione non se n'era accorta: controllava il foro rispetto al
-**bordo** e alla sua piazzola, mai rispetto al semi-foro. E `hole_inset` non era
-esposto da nessuna parte -- nessun campo, nessun chiamante -- quindi restava
-inchiodato a `0,76 x raggio` e la validazione non poteva nemmeno leggerlo,
-perche' la formula viveva dentro `step_generator`.
-
-**Correzione.** `half_hole_inset` e `thru_hole_centre_offset` sono ora proprieta'
-del parametro, quindi generatore 2D, generatore 3D e validazione leggono gli
-stessi numeri. La distanza del foro passante dal bordo **si ricava** invece di
-essere un numero fisso: `inset + raggio semi-foro + raggio foro + MIN_HOLE_WALL_MM`.
-Con i valori predefiniti viene **2,196 mm** invece di 1,27. Non e' una quota
-tarata su una scheda: cambiando il semi-foro cambia da sola. Uno zero significa
-"calcolalo tu"; un numero esplicito viene rispettato ma rifiutato se i due fori
-si toccherebbero, con un messaggio che dice di quanto distano gli assi, quanto
-vale la somma dei raggi e quale sarebbe il minimo. `hole_inset` ha finalmente un
-campo nel wizard, anch'esso con lo zero come "automatico".
-
-**Difetto latente segnalato e NON corretto**: il foro passante non ha
-metallizzazione ne' piazzola nel 3D (`step_generator` popola `contacts` solo per
-il semi-foro). Anche ora che sara' un foro vero, uscira' come foro nudo nel FR4.
-
-## 2. Zero agganci automatici: non e' una regressione, e' la risposta del modello
-
-Diff verificato fra i due run: il codice che decide `auto_matched` e'
-**bit-identico**. E' cambiata la risposta AI, perche' il bump di
-`PROMPT_VERSION` a 6 ha invalidato la cache e provocato una chiamata nuova:
-`package` da `"0603"` a `"0603 chip"`, e soprattutto `terminal_layout` da
-"end caps" a **"two end terminations left and right"**. La regex di
-`_tentative_endcap_family` pretende il lemma `end cap` e ha detto no a **28
-componenti su 28**; da li' scoperta di famiglia, `omitted`, `search_truncated`,
-e nessun aggancio possibile. Controfattuale eseguito: cambiando solo quella
-stringa, a codice fermo, si riproduce il prima e il dopo.
-
-**E' la terza volta che una proprieta' strutturale viene decisa leggendo prosa
-libera.** Allargare la regex sarebbe la stessa taratura per la terza volta.
-
-Regola da applicare (non ancora implementata): il conteggio e la completezza si
-leggono dai campi **gia' tipizzati** nello schema (`lead_count`,
-`lead_count_complete`, `lead_count_confidence`, `terminal_count`,
-`terminal_count_basis`), che su tutti i 28 chip erano corretti e coerenti; e la
-**morfologia del terminale** va chiesta come campo enumerato
-(`terminal_style` fra end_cap / gull_wing / j_lead / projecting_lead /
-leadless_pad / castellated / unknown), perche' due terminali visibili non
-distinguono un endcap da due reofori sporgenti ne' da un MELF.
-
-**Avvertenza importante**: tornare a 23 agganci NON e' l'obiettivo. Su questa
-scheda, per 11 chip su 25 la fotografia non separa 0603 da 0805 (scarti 17-25%,
-entrambi dentro il 30% di tolleranza) e **devono** restare in revisione.
-
-Incoerenza interna trovata a parte: lo shim che legge il conteggio dichiarato
-copre solo `[RC]_...`, mentre i LED sono nel catalogo endcap per la scoperta.
-Un LED a due terminali non puo' quindi mai agganciarsi da solo.
-
-## 3. La ricerca senza chiave, quantificata
-
-34 componenti su 45 troncati: **33** per `omitted` in `_family_paths`, **1** per
-il tetto dei 64 (U4, induttore, 382 nomi compatibili). Per J2/J3 si scandiscono
-**3332** percorsi e se ne scartano **3236** perche' non hanno **alcun** token
-dimensionale nel nome -- non perche' la quota sia lontana, come dice la nota.
-I 96 ammessi sono **tutti DSUB**, ammessi perche' il regex legge il **passo**
-come ingombro: `P2.77x2.54mm` su un connettore che misura davvero 30,80x18,34.
-
-Misura sulla libreria (7251 file): 884 contengono un token `NxMmm`, **112** lo
-hanno etichettato (`P` 100, `EP` 3, `Cylinder-` 7, 2 vendor) e vengono letti
-male; 772 sono ingombri veri.
-
-Criterio proposto: nella nomenclatura KiCad lo stem e' una sequenza di campi
-separati da `_`, e l'etichetta alfabetica iniziale dichiara **quale grandezza**
-il numero rappresenta. Un token `NxMmm` e' un ingombro **solo se costituisce
-l'intero campo**. Verificato: la regola non perde nessuno dei 772 hint corretti
-e rifiuta esattamente i 112 dubbi.
-
-Difetto gemello segnalato: l'hint viene confrontato **ignorando `basis`**, mentre
-il campo nudo KiCad dichiara il corpo e il bbox STEP il totale.
-
-**Decisione dell'utente**: quando i candidati determinati dagli attributi
-dichiarati superano il budget, **la ricerca non parte** e lo dichiara
-(`no_search_key`), invece di misurarne 64 a caso e riportare un troncamento.
-Conseguenza da aspettarsi: J2/J3 passano da 96 candidati a zero. Sono candidati
-falsi, quindi e' corretto, ma va detto prima o sembra un peggioramento.
-
-## 4. Deciso con l'utente, da fare: revisione dei riquadri YOLO
-
-**Un passo intermedio, prima della chiamata AI.** Oggi le 111 proposte -- 63
-sopra soglia e 48 nella coda di revisione, da 2265 rilevamenti grezzi su 30
-viste, 1238 soppressi dalla NMS -- finiscono tutte dentro la riconciliazione,
-che su questo run e' costata 1,00 USD. Potarle prima costa meno e da' al modello
-un problema piu' pulito.
-
-Deciso: la vista sta **prima della chiamata AI**, il che richiede di spezzare
-l'estrazione in due fasi (oggi e' una corsa unica dentro un worker). Deve
-permettere di **eliminare** un riquadro, **distinguere le deboli dalle sicure**,
-**aggiungere** un corpo mancato e **correggere la categoria**.
-
-Materiale gia' pronto: `photo_review_dialog.py` disegna i riquadri sovrapposti
-alla foto e permette sposta/modifica/elimina, ma arriva **dopo** la
-riconciliazione. Il disegno c'e', manca il momento.
-
-Nota da tenere presente: la categoria YOLO serve solo a restringere la famiglia
-di modelli; il package lo decide comunque la chiamata AI dopo.
-
-## 5. Verifica
-
-* Suite senza GUI: **2434 passati**, con i soliti 2 falliti e 1 errore di
-  raccolta identici alla baseline. Moduli GUI verdi.
-* Coppia positivo/negativo nuova: nessuna coppia di cilindri si tocca (invariante
-  geometrica su tutti, non solo sulla coppia); un offset esplicito di 1,27 viene
-  rifiutato e uno di 2,196 accettato; con un semi-foro piu' stretto il minimo
-  scende da solo, che e' la differenza fra una regola e un numero tarato.
-* **Non verificato**: nessun run end-to-end dopo questa correzione.
-
----
-
-# 2026-09-20 (8) — il verso si misura sul solido: cosa funziona e cosa no
-
-Branch `YOLO-SOLUTION`, sopra `61728a6`. Il criterio del baricentro introdotto
-nel checkpoint precedente **è stato provato sui file veri e sostituito**: non
-reggeva. Quello che c'è adesso è stato misurato su quattro modelli reali della
-libreria dell'utente, con i numeri qui sotto.
-
-## 1. Il baricentro del solido intero non funziona, ed è dimostrato
-
-Misurato sul `ESP32-S3-WROOM-1U.STEP` vero (8,8 MB, letto con OpenCascade):
-
-```
-bbox 18,004 x 19,204 x 3,204   volume 408,867 mm3
-baricentro   8,9818  9,4559     centro bbox  9,0000  9,6000
-scarto normalizzato  dx = -0,0020   dy = -0,0150     soglia 0,02
-```
-
-Sotto soglia. La massa simmetrica del PCB e dello schermo **diluisce**
-l'asimmetria del connettore fino a renderla indistinguibile dal rumore. Un
-criterio che su un modulo schermato non risponde non serve a niente, e
-abbassare la soglia sarebbe stato tararla su un pezzo.
-
-## 2. Cosa c'è adesso: l'asimmetria è ciò che non sopravvive a mezzo giro
-
-Definizione, non taratura. Si ruota il solido di 180° attorno al centro del suo
-ingombro, lo si sottrae da sé stesso, e il residuo è **esattamente** il
-materiale che distingue i due capi. Su un corpo simmetrico quel residuo tende a
-zero da solo.
-
-Misurato sui file veri:
-
-| modello | residuo | scarto del residuo | esito |
-|---|---|---|---|
-| ESP32-S3-WROOM-1U | **15,86%** | dx +0,057, **dy −0,181** | lato Y− |
-| USB_C_Receptacle_GCT_USB4085 | **45,99%** | dx −0,009, **dy +0,514** | lato Y+ |
-| SOT-223 | 4,85% | dx ±0,000, dy ±0,000 | **nessun lato** |
-| R_0603_1608Metric | **0,00%** | 0, 0 | **nessun lato** |
-
-Tre controlli, tutti con una ragione fisica e nessuno tarato su un esemplare:
-
-* **volume del residuo ≥ 1%** — sotto, è residuo numerico del boolean. Il
-  modulo sta al 15,9%, un ordine di grandezza sopra.
-* **scarto del residuo ≥ 0,05 semilati** — un residuo che c'è ma sta al centro
-  significa che l'asimmetria è **bilanciata** fra i due capi.
-* **la direzione dominante stacca l'altra di almeno 2×** — a parità la
-  direzione punta alla diagonale, cioè a un angolo, e un angolo non si
-  confronta con un lato dichiarato.
-
-## 3. Il limite, dichiarato: il SOT-223 non si risolve
-
-Il residuo del SOT-223 **c'è** (4,85% del volume) ma è centralmente simmetrico:
-verificato tagliandolo a metà, **0,9156 mm³ da una parte e 0,9156 dall'altra**,
-identici su entrambi gli assi. I tre reofori da un lato e il tab dall'altro si
-compensano in volume, e quel modello in pianta i suoi due capi non li
-distingue.
-
-Per quei corpi il verso resta `orientation_unverified`, che è la risposta
-onesta. **Non è stato abbassato nulla per farlo rientrare**: senza il controllo
-sullo scarto, un milionesimo di rumore numerico sarebbe diventato un lato.
-
-Chi riprende: se si vuole risolvere anche quella classe serve un criterio
-diverso, che guardi la *forma* dei due lobi e non il loro volume (tre pezzi
-stretti contro uno largo). È un'altra indagine, non un'altra soglia.
-
-## 4. Verifica
-
-* Suite senza GUI: **2419 passati**, con i soliti 2 falliti e 1 errore di
-  raccolta identici alla baseline. Moduli GUI verdi.
-* I casi dei test sono **i numeri misurati sui file veri**, non inventati:
-  modulo e USB-C come positivi, SOT-223 e 0603 come negativi. È una coppia
-  positivo/negativo su geometria reale, che è la verifica più forte
-  disponibile senza un run end-to-end.
-* **Non verificato**: il run completo. Serve che l'app rigeneri il modulo.
-
-## 5. Da fare, chiesto dall'utente e rimandato
-
-* **Il titolo della modale dice sempre "Analisi AI in corso"**, anche quando a
-  lavorare e' il rilevatore locale, che AI non e'. La riga sotto dice gia' lo
-  strumento giusto, quindi non e' un'informazione sbagliata -- e' il titolo che
-  resta indietro. Va fatto diventare il nome del passo in corso (per esempio
-  "Quote e pinout", "Rilevamento dei corpi", "Inventario globale",
-  "Modello 3D"), tenendo il nome dello strumento dov'e' adesso.
-* Valutare nello stesso giro se numerare i passi ("Passo 1 di 3"): l'utente non
-  si e' ancora pronunciato, ed e' stato offerto.
-* **Il costo compare durante la generazione FreeCAD e li' si legge male.**
-  Segnalato dall'utente guardando la fase 3D: sopra c'e' scritto "FreeCAD
-  (modellazione locale)" e sotto "Costo ultima analisi: 1,0084 USD", che
-  sembra il costo di FreeCAD. FreeCAD non costa nulla.
-
-  **Non e' un difetto vecchio: e' una conseguenza di aver aggiunto il nome
-  dello strumento.** Quella riga era stata messa apposta perche' durante la
-  generazione automatica la modale copre la label sotto il pulsante e il costo
-  passava senza essere visto (vedi `clear_cost`, che per questo NON sta in
-  `start()`); finche' la scheda era indistinta, "un'unica operazione in corso"
-  reggeva. Ora non regge piu'.
-
-  Proposta discussa con l'utente, da confermare: tenerlo visibile ma al passato
-  esplicito -- "Analisi AI conclusa: 1,0084 USD - 2 chiamate" -- invece di
-  farlo sparire, perche' a fine lavoro e' proprio il momento in cui lo si
-  cerca. L'alternativa e' nasconderlo quando lo strumento al lavoro non e' il
-  modello. **Decisione dell'utente non ancora presa.**
-
-Contesto di come ci si e' arrivati: l'utente ha chiesto se il primo passo non
-fosse YOLO, vedendo la modale mostrare una chiamata AI. **Non e' un difetto**:
-YOLO e' il rilevatore, non il primo passo, e non puo' esserlo perche'
-`detect_yolo_components(photo, length, width, ...)` pretende le dimensioni
-reali della scheda per convertire i pixel in millimetri, e quelle arrivano
-dalla prima chiamata. Con `photo_detector='yolo'` all'inizio gira solo
-`validate_yolo_setup()`, che controlla i pesi ONNX senza inferenza, apposta per
-non far pagare una chiamata e fermarsi poi su un avviso.
-
-## 6. Nota operativa: FreeCAD
-
-La misura gira nel `freecadcmd` **headless** che l'app già lancia: non serve
-avere la GUI aperta, il flusso automatico resta automatico. Il server MCP
-`freecad` sulla macchina dell'utente invece non è utilizzabile così com'è --
-non trova `freecadcmd` (sta in `C:\Program Files\FreeCAD 1.1\bin\`) e la porta
-RPC risponde solo con la GUI aperta e l'addon avviato. Le misure di questo
-checkpoint sono state fatte leggendo gli STEP con OpenCascade in un ambiente
-separato, il che è ripetibile da chiunque senza toccare la macchina.
-
-Costo: l'operazione booleana richiede una ventina di secondi su un modulo da
-8 MB, meno di un secondo sui pezzi piccoli. Si esegue **solo** quando la
-fotografia ha dichiarato un lato, perché senza non ci sarebbe nulla da
-confrontare.
-
----
-
-# 2026-09-20 (7) — l'orientamento si deduce da un riferimento, non da una regex
-
-Branch `YOLO-SOLUTION`, sopra `0b99df0`. Richiamo dell'utente: «non devi fare
-una pezza per far funzionare questa scheda, deve inferire la rotazione da dei
-riferimenti, per esempio un punto di marcatura oppure in questo caso
-l'antenna». Ha ragione, e il checkpoint precedente lo ammetteva già: la regola
-dei 180° era ancorata al nome del file e valeva per un modulo solo.
-
-## 1. Cosa c'era e perché era sbagliato
-
-`_native_model_rotation_override` decideva il verso con due `re.search` inglesi
-su tre campi concatenati (`terminal_layout + package_evidence + package`), e
-scattava solo per un modello il cui nome file coincideva con la marcatura.
-Tre difetti, tutti dimostrati: è una regola sui nomi, che il CLAUDE.md vieta;
-le due condizioni possono essere soddisfatte da campi diversi, quindi il
-`package` di un modulo con U.FL rendeva la seconda sempre vera e bastava un
-«bottom right» riferito ad altro per far ruotare; ed è cieca a qualunque lingua
-diversa dall'inglese.
-
-**È stata rimossa**, insieme ai suoi due test, come deciso dall'utente.
-
-## 2. Cosa c'è adesso
-
-Il verso di un modello nativo è la composizione di due informazioni
-indipendenti, e servono **entrambi i lati** per stabilirlo:
-
-**a. Lato osservato — si chiede, non si deduce.** Nuovo campo
-`asymmetry_landmark` nello schema del global inventory: `feature` (vocabolario
-chiuso: coaxial_jack, connector_opening, cable_exit, polarity_marker,
-pin1_marker, chamfer, notch, tab, other), `side` (left/right/top/bottom della
-scatola di *quel* componente, nel frame della prima foto, X a destra Y in
-basso) e `confidence`. `null` è una risposta legittima e frequente: un corpo
-simmetrico non ha un capo distinguibile dall'altro. Una dichiarazione
-incompleta o a confidenza bassa vale come assenza — qui un errore vale mezzo
-giro, non poco. `PROMPT_VERSION` sale a `global-yolo-inventory-6`.
-
-**b. Lato nativo — si misura, col baricentro.** In `freecad_parts`,
-`_native_landmark_direction` confronta il centro di massa del solido col centro
-del suo ingombro e restituisce la direzione dominante dello scarto,
-normalizzata sul semilato (quindi adimensionale: vale per un modulo da 20 mm e
-per un chip da 1). Sotto `NATIVE_LANDMARK_MIN_OFFSET = 0.02` il pezzo è
-simmetrico quanto basta perché la direzione sia rumore di tassellazione, e la
-risposta è `None`. Criterio fisico, nessun nome, nessuna soglia tarata su un
-esemplare.
-
-**c. Derivazione.** `_verse_correction` cerca **solo 0 e 180**: l'asse l'ha già
-deciso la misura dell'ingombro e una correzione di 90 lo smentirebbe. Se né 0
-né 180 portano il riferimento nativo dalla parte osservata, i due dati si
-contraddicono e non si corregge nulla. Il ribaltamento Y fra frame fotografico
-(Y in basso) e frame CAD (Y in alto) è applicato esplicitamente.
-
-Il report porta ora `orientation_landmark` quando il riferimento c'è, e
-`orientation_unverified` quando manca, invece di una nota che descriveva una
-rotazione decisa da una regex.
-
-## 3. Verifica
-
-* Suite senza GUI: **2413 passati**, con i soliti 2 falliti e 1 errore di
-  raccolta identici alla baseline.
-* Moduli GUI uno per uno: verdi.
-* Coppie positivo/negativo nuove: baricentro spostato contro corpo simmetrico;
-  verso che segue il lato osservato contro dati che si contraddicono; campo
-  dichiarato per intero contro mezza dichiarazione, confidenza bassa,
-  vocabolario violato e risposta in cache che il campo non ce l'ha.
-* **NON verificato sul modello vero.** Il baricentro del WROOM-1U non è ancora
-  stato misurato: il server MCP di FreeCAD sulla macchina dell'utente non trova
-  `freecadcmd` (FreeCAD 1.1 è in `C:\Program Files\FreeCAD 1.1`, quindi il
-  binario è in `...\bin\freecadcmd.exe`) e la porta RPC rifiuta la connessione
-  perché la GUI non è aperta. **È la prova che manca**, ed è alla portata: con
-  uno dei due canali attivi bastano dieci righe di script.
-
-## 4. Resta aperto
-
-* **Misurare il baricentro del WROOM-1U** e confermare che lo scarto superi la
-  soglia e punti dal lato del connettore U.FL. Se il modulo risultasse troppo
-  simmetrico, il verso resterà non verificato e servirà il secondo criterio
-  (il materiale sopra il piano dello schermo), che è più fragile e va deciso.
-* La prossima estrazione **paga una chiamata nuova**: il prompt è cambiato,
-  quindi la cache non risponde più. È voluto, ma va saputo.
-* Il campo `mating`, già presente in altri due schemi, resta fuori da quello
-  del global inventory.
-* Quante feature abbia un contatto castellated è ancora un default e non una
-  lettura della fotografia (vedi checkpoint precedente).
-
----
-
-# 2026-09-20 (6) — i contatti castellated hanno due appigli, non uno
-
-Branch `YOLO-SOLUTION`, sopra `ee4c564`. Segnalazione dell'utente con
-fotografia: «i connettori che fa il wizard sono troppo aperti, qui è un foro
-chiuso e un mezzo foro aperto».
-
-## 1. Cosa mancava
-
-Il wizard generava **una sola feature per contatto**: un cilindro col centro a
-`0.76 · raggio` dentro il bordo, che tagliato dal bordo lascia una U spalancata.
-Nel footprint 2D non c'era nulla di tutto ciò: solo piazzole SMD rettangolari,
-nessun foro.
-
-Sulla scheda dell'utente ogni contatto ne ha **due**: il mezzo foro sul bordo,
-che serve alla rifusione SMD, e un **foro passante chiuso** poco più dentro, in
-cui si salda uno strip a passo 2,54. È il doppio aggancio tipico delle schede
-di sviluppo, e senza il secondo il bordo resta tutto aperto e i pin non si
-possono saldare.
-
-## 2. Decisioni dell'utente
-
-* **Due feature per posizione**: foro chiuso più mezzo foro al bordo.
-* **Il footprint 2D cambia di conseguenza**: i pad THT entrano davvero nel
-  `.kicad_mod`, non solo nel 3D.
-* **Le quote sono campi del wizard con default standard**, non rapporti
-  derivati dal passo né misure chieste al modello.
-
-## 3. Cosa è cambiato
-
-`CastellatedModuleParams` ha tre campi nuovi: `thru_hole_drill` (default 1,0
-mm), `thru_pad_diameter` (1,7 mm) e `thru_hole_offset` (1,27 mm, distanza del
-centro dal bordo). La proprietà `has_thru_holes` è vera quando foro e piazzola
-sono entrambi dichiarati; **mettere il diametro a zero è il modo di dire «questo
-modulo ha solo i semi-fori»** — un foro di diametro nullo non esiste, quindi lo
-zero non può essere scambiato per una quota.
-
-Nel footprint ogni contatto riceve un pad `thru_hole` circolare su `*.Cu` e
-`*.Mask`, **con lo stesso numero del pad SMD**: sono due appigli di un contatto,
-non due contatti, e KiCad li tratta come una sola rete. Nel solido 3D si
-sottrae un secondo cilindro, quello del foro chiuso, accanto a quello del
-semi-foro.
-
-Tre validazioni nuove, tutte geometriche: la piazzola dev'essere più larga del
-foro (senza corona non c'è rame su cui saldare); il centro dev'essere distante
-dal bordo almeno quanto il raggio della piazzola (altrimenti non è un foro
-chiuso, è un secondo semi-foro); i fori dei due lati opposti devono starci
-dentro la dimensione più corta del corpo.
-
-Il `hole_inset` del semi-foro **non è stato toccato**: resta il parametro già
-documentato. Se la U va resa più profonda si abbassa quello.
-
-## 4. Verifica
-
-* Suite senza GUI: **2386 passati**, con i soliti 2 falliti e 1 errore di
-  raccolta identici alla baseline.
-* Moduli GUI uno per uno: verdi, tranne `test_board_pipeline` (2) che fallisce
-  **identico anche sulla baseline** (`body.pin_color_hex` con body None: è
-  l'ambiente, non il codice).
-* Contratti aggiornati capendo perché: `test_footprint_has_smd_pads_without_drill`
-  e l'asserzione `"thru_hole" not in content` esprimevano il vecchio contratto
-  «solo SMD» e ora verificano il footprint ibrido.
-* Coppie positivo/negativo nuove: contatto con entrambi i fori contro modulo
-  che dichiara zero fori passanti; cilindri che attraversano il bordo contro
-  cilindri interamente dentro il corpo.
-* **Non verificato**: nessun run end-to-end, serve FreeCAD.
-
-## 5. Resta aperto su questo fronte
-
-* **Quante feature abbia un contatto è una cosa che si vede nella fotografia**,
-  e secondo la regola del CLAUDE.md andrebbe chiesta al modello invece che
-  decisa da un default. Oggi il default è «tutte e due», che è il caso comune
-  delle schede di sviluppo ma non di tutti i moduli: un convertitore RS485 con
-  i soli semi-fori ora riceve dei fori che non ha, finché non si mette il
-  diametro a zero a mano. È un ripiego dichiarato, non una regola generale.
-* L'attributo del footprint resta `smd` anche col pad passante: il montaggio
-  primario del modulo è la rifusione sui semi-fori. Se si volesse coerenza con
-  KLC per i footprint ibridi andrebbe deciso a parte.
-* Le quote di default (1,0 / 1,7 / 1,27) sono i valori standard di uno strip a
-  passo 2,54. Su una scheda fuori standard vanno corrette a mano nei tre campi.
-
----
-
-# 2026-09-20 (5) — USB-C, regolatore e orientamento ESP32
-
-Branch `YOLO-SOLUTION`, sopra `cb7c185`. Tre difetti segnalati dall'utente sul
-run reale, indagati da tre agenti di sola analisi su ambiti separati
-(connettori / semiconduttori / orientamento) e integrati qui.
-
-## 0. Il verdetto che ribalta un'ipotesi: l'ESP32 era storto di 90°, non di 180°
-
-Il checkpoint precedente lasciava aperto se la regola dei 180° «non scatti o
-scatti al contrario». **Nessuna delle due: scatta, ed è corretta nel suo
-ambito.** L'errore è a monte ed è di **90 gradi**, quindi nessun valore fra 0 e
-180 poteva rimetterlo dritto — ed è il motivo per cui il connettore d'antenna
-restava dalla parte sbagliata sia prima sia dopo la correzione del trattino.
-
-Due difetti distinti, entrambi corretti:
-
-**a. L'asse si decideva con una metrica non invariante di scala.**
-`freecad_parts.py` sceglieva fra 0° e 90° minimizzando `|x/L−1| + |y/W−1|`.
-Con l'ingombro fotografico gonfiato (24.40 × 20.43 contro 19.2 × 18.0 reali) i
-due punteggi diventano 0.32276 e 0.33231: **la scelta si ribalta con un margine
-dell'1%**. Lo STEP del WROOM-1U ha l'asse lungo su Y, l'ingombro fotografico ce
-l'ha su X per contratto (`length_mm = max(sx, sy)`), quindi la risposta giusta è
-**90, sempre, a qualunque scala**. Ora l'asse si decide confrontando *quale*
-lato è il più lungo — la stessa lettura ordinata che `size_distance` usa già per
-dichiarare quel modello compatibile. Prima le due fasi si contraddicevano in
-silenzio: il matcher calcolava `relative_xy_error` assumendo la mappatura a 90°,
-il costruttore ne sceglieva un'altra.
-
-**b. La correzione automatica era un angolo assoluto e cancellava l'asse.**
-`_native_model_rotation_override` scriveva in `model_rotation_deg`, che
-`freecad_parts` legge **al posto** dell'angolo dedotto. Ora va in
-`model_rotation_native_delta_deg`, che si **somma**: asse 90 + verso 180 = 270.
-Resta assoluta solo la scelta esplicita dell'utente, che nomina insieme il
-modello e l'angolo. L'angolo assoluto di una corsa precedente continua a essere
-ripulito, come prima.
-
-## 1. Il regolatore: un dubbio elettrico cancellava una dichiarazione meccanica
-
-`photo_global_inventory.py` azzerava il campo `package` quando
-`class_confidence` era `low`. Per U4 il modello aveva scritto
-`large-tab power package (TO-252/DPAK or SOT-223-like), 3 leads + wide tab`,
-con `presence_confidence=high`, `bbox_basis=body_and_leads` e
-`confidence=medium`: l'evidenza **meccanica** era buona, era bassa solo la
-fiducia su *che cosa faccia* il pezzo. Buttando il campo la ricerca perdeva la
-sua chiave e scandiva l'intera famiglia.
-
-Misurato sulla libreria vera: da **79 rigetti + ricerca troncata +
-`topology_incomplete`** a **9 percorsi, 1 rigetto, ricerca completa**. Asimmetria
-che rendeva evidente il difetto: `package_evidence` (la prosa) veniva
-conservata, il campo strutturato no.
-
-Ora a cancellare il package restano la fiducia complessiva bassa e un contorno
-irrisolto. **Q1, J2 e J3 non ne beneficiano**: hanno `confidence=low`, e lì
-azzerare è corretto — il modello stesso dichiara l'identità irrisolta.
-
-## 2. USB-C: la logica premiava le liste ambigue e puniva quelle nitide
-
-`_provisional_geometry_choice` agganciava un'anteprima **solo** se i primi due
-candidati erano indistinguibili. J1 aveva 4 candidati a 4% e 16%: nessuna
-anteprima. Dimostrato dagli agenti eseguendo la funzione: aggiungendo un
-doppione identico del migliore l'anteprima compariva; togliendo il doppione
-spariva.
-
-Pareggio e dominanza sono le due facce della stessa cosa — il pareggio dice «la
-fotografia non distingue queste varianti», la dominanza dice «le ha distinte, e
-una sola regge» — e in entrambi i casi l'incertezza residua riguarda identità e
-variante, non la geometria mostrata. Ora anche la dominanza aggancia
-un'anteprima, **a due condizioni**: la ricerca dev'essere completa (superare
-alternative che nessuno ha misurato non è superarle) e i candidati almeno due
-(**un candidato solo non è dominanza, è assenza di confronto** — questa
-restrizione evita di promuovere cinque casi che i test esistenti tenevano in
-revisione a ragione).
-
-## 3. Verifica
-
-* Suite senza GUI: **2382 passati**, con i soliti 2 falliti e 1 errore di
-  raccolta **identici alla baseline** dello stesso ambiente.
-* Contratti aggiornati capendo perché, non allentati: i due test
-  sull'orientamento ora verificano il canale additivo; quello sulle confidenze
-  indipendenti ha finalmente il caso `presence=high, class=low, conf=medium`,
-  che è esattamente il regolatore e non era mai stato parametrizzato.
-* Coppie positivo/negativo nuove: asse invariante di scala contro asse già
-  giusto; dominanza contro «né pareggio né dominanza»; dominanza su ricerca
-  completa contro dominanza su ricerca troncata.
-* **Non verificato**: nessun run end-to-end. Serve FreeCAD, che qui non c'è.
-
-## 4. Resta aperto, in ordine di peso
-
-* **Il verso dei 180° resta un'euristica basata sul nome**, quindi vietata dal
-  CLAUDE.md, e va rimossa non tarata. Due difetti già dimostrati: le due
-  condizioni (`lower right` e `rf|u.fl|ipex`) sono cercate nella **stessa
-  stringa concatenata** di tre campi, quindi il `package` di un modulo con U.FL
-  rende la seconda sempre vera e basta un «bottom right» riferito ad altro per
-  far ruotare; ed è cieca a qualunque lingua diversa dall'inglese. La cura
-  strutturale è chiedere al modello un `asymmetry_landmark` (feature + angolo o
-  bordo nel frame della foto) e misurare il lato nativo dallo STEP, invece di
-  dedurre da prosa. **Dopo la correzione dell'asse va riguardato se i 180
-  servano ancora o siano ora di troppo**: 90 e 270 mettono il connettore ai due
-  capi opposti dello stesso bordo corto, e senza il file STEP non si può dire
-  quale sia giusto.
-* **`terminal_count_basis` è scritto incondizionatamente** a
-  `visible_including_tabs` per ogni riga del global inventory. Rende
-  `_provisional_terminal_count` codice morto per tutti i componenti, e con esso
-  il conteggio osservato: è la ragione per cui `_observed_count` è vuoto per i
-  connettori e `auto_matched` è di fatto irraggiungibile fuori da R/C chip
-  (misurato: 23 su 23 agganciati automaticamente sono R/C).
-* **`_declared_count` legge solo la nomenclatura IC.** Dei 3332 modelli di
-  famiglia connettore, 2982 dichiarano le posizioni nel nome (`_6P_`,
-  `_1x04_`) e ne riconosce **zero**. Da ancorare alla famiglia della
-  tassonomia: fuori dai connettori `_<N>P_` non è un conteggio
-  (controesempio reale: `Potentiometer_Bourns_3296P_Horizontal`).
-* **Scoperta senza chiave.** Con `package` vuoto e classe a bassa fiducia si
-  scandisce comunque l'intera famiglia (J2/J3: 3332 percorsi, 3310 scartati per
-  solo nome) e il fallimento viene riportato come `search_truncated`, che
-  descrive un budget esaurito e non l'assenza di qualunque chiave.
-* **Il regex del suggerimento dimensionale legge un passo come un ingombro**:
-  `P2.29x1.90mm` di un DSUB entra nella coda CAD come se fosse 2.29 × 1.90 mm.
-  Sono tutti falsi positivi e consumano budget.
-* **Il campo `mating` esiste in due schemi ma non in quello del global
-  inventory**: è l'attributo che distingue un connettore da un passivo stampato
-  di pari ingombro, ed è l'esempio citato dal CLAUDE.md. J2/J3 non erano
-  distinguibili nemmeno in linea di principio.
-* **Una sola misura per componente.** Il modello scrive in prosa due rettangoli
-  (corpo e inviluppo reofori) per U3, U4 e Q1; lo schema ne trasporta uno. Il
-  16% di U3 è questo, non un errore d'identità.
-* **Il log registra il prompt ma non la risposta AI.** Le risposte grezze stanno
-  solo in `generated/photo-cache/yolo-audit/global-inventory-*.json`: senza
-  quel file un'analisi come questa sarebbe stata ricostruttiva.
-* Vicolo cieco dell'indice misure, `omitted` incoerente, scarto del 28% sul
-  modulo: invariati.
-
----
-
-# 2026-09-20 (4) — il nome lo decide l'utente, e la modale dice chi lavora
-
-Branch `YOLO-SOLUTION`, sopra `9b56d4f`. Tre richieste dell'utente dopo la
-prima prova reale della correzione precedente, piu' il conto di quella prova.
-
-## 0. La correzione dei passivi funziona: 0 → 23 agganciati
-
-Stesso modulo, stessa foto, prima e dopo `9b56d4f`:
-
-| | prima | dopo |
-|---|---|---|
-| componenti | 53 | 45 |
-| `auto_matched` | **0** | **23** |
-| `provisional_matched` | 6 | 5 |
-| `review_required` | 35 | 6 |
-| `unresolved` | 12 | 11 |
-
-Il magenta passa da quasi tutto a circa un terzo. Restano fuori gli 11
-irrisolti e i 6 in revisione: non e' stato ancora indagato quali siano ne'
-perche'. E' il prossimo fronte sul matching.
-
-## 1. Perche' comparivano tre cartelle in area di lavoro
-
-L'utente scriveva "Test" e si ritrovava `Test/`, `PinHeader_2x04_P2.54mm_THT/`
-e `Module_ESP32-S3-DEV-KIT-NXRX_63.3x25.4mm_Castellated/`. Nessuna e' un
-residuo accidentale: erano tre regole che si sommavano.
-
-* Il campo Nome parte con un valore predefinito (`PinHeader_2x04_P2.54mm_THT`),
-  e il log dell'analisi si scrive nella cartella del nome in uso.
-* `Test/` nasce quando l'utente scrive il suo nome e allega i documenti.
-* A fine estrazione il nome proposto **sovrascriveva** quello scritto e
-  spostava `docs/` sotto il nome nuovo. Ogni analisi che proponeva un nome
-  diverso lasciava indietro la cartella precedente.
-
-**Decisione dell'utente: comanda il nome che scrive lui.** Ora l'estrazione
-propone e basta: la proposta compare accanto al campo con un pulsante "Usa
-questo nome", e solo premendolo il progetto cambia nome portandosi dietro i
-documenti e il log. Tutto cio' che si genera -- `.pretty`, `.3dshapes`, file --
-porta il nome in uso. Se il campo e' vuoto la proposta viene adottata senza
-chiedere: non c'e' nulla da rispettare e `NUOVO_COMPONENTE` non serve a nessuno.
-
-Il valore predefinito del campo **non e' stato toccato**: cambiarlo e' una
-decisione a se', e comunque sposterebbe il problema invece di chiuderlo.
-
-## 2. La modale dice chi sta lavorando
-
-Prima mostrava al posto dello stato le righe che il programma scrive per se'
-(`AI_CALL_PROMPT_END id=1 model=... sha256=...`): occupavano il posto di cio'
-che stava accadendo senza dirlo a nessuno.
-
-* **Strumento in chiaro, con un segno grafico diverso per ciascuno**: nuvola
-  per il modello remoto (esce dalla macchina e si paga), riquadro con gli
-  angoli staccati per YOLO (e' cio' che disegna), cubo isometrico per FreeCAD,
-  piazzole per KiCad. Il colore da solo non basterebbe a distinguerli.
-* **I marcatori di servizio non arrivano piu' sulla scheda**, restano nel log.
-  Il pulsante "Apri log AI" resta dov'era.
-* **Barra di avanzamento solo dove esiste un conteggio vero.** L'unico passo
-  della generazione con un totale onesto e' l'abbinamento dei modelli, che
-  scorre i componenti e per ognuno puo' pagare una misura CAD: li' si vede
-  `27% · 12/45 componenti`. Per la chiamata al modello no, e resta l'anello
-  animato: una percentuale stimata sul tempo si ferma al 90% e dice meno del
-  nulla, perche' sembra un'informazione. **Scelta esplicita dell'utente.**
-
-Meccanica: i worker hanno un segnale `phase(strumento, dettaglio, fatti,
-totale)` accanto a `progress(str)`; `attach_models` accetta un callback
-`progress(done, total)` e lo chiama a ogni componente. Un totale non positivo
-significa "nessun conteggio" e la barra sparisce.
-
-## 3. Verifica
-
-* Suite senza GUI: **2370 passati**, 2 falliti e 1 errore di raccolta,
-  **identici alla baseline** misurata nello stesso ambiente.
-* Moduli GUI, eseguiti uno per uno: tutti verdi
-  (`test_automatic_generation` 25, `test_photo_inventory_gui` 61,
-  `test_board_edit_lifecycle` 26, `test_photo_detector_ui` 46,
-  `test_live_log_lifecycle` 14, `test_docs_migration` 5,
-  `test_analysis_overlay` 8, e gli altri). Fanno eccezione
-  `test_board_pipeline` (2) e `test_preview_component_picking` (4), che
-  falliscono **identici anche sulla baseline**: sono artefatti dell'ambiente,
-  non del codice.
-* **Ambiente**: la suite gira in un contenitore Linux. VTK non parte senza
-  OpenGL, quindi i moduli GUI usano uno stub di `pyvistaqt` che non fa parte
-  del repository, e con lo stub alcuni moduli vanno eseguiti separatamente.
-  **Va rieseguita su Windows** con
-  `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider` prima di
-  considerare chiuso il lavoro.
-* Contratti di test aggiornati, non allentati: `test_docs_migration`,
-  `test_live_log_lifecycle` e `test_automatic_generation` verificavano la
-  rinomina automatica; ora verificano che la proposta non tocchi nulla e che
-  i documenti seguano **quando viene accettata**.
-
-## 4. Resta aperto
-
-* **Gli 11 irrisolti e i 6 in revisione del run reale non sono stati
-  indagati.** E' il prossimo passo sul magenta.
-* L'avanzamento reale copre solo l'abbinamento modelli. Il rilevamento YOLO
-  lavora per riquadri e l'inventario per viste: entrambi hanno un totale
-  ottenibile, nessuno dei due e' stato cablato.
-* `_on_phase` passa "componenti" come unita' del conteggio perche' oggi quello
-  e' l'unico passo contato. Se se ne aggiunge un altro, l'unita' deve viaggiare
-  col conteggio invece di stare nel gestore.
-* Il valore predefinito del campo Nome continua a creare una cartella se si
-  analizza prima di dare un nome.
-* Vicolo cieco dell'indice misure, `omitted` incoerente, connettore RF, scarto
-  del 28%, USB-C: invariati, vedi i checkpoint precedenti.
-
----
+* Il foro passante del contatto castellated non ha metallizzazione né piazzola
+  nel 3D.
+* Il verso del SOT-223 non è risolvibile con il criterio del mezzo giro:
+  limite dichiarato, non aggirato.
 
 # 2026-09-20 (3) — perché ogni passivo restava magenta
 

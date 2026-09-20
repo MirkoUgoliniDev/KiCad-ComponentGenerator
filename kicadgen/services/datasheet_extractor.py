@@ -756,6 +756,7 @@ def extract_pin_header_params(
     photo_detector: str = "ai",
     yolo_model_path: Optional[Path] = None,
     phase: Optional[Callable[..., None]] = None,
+    review_proposals: Optional[Callable[..., object]] = None,
 ) -> ExtractedParams:
     """@brief Extract dimensions and pinout, optionally using local YOLO photo proposals.
 
@@ -959,7 +960,7 @@ def extract_pin_header_params(
     populated_board = data.get("layout") == "castellated" or component_family == "aggregate_tht"
     if (populated_board and data.get("body_length_mm")
             and data.get("body_width_mm")):
-        from .photo_inventory import extract_inventory
+        from .photo_inventory import ReviewCancelled, extract_inventory
         from .photo_grounding import DEFAULT_VISION_MODEL
         if phase:
             # Con YOLO le proposte sono locali ma la verifica resta una
@@ -977,9 +978,14 @@ def extract_pin_header_params(
                 cache_dir=photo_cache_dir if photo_cache_dir is not None else Path(__file__).resolve().parents[2]/"generated"/"photo-cache",
                 classifier_model=verification_model or model or DEFAULT_MODEL,
                 grounding_prompt=grounding_prompt, verification_prompt=verification_prompt,
-                **({'detector': photo_detector, 'yolo_model_path': yolo_model_path}
+                **({'detector': photo_detector, 'yolo_model_path': yolo_model_path,
+                    'review_proposals': review_proposals}
                    if photo_detector == 'yolo' else {}),
             )
+        except ReviewCancelled as exc:
+            # Un annullo non e' un guasto dell'inventario: proseguire qui
+            # vorrebbe dire pagare la riconciliazione sulle proposte rifiutate.
+            raise ExtractionError(str(exc)) from exc
         except (OpenRouterError, ValueError, OSError) as exc:
             data["notes"] = (str(data.get("notes") or "") + f"\nInventario fotografico fallito: {exc}").strip()
         if photo_report and photo_report.components:

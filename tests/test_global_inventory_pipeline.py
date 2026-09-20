@@ -244,3 +244,47 @@ def test_main_response_injection_stays_dropped_when_photo_inventory_fails(pipeli
     assert params.components_3d[0]['_uncertain']
     assert not {'model_path', 'model_selection'} & params.components_3d[0].keys()
     assert 'Inventario fotografico fallito' in params.notes
+
+
+def test_review_prunes_before_the_paid_call_and_a_cancel_never_pays(pipeline):
+    """@brief La revisione sta prima della riconciliazione, e vale.
+
+    Coppia positivo/negativo sulla stessa catena reale: tolta una proposta,
+    quella non compare fra i candidati inviati e la chiamata parte comunque;
+    annullata la revisione, la chiamata non parte affatto. Se la potatura
+    avvenisse dopo l'invio -- o se l'annullo fosse degradato a nota come gli
+    altri guasti dell'inventario -- uno dei due casi fallirebbe.
+    """
+    seen = []
+    # La risposta deve restare coerente con cio' che viene inviato: se la
+    # revisione toglie il candidato 2, la riconciliazione non puo' parlarne.
+    pipeline['inventory'] = dict(components=[_body(sources=[1])], uncertainties=[],
+                                 candidate_decisions=[dict(candidate_id=1, status='merge',
+                                                           component_id='whole-assembly',
+                                                           reason='Retained substrate assembly')])
+
+    def keep_the_first(photo_png, proposals, length_mm, width_mm):
+        seen.append((photo_png, [dict(p) for p in proposals], length_mm, width_mm))
+        return proposals[:1]
+
+    params = pipeline['execute'](review_proposals=keep_the_first)
+    assert len(seen) == 1
+    photo_png, offered, length_mm, width_mm = seen[0]
+    # Chi rivede riceve la foto gia' codificata e la calibrazione con cui i
+    # riquadri sono stati misurati: un corpo aggiunto a mano deve cadere sulla
+    # stessa scala di quelli del rilevatore.
+    assert photo_png[:8] == b'\x89PNG\r\n\x1a\n'
+    assert [row['_id'] for row in offered] == [1, 2]
+    assert (length_mm, width_mm) == (40, 20)
+    inputs = json.loads(pipeline['requests'][1]['content_blocks'][4]['text'])
+    assert [row['id'] for row in inputs['candidates']] == [1]
+    assert inputs['board_size_mm'] == [40, 20]
+    assert len(params.components_3d) == 1
+
+    before = len(pipeline['requests'])
+    with pytest.raises(extractor.ExtractionError, match='annullata'):
+        pipeline['execute'](review_proposals=lambda *args: None)
+    # L'estrazione della scheda e' gia' avvenuta; quella che non deve partire
+    # e' la riconciliazione globale, cioe' la seconda richiesta.
+    assert len(pipeline['requests']) == before + 1
+    assert pipeline['requests'][-1]['tool']['function']['name'] != 'report_global_inventory'

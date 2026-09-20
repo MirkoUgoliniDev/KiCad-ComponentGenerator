@@ -13,6 +13,7 @@ from copy import deepcopy
 import json
 import math
 import re
+import threading
 import shutil
 import sqlite3
 import sys
@@ -364,6 +365,13 @@ class ExtractWorker(QThread):
     progress = pyqtSignal(str)
     #: Vedi GenerateWorker.phase.
     phase = pyqtSignal(str, str, int, int)
+    #: (foto PNG, proposte del rilevatore, lunghezza mm, larghezza mm). Emesso
+    #: fra il rilevamento locale e la riconciliazione a pagamento: il worker si
+    #: ferma qui finche' l'interfaccia non risponde con deliver_review, perche'
+    #: una proposta tolta adesso non viene ne' inviata ne' pagata. Le quote
+    #: sono quelle con cui la foto e' stata calibrata, non quelle dei campi:
+    #: durante l'estrazione i campi non sono ancora stati compilati.
+    review_requested = pyqtSignal(object, object, float, float)
 
     def __init__(
         self, doc_paths: list[Path], system_prompt: str | None = None,
@@ -408,6 +416,37 @@ class ExtractWorker(QThread):
         self.component_family = component_family
         self.photo_detector = photo_detector
         self.yolo_model_path = yolo_model_path
+        self._review_answered = threading.Event()
+        self._review_result = None
+
+    def _review_proposals(self, photo_png, proposals, length_mm, width_mm):
+        """@brief Chiede all'interfaccia quali corpi tenere, e aspetta.
+
+        @param photo_png Fotografia calibrata, gia' codificata in PNG.
+        @param proposals Proposte del rilevatore locale.
+        @param length_mm Estensione della scheda lungo X, in mm.
+        @param width_mm Estensione lungo Y, in mm.
+        @return Le proposte da tenere, oppure None se la revisione e' annullata.
+        @note Gira nel thread del worker: il segnale attraversa i thread e la
+            risposta torna da deliver_review. L'attesa e' voluta -- la chiamata
+            a pagamento non deve partire prima che qualcuno abbia guardato.
+        """
+        self._review_result = None
+        self._review_answered.clear()
+        self.review_requested.emit(photo_png or b"", [dict(p) for p in proposals],
+                                   float(length_mm), float(width_mm))
+        self._review_answered.wait()
+        return self._review_result
+
+    def deliver_review(self, kept) -> None:
+        """@brief Consegna al worker l'esito della revisione e lo sblocca.
+
+        @param kept Proposte da tenere, o None per annullare l'estrazione.
+        @note Va chiamata SEMPRE, anche quando qualcosa va storto: un worker
+            lasciato in attesa non finisce piu'.
+        """
+        self._review_result = kept
+        self._review_answered.set()
 
     def run(self) -> None:
         """@brief Forward the captured settings and emit extracted data or an error."""
@@ -427,6 +466,7 @@ class ExtractWorker(QThread):
                 include_nc_pins=self.include_nc_pins,
                 progress=self.progress.emit,
                 phase=lambda tool, detail='': self.phase.emit(tool, detail, 0, 0),
+                review_proposals=self._review_proposals,
             )
             self.done.emit(params)
         except ExtractionError as exc:
@@ -1543,6 +1583,7 @@ class MainWindow(QMainWindow):
         self._extract_worker.error.connect(self._on_extract_error)
         self._extract_worker.progress.connect(self._on_ai_progress)
         self._extract_worker.phase.connect(self._on_phase)
+        self._extract_worker.review_requested.connect(self._on_review_requested)
         self._extract_worker.finished.connect(self._on_extract_finished)
         self._analysis_tabs_enabled = self.tabs.isEnabled()
         self.tabs.setEnabled(False)
@@ -1608,6 +1649,43 @@ class MainWindow(QMainWindow):
         # durante la generazione e' comunque coperta dalla modale: il dato va
         # anche dove l'utente sta gia' guardando.
         self.analysis_overlay.set_cost(text)
+
+    def _on_review_requested(self, photo_png, proposals, length_mm, width_mm) -> None:
+        """@brief Mostra i corpi rilevati e restituisce al worker quelli da tenere.
+
+        @param photo_png Fotografia calibrata, codificata in PNG.
+        @param proposals Proposte del rilevatore locale.
+        @param length_mm Estensione della scheda lungo X, in mm.
+        @param width_mm Estensione lungo Y, in mm.
+        @note Il worker e' fermo in attesa: qualunque cosa succeda qui, la
+            risposta va consegnata, altrimenti l'estrazione non finisce piu'.
+            Annullare consegna None, e l'estrazione si ferma senza pagare la
+            riconciliazione -- che e' il motivo per cui questa vista sta prima
+            di quella chiamata e non dopo. Se invece la vista non si apre
+            affatto si prosegue con tutte le proposte: un difetto della
+            revisione non deve buttare via l'analisi gia' pagata fin qui.
+        """
+        worker = self._extract_worker
+        kept = list(proposals)
+        try:
+            from .yolo_review_dialog import YoloReviewDialog
+            from ..services.photo_yolo import detector_classes
+            self.analysis_overlay.hide()
+            dialog = YoloReviewDialog(photo_png, proposals, length_mm, width_mm,
+                                      detector_classes(), self)
+            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+            kept = dialog.kept() if accepted else None
+            self._append_log(
+                f"Revisione dei corpi rilevati: {len(kept)} tenute su {len(proposals)}."
+                if kept is not None else "Revisione dei corpi rilevati annullata.")
+        except Exception as exc:  # noqa: BLE001 - un errore qui non deve appendere il worker
+            self._append_log(f"ATTENZIONE revisione dei corpi non disponibile: {exc}")
+        finally:
+            if worker is not None:
+                worker.deliver_review(kept)
+            if kept is not None:
+                self.analysis_overlay.show()
+                self.analysis_overlay.raise_()
 
     def _on_phase(self, tool: str, detail: str, done: int, total: int) -> None:
         """@brief Porta in modale lo strumento al lavoro e il suo avanzamento.

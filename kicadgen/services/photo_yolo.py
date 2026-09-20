@@ -30,6 +30,17 @@ _NMS_IOU = 0.5
 _EXCLUDED = {"pads", "pins"}
 
 
+def detector_classes() -> tuple:
+    """@brief Categorie che il rilevatore locale sa assegnare.
+
+    @return Le classi note, escluse quelle che non sono corpi montati.
+    @note Le piazzole nude e le file di pin non sono componenti: restano fuori
+        anche dall'elenco che si propone a chi rivede, perche' sceglierle
+        sarebbe un errore che nessuno a valle saprebbe correggere.
+    """
+    return tuple(name for name in _CLASSES if name not in _EXCLUDED)
+
+
 def resolve_yolo_model(model_path=None) -> Path:
     """@brief Resolve and check a readable, nonempty local ONNX weights file.
 

@@ -61,6 +61,17 @@ def copy_mechanical_metadata(target, source, *, overwrite=True, geometry=True):
             target[key] = value[:500] if key == "package_evidence" else value
 
 
+class ReviewCancelled(Exception):
+    """@brief Chi rivede le proposte del rilevatore ha annullato.
+
+    @note Volutamente non e' un ValueError: chi chiama degrada gli errori
+        dell'inventario fotografico in una nota e prosegue, mentre un annullo
+        e' una decisione di chi guarda e deve fermare l'estrazione. Trattarlo
+        come un guasto significherebbe proseguire lo stesso, cioe' pagare la
+        riconciliazione sulle proposte che sono appena state rifiutate.
+    """
+
+
 @dataclass
 class InventoryResult:
     """@brief Return the detected component inventory and analysis warnings."""
@@ -479,11 +490,18 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                       top_photo_index=None, extra_instructions=None,
                       grounding=True, cache_dir=None, classifier_model=None, mechanical=True,
                       grounding_prompt=None, verification_prompt=None, top_photo_source='AI',
-                      detector='ai', yolo_model_path=None):
+                      detector='ai', yolo_model_path=None, review_proposals=None):
     """@brief Calibrate the photo and extract reviewed component envelopes.
 
     @param detector ai preserves the existing localization; yolo uses local ONNX proposals.
     @param yolo_model_path Optional compatible ONNX weight file for the local detector.
+    @param review_proposals Optional callable(photo_png, proposals, length_mm,
+        width_mm) -> proposals kept. Runs between the local detector and the
+        paid reconciliation, so a body removed here is never sent nor paid for.
+        Returning None aborts. The board extents travel with the call because
+        they are the calibration the boxes were measured against: a reviewer
+        that read them elsewhere would place a hand-drawn body on a different
+        scale than the detector's.
     @note Local detections are hypotheses, not package identities; AI review may cost credit.
     """
     log = progress or (lambda message: None)
@@ -542,6 +560,16 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         log('YOLO locale: localizzazione senza invio della foto; verifica package AI successiva.')
         proposals = detect_yolo_components(photo, length, width, model_path=yolo_model_path,
                                           log=log, audit_dir=audit, include_review_candidates=True)
+        if review_proposals is not None:
+            # Potare qui, non dopo: la riconciliazione che segue si paga, e
+            # riceverla piu' pulita costa meno e le da' meno rumore da
+            # smaltire. Annullare significa non procedere: nessuno deve pagare
+            # una chiamata su proposte che non sono state approvate.
+            kept = review_proposals(report.photo_png, proposals, length, width)
+            if kept is None:
+                raise ReviewCancelled("Revisione dei corpi rilevati annullata.")
+            log(f'Revisione dei corpi: {len(kept)} proposte tenute su {len(proposals)}.')
+            proposals = list(kept)
         report.components = review_global_inventory(
             photo, proposals, length, width, classifier_model or model, call, log,
             cache_dir, verification_prompt=verification_prompt,
