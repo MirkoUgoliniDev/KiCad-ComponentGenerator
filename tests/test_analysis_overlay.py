@@ -55,12 +55,21 @@ def test_service_markers_stay_in_the_log_and_off_the_card(overlay):
     overlay.set_status("Generazione del footprint KiCad…")
     for marker in ("AI_CALL_PROMPT_END id=1 model=anthropic/claude-opus-5",
                    "KICADGEN_IMPORT_OK: ESP32-S3-WROOM-1U.STEP; parts=231",
-                   "AI_CALL_START id=2"):
+                   "AI_CALL_START id=2",
+                   # Chi inoltra l'uscita di freecadcmd le antepone un prefisso,
+                   # e con l'ancora iniziale passavano tutte.
+                   "FreeCAD: KICADGEN_FCSTD_OK:C:\\Lavori\\TEST.FCStd",
+                   "FreeCAD: KICADGEN_WARN:componente U3: package sconosciuto"):
         overlay.set_status(marker)
         assert overlay.status.text() == "Generazione del footprint KiCad…"
-    # Una frase che comincia per maiuscolo non e' un marcatore: resta.
-    overlay.set_status("Viste dall’alto disponibili: nessuna.")
-    assert overlay.status.text() == "Viste dall’alto disponibili: nessuna."
+    # Una frase che comincia per maiuscolo non e' un marcatore: resta. E nemmeno
+    # una parola sola tutta maiuscola, che nei log di questo progetto introduce
+    # un avviso scritto per chi guarda.
+    for human in ("Viste dall’alto disponibili: nessuna.",
+                  "ATTENZIONE: geometria package ignorata",
+                  "Candidate measurement budget: first 64 of 382 compatible names."):
+        overlay.set_status(human)
+        assert overlay.status.text() == human
 
 
 def test_overlay_animation_resize_literal_status_and_cleanup():

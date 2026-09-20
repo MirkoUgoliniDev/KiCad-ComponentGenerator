@@ -1199,7 +1199,13 @@ def _components_3d(raw: Optional[Sequence[dict]]) -> Optional[list[dict]]:
                     'terminal_count_basis', 'lead_count', 'lead_count_complete', 'lead_count_confidence',
                     '_reported_rotation_deg', '_height_estimated', '_global_inventory_status',
                     '_global_inventory_errors', '_global_inventory_uncertainties',
-                    '_global_inventory_prompt_version', '_global_inventory_prompt_hash'):
+                    '_global_inventory_prompt_version', '_global_inventory_prompt_hash',
+                    # Il riferimento asimmetrico serve al costruttore 3D per
+                    # stabilire il verso del modello nativo. Senza questa riga
+                    # veniva scartato qui, e ogni componente arrivava al
+                    # matching dichiarando "nessun riferimento osservato" anche
+                    # quando il modello ne aveva visto uno ad alta confidenza.
+                    'landmark_feature', 'landmark_side', 'landmark_confidence'):
             if key in entry:
                 component[key] = entry[key]
         if isinstance(entry.get("pin_count"), int) and not isinstance(entry.get("pin_count"), bool) and entry["pin_count"] > 0:

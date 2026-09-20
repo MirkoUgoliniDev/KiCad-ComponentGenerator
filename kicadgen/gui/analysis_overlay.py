@@ -23,7 +23,12 @@ TOOLS = {
 #: esiti di importazione, impronte sha256. Vanno nel log, dove servono a
 #: ricostruire una corsa, non sulla scheda, dove occupano il posto di cio' che
 #: sta accadendo senza dirlo a nessuno.
-_MACHINE_MARKER = re.compile(r"^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\s*[: =]")
+#:
+#: Il marcatore si cerca ovunque nella riga e non solo in testa: chi inoltra
+#: l'uscita di freecadcmd le antepone "FreeCAD: ", e con l'ancora iniziale
+#: passavano tutte. Serve almeno un underscore fra maiuscole, cosi' una parola
+#: sola come "ATTENZIONE:" resta una frase per chi guarda.
+_MACHINE_MARKER = re.compile(r"(?<![\w])[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\s*[: =]")
 
 
 class AnalysisSpinner(QWidget):
@@ -281,7 +286,7 @@ class AnalysisOverlay(QWidget):
         """
         # Full messages stay in the log; keep the card stable for long replies.
         source = " ".join(str(message).split())
-        if _MACHINE_MARKER.match(source):
+        if _MACHINE_MARKER.search(source):
             return
         text = self.i18n.text(source) if self.i18n is not None else source
         self.status.setText(text if len(text) <= 220 else text[:217] + "…")
