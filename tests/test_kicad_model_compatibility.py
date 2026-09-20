@@ -233,8 +233,9 @@ def test_sot223_family_and_measured_tab_remain_reviewable(tmp_path, monkeypatch,
     monkeypatch.setattr(km, "model_sizes", lambda *a, **k: {str(path): {
         "body": [6.5, 3.5, 1.7], "total": [7, 6.5, 1.7]}})
     monkeypatch.setattr(km, "footprint_sizes", lambda *a, **k: pytest.fail("Explicit body/lead basis needs no pads"))
-    # SOT is a mechanical package shared by multiple electrical families.
-    assert km._candidate_family(path) is None
+    # Semiconductor is a mechanical family shared by ICs and discrete devices;
+    # it does not claim a regulator/transistor electrical identity.
+    assert km._candidate_family(path) == "semiconductor"
     c = dict(kind=kind, package="SOT-223", length_mm=xy[0], width_mm=xy[1], bbox_basis=basis)
     assert km.attach_models([c], library=tmp_path) == 0
     report = c["model_match"]
@@ -242,7 +243,7 @@ def test_sot223_family_and_measured_tab_remain_reviewable(tmp_path, monkeypatch,
     candidate = report["candidates"][0]
     assert candidate["dimensions_mm"] == [*xy, 1.7]
     assert candidate["relative_xy_error"] == 0
-    assert candidate["family"] is None
+    assert candidate["family"] == "semiconductor"
     if basis == "body":
         c.update(bbox_basis="total")
         assert km.model_candidates(c, library=tmp_path)["candidates"] == []

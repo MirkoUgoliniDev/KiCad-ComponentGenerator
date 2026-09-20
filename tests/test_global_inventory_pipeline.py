@@ -132,7 +132,7 @@ def test_extractor_yolo_calls_global_once_without_legacy_or_terminals(pipeline, 
     assert row['_box'] == [.1, .1, .8, .8]
     assert row['length_mm'] == pytest.approx(28)
     assert row['width_mm'] == pytest.approx(14)
-    assert row['terminal_count'] == row['pin_count'] == 4
+    assert row['terminal_count'] == 4 and 'pin_count' not in row
     assert row['terminal_layout'] == 'three leads left, one tab right'
     assert row['_reported_rotation_deg'] == 25 and row['rotation_deg'] == 0
     assert row['_height_estimated'] and not row['_orientation_verified']

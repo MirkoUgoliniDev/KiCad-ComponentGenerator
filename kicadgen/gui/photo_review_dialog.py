@@ -470,7 +470,9 @@ class PhotoReviewDialog(QDialog):
         selection = component.get('model_selection') or {}
         if (component.get('model_match') or {}).get('status') == 'import_failed':
             warnings.append(self._tr("Importazione STEP fallita: il 3D mostra un segnaposto, non il modello scelto."))
-        if selection.get('status') != 'confirmed':
+        if (component.get('model_match') or {}).get('status') == 'auto_matched' and selection.get('status') != 'confirmed':
+            warnings.append(self._tr("Modello KiCad applicato automaticamente per compatibilità meccanica: identità e polarità non certificate; doppio clic per modificarlo."))
+        elif selection.get('status') != 'confirmed':
             warnings.append(self._tr("Modello KiCad non confermato: doppio clic per scegliere."))
         else:
             try:

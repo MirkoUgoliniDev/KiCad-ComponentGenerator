@@ -104,6 +104,8 @@ class ComponentBox:
     # Explicit local user choice; absence never establishes a verified identity.
     model_selection: Optional[dict] = None
     model_match: Optional[dict] = None
+    # Photographic evidence for mechanical matching, never placement overrides.
+    match_evidence: Optional[dict] = None
 
     def is_usable(self) -> bool:
         """@brief Provide the is usable operation for this workflow."""

@@ -41,6 +41,17 @@ def _safe_name(name: str, index: int) -> str:
 COMPONENT_EDGE_MARGIN_MM = 0.2
 
 
+def _match_evidence(component):
+    """Copy only matching observations; evidence cannot replace CAD placement."""
+    evidence = getattr(component, "match_evidence", None)
+    if not isinstance(evidence, dict):
+        return {}
+    fields = ("presence_confidence", "class_confidence", "confidence",
+              "_yolo_review_only", "_yolo_origin", "terminal_count",
+              "terminal_layout", "terminal_count_basis", "_global_inventory_status", "class")
+    return {key: evidence[key] for key in fields if key in evidence}
+
+
 def _model_placement(component):
     """Keep only explicit finite native-model overrides; None means infer axes."""
     result = {}
@@ -363,6 +374,7 @@ def generate_castellated_3d_model(
             "model_selection": component.model_selection,
             "model_match": component.model_match,
             **_model_placement(component),
+            **_match_evidence(component),
         })
 
     extra_boxes = []
@@ -502,6 +514,7 @@ def _generate_populated_tht(params, body, pins, output_dir, **options):
             "pin_count_source": c.pin_count_source,
             "terminal_geometry": c.terminal_geometry,
             **_model_placement(c),
+            **_match_evidence(c),
         })
     attach_models(components, log=report)
     from ..services.model_choices import save_candidate_report

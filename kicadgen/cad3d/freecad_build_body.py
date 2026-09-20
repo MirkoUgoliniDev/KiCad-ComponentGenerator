@@ -249,13 +249,37 @@ def _text_solid(text, size, thickness, font_file, bold_font=None):
     return shape
 
 
-def _place_text(text, size, x, y, z, angle, font_file, thickness=0.012):
+def _place_text(text, size, x, y, z, angle, font_file, thickness=0.012,
+                bounds=None, local_angle=0):
+    """Place complete glyphs, optionally fitting their local rotated XY bounds.
+
+    Bounds are the available component-local length/width in mm. XY scaling
+    preserves aspect ratio and extrusion thickness; placement rotation follows
+    fitting so arbitrary component rotations keep text within its envelope.
+    """
     bold = None
     if font_file.lower().endswith("arial.ttf"):
         bold = font_file[:-len("arial.ttf")] + "arialbd.ttf"
     shape = _text_solid(text, size, thickness, font_file, bold)
     if shape is None:
         return None
+    if local_angle:
+        shape.rotate(FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(0, 0, 1), local_angle)
+    if bounds is not None:
+        bb = shape.BoundBox
+        factor = min(1.0, bounds[0] / bb.XLength, bounds[1] / bb.YLength)
+        if factor < 1.0:
+            # Rebuild at the fitted font size to retain analytic glyph curves
+            # and the original extrusion depth (affine OCC conversion can
+            # inflate B-spline bounds after rotation).
+            shape = _text_solid(text, size * factor, thickness, font_file, bold)
+            if shape is None:
+                return None
+            if local_angle:
+                shape.rotate(FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(0, 0, 1), local_angle)
+        bb = shape.BoundBox
+        shape.translate(FreeCAD.Vector(-(bb.XMin + bb.XMax) / 2,
+                                       -(bb.YMin + bb.YMax) / 2, 0))
     if angle:
         shape.rotate(FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(0, 0, 1), angle)
     shape.translate(FreeCAD.Vector(x, y, z))
@@ -549,7 +573,10 @@ def main():
                                          0.9 * float(component["length_mm"]) / max(1, len(marking))))
                     ztop = z1 + float(component["height_mm"]) + 0.004
                     text_shape = _place_text(marking, size, component["x"], component["y"], ztop,
-                                             rotation + float(component.get("marking_angle", 0)), font_file)
+                                             rotation, font_file,
+                                             bounds=(float(component["length_mm"]),
+                                                     float(component["width_mm"])),
+                                             local_angle=float(component.get("marking_angle", 0)))
                     if text_shape is not None:
                         mark_obj = add(f"{base}_mark", text_shape, component.get("marking_color_hex", "#c8c8c0"))
                         metadata[mark_obj.Name] = {"source_row": component.get("source_row", index)}

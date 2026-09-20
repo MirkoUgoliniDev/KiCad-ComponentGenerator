@@ -41,6 +41,9 @@ from pathlib import Path
 from functools import lru_cache
 from typing import Iterable, Optional
 
+from .model_measurement import normalize_model_measurement
+from . import model_size_cache
+
 #: Variabile d'ambiente per indicare una libreria diversa da quella trovata.
 LIBRARY_ENV = "KICAD_3DMODEL_DIR"
 
@@ -71,6 +74,9 @@ INDEX_FILENAME = ".kicadgen-model-sizes-v4.json"
 # Resource budget, not a geometric threshold: never launch a library-wide CAD batch.
 MAX_CANDIDATE_MEASUREMENTS = 64
 
+_NAMED_PACKAGE_PATTERN = r"(?<![\w-])(?:SC|SOT|SOD|SOIC|SSOP|TSSOP|MSOP|TSOP|SOP|QFN|DFN|LQFP|TQFP|QFP|BGA|DIP|TO)[ _-]?\d+(?:[-_]\d+)?(?![\w])"
+_CHIP_SIZE_CODES = r"(?:008004|01005|0201|0402|0603|0805|1008|1206|1210|1806|1812|2010|2512)"
+
 
 def _package_token(package: str) -> str:
     """Extract declared package syntax; never derive a package from dimensions.
@@ -81,7 +87,7 @@ def _package_token(package: str) -> str:
     Ambiguous prose is deliberately left unresolved.
     """
     text = str(package or "").strip()
-    codes = r"(?:008004|01005|0201|0402|0603|0805|1008|1206|1210|1806|1812|2010|2512)"
+    codes = _CHIP_SIZE_CODES
     # A standalone size-class label is package syntax, not a vendor identifier.
     shorthand = re.fullmatch(r"(" + codes + r")-class", text, re.I)
     if shorthand:
@@ -92,8 +98,7 @@ def _package_token(package: str) -> str:
     if re.fullmatch(codes, text):
         return text
     tokens = []
-    named = r"(?<![\w-])(?:SOT|SOD|SOIC|SSOP|TSSOP|MSOP|TSOP|SOP|QFN|DFN|LQFP|TQFP|QFP|BGA|DIP|TO)[ _-]?\d+(?:[-_]\d+)?(?![\w])"
-    for match in re.finditer(named, text, re.I):
+    for match in re.finditer(_NAMED_PACKAGE_PATTERN, text, re.I):
         tokens.append(re.sub(r"\s+", "-", match.group()))
     # Explicit metric notation is matched directly against KiCad's Metric token.
     metric = r"(?<!\w)(?:(\d{4})\s*[-( ]?\s*metric\b|metric\s*[-: ]?\s*(\d{4})(?!\w))"
@@ -142,9 +147,51 @@ def _candidate_roots() -> Iterable[Path]:
             # Versioni piu' recenti per prime: 10.0 prima di 9.0.
             for version in sorted(root.iterdir(), reverse=True):
                 yield version / "share" / "kicad" / "3dmodels"
+    # KiCad mantiene le librerie 3rd-party installate dall'utente fuori da
+    # Program Files. Ogni repository puo' avere una propria cartella
+    # ``*.3dshapes`` (es. ``espressif.3dshapes``), quindi si espongono i
+    # repository come radici indipendenti e si evita di assumere un vendor.
+    user_kicad = Path.home() / "Documents" / "KiCad"
+    if user_kicad.is_dir():
+        for version in sorted(user_kicad.iterdir(), reverse=True):
+            models = version / "3rdparty" / "3dmodels"
+            if not models.is_dir():
+                continue
+            try:
+                children = sorted(models.iterdir(), reverse=True)
+            except OSError:
+                continue
+            for repository in children:
+                if repository.is_dir() and any(repository.glob("*.3dshapes")):
+                    yield repository
     for base in ("/usr/share/kicad/3dmodels", "/usr/local/share/kicad/3dmodels",
                  "/Applications/KiCad/KiCad.app/Contents/SharedSupport/3dmodels"):
         yield Path(base)
+
+
+def _search_roots(library: Optional[Path]) -> list[Path]:
+    """Return the explicit root plus installed user repositories once each."""
+    if library is not None:
+        return [Path(library)]
+    result = []
+    # Keep the established primary-library contract (and test doubles that
+    # replace find_library), then add every discovered user repository.
+    roots = []
+    primary = find_library()
+    if primary is None:
+        return []
+    roots.append(Path(primary))
+    roots.extend(_candidate_roots())
+    for index, root in enumerate(roots):
+        root = Path(root)
+        if root in result:
+            continue
+        try:
+            if root.is_dir() and (index == 0 or any(root.glob("*.3dshapes"))):
+                result.append(root)
+        except OSError:
+            continue
+    return result
 
 
 def find_library() -> Optional[Path]:
@@ -169,6 +216,44 @@ def _normalize(text: str) -> str:
     corrispondenza per un separatore diverso.
     """
     return re.sub(r"[^a-z0-9]+", "", str(text or "").lower())
+
+
+def _marking_model_tokens(component: dict) -> tuple[str, ...]:
+    """Extract conservative multi-part model identifiers from literal marking."""
+    marking = str(component.get("marking") or "")
+    # A model identifier such as ESP32-S3-WROOM-1U is useful only as a literal
+    # filename hint. Require at least two separators so FCC/IC identifiers and
+    # arbitrary single words do not become packages by accident.
+    matches = re.findall(r"(?<![A-Z0-9])([A-Z][A-Z0-9]*(?:-[A-Z0-9]+){2,})(?![A-Z0-9])",
+                         marking.upper())
+    unique = {}
+    for value in matches:
+        unique[_normalize(value)] = value
+    return tuple(unique.values())
+
+
+def _marked_model_matches(path: Path, component: dict) -> bool:
+    """Whether a model filename contains an exact literal identifier from marking."""
+    stem = _normalize(path.stem)
+    return any(stem == _normalize(token) or _normalize(token) in stem
+               for token in _marking_model_tokens(component))
+
+
+def _marked_model_paths(component: dict, root: Path) -> list[Path]:
+    """Find STEP files named by a literal marking inside one KiCad root."""
+    tokens = _marking_model_tokens(component)
+    if not tokens:
+        return []
+    paths = []
+    try:
+        for path in root.rglob("*"):
+            if path.suffix.lower() in (".step", ".stp") and _marked_model_matches(path, component):
+                paths.append(path)
+    except OSError:
+        return []
+    return sorted(paths, key=lambda path: (
+        min(0 if _normalize(path.stem) == _normalize(token) else 1 for token in tokens),
+        len(path.stem), str(path)))
 
 
 def candidates(package: str, library: Optional[Path] = None) -> list[Path]:
@@ -220,8 +305,13 @@ def _index_path(library: Path) -> Path:
     if os.access(library, os.W_OK):
         return beside
     cache = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".cache") / "kicadgen"
-    cache.mkdir(parents=True, exist_ok=True)
     return cache / INDEX_FILENAME
+
+
+def _index_paths(library):
+    """Try actual cache writes, not just os.access, before falling back to user data."""
+    user_cache = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".cache") / "kicadgen" / INDEX_FILENAME
+    return list(dict.fromkeys((_index_path(library), library / INDEX_FILENAME, user_cache)))
 
 
 def load_index(library: Optional[Path] = None) -> dict:
@@ -229,11 +319,7 @@ def load_index(library: Optional[Path] = None) -> dict:
     library = library or find_library()
     if not library:
         return {}
-    try:
-        value = json.loads(_index_path(library).read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else {}
-    except (OSError, ValueError):
-        return {}
+    return model_size_cache.load(_index_paths(Path(library)))
 
 
 def save_index(index: dict, library: Optional[Path] = None) -> None:
@@ -241,11 +327,7 @@ def save_index(index: dict, library: Optional[Path] = None) -> None:
     library = library or find_library()
     if not library:
         return
-    try:
-        _index_path(library).write_text(json.dumps(index, indent=1), encoding="utf-8")
-    except OSError:
-        # L'indice e' solo una cache: senza, si torna a misurare.
-        pass
+    model_size_cache.save(index, _index_paths(Path(library)))
 
 
 def index_key(path: Path) -> str:
@@ -554,6 +636,12 @@ def model_sizes(paths, library: Optional[Path] = None) -> dict:
     paths = [Path(p) for p in paths]
     library = library or find_library()
     index = load_index(library)
+    # Migrate the interpretation of legacy raw section measurements on every
+    # read, without trusting a cache produced by the old body-section contract.
+    for path in paths:
+        key = index_key(path)
+        if key in index:
+            index[key] = normalize_model_measurement(path, index[key])
     missing = [p for p in paths if size_distance(index.get(index_key(p)), 1, 1) is None]
     if missing:
         measured = measure_models(missing)
@@ -561,7 +649,7 @@ def model_sizes(paths, library: Optional[Path] = None) -> dict:
             value = measured.get(str(path))
             # A missing FreeCAD installation or failed batch must be retryable.
             if size_distance(value, 1, 1) is not None:
-                index[index_key(path)] = value
+                index[index_key(path)] = normalize_model_measurement(path, value)
         save_index(index, library)
     return {str(p): index.get(index_key(p)) for p in paths}
 
@@ -645,6 +733,12 @@ def _candidate_family(path):
             return family
     if folder == "crystal":
         return "crystal"
+    if folder.startswith("button_switch"):
+        return "switch"
+    if folder == "rf_module":
+        return "module"
+    if folder == "package_to_sot_smd":
+        return "semiconductor"
     if folder in ("package_so", "package_son", "package_dfn_qfn", "package_qfp",
                   "package_bga", "package_dip"):
         return "ic"
@@ -658,6 +752,18 @@ def _candidate_family(path):
     return None
 
 
+def _candidate_family_for_component(path: Path, component: dict) -> Optional[str]:
+    """Add only marking-backed vendor models to the declared component family."""
+    family = _candidate_family(path)
+    if family is not None:
+        return family
+    kind = str(component.get("kind") or component.get("detected_kind") or
+                component.get("_detected_kind") or "").lower()
+    if kind in ("module", "rf_module", "pcb_module") and _marked_model_matches(path, component):
+        return "module"
+    return None
+
+
 def _observed_count(component):
     """Use confident explicit observations only, never a count guessed from kind."""
     counts = set()
@@ -665,6 +771,12 @@ def _observed_count(component):
     if confidence is None and component.get("pin_count_source") in ("photo_observation", "observed", "manual"):
         confidence = component.get("confidence")
     count = component.get("pin_count")
+    # Older global inventories copied visible metal surfaces (including tabs)
+    # into pin_count. That is not the total ordinary lead count used by package
+    # names. Explicit manual/full-lead observations use a separate provenance.
+    if (component.get("terminal_count_basis") == "visible_including_tabs"
+            and component.get("pin_count_source") not in ("manual", "complete_lead_observation")):
+        count = None
     if confidence in ("high", "medium") and type(count) is int and 0 < count <= 128:
         counts.add(count)
     geometry = component.get("terminal_geometry")
@@ -687,12 +799,37 @@ def _declared_count(path):
     """Only count-bearing KiCad package syntax: SOT-23 does NOT mean 23 pins."""
     # SOT's first number identifies the package; only a separate variant suffix
     # declares terminals. Bare SOT packages deliberately remain uncounted.
-    sot = re.match(r"SOT[-_]?\d+[-_]([1-9]\d*)(?=[_]|$)", path.stem, re.IGNORECASE)
+    sot = re.match(r"(?:SOT|SC)[-_]?\d+[-_]([1-9]\d*)(?=[_]|$)", path.stem, re.IGNORECASE)
     if sot:
         return int(sot.group(1))
-    match = re.match(r"(?:SOIC|SSOP|TSSOP|MSOP|TSOP|SOP|QFN|DFN|[LT]?QFP|BGA|DIP)[-_](\d+)(?=[_-]|$)",
-                     path.stem, re.IGNORECASE)
+    # Vendor-prefixed filenames can carry an explicit count-bearing package
+    # token. Require token boundaries, and never apply this embedded search to
+    # SOT/TO model codes (e.g. NXP_SOT1982-1 is not a one-terminal package).
+    # An EP suffix is deliberately not added to the lead count: photographic
+    # tabs and KiCad electrical/exposed pads do not share a universal convention.
+    match = re.search(r"(?<![a-z0-9])(?:SOIC|SSOP|[A-Z]{0,2}TSSOP|MSOP|TSOP|SOP|[A-Z]{0,4}(?:QFN|DFN|QFP|BGA|SON)|SIP|DIP)[-_](\d+)(?=[_-]|$)",
+                      path.stem, re.IGNORECASE)
     return int(match.group(1)) if match else None
+
+
+def _provisional_terminal_count(component):
+    """Retain observed morphology for review filtering, not automatic attachment.
+
+    Presence and a described layout support using an explicitly observed count
+    as a provisional constraint even when electrical class/overall confidence is
+    low. Do not invent hidden terminals, infer a count from prose, or promote this
+    weaker evidence into the confident _observed_count contract.
+    """
+    if component.get("terminal_count_basis") == "visible_including_tabs":
+        return None
+    count = component.get("terminal_count")
+    layout = component.get("terminal_layout")
+    if (component.get("presence_confidence") == "high"
+            and type(count) is int and 0 < count <= 512
+            and isinstance(layout, str) and layout.strip()
+            and layout.strip().lower() not in ("unknown", "unresolved", "?")):
+        return count
+    return None
 
 
 def _compatible_candidates(paths, component, note):
@@ -700,9 +837,11 @@ def _compatible_candidates(paths, component, note):
     if not component:
         return paths
     aliases = {"ic_soic": "ic", "ic_qfn": "ic", "ic_qfp": "ic", "ic_bga": "ic",
-               "tantalum": "capacitor", "diode_melf": "diode"}
+               "tantalum": "capacitor", "diode_melf": "diode",
+               "rf_module": "module", "pcb_module": "module",
+               "semiconductor_unknown": "semiconductor", "transistor": "semiconductor"}
     known = {"resistor", "resistor_array", "capacitor", "diode", "led", "inductor",
-             "connector", "crystal", "ic", "fuse", "mechanical"}
+             "connector", "crystal", "ic", "fuse", "mechanical", "switch", "module", "semiconductor"}
     kinds = {str(component.get(key) or "").lower() for key in
              ("kind", "detected_kind", "_detected_kind")} - {"", "generic", "unknown"}
     verified = component.get("type_verified") is True or component.get("_type_verified") is True
@@ -712,14 +851,23 @@ def _compatible_candidates(paths, component, note):
     if verified and public_kind not in ("", "generic", "unknown"):
         kinds = {public_kind}
     families = {aliases.get(kind, kind) for kind in kinds} & known
+    # The CAD renderer uses 'ic' for an unidentified semiconductor. Its
+    # electronic class can still be a diode; a rendering alias is not a veto.
+    unknown_semiconductor = (component.get("class") == "semiconductor_unknown"
+                             and kinds <= {"ic", "semiconductor_unknown"})
     counts = _observed_count(component)
+    provisional = _provisional_terminal_count(component)
+    if provisional is not None:
+        counts.add(provisional)
     accepted = []
     for path in paths:
         family = _candidate_family(path)
         reason = None
         if len(families) > 1:
             reason = "tipi dichiarati/osservati in conflitto"
-        elif family and families and family not in families:
+        elif family and families and family not in families and not (
+                family == "semiconductor" and families <= {"ic", "diode"}) and not (
+                unknown_semiconductor and family in ("ic", "semiconductor", "diode")):
             reason = f"tipo {','.join(sorted(kinds))} incompatibile con famiglia {family}"
         stem = path.stem.upper()
         is_so = path.parent.name.lower() == "package_so.3dshapes" or bool(
@@ -734,6 +882,8 @@ def _compatible_candidates(paths, component, note):
             reason = f"terminali osservati {next(iter(counts))}, package dichiara {declared}"
         if reason:
             evidence = "tipo verificato" if verified else "tipo provvisorio/non verificato"
+            if provisional is not None:
+                evidence += "; observed terminal layout/count is provisional"
             note(f"{component.get('package', '')}: rifiutato {path.name}: {reason} ({evidence}); "
                  "il solo ingombro non conferma il package.")
         else:
@@ -916,6 +1066,217 @@ def _basis_readings(size, basis):
         yield label, value
 
 
+def _discovery_structure(paths, component, package):
+    """Use explicit mounting/subtype declarations for discovery, never identity.
+
+    Unknown mounting stays eligible. A USB receptacle declaration excludes an
+    explicitly different interface/plug, and a tactile actuator excludes named
+    slide/rotary/reed banks. Vendor names are neither clues nor special cases.
+    """
+    surface = bool(re.search(r"(?<!\w)(?:SMD|SMT|surface[- ]mount)(?!\w)", package, re.I))
+    through = bool(re.search(r"(?<!\w)(?:THT|through[- ]hole)(?!\w)", package, re.I))
+    tactile = bool(re.search(r"(?<!\w)(?:tactile|push[- ]?button)(?!\w)", package, re.I))
+    usb = re.search(r"(?<!\w)USB[ _-]*(?:Type[ _-]*)?([ABC])(?!\w)", package, re.I)
+    socket = bool(re.search(r"\b(?:receptacle|socket)\b", package, re.I))
+    plug = bool(re.search(r"\bplug\b", package, re.I))
+    selected = []
+    for path in paths:
+        folder = path.parent.name.lower().removesuffix('.3dshapes')
+        if surface != through and ((surface and folder.endswith('_tht')) or
+                                   (through and folder.endswith('_smd'))):
+            continue
+        if tactile and _candidate_family(path) == 'switch' and re.search(
+                r'(?:^|_)(?:DIP|Slide|Rotary|Reed)(?:_|$)', path.stem, re.I):
+            continue
+        if usb and _candidate_family(path) == 'connector':
+            interface = re.search(r'(?:^|_)USB[_-]([ABC])(?:_|$)', path.stem, re.I)
+            if not interface or interface.group(1).upper() != usb.group(1).upper():
+                continue
+            if socket != plug and ((socket and re.search(r'(?:^|_)Plug(?:_|$)', path.stem, re.I)) or
+                                   (plug and re.search(r'(?:^|_)Receptacle(?:_|$)', path.stem, re.I))):
+                continue
+        selected.append(path)
+    return selected, bool(usb or tactile or surface != through)
+
+
+def _tentative_endcap_family(component):
+    """Recognize an estimated chip form, without trusting its nominated size.
+
+    A standalone standard chip-size proposal plus independently observed two
+    endcaps supports the rectangular chip family, not an exact size or value.
+    Search every size and suffix variant in that declared family. This is a
+    scoped mechanical estimate, never a claim to have searched arbitrary
+    electrolytic, trimmer, cylindrical, leaded or custom non-chip housings.
+    Ambiguous namespaces, part numbers and absent morphology stay unresolved.
+    """
+    kind = component.get("kind")
+    layout = str(component.get("terminal_layout") or "").strip()
+    # Deliberately narrow affirmative grammar, not keyword classification of
+    # arbitrary prose. Negated, hidden or projecting terminals cannot establish
+    # an endcap topology; unsupported descriptions retain the review fallback.
+    endcaps_observed = bool(re.match(
+        r"^(?:two|2)\s+(?:(?:metal|metallized|plated|tinned|opposing|opposed|opposite|visible)\s+)*end[- ]?caps?\b",
+        layout, re.I)) and not re.search(
+            r"\b(?:no|not|without|neither|unknown|uncertain|unclear|occluded|hidden|absent|projecting|maybe|possibly)\b",
+            layout, re.I)
+    if (kind not in ("resistor", "capacitor")
+            or component.get("class", kind) != kind
+            or component.get("presence_confidence") != "high"
+            or component.get("class_confidence") not in ("high", "medium")
+            or not endcaps_observed):
+        return None
+    package = str(component.get("package") or "").strip()
+    if not re.fullmatch(_CHIP_SIZE_CODES + r"\s*\(\s*(?:approx(?:imate(?:ly)?)?\.?|estimated?|nominal)\s*\)", package, re.I):
+        return None
+    counts = _observed_count(component)
+    visible_pair = (not counts and component.get("terminal_count_basis") == "visible_including_tabs"
+                    and type(component.get("terminal_count")) is int
+                    and component["terminal_count"] == 2
+                    and component.get("confidence") in ("high", "medium"))
+    return kind if counts == {2} or visible_pair else None
+
+
+def _family_paths(component, root, basis):
+    """Rank family solids cheaply; names prioritize measurement, never certify size.
+
+    Cached readings retain their photographic basis. Filename millimetres and
+    passive Metric codes are discovery hints only, including on a cold cache.
+    Explicit mounting/subtype descriptions also admit cold family models into
+    the same bounded CAD queue. Omitted candidates cannot prove uniqueness.
+    The caller additionally applies the existing fixed CAD resource budget.
+    """
+    kind = str(component.get("kind") or component.get("detected_kind") or "").lower()
+    observed_class = str(component.get("class") or "").lower()
+    # Rendering normalizes these observations to 'ic'. Preserve the original
+    # mechanical class for discovery without rewriting the rendering metadata.
+    if observed_class in ("semiconductor_unknown", "transistor", "regulator"):
+        kind = observed_class
+    aliases = {"ic_soic": "ic", "ic_qfn": "ic", "ic_qfp": "ic", "ic_bga": "ic",
+               "rf_module": "module", "pcb_module": "module", "tantalum": "capacitor",
+               "diode_melf": "diode", "semiconductor_unknown": "semiconductor",
+               "transistor": "semiconductor", "regulator": "semiconductor"}
+    family = aliases.get(kind, kind)
+    # Discovery must cover every family accepted by the compatibility filter:
+    # a generic IC can use SO/QFN or SOT. Omitting SOT would manufacture a unique
+    # SO candidate. Explicit transistor/regulator classes may narrow the search.
+    families = ({"ic", "semiconductor", "diode"} if kind == "semiconductor_unknown" else
+                {"ic", "semiconductor"} if kind == "ic" else {family})
+    if family not in {"resistor", "capacitor", "diode", "led", "inductor", "ic",
+                      "connector", "switch", "module", "crystal", "semiconductor"}:
+        return [], False
+    package = str(component.get("package") or "")
+    alternatives = re.findall(_NAMED_PACKAGE_PATTERN, package, re.I)
+    endcap_family = _tentative_endcap_family(component)
+    marked_models = _marked_model_paths(component, root) if family == "module" else []
+    if marked_models:
+        # A literal manufacturer marking can identify a model filename in a
+        # user-installed library. It remains dimensional evidence plus a
+        # reviewable proposal; it is not a blanket vendor/package inference.
+        paths = marked_models
+        structural_query = True
+    elif endcap_family:
+        # Approximate 0603 must not become an exact 0603 lookup: adjacent sizes
+        # and suffix variants remain alternatives. Even clearly distant cold
+        # chip sizes are measured, so filename hints cannot fabricate uniqueness.
+        prefix = "R" if endcap_family == "resistor" else "C"
+        folder = "Resistor_SMD.3dshapes" if prefix == "R" else "Capacitor_SMD.3dshapes"
+        paths = [p for p in (root / folder).rglob("*")
+                 if p.suffix.lower() in (".step", ".stp")
+                 and re.match(prefix + r"_\d{4,6}(?:_|$)", p.stem, re.I)]
+    elif alternatives:
+        # Ambiguity broadens only to the stated alternatives, never to all ICs.
+        paths = list(dict.fromkeys(p for token in alternatives for p in candidates(token, root)
+                                   if p.suffix.lower() in (".step", ".stp")))
+    else:
+        paths = [p for p in root.rglob("*") if p.suffix.lower() in (".step", ".stp")
+                 and _candidate_family(p) in families]
+        # A family-only declaration is still structural evidence, even when it
+        # lacks a numeric package identifier: QFN prose must not discover SO/SOT.
+        topologies = {token.upper().replace("LQFN", "QFN") for token in re.findall(
+            r"(?<![\w])(?:LQFN|QFN|DFN|SOIC|SSOP|TSSOP|MSOP|TSOP|SOP|SOT|SC|TO|LQFP|TQFP|QFP|BGA|DIP)(?![\w])",
+            package, re.I)}
+        if topologies:
+            paths = [p for p in paths if any(re.match(re.escape(token) + r"[-_]?\d", p.stem, re.I)
+                                            for token in topologies)]
+    paths, structural_query = _discovery_structure(paths, component, package)
+    index = load_index(root)
+    ranked, omitted = [], False
+    for path in paths:
+        size = normalize_model_measurement(path, index.get(index_key(path)))
+        distances = [d for _, value in _basis_readings(size, basis)
+                     if (d := size_distance(value, component["length_mm"], component["width_mm"])) is not None]
+        cached = bool(distances)
+        if not cached:
+            hint = re.search(r"(?<![\d.])(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)(?:x\d+(?:\.\d+)?)?mm", path.stem, re.I)
+            metric = re.search(r"(?:^|_)(\d{2})(\d{2})Metric(?:_|$)", path.stem, re.I)
+            dimensions = ([float(v) for v in hint.groups()] if hint else
+                          [int(v)/10 for v in metric.groups()] if metric and family in ("resistor", "capacitor", "led") else None)
+            distance = size_distance(dimensions, component["length_mm"], component["width_mm"])
+            if distance is not None:
+                distances.append(distance)
+        distance = min(distances, default=float("inf"))
+        # Standard TO/SOT names encode package IDs, not millimetres. Requiring
+        # filename dimensions would permanently hide these families on a cold
+        # index. Include them in the existing bounded CAD measurement budget.
+        cold_discrete = not cached and _candidate_family(path) == "semiconductor"
+        if (distance <= DEFAULT_SIZE_TOLERANCE or (endcap_family and not cached)
+                or (alternatives and not cached) or cold_discrete
+                or (structural_query and not cached and not distances)):
+            ranked.append((distance, str(path), path))
+        elif not cached:
+            # A name hint is not a measured envelope. Skipping it saves cold CAD
+            # work but must never turn the remaining choice into a proof.
+            omitted = True
+    return [path for _, _, path in sorted(ranked)], omitted
+
+
+def _automatic_mechanical(component, choices, complete, basis):
+    """Require independent presence, family, terminal and envelope support.
+
+    Uniqueness is evaluated before UI truncation, never inferred from a budgeted
+    or unreadable search. This conservative estimate does not certify identity.
+    """
+    if (not complete or len(choices) != 1 or basis not in ("body", "total")
+            or (basis == "body" and choices[0].get("measurement_method") == "section_65pct_unverified")
+            or component.get("presence_confidence") != "high"
+            or component.get("class_confidence") not in ("medium", "high")
+            or component.get("_yolo_review_only") is True
+            or component.get("_yolo_origin") == "low_confidence_review"
+            or str(component.get("class") or "").lower() in ("semiconductor_unknown", "unknown", "other")
+            or str(component.get("kind") or "").lower() not in (
+                "resistor", "capacitor", "tantalum", "diode", "diode_melf", "led",
+                "inductor", "ic", "ic_soic", "ic_qfn", "ic_qfp", "ic_bga",
+                "connector", "switch", "module", "rf_module", "pcb_module", "crystal", "transistor")
+            or component.get("_global_inventory_status") in ("invalid", "rejected")):
+        return False
+    counts = _observed_count(component)
+    raw_count = component.get("terminal_count")
+    visible_only = component.get("terminal_count_basis") == "visible_including_tabs"
+    if not visible_only and raw_count is not None and (type(raw_count) is not int or raw_count not in counts):
+        return False
+    path = Path(choices[0]["path"])
+    declared = _declared_count(path)
+    # Standard single chip R/C packages have two end terminals; do not extend
+    # that topology assumption to arrays, LEDs, inductors or arbitrary solids.
+    if (declared is None and choices[0]["family"] in ("resistor", "capacitor")
+            and re.fullmatch(r"[RC]_\d{4,6}(?:_\d{4}Metric)?", path.stem, re.I)):
+        declared = 2
+        # A recognized single chip R/C with both endcaps visible has the same
+        # two-terminal mechanical topology as these standard models. This is
+        # not generalized to arrays or an unknown semiconductor with two of
+        # several leads visible. Conflicting explicit counts still veto.
+        if (not counts and visible_only and type(raw_count) is int and raw_count == 2
+                and component.get("confidence") in ("medium", "high")):
+            counts = {2}
+    # A literal manufacturer model identifier is stronger than a generic
+    # family estimate. Permit the single exact-marking module to be imported
+    # automatically, while retaining the dimensional and presence gates above.
+    if (declared is None and choices[0]["family"] == "module"
+            and _marked_model_matches(path, component)):
+        return True
+    return declared is not None and counts == {declared} and choices[0]["family"] is not None
+
+
 def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dict:
     """@brief Propose bounded, JSON-safe model choices for explicit human review.
 
@@ -925,11 +1286,13 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dic
     @param log Optional diagnostic callback accepting a string.
     @return Mapping with status, candidates and selected_path. Candidate dimensions_mm
         is the matched XY reading (and Z when available), in native model axes.
-    @note Dimensional evidence never confirms identity. Only an existing exact
-        explicitly confirmed solid sets selected_path. Rejection stops discovery.
+    @note Dimensional evidence never confirms identity. Explicit confirmation wins;
+        independently supported unique estimates use auto_matched instead.
+        Rejection stops discovery. Missing/descriptive packages use family discovery.
         Unknown basis compares independent readings; body/total/pads are strict.
         leads and body_and_leads mean total. At most 64 structurally compatible
-        paths are measured; search_truncated flags omitted names, not a full search.
+        paths are measured; search_truncated flags omitted names, including cold
+        family models without compatible dimensional hints, not a full search.
     """
     result = {"status": "unresolved", "candidates": [], "selected_path": None}
     note = log or (lambda message: None)
@@ -955,15 +1318,55 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dic
     if basis not in ("unknown", "body", "total", "pads"):
         return result
     package = str(component.get("package") or "").strip()
-    if not package:
-        return result
-    root = Path(library) if library is not None else find_library()
+    roots = _search_roots(library)
+    root = roots[0] if roots else None
     if root is None:
         note("Libreria 3D di KiCad non trovata: si usano le forme approssimate.")
         return result
-    paths = _compatible_candidates(
-        [p for p in candidates(package, root) if p.suffix.lower() in (".step", ".stp")],
-        component, note)
+    named = list(dict.fromkeys(
+        p for search_root in roots
+        for p in candidates(package, search_root)
+        if p.suffix.lower() in (".step", ".stp")))
+    # Do not substitute another package for an explicit identifier that failed.
+    fallback = not _package_token(package)
+    if fallback:
+        marking_paths = list(dict.fromkeys(
+            path for search_root in roots
+            for path in _marked_model_paths(component, search_root)))
+        if marking_paths and str(component.get("kind") or component.get("detected_kind") or
+                                 component.get("_detected_kind") or "").lower() in (
+                                     "module", "rf_module", "pcb_module"):
+            # An exact literal model identifier is a stronger discovery key
+            # than a library-wide module-family scan. Keep only those models;
+            # dimensions and the existing module envelope checks still apply.
+            paths, omitted = marking_paths, False
+            result["discovery_scope"] = "literal_marking_model"
+            note("Literal model marking: restricting KiCad search to matching STEP filenames; dimensions still require verification.")
+        elif _tentative_endcap_family(component):
+            result["discovery_scope"] = "standard_chip_endcaps"
+            note("Estimated chip package: checking all standard endcap sizes and variants; nominated size is not an exact constraint.")
+            family_results = [_family_paths(component, search_root, basis)
+                              for search_root in roots]
+            paths = list(dict.fromkeys(path for family_paths, _ in family_results
+                                       for path in family_paths))
+            omitted = any(was_omitted for _, was_omitted in family_results)
+        else:
+            family_results = [_family_paths(component, search_root, basis)
+                              for search_root in roots]
+            paths = list(dict.fromkeys(path for family_paths, _ in family_results
+                                       for path in family_paths))
+            omitted = any(was_omitted for _, was_omitted in family_results)
+        if omitted:
+            result["search_truncated"] = True
+            note("Family discovery omitted cold models without compatible dimension hints; automatic selection disabled.")
+    else:
+        paths = named
+    rejections = []
+    paths = _compatible_candidates(paths, component, rejections.append)
+    if rejections:
+        result["rejected_candidate_count"] = len(rejections)
+        note(f"{package}: rejected {len(rejections)} family/terminal-incompatible candidates; "
+             + " | ".join(rejections[:3]))
     # A bare numeric package supplies no family evidence. Do not fill the UI
     # with unclassified custom solids or mechanical hardware of the same size.
     requested_family = _candidate_family(Path("Custom") / _package_token(package))
@@ -972,17 +1375,33 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dic
              and (_candidate_family(p) != "mechanical" or mechanical)
              and (requested_family is None or _candidate_family(p) == requested_family)]
     paths = list(dict.fromkeys(paths))
+    # A known observed topology cannot be checked against an IC whose package
+    # count is unreadable. Withhold those suggestions rather than letting more
+    # exotic vendor syntax bypass the terminal filter. This omission must also
+    # disable automatic uniqueness, since the discarded models remain unknown.
+    observed_counts = _observed_count(component)
+    provisional_count = _provisional_terminal_count(component)
+    if observed_counts or provisional_count is not None:
+        unknown_topology = [p for p in paths if _candidate_family(p) == "ic"
+                            and _declared_count(p) is None]
+        if unknown_topology:
+            result["topology_incomplete"] = True
+            paths = [p for p in paths if p not in unknown_topology]
+            note(f"Withheld {len(unknown_topology)} IC models with unreadable terminal topology; automatic uniqueness disabled.")
     if len(paths) > MAX_CANDIDATE_MEASUREMENTS:
         result["search_truncated"] = True
         note(f"Candidate measurement budget: first {MAX_CANDIDATE_MEASUREMENTS} of {len(paths)} compatible names.")
     paths = paths[:MAX_CANDIDATE_MEASUREMENTS]
     if not paths:
         return result
+    result["discovery"] = "family_dimensions" if fallback else "package"
     sizes = model_sizes(paths, root)
+    complete = not (result.get("search_truncated") or result.get("topology_incomplete"))
     lands = footprint_sizes(paths, root, log=note) if basis in ("unknown", "pads") else {}
     for path in paths:
         size = sizes.get(str(path))
         if size_distance(size, 1, 1) is None:
+            complete = False
             continue
         size = dict(size) if isinstance(size, dict) else {"total": size}
         if str(path) in lands:
@@ -992,6 +1411,7 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dic
         readings = [(distance, label, value) for label, value in _basis_readings(size, basis)
                     if (distance := size_distance(value, length, width)) is not None]
         if not readings:
+            complete = False
             continue
         distance, label, value = min(readings, key=lambda item: item[:2])
         if distance > DEFAULT_SIZE_TOLERANCE:
@@ -1002,31 +1422,42 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dic
         result["candidates"].append({
             "path": str(path), "package": path.stem, "dimensions_mm": dimensions,
             "relative_xy_error": distance, "measurement_basis": label,
-            "family": _candidate_family(path), "status": "review_required",
-            "reasons": ["Package name compatible", "No declared family or terminal conflict",
+            "measurement_method": size.get("body_method", "provided_body") if label == "body" else "measured_total" if label == "total" else "footprint_copper",
+            "family": _candidate_family_for_component(path, component), "status": "review_required",
+            "reasons": ["Family and dimension discovery" if fallback else "Package name compatible", "No declared family or terminal conflict",
                         f"Compatible {label} dimensions", "Identity and variant require user review"],
         })
     result["candidates"].sort(key=lambda item: (item["relative_xy_error"],
         _normalize(item["package"]) != _package_name(package), item["path"]))
+    automatic = _automatic_mechanical(component, result["candidates"], complete, basis)
     result["candidates"] = result["candidates"][:limit]
     if result["candidates"]:
         result["status"] = "review_required"
-        note(f"{package}: {len(result['candidates'])} dimensional candidates require explicit review; no model selected.")
+        if automatic:
+            choice = result["candidates"][0]
+            choice["status"] = "auto_matched"
+            if _marked_model_matches(Path(choice["path"]), component):
+                choice["reasons"][-1] = "Exact literal model marking and compatible dimensions; orientation remains reviewable"
+            else:
+                choice["reasons"][-1] = "Mechanical estimate; identity and variant not verified"
+            result.update(status="auto_matched", selected_path=choice["path"])
+        note(f"{package}: {len(result['candidates'])} dimensional candidates; {result['status']}; identity not verified.")
     return result
 
 
 def attach_models(components, log=None, library: Optional[Path] = None) -> int:
-    """@brief Attach only exact explicitly confirmed models, clearing stale choices.
+    """@brief Attach explicit choices or supported mechanical estimates, clearing stale paths.
 
     @param components Mutable component dictionaries containing model_selection.
     @param log Optional diagnostic callback.
     @param library Optional library root for API compatibility.
-    @return Number of confirmed paths attached.
-    @note Rejected, missing or invalid selections use synthetic geometry. Rotation
+    @return Number of explicit or inferred mechanical paths attached.
+    @note Rejected or invalid explicit selections use synthetic geometry. Missing
+        selections permit auto_matched mechanical estimates when evidence supports them. Rotation
         is copied to model_rotation_deg; None or an omitted selection rotation clears
         that override for automatic native-axis inference. Explicit zero is retained.
         Unconfirmed native placement metadata and component photo rotation are preserved.
-        The JSON report is stored in model_match; unconfirmed placeholders are magenta.
+        The JSON report is stored in model_match; unresolved/review placeholders are magenta.
     """
     note = log or (lambda message: None)
     resolved = 0
@@ -1045,7 +1476,11 @@ def attach_models(components, log=None, library: Optional[Path] = None) -> int:
             else:
                 component["model_rotation_deg"] = rotation
             resolved += 1
+        elif report["status"] == "auto_matched":
+            component["model_path"] = report["selected_path"]
+            component.pop("model_rotation_deg", None)
+            resolved += 1
         else:
             component["color_hex"] = "#FF00FF"
-    note(f"Explicitly confirmed KiCad models: {resolved}.")
+    note(f"Attached KiCad models (explicit choices or mechanical estimates): {resolved}.")
     return resolved

@@ -1154,7 +1154,10 @@ def _components_3d(raw: Optional[Sequence[dict]]) -> Optional[list[dict]]:
         kind = str(entry.get("kind") or "generic")
         component["kind"] = kind if kind in COMPONENT_KINDS else "generic"
         if entry.get("marking"):
-            component["marking"] = str(entry["marking"]).strip()
+            marking = str(entry["marking"]).strip()
+            # Normalize only whole-field AI absence/illegibility sentinels;
+            # literal substrings and the source observation remain untouched.
+            component["marking"] = "" if marking.casefold() in ("none", "?") else marking
         component["rotation_deg"] = (_optional_number(entry.get("rotation_deg")) or 0.0) % 360
         # Verso di innesto dichiarato dal modello guardando la foto. Senza,
         # la forma 3D dovrebbe indovinarlo dalle sole dimensioni, che per un
@@ -1179,6 +1182,7 @@ def _components_3d(raw: Optional[Sequence[dict]]) -> Optional[list[dict]]:
                     '_yolo_class_ambiguous', '_yolo_review_only', '_yolo_origin',
                     '_package_verified', '_orientation_verified', 'pin_count_confidence', 'pin_count_source',
                     'class', 'component_id', 'source_candidate_ids', 'terminal_count', 'terminal_layout',
+                    'terminal_count_basis', 'lead_count', 'lead_count_complete', 'lead_count_confidence',
                     '_reported_rotation_deg', '_height_estimated', '_global_inventory_status',
                     '_global_inventory_errors', '_global_inventory_uncertainties',
                     '_global_inventory_prompt_version', '_global_inventory_prompt_hash'):

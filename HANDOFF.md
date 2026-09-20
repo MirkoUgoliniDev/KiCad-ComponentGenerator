@@ -1,4 +1,237 @@
+# 09:05 — libreria Espressif utente rilevata e WROOM-1U importato in FreeCAD
+
+La libreria locale installata dall'utente contiene il modello esatto:
+`C:\Users\mirko\Documents\KiCad\10.0\3rdparty\3dmodels\com_github_espressif_kicad-libraries\espressif.3dshapes\ESP32-S3-WROOM-1U.STEP`.
+Il resolver ora cerca anche i repository KiCad `Documents\KiCad\*\3rdparty\3dmodels`,
+usa il codice modello letterale presente nella marcatura per restringere la ricerca
+e considera il file una proposta di modulo solo dopo il controllo dimensionale.
+Per una corrispondenza letterale unica e coerente, l'importazione automatica e'
+abilitata; orientamento e posizione restano comunque verificabili.
+
+Replay offline del JSON salvato, senza nuove chiamate AI:
+`outputs/espressif-library-replay-fixed2` — 49 componenti, 6 `auto_matched`,
+20 `review_required`, 23 `unresolved`. C21 e' stato associato al file
+`ESP32-S3-WROOM-1U.STEP` con dimensioni misurate 18.00 x 19.20 x 3.20 mm.
+FreeCAD ha generato STEP/FCStd/WRL con 6 importazioni native e colori reali.
+Suite completa: 2646 passed, 2 xfailed, 19 subtests, 136.49s.
+Test mirato aggiunto: `test_literal_marking_selects_user_installed_module_model`.
+Nessun commit/push e nessuna nuova AI pagata.
+
 # Handoff — sessione 2026-09-19
+
+## 08:53 — correzione tutto-magenta verificata sul nuovo JSON
+
+Suite COMPLETA con codice finale: 2644 passed, 2 xfailed, 19 subtests, 159.79s.
+L'esecuzione intermedia aveva 2 failure sul caso class=unknown con modulo gia'
+caricato prima della correzione; entrambe risolte e incluse nella suite finale.
+84 nuove regressioni chip (piu' documentazione) passate. Reviewer Heisenberg
+approva dopo aver richiesto veto alle frasi negate: solo descrizioni affermative
+dei due endcap, classi coerenti e prove indipendenti attivano il nuovo ambito.
+
+Replay FINALE outputs/morning-verified-replay: 49 ipotesi, 26 con candidati,
+5 auto_matched (C5,C7,C9 -> C0603; C11 -> R0603; C32 -> R0805), 21 review,
+23 unresolved. CAD-verification.json conferma tutti e cinque i solidi nativi,
+colori reali non magenta, misure e rotazioni. STEP11.237.211byte. Rendering
+top/3D ispezionato; DIAGNOSI.md spiega causa, limiti e inventario completo.
+Nessuna nuova AI pagata, output app originale intatto, branch/HEAD invariati.
+Confucius aggiunto test_tentative_passive_gui.py: test sintetico reale
+GUI->worker->FreeCAD passa insieme al precedente real_board_pipeline (2 passed,
+12.05s); nessuna selezione manuale/preboundpath, C0603 auto_matched con colori
+nativi e dimensioni1.6x0.8x0.8, trasporto evidenze confermato. Ultima suite
+con anche questo test appena aggiunto in corso; produzione congelata.
+Non far ripagare l'analisi per dimostrare questo fix: JSON nuovo gia' riprodotto.
+Riavvio necessario per caricare codice; app NON ripristina l'intero stato
+di estrazione alla riapertura. Nella finestra vecchia resta possibile scelta
+manuale dei candidati e Rigenera, senza AI. Nessun hot-reload introdotto.
+
+## 08:46 — nuovo run riprodotto, 5 importazioni reali recuperate
+
+Fix locale matcher: per una taglia chip R/C approssimata con endcap osservati
+e evidenze indipendenti, discovery_scope=standard_chip_endcaps enumera tutte
+le taglie/varianti STEP della famiglia; non impone il numero nominale e misura
+anche taglie fredde lontane. Budget64/tolleranza30% invariati, ambigui manuali.
+100 test mirati passati; suite completa79510 in corso, Boyle aggiunge nuove
+regressioni in tests/test_tentative_passive_discovery.py, Heisenberg review.
+Replay produzione dell'audit NUOVO:49 ipotesi,26 con candidati,5auto,21review,
+23unresolved. Mesh reale verifica5 nativeimports, STEP11.237.211byte;
+output isolato workspacechat outputs/morning-run-replay, render ispezionato.
+Preservato run utente originale; nessuna nuova AI a pagamento o commit/push.
+
+Audit Godel separato (non causa tutto magenta): _library_model conserva scala
+STEP ma puo' centrare sulla sezione65% anche con bbox_basis total. Testmodulo
+asimmetrico sposta centro0.2mm; da correggere in seguito con riferimento
+coerente, non modificato in questo fix. Scelta STEP esterno gia' presente.
+
+## 08:40 — nuovo run utente tutto magenta, diagnosi
+
+Run reale 08:29-08:36, cartella generated/ESP32-S3-DEV-KIT-NXRX_2x22_P2.54mm_Castellated:
+49 ipotesi, 26 review_required e 23 unresolved, ZERO STEP applicati. AI e FreeCAD
+completati, nessun errore HTTP/credito; prompt v5/schema4 effettivamente usati.
+Audit global-inventory-8b8dea146c894f3a85cda70bb8feaa71.json, YOLO yolo-aqlku78r.json.
+Differenza dal vecchio replay: package passivi "0603 (approx)" porta a ricerca
+di tutta la famiglia, poi search_truncated blocca anche candidati unici con
+misure e due terminali completi. NON basta togliere il flag o imporre 0603:
+eventuali taglie adiacenti compatibili devono restare alternative. Correzione
+generale da verificare su QUESTO JSON; preservare output utente, nessuna nuova AI.
+Esperimento WROOM manuale sospeso per priorita' diagnosi ultima richiesta utente.
+
+## Verifica finale 08:10 — codice testato, limiti residui espliciti
+
+Suite COMPLETA finale:2560 passed,2 xfailed,19 subtests,268.66s.
+ReviewerHeisenberg nessunblocco nuovecorrezioni (cacheultima43test+doc).
+git diff --check pulito, branchYOLO-SOLUTION HEAD53492f6 invariato,
+nessun nuovo commit/push. Generazione e meshconfermate9importazioni native.
+Nuovo reportoutputs/night-json-cad-replay:38candidati,9auto,29review,
+26irrisolti,64ipotesitotali noncertificate. Preservatioutputoriginali.
+App modificata, necessita riavvio; nuovo promptv5 richiede futuraanalisi
+per migliorare vecchiedimensioni/identita', nessuna nuova AI pagata eseguita.
+
+STEPufficiale esatto WROOM1U verificatoFreeCAD:18x19.2x3.2mm, compoundvalido,
+231solidi/3474facce (NONcomponenti rilevati); colorsnativepreservati.
+Misure, renderPNG e fonte/licenza in outputs/official-espressif-cad.
+Non installato, non associato automaticamente su scheda. La suapresenza
+non certifica orientamento/posizioneAI. Nuovi processiterminati senza
+toccare apputente, filetemporaneimateriali noneliminati. Handoff attuale
+prevale su tuttistoriciprecedenti. Heartbeatnotturno rimaneattivofino09:00
+salvo nuova indicazione dell'utente: nessun permesso pernuoveanalisi pagate.
+
+## Checkpoint 08:05 — replay notturno completato e verificato
+
+Cache Windows corretta: aperturaesclusiva UUID con3retry solo collisione,
+PermissionError passa al fallback senza loop; reviewerapprova,43testcache
+(44con doc). Cache utente ora presente115347byte. Replay80662 completato:
+64ipotesi,38con candidati (prima34),9auto_matched,29review,26irrisolti.
+FreeCAD STEP17.185.979byte,9componenti importatinativi verificati nelmesh;
+nuovi preview eMATCHING-REPORT in outputs/night-json-cad-replay del workspace.
+Vista reale ispezionata: nessuna scritta none/?spuria, moltepartirestanomagenta
+perche'non scelte; non dichiarare completa la ricostruzione.
+
+La rimozione dei falsi conteggiesatti nei JSONlegacy allarga le alternative
+di Q1/U4 (ora anche SO/BGA a quotacompatibile): e'un limite delle evidenze
+vecchie, NONsono identita' certificate. SOT223presenteperU4; altrerichiedono
+scelta/futuri dati con lead_count completo. Non ripristinare uguaglianza
+fra terminalivisibili e pin totali per farapparirelista migliore.
+Suite completa aggiornata1729ancoraincorso, faulthandlersegnala45s nel test
+scanfootprint reale (nonblocco: proseguito). Agenzeproduttivecongelate,
+GodelverificaSTEPufficialeesatto standalone, senza inserirloscheda.
+
+## Checkpoint 08:00 — correzioni in verifica, replay da ripetere
+
+Fix locali hanno recuperato candidati REALI per SW1 (5), SW2 (5), USB-C (3)
+e LED D2 (2 varianti0805), prima tutti senza candidati. D1 correttamente
+non accetta1206: LED0805total2x1.25 compatibile, LED1206total3.2x1.6 no.
+Helper model_measurement normalizza raw/cache e conserva metodo di misura.
+Nuovo contratto terminali e sentinel implementato;145testintegrazionepassati.
+Suitecompleta finale58813 in corso; reviewerHeisenberg01a0bd60-5a65-7760-9166-e9684ae39485.
+
+Replay61480 e probe31250 BLOCCATI in nuovo helpercache: faulthandler prova
+tempfile.NamedTemporaryFile -> tempfile._mkstemp_inner loopCPU su Windows
+ProgramFiles ACL (os.access diceTrue). Fermati soltanto processi di prova
+4880/13772, confermati per commandline. Boyle corregge helpercache con
+uuid+openx, retries limitatiFileExistsError, immediato fallbackPermissionError.
+Rieseguire testcache, replay e fullsuite dopo questa correzione. Non dire
+ancora verificato replay finale. Vecchi output latest-json-cad-replay intatti;
+nuovo night-json-cad-replay parziale in workspacechat outputs.
+
+Verificato online che STEP esatto WROOM1U esiste nella libreria UFFICIALE
+Espressif (non nella locale): github.com/espressif/kicad-libraries, path
+3dmodels/espressif.3dshapes/ESP32-S3-WROOM-1U.STEP. Scaricato solo in
+outputs/official-espressif-cad conLICENSE.md; SHA256
+7be82bdafece2891b297546eb0643ff254e3d8161074ebdc972e0d78e79a4bdb.
+Non installato, non inserito nel CAD, da misurare/verificare. Nessuna AI
+pagata o cambio detector/modelloLLM. Non inventare posizione o totale pin.
+
+## Prosecuzione 07:36–08:00 del 20/09 — in corso
+
+Suite completa prima di nuove correzioni: 2399 passed, 2 xfailed,
+19 subtests, 282.59s. Nessun nuovo commit/push/AI pagata. Branch invariato.
+Audit esperti Godel e Confucius: cache fredda esclude switch/USB/LED senza
+quote nel nome; corpo misurato come sezione al 65% e' sbagliato per LED
+(0805 reale 2x1.25 ma sezione 1.25x1.25, falso rifiuto), e puo' accettare
+LED1206 con lente piccola (falso positivo). Non allargare ricerca prima
+di correggere semantica delle misure. S3-WROOM-1U esatto assente in locale.
+
+Ulteriore bug confermato: terminal_count della risposta globale conta solo
+superfici visibili, aletta inclusa; non equivale a totale piedini ordinari.
+In correzione con nuovo metadato terminal_count_basis e schema completo
+lead_count/lead_count_complete/lead_count_confidence. Vecchi JSON restano
+replayabili senza promuovere conteggi incompleti a fatti. Eccezione strutturale
+esplicita per singolo R/C standard con entrambi gli endcap visibili.
+Confucius modifica global_inventory/extractor+test (anche sentinel none/?);
+Godel helper model_measurement+test; main matcher, trasporto GUI/CAD e replay.
+Nuovo test LED Metric passato (2); non basta ancora per risolvere D2 a causa
+del difetto sezione-corpo. Conservare precedente output; nuova prova isolata.
+
+## Checkpoint notturno 20/09 — leggere prima dei checkpoint storici
+
+Utente chiede prosecuzione durante la notte e handoff prima dei limiti.
+Heartbeat attivo: miglioramento-pcb-yolo-e-kicad, orario, stessa attivita;
+terminare entro le 09:00 Europe/Rome del 20/09 con riepilogo onesto.
+Nessuna nuova chiamata AI a pagamento, nessun nuovo commit/push autorizzato
+in questa prosecuzione. Branch YOLO-SOLUTION, modifiche ancora non committate.
+
+Replay finale completato usando risposta JSON salvata e pipeline produzione:
+64 ipotesi (NON 64 componenti certificati), 34 con candidati, 9 auto_matched,
+25 review_required, 30 unresolved. Verifica mesh: 9 importazioni native KiCad
+effettive, STEP 21.424.718 byte. Rendering e report rigenerati nel workspace
+chat outputs/latest-json-cad-replay (preview-top.png, preview-3d.png,
+MATCHING-REPORT.md). Nessuna sovrascrittura del run originale.
+
+Ultimi test mirati: 342 passed. Suite completa precedente 2345 passed,
+2 failed poi corretti e ritestati, 2 xfailed: rieseguire la suite completa
+dopo le ultime modifiche prima di dichiarare verifica completa.
+Matcher: conteggi terminali vendor-prefixed e varianti HTSSOP/AQFN/TDSON;
+topologia IC non interpretabile esclusa se count osservato, ricerca marcata
+incompleta per non dichiarare falsa unicita. SOT/TO senza quote nel nome
+entrano nel budget di misura CAD esistente: U4 ora propone SOT-223, resta
+ambiguo e NON applicato automaticamente. Test nuovi variant_terminal_counts.
+
+Restano importanti limiti: grandi componenti ancora da scegliere, bbox del
+modulo nella risposta AI sovrastimata (CAD rispetta esattamente tale bbox),
+proposte deboli conservate non equivalgono a corpi reali. Non ridurre vincoli
+per colorare il rendering. Migliorare evidenze/matching generale, esaminare
+foto e rendering, testare senza nuova AI pagata. Prompt legacy incompatibile
+rimosso per futuri run; replay non ripara misure errate nella risposta vecchia.
+
+## Nuova correzione20/09: replay reale ultimo JSON, in corso
+
+Ultimo checkpoint codice finale:331 test mirati passati (16.80s), include
+GUItransport, prompt/merge, matcher, test FreeCAD reali e pipelineGUIreale.
+Reviewer2blocchi risolti con regressionitest: famigliecompatibili enumerate
+primaunicita', groupingunresolved indipendente numeroorigini. Conta terminali
+ora riconosce HTSSOP e packagevendor-prefixed; evita proposte24/98pin per4.
+Agentimodifiche congelate. Rendering/replayfinale in corso per riallineare
+artefatti; nuove modifiche NON committate/pushate (ultimo remoto53492f6).
+Nessuna nuovaAIpagata. Questo replay corregge validazione/matching della
+risposta esistente, non le sue misurefoto inventate o ambigue: non dichiarare
+identificazione completa. Per nuovi run promptlegacy incompatibile rimosso.
+
+Checkpoint: replay produzione FreeCAD64ipotesi=43corpi+21proposte irrisolte;
+34con candidati,9auto_matched importati,25review,30irrisolti. Nessuna AI pagata.
+Rendering in outputs/latest-json-cad-replay del workspacechat, non nel repo.
+MOD1 mesh24.40215x20.701mm corrisponde bboxAI ed entroPCB: non bug scalaCAD.
+Corrette9marcature che fuoriuscivano con fitglyph, testFreeCADrealepassato.
+Fullsuite2345pass2fail2xfail19subtests: uno testoCADversioneintermedia,
+unoasserzionelogvecchia; entrambi corretti/verificati con7testreali passati.
+Reviewer segnala2ultimiblocchi in correzione: unionfamilyic/semiconductor per
+non dichiarareunicita' falsa, grouping_basisunresolved anche0/1source.
+Trasporto class osservata aggiunto a evidenceGUI/CAD per evitare perdita
+famigliepotenza; rerun finale necessario dopoquesteultimepatch.
+
+HEAD53492f6 suYOLO-SOLUTION, precedente push verificato. Utente autorizza
+fix e agenti usando JSON esistente, nessuna nuova AI pagata. Run00:12-00:20:
+111proposte ->45corpiAI+2fallback=47; report10review_required,37unresolved,
+0modelli applicati. Restrizione conferma manuale per TUTTI introdotta prima
+non corrisponde all'intento utente (manuale solo ambigui); da correggere.
+Audit global-inventory-9192fbb92e084110ae701802800b896a.json in generated:
+prompt effettivo contiene legacycontraddittorio 'Do NOT identify...' e
+istruzioni tipologia modulo inappropriate perinventario montato. Nuovi agenti:
+Hypatia matcher/fallback+auto meccanico, Lovelace validazione merge/prompt,
+Newton geometriaCAD. Main replay produzione e GUItransport evidenze.
+R13 e gruppi incerti non devono diventare corpo gigante; no coordinate
+inventate per far combaciare esempio. Output prova separato nel workspacechat.
+Non attribuire zero matching attuale al precedente difetto stringhe soltanto:
+10 candidati ci sono ma bloccati, altri package assenti/nonstandard.
 
 ## Consegna20/09 — stato corrente (precede tutti i checkpoint storici)
 

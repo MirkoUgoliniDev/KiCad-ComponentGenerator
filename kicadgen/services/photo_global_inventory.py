@@ -9,13 +9,14 @@ from collections import Counter
 from copy import deepcopy
 import hashlib
 import json
+import re
 from pathlib import Path
 
 from .openrouter import OpenRouterError
 from .photo_inventory import draw_inventory, image_block
 
-PROMPT_VERSION = 'global-yolo-inventory-3'
-SCHEMA_VERSION = 'global-inventory-2'
+PROMPT_VERSION = 'global-yolo-inventory-5'
+SCHEMA_VERSION = 'global-inventory-4'
 PHYSICAL_REJECTIONS = ('bare_pad_or_contact', 'silkscreen_or_marking',
                        'hole_or_via', 'solder_joint', 'background')
 CLASSES = ('resistor', 'capacitor', 'inductor', 'diode', 'transistor',
@@ -36,6 +37,15 @@ Add real bodies missed by the detector. For fragments of ONE assembly retain ONE
 COMPLETE assembly bbox and link ALL fragments to its component_id with merge.
 Never reject a fragment as 'already represented' without a retained parent:
 use merge. source_candidate_ids must exactly match candidate_decisions links.
+Every source must spatially overlap its retained parent. Never collect unrelated
+or unresolved proposals into a bounding rectangle merely to account for their IDs.
+An incorrect source ID does not erase an independently visible body: retain that
+body, unlink the incoherent source, and leave the source uncertain with no parent.
+Set grouping_basis to single_body, assembly or unresolved. For disconnected
+fragments, assembly requires a visible shared substrate/housing and evidence of
+physical attachment; a class label or proximity alone is not assembly evidence.
+Use unresolved for doubtful groups and leave each candidate uncertain with
+component_id null and its original geometry. Do not output a placeholder group.
 An assembled daughterboard includes its substrate, shield and attached onboard
 parts as one assembly, including an antenna connector when part of that assembly.
 Apply this structurally to any module; do not assume a product name or brand.
@@ -77,6 +87,14 @@ photo estimates, not datasheet specifications. Marking is literal, '?' if illegi
 terminal_count counts only observed terminals INCLUDING visible tab; state ordinary
 leads and tabs separately and their image sides in terminal_layout. Unknown counts
 are null; never infer hidden pins or electrical pin count from metal surfaces.
+lead_count counts observed ordinary leads ONLY, excluding thermal tabs and exposed
+pads. Use null when ordinary leads cannot be counted. lead_count_complete is true
+only when ALL ordinary leads are visible and individually countable; use false
+for hidden/occluded sides, partial views or uncertain completeness. Never guess
+hidden leads from a package name. lead_count_confidence describes this observation
+independently as high/medium/low. Three ordinary leads plus one tab means
+terminal_count=4 and lead_count=3, not four electrical pins. A visible minimum is
+not an exact package count, even when physical presence is high confidence.
 rotation_deg is the complete envelope LONG AXIS clockwise in the first image,
 X right/Y down, [0,180), null if unresolved. It is not KiCad placement or pin1.
 Do not claim polarity or pin1 without visible evidence. Height cannot be measured
@@ -93,6 +111,7 @@ def inventory_tool():
     string = {'type': 'string'}
     props = {
         'component_id': string,
+        'grouping_basis': {'type': 'string', 'enum': ['single_body', 'assembly', 'unresolved']},
         'source_candidate_ids': {'type': 'array', 'items': {'type': 'integer'}, 'uniqueItems': True},
         'class': {'type': 'string', 'enum': list(CLASSES)},
         'bbox': {'type': 'array', 'items': {'type': 'number', 'minimum': 0, 'maximum': 1}, 'minItems': 4, 'maxItems': 4},
@@ -100,6 +119,11 @@ def inventory_tool():
         'rotation_deg': {'type': ['number', 'null'], 'minimum': 0, 'exclusiveMaximum': 180},
         'package': string, 'marking': string, 'terminal_layout': string,
         'terminal_count': {'type': ['integer', 'null'], 'minimum': 0, 'maximum': 512},
+        'lead_count': {'type': ['integer', 'null'], 'minimum': 0, 'maximum': 512,
+                       'description': 'Observed ordinary leads only; excludes thermal tabs/exposed pads. Null if uncountable.'},
+        'lead_count_complete': {'type': 'boolean',
+                                'description': 'True only if all ordinary leads are visible and countable; no hidden-lead guesses.'},
+        'lead_count_confidence': {'type': 'string', 'enum': ['high', 'medium', 'low']},
         'height_mm': {'type': ['number', 'null'], 'exclusiveMinimum': 0, 'maximum': 100},
         'height_source': {'type': 'string', 'enum': ['unknown', 'nominal_package', 'visual_estimate']},
         'confidence': {'type': 'string', 'enum': ['high', 'medium', 'low']}, 'evidence': string,
@@ -125,6 +149,26 @@ def _number(value, low, high):
     return type(value) in (int, float) and low <= value <= high
 
 
+def _lead_observation_valid(row):
+    """Accept legacy absence, but require a well-typed coherent observation group."""
+    fields = ('lead_count', 'lead_count_complete', 'lead_count_confidence')
+    if not any(key in row for key in fields):
+        return True
+    if not all(key in row for key in fields):
+        return False
+    count = row['lead_count']
+    complete = row['lead_count_complete']
+    if (count is not None and (type(count) is not int or not 0 <= count <= 512)):
+        return False
+    if type(complete) is not bool or row['lead_count_confidence'] not in ('high', 'medium', 'low'):
+        return False
+    if complete and count is None:
+        return False
+    # Ordinary leads are a subset of the observed lead-plus-tab surfaces.
+    terminals = row.get('terminal_count')
+    return not (type(terminals) is int and count is not None and count > terminals)
+
+
 def _component_valid(row, known):
     from .photo_yolo_review import _valid_box
     if not isinstance(row, dict):
@@ -148,6 +192,7 @@ def _component_valid(row, known):
                 (_number(row['rotation_deg'], 0, 180) and row['rotation_deg'] < 180))
             and 'terminal_count' in row and (row['terminal_count'] is None or
                 (type(row['terminal_count']) is int and 0 <= row['terminal_count'] <= 512))
+            and _lead_observation_valid(row)
             and 'height_mm' in row and row.get('height_source') in ('unknown', 'nominal_package', 'visual_estimate')
             and ((row['height_mm'] is None and row['height_source'] == 'unknown') or
                  (_number(row['height_mm'], 0, 100) and row['height_mm'] > 0 and row['height_source'] != 'unknown')))
@@ -155,7 +200,7 @@ def _component_valid(row, known):
         return False
 
 
-def _validate(data, known):
+def _validate(data, known, boxes=None):
     """Return usable bodies, safe decisions and errors without deleting uncertain input."""
     errors = []
     if not isinstance(data, dict):
@@ -203,6 +248,8 @@ def _validate(data, known):
                     package='', marking='?', terminal_count=None, terminal_layout='unresolved',
                     height_mm=None, height_source='unknown', confidence='low',
                     evidence='Valid global envelope retained; malformed metadata requires manual review'))
+                if 'grouping_basis' in row:
+                    valid[-1]['grouping_basis'] = row['grouping_basis']
     parents = {r['component_id']: r for r in valid}
     votes = {}
     for d in decisions:
@@ -233,10 +280,109 @@ def _validate(data, known):
             safe[identity] = d
         else:
             errors.append(f'candidate {identity}: invalid status/retained parent/source link')
+    if boxes is not None:
+        valid, safe, geometry_errors = _validate_geometry(valid, safe, boxes)
+        errors.extend(geometry_errors)
     return valid, safe, errors
 
 
+def _validate_geometry(rows, safe, boxes):
+    """Check spatial accounting without treating detector bounds as exact bodies.
+
+    Positive overlap is necessary, not sufficient, evidence of a source link.
+    Disconnected sources require a physical body/assembly declaration.
+    Legacy module and body-with-leads declarations remain compatible; no area, count, package
+    or product-specific thresholds are used. This cannot certify photo accuracy.
+    """
+    def overlaps(a, b):
+        return max(a[0], b[0]) < min(a[2], b[2]) and max(a[1], b[1]) < min(a[3], b[3])
+
+    retained, errors = [], []
+    for row in rows:
+        row = deepcopy(row)
+        sources = row['source_candidate_ids']
+        original_sources = list(sources)
+        reason = None
+        basis = row.get('grouping_basis')
+        visible_body = (row.get('presence_confidence') == 'high' and
+                        row['bbox_basis'] != 'unknown' and basis != 'unresolved')
+        outside = [i for i in sources if not overlaps(row['bbox'], boxes[i])]
+        if basis is not None and basis not in ('single_body', 'assembly', 'unresolved'):
+            reason = 'invalid grouping basis'
+        elif basis == 'unresolved':
+            reason = 'unsupported group of separate or unresolved proposals'
+        elif outside and not visible_body:
+            reason = 'source proposal outside retained envelope'
+        elif outside:
+            # Presence and provenance are independent. Bad IDs must not dismantle
+            # an explicitly visible housing into its detector fragments.
+            sources = [i for i in sources if i not in outside]
+            row['source_candidate_ids'] = sources
+            for identity in outside:
+                safe.pop(identity, None)
+            errors.append(f"component {row['component_id']}: source proposals {outside} outside retained envelope; "
+                          'links removed, visible body and offending originals retained')
+        if reason is None and len(sources) > 1:
+            pending = set(sources)
+            reached = {pending.pop()}
+            while pending:
+                adjacent = {i for i in pending if any(overlaps(boxes[i], boxes[j]) for j in reached)}
+                if not adjacent:
+                    break
+                reached.update(adjacent)
+                pending.difference_update(adjacent)
+            # Explicit assembly semantics allow separated onboard parts. Legacy
+            # rows may express that same contract through module + known body.
+            assembly = (basis == 'assembly' or (basis is None and
+                        row['class'] in ('module', 'rf_module')))
+            assembly = (assembly and row['bbox_basis'] != 'unknown' and
+                        row.get('presence_confidence', row['confidence']) != 'low')
+            # A visible body with attached leads can have separate detections on
+            # its terminals. The returned body is the physical connection, not
+            # an arbitrary distance threshold between those detector fragments.
+            single_body = visible_body and (basis == 'single_body' or
+                (basis is None and row['bbox_basis'] == 'body_and_leads'))
+            uncertain_group = (row['bbox_basis'] == 'unknown' and
+                row.get('presence_confidence', row['confidence']) == 'low' and
+                all(safe.get(i, {}).get('status') == 'uncertain' for i in sources))
+            if uncertain_group or (pending and not (assembly or single_body)):
+                reason = 'unsupported group of separate or unresolved proposals'
+        if reason:
+            errors.append(f"component {row['component_id']}: {reason}; individual proposals retained")
+            # Drop all decisions pointing at this parent, including inconsistent
+            # source lists; neither a dangling merge nor a rejection may hide input.
+            safe = {i: d for i, d in safe.items()
+                    if i not in original_sources and d.get('component_id') != row['component_id']}
+        else:
+            retained.append(row)
+    return retained, safe, errors
+
+
+def _inventory_context(text):
+    """Remove recognized fixed-box defaults and delimited board extraction context.
+
+    Match complete known templates with flexible whitespace, preserving custom
+    text before/after them and unknown edits rather than guessing their extent.
+    """
+    from .photo_grounding import VERIFICATION_PROMPT
+    from .component_types import BLOCK_START, BLOCK_END
+    legacy = VERIFICATION_PROMPT.replace(
+        'Do NOT invent exact electrical function, part numbers, markings or values.',
+        'Do NOT identify electrical type, part number, markings, values or circuit function.')
+    for template in (VERIFICATION_PROMPT, legacy):
+        pattern = r'\s+'.join(re.escape(word) for word in template.split())
+        text = re.sub(pattern, '', text)
+    text = re.sub(re.escape(BLOCK_START) + r'.*?' + re.escape(BLOCK_END), '', text, flags=re.DOTALL)
+    return text.strip()
+
+
 def _normalize(row, identity, length, width, issues):
+    """@brief Convert AI observations without modifying the raw audit response."""
+    marking = row['marking']
+    # These whole-field AI sentinels mean no literal marking, not CAD glyphs.
+    # Preserve partial readings (e.g. S?) and the original response for audit.
+    if marking.strip().casefold() in ('none', '?'):
+        marking = ''
     x, y, a, b = row['bbox']; sx, sy = (a-x)*length, (b-y)*width
     angle = row['rotation_deg']
     # Axis-aligned bounds cannot determine rotated side lengths (singular at 45deg).
@@ -258,18 +404,24 @@ def _normalize(row, identity, length, width, issues):
         package=row['package'] if row['confidence'] != 'low'
             and row.get('class_confidence', row['confidence']) != 'low'
             and row['bbox_basis'] != 'unknown' else '',
-        _package_verified=False, package_evidence=row['evidence'], marking=row['marking'],
+        _package_verified=False, package_evidence=row['evidence'], marking=marking,
         bbox_basis='leads' if row['bbox_basis'] == 'body_and_leads' else row['bbox_basis'],
         terminal_count=row['terminal_count'], terminal_layout=row['terminal_layout'],
+        terminal_count_basis='visible_including_tabs',
+        lead_count=row.get('lead_count'), lead_count_complete=row.get('lead_count_complete', False),
+        lead_count_confidence=row.get('lead_count_confidence', 'low'),
         confidence=row['confidence'], color_hex='#303030', _uncertain=True,
         presence_confidence=row.get('presence_confidence', 'low'),
         class_confidence=row.get('class_confidence', row['confidence']),
         component_id=row['component_id'], source_candidate_ids=list(row['source_candidate_ids']),
         _source='AI global inventory', _geometry_source='global photographic envelope; not nominal package',
         _review_reason=row['evidence'], _global_inventory_errors=list(issues))
-    if row['terminal_count']:
-        result.update(pin_count=row['terminal_count'], pin_count_confidence=row['confidence'],
-                      pin_count_source='photo_observation')
+    # Visible surfaces may be a minimum and include tabs: only an explicit
+    # complete ordinary-lead observation supports an exact package lead count.
+    if (row.get('lead_count_complete') is True and type(row.get('lead_count')) is int
+            and row.get('lead_count_confidence') in ('medium', 'high')):
+        result.update(pin_count=row['lead_count'], pin_count_confidence=row['lead_count_confidence'],
+                      pin_count_source='complete_lead_observation')
     return result
 
 
@@ -284,8 +436,8 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     @param call Application API callable; invoked at most once, without local retries.
     @param log Persistent progress callback, including partial/failure diagnostics.
     @param cache_dir Optional response cache and audit directory.
-    @param verification_prompt Custom supplemental text; legacy default is excluded.
-    @param extra_instructions Supplemental user notes, subordinate to the global contract.
+    @param verification_prompt Custom notes; recognized legacy defaults are excluded.
+    @param extra_instructions User notes; delimited board extraction blocks are excluded.
     @return Normalized component hypotheses, retaining unresolved input on failure.
     @throws ValueError Invalid photo, dimensions or candidate IDs/boxes; failed empty inventory.
     @note Arbitrary angles remain photographic evidence; CAD envelopes stay axis aligned.
@@ -294,6 +446,9 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         An uncertain decision without a parent retains the original envelope.
     @note Display names use model-generated component IDs, not verified silkscreen
         references. Names are presentation only, never geometry/accounting keys.
+    @note Unsupported groups restore individual proposals. Spatially impossible
+        links are detached from high-presence bodies without discarding their geometry.
+        Body/assembly declarations are hypotheses, not independent visual proof.
     """
     from .photo_yolo_review import _valid_box, _write_audit
     if photo is None or len(photo.shape) < 2 or min(photo.shape[:2]) < 1:
@@ -328,14 +483,9 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         left = max(0, round((i/3-.05)*w)); right = min(w, max(left+1, round(((i+1)/3+.05)*w)))
         content.extend([{'type': 'text', 'text': f'Context strip {i+1}; GLOBAL bounds {[left/w, 0, right/w, 1]}'},
                         image_block(photo[:, left:right])])
-    from .photo_grounding import VERIFICATION_PROMPT
     prompt = PROMPT
-    custom = (verification_prompt or '').strip()
-    legacy = VERIFICATION_PROMPT.strip()
-    # Profiles may append user notes to the persisted legacy default.
-    if custom.startswith(legacy):
-        custom = custom[len(legacy):].strip()
-    supplements = [s.strip() for s in (custom, extra_instructions or '') if s.strip()]
+    supplements = [clean for s in (verification_prompt or '', extra_instructions or '')
+                   if (clean := _inventory_context(s))]
     if supplements:
         prompt += ('\nSupplemental user context follows. Apply where compatible with the global\n'
                    'coordinate/accounting/schema contract above; never impose a target count.\n'
@@ -347,11 +497,12 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
                   tool=inventory_tool(), max_tokens=24000, has_pdf=False)
     key = hashlib.sha256(json.dumps(kwargs, sort_keys=True, allow_nan=False).encode()).hexdigest()
     path = Path(cache_dir)/f'global-inventory-{key}.json' if cache_dir else None
+    boxes = {c['id']: c['bbox'] for c in candidates}
     data = None
     if path and path.exists():
         try:
             record = json.loads(path.read_text(encoding='utf-8'))
-            if record.get('key') == key and not _validate(record.get('response'), known)[2]:
+            if record.get('key') == key and not _validate(record.get('response'), known, boxes)[2]:
                 data = record['response']; log('Global inventory: validated cache hit.')
         except (OSError, ValueError, AttributeError):
             pass
@@ -361,7 +512,7 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
             data = call(**kwargs)
         except (OpenRouterError, ValueError, OSError) as exc:
             data = {'error': str(exc)}
-    rows, safe, errors = _validate(data, known)
+    rows, safe, errors = _validate(data, known, boxes)
     if isinstance(data, dict) and data.get('error'):
         errors.append(str(data['error']))
     if errors:

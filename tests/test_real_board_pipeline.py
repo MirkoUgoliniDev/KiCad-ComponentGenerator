@@ -132,5 +132,5 @@ def test_synthetic_r0603_through_gui_resolver_and_real_freecad(
     assert "colori nativi" not in freecad_log  # This text marks color-import fallback.
     gui_log = window.log_text.toPlainText()
     assert "R_0603_1608Metric.step" in gui_log
-    assert "Explicitly confirmed KiCad models: 1" in gui_log
+    assert "Attached KiCad models (explicit choices or mechanical estimates): 1" in gui_log
     assert "KICADGEN_IMPORT_OK:" in gui_log

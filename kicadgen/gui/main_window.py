@@ -3566,6 +3566,8 @@ class MainWindow(QMainWindow):
         table.insertRow(row)
         metadata = QTableWidgetItem()
         row_metadata = deepcopy(photo_metadata or {})
+        for key, value in (component.match_evidence or {}).items():
+            row_metadata.setdefault(key, deepcopy(value))
         row_metadata.update(pin_count=component.pin_count, pins_by_side=component.pins_by_side,
                             pin_count_confidence=component.pin_count_confidence,
                             pin_count_source=component.pin_count_source,
@@ -3673,6 +3675,10 @@ class MainWindow(QMainWindow):
                 model_rotation_deg=c.get("model_rotation_deg"),
                 model_selection=deepcopy(c.get("model_selection")),
                 model_match=deepcopy(c.get("model_match")),
+                match_evidence={key: deepcopy(c[key]) for key in (
+                    'presence_confidence', 'class_confidence', 'confidence',
+                    '_yolo_review_only', '_yolo_origin', 'terminal_count',
+                    'terminal_layout', 'terminal_count_basis', '_global_inventory_status', 'class') if key in c},
                 model_z_offset_mm=float(c.get("model_z_offset_mm") or 0.0),
                 pin_count=c.get("pin_count"), pins_by_side=c.get("pins_by_side"),
                 pin_count_confidence=str(c.get("pin_count_confidence") or ""),
@@ -3721,6 +3727,10 @@ class MainWindow(QMainWindow):
                 model_rotation_deg=metadata.get("model_rotation_deg"),
                 model_selection=deepcopy(metadata.get("model_selection")),
                 model_match=deepcopy(metadata.get("model_match")),
+                match_evidence={key: deepcopy(metadata[key]) for key in (
+                    'presence_confidence', 'class_confidence', 'confidence',
+                    '_yolo_review_only', '_yolo_origin', 'terminal_count',
+                    'terminal_layout', 'terminal_count_basis', '_global_inventory_status', 'class') if key in metadata},
                 model_z_offset_mm=float(metadata.get("model_z_offset_mm") or 0.0),
                 color_hex=table.cellWidget(row, 8).text().strip() or "#303030",
                 marking=table.cellWidget(row, 9).text().strip(),

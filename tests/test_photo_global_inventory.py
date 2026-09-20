@@ -1,12 +1,221 @@
 """@brief Offline regressions for global inventory accounting and compatibility."""
 from copy import deepcopy
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
 
 from kicadgen.services import photo_global_inventory as inventory
 from kicadgen.services.photo_yolo_review import review_yolo_components
+
+
+@pytest.mark.parametrize('kind,basis,presence,accepted', [
+    ('unknown', 'unknown', 'low', False),
+    ('resistor', 'body', 'high', False),
+    ('module', 'body', 'high', True),
+    ('rf_module', 'unknown', 'low', False),
+])
+def test_separated_groups_require_physical_assembly(kind, basis, presence, accepted, tmp_path):
+    items = [candidate(1), candidate(2)]
+    items[1]['_box'] = [.6, .6, .7, .7]
+    data = response()
+    data['components'][0].update(**{'class': kind}, bbox_basis=basis,
+                                 presence_confidence=presence)
+    before = deepcopy(items)
+    result, calls, _ = run(data, items, cache=tmp_path)
+    assert len(calls) == 1 and items == before
+    if accepted:
+        assert len(result) == 1 and result[0]['component_id'] == 'assembly'
+        assert not run(data, items, cache=tmp_path)[1]
+    else:
+        assert {r['_id'] for r in result} == {1, 2}
+        assert [r['_box'] for r in result] == [r['_box'] for r in items]
+        assert all(r['_global_inventory_status'] == 'partial' for r in result)
+        assert not list(tmp_path.glob('*.json'))
+
+
+def test_explicit_assembly_is_not_limited_to_module_class():
+    items = [candidate(1), candidate(2)]
+    items[1]['_box'] = [.6, .6, .7, .7]
+    data = response()
+    data['components'][0].update(**{'class': 'unknown'}, grouping_basis='assembly',
+                                 presence_confidence='high')
+    assert len(run(data, items)[0]) == 1
+    data['components'][0]['grouping_basis'] = 'unresolved'
+    assert len(run(data, items)[0]) == 2
+
+
+@pytest.mark.parametrize('kind', ['module', 'resistor', 'unknown'])
+def test_outside_source_invalidates_parent_even_for_one_source(kind):
+    data = response()
+    data['components'] = [body('assembly', [1], **{'class': kind}, bbox=[.6, .6, .8, .8])]
+    data['candidate_decisions'] = data['candidate_decisions'][:1]
+    result, _, _ = run(data, [candidate()])
+    assert len(result) == 1 and result[0]['_id'] == 1
+    assert result[0]['_box'] == candidate()['_box']
+    assert any('outside retained envelope' in e for e in result[0]['_global_inventory_errors'])
+
+
+@pytest.mark.parametrize('kind', ['unknown', 'resistor', 'module'])
+def test_visible_body_survives_all_sources_unlinked(kind, tmp_path):
+    data = response()
+    data['components'] = [body('visible', [1], **{'class': kind},
+        bbox=[.6, .6, .8, .8], presence_confidence='high', class_confidence='low')]
+    data['candidate_decisions'] = [dict(candidate_id=1, status='keep',
+        component_id='visible', reason='Incorrect association')]
+    before = deepcopy(data)
+    result, _, _ = run(data, [candidate()], cache=tmp_path)
+    assert data == before
+    assert len(result) == 2
+    assert result[0]['component_id'] == 'visible' and result[0]['source_candidate_ids'] == []
+    assert result[0]['_box'] == [.6, .6, .8, .8]
+    assert result[1]['_id'] == 1 and result[1]['_box'] == candidate()['_box']
+    assert all(r['_global_inventory_status'] == 'partial' for r in result)
+    assert any('links removed' in e for e in result[0]['_global_inventory_errors'])
+    assert not list(tmp_path.glob('*.json'))
+
+
+def test_visible_body_with_separate_leads_detaches_only_outside_source():
+    data = response()
+    data['components'][0].update(**{'class': 'unknown'}, source_candidate_ids=[1, 2, 3],
+        bbox_basis='body_and_leads', presence_confidence='high', class_confidence='low')
+    data['candidate_decisions'].append(dict(candidate_id=3, status='merge',
+        component_id='assembly', reason='Incorrect fragment association'))
+    items = [candidate(1), dict(candidate(2), _box=[.6, .6, .7, .7]),
+             dict(candidate(3), _box=[.9, .9, 1, 1])]
+    result, _, _ = run(data, items)
+    assert len(result) == 2
+    assert result[0]['source_candidate_ids'] == [1, 2]
+    assert result[0]['_box'] == data['components'][0]['bbox']
+    assert result[1]['_id'] == 3 and result[1]['_box'] == items[2]['_box']
+
+
+def test_high_presence_does_not_override_explicit_unresolved_group():
+    data = response()
+    data['components'][0].update(grouping_basis='unresolved', presence_confidence='high',
+                                bbox_basis='body_and_leads')
+    assert [r['_id'] for r in run(data)[0]] == [1, 2]
+
+
+@pytest.mark.parametrize('sources', [[], [1]])
+def test_explicit_unresolved_zero_or_one_source_never_replaces_original(sources, tmp_path):
+    data = dict(components=[body('unresolved', sources, grouping_basis='unresolved',
+                                presence_confidence='high')],
+        candidate_decisions=[dict(candidate_id=1, status='uncertain',
+            component_id='unresolved' if sources else None,
+            reason='Presence unresolved', rejection_category=None)], uncertainties=[])
+    original = candidate()
+    before = deepcopy(data)
+    result, calls, _ = run(data, [original], cache=tmp_path)
+    assert data == before and len(calls) == 1
+    assert len(result) == 1 and result[0]['_id'] == original['_id']
+    assert result[0]['_box'] == original['_box']
+    assert 'component_id' not in result[0]
+    assert result[0]['_global_inventory_status'] == 'partial'
+    assert any('unsupported group' in e for e in result[0]['_global_inventory_errors'])
+    assert not list(tmp_path.glob('*.json'))
+
+
+def test_connected_fragments_unknown_class_remain_one_body():
+    items = [candidate(1), candidate(2)]
+    items[1]['_box'] = [.3, .3, .5, .5]
+    data = response()
+    data['components'][0].update(**{'class': 'unknown'}, presence_confidence='high',
+                                 class_confidence='low', grouping_basis='single_body')
+    assert len(run(data, items)[0]) == 1
+
+
+def test_overlap_alone_cannot_promote_an_unresolved_group():
+    data = response()
+    data['components'][0].update(bbox_basis='unknown', presence_confidence='low')
+    for decision in data['candidate_decisions']:
+        decision['status'] = 'uncertain'
+    result, _, _ = run(data)
+    assert [r['_id'] for r in result] == [1, 2]
+
+
+def test_malformed_metadata_does_not_erase_explicit_unresolved_group():
+    data = response()
+    data['components'][0].update(grouping_basis='unresolved', terminal_count=True)
+    assert [r['_id'] for r in run(data)[0]] == [1, 2]
+
+
+@pytest.mark.parametrize('old', [False, True])
+@pytest.mark.parametrize('field', ['verification_prompt', 'extra_instructions'])
+def test_known_prompt_versions_and_generated_category_removed_preserving_notes(old, field):
+    from kicadgen.services.photo_grounding import VERIFICATION_PROMPT
+    from kicadgen.services.component_types import BLOCK_START, BLOCK_END
+    template = VERIFICATION_PROMPT
+    if old:
+        template = template.replace('Do NOT invent exact electrical function, part numbers, markings or values.',
+            'Do NOT identify electrical type, part number, markings, values or circuit function.')
+    template = template.replace(' ', '\r\n  ')
+    context = f'Keep measured dimensions.\n{template}\nCustom note A.\n{BLOCK_START}\nBoard-only datasheet instructions\n{BLOCK_END}\nCustom note B.'
+    _, calls, _ = run(response(), **{field: context})
+    prompt = calls[0]['system_prompt']
+    assert 'mechanical-envelope inventory' not in prompt
+    assert 'Do not add IDs' not in prompt and 'Board-only' not in prompt
+    assert all(note in prompt for note in ('Keep measured dimensions.', 'Custom note A.', 'Custom note B.'))
+
+
+def test_unknown_custom_verification_text_is_not_discarded():
+    custom = 'This is a mechanical-envelope inventory with custom user requirements. Inspect the socket.'
+    assert inventory._inventory_context(custom) == custom
+
+
+def test_geometry_is_revalidated_on_cache_read(tmp_path):
+    run(response(), cache=tmp_path)
+    path = next(tmp_path.glob('*.json'))
+    record = json.loads(path.read_text())
+    record['response']['components'][0]['bbox'] = [.6, .6, .8, .8]
+    path.write_text(json.dumps(record))
+    result, calls, _ = run(response(), cache=tmp_path)
+    assert len(calls) == 1 and len(result) == 1
+
+
+def test_saved_audit_replay_without_network(monkeypatch):
+    """@brief Replay local evidence through the real request/validation path offline."""
+    import socket
+    path = Path(__file__).resolve().parents[1]/'generated/photo-cache/yolo-audit/global-inventory-9192fbb92e084110ae701802800b896a.json'
+    if not path.exists():
+        pytest.skip('Private saved audit is not shipped with the repository')
+    def forbidden(*args, **kwargs):
+        pytest.fail('Saved audit replay must never access the network')
+    monkeypatch.setattr(socket.socket, 'connect', forbidden)
+    monkeypatch.setattr(socket, 'create_connection', forbidden)
+    audit = json.loads(path.read_text(encoding='utf-8'))
+    items = [dict(candidate(c['id']), _box=c['bbox'], **c.get('detector_metadata', {}))
+             for c in audit['inputs']['candidates']]
+    calls = []
+    def fake(**kwargs):
+        calls.append(kwargs)
+        return deepcopy(audit['response'])
+    w, h = audit['inputs']['image_size_px']
+    result = inventory.review_global_inventory(np.zeros((h, w, 3), np.uint8), items,
+        *audit['inputs']['board_size_mm'], 'offline/saved', fake, lambda text: None,
+        verification_prompt=audit['prompt'].split('never impose a target count.\n', 1)[1])
+    assert len(calls) == 1
+    assert 'Do not add IDs or alter rectangles' not in calls[0]['system_prompt']
+    assert 'TIPOLOGIA:' not in calls[0]['system_prompt']
+    assert not any(r.get('component_id') == 'R13' for r in result)
+    rejected = next(r for r in audit['response']['components'] if r['component_id'] == 'R13')
+    originals = {r['_id']: r for r in result if 'component_id' not in r}
+    for identity in rejected['source_candidate_ids']:
+        assert originals[identity]['_box'] == next(c['_box'] for c in items if c['_id'] == identity)
+    module = next(r for r in result if r.get('component_id') == 'MOD1')
+    assert module['_box'] == next(r['bbox'] for r in audit['response']['components'] if r['component_id'] == 'MOD1')
+    assert {61, 63}.issubset(originals)
+    assert 89 in originals
+    for identity, detached in (('SW2', 89), ('U4', 63)):
+        saved = next(r for r in audit['response']['components'] if r['component_id'] == identity)
+        kept = next(r for r in result if r.get('component_id') == identity)
+        assert kept['_box'] == saved['bbox']
+        assert kept['source_candidate_ids'] == [i for i in saved['source_candidate_ids'] if i != detached]
+        assert not any(i in originals for i in kept['source_candidate_ids'])
+    assert not any(r.get('component_id') == 'C15' for r in result)
+    assert module['length_mm'] == pytest.approx(.3855 * 63.3)
+    assert module['width_mm'] == pytest.approx(.815 * 25.4)
 
 
 def candidate(identity=1):
@@ -153,7 +362,7 @@ def test_terminal_tab_and_arbitrary_orientation_remain_evidence():
         bbox_basis='body_and_leads', package='SOT-223', height_mm=1.8, height_source='nominal_package')
     row = run(data)[0][0]
     assert row['kind'] == 'ic' and row['class'] == 'semiconductor_unknown'
-    assert row['pin_count'] == 4 and row['bbox_basis'] == 'leads'
+    assert row['terminal_count'] == 4 and 'pin_count' not in row and row['bbox_basis'] == 'leads'
     assert row['_reported_rotation_deg'] == 37 and row['rotation_deg'] == 0
     assert not row['_orientation_verified'] and row['_height_estimated']
 
