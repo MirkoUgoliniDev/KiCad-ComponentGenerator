@@ -1,3 +1,25 @@
+# 2026-09-20 (8) — il cablaggio della revisione, provato davvero
+
+La vista era provata da sola, mai dentro `MainWindow`: mancava proprio la parte
+in cui si sbaglia, perche' il worker si ferma su un `threading.Event` e chi non
+gli consegna una risposta lo lascia appeso per sempre.
+
+`tests/test_yolo_review_wiring.py` (4 test) esercita le tre uscite sul vero
+`MainWindow` con la sola vista sostituita:
+
+* **OK** → le proposte tenute arrivano al worker e la modale dell'analisi
+  torna su;
+* **Annulla** → arriva `None`, l'estrazione si ferma e la modale **non** torna
+  su, perche' non prosegue nulla;
+* **vista che non si apre** → arrivano tutte le proposte e l'analisi finisce:
+  un difetto della revisione non deve buttare via cio' che e' gia' stato
+  pagato.
+
+Verificato anche che foto, numero di proposte e **quote della scheda** passano
+il confine dei thread intatte (63,3 x 25,4 nel test).
+
+Resta da fare: la prova a mano nell'app, con il rilevatore impostato su YOLO.
+
 # 2026-09-20 (7) — il confronto ha dichiarato «Differenze: 0» su due fallimenti
 
 Prima esecuzione reale di `tools/compare_vision_models.py` sulla scheda TEST
