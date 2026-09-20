@@ -680,3 +680,55 @@ def test_an_edge_another_view_saw_beyond_is_not_clipped_any_more(setup):
     assert 'right' not in sides, 'quel bordo lo ha misurato il secondo frammento'
     assert 'left' in sides, 'quello sinistro resta un taglio di tessera'
     assert merged[0]['_box'][2] == pytest.approx(.7)
+
+
+def test_a_body_bigger_than_the_overlap_is_measured_by_the_view_that_contains_it(setup):
+    """@brief Regola fisica: una tessera non misura cio' che non contiene.
+
+    Un corpo piu' grande della sovrapposizione fra tessere tocca un bordo in
+    OGNI tessera che lo contiene, quindi da li' il suo ingombro non e'
+    osservabile. Se un'altra vista lo contiene per intero, il frammento non
+    aggiunge nulla -- ed era proprio quello a creare il falso accordo su un
+    bordo di tessera che ha rimpicciolito del 15% il modulo radio.
+    """
+    session, _ = setup
+    # Vista d'insieme: il corpo intero, ma con poca confidenza. Una tessera lo
+    # taglia e lo vede meglio: e' il caso reale, all'incontrario di come si
+    # potrebbe pensare.
+    outputs = [_raw(([320, 320, 400, 200], 10, .18)),
+               _raw(([560, 320, 160, 200], 10, .80)), _raw(), _raw()]
+    session.raw = lambda index: outputs[index]
+    rows = yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64,
+                                       include_review_candidates=True)
+    tagliati = [row for row in rows if row['_yolo_clipped_sides']]
+    assert not tagliati, 'il frammento non poteva misurare quel corpo'
+    assert any(row['_yolo_confidence'] == pytest.approx(.18) for row in rows), \
+        'la vista che lo contiene resta, anche se meno sicura'
+
+
+def test_a_small_body_touching_a_seam_is_still_an_observed_body(setup):
+    """@brief Caso negativo: sotto la sovrapposizione la regola non si applica.
+
+    Un corpo piu' piccolo della sovrapposizione che sfiora una cucitura e'
+    comunque contenuto per intero da una tessera vicina: toglierlo perche'
+    tocca un bordo perderebbe un componente vero.
+    """
+    session, _ = setup
+    # Stessa struttura del caso positivo -- una vista d'insieme poco sicura che
+    # contiene, una tessera che taglia -- ma il corpo e' 100 px contro i 160 di
+    # sovrapposizione: quella tessera lo misura, e quindi resta.
+    outputs = [_raw(([320, 320, 700, 300], 10, .18)),
+               _raw(([600, 320, 100, 80], 3, .70)), _raw(), _raw()]
+    session.raw = lambda index: outputs[index]
+    rows = yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64,
+                                       include_review_candidates=True)
+    assert any(row['_yolo_clipped_sides'] for row in rows), \
+        'un corpo piccolo sulla cucitura resta, marcato ma presente'
+
+
+def test_the_overlap_of_a_view_comes_from_its_own_tile_size():
+    """@brief La quota che decide viene dalla ricetta, non da un numero a parte."""
+    assert yolo.view_overlap_px('tile640-2400-480') == 160
+    assert yolo.view_overlap_px('tile1280-960-0') == 320
+    assert yolo.view_overlap_px('overview') == float('inf')
+    assert yolo.view_overlap_px(None) == float('inf')

@@ -142,11 +142,70 @@ def validate_yolo_setup(model_path=None) -> dict:
     return _setup(model_path)[-1]
 
 
+#: Frazione di tessera che si ripete nella successiva. Il passo e' il
+#: complemento: e' la stessa costante usata da _views, tenuta qui perche' da
+#: essa dipende quale corpo una tessera puo' misurare e quale no.
+_TILE_OVERLAP_FRACTION = 0.25
+
+
+def view_overlap_px(view):
+    """@brief Quanto una tessera si sovrappone alla successiva, in pixel.
+
+    @param view Nome della vista, come lo genera _views.
+    @return Pixel di sovrapposizione, o infinito per la vista d'insieme.
+    @note E' la quota che decide che cosa quella vista puo' misurare: un corpo
+        piu' grande della sovrapposizione tocca un bordo in OGNI tessera che lo
+        contiene, quindi da li' il suo ingombro non e' osservabile, per quanto
+        il rilevamento sia sicuro.
+    """
+    name = str(view or "")
+    if not name.startswith("tile"):
+        return float("inf")
+    try:
+        size = int(name.split("-")[0][4:])
+    except ValueError:
+        return float("inf")
+    return size * _TILE_OVERLAP_FRACTION
+
+
+def _prefer_complete_views(rows, complete):
+    """@brief Toglie i frammenti che nessuna tessera poteva misurare.
+
+    @param rows Righe da filtrare.
+    @param complete Rilevamenti non tagliati, da QUALUNQUE vista e a qualunque
+        confidenza: che una vista abbia visto il corpo per intero e' un fatto
+        geometrico e non dipende dalla soglia operativa. Restringerlo ai soli
+        candidati sopra soglia lasciava passare proprio il caso che conta --
+        sulla scheda di prova la vista d'insieme vedeva il modulo intero a
+        0,18, sotto soglia, e il confronto non la trovava.
+    @return Le righe da tenere.
+    @note Regola fisica, non una soglia: un corpo piu' grande della
+        sovrapposizione fra tessere tocca un bordo in ogni tessera che lo
+        contiene, quindi quella vista non ne conosce l'ingombro. Se un'altra
+        vista lo contiene per intero, e' quella a misurarlo, e il frammento non
+        aggiunge nulla -- anzi, e' cio' che creava il falso accordo su un bordo
+        di tessera. Sotto la sovrapposizione la regola non si applica: un corpo
+        piccolo che sfiora una cucitura resta un corpo osservato.
+    """
+    keep = []
+    for row in rows:
+        sides = row.get("clipped_sides")
+        box = row["box"]
+        size = max(box[2] - box[0], box[3] - box[1])
+        if sides and size > view_overlap_px(row.get("view")) and any(
+                _cover(box, other["box"]) >= _FRAGMENT_COVERED for other in complete
+                if other is not row):
+            continue
+        keep.append(row)
+    return keep
+
+
 def _views(width, height):
     yield "overview", (0, 0, width, height)
     for size in (640, 1280):
         def starts(length):
-            values = range(0, max(1, length - size + 1), int(size * 0.75))
+            values = range(0, max(1, length - size + 1),
+                           int(size * (1 - _TILE_OVERLAP_FRACTION)))
             return sorted(set(values) | {max(0, length - size)})
 
         for y in starts(height):
@@ -420,7 +479,7 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
     views = list(_views(width, height))
     emit(f"YOLO local: {len(views)} views; confidence {_CONFIDENCE}; "
          f"audit floor {_AUDIT_CONFIDENCE}; class-agnostic NMS IoU {_NMS_IOU}; CPU inference.")
-    proposals, candidates, view_records, fragments = [], [], [], []
+    proposals, candidates, view_records, fragments, whole = [], [], [], [], []
     nms_trace = [] if audit_dir is not None else None
     for view, bounds in views:
         x, y, x1, y1 = bounds
@@ -440,6 +499,10 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
         # Raccolti sempre, non solo per l'audit: senza di loro un corpo piu'
         # grande della sovrapposizione fra tessere non arriva da nessuna parte.
         fragments.extend(row for row in rows if row["rejection"] == "clipped_by_tile")
+        # Chi ha visto un corpo per intero conta come misura anche sotto la
+        # soglia operativa: e' un fatto geometrico, non un giudizio.
+        whole.extend(row for row in rows if not row["clipped_sides"]
+                     and row["rejection"] in (None, "below_confidence"))
         if audit_dir is not None or include_review_candidates:
             proposals.extend(rows)
         view_records.append({"name": view, "bounds": list(bounds), "scale": ratio,
@@ -458,6 +521,14 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
     if confident:
         retained = _nms(retained + confident, np, nms_trace, "global")
     retained.sort(key=lambda row: (row["box"][1], row["box"][0]))
+    # Chi ha visto un corpo per intero vale come misura anche se non era
+    # abbastanza sicuro da diventare un candidato.
+    before_preference = len(retained)
+    retained = _prefer_complete_views(retained, whole)
+    if len(retained) < before_preference:
+        emit(f"YOLO local: {before_preference - len(retained)} clipped detections dropped; "
+             "they are larger than the tile overlap, so that view could not measure them, "
+             "and a view containing them whole is available.")
     if recovered:
         emit(f"YOLO local: {len(recovered)} bodies rebuilt from tile seams "
              f"({len(confident)} at the operating threshold); no view saw them whole, "
@@ -468,8 +539,9 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
     if audit_dir is not None or include_review_candidates:
         review_pool = retained + [row for row in proposals if row["rejection"] == "below_confidence"]
         review_pool += [row for row in recovered if row["rejection"] == "below_confidence"]
-        review_proposals = [row for row in _nms(review_pool, np)
-                            if row["rejection"] == "below_confidence"]
+        review_proposals = _prefer_complete_views(
+            [row for row in _nms(review_pool, np) if row["rejection"] == "below_confidence"],
+            whole)
     returned = retained + (review_proposals if include_review_candidates else [])
     returned.sort(key=lambda row: (row["box"][1], row["box"][0]))
     components = []
