@@ -760,7 +760,9 @@ def extract_pin_header_params(
 ) -> ExtractedParams:
     """@brief Extract dimensions and pinout, optionally using local YOLO photo proposals.
 
-    @param photo_detector Photo localization backend: ai (legacy) or yolo (local).
+    @param photo_detector Photo localization backend: ai (legacy), yolo (local
+        proposals plus one AI reconciliation) or vlm (no local detector: the
+        vision model enumerates the bodies in that same single request).
     @param yolo_model_path Optional compatible ONNX file; validated before paid calls.
     @note YOLO localization is local; datasheet, package and terminal review still use AI.
 
@@ -788,7 +790,7 @@ def extract_pin_header_params(
     """
     if not doc_paths:
         raise ExtractionError("Nessun file selezionato.")
-    if photo_detector not in ("ai", "yolo"):
+    if photo_detector not in ("ai", "yolo", "vlm"):
         raise ExtractionError("Rilevatore fotografico non supportato.")
     if photo_detector == "yolo":
         from .photo_yolo import validate_yolo_setup
@@ -980,7 +982,7 @@ def extract_pin_header_params(
                 grounding_prompt=grounding_prompt, verification_prompt=verification_prompt,
                 **({'detector': photo_detector, 'yolo_model_path': yolo_model_path,
                     'review_proposals': review_proposals}
-                   if photo_detector == 'yolo' else {}),
+                   if photo_detector in ('yolo', 'vlm') else {}),
             )
         except ReviewCancelled as exc:
             # Un annullo non e' un guasto dell'inventario: proseguire qui
@@ -991,7 +993,7 @@ def extract_pin_header_params(
         if photo_report and photo_report.components:
             # The global YOLO reconciliation already reports terminal evidence.
             # Further paid crop calls are an explicit optional UI action only.
-            if photo_detector != 'yolo' and isinstance(getattr(photo_report, "photo_png", None), bytes):
+            if photo_detector not in ('yolo', 'vlm') and isinstance(getattr(photo_report, "photo_png", None), bytes):
                 from .photo_terminals import observe_terminals
                 try:
                     photo_report.components = observe_terminals(

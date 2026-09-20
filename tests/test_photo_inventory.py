@@ -1,4 +1,5 @@
 """Regressioni geometriche e orchestrazione con risposte AI simulate."""
+import json
 from pathlib import Path
 
 import pytest
@@ -247,3 +248,39 @@ def test_a_sharp_enough_top_view_says_nothing():
 @pytest.mark.parametrize("crop_px, length", [(0, 63.3), (-5, 63.3), (770, 0), (770, float("nan"))])
 def test_degenerate_calibration_does_not_raise(crop_px, length):
     inv._warn_if_too_coarse(crop_px, length, lambda m: None)
+
+
+def test_the_inventory_leaves_a_photo_an_overlay_and_a_json_on_disk(tmp_path):
+    """@brief Poter contestare un risultato guardandolo, non fidandosi di un numero.
+
+    Il modello non restituisce immagini: l'annotazione la disegna il programma
+    dal JSON, che resta l'unica cosa che il modello ha davvero detto. I tre
+    file portano lo stesso istante nel nome, cosi' si sa che appartengono alla
+    stessa corsa.
+    """
+    messages = []
+    components = [dict(name='U1', kind='ic', x_mm=0, y_mm=0, length_mm=5, width_mm=5,
+                       height_mm=1, rotation_deg=0, _box=(.1, .1, .3, .3))]
+    written = inv.save_inventory_evidence(
+        tmp_path, b'foto-finta', b'sovrapposizione-finta', components, messages.append)
+    assert len(written) == 3
+    photo, overlay, document = written
+    assert photo.read_bytes() == b'foto-finta'
+    assert overlay.read_bytes() == b'sovrapposizione-finta'
+    saved = json.loads(document.read_text(encoding='utf-8'))
+    assert saved['count'] == 1 and saved['components'][0]['name'] == 'U1'
+    stamps = {path.name.split('-')[1] for path in written}
+    assert len(stamps) == 1
+    assert str(document) in messages[0]
+
+
+def test_a_disk_error_is_reported_and_never_wastes_an_analysis_already_paid(tmp_path):
+    """@brief Caso negativo: salvare e' un di piu', non una condizione."""
+    messages = []
+    blocked = tmp_path/'file-non-cartella'
+    blocked.write_text('occupato', encoding='utf-8')
+    assert inv.save_inventory_evidence(blocked, b'x', b'y', [], messages.append) == []
+    assert messages and 'non salvato' in messages[0]
+    # Senza cartella non si scrive e non si dice nulla: non e' un errore.
+    assert inv.save_inventory_evidence(None, b'x', b'y', [], messages.append) == []
+    assert len(messages) == 1

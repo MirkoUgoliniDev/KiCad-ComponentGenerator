@@ -288,3 +288,46 @@ def test_review_prunes_before_the_paid_call_and_a_cancel_never_pays(pipeline):
     # e' la riconciliazione globale, cioe' la seconda richiesta.
     assert len(pipeline['requests']) == before + 1
     assert pipeline['requests'][-1]['tool']['function']['name'] != 'report_global_inventory'
+
+
+def test_without_a_local_detector_the_vision_model_enumerates_the_bodies(pipeline):
+    """@brief Terzo rilevatore: nessuna proposta locale, stessa richiesta e schema.
+
+    Il percorso e' quello di produzione con un pezzo in meno: niente ONNX,
+    niente revisione delle proposte (non ce ne sono), una sola chiamata. Il
+    prompt cambia perche' non c'e' nulla da riconciliare, e cade la
+    sovrapposizione numerata, che sarebbe una copia vuota della fotografia.
+    """
+    pipeline['inventory'] = dict(components=[_body(sources=[])], candidate_decisions=[],
+                                 uncertainties=[])
+    params = pipeline['execute'](photo_detector='vlm')
+    pipeline['detection'].assert_not_called()
+    pipeline['setup'].assert_not_called()
+    assert len(pipeline['requests']) == 2
+    request = pipeline['requests'][1]
+    assert request['tool']['function']['name'] == 'report_global_inventory'
+    # Quattro immagini, non cinque: la foto piena e le tre strisce.
+    assert sum(b['type'] == 'image_url' for b in request['content_blocks']) == 4
+    inputs = json.loads(request['content_blocks'][2]['text'])
+    assert inputs['candidates'] == [] and inputs['board_size_mm'] == [40, 20]
+    assert inputs['prompt_version'] == global_inventory.ENUMERATION_PROMPT_VERSION
+    system = request['system_prompt']
+    assert 'NO local detector ran' in system and 'candidate_decisions MUST be an empty list' in system
+    # La coda che parla di corpi, misure e orientamento e' la stessa dell'altro
+    # percorso: le regole fisiche non cambiano con chi propone i rettangoli.
+    assert global_inventory.PROMPT[global_inventory.PROMPT.index(
+        global_inventory._COMMON_FROM):] in system
+    assert len(params.components_3d) == 1
+    row = params.components_3d[0]
+    assert row['component_id'] == 'whole-assembly' and row['length_mm'] == pytest.approx(28)
+    assert row['_global_inventory_prompt_version'] == global_inventory.ENUMERATION_PROMPT_VERSION
+
+
+def test_the_yolo_path_keeps_its_own_prompt_and_its_numbered_overlay(pipeline):
+    """@brief Caso negativo del precedente: con le proposte nulla cambia."""
+    pipeline['execute']()
+    request = pipeline['requests'][1]
+    assert sum(b['type'] == 'image_url' for b in request['content_blocks']) == 5
+    assert json.loads(request['content_blocks'][4]['text'])['prompt_version'] \
+        == global_inventory.PROMPT_VERSION
+    assert 'NO local detector ran' not in request['system_prompt']

@@ -505,7 +505,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     @note Local detections are hypotheses, not package identities; AI review may cost credit.
     """
     log = progress or (lambda message: None)
-    if detector not in ('ai', 'yolo'):
+    if detector not in ('ai', 'yolo', 'vlm'):
         raise ValueError('Rilevatore fotografico non supportato.')
     report = InventoryResult()
     def warn(message):
@@ -553,14 +553,21 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     import cv2
     ok, encoded = cv2.imencode(".png", photo)
     report.photo_png = encoded.tobytes() if ok else None
-    if detector == 'yolo':
-        from .photo_yolo import detect_yolo_components
+    if detector in ('yolo', 'vlm'):
         from .photo_global_inventory import review_global_inventory
-        audit = Path(cache_dir)/'yolo-audit' if cache_dir else None
-        log('YOLO locale: localizzazione senza invio della foto; verifica package AI successiva.')
-        proposals = detect_yolo_components(photo, length, width, model_path=yolo_model_path,
-                                          log=log, audit_dir=audit, include_review_candidates=True)
-        if review_proposals is not None:
+        proposals = []
+        if detector == 'yolo':
+            from .photo_yolo import detect_yolo_components
+            audit = Path(cache_dir)/'yolo-audit' if cache_dir else None
+            log('YOLO locale: localizzazione senza invio della foto; verifica package AI successiva.')
+            proposals = detect_yolo_components(photo, length, width, model_path=yolo_model_path,
+                                              log=log, audit_dir=audit, include_review_candidates=True)
+        else:
+            # Nessun rilevatore locale: la foto va al modello di visione, che
+            # enumera i corpi da solo. Stessa richiesta, stesso schema, stessa
+            # conversione in millimetri: cambia solo chi propone i rettangoli.
+            log('Nessun rilevatore locale: i corpi li enumera il modello di visione, in una sola richiesta.')
+        if proposals and review_proposals is not None:
             # Potare qui, non dopo: la riconciliazione che segue si paga, e
             # riceverla piu' pulita costa meno e le da' meno rumore da
             # smaltire. Annullare significa non procedere: nessuno deve pagare
@@ -574,7 +581,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             photo, proposals, length, width, classifier_model or model, call, log,
             cache_dir, verification_prompt=verification_prompt,
             extra_instructions=extra_instructions)
-        report.calibration['detector'] = 'yolo'
+        report.calibration['detector'] = detector
         report.calibration['proposal_count'] = len(proposals)
         report.calibration['coverage_added_count'] = sum(
             not c.get('source_candidate_ids', [True]) for c in report.components)
@@ -585,9 +592,11 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             warn('Inventario globale parziale: ' + '; '.join(issues)
                  + '. Componenti irrisolti conservati per revisione manuale.')
         report.overlay_png = draw_inventory(photo, report.components)
-        log(f'Inventario ibrido revisionato: {len(report.components)} ipotesi da {len(proposals)} proposte YOLO '
-            'con riconciliazione globale in una richiesta; '
-            'completezza non certificata. Package, altezze e orientamenti dubbi da rivedere.')
+        log(f'Inventario revisionato: {len(report.components)} ipotesi '
+            + (f'da {len(proposals)} proposte YOLO ' if detector == 'yolo'
+               else 'enumerate dal modello di visione ')
+            + 'in una sola richiesta; completezza non certificata. '
+              'Package, altezze e orientamenti dubbi da rivedere.')
         return report
     if grounding:
         from .photo_grounding import grounded_components

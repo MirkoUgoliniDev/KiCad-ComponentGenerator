@@ -266,15 +266,49 @@ def test_recipe_has_41_views_and_complete_edge_coverage():
         assert covered.all()
 
 
-def test_tile_translation_and_interior_fragment_rejection(setup):
-    """@brief Translate complete tile detections while discarding interior-edge fragments."""
+def test_a_fragment_is_dropped_only_when_another_view_saw_the_body_whole(setup):
+    """@brief Il taglio di una tessera non e' prova di assenza.
+
+    La regola sui frammenti serve a togliere i doppioni di cio' che un'altra
+    vista vede per intero: qui la vista 2 lo vede intero, quindi il frammento
+    della vista 1 e' un doppione e sparisce, e sopravvive l'ingombro NON
+    troncato. Il caso opposto e' nel test seguente.
+    """
     session, _ = setup
+    # Stesso corpo: intero in tile640-360-0 (x 600..680), tagliato dal bordo
+    # destro di tile640-0-0 (x 600..640).
     outputs = [_raw(), _raw(([630, 50, 60, 40], 10, 0.9)),
-               _raw(([30, 50, 40, 60], 3, 0.8)), _raw()]
+               _raw(([280, 50, 80, 60], 10, 0.8)), _raw()]
     session.raw = lambda index: outputs[index]
     results = yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64)
     assert len(results) == 1
-    assert results[0]["_box"] == pytest.approx((0.37, 20 / 640, 0.41, 80 / 640))
+    assert results[0]["_box"] == pytest.approx((0.6, 20 / 640, 0.68, 80 / 640))
+    assert not results[0]["_yolo_clipped_recovery"]
+
+
+def test_a_body_no_view_saw_whole_is_rebuilt_instead_of_lost(setup):
+    """@brief Il caso del regolatore: piu' grande della sovrapposizione fra tessere.
+
+    Su dati reali il rilevatore lo aveva visto quattro volte (la migliore a
+    0,165) e ogni volta il riquadro toccava un bordo, perche' i suoi ~350 px
+    non stanno nei 160 px di sovrapposizione delle tessere da 640. Scartando
+    ogni frammento il corpo spariva del tutto. Qui due meta' viste da tessere
+    diverse tornano un corpo solo, marcato come ricomposto perche' il suo
+    ingombro resta troncato.
+    """
+    session, _ = setup
+    outputs = [_raw(), _raw(([500, 50, 300, 40], 10, 0.9)),
+               _raw(([20, 50, 40, 40], 10, 0.7)), _raw()]
+    session.raw = lambda index: outputs[index]
+    results = yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64)
+    assert len(results) == 1
+    row = results[0]
+    assert row["_yolo_clipped_recovery"] and "cucitura" in row["_source"]
+    assert not row["_yolo_review_only"]
+    # Unione dei due frammenti: 350..640 dalla prima tessera, 360..400 dalla
+    # seconda. Restano i bordi esterni, cioe' l'ingombro piu' ampio visto.
+    assert row["_box"] == pytest.approx((0.35, 30 / 640, 0.64, 70 / 640))
+    assert row["_yolo_confidence"] == pytest.approx(0.9)
 
 
 @pytest.mark.parametrize("xywh", [[0, 320, 20, 40], [640, 320, 20, 40],
@@ -541,16 +575,23 @@ def test_opt_in_review_candidates_are_deduplicated_and_audit_independent(setup, 
         assert not list(tmp_path.glob('yolo-*.json'))
 
 
-def test_review_candidates_do_not_include_internal_tile_fragments(setup):
-    """@brief Subthreshold fragments cannot bypass the complete-body geometry filter."""
+def test_a_weak_fragment_comes_back_as_a_weak_hypothesis_not_as_nothing(setup):
+    """@brief Sotto soglia e tagliato restano due cose diverse.
+
+    Il frammento ricomposto rientra dalla porta che gli spetta -- quella delle
+    ipotesi deboli, da rivedere -- e non da quella dei candidati sicuri. E' il
+    caso reale: il regolatore era a 0,165, sotto la soglia operativa.
+    """
     session, _ = setup
-    outputs = [_raw(), _raw(([630, 50, 60, 40], 3, .2)),
-               _raw(([30, 50, 40, 60], 3, .2)), _raw()]
+    outputs = [_raw(), _raw(([630, 50, 60, 40], 3, .2)), _raw(), _raw()] * 2
     session.raw = lambda index: outputs[index]
     result = yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64,
                                          include_review_candidates=True)
-    assert len(result) == 1 and result[0]['_yolo_review_only']
-    assert result[0]['_box'] == pytest.approx((.37, 20/640, .41, 80/640))
+    assert len(result) == 1
+    assert result[0]['_yolo_review_only'] and result[0]['_yolo_clipped_recovery']
+    assert result[0]['_yolo_confidence'] == pytest.approx(.2)
+    # Senza l'adesione esplicita alla revisione, un'ipotesi debole non esce.
+    assert yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64) == []
 
 
 @pytest.mark.parametrize('value', [None, 'false', 0, 1])

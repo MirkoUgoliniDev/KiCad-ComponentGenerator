@@ -191,6 +191,82 @@ def _nms(rows, np, trace=None, stage=None):
     return retained
 
 
+#: Quanto un frammento deve stare dentro un rilevamento intero perche' sia lo
+#: stesso corpo, gia' visto meglio: sotto questa frazione della propria area
+#: il frammento e' l'unica prova che quel corpo esista.
+_FRAGMENT_COVERED = 0.5
+
+
+def _cover(first, second):
+    """@brief Frazione del primo rettangolo che sta dentro il secondo."""
+    wide = max(0.0, min(first[2], second[2]) - max(first[0], second[0]))
+    high = max(0.0, min(first[3], second[3]) - max(first[1], second[1]))
+    area = (first[2] - first[0]) * (first[3] - first[1])
+    return (wide * high / area) if area > 0 else 0.0
+
+
+def _recover_clipped(retained, fragments):
+    """@brief Ricompone i corpi che nessuna vista ha visto per intero.
+
+    @param retained Rilevamenti interni sopravvissuti alla NMS globale.
+    @param fragments Righe scartate perche' toccavano il bordo di una tessera.
+    @return Righe ricomposte, con la confidenza migliore del gruppo.
+    @note Il taglio di una tessera non e' prova di assenza. La regola che
+        scarta i frammenti serve a togliere i doppioni di cio' che un'altra
+        vista vede per intero: quando NESSUNA vista lo vede intero, scartare
+        significa perdere il corpo. Succede a chi e' piu' grande della
+        sovrapposizione fra tessere -- 160 px su tessere da 640 -- e allora il
+        corpo tocca un bordo in ogni tessera che lo contiene. Le sovrapposizioni
+        si potrebbero allargare, ma nessuna larghezza fissa e' garantita:
+        l'ingombro dei corpi non si conosce prima di averli visti.
+    @note L'unione dei frammenti resta un ingombro TRONCATO quando il taglio e'
+        su un bordo che nessuna tessera supera: e' un'ipotesi da rivedere, non
+        una misura, e chi la riceve la marca come tale.
+    @note Separazione dichiaratamente fragile. Il raggruppamento lega ogni
+        frammento al capostipite, non al precedente, ma sulla scheda di prova
+        l'unione piu' grande cresce comunque a quattro volte l'area del
+        capostipite (31 frammenti, da 6,4x11,3 a 19,7x14,7 mm). Va bene per
+        dire «qui c'e' un corpo», non per dire quanto e' grande: chi misura e'
+        la riconciliazione, che riceve queste righe come ipotesi incerte.
+    """
+    orphans = [row for row in fragments
+               if not any(_cover(row["box"], kept["box"]) >= _FRAGMENT_COVERED
+                          for kept in retained)]
+    groups = []
+    for row in sorted(orphans, key=lambda row: -row["confidence"]):
+        for group in groups:
+            # Ogni frammento deve coprire il CAPOSTIPITE del gruppo, non un
+            # membro qualsiasi: con il legame a catena l'unione puo' camminare
+            # per tutta la scheda, un frammento alla volta. Legata al
+            # capostipite, ogni membro sta per meta' dentro di lui, quindi
+            # l'unione resta nell'ordine del doppio in ogni direzione.
+            # ATTENZIONE, misurato sulla scheda vera: non basta a rendere
+            # l'unione stretta. Il gruppo piu' grande resta di 31 frammenti e
+            # cresce fino a QUATTRO VOLTE l'area del capostipite (6,4x11,3 mm
+            # -> 19,7x14,7 mm). L'ingombro di un corpo ricomposto e' percio'
+            # un'ipotesi grossolana, non una misura: per questo esce marcato e
+            # la riconciliazione lo rimisura.
+            # La porzione condivisa, non la IoU: due meta' dello stesso corpo
+            # si coprono a vicenda ma hanno IoU bassa, ed e' proprio per
+            # questo che la NMS non le aveva unite.
+            if max(_cover(row["box"], group[0]["box"]),
+                   _cover(group[0]["box"], row["box"])) >= _FRAGMENT_COVERED:
+                group.append(row)
+                break
+        else:
+            groups.append([row])
+    recovered = []
+    for group in groups:
+        best = max(group, key=lambda row: row["confidence"])
+        box = [min(row["box"][0] for row in group), min(row["box"][1] for row in group),
+               max(row["box"][2] for row in group), max(row["box"][3] for row in group)]
+        recovered.append(dict(best, box=box, clipped_by_tile=True,
+                              recovered_from=[row["proposal_id"] for row in group],
+                              rejection=(None if best["confidence"] >= _CONFIDENCE
+                                         else "below_confidence")))
+    return recovered
+
+
 def _proposals(raw, bounds, image_size, transform, view, np):
     """Keep auditable pre-NMS proposals; reject malformed or cropped body boxes."""
     x, y, x1, y1 = bounds
@@ -326,7 +402,7 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
     views = list(_views(width, height))
     emit(f"YOLO local: {len(views)} views; confidence {_CONFIDENCE}; "
          f"audit floor {_AUDIT_CONFIDENCE}; class-agnostic NMS IoU {_NMS_IOU}; CPU inference.")
-    proposals, candidates, view_records = [], [], []
+    proposals, candidates, view_records, fragments = [], [], [], []
     nms_trace = [] if audit_dir is not None else None
     for view, bounds in views:
         x, y, x1, y1 = bounds
@@ -343,6 +419,9 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
         eligible = [row for row in rows if row["rejection"] is None]
         selected = _nms(eligible, np, nms_trace, "eligible_per_view")
         candidates.extend(selected)
+        # Raccolti sempre, non solo per l'audit: senza di loro un corpo piu'
+        # grande della sovrapposizione fra tessere non arriva da nessuna parte.
+        fragments.extend(row for row in rows if row["rejection"] == "clipped_by_tile")
         if audit_dir is not None or include_review_candidates:
             proposals.extend(rows)
         view_records.append({"name": view, "bounds": list(bounds), "scale": ratio,
@@ -354,12 +433,23 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
                              "raw_proposals": len(rows), "retained_before_global_nms": len(selected)})
         emit(f"YOLO local {view}: {len(selected)} candidates; {invalid} invalid rows rejected.")
     retained = _nms(candidates, np, nms_trace, "global")
+    # Cio' che nessuna vista ha visto intero torna in gioco: sopra soglia come
+    # candidato, sotto soglia come ipotesi da rivedere, come qualunque altro.
+    recovered = _recover_clipped(retained, fragments)
+    confident = [row for row in recovered if row["rejection"] is None]
+    if confident:
+        retained = _nms(retained + confident, np, nms_trace, "global")
     retained.sort(key=lambda row: (row["box"][1], row["box"][0]))
-    # Retained detections outrank weak proposals. Excluded classes and tile
-    # fragments cannot enter through this route, regardless of audit storage.
+    if recovered:
+        emit(f"YOLO local: {len(recovered)} bodies rebuilt from tile seams "
+             f"({len(confident)} at the operating threshold); no view saw them whole, "
+             "so their extent is truncated and must be reviewed.")
+    # Retained detections outrank weak proposals. Excluded classes cannot enter
+    # through this route, regardless of audit storage.
     review_proposals = []
     if audit_dir is not None or include_review_candidates:
         review_pool = retained + [row for row in proposals if row["rejection"] == "below_confidence"]
+        review_pool += [row for row in recovered if row["rejection"] == "below_confidence"]
         review_proposals = [row for row in _nms(review_pool, np)
                             if row["rejection"] == "below_confidence"]
     returned = retained + (review_proposals if include_review_candidates else [])
@@ -376,11 +466,16 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
             "rotation_deg": 0 if sx >= sy else 90, "height_mm": 1.0,
             "_height_source": "estimated_placeholder_not_measured", "_height_estimated": True,
             "color_hex": "#303030", "marking": "", "confidence": "low",
-            "_box": (x0, y0, x1, y1), "_source": "YOLO local",
+            "_box": (x0, y0, x1, y1),
+            "_source": ("YOLO local, ricomposto da cucitura" if row.get("recovered_from")
+                        else "YOLO local"),
             "_uncertain": True, "_id": identifier,
             "_yolo_class": row["class"], "_yolo_confidence": row["confidence"],
             "_yolo_proposal_id": row["proposal_id"],
             "_yolo_class_ambiguous": row["class_ambiguous"],
+            # L'ingombro di un corpo ricomposto e' troncato dal bordo che lo ha
+            # tagliato: e' un'ipotesi da rivedere, non una misura.
+            "_yolo_clipped_recovery": bool(row.get("recovered_from")),
             "_yolo_origin": ("low_confidence_review" if row["rejection"] == "below_confidence"
                              else "operating_threshold"),
             "_yolo_review_only": row["rejection"] == "below_confidence",
@@ -403,7 +498,7 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
                                                       "only at ordinary confidence threshold",
                              "component_limit": None},
                      views=view_records, raw_proposals=proposals,
-                     nms_suppressions=nms_trace,
+                     nms_suppressions=nms_trace, recovered_clipped_fragments=recovered,
                      low_confidence_review_proposals=review_proposals,
                      retained_detector_results=retained, components=components)
         emit(f"YOLO local audit: {_write_audit(audit_dir, audit)}")

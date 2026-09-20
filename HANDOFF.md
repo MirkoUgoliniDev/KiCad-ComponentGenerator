@@ -1,3 +1,120 @@
+# 2026-09-20 (10) — terzo rilevatore: il modello di visione al posto di YOLO
+
+Decisione dell'utente, dopo la vista di revisione: «sono profondamente dubbioso
+e sfiduciato di YOLO, proviamo a bypassarlo e usiamo Qwen3-VL come
+riconoscitore di componenti». Chiesto anche: prompt adatto, foto ad alta
+risoluzione, e in uscita **un'immagine annotata e un JSON**.
+
+## Cosa e' stato fatto
+
+`detector = 'vlm'`, terza scelta accanto ad `ai` e `yolo`. Non e' un percorso
+nuovo: e' quello di produzione con un pezzo in meno. Nessun ONNX, nessuna
+revisione delle proposte (non ce ne sono), **una sola richiesta**, stesso
+schema `report_global_inventory`, stessa conversione in millimetri, stessa
+gestione dell'incertezza. Cambia solo chi propone i rettangoli.
+
+* `PROMPT_ENUMERATE` (`ENUMERATION_PROMPT_VERSION = 'global-vlm-inventory-1'`):
+  testa nuova -- non c'e' nulla da riconciliare, `candidate_decisions` vuoto --
+  e **coda identica** a quella dell'altro percorso, presa dalla stessa stringa
+  con uno split su `_COMMON_FROM`. Le regole fisiche (corpi separati, misure,
+  famiglie di package, orientamento, riferimento asimmetrico) non devono
+  esistere in due copie che divergono.
+* Senza candidati cade anche la sovrapposizione numerata, che sarebbe una copia
+  vuota della fotografia: **quattro immagini invece di cinque**.
+* Risoluzione: `image_block` manda la foto calibrata **a risoluzione piena**
+  (sulla scheda di prova 3487x1391, ~81 px/mm) e comprime solo oltre 5 MiB per
+  immagine, prima riducendo la qualita' JPEG e solo in ultimo i pixel. Le tre
+  strisce contestuali sono anch'esse a piena risoluzione: di fatto uno zoom 3x
+  su ciascun terzo.
+* `save_inventory_evidence`: scrive nella cartella dell'analisi
+  `inventory-<istante>-photo.png`, `inventory-<istante>-overlay.png` e
+  `inventory-<istante>.json`, con i percorsi nel log. **Il modello non
+  restituisce immagini**: l'annotazione la disegna il programma dal JSON, che
+  resta l'unica cosa che il modello ha davvero detto. Un errore di disco viene
+  riportato e basta: non deve mai sprecare un'analisi gia' pagata.
+
+## Quale modello viene usato
+
+Il percorso `vlm` usa il **modello di verifica foto** (Impostazioni → «Modello
+per verifica foto»), non quello dei datasheet. Da li' si sceglie
+`qwen/qwen3-vl-235b-a22b-instruct`, ora visibile nel selettore grazie alla
+correzione del checkpoint (5). Da valutare se rinominare quel campo quando il
+rilevatore e' `vlm`: oggi il nome dice «verifica» ma il modello sta anche
+rilevando.
+
+## Verifica
+
+`tests/test_global_inventory_pipeline.py`: coppia positivo/negativo sulla
+catena reale -- senza rilevatore locale non parte ne' l'ONNX ne' la sua
+validazione, le immagini sono quattro, i candidati sono vuoti, il prompt e'
+quello di enumerazione e la coda comune e' testualmente la stessa; con YOLO
+nulla cambia (cinque immagini, prompt e versione di prima).
+`tests/test_photo_inventory.py`: i tre file portano lo stesso istante nel nome;
+un errore di disco non interrompe nulla.
+
+# 2026-09-20 (9) — il regolatore non era sotto soglia: era tagliato dalle tessere
+
+Segnalazione dell'utente sulla vista di revisione: «il regolatore proprio non
+l'ha filato», e «ci deve essere qualche regolazione di YOLO». Aveva ragione, ma
+non e' la soglia.
+
+## Misurato sull'audit della sua corsa, non ipotizzato
+
+`generated/photo-cache/yolo-audit/yolo-pwt_h91k.json`, 2265 proposte grezze:
+
+* Sul regolatore ci sono **quattro rilevamenti**, il migliore `connector` a
+  **0,165**. Nessuno e' stato scartato per confidenza: tutti e quattro portano
+  `rejection = clipped_by_tile`.
+* Il suo riquadro e' largo ~350 px e alto ~320 px. Le tessere da 640 si
+  sovrappongono di **160 px** (passo 480). Un corpo piu' grande della
+  sovrapposizione **tocca un bordo in ogni tessera che lo contiene**, quindi la
+  regola che scarta i frammenti di bordo lo cancella ovunque.
+* Le tessere da 1280 lo conterrebbero intero (sovrapposizione 320 px) ma li'
+  il modello non ha sparato nulla nemmeno a 0,05.
+
+Prima ipotesi verificata e **smentita**: pensavo che le file di pad entrassero
+dal ripescaggio delle classi `pads`/`pins`. Nell'audit i rilevamenti con
+`class_ambiguous` sono **zero**: il modello chiama proprio le file di pad
+«switch», «battery», «clock». Filtrare per classe non avrebbe tolto niente.
+
+## Cosa e' cambiato
+
+`_recover_clipped`: un frammento di bordo viene scartato **solo** se un
+rilevamento interno lo copre per almeno meta' della propria area -- cioe' solo
+quando e' il doppione di qualcosa visto meglio altrove, che era l'intento
+originale della regola. Gli orfani vengono raggruppati e uniti, e rientrano
+dalla porta che gli spetta: sopra 0,25 come candidati, sotto come ipotesi
+deboli da rivedere. Escono marcati `_yolo_clipped_recovery`.
+
+Rigiocato sull'audit vero: **331 frammenti → 20 corpi ricomposti** (4 sopra
+soglia, 16 deboli), e fra questi il regolatore a 0,165, 7,4x6,0 mm, centro
+x=-2,8 y=-0,9 mm.
+
+## Fragilita' dichiarata
+
+Il raggruppamento lega ogni frammento al **capostipite** e non al precedente,
+per impedire all'unione di camminare per tutta la scheda. **Non basta**: sulla
+scheda di prova il gruppo piu' grande resta di 31 frammenti e l'unione cresce a
+**quattro volte** l'area del capostipite (da 6,4x11,3 a 19,7x14,7 mm). Va bene
+per dire «qui c'e' un corpo», non per dire quanto e' grande. Per questo le
+righe ricomposte escono marcate e incerte: a misurarle e' la riconciliazione.
+Il commento nel codice diceva prima che il legame a stella aveva risolto il
+problema: **era falso**, corretto citando la misura.
+
+## Aperto su questo fronte
+
+* Le file di pad continuano a entrare come corpi (il modello le chiama
+  «switch»/«battery»). L'idea concordata e' usare le posizioni dei contatti
+  **dichiarate** dall'estrazione (lati, numero, passo: il generatore del
+  footprint le sa calcolare) per riconoscere i riquadri che ci cadono sopra.
+  Non ancora implementata.
+* Le sovrapposizioni annidate restano alla riconciliazione, come deciso: una
+  soppressione per inclusione perderebbe i passivi dentro il riquadro di un
+  modulo. Sulla scheda: 45 coppie annidate, di cui **una sola** di taglia
+  simile.
+* Attenzione operativa: modificare `photo_yolo.py` mentre l'app e' aperta non
+  ha effetto sulla corsa in esecuzione -- Python ha gia' caricato il modulo.
+
 # 2026-09-20 (8) — il cablaggio della revisione, provato davvero
 
 La vista era provata da sola, mai dentro `MainWindow`: mancava proprio la parte

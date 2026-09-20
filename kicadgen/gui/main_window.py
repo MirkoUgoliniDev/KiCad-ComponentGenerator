@@ -88,6 +88,10 @@ _PHOTO_DETECTOR_TRANSLATIONS = {
            "fr": "IA (actuelle)", "de": "KI (bisherig)"},
     "yolo": {"it": "YOLO locale + verifica AI", "en": "Local YOLO + AI verification",
              "fr": "YOLO local + vérification IA", "de": "Lokales YOLO + KI-Prüfung"},
+    "vlm": {"it": "Solo modello di visione (nessun rilevatore locale)",
+            "en": "Vision model only (no local detector)",
+            "fr": "Modèle de vision seul (aucun détecteur local)",
+            "de": "Nur Sehmodell (kein lokaler Detektor)"},
     "model": {"it": "Modello YOLO:", "en": "YOLO model:",
               "fr": "Modèle YOLO :", "de": "YOLO-Modell:"},
     "browse": {"it": "Sfoglia…", "en": "Browse…",
@@ -773,7 +777,7 @@ class MainWindow(QMainWindow):
     def _refresh_photo_detector_controls(self) -> None:
         """Translate session controls without changing selected data or paths."""
         self.label_photo_detector.setText(self._photo_detector_text("label"))
-        for index, key in enumerate(("ai", "yolo")):
+        for index, key in enumerate(("ai", "yolo", "vlm")):
             self.combo_photo_detector.setItemText(index, self._photo_detector_text(key))
         self.combo_photo_detector.setToolTip(self._photo_detector_text("help"))
         self.label_yolo_model.setText(self._photo_detector_text("model"))
@@ -1152,6 +1156,7 @@ class MainWindow(QMainWindow):
         self.combo_photo_detector = QComboBox()
         self.combo_photo_detector.addItem("", "ai")
         self.combo_photo_detector.addItem("", "yolo")
+        self.combo_photo_detector.addItem("", "vlm")
         # User-selected startup default; explicit AI fallback remains available.
         self.combo_photo_detector.setCurrentIndex(self.combo_photo_detector.findData("yolo"))
         self.combo_photo_detector.currentIndexChanged.connect(self._on_photo_detector_changed)
