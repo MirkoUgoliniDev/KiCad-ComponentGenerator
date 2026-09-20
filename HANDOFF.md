@@ -2711,3 +2711,55 @@ OpenCV: N proposte su M misurate…» e quante risultano non cardinali.
   manca la rettifica prospettica e la calibrazione rifiuta le foto inclinate
   oltre 1°. Fondere invece più viste DALL'ALTO già calibrate resta un'idea
   legittima e non implementata: oggi si tiene solo la più dettagliata.
+
+# 20:52 — correzione: il modello che guarda la fotografia non è più fissato nel codice
+
+**Correzione di una diagnosi sbagliata data poche ore prima.** Avevo detto
+all'utente che in modalità YOLO il campo «Modello di visione» fosse inerte e
+che la riconciliazione andasse al modello principale. **È falso.** La catena è:
+`main_window._extract_with_ai` → `verification_model` → `ExtractWorker` →
+`datasheet_extractor` (`classifier_model = verification_model or model or
+DEFAULT_MODEL`) → `photo_inventory` (`classifier_model or model`). Il classifier
+vince sempre: quel campo **è** il modello che riceve la fotografia e la
+chiamata a pagamento, sia con `vlm` (rileva ed elenca) sia con `yolo`
+(riconcilia le proposte locali). Il commento già presente nel codice era
+corretto; la mia lettura no.
+
+## Il difetto vero
+
+`MainWindow.__init__` inizializzava `self._vlm_model = DEFAULT_PHOTO_DETECTOR_MODEL`,
+cioè `qwen/qwen3-vl-235b-a22b-instruct` scritto in `photo_grounding`. All'avvio
+l'utente trovava quindi già scelto un modello che non aveva configurato da
+nessuna parte — ed è lo stesso che in una corsa precedente aveva restituito un
+inventario **vuoto**. Una costante nel codice della finestra vinceva in
+silenzio sulle impostazioni e dirottava la chiamata a pagamento.
+
+## Modifiche
+
+- `self._vlm_model` ora nasce `None`: significa «segui il modello configurato».
+- Nuovo `MainWindow._photo_detector_model()` — scelta di sessione se c'è,
+  altrimenti `_effective_model()` (modello di sessione o del profilo). Usato dal
+  campo della GUI, dal selettore e dalla costruzione del worker.
+- Il log **dichiara sempre** quale modello riceve la fotografia, con `yolo` e
+  con `vlm`, e se viene da impostazioni o da scelta di sessione. Prima lo
+  scriveva solo quando differiva dal modello principale: con i due uguali il
+  log taceva e la destinazione della spesa si scopriva dalla fattura.
+- Rimosso l'import ormai inutile di `DEFAULT_PHOTO_DETECTOR_MODEL` dalla GUI.
+  La costante resta in `photo_grounding` per chi la voglia come suggerimento,
+  ma non decide più niente all'avvio.
+
+**Non cambiato di proposito:** chi vuole spendere meno sulla fotografia che sui
+datasheet sceglie ancora un modello dal pannello, e vale per la sessione.
+
+## Test
+
+`tests/test_photo_detector_ui.py`: 49 passati. Contratto aggiornato dove
+asseriva il vecchio default (`worker.verification_model == DEFAULT_PHOTO_DETECTOR_MODEL`),
+spiegando perché è cambiato. Due test nuovi: all'avvio la chiamata sulla
+fotografia segue il modello configurato e una scelta esplicita dal pannello
+vince; il modello che riceve la fotografia finisce sempre nel log.
+
+Suite GUI eseguite una per file (nel contenitore VTK va in segmentation fault
+se più suite Qt girano nello stesso processo — artefatto d'ambiente, non del
+codice): review wiring 4, inventory gui 61, review dialog 32, yolo review
+dialog 7, auto match 1, live log 14, servizi 135. Tutte verdi.

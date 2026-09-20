@@ -68,7 +68,6 @@ from .generation_options_dialog import GenerationOptionsDialog
 from .guided_documents import GuidedDocuments
 from .model_dialog import pick_model
 from ..services.openrouter import PHOTO_CAPABILITIES
-from ..services.photo_grounding import DEFAULT_PHOTO_DETECTOR_MODEL
 from .pinout_dialog import PinoutDialog
 from .photo_review_dialog import PhotoReviewDialog, PhotoTransform
 from .preview_3d_vtk import Preview3DVtk
@@ -529,8 +528,12 @@ class MainWindow(QMainWindow):
         # Modello scelto solo per questa sessione (datasheet difficile): non
         # viene salvato in config.json e si perde alla chiusura, per scelta.
         self._session_model: str | None = None
-        #: Modello che guarda la fotografia quando il rilevatore e' 'vlm'.
-        self._vlm_model: str = DEFAULT_PHOTO_DETECTOR_MODEL
+        #: Scelta di sessione per il modello che guarda la fotografia. None
+        #: significa «quello configurato nel profilo»: all'avvio non si impone
+        #: un modello deciso qui dentro, perche' una costante nel codice della
+        #: finestra vince in silenzio sulle impostazioni dell'utente e manda la
+        #: chiamata a pagamento a un modello che lui non ha scelto.
+        self._vlm_model: str | None = None
         self._auto_after_extraction = False
         self._auto_generation_params = None
         self._applying_extraction = False
@@ -756,6 +759,24 @@ class MainWindow(QMainWindow):
     def _default_vision_model(self) -> str:
         return self._profile_values()['vision_model']
 
+    def _photo_detector_model(self) -> str:
+        """@brief Modello che guarda la fotografia nella prossima estrazione.
+
+        @return Identificatore del modello: la scelta di sessione se c'e',
+            altrimenti quella configurata nel profilo.
+        @note E' la chiamata a pagamento del percorso fotografico -- con 'vlm'
+            rileva ed elenca i corpi, con 'yolo' riconcilia le proposte
+            locali -- e finisce nel worker come `verification_model`.
+        @note All'avvio segue il modello configurato per l'estrazione, non una
+            costante scritta qui. Prima il valore iniziale era un modello
+            fissato nel codice della finestra: chi apriva l'app trovava gia'
+            scelto un modello che non aveva configurato, e la chiamata a
+            pagamento sulla fotografia ci andava senza che nulla lo dicesse.
+            Chi vuole un modello diverso, magari piu' economico, lo sceglie dal
+            pannello e vale per la sessione.
+        """
+        return self._vlm_model or self._effective_model()
+
     def _verification_model(self) -> str:
         """@brief Return the single AI model also used for photo verification."""
         return self._effective_model()
@@ -810,7 +831,7 @@ class MainWindow(QMainWindow):
         self.btn_pick_vlm_model.setAccessibleName(self._photo_detector_text("vlm_model"))
         for widget in (self.field_vlm_model, self.btn_pick_vlm_model):
             widget.setToolTip(self._photo_detector_text("vlm_help"))
-        self.field_vlm_model.setText(self._vlm_model)
+        self.field_vlm_model.setText(self._photo_detector_model())
         self._on_photo_detector_changed()
 
     def _on_photo_detector_changed(self) -> None:
@@ -848,7 +869,7 @@ class MainWindow(QMainWindow):
             i PDF nasconderebbe i modelli di sola visione, che sono proprio
             quelli che si vogliono provare qui.
         """
-        chosen = pick_model(self._vlm_model, self,
+        chosen = pick_model(self._photo_detector_model(), self,
                             title=self._photo_detector_text("vlm_model"),
                             capabilities=PHOTO_CAPABILITIES)
         if chosen:
@@ -1628,16 +1649,22 @@ class MainWindow(QMainWindow):
         # elenca i corpi, con 'yolo' riconcilia le proposte locali. In
         # entrambi i casi e' una chiamata sola, e non e' detto che debba
         # costare quanto il modello che legge i datasheet.
-        verification_model = (self._vlm_model
-                              if photo_detector in ('yolo', 'vlm') and self._vlm_model
-                              else model)
+        verification_model = (self._photo_detector_model()
+                              if photo_detector in ('yolo', 'vlm') else model)
         self._append_log(
             f"Estrazione da {len(doc_paths)} file con il modello AI {model}"
             + (" (solo questa sessione)." if self._session_model else ".")
         )
         self._on_ai_progress(f"Profilo AI: {self.combo_component_type.currentText()}.")
         self._on_ai_progress(f"Modello AI unico: {model}.")
-        if verification_model != model:
+        if photo_detector in ('yolo', 'vlm'):
+            # Detto sempre, non solo quando differisce dal modello principale:
+            # e' la chiamata a pagamento che guarda la fotografia, e va scritta
+            # nel log prima di partire, non dedotta dopo dalla fattura.
+            self._on_ai_progress(
+                f"Chiamata sulla fotografia affidata a {verification_model}"
+                + (" (scelto per questa sessione)." if self._vlm_model else " (da impostazioni)."))
+        elif verification_model != model:
             self._on_ai_progress(f"Rilevamento dei corpi affidato a {verification_model}.")
 
         self._extract_worker = ExtractWorker(

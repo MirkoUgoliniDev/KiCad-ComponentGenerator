@@ -7,8 +7,6 @@ from types import ModuleType
 
 import pytest
 
-from kicadgen.services.photo_grounding import DEFAULT_PHOTO_DETECTOR_MODEL
-
 from test_photo_inventory_gui import window
 from kicadgen.gui import main_window as gui
 
@@ -170,12 +168,15 @@ def test_preflight_happens_before_worker_and_busy_controls_restore(window, monke
     assert events == [("validate", path), ("start", worker)]
     assert worker.photo_detector == "yolo"
     assert worker.yolo_model_path == path
-    # Il datasheet resta al modello configurato; la chiamata che GUARDA la
-    # fotografia -- qui la riconciliazione delle proposte locali -- va al
-    # modello di visione scelto nel pannello. E' una chiamata sola, e non e'
-    # detto che debba costare quanto quella che legge i documenti.
+    # La chiamata che GUARDA la fotografia -- qui la riconciliazione delle
+    # proposte locali -- e' una chiamata sola e puo' andare a un modello
+    # diverso da quello che legge i documenti. Ma finche' nessuno ne sceglie
+    # uno, segue il modello configurato: all'avvio la finestra non impone un
+    # modello suo, altrimenti la chiamata a pagamento finisce a un modello che
+    # l'utente non ha scelto e non vede scritto da nessuna parte.
+    assert window._vlm_model is None
     assert worker.model == worker.vision_model == "configured/model"
-    assert worker.verification_model == window._vlm_model == DEFAULT_PHOTO_DETECTOR_MODEL
+    assert worker.verification_model == "configured/model"
     for control in (window.combo_photo_detector, window.field_yolo_model, window.btn_pick_yolo_model):
         assert not control.isEnabled()
     window._on_extract_finished()
@@ -407,3 +408,59 @@ def test_without_a_vision_model_the_photo_call_falls_back_to_the_configured_one(
     window._extract_with_ai()
     worker = window._extract_worker
     assert worker.model == worker.vision_model == worker.verification_model == "configured/model"
+
+
+def test_at_boot_the_photo_call_follows_the_configured_model(window, monkeypatch):
+    """@brief Caso positivo e negativo sul modello che guarda la fotografia.
+
+    All'avvio la finestra non deve imporre un modello proprio: la chiamata a
+    pagamento sulla fotografia segue quello configurato per l'estrazione.
+    Prima il valore iniziale era una costante scritta nella finestra, e chi
+    apriva l'app trovava gia' scelto un modello che non aveva configurato --
+    la riconciliazione ci finiva senza che nulla lo dicesse.
+
+    Scegliere un modello dal pannello resta possibile e vince: e' il caso in
+    cui si vuole spendere meno sulla fotografia che sui datasheet.
+    """
+    _fake_yolo(monkeypatch, lambda path: None)
+    monkeypatch.setattr(window, "_selected_documents", lambda: ([Path("board.png")], None))
+    monkeypatch.setattr(gui.ExtractWorker, "start", lambda self: None)
+    window.combo_photo_detector.setCurrentIndex(window.combo_photo_detector.findData("yolo"))
+    window._session_model = "configured/model"
+
+    # Appena aperta: nessuna scelta di sessione, e il campo mostra quello che
+    # verra' davvero usato.
+    assert window._vlm_model is None
+    assert window._photo_detector_model() == "configured/model"
+    window._extract_with_ai()
+    assert window._extract_worker.verification_model == "configured/model"
+
+    # Scelta esplicita dal pannello: vince, e resta solo per la sessione.
+    window._vlm_model = "cheap/vision-model"
+    assert window._photo_detector_model() == "cheap/vision-model"
+    window._extract_with_ai()
+    assert window._extract_worker.verification_model == "cheap/vision-model"
+
+
+def test_the_photo_call_model_is_always_written_in_the_log(window, monkeypatch):
+    """@brief Quale modello riceve la fotografia va detto prima di partire.
+
+    Veniva scritto solo quando differiva dal modello principale: con i due
+    uguali il log taceva, e non c'era modo di sapere dal log dove fosse
+    finita la chiamata a pagamento se non dalla fattura.
+    """
+    _fake_yolo(monkeypatch, lambda path: None)
+    monkeypatch.setattr(window, "_selected_documents", lambda: ([Path("board.png")], None))
+    monkeypatch.setattr(gui.ExtractWorker, "start", lambda self: None)
+    window.combo_photo_detector.setCurrentIndex(window.combo_photo_detector.findData("yolo"))
+    window._session_model = "configured/model"
+    lines = []
+    monkeypatch.setattr(window, "_on_ai_progress", lines.append)
+
+    window._extract_with_ai()
+    assert any("configured/model" in line and "fotografia" in line for line in lines), lines
+
+    lines.clear()
+    window._vlm_model = "cheap/vision-model"
+    window._extract_with_ai()
+    assert any("cheap/vision-model" in line and "sessione" in line for line in lines), lines
