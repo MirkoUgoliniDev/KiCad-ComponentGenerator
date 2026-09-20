@@ -1708,12 +1708,16 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dic
     return result
 
 
-def attach_models(components, log=None, library: Optional[Path] = None) -> int:
+def attach_models(components, log=None, library: Optional[Path] = None, progress=None) -> int:
     """@brief Attach explicit choices or supported mechanical estimates, clearing stale paths.
 
     @param components Mutable component dictionaries containing model_selection.
     @param log Optional diagnostic callback.
     @param library Optional library root for API compatibility.
+    @param progress Optional callback(done, total) called once per component.
+        This is the one step of a generation with a real total: every component
+        may cost a CAD measurement, so the count is what a progress bar can
+        honestly be built on.
     @return Number of explicit or inferred mechanical paths attached.
     @note Rejected or invalid explicit selections use synthetic geometry. Missing
         selections permit auto_matched mechanical estimates or provisional_matched
@@ -1725,7 +1729,11 @@ def attach_models(components, log=None, library: Optional[Path] = None) -> int:
     """
     note = log or (lambda message: None)
     resolved = 0
-    for component in components or []:
+    pending = list(components or [])
+    total = len(pending)
+    for done, component in enumerate(pending, 1):
+        if progress is not None:
+            progress(done - 1, total)
         if not isinstance(component, dict):
             continue
         # Il ripristino a True ripulisce lo stato calcolato nella corsa
@@ -1770,5 +1778,7 @@ def attach_models(components, log=None, library: Optional[Path] = None) -> int:
                 report["render_3d"] = False
                 note(f"YOLO-only hypothesis {component.get('name')}: kept for review, omitted from 3D.")
     _synchronize_preview_variants(components, note)
+    if progress is not None:
+        progress(total, total)
     note(f"Attached KiCad models (explicit choices or mechanical estimates): {resolved}.")
     return resolved

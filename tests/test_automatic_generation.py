@@ -176,7 +176,10 @@ def test_existing_outputs_need_explicit_confirmation(window, monkeypatch, overwr
     monkeypatch.setattr(QMessageBox, 'warning', lambda *a: warnings.append(a))
     begin(window, monkeypatch)
     window._on_extracted(acquired())
-    path = window._project_dir() / 'AutoModule.3dshapes' / 'AutoModule.step'
+    # Gli output portano il nome in uso, che l'estrazione non riscrive piu':
+    # propone il suo accanto al campo e aspetta un clic.
+    name = window._component_name()
+    path = window._project_dir() / f'{name}.3dshapes' / f'{name}.step'
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('keep existing')
     questions = []
@@ -293,6 +296,10 @@ def test_the_name_conflict_no_longer_opens_a_modal(window, monkeypatch):
     monkeypatch.setattr(QMessageBox, 'information', refuse)
     monkeypatch.setattr(QMessageBox, 'warning', lambda *args: None)
     window._on_extracted(acquired())
+    # L'estrazione non rinomina piu' da sola: il conflitto puo' nascere solo
+    # quando il nome proposto viene accettato, ed e' li' che va verificato.
+    assert window._component_name() == original_name
+    window.btn_use_suggested_name.click()
     assert window._component_name() == original_name, 'il conflitto deve conservare il nome'
     assert (target / 'photo.png').read_bytes() == b'altro progetto', 'documento sovrascritto'
     assert any('già documenti' in line or 'conten' in line
@@ -301,17 +308,30 @@ def test_the_name_conflict_no_longer_opens_a_modal(window, monkeypatch):
     window._on_generation_finished()
 
 
-def test_the_rename_no_longer_interrupts_the_analysis_with_a_question(window, monkeypatch):
-    """Scelta dell'utente: rinominare sempre, senza chiedere."""
+def test_the_proposed_name_waits_for_a_click_and_never_opens_a_modal(window, monkeypatch):
+    """Scelta dell'utente: il nome lo decide chi lavora.
+
+    L'estrazione lo propone accanto al campo e non tocca nulla finche' non si
+    preme il pulsante; ne' prima ne' dopo compare una domanda a interrompere
+    l'analisi. Prima si rinominava da soli, e ogni nome mai proposto lasciava
+    una cartella in area di lavoro.
+    """
     begin(window, monkeypatch)
     docs = window._docs_dir()
     docs.mkdir(parents=True, exist_ok=True)
     (docs / 'photo.png').write_bytes(b'offline fixture')
+    chosen = window._component_name()
     def refuse(*args, **kwargs):
-        pytest.fail("La rinomina non deve piu' aprire una modale")
+        pytest.fail("Il nome proposto non deve aprire una modale")
     monkeypatch.setattr(QMessageBox, 'question', refuse)
     monkeypatch.setattr(QMessageBox, 'warning', lambda *args: None)
+
     window._on_extracted(acquired())
+    assert window._component_name() == chosen
+    assert window._suggested_name == 'AutoModule'
+    assert window.widget_name_suggestion.isVisibleTo(window)
+
+    window.btn_use_suggested_name.click()
     assert window._component_name() == 'AutoModule'
     assert any('Rinomina automatica' in line for line in
                window.ai_progress_text.toPlainText().splitlines())
@@ -325,9 +345,9 @@ def test_real_qthread_handoff_generates_footprint_and_requests_3d(window, monkey
     monkeypatch.setattr(gui.ExtractWorker, 'run', lambda self: self.done.emit(acquired()))
     cad_calls = []
     warnings = []
-    def cad(params, body, project, fillets, texts, progress=None):
+    def cad(params, body, project, fillets, texts, progress=None, model_progress=None):
         cad_calls.append((params, body))
-        path = project / 'AutoModule.3dshapes' / 'AutoModule.step'
+        path = project / f'{params.name}.3dshapes' / f'{params.name}.step'
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('offline CAD fixture')
         return {'step_path': path}
@@ -374,8 +394,9 @@ def test_real_qthread_handoff_generates_footprint_and_requests_3d(window, monkey
     if rename_dialog:
         assert modal_observations == [(True, True)]
     assert not warnings
-    assert (window._project_dir() / 'AutoModule.pretty' / 'AutoModule.kicad_mod').is_file()
-    assert (window._project_dir() / 'AutoModule.3dshapes' / 'AutoModule.step').is_file()
+    name = window._component_name()
+    assert (window._project_dir() / f'{name}.pretty' / f'{name}.kicad_mod').is_file()
+    assert (window._project_dir() / f'{name}.3dshapes' / f'{name}.step').is_file()
     assert window.tabs.currentIndex() == 4
     assert window.tabs.isEnabled() and window.analysis_overlay.isHidden()
 
@@ -404,7 +425,7 @@ def test_guided_name_collision_keeps_documents_and_generates_after_real_thread(w
     warnings = []
     monkeypatch.setattr(QMessageBox, 'warning', lambda *a: warnings.append(a))
     cad_calls = []
-    def cad(params, body, project, fillets, texts, progress=None):
+    def cad(params, body, project, fillets, texts, progress=None, model_progress=None):
         cad_calls.append((params.name, project))
         path = project / f'{params.name}.3dshapes' / f'{params.name}.step'
         path.parent.mkdir(parents=True)
@@ -439,3 +460,26 @@ def test_guided_name_collision_keeps_documents_and_generates_after_real_thread(w
     assert conflict.read_bytes() == b'other project: must never change'
     assert window._extract_worker.document_roles == {f'{role}.png': role for role in ROLES}
     assert window.tabs.currentIndex() == 4
+
+
+def test_the_modal_says_which_tool_is_working_and_how_far_it_is(window, monkeypatch):
+    """@brief Il segnale di fase dei worker deve arrivare davvero alla modale.
+
+    Senza questo collegamento la scheda resta muta sullo strumento e mostra al
+    suo posto i messaggi di servizio, che era il difetto segnalato: si vedeva
+    "AI_CALL_PROMPT_END ... sha256=..." e non si capiva chi stesse lavorando
+    ne' quanto mancasse.
+    """
+    begin(window, monkeypatch)
+    overlay = window.analysis_overlay
+
+    window._extract_worker.phase.emit('llm', 'anthropic/claude-opus-5', 0, 0)
+    assert 'anthropic/claude-opus-5' in overlay.tool.text()
+    # Una chiamata al modello non ha un conteggio: nessuna percentuale finta.
+    assert not overlay.progress_row.isVisibleTo(overlay)
+
+    window._on_extracted(acquired())
+    window._generate()
+    window._worker.phase.emit('freecad', 'abbinamento modelli KiCad', 9, 45)
+    assert 'FreeCAD' in overlay.tool.text()
+    assert overlay.progress_label.text() == '20% · 9/45 componenti'

@@ -47,20 +47,56 @@ def _extracted(name: str, **kwargs) -> ExtractedParams:
     return ExtractedParams(**base)
 
 
-def test_docs_follow_component_rename(window, tmp_path):
+def _with_documents(window, tmp_path, name):
     window.field_library_root.setText(str(tmp_path))
-    window.field_name.setText("NOME_VECCHIO")
+    window.field_name.setText(name)
+    docs = window._docs_dir()
+    docs.mkdir(parents=True)
+    (docs / "datasheet.pdf").write_bytes(b"%PDF fake")
+    (docs / "foto.png").write_bytes(b"PNG fake")
+    return docs
 
-    old_docs = window._docs_dir()
-    old_docs.mkdir(parents=True)
-    (old_docs / "datasheet.pdf").write_bytes(b"%PDF fake")
-    (old_docs / "foto.png").write_bytes(b"PNG fake")
+
+def test_extraction_proposes_a_name_and_does_not_take_it(window, tmp_path):
+    """Il nome lo decide chi lavora; l'estrazione lo propone soltanto.
+
+    Riscriverlo da soli spostava docs/ a ogni analisi e lasciava in area di
+    lavoro una cartella per ogni nome mai proposto.
+    """
+    old_docs = _with_documents(window, tmp_path, "NOME_VECCHIO")
 
     window._on_extracted(_extracted("NOME_NUOVO"))
+
+    assert window.field_name.text() == "NOME_VECCHIO"
+    assert window._suggested_name == "NOME_NUOVO"
+    assert window.widget_name_suggestion.isVisibleTo(window)
+    assert window._docs_dir() == old_docs
+    assert sorted(p.name for p in old_docs.iterdir()) == ["datasheet.pdf", "foto.png"]
+    assert not (tmp_path / "NOME_NUOVO").exists()
+
+
+def test_docs_follow_the_component_when_the_proposal_is_accepted(window, tmp_path):
+    _with_documents(window, tmp_path, "NOME_VECCHIO")
+    window._on_extracted(_extracted("NOME_NUOVO"))
+
+    window.btn_use_suggested_name.click()
 
     assert window.field_name.text() == "NOME_NUOVO"
     assert sorted(p.name for p in window._docs_dir().iterdir()) == ["datasheet.pdf", "foto.png"]
     assert window.docs_list.count() == 2
+    assert not window.widget_name_suggestion.isVisibleTo(window)
+
+
+def test_an_unnamed_component_takes_the_proposal_without_asking(window, tmp_path):
+    """Senza un nome scelto non c'e' nulla da rispettare, e "NUOVO_COMPONENTE"
+    come cartella non serve a nessuno."""
+    window.field_library_root.setText(str(tmp_path))
+    window.field_name.setText("")
+
+    window._on_extracted(_extracted("NOME_NUOVO"))
+
+    assert window.field_name.text() == "NOME_NUOVO"
+    assert not window.widget_name_suggestion.isVisibleTo(window)
 
 
 def test_extracted_fillets_populate_annotation_table(window, tmp_path):

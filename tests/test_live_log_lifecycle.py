@@ -47,7 +47,10 @@ def test_name_migration_without_documents_preserves_log_and_continues_it(window,
     original = source.read_bytes()
     target = source.parent.parent / "LogRenamed" / window.LOG_FILENAME
 
+    # L'estrazione propone il nome; il progetto lo cambia solo su richiesta,
+    # ed e' li' che il log deve seguire senza perdere una riga.
     window._on_extracted(_extracted("LogRenamed"))
+    window.btn_use_suggested_name.click()
 
     assert window._component_name() == "LogRenamed"
     assert window._log_file() == target
@@ -83,7 +86,10 @@ def test_failed_log_move_refuses_rename_and_preserves_project(
     else:
         params = _extracted("LogRenamed")
         window._on_extracted(params)
+        # Il nome proposto non tocca nulla finche' non viene accettato: e'
+        # accettandolo che lo spostamento fallisce e il progetto resta.
         assert params.name == "LogOriginal"
+        window.btn_use_suggested_name.click()
 
     assert attempts == [(source, destination / window.LOG_FILENAME)]
     assert window._component_name() == "LogOriginal"

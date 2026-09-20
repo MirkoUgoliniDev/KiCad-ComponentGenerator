@@ -1,3 +1,111 @@
+# 2026-09-20 (4) — il nome lo decide l'utente, e la modale dice chi lavora
+
+Branch `YOLO-SOLUTION`, sopra `9b56d4f`. Tre richieste dell'utente dopo la
+prima prova reale della correzione precedente, piu' il conto di quella prova.
+
+## 0. La correzione dei passivi funziona: 0 → 23 agganciati
+
+Stesso modulo, stessa foto, prima e dopo `9b56d4f`:
+
+| | prima | dopo |
+|---|---|---|
+| componenti | 53 | 45 |
+| `auto_matched` | **0** | **23** |
+| `provisional_matched` | 6 | 5 |
+| `review_required` | 35 | 6 |
+| `unresolved` | 12 | 11 |
+
+Il magenta passa da quasi tutto a circa un terzo. Restano fuori gli 11
+irrisolti e i 6 in revisione: non e' stato ancora indagato quali siano ne'
+perche'. E' il prossimo fronte sul matching.
+
+## 1. Perche' comparivano tre cartelle in area di lavoro
+
+L'utente scriveva "Test" e si ritrovava `Test/`, `PinHeader_2x04_P2.54mm_THT/`
+e `Module_ESP32-S3-DEV-KIT-NXRX_63.3x25.4mm_Castellated/`. Nessuna e' un
+residuo accidentale: erano tre regole che si sommavano.
+
+* Il campo Nome parte con un valore predefinito (`PinHeader_2x04_P2.54mm_THT`),
+  e il log dell'analisi si scrive nella cartella del nome in uso.
+* `Test/` nasce quando l'utente scrive il suo nome e allega i documenti.
+* A fine estrazione il nome proposto **sovrascriveva** quello scritto e
+  spostava `docs/` sotto il nome nuovo. Ogni analisi che proponeva un nome
+  diverso lasciava indietro la cartella precedente.
+
+**Decisione dell'utente: comanda il nome che scrive lui.** Ora l'estrazione
+propone e basta: la proposta compare accanto al campo con un pulsante "Usa
+questo nome", e solo premendolo il progetto cambia nome portandosi dietro i
+documenti e il log. Tutto cio' che si genera -- `.pretty`, `.3dshapes`, file --
+porta il nome in uso. Se il campo e' vuoto la proposta viene adottata senza
+chiedere: non c'e' nulla da rispettare e `NUOVO_COMPONENTE` non serve a nessuno.
+
+Il valore predefinito del campo **non e' stato toccato**: cambiarlo e' una
+decisione a se', e comunque sposterebbe il problema invece di chiuderlo.
+
+## 2. La modale dice chi sta lavorando
+
+Prima mostrava al posto dello stato le righe che il programma scrive per se'
+(`AI_CALL_PROMPT_END id=1 model=... sha256=...`): occupavano il posto di cio'
+che stava accadendo senza dirlo a nessuno.
+
+* **Strumento in chiaro, con un segno grafico diverso per ciascuno**: nuvola
+  per il modello remoto (esce dalla macchina e si paga), riquadro con gli
+  angoli staccati per YOLO (e' cio' che disegna), cubo isometrico per FreeCAD,
+  piazzole per KiCad. Il colore da solo non basterebbe a distinguerli.
+* **I marcatori di servizio non arrivano piu' sulla scheda**, restano nel log.
+  Il pulsante "Apri log AI" resta dov'era.
+* **Barra di avanzamento solo dove esiste un conteggio vero.** L'unico passo
+  della generazione con un totale onesto e' l'abbinamento dei modelli, che
+  scorre i componenti e per ognuno puo' pagare una misura CAD: li' si vede
+  `27% · 12/45 componenti`. Per la chiamata al modello no, e resta l'anello
+  animato: una percentuale stimata sul tempo si ferma al 90% e dice meno del
+  nulla, perche' sembra un'informazione. **Scelta esplicita dell'utente.**
+
+Meccanica: i worker hanno un segnale `phase(strumento, dettaglio, fatti,
+totale)` accanto a `progress(str)`; `attach_models` accetta un callback
+`progress(done, total)` e lo chiama a ogni componente. Un totale non positivo
+significa "nessun conteggio" e la barra sparisce.
+
+## 3. Verifica
+
+* Suite senza GUI: **2370 passati**, 2 falliti e 1 errore di raccolta,
+  **identici alla baseline** misurata nello stesso ambiente.
+* Moduli GUI, eseguiti uno per uno: tutti verdi
+  (`test_automatic_generation` 25, `test_photo_inventory_gui` 61,
+  `test_board_edit_lifecycle` 26, `test_photo_detector_ui` 46,
+  `test_live_log_lifecycle` 14, `test_docs_migration` 5,
+  `test_analysis_overlay` 8, e gli altri). Fanno eccezione
+  `test_board_pipeline` (2) e `test_preview_component_picking` (4), che
+  falliscono **identici anche sulla baseline**: sono artefatti dell'ambiente,
+  non del codice.
+* **Ambiente**: la suite gira in un contenitore Linux. VTK non parte senza
+  OpenGL, quindi i moduli GUI usano uno stub di `pyvistaqt` che non fa parte
+  del repository, e con lo stub alcuni moduli vanno eseguiti separatamente.
+  **Va rieseguita su Windows** con
+  `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider` prima di
+  considerare chiuso il lavoro.
+* Contratti di test aggiornati, non allentati: `test_docs_migration`,
+  `test_live_log_lifecycle` e `test_automatic_generation` verificavano la
+  rinomina automatica; ora verificano che la proposta non tocchi nulla e che
+  i documenti seguano **quando viene accettata**.
+
+## 4. Resta aperto
+
+* **Gli 11 irrisolti e i 6 in revisione del run reale non sono stati
+  indagati.** E' il prossimo passo sul magenta.
+* L'avanzamento reale copre solo l'abbinamento modelli. Il rilevamento YOLO
+  lavora per riquadri e l'inventario per viste: entrambi hanno un totale
+  ottenibile, nessuno dei due e' stato cablato.
+* `_on_phase` passa "componenti" come unita' del conteggio perche' oggi quello
+  e' l'unico passo contato. Se se ne aggiunge un altro, l'unita' deve viaggiare
+  col conteggio invece di stare nel gestore.
+* Il valore predefinito del campo Nome continua a creare una cartella se si
+  analizza prima di dare un nome.
+* Vicolo cieco dell'indice misure, `omitted` incoerente, connettore RF, scarto
+  del 28%, USB-C: invariati, vedi i checkpoint precedenti.
+
+---
+
 # 2026-09-20 (3) — perché ogni passivo restava magenta
 
 Branch `YOLO-SOLUTION`. Punto di partenza `027ee40`. Segnalazione dell'utente

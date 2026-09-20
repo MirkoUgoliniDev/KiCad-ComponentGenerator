@@ -755,6 +755,7 @@ def extract_pin_header_params(
     component_family: Optional[str] = None,
     photo_detector: str = "ai",
     yolo_model_path: Optional[Path] = None,
+    phase: Optional[Callable[..., None]] = None,
 ) -> ExtractedParams:
     """@brief Extract dimensions and pinout, optionally using local YOLO photo proposals.
 
@@ -820,6 +821,11 @@ def extract_pin_header_params(
     except OpenRouterError as exc:
         raise ExtractionError(str(exc)) from exc
 
+    if phase:
+        # Quale strumento sta lavorando non si deduce dai messaggi di
+        # avanzamento, e la differenza pesa: questa e' una chiamata remota che
+        # si paga, il rilevamento locale no.
+        phase("llm", model or DEFAULT_MODEL)
     if progress:
         progress(f"Invio a AI {len(doc_paths)} file per layout, quote e pinout...")
     content_blocks = []
@@ -955,6 +961,12 @@ def extract_pin_header_params(
             and data.get("body_width_mm")):
         from .photo_inventory import extract_inventory
         from .photo_grounding import DEFAULT_VISION_MODEL
+        if phase:
+            # Con YOLO le proposte sono locali ma la verifica resta una
+            # chiamata al modello: il dettaglio lo dice, invece di far credere
+            # che da qui in poi non si spenda nulla.
+            phase(*(("yolo", "proposte locali, verifica AI") if photo_detector == "yolo"
+                    else ("llm", vision_model or DEFAULT_VISION_MODEL)))
         try:
             photo_report = extract_inventory(
                 doc_paths, vision_model or DEFAULT_VISION_MODEL, data["body_length_mm"],

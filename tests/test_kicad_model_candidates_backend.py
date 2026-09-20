@@ -587,3 +587,26 @@ def test_pads_require_a_measured_solid_and_keep_variants_separate(library, monke
     assert km.model_candidates(component(bbox_basis="pads"), library=root)["candidates"][0]["measurement_basis"] == "piazzole C"
     monkeypatch.setattr(km, "model_sizes", lambda *a, **k: {})
     assert km.model_candidates(component(bbox_basis="pads"), library=root)["candidates"] == []
+
+
+def test_attach_models_counts_components_for_an_honest_progress_bar(library):
+    """@brief L'unico passo della generazione con un totale vero.
+
+    Ogni componente puo' costare una misura CAD, quindi il conto avanza al
+    ritmo del lavoro. Una percentuale stimata sul tempo, invece, si ferma al
+    90% quando una chiamata e' piu' lenta del solito e dice meno del nulla.
+    """
+    root, add, _ = library
+    add("Resistor_SMD", "R_0603_1608Metric")
+    seen = []
+    km.attach_models([supported(), supported(), "non e' un componente"],
+                     library=root, progress=lambda done, total: seen.append((done, total)))
+    assert seen[0] == (0, 3) and seen[-1] == (3, 3)
+    assert [done for done, _ in seen] == sorted(done for done, _ in seen)
+    assert all(total == 3 for _, total in seen)
+
+
+def test_attach_models_without_a_progress_callback_still_works(library):
+    root, add, _ = library
+    add("Resistor_SMD", "R_0603_1608Metric")
+    assert km.attach_models([supported()], library=root) == 1

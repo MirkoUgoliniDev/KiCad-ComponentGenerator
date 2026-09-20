@@ -152,7 +152,7 @@ def _side_pinout(side: dict) -> list[dict]:
 
 
 def _generate_3d(params, body: Body3DParams, project_dir: Path, fillets, face_texts,
-                 progress=None):
+                 progress=None, model_progress=None):
     """Genera il 3D con il generatore adatto al tipo di componente.
 
     I due modelli sono diversi in modo sostanziale: il pin header e' un
@@ -162,11 +162,11 @@ def _generate_3d(params, body: Body3DParams, project_dir: Path, fillets, face_te
     if isinstance(params, CastellatedModuleParams):
         return generate_castellated_3d_model(
             params, body, project_dir, fillets=fillets, face_texts=face_texts,
-            progress=progress,
+            progress=progress, model_progress=model_progress,
         )
     return generate_3d_model(
         params, body, project_dir, fillets=fillets, face_texts=face_texts,
-        progress=progress,
+        progress=progress, model_progress=model_progress,
     )
 
 
@@ -190,6 +190,11 @@ class GenerateWorker(QThread):
     cad3d_error = pyqtSignal(str)
     warning = pyqtSignal(str)
     progress = pyqtSignal(str)
+    #: (strumento, dettaglio, fatti, totale). Dice alla modale CHI sta
+    #: lavorando, che dai messaggi di avanzamento non si capiva. Un totale non
+    #: positivo significa "nessun conteggio": la modale resta animata invece di
+    #: mostrare una percentuale inventata.
+    phase = pyqtSignal(str, str, int, int)
 
     def __init__(
         self, params: PinHeaderParams | CastellatedModuleParams | PackageGeometry, project_dir: Path,
@@ -203,11 +208,20 @@ class GenerateWorker(QThread):
         self.fillets = fillets or []
         self.face_texts = face_texts or []
 
+    def _model_progress(self, done: int, total: int) -> None:
+        """@brief Porta in modale l'unico conteggio vero della generazione.
+
+        @param done Componenti gia' esaminati.
+        @param total Componenti da esaminare.
+        @note Ogni componente puo' costare una misura CAD, quindi il conto
+            avanza al ritmo del lavoro vero e non di un timer.
+        """
+        self.phase.emit('freecad', 'abbinamento modelli KiCad', done, total)
+
     def run(self) -> None:
         """@brief Provide the run operation for this workflow."""
-        """@brief Provide the run operation for this workflow."""
-        """@brief Provide the run operation for this workflow."""
         try:
+            self.phase.emit('kicad', 'footprint 2D', 0, 0)
             self.progress.emit('Generazione del footprint KiCad…')
             footprint = (
                 build_castellated_module(self.params)
@@ -226,11 +240,13 @@ class GenerateWorker(QThread):
 
         if self.body is not None:
             try:
+                self.phase.emit('freecad', 'modello 3D', 0, 0)
                 self.progress.emit('Generazione del modello 3D tramite FreeCAD…')
                 result = _generate_3d(
                     self.params, self.body, self.project_dir,
                     self.fillets, self.face_texts,
                     progress=self.progress.emit,
+                    model_progress=self._model_progress,
                 )
                 for warning in result.get('warnings', []):
                     self.warning.emit(warning)
@@ -264,6 +280,8 @@ class Cad3DWorker(QThread):
     #: usati): vanno nel log senza il prefisso di avviso, perche' non c'e'
     #: nulla che richieda attenzione.
     progress = pyqtSignal(str)
+    #: Vedi GenerateWorker.phase.
+    phase = pyqtSignal(str, str, int, int)
 
     def __init__(
         self, params: PinHeaderParams | CastellatedModuleParams, body: Body3DParams,
@@ -276,12 +294,18 @@ class Cad3DWorker(QThread):
         self.fillets = fillets
         self.face_texts = face_texts
 
+    def _model_progress(self, done: int, total: int) -> None:
+        """@brief Porta in modale l'unico conteggio vero della generazione."""
+        self.phase.emit('freecad', 'abbinamento modelli KiCad', done, total)
+
     def run(self) -> None:
         try:
+            self.phase.emit('freecad', 'modello 3D', 0, 0)
             result = _generate_3d(
                 self.params, self.body, self.project_dir,
                 self.fillets, self.face_texts,
                 progress=self.progress.emit,
+                model_progress=self._model_progress,
             )
             for note in result.get("notes", []):
                 self.progress.emit(note)
@@ -338,6 +362,8 @@ class ExtractWorker(QThread):
     done = pyqtSignal(object)
     error = pyqtSignal(str)
     progress = pyqtSignal(str)
+    #: Vedi GenerateWorker.phase.
+    phase = pyqtSignal(str, str, int, int)
 
     def __init__(
         self, doc_paths: list[Path], system_prompt: str | None = None,
@@ -400,6 +426,7 @@ class ExtractWorker(QThread):
                 extra_instructions=self.extra_instructions,
                 include_nc_pins=self.include_nc_pins,
                 progress=self.progress.emit,
+                phase=lambda tool, detail='': self.phase.emit(tool, detail, 0, 0),
             )
             self.done.emit(params)
         except ExtractionError as exc:
@@ -940,6 +967,28 @@ class MainWindow(QMainWindow):
         self.field_name = QLineEdit("PinHeader_2x04_P2.54mm_THT")
         self.field_name.textChanged.connect(self._on_name_changed)
         folder_layout.addRow("Nome componente:", self.field_name)
+
+        # Il nome proposto dall'estrazione vive qui, accanto al campo, e non
+        # dentro il campo. Prima l'estrazione lo scriveva da sola: ogni analisi
+        # che proponeva un nome diverso spostava docs/ altrove e lasciava
+        # indietro la cartella precedente in area di lavoro.
+        self._suggested_name = ""
+        self.lbl_name_suggestion = QLabel()
+        self.lbl_name_suggestion.setWordWrap(True)
+        self.lbl_name_suggestion.setProperty("i18n_skip", True)
+        self.lbl_name_suggestion.setStyleSheet(f"color: {BLUE};")
+        self.btn_use_suggested_name = QPushButton("Usa questo nome")
+        self.btn_use_suggested_name.setObjectName("useSuggestedNameButton")
+        self.btn_use_suggested_name.clicked.connect(self._apply_suggested_name)
+        suggestion_row = QHBoxLayout()
+        suggestion_row.setContentsMargins(0, 0, 0, 0)
+        suggestion_row.setSpacing(6)
+        suggestion_row.addWidget(self.lbl_name_suggestion, 1)
+        suggestion_row.addWidget(self.btn_use_suggested_name)
+        self.widget_name_suggestion = QWidget()
+        self.widget_name_suggestion.setLayout(suggestion_row)
+        self.widget_name_suggestion.hide()
+        folder_layout.addRow("", self.widget_name_suggestion)
 
         self.field_library_root = QLineEdit(str(DEFAULT_LIBRARY_ROOT))
         self.field_library_root.textChanged.connect(self._update_project_path_label)
@@ -1493,6 +1542,7 @@ class MainWindow(QMainWindow):
         self._extract_worker.done.connect(self._on_extracted)
         self._extract_worker.error.connect(self._on_extract_error)
         self._extract_worker.progress.connect(self._on_ai_progress)
+        self._extract_worker.phase.connect(self._on_phase)
         self._extract_worker.finished.connect(self._on_extract_finished)
         self._analysis_tabs_enabled = self.tabs.isEnabled()
         self.tabs.setEnabled(False)
@@ -1558,6 +1608,19 @@ class MainWindow(QMainWindow):
         # durante la generazione e' comunque coperta dalla modale: il dato va
         # anche dove l'utente sta gia' guardando.
         self.analysis_overlay.set_cost(text)
+
+    def _on_phase(self, tool: str, detail: str, done: int, total: int) -> None:
+        """@brief Porta in modale lo strumento al lavoro e il suo avanzamento.
+
+        @param tool Chiave in analysis_overlay.TOOLS.
+        @param detail Testo libero accanto al nome, es. il modello usato.
+        @param done Elementi completati.
+        @param total Elementi previsti; non positivo significa nessun conteggio.
+        @note Il testo integrale continua ad andare nel log: qui arriva solo
+            cio' che si legge a colpo d'occhio mentre si aspetta.
+        """
+        self.analysis_overlay.set_tool(tool, detail)
+        self.analysis_overlay.set_progress(done, total, "componenti")
 
     def _on_ai_progress(self, message: str) -> None:
         self.analysis_overlay.set_status(message)
@@ -1675,6 +1738,33 @@ class MainWindow(QMainWindow):
         worker = self.sender()
         return worker is None or worker._model_revision == self._model_revision
 
+    def _set_suggested_name(self, name) -> None:
+        """@brief Mostra accanto al campo il nome proposto dall'estrazione.
+
+        @param name Nome proposto; vuoto o uguale a quello in uso nasconde la riga.
+        @note La proposta non tocca nulla: il nome in uso resta quello scelto
+            dall'utente finche' non preme il pulsante.
+        """
+        proposed = " ".join(str(name or "").split())
+        self._suggested_name = "" if proposed == self._component_name() else proposed
+        if self._suggested_name:
+            self.lbl_name_suggestion.setText(
+                f"L'analisi propone: {self._suggested_name}")
+        self.widget_name_suggestion.setVisible(bool(self._suggested_name))
+
+    def _apply_suggested_name(self) -> None:
+        """@brief Adotta il nome proposto, portandosi dietro i documenti.
+
+        @note La rinomina puo' essere rifiutata (conflitto di documenti): in
+            quel caso il progetto resta quello corrente e la proposta rimane
+            visibile, perche' non e' stata applicata.
+        """
+        if not self._suggested_name:
+            return
+        applied = self._migrate_docs_to_new_name(self._suggested_name)
+        self.field_name.setText(applied)
+        self._set_suggested_name(self._suggested_name)
+
     def _migrate_docs_to_new_name(self, new_name: str) -> str:
         """Sposta i documenti nella cartella del nuovo nome componente.
 
@@ -1757,12 +1847,22 @@ class MainWindow(QMainWindow):
         self._photo_overlay_png = params.photo_overlay_png
         self._photo_source = params.photo_source
         self.btn_photo_comparison.setEnabled(bool(self._photo_png or self._photo_overlay_png))
-        if params.name and params.name != self._component_name():
-            # Keep the output name and the active document directory consistent.
-            # A naming collision must not discard a successful (paid) extraction.
+        # Il nome lo decide chi lavora, non l'estrazione. Il nome proposto
+        # resta visibile accanto al campo e si applica con un clic -- che e'
+        # anche il momento in cui i documenti lo seguono. Riscriverlo da soli
+        # significava spostare docs/ a ogni analisi e lasciare in area di
+        # lavoro una cartella per ogni nome mai proposto.
+        self._set_suggested_name(params.name)
+        if params.name and not self._component_name():
+            # Nessun nome scelto: non c'e' niente da rispettare e la proposta
+            # e' meglio di "NUOVO_COMPONENTE".
             params.name = self._migrate_docs_to_new_name(params.name)
-        if params.name:
             self.field_name.setText(params.name)
+            self._set_suggested_name("")
+        else:
+            # Tutto cio' che viene generato porta il nome scelto: footprint,
+            # modello e cartelle devono restare d'accordo fra loro.
+            params.name = self._component_name() or params.name
         if self._photo_png and params.components_3d:
             from ..services.model_choices import restore_choices
             try:
@@ -3037,6 +3137,7 @@ class MainWindow(QMainWindow):
         self._worker.warning.connect(self._on_cad3d_warning)
         self._worker.cad3d_error.connect(self._on_cad3d_error)
         self._worker.progress.connect(self._on_ai_progress)
+        self._worker.phase.connect(self._on_phase)
         self._worker.finished.connect(self._on_generation_finished)
         if automatic:
             self._automatic_generation_active = True
@@ -3423,6 +3524,7 @@ class MainWindow(QMainWindow):
         self._cad3d_worker._model_revision = self._model_revision
         self._cad3d_worker.done.connect(self._on_regen_3d_done)
         self._cad3d_worker.progress.connect(self._on_ai_progress)
+        self._cad3d_worker.phase.connect(self._on_phase)
         self._cad3d_worker.progress.connect(self._on_regen_3d_progress)
         self._cad3d_worker.warning.connect(self._on_regen_3d_progress)
         self._cad3d_worker.warning.connect(self._on_cad3d_warning)

@@ -268,6 +268,7 @@ def generate_castellated_3d_model(
     face_texts: Optional[list] = None,
     font_file: str = DEFAULT_FONT_FILE,
     progress=None,
+    model_progress=None,
 ) -> dict:
     """Genera il 3D di un modulo castellated come PCB vero e proprio.
 
@@ -428,7 +429,7 @@ def generate_castellated_3d_model(
             progress(message)
     try:
         from .kicad_models import attach_models
-        attach_models(components, log=report_model)
+        attach_models(components, log=report_model, progress=model_progress)
     except Exception as exc:  # noqa: BLE001 - la libreria e' un di piu', mai un requisito
         report_model(f"Libreria 3D KiCad non utilizzabile ({exc}); "
                            "si usano le forme approssimate.")
@@ -467,6 +468,7 @@ def generate_3d_model(
     face_texts: Optional[list] = None,
     font_file: str = DEFAULT_FONT_FILE,
     progress=None,
+    model_progress=None,
 ) -> dict:
     """Genera <Nome>.step (e best-effort <Nome>.wrl) in output_dir/<Nome>.3dshapes/.
 
@@ -483,7 +485,7 @@ def generate_3d_model(
     if body.populated_board or body.components:
         return _generate_populated_tht(pin_params, body, pins, output_dir,
             freecadcmd_path=freecadcmd_path, fillets=fillets, face_texts=face_texts,
-            font_file=font_file, progress=progress)
+            font_file=font_file, progress=progress, model_progress=model_progress)
     return _run_freecad(
         pin_params.name, pins, body, output_dir,
         freecadcmd_path=freecadcmd_path, fillets=fillets, face_texts=face_texts,
@@ -496,6 +498,9 @@ def _generate_populated_tht(params, body, pins, output_dir, **options):
     """Build a populated PCB using matrix pin coordinates and centered photo boxes."""
     from .kicad_models import attach_models
     progress = options.get("progress")
+    # Estratto, non letto: piu' avanti `options` viene inoltrato tale e quale
+    # a _run_freecad, che non conosce questo callback e rifiuterebbe la chiamata.
+    model_progress = options.pop("model_progress", None)
     notes = []
     def report(message):
         notes.append(message)
@@ -534,7 +539,7 @@ def _generate_populated_tht(params, body, pins, output_dir, **options):
             **_model_placement(c),
             **_match_evidence(c),
         })
-    attach_models(components, log=report)
+    attach_models(components, log=report, progress=model_progress)
     from ..services.model_choices import save_candidate_report
     candidate_report = save_candidate_report(output_dir, components)
     holes = [{"x": x, "y": y, "radius": params.drill / 2} for _, x, y in pins]
