@@ -2763,3 +2763,97 @@ Suite GUI eseguite una per file (nel contenitore VTK va in segmentation fault
 se più suite Qt girano nello stesso processo — artefatto d'ambiente, non del
 codice): review wiring 4, inventory gui 61, review dialog 32, yolo review
 dialog 7, auto match 1, live log 14, servizi 135. Tutte verdi.
+
+# 21:15 — la finestra di ricerca dei bordi, e il contrasto misurato e scartato
+
+## Difetto trovato rigiocando la prima corsa reale
+
+La corsa dell'utente (annullata alla revisione, quindi senza spesa di
+riconciliazione) ha dato: 123 ipotesi YOLO, 40 tolte dal filtro contatti,
+**«Bordi con OpenCV: 3 proposte su 83 misurate»**. Rigiocando la misura su
+tutte e 123 le proposte dell'audit: 12 misurate, **spostamento mediano
+1.44 mm** su una scheda da 63 mm. Quando scattava non rifiniva: agganciava il
+vicino.
+
+**Causa.** `SEARCH_MARGIN_MM = 2.0` fissa. A 55 px/mm sono ±110 px di vicinato
+attorno a un chip da 0.8 mm, e su questo modulo la distanza mediana fra
+proposte è **0.00 mm** (si toccano). Il contorno più vicino al centro risultava
+in mediana **9 volte** l'area della proposta: la chiusura morfologica fondeva
+il corpo con piste, serigrafia e vicini. Quel valore era ragionevole per le
+stime sparse di un modello linguistico, non per 123 proposte YOLO.
+
+## Correzione (decisa dall'utente)
+
+Nuova `photo_refine.search_margin_mm(gap_mm, scale_px_per_mm)`: la zona di
+competenza di un corpo finisce a **metà strada dal vicino più prossimo**.
+Nessun numero scelto a mano — lo decide la densità della scheda. Tetto:
+`SEARCH_MARGIN_MM`, che resta per i corpi isolati. Minimo:
+`MORPH_GROWTH_PX / scala`, cioè di quanto `_edge_mask` gonfia il contorno —
+con una finestra più stretta si taglierebbe il proprio stesso bordo.
+
+`refine_component_edges` accetta ora `margin_mm` (default: il tetto, quindi i
+chiamanti esistenti non cambiano comportamento); `refine_on_frame` calcola le
+distanze **una volta sola sulle stime di partenza**, prima che le misure le
+cambino, altrimenti l'ordine della lista deciderebbe le zone.
+
+Misurato sulle stesse 123 proposte, con il codice vero:
+
+| finestra | misurate | spostamento mediano |
+|---|---|---|
+| fissa 2.0 mm (prima) | 12/123 | 1.44 mm |
+| fissa 0.5 mm | 42/123 | 0.23 mm |
+| **metà strada dal vicino** | **84/123** | **0.04 mm** |
+
+Adesso la misura stringe i riquadri invece di spostarli. Non recupera un
+riquadro messo male, e va bene così: su una scheda densa non c'è modo di
+distinguere «il mio corpo» dal vicino.
+
+## Contrasto alzato: idea dell'utente, misurata e scartata
+
+Ipotesi: una copia a contrasto locale alzato (CLAHE) aiuterebbe sui corpi neri
+su soldermask nera. All'occhio si vede: il SOT-23 accanto al CH334F, invisibile
+nell'originale, con CLAHE 4 ha un bordo. Nei numeri no.
+
+YOLO sulla stessa foto (pesi reali, 30 viste):
+
+| immagine | ipotesi | sopra soglia | confidenza mediana |
+|---|---|---|---|
+| originale | 123 | 64 | 0.731 |
+| CLAHE 2 | 127 | 62 | 0.736 |
+| CLAHE 4 | 145 | 64 | 0.715 |
+
+Invariato: le ipotesi in più sono rumore debole, non corpi nuovi.
+
+Misura dei bordi, stesse proposte, cambia solo l'immagine:
+
+| immagine | misurate | spostamento mediano |
+|---|---|---|
+| originale | 84/123 | 0.04 mm |
+| CLAHE 2 | 76/123 | 0.03 mm |
+| CLAHE 4 | 64/123 | 0.03 mm |
+
+**Peggiora.** CLAHE alza anche piste, texture della soldermask e serigrafia:
+per Canny sono bordi quanto quelli dei componenti, e il problema non era la
+mancanza di gradiente ma il suo eccesso.
+
+Argomento indipendente dai numeri: i colori del modello 3D si campionano dalla
+fotografia. Un'immagine alterata darebbe `color_hex` falsi. Anche se avesse
+aiutato, la copia a contrasto potrebbe essere al più una vista ausiliaria, mai
+il riferimento.
+
+## Test
+
+`tests/test_detector_edge_measurement.py` (10): la finestra si stringe su
+scheda fitta e si apre su scheda sparsa, con il minimo legato alla crescita
+morfologica; e un caso positivo/negativo sulla stessa immagine — corpo quasi
+invisibile accanto a un vicino netto: con la finestra larga la misura diventa
+il vicino, con quella nuova non misura affatto e la proposta resta intatta.
+`tests/test_photo_mechanical_metadata.py`: il riferimento finto ora porta la
+scala, perché la finestra si ricava da quella.
+
+Suite fotografiche sul disco dell'utente: 246 passate, 1 saltata.
+
+## Trappola per chi riprende
+
+`generated/photo-cache/confronto-contrasto.json` (300 KB) è il materiale del
+confronto: cartella ignorata da git, cancellabile.

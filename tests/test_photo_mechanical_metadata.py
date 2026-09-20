@@ -239,7 +239,9 @@ def test_terminal_unresolved_and_refine_skip_preserve_metadata():
 
 
 def test_refined_box_invalidates_only_box_evidence(monkeypatch):
-    frame = Mock(width_px=200)
+    # La finestra di ricerca si ricava dalla scala della foto, quindi il
+    # riferimento finto deve averla come quello vero.
+    frame = Mock(width_px=200, scale=10.0)
     monkeypatch.setattr(refine.cv2, "imread", lambda _: np.zeros((100, 200, 3), np.uint8))
     monkeypatch.setattr(refine, "find_board", lambda *args: frame)
     monkeypatch.setattr(refine, "_forbidden_mask", lambda *args: None)

@@ -197,3 +197,51 @@ def test_a_body_outside_the_declared_strip_is_still_measured():
     assert measured.get("_edges_measured")
     assert measured["x_mm"] == pytest.approx(body_centre[0], abs=0.4)
     assert measured["y_mm"] == pytest.approx(body_centre[1], abs=0.4)
+
+
+# ── la finestra di ricerca si ferma dove comincia il vicino ──────────
+
+def test_search_window_shrinks_on_a_crowded_board_and_opens_on_a_sparse_one():
+    """La densità della scheda decide la finestra, non un numero scelto a mano."""
+    from kicadgen.services.photo_refine import (MORPH_GROWTH_PX, SEARCH_MARGIN_MM,
+                                                search_margin_mm)
+    scale = 55.0
+    # Corpo isolato: nessun vicino a chiudere la zona, vale il tetto.
+    assert search_margin_mm(20.0, scale) == pytest.approx(SEARCH_MARGIN_MM)
+    # Vicino a 1 mm: ci si ferma a metà strada.
+    assert search_margin_mm(1.0, scale) == pytest.approx(0.5)
+    # Riquadri che si toccano: resta solo quanto la chiusura morfologica
+    # gonfia il contorno, altrimenti si taglierebbe il proprio stesso bordo.
+    assert search_margin_mm(0.0, scale) == pytest.approx(MORPH_GROWTH_PX / scale)
+
+
+def test_a_neighbour_stops_the_measure_from_grabbing_it():
+    """Caso positivo e negativo: stessa foto, finestra stretta o larga.
+
+    È il difetto misurato sul modulo vero: con una finestra fissa di 2 mm, su
+    una foto fitta il contorno del vicino finiva nella stessa finestra e la
+    misura lo agganciava, spostando il corpo di oltre un millimetro. Qui il
+    corpo cercato è quasi invisibile (nessun contorno utile) e accanto c'è un
+    vicino netto della stessa taglia: con la finestra larga la misura diventa
+    il vicino, con la finestra che si ferma a metà strada non misura affatto e
+    la proposta resta quella del rilevatore -- che è il comportamento giusto,
+    perché non misurare non peggiora mai.
+    """
+    from kicadgen.services.photo_refine import (SEARCH_MARGIN_MM, crop_frame,
+                                                refine_component_edges)
+    board = _calibrated_board()
+    _paint(board, (0.0, 0.0), (1.4, 1.0), gray=24)      # corpo, quasi invisibile
+    neighbour = (1.8, 0.0)
+    _paint(board, neighbour, (1.4, 1.0), gray=120)      # vicino, netto
+    image = _noisy(board)
+    proposal = _proposal((0.0, 0.0), (1.4, 1.0))
+
+    narrow = measure_proposal_edges(image, [dict(proposal)], [], LENGTH_MM, WIDTH_MM,
+                                    lambda _: None)[0]
+    frame = crop_frame(image, LENGTH_MM, WIDTH_MM)
+    wide = refine_component_edges(image, frame, dict(proposal), None, SEARCH_MARGIN_MM)
+
+    assert wide is not None and wide["x_mm"] == pytest.approx(neighbour[0], abs=0.3), (
+        "la finestra larga non ha agganciato il vicino: il test non prova la regola")
+    assert "_edges_measured" not in narrow
+    assert narrow["x_mm"] == pytest.approx(0.0)

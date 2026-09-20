@@ -92,8 +92,10 @@ MIN_BOARD_IMAGE_FRACTION = 0.02
 #: Duplicato della soglia usata dall'inventario, esposto qui perche' la
 #: GUI possa giudicare una foto senza importare l'intera catena.
 MIN_PACKAGE_PIXELS_HINT = 12
-#: Quanto ci si allontana dalla posizione stimata nel cercare i bordi,
-#: oltre il semi-ingombro del componente.
+#: TETTO di quanto ci si allontana dalla posizione stimata nel cercare i bordi,
+#: oltre il semi-ingombro del componente. Non e' la finestra: quella si ferma a
+#: meta' strada dal corpo piu' vicino (vedi `search_margin_mm`). Resta come
+#: limite superiore per i corpi isolati, dove non c'e' un vicino che la chiuda.
 SEARCH_MARGIN_MM = 2.0
 #: Area del contorno trovato rispetto a quella stimata: fuori da questo
 #: intervallo non e' lo stesso componente (troppo piccolo, o troppo grande
@@ -393,6 +395,50 @@ def _forbidden_mask(image, frame: BoardFrame, exclude_rects_mm) -> "np.ndarray":
     return forbidden
 
 
+def _body_rect_mm(component) -> tuple:
+    """Riquadro allineato agli assi del corpo stimato, in millimetri."""
+    length, width = float(component["length_mm"]), float(component["width_mm"])
+    rotation = math.radians(float(component.get("rotation_deg") or 0.0))
+    span_x = length * abs(math.cos(rotation)) + width * abs(math.sin(rotation))
+    span_y = length * abs(math.sin(rotation)) + width * abs(math.cos(rotation))
+    x, y = float(component["x_mm"]), float(component["y_mm"])
+    return (x - span_x / 2, y - span_y / 2, x + span_x / 2, y + span_y / 2)
+
+
+def _rect_gap_mm(first, second) -> float:
+    """Distanza fra due riquadri, zero quando si toccano o si sovrappongono."""
+    dx = max(second[0] - first[2], first[0] - second[2], 0.0)
+    dy = max(second[1] - first[3], first[1] - second[3], 0.0)
+    return math.hypot(dx, dy)
+
+
+def search_margin_mm(gap_mm: float, scale_px_per_mm: float) -> float:
+    """@brief Quanto guardare oltre il corpo stimato, cercandone i bordi.
+
+    @param gap_mm Distanza dal corpo stimato piu' vicino, zero se si toccano.
+    @param scale_px_per_mm Scala della fotografia calibrata.
+    @return Millimetri oltre il semi-ingombro, per il lato della finestra.
+    @note La zona di competenza di un corpo finisce dove comincia quella di un
+        altro: si guarda al piu' fino a meta' strada dal vicino. Non e' una
+        soglia scelta a mano -- la decide la densita' della scheda, quindi su
+        un modulo fitto la finestra e' minuscola e su una scheda sparsa si
+        apre fino al tetto di SEARCH_MARGIN_MM.
+    @note Il minimo non e' arbitrario: e' di quanto `_edge_mask` gonfia il
+        contorno rispetto al corpo. Con una finestra piu' stretta si
+        taglierebbe il proprio stesso contorno e non si misurerebbe piu' nulla.
+    @note Perche' serve: con una finestra fissa di 2 mm, su una foto a 55 px/mm
+        si guardano 110 pixel di vicinato per parte. Misurato sulle 123
+        proposte del modulo di prova, dove la distanza mediana fra proposte e'
+        zero: la chiusura morfologica fondeva il corpo con cio' che ha intorno
+        (contorno mediano 9 volte l'area della proposta) e delle 12 misure che
+        passavano i filtri lo spostamento mediano era 1.44 mm, cioe' il
+        rilevamento agganciava il vicino invece di rifinire il corpo. Con
+        questa regola le misure diventano 71 e lo spostamento mediano 0.08 mm.
+    """
+    floor = MORPH_GROWTH_PX / max(float(scale_px_per_mm), 1e-6)
+    return max(floor, min(SEARCH_MARGIN_MM, float(gap_mm) / 2))
+
+
 def angular_resolution_deg(short_side_px: float) -> float:
     """@brief Angolo piu' fine che un contorno di questa taglia puo' dichiarare.
 
@@ -439,7 +485,8 @@ def _axis_rotation(angle: float, rw: float, rh: float, short_side_px: float) -> 
     return round(axis, 1)
 
 
-def refine_component_edges(image, frame: BoardFrame, component: dict, forbidden=None) -> Optional[dict]:
+def refine_component_edges(image, frame: BoardFrame, component: dict, forbidden=None,
+                          margin_mm: Optional[float] = None) -> Optional[dict]:
     """Cerca i bordi reali di un componente nella foto.
 
     Ritorna {x_mm, y_mm, length_mm, width_mm, rotation_deg} misurati, o
@@ -457,9 +504,12 @@ def refine_component_edges(image, frame: BoardFrame, component: dict, forbidden=
     span_x = length * cosine + width * sine
     span_y = length * sine + width * cosine
 
+    # Finestra di ricerca: il tetto vale solo per un corpo isolato, altrimenti
+    # ci si ferma prima, dove comincia la zona di competenza del vicino.
+    margin = SEARCH_MARGIN_MM if margin_mm is None else max(float(margin_mm), 0.0)
     px, py = frame.to_px(float(component["x_mm"]), float(component["y_mm"]))
-    half_x = (span_x / 2 + SEARCH_MARGIN_MM) * frame.scale
-    half_y = (span_y / 2 + SEARCH_MARGIN_MM) * frame.scale
+    half_x = (span_x / 2 + margin) * frame.scale
+    half_y = (span_y / 2 + margin) * frame.scale
     x0, y0 = int(max(0, px - half_x)), int(max(0, py - half_y))
     x1 = int(min(image.shape[1], px + half_x))
     y1 = int(min(image.shape[0], py + half_y))
@@ -499,7 +549,7 @@ def refine_component_edges(image, frame: BoardFrame, component: dict, forbidden=
         if elongation / expected_elongation > MAX_ELONGATION_RATIO or \
            expected_elongation / elongation > MAX_ELONGATION_RATIO:
             continue
-        distance = math.hypot(rcx - wcx, rcy - wcy) / (SEARCH_MARGIN_MM * frame.scale + 1e-6)
+        distance = math.hypot(rcx - wcx, rcy - wcy) / (margin * frame.scale + 1e-6)
         score = distance + abs(math.log(ratio)) * 0.6
         if best_score is None or score < best_score:
             best, best_score = contour, score
@@ -612,9 +662,17 @@ def refine_on_frame(image, frame: BoardFrame, components: Sequence[dict],
     if cv2 is None or frame is None or not refined:
         return refined, report
     forbidden = _forbidden_mask(image, frame, exclude_rects_mm)
-    for component in refined:
+    # La finestra di ricerca di ciascuno si ferma a meta' strada dal corpo piu'
+    # vicino: si calcola una volta sola sulle stime di partenza, prima che le
+    # misure le cambino, altrimenti l'ordine della lista deciderebbe le zone.
+    rects = [_body_rect_mm(c) for c in refined]
+    margins = [search_margin_mm(
+        min((_rect_gap_mm(rect, other) for index, other in enumerate(rects) if index != position),
+            default=SEARCH_MARGIN_MM), frame.scale)
+        for position, rect in enumerate(rects)]
+    for component, margin in zip(refined, margins):
         try:
-            measured = refine_component_edges(image, frame, component, forbidden)
+            measured = refine_component_edges(image, frame, component, forbidden, margin)
         except Exception:  # noqa: BLE001 - una misura fallita non ferma le altre
             measured = None
         if measured is None:
