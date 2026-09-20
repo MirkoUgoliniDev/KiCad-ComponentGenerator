@@ -3076,13 +3076,33 @@ class MainWindow(QMainWindow):
         interrompe a meta', quello che e' successo fino a quel punto resta
         leggibile. Un errore di scrittura non ferma l'analisi -- il diario e'
         un aiuto, non un requisito.
+
+        @note Finche' il componente non ha un nome non c'e' una cartella dove
+            scrivere, e il diario resta solo a schermo. Prima il diario creava
+            da solo la cartella di ripiego: bastava aprire l'applicazione per
+            ritrovarsi in area di lavoro una cartella che nessuno aveva chiesto,
+            con dentro il log dell'avvio. Le righe si accumulano e finiscono su
+            disco appena un nome c'e'.
         """
+        if not self._component_name():
+            buffer = getattr(self, "_pending_log_lines", None)
+            if buffer is None:
+                buffer = self._pending_log_lines = []
+            # Il diario di un avvio non vale una crescita senza fine.
+            if len(buffer) < 500:
+                buffer.append(str(message).rstrip())
+            return
         try:
             from datetime import datetime
             path = self._log_file()
             path.parent.mkdir(parents=True, exist_ok=True)
+            pending = getattr(self, "_pending_log_lines", None)
             with open(path, "a", encoding="utf-8") as handle:
                 stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+                for line in (pending or ()):
+                    handle.write(f"[{stamp}] {line}\n")
+                if pending:
+                    self._pending_log_lines = []
                 handle.write(f"[{stamp}] {str(message).rstrip()}\n")
                 handle.flush()
         except (OSError, AttributeError) as exc:

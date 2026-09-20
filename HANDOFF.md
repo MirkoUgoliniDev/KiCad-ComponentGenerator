@@ -2938,3 +2938,36 @@ yolo_review_dialog 7, live_log 14.
 Nel contenitore, con `pyvistaqt` installato, più suite Qt nello stesso processo
 mandano VTK in segmentation fault: vanno girate un file alla volta sotto
 `xvfb-run`. Non è un difetto del codice.
+
+# 21:40 — la cartella NUOVO_COMPONENTE che nasceva da sola
+
+L'utente apre l'applicazione, scrive `TEST`, e in area di lavoro trova **due**
+cartelle: `TEST` e `NUOVO_COMPONENTE`.
+
+**Causa.** `_write_log_line` scrive subito su disco, per scelta (se l'analisi
+si interrompe, quello che è successo resta leggibile), e faceva
+`path.parent.mkdir(parents=True, exist_ok=True)`. Senza nome `_project_dir()`
+ripiega su `NUOVO_COMPONENTE`, quindi bastava **avviare l'applicazione** —
+che emette subito «Tipologia componente: …» — per creare una cartella che
+nessuno aveva chiesto, con dentro il log dell'avvio. Il blocco sul nome aveva
+spento documenti ed estrazione, ma non il diario: il difetto era lì da prima e
+si è visto solo ora che il campo nasce vuoto.
+
+**Correzione.** Finché il componente non ha un nome il diario resta a schermo e
+le righe si accumulano in memoria (`_pending_log_lines`, al più 500); appena un
+nome c'è, vengono scritte tutte, in ordine, prima della riga corrente. Niente
+si perde e niente nasce prima del tempo.
+
+`_project_dir()` mantiene il ripiego `NUOVO_COMPONENTE` per i percorsi di sola
+lettura. Non è più una cartella che si materializza, ma resta un nome inventato
+in un path: se ricompare da qualche altra parte, il colpevole è un'altra
+scrittura senza nome, non il diario.
+
+**Test.** `test_no_folder_appears_before_the_name_is_written`: dopo l'avvio e
+una riga di log senza nome, in area di lavoro non c'è nessuna cartella; scritto
+il nome, il file del diario esiste e contiene sia la riga prodotta prima sia
+quella dopo.
+
+Suite Qt nel contenitore, una per file: photo_inventory_gui 65,
+photo_detector_ui 49, board_edit_lifecycle 26, automatic_generation 25,
+live_log 14, terminal_metadata_flow 15.

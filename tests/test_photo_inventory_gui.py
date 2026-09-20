@@ -1011,3 +1011,27 @@ def test_extraction_refuses_to_start_without_a_name(window, monkeypatch):
     window.field_name.setText("")
     window._extract_with_ai()
     assert not started and window._extract_worker is None
+
+
+def test_no_folder_appears_before_the_name_is_written(window, tmp_path):
+    """@brief Aprire l'applicazione non deve creare cartelle in area di lavoro.
+
+    Il diario del componente scriveva subito, e la cartella se la creava da
+    solo con il nome di ripiego: bastava avviare l'applicazione per ritrovarsi
+    una cartella che nessuno aveva chiesto, accanto a quelle vere. Le righe
+    prodotte prima del nome restano in memoria e finiscono su disco appena il
+    nome c'e', senza perdersi.
+    """
+    root = Path(window.field_library_root.text())
+    window.field_name.setText("")
+    window._append_log("riga prodotta prima del nome")
+    creati = [p.name for p in root.iterdir() if p.is_dir()] if root.exists() else []
+    assert not creati, "nessuna cartella deve nascere finche' il componente non ha un nome: %s" % creati
+
+    window.field_name.setText("Componente_con_nome")
+    window._append_log("prima riga dopo il nome")
+    log = root / "Componente_con_nome" / window.LOG_FILENAME
+    assert log.is_file()
+    written = log.read_text(encoding="utf-8")
+    assert "riga prodotta prima del nome" in written
+    assert "prima riga dopo il nome" in written
