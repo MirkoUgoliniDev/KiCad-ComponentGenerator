@@ -43,7 +43,54 @@ def _evidence(kind, **changes):
 
 
 def _names(kind):
-    return ("Resistor", "R") if kind == "resistor" else ("Capacitor", "C")
+    return {"resistor": ("Resistor", "R"), "capacitor": ("Capacitor", "C"),
+            "led": ("LED", "LED")}[kind]
+
+
+@pytest.mark.parametrize("kind", ["resistor", "capacitor", "led"])
+def test_nominated_size_opens_the_catalog_and_a_bare_one_does_not(cold_catalog, kind):
+    """@brief Una sigla nuda dichiara, una sigla dentro una descrizione propone.
+
+    "0603" da solo e' cio' che il campo package dichiara, e la ricerca per nome
+    lo prende alla lettera. "0603 chip" -- la forma che il modello scrive di
+    gran lunga piu' spesso di "0603 (approx)" -- nomina una taglia che la
+    fotografia deve ancora confermare: su un run reale la nomina sbaglia di una
+    classe intera in 4 componenti su 21, quindi la ricerca deve restare aperta
+    alle taglie adiacenti. La differenza fra i due casi e' strutturale (sigla
+    nuda o no), non un elenco di parole ammesse.
+    """
+    root, add, measured = cold_catalog
+    family, prefix = _names(kind)
+    good = add(family + "_SMD", prefix + "_0603_1608Metric", [1.6, .8, .4])
+    adjacent = add(family + "_SMD", prefix + "_0805_2012Metric", [2, 1.25, .5])
+
+    declared = km.model_candidates(_evidence(kind, package="0603"), library=root)
+    assert declared.get("discovery_scope") != "standard_chip_endcaps"
+    assert measured == [good] and adjacent not in measured
+
+    measured.clear()
+    nominated = km.model_candidates(_evidence(kind, package="0603 chip"), library=root)
+    assert nominated["discovery_scope"] == "standard_chip_endcaps"
+    assert set(measured) == {good, adjacent}
+    # Il punto della correzione: la ricerca e' *completa*, quindi puo' decidere.
+    # Prima restava troncata e ogni passivo finiva in revisione per sempre.
+    assert not nominated.get("search_truncated")
+
+
+def test_diode_chip_catalog_stays_out_of_the_exhaustive_scope(cold_catalog):
+    """@brief I diodi condividono il catalogo a sigle ma non solo quello.
+
+    D_0603_1608Metric esiste, ma esistono anche i MELF cilindrici: due
+    terminali metallizzati si vedono uguali in fotografia e un MELF non entra
+    in un elenco di sole sigle. Dichiarare completa una ricerca che lo esclude
+    permetterebbe di agganciare da soli il modello sbagliato, quindi il diodo
+    resta fuori finche' la morfologia non lo distingue davvero.
+    """
+    root, add, _ = cold_catalog
+    add("Diode_SMD", "D_0603_1608Metric", [1.6, .8, .4])
+    add("Diode_SMD", "D_MELF", [3.5, 1.6, 1.6])
+    report = km.model_candidates(_evidence("diode", package="0603 chip"), library=root)
+    assert report.get("discovery_scope") != "standard_chip_endcaps"
 
 
 @pytest.mark.parametrize("kind", ["resistor", "capacitor"])

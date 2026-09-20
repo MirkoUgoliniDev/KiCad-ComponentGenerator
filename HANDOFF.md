@@ -1,3 +1,128 @@
+# 2026-09-20 (3) — perché ogni passivo restava magenta
+
+Branch `YOLO-SOLUTION`. Punto di partenza `027ee40`. Segnalazione dell'utente
+con schermata: nell'anteprima 3D della ESP32-S3-DEV-KIT quasi tutti i corpi
+piccoli sono porpora, cioè senza modello KiCad agganciato.
+
+## 0. La diagnosi precedente era giusta come osservazione, sbagliata come cura
+
+Il checkpoint precedente indicava `_package_token` che «restituisce stringa
+vuota quando c'è prosa attorno alla sigla» come il difetto da correggere, con
+la prova C1 `"0603"` agganciato contro C6 `"0603 (long axis vertical)"` in
+revisione. **Ho provato quella correzione e i dati reali l'hanno smentita.**
+
+Rigiocando il run vero (`generated/ESP32-.../kicad-model-candidates.json`,
+53 componenti):
+
+* 21 componenti su 53 hanno package **`"0603 chip"`**, non la forma fra
+  parentesi. Promuovere la sigla in testa al campo dà loro il token `0603` e
+  li manda sulla **ricerca per nome**.
+* Per **4 di quei 21** (LED_PWR, R5, C13, R13) il candidato migliore di oggi è
+  uno **0805**, non uno 0603: la misura fotografica smentisce la taglia
+  nominata di una classe intera. Cercando per nome un 0603 quei quattro
+  sarebbero rimasti **senza alcun candidato**, cioè peggio di prima.
+* Soprattutto: **tutti e 21 escono con `search_truncated: True`**, e una
+  ricerca troncata non può dimostrare unicità, quindi `_automatic_mechanical`
+  non aggancia mai. Il token non era il collo di bottiglia; il troncamento sì.
+
+Quella correzione è stata quindi **ritirata**, non solo non committata. Resta
+valida l'osservazione di partenza: una sigla dentro una descrizione si comporta
+diversamente da una sigla nuda. È la direzione della cura a essere opposta.
+
+## 1. La catena vera
+
+`"0603 chip"` non è una sigla nuda, quindi `_package_token` torna `""`, quindi
+`fallback` è vero e si va in scoperta per famiglia. Lì `_tentative_endcap_family`
+avrebbe dovuto restringere la ricerca al catalogo dei chip SMD — è esattamente
+ciò per cui esiste — ma pretendeva la forma `0603 (approx)` con la parentesi.
+Il modello quella forma non la scrive quasi mai.
+
+Senza quel ramo la ricerca scandisce l'intera famiglia nella libreria vera:
+**478 modelli per un condensatore, 108 per un resistore, 93 per un LED**. Di
+quei 478, **477 non hanno quote nel nome**: restano non misurati, marcano
+`omitted`, e `omitted` diventa `search_truncated`. Da lì in poi nessun passivo
+può essere agganciato automaticamente, qualunque sia il suo scarto.
+
+Ecco perché la schermata è quasi tutta magenta: non è un problema di misure né
+di soglie, è che la ricerca si dichiara incompleta per costruzione.
+
+## 2. Cosa è cambiato
+
+**a. Una taglia nominata dentro una descrizione apre il catalogo dei chip.**
+`_tentative_endcap_family` non pretende più la parentesi. Il criterio è
+strutturale, non lessicale: il campo non è una sigla nuda, non risolve ad alcun
+package dichiarato, e nomina **una sola** taglia. `"0603/0805"` e `""` restano
+fuori come prima. Effetto misurato sulla libreria vera: da 478 percorsi con
+`omitted=True` a **17 percorsi con ricerca completa**; 21 per il LED.
+
+**b. Il catalogo vale anche per i LED.** `LED_SMD.3dshapes` ha le stesse sigle
+di taglia (`LED_0603_1608Metric`) e la stessa morfologia a due endcap. I
+**diodi restano deliberatamente fuori**: condividono il catalogo a sigle ma
+hanno anche i MELF cilindrici, che in fotografia mostrano gli stessi due
+terminali metallizzati e non entrerebbero in un elenco di sole sigle.
+Dichiarare completa una ricerca che li esclude significherebbe poter agganciare
+da soli il modello sbagliato. Separazione fragile, dichiarata come tale.
+
+**c. Il conteggio dei reofori ordina, non fa solo da veto.** Entro
+`NAME_TIEBREAK_MARGIN` la fotografia non distingue due solidi: lì un conteggio
+dichiarato che coincide con quello osservato vale più di una frazione di
+percento di scarto. Corregge il caso U3 (6 reofori osservati, unico candidato a
+6 terminali in fondo alla classifica). Fuori dalla banda comanda ancora la
+misura: un conteggio che coincide non promuove mai un solido già scartato.
+
+## 3. Verifica
+
+* Suite completa: **2224 passati**, 14 falliti e 14 errori di raccolta —
+  **identici alla baseline** di `027ee40` misurata nello stesso ambiente, che
+  ne aveva 2218/14/14. I 6 test in più sono quelli aggiunti qui.
+* **Attenzione, limite dell'ambiente**: la suite è stata eseguita in una VM
+  Linux senza PyQt6 (manca `libEGL`, niente root per installarlo) e senza
+  KiCad. I 14 falliti e i 14 errori sono tutti di lì. **Va rieseguita su
+  Windows** con `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider`
+  prima di considerare chiuso il lavoro.
+* Verifica su libreria reale (`C:\Program Files\KiCad\10.0\share\kicad\3dmodels`),
+  non su fixture: `"0603 chip"` → 17 percorsi, `omitted=False`;
+  `"0603 chip LED"` → 21, `omitted=False`; `"0603"` nudo → ricerca per nome;
+  `"0603/0805"` e `""` → invariati.
+
+## 4. Resta aperto
+
+* **Non è stato provato un run vero end-to-end.** Senza FreeCAD nell'ambiente
+  non si arriva allo stato finale dei 53 componenti: è dimostrato che il blocco
+  (`search_truncated`) sparisce, non quanti componenti diventino `auto_matched`.
+  Serve una nuova generazione sulla macchina dell'utente per contarli.
+* **Il vicolo cieco dell'indice delle misure NON è corretto.** Il numero
+  dell'handoff precedente è confermato sui file veri: 91 LED e 116 diodi hanno
+  un nome senza alcuna quota, non vengono mai misurati, quindi non entrano in
+  cache, quindi non verranno mai misurati. Ho provato ad ammetterli tutti nella
+  coda CAD e **l'ho ritirato**: per un condensatore la coda passa a 478
+  percorsi, sfonda `MAX_CANDIDATE_MEASUREMENTS` e il troncamento torna da
+  un'altra porta, pagando anche 64 misure FreeCAD per componente. Serve una
+  scoperta *limitata* prima, non una coda più grande. Il ramo dei chip la
+  fornisce per i passivi; per connettori, moduli e semiconduttori no.
+* **`omitted` è incoerente e resta tale**: un nome con quote lontane viene
+  saltato (ci si fida del nome per non misurare) e contemporaneamente marca la
+  ricerca incompleta (non ci si fida del nome per concludere). O il nome è una
+  dichiarazione o non lo è. Toccarlo cambia quando l'aggancio automatico è
+  lecito su tutte le famiglie: va deciso, non fatto di straforo.
+* `_native_model_rotation_override`, lo scarto del 28% sul modulo, USB-C e il
+  conteggio terminali come veto: invariati, vedi i checkpoint precedenti.
+
+## 5. Trappole per chi riprende
+
+* **Un'altra sessione stava committando sullo stesso checkout** durante questo
+  lavoro: `027ee40` ha inglobato modifiche non sue (il `.gitattributes` scritto
+  qui) e due gitlink spuri `.claude/worktrees/agent-*`, che andrebbero tolti
+  dall'indice e ignorati. Non far lavorare due sessioni sullo stesso checkout.
+* Le fini di riga ora sono normalizzate da `.gitattributes`. Prima un
+  `git status` mostrava 103 file modificati di cui 4 veri.
+* Il file `kicad-model-candidates.json` nella cartella del componente è un
+  *report ridotto*: non contiene `class`, `kind`, `terminal_layout` né le
+  confidenze, quindi da solo non basta a rigiocare la scelta. Per farlo
+  servono i campi originali del componente.
+
+---
+
 # 2026-09-20 (2) — il modulo diventava porpora dopo una rotazione
 
 Tre difetti segnalati dall'utente su una sessione reale, tutti riprodotti e

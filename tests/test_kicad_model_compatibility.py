@@ -296,5 +296,41 @@ def test_observed_sot_terminals_filter_variants_before_measurement(
     report = km.model_candidates(component, library=tmp_path)
     expected = paths if keep_variant else paths[:1]
     assert measured == expected
-    assert [c["path"] for c in report["candidates"]] == [str(p) for p in expected]
+    # Quali varianti sopravvivono al filtro e' l'oggetto di questo test.
+    # L'ordine in cui vengono proposte lo decide il conteggio dei reofori, ed
+    # e' verificato dalla coppia di test qui sotto.
+    assert {c["path"] for c in report["candidates"]} == {str(p) for p in expected}
     assert report["status"] == "review_required" and report["selected_path"] is None
+
+
+@pytest.mark.parametrize("variant_size,first", [
+    ([6.5, 3.5, 1.7], "SOT-23-5"),
+    ([8.0, 4.5, 1.7], "SOT-23"),
+])
+def test_matching_terminal_count_ranks_first_only_within_the_measurement_band(
+        tmp_path, monkeypatch, variant_size, first):
+    """@brief Il conteggio dichiarato ordina dove la misura non distingue.
+
+    Positivo: due solidi di ingombro identico: la fotografia non puo'
+    separarli, e i cinque reofori osservati corrispondono a quelli dichiarati
+    da SOT-23-5, che quindi va proposto per primo.
+
+    Negativo: lo stesso conteggio corrispondente su un solido piu' grande
+    dello scarto che la misura sa risolvere. Li' la misura decide, e SOT-23 --
+    che di reofori non ne dichiara -- resta primo. La differenza fra i due
+    casi e' strutturale (dentro o fuori NAME_TIEBREAK_MARGIN), non una
+    coincidenza numerica fra due ingombri scelti bene.
+    """
+    directory = tmp_path / "Package_TO_SOT_SMD.3dshapes"
+    directory.mkdir()
+    sizes = {"SOT-23": [6.5, 3.5, 1.7], "SOT-23-5": variant_size}
+    for name in sizes:
+        (directory / (name + ".step")).touch()
+    monkeypatch.setattr(km, "model_sizes", lambda requested, library=None: {
+        str(p): {"body": sizes[p.stem]} for p in requested})
+    component = dict(kind="regulator", package="SOT-23", length_mm=6.5, width_mm=3.5,
+        bbox_basis="body", pin_count=5, pin_count_confidence="medium",
+        pin_count_source="photo_observation")
+    report = km.model_candidates(component, library=tmp_path)
+    assert [km.Path(c["path"]).stem for c in report["candidates"]][0] == first
+    assert {km.Path(c["path"]).stem for c in report["candidates"]} == set(sizes)

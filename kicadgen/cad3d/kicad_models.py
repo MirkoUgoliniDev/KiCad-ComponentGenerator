@@ -77,6 +77,19 @@ MAX_CANDIDATE_MEASUREMENTS = 64
 _NAMED_PACKAGE_PATTERN = r"(?<![\w-])(?:SC|SOT|SOD|SOIC|SSOP|TSSOP|MSOP|TSOP|SOP|QFN|DFN|LQFP|TQFP|QFP|BGA|DIP|TO)[ _-]?\d+(?:[-_]\d+)?(?![\w])"
 _CHIP_SIZE_CODES = r"(?:008004|01005|0201|0402|0603|0805|1008|1206|1210|1806|1812|2010|2512)"
 
+#: Famiglie che hanno in libreria un catalogo SMD a sigle di taglia standard e
+#: corpo rettangolare a due terminali metallizzati. Solo per queste una taglia
+#: nominata piu' due endcap osservati delimitano una ricerca *completa*: il
+#: catalogo copre per costruzione tutte le taglie e le varianti di suffisso.
+#: I diodi ne restano fuori di proposito: condividono il catalogo a sigle
+#: (D_0603_1608Metric) ma anche gli involucri MELF cilindrici, che con due
+#: terminali metallizzati si vedono uguali in fotografia e non entrerebbero
+#: nell'elenco -- dichiarare completa una ricerca che li esclude significa
+#: poter agganciare da soli il modello sbagliato.
+_ENDCAP_CHIP_CATALOG = {"resistor": ("R", "Resistor_SMD.3dshapes"),
+                        "capacitor": ("C", "Capacitor_SMD.3dshapes"),
+                        "led": ("LED", "LED_SMD.3dshapes")}
+
 
 def _package_token(package: str) -> str:
     """Extract declared package syntax; never derive a package from dimensions.
@@ -1119,14 +1132,29 @@ def _tentative_endcap_family(component):
         layout, re.I)) and not re.search(
             r"\b(?:no|not|without|neither|unknown|uncertain|unclear|occluded|hidden|absent|projecting|maybe|possibly)\b",
             layout, re.I)
-    if (kind not in ("resistor", "capacitor")
+    if (kind not in _ENDCAP_CHIP_CATALOG
             or component.get("class", kind) != kind
             or component.get("presence_confidence") != "high"
             or component.get("class_confidence") not in ("high", "medium")
             or not endcaps_observed):
         return None
     package = str(component.get("package") or "").strip()
-    if not re.fullmatch(_CHIP_SIZE_CODES + r"\s*\(\s*(?:approx(?:imate(?:ly)?)?\.?|estimated?|nominal)\s*\)", package, re.I):
+    # Una sigla nuda ("0603") e' una dichiarazione, e la ricerca per nome la
+    # tratta come tale. Qui interessa il caso opposto: la taglia *nominata*
+    # dentro una descrizione -- "0603 (approx)", ma anche "0603 chip" o
+    # "0603 chip LED", che il modello scrive molto piu' spesso della forma fra
+    # parentesi. Il criterio e' strutturale, non un elenco di parole: il campo
+    # non e' una sigla nuda, non risolve ad alcun package dichiarato, e nomina
+    # una sola taglia. Due taglie ("0603/0805") restano un'ambiguita' da
+    # risolvere a monte, non una proposta da verificare.
+    #
+    # Perche' la nomina vada verificata e non usata come vincolo: su un run
+    # reale di 53 componenti, 21 dichiarano "0603 chip" e per 4 di questi la
+    # misura fotografica indica una classe intera piu' grande (0805). Cercare
+    # per nome un 0603 li avrebbe lasciati senza alcun candidato.
+    nominated = set(re.findall(r"(?<![\w.-])" + _CHIP_SIZE_CODES + r"(?![\w.])", package))
+    if (re.fullmatch(_CHIP_SIZE_CODES, package) or _package_token(package)
+            or len(nominated) != 1):
         return None
     counts = _observed_count(component)
     visible_pair = (not counts and component.get("terminal_count_basis") == "visible_including_tabs"
@@ -1178,8 +1206,7 @@ def _family_paths(component, root, basis):
         # Approximate 0603 must not become an exact 0603 lookup: adjacent sizes
         # and suffix variants remain alternatives. Even clearly distant cold
         # chip sizes are measured, so filename hints cannot fabricate uniqueness.
-        prefix = "R" if endcap_family == "resistor" else "C"
-        folder = "Resistor_SMD.3dshapes" if prefix == "R" else "Capacitor_SMD.3dshapes"
+        prefix, folder = _ENDCAP_CHIP_CATALOG[endcap_family]
         paths = [p for p in (root / folder).rglob("*")
                  if p.suffix.lower() in (".step", ".stp")
                  and re.match(prefix + r"_\d{4,6}(?:_|$)", p.stem, re.I)]
@@ -1632,8 +1659,26 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dic
             "reasons": ["Family and dimension discovery" if fallback else "Package name compatible", "No declared family or terminal conflict",
                         f"Compatible {label} dimensions", "Identity and variant require user review"],
         })
-    result["candidates"].sort(key=lambda item: (item["relative_xy_error"],
-        _normalize(item["package"]) != _package_name(package), item["path"]))
+    # Entro NAME_TIEBREAK_MARGIN la fotografia non distingue due solidi: una
+    # frazione di percento di scarto misurato e' rumore, mentre un conteggio
+    # dichiarato che coincide con quello osservato e' evidenza strutturale
+    # indipendente. Ordinare per solo scarto la seppelliva -- un corpo con sei
+    # reofori osservati metteva ultimo il suo unico candidato a sei terminali.
+    # Fuori dalla banda comanda ancora la misura, e un conteggio che coincide
+    # non promuove mai un solido che la misura ha gia' scartato.
+    counts = set(_observed_count(component))
+    if (provisional_count := _provisional_terminal_count(component)) is not None:
+        counts.add(provisional_count)
+    closest = min((item["relative_xy_error"] for item in result["candidates"]), default=0.0)
+
+    def _rank(item):
+        equivalent = item["relative_xy_error"] <= closest + NAME_TIEBREAK_MARGIN
+        declared = _declared_count(Path(item["path"]))
+        supported = bool(counts) and declared is not None and declared in counts
+        return (not equivalent, not (equivalent and supported), item["relative_xy_error"],
+                _normalize(item["package"]) != _package_name(package), item["path"])
+
+    result["candidates"].sort(key=_rank)
     automatic = _automatic_mechanical(component, result["candidates"], complete, basis)
     provisional = (None if automatic or result.get("topology_incomplete")
                    else _provisional_geometry_choice(
