@@ -695,6 +695,82 @@ def _native_axis_angle(references, length, width):
     return angle, reference
 
 
+#: Sotto questo scarto fra baricentro e centro dell'ingombro il solido e'
+#: simmetrico quanto basta perche' la direzione non significhi nulla: la
+#: differenza sarebbe rumore di tassellazione, non una feature. Frazione del
+#: semilato, cioe' adimensionale: vale per un modulo da 20 mm e per un chip da 1.
+NATIVE_LANDMARK_MIN_OFFSET = 0.02
+
+#: Da che parte guarda ogni lato dichiarabile, nel frame del footprint
+#: (X a destra, Y in basso), che e' anche quello in cui il modello descrive la
+#: fotografia.
+_LANDMARK_DIRECTIONS = {"right": (1, 0), "left": (-1, 0),
+                        "bottom": (0, 1), "top": (0, -1)}
+
+
+def _native_landmark_direction(shape, reference):
+    """@brief Da che parte pende il materiale del modello, in coordinate native.
+
+    @param shape Solido (o compound) gia' letto dal file di libreria.
+    @param reference Ingombro usato per posarlo, cioe' il riferimento su cui e'
+        stato scelto l'asse.
+    @return (dx, dy) con una sola componente non nulla, oppure None quando il
+        solido e' troppo simmetrico perche' la misura significhi qualcosa.
+    @note Criterio fisico, non un nome di file: una feature asimmetrica --
+        un connettore coassiale, un boss, una smussatura -- sposta il centro di
+        massa rispetto al centro dell'ingombro, e la direzione dello
+        spostamento dice da che parte sta. Su un pezzo simmetrico lo
+        spostamento tende a zero e allora non si corregge niente, che e'
+        l'unica risposta onesta.
+    """
+    try:
+        centre = shape.CenterOfMass
+    except Exception:  # noqa: BLE001 - un compound senza massa non e' fatale
+        return None
+    half_x = max(reference.XLength / 2, 1e-9)
+    half_y = max(reference.YLength / 2, 1e-9)
+    dx = (centre.x - (reference.XMin + reference.XMax) / 2) / half_x
+    dy = (centre.y - (reference.YMin + reference.YMax) / 2) / half_y
+    # Una sola direzione: due componenti confrontabili vorrebbero dire che la
+    # feature sta in un angolo, e un angolo non si confronta con un lato.
+    if max(abs(dx), abs(dy)) < NATIVE_LANDMARK_MIN_OFFSET:
+        return None
+    return (1 if dx > 0 else -1, 0) if abs(dx) >= abs(dy) else (0, 1 if dy > 0 else -1)
+
+
+def _verse_correction(native_direction, inferred, observed_side):
+    """@brief Rotazione che porta il riferimento nativo dove lo si e' osservato.
+
+    @param native_direction (dx, dy) del baricentro nel frame del modello, o None.
+    @param inferred Angolo dell'asse gia' scelto sull'ingombro, 0 o 90 gradi.
+    @param observed_side Lato dichiarato dall'osservazione: left/right/top/bottom.
+    @return 0 o 180 gradi da sommare, oppure None se non si puo' stabilire.
+    @note Si cercano solo 0 e 180 di proposito: l'asse l'ha gia' deciso la
+        misura dell'ingombro, e una correzione di 90 lo smentirebbe. Se ne' 0
+        ne' 180 portano il riferimento dalla parte osservata, i due dati si
+        contraddicono e non si corregge nulla: meglio un verso non verificato
+        che uno inventato.
+    """
+    wanted = _LANDMARK_DIRECTIONS.get(observed_side)
+    if native_direction is None or wanted is None:
+        return None
+    # Il costruttore lavora con Y verso l'alto, l'osservazione con Y verso il
+    # basso: senza questo ribaltamento "sopra" e "sotto" si scambierebbero.
+    wanted = (wanted[0], -wanted[1])
+    for extra in (0, 180):
+        if _rotated(native_direction, inferred + extra) == wanted:
+            return extra
+    return None
+
+
+def _rotated(direction, angle):
+    """Ruota una direzione cardinale di un multiplo di 90 gradi."""
+    dx, dy = direction
+    for _ in range(int(round(angle / 90)) % 4):
+        dx, dy = -dy, dx
+    return (dx, dy)
+
+
 def _placement_angle(component, inferred):
     """@brief Compose the inferred axis with the corrections that apply to it.
 
@@ -710,7 +786,6 @@ def _placement_angle(component, inferred):
         wrong axis, and no value between 0 and 180 could put it right.
     """
     return (float(component.get("model_rotation_deg", inferred))
-            + float(component.get("model_rotation_native_delta_deg") or 0)
             + float(component.get("model_rotation_delta_deg") or 0))
 
 
@@ -758,6 +833,16 @@ def _library_model(component, cx, cy, z0, color):
             pass
         length, width = float(component["length_mm"]), float(component["width_mm"])
         inferred, reference = _native_axis_angle(references, length, width)
+        # Il verso non si ricava dall'ingombro: due capi di un rettangolo
+        # misurano uguale. Si confronta dove pende il materiale del modello con
+        # il lato su cui la fotografia ha visto il riferimento asimmetrico.
+        verse = _verse_correction(_native_landmark_direction(combined, reference),
+                                  inferred, component.get("landmark_side"))
+        if verse:
+            print(f"KICADGEN_VERSE:{path}; landmark="
+                  f"{component.get('landmark_feature')} on {component.get('landmark_side')}; "
+                  f"rotated {verse:g} deg over the inferred axis", flush=True)
+        inferred += verse or 0
         # La correzione manuale e' un DELTA, non un angolo assoluto: l'angolo
         # di partenza lo deduce qui FreeCAD confrontando il modello con la
         # misura, e l'interfaccia non lo conosce. "Ruota di 90 gradi" si

@@ -3831,7 +3831,11 @@ class MainWindow(QMainWindow):
                 match_evidence={key: deepcopy(c[key]) for key in (
                     'presence_confidence', 'class_confidence', 'confidence',
                     '_yolo_review_only', '_yolo_origin', 'terminal_count',
-                    'terminal_layout', 'terminal_count_basis', '_global_inventory_status', 'class') if key in c},
+                    'terminal_layout', 'terminal_count_basis', '_global_inventory_status', 'class',
+                    # Il riferimento asimmetrico deve arrivare fino al
+                    # costruttore: e' li' che si confronta col baricentro del
+                    # modello nativo per stabilire il verso.
+                    'landmark_feature', 'landmark_side', 'landmark_confidence') if key in c},
                 model_z_offset_mm=float(c.get("model_z_offset_mm") or 0.0),
                 pin_count=c.get("pin_count"), pins_by_side=c.get("pins_by_side"),
                 pin_count_confidence=str(c.get("pin_count_confidence") or ""),
@@ -3989,7 +3993,11 @@ class MainWindow(QMainWindow):
                 match_evidence={key: deepcopy(metadata[key]) for key in (
                     'presence_confidence', 'class_confidence', 'confidence',
                     '_yolo_review_only', '_yolo_origin', 'terminal_count',
-                    'terminal_layout', 'terminal_count_basis', '_global_inventory_status', 'class') if key in metadata},
+                    'terminal_layout', 'terminal_count_basis', '_global_inventory_status', 'class',
+                    # Il riferimento asimmetrico deve arrivare fino al
+                    # costruttore: e' li' che si confronta col baricentro del
+                    # modello nativo per stabilire il verso.
+                    'landmark_feature', 'landmark_side', 'landmark_confidence') if key in metadata},
                 model_z_offset_mm=float(metadata.get("model_z_offset_mm") or 0.0),
                 color_hex=table.cellWidget(row, 8).text().strip() or "#303030",
                 marking=table.cellWidget(row, 9).text().strip(),

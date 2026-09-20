@@ -23,7 +23,10 @@ def _body(**changes):
 
 
 def test_versioned_schema_and_prompt_distinguish_complete_leads_and_visible_tabs():
-    assert inventory.PROMPT_VERSION == 'global-yolo-inventory-5'
+    # Il prompt ora chiede anche il riferimento asimmetrico, quindi la versione
+    # sale: un prompt diverso sotto la stessa versione renderebbe impossibile
+    # dire, rileggendo una cache, che cosa era stato davvero chiesto.
+    assert inventory.PROMPT_VERSION == 'global-yolo-inventory-6'
     assert inventory.SCHEMA_VERSION == 'global-inventory-4'
     item = inventory.inventory_tool()['function']['parameters']['properties']['components']['items']
     fields = item['properties']

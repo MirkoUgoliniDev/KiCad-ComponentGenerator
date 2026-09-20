@@ -1423,31 +1423,6 @@ def _provisional_geometry_choice(component, choices, complete, basis):
     return first
 
 
-def _native_model_rotation_override(component: dict, path: Path) -> Optional[float]:
-    """Return an explicit local STEP rotation when the observed feature fixes it.
-
-    The WROOM-1U STEP has a meaningful asymmetric RF connector.  XY dimensions
-    can infer its long axis but cannot decide between 0 and 180 degrees.  Only
-    an exact literal model marking plus an affirmative observation of the RF
-    jack on the lower/right side is strong enough to apply this local CAD
-    correction.  It never changes the component's photographic rotation.
-    """
-    if not _marked_model_matches(path, component):
-        return None
-    if str(component.get("kind") or component.get("detected_kind") or "").lower() not in (
-            "module", "rf_module", "pcb_module"):
-        return None
-    text = " ".join(str(component.get(key) or "") for key in (
-        "terminal_layout", "package_evidence", "package"))
-    # Vision models commonly emit either "lower right" or "lower-right".
-    # Both describe the same asymmetric RF-jack landmark.
-    if not re.search(r"\b(?:lower|bottom|inferior)(?:[-\s]+)right\b", text, re.I):
-        return None
-    if not re.search(r"\b(?:rf|u\.fl|ipex|coax|antenna)\b", text, re.I):
-        return None
-    return 180.0
-
-
 def _is_yolo_only_hypothesis(component: dict) -> bool:
     """Identify detector-only rows which are useful for review, not for 3D."""
     name = str(component.get("name") or "").strip().lower()
@@ -1781,29 +1756,28 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
             resolved += 1
         elif report["status"] in ("auto_matched", "provisional_matched"):
             component["model_path"] = report["selected_path"]
-            override = _native_model_rotation_override(
-                component, Path(report["selected_path"] or ""))
-            # La correzione automatica riguarda il VERSO, non l'asse: l'asse
-            # lo deduce FreeCAD confrontando il modello con la misura, e qui
-            # non lo si conosce. Scrivendola in model_rotation_deg -- che e'
-            # un angolo assoluto -- cancellava l'asse dedotto: un modulo il
-            # cui asse lungo andava girato di 90 gradi finiva comunque a 180,
-            # cioe' con l'asse ancora sbagliato, e nessun valore fra 0 e 180
-            # poteva rimetterlo a posto. Va in un canale additivo suo, distinto
-            # da model_rotation_delta_deg, che e' la correzione manuale
-            # dell'utente e non deve essere sovrascritta.
+            # Il verso del modello nativo non si decide qui. Fino a poco fa lo
+            # decideva una regex inglese su prosa libera, ancorata al nome del
+            # file e valida di fatto per un modulo solo: una regola sui nomi,
+            # che questo progetto vieta. Ora lo ricava il costruttore
+            # confrontando dove pende il materiale del modello (baricentro
+            # contro centro dell'ingombro) con il lato su cui la fotografia ha
+            # visto il riferimento asimmetrico. Se uno dei due lati manca, il
+            # verso resta non verificato invece di essere indovinato.
+            #
             # L'angolo assoluto di una corsa precedente e' stato calcolato su
-            # un altro modello e va comunque tolto, come prima.
+            # un altro modello e va comunque tolto.
             component.pop("model_rotation_deg", None)
-            if override is None:
-                component.pop("model_rotation_native_delta_deg", None)
+            component.pop("model_rotation_native_delta_deg", None)
+            if component.get("landmark_side"):
+                report["orientation_landmark"] = {
+                    "feature": component.get("landmark_feature"),
+                    "side": component["landmark_side"],
+                    "confidence": component.get("landmark_confidence")}
             else:
-                component["model_rotation_native_delta_deg"] = override
-                report["native_model_rotation_deg"] = override
-                report["native_orientation_note"] = (
-                    "Native STEP rotated 180° over the inferred axis to place the "
-                    "observed RF connector on the lower-right side; photo rotation "
-                    "is unchanged")
+                report["orientation_unverified"] = (
+                    "No asymmetric landmark observed: an outline alone cannot tell "
+                    "one end from the other, so the model keeps its inferred axis.")
             resolved += 1
         else:
             component["color_hex"] = "#FF00FF"

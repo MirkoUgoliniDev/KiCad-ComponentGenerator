@@ -1,3 +1,89 @@
+# 2026-09-20 (7) — l'orientamento si deduce da un riferimento, non da una regex
+
+Branch `YOLO-SOLUTION`, sopra `0b99df0`. Richiamo dell'utente: «non devi fare
+una pezza per far funzionare questa scheda, deve inferire la rotazione da dei
+riferimenti, per esempio un punto di marcatura oppure in questo caso
+l'antenna». Ha ragione, e il checkpoint precedente lo ammetteva già: la regola
+dei 180° era ancorata al nome del file e valeva per un modulo solo.
+
+## 1. Cosa c'era e perché era sbagliato
+
+`_native_model_rotation_override` decideva il verso con due `re.search` inglesi
+su tre campi concatenati (`terminal_layout + package_evidence + package`), e
+scattava solo per un modello il cui nome file coincideva con la marcatura.
+Tre difetti, tutti dimostrati: è una regola sui nomi, che il CLAUDE.md vieta;
+le due condizioni possono essere soddisfatte da campi diversi, quindi il
+`package` di un modulo con U.FL rendeva la seconda sempre vera e bastava un
+«bottom right» riferito ad altro per far ruotare; ed è cieca a qualunque lingua
+diversa dall'inglese.
+
+**È stata rimossa**, insieme ai suoi due test, come deciso dall'utente.
+
+## 2. Cosa c'è adesso
+
+Il verso di un modello nativo è la composizione di due informazioni
+indipendenti, e servono **entrambi i lati** per stabilirlo:
+
+**a. Lato osservato — si chiede, non si deduce.** Nuovo campo
+`asymmetry_landmark` nello schema del global inventory: `feature` (vocabolario
+chiuso: coaxial_jack, connector_opening, cable_exit, polarity_marker,
+pin1_marker, chamfer, notch, tab, other), `side` (left/right/top/bottom della
+scatola di *quel* componente, nel frame della prima foto, X a destra Y in
+basso) e `confidence`. `null` è una risposta legittima e frequente: un corpo
+simmetrico non ha un capo distinguibile dall'altro. Una dichiarazione
+incompleta o a confidenza bassa vale come assenza — qui un errore vale mezzo
+giro, non poco. `PROMPT_VERSION` sale a `global-yolo-inventory-6`.
+
+**b. Lato nativo — si misura, col baricentro.** In `freecad_parts`,
+`_native_landmark_direction` confronta il centro di massa del solido col centro
+del suo ingombro e restituisce la direzione dominante dello scarto,
+normalizzata sul semilato (quindi adimensionale: vale per un modulo da 20 mm e
+per un chip da 1). Sotto `NATIVE_LANDMARK_MIN_OFFSET = 0.02` il pezzo è
+simmetrico quanto basta perché la direzione sia rumore di tassellazione, e la
+risposta è `None`. Criterio fisico, nessun nome, nessuna soglia tarata su un
+esemplare.
+
+**c. Derivazione.** `_verse_correction` cerca **solo 0 e 180**: l'asse l'ha già
+deciso la misura dell'ingombro e una correzione di 90 lo smentirebbe. Se né 0
+né 180 portano il riferimento nativo dalla parte osservata, i due dati si
+contraddicono e non si corregge nulla. Il ribaltamento Y fra frame fotografico
+(Y in basso) e frame CAD (Y in alto) è applicato esplicitamente.
+
+Il report porta ora `orientation_landmark` quando il riferimento c'è, e
+`orientation_unverified` quando manca, invece di una nota che descriveva una
+rotazione decisa da una regex.
+
+## 3. Verifica
+
+* Suite senza GUI: **2413 passati**, con i soliti 2 falliti e 1 errore di
+  raccolta identici alla baseline.
+* Moduli GUI uno per uno: verdi.
+* Coppie positivo/negativo nuove: baricentro spostato contro corpo simmetrico;
+  verso che segue il lato osservato contro dati che si contraddicono; campo
+  dichiarato per intero contro mezza dichiarazione, confidenza bassa,
+  vocabolario violato e risposta in cache che il campo non ce l'ha.
+* **NON verificato sul modello vero.** Il baricentro del WROOM-1U non è ancora
+  stato misurato: il server MCP di FreeCAD sulla macchina dell'utente non trova
+  `freecadcmd` (FreeCAD 1.1 è in `C:\Program Files\FreeCAD 1.1`, quindi il
+  binario è in `...\bin\freecadcmd.exe`) e la porta RPC rifiuta la connessione
+  perché la GUI non è aperta. **È la prova che manca**, ed è alla portata: con
+  uno dei due canali attivi bastano dieci righe di script.
+
+## 4. Resta aperto
+
+* **Misurare il baricentro del WROOM-1U** e confermare che lo scarto superi la
+  soglia e punti dal lato del connettore U.FL. Se il modulo risultasse troppo
+  simmetrico, il verso resterà non verificato e servirà il secondo criterio
+  (il materiale sopra il piano dello schermo), che è più fragile e va deciso.
+* La prossima estrazione **paga una chiamata nuova**: il prompt è cambiato,
+  quindi la cache non risponde più. È voluto, ma va saputo.
+* Il campo `mating`, già presente in altri due schemi, resta fuori da quello
+  del global inventory.
+* Quante feature abbia un contatto castellated è ancora un default e non una
+  lettura della fotografia (vedi checkpoint precedente).
+
+---
+
 # 2026-09-20 (6) — i contatti castellated hanno due appigli, non uno
 
 Branch `YOLO-SOLUTION`, sopra `ee4c564`. Segnalazione dell'utente con

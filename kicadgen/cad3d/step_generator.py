@@ -48,7 +48,10 @@ def _match_evidence(component):
         return {}
     fields = ("presence_confidence", "class_confidence", "confidence",
               "_yolo_review_only", "_yolo_origin", "terminal_count",
-              "terminal_layout", "terminal_count_basis", "_global_inventory_status", "class")
+              "terminal_layout", "terminal_count_basis", "_global_inventory_status", "class",
+              # Riferimento asimmetrico osservato: il costruttore lo confronta
+              # col baricentro del modello nativo per ricavare il verso.
+              "landmark_feature", "landmark_side", "landmark_confidence")
     return {key: evidence[key] for key in fields if key in evidence}
 
 

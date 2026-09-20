@@ -77,20 +77,90 @@ def test_a_square_model_never_raises_and_stays_put(parts):
     assert angle == 0
 
 
-def test_the_automatic_verse_correction_adds_to_the_axis(parts):
-    """@brief 90 gradi d'asse piu' 180 di verso fanno 270, non 180.
-
-    E' il difetto che teneva storto il modulo: la correzione automatica veniva
-    scritta come angolo assoluto e cancellava l'asse dedotto. Un solo campo
-    resta assoluto, ed e' la scelta esplicita dell'utente, che nomina insieme
-    il modello e l'angolo a cui metterlo.
-    """
-    assert parts._placement_angle({"model_rotation_native_delta_deg": 180}, 90) == 270
+def test_only_an_explicit_choice_replaces_the_deduced_axis(parts):
+    """La correzione manuale si somma, la scelta esplicita sostituisce."""
     assert parts._placement_angle({}, 90) == 90
     assert parts._placement_angle({"model_rotation_delta_deg": -90}, 90) == 0
-    assert parts._placement_angle(
-        {"model_rotation_native_delta_deg": 180, "model_rotation_delta_deg": 90}, 90) == 360
-    # La scelta esplicita sostituisce la deduzione, e i delta si sommano a lei.
+    # La scelta esplicita nomina insieme il modello e l'angolo a cui metterlo.
     assert parts._placement_angle({"model_rotation_deg": 0}, 90) == 0
     assert parts._placement_angle(
-        {"model_rotation_deg": 0, "model_rotation_native_delta_deg": 180}, 90) == 180
+        {"model_rotation_deg": 0, "model_rotation_delta_deg": 90}, 90) == 90
+
+
+class _Box:
+    """Ingombro finto: al calcolo del verso servono solo questi quattro numeri."""
+
+    def __init__(self, x_min, x_max, y_min, y_max):
+        self.XMin, self.XMax, self.YMin, self.YMax = x_min, x_max, y_min, y_max
+        self.XLength, self.YLength = x_max - x_min, y_max - y_min
+
+
+class _Solid:
+    def __init__(self, cx, cy):
+        self.CenterOfMass = SimpleNamespace(x=cx, y=cy)
+
+
+#: Ingombro 20 x 18 centrato nell'origine.
+FRAME = _Box(-10, 10, -9, 9)
+
+
+@pytest.mark.parametrize("cx,cy,expected", [
+    (2.0, 0.0, (1, 0)),    # il materiale pende a destra
+    (-2.0, 0.0, (-1, 0)),
+    (0.0, 2.0, (0, 1)),
+    (0.0, -2.0, (0, -1)),
+    (2.0, 0.4, (1, 0)),    # una sola direzione: vince la dominante
+    (0.05, 0.02, None),    # corpo simmetrico: nessuna direzione
+    (0.0, 0.0, None),
+])
+def test_the_centroid_says_where_the_material_hangs(parts, cx, cy, expected):
+    """@brief Criterio fisico, non un nome di file.
+
+    Una feature asimmetrica -- un connettore coassiale, un boss, una
+    smussatura -- sposta il centro di massa rispetto al centro dell'ingombro.
+    Su un pezzo simmetrico lo spostamento tende a zero, e li' la risposta
+    onesta e' "non lo so", non una direzione qualsiasi.
+    """
+    assert parts._native_landmark_direction(_Solid(cx, cy), FRAME) == expected
+
+
+def test_a_solid_without_mass_does_not_take_down_the_generation(parts):
+    class _NoMass:
+        @property
+        def CenterOfMass(self):
+            raise RuntimeError("compound senza massa")
+
+    assert parts._native_landmark_direction(_NoMass(), FRAME) is None
+
+
+@pytest.mark.parametrize("native,inferred,side,expected", [
+    # Materiale a destra nel modello, riferimento visto a destra: gia' a posto.
+    ((1, 0), 0, "right", 0),
+    # Stesso modello, riferimento visto a sinistra: mezzo giro.
+    ((1, 0), 0, "left", 180),
+    # Con l'asse gia' ruotato di 90 il materiale guarda in alto (frame CAD).
+    ((1, 0), 90, "top", 0),
+    ((1, 0), 90, "bottom", 180),
+    # Y della fotografia cresce verso il basso, quella del CAD verso l'alto.
+    ((0, 1), 0, "top", 0),
+    ((0, -1), 0, "top", 180),
+])
+def test_the_verse_follows_the_observed_side(parts, native, inferred, side, expected):
+    assert parts._verse_correction(native, inferred, side) == expected
+
+
+@pytest.mark.parametrize("native,inferred,side", [
+    (None, 0, "right"),        # il modello non dice da che parte pende
+    ((1, 0), 0, None),         # la fotografia non ha visto alcun riferimento
+    ((1, 0), 0, "sopra"),      # lato fuori vocabolario
+    ((1, 0), 0, "top"),        # asse e verso si contraddicono
+    ((0, 1), 0, "right"),
+])
+def test_no_correction_when_the_two_sides_cannot_be_matched(parts, native, inferred, side):
+    """@brief Meglio un verso non verificato che uno inventato.
+
+    Si cercano solo 0 e 180 di proposito: l'asse l'ha gia' deciso la misura
+    dell'ingombro, e una correzione di 90 lo smentirebbe. Quando nessuno dei
+    due porta il riferimento dalla parte osservata, i dati si contraddicono.
+    """
+    assert parts._verse_correction(native, inferred, side) is None

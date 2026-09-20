@@ -651,3 +651,48 @@ def test_a_guessed_single_body_cannot_bind_separate_leads():
     data['components'][0].update(grouping_basis='single_body', bbox_basis='body_and_leads',
                                  presence_confidence='low', confidence='low')
     assert [r['_id'] for r in run(data, items)[0]] == [1, 2]
+
+
+@pytest.mark.parametrize('landmark,expected', [
+    ({'feature': 'coaxial_jack', 'side': 'right', 'confidence': 'high'},
+     {'landmark_feature': 'coaxial_jack', 'landmark_side': 'right',
+      'landmark_confidence': 'high'}),
+    ({'feature': 'chamfer', 'side': 'top', 'confidence': 'medium'},
+     {'landmark_feature': 'chamfer', 'landmark_side': 'top',
+      'landmark_confidence': 'medium'}),
+    # Un corpo simmetrico non ha un capo distinguibile dall'altro: l'assenza e'
+    # una risposta, e inventargliela ruoterebbe il pezzo di mezzo giro.
+    (None, {}),
+    ({}, {}),
+    # Una confidenza bassa vale come assenza: qui un errore vale 180 gradi.
+    ({'feature': 'coaxial_jack', 'side': 'right', 'confidence': 'low'}, {}),
+    # Vocabolari chiusi: un lato o una feature fuori elenco non si interpretano.
+    ({'feature': 'coaxial_jack', 'side': 'sopra', 'confidence': 'high'}, {}),
+    ({'feature': 'antenna', 'side': 'right', 'confidence': 'high'}, {}),
+    # Mezza dichiarazione non e' confrontabile con niente.
+    ({'feature': 'coaxial_jack', 'confidence': 'high'}, {}),
+    ('lower right', {}),
+])
+def test_the_asymmetry_landmark_is_read_only_when_it_is_complete(landmark, expected):
+    """@brief E' cio' che rende verificabile un orientamento.
+
+    Un ingombro da solo non dice quale capo sia quale. Prima il verso lo
+    decideva una regex inglese su prosa libera, ancorata al nome di un file;
+    ora e' un campo dichiarato, con vocabolari chiusi, che vale solo se
+    completo.
+    """
+    data = response()
+    data['components'][0]['asymmetry_landmark'] = landmark
+    result, _, _ = run(data)
+    assert len(result) == 1
+    got = {k: v for k, v in result[0].items() if k.startswith('landmark_')}
+    assert got == expected
+
+
+def test_a_response_without_the_landmark_field_is_still_accepted():
+    """Le risposte in cache sono anteriori al campo: l'assenza non e' un errore."""
+    data = response()
+    data['components'][0].pop('asymmetry_landmark', None)
+    result, _, _ = run(data)
+    assert len(result) == 1
+    assert not any(k.startswith('landmark_') for k in result[0])

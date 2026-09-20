@@ -75,46 +75,6 @@ def test_literal_marking_selects_user_installed_module_model(library):
     assert measured == [exact]
 
 
-def test_literal_module_observed_lower_right_rf_jack_sets_native_rotation(library):
-    root, add, _ = library
-    exact = add("espressif", "ESP32-S3-WROOM-1U",
-                {"total": [19.2, 18.0, 3.2], "body": [19.2, 18.0, 3.2]})
-    c = dict(
-        kind="module", **{"class": "rf_module"},
-        package="Shielded castellated SMD module with U.FL/IPEX antenna connector",
-        package_evidence="Attached RF coaxial jack at lower right.",
-        terminal_layout="Castellated rows on top and bottom; RF coaxial connector at lower right.",
-        marking="ESP32-S3-WROOM-1U", length_mm=19.2, width_mm=18.0,
-        bbox_basis="total", presence_confidence="high", class_confidence="high",
-    )
-    assert km.attach_models([c], library=root) == 1
-    assert c["model_path"] == str(exact)
-    # La correzione automatica riguarda il verso e si SOMMA all'asse che il
-    # costruttore deduce dal modello: scritta come angolo assoluto cancellava
-    # l'asse, e un modulo da girare di 90 gradi restava girato male comunque.
-    assert c["model_rotation_native_delta_deg"] == 180.0
-    assert "model_rotation_deg" not in c
-    assert c["model_match"]["native_model_rotation_deg"] == 180.0
-
-
-def test_literal_module_observed_hyphenated_lower_right_rf_jack_sets_native_rotation(library):
-    root, add, _ = library
-    exact = add("espressif", "ESP32-S3-WROOM-1U",
-                {"total": [19.2, 18.0, 3.2], "body": [19.2, 18.0, 3.2]})
-    c = dict(
-        kind="module", **{"class": "rf_module"},
-        package="Shielded castellated SMD module with U.FL/IPEX antenna connector",
-        package_evidence="Attached RF coaxial jack at lower-right.",
-        terminal_layout="Castellated rows on top and bottom; RF coaxial connector at lower-right.",
-        marking="ESP32-S3-WROOM-1U", length_mm=19.2, width_mm=18.0,
-        bbox_basis="total", presence_confidence="high", class_confidence="high",
-    )
-    assert km.attach_models([c], library=root) == 1
-    assert c["model_path"] == str(exact)
-    assert c["model_rotation_native_delta_deg"] == 180.0
-    assert "model_rotation_deg" not in c
-
-
 def test_three_lead_tab_unknown_semiconductor_gets_sot223_preview(library):
     root, add, _ = library
     sot = add("Package_TO_SOT_SMD", "SOT-223",
