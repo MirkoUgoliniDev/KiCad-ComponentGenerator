@@ -1,3 +1,127 @@
+# 2026-09-20 (13) — la striscia del contatto, non il suo centro
+
+Prima corsa con il filtro dei contatti: **22 proposte tolte su 44 contatti**,
+ma nella vista di revisione restavano ancora le file di piazzole. Misurato sul
+JSON del rilevatore (106 proposte superstiti), gli intrusi erano di due
+famiglie:
+
+* **piazzole e sigle**: una fila regolare di riquadri da 0,7-1,0 mm a **2,9 mm
+  dal bordo**, che YOLO chiama «ic» fino a 0,73 di confidenza -- sono le cifre
+  serigrafate accanto ai contatti -- piu' riquadri da ~2,2 mm centrati a 1,3 mm
+  dal bordo, cioe' le piazzole vere;
+* **pezzi di fila**: riquadri da 4, 11 e **19,2 mm** distesi sulla fila dei
+  contatti.
+
+## Perche' la prima regola non bastava
+
+Guardava solo il **centro del contatto**, entro mezzo passo. Ma il rilevatore
+non annota il centro del semi-foro: annota la piazzola dorata, che entra sotto
+il modulo, e la sigla stampata accanto. Con una zona ridotta a un cerchietto
+sul bordo, quasi tutto passava.
+
+## La regola ora
+
+La zona e' una **striscia** profonda quanto il contatto occupa con la sua
+sigla: `pad_length` dichiarata (o il passo come ripiego) + mezzo foro + 0,55
+mm, dove 0,55 e' il `label_gap` con cui **il generatore del footprint stesso**
+dispone la serigrafia. Non e' un numero scelto per far tornare questo caso: la
+prova lo mostra: con `pad_length` dichiarata la striscia viene 3,85 mm, senza
+3,89 mm, e **tolgono esattamente le stesse 20 proposte**. La separazione non e'
+in bilico.
+
+Secondo criterio, per i pezzi di fila: un riquadro **contenuto** nella striscia
+che copre due o piu' contatti e' un tratto di fila, perche' su un modulo
+castellated non c'e' nulla montato sopra i contatti. La **contenzione** e' cio'
+che salva un connettore montato sul bordo, che entra nella scheda molto piu'
+della striscia -- e il primo tentativo, che guardava solo il centro, lo avrebbe
+cancellato: l'ha rivelato il test, non la corsa.
+
+Sulle matrici THT la regola della copertura **non si applica**: li' il corpo di
+un pin header copre tutti i suoi pin per definizione.
+
+## Effetto misurato sulla corsa vera
+
+128 proposte del rilevatore → 22 tolte dalla prima regola → **altre 20 dalla
+striscia**, restano 86. Fra le tolte: il tratto da 19,2 mm, i tre da 2,2 mm
+sulle piazzole e l'intera fila di cifre serigrafate a 9,8 mm dal centro.
+Sopravvivono i riquadri grandi che sporgono dalla striscia: quelli restano alla
+riconciliazione, che ha la categoria apposta (`bare_pad_or_contact`).
+
+## Trappola di consegna, terza volta
+
+`device_commit_files` ha risposto «written» **senza sostituire il file**, e la
+verifica con `md5sum` lo ha scoperto: senza quella verifica avrei misurato la
+regola vecchia credendo di provare la nuova. Confrontare sempre il checksum
+dopo ogni consegna.
+
+# 2026-09-20 (12) — i contatti del modulo non sono componenti, e si vede cosa toglie
+
+Due prove reali alle spalle, entrambe misurate:
+
+* **Qwen3-VL** (`qwen/qwen3-vl-235b-a22b-instruct`): risposta valida in 9
+  secondi con `{"components": [], ...}`. Il tool calling con le immagini
+  **funziona** -- era il dubbio aperto -- ma non ha enumerato nulla. Dal
+  confronto dei token (ora registrati per chiamata) la sua richiesta valeva
+  ~13k token in ingresso, quanto quella che ha funzionato: **le immagini le
+  aveva ricevute**. Ha semplicemente preso la scorciatoia che lo schema
+  lasciava aperta.
+* **`openai/gpt-5.6-luna`**: 34 corpi, 61 s, `tokens_in=14946`, **0,0105 USD**.
+  Misurato sul JSON: il corpo piu' piccolo che riporta e' **1,9x1,8 mm** su una
+  scheda che ha 0402 (1,0x0,5) e 0603 (1,6x0,8) -- non scende sotto i 2 mm, ed
+  e' per questo che il 3D viene un campo di mattoni. 17 su 34 senza package, 3
+  coppie di riquadri sovrapposti sullo stesso corpo.
+
+## Conclusione che orienta il lavoro
+
+I due strumenti sbagliano in modo opposto: **YOLO misura bene e riconosce
+male** (riquadri stretti anche sui 0402, ma scambia le piazzole per corpi e ne
+perdeva alcuni), **il modello di visione riconosce bene e misura male** (trova
+i corpi veri e li nomina, ma non scende sotto i 2 mm). La strada e' l'ibrido
+che c'era gia': geometria dal rilevatore locale, identita' dal modello.
+
+## Contatti dichiarati, non indovinati
+
+`kicadgen/services/contact_zones.py` (nuovo). La prima ipotesi -- filtrare le
+classi `pads`/`pins` -- era gia' stata **smentita dall'audit**: zero
+rilevamenti ripescati, il modello chiama le file di piazzole «switch»,
+«battery», «clock». Neanche la dimensione separa: una piazzola e un 0603
+misurano uguale.
+
+Cio' che separa e' la **posizione**, e non e' un'incognita: l'estrazione
+dichiara lati, numero, passo e offset dei contatti, la stessa geometria con cui
+il footprint disegna le piazzole. Una proposta viene tolta quando il suo centro
+sta entro **mezzo passo** da un contatto dichiarato **e** il suo lato lungo non
+supera il passo -- due criteri, entrambi quote dichiarate, nessuna soglia
+scelta a mano. Il secondo evita di cancellare un connettore lungo che passa
+sopra la fila. Senza quote dichiarate non si filtra nulla: indovinare dove sono
+i contatti cancellerebbe componenti veri. Vale anche per le matrici THT.
+
+## L'anteprima del rilevatore torna, e mostra anche cio' che ha tolto
+
+`draw_detector_proposals` salva `detector-<istante>-overlay.png` accanto a
+`inventory-<istante>-*`: proposte sicure in verde, deboli tratteggiate, e **in
+rosso quelle scartate perche' cadute su un contatto**. Un filtro che toglie la
+cosa sbagliata si vede solo se mostra cosa toglie.
+
+## Il modello di visione vale anche con YOLO
+
+La riga «Modello di visione» ora compare anche con il rilevatore locale, dove
+governa la riconciliazione. Motivo pratico: la stessa chiamata costa **0,0105
+USD con gpt-5.6-luna contro 0,246 con Opus**. Il datasheet resta al modello
+configurato.
+
+## Aperto
+
+* Le sovrapposizioni annidate restano alla riconciliazione (deciso): sulla
+  scheda 45 coppie annidate, una sola di taglia simile.
+* Le marcature vengono stampate sul 3D («CH3?4?; ?; KH») mentre la strategia
+  del progetto prevede volumi generici senza scritte: difetto segnalato, non
+  corretto.
+* Trappola di consegna, gia' capitata due volte: una scrittura su disco puo'
+  essere segnalata riuscita senza sostituire il file. Verificare con checksum
+  dopo ogni consegna, altrimenti si committa una versione vecchia e si debugga
+  codice che sulla macchina non c'e'.
+
 # 2026-09-20 (11) — il modello di visione si sceglie dove si lavora, e il prompt parla la sua lingua
 
 Osservazione dell'utente guardando il pannello: «ok, ma il modello?». Aveva
