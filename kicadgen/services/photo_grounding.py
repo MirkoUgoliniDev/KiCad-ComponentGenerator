@@ -40,6 +40,11 @@ MECHANICAL_EVIDENCE_PROMPT = (
 )
 
 DEFAULT_VISION_MODEL = "anthropic/claude-opus-5"
+#: Modello predefinito quando a rilevare i corpi e' il modello di visione e non
+#: un rilevatore locale. E' una scelta di prodotto, non una regola: si cambia
+#: dal pannello dell'analisi, e qualunque modello con risposta strutturata e
+#: lettura di immagini va bene al suo posto.
+DEFAULT_PHOTO_DETECTOR_MODEL = "qwen/qwen3-vl-235b-a22b-instruct"
 MECHANICAL_MAX_TOKENS = 16384
 GROUNDING_PROMPT = (
     "Detect every separately mounted electronic component on this PCB photograph, including all tiny "

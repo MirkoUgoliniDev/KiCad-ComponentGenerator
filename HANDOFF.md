@@ -1,3 +1,46 @@
+# 2026-09-20 (11) — il modello di visione si sceglie dove si lavora, e il prompt parla la sua lingua
+
+Osservazione dell'utente guardando il pannello: «ok, ma il modello?». Aveva
+ragione: il modello che rileva stava sepolto in Impostazioni sotto un nome che
+dice un'altra cosa («Modello per verifica foto»), mentre il pannello mostrava
+solo «Modello AI» e «Modello YOLO».
+
+## Scoperta che cambia le cose
+
+L'estrazione **usa un solo modello per tutto**: in `_extract_with_ai`,
+`photo_model` e `verification_model` sono entrambi il modello AI scelto. I
+campi separati in Impostazioni non li legge piu' nessuno per questa via. Ecco
+perche' la modale diceva «Global inventory: anthropic/claude-opus-5».
+
+## Cosa e' cambiato
+
+* Nel pannello «Strumenti AI» la seconda riga ora **segue il rilevatore**: con
+  `yolo` mostra i pesi ONNX, con `vlm` mostra «Modello di visione:» con il suo
+  selettore, con `ai` nessuna delle due. Una riga per volta, quella su cui si
+  puo' davvero intervenire.
+* Il selettore chiede `PHOTO_CAPABILITIES`, non quelle dei datasheet: pretendere
+  i PDF nasconderebbe proprio i modelli di sola visione che si vogliono provare.
+* Default `DEFAULT_PHOTO_DETECTOR_MODEL = 'qwen/qwen3-vl-235b-a22b-instruct'`
+  (in `photo_grounding`): e' una scelta di prodotto dichiarata, non una regola.
+* Con rilevatore `vlm` quel modello sostituisce `verification_model` per la
+  corsa, e il log lo dice: «Rilevamento dei corpi affidato a ...».
+
+## Il prompt, per un modello di grounding
+
+* Paragrafo COORDINATES esplicito nella testa di enumerazione: frazioni 0..1,
+  **non pixel e non griglia 0-1000**, con un esempio numerico, e
+  `image_size_px` dichiarato come contesto e non come unita' della risposta.
+* Ma un'istruzione non e' una garanzia: `_rescale_boxes` converte una risposta
+  consegnata in pixel o su griglia 0-1000, **solo** quando la conversione rende
+  validi TUTTI i rettangoli -- se ne salva una parte, il problema e' un altro e
+  non si tocca nulla. La convenzione usata finisce nel log, nell'audit e in
+  `_global_inventory_box_scale` su ogni componente.
+* Fragilita' dichiarata: con un'immagine larga circa 1000 px le due convenzioni
+  coincidono e vince la prima. Per questo viene registrata.
+
+Test: conversione pixel e griglia 0-1000 (positivo), frazioni lasciate stare,
+nessuna convenzione coerente, interi enormi e non-numeri (negativi).
+
 # 2026-09-20 (10) — terzo rilevatore: il modello di visione al posto di YOLO
 
 Decisione dell'utente, dopo la vista di revisione: «sono profondamente dubbioso

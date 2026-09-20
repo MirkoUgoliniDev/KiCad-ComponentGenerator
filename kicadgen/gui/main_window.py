@@ -67,6 +67,8 @@ from .analysis_overlay import AnalysisOverlay
 from .generation_options_dialog import GenerationOptionsDialog
 from .guided_documents import GuidedDocuments
 from .model_dialog import pick_model
+from ..services.openrouter import PHOTO_CAPABILITIES
+from ..services.photo_grounding import DEFAULT_PHOTO_DETECTOR_MODEL
 from .pinout_dialog import PinoutDialog
 from .photo_review_dialog import PhotoReviewDialog, PhotoTransform
 from .preview_3d_vtk import Preview3DVtk
@@ -94,6 +96,18 @@ _PHOTO_DETECTOR_TRANSLATIONS = {
             "de": "Nur Sehmodell (kein lokaler Detektor)"},
     "model": {"it": "Modello YOLO:", "en": "YOLO model:",
               "fr": "Modèle YOLO :", "de": "YOLO-Modell:"},
+    "vlm_model": {"it": "Modello di visione:", "en": "Vision model:",
+                  "fr": "Modèle de vision :", "de": "Sehmodell:"},
+    "vlm_pick": {"it": "Scegli modello…", "en": "Choose model…",
+                 "fr": "Choisir le modèle…", "de": "Modell wählen…"},
+    "vlm_help": {"it": "Modello che guarda la fotografia ed elenca i corpi. "
+                       "Vuoto: lo stesso modello AI dell'estrazione.",
+                 "en": "Model that looks at the photograph and lists the bodies. "
+                       "Empty: the same AI model as the extraction.",
+                 "fr": "Modèle qui regarde la photographie et liste les corps. "
+                       "Vide : le même modèle IA que l'extraction.",
+                 "de": "Modell, das das Foto ansieht und die Körper auflistet. "
+                       "Leer: dasselbe KI-Modell wie die Extraktion."},
     "browse": {"it": "Sfoglia…", "en": "Browse…",
                "fr": "Parcourir…", "de": "Durchsuchen…"},
     "picker": {"it": "Seleziona modello YOLO ONNX per questa sessione",
@@ -515,6 +529,8 @@ class MainWindow(QMainWindow):
         # Modello scelto solo per questa sessione (datasheet difficile): non
         # viene salvato in config.json e si perde alla chiusura, per scelta.
         self._session_model: str | None = None
+        #: Modello che guarda la fotografia quando il rilevatore e' 'vlm'.
+        self._vlm_model: str = DEFAULT_PHOTO_DETECTOR_MODEL
         self._auto_after_extraction = False
         self._auto_generation_params = None
         self._applying_extraction = False
@@ -789,13 +805,27 @@ class MainWindow(QMainWindow):
             self._photo_detector_text("default", path=default_path))
         self.field_yolo_model.setToolTip(
             self._photo_detector_text("path_help", path=default_path))
+        self.label_vlm_model.setText(self._photo_detector_text("vlm_model"))
+        self.btn_pick_vlm_model.setText(self._photo_detector_text("vlm_pick"))
+        self.btn_pick_vlm_model.setAccessibleName(self._photo_detector_text("vlm_model"))
+        for widget in (self.field_vlm_model, self.btn_pick_vlm_model):
+            widget.setToolTip(self._photo_detector_text("vlm_help"))
+        self.field_vlm_model.setText(self._vlm_model)
         self._on_photo_detector_changed()
 
     def _on_photo_detector_changed(self) -> None:
-        """Enable the session path only when the user explicitly selects YOLO."""
-        enabled = self.combo_photo_detector.currentData() == "yolo"
-        self.field_yolo_model.setEnabled(enabled)
-        self.btn_pick_yolo_model.setEnabled(enabled)
+        """@brief Mostra i pesi locali o il modello di visione, secondo il rilevatore.
+
+        @note Una riga per volta: i pesi ONNX non c'entrano nulla quando a
+            guardare la fotografia e' un modello remoto, e il contrario. La
+            riga che resta e' quella su cui si puo' davvero intervenire.
+        """
+        detector = self.combo_photo_detector.currentData()
+        self.field_yolo_model.setEnabled(detector == "yolo")
+        self.btn_pick_yolo_model.setEnabled(detector == "yolo")
+        if hasattr(self, "_models_form"):
+            self._models_form.setRowVisible(self._row_yolo_model, detector == "yolo")
+            self._models_form.setRowVisible(self._row_vlm_model, detector == "vlm")
 
     def _pick_session_yolo_model(self) -> None:
         """Select optional ONNX weights without reading or saving preferences."""
@@ -806,6 +836,22 @@ class MainWindow(QMainWindow):
         )
         if selected:
             self.field_yolo_model.setText(selected)
+
+    def _pick_session_vlm_model(self) -> None:
+        """@brief Sceglie il modello che guarda la fotografia, solo per questa sessione.
+
+        @note Chiede le capacita' del lavoro fotografico -- risposta strutturata
+            e lettura di immagini -- non quelle dei datasheet: pretendere anche
+            i PDF nasconderebbe i modelli di sola visione, che sono proprio
+            quelli che si vogliono provare qui.
+        """
+        chosen = pick_model(self._vlm_model, self,
+                            title=self._photo_detector_text("vlm_model"),
+                            capabilities=PHOTO_CAPABILITIES)
+        if chosen:
+            self._vlm_model = chosen
+            self.field_vlm_model.setText(chosen)
+            self._append_log(f"Modello di visione per questa sessione: {chosen}.")
 
     def _photo_detector_options(self) -> tuple[str, Path | None]:
         """Snapshot the selected backend; AI ignores any remembered ONNX path."""
@@ -1171,9 +1217,23 @@ class MainWindow(QMainWindow):
         yolo_row.addWidget(self.field_yolo_model, 1)
         yolo_row.addWidget(self.btn_pick_yolo_model)
         models_form.addRow(self.label_yolo_model, yolo_row)
+        self._row_yolo_model = models_form.rowCount() - 1
+        self.label_vlm_model = QLabel()
+        self.field_vlm_model = QLineEdit()
+        self.field_vlm_model.setReadOnly(True)
+        self.btn_pick_vlm_model = QPushButton()
+        self.btn_pick_vlm_model.setAutoDefault(False)
+        self.btn_pick_vlm_model.clicked.connect(self._pick_session_vlm_model)
+        vlm_row = QHBoxLayout()
+        vlm_row.addWidget(self.field_vlm_model, 1)
+        vlm_row.addWidget(self.btn_pick_vlm_model)
+        models_form.addRow(self.label_vlm_model, vlm_row)
+        self._row_vlm_model = models_form.rowCount() - 1
+        self._models_form = models_form
         # These data-bearing widgets use explicit keys and local I18n fallbacks.
         for widget in (self.label_photo_detector, self.combo_photo_detector,
-                       self.label_yolo_model, self.field_yolo_model, self.btn_pick_yolo_model):
+                       self.label_yolo_model, self.field_yolo_model, self.btn_pick_yolo_model,
+                       self.label_vlm_model, self.field_vlm_model, self.btn_pick_vlm_model):
             widget.setProperty("i18n_skip", True)
         self._refresh_photo_detector_controls()
         _align_form_labels(models_form)
@@ -1561,13 +1621,19 @@ class MainWindow(QMainWindow):
 
         model = self._session_model or profile['model']
         photo_model = model
-        verification_model = model
+        # Con il rilevatore 'vlm' e' questo modello a guardare la fotografia ed
+        # elencare i corpi: e' la stessa chiamata che altrove fa la verifica,
+        # ma qui e' anche il rilevatore, quindi lo si sceglie dal pannello.
+        verification_model = (self._vlm_model if photo_detector == 'vlm' and self._vlm_model
+                              else model)
         self._append_log(
             f"Estrazione da {len(doc_paths)} file con il modello AI {model}"
             + (" (solo questa sessione)." if self._session_model else ".")
         )
         self._on_ai_progress(f"Profilo AI: {self.combo_component_type.currentText()}.")
         self._on_ai_progress(f"Modello AI unico: {model}.")
+        if verification_model != model:
+            self._on_ai_progress(f"Rilevamento dei corpi affidato a {verification_model}.")
 
         self._extract_worker = ExtractWorker(
             doc_paths,

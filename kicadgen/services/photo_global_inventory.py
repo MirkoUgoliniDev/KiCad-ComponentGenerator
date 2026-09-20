@@ -9,6 +9,7 @@ from collections import Counter
 from copy import deepcopy
 import hashlib
 import json
+import math
 import re
 from pathlib import Path
 
@@ -147,6 +148,11 @@ strip, then check strip boundaries and board edges against the full photograph,
 which is the only coordinate frame.
 Report presence_confidence and class_confidence independently as high/medium/low;
 confidence is overall uncertainty.
+COORDINATES: bbox=[left,top,right,bottom] as FRACTIONS of the first photograph,
+each between 0 and 1, with left<right and top<bottom. Do NOT use pixels and do
+NOT use a 0-1000 grid. A body whose left edge is one quarter across the image
+and whose top edge is one tenth down is [0.25,0.10,...], never [250,100,...].
+image_size_px in the JSON is context, not the unit of your answer.
 """
 
 #: Il prompt di enumerazione completo: testa nuova, coda identica all'altro.
@@ -276,6 +282,60 @@ def _repair_nullable_lead_observation(row):
         repaired['lead_count_confidence'] = 'low'
         return repaired
     return row
+
+
+#: Convenzioni di coordinate che un modello di grounding puo' consegnare al
+#: posto delle frazioni chieste. Non si indovina: si sceglie quella che rende
+#: TUTTI i rettangoli validi, e se nessuna lo fa non si tocca nulla.
+_BOX_SCALES = (('normalized_1000', 1000.0, 1000.0), ('pixels', None, None))
+
+
+def _rescale_boxes(rows, width, height, log):
+    """@brief Riporta a frazioni 0..1 i rettangoli consegnati in un'altra unita'.
+
+    @param rows Componenti della risposta, modificati sul posto.
+    @param width Larghezza della fotografia in pixel.
+    @param height Altezza della fotografia in pixel.
+    @param log Callback di avanzamento: dice quale convenzione e' stata usata.
+    @return Il nome della convenzione applicata, o None se non serviva.
+    @note Un modello di grounding spesso risponde in pixel o su griglia 0-1000
+        anche quando il contratto chiede frazioni. Scartare tutto sarebbe
+        buttare una risposta corretta per un'unita' di misura: qui la si
+        converte, ma solo quando la conversione rende validi TUTTI i
+        rettangoli, perche' una conversione che ne salva una parte e' un
+        indizio che il problema e' un altro.
+    @note Separazione fragile quando l'immagine e' larga circa 1000 px: le due
+        convenzioni coincidono e la scelta ricade sulla prima. Per questo la
+        convenzione usata finisce nel log e nell'audit.
+    """
+    def numbers(box):
+        # Un intero enorme o un non-numero non descrive un'unita' di misura
+        # diversa: descrive una risposta rotta, che deve restare tale.
+        try:
+            values = [float(v) for v in box]
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return values if all(math.isfinite(v) for v in values) else None
+
+    boxes = [values for row in rows
+             if isinstance(row, dict) and isinstance(row.get('bbox'), list)
+             and len(row['bbox']) == 4
+             and not any(isinstance(v, bool) for v in row['bbox'])
+             and (values := numbers(row['bbox'])) is not None]
+    if not boxes or len(boxes) != sum(1 for row in rows if isinstance(row, dict)):
+        return None
+    if max(max(box) for box in boxes) <= 1.0:
+        return None
+    for name, sx, sy in _BOX_SCALES:
+        dx, dy = (sx or float(width)), (sy or float(height))
+        converted = [[box[0]/dx, box[1]/dy, box[2]/dx, box[3]/dy] for box in boxes]
+        if all(0 <= b[0] < b[2] <= 1 and 0 <= b[1] < b[3] <= 1 for b in converted):
+            for row, box in zip(rows, boxes):
+                row['bbox'] = [box[0]/dx, box[1]/dy, box[2]/dx, box[3]/dy]
+            log(f'Global inventory: coordinates delivered as {name}; converted to fractions.')
+            return name
+    log('Global inventory: coordinates outside 0..1 and no consistent convention; left untouched.')
+    return None
 
 
 def _component_valid(row, known):
@@ -662,6 +722,11 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
             data = call(**kwargs)
         except (OpenRouterError, ValueError, OSError) as exc:
             data = {'error': str(exc)}
+    # Prima di giudicare la risposta, portarla nell'unita' del contratto: un
+    # rettangolo giusto consegnato in pixel non e' una risposta sbagliata.
+    box_scale = None
+    if isinstance(data, dict) and isinstance(data.get('components'), list):
+        box_scale = _rescale_boxes(data['components'], w, h, log)
     rows, safe, errors = _validate(data, known, boxes)
     if isinstance(data, dict) and data.get('error'):
         errors.append(str(data['error']))
@@ -696,8 +761,11 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         c['_global_inventory_uncertainties'] = list(uncertainties)
         c['_global_inventory_status'] = 'partial' if errors else 'validated_hypotheses'
         c['_global_inventory_prompt_version'] = version
+        if box_scale:
+            c['_global_inventory_box_scale'] = box_scale
         c['_global_inventory_prompt_hash'] = prompt_hash
     _write_audit(cache_dir, 'global-inventory', dict(version=version, schema_version=SCHEMA_VERSION,
+        box_scale=box_scale,
         model=model, prompt=prompt, prompt_hash=prompt_hash, inputs=inputs, response=data, errors=errors, components=result), log)
     if errors and not result:
         raise ValueError('Global inventory failed with no recoverable bodies: ' + '; '.join(errors))

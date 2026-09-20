@@ -696,3 +696,48 @@ def test_a_response_without_the_landmark_field_is_still_accepted():
     result, _, _ = run(data)
     assert len(result) == 1
     assert not any(k.startswith('landmark_') for k in result[0])
+
+
+def _boxed(*boxes):
+    return [dict(bbox=list(box)) for box in boxes]
+
+
+def test_boxes_delivered_in_pixels_or_on_a_thousand_grid_are_converted():
+    """@brief Un rettangolo giusto in un'altra unita' non e' una risposta sbagliata.
+
+    Un modello di grounding risponde spesso in pixel o su griglia 0-1000 anche
+    quando il contratto chiede frazioni. Scartare tutto significherebbe buttare
+    una risposta corretta per un'unita' di misura.
+    """
+    messages = []
+    rows = _boxed([250, 100, 500, 400])
+    assert inventory._rescale_boxes(rows, 2000, 1000, messages.append) == 'normalized_1000'
+    assert rows[0]['bbox'] == pytest.approx([.25, .1, .5, .4])
+    assert 'normalized_1000' in messages[0]
+
+    # Oltre mille non puo' essere la griglia: restano i pixel dell'immagine.
+    rows = _boxed([500, 200, 1500, 800])
+    assert inventory._rescale_boxes(rows, 2000, 1000, messages.append) == 'pixels'
+    assert rows[0]['bbox'] == pytest.approx([.25, .2, .75, .8])
+
+
+def test_fractions_are_left_alone_and_a_broken_answer_stays_broken():
+    """@brief Caso negativo: la conversione non deve salvare cio' che e' rotto."""
+    messages = []
+    rows = _boxed([.25, .1, .5, .4])
+    assert inventory._rescale_boxes(rows, 2000, 1000, messages.append) is None
+    assert rows[0]['bbox'] == [.25, .1, .5, .4] and not messages
+
+    # Nessuna convenzione rende validi TUTTI i rettangoli: non si tocca nulla,
+    # perche' una conversione che ne salva una parte dice che il problema e'
+    # un altro.
+    rows = _boxed([250, 100, 500, 400], [100, 100, 90, 400])
+    assert inventory._rescale_boxes(rows, 2000, 1000, messages.append) is None
+    assert rows[0]['bbox'] == [250, 100, 500, 400]
+    assert 'no consistent convention' in messages[-1]
+
+    # Un intero enorme o un non-numero descrive una risposta rotta, non
+    # un'unita' diversa.
+    for broken in ([0, 0, 10**400, 1], [0, 0, float('nan'), 1], ['x', 0, 1, 1]):
+        rows = _boxed(broken)
+        assert inventory._rescale_boxes(rows, 2000, 1000, messages.append) is None
