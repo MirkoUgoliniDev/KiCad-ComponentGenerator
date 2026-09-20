@@ -496,7 +496,11 @@ def test_visible_unknown_has_independent_confidences_without_duplicate_original(
     result, calls, _ = run(data)
     assert len(result) == 1 and result[0]['kind'] == 'generic'
     assert result[0]['presence_confidence'] == 'high'
-    assert result[0]['class_confidence'] == 'low' and result[0]['package'] == ''
+    # L'involucro sopravvive al dubbio sulla funzione: "non so che cosa faccia"
+    # non e' "non so che forma abbia", ed e' la forma che serve a cercare un
+    # modello. A cancellare il campo resta la fiducia complessiva bassa o un
+    # contorno irrisolto, verificati dal test sulle confidenze indipendenti.
+    assert result[0]['class_confidence'] == 'low' and result[0]['package'] == 'unverified'
     assert 'Scan systematically' in calls[0]['system_prompt']
     schema = calls[0]['tool']['function']['parameters']['properties']
     assert 'rejection_category' in schema['candidate_decisions']['items']['required']
@@ -561,8 +565,14 @@ def test_review_candidate_metadata_reaches_verifier_and_survives_uncertainty(tmp
 
 @pytest.mark.parametrize('presence,classification,overall,package', [
     ('high', 'low', 'low', ''), ('low', 'high', 'low', ''),
-    ('high', 'high', 'medium', 'SOT-223')])
-def test_independent_confidences_do_not_promote_legacy_low_confidence_package(
+    ('high', 'high', 'medium', 'SOT-223'),
+    # Il caso che mancava, ed e' quello reale di un regolatore: l'involucro e'
+    # descritto bene e il contorno e' risolto, ma non si sa se sia un
+    # regolatore o un transistor di potenza. Il dubbio e' sulla funzione
+    # elettrica e non puo' cancellare una dichiarazione meccanica: senza
+    # package la ricerca perde la chiave e scandisce l'intera famiglia.
+    ('high', 'low', 'medium', 'SOT-223')])
+def test_the_electrical_class_doubt_does_not_erase_the_mechanical_package(
         presence, classification, overall, package):
     data = response()
     data['components'][0].update(presence_confidence=presence,

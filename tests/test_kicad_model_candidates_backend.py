@@ -89,7 +89,11 @@ def test_literal_module_observed_lower_right_rf_jack_sets_native_rotation(librar
     )
     assert km.attach_models([c], library=root) == 1
     assert c["model_path"] == str(exact)
-    assert c["model_rotation_deg"] == 180.0
+    # La correzione automatica riguarda il verso e si SOMMA all'asse che il
+    # costruttore deduce dal modello: scritta come angolo assoluto cancellava
+    # l'asse, e un modulo da girare di 90 gradi restava girato male comunque.
+    assert c["model_rotation_native_delta_deg"] == 180.0
+    assert "model_rotation_deg" not in c
     assert c["model_match"]["native_model_rotation_deg"] == 180.0
 
 
@@ -107,7 +111,8 @@ def test_literal_module_observed_hyphenated_lower_right_rf_jack_sets_native_rota
     )
     assert km.attach_models([c], library=root) == 1
     assert c["model_path"] == str(exact)
-    assert c["model_rotation_deg"] == 180.0
+    assert c["model_rotation_native_delta_deg"] == 180.0
+    assert "model_rotation_deg" not in c
 
 
 def test_three_lead_tab_unknown_semiconductor_gets_sot223_preview(library):
@@ -610,3 +615,67 @@ def test_attach_models_without_a_progress_callback_still_works(library):
     root, add, _ = library
     add("Resistor_SMD", "R_0603_1608Metric")
     assert km.attach_models([supported()], library=root) == 1
+
+
+def _usb_library(library, second_size=(8.94, 6.90, 4.26)):
+    """Due ricettacoli della stessa famiglia, uno chiaramente piu' vicino."""
+    root, add, measured = library
+    best = add("Connector_USB", "USB_C_Receptacle_A_6P", {"body": [11.14, 6.90, 3.26]})
+    other = add("Connector_USB", "USB_C_Receptacle_B_16P", {"body": list(second_size)})
+    component = supported(kind="connector", length_mm=10.67, width_mm=6.87,
+                          package="USB Type-C receptacle, SMD with through-hole shell tabs")
+    return root, best, other, component
+
+
+def test_a_dominant_candidate_earns_a_preview_like_a_tie_does(library):
+    """@brief Il pareggio e la dominanza sono le due facce della stessa cosa.
+
+    Il pareggio dice "la fotografia non distingue queste due varianti"; la
+    dominanza dice "la fotografia le ha distinte, e una sola regge". In
+    entrambi i casi l'incertezza residua riguarda identita' e variante, non la
+    geometria XY che si sta mostrando. Riconoscendo solo il pareggio, un
+    ricettacolo USB-C con un candidato al 4% e uno al 16% non otteneva alcuna
+    anteprima, mentre sarebbe bastato aggiungere un doppione identico del
+    migliore per ottenerla: le liste nitide erano punite e quelle ambigue
+    premiate.
+    """
+    root, best, _, component = _usb_library(library)
+    report = km.model_candidates(component, library=root)
+    assert report["status"] == "provisional_matched"
+    assert report["selected_path"] == str(best)
+    assert "review" in report["candidates"][0]["reasons"][-1].lower()
+
+
+def test_close_candidates_that_neither_tie_nor_dominate_stay_in_review(library):
+    """Caso negativo strutturale: nessuno domina e nessuno pareggia.
+
+    Il secondo dista meno del margine di pareggio dal primo, quindi la misura
+    non lo ha scartato; ma i due ingombri non coincidono, quindi non sono due
+    varianti dello stesso corpo. Non c'e' niente da mostrare senza scegliere.
+    """
+    root, _, _, component = _usb_library(library, second_size=(10.30, 6.90, 4.26))
+    report = km.model_candidates(component, library=root)
+    assert report["status"] == "review_required"
+    assert report["selected_path"] is None
+
+
+def test_dominance_over_models_nobody_measured_is_not_dominance(library, monkeypatch):
+    """Caso negativo: stessa dominanza, ma la ricerca non e' completa.
+
+    Superare alternative che nessuno ha misurato non e' superarle. Il pareggio
+    resta invece ammesso su una ricerca troncata, perche' non afferma nulla su
+    cio' che non e' stato misurato.
+    """
+    root, best, other, component = _usb_library(library)
+    _, add, _ = library
+    unreadable = add("Connector_USB", "USB_C_Receptacle_C_Unreadable")
+    readable = {str(best): {"body": [11.14, 6.90, 3.26]},
+                str(other): {"body": [8.94, 6.90, 4.26]}}
+    monkeypatch.setattr(km, "model_sizes", lambda paths, library=None: {
+        str(p): readable[str(p)] for p in paths if str(p) in readable})
+
+    report = km.model_candidates(component, library=root)
+
+    assert unreadable.exists()
+    assert report["status"] == "review_required"
+    assert report["selected_path"] is None

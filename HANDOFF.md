@@ -1,3 +1,136 @@
+# 2026-09-20 (5) — USB-C, regolatore e orientamento ESP32
+
+Branch `YOLO-SOLUTION`, sopra `cb7c185`. Tre difetti segnalati dall'utente sul
+run reale, indagati da tre agenti di sola analisi su ambiti separati
+(connettori / semiconduttori / orientamento) e integrati qui.
+
+## 0. Il verdetto che ribalta un'ipotesi: l'ESP32 era storto di 90°, non di 180°
+
+Il checkpoint precedente lasciava aperto se la regola dei 180° «non scatti o
+scatti al contrario». **Nessuna delle due: scatta, ed è corretta nel suo
+ambito.** L'errore è a monte ed è di **90 gradi**, quindi nessun valore fra 0 e
+180 poteva rimetterlo dritto — ed è il motivo per cui il connettore d'antenna
+restava dalla parte sbagliata sia prima sia dopo la correzione del trattino.
+
+Due difetti distinti, entrambi corretti:
+
+**a. L'asse si decideva con una metrica non invariante di scala.**
+`freecad_parts.py` sceglieva fra 0° e 90° minimizzando `|x/L−1| + |y/W−1|`.
+Con l'ingombro fotografico gonfiato (24.40 × 20.43 contro 19.2 × 18.0 reali) i
+due punteggi diventano 0.32276 e 0.33231: **la scelta si ribalta con un margine
+dell'1%**. Lo STEP del WROOM-1U ha l'asse lungo su Y, l'ingombro fotografico ce
+l'ha su X per contratto (`length_mm = max(sx, sy)`), quindi la risposta giusta è
+**90, sempre, a qualunque scala**. Ora l'asse si decide confrontando *quale*
+lato è il più lungo — la stessa lettura ordinata che `size_distance` usa già per
+dichiarare quel modello compatibile. Prima le due fasi si contraddicevano in
+silenzio: il matcher calcolava `relative_xy_error` assumendo la mappatura a 90°,
+il costruttore ne sceglieva un'altra.
+
+**b. La correzione automatica era un angolo assoluto e cancellava l'asse.**
+`_native_model_rotation_override` scriveva in `model_rotation_deg`, che
+`freecad_parts` legge **al posto** dell'angolo dedotto. Ora va in
+`model_rotation_native_delta_deg`, che si **somma**: asse 90 + verso 180 = 270.
+Resta assoluta solo la scelta esplicita dell'utente, che nomina insieme il
+modello e l'angolo. L'angolo assoluto di una corsa precedente continua a essere
+ripulito, come prima.
+
+## 1. Il regolatore: un dubbio elettrico cancellava una dichiarazione meccanica
+
+`photo_global_inventory.py` azzerava il campo `package` quando
+`class_confidence` era `low`. Per U4 il modello aveva scritto
+`large-tab power package (TO-252/DPAK or SOT-223-like), 3 leads + wide tab`,
+con `presence_confidence=high`, `bbox_basis=body_and_leads` e
+`confidence=medium`: l'evidenza **meccanica** era buona, era bassa solo la
+fiducia su *che cosa faccia* il pezzo. Buttando il campo la ricerca perdeva la
+sua chiave e scandiva l'intera famiglia.
+
+Misurato sulla libreria vera: da **79 rigetti + ricerca troncata +
+`topology_incomplete`** a **9 percorsi, 1 rigetto, ricerca completa**. Asimmetria
+che rendeva evidente il difetto: `package_evidence` (la prosa) veniva
+conservata, il campo strutturato no.
+
+Ora a cancellare il package restano la fiducia complessiva bassa e un contorno
+irrisolto. **Q1, J2 e J3 non ne beneficiano**: hanno `confidence=low`, e lì
+azzerare è corretto — il modello stesso dichiara l'identità irrisolta.
+
+## 2. USB-C: la logica premiava le liste ambigue e puniva quelle nitide
+
+`_provisional_geometry_choice` agganciava un'anteprima **solo** se i primi due
+candidati erano indistinguibili. J1 aveva 4 candidati a 4% e 16%: nessuna
+anteprima. Dimostrato dagli agenti eseguendo la funzione: aggiungendo un
+doppione identico del migliore l'anteprima compariva; togliendo il doppione
+spariva.
+
+Pareggio e dominanza sono le due facce della stessa cosa — il pareggio dice «la
+fotografia non distingue queste varianti», la dominanza dice «le ha distinte, e
+una sola regge» — e in entrambi i casi l'incertezza residua riguarda identità e
+variante, non la geometria mostrata. Ora anche la dominanza aggancia
+un'anteprima, **a due condizioni**: la ricerca dev'essere completa (superare
+alternative che nessuno ha misurato non è superarle) e i candidati almeno due
+(**un candidato solo non è dominanza, è assenza di confronto** — questa
+restrizione evita di promuovere cinque casi che i test esistenti tenevano in
+revisione a ragione).
+
+## 3. Verifica
+
+* Suite senza GUI: **2382 passati**, con i soliti 2 falliti e 1 errore di
+  raccolta **identici alla baseline** dello stesso ambiente.
+* Contratti aggiornati capendo perché, non allentati: i due test
+  sull'orientamento ora verificano il canale additivo; quello sulle confidenze
+  indipendenti ha finalmente il caso `presence=high, class=low, conf=medium`,
+  che è esattamente il regolatore e non era mai stato parametrizzato.
+* Coppie positivo/negativo nuove: asse invariante di scala contro asse già
+  giusto; dominanza contro «né pareggio né dominanza»; dominanza su ricerca
+  completa contro dominanza su ricerca troncata.
+* **Non verificato**: nessun run end-to-end. Serve FreeCAD, che qui non c'è.
+
+## 4. Resta aperto, in ordine di peso
+
+* **Il verso dei 180° resta un'euristica basata sul nome**, quindi vietata dal
+  CLAUDE.md, e va rimossa non tarata. Due difetti già dimostrati: le due
+  condizioni (`lower right` e `rf|u.fl|ipex`) sono cercate nella **stessa
+  stringa concatenata** di tre campi, quindi il `package` di un modulo con U.FL
+  rende la seconda sempre vera e basta un «bottom right» riferito ad altro per
+  far ruotare; ed è cieca a qualunque lingua diversa dall'inglese. La cura
+  strutturale è chiedere al modello un `asymmetry_landmark` (feature + angolo o
+  bordo nel frame della foto) e misurare il lato nativo dallo STEP, invece di
+  dedurre da prosa. **Dopo la correzione dell'asse va riguardato se i 180
+  servano ancora o siano ora di troppo**: 90 e 270 mettono il connettore ai due
+  capi opposti dello stesso bordo corto, e senza il file STEP non si può dire
+  quale sia giusto.
+* **`terminal_count_basis` è scritto incondizionatamente** a
+  `visible_including_tabs` per ogni riga del global inventory. Rende
+  `_provisional_terminal_count` codice morto per tutti i componenti, e con esso
+  il conteggio osservato: è la ragione per cui `_observed_count` è vuoto per i
+  connettori e `auto_matched` è di fatto irraggiungibile fuori da R/C chip
+  (misurato: 23 su 23 agganciati automaticamente sono R/C).
+* **`_declared_count` legge solo la nomenclatura IC.** Dei 3332 modelli di
+  famiglia connettore, 2982 dichiarano le posizioni nel nome (`_6P_`,
+  `_1x04_`) e ne riconosce **zero**. Da ancorare alla famiglia della
+  tassonomia: fuori dai connettori `_<N>P_` non è un conteggio
+  (controesempio reale: `Potentiometer_Bourns_3296P_Horizontal`).
+* **Scoperta senza chiave.** Con `package` vuoto e classe a bassa fiducia si
+  scandisce comunque l'intera famiglia (J2/J3: 3332 percorsi, 3310 scartati per
+  solo nome) e il fallimento viene riportato come `search_truncated`, che
+  descrive un budget esaurito e non l'assenza di qualunque chiave.
+* **Il regex del suggerimento dimensionale legge un passo come un ingombro**:
+  `P2.29x1.90mm` di un DSUB entra nella coda CAD come se fosse 2.29 × 1.90 mm.
+  Sono tutti falsi positivi e consumano budget.
+* **Il campo `mating` esiste in due schemi ma non in quello del global
+  inventory**: è l'attributo che distingue un connettore da un passivo stampato
+  di pari ingombro, ed è l'esempio citato dal CLAUDE.md. J2/J3 non erano
+  distinguibili nemmeno in linea di principio.
+* **Una sola misura per componente.** Il modello scrive in prosa due rettangoli
+  (corpo e inviluppo reofori) per U3, U4 e Q1; lo schema ne trasporta uno. Il
+  16% di U3 è questo, non un errore d'identità.
+* **Il log registra il prompt ma non la risposta AI.** Le risposte grezze stanno
+  solo in `generated/photo-cache/yolo-audit/global-inventory-*.json`: senza
+  quel file un'analisi come questa sarebbe stata ricostruttiva.
+* Vicolo cieco dell'indice misure, `omitted` incoerente, scarto del 28% sul
+  modulo: invariati.
+
+---
+
 # 2026-09-20 (4) — il nome lo decide l'utente, e la modale dice chi lavora
 
 Branch `YOLO-SOLUTION`, sopra `9b56d4f`. Tre richieste dell'utente dopo la

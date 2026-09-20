@@ -660,6 +660,60 @@ def _read_library_parts(path, color):
             FreeCAD.setActiveDocument(previous.Name)
 
 
+def _native_axis_angle(references, length, width):
+    """@brief Decide which model axis must end up along the photographed length.
+
+    @param references Bounding boxes to compare (full solid, and the section
+        through the body when it is available): a lead envelope can have a
+        different long axis from the plastic body.
+    @param length Photographed envelope along X, in mm.
+    @param width Photographed envelope along Y, in mm.
+    @return (angle in degrees, the reference that matched) with angle 0 or 90.
+    @note The axis is decided by WHICH side is the longer one, never by a sum
+        of ratios. A sum of ratios is not scale invariant: with a photographic
+        envelope inflated by 28% it flipped the choice with a 1% margin and put
+        the model's long axis across the board's short one, which moves an
+        asymmetric feature from a short edge to a long edge. Reading the sides
+        in order is also the reading that kicad_models.size_distance already
+        used to call that model compatible: before this, the two stages
+        disagreed in silence and nothing reported it.
+    """
+    measured_long, measured_short = sorted((length, width), reverse=True)
+    measured_long_on_x = length >= width
+    choices = []
+    for reference in references:
+        model_long_on_x = reference.XLength >= reference.YLength
+        model_long = max(reference.XLength, reference.YLength)
+        model_short = min(reference.XLength, reference.YLength)
+        # Same residual as the matcher: the worse of the two sides, so a good
+        # fit on one axis cannot pay for a bad one on the other.
+        score = max(abs(model_long - measured_long) / measured_long,
+                    abs(model_short - measured_short) / measured_short)
+        choices.append((score, 0 if model_long_on_x == measured_long_on_x else 90,
+                        reference))
+    score, angle, reference = min(choices, key=lambda choice: choice[0])
+    return angle, reference
+
+
+def _placement_angle(component, inferred):
+    """@brief Compose the inferred axis with the corrections that apply to it.
+
+    @param component Component mapping carrying the optional overrides.
+    @param inferred Axis angle deduced by comparing the model with the measure.
+    @return Total rotation around Z, in degrees.
+    @note Only an explicit user selection is absolute: it names a model AND the
+        angle to place it at, so it replaces the deduction. The other two are
+        deltas and add to it -- the automatic one corrects the VERSE of an
+        asymmetric feature, the manual one is the 3D context menu. Writing the
+        automatic correction as an absolute angle used to erase the axis: a
+        module whose long axis needed 90 degrees ended up at 180, keeping the
+        wrong axis, and no value between 0 and 180 could put it right.
+    """
+    return (float(component.get("model_rotation_deg", inferred))
+            + float(component.get("model_rotation_native_delta_deg") or 0)
+            + float(component.get("model_rotation_delta_deg") or 0))
+
+
 def _library_model(component, cx, cy, z0, color):
     """Import resolved STEP geometry and styles, or return None on failure.
 
@@ -703,18 +757,12 @@ def _library_model(component, cx, cy, z0, color):
         except Exception:
             pass
         length, width = float(component["length_mm"]), float(component["width_mm"])
-        choices = []
-        for reference in references:
-            for angle, x, y in ((0, reference.XLength, reference.YLength),
-                                (90, reference.YLength, reference.XLength)):
-                choices.append((abs(x / length - 1) + abs(y / width - 1), angle, reference))
-        _, inferred, reference = min(choices, key=lambda choice: choice[0])
+        inferred, reference = _native_axis_angle(references, length, width)
         # La correzione manuale e' un DELTA, non un angolo assoluto: l'angolo
         # di partenza lo deduce qui FreeCAD confrontando il modello con la
         # misura, e l'interfaccia non lo conosce. "Ruota di 90 gradi" si
         # somma quindi a qualunque sia la base, dedotta o gia' forzata.
-        angle = (float(component.get("model_rotation_deg", inferred))
-                 + float(component.get("model_rotation_delta_deg") or 0))
+        angle = _placement_angle(component, inferred)
         dz = float(component.get("model_z_offset_mm", 0))
         if not math.isfinite(angle) or not math.isfinite(dz):
             raise ValueError("non-finite library placement")

@@ -1314,11 +1314,16 @@ def _provisional_geometry_choice(component, choices, complete, basis):
     solid.  This path therefore attaches only a *provisional* model: the
     report remains reviewable and the UI keeps the candidate picker visible.
 
-    A single candidate is accepted only for a literal manufacturer/model
-    marking.  Otherwise the first two candidates must be from the same KiCad
-    family and have effectively the same XY envelope.  Truncated searches are
-    allowed only under that tie condition; a distant or topology-incomplete
-    search is never promoted to a preview.
+    Two situations qualify, and they are opposites: either the measurement
+    cannot separate the first two candidates (same family, effectively the same
+    XY envelope), or it separated them clearly and one stands alone.  In both
+    the residual doubt is about identity and variant, never about the XY
+    geometry being previewed.  The tie case is allowed on a truncated search,
+    because a tie says nothing about what was not measured; dominance requires
+    a complete search, since outranking alternatives nobody measured is not
+    outranking them.  A single candidate also qualifies under a literal
+    manufacturer/model marking.  A topology-incomplete search is never
+    promoted.
     """
     if (not choices or basis not in ("body", "total")
             or component.get("presence_confidence") != "high"
@@ -1376,6 +1381,25 @@ def _provisional_geometry_choice(component, choices, complete, basis):
                 and best_error <= 0.12
                 and re.search(r"(?:^|[-_])SOT[-_]?223(?:\.|$)",
                               Path(first["path"]).name, re.I)):
+            return first
+    # Il caso simmetrico del pareggio. Il pareggio dice "la fotografia non
+    # distingue queste due varianti"; la dominanza dice "la fotografia le ha
+    # distinte, e una sola regge". Sono le due situazioni in cui l'incertezza
+    # residua non riguarda la geometria XY, e riconoscere solo la prima
+    # premiava le liste ambigue e puniva quelle nitide: su un ricettacolo
+    # USB-C con quattro candidati al 4% e al 16% non si agganciava nulla,
+    # mentre sarebbe bastato un doppione identico del migliore per ottenere
+    # l'anteprima. Serve una ricerca completa: dominare alternative che
+    # nessuno ha misurato non e' dominare.
+    # Un candidato solo non e' dominanza, e' assenza di confronto: la misura
+    # non ha scartato nessuno, quindi qui non decide niente e si continua a
+    # pretendere una marcatura letterale o la morfologia.
+    if complete and not component.get("topology_incomplete") and len(choices) >= 2:
+        try:
+            runner_up = float(choices[1].get("relative_xy_error"))
+        except (TypeError, ValueError):
+            runner_up = float("nan")
+        if math.isfinite(runner_up) and runner_up - best_error > NAME_TIEBREAK_MARGIN:
             return first
     if len(choices) < 2 or component.get("topology_incomplete"):
         return None
@@ -1759,14 +1783,27 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
             component["model_path"] = report["selected_path"]
             override = _native_model_rotation_override(
                 component, Path(report["selected_path"] or ""))
+            # La correzione automatica riguarda il VERSO, non l'asse: l'asse
+            # lo deduce FreeCAD confrontando il modello con la misura, e qui
+            # non lo si conosce. Scrivendola in model_rotation_deg -- che e'
+            # un angolo assoluto -- cancellava l'asse dedotto: un modulo il
+            # cui asse lungo andava girato di 90 gradi finiva comunque a 180,
+            # cioe' con l'asse ancora sbagliato, e nessun valore fra 0 e 180
+            # poteva rimetterlo a posto. Va in un canale additivo suo, distinto
+            # da model_rotation_delta_deg, che e' la correzione manuale
+            # dell'utente e non deve essere sovrascritta.
+            # L'angolo assoluto di una corsa precedente e' stato calcolato su
+            # un altro modello e va comunque tolto, come prima.
+            component.pop("model_rotation_deg", None)
             if override is None:
-                component.pop("model_rotation_deg", None)
+                component.pop("model_rotation_native_delta_deg", None)
             else:
-                component["model_rotation_deg"] = override
+                component["model_rotation_native_delta_deg"] = override
                 report["native_model_rotation_deg"] = override
                 report["native_orientation_note"] = (
-                    "Native STEP rotated 180° to place the observed RF connector "
-                    "on the lower-right side; photo rotation is unchanged")
+                    "Native STEP rotated 180° over the inferred axis to place the "
+                    "observed RF connector on the lower-right side; photo rotation "
+                    "is unchanged")
             resolved += 1
         else:
             component["color_hex"] = "#FF00FF"

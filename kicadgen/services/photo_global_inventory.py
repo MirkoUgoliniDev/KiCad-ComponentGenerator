@@ -445,8 +445,17 @@ def _normalize(row, identity, length, width, issues):
         height_mm=row['height_mm'] if row['height_mm'] is not None else 1.0,
         _height_source=(row['height_source'] + '_not_measured' if row['height_mm'] is not None
                         else 'estimated_placeholder_not_measured'), _height_estimated=True,
+        # Un package e' una dichiarazione MECCANICA, e va sostenuta da cio' che
+        # sostiene la meccanica: la fiducia complessiva e un contorno risolto.
+        # class_confidence dice un'altra cosa -- "non so se e' un regolatore o
+        # un transistor di potenza" -- e lasciarla cancellare il campo buttava
+        # via anche l'involucro, che il modello aveva descritto benissimo. Con
+        # il package vuoto la ricerca perde la sua chiave e scandisce l'intera
+        # famiglia: su un run reale un regolatore passava da 9 percorsi a 79
+        # rigetti, ricerca troncata e nessun modello agganciato. La prosa
+        # (package_evidence, riga sotto) veniva invece conservata: si teneva la
+        # descrizione e si buttava il dato strutturato.
         package=row['package'] if row['confidence'] != 'low'
-            and row.get('class_confidence', row['confidence']) != 'low'
             and row['bbox_basis'] != 'unknown' else '',
         _package_verified=False, package_evidence=row['evidence'], marking=marking,
         bbox_basis='leads' if row['bbox_basis'] == 'body_and_leads' else row['bbox_basis'],
