@@ -115,6 +115,33 @@ def _prompt_snapshot(arguments: dict) -> tuple[str, list[str]]:
     return digest, lines
 
 
+def _usage_snapshot():
+    """@brief Consuntivo dei token al momento della chiamata, se disponibile."""
+    try:
+        from .openrouter import usage_totals
+        totals = usage_totals()
+        return (totals.prompt_tokens, totals.completion_tokens, totals.cost_usd)
+    except Exception:  # noqa: BLE001 - la diagnostica non deve mai far cadere una chiamata
+        return None
+
+
+def _usage_delta(before):
+    """@brief Token e costo attribuibili alla chiamata appena conclusa.
+
+    @param before Istantanea presa prima della chiamata, o None.
+    @return Testo da accodare alla riga di diagnostica, eventualmente vuoto.
+    @note Differenza di un totale globale: con chiamate in parallelo
+        attribuirebbe a una cio' che ha speso un'altra. Oggi le chiamate
+        dell'analisi sono in sequenza; se un giorno non lo fossero, questa
+        riga andrebbe ricavata dalla risposta invece che dal totale.
+    """
+    after = _usage_snapshot()
+    if before is None or after is None:
+        return ""
+    tokens_in, tokens_out, cost = (a - b for a, b in zip(after, before))
+    return f" tokens_in={tokens_in} tokens_out={tokens_out} cost_usd={cost:.4f}"
+
+
 def make_logged_call(call_tool: Callable, progress: Optional[Callable[[str], None]], *,
                      log_prompt: bool = False) -> Callable:
     """@brief Wrap a synchronous AI call with lifecycle and optional prompt diagnostics.
@@ -180,6 +207,12 @@ def make_logged_call(call_tool: Callable, progress: Optional[Callable[[str], Non
                 emit(line)
             emit(f"AI_CALL_PROMPT_END {context} sha256={digest}")
         started = perf_counter()
+        # Il consuntivo dei token e' globale: la differenza prima/dopo e'
+        # l'unico modo per sapere quanto e' entrato in QUESTA chiamata. Serve
+        # a vedere subito se un fornitore ha scartato le immagini: una
+        # richiesta con quattro fotografie che costa poche migliaia di token
+        # non le ha ricevute, per quanto la risposta sembri legittima.
+        before = _usage_snapshot()
         try:
             result = call_tool(*args, **kwargs)
         except BaseException as exc:
@@ -208,7 +241,8 @@ def make_logged_call(call_tool: Callable, progress: Optional[Callable[[str], Non
                      f"error={_identifier(type(exc).__name__)}")
                 raise
         elapsed = perf_counter() - started
-        emit(f"AI_CALL_END {context} elapsed={elapsed:.3f}s result={_result_summary(result)}")
+        emit(f"AI_CALL_END {context} elapsed={elapsed:.3f}s result={_result_summary(result)}"
+             + _usage_delta(before))
         return result
 
     return logged_call

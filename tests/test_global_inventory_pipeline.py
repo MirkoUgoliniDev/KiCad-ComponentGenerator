@@ -331,3 +331,24 @@ def test_the_yolo_path_keeps_its_own_prompt_and_its_numbered_overlay(pipeline):
     assert json.loads(request['content_blocks'][4]['text'])['prompt_version'] \
         == global_inventory.PROMPT_VERSION
     assert 'NO local detector ran' not in request['system_prompt']
+
+
+def test_an_empty_enumeration_is_a_failure_and_not_a_result(pipeline):
+    """@brief Qwen ha risposto in 9 secondi con gli array vuoti: non e' un esito.
+
+    Senza candidati nulla obbliga il modello a pronunciarsi -- `components` puo'
+    legittimamente essere vuoto -- e registrare quell'elenco come «0 ipotesi,
+    completezza non certificata» lo farebbe passare per un risultato, mentre la
+    lavorazione prosegue in silenzio con cio' che c'era prima. Deve restare
+    scritto che non ha trovato nulla.
+    """
+    pipeline['inventory'] = dict(components=[], candidate_decisions=[], uncertainties=[])
+    params = pipeline['execute'](photo_detector='vlm')
+    assert 'no bodies at all' in (params.notes or '')
+    assert any('no bodies at all' in message for message in pipeline['logs']) or params.notes
+    # Con i candidati invece un elenco vuoto resta gestibile: le proposte del
+    # rilevatore sopravvivono come ipotesi irrisolte, e non e' un fallimento.
+    pipeline['inventory'] = dict(components=[], candidate_decisions=[], uncertainties=[])
+    recovered = pipeline['execute']()
+    assert len(recovered.components_3d) == 2
+    assert all(row['_uncertain'] for row in recovered.components_3d)

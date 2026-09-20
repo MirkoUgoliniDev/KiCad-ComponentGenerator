@@ -7,8 +7,10 @@ i componenti grandi che nei dettagli attraversano i confini dei crop.
 from __future__ import annotations
 
 import base64
+import json
 import math
 import re
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -428,6 +430,45 @@ def regions(image):
             y0, y1 = max(0, round((row/2-.12)*h)), min(h, round(((row+1)/2+.12)*h))
             yield f"Crop {row*3+col+1}/6", (x0/w,y0/h,x1/w,y1/h), image[y0:y1,x0:x1]
 
+def save_inventory_evidence(cache_dir, photo_png, overlay_png, components, log):
+    """@brief Salva su disco cio' che l'inventario ha trovato, per poterlo guardare.
+
+    @param cache_dir Cartella dell'analisi; senza, non si scrive nulla.
+    @param photo_png Fotografia calibrata usata per la richiesta.
+    @param overlay_png Stessa fotografia con sopra i rettangoli trovati.
+    @param components Ipotesi di componente, come arrivano dall'inventario.
+    @param log Callback di avanzamento: riceve i percorsi scritti.
+    @return I percorsi scritti, in ordine: foto, sovrapposizione, JSON.
+    @note Il modello non restituisce immagini: l'annotazione la disegniamo noi
+        dal JSON, che resta l'unica cosa che il modello ha davvero detto. I due
+        file servono a poter contestare un risultato guardandolo, invece di
+        fidarsi di un conteggio.
+    @note Scrivere non deve mai far fallire un'analisi gia' pagata: un errore
+        di disco viene riportato e basta.
+    """
+    if not cache_dir:
+        return []
+    written = []
+    try:
+        directory = Path(cache_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime('%Y%m%d-%H%M%S')
+        for name, payload in ((f'inventory-{stamp}-photo.png', photo_png),
+                              (f'inventory-{stamp}-overlay.png', overlay_png)):
+            if payload:
+                (directory/name).write_bytes(payload)
+                written.append(directory/name)
+        document = {'components': components, 'count': len(components)}
+        path = directory/f'inventory-{stamp}.json'
+        path.write_text(json.dumps(document, indent=2, ensure_ascii=False, default=str),
+                        encoding='utf-8')
+        written.append(path)
+        log('Inventario salvato: ' + '; '.join(str(p) for p in written))
+    except (OSError, TypeError, ValueError) as exc:
+        log(f'Inventario non salvato su disco: {exc}')
+    return written
+
+
 
 def image_block(image):
     """@brief Provide the image block operation for this workflow."""
@@ -592,6 +633,8 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             warn('Inventario globale parziale: ' + '; '.join(issues)
                  + '. Componenti irrisolti conservati per revisione manuale.')
         report.overlay_png = draw_inventory(photo, report.components)
+        save_inventory_evidence(cache_dir, report.photo_png, report.overlay_png,
+                                report.components, log)
         log(f'Inventario revisionato: {len(report.components)} ipotesi '
             + (f'da {len(proposals)} proposte YOLO ' if detector == 'yolo'
                else 'enumerate dal modello di visione ')

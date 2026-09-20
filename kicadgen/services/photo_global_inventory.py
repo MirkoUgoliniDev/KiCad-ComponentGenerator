@@ -148,6 +148,11 @@ strip, then check strip boundaries and board edges against the full photograph,
 which is the only coordinate frame.
 Report presence_confidence and class_confidence independently as high/medium/low;
 confidence is overall uncertainty.
+An EMPTY components array is not an acceptable answer for a populated board: it
+always carries mounted bodies, and a photograph of one shows several. If you
+cannot resolve what a body is, report it with class unknown, empty package and
+low confidence -- never omit it. Reporting nothing is worse than reporting a
+doubtful body, because nothing is indistinguishable from not having looked.
 COORDINATES: bbox=[left,top,right,bottom] as FRACTIONS of the first photograph,
 each between 0 and 1, with left<right and top<bottom. Do NOT use pixels and do
 NOT use a 0-1000 grid. A body whose left edge is one quarter across the image
@@ -769,5 +774,15 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         model=model, prompt=prompt, prompt_hash=prompt_hash, inputs=inputs, response=data, errors=errors, components=result), log)
     if errors and not result:
         raise ValueError('Global inventory failed with no recoverable bodies: ' + '; '.join(errors))
+    if enumerating and not result:
+        # Senza candidati un elenco vuoto non e' un esito: e' un rifiuto di
+        # lavorare che lo schema consente, perche' `components` puo'
+        # legittimamente essere vuoto e non c'e' nessuna contabilita' di ID
+        # che obblighi il modello a pronunciarsi. Registrarlo come «0 ipotesi,
+        # completezza non certificata» lo farebbe passare per un risultato, e
+        # la lavorazione proseguirebbe in silenzio con cio' che restava prima.
+        raise ValueError(
+            'Global inventory returned no bodies at all: a populated board always has some. '
+            'The model answered with an empty enumeration; nothing was detected.')
     log(f'Global inventory: {len(result)} hypotheses; completeness not certified.')
     return result
