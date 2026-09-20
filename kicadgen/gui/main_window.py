@@ -553,6 +553,9 @@ class MainWindow(QMainWindow):
         )
         self._sync_footprint_subtabs()
         self._refresh_docs_list()
+        # Il campo nasce vuoto, quindi nessun segnale di modifica lo annuncia:
+        # il blocco va applicato una volta all'avvio.
+        self._apply_component_name_gate()
 
         # Connect after initialization so construction does not invalidate a worker.
         for key, widget in vars(self).copy().items():
@@ -1078,7 +1081,15 @@ class MainWindow(QMainWindow):
         folder_group = QGroupBox("Cartella componente")
         folder_layout = QFormLayout(folder_group)
 
-        self.field_name = QLineEdit("PinHeader_2x04_P2.54mm_THT")
+        # Vuoto all'avvio, per scelta: un nome scritto qui dal programma
+        # diventa il nome della cartella, del footprint, del simbolo e del
+        # modello 3D. Un esempio lasciato nel campo si ritrova stampato su
+        # tutto cio' che viene generato, e chi lavora non se ne accorge finche'
+        # non apre KiCad. Finche' il campo e' vuoto non si caricano documenti e
+        # non si estrae nulla: vedi `_apply_component_name_gate`.
+        self.field_name = QLineEdit()
+        self.field_name.setPlaceholderText(
+            "Scrivi il nome del componente: da qui nascono cartella, footprint e modello 3D")
         self.field_name.textChanged.connect(self._on_name_changed)
         folder_layout.addRow("Nome componente:", self.field_name)
 
@@ -1459,7 +1470,10 @@ class MainWindow(QMainWindow):
         return self._project_dir() / DOCS_SUBDIR
 
     def _update_project_path_label(self) -> None:
-        self.label_project_path.setText(str(self._project_dir()))
+        # Senza nome non c'e' una cartella: mostrarne una inventata farebbe
+        # credere che i documenti finiranno li'.
+        self.label_project_path.setText(
+            str(self._project_dir()) if self._component_name() else "")
         self._refresh_output_actions()
         self._refresh_docs_list()
 
@@ -1508,6 +1522,30 @@ class MainWindow(QMainWindow):
         if hasattr(self, "field_name_mirror"):
             self.field_name_mirror.setText(text)
         self._update_project_path_label()
+        self._apply_component_name_gate()
+
+    def _apply_component_name_gate(self) -> None:
+        """@brief Senza nome non si carica nulla e non si estrae nulla.
+
+        @note Il nome non e' un'etichetta: e' la cartella in cui finiscono i
+            documenti e il nome con cui nascono footprint, simbolo e modello
+            3D. Lasciar caricare le immagini prima vorrebbe dire scriverle in
+            una cartella scelta dal programma, e poi doverle spostare quando il
+            nome arriva -- che e' esattamente il pasticcio che questo blocco
+            evita. Meglio un pulsante spento con scritto perche'.
+        """
+        named = bool(self._component_name())
+        reason = "" if named else "Scrivi prima il nome del componente."
+        for attr in ("guided_docs", "docs_list", "btn_extract_ai"):
+            widget = getattr(self, attr, None)
+            if widget is None:
+                continue
+            widget.setEnabled(named)
+            if attr == "btn_extract_ai":
+                widget.setToolTip(reason or
+                                  "Avvia l'estrazione dai documenti e dalle foto selezionati")
+            else:
+                widget.setToolTip(reason)
 
     def _browse_library_root(self) -> None:
         path = QFileDialog.getExistingDirectory(
@@ -1594,6 +1632,15 @@ class MainWindow(QMainWindow):
 
     def _extract_with_ai(self) -> None:
         if self._background_work_running() or self._automatic_generation_active:
+            return
+        if not self._component_name():
+            # I pulsanti sono gia' spenti; questo vale per le scorciatoie e per
+            # chi arriva qui da un'automazione. Senza nome i documenti non
+            # hanno una cartella e cio' che verrebbe generato non ha un nome.
+            QMessageBox.information(
+                self, self.i18n.text("Nome componente"),
+                self.i18n.text("Scrivi prima il nome del componente: da questo nascono la "
+                               "cartella dei documenti, il footprint e il modello 3D."))
             return
 
         photo_detector, yolo_model_path = self._photo_detector_options()

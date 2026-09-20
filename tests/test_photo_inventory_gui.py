@@ -42,6 +42,10 @@ def window(monkeypatch, tmp_path):
             raise ValueError('Nessun documento nel test.')
         return paths, None
     monkeypatch.setattr(w, '_selected_documents', selected_documents)
+    # Il campo del nome nasce vuoto e senza nome non si carica ne' si estrae
+    # nulla: questi test riguardano altro, quindi partono come chi ha gia'
+    # scritto il nome. Il blocco ha i suoi test dedicati.
+    w.field_name.setText("Componente_di_prova")
     yield w
     w.close()
     app.processEvents()
@@ -959,3 +963,51 @@ def test_queued_cad_result_respects_photo_revision(
         assert window._last_mesh_path == mesh
         assert "Modello STEP aggiornato" in window.label_3d_status.text()
         current_worker.finished.emit()
+
+
+# ── il nome del componente non lo inventa il programma ───────────────
+
+def test_the_component_name_starts_empty_and_blocks_everything(window):
+    """@brief Caso negativo: senza nome non si carica e non si estrae.
+
+    Il nome non e' un'etichetta: e' la cartella dei documenti e il nome con cui
+    nascono footprint, simbolo e modello 3D. Un esempio lasciato nel campo
+    finiva stampato su tutto il generato senza che nessuno se ne accorgesse
+    fino ad aprire KiCad.
+    """
+    window.field_name.setText("")
+    assert window._component_name() == ""
+    assert not window.btn_extract_ai.isEnabled()
+    assert not window.guided_docs.isEnabled()
+    assert not window.docs_list.isEnabled()
+    # Nessuna cartella inventata da mostrare.
+    assert window.label_project_path.text() == ""
+    # Il campo dice cosa manca, invece di lasciare indovinare.
+    assert window.field_name.placeholderText()
+
+
+def test_writing_the_name_unlocks_documents_and_extraction(window):
+    """@brief Caso positivo: appena c'e' un nome, si riparte."""
+    window.field_name.setText("")
+    assert not window.btn_extract_ai.isEnabled()
+    window.field_name.setText("ESP32_S3_DevKit")
+    assert window.btn_extract_ai.isEnabled()
+    assert window.guided_docs.isEnabled() and window.docs_list.isEnabled()
+    assert window.label_project_path.text().endswith("ESP32_S3_DevKit")
+    # E tornando indietro si richiude.
+    window.field_name.setText("   ")
+    assert not window.btn_extract_ai.isEnabled()
+
+
+def test_extraction_refuses_to_start_without_a_name(window, monkeypatch):
+    """@brief Il blocco non e' solo nei pulsanti.
+
+    Vale anche per chi arriva da una scorciatoia o da un'automazione: senza
+    nome i documenti non hanno una cartella e cio' che verrebbe generato non ha
+    un nome da portare.
+    """
+    started = []
+    monkeypatch.setattr(gui.ExtractWorker, "start", lambda self: started.append(self))
+    window.field_name.setText("")
+    window._extract_with_ai()
+    assert not started and window._extract_worker is None

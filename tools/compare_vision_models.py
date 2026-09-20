@@ -64,6 +64,64 @@ def parse_arguments(argv=None):
     return parser.parse_args(argv)
 
 
+def require_credentials():
+    """@brief Carica il .env e pretende la chiave PRIMA di lavorare.
+
+    @throws SystemExit Se la chiave non c'e'.
+    @note L'applicazione legge il .env all'avvio; uno strumento da riga di
+        comando parte da un ambiente nudo, e senza questo passaggio la
+        mancanza della chiave si scopriva solo dopo minuti di rilevamento
+        locale, sotto forma di risposta vuota che sembrava una risposta.
+    """
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(ROOT/'.env')
+    except ImportError:
+        pass
+    from kicadgen.services.openrouter import OpenRouterError, api_key
+    try:
+        api_key()
+    except OpenRouterError as exc:
+        raise SystemExit(str(exc))
+
+
+def resolved_names(summary):
+    """@brief I componenti che il modello ha davvero nominato.
+
+    @param summary Uscita di summarize.
+    @return L'insieme dei nomi con `resolved` vero.
+    @note Una proposta che torna indietro com'era non e' una risposta del
+        modello: e' la proposta del rilevatore conservata perche' nessuno l'ha
+        giudicata. Contarla come risposta e' cio' che faceva sembrare
+        d'accordo due esecuzioni entrambe fallite.
+    """
+    return {name for name, row in summary.items() if row['resolved']}
+
+
+def answered_or_stop(label, model, summary, components):
+    """@brief Pretende che il modello abbia risposto, prima di proseguire.
+
+    @param label Etichetta dell'esecuzione (A o B).
+    @param model Id del modello, per il messaggio.
+    @param summary Uscita di summarize.
+    @param components Ipotesi grezze, da cui si leggono le diagnosi.
+    @return I nomi riconciliati.
+    @throws SystemExit Se il modello non ha riconciliato nulla.
+    @note Senza questa fermata il confronto proseguiva, chiedeva anche il
+        secondo modello e dichiarava «Differenze: 0» su due esecuzioni
+        entrambe fallite: il verdetto peggiore possibile, perche' sembra un
+        risultato.
+    """
+    answered = resolved_names(summary)
+    if answered:
+        return answered
+    errors = sorted({str(issue) for component in components
+                     for issue in component.get('_global_inventory_errors', [])})
+    raise SystemExit(f'{label} ({model}) non ha riconciliato nulla: '
+                     + ('; '.join(errors) or 'nessuna diagnosi disponibile')
+                     + '\nConfronto interrotto: nessun verdetto su una risposta assente.')
+
+
 def inventory_with(model, photo, proposals, length, width, cache_dir, instructions, log):
     """@brief Esegue la riconciliazione globale con un modello, e nient'altro.
 
@@ -91,7 +149,11 @@ def summarize(components):
     """
     rows = {}
     for component in components:
+        # `component_id` lo scrive la riconciliazione; una proposta conservata
+        # perche' irrisolta conserva invece il nome del rilevatore.
+        resolved = bool(component.get('component_id'))
         rows[str(component.get('component_id') or component.get('name'))] = dict(
+            resolved=resolved,
             klass=component.get('class') or component.get('kind'),
             package=component.get('package') or '',
             length_mm=round(float(component.get('length_mm') or 0), 3),
@@ -137,11 +199,15 @@ def main(argv=None):
 
     @param argv Argomenti della riga di comando.
     @return Codice di uscita del processo.
-    @throws SystemExit Se la fotografia non e' calibrabile.
+    @throws SystemExit Se manca la chiave, se la fotografia non e' calibrabile,
+        o se un modello non riconcilia nulla.
     @note Ogni modello indicato costa una richiesta; la cache sotto la cartella
         di uscita evita di ripagare lo stesso confronto.
     """
     arguments = parse_arguments(argv)
+    # Prima di tutto: il rilevamento locale dura minuti, e scoprire solo dopo
+    # che manca la chiave significa buttarli.
+    require_credentials()
     arguments.output.mkdir(parents=True, exist_ok=True)
     messages = []
 
@@ -175,15 +241,23 @@ def main(argv=None):
         components = inventory_with(model, photo, proposals, arguments.length, arguments.width,
                                     arguments.output/f'cache-{label}', arguments.instructions, log)
         summaries[label] = summarize(components)
-        report['models'][label] = {'model': model, 'components': summaries[label]}
-        log(f'{label}: {len(components)} ipotesi da {len(proposals)} proposte.')
+        answered = answered_or_stop(label, model, summaries[label], components)
+        report['models'][label] = {'model': model, 'components': summaries[label],
+                                   'resolved': len(answered), 'total': len(summaries[label])}
+        log(f'{label}: {len(answered)} componenti riconciliati su {len(components)} '
+            f'ipotesi, da {len(proposals)} proposte.')
+        if len(answered) < len(summaries[label]):
+            log(f'ATTENZIONE {label}: {len(summaries[label]) - len(answered)} proposte '
+                'restano irrisolte e non entrano nel confronto.')
         for name, row in sorted(summaries[label].items()):
             log(f"  {name:<18} {row['klass']:<14} {row['package']:<18} "
                 f"{row['length_mm']}x{row['width_mm']} mm  rot={row['rotation_deg']}  "
                 f"n={row['terminal_count']}  rif={row['landmark']}")
 
     if len(summaries) == 2:
-        report['differences'] = differences(summaries['A'], summaries['B'])
+        report['differences'] = differences(
+            {name: row for name, row in summaries['A'].items() if row['resolved']},
+            {name: row for name, row in summaries['B'].items() if row['resolved']})
         log(f"--- Differenze: {len(report['differences'])}")
         for line in report['differences']:
             log('  ' + line)

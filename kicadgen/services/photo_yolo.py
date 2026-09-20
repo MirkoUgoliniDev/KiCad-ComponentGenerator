@@ -192,9 +192,18 @@ def _prefer_complete_views(rows, complete):
         sides = row.get("clipped_sides")
         box = row["box"]
         size = max(box[2] - box[0], box[3] - box[1])
-        if sides and size > view_overlap_px(row.get("view")) and any(
-                _cover(box, other["box"]) >= _FRAGMENT_COVERED for other in complete
-                if other is not row):
+        covering = [other for other in complete if other is not row
+                    and _cover(box, other["box"]) >= _FRAGMENT_COVERED]
+        if sides and size > view_overlap_px(row.get("view")) and covering:
+            # Presenza ed ingombro sono due fatti distinti. Se il frammento che
+            # cede il posto era sopra la soglia operativa, la PRESENZA del corpo
+            # e' attestata da un rilevamento sicuro: a cedere e' solo la misura
+            # dell'ingombro, che passa alla vista che lo contiene. Quella vista
+            # va quindi tenuta anche se debole, altrimenti si perderebbe due
+            # volte un corpo che era stato visto benissimo.
+            if row.get("rejection") is None:
+                for other in covering:
+                    other["attests_presence"] = True
             continue
         keep.append(row)
     return keep
@@ -437,12 +446,14 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
     @param model_path Optional local ONNX weights path; see resolve_yolo_model.
     @param log Optional callable receiving progress and audit-path strings.
     @param audit_dir Optional directory receiving a unique yolo-*.json audit.
-    @param include_review_candidates Include deduplicated subthreshold body
-        hypotheses as generic uncertain review-only candidates, even without an
-        audit directory. Defaults to False for standalone detector compatibility.
-        Reuses the same inference views; stores weak proposals in memory and runs
-        extra NMS (quadratic worst case). More candidates enlarge downstream AI
-        payloads and may increase tokens, cost and review time, not call count.
+    @param include_review_candidates Include the subthreshold bodies REBUILT
+        from tile seams as generic uncertain review-only candidates, even
+        without an audit directory. Defaults to False for standalone detector
+        compatibility. The other weak proposals are never returned: they stay
+        in the audit only, because on a populated board they are mostly noise
+        over areas where nothing is mounted, and they make the single paid call
+        noisier and dearer. Reuses the same inference views; stores weak
+        proposals in memory and runs extra NMS (quadratic worst case).
     @return photo_grounding-compatible dictionaries ordered top-to-bottom then
         left-to-right, with normalized _box and board-centered mm coordinates.
     @throws ValueError For invalid photo/dimensions/model/runtime, failed inference
@@ -456,7 +467,8 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
         before filtering/NMS, invalid-row counts, and retained detector results.
         Schema 2 adds decoded BGR pixel hash, NMS suppressor links and detector
         proposal IDs on components. Low-confidence body proposals are separately
-        deduplicated for review, and returned only with include_review_candidates.
+        deduplicated for review; of those, only the ones rebuilt from tile
+        seams are returned, and only with include_review_candidates.
         _yolo_origin and _yolo_review_only distinguish operating-threshold output
         from weak review hypotheses. IDs are unique within each returned run.
         No evidence below the audit floor is stored;
@@ -542,7 +554,18 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
         review_proposals = _prefer_complete_views(
             [row for row in _nms(review_pool, np) if row["rejection"] == "below_confidence"],
             whole)
-    returned = retained + (review_proposals if include_review_candidates else [])
+    # Le proposte deboli non arrivano piu' alla revisione ne' al modello: sulla
+    # scheda di prova erano 35 su 82, quasi tutte su zone dove non c'e' nulla
+    # montato, e rendevano piu' rumorosa (e piu' cara) l'unica chiamata a
+    # pagamento. Restano nell'audit, dove si possono sempre guardare.
+    # Fanno eccezione i corpi RICOMPOSTI dalle cuciture fra tessere: quelli
+    # stanno sotto soglia per un motivo geometrico -- nessuna vista ne ha visto
+    # piu' di un pezzo -- non perche' il rilevatore dubiti che il corpo ci sia.
+    # Scartarli vorrebbe dire perdere proprio i corpi che nessuna tessera
+    # contiene per intero, che sono quelli piu' facili da non vedere a occhio.
+    rebuilt = [row for row in review_proposals
+               if row.get("recovered_from") or row.get("attests_presence")]
+    returned = retained + (rebuilt if include_review_candidates else [])
     returned.sort(key=lambda row: (row["box"][1], row["box"][0]))
     components = []
     for identifier, row in enumerate(returned, 1):
@@ -595,10 +618,15 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
                      retained_detector_results=retained, components=components)
         emit(f"YOLO local audit: {_write_audit(audit_dir, audit)}")
     if audit_dir is not None or include_review_candidates:
-        destination = ("included as uncertain review-only candidates" if include_review_candidates
-                       else "saved for review in audit only; not returned")
-        emit(f"YOLO local: {len(review_proposals)} additional low-confidence body hypotheses "
-             f"{destination}.")
+        if include_review_candidates:
+            emit(f"YOLO local: of {len(review_proposals)} low-confidence body hypotheses, "
+                 f"{len(rebuilt)} rebuilt from tile seams are included as uncertain "
+                 f"review-only candidates; the other {len(review_proposals) - len(rebuilt)} "
+                 "are weak detections over areas the detector was unsure about and stay in "
+                 "the audit only, so they neither show in the review nor reach the model.")
+        else:
+            emit(f"YOLO local: {len(review_proposals)} additional low-confidence body "
+                 "hypotheses saved for review in audit only; not returned.")
     emit(f"YOLO local: {len(retained)} operating-threshold candidates; "
          f"returned {len(components)} generic hypotheses; heights are placeholders.")
     return components

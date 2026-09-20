@@ -543,7 +543,13 @@ def test_review_queue_preserves_weak_bodies_without_promoting_pads_or_duplicates
 
 @pytest.mark.parametrize('audit_enabled', [False, True])
 def test_opt_in_review_candidates_are_deduplicated_and_audit_independent(setup, tmp_path, audit_enabled):
-    """@brief Return weak bodies only on opt-in with unique IDs and explicit provenance."""
+    """@brief Le proposte deboli restano nell'audit e non escono dal rilevatore.
+
+    Erano il grosso del rumore mandato alla revisione e alla chiamata a
+    pagamento: su una scheda popolata cadono quasi tutte dove non c'e' nulla
+    montato. Restano registrate nell'audit, dove si possono sempre guardare,
+    ma non compaiono nell'anteprima e non arrivano al modello.
+    """
     session, _ = setup
     session.raw = _raw(([100, 100, 20, 20], 10, .8),
                        ([100, 100, 20, 20], 3, .2),
@@ -555,21 +561,19 @@ def test_opt_in_review_candidates_are_deduplicated_and_audit_independent(setup, 
     baseline = yolo.detect_yolo_components(photo, 64, 64)
     result = yolo.detect_yolo_components(photo, 64, 64, include_review_candidates=True,
                                          audit_dir=tmp_path if audit_enabled else None)
-    assert len(baseline) == 1 and len(result) == 2
-    assert [c['_id'] for c in result] == [1, 2]
-    assert len({c['_yolo_proposal_id'] for c in result}) == 2
-    assert result[0] == baseline[0]
-    weak = result[1]
-    assert weak['_yolo_origin'] == 'low_confidence_review' and weak['_yolo_review_only']
-    assert weak['_yolo_confidence'] == pytest.approx(.2)
-    assert weak['_uncertain'] and weak['confidence'] == 'low' and weak['kind'] == 'generic'
-    assert weak['_box'] == pytest.approx([290/640, 290/640, 310/640, 310/640])
-    assert weak['length_mm'] == pytest.approx(2) and weak['width_mm'] == pytest.approx(2)
-    assert 'package' not in weak
+    # Nessuna debole in uscita: nemmeno chiedendole esplicitamente, perche' qui
+    # non ce ne sono di ricomposte da cuciture ne' che attestino una presenza.
+    assert len(baseline) == 1 and len(result) == 1
+    assert result == baseline
+    assert not any(c['_yolo_review_only'] for c in result)
     if audit_enabled:
         audit = json.loads(next(tmp_path.glob('yolo-*.json')).read_text())
         assert audit['recipe']['include_review_candidates'] is True
         assert len(audit['retained_detector_results']) == 1
+        # L'audit le conserva tutte: togliere il rumore dalla revisione non
+        # vuol dire nasconderlo a chi vuole controllare.
+        weak = audit['low_confidence_review_proposals']
+        assert weak and all(row['rejection'] == 'below_confidence' for row in weak)
         assert audit['components'] == json.loads(json.dumps(result))
     else:
         assert not list(tmp_path.glob('yolo-*.json'))
@@ -606,7 +610,12 @@ def test_review_candidate_opt_in_rejects_non_boolean(setup, value):
 
 @pytest.mark.parametrize('audit_enabled', [False, True])
 def test_production_inventory_sends_weak_bodies_to_global_review(setup, monkeypatch, tmp_path, audit_enabled):
-    """@brief Run the production detector/reviewer chain with local fake inference and AI."""
+    """@brief La catena di produzione non manda al modello le proposte deboli.
+
+    Il modello riceve i corpi sopra la soglia operativa. Le deboli restano nel
+    rilevatore: erano il grosso del rumore nella richiesta a pagamento, e su
+    una scheda popolata cadono quasi tutte dove non c'e' niente montato.
+    """
     from kicadgen.services import photo_inventory
     session, _ = setup
     session.raw = _raw(([100, 100, 20, 20], 10, .8),
@@ -618,12 +627,9 @@ def test_production_inventory_sends_weak_bodies_to_global_review(setup, monkeypa
     def review(**kwargs):
         requests.append(kwargs)
         payload = json.loads(kwargs['content_blocks'][4]['text'])
-        assert [c['id'] for c in payload['candidates']] == [1, 2]
-        assert payload['candidates'][1]['yolo_confidence'] == pytest.approx(.2)
-        metadata = payload['candidates'][1]['detector_metadata']
-        assert metadata['_yolo_review_only'] is True
-        assert metadata['_yolo_origin'] == 'low_confidence_review'
-        assert metadata['_yolo_proposal_id']
+        assert [c['id'] for c in payload['candidates']] == [1]
+        assert payload['candidates'][0]['yolo_confidence'] == pytest.approx(.8)
+        assert not payload['candidates'][0]['detector_metadata'].get('_yolo_review_only')
         return dict(components=[], candidate_decisions=[
             dict(candidate_id=c['id'], status='uncertain', component_id=None,
                  rejection_category=None, reason='Physical presence unresolved; preserve for review')
@@ -632,13 +638,10 @@ def test_production_inventory_sends_weak_bodies_to_global_review(setup, monkeypa
         [tmp_path / 'top.png'], 'offline/model', 64, 64, [], review,
         detector='yolo', top_photo_index=0,
         cache_dir=tmp_path / 'cache' if audit_enabled else None)
-    assert len(requests) == 1 and len(report.components) == 2
-    assert report.calibration['proposal_count'] == 2
+    assert len(requests) == 1 and len(report.components) == 1
+    assert report.calibration['proposal_count'] == 1
     assert report.photo_png and report.overlay_png
-    weak = next(c for c in report.components if c['_yolo_review_only'])
-    assert weak['_yolo_origin'] == 'low_confidence_review' and weak['_uncertain']
-    assert weak['kind'] == 'generic' and weak['package'] == ''
-    assert weak['_global_inventory_status'] == 'validated_hypotheses'
+    assert not any(c.get('_yolo_review_only') for c in report.components)
 
 
 def test_a_clipped_edge_is_named_so_that_nobody_mistakes_it_for_a_measure(setup):
@@ -732,3 +735,30 @@ def test_the_overlap_of_a_view_comes_from_its_own_tile_size():
     assert yolo.view_overlap_px('tile1280-960-0') == 320
     assert yolo.view_overlap_px('overview') == float('inf')
     assert yolo.view_overlap_px(None) == float('inf')
+
+
+def test_only_the_weak_bodies_rebuilt_from_seams_reach_the_review(setup):
+    """@brief Caso positivo e negativo nella stessa corsa, sulla stessa soglia.
+
+    Due corpi sotto la soglia operativa. Uno lo e' perche' il rilevatore non
+    era sicuro che ci fosse qualcosa: quello resta nell'audit e non arriva ne'
+    all'anteprima ne' al modello. L'altro lo e' per un motivo geometrico --
+    nessuna vista ne ha visto piu' di un pezzo, e i pezzi sono stati
+    ricomposti: quello arriva, perche' e' proprio il corpo che a occhio non si
+    nota e che il rilevatore vede male per come e' fatta la scansione.
+
+    La distinzione non e' una soglia: e' la PROVENIENZA della debolezza.
+    """
+    session, _ = setup
+    # Tessera 2 e tessera 3 vedono due pezzi dello stesso corpo a cavallo della
+    # cucitura x=640, entrambi sotto soglia; altrove un corpo debole isolato.
+    outputs = [_raw(([100, 100, 30, 30], 10, .20)),
+               _raw(([600, 320, 80, 60], 10, .20)),
+               _raw(([120, 320, 80, 60], 10, .20)), _raw()]
+    session.raw = lambda index: outputs[index]
+    rows = yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64,
+                                       include_review_candidates=True)
+    rebuilt = [row for row in rows if row['_yolo_clipped_recovery']]
+    assert rebuilt, 'il corpo ricomposto dalla cucitura deve arrivare alla revisione'
+    assert all(row['_yolo_clipped_recovery'] or not row['_yolo_review_only'] for row in rows), \
+        'una debole non ricomposta non deve uscire dal rilevatore'

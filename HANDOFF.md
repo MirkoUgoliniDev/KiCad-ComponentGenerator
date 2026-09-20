@@ -2857,3 +2857,84 @@ Suite fotografiche sul disco dell'utente: 246 passate, 1 saltata.
 
 `generated/photo-cache/confronto-contrasto.json` (300 KB) è il materiale del
 confronto: cartella ignorata da git, cancellabile.
+
+# 21:45 — le proposte deboli non escono più dal rilevatore; il nome componente non si inventa
+
+Due richieste dell'utente dopo la prima corsa reale andata a fondo.
+
+## 1. Deboli fuori dall'anteprima e dalla richiesta a pagamento
+
+Nella corsa: 82 proposte, 47 sicure e 35 deboli, quasi tutte sulle file di
+piazzole dove non c'è niente montato. L'utente le ha tenute tutte («82 tenute
+su 82») e le ha pagate.
+
+**Eccezione decisa dall'utente, dopo averne visto la conseguenza:** restano le
+deboli **ricomposte dalle cuciture** fra tessere. Quelle sono sotto soglia per
+un motivo geometrico — nessuna vista ne ha visto più di un pezzo — non perché
+il rilevatore dubiti che il corpo ci sia. Nella corsa erano 22 ricomposte, di
+cui solo 4 sopra soglia: buttarle tutte avrebbe perso proprio i corpi come il
+regolatore.
+
+**Interazione trovata implementando, non prevista:** con l'opzione (b) attiva,
+un frammento sopra soglia cede l'ingombro alla vista che contiene il corpo per
+intero. Se quella vista è debole e la si scarta, il corpo sparisce due volte:
+una volta come frammento e una come vista completa, pur essendo stato visto a
+piena confidenza. Presenza e ingombro sono due fatti distinti, quindi
+`_prefer_complete_views` ora marca `attests_presence` sulla vista che riceve
+l'ingombro da un frammento **sopra soglia**, e quella vista esce anche se
+debole. Senza questa marcatura il test dell'opzione (b) falliva: è così che è
+saltata fuori.
+
+`low_confidence_review_proposals` resta completo nell'audit: togliere il rumore
+dalla revisione non è nasconderlo a chi controlla.
+
+## 2. Il nome del componente non lo scrive il programma
+
+`field_name` nasceva con dentro `"PinHeader_2x04_P2.54mm_THT"`. Quel nome è la
+cartella dei documenti e il nome di footprint, simbolo e modello 3D: un esempio
+lasciato nel campo finisce stampato su tutto il generato e non te ne accorgi
+finché non apri KiCad. È successo davvero in questa sessione.
+
+Adesso il campo nasce **vuoto**, con un placeholder che dice a cosa serve, e
+finché è vuoto `_apply_component_name_gate()` spegne il caricamento documenti
+(`guided_docs`, `docs_list`) e l'estrazione (`btn_extract_ai`), con il tooltip
+che spiega perché. `_extract_with_ai` rifiuta comunque, per chi arriva da una
+scorciatoia o da un'automazione. `label_project_path` resta vuota invece di
+mostrare una cartella inventata.
+
+Il blocco va applicato una volta all'avvio: il campo nasce vuoto e nessun
+segnale di modifica lo annuncia.
+
+## 3. Consegna mai arrivata, scoperta ora
+
+`tools/compare_vision_models.py` sul disco dell'utente era **più vecchio dei
+suoi test**, committati: mancavano `require_credentials`, `answered_or_stop` e
+`resolved_names`, e tre test erano rossi da allora. È la stessa trappola già
+annotata: una consegna che non ha sostituito il file. Consegnato e verificato
+con md5.
+
+## Test
+
+- `tests/test_photo_yolo.py` (91): la coppia sulla provenienza della debolezza —
+  due corpi sotto soglia nella stessa corsa, uno ricomposto da cucitura che
+  arriva e uno debole isolato che non arriva; contratto aggiornato dove
+  asseriva il vecchio comportamento, con il perché.
+- `tests/test_photo_inventory_gui.py` (64): il campo nasce vuoto e blocca tutto;
+  scrivere un nome sblocca e cancellarlo richiude; l'estrazione rifiuta di
+  partire senza nome.
+- Le fixture di `test_photo_inventory_gui` e `test_board_edit_lifecycle` ora
+  scrivono un nome: quei test riguardano altro e partono come chi ha già
+  scritto il nome.
+
+Sul disco dell'utente, escluse le suite che qui non partono (manca `libEGL`
+nella VM Linux e manca KiCad): **2299 passati, 21 saltati, 2 xfail, 19
+sottotest**. Le suite Qt girate a parte nel contenitore, una per file:
+photo_detector_ui 49, photo_inventory_gui 64, board_edit_lifecycle 26,
+automatic_generation 25, terminal_metadata_flow 15, yolo_review_wiring 4,
+yolo_review_dialog 7, live_log 14.
+
+## Trappola operativa
+
+Nel contenitore, con `pyvistaqt` installato, più suite Qt nello stesso processo
+mandano VTK in segmentation fault: vanno girate un file alla volta sotto
+`xvfb-run`. Non è un difetto del codice.

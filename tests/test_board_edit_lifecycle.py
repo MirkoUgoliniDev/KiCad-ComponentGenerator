@@ -60,6 +60,10 @@ def window(monkeypatch, tmp_path):
     # The parent may be running real analysis: never share its profile DB/logs.
     store = ProfileStore(tmp_path / "profiles.sqlite3")
     w = gui.MainWindow(profile_store=store)
+    # Il campo del nome nasce vuoto e senza nome non si genera nulla: questi
+    # test riguardano il ciclo di vita della scheda, quindi partono come chi ha
+    # gia' scritto il nome.
+    w.field_name.setText("Componente_di_prova")
     yield w
     w.close()
     app.processEvents()
