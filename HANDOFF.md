@@ -3233,3 +3233,12 @@ board_edit_lifecycle 26, photo_review_dialog 32, model_candidates_dialog 29.
   ha omesso due volte.
 - `generated/photo-cache/confronto-contrasto.json` e `generated/his.md5` sono
   scarti miei, cancellabili.
+
+## Trappola git (02:40)
+
+Il ponte con cui lavoro non puo’ cancellare file: git non riesce a rimuovere i
+propri lock (`index.lock`, `HEAD.lock`) e ogni comando successivo si blocca con
+«index.lock exists». Il commit `a90bd43` e’ riuscito spostando i lock a mano.
+**Prima di usare git**: cancellare la cartella `_git_lock_da_cancellare/` nella
+radice del repo e un eventuale `.git/index.lock` residuo (sono tutti file
+vuoti). Poi `git push origin YOLO-SOLUTION` (1 commit avanti).
