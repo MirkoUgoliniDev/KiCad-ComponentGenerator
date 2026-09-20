@@ -22,7 +22,11 @@ from PyQt6.QtWidgets import (
     QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
-from ..services.openrouter import ModelInfo, OpenRouterError, list_models
+from ..services.openrouter import (DATASHEET_CAPABILITIES, ModelInfo, OpenRouterError,
+                                   list_models)
+
+#: Come si chiama, per chi guarda, ogni capacita' richiesta.
+_CAPABILITY_LABELS = {"tools": "tool calling", "images": "immagini", "files": "PDF"}
 
 #: Colonne della tabella.
 _COL_ID, _COL_NAME, _COL_IN, _COL_OUT, _COL_CTX = range(5)
@@ -93,8 +97,10 @@ class ModelPickerDialog(QDialog):
     globale o vale solo per l'estrazione in corso.
     """
 
-    def __init__(self, current_model: Optional[str] = None, parent=None, title: str = "Scegli il modello LLM"):
+    def __init__(self, current_model: Optional[str] = None, parent=None,
+                 title: str = "Scegli il modello LLM", capabilities=DATASHEET_CAPABILITIES):
         super().__init__(parent)
+        self.capabilities = tuple(capabilities)
         self.i18n = _find_i18n(parent)
         self.setWindowTitle(title)
         self.resize(900, 620)
@@ -138,7 +144,8 @@ class ModelPickerDialog(QDialog):
 
         options_row = QHBoxLayout()
         self.check_compatible = QCheckBox(
-            "Solo modelli compatibili (tool calling + immagini + PDF)"
+            "Solo modelli compatibili (%s)"
+            % " + ".join(_CAPABILITY_LABELS[name] for name in self.capabilities)
         )
         self.check_compatible.setChecked(True)
         self.check_compatible.setToolTip(
@@ -223,7 +230,7 @@ class ModelPickerDialog(QDialog):
 
         result = []
         for model in self._models:
-            if only_compatible and not model.usable_for_datasheets():
+            if only_compatible and not model.usable_for(self.capabilities):
                 continue
             if max_cost > 0 and model.prompt_usd_per_mtok > max_cost:
                 continue
@@ -314,9 +321,15 @@ def _price_text(value: float, i18n=None) -> str:
     return f"{value:.2f}"
 
 
-def pick_model(current_model: Optional[str], parent=None, title: str = "Scegli il modello LLM") -> Optional[str]:
-    """Apre il dialogo e ritorna l'id scelto, o None se si annulla."""
-    dialog = ModelPickerDialog(current_model, parent, title=title)
+def pick_model(current_model: Optional[str], parent=None, title: str = "Scegli il modello LLM",
+               capabilities=DATASHEET_CAPABILITIES) -> Optional[str]:
+    """Apre il dialogo e ritorna l'id scelto, o None se si annulla.
+
+    @param capabilities Capacita' che il modello dovra' avere per il lavoro a
+        cui e' destinato: vedi ModelInfo.usable_for. Chiederne piu' del
+        necessario nasconde modelli validi.
+    """
+    dialog = ModelPickerDialog(current_model, parent, title=title, capabilities=capabilities)
     if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_model():
         return dialog.selected_model()
     return None

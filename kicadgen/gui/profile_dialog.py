@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..services.analysis_profiles import FAMILIES, ProfileError
+from ..services.openrouter import DATASHEET_CAPABILITIES, PHOTO_CAPABILITIES
 from .model_dialog import pick_model
 
 ASSETS = Path(__file__).parent / 'assets'
@@ -188,7 +189,7 @@ class ProfileEditor(QDialog):
             line.addWidget(editor, 1)
             picker = QPushButton('Scegli modello…')
             picker.setAutoDefault(False)
-            picker.clicked.connect(lambda checked=False, field=editor: self._pick(field))
+            picker.clicked.connect(lambda checked=False, field=editor, name=key: self._pick(field, name))
             line.addWidget(picker)
             layout.addLayout(line)
         else:
@@ -209,8 +210,12 @@ class ProfileEditor(QDialog):
             else:
                 editor.setPlainText(self.defaults[name])
 
-    def _pick(self, field):
-        chosen = pick_model(field.text(), self, title='Modello di questa analisi')
+    def _pick(self, field, key='model'):
+        # Il requisito segue il lavoro: i due stadi fotografici non vedono mai
+        # un PDF, quindi pretenderne la lettura nasconderebbe modelli validi.
+        capabilities = DATASHEET_CAPABILITIES if key == 'model' else PHOTO_CAPABILITIES
+        chosen = pick_model(field.text(), self, title='Modello di questa analisi',
+                            capabilities=capabilities)
         if chosen:
             field.setText(chosen)
 

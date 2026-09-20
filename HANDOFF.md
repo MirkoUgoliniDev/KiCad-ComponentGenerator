@@ -1,3 +1,81 @@
+# 2026-09-20 (5) — Qwen3-VL: cosa lo bloccava, e la prova pronta
+
+Richiesta dell'utente (20/09, mentre era fuori): «proviamo a usare Qwen3-VL per
+individuare in modo preciso il tipo di componente, dimensioni e orientamento;
+puoi testare appena puoi».
+
+## Non ho potuto fare la chiamata vera, e va detto subito
+
+`openrouter.ai` **non è raggiungibile da nessuno dei due ambienti** in cui
+lavoro: dal contenitore cloud il proxy risponde 403 per policy
+(`connect_rejected`), e la VM collegata alla macchina dell'utente non ha
+egress verso quel dominio (curl exit 56; `pypi.org` invece risponde 200).
+Quindi la prova a pagamento la può lanciare solo l'utente, sulla sua macchina,
+dove la chiave sta nel `.env`. Tutto il resto è pronto perché sia un comando
+solo.
+
+## Il vero ostacolo non era il modello: era il filtro del selettore
+
+`ModelPickerDialog` mostrava solo i modelli con **tool calling + immagini +
+PDF** (`usable_for_datasheets`), e quel requisito valeva per tutti e tre i
+campi. I Qwen3-VL dichiarano `text`+`image`, **non** `file`: sarebbero stati
+nascosti dall'elenco anche dove i PDF non entrano mai.
+
+Correzione generalizzata, non una deroga per un nome: il requisito ora segue il
+**lavoro**, non il campo.
+
+* `ModelInfo.usable_for(capabilities)` con `DATASHEET_CAPABILITIES =
+  ('tools','images','files')` e `PHOTO_CAPABILITIES = ('tools','images')`.
+  Una capacità scritta male solleva `ValueError` invece di sembrare
+  soddisfatta.
+* `pick_model(..., capabilities=...)`: i due stadi fotografici (localizzazione
+  e verifica) chiedono `PHOTO_CAPABILITIES`; il datasheet resta com'era.
+  `profile_dialog._pick` sceglie in base alla chiave del campo.
+* L'etichetta della spunta nomina le capacità che sta filtrando, altrimenti due
+  finestre identiche mostrerebbero elenchi diversi senza motivo apparente.
+* `usable_for_datasheets()` resta, ora scritto sopra `usable_for`.
+
+`tests/test_model_capabilities.py` (4 test): un modello visione-senza-allegati
+passa per le foto e non per i datasheet; senza tool calling non passa per
+nessuno dei due (caso negativo); capacità sconosciuta → errore; il selettore
+filtra secondo il lavoro per cui è stato aperto e la spunta togliendola mostra
+tutto.
+
+## La prova, da lanciare sulla sua macchina
+
+`tools/compare_vision_models.py`: rileva **una volta** con YOLO e poi chiama la
+riconciliazione globale con uno o due modelli sulle **stesse** proposte, così
+la differenza misurata è del modello e non del rilevatore. Percorso esercitato:
+`prepare_photo` → `detect_yolo_components` → `review_global_inventory`, cioè
+quello di produzione: non esiste una seconda strada «di prova».
+
+```powershell
+.venv/Scripts/python.exe tools/compare_vision_models.py <foto> --length 25.5 --width 18 ^
+    --model qwen/qwen3-vl-235b-a22b-instruct ^
+    --against anthropic/claude-opus-5 --output generated/confronto-modelli
+```
+
+Costo: **una richiesta per modello** (due con `--against`); il rilevamento
+locale è gratis; la cache sotto la cartella di uscita evita di ripagare la
+stessa esecuzione. Il rapporto `comparison.json` elenca per componente tipo,
+package, quote, orientamento **dichiarato** (`_reported_rotation_deg`, non
+quello allineato agli assi, che sarebbe sempre 0/90 e farebbe sembrare
+d'accordo modelli che hanno visto cose diverse), numero di terminali e
+riferimento asimmetrico, più le differenze fra i due.
+
+`tests/test_compare_vision_models.py` (5 test, nessuna chiamata): un componente
+nominato da un solo modello è a sua volta una differenza; tipo, package,
+orientamento e terminali sono riportati alla lettera; coppia positivo/negativo
+sulle quote — 3,70 contro 3,75 mm non è un disaccordo, 3,70 contro 5,55 sì.
+
+## Id dei modelli (da elenco pubblico, non verificati con una chiamata)
+
+`qwen/qwen3-vl-235b-a22b-instruct`, `qwen/qwen3-vl-235b-a22b-thinking`, più una
+variante `:free` del secondo. **Non è verificato** che il provider dietro
+questi id accetti il tool calling con immagini come lo usa
+`openrouter.call_tool`: è la prima cosa che dirà la prova. Se il tool calling
+non c'è, serve un ripiego a JSON puro, che oggi non esiste.
+
 # 2026-09-20 (4) — la revisione dei corpi rilevati, prima di pagare
 
 Branch `YOLO-SOLUTION`. Ultimo commit prima di questo lavoro: `9416ea8`.

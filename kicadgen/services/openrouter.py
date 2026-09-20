@@ -124,7 +124,32 @@ class ModelInfo:
         risposta come chiamata a uno strumento: un modello senza queste due
         capacita' fallirebbe la richiesta, quindi la GUI lo nasconde.
         """
-        return self.supports_tools and self.supports_images and self.supports_pdf
+        return self.usable_for(DATASHEET_CAPABILITIES)
+
+    def usable_for(self, capabilities) -> bool:
+        """@brief True se il modello ha tutte le capacita' richieste.
+
+        @param capabilities Nomi fra 'tools', 'images', 'files'.
+        @return Se il modello dichiara tutte quelle capacita'.
+        @note Il requisito dipende da cosa si chiedera' al modello, non dal
+            campo in cui viene scritto: il percorso fotografico manda solo
+            immagini, quindi pretendere anche la lettura dei PDF nasconderebbe
+            modelli che quel lavoro lo fanno benissimo.
+        """
+        have = {"tools": self.supports_tools, "images": self.supports_images,
+                "files": self.supports_pdf}
+        unknown = set(capabilities) - set(have)
+        if unknown:
+            raise ValueError(f"Capacita' di modello sconosciute: {sorted(unknown)}")
+        return all(have[name] for name in capabilities)
+
+
+#: Cosa serve per leggere un datasheet: risposta strutturata, disegni
+#: meccanici come immagini e documenti allegati.
+DATASHEET_CAPABILITIES = ("tools", "images", "files")
+#: Cosa serve sulle fotografie: risposta strutturata e lettura di immagini.
+#: I PDF non entrano mai in questo percorso.
+PHOTO_CAPABILITIES = ("tools", "images")
 
 
 def api_key() -> str:

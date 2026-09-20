@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..services.datasheet_extractor import DEFAULT_SYSTEM_PROMPT
-from ..services.openrouter import DEFAULT_MODEL
+from ..services.openrouter import DEFAULT_MODEL, PHOTO_CAPABILITIES
 from ..services.photo_grounding import DEFAULT_VISION_MODEL, GROUNDING_PROMPT, VERIFICATION_PROMPT
 from .model_dialog import pick_model
 
@@ -225,7 +225,10 @@ class LlmSettingsDialog(QDialog):
         )
 
     def _pick_verification_model(self):
-        chosen = pick_model(self._verification_model, self, title='Modello per verifica foto')
+        # La verifica lavora solo su fotografie: chiedere anche la lettura dei
+        # PDF escluderebbe modelli fatti per le immagini.
+        chosen = pick_model(self._verification_model, self, title='Modello per verifica foto',
+                            capabilities=PHOTO_CAPABILITIES)
         if chosen:
             self._verification_model = chosen
             self.field_verification_model.setText(chosen)
@@ -243,7 +246,8 @@ class LlmSettingsDialog(QDialog):
         return self.verification_editor.toPlainText().strip() or VERIFICATION_PROMPT
 
     def _pick_vision_model(self) -> None:
-        chosen = pick_model(self._vision_model, self, title="Modello per localizzazione fotografica")
+        chosen = pick_model(self._vision_model, self, title="Modello per localizzazione fotografica",
+                            capabilities=PHOTO_CAPABILITIES)
         if chosen:
             self._vision_model = chosen
             self.field_vision_model.setText(chosen)
