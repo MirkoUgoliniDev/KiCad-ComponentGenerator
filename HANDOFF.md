@@ -2971,3 +2971,51 @@ quella dopo.
 Suite Qt nel contenitore, una per file: photo_inventory_gui 65,
 photo_detector_ui 49, board_edit_lifecycle 26, automatic_generation 25,
 live_log 14, terminal_metadata_flow 15.
+
+# 21:55 — il nome di ripiego non esiste più
+
+L'utente, dopo la cartella `NUOVO_COMPONENTE` comparsa da sola: «io ho scritto
+solo TEST e deve fare solo quella cartella».
+
+Il diario era il colpevole di quel caso, ma la causa vera era a monte:
+`_project_dir()` **inventava** il nome `NUOVO_COMPONENTE` quando il campo era
+vuoto. Un ripiego dentro un percorso non resta un percorso: prima o poi
+qualcuno ci scrive.
+
+**Correzione.** `_project_dir()` e `_docs_dir()` ora **sollevano `ValueError`**
+quando il componente non ha un nome. Non c'è più nessun percorso utilizzabile
+senza nome, quindi nessuna scrittura può inventare una cartella: chi ne ha
+bisogno prima del tempo se ne accorge subito.
+
+Adattati i punti che girano legittimamente prima del nome:
+
+- `_refresh_docs_list` esce subito e lascia la lista vuota;
+- `_refresh_output_actions` calcola i percorsi solo quando c'è un nome;
+- `_project_dir_text()` nuovo, per i riepiloghi: mostra un trattino;
+- `GuidedDocuments.refresh` tollera la cartella assente — è lo stato normale di
+  un lavoro appena cominciato, non un guasto — e lascia le card vuote.
+
+**Difetto trovato dal cambiamento stesso.** Costruendo una seconda finestra i
+test andavano in abort: `group_castellated.setChecked` scatena
+`_on_castellated_toggled` → `_update_summary` → i due riepiloghi che stampavano
+`folder=self._project_dir()`. Prima quella riga mostrava tranquillamente
+`NUOVO_COMPONENTE`, cioè annunciava una cartella che non esiste. Con il ripiego
+tolto è venuto fuori subito: è esattamente il motivo per cui un ripiego muto è
+peggio di un errore.
+
+**Test.** `test_without_a_name_there_is_no_folder_path_at_all`: chiedere la
+cartella o quella dei documenti solleva; il riepilogo mostra un trattino; e le
+viste che girano all'avvio (`_update_project_path_label`, `_refresh_docs_list`,
+`_refresh_output_actions`, `_update_summary`) non sollevano.
+
+Suite sul disco dell'utente: 2298 passati. Suite Qt nel contenitore, una per
+file: photo_inventory_gui 66, photo_detector_ui 49, board_edit_lifecycle 26,
+automatic_generation 25, live_log 14, terminal_metadata_flow 15.
+
+## Test instabile, non causato da queste modifiche
+
+`tests/test_kicad_model_footprints.py::test_footprint_cache_tracks_edits_additions_and_deletions`
+fallisce a volte nella corsa completa sul disco dell'utente e passa sempre da
+solo, a coppie e nel contenitore (anche mettendo da parte le modifiche). Ha
+l'aria di una dipendenza dalla granularità dei tempi di modifica dei file.
+Da guardare quando qualcuno tocca la cache dei footprint.

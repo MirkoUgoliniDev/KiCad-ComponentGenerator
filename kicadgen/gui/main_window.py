@@ -1462,11 +1462,30 @@ class MainWindow(QMainWindow):
         return self.field_name.text().strip() if hasattr(self, "field_name") else ""
 
     def _project_dir(self) -> Path:
+        """@brief Cartella del componente in area di lavoro.
+
+        @return Percorso della cartella, che porta il nome scelto.
+        @throws ValueError quando il componente non ha ancora un nome.
+        @note Prima qui c'era un nome di ripiego, `NUOVO_COMPONENTE`. Un
+            ripiego in un percorso non resta un percorso: prima o poi qualcuno
+            ci scrive, e in area di lavoro compare una cartella che nessuno ha
+            chiesto, accanto a quelle vere. E' successo con il diario
+            dell'analisi. Meglio che non esista affatto un percorso da usare
+            senza nome: chi ha bisogno della cartella prima che il nome ci sia
+            deve accorgersene qui, non dopo, guardando l'area di lavoro.
+        """
+        name = self._component_name()
+        if not name:
+            raise ValueError(
+                "Il componente non ha ancora un nome: nessuna cartella da usare.")
         root = self.field_library_root.text().strip() or str(DEFAULT_LIBRARY_ROOT)
-        name = self._component_name() or "NUOVO_COMPONENTE"
         return Path(root) / name
 
     def _docs_dir(self) -> Path:
+        """@brief Cartella dei documenti del componente.
+
+        @throws ValueError quando il componente non ha ancora un nome.
+        """
         return self._project_dir() / DOCS_SUBDIR
 
     def _update_project_path_label(self) -> None:
@@ -1477,12 +1496,32 @@ class MainWindow(QMainWindow):
         self._refresh_output_actions()
         self._refresh_docs_list()
 
+    def _named(self) -> bool:
+        """@brief Vero quando esiste una cartella del componente da guardare."""
+        return bool(self._component_name())
+
+    def _project_dir_text(self) -> str:
+        """@brief La cartella del componente da mostrare, o un trattino.
+
+        @note Serve ai riepiloghi, che si aggiornano anche prima che il nome
+            esista: senza nome non c'e' una cartella, e scriverne una inventata
+            sarebbe una promessa falsa su dove finiranno i file.
+        """
+        return str(self._project_dir()) if self._named() else "—"
+
     def _refresh_output_actions(self) -> bool:
         name = self._component_name()
-        footprint = self._project_dir() / f"{name}.pretty" / f"{name}.kicad_mod"
-        step = self._project_dir() / f"{name}.3dshapes" / f"{name}.step"
-        footprint_available = bool(name) and footprint.is_file()
-        complete_available = footprint_available and step.is_file()
+        if name:
+            project = self._project_dir()
+            footprint = project / f"{name}.pretty" / f"{name}.kicad_mod"
+            step = project / f"{name}.3dshapes" / f"{name}.step"
+            footprint_available = footprint.is_file()
+            complete_available = footprint_available and step.is_file()
+        else:
+            # Senza nome non c'e' una cartella, quindi niente da aprire ne' da
+            # installare: nessun percorso da mostrare e nessun file da cercare.
+            footprint = step = None
+            footprint_available = complete_available = False
         for attr in ("btn_open_output", "action_open_output"):
             action = getattr(self, attr, None)
             if action is not None:
@@ -1511,7 +1550,8 @@ class MainWindow(QMainWindow):
         if hasattr(self, "label_kicad_footprint"):
             self.label_kicad_footprint.setText(
                 str(footprint) if footprint_available else "—")
-            self.label_kicad_step.setText(str(step) if step.is_file() else "—")
+            self.label_kicad_step.setText(
+                str(step) if (step is not None and step.is_file()) else "—")
             self.label_kicad_status.setText(
                 self.i18n.text("Footprint e modello STEP pronti per la verifica.")
                 if complete_available else
@@ -1574,6 +1614,11 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "docs_list"):
             return
         self.docs_list.clear()
+        if not self._named():
+            # Senza nome non c'e' una cartella da leggere: la lista resta vuota
+            # e il riquadro guidato non va interrogato, altrimenti chiederebbe
+            # un percorso che non esiste.
+            return
         docs_dir = self._docs_dir()
         if docs_dir.is_dir():
             for f in sorted(docs_dir.iterdir()):
@@ -3245,7 +3290,7 @@ class MainWindow(QMainWindow):
         )
         self.label_summary.setText(self.i18n.tr(
             "summary.pin_header", name=params.name or self.i18n.text('(nome vuoto)'),
-            folder=self._project_dir(), rows=params.rows, cols=params.cols,
+            folder=self._project_dir_text(), rows=params.rows, cols=params.cols,
             pitch=params.pitch, row_spacing=row_spacing, pad=params.pad_diameter,
             drill=params.drill, populated=populated))
 
@@ -3264,7 +3309,7 @@ class MainWindow(QMainWindow):
             error = self.i18n.tr("summary.parameter_error_line", error=exc)
         self.label_summary.setText(self.i18n.tr(
             "summary.castellated", name=params.name or self.i18n.text('(nome vuoto)'),
-            folder=self._project_dir(), length=params.body_length,
+            folder=self._project_dir_text(), length=params.body_length,
             width=params.body_width, pad_length=params.pad_length,
             pad_width=params.pad_width, overhang=params.pad_overhang,
             sides=sides, error=error))

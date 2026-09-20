@@ -211,17 +211,31 @@ class GuidedDocuments(QWidget):
         return ('✓', summary, self._tr('utilizzabile:') + f' {summary}', '#a6e3a1')
 
     def refresh(self):
-        """@brief Provide the refresh operation for this workflow."""
+        """@brief Rilegge le assegnazioni e aggiorna le card.
+
+        @note La cartella puo' non esistere ancora: finche' il componente non
+            ha un nome non c'e' un posto dove i documenti andrebbero, e
+            chiederlo solleva. Qui non e' un errore da segnalare come guasto:
+            e' lo stato normale di un lavoro appena cominciato, e le card
+            restano vuote finche' il nome non c'e'.
+        """
+        directory = None
         try:
-            rows = self.store().read()['roles']
-            self.status.setText('Assegna un file a ogni ruolo, oppure indica “Non disponibile”.')
-        except (ValueError, OSError) as exc:
+            directory = Path(self.directory())
+        except ValueError as exc:
             rows = {}
             self.status.setText(str(exc))
+        else:
+            try:
+                rows = self.store().read()['roles']
+                self.status.setText('Assegna un file a ogni ruolo, oppure indica “Non disponibile”.')
+            except (ValueError, OSError) as exc:
+                rows = {}
+                self.status.setText(str(exc))
         for role, widgets in self.cards.items():
             entry = rows.get(role, {})
             filename = entry.get('filename')
-            path = Path(self.directory()) / filename if filename else None
+            path = directory / filename if (directory is not None and filename) else None
             exists = bool(path and path.is_file())
             # Reset the stable source on every refresh. A card may have been
             # refreshed after a language switch, so never trust its rendered text.
@@ -277,8 +291,8 @@ class GuidedDocuments(QWidget):
                 self.i18n.tr('tooltip.remove_role', role=role_label)
                 if self.i18n is not None else 'Rimuovi: ' + ROLES[role]
             )
-        if not self.store().path.exists() and Path(self.directory()).is_dir():
-            if any(p.is_file() and p.suffix.lower() in SUFFIXES for p in Path(self.directory()).iterdir()):
+        if directory is not None and not self.store().path.exists() and directory.is_dir():
+            if any(p.is_file() and p.suffix.lower() in SUFFIXES for p in directory.iterdir()):
                 self.status.setText('Documenti precedenti conservati: usa Carica per assegnarli ai ruoli disponibili.')
         self.status.setProperty('i18n_source', self.status.text())
         if self.i18n is not None:

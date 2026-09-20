@@ -1035,3 +1035,24 @@ def test_no_folder_appears_before_the_name_is_written(window, tmp_path):
     written = log.read_text(encoding="utf-8")
     assert "riga prodotta prima del nome" in written
     assert "prima riga dopo il nome" in written
+
+
+def test_without_a_name_there_is_no_folder_path_at_all(window):
+    """@brief Il nome di ripiego non esiste piu': chiedere la cartella solleva.
+
+    Un ripiego in un percorso non resta un percorso: prima o poi qualcuno ci
+    scrive, e in area di lavoro compare una cartella che nessuno ha chiesto.
+    Meglio che chi ne ha bisogno prima del tempo se ne accorga qui.
+    """
+    window.field_name.setText("")
+    with pytest.raises(ValueError):
+        window._project_dir()
+    with pytest.raises(ValueError):
+        window._docs_dir()
+    # I riepiloghi, che si aggiornano comunque, mostrano un trattino.
+    assert window._project_dir_text() == "—"
+    # E le viste che girano all'avvio non sollevano.
+    window._update_project_path_label()
+    window._refresh_docs_list()
+    window._refresh_output_actions()
+    window._update_summary()
