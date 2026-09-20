@@ -1,3 +1,94 @@
+# 2026-09-20 (8) — il verso si misura sul solido: cosa funziona e cosa no
+
+Branch `YOLO-SOLUTION`, sopra `61728a6`. Il criterio del baricentro introdotto
+nel checkpoint precedente **è stato provato sui file veri e sostituito**: non
+reggeva. Quello che c'è adesso è stato misurato su quattro modelli reali della
+libreria dell'utente, con i numeri qui sotto.
+
+## 1. Il baricentro del solido intero non funziona, ed è dimostrato
+
+Misurato sul `ESP32-S3-WROOM-1U.STEP` vero (8,8 MB, letto con OpenCascade):
+
+```
+bbox 18,004 x 19,204 x 3,204   volume 408,867 mm3
+baricentro   8,9818  9,4559     centro bbox  9,0000  9,6000
+scarto normalizzato  dx = -0,0020   dy = -0,0150     soglia 0,02
+```
+
+Sotto soglia. La massa simmetrica del PCB e dello schermo **diluisce**
+l'asimmetria del connettore fino a renderla indistinguibile dal rumore. Un
+criterio che su un modulo schermato non risponde non serve a niente, e
+abbassare la soglia sarebbe stato tararla su un pezzo.
+
+## 2. Cosa c'è adesso: l'asimmetria è ciò che non sopravvive a mezzo giro
+
+Definizione, non taratura. Si ruota il solido di 180° attorno al centro del suo
+ingombro, lo si sottrae da sé stesso, e il residuo è **esattamente** il
+materiale che distingue i due capi. Su un corpo simmetrico quel residuo tende a
+zero da solo.
+
+Misurato sui file veri:
+
+| modello | residuo | scarto del residuo | esito |
+|---|---|---|---|
+| ESP32-S3-WROOM-1U | **15,86%** | dx +0,057, **dy −0,181** | lato Y− |
+| USB_C_Receptacle_GCT_USB4085 | **45,99%** | dx −0,009, **dy +0,514** | lato Y+ |
+| SOT-223 | 4,85% | dx ±0,000, dy ±0,000 | **nessun lato** |
+| R_0603_1608Metric | **0,00%** | 0, 0 | **nessun lato** |
+
+Tre controlli, tutti con una ragione fisica e nessuno tarato su un esemplare:
+
+* **volume del residuo ≥ 1%** — sotto, è residuo numerico del boolean. Il
+  modulo sta al 15,9%, un ordine di grandezza sopra.
+* **scarto del residuo ≥ 0,05 semilati** — un residuo che c'è ma sta al centro
+  significa che l'asimmetria è **bilanciata** fra i due capi.
+* **la direzione dominante stacca l'altra di almeno 2×** — a parità la
+  direzione punta alla diagonale, cioè a un angolo, e un angolo non si
+  confronta con un lato dichiarato.
+
+## 3. Il limite, dichiarato: il SOT-223 non si risolve
+
+Il residuo del SOT-223 **c'è** (4,85% del volume) ma è centralmente simmetrico:
+verificato tagliandolo a metà, **0,9156 mm³ da una parte e 0,9156 dall'altra**,
+identici su entrambi gli assi. I tre reofori da un lato e il tab dall'altro si
+compensano in volume, e quel modello in pianta i suoi due capi non li
+distingue.
+
+Per quei corpi il verso resta `orientation_unverified`, che è la risposta
+onesta. **Non è stato abbassato nulla per farlo rientrare**: senza il controllo
+sullo scarto, un milionesimo di rumore numerico sarebbe diventato un lato.
+
+Chi riprende: se si vuole risolvere anche quella classe serve un criterio
+diverso, che guardi la *forma* dei due lobi e non il loro volume (tre pezzi
+stretti contro uno largo). È un'altra indagine, non un'altra soglia.
+
+## 4. Verifica
+
+* Suite senza GUI: **2419 passati**, con i soliti 2 falliti e 1 errore di
+  raccolta identici alla baseline. Moduli GUI verdi.
+* I casi dei test sono **i numeri misurati sui file veri**, non inventati:
+  modulo e USB-C come positivi, SOT-223 e 0603 come negativi. È una coppia
+  positivo/negativo su geometria reale, che è la verifica più forte
+  disponibile senza un run end-to-end.
+* **Non verificato**: il run completo. Serve che l'app rigeneri il modulo.
+
+## 5. Nota operativa: FreeCAD
+
+La misura gira nel `freecadcmd` **headless** che l'app già lancia: non serve
+avere la GUI aperta, il flusso automatico resta automatico. Il server MCP
+`freecad` sulla macchina dell'utente invece non è utilizzabile così com'è --
+non trova `freecadcmd` (sta in `C:\Program Files\FreeCAD 1.1\bin\`) e la porta
+RPC risponde solo con la GUI aperta e l'addon avviato. Le misure di questo
+checkpoint sono state fatte leggendo gli STEP con OpenCascade in un ambiente
+separato, il che è ripetibile da chiunque senza toccare la macchina.
+
+Costo: l'operazione booleana richiede una ventina di secondi su un modulo da
+8 MB, meno di un secondo sui pezzi piccoli. Si esegue **solo** quando la
+fotografia ha dichiarato un lato, perché senza non ci sarebbe nulla da
+confrontare.
+
+---
+
 # 2026-09-20 (7) — l'orientamento si deduce da un riferimento, non da una regex
 
 Branch `YOLO-SOLUTION`, sopra `0b99df0`. Richiamo dell'utente: «non devi fare

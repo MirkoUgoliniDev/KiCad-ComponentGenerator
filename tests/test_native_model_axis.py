@@ -95,42 +95,84 @@ class _Box:
         self.XLength, self.YLength = x_max - x_min, y_max - y_min
 
 
-class _Solid:
-    def __init__(self, cx, cy):
-        self.CenterOfMass = SimpleNamespace(x=cx, y=cy)
-
-
 #: Ingombro 20 x 18 centrato nell'origine.
 FRAME = _Box(-10, 10, -9, 9)
 
 
-@pytest.mark.parametrize("cx,cy,expected", [
-    (2.0, 0.0, (1, 0)),    # il materiale pende a destra
-    (-2.0, 0.0, (-1, 0)),
-    (0.0, 2.0, (0, 1)),
-    (0.0, -2.0, (0, -1)),
-    (2.0, 0.4, (1, 0)),    # una sola direzione: vince la dominante
-    (0.05, 0.02, None),    # corpo simmetrico: nessuna direzione
-    (0.0, 0.0, None),
+@pytest.mark.parametrize("fraction,dx,dy,expected", [
+    # Il modulo vero: residuo al 15,9%, spostato su Y di tre volte l'altro asse.
+    (0.1586, 0.0567, -0.1808, (0, -1)),
+    (0.30, 0.40, 0.0, (1, 0)),
+    (0.30, -0.40, 0.05, (-1, 0)),
+    (0.30, 0.0, 0.40, (0, 1)),
+    # Il ricettacolo USB-C vero: residuo al 46%, spostato di mezzo semilato.
+    (0.4599, -0.009, 0.514, (0, 1)),
+    # Corpo simmetrico: il residuo e' rumore del boolean, non una feature.
+    (0.004, 0.40, 0.0, None),
+    (0.0, 0.0, 0.0, None),
+    # Il SOT-223 vero: il residuo c'e' (4,9%) ma sta al centro, perche' si
+    # divide in due lobi identici. L'asimmetria e' bilanciata fra i due capi e
+    # non li distingue: la risposta onesta e' "non lo so", non il segno del
+    # rumore numerico.
+    (0.0485, -1e-6, 2e-6, None),
+    (0.30, 0.0, 0.02, None),
+    # Feature in un angolo: le due componenti si equivalgono e un angolo non si
+    # confronta con un lato dichiarato.
+    (0.30, 0.30, 0.28, None),
+    (0.30, 0.20, -0.30, None),
 ])
-def test_the_centroid_says_where_the_material_hangs(parts, cx, cy, expected):
-    """@brief Criterio fisico, non un nome di file.
+def test_the_half_turn_residue_names_a_side_or_nothing(parts, fraction, dx, dy, expected):
+    """@brief L'asimmetria e' cio' che non sopravvive a mezzo giro.
 
-    Una feature asimmetrica -- un connettore coassiale, un boss, una
-    smussatura -- sposta il centro di massa rispetto al centro dell'ingombro.
-    Su un pezzo simmetrico lo spostamento tende a zero, e li' la risposta
-    onesta e' "non lo so", non una direzione qualsiasi.
+    Il baricentro del solido INTERO non basta: su un modulo schermato la massa
+    simmetrica del PCB e dello schermo diluisce il connettore fino all'1,5%,
+    sotto qualunque soglia onesta. Il residuo dello stesso modulo pesa il
+    15,9%. E' una definizione, non una taratura: su un corpo simmetrico va a
+    zero da solo.
     """
-    assert parts._native_landmark_direction(_Solid(cx, cy), FRAME) == expected
+    assert parts._asymmetry_direction(fraction, dx, dy) == expected
 
 
-def test_a_solid_without_mass_does_not_take_down_the_generation(parts):
-    class _NoMass:
-        @property
-        def CenterOfMass(self):
-            raise RuntimeError("compound senza massa")
+class _Shape:
+    """Solido finto: copia, ruota, sottrae. Quanto basta a provare il cablaggio."""
 
-    assert parts._native_landmark_direction(_NoMass(), FRAME) is None
+    def __init__(self, volume, residual_volume, residual_centre):
+        self.Volume = volume
+        self._residual_volume = residual_volume
+        self._residual_centre = residual_centre
+
+    def copy(self):
+        return self
+
+    def rotate(self, *args):
+        return None
+
+    def cut(self, other):
+        return SimpleNamespace(Volume=self._residual_volume,
+                               CenterOfMass=SimpleNamespace(*self._residual_centre))
+
+
+def test_the_measurement_is_wired_to_the_residue_not_to_the_whole_solid(parts):
+    # Residuo 16% del volume, spostato di -1.8 su un semilato di 9: -0.20.
+    shape = _Shape(400.0, 64.0, SimpleNamespace(x=0.5, y=-1.8))
+    shape.cut = lambda other: SimpleNamespace(
+        Volume=64.0, CenterOfMass=SimpleNamespace(x=0.5, y=-1.8))
+    assert parts._native_landmark_direction(shape, FRAME) == (0, -1)
+
+
+def test_a_failed_boolean_does_not_take_down_the_generation(parts):
+    class _Broken(_Shape):
+        def cut(self, other):
+            raise RuntimeError("boolean fallito")
+
+    assert parts._native_landmark_direction(_Broken(400.0, 0, (0, 0)), FRAME) is None
+
+
+def test_a_solid_without_volume_says_nothing(parts):
+    shape = _Shape(0.0, 0.0, (0, 0))
+    shape.cut = lambda other: SimpleNamespace(
+        Volume=0.0, CenterOfMass=SimpleNamespace(x=0.0, y=0.0))
+    assert parts._native_landmark_direction(shape, FRAME) is None
 
 
 @pytest.mark.parametrize("native,inferred,side,expected", [

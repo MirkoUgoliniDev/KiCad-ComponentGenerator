@@ -695,11 +695,28 @@ def _native_axis_angle(references, length, width):
     return angle, reference
 
 
-#: Sotto questo scarto fra baricentro e centro dell'ingombro il solido e'
-#: simmetrico quanto basta perche' la direzione non significhi nulla: la
-#: differenza sarebbe rumore di tassellazione, non una feature. Frazione del
-#: semilato, cioe' adimensionale: vale per un modulo da 20 mm e per un chip da 1.
-NATIVE_LANDMARK_MIN_OFFSET = 0.02
+#: Frazione di volume che non sopravvive a mezzo giro sotto la quale il solido
+#: e' simmetrico: quel che resta e' residuo numerico del boolean, non una
+#: feature. Su un corpo davvero simmetrico il residuo tende a zero da solo,
+#: quindi la soglia separa il rumore dal segnale e non taglia su misura un
+#: pezzo: il modulo su cui e' stata provata sta al 15,9%, un ordine di
+#: grandezza sopra.
+NATIVE_ASYMMETRY_MIN_FRACTION = 0.01
+
+#: Quanto la direzione dominante deve staccare l'altra perche' la feature si
+#: possa attribuire a un LATO. A parita' la direzione punta alla diagonale,
+#: cioe' a un angolo, e un angolo non si confronta con un lato dichiarato.
+NATIVE_ASYMMETRY_DOMINANCE = 2.0
+
+#: Quanto il residuo deve essere spostato dal centro, in frazione di semilato,
+#: perche' indichi un capo. Un residuo che c'e' ma sta al centro significa che
+#: l'asimmetria e' BILANCIATA fra i due capi e non li distingue: misurato su un
+#: SOT-223 reale, dove il residuo pesa il 4,9% del volume ma si divide in due
+#: lobi identici (0,9156 mm3 da una parte e 0,9156 dall'altra). Senza questo
+#: controllo un centesimo di micron di rumore diventerebbe un lato.
+#: Per confronto, sugli stessi file: modulo schermato 0,181; ricettacolo
+#: USB-C 0,514; chip 0603 esattamente 0.
+NATIVE_ASYMMETRY_MIN_OFFSET = 0.05
 
 #: Da che parte guarda ogni lato dichiarabile, nel frame del footprint
 #: (X a destra, Y in basso), che e' anche quello in cui il modello descrive la
@@ -708,34 +725,66 @@ _LANDMARK_DIRECTIONS = {"right": (1, 0), "left": (-1, 0),
                         "bottom": (0, 1), "top": (0, -1)}
 
 
+def _asymmetry_direction(fraction, dx, dy):
+    """@brief Traduci la misura dell'asimmetria in un lato, o in un "non lo so".
+
+    @param fraction Volume che non sopravvive al mezzo giro, sul volume totale.
+    @param dx Scarto del baricentro del residuo lungo X, sul semilato.
+    @param dy Scarto lungo Y, sul semilato.
+    @return (dx, dy) cardinale, oppure None quando la misura non attribuisce
+        la feature a un lato solo.
+    @note Separata dalla geometria apposta: qui non serve OpenCascade, e la
+        regola che decide si puo' provare da sola.
+    """
+    if not (fraction >= NATIVE_ASYMMETRY_MIN_FRACTION):
+        return None
+    major, minor = (abs(dx), abs(dy)) if abs(dx) >= abs(dy) else (abs(dy), abs(dx))
+    if major < NATIVE_ASYMMETRY_MIN_OFFSET:
+        return None
+    if major < NATIVE_ASYMMETRY_DOMINANCE * minor:
+        return None
+    return (1 if dx > 0 else -1, 0) if abs(dx) >= abs(dy) else (0, 1 if dy > 0 else -1)
+
+
 def _native_landmark_direction(shape, reference):
-    """@brief Da che parte pende il materiale del modello, in coordinate native.
+    """@brief Da che parte sta il materiale che distingue un capo dall'altro.
 
     @param shape Solido (o compound) gia' letto dal file di libreria.
     @param reference Ingombro usato per posarlo, cioe' il riferimento su cui e'
         stato scelto l'asse.
     @return (dx, dy) con una sola componente non nulla, oppure None quando il
-        solido e' troppo simmetrico perche' la misura significhi qualcosa.
-    @note Criterio fisico, non un nome di file: una feature asimmetrica --
-        un connettore coassiale, un boss, una smussatura -- sposta il centro di
-        massa rispetto al centro dell'ingombro, e la direzione dello
-        spostamento dice da che parte sta. Su un pezzo simmetrico lo
-        spostamento tende a zero e allora non si corregge niente, che e'
-        l'unica risposta onesta.
+        solido e' simmetrico o la feature sta in un angolo.
+    @note L'asimmetria e', per definizione, cio' che NON sopravvive a mezzo
+        giro: si ruota il solido di 180 gradi attorno al centro del suo
+        ingombro, lo si sottrae da se' stesso, e il residuo e' esattamente il
+        materiale che distingue i due capi. Il baricentro del solido INTERO non
+        basta -- su un modulo schermato la massa simmetrica del PCB e dello
+        schermo diluisce il connettore fino all'1,5%, sotto qualunque soglia
+        onesta -- mentre il residuo di quello stesso modulo pesa il 15,9%.
+        Criterio definitorio, non tarato: nessun nome di file, nessuna misura
+        presa da un pezzo particolare.
+    @note Costa un'operazione booleana (una ventina di secondi su un modulo da
+        8 MB), quindi il chiamante la esegue solo quando la fotografia ha
+        dichiarato un lato con cui confrontarla.
     """
     try:
-        centre = shape.CenterOfMass
-    except Exception:  # noqa: BLE001 - un compound senza massa non e' fatale
+        centre_x = (reference.XMin + reference.XMax) / 2
+        centre_y = (reference.YMin + reference.YMax) / 2
+        flipped = shape.copy()
+        flipped.rotate(V(centre_x, centre_y, 0), V(0, 0, 1), 180)
+        residual = shape.cut(flipped)
+        volume = shape.Volume
+        if not volume > 0:
+            return None
+        fraction = residual.Volume / volume
+        centre = residual.CenterOfMass
+    except Exception:  # noqa: BLE001 - un boolean fallito non ferma il solido
         return None
     half_x = max(reference.XLength / 2, 1e-9)
     half_y = max(reference.YLength / 2, 1e-9)
-    dx = (centre.x - (reference.XMin + reference.XMax) / 2) / half_x
-    dy = (centre.y - (reference.YMin + reference.YMax) / 2) / half_y
-    # Una sola direzione: due componenti confrontabili vorrebbero dire che la
-    # feature sta in un angolo, e un angolo non si confronta con un lato.
-    if max(abs(dx), abs(dy)) < NATIVE_LANDMARK_MIN_OFFSET:
-        return None
-    return (1 if dx > 0 else -1, 0) if abs(dx) >= abs(dy) else (0, 1 if dy > 0 else -1)
+    return _asymmetry_direction(fraction,
+                                (centre.x - centre_x) / half_x,
+                                (centre.y - centre_y) / half_y)
 
 
 def _verse_correction(native_direction, inferred, observed_side):
@@ -834,10 +883,14 @@ def _library_model(component, cx, cy, z0, color):
         length, width = float(component["length_mm"]), float(component["width_mm"])
         inferred, reference = _native_axis_angle(references, length, width)
         # Il verso non si ricava dall'ingombro: due capi di un rettangolo
-        # misurano uguale. Si confronta dove pende il materiale del modello con
-        # il lato su cui la fotografia ha visto il riferimento asimmetrico.
-        verse = _verse_correction(_native_landmark_direction(combined, reference),
-                                  inferred, component.get("landmark_side"))
+        # misurano uguale. Si confronta il materiale asimmetrico del modello
+        # con il lato su cui la fotografia ha visto il riferimento. La misura
+        # costa un boolean, quindi si fa solo se c'e' un lato osservato: senza,
+        # non ci sarebbe nulla con cui confrontarla.
+        observed_side = component.get("landmark_side")
+        verse = _verse_correction(
+            _native_landmark_direction(combined, reference) if observed_side else None,
+            inferred, observed_side)
         if verse:
             print(f"KICADGEN_VERSE:{path}; landmark="
                   f"{component.get('landmark_feature')} on {component.get('landmark_side')}; "
