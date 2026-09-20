@@ -162,3 +162,75 @@ def test_empty_space_and_unknown_actors_open_no_component_menu():
     assert Preview3DVtk._component_row_at_widget_point(empty, 1, 1) is None
     _, foreign = _viewer_at(_actor('pcb'))
     assert Preview3DVtk._component_row_at_widget_point(foreign, 1, 1) is None
+
+
+# ── tasto destro: click contro zoom a trascinamento ──────────────────
+
+@pytest.fixture
+def right_click_view():
+    """Widget vero: l'evento del tasto destro va provato sul suo percorso Qt."""
+    from PyQt6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    view = Preview3DVtk()
+    view.resize(400, 300)
+    view.show()
+    app.processEvents()
+    view._component_actors = {'fake': 3}
+    view._component_actor_at = lambda x, y: _actor('fake')
+    rows = []
+    view.component_menu_requested.connect(lambda row, _pos: rows.append(row))
+    yield view, rows, app
+    view.close()
+    app.processEvents()
+
+
+def _press_release(app, view, start, end, button=None):
+    from PyQt6.QtCore import QPointF, Qt
+    from PyQt6.QtGui import QMouseEvent
+    button = button or Qt.MouseButton.RightButton
+    for kind, point in ((QMouseEvent.Type.MouseButtonPress, start),
+                        (QMouseEvent.Type.MouseButtonRelease, end)):
+        app.sendEvent(view, QMouseEvent(kind, QPointF(point), QPointF(view.mapToGlobal(point)),
+                                        button, button, Qt.KeyboardModifier.NoModifier))
+
+
+def test_a_steady_right_click_asks_for_the_component_menu(right_click_view):
+    from PyQt6.QtCore import QPoint
+    view, rows, app = right_click_view
+    _press_release(app, view, QPoint(50, 40), QPoint(50, 40))
+    assert rows == [3]
+
+
+def test_a_right_drag_is_a_zoom_and_opens_no_menu(right_click_view):
+    """Il negativo: il tasto destro di VTK e' anche lo zoom a trascinamento."""
+    from PyQt6.QtCore import QPoint
+    view, rows, app = right_click_view
+    _press_release(app, view, QPoint(50, 40), QPoint(90, 40))
+    assert rows == []
+
+
+def test_a_left_click_never_opens_the_component_menu(right_click_view):
+    from PyQt6.QtCore import QPoint, Qt
+    view, rows, app = right_click_view
+    _press_release(app, view, QPoint(50, 40), QPoint(50, 40), Qt.MouseButton.LeftButton)
+    assert rows == []
+
+
+def test_the_same_gesture_never_opens_two_menus(right_click_view):
+    """Su Windows il rilascio e contextMenuEvent arrivano entrambi."""
+    from PyQt6.QtCore import QPoint
+    from PyQt6.QtGui import QContextMenuEvent
+    view, rows, app = right_click_view
+    _press_release(app, view, QPoint(50, 40), QPoint(50, 40))
+    app.sendEvent(view, QContextMenuEvent(QContextMenuEvent.Reason.Mouse, QPoint(50, 40),
+                                          view.mapToGlobal(QPoint(50, 40))))
+    assert rows == [3]
+
+
+def test_the_keyboard_menu_key_still_works_on_its_own(right_click_view):
+    from PyQt6.QtCore import QPoint
+    from PyQt6.QtGui import QContextMenuEvent
+    view, rows, app = right_click_view
+    app.sendEvent(view, QContextMenuEvent(QContextMenuEvent.Reason.Keyboard, QPoint(50, 40),
+                                          view.mapToGlobal(QPoint(50, 40))))
+    assert rows == [3]

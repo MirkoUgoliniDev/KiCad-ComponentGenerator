@@ -103,3 +103,32 @@ def test_a_new_analysis_clears_the_previous_cost(window):
     window.analysis_overlay.clear_cost()
     assert window.analysis_overlay.cost.text() == ''
     assert window.analysis_overlay.cost.isHidden()
+
+
+def test_a_manual_regeneration_shows_no_cost_in_its_modal(window, monkeypatch):
+    """"Rigenera modello 3D" non chiama il modello: mostrare li' il costo
+    dell'ultima analisi lo fa leggere come il costo di adesso.
+
+    Resta invece sulla label sotto il pulsante, che dice "ultima analisi"
+    ed e' quindi un dato storico, non l'esito di questa operazione.
+    """
+    from kicadgen.services.datasheet_extractor import ExtractedParams
+
+    params = ExtractedParams(
+        name='Modulo', description='', tags='', confidence='medium', notes='',
+        layout='castellated', body_length_mm=40, body_width_mm=20, body_height_mm=2.0,
+        castellated_sides=[dict(edge='left', count=4, pitch_mm=2.54, first_pin=1)])
+    window._on_extracted(params)
+    window.group_3d.setChecked(True)
+    monkeypatch.setattr(gui.Cad3DWorker, 'start', lambda self: None)
+
+    openrouter._record_usage(response(0.05, prompt=10))
+    window.analysis_overlay.start('Analisi AI in corso', 'in corso…')
+    window._on_extract_finished()
+    assert '0.05' in window.analysis_overlay.cost.text(), 'premessa: il costo era mostrato'
+
+    window._regenerate_3d()
+    assert window._cad3d_worker is not None, window.log_text.toPlainText()
+    assert window.analysis_overlay.cost.text() == ''
+    assert window.analysis_overlay.cost.isHidden()
+    assert '0.05' in window.lbl_ai_cost.text(), 'lo storico non va perso'

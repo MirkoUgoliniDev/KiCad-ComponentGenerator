@@ -1,3 +1,99 @@
+# 2026-09-20 (2) — il modulo diventava porpora dopo una rotazione
+
+Tre difetti segnalati dall'utente su una sessione reale, tutti riprodotti e
+corretti.
+
+## 1. Ruotare l'ESP32 gli toglieva il modello KiCad
+
+Sintomo: l'utente corregge l'orientamento del modulo dal dialogo di revisione
+fotografica, rigenera, e il blocco diventa **porpora** (nessun modello nativo).
+La rigenerazione FreeCAD riusciva (`exit=0`, STEP/FCStd/WRL scritti): il
+problema era a monte.
+
+Nel log le due corse differiscono per una riga sola:
+
+```
+12:46:23  shielded SMD module ...: 1 dimensional candidates; provisional_matched
+12:49:43  Footprint KiCad: 0 letture collegate; 0 footprint ... senza ingombro
+12:49:43  shielded SMD module ...: 1 dimensional candidates; review_required
+```
+
+Quella riga intermedia compare solo quando `basis in ("unknown", "pads")`
+(`kicad_models.py:1605`). Provato in isolamento sul componente vero:
+
+| `bbox_basis` | esito |
+|---|---|
+| `body` | **provisional_matched** (renderizzato) |
+| `leads` / `total` | auto_matched |
+| `unknown` o assente | **review_required** (porpora) |
+
+Causa: `photo_review_dialog._geometry_changed` azzerava `bbox_basis` dopo
+**qualunque** modifica geometrica, rotazione compresa.
+
+**La regola era giusta per sposta e ridimensiona, sbagliata per ruota.**
+`bbox_basis` risponde a *"il contorno segue il corpo o il corpo coi reofori"*.
+Spostare o ridimensionare ridisegna il contorno e quella risposta decade;
+girarlo no — il rettangolo mantiene centro e misure e racchiude la stessa
+cosa. In piu' `"unknown"` non e' l'assenza di informazione: e' un'affermazione
+diversa, che manda il componente sul ramo delle piazzole e gli nega il modello
+nativo.
+
+Ora una rotazione conserva `bbox_basis` e `package_evidence`; continua a
+scartare `terminal_geometry`, che localizza il metallo *dentro* il rettangolo
+e dipende da come e' posato. Sposta e ridimensiona non cambiano.
+
+Effetto collaterale utile: `package_evidence` alimenta anche la regola dei
+180° sul connettore RF (`_native_model_rotation_override`), che prima si
+perdeva insieme al resto.
+
+## 2. Il tasto destro non apriva il menu
+
+Due cose distinte.
+
+**La prima**: il processo dell'utente era partito prima che il menu esistesse
+(commit `084d721` delle 12:50:07, sessione in corso dalle 12:46). Serviva
+riavviare.
+
+**La seconda, vera**: passare solo da `contextMenuEvent` e' fragile. Qt lo
+sintetizza dal messaggio di sistema e sopra la finestra nativa che VTK si crea
+non e' garantito che arrivi. Ora il clic e' servito dal **rilascio del
+pulsante**, che l'interattore Qt di VTK inoltra sempre essendo un QWidget
+normale; `contextMenuEvent` resta come via alternativa (tasto menu della
+tastiera) con una guardia contro il doppio menu sullo stesso gesto.
+
+Il tasto destro di VTK e' anche lo zoom a trascinamento: il menu si apre solo
+se il mouse non si e' spostato oltre pochi pixel. Sei casi coperti da test
+(clic fermo, clic con 2 px, trascinamento, tasto sinistro, doppia consegna,
+tasto menu della tastiera, vuoto).
+
+## 3. Il costo AI compariva durante una rigenerazione senza AI
+
+`"Rigenera modello 3D"` non chiama il modello, ma la modale riproponeva
+`Costo ultima analisi: 0.0500 USD …`, che li' si legge come il costo di cio'
+che sta accadendo.
+
+Azzerato nella modale **solo** per la rigenerazione manuale. Nella generazione
+automatica il costo resta: li' estrazione e generazione sono un'unica
+operazione continua, ed era il motivo per cui `clear_cost` non stava in
+`start()`. La label sotto il pulsante conserva il dato, e dice esplicitamente
+"ultima analisi".
+
+## Resta aperto
+
+* `_native_model_rotation_override` decide i 180° con una regex inglese su
+  prosa libera (`lower right` + `rf|u.fl|ipex|coax|antenna`) e vale di fatto
+  per il solo WROOM-1U. Nella foto dell'utente il connettore finisce comunque
+  dalla parte sbagliata: non ho ancora verificato se la regola non scatta o
+  scatta al contrario. Intanto la rotazione dal menu contestuale corregge
+  l'orientamento **senza** distruggere l'abbinamento.
+* Il modulo resta a 28% di scarto perche' la misura fotografica da' 20,68 mm
+  sul lato corto contro 18,0 reali: il rettangolo include le castellature
+  oltre lo schermo.
+* USB-C, `_package_token` sulla prosa, vicolo cieco dell'indice e conteggio
+  terminali: invariati, vedi la sezione precedente.
+
+---
+
 # 2026-09-20 — perché mancano componenti, e menu contestuale sul 3D
 
 Branch **`YOLO-SOLUTION`**. Il lavoro non committato di un'altra sessione

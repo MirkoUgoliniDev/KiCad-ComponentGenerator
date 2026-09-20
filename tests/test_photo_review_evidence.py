@@ -55,14 +55,33 @@ def assert_invalidated(editor):
 
 
 @pytest.mark.parametrize("key,value", [
-    ("x_mm", 3.), ("y_mm", -1.), ("length_mm", 2.),
-    ("width_mm", 1.), ("rotation_deg", 90.), ("rotation_deg", 37.),
+    ("x_mm", 3.), ("y_mm", -1.), ("length_mm", 2.), ("width_mm", 1.),
 ])
 def test_numeric_rectangle_edits_discard_photo_evidence(editor, key, value):
     dialog, _, _ = editor
     dialog.fields[key].setValue(value)
     assert dialog.get_components()[0][key] == value
     assert_invalidated(editor)
+
+
+@pytest.mark.parametrize("angle", [90., 37.])
+def test_a_rotation_keeps_what_the_outline_encloses(editor, angle):
+    """Spostare o ridimensionare ridisegna il contorno; ruotarlo no.
+
+    `bbox_basis` risponde a "il contorno segue il corpo o il corpo coi
+    reofori": girare lo stesso rettangolo non cambia quella risposta, e
+    scriverci "unknown" non e' "non lo so piu'" ma un'affermazione diversa,
+    che manda il componente sul ramo delle piazzole e gli nega il modello
+    nativo di KiCad. Le posizioni dei terminali dentro il rettangolo invece
+    dipendono da come il rettangolo e' posato, quindi quelle decadono.
+    """
+    dialog, _, before = editor
+    dialog.fields["rotation_deg"].setValue(angle)
+    changed = dialog.get_components()[0]
+    assert changed["rotation_deg"] == angle
+    assert changed["bbox_basis"] == before[0]["bbox_basis"]
+    assert changed["package_evidence"] == before[0]["package_evidence"]
+    assert "terminal_geometry" not in changed
 
 
 def test_drag_position_change_discards_photo_evidence(editor):

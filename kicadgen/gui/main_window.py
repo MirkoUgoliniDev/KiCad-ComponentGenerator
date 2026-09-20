@@ -3435,6 +3435,13 @@ class MainWindow(QMainWindow):
         self._analysis_tabs_enabled = self.tabs.isEnabled()
         self.tabs.setEnabled(False)
         self._start_log_session("Rigenerazione modello 3D")
+        # Questa e' un'operazione a se', e non chiama il modello AI: lasciare
+        # il consuntivo dell'ultima analisi dentro la modale lo farebbe
+        # leggere come il costo di cio' che sta accadendo adesso. Resta sulla
+        # label sotto il pulsante, che dice esplicitamente "ultima analisi".
+        # Nella generazione automatica il costo va invece tenuto: li' estrazione
+        # e generazione sono un'unica operazione continua (vedi clear_cost).
+        self.analysis_overlay.clear_cost()
         self.analysis_overlay.start('Generazione modello 3D',
                                     'Avvio di FreeCAD…')
         self._cad3d_worker.start()

@@ -14,8 +14,11 @@ The crop edges correspond to the PCB body edges: origin at the board center,
 X right, Y down, positive rotation clockwise in the photo. Length and width
 remain LOCAL dimensions, including at arbitrary angles. Source metadata is
 preserved except for evidence tied to an edited photograph rectangle:
-``bbox_basis`` becomes unknown and ``package_evidence``/``terminal_geometry``
-are discarded after position, size or rotation edits. An existing normalized
+``bbox_basis`` becomes unknown and ``package_evidence`` is discarded after a
+position or size edit, while ``terminal_geometry`` is discarded after any
+geometry edit including rotation. A rotation alone keeps the boundary
+evidence: turning the outline does not change whether it traces the body or
+the body with its leads. An existing normalized
 full-board ``_box`` cache is refreshed. Source-crop ``bbox`` metadata is left
 as detection provenance. Height and text edits do not change that rectangle.
 """
@@ -529,13 +532,22 @@ class PhotoReviewDialog(QDialog):
         margin = max(self.photo_rect.width(), self.photo_rect.height()) * .1
         self.scene.setSceneRect(rect.adjusted(-margin, -margin, margin, margin))
 
-    def _geometry_changed(self, item):
+    def _geometry_changed(self, item, rotation_only=False):
         # The original pixel region no longer supports its boundary evidence or
         # normalized terminal boxes. Keep package/mating identity, but do not
         # stretch or relocate observed metal as if it had been measured again.
-        if "bbox_basis" in item.component:
-            item.component["bbox_basis"] = "unknown"
-        item.component.pop("package_evidence", None)
+        #
+        # Una rotazione e' l'eccezione: sposta e ridimensiona invalidano cio'
+        # che il rettangolo racchiude, ruotare no. `bbox_basis` risponde a "il
+        # contorno segue il corpo o il corpo coi reofori", e girare lo stesso
+        # contorno non cambia quella risposta; lo stesso vale per la
+        # descrizione della morfologia osservata. Scriverci "unknown" non
+        # significa "non lo so piu'": e' un'affermazione diversa, che manda il
+        # componente sul ramo delle piazzole e gli nega il modello nativo.
+        if not rotation_only:
+            if "bbox_basis" in item.component:
+                item.component["bbox_basis"] = "unknown"
+            item.component.pop("package_evidence", None)
         item.component.pop("terminal_geometry", None)
         item.component.pop("model_match", None)
         item.component.pop("model_selection", None)
@@ -569,7 +581,7 @@ class PhotoReviewDialog(QDialog):
         item.component[key] = value
         if key in self._GEOMETRY_FIELDS:
             item.sync_geometry()
-            self._geometry_changed(item)
+            self._geometry_changed(item, rotation_only=key == "rotation_deg")
 
     def _text_edited(self, key):
         item = self._selected_item()

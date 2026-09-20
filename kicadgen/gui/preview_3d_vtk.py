@@ -19,11 +19,16 @@ import re
 os.environ.setdefault("QT_API", "pyqt6")
 
 import numpy as np
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
 from pyvistaqt import QtInteractor
 
 from ..cad3d.body_params import Body3DParams
 from ..generators.pin_header import PinHeaderParams, pin_positions
+
+#: Spostamento massimo, in pixel, perche' un tasto destro conti ancora come
+#: clic e non come l'inizio di uno zoom a trascinamento. E' la tolleranza di
+#: mano ferma, non una soglia legata a un contenuto particolare.
+_CLICK_TOLERANCE_PX = 4
 
 _BG_COLOR = "#1e1e2e"
 _APPROX_BODY_COLOR = "#89b4fa"
@@ -83,6 +88,8 @@ class Preview3DVtk(QtInteractor):
         @param parent Optional Qt parent widget.
         """
         self._component_actors = {}
+        self._right_press = None
+        self._menu_served = False
         super().__init__(parent)
         self.setToolTip('Doppio clic su un componente: scegli modello KiCad e ruota il modello.\n'
                         'Tasto destro: elimina, ruota o cambia il modello.')
@@ -157,22 +164,62 @@ class Preview3DVtk(QtInteractor):
             return None
         return self._component_actors.get(actor.GetAddressAsString(''))
 
-    def contextMenuEvent(self, event):  # noqa: N802 - firma Qt
-        """@brief Chiedi alla finestra il menu del componente sotto il cursore.
+    def _request_component_menu(self, position, global_position) -> bool:
+        """@brief Emetti la richiesta di menu, se sotto il punto c'e' un componente.
 
-        Si passa da contextMenuEvent e non da un osservatore VTK sul tasto
-        destro perche' quello lascerebbe l'interattore a meta' di una
-        manovra di zoom mentre il menu tiene il mouse: Qt consegna questo
-        evento per conto suo, senza interferire con la telecamera.
+        @return True se la richiesta e' partita, cosi' il chiamante sa di aver
+                gia' servito questo clic e non lo serve una seconda volta.
         """
-        position = event.pos()
         index = self._component_row_at_widget_point(position.x(), position.y())
         if index is None:
-            # Fuori dai componenti il tasto destro resta quello di VTK.
-            super().contextMenuEvent(event)
+            return False
+        self._menu_served = True
+        self.component_menu_requested.emit(index, global_position)
+        return True
+
+    def mousePressEvent(self, event):  # noqa: N802 - firma Qt
+        """@brief Ricorda dove inizia il tasto destro, per distinguere clic e zoom."""
+        if event.button() == Qt.MouseButton.RightButton:
+            self._right_press = event.pos()
+            self._menu_served = False
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):  # noqa: N802 - firma Qt
+        """@brief Apri il menu su un clic destro fermo sopra un componente.
+
+        Qt sintetizza `contextMenuEvent` dal messaggio di sistema, e sopra la
+        finestra nativa che VTK si crea non e' detto che arrivi; il rilascio
+        del pulsante invece passa sempre di qui, perche' l'interattore Qt di
+        VTK e' un QWidget normale che lo inoltra. Si serve quindi il clic qui,
+        e `contextMenuEvent` resta per il tasto menu della tastiera.
+
+        Il tasto destro di VTK e' anche lo zoom a trascinamento: si apre il
+        menu solo se il mouse non si e' spostato, altrimenti si e' chiesto
+        uno zoom e il menu sarebbe un fastidio.
+        """
+        start = getattr(self, "_right_press", None)
+        self._right_press = None
+        super().mouseReleaseEvent(event)
+        if event.button() != Qt.MouseButton.RightButton or start is None:
             return
-        event.accept()
-        self.component_menu_requested.emit(index, event.globalPos())
+        if (event.pos() - start).manhattanLength() > _CLICK_TOLERANCE_PX:
+            return
+        self._request_component_menu(event.pos(), event.globalPosition().toPoint())
+
+    def contextMenuEvent(self, event):  # noqa: N802 - firma Qt
+        """@brief Via alternativa al menu (tasto dedicato, o piattaforme che
+        consegnano questo evento invece del rilascio del pulsante)."""
+        if getattr(self, "_menu_served", False):
+            # Il clic e' gia' stato servito dal rilascio: un secondo menu
+            # per lo stesso gesto sarebbe solo un doppione.
+            self._menu_served = False
+            event.accept()
+            return
+        if self._request_component_menu(event.pos(), event.globalPos()):
+            event.accept()
+            return
+        # Fuori dai componenti il tasto destro resta quello di VTK.
+        super().contextMenuEvent(event)
 
     def _component_double_clicked(self, *_args):
         actor = self._component_actor_at_cursor()
