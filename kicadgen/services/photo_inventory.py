@@ -990,6 +990,164 @@ def load_saved_detector_proposals(cache_dir):
     return None
 
 
+#: Sotto-cartella del componente in cui la GUI conserva le proposte riviste
+#: e la foto su cui furono misurate. Sta NELLA cartella del componente, non
+#: nella cache comune: cosi' la revisione si riapre al riavvio con il solo
+#: nome digitato, senza cercare fra i file di altri componenti e senza
+#: rifare alcuna chiamata AI.
+REVIEW_BUNDLE_SUBDIR = 'photo-review'
+REVIEW_BUNDLE_JSON = 'proposals.json'
+REVIEW_BUNDLE_PHOTO = 'photo.png'
+#: Formato del pacchetto scritto da save_review_bundle: chi legge un file di
+#: un formato che non conosce lo scarta invece di interpretarlo a meta'.
+REVIEW_BUNDLE_FORMAT = 1
+
+
+@dataclass
+class ReviewBundle:
+    """@brief Reviewed detector proposals stored inside the component folder.
+
+    @note `body_length_mm`/`body_width_mm` are the board extents the boxes were
+        calibrated with: they travel with the proposals because the fields in
+        the window may have been edited since, and without them the saved
+        boxes have no scale. `photo_path` is None when the PNG is missing;
+        the caller may then fall back to a photograph it still holds.
+    """
+    json_path: Path
+    proposals: list[dict]
+    body_length_mm: float
+    body_width_mm: float
+    stamp: str = ''
+    detector: str = 'yolo'
+    source_json: str = ''
+    photo_path: Path | None = None
+
+
+def _positive_extent(value):
+    """@brief True for a finite, positive, non-boolean number (a usable mm extent)."""
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value > 0)
+
+
+def _valid_proposal_row(row):
+    """@brief True when a row is a dict carrying an id and a four-number box.
+
+    @note Only the two keys the reviewer needs to place a box are required;
+        everything else is forwarded as saved, so a hand-drawn box with fewer
+        detector fields is as valid as a detector one.
+    """
+    if not isinstance(row, dict) or '_id' not in row:
+        return False
+    box = row.get('_box')
+    return (isinstance(box, (list, tuple)) and len(box) == 4
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                    and math.isfinite(v) for v in box))
+
+
+def review_bundle_dir(project_dir):
+    """@brief Folder of the review bundle inside a component folder.
+
+    @param project_dir Component folder.
+    @return `<project_dir>/photo-review`.
+    """
+    return Path(project_dir) / REVIEW_BUNDLE_SUBDIR
+
+
+def _atomic_write_bytes(path, payload):
+    """@brief Write `payload` to `path` through a sibling temporary file and os.replace.
+
+    @note A crash half-way leaves the previous file intact, never a truncated
+        one: a bundle that is either whole or absent is what load_review_bundle
+        relies on.
+    """
+    import os
+    tmp = path.with_name(path.name + '.tmp')
+    tmp.write_bytes(payload)
+    os.replace(tmp, path)
+
+
+def save_review_bundle(project_dir, proposals, photo_png, length_mm, width_mm, *,
+                       detector='yolo', source_json='', stamp=None):
+    """@brief Store reviewed proposals, their calibration and photograph in the component folder.
+
+    @param project_dir Component folder; `photo-review/` is created inside it.
+    @param proposals Proposal rows as the reviewer keeps them (`_id`, `_box`,
+        geometry in mm, `_yolo_manual_box` and any other field), copied as-is.
+    @param photo_png PNG bytes of the calibrated photograph, or None to keep
+        the photograph already in the bundle (if any).
+    @param length_mm Board X extent in mm the boxes were calibrated with.
+    @param width_mm Board Y extent in mm.
+    @param detector Name of the detector the proposals came from.
+    @param source_json Name of the cache file the proposals were first read
+        from, kept for traceability only.
+    @param stamp Timestamp in the evidence format; now when omitted.
+    @return Path of the written `proposals.json`.
+    @throws ValueError When the extents are not positive finite numbers or
+        no valid proposal row is given: a bundle without scale or without
+        rows could not be reopened, so it is not written at all.
+    @throws OSError When the folder cannot be written.
+    @note Offline by construction: nothing here talks to a model. Both files
+        are written atomically (temporary file + replace).
+    """
+    if not all(_positive_extent(v) for v in (length_mm, width_mm)):
+        raise ValueError('Quote PCB non valide: proposte non salvate.')
+    rows = [dict(row) for row in proposals if _valid_proposal_row(row)]
+    if not rows:
+        raise ValueError('Nessuna proposta valida (serve almeno un riquadro con _id e _box).')
+    folder = review_bundle_dir(project_dir)
+    folder.mkdir(parents=True, exist_ok=True)
+    document = dict(format=REVIEW_BUNDLE_FORMAT,
+                    stamp=stamp or time.strftime('%Y%m%d-%H%M%S'),
+                    detector=str(detector), source_json=str(source_json or ''),
+                    body_length_mm=float(length_mm), body_width_mm=float(width_mm),
+                    photo=REVIEW_BUNDLE_PHOTO if (photo_png or (folder / REVIEW_BUNDLE_PHOTO).is_file()) else None,
+                    count=len(rows), proposals=rows)
+    if photo_png:
+        _atomic_write_bytes(folder / REVIEW_BUNDLE_PHOTO, bytes(photo_png))
+    path = folder / REVIEW_BUNDLE_JSON
+    _atomic_write_bytes(path, json.dumps(document, indent=1, ensure_ascii=False).encode('utf-8'))
+    return path
+
+
+def load_review_bundle(project_dir):
+    """@brief Read the review bundle of a component folder, if it is usable.
+
+    @param project_dir Component folder.
+    @return A ReviewBundle, or None when there is nothing to reopen: no
+        folder, no `proposals.json`, unreadable or corrupt JSON, an unknown
+        format, non-positive extents, or no valid proposal row.
+    @note Never raises on bad content: a broken bundle is the same as no
+        bundle, and the buttons that depend on it simply stay disabled. Rows
+        that fail the structural check are dropped, the valid ones are kept
+        (as the cache loader does with partial answers).
+    """
+    if not project_dir:
+        return None
+    path = review_bundle_dir(project_dir) / REVIEW_BUNDLE_JSON
+    try:
+        document = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(document, dict) or document.get('format') != REVIEW_BUNDLE_FORMAT:
+        return None
+    length, width = document.get('body_length_mm'), document.get('body_width_mm')
+    if not all(_positive_extent(v) for v in (length, width)):
+        return None
+    rows = document.get('proposals')
+    if not isinstance(rows, list):
+        return None
+    rows = [dict(row) for row in rows if _valid_proposal_row(row)]
+    if not rows:
+        return None
+    photo_path = path.with_name(REVIEW_BUNDLE_PHOTO)
+    return ReviewBundle(json_path=path, proposals=rows,
+                        body_length_mm=float(length), body_width_mm=float(width),
+                        stamp=str(document.get('stamp') or ''),
+                        detector=str(document.get('detector') or 'yolo'),
+                        source_json=str(document.get('source_json') or ''),
+                        photo_path=photo_path if photo_path.is_file() else None)
+
+
 def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
                               cache_dir=None, *, declared=None, verification_prompt=None,
                               extra_instructions=None, detector='yolo'):

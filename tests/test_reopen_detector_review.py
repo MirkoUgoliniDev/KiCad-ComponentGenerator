@@ -186,21 +186,91 @@ def test_reconcile_refuses_an_unreadable_photo_before_any_call(tmp_path):
                                       lambda **_: pytest.fail('rete'), lambda _: None, tmp_path)
 
 
+# ── Servizio: pacchetto nella cartella del componente ─────────────────────
+
+def test_review_bundle_round_trips_proposals_extents_and_photo(tmp_path):
+    """@brief Positivo: cio' che si salva si rilegge uguale, foto compresa."""
+    rows = [_proposal(1), _proposal(2, box=(.5, .5, .7, .7), _yolo_manual_box=True)]
+    path = inv.save_review_bundle(tmp_path, rows, _photo_png(), LENGTH, WIDTH,
+                                  detector='yolo', source_json='detector-x.json')
+    assert path == tmp_path / 'photo-review' / 'proposals.json'
+    bundle = inv.load_review_bundle(tmp_path)
+    assert bundle is not None
+    assert bundle.proposals == rows
+    assert (bundle.body_length_mm, bundle.body_width_mm) == (LENGTH, WIDTH)
+    assert bundle.photo_path is not None and bundle.photo_path.read_bytes() == _photo_png()
+    assert bundle.source_json == 'detector-x.json' and bundle.detector == 'yolo'
+    assert bundle.proposals[1]['_yolo_manual_box'] is True
+
+
+@pytest.mark.parametrize('spoil', ['missing', 'corrupt', 'zero_extent', 'no_proposals', 'bad_row'])
+def test_review_bundle_is_absent_when_unusable(tmp_path, spoil):
+    """@brief Negativo: file assente, corrotto, senza scala o senza proposte = niente da riaprire."""
+    if spoil != 'missing':
+        inv.save_review_bundle(tmp_path, [_proposal(1)], _photo_png(), LENGTH, WIDTH)
+        path = tmp_path / 'photo-review' / 'proposals.json'
+        if spoil == 'corrupt':
+            path.write_text('{not json', encoding='utf-8')
+        else:
+            document = json.loads(path.read_text(encoding='utf-8'))
+            if spoil == 'zero_extent':
+                document['body_length_mm'] = 0
+            elif spoil == 'no_proposals':
+                document['proposals'] = []
+            else:
+                document['proposals'] = [dict(name='senza id ne box')]
+            path.write_text(json.dumps(document), encoding='utf-8')
+    assert inv.load_review_bundle(tmp_path) is None
+
+
 # ── Interfaccia ───────────────────────────────────────────────────────────
 
-def test_button_enabled_only_with_saved_proposals_and_extracted_extents(prepared):
-    window, cache, _calls, _started, _warnings = prepared
+def _bundle_dir(window):
+    return window._project_dir() / 'photo-review'
+
+
+def _retype_name(window, name='Componente_di_prova'):
+    """@brief Come chi riavvia e scrive il nome: il cambio del campo ricalcola i pulsanti."""
+    window.field_name.setText('')
+    window.field_name.setText(name)
+
+
+def test_buttons_follow_the_bundle_in_the_component_folder(prepared):
+    """@brief Con il solo nome digitato e il pacchetto nella cartella, si riapre; senza nome no.
+
+    Decisione dell'utente: «se il file json esiste nella cartella deve essere
+    possibile aprire la revisione bypassando l'interrogazione AI», anche dopo
+    un riavvio, quindi senza estrazione in questa sessione.
+    """
+    window, _cache, _calls, _started, _warnings = prepared
+    assert window._last_extracted is None
     assert not window.btn_reopen_review.isEnabled()
+    assert not window.btn_relaunch_inventory.isEnabled()
+    inv.save_review_bundle(window._project_dir(), [_proposal(1)], _photo_png(), LENGTH, WIDTH)
+    window.field_name.setText('AltroNome')
+    assert not window.btn_reopen_review.isEnabled(), 'altra cartella, nessun pacchetto'
+    window.field_name.setText('Componente_di_prova')
+    assert window.btn_reopen_review.isEnabled()
+    assert window.btn_relaunch_inventory.isEnabled()
+    window.field_name.setText('')
+    assert not window.btn_reopen_review.isEnabled(), 'senza nome non c\'e\' cartella'
+    assert not window.btn_relaunch_inventory.isEnabled()
+
+
+def test_extraction_writes_the_bundle_into_the_component_folder(prepared):
+    """@brief L'estrazione copia le proposte fresche della cache nella cartella del componente."""
+    window, cache, *_ = prepared
     window._on_extracted(_params())
-    # Estrazione fatta, ma nulla in cache: spento.
+    assert not (_bundle_dir(window) / 'proposals.json').exists(), 'nulla in cache: nulla da salvare'
     assert not window.btn_reopen_review.isEnabled()
     _save_evidence(cache, [_proposal(1), _proposal(2, box=(.5, .5, .7, .7))])
     window._on_extracted(_params())
+    bundle = inv.load_review_bundle(window._project_dir())
+    assert bundle is not None and [r['_id'] for r in bundle.proposals] == [1, 2]
+    assert (bundle.body_length_mm, bundle.body_width_mm) == (LENGTH, WIDTH)
+    assert bundle.photo_path is not None
     assert window.btn_reopen_review.isEnabled()
-    # Quote della scheda assenti: le proposte non hanno scala, spento.
-    window._on_extracted(ExtractedParams(name='', description='', tags='', confidence='low',
-                                         notes='', layout='castellated', castellated_sides=[]))
-    assert not window.btn_reopen_review.isEnabled()
+    assert 'senza chiamate AI' in window.ai_progress_text.toPlainText()
 
 
 def test_proposals_older_than_the_current_extraction_are_ignored(prepared):
@@ -210,44 +280,87 @@ def test_proposals_older_than_the_current_extraction_are_ignored(prepared):
     window._extraction_started_stamp = '20260101-000000'
     window._on_extracted(_params())
     assert not window.btn_reopen_review.isEnabled()
+    assert not (_bundle_dir(window) / 'proposals.json').exists()
 
 
-def test_accepting_pays_once_for_the_kept_proposals_and_restarts_matching(prepared, monkeypatch):
-    window, cache, calls, started, warnings = prepared
-    _save_evidence(cache, [_proposal(1), _proposal(2, box=(.5, .5, .7, .7))])
-    window._on_extracted(_params())
-    _answer(monkeypatch, QDialog.DialogCode.Accepted, [_proposal(1)])
+def test_accepting_saves_offline_and_pays_nothing(prepared, monkeypatch):
+    """@brief Decisione dell'utente: l'OK salva e basta; la spesa e' un altro pulsante.
+
+    Sostituisce il contratto precedente (OK = riconciliazione a pagamento).
+    """
+    window, _cache, calls, started, warnings = prepared
+    inv.save_review_bundle(window._project_dir(),
+                           [_proposal(1), _proposal(2, box=(.5, .5, .7, .7))],
+                           _photo_png(), LENGTH, WIDTH)
+    _retype_name(window)
+    kept = _proposal(1, box=(.21, .2, .41, .4), _yolo_manual_box=True)
+    _answer(monkeypatch, QDialog.DialogCode.Accepted, [kept])
     window.btn_reopen_review.click()
-    log_before = window.ai_progress_text.toPlainText()
-    assert 'Rilancio dell\'inventario su 1 proposte: una richiesta a pagamento al modello' in log_before
-    assert 'una richiesta a pagamento' in window.analysis_overlay.status.text()
-    _run_worker(window)
-    assert warnings == []
-    assert len(calls) == 1
-    sent = _candidates(calls[0])
-    assert [c['id'] for c in sent] == [1]
-    assert calls[0]['model'] == window._photo_detector_model()
-    # I componenti riconciliati hanno preso il posto di quelli vecchi...
-    assert [c.name for c in window.castellated_components] == ['R1 (resistor)']
-    assert window._last_extracted.components_3d[0]['package'] == 'R_0603'
-    assert 'Inventario rilanciato: 1 ingombri' in window._last_extracted.notes
-    # ...e l'abbinamento modelli + 3D e' ripartito per la via dell'estrazione.
-    assert len(started) == 1 and started[0].components_3d[0]['package'] == 'R_0603'
-    assert window.btn_extract_ai.isEnabled()
-    assert window.btn_reopen_review.isEnabled()
+    assert window._reconcile_worker is None, 'nessun worker: la revisione e\' gratuita'
+    assert calls == [] and started == [] and warnings == []
+    bundle = inv.load_review_bundle(window._project_dir())
+    assert bundle.proposals == [kept]
+    assert (bundle.body_length_mm, bundle.body_width_mm) == (LENGTH, WIDTH)
+    log = window.ai_progress_text.toPlainText()
+    assert 'nessuna richiesta AI' in log and 'gratuito' in log
+    assert window.btn_reopen_review.isEnabled() and window.btn_relaunch_inventory.isEnabled()
 
 
-def test_cancelling_starts_nothing(prepared, monkeypatch):
-    """@brief Caso negativo: Annulla non avvia ne' worker ne' richiesta."""
-    window, cache, calls, started, _warnings = prepared
-    _save_evidence(cache, [_proposal(1)])
-    window._on_extracted(_params())
+def test_cancelling_starts_nothing_and_leaves_the_file(prepared, monkeypatch):
+    """@brief Negativo: Annulla non avvia nulla e non tocca il pacchetto."""
+    window, _cache, calls, started, _warnings = prepared
+    inv.save_review_bundle(window._project_dir(), [_proposal(1)], _photo_png(), LENGTH, WIDTH)
+    _retype_name(window)
+    before = (_bundle_dir(window) / 'proposals.json').read_bytes()
     _answer(monkeypatch, QDialog.DialogCode.Rejected, [])
     window.btn_reopen_review.click()
     assert window._reconcile_worker is None
     assert calls == [] and started == []
     assert 'annullata' in window.ai_progress_text.toPlainText()
+    assert (_bundle_dir(window) / 'proposals.json').read_bytes() == before
     assert window.btn_reopen_review.isEnabled()
+
+
+def test_relaunch_pays_once_for_the_saved_proposals_and_restarts_matching(prepared, monkeypatch):
+    """@brief Il pulsante a pagamento ripaga una sola volta, sulle proposte del pacchetto."""
+    window, _cache, calls, started, warnings = prepared
+    _save_evidence(_cache, [_proposal(1), _proposal(2, box=(.5, .5, .7, .7))])
+    window._on_extracted(_params())
+    _answer(monkeypatch, QDialog.DialogCode.Accepted, [_proposal(1)])
+    window.btn_reopen_review.click()
+    assert calls == [], 'la revisione non paga'
+    window.btn_relaunch_inventory.click()
+    log_before = window.ai_progress_text.toPlainText()
+    assert 'Rilancio dell\'inventario su 1 proposte' in log_before
+    assert 'una richiesta a pagamento al modello' in log_before
+    assert 'una richiesta a pagamento' in window.analysis_overlay.status.text()
+    _run_worker(window)
+    assert warnings == []
+    assert len(calls) == 1
+    assert [c['id'] for c in _candidates(calls[0])] == [1]
+    assert calls[0]['model'] == window._photo_detector_model()
+    assert [c.name for c in window.castellated_components] == ['R1 (resistor)']
+    assert window._last_extracted.components_3d[0]['package'] == 'R_0603'
+    assert 'Inventario rilanciato: 1 ingombri' in window._last_extracted.notes
+    assert len(started) == 1 and started[0].components_3d[0]['package'] == 'R_0603'
+    assert window.btn_extract_ai.isEnabled()
+    assert window.btn_reopen_review.isEnabled()
+    # Il pacchetto conserva le proposte tenute, non quelle originali della cache.
+    assert [r['_id'] for r in inv.load_review_bundle(window._project_dir()).proposals] == [1]
+
+
+def test_relaunch_after_restart_updates_components_without_auto_generation(prepared, monkeypatch):
+    """@brief Senza estrazione in sessione il rilancio aggiorna i componenti e non avvia footprint/3D."""
+    window, _cache, calls, started, warnings = prepared
+    inv.save_review_bundle(window._project_dir(), [_proposal(1)], _photo_png(), LENGTH, WIDTH)
+    _retype_name(window)
+    assert window._last_extracted is None
+    window.btn_relaunch_inventory.click()
+    _run_worker(window)
+    assert warnings == [] and len(calls) == 1
+    assert [c.name for c in window.castellated_components] == ['R1 (resistor)']
+    assert started == [], 'base sintetizzata dai campi: niente generazione automatica'
+    assert 'senza avviare la generazione automatica' in window.ai_progress_text.toPlainText()
 
 
 def test_identical_proposals_replay_the_cache_without_a_new_call(prepared, monkeypatch):
@@ -256,9 +369,10 @@ def test_identical_proposals_replay_the_cache_without_a_new_call(prepared, monke
     window._on_extracted(_params())
     _answer(monkeypatch, QDialog.DialogCode.Accepted, [_proposal(1)])
     window.btn_reopen_review.click()
+    window.btn_relaunch_inventory.click()
     _run_worker(window)
     assert len(calls) == 1
-    window.btn_reopen_review.click()
+    window.btn_relaunch_inventory.click()
     _run_worker(window)
     assert warnings == []
     assert len(calls) == 1, 'proposte identiche: la richiesta non va ripagata'

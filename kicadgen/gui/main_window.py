@@ -1420,16 +1420,28 @@ class MainWindow(QMainWindow):
         )
         self.btn_photo_comparison.setEnabled(False)
         self.btn_photo_comparison.clicked.connect(self._show_photo_comparison)
-        # Riapre «Corpi rilevati» sulle proposte salvate dall'ultima estrazione
-        # e ripaga SOLO la riconciliazione: niente documenti, niente YOLO.
-        self.btn_reopen_review = QPushButton("Rivedi proposte e rilancia l'inventario…")
+        # Riapre «Corpi rilevati» sulle proposte salvate nella cartella del
+        # componente e, all'OK, le RISALVA li': gratuito, nessuna chiamata AI.
+        # Decisione dell'utente: «se il file json esiste nella cartella deve
+        # essere possibile aprire la revisione bypassando interrogazione AI».
+        self.btn_reopen_review = QPushButton("Rivedi proposte salvate…")
         self.btn_reopen_review.setToolTip(
-            "Riapre i corpi rilevati dall'ultima estrazione, salvati nella cache, e "
-            "rilancia solo l'inventario AI sulle proposte tenute: una richiesta a "
-            "pagamento, poi abbinamento modelli e 3D come dopo un'estrazione."
+            "Riapre i corpi rilevati salvati in photo-review/ nella cartella del "
+            "componente e, alla conferma, salva le proposte tenute nello stesso file. "
+            "Nessuna richiesta AI: gratuito."
         )
         self.btn_reopen_review.setEnabled(False)
         self.btn_reopen_review.clicked.connect(self._reopen_detector_review)
+        # La spesa sta in un pulsante a parte: chi vuole solo rivedere non
+        # deve poter pagare per sbaglio con lo stesso OK.
+        self.btn_relaunch_inventory = QPushButton("Rilancia inventario AI (a pagamento)…")
+        self.btn_relaunch_inventory.setToolTip(
+            "Rilancia solo l'inventario AI sulle proposte salvate in photo-review/: "
+            "una richiesta a pagamento al modello che guarda la foto, poi abbinamento "
+            "modelli e 3D come dopo un'estrazione."
+        )
+        self.btn_relaunch_inventory.setEnabled(False)
+        self.btn_relaunch_inventory.clicked.connect(self._relaunch_inventory)
         self._photo_png = None
         self._photo_overlay_png = None
         self._photo_source = ""
@@ -1543,6 +1555,7 @@ class MainWindow(QMainWindow):
         reopen_row = QHBoxLayout()
         reopen_row.addStretch()
         reopen_row.addWidget(self.btn_reopen_review)
+        reopen_row.addWidget(self.btn_relaunch_inventory)
         reopen_row.addStretch()
         outer.addLayout(reopen_row)
 
@@ -1724,6 +1737,10 @@ class MainWindow(QMainWindow):
                                   "Avvia l'estrazione dai documenti e dalle foto selezionati")
             else:
                 widget.setToolTip(reason)
+        # Il nome decide anche la cartella in cui cercare le proposte salvate:
+        # cambiato il nome, i pulsanti della revisione vanno ricalcolati.
+        if hasattr(self, "btn_reopen_review"):
+            self._refresh_reopen_review_button()
 
     def _browse_library_root(self) -> None:
         path = QFileDialog.getExistingDirectory(
@@ -1859,6 +1876,7 @@ class MainWindow(QMainWindow):
         self._extraction_started_stamp = time.strftime('%Y%m%d-%H%M%S')
         self._last_extracted = None
         self.btn_reopen_review.setEnabled(False)
+        self.btn_relaunch_inventory.setEnabled(False)
         self.btn_photo_comparison.setEnabled(False)
         self._photo_png = None
         self._photo_overlay_png = None
@@ -1972,67 +1990,246 @@ class MainWindow(QMainWindow):
             return None
         return saved
 
-    def _refresh_reopen_review_button(self) -> None:
-        """@brief Abilita il rilancio solo con proposte salvate E quote della scheda note.
+    @staticmethod
+    def _calibrated_extents(params) -> bool:
+        """@brief Vero quando i parametri portano quote della scheda finite e positive.
 
-        @note Le due condizioni sono entrambe necessarie: senza le quote con
-            cui la foto fu calibrata i riquadri salvati non hanno scala; senza
-            proposte salvate non c'e' nulla da rivedere.
+        @note Sono le quote con cui la foto fu calibrata: senza, i riquadri
+            normalizzati non hanno scala e non si possono ne' rivedere ne'
+            rilanciare.
+        """
+        return (params is not None
+                and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                        and math.isfinite(v) and v > 0
+                        for v in (params.body_length_mm, params.body_width_mm)))
+
+    def _review_bundle(self):
+        """@brief Il pacchetto di revisione salvato nella cartella del componente.
+
+        @return ReviewBundle, oppure None: senza nome non c'e' cartella, e un
+            pacchetto assente o corrotto vale come nessun pacchetto.
+        @note E' l'unica fonte che sopravvive al riavvio: sta nella cartella
+            del componente, non nella cache comune, quindi con il solo nome
+            digitato si sa gia' se c'e' qualcosa da riaprire.
+        """
+        from ..services.photo_inventory import load_review_bundle
+        if not self._named():
+            return None
+        try:
+            return load_review_bundle(self._project_dir())
+        except (OSError, ValueError):
+            return None
+
+    def _write_review_bundle(self, proposals, photo_png, length, width, *,
+                             source_json='', detector='yolo'):
+        """@brief Scrive il pacchetto di revisione nella cartella del componente.
+
+        @return Percorso di `proposals.json`, oppure None se non c'e' un nome
+            o la scrittura fallisce (annotato nel log, senza fermare nulla).
+        @note Operazione offline e gratuita: nessuna chiamata a modelli.
+        """
+        from ..services.photo_inventory import save_review_bundle
+        if not self._named():
+            return None
+        try:
+            return save_review_bundle(self._project_dir(), proposals, photo_png, length, width,
+                                      detector=detector, source_json=source_json)
+        except (OSError, ValueError) as exc:
+            self._append_log(f"ATTENZIONE proposte non salvate nella cartella del componente: {exc}")
+            return None
+
+    def _fresh_cache_evidence(self):
+        """@brief Ripiego di sessione: proposte fresche in cache + quote dell'ultima estrazione.
+
+        @return (SavedDetectorProposals, ExtractedParams) oppure None.
+        @note Vale solo finche' il pacchetto nella cartella del componente
+            non esiste: appena c'e', comanda quello.
         """
         params = self._last_extracted
-        calibrated = (params is not None
-                      and all(isinstance(v, (int, float)) and not isinstance(v, bool)
-                              and math.isfinite(v) and v > 0
-                              for v in (params.body_length_mm, params.body_width_mm)))
-        self.btn_reopen_review.setEnabled(bool(calibrated and self._saved_detector_proposals()))
-
-    def _reopen_detector_review(self) -> None:
-        """@brief Riapre «Corpi rilevati» sull'ultimo salvataggio e rilancia l'inventario.
-
-        @note Ordine voluto: prima la revisione, gratuita e sul thread GUI;
-            poi, solo all'OK, la dichiarazione nel log della richiesta a
-            pagamento e il worker. Annullare non avvia nulla. Le proposte
-            tornano dal file cosi' come furono salvate (gia' filtrate e
-            misurate) e quelle tenute, comprese le disegnate a mano
-            (`_yolo_manual_box`), vanno alla riconciliazione senza altre
-            trasformazioni.
-        """
-        if self._background_work_running() or self._automatic_generation_active:
-            return
-        params = self._last_extracted
+        if not self._calibrated_extents(params):
+            return None
         saved = self._saved_detector_proposals()
-        if params is None or saved is None:
-            self._refresh_reopen_review_button()
-            return
-        length, width = float(params.body_length_mm), float(params.body_width_mm)
+        return (saved, params) if saved is not None else None
+
+    def _ensure_review_bundle(self):
+        """@brief Il pacchetto da riaprire, scrivendolo prima dalla cache se manca.
+
+        @return ReviewBundle oppure None.
+        @note Decisione dell'utente: il percorso dalla cache comune resta
+            solo come ripiego, e anche in quel caso il pacchetto va scritto
+            PRIMA, cosi' il prossimo avvio lo trova nella cartella del
+            componente senza dipendere dalla cache.
+        """
+        bundle = self._review_bundle()
+        if bundle is not None:
+            return bundle
+        fresh = self._fresh_cache_evidence()
+        if fresh is None:
+            return None
+        saved, params = fresh
         photo_png = None
         if saved.photo_path is not None:
             try:
                 photo_png = saved.photo_path.read_bytes()
             except OSError as exc:
-                self._append_log(f"Foto calibrata salvata non leggibile ({exc}): uso quella dell'estrazione.")
-        photo_png = photo_png or self._photo_png
+                self._append_log(f"Foto calibrata in cache non leggibile ({exc}): uso quella dell'estrazione.")
+        if self._write_review_bundle(saved.proposals, photo_png or self._photo_png,
+                                     params.body_length_mm, params.body_width_mm,
+                                     source_json=saved.json_path.name) is None:
+            return None
+        return self._review_bundle()
+
+    def _store_extraction_review_bundle(self) -> None:
+        """@brief Dopo un'estrazione, copia le proposte fresche della cache nella cartella del componente.
+
+        @note Scrive solo quando l'estrazione ha lasciato proposte in cache con
+            quote valide, e solo se il pacchetto manca o e' PIU' VECCHIO
+            dell'estrazione appena avviata. Il secondo vincolo conta: anche il
+            rilancio dell'inventario rientra da `_on_extracted`, e senza di
+            esso le proposte ORIGINALI della cache tornerebbero a coprire
+            quelle tenute dalla revisione, che stanno nel pacchetto con una
+            marca piu' recente.
+        """
+        fresh = self._fresh_cache_evidence()
+        if fresh is None:
+            return
+        saved, params = fresh
+        bundle = self._review_bundle()
+        started = self._extraction_started_stamp
+        if bundle is not None and not (started and bundle.stamp < started):
+            return
+        photo_png = None
+        if saved.photo_path is not None:
+            try:
+                photo_png = saved.photo_path.read_bytes()
+            except OSError:
+                photo_png = None
+        path = self._write_review_bundle(saved.proposals, photo_png or self._photo_png,
+                                         params.body_length_mm, params.body_width_mm,
+                                         source_json=saved.json_path.name)
+        if path is not None:
+            self._append_log(f"Proposte del rilevatore salvate in {path} ({len(saved.proposals)} corpi): "
+                             "la revisione si puo' riaprire senza chiamate AI.")
+
+    def _refresh_reopen_review_button(self) -> None:
+        """@brief Abilita revisione (gratuita) e rilancio (a pagamento) quando c'e' cosa riaprire.
+
+        @note Entrambi seguono la stessa condizione: un pacchetto valido nella
+            cartella del componente (quote positive e almeno una proposta),
+            oppure -- ripiego di sessione -- proposte fresche in cache con le
+            quote dell'ultima estrazione. Senza nome non c'e' cartella, quindi
+            entrambi spenti. Non serve un'estrazione in questa sessione:
+            appena il nome punta a una cartella con il pacchetto, si riapre.
+        """
+        available = self._review_bundle() is not None or self._fresh_cache_evidence() is not None
+        self.btn_reopen_review.setEnabled(available)
+        self.btn_relaunch_inventory.setEnabled(available)
+
+    def _review_photo(self, bundle):
+        """@brief La foto calibrata del pacchetto, o quella in memoria come ripiego.
+
+        @return PNG in byte, oppure None (gia' segnalato con un avviso).
+        """
+        photo_png = None
+        if bundle.photo_path is not None:
+            try:
+                photo_png = bundle.photo_path.read_bytes()
+            except OSError as exc:
+                self._append_log(f"Foto calibrata del pacchetto non leggibile ({exc}).")
+        if not photo_png and self._photo_png:
+            photo_png = self._photo_png
+            self._append_log("Foto calibrata assente in photo-review/: uso quella dell'estrazione in memoria.")
         if not photo_png:
             QMessageBox.warning(
                 self, self.i18n.text("Rilancio non disponibile"),
                 self.i18n.text("Manca la foto calibrata delle proposte salvate: rilancia l'estrazione."))
+        return photo_png
+
+    def _reopen_detector_review(self) -> None:
+        """@brief Riapre «Corpi rilevati» sul pacchetto salvato e, all'OK, lo risalva. Gratis.
+
+        @note Nessuna chiamata AI in nessun ramo: la revisione e' sul thread
+            GUI e l'OK scrive soltanto `photo-review/proposals.json` con le
+            proposte tenute -- comprese le disegnate a mano (`_yolo_manual_box`)
+            e tutti i campi cosi' come sono. Chi vuole ripagare l'inventario
+            ha il pulsante accanto (`_relaunch_inventory`). Annullare non
+            tocca il file.
+        """
+        if self._background_work_running() or self._automatic_generation_active:
             return
-        photo_name = saved.photo_path.name if saved.photo_path else "dell'ultima estrazione"
-        self._append_log(f"Proposte del rilevatore riaperte da {saved.json_path.name}: "
-                         f"{len(saved.proposals)} corpi su foto {photo_name}.")
+        bundle = self._ensure_review_bundle()
+        if bundle is None:
+            self._refresh_reopen_review_button()
+            return
+        photo_png = self._review_photo(bundle)
+        if not photo_png:
+            return
+        self._append_log(f"Proposte riaperte da {bundle.json_path}: {len(bundle.proposals)} corpi, "
+                         "nessuna richiesta AI.")
         try:
             from .yolo_review_dialog import YoloReviewDialog
             from ..services.photo_yolo import detector_classes
-            dialog = YoloReviewDialog(photo_png, [dict(p) for p in saved.proposals],
-                                      length, width, detector_classes(), self)
+            dialog = YoloReviewDialog(photo_png, [dict(p) for p in bundle.proposals],
+                                      bundle.body_length_mm, bundle.body_width_mm,
+                                      detector_classes(), self)
             accepted = dialog.exec() == QDialog.DialogCode.Accepted
             kept = list(dialog.kept()) if accepted else None
         except Exception as exc:  # noqa: BLE001 - la vista non deve far cadere la finestra
             self._append_log(f"ATTENZIONE revisione dei corpi non disponibile: {exc}")
             return
         if kept is None:
-            self._append_log("Revisione dei corpi rilevati annullata: nessuna richiesta avviata.")
+            self._append_log("Revisione dei corpi rilevati annullata: nessuna richiesta avviata, file invariato.")
             return
+        path = self._write_review_bundle(kept, photo_png, bundle.body_length_mm, bundle.body_width_mm,
+                                         source_json=bundle.source_json, detector=bundle.detector)
+        if path is not None:
+            self._append_log(f"Revisione salvata offline in {path}: {len(kept)} proposte tenute, "
+                             "nessuna richiesta AI (gratuito). Per l'inventario usa «Rilancia "
+                             "inventario AI (a pagamento)…».")
+        self._refresh_reopen_review_button()
+
+    def _relaunch_base_params(self, bundle):
+        """@brief I parametri su cui innestare l'inventario rilanciato.
+
+        @return L'ultima estrazione della sessione, oppure -- dopo un riavvio,
+            quando non ce n'e' una -- una base castellated ricavata dal
+            pacchetto e dai campi correnti (lati della tabella, descrizione).
+        @note Le quote vengono dal pacchetto, non dai campi: sono quelle con
+            cui i riquadri furono calibrati.
+        """
+        if self._last_extracted is not None:
+            return self._last_extracted
+        sides = [dict(edge=s.edge, count=s.count, pitch_mm=s.pitch, offset_mm=s.offset,
+                      first_pin=s.first_pin, reverse=s.reverse)
+                 for s in self._sides_from_table()]
+        return ExtractedParams(
+            name=self._component_name(), description=self.field_description.text(),
+            tags=self.field_tags.text(), confidence='low', notes='',
+            layout='castellated', castellated_sides=sides, components_3d=[],
+            body_length_mm=bundle.body_length_mm, body_width_mm=bundle.body_width_mm,
+            photo_png=None, photo_source=str(bundle.photo_path or ''))
+
+    def _relaunch_inventory(self) -> None:
+        """@brief Ripaga la sola riconciliazione sulle proposte del pacchetto salvato.
+
+        @note E' l'unica spesa di questo percorso e viene dichiarata PRIMA
+            di partire, nel log e nella modale. Le proposte arrivano dal file
+            cosi' come furono salvate dalla revisione (gia' filtrate e
+            misurate; le disegnate a mano incluse) e vanno alla
+            riconciliazione senza altre trasformazioni. Il risultato rientra
+            per `_on_reconciled` come dopo un'estrazione.
+        """
+        if self._background_work_running() or self._automatic_generation_active:
+            return
+        bundle = self._ensure_review_bundle()
+        if bundle is None:
+            self._refresh_reopen_review_button()
+            return
+        photo_png = self._review_photo(bundle)
+        if not photo_png:
+            return
+        synthesized = self._last_extracted is None
+        params = self._relaunch_base_params(bundle)
         model = self._photo_detector_model()
         try:
             profile = self.profile_store.snapshot(self._profile_key())
@@ -2040,22 +2237,31 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, self.i18n.text('Profilo AI non disponibile'), str(exc))
             return
         self._begin_ai_run("Rilancio inventario")
+        if synthesized:
+            # Senza un'estrazione in questa sessione la base viene dai campi
+            # correnti, che possono essere vuoti: l'inventario va applicato
+            # ai campi, non usato per far partire da solo footprint e 3D.
+            self._auto_after_extraction = False
+            self._append_log("Nessuna estrazione in questa sessione: l'inventario rilanciato "
+                             "aggiorna i componenti senza avviare la generazione automatica.")
         self.btn_reopen_review.setEnabled(False)
+        self.btn_relaunch_inventory.setEnabled(False)
         # Dichiarata PRIMA di partire, nel log e nella modale: e' l'unica
         # spesa di questo percorso e chi preme deve saperlo prima, non dopo.
-        announcement = (f"Rilancio dell'inventario su {len(kept)} proposte: una richiesta "
-                        f"a pagamento al modello {model}.")
+        announcement = (f"Rilancio dell'inventario su {len(bundle.proposals)} proposte "
+                        f"da {bundle.json_path.name}: una richiesta a pagamento al modello {model}.")
         self._on_ai_progress(announcement)
+        self._last_extracted = params
         declared = dict(layout=params.layout, castellated_sides=params.castellated_sides,
                         body_length_mm=params.body_length_mm, body_width_mm=params.body_width_mm)
         self._reconcile_worker = ReconcileWorker(
-            photo_png, kept, length, width, model, self._photo_cache_dir(),
+            photo_png, bundle.proposals, bundle.body_length_mm, bundle.body_width_mm, model,
+            self._photo_cache_dir(),
             declared=declared, verification_prompt=profile['verification_prompt'],
             extra_instructions=self.field_component_prompt.toPlainText().strip() or None,
-            # Le proposte salvate vengono dal rilevatore locale: il nome che
-            # finisce nella calibrazione e' quello, qualunque cosa dica ora la
-            # tendina, perche' descrive come i riquadri sono nati.
-            detector='yolo')
+            # Il nome del rilevatore e' quello con cui i riquadri sono nati,
+            # registrato nel pacchetto, qualunque cosa dica ora la tendina.
+            detector=bundle.detector)
         self._reconcile_worker.done.connect(self._on_reconciled)
         self._reconcile_worker.error.connect(self._on_extract_error)
         self._reconcile_worker.progress.connect(self._on_ai_progress)
@@ -2438,7 +2644,6 @@ class MainWindow(QMainWindow):
         self._photo_source = params.photo_source
         self.btn_photo_comparison.setEnabled(bool(self._photo_png or self._photo_overlay_png))
         self._last_extracted = params
-        self._refresh_reopen_review_button()
         # Il nome lo decide chi lavora, non l'estrazione. Il nome proposto
         # resta visibile accanto al campo e si applica con un clic -- che e'
         # anche il momento in cui i documenti lo seguono. Riscriverlo da soli
@@ -2455,6 +2660,9 @@ class MainWindow(QMainWindow):
             # Tutto cio' che viene generato porta il nome scelto: footprint,
             # modello e cartelle devono restare d'accordo fra loro.
             params.name = self._component_name() or params.name
+        # Dopo il nome, perche' il pacchetto vive nella cartella del componente.
+        self._store_extraction_review_bundle()
+        self._refresh_reopen_review_button()
         if self._photo_png and params.components_3d:
             from ..services.model_choices import restore_choices
             try:

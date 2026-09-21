@@ -3490,3 +3490,69 @@ visto perche' e' una suite Qt e sul disco dell'utente le Qt non girano. Fix:
 senza nome corrente non esiste cartella ne' documenti da spostare (il blocco
 sul nome impedisce di caricarli), quindi la proposta si prende cosi' com'e'.
 Nessuna modifica al test.
+
+# 2026-09-21 11:30 — la revisione si riapre dal file nella cartella, senza AI
+
+Commit precedente: `bb184c4`. Richiesta dell'utente: «se il file json esiste
+nella cartella deve essere possibile aprire la revisione bypassando
+l'interrogazione AI». Due decisioni sue, chieste prima di partire:
+**salvataggio nella cartella del componente** e **all'OK si salva e basta**
+(la spesa e' un pulsante separato).
+
+## Pacchetto di revisione (`photo_inventory`)
+
+`<componente>/photo-review/` con `proposals.json` (formato 1: proposte cosi'
+come tenute, `body_length_mm`/`body_width_mm` con cui i riquadri furono
+calibrati, `stamp`, `detector`, `source_json`) e `photo.png` (foto calibrata).
+`save_review_bundle(project_dir, proposals, photo_png, length, width, *,
+detector, source_json)` scrive atomicamente; `load_review_bundle(project_dir)`
+→ `ReviewBundle` oppure None per file assente, JSON corrotto, quote non
+positive, nessuna proposta o riga senza `_id`/`_box` (mai eccezioni). La
+cache comune `generated/photo-cache` resta com'era: il pacchetto e' la copia
+che sopravvive al riavvio.
+
+## GUI (`main_window`)
+
+- `_store_extraction_review_bundle()` da `_on_extracted`: copia le proposte
+  fresche della cache nel pacchetto, ma **solo se il pacchetto manca o e'
+  piu' vecchio dell'estrazione avviata** — altrimenti il rientro da
+  `_on_reconciled` (che passa per `_on_extracted`) ricoprirebbe le proposte
+  tenute con quelle originali.
+- `_refresh_reopen_review_button()` su cambio nome, dopo estrazione, dopo
+  rilancio, dopo errore: pacchetto valido nella cartella del nome corrente,
+  oppure (ripiego di sessione) cache fresca + quote dell'ultima estrazione.
+  Senza nome: spenti. Non serve un'estrazione in sessione.
+- `_reopen_detector_review()`: apre `YoloReviewDialog` sul pacchetto (foto
+  del pacchetto; ripiego `_photo_png` dichiarato nel log); **OK riscrive
+  `proposals.json` e non chiama nulla** (log: «nessuna richiesta AI
+  (gratuito)»); Annulla lascia il file intatto.
+- `btn_relaunch_inventory` «Rilancia inventario AI (a pagamento)…», stessa
+  riga in fondo alla scheda Progetto: `_relaunch_inventory()` dichiara la
+  spesa nel log e nella modale, poi `ReconcileWorker` sulle proposte del
+  pacchetto. Dopo un riavvio (`_last_extracted` None) la base viene da
+  `_relaunch_base_params`: quote dal pacchetto, lati dalla tabella; in quel
+  caso l'inventario aggiorna i componenti **senza** avviare la generazione
+  automatica (dichiarato nel log).
+- `_ensure_review_bundle()`: se manca il pacchetto ma c'e' cache fresca, lo
+  scrive PRIMA di aprire, cosi' il prossimo avvio lo trova.
+
+## Test (`test_reopen_detector_review.py`, 19)
+
+Servizio: round trip completo (foto, flag `_yolo_manual_box`), 5 negativi
+parametrizzati. GUI: pulsanti che seguono il pacchetto della cartella del
+nome (altro nome → spenti, nome vuoto → spenti); l'estrazione scrive il
+pacchetto; cache di un'altra estrazione ignorata e non copiata; OK salva e
+non paga (nessun worker, nessuna chiamata, file aggiornato); Annulla lascia
+il file byte per byte; rilancio paga una volta con le proposte tenute e il
+pacchetto conserva quelle tenute; rilancio dopo «riavvio» senza generazione
+automatica; replay di cache senza nuovo addebito (contratto precedente «OK
+paga» sostituito, detto nel docstring). Trappola per i test: `setText` con
+lo stesso nome non emette `textChanged` → `_retype_name`.
+Altre suite: photo_inventory_gui 66, photo_detector_ui 49, live_log 15,
+docs_migration 5, automatic_generation 25, photo_inventory 46,
+board_edit_lifecycle 26, yolo_review_wiring 4, i18n 7, documentation 1.
+
+## Da provare nella corsa dell'utente
+
+Chiudere l'app, riaprirla, scrivere solo il nome: i due pulsanti in fondo
+devono accendersi se `photo-review/proposals.json` esiste in quella cartella.
