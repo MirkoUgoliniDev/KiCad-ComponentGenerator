@@ -148,6 +148,36 @@ def test_two_models_for_the_same_marking_stay_provisional(library):
     assert c["model_path"] == report["selected_path"]
 
 
+def test_a_file_that_only_contains_the_marking_is_a_variant_not_an_identity(library):
+    """@brief Negativo (B): sottostringa nel nome del file != identita'.
+
+    Marcatura ``ACME-RF-MOD-7A``, in libreria il solo ``ACME-RF-MOD-7AU``:
+    la scoperta lo trova (il codice marcato e' contenuto nel nome, e cosi'
+    deve essere, perche' le varianti si nominano aggiungendo un suffisso),
+    ma non e' il file che la scritta nomina. Caso reale: la scritta ``…-1``
+    con installata la sola variante ``…-1U`` a connettore d'antenna, che ha
+    un'altra geometria. Resta la proposta provvisoria (decisione A): il
+    modello si aggancia dichiarandosi tale, senza identity_evidence.
+
+    Positivo speculare: test_literal_marking_identity_is_independent_of_the_box
+    (stessa marcatura, file ``ACME-RF-MOD-7A`` esatto -> auto_matched).
+    """
+    root, add, _ = library
+    variant = add("vendor", "ACME-RF-MOD-7AU", _MARKED_SIZE)
+    c = _marked_module()
+    assert km._marked_model_matches(variant, c)
+    assert not km._marked_model_is_named(variant, c)
+    assert km.attach_models([c], library=root) == 1
+    report = c["model_match"]
+    assert report["discovery_scope"] == "literal_marking_model"
+    assert len(report["candidates"]) == 1
+    assert report["status"] == "provisional_matched"
+    assert report["attachment"] == "provisional"
+    assert "identity_evidence" not in report
+    assert c["model_path"] == str(variant)
+    assert "Exact literal" not in report["candidates"][0]["reasons"][-1]
+
+
 def test_a_marked_body_outside_the_size_tolerance_is_not_that_model(library):
     """@brief Negativo (B): oltre DEFAULT_SIZE_TOLERANCE la marcatura non basta.
 
@@ -1060,7 +1090,17 @@ def test_the_module_of_the_real_run_with_its_real_numbers(rf_library):
        registrato nell'ordine della lista, che e' l'unico modo di accorgersi
        se un domani tornasse.
     2. Con il bordo giusto vince il solido corretto, e non di misura: la banda
-       contiene solo moduli con lo stesso inviluppo, e la proposta scatta.
+       contiene solo moduli che la fotografia non distingue fra loro, e la
+       proposta scatta. SEPARAZIONE FRAGILE, dichiarata: la banda comprende
+       anche ESP-WROOM-02 e ESP32-C3-WROOM-02 (18 x 20) accanto al
+       ESP32-WROOM-32U (18 x 19.2). Sul lato lungo, misurato 19,23, gli
+       scarti relativi sono +0,040 e -0,002: una dispersione di 0,0416, cioe'
+       l'83% di NAME_TIEBREAK_MARGIN (0,05). Basta che il margine scenda
+       sotto ~0,042 -- o che il rilevatore consegni il lato lungo un po' piu'
+       corto -- perche' la banda diventi eterogenea e il modulo corretto
+       torni review_required. La promozione qui regge quindi su un criterio
+       con margine risicato, non su una distinzione netta; l'asserzione
+       esplicita sotto lo rende visibile a chi cambiasse la costante.
     3. Anche con la misura sbagliata, se l'altezza e' stata osservata il solido
        corretto torna primo: la vista dall'alto non misura l'altezza, e i due
        candidati sono dentro la banda in cui non li distingue. La banda pero'
@@ -1081,6 +1121,19 @@ def test_the_module_of_the_real_run_with_its_real_numbers(rf_library):
     assert right['status'] == 'provisional_matched'
     assert Path(right['selected_path']).stem == 'ESP32-WROOM-32U'
     assert right['candidates'][0]['relative_xy_error'] == pytest.approx(.0044, abs=1e-3)
+    # La separazione fragile del punto 2, in numeri: la banda contiene i due
+    # moduli 18 x 20 e il 18 x 19.2; sul lato lungo la dispersione degli
+    # scarti dal lato misurato e' 0,8 / 19,23 e passa per meno di un quinto
+    # del margine. Se NAME_TIEBREAK_MARGIN scende, questa asserzione cade
+    # prima del comportamento, ed e' voluto.
+    band = km._tie_band(right['candidates'])
+    assert {Path(item['path']).stem for item in band} == {
+        'ESP32-WROOM-32U', 'ESP-WROOM-02', 'ESP32-C3-WROOM-02'}
+    assert km._band_is_homogeneous(band, 19.23, 18.08)
+    long_spread = (20.0 - 19.2) / 19.23
+    assert long_spread == pytest.approx(.0416, abs=1e-3)
+    assert long_spread < km.NAME_TIEBREAK_MARGIN
+    assert km.NAME_TIEBREAK_MARGIN - long_spread < 0.2 * km.NAME_TIEBREAK_MARGIN
 
     rescued = km.model_candidates(
         _radio(18.0848, 16.3314, height_mm=3.1, height_source='visual_estimate'),
@@ -1121,7 +1174,7 @@ def test_a_third_solid_within_the_margin_breaks_the_tie(library):
     band = km._tie_band(report["candidates"])
     assert len(band) == 3
     assert {item["path"] for item in band} > twins
-    assert not km._band_is_homogeneous(band)
+    assert not km._band_is_homogeneous(band, 10.67, 6.87)
     assert report["status"] == "review_required"
     assert report["selected_path"] is None
 
@@ -1131,7 +1184,7 @@ def test_a_homogeneous_band_of_three_is_still_a_tie(library):
     root, twins, component = _band_library(library, third=(11.14, 6.90, 4.26))
     report = km.model_candidates(component, library=root)
     band = km._tie_band(report["candidates"])
-    assert len(band) == 3 and km._band_is_homogeneous(band)
+    assert len(band) == 3 and km._band_is_homogeneous(band, 10.67, 6.87)
     assert report["status"] == "provisional_matched"
     # La proposta e' la testa della lista, che sta nella banda: quale delle
     # tre varianti identiche sia non e' una scelta della misura.
@@ -1197,3 +1250,65 @@ def test_the_band_is_measured_from_the_best_error_not_from_the_list_head(library
     band = km._tie_band(choices)
     assert [item["path"] for item in band] == ["b", "a"]
     assert km._tie_band([dict(choices[0], relative_xy_error=None)]) is None
+
+
+def test_an_empty_list_has_no_band():
+    """@brief Contratto di _tie_band: None quando la banda non si puo' stabilire.
+
+    Senza candidati non c'e' un migliore da cui misurare gli altri: e' lo
+    stesso esito di uno scarto illeggibile, non un'eccezione.
+    """
+    assert km._tie_band([]) is None
+
+
+def test_band_homogeneity_is_measured_in_the_same_quantity_as_the_band():
+    """@brief L'omogeneita' usa lo scarto dal lato MISURATO, per asse, come la banda.
+
+    relative_xy_error e' il modulo dello scarto ``(modello - misurato) /
+    misurato`` sull'asse peggiore; la banda ammette chi sta entro
+    NAME_TIEBREAK_MARGIN dal migliore. L'omogeneita' chiede, nella stessa
+    grandezza, che su ogni asse la dispersione degli scarti (con segno) dei
+    membri stia entro lo stesso margine.
+
+    Negativo strutturale: due solidi a cavallo della misura (10,3 e 9,7 su
+    un lato misurato 10,0) hanno lo STESSO scarto assoluto 0,03 -- pareggio
+    perfetto per la banda -- ma la fotografia li separa: distano 0,06 del
+    lato misurato, oltre il margine. Positivo al limite: 10,25 e 9,75
+    distano esattamente il margine.
+
+    Normalizzazione: e' il lato misurato, non quello del modello. Con
+    misurato 10,0 e modelli 9,0 e 8,52 gli scarti sono -0,100 e -0,148,
+    dispersione 0,048 = la stessa differenza che ha ammesso il secondo nella
+    banda; normalizzando sul lato del modello (0,48 / 9,0 = 0,053) la
+    stessa coppia sarebbe stata dichiarata distinguibile pur essendo, per la
+    banda, indistinguibile: due risposte diverse alla stessa domanda.
+    """
+    def item(long_side, short_side, measured=(10.0, 5.0)):
+        return {"path": f"{long_side}x{short_side}", "family": "module",
+                "dimensions_mm": [long_side, short_side, 1.0],
+                "relative_xy_error": km.size_distance([long_side, short_side], *measured)}
+
+    straddle = [item(10.3, 5.0), item(9.7, 5.0)]
+    assert straddle[0]["relative_xy_error"] == pytest.approx(0.03)
+    assert straddle[1]["relative_xy_error"] == pytest.approx(0.03)
+    assert km._tie_band(straddle) == straddle
+    assert not km._band_is_homogeneous(straddle, 10.0, 5.0)
+    boundary = [item(10.25, 5.0), item(9.75, 5.0)]
+    assert km._tie_band(boundary) == boundary
+    assert km._band_is_homogeneous(boundary, 10.0, 5.0)
+
+    smaller = [item(9.0, 5.0), item(8.52, 5.0)]
+    assert km._tie_band(smaller) == smaller
+    assert km._band_is_homogeneous(smaller, 10.0, 5.0)
+    assert 0.48 / 9.0 > km.NAME_TIEBREAK_MARGIN > 0.48 / 10.0
+    # Gli assi non si mescolano: lo stesso 0,48 sul lato corto, misurato 5,0,
+    # e' una dispersione di 0,096 e la fotografia lo vede.
+    short_axis = [item(9.0, 5.0), item(9.0, 4.52)]
+    assert km._tie_band(short_axis) == short_axis
+    assert not km._band_is_homogeneous(short_axis, 10.0, 5.0)
+    # Il lato misurato puo' arrivare in qualunque ordine, come in size_distance.
+    assert km._band_is_homogeneous(smaller, 5.0, 10.0)
+    # Una misura illeggibile o una famiglia mista non e' mai omogenea.
+    assert not km._band_is_homogeneous(smaller, None, 5.0)
+    assert not km._band_is_homogeneous(smaller, 0.0, 5.0)
+    assert not km._band_is_homogeneous([smaller[0], dict(smaller[1], family="ic")], 10.0, 5.0)

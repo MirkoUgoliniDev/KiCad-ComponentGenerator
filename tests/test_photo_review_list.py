@@ -1,7 +1,8 @@
 """@brief Sidebar list, parameter modal and selection highlight of PhotoReviewDialog.
 
 Real offscreen Qt interaction tests: the list must dominate the sidebar with
-a live count above it, the parameter form lives in a non-blocking modal, and
+a live count above it, the parameter form lives in a window-modal dialog
+opened with ``QDialog.open()`` (input-blocked, no nested event loop), and
 list/outline selection is mirrored both ways with a high-contrast highlight.
 """
 
@@ -301,6 +302,91 @@ def test_clicking_an_outline_selects_its_row_and_highlights_it(dialog, app):
         assert _highlighted(dialog) == [row]
         assert item.component == before
         assert dialog.fields["length_mm"].value() == before["length_mm"]
+
+
+def _click_outline(dialog, app, row, modifier):
+    """Real press/release on the center of outline ``row`` with a keyboard modifier."""
+    item = dialog._items[row]
+    dialog.view.centerOn(item)
+    app.processEvents()
+    QTest.mouseClick(dialog.view.viewport(), Qt.MouseButton.LeftButton, modifier,
+                     dialog.view.mapFromScene(item.scenePos()))
+    app.processEvents()
+
+
+def test_ctrl_click_selects_the_clicked_outline_not_the_lowest_index(dialog, app):
+    """@brief Ctrl-click resolves to the outline under the pointer, like a plain click.
+
+    Qt's default would extend the selection to two items and the editor,
+    which edits one component, would stay bound to the lowest list index.
+    Here the sidebar, the form and the halo must all follow the clicked row.
+    """
+    dialog.view.zoom(3)
+    app.processEvents()
+    dialog.component_list.setCurrentRow(0)
+    before = deepcopy(dialog.get_components())
+    _click_outline(dialog, app, 1, Qt.KeyboardModifier.ControlModifier)
+    assert dialog.component_list.currentRow() == 1
+    assert _highlighted(dialog) == [1]
+    assert [item.isSelected() for item in dialog._items] == [False, True, False]
+    assert dialog.fields["length_mm"].value() == before[1]["length_mm"]
+    _click_outline(dialog, app, 2, Qt.KeyboardModifier.ControlModifier)
+    assert dialog.component_list.currentRow() == 2
+    assert _highlighted(dialog) == [2]
+    assert dialog.get_components() == before
+
+
+def test_ctrl_click_on_the_selected_outline_keeps_it_selected(dialog, app):
+    """@brief Negative: Ctrl-click on the current outline is not a toggle that clears the selection."""
+    dialog.view.zoom(3)
+    app.processEvents()
+    dialog.component_list.setCurrentRow(0)
+    before = deepcopy(dialog.get_components())
+    _click_outline(dialog, app, 0, Qt.KeyboardModifier.ControlModifier)
+    assert dialog.component_list.currentRow() == 0
+    assert _highlighted(dialog) == [0]
+    assert dialog._items[0].isSelected()
+    assert dialog.form_widget.isEnabled()
+    assert dialog.get_components() == before
+
+
+def test_minimize_and_restore_keep_the_parameter_modal(dialog, app):
+    """@brief A spontaneous hide (minimize) must not close the modal for good.
+
+    The window system hides the editor on minimize; closing the modal then
+    would leave it hidden after ``showNormal()``. Only program-driven hides
+    (close, reject) take the modal down.
+    """
+    dialog.component_list.setCurrentRow(1)
+    dialog.open_parameters()
+    app.processEvents()
+    assert dialog.parameters_dialog.isVisible()
+    dialog.showMinimized()
+    app.processEvents()
+    QTest.qWait(50)
+    if not dialog.isMinimized():
+        pytest.skip("this platform plugin cannot minimize a window")
+    dialog.showNormal()
+    app.processEvents()
+    QTest.qWait(50)
+    assert not dialog.isMinimized()
+    assert dialog.isVisible()
+    assert dialog.parameters_dialog.isVisible()
+    assert dialog.parameters_dialog.isModal()
+    # The modal is still live: an edit made after the round trip reaches the outline.
+    dialog.fields["length_mm"].setValue(4.5)
+    assert dialog.get_components()[1]["length_mm"] == 4.5
+
+
+def test_program_driven_hide_still_takes_the_modal_down(dialog, app):
+    """@brief Negative: a non-spontaneous hide (the editor's own hide/close) closes the modal."""
+    dialog.component_list.setCurrentRow(1)
+    dialog.open_parameters()
+    app.processEvents()
+    assert dialog.parameters_dialog.isVisible()
+    dialog.hide()
+    app.processEvents()
+    assert not dialog.parameters_dialog.isVisible()
 
 
 def test_double_clicking_an_outline_keeps_the_viewport_still(dialog, app, monkeypatch):

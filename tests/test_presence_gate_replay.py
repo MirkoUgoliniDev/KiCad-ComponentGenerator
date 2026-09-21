@@ -115,10 +115,11 @@ def test_with_presence_high_on_the_sound_components_matches_return(run):
       domina tutti gli altri oltre NAME_TIEBREAK_MARGIN -> provisional;
     * SW_BOOT resta review (contratto aggiornato: prima era provisional).
       I primi due candidati pareggiano (4,7 x 3,55), ma il terzo, 5,1 x 3,5,
-      dista dal migliore 0,031 -- meno del margine -- con un inviluppo che
-      differisce del 7,8%: la fotografia non sa dire quale dei due corpi c'e'.
-      Con la banda che guardava solo i primi due il terzo non partecipava;
-      ora fa parte del dubbio, e non si propone nulla;
+      dista dal migliore 0,031 -- meno del margine -- e sul lato lungo,
+      misurato 4,81, il suo scarto si discosta da quello dei primi due di
+      0,4 / 4,81 = 0,083, oltre il margine: la fotografia non sa dire quale
+      dei due corpi c'e'. Con la banda che guardava solo i primi due il
+      terzo non partecipava; ora fa parte del dubbio, e non si propone nulla;
     * SW_RESET resta review: i primi due candidati non pareggiano e la
       ricerca e' troncata, quindi la dominanza non e' dimostrabile. E' il
       controllo che la porta non si apre "a caso".
@@ -140,10 +141,15 @@ def test_with_presence_high_on_the_sound_components_matches_return(run):
     matched = sorted(name for name, s in decided.items() if s == "provisional_matched")
     assert matched == ["J_USBC (connector)", "U2_CH334F (ic)", "U3_CH343P (ic)"]
     assert decided["SW_BOOT (switch)"] == "review_required"
-    boot = next(c for c in sound if c["name"] == "SW_BOOT (switch)")["model_match"]["candidates"]
+    boot_component = next(c for c in sound if c["name"] == "SW_BOOT (switch)")
+    boot = boot_component["model_match"]["candidates"]
+    sides = (boot_component["length_mm"], boot_component["width_mm"])
     band = km._tie_band(boot)
-    assert len(band) == 3 and not km._band_is_homogeneous(band)
-    assert km._band_is_homogeneous(band[:2])
+    assert len(band) == 3 and not km._band_is_homogeneous(band, *sides)
+    assert km._band_is_homogeneous(band[:2], *sides)
+    long_spread = (5.1 - 4.7) / max(sides)
+    assert long_spread == pytest.approx(.083, abs=1e-3)
+    assert long_spread > km.NAME_TIEBREAK_MARGIN
     assert decided["SW_RESET (switch)"] == "review_required"
     assert not any(s == "auto_matched" for s in decided.values())
     passives = [c for c in sound if c["kind"] in ("resistor", "capacitor")]
@@ -191,7 +197,10 @@ def test_the_module_has_no_model_path_only_because_of_its_presence(run):
     assert not report.get("search_truncated") and not report.get("topology_incomplete")
     assert _decide(module, "low") == "review_required"
     assert _decide(module, "high") == "auto_matched"
+    # L'identita' pretende il nome esatto del file, non una sottostringa:
+    # qui la scritta nomina il file per intero.
     assert km._marked_model_matches(Path(report["candidates"][0]["path"]), module)
+    assert km._marked_model_is_named(Path(report["candidates"][0]["path"]), module)
     assert module["model_path"] is None
 
 

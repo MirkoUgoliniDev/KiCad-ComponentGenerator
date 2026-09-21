@@ -1,4 +1,4 @@
-"""Manual review of a raw, board-aligned PCB crop; depends only on PyQt6.
+"""@brief Manual review of a raw, board-aligned PCB crop; depends only on PyQt6.
 
 Integration::
 
@@ -66,7 +66,13 @@ class _MatchWorker(QThread):
 
 @dataclass(frozen=True)
 class PhotoTransform:
-    """Continuous edge coordinates: pixel (W/2, H/2) is millimeter (0, 0)."""
+    """@brief Board-crop calibration: pixel (W/2, H/2) is millimeter (0, 0).
+
+    The crop edges are the PCB body edges, so the horizontal and vertical
+    pixel scales are independent (an anisotropic photo is calibrated, not
+    corrected). Coordinates are continuous edge coordinates, not pixel
+    centers: pixel column 0 starts at -length/2 mm.
+    """
 
     pixel_width: int
     pixel_height: int
@@ -80,12 +86,22 @@ class PhotoTransform:
             raise ValueError("Photo and PCB dimensions must be finite and positive")
 
     def mm_to_pixel(self, x: float, y: float) -> QPointF:
-        """@brief Provide the mm to pixel operation for this workflow."""
+        """@brief Map board millimeters (center origin, Y down) to crop pixels.
+
+        @param x Millimeters along the board length, positive to the right.
+        @param y Millimeters along the board width, positive downward.
+        @return Continuous pixel position in the crop.
+        """
         return QPointF((x / self.body_length_mm + .5) * self.pixel_width,
                        (y / self.body_width_mm + .5) * self.pixel_height)
 
     def pixel_to_mm(self, x: float, y: float) -> QPointF:
-        """@brief Provide the pixel to mm operation for this workflow."""
+        """@brief Inverse of mm_to_pixel: crop pixels to board millimeters.
+
+        @param x Horizontal pixel position in the crop.
+        @param y Vertical pixel position in the crop.
+        @return Board point in millimeters, origin at the board center.
+        """
         return QPointF((x / self.pixel_width - .5) * self.body_length_mm,
                        (y / self.pixel_height - .5) * self.body_width_mm)
 
@@ -121,7 +137,14 @@ class PhotoTransform:
         return QPointF(dx*c + dy*s, -dx*s + dy*c)
 
     def local_polygon(self, component: dict) -> QPolygonF:
-        """Rotate in millimeters BEFORE applying the independent pixel scales."""
+        """@brief Outline of a component around its own center, in item pixels.
+
+        @param component Dictionary with length_mm, width_mm and rotation_deg.
+        @return Four corners, from (-l/2, -w/2) clockwise in the local frame.
+        @note The rectangle is rotated in millimeters BEFORE the independent
+              pixel scales are applied, so it keeps its metric right angles
+              on an anisotropic photo.
+        """
         rotation = float(component.get("rotation_deg", 0))
         half_l = float(component["length_mm"]) / 2
         half_w = float(component["width_mm"]) / 2
@@ -132,7 +155,12 @@ class PhotoTransform:
         ])
 
     def normalized_box(self, component: dict) -> tuple[float, float, float, float]:
-        """Axis-aligned full-board envelope for the inventory's ``_box`` cache."""
+        """@brief Axis-aligned envelope of the outline as fractions of the crop.
+
+        @param component Dictionary with x_mm, y_mm, length_mm, width_mm, rotation_deg.
+        @return (left, top, right, bottom) in [0, 1] of the crop size, the
+                format of the inventory's normalized ``_box`` cache.
+        """
         center = self.mm_to_pixel(float(component["x_mm"]), float(component["y_mm"]))
         bounds = self.local_polygon(component).translated(center).boundingRect()
         return (bounds.left() / self.pixel_width, bounds.top() / self.pixel_height,
@@ -140,7 +168,11 @@ class PhotoTransform:
 
 
 class _PhotoView(QGraphicsView):
-    """Left drag moves components; middle drag pans without changing selection."""
+    """@brief Photo canvas: left drag moves outlines, middle drag pans, wheel zooms.
+
+    The view auto-fits the photo until the user zooms or pans; a manual
+    zoom is then preserved across window resizes until fit is requested.
+    """
 
     def __init__(self, scene, parent=None):
         super().__init__(scene, parent)
@@ -158,7 +190,10 @@ class _PhotoView(QGraphicsView):
         self._resize_fit_timer.timeout.connect(self._apply_fit)
 
     def fit_photo(self, rect):
-        """@brief Provide the fit photo operation for this workflow."""
+        """@brief Fit a scene rectangle in the viewport and re-enable auto-fit on resize.
+
+        @param rect Scene rectangle to show whole, normally the photo bounds.
+        """
         self._fit_rect = QRectF(rect)
         self._auto_fit = True
         self._apply_fit()
@@ -170,7 +205,7 @@ class _PhotoView(QGraphicsView):
         self._fit_scale = self.transform().m11()
 
     def resizeEvent(self, event):
-        """@brief Provide the resizeEvent operation for this workflow."""
+        """@brief Keep the photo fitted on viewport resizes while auto-fit is on."""
         super().resizeEvent(event)
         if self._auto_fit:
             # Scrollbar visibility can resize the viewport during fitInView;
@@ -178,14 +213,18 @@ class _PhotoView(QGraphicsView):
             self._resize_fit_timer.start(0)
 
     def zoom(self, factor):
-        """@brief Provide the zoom operation for this workflow."""
+        """@brief Scale the view by a factor, clamped between 1/8 and 64 times the fit scale.
+
+        @param factor Multiplier applied to the current scale; >1 zooms in.
+        @note Any zoom ends auto-fit: the user's scale survives resizes.
+        """
         self._auto_fit = False
         current = self.transform().m11()
         target = min(self._fit_scale * 64, max(self._fit_scale / 8, current * factor))
         self.scale(target / current, target / current)
 
     def wheelEvent(self, event):
-        """@brief Provide the wheelEvent operation for this workflow."""
+        """@brief Zoom around the pointer with the wheel; other wheel input scrolls."""
         delta = event.angleDelta().y() or event.pixelDelta().y()
         if delta:
             self.zoom(1.2 ** max(-4, min(4, delta / 120)))
@@ -194,7 +233,7 @@ class _PhotoView(QGraphicsView):
             super().wheelEvent(event)
 
     def mousePressEvent(self, event):
-        """@brief Provide the mousePressEvent operation for this workflow."""
+        """@brief Start a middle-button pan; other buttons reach the scene items."""
         if event.button() == Qt.MouseButton.MiddleButton:
             self._auto_fit = False
             self._pan_position = event.position()
@@ -204,7 +243,7 @@ class _PhotoView(QGraphicsView):
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        """@brief Provide the mouseMoveEvent operation for this workflow."""
+        """@brief Scroll the viewport by the pointer motion while panning."""
         if self._pan_position is not None:
             delta = event.position() - self._pan_position
             self._pan_position = event.position()
@@ -215,7 +254,7 @@ class _PhotoView(QGraphicsView):
             super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        """@brief Provide the mouseReleaseEvent operation for this workflow."""
+        """@brief End a middle-button pan and restore the cursor."""
         if event.button() == Qt.MouseButton.MiddleButton and self._pan_position is not None:
             self._pan_position = None
             self.viewport().unsetCursor()
@@ -225,7 +264,7 @@ class _PhotoView(QGraphicsView):
 
 
 class _NumberLabel(QGraphicsSimpleTextItem):
-    """Screen-sized ID with an opaque backing, readable on any PCB color."""
+    """@brief Screen-sized ID label with an opaque backing, readable on any PCB color."""
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -235,7 +274,7 @@ class _NumberLabel(QGraphicsSimpleTextItem):
         self.setBrush(QColor("white"))
 
     def paint(self, painter, option, widget=None):
-        """@brief Provide the paint operation for this workflow."""
+        """@brief Paint a dark rounded backing behind the white text."""
         painter.save()
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor("#101318"))
@@ -367,7 +406,16 @@ class _ComponentItem(QGraphicsPolygonItem):
         self.sync_geometry()
 
     def sync_geometry(self):
-        """@brief Provide the sync geometry operation for this workflow."""
+        """@brief Rebuild the item from the component dictionary (the single source of truth).
+
+        Polygon, halo, position, number label and the eight resize handles
+        are all derived from x_mm/y_mm/length_mm/width_mm/rotation_deg; the
+        halo mirrors the outline exactly so the highlight never lags an edit,
+        and the handles are re-placed on the rotated local edges with a
+        cursor matching their on-screen direction.
+        @note ``_syncing`` suppresses the position feedback in itemChange:
+              a setPos issued here is a mirror of the data, not a user move.
+        """
         self._syncing = True
         try:
             self.setPolygon(self.editor.photo_transform.local_polygon(self.component))
@@ -459,9 +507,36 @@ class _ComponentItem(QGraphicsPolygonItem):
         self._resize = None
 
     def photo_bounds(self):
-        """@brief Provide the photo bounds operation for this workflow."""
+        """@brief Axis-aligned scene envelope of the physical package outline.
+
+        @return Bounding rectangle in scene (crop) pixels.
+        """
         # No pen or label padding: this is the physical package envelope.
         return self.mapToScene(self.polygon()).boundingRect()
+
+    def mousePressEvent(self, event):
+        """@brief Select the clicked outline alone, with or without Ctrl.
+
+        @note Qt treats Ctrl-click as "extend the selection", which would
+              leave two outlines selected and the editor bound to the lowest
+              list index rather than the clicked one. This editor edits one
+              component at a time, so the click always resolves to the
+              outline under the pointer; the default handling then only sets
+              up the move.
+        """
+        if not self.isSelected():
+            self.editor._select_row(self.editor._items.index(self), center=False)
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """@brief Keep the clicked outline selected after a Ctrl-click.
+
+        @note Without movement Qt toggles the item on a Ctrl release, which
+              would clear the selection of the outline that was just clicked.
+        """
+        super().mouseReleaseEvent(event)
+        if not self.isSelected():
+            self.editor._select_row(self.editor._items.index(self), center=False)
 
     def mouseDoubleClickEvent(self, event):
         """@brief Open KiCad alternatives for the clicked photographic component.
@@ -474,7 +549,13 @@ class _ComponentItem(QGraphicsPolygonItem):
         event.accept()
 
     def itemChange(self, change, value):
-        """@brief Provide the itemChange operation for this workflow."""
+        """@brief Feed user moves back into the data and show grips only when selected.
+
+        A position change caused by dragging (not by sync_geometry) updates
+        the component's x_mm/y_mm through the editor; a selection change
+        toggles the resize handles, because hidden handles take no mouse
+        events and neighbours must be moved, never resized, by mistake.
+        """
         result = super().itemChange(change, value)
         if (change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged
                 and not self._syncing):
@@ -488,7 +569,7 @@ class _ComponentItem(QGraphicsPolygonItem):
 
 
 class PhotoReviewDialog(QDialog):
-    """Edit photo inventory without modifying inputs or importing the 3D stack.
+    """@brief Edit the photo inventory without modifying inputs or importing the 3D stack.
 
     ``photo_png`` must be raw PNG bytes of the full board crop, with body length
     horizontal and body width vertical. Invalid image/calibration/geometry raises
@@ -501,7 +582,7 @@ class PhotoReviewDialog(QDialog):
     Layout contract: the sidebar is dominated by ``component_list`` with
     ``count_label`` ("Componenti: N") above it; the parameter form
     (``form_widget`` holding ``text_fields`` and ``fields``) lives in the
-    non-blocking modal ``parameters_dialog`` opened by ``parameters_button``
+    window-modal ``parameters_dialog`` opened by ``parameters_button``
     or ``open_parameters()``. The field widgets are the same objects whether
     or not that modal is shown, and editing them updates the outline live.
     """
@@ -591,10 +672,17 @@ class PhotoReviewDialog(QDialog):
         self.form_widget = QWidget()
         form = QFormLayout(self.form_widget)
         self.text_fields = {}
+        # Gli slot sono metodi legati, non closure: se l'applicazione esce
+        # con la finestra ancora aperta, il distruttore C++ non passa da
+        # hideEvent/closeEvent e il QLineEdit a fuoco emette editingFinished
+        # dal proprio distruttore. PyQt scioglie da solo le connessioni a
+        # metodi legati quando il ricevente muore, mentre una lambda con
+        # default gia' smantellati verrebbe chiamata e farebbe abortire il
+        # processo con TypeError. La chiave viene dall'objectName del mittente.
         for key, label in (("name", "Nome"), ("kind", "Tipo"), ("marking", "Marcatura")):
             field = QLineEdit()
             field.setObjectName(key)
-            field.editingFinished.connect(lambda key=key: self._text_edited(key))
+            field.editingFinished.connect(self._text_field_finished)
             form.addRow(label, field)
             self.text_fields[key] = field
         self.fields = {}
@@ -606,7 +694,7 @@ class PhotoReviewDialog(QDialog):
             field.setSingleStep(1 if key == "rotation_deg" else .1)
             field.setSuffix(" °" if key == "rotation_deg" else " mm")
             field.setKeyboardTracking(False)
-            field.valueChanged.connect(lambda value, key=key: self._number_edited(key, value))
+            field.valueChanged.connect(self._number_field_changed)
             form.addRow(label, field)
             self.fields[key] = field
         self.parameters_dialog = QDialog(self)
@@ -668,18 +756,29 @@ class PhotoReviewDialog(QDialog):
         self._selection_changed()
 
     def get_components(self) -> list[dict]:
-        """Return an independent snapshot of the current working inventory."""
+        """@brief Return an independent snapshot of the current working inventory.
+
+        @return Deep copy of the components; edits to it never reach the dialog.
+        """
         return deepcopy(self._components)
 
     def showEvent(self, event):
-        """@brief Provide the showEvent operation for this workflow."""
+        """@brief Fit the whole photo the first time the editor is shown."""
         super().showEvent(event)
         self.fit_photo()
 
     def hideEvent(self, event):
-        """@brief Take the parameter modal down together with the editor."""
+        """@brief Take the parameter modal down when the editor itself is dismissed.
+
+        @note Only for hides requested by the program (close, reject, hide):
+              the window system also hides the editor on minimize, and a
+              modal closed then would not come back with ``showNormal()``.
+              Spontaneous hides leave the modal alone; Qt minimizes it with
+              its parent and restores it with it.
+        """
         super().hideEvent(event)
-        self._close_parameters()
+        if not event.spontaneous():
+            self._close_parameters()
 
     def closeEvent(self, event):
         """@brief Close the parameter modal even when the editor was never shown."""
@@ -690,10 +789,11 @@ class PhotoReviewDialog(QDialog):
         """Hide the modal after moving focus out of its editors.
 
         The modal is a separate window: hiding the editor does not clear the
-        focus inside it, so a focused editor would emit ``editingFinished``
-        only when it is destroyed, which can be during garbage collection
-        after the slot's closure has already been torn down. Clearing focus
-        here fires that signal while everything is still intact.
+        focus inside it, so text still being typed would only be committed
+        when the editor is destroyed, i.e. never for the user. Clearing focus
+        here fires ``editingFinished`` while the outline can still take the
+        edit. Crash safety does not depend on this: the slots are bound
+        methods, dropped by PyQt when the dialog dies.
         """
         focused = self.parameters_dialog.focusWidget()
         if focused is not None:
@@ -701,7 +801,7 @@ class PhotoReviewDialog(QDialog):
         self.parameters_dialog.hide()
 
     def fit_photo(self):
-        """@brief Provide the fit photo operation for this workflow."""
+        """@brief Show the whole photo and re-enable auto-fit on resize."""
         self.view.fit_photo(self.photo_rect)
 
     def _append_item(self, component):
@@ -740,7 +840,8 @@ class PhotoReviewDialog(QDialog):
 
     def _selection_changed(self):
         selected = self._selected_item()
-        # Ctrl-click may select multiple graphics items; this editor edits one.
+        # Outline clicks already resolve to one item; a rubber band or a
+        # programmatic multi-selection still collapses to the first one.
         if selected:
             with QSignalBlocker(self.scene):
                 for item in self._items:
@@ -789,9 +890,11 @@ class PhotoReviewDialog(QDialog):
     def open_parameters(self):
         """@brief Show the parameter form for the selected component in a modal.
 
-        @note Non-blocking (``QDialog.open``): the outline follows every edit
-              live while the modal is up, and callers such as tests can still
-              drive the fields without the modal ever being shown.
+        @note Window-modal via ``QDialog.open``: input to the editor is
+              blocked while the modal is up, but no nested event loop runs,
+              so the outline follows every edit live and callers such as
+              tests can still drive the fields without the modal ever being
+              shown.
         """
         if self._selected_item() is None:
             return
@@ -923,6 +1026,36 @@ class PhotoReviewDialog(QDialog):
                     self.fields[key].setValue(value)
         self._geometry_changed(item)
 
+    def _field_key(self, fields):
+        """Return the sender's key among ``fields``; None for a direct call or a foreign sender."""
+        sender = self.sender()
+        key = sender.objectName() if sender is not None else ""
+        return key if key in fields else None
+
+    def _number_field_changed(self, value):
+        """@brief Store a numeric field edit; the field is recovered from the sender.
+
+        @param value New value of the spin box, in millimeters or degrees.
+        @note Bound-method slot on purpose: PyQt drops the connection when
+              this dialog's wrapper dies, so a spin box destroyed during an
+              abnormal teardown never calls in here (a closure would be
+              called with its defaults already torn down and abort).
+        """
+        key = self._field_key(self.fields)
+        if key is not None:
+            self._number_edited(key, value)
+
+    def _text_field_finished(self):
+        """@brief Store a text field edit; the field is recovered from the sender.
+
+        @note Bound-method slot on purpose: the focused line edit emits
+              editingFinished from its destructor when the application quits
+              with the modal up, and PyQt then simply drops the connection.
+        """
+        key = self._field_key(self.text_fields)
+        if key is not None:
+            self._text_edited(key)
+
     def _number_edited(self, key, value):
         item = self._selected_item()
         if item is None:
@@ -1007,7 +1140,12 @@ class PhotoReviewDialog(QDialog):
         super().reject()
 
     def add_component(self):
-        """Add a generic package at the visible center, then select its controls."""
+        """@brief Add a generic package at the visible center and select it for naming.
+
+        The new outline is clamped inside the board, sized to a tenth of the
+        board (at most 2 x 1 mm), and flagged uncertain: it is a placeholder
+        for the user to place and measure, not a detection.
+        """
         center = self.view.mapToScene(self.view.viewport().rect().center())
         center = self.photo_transform.pixel_to_mm(
             min(self.photo_rect.width(), max(0, center.x())),
@@ -1036,7 +1174,7 @@ class PhotoReviewDialog(QDialog):
             self.text_fields["name"].selectAll()
 
     def delete_selected(self):
-        """@brief Provide the delete selected operation for this workflow."""
+        """@brief Remove the selected outline and renumber; selection moves to its neighbour."""
         item = self._selected_item()
         if item is None:
             return
@@ -1051,7 +1189,11 @@ class PhotoReviewDialog(QDialog):
         self._update_scene_rect()
 
     def accept(self):
-        """@brief Provide the accept operation for this workflow."""
+        """@brief Apply: emit a detached corrected list once, then close.
+
+        @note Text still being typed is committed first, so an Apply
+              without a focus change loses nothing; a second call is a no-op.
+        """
         if self._applied:
             return
         # Commit text still being typed, including calls made without focus loss.

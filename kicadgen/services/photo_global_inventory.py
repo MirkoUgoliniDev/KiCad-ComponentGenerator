@@ -59,6 +59,8 @@ detector's tile boundary, NOT on the body. They are an artifact of how the
 photograph was cut into views, so several fragments agreeing on such an edge
 agree on nothing. Never adopt a clipped edge as a component boundary: read that
 side from the photograph, and expect the true edge to lie beyond it.
+detector_metadata may carry _yolo_manual_box true: that box was placed or adjusted by a person;
+keep its geometry unless clearly wrong, treat presence as confirmed.
 Every source must spatially overlap its retained parent. Never collect unrelated
 or unresolved proposals into a bounding rectangle merely to account for their IDs.
 An incorrect source ID does not erase an independently visible body: retain that
@@ -695,9 +697,14 @@ def _inventory_context(text):
     return text.strip()
 
 
-def _normalize(row, identity, length, width, issues):
+def _normalize(row, identity, length, width, issues, manual_ids=frozenset()):
     """@brief Convert AI observations without modifying the raw audit response.
     @param issues Errori di validazione che riguardano QUESTA riga, non l'inventario.
+    @param manual_ids ID dei candidati che una persona ha tracciato o ritoccato
+        (`_yolo_manual_box`). Se questa riga ne assorbe almeno uno, la
+        marcatura passa al componente finale: senza, la mano dell'utente si
+        perdeva qui, fra i candidati inviati e l'inventario restituito, e a
+        valle nessuno sapeva piu' che quel riquadro era una decisione umana.
     """
     marking = row['marking']
     # These whole-field AI sentinels mean no literal marking, not CAD glyphs.
@@ -753,6 +760,8 @@ def _normalize(row, identity, length, width, issues):
         component_id=row['component_id'], source_candidate_ids=list(row['source_candidate_ids']),
         _source='AI global inventory', _geometry_source='global photographic envelope; not nominal package',
         _review_reason=row['evidence'], _global_inventory_errors=list(issues))
+    if any(source in manual_ids for source in row['source_candidate_ids']):
+        result['_yolo_manual_box'] = True
     # Visible surfaces may be a minimum and include tabs: only an explicit
     # complete ordinary-lead observation supports an exact package lead count.
     if (row.get('lead_count_complete') is True and type(row.get('lead_count')) is int
@@ -939,8 +948,9 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         return [str(e) for e in errors if e.concerns(component, candidates)]
     # New IDs cannot collide with unresolved originals, including malformed merges.
     next_id = max(known, default=0)+1
+    manual_ids = frozenset(c['_id'] for c in components if c.get('_yolo_manual_box') is True)
     result = [_normalize(r, next_id+i, length, width,
-                         own(r['component_id'], r['source_candidate_ids']))
+                         own(r['component_id'], r['source_candidate_ids']), manual_ids)
               for i, r in enumerate(rows)]
     for original in components:
         decision = safe.get(original['_id'])

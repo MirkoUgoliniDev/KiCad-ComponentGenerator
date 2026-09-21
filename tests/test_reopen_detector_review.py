@@ -381,6 +381,276 @@ def test_identical_proposals_replay_the_cache_without_a_new_call(prepared, monke
     assert len(started) == 2
 
 
+def _fake_extract_worker(delivered, detector='yolo'):
+    """@brief Il worker fermo in attesa della revisione: registra la risposta consegnata."""
+    from types import SimpleNamespace
+    return SimpleNamespace(deliver_review=delivered.append, photo_detector=detector,
+                           isRunning=lambda: False)
+
+
+def test_in_extraction_review_writes_the_kept_proposals_not_the_cache_rows(prepared, monkeypatch):
+    """@brief Positivo: il pacchetto contiene cio' che la revisione ha tenuto, box corretto compreso.
+
+    Il `detector-*.json` in cache nasce PRIMA della revisione: copiarlo dopo
+    l'estrazione riporterebbe il falso positivo cancellato e perderebbe il
+    riquadro corretto. Ne' `_on_extracted` puo' poi sovrascriverlo.
+    """
+    window, cache, calls, _started, _warnings = prepared
+    window._extraction_started_stamp = '20260101-000000'
+    window._reviewed_this_extraction = False
+    _save_evidence(cache, [_proposal(1), _proposal(2, box=(.5, .5, .7, .7))])
+    edited = _proposal(1, box=(.21, .2, .41, .4))
+    _answer(monkeypatch, QDialog.DialogCode.Accepted, [edited])
+    delivered = []
+    monkeypatch.setattr(window, '_extract_worker', _fake_extract_worker(delivered, 'vlm'))
+    window._on_review_requested(_photo_png(), [_proposal(1), _proposal(2, box=(.5, .5, .7, .7))],
+                                LENGTH, WIDTH)
+    assert delivered == [[edited]], 'il worker riceve le proposte tenute'
+    assert window._reviewed_this_extraction is True
+    bundle = inv.load_review_bundle(window._project_dir())
+    assert bundle is not None and bundle.proposals == [edited]
+    assert bundle.detector == 'vlm'
+    assert (bundle.body_length_mm, bundle.body_width_mm) == (LENGTH, WIDTH)
+    assert bundle.photo_path is not None and bundle.photo_path.read_bytes() == _photo_png()
+    assert 'tenute dalla revisione salvate' in window.ai_progress_text.toPlainText()
+    # La fine dell'estrazione non deve riportare le righe grezze della cache.
+    window._on_extracted(_params())
+    assert inv.load_review_bundle(window._project_dir()).proposals == [edited]
+    assert calls == []
+    assert window.btn_reopen_review.isEnabled()
+
+
+def test_extraction_without_review_dialog_still_copies_the_cache_rows(prepared):
+    """@brief Negativo: senza revisione in questa estrazione il ripiego dalla cache resta attivo."""
+    window, cache, *_ = prepared
+    window._extraction_started_stamp = '20260101-000000'
+    window._reviewed_this_extraction = False
+    _save_evidence(cache, [_proposal(1), _proposal(2, box=(.5, .5, .7, .7))])
+    window._on_extracted(_params())
+    assert [r['_id'] for r in inv.load_review_bundle(window._project_dir()).proposals] == [1, 2]
+
+
+def test_review_that_keeps_nothing_marks_the_extraction_reviewed_and_copies_nothing(prepared, monkeypatch):
+    """@brief Tenere zero proposte non scrive il pacchetto e non lascia copiare la cache."""
+    window, cache, *_ = prepared
+    window._extraction_started_stamp = '20260101-000000'
+    window._reviewed_this_extraction = False
+    _save_evidence(cache, [_proposal(1)])
+    _answer(monkeypatch, QDialog.DialogCode.Accepted, [])
+    delivered = []
+    monkeypatch.setattr(window, '_extract_worker', _fake_extract_worker(delivered))
+    window._on_review_requested(_photo_png(), [_proposal(1)], LENGTH, WIDTH)
+    assert delivered == [[]]
+    assert window._reviewed_this_extraction is True
+    assert not (_bundle_dir(window) / 'proposals.json').exists()
+    assert 'nessuna proposta tenuta' in window.ai_progress_text.toPlainText()
+    window._on_extracted(_params())
+    assert not (_bundle_dir(window) / 'proposals.json').exists(), 'la cache grezza non va copiata'
+
+
+def test_cancelled_in_extraction_review_writes_nothing(prepared, monkeypatch):
+    """@brief Negativo: Annulla consegna None al worker e non tocca la cartella del componente."""
+    window, cache, *_ = prepared
+    window._reviewed_this_extraction = False
+    _answer(monkeypatch, QDialog.DialogCode.Rejected, [])
+    delivered = []
+    monkeypatch.setattr(window, '_extract_worker', _fake_extract_worker(delivered))
+    window._on_review_requested(_photo_png(), [_proposal(1)], LENGTH, WIDTH)
+    assert delivered == [None]
+    assert window._reviewed_this_extraction is False
+    assert not (_bundle_dir(window) / 'proposals.json').exists()
+
+
+def test_new_extraction_resets_the_reviewed_and_synthesized_flags(prepared, monkeypatch):
+    """@brief I flag valgono per una sola analisi: la successiva riparte pulita."""
+    window, *_ = prepared
+    window._reviewed_this_extraction = True
+    window._relaunch_base_synthesized = True
+
+    class _NeverStarts:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError('worker di prova')
+
+    monkeypatch.setattr(gui, 'ExtractWorker', _NeverStarts)
+    profile = dict(model='m', grounding_prompt='', verification_prompt='',
+                   terminal_prompt='', system_prompt='')
+    with pytest.raises(RuntimeError, match='worker di prova'):
+        window._start_extract_worker([], None, profile, 'vlm', None)
+    assert window._reviewed_this_extraction is False
+    assert window._relaunch_base_synthesized is False
+    assert window._extraction_started_stamp is not None
+
+
+def test_relaunch_after_restart_keeps_a_matrix_component_in_matrix_layout(prepared):
+    """@brief Positivo: la base sintetizzata segue la disposizione dei campi, non un castellated fisso.
+
+    Negativo implicito: con il gruppo castellated spento, `_apply_extracted_result`
+    riempie righe/colonne dagli spin box e il gruppo resta spento.
+    """
+    window, _cache, calls, started, warnings = prepared
+    inv.save_review_bundle(window._project_dir(), [_proposal(1)], _photo_png(), LENGTH, WIDTH)
+    _retype_name(window)
+    window.group_castellated.setChecked(False)
+    window.field_rows.setValue(3)
+    window.field_cols.setValue(5)
+    window.field_pitch.setValue(1.27)
+    bundle = inv.load_review_bundle(window._project_dir())
+    base = window._relaunch_base_params(bundle)
+    assert base.layout == 'matrix' and (base.rows, base.cols, base.pitch_mm) == (3, 5, 1.27)
+    assert base.row_spacing_mm == window.field_row_spacing.value()
+    assert base.pad_diameter_mm == window.field_pad.value()
+    assert base.drill_mm == window.field_drill.value()
+    window.btn_relaunch_inventory.click()
+    _run_worker(window)
+    assert warnings == [] and len(calls) == 1
+    assert not window.group_castellated.isChecked()
+    assert (window.field_rows.value(), window.field_cols.value()) == (3, 5)
+    assert [c.name for c in window.castellated_components] == ['R1 (resistor)']
+    assert started == []
+    # Positivo speculare: con il gruppo acceso la base resta castellated.
+    window.group_castellated.setChecked(True)
+    window._last_extracted = None
+    assert window._relaunch_base_params(bundle).layout == 'castellated'
+
+
+def test_second_relaunch_after_a_failed_one_still_does_not_auto_generate(prepared, monkeypatch):
+    """@brief La base sintetizzata resta tale: un secondo rilancio non genera da solo.
+
+    Dopo il primo rilancio `_last_extracted` non e' piu' None (porta la base
+    sintetizzata), quindi il criterio non puo' essere quello.
+    """
+    window, _cache, calls, started, warnings = prepared
+    inv.save_review_bundle(window._project_dir(), [_proposal(1)], _photo_png(), LENGTH, WIDTH)
+    _retype_name(window)
+    import kicadgen.services.openrouter as openrouter
+
+    def failing(**kwargs):
+        raise RuntimeError('rete assente')
+
+    monkeypatch.setattr(openrouter, 'call_tool', failing)
+    window.btn_relaunch_inventory.click()
+    _run_worker(window)
+    assert len(warnings) == 1 and 'rete assente' in warnings[0]
+    assert window._last_extracted is not None and window._relaunch_base_synthesized is True
+    assert started == []
+    monkeypatch.setattr(openrouter, 'call_tool', _answer_call(calls))
+    window.btn_relaunch_inventory.click()
+    _run_worker(window)
+    assert len(calls) == 1
+    assert started == [], 'seconda base sintetizzata: ancora nessuna generazione automatica'
+    assert 'senza avviare la generazione automatica' in window.ai_progress_text.toPlainText()
+
+
+def test_relaunch_after_a_real_extraction_auto_generates(prepared, monkeypatch):
+    """@brief Negativo del precedente: con un'estrazione vera la generazione automatica parte."""
+    window, cache, calls, started, warnings = prepared
+    _save_evidence(cache, [_proposal(1)])
+    window._relaunch_base_synthesized = False
+    window._on_extracted(_params())
+    window.btn_relaunch_inventory.click()
+    _run_worker(window)
+    assert warnings == [] and len(calls) == 1
+    assert len(started) == 1
+
+
+def test_synthesized_relaunch_closes_with_an_inventory_message_not_an_extraction_one(prepared, monkeypatch):
+    """@brief La modale finale dice cosa e' successo: un rilancio, non un'estrazione «a confidenza low»."""
+    window, _cache, _calls, _started, _warnings = prepared
+    inv.save_review_bundle(window._project_dir(), [_proposal(1)], _photo_png(), LENGTH, WIDTH)
+    _retype_name(window)
+    shown = []
+    monkeypatch.setattr(QMessageBox, 'information', lambda *args: shown.append((args[1], args[2])))
+    window._auto_after_extraction = False
+    monkeypatch.setattr(window, '_advanced_user', lambda: True)
+    window.btn_relaunch_inventory.click()
+    _run_worker(window)
+    titles = [title for title, _text in shown]
+    assert 'Inventario rilanciato' in titles
+    assert 'Estrazione completata' not in titles
+    assert not any('Confidenza' in text for _title, text in shown)
+
+
+def test_extraction_setup_failure_restores_the_idle_ui(prepared, monkeypatch):
+    """@brief Un'eccezione fra _begin_ai_run e worker.start() non lascia i tab spenti."""
+    window, _cache, _calls, _started, warnings = prepared
+    monkeypatch.setattr(window, '_selected_documents', lambda: ([], None))
+    monkeypatch.setattr(window, '_photo_detector_options', lambda: ('vlm', None))
+
+    class _Broken:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError('costruttore rotto')
+
+    monkeypatch.setattr(gui, 'ExtractWorker', _Broken)
+    window._extract_with_ai()
+    assert window.tabs.isEnabled()
+    assert window.btn_extract_ai.isEnabled()
+    assert len(warnings) == 1 and 'costruttore rotto' in warnings[0]
+
+
+def test_relaunch_setup_failure_restores_the_idle_ui(prepared, monkeypatch):
+    """@brief Stessa garanzia per il rilancio: il worker che non nasce non blocca la finestra."""
+    window, _cache, _calls, _started, warnings = prepared
+    inv.save_review_bundle(window._project_dir(), [_proposal(1)], _photo_png(), LENGTH, WIDTH)
+    _retype_name(window)
+
+    class _Broken:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError('costruttore rotto')
+
+    monkeypatch.setattr(gui, 'ReconcileWorker', _Broken)
+    window.btn_relaunch_inventory.click()
+    assert window.tabs.isEnabled()
+    assert window.btn_extract_ai.isEnabled()
+    assert window.btn_relaunch_inventory.isEnabled(), 'il pacchetto e\' ancora valido: si puo\' riprovare'
+    assert len(warnings) == 1 and 'costruttore rotto' in warnings[0]
+
+
+def test_name_change_during_a_run_keeps_the_analysis_buttons_disabled(prepared, monkeypatch):
+    """@brief Cambiare nome mentre un worker gira non riaccende estrazione, revisione e rilancio."""
+    from types import SimpleNamespace
+    window, *_ = prepared
+    inv.save_review_bundle(window._project_dir(), [_proposal(1)], _photo_png(), LENGTH, WIDTH)
+    _retype_name(window)
+    assert window.btn_extract_ai.isEnabled() and window.btn_reopen_review.isEnabled()
+    window.btn_extract_ai.setEnabled(False)
+    window.btn_reopen_review.setEnabled(False)
+    window.btn_relaunch_inventory.setEnabled(False)
+    window._extract_worker = SimpleNamespace(isRunning=lambda: True)
+    try:
+        window.field_name.setText('Componente_di_prova_2')
+        window.field_name.setText('Componente_di_prova')
+        assert not window.btn_extract_ai.isEnabled()
+        assert not window.btn_reopen_review.isEnabled()
+        assert not window.btn_relaunch_inventory.isEnabled()
+    finally:
+        window._extract_worker = None
+    # Negativo: a worker fermo il cambio nome riabilita come prima.
+    window.field_name.setText('Componente_di_prova_2')
+    window.field_name.setText('Componente_di_prova')
+    assert window.btn_extract_ai.isEnabled() and window.btn_reopen_review.isEnabled()
+
+
+def test_bundle_without_photo_disables_both_buttons_and_warns_neutrally(prepared):
+    """@brief Senza foto calibrata (ne' su disco ne' in memoria) i pulsanti restano spenti."""
+    window, _cache, _calls, _started, warnings = prepared
+    inv.save_review_bundle(window._project_dir(), [_proposal(1)], _photo_png(), LENGTH, WIDTH)
+    (_bundle_dir(window) / 'photo.png').unlink()
+    assert not list(_bundle_dir(window).glob('*.png'))
+    window._photo_png = None
+    _retype_name(window)
+    assert not window.btn_reopen_review.isEnabled()
+    assert not window.btn_relaunch_inventory.isEnabled()
+    # L'avviso, se raggiunto direttamente, non parla di «rilancio».
+    bundle = inv.load_review_bundle(window._project_dir())
+    assert bundle.photo_path is None
+    assert window._review_photo(bundle) is None
+    assert len(warnings) == 1 and 'rilanci' not in warnings[0].lower()
+    # Positivo: con la foto in memoria i pulsanti si riaccendono.
+    window._photo_png = _photo_png()
+    _retype_name(window)
+    assert window.btn_reopen_review.isEnabled() and window.btn_relaunch_inventory.isEnabled()
+
+
 def test_reopen_button_sits_at_the_bottom_of_the_project_tab(window):  # noqa: F811
     """@brief «Un pulsante in basso nella scheda principale»: ultimo nella scheda, non fra gli strumenti.
 

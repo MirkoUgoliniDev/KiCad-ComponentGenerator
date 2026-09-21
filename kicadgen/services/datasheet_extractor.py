@@ -1203,6 +1203,10 @@ def _components_3d(raw: Optional[Sequence[dict]]) -> Optional[list[dict]]:
         for key in ('_yolo_class', '_yolo_confidence', '_yolo_original_box', '_geometry_source',
                     'presence_confidence', 'class_confidence', '_yolo_proposal_id',
                     '_yolo_class_ambiguous', '_yolo_review_only', '_yolo_origin',
+                    # Riquadro tracciato o ritoccato da una persona: e' la
+                    # decisione di presenza del revisore e deve arrivare al
+                    # componente finale, non fermarsi ai candidati inviati.
+                    '_yolo_manual_box',
                     '_package_verified', '_orientation_verified', 'pin_count_confidence', 'pin_count_source',
                     'class', 'component_id', 'source_candidate_ids', 'terminal_count', 'terminal_layout',
                     'terminal_count_basis', 'lead_count', 'lead_count_complete', 'lead_count_confidence',

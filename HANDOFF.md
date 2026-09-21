@@ -3556,3 +3556,110 @@ board_edit_lifecycle 26, yolo_review_wiring 4, i18n 7, documentation 1.
 
 Chiudere l'app, riaprirla, scrivere solo il nome: i due pulsanti in fondo
 devono accendersi se `photo-review/proposals.json` esiste in quella cartella.
+
+# 2026-09-21 13:30 — «scatena degli agenti esperti e ricontrolla tutto»
+
+Commit precedente: `2b0ec41`. Quattro revisori in sola lettura sui tre
+commit della mattina (dialogo YOLO + servizio pacchetto; dialogo
+post-inventario; cablaggio in `main_window`; `kicad_models`), poi quattro
+correttori su file disgiunti. Tutti i difetti sotto sono stati **riprodotti
+con sonde** dai revisori prima di correggerli, non dedotti.
+
+## Difetti veri trovati e corretti
+
+1. **Le proposte riviste nell'estrazione fresca non finivano nel pacchetto**
+   (`main_window._on_review_requested`): `detector-*.json` viene scritto
+   PRIMA della revisione, quindi `photo-review/proposals.json` prendeva le
+   righe non riviste (i falsi positivi eliminati tornavano; i riquadri
+   modificati sparivano; il rilancio pagava per l'insieme sbagliato). Ora
+   `_store_reviewed_proposals(kept, …)` scrive il pacchetto dalle proposte
+   tenute e alza `_reviewed_this_extraction`; `_store_extraction_review_bundle`
+   resta un ripiego per le corse senza finestra di revisione. Test: tenute
+   [1] con riquadro modificato → il pacchetto contiene esattamente quelle e
+   `_on_extracted` non le ricopre.
+2. **Due `closeEvent` in `MainWindow`**: il secondo oscurava il primo, quindi
+   solo il worker dei terminali bloccava la chiusura; chiudere con
+   estrazione/riconciliazione/CAD in corso distruggeva un `QThread` attivo
+   (abort Qt). Uno solo, con il ramo terminali prima del generale. Nuovo
+   `tests/test_main_window_close_guard.py` (7).
+3. **Riquadri piccoli alterati da un clic** (`yolo_review_dialog`): sotto
+   `2·HANDLE_RADIUS_PX + MIN_BOX_PX` le maniglie d'angolo coprivano l'interno
+   e `_edited_rect` allargava il riquadro anche con delta 0 → un 0402
+   cliccato diventava «manuale» e perdeva la misura OpenCV. Ora sotto
+   `SMALL_BOX_PX` l'interno e' solo spostamento e il pavimento e'
+   `min(MIN_BOX_PX, lato)`: un riquadro non cresce mai da solo.
+4. **Identita' per marcatura letterale su corrispondenza di sottostringa**
+   (`kicad_models`): marcatura `…-7A` con in libreria solo `…-7AU.step` →
+   `auto_matched`. Nuova `_marked_model_is_named` (stem normalizzato UGUALE
+   a un token della marcatura) usata per l'identita'; la sottostringa resta
+   per la sola scoperta/provvisorio. Negativo aggiunto.
+5. **`_relaunch_base_params` con `layout='castellated'` fisso**: il rilancio
+   dopo riavvio su un componente a matrice ribaltava il layout e
+   `_apply_extracted_result` falliva su `setValue(None)`. Ora segue
+   `_is_castellated()` e per la matrice legge i campi.
+6. **`synthesized` ricavato da `_last_extracted is None`** ma la base
+   sintetizzata veniva assegnata a `_last_extracted`: un secondo rilancio (o
+   dopo uno fallito) avviava la generazione automatica su una base mai
+   estratta. Flag esplicito `_relaunch_base_synthesized`.
+
+## Rischi corretti
+
+- `mark_manual` svuotava `_yolo_clipped_sides` anche per un puro
+  spostamento: ora cade solo il lato trascinato (segnale `box_edited(int,
+  tuple)` porta la maniglia). Un riquadro toccato a mano azzera
+  `_yolo_review_only` (la mano del revisore E' la decisione di presenza,
+  dichiarato nel docstring; `_yolo_origin_before_manual` conserva l'origine)
+  e il PROMPT spiega `_yolo_manual_box`; il flag arriva al componente finale
+  (`_normalize` con `manual_ids`, whitelist in `datasheet_extractor`).
+- `_valid_proposal_row` ora richiede `_id` int, box in [0,1] con x0<x1 e
+  y0<y1, dedup per `_id`: un file corrotto non fa piu' fallire l'intera
+  riconciliazione. `load_saved_detector_proposals` prende la foto PIU' VICINA
+  ≥ stamp (prima: la piu' recente). Letture JSON con `utf-8-sig` (BOM di
+  Notepad). Nuovo `tests/test_review_bundle_service.py` (16).
+- `photo_review_dialog`: gli slot dei campi erano lambda con default —
+  alla distruzione anomala (uscita con la modale aperta) `editingFinished`
+  arrivava dal distruttore C++ a una lambda gia' svuotata → abort PyQt
+  (riprodotto: rc 134). Ora metodi legati + `sender().objectName()`; test di
+  regressione in sottoprocesso. `hideEvent` spontaneo (riduci a icona) non
+  chiude piu' la modale. Ctrl-clic seleziona il rettangolo cliccato, non
+  l'indice piu' basso.
+- `main_window`: `try` intorno a TUTTA la preparazione del worker (ctor,
+  overlay, tab) in `_start_extract_worker`/`_start_reconcile_worker`; il
+  cambio nome durante un lavoro non riaccende i pulsanti; avviso neutro
+  «Foto calibrata mancante» e pulsanti spenti se manca la foto; finestra di
+  chiusura «Inventario rilanciato» dopo un rilancio sintetizzato.
+- `_band_is_homogeneous` usava `NAME_TIEBREAK_MARGIN` su una grandezza
+  diversa (inviluppo modello-modello) spacciandola per «la stessa tolleranza
+  del pareggio». Ora: scarto relativo per asse di ogni membro dal lato
+  MISURATO, dispersione ≤ margine — stessa unita' e stessa costante della
+  banda, nessun numero nuovo. Fixture run0004 invariata (1 auto / 3
+  provvisori / 36 revisione / 15 irrisolti con presenza high). La
+  separazione fragile ESP-WROOM-02/C3 (0.0416 = 83 % del margine) e' ORA
+  dichiarata e asserita nel test (prima l'handoff lo affermava a torto:
+  correzione). `_tie_band([])` → None.
+
+## Non corretto, dichiarato
+
+- `STILL_CLICK_PX=0.5`: uno spostamento press→release di 1 px e' ancora una
+  modifica (un valore piu' alto renderebbe impossibili i ritocchi sotto i
+  10 px). Contratto lasciato com'e'.
+- `model_review`/`render_placeholder` sono il registro del matcher al
+  momento dell'abbinamento; `model_match.status` e' l'unica fonte per i
+  consumatori (documentato in `attach_models`); step_generator non li
+  aggiorna quando riscrive `import_failed`.
+- La costante `0.12` e la regex `SOT-223` nell'eccezione morfologica
+  (`kicad_models` ~1488) sono preesistenti e senza derivazione dichiarata.
+- Il ripiego dalla cache comune dopo un riavvio accetta il JSON piu'
+  recente qualunque sia il componente (raggiungibile solo senza pacchetto).
+- Chiave `ui:Componente` era duplicata in `i18n` (mia, delle 10:30): rimossa.
+
+## Test
+
+File per file nel contenitore, 108 file: **~3020 passati**, nessun rosso
+oltre ai due `[castellated]` preesistenti. Conteggi nuovi:
+`test_yolo_review_dialog` 22 (+7), `test_review_bundle_service` 16 (nuovo),
+`test_reopen_detector_review` 32 (+13), `test_main_window_close_guard` 7
+(nuovo), `test_photo_review_dialog` 50 (+9), `test_photo_review_list` 19
+(+4), `test_kicad_model_candidates_backend`/`presence_gate_replay`/
+`kicad_models` +3. `PROMPT_VERSION` non cambiato: la chiave di cache include
+il testo del prompt, quindi le risposte vecchie non vengono rigiocate.

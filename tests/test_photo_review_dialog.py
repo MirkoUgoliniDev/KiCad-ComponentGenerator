@@ -14,7 +14,7 @@ pytest.importorskip("PyQt6")
 from PyQt6.QtCore import QBuffer, QByteArray, QIODevice, QPoint, QPointF, Qt
 from PyQt6.QtGui import QColor, QImage, QMouseEvent, QWheelEvent
 from PyQt6.QtTest import QSignalSpy, QTest
-from PyQt6.QtWidgets import QApplication, QDialog, QDialogButtonBox
+from PyQt6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QGraphicsItem
 
 from kicadgen.gui.photo_review_dialog import PhotoReviewDialog, PhotoTransform
 
@@ -388,6 +388,91 @@ def test_the_quit_promise_is_released_when_the_measurement_thread_ends(dialog, a
         app.aboutToQuit.disconnect(worker.wait)
 
 
+_TEARDOWN_SCRIPT = """
+import gc, os, sys
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
+from PyQt6.QtGui import QColor, QImage
+from PyQt6.QtTest import QTest
+from PyQt6.QtWidgets import QApplication
+from kicadgen.gui.photo_review_dialog import PhotoReviewDialog
+
+app = QApplication([])
+image = QImage(400, 100, QImage.Format.Format_RGB32)
+image.fill(QColor("#243b28"))
+data = QByteArray()
+buffer = QBuffer(data)
+buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+image.save(buffer, "PNG")
+components = [dict(name="U1", kind="ic", x_mm=-5.0, y_mm=2.0, length_mm=8.0,
+                   width_mm=2.0, height_mm=1.5, rotation_deg=90.0)]
+dialog = PhotoReviewDialog(bytes(data), components, 40, 20)
+dialog.show()
+app.processEvents()
+dialog.component_list.setCurrentRow(0)
+dialog.open_parameters()
+dialog.parameters_dialog.activateWindow()
+app.processEvents()
+dialog.text_fields["name"].setFocus()
+app.processEvents()
+QTest.keyClicks(dialog.text_fields["name"], "typed")
+assert dialog.text_fields["name"].hasFocus(), "the editor never took real focus"
+if sys.argv[1] == "drop":
+    del dialog
+    gc.collect()
+    app.processEvents()
+print("SURVIVED")
+"""
+
+
+@pytest.mark.parametrize("mode", ["drop", "quit"])
+def test_abnormal_teardown_with_a_focused_editor_does_not_abort(mode):
+    """@brief Regression: the focused line edit emitting from its destructor must not abort.
+
+    An application quitting with the modal up, or the last reference to the
+    editor being dropped, destroys the dialog from C++ without hideEvent or
+    closeEvent: the focused QLineEdit then emits ``editingFinished`` from its
+    destructor. Closure slots were called with their defaults already torn
+    down (TypeError → PyQt abort, exit 134); bound-method slots are dropped
+    by PyQt together with the receiver. The process must end normally in
+    both modes, with and without an explicit ``del`` + ``gc.collect()``.
+    """
+    result = subprocess.run([sys.executable, "-c", _TEARDOWN_SCRIPT, mode],
+                            capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stderr
+    assert "SURVIVED" in result.stdout
+    assert "TypeError" not in result.stderr and "Aborted" not in result.stderr
+
+
+def test_field_slots_resolve_their_key_from_the_sender(dialog):
+    """@brief Positive: a field signal commits to the key of the emitting widget only.
+
+    The slots are bound methods shared by every field, so the key must come
+    from ``sender().objectName()``: an edit to ``kind`` must not land in
+    ``name`` or ``marking``, and a numeric edit must reach its own key.
+    """
+    dialog.component_list.setCurrentRow(1)
+    before = deepcopy(dialog.get_components()[1])
+    dialog.text_fields["kind"].setText("inductor")
+    dialog.text_fields["kind"].editingFinished.emit()
+    dialog.fields["height_mm"].setValue(2.2)
+    actual = dialog.get_components()[1]
+    assert actual["kind"] == "inductor"
+    assert actual["height_mm"] == 2.2
+    assert (actual["name"], actual["marking"]) == (before["name"], before["marking"])
+    assert (actual["length_mm"], actual["width_mm"]) == (before["length_mm"], before["width_mm"])
+
+
+def test_field_slots_ignore_a_direct_call_without_a_sender(dialog):
+    """@brief Negative: called outside a signal there is no field to read, so nothing changes."""
+    dialog.component_list.setCurrentRow(1)
+    before = dialog.get_components()
+    dialog.text_fields["name"].setText("would be lost")
+    dialog._text_field_finished()
+    dialog._number_field_changed(99.0)
+    assert dialog.get_components() == before
+
+
 def _handle_view_point(dialog, item, edge):
     """Viewport pixel of a resize grip; grips ignore zoom, so the center is enough."""
     return dialog.view.mapFromScene(item.handle(edge).scenePos())
@@ -520,6 +605,141 @@ def test_resize_stops_at_the_declared_minimum_instead_of_inverting(dialog, app):
     # The outline is still a proper rectangle inside the photo, not flipped.
     bounds = item.photo_bounds()
     assert bounds.width() == pytest.approx(MIN_HANDLE_SIZE_MM * 10)
+
+
+def _scene_polygon_mm(dialog, item):
+    """Corners of the outline in board millimeters, in polygon order."""
+    transform = dialog.photo_transform
+    return [transform.pixel_to_mm(p.x(), p.y()) for p in item.mapToScene(item.polygon())]
+
+
+def test_corner_handle_at_37_degrees_edits_both_local_axes_and_keeps_a_rectangle(dialog, app):
+    """@brief The (1, 1) corner grip of a 37 degree part grows length AND width.
+
+    The pointer displacement is projected on both rotated local axes through
+    the anisotropic pixel scales; the opposite corner is the anchor, so the
+    center moves by half of each growth along its own axis. Afterwards the
+    outline is still a rectangle (metric right angles, opposite sides equal)
+    at the same 37 degrees: the resize never shears or re-rotates it.
+    """
+    angle = 37
+    dialog.component_list.setCurrentRow(1)
+    dialog.fields["rotation_deg"].setValue(angle)
+    item = dialog._items[1]
+    before = deepcopy(item.component)
+    anchor = _scene_polygon_mm(dialog, item)[0]
+    displacement = _drag_handle(dialog, app, item, (1, 1), QPoint(22, 13))
+    c, s = math.cos(math.radians(angle)), math.sin(math.radians(angle))
+    dx_mm, dy_mm = displacement.x() / 10, displacement.y() / 5
+    grown_u = dx_mm * c + dy_mm * s
+    grown_v = -dx_mm * s + dy_mm * c
+    assert grown_u > 0 and grown_v > 0
+    actual = dialog.get_components()[1]
+    assert actual["length_mm"] == pytest.approx(before["length_mm"] + grown_u)
+    assert actual["width_mm"] == pytest.approx(before["width_mm"] + grown_v)
+    assert actual["x_mm"] == pytest.approx(before["x_mm"] + grown_u / 2 * c - grown_v / 2 * s)
+    assert actual["y_mm"] == pytest.approx(before["y_mm"] + grown_u / 2 * s + grown_v / 2 * c)
+    assert actual["rotation_deg"] == angle
+    corners = _scene_polygon_mm(dialog, item)
+    length_vector = corners[1] - corners[0]
+    width_vector = corners[2] - corners[1]
+    assert math.hypot(length_vector.x(), length_vector.y()) == pytest.approx(actual["length_mm"])
+    assert math.hypot(width_vector.x(), width_vector.y()) == pytest.approx(actual["width_mm"])
+    assert length_vector.x() * width_vector.x() + length_vector.y() * width_vector.y() == pytest.approx(0, abs=1e-9)
+    assert math.degrees(math.atan2(length_vector.y(), length_vector.x())) == pytest.approx(angle)
+    # The opposite corner (-1, -1) is the anchor of a corner stroke.
+    assert (corners[0].x(), corners[0].y()) == pytest.approx((anchor.x(), anchor.y()))
+    for key in ("length_mm", "width_mm", "x_mm", "y_mm"):
+        assert dialog.fields[key].value() == pytest.approx(actual[key], abs=1e-6)
+
+
+def test_corner_handle_at_37_degrees_moving_along_one_local_axis_leaves_the_other(dialog, app):
+    """@brief Negative: a corner stroke parallel to the local length axis does not touch width.
+
+    The screen displacement is chosen along the rotated u direction, so its
+    projection on v is zero: only length_mm changes, even though the stroke
+    has both a horizontal and a vertical screen component.
+    """
+    angle = 37
+    dialog.component_list.setCurrentRow(1)
+    dialog.fields["rotation_deg"].setValue(angle)
+    item = dialog._items[1]
+    before = deepcopy(item.component)
+    # 2 mm along +u in board mm, converted through the anisotropic scales to
+    # a viewport offset (the view is at fit scale, so scene px = crop px).
+    u_mm = 2.0
+    scene_offset = dialog.photo_transform.local_to_item_pixel(angle, u_mm, 0)
+    scale = dialog.view.transform().m11()
+    offset = QPoint(round(scene_offset.x() * scale), round(scene_offset.y() * scale))
+    displacement = _drag_handle(dialog, app, item, (1, 1), offset)
+    c, s = math.cos(math.radians(angle)), math.sin(math.radians(angle))
+    dx_mm, dy_mm = displacement.x() / 10, displacement.y() / 5
+    grown_u = dx_mm * c + dy_mm * s
+    grown_v = -dx_mm * s + dy_mm * c
+    # Rounding to whole viewport pixels leaves a sub-pixel v component.
+    assert abs(grown_v) < .05 < grown_u
+    actual = dialog.get_components()[1]
+    assert actual["length_mm"] == pytest.approx(before["length_mm"] + grown_u)
+    assert actual["width_mm"] == pytest.approx(before["width_mm"] + grown_v)
+    assert abs(actual["width_mm"] - before["width_mm"]) < .05
+
+
+@pytest.mark.parametrize("angle", [90, 37])
+def test_width_floor_holds_at_rotation(dialog, app, angle):
+    """@brief Pulling the (0, 1) width grip through the part at any rotation stops at the floor.
+
+    The clamp is applied in the LOCAL frame: the stroke is aimed along the
+    rotated -v direction on screen so it crosses the opposite width edge,
+    and width_mm ends exactly at MIN_HANDLE_SIZE_MM with the far edge fixed;
+    length_mm and the rotation are untouched.
+    """
+    from kicadgen.gui.photo_review_dialog import MIN_HANDLE_SIZE_MM
+    dialog.component_list.setCurrentRow(1)
+    dialog.fields["rotation_deg"].setValue(angle)
+    item = dialog._items[1]
+    before = deepcopy(item.component)
+    far = _scene_polygon_mm(dialog, item)[0]      # on the (-1, -1) corner: the -v edge
+    scene_offset = dialog.photo_transform.local_to_item_pixel(angle, 0, -20.0)
+    scale = dialog.view.transform().m11()
+    _drag_handle(dialog, app, item, (0, 1),
+                 QPoint(round(scene_offset.x() * scale), round(scene_offset.y() * scale)))
+    actual = dialog.get_components()[1]
+    assert actual["width_mm"] == pytest.approx(MIN_HANDLE_SIZE_MM)
+    assert actual["length_mm"] == before["length_mm"]
+    assert actual["rotation_deg"] == angle
+    c, s = math.cos(math.radians(angle)), math.sin(math.radians(angle))
+    # Center moved from the old center towards the -v edge by (w_before - floor) / 2.
+    shift = (before["width_mm"] - MIN_HANDLE_SIZE_MM) / 2
+    assert actual["x_mm"] == pytest.approx(before["x_mm"] + shift * s)
+    assert actual["y_mm"] == pytest.approx(before["y_mm"] - shift * c)
+    corners = _scene_polygon_mm(dialog, item)
+    assert (corners[0].x(), corners[0].y()) == pytest.approx((far.x(), far.y()))
+    width_vector = corners[2] - corners[1]
+    assert math.hypot(width_vector.x(), width_vector.y()) == pytest.approx(MIN_HANDLE_SIZE_MM)
+    assert dialog.fields["width_mm"].value() == pytest.approx(MIN_HANDLE_SIZE_MM, abs=1e-6)
+
+
+def test_selection_halo_stacks_behind_and_handles_above_the_label(dialog):
+    """@brief Z-order contract: halo behind the status outline, grips above the number label.
+
+    The halo must never cover the status-coloured pen it highlights, and the
+    top-left grip must stay grabbable where the number label sits.
+    """
+    dialog.component_list.setCurrentRow(0)
+    item = dialog._items[0]
+    assert item.halo.flags() & QGraphicsItem.GraphicsItemFlag.ItemStacksBehindParent
+    assert item.halo.parentItem() is item
+    assert item.halo.isVisible()
+    for handle in item.handles.values():
+        assert handle.parentItem() is item
+        assert handle.zValue() > item.number.zValue()
+        assert handle.isVisible()
+    # Negative: the outline itself and the number label do not stack behind
+    # the parent, otherwise the photo would hide them.
+    assert not (item.flags() & QGraphicsItem.GraphicsItemFlag.ItemStacksBehindParent)
+    assert not (item.number.flags() & QGraphicsItem.GraphicsItemFlag.ItemStacksBehindParent)
+    # A selected outline is drawn above unselected neighbours.
+    assert item.zValue() > dialog._items[1].zValue()
 
 
 def test_handle_cursors_follow_the_on_screen_edge_direction(dialog):

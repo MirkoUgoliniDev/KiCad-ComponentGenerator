@@ -963,6 +963,11 @@ def load_saved_detector_proposals(cache_dir):
         included.
     @note A JSON that cannot be read or has no `components` list is skipped,
         not reported as a failure: an older, valid run is still worth reviewing.
+        Files are read as `utf-8-sig`: a byte-order mark left by an editor
+        (Notepad) is not corruption.
+    @throws OSError When `cache_dir` exists but cannot be listed (permissions,
+        a path that is not a directory being replaced under us): that is not
+        a bad file to skip but a folder we cannot look into.
     """
     if not cache_dir:
         return None
@@ -975,16 +980,19 @@ def load_saved_detector_proposals(cache_dir):
         if match:
             entries.setdefault((match['label'], match['suffix']), []).append((match['stamp'], path))
     detector_jsons = sorted(entries.get((DETECTOR_EVIDENCE_LABEL, '.json'), []), reverse=True)
-    photos = sorted(entries.get((INVENTORY_EVIDENCE_LABEL, '-photo.png'), []), reverse=True)
+    photos = entries.get((INVENTORY_EVIDENCE_LABEL, '-photo.png'), [])
     for stamp, path in detector_jsons:
         try:
-            document = json.loads(path.read_text(encoding='utf-8'))
+            document = json.loads(path.read_text(encoding='utf-8-sig'))
         except (OSError, ValueError):
             continue
         rows = document.get('components') if isinstance(document, dict) else None
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
             continue
-        photo_path = next((p for s, p in photos if s >= stamp), None)
+        # The NEAREST photograph not older than the proposals is the one of
+        # the same run: the run writes its photo seconds after its proposals.
+        # A later run's photo is also "not older", but it is another crop.
+        photo_path = min((entry for entry in photos if entry[0] >= stamp), default=(None, None))[1]
         return SavedDetectorProposals(json_path=path, stamp=stamp, proposals=rows,
                                       photo_path=photo_path)
     return None
@@ -1030,18 +1038,42 @@ def _positive_extent(value):
 
 
 def _valid_proposal_row(row):
-    """@brief True when a row is a dict carrying an id and a four-number box.
+    """@brief True when a row is a dict carrying an integer id and a usable box.
 
     @note Only the two keys the reviewer needs to place a box are required;
         everything else is forwarded as saved, so a hand-drawn box with fewer
         detector fields is as valid as a detector one.
+    @note The check is exactly what review_global_inventory will demand of
+        the row later: `_id` a plain int (not a bool, not a string), `_box`
+        four finite numbers inside [0, 1] with left < right and top < bottom.
+        A looser loader accepted rows that the consumer then rejected, and
+        reconcile_saved_proposals raised for the whole set because of one
+        row; here that row is dropped and the rest stays reviewable.
     """
-    if not isinstance(row, dict) or '_id' not in row:
+    if not isinstance(row, dict) or type(row.get('_id')) is not int:
         return False
     box = row.get('_box')
-    return (isinstance(box, (list, tuple)) and len(box) == 4
+    if not (isinstance(box, (list, tuple)) and len(box) == 4
             and all(isinstance(v, (int, float)) and not isinstance(v, bool)
-                    and math.isfinite(v) for v in box))
+                    and math.isfinite(v) and 0 <= v <= 1 for v in box)):
+        return False
+    x0, y0, x1, y1 = box
+    return x0 < x1 and y0 < y1
+
+
+def _valid_proposal_rows(rows):
+    """@brief The rows that pass _valid_proposal_row, one per `_id` (first kept).
+
+    @note Duplicate ids are the other thing the consumer refuses as a whole
+        ("unique integer candidate IDs"); keeping the first occurrence is the
+        same choice the cache loaders make with partial answers.
+    """
+    kept, seen = [], set()
+    for row in rows:
+        if _valid_proposal_row(row) and row['_id'] not in seen:
+            seen.add(row['_id'])
+            kept.append(dict(row))
+    return kept
 
 
 def review_bundle_dir(project_dir):
@@ -1087,11 +1119,18 @@ def save_review_bundle(project_dir, proposals, photo_png, length_mm, width_mm, *
         rows could not be reopened, so it is not written at all.
     @throws OSError When the folder cannot be written.
     @note Offline by construction: nothing here talks to a model. Both files
-        are written atomically (temporary file + replace).
+        are written atomically (temporary file + replace), and in this order:
+        the photograph first, `proposals.json` last. The JSON is the commit
+        point: load_review_bundle reads only the JSON and looks for the
+        photo beside it, so a crash between the two leaves the previous
+        bundle (or none) fully consistent, never new boxes on an old photo.
+    @note Rows that fail the structural check (see _valid_proposal_row) and
+        duplicate ids are dropped before writing, so what is on disk is what
+        the reconciliation will accept.
     """
     if not all(_positive_extent(v) for v in (length_mm, width_mm)):
         raise ValueError('Quote PCB non valide: proposte non salvate.')
-    rows = [dict(row) for row in proposals if _valid_proposal_row(row)]
+    rows = _valid_proposal_rows(proposals)
     if not rows:
         raise ValueError('Nessuna proposta valida (serve almeno un riquadro con _id e _box).')
     folder = review_bundle_dir(project_dir)
@@ -1118,14 +1157,16 @@ def load_review_bundle(project_dir):
         format, non-positive extents, or no valid proposal row.
     @note Never raises on bad content: a broken bundle is the same as no
         bundle, and the buttons that depend on it simply stay disabled. Rows
-        that fail the structural check are dropped, the valid ones are kept
-        (as the cache loader does with partial answers).
+        that fail the structural check or repeat an id are dropped, the valid
+        ones are kept (as the cache loader does with partial answers). The
+        file is read as `utf-8-sig`: a byte-order mark added by an editor
+        (Notepad) must not turn a hand-edited bundle into "no bundle".
     """
     if not project_dir:
         return None
     path = review_bundle_dir(project_dir) / REVIEW_BUNDLE_JSON
     try:
-        document = json.loads(path.read_text(encoding='utf-8'))
+        document = json.loads(path.read_text(encoding='utf-8-sig'))
     except (OSError, ValueError):
         return None
     if not isinstance(document, dict) or document.get('format') != REVIEW_BUNDLE_FORMAT:
@@ -1136,7 +1177,7 @@ def load_review_bundle(project_dir):
     rows = document.get('proposals')
     if not isinstance(rows, list):
         return None
-    rows = [dict(row) for row in rows if _valid_proposal_row(row)]
+    rows = _valid_proposal_rows(rows)
     if not rows:
         return None
     photo_path = path.with_name(REVIEW_BUNDLE_PHOTO)

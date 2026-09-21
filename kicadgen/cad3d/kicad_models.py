@@ -246,10 +246,32 @@ def _marking_model_tokens(component: dict) -> tuple[str, ...]:
 
 
 def _marked_model_matches(path: Path, component: dict) -> bool:
-    """Whether a model filename contains an exact literal identifier from marking."""
+    """Whether a model filename CONTAINS a literal identifier from the marking.
+
+    This is the DISCOVERY key: a substring is enough to put a file in the
+    candidate list, because a vendor library may name a variant by appending
+    a suffix to the marked code. It is not identity evidence -- see
+    _marked_model_is_named for that -- and every consumer that promotes a
+    candidate on the strength of the marking must use the exact form.
+    """
     stem = _normalize(path.stem)
     return any(stem == _normalize(token) or _normalize(token) in stem
                for token in _marking_model_tokens(component))
+
+
+def _marked_model_is_named(path: Path, component: dict) -> bool:
+    """Whether the marking names the model file EXACTLY (normalized stem).
+
+    Identity requires the whole filename stem to equal a marking token. A
+    substring match (marking ``X-Y-1`` on file ``X-Y-1U.step``) is the
+    signature of a different variant with the same prefix, and such variants
+    can differ in geometry (an antenna-connector version versus a PCB-antenna
+    version): they may be discovered and proposed provisionally, never
+    promoted as the identified model. The comparison is between the observed
+    marking and the filename, never against a vendor list.
+    """
+    stem = _normalize(path.stem)
+    return any(stem == _normalize(token) for token in _marking_model_tokens(component))
 
 
 def _marked_model_paths(component: dict, root: Path) -> list[Path]:
@@ -1315,6 +1337,13 @@ def _literal_marking_identity(component, choices, complete, discovery_scope):
     corrispondono letteralmente alla stessa marcatura (varianti) NON sono
     identita': restano una proposta provvisoria (caso negativo).
 
+    Identita' vuol dire che la scritta nomina il file per intero: il gambo
+    normalizzato del nome deve essere UGUALE a un identificatore della
+    marcatura (_marked_model_is_named). Un file che contiene la scritta come
+    sottostringa (marcatura ``X-Y-1``, unico file ``X-Y-1U.step``) e' una
+    variante con lo stesso prefisso, che puo' avere un'altra geometria: entra
+    in lista per la scoperta, ma resta provvisorio (caso negativo).
+
     La regola non nomina alcun modello o marca: dipende dallo scopo della
     scoperta e da grandezze misurate. Presenza 'high' e ricerca completa
     restano richieste, perche' senza il corpo verificato la marcatura non ha
@@ -1325,6 +1354,14 @@ def _literal_marking_identity(component, choices, complete, discovery_scope):
     @param complete True when every structurally compatible model was measured.
     @param discovery_scope The `discovery_scope` recorded by model_candidates.
     @return True when the single literal-marking candidate identifies the body.
+    @note The final `relative_xy_error <= DEFAULT_SIZE_TOLERANCE` check is
+        defence in depth: model_candidates already drops every candidate
+        above the tolerance before ranking, so in production the list never
+        holds one. It is kept because this function is also called on
+        replayed candidate lists (tests, offline reports) where the caller,
+        not model_candidates, built `choices`, and the gate's contract --
+        "beyond the tolerance the marking was read on something else" --
+        must hold on its own.
     """
     if (discovery_scope != "literal_marking_model" or not complete
             or len(choices) != 1
@@ -1334,7 +1371,7 @@ def _literal_marking_identity(component, choices, complete, discovery_scope):
             or component.get("_global_inventory_status") in ("invalid", "rejected")):
         return False
     choice = choices[0]
-    if choice.get("family") != "module" or not _marked_model_matches(Path(choice["path"]), component):
+    if choice.get("family") != "module" or not _marked_model_is_named(Path(choice["path"]), component):
         return False
     try:
         error = float(choice.get("relative_xy_error"))
@@ -1392,8 +1429,10 @@ def _automatic_mechanical(component, choices, complete, basis, discovery_scope=N
     # A literal manufacturer model identifier is stronger than a generic
     # family estimate. Permit the single exact-marking module to be imported
     # automatically, while retaining the dimensional and presence gates above.
+    # Exact means the whole filename stem: a file that merely contains the
+    # marked code is a sibling variant and stays with the provisional path.
     if (declared is None and choices[0]["family"] == "module"
-            and _marked_model_matches(path, component)):
+            and _marked_model_is_named(path, component)):
         return True
     return declared is not None and counts == {declared} and choices[0]["family"] is not None
 
@@ -1412,9 +1451,11 @@ def _provisional_geometry_choice(component, choices, complete, basis):
     relative_xy_error lies within NAME_TIEBREAK_MARGIN of the best one, i.e.
     all the solids the top view cannot tell apart.  Two situations qualify,
     and they are opposites: either the band is homogeneous (one family, and
-    every member has the same XY envelope within NAME_TIEBREAK_MARGIN), so the
-    residual doubt is about identity and variant rather than about the XY
-    geometry being previewed; or the band holds a single candidate, meaning
+    on each axis the members' relative deviations from the measured side
+    agree within NAME_TIEBREAK_MARGIN, i.e. the photo cannot tell any two of
+    them apart; see _band_is_homogeneous), so the residual doubt is about
+    identity and variant rather than about the XY geometry being previewed;
+    or the band holds a single candidate, meaning
     the measurement separated it from every alternative.  A homogeneous tie
     is allowed on a truncated search, because a tie says nothing about what
     was not measured; a lone band member requires a complete search, since
@@ -1517,7 +1558,8 @@ def _provisional_geometry_choice(component, choices, complete, basis):
     # niente (restano la marcatura letterale e la morfologia, sopra).
     if len(band) == 1:
         return first if complete and len(choices) >= 2 else None
-    return first if _band_is_homogeneous(band) else None
+    return first if _band_is_homogeneous(
+        band, component.get("length_mm"), component.get("width_mm")) else None
 
 
 def _tie_band(choices):
@@ -1525,8 +1567,9 @@ def _tie_band(choices):
 
     The band is every candidate whose relative_xy_error lies within
     NAME_TIEBREAK_MARGIN of the smallest error in the list, the same criterion
-    model_candidates uses to rank.  None means an error could not be read,
-    in which case no band can honestly be established.
+    model_candidates uses to rank.  None means no band can honestly be
+    established: an error could not be read, or there is no candidate at all
+    (an empty list has no best member to measure the others against).
     """
     errors = []
     for item in choices:
@@ -1537,24 +1580,52 @@ def _tie_band(choices):
         if not math.isfinite(error):
             return None
         errors.append(error)
+    if not errors:
+        return None
     best = min(errors)
     return [item for item, error in zip(choices, errors)
             if error <= best + NAME_TIEBREAK_MARGIN]
 
 
-def _band_is_homogeneous(band):
-    """True when every band member is one family with the same XY envelope.
+def _band_is_homogeneous(band, length_mm, width_mm):
+    """True when the band is one family and the photo cannot tell its members apart on any axis.
 
-    Envelopes are compared pairwise on their sorted XY extents, each pair
-    within NAME_TIEBREAK_MARGIN: the tolerance already used for the two-way
-    tie, applied to every pair so that two members cannot drift twice the
-    margin apart through a third one in the middle.  Any unreadable or
-    non-positive dimension disqualifies the band.
+    Homogeneity is expressed in the SAME quantity as the band itself: the
+    relative deviation of a model side from the MEASURED side of the
+    photograph, ``(model - measured) / measured``, taken per axis (long side
+    to long side, short to short, like size_distance).  relative_xy_error is
+    the worst-axis absolute value of exactly this deviation, and the band
+    admits a member when that error is within NAME_TIEBREAK_MARGIN of the
+    best.  The band therefore says "the photo cannot separate these from the
+    best one"; this function asks the stricter question "can the photo
+    separate any two of them on either axis?", and answers no only when, on
+    each axis, the spread between the largest and the smallest deviation is
+    within the same margin.  Spread (max minus min) rather than pairwise
+    checks: it is the same test for every pair at once, so two members cannot
+    drift twice the margin apart through a third one in the middle.
+
+    No second constant is introduced: a model-versus-model comparison
+    normalised by a model side would be a different quantity from the one
+    the margin was declared for.  Any unreadable or non-positive dimension,
+    on the models or on the measurement, disqualifies the band.
+
+    @param band Candidates returned by _tie_band (non-empty).
+    @param length_mm Photographic side in millimetres, either axis.
+    @param width_mm The other photographic side in millimetres.
+    @return True when one family and every axis has a deviation spread
+        within NAME_TIEBREAK_MARGIN.
     """
     families = {item.get("family") for item in band}
     if len(families) != 1:
         return False
-    extents = []
+    try:
+        measured = sorted(float(v) for v in (length_mm, width_mm))
+    except (TypeError, ValueError):
+        return False
+    if (any(isinstance(v, bool) for v in (length_mm, width_mm))
+            or not all(math.isfinite(v) and v > 0 for v in measured)):
+        return False
+    deviations = []
     for item in band:
         dims = item.get("dimensions_mm")
         if not (isinstance(dims, (list, tuple)) and len(dims) >= 2):
@@ -1565,12 +1636,9 @@ def _band_is_homogeneous(band):
             return False
         if not all(math.isfinite(v) and v > 0 for v in xy):
             return False
-        extents.append(xy)
-    for index, a in enumerate(extents):
-        for b in extents[index + 1:]:
-            if max(abs(x - y) / max(x, y) for x, y in zip(a, b)) > NAME_TIEBREAK_MARGIN:
-                return False
-    return True
+        deviations.append([(model - side) / side for model, side in zip(xy, measured)])
+    return all(max(axis) - min(axis) <= NAME_TIEBREAK_MARGIN
+               for axis in zip(*deviations))
 
 
 def _is_yolo_only_hypothesis(component: dict) -> bool:
@@ -1867,7 +1935,7 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dic
         if automatic:
             choice = result["candidates"][0]
             choice["status"] = "auto_matched"
-            if _marked_model_matches(Path(choice["path"]), component):
+            if _marked_model_is_named(Path(choice["path"]), component):
                 choice["reasons"][-1] = "Exact literal model marking and compatible dimensions; orientation remains reviewable"
                 if result.get("discovery_scope") == "literal_marking_model":
                     result["identity_evidence"] = "literal_marking"
@@ -1910,18 +1978,29 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
         model_match.selected_path so the solid previews the compatible library
         model instead of a generic body, and the report says so with
         model_match.attachment == "provisional" plus attachment_reason, so the
-        picker can replace it. The review state is carried by model_review.
+        picker can replace it.
         Rotation is copied to model_rotation_deg; None or an omitted selection
         rotation clears that override for automatic native-axis inference.
         Explicit zero is retained. Unconfirmed native placement metadata and
         component photo rotation are preserved. The JSON report is stored in
-        model_match. Every component receives model_review (the report status)
-        and render_placeholder: only an unresolved component, for which nothing
-        beyond its rectangle is known, is painted the magenta placeholder colour.
-        review_required and provisional_matched bodies keep the colour sampled
-        from the photograph or supplied by the detector; the review state is
-        expressed by those explicit fields, never by the colour. The magenta of
-        a failed STEP import is decided later by the FreeCAD builder.
+        model_match. Every component also receives model_review (the report
+        status at match time) and render_placeholder: only an unresolved
+        component, for which nothing beyond its rectangle is known, is painted
+        the magenta placeholder colour. review_required and provisional_matched
+        bodies keep the colour sampled from the photograph or supplied by the
+        detector; the review state is expressed by explicit fields, never by
+        the colour. The magenta of a failed STEP import is decided later by the
+        FreeCAD builder.
+    @note Single source of truth for consumers: `model_match.status`.
+        `model_review` and `render_placeholder` are this matcher's own record
+        of the state it produced, written once here and not maintained by
+        later stages: the STEP build may rewrite `model_match.status` to
+        `import_failed` (step_generator reconciles the import log into the
+        report) without touching them, so a reader that needs the current
+        state must read `model_match.status` and treat `model_review` as
+        "what the matcher decided", not "what the component is now". They are
+        kept because review tooling and tests read them as the matcher's
+        verdict; they must not grow new consumers that need liveness.
     """
     note = log or (lambda message: None)
     resolved = 0
@@ -1948,6 +2027,8 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
         # con una proposta provvisoria ha una geometria XY nota e un colore
         # campionato dalla foto, e cancellarlo con il magenta buttava via
         # un'informazione vera per segnalarne una che il report gia' porta.
+        # model_review e' il verdetto del matcher al momento dell'abbinamento;
+        # lo stato corrente e' model_match.status (vedi @note nel docstring).
         component["model_review"] = report["status"]
         component["render_placeholder"] = report["status"] == "unresolved"
         report["render_placeholder"] = component["render_placeholder"]

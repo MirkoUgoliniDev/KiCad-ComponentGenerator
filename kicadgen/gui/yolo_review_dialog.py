@@ -37,6 +37,17 @@ HANDLE_RADIUS_PX = 5
 #: finestra: le due grandezze coincidono solo per caso.
 MIN_BOX_PX = 2 * HANDLE_RADIUS_PX + 2
 
+#: Sotto questa larghezza (o altezza), in pixel della vista, un riquadro non
+#: ha piu' un interno che le maniglie non coprano: ogni zona di presa entra
+#: di HANDLE_RADIUS_PX dentro il bordo, e fra le due opposte deve restare
+#: almeno MIN_BOX_PX di interno libero -- lo stesso lato sotto cui un
+#: riquadro non e' piu' osservabile. Sotto, un clic dentro il riquadro
+#: prenderebbe sempre un angolo, e un componente piccolo sullo schermo
+#: (un 0402 a ~19x10 px) non potrebbe essere scelto senza essere alterato.
+#: Percio' in un riquadro cosi' l'interno sposta e le maniglie si prendono
+#: solo da fuori, dove non c'e' altro da prendere.
+SMALL_BOX_PX = 2 * HANDLE_RADIUS_PX + MIN_BOX_PX
+
 #: Sotto questo spostamento, in pixel della vista, un trascinamento e' un
 #: clic fermo: il riquadro torna esattamente com'era e non viene marcato come
 #: ritoccato. Serve perche' pixel -> normalizzato -> pixel non e' un'identita'
@@ -109,9 +120,11 @@ class BoardView(QWidget):
     selection_changed = pyqtSignal(int)
     box_added = pyqtSignal(tuple)
     #: Indice della proposta il cui `_box` e' stato spostato o ridimensionato
-    #: a mano. Viene emesso solo al rilascio e solo se la geometria e'
-    #: davvero cambiata: un clic fermo su un riquadro non e' una modifica.
-    box_edited = pyqtSignal(int)
+    #: a mano, e la maniglia (di HANDLES o MOVE_HANDLE) con cui: chi riceve
+    #: deve sapere QUALI lati sono stati guardati. Viene emesso solo al
+    #: rilascio e solo se la geometria e' davvero cambiata: un clic fermo su
+    #: un riquadro non e' una modifica.
+    box_edited = pyqtSignal(int, tuple)
 
     def __init__(self, pixmap, proposals, parent=None):
         super().__init__(parent)
@@ -171,16 +184,23 @@ class BoardView(QWidget):
             riquadro scelto, None se il punto non tocca il riquadro scelto.
         @note Solo il riquadro scelto ha maniglie: su una scheda fitta, otto
             maniglie per ogni proposta coprirebbero i corpi vicini.
+        @note Se il riquadro e' piu' stretto di SMALL_BOX_PX su un asse, il
+            suo interno (bordo compreso) e' sempre MOVE_HANDLE e le maniglie
+            si prendono solo da fuori: altrimenti un clic per sceglierlo
+            cadrebbe per forza su un angolo e lo ridimensionerebbe.
         """
         rect = self._selected_rect()
         if rect is None:
             return None
+        inside = rect.contains(position)
+        if inside and (rect.width() < SMALL_BOX_PX or rect.height() < SMALL_BOX_PX):
+            return MOVE_HANDLE
         for handle in HANDLES:
             center = self._handle_center(rect, handle)
             if (abs(position.x() - center.x()) <= HANDLE_RADIUS_PX
                     and abs(position.y() - center.y()) <= HANDLE_RADIUS_PX):
                 return handle
-        return MOVE_HANDLE if rect.contains(position) else None
+        return MOVE_HANDLE if inside else None
 
     def _edited_rect(self, origin, handle, delta):
         """@brief Rettangolo che risulta trascinando `handle` di `delta` pixel.
@@ -188,9 +208,16 @@ class BoardView(QWidget):
         @param origin Rettangolo di partenza, in pixel.
         @param handle Maniglia di HANDLES o MOVE_HANDLE.
         @param delta Spostamento del puntatore dalla pressione.
-        @return Nuovo rettangolo, sempre dentro la foto e mai piu' stretto
-            di MIN_BOX_PX: il lato trascinato si ferma contro l'opposto, non
-            lo scavalca, cosi' un riquadro non puo' rovesciarsi ne' sparire.
+        @return Nuovo rettangolo, sempre dentro la foto: il lato trascinato
+            si ferma contro l'opposto, non lo scavalca, cosi' un riquadro non
+            puo' rovesciarsi ne' sparire.
+        @note Il lato minimo e' MIN_BOX_PX, ma mai piu' del lato che il
+            riquadro ha gia': un riquadro piu' piccolo del minimo (un 0402
+            visto da lontano) puo' essere allargato, non ristretto, e con
+            delta nullo resta esattamente com'e'. Se il minimo fosse
+            assoluto, il solo prendere la maniglia lo farebbe crescere da
+            solo, e una misura della macchina diventerebbe "manuale" senza
+            che nessuno abbia deciso nulla.
         """
         frame = QRectF(self._frame())
         hx, hy = handle
@@ -199,14 +226,16 @@ class BoardView(QWidget):
             dx = min(max(delta.x(), frame.left() - rect.left()), frame.right() - rect.right())
             dy = min(max(delta.y(), frame.top() - rect.top()), frame.bottom() - rect.bottom())
             return rect.translated(dx, dy)
+        min_w = min(MIN_BOX_PX, rect.width())
+        min_h = min(MIN_BOX_PX, rect.height())
         if hx < 0:
-            rect.setLeft(min(max(frame.left(), rect.left() + delta.x()), rect.right() - MIN_BOX_PX))
+            rect.setLeft(min(max(frame.left(), rect.left() + delta.x()), rect.right() - min_w))
         elif hx > 0:
-            rect.setRight(max(min(frame.right(), rect.right() + delta.x()), rect.left() + MIN_BOX_PX))
+            rect.setRight(max(min(frame.right(), rect.right() + delta.x()), rect.left() + min_w))
         if hy < 0:
-            rect.setTop(min(max(frame.top(), rect.top() + delta.y()), rect.bottom() - MIN_BOX_PX))
+            rect.setTop(min(max(frame.top(), rect.top() + delta.y()), rect.bottom() - min_h))
         elif hy > 0:
-            rect.setBottom(max(min(frame.bottom(), rect.bottom() + delta.y()), rect.top() + MIN_BOX_PX))
+            rect.setBottom(max(min(frame.bottom(), rect.bottom() + delta.y()), rect.top() + min_h))
         return rect
 
     def paintEvent(self, event):
@@ -282,7 +311,7 @@ class BoardView(QWidget):
     def mouseReleaseEvent(self, event):
         """@brief Il rilascio conferma la modifica, o il rettangolo tracciato se ha un'area."""
         if self._edit is not None:
-            index, _handle, origin, _start = self._edit
+            index, handle, origin, _start = self._edit
             self._edit = None
             self.setCursor(Qt.CursorShape.ArrowCursor)
             self.update()
@@ -294,7 +323,7 @@ class BoardView(QWidget):
             if moved < STILL_CLICK_PX:
                 self.proposals[index]["_box"] = origin
             else:
-                self.box_edited.emit(index)
+                self.box_edited.emit(index, tuple(handle))
             return
         if self._drag_from is None:
             return
@@ -485,40 +514,73 @@ class YoloReviewDialog(QDialog):
         }
 
     @staticmethod
-    def mark_manual(proposal):
+    def mark_manual(proposal, handle=MOVE_HANDLE):
         """@brief Dichiara che la geometria di `proposal` e' quella vista dall'utente.
 
         @param proposal Proposta modificata sul posto.
+        @param handle Maniglia con cui e' stata modificata: una di HANDLES per
+            un ridimensionamento, MOVE_HANDLE (predefinito) per uno
+            spostamento. Decide quali lati sono stati guardati.
         @note `_yolo_manual_box` ha il prefisso `_yolo_` apposta: e' cio' che
             viene inoltrato nei `detector_metadata` della richiesta al modello,
             che deve sapere che quel riquadro non l'ha misurato una macchina.
             Le marcature che decadono: `_edges_measured` era la misura dei
-            bordi con OpenCV, e ora il bordo e' dove lo ha messo l'occhio;
+            bordi con OpenCV, e ora il bordo e' dove lo ha messo l'occhio.
             `_yolo_clipped_sides` e `_yolo_clipped_recovery` dicevano che
             alcuni lati poggiavano sul confine di una tessera del rilevatore
-            e non erano misure -- se l'utente ha sistemato il riquadro, quei
-            lati sono stati guardati e non sono piu' artefatti. La provenienza
-            precedente resta in `_yolo_source_before_manual`, cosi' si sa se
-            sotto c'era una proposta forte, debole o ricomposta.
+            e non erano misure: decade SOLO il lato che la maniglia ha
+            trascinato, perche' quello e' stato guardato; uno spostamento
+            non cambia l'estensione e lascia la lista com'e', e cosi' il
+            modello continua a sapere che quel bordo e' un artefatto. La
+            ricomposizione (`_yolo_clipped_recovery`) resta dichiarata
+            finche' resta almeno un lato tagliato. La provenienza precedente
+            resta in `_yolo_source_before_manual`, cosi' si sa se sotto
+            c'era una proposta forte, debole o ricomposta.
+        @note Decisione del revisore: la mano di chi guarda E' la decisione
+            di presenza. Una proposta debole (`_yolo_review_only`) che
+            l'utente ha spostato o ridimensionato non e' piu' un'ipotesi a
+            bassa confidenza da verificare -- l'ha verificata l'occhio --
+            percio' `_yolo_review_only` diventa False, e a valle nessuno la
+            tratta piu' da dubbio. L'origine di prima resta in
+            `_yolo_origin_before_manual` (solo se c'era), per la
+            tracciabilita'.
         """
         if not proposal.get("_yolo_manual_box"):
             proposal["_yolo_source_before_manual"] = proposal.get("_source")
         proposal["_yolo_manual_box"] = True
         proposal["_source"] = MANUAL_SOURCE
         proposal.pop("_edges_measured", None)
-        proposal["_yolo_clipped_sides"] = []
-        proposal["_yolo_clipped_recovery"] = False
+        hx, hy = handle
+        looked_at = set()
+        if hx < 0:
+            looked_at.add("left")
+        elif hx > 0:
+            looked_at.add("right")
+        if hy < 0:
+            looked_at.add("top")
+        elif hy > 0:
+            looked_at.add("bottom")
+        clipped = [side for side in (proposal.get("_yolo_clipped_sides") or ())
+                   if side not in looked_at]
+        proposal["_yolo_clipped_sides"] = clipped
+        if not clipped:
+            proposal["_yolo_clipped_recovery"] = False
+        if proposal.get("_yolo_review_only"):
+            if "_yolo_origin" in proposal and "_yolo_origin_before_manual" not in proposal:
+                proposal["_yolo_origin_before_manual"] = proposal["_yolo_origin"]
+            proposal["_yolo_review_only"] = False
 
-    def _box_edited(self, index):
+    def _box_edited(self, index, handle):
         """@brief Un riquadro esistente e' stato spostato o ridimensionato.
 
         @param index Posizione della proposta nella lista in revisione.
+        @param handle Maniglia usata, di HANDLES o MOVE_HANDLE.
         """
         if not 0 <= index < len(self.proposals):
             return
         proposal = self.proposals[index]
         proposal.update(self.geometry_mm(proposal["_box"]))
-        self.mark_manual(proposal)
+        self.mark_manual(proposal, tuple(handle))
         self._refresh()
 
     def _add_box(self, box):
