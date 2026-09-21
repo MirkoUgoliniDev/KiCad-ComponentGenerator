@@ -9,12 +9,20 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-from PyQt6.QtCore import QObject, QPointF, QRunnable, Qt, QThreadPool, pyqtSignal
+from PyQt6.QtCore import (
+    QObject, QPointF, QRunnable, QSignalBlocker, Qt, QThreadPool, QTimer, pyqtSignal,
+)
 from PyQt6.QtGui import QColor, QImage, QPainter, QPixmap, QPolygonF
 from PyQt6.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QHBoxLayout,
-    QLabel, QListWidget, QPushButton, QVBoxLayout,
+    QLabel, QLineEdit, QListWidget, QPushButton, QVBoxLayout,
 )
+
+from ..services.model_library_search import filter_models, library_models
+
+#: Pause after the last keystroke before the library filter runs, so typing a
+#: word does not filter thousands of rows once per letter.
+FILTER_DEBOUNCE_MS = 250
 
 
 def _number(value, default=0.0):
@@ -138,9 +146,34 @@ class _Preview(QRunnable):
         self.signals.ready.emit(self.token, result)
 
 
+class _Index(QRunnable):
+    """@brief Walk the installed KiCad 3D libraries off the GUI thread."""
+
+    def __init__(self, token):
+        """@brief Prepare one library walk identified by a dialog token.
+
+        @param token Value the dialog compares against its current index token.
+        """
+        super().__init__()
+        self.signals = _Signals()
+        self.token = token
+
+    def run(self):
+        """@brief Build the model index; a failed walk yields an empty index."""
+        try:
+            result = list(library_models())
+        except Exception:
+            result = []
+        self.signals.ready.emit(self.token, result)
+
+
 class ModelCandidatesDialog(QDialog):
     """@brief Review at most five ranked suggestions and confirm one STEP model.
 
+    @details Besides the ranked candidates, a KiCad-style filter over the whole
+    installed 3D library lists ``library/stem`` rows for typed fragments; a row
+    chosen there is confirmed exactly like a manually chosen file. The library
+    index is built once per process, off the GUI thread, on the first query.
     @note Inputs are read-only. Apply selected_selection() only after Accepted;
     Accepted with rejected status means preserve the generic placeholder.
     Rotation is a local native-model Z override in degrees, or None to retain
@@ -205,11 +238,39 @@ class ModelCandidatesDialog(QDialog):
             images.addWidget(label)
         layout.addLayout(images)
         self._set_photo(photo_crop)
+        # Library filter: the whole installed library, filtered KiCad-style by
+        # typed fragments, so a model outside the five candidates needs no
+        # folder browsing. The index is built lazily, on the first keystroke.
+        self._library_models = None
+        self._library_results = []
+        self._index_token = 0
+        self._index_worker = None
+        filter_row = QHBoxLayout()
+        self.library_filter = QLineEdit()
+        self.library_filter.setObjectName('library_filter')
+        self.library_filter.setPlaceholderText('Filtra la libreria KiCad: es. wroom usb-c sot23…')
+        self.library_filter.setClearButtonEnabled(True)
+        filter_row.addWidget(self.library_filter, 1)
+        self.library_count_label = QLabel('')
+        self.library_count_label.setTextFormat(Qt.TextFormat.PlainText)
+        filter_row.addWidget(self.library_count_label)
+        layout.addLayout(filter_row)
+        self.library_list = QListWidget()
+        self.library_list.setObjectName('library_list')
+        self.library_list.setMaximumHeight(150)
+        self.library_list.setVisible(False)
+        layout.addWidget(self.library_list)
+        self._filter_timer = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.setInterval(FILTER_DEBOUNCE_MS)
+        self._filter_timer.timeout.connect(self._apply_library_filter)
+        self.library_filter.textChanged.connect(self._filter_text_changed)
+        self.library_list.currentRowChanged.connect(self._library_row_changed)
         self.candidate_list = QListWidget()
         for candidate in self._candidates:
             self.candidate_list.addItem(str(candidate.get('package') or Path(candidate['path']).name))
         layout.addWidget(self.candidate_list)
-        self.details_label = QLabel('Scegli un candidato, un file STEP oppure conserva il segnaposto.')
+        self.details_label = QLabel('Scegli un candidato, filtra la libreria KiCad, scegli un file STEP oppure conserva il segnaposto.')
         self.details_label.setTextFormat(Qt.TextFormat.PlainText)
         self.details_label.setWordWrap(True)
         self.details_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -292,9 +353,98 @@ class ModelCandidatesDialog(QDialog):
             self.photo_label.setPixmap(pixmap.scaled(340, 340, Qt.AspectRatioMode.KeepAspectRatio,
                                                      Qt.TransformationMode.SmoothTransformation))
 
+    def _clear_selection(self, widget):
+        """Deselect a list without re-entering its row handler."""
+        blocker = QSignalBlocker(widget)
+        try:
+            widget.setCurrentRow(-1)
+        finally:
+            blocker.unblock()
+
+    def _filter_text_changed(self, *_):
+        # Coalesce keystrokes; an emptied field clears immediately so the
+        # candidate list is not hidden behind stale rows for a quarter second.
+        if self.library_filter.text().strip():
+            self._filter_timer.start()
+        else:
+            self._filter_timer.stop()
+            self._apply_library_filter()
+
+    def _apply_library_filter(self, *_):
+        """Fill the library list for the current query, indexing on first use."""
+        query = self.library_filter.text().strip()
+        if self._closed:
+            return
+        if not query:
+            self._show_library_results([], 0, '')
+            return
+        if self._library_models is None:
+            self.library_count_label.setText('Indicizzazione della libreria…')
+            self._start_index()
+            return
+        if not self._library_models:
+            self._show_library_results([], 0, 'libreria KiCad non trovata')
+            return
+        result = filter_models(self._library_models, query)
+        if result.truncated:
+            text = f'primi {len(result)} di {result.total}'
+        elif result.total == 0:
+            text = 'nessun modello'
+        elif result.total == 1:
+            text = '1 modello'
+        else:
+            text = f'{result.total} modelli'
+        self._show_library_results(list(result), result.total, text)
+
+    def _show_library_results(self, models, total, text):
+        """Replace the library rows; the current row is intentionally dropped.
+
+        A path already chosen from the library stays selected in the dialog
+        state, exactly like a manually chosen file survives a cancelled picker.
+        """
+        blocker = QSignalBlocker(self.library_list)
+        try:
+            self.library_list.clear()
+            self._library_results = list(models)
+            for model in self._library_results:
+                self.library_list.addItem(model.label)
+        finally:
+            blocker.unblock()
+        self.library_list.setVisible(bool(self._library_results))
+        self.library_count_label.setText(text)
+
+    def _start_index(self):
+        """Walk the library at most once per dialog, never on the GUI thread."""
+        if self._index_worker is not None or self._closed:
+            return
+        self._index_token += 1
+        worker = _Index(self._index_token)
+        self._index_worker = worker
+        worker.signals.ready.connect(self._index_ready)
+        QThreadPool.globalInstance().start(worker)
+
+    def _index_ready(self, token, models):
+        self._index_worker = None
+        if self._closed or token != self._index_token:
+            return
+        self._library_models = list(models)
+        self._apply_library_filter()
+
+    def _library_row_changed(self, row):
+        if row < 0 or row >= len(self._library_results):
+            return
+        self._clear_selection(self.candidate_list)
+        model = self._library_results[row]
+        self._path = str(model.path)
+        self.details_label.setText(f'Dalla libreria KiCad: {self._path}\n'
+                                   'Dimensioni e motivi di corrispondenza non disponibili.')
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(_step_file(self._path))
+        self._start_preview()
+
     def _candidate_changed(self, row, preview=True):
         if row < 0:
             return
+        self._clear_selection(self.library_list)
         candidate = self._candidates[row]
         self._path = candidate['path']
         reasons = candidate.get('reasons') or []
@@ -313,6 +463,7 @@ class ModelCandidatesDialog(QDialog):
         if not path:
             return
         self.candidate_list.setCurrentRow(-1)
+        self._clear_selection(self.library_list)
         self._path = path
         self.details_label.setText(f'STEP manuale: {path}\nDimensioni e motivi di corrispondenza non disponibili.')
         self._start_preview()
@@ -363,6 +514,8 @@ class ModelCandidatesDialog(QDialog):
         """
         self._closed = True
         self._token += 1
+        self._index_token += 1
+        self._filter_timer.stop()
         if result == QDialog.DialogCode.Rejected:
             self._selection = dict(status='rejected', path='', rotation_deg=0.0)
         super().done(result)

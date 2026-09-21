@@ -336,6 +336,171 @@ def test_dimensions_are_readable_without_changing_evidence(review, monkeypatch):
     dialog.reject()
 
 
+@pytest.fixture
+def library(tmp_path, monkeypatch):
+    """Fixed library index served synchronously, so no library walk ever runs."""
+    from kicadgen.services.model_library_search import LibraryModel
+    folder = tmp_path / 'RF_Module.3dshapes'
+    folder.mkdir()
+    models = []
+    for stem in ('ESP32-WROOM-32', 'ESP32-S3-WROOM-1', 'ESP32-S3-WROOM-1U', 'USB_C_Receptacle'):
+        path = folder / f'{stem}.step'
+        path.write_text('fixture')
+        models.append(LibraryModel(path, 'RF_Module.3dshapes', stem))
+    walks = []
+    monkeypatch.setattr(gui, 'library_models', lambda *args, **kwargs: walks.append(True) or list(models))
+    return models, walks
+
+
+def _filter(app, dialog, text):
+    dialog.library_filter.setText(text)
+    _wait(app, lambda: not dialog._filter_timer.isActive() and dialog._index_worker is None
+          and dialog.library_count_label.text() != 'Indicizzazione della libreria…')
+
+
+def test_typing_filters_library_after_lazy_index(review, app, library):
+    dialog, _, _ = review
+    models, walks = library
+    assert dialog.library_list.count() == 0
+    assert walks == []
+    _filter(app, dialog, 'wroom s3')
+    assert walks == [True]
+    assert [dialog.library_list.item(i).text() for i in range(dialog.library_list.count())] == [
+        'RF_Module.3dshapes/ESP32-S3-WROOM-1', 'RF_Module.3dshapes/ESP32-S3-WROOM-1U']
+    assert dialog.library_count_label.text() == '2 modelli'
+    assert dialog.library_list.isVisibleTo(dialog)
+    _filter(app, dialog, 'usb*recept')
+    assert walks == [True]
+    assert dialog.library_list.count() == 1
+    assert dialog.library_count_label.text() == '1 modello'
+    _filter(app, dialog, 'nothing-here')
+    assert dialog.library_list.count() == 0
+    assert dialog.library_count_label.text() == 'nessun modello'
+
+
+def test_library_row_sets_path_enables_ok_and_is_returned(review, app, library, monkeypatch):
+    dialog, _, _ = review
+    models, _ = library
+    previews = []
+    monkeypatch.setattr(dialog, '_start_preview', lambda *args: previews.append(True))
+    _filter(app, dialog, 'wroom-1u')
+    assert dialog.library_list.count() == 1
+    dialog.library_list.setCurrentRow(0)
+    expected = str(models[2].path)
+    assert dialog._path == expected
+    assert dialog.details_label.text().startswith(f'Dalla libreria KiCad: {expected}')
+    assert dialog.buttons.button(QDialogButtonBox.StandardButton.Ok).isEnabled()
+    assert previews == [True]
+    dialog.auto_rotation.setChecked(False)
+    dialog.rotation.setValue(90)
+    dialog.accept()
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    assert dialog.selected_selection() == dict(status='confirmed', path=expected, rotation_deg=90.0)
+
+
+def test_library_row_starts_the_same_preview_as_candidates(review, app, library, monkeypatch):
+    dialog, _, _ = review
+    models, _ = library
+    calls = []
+    monkeypatch.setattr(gui, '_thumbnail', lambda *args: calls.append(args))
+    _filter(app, dialog, 'usb')
+    dialog.library_list.setCurrentRow(0)
+    _wait(app, lambda: not dialog._workers)
+    assert calls == [(str(models[3].path), 37.0)]
+    dialog.auto_rotation.setChecked(True)
+    _wait(app, lambda: len(calls) == 2 and not dialog._workers)
+    assert calls[-1] == (str(models[3].path), None, (3, 2))
+
+
+def test_empty_filter_shows_nothing_and_keeps_candidate_selection(review, app, library, monkeypatch):
+    dialog, _, report = review
+    _, walks = library
+    monkeypatch.setattr(dialog, '_start_preview', lambda *args: None)
+    dialog.candidate_list.setCurrentRow(2)
+    _filter(app, dialog, '   ')
+    assert walks == []
+    assert dialog.library_list.count() == 0
+    assert dialog.library_count_label.text() == ''
+    assert not dialog.library_list.isVisibleTo(dialog)
+    assert dialog.candidate_list.currentRow() == 2
+    assert dialog._path == report['candidates'][2]['path']
+    _filter(app, dialog, 'wroom')
+    assert dialog.library_list.count() == 3
+    assert dialog.candidate_list.currentRow() == 2
+    _filter(app, dialog, '')
+    assert dialog.library_list.count() == 0
+    assert dialog.candidate_list.currentRow() == 2
+    assert dialog._path == report['candidates'][2]['path']
+
+
+def test_selecting_in_one_list_clears_the_other(review, app, library, monkeypatch):
+    dialog, _, report = review
+    models, _ = library
+    monkeypatch.setattr(dialog, '_start_preview', lambda *args: None)
+    dialog.candidate_list.setCurrentRow(1)
+    _filter(app, dialog, 'wroom')
+    dialog.library_list.setCurrentRow(1)
+    assert dialog.candidate_list.currentRow() == -1
+    assert dialog._path == str(models[1].path)
+    dialog.candidate_list.setCurrentRow(3)
+    assert dialog.library_list.currentRow() == -1
+    assert dialog._path == report['candidates'][3]['path']
+    assert '12.0%' in dialog.details_label.text()
+    # A manual file also releases the library row.
+    dialog.library_list.setCurrentRow(0)
+    manual = report['candidates'][6]['path']
+    monkeypatch.setattr(gui.QFileDialog, 'getOpenFileName', lambda *args: (manual, ''))
+    dialog.manual_button.click()
+    assert dialog.library_list.currentRow() == -1
+    assert dialog.candidate_list.currentRow() == -1
+    assert dialog._path == manual
+
+
+def test_library_without_models_and_failed_walk_are_reported(review, app, monkeypatch):
+    dialog, _, _ = review
+    monkeypatch.setattr(gui, 'library_models', lambda *args, **kwargs: [])
+    _filter(app, dialog, 'sot')
+    assert dialog.library_list.count() == 0
+    assert dialog.library_count_label.text() == 'libreria KiCad non trovata'
+    assert not dialog.buttons.button(QDialogButtonBox.StandardButton.Ok).isEnabled()
+
+    def broken(*args, **kwargs):
+        raise OSError('walk failed')
+
+    monkeypatch.setattr(gui, 'library_models', broken)
+    other = gui.ModelCandidatesDialog({}, {'candidates': []})
+    _filter(app, other, 'sot')
+    assert other.library_count_label.text() == 'libreria KiCad non trovata'
+    other.reject()
+
+
+def test_index_result_after_close_or_stale_token_is_ignored(review, app, monkeypatch):
+    dialog, _, _ = review
+    from kicadgen.services.model_library_search import LibraryModel
+    entered, release = threading.Event(), threading.Event()
+
+    def slow_walk(*args, **kwargs):
+        entered.set()
+        release.wait(2)
+        return [LibraryModel(gui.Path('late.step'), 'Late.3dshapes', 'late')]
+
+    monkeypatch.setattr(gui, 'library_models', slow_walk)
+    dialog.library_filter.setText('late')
+    _wait(app, lambda: dialog._index_worker is not None)
+    assert entered.wait(1)
+    assert dialog.library_count_label.text() == 'Indicizzazione della libreria…'
+    try:
+        dialog.reject()
+        assert dialog.result() == QDialog.DialogCode.Rejected
+    finally:
+        release.set()
+        QThreadPool.globalInstance().waitForDone(2000)
+        app.processEvents()
+    assert dialog.library_list.count() == 0
+    assert dialog._library_models is None
+    assert dialog.selected_selection() == dict(status='rejected', path='', rotation_deg=0.0)
+
+
 @pytest.mark.parametrize('value,display', [(None, '?'), (float('nan'), '?'),
                                          (-0.00001, '0'), (2.0, '2'), (0.1254, '0.125')])
 def test_dimension_display_handles_missing_and_small_values(value, display):

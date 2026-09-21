@@ -193,6 +193,9 @@ class AnalysisOverlay(QWidget):
         self.timer.setInterval(40)
         self.timer.timeout.connect(self._tick)
         self.started_at = 0.0
+        #: Istante in cui l'overlay e' stato nascosto a operazione in corso
+        #: (revisione dei corpi): al ritorno l'orologio salta quel tempo.
+        self._hidden_at = None
         parent.installEventFilter(self)
         if self.i18n is not None:
             self.i18n.retranslate_widgets(self)
@@ -208,6 +211,7 @@ class AnalysisOverlay(QWidget):
         """@brief Show the overlay for a new operation, with no tool yet claimed."""
         self.title.setText(self.i18n.text(title) if self.i18n is not None else title)
         self.started_at = monotonic()
+        self._hidden_at = None
         self.spinner.angle = 0
         self.set_tool(None)
         self.set_status(status)
@@ -308,6 +312,29 @@ class AnalysisOverlay(QWidget):
         self.hide()
 
     def hideEvent(self, event):
-        """@brief Stop the animation whenever the overlay goes away."""
+        """@brief Stop the animation whenever the overlay goes away.
+
+        @note Records when it went away: the overlay is hidden mid-operation
+            while the reviewer edits the detected bodies, and the clock must
+            not count that time as waiting for the model.
+        """
         self.timer.stop()
+        self._hidden_at = monotonic()
         super().hideEvent(event)
+
+    def showEvent(self, event):
+        """@brief Resume the animation when the overlay comes back mid-operation.
+
+        @note `hideEvent` stops the timer; a plain `show()` after the review
+            used to leave the spinner and the clock frozen at the value they
+            had when hidden (seen by the user as a crash). The time spent
+            hidden is subtracted, so the clock measures the operation, not
+            the reviewer.
+        """
+        super().showEvent(event)
+        if self._hidden_at is not None:
+            self.started_at += max(0.0, monotonic() - self._hidden_at)
+            self._hidden_at = None
+        if not self.timer.isActive():
+            self._tick()
+            self.timer.start()

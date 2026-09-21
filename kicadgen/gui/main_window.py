@@ -1928,8 +1928,7 @@ class MainWindow(QMainWindow):
         self._reviewed_this_extraction = False
         self._relaunch_base_synthesized = False
         self._last_extracted = None
-        self.btn_reopen_review.setEnabled(False)
-        self.btn_relaunch_inventory.setEnabled(False)
+        self._set_review_buttons_enabled(False)
         self.btn_photo_comparison.setEnabled(False)
         self._photo_png = None
         self._photo_overlay_png = None
@@ -2190,8 +2189,22 @@ class MainWindow(QMainWindow):
             available = bundle.photo_path is not None or bool(self._photo_png)
         else:
             available = self._fresh_cache_evidence() is not None
-        self.btn_reopen_review.setEnabled(available)
-        self.btn_relaunch_inventory.setEnabled(available)
+        self._set_review_buttons_enabled(available)
+
+    def _set_review_buttons_enabled(self, enabled: bool) -> None:
+        """@brief Accende o spegne insieme tutte le copie dei pulsanti di revisione/rilancio.
+
+        @note Richiesta dell'utente: «dovrebbe sempre essere possibile
+            ripartire anche da li'» -- i pulsanti stanno in fondo alla scheda
+            Progetto e in fondo alla scheda Modello 3D, dove si guarda il
+            risultato e ci si accorge che manca qualcosa. Sono lo stesso
+            comando, quindi hanno sempre lo stesso stato.
+        """
+        for name in ("btn_reopen_review", "btn_relaunch_inventory",
+                     "btn_reopen_review_3d", "btn_relaunch_inventory_3d"):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.setEnabled(bool(enabled))
 
     def _review_photo(self, bundle):
         """@brief La foto calibrata del pacchetto, o quella in memoria come ripiego.
@@ -2351,8 +2364,7 @@ class MainWindow(QMainWindow):
             self._auto_after_extraction = False
             self._append_log("Nessuna estrazione in questa sessione: l'inventario rilanciato "
                              "aggiorna i componenti senza avviare la generazione automatica.")
-        self.btn_reopen_review.setEnabled(False)
-        self.btn_relaunch_inventory.setEnabled(False)
+        self._set_review_buttons_enabled(False)
         # Dichiarata PRIMA di partire, nel log e nella modale: e' l'unica
         # spesa di questo percorso e chi preme deve saperlo prima, non dopo.
         announcement = (f"Rilancio dell'inventario su {len(bundle.proposals)} proposte "
@@ -4356,6 +4368,20 @@ class MainWindow(QMainWindow):
         btn_open_3d = QPushButton("Apri cartella 3dshapes")
         btn_open_3d.clicked.connect(self._open_3dshapes_dir)
         regen_row.addWidget(btn_open_3d)
+        # Copie dei pulsanti della scheda Progetto: da qui si vede il solido
+        # e si capisce se mancano corpi, quindi da qui si deve poter tornare
+        # alle proposte annotate e ripartire (revisione gratuita; rilancio a
+        # pagamento, dichiarato). Stesso stato delle copie in Progetto.
+        self.btn_reopen_review_3d = QPushButton(self.btn_reopen_review.text())
+        self.btn_reopen_review_3d.setToolTip(self.btn_reopen_review.toolTip())
+        self.btn_reopen_review_3d.setEnabled(self.btn_reopen_review.isEnabled())
+        self.btn_reopen_review_3d.clicked.connect(self._reopen_detector_review)
+        regen_row.addWidget(self.btn_reopen_review_3d)
+        self.btn_relaunch_inventory_3d = QPushButton(self.btn_relaunch_inventory.text())
+        self.btn_relaunch_inventory_3d.setToolTip(self.btn_relaunch_inventory.toolTip())
+        self.btn_relaunch_inventory_3d.setEnabled(self.btn_relaunch_inventory.isEnabled())
+        self.btn_relaunch_inventory_3d.clicked.connect(self._relaunch_inventory)
+        regen_row.addWidget(self.btn_relaunch_inventory_3d)
         regen_row.addStretch()
 
         scroll = QScrollArea()

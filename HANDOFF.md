@@ -3663,3 +3663,68 @@ oltre ai due `[castellated]` preesistenti. Conteggi nuovi:
 (+4), `test_kicad_model_candidates_backend`/`presence_gate_replay`/
 `kicad_models` +3. `PROMPT_VERSION` non cambiato: la chiave di cache include
 il testo del prompt, quindi le risposte vecchie non vengono rigiocate.
+
+# 2026-09-21 22:50 — corsa dell'utente: overlay «bloccato», pulsanti nel tab 3D, filtro della libreria STEP
+
+Commit precedente: `43d86e9`. Corsa reale delle 22:16 (`generated/Test/analisi-ai.log`).
+
+## Diagnosi della corsa (analisi con agente, sola lettura)
+
+1. **Spinner fermo e «Tempo trascorso 01:11» bloccato NON erano un blocco.**
+   `AnalysisOverlay.hideEvent` ferma il timer; `_on_review_requested` nasconde
+   l'overlay per aprire «Corpi rilevati» e dopo lo rimostra con `show()`, che
+   non faceva ripartire nulla. 22:16:25 → 22:17:36 = 71 s = 01:11, esatto.
+   Il thread GUI non era bloccato (chiamata HTTP nel `QThread`, `urllib`).
+2. **La richiesta a DeepSeek e' durata 512 s ed e' fallita per
+   `finish_reason=length`**: modello ragionante, ha speso TUTTI i 24000
+   token di completamento in ragionamento senza mai emettere la chiamata
+   allo strumento (30170 token in uscita, 24000 di ragionamento; 0.25 USD
+   buttati). L'inventario e' risultato «parziale»: 59 ipotesi solo-YOLO
+   omesse dal 3D, solo i 4 corpi disegnati a mano nel solido, tutti magenta.
+   Il payload (5 PNG a piena risoluzione, 15,2 M caratteri base64 ≈ 11 MB)
+   e' identico a quello della corsa notturna con Opus, che ha risposto in
+   176 s. **Non e' un difetto del codice: e' il modello scelto.** Proposta
+   non ancora autorizzata: per i modelli ragionanti inviare
+   `reasoning: {max_tokens|effort}` limitato, o alzare `max_tokens`.
+3. Timeout HTTP = 300 s di **inattivita'** per operazione, non totale; un
+   fornitore che manda un byte ogni 5 minuti tiene il worker appeso senza
+   limite. Non c'e' Annulla sull'overlay. Il retry su HTTP 400 e' voluto
+   (`compatibility_retry`: forma diversa di `tool_choice`), non un difetto.
+
+## Correzioni fatte
+
+- `analysis_overlay.py`: `hideEvent` registra `_hidden_at`; nuovo
+  `showEvent` fa ripartire spinner e orologio e **sottrae il tempo passato
+  nascosti** (l'orologio misura l'attesa del modello, non il revisore);
+  `start()` azzera `_hidden_at` cosi' una partenza nuova non eredita nulla.
+- **Pulsanti anche nel tab Modello 3D** («dovrebbe sempre essere possibile
+  ripartire anche da li'»): `btn_reopen_review_3d` e
+  `btn_relaunch_inventory_3d` nella riga di «Rigenera modello 3D», stessi
+  comandi e stesso stato delle copie in Progetto (`_set_review_buttons_enabled`).
+  Nota: il tab 3D e' disabilitato finche' non esiste un modello, quindi
+  li' le copie sono usabili solo dopo una generazione.
+- **Filtro della libreria KiCad nella «Scelta del modello STEP»** («come
+  quando si filtrano i componenti in KiCad, non dover sfogliare»): nuovo
+  servizio `model_library_search.py` (`library_models` indicizza una volta
+  per processo le radici scoperte da `kicad_models._search_roots`; `.step/.stp`,
+  `.wrl` solo senza gemello STEP; `filter_models`: ogni token deve
+  comparire in `libreria/stem`, jolly `*`/`?`, query vuota → nulla, max 200
+  risultati con `truncated`). Nel dialogo: campo `library_filter` (debounce
+  250 ms), indicizzazione in `QRunnable` al primo carattere, lista
+  `library_list`; scegliere una riga imposta il percorso, anteprima e Ok
+  come per un candidato; le due liste si escludono; «Scegli file STEP…»
+  resta come ripiego.
+
+## Test
+
+`test_overlay_resume_and_3d_buttons.py` 5 (nuovo), `test_model_library_search.py`
+14+1 skip (nuovo), `test_model_candidates_dialog.py` 36 (+7); rieseguiti
+reopen 32, close_guard 7, live_log 15, photo_inventory_gui 66,
+automatic_generation 25, regen_3d_overlay 7, model_choice_gui_flow 7,
+terminal_metadata_flow 15, docs_migration 5, i18n 7, documentation 1.
+
+## Da decidere (utente)
+
+- Modelli ragionanti: limitare il ragionamento o alzare il budget? Oggi la
+  risposta troncata costa e non produce nulla.
+- Pulsante Annulla sull'overlay (chiusura del socket nel worker).
