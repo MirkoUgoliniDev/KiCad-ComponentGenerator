@@ -1491,7 +1491,6 @@ class MainWindow(QMainWindow):
         self.btn_component_prompt.setToolTip("Modifica le istruzioni AI specifiche di questo componente")
         tools_row.addWidget(self.btn_component_prompt)
         tools_row.addWidget(self.btn_photo_comparison)
-        tools_row.addWidget(self.btn_reopen_review)
         tools_row.addStretch()
         analysis_layout.addSpacing(10)
         analysis_layout.addWidget(self.btn_extract_ai, alignment=Qt.AlignmentFlag.AlignHCenter)
@@ -1537,6 +1536,15 @@ class MainWindow(QMainWindow):
 
         outer.addWidget(self.group_component_analysis)
         outer.addStretch()
+        # Richiesta dell'utente: «un pulsante in basso nella scheda
+        # principale» per riaprire la revisione dopo averla salvata. Sta
+        # sotto tutto, non nella riga degli strumenti dell'analisi, cosi' si
+        # trova anche a estrazione chiusa e senza cercarlo fra le opzioni.
+        reopen_row = QHBoxLayout()
+        reopen_row.addStretch()
+        reopen_row.addWidget(self.btn_reopen_review)
+        reopen_row.addStretch()
+        outer.addLayout(reopen_row)
 
         self._refresh_model_combo()
         self._restore_component_type()
@@ -2351,8 +2359,15 @@ class MainWindow(QMainWindow):
         rinomina rifiutata o documenti in conflitto mantengono il progetto corrente,
         senza scartare il risultato AI e senza interrompere la generazione.
         """
-        old_docs = self._docs_dir()
         old_name = self._component_name()
+        if not old_name:
+            # Senza nome non esiste una cartella del componente (`_project_dir`
+            # lo rifiuta apposta, dalle 21:55) e il blocco sul nome impedisce
+            # di caricare documenti: non c'e' nulla da spostare, la proposta
+            # si prende cosi' com'e'. Le righe di log bufferizzate le
+            # scarica il primo scrittore con il nome nuovo.
+            return new_name
+        old_docs = self._docs_dir()
         new_docs = Path(self.field_library_root.text().strip()) / new_name / DOCS_SUBDIR
         if new_docs.resolve() == old_docs.resolve():
             return old_name

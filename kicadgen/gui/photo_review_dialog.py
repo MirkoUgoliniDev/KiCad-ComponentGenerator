@@ -260,6 +260,18 @@ HANDLE_HALF_PX = 4.0
 ## horizontal, vertical and the two diagonal resize cursors.
 _CURSOR_SECTOR_DEG = 45.0
 
+## Colour of the halo drawn behind the selected outline. White is chosen for
+## contrast against the dark soldermask and the coloured status pen alike:
+## the halo never carries status, it only says "this one is selected".
+SELECTION_HALO_COLOR = "#ffffff"
+
+## Cosmetic pen widths in device pixels: the halo must stay clearly wider
+## than the status pen it surrounds at every zoom level, otherwise a thick
+## status line would hide the highlight.
+SELECTED_PEN_WIDTH_PX = 3
+UNSELECTED_PEN_WIDTH_PX = 2
+SELECTION_HALO_WIDTH_PX = 9
+
 
 class _ResizeHandle(QGraphicsRectItem):
     """@brief Screen-sized grip on one edge or corner of a selected component.
@@ -338,6 +350,19 @@ class _ComponentItem(QGraphicsPolygonItem):
         self.number = _NumberLabel(self)
         self.number.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
         self.number.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        # Selection halo: a wide, high-contrast outline drawn just behind the
+        # status-coloured outline. A child of the item, so it moves, rotates
+        # and stacks with it, but behind the parent so the status pen stays
+        # legible on top of it.
+        self.halo = QGraphicsPolygonItem(self)
+        self.halo.setFlag(QGraphicsItem.GraphicsItemFlag.ItemStacksBehindParent)
+        self.halo.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        halo_pen = QPen(QColor(SELECTION_HALO_COLOR), SELECTION_HALO_WIDTH_PX)
+        halo_pen.setCosmetic(True)
+        halo_pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+        self.halo.setPen(halo_pen)
+        self.halo.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+        self.halo.hide()
         self.handles = {edge: _ResizeHandle(self, edge) for edge in _ResizeHandle.EDGES}
         self.sync_geometry()
 
@@ -346,6 +371,7 @@ class _ComponentItem(QGraphicsPolygonItem):
         self._syncing = True
         try:
             self.setPolygon(self.editor.photo_transform.local_polygon(self.component))
+            self.halo.setPolygon(self.polygon())
             self.setPos(self.editor.photo_transform.mm_to_pixel(
                 float(self.component["x_mm"]), float(self.component["y_mm"])))
             self.number.setPos(self.polygon().boundingRect().topLeft())
@@ -438,8 +464,12 @@ class _ComponentItem(QGraphicsPolygonItem):
         return self.mapToScene(self.polygon()).boundingRect()
 
     def mouseDoubleClickEvent(self, event):
-        """@brief Open KiCad alternatives for the clicked photographic component."""
-        self.editor._select_row(self.editor._items.index(self))
+        """@brief Open KiCad alternatives for the clicked photographic component.
+
+        @note The outline is already under the pointer: the view is not
+              re-centred on it, that would move the photo under the user.
+        """
+        self.editor._select_row(self.editor._items.index(self), center=False)
         self.editor.choose_model()
         event.accept()
 
@@ -467,6 +497,13 @@ class PhotoReviewDialog(QDialog):
 
     Public integration API: ``components_applied(list)``, ``get_components()``,
     and the standard QDialog accepted/rejected result. Apply closes the dialog.
+
+    Layout contract: the sidebar is dominated by ``component_list`` with
+    ``count_label`` ("Componenti: N") above it; the parameter form
+    (``form_widget`` holding ``text_fields`` and ``fields``) lives in the
+    non-blocking modal ``parameters_dialog`` opened by ``parameters_button``
+    or ``open_parameters()``. The field widgets are the same objects whether
+    or not that modal is shown, and editing them updates the outline live.
     """
 
     components_applied = pyqtSignal(list)
@@ -511,7 +548,7 @@ class PhotoReviewDialog(QDialog):
         layout = QVBoxLayout(self)
         instructions = QLabel(
             "Seleziona un rettangolo o una voce; trascina per spostare. "
-            "Trascina le maniglie o modifica le quote per ridimensionare.\n"
+            "Trascina le maniglie per ridimensionare; «Parametri…» apre quote e testi.\n"
             "Rotella: zoom · Tasto centrale: panoramica · "
             "Origine: centro PCB, X destra, Y basso; rotazione oraria.")
         instructions.setWordWrap(True)
@@ -538,9 +575,19 @@ class PhotoReviewDialog(QDialog):
         content = QHBoxLayout()
         content.addWidget(self.view, 1)
         sidebar = QVBoxLayout()
+        # The list is the sidebar's main content: the count sits above it and
+        # the list takes all the vertical space the compact status rows leave.
+        self.count_label = QLabel()
+        count_font = self.count_label.font()
+        count_font.setBold(True)
+        self.count_label.setFont(count_font)
+        sidebar.addWidget(self.count_label)
         self.component_list = QListWidget()
         self.component_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         sidebar.addWidget(self.component_list, 1)
+        # Parameter form: built once, then re-parented into the modal below.
+        # ``fields``/``text_fields`` stay the same objects, so live editing
+        # works whether or not the modal is shown.
         self.form_widget = QWidget()
         form = QFormLayout(self.form_widget)
         self.text_fields = {}
@@ -562,7 +609,21 @@ class PhotoReviewDialog(QDialog):
             field.valueChanged.connect(lambda value, key=key: self._number_edited(key, value))
             form.addRow(label, field)
             self.fields[key] = field
-        sidebar.addWidget(self.form_widget)
+        self.parameters_dialog = QDialog(self)
+        self.parameters_dialog.setWindowTitle("Parametri componente")
+        parameters_layout = QVBoxLayout(self.parameters_dialog)
+        parameters_layout.addWidget(self.form_widget)
+        self.parameters_buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        self.parameters_buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Applica")
+        self.parameters_buttons.accepted.connect(self.parameters_dialog.accept)
+        parameters_layout.addWidget(self.parameters_buttons)
+        # Edits are live, so closing the modal by any route is a focus change,
+        # not an undo: pending text is committed on OK and on Escape alike.
+        self.parameters_dialog.finished.connect(self._commit_pending_text)
+        self.parameters_button = QPushButton("Parametri…")
+        self.parameters_button.setAutoDefault(False)
+        self.parameters_button.clicked.connect(self.open_parameters)
+        sidebar.addWidget(self.parameters_button)
         self.model_button = QPushButton("Scegli modello KiCad…")
         self.model_button.setAutoDefault(False)
         self.model_button.clicked.connect(self.choose_model)
@@ -575,7 +636,7 @@ class PhotoReviewDialog(QDialog):
         self.warning_label.setWordWrap(True)
         self.warning_label.setTextFormat(Qt.TextFormat.PlainText)
         sidebar.addWidget(self.warning_label)
-        legend = QLabel("Verde: rilevato · Arancione: da verificare\nRosso: fuori PCB · Tratteggio: selezionato")
+        legend = QLabel("Verde: rilevato · Arancione: da verificare\nRosso: fuori PCB · Bordo bianco spesso: selezionato")
         legend.setWordWrap(True)
         sidebar.addWidget(legend)
         side_widget = QWidget()
@@ -602,6 +663,7 @@ class PhotoReviewDialog(QDialog):
         for component in self._components:
             self._append_item(component)
         self._update_scene_rect()
+        self._update_count()
         self._select_row(0 if self._items else -1)
         self._selection_changed()
 
@@ -614,6 +676,30 @@ class PhotoReviewDialog(QDialog):
         super().showEvent(event)
         self.fit_photo()
 
+    def hideEvent(self, event):
+        """@brief Take the parameter modal down together with the editor."""
+        super().hideEvent(event)
+        self._close_parameters()
+
+    def closeEvent(self, event):
+        """@brief Close the parameter modal even when the editor was never shown."""
+        self._close_parameters()
+        super().closeEvent(event)
+
+    def _close_parameters(self):
+        """Hide the modal after moving focus out of its editors.
+
+        The modal is a separate window: hiding the editor does not clear the
+        focus inside it, so a focused editor would emit ``editingFinished``
+        only when it is destroyed, which can be during garbage collection
+        after the slot's closure has already been torn down. Clearing focus
+        here fires that signal while everything is still intact.
+        """
+        focused = self.parameters_dialog.focusWidget()
+        if focused is not None:
+            focused.clearFocus()
+        self.parameters_dialog.hide()
+
     def fit_photo(self):
         """@brief Provide the fit photo operation for this workflow."""
         self.view.fit_photo(self.photo_rect)
@@ -625,18 +711,32 @@ class PhotoReviewDialog(QDialog):
         with QSignalBlocker(self.component_list):
             self.component_list.addItem("")
         self._refresh_item(item)
+        self._update_count()
         return item
+
+    def _update_count(self):
+        """Show the live number of outlines above the list."""
+        self.count_label.setText(self._tr("Componenti: {count}").format(count=len(self._items)))
 
     def _selected_item(self):
         return next((item for item in self._items if item.isSelected()), None)
 
-    def _select_row(self, row):
+    def _select_row(self, row, center=True):
+        """Select one outline by list row and bring it into view.
+
+        @param row Index in ``_items``; any other value clears the selection.
+        @param center Centre the view on the outline. False keeps the current
+               viewport, for selections made by pointing at the outline itself.
+        """
         with QSignalBlocker(self.scene):
             for index, item in enumerate(self._items):
                 item.setSelected(index == row)
         self._selection_changed()
-        if 0 <= row < len(self._items):
-            self.view.ensureVisible(self._items[row])
+        if center and 0 <= row < len(self._items):
+            # centerOn, not ensureVisible: an outline already inside the
+            # viewport would otherwise stay wherever it is, easy to miss on a
+            # crowded board.
+            self.view.centerOn(self._items[row])
 
     def _selection_changed(self):
         selected = self._selected_item()
@@ -648,18 +748,57 @@ class PhotoReviewDialog(QDialog):
         with QSignalBlocker(self.component_list):
             self.component_list.setCurrentRow(self._items.index(selected) if selected else -1)
         self.form_widget.setEnabled(selected is not None)
+        self.parameters_button.setEnabled(selected is not None)
         self.delete_button.setEnabled(selected is not None)
         self.model_button.setEnabled(selected is not None and self._match_worker is None)
         if selected:
-            for key, field in self.fields.items():
-                with QSignalBlocker(field):
-                    field.setValue(float(selected.component.get(key, 0 if key == "rotation_deg" else 1)))
-            for key, field in self.text_fields.items():
-                field.setText(str(selected.component.get(key, "")))
+            self._reload_fields()
         else:
             self.warning_label.setText(self._tr("Seleziona o aggiungi un componente."))
+        self._refresh_parameters_title()
         for item in self._items:
             self._refresh_item(item)
+
+    def _reload_fields(self):
+        """Show the selected component's values in the form without editing it."""
+        selected = self._selected_item()
+        if selected is None:
+            return
+        for key, field in self.fields.items():
+            with QSignalBlocker(field):
+                field.setValue(float(selected.component.get(key, 0 if key == "rotation_deg" else 1)))
+        for key, field in self.text_fields.items():
+            field.setText(str(selected.component.get(key, "")))
+
+    def _commit_pending_text(self):
+        """Store text and numbers still being typed, as a focus change would."""
+        for field in self.fields.values():
+            field.interpretText()
+        for key in self.text_fields:
+            self._text_edited(key)
+
+    def _refresh_parameters_title(self):
+        selected = self._selected_item()
+        title = self._tr("Parametri componente")
+        if selected is not None:
+            index = self._items.index(selected)
+            name = selected.component.get("name") or selected.component.get("kind") or self._tr("Componente")
+            title += f" — {index + 1}. {name}"
+        self.parameters_dialog.setWindowTitle(title)
+
+    def open_parameters(self):
+        """@brief Show the parameter form for the selected component in a modal.
+
+        @note Non-blocking (``QDialog.open``): the outline follows every edit
+              live while the modal is up, and callers such as tests can still
+              drive the fields without the modal ever being shown.
+        """
+        if self._selected_item() is None:
+            return
+        self._refresh_parameters_title()
+        self.parameters_dialog.open()
+        self.text_fields["name"].setFocus()
+        self.text_fields["name"].selectAll()
 
     def _warnings(self, item):
         warnings = []
@@ -696,13 +835,14 @@ class PhotoReviewDialog(QDialog):
         warnings = self._warnings(item)
         outside = not self.photo_rect.adjusted(-1e-7, -1e-7, 1e-7, 1e-7).contains(item.photo_bounds())
         color = QColor("#ef5350" if outside else "#ffad33" if warnings else "#40dc80")
-        pen = QPen(color, 3 if item.isSelected() else 2)
+        # The status pen keeps its colour when selected: the selection is
+        # shown by the wide halo behind it, the thicker line and the fill.
+        pen = QPen(color, SELECTED_PEN_WIDTH_PX if item.isSelected() else UNSELECTED_PEN_WIDTH_PX)
         pen.setCosmetic(True)
-        if item.isSelected():
-            pen.setStyle(Qt.PenStyle.DashLine)
         item.setPen(pen)
+        item.halo.setVisible(item.isSelected())
         fill = QColor(color)
-        fill.setAlpha(45 if item.isSelected() else 15)
+        fill.setAlpha(60 if item.isSelected() else 15)
         item.setBrush(QBrush(fill))
         item.setZValue(2 if item.isSelected() else 1)
         item.number.setText(str(index + 1))
@@ -804,6 +944,7 @@ class PhotoReviewDialog(QDialog):
                     item.component.pop('model_match', None)
                     item.component.pop('model_selection', None)
                 self._refresh_item(item)
+                self._refresh_parameters_title()
 
     def choose_model(self):
         """@brief Resolve plausible local CAD models for the selected component asynchronously."""
@@ -884,8 +1025,15 @@ class PhotoReviewDialog(QDialog):
         self._append_item(component)
         self._update_scene_rect()
         self._select_row(len(self._items) - 1)
-        self.text_fields["name"].setFocus()
-        self.text_fields["name"].selectAll()
+        # A new outline has only a placeholder name: the parameter modal
+        # follows automatically so the user can type it straight away. A
+        # modal over an editor that is not on screen would be orphaned, so
+        # a hidden editor (headless callers) only prepares the name field.
+        if self.isVisible() and not self.parameters_dialog.isVisible():
+            self.open_parameters()
+        else:
+            self.text_fields["name"].setFocus()
+            self.text_fields["name"].selectAll()
 
     def delete_selected(self):
         """@brief Provide the delete selected operation for this workflow."""
@@ -898,6 +1046,7 @@ class PhotoReviewDialog(QDialog):
             self._items.pop(index)
             self._components.pop(index)
             self.component_list.takeItem(index)
+        self._update_count()
         self._select_row(min(index, len(self._items) - 1))
         self._update_scene_rect()
 
@@ -906,10 +1055,7 @@ class PhotoReviewDialog(QDialog):
         if self._applied:
             return
         # Commit text still being typed, including calls made without focus loss.
-        for field in self.fields.values():
-            field.interpretText()
-        for key in self.text_fields:
-            self._text_edited(key)
+        self._commit_pending_text()
         self._applied = True
         self._closing = True
         self.components_applied.emit(self.get_components())

@@ -265,3 +265,36 @@ def test_identical_proposals_replay_the_cache_without_a_new_call(prepared, monke
     log = window.ai_progress_text.toPlainText()
     assert 'validated cache hit' in log and 'nessun nuovo addebito' in log
     assert len(started) == 2
+
+
+def test_reopen_button_sits_at_the_bottom_of_the_project_tab(window):  # noqa: F811
+    """@brief «Un pulsante in basso nella scheda principale»: ultimo nella scheda, non fra gli strumenti.
+
+    Positivo: e' l'ultimo elemento del layout della scheda Progetto, sotto il
+    gruppo di analisi. Negativo: non compare piu' nella riga degli strumenti
+    accanto a «Rivedi foto…», dove stava prima.
+    """
+    from PyQt6.QtWidgets import QLayout, QScrollArea
+    scroll = window.tabs.widget(0)
+    tab = scroll.widget() if isinstance(scroll, QScrollArea) else scroll
+    outer = tab.layout()
+    last = outer.itemAt(outer.count() - 1)
+    row = last.layout()
+    assert isinstance(row, QLayout), "l'ultimo elemento della scheda deve essere la riga del pulsante"
+    widgets = [row.itemAt(i).widget() for i in range(row.count())]
+    assert window.btn_reopen_review in widgets
+    assert outer.indexOf(window.group_component_analysis) < outer.count() - 1
+    # Negativo: non sta piu' nella riga degli strumenti dell'analisi.
+    tools_row = window.btn_photo_comparison.parentWidget().layout()
+
+    def _contains(layout, widget):
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item.widget() is widget:
+                return True
+            if item.layout() is not None and _contains(item.layout(), widget):
+                return True
+        return False
+
+    assert _contains(tools_row, window.btn_photo_comparison)
+    assert not _contains(tools_row, window.btn_reopen_review)

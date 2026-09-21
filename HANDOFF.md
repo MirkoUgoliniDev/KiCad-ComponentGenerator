@@ -3416,3 +3416,77 @@ i18n; candidato singolo nella banda di pareggio non promosso.
 Lock git non cancellabili dal bridge → `mv` in `_git_lock_da_cancellare/`
 prima e dopo ogni comando git; la cartella la cancella l'utente. Push a
 carico dell'utente. Consegna sempre con `force` + verifica md5.
+
+# 2026-09-21 10:30 — «scatena agenti»: lista, conteggio, parametri in modale, evidenziazione, pulsante in basso
+
+Commit precedente: `3545649` (riquadri ridimensionabili, revisione
+riapribile, 1+3). Questo pacchetto chiude i punti 2–5 della lista «Richiesto,
+da fare» delle 09:40. Un agente su `photo_review_dialog.py` (+ nuovo
+`tests/test_photo_review_list.py`); `main_window.py`, `i18n.py` e il test di
+posizione fatti dal coordinatore.
+
+## Finestra post-inventario (`PhotoReviewDialog`)
+
+- **Conteggio in alto**: `count_label` («Componenti: N», grassetto) sopra la
+  lista; `_update_count()` da `_append_item` e `delete_selected`.
+- **Lista dominante**: il modulo dei campi non sta piu' nella barra laterale;
+  `component_list` prende lo spazio verticale. Restano, compatti: pulsante
+  «Parametri…», «Scegli modello KiCad…», `model_status`, `warning_label`,
+  legenda.
+- **Parametri in modale**: `form_widget` (stessi oggetti `fields` e
+  `text_fields`, cosi' i test esistenti non cambiano) e' riparentato in
+  `parameters_dialog` (QDialog, aperto con `open()` non bloccante);
+  `parameters_button` → `open_parameters()`; modifica dal vivo invariata
+  (`_number_edited`/`_text_edited`); alla chiusura per qualunque via
+  `_commit_pending_text()` (Esc si comporta come perdita di fuoco, non come
+  annulla, coerente con gli spinbox che applicano mentre si scrive).
+  `add_component` apre la modale sul nome del nuovo componente.
+  `hideEvent`/`closeEvent` → `_close_parameters()`: **trappola trovata**
+  nascondere il genitore non toglie il fuoco a una finestra figlia separata;
+  il `QLineEdit` a fuoco emetteva `editingFinished` solo alla distruzione,
+  quando il GC aveva gia' svuotato i default della lambda → `TypeError` →
+  abort di PyQt6. Il doppio clic sulla lista apre ancora `choose_model`.
+- **Evidenziazione**: alone bianco spesso (`SELECTION_HALO_WIDTH_PX=9`,
+  figlio `ItemStacksBehindParent`) + bordo 3 px pieno per il selezionato
+  (`SELECTED_PEN_WIDTH_PX`), 2 px per gli altri; il tratteggio non c'e' piu',
+  legenda aggiornata. `_select_row(row, center=True)` fa `view.centerOn`;
+  il doppio clic sul rettangolo passa `center=False` per non far saltare la
+  foto sotto il puntatore. Rettangolo → riga di lista invariato.
+- Note dell'agente, non toccate: Qt disegna ancora la sua bounding box
+  puntinata sull'item selezionato; a zoom «adatta» le otto maniglie coprono
+  visivamente le parti molto piccole (disegno delle maniglie delle 09:40).
+
+## Scheda Progetto
+
+`btn_reopen_review` spostato dalla riga degli strumenti dell'analisi a una
+riga propria **in fondo alla scheda** (`reopen_row`, dopo `outer.addStretch()`),
+come chiesto. Test `test_reopen_button_sits_at_the_bottom_of_the_project_tab`
+(positivo: ultimo elemento della scheda; negativo: assente dalla riga degli
+strumenti). La scheda e' avvolta in una `QScrollArea`: `tabs.widget(0)` e' lo
+scroll, la scheda e' `.widget()`.
+
+## i18n
+
+Nuove voci `ui:`: «Componenti: {count}», «Parametri componente»,
+«Componente», e l'avviso «Modello KiCad applicato provvisoriamente dalla sola
+geometria…» (en/fr/de).
+
+## Test
+
+`test_photo_review_list.py` 15 (nuovo), `test_photo_review_dialog.py` 41,
+`test_photo_review_evidence.py` 19, `test_reopen_detector_review.py` 10,
+`test_i18n.py` + `test_documentation.py` 8. Suite completa file per file nel
+contenitore (106 file, `xvfb-run -a`, esclusi `test_system_dependencies` e i
+due `[castellated]` preesistenti): **2871 passati**, nessun rosso; i segfault
+VTK a fine file (`photo_inventory_gui`, `preview_grid`) arrivano dopo l'ultimo
+test verde e spariscono al secondo tentativo.
+
+## Rosso preesistente trovato e corretto (non era nella lista)
+
+`test_docs_migration.py::test_an_unnamed_component_takes_the_proposal_without_asking`
+era rosso dalle 21:55: `_migrate_docs_to_new_name` chiamava `_docs_dir()`
+→ `_project_dir()` che, senza nome, ora solleva `ValueError`. Non era stato
+visto perche' e' una suite Qt e sul disco dell'utente le Qt non girano. Fix:
+senza nome corrente non esiste cartella ne' documenti da spostare (il blocco
+sul nome impedisce di caricarli), quindi la proposta si prende cosi' com'e'.
+Nessuna modifica al test.
