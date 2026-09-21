@@ -150,3 +150,45 @@ def test_apply_delivers_detached_invalidated_metadata(editor):
     spy[0][0][0]["custom"]["provenance"].append(3)
     assert source == before
     assert dialog.get_components()[0]["custom"] == before[0]["custom"]
+
+
+def test_handle_resize_discards_photo_evidence_like_a_typed_size(editor):
+    """@brief Grabbing a corner grip is a size edit: same invalidation as the fields.
+
+    Driven through real viewport mouse events on the shown dialog so the
+    grip hit-test, not only the arithmetic, is exercised.
+    """
+    from PyQt6.QtCore import QPoint, Qt
+    from PyQt6.QtGui import QMouseEvent
+    from PyQt6.QtTest import QTest
+    dialog, _, before = editor
+    dialog.show()
+    QApplication.processEvents()
+    item = dialog._items[0]
+    grip = item.handle((1, 1))
+    assert grip.isVisible()
+    start = dialog.view.mapFromScene(grip.scenePos())
+    end = start + QPoint(15, 10)
+    viewport = dialog.view.viewport()
+    QTest.mousePress(viewport, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+    QApplication.sendEvent(viewport, QMouseEvent(
+        QMouseEvent.Type.MouseMove, QPointF(end), QPointF(viewport.mapToGlobal(end)),
+        Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+    QTest.mouseRelease(viewport, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end)
+    QApplication.processEvents()
+    changed = dialog.get_components()[0]
+    assert changed["length_mm"] > before[0]["length_mm"]
+    assert changed["width_mm"] > before[0]["width_mm"]
+    assert changed["rotation_deg"] == before[0]["rotation_deg"]
+    assert_invalidated(editor)
+
+
+def test_grabbing_a_handle_without_moving_it_preserves_exact_values(editor):
+    """@brief Negative: a press/release with no stroke is not a size edit."""
+    dialog, _, before = editor
+    item = dialog._items[0]
+    grip = item.handle((1, 0))
+    item.begin_resize(grip.edge, grip.scenePos())
+    item.resize_to(grip.scenePos())
+    item.end_resize()
+    assert dialog.get_components() == before

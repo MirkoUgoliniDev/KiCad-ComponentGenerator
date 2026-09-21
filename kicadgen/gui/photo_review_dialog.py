@@ -35,7 +35,8 @@ from PyQt6.QtCore import QPointF, QRectF, QSignalBlocker, Qt, QTimer, QThread, p
 from PyQt6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QPolygonF
 from PyQt6.QtWidgets import (
     QAbstractItemView, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
-    QGraphicsItem, QGraphicsPolygonItem, QGraphicsScene, QGraphicsSimpleTextItem,
+    QGraphicsItem, QGraphicsPolygonItem, QGraphicsRectItem, QGraphicsScene,
+    QGraphicsSimpleTextItem,
     QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton,
     QVBoxLayout, QWidget, QApplication, QMessageBox,
 )
@@ -88,16 +89,44 @@ class PhotoTransform:
         return QPointF((x / self.pixel_width - .5) * self.body_length_mm,
                        (y / self.pixel_height - .5) * self.body_width_mm)
 
-    def local_polygon(self, component: dict) -> QPolygonF:
-        """Rotate in millimeters BEFORE applying the independent pixel scales."""
-        angle = math.radians(float(component.get("rotation_deg", 0)))
+    def local_to_item_pixel(self, rotation_deg: float, u: float, v: float) -> QPointF:
+        """@brief Map a point of the component's LOCAL frame to item pixels.
+
+        @param rotation_deg Clockwise rotation of the component in the photo.
+        @param u Coordinate along the local length axis, in millimeters.
+        @param v Coordinate along the local width axis, in millimeters.
+        @return Pixel offset from the component center (the item origin).
+        @note The rotation is applied in millimeters BEFORE the independent
+              horizontal/vertical pixel scales, so anisotropic photos keep
+              the metric right angle between the two local axes.
+        """
+        angle = math.radians(float(rotation_deg))
         c, s = math.cos(angle), math.sin(angle)
-        half_l = float(component["length_mm"]) / 2
-        half_w = float(component["width_mm"]) / 2
         sx = self.pixel_width / self.body_length_mm
         sy = self.pixel_height / self.body_width_mm
+        return QPointF((u*c - v*s)*sx, (u*s + v*c)*sy)
+
+    def item_pixel_to_local(self, rotation_deg: float, x: float, y: float) -> QPointF:
+        """@brief Inverse of local_to_item_pixel: item pixels to LOCAL millimeters.
+
+        @param rotation_deg Clockwise rotation of the component in the photo.
+        @param x Horizontal pixel offset from the component center.
+        @param y Vertical pixel offset from the component center.
+        @return Point (u, v) along the local length and width axes, in millimeters.
+        """
+        angle = math.radians(float(rotation_deg))
+        c, s = math.cos(angle), math.sin(angle)
+        dx = x / (self.pixel_width / self.body_length_mm)
+        dy = y / (self.pixel_height / self.body_width_mm)
+        return QPointF(dx*c + dy*s, -dx*s + dy*c)
+
+    def local_polygon(self, component: dict) -> QPolygonF:
+        """Rotate in millimeters BEFORE applying the independent pixel scales."""
+        rotation = float(component.get("rotation_deg", 0))
+        half_l = float(component["length_mm"]) / 2
+        half_w = float(component["width_mm"]) / 2
         return QPolygonF([
-            QPointF((x*c - y*s)*sx, (x*s + y*c)*sy)
+            self.local_to_item_pixel(rotation, x, y)
             for x, y in ((-half_l, -half_w), (half_l, -half_w),
                          (half_l, half_w), (-half_l, half_w))
         ])
@@ -215,12 +244,93 @@ class _NumberLabel(QGraphicsSimpleTextItem):
         super().paint(painter, option, widget)
 
 
+## Smallest local length/width (mm) a handle drag may leave behind. Not a
+## limit on what the numeric fields accept: it only stops a stroke from
+## collapsing the outline to nothing or pulling one edge past the opposite
+## one, which would flip the rectangle. 0.2 mm is the narrowest standard chip
+## package (01005: 0.4 x 0.2 mm), so no real body on a PCB is smaller and a
+## shorter extent is an overshoot rather than a measurement.
+MIN_HANDLE_SIZE_MM = 0.2
+
+## Half side of a resize handle in device pixels: the handle ignores the view
+## transform so it stays grabbable at every zoom level.
+HANDLE_HALF_PX = 4.0
+
+## Handle screen angles are quantized to 45 degree sectors: Qt only offers
+## horizontal, vertical and the two diagonal resize cursors.
+_CURSOR_SECTOR_DEG = 45.0
+
+
+class _ResizeHandle(QGraphicsRectItem):
+    """@brief Screen-sized grip on one edge or corner of a selected component.
+
+    The handle is identified by its LOCAL edge signs ``(eu, ev)`` in
+    {-1, 0, 1}: ``(1, 0)`` is the far end of the length axis, ``(0, -1)``
+    the near side of the width axis, ``(1, 1)`` the corner between them.
+    Handles follow the component rotation, so the same handle can sit on any
+    side of the screen; the geometry it edits is always the local one.
+    """
+
+    ## All eight edge/corner identities, corners first so that a tiny
+    ## rectangle still exposes them above the mid-edge grips.
+    EDGES = ((-1, -1), (1, -1), (1, 1), (-1, 1), (1, 0), (-1, 0), (0, 1), (0, -1))
+
+    def __init__(self, item, edge):
+        super().__init__(-HANDLE_HALF_PX, -HANDLE_HALF_PX, 2*HANDLE_HALF_PX, 2*HANDLE_HALF_PX, item)
+        self.item = item
+        self.edge = edge
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
+        self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
+        # Above the number label so the top-left grip is always visible.
+        self.setZValue(1)
+        pen = QPen(QColor("#101318"), 1)
+        pen.setCosmetic(True)
+        self.setPen(pen)
+        self.setBrush(QBrush(QColor("white")))
+        self.hide()
+
+    def update_cursor(self):
+        """@brief Pick the resize cursor that matches the on-screen edge normal.
+
+        @note The outward local direction is mapped through the rotation and
+              the anisotropic pixel scales, then quantized to 45 degree
+              sectors: a corner of a 37 degree component may legitimately show
+              a horizontal or vertical arrow.
+        """
+        rotation = float(self.item.component.get("rotation_deg", 0))
+        direction = self.item.editor.photo_transform.local_to_item_pixel(
+            rotation, self.edge[0], self.edge[1])
+        angle = math.degrees(math.atan2(direction.y(), direction.x())) % 180
+        sector = int(round(angle / _CURSOR_SECTOR_DEG)) % 4
+        # Screen Y grows downward: 45 degrees is the "\" diagonal (SizeFDiag).
+        self.setCursor((Qt.CursorShape.SizeHorCursor, Qt.CursorShape.SizeFDiagCursor,
+                        Qt.CursorShape.SizeVerCursor, Qt.CursorShape.SizeBDiagCursor)[sector])
+
+    def mousePressEvent(self, event):
+        """@brief Start a resize; accepting here keeps the parent from moving."""
+        self.item.begin_resize(self.edge, event.scenePos())
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        """@brief Follow the pointer, editing the component live."""
+        self.item.resize_to(event.scenePos())
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        """@brief Finish the resize stroke."""
+        self.item.end_resize()
+        event.accept()
+
+
 class _ComponentItem(QGraphicsPolygonItem):
+    """@brief Selectable, movable and resizable outline of one component."""
+
     def __init__(self, editor, component):
         super().__init__()
         self.editor = editor
         self.component = component
         self._syncing = False
+        self._resize = None
         self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable |
                       QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
                       QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
@@ -228,6 +338,7 @@ class _ComponentItem(QGraphicsPolygonItem):
         self.number = _NumberLabel(self)
         self.number.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
         self.number.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self.handles = {edge: _ResizeHandle(self, edge) for edge in _ResizeHandle.EDGES}
         self.sync_geometry()
 
     def sync_geometry(self):
@@ -238,8 +349,88 @@ class _ComponentItem(QGraphicsPolygonItem):
             self.setPos(self.editor.photo_transform.mm_to_pixel(
                 float(self.component["x_mm"]), float(self.component["y_mm"])))
             self.number.setPos(self.polygon().boundingRect().topLeft())
+            rotation = float(self.component.get("rotation_deg", 0))
+            half_l = float(self.component["length_mm"]) / 2
+            half_w = float(self.component["width_mm"]) / 2
+            for (eu, ev), handle in self.handles.items():
+                handle.setPos(self.editor.photo_transform.local_to_item_pixel(
+                    rotation, eu*half_l, ev*half_w))
+                handle.update_cursor()
         finally:
             self._syncing = False
+
+    def handle(self, edge):
+        """@brief Return the grip for a local edge/corner, e.g. ``(1, 0)``.
+
+        @param edge Pair of local signs ``(eu, ev)`` as in _ResizeHandle.EDGES.
+        @return The _ResizeHandle child item.
+        """
+        return self.handles[edge]
+
+    def begin_resize(self, edge, scene_pos):
+        """@brief Record the fixed edges and the grab offset of a resize stroke.
+
+        @param edge Local edge/corner signs ``(eu, ev)`` being dragged.
+        @param scene_pos Scene point where the pointer grabbed the handle.
+        @note The pointer rarely sits exactly on the edge, so the offset
+              between the grab point and the edge is kept in LOCAL millimeters
+              and the edge follows the pointer without an initial jump.
+        """
+        component = self.component
+        rotation = float(component.get("rotation_deg", 0))
+        half_l = float(component["length_mm"]) / 2
+        half_w = float(component["width_mm"]) / 2
+        origin = self.editor.photo_transform.mm_to_pixel(
+            float(component["x_mm"]), float(component["y_mm"]))
+        grab = self.editor.photo_transform.item_pixel_to_local(
+            rotation, scene_pos.x() - origin.x(), scene_pos.y() - origin.y())
+        self._resize = dict(
+            edge=edge, rotation=rotation, origin=origin,
+            center=(float(component["x_mm"]), float(component["y_mm"])),
+            u=(-half_l, half_l), v=(-half_w, half_w),
+            offset=(edge[0]*half_l - grab.x(), edge[1]*half_w - grab.y()))
+
+    def resize_to(self, scene_pos):
+        """@brief Move the grabbed edges to the pointer, keeping the others fixed.
+
+        @param scene_pos Current pointer position in scene pixels.
+        @note Works in the LOCAL frame of the stroke's starting rectangle:
+              each grabbed axis gets a new extent, clamped at
+              MIN_HANDLE_SIZE_MM from the opposite edge, and the new center is
+              rotated back to board millimeters. Length and width therefore
+              stay local at any rotation, cardinal or not.
+        """
+        if self._resize is None:
+            return
+        state = self._resize
+        transform = self.editor.photo_transform
+        pointer = transform.item_pixel_to_local(
+            state["rotation"], scene_pos.x() - state["origin"].x(), scene_pos.y() - state["origin"].y())
+        pointer = (pointer.x() + state["offset"][0], pointer.y() + state["offset"][1])
+        extents = []
+        for axis, sign in enumerate(state["edge"]):
+            low, high = state[("u", "v")[axis]]
+            if sign > 0:
+                high = max(pointer[axis], low + MIN_HANDLE_SIZE_MM)
+            elif sign < 0:
+                low = min(pointer[axis], high - MIN_HANDLE_SIZE_MM)
+            extents.append((low, high))
+        (u0, u1), (v0, v1) = extents
+        cu, cv = (u0 + u1) / 2, (v0 + v1) / 2
+        angle = math.radians(state["rotation"])
+        c, s = math.cos(angle), math.sin(angle)
+        values = dict(length_mm=u1 - u0, width_mm=v1 - v0,
+                      x_mm=state["center"][0] + cu*c - cv*s,
+                      y_mm=state["center"][1] + cu*s + cv*c)
+        if all(values[key] == float(self.component[key]) for key in values):
+            return
+        self.component.update(values)
+        self.sync_geometry()
+        self.editor._item_resized(self, values)
+
+    def end_resize(self):
+        """@brief Drop the stroke state; the component already holds the result."""
+        self._resize = None
 
     def photo_bounds(self):
         """@brief Provide the photo bounds operation for this workflow."""
@@ -258,6 +449,11 @@ class _ComponentItem(QGraphicsPolygonItem):
         if (change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged
                 and not self._syncing):
             self.editor._item_moved(self)
+        elif change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
+            # Only the selected outline exposes grips: hidden handles take no
+            # mouse events, so neighbours are moved, not resized, by mistake.
+            for handle in self.handles.values():
+                handle.setVisible(bool(value))
         return result
 
 
@@ -315,7 +511,7 @@ class PhotoReviewDialog(QDialog):
         layout = QVBoxLayout(self)
         instructions = QLabel(
             "Seleziona un rettangolo o una voce; trascina per spostare. "
-            "Modifica le quote per ridimensionare.\n"
+            "Trascina le maniglie o modifica le quote per ridimensionare.\n"
             "Rotella: zoom · Tasto centrale: panoramica · "
             "Origine: centro PCB, X destra, Y basso; rotazione oraria.")
         instructions.setWordWrap(True)
@@ -476,9 +672,10 @@ class PhotoReviewDialog(QDialog):
         if (component.get('model_match') or {}).get('status') == 'auto_matched' and selection.get('status') != 'confirmed':
             warnings.append(self._tr("Modello KiCad applicato automaticamente per compatibilità meccanica: identità e polarità non certificate; doppio clic per modificarlo."))
         elif (component.get('model_match') or {}).get('status') == 'provisional_matched' and selection.get('status') != 'confirmed':
-            # Il provvisorio non finisce piu' nel solido: e' una proposta per il
-            # selettore, e il 3D mostra il corpo generico con il colore della foto.
-            warnings.append(self._tr("Modello KiCad proposto dalla sola geometria, non applicato: il 3D mostra il corpo generico; doppio clic per confermarlo o cambiarlo."))
+            # Decisione dell'utente (1+3): il provvisorio torna ad agganciare
+            # il modello, ma dichiarato come tale, cosi' chi rivede sa che
+            # l'identita' viene dalla sola geometria e non da una marcatura.
+            warnings.append(self._tr("Modello KiCad applicato provvisoriamente dalla sola geometria: identità non certificata; doppio clic per confermarlo o cambiarlo."))
         elif selection.get('status') != 'confirmed':
             warnings.append(self._tr("Modello KiCad non confermato: doppio clic per scegliere."))
         else:
@@ -570,6 +767,18 @@ class PhotoReviewDialog(QDialog):
         item.component.update(x_mm=point.x(), y_mm=point.y())
         if item.isSelected():
             for key, value in (("x_mm", point.x()), ("y_mm", point.y())):
+                with QSignalBlocker(self.fields[key]):
+                    self.fields[key].setValue(value)
+        self._geometry_changed(item)
+
+    def _item_resized(self, item, values):
+        """Mirror a handle resize into the side fields and invalidate evidence.
+
+        Same contract as a size typed into the fields: the outline no longer
+        encloses the region the photograph evidence was measured on.
+        """
+        if item.isSelected():
+            for key, value in values.items():
                 with QSignalBlocker(self.fields[key]):
                     self.fields[key].setValue(value)
         self._geometry_changed(item)

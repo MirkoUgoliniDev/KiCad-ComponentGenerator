@@ -66,7 +66,7 @@ def _decide(component, presence):
     if report.get("topology_incomplete"):
         c["topology_incomplete"] = True
     complete = not (report.get("search_truncated") or report.get("topology_incomplete"))
-    if km._automatic_mechanical(c, choices, complete, _basis(c)):
+    if km._automatic_mechanical(c, choices, complete, _basis(c), report.get("discovery_scope")):
         return "auto_matched"
     if (not report.get("topology_incomplete")
             and km._provisional_geometry_choice(c, choices, complete, _basis(c)) is not None):
@@ -193,3 +193,49 @@ def test_the_module_has_no_model_path_only_because_of_its_presence(run):
     assert _decide(module, "high") == "auto_matched"
     assert km._marked_model_matches(Path(report["candidates"][0]["path"]), module)
     assert module["model_path"] is None
+
+
+def test_the_marked_module_is_automatic_even_on_a_body_box_that_misses_it(run):
+    """La catena che nella corsa successiva ha tenuto il modulo PROVVISORIO.
+
+    Stesso modulo della fixture, stesso candidato unico per marcatura
+    letterale, presenza 'high'; ma il riquadro riferito al CORPO (bbox_basis
+    'body') e' confrontato con la sezione non verificata del modello
+    (`section_65pct_unverified`), e il rilevatore lo aveva disegnato 21 x 14
+    invece di 18 x 16: scarto XY 0,17. I soli criteri dimensionali di
+    `_automatic_mechanical` respingono la coppia body + sezione non
+    verificata (e un conteggio di terminali non confermato), mentre
+    `_provisional_geometry_choice` accetta la marcatura: da qui il
+    provisional_matched della corsa, e con la regola di stamattina il
+    parallelepipedo generico.
+
+    Decisione dell'utente (B): la marcatura letterale e' evidenza
+    d'identita', indipendente dal riquadro. Con lo scopo di scoperta
+    `literal_marking_model`, candidato unico, presenza 'high' e ricerca
+    completa il modulo e' auto_matched purche' lo scarto resti entro
+    DEFAULT_SIZE_TOLERANCE. Negativi sullo stesso dato: senza lo scopo (i
+    soli criteri dimensionali) resta provvisorio; oltre la tolleranza
+    generale non e' automatico; con presenza non 'high' nemmeno.
+    """
+    module = copy.deepcopy(next(c for c in run if c["name"] == "U1_MODULE (rf_module)"))
+    module.update(bbox_basis="body", presence_confidence="high",
+                  length_mm=21.0, width_mm=14.0)
+    choice = module["model_match"]["candidates"][0]
+    body = [15.65, 17.5, 3.2]
+    choice.update(measurement_basis="body", measurement_method="section_65pct_unverified",
+                  dimensions_mm=body,
+                  relative_xy_error=km.size_distance(body, 21.0, 14.0))
+    assert 0.15 < choice["relative_xy_error"] <= km.DEFAULT_SIZE_TOLERANCE
+    choices = module["model_match"]["candidates"]
+    # Catena della corsa: la porta dimensionale respinge, il provvisorio accetta.
+    assert not km._automatic_mechanical(module, choices, True, "body")
+    assert km._provisional_geometry_choice(module, choices, True, "body") is choice
+    # Decisione B: con lo scopo di scoperta la marcatura identifica il modello.
+    assert _decide(module, "high") == "auto_matched"
+    assert _decide(module, "medium") == "review_required"
+    beyond = copy.deepcopy(module)
+    beyond["model_match"]["candidates"][0]["relative_xy_error"] = km.DEFAULT_SIZE_TOLERANCE + 0.01
+    assert _decide(beyond, "high") != "auto_matched"
+    twins = copy.deepcopy(module)
+    twins["model_match"]["candidates"].append(copy.deepcopy(choice))
+    assert _decide(twins, "high") == "provisional_matched"

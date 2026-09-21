@@ -3315,3 +3315,104 @@ automatic_generation 25, model_candidates_dialog 29, model_choice_gui_flow 7,
 photo_review_dialog 32, board_edit_lifecycle 26, live_log 15,
 terminal_metadata_flow 15, auto_match 1, match_evidence 1, candidate_report 2,
 regen_3d_overlay 7.
+
+# 2026-09-21 09:40 — «Procedi»: riquadri modificabili, revisione riapribile, provvisorio 1+3
+
+Quattro agenti su file disgiunti (P `kicad_models`, Q `yolo_review_dialog`,
+R `photo_review_dialog`, S riapertura/rilancio in `main_window` +
+`photo_inventory`), integrati e verificati centralmente. Un solo intervento
+del coordinatore oltre l'integrazione: il testo dell'avviso in
+`photo_review_dialog` per il provvisorio, che diceva ancora «non applicato».
+
+## Decisione dell'utente sul provvisorio: 1+3
+
+Dopo la corsa delle 07:37 (WROOM, USB-C e regolatore usciti generici) l'utente
+ha scelto di **tornare ad agganciare** il modello provvisorio, ma dichiarato:
+
+1. `attach_models`: `provisional_matched` con `selected_path` scrive di nuovo
+   `model_path`, e il report porta `attachment='provisional'`. Magenta resta
+   solo per `unresolved` (invariato dalle 04:10). L'avviso della revisione
+   dice «applicato provvisoriamente dalla sola geometria».
+3. `_literal_marking_identity`: se la scoperta e' stata ristretta ai file
+   nominati dalla marcatura letterale (`discovery_scope ==
+   'literal_marking_model'`) e ne resta **uno solo** entro
+   `DEFAULT_SIZE_TOLERANCE`, la marcatura e' evidenza di identita' e lo stato
+   e' `auto_matched`. Due file per la stessa marcatura (varianti) restano
+   provvisori (negativo). Presenza `'high'` e ricerca completa restano
+   richieste. Nessun nome di modello o marca nella regola.
+
+La sezione «2. provisional_matched non aggancia più il modello» delle 04:10 e'
+quindi **superata**; la #1 e la #3 restano.
+
+## Riquadri modificabili
+
+- **Prima della chiamata a pagamento** (`YoloReviewDialog`): maniglie ai
+  quattro lati (`HANDLE_RADIUS_PX=5`), trascinamento del riquadro intero,
+  lato minimo `MIN_BOX_PX`, clic fermo (`STILL_CLICK_PX`) = selezione.
+  Ogni modifica passa da `mark_manual`: `_yolo_manual_box=True`,
+  `_source="revisione manuale"`, via `_edges_measured` e i flag di taglio,
+  perche' una misura OpenCV fatta sul riquadro vecchio non descrive quello
+  nuovo. `geometry_mm()` converte con la stessa calibrazione dell'inventario.
+- **Dopo l'inventario** (`PhotoReviewDialog`): `_ResizeHandle` sui quattro
+  lati, `PhotoTransform.local_to_item_pixel/item_pixel_to_local` per i corpi
+  ruotati, lato minimo `MIN_HANDLE_SIZE_MM=0.2`; `_item_resized` aggiorna
+  quote e centro nei campi come farebbe una modifica a mano.
+- Il flag `_yolo_manual_box` e' inoltrato nei `detector_metadata`: la
+  riconciliazione **non rimisura** un riquadro disegnato a mano e non lo
+  scarta come debole.
+
+## «Rivedi proposte e rilancia l'inventario…»
+
+`photo_inventory.load_saved_detector_proposals(cache_dir)` rilegge le
+proposte salvate (`SavedDetectorProposals`: proposte, json, foto calibrata);
+`reconcile_saved_proposals(...)` rilancia **solo la riconciliazione a
+pagamento** su quelle tenute, senza rieseguire YOLO ne' la misura. In GUI:
+`btn_reopen_review` (abilitato se c'e' foto calibrata e salvataggio),
+`_reopen_detector_review` apre la finestra gratuita sul thread GUI, e solo
+all'OK dichiara nel log la chiamata a pagamento e avvia `ReconcileWorker`;
+`_on_reconciled` sostituisce l'inventario. Annulla non chiama nulla. Quattro
+voci `ui:` nuove in `i18n`.
+
+**Attenzione:** l'utente vuole il pulsante **in basso nella scheda
+principale**; oggi sta nella riga degli strumenti accanto a «Rivedi foto…».
+Va spostato (vedi «Richiesto, da fare»).
+
+## Test
+
+Contenitore, un file per volta sotto `xvfb-run -a` (tutti i 106 file, escluso
+`test_system_dependencies`): tutto verde tranne i due rossi preesistenti
+`test_board_pipeline[castellated]` (`pin_color_hex` su None, non toccati).
+Nuovi/aggiornati: `test_reopen_detector_review.py` (9),
+`test_yolo_review_dialog.py` (+7), `test_photo_review_dialog.py` (+9),
+`test_photo_review_evidence.py` (+2), `test_kicad_model_candidates_backend.py`
+e `test_presence_gate_replay.py` (contratto 1+3, positivo e negativo).
+`test_photo_inventory_gui.py` 66 verdi; il segfault VTK a fine file resta
+un artefatto del contenitore, non un test rosso.
+
+Un `SyntaxError` a `main_window.py:~2014` segnalato dall'agente P durante il
+lavoro parallelo **non c'e' piu'** nella versione integrata (verificato con
+Python 3.11 e con `test_documentation`).
+
+## Richiesto dall'utente, da fare (in quest'ordine, sue parole)
+
+1. «come prima cosa, la possibilità di ridimensionare il rettangolo» — fatto
+   (sopra), da provare nella sua corsa.
+2. «un pulsante in basso nella scheda principale» per riaprire la revisione
+   dopo averla salvata — il pulsante esiste, va **spostato in basso**.
+3. «la lista dei componenti ed in alto il numero degli stessi» — nella
+   finestra post-inventario, lista piu' visibile con il conteggio sopra.
+4. «aprire i parametri in una modale» — i campi del componente in una
+   finestra modale invece che nel pannello.
+5. «quando seleziono un elemento dalla lista si deve evidenziare
+   nell'immagine» (e viceversa).
+
+## Segnalato, mai autorizzato (invariato)
+
+Gate `presence == 'high'` con presenza da ripiego; `YoloReviewDialog` senza
+i18n; candidato singolo nella banda di pareggio non promosso.
+
+## Trappole (invariate)
+
+Lock git non cancellabili dal bridge → `mv` in `_git_lock_da_cancellare/`
+prima e dopo ogni comando git; la cartella la cancella l'utente. Push a
+carico dell'utente. Consegna sempre con `force` + verifica md5.

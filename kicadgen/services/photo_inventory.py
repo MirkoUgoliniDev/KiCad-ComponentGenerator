@@ -924,3 +924,170 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     report.overlay_png = draw_inventory(photo, report.components)
     log("Confronto fotografico pronto: verde = rilevato; arancione = da verificare.")
     return report
+
+
+#: Prefissi dei file di evidenza scritti da save_inventory_evidence: il
+#: rilevatore (proposte prima della revisione) e l'inventario finale (foto
+#: calibrata pulita). Sono gli stessi nomi che extract_inventory produce.
+DETECTOR_EVIDENCE_LABEL = 'detector'
+INVENTORY_EVIDENCE_LABEL = 'inventory'
+_EVIDENCE_STAMP = re.compile(r'^(?P<label>[a-z]+)-(?P<stamp>\d{8}-\d{6})(?P<suffix>-photo\.png|-overlay\.png|\.json)$')
+
+
+@dataclass
+class SavedDetectorProposals:
+    """@brief Detector proposals found on disk, ready to be reviewed again.
+
+    @note `photo_path` is the clean calibrated photograph the proposals were
+        measured on; it is None when the run that produced the proposals never
+        reached the end of the inventory (review cancelled, call failed), in
+        which case the caller must supply the photograph it still holds.
+    """
+    json_path: Path
+    stamp: str
+    proposals: list[dict] = field(default_factory=list)
+    photo_path: Path | None = None
+
+
+def load_saved_detector_proposals(cache_dir):
+    """@brief Find the newest saved detector proposals and their calibrated photograph.
+
+    @param cache_dir Folder that extract_inventory wrote its evidence into.
+    @return A SavedDetectorProposals, or None when no usable detector JSON exists.
+    @note The timestamp in the file name is the pairing key: the photograph is
+        the newest `inventory-<stamp>-photo.png` whose stamp is not older than
+        the proposals'. A photograph saved by an EARLIER run must not be paired
+        with these proposals: it may be a different crop, and every box would
+        land on the wrong pixels. Nothing here measures or filters: rows come
+        back exactly as they were saved, hand-drawn ones (`_yolo_manual_box`)
+        included.
+    @note A JSON that cannot be read or has no `components` list is skipped,
+        not reported as a failure: an older, valid run is still worth reviewing.
+    """
+    if not cache_dir:
+        return None
+    directory = Path(cache_dir)
+    if not directory.is_dir():
+        return None
+    entries = {}
+    for path in directory.iterdir():
+        match = _EVIDENCE_STAMP.match(path.name)
+        if match:
+            entries.setdefault((match['label'], match['suffix']), []).append((match['stamp'], path))
+    detector_jsons = sorted(entries.get((DETECTOR_EVIDENCE_LABEL, '.json'), []), reverse=True)
+    photos = sorted(entries.get((INVENTORY_EVIDENCE_LABEL, '-photo.png'), []), reverse=True)
+    for stamp, path in detector_jsons:
+        try:
+            document = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            continue
+        rows = document.get('components') if isinstance(document, dict) else None
+        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+            continue
+        photo_path = next((p for s, p in photos if s >= stamp), None)
+        return SavedDetectorProposals(json_path=path, stamp=stamp, proposals=rows,
+                                      photo_path=photo_path)
+    return None
+
+
+def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
+                              cache_dir=None, *, declared=None, verification_prompt=None,
+                              extra_instructions=None, detector='yolo'):
+    """@brief Re-run the paid reconciliation on already reviewed detector proposals.
+
+    @param photo Calibrated BGR crop (numpy array) or its PNG bytes: the same
+        photograph the proposals were measured on.
+    @param proposals Proposals kept by the reviewer, with `_id`, `_box` and
+        geometry in mm, exactly as `detector-*.json` stored them.
+    @param length Board X extent in mm, the calibration of the boxes.
+    @param width Board Y extent in mm.
+    @param model Model paid for the single global request.
+    @param call Application API callable, forwarded to review_global_inventory.
+    @param log Progress callback.
+    @param cache_dir Folder of the response cache and of the saved evidence.
+    @param declared Extracted board parameters, kept only for a consistency
+        note: the contact filter already ran when the proposals were saved and
+        must not run again on rows a person has just approved.
+    @param verification_prompt Custom notes, as in the normal path.
+    @param extra_instructions User notes, as in the normal path.
+    @param detector Detector name recorded in the calibration, for the report.
+    @return An InventoryResult shaped like the one extract_inventory returns
+        on the detector path: components, overlay, photo PNG, calibration.
+    @throws ValueError When the photograph cannot be decoded, the extents are
+        not positive, or review_global_inventory rejects the proposals.
+    @note This is the tail of extract_inventory's detector path, nothing more:
+        the same review_global_inventory, the same sample_body_colors, the same
+        save_inventory_evidence. There is deliberately no second route that
+        could drift from the normal one. What is skipped -- documents, the
+        local detector, the contact filter and the edge measurement -- ran
+        when the proposals were saved, and rows are forwarded untouched:
+        a hand-drawn box (`_yolo_manual_box`) is neither re-measured nor
+        re-filtered.
+    @note review_global_inventory keys its cache on the whole request. The
+        same photograph and the same proposals replay the stored answer and
+        nothing is paid: the log line "validated cache hit" says so, and the
+        summary here repeats it, because whoever pressed the button expects a
+        charge and must be told there was none.
+    """
+    from .photo_global_inventory import review_global_inventory
+    import cv2
+    import numpy as np
+    if isinstance(photo, (bytes, bytearray)):
+        photo = cv2.imdecode(np.frombuffer(photo, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if photo is None or getattr(photo, 'ndim', 0) != 3 or min(photo.shape[:2]) < 1:
+        raise ValueError('Foto calibrata non decodificabile: inventario non rilanciato.')
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool)
+               and math.isfinite(v) and v > 0 for v in (length, width)):
+        raise ValueError('Quote PCB non valide: inventario non rilanciato.')
+    report = InventoryResult()
+    ok, encoded = cv2.imencode('.png', photo)
+    report.photo_png = encoded.tobytes() if ok else None
+    proposals = [dict(row) for row in proposals]
+    if declared:
+        # Solo una nota di coerenza: le quote con cui le proposte furono
+        # misurate devono essere quelle della scheda estratta, altrimenti i
+        # riquadri normalizzati finiscono su una scala diversa.
+        for key, value in (('body_length_mm', length), ('body_width_mm', width)):
+            stated = declared.get(key)
+            if isinstance(stated, (int, float)) and not isinstance(stated, bool) \
+                    and not math.isclose(float(stated), float(value), abs_tol=0.011):
+                report.warnings.append(
+                    f'Quota dichiarata {key}={stated} diversa da quella di calibrazione {value}: '
+                    'le proposte salvate potrebbero essere su un\'altra scala.')
+                log(report.warnings[-1])
+    manual = sum(1 for row in proposals if row.get('_yolo_manual_box') is True)
+    log(f'Rilancio dell\'inventario: {len(proposals)} proposte riviste'
+        + (f', di cui {manual} disegnate a mano e inoltrate senza misura ne\' filtro' if manual else '')
+        + '; nessun rilevatore locale e nessun documento vengono rieseguiti.')
+    seen = []
+    def observe(message):
+        seen.append(message)
+        log(message)
+    report.components = review_global_inventory(
+        photo, proposals, length, width, model, call, observe, cache_dir,
+        verification_prompt=verification_prompt, extra_instructions=extra_instructions)
+    replayed = any('validated cache hit' in message for message in seen)
+    if replayed:
+        log('Rilancio dell\'inventario: proposte e foto identiche a una richiesta gia\' '
+            'pagata; risposta rigiocata dalla cache, nessun nuovo addebito.')
+    # Stesso ordine del percorso normale: il colore si misura dopo la
+    # riconciliazione, che sposta e fonde i riquadri.
+    sample_body_colors(photo, report.components, log)
+    report.calibration.update(detector=detector, proposal_count=len(proposals),
+                              coverage_added_count=sum(
+                                  not c.get('source_candidate_ids', [True]) for c in report.components),
+                              inventory_strategy='global-one-call', reconciled_from_saved=True,
+                              replayed_from_cache=replayed, manual_proposals=manual)
+    issues = sorted({str(issue) for c in report.components
+                     for issue in c.get('_global_inventory_errors', [])})
+    if issues:
+        report.warnings.append('Inventario globale parziale: ' + '; '.join(issues)
+                               + '. Componenti irrisolti conservati per revisione manuale.')
+        log(report.warnings[-1])
+    report.overlay_png = draw_inventory(photo, report.components)
+    save_inventory_evidence(cache_dir, report.photo_png, report.overlay_png,
+                            report.components, log, label=INVENTORY_EVIDENCE_LABEL)
+    log(f'Inventario rilanciato: {len(report.components)} ipotesi da {len(proposals)} proposte '
+        'riviste in una sola richiesta; completezza non certificata. '
+        'Package, altezze e orientamenti dubbi da rivedere.')
+    return report

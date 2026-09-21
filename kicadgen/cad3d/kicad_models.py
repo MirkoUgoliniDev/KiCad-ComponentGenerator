@@ -1299,12 +1299,64 @@ def _family_paths(component, root, basis):
     return [path for _, _, path in sorted(ranked)], omitted
 
 
-def _automatic_mechanical(component, choices, complete, basis):
+def _literal_marking_identity(component, choices, complete, discovery_scope):
+    """Whether the marking on the body names the single library model found.
+
+    Decisione dell'utente (B): la scritta letterale sul pezzo e' evidenza di
+    IDENTITA', non di geometria. Quando la scoperta e' stata ristretta ai soli
+    file nominati dalla marcatura (`discovery_scope == 'literal_marking_model'`)
+    e ne e' rimasto uno solo dopo i vincoli d'ingombro, il riquadro fotografico
+    non serve a dire *quale* modello e', ma solo a escludere che quel corpo NON
+    possa essere quel modello. Per questo la porta accetta anche una base
+    'body' con lettura di sezione non verificata, o uno scarto XY che i
+    criteri puramente dimensionali respingerebbero, purche' resti entro
+    DEFAULT_SIZE_TOLERANCE: oltre, la marcatura sarebbe stata letta su un corpo
+    che non puo' essere quel modello (caso negativo). Due file diversi che
+    corrispondono letteralmente alla stessa marcatura (varianti) NON sono
+    identita': restano una proposta provvisoria (caso negativo).
+
+    La regola non nomina alcun modello o marca: dipende dallo scopo della
+    scoperta e da grandezze misurate. Presenza 'high' e ricerca completa
+    restano richieste, perche' senza il corpo verificato la marcatura non ha
+    un soggetto e una ricerca troncata non dimostra l'unicita'.
+
+    @param component Component evidence (presence, marking).
+    @param choices Candidates ranked by model_candidates, all within tolerance.
+    @param complete True when every structurally compatible model was measured.
+    @param discovery_scope The `discovery_scope` recorded by model_candidates.
+    @return True when the single literal-marking candidate identifies the body.
+    """
+    if (discovery_scope != "literal_marking_model" or not complete
+            or len(choices) != 1
+            or component.get("presence_confidence") != "high"
+            or component.get("_yolo_review_only") is True
+            or component.get("_yolo_origin") == "low_confidence_review"
+            or component.get("_global_inventory_status") in ("invalid", "rejected")):
+        return False
+    choice = choices[0]
+    if choice.get("family") != "module" or not _marked_model_matches(Path(choice["path"]), component):
+        return False
+    try:
+        error = float(choice.get("relative_xy_error"))
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(error) and error <= DEFAULT_SIZE_TOLERANCE
+
+
+def _automatic_mechanical(component, choices, complete, basis, discovery_scope=None):
     """Require independent presence, family, terminal and envelope support.
 
     Uniqueness is evaluated before UI truncation, never inferred from a budgeted
-    or unreadable search. This conservative estimate does not certify identity.
+    or unreadable search. This conservative estimate does not certify identity,
+    with one declared exception: a single model named literally by the marking
+    on the body (see _literal_marking_identity) is identity evidence and is
+    not subject to the envelope-basis and terminal gates below.
+
+    @param discovery_scope The `discovery_scope` recorded by model_candidates,
+        when the caller knows it; None keeps the purely dimensional gates.
     """
+    if _literal_marking_identity(component, choices, complete, discovery_scope):
+        return True
     if (not complete or len(choices) != 1 or basis not in ("body", "total")
             or (basis == "body" and choices[0].get("measurement_method") == "section_65pct_unverified")
             or component.get("presence_confidence") != "high"
@@ -1544,9 +1596,10 @@ def _synchronize_preview_variants(components, note) -> None:
     Independent dimensions of cropped buttons often differ by a few tenths of
     a millimetre.  If their review lists share a compatible native model, the
     same candidate is proposed for all of them so that a later confirmation
-    does not end with two visibly different switches.  The proposal lives in
-    model_match.selected_path only: a provisional match attaches no
-    model_path, so the solids stay generic until the user confirms.
+    does not end with two visibly different switches.  The shared candidate
+    replaces model_match.selected_path and, as for any provisional match
+    (user decision A), model_path: the solids preview the same library model,
+    declared provisional in the report, until the user confirms or changes it.
     """
     groups = {}
     for component in components or []:
@@ -1601,9 +1654,15 @@ def _synchronize_preview_variants(components, note) -> None:
                 if candidate.get("path") == selected:
                     reasons = candidate.setdefault("reasons", [])
                     reasons[-1:] = [report["shared_preview_reason"]]
-            # Nessun model_path: la proposta condivisa resta provvisoria come
-            # quella del singolo componente, e il solido usa il corpo generico.
-            component.pop("model_path", None)
+            # La proposta condivisa e' provvisoria come quella del singolo
+            # componente e, come quella, si aggancia dichiarandosi tale
+            # (decisione A): il solido mostra il modello comune, non il corpo
+            # generico, e il selettore puo' cambiarlo.
+            component["model_path"] = selected
+            report["attachment"] = "provisional"
+            report["attachment_reason"] = (
+                "Model applied PROVISIONALLY: shared same-family switch candidate, "
+                "identity not verified; the picker can change it.")
         note(f"Switch preview group '{key}': shared candidate {Path(selected).name} proposed for {len(group)} components.")
 
 
@@ -1619,7 +1678,7 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dic
     @note Dimensional evidence never confirms identity. Explicit confirmation wins;
         independently supported unique estimates use auto_matched instead;
         same-footprint alternatives may use provisional_matched, which proposes
-        selected_path to the picker without attaching any model.
+        selected_path; attach_models applies it provisionally and says so.
         Rejection stops discovery. Missing/descriptive packages use family discovery.
         Unknown basis compares independent readings; body/total/pads are strict.
         leads and body_and_leads mean total. At most 64 structurally compatible
@@ -1797,7 +1856,8 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dic
                 _normalize(item["package"]) != _package_name(package), item["path"])
 
     result["candidates"].sort(key=_rank)
-    automatic = _automatic_mechanical(component, result["candidates"], complete, basis)
+    automatic = _automatic_mechanical(component, result["candidates"], complete, basis,
+                                      result.get("discovery_scope"))
     provisional = (None if automatic or result.get("topology_incomplete")
                    else _provisional_geometry_choice(
                        component, result["candidates"], complete, basis))
@@ -1809,19 +1869,23 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dic
             choice["status"] = "auto_matched"
             if _marked_model_matches(Path(choice["path"]), component):
                 choice["reasons"][-1] = "Exact literal model marking and compatible dimensions; orientation remains reviewable"
+                if result.get("discovery_scope") == "literal_marking_model":
+                    result["identity_evidence"] = "literal_marking"
             else:
                 choice["reasons"][-1] = "Mechanical estimate; identity and variant not verified"
             result.update(status="auto_matched", selected_path=choice["path"])
         elif provisional is not None:
             # Keep the candidate list and the warning semantics: this is a
-            # proposal for the picker, not a confirmed package identity, and
-            # attach_models attaches no model for it.
+            # proposal, not a confirmed package identity. attach_models applies
+            # it PROVISIONALLY (decision A) and says so in the report, so the
+            # picker can replace it.
             choice = next((item for item in result["candidates"]
                            if item["path"] == provisional["path"]), None)
             if choice is not None:
                 choice["status"] = "provisional_matched"
                 choice["reasons"][-1] = (
-                    "Proposed for the picker only; package variant and orientation require user review")
+                    "Applied provisionally: identity not verified; package variant and "
+                    "orientation require user review and the picker can replace it")
                 result.update(status="provisional_matched", selected_path=choice["path"])
         note(f"{package}: {len(result['candidates'])} dimensional candidates; {result['status']}; identity not verified.")
     return result
@@ -1837,13 +1901,16 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
         This is the one step of a generation with a real total: every component
         may cost a CAD measurement, so the count is what a progress bar can
         honestly be built on.
-    @return Number of explicit or inferred mechanical paths attached.
+    @return Number of paths attached: explicit choices, automatic mechanical
+        estimates and provisional proposals alike.
     @note Rejected or invalid explicit selections use synthetic geometry. Missing
         selections permit auto_matched mechanical estimates when evidence supports
-        them. A provisional_matched report is a proposal, not an accepted match:
-        model_match.selected_path carries the candidate for the picker, but no
-        model_path is attached and the solid stays the generic body with its own
-        colour, because the XY geometry is known even though the identity is not.
+        them. A provisional_matched report is a proposal whose identity is not
+        verified, yet it IS applied (user decision A): model_path receives
+        model_match.selected_path so the solid previews the compatible library
+        model instead of a generic body, and the report says so with
+        model_match.attachment == "provisional" plus attachment_reason, so the
+        picker can replace it. The review state is carried by model_review.
         Rotation is copied to model_rotation_deg; None or an omitted selection
         rotation clears that override for automatic native-axis inference.
         Explicit zero is retained. Unconfirmed native placement metadata and
@@ -1888,19 +1955,29 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
         if explicit is not None:
             path, rotation = explicit
             component["model_path"] = str(path)
+            report["attachment"] = "explicit"
             if rotation is None:
                 component.pop("model_rotation_deg", None)
             else:
                 component["model_rotation_deg"] = rotation
             resolved += 1
-        elif report["status"] == "auto_matched":
-            # provisional_matched NON entra qui: e' una proposta per il
-            # picker, non un abbinamento accettato. Il modello di libreria
-            # finisce nello STEP solo su conferma esplicita o su una stima
-            # meccanica sostenuta da evidenza indipendente; il candidato
-            # provvisorio resta in model_match.selected_path e il solido usa
-            # il corpo generico, con il suo colore.
+        elif report["status"] in ("auto_matched", "provisional_matched") and report.get("selected_path"):
+            # Decisione dell'utente (A): anche la proposta provvisoria aggancia
+            # il modello, ma lo dichiara. Lasciare il corpo generico per un
+            # candidato che la misura non sa distinguere dalle sue varianti
+            # buttava via un solido compatibile (modulo, USB-C, QFN uscivano
+            # come parallelepipedi) per segnalare un dubbio che il report
+            # porta gia' in un campo. L'identita' resta NON verificata:
+            # model_review e attachment lo dicono, e il selettore puo'
+            # sostituire il modello.
             component["model_path"] = report["selected_path"]
+            if report["status"] == "provisional_matched":
+                report["attachment"] = "provisional"
+                report["attachment_reason"] = (
+                    "Model applied PROVISIONALLY: identity not verified, the photograph "
+                    "cannot separate it from its variants; the picker can change it.")
+            else:
+                report["attachment"] = "automatic"
             # Il verso del modello nativo non si decide qui. Fino a poco fa lo
             # decideva una regex inglese su prosa libera, ancorata al nome del
             # file e valida di fatto per un modulo solo: una regola sui nomi,

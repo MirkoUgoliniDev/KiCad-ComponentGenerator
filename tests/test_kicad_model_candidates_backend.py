@@ -76,14 +76,141 @@ def test_literal_marking_selects_user_installed_module_model(library):
     assert measured == [exact]
 
 
+def _marked_module(**overrides):
+    """Un modulo schermato la cui scritta nomina letteralmente un modello.
+
+    Il riquadro fotografico (base 'body') e' volutamente diverso dalla sezione
+    del modello: 21,0 x 14,0 contro 17,5 x 15,65, scarto XY 0,20 sul lato
+    lungo. E' il caso della corsa reale: il rilevatore aveva disegnato il
+    modulo piu' largo e meno alto di com'e', e i soli criteri dimensionali
+    lo lasciavano provvisorio nonostante la marcatura letterale.
+    """
+    base = dict(kind="module", **{"class": "rf_module"},
+                package="shielded SMD module with castellated edge pads",
+                marking="ACME-RF-MOD-7A FCC ID:2AC7Z-MOD7A",
+                length_mm=21.0, width_mm=14.0, bbox_basis="body",
+                presence_confidence="high", class_confidence="high")
+    base.update(overrides)
+    return base
+
+
+# Stessa forma che model_sizes produce per un modulo non standard: la lettura
+# 'body' e' una sezione orizzontale non verificata, quella che i soli criteri
+# dimensionali dell'automatico respingono su base 'body'.
+_MARKED_SIZE = {"total": [18.0, 19.2, 3.2], "body": [15.65, 17.5, 3.2],
+                "body_method": "section_65pct_unverified"}
+
+
+def test_literal_marking_identity_is_independent_of_the_box(library):
+    """@brief Positivo (decisione B): marcatura letterale unica -> auto_matched.
+
+    La scoperta e' ristretta ai file nominati dalla scritta
+    (discovery_scope 'literal_marking_model'), ne resta uno, la presenza e'
+    'high' e la ricerca completa: l'identita' e' data dalla marcatura, non
+    dal riquadro. La base 'body' con lettura di sezione non verificata e lo
+    scarto XY del 20% -- che i criteri puramente dimensionali respingono --
+    non contano piu': il riquadro serve solo a escludere un corpo che non
+    puo' essere quel modello (entro DEFAULT_SIZE_TOLERANCE).
+    """
+    root, add, _ = library
+    exact = add("vendor", "ACME-RF-MOD-7A", _MARKED_SIZE)
+    c = _marked_module()
+    assert km.attach_models([c], library=root) == 1
+    report = c["model_match"]
+    assert report["discovery_scope"] == "literal_marking_model"
+    assert report["status"] == "auto_matched"
+    assert report["identity_evidence"] == "literal_marking"
+    assert report["attachment"] == "automatic"
+    assert c["model_path"] == str(exact)
+    choice = report["candidates"][0]
+    assert choice["measurement_method"] == "section_65pct_unverified"
+    assert 0.15 < choice["relative_xy_error"] <= km.DEFAULT_SIZE_TOLERANCE
+    assert "literal model marking" in choice["reasons"][-1]
+
+
+def test_two_models_for_the_same_marking_stay_provisional(library):
+    """@brief Negativo (B): due file per la stessa scritta non sono un'identita'.
+
+    Varianti che contengono entrambe il codice marcato: la marcatura non dice
+    quale delle due c'e', quindi niente automatico. Resta la proposta
+    provvisoria della marcatura (agganciata e dichiarata tale, decisione A).
+    """
+    root, add, _ = library
+    add("vendor", "ACME-RF-MOD-7A", _MARKED_SIZE)
+    add("vendor", "ACME-RF-MOD-7A-N8", _MARKED_SIZE)
+    c = _marked_module()
+    km.attach_models([c], library=root)
+    report = c["model_match"]
+    assert report["discovery_scope"] == "literal_marking_model"
+    assert len(report["candidates"]) == 2
+    assert report["status"] == "provisional_matched"
+    assert report["attachment"] == "provisional"
+    assert c["model_path"] == report["selected_path"]
+
+
+def test_a_marked_body_outside_the_size_tolerance_is_not_that_model(library):
+    """@brief Negativo (B): oltre DEFAULT_SIZE_TOLERANCE la marcatura non basta.
+
+    Un riquadro che si scosta dal modello oltre la tolleranza generale e' un
+    corpo che NON puo' essere quel modello: la scritta e' stata letta su
+    qualcos'altro, o il riquadro e' sbagliato. Nessun candidato, quindi
+    nessun automatismo e nessun provvisorio.
+    """
+    root, add, _ = library
+    add("vendor", "ACME-RF-MOD-7A", _MARKED_SIZE)
+    c = _marked_module(length_mm=26.0, width_mm=14.0)
+    assert km.attach_models([c], library=root) == 0
+    assert c["model_match"]["status"] == "unresolved"
+    assert "model_path" not in c
+
+
+@pytest.mark.parametrize("fields", [
+    {"presence_confidence": "medium"}, {"presence_confidence": "low"},
+    {"_yolo_review_only": True}, {"_yolo_origin": "low_confidence_review"},
+    {"_global_inventory_status": "rejected"}])
+def test_literal_marking_without_verified_presence_is_not_automatic(library, fields):
+    """@brief Negativo (B): senza il corpo verificato la marcatura non ha un soggetto.
+
+    La presenza 'high' resta richiesta: la scritta identifica un modello solo
+    se il corpo su cui e' letta e' stato verificato. Con presenza inferiore o
+    con un rilevamento da rivedere il modulo non e' automatico (ne'
+    provvisorio, che pretende la stessa presenza).
+    """
+    root, add, _ = library
+    add("vendor", "ACME-RF-MOD-7A", _MARKED_SIZE)
+    c = _marked_module(**fields)
+    km.attach_models([c], library=root)
+    assert c["model_match"]["status"] == "review_required"
+    assert c["model_match"]["selected_path"] is None
+    assert "model_path" not in c
+
+
+def test_literal_marking_identity_requires_a_complete_search(library, monkeypatch):
+    """@brief Negativo (B): una ricerca troncata non dimostra l'unicita'.
+
+    Se la misura di un file nominato dalla marcatura fallisce, la lista ha
+    un solo candidato ma la ricerca non e' completa: il secondo file potrebbe
+    essere quello giusto. Niente automatico; resta la proposta provvisoria
+    della marcatura.
+    """
+    root, add, _ = library
+    good = add("vendor", "ACME-RF-MOD-7A", _MARKED_SIZE)
+    add("vendor", "ACME-RF-MOD-7A-N8", _MARKED_SIZE)
+    monkeypatch.setattr(km, "model_sizes", lambda *a, **k: {str(good): _MARKED_SIZE})
+    c = _marked_module()
+    km.attach_models([c], library=root)
+    assert len(c["model_match"]["candidates"]) == 1
+    assert c["model_match"]["status"] == "provisional_matched"
+
+
 def test_three_lead_tab_unknown_semiconductor_gets_sot223_preview(library):
     """@brief La morfologia a tre reofori e linguetta propone il SOT-223.
 
-    Contratto aggiornato: una proposta provvisoria non aggancia piu' alcun
-    model_path (il modello di libreria finiva nello STEP sulla base di un
-    abbinamento che il codice stesso dichiarava di non saper confermare).
-    Il candidato resta in model_match.selected_path per il picker, il solido
-    usa il corpo generico e il conteggio degli agganci non lo include.
+    Decisione dell'utente (A): la proposta provvisoria torna ad agganciare
+    il modello, dichiarandolo tale. Lasciare il corpo generico per un solido
+    compatibile non aggiungeva informazione: il dubbio sull'identita' lo
+    porta gia' il report (status provisional_matched, attachment
+    'provisional'), e il selettore puo' cambiare il modello.
     """
     root, add, _ = library
     sot = add("Package_TO_SOT_SMD", "SOT-223",
@@ -94,10 +221,12 @@ def test_three_lead_tab_unknown_semiconductor_gets_sot223_preview(library):
              package_evidence="Three leads and one large tab are visible.",
              length_mm=7.37, width_mm=6.91, bbox_basis="total",
              presence_confidence="high", class_confidence="low")
-    assert km.attach_models([c], library=root) == 0
+    assert km.attach_models([c], library=root) == 1
     assert c["model_match"]["status"] == "provisional_matched"
     assert c["model_match"]["selected_path"] == str(sot)
-    assert "model_path" not in c
+    assert c["model_path"] == str(sot)
+    assert c["model_match"]["attachment"] == "provisional"
+    assert c["model_review"] == "provisional_matched"
     assert "model variant" in c["model_match"]["candidates"][0]["reasons"][-1].lower() or \
            "package" in c["model_match"]["candidates"][0]["reasons"][-1].lower()
 
@@ -159,13 +288,16 @@ def test_the_magenta_placeholder_is_reserved_for_the_unresolved(library):
     assert unresolved["model_match"]["render_placeholder"] is True
 
 
-def test_a_provisional_proposal_keeps_the_photo_colour_and_attaches_nothing(library):
-    """@brief provisional_matched: geometria nota, identita' no, quindi corpo generico.
+def test_a_provisional_proposal_keeps_the_photo_colour_and_attaches_declared(library):
+    """@brief provisional_matched: geometria nota, identita' no, modello applicato ma dichiarato.
 
-    Positivo/negativo a parita' di corpo: con evidenza indipendente (conteggio
-    osservato) la stessa lista diventa auto_matched e aggancia il modello; con
-    la sola geometria resta una proposta, con il colore campionato e senza
-    model_path. Prima entrambi finivano nello STEP.
+    Decisione dell'utente (A): il provvisorio aggancia il model_path come
+    l'automatico, ma il report lo dice (attachment 'provisional', con la
+    ragione), il colore campionato dalla foto resta e nulla e' magenta.
+    Positivo/negativo sullo stesso stato: con evidenza indipendente
+    (conteggio osservato) la stessa lista diventa auto_matched, attachment
+    'automatic'; con la sola geometria resta provvisoria. E, nel negativo
+    che segue, review_required non aggancia nulla e unresolved e' magenta.
     """
     root, add, _ = library
     first = add("Button_Switch_SMD", "SW_SPST_EVQP7A", {"total": [4.7, 3.55, 1.35]})
@@ -174,31 +306,57 @@ def test_a_provisional_proposal_keeps_the_photo_colour_and_attaches_nothing(libr
                          length_mm=4.74, width_mm=3.53, bbox_basis="total",
                          color_hex="#2b2b2b", _color_source="photo_median",
                          model_rotation_deg=90)
-    assert km.attach_models([proposal], library=root) == 0
+    assert km.attach_models([proposal], library=root) == 1
     assert proposal["model_match"]["status"] == "provisional_matched"
     assert proposal["model_match"]["selected_path"] == str(first)
-    assert "model_path" not in proposal
+    assert proposal["model_path"] == str(first)
+    assert proposal["model_match"]["attachment"] == "provisional"
+    assert "PROVISIONALLY" in proposal["model_match"]["attachment_reason"]
+    assert "picker can change it" in proposal["model_match"]["attachment_reason"]
+    assert "provisional" in proposal["model_match"]["candidates"][0]["reasons"][-1].lower()
     assert proposal["color_hex"] == "#2b2b2b" and proposal["_color_source"] == "photo_median"
     assert proposal["render_placeholder"] is False
     assert proposal["model_review"] == "provisional_matched"
-    # Nessun modello agganciato, nessuna decisione sul suo verso: la
-    # correzione dell'utente resta com'era, come per review_required.
-    assert proposal["model_rotation_deg"] == 90
+    # Un modello e' agganciato: l'angolo assoluto di una corsa precedente era
+    # stato calcolato su un altro modello e va tolto, come per auto_matched.
+    assert "model_rotation_deg" not in proposal
 
     accepted = supported(package="", color_hex="#2b2b2b")
     add("Resistor_SMD", "R_0603_1608Metric")
     assert km.attach_models([accepted], library=root) == 1
     assert accepted["model_match"]["status"] == "auto_matched"
     assert accepted["model_path"] == accepted["model_match"]["selected_path"]
+    assert accepted["model_match"]["attachment"] == "automatic"
     assert accepted["render_placeholder"] is False
+
+
+def test_review_required_attaches_nothing_and_unresolved_is_magenta(library):
+    """@brief Negativo della decisione A: solo il provvisorio aggancia.
+
+    Un corpo con candidati ma senza proposta (review_required) resta senza
+    model_path e conserva il colore della foto; un corpo senza candidati
+    (unresolved) e' magenta. La regola del magenta non cambia con A.
+    """
+    root, add, _ = library
+    add("Resistor_SMD", "R_0603")
+    reviewed = component(color_hex="#5a4b3c", _color_source="photo_median")
+    unresolved = component(length_mm=10, color_hex="#5a4b3c", _color_source="photo_median")
+    assert km.attach_models([reviewed, unresolved], library=root) == 0
+    assert reviewed["model_match"]["status"] == "review_required"
+    assert "model_path" not in reviewed and "attachment" not in reviewed["model_match"]
+    assert reviewed["color_hex"] == "#5a4b3c" and reviewed["render_placeholder"] is False
+    assert unresolved["model_match"]["status"] == "unresolved"
+    assert "model_path" not in unresolved
+    assert unresolved["color_hex"] == "#FF00FF" and unresolved["render_placeholder"] is True
 
 
 def test_same_family_switches_share_common_preview_variant(library):
     """@brief Due pulsanti provvisori della stessa famiglia propongono un candidato comune.
 
     Contratto aggiornato su due punti. La proposta condivisa resta provvisoria
-    come quella del singolo: vive in selected_path e non aggancia alcun
-    model_path. E il secondo pulsante misura ora 4,95 x 3,05 invece di
+    come quella del singolo e, per la decisione dell'utente (A), aggancia il
+    modello comune come model_path dichiarandosi provvisoria: il selettore puo'
+    cambiarla. E il secondo pulsante misura ora 4,95 x 3,05 invece di
     4,84 x 3,12: con la vecchia misura la sua banda di pareggio conteneva un
     terzo solido di inviluppo diverso (4,6 x 3,2 a meno del margine dai
     5,0 x 3,0), quindi con la banda che guarda tutti i candidati non e' piu'
@@ -216,9 +374,10 @@ def test_same_family_switches_share_common_preview_variant(library):
     second = dict(kind="switch", package="SMD tactile switch (~4.9x3.1mm visible)",
                   length_mm=4.95, width_mm=3.05, bbox_basis="total",
                   presence_confidence="high", class_confidence="medium")
-    assert km.attach_models([first, second], library=root) == 0
+    assert km.attach_models([first, second], library=root) == 2
     assert first["model_match"]["selected_path"] == second["model_match"]["selected_path"] == str(common)
-    assert "model_path" not in first and "model_path" not in second
+    assert first["model_path"] == second["model_path"] == str(common)
+    assert first["model_match"]["attachment"] == second["model_match"]["attachment"] == "provisional"
     assert first["model_match"]["status"] == second["model_match"]["status"] == "provisional_matched"
     assert first["model_match"]["shared_preview_group"] == "smd tactile switch"
 
@@ -244,9 +403,10 @@ def test_a_switch_whose_band_is_mixed_does_not_join_the_shared_proposal(library)
     mixed = dict(kind="switch", package="SMD tactile switch (~4.8x3.1mm visible)",
                  length_mm=4.84, width_mm=3.12, bbox_basis="total",
                  presence_confidence="high", class_confidence="medium")
-    assert km.attach_models([first, mixed], library=root) == 0
+    assert km.attach_models([first, mixed], library=root) == 1
     assert mixed["model_match"]["status"] == "review_required"
     assert mixed["model_match"]["selected_path"] is None
+    assert "model_path" not in mixed
     assert len(km._tie_band(mixed["model_match"]["candidates"])) == 3
     assert first["model_match"]["status"] == "provisional_matched"
     assert first["model_match"]["selected_path"] == str(first_choice)
@@ -254,6 +414,12 @@ def test_a_switch_whose_band_is_mixed_does_not_join_the_shared_proposal(library)
 
 
 def test_same_xy_variants_attach_a_reviewable_preview_model(library):
+    """@brief Due varianti con lo stesso ingombro XY: modello applicato, ma provvisorio.
+
+    Decisione dell'utente (A): il candidato provvisorio e' agganciato come
+    model_path e dichiarato tale nel report; resta una proposta per il
+    selettore, non un'identita' verificata.
+    """
     root, add, measured = library
     first = add("Button_Switch_SMD", "SW_SPST_EVQP7A",
                 {"total": [4.7, 3.55, 1.35]})
@@ -261,12 +427,11 @@ def test_same_xy_variants_attach_a_reviewable_preview_model(library):
         {"total": [4.7, 3.55, 1.85]})
     c = supported(kind="switch", package="small tactile switch",
                   length_mm=4.74, width_mm=3.53, bbox_basis="total")
-    # Contratto aggiornato: il candidato provvisorio e' una proposta per il
-    # picker (selected_path), non un modello agganciato allo STEP.
-    assert km.attach_models([c], library=root) == 0
+    assert km.attach_models([c], library=root) == 1
     assert c["model_match"]["status"] == "provisional_matched"
     assert c["model_match"]["selected_path"] == str(first)
-    assert "model_path" not in c
+    assert c["model_path"] == str(first)
+    assert c["model_match"]["attachment"] == "provisional"
     assert c["model_match"]["candidates"][0]["status"] == "provisional_matched"
     assert "variant" in c["model_match"]["candidates"][0]["reasons"][-1]
     assert measured == [first, first.parent / "SW_SPST_EVQP7C.step"]

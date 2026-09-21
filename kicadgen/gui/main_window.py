@@ -17,6 +17,7 @@ import threading
 import shutil
 import sqlite3
 import sys
+import time
 import webbrowser
 from pathlib import Path
 
@@ -533,6 +534,72 @@ class ExtractWorker(QThread):
             self.error.emit(f"Errore API: {exc}")
 
 
+class ReconcileWorker(QThread):
+    """@brief Rilancia la sola riconciliazione a pagamento su proposte gia' riviste.
+
+    E' la coda di ExtractWorker senza la testa: niente documenti, niente
+    rilevatore locale, niente filtro dei contatti ne' misura dei bordi. Riceve
+    le proposte tenute nella finestra «Corpi rilevati», riaperta sull'ultimo
+    salvataggio, e fa UNA richiesta al modello che guarda la fotografia, poi
+    campiona i colori e salva l'evidenza come farebbe l'estrazione normale.
+
+    Segnali:
+        done(InventoryResult) -- inventario riconciliato
+        error(str)            -- messaggio di errore leggibile
+        progress(str)         -- avanzamento, compresa la riga della chiamata
+        phase(str, str, int, int) -- vedi GenerateWorker.phase
+    """
+
+    done = pyqtSignal(object)
+    error = pyqtSignal(str)
+    progress = pyqtSignal(str)
+    phase = pyqtSignal(str, str, int, int)
+
+    def __init__(self, photo_png, proposals, length_mm, width_mm, model, cache_dir,
+                 *, declared=None, verification_prompt=None, extra_instructions=None,
+                 detector='yolo'):
+        """@brief Fotografa le proposte approvate prima di lasciare il thread GUI.
+
+        @param photo_png Fotografia calibrata su cui le proposte furono misurate.
+        @param proposals Proposte tenute dalla revisione, inoltrate cosi' come sono.
+        @param length_mm Estensione della scheda lungo X, in mm (calibrazione).
+        @param width_mm Estensione lungo Y, in mm.
+        @param model Modello a pagamento della riconciliazione.
+        @param cache_dir Cartella della cache delle risposte e dell'evidenza.
+        @param declared Quote dichiarate della scheda, solo per la nota di coerenza.
+        @param verification_prompt Note del profilo, come nel percorso normale.
+        @param extra_instructions Note dell'utente, come nel percorso normale.
+        @param detector Nome del rilevatore da registrare nella calibrazione.
+        """
+        super().__init__()
+        self.photo_png = photo_png
+        self.proposals = deepcopy(proposals)
+        self.length_mm, self.width_mm = float(length_mm), float(width_mm)
+        self.model = model
+        self.cache_dir = cache_dir
+        self.declared = deepcopy(declared) if declared else None
+        self.verification_prompt = verification_prompt
+        self.extra_instructions = extra_instructions
+        self.detector = detector
+
+    def run(self) -> None:
+        """@brief Esegue la riconciliazione con la stessa chiamata registrata dell'estrazione."""
+        from ..services.photo_inventory import reconcile_saved_proposals
+        from ..services.openrouter import call_tool
+        from ..services.ai_diagnostics import make_logged_call
+        try:
+            self.phase.emit('llm', self.model, 0, 0)
+            report = reconcile_saved_proposals(
+                self.photo_png, self.proposals, self.length_mm, self.width_mm, self.model,
+                make_logged_call(call_tool, self.progress.emit, log_prompt=True),
+                self.progress.emit, self.cache_dir, declared=self.declared,
+                verification_prompt=self.verification_prompt,
+                extra_instructions=self.extra_instructions, detector=self.detector)
+            self.done.emit(report)
+        except Exception as exc:  # noqa: BLE001 - errori rete/API riportati in UI
+            self.error.emit(f"Rilancio dell'inventario fallito: {exc}")
+
+
 class MainWindow(QMainWindow):
     """@brief Coordinate the six-tab component generation workflow."""
 
@@ -550,7 +617,17 @@ class MainWindow(QMainWindow):
         self._extract_worker: ExtractWorker | None = None
         self._cad3d_worker: Cad3DWorker | None = None
         self._terminal_worker: TerminalDetailWorker | None = None
+        self._reconcile_worker: ReconcileWorker | None = None
         self._last_params: PinHeaderParams | CastellatedModuleParams | PackageGeometry | None = None
+        #: Ultimo risultato dell'estrazione applicato ai campi. Serve a
+        #: rilanciare l'inventario sulle proposte salvate: le quote con cui la
+        #: foto fu calibrata e i lati dichiarati stanno qui, non nei campi,
+        #: che nel frattempo l'utente puo' aver ritoccato.
+        self._last_extracted: ExtractedParams | None = None
+        #: Marca temporale (stesso formato dei file di evidenza) dell'ultima
+        #: estrazione avviata: le proposte salvate valgono solo se sono nate
+        #: da quella, perche' la cartella photo-cache e' comune ai componenti.
+        self._extraction_started_stamp: str | None = None
         self.package_geometry: PackageGeometry | None = None
         self.fillet_annotations: list[EdgeFilletAnnotation] = []
         self.face_text_annotations: list[FaceTextAnnotation] = []
@@ -716,7 +793,8 @@ class MainWindow(QMainWindow):
 
     def _background_work_running(self):
         return any(worker is not None and worker.isRunning() for worker in
-                   (self._worker, self._extract_worker, self._cad3d_worker, self._terminal_worker))
+                   (self._worker, self._extract_worker, self._cad3d_worker, self._terminal_worker,
+                    self._reconcile_worker))
 
     def closeEvent(self, event):
         """@brief Provide the closeEvent operation for this workflow."""
@@ -1342,6 +1420,16 @@ class MainWindow(QMainWindow):
         )
         self.btn_photo_comparison.setEnabled(False)
         self.btn_photo_comparison.clicked.connect(self._show_photo_comparison)
+        # Riapre «Corpi rilevati» sulle proposte salvate dall'ultima estrazione
+        # e ripaga SOLO la riconciliazione: niente documenti, niente YOLO.
+        self.btn_reopen_review = QPushButton("Rivedi proposte e rilancia l'inventario…")
+        self.btn_reopen_review.setToolTip(
+            "Riapre i corpi rilevati dall'ultima estrazione, salvati nella cache, e "
+            "rilancia solo l'inventario AI sulle proposte tenute: una richiesta a "
+            "pagamento, poi abbinamento modelli e 3D come dopo un'estrazione."
+        )
+        self.btn_reopen_review.setEnabled(False)
+        self.btn_reopen_review.clicked.connect(self._reopen_detector_review)
         self._photo_png = None
         self._photo_overlay_png = None
         self._photo_source = ""
@@ -1403,6 +1491,7 @@ class MainWindow(QMainWindow):
         self.btn_component_prompt.setToolTip("Modifica le istruzioni AI specifiche di questo componente")
         tools_row.addWidget(self.btn_component_prompt)
         tools_row.addWidget(self.btn_photo_comparison)
+        tools_row.addWidget(self.btn_reopen_review)
         tools_row.addStretch()
         analysis_layout.addSpacing(10)
         analysis_layout.addWidget(self.btn_extract_ai, alignment=Qt.AlignmentFlag.AlignHCenter)
@@ -1758,19 +1847,10 @@ class MainWindow(QMainWindow):
                 self, self.i18n.text('Profilo AI non disponibile'), str(exc))
             return
 
-        self.btn_extract_ai.setEnabled(False)
-        self._auto_after_extraction = not self._advanced_user()
-        self._auto_generation_params = None
-        self._extract_finish_pending = False
-        # Il consuntivo si azzera qui, all'inizio di una NUOVA analisi: farlo
-        # quando la modale riparte lo cancellava subito dopo averlo mostrato,
-        # perche' la modale riparte anche per la generazione FreeCAD.
-        self.analysis_overlay.clear_cost()
-        self.lbl_ai_cost.hide()
-        self.btn_extract_ai.setText(self.i18n.text("Analisi in corso..."))
-        self._start_log_session("Analisi AI")
-        self.ai_progress_text.clear()
-        self.ai_elements_list.clear()
+        self._begin_ai_run("Analisi AI")
+        self._extraction_started_stamp = time.strftime('%Y%m%d-%H%M%S')
+        self._last_extracted = None
+        self.btn_reopen_review.setEnabled(False)
         self.btn_photo_comparison.setEnabled(False)
         self._photo_png = None
         self._photo_overlay_png = None
@@ -1829,6 +1909,187 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._on_extract_finished()
             self._on_extract_error(str(exc))
+
+    def _begin_ai_run(self, title: str) -> None:
+        """@brief Prepara log, consuntivo e pulsanti per un'analisi AI che sta per partire.
+
+        @param title Titolo della sezione nel diario.
+        @note Condiviso fra l'estrazione completa e il rilancio dell'inventario:
+            entrambi finiscono in _on_extracted/_on_extract_finished, quindi
+            devono partire dallo stesso stato. Il consuntivo si azzera qui,
+            all'inizio di una NUOVA analisi: farlo quando la modale riparte lo
+            cancellava subito dopo averlo mostrato, perche' la modale riparte
+            anche per la generazione FreeCAD.
+        """
+        self.btn_extract_ai.setEnabled(False)
+        self._auto_after_extraction = not self._advanced_user()
+        self._auto_generation_params = None
+        self._extract_finish_pending = False
+        self.analysis_overlay.clear_cost()
+        self.lbl_ai_cost.hide()
+        self.btn_extract_ai.setText(self.i18n.text("Analisi in corso..."))
+        self._start_log_session(title)
+        self.ai_progress_text.clear()
+        self.ai_elements_list.clear()
+
+    def _photo_cache_dir(self) -> Path:
+        """@brief Cartella in cui l'inventario fotografico salva cache ed evidenza.
+
+        @return Lo stesso percorso predefinito di datasheet_extractor
+            (`generated/photo-cache` nella radice del tool): il worker di
+            estrazione non ne passa uno diverso, quindi e' li' che finiscono
+            `detector-*.json` e `inventory-*-photo.png`.
+        @note E' una cartella comune a tutti i componenti: per questo le
+            proposte salvate si accettano solo se nate dall'ultima estrazione
+            (vedi _saved_detector_proposals).
+        """
+        return Path(__file__).resolve().parents[2] / 'generated' / 'photo-cache'
+
+    def _saved_detector_proposals(self):
+        """@brief Le proposte del rilevatore salvate dall'ultima estrazione, se ci sono.
+
+        @return SavedDetectorProposals, oppure None quando non c'e' nulla di
+            riutilizzabile: nessun file, oppure un file piu' vecchio
+            dell'ultima estrazione avviata in questa sessione, che potrebbe
+            appartenere a un altro componente.
+        """
+        from ..services.photo_inventory import load_saved_detector_proposals
+        try:
+            saved = load_saved_detector_proposals(self._photo_cache_dir())
+        except OSError:
+            return None
+        if saved is None or not saved.proposals:
+            return None
+        if self._extraction_started_stamp and saved.stamp < self._extraction_started_stamp:
+            return None
+        return saved
+
+    def _refresh_reopen_review_button(self) -> None:
+        """@brief Abilita il rilancio solo con proposte salvate E quote della scheda note.
+
+        @note Le due condizioni sono entrambe necessarie: senza le quote con
+            cui la foto fu calibrata i riquadri salvati non hanno scala; senza
+            proposte salvate non c'e' nulla da rivedere.
+        """
+        params = self._last_extracted
+        calibrated = (params is not None
+                      and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                              and math.isfinite(v) and v > 0
+                              for v in (params.body_length_mm, params.body_width_mm)))
+        self.btn_reopen_review.setEnabled(bool(calibrated and self._saved_detector_proposals()))
+
+    def _reopen_detector_review(self) -> None:
+        """@brief Riapre «Corpi rilevati» sull'ultimo salvataggio e rilancia l'inventario.
+
+        @note Ordine voluto: prima la revisione, gratuita e sul thread GUI;
+            poi, solo all'OK, la dichiarazione nel log della richiesta a
+            pagamento e il worker. Annullare non avvia nulla. Le proposte
+            tornano dal file cosi' come furono salvate (gia' filtrate e
+            misurate) e quelle tenute, comprese le disegnate a mano
+            (`_yolo_manual_box`), vanno alla riconciliazione senza altre
+            trasformazioni.
+        """
+        if self._background_work_running() or self._automatic_generation_active:
+            return
+        params = self._last_extracted
+        saved = self._saved_detector_proposals()
+        if params is None or saved is None:
+            self._refresh_reopen_review_button()
+            return
+        length, width = float(params.body_length_mm), float(params.body_width_mm)
+        photo_png = None
+        if saved.photo_path is not None:
+            try:
+                photo_png = saved.photo_path.read_bytes()
+            except OSError as exc:
+                self._append_log(f"Foto calibrata salvata non leggibile ({exc}): uso quella dell'estrazione.")
+        photo_png = photo_png or self._photo_png
+        if not photo_png:
+            QMessageBox.warning(
+                self, self.i18n.text("Rilancio non disponibile"),
+                self.i18n.text("Manca la foto calibrata delle proposte salvate: rilancia l'estrazione."))
+            return
+        photo_name = saved.photo_path.name if saved.photo_path else "dell'ultima estrazione"
+        self._append_log(f"Proposte del rilevatore riaperte da {saved.json_path.name}: "
+                         f"{len(saved.proposals)} corpi su foto {photo_name}.")
+        try:
+            from .yolo_review_dialog import YoloReviewDialog
+            from ..services.photo_yolo import detector_classes
+            dialog = YoloReviewDialog(photo_png, [dict(p) for p in saved.proposals],
+                                      length, width, detector_classes(), self)
+            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+            kept = list(dialog.kept()) if accepted else None
+        except Exception as exc:  # noqa: BLE001 - la vista non deve far cadere la finestra
+            self._append_log(f"ATTENZIONE revisione dei corpi non disponibile: {exc}")
+            return
+        if kept is None:
+            self._append_log("Revisione dei corpi rilevati annullata: nessuna richiesta avviata.")
+            return
+        model = self._photo_detector_model()
+        try:
+            profile = self.profile_store.snapshot(self._profile_key())
+        except (ProfileError, sqlite3.Error, OSError) as exc:
+            QMessageBox.warning(self, self.i18n.text('Profilo AI non disponibile'), str(exc))
+            return
+        self._begin_ai_run("Rilancio inventario")
+        self.btn_reopen_review.setEnabled(False)
+        # Dichiarata PRIMA di partire, nel log e nella modale: e' l'unica
+        # spesa di questo percorso e chi preme deve saperlo prima, non dopo.
+        announcement = (f"Rilancio dell'inventario su {len(kept)} proposte: una richiesta "
+                        f"a pagamento al modello {model}.")
+        self._on_ai_progress(announcement)
+        declared = dict(layout=params.layout, castellated_sides=params.castellated_sides,
+                        body_length_mm=params.body_length_mm, body_width_mm=params.body_width_mm)
+        self._reconcile_worker = ReconcileWorker(
+            photo_png, kept, length, width, model, self._photo_cache_dir(),
+            declared=declared, verification_prompt=profile['verification_prompt'],
+            extra_instructions=self.field_component_prompt.toPlainText().strip() or None,
+            # Le proposte salvate vengono dal rilevatore locale: il nome che
+            # finisce nella calibrazione e' quello, qualunque cosa dica ora la
+            # tendina, perche' descrive come i riquadri sono nati.
+            detector='yolo')
+        self._reconcile_worker.done.connect(self._on_reconciled)
+        self._reconcile_worker.error.connect(self._on_extract_error)
+        self._reconcile_worker.progress.connect(self._on_ai_progress)
+        self._reconcile_worker.phase.connect(self._on_phase)
+        self._reconcile_worker.finished.connect(self._on_extract_finished)
+        self._analysis_tabs_enabled = self.tabs.isEnabled()
+        self.tabs.setEnabled(False)
+        self.analysis_overlay.start("Rilancio dell'inventario", announcement)
+        try:
+            self._reconcile_worker.start()
+        except Exception as exc:
+            self._on_extract_finished()
+            self._on_extract_error(str(exc))
+
+    def _on_reconciled(self, report) -> None:
+        """@brief Sostituisce i componenti e rientra nella via di un'estrazione normale.
+
+        @param report InventoryResult di reconcile_saved_proposals.
+        @note I nuovi componenti prendono il posto di `components_3d` negli
+            ultimi parametri estratti, e il resto (nome, quote, lati) resta
+            quello. Da qui in poi e' _on_extracted: stessi campi, stesso
+            ripristino delle scelte KiCad, e -- se la modalita' lo prevede --
+            la generazione automatica con abbinamento modelli e 3D parte da
+            _on_extract_finished come dopo l'estrazione.
+        """
+        from dataclasses import replace
+        base = self._last_extracted
+        if base is None:
+            self._on_extract_error("Nessuna estrazione a cui applicare l'inventario rilanciato.")
+            return
+        notes = str(base.notes or '').strip()
+        suffix = (f"Inventario rilanciato: {len(report.components)} ingombri riconciliati "
+                  f"da {report.calibration.get('proposal_count', 0)} proposte riviste. "
+                  "Modello meccanico semplificato, senza marcature; altezze indicative, "
+                  "non misure certificate.")
+        if report.warnings:
+            suffix += "\n" + "\n".join(report.warnings[:6])
+        params = replace(base, components_3d=[dict(c) for c in report.components],
+                         photo_overlay_png=report.overlay_png,
+                         photo_png=report.photo_png or base.photo_png,
+                         notes=f"{notes} {suffix}".strip())
+        self._on_extracted(params)
 
     def _hide_analysis_overlay(self) -> None:
         self.analysis_overlay.stop()
@@ -2161,6 +2422,8 @@ class MainWindow(QMainWindow):
         self._photo_overlay_png = params.photo_overlay_png
         self._photo_source = params.photo_source
         self.btn_photo_comparison.setEnabled(bool(self._photo_png or self._photo_overlay_png))
+        self._last_extracted = params
+        self._refresh_reopen_review_button()
         # Il nome lo decide chi lavora, non l'estrazione. Il nome proposto
         # resta visibile accanto al campo e si applica con un clic -- che e'
         # anche il momento in cui i documenti lo seguono. Riscriverlo da soli
@@ -2351,6 +2614,10 @@ class MainWindow(QMainWindow):
         self._auto_generation_params = None
         self._auto_after_extraction = False
         self._hide_analysis_overlay()
+        # Un rilancio fallito lascia validi i parametri e le proposte salvate:
+        # il pulsante torna disponibile per riprovare, o resta spento se non
+        # c'era nulla.
+        self._refresh_reopen_review_button()
         self._on_ai_progress(f"Estrazione fallita: {message}")
         QMessageBox.warning(self, self.i18n.text("Estrazione fallita"), message)
 

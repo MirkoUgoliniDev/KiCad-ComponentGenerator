@@ -386,3 +386,151 @@ def test_the_quit_promise_is_released_when_the_measurement_thread_ends(dialog, a
     # Sciolta: una seconda disconnessione non ha piu' nulla da sciogliere.
     with pytest.raises(TypeError):
         app.aboutToQuit.disconnect(worker.wait)
+
+
+def _handle_view_point(dialog, item, edge):
+    """Viewport pixel of a resize grip; grips ignore zoom, so the center is enough."""
+    return dialog.view.mapFromScene(item.handle(edge).scenePos())
+
+
+def _drag_handle(dialog, app, item, edge, offset):
+    """Drag one grip by a viewport offset and return the scene displacement in px."""
+    start = _handle_view_point(dialog, item, edge)
+    end = start + offset
+    displacement = dialog.view.mapToScene(end) - dialog.view.mapToScene(start)
+    _drag(app, dialog.view, start, end, Qt.MouseButton.LeftButton)
+    return displacement
+
+
+def test_length_handle_at_rotation_0_grows_length_and_moves_center_by_half(dialog, app):
+    """@brief The far length grip of an unrotated part edits only length_mm.
+
+    The opposite edge stays put, so the center follows by half the growth;
+    the vertical part of the stroke is ignored because a mid-edge grip only
+    owns one local axis.
+    """
+    dialog.component_list.setCurrentRow(1)
+    item = dialog._items[1]
+    before = deepcopy(item.component)
+    displacement = _drag_handle(dialog, app, item, (1, 0), QPoint(30, 7))
+    grown = displacement.x() / 10
+    assert grown > 0
+    actual = dialog.get_components()[1]
+    assert actual["length_mm"] == pytest.approx(before["length_mm"] + grown)
+    assert actual["x_mm"] == pytest.approx(before["x_mm"] + grown / 2)
+    assert (actual["y_mm"], actual["width_mm"], actual["rotation_deg"]) == (
+        before["y_mm"], before["width_mm"], before["rotation_deg"])
+    assert dialog.fields["length_mm"].value() == pytest.approx(actual["length_mm"], abs=1e-6)
+    assert dialog.fields["x_mm"].value() == pytest.approx(actual["x_mm"], abs=1e-6)
+    assert dialog.component_list.currentRow() == 1
+
+
+def test_screen_right_grip_of_a_90_degree_part_is_its_local_width_side(dialog, app):
+    """@brief Grips follow the rotation: at 90 degrees the screen-right grip is (0, -1).
+
+    Local +u points down the screen, local +v points left, so the grip on
+    the right of the screen is the NEAR width side: dragging it rightwards
+    grows width_mm, leaves length_mm alone and shifts the center by half.
+    """
+    dialog.component_list.setCurrentRow(0)
+    item = dialog._items[0]
+    before = deepcopy(item.component)
+    side_grips = [edge for edge in item.handles if 0 in edge]
+    right_grip = max(side_grips, key=lambda edge: item.handle(edge).scenePos().x())
+    assert right_grip == (0, -1)
+    assert item.handle((1, 0)).scenePos().y() > item.scenePos().y()
+    displacement = _drag_handle(dialog, app, item, right_grip, QPoint(20, 0))
+    grown = displacement.x() / 10
+    actual = dialog.get_components()[0]
+    assert actual["width_mm"] == pytest.approx(before["width_mm"] + grown)
+    assert actual["x_mm"] == pytest.approx(before["x_mm"] + grown / 2)
+    assert actual["length_mm"] == before["length_mm"]
+    assert actual["y_mm"] == pytest.approx(before["y_mm"])
+    assert dialog.fields["width_mm"].value() == pytest.approx(actual["width_mm"], abs=1e-6)
+
+
+@pytest.mark.parametrize("angle", [180, 270, 37, -23])
+def test_length_grip_edits_the_local_axis_at_any_rotation(dialog, app, angle):
+    """@brief A stroke on the +u grip changes length only, whatever the angle.
+
+    The pointer displacement is projected on the local axes through the
+    anisotropic pixel scales; the mid-edge grip discards the v component,
+    and the center moves by half the growth along the rotated u direction.
+    """
+    dialog.component_list.setCurrentRow(1)
+    dialog.fields["rotation_deg"].setValue(angle)
+    item = dialog._items[1]
+    before = deepcopy(item.component)
+    displacement = _drag_handle(dialog, app, item, (1, 0), QPoint(24, -9))
+    c, s = math.cos(math.radians(angle)), math.sin(math.radians(angle))
+    grown = displacement.x() / 10 * c + displacement.y() / 5 * s
+    actual = dialog.get_components()[1]
+    assert actual["length_mm"] == pytest.approx(before["length_mm"] + grown)
+    assert actual["width_mm"] == before["width_mm"]
+    assert actual["x_mm"] == pytest.approx(before["x_mm"] + grown / 2 * c)
+    assert actual["y_mm"] == pytest.approx(before["y_mm"] + grown / 2 * s)
+    # The far edge stayed exactly where it was: it is the stroke's anchor.
+    far = dialog.photo_transform.pixel_to_mm(item.handle((-1, 0)).scenePos().x(),
+                                             item.handle((-1, 0)).scenePos().y())
+    assert (far.x(), far.y()) == pytest.approx(
+        (before["x_mm"] - before["length_mm"] / 2 * c, before["y_mm"] - before["length_mm"] / 2 * s))
+
+
+def test_dragging_inside_the_outline_moves_without_resizing(dialog, app):
+    """@brief Negative: the interior is a move grip, and unselected parts have no handles.
+
+    Grips are 8 screen px wide whatever the zoom, so a 1 mm part must be
+    zoomed in before its interior is wider than the grips that frame it.
+    """
+    dialog.view.zoom(4)
+    dialog.component_list.setCurrentRow(1)
+    selected = dialog._items[1]
+    before = deepcopy(selected.component)
+    start = dialog.view.mapFromScene(selected.scenePos())
+    _drag(app, dialog.view, start, start + QPoint(12, 6), Qt.MouseButton.LeftButton)
+    actual = dialog.get_components()[1]
+    assert (actual["length_mm"], actual["width_mm"]) == (before["length_mm"], before["width_mm"])
+    assert actual["x_mm"] != before["x_mm"]
+    # The other part is not selected: its grips are hidden and pressing where
+    # one would be moves the outline instead of resizing it.
+    other = dialog._items[0]
+    assert not other.handle((1, 0)).isVisible()
+    before_other = deepcopy(other.component)
+    start = _handle_view_point(dialog, other, (1, 0))
+    _drag(app, dialog.view, start, start + QPoint(10, 10), Qt.MouseButton.LeftButton)
+    actual = dialog.get_components()[0]
+    assert (actual["length_mm"], actual["width_mm"]) == (before_other["length_mm"], before_other["width_mm"])
+    assert actual["x_mm"] != before_other["x_mm"]
+
+
+def test_resize_stops_at_the_declared_minimum_instead_of_inverting(dialog, app):
+    """@brief Negative: pulling a grip past the opposite edge leaves the minimum extent."""
+    from kicadgen.gui.photo_review_dialog import MIN_HANDLE_SIZE_MM
+    dialog.component_list.setCurrentRow(1)
+    item = dialog._items[1]
+    before = deepcopy(item.component)
+    far_left_mm = before["x_mm"] - before["length_mm"] / 2
+    # 3 mm long at 10 px/mm: a 200 px stroke to the left crosses the far edge.
+    _drag_handle(dialog, app, item, (1, 0), QPoint(-200, 0))
+    actual = dialog.get_components()[1]
+    assert actual["length_mm"] == pytest.approx(MIN_HANDLE_SIZE_MM)
+    assert actual["x_mm"] == pytest.approx(far_left_mm + MIN_HANDLE_SIZE_MM / 2)
+    assert actual["width_mm"] == before["width_mm"]
+    assert dialog.fields["length_mm"].value() == pytest.approx(MIN_HANDLE_SIZE_MM, abs=1e-6)
+    # The outline is still a proper rectangle inside the photo, not flipped.
+    bounds = item.photo_bounds()
+    assert bounds.width() == pytest.approx(MIN_HANDLE_SIZE_MM * 10)
+
+
+def test_handle_cursors_follow_the_on_screen_edge_direction(dialog):
+    """@brief Cursors are chosen from the rotated, anisotropically scaled normal."""
+    dialog.component_list.setCurrentRow(1)
+    item = dialog._items[1]
+    assert item.handle((1, 0)).cursor().shape() == Qt.CursorShape.SizeHorCursor
+    assert item.handle((0, 1)).cursor().shape() == Qt.CursorShape.SizeVerCursor
+    # Top-right corner: normal (+10, -5) px points up-right, the "/" diagonal.
+    assert item.handle((1, -1)).cursor().shape() == Qt.CursorShape.SizeBDiagCursor
+    assert item.handle((-1, -1)).cursor().shape() == Qt.CursorShape.SizeFDiagCursor
+    dialog.fields["rotation_deg"].setValue(90)
+    assert item.handle((1, 0)).cursor().shape() == Qt.CursorShape.SizeVerCursor
+    assert item.handle((0, 1)).cursor().shape() == Qt.CursorShape.SizeHorCursor
