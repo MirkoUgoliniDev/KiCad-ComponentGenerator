@@ -123,3 +123,19 @@ def test_same_path_move_and_name_migration_do_not_delete_or_duplicate_log(window
     assert window._migrate_docs_to_new_name("LogOriginal") == "LogOriginal"
     assert source.read_bytes() == original
     assert (window._docs_dir() / "datasheet.pdf").read_bytes() == b"original document"
+
+
+def test_freecad_component_lines_drive_the_3d_progress():
+    """@brief Il conteggio in modale segue FreeCAD, non l'abbinamento dei modelli.
+
+    La barra diceva «100% · 50/50» mentre FreeCAD era al primo componente:
+    era il conteggio dell'abbinamento, finito prima che FreeCAD partisse.
+    FreeCAD annuncia ogni componente che comincia; i completati sono quelli
+    prima di lui, e una riga qualsiasi non muove niente.
+    """
+    from kicadgen.gui.main_window import freecad_progress
+    assert freecad_progress("FreeCAD: KICADGEN_COMPONENT_START:1/50:Cmp0_U1") == (0, 50)
+    assert freecad_progress("FreeCAD: KICADGEN_COMPONENT_START:37/50:Cmp36_R9") == (36, 50)
+    assert freecad_progress("FreeCAD: KICADGEN_IMPORT_START:C:\\x\\y.STEP") is None
+    assert freecad_progress("Generazione del modello 3D tramite FreeCAD…") is None
+    assert freecad_progress("") is None and freecad_progress(None) is None

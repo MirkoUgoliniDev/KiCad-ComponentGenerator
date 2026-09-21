@@ -476,7 +476,9 @@ class PhotoReviewDialog(QDialog):
         if (component.get('model_match') or {}).get('status') == 'auto_matched' and selection.get('status') != 'confirmed':
             warnings.append(self._tr("Modello KiCad applicato automaticamente per compatibilità meccanica: identità e polarità non certificate; doppio clic per modificarlo."))
         elif (component.get('model_match') or {}).get('status') == 'provisional_matched' and selection.get('status') != 'confirmed':
-            warnings.append(self._tr("Modello KiCad provvisorio applicato per la geometria: variante e orientamento non confermati; doppio clic per modificarlo."))
+            # Il provvisorio non finisce piu' nel solido: e' una proposta per il
+            # selettore, e il 3D mostra il corpo generico con il colore della foto.
+            warnings.append(self._tr("Modello KiCad proposto dalla sola geometria, non applicato: il 3D mostra il corpo generico; doppio clic per confermarlo o cambiarlo."))
         elif selection.get('status') != 'confirmed':
             warnings.append(self._tr("Modello KiCad non confermato: doppio clic per scegliere."))
         else:

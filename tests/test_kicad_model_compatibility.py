@@ -7,7 +7,12 @@ from kicadgen.cad3d import kicad_models as km
 
 @pytest.fixture
 def resolver(tmp_path, monkeypatch):
-    """Return candidate count; every unconfirmed attachment remains a placeholder."""
+    """Return candidate count; every unconfirmed attachment stays synthetic.
+
+    Contratto aggiornato: il segnaposto magenta e' solo per chi non ha alcun
+    candidato (unresolved). Con candidati il corpo generico tiene il colore
+    del rilevatore e lo stato si legge da model_review / render_placeholder.
+    """
     monkeypatch.setattr(km, "footprint_sizes", lambda *a, **k: {})
     monkeypatch.setattr(km, "model_sizes", lambda paths, library=None: {str(p): [3, 2, .5] for p in paths})
     def run(folder, package, **evidence):
@@ -15,15 +20,17 @@ def resolver(tmp_path, monkeypatch):
         directory.mkdir(exist_ok=True)
         path = directory / (package + ".step")
         path.touch()
-        component = dict(package=package, length_mm=3, width_mm=2, **evidence)
+        component = dict(package=package, length_mm=3, width_mm=2, color_hex="#303030", **evidence)
         logs = []
         count = km.attach_models([component], library=tmp_path, log=logs.append)
         assert count == 0
         assert "model_path" not in component
-        assert component["color_hex"] == "#FF00FF"
         report = component["model_match"]
         assert report["selected_path"] is None
         assert report["status"] == ("review_required" if report["candidates"] else "unresolved")
+        assert component["model_review"] == report["status"]
+        assert component["render_placeholder"] is (not report["candidates"])
+        assert component["color_hex"] == ("#303030" if report["candidates"] else "#FF00FF")
         return len(report["candidates"]), component, logs, path
     return run
 

@@ -109,13 +109,23 @@ def test_with_presence_high_on_the_sound_components_matches_return(run):
     la fusione dei riquadri fallita) le porte finali tornano ad aprirsi, e per
     ragioni strutturali diverse fra loro, non per un numero fortunato:
 
-    * SW_BOOT: pareggio fra i primi due candidati (stessa famiglia, stesso
-      inviluppo XY) -> provisional;
-    * J_USBC, U2_CH334F, U3_CH343P: ricerca completa e primo candidato che
-      domina il secondo oltre NAME_TIEBREAK_MARGIN -> provisional;
-    * SW_RESET resta review: stesso scarto di SW_BOOT ma i primi due
-      candidati non pareggiano e la ricerca e' troncata, quindi la dominanza
-      non e' dimostrabile. E' il controllo che la porta non si apre "a caso".
+    * U2_CH334F, U3_CH343P: banda di pareggio omogenea (cinque QFN della
+      stessa famiglia e dello stesso inviluppo, 5x5 e 4x4) -> provisional;
+    * J_USBC: ricerca completa e banda di un solo elemento, il primo candidato
+      domina tutti gli altri oltre NAME_TIEBREAK_MARGIN -> provisional;
+    * SW_BOOT resta review (contratto aggiornato: prima era provisional).
+      I primi due candidati pareggiano (4,7 x 3,55), ma il terzo, 5,1 x 3,5,
+      dista dal migliore 0,031 -- meno del margine -- con un inviluppo che
+      differisce del 7,8%: la fotografia non sa dire quale dei due corpi c'e'.
+      Con la banda che guardava solo i primi due il terzo non partecipava;
+      ora fa parte del dubbio, e non si propone nulla;
+    * SW_RESET resta review: i primi due candidati non pareggiano e la
+      ricerca e' troncata, quindi la dominanza non e' dimostrabile. E' il
+      controllo che la porta non si apre "a caso".
+
+    Limite del replay: la banda viene calcolata sui cinque candidati salvati
+    nel report, non sull'intera lista misurata dalla corsa; anche per questo
+    il replay puo' solo sovrastimare le proposte.
 
     I 29 passivi restano review anche con 'high': nella corsa la loro ricerca
     e' stata TRONCATA (`search_truncated`), e un abbinamento automatico
@@ -128,8 +138,12 @@ def test_with_presence_high_on_the_sound_components_matches_return(run):
     sound = [c for c in run if c["name"] != "U1_MODULE (rf_module)"]
     decided = {c["name"]: _decide(c, "high") for c in sound}
     matched = sorted(name for name, s in decided.items() if s == "provisional_matched")
-    assert matched == ["J_USBC (connector)", "SW_BOOT (switch)",
-                       "U2_CH334F (ic)", "U3_CH343P (ic)"]
+    assert matched == ["J_USBC (connector)", "U2_CH334F (ic)", "U3_CH343P (ic)"]
+    assert decided["SW_BOOT (switch)"] == "review_required"
+    boot = next(c for c in sound if c["name"] == "SW_BOOT (switch)")["model_match"]["candidates"]
+    band = km._tie_band(boot)
+    assert len(band) == 3 and not km._band_is_homogeneous(band)
+    assert km._band_is_homogeneous(band[:2])
     assert decided["SW_RESET (switch)"] == "review_required"
     assert not any(s == "auto_matched" for s in decided.values())
     passives = [c for c in sound if c["kind"] in ("resistor", "capacitor")]

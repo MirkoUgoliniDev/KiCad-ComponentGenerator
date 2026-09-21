@@ -188,6 +188,31 @@ def _generate_3d(params, body: Body3DParams, project_dir: Path, fillets, face_te
     )
 
 
+#: Riga con cui lo script FreeCAD annuncia il componente su cui lavora.
+_FREECAD_COMPONENT = re.compile(r"KICADGEN_COMPONENT_START:(\d+)/(\d+)")
+
+
+def freecad_progress(message: str):
+    """@brief Avanzamento del 3D letto dalle righe di FreeCAD.
+
+    @param message Riga di log, gia' prefissata con «FreeCAD: ».
+    @return (completati, totale) quando la riga annuncia un componente,
+        altrimenti None.
+    @note Il conteggio in modale si fermava a «100% · 50/50» mentre FreeCAD
+        era ancora al primo componente: quel numero era l'abbinamento dei
+        modelli, finito prima che FreeCAD partisse, e nessuno lo aggiornava
+        dopo. FreeCAD pero' annuncia ogni componente che comincia: i
+        completati sono quelli prima di lui. Su un lavoro da cinque minuti la
+        differenza fra «finito» e «al primo di cinquanta» e' tutto cio' che
+        chi aspetta ha bisogno di sapere.
+    """
+    match = _FREECAD_COMPONENT.search(message or "")
+    if not match:
+        return None
+    current, total = int(match.group(1)), int(match.group(2))
+    return max(0, current - 1), total
+
+
 class GenerateWorker(QThread):
     """QThread che costruisce/salva un Footprint e, se richiesto, il modello 3D.
 
@@ -236,6 +261,14 @@ class GenerateWorker(QThread):
         """
         self.phase.emit('freecad', 'abbinamento modelli KiCad', done, total)
 
+    def _cad_progress(self, message: str) -> None:
+        """@brief Inoltra la riga al log e, se annuncia un componente, al conteggio."""
+        self.progress.emit(message)
+        step = freecad_progress(message)
+        if step is not None:
+            done, total = step
+            self.phase.emit('freecad', 'modello 3D', done, total)
+
     def run(self) -> None:
         """@brief Provide the run operation for this workflow."""
         try:
@@ -263,7 +296,7 @@ class GenerateWorker(QThread):
                 result = _generate_3d(
                     self.params, self.body, self.project_dir,
                     self.fillets, self.face_texts,
-                    progress=self.progress.emit,
+                    progress=self._cad_progress,
                     model_progress=self._model_progress,
                 )
                 for warning in result.get('warnings', []):
@@ -316,13 +349,21 @@ class Cad3DWorker(QThread):
         """@brief Porta in modale l'unico conteggio vero della generazione."""
         self.phase.emit('freecad', 'abbinamento modelli KiCad', done, total)
 
+    def _cad_progress(self, message: str) -> None:
+        """@brief Inoltra la riga al log e, se annuncia un componente, al conteggio."""
+        self.progress.emit(message)
+        step = freecad_progress(message)
+        if step is not None:
+            done, total = step
+            self.phase.emit('freecad', 'modello 3D', done, total)
+
     def run(self) -> None:
         try:
             self.phase.emit('freecad', 'modello 3D', 0, 0)
             result = _generate_3d(
                 self.params, self.body, self.project_dir,
                 self.fillets, self.face_texts,
-                progress=self.progress.emit,
+                progress=self._cad_progress,
                 model_progress=self._model_progress,
             )
             for note in result.get("notes", []):

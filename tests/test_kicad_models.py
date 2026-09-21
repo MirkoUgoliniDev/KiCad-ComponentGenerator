@@ -201,15 +201,24 @@ def test_components_without_a_package_are_left_to_the_synthetic_shapes(monkeypat
 
 
 def test_a_candidate_requires_selection_before_carrying_the_model_path(monkeypatch, tmp_path):
+    """@brief Un candidato in revisione non porta model_path e non e' magenta.
+
+    Contratto aggiornato: il magenta e' riservato a chi non ha candidati
+    (unresolved). Un corpo con candidati ha una geometria nota e tiene il suo
+    colore (qui quello del rilevatore); lo stato di revisione sta nei campi
+    espliciti model_review / render_placeholder, non nel colore.
+    """
     model = tmp_path / "R_0402_1005Metric.step"
     model.write_bytes(b"")
     monkeypatch.setattr(km, "find_library", lambda: tmp_path)
     monkeypatch.setattr(km, "model_sizes", lambda *a, **k: {str(model): [1, .5, .3]})
-    components = [{"package": "R_0402", "length_mm": 1.0, "width_mm": 0.5}]
+    components = [{"package": "R_0402", "length_mm": 1.0, "width_mm": 0.5, "color_hex": "#303030"}]
     assert km.attach_models(components) == 0
     component = components[0]
     assert "model_path" not in component
-    assert component["color_hex"] == "#FF00FF"
+    assert component["color_hex"] == "#303030"
+    assert component["render_placeholder"] is False
+    assert component["model_review"] == "review_required"
     assert component["model_match"]["status"] == "review_required"
     assert component["model_match"]["candidates"][0]["dimensions_mm"] == [1, .5, .3]
     component["model_selection"] = {"status": "confirmed", "path": str(model), "rotation_deg": -90}

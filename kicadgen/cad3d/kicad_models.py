@@ -1356,16 +1356,30 @@ def _provisional_geometry_choice(component, choices, complete, basis):
     solid.  This path therefore attaches only a *provisional* model: the
     report remains reviewable and the UI keeps the candidate picker visible.
 
-    Two situations qualify, and they are opposites: either the measurement
-    cannot separate the first two candidates (same family, effectively the same
-    XY envelope), or it separated them clearly and one stands alone.  In both
-    the residual doubt is about identity and variant, never about the XY
-    geometry being previewed.  The tie case is allowed on a truncated search,
-    because a tie says nothing about what was not measured; dominance requires
-    a complete search, since outranking alternatives nobody measured is not
-    outranking them.  A single candidate also qualifies under a literal
-    manufacturer/model marking.  A topology-incomplete search is never
-    promoted.
+    The decision is taken on the *tie band*: every candidate whose
+    relative_xy_error lies within NAME_TIEBREAK_MARGIN of the best one, i.e.
+    all the solids the top view cannot tell apart.  Two situations qualify,
+    and they are opposites: either the band is homogeneous (one family, and
+    every member has the same XY envelope within NAME_TIEBREAK_MARGIN), so the
+    residual doubt is about identity and variant rather than about the XY
+    geometry being previewed; or the band holds a single candidate, meaning
+    the measurement separated it from every alternative.  A homogeneous tie
+    is allowed on a truncated search, because a tie says nothing about what
+    was not measured; a lone band member requires a complete search, since
+    outranking alternatives nobody measured is not outranking them, and at
+    least one other candidate in the list, since a single candidate overall
+    was never compared with anything.  A band
+    that mixes families or envelopes is never promoted, however many members
+    agree with each other: a third solid that the measurement cannot exclude
+    is part of the doubt, not a bystander.  A literal manufacturer/model
+    marking and the three-lead-tab morphology are earlier exits and do not
+    depend on the band.  A topology-incomplete search is never promoted.
+
+    @param component Component evidence (presence, class, kind, package prose).
+    @param choices Candidates ranked by model_candidates, all within tolerance.
+    @param complete True when every structurally compatible model was measured.
+    @param basis Normalised bbox basis; only body/total readings qualify.
+    @return The ranked head candidate to preview, or None.
     """
     if (not choices or basis not in ("body", "total")
             or component.get("presence_confidence") != "high"
@@ -1424,45 +1438,87 @@ def _provisional_geometry_choice(component, choices, complete, basis):
                 and re.search(r"(?:^|[-_])SOT[-_]?223(?:\.|$)",
                               Path(first["path"]).name, re.I)):
             return first
-    # Il caso simmetrico del pareggio. Il pareggio dice "la fotografia non
-    # distingue queste due varianti"; la dominanza dice "la fotografia le ha
-    # distinte, e una sola regge". Sono le due situazioni in cui l'incertezza
-    # residua non riguarda la geometria XY, e riconoscere solo la prima
-    # premiava le liste ambigue e puniva quelle nitide: su un ricettacolo
-    # USB-C con quattro candidati al 4% e al 16% non si agganciava nulla,
-    # mentre sarebbe bastato un doppione identico del migliore per ottenere
-    # l'anteprima. Serve una ricerca completa: dominare alternative che
-    # nessuno ha misurato non e' dominare.
-    # Un candidato solo non e' dominanza, e' assenza di confronto: la misura
-    # non ha scartato nessuno, quindi qui non decide niente e si continua a
-    # pretendere una marcatura letterale o la morfologia.
-    if complete and not component.get("topology_incomplete") and len(choices) >= 2:
+    if component.get("topology_incomplete"):
+        return None
+    # La banda di pareggio e' l'insieme di TUTTI i candidati che la misura
+    # dall'alto non distingue dal migliore, non i primi due della lista.
+    # Guardare solo choices[0] e choices[1] lasciava fuori dal confronto un
+    # terzo solido entro il margine: nella corsa reale due varianti identiche
+    # di un modulo radio "pareggiavano" fra loro e venivano promosse, mentre
+    # il modulo giusto, terzo a meno del margine, non partecipava alla
+    # decisione. Un solido che la misura non sa escludere fa parte del dubbio.
+    band = _tie_band(choices)
+    if band is None or not any(item is first for item in band):
+        return None
+    # Il pareggio dice "la fotografia non distingue queste varianti"; la
+    # dominanza dice "la fotografia le ha distinte, e una sola regge". Sono
+    # le due situazioni in cui l'incertezza residua non riguarda la geometria
+    # XY. Riconoscere solo la prima premiava le liste ambigue e puniva quelle
+    # nitide: su un ricettacolo USB-C con candidati al 4% e al 16% non si
+    # proponeva nulla, mentre sarebbe bastato un doppione identico del
+    # migliore. La dominanza pretende pero' una ricerca completa: dominare
+    # alternative che nessuno ha misurato non e' dominare. Il pareggio
+    # omogeneo resta ammesso su una ricerca troncata, perche' non afferma
+    # nulla su cio' che non e' stato misurato.
+    # Un candidato solo in tutta la lista non e' dominanza, e' assenza di
+    # confronto: la misura non ha scartato nessuno, quindi qui non decide
+    # niente (restano la marcatura letterale e la morfologia, sopra).
+    if len(band) == 1:
+        return first if complete and len(choices) >= 2 else None
+    return first if _band_is_homogeneous(band) else None
+
+
+def _tie_band(choices):
+    """Return the candidates the top view cannot separate from the best one.
+
+    The band is every candidate whose relative_xy_error lies within
+    NAME_TIEBREAK_MARGIN of the smallest error in the list, the same criterion
+    model_candidates uses to rank.  None means an error could not be read,
+    in which case no band can honestly be established.
+    """
+    errors = []
+    for item in choices:
         try:
-            runner_up = float(choices[1].get("relative_xy_error"))
+            error = float(item.get("relative_xy_error"))
         except (TypeError, ValueError):
-            runner_up = float("nan")
-        if math.isfinite(runner_up) and runner_up - best_error > NAME_TIEBREAK_MARGIN:
-            return first
-    if len(choices) < 2 or component.get("topology_incomplete"):
-        return None
-    second = choices[1]
-    if first.get("family") != second.get("family"):
-        return None
-    a, b = first.get("dimensions_mm"), second.get("dimensions_mm")
-    if not (isinstance(a, (list, tuple)) and isinstance(b, (list, tuple))
-            and len(a) >= 2 and len(b) >= 2):
-        return None
-    try:
-        a = sorted(float(v) for v in a[:2])
-        b = sorted(float(v) for v in b[:2])
-        tie_error = max(abs(x - y) / max(x, y) for x, y in zip(a, b))
-    except (TypeError, ValueError, ZeroDivisionError):
-        return None
-    if not all(math.isfinite(v) and v > 0 for v in (*a, *b)):
-        return None
-    if tie_error > NAME_TIEBREAK_MARGIN:
-        return None
-    return first
+            return None
+        if not math.isfinite(error):
+            return None
+        errors.append(error)
+    best = min(errors)
+    return [item for item, error in zip(choices, errors)
+            if error <= best + NAME_TIEBREAK_MARGIN]
+
+
+def _band_is_homogeneous(band):
+    """True when every band member is one family with the same XY envelope.
+
+    Envelopes are compared pairwise on their sorted XY extents, each pair
+    within NAME_TIEBREAK_MARGIN: the tolerance already used for the two-way
+    tie, applied to every pair so that two members cannot drift twice the
+    margin apart through a third one in the middle.  Any unreadable or
+    non-positive dimension disqualifies the band.
+    """
+    families = {item.get("family") for item in band}
+    if len(families) != 1:
+        return False
+    extents = []
+    for item in band:
+        dims = item.get("dimensions_mm")
+        if not (isinstance(dims, (list, tuple)) and len(dims) >= 2):
+            return False
+        try:
+            xy = sorted(float(v) for v in dims[:2])
+        except (TypeError, ValueError):
+            return False
+        if not all(math.isfinite(v) and v > 0 for v in xy):
+            return False
+        extents.append(xy)
+    for index, a in enumerate(extents):
+        for b in extents[index + 1:]:
+            if max(abs(x - y) / max(x, y) for x, y in zip(a, b)) > NAME_TIEBREAK_MARGIN:
+                return False
+    return True
 
 
 def _is_yolo_only_hypothesis(component: dict) -> bool:
@@ -1483,12 +1539,14 @@ def _switch_group_key(component: dict) -> str:
 
 
 def _synchronize_preview_variants(components, note) -> None:
-    """Use one common preview variant for visually same-family switches.
+    """Propose one common candidate for visually same-family switches.
 
     Independent dimensions of cropped buttons often differ by a few tenths of
-    a millimetre.  If their review lists share a compatible native model, using
-    that common candidate avoids rendering two visibly different switches,
-    while keeping the choice explicitly provisional.
+    a millimetre.  If their review lists share a compatible native model, the
+    same candidate is proposed for all of them so that a later confirmation
+    does not end with two visibly different switches.  The proposal lives in
+    model_match.selected_path only: a provisional match attaches no
+    model_path, so the solids stay generic until the user confirms.
     """
     groups = {}
     for component in components or []:
@@ -1543,9 +1601,10 @@ def _synchronize_preview_variants(components, note) -> None:
                 if candidate.get("path") == selected:
                     reasons = candidate.setdefault("reasons", [])
                     reasons[-1:] = [report["shared_preview_reason"]]
-            component["model_path"] = selected
-            component.pop("model_rotation_deg", None)
-        note(f"Switch preview group '{key}': shared candidate {Path(selected).name} for {len(group)} components.")
+            # Nessun model_path: la proposta condivisa resta provvisoria come
+            # quella del singolo componente, e il solido usa il corpo generico.
+            component.pop("model_path", None)
+        note(f"Switch preview group '{key}': shared candidate {Path(selected).name} proposed for {len(group)} components.")
 
 
 def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dict:
@@ -1559,8 +1618,8 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dic
         is the matched XY reading (and Z when available), in native model axes.
     @note Dimensional evidence never confirms identity. Explicit confirmation wins;
         independently supported unique estimates use auto_matched instead;
-        same-footprint alternatives may use provisional_matched for a real 3D
-        preview while keeping identity and variant reviewable.
+        same-footprint alternatives may use provisional_matched, which proposes
+        selected_path to the picker without attaching any model.
         Rejection stops discovery. Missing/descriptive packages use family discovery.
         Unknown basis compares independent readings; body/total/pads are strict.
         leads and body_and_leads mean total. At most 64 structurally compatible
@@ -1755,13 +1814,14 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dic
             result.update(status="auto_matched", selected_path=choice["path"])
         elif provisional is not None:
             # Keep the candidate list and the warning semantics: this is a
-            # rendering aid, not a confirmed package identity.
+            # proposal for the picker, not a confirmed package identity, and
+            # attach_models attaches no model for it.
             choice = next((item for item in result["candidates"]
                            if item["path"] == provisional["path"]), None)
             if choice is not None:
                 choice["status"] = "provisional_matched"
                 choice["reasons"][-1] = (
-                    "Preview geometry only; package variant and orientation require user review")
+                    "Proposed for the picker only; package variant and orientation require user review")
                 result.update(status="provisional_matched", selected_path=choice["path"])
         note(f"{package}: {len(result['candidates'])} dimensional candidates; {result['status']}; identity not verified.")
     return result
@@ -1779,12 +1839,22 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
         honestly be built on.
     @return Number of explicit or inferred mechanical paths attached.
     @note Rejected or invalid explicit selections use synthetic geometry. Missing
-        selections permit auto_matched mechanical estimates or provisional_matched
-        same-footprint previews when evidence supports them. Rotation
-        is copied to model_rotation_deg; None or an omitted selection rotation clears
-        that override for automatic native-axis inference. Explicit zero is retained.
-        Unconfirmed native placement metadata and component photo rotation are preserved.
-        The JSON report is stored in model_match; unresolved/review placeholders are magenta.
+        selections permit auto_matched mechanical estimates when evidence supports
+        them. A provisional_matched report is a proposal, not an accepted match:
+        model_match.selected_path carries the candidate for the picker, but no
+        model_path is attached and the solid stays the generic body with its own
+        colour, because the XY geometry is known even though the identity is not.
+        Rotation is copied to model_rotation_deg; None or an omitted selection
+        rotation clears that override for automatic native-axis inference.
+        Explicit zero is retained. Unconfirmed native placement metadata and
+        component photo rotation are preserved. The JSON report is stored in
+        model_match. Every component receives model_review (the report status)
+        and render_placeholder: only an unresolved component, for which nothing
+        beyond its rectangle is known, is painted the magenta placeholder colour.
+        review_required and provisional_matched bodies keep the colour sampled
+        from the photograph or supplied by the detector; the review state is
+        expressed by those explicit fields, never by the colour. The magenta of
+        a failed STEP import is decided later by the FreeCAD builder.
     """
     note = log or (lambda message: None)
     resolved = 0
@@ -1805,6 +1875,15 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
         component.pop("model_path", None)
         report = model_candidates(component, library=library, log=note)
         component["model_match"] = report
+        # Lo stato di revisione si dice con un campo, non con un colore: il
+        # magenta resta solo per chi non ha alcun candidato, perche' di quel
+        # corpo non si sa nulla oltre al riquadro. Un corpo in revisione o
+        # con una proposta provvisoria ha una geometria XY nota e un colore
+        # campionato dalla foto, e cancellarlo con il magenta buttava via
+        # un'informazione vera per segnalarne una che il report gia' porta.
+        component["model_review"] = report["status"]
+        component["render_placeholder"] = report["status"] == "unresolved"
+        report["render_placeholder"] = component["render_placeholder"]
         explicit = _explicit_selection(component) if report["status"] == "confirmed" else None
         if explicit is not None:
             path, rotation = explicit
@@ -1814,7 +1893,13 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
             else:
                 component["model_rotation_deg"] = rotation
             resolved += 1
-        elif report["status"] in ("auto_matched", "provisional_matched"):
+        elif report["status"] == "auto_matched":
+            # provisional_matched NON entra qui: e' una proposta per il
+            # picker, non un abbinamento accettato. Il modello di libreria
+            # finisce nello STEP solo su conferma esplicita o su una stima
+            # meccanica sostenuta da evidenza indipendente; il candidato
+            # provvisorio resta in model_match.selected_path e il solido usa
+            # il corpo generico, con il suo colore.
             component["model_path"] = report["selected_path"]
             # Il verso del modello nativo non si decide qui. Fino a poco fa lo
             # decideva una regex inglese su prosa libera, ancorata al nome del
@@ -1840,11 +1925,13 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
                     "one end from the other, so the model keeps its inferred axis.")
             resolved += 1
         else:
-            component["color_hex"] = "#FF00FF"
+            if report["status"] == "unresolved":
+                component["color_hex"] = "#FF00FF"
+                component["_color_source"] = "placeholder_unresolved"
             if _is_yolo_only_hypothesis(component) and override is not True:
                 # Keep detector-only hypotheses in the JSON/review evidence,
-                # but never turn an unclassified proposal into a misleading
-                # magenta CAD body which looks like a real component.
+                # but never turn an unclassified proposal into a CAD body
+                # which looks like a real component, whatever its colour.
                 component["render_3d"] = False
                 report["render_3d"] = False
                 note(f"YOLO-only hypothesis {component.get('name')}: kept for review, omitted from 3D.")

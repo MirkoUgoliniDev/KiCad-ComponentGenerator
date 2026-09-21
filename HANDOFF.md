@@ -3242,3 +3242,76 @@ propri lock (`index.lock`, `HEAD.lock`) e ogni comando successivo si blocca con
 **Prima di usare git**: cancellare la cartella `_git_lock_da_cancellare/` nella
 radice del repo e un eventuale `.git/index.lock` residuo (sono tutti file
 vuoti). Poi `git push origin YOLO-SOLUTION` (1 commit avanti).
+
+# 2026-09-21 04:10 — le tre decisioni, autorizzate («fa' tutto, in modo preciso»)
+
+L'utente ha autorizzato in blocco le modifiche finora solo segnalate. Fatte
+tutte, con test positivo e negativo, più due difetti di contorno.
+
+## 1. Il magenta solo dove non si sa nulla (`kicad_models.attach_models`)
+
+Prima: `#FF00FF` per ogni componente non `confirmed`/`auto_matched`/
+`provisional_matched`, cancellando il colore campionato dalla foto.
+Ora: magenta SOLO per `unresolved` (nessun candidato) e per l'import STEP
+fallito (`freecad_parts.py:987`, invariato). `review_required` e
+`provisional_matched` tengono il colore (foto o segnaposto del rilevatore).
+Il fatto che un corpo sia in revisione è detto da campi espliciti —
+`model_review = status` e `render_placeholder = (status == 'unresolved')`,
+anche in `model_match` e quindi in `kicad-model-candidates.json` — non dal
+colore. Nessun codice a valle leggeva il magenta per decidere: solo i test,
+aggiornati con il perché.
+
+## 2. `provisional_matched` non aggancia più il modello
+
+Prima: `model_path` anche per il provvisorio → il modello di libreria finiva
+nello STEP su una corrispondenza non verificata (23:48: 8 su 50, WROOM
+compreso). Ora: `model_path` solo per `confirmed` e `auto_matched`. Il
+provvisorio resta una PROPOSTA: `selected_path` nel report, il selettore lo
+preseleziona (`model_candidates_dialog.py:172` legge già `selected_path`), il
+solido usa il corpo generico con il colore della foto. Anche
+`_synchronize_preview_variants` (gruppo dei pulsanti) propone senza agganciare.
+Testo della revisione fotografica corretto: «proposto dalla sola geometria, non
+applicato: il 3D mostra il corpo generico; doppio clic per confermarlo».
+
+## 3. La banda di pareggio guarda tutti i candidati (`_provisional_geometry_choice`)
+
+Prima: pareggio e dominanza su `choices[0]`/`[1]` soltanto. Ora: banda =
+tutti i candidati con `relative_xy_error <= min + NAME_TIEBREAK_MARGIN`
+(dal minimo, non dalla testa della lista); promozione se la banda è omogenea
+(una sola famiglia, inviluppi XY a coppie entro lo stesso margine) o se è di
+uno fra almeno due candidati con ricerca completa. Nessuna soglia nuova.
+**Scelta da confermare:** un candidato SOLO in tutta la lista resta non
+promosso (contratto precedente «assenza di confronto», nominato da 6+ test).
+Effetto sui dati veri (fixture run0004): SW_BOOT passa da provvisorio a
+revisione (terzo candidato a 0.031 dal migliore, inviluppo +7.8 %); J_USBC,
+U2, U3 restano proposti. Sul modulo della corsa precedente: con la misura
+sbagliata ora `review_required` (banda eterogenea ZETA×2 + WROOM-32U); con il
+bordo giusto ancora proposto WROOM-32U — ma ESP-WROOM-02/C3 stanno nella banda
+con inviluppo al 4.2 %, sotto il 5 % per 0.8 punti: **separazione risicata**,
+dichiarata nel test.
+
+## 4. La barra «100% · 50/50» (`main_window.freecad_progress`)
+
+Quel numero era l'abbinamento dei modelli, finito prima che FreeCAD partisse.
+Ora le righe `KICADGEN_COMPONENT_START:i/n` di FreeCAD aggiornano il conteggio
+in modale (`i-1/n` completati). Entrambi i worker (generazione e rigenerazione
+3D) passano per `_cad_progress`.
+
+## Non fatto, e perché
+
+- Il gate `presence == 'high'` in `kicad_models` con presenza da ripiego
+  (`confidence`): aprirlo su `medium` sarebbe abbassare una soglia per far
+  passare questo caso. La via giusta è il retry che ottiene il campo (fatto
+  alle 02:30). Resta segnalato.
+- Il campo `render_placeholder` lo decide il matcher; l'import fallito
+  continua a segnalarsi solo con `status == 'import_failed'`.
+
+## Test
+
+Sul disco dell'utente (escluse Qt e KiCad): **2356 passati, 21 saltati, 2
+xfail, 19 sottotest**; unico rosso il test instabile noto. Qt nel contenitore,
+uno per file: photo_inventory_gui 66, photo_detector_ui 49,
+automatic_generation 25, model_candidates_dialog 29, model_choice_gui_flow 7,
+photo_review_dialog 32, board_edit_lifecycle 26, live_log 15,
+terminal_metadata_flow 15, auto_match 1, match_evidence 1, candidate_report 2,
+regen_3d_overlay 7.

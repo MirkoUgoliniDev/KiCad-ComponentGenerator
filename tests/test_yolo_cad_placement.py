@@ -78,8 +78,13 @@ def test_review_selection_contract_reaches_cad_payload(monkeypatch, tmp_path, la
     else:
         assert 'model_path' not in result
         assert result['model_rotation_deg'] == 45
-        assert result['color_hex'] == '#FF00FF'
         expected = 'review_required' if selection_status is None else 'unresolved'
         assert result['model_match']['status'] == expected
+        # Contratto aggiornato: il magenta resta solo per chi non ha candidati
+        # (qui: selezione rifiutata o non disponibile -> unresolved); il
+        # candidato in revisione tiene il colore del ComponentBox.
+        assert result['color_hex'] == ('#FF00FF' if expected == 'unresolved' else component.color_hex)
+        assert result['render_placeholder'] is (expected == 'unresolved')
+        assert result['model_review'] == expected
         if selection_status is None:
             assert result['model_match']['candidates'][0]['dimensions_mm'] == [1.6, .8, .4]

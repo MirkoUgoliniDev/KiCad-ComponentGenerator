@@ -77,6 +77,14 @@ def test_literal_marking_selects_user_installed_module_model(library):
 
 
 def test_three_lead_tab_unknown_semiconductor_gets_sot223_preview(library):
+    """@brief La morfologia a tre reofori e linguetta propone il SOT-223.
+
+    Contratto aggiornato: una proposta provvisoria non aggancia piu' alcun
+    model_path (il modello di libreria finiva nello STEP sulla base di un
+    abbinamento che il codice stesso dichiarava di non saper confermare).
+    Il candidato resta in model_match.selected_path per il picker, il solido
+    usa il corpo generico e il conteggio degli agganci non lo include.
+    """
     root, add, _ = library
     sot = add("Package_TO_SOT_SMD", "SOT-223",
               {"total": [7.0, 6.5, 1.7]})
@@ -86,9 +94,10 @@ def test_three_lead_tab_unknown_semiconductor_gets_sot223_preview(library):
              package_evidence="Three leads and one large tab are visible.",
              length_mm=7.37, width_mm=6.91, bbox_basis="total",
              presence_confidence="high", class_confidence="low")
-    assert km.attach_models([c], library=root) == 1
+    assert km.attach_models([c], library=root) == 0
     assert c["model_match"]["status"] == "provisional_matched"
-    assert c["model_path"] == str(sot)
+    assert c["model_match"]["selected_path"] == str(sot)
+    assert "model_path" not in c
     assert "model variant" in c["model_match"]["candidates"][0]["reasons"][-1].lower() or \
            "package" in c["model_match"]["candidates"][0]["reasons"][-1].lower()
 
@@ -102,9 +111,99 @@ def test_detector_only_yolo_hypothesis_stays_in_report_but_not_3d(library):
     assert c["model_match"]["status"] == "unresolved"
     assert c["render_3d"] is False
     assert c["color_hex"] == "#FF00FF"
+    assert c["render_placeholder"] is True and c["model_review"] == "unresolved"
+
+
+def test_detector_only_hypothesis_in_review_is_still_omitted_from_3d(library):
+    """@brief Negativo: l'omissione dal 3D non dipende dal colore.
+
+    Un'ipotesi del solo rilevatore con candidati e' review_required, non piu'
+    magenta: deve restare fuori dal solido esattamente come prima, perche'
+    il motivo (una proposta non classificata) non e' cambiato.
+    """
+    root, add, _ = library
+    add("Resistor_SMD", "R_0603")
+    c = component(name="YOLO candidate 7", color_hex="#4a4a4a")
+    assert km.attach_models([c], library=root) == 0
+    assert c["model_match"]["status"] == "review_required"
+    assert c["render_3d"] is False
+    assert c["color_hex"] == "#4a4a4a"
+
+
+def test_the_magenta_placeholder_is_reserved_for_the_unresolved(library):
+    """@brief Il magenta dice "non so nulla di questo corpo", non "e' in revisione".
+
+    Positivo/negativo sullo stesso colore campionato dalla foto: un corpo con
+    candidati (review_required) lo conserva e dichiara lo stato nei campi
+    espliciti; un corpo senza candidati (unresolved) lo perde a favore del
+    segnaposto, e la provenienza del colore lo dice. Prima entrambi
+    diventavano magenta, e il colore vero campionato dalla foto andava perso
+    per ripetere un'informazione che model_match.status gia' porta.
+    """
+    root, add, _ = library
+    add("Resistor_SMD", "R_0603")
+    reviewed = component(color_hex="#5a4b3c", _color_source="photo_median")
+    unresolved = component(length_mm=10, color_hex="#5a4b3c", _color_source="photo_median")
+    assert km.attach_models([reviewed, unresolved], library=root) == 0
+    assert reviewed["model_match"]["status"] == "review_required"
+    assert reviewed["color_hex"] == "#5a4b3c"
+    assert reviewed["_color_source"] == "photo_median"
+    assert reviewed["render_placeholder"] is False
+    assert reviewed["model_review"] == "review_required"
+    assert reviewed["model_match"]["render_placeholder"] is False
+    assert unresolved["model_match"]["status"] == "unresolved"
+    assert unresolved["color_hex"] == "#FF00FF"
+    assert unresolved["_color_source"] == "placeholder_unresolved"
+    assert unresolved["render_placeholder"] is True
+    assert unresolved["model_review"] == "unresolved"
+    assert unresolved["model_match"]["render_placeholder"] is True
+
+
+def test_a_provisional_proposal_keeps_the_photo_colour_and_attaches_nothing(library):
+    """@brief provisional_matched: geometria nota, identita' no, quindi corpo generico.
+
+    Positivo/negativo a parita' di corpo: con evidenza indipendente (conteggio
+    osservato) la stessa lista diventa auto_matched e aggancia il modello; con
+    la sola geometria resta una proposta, con il colore campionato e senza
+    model_path. Prima entrambi finivano nello STEP.
+    """
+    root, add, _ = library
+    first = add("Button_Switch_SMD", "SW_SPST_EVQP7A", {"total": [4.7, 3.55, 1.35]})
+    add("Button_Switch_SMD", "SW_SPST_EVQP7C", {"total": [4.7, 3.55, 1.85]})
+    proposal = supported(kind="switch", package="small tactile switch",
+                         length_mm=4.74, width_mm=3.53, bbox_basis="total",
+                         color_hex="#2b2b2b", _color_source="photo_median",
+                         model_rotation_deg=90)
+    assert km.attach_models([proposal], library=root) == 0
+    assert proposal["model_match"]["status"] == "provisional_matched"
+    assert proposal["model_match"]["selected_path"] == str(first)
+    assert "model_path" not in proposal
+    assert proposal["color_hex"] == "#2b2b2b" and proposal["_color_source"] == "photo_median"
+    assert proposal["render_placeholder"] is False
+    assert proposal["model_review"] == "provisional_matched"
+    # Nessun modello agganciato, nessuna decisione sul suo verso: la
+    # correzione dell'utente resta com'era, come per review_required.
+    assert proposal["model_rotation_deg"] == 90
+
+    accepted = supported(package="", color_hex="#2b2b2b")
+    add("Resistor_SMD", "R_0603_1608Metric")
+    assert km.attach_models([accepted], library=root) == 1
+    assert accepted["model_match"]["status"] == "auto_matched"
+    assert accepted["model_path"] == accepted["model_match"]["selected_path"]
+    assert accepted["render_placeholder"] is False
 
 
 def test_same_family_switches_share_common_preview_variant(library):
+    """@brief Due pulsanti provvisori della stessa famiglia propongono un candidato comune.
+
+    Contratto aggiornato su due punti. La proposta condivisa resta provvisoria
+    come quella del singolo: vive in selected_path e non aggancia alcun
+    model_path. E il secondo pulsante misura ora 4,95 x 3,05 invece di
+    4,84 x 3,12: con la vecchia misura la sua banda di pareggio conteneva un
+    terzo solido di inviluppo diverso (4,6 x 3,2 a meno del margine dai
+    5,0 x 3,0), quindi con la banda che guarda tutti i candidati non e' piu'
+    una proposta ma una revisione -- vedi il test negativo che segue.
+    """
     root, add, _ = library
     add("Button_Switch_SMD", "SW_SPST_EVQP7A", {"total": [4.7, 3.55, 1.35]})
     add("Button_Switch_SMD", "SW_SPST_EVQP7C", {"total": [4.7, 3.55, 1.85]})
@@ -114,12 +213,44 @@ def test_same_family_switches_share_common_preview_variant(library):
     first = dict(kind="switch", package="SMD tactile switch (~4.7x3.5mm visible)",
                  length_mm=4.74, width_mm=3.53, bbox_basis="total",
                  presence_confidence="high", class_confidence="medium")
-    second = dict(kind="switch", package="SMD tactile switch (~4.8x3.1mm visible)",
-                  length_mm=4.84, width_mm=3.12, bbox_basis="total",
+    second = dict(kind="switch", package="SMD tactile switch (~4.9x3.1mm visible)",
+                  length_mm=4.95, width_mm=3.05, bbox_basis="total",
                   presence_confidence="high", class_confidence="medium")
-    assert km.attach_models([first, second], library=root) == 2
-    assert first["model_path"] == second["model_path"] == str(common)
+    assert km.attach_models([first, second], library=root) == 0
+    assert first["model_match"]["selected_path"] == second["model_match"]["selected_path"] == str(common)
+    assert "model_path" not in first and "model_path" not in second
+    assert first["model_match"]["status"] == second["model_match"]["status"] == "provisional_matched"
     assert first["model_match"]["shared_preview_group"] == "smd tactile switch"
+
+
+def test_a_switch_whose_band_is_mixed_does_not_join_the_shared_proposal(library):
+    """@brief Negativo: chi non e' una proposta per conto suo non entra nel gruppo.
+
+    Stessa libreria, ma il secondo pulsante misura 4,84 x 3,12: la sua banda
+    contiene le due varianti 5,0 x 3,0 e il 4,6 x 3,2, cioe' due inviluppi
+    che la fotografia non distingue. Resta review_required, senza candidato
+    condiviso, e il primo pulsante -- solo nel suo gruppo -- tiene la sua
+    proposta individuale.
+    """
+    root, add, _ = library
+    first_choice = add("Button_Switch_SMD", "SW_SPST_EVQP7A", {"total": [4.7, 3.55, 1.35]})
+    add("Button_Switch_SMD", "SW_SPST_EVQP7C", {"total": [4.7, 3.55, 1.85]})
+    add("Button_Switch_SMD", "SW_SPST_PTS810", {"total": [4.6, 3.2, 2.5]})
+    add("Button_Switch_SMD", "SW_SPST_TS-1088-xR020", {"total": [5.0, 3.0, 2.0]})
+    add("Button_Switch_SMD", "SW_SPST_TS-1088-xR025", {"total": [5.0, 3.0, 2.5]})
+    first = dict(kind="switch", package="SMD tactile switch (~4.7x3.5mm visible)",
+                 length_mm=4.74, width_mm=3.53, bbox_basis="total",
+                 presence_confidence="high", class_confidence="medium")
+    mixed = dict(kind="switch", package="SMD tactile switch (~4.8x3.1mm visible)",
+                 length_mm=4.84, width_mm=3.12, bbox_basis="total",
+                 presence_confidence="high", class_confidence="medium")
+    assert km.attach_models([first, mixed], library=root) == 0
+    assert mixed["model_match"]["status"] == "review_required"
+    assert mixed["model_match"]["selected_path"] is None
+    assert len(km._tie_band(mixed["model_match"]["candidates"])) == 3
+    assert first["model_match"]["status"] == "provisional_matched"
+    assert first["model_match"]["selected_path"] == str(first_choice)
+    assert "shared_preview_group" not in first["model_match"]
 
 
 def test_same_xy_variants_attach_a_reviewable_preview_model(library):
@@ -130,10 +261,12 @@ def test_same_xy_variants_attach_a_reviewable_preview_model(library):
         {"total": [4.7, 3.55, 1.85]})
     c = supported(kind="switch", package="small tactile switch",
                   length_mm=4.74, width_mm=3.53, bbox_basis="total")
-    assert km.attach_models([c], library=root) == 1
+    # Contratto aggiornato: il candidato provvisorio e' una proposta per il
+    # picker (selected_path), non un modello agganciato allo STEP.
+    assert km.attach_models([c], library=root) == 0
     assert c["model_match"]["status"] == "provisional_matched"
     assert c["model_match"]["selected_path"] == str(first)
-    assert c["model_path"] == str(first)
+    assert "model_path" not in c
     assert c["model_match"]["candidates"][0]["status"] == "provisional_matched"
     assert "variant" in c["model_match"]["candidates"][0]["reasons"][-1]
     assert measured == [first, first.parent / "SW_SPST_EVQP7C.step"]
@@ -442,7 +575,10 @@ def test_attach_stores_review_report_and_clears_stale_import(library):
     c = component(model_path="stale.step", model_rotation_deg=90)
     assert km.attach_models([c], library=root) == 0
     assert c["model_match"]["status"] == "review_required"
-    assert c["color_hex"] == "#FF00FF"
+    # Contratto aggiornato: in revisione il colore non viene toccato (qui non
+    # c'era, e non ne compare uno); lo stato si legge dai campi espliciti.
+    assert "color_hex" not in c
+    assert c["render_placeholder"] is False and c["model_review"] == "review_required"
     assert "model_path" not in c and c["model_rotation_deg"] == 90
 
 
@@ -750,29 +886,149 @@ def test_the_module_of_the_real_run_with_its_real_numbers(rf_library):
     18,08 x 16,33 perche' il bordo destro era il confine di una tessera YOLO,
     non il bordo del corpo.
 
-    1. Con quella misura vince un modulo radio 16,5 x 16,0 alto 1,3 mm: il
-       difetto che si vedeva nel 3D. Vale la pena registrarlo, perche' e'
-       l'unico modo di accorgersi se un domani tornasse.
-    2. Con il bordo giusto vince il solido corretto, e non di misura.
+    1. Con quella misura il primo della lista e' un modulo radio 16,5 x 16,0
+       alto 1,3 mm: il difetto che si vedeva nel 3D. Contratto aggiornato:
+       le due varianti identiche di quel modulo "pareggiavano" fra loro e la
+       promozione guardava solo loro due; ora la banda di pareggio comprende
+       anche il modulo corretto, terzo a meno del margine, e con tre solidi
+       di inviluppo diverso non si propone nulla. Il difetto resta
+       registrato nell'ordine della lista, che e' l'unico modo di accorgersi
+       se un domani tornasse.
+    2. Con il bordo giusto vince il solido corretto, e non di misura: la banda
+       contiene solo moduli con lo stesso inviluppo, e la proposta scatta.
     3. Anche con la misura sbagliata, se l'altezza e' stata osservata il solido
        corretto torna primo: la vista dall'alto non misura l'altezza, e i due
-       candidati sono dentro la banda in cui non li distingue.
+       candidati sono dentro la banda in cui non li distingue. La banda pero'
+       resta eterogenea, quindi l'altezza riordina ma non promuove.
     """
     wrong = km.model_candidates(_radio(18.0848, 16.3314), library=rf_library)
-    assert Path(wrong['selected_path']).stem.startswith('ZETA-433')
+    assert wrong['candidates'][0]['package'].startswith('ZETA-433')
+    assert wrong['status'] == 'review_required' and wrong['selected_path'] is None
     errors = {c['package']: c['relative_xy_error'] for c in wrong['candidates']}
     assert errors['ZETA-433-SO_THT'] == pytest.approx(.0876, abs=1e-3)
     assert errors['ESP32-WROOM-32U'] == pytest.approx(.1022, abs=1e-3)
     # Il distacco e' sotto il margine entro cui il codice stesso dichiara di
-    # non saper distinguere: la scelta era gia' una moneta lanciata.
+    # non saper distinguere: il modulo giusto e' nella banda, e la banda non
+    # e' omogenea.
     assert errors['ESP32-WROOM-32U'] - errors['ZETA-433-SO_THT'] < km.NAME_TIEBREAK_MARGIN
 
     right = km.model_candidates(_radio(19.23, 18.08), library=rf_library)
+    assert right['status'] == 'provisional_matched'
     assert Path(right['selected_path']).stem == 'ESP32-WROOM-32U'
     assert right['candidates'][0]['relative_xy_error'] == pytest.approx(.0044, abs=1e-3)
 
     rescued = km.model_candidates(
         _radio(18.0848, 16.3314, height_mm=3.1, height_source='visual_estimate'),
         library=rf_library)
-    assert Path(rescued['selected_path']).stem == 'ESP32-WROOM-32U'
+    assert rescued['candidates'][0]['package'] == 'ESP32-WROOM-32U'
     assert rescued['candidates'][0]['relative_z_error'] == pytest.approx(.0323, abs=1e-3)
+    assert rescued['status'] == 'review_required' and rescued['selected_path'] is None
+
+
+def _band_library(library, third):
+    """@brief Tre ricettacoli della stessa famiglia; il terzo lo decide il test.
+
+    I primi due sono varianti identiche di inviluppo (pareggio); il terzo
+    entra nella banda di pareggio per scarto XY ma il suo inviluppo lo decide
+    il chiamante: uguale (banda omogenea) o diverso (banda eterogenea).
+    """
+    root, add, _ = library
+    twins = {add("Connector_USB", "USB_C_Receptacle_A_6P", {"body": [11.14, 6.90, 3.26]}),
+             add("Connector_USB", "USB_C_Receptacle_A_16P", {"body": [11.14, 6.90, 3.46]})}
+    add("Connector_USB", "USB_C_Receptacle_C", {"body": list(third)})
+    component = supported(kind="connector", length_mm=10.67, width_mm=6.87,
+                          package="USB Type-C receptacle, SMD with through-hole shell tabs")
+    return root, {str(path) for path in twins}, component
+
+
+def test_a_third_solid_within_the_margin_breaks_the_tie(library):
+    """@brief Negativo: la banda di pareggio guarda tutti i candidati, non i primi due.
+
+    Due varianti identiche pareggiano, e guardando solo loro si promuoveva il
+    primo. Il terzo candidato dista dal migliore meno di NAME_TIEBREAK_MARGIN
+    -- la misura non lo ha escluso -- ma ha un inviluppo XY diverso: la
+    fotografia non sa dire quale dei due corpi c'e', e proporre uno dei due
+    sarebbe scegliere al posto suo. E' il caso del modulo radio della corsa
+    reale, dove il solido giusto era terzo e non partecipava al confronto.
+    """
+    root, twins, component = _band_library(library, third=(10.30, 6.90, 4.26))
+    report = km.model_candidates(component, library=root)
+    band = km._tie_band(report["candidates"])
+    assert len(band) == 3
+    assert {item["path"] for item in band} > twins
+    assert not km._band_is_homogeneous(band)
+    assert report["status"] == "review_required"
+    assert report["selected_path"] is None
+
+
+def test_a_homogeneous_band_of_three_is_still_a_tie(library):
+    """@brief Positivo: tre varianti con lo stesso inviluppo sono un pareggio."""
+    root, twins, component = _band_library(library, third=(11.14, 6.90, 4.26))
+    report = km.model_candidates(component, library=root)
+    band = km._tie_band(report["candidates"])
+    assert len(band) == 3 and km._band_is_homogeneous(band)
+    assert report["status"] == "provisional_matched"
+    # La proposta e' la testa della lista, che sta nella banda: quale delle
+    # tre varianti identiche sia non e' una scelta della misura.
+    assert report["selected_path"] == report["candidates"][0]["path"]
+    assert report["selected_path"] in {item["path"] for item in band}
+
+
+def test_a_band_of_one_is_dominance_only_on_a_complete_search(library, monkeypatch):
+    """@brief Positivo/negativo sulla stessa lista: banda di un solo elemento.
+
+    Con la ricerca completa il migliore ha distanziato tutti gli altri oltre
+    il margine, e viene proposto. Con la stessa lista ma un modello non
+    misurabile (ricerca incompleta) dominare alternative che nessuno ha
+    misurato non e' dominare, e non si propone nulla.
+    """
+    root, best, other, component = _usb_library(library)
+    report = km.model_candidates(component, library=root)
+    assert len(km._tie_band(report["candidates"])) == 1
+    assert report["status"] == "provisional_matched"
+    assert report["selected_path"] == str(best)
+
+    _, add, _ = library
+    add("Connector_USB", "USB_C_Receptacle_C_Unreadable")
+    readable = {str(best): {"body": [11.14, 6.90, 3.26]},
+                str(other): {"body": [8.94, 6.90, 4.26]}}
+    monkeypatch.setattr(km, "model_sizes", lambda paths, library=None: {
+        str(p): readable[str(p)] for p in paths if str(p) in readable})
+    truncated = km.model_candidates(component, library=root)
+    assert len(km._tie_band(truncated["candidates"])) == 1
+    assert truncated["status"] == "review_required"
+    assert truncated["selected_path"] is None
+
+
+def test_a_lone_candidate_is_not_a_comparison(library):
+    """@brief Negativo: un candidato solo in tutta la lista non e' dominanza.
+
+    La banda contiene un solo elemento e la ricerca e' completa, ma la misura
+    non ha scartato nessuno: non c'e' stato confronto. Il contratto precedente
+    resta: senza marcatura letterale o morfologia non si propone nulla.
+    """
+    root, add, _ = library
+    add("Connector_USB", "USB_C_Receptacle_A_6P", {"body": [11.14, 6.90, 3.26]})
+    component = supported(kind="connector", length_mm=10.67, width_mm=6.87,
+                          package="USB Type-C receptacle, SMD with through-hole shell tabs")
+    report = km.model_candidates(component, library=root)
+    assert not report.get("search_truncated")
+    assert len(report["candidates"]) == 1
+    assert report["status"] == "review_required" and report["selected_path"] is None
+
+
+def test_the_band_is_measured_from_the_best_error_not_from_the_list_head(library):
+    """@brief La banda parte dal minimo scarto XY, anche se la lista e' riordinata.
+
+    Dentro la banda l'altezza riordina i candidati: il primo della lista puo'
+    non essere quello con lo scarto XY minimo. La banda deve comunque essere
+    calcolata dal minimo, altrimenti un riordino allargherebbe il pareggio.
+    """
+    choices = [
+        {"path": "b", "family": "module", "dimensions_mm": [18.0, 19.2, 3.2], "relative_xy_error": .10},
+        {"path": "a", "family": "module", "dimensions_mm": [16.5, 16.0, 1.3], "relative_xy_error": .08},
+        {"path": "c", "family": "module", "dimensions_mm": [22.0, 21.0, 3.0], "relative_xy_error": .135},
+    ]
+    band = km._tie_band(choices)
+    assert [item["path"] for item in band] == ["b", "a"]
+    assert km._tie_band([dict(choices[0], relative_xy_error=None)]) is None
