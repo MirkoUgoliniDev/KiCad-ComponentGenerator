@@ -108,6 +108,14 @@ def prepared(window, monkeypatch, tmp_path):  # noqa: F811 - fixture importata
     monkeypatch.setattr(window, '_photo_cache_dir', lambda: cache)
     warnings = []
     monkeypatch.setattr(QMessageBox, 'warning', lambda *args: warnings.append(args[2]))
+    # Dopo l'inventario (anche quello di un rilancio) la finestra si ferma e
+    # propone la revisione dei componenti: e' la pausa chiesta dall'utente, e
+    # ha i suoi test in tests/test_pipeline_pauses.py. Qui si prova il
+    # rilancio, cioe' cio' che accade PRIMA e DOPO quella pausa, quindi si
+    # risponde «No» -- il ramo «prosegui con il risultato dell'AI», che e'
+    # esattamente il comportamento che questi test descrivono da sempre.
+    monkeypatch.setattr(QMessageBox, 'question',
+                        lambda *args, **kwargs: QMessageBox.StandardButton.No)
     started = []
     monkeypatch.setattr(window, '_start_automatic_generation', lambda params: started.append(params))
     calls = []

@@ -42,6 +42,7 @@ from functools import lru_cache
 from typing import Iterable, Optional
 
 from .model_measurement import normalize_model_measurement
+from .process_log import CANCEL_POLL_INTERVAL_S, ProcessCancelled
 from . import model_size_cache
 
 #: Variabile d'ambiente per indicare una libreria diversa da quella trovata.
@@ -578,10 +579,47 @@ def footprint_sizes(paths, library: Optional[Path] = None, log=None) -> dict:
     return result
 
 
+class MatchingCancelled(ProcessCancelled):
+    """@brief Raised when the KiCad model matching was stopped on request.
+
+    @note Sottoclasse di `process_log.ProcessCancelled` DI PROPOSITO: la fase
+        di abbinamento avvia i suoi figli `freecadcmd` (le misure dei
+        candidati non ancora in cache) e chi la chiama deve poter scrivere UNA
+        sola clausola -- `except ProcessCancelled` -- per entrambe le meta'
+        del 3D, abbinamento e costruzione del solido. Una seconda gerarchia
+        avrebbe voluto dire due convenzioni per la stessa cosa.
+    @note Distinta da un lotto FALLITO, che resta `{}`: una misura che non
+        riesce e' una diagnosi sul file (modello illeggibile, FreeCAD
+        assente), una rinuncia e' una decisione di chi guarda. Confonderle
+        farebbe registrare «nessun candidato» per componenti che nessuno ha
+        mai misurato, cioe' un verdetto inventato.
+    """
+
+    def __init__(self, command=None, output="", measured=None):
+        """@brief Carry the killed command and the measurements already paid for.
+
+        @param command Command line of the child that was killed, or None when
+            the stop happened between two components, senza nessun figlio vivo.
+        @param output Text the child had already written, kept for the log.
+        @param measured Mapping path -> measurement completed BEFORE the stop.
+            Sono misure valide: il chiamante le mette in cache invece di
+            buttarle, perche' sono gia' state pagate in tempo di CPU.
+        """
+        super().__init__(command, output=output)
+        self.measured = dict(measured or {})
+
+
 #: Script eseguito dentro FreeCAD: misura l'ingombro di piu' modelli in una
 #: sola invocazione. Aprire un processo per file costerebbe secondi a pezzo.
 #: I percorsi passano da un file di scambio e non da argv, perche' freecadcmd
 #: non inoltra gli argomenti allo script come farebbe python.
+#:
+#: Protocollo del file di scambio (lo stesso che le prove sostituiscono con un
+#: finto misuratore, visto che FreeCAD non c'e' nei test):
+#:   in.json        -> elenco dei percorsi da misurare;
+#:   progress.jsonl -> una riga {"path": ..., "size": ...} per OGNI misura
+#:                     finita, scritta e scaricata subito;
+#:   out.json       -> l'intera mappa, scritta solo se il lotto arriva in fondo.
 _MEASURE_SCRIPT = """
 import json, os
 import FreeCAD
@@ -620,17 +658,44 @@ def measure(path):
 
 
 sizes = {}
-for path in paths:
-    try:
-        sizes[path] = measure(path)
-    except Exception:
-        sizes[path] = None
+# Ogni misura finita viene scritta SUBITO, riga per riga: se il processo
+# viene ucciso su richiesta a meta' lotto, cio' che era gia' stato misurato
+# sopravvive e finisce in cache invece di essere rifatto alla corsa dopo.
+with open(os.path.join(folder, "progress.jsonl"), "w", encoding="utf-8") as done:
+    for path in paths:
+        try:
+            sizes[path] = measure(path)
+        except Exception:
+            sizes[path] = None
+        done.write(json.dumps({"path": path, "size": sizes[path]}) + "\\n")
+        done.flush()
 with open(os.path.join(folder, "out.json"), "w", encoding="utf-8") as handle:
     json.dump(sizes, handle)
 """
 
 
-def measure_models(paths, timeout: int = 300) -> dict:
+def _partial_measurements(progress_path: Path) -> dict:
+    """Rilegge le misure gia' finite da `progress.jsonl`, riga per riga.
+
+    L'ultima riga puo' essere troncata: il figlio e' stato ucciso mentre la
+    scriveva. Una riga rotta si scarta, le precedenti restano valide.
+    """
+    measured = {}
+    try:
+        text = progress_path.read_text(encoding="utf-8")
+    except OSError:
+        return measured
+    for line in text.splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and isinstance(record.get("path"), str):
+            measured[record["path"]] = record.get("size")
+    return measured
+
+
+def measure_models(paths, timeout: int = 300, *, cancel=None) -> dict:
     """@brief Measure model body and total X/Y/Z dimensions in mm using FreeCAD.
 
     Una sola invocazione per l'intero lotto: aprire un processo per file
@@ -640,13 +705,37 @@ def measure_models(paths, timeout: int = 300) -> dict:
 
     Solo STEP: il VRML e' una mesh per la visualizzazione e FreeCAD non lo
     importa come solido.
+
+    @param paths Percorsi dei modelli da misurare.
+    @param timeout Secondi concessi all'intero lotto prima di considerarlo fermo.
+    @param cancel Canale di rinuncia: un oggetto con `is_set()` (tipicamente
+        `threading.Event`) che il chiamante mette a uno per chiedere la fine
+        del lavoro. **None significa non interrompibile**, ed e' il valore
+        predefinito: senza canale questa funzione si comporta esattamente come
+        prima, figlio compreso.
+    @return Mappa percorso -> misura; `{}` quando il lotto non e' utilizzabile
+        (FreeCAD assente, lancio fallito, lotto fermo oltre @p timeout).
+    @throws MatchingCancelled Quando @p cancel viene messo a uno: il figlio
+        `freecadcmd` viene UCCISO -- non abbandonato -- con la stessa logica di
+        `process_log.run_logged`, e le misure gia' finite viaggiano
+        nell'eccezione (`measured`) perche' chi chiama possa metterle in cache.
+    @note Il canale si guarda ogni `process_log.CANCEL_POLL_INTERVAL_S`: e'
+        la stessa promessa di reattivita' fatta alla costruzione del solido, e
+        la costante e' una sola perche' le due attese sono la stessa attesa.
+        Non basterebbe guardarlo FRA una misura e l'altra: un singolo STEP
+        grande puo' occupare da solo decine di secondi.
     """
     import subprocess
     import tempfile
+    import time
 
     readable = [str(p) for p in paths if Path(p).suffix.lower() in (".step", ".stp")]
     if not readable:
         return {}
+    if cancel is not None and cancel.is_set():
+        # Rinuncia gia' chiesta: non si avvia un figlio che andrebbe ucciso al
+        # primo respiro (stessa regola di `_run_freecad`).
+        raise MatchingCancelled(measured={})
     try:
         from .step_generator import find_freecadcmd
         freecad = find_freecadcmd()
@@ -658,16 +747,84 @@ def measure_models(paths, timeout: int = 300) -> dict:
         script = base / "measure.py"
         script.write_text(_MEASURE_SCRIPT, encoding="utf-8")
         environment = dict(os.environ, KICADGEN_MEASURE_DIR=str(base))
+        command = [freecad, str(script)]
+        if cancel is None:
+            try:
+                subprocess.run(command, capture_output=True, text=True,
+                               timeout=timeout, env=environment)
+                return json.loads((base / "out.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError, subprocess.SubprocessError):
+                return {}
+        # Con il canale il figlio va sorvegliato, quindi non si puo' usare
+        # `subprocess.run`: aspetta e basta. L'uscita finisce su file e non su
+        # una pipe perche' nessuno la legge -- una pipe piena bloccherebbe il
+        # figlio, che e' il difetto che questo ramo non deve introdurre.
+        log_path = base / "freecad.out"
+        stopped = None
         try:
-            subprocess.run([freecad, str(script)], capture_output=True, text=True,
-                           timeout=timeout, env=environment)
-            return json.loads((base / "out.json").read_text(encoding="utf-8"))
+            with log_path.open("wb") as sink, subprocess.Popen(
+                    command, stdout=sink, stderr=subprocess.STDOUT,
+                    env=environment) as process:
+
+                def kill_child():
+                    """Unico punto in cui il figlio della misura viene ucciso."""
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+                    process.wait()
+
+                deadline = time.monotonic() + timeout
+                while True:
+                    try:
+                        process.wait(timeout=CANCEL_POLL_INTERVAL_S)
+                        break
+                    except subprocess.TimeoutExpired:
+                        pass
+                    if cancel.is_set():
+                        kill_child()
+                        # Letture difensive: un errore nel raccogliere il
+                        # bottino non deve trasformare una rinuncia in un
+                        # lotto «fallito», che e' l'altro verdetto.
+                        try:
+                            tail = log_path.read_text(encoding="utf-8", errors="replace")
+                        except OSError:
+                            tail = ""
+                        stopped = MatchingCancelled(
+                            command, output=tail,
+                            measured=_partial_measurements(base / "progress.jsonl"))
+                        break
+                    if time.monotonic() >= deadline:
+                        kill_child()
+                        # Un lotto fermo resta un lotto FALLITO, come prima:
+                        # non e' una decisione di nessuno, e' una diagnosi.
+                        return {}
+            if stopped is None:
+                return json.loads((base / "out.json").read_text(encoding="utf-8"))
         except (OSError, ValueError, subprocess.SubprocessError):
             return {}
+    # Fuori dal `try`: una rinuncia non e' un errore di lettura, e non deve
+    # poter essere riassorbita nel verdetto «lotto non utilizzabile».
+    raise stopped
 
 
-def model_sizes(paths, library: Optional[Path] = None) -> dict:
-    """@brief Retrieve valid cached dimensions and retry missing/failed measurements."""
+def model_sizes(paths, library: Optional[Path] = None, *, cancel=None) -> dict:
+    """@brief Retrieve valid cached dimensions and retry missing/failed measurements.
+
+    @param paths Modelli di cui servono le quote.
+    @param library Radice della libreria, per la cache delle misure.
+    @param cancel Canale di rinuncia inoltrato a `measure_models`. **None
+        significa non interrompibile** ed e' il valore predefinito: senza
+        canale il comportamento e' identico a prima, `measure_models`
+        compreso, che non lo vede nemmeno arrivare.
+    @return Mappa percorso -> misura (anche `None` per chi non si e' potuto misurare).
+    @throws MatchingCancelled Quando la misura viene fermata su richiesta. Le
+        misure gia' concluse prima della rinuncia vengono comunque SALVATE in
+        cache: sono valide e sono gia' state pagate, e buttarle farebbe
+        ricominciare da zero la corsa successiva. Quello che non viene
+        restituito e' il risultato parziale, che il chiamante scambierebbe
+        per completo.
+    """
     paths = [Path(p) for p in paths]
     library = library or find_library()
     index = load_index(library)
@@ -679,13 +836,22 @@ def model_sizes(paths, library: Optional[Path] = None) -> dict:
             index[key] = normalize_model_measurement(path, index[key])
     missing = [p for p in paths if size_distance(index.get(index_key(p)), 1, 1) is None]
     if missing:
-        measured = measure_models(missing)
+        stopped = None
+        try:
+            # Il canale si passa SOLO quando c'e': la firma che vedono i
+            # chiamanti non interattivi (e le loro sostituzioni nei test)
+            # resta quella di prima. Stessa regola di `_run_freecad`.
+            measured = measure_models(missing, **({"cancel": cancel} if cancel is not None else {}))
+        except MatchingCancelled as exc:
+            measured, stopped = exc.measured, exc
         for path in missing:
             value = measured.get(str(path))
             # A missing FreeCAD installation or failed batch must be retryable.
             if size_distance(value, 1, 1) is not None:
                 index[index_key(path)] = normalize_model_measurement(path, value)
         save_index(index, library)
+        if stopped is not None:
+            raise stopped
     return {str(p): index.get(index_key(p)) for p in paths}
 
 
@@ -1734,13 +1900,21 @@ def _synchronize_preview_variants(components, note) -> None:
         note(f"Switch preview group '{key}': shared candidate {Path(selected).name} proposed for {len(group)} components.")
 
 
-def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dict:
+def model_candidates(component: dict, *, limit=5, library=None, log=None,
+                     cancel=None) -> dict:
     """@brief Propose bounded, JSON-safe model choices for explicit human review.
 
     @param component Component evidence, dimensions, bbox_basis and model_selection.
     @param limit Maximum result count, clamped to zero through five.
     @param library Optional KiCad model root; cached measurements are reused.
     @param log Optional diagnostic callback accepting a string.
+    @param cancel Canale di rinuncia (`is_set()`) inoltrato alla misura dei
+        candidati non ancora in cache. **None significa non interrompibile**
+        ed e' il valore predefinito.
+    @throws MatchingCancelled Quando la rinuncia arriva prima o durante la
+        misura. NON viene restituito un report parziale: un rapporto senza
+        candidati sarebbe indistinguibile da «nessun modello compatibile»,
+        cioe' un verdetto su un componente che nessuno ha esaminato.
     @return Mapping with status, candidates and selected_path. Candidate dimensions_mm
         is the matched XY reading (and Z when available), in native model axes.
     @note Dimensional evidence never confirms identity. Explicit confirmation wins;
@@ -1755,6 +1929,10 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dic
     """
     result = {"status": "unresolved", "candidates": [], "selected_path": None}
     note = log or (lambda message: None)
+    # Prima di qualunque lavoro: chi ha gia' chiesto di fermarsi non deve
+    # ricevere il verdetto di un esame mai cominciato.
+    if cancel is not None and cancel.is_set():
+        raise MatchingCancelled(measured={})
     if not isinstance(component, dict):
         return result
     selection = component.get("model_selection")
@@ -1854,7 +2032,10 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dic
     if not paths:
         return result
     result["discovery"] = "family_dimensions" if fallback else "package"
-    sizes = model_sizes(paths, root)
+    # Vedi `_run_freecad`: il canale si passa solo quando c'e', cosi' le
+    # sostituzioni di `model_sizes` scritte prima di questo parametro
+    # continuano a funzionare.
+    sizes = model_sizes(paths, root, **({"cancel": cancel} if cancel is not None else {}))
     complete = not (result.get("search_truncated") or result.get("topology_incomplete"))
     lands = footprint_sizes(paths, root, log=note) if basis in ("unknown", "pads") else {}
     # L'altezza non esclude nessun candidato -- e' una stima visiva, non una
@@ -1959,7 +2140,8 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None) -> dic
     return result
 
 
-def attach_models(components, log=None, library: Optional[Path] = None, progress=None) -> int:
+def attach_models(components, log=None, library: Optional[Path] = None, progress=None,
+                  *, cancel=None) -> int:
     """@brief Attach explicit choices or supported mechanical estimates, clearing stale paths.
 
     @param components Mutable component dictionaries containing model_selection.
@@ -1969,8 +2151,22 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
         This is the one step of a generation with a real total: every component
         may cost a CAD measurement, so the count is what a progress bar can
         honestly be built on.
+    @param cancel Canale di rinuncia: un oggetto con `is_set()` (tipicamente
+        `threading.Event`) che chi ha avviato il lavoro mette a uno per
+        chiedere la fine. **None significa non interrompibile** ed e' il
+        valore predefinito: senza canale questa funzione fa esattamente quel
+        che faceva prima. Il canale viene guardato PRIMA di ogni componente e
+        inoltrato fino al figlio `freecadcmd` che misura i candidati, cosi'
+        una richiesta non aspetta la fine del lotto in corso.
     @return Number of paths attached: explicit choices, automatic mechanical
         estimates and provisional proposals alike.
+    @throws MatchingCancelled Quando la rinuncia arriva: il conteggio parziale
+        NON viene restituito (sarebbe letto come il totale di una corsa
+        completa) e il componente su cui la richiesta e' caduta viene
+        rimesso esattamente com'era. I componenti gia' esaminati conservano il
+        loro verdetto, che e' vero; quelli mai esaminati non ne ricevono
+        nessuno -- un `model_match` «unresolved» scritto d'ufficio direbbe
+        «nessun modello compatibile» di un pezzo che nessuno ha guardato.
     @note Rejected or invalid explicit selections use synthetic geometry. Missing
         selections permit auto_matched mechanical estimates when evidence supports
         them. A provisional_matched report is a proposal whose identity is not
@@ -2011,15 +2207,36 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
             progress(done - 1, total)
         if not isinstance(component, dict):
             continue
+        # Guardato PRIMA di toccare il componente: cosi' il pezzo su cui la
+        # rinuncia cade resta intatto invece di restare a meta' strada, senza
+        # modello agganciato e con il verdetto della corsa precedente.
+        if cancel is not None and cancel.is_set():
+            note(f"Abbinamento modelli KiCad interrotto su richiesta dopo {done - 1} "
+                 f"componenti su {total}.")
+            raise MatchingCancelled(measured={})
         # Il ripristino a True ripulisce lo stato calcolato nella corsa
         # precedente, non la scelta dell'utente: render_3d_override e' l'unico
         # canale esplicito e vince in entrambe le direzioni, sia per togliere
         # dal solido un falso positivo del rilevatore sia per rimettere un
         # pezzo che l'automatismo aveva omesso.
         override = component.get("render_3d_override")
+        # Cio' che sto per sovrascrivere, per poterlo rimettere se la rinuncia
+        # arriva a meta' esame: un componente mai esaminato fino in fondo deve
+        # restare come l'ho trovato, non a meta'.
+        restore = {key: component[key] for key in ("render_3d", "model_path")
+                   if key in component}
         component["render_3d"] = True if override is None else bool(override)
         component.pop("model_path", None)
-        report = model_candidates(component, library=library, log=note)
+        try:
+            report = model_candidates(component, library=library, log=note,
+                                      **({"cancel": cancel} if cancel is not None else {}))
+        except MatchingCancelled:
+            component.pop("render_3d", None)
+            component.pop("model_path", None)
+            component.update(restore)
+            note(f"Abbinamento modelli KiCad interrotto su richiesta durante il "
+                 f"componente {done} di {total}.")
+            raise
         component["model_match"] = report
         # Lo stato di revisione si dice con un campo, non con un colore: il
         # magenta resta solo per chi non ha alcun candidato, perche' di quel

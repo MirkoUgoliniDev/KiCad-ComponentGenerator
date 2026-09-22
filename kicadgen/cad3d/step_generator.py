@@ -23,7 +23,7 @@ from ..generators.castellated_module import CastellatedModuleParams, pad_positio
 from ..generators.pin_header import PinHeaderParams, pin_positions
 from .annotations import EdgeFilletAnnotation, FaceTextAnnotation
 from .body_params import Body3DParams
-from .process_log import heartbeat_interval
+from .process_log import ProcessCancelled, heartbeat_interval
 
 DEFAULT_FONT_FILE = r"C:\Windows\Fonts\arial.ttf"
 
@@ -460,7 +460,17 @@ def generate_castellated_3d_model(
             progress(message)
     try:
         from .kicad_models import attach_models
-        attach_models(components, log=report_model, progress=model_progress)
+        # Il canale si passa SOLO quando c'e', come a `run_logged`: una
+        # sostituzione di `attach_models` scritta prima di questo parametro
+        # non deve far fallire una generazione buona.
+        attach_models(components, log=report_model, progress=model_progress,
+                      **({"cancel": cancel} if cancel is not None else {}))
+    except ProcessCancelled as exc:
+        # La rinuncia NON e' un difetto della libreria 3D: se finisse nel ramo
+        # sotto, verrebbe annunciata come «libreria non utilizzabile» e la
+        # costruzione del solido partirebbe lo stesso, cioe' il pulsante
+        # «Interrompi» non farebbe niente di visibile fino alla fine.
+        raise Cad3DError(CAD_ABORT_MESSAGE) from exc
     except Exception as exc:  # noqa: BLE001 - la libreria e' un di piu', mai un requisito
         report_model(f"Libreria 3D KiCad non utilizzabile ({exc}); "
                            "si usano le forme approssimate.")
@@ -577,7 +587,15 @@ def _generate_populated_tht(params, body, pins, output_dir, **options):
             **_model_placement(c),
             **_match_evidence(c),
         })
-    attach_models(components, log=report, progress=model_progress)
+    # `options` viaggia intatto fino a `_run_freecad`, che vuole ancora il
+    # canale: qui si LEGGE soltanto. Stessa regola del sito castellated --
+    # una sola richiesta copre misura dei candidati e costruzione del solido.
+    cancel = options.get("cancel")
+    try:
+        attach_models(components, log=report, progress=model_progress,
+                      **({"cancel": cancel} if cancel is not None else {}))
+    except ProcessCancelled as exc:
+        raise Cad3DError(CAD_ABORT_MESSAGE) from exc
     from ..services.model_choices import save_candidate_report
     candidate_report = save_candidate_report(output_dir, components)
     holes = [{"x": x, "y": y, "radius": params.drill / 2} for _, x, y in pins]
@@ -652,14 +670,14 @@ def _run_freecad(
     e la chiamata esce con `Cad3DError(CAD_ABORT_MESSAGE)`, cioe' per la via
     con cui l'interfaccia riporta gia' la finestra in quiete.
 
-    LIMITE DICHIARATO: la rinuncia arriva solo al figlio che COSTRUISCE il
-    solido. L'abbinamento dei modelli di libreria, che precede questa
-    chiamata, avvia a sua volta freecadcmd per misurare i candidati non ancora
-    in cache (`kicad_models.measure_models`, con un proprio limite di durata):
-    quel figlio qui non e' raggiungibile, quindi una rinuncia chiesta durante
-    l'abbinamento ha effetto appena il lotto in corso finisce -- e allora
-    questa funzione non avvia nemmeno il figlio del solido. Diventerebbe
-    superfluo il giorno in cui anche `measure_models` accettasse il canale.
+    Lo STESSO canale copre le due meta' della fase 3D: l'abbinamento dei
+    modelli di libreria, che precede questa chiamata, lo riceve da chi chiama
+    (`attach_models` -> `model_candidates` -> `model_sizes` ->
+    `kicad_models.measure_models`) e uccide il proprio figlio freecadcmd --
+    quello che misura i candidati non ancora in cache -- invece di aspettare
+    che il lotto finisca. Una rinuncia chiesta durante l'abbinamento esce
+    quindi subito, per la stessa via (`Cad3DError(CAD_ABORT_MESSAGE)`), e
+    questa funzione non avvia nemmeno il figlio del solido.
     """
     body.validate()
     fillets = fillets or []

@@ -83,6 +83,14 @@ APP_DIR = Path(__file__).resolve().parent.parent.parent
 DEFAULT_LIBRARY_ROOT = APP_DIR / "generated"
 DOCS_SUBDIR = "docs"
 
+#: Tipologie che dichiarano UN SOLO componente discreto (vedi
+#: `services/component_types.py`). Non sono schede con corpi montati sopra,
+#: quindi l'estrattore non guarda la fotografia per inventariarli: niente
+#: rilevatore locale, niente revisione «Corpi rilevati», niente componenti in
+#: tabella. E' un attributo dichiarato della tipologia scelta, non il nome del
+#: pezzo: vale per qualunque componente di quella famiglia.
+_SINGLE_COMPONENT_FAMILIES = ("single_tht", "single_smd")
+
 # Local fallbacks use I18n.tr without adding rows to the profile database.
 _PHOTO_DETECTOR_TRANSLATIONS = {
     "label": {"it": "Rilevamento foto:", "en": "Photo detection:",
@@ -187,6 +195,62 @@ def _castellated_body_available(params) -> bool:
     return bool(params.body_length_mm) and bool(params.body_width_mm)
 
 
+def _generation_target(params):
+    """@brief Il generatore 3D che costruira' DAVVERO questo componente.
+
+    @param params Parametri del componente (matrice/package o modulo castellated).
+    @return La funzione di `step_generator` che verra' chiamata.
+    @note Esiste per una ragione sola: `_generate_3d` e' un involucro, e chi
+        vuole sapere se la corsa e' interrompibile deve guardare la funzione
+        vera. L'involucro accetta `cancel` per costruzione, quindi
+        interrogarlo risponderebbe sempre di si' -- anche quando il
+        generatore sotto non conosce il canale e il pulsante «Interrompi»
+        non fermerebbe nulla.
+    @note Si legge dal modulo al momento della chiamata (non si cattura alla
+        definizione) cosi' una sostituzione -- prove, strumenti -- riguarda
+        introspezione e chiamata insieme.
+    """
+    return (generate_castellated_3d_model
+            if isinstance(params, CastellatedModuleParams) else generate_3d_model)
+
+
+def matching_cancel_kwargs(function, cancel) -> dict:
+    """@brief `{'model_cancel': evento}` solo se il generatore dichiara quel canale.
+
+    @param function Generatore 3D che si sta per chiamare.
+    @param cancel Evento con cui la modale chiede di fermare il lavoro.
+    @return Dizionario da espandere nella chiamata, vuoto quasi sempre.
+    @note L'abbinamento dei modelli KiCad (`kicad_models.attach_models`, che
+        per misurare un candidato non ancora in cache avvia `freecadcmd`) puo'
+        durare minuti da solo, e la sua interruzione sta nascendo in
+        `cad3d/`: il canale ordinario e' lo stesso `cancel` che gia' arriva al
+        figlio FreeCAD (vedi `cancel_kwargs`), ma se l'abbinamento ricevesse un
+        canale PROPRIO questa e' la porta per passarglielo. Finche' la firma
+        non lo dichiara non si passa nulla: mai un TypeError per una
+        funzionalita' accessoria, e le due modifiche possono atterrare in
+        qualunque ordine.
+    """
+    return {"model_cancel": cancel} if accepts_keyword(function, "model_cancel") else {}
+
+
+def generation_accepts_cancel(generator, params) -> bool:
+    """@brief Dice se l'ordine di fermarsi arriva al lavoro vero, non solo all'involucro.
+
+    @param generator Funzione che il worker sta per chiamare.
+    @param params Parametri del componente, che scelgono il generatore reale.
+    @return True solo quando chi costruisce il solido conosce il canale.
+    @note Con `generator is _generate_3d` la domanda si gira al generatore
+        reale: l'involucro accetta `cancel` sempre, quindi da solo direbbe
+        «interrompibile» anche su un generatore che non lo e'. Per un
+        generatore sostituito (prove, strumenti) vale la sua stessa firma.
+    """
+    if not accepts_keyword(generator, "cancel"):
+        return False
+    if generator is _generate_3d:
+        return accepts_keyword(_generation_target(params), "cancel")
+    return True
+
+
 def _generate_3d(params, body: Body3DParams, project_dir: Path, fillets, face_texts,
                  progress=None, model_progress=None, cancel=None):
     """Genera il 3D con il generatore adatto al tipo di componente.
@@ -196,16 +260,19 @@ def _generate_3d(params, body: Body3DParams, project_dir: Path, fillets, face_te
     un PCB con i semi-fori tagliati sul bordo e i componenti sopra.
 
     `cancel` e' il canale con cui il pulsante «Interrompi» della modale
-    chiede la fine del processo FreeCAD figlio (vedi step_generator).
+    chiede la fine del lavoro: oggi il processo FreeCAD figlio (vedi
+    step_generator), e l'abbinamento dei modelli KiCad appena `cad3d/` gli
+    dara' un canale. Qui viene inoltrato in modo DIFENSIVO -- `cancel_kwargs`
+    e `matching_cancel_kwargs` guardano la firma installata -- perche' questo
+    involucro e i generatori evolvono separatamente e una funzionalita'
+    accessoria non deve far cadere una generazione buona con un TypeError.
     """
-    if isinstance(params, CastellatedModuleParams):
-        return generate_castellated_3d_model(
-            params, body, project_dir, fillets=fillets, face_texts=face_texts,
-            progress=progress, model_progress=model_progress, cancel=cancel,
-        )
-    return generate_3d_model(
+    generator = _generation_target(params)
+    return generator(
         params, body, project_dir, fillets=fillets, face_texts=face_texts,
-        progress=progress, model_progress=model_progress, cancel=cancel,
+        progress=progress, model_progress=model_progress,
+        **cancel_kwargs(generator, cancel),
+        **matching_cancel_kwargs(generator, cancel),
     )
 
 
@@ -420,6 +487,10 @@ class GenerateWorker(QThread):
     cad3d_error = pyqtSignal(str)
     warning = pyqtSignal(str)
     progress = pyqtSignal(str)
+    #: True/False all'inizio del 3D: dice alla finestra se «Interrompi» ha
+    #: davvero un lavoro da fermare. Falso = il generatore in uso non conosce
+    #: il canale, e la modale deve togliere il comando invece di prometterlo.
+    cancellable = pyqtSignal(bool)
     #: (strumento, dettaglio, fatti, totale). Dice alla modale CHI sta
     #: lavorando, che dai messaggi di avanzamento non si capiva. Un totale non
     #: positivo significa "nessun conteggio": la modale resta animata invece di
@@ -450,13 +521,20 @@ class GenerateWorker(QThread):
         @note Quando il canale non viene accettato la corsa NON e' fermabile, e
             la cosa si dice invece di scoprirla premendo un pulsante che non fa
             niente. La riga finisce nel log e sulla modale come ogni altro
-            avviso di questo worker.
+            avviso di questo worker, e `cancellable(False)` fa TOGLIERE il
+            comando dalla modale: un pulsante che non ferma niente e' peggio
+            di nessun pulsante.
+        @note La domanda si fa a `generation_accepts_cancel`, non alla sola
+            firma dell'involucro `_generate_3d`: e' il generatore reale a
+            dover conoscere il canale.
         """
-        kwargs = cancel_kwargs(generator, self.cancel)
+        kwargs = (cancel_kwargs(generator, self.cancel)
+                  if generation_accepts_cancel(generator, self.params) else {})
         if not kwargs:
             self.progress.emit(
                 "ATTENZIONE: il generatore 3D in uso non accetta il canale di "
                 "interruzione; questa generazione non potrà essere fermata.")
+        self.cancellable.emit(bool(kwargs))
         return kwargs
 
     def request_abort(self) -> None:
@@ -569,6 +647,8 @@ class Cad3DWorker(QThread):
     #: usati): vanno nel log senza il prefisso di avviso, perche' non c'e'
     #: nulla che richieda attenzione.
     progress = pyqtSignal(str)
+    #: Vedi GenerateWorker.cancellable.
+    cancellable = pyqtSignal(bool)
     #: Vedi GenerateWorker.phase.
     phase = pyqtSignal(str, str, int, int)
 
@@ -587,11 +667,13 @@ class Cad3DWorker(QThread):
 
     def _cancel_kwargs(self, generator) -> dict:
         """@brief Vedi GenerateWorker._cancel_kwargs: stesso canale, stesso avviso."""
-        kwargs = cancel_kwargs(generator, self.cancel)
+        kwargs = (cancel_kwargs(generator, self.cancel)
+                  if generation_accepts_cancel(generator, self.params) else {})
         if not kwargs:
             self.progress.emit(
                 "ATTENZIONE: il generatore 3D in uso non accetta il canale di "
                 "interruzione; questa generazione non potrà essere fermata.")
+        self.cancellable.emit(bool(kwargs))
         return kwargs
 
     def request_abort(self) -> None:
@@ -959,6 +1041,17 @@ class MainWindow(QMainWindow):
         #: domanda o mandi un secondo ordine.
         self._abort_pending = False
         self._acquisition_completed = False
+        #: Vero quando l'analisi appena conclusa ha prodotto un inventario
+        #: fotografico da far rivedere: e' cio' che rende dovuta la pausa fra
+        #: l'inventario a pagamento e l'abbinamento modelli/3D. Si consuma
+        #: nella pausa stessa, cosi' una seconda `finished` non la ripropone.
+        self._inventory_pause_pending = False
+        #: Vero mentre la pausa e' aperta: la revisione gira in un event loop
+        #: annidato e da li' si puo' rientrare in questa finestra.
+        self._inventory_pause_active = False
+        #: Vero mentre una generazione manuale sta mostrando la modale: e' la
+        #: finestra ad averla aperta, quindi e' lei a doverla chiudere.
+        self._manual_cad_overlay = False
         self._config = load_config()
         self.profile_store = profile_store or ProfileStore(legacy_config=self._config, legacy_path=config_path())
         self.i18n = I18n(self.profile_store, self._config.get("language", "it"))
@@ -1110,6 +1203,67 @@ class MainWindow(QMainWindow):
     def _advanced_user(self):
         return self._config.get('advanced_user', False) is True
 
+    def _inventory_pause_enabled(self) -> bool:
+        """@brief Dice se dopo l'inventario a pagamento ci si ferma a rivederlo.
+
+        @return True finche' qualcuno non ha chiesto esplicitamente di non
+            fermarsi piu'.
+        @note Predefinito ACCESO, al contrario di `advanced_user`: la pausa e'
+            cio' che l'utente ha chiesto («dopo l'elaborazione AI stessa cosa,
+            non ho visto la pausa»), e un impianto che comincia a correre da
+            solo verso l'abbinamento modelli e FreeCAD gli toglie l'unico
+            momento in cui puo' correggere la disposizione dei corpi prima che
+            qualcosa venga costruito su di essa. Chi non la vuole la spegne una
+            volta, dalla pausa stessa, e la scelta resta in config.json.
+        @note `is not False` e non `get(..., True)`: un valore scritto a mano
+            che non sia un booleano (una stringa, un numero) non deve valere
+            come «spenta» per caso.
+        """
+        return self._config.get('pause_after_inventory', True) is not False
+
+    def _remember_inventory_pause(self, enabled: bool) -> None:
+        """@brief Ricorda in config.json se la pausa dell'inventario va offerta.
+
+        @param enabled False quando l'utente ha chiesto di non essere piu' fermato.
+        @note Stesso deposito e stesso metodo di «utente avanzato»: la scelta
+            vale per le corse successive, non solo per questa sessione.
+        """
+        self._config['pause_after_inventory'] = bool(enabled)
+        save_config(self._config)
+
+    def _photo_inventory_family(self) -> bool | None:
+        """@brief Prevede se l'analisi passera' dall'inventario fotografico.
+
+        @return True quando la tipologia dichiara una scheda POPOLATA (modulo
+            castellated o aggregato a fori passanti), False quando dichiara UN
+            SOLO componente discreto, None quando la tipologia non basta a
+            deciderlo.
+        @note Condizione dell'estrattore (`datasheet_extractor`, variabile
+            `populated_board`: `layout == 'castellated' or component_family ==
+            'aggregate_tht'`), qui ripetuta perche' e' l'unica cosa che la
+            finestra sa PRIMA di spendere. Da essa dipendono a cascata il
+            rilevatore locale dei corpi, la revisione «Corpi rilevati», i
+            componenti della tabella e la pausa dopo l'inventario: per un
+            componente singolo nulla di tutto cio' viene eseguito.
+        @note I tre valori non sono un vezzo. La disposizione `castellated` la
+            decide il MODELLO leggendo i documenti, e qui non e' ancora nota:
+            con la tipologia «(non specificata)» o con una tipologia
+            personalizzata l'inventario puo' benissimo partire, quindi si
+            risponde None e non si annuncia nulla. Rispondere False in quel
+            caso cancellerebbe dal log la dichiarazione della chiamata a
+            pagamento sulla fotografia -- cioe' proprio l'informazione che non
+            deve mai mancare.
+        @note Il criterio non e' il NOME del componente ma l'attributo
+            dichiarato dalla tipologia scelta: un componente discreto singolo
+            non e' una scheda con corpi montati sopra, per costruzione, e
+            questo vale per qualunque pezzo di quella famiglia.
+        """
+        if self._is_castellated() or self._selected_family() == "aggregate_tht":
+            return True
+        if self._selected_family() in _SINGLE_COMPONENT_FAMILIES:
+            return False
+        return None
+
     def _apply_user_mode(self):
         advanced = self._advanced_user()
         # Keep widget instances and numeric tab indexes stable for existing handlers.
@@ -1119,8 +1273,11 @@ class MainWindow(QMainWindow):
         self.tabs.setTabVisible(2, advanced)
         self.model_3d_settings_scroll.setVisible(advanced)
         self.group_annotations.setVisible(advanced)
-        self.group_components.setVisible(advanced and (
-            self._is_castellated() or self._selected_family() == "aggregate_tht"))
+        # Stessa condizione dell'inventario fotografico: la tabella dei corpi
+        # esiste solo per le schede popolate, che sono le sole a produrli. Solo
+        # `True` conta: con la previsione incerta (None) non si mostra una
+        # tabella che potrebbe restare vuota per sempre.
+        self.group_components.setVisible(advanced and self._photo_inventory_family() is True)
         # La modifica della revisione non dipende dalla modalita' d'uso: la sua
         # condizione e' la fotografia in memoria. Qui si ri-applica quella
         # disciplina invece di forzare la visibilita', altrimenti un cambio di
@@ -1764,7 +1921,14 @@ class MainWindow(QMainWindow):
         self.btn_extract_ai.setIcon(QIcon(str(Path(__file__).resolve().parent / "assets" / "extract-ai.svg")))
         self.btn_extract_ai.setIconSize(QSize(24, 24))
         self.btn_extract_ai.setMinimumHeight(46)
-        self.btn_extract_ai.setToolTip("Avvia l'estrazione dai documenti e dalle foto selezionati")
+        # Il costo sta nel suggerimento perche' questo e' l'unico comando della
+        # scheda che spende da solo: la regola della riga in fondo («ogni
+        # comando che spende lo dice prima, ogni comando gratuito si riconosce»)
+        # comincia da qui, non dalla riga dei rientri.
+        self.btn_extract_ai.setToolTip(
+            "Avvia l'estrazione dai documenti e dalle foto selezionati. "
+            "Analisi A PAGAMENTO: consuma credito OpenRouter. I modelli usati e la "
+            "spesa vengono scritti nel log prima di partire.")
         self.btn_extract_ai.clicked.connect(self._extract_with_ai)
         # Riapre «Corpi rilevati» sulle proposte salvate nella cartella del
         # componente e, all'OK, le RISALVA li': gratuito, nessuna chiamata AI.
@@ -1772,9 +1936,9 @@ class MainWindow(QMainWindow):
         # essere possibile aprire la revisione bypassando interrogazione AI».
         self.btn_reopen_review = QPushButton("Rivedi proposte salvate…")
         self.btn_reopen_review.setToolTip(
-            "Riapre i corpi rilevati salvati in photo-review/ nella cartella del "
-            "componente e, alla conferma, salva le proposte tenute nello stesso file. "
-            "Nessuna richiesta AI: gratuito."
+            "Passo 1 della pipeline — Riapre i corpi rilevati salvati in photo-review/ "
+            "nella cartella del componente e, alla conferma, salva le proposte tenute "
+            "nello stesso file. Nessuna richiesta AI: gratuito."
         )
         self.btn_reopen_review.setEnabled(False)
         self.btn_reopen_review.clicked.connect(self._reopen_detector_review)
@@ -1782,9 +1946,10 @@ class MainWindow(QMainWindow):
         # deve poter pagare per sbaglio con lo stesso OK.
         self.btn_relaunch_inventory = QPushButton("Rilancia inventario AI (a pagamento)…")
         self.btn_relaunch_inventory.setToolTip(
-            "Rilancia solo l'inventario AI sulle proposte salvate in photo-review/: "
-            "una richiesta a pagamento al modello che guarda la foto, poi abbinamento "
-            "modelli e 3D come dopo un'estrazione."
+            "Passo 2 della pipeline — Rilancia solo l'inventario AI sulle proposte "
+            "salvate in photo-review/: una richiesta A PAGAMENTO al modello che guarda "
+            "la foto, poi abbinamento modelli e 3D come dopo un'estrazione. È l'unico "
+            "comando di questa riga che spende."
         )
         self.btn_relaunch_inventory.setEnabled(False)
         self.btn_relaunch_inventory.clicked.connect(self._relaunch_inventory)
@@ -1795,8 +1960,10 @@ class MainWindow(QMainWindow):
         # quando l'analisi e' finita e ci si accorge che qualcosa va corretto.
         self.btn_edit_component_review = QPushButton("Modifica la revisione dei componenti…")
         self.btn_edit_component_review.setToolTip(
-            "Riapre la revisione della fase completata: ingombri sulla foto, quote "
-            "e scelta dei modelli KiCad. Non avvia la generazione e non fa richieste AI."
+            "Passo 3 della pipeline — Riapre la revisione della fase completata: "
+            "ingombri sulla foto, quote e scelta dei modelli KiCad. Non avvia la "
+            "generazione e non fa richieste AI: gratuito. Dopo averla applicata, "
+            "«Rigenera modello 3D» nella scheda Modello 3D ricostruisce lo STEP."
         )
         self.btn_edit_component_review.setEnabled(False)
         self.btn_edit_component_review.clicked.connect(self._show_photo_comparison)
@@ -1914,15 +2081,52 @@ class MainWindow(QMainWindow):
 
         outer.addWidget(self.group_component_analysis)
         outer.addStretch()
+        # La pausa dopo l'inventario e' un'impostazione, non un comando: sta
+        # sopra la riga dei rientri perche' e' li' che si ragiona di «dove
+        # posso rimettere le mani», e resta visibile anche prima della prima
+        # analisi -- e' allora che si decide se farsi fermare o no.
+        self.chk_pause_after_inventory = QCheckBox(
+            "Fermati dopo l'inventario AI per rivedere i corpi (gratuito)")
+        self.chk_pause_after_inventory.setToolTip(
+            "Quando l'inventario AI ha finito, la pipeline si ferma e propone la "
+            "revisione dei componenti prima dell'abbinamento dei modelli KiCad e della "
+            "generazione 3D: da lì si spostano, ridimensionano, aggiungono ed eliminano "
+            "i corpi. La revisione non fa richieste AI: è gratuita. Togliendo la spunta "
+            "l'analisi prosegue da sola con i corpi proposti dall'AI.")
+        self.chk_pause_after_inventory.setChecked(self._inventory_pause_enabled())
+        self.chk_pause_after_inventory.toggled.connect(self._on_inventory_pause_toggled)
+        pause_row = QHBoxLayout()
+        pause_row.addStretch()
+        pause_row.addWidget(self.chk_pause_after_inventory)
+        pause_row.addStretch()
+        outer.addLayout(pause_row)
+        # Richiesta dell'utente: «devo poter tornare sui miei passi senza fare
+        # intervenire AI». I tre comandi esistevano gia' ma stavano in fila
+        # senza dire di essere i passi di UNA pipeline ne' quale costasse: qui
+        # l'intestazione li enumera nell'ordine in cui la pipeline li esegue e
+        # dichiara il costo di ciascuno. La riga sotto segue lo stesso ordine.
+        self.lbl_pipeline_steps = QLabel(
+            "Rientri nella pipeline, nell'ordine: 1) rivedi i corpi rilevati — gratuito · "
+            "2) rilancia l'inventario AI — a pagamento · 3) modifica la revisione dei "
+            "componenti — gratuito · poi «Rigenera modello 3D» nella scheda Modello 3D — "
+            "gratuito. Ogni passo riparte da quello che il precedente ha salvato.")
+        self.lbl_pipeline_steps.setWordWrap(True)
+        self.lbl_pipeline_steps.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.lbl_pipeline_steps.setStyleSheet("color: #a6adc8;")
+        outer.addWidget(self.lbl_pipeline_steps)
         # Richiesta dell'utente: «un pulsante in basso nella scheda
         # principale» per riaprire la revisione dopo averla salvata. Sta
         # sotto tutto, non nella riga degli strumenti dell'analisi, cosi' si
         # trova anche a estrazione chiusa e senza cercarlo fra le opzioni.
+        # L'ordine dei tre comandi e' quello della pipeline (rilevatore ->
+        # inventario a pagamento -> revisione dei componenti), non quello in
+        # cui sono stati aggiunti: e' l'ordine a dire che sono passi di una
+        # stessa catena e non tre azioni scorrelate.
         reopen_row = QHBoxLayout()
         reopen_row.addStretch()
-        reopen_row.addWidget(self.btn_edit_component_review)
         reopen_row.addWidget(self.btn_reopen_review)
         reopen_row.addWidget(self.btn_relaunch_inventory)
+        reopen_row.addWidget(self.btn_edit_component_review)
         reopen_row.addStretch()
         outer.addLayout(reopen_row)
         # Stato iniziale coerente con la disciplina della riga: cio' che non
@@ -2123,8 +2327,14 @@ class MainWindow(QMainWindow):
                 continue
             if attr == "btn_extract_ai":
                 widget.setEnabled(named and not busy)
+                # Stesso testo del costruttore, letterale in entrambi i posti:
+                # e' cosi' che il controllo del catalogo (tests/test_i18n.py)
+                # lo vede. Se cambia qui deve cambiare la' -- il costo
+                # dichiarato e' la parte che non puo' divergere.
                 widget.setToolTip(reason or
-                                  "Avvia l'estrazione dai documenti e dalle foto selezionati")
+                                  "Avvia l'estrazione dai documenti e dalle foto selezionati. "
+                                  "Analisi A PAGAMENTO: consuma credito OpenRouter. I modelli usati e la "
+                                  "spesa vengono scritti nel log prima di partire.")
             else:
                 widget.setEnabled(named)
                 widget.setToolTip(reason)
@@ -2320,7 +2530,24 @@ class MainWindow(QMainWindow):
         )
         self._on_ai_progress(f"Profilo AI: {self.combo_component_type.currentText()}.")
         self._on_ai_progress(f"Modello AI unico: {model}.")
-        if photo_detector in ('yolo', 'vlm'):
+        if photo_detector in ('yolo', 'vlm') and self._photo_inventory_family() is False:
+            # Difetto visto dall'utente: con «YOLO locale + verifica AI» e una
+            # tipologia da COMPONENTE SINGOLO il rilevatore non parte, la
+            # revisione dei corpi rilevati non si apre e nessun corpo entra
+            # nella tabella -- perche' l'estrattore guarda la fotografia solo
+            # per le schede popolate (vedi `_photo_inventory_family`). Prima si
+            # annunciava lo stesso «chiamata sulla fotografia affidata a …»:
+            # una fase promessa che non sarebbe mai avvenuta, e chi aspettava
+            # la pausa la aspettava per sempre. Qui si dice cosa succede
+            # davvero, senza bloccare nulla: la scelta della tipologia resta
+            # dell'utente, e l'estrazione dai documenti ha comunque senso.
+            self._on_ai_progress(
+                f"Tipologia «{self.combo_component_type.currentText()}»: l'analisi NON passa "
+                "dall'inventario fotografico, quindi il rilevatore dei corpi e la revisione "
+                "«Corpi rilevati» non verranno eseguiti e nessuna chiamata guardera' la "
+                "fotografia. I corpi dalla foto si ottengono con le tipologie di scheda "
+                "popolata (aggregato a fori passanti o modulo castellated).")
+        elif photo_detector in ('yolo', 'vlm'):
             # Detto sempre, non solo quando differisce dal modello principale:
             # e' la chiamata a pagamento che guarda la fotografia, e va scritta
             # nel log prima di partire, non dedotta dopo dalla fattura.
@@ -2663,6 +2890,46 @@ class MainWindow(QMainWindow):
                         or getattr(self, "_photo_overlay_png", None))
         for name in ("btn_edit_component_review", "btn_edit_component_review_3d"):
             self._set_action_available(name, editable)
+        self._refresh_pipeline_steps_label()
+
+    def _refresh_pipeline_steps_label(self) -> None:
+        """@brief L'intestazione dei rientri si vede solo quando un rientro esiste.
+
+        @note Stessa disciplina di `_set_action_available`: una riga che
+            annuncia tre passi sotto una fila vuota di pulsanti descrive
+            qualcosa che non c'e'. Basta UN passo disponibile perche' valga la
+            pena spiegare l'ordine, perche' e' da li' che si riparte.
+        @note `getattr` difensivo: i pulsanti nascono prima dell'intestazione
+            durante la costruzione della scheda, e un ricalcolo anticipato non
+            deve far cadere la finestra.
+        """
+        label = getattr(self, "lbl_pipeline_steps", None)
+        if label is None:
+            return
+        # `isVisibleTo(genitore)` e non `isVisible()`: la finestra dei test non
+        # viene mai mostrata, e `isVisible()` direbbe «nascosto» per tutti,
+        # spegnendo l'intestazione anche quando i comandi ci sono.
+        buttons = [getattr(self, name, None)
+                   for name in ("btn_reopen_review", "btn_relaunch_inventory",
+                                "btn_edit_component_review")]
+        label.setVisible(any(button is not None and button.parentWidget() is not None
+                             and button.isVisibleTo(button.parentWidget())
+                             for button in buttons))
+
+    def _on_inventory_pause_toggled(self, checked: bool) -> None:
+        """@brief Ricorda la scelta sulla pausa e la scrive nel diario.
+
+        @param checked True quando l'utente vuole essere fermato dopo l'inventario.
+        @note Lo stato scritto e' quello del comando: e' l'unico posto da cui
+            si accende e si spegne, quindi non puo' divergere dalle impostazioni.
+        """
+        self._remember_inventory_pause(checked)
+        self._append_log(
+            "Pausa dopo l'inventario AI: attiva. La revisione dei componenti verrà "
+            "proposta prima dell'abbinamento modelli e del 3D (gratuita)."
+            if checked else
+            "Pausa dopo l'inventario AI: disattivata. L'analisi proseguirà da sola con "
+            "i corpi proposti dall'AI; la revisione resta disponibile dai pulsanti in basso.")
 
     def _ai_log_available(self) -> bool:
         """@brief Dice se esiste davvero un log dell'analisi da aprire.
@@ -3066,6 +3333,27 @@ class MainWindow(QMainWindow):
         else:
             self._abort_ai_run(worker, phase)
 
+    def _on_cad_cancellable(self, cancellable: bool) -> None:
+        """@brief Toglie «Interrompi» quando il generatore in uso non sa fermarsi.
+
+        @param cancellable False quando il canale di rinuncia non e' accettato.
+        @note Richiesta dell'utente: «la possibilità di stoppare deve essere
+            presente in ogni step». Dove non c'e', non si finge: il comando
+            sparisce e il log dice perche'. Un pulsante «Interrompi» che non
+            interrompe e' una promessa peggiore della sua assenza -- chi lo
+            preme smette di guardare e crede che il lavoro si stia fermando.
+        @note Il segnale arriva dal thread del worker: Qt lo consegna qui in
+            coda sul thread della finestra, che e' l'unico che puo' toccare la
+            modale.
+        """
+        if cancellable:
+            return
+        self.analysis_overlay.set_abortable(False)
+        self._on_ai_progress(
+            "«Interrompi» non è disponibile per questa generazione: il generatore 3D in "
+            "uso non accetta il canale di interruzione, quindi premerlo non fermerebbe "
+            "nulla. L'attesa va lasciata finire, oppure si chiude il programma.")
+
     def _abort_cad_run(self, worker, phase: str) -> None:
         """@brief Uccide il processo FreeCAD e lascia che il worker finisca da se'.
 
@@ -3112,6 +3400,9 @@ class MainWindow(QMainWindow):
         self._auto_after_extraction = False
         self._auto_generation_params = None
         self._extract_finish_pending = False
+        # Una corsa abbandonata non produce l'inventario su cui fermarsi: la
+        # pausa non deve sopravviverle e riaprirsi sui dati di prima.
+        self._inventory_pause_pending = False
         # Il consuntivo di cio' che e' gia' stato fatturato resta sotto il
         # pulsante: dopo un'interruzione e' l'informazione piu' utile che ci
         # sia. Non comprende la richiesta ancora in volo, che verra' pagata
@@ -3187,6 +3478,14 @@ class MainWindow(QMainWindow):
         params = self._auto_generation_params
         self._auto_generation_params = None
         self._auto_after_extraction = False
+        # La pausa sta QUI e non dentro _on_extracted: i campi e la tabella dei
+        # componenti sono gia' pieni (quindi la revisione mostra cio' che l'AI
+        # ha davvero prodotto) e l'abbinamento dei modelli con la generazione
+        # 3D non e' ancora partito, quindi le correzioni fanno ancora in tempo
+        # a entrarci. Vale per entrambe le modalita': in quella standard
+        # precede la generazione automatica, in quella avanzata e' comunque il
+        # momento in cui il risultato va guardato.
+        self._offer_inventory_review()
         if params is not None:
             self._start_automatic_generation(params)
 
@@ -3218,6 +3517,95 @@ class MainWindow(QMainWindow):
         # durante la generazione e' comunque coperta dalla modale: il dato va
         # anche dove l'utente sta gia' guardando.
         self.analysis_overlay.set_cost(text)
+
+    def _offer_inventory_review(self) -> bool:
+        """@brief Pausa fra l'inventario a pagamento e tutto cio' che ne discende.
+
+        @return True quando la revisione dei componenti e' stata davvero aperta.
+        @note Richiesta dell'utente: «dopo l'elaborazione AI stessa cosa, non ho
+            visto la pausa». La revisione dei corpi esisteva gia' (lo stesso
+            `PhotoReviewDialog` del comando «Modifica la revisione dei
+            componenti…»), ma bisognava sapere di doverla cercare: l'analisi
+            proseguiva da sola verso l'abbinamento dei modelli e FreeCAD, cioe'
+            costruiva tutto sulla disposizione dell'AI senza che nessuno
+            l'avesse guardata. Qui ci si ferma PRIMA, dove le correzioni
+            contano ancora.
+        @note Applicare prosegue con le correzioni: la revisione le scrive
+            nella tabella dei componenti (`_apply_photo_review`), ed e' da li'
+            che `_current_body_params()` prende i corpi per la generazione.
+            Rifiutare (o annullare la revisione) prosegue con il risultato
+            dell'AI cosi' com'e': non si tocca nulla.
+        @note La pausa e' GRATUITA in ogni ramo: nessuna richiesta al modello,
+            ne' per aprirla ne' per applicarla. Va detto nella domanda, perche'
+            e' esattamente la paura dell'utente («devo poter tornare sui miei
+            passi senza fare intervenire AI»).
+        @note Si consuma `_inventory_pause_pending` all'ingresso: `finished`
+            puo' arrivare due volte (vedi `_extract_finish_pending`) e la stessa
+            pausa non va offerta due volte. `_inventory_pause_active` copre
+            l'event loop annidato della revisione, da cui si puo' rientrare in
+            questa finestra.
+        @note Disciplina della modale identica a `_on_review_requested`: si
+            nasconde solo se era visibile e si rimette esattamente com'era. Il
+            tempo passato nascosta non viene contato come attesa del modello
+            (`AnalysisOverlay.hideEvent/showEvent`), quindi l'orologio misura
+            il lavoro e non il revisore.
+        """
+        pending, self._inventory_pause_pending = self._inventory_pause_pending, False
+        if not pending or self._inventory_pause_active:
+            return False
+        if not self._inventory_pause_enabled():
+            self._append_log(
+                "Pausa dopo l'inventario AI: disattivata nelle impostazioni, si prosegue "
+                "con i corpi come li ha proposti l'AI.")
+            return False
+        components = self._photo_components_from_table()
+        if not components:
+            return False
+        if not (self._photo_png or self._photo_overlay_png):
+            # Senza immagine la revisione non ha su cosa disegnare: fermare la
+            # corsa per una finestra che non si aprirebbe sarebbe una pausa a
+            # vuoto (stessa disciplina di `_refresh_edit_review_buttons`).
+            self._append_log("Pausa dopo l'inventario AI non offerta: manca la fotografia "
+                             "calibrata su cui mostrare i corpi.")
+            return False
+        answer = QMessageBox.question(
+            self, self.i18n.text("Inventario AI completato"),
+            self.i18n.tr(
+                "inventory_pause.question", count=len(components),
+                default=(
+                    "L'inventario AI ha prodotto {count} ingombri.\n\n"
+                    "Vuoi rivederli adesso (sposta, ridimensiona, aggiungi, elimina, "
+                    "cambia tipo e modello KiCad) PRIMA dell'abbinamento dei modelli e "
+                    "della generazione 3D?\n\n"
+                    "La revisione è gratuita: nessuna chiamata AI. Rispondendo No si "
+                    "prosegue con i corpi come li ha proposti l'AI; puoi comunque "
+                    "riaprirla dopo con «Modifica la revisione dei componenti…»."),
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes)
+        if answer != QMessageBox.StandardButton.Yes:
+            self._append_log(f"Pausa dopo l'inventario AI: revisione rifiutata, si prosegue "
+                             f"con i {len(components)} corpi proposti dall'AI.")
+            return False
+        self._append_log(f"Pausa dopo l'inventario AI: revisione dei {len(components)} corpi "
+                         "aperta su richiesta. Nessuna chiamata AI (gratuito).")
+        overlay_was_visible = self.analysis_overlay.isVisible()
+        self._inventory_pause_active = True
+        try:
+            if overlay_was_visible:
+                self.analysis_overlay.hide()
+            self._show_photo_comparison()
+        except Exception as exc:  # noqa: BLE001 - vedi _on_review_requested
+            # Un guasto della revisione non deve buttare via l'analisi appena
+            # pagata: si annota e si prosegue con i corpi dell'AI, che e' lo
+            # stesso esito del rifiuto.
+            self._append_log(f"ATTENZIONE revisione dei componenti non disponibile: {exc}")
+        finally:
+            self._inventory_pause_active = False
+            if overlay_was_visible:
+                self.analysis_overlay.show()
+                self.analysis_overlay.raise_()
+        return True
 
     def _on_review_requested(self, photo_png, proposals, length_mm, width_mm) -> None:
         """@brief Mostra i corpi rilevati e restituisce al worker quelli da tenere.
@@ -3581,16 +3969,25 @@ class MainWindow(QMainWindow):
             viene scartato qui: l'utente ha gia' ripreso in mano la finestra e
             puo' aver cambiato campi, nome o componente. Vedi
             `_analysis_result_is_current`.
+        @note Qui si segna che c'e' un inventario da far rivedere: la pausa
+            vera arriva a `finished` (vedi `_offer_inventory_review`), quando
+            l'applicazione dei campi e' conclusa. Un risultato senza corpi non
+            segna nulla -- non ci sarebbe niente da correggere.
         """
         if not self._analysis_result_is_current():
             self._append_log("Risultato di un'analisi interrotta dall'utente: scartato, "
                              "i campi restano come sono.")
             return
+        self._inventory_pause_pending = bool(getattr(params, "components_3d", None))
         self._applying_extraction = True
         try:
             self._apply_extracted_result(params)
         except Exception as exc:
             self._auto_generation_params = None
+            # Campi applicati a meta': non c'e' un inventario coerente da far
+            # rivedere, e fermarsi per una revisione su dati incerti non
+            # aiuterebbe nessuno.
+            self._inventory_pause_pending = False
             self._on_extract_error(f'Impossibile applicare i dati estratti: {exc}')
         finally:
             self._applying_extraction = False
@@ -5069,7 +5466,23 @@ class MainWindow(QMainWindow):
         self._worker.cad3d_error.connect(self._on_cad3d_error)
         self._worker.progress.connect(self._on_ai_progress)
         self._worker.phase.connect(self._on_phase)
+        self._worker.cancellable.connect(self._on_cad_cancellable)
         self._worker.finished.connect(self._on_generation_finished)
+        if not automatic and body is not None:
+            # Richiesta dell'utente: «la possibilità di stoppare deve essere
+            # presente in ogni step». La generazione manuale con modello 3D
+            # passa dalle stesse due fasi lunghe della corsa automatica --
+            # abbinamento dei modelli KiCad e costruzione del solido in
+            # FreeCAD, minuti su una scheda popolata -- ma non apriva la
+            # modale, quindi restava l'unica strada senza «Interrompi». Il
+            # criterio e' la presenza del corpo 3D, cioe' del lavoro lungo:
+            # il solo footprint 2D si scrive in un istante e una modale li'
+            # sarebbe solo un lampo. Schede e menu NON si spengono come nella
+            # corsa automatica: qui l'utente ha avviato lui il lavoro e il
+            # resto della finestra non e' in mezzo alla catena.
+            self._manual_cad_overlay = True
+            self.analysis_overlay.start('Generazione footprint e modello 3D',
+                                        'Preparazione della generazione…', abortable=True)
         if automatic:
             self._automatic_generation_active = True
             self._automatic_footprint_done = self._automatic_3d_done = False
@@ -5104,6 +5517,12 @@ class MainWindow(QMainWindow):
         aborted = self._abort_pending
         self._abort_pending = False
         self.btn_generate.setEnabled(True)
+        if self._manual_cad_overlay:
+            # La modale della generazione manuale la chiude chi l'ha aperta:
+            # la corsa automatica ha la sua chiusura piu' sotto, insieme a
+            # schede, menu e consuntivo, che qui non sono stati toccati.
+            self._manual_cad_overlay = False
+            self._hide_analysis_overlay()
         if not self._automatic_generation_active:
             return
         self._automatic_generation_active = False
@@ -5317,6 +5736,10 @@ class MainWindow(QMainWindow):
         # actions, keeping handlers and the automatic extraction unchanged.
         self.btn_terminal_detail.hide()
         self.btn_regen_3d = QPushButton("Rigenera modello 3D (STEP) con queste annotazioni")
+        self.btn_regen_3d.setToolTip(
+            "Ultimo passo della pipeline — Ricostruisce lo STEP con FreeCAD dai corpi e "
+            "dalle annotazioni attuali, comprese le correzioni appena applicate nella "
+            "revisione dei componenti. Nessuna richiesta AI: gratuito.")
         self.btn_regen_3d.setObjectName("primary")
         self.btn_regen_3d.clicked.connect(self._regenerate_3d)
         regen_row.addWidget(self.btn_regen_3d)
@@ -5510,6 +5933,7 @@ class MainWindow(QMainWindow):
         self._cad3d_worker.progress.connect(self._on_regen_3d_progress)
         self._cad3d_worker.warning.connect(self._on_regen_3d_progress)
         self._cad3d_worker.warning.connect(self._on_cad3d_warning)
+        self._cad3d_worker.cancellable.connect(self._on_cad_cancellable)
         self._cad3d_worker.error.connect(self._on_regen_3d_error)
         self._cad3d_worker.finished.connect(self._on_regen_3d_finished)
         # FreeCAD gira nel worker, quindi la GUI resta viva: lo spinner si

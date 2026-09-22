@@ -4191,3 +4191,103 @@ Cresciuti: `test_photo_review_dialog.py` 86, `test_photo_review_list.py` 34,
    FreeCAD/KiCad». La pausa dopo YOLO esiste ma parte solo col rilevatore
    locale attivo; quella dopo l'inventario e' la revisione componenti, che
    non e' proposta automaticamente a fine corsa.
+
+# 2026-09-22 (4) — pipeline a passi: pausa dopo l'inventario, Interrompi ovunque, rientri dichiarati
+
+Commit precedente: `b6571a8`. Richieste dell'utente, sue parole: «la
+possibilità di stoppare deve essere presente in OGNI step», e «dopo che YOLO
+ha terminato ci deve essere una pausa per editare il suo risultato, poi dopo
+l'elaborazione AI stessa cosa, poi alla fine devo poter tornare sui miei
+passi senza fare intervenire AI, modificare la disposizione delle annotazioni
+e ripassare per la generazione FreeCAD/KiCad».
+
+## Perche' la pausa dopo YOLO «non si vedeva»: non era un difetto della pausa
+
+`datasheet_extractor.py:1050`:
+```python
+populated_board = data.get("layout") == "castellated" or component_family == "aggregate_tht"
+```
+Tutto il ramo fotografico — `extract_inventory`, quindi il rilevatore locale,
+la richiamata `review_proposals`, `_on_review_requested` e perfino
+`components_3d` — sta dietro quel cancello. L'utente aveva scelto
+«Componente singolo a fori passanti (THT)», famiglia `single_tht`: il
+cancello e' falso, **YOLO non parte proprio**, non esistono proposte e nessuna
+revisione puo' aprirsi, qualunque cosa dica la tendina «YOLO locale +
+verifica AI». La GUI peggiorava le cose annunciando comunque «Chiamata sulla
+fotografia affidata a …».
+Corretto cio' che era una bugia: il log ora dice che per quella tipologia
+l'analisi NON passa dall'inventario fotografico e che «Corpi rilevati» non si
+aprira'. **Il cancello in se' resta una decisione di prodotto aperta**: se un
+componente singolo debba passare dall'inventario fotografico, oppure se la
+tendina del rilevatore debba rifiutarsi per quelle famiglie. Non deciso.
+
+## Pausa vera dopo l'inventario a pagamento
+
+`_offer_inventory_review`, chiamata da `_on_extract_finished` **prima** di
+`_start_automatic_generation`: chiede (gratis, dichiarato), apre la revisione
+componenti, e cio' che si applica arriva davvero alla generazione
+(`_apply_photo_review` → tabella → `_current_body_params().components` →
+`GenerateWorker`). Rifiutare prosegue con il risultato dell'AI. Guardie:
+`_inventory_pause_pending` impostata in `_on_extracted` solo se ci sono
+corpi, consumata alla pausa, cosi' un `finished` doppio non riapre nulla;
+`_inventory_pause_active` protegge il ciclo annidato; overlay nascosto e
+rimostrato come in `_on_review_requested`, quindi l'orologio non conta il
+tempo della revisione. Copre anche `_relaunch_inventory`, l'altra porta alla
+stessa spesa. Impostazione `pause_after_inventory` in `config.json`
+(**accesa** di default), con una spunta nella scheda Progetto.
+
+## Rientri dichiarati, con il prezzo
+
+Riga in fondo riordinata secondo la pipeline (1 revisione dei corpi rilevati
+— gratuito · 2 rilancio dell'inventario AI — **a pagamento** · 3 revisione
+dei componenti — gratuito · poi «Rigenera modello 3D» — gratuito), con una
+didascalia che li enumera e tooltip che dicono «Passo N» e se il comando
+spende. Anche `btn_extract_ai` ora dichiara la spesa nel tooltip. Le
+etichette dei pulsanti NON sono cambiate: sono ancore del controllo i18n e
+sono gia' tradotte.
+
+## Il percorso gratuito e' provato, non affermato
+
+`test_the_late_free_path_reaches_freecad_with_the_corrections_and_no_ai_call`:
+riapre la revisione col pulsante vero, sposta e ridimensiona un corpo,
+applica, rigenera il 3D — e asserisce che la geometria corretta arriva a
+`body.components` **e** che lo stub di OpenRouter (che registra e solleva)
+non e' mai stato chiamato. E' la risposta verificabile a «devo poter
+modificare la disposizione delle annotazioni per poi ripassare per la
+generazione».
+
+## Interrompi in ogni fase
+
+- L'abbinamento dei modelli KiCad era il buco dichiarato: ora
+  `measure_models`, `model_sizes`, `model_candidates` e `attach_models`
+  accettano `cancel` (keyword-only, `None` = non interrompibile, stessa forma
+  di `run_logged`). Il lotto controlla il canale **fra una misura e l'altra**
+  e **uccide** il figlio `freecadcmd` come fa `run_logged`; lo script di
+  misura scrive una riga per modello finito, cosi' al kill le misure gia'
+  fatte restano in cache e la mappa parziale non viene restituita.
+  Nuova `MatchingCancelled(ProcessCancelled)`: un annullamento non e' mai
+  confuso con un fallimento, e un componente mai esaminato **non** riceve un
+  verdetto «nessun candidato» che sembrerebbe vero.
+  In `generate_castellated_3d_model` la clausola nuova sta **prima** dell'
+  `except Exception` largo, che altrimenti si sarebbe mangiato l'abort e
+  avrebbe costruito il solido lo stesso.
+- `_generate(automatic=False)` apre ora la modale interrompibile quando c'e'
+  un corpo 3D da costruire; una corsa di solo footprint non apre nulla.
+- Onesta': `generation_accepts_cancel` interroga il generatore **vero**, non
+  il guscio `_generate_3d` che accetta sempre `cancel`; i worker emettono
+  `cancellable(bool)` e, quando il generatore e' sordo, il pulsante viene
+  tolto e si dice perche', invece di offrire un comando che non ferma niente.
+
+## Test
+
+Suite completa: **3415 passati**, 11 saltati, 2 xfail, 19 sottotest, zero
+rossi. Nuovi: `test_pipeline_pauses.py` 20, `test_matching_cancel.py` 20.
+Venti voci nuove nel catalogo (en/it/fr/de) fra questo pacchetto e il
+precedente.
+
+## Aperto
+
+- Il cancello `populated_board` (sopra): decisione di prodotto.
+- `resolve_model` (API legacy, nessun chiamante di produzione) non riceve il
+  canale: sarebbe codice morto.
+- Push: le credenziali git non esistono nella VM del ponte, lo lancia l'utente.
