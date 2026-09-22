@@ -4070,3 +4070,124 @@ parametrizzato su 7/16/24 pt e su due dimensioni di finestra.
 - A 24 pt su una finestra 640×480 la scheda della modale e' alta 850 px: il
   limite di larghezza e' risolto, quello di altezza no.
 - L'ordinamento del pittore nell'anteprima STEP resta approssimato.
+
+# 2026-09-22 (3) — la corsa reale uccisa dal watchdog, Interrompi, foto nascondibile
+
+Commit precedente: `f26c0b6`. Corsa reale dell'utente delle 18:16, persa.
+
+## Il difetto: il watchdog ha ucciso un processo sano
+
+```
+[18:24:15] FreeCAD: KICADGEN_IMPORT_START:...\espressif.3dshapes\ESP32-S3-WROOM-1U.STEP
+[18:29:15] ERRORE 3D: ... timed out after 300
+```
+Esattamente 300 s dopo, senza una riga in mezzo, il watchdog del silenzio ha
+terminato FreeCAD al componente 13 su 52, buttando via 0,86 USD di chiamate
+gia' pagate. Il footprint era salvo, il 3D no.
+
+Il presupposto del watchdog («questo processo annuncia cio' che fa») e' vero
+per ogni componente e **falso per un passo atomico**: `Import.insert` e il
+ripiego `Part.read` non stampano nulla mentre leggono un assieme grande.
+Correzione: **battito del cuore** attorno all'import e all'analisi
+geometrica che lo segue, con l'intervallo ricavato dal timeout stesso
+(`heartbeat_interval(FREECAD_SILENCE_TIMEOUT_S)` = timeout/5, passato nel
+file dei parametri: il numero non e' scritto due volte). La riga e' una frase
+italiana che nomina il modello e da quanto sta lavorando, quindi **serve a
+due cose**: azzera il watchdog e dice all'utente perche' la barra non si
+muove. Verificata contro i filtri veri della GUI perche' arrivi alla modale.
+Limite dichiarato: un thread Python batte solo se l'import rilascia il GIL,
+quindi il battito e' emesso anche dal thread di lavoro nei tratti Python
+(`beat_if_due`), che non dipendono dal GIL.
+
+## Perche' proprio quel modello, e perche' «giorni fa funzionava»
+
+Non era l'import: e' il **confronto del verso**, `shape.cut(flipped)` in
+`_native_landmark_direction` — una sottrazione booleana dell'intero assieme
+contro una sua copia ruotata di 180°. Istantanea su un 0603, minuti su un
+modulo schermato con antenna e decine di solidi. Le date lo confermano: quel
+confronto e' arrivato col commit `61728a6` **del 20 settembre**; l'import
+riuscito del WROOM-1U nell'handoff e' del **19**. Prima c'era una regola sul
+nome, gratuita.
+
+Correzione in due parti, nessuna delle quali e' una soglia scelta per far
+passare questo modello:
+1. **Quasi sempre gratis.** Dimostrazione: detta ρ la mezza rotazione, con
+   C = A ∩ ρA invariante per ρ, dalla somma dei momenti segue
+   `(c_R − centro) = (V_A/V_R)·(c_A − centro)`: lo scarto del residuo e'
+   quello dell'intero solido moltiplicato per uno scalare positivo. Segno e
+   dominanza — tutto cio' che decide **quale lato** — si leggono quindi da
+   `CenterOfMass`, senza alcun booleano. Due delle quattro porte si chiudono
+   gratis; il booleano resta solo quando serve davvero la frazione di volume
+   (il caso del modulo dell'utente). Equivalenza verificata rigiocando le sei
+   terne reali che i test gia' fissavano.
+2. **Costo limitato e memorizzato.** Il residuo booleano e' decomposto per
+   solido con potatura sui bounding box (quindi anche interrompibile), ha per
+   budget l'intervallo del battito — stessa manopola, non possono divergere —
+   e allo scadere ritorna l'esito «non so da che parte guarda» che il codice
+   gia' prevede e gestisce, dichiarandolo nel log. Il risultato e'
+   **memorizzato per file di modello** (chiave: percorso + dimensione +
+   mtime, la stessa ricetta di `index_key`, piu' la firma del riferimento),
+   quindi si paga una volta sola.
+   `combined.slice(...)` resta senza limite, con la ragione scritta: il verso
+   ha un esito «non so» sanzionato, l'asse no — rinunciarvi metterebbe il
+   modello a 90 gradi, che e' un errore, non una degradazione.
+
+## «Serve un pulsante per abortire»
+
+`AnalysisOverlay` ha ora **Interrompi** accanto ad «Apri log AI», con
+conferma che dice cosa si perde. Cosa fa davvero, per percorso — dichiarato,
+senza far finta:
+- **FreeCAD**: si interrompe sul serio. `run_logged` riceve un canale di
+  annullamento e uccide il figlio con lo **stesso** `kill_child()` del
+  watchdog; l'errore rientra dal percorso esistente, tab e pulsanti tornano
+  utilizzabili, e il footprint 2D gia' scritto resta e viene detto.
+- **Chiamata AI in volo**: `urllib` e' bloccante e non si annulla. La corsa
+  viene **abbandonata**: la finestra torna subito utilizzabile, il risultato
+  tardivo viene scartato (stessa disciplina dei token gia' usata per i
+  risultati CAD in ritardo) e la conferma dice a chiare lettere che **il
+  denaro gia' speso resta speso**.
+- Limite dichiarato: un lotto `measure_models` in corso non e' raggiungibile
+  dal canale; l'interruzione ha effetto appena quel lotto finisce.
+
+## «Nascondere la foto per vedere i rettangoli»
+
+Nella revisione componenti, un pulsante accanto ai controlli di vista cicla
+**Foto: intera → attenuata → nascosta**. L'intermedio esiste perche'
+togliere la foto risponde a «dov'e' quel 1005», ma distrugge l'altra meta'
+della revisione: se il rettangolo sta davvero sul suo componente lo si
+giudica solo contro la scheda. Al posto della foto si disegna un fondo
+neutro `#32373e` **scelto per misura**, non a occhio: rapporto WCAG ≥ 3:1
+contro il colore di stato piu' scuro (rosso 3,4; arancio 6,4; verde 6,7;
+alone bianco 12,0), con il bordo della PCB tracciato, cosi' «fuori dai bordi»
+resta giudicabile. I colori di stato non sono stati toccati: portano
+significato e stanno nella legenda.
+
+## Altro
+
+- Tradotte le due righe inglesi che finivano nella modale
+  (`kicad_models.py`: «Modelli KiCad agganciati…», «Solo ipotesi del
+  rilevatore…»); il contratto in `test_real_board_pipeline.py` e' stato
+  riscritto, non allentato.
+- Undici voci nuove nel catalogo (en/it/fr/de) per Interrompi, le due
+  conferme e i tre stati della foto.
+
+## Test
+
+Suite completa in un solo processo: **3375 passati**, 11 saltati, 2 xfail,
+19 sottotest, zero rossi. Nuovi file: `test_freecad_heartbeat.py` 31,
+`test_analysis_abort.py` 18, `test_native_landmark_cost.py` 30.
+Cresciuti: `test_photo_review_dialog.py` 86, `test_photo_review_list.py` 34,
+`test_analysis_overlay.py` 76, `test_model_size_cache.py` 46.
+
+## Richiesto dall'utente, ANCORA DA FARE
+
+1. «la possibilita' di stoppare deve essere presente in OGNI step» — oggi
+   Interrompi c'e' sulla modale; l'utente ha indicato anche la fase
+   «Analisi AI in corso» e «abbinamento modelli KiCad».
+2. «dopo che YOLO ha terminato ci deve essere una pausa per editare il suo
+   risultato; dopo l'elaborazione AI stessa cosa; poi alla fine devo poter
+   tornare sui miei passi senza far intervenire l'AI, modificare la
+   disposizione delle annotazioni e ripassare per la generazione
+   FreeCAD/KiCad». La pausa dopo YOLO esiste ma parte solo col rilevatore
+   locale attivo; quella dopo l'inventario e' la revisione componenti, che
+   non e' proposta automaticamente a fine corsa.

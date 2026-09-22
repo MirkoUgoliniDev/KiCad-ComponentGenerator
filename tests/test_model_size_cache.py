@@ -383,3 +383,54 @@ def test_corrupt_primary_replaced_with_fallback_keys_and_new_measurements(tmp_pa
     fallback = _seed(tmp_path / "fallback.json", {"existing": [1, 2]})
     assert cache.save({"new": [3, 4]}, [primary, fallback]) == primary
     assert cache.load([primary, fallback]) == {"existing": [1, 2], "new": [3, 4]}
+
+
+# --------------------------------------------------------------------------
+# L'identita' del file: cio' che rende una misura replicabile e invalidabile.
+# --------------------------------------------------------------------------
+
+def test_the_identity_changes_when_the_file_changes(tmp_path):
+    """@brief Positivo e negativo sulla condizione che la cache deve garantire.
+
+    Stesso file, stessa chiave: e' cio' che permette di replicare una misura.
+    File riscritto, chiave diversa: e' cio' che impedisce a una misura vecchia
+    di passare per una misura del file nuovo.
+    """
+    path = tmp_path / "model.step"
+    path.write_bytes(b"ISO-10303-21;")
+    first = cache.file_identity(path)
+    assert first and cache.file_identity(path) == first
+    assert cache.file_identity(str(path)) == first
+
+    path.write_bytes(b"ISO-10303-21; PIU' LUNGO")
+    assert cache.file_identity(path) != first
+
+    # Stessa dimensione ma data diversa: la sola lunghezza non basterebbe.
+    same_size = cache.file_identity(path)
+    os.utime(path, (1_000_000, 1_000_000))
+    assert cache.file_identity(path) != same_size
+
+
+def test_a_file_that_cannot_be_inspected_has_no_identity(tmp_path):
+    """@brief Negativo: senza dimensione e data non si puo' invalidare nulla.
+
+    Ripiegare sul solo percorso darebbe una chiave che non cambia mai piu':
+    una misura sbagliata resterebbe valida per sempre. Meglio rimisurare.
+    """
+    assert cache.file_identity(tmp_path / "non-esiste.step") is None
+    assert cache.file_identity(None) is None
+    assert cache.file_identity("nul\0path") is None
+
+
+def test_the_identity_recipe_matches_the_size_index_key(tmp_path):
+    """@brief Le due ricette della stessa chiave non devono divergere.
+
+    `kicad_models.index_key` calcola oggi la stessa stringa per l'indice degli
+    ingombri. Finche' esistono due copie della ricetta, questa prova le tiene
+    allineate: chi ne cambia una deve cambiare l'altra.
+    """
+    from kicadgen.cad3d.kicad_models import index_key
+
+    path = tmp_path / "model.step"
+    path.write_bytes(b"ISO-10303-21;")
+    assert cache.file_identity(path) == index_key(path)

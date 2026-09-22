@@ -47,6 +47,33 @@ def _paths(paths: _PathInput) -> list[Path]:
     return result
 
 
+def file_identity(path: str | os.PathLike[str]) -> str | None:
+    """@brief Identify a file by absolute path, byte size and nanosecond mtime.
+
+    @param path File whose measurements are about to be stored or replayed.
+    @return "<absolute path>:<size>:<mtime_ns>", or None when the file cannot
+        be inspected.
+    @note Questa e' la chiave che rende una misura ripetibile: un file
+        riscritto cambia dimensione o data e quindi cambia chiave, cosi' una
+        voce vecchia non puo' essere scambiata per una misura del file nuovo.
+    @note None non e' una chiave degradata ma l'assenza di chiave: senza
+        dimensione e data non si puo' invalidare nulla, quindi il chiamante
+        deve rimisurare invece di fidarsi. Per questo non si ripiega sul solo
+        percorso.
+    @note `kicad_models.index_key` calcola oggi la stessa stringa per l'indice
+        degli ingombri; le due formule devono restare identiche (un test lo
+        verifica) e quel modulo dovrebbe passare di qui alla prossima modifica,
+        invece di conservare una seconda copia della ricetta.
+    """
+    try:
+        resolved = Path(path).absolute()
+        status = resolved.stat()
+        return f"{resolved}:{status.st_size}:{status.st_mtime_ns}"
+    except (OSError, TypeError, ValueError):
+        _warn("file identity unavailable; measurement stays retryable")
+        return None
+
+
 def _object(pairs: list[tuple[str, object]]) -> dict:
     value = {}
     for key, item in pairs:

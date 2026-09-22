@@ -17,6 +17,10 @@ separati per poter avere ciascuno il proprio colore in STEP e VRML.
 """
 
 import math
+import os
+import sys
+import threading
+import time
 
 import FreeCAD
 import Part
@@ -630,7 +634,185 @@ class _ModelColor(str):
         return value
 
 
-def _read_library_parts(path, color):
+#: Intervallo fra due battiti, in secondi. E' SOLO un ripiego per il caso in cui
+#: il file dei parametri non porti il campo `heartbeat_interval_s` (payload
+#: vecchio, prova manuale dello script): il valore buono e' quello derivato dal
+#: timeout del watchdog in `kicadgen.cad3d.process_log.heartbeat_interval` e
+#: arriva da li' tramite `set_heartbeat_interval`. Questo modulo gira
+#: nell'interprete embedded di FreeCAD e non puo' importare quel modulo, quindi
+#: il numero viaggia nel JSON invece di essere duplicato qui.
+_HEARTBEAT_INTERVAL_S = 60.0
+
+
+def set_heartbeat_interval(seconds):
+    """@brief Adopt the heartbeat period derived from the watchdog's timeout.
+
+    @param seconds Value of `heartbeat_interval_s` from the params file; None,
+        zero or a non-numeric value leaves the fallback in place.
+    @return The interval in seconds that will actually be used.
+    @note Chiamata una volta da freecad_build_body.main(), prima del ciclo dei
+        componenti. Non si accetta un intervallo non positivo o non finito: un
+        battito ogni zero secondi riempirebbe la pipe e affamerebbe proprio il
+        lavoro che deve annunciare.
+    """
+    global _HEARTBEAT_INTERVAL_S
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        return _HEARTBEAT_INTERVAL_S
+    if value > 0 and math.isfinite(value):
+        _HEARTBEAT_INTERVAL_S = value
+    return _HEARTBEAT_INTERVAL_S
+
+
+def _model_file_name(path):
+    """Nome del file del modello, qualunque sia il separatore nel percorso.
+
+    `os.path.basename` conosce solo il separatore del sistema su cui gira, ma
+    il percorso arriva dalla libreria KiCad e viaggia nel file dei parametri:
+    un percorso Windows letto su un sistema POSIX (o al contrario) resterebbe
+    intero e la riga finirebbe accorciata dalla modale proprio nella parte che
+    l'utente riconosce. Si taglia su entrambi i separatori.
+    """
+    text = str(path or "").rstrip("/\\")
+    for separator in ("/", "\\"):
+        text = text.rpartition(separator)[2] or text
+    return text or str(path)
+
+
+def _elapsed_phrase(seconds):
+    """Durata leggibile da una persona: "45 s", "5 min 12 s"."""
+    whole = int(max(0.0, seconds))
+    if whole < 60:
+        return f"{whole} s"
+    return f"{whole // 60} min {whole % 60} s"
+
+
+def heartbeat_line(model_name, seconds):
+    """@brief Compose the one line that keeps the watchdog quiet AND informs the user.
+
+    @param model_name File name of the model being imported (never a full path).
+    @param seconds Seconds elapsed since the import started.
+    @return An Italian sentence, ready to print on the child's stdout.
+    @note UN SOLO meccanismo per due scopi. La riga deve (a) rompere il
+        silenzio, cosi' il watchdog di run_logged non scambia un import lento
+        per un processo fermo, e (b) spiegare all'utente perche' la barra e'
+        ferma su "12/52". Un marcatore `KICADGEN_*` farebbe solo (a): la modale
+        lo scarta come riga macchina (analysis_overlay.is_machine_line), quindi
+        l'utente continuerebbe a guardare una barra congelata.
+    @note La forma e' scelta per attraversare i filtri della modale COSI' COME
+        SONO, senza toccarli: niente marcatore in maiuscolo in testa, niente
+        percorso assoluto (di cui resterebbe solo il nome del file), niente
+        "chiave=valore", niente " : " spaziato, niente punto e virgola (che
+        `main_window.per_item_detail` legge come rendiconto per-elemento) e
+        niente parentesi con conteggi. Resta il NOME DEL FILE, che e' la parte
+        che l'utente riconosce, e il tempo trascorso, che e' la ragione per cui
+        sta aspettando. I test lo verificano importando quelle due funzioni.
+    """
+    return (f"Importazione del modello 3D {model_name} ancora in corso da "
+            f"{_elapsed_phrase(seconds)}, un modello di libreria grande puo' "
+            f"richiedere minuti.")
+
+
+class _ImportHeartbeat:
+    """@brief Announce that a silent library import is still alive.
+
+    @note Perche' esiste: `Import.insert` e `Part.read` parsano un assieme STEP
+        senza stampare NULLA. Su una corsa reale un modulo RF schermato ha
+        tenuto lo stdout muto per cinque minuti e il watchdog ha ucciso un
+        processo sano al tredicesimo componente su cinquantadue, buttando via
+        anche le chiamate AI gia' pagate. La correzione non e' alzare la
+        soglia -- sarebbe la soglia tarata sul caso visto, e un modello piu'
+        grande la rifarebbe scattare -- ma rendere di nuovo vera la premessa
+        del watchdog: chi lavora, parla.
+    @note Il thread e' un demone e NON tocca mai FreeCAD, Part o il documento:
+        formatta una stringa e la stampa. Le API di FreeCAD non sono
+        thread-safe, quindi questa e' la sola cosa che puo' fare mentre il
+        thread principale e' dentro il parser OCCT.
+    @note LIMITE DICHIARATO, non verificabile senza FreeCAD: un battito parte
+        solo se l'interprete Python gira, cioe' se la chiamata C++ dell'import
+        rilascia il GIL. Se non lo rilasciasse, il silenzio tornerebbe e il
+        watchdog ricomincerebbe a uccidere import sani. Per questo il battito
+        non e' affidato al solo timer: `beat_if_due` viene chiamato anche nei
+        punti Python attraversati durante l'import (la copia dei pezzi
+        dell'assieme), che battono comunque.
+    """
+
+    def __init__(self, path, interval=None):
+        self._name = _model_file_name(path)
+        self._interval = float(interval) if interval else _HEARTBEAT_INTERVAL_S
+        self._stop = threading.Event()
+        # Il lock serve a una promessa precisa: dopo stop() non esce piu' una
+        # riga. Senza, un battito gia' entrato in print apparirebbe DOPO il
+        # marcatore di fine import e il log racconterebbe una bugia.
+        self._lock = threading.Lock()
+        self._thread = None
+        self._started = 0.0
+        self._last = 0.0
+
+    def start(self):
+        """@brief Start beating; safe to call once per import."""
+        self._started = self._last = time.monotonic()
+        self._thread = threading.Thread(target=self._loop, daemon=True,
+                                        name="kicadgen-import-heartbeat")
+        self._thread.start()
+        return self
+
+    def stop(self):
+        """@brief Stop beating for good; idempotent and safe from any state."""
+        with self._lock:
+            self._stop.set()
+        thread = self._thread
+        if thread is not None:
+            # wait() torna subito quando l'evento e' settato, quindi questo
+            # join non aspetta un intervallo. Il tetto e' una rete di sicurezza
+            # indipendente dall'intervallo: la generazione non deve fermarsi
+            # per colpa del battito nemmeno con un intervallo lunghissimo.
+            thread.join(timeout=min(self._interval, 5.0))
+            self._thread = None
+
+    def beat_if_due(self):
+        """@brief Emit a beat from the working thread when one is due.
+
+        @note Serve nei punti Python lunghi dell'import: battono anche se il
+            timer non riesce a girare. Non stampa in anticipo, quindi non
+            raddoppia le righe quando il timer funziona.
+        """
+        if time.monotonic() - self._last >= self._interval:
+            self._beat()
+
+    def _loop(self):
+        while not self._stop.wait(self._interval):
+            self._beat()
+
+    def _beat(self):
+        with self._lock:
+            if self._stop.is_set():
+                return
+            now = time.monotonic()
+            self._last = now
+            try:
+                # Una sola write, testo e a capo insieme: con lo stdout a
+                # buffer di riga e' cio' che rende il battito indivisibile
+                # rispetto alle righe stampate dal thread di lavoro. print()
+                # scrive il testo e l'a capo separatamente, e le due righe si
+                # potrebbero intrecciare a meta'.
+                sys.stdout.write(heartbeat_line(self._name, now - self._started) + "\n")
+                sys.stdout.flush()
+            except Exception:  # noqa: BLE001 - stdout chiuso: il battito non e' il lavoro
+                self._stop.set()
+
+    def __enter__(self):
+        return self.start()
+
+    def __exit__(self, exc_type, exc, tb):
+        # Vale anche quando l'import solleva: il battito non deve sopravvivere
+        # al passo che stava annunciando.
+        self.stop()
+        return False
+
+
+def _read_library_parts(path, color, heartbeat=None):
     """Copy shapes and face colors out of an isolated headless import document."""
     import Import
 
@@ -642,6 +824,10 @@ def _read_library_parts(path, color):
             raise ValueError("headless importer returned no colored shapes")
         parts = []
         for obj, colors in imported:
+            # Copiare le forme di un assieme grande e' lento quanto leggerlo:
+            # e' Python, quindi qui il battito non dipende dal GIL del parser.
+            if heartbeat is not None:
+                heartbeat.beat_if_due()
             shape = obj.Shape.copy()
             if shape.isNull() or not shape.Solids or not shape.isValid():
                 raise ValueError("library model contains invalid or non-solid geometry")
@@ -725,6 +911,28 @@ _LANDMARK_DIRECTIONS = {"right": (1, 0), "left": (-1, 0),
                         "bottom": (0, 1), "top": (0, -1)}
 
 
+def _dominant_direction(dx, dy):
+    """@brief Parte scale-invariante della regola: verso cardinale, o None.
+
+    @param dx Scarto del baricentro lungo X, in una qualunque unita'.
+    @param dy Scarto lungo Y, nella STESSA unita'.
+    @return (dx, dy) cardinale, oppure None quando le due componenti si
+        equivalgono (la feature sta in un angolo) o non c'e' scarto.
+    @note Isolata perche' e' l'unica parte della decisione che non cambia se
+        si moltiplicano entrambe le componenti per uno stesso fattore
+        positivo. E' cio' che permette di leggerla sul baricentro del solido
+        intero, che costa nulla, invece che su quello del residuo, che costa
+        un boolean: i due scarti differiscono esattamente per il fattore
+        volume_totale/volume_residuo (vedi `_cheap_landmark_verdict`).
+    """
+    major, minor = (abs(dx), abs(dy)) if abs(dx) >= abs(dy) else (abs(dy), abs(dx))
+    if not major > 0:
+        return None
+    if major < NATIVE_ASYMMETRY_DOMINANCE * minor:
+        return None
+    return (1 if dx > 0 else -1, 0) if abs(dx) >= abs(dy) else (0, 1 if dy > 0 else -1)
+
+
 def _asymmetry_direction(fraction, dx, dy):
     """@brief Traduci la misura dell'asimmetria in un lato, o in un "non lo so".
 
@@ -738,22 +946,233 @@ def _asymmetry_direction(fraction, dx, dy):
     """
     if not (fraction >= NATIVE_ASYMMETRY_MIN_FRACTION):
         return None
-    major, minor = (abs(dx), abs(dy)) if abs(dx) >= abs(dy) else (abs(dy), abs(dx))
-    if major < NATIVE_ASYMMETRY_MIN_OFFSET:
+    if max(abs(dx), abs(dy)) < NATIVE_ASYMMETRY_MIN_OFFSET:
         return None
-    if major < NATIVE_ASYMMETRY_DOMINANCE * minor:
-        return None
-    return (1 if dx > 0 else -1, 0) if abs(dx) >= abs(dy) else (0, 1 if dy > 0 else -1)
+    return _dominant_direction(dx, dy)
 
 
-def _native_landmark_direction(shape, reference):
+def _landmark_budget_s():
+    """@brief Seconds a single orientation measurement may spend before giving up.
+
+    @return Il budget in secondi, uguale all'intervallo del battito.
+    @note NON e' un numero nuovo: e' l'intervallo fra due battiti, che a sua
+        volta e' una frazione del timeout di silenzio del watchdog
+        (`step_generator.FREECAD_SILENCE_TIMEOUT_S` tramite
+        `process_log.heartbeat_interval`). Una sola manopola, quindi le due
+        cose non possono divergere.
+    @note Perche' proprio quell'intervallo: la sottrazione booleana e' una
+        chiamata C++ che puo' non rilasciare il GIL, quindi mentre gira
+        potrebbe non uscire NESSUN battito. L'intervallo del battito e' gia'
+        la risposta del progetto alla domanda «quanto a lungo un passo puo'
+        restare muto prima di dover dimostrare di essere vivo»: una misura
+        che sta dentro quell'intervallo non puo', da sola, trasformare una
+        corsa sana in un silenzio che il watchdog scambia per un blocco.
+    @note EURISTICA DICHIARATA nella sola scelta della frazione: che il
+        budget sia UN intervallo e non due o mezzo non deriva da una misura.
+        Non e' tarato sul caso osservato -- il modulo che ha scatenato la
+        correzione impiega minuti, quindi sfonda qualunque frazione sensata
+        del timeout -- ed e' legato al watchdog, non al pezzo. Lo renderebbe
+        superfluo una misura interrompibile: se OpenCascade offrisse un
+        `BRepAlgoAPI` con progress/cancel, il limite sarebbe la rinuncia
+        dell'utente e non un tempo deciso qui.
+    """
+    return _HEARTBEAT_INTERVAL_S
+
+
+class _MeasurementExpired(Exception):
+    """Il budget della misura e' finito: il verso resta non misurato."""
+
+
+def _expired(deadline):
+    """Vero quando il budget e' finito. deadline None = nessun limite."""
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def _check_deadline(deadline):
+    if _expired(deadline):
+        raise _MeasurementExpired()
+
+
+def _reference_frame(reference):
+    """Centro e semilati del riferimento, cioe' l'unita' di misura degli scarti."""
+    centre_x = (reference.XMin + reference.XMax) / 2
+    centre_y = (reference.YMin + reference.YMax) / 2
+    return (centre_x, centre_y,
+            max(reference.XLength / 2, 1e-9), max(reference.YLength / 2, 1e-9))
+
+
+#: Sentinella: la misura a costo zero non basta, serve il boolean.
+_UNDECIDED = object()
+
+
+def _cheap_landmark_verdict(shape, reference):
+    """@brief Decidi il verso senza boolean, quando l'identita' lo consente.
+
+    @param shape Solido (o compound) gia' letto dal file di libreria.
+    @param reference Ingombro su cui e' stato scelto l'asse.
+    @return Il verso cardinale, None, oppure `_UNDECIDED` quando la sola
+        misura gratuita non basta a decidere.
+    @note IDENTITA' ESATTA, non un'approssimazione. Sia A il solido, rho il
+        mezzo giro attorno al centro del riferimento, C = A intersecato rhoA e
+        R = A meno rhoA il residuo. C e' invariante per rho, quindi il suo
+        baricentro sta sull'asse di rotazione; dalla somma dei momenti
+        (A = C + R) segue
+            (c_R - centro) = (V_A / V_R) * (c_A - centro).
+        Lo scarto del residuo e' quindi lo scarto del solido INTERO
+        moltiplicato per un fattore positivo: segno e dominanza fra i due assi
+        -- cioe' tutto cio' che decide QUALE lato -- si leggono identici sul
+        baricentro del solido intero, che FreeCAD calcola senza boolean.
+    @note Restano due confronti che dipendono dalla scala, e con f = V_R/V_A
+        e `major` lo scarto maggiore del solido intero si chiudono cosi':
+        - da c_A - centro = f * (c_R - centro) e dal fatto che c_R cade dentro
+          l'ingombro del solido segue f >= major / reach, dove `reach` e'
+          quanto l'ingombro del solido si estende dal centro del riferimento,
+          in semilati. Se major >= MIN_FRACTION * reach allora f e' sopra la
+          soglia di frazione senza misurarla;
+        - f <= 1 sempre, quindi se major >= MIN_OFFSET allora major / f e'
+          sopra la soglia di scarto senza misurarla.
+        Insieme: verso deciso a costo zero. Al contrario, se
+        major < MIN_FRACTION * MIN_OFFSET nessun f puo' soddisfare entrambe le
+        condizioni, e la risposta e' «non lo so» senza boolean. In mezzo resta
+        la banda in cui f va misurato davvero.
+    @note Una forma che non sa dire il proprio baricentro o il proprio
+        ingombro (compound misti, e i solidi finti delle prove) non perde la
+        misura: si torna al boolean, che e' cio' che accadeva prima.
+    """
+    try:
+        centre_x, centre_y, half_x, half_y = _reference_frame(reference)
+        centre = shape.CenterOfMass
+        box = shape.BoundBox
+        dx = (centre.x - centre_x) / half_x
+        dy = (centre.y - centre_y) / half_y
+        reach = max(abs(box.XMax - centre_x), abs(centre_x - box.XMin)) / half_x
+        reach = max(reach, max(abs(box.YMax - centre_y),
+                               abs(centre_y - box.YMin)) / half_y)
+    except Exception:  # noqa: BLE001 - senza baricentro si paga il boolean
+        return _UNDECIDED
+    direction = _dominant_direction(dx, dy)
+    if direction is None:
+        return None
+    major = max(abs(dx), abs(dy))
+    if major < NATIVE_ASYMMETRY_MIN_FRACTION * NATIVE_ASYMMETRY_MIN_OFFSET:
+        return None
+    if (major >= NATIVE_ASYMMETRY_MIN_OFFSET
+            and major >= NATIVE_ASYMMETRY_MIN_FRACTION * max(reach, 1e-9)):
+        return direction
+    return _UNDECIDED
+
+
+def _boxes_overlap(first, second):
+    """Due ingombri si toccano? Se no, i solidi non possono intersecarsi."""
+    return (first.XMin <= second.XMax and second.XMin <= first.XMax
+            and first.YMin <= second.YMax and second.YMin <= first.YMax
+            and first.ZMin <= second.ZMax and second.ZMin <= first.ZMax)
+
+
+def _residue_pieces(shape, flipped):
+    """@brief Spezza la sottrazione in pezzi singolarmente interrompibili.
+
+    @param shape Solido o compound originale.
+    @param flipped La sua copia ruotata di mezzo giro.
+    @return Lista di (solido, tagliente) con tagliente None quando il solido
+        sopravvive intero, oppure None quando la forma non e' scomponibile.
+    @note Due ragioni, e nessuna delle due e' un'approssimazione: (a) un solo
+        `cut` su un assieme intero e' UNA chiamata C++ che Python non puo'
+        interrompere, quindi nessun limite di tempo la potrebbe fermare,
+        mentre una somma di sottrazioni per solido si controlla fra un pezzo e
+        l'altro; (b) un solido il cui ingombro non tocca nessuna immagine
+        speculare sopravvive per intero, e li' il boolean non si esegue
+        affatto. Su un assieme dove i pezzi sono per lo piu' distanti fra loro
+        questo toglie la maggior parte del lavoro.
+    @note ASSUNZIONE DICHIARATA: i solidi dell'assieme non si compenetrano,
+        altrimenti la somma dei volumi conta due volte le zone comuni. E'
+        la stessa assunzione che `shape.Volume` di un compound fa gia' oggi,
+        quindi il confronto con la soglia di frazione resta coerente.
+    """
+    try:
+        solids = list(shape.Solids)
+        mirrored = list(flipped.Solids)
+    except Exception:  # noqa: BLE001 - forma non scomponibile
+        return None
+    if len(solids) < 2:
+        return None
+    pieces = []
+    for solid in solids:
+        try:
+            box = solid.BoundBox
+            cutters = [other for other in mirrored
+                       if _boxes_overlap(box, other.BoundBox)]
+        except Exception:  # noqa: BLE001 - senza ingombro non si pota
+            return None
+        pieces.append((solid, Part.makeCompound(cutters) if cutters else None))
+    return pieces
+
+
+def _half_turn_residue(shape, reference, deadline=None, heartbeat=None):
+    """@brief Volume e baricentro di cio' che NON sopravvive a mezzo giro.
+
+    @param shape Solido (o compound) gia' letto dal file di libreria.
+    @param reference Ingombro su cui e' stato scelto l'asse.
+    @param deadline Istante (time.monotonic) oltre il quale si rinuncia.
+    @param heartbeat Battito da tenere vivo fra un pezzo e l'altro.
+    @return (frazione di volume, scarto X, scarto Y) in semilati, o None.
+    @throws _MeasurementExpired Quando il budget finisce a misura incompleta.
+    """
+    try:
+        centre_x, centre_y, half_x, half_y = _reference_frame(reference)
+    except Exception:  # noqa: BLE001 - riferimento inutilizzabile
+        return None
+    try:
+        volume = shape.Volume
+        flipped = shape.copy()
+        flipped.rotate(V(centre_x, centre_y, 0), V(0, 0, 1), 180)
+        pieces = _residue_pieces(shape, flipped)
+        if pieces is None:
+            # Un pezzo solo: la sottrazione e' indivisibile, quindi il budget
+            # puo' soltanto impedire di INIZIARLA. Limite dichiarato: una
+            # chiamata gia' partita arriva in fondo.
+            _check_deadline(deadline)
+            residual = shape.cut(flipped)
+            total = residual.Volume
+            centre = residual.CenterOfMass
+            x, y = centre.x, centre.y
+        else:
+            total = moment_x = moment_y = 0.0
+            for solid, cutter in pieces:
+                if heartbeat is not None:
+                    heartbeat.beat_if_due()
+                _check_deadline(deadline)
+                piece = solid if cutter is None else solid.cut(cutter)
+                piece_volume = piece.Volume
+                if piece_volume > 0:
+                    centre = piece.CenterOfMass
+                    total += piece_volume
+                    moment_x += piece_volume * centre.x
+                    moment_y += piece_volume * centre.y
+            if not total > 0:
+                return None
+            x, y = moment_x / total, moment_y / total
+    except _MeasurementExpired:
+        raise
+    except Exception:  # noqa: BLE001 - un boolean fallito non ferma il solido
+        return None
+    if not volume > 0:
+        return None
+    return total / volume, (x - centre_x) / half_x, (y - centre_y) / half_y
+
+
+def _native_landmark_direction(shape, reference, deadline=None, heartbeat=None):
     """@brief Da che parte sta il materiale che distingue un capo dall'altro.
 
     @param shape Solido (o compound) gia' letto dal file di libreria.
     @param reference Ingombro usato per posarlo, cioe' il riferimento su cui e'
         stato scelto l'asse.
+    @param deadline Istante (time.monotonic) oltre il quale si rinuncia.
+    @param heartbeat Battito da tenere vivo durante la misura.
     @return (dx, dy) con una sola componente non nulla, oppure None quando il
-        solido e' simmetrico o la feature sta in un angolo.
+        solido e' simmetrico, la feature sta in un angolo, o la misura e'
+        costata piu' del budget.
+    @throws _MeasurementExpired Quando il budget finisce a misura incompleta.
     @note L'asimmetria e', per definizione, cio' che NON sopravvive a mezzo
         giro: si ruota il solido di 180 gradi attorno al centro del suo
         ingombro, lo si sottrae da se' stesso, e il residuo e' esattamente il
@@ -763,28 +1182,208 @@ def _native_landmark_direction(shape, reference):
         onesta -- mentre il residuo di quello stesso modulo pesa il 15,9%.
         Criterio definitorio, non tarato: nessun nome di file, nessuna misura
         presa da un pezzo particolare.
-    @note Costa un'operazione booleana (una ventina di secondi su un modulo da
-        8 MB), quindi il chiamante la esegue solo quando la fotografia ha
-        dichiarato un lato con cui confrontarla.
+    @note Il boolean si paga solo quando serve davvero: `_cheap_landmark_verdict`
+        chiude i casi in cui l'identita' fra scarto del residuo e scarto del
+        solido intero decide gia' da sola, e il chiamante replica la misura
+        dalla cache quando quel file e' gia' stato misurato.
     """
     try:
-        centre_x = (reference.XMin + reference.XMax) / 2
-        centre_y = (reference.YMin + reference.YMax) / 2
-        flipped = shape.copy()
-        flipped.rotate(V(centre_x, centre_y, 0), V(0, 0, 1), 180)
-        residual = shape.cut(flipped)
-        volume = shape.Volume
-        if not volume > 0:
+        if not shape.Volume > 0:
             return None
-        fraction = residual.Volume / volume
-        centre = residual.CenterOfMass
-    except Exception:  # noqa: BLE001 - un boolean fallito non ferma il solido
+    except Exception:  # noqa: BLE001 - un solido che non sa dire il volume
         return None
-    half_x = max(reference.XLength / 2, 1e-9)
-    half_y = max(reference.YLength / 2, 1e-9)
-    return _asymmetry_direction(fraction,
-                                (centre.x - centre_x) / half_x,
-                                (centre.y - centre_y) / half_y)
+    verdict = _cheap_landmark_verdict(shape, reference)
+    if verdict is not _UNDECIDED:
+        return verdict
+    measured = _half_turn_residue(shape, reference, deadline, heartbeat)
+    if measured is None:
+        return None
+    return _asymmetry_direction(*measured)
+
+
+#: Nome dell'indice delle misure di verso. File separato da quello degli
+#: ingombri (`kicad_models.INDEX_FILENAME`) perche' le due misure hanno vite
+#: diverse: l'ingombro lo misura il processo padre durante l'abbinamento, il
+#: verso lo misura FreeCAD durante la costruzione. Stesso meccanismo di
+#: scrittura atomica e stessa ricetta di chiave.
+LANDMARK_INDEX_FILENAME = "kicadgen-landmark-index.json"
+
+#: Sentinella: la cache non ha nulla da dire su questo file.
+_LANDMARK_MISS = object()
+
+
+def _landmark_cache_paths():
+    """Dove vive l'indice dei versi gia' misurati.
+
+    Nella cache dell'utente e non accanto al modello: la libreria 3D di KiCad
+    e' spesso installata di sistema e sola lettura, e un file di servizio per
+    cartella la sporcherebbe. La chiave porta identita' del file e
+    riferimento, quindi un solo indice condiviso non puo' confondere due
+    modelli.
+    """
+    base = os.environ.get("LOCALAPPDATA") or os.path.join(
+        os.path.expanduser("~"), ".cache")
+    return [os.path.join(base, "kicadgen", LANDMARK_INDEX_FILENAME)]
+
+
+def _landmark_store():
+    """Il magazzino delle misure, o None se non e' raggiungibile.
+
+    Lo stesso modulo serve il processo padre (come pacchetto) e l'interprete
+    embedded di FreeCAD (come modulo accanto a questo), come gia' fa
+    `lead_geometry`: senza la cache la misura si rifa', non si rompe.
+    """
+    try:
+        try:
+            from kicadgen.cad3d import model_size_cache
+        except ImportError:
+            import model_size_cache
+        return model_size_cache
+    except Exception:  # noqa: BLE001 - senza cache si rimisura
+        return None
+
+
+def _landmark_reference_signature(reference):
+    """Il riferimento fa parte della domanda, quindi fa parte della chiave.
+
+    Il mezzo giro e' attorno al CENTRO del riferimento: misurare sull'ingombro
+    totale o sulla sezione del corpo sono due domande diverse con due risposte
+    diverse, e una non deve mai essere replayata al posto dell'altra.
+    """
+    return ",".join(f"{float(value):.6f}" for value in
+                    (reference.XMin, reference.XMax, reference.YMin, reference.YMax))
+
+
+def _landmark_cache_entry(path, reference):
+    """(chiave, identita' del file, firma del riferimento), o None."""
+    store = _landmark_store()
+    if store is None:
+        return None
+    try:
+        identity = store.file_identity(path)
+        signature = _landmark_reference_signature(reference)
+    except Exception:  # noqa: BLE001 - senza identita' non si replica nulla
+        return None
+    if not identity:
+        return None
+    return f"{identity}|{signature}", identity, signature
+
+
+def _landmark_direction_value(value):
+    """Verso letto dalla cache, o `_LANDMARK_MISS` se non e' un verso valido."""
+    if value is None:
+        return None
+    if (isinstance(value, (list, tuple)) and len(value) == 2
+            and all(item in (-1, 0, 1) and not isinstance(item, bool) for item in value)
+            and sum(1 for item in value if item) == 1):
+        return (int(value[0]), int(value[1]))
+    return _LANDMARK_MISS
+
+
+def _cached_landmark(entry, budget):
+    """@brief Replay a landmark already measured for THIS file and reference.
+
+    @param entry Tripla di `_landmark_cache_entry`.
+    @param budget Budget della misura che si starebbe per fare, in secondi.
+    @return (verso,) quando la cache risponde, `_LANDMARK_MISS` altrimenti.
+    @note Il record porta identita' e riferimento anche al proprio interno, non
+        solo nella chiave: cosi' un indice corrotto o fuso male non puo' far
+        ereditare a un modello la misura di un altro.
+    @note Una rinuncia per budget si ricorda con il budget che aveva: stesso
+        file e budget non maggiore, non vale la pena ripagare minuti per
+        arrivare alla stessa rinuncia; un budget piu' generoso ritenta.
+    """
+    store = _landmark_store()
+    if store is None or entry is None:
+        return _LANDMARK_MISS
+    key, identity, signature = entry
+    try:
+        record = store.load(_landmark_cache_paths()).get(key)
+    except Exception:  # noqa: BLE001 - cache illeggibile: si rimisura
+        return _LANDMARK_MISS
+    if not isinstance(record, dict):
+        return _LANDMARK_MISS
+    if record.get("model") != identity or record.get("reference") != signature:
+        return _LANDMARK_MISS
+    status = record.get("status")
+    if status == "measured":
+        direction = _landmark_direction_value(record.get("direction"))
+        return _LANDMARK_MISS if direction is _LANDMARK_MISS else (direction,)
+    if status == "budget_exceeded":
+        try:
+            spent = float(record.get("budget_s"))
+        except (TypeError, ValueError):
+            return _LANDMARK_MISS
+        if math.isfinite(spent) and budget <= spent:
+            return (None,)
+    return _LANDMARK_MISS
+
+
+def _store_landmark(entry, direction, status, budget):
+    """Registra la misura (o la rinuncia) come misura DI QUEL file."""
+    store = _landmark_store()
+    if store is None or entry is None:
+        return
+    key, identity, signature = entry
+    try:
+        store.save({key: {
+            "model": identity,
+            "reference": signature,
+            "status": status,
+            "direction": list(direction) if direction else None,
+            "budget_s": float(budget),
+        }}, _landmark_cache_paths())
+    except Exception:  # noqa: BLE001 - una cache non scritta non e' un guasto
+        pass
+
+
+def landmark_budget_line(model_name, seconds):
+    """@brief Compose the line that says the verse was NOT measured, and why.
+
+    @param model_name File name of the model (never a full path).
+    @param seconds Budget the measurement was given, in seconds.
+    @return An Italian sentence, ready to print on the child's stdout.
+    @note Stessa forma della riga del battito e per la stessa ragione: deve
+        arrivare sia nel log sia nella modale di avanzamento. Un marcatore
+        `KICADGEN_*` finirebbe nel solo log (analysis_overlay.is_machine_line),
+        e l'utente non saprebbe mai perche' quel componente e' rimasto
+        orientato dal solo ingombro.
+    """
+    return (f"Verso del modello 3D {model_name} non misurato entro "
+            f"{_elapsed_phrase(seconds)}, il componente resta orientato "
+            f"secondo il solo ingombro.")
+
+
+def _cached_landmark_direction(shape, reference, path, heartbeat=None):
+    """@brief Measure the verse once per model file, and never longer than the budget.
+
+    @param shape Solido (o compound) gia' letto dal file di libreria.
+    @param reference Ingombro su cui e' stato scelto l'asse.
+    @param path Percorso del file di libreria: identifica la misura.
+    @param heartbeat Battito da tenere vivo durante la misura.
+    @return Il verso cardinale, oppure None quando non si puo' attribuire.
+    @note La cache si consulta PRIMA del lavoro caro, non dopo: il verso di un
+        file e' deterministico, quindi si paga una volta sola. La chiave e'
+        percorso + dimensione + data del file (piu' il riferimento), quindi un
+        file riscritto si rimisura da solo.
+    @note Sforare il budget non e' un guasto: e' l'esito «non lo so» che
+        `_verse_correction` gia' prevede, quindi la generazione prosegue con il
+        componente orientato dal solo ingombro.
+    """
+    budget = _landmark_budget_s()
+    entry = _landmark_cache_entry(path, reference)
+    cached = _cached_landmark(entry, budget)
+    if cached is not _LANDMARK_MISS:
+        return cached[0]
+    try:
+        direction = _native_landmark_direction(
+            shape, reference, time.monotonic() + budget, heartbeat)
+    except _MeasurementExpired:
+        print(landmark_budget_line(_model_file_name(path), budget), flush=True)
+        _store_landmark(entry, None, "budget_exceeded", budget)
+        return None
+    _store_landmark(entry, direction, "measured", budget)
+    return direction
 
 
 def _verse_correction(native_direction, inferred, observed_side):
@@ -860,58 +1459,82 @@ def _library_model(component, cx, cy, z0, color):
         return None
     print(f"KICADGEN_IMPORT_START:{path}", flush=True)
     try:
-        try:
-            parts = _read_library_parts(path, color)
-        except Exception as exc:
-            print(f"KICADGEN_WARN:colori nativi {path} non disponibili ({exc}); "
-                  "si conserva la geometria con colore fotografico", flush=True)
-            shape = Part.read(str(path))
-            if shape.isNull() or not shape.Solids or not shape.isValid():
-                raise ValueError("library model has no valid solids")
-            parts = [(shape, _ModelColor(color, None, path))]
-        combined = Part.makeCompound([shape for shape, _ in parts])
-        box = combined.BoundBox
-        # Compare unsorted axes of both supported observations. A lead envelope
-        # can have a different long axis from the plastic body (e.g. SOT-223).
-        references = [box]
-        try:
-            section = combined.slice(V(0, 0, 1), box.ZMin + box.ZLength * 0.65)
-            if section:
-                references.append(Part.makeCompound(section).BoundBox)
-        except Exception:
-            pass
-        length, width = float(component["length_mm"]), float(component["width_mm"])
-        inferred, reference = _native_axis_angle(references, length, width)
-        # Il verso non si ricava dall'ingombro: due capi di un rettangolo
-        # misurano uguale. Si confronta il materiale asimmetrico del modello
-        # con il lato su cui la fotografia ha visto il riferimento. La misura
-        # costa un boolean, quindi si fa solo se c'e' un lato osservato: senza,
-        # non ci sarebbe nulla con cui confrontarla.
-        observed_side = component.get("landmark_side")
-        verse = _verse_correction(
-            _native_landmark_direction(combined, reference) if observed_side else None,
-            inferred, observed_side)
-        if verse:
-            print(f"KICADGEN_VERSE:{path}; landmark="
-                  f"{component.get('landmark_feature')} on {component.get('landmark_side')}; "
-                  f"rotated {verse:g} deg over the inferred axis", flush=True)
-        inferred += verse or 0
-        # La correzione manuale e' un DELTA, non un angolo assoluto: l'angolo
-        # di partenza lo deduce qui FreeCAD confrontando il modello con la
-        # misura, e l'interfaccia non lo conosce. "Ruota di 90 gradi" si
-        # somma quindi a qualunque sia la base, dedotta o gia' forzata.
-        angle = _placement_angle(component, inferred)
-        dz = float(component.get("model_z_offset_mm", 0))
-        if not math.isfinite(angle) or not math.isfinite(dz):
-            raise ValueError("non-finite library placement")
-        centre = V((reference.XMin + reference.XMax) / 2,
-                   (reference.YMin + reference.YMax) / 2, 0)
-        for shape, _ in parts:
-            shape.translate(-centre)
-            shape.rotate(V(0, 0, 0), V(0, 0, 1), angle)
-            # KiCad models use Z=0 as the PCB seating plane. Do not lift
-            # through-hole pins or board locks by aligning their lowest point.
-            shape.translate(V(cx, cy, z0 + dz))
+        # Il battito copre TUTTO il tratto muto: la lettura del file (sia la
+        # via con i colori nativi sia il ripiego Part.read) e l'analisi
+        # geometrica che segue, dove uno slice e un boolean su un assieme
+        # grande costano anche loro minuti senza stampare nulla. Esce dal
+        # `with` -- quindi smette -- sia quando l'import finisce sia quando
+        # solleva, prima che venga stampato il marcatore di esito.
+        with _ImportHeartbeat(path) as heartbeat:
+            try:
+                parts = _read_library_parts(path, color, heartbeat)
+            except Exception as exc:
+                print(f"KICADGEN_WARN:colori nativi {path} non disponibili ({exc}); "
+                      "si conserva la geometria con colore fotografico", flush=True)
+                shape = Part.read(str(path))
+                if shape.isNull() or not shape.Solids or not shape.isValid():
+                    raise ValueError("library model has no valid solids")
+                parts = [(shape, _ModelColor(color, None, path))]
+            heartbeat.beat_if_due()
+            combined = Part.makeCompound([shape for shape, _ in parts])
+            box = combined.BoundBox
+            # Compare unsorted axes of both supported observations. A lead
+            # envelope can have a different long axis from the plastic body
+            # (e.g. SOT-223).
+            references = [box]
+            try:
+                # Lo slice sta sullo stesso tratto muto e su un assieme grande
+                # costa anch'esso: NON ha pero' un budget come la misura del
+                # verso, e la differenza non e' una svista. Il verso ha un
+                # esito «non lo so» gia' previsto (il componente resta
+                # orientato dall'ingombro, com'era prima che la misura
+                # esistesse), mentre l'asse no: rinunciarvi poserebbe il
+                # modello ruotato di 90 gradi, che e' un errore vero e non una
+                # rinuncia. Bilanciarli allo stesso modo richiederebbe un
+                # secondo esito onesto per l'asse, che oggi non c'e'.
+                section = combined.slice(V(0, 0, 1), box.ZMin + box.ZLength * 0.65)
+                if section:
+                    references.append(Part.makeCompound(section).BoundBox)
+            except Exception:
+                pass
+            length, width = float(component["length_mm"]), float(component["width_mm"])
+            inferred, reference = _native_axis_angle(references, length, width)
+            # Il verso non si ricava dall'ingombro: due capi di un rettangolo
+            # misurano uguale. Si confronta il materiale asimmetrico del
+            # modello con il lato su cui la fotografia ha visto il riferimento.
+            # La misura puo' costare un boolean, quindi si fa solo se c'e' un
+            # lato osservato: senza, non ci sarebbe nulla con cui confrontarla.
+            # Il verso di un file e' deterministico: si misura una volta, con
+            # un budget, e le corse successive lo rileggono dalla cache.
+            observed_side = component.get("landmark_side")
+            heartbeat.beat_if_due()
+            verse = _verse_correction(
+                _cached_landmark_direction(combined, reference, path, heartbeat)
+                if observed_side else None,
+                inferred, observed_side)
+            if verse:
+                print(f"KICADGEN_VERSE:{path}; landmark="
+                      f"{component.get('landmark_feature')} on "
+                      f"{component.get('landmark_side')}; "
+                      f"rotated {verse:g} deg over the inferred axis", flush=True)
+            inferred += verse or 0
+            # La correzione manuale e' un DELTA, non un angolo assoluto:
+            # l'angolo di partenza lo deduce qui FreeCAD confrontando il
+            # modello con la misura, e l'interfaccia non lo conosce. "Ruota di
+            # 90 gradi" si somma quindi a qualunque sia la base, dedotta o gia'
+            # forzata.
+            angle = _placement_angle(component, inferred)
+            dz = float(component.get("model_z_offset_mm", 0))
+            if not math.isfinite(angle) or not math.isfinite(dz):
+                raise ValueError("non-finite library placement")
+            centre = V((reference.XMin + reference.XMax) / 2,
+                       (reference.YMin + reference.YMax) / 2, 0)
+            for shape, _ in parts:
+                shape.translate(-centre)
+                shape.rotate(V(0, 0, 0), V(0, 0, 1), angle)
+                # KiCad models use Z=0 as the PCB seating plane. Do not lift
+                # through-hole pins or board locks by aligning their lowest point.
+                shape.translate(V(cx, cy, z0 + dz))
         print(f"KICADGEN_IMPORT_OK:{path}; parts={len(parts)}; "
               f"local_rotation_deg={angle:g}", flush=True)
         return parts

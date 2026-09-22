@@ -132,5 +132,9 @@ def test_synthetic_r0603_through_gui_resolver_and_real_freecad(
     assert "colori nativi" not in freecad_log  # This text marks color-import fallback.
     gui_log = window.log_text.toPlainText()
     assert "R_0603_1608Metric.step" in gui_log
-    assert "Attached KiCad models (explicit choices or mechanical estimates): 1" in gui_log
+    # Contratto aggiornato: la riga era in inglese dentro un'interfaccia
+    # italiana e finiva nella modale sotto gli occhi dell'utente. Cio' che il
+    # test garantisce non cambia -- il conteggio dei modelli agganciati arriva
+    # al log della finestra -- cambia solo la lingua in cui lo dice.
+    assert "Modelli KiCad agganciati (scelte esplicite o compatibilita' meccanica): 1" in gui_log
     assert "KICADGEN_IMPORT_OK:" in gui_log

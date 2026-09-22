@@ -544,9 +544,15 @@ def _run_worker_phases(monkeypatch, worker):
     @param monkeypatch Fixture pytest, per sostituire `_generate_3d`.
     @param worker Worker gia' costruito, con `params`/`body` pronti.
     @return Lista di (strumento, dettaglio) nell'ordine in cui sono usciti.
+    @note Il finto servizio pretende il canale di rinuncia del worker: senza
+        quel passaggio il pulsante «Interrompi» della modale non arriverebbe
+        mai al processo FreeCAD, e la modale prometterebbe un'interruzione che
+        non avviene. La verifica sta qui perche' qui passa ogni worker CAD.
     """
     def fake_generate_3d(params, body, project_dir, fillets, face_texts,
-                         progress=None, model_progress=None):
+                         progress=None, model_progress=None, cancel=None):
+        assert cancel is worker.cancel, (
+            "il worker deve passare al servizio il proprio canale di rinuncia")
         # Ordine reale del servizio: prima l'abbinamento dei modelli di KiCad,
         # poi la costruzione del solido.
         if model_progress is not None:

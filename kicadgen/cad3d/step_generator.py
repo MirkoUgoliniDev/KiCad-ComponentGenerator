@@ -23,8 +23,23 @@ from ..generators.castellated_module import CastellatedModuleParams, pad_positio
 from ..generators.pin_header import PinHeaderParams, pin_positions
 from .annotations import EdgeFilletAnnotation, FaceTextAnnotation
 from .body_params import Body3DParams
+from .process_log import heartbeat_interval
 
 DEFAULT_FONT_FILE = r"C:\Windows\Fonts\arial.ttf"
+
+#: Secondi di SILENZIO tollerati dal figlio freecadcmd, non secondi di lavoro:
+#: il conto riparte a ogni riga stampata (vedi process_log.run_logged). E' il
+#: solo posto in cui il numero esiste; l'intervallo del battito dello script
+#: FreeCAD si ricava da qui con `heartbeat_interval`, cosi' i due non possono
+#: divergere.
+FREECAD_SILENCE_TIMEOUT_S = 300
+
+#: Testo unico dell'interruzione chiesta da chi guarda. Passa per `Cad3DError`,
+#: cioe' per la STESSA via di uscita di ogni altro guasto della generazione 3D:
+#: l'interfaccia ha gia' un percorso che riporta la finestra in quiete quando
+#: il 3D non si completa, e un'interruzione e' un 3D non completato con un
+#: motivo diverso, non un secondo meccanismo da mantenere in parallelo.
+CAD_ABORT_MESSAGE = "Generazione 3D interrotta su richiesta dell'utente."
 
 _SCRIPT_PATH = Path(__file__).parent / "freecad_build_body.py"
 
@@ -272,8 +287,12 @@ def generate_castellated_3d_model(
     font_file: str = DEFAULT_FONT_FILE,
     progress=None,
     model_progress=None,
+    cancel=None,
 ) -> dict:
     """Genera il 3D di un modulo castellated come PCB vero e proprio.
+
+    `cancel` e' il canale di rinuncia (vedi `_run_freecad`): un
+    `threading.Event` che chi ha avviato il lavoro mette a uno per fermarlo.
 
     Quello che si vede in un modulo reale, e che qui viene ricostruito:
 
@@ -454,6 +473,7 @@ def generate_castellated_3d_model(
         font_file=font_file, notches=notches, extra_boxes=extra_boxes,
         edge_contacts=contacts,
         progress=progress,
+        cancel=cancel,
         extra_payload={
             "substrate": {"color_hex": params.substrate_color_hex, "mask_thickness_mm": 0.02},
             "silk_texts": silk_texts,
@@ -481,6 +501,7 @@ def generate_3d_model(
     font_file: str = DEFAULT_FONT_FILE,
     progress=None,
     model_progress=None,
+    cancel=None,
 ) -> dict:
     """Genera <Nome>.step (e best-effort <Nome>.wrl) in output_dir/<Nome>.3dshapes/.
 
@@ -488,21 +509,26 @@ def generate_3d_model(
     (kicadgen.cad3d.annotations) applicate al corpo prima dell'export: fillet
     per primi (in ordine), poi il testo inciso sulle facce risultanti.
 
+    `cancel` e' il canale di rinuncia (vedi `_run_freecad`).
+
     Ritorna {"step_path": Path, "wrl_path": Path | None}.
     Solleva Cad3DError per problemi applicativi (freecadcmd assente, script
-    FreeCAD fallito) con l'output di freecadcmd incluso per debug.
+    FreeCAD fallito, interruzione chiesta dall'utente) con l'output di
+    freecadcmd incluso per debug.
     """
     pin_params.validate()
     pins = [[pin, x, y] for pin, x, y in pin_positions(pin_params)]
     if body.populated_board or body.components:
         return _generate_populated_tht(pin_params, body, pins, output_dir,
             freecadcmd_path=freecadcmd_path, fillets=fillets, face_texts=face_texts,
-            font_file=font_file, progress=progress, model_progress=model_progress)
+            font_file=font_file, progress=progress, model_progress=model_progress,
+            cancel=cancel)
     return _run_freecad(
         pin_params.name, pins, body, output_dir,
         freecadcmd_path=freecadcmd_path, fillets=fillets, face_texts=face_texts,
         font_file=font_file,
         progress=progress,
+        cancel=cancel,
     )
 
 
@@ -610,6 +636,7 @@ def _run_freecad(
     edge_contacts: Optional[list] = None,
     extra_payload: Optional[dict] = None,
     progress=None,
+    cancel=None,
 ) -> dict:
     """Costruisce il JSON e lancia freecadcmd; comune a tutti i generatori 3D.
 
@@ -617,6 +644,22 @@ def _run_freecad(
     castellated), `notches` i cilindri da SOTTRARRE al corpo per ricavare i
     semi-fori sul bordo, `extra_boxes` i solidi da aggiungere sopra il corpo
     (per i moduli, il blocco che rappresenta i componenti montati sul PCB).
+
+    `cancel` e' il canale di rinuncia: un oggetto con `is_set()`/`wait()`
+    (tipicamente `threading.Event`) che chi ha avviato il lavoro mette a uno
+    per chiedere di fermarsi. Il figlio freecadcmd viene ucciso dalla stessa
+    macchina che lo uccide quando tace troppo a lungo (process_log.run_logged)
+    e la chiamata esce con `Cad3DError(CAD_ABORT_MESSAGE)`, cioe' per la via
+    con cui l'interfaccia riporta gia' la finestra in quiete.
+
+    LIMITE DICHIARATO: la rinuncia arriva solo al figlio che COSTRUISCE il
+    solido. L'abbinamento dei modelli di libreria, che precede questa
+    chiamata, avvia a sua volta freecadcmd per misurare i candidati non ancora
+    in cache (`kicad_models.measure_models`, con un proprio limite di durata):
+    quel figlio qui non e' raggiungibile, quindi una rinuncia chiesta durante
+    l'abbinamento ha effetto appena il lotto in corso finisce -- e allora
+    questa funzione non avvia nemmeno il figlio del solido. Diventerebbe
+    superfluo il giorno in cui anche `measure_models` accettasse il canale.
     """
     body.validate()
     fillets = fillets or []
@@ -670,6 +713,19 @@ def _run_freecad(
     }
     payload.update(extra_payload or {})
 
+    # Canale di trasporto del battito: lo script FreeCAD non puo' importare
+    # questo modulo (gira nell'interprete embedded), quindi l'intervallo
+    # viaggia nel JSON invece di essere riscritto a mano la' dentro. Scritto
+    # DOPO l'update di extra_payload: un chiamante non deve poter scollegare
+    # per sbaglio il battito dal watchdog.
+    #
+    # Lo stesso numero fa da budget alla misura del verso di un modello
+    # nativo (freecad_parts._landmark_budget_s): una misura che stesse muta
+    # piu' a lungo dell'intervallo fra due battiti potrebbe, da sola,
+    # trasformare una corsa sana nel silenzio che il watchdog uccide. Una
+    # manopola sola, quindi non possono divergere.
+    payload["heartbeat_interval_s"] = heartbeat_interval(FREECAD_SILENCE_TIMEOUT_S)
+
     # Suffisso non ".json": freecadcmd tenta di aprire come documento ogni
     # argomento extra con estensione che riconosce come formato importabile
     # (incluso .json, per via dell'importer FEM YAML/JSON), causando
@@ -681,22 +737,40 @@ def _run_freecad(
         json_path = tmp.name
 
     try:
+        if cancel is not None and cancel.is_set():
+            # Rinuncia gia' chiesta durante l'abbinamento dei modelli: non si
+            # avvia un processo che andrebbe ucciso al primo respiro.
+            raise Cad3DError(CAD_ABORT_MESSAGE)
         if progress:
-            from .process_log import run_logged
-            # 300 secondi di SILENZIO, non di lavoro: il conto riparte a ogni
-            # riga che FreeCAD stampa. Un limite sulla durata complessiva
-            # uccideva il lavoro dei componenti successivi per colpa del primo
-            # import lento, ed era tanto piu' probabile quanto piu' grande era
-            # il modulo.
-            result = run_logged(
-                [freecadcmd, str(_SCRIPT_PATH), json_path],
-                output_dir / "freecad.log", progress=progress,
-                timeout=300, creationflags=_CFLAGS,
-            )
+            from .process_log import ProcessCancelled, run_logged
+            # Secondi di SILENZIO, non di lavoro: il conto riparte a ogni riga
+            # che FreeCAD stampa, e ogni passo lungo batte (vedi
+            # heartbeat_interval_s nel payload qui sopra). Un limite sulla
+            # durata complessiva uccideva il lavoro dei componenti successivi
+            # per colpa del primo import lento, ed era tanto piu' probabile
+            # quanto piu' grande era il modulo.
+            try:
+                # Il canale si passa SOLO quando c'e': cosi' la firma che
+                # vedono i chiamanti non interattivi (e le loro sostituzioni
+                # nei test) resta quella di prima.
+                result = run_logged(
+                    [freecadcmd, str(_SCRIPT_PATH), json_path],
+                    output_dir / "freecad.log", progress=progress,
+                    timeout=FREECAD_SILENCE_TIMEOUT_S, creationflags=_CFLAGS,
+                    **({"cancel": cancel} if cancel is not None else {}),
+                )
+            except ProcessCancelled as exc:
+                raise Cad3DError(CAD_ABORT_MESSAGE) from exc
         else:
+            # LIMITE DICHIARATO: senza `progress` nessuno legge le righe, quindi
+            # qui il timeout resta quello che subprocess.run sa fare -- la
+            # DURATA COMPLESSIVA -- e il battito non lo puo' salvare. E' la via
+            # usata solo da script e prove non interattive, dove non c'e' una
+            # modale da informare; l'interfaccia passa sempre `progress`. Per
+            # renderlo superfluo servirebbe leggere lo stdout anche qui.
             result = subprocess.run(
                 [freecadcmd, str(_SCRIPT_PATH), json_path],
-                capture_output=True, text=True, timeout=300,
+                capture_output=True, text=True, timeout=FREECAD_SILENCE_TIMEOUT_S,
                 creationflags=_CFLAGS,
             )
     finally:

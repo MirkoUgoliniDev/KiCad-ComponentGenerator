@@ -20,8 +20,8 @@ from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QDialogButtonBox
 
 from kicadgen.gui.photo_review_dialog import (
-    PhotoReviewDialog, SELECTED_PEN_WIDTH_PX, SELECTION_HALO_COLOR,
-    SELECTION_HALO_WIDTH_PX, UNSELECTED_PEN_WIDTH_PX,
+    PHOTO_DIMMED, PHOTO_HIDDEN, PhotoReviewDialog, SELECTED_PEN_WIDTH_PX,
+    SELECTION_HALO_COLOR, SELECTION_HALO_WIDTH_PX, UNSELECTED_PEN_WIDTH_PX,
 )
 
 
@@ -699,3 +699,86 @@ def test_retyping_the_kind_of_the_last_member_retires_its_category(dialog):
     assert "tantalum-capacitor" in categories
     assert dialog.active_category() is None
     assert _visible_rows(dialog) == [0, 1, 2]
+
+
+# --------------------------------------------------------------------------
+# 5. Sidebar and list with the photograph attenuated or taken away
+# --------------------------------------------------------------------------
+
+def test_the_list_and_the_outlines_stay_in_step_with_the_photograph_hidden(dialog, app):
+    """@brief Selection keeps travelling both ways when the canvas shows no photo.
+
+    Taking the photograph away is a view setting: choosing a row must still
+    highlight its outline, and clicking an outline must still make its row
+    current, halo included.
+    """
+    dialog.set_photo_state(PHOTO_HIDDEN)
+    dialog.view.zoom(3)
+    app.processEvents()
+    for row in (2, 0, 1):
+        dialog.component_list.setCurrentRow(row)
+        assert _highlighted(dialog) == [row]
+        assert dialog.text_fields["name"].text() == dialog._components[row]["name"]
+    for row in (0, 2):
+        item = dialog._items[row]
+        dialog.view.centerOn(item)
+        app.processEvents()
+        QTest.mouseClick(dialog.view.viewport(), Qt.MouseButton.LeftButton,
+                         Qt.KeyboardModifier.NoModifier, dialog.view.mapFromScene(item.scenePos()))
+        app.processEvents()
+        assert dialog.component_list.currentRow() == row
+        assert _highlighted(dialog) == [row]
+    assert dialog.photo_state() == PHOTO_HIDDEN
+
+
+def test_the_category_filter_and_the_backdrop_are_independent(dialog, app):
+    """@brief Negative: neither control resets the other, and neither hides a rectangle.
+
+    The filter hides list rows, the backdrop control hides the photograph;
+    with both engaged every outline is still drawn and still clickable, which
+    is the contract the filter already carries.
+    """
+    dialog.set_photo_state(PHOTO_DIMMED)
+    # The selected component is kept visible out of category by contract, so
+    # the selection is moved onto the category being asked for.
+    dialog.component_list.setCurrentRow(1)
+    _select_category(dialog, "resistor")
+    assert _visible_rows(dialog) == [1]
+    assert dialog.count_label.text() == "Componenti: 1 di 3"
+    assert dialog.photo_state() == PHOTO_DIMMED
+    assert all(item.isVisible() for item in dialog._items)
+    dialog.set_photo_state(PHOTO_HIDDEN)
+    assert dialog.active_category() == "resistor"
+    assert _visible_rows(dialog) == [1]
+    # A rectangle whose row is hidden still selects itself, photograph or not.
+    dialog.view.zoom(3)
+    app.processEvents()
+    item = dialog._items[2]
+    dialog.view.centerOn(item)
+    app.processEvents()
+    QTest.mouseClick(dialog.view.viewport(), Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.NoModifier, dialog.view.mapFromScene(item.scenePos()))
+    app.processEvents()
+    assert dialog.component_list.currentRow() == 2
+    assert _visible_rows(dialog) == [1, 2]
+    assert dialog.photo_state() == PHOTO_HIDDEN
+
+
+def test_the_parameter_modal_edits_live_with_the_photograph_hidden(dialog, app):
+    """@brief The modal keeps driving the outline, and does not restore the photograph."""
+    dialog.set_photo_state(PHOTO_HIDDEN)
+    dialog.component_list.setCurrentRow(1)
+    item = dialog._items[1]
+    QTest.mouseClick(dialog.parameters_button, Qt.MouseButton.LeftButton)
+    app.processEvents()
+    assert dialog.parameters_dialog.isVisible()
+    assert dialog.photo_state() == PHOTO_HIDDEN
+    assert not dialog.photo_item.isVisible()
+    before = item.photo_bounds()
+    dialog.fields["length_mm"].setValue(6)
+    assert item.photo_bounds().width() > before.width()
+    assert dialog.get_components()[1]["length_mm"] == 6
+    dialog.parameters_dialog.accept()
+    app.processEvents()
+    assert dialog.photo_state() == PHOTO_HIDDEN
+    assert not dialog.photo_item.isVisible()

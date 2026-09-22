@@ -392,8 +392,22 @@ class AnalysisSpinner(QWidget):
 
 
 class AnalysisOverlay(QWidget):
-    """@brief Present analysis progress and expose the AI log action."""
+    """@brief Present analysis progress and expose the AI log and abort actions.
+
+    @note La scheda copre tutta la finestra e le schede sotto sono spente
+        mentre si lavora: senza un comando che esca da qui l'unica via d'uscita
+        era chiudere il programma. Il pulsante sta accanto a «Apri log AI»
+        perche' quella riga e' l'unica parte della scheda su cui si puo'
+        agire; cio' che l'interruzione *fa* dipende dal lavoro in corso e lo
+        decide la finestra, non questa scheda (vedi `abort_requested`).
+    """
     log_requested = pyqtSignal()
+    #: Emesso al clic su «Interrompi». La scheda non sa che cosa stia
+    #: lavorando -- un processo FreeCAD si uccide, una richiesta HTTP gia'
+    #: partita no -- quindi non decide nulla: chiede, e chi ha avviato il
+    #: lavoro sceglie. E' anche il motivo per cui questo modulo non importa
+    #: main_window: la dipendenza va in un verso solo.
+    abort_requested = pyqtSignal()
 
     def __init__(self, parent, *, i18n=None):
         super().__init__(parent)
@@ -481,9 +495,36 @@ class AnalysisOverlay(QWidget):
         self.cost.setProperty('i18n_skip', True)
         self.cost.hide()
         content.addWidget(self.cost)
+        # I due comandi stanno sulla stessa riga, nell'ordine in cui l'utente
+        # li ha chiesti: il log a sinistra, l'interruzione subito alla sua
+        # destra. La riga resta centrata come lo era il solo pulsante del log.
         self.log_button = QPushButton("Apri log AI")
+        self.log_button.setObjectName("analysisLogButton")
         self.log_button.clicked.connect(self.log_requested.emit)
-        content.addWidget(self.log_button, alignment=Qt.AlignmentFlag.AlignHCenter)
+        self.abort_button = QPushButton("Interrompi")
+        self.abort_button.setObjectName("analysisAbortButton")
+        self.abort_button.setToolTip(
+            "Interrompi l'operazione in corso: verrà chiesta conferma.")
+        self.abort_button.clicked.connect(self.abort_requested.emit)
+        # Nessuna chiamata a i18n qui, esattamente come per il pulsante
+        # accanto: il testo sorgente resta quello scritto sul pulsante e la
+        # traduzione la applica `retranslate_widgets` in fondo a __init__ (e a
+        # ogni cambio di lingua). Tradurre qui salverebbe il testo gia'
+        # tradotto come chiave della traduzione successiva.
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setSpacing(12)
+        buttons.addStretch()
+        buttons.addWidget(self.log_button)
+        buttons.addWidget(self.abort_button)
+        buttons.addStretch()
+        self.button_row = QWidget()
+        self.button_row.setLayout(buttons)
+        content.addWidget(self.button_row)
+        #: Vero solo mentre esiste un lavoro che ha senso interrompere. Nasce
+        #: falso: una scheda ferma non deve offrire di fermare nulla.
+        self._abortable = False
+        self.set_abortable(False)
         self._size_the_card()
         self.status.installEventFilter(self)
         outer.addWidget(self.card, alignment=Qt.AlignmentFlag.AlignHCenter)
@@ -610,8 +651,35 @@ class AnalysisOverlay(QWidget):
             self._size_the_card()
         return super().eventFilter(watched, event)
 
-    def start(self, title='Analisi AI in corso', status='Preparazione dei documenti…'):
-        """@brief Show the overlay for a new operation, with no tool yet claimed."""
+    def set_abortable(self, abortable):
+        """@brief Offer the abort action only while something can actually be stopped.
+
+        @param abortable True while an operation that the window can abort runs.
+        @note Spento E nascosto insieme, secondo la stessa disciplina degli
+            altri comandi di questo programma: un pulsante acceso su nessun
+            lavoro e' una promessa che non si puo' mantenere, e uno visibile ma
+            spento occupa il posto senza dire perche'.
+        @note Chi avvia il lavoro deve dichiararlo (`start(..., abortable=True)`):
+            il valore predefinito e' falso, cosi' un percorso nuovo che non ha
+            pensato all'interruzione non offre un pulsante che non farebbe nulla.
+        """
+        self._abortable = bool(abortable)
+        self.abort_button.setEnabled(self._abortable)
+        self.abort_button.setVisible(self._abortable)
+
+    def is_abortable(self):
+        """@brief Tell whether the card is currently offering the abort action."""
+        return self._abortable
+
+    def start(self, title='Analisi AI in corso', status='Preparazione dei documenti…',
+              abortable=False):
+        """@brief Show the overlay for a new operation, with no tool yet claimed.
+
+        @param title Heading of the card.
+        @param status First status line.
+        @param abortable True when the caller knows how to stop this operation.
+        """
+        self.set_abortable(abortable)
         self.title.setText(self.i18n.text(title) if self.i18n is not None else title)
         self.started_at = monotonic()
         self._hidden_at = None
@@ -729,9 +797,17 @@ class AnalysisOverlay(QWidget):
         self.spinner.update()
 
     def stop(self):
-        """@brief Hide the overlay and stop the animation."""
+        """@brief Hide the overlay and stop the animation.
+
+        @note Toglie anche l'interruzione: il lavoro e' finito (da solo o
+            perche' e' stato fermato), quindi da qui in poi non c'e' piu'
+            niente da fermare. `hide()` da solo non basta -- la scheda viene
+            nascosta anche a operazione in corso, durante la revisione dei
+            corpi, e li' il comando deve restare valido.
+        """
         self.timer.stop()
         self.set_progress(None, None)
+        self.set_abortable(False)
         self.hide()
 
     def hideEvent(self, event):

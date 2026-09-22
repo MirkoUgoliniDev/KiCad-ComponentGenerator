@@ -619,6 +619,13 @@ def main():
         import os
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import freecad_parts
+        # L'intervallo del battito arriva dal JSON, derivato dal timeout del
+        # watchdog in kicadgen.cad3d.process_log: questo script gira
+        # nell'interprete embedded di FreeCAD e non puo' importare quel modulo,
+        # quindi il numero viaggia nei parametri invece di essere riscritto qui
+        # -- due copie si scollegherebbero alla prima modifica e il watchdog
+        # tornerebbe a uccidere import sani.
+        freecad_parts.set_heartbeat_interval(data.get("heartbeat_interval_s"))
         for index, component in enumerate(components):
             base = _safe(component.get("name"), index)
             if component.get("render_3d", True) is False:

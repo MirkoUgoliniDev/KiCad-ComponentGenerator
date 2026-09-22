@@ -35,7 +35,8 @@ from PyQt6.QtWidgets import (
 from ..cad3d.annotations import EDGE_NAMES, FACE_NAMES, EdgeFilletAnnotation, FaceTextAnnotation
 from ..cad3d.body_params import Body3DParams
 from ..cad3d.step_generator import (
-    Cad3DError, find_freecadcmd, generate_3d_model, generate_castellated_3d_model,
+    CAD_ABORT_MESSAGE, Cad3DError, find_freecadcmd, generate_3d_model,
+    generate_castellated_3d_model,
 )
 from ..generators.castellated_module import (
     EDGE_LABELS, EDGES as CASTELLATED_EDGES, CastellatedModuleParams,
@@ -187,21 +188,24 @@ def _castellated_body_available(params) -> bool:
 
 
 def _generate_3d(params, body: Body3DParams, project_dir: Path, fillets, face_texts,
-                 progress=None, model_progress=None):
+                 progress=None, model_progress=None, cancel=None):
     """Genera il 3D con il generatore adatto al tipo di componente.
 
     I due modelli sono diversi in modo sostanziale: il pin header e' un
     corpo con pin cilindrici che sporgono sotto, il modulo castellated e'
     un PCB con i semi-fori tagliati sul bordo e i componenti sopra.
+
+    `cancel` e' il canale con cui il pulsante «Interrompi» della modale
+    chiede la fine del processo FreeCAD figlio (vedi step_generator).
     """
     if isinstance(params, CastellatedModuleParams):
         return generate_castellated_3d_model(
             params, body, project_dir, fillets=fillets, face_texts=face_texts,
-            progress=progress, model_progress=model_progress,
+            progress=progress, model_progress=model_progress, cancel=cancel,
         )
     return generate_3d_model(
         params, body, project_dir, fillets=fillets, face_texts=face_texts,
-        progress=progress, model_progress=model_progress,
+        progress=progress, model_progress=model_progress, cancel=cancel,
     )
 
 
@@ -310,6 +314,52 @@ def per_item_detail(message: str) -> bool:
     return any(_item_field_clause(clause) for clause in clauses)
 
 
+def accepts_keyword(function, name: str) -> bool:
+    """@brief Dice se si puo' passare `name=` a questa funzione senza TypeError.
+
+    @param function Funzione che si sta per chiamare.
+    @param name Nome del parametro facoltativo da passare.
+    @return True quando la firma lo dichiara, oppure quando ha un `**kwargs`
+        insieme ad almeno un parametro con un nome.
+    @note Regole e motivazioni sono quelle di `phase_kwargs`, di cui questa e'
+        la parte generale: un `**kwargs` DA SOLO e' l'impronta di un wrapper
+        scritto senza `functools.wraps`, quindi non dimostra nulla.
+    """
+    try:
+        import inspect
+        parameters = list(inspect.signature(function).parameters.values())
+    except (TypeError, ValueError):  # builtin o oggetto non introspezionabile
+        return False
+    named = [p for p in parameters if p.kind not in (
+        inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)]
+    for parameter in parameters:
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD and named:
+            return True
+        if parameter.name == name and parameter.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
+            return True
+    return False
+
+
+def cancel_kwargs(function, cancel) -> dict:
+    """@brief `{'cancel': evento}` solo se il generatore 3D accetta il canale.
+
+    @param function Generatore 3D che si sta per chiamare.
+    @param cancel Evento con cui la modale chiede di fermare il figlio FreeCAD.
+    @return Dizionario da espandere nella chiamata, vuoto se il canale non e'
+        accettato.
+    @note Stessa ragione di `phase_kwargs`: la funzione chiamata puo' essere
+        sostituita (prove, strumenti) da una che non conosce questo parametro,
+        e un TypeError li' farebbe fallire una generazione buona per colpa di
+        una funzionalita' accessoria.
+    @note A differenza dell'annuncio della fase, qui la rinuncia NON si perde
+        in silenzio: chi chiama deve dirlo nel log (vedi
+        `GenerateWorker._generation_kwargs`), perche' una modale che offre
+        «Interrompi» su un lavoro non interrompibile prometterebbe il falso.
+    """
+    return {"cancel": cancel} if accepts_keyword(function, "cancel") else {}
+
+
 def phase_kwargs(function, callback) -> dict:
     """@brief `{'phase': callback}` solo se la funzione di servizio lo accetta.
 
@@ -387,6 +437,39 @@ class GenerateWorker(QThread):
         self.body = body
         self.fillets = fillets or []
         self.face_texts = face_texts or []
+        #: Canale di rinuncia condiviso col processo FreeCAD figlio. Vive sul
+        #: worker e non sulla finestra: e' la corsa a poter essere fermata, e
+        #: una corsa successiva deve nascere con un canale pulito.
+        self.cancel = threading.Event()
+
+    def _cancel_kwargs(self, generator) -> dict:
+        """@brief Il canale di rinuncia da passare al generatore, se lo accetta.
+
+        @param generator La funzione di generazione 3D che si sta per chiamare.
+        @return `{'cancel': evento}` oppure `{}`.
+        @note Quando il canale non viene accettato la corsa NON e' fermabile, e
+            la cosa si dice invece di scoprirla premendo un pulsante che non fa
+            niente. La riga finisce nel log e sulla modale come ogni altro
+            avviso di questo worker.
+        """
+        kwargs = cancel_kwargs(generator, self.cancel)
+        if not kwargs:
+            self.progress.emit(
+                "ATTENZIONE: il generatore 3D in uso non accetta il canale di "
+                "interruzione; questa generazione non potrà essere fermata.")
+        return kwargs
+
+    def request_abort(self) -> None:
+        """@brief Ask the FreeCAD child of this run to die.
+
+        @note Non uccide il QThread: l'ordine viaggia sul canale e il figlio
+            viene ucciso da `process_log.run_logged`, cioe' dalla stessa
+            macchina del watchdog. Il worker esce poi dalla sua via d'errore
+            normale (`cad3d_error` e `finished`), che e' cio' che riporta la
+            finestra in quiete: terminare il thread di forza lascerebbe invece
+            un processo figlio orfano e la GUI senza segnale di fine.
+        """
+        self.cancel.set()
 
     def _model_progress(self, done: int, total: int) -> None:
         """@brief Porta in modale l'unico conteggio vero della generazione.
@@ -444,11 +527,15 @@ class GenerateWorker(QThread):
                 # solido comincia davvero.
                 self.phase.emit('kicad', 'abbinamento modelli KiCad', 0, 0)
                 self.progress.emit('Generazione del modello 3D tramite FreeCAD…')
-                result = _generate_3d(
+                # Risolto una volta sola: introspezione e chiamata devono
+                # riguardare lo stesso oggetto, anche quando e' stato sostituito.
+                generator = _generate_3d
+                result = generator(
                     self.params, self.body, self.project_dir,
                     self.fillets, self.face_texts,
                     progress=self._cad_progress,
                     model_progress=self._model_progress,
+                    **self._cancel_kwargs(generator),
                 )
                 for warning in result.get('warnings', []):
                     self.warning.emit(warning)
@@ -495,6 +582,25 @@ class Cad3DWorker(QThread):
         self.project_dir = project_dir
         self.fillets = fillets
         self.face_texts = face_texts
+        #: Vedi GenerateWorker.cancel.
+        self.cancel = threading.Event()
+
+    def _cancel_kwargs(self, generator) -> dict:
+        """@brief Vedi GenerateWorker._cancel_kwargs: stesso canale, stesso avviso."""
+        kwargs = cancel_kwargs(generator, self.cancel)
+        if not kwargs:
+            self.progress.emit(
+                "ATTENZIONE: il generatore 3D in uso non accetta il canale di "
+                "interruzione; questa generazione non potrà essere fermata.")
+        return kwargs
+
+    def request_abort(self) -> None:
+        """@brief Ask the FreeCAD child of this regeneration to die.
+
+        @note Vedi GenerateWorker.request_abort: stesso canale, stessa uscita
+            dalla via d'errore esistente (`error` e `finished`).
+        """
+        self.cancel.set()
 
     def _model_progress(self, done: int, total: int) -> None:
         """@brief Porta in modale l'unico conteggio vero della generazione.
@@ -522,11 +628,14 @@ class Cad3DWorker(QThread):
             # dall'abbinamento dei modelli di KiCad. `_cad_progress` passa a
             # `freecad` quando il solido comincia davvero.
             self.phase.emit('kicad', 'abbinamento modelli KiCad', 0, 0)
-            result = _generate_3d(
+            # Vedi GenerateWorker.run: un solo oggetto per introspezione e chiamata.
+            generator = _generate_3d
+            result = generator(
                 self.params, self.body, self.project_dir,
                 self.fillets, self.face_texts,
                 progress=self._cad_progress,
                 model_progress=self._model_progress,
+                **self._cancel_kwargs(generator),
             )
             for note in result.get("notes", []):
                 self.progress.emit(note)
@@ -833,6 +942,22 @@ class MainWindow(QMainWindow):
         self.pin_map: dict | None = None
         self._last_mesh_path: Path | None = None
         self._model_revision = 0
+        #: Revisione dell'analisi AI, gemella di `_model_revision` per i
+        #: risultati CAD tardivi. Una chiamata HTTP gia' partita non si puo'
+        #: interrompere (urllib bloccante): interromperla vuol dire
+        #: ABBANDONARLA, e il suo risultato -- che arrivera' comunque -- va
+        #: riconosciuto come scaduto e buttato. Il worker viene marchiato con
+        #: il valore corrente alla partenza; l'interruzione lo incrementa.
+        self._analysis_revision = 0
+        #: Worker abbandonati che stanno ancora girando: restano referenziati
+        #: (un QThread vivo raccolto dal garbage collector abbatte il
+        #: processo) e continuano a contare per la guardia di chiusura, ma non
+        #: sono piu' candidati a essere interrotti una seconda volta.
+        self._abandoned_workers: list = []
+        #: Vero fra la conferma dell'interruzione e la fine effettiva del
+        #: lavoro che si sta fermando: impedisce che un secondo clic riapra la
+        #: domanda o mandi un secondo ordine.
+        self._abort_pending = False
         self._acquisition_completed = False
         self._config = load_config()
         self.profile_store = profile_store or ProfileStore(legacy_config=self._config, legacy_path=config_path())
@@ -1359,6 +1484,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         self.analysis_overlay = AnalysisOverlay(central, i18n=self.i18n)
         self.analysis_overlay.log_requested.connect(self.ai_log_dialog.exec)
+        self.analysis_overlay.abort_requested.connect(self._request_abort)
         self._analysis_tabs_enabled = None
         # Apply the persisted language to all catalogued widgets on first render.
         self.i18n.retranslate_widgets(self)
@@ -2225,9 +2351,12 @@ class MainWindow(QMainWindow):
         self._extract_worker.phase.connect(self._on_phase)
         self._extract_worker.review_requested.connect(self._on_review_requested)
         self._extract_worker.finished.connect(self._on_extract_finished)
+        # Marchio della corsa: da qui in poi il risultato di questo worker vale
+        # solo finche' la finestra non dichiara scaduta la corsa (interruzione).
+        self._extract_worker._analysis_revision = self._analysis_revision
         self._analysis_tabs_enabled = self.tabs.isEnabled()
         self.tabs.setEnabled(False)
-        self.analysis_overlay.start()
+        self.analysis_overlay.start(abortable=True)
         self._extract_worker.start()
 
     def _begin_ai_run(self, title: str) -> None:
@@ -2763,9 +2892,12 @@ class MainWindow(QMainWindow):
         self._reconcile_worker.progress.connect(self._on_ai_progress)
         self._reconcile_worker.phase.connect(self._on_phase)
         self._reconcile_worker.finished.connect(self._on_extract_finished)
+        # Vedi _start_extract_worker: marchio della corsa per i risultati tardivi.
+        self._reconcile_worker._analysis_revision = self._analysis_revision
         self._analysis_tabs_enabled = self.tabs.isEnabled()
         self.tabs.setEnabled(False)
-        self.analysis_overlay.start("Rilancio dell'inventario", announcement)
+        self.analysis_overlay.start("Rilancio dell'inventario", announcement,
+                                    abortable=True)
         self._reconcile_worker.start()
 
     def _on_reconciled(self, report) -> None:
@@ -2780,6 +2912,10 @@ class MainWindow(QMainWindow):
             _on_extract_finished come dopo l'estrazione.
         """
         from dataclasses import replace
+        if not self._analysis_result_is_current():
+            self._append_log("Inventario di un rilancio interrotto dall'utente: scartato, "
+                             "i componenti restano come sono.")
+            return
         base = self._last_extracted
         if base is None:
             self._on_extract_error("Nessuna estrazione a cui applicare l'inventario rilanciato.")
@@ -2803,7 +2939,237 @@ class MainWindow(QMainWindow):
             self.tabs.setEnabled(self._analysis_tabs_enabled)
             self._analysis_tabs_enabled = None
 
+    # ── Interruzione dell'operazione in corso ──────────────────────
+
+    #: Le quattro vie che aprono la modale, con cio' che di ciascuna si puo'
+    #: DAVVERO fermare. La distinzione non e' un dettaglio interno: e' quello
+    #: che si promette a chi preme il pulsante.
+    #:
+    #: * `cad` -- il lavoro sta in un processo figlio (freecadcmd) avviato da
+    #:   questo programma, che lo sa uccidere: interrompere vuol dire ucciderlo.
+    #: * `ai` -- il lavoro e' una richiesta HTTP gia' partita verso OpenRouter,
+    #:   fatta con `urllib` bloccante (`kicadgen/services/openrouter.py`).
+    #:   Nessuno la puo' annullare dall'esterno del thread che la sta
+    #:   aspettando, e soprattutto ANNULLARE NON RIMBORSA: il modello sta gia'
+    #:   elaborando cio' che e' stato inviato. Interrompere vuol dire
+    #:   abbandonare la corsa, restituire subito la finestra e scartare il
+    #:   risultato quando arrivera'. Fingere di "fermarla" sarebbe una bugia
+    #:   sul denaro speso.
+    _ABORTABLE_OPERATIONS = (
+        ("cad", "_worker", "Generazione di footprint e modello 3D"),
+        ("cad", "_cad3d_worker", "Rigenerazione del modello 3D"),
+        ("ai", "_extract_worker", "Analisi AI dei documenti"),
+        ("ai", "_reconcile_worker", "Rilancio dell'inventario"),
+    )
+
+    def _abortable_operation(self):
+        """@brief L'operazione in corso che «Interrompi» puo' fermare, se c'e'.
+
+        @return (natura, worker, fase) con natura in {'cad', 'ai'}, oppure None
+            quando non c'e' nulla da fermare.
+        @note Un worker gia' abbandonato NON e' piu' un candidato: continua a
+            girare (e a contare per la guardia di chiusura) ma la finestra e'
+            gia' tornata all'utente, quindi non c'e' piu' niente da chiedergli.
+        """
+        for kind, attribute, label in self._ABORTABLE_OPERATIONS:
+            worker = getattr(self, attribute, None)
+            if worker is None or not worker.isRunning():
+                continue
+            if any(worker is abandoned for abandoned in self._abandoned_workers):
+                continue
+            return kind, worker, label
+        return None
+
+    def _abort_phase_text(self, label: str) -> str:
+        """@brief La fase da scrivere nel log e nella domanda di conferma.
+
+        @param label Nome dell'operazione (vedi _ABORTABLE_OPERATIONS).
+        @return Operazione e, quando la modale lo dichiara, strumento al lavoro.
+        @note «A che punto era» e' l'unica cosa che rende utile la riga nel
+            log: due mesi dopo, «interrotta» da sola non dice se si stavano
+            abbinando modelli o costruendo il solido.
+        """
+        tool = ""
+        label_widget = getattr(self.analysis_overlay, "tool", None)
+        if label_widget is not None and label_widget.isVisibleTo(self.analysis_overlay):
+            tool = " ".join(label_widget.text().split())
+        return f"{label} — {tool}" if tool else label
+
+    def _confirm_abort(self, kind: str, phase: str) -> bool:
+        """@brief Chiede conferma dicendo che cosa si perde, senza addolcirlo.
+
+        @param kind 'cad' o 'ai' (vedi _ABORTABLE_OPERATIONS).
+        @param phase Fase in corso, come la scrive _abort_phase_text.
+        @return True solo se l'utente ha risposto di si'.
+        @note Una domanda sola, con la risposta prudente preselezionata:
+            interrompere butta via minuti di attesa o denaro gia' speso, e chi
+            preme il pulsante puo' averlo fatto per sbaglio.
+        @note Nel caso `ai` la spesa va detta QUI, prima del danno: la
+            richiesta e' gia' partita e nessuna interfaccia la puo' richiamare.
+        """
+        if kind == "cad":
+            detail = self.i18n.text(
+                "Il processo FreeCAD in corso verrà terminato e il modello 3D non "
+                "sarà completato: il lavoro fatto finora va perso e la generazione "
+                "andrà rifatta da capo.\n\n"
+                "Se in questo momento si stanno misurando modelli della libreria "
+                "KiCad, l'interruzione ha effetto appena quella misura finisce.")
+        else:
+            detail = self.i18n.text(
+                "La richiesta già inviata al modello NON si può annullare: è già "
+                "stata addebitata e interromperla non la rimborsa.\n\n"
+                "L'analisi viene abbandonata, la finestra torna subito utilizzabile "
+                "e il risultato, se arriverà, verrà scartato: il denaro già speso "
+                "resta speso e il lavoro andrà rifatto (e ripagato) da capo.")
+        answer = QMessageBox.question(
+            self, self.i18n.text("Interrompere l'operazione?"),
+            f"{phase}\n\n{detail}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _request_abort(self) -> None:
+        """@brief Slot del pulsante «Interrompi» della modale.
+
+        @note Due clic non fanno due interruzioni: `_abort_pending` copre
+            l'intervallo fra la conferma e la fine effettiva del lavoro, che
+            per il CAD non e' istantanea (il figlio deve morire e il worker
+            deve uscire dalla sua via d'errore).
+        @note La domanda gira un event loop annidato: fra la domanda e la
+            risposta il lavoro puo' finire da solo. Si ricontrolla dopo, e in
+            quel caso non si ordina niente a nessuno.
+        """
+        if self._abort_pending:
+            return
+        operation = self._abortable_operation()
+        if operation is None:
+            # Il lavoro e' finito fra il clic e questo slot: la finestra sta
+            # gia' tornando da sola e il pulsante non ha piu' un oggetto.
+            self.analysis_overlay.set_abortable(False)
+            return
+        kind, worker, label = operation
+        phase = self._abort_phase_text(label)
+        if not self._confirm_abort(kind, phase):
+            # Rifiutare non tocca nulla: il lavoro continua e il pulsante
+            # resta dov'era, per ripensarci.
+            return
+        if self._abort_pending or not worker.isRunning():
+            self._append_log(
+                f"Interruzione chiesta dall'utente ({phase}), ma nel frattempo "
+                "l'operazione era già terminata: niente da fermare.")
+            self.analysis_overlay.set_abortable(False)
+            return
+        self._abort_pending = True
+        self.analysis_overlay.set_abortable(False)
+        if kind == "cad":
+            self._abort_cad_run(worker, phase)
+        else:
+            self._abort_ai_run(worker, phase)
+
+    def _abort_cad_run(self, worker, phase: str) -> None:
+        """@brief Uccide il processo FreeCAD e lascia che il worker finisca da se'.
+
+        @param worker GenerateWorker o Cad3DWorker in corso.
+        @param phase Fase in corso, per il log.
+        @note La modale resta finche' il worker non emette `finished`: e' quel
+            segnale a rimettere in piedi schede, pulsanti e testo del comando,
+            ed e' la via che esiste gia' per ogni altro modo in cui il 3D non
+            si completa. Anticiparla a mano vorrebbe dire avere due percorsi di
+            ripristino da tenere allineati per sempre.
+        """
+        self._on_ai_progress(
+            f"INTERRUZIONE chiesta dall'utente durante: {phase}. "
+            "Il processo FreeCAD viene terminato; il modello 3D non sarà completato.")
+        self.analysis_overlay.set_status(self.i18n.text(
+            "Interruzione in corso: chiusura del processo FreeCAD…"))
+        worker.request_abort()
+
+    def _abort_ai_run(self, worker, phase: str) -> None:
+        """@brief Abbandona la corsa AI: la finestra torna subito, il risultato si scarta.
+
+        @param worker ExtractWorker o ReconcileWorker in corso.
+        @param phase Fase in corso, per il log.
+        @note Non si finge di aver fermato la chiamata: il thread resta vivo
+            finche' `urllib` non restituisce, e per questo il worker continua a
+            contare per la guardia di `closeEvent` -- chiudere la finestra con
+            un QThread vivo abbatte il processo.
+        @note Cio' che cambia e' la VALIDITA' del suo risultato: si incrementa
+            `_analysis_revision`, esattamente come `_invalidate_generated_mesh`
+            fa con i risultati CAD tardivi, e i segnali che arrivano dopo
+            vengono riconosciuti come scaduti e scartati.
+        @note I comandi che spendono altro denaro (estrazione, rilancio) NON
+            vengono riaccesi qui: finche' la richiesta abbandonata e' in volo
+            `_background_work_running()` e' vero, e riaccenderli prometterebbe
+            un'operazione che partirebbe subito con un rifiuto silenzioso. Li
+            riaccende la fine della corsa fantasma, in `_on_extract_finished`.
+        """
+        self._analysis_revision += 1
+        self._abandoned_workers.append(worker)
+        self._on_ai_progress(
+            f"INTERRUZIONE chiesta dall'utente durante: {phase}. La richiesta già "
+            "inviata al modello non si può annullare ed è già a pagamento: la corsa "
+            "viene abbandonata e il suo risultato, quando arriverà, verrà scartato.")
+        self._auto_after_extraction = False
+        self._auto_generation_params = None
+        self._extract_finish_pending = False
+        # Il consuntivo di cio' che e' gia' stato fatturato resta sotto il
+        # pulsante: dopo un'interruzione e' l'informazione piu' utile che ci
+        # sia. Non comprende la richiesta ancora in volo, che verra' pagata
+        # lo stesso ma non ha ancora restituito i propri conteggi: e' scritto
+        # nella riga di log qui sopra.
+        self._show_ai_cost()
+        self._hide_analysis_overlay()
+        self.btn_extract_ai.setText(self.i18n.text("Estrai parametri con AI"))
+        self._apply_component_name_gate()
+        self._refresh_ai_log_button()
+        # Niente da attendere: la finestra e' gia' tornata all'utente.
+        self._abort_pending = False
+
+    def _analysis_result_is_current(self) -> bool:
+        """@brief Dice se il risultato che sta arrivando appartiene alla corsa valida.
+
+        @return False per i segnali di una corsa abbandonata con «Interrompi».
+        @note Gemello di `_cad_result_is_current`: stesso meccanismo (un
+            numero di revisione impresso sul worker alla partenza, confrontato
+            con quello della finestra) applicato ai worker dell'analisi AI.
+            Una chiamata diretta -- non via segnale -- non ha mittente e vale
+            sempre: e' il caso di `_on_extracted` chiamato da `_on_reconciled`.
+        """
+        worker = self.sender()
+        if worker is None:
+            return True
+        return getattr(worker, "_analysis_revision",
+                       self._analysis_revision) == self._analysis_revision
+
+    def _forget_abandoned_worker(self, worker) -> None:
+        """@brief Lascia andare un worker abbandonato che ha finalmente finito.
+
+        @param worker Worker che ha appena emesso `finished`.
+        @note Si libera lo slot solo se e' ancora lui: nel frattempo l'utente
+            puo' aver avviato un'altra analisi, e azzerare lo slot di quella
+            nuova la renderebbe invisibile alla guardia di chiusura.
+        """
+        self._abandoned_workers = [
+            other for other in self._abandoned_workers if other is not worker]
+        for _, attribute, _ in self._ABORTABLE_OPERATIONS:
+            if getattr(self, attribute, None) is worker:
+                setattr(self, attribute, None)
+
     def _on_extract_finished(self) -> None:
+        if not self._analysis_result_is_current():
+            # Corsa abbandonata con «Interrompi»: la finestra e' gia' tornata
+            # all'utente da un pezzo. Qui si prende atto che la chiamata a
+            # pagamento e' finalmente rientrata, si lascia andare il worker e
+            # si riaccendono i comandi che erano spenti perche' girava.
+            worker = self.sender()
+            self._forget_abandoned_worker(worker)
+            self._append_log(
+                "La corsa interrotta dall'utente è terminata adesso: il suo "
+                "risultato è stato scartato, i comandi tornano disponibili.")
+            self._apply_component_name_gate()
+            self._refresh_reopen_review_button()
+            self._refresh_ai_log_button()
+            return
         # Modal rename/validation dialogs run a nested Qt event loop. The worker
         # may finish there, before _on_extracted has populated all fields.
         if self._applying_extraction:
@@ -3208,6 +3574,18 @@ class MainWindow(QMainWindow):
         return new_name
 
     def _on_extracted(self, params: ExtractedParams) -> None:
+        """@brief Applica i parametri estratti, se sono ancora quelli attesi.
+
+        @param params Parametri estratti dal worker.
+        @note Un risultato che arriva da una corsa interrotta con «Interrompi»
+            viene scartato qui: l'utente ha gia' ripreso in mano la finestra e
+            puo' aver cambiato campi, nome o componente. Vedi
+            `_analysis_result_is_current`.
+        """
+        if not self._analysis_result_is_current():
+            self._append_log("Risultato di un'analisi interrotta dall'utente: scartato, "
+                             "i campi restano come sono.")
+            return
         self._applying_extraction = True
         try:
             self._apply_extracted_result(params)
@@ -3446,6 +3824,17 @@ class MainWindow(QMainWindow):
             self._append_log(f"Sigle serigrafate {line}")
 
     def _on_extract_error(self, message: str) -> None:
+        """@brief Riporta la finestra in quiete e dice perche' l'analisi e' fallita.
+
+        @param message Testo dell'errore, come arriva dal worker.
+        @note L'errore di una corsa abbandonata con «Interrompi» non apre
+            nessuna finestra: l'utente ha gia' deciso di lasciarla perdere, e
+            un avviso di guasto su cio' che ha interrotto lui sarebbe un
+            rimprovero per una sua scelta. Resta nel log, dove serve.
+        """
+        if not self._analysis_result_is_current():
+            self._append_log(f"Errore di un'analisi interrotta dall'utente: {message}")
+            return
         self._auto_generation_params = None
         self._auto_after_extraction = False
         self._hide_analysis_overlay()
@@ -4695,7 +5084,8 @@ class MainWindow(QMainWindow):
             self._generation_menu_enabled = self.menuBar().isEnabled()
             self.menuBar().setEnabled(False)
             self.btn_extract_ai.setEnabled(False)
-            self.analysis_overlay.start('Generazione footprint e modello 3D', 'Preparazione della generazione…')
+            self.analysis_overlay.start('Generazione footprint e modello 3D',
+                                        'Preparazione della generazione…', abortable=True)
         try:
             self._worker.start()
         except Exception as exc:
@@ -4703,6 +5093,16 @@ class MainWindow(QMainWindow):
             self._on_generation_finished()
 
     def _on_generation_finished(self):
+        """@brief Riporta la finestra in quiete alla fine della generazione.
+
+        @note E' la stessa via per l'esito buono, per il guasto e per
+            l'interruzione chiesta dall'utente: il worker emette `finished` in
+            tutti e tre i casi. L'interruzione si riconosce da
+            `_abort_pending`, che viene azzerato qui perche' qui finisce
+            davvero il lavoro che si stava fermando.
+        """
+        aborted = self._abort_pending
+        self._abort_pending = False
         self.btn_generate.setEnabled(True)
         if not self._automatic_generation_active:
             return
@@ -4716,7 +5116,17 @@ class MainWindow(QMainWindow):
             self.tabs.setCurrentIndex(3)
         expected_3d = getattr(self, "_automatic_3d_expected", True)
         complete = self._automatic_footprint_done and (self._automatic_3d_done or not expected_3d)
-        if self._automatic_generation_errors or not complete:
+        if aborted:
+            # Nessun avviso di «generazione incompleta»: l'incompletezza e'
+            # esattamente cio' che l'utente ha chiesto, e restituirgliela come
+            # un guasto sarebbe rimproverargli la sua decisione. Il consuntivo
+            # va comunque scritto, perche' dice che cosa e' rimasto sul disco.
+            self._on_ai_progress(
+                'Generazione interrotta dall’utente. '
+                + ('Il footprint scritto prima dell’interruzione resta sul disco; '
+                   if self._automatic_footprint_done else 'Nessun footprint scritto; ')
+                + 'il modello 3D non è stato completato.')
+        elif self._automatic_generation_errors or not complete:
             details = ('\n'.join(self._automatic_generation_errors)
                        or self.i18n.text('La generazione non ha prodotto entrambi i risultati.'))
             prefix = (self.i18n.text('Footprint generato, modello 3D non completato.') + '\n'
@@ -4758,7 +5168,18 @@ class MainWindow(QMainWindow):
         self._show_generated_mesh(Path(path))
 
     def _on_cad3d_error(self, message: str) -> None:
+        """@brief Registra il mancato completamento del modello 3D.
+
+        @param message Testo dell'esito, come arriva dal worker.
+        @note L'interruzione chiesta dall'utente passa da qui -- e' la via
+            d'uscita che esisteva gia' -- ma non si chiama «ERRORE»: nessun
+            guasto e' avvenuto, e non entra nell'elenco dei guasti da
+            riportare a fine corsa.
+        """
         if not self._cad_result_is_current():
+            return
+        if CAD_ABORT_MESSAGE in message:
+            self._append_log(f"INTERROTTO 3D: {message}")
             return
         self._append_log(f"ERRORE 3D: {message}")
         if self._automatic_generation_active:
@@ -5106,7 +5527,7 @@ class MainWindow(QMainWindow):
         # e generazione sono un'unica operazione continua (vedi clear_cost).
         self.analysis_overlay.clear_cost()
         self.analysis_overlay.start('Generazione modello 3D',
-                                    'Avvio di FreeCAD…')
+                                    'Avvio di FreeCAD…', abortable=True)
         self._cad3d_worker.start()
 
     def _on_regen_3d_progress(self, message: str) -> None:
@@ -5114,6 +5535,12 @@ class MainWindow(QMainWindow):
         self.analysis_overlay.set_status(message)
 
     def _on_regen_3d_finished(self) -> None:
+        """@brief Chiude la modale e riabilita il comando, in ogni esito.
+
+        @note Vale anche per l'interruzione: `finished` scatta comunque, ed e'
+            qui che si chiude la richiesta di fermarsi (`_abort_pending`).
+        """
+        self._abort_pending = False
         self._hide_analysis_overlay()
         self.btn_regen_3d.setEnabled(True)
         self.btn_regen_3d.setText(self.i18n.text(
@@ -5177,7 +5604,20 @@ class MainWindow(QMainWindow):
             self._append_log(f"Anteprima mesh non disponibile: {exc}")
 
     def _on_regen_3d_error(self, message: str) -> None:
+        """@brief Scrive nel log e sulla barra 3D perche' lo STEP non c'e'.
+
+        @param message Testo dell'esito, come arriva dal worker.
+        @note Come `_on_cad3d_error`: l'interruzione chiesta dall'utente non e'
+            un guasto, quindi non viene annunciata come tale ne' nel log ne'
+            sulla barra di stato.
+        """
         if not self._cad_result_is_current():
+            return
+        if CAD_ABORT_MESSAGE in message:
+            self._append_log(f"INTERROTTO 3D: {message}")
+            self.label_3d_status.setText(self.i18n.text(
+                "Generazione interrotta dall'utente: il modello 3D non è stato "
+                "aggiornato."))
             return
         self._append_log(f"ERRORE 3D: {message}")
         self.label_3d_status.setText(self.i18n.tr(

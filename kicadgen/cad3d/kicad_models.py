@@ -2092,9 +2092,10 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
                 # which looks like a real component, whatever its colour.
                 component["render_3d"] = False
                 report["render_3d"] = False
-                note(f"YOLO-only hypothesis {component.get('name')}: kept for review, omitted from 3D.")
+                note(f"Solo ipotesi del rilevatore per {component.get('name')}: tenuta per la revisione, "
+                     "esclusa dal 3D.")
     _synchronize_preview_variants(components, note)
     if progress is not None:
         progress(total, total)
-    note(f"Attached KiCad models (explicit choices or mechanical estimates): {resolved}.")
+    note(f"Modelli KiCad agganciati (scelte esplicite o compatibilita' meccanica): {resolved}.")
     return resolved

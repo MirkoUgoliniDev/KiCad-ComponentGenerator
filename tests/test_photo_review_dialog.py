@@ -19,8 +19,11 @@ from PyQt6.QtWidgets import (
 )
 
 from kicadgen.gui.photo_review_dialog import (
-    DRAW_CLICK_PX, MIN_HANDLE_SIZE_MM, PhotoReviewDialog, PhotoTransform,
-    _ResizeHandle,
+    BOARD_BACKDROP_COLOR, BOARD_BORDER_COLOR, DRAW_CLICK_PX,
+    MIN_HANDLE_SIZE_MM, NUMBER_LABEL_BACKING_COLOR, PHOTO_DIMMED,
+    PHOTO_DIMMED_OPACITY, PHOTO_FULL, PHOTO_HIDDEN, PHOTO_STATES,
+    PhotoReviewDialog, PhotoTransform, SELECTION_HALO_COLOR,
+    _BoardBackdrop, _ResizeHandle,
 )
 
 
@@ -353,9 +356,16 @@ def test_a_rectangle_drawn_smaller_than_the_handle_floor_is_held_at_it(dialog, a
 
 
 def _bands(dialog):
-    """Rubber bands currently on the scene; the resize grips are not bands."""
+    """Rubber bands currently on the scene.
+
+    The resize grips are not bands, and neither is the board backdrop: both
+    are permanent furniture of the canvas, while a band exists only while a
+    drawing gesture is in progress. They are told apart by type on purpose, so
+    that a band left behind still fails this check.
+    """
     return [item for item in dialog.scene.items()
-            if isinstance(item, QGraphicsRectItem) and not isinstance(item, _ResizeHandle)]
+            if isinstance(item, QGraphicsRectItem)
+            and not isinstance(item, (_ResizeHandle, _BoardBackdrop))]
 
 
 def _move_event(dialog, point, buttons):
@@ -1238,3 +1248,392 @@ def test_the_armed_pointer_survives_a_pan_and_goes_back_to_normal_when_disarmed(
     assert dialog.view.viewport().cursor().shape() == Qt.CursorShape.CrossCursor
     dialog.set_draw_mode(False)
     assert dialog.view.viewport().cursor().shape() != Qt.CursorShape.CrossCursor
+
+
+# --------------------------------------------------------------------------
+# Backdrop of the canvas: the photograph whole, attenuated or taken away
+# --------------------------------------------------------------------------
+
+def _toolbar_buttons(dialog):
+    """Buttons of the top toolbar, in the order the user reads them."""
+    layout = dialog.layout()
+    for index in range(layout.count()):
+        row = layout.itemAt(index).layout()
+        if row is None:
+            continue
+        widgets = [row.itemAt(position).widget() for position in range(row.count())]
+        if dialog.fit_button in widgets:
+            return [widget for widget in widgets if widget is not None]
+    raise AssertionError("the toolbar holding the view controls was not found")
+
+
+def _view_image(dialog, app):
+    """Picture of the canvas exactly as the user sees it, backdrop included."""
+    app.processEvents()
+    return dialog.view.grab().toImage()
+
+
+def _region(dialog, item):
+    """Viewport rectangle around one outline, with room for the pen and halo."""
+    return dialog.view.mapFromScene(item.photo_bounds()).boundingRect().adjusted(-8, -8, 8, 8)
+
+
+def _pixels_near(image, rect, color, tolerance=40):
+    """How many pixels of a region are within ``tolerance`` of a colour, per channel."""
+    found = 0
+    for y in range(max(0, rect.top()), min(image.height() - 1, rect.bottom()) + 1):
+        for x in range(max(0, rect.left()), min(image.width() - 1, rect.right()) + 1):
+            pixel = image.pixelColor(x, y)
+            if (abs(pixel.red() - color.red()) <= tolerance
+                    and abs(pixel.green() - color.green()) <= tolerance
+                    and abs(pixel.blue() - color.blue()) <= tolerance):
+                found += 1
+    return found
+
+
+def _outline_pixels(dialog, app):
+    """Pixels drawn in each outline's own status colour, one count per outline."""
+    image = _view_image(dialog, app)
+    return [_pixels_near(image, _region(dialog, item), item.pen().color())
+            for item in dialog._items]
+
+
+def _scene_geometry(dialog):
+    """Every outline's scene polygon and envelope, the geometry an edit would move."""
+    return [([(point.x(), point.y()) for point in item.mapToScene(item.polygon())],
+             item.photo_bounds().getCoords())
+            for item in dialog._items]
+
+
+def _relative_luminance(color):
+    """WCAG relative luminance of a QColor, sRGB channels linearised."""
+    channels = []
+    for value in (color.redF(), color.greenF(), color.blueF()):
+        channels.append(value / 12.92 if value <= .03928 else ((value + .055) / 1.055) ** 2.4)
+    return .2126 * channels[0] + .7152 * channels[1] + .0722 * channels[2]
+
+
+def _contrast_ratio(first, second):
+    """WCAG contrast ratio between two colours, 1.0 (identical) to 21.0."""
+    light, dark = sorted((_relative_luminance(QColor(first)), _relative_luminance(QColor(second))))
+    return (dark + .05) / (light + .05)
+
+
+def test_the_backdrop_control_is_a_view_control_and_cycles_three_states(dialog, app):
+    """@brief One button next to fit and zoom, cycling photograph -> attenuated -> hidden.
+
+    It is a view control, so it belongs after the zoom buttons and not next to
+    the editing ones; it states the state it is in, and stays visibly pressed
+    while the canvas is not showing the real photograph, so a hidden board is
+    never mistaken for an empty one.
+    """
+    buttons = _toolbar_buttons(dialog)
+    assert dialog.photo_button in buttons
+    assert buttons.index(dialog.photo_button) > buttons.index(dialog.zoom_out_button)
+    assert buttons.index(dialog.photo_button) > buttons.index(dialog.delete_button)
+    assert dialog.photo_button.isCheckable()
+    assert dialog.photo_state() == PHOTO_FULL
+    assert dialog.photo_button.text() == "Foto: intera"
+    assert not dialog.photo_button.isChecked()
+    QTest.mouseClick(dialog.photo_button, Qt.MouseButton.LeftButton)
+    assert dialog.photo_state() == PHOTO_DIMMED
+    assert dialog.photo_button.text() == "Foto: attenuata"
+    assert dialog.photo_button.isChecked()
+    QTest.mouseClick(dialog.photo_button, Qt.MouseButton.LeftButton)
+    assert dialog.photo_state() == PHOTO_HIDDEN
+    assert dialog.photo_button.text() == "Foto: nascosta"
+    assert dialog.photo_button.isChecked()
+    # Negative: the cycle closes, it does not get stuck on the last state.
+    QTest.mouseClick(dialog.photo_button, Qt.MouseButton.LeftButton)
+    assert dialog.photo_state() == PHOTO_FULL
+    assert not dialog.photo_button.isChecked()
+
+
+def test_hiding_the_photograph_keeps_every_outline_in_place_and_drawn(dialog, app):
+    """@brief The geometry does not move and the outlines are still painted.
+
+    This is the whole point of the control: on a crowded board a thin outline
+    over a dark photograph is unreadable, so the photograph goes away — but an
+    outline that moved, or that stopped being drawn, would make the review
+    worse than the problem it fixes. Both are measured: the scene geometry is
+    compared before and after, and the canvas is rendered and counted.
+    """
+    dialog.component_list.setCurrentRow(0)
+    before_geometry = _scene_geometry(dialog)
+    before_pixels = _outline_pixels(dialog, app)
+    assert all(count > 0 for count in before_pixels)
+    dialog.set_photo_state(PHOTO_HIDDEN)
+    assert not dialog.photo_item.isVisible()
+    assert dialog.board_backdrop.isVisible()
+    assert _scene_geometry(dialog) == before_geometry
+    assert _outline_pixels(dialog, app) == before_pixels
+    image = _view_image(dialog, app)
+    board = dialog.view.mapFromScene(dialog.photo_rect).boundingRect()
+    # Negative: not one pixel of the board still shows the photograph itself.
+    assert _pixels_near(image, board, QColor("#243b28"), tolerance=6) == 0
+    # ...and what replaced it is the declared neutral backdrop.
+    assert _pixels_near(image, board, QColor(BOARD_BACKDROP_COLOR), tolerance=2) > 0
+    assert image.pixelColor(dialog.view.mapFromScene(QPointF(360, 15))) == QColor(BOARD_BACKDROP_COLOR)
+    dialog.set_photo_state(PHOTO_FULL)
+    assert dialog.photo_item.isVisible()
+    assert dialog.photo_item.opacity() == 1.0
+    assert not dialog.board_backdrop.isVisible()
+    assert _scene_geometry(dialog) == before_geometry
+
+
+def test_the_attenuated_photograph_fades_into_the_neutral_backdrop(dialog, app):
+    """@brief The middle state keeps the board as context instead of removing it.
+
+    Attenuating is the state that keeps the review possible — whether an
+    outline sits on its component is only judgeable against the board — so the
+    photograph must still be there, but composited onto the neutral backdrop
+    and therefore much closer to it than to itself.
+    """
+    with_photograph = _outline_pixels(dialog, app)
+    dialog.set_photo_state(PHOTO_DIMMED)
+    assert dialog.photo_item.isVisible()
+    assert dialog.photo_item.opacity() == PHOTO_DIMMED_OPACITY
+    assert dialog.board_backdrop.isVisible()
+    assert _outline_pixels(dialog, app) == with_photograph
+    image = _view_image(dialog, app)
+    pixel = image.pixelColor(dialog.view.mapFromScene(QPointF(360, 15)))
+
+    def distance(color):
+        return (abs(pixel.red() - color.red()) + abs(pixel.green() - color.green())
+                + abs(pixel.blue() - color.blue()))
+
+    photograph, backdrop = QColor("#243b28"), QColor(BOARD_BACKDROP_COLOR)
+    assert distance(backdrop) * 3 < distance(photograph), (
+        "the attenuated board must sit close to the backdrop, not to the photograph")
+    # Negative: attenuated is not hidden — the board is still being shown.
+    assert distance(backdrop) > 0
+
+
+def test_the_backdrop_contrasts_with_every_outline_colour(dialog):
+    """@brief Measured contrast of the backdrop against the pens it must not swallow.
+
+    The status colours carry meaning and are explained in the legend, so the
+    backdrop is chosen around them, never the reverse. Every status colour and
+    the white selection halo clear a 3:1 WCAG contrast ratio against it, the
+    board border clears it too, and the backdrop is lighter than the empty
+    canvas around it so the board area stays a readable region.
+    """
+    status_colours = {"#40dc80", "#ffad33", "#ef5350"}
+    assert {dialog._items[0].pen().color().name(),
+            dialog._items[1].pen().color().name()} <= status_colours
+    for colour in status_colours | {SELECTION_HALO_COLOR, BOARD_BORDER_COLOR}:
+        assert _contrast_ratio(colour, BOARD_BACKDROP_COLOR) >= 3.0, colour
+    assert (_relative_luminance(QColor(BOARD_BACKDROP_COLOR))
+            > _relative_luminance(dialog.view.backgroundBrush().color()))
+    # Negative: a photograph offers no such guarantee — a bright shield or a
+    # white silkscreen area defeats the orange pen wherever it happens to be,
+    # which is exactly why a known backdrop is needed.
+    assert _contrast_ratio("#ffad33", "#ffffff") < 3.0
+
+
+def test_the_number_labels_stay_legible_without_the_photograph(dialog, app):
+    """@brief The ID labels keep their own opaque backing when the photo goes.
+
+    The labels are drawn over the photograph; with it gone they must not melt
+    into the backdrop. The backing is darker than the backdrop and the white
+    text clears the 4.5:1 ratio for body text on it.
+    """
+    assert _contrast_ratio("#ffffff", NUMBER_LABEL_BACKING_COLOR) >= 4.5
+    assert _contrast_ratio(NUMBER_LABEL_BACKING_COLOR, BOARD_BACKDROP_COLOR) > 1.4
+    assert (_relative_luminance(QColor(NUMBER_LABEL_BACKING_COLOR))
+            < _relative_luminance(QColor(BOARD_BACKDROP_COLOR)))
+    dialog.set_photo_state(PHOTO_HIDDEN)
+    image = _view_image(dialog, app)
+    for item in dialog._items:
+        label = dialog.view.mapFromScene(
+            item.number.mapToScene(item.number.boundingRect())).boundingRect()
+        assert _pixels_near(image, label, QColor(NUMBER_LABEL_BACKING_COLOR), tolerance=12) > 0
+        assert _pixels_near(image, label, QColor("white"), tolerance=12) > 0
+
+
+def test_the_board_rectangle_is_still_drawn_and_stays_inert(dialog, app):
+    """@brief With the pixmap gone the PCB edge is the only spatial reference left.
+
+    It is drawn at the photograph's own rectangle, in a grey that no status
+    colour uses, below everything else, and it takes no mouse button: clicking
+    "on the board" still reaches the outlines and the drawing gesture.
+    """
+    assert dialog.board_backdrop.rect() == dialog.photo_rect
+    assert dialog.board_backdrop.pen().color() == QColor(BOARD_BORDER_COLOR)
+    assert dialog.board_backdrop.brush().color() == QColor(BOARD_BACKDROP_COLOR)
+    assert dialog.board_backdrop.zValue() < dialog.photo_item.zValue()
+    assert dialog.board_backdrop.acceptedMouseButtons() == Qt.MouseButton.NoButton
+    dialog.set_photo_state(PHOTO_HIDDEN)
+    image = _view_image(dialog, app)
+    edge = dialog.view.mapFromScene(dialog.photo_rect).boundingRect().adjusted(-3, -3, 3, 3)
+    assert _pixels_near(image, edge, QColor(BOARD_BORDER_COLOR), tolerance=30) > 0
+    # "Fuori dai bordi PCB" stays judgeable with the photograph gone.
+    dialog.component_list.setCurrentRow(0)
+    dialog.fields["x_mm"].setValue(20)
+    assert dialog._items[0].pen().color().name() == "#ef5350"
+    assert "Fuori" in dialog.warning_label.text()
+
+
+def test_the_saved_inventory_is_identical_whatever_the_backdrop(dialog, app, components):
+    """@brief Negative: the backdrop is a view setting and must not leak into the data.
+
+    The working copy is compared byte for byte across the three states, and
+    Apply emits exactly what it emits with the photograph shown.
+    """
+    reference = repr(dialog.get_components()).encode()
+    for state in PHOTO_STATES:
+        dialog.set_photo_state(state)
+        app.processEvents()
+        assert repr(dialog.get_components()).encode() == reference
+    dialog.set_photo_state(PHOTO_HIDDEN)
+    assert repr(dialog.get_components()).encode() == reference
+    spy = QSignalSpy(dialog.components_applied)
+    dialog.accept()
+    assert len(spy) == 1
+    assert spy[0][0] == components
+
+
+def test_apply_emits_the_same_bytes_with_the_photograph_hidden(app, png, components):
+    """@brief Negative: two identical reviews, two backdrops, one identical result.
+
+    The same inventory is applied by two editors that differ only in what the
+    canvas is showing; what reaches the caller is compared byte for byte.
+    """
+    emitted = []
+    for state in (PHOTO_FULL, PHOTO_HIDDEN):
+        widget = PhotoReviewDialog(png, components, 40, 20)
+        try:
+            widget.set_photo_state(state)
+            spy = QSignalSpy(widget.components_applied)
+            widget.accept()
+            assert len(spy) == 1
+            emitted.append(repr(spy[0][0]).encode())
+        finally:
+            widget.close()
+    assert emitted[0] == emitted[1]
+
+
+def test_the_backdrop_state_survives_every_edit_and_the_parameter_modal(dialog, app):
+    """@brief The state is not a casualty of adding, deleting, filtering, zooming or fitting.
+
+    A control that silently reset itself on the next edit would be useless on
+    the board that motivates it, where the user hides the photograph precisely
+    to go and fix the outlines that were lost under it.
+    """
+    dialog.set_photo_state(PHOTO_HIDDEN)
+
+    def still_hidden(step):
+        assert dialog.photo_state() == PHOTO_HIDDEN, step
+        assert not dialog.photo_item.isVisible(), step
+        assert dialog.board_backdrop.isVisible(), step
+        assert dialog.photo_button.text() == "Foto: nascosta", step
+
+    dialog.add_component()
+    still_hidden("add")
+    dialog.open_parameters()
+    app.processEvents()
+    still_hidden("parameters open")
+    dialog.parameters_dialog.accept()
+    app.processEvents()
+    still_hidden("parameters closed")
+    _draw_new_component(app, dialog, (100, 30), (160, 60))
+    still_hidden("draw")
+    dialog.category_filter.setCurrentIndex(1)
+    still_hidden("filter")
+    dialog.component_list.setCurrentRow(0)
+    QTest.mouseClick(dialog.delete_button, Qt.MouseButton.LeftButton)
+    still_hidden("delete")
+    dialog.zoom_in_button.click()
+    dialog.zoom_out_button.click()
+    still_hidden("zoom")
+    dialog.view.zoom(4)
+    app.processEvents()
+    scrolled = dialog.view.horizontalScrollBar().value()
+    _drag(app, dialog.view, QPoint(100, 100), QPoint(150, 110), Qt.MouseButton.MiddleButton)
+    assert dialog.view.horizontalScrollBar().value() == scrolled - 50
+    still_hidden("pan")
+    dialog.fit_button.click()
+    app.processEvents()
+    still_hidden("fit")
+    dialog.resize(900, 680)
+    QTest.qWait(20)
+    still_hidden("resize")
+
+
+def test_a_new_editor_opens_on_the_photograph(app, png, components):
+    """@brief Negative: the state does not survive the dialog; a review starts from the photo."""
+    first = PhotoReviewDialog(png, components, 40, 20)
+    try:
+        first.set_photo_state(PHOTO_HIDDEN)
+        assert first.photo_state() == PHOTO_HIDDEN
+    finally:
+        first.close()
+    second = PhotoReviewDialog(png, components, 40, 20)
+    try:
+        assert second.photo_state() == PHOTO_FULL
+        assert second.photo_item.isVisible()
+        assert not second.board_backdrop.isVisible()
+        assert second.photo_button.text() == "Foto: intera"
+    finally:
+        second.close()
+
+
+def test_an_unknown_backdrop_state_is_refused(dialog):
+    """@brief Negative: an unknown state would leave button and canvas disagreeing."""
+    dialog.set_photo_state(PHOTO_DIMMED)
+    with pytest.raises(ValueError):
+        dialog.set_photo_state("transparent")
+    assert dialog.photo_state() == PHOTO_DIMMED
+    assert dialog.photo_button.text() == "Foto: attenuata"
+
+
+def test_selecting_and_moving_an_outline_still_work_with_the_photograph_hidden(dialog, app):
+    """@brief The scene stays fully usable: the same drag as with the photograph shown."""
+    dialog.set_photo_state(PHOTO_HIDDEN)
+    dialog.view.zoom(2)
+    item = dialog._items[1]
+    start = dialog.view.mapFromScene(item.pos())
+    end = start + QPoint(35, 15)
+    displacement = dialog.view.mapToScene(end) - dialog.view.mapToScene(start)
+    before = deepcopy(item.component)
+    _drag(app, dialog.view, start, end, Qt.MouseButton.LeftButton)
+    assert dialog.component_list.currentRow() == 1
+    assert item.isSelected() and item.halo.isVisible()
+    actual = dialog.get_components()[1]
+    assert actual["x_mm"] == pytest.approx(before["x_mm"] + displacement.x() / 10)
+    assert actual["y_mm"] == pytest.approx(before["y_mm"] + displacement.y() / 5)
+    assert all(handle.isVisible() for handle in item.handles.values())
+
+
+def test_resizing_by_grip_still_works_with_the_photograph_hidden(dialog, app):
+    """@brief The eight grips keep editing the local axes without the photograph."""
+    dialog.set_photo_state(PHOTO_HIDDEN)
+    dialog.component_list.setCurrentRow(1)
+    item = dialog._items[1]
+    before = deepcopy(item.component)
+    displacement = _drag_handle(dialog, app, item, (1, 0), QPoint(30, 7))
+    grown = displacement.x() / 10
+    assert grown > 0
+    actual = dialog.get_components()[1]
+    assert actual["length_mm"] == pytest.approx(before["length_mm"] + grown)
+    assert actual["x_mm"] == pytest.approx(before["x_mm"] + grown / 2)
+    assert (actual["y_mm"], actual["width_mm"]) == (before["y_mm"], before["width_mm"])
+    assert dialog.photo_state() == PHOTO_HIDDEN
+
+
+def test_drawing_a_new_rectangle_still_works_with_the_photograph_hidden(dialog, app):
+    """@brief The drawing gesture is bounded by the board, not by the pixmap being shown."""
+    dialog.set_photo_state(PHOTO_HIDDEN)
+    _draw_new_component(app, dialog, (100, 30), (160, 60))
+    assert len(dialog._items) == 3
+    drawn = dialog.get_components()[2]
+    assert drawn["x_mm"] == pytest.approx(-7, abs=.3)
+    assert drawn["y_mm"] == pytest.approx(-1, abs=.3)
+    assert drawn["length_mm"] == pytest.approx(6, abs=.3)
+    assert drawn["width_mm"] == pytest.approx(6, abs=.3)
+    # Negative: the board still bounds the gesture, the empty canvas is not board.
+    before = deepcopy(dialog.get_components())
+    QTest.mouseClick(dialog.add_button, Qt.MouseButton.LeftButton)
+    start = dialog.view.mapFromScene(QPointF(200, -30))
+    _drag(app, dialog.view, start, start + QPoint(40, 40), Qt.MouseButton.LeftButton)
+    assert dialog.get_components() == before

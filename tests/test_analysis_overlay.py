@@ -137,6 +137,12 @@ MACHINE_SHAPED = (
     " sha256=7cd600c8137b6c87af92bf248d88fefdbfab66ead9366ce094583f580426826b",
     "Inventario globale: prompt=g6; schema=gi4; sha256=7cd600c8137b6c87af92bf24",
     "FreeCAD exit=0, timeout=False",
+    # Forma effettiva dopo l'aggiunta del canale di rinuncia: la riga di uscita
+    # porta anche `cancelled=`, e resta un record, non una frase. La coda fra
+    # parentesi («… (interrotto su richiesta dell'utente)») non compare qui
+    # perche' quella riga non passa mai per la modale: run_logged la scrive
+    # soltanto sul file di log del CAD.
+    "FreeCAD exit=-9, timeout=False, cancelled=True",
     "AI_CALL_END id=1 model=x tool=y elapsed=65.664s result=object fields=21"
     " tokens_in=16765 tokens_out=6732 cost_usd=0.2521",
     # Intestazioni d'avvio di un programma esterno.
@@ -501,6 +507,48 @@ def test_the_header_keeps_its_full_text_for_main_window(overlay):
     overlay.set_tool("llm", detail)
     assert overlay.tool.text() == f"{TOOLS['llm'][0]} · {detail}"
     assert overlay.tool.text().endswith(detail)
+
+
+def test_the_abort_action_exists_only_while_something_can_be_stopped():
+    """Positivo: dichiarata l'interruzione, il comando c'e' ed emette il segnale.
+
+    Negativo doppio: una scheda ferma, e una scheda avviata da un percorso che
+    non sa fermare il proprio lavoro, non offrono il pulsante. La scheda non
+    decide nulla da sola -- chiede e basta -- quindi il contratto che conta e'
+    esattamente questo: quando si vede, e che cosa emette.
+    """
+    app = QApplication.instance() or QApplication([])
+    parent = QWidget()
+    parent.resize(900, 650)
+    overlay = AnalysisOverlay(parent)
+    parent.show()
+    try:
+        assert not overlay.is_abortable()
+        assert not overlay.abort_button.isEnabled()
+        overlay.start()
+        app.processEvents()
+        assert not overlay.is_abortable(), (
+            "chi non dichiara di saper fermare il lavoro non offre di fermarlo")
+        overlay.start('Generazione modello 3D', 'Avvio di FreeCAD…', abortable=True)
+        app.processEvents()
+        assert overlay.is_abortable()
+        assert overlay.abort_button.isEnabled()
+        assert overlay.abort_button.isVisibleTo(overlay.button_row)
+        spy = QSignalSpy(overlay.abort_requested)
+        overlay.abort_button.click()
+        assert len(spy) == 1
+        overlay.stop()
+        assert not overlay.is_abortable()
+        assert not overlay.abort_button.isEnabled()
+        # Nascondere la scheda a operazione in corso (revisione dei corpi) NON
+        # e' la fine del lavoro: li' il comando deve sopravvivere.
+        overlay.start('Analisi AI in corso', 'Preparazione…', abortable=True)
+        overlay.hide()
+        overlay.show()
+        assert overlay.is_abortable()
+    finally:
+        overlay.stop()
+        parent.close()
 
 
 def test_overlay_animation_resize_literal_status_and_cleanup():

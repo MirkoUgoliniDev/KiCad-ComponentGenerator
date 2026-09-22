@@ -21,6 +21,12 @@ evidence: turning the outline does not change whether it traces the body or
 the body with its leads. An existing normalized
 full-board ``_box`` cache is refreshed. Source-crop ``bbox`` metadata is left
 as detection provenance. Height and text edits do not change that rectangle.
+
+The photograph itself is a view setting, never data: ``photo_state()`` /
+``set_photo_state()`` show it whole, attenuate it or take it away so that a
+thin outline over a dark, crowded board can be read on its own. Whatever the
+state, the board rectangle keeps being drawn and every edit, selection and
+measurement behaves identically; the saved inventory is unaffected.
 """
 
 from __future__ import annotations
@@ -455,10 +461,15 @@ class _NumberLabel(QGraphicsSimpleTextItem):
         self.setBrush(QColor("white"))
 
     def paint(self, painter, option, widget=None):
-        """@brief Paint a dark rounded backing behind the white text."""
+        """@brief Paint a dark rounded backing behind the white text.
+
+        @note The backing is opaque and darker than both the photograph and
+              the neutral board backdrop, so the number stays readable whether
+              the photograph is shown, attenuated or taken away.
+        """
         painter.save()
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#101318"))
+        painter.setBrush(QColor(NUMBER_LABEL_BACKING_COLOR))
         painter.drawRoundedRect(self.boundingRect(), 2, 2)
         painter.restore()
         super().paint(painter, option, widget)
@@ -516,6 +527,64 @@ SELECTION_HALO_COLOR = "#ffffff"
 SELECTED_PEN_WIDTH_PX = 3
 UNSELECTED_PEN_WIDTH_PX = 2
 SELECTION_HALO_WIDTH_PX = 9
+
+## Opaque backing painted behind every number label. Darker than the board
+## backdrop below, so the label reads as a label and not as part of the board.
+NUMBER_LABEL_BACKING_COLOR = "#101318"
+
+## Backdrop states of the review canvas, in the order the toolbar control
+## cycles through them: the photograph whole, attenuated, then gone.
+PHOTO_FULL = "full"
+PHOTO_DIMMED = "dimmed"
+PHOTO_HIDDEN = "hidden"
+PHOTO_STATES = (PHOTO_FULL, PHOTO_DIMMED, PHOTO_HIDDEN)
+
+## Opacity of the attenuated photograph. The board stays recognisable (which
+## component each outline sits on is still judgeable, and that IS the review)
+## while most of its contrast is given back to the outlines. Low enough that
+## the composite over BOARD_BACKDROP_COLOR stays much closer to the backdrop
+## than to the photograph, so the guarantee below is only mildly weakened;
+## the state that guarantees it outright is PHOTO_HIDDEN.
+PHOTO_DIMMED_OPACITY = .25
+
+## Neutral fill drawn over the board area when the photograph is attenuated or
+## taken away. Chosen for measurable contrast, not by eye: its relative
+## luminance (~0.038) keeps the WCAG contrast ratio above 3:1 against the
+## DARKEST of the status colours (red #ef5350, ratio ~3.4) and therefore
+## against the other two and the white halo as well. The status colours carry
+## meaning and are explained in the legend, so the backdrop is what gets
+## chosen around them. It is also lighter than the view background, which is
+## what makes the board area, and hence "outside the PCB", still readable.
+BOARD_BACKDROP_COLOR = "#32373e"
+
+## Board outline drawn with that backdrop. With the pixmap gone this is the
+## only remaining evidence of where the PCB ends, so a component flagged
+## "fuori dai bordi PCB" stays judgeable. Grey on purpose: it must not be
+## mistaken for a status-coloured component outline nor for the white halo.
+BOARD_BORDER_COLOR = "#8a93a0"
+BOARD_BORDER_WIDTH_PX = 2
+
+
+class _BoardBackdrop(QGraphicsRectItem):
+    """@brief Neutral board rectangle shown when the photograph steps back.
+
+    Its own type, so that code enumerating the scene can tell it apart from
+    the transient rubber band of a drawing gesture, which is a plain
+    QGraphicsRectItem. It is inert: it takes no mouse button, so selecting,
+    moving and drawing behave exactly as they do over the photograph.
+    """
+
+    def __init__(self, rect):
+        super().__init__(QRectF(rect))
+        pen = QPen(QColor(BOARD_BORDER_COLOR), BOARD_BORDER_WIDTH_PX)
+        pen.setCosmetic(True)
+        self.setPen(pen)
+        self.setBrush(QBrush(QColor(BOARD_BACKDROP_COLOR)))
+        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        # Below the photograph: attenuating the photograph must fade it into
+        # this neutral base rather than into the view's own background.
+        self.setZValue(-101)
+        self.hide()
 
 
 class _ResizeHandle(QGraphicsRectItem):
@@ -805,6 +874,16 @@ class PhotoReviewDialog(QDialog):
     and every row index keep their meaning while a filter is active. The
     filter is about the list only — the rectangles on the photo are never
     hidden, and clicking one always selects it, filtered out or not.
+
+    ``photo_button`` sits with the view controls and cycles the canvas
+    backdrop (``photo_state()``, ``set_photo_state()``, ``cycle_photo_state()``)
+    between the photograph whole, attenuated and gone. A dark, crowded board
+    swallows a thin coloured outline; in the last two states the board area is
+    filled with the neutral BOARD_BACKDROP_COLOR and framed with
+    BOARD_BORDER_COLOR, so the outlines and the PCB edge stay readable. It is
+    a view setting: it survives adding, deleting, filtering, zooming, fitting
+    and the parameter modal, it defaults to PHOTO_FULL on every new dialog,
+    and it changes nothing in ``get_components()`` or in what Apply emits.
     """
 
     components_applied = pyqtSignal(list)
@@ -864,8 +943,21 @@ class PhotoReviewDialog(QDialog):
         self.fit_button = QPushButton("Adatta foto")
         self.zoom_in_button = QPushButton("Zoom +")
         self.zoom_out_button = QPushButton("Zoom −")
+        # A view control, next to fit and zoom: it changes what the canvas
+        # shows, never what is saved. One button for three states instead of a
+        # mode selector; the label always states the state it is in, and the
+        # button stays visibly pressed while the photograph is not intact, so
+        # a canvas that no longer shows the real board is never mistaken for
+        # one that does.
+        self.photo_button = QPushButton()
+        self.photo_button.setCheckable(True)
+        self.photo_button.setToolTip(
+            "Foto intera, attenuata o nascosta: su una foto scura e affollata i "
+            "contorni si leggono solo quando la fotografia si fa da parte. "
+            "Il bordo della PCB resta sempre disegnato.")
         for button in (self.add_button, self.delete_button, self.fit_button,
-                       self.zoom_in_button, self.zoom_out_button):
+                       self.zoom_in_button, self.zoom_out_button,
+                       self.photo_button):
             button.setAutoDefault(False)
             toolbar.addWidget(button)
         toolbar.addStretch()
@@ -882,6 +974,11 @@ class PhotoReviewDialog(QDialog):
         self.photo_item.setZValue(-100)
         self.photo_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
         self.photo_rect = QRectF(0, 0, pixmap.width(), pixmap.height())
+        self._photo_state = PHOTO_FULL
+        # Always on the scene, shown only when the photograph steps back: the
+        # board must never become an invisible region of empty canvas.
+        self.board_backdrop = _BoardBackdrop(self.photo_rect)
+        self.scene.addItem(self.board_backdrop)
         self.view = _PhotoView(self.scene, self)
         content = QHBoxLayout()
         content.addWidget(self.view, 1)
@@ -1011,6 +1108,8 @@ class PhotoReviewDialog(QDialog):
         self.fit_button.clicked.connect(self.fit_photo)
         self.zoom_in_button.clicked.connect(lambda: self.view.zoom(1.2))
         self.zoom_out_button.clicked.connect(lambda: self.view.zoom(1 / 1.2))
+        self.photo_button.clicked.connect(self._photo_button_clicked)
+        self._apply_photo_state()
         self.component_list.currentRowChanged.connect(self._select_row)
         self.component_list.itemDoubleClicked.connect(lambda _item: self.choose_model())
         self.scene.selectionChanged.connect(self._selection_changed)
@@ -1078,6 +1177,74 @@ class PhotoReviewDialog(QDialog):
     def fit_photo(self):
         """@brief Show the whole photo and re-enable auto-fit on resize."""
         self.view.fit_photo(self.photo_rect)
+
+    def photo_state(self) -> str:
+        """@brief How much of the photograph the canvas is showing.
+
+        @return One of PHOTO_FULL, PHOTO_DIMMED or PHOTO_HIDDEN.
+        @note A view setting only: it never reaches ``get_components()`` nor
+              the list emitted by Apply, and it is not remembered between two
+              editors — a new dialog opens on the photograph, which is the
+              reference the review starts from.
+        """
+        return self._photo_state
+
+    def set_photo_state(self, state):
+        """@brief Show the photograph whole, attenuate it, or take it away.
+
+        @param state One of PHOTO_FULL, PHOTO_DIMMED, PHOTO_HIDDEN.
+        @throws ValueError for any other value: a silently ignored state would
+                leave the canvas and the button disagreeing about what the user
+                is looking at, which is exactly what this control exists to
+                make unambiguous.
+        @note Nothing else changes. Selection, move, the eight grips, the halo,
+              the list, the drawing gesture, zoom and pan keep working, and the
+              full-resolution pixmap stays available for the model chooser's
+              crop, which reads ``photo_item.pixmap()`` and not what is on
+              screen.
+        """
+        if state not in PHOTO_STATES:
+            raise ValueError(f"Unknown photo state: {state!r}")
+        self._photo_state = state
+        self._apply_photo_state()
+
+    def cycle_photo_state(self):
+        """@brief Step to the next backdrop state: whole, attenuated, hidden.
+
+        @note Monotonic on purpose, each click taking one step further away
+              from the photograph: a cycle that jumped straight to "hidden"
+              would be quicker for the one case the user asked about, at the
+              price of an order nobody can predict from the button alone.
+        """
+        self.set_photo_state(
+            PHOTO_STATES[(PHOTO_STATES.index(self._photo_state) + 1) % len(PHOTO_STATES)])
+
+    def _photo_button_clicked(self, _checked):
+        """Cycle on click; the check state is a readout, not the input.
+
+        A checkable button toggles itself before ``clicked`` arrives, so the
+        state it reports is meaningless for a three-state control and is
+        rewritten by ``_apply_photo_state``.
+        """
+        self.cycle_photo_state()
+
+    def _apply_photo_state(self):
+        """Mirror the state onto the canvas and onto the button label."""
+        state = self._photo_state
+        # Hiding, not a zero opacity: an invisible item is also out of every
+        # paint and hit-test path, and it takes no mouse button either way.
+        self.photo_item.setVisible(state != PHOTO_HIDDEN)
+        self.photo_item.setOpacity(PHOTO_DIMMED_OPACITY if state == PHOTO_DIMMED else 1.0)
+        self.board_backdrop.setVisible(state != PHOTO_FULL)
+        if state == PHOTO_HIDDEN:
+            text = self._tr("Foto: nascosta")
+        elif state == PHOTO_DIMMED:
+            text = self._tr("Foto: attenuata")
+        else:
+            text = self._tr("Foto: intera")
+        with QSignalBlocker(self.photo_button):
+            self.photo_button.setChecked(state != PHOTO_FULL)
+        self.photo_button.setText(text)
 
     def _append_item(self, component):
         item = _ComponentItem(self, component)
