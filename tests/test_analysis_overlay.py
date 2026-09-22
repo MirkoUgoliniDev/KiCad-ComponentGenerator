@@ -1,5 +1,6 @@
 import math
 import os
+from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
@@ -12,7 +13,9 @@ from kicadgen.gui.analysis_overlay import (TOOLS, AnalysisOverlay, AnalysisSpinn
                                           ElidedLabel, _CARD_MIN_WIDTH,
                                           _CARD_PADDING, _OVERLAY_MARGIN,
                                           _STATUS_CHAR_LIMIT, _STATUS_LINES,
-                                          elide_paths, is_machine_line)
+                                          elide_paths, enumeration_lines,
+                                          is_machine_line)
+from kicadgen.services.datasheet_extractor import _files_sent_message
 
 
 @pytest.fixture
@@ -276,6 +279,230 @@ def test_a_path_only_line_keeps_only_its_file_name():
     assert elide_paths("C:\\Lavori\\Python\\gen\\TEST\\TEST.step") == "…\\TEST.step"
     assert elide_paths("/home/mirko/lavori/TEST.step") == "…/TEST.step"
     assert elide_paths("\\\\server\\lavori\\TEST.step") == "…\\TEST.step"
+
+
+#: ── L'elenco sulla scheda: una voce per riga ─────────────────────────
+#:
+#: Richiesta dell'utente: «l'elenco nella modale deve essere fatto meglio, i
+#: nomi dei file uno sotto l'altro, più chiaro». La riga che il programma
+#: scrive resta UNA -- il log vive di un evento per riga -- e qui si verifica
+#: che la scheda la rimpagini senza tagliarla e senza uscire dalla finestra.
+
+
+def _document_line(count):
+    """La riga vera di `datasheet_extractor`, non una sua imitazione: il patto
+    fra chi scrive la riga e chi la impagina e' proprio la sua punteggiatura,
+    quindi ricopiarla qui vorrebbe dire non provarlo."""
+    names = [f'documento-{index}.png' for index in range(count)]
+    roles = {name: ('top', 'pinout', 'hires')[index % 3]
+             for index, name in enumerate(names)}
+    return _files_sent_message([Path('progetto') / name for name in names], roles)
+
+
+def _card_lines(overlay):
+    return overlay.status.text().split("\n")
+
+
+def _assert_nothing_clipped(overlay):
+    """Positivo di misura: il testo scritto sta TUTTO nello spazio riservato,
+    in altezza e in larghezza. E' la differenza fra un elenco e un elenco
+    tagliato a meta' dell'ultima riga."""
+    usable = overlay.card.minimumWidth() - 2 * _CARD_PADDING
+    assert overlay.status.heightForWidth(usable) <= overlay.status.minimumHeight()
+    assert overlay.card.minimumHeight() >= overlay.status.minimumHeight()
+    metrics = overlay.status.fontMetrics()
+    for line in _card_lines(overlay):
+        assert metrics.horizontalAdvance(line) <= usable, f"riga oltre la scheda: {line}"
+
+
+def test_the_documents_are_listed_one_per_line_with_name_and_role(overlay):
+    """Positivo: tre documenti, tre righe, e su ognuna il nome e il ruolo con
+    cui il file parte. Prima era una riga sola con i documenti separati dal
+    punto mediano, che la scheda mandava a capo dove capitava, spezzando i nomi
+    a meta'."""
+    message = _files_sent_message(
+        [Path('a/pinout.png'), Path('a/top.png'), Path('a/hires.jpg')],
+        {'pinout.png': 'pinout', 'top.png': 'top', 'hires.jpg': 'hires'})
+    overlay.set_status(message)
+    assert _card_lines(overlay) == [
+        'Invio a AI 3 documenti per layout, quote e pinout:',
+        'pinout.png, Pinout / disposizione contatti',
+        'top.png, Immagine con quote',
+        'hires.jpg, Foto ad alta risoluzione.']
+    _assert_nothing_clipped(overlay)
+    # Incolonnati a sinistra: centrati, i nomi partirebbero da una colonna
+    # diversa per riga, che e' il difetto che l'elenco deve togliere.
+    assert overlay.status.alignment() & Qt.AlignmentFlag.AlignLeft
+
+
+def test_the_card_makes_room_for_eight_documents_without_clipping():
+    """Positivo al limite: otto documenti sono nove righe, cioe' molte piu'
+    delle tre riservate d'ufficio. La scheda deve SEGUIRE il contenuto (e
+    restare dentro la finestra), non tagliarlo: il numero di documenti lo
+    sceglie l'utente, non la scheda."""
+    app = QApplication.instance() or QApplication([])
+    parent = QWidget()
+    parent.resize(900, 650)
+    overlay = AnalysisOverlay(parent)
+    parent.show()
+    try:
+        overlay.start()
+        app.processEvents()
+        before = overlay.card.minimumHeight()
+        overlay.set_status(_document_line(8))
+        app.processEvents()
+        lines = _card_lines(overlay)
+        assert len(lines) == 9 and lines[-1].endswith('.'), (
+            "l'elenco deve arrivare in fondo, senza troncature")
+        assert all(', ' in line for line in lines[1:])
+        _assert_nothing_clipped(overlay)
+        assert overlay.card.minimumHeight() > before, (
+            "la scheda deve crescere per contenere l'elenco")
+        assert overlay.card.minimumHeight() + 2 * _OVERLAY_MARGIN <= 650, (
+            "una scheda piu' alta della finestra perde i pulsanti in fondo")
+    finally:
+        overlay.stop()
+        parent.close()
+
+
+def test_a_window_too_short_cuts_the_list_instead_of_overflowing():
+    """Negativo dell'altezza: quando le righe non ci stanno, l'elenco si
+    accorcia e il taglio si DICHIARA con un'ellissi su una riga propria -- lo
+    stesso segno con cui questa scheda dichiara ogni altro accorciamento.
+    Lasciarlo debordare manderebbe i pulsanti fuori dallo schermo, e tagliarlo
+    in silenzio farebbe credere che i documenti fossero meno."""
+    app = QApplication.instance() or QApplication([])
+    parent = QWidget()
+    parent.resize(900, 480)
+    overlay = AnalysisOverlay(parent)
+    parent.show()
+    try:
+        overlay.start()
+        app.processEvents()
+        overlay.set_status(_document_line(8))
+        app.processEvents()
+        lines = _card_lines(overlay)
+        assert 2 < len(lines) < 9 and lines[-1] == '…'
+        assert lines[0].endswith(':') and ', ' in lines[1]
+        _assert_nothing_clipped(overlay)
+        assert overlay.card.minimumHeight() + 2 * _OVERLAY_MARGIN <= 480
+    finally:
+        overlay.stop()
+        parent.close()
+
+
+@pytest.mark.parametrize('count', (1, 0))
+def test_without_a_list_the_line_stays_one_centred_line(overlay, count):
+    """Negativo doppio: un documento solo non e' un elenco (due righe per dire
+    cio' che ne occupa una), e zero documenti non elencano affatto -- quella
+    riga dice che NESSUNA richiesta parte, e un elenco vuoto sembrerebbe un
+    invio a vuoto, cioe' pagato."""
+    message = _document_line(count)
+    overlay.set_status(message)
+    assert _card_lines(overlay) == [message]
+    assert enumeration_lines(message) is None
+    assert overlay.status.alignment() == Qt.AlignmentFlag.AlignCenter
+
+
+@pytest.mark.parametrize('name', ('MOD_REV_B.pdf', 'MOD_REV_B'))
+def test_a_document_named_like_a_service_marker_still_reaches_the_card(overlay, name):
+    """Negativo contro i filtri VERI della modale: UPPER_SNAKE e' la forma con
+    cui questo programma marca le proprie righe di servizio ed e' anche un nome
+    di file legittimo. Il marcatore si cerca in testa alla riga, e il nome di
+    un documento non ci arriva mai, perche' la riga comincia con l'annuncio:
+    l'unica riga che dice che cosa e' partito non puo' sparire per come
+    l'utente ha chiamato il suo file. Si prova anche senza estensione."""
+    window = pytest.importorskip('kicadgen.gui.main_window')
+    message = _files_sent_message([Path('d') / name, Path('d/top.png')],
+                                  {name: 'pinout', 'top.png': 'top'})
+    assert not is_machine_line(message) and not window.per_item_detail(message)
+    overlay.set_status(message)
+    lines = _card_lines(overlay)
+    assert lines[1] == f'{name}, Pinout / disposizione contatti'
+    assert len(lines) == 3
+
+
+def test_a_very_long_name_is_shortened_by_the_sender_and_shown_whole_line(overlay):
+    """Il nome lunghissimo viene accorciato da chi scrive la riga (nel mezzo,
+    cosi' l'estensione resta) e sulla scheda occupa la sua riga come gli altri.
+    Che il modello riceva comunque il nome INTERO e' provato in
+    tests/test_progress_messages.py, dove si guardano i blocchi inviati."""
+    name = 'scheda-radio-vista-dall-alto-alta-risoluzione-rev-C-2026.png'
+    message = _files_sent_message([Path('d') / name, Path('d/top.png')],
+                                  {name: 'hires', 'top.png': 'top'})
+    overlay.set_status(message)
+    lines = _card_lines(overlay)
+    assert len(lines) == 3
+    shown, _, role = lines[1].partition(', ')
+    assert role == 'Foto ad alta risoluzione' and '…' in shown
+    assert shown.startswith('scheda-radio-vista') and shown.endswith('.png')
+    assert name not in overlay.status.text()
+    _assert_nothing_clipped(overlay)
+
+
+def test_any_other_sender_gets_the_same_layout(overlay):
+    """Positivo di generalita': la regola e' sulla FORMA della riga (annuncio
+    coi due punti, voci separate dal punto mediano), non sul messaggio dei
+    documenti. L'inventario globale elenca allo stesso modo i motivi di un
+    esito parziale, e anche quelli si leggono meglio incolonnati. Una regola
+    valida per una riga sola sarebbe una regola tarata sul caso in mano."""
+    message = ('Inventario globale FAILED/PARTIAL: component U1: merged box'
+               ' excludes most of sources · 2 problemi · proposte irrisolte'
+               ' conservate.')
+    overlay.set_status(message)
+    assert _card_lines(overlay) == [
+        'Inventario globale FAILED/PARTIAL:',
+        'component U1: merged box excludes most of sources',
+        '2 problemi',
+        'proposte irrisolte conservate.']
+    _assert_nothing_clipped(overlay)
+
+
+@pytest.mark.parametrize('line', (
+    # Punto mediano senza annuncio: non e' un elenco, e' una frase.
+    'Modello AI (remoto, a consumo) · anthropic/claude-opus-5',
+    '27% · 12/45 componenti',
+    # Annuncio senza punto mediano: elenca col punto e virgola, che questa
+    # regola non tocca (i due punti da soli sono punteggiatura normale).
+    'Inventario salvato: inv-photo.png; inv-overlay.png; inv.json',
+))
+def test_one_signal_alone_does_not_make_a_list(overlay, line):
+    """Negativo della regola: servono ENTRAMBI i segni. Il solo punto mediano
+    spezzerebbe frasi che non elencano nulla; i soli due punti sono
+    punteggiatura di tutti i giorni e trasformerebbero mezza modale in elenchi
+    di una voce."""
+    assert enumeration_lines(line) is None
+    overlay.set_status(line)
+    assert _card_lines(overlay) == [line]
+
+
+def test_an_empty_item_does_not_become_a_blank_row(overlay):
+    """Negativo di robustezza: i motivi che questo programma elenca possono
+    venire da testi altrui (un errore dell'API che torna vuoto), e due
+    separatori di fila darebbero una riga bianca in mezzo all'elenco -- che non
+    dice nulla e fa contare male le voci. Se dopo lo scarto resta una voce
+    sola, non c'e' niente da incolonnare e la riga resta una riga."""
+    assert enumeration_lines('Esito: primo motivo ·  · secondo motivo.') == [
+        'Esito:', 'primo motivo', 'secondo motivo.']
+    assert enumeration_lines('Esito: unico motivo ·  · ') is None
+    overlay.set_status('Esito: unico motivo ·  · ')
+    assert _card_lines(overlay) == ['Esito: unico motivo · ·']
+
+
+def test_the_card_does_not_shrink_back_when_the_list_is_gone(overlay):
+    """La scheda cresce una volta per l'elenco e resta cosi' fino alla fine
+    dell'operazione: rialzarsi e riabbassarsi a ogni messaggio e' lo stesso
+    sobbalzo che il dimensionamento esiste per evitare. Una NUOVA operazione
+    invece riparte dall'ingombro di prima."""
+    small = overlay.card.minimumHeight()
+    overlay.set_status(_document_line(5))
+    grown = overlay.card.minimumHeight()
+    assert grown > small
+    overlay.set_status('Generazione del footprint KiCad…')
+    assert overlay.card.minimumHeight() == grown
+    assert overlay.status.alignment() == Qt.AlignmentFlag.AlignCenter
+    overlay.start()
+    assert overlay.card.minimumHeight() == small
 
 
 def _render(spinner):

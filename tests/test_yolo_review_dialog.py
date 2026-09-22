@@ -10,12 +10,18 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 pytest.importorskip("PyQt6")
-from PyQt6.QtCore import QPointF, Qt
+from PyQt6.QtCore import QBuffer, QByteArray, QIODevice, QPointF, Qt
+from PyQt6.QtGui import QColor, QImage
 from PyQt6.QtWidgets import QApplication
 
-from kicadgen.gui.yolo_review_dialog import (HANDLE_RADIUS_PX, MIN_BOX_PX, MIN_NEW_BOX,
-                                             MOVE_HANDLE, SMALL_BOX_PX, YoloReviewDialog,
-                                             box_pen)
+from kicadgen.gui.theme import BASE
+from kicadgen.gui.yolo_review_dialog import (ADDED_COLOR, BOARD_BACKDROP_COLOR,
+                                             BOARD_BORDER_COLOR, HANDLE_RADIUS_PX,
+                                             MIN_BOX_PX, MIN_NEW_BOX, MOVE_HANDLE,
+                                             PHOTO_DIMMED, PHOTO_DIMMED_OPACITY,
+                                             PHOTO_FULL, PHOTO_HIDDEN, PHOTO_STATES,
+                                             SELECTED_COLOR, SMALL_BOX_PX, STRONG_COLOR,
+                                             WEAK_COLOR, YoloReviewDialog, box_pen)
 from kicadgen.services.photo_yolo import detector_classes
 
 #: La scheda di prova: 40 mm lungo X, 20 mm lungo Y. Le quote servono a
@@ -484,6 +490,401 @@ def test_a_click_that_slipped_is_not_a_component(dialog):
     view._drag_from, view._drag_to = start, start
     view.mouseReleaseEvent(_Mouse(end))
     assert len(widget.kept()) == before
+
+
+#: Colore della fotografia di prova. Serve che sia lontano da tutti e quattro
+#: i tratti della finestra: un fondo vicino a un tratto farebbe contare come
+#: "contorno" pixel che contorno non sono, e la prova direbbe il falso.
+PHOTO_COLOR = "#243b28"
+
+#: Tolleranza per canale con cui si riconosce un pixel del tratto. EURISTICA
+#: DICHIARATA: i bordi sono disegnati con antialiasing, quindi i pixel di
+#: frontiera sono miscele fra tratto e sfondo e cambiano quando lo sfondo
+#: cambia -- e' proprio cio' che questa finestra sta modificando. A 20 la
+#: miscela piu' vicina (mezzo tratto su fondo) resta fuori dal conteggio su
+#: tutti e tre gli sfondi, cosi' si contano i pixel "pieni", che dallo sfondo
+#: non dipendono e possono essere confrontati alla pari. Diventerebbe
+#: superflua disegnando i contorni senza antialiasing, al prezzo di riquadri
+#: piu' brutti su schermi ad alta densita'.
+OUTLINE_TOLERANCE = 20
+
+
+def _photo_png(color=PHOTO_COLOR):
+    """@brief Una fotografia PNG di prova, in tinta unita e con quote note."""
+    # 400 x 100 px per una scheda 40 x 20 mm: deliberatamente anisotropa, cosi'
+    # uno scambio fra gli assi si vedrebbe.
+    image = QImage(400, 100, QImage.Format.Format_RGB32)
+    image.fill(QColor(color))
+    data = QByteArray()
+    buffer = QBuffer(data)
+    assert buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    assert image.save(buffer, "PNG")
+    return bytes(data)
+
+
+def _make_dialog(photo_png):
+    """@brief La stessa coppia di proposte della fixture, ma sopra una foto vera."""
+    app = QApplication.instance() or QApplication([])
+    proposals = [_proposal(1, FIRST_BOX, _source='YOLO local'),
+                 _proposal(2, (.60, .10, .80, .30), _yolo_class='capacitor',
+                           _yolo_confidence=.06, _yolo_review_only=True,
+                           _source='YOLO local')]
+    widget = YoloReviewDialog(photo_png, proposals, LENGTH_MM, WIDTH_MM, detector_classes())
+    widget.resize(900, 600)
+    widget.show()
+    app.processEvents()
+    return app, widget, proposals
+
+
+@pytest.fixture
+def photo_dialog():
+    app, widget, proposals = _make_dialog(_photo_png())
+    yield app, widget, proposals
+    widget.close()
+
+
+def _relative_luminance(color):
+    """@brief Luminanza relativa WCAG di un colore, canali sRGB linearizzati."""
+    channels = []
+    for value in (QColor(color).redF(), QColor(color).greenF(), QColor(color).blueF()):
+        channels.append(value / 12.92 if value <= .03928 else ((value + .055) / 1.055) ** 2.4)
+    return .2126 * channels[0] + .7152 * channels[1] + .0722 * channels[2]
+
+
+def _contrast_ratio(first, second):
+    """@brief Rapporto di contrasto WCAG fra due colori, da 1.0 a 21.0."""
+    light, dark = sorted((_relative_luminance(first), _relative_luminance(second)))
+    return (dark + .05) / (light + .05)
+
+
+def _view_image(app, widget):
+    """@brief Immagine della vista esattamente come la vede chi guarda."""
+    app.processEvents()
+    return widget.view.grab().toImage()
+
+
+def _matching(image, rect, color, tolerance=OUTLINE_TOLERANCE):
+    """@brief Quanti pixel di una regione sono entro `tolerance` da un colore, e dove.
+
+    @return Coppia (conteggio, rettangolo che li contiene tutti), con None al
+        posto del rettangolo se non ce n'e' nessuno.
+    """
+    color = QColor(color)
+    found, bounds = 0, None
+    for y in range(max(0, rect.top()), min(image.height() - 1, rect.bottom()) + 1):
+        for x in range(max(0, rect.left()), min(image.width() - 1, rect.right()) + 1):
+            pixel = image.pixelColor(x, y)
+            if (abs(pixel.red() - color.red()) <= tolerance
+                    and abs(pixel.green() - color.green()) <= tolerance
+                    and abs(pixel.blue() - color.blue()) <= tolerance):
+                found += 1
+                bounds = ((x, y, x, y) if bounds is None else
+                          (min(bounds[0], x), min(bounds[1], y),
+                           max(bounds[2], x), max(bounds[3], y)))
+    return found, bounds
+
+
+def _outline_pixels(app, widget):
+    """@brief Per ogni proposta: pixel disegnati nel suo colore, e dove stanno."""
+    image = _view_image(app, widget)
+    return [_matching(image, widget.view.to_widget(p["_box"]).adjusted(-6, -6, 6, 6).toRect(),
+                      box_pen(p, index == widget.view.selected).color())
+            for index, p in enumerate(widget.view.proposals)]
+
+
+def _geometry(widget):
+    """@brief Rettangoli in pixel di tutte le proposte: cio' che un ritocco muoverebbe."""
+    return [widget.view.to_widget(p["_box"]).getCoords() for p in widget.view.proposals]
+
+
+def test_the_backdrop_control_cycles_three_states_and_names_the_next_step(photo_dialog):
+    """@brief Un comando sotto la foto: il verbo sul pulsante, lo stato accanto.
+
+    Stessa convenzione della revisione fotografica successiva, e per la stessa
+    ragione trovata sul campo: un pulsante che dice «Foto: intera» enuncia uno
+    stato, e una didascalia non si preme. Il pulsante porta il verbo del passo
+    successivo -- che rende prevedibile anche l'ordine del ciclo -- e
+    l'etichetta accanto dice dove si e'. Il pulsante resta premuto finche' la
+    fotografia non e' intera, cosi' una vista che non mostra piu' la scheda
+    vera non viene scambiata per una che la mostra.
+    """
+    _app, widget, _ = photo_dialog
+    assert widget.photo_state() == PHOTO_FULL
+    assert widget.photo_button.text() == "Attenua foto"
+    assert widget.photo_state_label.text() == "Foto: intera"
+    assert widget.photo_button.isCheckable() and not widget.photo_button.isChecked()
+    widget.photo_button.click()
+    assert widget.photo_state() == PHOTO_DIMMED
+    assert widget.photo_button.text() == "Nascondi foto"
+    assert widget.photo_state_label.text() == "Foto: attenuata"
+    assert widget.photo_button.isChecked()
+    widget.photo_button.click()
+    assert widget.photo_state() == PHOTO_HIDDEN
+    assert widget.photo_button.text() == "Mostra foto"
+    assert widget.photo_state_label.text() == "Foto: nascosta"
+    assert widget.photo_button.isChecked()
+    # Chi ascolta il pulsante da solo deve sentire anche dove si trova.
+    assert widget.photo_button.accessibleName() == "Mostra foto (stato attuale: Foto: nascosta)"
+    # Negativo: il ciclo si chiude, non resta incastrato sull'ultimo stato.
+    widget.photo_button.click()
+    assert widget.photo_state() == PHOTO_FULL
+    assert not widget.photo_button.isChecked()
+    # Negativo: il pulsante non enuncia mai lo stato, altrimenti tornerebbe a
+    # leggersi come una didascalia.
+    assert not widget.photo_button.text().startswith("Foto:")
+    # Il pulsante non deve diventare il predefinito della finestra: Invio
+    # accetta la revisione, non cambia il modo di guardarla.
+    assert not widget.photo_button.autoDefault()
+
+
+def test_hiding_the_photograph_keeps_every_outline_drawn_and_in_place(photo_dialog):
+    """@brief Positivo: tolta la foto, ogni contorno c'e' ancora e sta dov'era.
+
+    E' il motivo per cui il comando esiste -- su una foto scura e affollata i
+    corpi piccoli sono illeggibili -- ma un contorno che si sposta, o che
+    smette di essere disegnato, renderebbe la revisione peggiore del problema
+    che risolve. Si misurano entrambe le cose: la geometria in pixel prima e
+    dopo, e la vista disegnata davvero, contando i pixel di ogni contorno e il
+    rettangolo che li contiene.
+    """
+    app, widget, _ = photo_dialog
+    before_geometry = _geometry(widget)
+    before_pixels = _outline_pixels(app, widget)
+    assert all(count > 0 for count, _ in before_pixels)
+    widget.set_photo_state(PHOTO_HIDDEN)
+    assert _geometry(widget) == before_geometry
+    assert _outline_pixels(app, widget) == before_pixels
+    image = _view_image(app, widget)
+    frame = widget.view._frame()
+    # Negativo: della fotografia non resta un pixel dentro l'area della scheda.
+    assert _matching(image, frame, PHOTO_COLOR, tolerance=6)[0] == 0
+    # ...e al suo posto c'e' lo sfondo neutro dichiarato.
+    assert _matching(image, frame, BOARD_BACKDROP_COLOR, tolerance=2)[0] > 0
+    assert image.pixelColor(frame.center()) == QColor(BOARD_BACKDROP_COLOR)
+    widget.set_photo_state(PHOTO_FULL)
+    assert _geometry(widget) == before_geometry
+    assert _outline_pixels(app, widget) == before_pixels
+    assert _view_image(app, widget).pixelColor(frame.center()) == QColor(PHOTO_COLOR)
+
+
+def test_the_attenuated_photograph_fades_into_the_neutral_backdrop(photo_dialog):
+    """@brief Lo stato intermedio tiene la scheda come contesto invece di toglierla.
+
+    Attenuare e' lo stato che lascia la revisione possibile -- se un riquadro
+    poggi o no sul suo corpo si giudica solo contro la scheda -- quindi la
+    fotografia c'e' ancora, ma composta sopra lo sfondo neutro e percio' molto
+    piu' vicina a quello che a se stessa.
+    """
+    app, widget, _ = photo_dialog
+    before_pixels = _outline_pixels(app, widget)
+    widget.set_photo_state(PHOTO_DIMMED)
+    assert _outline_pixels(app, widget) == before_pixels
+    pixel = _view_image(app, widget).pixelColor(widget.view._frame().center())
+
+    def distance(color):
+        color = QColor(color)
+        return (abs(pixel.red() - color.red()) + abs(pixel.green() - color.green())
+                + abs(pixel.blue() - color.blue()))
+
+    assert distance(BOARD_BACKDROP_COLOR) * 3 < distance(PHOTO_COLOR), (
+        "la scheda attenuata deve stare vicino allo sfondo neutro, non alla fotografia")
+    # Negativo: attenuata non e' nascosta -- la scheda si vede ancora.
+    assert distance(BOARD_BACKDROP_COLOR) > 0
+    assert PHOTO_DIMMED_OPACITY < .5, "sotto meta' opacita', altrimenti non e' attenuazione"
+
+
+def test_the_backdrop_contrasts_with_every_pen_this_dialog_uses(photo_dialog):
+    """@brief Contrasto misurato dello sfondo contro ogni tratto della finestra.
+
+    I colori di stato portano significato -- il testo della finestra spiega i
+    tratteggiati -- percio' si sceglie lo sfondo attorno a loro, mai il
+    contrario. Tutti e quattro i tratti (forte, debole, aggiunto, scelto: che
+    e' anche il colore delle maniglie e del rettangolo che si sta tracciando)
+    e il bordo della PCB superano il rapporto WCAG di 3:1 contro lo sfondo, e
+    lo sfondo e' piu' chiaro di quello dell'applicazione, cosi' l'area della
+    scheda resta una regione leggibile.
+    """
+    _app, widget, _ = photo_dialog
+    pens = {STRONG_COLOR, WEAK_COLOR, ADDED_COLOR, SELECTED_COLOR}
+    # I colori provati sono davvero quelli che la finestra mette sullo schermo.
+    assert {box_pen(p).color().name() for p in widget.view.proposals} <= pens
+    assert box_pen(widget.view.proposals[0], chosen=True).color().name() == SELECTED_COLOR
+    for colour in pens | {BOARD_BORDER_COLOR}:
+        assert _contrast_ratio(colour, BOARD_BACKDROP_COLOR) >= 3.0, colour
+    assert _relative_luminance(BOARD_BACKDROP_COLOR) > _relative_luminance(BASE)
+    # Negativo: una fotografia non offre nessuna garanzia del genere -- una
+    # serigrafia bianca o uno schermo metallico chiaro annullano il tratto
+    # giallo proprio dove capita, ed e' il motivo per cui serve uno sfondo noto.
+    assert _contrast_ratio(WEAK_COLOR, "#ffffff") < 3.0
+    assert _contrast_ratio(STRONG_COLOR, "#d9e6d2") < 3.0
+
+
+def test_the_pcb_border_is_traced_whenever_the_photograph_steps_back(photo_dialog):
+    """@brief Tolta la foto, il bordo della scheda e' l'unico riferimento rimasto.
+
+    Senza di esso un corpo che sta FUORI dalla scheda non sarebbe piu'
+    giudicabile, e questa e' la finestra in cui si decide cosa mandare. Il
+    bordo si disegna dentro il fotogramma, in un grigio che nessun tratto di
+    stato usa, e in entrambi gli stati in cui la fotografia si fa da parte.
+    """
+    app, widget, _ = photo_dialog
+    frame = widget.view._frame()
+    edge = frame.adjusted(0, 0, 0, -frame.height() + 2 * HANDLE_RADIUS_PX)
+    # Negativo: con la fotografia intera il bordo non viene disegnato, perche'
+    # il bordo della foto E' gia' il bordo della scheda.
+    assert _matching(_view_image(app, widget), edge, BOARD_BORDER_COLOR, tolerance=12)[0] == 0
+    for state in (PHOTO_DIMMED, PHOTO_HIDDEN):
+        widget.set_photo_state(state)
+        assert _matching(_view_image(app, widget), edge,
+                         BOARD_BORDER_COLOR, tolerance=12)[0] > 0, state
+    assert BOARD_BORDER_COLOR not in {STRONG_COLOR, WEAK_COLOR, ADDED_COLOR, SELECTED_COLOR}
+
+
+def test_what_the_review_returns_is_identical_in_every_state(photo_dialog):
+    """@brief Negativo: lo stato della vista non deve trapelare in cio' che esce.
+
+    E' un modo di guardare, non una decisione: `kept()` e le proposte devono
+    essere identiche byte per byte nei tre stati, altrimenti chi paga la
+    chiamata a valle riceverebbe qualcosa che dipende da come era regolata la
+    finestra.
+    """
+    app, widget, _ = photo_dialog
+    widget._select_row(0)
+    _drag(widget.view, widget.view.to_widget(FIRST_BOX).center(), _pixels(widget.view, .10, .10))
+    widget._add_box((.25, .40, .75, .50))
+    reference = repr(widget.kept())
+    for state in PHOTO_STATES:
+        widget.set_photo_state(state)
+        app.processEvents()
+        assert repr(widget.kept()) == reference, state
+        assert repr(widget.view.proposals) == repr(widget.proposals), state
+    assert len(widget.kept()) == 3
+
+
+def test_every_gesture_still_works_with_the_photograph_hidden(photo_dialog):
+    """@brief Positivo: scelta, spostamento, maniglie e disegno funzionano senza foto.
+
+    Lo sfondo neutro non prende il mouse: le coordinate normalizzate nascono
+    da `_frame()`, che non dipende dallo stato, quindi un gesto deve produrre
+    esattamente le stesse quote che produrrebbe sopra la fotografia. Si guida
+    il widget vero, come fanno le altre prove di questo file.
+    """
+    _app, widget, _ = photo_dialog
+    view = widget.view
+    widget.set_photo_state(PHOTO_HIDDEN)
+    # Scelta con un clic sul riquadro, senza passare dalla lista.
+    _drag(view, view.to_widget(FIRST_BOX).center(), (0, 0))
+    assert view.selected == 0 and widget.list.currentRow() == 0
+    assert '_yolo_manual_box' not in widget.kept()[0]
+    # Spostamento: un decimo del ritaglio vale 4 mm lungo X e 2 mm lungo Y.
+    before = dict(widget.kept()[0])
+    _drag(view, view.to_widget(FIRST_BOX).center(), _pixels(view, .10, .10))
+    moved = widget.kept()[0]
+    assert moved['x_mm'] == pytest.approx(before['x_mm'] + 4.0)
+    assert moved['y_mm'] == pytest.approx(before['y_mm'] + 2.0)
+    assert moved['_box'] == pytest.approx((.20, .20, .40, .40))
+    # Ridimensionamento con la maniglia destra.
+    rect = view.to_widget(moved['_box'])
+    assert view.handle_at(QPointF(rect.right(), rect.center().y())) == (1, 0)
+    _drag(view, QPointF(rect.right(), rect.center().y()), _pixels(view, .10, 0))
+    resized = widget.kept()[0]
+    assert resized['_box'] == pytest.approx((.20, .20, .50, .40))
+    assert resized['length_mm'] == pytest.approx(.30 * LENGTH_MM)
+    # Rettangolo nuovo tracciato sul vuoto.
+    frame = view._frame()
+    dx, dy = _pixels(view, .40, .60)
+    _drag(view, QPointF(frame.x() + dx, frame.y() + dy), _pixels(view, .20, .10))
+    assert len(widget.kept()) == 3
+    added = widget.kept()[-1]
+    assert added['_yolo_origin'] == 'user_added'
+    assert added['length_mm'] == pytest.approx(.20 * LENGTH_MM)
+    # Categoria e lista continuano a seguire la scelta.
+    widget._select_row(1)
+    widget._change_class('diode')
+    assert widget.kept()[1]['_yolo_class'] == 'diode'
+    assert 'diode' in widget.list.item(1).text()
+    # Eliminazione.
+    widget._delete_selected()
+    assert [row['_id'] for row in widget.kept()] == [1, 3]
+    # Lo stato non e' cambiato per conto suo durante tutto questo.
+    assert widget.photo_state() == PHOTO_HIDDEN
+    assert widget.photo_state_label.text() == "Foto: nascosta"
+
+
+def test_a_click_that_slipped_is_still_not_a_component_without_the_photograph(photo_dialog):
+    """@brief Negativo del precedente: lo sfondo neutro non abbassa la soglia.
+
+    Un rettangolo grande come un clic resta un clic andato storto anche quando
+    la fotografia non c'e': togliere la foto rende visibile, non permissivo.
+    """
+    _app, widget, _ = photo_dialog
+    widget.set_photo_state(PHOTO_HIDDEN)
+    view = widget.view
+    before = len(widget.kept())
+    frame = view._frame()
+    start = QPointF(frame.x() + frame.width() * .5, frame.y() + frame.height() * .9)
+    tiny = MIN_NEW_BOX / 3
+    end = QPointF(start.x() + frame.width() * tiny, start.y() + frame.height() * tiny)
+    view._drag_from, view._drag_to = start, start
+    view.mouseReleaseEvent(_Mouse(end))
+    assert len(widget.kept()) == before
+
+
+def test_a_new_review_opens_on_the_photograph(photo_dialog):
+    """@brief Ogni finestra nuova riparte dalla fotografia.
+
+    La fotografia e' il riferimento da cui la revisione comincia: uno stato
+    ereditato dalla finestra precedente farebbe aprire una revisione su una
+    scheda che non si vede, senza che nessuno l'abbia chiesto.
+    """
+    _app, first, _ = photo_dialog
+    first.set_photo_state(PHOTO_HIDDEN)
+    assert first.photo_state() == PHOTO_HIDDEN
+    _app2, second, _ = _make_dialog(_photo_png())
+    try:
+        assert second.photo_state() == PHOTO_FULL
+        assert second.photo_state_label.text() == "Foto: intera"
+        assert second.photo_button.text() == "Attenua foto"
+        assert not second.photo_button.isChecked()
+    finally:
+        second.close()
+
+
+def test_an_unknown_state_is_refused_instead_of_being_ignored(photo_dialog):
+    """@brief Negativo: uno stato sconosciuto non deve passare in silenzio.
+
+    Ignorarlo lascerebbe la vista e il pulsante in disaccordo su cosa si sta
+    guardando, che e' esattamente cio' che questo comando esiste per rendere
+    inequivocabile.
+    """
+    _app, widget, _ = photo_dialog
+    widget.set_photo_state(PHOTO_DIMMED)
+    with pytest.raises(ValueError):
+        widget.set_photo_state("transparent")
+    assert widget.photo_state() == PHOTO_DIMMED
+    assert widget.photo_state_label.text() == "Foto: attenuata"
+    assert widget.photo_button.text() == "Nascondi foto"
+
+
+def test_the_control_works_even_without_a_photograph(dialog):
+    """@brief Senza fotografia il comando resta coerente invece di rompersi.
+
+    La finestra puo' essere costruita con `photo_png` vuoto (e le altre prove
+    di questo file la costruiscono cosi'): in quel caso non c'e' niente da
+    attenuare, ma lo sfondo neutro e il bordo devono comunque comparire,
+    perche' e' sempre sopra di essi che si disegnano i riquadri.
+    """
+    widget, _ = dialog
+    app = QApplication.instance()
+    assert widget.view.pixmap.isNull()
+    before = _geometry(widget)
+    for state in PHOTO_STATES:
+        widget.set_photo_state(state)
+        app.processEvents()
+        assert _geometry(widget) == before, state
+    widget.set_photo_state(PHOTO_HIDDEN)
+    image = _view_image(app, widget)
+    assert _matching(image, widget.view._frame(), BOARD_BACKDROP_COLOR, tolerance=2)[0] > 0
 
 
 class _Mouse:

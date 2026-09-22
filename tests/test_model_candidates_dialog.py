@@ -223,6 +223,18 @@ def test_reopen_manual_path_missing_from_report(review, monkeypatch, tmp_path):
     ({}, None, True, 0),
 ])
 def test_rotation_auto_and_explicit_zero_contract(review, monkeypatch, saved, legacy, automatic, angle):
+    """@brief Ogni combinazione salvata/legacy produce la stessa scelta di prima.
+
+    @note Contratto riscritto, non allentato: l'asserzione
+    ``rotation.isEnabled() != automatic`` non esiste piu' perche' il campo non
+    viene piu' disabilitato in modalita' automatica. Disabilitarlo era il
+    difetto segnalato dall'utente: il campo restava visibile, con le frecce e
+    un valore, e ingoiava in silenzio l'intenzione di chi lo girava. Al suo
+    posto si asserisce cio' che il campo disabilitato avrebbe dovuto
+    comunicare, cioe' quale delle due modalita' comanda, su un'etichetta
+    leggibile senza passare il mouse. Il valore restituito da
+    selected_selection() resta identico a prima per ogni combinazione.
+    """
     _, component, report = review
     component['model_rotation_deg'] = legacy
     component['model_selection'] = dict(saved, status='confirmed', path=report['candidates'][0]['path'])
@@ -230,7 +242,9 @@ def test_rotation_auto_and_explicit_zero_contract(review, monkeypatch, saved, le
     monkeypatch.setattr(gui.QThreadPool, 'globalInstance', lambda: pytest.fail('Eager preview'))
     dialog = gui.ModelCandidatesDialog(component, report)
     assert dialog.auto_rotation.isChecked() == automatic
-    assert dialog.rotation.isEnabled() != automatic
+    assert dialog.rotation.isEnabled()
+    assert ('Automatico' in dialog.rotation_state.text()) == automatic
+    assert ('override esplicito' in dialog.rotation_state.text()) != automatic
     assert dialog.rotation.value() == angle
     dialog.accept()
     assert dialog.selected_selection()['rotation_deg'] == (None if automatic else angle)
@@ -256,6 +270,174 @@ def test_switch_auto_to_explicit_zero_and_back(review, monkeypatch):
     other.auto_rotation.setChecked(True)
     other.accept()
     assert other.selected_selection()['rotation_deg'] is None
+
+
+def test_turning_the_rotation_takes_over_from_automatic_and_is_previewed(review, app, monkeypatch):
+    """@brief Positivo: girare la manopola con «Automatico» attivo non e' un vicolo cieco.
+
+    Il difetto segnalato: il campo restava visibile e con le frecce ma
+    disabilitato, quindi l'utente lo girava due volte senza che accadesse
+    nulla. L'unico significato possibile di quel gesto e' «voglio questo
+    angolo», quindi la spunta automatica deve cadere da sola e l'anteprima
+    deve essere ricostruita proprio con il valore chiesto.
+    """
+    dialog, _, report = review
+    calls = []
+    monkeypatch.setattr(gui, '_thumbnail', lambda *args: calls.append(args))
+    dialog.auto_rotation.setChecked(True)
+    dialog.candidate_list.setCurrentRow(0)
+    _wait(app, lambda: not dialog._workers and calls)
+    assert calls[-1][1] is None
+    # Il campo e' utilizzabile in entrambe le modalita': disabilitarlo era il difetto.
+    assert dialog.rotation.isEnabled()
+    dialog.rotation.setValue(45)
+    _wait(app, lambda: not dialog._workers and len(calls) == 2)
+    assert not dialog.auto_rotation.isChecked()
+    assert dialog.rotation_state.text() == 'in uso: override esplicito'
+    assert calls[-1] == (report['candidates'][0]['path'], 45.0, None, None)
+    dialog.accept()
+    assert dialog.selected_selection() == dict(
+        status='confirmed', path=report['candidates'][0]['path'], rotation_deg=45.0)
+
+
+def test_untouched_automatic_still_asks_for_the_inferred_orientation(review, app, monkeypatch):
+    """@brief Negativo: senza toccare la rotazione, l'anteprima resta automatica."""
+    dialog, _, report = review
+    calls = []
+    monkeypatch.setattr(gui, '_thumbnail', lambda *args: calls.append(args))
+    dialog.auto_rotation.setChecked(True)
+    dialog.candidate_list.setCurrentRow(1)
+    _wait(app, lambda: not dialog._workers and calls)
+    # Nessuna rotazione esplicita si insinua: il worker riceve None e le quote.
+    assert calls == [(report['candidates'][1]['path'], None, (3, 2), None)]
+    assert dialog.auto_rotation.isChecked()
+    assert dialog.rotation_state.text() == 'non in uso: comanda «Automatico»'
+    dialog.accept()
+    assert dialog.selected_selection() == dict(
+        status='confirmed', path=report['candidates'][1]['path'], rotation_deg=None)
+
+
+def test_explicit_zero_typed_over_automatic_zero_is_not_swallowed(review, app, monkeypatch):
+    """@brief Il caso 0°: digitarlo mentre «Automatico» e' attivo deve valere.
+
+    Con valore gia' a 0 e modalita' automatica, ``valueChanged`` non scatta:
+    senza la via del testo digitato la richiesta sparirebbe in silenzio, ed e'
+    esattamente la richiesta che distingue «automatico» da «esplicito 0°»,
+    contratto dichiarato in rotation_hint.
+    """
+    from PyQt6.QtTest import QTest
+    _, component, report = review
+    component['model_selection'] = dict(status='confirmed', rotation_deg=None,
+                                        path=report['candidates'][0]['path'])
+    dialog = gui.ModelCandidatesDialog(component, report)
+    calls = []
+    monkeypatch.setattr(gui, '_thumbnail', lambda *args: calls.append(args))
+    try:
+        assert dialog.auto_rotation.isChecked() and dialog.rotation.value() == 0
+        dialog.show()
+        _wait(app, lambda: not dialog._workers and calls)
+        assert calls[-1][1] is None
+        dialog.rotation.lineEdit().selectAll()
+        QTest.keyClicks(dialog.rotation.lineEdit(), '0')
+        assert dialog.rotation.value() == 0
+        assert not dialog.auto_rotation.isChecked()
+        assert '0°' in dialog.rotation_hint.text()
+        _wait(app, lambda: not dialog._workers and len(calls) == 2)
+        # Zero esplicito, non None: l'inferenza degli assi resta disattivata.
+        assert calls[-1] == (report['candidates'][0]['path'], 0.0, None, None)
+        dialog.accept()
+        assert dialog.selected_selection()['rotation_deg'] == 0.0
+    finally:
+        dialog.reject()
+
+
+def test_a_step_swallowed_by_the_range_limit_still_claims_the_override(review):
+    """@brief Negativo del meccanismo: nemmeno uno scatto senza effetto va perso."""
+    from PyQt6.QtCore import QSignalBlocker
+    dialog, _, _ = review
+    dialog.auto_rotation.setChecked(True)
+    # Il blocco evita che la preparazione del caso limite passi per la stessa
+    # via che il test deve verificare.
+    blocker = QSignalBlocker(dialog.rotation)
+    try:
+        dialog.rotation.setValue(360)
+    finally:
+        blocker.unblock()
+    assert dialog.auto_rotation.isChecked()
+    dialog.rotation.stepBy(1)
+    assert dialog.rotation.value() == 360
+    assert not dialog.auto_rotation.isChecked()
+    assert dialog.rotation_state.text() == 'in uso: override esplicito'
+    dialog.candidate_list.setCurrentRow(0)
+    dialog.accept()
+    assert dialog.selected_selection()['rotation_deg'] == 360.0
+
+
+def test_restoring_a_saved_angle_never_claims_the_override_by_itself(review, monkeypatch):
+    """@brief Negativo: costruire il dialogo non equivale a girare la manopola."""
+    _, component, report = review
+    component['model_selection'] = dict(status='confirmed', rotation_deg=None,
+                                        path=report['candidates'][0]['path'])
+    component['model_rotation_deg'] = 90
+    monkeypatch.setattr(gui.QThreadPool, 'globalInstance', lambda: pytest.fail('Eager preview'))
+    dialog = gui.ModelCandidatesDialog(component, report)
+    try:
+        assert dialog.auto_rotation.isChecked()
+        assert dialog.rotation_state.text() == 'non in uso: comanda «Automatico»'
+        dialog.accept()
+        assert dialog.selected_selection()['rotation_deg'] is None
+    finally:
+        dialog.reject()
+
+
+def test_rapid_rotation_changes_end_on_the_last_value(review, app, monkeypatch):
+    """@brief Coalescenza: l'ultimo valore chiesto e' quello disegnato.
+
+    Con un worker gia' in corso ``_start_preview`` non ne avvia un secondo; la
+    rientranza di ``_preview_ready`` deve quindi ripartire da sola sull'ultimo
+    token, altrimenti l'utente vedrebbe l'anteprima di un angolo intermedio.
+    """
+    dialog, _, report = review
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def thumbnail(path, rotation, *_):
+        calls.append((path, rotation))
+        if len(calls) == 1:
+            entered.set()
+            release.wait(2)
+        return None
+
+    monkeypatch.setattr(gui, '_thumbnail', thumbnail)
+    dialog.candidate_list.setCurrentRow(0)
+    assert entered.wait(1)
+    for value in (10, 20, 30, 40):
+        dialog.rotation.setValue(value)
+    # Un solo processo per volta: le richieste intermedie non ne aprono altri.
+    assert len(calls) == 1
+    release.set()
+    _wait(app, lambda: not dialog._workers and len(calls) >= 2)
+    assert calls[-1] == (report['candidates'][0]['path'], 40.0)
+    assert len(calls) == 2
+    assert dialog.rotation.value() == 40
+
+
+def test_the_mode_in_force_is_readable_on_the_dialog_without_hovering(review, monkeypatch):
+    """@brief Lo stato si legge sul dialogo, non in un tooltip da scoprire."""
+    from PyQt6.QtWidgets import QLabel
+    dialog, _, _ = review
+    monkeypatch.setattr(dialog, '_start_preview', lambda *args: None)
+    assert dialog.rotation_state.isVisibleTo(dialog)
+    assert dialog.rotation_state.text() == 'in uso: override esplicito'
+    dialog.auto_rotation.setChecked(True)
+    assert dialog.rotation_state.text() == 'non in uso: comanda «Automatico»'
+    # L'indicazione e' un'etichetta del dialogo, non un suggerimento nascosto.
+    assert 'non in uso: comanda «Automatico»' in [
+        label.text() for label in dialog.findChildren(QLabel)]
+    assert 'Modificando la rotazione' in dialog.rotation_hint.text()
+    dialog.auto_rotation.setChecked(False)
+    assert dialog.rotation_state.text() == 'in uso: override esplicito'
+    assert '0°' in dialog.rotation_hint.text()
 
 
 def test_auto_worker_receives_component_dimensions(review, app, monkeypatch):

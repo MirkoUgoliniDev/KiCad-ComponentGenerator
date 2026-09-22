@@ -81,7 +81,10 @@ def test_no_document_is_not_reported_as_a_call_with_zero_files():
 
 
 def test_the_line_names_files_not_paths():
-    """@brief Le cartelle non entrano: la modale ha una riga e le taglierebbe."""
+    """@brief Le cartelle non entrano: dicono dove sta il file, non che cosa sta
+    partendo, e su una riga della scheda prenderebbero il posto del nome e del
+    ruolo -- che sono l'informazione richiesta. Vale anche ora che ogni
+    documento ha una riga propria: la riga e' larga quanto la scheda."""
     path = Path('/home/utente/Documenti/progetti/scheda-radio/immagini/top.png')
     message = _files_sent_message([path], {'top.png': 'top'})
     assert 'top.png' in message and str(path.parent) not in message
@@ -144,6 +147,105 @@ def test_files_not_sent_do_not_appear_in_the_line():
     """@brief Negativo: la riga descrive l'invio, non la cartella del progetto."""
     message = _files_sent_message([Path('p/top.png')], {'top.png': 'top'})
     assert 'pinout' not in message.lower().split(': ', 1)[1]
+
+
+# ── 1b. La stessa riga per due lettori: il log e la scheda della modale ──
+#
+# La riga resta UNA per il log -- un evento, una marca temporale, come ogni
+# altra riga -- e la scheda la rimpagina a un documento per riga
+# (`analysis_overlay.enumeration_lines`). Qui si verifica il patto fra le due
+# parti sul testo; che la scheda poi la disegni senza tagliarla e' provato in
+# tests/test_analysis_overlay.py, dove c'e' un widget vero da misurare.
+
+
+def _card_lines(message):
+    """Le righe che la scheda ricava dalla riga di log, senza aprire una finestra."""
+    overlay = pytest.importorskip('kicadgen.gui.analysis_overlay')
+    return overlay.enumeration_lines(message)
+
+
+@pytest.mark.parametrize('count', (2, 3, 8))
+def test_the_event_stays_one_log_line_however_many_documents(count):
+    """@brief Il log non si spezza: un evento resta una riga, con una marca sola.
+
+    E' il motivo per cui la divisione fra i due lettori NON e' fatta mettendo
+    un a capo nel messaggio: una riga su piu' righe rompe la forma con cui il
+    resto del log si rilegge a ritroso (`analisi-ai.log`), e la scheda non
+    saprebbe comunque quanto alta farsi. La riga viene rimpaginata a valle.
+    """
+    names = [f'documento-{index}.png' for index in range(count)]
+    roles = {name: ('top', 'pinout', 'hires')[index % 3]
+             for index, name in enumerate(names)}
+    message = _files_sent_message([Path('d') / name for name in names], roles)
+    assert '\n' not in message and '\r' not in message
+    assert message.count(' · ') == count - 1
+    assert message.startswith(f'Invio a AI {count} documenti')
+
+
+def test_the_card_puts_one_document_per_line_with_its_role():
+    """@brief Positivo: dalla riga sola la scheda ricava intestazione piu' una
+    riga per documento, e su ogni riga restano il nome e il ruolo.
+
+    E' la richiesta dell'utente: «i nomi dei file uno sotto l'altro, più
+    chiaro». Il patto e' tutto nella punteggiatura della riga -- due punti che
+    chiudono l'annuncio, punto mediano fra i documenti -- quindi si verifica
+    qui, accanto a chi la scrive.
+    """
+    paths = [Path('a/pinout.png'), Path('a/top.png'), Path('a/hires.jpg')]
+    roles = {'pinout.png': 'pinout', 'top.png': 'top', 'hires.jpg': 'hires'}
+    lines = _card_lines(_files_sent_message(paths, roles))
+    assert lines == ['Invio a AI 3 documenti per layout, quote e pinout:',
+                     'pinout.png, Pinout / disposizione contatti',
+                     'top.png, Immagine con quote',
+                     'hires.jpg, Foto ad alta risoluzione.']
+
+
+@pytest.mark.parametrize('paths,roles', [
+    ([Path('a/top.png')], {'top.png': 'top'}),
+    ([], {}),
+])
+def test_one_document_and_no_document_are_not_lists(paths, roles):
+    """@brief Negativo: con un documento solo, o nessuno, non c'e' nulla da
+    incolonnare e la riga resta una riga.
+
+    Un elenco di una voce sarebbe due righe per dire cio' che ne occupa una, e
+    la riga dello zero non elenca affatto: non deve poter diventare un elenco
+    vuoto, che sembrerebbe un invio a vuoto.
+    """
+    assert _card_lines(_files_sent_message(paths, roles)) is None
+
+
+@pytest.mark.parametrize('name', ('MOD_REV_B.pdf', 'MOD_REV_B'))
+def test_a_name_shaped_like_a_service_marker_still_reaches_the_card(name):
+    """@brief Negativo, contro i filtri VERI della modale.
+
+    UPPER_SNAKE e' la forma con cui questo programma marca le proprie righe di
+    servizio, ed e' anche un nome di file legittimo (una revisione, un
+    disegno). Il marcatore si cerca solo in TESTA alla riga, e questa riga
+    comincia con l'annuncio: il documento dell'utente non puo' quindi far
+    sparire dalla scheda l'unica riga che dice che cosa e' partito. Si prova
+    anche il nome senza estensione, che e' il caso peggiore.
+    """
+    overlay = pytest.importorskip('kicadgen.gui.analysis_overlay')
+    window = pytest.importorskip('kicadgen.gui.main_window')
+    message = _files_sent_message([Path('d') / name, Path('d/top.png')],
+                                  {name: 'pinout', 'top.png': 'top'})
+    assert not overlay.is_machine_line(message)
+    assert not window.per_item_detail(message)
+    lines = overlay.enumeration_lines(message)
+    assert lines[1] == f'{name}, Pinout / disposizione contatti'
+    assert overlay.elide_paths(message) == message, (
+        'un nome di file non e’ un percorso e non va accorciato come tale')
+
+
+def test_the_role_label_with_a_slash_is_not_taken_for_a_path():
+    """@brief Negativo dedicato: «Pinout / disposizione contatti» contiene una
+    barra, e la scheda accorcia i percorsi assoluti. Se l'etichetta finisse
+    sotto quella regola, la riga perderebbe proprio il ruolo che deve dire."""
+    overlay = pytest.importorskip('kicadgen.gui.analysis_overlay')
+    message = _files_sent_message([Path('/tmp/p/pinout.pdf')], {'pinout.pdf': 'pinout'})
+    assert overlay.elide_paths(message) == message
+    assert 'Pinout / disposizione contatti' in message
 
 
 # ── 2. Quale strumento sta lavorando: rilevamento locale o chiamata ──

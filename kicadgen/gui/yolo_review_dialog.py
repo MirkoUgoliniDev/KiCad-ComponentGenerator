@@ -11,7 +11,8 @@ Qui si potano prima: costa meno e il modello riceve un problema piu' pulito.
 Chi guarda decide, perche' distinguere un corpo da un riflesso e' esattamente
 cio' che un occhio fa meglio di una soglia.
 """
-from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, pyqtSignal
+from PyQt6.QtCore import (QPoint, QPointF, QRect, QRectF, QSignalBlocker, Qt,
+                          pyqtSignal)
 from PyQt6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QHBoxLayout,
                              QLabel, QListWidget, QListWidgetItem, QPushButton,
@@ -85,6 +86,41 @@ WEAK_COLOR = "#f9e2af"
 ADDED_COLOR = "#89b4fa"
 SELECTED_COLOR = "#f38ba8"
 
+#: Stati dello sfondo della vista, nell'ordine in cui il pulsante li
+#: attraversa: fotografia intera, attenuata, tolta. Stessi identificatori e
+#: stesse etichette di `photo_review_dialog`: le due finestre risolvono lo
+#: stesso problema e chi le usa non deve incontrare due convenzioni.
+PHOTO_FULL = "full"
+PHOTO_DIMMED = "dimmed"
+PHOTO_HIDDEN = "hidden"
+PHOTO_STATES = (PHOTO_FULL, PHOTO_DIMMED, PHOTO_HIDDEN)
+
+#: Opacita' della fotografia attenuata. La scheda resta riconoscibile -- e
+#: capire su QUALE corpo poggia un riquadro e' esattamente cio' che si sta
+#: rivedendo -- mentre quasi tutto il contrasto torna ai contorni. Bassa
+#: abbastanza perche' il risultato composto su BOARD_BACKDROP_COLOR resti
+#: molto piu' vicino allo sfondo neutro che alla fotografia; la garanzia
+#: piena sul contrasto la da' solo PHOTO_HIDDEN.
+PHOTO_DIMMED_OPACITY = .25
+
+#: Riempimento neutro disegnato al posto della fotografia quando questa e'
+#: attenuata o tolta. Scelto per misura, non a occhio: la sua luminanza
+#: relativa (~0.038) tiene il rapporto di contrasto WCAG sopra 3:1 contro il
+#: PIU' SCURO dei tratti che questa finestra usa (SELECTED_COLOR, ~5.2:1) e
+#: quindi anche contro gli altri tre, che sono piu' chiari. I colori di stato
+#: portano significato -- il testo della finestra spiega i tratteggiati --
+#: percio' si sceglie lo sfondo attorno a loro, mai il contrario. E' anche
+#: piu' chiaro dello sfondo dell'applicazione (BASE del tema, #1e1e2e), che e'
+#: cio' che rende l'area della scheda ancora leggibile come regione.
+BOARD_BACKDROP_COLOR = "#32373e"
+
+#: Bordo della scheda disegnato con quello sfondo. Tolta la fotografia e'
+#: l'unica traccia rimasta di dove finisce la PCB, quindi un corpo che sta
+#: fuori dal bordo resta giudicabile. Grigio apposta: non deve essere scambiato
+#: per il tratto colorato di una proposta ne' per le maniglie.
+BOARD_BORDER_COLOR = "#8a93a0"
+BOARD_BORDER_WIDTH_PX = 2
+
 
 def _origin_color(proposal):
     """@brief Colore di un riquadro secondo la sua provenienza."""
@@ -137,8 +173,49 @@ class BoardView(QWidget):
         # `_box` di partenza, punto di pressione). None quando non si sta
         # trascinando nulla di esistente.
         self._edit = None
+        # Stato dello sfondo: appartiene alla vista perche' e' la vista a
+        # dipingere. Non tocca nulla di cio' che la finestra restituisce.
+        self._photo_state = PHOTO_FULL
         self.setMinimumSize(480, 320)
         self.setMouseTracking(True)
+
+    def photo_state(self):
+        """@brief Quanto della fotografia la vista sta mostrando.
+
+        @return Uno fra PHOTO_FULL, PHOTO_DIMMED e PHOTO_HIDDEN.
+        @note E' solo un modo di guardare: non entra in `_box` ne' in nessun
+            altro campo delle proposte, quindi non raggiunge chi paga la
+            chiamata a valle.
+        """
+        return self._photo_state
+
+    def set_photo_state(self, state):
+        """@brief Mostra la fotografia intera, la attenua, o la toglie.
+
+        @param state Uno fra PHOTO_FULL, PHOTO_DIMMED, PHOTO_HIDDEN.
+        @throws ValueError per qualunque altro valore: uno stato ignorato in
+            silenzio lascerebbe la vista e il pulsante in disaccordo su cosa
+            si sta guardando, che e' esattamente cio' che questo comando
+            esiste per rendere inequivocabile.
+        @note Cambia solo cio' che si vede. Scelta, spostamento, le otto
+            maniglie, il rettangolo tracciato e le coordinate normalizzate
+            restano quelli di prima: `_frame()` non dipende dallo stato.
+        """
+        if state not in PHOTO_STATES:
+            raise ValueError(f"Unknown photo state: {state!r}")
+        self._photo_state = state
+        self.update()
+
+    def cycle_photo_state(self):
+        """@brief Passa allo stato successivo: intera, attenuata, nascosta.
+
+        @note Monotono apposta, un passo per clic sempre piu' lontano dalla
+            fotografia: un ciclo che saltasse dritto a "nascosta" sarebbe piu'
+            rapido per il caso che l'utente ha chiesto, al prezzo di un ordine
+            che dal pulsante non si puo' prevedere.
+        """
+        index = (PHOTO_STATES.index(self._photo_state) + 1) % len(PHOTO_STATES)
+        self.set_photo_state(PHOTO_STATES[index])
 
     def _frame(self):
         """@brief Rettangolo, in pixel, in cui la foto e' disegnata."""
@@ -239,12 +316,33 @@ class BoardView(QWidget):
         return rect
 
     def paintEvent(self, event):
-        """@brief Disegna la foto, i riquadri in gioco e le maniglie di quello scelto."""
+        """@brief Disegna lo sfondo, i riquadri in gioco e le maniglie di quello scelto.
+
+        @note Lo sfondo neutro va sotto la fotografia, non al posto suo:
+            attenuare deve sfumare la foto dentro una base nota, altrimenti il
+            contrasto dei tratti dipenderebbe dal colore della scheda sotto.
+        @note Il bordo della scheda si disegna DOPO la fotografia: nello stato
+            attenuato un bordo sotto verrebbe sbiadito proprio quando serve,
+            perche' e' l'unico riferimento di dove finisce la PCB.
+        """
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         frame = self._frame()
-        if not self.pixmap.isNull():
+        backdrop = self._photo_state != PHOTO_FULL
+        if backdrop:
+            painter.fillRect(frame, QColor(BOARD_BACKDROP_COLOR))
+        if not self.pixmap.isNull() and self._photo_state != PHOTO_HIDDEN:
+            if self._photo_state == PHOTO_DIMMED:
+                painter.setOpacity(PHOTO_DIMMED_OPACITY)
             painter.drawPixmap(frame, self.pixmap)
+            painter.setOpacity(1.0)
+        if backdrop:
+            painter.setPen(QPen(QColor(BOARD_BORDER_COLOR), BOARD_BORDER_WIDTH_PX))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            # Mezzo tratto dentro il fotogramma: una penna centrata sul bordo
+            # esatto verrebbe tagliata a meta' quando la foto riempie la vista.
+            half = BOARD_BORDER_WIDTH_PX / 2
+            painter.drawRect(QRectF(frame).adjusted(half, half, -half, -half))
         for index, proposal in enumerate(self.proposals):
             painter.setPen(box_pen(proposal, index == self.selected))
             painter.drawRect(self.to_widget(proposal["_box"]))
@@ -347,6 +445,13 @@ class YoloReviewDialog(QDialog):
     @param classes Categorie che il rilevatore conosce.
     @note Annullare significa non procedere: chi chiama non deve pagare la
         chiamata di riconciliazione con proposte che non sono state approvate.
+    @note La fotografia puo' farsi da parte (`photo_state()`,
+        `set_photo_state()`, `cycle_photo_state()`): su una scheda affollata i
+        corpi piccoli sono illeggibili sopra la foto, e qui la leggibilita'
+        decide cosa viene mandato e pagato. E' un comando di vista e basta:
+        `kept()` e le proposte non cambiano di un byte, e ogni finestra nuova
+        riparte da PHOTO_FULL, perche' la fotografia e' il riferimento da cui
+        la revisione comincia.
     """
 
     def __init__(self, photo_png, proposals, length_mm, width_mm, classes, parent=None):
@@ -377,6 +482,30 @@ class YoloReviewDialog(QDialog):
         self.combo_class.addItems(self.classes)
         self.combo_class.setEnabled(False)
         self.combo_class.currentTextChanged.connect(self._change_class)
+        # Comando di vista, sotto la fotografia e non fra i comandi di
+        # modifica: cambia cio' che si vede, mai cio' che si tiene. Un solo
+        # pulsante per tre stati invece di tre alternative.
+        #
+        # Comando e stato stanno su due widget diversi, come nella revisione
+        # fotografica successiva e per la stessa ragione trovata sul campo:
+        # finche' il pulsante diceva «Foto: intera» enunciava uno STATO, e una
+        # didascalia non si preme -- un utente ha chiesto la funzione come se
+        # non esistesse. Il pulsante porta il VERBO del passo successivo e
+        # l'etichetta accanto porta lo stato attuale; il verbo rende anche
+        # prevedibile l'ordine del ciclo, che altrimenti si scopre premendo.
+        # Lo stato premuto resta come indizio ridondante: una vista che non
+        # mostra piu' la scheda vera non va scambiata per una che la mostra.
+        self.photo_button = QPushButton()
+        self.photo_button.setCheckable(True)
+        self.photo_button.setAutoDefault(False)
+        self.photo_button.setToolTip(
+            "Foto intera, attenuata o nascosta: su una foto scura e affollata i "
+            "contorni si leggono solo quando la fotografia si fa da parte. "
+            "Il bordo della PCB resta sempre disegnato.")
+        self.photo_button.clicked.connect(self._photo_button_clicked)
+        # Lo stato accanto al comando, non dentro: un'etichetta non si preme e
+        # non promette di farlo, quindi puo' dire soltanto dove siamo.
+        self.photo_state_label = QLabel()
         self.btn_delete = QPushButton("Elimina il riquadro scelto")
         self.btn_delete.setEnabled(False)
         self.btn_delete.clicked.connect(self._delete_selected)
@@ -394,8 +523,21 @@ class YoloReviewDialog(QDialog):
         side_widget.setLayout(side)
         side_widget.setFixedWidth(300)
 
+        # La fotografia si fa da parte con un comando che sta sotto di lei,
+        # non nella colonna delle modifiche: e' l'unica cosa in questa
+        # finestra che cambia come si guarda invece di cosa si tiene.
+        view_bar = QHBoxLayout()
+        view_bar.addWidget(self.photo_button)
+        view_bar.addWidget(self.photo_state_label)
+        view_bar.addStretch()
+        canvas = QVBoxLayout()
+        canvas.addWidget(self.view, 1)
+        canvas.addLayout(view_bar)
+        canvas_widget = QWidget()
+        canvas_widget.setLayout(canvas)
+
         body = QHBoxLayout()
-        body.addWidget(self.view, 1)
+        body.addWidget(canvas_widget, 1)
         body.addWidget(side_widget)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
                                    | QDialogButtonBox.StandardButton.Cancel)
@@ -411,7 +553,63 @@ class YoloReviewDialog(QDialog):
         layout.addLayout(body, 1)
         layout.addWidget(buttons)
         self.resize(1100, 700)
+        self._apply_photo_state()
         self._refresh()
+
+    def photo_state(self):
+        """@brief Quanto della fotografia la vista sta mostrando.
+
+        @return Uno fra PHOTO_FULL, PHOTO_DIMMED e PHOTO_HIDDEN.
+        """
+        return self.view.photo_state()
+
+    def set_photo_state(self, state):
+        """@brief Mostra la fotografia intera, la attenua, o la toglie.
+
+        @param state Uno fra PHOTO_FULL, PHOTO_DIMMED, PHOTO_HIDDEN.
+        @throws ValueError per qualunque altro valore.
+        @note Non cambia nient'altro: scelta, spostamento, maniglie, disegno
+            di un nuovo riquadro, categoria, lista e `kept()` restano quelli
+            di prima.
+        """
+        self.view.set_photo_state(state)
+        self._apply_photo_state()
+
+    def cycle_photo_state(self):
+        """@brief Passa allo stato successivo: intera, attenuata, nascosta."""
+        self.view.cycle_photo_state()
+        self._apply_photo_state()
+
+    def _photo_button_clicked(self, _checked):
+        """Cicla al clic; la spunta e' una lettura, non il comando.
+
+        Un pulsante spuntabile si spunta da solo prima che arrivi `clicked`,
+        quindi lo stato che riporta non significa nulla per un comando a tre
+        stati e viene riscritto da `_apply_photo_state`.
+        """
+        self.cycle_photo_state()
+
+    def _apply_photo_state(self):
+        """Riporta lo stato sul comando, sulla lettura di stato e sulla spunta.
+
+        Il pulsante prende l'imperativo del passo SUCCESSIVO del ciclo e
+        l'etichetta accanto lo stato in cui la vista si trova adesso. Il nome
+        accessibile porta entrambi, perche' un lettore di schermo annuncia il
+        pulsante da solo e sentirebbe altrimenti un comando senza contesto.
+        """
+        state = self.view.photo_state()
+        if state == PHOTO_HIDDEN:
+            action, current = "Mostra foto", "Foto: nascosta"
+        elif state == PHOTO_DIMMED:
+            action, current = "Nascondi foto", "Foto: attenuata"
+        else:
+            action, current = "Attenua foto", "Foto: intera"
+        with QSignalBlocker(self.photo_button):
+            self.photo_button.setChecked(state != PHOTO_FULL)
+        self.photo_button.setText(action)
+        self.photo_button.setAccessibleName(
+            "{action} (stato attuale: {state})".format(action=action, state=current))
+        self.photo_state_label.setText(current)
 
     def kept(self):
         """@brief Proposte sopravvissute alla revisione.

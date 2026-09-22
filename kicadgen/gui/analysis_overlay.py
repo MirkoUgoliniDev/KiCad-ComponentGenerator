@@ -175,6 +175,25 @@ _PATH_RULES = (_DRIVE_PATH, _UNC_PATH, _POSIX_PATH)
 #: d'occhio e il testo integrale e' comunque nel log.
 _STATUS_CHAR_LIMIT = 220
 
+#: Separatore con cui questo programma elenca piu' VOCI dentro una sola riga di
+#: avanzamento: i documenti che partono nella chiamata a pagamento
+#: (`datasheet_extractor._files_sent_message`), i motivi di un inventario
+#: parziale (`photo_global_inventory._DETAIL_SEPARATOR`).
+#:
+#: La riga resta una: il log vive di un evento per riga, con una marca
+#: temporale sola, e spezzarla li' renderebbe una corsa illeggibile a ritroso.
+#: La scheda invece ha bisogno dell'elenco -- richiesta dell'utente: «i nomi
+#: dei file uno sotto l'altro» -- quindi e' QUI che la riga si rimpagina, senza
+#: che la sorgente sappia nulla della scheda.
+#:
+#: Il punto mediano non e' un vezzo: in italiano e in inglese non e' un segno
+#: di punteggiatura, quindi in una frase scritta per chi guarda non compare, e
+#: le due sorgenti sopra lo usavano gia' per elencare senza ricorrere al punto
+#: e virgola, che i filtri della modale contano. Riconoscere l'elenco da questo
+#: separatore e' quindi una regola sulla FORMA, valida per qualunque riga che
+#: elenchi, non una regola sul messaggio dei documenti.
+_LIST_SEPARATOR = " · "
+
 #: Righe di testo riservate allo stato. La scheda e' dimensionata su questo
 #: numero, non sulla frase che passa in quel momento: una scheda che cambia
 #: altezza a ogni messaggio e' piu' fastidiosa di una scheda un po' piu' alta.
@@ -201,6 +220,11 @@ _CARD_MIN_WIDTH = 480
 #: layout): e' un ripiego temporaneo, il primo resize la sostituisce.
 _CARD_FALLBACK_WIDTH = 960
 
+#: Gemella della precedente per l'altezza: serve a decidere quante righe di
+#: elenco la finestra concede quando la finestra (e lo schermo) non hanno
+#: ancora una dimensione. Stesso ripiego temporaneo, stessa vita breve.
+_CARD_FALLBACK_HEIGHT = 720
+
 #: Frase peggiore possibile della lunghezza massima consentita, fatta di parole
 #: di lettere larghe: serve a contare le righe che lo stato occupa DAVVERO alla
 #: larghezza scelta, invece di fidarsi della larghezza media dei caratteri.
@@ -225,6 +249,47 @@ def is_machine_line(text):
     """
     line = " ".join(str(text or "").split())
     return any(rule.search(line) for rule in _MACHINE_LINE_RULES)
+
+
+def enumeration_lines(text):
+    """@brief Split a one-line enumeration into the lines a card can show.
+
+    @param text One status line, as it is written to the log.
+    @return The lines to show -- the lead-in first, then ONE item per line --
+        or None when the line is not an enumeration and must stay on one line.
+    @note Recognized shape, structural and not tied to any sender: a lead-in
+        ending with a colon, then items separated by `_LIST_SEPARATOR`. Both
+        signals are required. The separator alone would turn any sentence that
+        happens to carry a middle dot into a list; the colon alone is ordinary
+        punctuation. Two items are enough to be a list: with a single document
+        there is nothing to line up, and the line stays as it is.
+    @note EURISTICA DICHIARATA sul taglio della testa: si usa il PRIMO ": "
+        della riga, non l'ultimo. L'elenco comincia dove il testo lo annuncia,
+        mentre i due punti che compaiono dopo appartengono alla voce che li
+        contiene: gli esiti di questo programma scrivono voci come «component
+        U1: merged box excludes…», e tagliando sull'ultimo ": " la prima voce
+        perderebbe proprio il soggetto. Sarebbe superflua il giorno in cui le
+        righe portassero l'elenco in forma strutturata invece che punteggiata;
+        finche' il canale e' una stringa sola, la punteggiatura e' il canale.
+    @note Separators in a row count as one: an item can carry a text that is
+        not ours (the reason an API gave for failing) and that came back empty,
+        and the alternative is a blank row, or a stray middle dot opening the
+        next line. Fewer than two items left means there is nothing to line up,
+        and the line stays one line.
+    @note The log is never reflowed: this function is presentation, the caller
+        keeps the full line for `_append_log` and for the log file, where one
+        event is one line with one timestamp.
+    """
+    line = " ".join(str(text or "").split())
+    if _LIST_SEPARATOR not in line:
+        return None
+    head, colon, first_item = line[:line.index(_LIST_SEPARATOR)].partition(": ")
+    if not colon or not head.strip():
+        return None
+    tail = first_item + line[line.index(_LIST_SEPARATOR):]
+    items = [item.strip().strip("·").strip() for item in tail.split(_LIST_SEPARATOR)]
+    items = [item for item in items if item]
+    return [f"{head}:"] + items if len(items) > 1 else None
 
 
 def elide_paths(text):
@@ -525,6 +590,14 @@ class AnalysisOverlay(QWidget):
         #: falso: una scheda ferma non deve offrire di fermare nulla.
         self._abortable = False
         self.set_abortable(False)
+        #: Altezza (px) che lo stato occupa con le righe riservate d'ufficio, e
+        #: supplemento concesso a un elenco piu' alto di quelle. Il supplemento
+        #: e' MONOTONO dentro una corsa e si azzera solo in `start()`: un elenco
+        #: di otto documenti compare una volta sola, e far rimpicciolire la
+        #: scheda al messaggio successivo sarebbe lo stesso sobbalzo che il
+        #: dimensionamento esiste per evitare.
+        self._status_base_height = 0
+        self._status_extra = 0
         self._size_the_card()
         self.status.installEventFilter(self)
         outer.addWidget(self.card, alignment=Qt.AlignmentFlag.AlignHCenter)
@@ -559,6 +632,41 @@ class AnalysisOverlay(QWidget):
         if room <= 0:
             room = _CARD_FALLBACK_WIDTH
         return max(1, room - 2 * _OVERLAY_MARGIN)
+
+    def _available_card_height(self):
+        """@brief Tallest card the hosting window can show without clipping.
+
+        @return Maximum card height in pixels, margins already subtracted.
+        @note Gemella di `_available_card_width`, e per lo stesso motivo: un
+            elenco lungo deve poter allungare la scheda, ma non oltre la
+            finestra che la ospita, altrimenti la parte in fondo -- pulsanti
+            compresi -- finirebbe fuori dallo schermo.
+        """
+        parent = self.parentWidget()
+        room = parent.height() if parent is not None else 0
+        if room <= 0:
+            screen = self.screen()
+            room = screen.availableGeometry().height() if screen is not None else 0
+        if room <= 0:
+            room = _CARD_FALLBACK_HEIGHT
+        return max(1, room - 2 * _OVERLAY_MARGIN)
+
+    def _status_height_room(self):
+        """@brief Tallest status block that still fits in the hosting window.
+
+        @return Height in pixels available to the status label, its currently
+            reserved height included.
+        @note Si misura sulla scheda VERA (`sizeHint`), non su una stima delle
+            righe: la scheda porta anche titolo, anello, barra, costo e
+            pulsanti, e quanto spazio resta allo stato dipende da tutti loro.
+        """
+        spare = self._available_card_height() - self.card.sizeHint().height()
+        return self.status.minimumHeight() + max(0, spare)
+
+    def _status_height(self):
+        """Altezza che il testo attuale dello stato occupa alla larghezza della scheda."""
+        usable = max(1, self.card.minimumWidth() - 2 * _CARD_PADDING)
+        return self.status.heightForWidth(usable)
 
     def _size_the_card(self):
         """@brief Size the card on its content, not on the texts of one run.
@@ -604,8 +712,11 @@ class AnalysisOverlay(QWidget):
                                        _WORST_CASE_STATUS)
         lines = max(_STATUS_LINES,
                     math.ceil(wrapped.height() / max(1, metrics.lineSpacing())))
-        self.status.setMinimumHeight(lines * metrics.lineSpacing()
-                                     + metrics.descent())
+        self._status_base_height = lines * metrics.lineSpacing() + metrics.descent()
+        # Il supplemento dell'elenco si somma alle righe riservate: le righe
+        # d'ufficio restano il pavimento (una scheda che si abbassa quando
+        # l'elenco finisce e' lo stesso sobbalzo di una che si alza).
+        self.status.setMinimumHeight(self._status_base_height + self._status_extra)
         self.tool.setMinimumHeight(self.tool.fontMetrics().lineSpacing())
         self.cost.setMinimumHeight(self.cost.fontMetrics().lineSpacing())
         # Spazio riservato anche quando la riga e' nascosta: evita che la scheda
@@ -685,6 +796,13 @@ class AnalysisOverlay(QWidget):
         self._hidden_at = None
         self.spinner.angle = 0
         self.set_tool(None)
+        # Nuova operazione, nuovo ingombro: il supplemento concesso all'elenco
+        # della corsa precedente si azzera QUI e in nessun altro punto. Si
+        # svuota prima la label perche' il suo testo vecchio, se era un elenco,
+        # terrebbe alto il `sizeHint` su cui la scheda si ridimensiona.
+        self._status_extra = 0
+        self.status.clear()
+        self._size_the_card()
         self.set_status(status)
         self.setGeometry(self.parentWidget().rect())
         self._tick()
@@ -758,9 +876,11 @@ class AnalysisOverlay(QWidget):
         self.cost.setVisible(bool(text))
 
     def set_status(self, message):
-        """@brief Show one line of human status, never a service line.
+        """@brief Show one status written for a person, never a service line.
 
         @param message Status line; machine bookkeeping is dropped, not shown.
+            One line in, one line shown -- unless the line enumerates, and then
+            it is laid out as a list (see the last note).
         @note Le righe che il programma scrive per se' (AI_CALL_... in testa
             alla riga, record "chiave=valore" con le impronte sha256) e quelle
             che gli strumenti esterni scrivono sul proprio stdout (campi
@@ -776,6 +896,12 @@ class AnalysisOverlay(QWidget):
         @note Quando una riga viene scartata l'ultimo stato leggibile *resta*
             scritto: azzerare la label farebbe sembrare l'operazione bloccata,
             che e' il difetto che questo filtro deve evitare, non causare.
+        @note Una riga che ELENCA (lead-in coi due punti e voci separate dal
+            punto mediano: i documenti inviati al modello, i motivi di un
+            inventario parziale) viene rimpaginata a una voce per riga, e la
+            scheda si allunga per contenerle. La riga che va nel log resta una
+            sola, con una marca temporale sola: la divisione fra il log e la
+            scheda avviene qui, non alla sorgente (vedi `enumeration_lines`).
         """
         # Full messages stay in the log; keep the card stable for long replies.
         source = " ".join(str(message).split())
@@ -783,8 +909,71 @@ class AnalysisOverlay(QWidget):
             return
         text = self.i18n.text(source) if self.i18n is not None else source
         text = elide_paths(text)
+        lines = enumeration_lines(text)
+        if lines is not None and self._show_enumeration(lines):
+            return
+        self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status.setText(text if len(text) <= _STATUS_CHAR_LIMIT
                             else text[:_STATUS_CHAR_LIMIT - 3] + "…")
+
+    def _show_enumeration(self, lines):
+        """@brief Lay an enumeration out one item per line, sized to fit.
+
+        @param lines Lead-in and items, as `enumeration_lines` returns them.
+        @return True when the list is on the card; False when there is not even
+            room for two lines, and the caller must fall back to the one-line
+            form -- a list that does not fit is not an improvement.
+        @note Ogni riga viene accorciata alla larghezza VERA della scheda
+            (`elidedText`, le stesse metriche con cui la scheda e' stata
+            dimensionata) invece di essere mandata a capo: cosi' una voce
+            occupa una riga e una sola, il conteggio delle righe e' esatto e il
+            nome del file resta allineato sotto il precedente, che e' cio' che
+            l'utente ha chiesto. Il testo integrale e' nel log.
+        @note Se le voci non ci stanno in altezza si TAGLIA l'elenco, non lo si
+            lascia debordare: si tolgono le ultime voci e il taglio si dichiara
+            con un'ellissi su una riga propria -- lo stesso segno con cui
+            questa scheda dichiara ogni altro accorciamento. Meglio un elenco
+            dichiaratamente parziale che una scheda piu' alta della finestra,
+            con i pulsanti fuori dallo schermo.
+        @note L'elenco e' allineato a sinistra: centrato, i nomi dei file
+            partirebbero da colonne diverse a ogni riga, cioe' esattamente il
+            difetto («più chiaro») che l'elenco deve togliere. Le righe non
+            elencate restano centrate come prima.
+        """
+        metrics = self.status.fontMetrics()
+        usable = max(1, self.card.minimumWidth() - 2 * _CARD_PADDING)
+        shown = [metrics.elidedText(line, Qt.TextElideMode.ElideRight, usable)
+                 for line in lines]
+        room = self._status_height_room()
+        if room < 2 * metrics.lineSpacing() + metrics.descent():
+            return False
+        self.status.setAlignment(Qt.AlignmentFlag.AlignLeft
+                                 | Qt.AlignmentFlag.AlignVCenter)
+        self.status.setText("\n".join(shown))
+        while len(shown) > 2 and self._status_height() > room:
+            # La prima potatura sostituisce l'ultima voce con l'ellissi (stesso
+            # numero di righe, una voce in meno); dalla seconda in poi si toglie
+            # anche l'ellissi, quindi ogni giro perde una riga e il ciclo
+            # termina sempre, al piu' sulle due righe del limite.
+            del shown[-2 if shown[-1] == "…" else -1:]
+            shown.append("…")
+            self.status.setText("\n".join(shown))
+        self._reserve_status_height(self._status_height())
+        return True
+
+    def _reserve_status_height(self, needed):
+        """@brief Grow the reserved status height so a list is never clipped.
+
+        @param needed Height in pixels the status text occupies right now.
+        @note Solo in aumento e solo dentro una corsa: `start()` riporta il
+            supplemento a zero. Una scheda che si rialza e si riabbassa a ogni
+            messaggio e' piu' fastidiosa di una scheda un po' piu' alta, che e'
+            la stessa ragione per cui l'altezza si riserva d'ufficio.
+        """
+        extra = max(0, needed - self._status_base_height)
+        if extra > self._status_extra:
+            self._status_extra = extra
+            self._size_the_card()
 
     def _tick(self):
         seconds = max(0, int(monotonic() - self.started_at))

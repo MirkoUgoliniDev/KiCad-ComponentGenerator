@@ -739,12 +739,20 @@ def _merge_photo_components(groups):
     return merge_components([_components_3d(g) or [] for g in groups])
 
 
-#: Massimo numero di caratteri con cui un nome file viene mostrato nel log di
-#: avanzamento. E' un ripiego di PRESENTAZIONE, non una regola sui documenti:
-#: la modale mostra una riga sola, e un nome lunghissimo spingerebbe fuori i
-#: nomi dei file successivi, che sono esattamente l'informazione richiesta.
-#: Non dipende da estensione, contenuto o marca; diventerebbe superfluo se la
-#: modale andasse a capo mostrando l'elenco completo.
+#: Massimo numero di caratteri con cui un nome file viene mostrato nella riga
+#: di avanzamento. E' un ripiego di PRESENTAZIONE, non una regola sui
+#: documenti: non dipende da estensione, contenuto o marca.
+#:
+#: La modale ora mette ogni documento su una riga propria
+#: (`analysis_overlay.enumeration_lines`), quindi un nome lungo non spinge piu'
+#: fuori i nomi successivi: accorcia soltanto SE STESSO. Il limite resta perche'
+#: una riga della scheda porta circa ottantotto caratteri (e' la larghezza su
+#: cui la scheda e' dimensionata), e una voce e' «nome, ruolo»: con i quaranta
+#: caratteri di qui piu' la virgola e l'etichetta di ruolo piu' lunga fra quelle
+#: dichiarate in `document_roles.ROLES` (trenta caratteri) si resta sotto quella
+#: larghezza, cioe' il ruolo si legge sempre. Oltre il limite la scheda
+#: accorcerebbe comunque la riga, ma tagliando la CODA, quindi il ruolo: qui si
+#: accorcia il nome nel mezzo, e l'estensione sopravvive.
 _LOG_NAME_CHARS = 40
 
 
@@ -767,8 +775,8 @@ def _files_sent_message(doc_paths, document_roles: Optional[dict[str, str]] = No
     """@brief Name the documents about to travel in the paid analysis request.
 
     @param doc_paths Documents in request order; only their file names are
-        reported, because the full paths are long and the progress modal shows
-        a single line that would cut them.
+        reported, because the directories say nothing about what is being sent
+        and would take the room the names and the roles need.
     @param document_roles Optional file name -> role mapping declared by the
         user. A name missing from it, or a role that is not a known one, is
         reported as undeclared: the role is never guessed from the file name.
@@ -776,14 +784,25 @@ def _files_sent_message(doc_paths, document_roles: Optional[dict[str, str]] = No
         role it is sent as.
     @note The count and the noun agree for one document as well as for many,
         so the line never reads as a plural applied to a single file.
-    @note Punctuation is part of the contract, not taste: the modal hides the
-        lines a machine writes for itself, recognizing them by an
-        UPPERCASE_UNDERSCORE token followed by a space, a colon or an equals
-        sign. A file name is user data and is never rewritten, so the line is
-        built so that our own punctuation never follows a name with a bare
-        space: the role comes after a comma and the documents are separated by
-        a middle dot. A name that carries a space inside itself is still beyond
-        this line's reach, and belongs to the marker rule, not here.
+    @note Punctuation is part of the contract, not taste, and now for two
+        readers at once.
+
+        The modal hides the lines a machine writes for itself, recognizing them
+        by an UPPERCASE_UNDERSCORE token followed by a space, a colon or an
+        equals sign, in FIRST position. A file name is user data and is never
+        rewritten, so the line is built so that our own punctuation never
+        follows a name with a bare space: the role comes after a comma, the
+        documents are separated by a middle dot, and no name ever opens the
+        line. A name that carries a space inside itself is still beyond this
+        line's reach, and belongs to the marker rule, not here.
+
+        The same two signs are what the card reads to lay the documents out one
+        per line (`analysis_overlay.enumeration_lines`): the colon closes the
+        lead-in, and every middle dot starts a new line. The line written to
+        the log stays ONE line with one timestamp, as every other log entry;
+        the list exists only on the card. Replacing the middle dot with a
+        semicolon, or dropping the colon, would silently take the list away
+        without breaking anything else -- hence this note.
     """
     from .document_roles import ROLES
     if not doc_paths:

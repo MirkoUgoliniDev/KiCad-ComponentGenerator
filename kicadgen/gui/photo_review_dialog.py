@@ -26,7 +26,24 @@ The photograph itself is a view setting, never data: ``photo_state()`` /
 ``set_photo_state()`` show it whole, attenuate it or take it away so that a
 thin outline over a dark, crowded board can be read on its own. Whatever the
 state, the board rectangle keeps being drawn and every edit, selection and
-measurement behaves identically; the saved inventory is unaffected.
+measurement behaves identically; the saved inventory is unaffected. The
+control that drives it is split in two: ``photo_button`` carries the VERB of
+the next step ("Attenua foto", "Nascondi foto", "Mostra foto") and
+``photo_state_label`` carries the state the canvas is in. See
+``_apply_photo_state``.
+
+Bodies the detection declined to type are surfaced here, because this is
+where the fix costs one double click. ``type_undetermined()`` reads the
+STRUCTURED declaration — ``class`` (or ``kind``) in the explicit unknown
+family, or a ``class_confidence`` that does not support the family named —
+never the free-text ``uncertainties``, which name components in prose. Such
+a body gets its own outline status (UNDETERMINED_TYPE_COLOR), its own list
+marker (UNDETERMINED_LIST_MARKER) and a warning naming the manual action.
+The inventory's global ``uncertainties``, carried on every component as
+``_global_inventory_uncertainties``, are reachable through
+``model_uncertainties()`` and the ``uncertainties_button``; they are the
+model's prose and are displayed as plain text, as data, never as
+instructions.
 """
 
 from __future__ import annotations
@@ -47,7 +64,8 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox, QFormLayout,
     QGraphicsItem, QGraphicsPolygonItem, QGraphicsRectItem, QGraphicsScene,
     QGraphicsSimpleTextItem,
-    QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton,
+    QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QPlainTextEdit, QPushButton,
     QVBoxLayout, QWidget, QApplication, QMessageBox,
 )
 
@@ -564,6 +582,36 @@ BOARD_BACKDROP_COLOR = "#32373e"
 BOARD_BORDER_COLOR = "#8a93a0"
 BOARD_BORDER_WIDTH_PX = 2
 
+## Declared classes that mean "a body is here, I am not saying what family it
+## belongs to". Not a vocabulary invented for this dialog: it is the same set
+## ``cad3d.kicad_models`` uses to refuse to certify an identity, so the review
+## and the generator agree on what "untyped" means. ``other`` and ``unknown``
+## are the schema's own escape hatches; ``semiconductor_unknown`` is the one
+## the model is told to use when it can see leads and a tab but will not
+## choose between a transistor and a regulator.
+UNDETERMINED_TYPE_CLASSES = ("semiconductor_unknown", "unknown", "other")
+
+## Class confidences that do NOT support the family a component declares. The
+## consequence downstream is the same as an unknown class: ``kicad_models``
+## will not certify an identity, so the body ends up as a generic volume.
+UNDETERMINED_TYPE_CONFIDENCES = ("low",)
+
+## Fourth outline status: the model declined to determine this body's type.
+## Chosen against the three that already carry meaning, not by taste. Its
+## contrast against BOARD_BACKDROP_COLOR is 4.8:1, above the 3:1 floor and
+## above the darkest status already accepted (red, 3.4:1). Its hue is the only
+## one of the four with a dominant blue channel (0xf9 against 0x50, 0x33 and
+## 0x80), so it stays a distinct signal where red and green do not, and it
+## cannot be read as "fuori PCB" (red) nor as the generic "da verificare"
+## (orange).
+UNDETERMINED_TYPE_COLOR = "#c58af9"
+
+## Marker appended to the list row of such a body. Distinct from the existing
+## "[!]", which only says "this row has at least one warning" and is therefore
+## on nearly every row before a model is chosen: it could not single this one
+## out. A body that is both keeps both markers.
+UNDETERMINED_LIST_MARKER = "[?]"
+
 
 class _BoardBackdrop(QGraphicsRectItem):
     """@brief Neutral board rectangle shown when the photograph steps back.
@@ -869,6 +917,15 @@ class PhotoReviewDialog(QDialog):
     placeholder at the visible centre for headless callers. Either way adding
     disarms the mode, and the body lands whole inside the board.
 
+    A body whose type the detection declined to establish (``type_undetermined``)
+    is carried by the mechanisms that already exist: a line in ``warning_label``
+    naming the manual action, a distinct outline status (UNDETERMINED_TYPE_COLOR,
+    which yields to "fuori PCB" and wins over the generic "da verificare") and
+    the UNDETERMINED_LIST_MARKER on its list row beside the existing "[!]".
+    The inventory's own global doubts, when the components carry any, are behind
+    ``uncertainties_button`` / ``show_uncertainties()`` and readable through
+    ``model_uncertainties()``; the button is hidden when there are none.
+
     ``category_filter`` hides the list rows whose ``kind`` does not match the
     chosen category. It hides rows, it never rebuilds the list: ``_components``
     and every row index keep their meaning while a filter is active. The
@@ -877,7 +934,9 @@ class PhotoReviewDialog(QDialog):
 
     ``photo_button`` sits with the view controls and cycles the canvas
     backdrop (``photo_state()``, ``set_photo_state()``, ``cycle_photo_state()``)
-    between the photograph whole, attenuated and gone. A dark, crowded board
+    between the photograph whole, attenuated and gone. It reads as a command:
+    its label is the imperative of the next step and ``photo_state_label``,
+    immediately beside it, states which of the three the canvas is in. A dark, crowded board
     swallows a thin coloured outline; in the last two states the board area is
     filled with the neutral BOARD_BACKDROP_COLOR and framed with
     BOARD_BORDER_COLOR, so the outlines and the PCB edge stay readable. It is
@@ -945,10 +1004,17 @@ class PhotoReviewDialog(QDialog):
         self.zoom_out_button = QPushButton("Zoom −")
         # A view control, next to fit and zoom: it changes what the canvas
         # shows, never what is saved. One button for three states instead of a
-        # mode selector; the label always states the state it is in, and the
-        # button stays visibly pressed while the photograph is not intact, so
-        # a canvas that no longer shows the real board is never mistaken for
-        # one that does.
+        # mode selector.
+        #
+        # Il comando e lo stato sono due cose diverse e stanno su due widget
+        # diversi. Finche' il pulsante diceva «Foto: intera» enunciava uno
+        # STATO: un utente lo ha guardato e ha chiesto la funzione come se non
+        # esistesse, perche' una didascalia non si preme. Ora il pulsante porta
+        # il VERBO del passo successivo («Attenua foto») e l'etichetta accanto
+        # porta lo stato attuale («Foto: intera»): il comando e' leggibile come
+        # comando senza perdere l'informazione su dove ci si trova, e il verbo
+        # rende anche prevedibile l'ordine del ciclo, che prima si scopriva
+        # solo premendo. Lo stato premuto resta come indizio ridondante.
         self.photo_button = QPushButton()
         self.photo_button.setCheckable(True)
         self.photo_button.setToolTip(
@@ -960,6 +1026,12 @@ class PhotoReviewDialog(QDialog):
                        self.photo_button):
             button.setAutoDefault(False)
             toolbar.addWidget(button)
+        # Lo stato accanto al comando, non dentro: un'etichetta non si preme e
+        # non promette di farlo, quindi puo' dire soltanto dove siamo.
+        self.photo_state_label = QLabel()
+        self.photo_state_label.setObjectName("photo_state_label")
+        self.photo_state_label.setTextFormat(Qt.TextFormat.PlainText)
+        toolbar.addWidget(self.photo_state_label)
         toolbar.addStretch()
         layout.addLayout(toolbar)
         self.draw_hint = QLabel(
@@ -1074,9 +1146,45 @@ class PhotoReviewDialog(QDialog):
         self.warning_label.setWordWrap(True)
         self.warning_label.setTextFormat(Qt.TextFormat.PlainText)
         sidebar.addWidget(self.warning_label)
-        legend = QLabel("Verde: rilevato · Arancione: da verificare\nRosso: fuori PCB · Bordo bianco spesso: selezionato")
-        legend.setWordWrap(True)
-        sidebar.addWidget(legend)
+        # La legenda dichiara anche la precedenza, perche' il colore e' un
+        # canale solo: un corpo fuori PCB e senza tipo e' rosso, e il tipo
+        # mancante resta scritto nell'avviso e nel marcatore della lista.
+        self.legend = QLabel(
+            "Verde: rilevato · Arancione: da verificare\n"
+            "Viola [?]: tipo non stabilito, scegli tu il modello KiCad\n"
+            "Rosso: fuori PCB (prevale sugli altri) · Bordo bianco spesso: selezionato")
+        self.legend.setWordWrap(True)
+        sidebar.addWidget(self.legend)
+        # I dubbi globali dell'inventario arrivavano solo al log. Qui stanno
+        # dietro un pulsante che compare solo se ce ne sono: sono prosa del
+        # modello, quindi vanno messi a disposizione senza occupare la barra
+        # laterale e senza competere con gli avvisi del componente scelto.
+        self.uncertainties_button = QPushButton()
+        self.uncertainties_button.setAutoDefault(False)
+        self.uncertainties_button.clicked.connect(self.show_uncertainties)
+        self.uncertainties_button.hide()
+        sidebar.addWidget(self.uncertainties_button)
+        self._uncertainties = []
+        self.uncertainties_dialog = QDialog(self)
+        self.uncertainties_dialog.setWindowTitle("Dubbi dichiarati dal modello")
+        uncertainties_layout = QVBoxLayout(self.uncertainties_dialog)
+        uncertainties_intro = QLabel(
+            "Parole del modello, riportate come sono: sono dati da leggere, non istruzioni. "
+            "Nessun componente viene cercato per nome in queste frasi.")
+        uncertainties_intro.setWordWrap(True)
+        uncertainties_intro.setTextFormat(Qt.TextFormat.PlainText)
+        uncertainties_layout.addWidget(uncertainties_intro)
+        # QPlainTextEdit e non QLabel/QTextEdit: non interpreta mai il rich
+        # text, quindi una frase del modello che contiene <b> o &amp; resta la
+        # frase del modello. `i18n_skip` perche' il contenuto e' un dato della
+        # corsa, non un testo dell'interfaccia da tradurre.
+        self.uncertainties_view = QPlainTextEdit()
+        self.uncertainties_view.setReadOnly(True)
+        self.uncertainties_view.setProperty("i18n_skip", True)
+        uncertainties_layout.addWidget(self.uncertainties_view)
+        self.uncertainties_buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        self.uncertainties_buttons.rejected.connect(self.uncertainties_dialog.reject)
+        uncertainties_layout.addWidget(self.uncertainties_buttons)
         side_widget = QWidget()
         side_widget.setLayout(sidebar)
         side_widget.setMinimumWidth(320)
@@ -1160,7 +1268,7 @@ class PhotoReviewDialog(QDialog):
         super().closeEvent(event)
 
     def _close_parameters(self):
-        """Hide the modal after moving focus out of its editors.
+        """Hide the child windows after moving focus out of the parameter editors.
 
         The modal is a separate window: hiding the editor does not clear the
         focus inside it, so text still being typed would only be committed
@@ -1173,6 +1281,9 @@ class PhotoReviewDialog(QDialog):
         if focused is not None:
             focused.clearFocus()
         self.parameters_dialog.hide()
+        # Stessa ragione, nessun testo da salvare: una finestra figlia lasciata
+        # aperta sopra un editor chiuso resta orfana sullo schermo.
+        self.uncertainties_dialog.hide()
 
     def fit_photo(self):
         """@brief Show the whole photo and re-enable auto-fit on resize."""
@@ -1229,7 +1340,13 @@ class PhotoReviewDialog(QDialog):
         self.cycle_photo_state()
 
     def _apply_photo_state(self):
-        """Mirror the state onto the canvas and onto the button label."""
+        """Mirror the state onto the canvas, the command and the state readout.
+
+        The button gets the imperative for the NEXT step of the cycle and the
+        label beside it gets the state the canvas is in now. The accessible
+        name carries both, because a screen reader announces the button alone
+        and would otherwise hear a command with no context.
+        """
         state = self._photo_state
         # Hiding, not a zero opacity: an invisible item is also out of every
         # paint and hit-test path, and it takes no mouse button either way.
@@ -1237,14 +1354,17 @@ class PhotoReviewDialog(QDialog):
         self.photo_item.setOpacity(PHOTO_DIMMED_OPACITY if state == PHOTO_DIMMED else 1.0)
         self.board_backdrop.setVisible(state != PHOTO_FULL)
         if state == PHOTO_HIDDEN:
-            text = self._tr("Foto: nascosta")
+            action, current = self._tr("Mostra foto"), self._tr("Foto: nascosta")
         elif state == PHOTO_DIMMED:
-            text = self._tr("Foto: attenuata")
+            action, current = self._tr("Nascondi foto"), self._tr("Foto: attenuata")
         else:
-            text = self._tr("Foto: intera")
+            action, current = self._tr("Attenua foto"), self._tr("Foto: intera")
         with QSignalBlocker(self.photo_button):
             self.photo_button.setChecked(state != PHOTO_FULL)
-        self.photo_button.setText(text)
+        self.photo_button.setText(action)
+        self.photo_button.setAccessibleName(
+            self._tr("{action} (stato attuale: {state})").format(action=action, state=current))
+        self.photo_state_label.setText(current)
 
     def _append_item(self, component):
         item = _ComponentItem(self, component)
@@ -1274,6 +1394,54 @@ class PhotoReviewDialog(QDialog):
         matching = sum(1 for item in self._items if self._matches_category(item, category))
         self.count_label.setText(self._tr("Componenti: {count} di {total}").format(
             count=matching, total=total))
+
+    def model_uncertainties(self) -> list[str]:
+        """@brief The inventory's global doubts, in the model's own words.
+
+        @return Detached list of the distinct ``_global_inventory_uncertainties``
+                sentences carried by the working components, in the order they
+                are first met.
+        @note These are DATA to be shown, never instructions and never a source
+              of rules: which body needs attention is decided by
+              ``type_undetermined`` on structured fields, not by looking for a
+              component's name inside these sentences.
+        @note Only strings are kept. The list travels from an AI response
+              through the inventory, so anything else in it is a malformed
+              response, not a doubt.
+        """
+        return list(self._uncertainties)
+
+    def _refresh_uncertainties(self):
+        """Recollect the global doubts and show or hide the button that opens them.
+
+        Called wherever the membership of the inventory changes: the sentences
+        are attached to every component of the run, so deleting the last one
+        that carries them must take the button away with them rather than leave
+        a window onto an inventory that is no longer here.
+        """
+        seen = []
+        for component in self._components:
+            for sentence in component.get("_global_inventory_uncertainties") or ():
+                if isinstance(sentence, str) and sentence.strip() and sentence not in seen:
+                    seen.append(sentence)
+        self._uncertainties = seen
+        self.uncertainties_button.setVisible(bool(seen))
+        self.uncertainties_button.setText(
+            self._tr("Dubbi dichiarati dal modello ({count})…").format(count=len(seen)))
+        # Un elenco: numerarlo direbbe una priorita' che il modello non ha
+        # dichiarato, quindi ogni frase sta su una riga con lo stesso segno.
+        self.uncertainties_view.setPlainText("\n\n".join("• " + sentence for sentence in seen))
+
+    def show_uncertainties(self):
+        """@brief Show the model's declared doubts in a window-modal reader.
+
+        @note ``QDialog.open``, as the parameter modal: input to the editor is
+              blocked while it is up but no nested event loop runs, so a caller
+              (or a test) is never suspended inside this call.
+        """
+        if not self._uncertainties:
+            return
+        self.uncertainties_dialog.open()
 
     def active_category(self):
         """@brief Category currently filtering the list.
@@ -1340,6 +1508,9 @@ class PhotoReviewDialog(QDialog):
             self.category_filter.setCurrentIndex(max(0, index))
         # The same vocabulary drives the type field of a newly drawn body.
         self._kind_model.setStringList(categories)
+        # Stesso momento, stessa causa: e' qui che l'insieme dei componenti
+        # cambia (costruzione, aggiunta, eliminazione).
+        self._refresh_uncertainties()
         self._apply_filter()
 
     def _category_filter_changed(self, _index):
@@ -1472,10 +1643,66 @@ class PhotoReviewDialog(QDialog):
         field.setFocus()
         field.selectAll()
 
+    @staticmethod
+    def type_undetermined(component) -> bool:
+        """@brief Whether the detection declined to establish this body's type.
+
+        @param component One component dictionary of the working inventory.
+        @return True when the model's own STRUCTURED declaration says it did
+                not settle on a family for this body.
+        @note Two declarations mean that, and only these two are read:
+
+              - the declared ``class`` (or, when no class was recorded, the
+                ``kind``) is one of UNDETERMINED_TYPE_CLASSES, the schema's
+                explicit "a body, family unresolved" values;
+              - ``class_confidence`` is one of UNDETERMINED_TYPE_CONFIDENCES,
+                i.e. the model named a family but declared the naming
+                unsupported.
+
+              Both have the same consequence downstream — ``kicad_models``
+              refuses to certify an identity, the body falls back to a generic
+              volume without terminals — which is exactly the state a manual
+              model choice repairs, and is why they share one flag.
+        @note Deliberately NOT read: the free-text ``uncertainties`` /
+              ``_global_inventory_uncertainties``, which name components in
+              prose. Matching a body by its name inside a sentence would be a
+              name-based rule, fragile by construction and forbidden here.
+        @note Deliberately NOT read either: an empty ``package``. The inventory
+              empties that field whenever the OVERALL confidence is low or the
+              outline basis is unresolved, so it follows from other doubts
+              (already reported as "bassa confidenza") and from geometry, not
+              from a statement about the type; using it would flag confidently
+              typed passives whose outline basis was never settled.
+        @note A body a person drew here declares no ``class`` and gets
+              ``kind="generic"``, which is not one of the unknown values: the
+              flag says the MODEL declined, and must not be raised by the
+              user's own placeholder.
+        """
+        if not isinstance(component, dict):
+            return False
+        declared = component.get("class")
+        if not isinstance(declared, str) or not declared.strip():
+            declared = component.get("kind")
+        if (isinstance(declared, str)
+                and declared.strip().casefold() in UNDETERMINED_TYPE_CLASSES):
+            return True
+        class_confidence = component.get("class_confidence")
+        return (isinstance(class_confidence, str)
+                and class_confidence.strip().casefold() in UNDETERMINED_TYPE_CONFIDENCES)
+
     def _warnings(self, item):
         warnings = []
         if not self.photo_rect.adjusted(-1e-7, -1e-7, 1e-7, 1e-7).contains(item.photo_bounds()):
             warnings.append(self._tr("Fuori dai bordi PCB: verificare posizione e dimensioni."))
+        if self.type_undetermined(item.component):
+            # L'avviso dice cosa FARE, non che c'e' un dubbio: il dubbio del
+            # modello e' gia' una risposta corretta (il progetto non inventa
+            # identita' elettriche), mentre la scatola generica che ne segue e'
+            # il difetto visibile, e si ripara qui in un doppio clic.
+            warnings.append(self._tr(
+                "Il modello non ha stabilito il tipo di questo corpo: senza una scelta "
+                "manuale il 3D resta una scatola generica senza terminali. Doppio clic "
+                "per scegliere il modello KiCad: la ricerca è locale e non costa nulla."))
         component = item.component
         selection = component.get('model_selection') or {}
         if (component.get('model_match') or {}).get('status') == 'import_failed':
@@ -1506,7 +1733,16 @@ class PhotoReviewDialog(QDialog):
         index = self._items.index(item)
         warnings = self._warnings(item)
         outside = not self.photo_rect.adjusted(-1e-7, -1e-7, 1e-7, 1e-7).contains(item.photo_bounds())
-        color = QColor("#ef5350" if outside else "#ffad33" if warnings else "#40dc80")
+        undetermined = self.type_undetermined(item.component)
+        # Una sola linea porta un solo colore, quindi la precedenza va
+        # dichiarata: fuori PCB prima di tutto, perche' un corpo che non e'
+        # sulla scheda rende accademica ogni altra domanda; poi il tipo non
+        # stabilito, che e' piu' specifico e piu' azionabile del generico «da
+        # verificare»; poi gli altri avvisi. Il testo invece non ha questo
+        # limite: warning_label e tooltip elencano TUTTE le righe che valgono,
+        # quindi un corpo fuori PCB e senza tipo le mostra entrambe.
+        color = QColor("#ef5350" if outside else UNDETERMINED_TYPE_COLOR if undetermined
+                       else "#ffad33" if warnings else "#40dc80")
         # The status pen keeps its colour when selected: the selection is
         # shown by the wide halo behind it, the thicker line and the fill.
         pen = QPen(color, SELECTED_PEN_WIDTH_PX if item.isSelected() else UNSELECTED_PEN_WIDTH_PX)
@@ -1519,11 +1755,19 @@ class PhotoReviewDialog(QDialog):
         item.setZValue(2 if item.isSelected() else 1)
         item.number.setText(str(index + 1))
         name = item.component.get("name") or item.component.get("kind") or self._tr("Componente")
-        text = f"{index + 1}. {name}" + (" [!]" if warnings else "")
+        text = (f"{index + 1}. {name}"
+                + (f" {UNDETERMINED_LIST_MARKER}" if undetermined else "")
+                + (" [!]" if warnings else ""))
         self.component_list.item(index).setText(text)
         self.component_list.item(index).setForeground(color)
         # QGraphicsItem tooltips interpret HTML, so escape supplied metadata.
-        item.setToolTip(escape(text + ("\n" + "\n".join(warnings) if warnings else "")))
+        tooltip = escape(text + ("\n" + "\n".join(warnings) if warnings else ""))
+        item.setToolTip(tooltip)
+        # Stessa spiegazione sulla riga della lista: il marcatore e' corto per
+        # forza, la frase che dice cosa fare deve restare raggiungibile anche
+        # da chi sta leggendo l'elenco invece della foto. Non e' la correzione
+        # da sola -- il colore e il marcatore si vedono senza puntare nulla.
+        self.component_list.item(index).setToolTip(tooltip)
         if item.isSelected():
             if item.component.get('_height_source'):
                 warnings.append(self._tr("Altezza indicativa: verificare con una misura diretta."))

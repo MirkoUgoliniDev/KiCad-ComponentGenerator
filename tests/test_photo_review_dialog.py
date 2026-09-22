@@ -3,6 +3,7 @@
 from copy import deepcopy
 import math
 import os
+from pathlib import Path
 import subprocess
 import sys
 
@@ -15,7 +16,8 @@ from PyQt6.QtCore import QBuffer, QByteArray, QIODevice, QPoint, QPointF, Qt
 from PyQt6.QtGui import QColor, QImage, QMouseEvent, QWheelEvent
 from PyQt6.QtTest import QSignalSpy, QTest
 from PyQt6.QtWidgets import (
-    QApplication, QDialog, QDialogButtonBox, QGraphicsItem, QGraphicsRectItem,
+    QAbstractButton, QApplication, QDialog, QDialogButtonBox, QGraphicsItem,
+    QGraphicsRectItem, QPlainTextEdit,
 )
 
 from kicadgen.gui.photo_review_dialog import (
@@ -23,6 +25,7 @@ from kicadgen.gui.photo_review_dialog import (
     MIN_HANDLE_SIZE_MM, NUMBER_LABEL_BACKING_COLOR, PHOTO_DIMMED,
     PHOTO_DIMMED_OPACITY, PHOTO_FULL, PHOTO_HIDDEN, PHOTO_STATES,
     PhotoReviewDialog, PhotoTransform, SELECTION_HALO_COLOR,
+    UNDETERMINED_LIST_MARKER, UNDETERMINED_TYPE_CLASSES, UNDETERMINED_TYPE_COLOR,
     _BoardBackdrop, _ResizeHandle,
 )
 
@@ -1319,34 +1322,87 @@ def _contrast_ratio(first, second):
     return (dark + .05) / (light + .05)
 
 
+#: Verbi che rendono il pulsante un comando. Sono le forme imperative che il
+#: controllo puo' mostrare; l'elenco e' qui e non nel test perche' ogni
+#: asserzione sulla "leggibilita' come comando" deve misurare la stessa cosa.
+_PHOTO_COMMAND_VERBS = ("Attenua", "Nascondi", "Mostra")
+
+#: Testi che enunciano soltanto lo STATO. Erano l'etichetta del pulsante, e un
+#: utente li ha letti come didascalia: restano, ma su un'etichetta.
+_PHOTO_STATE_TEXTS = ("Foto: intera", "Foto: attenuata", "Foto: nascosta")
+
+
 def test_the_backdrop_control_is_a_view_control_and_cycles_three_states(dialog, app):
     """@brief One button next to fit and zoom, cycling photograph -> attenuated -> hidden.
 
     It is a view control, so it belongs after the zoom buttons and not next to
-    the editing ones; it states the state it is in, and stays visibly pressed
-    while the canvas is not showing the real photograph, so a hidden board is
-    never mistaken for an empty one.
+    the editing ones, and it stays visibly pressed while the canvas is not
+    showing the real photograph, so a hidden board is never mistaken for an
+    empty one.
+
+    CONTRACT CHANGE, and the reason for it. The button used to be labelled
+    with the state it was in ("Foto: intera"). A user looked straight at it and
+    asked for the feature as if it did not exist: a label that enunciates a
+    state reads as a caption, and a caption is not pressed. The label now
+    carries the VERB of the next step and a separate ``photo_state_label``
+    carries the state, so nothing is lost and the command is legible as a
+    command. The assertion is not weakened: it still pins the exact text of
+    all three steps, of both widgets, plus the accessible name — it pins a
+    different, stronger contract.
     """
     buttons = _toolbar_buttons(dialog)
     assert dialog.photo_button in buttons
+    assert dialog.photo_state_label in buttons
     assert buttons.index(dialog.photo_button) > buttons.index(dialog.zoom_out_button)
     assert buttons.index(dialog.photo_button) > buttons.index(dialog.delete_button)
+    # Lo stato sta accanto al comando, non da un'altra parte della finestra.
+    assert buttons.index(dialog.photo_state_label) == buttons.index(dialog.photo_button) + 1
     assert dialog.photo_button.isCheckable()
-    assert dialog.photo_state() == PHOTO_FULL
-    assert dialog.photo_button.text() == "Foto: intera"
-    assert not dialog.photo_button.isChecked()
-    QTest.mouseClick(dialog.photo_button, Qt.MouseButton.LeftButton)
-    assert dialog.photo_state() == PHOTO_DIMMED
-    assert dialog.photo_button.text() == "Foto: attenuata"
-    assert dialog.photo_button.isChecked()
-    QTest.mouseClick(dialog.photo_button, Qt.MouseButton.LeftButton)
-    assert dialog.photo_state() == PHOTO_HIDDEN
-    assert dialog.photo_button.text() == "Foto: nascosta"
-    assert dialog.photo_button.isChecked()
+    for expected_state, verb, state_text in (
+        (PHOTO_FULL, "Attenua foto", "Foto: intera"),
+        (PHOTO_DIMMED, "Nascondi foto", "Foto: attenuata"),
+        (PHOTO_HIDDEN, "Mostra foto", "Foto: nascosta"),
+    ):
+        assert dialog.photo_state() == expected_state
+        assert dialog.photo_button.text() == verb
+        assert dialog.photo_state_label.text() == state_text
+        assert dialog.photo_button.accessibleName() == f"{verb} (stato attuale: {state_text})"
+        assert dialog.photo_button.isChecked() == (expected_state != PHOTO_FULL)
+        QTest.mouseClick(dialog.photo_button, Qt.MouseButton.LeftButton)
     # Negative: the cycle closes, it does not get stuck on the last state.
-    QTest.mouseClick(dialog.photo_button, Qt.MouseButton.LeftButton)
     assert dialog.photo_state() == PHOTO_FULL
     assert not dialog.photo_button.isChecked()
+    assert dialog.photo_button.text() == "Attenua foto"
+
+
+def test_the_backdrop_control_reads_as_a_command_and_still_shows_its_state(dialog):
+    """@brief The discoverability contract, stated without naming the wording.
+
+    Whatever the state, the pressable widget's label (and its accessible name,
+    which is what a screen reader announces) starts with an imperative verb,
+    and no pressable widget is labelled with a bare state. The state itself is
+    never lost: it is readable from a widget that is not a button.
+    """
+    for state in PHOTO_STATES:
+        dialog.set_photo_state(state)
+        label = dialog.photo_button.text()
+        assert label.split()[0] in _PHOTO_COMMAND_VERBS, label
+        assert dialog.photo_button.accessibleName().split()[0] in _PHOTO_COMMAND_VERBS
+        # Negative: the command is not a caption any more.
+        assert label not in _PHOTO_STATE_TEXTS
+        # ...and the state survives the change, on something that is not a button.
+        assert dialog.photo_state_label.text() in _PHOTO_STATE_TEXTS
+        assert not isinstance(dialog.photo_state_label, QAbstractButton)
+        assert dialog.photo_state_label.isVisibleTo(dialog)
+    # Negative: the three public states and their order are untouched by the
+    # relabelling — the label is a view of the state, never its source.
+    assert PHOTO_STATES == (PHOTO_FULL, PHOTO_DIMMED, PHOTO_HIDDEN)
+    dialog.set_photo_state(PHOTO_FULL)
+    seen = []
+    for _ in PHOTO_STATES:
+        dialog.cycle_photo_state()
+        seen.append(dialog.photo_state())
+    assert seen == [PHOTO_DIMMED, PHOTO_HIDDEN, PHOTO_FULL]
 
 
 def test_hiding_the_photograph_keeps_every_outline_in_place_and_drawn(dialog, app):
@@ -1418,7 +1474,7 @@ def test_the_backdrop_contrasts_with_every_outline_colour(dialog):
     board border clears it too, and the backdrop is lighter than the empty
     canvas around it so the board area stays a readable region.
     """
-    status_colours = {"#40dc80", "#ffad33", "#ef5350"}
+    status_colours = {"#40dc80", "#ffad33", "#ef5350", UNDETERMINED_TYPE_COLOR}
     assert {dialog._items[0].pen().color().name(),
             dialog._items[1].pen().color().name()} <= status_colours
     for colour in status_colours | {SELECTION_HALO_COLOR, BOARD_BORDER_COLOR}:
@@ -1526,7 +1582,8 @@ def test_the_backdrop_state_survives_every_edit_and_the_parameter_modal(dialog, 
         assert dialog.photo_state() == PHOTO_HIDDEN, step
         assert not dialog.photo_item.isVisible(), step
         assert dialog.board_backdrop.isVisible(), step
-        assert dialog.photo_button.text() == "Foto: nascosta", step
+        assert dialog.photo_button.text() == "Mostra foto", step
+        assert dialog.photo_state_label.text() == "Foto: nascosta", step
 
     dialog.add_component()
     still_hidden("add")
@@ -1573,7 +1630,8 @@ def test_a_new_editor_opens_on_the_photograph(app, png, components):
         assert second.photo_state() == PHOTO_FULL
         assert second.photo_item.isVisible()
         assert not second.board_backdrop.isVisible()
-        assert second.photo_button.text() == "Foto: intera"
+        assert second.photo_button.text() == "Attenua foto"
+        assert second.photo_state_label.text() == "Foto: intera"
     finally:
         second.close()
 
@@ -1584,7 +1642,8 @@ def test_an_unknown_backdrop_state_is_refused(dialog):
     with pytest.raises(ValueError):
         dialog.set_photo_state("transparent")
     assert dialog.photo_state() == PHOTO_DIMMED
-    assert dialog.photo_button.text() == "Foto: attenuata"
+    assert dialog.photo_button.text() == "Nascondi foto"
+    assert dialog.photo_state_label.text() == "Foto: attenuata"
 
 
 def test_selecting_and_moving_an_outline_still_work_with_the_photograph_hidden(dialog, app):
@@ -1637,3 +1696,314 @@ def test_drawing_a_new_rectangle_still_works_with_the_photograph_hidden(dialog, 
     start = dialog.view.mapFromScene(QPointF(200, -30))
     _drag(app, dialog.view, start, start + QPoint(40, 40), Qt.MouseButton.LeftButton)
     assert dialog.get_components() == before
+
+
+# --------------------------------------------------------------------------
+# A body the model declined to type: the doubt must reach the body, not only
+# the log. Reproduces the reported run — the inventory classified a body as
+# ``semiconductor_unknown`` with an empty package, said so in the log, and the
+# review showed nothing on the body itself; the user saw a featureless box in
+# the 3D model and asked why the regulator had not been recognised.
+# --------------------------------------------------------------------------
+
+#: Prosa reale del modello. Nomina C19 e R7: e' esattamente cio' che una regola
+#: basata sui nomi userebbe, e che qui non deve avere alcun effetto. Contiene
+#: anche markup e una e commerciale, perche' la finestra che la mostra non deve
+#: interpretarla.
+_MODEL_DOUBT = (
+    "The large black body near board centre (C19) shows three wide leads plus a broad "
+    "tab; it could be a power transistor or a regulator. R7 <b>looks</b> rotated & "
+    "its marking is unreadable."
+)
+
+
+def _inventory_body(name, klass, kind, **overrides):
+    """One component as the global inventory writes it, with its declared fields."""
+    component = dict(
+        name=name, kind=kind, x_mm=0.0, y_mm=0.0, length_mm=6.0, width_mm=4.0,
+        height_mm=2.0, rotation_deg=0.0, package="SOT-223", package_evidence="three leads",
+        confidence="high", class_confidence="high", presence_confidence="high",
+        _global_inventory_uncertainties=[_MODEL_DOUBT],
+    )
+    component["class"] = klass
+    component.update(overrides)
+    return component
+
+
+@pytest.fixture
+def inventory_components():
+    """C19 as the model left it, and a resistor it typed with confidence.
+
+    Both carry the same global doubts, because the inventory attaches them to
+    every component of the run; both are named in that prose. Only the
+    structured fields differ, and only they may decide.
+    """
+    return [
+        _inventory_body("C19 (semiconductor_unknown)", "semiconductor_unknown", "ic",
+                        package="", package_evidence="three wide leads plus a broad tab",
+                        confidence="medium", class_confidence="low"),
+        _inventory_body("R7 (resistor)", "resistor", "resistor",
+                        x_mm=12.0, y_mm=5.0, length_mm=1.6, width_mm=.8, package="0603"),
+    ]
+
+
+@pytest.fixture
+def inventory_dialog(app, png, inventory_components):
+    widget = PhotoReviewDialog(png, inventory_components, 40, 20)
+    widget.show()
+    app.processEvents()
+    yield widget
+    widget.close()
+    app.processEvents()
+
+
+def test_a_body_the_model_declined_to_type_is_flagged_with_the_manual_action(
+        inventory_dialog, inventory_components):
+    """@brief Positive: the undetermined body is marked, and the mark names the fix.
+
+    The model behaved correctly by not inventing an electrical identity; what
+    was missing is any sign, on the body the user can fix, that this is the one
+    worth choosing a model for. The flag must therefore say what to DO — choose
+    a KiCad model by hand, which is free — and not merely that something is
+    uncertain.
+    """
+    assert PhotoReviewDialog.type_undetermined(inventory_components[0])
+    inventory_dialog.component_list.setCurrentRow(0)
+    message = inventory_dialog.warning_label.text()
+    assert "non ha stabilito il tipo" in message
+    assert "Doppio clic" in message
+    assert "modello KiCad" in message
+    # L'azione e' gratuita, e dirlo fa parte dell'invito: una ricerca che
+    # sembra costare non viene tentata.
+    assert "non costa nulla" in message
+    assert inventory_dialog._items[0].pen().color().name() == UNDETERMINED_TYPE_COLOR
+    assert UNDETERMINED_LIST_MARKER in inventory_dialog.component_list.item(0).text()
+    # La legenda spiega il colore, come per gli altri tre, e dichiara la
+    # precedenza: un canale in piu' senza legenda sarebbe un quarto linguaggio.
+    assert "Viola" in inventory_dialog.legend.text()
+    assert UNDETERMINED_LIST_MARKER in inventory_dialog.legend.text()
+    assert "prevale" in inventory_dialog.legend.text()
+    # Negative: segnalare non modifica l'inventario.
+    assert inventory_dialog.get_components() == inventory_components
+
+
+def test_a_normally_typed_body_is_not_flagged(inventory_dialog, inventory_components):
+    """@brief Negative: a family the model did name keeps the ordinary status.
+
+    The resistor has no confirmed CAD model either, so it still carries the
+    ordinary "da verificare" orange and its "[!]": what it must NOT carry is
+    the undetermined-type status, otherwise the new signal would be on every
+    row and would single out nothing.
+    """
+    assert not PhotoReviewDialog.type_undetermined(inventory_components[1])
+    assert inventory_dialog._items[1].pen().color().name() == "#ffad33"
+    row = inventory_dialog.component_list.item(1).text()
+    assert UNDETERMINED_LIST_MARKER not in row
+    assert "[!]" in row
+    inventory_dialog.component_list.setCurrentRow(1)
+    assert "non ha stabilito il tipo" not in inventory_dialog.warning_label.text()
+
+
+def test_the_flag_is_read_from_declared_fields_and_never_from_the_prose(app, png):
+    """@brief Negative: the free text names components; it must not select them.
+
+    Three bodies, one sentence of prose. The resistor is named in it and has
+    confident structured fields: it is not flagged. A body the prose never
+    mentions declares ``class="other"``: it is flagged. And with the prose
+    removed altogether, both verdicts are unchanged — the sentence is data to
+    show, never a rule.
+    """
+    named_but_confident = _inventory_body("R7 (resistor)", "resistor", "resistor")
+    unnamed_but_undeclared = _inventory_body("Q4 (other)", "other", "generic",
+                                             x_mm=12.0, y_mm=5.0)
+    assert "Q4" not in _MODEL_DOUBT and "R7" in _MODEL_DOUBT
+    assert not PhotoReviewDialog.type_undetermined(named_but_confident)
+    assert PhotoReviewDialog.type_undetermined(unnamed_but_undeclared)
+    without_prose = [dict(component) for component in (named_but_confident, unnamed_but_undeclared)]
+    for component in without_prose:
+        component.pop("_global_inventory_uncertainties")
+    assert [PhotoReviewDialog.type_undetermined(c) for c in without_prose] == [False, True]
+    widget = PhotoReviewDialog(png, without_prose, 40, 20)
+    try:
+        assert widget._items[0].pen().color().name() == "#ffad33"
+        assert widget._items[1].pen().color().name() == UNDETERMINED_TYPE_COLOR
+    finally:
+        widget.close()
+
+
+def test_an_empty_package_alone_does_not_flag_a_typed_body(app, png):
+    """@brief Negative: the fields chosen mean "no type", not "no search key".
+
+    ``package`` is emptied by the inventory whenever the OVERALL confidence is
+    low or the outline basis is unresolved, so it follows from other doubts and
+    from geometry rather than from a statement about the type. A confidently
+    typed resistor whose package field is empty is a search-key problem, not an
+    undetermined type, and must keep the ordinary status.
+    """
+    typed_without_package = _inventory_body("R7 (resistor)", "resistor", "resistor",
+                                            package="", bbox_basis="unknown")
+    assert not PhotoReviewDialog.type_undetermined(typed_without_package)
+    widget = PhotoReviewDialog(png, [typed_without_package], 40, 20)
+    try:
+        assert widget._items[0].pen().color().name() == "#ffad33"
+        assert UNDETERMINED_LIST_MARKER not in widget.component_list.item(0).text()
+    finally:
+        widget.close()
+
+
+def test_a_class_confidence_that_does_not_support_the_family_flags_the_body(app, png):
+    """@brief Positive: "I named a family but I cannot support it" is the same state.
+
+    The declared class is an ordinary one, but the model rated its own class
+    call low, and the generator refuses to certify an identity on exactly that
+    field. The consequence for the user is identical — a generic volume — so
+    the same flag and the same manual action apply.
+    """
+    named_but_unsupported = _inventory_body("U3 (regulator)", "regulator", "ic",
+                                            class_confidence="low")
+    assert PhotoReviewDialog.type_undetermined(named_but_unsupported)
+    # Negative: the same body with the family supported is not flagged, so the
+    # class name alone is not what decides.
+    assert not PhotoReviewDialog.type_undetermined(
+        _inventory_body("U3 (regulator)", "regulator", "ic", class_confidence="medium"))
+
+
+def test_a_body_a_person_drew_is_not_attributed_to_the_model(dialog):
+    """@brief Negative: "the model declined" must not be said about the user's own box.
+
+    ``add_component`` creates a placeholder with ``kind="generic"`` and no
+    declared class. It is genuinely untyped, but nobody declined anything: the
+    user is being asked for the type in the modal that opens on top of it.
+    """
+    dialog.add_component()
+    added = dialog.get_components()[-1]
+    assert added["kind"] == "generic" and "class" not in added
+    assert not PhotoReviewDialog.type_undetermined(added)
+    assert dialog._items[-1].pen().color().name() != UNDETERMINED_TYPE_COLOR
+
+
+def test_the_undetermined_status_does_not_collide_with_the_other_two(
+        inventory_dialog, tmp_path):
+    """@brief The colour has a documented precedence; the text loses nothing.
+
+    A single outline carries a single colour, so out-of-PCB keeps priority: a
+    body that is not on the board makes every other question academic. The
+    warning text has no such limit, so a body that is both shows BOTH lines and
+    keeps its list marker. The low-confidence state is a different statement
+    and stays on its own colour.
+    """
+    inventory_dialog.component_list.setCurrentRow(0)
+    inventory_dialog.fields["x_mm"].setValue(20)
+    assert inventory_dialog._items[0].pen().color().name() == "#ef5350"
+    message = inventory_dialog.warning_label.text()
+    assert "Fuori dai bordi PCB" in message
+    assert "non ha stabilito il tipo" in message
+    row = inventory_dialog.component_list.item(0).text()
+    assert UNDETERMINED_LIST_MARKER in row and "[!]" in row
+    # Back on the board the specific status comes back, ahead of the generic one.
+    inventory_dialog.fields["x_mm"].setValue(0)
+    assert inventory_dialog._items[0].pen().color().name() == UNDETERMINED_TYPE_COLOR
+    # Negative: low overall confidence is NOT this state. The second body gets
+    # the ordinary "da verificare" orange and the low-confidence sentence.
+    inventory_dialog._items[1].component.update(confidence="low", _uncertain=True)
+    inventory_dialog.component_list.setCurrentRow(1)
+    assert inventory_dialog._items[1].pen().color().name() == "#ffad33"
+    assert "bassa confidenza" in inventory_dialog.warning_label.text()
+    assert "non ha stabilito il tipo" not in inventory_dialog.warning_label.text()
+    # Negative: a confirmed model does not silence the undetermined type; it is
+    # about what the model declared, not about what has been chosen since.
+    chosen = tmp_path/"chosen.step"
+    chosen.touch()
+    inventory_dialog._items[0].component["model_selection"] = {
+        "status": "confirmed", "path": str(chosen)}
+    inventory_dialog._refresh_item(inventory_dialog._items[0])
+    assert inventory_dialog._items[0].pen().color().name() == UNDETERMINED_TYPE_COLOR
+
+
+def test_the_undetermined_colour_is_distinguishable_from_the_other_statuses(dialog):
+    """@brief The fourth status is a separate signal, measured and not judged by eye.
+
+    It clears the same 3:1 contrast floor against the board backdrop as the
+    three it joins, and it is the only one with a dominant blue channel, so it
+    stays distinct where a red/green deficiency flattens the others.
+    """
+    assert _contrast_ratio(UNDETERMINED_TYPE_COLOR, BOARD_BACKDROP_COLOR) >= 3.0
+    assert UNDETERMINED_TYPE_COLOR not in ("#40dc80", "#ffad33", "#ef5350")
+    undetermined = QColor(UNDETERMINED_TYPE_COLOR)
+    for other in ("#40dc80", "#ffad33", "#ef5350"):
+        assert undetermined.blue() > QColor(other).blue() + 100, other
+    # Negative: it is not the selection halo either, which carries no status.
+    assert UNDETERMINED_TYPE_COLOR != SELECTION_HALO_COLOR
+
+
+def test_the_declared_unknown_classes_are_the_ones_the_generator_refuses(dialog):
+    """@brief The vocabulary is shared with cad3d, not invented for this dialog.
+
+    ``kicad_models`` refuses to certify an identity for exactly these declared
+    classes. Reading the same set here is what makes the flag mean "this body
+    will reach the 3D as a generic volume" instead of being a second opinion.
+    """
+    source = (Path(__file__).resolve().parents[1]/"kicadgen"/"cad3d"/"kicad_models.py").read_text(
+        encoding="utf-8")
+    for declared in UNDETERMINED_TYPE_CLASSES:
+        assert f'"{declared}"' in source, declared
+    assert set(UNDETERMINED_TYPE_CLASSES) == {"semiconductor_unknown", "unknown", "other"}
+
+
+def test_the_global_uncertainties_are_reachable_and_rendered_as_plain_text(
+        inventory_dialog, app):
+    """@brief The model's doubts reach the dialog, as data and as literal text.
+
+    They used to stop at the log. Here they sit behind a button that only
+    exists when there are any, they are de-duplicated (the inventory attaches
+    the same list to every component), and they are shown in a read-only
+    QPlainTextEdit, which never interprets rich text: a doubt containing markup
+    stays the sentence the model wrote.
+    """
+    assert inventory_dialog.model_uncertainties() == [_MODEL_DOUBT]
+    assert inventory_dialog.uncertainties_button.isVisibleTo(inventory_dialog)
+    assert "(1)" in inventory_dialog.uncertainties_button.text()
+    inventory_dialog.show_uncertainties()
+    app.processEvents()
+    assert inventory_dialog.uncertainties_dialog.isVisible()
+    view = inventory_dialog.uncertainties_view
+    assert isinstance(view, QPlainTextEdit)
+    assert view.isReadOnly()
+    shown = view.toPlainText()
+    assert _MODEL_DOUBT in shown
+    # Negative: not interpreted as markup — the tags and the ampersand survive.
+    assert "<b>looks</b>" in shown
+    assert "rotated & its marking" in shown
+    # Negative: reading them cannot edit them, nor the inventory.
+    mutated = inventory_dialog.model_uncertainties()
+    mutated.append("injected")
+    assert inventory_dialog.model_uncertainties() == [_MODEL_DOUBT]
+    inventory_dialog.uncertainties_dialog.reject()
+    app.processEvents()
+
+
+def test_without_declared_doubts_the_reader_is_not_offered(dialog):
+    """@brief Negative: no doubts, no control — and nothing to open.
+
+    An inventory that declared nothing must not grow a button onto an empty
+    window; the sidebar stays as it was.
+    """
+    assert dialog.model_uncertainties() == []
+    assert not dialog.uncertainties_button.isVisibleTo(dialog)
+    dialog.show_uncertainties()
+    assert not dialog.uncertainties_dialog.isVisible()
+
+
+def test_deleting_the_last_carrier_takes_the_doubts_away(inventory_dialog, app):
+    """@brief The doubts belong to the inventory on screen, not to a past run.
+
+    Deleting every component of the run leaves no body the sentences describe,
+    so the reader must go with them rather than point at an inventory that is
+    no longer here.
+    """
+    while inventory_dialog._items:
+        inventory_dialog.component_list.setCurrentRow(0)
+        inventory_dialog.delete_selected()
+    app.processEvents()
+    assert inventory_dialog.model_uncertainties() == []
+    assert not inventory_dialog.uncertainties_button.isVisibleTo(inventory_dialog)

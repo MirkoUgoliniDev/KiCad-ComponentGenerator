@@ -265,6 +265,34 @@ def _thumbnail(path, rotation, dimensions=None, color=None):
     return image
 
 
+class _RotationSpinBox(QDoubleSpinBox):
+    """@brief Rotation field that reports *every* user interaction with it.
+
+    @details ``valueChanged`` alone cannot express "the user reached for this
+    knob": stepping at a range limit, or typing the value already shown, leaves
+    the value untouched and emits nothing. The dialog needs those cases too,
+    because it treats any interaction as the request for the explicit override.
+    @note ``interacted`` is deliberately *not* emitted for programmatic
+    ``setValue()``: the dialog only ever sets the value while building itself,
+    before any signal is connected, so the restored state cannot claim the
+    override on the user's behalf.
+    """
+
+    #: Emitted when the user stepped the value with the arrows, the up/down keys
+    #: or the wheel, including a step the range limits swallowed.
+    interacted = pyqtSignal()
+
+    def stepBy(self, steps):
+        """@brief Qt override: step the value, then report the interaction.
+
+        @param steps Signed number of single steps requested by the user.
+        @note Qt calls this only for user-driven stepping, so the signal cannot
+        be raised by the dialog restoring a saved rotation.
+        """
+        super().stepBy(steps)
+        self.interacted.emit()
+
+
 class _Signals(QObject):
     ready = pyqtSignal(int, object)
 
@@ -319,6 +347,11 @@ class ModelCandidatesDialog(QDialog):
     Accepted with rejected status means preserve the generic placeholder.
     Rotation is a local native-model Z override in degrees, or None to retain
     CAD bounding-box axis inference. Explicit zero disables that inference.
+    @note The rotation field is always enabled, in both modes: any interaction
+    with it (a moved value, a typed value, even a step the range swallowed)
+    clears the automatic tick and puts the explicit override in force, and the
+    label beside the field says which mode is in charge. selected_selection()
+    is unaffected: automatic still reports rotation None, explicit the value.
     """
 
     def __init__(self, component: dict, match_report: dict, photo_crop=None, parent=None):
@@ -428,22 +461,38 @@ class ModelCandidatesDialog(QDialog):
         self.details_label.setWordWrap(True)
         self.details_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.details_label)
-        controls = QHBoxLayout()
         self.auto_rotation = QCheckBox('Automatico: deduci gli assi CAD dall’ingombro')
         self.auto_rotation.setChecked(_number(initial_rotation, None) is None)
         layout.addWidget(self.auto_rotation)
         self.rotation_hint = QLabel()
         self.rotation_hint.setWordWrap(True)
         layout.addWidget(self.rotation_hint)
-        controls.addWidget(QLabel('Rotazione Z locale del CAD nativo'))
-        self.rotation = QDoubleSpinBox()
+        # Riga dedicata alla rotazione. Tenere manopola, stato e pulsanti sulla
+        # stessa riga portava la larghezza minima del dialogo da 750 a 963 px:
+        # lo stato deve stare accanto al campo, non costringere la finestra.
+        rotation_row = QHBoxLayout()
+        rotation_row.addWidget(QLabel('Rotazione Z locale del CAD nativo'))
+        self.rotation = _RotationSpinBox()
         self.rotation.setRange(-360, 360)
         self.rotation.setDecimals(2)
         self.rotation.setSingleStep(90)
         self.rotation.setSuffix(' °')
+        # Set before any connection: restoring a saved angle must not be mistaken
+        # for the user claiming the explicit override.
         self.rotation.setValue(_number(initial_rotation))
+        rotation_row.addWidget(self.rotation)
+        # Which of the two modes is in charge, written beside the knob itself.
+        # La frase lunga di rotation_hint non bastava: chi gira la manopola non
+        # collega il campo a una spiegazione staccata, e nessuno passa il mouse
+        # per un tooltip. Lo stato va letto dove si guarda, accanto al campo.
+        self.rotation_state = QLabel()
+        self.rotation_state.setObjectName('rotation_state')
+        self.rotation_state.setTextFormat(Qt.TextFormat.PlainText)
+        rotation_row.addWidget(self.rotation_state)
+        rotation_row.addStretch(1)
         self._update_rotation_controls()
-        controls.addWidget(self.rotation)
+        layout.addLayout(rotation_row)
+        controls = QHBoxLayout()
         self.manual_button = QPushButton('Scegli file STEP…')
         self.manual_button.clicked.connect(self._choose_file)
         controls.addWidget(self.manual_button)
@@ -459,7 +508,14 @@ class ModelCandidatesDialog(QDialog):
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
         self.candidate_list.currentRowChanged.connect(self._candidate_changed)
-        self.rotation.valueChanged.connect(self._start_preview)
+        # Three routes into the same intent, because no single one covers it:
+        # valueChanged for a value that really moved, textEdited for a value
+        # typed over an identical one (0 over 0, the case that decides between
+        # automatic and an explicit 0°), interacted for a step the range limits
+        # swallowed. Any of them means "I am driving this rotation now".
+        self.rotation.valueChanged.connect(self._rotation_value_changed)
+        self.rotation.lineEdit().textEdited.connect(self._rotation_claimed)
+        self.rotation.interacted.connect(self._rotation_claimed)
         self.auto_rotation.toggled.connect(self._rotation_mode_changed)
         if saved_path:
             row = next(i for i, c in enumerate(self._candidates) if c['path'] == saved_path)
@@ -480,13 +536,48 @@ class ModelCandidatesDialog(QDialog):
             self._start_preview()
 
     def _update_rotation_controls(self):
+        """Keep the readable state and the hint aligned with the mode in force.
+
+        @note The spin box is never disabled any more. A disabled field still
+        looked usable — visible, with its arrows and a value — so turning it
+        produced nothing and the reason lived in a separate sentence nobody
+        connected to the knob. It now stays enabled, any interaction with it
+        claims the explicit override (see _rotation_claimed), and the label
+        beside it states which mode is actually in charge without hovering.
+        """
         automatic = self.auto_rotation.isChecked()
-        self.rotation.setEnabled(not automatic)
+        self.rotation_state.setText('non in uso: comanda «Automatico»' if automatic
+                                    else 'in uso: override esplicito')
         self.rotation_hint.setText(
             'L’anteprima usa lo stesso allineamento automatico della generazione CAD '
-            '(ingombro totale e sezione del corpo). La rotazione nella foto è indipendente.' if automatic else
+            '(ingombro totale e sezione del corpo). La rotazione nella foto è indipendente. '
+            'Modificando la rotazione, «Automatico» si disattiva e l’override entra in vigore.'
+            if automatic else
             'Override locale esplicito: anche 0° disattiva l’inferenza degli assi. '
             'La rotazione del componente nella foto resta indipendente.')
+
+    def _rotation_claimed(self, *_):
+        """Hand the rotation to the explicit override the moment the user acts.
+
+        @note Turning that knob has exactly one possible meaning: this angle,
+        not the inferred one. Clearing «Automatico» here is what makes the
+        gesture legible — the tick moves, the state label flips and the preview
+        is rebuilt by _rotation_mode_changed — instead of being swallowed.
+        Already explicit: nothing to claim, and the preview is left to
+        _rotation_value_changed so a keystroke that does not move the value
+        cannot restart a CAD run.
+        """
+        if self.auto_rotation.isChecked():
+            self.auto_rotation.setChecked(False)
+
+    def _rotation_value_changed(self, *_):
+        """Rebuild the preview for a moved value, claiming the override first."""
+        if self.auto_rotation.isChecked():
+            # _rotation_mode_changed already rebuilds the preview with this
+            # value; starting a second one here would only bump the token.
+            self.auto_rotation.setChecked(False)
+            return
+        self._start_preview()
 
     def _rotation_mode_changed(self, *_):
         self._update_rotation_controls()
@@ -605,8 +696,14 @@ class ModelCandidatesDialog(QDialog):
             reasons = '\n'.join(str(reason) for reason in reasons)
         error = _number(candidate.get('relative_xy_error'), float('nan'))
         error_text = f'{error:.1%}' if math.isfinite(error) else 'non disponibile'
-        self.details_label.setText(f"{self._path}\nDimensioni del modello (mm): {_display_dimensions(candidate['dimensions_mm']) if candidate.get('dimensions_mm') else 'non disponibili'}"
-                                   f"\nErrore relativo XY: {error_text}\nMotivi: {reasons or 'non disponibili'}")
+        # Wording only: the two numbers are not peers. The model dimensions are
+        # read off the CAD file, the envelope they are compared against is
+        # reconstructed from the photograph, so the error belongs to the
+        # estimate. Presenting both as flat facts made the reviewer distrust the
+        # model instead of the measurement that is actually uncertain.
+        self.details_label.setText(f"{self._path}\nDimensioni misurate sul modello (mm): {_display_dimensions(candidate['dimensions_mm']) if candidate.get('dimensions_mm') else 'non disponibili'}"
+                                   f"\nErrore relativo XY rispetto all’ingombro stimato dalla foto: {error_text}"
+                                   f"\nMotivi: {reasons or 'non disponibili'}")
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(_step_file(self._path))
         if preview:
             self._start_preview()

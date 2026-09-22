@@ -21,7 +21,8 @@ from PyQt6.QtWidgets import QApplication, QDialogButtonBox
 
 from kicadgen.gui.photo_review_dialog import (
     PHOTO_DIMMED, PHOTO_HIDDEN, PhotoReviewDialog, SELECTED_PEN_WIDTH_PX,
-    SELECTION_HALO_COLOR, SELECTION_HALO_WIDTH_PX, UNSELECTED_PEN_WIDTH_PX,
+    SELECTION_HALO_COLOR, SELECTION_HALO_WIDTH_PX, UNDETERMINED_LIST_MARKER,
+    UNDETERMINED_TYPE_COLOR, UNSELECTED_PEN_WIDTH_PX,
 )
 
 
@@ -782,3 +783,106 @@ def test_the_parameter_modal_edits_live_with_the_photograph_hidden(dialog, app):
     app.processEvents()
     assert dialog.photo_state() == PHOTO_HIDDEN
     assert not dialog.photo_item.isVisible()
+
+
+# --------------------------------------------------------------------------
+# 8. The list row of a body the model declined to type
+#
+# The row already showed "N. NAME [!]", where "[!]" only means "this row has
+# at least one warning". Before a CAD model is chosen that is true of nearly
+# every row, so "[!]" could not single out the one body worth choosing a model
+# for by hand. It needs a marker of its own.
+# --------------------------------------------------------------------------
+
+def _undetermined_component(name, **overrides):
+    """A body the global inventory left without a family, as it writes it."""
+    component = dict(name=name, kind="ic", x_mm=0.0, y_mm=0.0, length_mm=6.0,
+                     width_mm=4.0, height_mm=2.0, rotation_deg=0.0, package="",
+                     confidence="medium", class_confidence="low",
+                     presence_confidence="high")
+    component["class"] = "semiconductor_unknown"
+    component.update(overrides)
+    return component
+
+
+def test_the_list_row_distinguishes_an_undetermined_type_from_an_ordinary_warning(app, png):
+    """@brief "[?]" says "the model did not type this"; "[!]" only says "there are warnings".
+
+    Both bodies here carry warnings (neither has a confirmed CAD model), so
+    both rows end in "[!]": that marker cannot tell them apart, which is the
+    whole reason a second one exists. The row of the undetermined body also
+    takes the status colour, so the list carries the same distinction as the
+    canvas without needing the photograph to be visible.
+    """
+    components = [
+        _undetermined_component("C19 (semiconductor_unknown)"),
+        dict(name="R7", kind="resistor", x_mm=12.0, y_mm=5.0, length_mm=1.6,
+             width_mm=.8, height_mm=.45, rotation_deg=0.0, confidence="high",
+             class_confidence="high", package="0603", **{"class": "resistor"}),
+    ]
+    widget = PhotoReviewDialog(png, components, 40, 20)
+    try:
+        undetermined, ordinary = (widget.component_list.item(0).text(),
+                                  widget.component_list.item(1).text())
+        assert undetermined == f"1. C19 (semiconductor_unknown) {UNDETERMINED_LIST_MARKER} [!]"
+        # Negative: the typed body gets the ordinary marker and only that one.
+        assert ordinary == "2. R7 [!]"
+        assert UNDETERMINED_LIST_MARKER not in ordinary
+        assert widget.component_list.item(0).foreground().color() == QColor(UNDETERMINED_TYPE_COLOR)
+        assert widget.component_list.item(1).foreground().color() == QColor("#ffad33")
+        # La riga e' corta per forza: la frase che dice cosa fare resta
+        # raggiungibile dal tooltip della riga, oltre che dall'avviso laterale.
+        assert "non ha stabilito il tipo" in widget.component_list.item(0).toolTip()
+        assert "non ha stabilito il tipo" not in widget.component_list.item(1).toolTip()
+    finally:
+        widget.close()
+
+
+def test_the_marker_follows_the_declared_type_when_it_is_edited(app, png):
+    """@brief Typing a real category in the form retires the marker; the data decides.
+
+    The user is allowed to answer the question the model left open by typing
+    the type. The list must then stop claiming the model declined — but only
+    because the declared class changed with it, never because a row was
+    repainted on its own.
+    """
+    widget = PhotoReviewDialog(png, [_undetermined_component("C19")], 40, 20)
+    try:
+        assert UNDETERMINED_LIST_MARKER in widget.component_list.item(0).text()
+        widget.component_list.setCurrentRow(0)
+        widget._items[0].component.update({"class": "regulator", "class_confidence": "high"})
+        widget.text_fields["kind"].setText("ic_soic")
+        widget.text_fields["kind"].editingFinished.emit()
+        assert widget.get_components()[0]["kind"] == "ic_soic"
+        assert UNDETERMINED_LIST_MARKER not in widget.component_list.item(0).text()
+        # Negative: the geometry and the rest of the row are untouched by it.
+        assert widget.component_list.item(0).text().startswith("1. C19")
+    finally:
+        widget.close()
+
+
+def test_the_undetermined_row_survives_the_category_filter(app, png):
+    """@brief Filtering hides rows, it never rewrites what a visible row says.
+
+    The filter works on ``kind``, and the undetermined body has a perfectly
+    ordinary kind ("ic") because the inventory maps unknown families onto the
+    CAD renderer's vocabulary. Selecting that category must therefore keep the
+    row, the marker and the colour exactly as they were.
+    """
+    components = [
+        _undetermined_component("C19"),
+        dict(name="R7", kind="resistor", x_mm=12.0, y_mm=5.0, length_mm=1.6,
+             width_mm=.8, height_mm=.45, rotation_deg=0.0, confidence="high",
+             class_confidence="high", **{"class": "resistor"}),
+    ]
+    widget = PhotoReviewDialog(png, components, 40, 20)
+    try:
+        before = widget.component_list.item(0).text()
+        widget.category_filter.setCurrentIndex(widget.category_filter.findData("ic"))
+        assert widget.active_category() == "ic"
+        assert not widget.component_list.item(0).isHidden()
+        assert widget.component_list.item(0).text() == before
+        assert UNDETERMINED_LIST_MARKER in widget.component_list.item(0).text()
+        assert widget.component_list.item(0).foreground().color() == QColor(UNDETERMINED_TYPE_COLOR)
+    finally:
+        widget.close()

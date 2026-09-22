@@ -4291,3 +4291,211 @@ precedente.
 - `resolve_model` (API legacy, nessun chiamante di produzione) non riceve il
   canale: sarebbe codice morto.
 - Push: le credenziali git non esistono nella VM del ponte, lo lancia l'utente.
+
+# NOTE DELL'UTENTE — LAVORATE il 2026-09-22 sera (vedi la sezione sotto)
+
+Raccolte il 2026-09-22 dopo il commit `1c76d65`. L'utente ha chiesto
+esplicitamente di prenderne nota e NON di lavorarle subito.
+
+1. **L'elenco dei documenti nella modale va impaginato meglio.** Oggi
+   `datasheet_extractor._files_sent_message` produce una riga sola con i tre
+   file separati da ` · `, che nella scheda va a capo dove capita e si legge
+   male (schermata dell'utente: «pinout.png, Pinout / disposizione contatti ·
+   top.png, Immagine con quote · hires.jpg, Foto ad alta risoluzione»). Vuole
+   **un file per riga**, nome e ruolo allineati. Attenzione: la riga passa per
+   `set_status`, che tronca a `_STATUS_CHAR_LIMIT` e conta le righe per
+   dimensionare la scheda — una lista multi-riga va concordata con
+   `_size_the_card`, non solo con `\n` nel messaggio. Va anche deciso se il
+   log debba restare su una riga sola (li' la riga unica e' comoda) mentre la
+   modale mostra l'elenco: sono due destinazioni con esigenze diverse.
+
+2. **Manca il pulsante «nascondi la foto» nella revisione PRE-chiamata.**
+   Errore mio nell'interpretare la richiesta: il ciclo «Foto: intera /
+   attenuata / nascosta» e' stato costruito in `PhotoReviewDialog` (la
+   revisione DOPO l'inventario), mentre l'utente lo chiedeva — e lo chiede
+   ancora — in `YoloReviewDialog` («Corpi rilevati: togli quelli che non sono
+   componenti»), che e' la finestra della sua schermata e quella in cui il
+   problema e' peggiore: 60 proposte verdi e rosa su una foto scura e
+   affollata, con i corpi piccoli illeggibili. Serve lo stesso controllo li',
+   possibilmente lo stesso comportamento (fondo neutro misurato, bordo PCB
+   tracciato) per non avere due convenzioni diverse nelle due revisioni.
+   Nota tecnica: `YoloReviewDialog` non e' una `QGraphicsScene` come l'altra —
+   disegna in `BoardView.paintEvent` con `QPainter` su un `QPixmap` di sfondo,
+   quindi il ripiego va implementato li', non riusato.
+
+3. **Il ciclo della foto nella revisione componenti non si riconosce come
+   comando.** Esiste gia' (`photo_button`, nella barra dopo «Zoom −»,
+   etichetta «Foto: intera» → «Foto: attenuata» → «Foto: nascosta»), ma
+   l'utente lo ha guardato e ha chiesto la funzione come se non ci fosse.
+   Causa: l'etichetta dichiara lo STATO, non l'AZIONE, quindi si legge come
+   una didascalia. Va reso evidente che e' un comando — verbo («Nascondi
+   foto»), oppure icona a occhio, oppure aspetto premuto piu' marcato — senza
+   perdere l'informazione su quale stato e' attivo. Da decidere insieme al
+   punto 2, cosi' le due revisioni finiscono con lo stesso controllo e la
+   stessa convenzione.
+
+4. **«La rotazione si rifletta sull'anteprima del modello KiCad».** Verificato:
+   **funziona gia'** — `rotation.valueChanged` e' collegato a `_start_preview`
+   (`model_candidates_dialog.py:462`) e l'anteprima viene ricostruita col
+   valore. Ma e' subordinata alla spunta «Automatico: deduci gli assi CAD
+   dall'ingombro»: con quella attiva `_update_rotation_controls` disabilita il
+   campo e `_start_preview` passa `None` (orientamento automatico), quindi
+   girare la manopola non cambia nulla. Nella schermata dell'utente la spunta
+   era attiva — e lui ha comunque provato a usare il campo, quindi il nesso
+   fra spunta e campo non si legge.
+   Da fare: rendere evidente il legame. Ipotesi da valutare — toccare la
+   rotazione toglie da sola la spunta (l'intenzione e' chiara: chi gira la
+   manopola vuole l'override), oppure il campo disabilitato lo dice a schermo
+   accanto, non solo nel testo lungo sotto. Da decidere, con il vincolo che
+   «anche 0 gradi disattiva l'inferenza» resta un comportamento voluto e
+   dichiarato.
+   Secondo punto emerso guardando la schermata: con quel modello l'**errore
+   relativo XY e' 14,4 %** (modello 15,65 x 17,5 contro i 19,433 x 18,288
+   stimati dalla foto) e il motivo dice «Exact literal model marking». Vale la
+   pena chiedersi se con una marcatura letterale esatta l'anteprima non debba
+   dichiarare piu' forte che l'ingombro fotografico e' una stima, non una
+   misura — ma e' una nota, non una richiesta dell'utente.
+
+5. **I dubbi dichiarati dal modello non arrivano dove si puo' agire.** Corsa
+   del 2026-09-22 20:24: l'inventario ha scritto nel log «The large black body
+   near board centre (C19) shows three wide leads plus a broad tab; it could be
+   a power transistor or a regulator», e ha classificato C19 come
+   `semiconductor_unknown` con package ignoto — comportamento corretto e
+   voluto (non inventare l'identita'), ma in FreeCAD diventa «package
+   sconosciuto, geometria generica senza terminali», cioe' una scatola nera, e
+   l'utente ha chiesto «perche' non ha riconosciuto il regolatore?».
+   Il dubbio esiste ed e' esplicito, ma resta nel log: nella revisione
+   componenti quel corpo non e' marcato in alcun modo che spinga a scegliere
+   un modello a mano. Da fare: portare il dubbio sul corpo, usando i campi
+   STRUTTURATI gia' presenti (`class` == `semiconductor_unknown`, `package`
+   vuoto, `class_confidence`/`confidence` basse) e non facendo parsing del
+   testo libero delle `uncertainties`, che nomina i componenti in prosa. Le
+   `uncertainties` globali andrebbero comunque mostrate da qualche parte nella
+   revisione, non solo nel log.
+
+# 2026-09-22 (5) — le cinque note dell'utente, lavorate
+
+Commit precedente: `1c76d65`. Le note 1-5 raccolte poco prima sono state
+lavorate da quattro agenti su file disgiunti. Suite completa: **3472 passati**,
+11 saltati, 2 xfail, 19 sottotest, zero rossi.
+
+## 1. Elenco dei documenti: una riga per file
+
+Scelta: **un solo messaggio e una sola riga di log; e' la scheda a impaginare.**
+`_files_sent_message` resta una riga, cosi' `analisi-ai.log` conserva la forma
+un-evento-una-riga-un-timestamp che hanno tutte le altre voci. La lista nasce
+in `set_status` tramite la nuova `enumeration_lines(text)`, che riconosce la
+forma gia' presente e gia' portante — un'introduzione chiusa da `": "` e voci
+separate da `" · "`, **entrambi i segnali richiesti** — e restituisce
+l'introduzione piu' una riga per voce. E' una regola sulla FORMA, non sul
+mittente: la riga `FAILED/PARTIAL: … · … · …` dell'inventario riceve lo stesso
+trattamento, ed e' provato come caso di generalita'.
+Le righe sono allineate a sinistra (i nomi si incolonnano) ed elise sulla
+larghezza vera della scheda, quindi il conteggio delle righe e' esatto e il
+dimensionamento le segue (`_reserve_status_height`, monotono dentro una corsa,
+azzerato solo da `start()`, cosi' la scheda non balla). Se la finestra non ci
+sta, la lista viene tagliata **dichiarando il taglio** con `…` invece di
+sbordare.
+Scartate: una riga di log per documento (moltiplica gli eventi per un solo
+atto, e la scheda tiene solo l'ultima riga); `\n` nel messaggio (rompe il log
+e lascia la scheda a misurare un testo che non sa dimensionare).
+
+## 2. «Nascondi foto» anche in «Corpi rilevati» — era una mia svista
+
+Il ciclo foto era stato costruito solo nella revisione DOPO l'inventario;
+l'utente lo chiedeva in `YoloReviewDialog`, dove il problema e' peggiore (60
+riquadri su foto scura) e dove si decide **cosa si manda a pagamento**. Ora
+c'e', con la stessa convenzione. Reimplementato, non riusato: quella finestra
+dipinge in `paintEvent` con `QPainter` su un `QPixmap`, non e' una
+`QGraphicsScene`. Ordine di disegno esplicito, con il **bordo PCB tracciato
+dopo** la foto attenuata (sotto verrebbe lavato via proprio quando e' l'unica
+prova di dove finisce la scheda). Contrasto verificato contro le quattro
+penne di QUESTA finestra (verde ~11.0, giallo ~11.6, azzurro ~7.7, rosa ~5.2).
+Il controllo sta in una riga sotto la vista: quella finestra non ha una barra
+di strumenti e la colonna laterale e' tutta di comandi di modifica.
+
+## 3. Il pulsante foto non si riconosceva come comando
+
+Diagnosi confermata dal comportamento dell'utente: ha guardato il pulsante e
+ha chiesto la funzione come se non esistesse, perche' l'etichetta dichiarava
+lo STATO e una didascalia non si preme. Ora **comando e stato sono separati**:
+il pulsante porta l'imperativo del passo successivo («Attenua foto» →
+«Nascondi foto» → «Mostra foto») e una `photo_state_label` accanto porta lo
+stato («Foto: intera»). Un'etichetta non e' premibile e quindi non puo'
+promettere nulla: al pulsante resta solo un verbo. Effetto collaterale utile:
+il verbo rende prevedibile l'ordine del ciclo prima di premere.
+API pubblica (`photo_state`, `set_photo_state`, `cycle_photo_state`, `PHOTO_*`)
+invariata. **Le due finestre devono restare identiche**: se questa convenzione
+si cambia, va cambiata in entrambe.
+
+## 4. Rotazione e «Automatico»
+
+Il campo era `setEnabled(False)` con la spunta attiva: sembrava usabile e
+ingoiava il gesto. Ora e' **sempre abilitato e qualunque interazione toglie la
+spunta** — girare quella manopola ha un solo significato possibile. Tre vie
+nello stesso gestore, ognuna dimostrata portante togliendola e vedendo
+fallire un test e uno solo:
+`valueChanged` (il valore si e' mosso), `lineEdit().textEdited` (un valore
+**digitato sopra uno identico** — scrivere `0` quando c'e' gia' `0,00 °` non
+emette `valueChanged`, ed e' proprio il tasto che separa automatico da zero
+esplicito), e `stepBy` (uno scatto mangiato dal limite ±360).
+`setValue()` in costruzione avviene prima delle connessioni, quindi
+ripristinare un angolo salvato non rivendica mai l'override al posto
+dell'utente. Stato leggibile senza passarci sopra: `rotation_state` dice «in
+uso: override esplicito» / «non in uso: comanda "Automatico"». Il contratto
+«anche 0° disattiva l'inferenza» resta vero e resta scritto.
+Un'asserzione e' stata **riscritta, non allentata**:
+`rotation.isEnabled() != automatic` era il difetto, non il contratto.
+
+## 5. I dubbi del modello arrivano sul corpo
+
+Nuova `PhotoReviewDialog.type_undetermined(component)`, su campi
+**strutturati**: `class` (con ripiego su `kind`) in
+`UNDETERMINED_TYPE_CLASSES = ("semiconductor_unknown", "unknown", "other")` —
+lo stesso insieme con cui `kicad_models` rifiuta di certificare un'identita',
+cosi' revisione e generatore concordano su cosa significhi «non tipizzato» —
+oppure `class_confidence == "low"`. **Mai** parsing del testo libero delle
+`uncertainties`, che nomina i componenti in prosa: sarebbe la regola sui nomi
+che CLAUDE.md vieta. Escluso anche il `package` vuoto, dichiarando perche':
+`_normalize` lo svuota quando la confidenza complessiva e' bassa o il
+`bbox_basis` e' irrisolto, quindi segue da altri dubbi e segnalerebbe passivi
+tipizzati con sicurezza.
+Quarto stato del contorno, viola `#c58af9` (4.8:1 sul fondo), perche' `[!]` e
+l'arancione sono gia' su quasi ogni riga prima della scelta di un modello e
+non potevano distinguere questo caso; e' l'unico dei quattro con canale blu
+dominante, quindi sopravvive a una deficienza rosso-verde. Precedenza
+dichiarata e provata: fuori PCB > tipo non stabilito > da verificare > ok; il
+canale testuale non perde nulla (un corpo che e' entrambe le cose mostra
+entrambe le righe). In lista `[?]` accanto a `[!]`.
+Le `uncertainties` globali erano gia' su ogni componente
+(`_global_inventory_uncertainties`), quindi nessun cablaggio nuovo in
+`main_window`: un pulsante che compare solo se ce ne sono apre un lettore in
+sola lettura, testo semplice per costruzione, con la nota che sono **dati da
+leggere, non istruzioni**.
+
+## Trappola operativa nuova, per chi riprende
+
+Gli agenti condividono la stessa cartella di appoggio. Due di loro hanno usato
+lo stesso nome di file per il backup (`scratchpad/orig.py`) e uno ha
+ripristinato **il modulo dell'altro** sopra `yolo_review_dialog.py`. E' stato
+scoperto dai test, il file e' stato riscritto da zero e l'integrita' di
+entrambi e' stata verificata dal coordinatore (parse, 33/68/99 test verdi nei
+tre dialoghi). Qui non c'e' git, quindi una collisione cosi' non si recupera:
+**imporre nomi di appoggio univoci per agente.**
+
+## Test
+
+`test_yolo_review_dialog.py` 33 (+11), `test_photo_review_dialog.py` 99 (+13),
+`test_photo_review_list.py` 37 (+3), `test_model_candidates_dialog.py` 68 (+7),
+`test_analysis_overlay.py` 90 (+14), `test_progress_messages.py` 28 (+9).
+Nove voci nuove nel catalogo (en/it/fr/de).
+
+## Aperto (dal precedente, invariato)
+
+- Cancello `populated_board`: se un componente singolo debba passare
+  dall'inventario fotografico. **Decisione dell'utente, non presa.**
+- Modelli ragionanti; timeout HTTP di inattivita'; altezza della scheda a
+  24 pt su finestre piccole; ordinamento del pittore nell'anteprima STEP.
+- Wording: sull'anteprima STEP «Dimensioni misurate sul modello» ed «Errore
+  relativo XY rispetto all'ingombro stimato dalla foto» ora dicono quale dei
+  due numeri e' la stima; era una nota dell'agente, non una richiesta.
