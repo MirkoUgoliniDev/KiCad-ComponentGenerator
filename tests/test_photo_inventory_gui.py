@@ -16,6 +16,25 @@ from kicadgen.services.photo_inventory import draw_inventory
 import numpy as np
 
 
+def tab_outer_layout(window):
+    """@brief Layout esterno della scheda Progetto, saltando lo scroll che la contiene."""
+    from PyQt6.QtWidgets import QScrollArea
+    scroll = window.tabs.widget(0)
+    tab = scroll.widget() if isinstance(scroll, QScrollArea) else scroll
+    return tab.layout()
+
+
+def layout_contains(layout, widget):
+    """@brief Dice se il widget sta in quel layout, anche annidato in un sotto-layout."""
+    for index in range(layout.count()):
+        item = layout.itemAt(index)
+        if item.widget() is widget:
+            return True
+        if item.layout() is not None and layout_contains(item.layout(), widget):
+            return True
+    return False
+
+
 class PreviewStub(QWidget):
     def fit_view(self): pass
     def clear_preview(self): pass
@@ -24,9 +43,26 @@ class PreviewStub(QWidget):
     def set_pin_numbers(self, checked): pass
 
 
+#: Una sola QApplication per processo, tenuta viva qui.
+#:
+#: `QApplication.instance() or QApplication([])` dentro la fixture non basta:
+#: l'oggetto C++ e' di proprieta' di Python, quindi alla fine del test il
+#: riferimento locale sparisce, la QApplication viene DISTRUTTA e il test dopo
+#: ne costruisce un'altra. Distruggerla fa invalidare a sip tutti i wrapper
+#: esistenti mentre i filtri di evento Python (AnalysisOverlay ne installa uno)
+#: ne creano di nuovi: la tabella interna di sip viene riallocata durante la
+#: propria visita e resta un puntatore liberato. Da li' in poi `findChildren`
+#: puo' restituire oggetti gia' distrutti, e il primo che li tocca in massa --
+#: la ripassata delle traduzioni in `MainWindow.__init__` -- muore di
+#: segmentation fault a caso durante la sessione. Misurato in questo
+#: contenitore: circa 1 esecuzione su 2 del file falliva cosi', 0 su 12 dopo.
+_APP = None
+
+
 @pytest.fixture
 def window(monkeypatch, tmp_path):
-    app = QApplication.instance() or QApplication([])
+    global _APP
+    app = _APP = QApplication.instance() or _APP or QApplication([])
     monkeypatch.setattr(gui, "Preview3DVtk", PreviewStub)
     monkeypatch.setattr(gui, "load_config", lambda: {"component_type": "", "system_prompt": ""})
     monkeypatch.setattr(gui, "save_config", lambda config: None)
@@ -70,10 +106,22 @@ def test_extraction_action_is_centered_below_separate_tools(window):
     assert not window.group_ai_tools.isAncestorOf(window.combo_component_type)
     assert window.group_ai_tools.isAncestorOf(window.btn_ai_log)
     assert window.group_ai_tools.isAncestorOf(window.btn_component_prompt)
-    assert window.group_ai_tools.isAncestorOf(window.btn_photo_comparison)
-    assert window.btn_photo_comparison.text() == 'Rivedi foto / scegli modelli KiCad…'
-    assert not window.btn_photo_comparison.isHidden()
-    assert 'Non avvia la generazione' in window.btn_photo_comparison.toolTip()
+    # Contratto nuovo, chiesto dall'utente («qui c'è troppa confusione con i
+    # pulsanti sotto... se questa fase è stata completata, dovrebbe essere
+    # possibile poterla sempre editare, inserire un pulsante in basso chiaro»):
+    # la revisione fotografica non e' piu' un secondo pulsante fra gli
+    # strumenti dell'analisi, dove duplicava il comando della riga in fondo.
+    # Resta un comando solo, in fondo alla scheda Progetto: qui si verifica che
+    # non sia rimasto fra gli strumenti e che quello in fondo si presenti con
+    # un'etichetta leggibile e col tooltip che promette di non generare nulla.
+    assert not window.group_ai_tools.isAncestorOf(window.btn_edit_component_review)
+    review = window.btn_edit_component_review
+    assert window.btn_photo_comparison is review, 'un comando solo, non due widget'
+    outer = tab_outer_layout(window)
+    bottom_row = outer.itemAt(outer.count() - 1).layout()
+    assert layout_contains(bottom_row, review), 'il comando vive nella riga in fondo'
+    assert review.text().strip()
+    assert 'Non avvia la generazione' in review.toolTip()
     tools_layout = window.group_ai_tools.layout()
     assert tools_layout.contentsMargins().bottom() >= 12
     assert tools_layout.itemAt(1).layout().spacing() >= 16
@@ -1056,3 +1104,36 @@ def test_without_a_name_there_is_no_folder_path_at_all(window):
     window._refresh_docs_list()
     window._refresh_output_actions()
     window._update_summary()
+
+
+#: Puntatori C++ visti dai test che seguono: servono a provare che la
+#: QApplication e' una sola e le finestre no.
+_SEEN_APPS = []
+_SEEN_WINDOWS = []
+
+
+@pytest.mark.parametrize("run", [1, 2])
+def test_the_session_never_recreates_the_qapplication(window, run):
+    """@brief Una sola QApplication per processo, mentre le finestre si rifanno.
+
+    Positivo: l'oggetto C++ della QApplication e' lo stesso in ogni test. La
+    fixture deve tenerne un riferimento di modulo: l'oggetto e' di proprieta'
+    di Python e una variabile locale lo farebbe distruggere a fine test.
+    Distruggerla invalida in sip tutti i wrapper esistenti mentre i filtri di
+    evento Python ne creano di nuovi; la tabella interna di sip viene
+    riallocata durante la propria visita e resta un puntatore liberato. Il
+    sintomo osservato era un segmentation fault a indice variabile dentro la
+    ripassata delle traduzioni di `MainWindow.__init__`, circa una volta su
+    due su questo file.
+
+    Negativo (stesso test): la finestra invece cambia a ogni prova, quindi la
+    costanza qui sopra e' una garanzia vera e non l'effetto di una fixture che
+    non ricostruisce nulla.
+    """
+    from PyQt6 import sip
+    app = QApplication.instance()
+    assert app is not None
+    _SEEN_APPS.append(sip.unwrapinstance(app))
+    _SEEN_WINDOWS.append(sip.unwrapinstance(window))
+    assert len(set(_SEEN_APPS)) == 1, "la QApplication non deve essere ricreata"
+    assert len(set(_SEEN_WINDOWS)) == len(_SEEN_WINDOWS), "ogni test ha la sua finestra"

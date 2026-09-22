@@ -170,6 +170,22 @@ def _side_pinout(side: dict) -> list[dict]:
     ]
 
 
+def _castellated_body_available(params) -> bool:
+    """@brief Dice se l'estrazione ha stabilito il solido di un modulo castellato.
+
+    @param params Parametri estratti (`ExtractedParams`) del componente.
+    @return True quando l'ingombro della scheda del modulo e' noto.
+    @note Per un modulo castellato il corpo 3D *e'* il suo PCB: il solido lo
+        descrivono lunghezza e larghezza del modulo, con lo spessore della
+        scheda al posto di un'altezza complessiva -- che infatti puo' mancare
+        anche quando il modulo c'e' (un assemblaggio somma spessore PCB e
+        altezze dei singoli componenti). Per questo la condizione non e'
+        `has_3d_body()`, che pretende anche `body_height_mm`. Senza contorno
+        non c'e' niente da costruire e il gruppo 3D non va acceso.
+    """
+    return bool(params.body_length_mm) and bool(params.body_width_mm)
+
+
 def _generate_3d(params, body: Body3DParams, project_dir: Path, fillets, face_texts,
                  progress=None, model_progress=None):
     """Genera il 3D con il generatore adatto al tipo di componente.
@@ -212,6 +228,68 @@ def freecad_progress(message: str):
         return None
     current, total = int(match.group(1)), int(match.group(2))
     return max(0, current - 1), total
+
+
+#: Campo macchina scritto in minuscolo_con_underscore (review_required,
+#: auto_matched): non e' una frase per chi guarda, e' il valore di un campo
+#: dell'esito di UN elemento.
+_ITEM_STATUS_FIELD = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+")
+
+
+def per_item_detail(message: str) -> bool:
+    """@brief Dice se la riga e' il rendiconto di UN elemento fra i tanti in corso.
+
+    @param message Riga di avanzamento, come arriva dai worker.
+    @return True se e' dettaglio per-elemento da tenere fuori dalla modale.
+    @note Richiesta dell'utente: «evitare di mettere il log dei componenti, non
+        servirebbe a nulla». Durante l'abbinamento dei modelli la modale
+        mostrava righe come «SOT-23-6 / …, 6 leads: 3 dimensional candidates;
+        review_required; identity not verified.»: cambiavano a ogni componente
+        e non dicevano nulla in piu' del contatore «7/41 componenti» che sta
+        appena sopra. Nel log invece servono a ricostruire la corsa, e li'
+        restano: questo filtro riguarda solo la modale.
+    @note Il criterio e' strutturale, non un elenco di frasi: un rendiconto
+        per-elemento ha la forma «intestazione dell'elemento: campo; campo;
+        campo», cioe' due punti seguiti da un elenco di campi separati da
+        punto e virgola, con almeno tre campi oppure un campo che e' un token
+        macchina. Una frase di fase («Generazione del footprint KiCad…»,
+        «Rilancio dell'inventario …: una richiesta a pagamento al modello X.»)
+        non ha quell'elenco e passa.
+    """
+    text = " ".join(str(message or "").split())
+    head, separator, body = text.partition(": ")
+    if not separator or not head or len(head) > 120 or ";" not in body:
+        return False
+    clauses = [clause.strip().rstrip(".") for clause in body.split(";")]
+    return len(clauses) >= 3 or any(_ITEM_STATUS_FIELD.fullmatch(clause) for clause in clauses)
+
+
+def phase_kwargs(function, callback) -> dict:
+    """@brief `{'phase': callback}` solo se la funzione di servizio lo accetta.
+
+    @param function Funzione di servizio che si sta per chiamare.
+    @param callback Callable(tool, detail) da inoltrare alla modale.
+    @return Dizionario da espandere nella chiamata: vuoto se il parametro non
+        esiste ancora.
+    @note I servizi e l'interfaccia evolvono separatamente: passare `phase=` a
+        una firma che non lo prevede fa fallire l'analisi con un TypeError, e
+        non passarlo quando c'e' fa perdere l'annuncio della fase. Si guarda
+        la firma installata invece di scommettere sull'ordine di arrivo delle
+        modifiche. Una funzione con `**kwargs` (tipica dei doppi nei test) lo
+        accetta per definizione.
+    """
+    try:
+        import inspect
+        parameters = inspect.signature(function).parameters.values()
+    except (TypeError, ValueError):  # builtin o oggetto non introspezionabile
+        return {}
+    for parameter in parameters:
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            return {"phase": callback}
+        if parameter.name == "phase" and parameter.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
+            return {"phase": callback}
+    return {}
 
 
 class GenerateWorker(QThread):
@@ -259,8 +337,13 @@ class GenerateWorker(QThread):
         @param total Componenti da esaminare.
         @note Ogni componente puo' costare una misura CAD, quindi il conto
             avanza al ritmo del lavoro vero e non di un timer.
+        @note Lo strumento e' `kicad`, non `freecad`: qui si interroga la
+            libreria dei modelli di KiCad per scegliere quale file usare, e
+            FreeCAD non e' ancora partito. Mostrare il solido di FreeCAD
+            faceva credere che il CAD fosse al lavoro durante una fase che non
+            lo riguarda.
         """
-        self.phase.emit('freecad', 'abbinamento modelli KiCad', done, total)
+        self.phase.emit('kicad', 'abbinamento modelli KiCad', done, total)
 
     def _cad_progress(self, message: str) -> None:
         """@brief Inoltra la riga al log e, se annuncia un componente, al conteggio."""
@@ -347,8 +430,13 @@ class Cad3DWorker(QThread):
         self.face_texts = face_texts
 
     def _model_progress(self, done: int, total: int) -> None:
-        """@brief Porta in modale l'unico conteggio vero della generazione."""
-        self.phase.emit('freecad', 'abbinamento modelli KiCad', done, total)
+        """@brief Porta in modale l'unico conteggio vero della generazione.
+
+        @note Strumento `kicad`: si sta cercando nella libreria di KiCad il
+            modello da abbinare, non si sta costruendo il solido. Vedi
+            GenerateWorker._model_progress.
+        """
+        self.phase.emit('kicad', 'abbinamento modelli KiCad', done, total)
 
     def _cad_progress(self, message: str) -> None:
         """@brief Inoltra la riga al log e, se annuncia un componente, al conteggio."""
@@ -507,6 +595,19 @@ class ExtractWorker(QThread):
         self._review_result = kept
         self._review_answered.set()
 
+    def _forward_phase(self, tool: str, detail: str = "") -> None:
+        """@brief Porta in modale lo strumento che il servizio dichiara al lavoro.
+
+        @param tool Chiave in analysis_overlay.TOOLS, es. yolo o llm.
+        @param detail Testo libero: l'etichetta del rilevatore o il modello.
+        @note Contratto del servizio: `phase(tool, detail)`. Senza conteggio
+            (0, 0) la modale resta animata invece di mostrare una percentuale
+            inventata. Serve soprattutto al rilevatore locale ONNX, che prima
+            girava senza che nulla lo annunciasse: chi guardava vedeva la nuvola
+            del modello a pagamento anche mentre non si spendeva niente.
+        """
+        self.phase.emit(str(tool or ""), str(detail or ""), 0, 0)
+
     def run(self) -> None:
         """@brief Forward the captured settings and emit extracted data or an error."""
         try:
@@ -524,8 +625,8 @@ class ExtractWorker(QThread):
                 extra_instructions=self.extra_instructions,
                 include_nc_pins=self.include_nc_pins,
                 progress=self.progress.emit,
-                phase=lambda tool, detail='': self.phase.emit(tool, detail, 0, 0),
                 review_proposals=self._review_proposals,
+                **phase_kwargs(extract_pin_header_params, self._forward_phase),
             )
             self.done.emit(params)
         except ExtractionError as exc:
@@ -582,6 +683,17 @@ class ReconcileWorker(QThread):
         self.extra_instructions = extra_instructions
         self.detector = detector
 
+    def _forward_phase(self, tool: str, detail: str = "") -> None:
+        """@brief Inoltra alla modale la fase dichiarata dal servizio.
+
+        @param tool Chiave in analysis_overlay.TOOLS.
+        @param detail Testo libero accanto al nome dello strumento.
+        @note Vedi ExtractWorker._forward_phase: stesso contratto
+            `phase(tool, detail)`, cosi' il rilancio annuncia le sue fasi
+            esattamente come l'estrazione completa.
+        """
+        self.phase.emit(str(tool or ""), str(detail or ""), 0, 0)
+
     def run(self) -> None:
         """@brief Esegue la riconciliazione con la stessa chiamata registrata dell'estrazione."""
         from ..services.photo_inventory import reconcile_saved_proposals
@@ -594,7 +706,8 @@ class ReconcileWorker(QThread):
                 make_logged_call(call_tool, self.progress.emit, log_prompt=True),
                 self.progress.emit, self.cache_dir, declared=self.declared,
                 verification_prompt=self.verification_prompt,
-                extra_instructions=self.extra_instructions, detector=self.detector)
+                extra_instructions=self.extra_instructions, detector=self.detector,
+                **phase_kwargs(reconcile_saved_proposals, self._forward_phase))
             self.done.emit(report)
         except Exception as exc:  # noqa: BLE001 - errori rete/API riportati in UI
             self.error.emit(f"Rilancio dell'inventario fallito: {exc}")
@@ -669,6 +782,10 @@ class MainWindow(QMainWindow):
         self._automatic_3d_done = False
         self._automatic_generation_errors = []
         self._startup_dependencies_checked = False
+        #: None finche' l'utente non tocca il gruppo «Modello 3D»; True/False
+        #: dopo un suo clic. Serve a non revocare la sua scelta quando arriva
+        #: una nuova estrazione.
+        self._user_3d_choice: bool | None = None
 
         self._build_menu()
         self._build_central()
@@ -795,7 +912,11 @@ class MainWindow(QMainWindow):
         self.group_annotations.setVisible(advanced)
         self.group_components.setVisible(advanced and (
             self._is_castellated() or self._selected_family() == "aggregate_tht"))
-        self.btn_photo_comparison.setVisible(True)
+        # La modifica della revisione non dipende dalla modalita' d'uso: la sua
+        # condizione e' la fotografia in memoria. Qui si ri-applica quella
+        # disciplina invece di forzare la visibilita', altrimenti un cambio di
+        # modalita' riaccenderebbe un comando che non ha nulla da aprire.
+        self._refresh_edit_review_buttons()
         if hasattr(self, "action_translations"):
             self.action_translations.setVisible(advanced)
 
@@ -1435,13 +1556,6 @@ class MainWindow(QMainWindow):
         self.btn_extract_ai.setMinimumHeight(46)
         self.btn_extract_ai.setToolTip("Avvia l'estrazione dai documenti e dalle foto selezionati")
         self.btn_extract_ai.clicked.connect(self._extract_with_ai)
-        self.btn_photo_comparison = QPushButton("Rivedi foto / scegli modelli KiCad…")
-        self.btn_photo_comparison.setToolTip(
-            "Mostra gli ingombri rilevati sulla foto superiore e, quando disponibile, "
-            "permette di correggerli. Non avvia la generazione del footprint o del modello 3D."
-        )
-        self.btn_photo_comparison.setEnabled(False)
-        self.btn_photo_comparison.clicked.connect(self._show_photo_comparison)
         # Riapre «Corpi rilevati» sulle proposte salvate nella cartella del
         # componente e, all'OK, le RISALVA li': gratuito, nessuna chiamata AI.
         # Decisione dell'utente: «se il file json esiste nella cartella deve
@@ -1464,6 +1578,27 @@ class MainWindow(QMainWindow):
         )
         self.btn_relaunch_inventory.setEnabled(False)
         self.btn_relaunch_inventory.clicked.connect(self._relaunch_inventory)
+        # Richiesta dell'utente: «se questa fase è stata completata, dovrebbe
+        # essere possibile poterla sempre editare, inserire un pulsante in
+        # basso chiaro». E' lo stesso comando della riga degli strumenti, ma
+        # qui sta accanto agli altri ritorni sulla revisione, dove si cerca
+        # quando l'analisi e' finita e ci si accorge che qualcosa va corretto.
+        self.btn_edit_component_review = QPushButton("Modifica la revisione dei componenti…")
+        self.btn_edit_component_review.setToolTip(
+            "Riapre la revisione della fase completata: ingombri sulla foto, quote "
+            "e scelta dei modelli KiCad. Non avvia la generazione e non fa richieste AI."
+        )
+        self.btn_edit_component_review.setEnabled(False)
+        self.btn_edit_component_review.clicked.connect(self._show_photo_comparison)
+        # Richiesta dell'utente: «qui c'è troppa confusione con i pulsanti
+        # sotto». Il comando di revisione esisteva due volte -- nella riga
+        # degli strumenti come «Rivedi foto / scegli modelli KiCad…» e qui in
+        # fondo -- avviando esattamente la stessa finestra. Ne resta uno solo,
+        # quello in fondo alla scheda, dove si cerca a fase finita.
+        # `btn_photo_comparison` non e' piu' un secondo widget: e' l'altro nome
+        # dello stesso pulsante, cosi' i percorsi che aprivano il confronto
+        # fotografico puntano al comando vero e non a un doppione nascosto.
+        self.btn_photo_comparison = self.btn_edit_component_review
         self._photo_png = None
         self._photo_overlay_png = None
         self._photo_source = ""
@@ -1524,7 +1659,6 @@ class MainWindow(QMainWindow):
         self.btn_component_prompt = QPushButton("Modifica prompt…")
         self.btn_component_prompt.setToolTip("Modifica le istruzioni AI specifiche di questo componente")
         tools_row.addWidget(self.btn_component_prompt)
-        tools_row.addWidget(self.btn_photo_comparison)
         tools_row.addStretch()
         analysis_layout.addSpacing(10)
         analysis_layout.addWidget(self.btn_extract_ai, alignment=Qt.AlignmentFlag.AlignHCenter)
@@ -1576,10 +1710,15 @@ class MainWindow(QMainWindow):
         # trova anche a estrazione chiusa e senza cercarlo fra le opzioni.
         reopen_row = QHBoxLayout()
         reopen_row.addStretch()
+        reopen_row.addWidget(self.btn_edit_component_review)
         reopen_row.addWidget(self.btn_reopen_review)
         reopen_row.addWidget(self.btn_relaunch_inventory)
         reopen_row.addStretch()
         outer.addLayout(reopen_row)
+        # Stato iniziale coerente con la disciplina della riga: cio' che non
+        # puo' agire non si vede, invece di stare acceso a vuoto.
+        self._set_review_buttons_enabled(False)
+        self._refresh_ai_log_button()
 
         self._refresh_model_combo()
         self._restore_component_type()
@@ -1768,6 +1907,10 @@ class MainWindow(QMainWindow):
         # ma non durante un'analisi, dove restano spenti fino alla fine.
         if hasattr(self, "btn_reopen_review") and not busy:
             self._refresh_reopen_review_button()
+        # Il nome decide anche la cartella del diario: cambiandolo, il log
+        # apribile e' un altro (o non c'e').
+        if hasattr(self, "btn_ai_log"):
+            self._refresh_ai_log_button()
 
     def _browse_library_root(self) -> None:
         path = QFileDialog.getExistingDirectory(
@@ -1928,11 +2071,14 @@ class MainWindow(QMainWindow):
         self._reviewed_this_extraction = False
         self._relaunch_base_synthesized = False
         self._last_extracted = None
-        self._set_review_buttons_enabled(False)
-        self.btn_photo_comparison.setEnabled(False)
+        # Le foto si azzerano PRIMA di ricalcolare i pulsanti: la modifica
+        # della revisione dipende dalla foto in memoria, e spegnerla mentre la
+        # vecchia foto e' ancora li' la lascerebbe accesa su dati appena
+        # invalidati.
         self._photo_png = None
         self._photo_overlay_png = None
         self._photo_source = ""
+        self._set_review_buttons_enabled(False)
 
         model = self._session_model or profile['model']
         photo_model = model
@@ -2191,20 +2337,100 @@ class MainWindow(QMainWindow):
             available = self._fresh_cache_evidence() is not None
         self._set_review_buttons_enabled(available)
 
+    def _set_action_available(self, name: str, available: bool) -> None:
+        """@brief Un comando che non puo' agire si nasconde, non resta acceso a vuoto.
+
+        @param name Nome dell'attributo del pulsante; assente = niente da fare.
+        @param available True quando l'azione e' davvero possibile adesso.
+        @note Richiesta dell'utente: «se il log non è presente il pulsante non
+            si deve vedere». Vale per ogni comando della riga: un pulsante
+            spento che resta visibile e' una promessa che l'interfaccia non
+            puo' mantenere, e in una riga di cinque pulsanti e' solo confusione.
+            Lo stato abilitato resta allineato alla visibilita' cosi' che i
+            controlli che lo leggono (e i test) vedano una cosa sola.
+        """
+        button = getattr(self, name, None)
+        if button is None:
+            return
+        button.setEnabled(bool(available))
+        button.setVisible(bool(available))
+
     def _set_review_buttons_enabled(self, enabled: bool) -> None:
         """@brief Accende o spegne insieme tutte le copie dei pulsanti di revisione/rilancio.
 
+        @param enabled True quando c'e' un pacchetto di proposte da riaprire.
         @note Richiesta dell'utente: «dovrebbe sempre essere possibile
             ripartire anche da li'» -- i pulsanti stanno in fondo alla scheda
             Progetto e in fondo alla scheda Modello 3D, dove si guarda il
             risultato e ci si accorge che manca qualcosa. Sono lo stesso
             comando, quindi hanno sempre lo stesso stato.
+        @note La modifica della revisione sta nella stessa riga ma ha una
+            condizione propria: le serve la fotografia calibrata in memoria,
+            che e' cio' che `_show_photo_comparison` apre. Il pacchetto
+            salvato non basta -- dopo un riavvio, senza foto, quel comando non
+            potrebbe fare nulla. Sta qui e non in un metodo a parte perche' le
+            copie devono restare per costruzione nello stesso stato.
         """
         for name in ("btn_reopen_review", "btn_relaunch_inventory",
                      "btn_reopen_review_3d", "btn_relaunch_inventory_3d"):
-            button = getattr(self, name, None)
-            if button is not None:
-                button.setEnabled(bool(enabled))
+            self._set_action_available(name, bool(enabled))
+        self._refresh_edit_review_buttons()
+
+    def _refresh_edit_review_buttons(self) -> None:
+        """@brief Allinea le copie di «Modifica la revisione…» a cio' che il comando puo' aprire.
+
+        @note La condizione e' la stessa che `_show_photo_comparison` verifica:
+            la fotografia calibrata, oppure -- quando quella manca -- la sola
+            sovrapposizione degli ingombri, che apre il confronto in sola
+            lettura. Legare il pulsante al solo `_photo_png` nascondeva un
+            comando che invece funzionava, quindi qui si guardano entrambe le
+            immagini. Senza nessuna delle due il comando non puo' fare nulla e
+            sparisce, secondo la disciplina di `_set_action_available`.
+        @note Metodo unico perche' le copie (scheda Progetto e scheda Modello
+            3D) sono lo stesso comando: devono restare per costruzione nello
+            stesso stato, da qualunque percorso si arrivi.
+        """
+        editable = bool(getattr(self, "_photo_png", None)
+                        or getattr(self, "_photo_overlay_png", None))
+        for name in ("btn_edit_component_review", "btn_edit_component_review_3d"):
+            self._set_action_available(name, editable)
+
+    def _ai_log_available(self) -> bool:
+        """@brief Dice se esiste davvero un log dell'analisi da aprire.
+
+        @return True quando il diario del componente ha righe, su disco o in
+            attesa di una cartella, oppure quando la sessione ha gia' scritto
+            qualcosa a schermo.
+        @note E' la condizione del pulsante «Log AI»: si guarda il file scritto
+            da `_write_log_line` (`_log_file()`) e il testo in memoria, non il
+            fatto che un'analisi sia stata avviata. Senza nome del componente
+            non c'e' cartella e le righe restano nel buffer: anche quelle sono
+            un log apribile.
+        """
+        text = getattr(self, "ai_progress_text", None)
+        if text is not None and text.toPlainText().strip():
+            return True
+        if getattr(self, "_pending_log_lines", None):
+            return True
+        if not self._component_name():
+            return False
+        try:
+            path = self._log_file()
+            return path.is_file() and path.stat().st_size > 0
+        except (OSError, AttributeError):
+            # Un diario illeggibile non e' un diario apribile.
+            return False
+
+    def _refresh_ai_log_button(self) -> None:
+        """@brief Mostra «Log AI» solo quando c'e' un log, e appena c'e'.
+
+        @note Chiamato dove il log o il nome del componente cambiano -- la
+            modifica del testo dell'analisi (`_refresh_ai_copy_buttons`) e il
+            controllo del nome (`_apply_component_name_gate`) -- e non da un
+            timer: un pulsante che appare per un giro di orologio invece che
+            per un fatto avvenuto e' peggio di uno spento.
+        """
+        self._set_action_available("btn_ai_log", self._ai_log_available())
 
     def _review_photo(self, bundle):
         """@brief La foto calibrata del pacchetto, o quella in memoria come ripiego.
@@ -2558,16 +2784,72 @@ class MainWindow(QMainWindow):
         self.analysis_overlay.set_tool(tool, detail)
         self.analysis_overlay.set_progress(done, total, "componenti")
 
+    def _overlay_header_detail(self) -> str:
+        """@brief Il dettaglio che l'intestazione della modale sta gia' mostrando.
+
+        @return Testo dopo il separatore «·» nell'intestazione, es. il modello
+            in uso; stringa vuota quando nessuno strumento e' dichiarato.
+        @note Si legge dalla modale invece di ricordarselo: `start()` azzera
+            l'intestazione, e una copia tenuta qui sopravviverebbe a quel
+            reset facendo sparire righe che invece vanno mostrate.
+        """
+        label = getattr(self.analysis_overlay, "tool", None)
+        text = label.text() if label is not None else ""
+        _, separator, detail = str(text).partition("·")
+        return " ".join(detail.split()) if separator else ""
+
+    def _restates_overlay_header(self, message: str) -> bool:
+        """@brief Dice se la riga non aggiunge nulla all'intestazione della modale.
+
+        @param message Riga di avanzamento.
+        @return True quando l'intero predicato della riga e' il dettaglio che
+            l'intestazione mostra gia'.
+        @note Richiesta dell'utente: «non ripetere sotto il modello lo hai
+            scritto sopra, ma spiega cosa stai facendo». L'intestazione dice
+            «Modello AI (remoto, a consumo) · anthropic/claude-opus-5» e la
+            riga sotto ripeteva lo stesso identificatore, sprecando l'unico
+            posto in cui si puo' dire cosa sta accadendo.
+        @note Regola generale: si confronta con il dettaglio dell'intestazione,
+            qualunque sia, e si scarta solo la forma «etichetta: <dettaglio>»,
+            in cui non resta nient'altro che il dettaglio. Una frase che
+            nomina il modello ma dice anche cos'altro sta succedendo passa.
+        """
+        detail = self._overlay_header_detail()
+        if not detail:
+            return False
+        text = " ".join(str(message or "").split()).rstrip(".")
+        if text == detail:
+            return True
+        head, separator, tail = text.partition(": ")
+        return bool(separator) and tail.rstrip(".") == detail
+
     def _on_ai_progress(self, message: str) -> None:
-        self.analysis_overlay.set_status(message)
+        """@brief Porta la riga nel log e, se e' leggibile a colpo d'occhio, in modale.
+
+        @param message Riga di avanzamento di un worker.
+        @note Il log riceve SEMPRE il testo integrale: la modale e' l'unico
+            posto filtrato, perche' ha una riga sola e serve a dire quale fase
+            e' in corso. Restano fuori il dettaglio per-elemento, che il
+            contatore riassume gia' (vedi per_item_detail), e la ripetizione
+            del dettaglio dell'intestazione.
+        """
+        if not (per_item_detail(message) or self._restates_overlay_header(message)):
+            self.analysis_overlay.set_status(message)
         # Testo del modello: inserimento letterale, mai interpretato come HTML.
         if re.match(r"^#\d+", message.strip()):
             self.ai_elements_list.addItem(message)
         self._append_log(message)
 
     def _refresh_ai_copy_buttons(self, *args) -> None:
+        """@brief Riallinea i comandi che dipendono dal contenuto del log.
+
+        @note Collegato ai cambi del testo dell'analisi e dell'elenco degli
+            elementi: e' il punto in cui il log passa da assente a presente,
+            quindi anche il punto in cui «Log AI» deve comparire.
+        """
         self.btn_copy_ai_log.setEnabled(bool(self.ai_progress_text.toPlainText()))
         self.btn_copy_ai_elements.setEnabled(self.ai_elements_list.count() > 0)
+        self._refresh_ai_log_button()
 
     def _copy_ai_output(self, *, elements=False) -> None:
         text = ('\n'.join(self.ai_elements_list.item(i).text() for i in range(self.ai_elements_list.count()))
@@ -2789,7 +3071,7 @@ class MainWindow(QMainWindow):
         self._photo_png = getattr(params, "photo_png", None)
         self._photo_overlay_png = params.photo_overlay_png
         self._photo_source = params.photo_source
-        self.btn_photo_comparison.setEnabled(bool(self._photo_png or self._photo_overlay_png))
+        self._refresh_edit_review_buttons()
         self._last_extracted = params
         # Il nome lo decide chi lavora, non l'estrazione. Il nome proposto
         # resta visibile accanto al campo e si applica con un clic -- che e'
@@ -2858,13 +3140,13 @@ class MainWindow(QMainWindow):
         if params.components_3d and params.pcb_thickness_mm is None:
             self._append_log("Spessore PCB non quotato: stima 1.6 mm per la scheda THT; verificare con una misura diretta.")
 
-        if self._auto_after_extraction and params.is_castellated():
-            self.group_3d.setChecked(True)
+        if params.is_castellated() and _castellated_body_available(params):
+            self._enable_3d_group_from_extraction()
             # A board assembly uses PCB thickness and individual component heights.
             # Missing overall height must neither block it nor reuse an old value.
             self.field_body_height.setValue(params.body_height_mm or self.field_cast_pcb.value())
         if params.has_3d_body() and not params.is_castellated():
-            self.group_3d.setChecked(True)
+            self._enable_3d_group_from_extraction()
             self.field_body_length.setValue(params.body_length_mm)
             self.field_body_width.setValue(params.body_width_mm)
             self.field_body_height.setValue(params.body_height_mm)
@@ -3409,6 +3691,27 @@ class MainWindow(QMainWindow):
     def _is_castellated(self) -> bool:
         return hasattr(self, "group_castellated") and self.group_castellated.isChecked()
 
+    def _enable_3d_group_from_extraction(self) -> None:
+        """@brief Accende il gruppo «Modello 3D» quando l'estrazione porta un solido.
+
+        @note Non riaccende cio' che l'utente ha spento a mano: `_user_3d_choice`
+            registra solo le sue interazioni, perche' `QGroupBox.clicked` scatta
+            sul clic e non sulle `setChecked()` del programma. Una nuova
+            estrazione descrive i dati, non revoca una decisione presa da chi
+            lavora: riaccendere il gruppo qui significherebbe generare (e far
+            aspettare) un modello 3D che era stato escluso apposta.
+        """
+        if self._user_3d_choice is False:
+            return
+        self.group_3d.setChecked(True)
+
+    def _on_3d_group_clicked(self, checked: bool) -> None:
+        """@brief Registra la scelta esplicita dell'utente sul gruppo «Modello 3D».
+
+        @param checked Stato del gruppo dopo il clic.
+        """
+        self._user_3d_choice = bool(checked)
+
     def _build_3d_group(self) -> QGroupBox:
         group = QGroupBox("Modello 3D (opzionale, richiede FreeCAD installato)")
         group.setCheckable(True)
@@ -3427,6 +3730,9 @@ class MainWindow(QMainWindow):
             "freecadcmd non trovato: installa FreeCAD o imposta FREECAD_CMD_PATH."
         )
         self.group_3d = group
+        # `clicked` distingue l'interazione umana dalle accensioni del
+        # programma: `toggled` scatterebbe anche per le nostre setChecked().
+        group.clicked.connect(self._on_3d_group_clicked)
         form3d = QFormLayout(group)
 
         self.field_body_length = QDoubleSpinBox()
@@ -4382,6 +4688,16 @@ class MainWindow(QMainWindow):
         self.btn_relaunch_inventory_3d.setEnabled(self.btn_relaunch_inventory.isEnabled())
         self.btn_relaunch_inventory_3d.clicked.connect(self._relaunch_inventory)
         regen_row.addWidget(self.btn_relaunch_inventory_3d)
+        # Anche la modifica della revisione va specchiata qui: e' guardando il
+        # solido che si scopre un corpo sbagliato, e tornare alla scheda
+        # Progetto per correggerlo era lavoro in piu' senza motivo.
+        self.btn_edit_component_review_3d = QPushButton(self.btn_edit_component_review.text())
+        self.btn_edit_component_review_3d.setToolTip(self.btn_edit_component_review.toolTip())
+        self.btn_edit_component_review_3d.setEnabled(self.btn_edit_component_review.isEnabled())
+        self.btn_edit_component_review_3d.setVisible(self.btn_edit_component_review.isVisibleTo(
+            self.btn_edit_component_review.parentWidget()))
+        self.btn_edit_component_review_3d.clicked.connect(self._show_photo_comparison)
+        regen_row.addWidget(self.btn_edit_component_review_3d)
         regen_row.addStretch()
 
         scroll = QScrollArea()

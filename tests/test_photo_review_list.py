@@ -78,11 +78,16 @@ def _highlighted(dialog):
 # --------------------------------------------------------------------------
 
 def test_count_label_sits_above_the_list_and_follows_add_and_delete(dialog, app):
-    """@brief "Componenti: N" is above the list and tracks the working inventory."""
+    """@brief "Componenti: N" is above the list and tracks the working inventory.
+
+    Contract change: the toolbar button now arms the drawing mode, so the
+    programmatic ``add_component()`` is what adds a body here. The label still
+    has to follow every addition and deletion.
+    """
     assert dialog.count_label.text() == "Componenti: 3"
     assert dialog.count_label.geometry().bottom() <= dialog.component_list.geometry().top()
     assert dialog.count_label.parentWidget() is dialog.component_list.parentWidget()
-    QTest.mouseClick(dialog.add_button, Qt.MouseButton.LeftButton)
+    dialog.add_component()
     assert dialog.count_label.text() == "Componenti: 4"
     assert dialog.component_list.count() == 4
     dialog.component_list.setCurrentRow(0)
@@ -116,7 +121,7 @@ def test_list_takes_the_sidebar_vertical_space(dialog, app):
     assert not sidebar.isAncestorOf(dialog.form_widget)
     others = [child for child in sidebar.findChildren(type(dialog.count_label))
               if child.parentWidget() is sidebar and child is not dialog.component_list]
-    others += [dialog.parameters_button, dialog.model_button]
+    others += [dialog.parameters_button, dialog.model_button, dialog.category_filter]
     assert dialog.component_list.height() > sum(child.height() for child in others)
 
 
@@ -212,8 +217,14 @@ def test_parameters_need_a_selection(app, png):
 
 
 def test_adding_a_component_opens_the_modal_on_its_name(dialog, app):
-    """@brief A new outline needs a name: the modal follows with the name selected."""
-    QTest.mouseClick(dialog.add_button, Qt.MouseButton.LeftButton)
+    """@brief A placeholder outline needs a name: the modal follows with it selected.
+
+    Contract change: this is the programmatic path, where the body gets
+    placeholder geometry and no name, so the modal asks for the name. A body
+    drawn on the photo already has its geometry and is asked for its type
+    instead (see tests/test_photo_review_dialog.py).
+    """
+    dialog.add_component()
     app.processEvents()
     assert dialog.parameters_dialog.isVisible()
     assert "4." in dialog.parameters_dialog.windowTitle()
@@ -420,3 +431,193 @@ def test_double_clicking_an_outline_keeps_the_viewport_still(dialog, app, monkey
     assert dialog.component_list.currentRow() == 1
     assert _highlighted(dialog) == [1]
     assert (dialog.view.horizontalScrollBar().value(), dialog.view.verticalScrollBar().value()) == scroll
+
+
+# --------------------------------------------------------------------------
+# 5. Category filter above the list
+# --------------------------------------------------------------------------
+
+def _visible_rows(dialog):
+    """Row indices the list actually shows, in order."""
+    return [index for index in range(dialog.component_list.count())
+            if not dialog.component_list.item(index).isHidden()]
+
+
+def _select_category(dialog, category):
+    """Choose a category in the filter combo by its visible text."""
+    index = dialog.category_filter.findText(category)
+    assert index >= 0, f"missing category: {category}"
+    dialog.category_filter.setCurrentIndex(index)
+
+
+def test_category_filter_sits_above_the_list_with_the_categories_of_the_inventory(dialog):
+    """@brief The combo is above the list and offers "all" plus the kinds present.
+
+    The vocabulary is derived from the components themselves: nothing is
+    hard-coded, so an inventory of connectors offers connectors.
+    """
+    combo = dialog.category_filter
+    assert combo.objectName() == "category_filter"
+    assert combo.parentWidget() is dialog.component_list.parentWidget()
+    assert combo.geometry().bottom() <= dialog.component_list.geometry().top()
+    assert combo.count() == 4
+    assert combo.itemText(0) == "Tutte le categorie"
+    assert combo.itemData(0) is None
+    assert [combo.itemText(i) for i in range(1, 4)] == ["capacitor", "ic", "resistor"]
+    assert dialog.active_category() is None
+    assert _visible_rows(dialog) == [0, 1, 2]
+
+
+def test_categories_are_deduplicated_case_insensitively_without_renaming(app, png):
+    """@brief "Resistor" and "resistor" are one category, spelled as first met.
+
+    Negative side: the editor must not rewrite what the detection wrote, so
+    the component keeps its own spelling of ``kind`` and both rows match the
+    single entry.
+    """
+    inventory = [
+        dict(name="R1", kind="resistor", x_mm=0, y_mm=0, length_mm=2, width_mm=1, height_mm=.5),
+        dict(name="R2", kind="Resistor", x_mm=4, y_mm=0, length_mm=2, width_mm=1, height_mm=.5),
+        dict(name="U1", kind="ic", x_mm=-8, y_mm=0, length_mm=4, width_mm=4, height_mm=1),
+    ]
+    widget = PhotoReviewDialog(png, inventory, 40, 20)
+    try:
+        assert [widget.category_filter.itemText(i)
+                for i in range(widget.category_filter.count())] == [
+            "Tutte le categorie", "ic", "resistor"]
+        _select_category(widget, "resistor")
+        assert _visible_rows(widget) == [0, 1]
+        assert widget.count_label.text() == "Componenti: 2 di 3"
+        assert [entry["kind"] for entry in widget.get_components()] == ["resistor", "Resistor", "ic"]
+    finally:
+        widget.close()
+
+
+def test_a_component_without_a_kind_adds_no_category_and_matches_none(app, png):
+    """@brief Negative: a body with no declared type is not invented a category.
+
+    It stays reachable with no filter and through its rectangle on the photo,
+    but no category claims it.
+    """
+    inventory = [
+        dict(name="R1", kind="resistor", x_mm=0, y_mm=0, length_mm=2, width_mm=1, height_mm=.5),
+        dict(name="?", kind="   ", x_mm=6, y_mm=0, length_mm=2, width_mm=1, height_mm=.5),
+    ]
+    widget = PhotoReviewDialog(png, inventory, 40, 20)
+    try:
+        assert [widget.category_filter.itemText(i)
+                for i in range(widget.category_filter.count())] == [
+            "Tutte le categorie", "resistor"]
+        widget.component_list.setCurrentRow(0)
+        _select_category(widget, "resistor")
+        assert _visible_rows(widget) == [0]
+        assert widget.count_label.text() == "Componenti: 1 di 2"
+    finally:
+        widget.close()
+
+
+def test_selecting_a_category_hides_the_other_rows_and_states_both_counts(dialog, app):
+    """@brief The filter hides rows and the count says how many of how many."""
+    dialog.component_list.setCurrentRow(1)
+    _select_category(dialog, "resistor")
+    assert dialog.active_category() == "resistor"
+    assert _visible_rows(dialog) == [1]
+    assert dialog.count_label.text() == "Componenti: 1 di 3"
+    # Row indices and texts are untouched: rows are hidden, not rebuilt.
+    assert dialog.component_list.count() == 3
+    assert dialog.component_list.item(2).text().startswith("3. C1")
+    assert [entry["name"] for entry in dialog.get_components()] == ["U1", "R1", "C1"]
+    # ...and the outlines on the photo are all still there and still editable.
+    assert all(item.isVisible() for item in dialog._items)
+
+
+def test_clearing_the_filter_shows_every_row_and_the_plain_count(dialog):
+    """@brief Negative: with no category the label is back to one number."""
+    dialog.component_list.setCurrentRow(1)
+    _select_category(dialog, "resistor")
+    assert dialog.count_label.text() == "Componenti: 1 di 3"
+    dialog.category_filter.setCurrentIndex(0)
+    assert dialog.active_category() is None
+    assert _visible_rows(dialog) == [0, 1, 2]
+    assert dialog.count_label.text() == "Componenti: 3"
+
+
+def test_a_filtered_out_selection_stays_selected_and_visible(dialog, app):
+    """@brief Documented choice: a filter never deselects, it keeps the odd row out.
+
+    Editing acts on the selected component through the modal, the numeric
+    fields and the delete button; a selection the list does not show would let
+    the user edit something invisible. So the selected row survives the filter
+    as an extra visible row, while the count still reports only the matches.
+    """
+    dialog.component_list.setCurrentRow(0)
+    _select_category(dialog, "resistor")
+    assert dialog._items[0].isSelected()
+    assert dialog.component_list.currentRow() == 0
+    assert _visible_rows(dialog) == [0, 1], "the selected row is kept, the third is hidden"
+    assert dialog.count_label.text() == "Componenti: 1 di 3"
+    assert dialog.fields["length_mm"].value() == 8
+    # Moving the selection inside the category releases the odd row again.
+    dialog.component_list.setCurrentRow(1)
+    assert _visible_rows(dialog) == [1]
+    assert dialog.count_label.text() == "Componenti: 1 di 3"
+
+
+def test_clicking_a_rectangle_whose_row_is_hidden_still_selects_it(dialog, app):
+    """@brief The filter is about the list, never about the photo.
+
+    Every rectangle stays on the photo and clickable whatever the filter says;
+    selecting one brings its row back into view instead of failing silently.
+    """
+    dialog.component_list.setCurrentRow(1)
+    _select_category(dialog, "resistor")
+    assert dialog.component_list.item(2).isHidden()
+    dialog.view.zoom(3)
+    _click_outline(dialog, app, 2, Qt.KeyboardModifier.NoModifier)
+    assert dialog._items[2].isSelected()
+    assert dialog.component_list.currentRow() == 2
+    assert not dialog.component_list.item(2).isHidden()
+    assert dialog.component_list.item(0).isHidden()
+    assert dialog.text_fields["name"].text() == "C1"
+
+
+def test_the_filter_follows_added_and_deleted_categories(dialog, app):
+    """@brief A new category appears, a vanished one falls back to "all categories".
+
+    Keeping a filter on a category no longer present would hide the whole
+    list with nothing explaining why; keeping a filter that still has
+    components must instead survive an unrelated addition.
+    """
+    dialog.component_list.setCurrentRow(1)
+    _select_category(dialog, "capacitor")
+    assert dialog.active_category() == "capacitor"
+    # A new body arrives with its own type: the vocabulary grows, the filter stays.
+    dialog.add_component()
+    dialog.text_fields["kind"].setText("connector")
+    dialog.text_fields["kind"].editingFinished.emit()
+    assert "connector" in [dialog.category_filter.itemText(i)
+                           for i in range(dialog.category_filter.count())]
+    assert dialog.active_category() == "capacitor"
+    # Deleting the only capacitor retires its category and clears the filter.
+    dialog.component_list.setCurrentRow(2)
+    dialog.delete_selected()
+    assert "capacitor" not in [dialog.category_filter.itemText(i)
+                               for i in range(dialog.category_filter.count())]
+    assert dialog.active_category() is None
+    assert _visible_rows(dialog) == [0, 1, 2]
+    assert dialog.count_label.text() == "Componenti: 3"
+
+
+def test_retyping_the_kind_of_the_last_member_retires_its_category(dialog):
+    """@brief Negative: a category with no component left must not stay in the combo."""
+    dialog.component_list.setCurrentRow(2)
+    _select_category(dialog, "capacitor")
+    assert _visible_rows(dialog) == [2]
+    dialog.text_fields["kind"].setText("tantalum-capacitor")
+    dialog.text_fields["kind"].editingFinished.emit()
+    categories = [dialog.category_filter.itemText(i)
+                  for i in range(dialog.category_filter.count())]
+    assert "capacitor" not in categories
+    assert "tantalum-capacitor" in categories
+    assert dialog.active_category() is None
+    assert _visible_rows(dialog) == [0, 1, 2]

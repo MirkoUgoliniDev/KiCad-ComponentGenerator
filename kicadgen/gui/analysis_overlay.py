@@ -1,4 +1,5 @@
 """Non-blocking progress overlay: which tool is working, real progress only."""
+import math
 import re
 from time import monotonic
 
@@ -29,6 +30,81 @@ TOOLS = {
 #: passavano tutte. Serve almeno un underscore fra maiuscole, cosi' una parola
 #: sola come "ATTENZIONE:" resta una frase per chi guarda.
 _MACHINE_MARKER = re.compile(r"(?<![\w])[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\s*[: =]")
+
+#: Il marcatore sopra riconosce solo cio' che *questo* programma stampa per se'.
+#: Sulla scheda arrivavano anche le righe che i programmi esterni scrivono sul
+#: proprio stdout (esiti di scrittura file, intestazioni di sessione, conteggi
+#: di entita'): non hanno un marcatore, quindi vanno riconosciute dalla *forma*.
+#: Le regole qui sotto non nominano nessun prodotto e nessuna frase precisa --
+#: agganciarle a "FreeCAD" o all'elenco delle frasi viste in una corsa vorrebbe
+#: dire rifare il lavoro alla prossima versione dello stesso strumento.
+#:
+#: Ogni regola e' un'euristica tipografica, tarata su come scrive una macchina
+#: e su come scrive una persona; sono dichiarate tali perche' nessuna e' una
+#: verita' generale, e diventerebbero superflue se gli strumenti esterni
+#: marcassero le proprie righe come fa questo programma.
+
+#: Decorazione: tre o piu' ripetizioni dello stesso segno di interpunzione
+#: ("******", "=====", "-----"). Il punto e' escluso: i puntini di sospensione
+#: sono normalissimi in una frase scritta per chi guarda.
+_DECORATION_RUN = re.compile(r"([^\w\s.])\1{2,}")
+
+#: Chiave e valore separati da spazio-due punti-spazio ("Step File Name : C:/…",
+#: "WorkSession : Sending all data"). In prosa italiana o inglese i due punti
+#: stanno attaccati alla parola che precede, quindi lo spazio davanti e' il
+#: segno che la riga e' un campo di un tracciato, non una frase.
+_SPACED_KEY_VALUE = re.compile(r"\S\s+:\s+\S")
+
+#: Percorso assoluto del filesystem: lettera di unita' ("C:/…", "D:\\…"),
+#: percorso UNC, o percorso POSIX con almeno due livelli ("/home/x/…"). Un
+#: percorso e' un dettaglio da log: identifica un file sul disco, non dice
+#: cosa sta accadendo. Il solo nome di un file (senza separatori) resta una
+#: frase leggibile e non viene toccato.
+_DRIVE_PATH = re.compile(r"(?<![\w])[A-Za-z]:[\\/]")
+_UNC_PATH = re.compile(r"\\\\[\w.$-]+\\")
+_POSIX_PATH = re.compile(r"(?:^|(?<=[\s(\"'=]))~?/[\w.+-]+/")
+
+#: Conteggio di entita' fra parentesi: numero grande seguito da un'abbreviazione
+#: corta ("(134238 ents)"). Il vincolo sulle quattro cifre e sull'abbreviazione
+#: breve serve a non confondere questa forma con un conteggio scritto per chi
+#: guarda, del tipo "(3 componenti)", che ha pochi numeri e la parola intera.
+_ENTITY_COUNT = re.compile(r"\(\s*\d{4,}\s+\w{1,6}\.?\s*\)")
+
+_MACHINE_LINE_RULES = (_MACHINE_MARKER, _DECORATION_RUN, _SPACED_KEY_VALUE,
+                       _DRIVE_PATH, _UNC_PATH, _POSIX_PATH, _ENTITY_COUNT)
+
+#: Lo stato viene troncato: oltre questa lunghezza la riga non si legge a colpo
+#: d'occhio e il testo integrale e' comunque nel log.
+_STATUS_CHAR_LIMIT = 220
+
+#: Righe di testo riservate allo stato. La scheda e' dimensionata su questo
+#: numero, non sulla frase che passa in quel momento: una scheda che cambia
+#: altezza a ogni messaggio e' piu' fastidiosa di una scheda un po' piu' alta.
+_STATUS_LINES = 3
+
+#: Margine interno orizzontale della scheda (per lato), usato sia dal layout sia
+#: dal calcolo della larghezza: vanno d'accordo per costruzione.
+_CARD_PADDING = 28
+
+#: Estremi della larghezza calcolata. Il minimo evita una scheda smilza con
+#: caratteri molto stretti, il massimo evita una riga larga mezzo monitor, che
+#: si legge male qualunque sia il font. Non dipendono dai testi di una corsa.
+_CARD_WIDTH_BOUNDS = (480, 760)
+
+
+def is_machine_line(text):
+    """@brief Tell a line written for the log from a line written for a person.
+
+    @param text One status line, already collapsed to single spaces.
+    @return True when the line is machine bookkeeping and belongs in the log.
+    @note Recognition is structural (markers, decoration runs, spaced key/value
+        fields, absolute paths, entity counters); no rule names a product or a
+        specific sentence, so a new external tool needs no new rule. A human
+        sentence carrying quotes, parentheses, units or a double dash keeps
+        none of those shapes and still reaches the card.
+    """
+    line = " ".join(str(text or "").split())
+    return any(rule.search(line) for rule in _MACHINE_LINE_RULES)
 
 
 class AnalysisSpinner(QWidget):
@@ -72,20 +148,34 @@ class AnalysisSpinner(QWidget):
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         if self.glyph == "cloud":
-            # Nuvola: la chiamata esce dalla macchina e si paga.
+            # Nuvola: la chiamata esce dalla macchina e si paga. I tre cerchi
+            # vanno *uniti*, non sovrapposti: gli archi interni si leggevano
+            # come tre bolle, cioe' come nessuna forma riconoscibile.
             path = QPainterPath()
-            path.addEllipse(QRectF(19, 26, 12, 12))
-            path.addEllipse(QRectF(26, 22, 14, 14))
-            path.addEllipse(QRectF(23, 30, 14, 9))
+            for box in (QRectF(18, 27, 12, 11), QRectF(25, 22, 15, 15),
+                        QRectF(22, 30, 15, 8)):
+                blob = QPainterPath()
+                blob.addEllipse(box)
+                path = path.united(blob)
             painter.drawPath(path.simplified())
         elif self.glyph == "frame":
-            # Riquadro con gli angoli staccati: e' cio' che il rilevatore
-            # disegna intorno a un corpo.
-            for x, y, dx, dy in ((18, 18, 1, 1), (38, 18, -1, 1),
-                                 (18, 38, 1, -1), (38, 38, -1, -1)):
-                painter.drawLine(QPointF(x, y), QPointF(x + 6 * dx, y))
-                painter.drawLine(QPointF(x, y), QPointF(x, y + 6 * dy))
+            # Mirino: quattro squadrette d'angolo piu' il bersaglio al centro.
+            # Un riquadro chiuso si confondeva col footprint e col cubo alla
+            # dimensione a cui viene disegnato; le squadrette staccate sono il
+            # segno con cui un rilevatore marca un corpo, e il puntino pieno
+            # dice che il riquadro e' *misurato*, non disegnato a mano.
+            arm = 7.0
+            for x, y, dx, dy in ((17, 17, 1, 1), (39, 17, -1, 1),
+                                 (17, 39, 1, -1), (39, 39, -1, -1)):
+                painter.drawLine(QPointF(x, y), QPointF(x + arm * dx, y))
+                painter.drawLine(QPointF(x, y), QPointF(x, y + arm * dy))
+            painter.drawLine(QPointF(28, 21), QPointF(28, 24))
+            painter.drawLine(QPointF(28, 32), QPointF(28, 35))
+            painter.drawLine(QPointF(21, 28), QPointF(24, 28))
+            painter.drawLine(QPointF(32, 28), QPointF(35, 28))
+            painter.setBrush(QColor(self.color))
             painter.drawEllipse(QRectF(26, 26, 4, 4))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
         elif self.glyph == "cube":
             # Cubo isometrico: si sta costruendo un solido.
             top, left, right = QPointF(28, 17), QPointF(18, 23), QPointF(38, 23)
@@ -96,10 +186,19 @@ class AnalysisSpinner(QWidget):
                                (left, centre), (right, centre), (top, centre)):
                 painter.drawLine(start, end)
         elif self.glyph == "pads":
-            # Due file di piazzole: il footprint.
-            for row in (21, 33):
+            # Footprint: due file di piazzole *piene* attorno al contorno del
+            # corpo. Le piazzole vuote si leggevano come un altro riquadro; il
+            # pieno del rame contro il filo di contorno distingue subito questo
+            # segno dal solido del CAD, che e' tutto wireframe.
+            painter.setBrush(QColor(self.color))
+            for row in (17.0, 35.0):
                 for column in (18, 25, 32):
-                    painter.drawRoundedRect(QRectF(column, row, 6, 4), 1.5, 1.5)
+                    painter.drawRoundedRect(QRectF(column, row, 6, 4), 1.2, 1.2)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            # Contorno del corpo fra le due file, staccato dalle piazzole, col
+            # segno del pin 1 a sinistra: e' come si legge un footprint.
+            painter.drawRect(QRectF(20, 24, 16, 8))
+            painter.drawLine(QPointF(20, 27), QPointF(24, 27))
 
 
 class AnalysisOverlay(QWidget):
@@ -125,9 +224,8 @@ class AnalysisOverlay(QWidget):
         outer.addStretch()
         self.card = QFrame()
         self.card.setObjectName("analysisCard")
-        self.card.setMaximumWidth(560)
         content = QVBoxLayout(self.card)
-        content.setContentsMargins(28, 24, 28, 24)
+        content.setContentsMargins(_CARD_PADDING, 24, _CARD_PADDING, 24)
         content.setSpacing(16)
         self.spinner = AnalysisSpinner()
         content.addWidget(self.spinner, alignment=Qt.AlignmentFlag.AlignHCenter)
@@ -148,7 +246,6 @@ class AnalysisOverlay(QWidget):
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setWordWrap(True)
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.status.setMinimumHeight(60)
         content.addWidget(self.status)
         # La barra compare solo quando esiste un conteggio vero da mostrare.
         # Una percentuale stimata sul tempo si ferma al 90% e resta li': dice
@@ -187,6 +284,7 @@ class AnalysisOverlay(QWidget):
         self.log_button = QPushButton("Apri log AI")
         self.log_button.clicked.connect(self.log_requested.emit)
         content.addWidget(self.log_button, alignment=Qt.AlignmentFlag.AlignHCenter)
+        self._size_the_card()
         outer.addWidget(self.card, alignment=Qt.AlignmentFlag.AlignHCenter)
         outer.addStretch()
         self.timer = QTimer(self)
@@ -200,6 +298,46 @@ class AnalysisOverlay(QWidget):
         if self.i18n is not None:
             self.i18n.retranslate_widgets(self)
         self.hide()
+
+    def _size_the_card(self):
+        """Dimensiona la scheda sul contenuto, non sui testi di una corsa.
+
+        La scheda era troppo bassa e strozzata: lo stato andava a capo male e
+        le righe che compaiono a meta' operazione (strumento, barra, costo) la
+        facevano crescere e rimpicciolire sotto gli occhi.
+
+        Larghezza: lo stato e' troncato a `_STATUS_CHAR_LIMIT` caratteri, quindi
+        la larghezza che serve e' quella che li distribuisce su `_STATUS_LINES`
+        righe, misurata con le metriche del font effettivo (`averageCharWidth`),
+        non con un numero di pixel scelto a occhio su una frase. Gli estremi
+        `_CARD_WIDTH_BOUNDS` tengono il risultato leggibile con font estremi.
+
+        Altezza: allo stato si riservano `_STATUS_LINES` righe piene (minimo, non
+        massimo: una quarta riga imprevista si vede ancora), e le tre righe
+        facoltative mantengono il proprio spazio anche da nascoste, cosi'
+        l'altezza complessiva e' quella di una scheda piena dall'inizio.
+        """
+        metrics = self.status.fontMetrics()
+        # Mezza riga di margine: `averageCharWidth` e' una media, e con una frase
+        # di lettere larghe il testo troncato sborderebbe sulla quarta riga
+        # facendo crescere la scheda. Dimensionando la larghezza su due righe e
+        # mezza, tre righe bastano anche nel caso peggiore.
+        chars_per_line = math.ceil(_STATUS_CHAR_LIMIT / (_STATUS_LINES - 0.5))
+        low, high = _CARD_WIDTH_BOUNDS
+        width = 2 * _CARD_PADDING + metrics.averageCharWidth() * chars_per_line
+        width = max(low, min(high, width))
+        self.card.setMinimumWidth(width)
+        self.card.setMaximumWidth(width)
+        self.status.setMinimumHeight(_STATUS_LINES * metrics.lineSpacing()
+                                     + metrics.descent())
+        # Spazio riservato anche quando la riga e' nascosta: evita che la scheda
+        # salti quando lo strumento, la barra o il costo compaiono a operazione
+        # avviata. La visibilita' logica non cambia (isVisibleTo resta falso).
+        for row in (self.tool, self.progress_row, self.cost):
+            policy = row.sizePolicy()
+            policy.setRetainSizeWhenHidden(True)
+            row.setSizePolicy(policy)
+        self.card.setMinimumHeight(self.card.sizeHint().height())
 
     def eventFilter(self, watched, event):
         """@brief Keep the overlay covering its parent as the window resizes."""
@@ -281,19 +419,26 @@ class AnalysisOverlay(QWidget):
         self.cost.setVisible(bool(text))
 
     def set_status(self, message):
-        """@brief Show one line of human status, never a service marker.
+        """@brief Show one line of human status, never a service line.
 
+        @param message Status line; machine bookkeeping is dropped, not shown.
         @note Le righe che il programma scrive per se' (AI_CALL_..., sha256,
-            esiti di importazione) restano nel log e non arrivano qui: sulla
-            scheda occupavano il posto di cio' che stava accadendo senza dirlo.
-            Il pulsante del log resta a un clic di distanza.
+            esiti di importazione) e quelle che gli strumenti esterni scrivono
+            sul proprio stdout (percorsi, campi "chiave : valore", conteggi di
+            entita', righe di sole decorazioni) restano nel log e non arrivano
+            qui: sulla scheda occupavano il posto di cio' che stava accadendo
+            senza dirlo. Il pulsante del log resta a un clic di distanza.
+        @note Quando una riga viene scartata l'ultimo stato leggibile *resta*
+            scritto: azzerare la label farebbe sembrare l'operazione bloccata,
+            che e' il difetto che questo filtro deve evitare, non causare.
         """
         # Full messages stay in the log; keep the card stable for long replies.
         source = " ".join(str(message).split())
-        if _MACHINE_MARKER.search(source):
+        if is_machine_line(source):
             return
         text = self.i18n.text(source) if self.i18n is not None else source
-        self.status.setText(text if len(text) <= 220 else text[:217] + "…")
+        self.status.setText(text if len(text) <= _STATUS_CHAR_LIMIT
+                            else text[:_STATUS_CHAR_LIMIT - 3] + "…")
 
     def _tick(self):
         seconds = max(0, int(monotonic() - self.started_at))

@@ -12,7 +12,7 @@ import tempfile
 from PyQt6.QtCore import (
     QObject, QPointF, QRunnable, QSignalBlocker, Qt, QThreadPool, QTimer, pyqtSignal,
 )
-from PyQt6.QtGui import QColor, QImage, QPainter, QPixmap, QPolygonF
+from PyQt6.QtGui import QBrush, QColor, QImage, QPainter, QPen, QPixmap, QPolygonF
 from PyQt6.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QPushButton, QVBoxLayout,
@@ -23,6 +23,76 @@ from ..services.model_library_search import filter_models, library_models
 #: Pause after the last keystroke before the library filter runs, so typing a
 #: word does not filter thousands of rows once per letter.
 FILTER_DEBOUNCE_MS = 250
+
+#: Body colour used when the component carries no sampled ``color_hex``; it is a
+#: neutral light blue that stays legible on the dark preview background.
+DEFAULT_BODY_COLOR = '#b0c7db'
+
+#: Background of the preview. Shaded lightnesses are kept well above its own
+#: lightness (~0.16) so a dark body is still separable from the canvas.
+PREVIEW_BACKGROUND = '#202431'
+
+#: Lambert floor: the fraction of the shading a face keeps where the light does
+#: not reach it. Without a floor the faces turned away collapse to black and the
+#: silhouette is lost against the dark background.
+_AMBIENT = 0.28
+
+#: Fixed light direction in the *eye* space the projection below produces
+#: (screen x to the right, screen y downwards, third axis towards the viewer):
+#: upper-left and slightly in front of the camera, the convention CAD viewers
+#: use, so the top face of a box is the brightest and the two visible flanks
+#: differ from it and from each other.
+_LIGHT = (-0.398015, -0.597022, 0.696526)
+
+#: Quantisation of the Lambert term. 64 steps are visually continuous, but they
+#: let one QColor/QPen/QBrush triplet serve thousands of triangles, which keeps a
+#: 100k-triangle mesh as cheap to paint as the previous flat fill.
+_SHADE_STEPS = 64
+
+
+def _face_intensity(a, b, c):
+    """Lambert term of one triangle, from its own geometric normal.
+
+    @param a First eye-space vertex as (screen x, screen y down, depth).
+    @param b Second eye-space vertex.
+    @param c Third eye-space vertex.
+    @return Intensity in [_AMBIENT, 1]. A degenerate triangle (zero area,
+    collinear or coincident vertices) has no normal at all, so it falls back to
+    the ambient floor instead of producing a non-finite value.
+    @note The dot product is taken in absolute value: ``Shape.tessellate`` gives
+    no guarantee that the winding order is consistent across faces, so a signed
+    term would paint an arbitrary half of the object black.
+    """
+    ux, uy, uz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+    vx, vy, vz = c[0] - a[0], c[1] - a[1], c[2] - a[2]
+    nx, ny, nz = uy*vz - uz*vy, uz*vx - ux*vz, ux*vy - uy*vx
+    norm = math.sqrt(nx*nx + ny*ny + nz*nz)
+    if not math.isfinite(norm) or norm <= 1e-12:
+        return _AMBIENT
+    lambert = abs(nx*_LIGHT[0] + ny*_LIGHT[1] + nz*_LIGHT[2]) / norm
+    if not math.isfinite(lambert):
+        return _AMBIENT
+    return _AMBIENT + (1.0 - _AMBIENT) * min(1.0, lambert)
+
+
+def _shaded_color(base, intensity):
+    """Shade one base colour by lightness only, keeping its hue and saturation.
+
+    @param base QColor of the body; hue and saturation are preserved so the
+    object reads as a single material instead of rainbow faces.
+    @param intensity Lambert term from _face_intensity().
+    @return QColor whose lightness follows the light, clamped to a band that
+    stays visible over PREVIEW_BACKGROUND.
+    @note The base lightness is first mapped into a legible mid band, so a nearly
+    black or nearly white body still shows three distinct sides rather than
+    saturating at one end of the scale.
+    """
+    hue, saturation, base_lightness, _ = QColor(base).getHslF()
+    if not math.isfinite(intensity):
+        intensity = _AMBIENT
+    mid = 0.42 + 0.34 * base_lightness
+    lightness = min(0.96, max(0.08, mid * (0.45 + 0.85 * intensity)))
+    return QColor.fromHslF(max(0.0, hue), saturation, lightness)
 
 
 def _number(value, default=0.0):
@@ -52,8 +122,18 @@ def _step_file(path):
         return False
 
 
-def _thumbnail(path, rotation, dimensions=None):
-    """Tessellate STEP; automatic orientation uses the production CAD importer."""
+def _thumbnail(path, rotation, dimensions=None, color=None):
+    """Tessellate STEP; automatic orientation uses the production CAD importer.
+
+    @param path STEP file to preview.
+    @param rotation Local Z override in degrees, or None for CAD axis inference.
+    @param dimensions (length_mm, width_mm), required only when rotation is None.
+    @param color Body colour of the component, typically the ``color_hex`` the
+    photo pipeline sampled. When the caller knows no colour, DEFAULT_BODY_COLOR
+    is used, so the preview still renders a coherent material.
+    @return QImage of 340x340 pixels with the shape shaded per face.
+    @throws ValueError When dimensions, mesh size or mesh coordinates are unusable.
+    """
     from ..cad3d.step_generator import find_freecadcmd
 
     executable = find_freecadcmd()
@@ -107,16 +187,35 @@ def _thumbnail(path, rotation, dimensions=None):
     xmin, xmax = min(p[0] for p in points), max(p[0] for p in points)
     ymin, ymax = min(p[1] for p in points), max(p[1] for p in points)
     scale = 280 / max(xmax-xmin, ymax-ymin, 0.001)
+    base = QColor(str(color)) if color else QColor()
+    if not base.isValid():
+        base = QColor(DEFAULT_BODY_COLOR)
     image = QImage(340, 340, QImage.Format.Format_RGB32)
-    image.fill(QColor('#202431'))
+    image.fill(QColor(PREVIEW_BACKGROUND))
     painter = QPainter(image)
     try:
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QColor('#60758b'))
+        # One cached pen+brush per quantised shade: building a QColor per triangle
+        # would dominate the cost on a 100k-triangle mesh.
+        shades = {}
+        # No back-face culling: the triangles are painter-sorted and the winding
+        # order of the tessellation is not guaranteed, so a wrong cull would erase
+        # the object entirely, which is worse than drawing hidden faces first.
         for face in sorted(triangles, key=lambda f: sum(points[i][2] for i in f)):
             if len(face) != 3:
                 raise ValueError('Invalid mesh triangle')
-            painter.setBrush(QColor('#b0c7db'))
+            step = int(_face_intensity(*(points[i] for i in face)) * _SHADE_STEPS)
+            pair = shades.get(step)
+            if pair is None:
+                shade = _shaded_color(base, (step + 0.5) / _SHADE_STEPS)
+                # Interior edges must vanish, but with antialiasing two coplanar
+                # triangles leave a sub-pixel gap along their shared edge. The
+                # outline is therefore drawn in the *same* colour as the fill: it
+                # covers the seam without any wireframe, and unlike a geometric
+                # overdraw it cannot distort the silhouette of thin features.
+                pair = shades[step] = (QPen(shade), QBrush(shade))
+            painter.setPen(pair[0])
+            painter.setBrush(pair[1])
             painter.drawPolygon(QPolygonF([
                 QPointF(170+(points[i][0]-(xmin+xmax)/2)*scale,
                         170+(points[i][1]-(ymin+ymax)/2)*scale) for i in face]))
@@ -130,17 +229,18 @@ class _Signals(QObject):
 
 
 class _Preview(QRunnable):
-    def __init__(self, token, path, rotation, dimensions=None):
+    def __init__(self, token, path, rotation, dimensions=None, color=None):
         super().__init__()
         self.signals = _Signals()
         self.token, self.path, self.rotation = token, path, rotation
         self.dimensions = dimensions
+        self.color = color
 
     def run(self):
         """@brief Generate an optional thumbnail without blocking the Qt event loop."""
         try:
-            result = (_thumbnail(self.path, None, self.dimensions) if self.rotation is None
-                      else _thumbnail(self.path, self.rotation))
+            result = (_thumbnail(self.path, None, self.dimensions, self.color) if self.rotation is None
+                      else _thumbnail(self.path, self.rotation, None, self.color))
         except Exception:
             result = None
         self.signals.ready.emit(self.token, result)
@@ -185,7 +285,8 @@ class ModelCandidatesDialog(QDialog):
 
         @param component Component metadata, dimensions in mm and optional
         model_selection. Saved selection rotation takes precedence over
-        model_rotation_deg, including None for automatic axis inference.
+        model_rotation_deg, including None for automatic axis inference. An
+        optional color_hex shades the STEP preview with the observed body colour.
         @param match_report Ranked candidates with path, package, dimensions_mm,
         relative_xy_error and reasons; the first five distinct paths are shown.
         @param photo_crop Optional QImage, QPixmap, encoded image bytes or image path.
@@ -199,6 +300,12 @@ class ModelCandidatesDialog(QDialog):
         self._closed = False
         self._workers = {}
         self._dimensions = (component.get('length_mm'), component.get('width_mm'))
+        # The photo pipeline samples the body colour into color_hex; shading the
+        # preview with it beats a fixed constant, and an unusable value falls back
+        # to DEFAULT_BODY_COLOR instead of painting an invalid colour.
+        declared_color = component.get('color_hex')
+        self._body_color = (str(declared_color) if isinstance(declared_color, str)
+                            and QColor(str(declared_color)).isValid() else None)
         saved = component.get('model_selection')
         saved = saved if isinstance(saved, dict) else {}
         saved_path = str(saved.get('path') or '')
@@ -479,7 +586,7 @@ class ModelCandidatesDialog(QDialog):
             return
         worker = _Preview(self._token, self._path,
                           None if self.auto_rotation.isChecked() else self.rotation.value(),
-                          self._dimensions)
+                          self._dimensions, self._body_color)
         self._workers[self._token] = worker
         worker.signals.ready.connect(self._preview_ready)
         QThreadPool.globalInstance().start(worker)

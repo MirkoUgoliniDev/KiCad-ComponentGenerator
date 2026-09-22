@@ -55,18 +55,35 @@ def test_standard_tabs_hidden_and_advanced_toggle_preserves_fields(window, monke
 
 
 def test_photo_model_review_is_available_in_both_modes_and_preserves_photo(window):
-    assert not window.btn_photo_comparison.isHidden()
-    assert not window.btn_photo_comparison.isEnabled()
+    """@brief La revisione foto/modelli resta raggiungibile in entrambe le modalita'.
+
+    Il contratto garantito e' lo stesso di prima: il comando non appartiene
+    alla modalita' avanzata, diventa utilizzabile appena esiste una foto, e i
+    passaggi di modalita' non buttano via la foto in memoria.
+
+    Cambia solo cio' che la vecchia versione pretendeva sulla visibilita'.
+    Prima il comando stava sempre visibile e restava spento finche' non c'era
+    niente da aprire; su richiesta dell'utente («qui c'è troppa confusione con
+    i pulsanti sotto. alcuni non hanno neppure senso») vale ora la disciplina
+    di `_set_review_buttons_enabled`: cio' che non puo' agire si nasconde
+    invece di stare acceso a vuoto. Quindi negativo = nascosto senza foto,
+    positivo = visibile e abilitato appena la foto c'e'. La copia nella riga
+    degli strumenti e' stata eliminata: il widget verificato e' quello della
+    riga in fondo alla scheda Progetto.
+    """
+    review = window.btn_edit_component_review
+    assert review.isHidden() or not review.isVisibleTo(review.parentWidget())
+    assert not review.isEnabled()
     params = acquired('castellated')
     params.photo_png = b'photo fixture'
     window._on_extracted(params)
-    assert not window.btn_photo_comparison.isHidden()
-    assert window.btn_photo_comparison.isEnabled()
+    assert review.isVisibleTo(review.parentWidget())
+    assert review.isEnabled()
     for advanced in (True, False, True):
         window._config['advanced_user'] = advanced
         window._apply_user_mode()
-        assert not window.btn_photo_comparison.isHidden()
-        assert window.btn_photo_comparison.isEnabled()
+        assert review.isVisibleTo(review.parentWidget())
+        assert review.isEnabled()
         assert window._photo_png == b'photo fixture'
         assert not window.btn_ai_log.isHidden()
         assert not window.btn_component_prompt.isHidden()

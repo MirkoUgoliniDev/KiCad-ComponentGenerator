@@ -49,6 +49,90 @@ def test_package_survives_gui_and_reaches_library_resolution(window, monkeypatch
     assert not captured["extra_payload"].get("silk_texts")
 
 
+def _castellated_raw(**overrides):
+    """@brief Estrazione minima di un modulo castellato, con quote sovrascrivibili."""
+    raw = dict(layout="castellated", name="Module", body_length_mm=40, body_width_mm=20,
+               pcb_thickness_mm=1.5,
+               castellated_sides=[dict(edge="left", count=4, pitch_mm=2.54)])
+    raw.update(overrides)
+    return ext._params_from_tool_arguments(raw)
+
+
+def _click_3d_group(window):
+    """@brief Inverte il gruppo «Modello 3D» come farebbe l'utente col mouse.
+
+    Serve il clic vero e non `setChecked()`: e' proprio la differenza fra i due
+    che la finestra usa per riconoscere una scelta umana.
+    """
+    from PyQt6.QtCore import QPoint, Qt
+    from PyQt6.QtTest import QTest
+    before = window.group_3d.isChecked()
+    QTest.mouseClick(window.group_3d, Qt.MouseButton.LeftButton, pos=QPoint(8, 8))
+    assert window.group_3d.isChecked() is not before, "il clic deve colpire l'indicatore"
+
+
+def test_castellated_module_has_a_body_even_outside_automatic_generation(window):
+    """@brief Il corpo 3D di un modulo castellato segue i dati, non il percorso di avvio.
+
+    Positivo: un'estrazione castellata avviata a mano (`_auto_after_extraction`
+    falso, come quando l'utente preme «Estrai» in modalita' avanzata) deve
+    lasciare parametri del corpo utilizzabili: per un modulo il corpo *e'* il
+    suo PCB, quindi ingombro e spessore bastano a costruirlo.
+
+    Negativo: senza ingombro della scheda non c'e' nulla da costruire e il
+    gruppo «Modello 3D» deve restare spento -- altrimenti la generazione
+    partirebbe su misure inventate.
+
+    Prima la condizione era `_auto_after_extraction`, cioe' «la generazione
+    parte da sola»: un'estrazione castellata fatta a mano lasciava il gruppo
+    spento e `_current_body_params()` restituiva None, che piu' a valle
+    diventava `AttributeError: 'NoneType' object has no attribute
+    'pin_color_hex'` dentro il generatore STEP.
+    """
+    window.group_3d.setChecked(False)
+    window._auto_after_extraction = False
+    window._on_extracted(_castellated_raw())
+    assert window.group_3d.isChecked()
+    body = window._current_body_params()
+    assert body is not None
+    assert body.length_mm == pytest.approx(40)
+    assert body.width_mm == pytest.approx(20)
+    # Lo spessore della scheda fa da lunghezza del pin/pad passante del modulo.
+    assert body.pin_length_mm == pytest.approx(1.5)
+    assert body.pin_color_hex
+
+    window.group_3d.setChecked(False)
+    window._on_extracted(_castellated_raw(body_length_mm=None, body_width_mm=None))
+    assert not window.group_3d.isChecked(), "senza ingombro non c'e' un solido da costruire"
+    assert window._current_body_params() is None
+
+
+def test_extraction_does_not_revoke_the_3d_choice_made_by_hand(window):
+    """@brief Negativo: cio' che l'utente ha spento col clic resta spento.
+
+    Un'estrazione descrive i dati del componente; non e' il permesso di
+    rimettere in coda una generazione 3D esclusa apposta. Il clic umano si
+    distingue dalle `setChecked()` del programma perche' solo il primo emette
+    `QGroupBox.clicked`, che qui si simula con `click()`.
+
+    Positivo (nella stessa prova): se l'utente il gruppo lo accende, una
+    successiva estrazione lo lascia acceso.
+    """
+    window.group_3d.setChecked(True)
+    # Un clic sull'indicatore di un QGroupBox spuntabile ne inverte lo stato.
+    _click_3d_group(window)
+    assert not window.group_3d.isChecked()
+    window._on_extracted(_castellated_raw())
+    assert not window.group_3d.isChecked()
+    assert window._current_body_params() is None
+
+    _click_3d_group(window)
+    assert window.group_3d.isChecked()
+    window._on_extracted(_castellated_raw())
+    assert window.group_3d.isChecked()
+    assert window._current_body_params() is not None
+
+
 def test_all_gui_logs_are_flushed_once(window):
     window._on_ai_progress("analysis-proof")
     window._append_log("generation-proof")

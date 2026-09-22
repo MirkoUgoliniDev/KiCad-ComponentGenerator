@@ -668,8 +668,11 @@ def test_reopen_button_sits_at_the_bottom_of_the_project_tab(window):  # noqa: F
     widgets = [row.itemAt(i).widget() for i in range(row.count())]
     assert window.btn_reopen_review in widgets
     assert outer.indexOf(window.group_component_analysis) < outer.count() - 1
-    # Negativo: non sta piu' nella riga degli strumenti dell'analisi.
-    tools_row = window.btn_photo_comparison.parentWidget().layout()
+    # Negativo: non sta nella riga degli strumenti dell'analisi. Il riferimento
+    # e' il gruppo, non piu' il padre di «Rivedi foto…»: quel comando e' stato
+    # spostato nella riga in fondo (richiesta dell'utente sui pulsanti
+    # confusi), quindi il suo padre e' la scheda, non la riga degli strumenti.
+    tools_row = window.group_ai_tools.layout()
 
     def _contains(layout, widget):
         for i in range(layout.count()):
@@ -680,5 +683,6 @@ def test_reopen_button_sits_at_the_bottom_of_the_project_tab(window):  # noqa: F
                 return True
         return False
 
-    assert _contains(tools_row, window.btn_photo_comparison)
+    assert _contains(tools_row, window.btn_component_prompt)
     assert not _contains(tools_row, window.btn_reopen_review)
+    assert not _contains(tools_row, window.btn_edit_component_review)

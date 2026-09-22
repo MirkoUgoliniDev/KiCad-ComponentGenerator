@@ -31,10 +31,14 @@ from html import escape
 import math
 from pathlib import Path
 
-from PyQt6.QtCore import QPointF, QRectF, QSignalBlocker, Qt, QTimer, QThread, pyqtSignal
+from PyQt6.QtCore import (
+    QPointF, QRectF, QSignalBlocker, QStringListModel, Qt, QTimer, QThread,
+    pyqtSignal,
+)
 from PyQt6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QPolygonF
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
+    QAbstractItemView, QComboBox, QCompleter, QDialog, QDialogButtonBox,
+    QDoubleSpinBox, QFormLayout,
     QGraphicsItem, QGraphicsPolygonItem, QGraphicsRectItem, QGraphicsScene,
     QGraphicsSimpleTextItem,
     QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton,
@@ -172,10 +176,28 @@ class _PhotoView(QGraphicsView):
 
     The view auto-fits the photo until the user zooms or pans; a manual
     zoom is then preserved across window resizes until fit is requested.
+
+    While draw mode is armed (``set_draw_mode``) the left button no longer
+    reaches the outlines: it rubber-bands a new rectangle over the photo and
+    reports it through ``rectangle_drawn``. The gesture is deliberately
+    inert unless it starts inside ``draw_bounds`` and travels more than
+    DRAW_CLICK_PX, so a stray click on a crowded board creates nothing.
     """
+
+    ## Scene rectangle the drawing gesture is confined to (the photo), set by
+    ## the editor. None disables the check, which is only useful in isolation.
+    draw_bounds = None
+
+    ## Emitted on a completed drawing gesture with the scene rectangle drawn,
+    ## already clipped to ``draw_bounds``.
+    rectangle_drawn = pyqtSignal(QRectF)
 
     def __init__(self, scene, parent=None):
         super().__init__(scene, parent)
+        self._draw_mode = False
+        self._draw_origin = None
+        self._draw_scene_origin = None
+        self._draw_band = None
         self.setRenderHints(QPainter.RenderHint.Antialiasing |
                             QPainter.RenderHint.SmoothPixmapTransform)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
@@ -232,8 +254,74 @@ class _PhotoView(QGraphicsView):
         else:
             super().wheelEvent(event)
 
+    def set_draw_mode(self, enabled):
+        """@brief Arm or disarm the "draw a new component" gesture.
+
+        @param enabled True to take the left button away from the outlines and
+               use it to trace a rectangle instead.
+        @note Disarming always drops a half-finished band: leaving a dangling
+              rubber band on the scene would keep claiming a gesture that the
+              user has abandoned.
+        """
+        self._draw_mode = bool(enabled)
+        self._cancel_band()
+        self._apply_draw_cursor()
+
+    def _apply_draw_cursor(self):
+        """Show the crosshair while armed; restore the normal pointer otherwise.
+
+        Called again after a pan, which borrows the viewport cursor: without
+        this, panning while armed would silently leave the pointer looking
+        like the mode was off.
+        """
+        if self._draw_mode:
+            self.viewport().setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.viewport().unsetCursor()
+
+    def draw_mode(self) -> bool:
+        """@brief Whether the next left drag on the photo traces a new rectangle."""
+        return self._draw_mode
+
+    def _cancel_band(self):
+        """Forget the current gesture and remove its rubber band from the scene."""
+        self._draw_origin = None
+        self._draw_scene_origin = None
+        if self._draw_band is not None:
+            # The band belongs to the scene, not to the component items: it
+            # must disappear without disturbing any outline.
+            self.scene().removeItem(self._draw_band)
+            self._draw_band = None
+
+    def _show_band(self, scene_pos):
+        """Draw the dashed preview of the rectangle being traced."""
+        if self._draw_band is None:
+            self._draw_band = QGraphicsRectItem()
+            pen = QPen(QColor(SELECTION_HALO_COLOR), 1, Qt.PenStyle.DashLine)
+            pen.setCosmetic(True)
+            self._draw_band.setPen(pen)
+            self._draw_band.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+            self._draw_band.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            # Above every outline: the band is what the pointer is doing now.
+            self._draw_band.setZValue(10)
+            self.scene().addItem(self._draw_band)
+        self._draw_band.setRect(QRectF(self._draw_scene_origin, scene_pos).normalized())
+
     def mousePressEvent(self, event):
-        """@brief Start a middle-button pan; other buttons reach the scene items."""
+        """@brief Start a middle-button pan; other buttons reach the scene items.
+
+        @note While draw mode is armed the left button starts a rectangle
+              instead, and only if it goes down inside the photo: outside it
+              there is nothing to measure, so the press is swallowed and the
+              mode stays armed for the next attempt.
+        """
+        if self._draw_mode and event.button() == Qt.MouseButton.LeftButton:
+            scene_pos = self.mapToScene(event.position().toPoint())
+            if self.draw_bounds is None or self.draw_bounds.contains(scene_pos):
+                self._draw_origin = event.position()
+                self._draw_scene_origin = scene_pos
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.MiddleButton:
             self._auto_fit = False
             self._pan_position = event.position()
@@ -243,7 +331,15 @@ class _PhotoView(QGraphicsView):
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        """@brief Scroll the viewport by the pointer motion while panning."""
+        """@brief Scroll the viewport by the pointer motion while panning.
+
+        @note A gesture in progress updates its rubber band instead, so the
+              user sees the rectangle before committing to it.
+        """
+        if self._draw_scene_origin is not None:
+            self._show_band(self.mapToScene(event.position().toPoint()))
+            event.accept()
+            return
         if self._pan_position is not None:
             delta = event.position() - self._pan_position
             self._pan_position = event.position()
@@ -254,10 +350,30 @@ class _PhotoView(QGraphicsView):
             super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        """@brief End a middle-button pan and restore the cursor."""
+        """@brief End a middle-button pan and restore the cursor.
+
+        @note A drawing gesture is completed here: below DRAW_CLICK_PX of
+              travel on either axis it is a click that missed, not a
+              measurement, and nothing is reported. The rectangle is clipped
+              to the photo, so a stroke that ends past the board edge still
+              describes a body on the board.
+        """
+        if (self._draw_mode and event.button() == Qt.MouseButton.LeftButton
+                and self._draw_scene_origin is not None):
+            origin = self._draw_origin
+            rect = QRectF(self._draw_scene_origin,
+                          self.mapToScene(event.position().toPoint())).normalized()
+            self._cancel_band()
+            travel = event.position() - origin
+            if abs(travel.x()) >= DRAW_CLICK_PX and abs(travel.y()) >= DRAW_CLICK_PX:
+                if self.draw_bounds is not None:
+                    rect = rect.intersected(self.draw_bounds)
+                self.rectangle_drawn.emit(rect)
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.MiddleButton and self._pan_position is not None:
             self._pan_position = None
-            self.viewport().unsetCursor()
+            self._apply_draw_cursor()
             event.accept()
         else:
             super().mouseReleaseEvent(event)
@@ -294,6 +410,15 @@ MIN_HANDLE_SIZE_MM = 0.2
 ## Half side of a resize handle in device pixels: the handle ignores the view
 ## transform so it stays grabbable at every zoom level.
 HANDLE_HALF_PX = 4.0
+
+## Minimum pointer travel, in viewport pixels, that makes a stroke on the
+## photo a drawn rectangle instead of a click gone wrong. Derived from the
+## grip size, not chosen by trial: a box narrower than one whole handle could
+## not be grabbed again afterwards, so a stroke that small is a slip of the
+## hand and not a measurement. The threshold is on the SCREEN, where the hand
+## shakes, and is therefore independent of the photo calibration; the metric
+## floor on the resulting body is MIN_HANDLE_SIZE_MM, a different question.
+DRAW_CLICK_PX = 2 * HANDLE_HALF_PX
 
 ## Handle screen angles are quantized to 45 degree sectors: Qt only offers
 ## horizontal, vertical and the two diagonal resize cursors.
@@ -580,11 +705,24 @@ class PhotoReviewDialog(QDialog):
     and the standard QDialog accepted/rejected result. Apply closes the dialog.
 
     Layout contract: the sidebar is dominated by ``component_list`` with
-    ``count_label`` ("Componenti: N") above it; the parameter form
+    ``count_label`` ("Componenti: N") and the ``category_filter`` combo above
+    it; the parameter form
     (``form_widget`` holding ``text_fields`` and ``fields``) lives in the
     window-modal ``parameters_dialog`` opened by ``parameters_button``
     or ``open_parameters()``. The field widgets are the same objects whether
     or not that modal is shown, and editing them updates the outline live.
+
+    Adding a component is a drawing gesture: ``add_button`` is checkable and
+    arms draw mode (``set_draw_mode``), the next drag on the photo becomes the
+    new body and its type is asked straight away. ``add_component()`` is still
+    the programmatic entry point and, called without geometry, keeps placing a
+    placeholder at the visible centre for headless callers.
+
+    ``category_filter`` hides the list rows whose ``kind`` does not match the
+    chosen category. It hides rows, it never rebuilds the list: ``_components``
+    and every row index keep their meaning while a filter is active. The
+    filter is about the list only — the rectangles on the photo are never
+    hidden, and clicking one always selects it, filtered out or not.
     """
 
     components_applied = pyqtSignal(list)
@@ -630,12 +768,16 @@ class PhotoReviewDialog(QDialog):
         instructions = QLabel(
             "Seleziona un rettangolo o una voce; trascina per spostare. "
             "Trascina le maniglie per ridimensionare; «Parametri…» apre quote e testi.\n"
+            "«Aggiungi componente»: traccia il rettangolo sulla foto, poi assegna la tipologia.\n"
             "Rotella: zoom · Tasto centrale: panoramica · "
             "Origine: centro PCB, X destra, Y basso; rotazione oraria.")
         instructions.setWordWrap(True)
         layout.addWidget(instructions)
         toolbar = QHBoxLayout()
         self.add_button = QPushButton("Aggiungi componente")
+        # Checkable: adding is a mode, and the user must be able to see that
+        # the next drag on the photo will create a body instead of moving one.
+        self.add_button.setCheckable(True)
         self.delete_button = QPushButton("Elimina selezionato")
         self.fit_button = QPushButton("Adatta foto")
         self.zoom_in_button = QPushButton("Zoom +")
@@ -646,6 +788,12 @@ class PhotoReviewDialog(QDialog):
             toolbar.addWidget(button)
         toolbar.addStretch()
         layout.addLayout(toolbar)
+        self.draw_hint = QLabel(
+            "Modalità disegno attiva: trascina sulla foto per tracciare il nuovo "
+            "componente, poi indicane la tipologia. Esc o «Aggiungi componente» annulla.")
+        self.draw_hint.setWordWrap(True)
+        self.draw_hint.hide()
+        layout.addWidget(self.draw_hint)
 
         self.scene = QGraphicsScene(self)
         self.photo_item = self.scene.addPixmap(pixmap)
@@ -663,6 +811,17 @@ class PhotoReviewDialog(QDialog):
         count_font.setBold(True)
         self.count_label.setFont(count_font)
         sidebar.addWidget(self.count_label)
+        # Category filter directly above the list: on an inventory of dozens
+        # of bodies, looking for "the capacitors" must not mean reading every
+        # row. The vocabulary is taken from the components themselves, never
+        # from a built-in taxonomy: this editor must not rename or reinterpret
+        # what the detection wrote in ``kind``.
+        self.category_filter = QComboBox()
+        self.category_filter.setObjectName("category_filter")
+        self.category_filter.setToolTip(
+            "Filtra la lista per categoria; i rettangoli sulla foto restano tutti visibili.")
+        self.category_filter.currentIndexChanged.connect(self._category_filter_changed)
+        sidebar.addWidget(self.category_filter)
         self.component_list = QListWidget()
         self.component_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         sidebar.addWidget(self.component_list, 1)
@@ -685,6 +844,18 @@ class PhotoReviewDialog(QDialog):
             field.editingFinished.connect(self._text_field_finished)
             form.addRow(label, field)
             self.text_fields[key] = field
+        # The type of a body the user has just drawn is asked, not guessed, and
+        # the categories already present in the inventory are offered as a
+        # convenience. A completer on the line edit, not a closed combo box:
+        # the vocabulary must never become a constraint, since the next board
+        # can carry a package nobody has named yet. The field stays a
+        # QLineEdit, so every existing caller keeps working.
+        self._kind_model = QStringListModel(self)
+        self.kind_completer = QCompleter(self._kind_model, self.text_fields["kind"])
+        self.kind_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.kind_completer.setCompletionMode(
+            QCompleter.CompletionMode.UnfilteredPopupCompletion)
+        self.text_fields["kind"].setCompleter(self.kind_completer)
         self.fields = {}
         for key, label in self._NUMERIC_FIELDS:
             field = QDoubleSpinBox()
@@ -740,7 +911,9 @@ class PhotoReviewDialog(QDialog):
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
 
-        self.add_button.clicked.connect(self.add_component)
+        self.add_button.toggled.connect(self.set_draw_mode)
+        self.view.draw_bounds = self.photo_rect
+        self.view.rectangle_drawn.connect(self._component_from_rectangle)
         self.delete_button.clicked.connect(self.delete_selected)
         self.fit_button.clicked.connect(self.fit_photo)
         self.zoom_in_button.clicked.connect(lambda: self.view.zoom(1.2))
@@ -751,7 +924,7 @@ class PhotoReviewDialog(QDialog):
         for component in self._components:
             self._append_item(component)
         self._update_scene_rect()
-        self._update_count()
+        self._refresh_categories()
         self._select_row(0 if self._items else -1)
         self._selection_changed()
 
@@ -815,8 +988,104 @@ class PhotoReviewDialog(QDialog):
         return item
 
     def _update_count(self):
-        """Show the live number of outlines above the list."""
-        self.count_label.setText(self._tr("Componenti: {count}").format(count=len(self._items)))
+        """Show the live number of outlines above the list.
+
+        With a category selected the label states both numbers, e.g.
+        "Componenti: 7 di 39": the first is how many components the filter
+        matches, the second how many the inventory holds. The matched count
+        deliberately ignores the selected component kept visible out of
+        category (see ``_apply_filter``): the label answers "how many are of
+        this category", not "how many rows are on screen".
+        """
+        total = len(self._items)
+        category = self.active_category()
+        if category is None:
+            self.count_label.setText(self._tr("Componenti: {count}").format(count=total))
+            return
+        matching = sum(1 for item in self._items if self._matches_category(item, category))
+        self.count_label.setText(self._tr("Componenti: {count} di {total}").format(
+            count=matching, total=total))
+
+    def active_category(self):
+        """@brief Category currently filtering the list.
+
+        @return The selected ``kind`` value, or None for "all categories".
+        """
+        return self.category_filter.currentData()
+
+    @staticmethod
+    def _component_category(component):
+        """Normalized ``kind`` of a component; empty when it declares none."""
+        return str(component.get("kind", "") or "").strip()
+
+    def _matches_category(self, item, category):
+        """Whether an outline belongs to a category, comparing case-insensitively."""
+        return self._component_category(item.component).casefold() == category.casefold()
+
+    def _categories(self):
+        """Categories present in the working inventory, as the components spell them.
+
+        Sorted and de-duplicated case-insensitively, keeping the first spelling
+        met: the list is a view of the data, so a value is never rewritten to
+        fit a canonical form the detection never used. Components with no
+        ``kind`` contribute no category, and therefore match no filter.
+        """
+        spellings = {}
+        for component in self._components:
+            category = self._component_category(component)
+            if category:
+                spellings.setdefault(category.casefold(), category)
+        return [spellings[key] for key in sorted(spellings)]
+
+    def _refresh_categories(self):
+        """Rebuild the filter vocabulary after the inventory or a ``kind`` changed.
+
+        The current selection survives if that category still exists, otherwise
+        the filter falls back to "all categories": a filter on a category that
+        no longer has any component would hide the whole list with no way to
+        tell why. Deleting the last resistor therefore shows everything again.
+        """
+        previous = self.active_category()
+        categories = self._categories()
+        with QSignalBlocker(self.category_filter):
+            self.category_filter.clear()
+            self.category_filter.addItem(self._tr("Tutte le categorie"), None)
+            for category in categories:
+                self.category_filter.addItem(category, category)
+            index = self.category_filter.findData(previous) if previous else 0
+            self.category_filter.setCurrentIndex(max(0, index))
+        # The same vocabulary drives the type field of a newly drawn body.
+        self._kind_model.setStringList(categories)
+        self._apply_filter()
+
+    def _category_filter_changed(self, _index):
+        """@brief Apply the category chosen in the combo to the list rows."""
+        self._apply_filter()
+
+    def _apply_filter(self):
+        """Hide the list rows outside the active category, keeping every index.
+
+        Rows are hidden, never removed: ``_components``, ``_items`` and the
+        list rows stay index-aligned, so every existing index-based path keeps
+        working while a filter is active.
+
+        The selected component is an exception and stays visible even out of
+        category. A selection the list does not show is worse than a row too
+        many: the parameter modal, the numeric fields and the delete button all
+        act on it, and the user would be editing something invisible. Hiding a
+        row therefore never deselects it, and clicking its rectangle on the
+        photo brings the row back into view.
+        """
+        category = self.active_category()
+        selected = self._selected_item()
+        for index, item in enumerate(self._items):
+            row = self.component_list.item(index)
+            if row is None:
+                continue
+            visible = (category is None or self._matches_category(item, category)
+                       or item is selected)
+            row.setHidden(not visible)
+        self._update_count()
 
     def _selected_item(self):
         return next((item for item in self._items if item.isSelected()), None)
@@ -846,6 +1115,9 @@ class PhotoReviewDialog(QDialog):
             with QSignalBlocker(self.scene):
                 for item in self._items:
                     item.setSelected(item is selected)
+        # Before the row becomes current: a hidden row cannot be shown as the
+        # current one, and the selected component is always kept visible.
+        self._apply_filter()
         with QSignalBlocker(self.component_list):
             self.component_list.setCurrentRow(self._items.index(selected) if selected else -1)
         self.form_widget.setEnabled(selected is not None)
@@ -887,9 +1159,13 @@ class PhotoReviewDialog(QDialog):
             title += f" — {index + 1}. {name}"
         self.parameters_dialog.setWindowTitle(title)
 
-    def open_parameters(self):
+    def open_parameters(self, focus=None):
         """@brief Show the parameter form for the selected component in a modal.
 
+        @param focus Key of the text field to focus and select, "name" by
+               default. Anything that is not a text field key falls back to
+               "name": this slot is also connected to a QPushButton, whose
+               ``clicked`` signal passes its checked state as first argument.
         @note Window-modal via ``QDialog.open``: input to the editor is
               blocked while the modal is up, but no nested event loop runs,
               so the outline follows every edit live and callers such as
@@ -900,8 +1176,11 @@ class PhotoReviewDialog(QDialog):
             return
         self._refresh_parameters_title()
         self.parameters_dialog.open()
-        self.text_fields["name"].setFocus()
-        self.text_fields["name"].selectAll()
+        field = self.text_fields.get(focus if isinstance(focus, str) else "", None)
+        if field is None:
+            field = self.text_fields["name"]
+        field.setFocus()
+        field.selectAll()
 
     def _warnings(self, item):
         warnings = []
@@ -1076,6 +1355,8 @@ class PhotoReviewDialog(QDialog):
                 if key == 'kind':
                     item.component.pop('model_match', None)
                     item.component.pop('model_selection', None)
+                    # Typing a type can create or retire a category.
+                    self._refresh_categories()
                 self._refresh_item(item)
                 self._refresh_parameters_title()
 
@@ -1139,39 +1420,113 @@ class PhotoReviewDialog(QDialog):
         self._closing = True
         super().reject()
 
-    def add_component(self):
-        """@brief Add a generic package at the visible center and select it for naming.
+    def set_draw_mode(self, enabled):
+        """@brief Arm or disarm "add a component by drawing its rectangle".
 
-        The new outline is clamped inside the board, sized to a tenth of the
-        board (at most 2 x 1 mm), and flagged uncertain: it is a placeholder
-        for the user to place and measure, not a detection.
+        @param enabled True to arm: the button stays checked, the pointer
+               becomes a crosshair over the photo and a hint is shown; the next
+               drag on the photo creates the body. False disarms without
+               creating anything.
+        @note Idempotent and safe to call from the button's own ``toggled``
+              signal: the button state is only written when it disagrees, and
+              then without re-emitting.
         """
-        center = self.view.mapToScene(self.view.viewport().rect().center())
-        center = self.photo_transform.pixel_to_mm(
-            min(self.photo_rect.width(), max(0, center.x())),
-            min(self.photo_rect.height(), max(0, center.y())))
-        length = min(2.0, self.photo_transform.body_length_mm / 10)
-        width = min(1.0, self.photo_transform.body_width_mm / 10)
-        center.setX(max(-self.photo_transform.body_length_mm / 2 + length / 2,
-                        min(self.photo_transform.body_length_mm / 2 - length / 2, center.x())))
-        center.setY(max(-self.photo_transform.body_width_mm / 2 + width / 2,
-                        min(self.photo_transform.body_width_mm / 2 - width / 2, center.y())))
-        component = dict(name=self._tr("Nuovo componente"), kind="generic", x_mm=center.x(), y_mm=center.y(),
+        enabled = bool(enabled)
+        if self.add_button.isChecked() != enabled:
+            with QSignalBlocker(self.add_button):
+                self.add_button.setChecked(enabled)
+        self.view.set_draw_mode(enabled)
+        self.draw_hint.setVisible(enabled)
+
+    def draw_mode(self) -> bool:
+        """@brief Whether the next drag on the photo would create a component.
+
+        @return True while the drawing mode is armed.
+        """
+        return self.view.draw_mode()
+
+    def keyPressEvent(self, event):
+        """@brief Let Escape disarm the drawing mode before it closes the editor.
+
+        @note An armed mode is the innermost thing Escape can cancel: leaving
+              the dialog while the user only wanted to give up on the rectangle
+              would throw away the whole review.
+        """
+        if event.key() == Qt.Key.Key_Escape and self.draw_mode():
+            self.set_draw_mode(False)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _component_from_rectangle(self, scene_rect):
+        """Create one component from a rectangle just drawn on the photo.
+
+        The rectangle arrives in scene (crop) pixels and is converted through
+        ``PhotoTransform``; a freshly drawn box is axis aligned, so its
+        rotation is 0 and its local length/width are the board axes. Each side
+        is held at MIN_HANDLE_SIZE_MM, the same floor the resize handles
+        enforce, so a stroke made at deep zoom cannot leave a degenerate body
+        that no handle could grab again.
+        """
+        top_left = self.photo_transform.pixel_to_mm(scene_rect.left(), scene_rect.top())
+        bottom_right = self.photo_transform.pixel_to_mm(scene_rect.right(), scene_rect.bottom())
+        length = max(MIN_HANDLE_SIZE_MM, bottom_right.x() - top_left.x())
+        width = max(MIN_HANDLE_SIZE_MM, bottom_right.y() - top_left.y())
+        # One rectangle, one component: the mode disarms itself, otherwise the
+        # parameter modal would open over a canvas still waiting to draw.
+        self.set_draw_mode(False)
+        self.add_component(geometry=((top_left.x() + bottom_right.x()) / 2,
+                                     (top_left.y() + bottom_right.y()) / 2, length, width))
+
+    def add_component(self, geometry=None):
+        """@brief Add a generic package and select it, asking for what is missing.
+
+        @param geometry Optional ``(x_mm, y_mm, length_mm, width_mm)`` measured
+               from a rectangle the user has drawn. Without it the body gets
+               placeholder geometry at the visible center, clamped inside the
+               board and sized to a tenth of it (at most 2 x 1 mm); that is the
+               programmatic/headless path, kept for callers that add a row and
+               then set its values themselves.
+        @note The body is flagged uncertain either way: a hand-drawn outline is
+              a human estimate, not a detection. A drawn body already has its
+              geometry, so the parameter modal opens on the type ("draw the
+              rectangle, then give it its category"); a placeholder body has
+              neither name nor geometry and opens on the name, as before.
+        """
+        drawn = geometry is not None
+        if drawn:
+            x_mm, y_mm, length, width = (float(value) for value in geometry)
+        else:
+            center = self.view.mapToScene(self.view.viewport().rect().center())
+            center = self.photo_transform.pixel_to_mm(
+                min(self.photo_rect.width(), max(0, center.x())),
+                min(self.photo_rect.height(), max(0, center.y())))
+            length = min(2.0, self.photo_transform.body_length_mm / 10)
+            width = min(1.0, self.photo_transform.body_width_mm / 10)
+            center.setX(max(-self.photo_transform.body_length_mm / 2 + length / 2,
+                            min(self.photo_transform.body_length_mm / 2 - length / 2, center.x())))
+            center.setY(max(-self.photo_transform.body_width_mm / 2 + width / 2,
+                            min(self.photo_transform.body_width_mm / 2 - width / 2, center.y())))
+            x_mm, y_mm = center.x(), center.y()
+        # "generic" is the project's generic-volume path, not an identity claim:
+        # the type is what the modal asks for right below.
+        component = dict(name=self._tr("Nuovo componente"), kind="generic", x_mm=x_mm, y_mm=y_mm,
                          length_mm=length, width_mm=width, height_mm=1.0, rotation_deg=0.0,
                          confidence="low", _uncertain=True)
         self._components.append(component)
         self._append_item(component)
         self._update_scene_rect()
+        self._refresh_categories()
         self._select_row(len(self._items) - 1)
-        # A new outline has only a placeholder name: the parameter modal
-        # follows automatically so the user can type it straight away. A
-        # modal over an editor that is not on screen would be orphaned, so
-        # a hidden editor (headless callers) only prepares the name field.
+        # The parameter modal follows automatically so the user can type
+        # straight away. A modal over an editor that is not on screen would be
+        # orphaned, so a hidden editor (headless callers) only prepares the field.
+        focus = "kind" if drawn else "name"
         if self.isVisible() and not self.parameters_dialog.isVisible():
-            self.open_parameters()
+            self.open_parameters(focus)
         else:
-            self.text_fields["name"].setFocus()
-            self.text_fields["name"].selectAll()
+            self.text_fields[focus].setFocus()
+            self.text_fields[focus].selectAll()
 
     def delete_selected(self):
         """@brief Remove the selected outline and renumber; selection moves to its neighbour."""
@@ -1184,7 +1539,8 @@ class PhotoReviewDialog(QDialog):
             self._items.pop(index)
             self._components.pop(index)
             self.component_list.takeItem(index)
-        self._update_count()
+        # A category can disappear with its last component.
+        self._refresh_categories()
         self._select_row(min(index, len(self._items) - 1))
         self._update_scene_rect()
 

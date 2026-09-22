@@ -3728,3 +3728,167 @@ terminal_metadata_flow 15, docs_migration 5, i18n 7, documentation 1.
 - Modelli ragionanti: limitare il ragionamento o alzare il budget? Oggi la
   risposta troncata costa e non produce nulla.
 - Pulsante Annulla sull'overlay (chiusura del socket nel worker).
+
+# 2026-09-22 — «Modifiche.docx»: dieci correzioni dalla corsa reale, sei agenti
+
+Commit precedente: `10ec347`. L'utente ha rivisto l'applicazione in funzione e
+consegnato un documento con dieci annotazioni su schermate. Sei agenti su file
+disgiunti. **Suite completa in un solo processo: 3155 passati, 11 saltati,
+2 xfail, 19 sottotest, nessun rosso, nessun segfault** (escluso
+`test_find_pcbnew_next_to_kicad_cli`, che cerca `pcbnew.exe` su Linux).
+
+## Le due precisazioni date all'utente prima di procedere
+
+1. **La fase YOLO non si vedeva perche' era spenta**: nella sua corsa aveva
+   «Rilevamento foto: Solo modello di visione (nessun rilevatore locale)».
+   La pausa con la revisione dei riquadri esiste gia' e parte solo col
+   rilevatore locale. Col solo modello di visione una pausa PRIMA e'
+   impossibile: i corpi nascono dalla risposta a pagamento. Cio' che mancava
+   davvero e' l'annuncio della fase, che ora c'e'.
+2. **L'icona sbagliata non era solo un'icona**: durante l'abbinamento dei
+   modelli KiCad il programma emetteva la fase `freecad`, quindi mostrava il
+   cubo del CAD mentre interrogava la libreria KiCad. Fase sbagliata, corretta.
+
+## Modale di analisi (`analysis_overlay.py`)
+
+- **Piu' alta e di dimensione stabile**: larghezza ricavata dal budget di
+  caratteri dello stato (`_STATUS_CHAR_LIMIT` su `_STATUS_LINES` righe,
+  misurato con `QFontMetrics`) entro `_CARD_WIDTH_BOUNDS`; le tre righe
+  opzionali (strumento, avanzamento, costo) conservano lo spazio da nascoste
+  (`setRetainSizeWhenHidden`), cosi' la scheda non cresce di ~90 px mentre le
+  fasi arrivano. 369 px dal primo fotogramma.
+- **Righe macchina filtrate per forma, non per prodotto**: nuova
+  `is_machine_line()` con cinque regole tipografiche dichiarate (corse di
+  punteggiatura ripetuta, `CHIAVE : valore` col due punti staccato, percorsi
+  assoluti drive/UNC/POSIX, conteggi di entita' a 4+ cifre). Passano ancora
+  le frasi umane, per esempio gli avvisi di sovrapposizione con le quote in mm.
+  Quando una riga e' filtrata, lo stato umano precedente **resta** sullo schermo.
+- **Glifi distinguibili**: il rilevatore locale e' un mirino a staffe
+  d'angolo con crocino, KiCad sono piazzole piene con contorno corpo e
+  segno del pin 1, la nuvola LLM e' unita in una sagoma sola. Test: ogni
+  chiave di `TOOLS` disegna qualcosa oltre l'anello, e due chiavi diverse
+  danno immagini diverse.
+
+## Scheda Progetto e fasi (`main_window.py`)
+
+- **Pulsanti morti nascosti, non spenti**: `_set_action_available()` toglie
+  visibilita' E abilitazione insieme. `btn_ai_log` sparisce quando il log non
+  esiste davvero (`_ai_log_available()`: testo, righe in attesa, o file non
+  vuoto nella cartella del componente corrente), agganciato dove lo stato
+  gia' si aggiorna, senza timer.
+- **Il doppione e' sparito**: `btn_photo_comparison` non sta piu' nella riga
+  degli strumenti; il comando vive nella riga in fondo come
+  `btn_edit_component_review` (e la copia `_3d`), ed e' lo STESSO oggetto
+  (alias documentato). Era proprio la confusione denunciata dall'utente.
+  I due test che lo fissavano nella riga strumenti sono stati riscritti sul
+  contratto nuovo, conservando cio' che garantivano davvero: raggiungibile in
+  entrambe le modalita' utente e foto conservata attraverso i cambi.
+- **La modale non ripete il modello**: `_restates_overlay_header()` toglie la
+  riga il cui predicato e' il dettaglio gia' scritto nell'intestazione,
+  qualunque esso sia; il log resta integrale.
+- **Niente log dei componenti in modale**: `per_item_detail()` riconosce per
+  forma il dettaglio per elemento (`testa: campo; campo; campo`, o un gettone
+  macchina come `review_required`) che la barra «7/41 componenti» gia'
+  riassume. Resta nel log.
+- **Fase locale annunciata**: `ExtractWorker._forward_phase` e
+  `phase_kwargs()`, che passa `phase=` solo se la firma installata lo accetta.
+
+## Servizi (`datasheet_extractor.py`, `photo_global_inventory.py`, `photo_inventory.py`)
+
+- **Quali file sono stati inviati**: `Invio a AI 3 documenti per layout, quote
+  e pinout: pinout.png (Pinout / disposizione contatti), top.png (Immagine con
+  quote), hires.jpg (Foto ad alta risoluzione).` Ruoli da `document_roles.ROLES`,
+  mai indovinati dal nome; singolare/plurale corretti; nomi, mai percorsi.
+- **Stato in italiano che dice cosa sta facendo**: `Inventario globale: una
+  sola richiesta a pagamento su 5 immagini; riconcilia le 2 proposte del
+  rilevatore locale ed elenca i corpi effettivi.` Senza identificatore del
+  modello. Tradotte tutte le righe della stessa classe. **Conservati come
+  gettoni di contratto** `validated cache hit` e `FAILED/PARTIAL`, che test
+  non di proprieta' dell'agente asseriscono; prompt, `PROMPT_VERSION`,
+  `SCHEMA_VERSION` e chiavi di cache intatti.
+- **Contratto `phase`**: `extract_inventory(..., phase=None)` con
+  `phase(tool, detail)`; `('yolo', 'rilevatore locale ONNX')` prima del
+  rilevatore, `('llm', modello)` prima della riconciliazione a pagamento;
+  **mai** la fase `yolo` con detector `ai`/`vlm`; eccezione del callback
+  registrata e ingoiata come per `progress`.
+
+## Revisione componenti (`photo_review_dialog.py`)
+
+- **Aggiunta tracciando il rettangolo**: «Aggiungi componente» arma una
+  modalita' di disegno (pulsante premuto, mirino, suggerimento); il
+  trascinamento crea il corpo, `DRAW_CLICK_PX = 2*HANDLE_HALF_PX` scarta le
+  gesture piu' corte di una maniglia (soglia di schermo, distinta dal
+  pavimento metrico `MIN_HANDLE_SIZE_MM`); Esc o secondo clic disarmano senza
+  creare. Dopo la creazione si apre la modale **sul campo tipologia**, con un
+  completamento alimentato dalle categorie presenti (comodita', non vincolo).
+  `add_component()` senza argomenti resta il percorso programmatico di prima.
+- **Filtro per categoria**: combo `category_filter` sopra la lista, vocabolario
+  ricavato dai `kind` dell'inventario (ordinati, deduplicati senza rinominare),
+  nessun elenco scritto a mano. `count_label` dice «Componenti: 7 di 39».
+  Decisioni dichiarate nei docstring: una riga selezionata fuori filtro **resta
+  visibile e selezionata** (modificarla senza vederla sarebbe peggio); il conteggio
+  conta le corrispondenze; **il filtro non tocca mai la foto**, i rettangoli
+  restano visibili e cliccabili.
+
+## Anteprima STEP (`model_candidates_dialog.py`)
+
+Da blocco piatto con ogni triangolo contornato a solido illuminato: Lambert
+per faccia con normale in spazio occhio, luce unitaria, `|n̂·L|` a due facce
+(la tassellatura non garantisce il verso), intensita' `0.28 + 0.72·|n̂·L|`;
+il colore varia la sola luminosita' HSL a partire dal colore campionato dalla
+foto (`color_hex`, altrimenti il predefinito), cosi' il materiale resta uno.
+Nessun contorno estraneo: ogni triangolo e' tratteggiato col **proprio** colore
+di riempimento, che copre la cucitura subpixel senza disegnare un fil di ferro.
+Niente back-face culling, dichiarato: con i triangoli ordinati dal pittore e il
+verso non garantito, un culling sbagliato cancella l'oggetto. Pennelli
+memorizzati su 64 livelli: su 100k triangoli **piu' veloce** di prima
+(0.70 s contro 0.82 s).
+
+## Due difetti preesistenti, ora risolti
+
+- **`test_board_pipeline[castellated]` ×2, rossi da giorni**: per un modulo
+  castellated `group_3d` veniva acceso solo dentro
+  `if self._auto_after_extraction and ...`, quindi un'estrazione fuori dal
+  percorso automatico lasciava `_current_body_params()` a `None` e
+  `step_generator.py:337` sollevava `AttributeError: pin_color_hex`. Il
+  difetto era in `main_window`, non in `step_generator`. Ora la condizione e'
+  il dato: `_castellated_body_available(params)` (per un modulo il corpo E' il
+  suo PCB, quindi `has_3d_body()`, che pretende l'altezza, e' il predicato
+  sbagliato) e `_enable_3d_group_from_extraction()`, che **non riaccende mai**
+  un gruppo spento a mano (`_user_3d_choice` da `QGroupBox.clicked`, che
+  scatta solo per interazione umana, non da `toggled`).
+- **TRAPPOLA: il segfault intermittente dei test Qt non era un artefatto.**
+  `tests/test_photo_inventory_gui.py` crollava in ~45% delle corse
+  (8/18), sempre con lo stack `i18n.py retranslate_widgets` dentro
+  `MainWindow.__init__`, a indici di test diversi. Misurato: con `xcb` invece
+  di offscreen crolla uguale (5/6), quindi **non** e' il contenitore; con
+  `gc.disable()` crolla ancora. gdb: `SIGSEGV in QObject::property()` su un
+  widget restituito da `findChildren` il cui oggetto C++ e' gia' morto.
+  Valgrind: lettura non valida in `sip_api_visit_wrappers` da
+  `release_QApplication`, su un blocco liberato da `reorganiseMap` — la mappa
+  degli oggetti di sip viene riallocata **mentre la si visita**, perche' i
+  filtri di evento Python (ne installa uno `analysis_overlay`) avvolgono
+  oggetti nuovi durante la distruzione. Causa: la fixture faceva
+  `app = QApplication.instance() or QApplication([])` tenendo un riferimento
+  **locale**, quindi Python distruggeva e ricostruiva la QApplication a ogni
+  test (puntatore C++ diverso ogni volta, misurato). Correzione: una
+  `_APP` di modulo tiene viva una sola QApplication per processo — **0 crolli
+  su 12 corse**. Nessuna modifica a `i18n.py`. Chi riprende non perda tempo a
+  cercare il difetto in `retranslate_widgets`: era solo il primo consumatore
+  di massa di una mappa gia' corrotta.
+
+## Test
+
+Nuovi: `test_project_tab_buttons.py` 22, `test_progress_messages.py` 19.
+Cresciuti: `test_analysis_overlay.py` 30 (da 12), `test_photo_review_dialog.py`
+59 (da 50), `test_photo_review_list.py` 28 (da 19),
+`test_model_candidates_dialog.py` 51 (da 36), `test_photo_global_inventory.py`
+125, `test_board_pipeline.py` 10, `test_photo_inventory_gui.py` 68.
+
+## Resta aperto (gia' segnalato, non autorizzato)
+
+- Modelli ragionanti: la corsa delle 22:16 con DeepSeek-flash ha speso tutti i
+  24000 token di completamento in ragionamento senza rispondere. Limitare il
+  ragionamento (`reasoning.max_tokens`) o alzare il budget: da decidere.
+- Pulsante Annulla sulla modale (chiusura del socket nel worker).
+- Timeout HTTP di 300 s di inattivita', non totale.

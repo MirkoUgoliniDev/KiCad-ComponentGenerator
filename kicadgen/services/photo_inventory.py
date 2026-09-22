@@ -711,7 +711,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                       grounding=True, cache_dir=None, classifier_model=None, mechanical=True,
                       grounding_prompt=None, verification_prompt=None, top_photo_source='AI',
                       detector='ai', yolo_model_path=None, review_proposals=None,
-                      declared=None):
+                      declared=None, phase=None):
     """@brief Calibrate the photo and extract reviewed component envelopes.
 
     @param detector ai preserves the existing localization; yolo uses local ONNX proposals.
@@ -727,9 +727,29 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         they are the calibration the boxes were measured against: a reviewer
         that read them elsewhere would place a hand-drawn body on a different
         scale than the detector's.
+    @param phase Optional callable(tool: str, detail: str) announcing WHICH
+        tool is working, so a progress modal can show the local-detection phase
+        and its icon instead of only free log text. It is called as
+        phase('yolo', <short label of the local detector>) right before the
+        local ONNX detection starts, and as phase('llm', <model identifier>)
+        immediately before the paid reconciliation. The 'yolo' announcement is
+        never emitted for detector 'ai' or 'vlm': with a vision-only detector
+        no local detection runs, and the modal must not claim a phase that is
+        not running. None (the default) is a no-op, and an exception raised by
+        the callback is logged and swallowed, exactly like for `progress`: the
+        notification is informative and must never abort a paid extraction.
     @note Local detections are hypotheses, not package identities; AI review may cost credit.
     """
     log = progress or (lambda message: None)
+
+    def announce(tool, detail):
+        """Segnalare la fase e' informativo, non una parte del risultato."""
+        if phase is None:
+            return
+        try:
+            phase(tool, detail)
+        except Exception as exc:  # noqa: BLE001 - la GUI non deve poter abortire l'estrazione
+            log(f'Segnalazione della fase non riuscita ({exc}); elaborazione proseguita.')
     if detector not in ('ai', 'yolo', 'vlm'):
         raise ValueError('Rilevatore fotografico non supportato.')
     report = InventoryResult()
@@ -784,6 +804,10 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         if detector == 'yolo':
             from .photo_yolo import detect_yolo_components
             audit = Path(cache_dir)/'yolo-audit' if cache_dir else None
+            # La fase locale va annunciata QUI, non prima: la calibrazione che
+            # precede non e' rilevamento, e la modale non deve mostrare una
+            # fase che non sta girando.
+            announce('yolo', 'rilevatore locale ONNX')
             log('YOLO locale: localizzazione senza invio della foto; verifica package AI successiva.')
             proposals = detect_yolo_components(photo, length, width, model_path=yolo_model_path,
                                               log=log, audit_dir=audit, include_review_candidates=True)
@@ -829,6 +853,10 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                 raise ReviewCancelled("Revisione dei corpi rilevati annullata.")
             log(f'Revisione dei corpi: {len(kept)} proposte tenute su {len(proposals)}.')
             proposals = list(kept)
+        # Da qui si paga: la revisione delle proposte e' finita e la richiesta
+        # sta per partire, quindi la modale deve tornare a dichiarare il
+        # modello remoto anche quando il rilevamento locale ha girato.
+        announce('llm', classifier_model or model)
         report.components = review_global_inventory(
             photo, proposals, length, width, classifier_model or model, call, log,
             cache_dir, verification_prompt=verification_prompt,

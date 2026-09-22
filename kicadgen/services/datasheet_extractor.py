@@ -739,6 +739,61 @@ def _merge_photo_components(groups):
     return merge_components([_components_3d(g) or [] for g in groups])
 
 
+#: Massimo numero di caratteri con cui un nome file viene mostrato nel log di
+#: avanzamento. E' un ripiego di PRESENTAZIONE, non una regola sui documenti:
+#: la modale mostra una riga sola, e un nome lunghissimo spingerebbe fuori i
+#: nomi dei file successivi, che sono esattamente l'informazione richiesta.
+#: Non dipende da estensione, contenuto o marca; diventerebbe superfluo se la
+#: modale andasse a capo mostrando l'elenco completo.
+_LOG_NAME_CHARS = 40
+
+
+def _log_name(name: str) -> str:
+    """@brief Shorten one file name so a multi-file progress line stays readable.
+
+    @param name File name as the user sees it, without any directory part.
+    @return The name unchanged when short enough, otherwise its head and tail
+        joined by an ellipsis, so both the prefix and the extension stay
+        visible and the document remains recognizable.
+    @note Presentation only: the name sent to the model is never shortened.
+    """
+    if len(name) <= _LOG_NAME_CHARS:
+        return name
+    tail = _LOG_NAME_CHARS // 3
+    return name[:_LOG_NAME_CHARS - 1 - tail] + '…' + name[-tail:]
+
+
+def _files_sent_message(doc_paths, document_roles: Optional[dict[str, str]] = None) -> str:
+    """@brief Name the documents about to travel in the paid analysis request.
+
+    @param doc_paths Documents in request order; only their file names are
+        reported, because the full paths are long and the progress modal shows
+        a single line that would cut them.
+    @param document_roles Optional file name -> role mapping declared by the
+        user. A name missing from it, or a role that is not a known one, is
+        reported as undeclared: the role is never guessed from the file name.
+    @return One readable line listing every document and, where known, the
+        role it is sent as.
+    @note The count and the noun agree for one document as well as for many,
+        so the line never reads as a plural applied to a single file.
+    """
+    from .document_roles import ROLES
+    if not doc_paths:
+        # Zero file non e' un invio: dirlo esplicitamente evita un «Invio a AI
+        # 0 file», che farebbe credere a una chiamata partita a vuoto (e quindi
+        # pagata) mentre nessuna richiesta lascia il programma.
+        return 'Nessun documento da inviare a AI: layout, quote e pinout non sono estraibili.'
+    described = []
+    for path in doc_paths:
+        name = Path(path).name
+        label = ROLES.get((document_roles or {}).get(name))
+        described.append(f'{_log_name(name)} ({label})' if label
+                         else f'{_log_name(name)} (ruolo non dichiarato)')
+    count = len(described)
+    return (f'Invio a AI {count} document{"o" if count == 1 else "i"} '
+            'per layout, quote e pinout: ' + ', '.join(described) + '.')
+
+
 def extract_pin_header_params(
     doc_paths: list[Path],
     model: Optional[str] = None,
@@ -765,6 +820,12 @@ def extract_pin_header_params(
         proposals plus one AI reconciliation) or vlm (no local detector: the
         vision model enumerates the bodies in that same single request).
     @param yolo_model_path Optional compatible ONNX file; validated before paid calls.
+    @param phase Optional callable(tool, detail) telling the caller WHICH tool
+        is working, so a progress modal can distinguish a paid remote call
+        ('llm') from local detection ('yolo'). It is forwarded to the photo
+        inventory, which announces the local and the paid steps as they start.
+        None disables the notification; a failing callback never aborts the
+        extraction, exactly like `progress`.
     @note YOLO localization is local; datasheet, package and terminal review still use AI.
 
     Due livelli di istruzioni, entrambi opzionali:
@@ -825,13 +886,26 @@ def extract_pin_header_params(
     except OpenRouterError as exc:
         raise ExtractionError(str(exc)) from exc
 
-    if phase:
-        # Quale strumento sta lavorando non si deduce dai messaggi di
-        # avanzamento, e la differenza pesa: questa e' una chiamata remota che
-        # si paga, il rilevamento locale no.
-        phase("llm", model or DEFAULT_MODEL)
+    def announce(tool, detail):
+        """Segnalare la fase e' informativo: una modale rotta non deve far
+        perdere un'elaborazione che si paga, quindi l'errore si registra e si
+        prosegue -- stesso trattamento riservato a `progress`."""
+        if phase is None:
+            return
+        try:
+            phase(tool, detail)
+        except Exception as exc:  # noqa: BLE001 - la GUI non deve poter abortire l'analisi
+            if progress:
+                progress(f"Segnalazione della fase non riuscita ({exc}); elaborazione proseguita.")
+
+    # Quale strumento sta lavorando non si deduce dai messaggi di
+    # avanzamento, e la differenza pesa: questa e' una chiamata remota che
+    # si paga, il rilevamento locale no.
+    announce("llm", model or DEFAULT_MODEL)
     if progress:
-        progress(f"Invio a AI {len(doc_paths)} file per layout, quote e pinout...")
+        # L'utente deve poter verificare QUALI dei suoi documenti sono partiti
+        # nella chiamata a pagamento, e con quale ruolo dichiarato.
+        progress(_files_sent_message(doc_paths, document_roles))
     content_blocks = []
     for index, path in enumerate(doc_paths):
         description = f"FILE {index}: {path.name}"
@@ -965,17 +1039,16 @@ def extract_pin_header_params(
             and data.get("body_width_mm")):
         from .photo_inventory import ReviewCancelled, extract_inventory
         from .photo_grounding import DEFAULT_VISION_MODEL
-        if phase:
-            # Con YOLO le proposte sono locali ma la verifica resta una
-            # chiamata al modello: il dettaglio lo dice, invece di far credere
-            # che da qui in poi non si spenda nulla.
-            phase(*(("yolo", "proposte locali, verifica AI") if photo_detector == "yolo"
-                    else ("llm", vision_model or DEFAULT_VISION_MODEL)))
+        # Con YOLO le proposte sono locali ma la verifica resta una
+        # chiamata al modello: il dettaglio lo dice, invece di far credere
+        # che da qui in poi non si spenda nulla.
+        announce(*(("yolo", "proposte locali, verifica AI") if photo_detector == "yolo"
+                   else ("llm", vision_model or DEFAULT_VISION_MODEL)))
         try:
             photo_report = extract_inventory(
                 doc_paths, vision_model or DEFAULT_VISION_MODEL, data["body_length_mm"],
                 data["body_width_mm"], COMPONENT_KINDS, diagnostic_call,
-                progress=progress, top_photo_index=top_index,
+                progress=progress, phase=announce, top_photo_index=top_index,
                 **({'top_photo_source': 'utente'} if document_roles is not None else {}),
                 extra_instructions=extra_instructions,
                 cache_dir=photo_cache_dir if photo_cache_dir is not None else Path(__file__).resolve().parents[2]/"generated"/"photo-cache",

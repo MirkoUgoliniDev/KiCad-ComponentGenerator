@@ -344,9 +344,9 @@ def _rescale_boxes(rows, width, height, log):
         if all(0 <= b[0] < b[2] <= 1 and 0 <= b[1] < b[3] <= 1 for b in converted):
             for row, box in zip(rows, boxes):
                 row['bbox'] = [box[0]/dx, box[1]/dy, box[2]/dx, box[3]/dy]
-            log(f'Global inventory: coordinates delivered as {name}; converted to fractions.')
+            log(f'Inventario globale: coordinate ricevute in {name}; convertite in frazioni.')
             return name
-    log('Global inventory: coordinates outside 0..1 and no consistent convention; left untouched.')
+    log('Inventario globale: coordinate fuori 0..1 e nessuna convenzione coerente; lasciate invariate.')
     return None
 
 
@@ -850,8 +850,8 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
                    'coordinate/accounting/schema contract above; never impose a target count.\n'
                    + '\n\n'.join(supplements))
     prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
-    log(f'Global inventory prompt={version}; schema={SCHEMA_VERSION}; sha256={prompt_hash}')
-    log('Global inventory labels use model-generated component IDs, not verified silkscreen references.')
+    log(f'Inventario globale: prompt={version}; schema={SCHEMA_VERSION}; sha256={prompt_hash}')
+    log('Inventario globale: le etichette sono ID generati dal modello, non sigle di serigrafia verificate.')
     kwargs = dict(model=model, system_prompt=prompt, content_blocks=content,
                   tool=inventory_tool(), max_tokens=24000, has_pdf=False)
     key = hashlib.sha256(json.dumps(kwargs, sort_keys=True, allow_nan=False).encode()).hexdigest()
@@ -863,14 +863,22 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         try:
             record = json.loads(path.read_text(encoding='utf-8'))
             if record.get('key') == key and not _validate(record.get('response'), known, boxes)[2]:
-                data = record['response']; log('Global inventory: validated cache hit.')
+                data = record['response']; log('Inventario globale: risposta valida ripresa dalla cache, nessuna nuova chiamata a pagamento (validated cache hit).')
         except (OSError, ValueError, AttributeError):
             pass
     if data is None:
         images = sum(1 for block in content if block.get('type') == 'image_url')
-        log(f'Global inventory: {model}; one request, '
-            + (f'no local detector, {images} images; the model enumerates the bodies.'
-               if enumerating else f'{len(candidates)} proposals, {images} images.'))
+        # Il modello e' gia' scritto nell'intestazione della modale: qui
+        # serve dire COSA si sta facendo, e che si tratta di una sola chiamata
+        # a pagamento. Singolare e plurale concordano anche con una sola
+        # immagine o una sola proposta.
+        pictures = f'{images} immagini' if images != 1 else '1 immagine'
+        log('Inventario globale: una sola richiesta a pagamento su ' + pictures + '; '
+            + ('nessun rilevatore locale, i corpi li enumera il modello di visione.'
+               if enumerating else
+               (f'riconcilia le {len(candidates)} proposte' if len(candidates) != 1
+                else 'riconcilia l’unica proposta')
+               + ' del rilevatore locale ed elenca i corpi effettivi.'))
         try:
             data = call(**kwargs)
         except (OpenRouterError, ValueError, OSError) as exc:
@@ -883,8 +891,8 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         # ripiega sulla confidenza complessiva (vedi _presence).
         omitted = omitted_required_fields(data)
         if omitted:
-            log('Global inventory: the model omitted required fields on every component '
-                f'({", ".join(omitted)}); one paid retry naming the omission.')
+            log('Inventario globale: il modello ha omesso campi obbligatori su OGNI componente '
+                f'({", ".join(omitted)}); un solo nuovo tentativo a pagamento che nomina l’omissione.')
             retry_kwargs = dict(kwargs, system_prompt=prompt + _OMISSION_REMINDER.format(
                 fields=', '.join(omitted)))
             try:
@@ -903,12 +911,13 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
                       and any(isinstance(row, dict) for row in second['components']))
             if usable and not still:
                 data = second
-                log('Global inventory: retry carries the required fields; using it.')
+                log('Inventario globale: il nuovo tentativo porta i campi obbligatori; si usa quello.')
             else:
                 failure = second.get('error') if isinstance(second, dict) else None
-                log('Global inventory: retry ' + (f'failed ({failure})' if failure else
-                    ('still omits ' + ', '.join(still)) if still else 'returned nothing to judge')
-                    + '; keeping the first answer, presence falls back to overall confidence.')
+                log('Inventario globale: nuovo tentativo ' + (f'fallito ({failure})' if failure else
+                    ('che omette ancora ' + ', '.join(still)) if still else
+                    'senza righe da giudicare')
+                    + '; si tiene la prima risposta, la presenza ripiega sulla confidenza complessiva.')
                 omission_issue = _Issue('model omitted required fields on every component: '
                                         + ', '.join(omitted))
     # Prima di giudicare la risposta, portarla nell'unita' del contratto: un
@@ -925,19 +934,19 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         # non rispetta lo schema.
         errors.append(omission_issue)
     if errors:
-        log('Global inventory FAILED/PARTIAL: ' + '; '.join(errors) + '; unresolved proposals retained.')
+        log('Inventario globale FAILED/PARTIAL: ' + '; '.join(errors) + '; proposte irrisolte conservate.')
     elif path:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(dict(key=key, response=data), allow_nan=False), encoding='utf-8')
         except OSError as exc:
-            log(f'Global inventory cache unavailable: {exc}')
+            log(f'Inventario globale: cache non disponibile ({exc}).')
     uncertainties = data.get('uncertainties', []) if isinstance(data, dict) else []
     if not isinstance(uncertainties, list):
         uncertainties = []
     uncertainties = [u for u in uncertainties if isinstance(u, str)]
     for uncertainty in uncertainties:
-        log('Global inventory uncertainty: ' + uncertainty)
+        log('Inventario globale, dubbio dichiarato dal modello: ' + uncertainty)
     # Un'incoerenza su una riga degrada QUELLA riga. Ogni errore porta con se'
     # il component_id e le proposte che lo riguardano, e una riga eredita solo
     # gli errori che la nominano o che nominano una proposta che essa
@@ -992,5 +1001,5 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         raise ValueError(
             'Global inventory returned no bodies at all: a populated board always has some. '
             'The model answered with an empty enumeration; nothing was detected.')
-    log(f'Global inventory: {len(result)} hypotheses; completeness not certified.')
+    log(f'Inventario globale: {len(result)} ipotesi; completezza non certificata.')
     return result

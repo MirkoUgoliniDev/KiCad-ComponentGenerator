@@ -797,7 +797,14 @@ def test_boxes_delivered_in_pixels_or_on_a_thousand_grid_are_converted():
 
 
 def test_fractions_are_left_alone_and_a_broken_answer_stays_broken():
-    """@brief Caso negativo: la conversione non deve salvare cio' che e' rotto."""
+    """@brief Caso negativo: la conversione non deve salvare cio' che e' rotto.
+
+    @note Il messaggio di rinuncia e' stato tradotto in italiano insieme agli
+        altri avanzamenti del modulo (l'interfaccia e' italiana): qui si
+        asserisce la nuova frase, non una piu' debole -- resta l'assenza di
+        qualunque conversione quando nessuna convenzione vale per TUTTI i
+        rettangoli.
+    """
     messages = []
     rows = _boxed([.25, .1, .5, .4])
     assert inventory._rescale_boxes(rows, 2000, 1000, messages.append) is None
@@ -809,7 +816,7 @@ def test_fractions_are_left_alone_and_a_broken_answer_stays_broken():
     rows = _boxed([250, 100, 500, 400], [100, 100, 90, 400])
     assert inventory._rescale_boxes(rows, 2000, 1000, messages.append) is None
     assert rows[0]['bbox'] == [250, 100, 500, 400]
-    assert 'no consistent convention' in messages[-1]
+    assert 'nessuna convenzione coerente' in messages[-1]
 
     # Un intero enorme o un non-numero descrive una risposta rotta, non
     # un'unita' diversa.
@@ -1114,6 +1121,13 @@ def test_a_contract_omission_is_retried_once_and_the_complete_answer_wins(tmp_pa
     cosi' il valore letto a valle dice da sola quale risposta e' stata usata.
     L'unica differenza fra le due richieste e' la coda del prompt che nomina i
     campi omessi: e' l'informazione che il primo tentativo non aveva.
+
+    @note Contratto dei log aggiornato: gli avanzamenti dell'inventario
+        globale sono passati in italiano (l'interfaccia lo e') e non ripetono
+        piu' l'identificativo del modello, che la modale mostra
+        nell'intestazione. Le asserzioni seguono la frase nuova senza
+        allentarsi: continuano a esigere che il secondo tentativo sia
+        dichiarato a pagamento e che il suo esito sia detto esplicitamente.
     """
     items = [candidate(1), dict(candidate(2), _box=[.6, .6, .7, .7])]
     complete = [dict(_clean_row('R1', 1, [.2, .2, .4, .4]), confidence='medium'),
@@ -1131,19 +1145,31 @@ def test_a_contract_omission_is_retried_once_and_the_complete_answer_wins(tmp_pa
     assert [r['class_confidence'] for r in result] == ['medium', 'medium']
     assert all(r['_global_inventory_errors'] == [] for r in result)
     assert all(r['_global_inventory_status'] == 'validated_hypotheses' for r in result)
-    assert any('one paid retry' in line for line in logs)
-    assert any('retry carries the required fields' in line for line in logs)
+    # Contratto aggiornato: gli avanzamenti dell'inventario globale sono in
+    # italiano e non ripetono l'identificativo del modello (lo mostra gia'
+    # l'intestazione della modale). Restano asserite le due cose che contano:
+    # che il secondo tentativo sia dichiarato A PAGAMENTO e che venga usato.
+    assert any('un solo nuovo tentativo a pagamento' in line for line in logs)
+    assert any('il nuovo tentativo porta i campi obbligatori' in line for line in logs)
 
 
 def test_a_complete_answer_is_never_retried(tmp_path):
-    """@brief Negativo: con tutti i campi c'e' una sola chiamata, e la cache si scrive."""
+    """@brief Negativo: con tutti i campi c'e' una sola chiamata, e la cache si scrive.
+
+    @note Contratto dei log aggiornato: gli avanzamenti dell'inventario
+        globale sono passati in italiano (l'interfaccia lo e') e non ripetono
+        piu' l'identificativo del modello, che la modale mostra
+        nell'intestazione. Le asserzioni seguono la frase nuova senza
+        allentarsi: continuano a esigere che il secondo tentativo sia
+        dichiarato a pagamento e che il suo esito sia detto esplicitamente.
+    """
     items = [candidate(1), dict(candidate(2), _box=[.6, .6, .7, .7])]
     data = _two_row_response([_clean_row('R1', 1, [.2, .2, .4, .4]),
                               _clean_row('R2', 2, [.6, .6, .7, .7])])
     result, calls, logs = run(data, items, cache=tmp_path)
     assert len(calls) == 1 and len(result) == 2
     assert 'omitted these REQUIRED fields' not in calls[0]['system_prompt']
-    assert not any('paid retry' in line for line in logs)
+    assert not any('nuovo tentativo' in line for line in logs)
     assert all(r['_global_inventory_errors'] == [] for r in result)
     assert len(list(tmp_path.glob('*.json'))) == 1
     assert not run(data, items, cache=tmp_path)[1]
@@ -1155,6 +1181,13 @@ def test_a_retry_that_still_omits_keeps_the_first_answer_and_declares_it(tmp_pat
     L'errore e' della risposta nel suo insieme e raggiunge ogni riga; la
     presenza ripiega sulla confidenza complessiva (vedi `_presence`) e una
     risposta cosi' non finisce in cache come buona.
+
+    @note Contratto dei log aggiornato: gli avanzamenti dell'inventario
+        globale sono passati in italiano (l'interfaccia lo e') e non ripetono
+        piu' l'identificativo del modello, che la modale mostra
+        nell'intestazione. Le asserzioni seguono la frase nuova senza
+        allentarsi: continuano a esigere che il secondo tentativo sia
+        dichiarato a pagamento e che il suo esito sia detto esplicitamente.
     """
     items = [candidate(1), dict(candidate(2), _box=[.6, .6, .7, .7])]
     rows = _without(('presence_confidence', 'class_confidence'),
@@ -1170,7 +1203,7 @@ def test_a_retry_that_still_omits_keeps_the_first_answer_and_declares_it(tmp_pat
     assert all(r['_global_inventory_status'] == 'partial' for r in result)
     assert [r['presence_confidence'] for r in result] == ['high', 'low']
     assert [r['class_confidence'] for r in result] == ['high', 'low']
-    assert any('still omits presence_confidence, class_confidence' in line for line in logs)
+    assert any('che omette ancora presence_confidence, class_confidence' in line for line in logs)
     assert not list(tmp_path.glob('*.json'))
 
 
@@ -1179,6 +1212,13 @@ def test_a_field_missing_on_some_rows_only_is_a_row_omission_not_a_retry(tmp_pat
 
     La riga senza il campo ripiega sulla confidenza complessiva, l'altra tiene
     il valore dichiarato, e nessuno paga una seconda chiamata.
+
+    @note Contratto dei log aggiornato: gli avanzamenti dell'inventario
+        globale sono passati in italiano (l'interfaccia lo e') e non ripetono
+        piu' l'identificativo del modello, che la modale mostra
+        nell'intestazione. Le asserzioni seguono la frase nuova senza
+        allentarsi: continuano a esigere che il secondo tentativo sia
+        dichiarato a pagamento e che il suo esito sia detto esplicitamente.
     """
     items = [candidate(1), dict(candidate(2), _box=[.6, .6, .7, .7])]
     declared = _clean_row('R1', 1, [.2, .2, .4, .4])
@@ -1186,7 +1226,7 @@ def test_a_field_missing_on_some_rows_only_is_a_row_omission_not_a_retry(tmp_pat
                        dict(_clean_row('R2', 2, [.6, .6, .7, .7]), confidence='low'))
     result, calls, logs = run(_two_row_response([declared, bare]), items, cache=tmp_path)
     assert len(calls) == 1 and len(result) == 2
-    assert not any('paid retry' in line for line in logs)
+    assert not any('nuovo tentativo' in line for line in logs)
     assert omission_errors(result) == [False, False]
     assert [r['presence_confidence'] for r in result] == ['high', 'low']
     assert all(r['_global_inventory_status'] == 'validated_hypotheses' for r in result)
@@ -1222,6 +1262,13 @@ def test_a_degenerate_retry_never_replaces_the_first_answer(tmp_path, degenerate
     Senza questa guardia una risposta vuota o malformata passava per completa
     e sostituiva la prima, che aveva due righe valide: si sarebbero perse le
     righe per far posto al nulla.
+
+    @note Contratto dei log aggiornato: gli avanzamenti dell'inventario
+        globale sono passati in italiano (l'interfaccia lo e') e non ripetono
+        piu' l'identificativo del modello, che la modale mostra
+        nell'intestazione. Le asserzioni seguono la frase nuova senza
+        allentarsi: continuano a esigere che il secondo tentativo sia
+        dichiarato a pagamento e che il suo esito sia detto esplicitamente.
     """
     items = [candidate(1), dict(candidate(2), _box=[.6, .6, .7, .7])]
     complete = [dict(_clean_row('R1', 1, [.2, .2, .4, .4]), confidence='medium'),
@@ -1233,4 +1280,68 @@ def test_a_degenerate_retry_never_replaces_the_first_answer(tmp_path, degenerate
     assert len(kept) == 2, 'le righe della prima risposta devono restare'
     assert all(r['presence_confidence'] == 'medium' for r in kept), \
         'la presenza ripiega sulla confidenza complessiva della prima risposta'
-    assert any('returned nothing to judge' in line or 'failed' in line for line in logs)
+    assert any('senza righe da giudicare' in line or 'fallito' in line for line in logs)
+
+
+# ── Riga di avanzamento della richiesta a pagamento ──────────────────
+
+
+def _paid_request_line(logs):
+    """@brief La riga di avanzamento che annuncia la richiesta a pagamento."""
+    lines = [line for line in logs if 'una sola richiesta a pagamento' in line]
+    assert len(lines) == 1, f'una sola riga deve annunciare la chiamata: {lines}'
+    return lines[0]
+
+
+def test_the_paid_request_line_says_what_is_done_and_never_repeats_the_model():
+    """@brief Positivo: la riga dice COSA si fa e che si paga, senza l'id del modello.
+
+    Contratto nuovo. Prima la riga era in inglese in un'interfaccia italiana e
+    ripeteva l'identificativo del modello, che la modale mostra gia' nella sua
+    intestazione: la ripetizione era rumore e non diceva nulla sul lavoro in
+    corso. Resta asserito -- e non allentato -- il punto che conta davvero nel
+    log: che quella riga dichiari una chiamata A PAGAMENTO, oltre a quante
+    proposte riconcilia e su quante immagini.
+    """
+    _, calls, logs = run(response(), [candidate(1), dict(candidate(2), _box=[.6, .6, .7, .7])])
+    line = _paid_request_line(logs)
+    assert 'unchanged/model' not in line, 'il modello e’ gia’ nell’intestazione della modale'
+    assert 'riconcilia le 2 proposte' in line and 'rilevatore locale' in line
+    images = len([b for b in calls[0]['content_blocks'] if b['type'] == 'image_url'])
+    assert f'{images} immagini' in line
+    assert 'nessun rilevatore locale' not in line, 'il rilevatore locale ha girato'
+
+
+def test_the_enumeration_line_declares_that_no_local_detector_ran():
+    """@brief Negativo del precedente: senza proposte non si nominano proposte.
+
+    Nel percorso di sola visione non c'e' nessun rilevamento locale, quindi la
+    riga non deve parlare di proposte da riconciliare: dichiara che i corpi li
+    enumera il modello. Resta una sola chiamata, e resta detto che si paga.
+    """
+    data = dict(components=[body('B1', [])], candidate_decisions=[],
+                uncertainties=[])
+    result, calls, logs = run(data, [])
+    assert len(calls) == 1 and len(result) == 1
+    line = _paid_request_line(logs)
+    assert 'unchanged/model' not in line
+    assert 'nessun rilevatore locale' in line and 'enumera' in line
+    assert 'proposte' not in line and 'riconcilia' not in line
+
+
+def test_the_cache_hit_line_states_that_nothing_is_charged(tmp_path):
+    """@brief Il replay non e' una chiamata: la riga lo dice, in italiano.
+
+    La riga conserva il termine `validated cache hit`, che altri test usano
+    come contratto sul fatto che la risposta ripresa era stata validata; la
+    parte leggibile dice all'utente cio' che gli serve, cioe' che non si paga.
+    """
+    items = [candidate(1), dict(candidate(2), _box=[.6, .6, .7, .7])]
+    data = _two_row_response([_clean_row('R1', 1, [.2, .2, .4, .4]),
+                              _clean_row('R2', 2, [.6, .6, .7, .7])])
+    assert run(data, items, cache=tmp_path)[1], 'la prima corsa deve pagare la chiamata'
+    _, calls, logs = run(data, items, cache=tmp_path)
+    assert calls == []
+    (line,) = [l for l in logs if 'validated cache hit' in l]
+    assert 'nessuna nuova chiamata a pagamento' in line
+    assert not any('una sola richiesta a pagamento' in l for l in logs)

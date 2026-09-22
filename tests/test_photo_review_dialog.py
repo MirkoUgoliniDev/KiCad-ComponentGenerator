@@ -16,7 +16,9 @@ from PyQt6.QtGui import QColor, QImage, QMouseEvent, QWheelEvent
 from PyQt6.QtTest import QSignalSpy, QTest
 from PyQt6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QGraphicsItem
 
-from kicadgen.gui.photo_review_dialog import PhotoReviewDialog, PhotoTransform
+from kicadgen.gui.photo_review_dialog import (
+    MIN_HANDLE_SIZE_MM, PhotoReviewDialog, PhotoTransform,
+)
 
 
 @pytest.fixture(scope="module")
@@ -158,10 +160,33 @@ def test_mouse_select_and_drag_at_zoom_updates_mm_without_swapping_axes(dialog, 
     assert (actual["length_mm"], actual["width_mm"], actual["rotation_deg"]) == (3, 1, 0)
 
 
-def test_add_delete_renumber_and_apply_detached_result(dialog, components):
+def _draw_new_component(app, dialog, scene_start, scene_end):
+    """Arm the drawing mode and trace one rectangle over the photo.
+
+    Scene points are photo pixels; the gesture goes through the real viewport
+    so the view's own press/move/release handling is exercised.
+    """
+    QTest.mouseClick(dialog.add_button, Qt.MouseButton.LeftButton)
+    assert dialog.draw_mode()
+    _drag(app, dialog.view, dialog.view.mapFromScene(QPointF(*scene_start)),
+          dialog.view.mapFromScene(QPointF(*scene_end)), Qt.MouseButton.LeftButton)
+
+
+def test_add_delete_renumber_and_apply_detached_result(dialog, components, app):
+    """@brief Add-draw-delete-apply, with the new body created by a drawn rectangle.
+
+    Contract change: "Aggiungi componente" no longer drops a placeholder in
+    the middle of the photo, it arms a drawing mode, so the click alone must
+    create nothing and the following drag must create exactly one body. The
+    rest of the transaction (renumbering, detached Apply, inputs untouched) is
+    unchanged and still asserted here.
+    """
     original = deepcopy(components)
     spy = QSignalSpy(dialog.components_applied)
     QTest.mouseClick(dialog.add_button, Qt.MouseButton.LeftButton)
+    assert len(dialog.get_components()) == 2
+    _drag(app, dialog.view, dialog.view.mapFromScene(QPointF(100, 30)),
+          dialog.view.mapFromScene(QPointF(160, 60)), Qt.MouseButton.LeftButton)
     assert len(dialog.get_components()) == 3
     assert dialog.component_list.currentRow() == 2
     dialog.text_fields["name"].setText("C_missing")
@@ -186,6 +211,142 @@ def test_add_delete_renumber_and_apply_detached_result(dialog, components):
     assert components == original
     dialog.accept()
     assert len(spy) == 1
+
+
+def test_drawing_a_rectangle_creates_that_body_and_asks_its_type(dialog, app):
+    """@brief The drawn rectangle becomes the body's millimeters, and the type is asked.
+
+    The gesture is the measurement: the rectangle is converted through
+    PhotoTransform on both axes independently (the photo is anisotropic),
+    the body is axis aligned so its rotation is 0, and the parameter modal
+    opens on the type field, because that is what the user still has to say.
+    """
+    _draw_new_component(app, dialog, (100, 30), (160, 60))
+    assert not dialog.draw_mode(), "one rectangle, one body: the mode disarms itself"
+    assert not dialog.add_button.isChecked()
+    assert dialog.add_button.isEnabled()
+    assert len(dialog._items) == 3
+    assert dialog.component_list.count() == 3
+    assert dialog.count_label.text() == "Componenti: 3"
+    assert dialog.component_list.currentRow() == 2
+    assert dialog._items[2].isSelected()
+    drawn = dialog.get_components()[2]
+    # (100, 30)-(160, 60) px of a 400 x 100 px crop of a 40 x 20 mm board.
+    assert drawn["x_mm"] == pytest.approx(-7, abs=.3)
+    assert drawn["y_mm"] == pytest.approx(-1, abs=.3)
+    assert drawn["length_mm"] == pytest.approx(6, abs=.3)
+    assert drawn["width_mm"] == pytest.approx(6, abs=.3)
+    assert drawn["rotation_deg"] == 0
+    assert drawn["_uncertain"] is True
+    assert dialog.parameters_dialog.isVisible()
+    assert dialog.parameters_dialog.focusWidget() is dialog.text_fields["kind"]
+    assert dialog.text_fields["kind"].selectedText() == dialog.text_fields["kind"].text()
+    # The vocabulary offered is the inventory's own, never a built-in taxonomy.
+    assert dialog.kind_completer.model().stringList() == ["generic", "ic", "resistor"]
+
+
+def test_the_type_field_offers_the_categories_without_forcing_them(dialog, app):
+    """@brief Negative: a type outside the vocabulary is accepted as typed.
+
+    The completer is a convenience; the next board may carry a package that
+    nobody in this inventory has named yet, and refusing it would lose data.
+    """
+    _draw_new_component(app, dialog, (100, 30), (160, 60))
+    assert "crystal-oscillator" not in dialog.kind_completer.model().stringList()
+    dialog.text_fields["kind"].setText("crystal-oscillator")
+    dialog.text_fields["kind"].editingFinished.emit()
+    assert dialog.get_components()[2]["kind"] == "crystal-oscillator"
+    assert "crystal-oscillator" in dialog.kind_completer.model().stringList()
+
+
+def test_a_still_click_on_the_photo_creates_nothing_and_keeps_the_mode_armed(dialog, app):
+    """@brief Negative: a stroke under the click threshold is not a measurement.
+
+    Below DRAW_CLICK_PX of travel the gesture is a click that missed; nothing
+    is created and the mode stays armed, so the user simply tries again
+    instead of having to press the button once more.
+    """
+    before = deepcopy(dialog.get_components())
+    QTest.mouseClick(dialog.add_button, Qt.MouseButton.LeftButton)
+    start = dialog.view.mapFromScene(QPointF(200, 50))
+    _drag(app, dialog.view, start, start + QPoint(2, 2), Qt.MouseButton.LeftButton)
+    assert dialog.get_components() == before
+    assert dialog.component_list.count() == 2
+    assert dialog.draw_mode() and dialog.add_button.isChecked()
+    assert not dialog.parameters_dialog.isVisible()
+
+
+def test_a_drag_started_outside_the_photo_creates_nothing_and_keeps_the_mode_armed(dialog, app):
+    """@brief Negative: outside the board crop there is nothing to measure.
+
+    The view has empty space around the photo; a stroke starting there must
+    not invent a body off the board, and must not silently disarm the mode.
+    """
+    before = deepcopy(dialog.get_components())
+    QTest.mouseClick(dialog.add_button, Qt.MouseButton.LeftButton)
+    start = dialog.view.mapFromScene(QPointF(200, -30))
+    assert dialog.view.viewport().rect().contains(start), "the stroke starts in the viewport"
+    assert not dialog.photo_rect.contains(dialog.view.mapToScene(start)), "...but off the photo"
+    _drag(app, dialog.view, start, start + QPoint(40, 40), Qt.MouseButton.LeftButton)
+    assert dialog.get_components() == before
+    assert dialog.draw_mode() and dialog.add_button.isChecked()
+
+
+@pytest.mark.parametrize("disarm", ["escape", "button"])
+def test_escape_or_the_button_again_disarms_without_creating_anything(dialog, app, disarm):
+    """@brief Negative: disarming is not an edit, and Escape does not close the editor.
+
+    An armed mode is the innermost thing Escape can cancel: giving up on a
+    rectangle must not reject the whole review.
+    """
+    before = deepcopy(dialog.get_components())
+    QTest.mouseClick(dialog.add_button, Qt.MouseButton.LeftButton)
+    assert dialog.draw_mode()
+    if disarm == "escape":
+        QTest.keyClick(dialog, Qt.Key.Key_Escape)
+    else:
+        QTest.mouseClick(dialog.add_button, Qt.MouseButton.LeftButton)
+    app.processEvents()
+    assert not dialog.draw_mode()
+    assert not dialog.add_button.isChecked()
+    # Rejecting would hide the editor; it is still up, mode off.
+    assert dialog.isVisible()
+    assert dialog.get_components() == before
+    # Disarmed, the left button belongs to the outlines again.
+    item = dialog._items[1]
+    start = dialog.view.mapFromScene(item.pos())
+    _drag(app, dialog.view, start, start + QPoint(20, 10), Qt.MouseButton.LeftButton)
+    assert len(dialog.get_components()) == 2
+    assert dialog.get_components()[1]["x_mm"] != before[1]["x_mm"]
+
+
+def test_escape_still_rejects_the_editor_when_no_mode_is_armed(dialog, app):
+    """@brief Negative: the drawing mode must not swallow Escape for good."""
+    assert not dialog.draw_mode()
+    QTest.keyClick(dialog, Qt.Key.Key_Escape)
+    app.processEvents()
+    assert dialog.result() == QDialog.DialogCode.Rejected
+
+
+def test_a_rectangle_drawn_smaller_than_the_handle_floor_is_held_at_it(dialog, app):
+    """@brief A real stroke at deep zoom still cannot leave a degenerate body.
+
+    Zoomed in, a stroke long enough on screen can cover less than
+    MIN_HANDLE_SIZE_MM of board: the body is held at that floor, the same one
+    the resize handles enforce, otherwise no handle could grab it again.
+    """
+    dialog.view.zoom(64)
+    dialog.view.centerOn(QPointF(200, 50))
+    app.processEvents()
+    start = dialog.view.viewport().rect().center()
+    scale = dialog.view.transform().m11()
+    travel = QPoint(10, 10)
+    assert travel.x() / scale / 10 < MIN_HANDLE_SIZE_MM, "the stroke is under the floor in mm"
+    QTest.mouseClick(dialog.add_button, Qt.MouseButton.LeftButton)
+    _drag(app, dialog.view, start, start + travel, Qt.MouseButton.LeftButton)
+    drawn = dialog.get_components()[2]
+    assert drawn["length_mm"] == pytest.approx(MIN_HANDLE_SIZE_MM)
+    assert drawn["width_mm"] == pytest.approx(MIN_HANDLE_SIZE_MM)
 
 
 def test_apply_commits_pending_keyboard_text(dialog):
@@ -754,3 +915,20 @@ def test_handle_cursors_follow_the_on_screen_edge_direction(dialog):
     dialog.fields["rotation_deg"].setValue(90)
     assert item.handle((1, 0)).cursor().shape() == Qt.CursorShape.SizeVerCursor
     assert item.handle((0, 1)).cursor().shape() == Qt.CursorShape.SizeHorCursor
+
+
+def test_the_armed_pointer_survives_a_pan_and_goes_back_to_normal_when_disarmed(dialog, app):
+    """@brief The crosshair says the mode is armed, so it must not lie after a pan.
+
+    Panning borrows the viewport cursor; when it gives it back the pointer has
+    to say again what the next left drag will do.
+    """
+    assert dialog.view.viewport().cursor().shape() != Qt.CursorShape.CrossCursor
+    QTest.mouseClick(dialog.add_button, Qt.MouseButton.LeftButton)
+    assert dialog.view.viewport().cursor().shape() == Qt.CursorShape.CrossCursor
+    centre = dialog.view.viewport().rect().center()
+    _drag(app, dialog.view, centre, centre + QPoint(20, 10), Qt.MouseButton.MiddleButton)
+    assert dialog.draw_mode()
+    assert dialog.view.viewport().cursor().shape() == Qt.CursorShape.CrossCursor
+    dialog.set_draw_mode(False)
+    assert dialog.view.viewport().cursor().shape() != Qt.CursorShape.CrossCursor

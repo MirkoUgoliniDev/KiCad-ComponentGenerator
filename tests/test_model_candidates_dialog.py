@@ -1,6 +1,7 @@
 """@brief Offscreen candidate review contracts, without AI or installed CAD."""
 
 from copy import deepcopy
+import math
 import os
 import threading
 import time
@@ -128,7 +129,7 @@ def test_preview_is_nonblocking_coalesces_and_ignores_late_result(review, app, m
     entered, release = threading.Event(), threading.Event()
     calls = []
 
-    def thumbnail(path, rotation):
+    def thumbnail(path, rotation, *_):
         calls.append((path, rotation))
         entered.set()
         release.wait(2)
@@ -264,7 +265,9 @@ def test_auto_worker_receives_component_dimensions(review, app, monkeypatch):
     dialog.auto_rotation.setChecked(True)
     dialog.candidate_list.setCurrentRow(0)
     _wait(app, lambda: not dialog._workers)
-    assert calls == [(report['candidates'][0]['path'], None, (3, 2))]
+    # The fourth argument is the sampled body colour: this component declares
+    # none, so the renderer must fall back to its documented default.
+    assert calls == [(report['candidates'][0]['path'], None, (3, 2), None)]
 
 
 @pytest.mark.parametrize('dimensions', [(8, 2), (2, 8)])
@@ -406,10 +409,10 @@ def test_library_row_starts_the_same_preview_as_candidates(review, app, library,
     _filter(app, dialog, 'usb')
     dialog.library_list.setCurrentRow(0)
     _wait(app, lambda: not dialog._workers)
-    assert calls == [(str(models[3].path), 37.0)]
+    assert calls == [(str(models[3].path), 37.0, None, None)]
     dialog.auto_rotation.setChecked(True)
     _wait(app, lambda: len(calls) == 2 and not dialog._workers)
-    assert calls[-1] == (str(models[3].path), None, (3, 2))
+    assert calls[-1] == (str(models[3].path), None, (3, 2), None)
 
 
 def test_empty_filter_shows_nothing_and_keeps_candidate_selection(review, app, library, monkeypatch):
@@ -505,3 +508,182 @@ def test_index_result_after_close_or_stale_token_is_ignored(review, app, monkeyp
                                          (-0.00001, '0'), (2.0, '2'), (0.1254, '0.125')])
 def test_dimension_display_handles_missing_and_small_values(value, display):
     assert gui._display_dimensions(value) == display
+
+
+# --- Shaded STEP preview -----------------------------------------------------
+#: Axis-aligned 10 mm cube; the isometric projection shows exactly three of its
+#: faces, with three different orientations, which is what the shading must show.
+_CUBE = [(0, 0, 0), (10, 0, 0), (10, 10, 0), (0, 10, 0),
+         (0, 0, 10), (10, 0, 10), (10, 10, 10), (0, 10, 10)]
+_CUBE_FACES = [(0, 1, 2), (0, 2, 3), (4, 6, 5), (4, 7, 6), (0, 5, 1), (0, 4, 5),
+               (1, 6, 2), (1, 5, 6), (2, 7, 3), (2, 6, 7), (3, 4, 0), (3, 7, 4)]
+
+
+def _render(monkeypatch, vertices, triangles, rotation=0.0, color=None, writer=None):
+    """Render a synthetic mesh through _thumbnail, with no FreeCAD installed."""
+    import sys
+    from pathlib import Path
+    from types import SimpleNamespace
+    from kicadgen.cad3d import step_generator
+
+    class Shape:
+        def tessellate(self, tolerance):
+            return ([SimpleNamespace(x=x, y=y, z=z) for x, y, z in vertices],
+                    list(triangles))
+
+    monkeypatch.setattr(step_generator, 'find_freecadcmd', lambda: 'fake-freecad')
+    monkeypatch.setitem(sys.modules, 'Part', SimpleNamespace(
+        read=lambda path: Shape(), makeCompound=lambda shapes: shapes[0]))
+
+    def run(command, **kwargs):
+        if writer is not None:
+            writer(Path(command[1]).parent / 'mesh.json')
+            return
+        exec(compile(Path(command[1]).read_text(encoding='utf-8'), command[1], 'exec'), {})
+
+    monkeypatch.setattr(gui.subprocess, 'run', run)
+    return gui._thumbnail('example.step', rotation, None, color)
+
+
+def _regions(image, minimum=2000):
+    """Flat areas of the render: rgb -> (pixel count, mean row).
+
+    Only areas far larger than any one-pixel outline can be are kept: a visible
+    face of the 280 px object covers order 10^4 pixels, while a stroked edge or
+    an antialiased blend covers at most order 10^3, so the cut needs no tuning
+    against a particular render.
+    """
+    background = QColor(gui.PREVIEW_BACKGROUND).rgb()
+    stats = {}
+    for y in range(image.height()):
+        for x in range(image.width()):
+            rgb = image.pixel(x, y)
+            if rgb == background:
+                continue
+            count, rows = stats.get(rgb, (0, 0))
+            stats[rgb] = (count + 1, rows + y)
+    return {rgb: (count, rows / count) for rgb, (count, rows) in stats.items()
+            if count >= minimum}
+
+
+def test_cube_shows_three_shades_brightest_towards_the_light(app, monkeypatch):
+    """Each visible side of a box must read as its own surface, not as a blob."""
+    image = _render(monkeypatch, _CUBE, _CUBE_FACES)
+    assert (image.width(), image.height()) == (340, 340)
+    all_colors = {image.pixel(x, y) for x in range(0, 340, 3) for y in range(0, 340, 3)}
+    assert len(all_colors) > 1
+    regions = _regions(image)
+    # Exactly the three visible faces: an outline stroked in a foreign colour
+    # would add a fourth large area, which is what made the old render a wireframe.
+    assert len(regions) == 3
+    lightnesses = sorted(QColor.fromRgb(rgb).lightnessF() for rgb in regions)
+    assert len(set(round(value, 3) for value in lightnesses)) == 3
+    assert lightnesses[1] - lightnesses[0] > 0.05
+    assert lightnesses[2] - lightnesses[1] > 0.05
+    # The light comes from above: the top face faces it most directly, and in this
+    # isometric projection that face is the upper rhombus of the cube.
+    brightest = max(regions, key=lambda rgb: QColor.fromRgb(rgb).lightnessF())
+    assert regions[brightest][1] < min(rows for rgb, (_, rows) in regions.items()
+                                       if rgb != brightest)
+    # Every face stays clear of the background lightness, so the body is visible.
+    assert lightnesses[0] > QColor(gui.PREVIEW_BACKGROUND).lightnessF() + 0.1
+
+
+def test_faces_keep_one_material_and_follow_the_declared_body_colour(app, monkeypatch):
+    """Only lightness varies; the body colour, when known, wins over the default."""
+    default = _regions(_render(monkeypatch, _CUBE, _CUBE_FACES))
+    red = _regions(_render(monkeypatch, _CUBE, _CUBE_FACES, color='#b01818'))
+    assert len(red) == 3
+    assert set(default) != set(red)
+    for source, reference in ((default, gui.DEFAULT_BODY_COLOR), (red, '#b01818')):
+        expected = QColor(reference).hueF()
+        for rgb in source:
+            assert abs(QColor.fromRgb(rgb).hueF() - expected) < 0.03
+    # An unusable declared colour must not paint an invalid colour.
+    fallback = _regions(_render(monkeypatch, _CUBE, _CUBE_FACES, color='not-a-colour'))
+    assert set(fallback) == set(default)
+
+
+def test_shading_ignores_the_winding_order_of_the_tessellation(app, monkeypatch):
+    """Reversed triangles keep their brightness: no face may go black or vanish."""
+    reversed_faces = [tuple(reversed(face)) for face in _CUBE_FACES]
+    direct = _regions(_render(monkeypatch, _CUBE, _CUBE_FACES))
+    flipped = _regions(_render(monkeypatch, _CUBE, reversed_faces))
+    assert set(direct) == set(flipped)
+    mixed = _regions(_render(monkeypatch, _CUBE,
+                             [face if index % 2 else tuple(reversed(face))
+                              for index, face in enumerate(_CUBE_FACES)]))
+    assert set(mixed) == set(direct)
+
+
+@pytest.mark.parametrize('triangle', [
+    ((0., 0., 0.), (1., 1., 1.), (2., 2., 2.)),      # collinear
+    ((3., 1., 2.), (3., 1., 2.), (3., 1., 2.)),      # coincident
+    ((0., 0., 0.), (0., 0., 0.), (5., 4., 3.)),      # zero-length edge
+])
+def test_degenerate_triangle_falls_back_to_the_ambient_floor(triangle):
+    value = gui._face_intensity(*triangle)
+    assert math.isfinite(value)
+    assert value == pytest.approx(gui._AMBIENT)
+    color = gui._shaded_color(QColor(gui.DEFAULT_BODY_COLOR), value)
+    assert color.isValid()
+
+
+def test_face_intensity_separates_a_lit_face_from_an_edge_on_face():
+    """Positive and negative case of the Lambert term, in eye space."""
+    light = gui._LIGHT
+    # Normal parallel to the light: the term must saturate at 1.
+    facing = ((0., 0., 0.), (light[1], -light[0], 0.),
+              (light[0]*light[2], light[1]*light[2], -(light[0]**2 + light[1]**2)))
+    assert gui._face_intensity(*facing) == pytest.approx(1.0, abs=1e-4)
+    # Normal perpendicular to the light: only the ambient floor remains.
+    edge_on = ((0., 0., 0.), (light[0], light[1], light[2]), (light[1], -light[0], 0.))
+    assert gui._face_intensity(*edge_on) == pytest.approx(gui._AMBIENT, abs=1e-4)
+
+
+def test_non_finite_intensity_never_produces_an_invalid_colour():
+    for intensity in (float('nan'), float('inf')):
+        color = gui._shaded_color(QColor(gui.DEFAULT_BODY_COLOR), intensity)
+        assert color.isValid()
+        assert 0.0 <= color.lightnessF() <= 1.0
+
+
+def test_degenerate_mesh_renders_without_crashing_or_black_pixels(app, monkeypatch):
+    """A tessellation with flat triangles must still produce a usable image."""
+    vertices = [(0., 0., 0.), (5., 5., 5.), (10., 10., 10.), (0., 0., 0.), (0., 10., 4.)]
+    faces = [(0, 1, 2), (0, 1, 3), (0, 3, 3), (0, 4, 2)]
+    image = _render(monkeypatch, vertices, faces)
+    assert not image.isNull()
+    background = QColor(gui.PREVIEW_BACKGROUND).rgb()
+    darkest = QColor(gui.PREVIEW_BACKGROUND).lightnessF()
+    for y in range(0, 340, 2):
+        for x in range(0, 340, 2):
+            rgb = image.pixel(x, y)
+            if rgb == background:
+                continue
+            # An invalid or NaN colour paints pure black; every real pixel is
+            # either a shaded face or an antialiased blend towards the canvas,
+            # so it can never be darker than the canvas itself.
+            assert rgb != 0xff000000
+            assert QColor.fromRgb(rgb).lightnessF() >= darkest - 0.01
+
+
+@pytest.mark.parametrize('vertices,faces,message', [
+    (_CUBE, [], 'Preview geometry unavailable or too complex'),
+    ([], _CUBE_FACES, 'Preview geometry unavailable or too complex'),
+    (_CUBE, [(0, 1, 2)] * 100_001, 'Preview geometry unavailable or too complex'),
+    (_CUBE, [(0, 1, 2, 3)], 'Invalid mesh triangle'),
+    ([(0., 0., 0.), (1., 0., 0.), (0., float('nan'), 1.)], [(0, 1, 2)],
+     'Invalid mesh coordinates'),
+])
+def test_mesh_guards_still_reject_unusable_previews(app, monkeypatch, vertices, faces, message):
+    with pytest.raises(ValueError, match=message):
+        _render(monkeypatch, vertices, faces)
+
+
+def test_oversized_mesh_file_is_rejected_before_parsing(app, monkeypatch):
+    def huge(output):
+        output.write_bytes(b'x' * 20_000_001)
+
+    with pytest.raises(ValueError, match='Preview mesh too large'):
+        _render(monkeypatch, _CUBE, _CUBE_FACES, writer=huge)
