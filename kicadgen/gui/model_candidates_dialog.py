@@ -44,9 +44,15 @@ _AMBIENT = 0.28
 #: differ from it and from each other.
 _LIGHT = (-0.398015, -0.597022, 0.696526)
 
-#: Quantisation of the Lambert term. 64 steps are visually continuous, but they
-#: let one QColor/QPen/QBrush triplet serve thousands of triangles, which keeps a
-#: 100k-triangle mesh as cheap to paint as the previous flat fill.
+#: Quantisation of the Lambert term. 64 steps are visually continuous, and they
+#: let one QColor/QPen/QBrush triplet serve thousands of triangles instead of one
+#: per triangle. Measured on the densest mesh the guards allow (a 100k-triangle
+#: sphere, best of three runs on one machine, depth sort included): 609 ms with
+#: this cache against 1462 ms shading without it, so the cache is worth 2.4x.
+#: Shading is *not* free, though: the same mesh flat-filled with the pen and
+#: brush hoisted out of the loop takes 329 ms, so per-face shading costs about
+#: +85% over a flat fill (a flat fill that rebuilt QPen/QBrush per triangle
+#: would take 856 ms, which is the cost this cache avoids, not the baseline).
 _SHADE_STEPS = 64
 
 
@@ -59,9 +65,22 @@ def _face_intensity(a, b, c):
     @return Intensity in [_AMBIENT, 1]. A degenerate triangle (zero area,
     collinear or coincident vertices) has no normal at all, so it falls back to
     the ambient floor instead of producing a non-finite value.
-    @note The dot product is taken in absolute value: ``Shape.tessellate`` gives
-    no guarantee that the winding order is consistent across faces, so a signed
-    term would paint an arbitrary half of the object black.
+    @note ``Shape.tessellate`` gives no guarantee that the winding order is
+    consistent across faces, so the sign of the raw normal carries no
+    information and a signed Lambert term would paint an arbitrary half of the
+    object black. The normal is therefore oriented against the *camera* rather
+    than against the winding: what the viewer sees of a closed solid is the
+    side turned towards them, so flipping the normal into the eye-space view
+    axis (+z, towards the viewer) recovers the outward normal of every visible
+    face regardless of winding, and the Lambert term can stay signed. Taking
+    the absolute value instead would light a face turned away from the light
+    exactly like one turned towards it: an undercut — a connector shroud lip, a
+    draft angle under an IC body, the chamfered underside of a shield, the far
+    wall of a cavity — would read a whole tone too bright and its edge against
+    the neighbouring flank would disappear.
+    @note A face exactly edge-on to the camera (normal z component zero) keeps
+    whatever sign its winding gave it, but it projects to zero area and paints
+    nothing, so the render stays winding-independent.
     """
     ux, uy, uz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
     vx, vy, vz = c[0] - a[0], c[1] - a[1], c[2] - a[2]
@@ -69,10 +88,12 @@ def _face_intensity(a, b, c):
     norm = math.sqrt(nx*nx + ny*ny + nz*nz)
     if not math.isfinite(norm) or norm <= 1e-12:
         return _AMBIENT
-    lambert = abs(nx*_LIGHT[0] + ny*_LIGHT[1] + nz*_LIGHT[2]) / norm
+    if nz < 0.0:
+        nx, ny, nz = -nx, -ny, -nz
+    lambert = (nx*_LIGHT[0] + ny*_LIGHT[1] + nz*_LIGHT[2]) / norm
     if not math.isfinite(lambert):
         return _AMBIENT
-    return _AMBIENT + (1.0 - _AMBIENT) * min(1.0, lambert)
+    return _AMBIENT + (1.0 - _AMBIENT) * max(0.0, min(1.0, lambert))
 
 
 def _shaded_color(base, intensity):
@@ -133,6 +154,23 @@ def _thumbnail(path, rotation, dimensions=None, color=None):
     is used, so the preview still renders a coherent material.
     @return QImage of 340x340 pixels with the shape shaded per face.
     @throws ValueError When dimensions, mesh size or mesh coordinates are unusable.
+    @note The triangles are painted back to front by centroid depth. That is an
+    approximation, not a visibility solution: where solids overlap or
+    interpenetrate — exactly what the automatic branch builds, since
+    _library_model returns bodies stacked on and sunk into one another before
+    Part.makeCompound joins them — a large far triangle can be painted over a
+    nearer one. Per-face shading makes those errors *visible*: the wrongly
+    ordered patch now carries a different tone instead of the same flat fill,
+    so the reviewer can see a geometry error that is not in the STEP file.
+    Measured against a per-pixel depth buffer of the same mesh (pixels covered
+    by the part, lightness differing by more than 0.02): a single box 0.14%,
+    which is the antialiased outline and the floor of the method; two stacked
+    boxes 5.0%; a slab carrying four bodies 6.7%, with a worst lightness error
+    of 0.119. No cheap replacement key is uniformly better — sorting by the
+    farthest vertex and breaking ties on the centroid halves the slab case to
+    3.1% but makes nested boxes worse, 8.2% to 10.2% — so the sort is left as
+    it is and the limit recorded here. Removing it needs a depth buffer or a
+    BSP split, neither of which belongs in a thumbnail.
     """
     from ..cad3d.step_generator import find_freecadcmd
 
@@ -187,7 +225,9 @@ def _thumbnail(path, rotation, dimensions=None, color=None):
     xmin, xmax = min(p[0] for p in points), max(p[0] for p in points)
     ymin, ymax = min(p[1] for p in points), max(p[1] for p in points)
     scale = 280 / max(xmax-xmin, ymax-ymin, 0.001)
-    base = QColor(str(color)) if color else QColor()
+    # Stripped here too, so the guarantee does not depend on which caller
+    # sampled the colour.
+    base = QColor(str(color).strip()) if color else QColor()
     if not base.isValid():
         base = QColor(DEFAULT_BODY_COLOR)
     image = QImage(340, 340, QImage.Format.Format_RGB32)
@@ -201,6 +241,7 @@ def _thumbnail(path, rotation, dimensions=None, color=None):
         # No back-face culling: the triangles are painter-sorted and the winding
         # order of the tessellation is not guaranteed, so a wrong cull would erase
         # the object entirely, which is worse than drawing hidden faces first.
+        # The sort below is approximate; see the @note on the sort in _thumbnail.
         for face in sorted(triangles, key=lambda f: sum(points[i][2] for i in f)):
             if len(face) != 3:
                 raise ValueError('Invalid mesh triangle')
@@ -303,9 +344,14 @@ class ModelCandidatesDialog(QDialog):
         # The photo pipeline samples the body colour into color_hex; shading the
         # preview with it beats a fixed constant, and an unusable value falls back
         # to DEFAULT_BODY_COLOR instead of painting an invalid colour.
+        # Whitespace around the value is stripped, as validate_hex_color already
+        # does for the CAD annotations: ' #112233 ' is a colour the pipeline
+        # observed, and silently falling back to the default would throw the
+        # sampled body colour away over a stray space.
         declared_color = component.get('color_hex')
-        self._body_color = (str(declared_color) if isinstance(declared_color, str)
-                            and QColor(str(declared_color)).isValid() else None)
+        declared_color = declared_color.strip() if isinstance(declared_color, str) else None
+        self._body_color = (declared_color if declared_color
+                            and QColor(declared_color).isValid() else None)
         saved = component.get('model_selection')
         saved = saved if isinstance(saved, dict) else {}
         saved_path = str(saved.get('path') or '')

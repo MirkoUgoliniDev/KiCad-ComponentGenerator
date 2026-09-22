@@ -776,22 +776,35 @@ def _files_sent_message(doc_paths, document_roles: Optional[dict[str, str]] = No
         role it is sent as.
     @note The count and the noun agree for one document as well as for many,
         so the line never reads as a plural applied to a single file.
+    @note Punctuation is part of the contract, not taste: the modal hides the
+        lines a machine writes for itself, recognizing them by an
+        UPPERCASE_UNDERSCORE token followed by a space, a colon or an equals
+        sign. A file name is user data and is never rewritten, so the line is
+        built so that our own punctuation never follows a name with a bare
+        space: the role comes after a comma and the documents are separated by
+        a middle dot. A name that carries a space inside itself is still beyond
+        this line's reach, and belongs to the marker rule, not here.
     """
     from .document_roles import ROLES
     if not doc_paths:
-        # Zero file non e' un invio: dirlo esplicitamente evita un «Invio a AI
-        # 0 file», che farebbe credere a una chiamata partita a vuoto (e quindi
-        # pagata) mentre nessuna richiesta lascia il programma.
+        # Invariante difensiva dell'helper: la riga descrive un invio, e senza
+        # documenti non c'e' invio da descrivere. Un «Invio a AI 0 file»
+        # farebbe credere a una chiamata partita a vuoto, quindi pagata. Il
+        # chiamante dell'estrazione rifiuta prima l'elenco vuoto
+        # («Nessun file selezionato.»), percio' qui non e' un caso atteso in
+        # produzione: e' il comportamento definito dell'helper per chi lo
+        # riusa, cosi' il ramo resta esercitabile e non produce una frase
+        # sbagliata se un secondo chiamante arriva.
         return 'Nessun documento da inviare a AI: layout, quote e pinout non sono estraibili.'
     described = []
     for path in doc_paths:
         name = Path(path).name
         label = ROLES.get((document_roles or {}).get(name))
-        described.append(f'{_log_name(name)} ({label})' if label
-                         else f'{_log_name(name)} (ruolo non dichiarato)')
+        described.append(f'{_log_name(name)}, {label}' if label
+                         else f'{_log_name(name)}, ruolo non dichiarato')
     count = len(described)
     return (f'Invio a AI {count} document{"o" if count == 1 else "i"} '
-            'per layout, quote e pinout: ' + ', '.join(described) + '.')
+            'per layout, quote e pinout: ' + ' · '.join(described) + '.')
 
 
 def extract_pin_header_params(
@@ -1039,11 +1052,17 @@ def extract_pin_header_params(
             and data.get("body_width_mm")):
         from .photo_inventory import ReviewCancelled, extract_inventory
         from .photo_grounding import DEFAULT_VISION_MODEL
-        # Con YOLO le proposte sono locali ma la verifica resta una
-        # chiamata al modello: il dettaglio lo dice, invece di far credere
-        # che da qui in poi non si spenda nulla.
-        announce(*(("yolo", "proposte locali, verifica AI") if photo_detector == "yolo"
-                   else ("llm", vision_model or DEFAULT_VISION_MODEL)))
+        # La fase del rilevatore locale NON si annuncia qui: il contratto di
+        # `extract_inventory` (vedi photo_inventory.extract_inventory, @param
+        # phase) e' che 'yolo' arrivi immediatamente prima del rilevatore, e
+        # qui siamo prima della calibrazione. Annunciarlo adesso mostrava una
+        # fase che poteva non partire mai -- senza vista calibrabile
+        # l'inventario esce prima di caricare l'ONNX -- e la modale restava sul
+        # rilevatore locale per il resto della corsa. Con 'ai' e 'vlm' invece
+        # il prossimo passo e' davvero la chiamata a pagamento al modello di
+        # visione, e va detto perche' e' cio' che si paga.
+        if photo_detector != "yolo":
+            announce("llm", vision_model or DEFAULT_VISION_MODEL)
         try:
             photo_report = extract_inventory(
                 doc_paths, vision_model or DEFAULT_VISION_MODEL, data["body_length_mm"],
@@ -1063,6 +1082,14 @@ def extract_pin_header_params(
             # vorrebbe dire pagare la riconciliazione sulle proposte rifiutate.
             raise ExtractionError(str(exc)) from exc
         except (OpenRouterError, ValueError, OSError) as exc:
+            # L'errore viene inghiottito nelle note e l'elaborazione prosegue
+            # senza inventario: bisogna chiudere la fase annunciata, altrimenti
+            # la modale resta per tutto il resto della corsa sull'ultimo
+            # strumento annunciato dall'inventario (il rilevatore locale, se il
+            # file ONNX e' sparito fra la validazione e il rilevamento) mentre
+            # quello strumento non sta piu' lavorando. Tool vuoto = nessuna
+            # fase rivendicata, non una fase sbagliata.
+            announce("", "")
             data["notes"] = (str(data.get("notes") or "") + f"\nInventario fotografico fallito: {exc}").strip()
         if photo_report and photo_report.components:
             # The global YOLO reconciliation already reports terminal evidence.

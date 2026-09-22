@@ -14,10 +14,13 @@ pytest.importorskip("PyQt6")
 from PyQt6.QtCore import QBuffer, QByteArray, QIODevice, QPoint, QPointF, Qt
 from PyQt6.QtGui import QColor, QImage, QMouseEvent, QWheelEvent
 from PyQt6.QtTest import QSignalSpy, QTest
-from PyQt6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QGraphicsItem
+from PyQt6.QtWidgets import (
+    QApplication, QDialog, QDialogButtonBox, QGraphicsItem, QGraphicsRectItem,
+)
 
 from kicadgen.gui.photo_review_dialog import (
-    MIN_HANDLE_SIZE_MM, PhotoReviewDialog, PhotoTransform,
+    DRAW_CLICK_PX, MIN_HANDLE_SIZE_MM, PhotoReviewDialog, PhotoTransform,
+    _ResizeHandle,
 )
 
 
@@ -347,6 +350,309 @@ def test_a_rectangle_drawn_smaller_than_the_handle_floor_is_held_at_it(dialog, a
     drawn = dialog.get_components()[2]
     assert drawn["length_mm"] == pytest.approx(MIN_HANDLE_SIZE_MM)
     assert drawn["width_mm"] == pytest.approx(MIN_HANDLE_SIZE_MM)
+
+
+def _bands(dialog):
+    """Rubber bands currently on the scene; the resize grips are not bands."""
+    return [item for item in dialog.scene.items()
+            if isinstance(item, QGraphicsRectItem) and not isinstance(item, _ResizeHandle)]
+
+
+def _move_event(dialog, point, buttons):
+    """A viewport move at ``point`` declaring ``buttons`` as held."""
+    return QMouseEvent(QMouseEvent.Type.MouseMove, QPointF(point),
+                       QPointF(dialog.view.viewport().mapToGlobal(point)),
+                       Qt.MouseButton.NoButton, buttons, Qt.KeyboardModifier.NoModifier)
+
+
+def _start_a_gesture(app, dialog, scene_start, scene_move):
+    """Arm the mode, press inside the photo and drag without ever releasing."""
+    QTest.mouseClick(dialog.add_button, Qt.MouseButton.LeftButton)
+    start = dialog.view.mapFromScene(QPointF(*scene_start))
+    QTest.mousePress(dialog.view.viewport(), Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.NoModifier, start)
+    move = dialog.view.mapFromScene(QPointF(*scene_move))
+    QApplication.sendEvent(dialog.view.viewport(),
+                           _move_event(dialog, move, Qt.MouseButton.LeftButton))
+    app.processEvents()
+    return start, move
+
+
+def _idle_match_worker(monkeypatch):
+    """Replace the measurement thread with a stand-in that only records starts."""
+    from kicadgen.gui import photo_review_dialog as module
+
+    started = []
+
+    class _Idle(module.QThread):
+        """@brief Stand-in worker: no thread and no modal, only the request itself."""
+
+        done = module.pyqtSignal(object)
+        failed = module.pyqtSignal(str)
+
+        def __init__(self, snapshot):
+            super().__init__()
+
+        def start(self):
+            started.append(self)
+
+    monkeypatch.setattr(module, "_MatchWorker", _Idle)
+    return started
+
+
+def test_a_double_click_while_armed_keeps_the_gesture_instead_of_choosing_a_model(
+        dialog, app, monkeypatch):
+    """@brief Negative: while armed the left button never reaches the outlines, doubled or not.
+
+    MouseButtonDblClick is a distinct event type from MouseButtonPress, so the
+    natural retry after a stroke refused as too short (the mode deliberately
+    stays armed) used to fall through to the outline under the pointer: the
+    selection jumped, a measurement thread started and the model chooser opened
+    over a canvas the user was still drawing on. The doubled press must behave
+    like a press: it starts a gesture and nothing else.
+    """
+    started = _idle_match_worker(monkeypatch)
+    dialog.view.zoom(3)
+    dialog.component_list.setCurrentRow(0)
+    item = dialog._items[1]
+    dialog.view.centerOn(item)
+    app.processEvents()
+    point = dialog.view.mapFromScene(item.scenePos())
+    QTest.mouseClick(dialog.add_button, Qt.MouseButton.LeftButton)
+    _drag(app, dialog.view, point, point + QPoint(2, 2), Qt.MouseButton.LeftButton)
+    assert dialog.draw_mode(), "a stroke under the threshold leaves the mode armed"
+    before = deepcopy(dialog.get_components())
+    QTest.mouseDClick(dialog.view.viewport(), Qt.MouseButton.LeftButton,
+                      Qt.KeyboardModifier.NoModifier, point)
+    app.processEvents()
+    assert started == [], "the doubled press must not ask for CAD candidates"
+    assert dialog._match_worker is None
+    assert dialog.component_list.currentRow() == 0, "the selection must not jump"
+    assert dialog.get_components() == before
+    assert dialog.draw_mode() and dialog.add_button.isChecked()
+    # ...and the retry still measures: the doubled press armed the gesture.
+    _drag(app, dialog.view, point, point + QPoint(40, 25), Qt.MouseButton.LeftButton)
+    assert len(dialog.get_components()) == 3
+
+
+def test_a_double_click_reaches_the_outline_when_no_mode_is_armed(dialog, app, monkeypatch):
+    """@brief Positive counterpart: disarmed, a double click is still the model chooser."""
+    started = _idle_match_worker(monkeypatch)
+    dialog.view.zoom(3)
+    dialog.component_list.setCurrentRow(0)
+    item = dialog._items[1]
+    dialog.view.centerOn(item)
+    app.processEvents()
+    assert not dialog.draw_mode()
+    QTest.mouseDClick(dialog.view.viewport(), Qt.MouseButton.LeftButton,
+                      Qt.KeyboardModifier.NoModifier,
+                      dialog.view.mapFromScene(item.scenePos()))
+    app.processEvents()
+    assert dialog.component_list.currentRow() == 1
+    assert len(started) == 1
+
+
+def test_a_long_thin_stroke_is_a_measurement_and_not_a_slip(dialog, app):
+    """@brief One axis clearing DRAW_CLICK_PX is enough: thin bodies are real.
+
+    A pin-header edge or a shield seam is long and deliberately thin, so
+    requiring the travel on BOTH axes discarded it in silence however long the
+    stroke was — contradicting the threshold's own rationale, which is about a
+    slip of the hand. The thin side is then held by MIN_HANDLE_SIZE_MM, not by
+    a screen threshold. The counterpart, a stroke inside the dead zone on both
+    axes, stays refused (see the still-click test above).
+    """
+    start = dialog.view.mapFromScene(QPointF(100, 40))
+    end = dialog.view.mapFromScene(QPointF(160, 40.5))
+    travel = end - start
+    assert abs(travel.x()) >= DRAW_CLICK_PX > abs(travel.y()), (
+        "the stroke must be long on one axis and inside the dead zone on the other")
+    QTest.mouseClick(dialog.add_button, Qt.MouseButton.LeftButton)
+    _drag(app, dialog.view, start, end, Qt.MouseButton.LeftButton)
+    assert len(dialog.get_components()) == 3, "a 6 mm stroke is not a stray click"
+    drawn = dialog.get_components()[2]
+    assert drawn["length_mm"] == pytest.approx(6, abs=.3)
+    assert drawn["width_mm"] == pytest.approx(MIN_HANDLE_SIZE_MM)
+    assert not dialog.draw_mode()
+
+
+@pytest.mark.parametrize("dismiss", ["hide", "close", "reject"])
+def test_an_interrupted_gesture_does_not_survive_the_editor_being_dismissed(
+        dialog, app, dismiss):
+    """@brief An unfinished rectangle belongs to the gesture, not to the scene.
+
+    A minimize or a close taken with the button down kills the pointer grab
+    with the window, so the release that would finish the stroke never arrives.
+    Left alone, the dashed band came back on restore and followed the bare
+    pointer, and a release delivered without a press created a body the user
+    never drew.
+    """
+    start, move = _start_a_gesture(app, dialog, (120, 40), (200, 70))
+    assert len(_bands(dialog)) == 1, "a held drag does show its band"
+    before = deepcopy(dialog.get_components())
+    getattr(dialog, dismiss)()
+    app.processEvents()
+    assert _bands(dialog) == []
+    dialog.show()
+    app.processEvents()
+    far = dialog.view.mapFromScene(QPointF(300, 90))
+    QApplication.sendEvent(dialog.view.viewport(),
+                           _move_event(dialog, far, Qt.MouseButton.NoButton))
+    app.processEvents()
+    assert _bands(dialog) == [], "the band must not come back on the bare pointer"
+    QTest.mouseRelease(dialog.view.viewport(), Qt.MouseButton.LeftButton,
+                       Qt.KeyboardModifier.NoModifier, far)
+    app.processEvents()
+    assert dialog.get_components() == before, "a release without a press creates nothing"
+
+
+def test_a_move_without_the_left_button_ends_the_gesture_instead_of_extending_it(dialog, app):
+    """@brief Negative: the band tracks a held button, never the bare pointer.
+
+    The draw branch used to key off the pending origin alone, so any motion
+    after a lost release kept re-drawing the band and the next release
+    committed a rectangle nobody traced. Positive counterpart in the same test:
+    a properly held drag still draws.
+    """
+    start, _move = _start_a_gesture(app, dialog, (120, 40), (200, 70))
+    assert len(_bands(dialog)) == 1
+    before = deepcopy(dialog.get_components())
+    far = dialog.view.mapFromScene(QPointF(300, 90))
+    QApplication.sendEvent(dialog.view.viewport(),
+                           _move_event(dialog, far, Qt.MouseButton.NoButton))
+    app.processEvents()
+    assert _bands(dialog) == [], "the gesture died with the button, and so did its band"
+    QTest.mouseRelease(dialog.view.viewport(), Qt.MouseButton.LeftButton,
+                       Qt.KeyboardModifier.NoModifier, far)
+    app.processEvents()
+    assert dialog.get_components() == before
+    assert dialog.draw_mode(), "the mode stays armed: the user simply tries again"
+    _drag(app, dialog.view, start, far, Qt.MouseButton.LeftButton)
+    assert len(dialog.get_components()) == len(before) + 1, "a held drag still draws"
+
+
+@pytest.mark.parametrize("key", [Qt.Key.Key_Return, Qt.Key.Key_Enter])
+def test_return_applies_the_corrections_instead_of_discarding_them(dialog, app, key):
+    """@brief Return confirms the review; it must never be a disguised Cancel.
+
+    "Applica correzioni" carries ApplyRole, so this button box has no
+    AcceptRole button and Qt made Cancel the default one: the most ordinary
+    keystroke in a dialog threw away every correction. Both the default button
+    and the key handler are asserted, because either alone would leave a focus
+    path where Return still cancels.
+    """
+    apply_button = dialog.buttons.button(QDialogButtonBox.StandardButton.Apply)
+    cancel_button = dialog.buttons.button(QDialogButtonBox.StandardButton.Cancel)
+    assert apply_button.isDefault() and not cancel_button.isDefault()
+    spy = QSignalSpy(dialog.components_applied)
+    dialog.component_list.setCurrentRow(1)
+    dialog.fields["height_mm"].setValue(2.0)
+    # The editor opens with the focus on Cancel, which is where the keystroke
+    # really lands: an auto-default button answers Return itself, so the key is
+    # sent to that button and not straight to the dialog.
+    cancel_button.setFocus()
+    app.processEvents()
+    assert cancel_button.hasFocus()
+    assert apply_button.isDefault(), "a focused Cancel must not take the default away"
+    QTest.keyClick(cancel_button, key)
+    app.processEvents()
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    assert len(spy) == 1
+    assert spy[0][0][1]["height_mm"] == 2.0
+
+
+def test_the_focused_cancel_button_still_discards_when_pressed(dialog, app):
+    """@brief Negative: Cancel gives up its auto-default, not its job.
+
+    Return must not reject, but the button itself must still reject when it is
+    the button the user presses: Space on the focused widget, and Escape.
+    """
+    cancel_button = dialog.buttons.button(QDialogButtonBox.StandardButton.Cancel)
+    spy = QSignalSpy(dialog.components_applied)
+    cancel_button.setFocus()
+    app.processEvents()
+    QTest.keyClick(cancel_button, Qt.Key.Key_Space)
+    app.processEvents()
+    assert dialog.result() == QDialog.DialogCode.Rejected
+    assert len(spy) == 0
+
+
+def test_escape_disarms_first_and_rejects_afterwards(dialog, app):
+    """@brief Negative: Escape is still the way out, and still cancels the mode first.
+
+    Confirming with Return must not cost the editor its cancel path: one
+    Escape gives up on the rectangle, the next one gives up on the review.
+    """
+    spy = QSignalSpy(dialog.components_applied)
+    QTest.mouseClick(dialog.add_button, Qt.MouseButton.LeftButton)
+    assert dialog.draw_mode()
+    QTest.keyClick(dialog, Qt.Key.Key_Escape)
+    app.processEvents()
+    assert not dialog.draw_mode()
+    assert dialog.isVisible(), "giving up on the rectangle is not giving up on the review"
+    QTest.keyClick(dialog, Qt.Key.Key_Escape)
+    app.processEvents()
+    assert dialog.result() == QDialog.DialogCode.Rejected
+    assert len(spy) == 0
+
+
+def test_add_component_disarms_the_mode_on_the_programmatic_path_too(dialog, app):
+    """@brief The invariant belongs to the addition, not to one of its callers.
+
+    Only the drawn path disarmed, so a programmatic ``add_component()`` with
+    the mode armed opened the parameter modal over a live canvas: the user's
+    next drag created a second body instead of adjusting the one just added.
+    """
+    QTest.mouseClick(dialog.add_button, Qt.MouseButton.LeftButton)
+    assert dialog.draw_mode()
+    dialog.add_component()
+    app.processEvents()
+    assert not dialog.draw_mode()
+    assert not dialog.add_button.isChecked()
+    assert not dialog.draw_hint.isVisible()
+    assert dialog.view.viewport().cursor().shape() != Qt.CursorShape.CrossCursor
+    dialog.parameters_buttons.button(QDialogButtonBox.StandardButton.Ok).click()
+    app.processEvents()
+    # The canvas is an editor again: the next drag moves the new body. Zoomed
+    # in, because the grips are 8 screen px wide whatever the zoom and a 2 x 1 mm
+    # placeholder is otherwise all grip.
+    dialog.view.zoom(4)
+    item = dialog._items[2]
+    before = deepcopy(item.component)
+    dialog.view.centerOn(item)
+    app.processEvents()
+    start = dialog.view.mapFromScene(item.scenePos())
+    _drag(app, dialog.view, start, start + QPoint(20, 10), Qt.MouseButton.LeftButton)
+    assert len(dialog.get_components()) == 3, "no second body was created"
+    assert dialog.get_components()[2]["x_mm"] != before["x_mm"]
+
+
+def test_a_stroke_on_the_board_edge_stays_inside_after_the_metric_floor(dialog, app):
+    """@brief The floor may grow a clipped side, but never back off the board.
+
+    The release handler clips the rectangle to the photo, then raises a side to
+    MIN_HANDLE_SIZE_MM: a stroke traced on the very edge of the board and
+    dragged off it came back out on the other side of the edge, and the new
+    outline was flagged "Fuori dai bordi PCB" the instant it appeared. The
+    centre is clamped per axis, so the axis that was already inside is left
+    exactly where the stroke put it.
+    """
+    QTest.mouseClick(dialog.add_button, Qt.MouseButton.LeftButton)
+    start = dialog.view.mapFromScene(QPointF(300, 99.6))
+    end = dialog.view.mapFromScene(QPointF(300, 160))
+    assert dialog.photo_rect.contains(dialog.view.mapToScene(start)), "the stroke starts on the board"
+    assert not dialog.photo_rect.contains(dialog.view.mapToScene(end)), "...and ends off it"
+    _drag(app, dialog.view, start, end, Qt.MouseButton.LeftButton)
+    assert len(dialog.get_components()) == 3
+    drawn = dialog.get_components()[2]
+    assert drawn["width_mm"] == pytest.approx(MIN_HANDLE_SIZE_MM), "the clipped side is at the floor"
+    assert drawn["y_mm"] == pytest.approx(10 - MIN_HANDLE_SIZE_MM / 2)
+    # Negative side: the length axis never left the board, so it is untouched.
+    assert drawn["x_mm"] == pytest.approx(10, abs=.05)
+    item = dialog._items[2]
+    assert dialog.photo_rect.adjusted(-1e-7, -1e-7, 1e-7, 1e-7).contains(item.photo_bounds())
+    assert item.pen().color().name() != "#ef5350"
+    assert not any("Fuori" in warning for warning in dialog._warnings(item))
 
 
 def test_apply_commits_pending_keyboard_text(dialog):

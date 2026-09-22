@@ -679,6 +679,59 @@ def _validate_geometry(rows, safe, boxes):
     return retained, safe, errors
 
 
+#: Separatore fra piu' motivi dentro UNA sola riga di avanzamento. Il filtro
+#: della modale (`per_item_detail` in gui/main_window.py) riconosce il
+#: rendiconto per-elemento dalla forma «intestazione: campo; campo; campo»:
+#: una riga di fase che elenchi i suoi motivi con il punto e virgola viene
+#: quindi nascosta proprio quando i motivi sono tanti. Le righe che parlano di
+#: soldi e di esiti mancati non possono sparire al crescere del numero di
+#: problemi, percio' elencano con questo separatore e non con «;».
+_DETAIL_SEPARATOR = ' · '
+
+
+def _inline_detail(text):
+    """@brief Ridurre un testo altrui a una sola clausola di avanzamento.
+
+    @param text Testo non nostro (errore dell'API, messaggio di eccezione).
+    @return Lo stesso testo su una riga, senza punto e virgola.
+    @note Serve perche' il testo interpolato non e' sotto il nostro controllo:
+        un errore upstream come «HTTP 502; upstream timeout; retry later»
+        porta con se' i separatori che il filtro della modale conta, e la riga
+        che dichiara una chiamata a pagamento senza esito sparirebbe proprio
+        nei casi peggiori. I punti e virgola diventano virgole: cambia la
+        punteggiatura, non il contenuto, e il log completo resta leggibile.
+    """
+    return ' '.join(str(text).replace(';', ',').split())
+
+
+def paid_request_message(images, proposals, enumerating):
+    """@brief The one progress line that announces the paid inventory request.
+
+    @param images Number of images travelling in the request.
+    @param proposals Number of local detector proposals to reconcile.
+    @param enumerating True when no local detector ran and the vision model
+        enumerates the bodies by itself.
+    @return One line stating that exactly one paid call is made and what it is
+        for, with the count and the noun in agreement.
+    @note The model identifier is deliberately absent: the modal already shows
+        it in its header, and repeating it said nothing about the work.
+    @note A separate function because the singular/plural agreement is a
+        contract that can be checked without calling anything. Today's request
+        always carries the full photo plus three context strips, so «1
+        immagine» is not reachable from `review_global_inventory`; the branch
+        stays as the defensive behaviour of this helper for a request built
+        with fewer images, and the test exercises it here instead of leaving
+        the agreement unverified.
+    """
+    pictures = f'{images} immagini' if images != 1 else '1 immagine'
+    return ('Inventario globale: una sola richiesta a pagamento su ' + pictures + '; '
+            + ('nessun rilevatore locale, i corpi li enumera il modello di visione.'
+               if enumerating else
+               (f'riconcilia le {proposals} proposte' if proposals != 1
+                else 'riconcilia l’unica proposta')
+               + ' del rilevatore locale ed elenca i corpi effettivi.'))
+
+
 def _inventory_context(text):
     """Remove recognized fixed-box defaults and delimited board extraction context.
 
@@ -868,17 +921,7 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
             pass
     if data is None:
         images = sum(1 for block in content if block.get('type') == 'image_url')
-        # Il modello e' gia' scritto nell'intestazione della modale: qui
-        # serve dire COSA si sta facendo, e che si tratta di una sola chiamata
-        # a pagamento. Singolare e plurale concordano anche con una sola
-        # immagine o una sola proposta.
-        pictures = f'{images} immagini' if images != 1 else '1 immagine'
-        log('Inventario globale: una sola richiesta a pagamento su ' + pictures + '; '
-            + ('nessun rilevatore locale, i corpi li enumera il modello di visione.'
-               if enumerating else
-               (f'riconcilia le {len(candidates)} proposte' if len(candidates) != 1
-                else 'riconcilia l’unica proposta')
-               + ' del rilevatore locale ed elenca i corpi effettivi.'))
+        log(paid_request_message(images, len(candidates), enumerating))
         try:
             data = call(**kwargs)
         except (OpenRouterError, ValueError, OSError) as exc:
@@ -914,10 +957,19 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
                 log('Inventario globale: il nuovo tentativo porta i campi obbligatori; si usa quello.')
             else:
                 failure = second.get('error') if isinstance(second, dict) else None
-                log('Inventario globale: nuovo tentativo ' + (f'fallito ({failure})' if failure else
-                    ('che omette ancora ' + ', '.join(still)) if still else
-                    'senza righe da giudicare')
-                    + '; si tiene la prima risposta, la presenza ripiega sulla confidenza complessiva.')
+                # Questa riga dice che una SECONDA chiamata a pagamento e' stata
+                # spesa senza risultato: e' l'unica cosa che contraddice la riga
+                # precedente, che il pagamento lo annuncia. Il motivo arriva
+                # dall'API e puo' contenere punti e virgola, quindi si appiattisce
+                # (`_inline_detail`) e i pezzi della riga si separano con
+                # `_DETAIL_SEPARATOR`: cosi' la visibilita' in modale non dipende
+                # da come e' punteggiato un errore altrui.
+                log('Inventario globale: nuovo tentativo '
+                    + (f'fallito ({_inline_detail(failure)})' if failure else
+                       ('che omette ancora ' + ', '.join(still)) if still else
+                       'senza righe da giudicare')
+                    + _DETAIL_SEPARATOR
+                    + 'si tiene la prima risposta, la presenza ripiega sulla confidenza complessiva.')
                 omission_issue = _Issue('model omitted required fields on every component: '
                                         + ', '.join(omitted))
     # Prima di giudicare la risposta, portarla nell'unita' del contratto: un
@@ -934,7 +986,18 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         # non rispetta lo schema.
         errors.append(omission_issue)
     if errors:
-        log('Inventario globale FAILED/PARTIAL: ' + '; '.join(errors) + '; proposte irrisolte conservate.')
+        # Il numero di problemi non deve cambiare la VISIBILITA' dell'avviso:
+        # con il punto e virgola due errori bastavano a far contare tre
+        # clausole al filtro della modale, che nascondeva l'avviso mentre la
+        # riga «una sola richiesta a pagamento…» restava, facendo passare per
+        # riuscita una chiamata pagata e parziale. Gli errori si elencano con
+        # `_DETAIL_SEPARATOR` e restano subito dopo «FAILED/PARTIAL: », dove i
+        # test della pipeline li cercano; il conteggio va in coda.
+        total = f'{len(errors)} problemi' if len(errors) != 1 else '1 problema'
+        log('Inventario globale FAILED/PARTIAL: '
+            + _DETAIL_SEPARATOR.join(_inline_detail(error) for error in errors)
+            + _DETAIL_SEPARATOR + total
+            + _DETAIL_SEPARATOR + 'proposte irrisolte conservate.')
     elif path:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)

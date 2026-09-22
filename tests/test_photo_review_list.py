@@ -516,6 +516,84 @@ def test_a_component_without_a_kind_adds_no_category_and_matches_none(app, png):
         widget.close()
 
 
+def test_a_kind_that_is_not_a_string_declares_no_category(app, png):
+    """@brief Negative: only a string is a spelling a detector could have written.
+
+    ``str()`` on the raw value published "['diode']" or "True" as categories in
+    the combo and in the type completer — a vocabulary no detection ever wrote,
+    which is the opposite of taking it from the components themselves. Such a
+    body simply declares no category, exactly like one with no ``kind`` at all,
+    and the stored value is left untouched for whoever wrote it.
+    """
+    inventory = [
+        dict(name="R1", kind="resistor", x_mm=0, y_mm=0, length_mm=2, width_mm=1, height_mm=.5),
+        dict(name="D1", kind=["diode"], x_mm=6, y_mm=0, length_mm=2, width_mm=1, height_mm=.5),
+        dict(name="Q1", kind=True, x_mm=-6, y_mm=0, length_mm=2, width_mm=1, height_mm=.5),
+        dict(name="L1", kind=0, x_mm=-12, y_mm=0, length_mm=2, width_mm=1, height_mm=.5),
+    ]
+    widget = PhotoReviewDialog(png, inventory, 40, 20)
+    try:
+        assert [widget.category_filter.itemText(i)
+                for i in range(widget.category_filter.count())] == [
+            "Tutte le categorie", "resistor"]
+        assert widget.kind_completer.model().stringList() == ["resistor"]
+        # Nothing was rewritten: the inventory still holds what arrived.
+        assert [entry["kind"] for entry in widget.get_components()] == [
+            "resistor", ["diode"], True, 0]
+        _select_category(widget, "resistor")
+        assert _visible_rows(widget) == [0], "no non-string kind matches a category"
+        assert widget.count_label.text() == "Componenti: 1 di 4"
+    finally:
+        widget.close()
+
+
+def test_surrounding_whitespace_is_the_only_liberty_taken_with_a_spelling(app, png):
+    """@brief Positive: " Resistor " and "resistor" are one category, spelled as first met.
+
+    Trimming is what keeps two visually identical entries from both appearing;
+    it is the only rewriting the vocabulary does, and the components keep their
+    own spelling, padding included.
+    """
+    inventory = [
+        dict(name="R1", kind="  Resistor  ", x_mm=0, y_mm=0, length_mm=2, width_mm=1, height_mm=.5),
+        dict(name="R2", kind="resistor", x_mm=6, y_mm=0, length_mm=2, width_mm=1, height_mm=.5),
+    ]
+    widget = PhotoReviewDialog(png, inventory, 40, 20)
+    try:
+        assert [widget.category_filter.itemText(i)
+                for i in range(widget.category_filter.count())] == [
+            "Tutte le categorie", "Resistor"]
+        assert [entry["kind"] for entry in widget.get_components()] == [
+            "  Resistor  ", "resistor"]
+        _select_category(widget, "Resistor")
+        assert _visible_rows(widget) == [0, 1]
+        assert widget.count_label.text() == "Componenti: 2 di 2"
+    finally:
+        widget.close()
+
+
+def test_a_row_outline_desync_fails_loudly_instead_of_hiding_the_wrong_rows(dialog):
+    """@brief Negative: index alignment is an invariant, not a case to tolerate.
+
+    Rows and outlines are created and destroyed together, so a missing row can
+    only mean the two have drifted apart. Filtering used to skip it in silence
+    and hide rows by a stale index, while ``_refresh_item`` already raised on
+    exactly the same state; one of the two had to change, and a broken
+    invariant must be the loud one. The positive side follows: once the row is
+    back, filtering works again.
+    """
+    orphan = dialog.component_list.takeItem(2)
+    try:
+        with pytest.raises(AssertionError, match="index-aligned"):
+            dialog._apply_filter()
+        with pytest.raises(AttributeError):
+            dialog._refresh_item(dialog._items[2])
+    finally:
+        dialog.component_list.insertItem(2, orphan)
+    dialog._apply_filter()
+    assert _visible_rows(dialog) == [0, 1, 2]
+
+
 def test_selecting_a_category_hides_the_other_rows_and_states_both_counts(dialog, app):
     """@brief The filter hides rows and the count says how many of how many."""
     dialog.component_list.setCurrentRow(1)

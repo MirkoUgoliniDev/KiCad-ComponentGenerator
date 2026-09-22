@@ -504,6 +504,27 @@ def test_index_result_after_close_or_stale_token_is_ignored(review, app, monkeyp
     assert dialog.selected_selection() == dict(status='rejected', path='', rotation_deg=0.0)
 
 
+@pytest.mark.parametrize('declared,expected', [
+    ('#112233', '#112233'),
+    (' #112233 ', '#112233'),      # una spaziatura non deve costare il colore
+    ('\tred\n', 'red'),
+    ('   ', None),
+    ('#12345g', None),             # caso negativo: resta il colore predefinito
+    (None, None),
+    (123456, None),
+])
+def test_declared_body_colour_survives_spacing_but_not_nonsense(app, declared, expected):
+    """Il colore campionato dalla foto va usato, o scartato, per merito suo."""
+    component = dict(name='U1', length_mm=3, width_mm=2)
+    if declared is not None:
+        component['color_hex'] = declared
+    dialog = gui.ModelCandidatesDialog(component, {'candidates': []})
+    try:
+        assert dialog._body_color == expected
+    finally:
+        dialog.reject()
+
+
 @pytest.mark.parametrize('value,display', [(None, '?'), (float('nan'), '?'),
                                          (-0.00001, '0'), (2.0, '2'), (0.1254, '0.125')])
 def test_dimension_display_handles_missing_and_small_values(value, display):
@@ -627,6 +648,163 @@ def test_degenerate_triangle_falls_back_to_the_ambient_floor(triangle):
     assert value == pytest.approx(gui._AMBIENT)
     color = gui._shaded_color(QColor(gui.DEFAULT_BODY_COLOR), value)
     assert color.isValid()
+
+
+def _triangle_with_normal(normal):
+    """Eye-space triangle whose geometric normal is exactly @p normal.
+
+    Built from two vectors perpendicular to the normal, so the test states the
+    orientation it means instead of hand-picking vertices that happen to give it.
+    """
+    nx, ny, nz = normal
+    length = math.sqrt(nx*nx + ny*ny + nz*nz)
+    nx, ny, nz = nx/length, ny/length, nz/length
+    other = (1.0, 0.0, 0.0) if abs(nx) < 0.9 else (0.0, 1.0, 0.0)
+    ux, uy, uz = (ny*other[2] - nz*other[1], nz*other[0] - nx*other[2],
+                  nx*other[1] - ny*other[0])
+    scale = math.sqrt(ux*ux + uy*uy + uz*uz)
+    ux, uy, uz = ux/scale, uy/scale, uz/scale
+    vx, vy, vz = ny*uz - nz*uy, nz*ux - nx*uz, nx*uy - ny*ux
+    return (0.0, 0.0, 0.0), (ux, uy, uz), (vx, vy, vz)
+
+
+def _dot_with_light(normal):
+    length = math.sqrt(sum(value*value for value in normal))
+    return sum(value*light for value, light in zip(normal, gui._LIGHT))/length
+
+
+#: Eye-space normal of an undercut actually measured on a 10 mm box whose +X
+#: flank is chamfered under the body: it points towards the camera (z > 0, so
+#: the face is plainly visible) yet away from the light (dot < 0, so the face
+#: must be in shadow). Connector shroud lips, draft angles under an IC body and
+#: the chamfered underside of a shield all land in this family.
+_UNDERCUT_NORMAL = (0.606, 0.770, 0.198)
+
+
+def test_an_undercut_face_is_in_shadow_and_not_lit_like_one_facing_the_light():
+    """Positive and negative case of the face a signed Lambert term must separate.
+
+    Both normals are visible from the camera and differ only in which way they
+    lean relative to the light; the shading must therefore separate them. The
+    absolute value this module used before could not: it gave the undercut the
+    intensity of its mirror image, 0.685 instead of 0.280, and the chamfer of a
+    10 mm box then rendered at lightness 0.702 against the 0.657 of the lit
+    flank next to it — brighter than a face that does point at the light.
+    """
+    away = _dot_with_light(_UNDERCUT_NORMAL)
+    assert away < 0 and _UNDERCUT_NORMAL[2] > 0
+    undercut = gui._face_intensity(*_triangle_with_normal(_UNDERCUT_NORMAL))
+    assert undercut == pytest.approx(gui._AMBIENT, abs=1e-4)
+    # Exactly the value the discarded abs() produced: naming it keeps the
+    # regression readable instead of hiding behind an inequality.
+    assert undercut != pytest.approx(
+        gui._AMBIENT + (1.0 - gui._AMBIENT)*abs(away), abs=1e-3)
+    # The same surface leaning the other way is lit, and by the full term.
+    towards = tuple(-value for value in _UNDERCUT_NORMAL[:2]) + (_UNDERCUT_NORMAL[2],)
+    lit = gui._face_intensity(*_triangle_with_normal(towards))
+    assert lit == pytest.approx(
+        gui._AMBIENT + (1.0 - gui._AMBIENT)*_dot_with_light(towards), abs=1e-4)
+    assert lit - undercut > 0.5
+    # Winding stays irrelevant: the normal is oriented against the camera, not
+    # against the triangle order.
+    for normal in (_UNDERCUT_NORMAL, towards):
+        a, b, c = _triangle_with_normal(normal)
+        assert gui._face_intensity(c, b, a) == pytest.approx(
+            gui._face_intensity(a, b, c), abs=1e-9)
+
+
+#: 10 mm box whose +X flank is chamfered under the body from z=0 to z=6: the
+#: undercut of the previous test as a whole solid, the shape a shield or a
+#: connector shroud presents to this preview.
+_CHAMFER_Z, _CHAMFER_SLOPE = 6.0, 0.6
+_UNDERCUT = [(0, 0, 0), (10-_CHAMFER_SLOPE*_CHAMFER_Z, 0, 0),
+             (10-_CHAMFER_SLOPE*_CHAMFER_Z, 10, 0), (0, 10, 0),
+             (10, 0, _CHAMFER_Z), (10, 10, _CHAMFER_Z),
+             (0, 0, 10), (10, 0, 10), (10, 10, 10), (0, 10, 10)]
+_UNDERCUT_FACES = [
+    (6, 7, 8), (6, 8, 9),                     # top
+    (4, 7, 8), (4, 8, 5),                     # +X flank above the chamfer
+    (1, 4, 5), (1, 5, 2),                     # the chamfer itself
+    (3, 2, 5), (3, 5, 8), (3, 8, 9),          # +Y flank
+    (0, 1, 4), (0, 4, 7), (0, 7, 6),          # -Y flank, hidden
+    (0, 3, 9), (0, 9, 6),                     # -X flank, hidden
+    (0, 1, 2), (0, 2, 3),                     # bottom, hidden
+]
+
+
+def test_an_undercut_solid_adds_no_tone_brighter_than_its_lit_flank(app, monkeypatch):
+    """A chamfer cut under a flank can only lose light, never gain it."""
+    cube = {round(QColor.fromRgb(rgb).lightnessF(), 3)
+            for rgb in _regions(_render(monkeypatch, _CUBE, _CUBE_FACES))}
+    regions = _regions(_render(monkeypatch, _UNDERCUT, _UNDERCUT_FACES))
+    tones = {round(QColor.fromRgb(rgb).lightnessF(), 3) for rgb in regions}
+    # Turning a surface further from the light cannot invent a shade the plain
+    # box does not have: before the fix the chamfer painted 0.702, a fourth tone
+    # brighter than the 0.657 flank it cuts into, and the chamfer disappeared.
+    assert tones <= cube, (tones, cube)
+    assert max(tones) == max(cube)
+    # The face pointing at the light stays the brightest, and it is the top one.
+    brightest = max(regions, key=lambda rgb: QColor.fromRgb(rgb).lightnessF())
+    assert regions[brightest][1] < min(rows for rgb, (_, rows) in regions.items()
+                                       if rgb != brightest)
+    flipped = _regions(_render(monkeypatch, _UNDERCUT,
+                               [tuple(reversed(face)) for face in _UNDERCUT_FACES]))
+    assert set(flipped) == set(regions)
+
+
+#: Coplanar fan: one flat disc cut into 180 triangles that all share the centre
+#: vertex. Every triangle has the same normal, so the whole disc must read as a
+#: single colour; only the seams between the triangles can break it.
+_FAN_SIDES = 180
+_FAN = [(0.0, 0.0, 0.0)] + [
+    (5*math.cos(2*math.pi*index/_FAN_SIDES), 5*math.sin(2*math.pi*index/_FAN_SIDES), 0.0)
+    for index in range(_FAN_SIDES)]
+_FAN_FACES = [(0, 1+index, 1+(index+1) % _FAN_SIDES) for index in range(_FAN_SIDES)]
+
+
+def _interior_deviation(image):
+    """Worst lightness deviation from the flat fill, away from the silhouette.
+
+    Only pixels at least three from the background are examined, so the
+    antialiased outline of the disc — which is not a seam — cannot be mistaken
+    for one.
+    """
+    background = QColor(gui.PREVIEW_BACKGROUND).rgb()
+    solid = [[image.pixel(x, y) != background for x in range(image.width())]
+             for y in range(image.height())]
+    values = []
+    for y in range(3, image.height()-3):
+        for x in range(3, image.width()-3):
+            if not solid[y][x]:
+                continue
+            if all(solid[y+dy][x+dx] for dx, dy in
+                   ((3, 0), (-3, 0), (0, 3), (0, -3), (2, 2), (2, -2), (-2, 2), (-2, -2))):
+                values.append(QColor.fromRgb(image.pixel(x, y)).lightnessF())
+    assert len(values) > 10_000, len(values)
+    flat = max(set(values), key=values.count)
+    return flat, max(abs(value - flat) for value in values)
+
+
+def test_coplanar_triangles_are_painted_without_visible_seams(app, monkeypatch):
+    """The same-colour outline must close the gaps antialiasing leaves.
+
+    @note Without it the file's own assertions stay green — _regions drops the
+    seam as too small — so this is the only test that holds the pen in place.
+    The tolerance is the 0.05 the cube test already uses to call two surfaces
+    different: a seam may not open a gap as wide as the difference between two
+    real faces. Measured worst deviation 0.020 with the pen and 0.247 without,
+    so neither side of that limit is close to it.
+    """
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtGui import QPen
+
+    flat, deviation = _interior_deviation(_render(monkeypatch, _FAN, _FAN_FACES))
+    assert deviation <= 0.05, (flat, deviation)
+    # Caso negativo: senza la penna le cuciture riaprono, e si vedono.
+    monkeypatch.setattr(gui, 'QPen', lambda *args: QPen(Qt.PenStyle.NoPen))
+    seamed_flat, seamed = _interior_deviation(_render(monkeypatch, _FAN, _FAN_FACES))
+    assert seamed_flat == flat
+    assert seamed > 0.05, seamed
 
 
 def test_face_intensity_separates_a_lit_face_from_an_edge_on_face():

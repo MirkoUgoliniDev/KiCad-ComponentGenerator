@@ -3892,3 +3892,181 @@ Cresciuti: `test_analysis_overlay.py` 30 (da 12), `test_photo_review_dialog.py`
   ragionamento (`reasoning.max_tokens`) o alzare il budget: da decidere.
 - Pulsante Annulla sulla modale (chiusura del socket nel worker).
 - Timeout HTTP di 300 s di inattivita', non totale.
+
+# 2026-09-22 (2) — «rifai un controllo approfondito»: cinque revisori, cinque correttori
+
+Commit precedente: `9a9384e`. Audit avversariale in sola lettura sul pacchetto
+delle dieci correzioni, poi cinque correttori su file disgiunti. Ogni difetto
+qui sotto e' stato **riprodotto con una sonda** prima di essere corretto, e
+ogni test nuovo e' stato verificato rosso sul codice pre-correzione.
+**Suite completa in un solo processo: 3274 passati, 11 saltati, 2 xfail,
+19 sottotest, zero rossi.**
+
+## Il difetto piu' grave: l'applicazione si chiudeva di colpo
+
+`ModelPickerDialog` (`model_dialog.py`) avviava un `QThread` non parentato per
+scaricare la lista dei modelli da OpenRouter (30 s di timeout) e non aveva
+`closeEvent`, `done` ne' distruttore che lo aspettasse. **Aprire «Scegli il
+modello LLM» e premere Annulla prima che la lista arrivasse terminava
+l'intera applicazione**, senza dialogo e senza una riga di log. Riprodotto
+fuori dalla suite (uscita 134) e dentro (3 volte su 3 con
+`pytest test_model_capabilities.py test_model_candidates_dialog.py`),
+mascherato dal solo ordine alfabetico.
+Precisazione sulla causa: su PyQt 6.11 e' PyQt stesso a trattenere un QThread
+in esecuzione, quindi non scatta il classico «Destroyed while thread is still
+running»; l'abort arriva un passo dopo, dalla lambda `finished` che tocca
+widget C++ gia' distrutti dentro uno slot Qt. Stessa classe, stessa cura.
+Correzione come nel resto del codice (`photo_review_dialog.py:1377-1385`):
+worker parentato a `QApplication.instance()`, `aboutToQuit → wait`,
+`_detach_worker()` da `done()` **e** da `closeEvent` (serve: `QDialog.closeEvent`
+chiama `reject()` solo su un dialogo visibile), slot protetti da `_alive()`.
+Chiusura immediata, misurata < 1 ms. Test di regressione in sottoprocesso,
+verificato che senza la correzione esce con SIGABRT.
+`main_window.py:933` documentava gia' questa trappola per gli altri worker:
+`model_dialog` era l'unico a non rispettarla.
+
+## Regressione mia, corretta: la generazione 2D bloccata
+
+La correzione castellated di ieri («non riaccendere mai un gruppo spento a
+mano») aveva un effetto collaterale: `_start_automatic_generation` trattava
+`_current_body_params() is None` come fatale **prima** di generare il
+footprint. Sequenza riprodotta: spegnere a mano «Modello 3D» → estrarre →
+avviso e **nessun `.kicad_mod`**. Ora il corpo e' richiesto solo se il gruppo
+e' acceso, e una corsa 2D voluta riporta «Footprint generato; modello 3D non
+richiesto» invece di un falso fallimento.
+Collegato: il gruppo 3D veniva acceso dall'estrazione **anche senza FreeCAD**
+(lo spegnimento iniziale e' programmatico, quindi non registrava la scelta
+umana), e ogni generazione finiva in errore CAD. Ora `_freecad_available`
+blocca l'accensione. Conseguenza sui test: `test_automatic_generation.py`
+presuppone FreeCAD installato e ora lo **dichiara** (`_freecad_available = True`
+in `use_ai_detector`, con il motivo scritto); il caso «FreeCAD assente» ha i
+suoi test in `test_board_pipeline.py`.
+
+## I filtri di ieri nascondevano informazioni vere
+
+Corpus di 2044 righe reali (le quattro `analisi-ai.log`/`freecad.log`
+registrate) passate nei filtri. Difetti trovati e corretti:
+
+- **`_MACHINE_MARKER` aveva uno SPAZIO nella classe di caratteri** `[: =]`, e
+  `\s*` puo' essere vuoto: la regola non era «marcatore + separatore» ma
+  «qualunque identificatore MAIUSCOLO_CON_UNDERSCORE seguito da spazio» —
+  cioe' la convenzione con cui si chiamano le sigle dei componenti. Erano
+  nascoste: `ATTENZIONE 3D: componente U1_MODULE (rf_module): geometria
+  approssimata`, `Componente J_HEADER_BLK non riconosciuto`, `Il pin RX_TX non
+  e' popolato`, e il `FAILED/PARTIAL` che nomina `U1_MODULE`. Di fatto era la
+  regola basata sui nomi che CLAUDE.md vieta, arrivata per struttura. Ora
+  ancorata a inizio riga dopo l'eventuale prefisso di inoltro, con `[:=]`.
+- **I percorsi facevano sparire gli esiti e gli errori di scrittura**:
+  `Inventario salvato: C:\…`, `Proposte del rilevatore salvate: C:\…` e
+  perfino `Inventario non salvato su disco: [Errno 28] No space left on
+  device`. Scelta: **elidere** il percorso (`…\inv.json`), non buttare la
+  riga — per un programma il cui prodotto SONO file, nominare un file non puo'
+  essere motivo di silenzio.
+- **`per_item_detail` divideva sul PRIMO `": "`**, quindi ogni frase la cui
+  coda contenesse tre punti e virgola diventava «dettaglio per componente».
+  Nascoste, su dati reali: `Estrazione completata. Confidenza: …` (l'unica
+  riga che dice che la fase AI e' finita, in entrambe le corse registrate),
+  `Credito OpenRouter: … USD residui` (un avviso di **spesa**),
+  `Inventario globale parziale: …` e `Global inventory FAILED/PARTIAL: …`.
+  Ora `rpartition`, la testa non deve contenere fine di frase, e il criterio
+  non e' piu' contare i punti e virgola ma «almeno una clausola e' un campo
+  macchina». Tolto anche il `not head` che dava verdetti opposti alla stessa
+  riga con e senza etichetta.
+- **Falsi negativi**: 101 righe `FreeCAD: (47 %)` — una percentuale nuda senza
+  referente — occupavano la scheda per tutta la fase CAD, e le righe
+  `sha256=` passavano benche' il `@note` promettesse il contrario. Aggiunte
+  regole strutturali per record `chiave=valore`, percentuali nude, intestazioni
+  di versione e copyright, marche temporali.
+- Corpus dopo: 55 occorrenze recuperate (30 distinte), 421 nuove soppressioni
+  di cui 201 la scala delle percentuali FreeCAD, **zero danni collaterali**
+  (ogni riga nuovamente soppressa e' stata elencata).
+
+## La scheda era tagliata
+
+`_CARD_WIDTH_BOUNDS[1] = 760` annullava la derivazione: da 14 pt in su la
+larghezza calcolata la superava (24 pt → 1464), e il testo veniva **tagliato**
+(a 18 pt la prima riga di stato e' mozzata in verticale). E l'intestazione
+dello strumento era tagliata **al font predefinito**: 526 px disponibili
+contro 638 necessari, resa come `AI (remoto, a consumo) · anthropic/claude-…`
+senza la parola «Modello» — mentre un filtro sopprimeva righe «perche'
+l'intestazione lo dice gia'». Ora il limite viene dal genitore/schermo, le
+righe di stato si ricontano sulla larghezza superstite, e l'intestazione e' un
+`ElidedLabel` (che pero' conserva `text()` intero, perche' `main_window` lo
+legge). Il test che «verificava» il dimensionamento era stato allentato fino a
+passare (asseriva 73 caratteri contro gli 88 derivati, su uno stato di 155
+caratteri invece del caso peggiore da 220): riscritto sulla derivazione vera e
+parametrizzato su 7/16/24 pt e su due dimensioni di finestra.
+
+## Revisione componenti
+
+- **Il doppio clic raggiungeva i rettangoli anche con il disegno armato**
+  (`MouseButtonDblClick` e' un evento diverso da `MouseButtonPress`): un tratto
+  troppo corto veniva rifiutato, l'utente ripeteva subito, e partiva il
+  selettore dei modelli 3D invece del disegno.
+- **Un corpo lungo e sottile non si poteva disegnare**: la soglia pretendeva
+  il movimento su ENTRAMBI gli assi, quindi 6 × 0.5 mm (114 px × 4 px) veniva
+  scartato in silenzio — contro la motivazione dichiarata della soglia stessa
+  («uno scarto di mano, non una misura»). Ora basta un asse. **Difetto emerso
+  dalla correzione e corretto**: con un tratto esattamente verticale
+  `QRectF.intersected` restituisce un rettangolo nullo e il corpo compariva
+  nell'angolo in alto a sinistra; sostituito con un ritaglio per asse.
+- **Il rettangolo tratteggiato sopravviveva alla finestra nascosta**: ridurre
+  a icona col pulsante premuto lasciava la banda a seguire il puntatore, e un
+  rilascio senza pressione creava un corpo mai disegnato.
+- **Invio annullava tutta la revisione**, scartando ogni correzione: il
+  `QDialogButtonBox` non ha un pulsante `AcceptRole` (Applica e' `ApplyRole`),
+  quindi Qt rendeva predefinito **Annulla**, e il fuoco parte proprio li'.
+  Preesistente, non introdotto ieri. Ora Applica e' predefinito, Annulla non
+  e' piu' auto-default e Invio applica. *Cambio di comportamento visibile:
+  chi si aspettava «Invio = Annulla» trovera' il contrario.*
+- Il pavimento metrico rispingeva fuori scheda un tratto appena ritagliato al
+  bordo; `add_component()` non disarmava il disegno; un `kind` non testuale
+  (lista, booleano) diventava una categoria inventata.
+
+## Altro
+
+- **Anteprima STEP**: `abs(n̂·L)` illuminava come esposte le facce che guardano
+  la telecamera ma voltano le spalle alla luce — uno smusso sotto un corpo
+  spariva (0.702 contro 0.657 della faccia illuminata: piu' chiaro del
+  dovuto). Ora la normale si orienta sulla **telecamera**, non sul verso della
+  tassellatura: indipendenza dal verso conservata, smusso al suo posto.
+  Dichiarato nel `@note` che l'ordinamento del pittore e' approssimato e che
+  l'ombreggiatura per faccia ne rende visibili gli errori (misurato: 5.0 % dei
+  pixel su due scatole impilate); provate e scartate le chiavi di ordinamento
+  alternative, con i numeri. Il commento sulle prestazioni sovrastimava
+  («come il riempimento piatto»): sostituito con la misura vera (+85 %).
+- **Traduzioni**: 47 stringhe su 352 non avevano le quattro lingue, incluse
+  quelle nuove di ieri — l'interfaccia mescolava italiano e inglese. Aggiunte
+  tutte; **il controllo e' ora un test** che cammina su `kicadgen/gui/` e fallisce
+  se una stringa nuova non e' nel catalogo. Tolte tre voci morte.
+- **Una fase `yolo` veniva annunciata per un rilevatore che non partiva mai**
+  (annuncio prima della calibrazione): se non c'era una vista calibrabile, la
+  modale restava sulla fase locale per tutta la corsa. Tolto l'annuncio
+  prematuro, aggiunta la chiusura di fase nel gestore d'eccezione.
+- **Righe che sparivano proprio quando contavano**: `FAILED/PARTIAL` aveva una
+  clausola fissa in coda, quindi **due** errori bastavano a superare la soglia
+  del filtro e a nascondere l'avviso mentre la modale continuava a mostrare
+  «una sola richiesta a pagamento»; e la riga del tentativo a pagamento
+  fallito interpolava il testo d'errore del fornitore, che spesso contiene
+  punti e virgola. Riformate con separatore ` · `.
+- **La fixture Qt di ieri aveva un ripiego pericoloso**: `or _APP` era
+  raggiungibile solo quando l'oggetto C++ era gia' distrutto sotto un
+  riferimento Python vivo — proprio il caso che la correzione doveva impedire —
+  e restituiva una `QApplication` morta. Tolto. Il test di regressione
+  confrontava puntatori grezzi di oggetti con vite disgiunte (misurato: 35 %
+  di riuso degli indirizzi) e passava a vuoto con `-k`: riscritto su identita'
+  di oggetti vivi e con il numero di campioni asserito.
+- **Asserzioni allentate trovate e strette**: un `or 'fallito'` che accettava
+  una situazione diversa da quella in prova, e quattro `@note` che dichiaravano
+  una garanzia («il secondo tentativo e' dichiarato a pagamento») che il test
+  non verificava. Aggiunte le asserzioni mancanti, tolte le note vacue.
+
+## Resta aperto
+
+- Modelli ragionanti (DeepSeek-flash ha bruciato 24000 token di ragionamento
+  senza rispondere): limitare `reasoning.max_tokens` o alzare il budget.
+- Pulsante Annulla sulla modale di analisi; il timeout HTTP e' di 300 s di
+  **inattivita'**, non totale.
+- A 24 pt su una finestra 640×480 la scheda della modale e' alta 850 px: il
+  limite di larghezza e' risolto, quello di altezza no.
+- L'ordinamento del pittore nell'anteprima STEP resta approssimato.

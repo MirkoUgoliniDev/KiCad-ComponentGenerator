@@ -3,8 +3,8 @@ import math
 import re
 from time import monotonic
 
-from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PyQt6.QtCore import QEvent, QPointF, QRect, QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPalette, QPen
 from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton,
                              QVBoxLayout, QWidget)
 
@@ -25,11 +25,31 @@ TOOLS = {
 #: ricostruire una corsa, non sulla scheda, dove occupano il posto di cio' che
 #: sta accadendo senza dirlo a nessuno.
 #:
-#: Il marcatore si cerca ovunque nella riga e non solo in testa: chi inoltra
-#: l'uscita di freecadcmd le antepone "FreeCAD: ", e con l'ancora iniziale
-#: passavano tutte. Serve almeno un underscore fra maiuscole, cosi' una parola
-#: sola come "ATTENZIONE:" resta una frase per chi guarda.
-_MACHINE_MARKER = re.compile(r"(?<![\w])[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\s*[: =]")
+#: Il marcatore si cerca in TESTA alla riga, dopo l'eventuale prefisso di
+#: inoltro ("FreeCAD: ") con cui chi rilancia l'uscita di freecadcmd marca la
+#: provenienza. Serve almeno un underscore fra maiuscole, cosi' una parola sola
+#: come "ATTENZIONE:" resta una frase per chi guarda.
+#:
+#: L'ancora non e' un dettaglio: UPPER_SNAKE e' in questo dominio anche la
+#: convenzione dei reference designator e dei nomi di libreria (U1_MODULE,
+#: J_HEADER_BLK, RX_TX, SW_BOOT). Cercando il marcatore *ovunque* nella riga la
+#: regola diventava di fatto una regola sui nomi dei componenti dell'utente e
+#: scartava esiti veri («Componente J_HEADER_BLK non riconosciuto: geometria
+#: generica.», «ATTENZIONE 3D: componente U1_MODULE (rf_module): geometria
+#: approssimata»). In una frase il designator non e' mai la prima parola,
+#: perche' la frase nomina prima la cosa; in una riga di servizio il marcatore
+#: apre la riga perche' e' l'intestazione del record.
+#:
+#: Dopo il marcatore si accetta ":"/"=" (forma forte, priva di ambiguita'),
+#: la fine della riga, oppure uno spazio. L'ultima alternativa e' un'euristica
+#: DICHIARATA: serve per i dump che questo programma scrive di se'
+#: ("AI_CALL_PROMPT_SYSTEM <testo del prompt>", "AI_CALL_START id=1 ...") e si
+#: appoggia solo alla posizione, quindi scarterebbe anche un'ipotetica frase
+#: che *inizi* con un designator. Diventerebbe superflua il giorno in cui
+#: ai_diagnostics separasse marcatore e payload con ":" come fanno i marcatori
+#: KICADGEN_*.
+_MACHINE_MARKER = re.compile(
+    r"^(?:\w+:\s+)?[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+(?:\s*[:=]|\s|$)")
 
 #: Il marcatore sopra riconosce solo cio' che *questo* programma stampa per se'.
 #: Sulla scheda arrivavano anche le righe che i programmi esterni scrivono sul
@@ -45,9 +65,18 @@ _MACHINE_MARKER = re.compile(r"(?<![\w])[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\s*[: =]")
 #: marcassero le proprie righe come fa questo programma.
 
 #: Decorazione: tre o piu' ripetizioni dello stesso segno di interpunzione
-#: ("******", "=====", "-----"). Il punto e' escluso: i puntini di sospensione
-#: sono normalissimi in una frase scritta per chi guarda.
-_DECORATION_RUN = re.compile(r"([^\w\s.])\1{2,}")
+#: ("******", "=====", "-----"). Sono esclusi il punto, il punto esclamativo e
+#: il punto di domanda: i puntini di sospensione e la punteggiatura enfatica
+#: ("Attenzione!!! il modello non ha risposto") sono normalissimi in una frase
+#: scritta per chi guarda, e una decorazione da tracciato non e' mai fatta di
+#: segni che in prosa portano intonazione.
+_DECORATION_RUN = re.compile(r"([^\w\s.!?])\1{2,}")
+
+#: Il punto escluso sopra va comunque distinto dalla sospensione: l'ellissi in
+#: prosa e' esattamente "..." o "…", mentre "Recompute......" e' il riempimento
+#: di una barra di avanzamento testuale. Quattro punti o piu' non sono
+#: punteggiatura in nessuna delle due lingue usate qui.
+_DOT_FILL_RUN = re.compile(r"\.{4,}")
 
 #: Chiave e valore separati da spazio-due punti-spazio ("Step File Name : C:/…",
 #: "WorkSession : Sending all data"). In prosa italiana o inglese i due punti
@@ -55,23 +84,92 @@ _DECORATION_RUN = re.compile(r"([^\w\s.])\1{2,}")
 #: segno che la riga e' un campo di un tracciato, non una frase.
 _SPACED_KEY_VALUE = re.compile(r"\S\s+:\s+\S")
 
-#: Percorso assoluto del filesystem: lettera di unita' ("C:/…", "D:\\…"),
-#: percorso UNC, o percorso POSIX con almeno due livelli ("/home/x/…"). Un
-#: percorso e' un dettaglio da log: identifica un file sul disco, non dice
-#: cosa sta accadendo. Il solo nome di un file (senza separatori) resta una
-#: frase leggibile e non viene toccato.
-_DRIVE_PATH = re.compile(r"(?<![\w])[A-Za-z]:[\\/]")
-_UNC_PATH = re.compile(r"\\\\[\w.$-]+\\")
-_POSIX_PATH = re.compile(r"(?:^|(?<=[\s(\"'=]))~?/[\w.+-]+/")
+#: Record "chiave=valore": un'etichetta breve e poi SOLO coppie, fino a fine
+#: riga ("FreeCAD exit=0, timeout=False", "Inventario globale: prompt=…;
+#: schema=…; sha256=…", "AI_CALL_END id=1 elapsed=65.664s tokens_in=16765").
+#: L'uguale attaccato al nome del campo e' come una macchina serializza un
+#: record, mentre in prosa l'uguale porta gli spazi ("drill_mm = 0 e
+#: pad_diameter_mm = larghezza stimata"). Rende vera la promessa del docstring
+#: di set_status: le righe con sha256 restano nel log.
+#:
+#: EURISTICA DICHIARATA sull'etichetta: al massimo due parole prima della prima
+#: coppia. Un record e' il NOME di cio' che si registra piu' i suoi campi; se
+#: fra il nome e i campi compare gia' un dato scritto per chi guarda la riga e'
+#: una frase, non un record. E' il solo criterio che separa «Inventario
+#: globale: prompt=…; schema=…» (record) da «Generazione TEST: 2x22,
+#: pitch=2.54mm, row_spacing=22.86mm, pad=1.7mm, drill=1.0mm» (riepilogo di
+#: cio' che si sta generando, da mostrare): le due forme sono per il resto
+#: identiche, quindi la separazione e' fragile e va pinzata da test in
+#: entrambi i versi. Diventerebbe superflua se i record portassero un
+#: marcatore come quelli KICADGEN_*.
+_KEY_VALUE_RECORD = re.compile(r"^(?:\S+\s+){0,2}\w+=\S+(?:[;,]?\s+\w+=\S+)+$")
+
+#: Percentuale nuda, senza soggetto ("(47 %)", "FreeCAD: (100 %)"). Non dice a
+#: cosa si riferisce ne' quanto manca, e resta appesa per tutta la fase del CAD
+#: al posto delle righe che dicono quale componente si sta costruendo. E' lo
+#: stesso motivo per cui set_progress rifiuta le stime sul tempo: un numero
+#: senza referente sembra un'informazione e non lo e'. La barra vera, quando un
+#: conteggio esiste, ha una riga propria.
+_BARE_PERCENT = re.compile(r"^(?:\w+:\s+)?\(?\s*\d+(?:[.,]\d+)?\s*%\s*\)?\.?$")
+
+#: Intestazioni di avvio di un programma esterno: nome piu' versione
+#: semantica ("FreeCAD 1.1.1, Libs: 1.1.1R20260414") e riga di copyright
+#: ("(C) 2001-2026 …"). Entrambe sono ancorate in testa, quindi non possono
+#: agganciare una quota o un anno citati dentro una frase.
+_VERSION_BANNER = re.compile(r"^(?:\w+:\s+)?\S+ \d+\.\d+\.\d+\b")
+_COPYRIGHT_BANNER = re.compile(r"^(?:\w+:\s+)?(?:\(c\)|©)\s*\d{4}", re.IGNORECASE)
+
+#: Marca temporale in testa alla riga, con o senza parentesi quadre
+#: ("[2026-09-21T00:08:36+02:00] FreeCAD start", "2026-09-21 00:04:13 Analisi
+#: AI"). Una riga che si auto-datifica e' un record di sessione: l'orologio
+#: della scheda dice gia' da quanto si aspetta.
+_TIMESTAMP_HEAD = re.compile(r"^\[?\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
 
 #: Conteggio di entita' fra parentesi: numero grande seguito da un'abbreviazione
-#: corta ("(134238 ents)"). Il vincolo sulle quattro cifre e sull'abbreviazione
-#: breve serve a non confondere questa forma con un conteggio scritto per chi
-#: guarda, del tipo "(3 componenti)", che ha pochi numeri e la parola intera.
-_ENTITY_COUNT = re.compile(r"\(\s*\d{4,}\s+\w{1,6}\.?\s*\)")
+#: corta e NON dentro una frase conclusa ("…/Test.step(134238 ents) Write Done",
+#: "Shapes written (98211 ents)").
+#:
+#: SEPARAZIONE DICHIARATA FRAGILE. Dal solo conteggio non si distingue
+#: "(134238 ents)" da "(12345 pezzi)": "pezzi", "test", "corpi", "righe",
+#: "fori" stanno tutti nelle sei lettere dell'abbreviazione, quindi il numero di
+#: cifre sarebbe l'unico criterio, e un criterio solo su due non basta (vedi
+#: CLAUDE.md). Il secondo criterio e' tipografico: la prosa chiude con un segno
+#: di fine frase, il record no. Cosi' "Importati (12345 pezzi) dal modello
+#: STEP." e "Suite locale: (1061 test) superati." restano sulla scheda. Anche
+#: questo resta un ripiego: una riga di prosa senza punto finale e con un
+#: conteggio a quattro cifre verrebbe scartata. Diventerebbe superflua se
+#: freecadcmd marcasse le proprie righe come fa questo programma.
+_ENTITY_COUNT = re.compile(r"\(\s*\d{4,}\s+\w{1,6}\.?\s*\)(?![^.!?…]*[.!?…]\s*$)")
 
-_MACHINE_LINE_RULES = (_MACHINE_MARKER, _DECORATION_RUN, _SPACED_KEY_VALUE,
-                       _DRIVE_PATH, _UNC_PATH, _POSIX_PATH, _ENTITY_COUNT)
+_MACHINE_LINE_RULES = (_MACHINE_MARKER, _DECORATION_RUN, _DOT_FILL_RUN,
+                       _SPACED_KEY_VALUE, _KEY_VALUE_RECORD, _BARE_PERCENT,
+                       _VERSION_BANNER, _COPYRIGHT_BANNER, _TIMESTAMP_HEAD,
+                       _ENTITY_COUNT)
+
+#: Percorso assoluto del filesystem: lettera di unita' ("C:/…", "D:\\…"),
+#: percorso UNC, o percorso POSIX con almeno due livelli ("/home/x/…").
+#:
+#: Il percorso NON e' piu' un motivo per scartare la riga. Questo e' uno
+#: strumento il cui prodotto SONO file: «Inventario salvato: …», «Proposte del
+#: rilevatore salvate: …» e soprattutto «Inventario non salvato su disco:
+#: [Errno 28] No space left on device: '…'» sono esiti che l'utente deve
+#: leggere, e la vecchia regola li nascondeva tutti, compreso un errore di
+#: scrittura, perche' il testo dell'OSError porta un percorso. Fra le due
+#: soluzioni proposte si sceglie di ACCORCIARE il percorso e tenere la riga: il
+#: criterio "quasi solo percorso" avrebbe scartato proprio «Inventario salvato:
+#: <tre percorsi>», che e' la riga da mostrare. Del percorso resta il nome del
+#: file, che e' l'unica parte che l'utente riconosce; il testo integrale e' nel
+#: log, a un clic di distanza.
+#:
+#: Il lookbehind su "/" evita di accorciare l'interno di una URL, e il secondo
+#: livello obbligatorio lascia intatti gli slug dei modelli
+#: ("anthropic/claude-opus-5") e i nomi di file senza separatori.
+_DRIVE_PATH = re.compile(r"(?<![\w])[A-Za-z]:[\\/][^\s;,'\")]*")
+_UNC_PATH = re.compile(r"\\\\[\w.$-]+\\[^\s;,'\")]*")
+_POSIX_PATH = re.compile(
+    r"(?:^|(?<=[\s(\"'=]))(?<!/)~?/[\w.+-]+/[^\s;,'\")]*")
+
+_PATH_RULES = (_DRIVE_PATH, _UNC_PATH, _POSIX_PATH)
 
 #: Lo stato viene troncato: oltre questa lunghezza la riga non si legge a colpo
 #: d'occhio e il testo integrale e' comunque nel log.
@@ -86,10 +184,27 @@ _STATUS_LINES = 3
 #: dal calcolo della larghezza: vanno d'accordo per costruzione.
 _CARD_PADDING = 28
 
-#: Estremi della larghezza calcolata. Il minimo evita una scheda smilza con
-#: caratteri molto stretti, il massimo evita una riga larga mezzo monitor, che
-#: si legge male qualunque sia il font. Non dipendono dai testi di una corsa.
-_CARD_WIDTH_BOUNDS = (480, 760)
+#: Margine fra il bordo della finestra e la scheda (per lato). E' lo stesso
+#: valore dei contentsMargins dell'overlay, e serve anche a dedurre quanta
+#: larghezza la scheda puo' davvero occupare.
+_OVERLAY_MARGIN = 24
+
+#: Larghezza minima desiderata: evita una scheda smilza con caratteri molto
+#: stretti. NON esiste piu' un massimo costante: il tetto si deduce dalla
+#: finestra che ospita l'overlay (vedi _available_card_width). Un tetto fisso
+#: (760 px) annullava la derivazione dal font e TAGLIAVA il testo dai 14 pt in
+#: su, cioe' proprio nel caso -- font grande, ipovisione -- in cui la scheda
+#: serve di piu'.
+_CARD_MIN_WIDTH = 480
+
+#: Larghezza da usare quando la finestra non ha ancora una dimensione (primo
+#: layout): e' un ripiego temporaneo, il primo resize la sostituisce.
+_CARD_FALLBACK_WIDTH = 960
+
+#: Frase peggiore possibile della lunghezza massima consentita, fatta di parole
+#: di lettere larghe: serve a contare le righe che lo stato occupa DAVVERO alla
+#: larghezza scelta, invece di fidarsi della larghezza media dei caratteri.
+_WORST_CASE_STATUS = " ".join(["M" * 8] * 30)[:_STATUS_CHAR_LIMIT]
 
 
 def is_machine_line(text):
@@ -97,14 +212,81 @@ def is_machine_line(text):
 
     @param text One status line, already collapsed to single spaces.
     @return True when the line is machine bookkeeping and belongs in the log.
-    @note Recognition is structural (markers, decoration runs, spaced key/value
-        fields, absolute paths, entity counters); no rule names a product or a
-        specific sentence, so a new external tool needs no new rule. A human
-        sentence carrying quotes, parentheses, units or a double dash keeps
-        none of those shapes and still reaches the card.
+    @note Recognition is structural (a record header in first position,
+        decoration or dot-fill runs, spaced key/value fields, key=value records,
+        referent-less percentages, start-up banners, self-dated lines and entity
+        counters); no rule names a product or a specific sentence, so a new
+        external tool needs no new rule. A human sentence carrying quotes,
+        parentheses, units, emphatic punctuation or a double dash keeps none of
+        those shapes and still reaches the card.
+    @note Naming a file is NOT one of those shapes: the outcome of this program
+        is files, so a path is shortened for display (see elide_paths) instead
+        of costing the line its place on the card.
     """
     line = " ".join(str(text or "").split())
     return any(rule.search(line) for rule in _MACHINE_LINE_RULES)
+
+
+def elide_paths(text):
+    """@brief Shorten absolute paths to "…<separator><file name>".
+
+    @param text One status line.
+    @return The same line with every absolute path reduced to its file name,
+        preceded by an ellipsis so it is visible that the path was cut.
+    @note This is what replaces dropping the line: on a card two hundred
+        characters wide a full Windows path is three quarters of the room, but
+        the file name is exactly the part the user recognises, and the outcome
+        that names it ("Inventario salvato: …", "Inventario non salvato su
+        disco: [Errno 28] …") is one of the few lines worth the space.
+    @note A model slug ("anthropic/claude-opus-5"), a bare file name and the
+        path inside a URL have no second separator preceded by a word boundary
+        and are left untouched.
+    """
+    line = str(text or "")
+    for rule in _PATH_RULES:
+        line = rule.sub(_shorten_path, line)
+    return line
+
+
+def _shorten_path(match):
+    """Keep the file name of one matched path, with the cut made visible."""
+    path = match.group(0)
+    separator = "\\" if "\\" in path else "/"
+    name = path.rstrip(separator).rpartition(separator)[2]
+    return f"…{separator}{name}" if name else path
+
+
+class ElidedLabel(QLabel):
+    """@brief One-line label that shortens its own text instead of clipping it.
+
+    @note Qt centres a non-wrapping QLabel and then cuts it on BOTH sides when
+        it does not fit: the header lost the first word ("Modello") and the last,
+        which is unreadable rather than merely short. Painting the elided text
+        keeps the beginning -- the tool and the model, the two things the header
+        exists to say -- and makes the cut visible as an ellipsis.
+    @note `text()` keeps returning the full string: main_window parses this
+        label to know which detail the header already shows, so shortening the
+        stored text would silently change that decision.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        #: Colore dell'inchiostro. Il foglio di stile di questa scheda cambia il
+        #: colore per strumento, e qui si dipinge a mano: si tiene il valore
+        #: invece di dedurlo dalla palette, che con un foglio di stile puo' non
+        #: essere aggiornata.
+        self.ink = None
+
+    def paintEvent(self, event):
+        """@brief Paint the text elided to the available width."""
+        painter = QPainter(self)
+        rect = self.contentsRect()
+        text = self.fontMetrics().elidedText(
+            self.text(), Qt.TextElideMode.ElideRight, rect.width())
+        color = (QColor(self.ink) if self.ink
+                 else self.palette().color(QPalette.ColorRole.WindowText))
+        painter.setPen(color)
+        painter.drawText(rect, int(self.alignment()), text)
 
 
 class AnalysisSpinner(QWidget):
@@ -141,7 +323,11 @@ class AnalysisSpinner(QWidget):
             self._paint_glyph(painter)
 
     def _paint_glyph(self, painter):
-        """@brief Draw the 22x22 mark centred in the ring."""
+        """@brief Draw the tool mark centred in the ring.
+
+        @note The marks span about 23x23 px inside the 42 px ring; none of them
+            reaches the ring itself, so the arc stays readable while it turns.
+        """
         pen = QPen(QColor(self.color), 1.6)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
@@ -190,10 +376,14 @@ class AnalysisSpinner(QWidget):
             # corpo. Le piazzole vuote si leggevano come un altro riquadro; il
             # pieno del rame contro il filo di contorno distingue subito questo
             # segno dal solido del CAD, che e' tutto wireframe.
+            # Tre piazzole per fila, larghe 4 px e distanti 4: il tratto del
+            # contorno (1.6 px) ne mangia 1.6 per ogni vuoto, quindi con lo
+            # stacco precedente di 1 px le tre si saldavano in una barra unica e
+            # il segno si leggeva come due barre invece di sei piazzole.
             painter.setBrush(QColor(self.color))
             for row in (17.0, 35.0):
-                for column in (18, 25, 32):
-                    painter.drawRoundedRect(QRectF(column, row, 6, 4), 1.2, 1.2)
+                for column in (18.0, 26.0, 34.0):
+                    painter.drawRoundedRect(QRectF(column, row, 4, 4), 1.2, 1.2)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             # Contorno del corpo fra le due file, staccato dalle piazzole, col
             # segno del pin 1 a sinistra: e' come si legge un footprint.
@@ -220,7 +410,7 @@ class AnalysisOverlay(QWidget):
             QProgressBar::chunk { background: #89b4fa; border-radius: 5px; }
         """)
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(24, 24, 24, 24)
+        outer.setContentsMargins(*(4 * (_OVERLAY_MARGIN,)))
         outer.addStretch()
         self.card = QFrame()
         self.card.setObjectName("analysisCard")
@@ -236,7 +426,12 @@ class AnalysisOverlay(QWidget):
         # Chi sta lavorando, in chiaro e accanto al suo segno. Senza questa
         # riga l'unico indizio erano i messaggi di servizio che scorrevano al
         # posto dello stato, che e' esattamente cio' che non si doveva leggere.
-        self.tool = QLabel()
+        # Una QLabel normale, centrata e senza a capo, veniva tagliata sui due
+        # lati gia' al font predefinito (526 px disponibili contro 638
+        # necessari): si perdeva la parola iniziale, quindi l'intestazione
+        # diventava illeggibile proprio mentre altre righe vengono scartate
+        # "perche' l'intestazione lo dice gia'".
+        self.tool = ElidedLabel()
         self.tool.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.tool.setProperty("i18n_skip", True)
         self.tool.setStyleSheet("font-weight: 600;")
@@ -273,9 +468,14 @@ class AnalysisOverlay(QWidget):
         # Sta in una riga propria, non nello stato, perche' i messaggi di
         # avanzamento della generazione lo sovrascriverebbero subito: e' il
         # motivo per cui il costo non si riusciva a leggere.
-        self.cost = QLabel()
+        # Una riga sola che si accorcia da sola, come l'intestazione: con l'a
+        # capo la riga del costo passava da una riga a due nel momento in cui il
+        # consuntivo arriva, e la scheda cambiava altezza sotto gli occhi --
+        # esattamente cio' che il dimensionamento deve evitare. Il numero sta in
+        # testa alla frase, quindi resta leggibile anche accorciata, e il testo
+        # integrale e' nel suggerimento e sulla label sotto il pulsante.
+        self.cost = ElidedLabel()
         self.cost.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.cost.setWordWrap(True)
         self.cost.setTextFormat(Qt.TextFormat.PlainText)
         self.cost.setStyleSheet("color: #a6e3a1;")
         self.cost.setProperty('i18n_skip', True)
@@ -285,6 +485,7 @@ class AnalysisOverlay(QWidget):
         self.log_button.clicked.connect(self.log_requested.emit)
         content.addWidget(self.log_button, alignment=Qt.AlignmentFlag.AlignHCenter)
         self._size_the_card()
+        self.status.installEventFilter(self)
         outer.addWidget(self.card, alignment=Qt.AlignmentFlag.AlignHCenter)
         outer.addStretch()
         self.timer = QTimer(self)
@@ -299,8 +500,27 @@ class AnalysisOverlay(QWidget):
             self.i18n.retranslate_widgets(self)
         self.hide()
 
+    def _available_card_width(self):
+        """@brief Widest card the hosting window can show without clipping.
+
+        @return Maximum card width in pixels, margins already subtracted.
+        @note Il tetto va dedotto, non scelto: una costante (760 px) era insieme
+            troppo bassa -- annullava la derivazione dal font e tagliava il testo
+            dai 14 pt in su -- e troppo alta, perche' 760 px di minimo piu' i
+            margini non stanno in una finestra da 640 px e la scheda finiva
+            tagliata di lato.
+        """
+        parent = self.parentWidget()
+        room = parent.width() if parent is not None else 0
+        if room <= 0:
+            screen = self.screen()
+            room = screen.availableGeometry().width() if screen is not None else 0
+        if room <= 0:
+            room = _CARD_FALLBACK_WIDTH
+        return max(1, room - 2 * _OVERLAY_MARGIN)
+
     def _size_the_card(self):
-        """Dimensiona la scheda sul contenuto, non sui testi di una corsa.
+        """@brief Size the card on its content, not on the texts of one run.
 
         La scheda era troppo bassa e strozzata: lo stato andava a capo male e
         le righe che compaiono a meta' operazione (strumento, barra, costo) la
@@ -309,13 +529,23 @@ class AnalysisOverlay(QWidget):
         Larghezza: lo stato e' troncato a `_STATUS_CHAR_LIMIT` caratteri, quindi
         la larghezza che serve e' quella che li distribuisce su `_STATUS_LINES`
         righe, misurata con le metriche del font effettivo (`averageCharWidth`),
-        non con un numero di pixel scelto a occhio su una frase. Gli estremi
-        `_CARD_WIDTH_BOUNDS` tengono il risultato leggibile con font estremi.
+        non con un numero di pixel scelto a occhio su una frase. Il minimo
+        `_CARD_MIN_WIDTH` tiene leggibile un font molto stretto; il massimo NON
+        e' una costante ma la larghezza che la finestra concede davvero.
 
-        Altezza: allo stato si riservano `_STATUS_LINES` righe piene (minimo, non
-        massimo: una quarta riga imprevista si vede ancora), e le tre righe
-        facoltative mantengono il proprio spazio anche da nascoste, cosi'
-        l'altezza complessiva e' quella di una scheda piena dall'inizio.
+        Altezza: quando il tetto della finestra morde, la larghezza voluta non
+        c'e' e le righe dello stato non sono piu' tre. Si CONTANO alla larghezza
+        sopravvissuta, misurando l'ingombro della frase peggiore possibile
+        (`_WORST_CASE_STATUS`, lettere larghe) con le metriche vere: e' la
+        differenza fra un testo che va a capo e un testo tagliato a meta' di una
+        riga. `_STATUS_LINES` resta il minimo, cosi' la scheda non si abbassa
+        quando il font e' minuscolo.
+
+        Le tre righe facoltative mantengono il proprio spazio anche da nascoste,
+        cosi' l'altezza complessiva e' quella di una scheda piena dall'inizio.
+
+        @note L'intestazione dello strumento si accorcia da sola (ElidedLabel),
+            quindi una riga le basta a qualunque font e non entra nel conteggio.
         """
         metrics = self.status.fontMetrics()
         # Mezza riga di margine: `averageCharWidth` e' una media, e con una frase
@@ -323,13 +553,20 @@ class AnalysisOverlay(QWidget):
         # facendo crescere la scheda. Dimensionando la larghezza su due righe e
         # mezza, tre righe bastano anche nel caso peggiore.
         chars_per_line = math.ceil(_STATUS_CHAR_LIMIT / (_STATUS_LINES - 0.5))
-        low, high = _CARD_WIDTH_BOUNDS
-        width = 2 * _CARD_PADDING + metrics.averageCharWidth() * chars_per_line
-        width = max(low, min(high, width))
+        wanted = 2 * _CARD_PADDING + metrics.averageCharWidth() * chars_per_line
+        width = min(self._available_card_width(), max(_CARD_MIN_WIDTH, wanted))
         self.card.setMinimumWidth(width)
         self.card.setMaximumWidth(width)
-        self.status.setMinimumHeight(_STATUS_LINES * metrics.lineSpacing()
+        usable = max(1, width - 2 * _CARD_PADDING)
+        wrapped = metrics.boundingRect(QRect(0, 0, usable, 0),
+                                       int(Qt.TextFlag.TextWordWrap),
+                                       _WORST_CASE_STATUS)
+        lines = max(_STATUS_LINES,
+                    math.ceil(wrapped.height() / max(1, metrics.lineSpacing())))
+        self.status.setMinimumHeight(lines * metrics.lineSpacing()
                                      + metrics.descent())
+        self.tool.setMinimumHeight(self.tool.fontMetrics().lineSpacing())
+        self.cost.setMinimumHeight(self.cost.fontMetrics().lineSpacing())
         # Spazio riservato anche quando la riga e' nascosta: evita che la scheda
         # salti quando lo strumento, la barra o il costo compaiono a operazione
         # avviata. La visibilita' logica non cambia (isVisibleTo resta falso).
@@ -339,10 +576,38 @@ class AnalysisOverlay(QWidget):
             row.setSizePolicy(policy)
         self.card.setMinimumHeight(self.card.sizeHint().height())
 
+    def changeEvent(self, event):
+        """@brief Re-derive the card size when the font or the style changes.
+
+        @note Il calcolo stava solo in `__init__`: un cambio di tema o del font
+            di accessibilita' a programma avviato lasciava la scheda dimensionata
+            sulle metriche vecchie, cioe' col testo tagliato -- proprio il
+            difetto che il calcolo doveva evitare.
+        """
+        super().changeEvent(event)
+        if getattr(self, "card", None) is None:
+            return
+        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange,
+                            QEvent.Type.ApplicationFontChange):
+            self._size_the_card()
+
     def eventFilter(self, watched, event):
-        """@brief Keep the overlay covering its parent as the window resizes."""
+        """@brief Keep the overlay covering its parent and sized on its metrics.
+
+        @note Il tetto della larghezza dipende dalla finestra, quindi si
+            ricalcola al resize: rimpicciolendo la finestra una scheda
+            dimensionata per la vecchia larghezza resterebbe tagliata di lato.
+        @note Il cambio di font si intercetta SULLA label dello stato, non
+            sull'overlay: il foglio di stile di questa scheda fissa il font dei
+            propri figli, quindi un nuovo font di sistema arriva alla label
+            (quando il tema viene riapplicato) senza passare da qui. Sizing e
+            metriche misurate devono restare la stessa cosa.
+        """
         if watched is self.parentWidget() and event.type() == QEvent.Type.Resize:
             self.setGeometry(watched.rect())
+            self._size_the_card()
+        elif watched is self.status and event.type() == QEvent.Type.FontChange:
+            self._size_the_card()
         return super().eventFilter(watched, event)
 
     def start(self, title='Analisi AI in corso', status='Preparazione dei documenti…'):
@@ -367,11 +632,16 @@ class AnalysisOverlay(QWidget):
         @param detail Free text appended in parentheses, e.g. the model name.
         @note An unknown key is treated as no tool rather than raising: a new
             phase must never be able to take down a running analysis.
+        @note The label keeps the full text and shortens it only while painting:
+            main_window reads `tool.text()` to know which detail the header
+            already carries.
         """
         name, color, glyph = TOOLS.get(str(tool or ""), ("", "#89b4fa", ""))
         self.spinner.set_tool(glyph, color)
         detail = " ".join(str(detail or "").split())
         self.tool.setText(f"{name} · {detail}" if name and detail else name)
+        self.tool.setToolTip(self.tool.text())
+        self.tool.ink = color
         self.tool.setStyleSheet(f"font-weight: 600; color: {color};")
         self.tool.setVisible(bool(name))
         self.progress.setStyleSheet(
@@ -416,18 +686,25 @@ class AnalysisOverlay(QWidget):
         essere visto, pur essendo gia' calcolato.
         """
         self.cost.setText(str(text or ""))
+        self.cost.setToolTip(self.cost.text())
         self.cost.setVisible(bool(text))
 
     def set_status(self, message):
         """@brief Show one line of human status, never a service line.
 
         @param message Status line; machine bookkeeping is dropped, not shown.
-        @note Le righe che il programma scrive per se' (AI_CALL_..., sha256,
-            esiti di importazione) e quelle che gli strumenti esterni scrivono
-            sul proprio stdout (percorsi, campi "chiave : valore", conteggi di
-            entita', righe di sole decorazioni) restano nel log e non arrivano
-            qui: sulla scheda occupavano il posto di cio' che stava accadendo
-            senza dirlo. Il pulsante del log resta a un clic di distanza.
+        @note Le righe che il programma scrive per se' (AI_CALL_... in testa
+            alla riga, record "chiave=valore" con le impronte sha256) e quelle
+            che gli strumenti esterni scrivono sul proprio stdout (campi
+            "chiave : valore", conteggi di entita', decorazioni, intestazioni di
+            versione e copyright, righe auto-datate, percentuali senza soggetto)
+            restano nel log e non arrivano qui: sulla scheda occupavano il posto
+            di cio' che stava accadendo senza dirlo. Il pulsante del log resta a
+            un clic di distanza.
+        @note Un percorso NON fa scartare la riga: viene accorciato al nome del
+            file (vedi elide_paths). Il prodotto di questo strumento sono file,
+            quindi «Inventario salvato: …» e «Inventario non salvato su disco:
+            [Errno 28] …» sono esiti, non contabilita' interna.
         @note Quando una riga viene scartata l'ultimo stato leggibile *resta*
             scritto: azzerare la label farebbe sembrare l'operazione bloccata,
             che e' il difetto che questo filtro deve evitare, non causare.
@@ -437,6 +714,7 @@ class AnalysisOverlay(QWidget):
         if is_machine_line(source):
             return
         text = self.i18n.text(source) if self.i18n is not None else source
+        text = elide_paths(text)
         self.status.setText(text if len(text) <= _STATUS_CHAR_LIMIT
                             else text[:_STATUS_CHAR_LIMIT - 3] + "…")
 

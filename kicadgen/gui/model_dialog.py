@@ -15,9 +15,10 @@ from __future__ import annotations
 
 from typing import Optional
 
+from PyQt6 import sip
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox,
+    QAbstractItemView, QApplication, QCheckBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
     QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
@@ -49,14 +50,37 @@ class _ModelsWorker(QThread):
     L'elenco e' circa un megabyte e il timeout arriva a 30 secondi: farlo
     sul thread della GUI significherebbe una finestra congelata, senza
     nemmeno il modo di annullare.
+
+    @note Il thread non appartiene alla finestra che lo avvia ma a
+    QApplication. Un QThread ancora in corsa distrutto insieme alla finestra
+    fa terminare l'intero processo — lo stesso rischio annotato in
+    `main_window.choose_model` per i worker della revisione fotografica — e i
+    30 secondi di timeout rendono la finestra chiusa in anticipo il caso
+    normale, non l'eccezione. Con la proprieta' in mano a Qt il worker
+    sopravvive alla finestra, si elimina da se' quando ha finito e l'uscita
+    dall'applicazione lo attende invece di distruggerlo.
     """
 
     done = pyqtSignal(object)
     error = pyqtSignal(str)
 
-    def __init__(self, force_refresh: bool = False):
-        super().__init__()
+    def __init__(self, force_refresh: bool = False, parent=None):
+        """@brief Prepare one model-list download owned by @p parent.
+
+        @param force_refresh True to ignore the local models cache.
+        @param parent Owner of the thread; pass QApplication.instance() so that
+            no dialog can destroy the download while it is still running.
+        """
+        super().__init__(parent)
         self.force_refresh = force_refresh
+        application = QApplication.instance()
+        if application is not None:
+            # Uscire dall'applicazione mentre il download e' in volo
+            # distruggerebbe il thread in corsa: si attende invece che esca da
+            # list_models. L'attesa non e' indefinita, il limite e' il timeout
+            # HTTP della richiesta.
+            application.aboutToQuit.connect(self.wait)
+        self.finished.connect(self._release)
 
     def run(self) -> None:
         """@brief Provide the run operation for this workflow."""
@@ -66,6 +90,24 @@ class _ModelsWorker(QThread):
             self.error.emit(str(exc))
         except Exception as exc:  # noqa: BLE001 - riportato nel dialogo
             self.error.emit(f"Errore inatteso: {exc}")
+
+    def _release(self) -> None:
+        """Scioglie l'attesa all'uscita e si elimina, una volta finito.
+
+        La promessa di `wait` vale solo finche' il thread esiste: lasciandola
+        attiva, all'uscita Qt chiamerebbe `wait` su un oggetto gia' eliminato
+        da `deleteLater` e l'applicazione terminerebbe con RuntimeError. E' la
+        stessa sequenza dei worker della revisione fotografica.
+        """
+        application = QApplication.instance()
+        if application is not None:
+            try:
+                application.aboutToQuit.disconnect(self.wait)
+            except TypeError:
+                # Mai connessa (nessuna QApplication alla costruzione) o gia'
+                # sciolta: in entrambi i casi non c'e' nulla da sciogliere.
+                pass
+        self.deleteLater()
 
 
 class _NumericItem(QTableWidgetItem):
@@ -108,6 +150,7 @@ class ModelPickerDialog(QDialog):
         self._models: list[ModelInfo] = []
         self._selected = current_model or ""
         self._worker: Optional[_ModelsWorker] = None
+        self._closed = False
 
         layout = QVBoxLayout(self)
 
@@ -198,7 +241,20 @@ class ModelPickerDialog(QDialog):
 
     # ── Dati ────────────────────────────────────────────────────────
 
+    def _alive(self) -> bool:
+        """Vero finche' questa finestra puo' ancora essere aggiornata.
+
+        Il download dura fino a 30 secondi e non viene interrotto: il risultato
+        puo' quindi arrivare quando la finestra e' stata chiusa, oppure quando
+        i suoi widget sono stati distrutti perche' e' morto il genitore. Un
+        aggiornamento in uno dei due casi solleverebbe RuntimeError dentro uno
+        slot Qt, e PyQt fa terminare il processo: si controlla prima.
+        """
+        return not self._closed and not sip.isdeleted(self)
+
     def _load_models(self, force_refresh: bool = False) -> None:
+        if self._closed:
+            return
         if self._worker is not None and self._worker.isRunning():
             return
         self.label_selected.setText(
@@ -207,18 +263,77 @@ class ModelPickerDialog(QDialog):
         )
         self.btn_refresh.setEnabled(False)
 
-        self._worker = _ModelsWorker(force_refresh)
+        # Proprieta' a QApplication, non a questa finestra: vedi _ModelsWorker.
+        self._worker = _ModelsWorker(force_refresh, parent=QApplication.instance())
         self._worker.done.connect(self._on_models_loaded)
         self._worker.error.connect(self._on_models_error)
-        self._worker.finished.connect(lambda: self.btn_refresh.setEnabled(True))
+        self._worker.finished.connect(self._worker_finished)
         self._worker.start()
 
+    def _worker_finished(self) -> None:
+        """Riabilita l'aggiornamento, se c'e' ancora una finestra da riabilitare.
+
+        Un metodo e non una lambda: la lambda resterebbe viva insieme al worker
+        (che ora sopravvive alla finestra) e toccherebbe widget gia' eliminati.
+        """
+        self._worker = None
+        if not self._alive():
+            return
+        self.btn_refresh.setEnabled(True)
+
+    def _detach_worker(self) -> None:
+        """Slega il download in corso da questa finestra, senza fermarlo.
+
+        Chi chiude non deve attendere il megabyte dell'elenco, e il thread non
+        si puo' distruggere mentre gira: resta vivo sotto QApplication e si
+        elimina da se' alla fine. Qui si tagliano solo i tre collegamenti verso
+        questa finestra, cosi' un risultato tardivo non tocca piu' nulla.
+        """
+        worker = self._worker
+        self._worker = None
+        if worker is None or sip.isdeleted(worker):
+            return
+        for signal, slot in ((worker.done, self._on_models_loaded),
+                             (worker.error, self._on_models_error),
+                             (worker.finished, self._worker_finished)):
+            try:
+                signal.disconnect(slot)
+            except TypeError:
+                # Gia' sciolto: il worker puo' essere finito prima della
+                # chiusura, e disconnettere due volte non e' un errore qui.
+                pass
+
+    def closeEvent(self, event) -> None:
+        """@brief Detach a running download even when the dialog was never shown.
+
+        @param event Qt close event.
+        @note QDialog.closeEvent only calls reject() on a *visible* dialog, so a
+        window closed before it was ever shown would never pass through done():
+        this override is what covers that path.
+        """
+        self._closed = True
+        self._detach_worker()
+        super().closeEvent(event)
+
+    def done(self, result: int) -> None:
+        """@brief Close immediately, letting a running download finish on its own.
+
+        @param result Qt Accepted or Rejected dialog result.
+        """
+        self._closed = True
+        self._detach_worker()
+        super().done(result)
+
     def _on_models_loaded(self, models: list) -> None:
+        if not self._alive():
+            return
         self._models = models
         self._apply_filters()
         self._update_selected_label()
 
     def _on_models_error(self, message: str) -> None:
+        if not self._alive():
+            return
         self._update_selected_label()
         title = self.i18n.text("Elenco modelli") if self.i18n is not None else "Elenco modelli"
         QMessageBox.warning(self, title, message)

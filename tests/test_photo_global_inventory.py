@@ -293,6 +293,31 @@ def run_replies(replies, items=None, cache=None, **kwargs):
     return result, calls, logs
 
 
+def run_failing_second(first, items, error, cache=None, **kwargs):
+    """@brief Prima risposta finta, seconda chiamata che fallisce come l'API.
+
+    @param first Risposta della prima chiamata (quella che omette i campi).
+    @param items Proposte del rilevatore locale.
+    @param error Testo dell'errore sollevato dalla seconda chiamata, cioe' cio'
+        che arriva davvero da OpenRouter: non e' testo nostro e puo' contenere
+        qualunque punteggiatura.
+    @return (risultato, chiamate, log), come `run_replies`.
+    """
+    from kicadgen.services.openrouter import OpenRouterError
+    calls, logs = [], []
+
+    def fake(**request):
+        calls.append(request)
+        if len(calls) >= 2:
+            raise OpenRouterError(error)
+        return deepcopy(first)
+
+    result = review_yolo_components(np.zeros((60, 120, 3), np.uint8), items,
+                                    40, 20, 'unchanged/model', fake, logs.append,
+                                    cache, strategy='global', **kwargs)
+    return result, calls, logs
+
+
 def seed_cache(cache, request, data):
     """@brief Scrive su disco la cache che una corsa precedente avrebbe lasciato.
 
@@ -1156,12 +1181,10 @@ def test_a_contract_omission_is_retried_once_and_the_complete_answer_wins(tmp_pa
 def test_a_complete_answer_is_never_retried(tmp_path):
     """@brief Negativo: con tutti i campi c'e' una sola chiamata, e la cache si scrive.
 
-    @note Contratto dei log aggiornato: gli avanzamenti dell'inventario
-        globale sono passati in italiano (l'interfaccia lo e') e non ripetono
-        piu' l'identificativo del modello, che la modale mostra
-        nell'intestazione. Le asserzioni seguono la frase nuova senza
-        allentarsi: continuano a esigere che il secondo tentativo sia
-        dichiarato a pagamento e che il suo esito sia detto esplicitamente.
+    @note Qui non c'e' nessun secondo tentativo, quindi non c'e' nessuna
+        dichiarazione di spesa da esigere: cio' che si asserisce e' l'assenza
+        della riga. La dichiarazione «a pagamento» del retry e' contratto dei
+        test in cui il retry avviene davvero.
     """
     items = [candidate(1), dict(candidate(2), _box=[.6, .6, .7, .7])]
     data = _two_row_response([_clean_row('R1', 1, [.2, .2, .4, .4]),
@@ -1182,12 +1205,9 @@ def test_a_retry_that_still_omits_keeps_the_first_answer_and_declares_it(tmp_pat
     presenza ripiega sulla confidenza complessiva (vedi `_presence`) e una
     risposta cosi' non finisce in cache come buona.
 
-    @note Contratto dei log aggiornato: gli avanzamenti dell'inventario
-        globale sono passati in italiano (l'interfaccia lo e') e non ripetono
-        piu' l'identificativo del modello, che la modale mostra
-        nell'intestazione. Le asserzioni seguono la frase nuova senza
-        allentarsi: continuano a esigere che il secondo tentativo sia
-        dichiarato a pagamento e che il suo esito sia detto esplicitamente.
+    @note Il secondo tentativo qui avviene davvero, quindi si esige che sia
+        dichiarato A PAGAMENTO e che il suo esito sia detto esplicitamente:
+        sono due frasi distinte nel log e il test le pretende entrambe.
     """
     items = [candidate(1), dict(candidate(2), _box=[.6, .6, .7, .7])]
     rows = _without(('presence_confidence', 'class_confidence'),
@@ -1203,7 +1223,11 @@ def test_a_retry_that_still_omits_keeps_the_first_answer_and_declares_it(tmp_pat
     assert all(r['_global_inventory_status'] == 'partial' for r in result)
     assert [r['presence_confidence'] for r in result] == ['high', 'low']
     assert [r['class_confidence'] for r in result] == ['high', 'low']
-    assert any('che omette ancora presence_confidence, class_confidence' in line for line in logs)
+    assert 'a pagamento' in _retry_charge_line(logs)
+    outcome = _retry_outcome_line(logs)
+    assert 'che omette ancora presence_confidence, class_confidence' in outcome
+    assert 'si tiene la prima risposta' in outcome
+    assert 'fallito' not in outcome, 'il secondo tentativo ha risposto, non e’ fallito'
     assert not list(tmp_path.glob('*.json'))
 
 
@@ -1213,12 +1237,9 @@ def test_a_field_missing_on_some_rows_only_is_a_row_omission_not_a_retry(tmp_pat
     La riga senza il campo ripiega sulla confidenza complessiva, l'altra tiene
     il valore dichiarato, e nessuno paga una seconda chiamata.
 
-    @note Contratto dei log aggiornato: gli avanzamenti dell'inventario
-        globale sono passati in italiano (l'interfaccia lo e') e non ripetono
-        piu' l'identificativo del modello, che la modale mostra
-        nell'intestazione. Le asserzioni seguono la frase nuova senza
-        allentarsi: continuano a esigere che il secondo tentativo sia
-        dichiarato a pagamento e che il suo esito sia detto esplicitamente.
+    @note Nessun secondo tentativo: cio' che si esige e' che il log non ne
+        parli affatto. Pretendere qui la dichiarazione di spesa del retry
+        sarebbe una promessa vuota, perche' la riga non esiste.
     """
     items = [candidate(1), dict(candidate(2), _box=[.6, .6, .7, .7])]
     declared = _clean_row('R1', 1, [.2, .2, .4, .4])
@@ -1263,12 +1284,13 @@ def test_a_degenerate_retry_never_replaces_the_first_answer(tmp_path, degenerate
     e sostituiva la prima, che aveva due righe valide: si sarebbero perse le
     righe per far posto al nulla.
 
-    @note Contratto dei log aggiornato: gli avanzamenti dell'inventario
-        globale sono passati in italiano (l'interfaccia lo e') e non ripetono
-        piu' l'identificativo del modello, che la modale mostra
-        nell'intestazione. Le asserzioni seguono la frase nuova senza
-        allentarsi: continuano a esigere che il secondo tentativo sia
-        dichiarato a pagamento e che il suo esito sia detto esplicitamente.
+    @note Il secondo tentativo avviene: si esige che sia dichiarato A
+        PAGAMENTO e che il suo esito sia detto per quello che e'. Per tutti e
+        quattro i parametri il codice prende lo stesso ramo, quello delle
+        righe mancanti: accettare in alternativa «fallito» non tollererebbe
+        una frase diversa, tollererebbe un'AFFERMAZIONE diversa sui soldi
+        dell'utente -- «la chiamata e' fallita» invece di «ha risposto senza
+        righe» -- e la lascerebbe passare per sempre.
     """
     items = [candidate(1), dict(candidate(2), _box=[.6, .6, .7, .7])]
     complete = [dict(_clean_row('R1', 1, [.2, .2, .4, .4]), confidence='medium'),
@@ -1280,10 +1302,213 @@ def test_a_degenerate_retry_never_replaces_the_first_answer(tmp_path, degenerate
     assert len(kept) == 2, 'le righe della prima risposta devono restare'
     assert all(r['presence_confidence'] == 'medium' for r in kept), \
         'la presenza ripiega sulla confidenza complessiva della prima risposta'
-    assert any('senza righe da giudicare' in line or 'fallito' in line for line in logs)
+    assert 'a pagamento' in _retry_charge_line(logs)
+    outcome = _retry_outcome_line(logs)
+    assert 'senza righe da giudicare' in outcome
+    assert 'si tiene la prima risposta' in outcome
+    assert 'fallito' not in outcome, \
+        'la chiamata ha risposto: dirla fallita direbbe un’altra cosa sulla spesa'
+
+
+def _retry_charge_line(logs):
+    """@brief La riga che ANNUNCIA la spesa del secondo tentativo."""
+    lines = [line for line in logs if 'un solo nuovo tentativo' in line]
+    assert len(lines) == 1, f'una sola riga deve annunciare il secondo tentativo: {lines}'
+    return lines[0]
+
+
+def _retry_outcome_line(logs):
+    """@brief La riga che dichiara l'ESITO del secondo tentativo a pagamento."""
+    lines = [line for line in logs
+             if line.startswith('Inventario globale: nuovo tentativo ')]
+    assert len(lines) == 1, f'un solo esito del secondo tentativo: {lines}'
+    return lines[0]
+
+
+# ── Forma delle righe che parlano di spesa: non devono poter sparire ──
+#
+# Il filtro della modale (`per_item_detail`) riconosce il rendiconto
+# per-elemento dalla forma «intestazione: campo; campo; campo». Una riga di
+# fase che elenchi i suoi motivi con il punto e virgola cambia forma al
+# crescere dei motivi, e finiva nascosta proprio nei casi peggiori: due errori
+# di contabilita', o un errore dell'API che contiene punti e virgola. Il
+# contratto verificato qui e' quello del SERVIZIO -- la riga non produce
+# clausole -- e resta valido qualunque sia la taratura del filtro nella GUI.
+
+
+def _semicolon_clauses(line):
+    """@brief Le clausole che il filtro della modale conterebbe in questa riga."""
+    return line.partition(': ')[2].split(';')
+
+
+def _two_accounting_errors(items):
+    """@brief Risposta con DUE errori di contabilita', uno per riga.
+
+    Ogni riga dichiara di assorbire la propria proposta e poi la lascia fuori
+    dal proprio rettangolo: due errori distinti, ognuno attribuito alla sua
+    riga.
+    """
+    return dict(
+        components=[body('M1', [1], bbox=[.05, .05, .1, .1], grouping_basis='single_body',
+                         presence_confidence='high', class_confidence='medium'),
+                    body('M2', [2], bbox=[.9, .9, .95, .95], grouping_basis='single_body',
+                         presence_confidence='high', class_confidence='medium')],
+        candidate_decisions=[dict(candidate_id=1, status='merge', component_id='M1',
+                                  reason='fuori dal rettangolo'),
+                             dict(candidate_id=2, status='merge', component_id='M2',
+                                  reason='fuori dal rettangolo')],
+        uncertainties=[])
+
+
+def _failed_partial_line(logs):
+    """@brief L'unica riga che dichiara l'inventario parziale o fallito."""
+    lines = [line for line in logs if 'FAILED/PARTIAL' in line]
+    assert len(lines) == 1, f'un solo avviso FAILED/PARTIAL: {lines}'
+    return lines[0]
+
+
+def test_the_partial_failure_warning_keeps_its_shape_with_two_errors():
+    """@brief Positivo: due errori restano una riga sola, senza clausole.
+
+    Due errori di contabilita' sono il caso in cui l'avviso serve di piu', ed
+    erano il caso in cui spariva: la riga vecchia («err; err; proposte
+    irrisolte conservate.») raggiungeva tre clausole e veniva nascosta, mentre
+    la riga «una sola richiesta a pagamento…» restava visibile. L'utente
+    vedeva una chiamata pagata dall'aria riuscita.
+    """
+    items = [candidate(1), dict(candidate(2), _box=[.6, .6, .7, .7])]
+    _, _, logs = run(_two_accounting_errors(items), items)
+    line = _failed_partial_line(logs)
+    assert 'component M1' in line and 'component M2' in line
+    assert '2 problemi' in line and 'proposte irrisolte conservate' in line
+    assert len(_semicolon_clauses(line)) == 1, line
+    assert line.startswith('Inventario globale FAILED/PARTIAL: component M1'), \
+        'gli errori restano subito dopo il marcatore, dove i parser li cercano'
+
+
+def test_the_partial_failure_warning_has_the_same_shape_with_one_error():
+    """@brief Negativo/controprova: con un solo errore la forma non cambia.
+
+    E' la coppia del test precedente: la visibilita' dell'avviso non deve
+    dipendere da quanti errori ci sono, e il numero va detto al singolare
+    quando e' uno.
+    """
+    data = response()
+    data['components'] = [body('visible', [1], bbox=[.6, .6, .8, .8],
+                               presence_confidence='high', class_confidence='low')]
+    data['candidate_decisions'] = [dict(candidate_id=1, status='keep',
+                                        component_id='visible', reason='associazione errata')]
+    _, _, logs = run(data, [candidate()])
+    line = _failed_partial_line(logs)
+    assert '1 problema' in line and '1 problemi' not in line
+    assert len(_semicolon_clauses(line)) == 1, line
+
+
+def test_the_retry_failure_line_survives_an_api_error_full_of_semicolons(tmp_path):
+    """@brief Positivo: l'errore dell'API non decide se la riga si vede.
+
+    E' la riga che dice che una SECONDA chiamata a pagamento e' stata spesa e
+    non ha prodotto nulla, mentre quella che annuncia la spesa resta. Gli
+    errori upstream contengono di routine punti e virgola («HTTP 502; upstream
+    timeout; retry later»): interpolati tali e quali portavano la riga a
+    quattro clausole e la facevano scomparire. Il motivo resta leggibile per
+    intero: cambia la punteggiatura, non il contenuto.
+    """
+    items = [candidate(1), dict(candidate(2), _box=[.6, .6, .7, .7])]
+    complete = [dict(_clean_row('R1', 1, [.2, .2, .4, .4]), confidence='medium'),
+                dict(_clean_row('R2', 2, [.6, .6, .7, .7]), confidence='medium')]
+    first = _two_row_response(_without(('presence_confidence', 'class_confidence'), *complete))
+    result, calls, logs = run_failing_second(first, items, 'HTTP 502; upstream timeout; retry later')
+    assert len(calls) == 2, 'la seconda chiamata e’ stata tentata e pagata'
+    assert 'a pagamento' in _retry_charge_line(logs)
+    line = _retry_outcome_line(logs)
+    assert 'fallito' in line and 'si tiene la prima risposta' in line
+    for fragment in ('HTTP 502', 'upstream timeout', 'retry later'):
+        assert fragment in line, line
+    assert ';' not in line, line
+    assert len(_semicolon_clauses(line)) == 1, line
+    assert [r['presence_confidence'] for r in result
+            if r.get('component_id') in ('R1', 'R2')] == ['medium', 'medium']
+
+
+def test_the_retry_failure_line_is_not_a_per_item_report_for_the_modal(tmp_path):
+    """@brief Le due righe riformate non sono rendiconti per-elemento.
+
+    Controllo di integrazione contro il filtro vero della GUI, cosi' il
+    contratto non resta un'asserzione sulla punteggiatura: entrambe le righe
+    devono arrivare in modale con un errore dell'API pieno di punti e virgola
+    e con due errori di contabilita'.
+    """
+    per_item_detail = pytest.importorskip('kicadgen.gui.main_window').per_item_detail
+    items = [candidate(1), dict(candidate(2), _box=[.6, .6, .7, .7])]
+    complete = [dict(_clean_row('R1', 1, [.2, .2, .4, .4]), confidence='medium'),
+                dict(_clean_row('R2', 2, [.6, .6, .7, .7]), confidence='medium')]
+    first = _two_row_response(_without(('presence_confidence', 'class_confidence'), *complete))
+    _, _, logs = run_failing_second(first, items, 'HTTP 502; upstream timeout; retry later')
+    assert not per_item_detail(_retry_outcome_line(logs))
+    assert not per_item_detail(_failed_partial_line(logs))
+    _, _, logs = run(_two_accounting_errors(items), items)
+    assert not per_item_detail(_failed_partial_line(logs))
 
 
 # ── Riga di avanzamento della richiesta a pagamento ──────────────────
+
+
+@pytest.mark.parametrize('images,proposals,singular_image,singular_proposal', [
+    (1, 1, True, True),
+    (5, 2, False, False),
+    (1, 3, True, False),
+    (4, 1, False, True),
+])
+def test_the_paid_request_line_agrees_in_number(images, proposals,
+                                                singular_image, singular_proposal):
+    """@brief Positivo e negativo: singolare e plurale concordano su entrambi i conteggi.
+
+    Il docstring della riga promette l'accordo «anche con una sola immagine o
+    una sola proposta», e i rami singolari non erano coperti da nessun test:
+    quello dell'immagine non e' nemmeno raggiungibile dalla richiesta di oggi,
+    che parte sempre con la foto piena e tre strisce di contesto. Si verifica
+    qui la funzione che compone la riga, cosi' l'accordo e' provato e non
+    soltanto dichiarato.
+    """
+    line = inventory.paid_request_message(images, proposals, enumerating=False)
+    assert ('1 immagine' in line) is singular_image
+    assert (f'{images} immagini' in line) is not singular_image
+    assert ('riconcilia l’unica proposta' in line) is singular_proposal
+    assert (f'riconcilia le {proposals} proposte' in line) is not singular_proposal
+    assert 'una sola richiesta a pagamento' in line
+
+
+def test_the_paid_request_line_names_no_proposals_when_none_were_detected():
+    """@brief Negativo: senza rilevatore locale il numero di proposte non si nomina.
+
+    Nel percorso di sola visione non esistono proposte, quindi nessuna forma
+    singolare o plurale e' corretta: la riga dice che i corpi li enumera il
+    modello.
+    """
+    line = inventory.paid_request_message(4, 0, enumerating=True)
+    assert 'nessun rilevatore locale' in line and 'enumera' in line
+    assert 'proposte' not in line and 'riconcilia' not in line
+    assert 'una sola richiesta a pagamento' in line
+
+
+def test_a_single_proposal_is_reconciled_in_the_singular_end_to_end():
+    """@brief Il ramo singolare vero: una sola proposta, dall'inventario completo.
+
+    Non basta provare la funzione: la riga deve leggersi al singolare anche
+    nella corsa reale, dove il numero di proposte lo conta il codice.
+    """
+    data = dict(components=[body('R1', [1], **{'class': 'resistor'},
+                                 grouping_basis='single_body', bbox=[.2, .2, .4, .4],
+                                 presence_confidence='high', class_confidence='medium')],
+                candidate_decisions=[dict(candidate_id=1, status='merge', component_id='R1',
+                                          reason='corpo unico')],
+                uncertainties=[])
+    result, calls, logs = run(data, [candidate(1)])
+    assert len(calls) == 1 and len(result) == 1
+    line = _paid_request_line(logs)
+    assert 'riconcilia l’unica proposta' in line
+    assert '1 proposte' not in line and 'le 1 proposte' not in line
 
 
 def _paid_request_line(logs):

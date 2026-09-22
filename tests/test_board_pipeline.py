@@ -4,6 +4,7 @@ import sys
 
 import pytest
 from test_photo_inventory_gui import window
+from kicadgen.gui import main_window as gui
 from kicadgen.services import datasheet_extractor as ext
 from kicadgen.cad3d import step_generator as cad, kicad_models
 from kicadgen.cad3d.process_log import run_logged
@@ -20,6 +21,10 @@ def test_package_survives_gui_and_reaches_library_resolution(window, monkeypatch
             y_mm=-3, length_mm=1.6, width_mm=.8, height_mm=.5,
             bbox_basis="body", package_evidence="two metal ends", mating="none")])
     params = ext._params_from_tool_arguments(raw)
+    # Questa prova riguarda il payload CAD, non il rilevamento di FreeCAD:
+    # senza FreeCAD l'estrazione lascia spento il gruppo «Modello 3D» (per
+    # scelta dichiarata) e non ci sarebbe alcun corpo da misurare.
+    window._freecad_available = True
     window._on_extracted(params)
     boxes = window._components_from_table()
     assert boxes[0].package == "R_0603"
@@ -89,6 +94,10 @@ def test_castellated_module_has_a_body_even_outside_automatic_generation(window)
     diventava `AttributeError: 'NoneType' object has no attribute
     'pin_color_hex'` dentro il generatore STEP.
     """
+    # Presupposto dichiarato: l'estrazione accende il gruppo solo dove FreeCAD
+    # c'e'. Nel contenitore di prova non c'e', e senza questa riga la prova
+    # verificherebbe il caso «3D non generabile» invece di quello che vuole.
+    window._freecad_available = True
     window.group_3d.setChecked(False)
     window._auto_after_extraction = False
     window._on_extracted(_castellated_raw())
@@ -149,6 +158,8 @@ def test_verified_photo_family_cannot_invent_terminals(window, monkeypatch, tmp_
         castellated_sides=[dict(edge="left", count=2, pitch_mm=2.54)],
         components_3d=[dict(name="U", kind="ic_qfn", _detected_kind="ic_qfn",
             package="QFN", x_mm=0, y_mm=0, length_mm=5, width_mm=5, height_mm=1)]))
+    # Vedi sopra: il gruppo «Modello 3D» serve acceso per avere un corpo.
+    window._freecad_available = True
     window._on_extracted(params)
     captured = {}
     monkeypatch.setattr(kicad_models, "attach_models", lambda components, **kw: None)
@@ -221,3 +232,87 @@ def test_a_silent_process_is_still_killed(tmp_path):
     assert "timeout=True" in written
     # Il diario dice che a mancare era l'output, non il tempo speso.
     assert "nessun output per" in written
+
+
+def _wait_for_worker(window, qt_app=None):
+    """@brief Porta a termine il worker di generazione avviato dalla finestra.
+
+    @param window Finestra con `_worker` gia' avviato.
+    @note Il worker e' un QThread vero: si aspetta la fine e poi si smaltiscono
+        gli eventi accodati, altrimenti i segnali `done`/`finished` non
+        arriverebbero mai agli slot e la prova leggerebbe uno stato a meta'.
+    """
+    from PyQt6.QtWidgets import QApplication
+    worker = window._worker
+    if worker is not None:
+        worker.wait(15000)
+    QApplication.processEvents()
+    QApplication.processEvents()
+
+
+def test_a_deliberate_2d_only_run_still_produces_the_footprint(window, monkeypatch):
+    """@brief Positivo: con il gruppo «Modello 3D» spento la generazione automatica scrive il .kicad_mod.
+
+    Sequenza riprodotta dall'utente: utente avanzato, gruppo «Modello 3D»
+    spento col mouse nel tab Footprint 2D, poi ritorno alla modalita' normale
+    (che riaccende la generazione automatica) e nuova estrazione. Il gruppo
+    spento fa restituire None a `_current_body_params()`, e quel None veniva
+    trattato come dato mancante: l'esito era un avviso e NESSUN footprint.
+    Un modello 3D non richiesto non puo' mancare.
+    """
+    monkeypatch.setattr(gui.QMessageBox, "warning",
+                        lambda *a, **k: pytest.fail("nessun avviso: il 2D e' un esito valido"))
+    monkeypatch.setattr(gui.QMessageBox, "question",
+                        lambda *a, **k: gui.QMessageBox.StandardButton.Yes)
+    window.group_3d.setChecked(False)
+    window._user_3d_choice = False  # come dopo il clic umano sul titolo del gruppo
+    params = _castellated_raw()
+    window._auto_after_extraction = True
+    window._on_extracted(params)
+    assert not window.group_3d.isChecked(), "la scelta umana non si revoca"
+    assert window._current_body_params() is None
+
+    window._start_automatic_generation(window._auto_generation_params)
+    _wait_for_worker(window)
+    name = window._component_name()
+    footprint = window._project_dir() / f"{name}.pretty" / f"{name}.kicad_mod"
+    assert footprint.is_file(), "il footprint 2D deve esistere anche senza modello 3D"
+    assert window._automatic_footprint_done is True
+    assert window._automatic_3d_expected is False
+
+
+def test_a_missing_body_with_the_3d_group_on_still_blocks(window, monkeypatch):
+    """@brief Negativo: con il gruppo ACCESO un corpo assente resta un guasto da segnalare.
+
+    E' la meta' che non va persa: il rilassamento riguarda la scelta di non
+    generare il 3D, non i dati mancanti quando il 3D e' stato chiesto.
+    """
+    blocked = []
+    monkeypatch.setattr(gui.QMessageBox, "warning", lambda *a, **k: None)
+    monkeypatch.setattr(window, "_automatic_generation_blocked", blocked.append)
+    monkeypatch.setattr(window, "_current_body_params", lambda: None)
+    window.group_3d.setChecked(True)
+    window._start_automatic_generation(_castellated_raw())
+    assert blocked and "modello 3D" in blocked[0]
+    assert window._worker is None or not window._worker.isRunning()
+
+
+def test_the_3d_group_stays_off_when_freecad_is_absent(window):
+    """@brief Negativo: senza FreeCAD l'estrazione non accende il gruppo «Modello 3D».
+
+    `_build_3d_group` lo spegne per una ragione dichiarata («Senza FreeCAD
+    resta spento, cosi' la generazione non fallisce»), ma quello spegnimento e'
+    programmatico e non lascia traccia in `_user_3d_choice`: l'estrazione lo
+    riaccendeva, e ogni generazione finiva con un `cad3d_error`.
+
+    Positivo: con FreeCAD disponibile la stessa estrazione lo accende.
+    """
+    window._freecad_available = False
+    window.group_3d.setChecked(False)
+    window._on_extracted(_castellated_raw())
+    assert not window.group_3d.isChecked(), "senza FreeCAD non si accende"
+    assert window._current_body_params() is None
+
+    window._freecad_available = True
+    window._on_extracted(_castellated_raw())
+    assert window.group_3d.isChecked(), "con FreeCAD la stessa estrazione lo accende"

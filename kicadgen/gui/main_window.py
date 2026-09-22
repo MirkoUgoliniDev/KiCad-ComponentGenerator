@@ -234,6 +234,25 @@ def freecad_progress(message: str):
 #: auto_matched): non e' una frase per chi guarda, e' il valore di un campo
 #: dell'esito di UN elemento.
 _ITEM_STATUS_FIELD = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+")
+#: Assegnazione macchina senza spazi (parts=1, local_rotation_deg=0,
+#: package=R_0603): stessa natura del token di stato, scritta come coppia.
+#: Nessuna prosa entra qui, perche' una frase contiene spazi e la
+#: corrispondenza e' sull'intera clausola.
+_ITEM_FIELD_ASSIGNMENT = re.compile(r"[a-z][a-z0-9_]*=\S*")
+#: Punto di fine frase: un punto seguito da spazio o dalla fine del testo.
+#: `C_0603_1608Metric.step` o `photo-review/x.json` NON lo contengono, quindi
+#: un nome di file nell'intestazione non la trasforma in una frase.
+_SENTENCE_END = re.compile(r"\.(?:\s|$)")
+
+
+def _item_field_clause(clause: str) -> bool:
+    """@brief Dice se la clausola e' un campo macchina e non un pezzo di prosa.
+
+    @param clause Clausola gia' ripulita, cioe' senza spazi ai bordi ne' punto finale.
+    @return True per `review_required`, `parts=1`, `local_rotation_deg=0`.
+    """
+    return bool(_ITEM_STATUS_FIELD.fullmatch(clause)
+                or _ITEM_FIELD_ASSIGNMENT.fullmatch(clause))
 
 
 def per_item_detail(message: str) -> bool:
@@ -248,20 +267,47 @@ def per_item_detail(message: str) -> bool:
         e non dicevano nulla in piu' del contatore «7/41 componenti» che sta
         appena sopra. Nel log invece servono a ricostruire la corsa, e li'
         restano: questo filtro riguarda solo la modale.
-    @note Il criterio e' strutturale, non un elenco di frasi: un rendiconto
-        per-elemento ha la forma «intestazione dell'elemento: campo; campo;
-        campo», cioe' due punti seguiti da un elenco di campi separati da
-        punto e virgola, con almeno tre campi oppure un campo che e' un token
-        macchina. Una frase di fase («Generazione del footprint KiCad…»,
-        «Rilancio dell'inventario …: una richiesta a pagamento al modello X.»)
-        non ha quell'elenco e passa.
+    @note Forma riconosciuta: «intestazione dell'elemento: campo; campo; campo».
+        L'intestazione e' cio' che precede l'ULTIMO «: », non il primo: una
+        frase che contiene due punti a meta' («Estrazione completata.
+        Confidenza: low. CONTATTI CASTELLATED: …») spezzava sul primo e
+        finiva classificata come rendiconto. L'intestazione deve poi essere
+        un'etichetta, cioe' non contenere una fine di frase: e' questo che
+        distingue «QFN-24» da «Estrazione completata. Confidenza».
+    @note EURISTICA DICHIARATA, unico criterio sul corpo: almeno una clausola
+        deve essere un campo macchina (`_item_field_clause`). Prima bastavano
+        tre clausole qualsiasi, e quel conteggio ha cancellato dalla modale
+        righe vere e importanti, verificate sui log di due corse reali: la
+        conferma di fine estrazione, l'avviso di credito OpenRouter residuo,
+        gli inventari globali parziali e il riepilogo del rilevatore YOLO.
+        Contare i punti e virgola non distingue un rendiconto da una frase con
+        tre incisi, quindi il conteggio e' stato rimosso invece di essere
+        tarato. Il prezzo dichiarato del cambio: restano fuori dal filtro le
+        righe per-elemento fatte di sola prosa (le catene «<package>:
+        rejected N family/terminal-incompatible candidates; …» e «<package>:
+        topologia contatti sconosciuta; …»), che ora arrivano in modale. E' il
+        verso sbagliato meno dannoso: mostrare una riga in piu' costa
+        un'occhiata, cancellare l'avviso di spesa o di fallimento parziale
+        costa una diagnosi. Cio' che renderebbe superfluo il filtro e' un
+        marcatore esplicito sulle righe per-elemento alla sorgente (in
+        `kicad_models.attach_models`), non una regola piu' fine qui.
+    @note Nessun tetto sulla lunghezza dell'intestazione: il vecchio
+        `len(head) > 120` non aveva derivazione. Il controllo di fine frase
+        respinge gia' le righe lunghe di prosa, e una riga di diagnostica
+        (`AI_CALL_PROMPT_*`) non e' un rendiconto per-elemento -- va filtrata
+        dove si decide cosa e' diagnostica, non qui.
     """
     text = " ".join(str(message or "").split())
-    head, separator, body = text.partition(": ")
-    if not separator or not head or len(head) > 120 or ";" not in body:
+    head, separator, body = text.rpartition(": ")
+    if not separator or ";" not in body:
+        return False
+    # Un'intestazione vuota resta valida: «: 3 dimensional candidates;
+    # review_required; …» e' la stessa riga senza etichetta, e prima le due
+    # forme ricevevano verdetti opposti.
+    if _SENTENCE_END.search(head):
         return False
     clauses = [clause.strip().rstrip(".") for clause in body.split(";")]
-    return len(clauses) >= 3 or any(_ITEM_STATUS_FIELD.fullmatch(clause) for clause in clauses)
+    return any(_item_field_clause(clause) for clause in clauses)
 
 
 def phase_kwargs(function, callback) -> dict:
@@ -270,21 +316,33 @@ def phase_kwargs(function, callback) -> dict:
     @param function Funzione di servizio che si sta per chiamare.
     @param callback Callable(tool, detail) da inoltrare alla modale.
     @return Dizionario da espandere nella chiamata: vuoto se il parametro non
-        esiste ancora.
+        esiste ancora o se la firma non dice nulla di utile.
     @note I servizi e l'interfaccia evolvono separatamente: passare `phase=` a
         una firma che non lo prevede fa fallire l'analisi con un TypeError, e
         non passarlo quando c'e' fa perdere l'annuncio della fase. Si guarda
         la firma installata invece di scommettere sull'ordine di arrivo delle
-        modifiche. Una funzione con `**kwargs` (tipica dei doppi nei test) lo
-        accetta per definizione.
+        modifiche.
+    @note `**kwargs` conta come consenso solo se la firma dichiara anche
+        almeno un parametro con un nome. Una firma fatta di soli `*args,
+        **kwargs` e' l'impronta di un decoratore scritto SENZA
+        `functools.wraps`: `inspect.signature` vede il wrapper, non la
+        funzione vera, quindi `**kwargs` non dimostra nulla e passare `phase=`
+        ricrea esattamente il TypeError che questo aiutante esiste per
+        evitare. In quel caso si rinuncia all'annuncio: perdere una riga in
+        modale e' meno grave che far cadere l'analisi. Un decoratore con
+        `functools.wraps` espone `__wrapped__`, `inspect.signature` lo segue e
+        la firma vera torna visibile: e' quella la soluzione, non una regola
+        piu' furba qui.
     """
     try:
         import inspect
-        parameters = inspect.signature(function).parameters.values()
+        parameters = list(inspect.signature(function).parameters.values())
     except (TypeError, ValueError):  # builtin o oggetto non introspezionabile
         return {}
+    named = [p for p in parameters if p.kind not in (
+        inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)]
     for parameter in parameters:
-        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD and named:
             return {"phase": callback}
         if parameter.name == "phase" and parameter.kind in (
                 inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
@@ -337,11 +395,14 @@ class GenerateWorker(QThread):
         @param total Componenti da esaminare.
         @note Ogni componente puo' costare una misura CAD, quindi il conto
             avanza al ritmo del lavoro vero e non di un timer.
-        @note Lo strumento e' `kicad`, non `freecad`: qui si interroga la
-            libreria dei modelli di KiCad per scegliere quale file usare, e
-            FreeCAD non e' ancora partito. Mostrare il solido di FreeCAD
-            faceva credere che il CAD fosse al lavoro durante una fase che non
-            lo riguarda.
+        @note Lo strumento dichiarato e' `kicad` perche' la fase e' la scelta
+            del file da usare nella libreria dei modelli di KiCad: e' quello
+            che avanza componente per componente ed e' quello che spiega
+            l'attesa. Non si dice che FreeCAD sia fermo -- `attach_models`
+            avvia `freecadcmd` per misurare i candidati che non sono ancora in
+            cache -- ma quelle misure servono all'abbinamento, non alla
+            costruzione del solido: mostrare il solido di FreeCAD qui faceva
+            credere che il modello finale fosse gia' in lavorazione.
         """
         self.phase.emit('kicad', 'abbinamento modelli KiCad', done, total)
 
@@ -375,7 +436,13 @@ class GenerateWorker(QThread):
 
         if self.body is not None:
             try:
-                self.phase.emit('freecad', 'modello 3D', 0, 0)
+                # La prima cosa che fa `_generate_3d` e' l'abbinamento dei
+                # modelli di KiCad, non la costruzione del solido: annunciare
+                # qui `freecad` accendeva il cubo di FreeCAD per tutta la fase
+                # che la correzione vuole attribuita a KiCad, per poi tornare
+                # indietro. Da `freecad` ci passa `_cad_progress`, quando il
+                # solido comincia davvero.
+                self.phase.emit('kicad', 'abbinamento modelli KiCad', 0, 0)
                 self.progress.emit('Generazione del modello 3D tramite FreeCAD…')
                 result = _generate_3d(
                     self.params, self.body, self.project_dir,
@@ -432,9 +499,12 @@ class Cad3DWorker(QThread):
     def _model_progress(self, done: int, total: int) -> None:
         """@brief Porta in modale l'unico conteggio vero della generazione.
 
-        @note Strumento `kicad`: si sta cercando nella libreria di KiCad il
-            modello da abbinare, non si sta costruendo il solido. Vedi
-            GenerateWorker._model_progress.
+        @param done Componenti gia' esaminati.
+        @param total Componenti da esaminare.
+        @note Strumento `kicad`: si sta scegliendo nella libreria di KiCad il
+            modello da abbinare, non si sta costruendo il solido -- anche se
+            per misurare un candidato non ancora in cache `attach_models` puo'
+            avviare `freecadcmd`. Vedi GenerateWorker._model_progress.
         """
         self.phase.emit('kicad', 'abbinamento modelli KiCad', done, total)
 
@@ -448,7 +518,10 @@ class Cad3DWorker(QThread):
 
     def run(self) -> None:
         try:
-            self.phase.emit('freecad', 'modello 3D', 0, 0)
+            # Stessa ragione di GenerateWorker.run: `_generate_3d` comincia
+            # dall'abbinamento dei modelli di KiCad. `_cad_progress` passa a
+            # `freecad` quando il solido comincia davvero.
+            self.phase.emit('kicad', 'abbinamento modelli KiCad', 0, 0)
             result = _generate_3d(
                 self.params, self.body, self.project_dir,
                 self.fillets, self.face_texts,
@@ -780,12 +853,23 @@ class MainWindow(QMainWindow):
         self._automatic_generation_active = False
         self._automatic_footprint_done = False
         self._automatic_3d_done = False
+        #: True quando la corsa automatica in atto ha chiesto anche il modello
+        #: 3D. Falso = generazione di solo footprint, che e' un esito completo.
+        self._automatic_3d_expected = True
         self._automatic_generation_errors = []
         self._startup_dependencies_checked = False
         #: None finche' l'utente non tocca il gruppo «Modello 3D»; True/False
         #: dopo un suo clic. Serve a non revocare la sua scelta quando arriva
         #: una nuova estrazione.
         self._user_3d_choice: bool | None = None
+        #: True/False appena `_build_3d_group` ha interrogato il sistema; None
+        #: finche' il gruppo non esiste. Va ricordato: `find_freecadcmd()` e' una
+        #: ricerca su disco e l'estrazione non deve rifarla per sapere se il
+        #: modello 3D e' generabile.
+        self._freecad_available: bool | None = None
+        #: Coppie (copia nella scheda Modello 3D, originale nella scheda
+        #: Progetto), per allinearne la visibilita' a genitore acquisito.
+        self._project_action_mirrors: list = []
 
         self._build_menu()
         self._build_central()
@@ -1807,6 +1891,22 @@ class MainWindow(QMainWindow):
             str(self._project_dir()) if self._component_name() else "")
         self._refresh_output_actions()
         self._refresh_docs_list()
+        # La radice della libreria entra in `_project_dir()` esattamente come
+        # il nome del componente: cambiandola cambiano il file del diario e la
+        # cartella `photo-review/`, quindi i due comandi che dipendono da
+        # quei file vanno ricalcolati qui. Prima solo `_on_name_changed` li
+        # aggiornava, e spostare la cartella di lavoro lasciava «Log AI»
+        # nascosto su un log che esisteva, oppure visibile su uno che non
+        # c'era piu'. Guardia `hasattr` come in `_apply_component_name_gate`:
+        # questo metodo gira anche durante la costruzione della finestra,
+        # prima che i pulsanti esistano.
+        if hasattr(self, "btn_ai_log"):
+            self._refresh_ai_log_button()
+        # Come in `_apply_component_name_gate`: durante un'analisi i comandi di
+        # revisione restano spenti fino alla fine del worker, e ricalcolarli
+        # qui li riaccenderebbe a meta' corsa.
+        if hasattr(self, "btn_reopen_review") and not self._background_work_running():
+            self._refresh_reopen_review_button()
 
     def _named(self) -> bool:
         """@brief Vero quando esiste una cartella del componente da guardare."""
@@ -2348,12 +2448,52 @@ class MainWindow(QMainWindow):
             puo' mantenere, e in una riga di cinque pulsanti e' solo confusione.
             Lo stato abilitato resta allineato alla visibilita' cosi' che i
             controlli che lo leggono (e i test) vedano una cosa sola.
+        @note L'allineamento vale per cio' che questo metodo imposta, non per
+            cio' che Qt calcola. Su una COPIA nella scheda Modello 3D --
+            `btn_reopen_review_3d`, `btn_relaunch_inventory_3d`,
+            `btn_edit_component_review_3d` -- `isEnabled()` e' in AND con lo
+            stato della scheda, che resta spenta fino alla prima acquisizione:
+            li' `isEnabled()` puo' essere falso mentre
+            `isVisibleTo(parentWidget())` e' vero, e non e' un difetto. Un
+            controllo sulla visibilita' propria della copia deve usare
+            `isVisibleTo(...)`, non `isEnabled()`.
         """
         button = getattr(self, name, None)
         if button is None:
             return
         button.setEnabled(bool(available))
         button.setVisible(bool(available))
+
+    def _mirror_project_action(self, source, slot, row):
+        """@brief Crea nella riga della scheda Modello 3D la copia di un comando della scheda Progetto.
+
+        @param source Pulsante originale: unica fonte di testo, suggerimento e stato.
+        @param slot Slot da collegare -- e' lo STESSO comando, non una variante.
+        @param row Layout della riga in cui inserire la copia.
+        @return Il pulsante copia, gia' inserito nella riga.
+        @note Le tre copie passano tutte da qui. Prima due copiavano solo
+            `setEnabled(...)` e la terza anche `isVisibleTo(...)`: partivano in
+            stati diversi pur essendo lo stesso comando, e bastava che il
+            primo ricalcolo arrivasse dopo per far vedere un pulsante che
+            l'originale aveva gia' nascosto.
+        @note La visibilita' NON si applica qui: finche' `regen_row` non e'
+            installata su un widget le copie non hanno un genitore, e
+            `setVisible(True)` su un widget senza genitore lo mostrerebbe come
+            finestra a se' stante. Si registra la coppia e si allinea in
+            `_apply_project_action_mirror_visibility()`, dopo `setLayout`.
+        """
+        mirror = QPushButton(source.text())
+        mirror.setToolTip(source.toolTip())
+        mirror.setEnabled(source.isEnabled())
+        mirror.clicked.connect(slot)
+        row.addWidget(mirror)
+        self._project_action_mirrors.append((mirror, source))
+        return mirror
+
+    def _apply_project_action_mirror_visibility(self) -> None:
+        """@brief Allinea la visibilita' delle copie agli originali, a genitore acquisito."""
+        for mirror, source in self._project_action_mirrors:
+            mirror.setVisible(source.isVisibleTo(source.parentWidget()))
 
     def _set_review_buttons_enabled(self, enabled: bool) -> None:
         """@brief Accende o spegne insieme tutte le copie dei pulsanti di revisione/rilancio.
@@ -2406,9 +2546,20 @@ class MainWindow(QMainWindow):
             fatto che un'analisi sia stata avviata. Senza nome del componente
             non c'e' cartella e le righe restano nel buffer: anche quelle sono
             un log apribile.
+        @note Si conta anche l'elenco degli elementi, non solo il testo:
+            `_on_ai_progress` manda le righe che cominciano con `#<numero>` in
+            `ai_elements_list`, e `_append_log` le tiene fuori da
+            `ai_progress_text`. Con una radice della libreria che
+            non e' una cartella (il file del diario non si puo' scrivere ne'
+            leggere) quelle righe erano l'unico contenuto della finestra del
+            log, e il pulsante si nascondeva su un log che aveva davvero
+            qualcosa da mostrare.
         """
         text = getattr(self, "ai_progress_text", None)
         if text is not None and text.toPlainText().strip():
+            return True
+        elements = getattr(self, "ai_elements_list", None)
+        if elements is not None and elements.count():
             return True
         if getattr(self, "_pending_log_lines", None):
             return True
@@ -2787,12 +2938,24 @@ class MainWindow(QMainWindow):
     def _overlay_header_detail(self) -> str:
         """@brief Il dettaglio che l'intestazione della modale sta gia' mostrando.
 
-        @return Testo dopo il separatore «·» nell'intestazione, es. il modello
+        @return Il dettaglio dichiarato con l'ultimo `set_tool`, es. il modello
             in uso; stringa vuota quando nessuno strumento e' dichiarato.
-        @note Si legge dalla modale invece di ricordarselo: `start()` azzera
-            l'intestazione, e una copia tenuta qui sopravviverebbe a quel
-            reset facendo sparire righe che invece vanno mostrate.
+        @note Si preferisce il valore memorizzato dalla modale
+            (`AnalysisOverlay.tool_detail`) alla lettura dell'etichetta
+            dipinta. L'etichetta e' presentazione: se un giorno viene mandata a
+            capo o accorciata con i puntini, un confronto sul testo dipinto
+            comincerebbe a mentire senza che nulla segnali il guasto. La
+            vecchia giustificazione («`start()` azzera l'intestazione, una
+            copia sopravviverebbe») era sbagliata: `start()` azzera passando da
+            `set_tool(None)`, che e' esattamente il punto in cui anche il
+            valore memorizzato viene azzerato.
+        @note Ripiego sull'analisi dell'etichetta finche' la modale non espone
+            l'attributo: l'accessorio e l'etichetta accorciata arrivano da due
+            modifiche diverse e devono poter atterrare in qualunque ordine.
         """
+        stored = getattr(self.analysis_overlay, "tool_detail", None)
+        if stored is not None:
+            return " ".join(str(stored).split())
         label = getattr(self.analysis_overlay, "tool", None)
         text = label.text() if label is not None else ""
         _, separator, detail = str(text).partition("·")
@@ -2802,26 +2965,35 @@ class MainWindow(QMainWindow):
         """@brief Dice se la riga non aggiunge nulla all'intestazione della modale.
 
         @param message Riga di avanzamento.
-        @return True quando l'intero predicato della riga e' il dettaglio che
+        @return True solo quando la riga INTERA e' il dettaglio che
             l'intestazione mostra gia'.
         @note Richiesta dell'utente: «non ripetere sotto il modello lo hai
             scritto sopra, ma spiega cosa stai facendo». L'intestazione dice
             «Modello AI (remoto, a consumo) · anthropic/claude-opus-5» e la
             riga sotto ripeteva lo stesso identificatore, sprecando l'unico
             posto in cui si puo' dire cosa sta accadendo.
-        @note Regola generale: si confronta con il dettaglio dell'intestazione,
-            qualunque sia, e si scarta solo la forma «etichetta: <dettaglio>»,
-            in cui non resta nient'altro che il dettaglio. Una frase che
-            nomina il modello ma dice anche cos'altro sta succedendo passa.
+        @note Il confronto e' sull'intera riga. La versione precedente
+            scartava anche la forma «testa: <dettaglio>» buttando via la
+            testa, che e' la meta' informativa: «Fallita la chiamata a:
+            anthropic/claude-opus-5.» spariva dalla modale proprio perche'
+            finiva col nome del modello, cioe' un avviso di fallimento
+            cancellato dall'unico posto in cui si guardava. Distinguere
+            un'etichetta («Modello AI unico») da un evento («Estrazione
+            fallita») richiede di sapere se la testa contiene un verbo:
+            l'italiano non si analizza con un'espressione regolare, e ogni
+            criterio ortografico provato (numero di parole, parole funzione,
+            maiuscole) separava l'esemplare osservato e non la classe. Meglio
+            far passare una riga in parte ridondante che cancellare un avviso.
+        @note Il punto finale si toglie da ENTRAMBI i lati. Prima veniva
+            tolto solo alla riga: un dettaglio che finisce con un punto --
+            e' il caso di ogni frase messa come dettaglio di fase -- rendeva il
+            confronto sempre falso, cioe' spegneva il filtro in silenzio.
         """
-        detail = self._overlay_header_detail()
+        detail = self._overlay_header_detail().rstrip(".")
         if not detail:
             return False
         text = " ".join(str(message or "").split()).rstrip(".")
-        if text == detail:
-            return True
-        head, separator, tail = text.partition(": ")
-        return bool(separator) and tail.rstrip(".") == detail
+        return text == detail
 
     def _on_ai_progress(self, message: str) -> None:
         """@brief Porta la riga nel log e, se e' leggibile a colpo d'occhio, in modale.
@@ -3700,8 +3872,17 @@ class MainWindow(QMainWindow):
             estrazione descrive i dati, non revoca una decisione presa da chi
             lavora: riaccendere il gruppo qui significherebbe generare (e far
             aspettare) un modello 3D che era stato escluso apposta.
+        @note Senza FreeCAD non si accende affatto. Lo spegnimento iniziale di
+            `_build_3d_group` e' programmatico, quindi NON lascia traccia in
+            `_user_3d_choice` e non frenava questa riaccensione: l'estrazione
+            ribaltava la regola dichiarata la' («Senza FreeCAD resta spento,
+            cosi' la generazione non fallisce») e ogni generazione finiva con un
+            `cad3d_error`. Si guarda la disponibilita' ricordata, non
+            `isChecked()`, perche' un gruppo spento puo' esserlo per la scelta
+            dell'utente o per l'assenza dello strumento: sono due ragioni
+            diverse e solo la seconda e' definitiva.
         """
-        if self._user_3d_choice is False:
+        if self._user_3d_choice is False or self._freecad_available is False:
             return
         self.group_3d.setChecked(True)
 
@@ -3723,6 +3904,9 @@ class MainWindow(QMainWindow):
             freecad_available = True
         except Cad3DError:
             freecad_available = False
+        # Ricordato perche' l'estrazione deve poterlo consultare senza rifare
+        # la ricerca su disco: vedi `_enable_3d_group_from_extraction`.
+        self._freecad_available = freecad_available
         group.setChecked(freecad_available)
         group.setToolTip(
             "FreeCAD trovato: il modello 3D viene generato insieme al footprint."
@@ -4234,6 +4418,21 @@ class MainWindow(QMainWindow):
         )
 
     def _current_body_params(self) -> Body3DParams | None:
+        """@brief I parametri del solido da costruire, o None se non ne va costruito uno.
+
+        @return Body3DParams dai campi correnti; None quando il gruppo
+            «Modello 3D» e' spento.
+        @note None NON significa «dati mancanti»: significa «nessun modello 3D
+            richiesto». Il gruppo spento e' una scelta -- dell'utente col clic,
+            o del programma quando FreeCAD non c'e' -- e chi chiama deve
+            trattare i due casi diversamente: un None con il gruppo ACCESO e'
+            un guasto da segnalare, un None con il gruppo spento e' la
+            generazione di solo footprint, che deve andare a termine. Questa
+            distinzione e' il fulcro di `_start_automatic_generation` e di
+            `_generate`.
+        @note Per un modulo castellated l'ingombro non viene dai campi a mano
+            ma dal PCB del modulo, che e' esso stesso il corpo.
+        """
         if not self.group_3d.isChecked():
             return None
         if self._is_castellated():
@@ -4364,18 +4563,31 @@ class MainWindow(QMainWindow):
                     raise ValueError(f'Parametro fuori dai limiti dell’editor: {field}.')
 
     def _start_automatic_generation(self, extracted):
+        """@brief Avvia la generazione automatica dopo un'estrazione, se i dati la permettono.
+
+        @param extracted Parametri estratti, gia' applicati ai campi.
+        @note Il modello 3D e' opzionale, il footprint no. Con il gruppo
+            «Modello 3D» spento `_current_body_params()` restituisce None per
+            scelta, non per un dato mancante: trattarlo come errore fatale
+            bloccava TUTTA la generazione automatica -- avviso e nessun
+            `.kicad_mod` -- a chi aveva spento il 3D di proposito. Quindi il
+            corpo si pretende solo quando il gruppo e' acceso, e i controlli
+            sulle quote si fanno solo se c'e' un corpo da controllare.
+        """
         try:
             self._validate_automatic_input(extracted)
             body = self._current_body_params()
-            if body is None:
+            if body is None and self.group_3d.isChecked():
                 raise ValueError('I parametri del modello 3D non sono disponibili.')
-            # QSpinBox limits must not silently replace extracted dimensions.
-            dimensions = ((body.length_mm, extracted.body_length_mm),
-                          (body.width_mm, extracted.body_width_mm))
-            if not extracted.is_castellated():
-                dimensions += ((body.height_mm, extracted.body_height_mm),)
-            if any(not math.isclose(actual, expected, abs_tol=.011) for actual, expected in dimensions):
-                raise ValueError('Le dimensioni estratte superano i limiti dell’editor: serve una revisione.')
+            if body is not None:
+                # QSpinBox limits must not silently replace extracted dimensions.
+                dimensions = ((body.length_mm, extracted.body_length_mm),
+                              (body.width_mm, extracted.body_width_mm))
+                if not extracted.is_castellated():
+                    dimensions += ((body.height_mm, extracted.body_height_mm),)
+                if any(not math.isclose(actual, expected, abs_tol=.011)
+                       for actual, expected in dimensions):
+                    raise ValueError('Le dimensioni estratte superano i limiti dell’editor: serve una revisione.')
         except (ValueError, TypeError) as exc:
             self._automatic_generation_blocked(str(exc))
             return
@@ -4410,7 +4622,11 @@ class MainWindow(QMainWindow):
             body = None if isinstance(params, PackageGeometry) else self._current_body_params()
             if body is not None:
                 body.validate()
-            if automatic and body is None:
+            # Il corpo si pretende solo se il 3D e' stato chiesto. Un gruppo
+            # «Modello 3D» spento e' una scelta, non un dato mancante: la
+            # generazione automatica deve comunque scrivere il footprint.
+            # Vedi `_current_body_params` e `_start_automatic_generation`.
+            if automatic and body is None and self.group_3d.isChecked():
                 raise ValueError('Mancano i parametri 3D.')
         except ValueError as exc:
             self._append_log(f"ERRORE: {exc}")
@@ -4468,6 +4684,11 @@ class MainWindow(QMainWindow):
         if automatic:
             self._automatic_generation_active = True
             self._automatic_footprint_done = self._automatic_3d_done = False
+            # Un modello 3D che non e' stato chiesto non puo' mancare: senza
+            # questo, una corsa di solo footprint finiva con «Generazione
+            # incompleta -- modello 3D non completato», cioe' un guasto
+            # annunciato per un risultato corretto e completo.
+            self._automatic_3d_expected = body is not None
             self._automatic_generation_errors = []
             self._analysis_tabs_enabled = self.tabs.isEnabled()
             self.tabs.setEnabled(False)
@@ -4493,15 +4714,22 @@ class MainWindow(QMainWindow):
             self.tabs.setCurrentIndex(4)
         elif self._automatic_footprint_done:
             self.tabs.setCurrentIndex(3)
-        if self._automatic_generation_errors or not (self._automatic_footprint_done and self._automatic_3d_done):
+        expected_3d = getattr(self, "_automatic_3d_expected", True)
+        complete = self._automatic_footprint_done and (self._automatic_3d_done or not expected_3d)
+        if self._automatic_generation_errors or not complete:
             details = ('\n'.join(self._automatic_generation_errors)
                        or self.i18n.text('La generazione non ha prodotto entrambi i risultati.'))
             prefix = (self.i18n.text('Footprint generato, modello 3D non completato.') + '\n'
-                      if self._automatic_footprint_done else '')
+                      if self._automatic_footprint_done and expected_3d else '')
             QMessageBox.warning(
                 self, self.i18n.text('Generazione incompleta'), prefix + details)
-        else:
+        elif expected_3d:
             self._on_ai_progress('Footprint e modello 3D generati. Verifica le anteprime prima dell’utilizzo.')
+        else:
+            # Consuntivo fedele: il modello 3D non e' stato chiesto, quindi non
+            # va ne' promesso ne' lamentato.
+            self._on_ai_progress('Footprint generato; modello 3D non richiesto. '
+                                 'Verifica l’anteprima prima dell’utilizzo.')
 
     def _on_generated(self, path: str) -> None:
         if self._automatic_generation_active:
@@ -4678,26 +4906,15 @@ class MainWindow(QMainWindow):
         # e si capisce se mancano corpi, quindi da qui si deve poter tornare
         # alle proposte annotate e ripartire (revisione gratuita; rilancio a
         # pagamento, dichiarato). Stesso stato delle copie in Progetto.
-        self.btn_reopen_review_3d = QPushButton(self.btn_reopen_review.text())
-        self.btn_reopen_review_3d.setToolTip(self.btn_reopen_review.toolTip())
-        self.btn_reopen_review_3d.setEnabled(self.btn_reopen_review.isEnabled())
-        self.btn_reopen_review_3d.clicked.connect(self._reopen_detector_review)
-        regen_row.addWidget(self.btn_reopen_review_3d)
-        self.btn_relaunch_inventory_3d = QPushButton(self.btn_relaunch_inventory.text())
-        self.btn_relaunch_inventory_3d.setToolTip(self.btn_relaunch_inventory.toolTip())
-        self.btn_relaunch_inventory_3d.setEnabled(self.btn_relaunch_inventory.isEnabled())
-        self.btn_relaunch_inventory_3d.clicked.connect(self._relaunch_inventory)
-        regen_row.addWidget(self.btn_relaunch_inventory_3d)
+        self.btn_reopen_review_3d = self._mirror_project_action(
+            self.btn_reopen_review, self._reopen_detector_review, regen_row)
+        self.btn_relaunch_inventory_3d = self._mirror_project_action(
+            self.btn_relaunch_inventory, self._relaunch_inventory, regen_row)
         # Anche la modifica della revisione va specchiata qui: e' guardando il
         # solido che si scopre un corpo sbagliato, e tornare alla scheda
         # Progetto per correggerlo era lavoro in piu' senza motivo.
-        self.btn_edit_component_review_3d = QPushButton(self.btn_edit_component_review.text())
-        self.btn_edit_component_review_3d.setToolTip(self.btn_edit_component_review.toolTip())
-        self.btn_edit_component_review_3d.setEnabled(self.btn_edit_component_review.isEnabled())
-        self.btn_edit_component_review_3d.setVisible(self.btn_edit_component_review.isVisibleTo(
-            self.btn_edit_component_review.parentWidget()))
-        self.btn_edit_component_review_3d.clicked.connect(self._show_photo_comparison)
-        regen_row.addWidget(self.btn_edit_component_review_3d)
+        self.btn_edit_component_review_3d = self._mirror_project_action(
+            self.btn_edit_component_review, self._show_photo_comparison, regen_row)
         regen_row.addStretch()
 
         scroll = QScrollArea()
@@ -4717,6 +4934,9 @@ class MainWindow(QMainWindow):
         container_layout.addWidget(splitter, 1)
         self.model_3d_action_bar = QWidget()
         self.model_3d_action_bar.setLayout(regen_row)
+        # Adesso le copie hanno un genitore: prima di qui `setVisible(True)`
+        # avrebbe aperto finestre a se' stanti.
+        self._apply_project_action_mirror_visibility()
         container_layout.addWidget(self.model_3d_action_bar)
         return container
 

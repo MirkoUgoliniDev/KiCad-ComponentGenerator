@@ -56,13 +56,22 @@ class PreviewStub(QWidget):
 #: la ripassata delle traduzioni in `MainWindow.__init__` -- muore di
 #: segmentation fault a caso durante la sessione. Misurato in questo
 #: contenitore: circa 1 esecuzione su 2 del file falliva cosi', 0 su 12 dopo.
+#:
+#: E' il legame di modulo a risolvere il problema: e' lui che tiene viva la
+#: QApplication fra un test e l'altro. Riusare `_APP` come RIPIEGO quando
+#: `QApplication.instance()` e' None sarebbe invece il contrario di una rete di
+#: sicurezza: quel caso si presenta esattamente quando l'oggetto C++ e' stato
+#: distrutto sotto un riferimento Python ancora vivo, e un wrapper sip morto
+#: resta vero in un `or` (i wrapper non definiscono `__bool__`). Si
+#: restituirebbe una QApplication DISTRUTTA e ogni test successivo morirebbe
+#: con «wrapped C/C++ object ... has been deleted» invece di ricostruirla.
 _APP = None
 
 
 @pytest.fixture
 def window(monkeypatch, tmp_path):
     global _APP
-    app = _APP = QApplication.instance() or _APP or QApplication([])
+    app = _APP = QApplication.instance() or QApplication([])
     monkeypatch.setattr(gui, "Preview3DVtk", PreviewStub)
     monkeypatch.setattr(gui, "load_config", lambda: {"component_type": "", "system_prompt": ""})
     monkeypatch.setattr(gui, "save_config", lambda config: None)
@@ -1106,10 +1115,19 @@ def test_without_a_name_there_is_no_folder_path_at_all(window):
     window._update_summary()
 
 
-#: Puntatori C++ visti dai test che seguono: servono a provare che la
-#: QApplication e' una sola e le finestre no.
+#: Oggetti visti dai test che seguono, non i loro indirizzi: due oggetti con
+#: vite disgiunte possono condividere lo stesso puntatore, perche' l'allocatore
+#: riusa la memoria appena liberata. Misurato in questo contenitore: 60 cicli
+#: crea/distruggi hanno prodotto 39 indirizzi distinti, cioe' il 35% riusati.
+#: Confrontare `sip.unwrapinstance` di oggetti che non sono vivi insieme non
+#: dimostra quindi nulla, e diventa un falso allarme non appena le prove
+#: crescono. Qui gli oggetti restano vivi e si confronta l'identita'.
 _SEEN_APPS = []
-_SEEN_WINDOWS = []
+#: Finestra del test precedente, tenuta viva apposta per il confronto.
+_PREVIOUS_WINDOW = None
+#: Quante prove hanno davvero campionato: una corsa filtrata (-k, --lf, xdist)
+#: ne lascia meno, e senza questo conteggio le asserzioni passerebbero a vuoto.
+_WINDOW_SAMPLES = 0
 
 
 @pytest.mark.parametrize("run", [1, 2])
@@ -1128,12 +1146,24 @@ def test_the_session_never_recreates_the_qapplication(window, run):
 
     Negativo (stesso test): la finestra invece cambia a ogni prova, quindi la
     costanza qui sopra e' una garanzia vera e non l'effetto di una fixture che
-    non ricostruisce nulla.
+    non ricostruisce nulla. La finestra precedente viene tenuta viva apposta e
+    confrontata per identita': l'indirizzo di un oggetto gia' distrutto puo'
+    tornare al successivo, quindi confrontare puntatori non distinguerebbe
+    «un'altra finestra» da «la stessa memoria riusata».
+
+    @note Il conteggio dei campioni fa parte del contratto: se la prova gira
+        filtrata (`-k`, `--lf`, xdist) le asserzioni sull'unicita' passerebbero
+        con un solo campione, cioe' senza aver verificato nulla. Meglio che
+        fallisca dicendo che non ha potuto misurare.
     """
-    from PyQt6 import sip
+    global _PREVIOUS_WINDOW, _WINDOW_SAMPLES
     app = QApplication.instance()
     assert app is not None
-    _SEEN_APPS.append(sip.unwrapinstance(app))
-    _SEEN_WINDOWS.append(sip.unwrapinstance(window))
-    assert len(set(_SEEN_APPS)) == 1, "la QApplication non deve essere ricreata"
-    assert len(set(_SEEN_WINDOWS)) == len(_SEEN_WINDOWS), "ogni test ha la sua finestra"
+    _SEEN_APPS.append(app)
+    _WINDOW_SAMPLES += 1
+    assert all(seen is app for seen in _SEEN_APPS), "la QApplication non deve essere ricreata"
+    assert window is not _PREVIOUS_WINDOW, "ogni test ha la sua finestra"
+    _PREVIOUS_WINDOW = window
+    assert _WINDOW_SAMPLES == run, (
+        f"prova {run} con {_WINDOW_SAMPLES} campioni: le prove precedenti non "
+        "sono state eseguite, quindi l'unicita' non e' stata verificata")

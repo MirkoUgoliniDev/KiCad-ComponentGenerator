@@ -178,10 +178,11 @@ class _PhotoView(QGraphicsView):
     zoom is then preserved across window resizes until fit is requested.
 
     While draw mode is armed (``set_draw_mode``) the left button no longer
-    reaches the outlines: it rubber-bands a new rectangle over the photo and
-    reports it through ``rectangle_drawn``. The gesture is deliberately
-    inert unless it starts inside ``draw_bounds`` and travels more than
-    DRAW_CLICK_PX, so a stray click on a crowded board creates nothing.
+    reaches the outlines, doubled or not: it rubber-bands a new rectangle over
+    the photo and reports it through ``rectangle_drawn``. The gesture is
+    deliberately inert unless it starts inside ``draw_bounds`` and travels more
+    than DRAW_CLICK_PX on at least one axis, so a stray click on a crowded
+    board creates nothing.
     """
 
     ## Scene rectangle the drawing gesture is confined to (the photo), set by
@@ -283,6 +284,18 @@ class _PhotoView(QGraphicsView):
         """@brief Whether the next left drag on the photo traces a new rectangle."""
         return self._draw_mode
 
+    def cancel_draw(self):
+        """@brief Abandon a half-traced rectangle, leaving the armed state alone.
+
+        @note For interruptions that are not a decision about the mode: the
+              editor being hidden or closed mid-stroke. The release that would
+              have completed the gesture may never arrive (the pointer grab
+              dies with an unmapped window), so the pending origin must go with
+              the band: otherwise a later release would commit a rectangle the
+              user never traced.
+        """
+        self._cancel_band()
+
     def _cancel_band(self):
         """Forget the current gesture and remove its rubber band from the scene."""
         self._draw_origin = None
@@ -307,6 +320,30 @@ class _PhotoView(QGraphicsView):
             self.scene().addItem(self._draw_band)
         self._draw_band.setRect(QRectF(self._draw_scene_origin, scene_pos).normalized())
 
+    def _clipped_to_bounds(self, rect):
+        """Clamp each edge of a traced rectangle into ``draw_bounds``, per axis.
+
+        Deliberately not ``QRectF.intersected``: a stroke drawn exactly
+        vertically or horizontally on screen has a zero extent on one axis, and
+        an empty rectangle intersects nothing, so the clip would return a null
+        rectangle and the body would silently appear at the scene origin
+        instead of under the pointer. Clamping the edges keeps a degenerate
+        axis where the user put it; its size then comes from
+        MIN_HANDLE_SIZE_MM, which is the floor's job.
+        """
+        if self.draw_bounds is None:
+            return rect
+        bounds = self.draw_bounds
+
+        def clamp(value, low, high):
+            return min(max(value, low), high)
+
+        return QRectF(
+            QPointF(clamp(rect.left(), bounds.left(), bounds.right()),
+                    clamp(rect.top(), bounds.top(), bounds.bottom())),
+            QPointF(clamp(rect.right(), bounds.left(), bounds.right()),
+                    clamp(rect.bottom(), bounds.top(), bounds.bottom())))
+
     def mousePressEvent(self, event):
         """@brief Start a middle-button pan; other buttons reach the scene items.
 
@@ -330,16 +367,42 @@ class _PhotoView(QGraphicsView):
         else:
             super().mousePressEvent(event)
 
+    def mouseDoubleClickEvent(self, event):
+        """@brief Keep the left button on the drawing gesture, doubled or not.
+
+        @note MouseButtonDblClick is a distinct event type from
+              MouseButtonPress, so without this override the second press of a
+              quick retry would fall through to the outline under the pointer,
+              select it and open the model chooser instead of starting a
+              stroke. That is exactly what happens after a stroke rejected as
+              too short, when the user presses again on the same spot inside
+              the double-click interval. While armed the button belongs to the
+              gesture, so the doubled press starts one like a single press
+              does: swallowing it outright would make the retry silently inert.
+        """
+        if self._draw_mode and event.button() == Qt.MouseButton.LeftButton:
+            self.mousePressEvent(event)
+            return
+        super().mouseDoubleClickEvent(event)
+
     def mouseMoveEvent(self, event):
         """@brief Scroll the viewport by the pointer motion while panning.
 
         @note A gesture in progress updates its rubber band instead, so the
-              user sees the rectangle before committing to it.
+              user sees the rectangle before committing to it. The gesture is
+              only alive while the left button is actually held: a move
+              arriving with no button pressed means the release happened
+              somewhere this view never saw it (a pointer grab broken by the
+              window being unmapped, for instance), so the band is dropped
+              rather than left following the bare pointer and rather than left
+              to be committed by the next stray release.
         """
         if self._draw_scene_origin is not None:
-            self._show_band(self.mapToScene(event.position().toPoint()))
-            event.accept()
-            return
+            if event.buttons() & Qt.MouseButton.LeftButton:
+                self._show_band(self.mapToScene(event.position().toPoint()))
+                event.accept()
+                return
+            self._cancel_band()
         if self._pan_position is not None:
             delta = event.position() - self._pan_position
             self._pan_position = event.position()
@@ -352,11 +415,14 @@ class _PhotoView(QGraphicsView):
     def mouseReleaseEvent(self, event):
         """@brief End a middle-button pan and restore the cursor.
 
-        @note A drawing gesture is completed here: below DRAW_CLICK_PX of
-              travel on either axis it is a click that missed, not a
-              measurement, and nothing is reported. The rectangle is clipped
-              to the photo, so a stroke that ends past the board edge still
-              describes a body on the board.
+        @note A drawing gesture is completed here: only a stroke that stays
+              below DRAW_CLICK_PX on BOTH axes is a click that missed, and
+              nothing is reported for it. One axis clearing the threshold is
+              enough, because a long stroke that is deliberately thin (a
+              pin-header edge, a shield seam) is a measurement, not a slip;
+              MIN_HANDLE_SIZE_MM then holds the thin side. The rectangle is
+              clipped to the photo, so a stroke that ends past the board edge
+              still describes a body on the board.
         """
         if (self._draw_mode and event.button() == Qt.MouseButton.LeftButton
                 and self._draw_scene_origin is not None):
@@ -365,9 +431,8 @@ class _PhotoView(QGraphicsView):
                           self.mapToScene(event.position().toPoint())).normalized()
             self._cancel_band()
             travel = event.position() - origin
-            if abs(travel.x()) >= DRAW_CLICK_PX and abs(travel.y()) >= DRAW_CLICK_PX:
-                if self.draw_bounds is not None:
-                    rect = rect.intersected(self.draw_bounds)
+            if abs(travel.x()) >= DRAW_CLICK_PX or abs(travel.y()) >= DRAW_CLICK_PX:
+                rect = self._clipped_to_bounds(rect)
                 self.rectangle_drawn.emit(rect)
             event.accept()
             return
@@ -418,6 +483,22 @@ HANDLE_HALF_PX = 4.0
 ## hand and not a measurement. The threshold is on the SCREEN, where the hand
 ## shakes, and is therefore independent of the photo calibration; the metric
 ## floor on the resulting body is MIN_HANDLE_SIZE_MM, a different question.
+## One axis clearing it is enough: a body can legitimately be long and thin,
+## and its thin side is held by MIN_HANDLE_SIZE_MM rather than by this.
+##
+## Declared consequence of measuring travel on the screen: the dead zone has a
+## metric size that depends on the zoom,
+##
+##     dead zone [mm] = DRAW_CLICK_PX / view_scale * board_mm / crop_px,
+##
+## so it shrinks as the user zooms in and is at its worst at the minimum zoom
+## ``zoom`` allows (fit/8). Measured on the 400 x 100 px crop of a 40 x 20 mm
+## board used by the tests, at fit/8 a deliberate 3.3 x 6.7 mm stroke is still
+## discarded, and in silence. That is accepted rather than tuned away: a
+## smaller threshold would let a shaky click leave a body no grip could take
+## hold of again. It is, however, the reason a stroke meant to measure
+## something belongs at fit zoom or closer, and the reason this constant must
+## not be reasoned about in millimeters.
 DRAW_CLICK_PX = 2 * HANDLE_HALF_PX
 
 ## Handle screen angles are quantized to 45 degree sectors: Qt only offers
@@ -716,7 +797,8 @@ class PhotoReviewDialog(QDialog):
     arms draw mode (``set_draw_mode``), the next drag on the photo becomes the
     new body and its type is asked straight away. ``add_component()`` is still
     the programmatic entry point and, called without geometry, keeps placing a
-    placeholder at the visible centre for headless callers.
+    placeholder at the visible centre for headless callers. Either way adding
+    disarms the mode, and the body lands whole inside the board.
 
     ``category_filter`` hides the list rows whose ``kind`` does not match the
     chosen category. It hides rows, it never rebuilds the list: ``_components``
@@ -908,6 +990,17 @@ class PhotoReviewDialog(QDialog):
                                        QDialogButtonBox.StandardButton.Cancel)
         self.buttons.button(QDialogButtonBox.StandardButton.Apply).setText("Applica correzioni")
         self.buttons.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(self.accept)
+        # Apply carries ApplyRole, so this box has no AcceptRole button and Qt
+        # has nothing to make the default one: Return then discarded the whole
+        # review. Two things are needed, and both are about Return, not about
+        # looks. The confirming action becomes the default button; and Cancel
+        # gives up its auto-default, because the editor opens with the focus on
+        # it and an auto-default button takes the default away while focused,
+        # answering Return itself before any dialog-level handler sees it.
+        # Cancel is still reachable by Space, by click and by Escape, which is
+        # how a focused button and a rejection are supposed to be driven.
+        self.buttons.button(QDialogButtonBox.StandardButton.Apply).setDefault(True)
+        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setAutoDefault(False)
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
 
@@ -948,13 +1041,22 @@ class PhotoReviewDialog(QDialog):
               modal closed then would not come back with ``showNormal()``.
               Spontaneous hides leave the modal alone; Qt minimizes it with
               its parent and restores it with it.
+        @note A half-traced rectangle is dropped on EVERY hide, spontaneous
+              included: a minimize taken while the button is down kills the
+              pointer grab with the window, so the release that would finish
+              the gesture never arrives. Kept alive, the band would come back
+              on restore and follow the bare pointer, and the next release
+              would create a body nobody drew. The armed mode itself is not a
+              casualty of the window being hidden, so it survives.
         """
         super().hideEvent(event)
+        self.view.cancel_draw()
         if not event.spontaneous():
             self._close_parameters()
 
     def closeEvent(self, event):
         """@brief Close the parameter modal even when the editor was never shown."""
+        self.view.cancel_draw()
         self._close_parameters()
         super().closeEvent(event)
 
@@ -1015,8 +1117,19 @@ class PhotoReviewDialog(QDialog):
 
     @staticmethod
     def _component_category(component):
-        """Normalized ``kind`` of a component; empty when it declares none."""
-        return str(component.get("kind", "") or "").strip()
+        """Normalized ``kind`` of a component; empty when it declares none.
+
+        Only a string is a category. ``kind`` is free text written by the
+        detection, so a list, a number or a boolean is not a spelling any
+        detector ever produced; coercing it with ``str()`` would publish
+        ``"['ic']"`` or ``"True"`` in the filter combo and in the type
+        completer, which is the opposite of taking the vocabulary from the
+        components themselves. Such a value simply declares no category and
+        therefore matches no filter. The stored value is left exactly as it
+        is: this editor reports what the data says, it does not repair it.
+        """
+        kind = component.get("kind")
+        return kind.strip() if isinstance(kind, str) else ""
 
     def _matches_category(self, item, category):
         """Whether an outline belongs to a category, comparing case-insensitively."""
@@ -1027,8 +1140,12 @@ class PhotoReviewDialog(QDialog):
 
         Sorted and de-duplicated case-insensitively, keeping the first spelling
         met: the list is a view of the data, so a value is never rewritten to
-        fit a canonical form the detection never used. Components with no
-        ``kind`` contribute no category, and therefore match no filter.
+        fit a canonical form the detection never used. The one liberty taken is
+        surrounding whitespace, dropped so that "resistor" and " resistor " are
+        one entry instead of two indistinguishable ones; the component itself
+        keeps its own spelling either way. Components whose ``kind`` is missing,
+        blank or not a string contribute no category, and therefore match no
+        filter.
         """
         spellings = {}
         for component in self._components:
@@ -1080,8 +1197,14 @@ class PhotoReviewDialog(QDialog):
         selected = self._selected_item()
         for index, item in enumerate(self._items):
             row = self.component_list.item(index)
-            if row is None:
-                continue
+            # Rows and outlines are created and destroyed together, so a
+            # missing row is a broken invariant, not a case to tolerate:
+            # skipping it would leave rows hidden or shown by a stale index,
+            # silently, while ``_refresh_item`` would already raise on the very
+            # same state. Fail here too, and loudly.
+            assert row is not None, (
+                f"list row {index} missing for {len(self._items)} outlines: "
+                "rows and outlines are no longer index-aligned")
             visible = (category is None or self._matches_category(item, category)
                        or item is selected)
             row.setHidden(not visible)
@@ -1446,14 +1569,29 @@ class PhotoReviewDialog(QDialog):
         return self.view.draw_mode()
 
     def keyPressEvent(self, event):
-        """@brief Let Escape disarm the drawing mode before it closes the editor.
+        """@brief Let Escape disarm the drawing mode, and make Return apply.
 
         @note An armed mode is the innermost thing Escape can cancel: leaving
               the dialog while the user only wanted to give up on the rectangle
-              would throw away the whole review.
+              would throw away the whole review. Escape with nothing armed
+              still rejects, as in any dialog.
+        @note Return/Enter confirms. This button box has no AcceptRole button
+              (Apply carries ApplyRole), so Qt routed Return to Cancel and the
+              most ordinary keystroke in a dialog discarded every correction.
+              The button box is set up to match (see the constructor); this
+              handler is what makes the guarantee independent of which widget
+              holds the focus. The keypad modifier is ignored because keypad
+              Enter is the same intent; any other modifier is left to the base
+              class, which must stay free to handle shortcuts.
         """
         if event.key() == Qt.Key.Key_Escape and self.draw_mode():
             self.set_draw_mode(False)
+            event.accept()
+            return
+        modifiers = event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
+        if (event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                and modifiers == Qt.KeyboardModifier.NoModifier):
+            self.accept()
             event.accept()
             return
         super().keyPressEvent(event)
@@ -1467,16 +1605,38 @@ class PhotoReviewDialog(QDialog):
         is held at MIN_HANDLE_SIZE_MM, the same floor the resize handles
         enforce, so a stroke made at deep zoom cannot leave a degenerate body
         that no handle could grab again.
+
+        The floor grows a side after the rectangle has been clipped to the
+        photo, which would push a stroke traced on the very edge of the board
+        back outside it — the outline would be flagged "outside the PCB" the
+        instant it appeared. The centre is therefore clamped afterwards, on
+        each axis independently, exactly as the placeholder path does.
         """
         top_left = self.photo_transform.pixel_to_mm(scene_rect.left(), scene_rect.top())
         bottom_right = self.photo_transform.pixel_to_mm(scene_rect.right(), scene_rect.bottom())
         length = max(MIN_HANDLE_SIZE_MM, bottom_right.x() - top_left.x())
         width = max(MIN_HANDLE_SIZE_MM, bottom_right.y() - top_left.y())
-        # One rectangle, one component: the mode disarms itself, otherwise the
-        # parameter modal would open over a canvas still waiting to draw.
-        self.set_draw_mode(False)
-        self.add_component(geometry=((top_left.x() + bottom_right.x()) / 2,
-                                     (top_left.y() + bottom_right.y()) / 2, length, width))
+        center = self._clamped_center((top_left.x() + bottom_right.x()) / 2,
+                                      (top_left.y() + bottom_right.y()) / 2, length, width)
+        self.add_component(geometry=(center.x(), center.y(), length, width))
+
+    def _clamped_center(self, x_mm, y_mm, length, width):
+        """Centre of an unrotated body kept so its whole extent stays on the board.
+
+        @param x_mm Wanted centre along the board length, in millimeters.
+        @param y_mm Wanted centre along the board width, in millimeters.
+        @param length Extent along the board length axis, in millimeters.
+        @param width Extent along the board width axis, in millimeters.
+        @return Clamped centre as a QPointF, in board millimeters.
+        @note Axis-aligned only: both callers create a body at rotation 0. A
+              rotated body's envelope is not its length and width, so this must
+              not be reused for one without recomputing the envelope.
+        """
+        half_length = self.photo_transform.body_length_mm / 2
+        half_width = self.photo_transform.body_width_mm / 2
+        return QPointF(
+            max(-half_length + length / 2, min(half_length - length / 2, x_mm)),
+            max(-half_width + width / 2, min(half_width - width / 2, y_mm)))
 
     def add_component(self, geometry=None):
         """@brief Add a generic package and select it, asking for what is missing.
@@ -1492,7 +1652,12 @@ class PhotoReviewDialog(QDialog):
               geometry, so the parameter modal opens on the type ("draw the
               rectangle, then give it its category"); a placeholder body has
               neither name nor geometry and opens on the name, as before.
+        @note Adding disarms the drawing mode, on every route in: one body per
+              gesture, and the parameter modal must never open over a canvas
+              still waiting for a stroke — the next drag would create a second
+              body instead of adjusting the one just added.
         """
+        self.set_draw_mode(False)
         drawn = geometry is not None
         if drawn:
             x_mm, y_mm, length, width = (float(value) for value in geometry)
@@ -1503,10 +1668,7 @@ class PhotoReviewDialog(QDialog):
                 min(self.photo_rect.height(), max(0, center.y())))
             length = min(2.0, self.photo_transform.body_length_mm / 10)
             width = min(1.0, self.photo_transform.body_width_mm / 10)
-            center.setX(max(-self.photo_transform.body_length_mm / 2 + length / 2,
-                            min(self.photo_transform.body_length_mm / 2 - length / 2, center.x())))
-            center.setY(max(-self.photo_transform.body_width_mm / 2 + width / 2,
-                            min(self.photo_transform.body_width_mm / 2 - width / 2, center.y())))
+            center = self._clamped_center(center.x(), center.y(), length, width)
             x_mm, y_mm = center.x(), center.y()
         # "generic" is the project's generic-volume path, not an identity claim:
         # the type is what the modal asks for right below.

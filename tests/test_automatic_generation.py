@@ -25,6 +25,13 @@ def use_ai_detector(window):
     tests/test_photo_detector_ui.py."""
     window.combo_photo_detector.setCurrentIndex(
         window.combo_photo_detector.findData('ai'))
+    # Presupposto dichiarato di questi flussi: FreeCAD installato. Senza, il
+    # gruppo «Modello 3D» resta spento per scelta (vedi
+    # `_enable_3d_group_from_extraction`: accenderlo senza il CAD significa far
+    # fallire ogni generazione alla fine), e qui si proverebbe la generazione
+    # del solo footprint invece del flusso standard/avanzato completo. Il caso
+    # «FreeCAD assente» ha i suoi test in tests/test_board_pipeline.py.
+    window._freecad_available = True
 
 
 def begin(window, monkeypatch):
