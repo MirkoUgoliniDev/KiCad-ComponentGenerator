@@ -4499,3 +4499,106 @@ Nove voci nuove nel catalogo (en/it/fr/de).
 - Wording: sull'anteprima STEP «Dimensioni misurate sul modello» ed «Errore
   relativo XY rispetto all'ingombro stimato dalla foto» ora dicono quale dei
   due numeri e' la stima; era una nota dell'agente, non una richiesta.
+
+# 2026-09-23 — i contatti come nella foto: foro passante, non mezzo foro
+
+Commit precedente: `834301e` (pushato dall'utente il 22 alle 21:17). Task a
+perimetro chiuso per volonta' dell'utente: «in questo task fai solo quello».
+
+## Il difetto, che l'utente aveva gia' segnalato
+
+Nella foto ad alta risoluzione della sua ESP32-S3 dev-kit ogni contatto delle
+due file da 22 e' un **foro passante intero**: anello dorato con il foro al
+centro, arretrato dal bordo, con scheda intatta fra anello e bordo. Il 3D
+disegnava invece un **mezzo foro tagliato nel bordo** (la «U» dorata) piu' un
+puntino scuro poco dentro.
+
+Causa scritta nel codice stesso (`castellated_module.py`): ogni contatto era
+modellato come DUE feature, mezzo foro sul bordo + foro chiuso, con il
+commento «Quante feature abbia davvero un contatto si vede nella fotografia e
+andrebbe chiesto al modello, non deciso qui». Era un punto aperto dichiarato,
+mai chiuso: e' questo il bug.
+
+## Il contratto
+
+`CastellatedSide.contact_style`, default `"half_and_through"` (il
+comportamento di prima, quindi ogni progetto esistente produce lo stesso
+output byte per byte — verificato contro l'uscita fissata prima di toccare).
+Costanti `CONTACT_HALF_HOLE`, `CONTACT_THROUGH_HOLE`,
+`CONTACT_HALF_AND_THROUGH`, `CONTACT_STYLES`. Un valore sconosciuto e'
+rifiutato da `validate()`, mai rimappato.
+- **footprint**: `through_hole` → solo pad THT, nessuna piazzola di bordo (una
+  scheda senza castellature non si puo' rifondere su piazzole di bordo);
+  `half_hole` → solo piazzole di bordo. Numeri, nomi e marcatore del pin 1
+  identici fra i tre tipi.
+- **3D**: `through_hole` non taglia il bordo e disegna canna metallizzata piu'
+  corona dorata su ENTRAMBE le facce, foro aperto.
+
+## Perche' il foro passante sembrava un puntino scuro (vale anche per il default)
+
+Il foro veniva tagliato nella scheda ma **nessun contatto lo descriveva**: niente
+canna, niente corona, quindi si vedeva il substrato scuro dentro un foro nudo.
+Non era la soldermask a coprirlo. Ora ogni `half_and_through` porta anche la
+voce del foro passante; la scheda e' forata al raggio ESTERNO della canna,
+cosi' canna e scheda non condividono una superficie (che sfarfallerebbe fra
+due colori).
+
+## A che distanza dal bordo stanno i fori
+
+1. `thru_hole_offset` esplicito: rispettato e controllato.
+2. Dalle quote dichiarate: (larghezza del corpo − distanza fra le file) / 2.
+   Sulla scheda dell'utente (25,4 mm, file a 22,86 mm) = **1,27 mm**. Vale solo
+   con esattamente una coppia di lati opposti con contatti, e presuppone file
+   centrate sulla scheda come gia' fa il footprint.
+3. Ripiego dichiarato come euristica: raggio della corona + 0,2 mm (la parete
+   minima gia' usata fra i fori). E' una **stima per difetto** (1,05 mm sulla
+   stessa scheda) e il log lo dice ogni volta.
+**Collegamento fatto dal coordinatore**: la GUI non conservava la distanza fra
+le file per i moduli castellated (il campo `field_row_spacing` e' della
+matrice), quindi la quota non arrivava mai al generatore e restava sempre il
+ripiego. Ora `_apply_extracted_castellated` la tiene in
+`_declared_row_spacing` (azzerata a ogni estrazione, scartata se assente, zero,
+negativa, NaN o booleana) e `_current_castellated_params` la passa come
+`row_spacing` se il generatore la accetta; il rilancio dell'inventario la
+conserva.
+
+## Chiesto al modello, correggibile a mano
+
+- **Estrazione**: `contact_style` nello schema come enum, con le istruzioni per
+  distinguerli dalla foto (mezzaluna aperta dal bordo / foro chiuso con scheda
+  fra foro e bordo / entrambi). Se il modello non lo dice, si assume il default
+  e il log lo scrive («tipo di contatto non osservato: si assume …»); un valore
+  non valido ferma l'estrazione prima di altre chiamate a pagamento.
+- **GUI**: colonna «Tipo contatto» nella tabella dei lati e, per la modalita'
+  base (dove quella tabella non si vede), una tendina «Tipo contatto (tutti i
+  lati):» nella barra del tab 3D accanto a «Rigenera modello 3D». Cambiarlo e
+  rigenerare **non fa nessuna chiamata AI** (test con OpenRouter che solleva).
+  Ogni modifica della tabella lati ora invalida la vecchia anteprima 3D — prima
+  lo facevano solo i campi numerici e la tabella componenti.
+- La maschera dei contatti (`contact_zones`) per un lato a foro passante copre
+  anello ed etichetta arretrati dal bordo, dalle stesse quote dichiarate.
+
+## Da sapere
+
+- **Il prompt nuovo non raggiunge le installazioni esistenti**: il profilo in
+  SQLite conserva il vecchio testo predefinito e
+  `app_config.LEGACY_DEFAULT_PROMPT_HASHES` non elenca il precedente
+  (`31a4c60c…6715`). Lo schema invece viene sempre inviato, quindi il campo
+  viene chiesto comunque. Aperto: aggiungere l'hash, se si vuole che il prompt
+  si aggiorni da solo.
+- **Cache**: l'estrazione principale non e' in cache. La prima volta che una
+  scheda viene dichiarata `through_hole` la maschera dei contatti cambia,
+  quindi la riconciliazione fotografica di quella scheda non si rigioca dalla
+  cache e costa una chiamata nuova. Per i lati col default nulla cambia.
+- Non verificabile qui senza FreeCAD: solidi reali, colori, sfarfallio. La
+  geometria passata a FreeCAD e' provata per ogni tipo; lo script gira contro
+  FreeCAD finto senza avvisi.
+- Trappola git ricorrente: anche `git status` scrive `index.lock`, che il ponte
+  non riesce a cancellare. Usare `git --no-optional-locks status`.
+
+## Test
+
+Suite completa: **3562 passati**, 11 saltati, 2 xfail, 19 sottotest, zero rossi.
+Nuovi: `test_contact_style.py` 58, `test_contact_style_gui.py` 22 (di cui 8
+sul collegamento della distanza fra le file). `test_board_edit_lifecycle.py`
+36 (+10). Otto voci nuove nel catalogo (en/it/fr/de).

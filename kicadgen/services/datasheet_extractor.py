@@ -27,7 +27,9 @@ from typing import Callable, Optional, Sequence
 
 from ..cad3d.annotations import EDGE_NAMES
 from ..core.package_geometry import package_from_mapping
-from ..generators.castellated_module import EDGES
+from ..generators.castellated_module import (
+    CONTACT_HALF_AND_THROUGH, CONTACT_STYLE_NAMES, CONTACT_STYLES, EDGE_LABELS, EDGES,
+)
 from .openrouter import (DEFAULT_MODEL, OpenRouterError, api_key, call_tool, check_credit,
                          reset_usage, usage_totals)
 
@@ -133,7 +135,10 @@ _EXTRACTION_TOOL = {
                     "Distanza PERPENDICOLARE tra le due file di pin, in millimetri. "
                     "IMPORTANTE: nei package DIP-style (es. moduli/convertitori DC-DC) "
                     "questa e' quasi sempre molto maggiore del pitch (es. 7.62/10.16/15.24mm "
-                    "contro un pitch di 2.54mm) -- non confonderla col pitch."
+                    "contro un pitch di 2.54mm) -- non confonderla col pitch. "
+                    "Anche con layout=\"castellated\", se i contatti stanno su due lati "
+                    "opposti: distanza fra i CENTRI dei contatti delle due file, se quotata "
+                    "o leggibile sulla griglia; ometti se non la conosci."
                 ),
             },
             "pad_diameter_mm": {"type": "number", "description": "Diametro pad THT in millimetri"},
@@ -401,6 +406,22 @@ _EXTRACTION_TOOL = {
                                 "piu' del diametro del semi-foro). Ometti se assente."
                             ),
                         },
+                        "contact_style": {
+                            "type": "string",
+                            "enum": list(CONTACT_STYLES),
+                            "description": (
+                                "Che feature metallizzata porta ogni contatto di questo "
+                                "lato, GUARDANDO LA FOTO del bordo (non dedurlo dalle "
+                                "quote): \"half_hole\" se il foro dorato e' tagliato dal "
+                                "bordo della scheda (mezzaluna aperta verso l'esterno); "
+                                "\"through_hole\" se il foro e' un cerchio intero chiuso, "
+                                "con una corona dorata completa e scheda intatta fra la "
+                                "corona e il bordo, che resta dritto; "
+                                "\"half_and_through\" se sullo stesso contatto ci sono "
+                                "entrambi, la mezzaluna sul bordo e un foro intero poco "
+                                "piu' dentro. Ometti se la foto non mostra il bordo."
+                            ),
+                        },
                         "pin_names": {
                             "type": "array",
                             "items": {"type": "string"},
@@ -599,6 +620,11 @@ _SYSTEM_PROMPT = (
     "su un lato e 5 a 2.54mm sull'altro): descrivili in castellated_sides, un "
     "elemento per lato, invece di comprimerli in una matrice righe x colonne che "
     "non li rappresenta e produrrebbe un footprint sbagliato. "
+    "Per ogni lato castellated indica anche contact_style guardando il bordo nella "
+    "foto: half_hole se il foro metallizzato e' tagliato dal bordo (mezzaluna aperta "
+    "verso l'esterno), through_hole se il foro e' intero, con corona chiusa e scheda "
+    "intatta fra la corona e il bordo, half_and_through se lo stesso contatto ha "
+    "entrambi; ometti il campo se il bordo non si vede. "
     "Per i moduli su PCB, se c'e' una foto del lato superiore, elenca in "
     "components_3d TUTTI i componenti visibili, uno per uno, compresi i passivi "
     "piccoli (resistenze, condensatori chip, diodi): posizione, ingombro (asse "
@@ -1034,6 +1060,12 @@ def extract_pin_header_params(
                     progress(warning)
             except (OpenRouterError, AttributeError) as repair_error:
                 raise ExtractionError("Correzione numerazione non riuscita; analisi foto non avviata.") from repair_error
+        # Dopo l'eventuale correzione, cosi' la riga descrive i lati definitivi.
+        notice = _unobserved_contact_style_notice(_castellated_sides(data.get("castellated_sides")))
+        if notice:
+            data["notes"] = (str(data.get("notes") or "") + "\n" + notice).strip()
+            if progress:
+                progress(notice)
     _params_from_tool_arguments(data)
 
     if progress:
@@ -1209,6 +1241,21 @@ def _castellated_sides(raw: Optional[Sequence[dict]]) -> list[dict]:
             side["reverse"] = True
         if isinstance(entry.get("pin_names"), (list, tuple)) and entry["pin_names"]:
             side["pin_names"] = [str(n) for n in entry["pin_names"]]
+        # Il tipo di contatto si vede nella foto e non si ricava dalle quote:
+        # un valore fuori elenco non si corregge ne' si scarta in silenzio,
+        # perche' qualunque sostituzione sarebbe proprio la deduzione che il
+        # campo esiste per evitare. Assente resta assente: il default lo
+        # applica chi costruisce il modulo, e il log lo dice (vedi
+        # _unobserved_contact_style_notice).
+        if "contact_style" in entry and entry["contact_style"] is not None:
+            style = entry["contact_style"]
+            if style not in CONTACT_STYLES:
+                raise ExtractionError(
+                    f"Lato {EDGE_LABELS.get(edge, edge)}: tipo di contatto {style!r} non "
+                    f"riconosciuto (ammessi: {', '.join(CONTACT_STYLES)}). La risposta non "
+                    "viene adattata: ripeti l'estrazione o scegli il tipo a mano."
+                )
+            side["contact_style"] = style
         sides.append(side)
 
     if not sides:
@@ -1237,6 +1284,26 @@ def _castellated_sides(raw: Optional[Sequence[dict]]) -> list[dict]:
             used.update(range(next_pin, next_pin + side["count"]))
         next_pin = int(side["first_pin"]) + side["count"]
     return sides
+
+
+def _unobserved_contact_style_notice(sides: Sequence[dict]) -> Optional[str]:
+    """@brief Say which castellated sides came back without a contact style.
+
+    @param sides Normalized sides, as returned by _castellated_sides.
+    @return One Italian log line naming those sides and the style assumed for
+        them, or None when every side declares its own style.
+    @note The default is applied downstream (CastellatedSide.contact_style),
+        never written into the side: the GUI keeps telling an observed style
+        from an assumed one. This line is what keeps the assumption from being
+        silent.
+    """
+    missing = [EDGE_LABELS.get(side["edge"], side["edge"])
+               for side in sides if "contact_style" not in side]
+    if not missing:
+        return None
+    return (f"Lato {', '.join(missing)}: tipo di contatto non osservato: si assume "
+            f"«{CONTACT_STYLE_NAMES[CONTACT_HALF_AND_THROUGH]}» ({CONTACT_HALF_AND_THROUGH}). "
+            "Verificarlo sulla foto e correggerlo nella tabella dei lati se diverso.")
 
 
 def _components_3d(raw: Optional[Sequence[dict]]) -> Optional[list[dict]]:

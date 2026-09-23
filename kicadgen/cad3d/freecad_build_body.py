@@ -410,6 +410,14 @@ def _flip_y(data):
     for c in data.get("edge_contacts", []):
         # top/bottom del modulo (bordi orizzontali) si scambiano come front/back
         c["edge"] = {"top": "bottom", "bottom": "top"}.get(c["edge"], c["edge"])
+        # Il lato di un foro passante e il foro chiuso di un contatto doppio
+        # sono geometria come il resto: vanno riflessi con lui, altrimenti la
+        # sigla finirebbe verso l'esterno e il foro sul lato sbagliato.
+        if "board_edge" in c:
+            c["board_edge"] = {"top": "bottom", "bottom": "top"}.get(c["board_edge"], c["board_edge"])
+        through = c.get("through_hole")
+        if isinstance(through, dict) and "y" in through:
+            through["y"] = -float(through["y"])
     rim = data.get("silk_outline")
     if rim:
         rim["y"] = -rim["y"]
@@ -417,6 +425,168 @@ def _flip_y(data):
         box["y"] = -(box["y"] + box["width_mm"])
     data["pins"] = [[n, x, -y] for n, x, y in data.get("pins", [])]
     return data
+
+
+#: Direzione verso l'interno della scheda per ogni lato, nel sistema del
+#: modello 3D (Y verso l'alto, dopo _flip_y).
+_INWARD = {"left": (1.0, 0.0), "right": (-1.0, 0.0), "top": (0.0, 1.0), "bottom": (0.0, -1.0)}
+
+
+def _through_features(x, y, radius, pad_diameter, z1, plating, pad_t, clip):
+    """@brief Plated barrel and annular rings of one closed through-hole.
+
+    @param x Hole centre X, mm.
+    @param y Hole centre Y, mm.
+    @param radius Finished bore radius, mm (the notch cut into the board).
+    @param pad_diameter Outer diameter of the annular ring, mm.
+    @param z1 Board thickness, mm.
+    @param plating Barrel wall thickness, mm.
+    @param pad_t Ring thickness, mm.
+    @param clip Whether the barrel is clipped to the board outline.
+    @return (tubes, drills): tube specs {x, y, r_in, r_out, z0, z1, clip}
+        for the barrel (through the full thickness) and one ring per face,
+        and the cylinder (x, y, r) to drill out of the board.
+    @throws ValueError When the ring is not wider than the bore.
+    @note The rings sit ON the soldermask (z1..z1+pad_t on top,
+        -pad_t..0 underneath), never inside it, so the mask cannot hide them;
+        their inner radius equals the bore, so the bore stays open.
+        The board is drilled to the barrel's OUTER radius: the barrel then
+        fills the gap instead of sharing its inner wall with the substrate,
+        where two coincident faces of different colours flicker.
+    """
+    if pad_diameter <= 2 * radius:
+        raise ValueError("through pad diameter must exceed hole diameter")
+    tubes = [
+        dict(x=x, y=y, r_in=radius, r_out=radius + plating, z0=0.0, z1=z1, clip=clip),
+        dict(x=x, y=y, r_in=radius, r_out=pad_diameter / 2, z0=z1, z1=z1 + pad_t, clip=False),
+        dict(x=x, y=y, r_in=radius, r_out=pad_diameter / 2, z0=-pad_t, z1=0.0, clip=False),
+    ]
+    return tubes, [(x, y, radius + plating)]
+
+
+def _contact_features(contact, bounds, plating, pad_t):
+    """@brief Describe every plated feature of one contact, without FreeCAD.
+
+    @param contact Entry of `edge_contacts` (already in 3D coordinates).
+    @param bounds (x0, y0, x1, y1, z1) of the board.
+    @param plating Barrel wall thickness, mm.
+    @param pad_t Pad/ring thickness, mm.
+    @return Dict with `tubes` (barrels and rings), `boxes` (rectangular edge
+        pads {x0, y0, x1, y1, z0, z1}), `bores` (x, y, r) every box is cut by
+        so no pad covers a hole, `drills` (x, y, r) to remove from the board
+        before it is sliced, and `label` [x, y, z] where the GUI writes the
+        contact number.
+    @throws ValueError On a through-hole whose ring is not wider than its bore.
+    @note Everything belongs to ONE contact and becomes one solid named after
+        its number: a half_and_through contact is one net with two features,
+        not two contacts. Kept free of FreeCAD so the geometry handed to it
+        can be tested with plain Python.
+    """
+    x0, y0, x1, y1, z1 = bounds
+    cx, cy, radius = float(contact["x"]), float(contact["y"]), float(contact["radius"])
+    edge = contact.get("edge")
+    pad_len = float(contact.get("pad_length_mm", 2.4))
+    pad_w = float(contact.get("pad_width_mm", 1.8))
+    tubes, boxes, bores, drills = [], [], [], []
+    if edge == "through":
+        # Through contacts use an observed circular land diameter,
+        # independent of board-edge orientation or pad length.
+        found, holes = _through_features(cx, cy, radius, pad_w, z1, plating, pad_t, clip=True)
+        tubes += found
+        drills += holes
+        inward = _INWARD.get(contact.get("board_edge"))
+        if inward is None:
+            label = [cx, cy]
+        else:
+            # Verso l'interno oltre la corona, non sopra il foro: il numero
+            # coprirebbe proprio il metallo che serve a riconoscerlo.
+            reach = pad_w / 2 + 0.8
+            label = [cx + inward[0] * reach, cy + inward[1] * reach]
+    else:
+        # Semi-foro: manicotto tagliato dal bordo (clip sul contorno intatto)
+        # piu' la piazzola rettangolare su entrambe le facce.
+        tubes.append(dict(x=cx, y=cy, r_in=radius, r_out=radius + plating,
+                          z0=0.0, z1=z1, clip=True))
+        drills.append((cx, cy, radius + plating))
+        bores.append((cx, cy, radius))
+        for z in (z1, -pad_t):
+            if edge in ("left", "right"):
+                px = x0 + pad_len / 2 if edge == "left" else x1 - pad_len / 2
+                boxes.append(dict(x0=px - pad_len / 2, y0=cy - pad_w / 2,
+                                  x1=px + pad_len / 2, y1=cy + pad_w / 2, z0=z, z1=z + pad_t))
+            else:
+                py = y0 + pad_len / 2 if edge == "top" else y1 - pad_len / 2
+                boxes.append(dict(x0=cx - pad_w / 2, y0=py - pad_len / 2,
+                                  x1=cx + pad_w / 2, y1=py + pad_len / 2, z0=z, z1=z + pad_t))
+        through = contact.get("through_hole")
+        if isinstance(through, dict):
+            # Il foro chiuso di un contatto doppio: prima era solo tagliato,
+            # quindi si vedeva un puntino scuro invece di una corona dorata.
+            tx, ty = float(through["x"]), float(through["y"])
+            tr = float(through["radius"])
+            found, holes = _through_features(tx, ty, tr, float(through["pad_diameter_mm"]),
+                                             z1, plating, pad_t, clip=False)
+            tubes += found
+            drills += holes
+            # La piazzola di bordo puo' arrivare sopra il foro: va forata
+            # anche li', o coprirebbe la bocca del foro passante.
+            bores.append((tx, ty, tr))
+        # Il numero va oltre la fine della piazzola, non a distanza fissa
+        # dal foro: le piazzole possono avere lunghezze diverse per lato.
+        clearance = pad_len + 0.8
+        if edge == "left":
+            label = [x0 + clearance, cy]
+        elif edge == "right":
+            label = [x1 - clearance, cy]
+        elif edge == "top":
+            label = [cx, y0 + clearance]
+        else:
+            label = [cx, y1 - clearance]
+    return {"tubes": tubes, "boxes": boxes, "bores": bores, "drills": drills,
+            "label": [label[0], label[1], -pad_t]}
+
+
+def _covered_by_drill(notch, drills):
+    """@brief True when a notch lies inside the drilling of a plated barrel.
+
+    @param notch Payload notch {x, y, radius}.
+    @param drills (x, y, r) cylinders from _contact_features.
+    @return True when some drill shares its centre and is at least as wide,
+        so cutting the notch as well would only cost another boolean.
+    """
+    try:
+        x, y, radius = float(notch["x"]), float(notch["y"]), float(notch["radius"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return any(abs(x - dx) < 1e-9 and abs(y - dy) < 1e-9 and dr >= radius
+               for dx, dy, dr in drills)
+
+
+def _contact_shape(features, uncut_body):
+    """Turn _contact_features specs into one FreeCAD compound."""
+    pieces = []
+    for tube in features["tubes"]:
+        height = tube["z1"] - tube["z0"]
+        outer = Part.makeCylinder(tube["r_out"], height,
+                                  FreeCAD.Vector(tube["x"], tube["y"], tube["z0"]),
+                                  FreeCAD.Vector(0, 0, 1))
+        inner = Part.makeCylinder(tube["r_in"], height + 2.0,
+                                  FreeCAD.Vector(tube["x"], tube["y"], tube["z0"] - 1.0),
+                                  FreeCAD.Vector(0, 0, 1))
+        piece = outer.cut(inner)
+        if tube.get("clip"):
+            piece = piece.common(uncut_body)
+        pieces.append(piece)
+    for spec in features["boxes"]:
+        box = Part.makeBox(spec["x1"] - spec["x0"], spec["y1"] - spec["y0"],
+                           spec["z1"] - spec["z0"],
+                           FreeCAD.Vector(spec["x0"], spec["y0"], spec["z0"]))
+        for bx, by, br in features["bores"]:
+            box = box.cut(Part.makeCylinder(br, spec["z1"] - spec["z0"] + 2.0,
+                                            FreeCAD.Vector(bx, by, spec["z0"] - 1.0),
+                                            FreeCAD.Vector(0, 0, 1)))
+        pieces.append(box)
+    return Part.makeCompound([piece for piece in pieces if piece.Volume > 0])
 
 
 def _long_path(path):
@@ -491,14 +661,32 @@ def main():
     if fillets:
         body_shape = _apply_fillets(body_shape, fillets, bounds)
 
-    # Semi-fori metallizzati sul bordo (moduli castellated): cilindri di cui
-    # resta nel solido solo la parte interna. Dopo i fillet, cosi' i raccordi
-    # d'angolo non si sovrappongono al taglio.
-    for notch in data.get("notches", []):
+    # Metallizzazioni dei contatti, descritte PRIMA di forare e affettare la
+    # scheda: ogni canna va forata nel substrato al suo raggio esterno (vedi
+    # _through_features), e dopo il taglio in strati non si puo' piu'.
+    plating = data.get("plating_thickness_mm", 0.06)
+    pad_t = 0.025
+    plated = []
+    for contact in data.get("edge_contacts", []):
         try:
+            plated.append((contact, _contact_features(contact, bounds, plating, pad_t)))
+        except Exception as exc:  # noqa: BLE001 - un contatto in meno non e' fatale
+            print(f"KICADGEN_WARN:contatto {contact.get('number')} non generato: {exc}")
+    drills = [drill for _, features in plated for drill in features["drills"]]
+
+    # Semi-fori e fori (moduli castellated): cilindri di cui resta nel solido
+    # solo la parte interna. Dopo i fillet, cosi' i raccordi d'angolo non si
+    # sovrappongono al taglio. Un foro gia' coperto dalla foratura della sua
+    # canna non si taglia due volte: ogni taglio booleano costa, e la scheda
+    # ne ha uno per foro come prima.
+    cutters = [n for n in data.get("notches", []) if not _covered_by_drill(n, drills)]
+    cutters += [{"x": x, "y": y, "radius": r} for x, y, r in drills]
+    for notch in cutters:
+        try:
+            x, y, radius = notch["x"], notch["y"], notch["radius"]
             cutter = Part.makeCylinder(
-                notch["radius"], body["height_mm"] + 2.0,
-                FreeCAD.Vector(notch["x"], notch["y"], -1.0),
+                radius, body["height_mm"] + 2.0,
+                FreeCAD.Vector(x, y, -1.0),
                 FreeCAD.Vector(0, 0, 1),
             )
             body_shape = body_shape.cut(cutter)
@@ -540,57 +728,15 @@ def main():
     ):
         add(f"Serigrafia{i}", text_solid, color)
 
-    # Contatti dei semi-fori: manicotto metallizzato nel foro + piazzola sulla
-    # faccia superiore e inferiore, tutto dello stesso metallo (ENIG dorato o
-    # stagno). Senza, i contatti non si vedrebbero ne' da sopra ne' da sotto.
-    plating = data.get("plating_thickness_mm", 0.06)
-    pad_t = 0.025
-    for contact in data.get("edge_contacts", []):
+    # Contatti: manicotto metallizzato nel foro + piazzola sulla faccia
+    # superiore e inferiore, tutto dello stesso metallo (ENIG dorato o stagno),
+    # per i semi-fori come per i fori passanti. Senza, i contatti non si
+    # vedrebbero ne' da sopra ne' da sotto.
+    for contact, features in plated:
         try:
-            cx, cy, radius = contact["x"], contact["y"], contact["radius"]
-            hole = Part.makeCylinder(radius, z1 + 2.0, FreeCAD.Vector(cx, cy, -1.0),
-                                     FreeCAD.Vector(0, 0, 1))
-            sleeve = (Part.makeCylinder(radius + plating, z1, FreeCAD.Vector(cx, cy, 0),
-                                        FreeCAD.Vector(0, 0, 1))
-                      .cut(hole).common(uncut_body))
-            pieces = [sleeve]
-            edge = contact.get("edge")
-            pad_len = float(contact.get("pad_length_mm", 2.4))
-            pad_w = float(contact.get("pad_width_mm", 1.8))
-
-            def pad_box(z):
-                if edge == "through":
-                    # Through contacts use an observed circular land diameter,
-                    # independent of board-edge orientation or pad length.
-                    if pad_w <= 2 * radius:
-                        raise ValueError("through pad diameter must exceed hole diameter")
-                    return Part.makeCylinder(pad_w / 2, pad_t, FreeCAD.Vector(cx, cy, z))
-                if edge in ("left", "right"):
-                    px = x0 + pad_len / 2 if edge == "left" else x1 - pad_len / 2
-                    return Part.makeBox(pad_len, pad_w, pad_t,
-                                        FreeCAD.Vector(px - pad_len / 2, cy - pad_w / 2, z))
-                py = y0 + pad_len / 2 if edge == "top" else y1 - pad_len / 2
-                return Part.makeBox(pad_w, pad_len, pad_t,
-                                    FreeCAD.Vector(cx - pad_w / 2, py - pad_len / 2, z))
-
-            pieces.append(pad_box(z1).cut(hole))
-            pieces.append(pad_box(-pad_t).cut(hole))
-            shape = Part.makeCompound([piece for piece in pieces if piece.Volume > 0])
+            shape = _contact_shape(features, uncut_body)
             add(f"Pin{contact['number']}", shape, contact.get("color_hex", pin_color))
-            # Il numero va oltre la fine della piazzola, non a distanza fissa
-            # dal foro: le piazzole possono avere lunghezze diverse per lato.
-            clearance = pad_len + 0.8
-            if edge == "through":
-                anchor = (cx, cy)
-            elif edge == "left":
-                anchor = (x0 + clearance, cy)
-            elif edge == "right":
-                anchor = (x1 - clearance, cy)
-            elif edge == "top":
-                anchor = (cx, y0 + clearance)
-            else:
-                anchor = (cx, y1 - clearance)
-            label_anchors[f"Pin{contact['number']}"] = [anchor[0], anchor[1], -pad_t]
+            label_anchors[f"Pin{contact['number']}"] = features["label"]
         except Exception as exc:  # noqa: BLE001 - un contatto in meno non e' fatale
             print(f"KICADGEN_WARN:contatto {contact.get('number')} non generato: {exc}")
 

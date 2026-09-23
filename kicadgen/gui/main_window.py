@@ -42,6 +42,7 @@ from ..generators.castellated_module import (
     EDGE_LABELS, EDGES as CASTELLATED_EDGES, CastellatedModuleParams,
     CastellatedSide, ComponentBox, build_castellated_module, pad_positions,
 )
+from ..generators import castellated_module as _castellated_module
 from ..generators.pin_header import PinHeaderParams, build_pin_header, pin_positions
 from ..generators.package import build_package
 from ..core.package_geometry import PackageGeometry, package_from_mapping
@@ -90,6 +91,59 @@ DOCS_SUBDIR = "docs"
 #: tabella. E' un attributo dichiarato della tipologia scelta, non il nome del
 #: pezzo: vale per qualunque componente di quella famiglia.
 _SINGLE_COMPONENT_FAMILIES = ("single_tht", "single_smd")
+
+#: Tipo di contatto di un lato castellated, nel caso in cui il generatore
+#: installato non esponga ancora le proprie costanti. I valori sono quelli
+#: fissati dal contratto di `castellated_module` (CONTACT_HALF_HOLE,
+#: CONTACT_THROUGH_HOLE, CONTACT_HALF_AND_THROUGH): la GUI e il generatore
+#: vengono modificati separatamente e nessuno dei due deve rompersi se
+#: l'altro arriva prima.
+_CONTACT_STYLES_FALLBACK = ("half_hole", "through_hole", "half_and_through")
+
+#: Etichette in italiano semplice: chi sceglie guarda la scheda, non il
+#: datasheet, quindi il nome descrive cio' che si vede.
+CONTACT_STYLE_LABELS = {
+    "half_hole": "Mezzo foro sul bordo",
+    "through_hole": "Foro passante",
+    "half_and_through": "Mezzo foro + foro passante",
+}
+
+#: Come distinguere i tre tipi guardando la scheda. Il criterio e' strutturale
+#: (il bordo taglia il foro oppure no), non una misura: e' l'unico che regge
+#: su qualunque modulo, qualunque passo abbia.
+CONTACT_STYLE_TOOLTIP = (
+    "Come riconoscere il tipo di contatto guardando la scheda:\n"
+    "- Mezzo foro sul bordo: il foro metallizzato e' tagliato dal bordo della "
+    "scheda, si vede una mezzaluna aperta verso l'esterno.\n"
+    "- Foro passante: il foro e' intero e chiuso, con materiale della scheda "
+    "fra il foro e il bordo.\n"
+    "- Mezzo foro + foro passante: ogni contatto ha entrambi, la mezzaluna sul "
+    "bordo e un foro intero poco piu' dentro.\n"
+    "Cambiarlo non richiede nessuna analisi AI: basta rigenerare."
+)
+
+
+def contact_styles() -> tuple:
+    """@brief The contact styles offered for a castellated side.
+
+    @return The generator's `CONTACT_STYLES` when it exists, otherwise
+        `_CONTACT_STYLES_FALLBACK`, which carries the same contract values.
+    @note Read at call time, not at import: the generator module may gain the
+        constant after this module was written, and tests simulate both states.
+    """
+    return tuple(getattr(_castellated_module, "CONTACT_STYLES", _CONTACT_STYLES_FALLBACK))
+
+
+def default_contact_style() -> str:
+    """@brief The contact style a side has when nothing declared another one.
+
+    @return The generator's `CONTACT_HALF_AND_THROUGH`, or its contract value
+        `"half_and_through"` when the constant is not there yet.
+    @note It is today's geometry (edge half-hole plus inner through-hole): an
+        extraction that does not state the style must keep producing exactly
+        what it produced before, not a guess.
+    """
+    return str(getattr(_castellated_module, "CONTACT_HALF_AND_THROUGH", "half_and_through"))
 
 # Local fallbacks use I18n.tr without adding rows to the profile database.
 _PHOTO_DETECTOR_TRANSLATIONS = {
@@ -2502,6 +2556,8 @@ class MainWindow(QMainWindow):
             caller restores the idle UI state.
         """
         self._extraction_started_stamp = time.strftime('%Y%m%d-%H%M%S')
+        # Una quota della scheda precedente non vale per quella nuova.
+        self._declared_row_spacing = None
         # Ogni estrazione nuova riparte senza revisione registrata e senza base
         # sintetizzata: questi flag riguardano solo l'analisi che sta partendo.
         self._reviewed_this_extraction = False
@@ -3066,9 +3122,15 @@ class MainWindow(QMainWindow):
             body_length_mm=bundle.body_length_mm, body_width_mm=bundle.body_width_mm,
             photo_png=None, photo_source=str(bundle.photo_path or ''))
         if self._is_castellated():
-            sides = [dict(edge=s.edge, count=s.count, pitch_mm=s.pitch, offset_mm=s.offset,
-                          first_pin=s.first_pin, reverse=s.reverse)
-                     for s in self._sides_from_table()]
+            # Il tipo di contatto viaggia con i lati: il risultato del rilancio
+            # rientra da `_apply_extracted_castellated`, che senza la chiave
+            # rimetterebbe il valore predefinito sopra la scelta dell'utente.
+            sides = self._serialised_sides()
+            spacing = getattr(self, "_declared_row_spacing", None)
+            if spacing is not None:
+                # Senza, il rilancio rientrerebbe da _apply_extracted_castellated
+                # senza quota e i fori passanti tornerebbero alla stima.
+                common = dict(common, row_spacing_mm=spacing)
             return ExtractedParams(layout='castellated', castellated_sides=sides, **common)
         return ExtractedParams(
             layout='matrix',
@@ -3194,7 +3256,10 @@ class MainWindow(QMainWindow):
                   "non misure certificate.")
         if report.warnings:
             suffix += "\n" + "\n".join(report.warnings[:6])
+        # Il rilancio ripaga l'inventario, non la lettura dei contatti: un tipo
+        # di contatto corretto a mano dopo l'estrazione deve sopravvivergli.
         params = replace(base, components_3d=[dict(c) for c in report.components],
+                         castellated_sides=self._sides_with_table_styles(base.castellated_sides),
                          photo_overlay_png=report.overlay_png,
                          photo_png=report.photo_png or base.photo_png,
                          notes=f"{notes} {suffix}".strip())
@@ -4168,6 +4233,15 @@ class MainWindow(QMainWindow):
         norma da' un solo land pattern valido per tutti i contatti.
         """
         self.group_castellated.setChecked(True)
+        # Distanza fra le file dichiarata dall'estrazione: e' la quota da cui
+        # il generatore ricava dove stanno i fori passanti rispetto al bordo,
+        # (larghezza - distanza) / 2. Senza, per i contatti a foro passante
+        # restano solo una stima per difetto e una riga di log che lo dice.
+        # Si azzera a ogni estrazione: una quota di un'altra scheda non vale.
+        spacing = getattr(params, "row_spacing_mm", None)
+        self._declared_row_spacing = (
+            float(spacing) if isinstance(spacing, (int, float)) and not isinstance(spacing, bool)
+            and math.isfinite(float(spacing)) and float(spacing) > 0 else None)
 
         if params.body_length_mm:
             self.field_cast_body_length.setValue(params.body_length_mm)
@@ -4209,14 +4283,19 @@ class MainWindow(QMainWindow):
                 "tab Modello 3D."
             )
 
-        self._append_log(
-            "Modulo con piazzole a mezzo foro: "
-            + ", ".join(
+        # Il tipo di contatto e' scritto accanto a ogni lato, con la sua
+        # provenienza: dichiarato dall'estrazione o predefinito perche' assente.
+        # Chi vede «predefinito» sa che nessuno lo ha letto sulla scheda.
+        styles = self._table_contact_styles()
+        described = []
+        for index, s in enumerate(params.castellated_sides or ()):
+            style = styles[index] if index < len(styles) else default_contact_style()
+            origin = "" if s.get("contact_style") in contact_styles() else ", predefinito"
+            described.append(
                 f"lato {EDGE_LABELS.get(s['edge'], s['edge'])} "
-                f"{s['count']} contatti a {s['pitch_mm']}mm"
-                for s in params.castellated_sides or ()
-            )
-        )
+                f"{s['count']} contatti a {s['pitch_mm']}mm "
+                f"({CONTACT_STYLE_LABELS.get(style, style)}{origin})")
+        self._append_log("Contatti del modulo: " + ", ".join(described))
         for line in names:
             self._append_log(f"Sigle serigrafate {line}")
 
@@ -4463,10 +4542,13 @@ class MainWindow(QMainWindow):
         side_note.setWordWrap(True)
         layout.addWidget(side_note)
 
-        self.table_sides = QTableWidget(0, 6)
+        self.table_sides = QTableWidget(0, 7)
         self.table_sides.setHorizontalHeaderLabels(
-            ["Lato", "N. contatti", "Passo", "Offset", "Primo pin", "Numerazione inversa"]
+            ["Lato", "N. contatti", "Passo", "Offset", "Primo pin", "Numerazione inversa",
+             "Tipo contatto"]
         )
+        self.table_sides.horizontalHeaderItem(self._SIDE_STYLE_COLUMN).setToolTip(
+            self.i18n.text(CONTACT_STYLE_TOOLTIP))
         self.table_sides.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch
         )
@@ -4476,7 +4558,7 @@ class MainWindow(QMainWindow):
 
         buttons = QHBoxLayout()
         btn_add = QPushButton("Aggiungi lato")
-        btn_add.clicked.connect(lambda: self._add_side_row())
+        btn_add.clicked.connect(self._add_side_row_by_user)
         btn_remove = QPushButton("Rimuovi lato selezionato")
         btn_remove.clicked.connect(self._remove_side_row)
         buttons.addWidget(btn_add)
@@ -4498,6 +4580,7 @@ class MainWindow(QMainWindow):
             self._add_side_row({"edge": "left", "count": 3, "pitch_mm": 2.54, "first_pin": 1})
             self._add_side_row({"edge": "right", "count": 3, "pitch_mm": 2.54, "first_pin": 4})
         self._sync_3d_fields_for_castellated(checked)
+        self._sync_contact_style_bar()
         if hasattr(self, "group_components"):
             self.group_components.setVisible(self._advanced_user() and (
                 checked or self._selected_family() == "aggregate_tht"))
@@ -4531,7 +4614,16 @@ class MainWindow(QMainWindow):
                 "\"Modulo castellated\"." if castellated else ""
             )
 
+    #: Colonna della tabella lati che porta il tipo di contatto.
+    _SIDE_STYLE_COLUMN = 6
+
     def _add_side_row(self, side: dict | None = None) -> None:
+        """Append one side row, filled from an extracted/serialised side dict.
+
+        Programmatic: it does NOT invalidate the generated 3D, because its
+        callers (a new extraction, the castellated toggle) already describe a
+        new input revision. Edits made afterwards in the row do invalidate it.
+        """
         side = side or {}
         row = self.table_sides.rowCount()
         self.table_sides.insertRow(row)
@@ -4541,13 +4633,13 @@ class MainWindow(QMainWindow):
             combo.addItem(EDGE_LABELS.get(edge, edge), edge)
         index = combo.findData(side.get("edge", "left"))
         combo.setCurrentIndex(max(index, 0))
-        combo.currentIndexChanged.connect(self._on_sides_changed)
+        combo.currentIndexChanged.connect(self._on_side_edited)
         self.table_sides.setCellWidget(row, 0, combo)
 
         count = QSpinBox()
         count.setRange(1, 100)
         count.setValue(int(side.get("count", 2)))
-        count.valueChanged.connect(self._on_sides_changed)
+        count.valueChanged.connect(self._on_side_edited)
         self.table_sides.setCellWidget(row, 1, count)
 
         for column, key, default, minimum in (
@@ -4559,35 +4651,138 @@ class MainWindow(QMainWindow):
             spin.setSingleStep(0.01)
             spin.setSuffix(" mm")
             spin.setValue(float(side.get(key, default)))
-            spin.valueChanged.connect(self._on_sides_changed)
+            spin.valueChanged.connect(self._on_side_edited)
             self.table_sides.setCellWidget(row, column, spin)
 
         first_pin = QSpinBox()
         first_pin.setRange(1, 999)
         first_pin.setValue(int(side.get("first_pin", 1)))
-        first_pin.valueChanged.connect(self._on_sides_changed)
+        first_pin.valueChanged.connect(self._on_side_edited)
         self.table_sides.setCellWidget(row, 4, first_pin)
 
         reverse = QCheckBox()
         reverse.setChecked(bool(side.get("reverse")))
-        reverse.toggled.connect(self._on_sides_changed)
+        reverse.toggled.connect(self._on_side_edited)
         self.table_sides.setCellWidget(row, 5, reverse)
 
+        style = self._contact_style_combo(self._declared_contact_style(side))
+        style.currentIndexChanged.connect(self._on_contact_style_edited)
+        self.table_sides.setCellWidget(row, self._SIDE_STYLE_COLUMN, style)
+
         self._on_sides_changed()
+
+    def _add_side_row_by_user(self) -> None:
+        """«Aggiungi lato»: a new side changes the module, the old 3D is stale."""
+        self._add_side_row()
+        self._invalidate_generated_mesh()
+
+    def _declared_contact_style(self, side: dict) -> str:
+        """Contact style declared by a side dict, or the default when absent.
+
+        An absent key is today's behaviour, not a question: the default is
+        kept silently. An unknown value is NOT guessed into one of the three:
+        it falls back to the default and the log says so, so that the user
+        knows the combo shows a default and not what the data said.
+        """
+        declared = side.get("contact_style")
+        if declared is None:
+            return default_contact_style()
+        if declared in contact_styles():
+            return declared
+        self._append_log(
+            f"ATTENZIONE: tipo di contatto sconosciuto {declared!r} sul lato "
+            f"{EDGE_LABELS.get(side.get('edge'), side.get('edge'))}: resta "
+            f"«{CONTACT_STYLE_LABELS.get(default_contact_style(), default_contact_style())}», "
+            "correggilo nella colonna «Tipo contatto».")
+        return default_contact_style()
+
+    def _contact_style_combo(self, style: str) -> QComboBox:
+        """Combo offering the contact styles, with the telling-apart tooltip."""
+        combo = QComboBox()
+        for value in contact_styles():
+            combo.addItem(self.i18n.text(CONTACT_STYLE_LABELS.get(value, value)), value)
+        combo.setCurrentIndex(max(combo.findData(style), 0))
+        combo.setToolTip(self.i18n.text(CONTACT_STYLE_TOOLTIP))
+        return combo
 
     def _remove_side_row(self) -> None:
         row = self.table_sides.currentRow()
         if row >= 0:
             self.table_sides.removeRow(row)
-            self._on_sides_changed()
+            self._on_side_edited()
 
     def _on_sides_changed(self) -> None:
         self._update_summary()
         self._draw_preview()
+        self._sync_contact_style_bar()
+
+    def _on_side_edited(self, *_args) -> None:
+        """@brief A user edit of the sides table: refresh views and drop the old 3D.
+
+        @param _args Signal payload (index, value, checked), unused.
+        @note Stessa disciplina delle modifiche alla tabella componenti e ai
+            campi numerici: il solido gia' generato descrive l'input di prima,
+            quindi l'anteprima va tolta e un risultato CAD tardivo, marchiato
+            con la revisione vecchia, non deve poterla ripristinare. Prima i
+            lati cambiavano footprint e anteprima 2D ma lasciavano a video il
+            vecchio 3D, che sembrava gia' aggiornato.
+        """
+        self._on_sides_changed()
+        self._invalidate_generated_mesh()
+
+    def _on_contact_style_edited(self, *_args) -> None:
+        """@brief The contact style of one side was changed in the table.
+
+        @param _args Signal payload (combo index), unused.
+        @note Nessuna chiamata AI: il tipo di contatto e' un dato che l'utente
+            vede sulla scheda e corregge qui; basta rigenerare footprint e 3D.
+        """
+        self._warn_if_contact_style_unsupported()
+        self._on_side_edited()
+
+    def _table_contact_styles(self) -> list[str]:
+        """Contact style of each table row, in row order."""
+        styles = []
+        for row in range(self.table_sides.rowCount()):
+            combo = self.table_sides.cellWidget(row, self._SIDE_STYLE_COLUMN)
+            styles.append(combo.currentData() if combo is not None else default_contact_style())
+        return styles
+
+    @staticmethod
+    def _contact_style_supported() -> bool:
+        """True when the installed `CastellatedSide` accepts `contact_style`."""
+        return accepts_keyword(CastellatedSide, "contact_style")
+
+    def _warn_if_contact_style_unsupported(self) -> None:
+        """Say in the log when a chosen style cannot reach the generator.
+
+        Without the field a non-default choice would vanish on its way to
+        generation; generating the default while the combo shows another
+        style must not look like a success.
+        """
+        if self._contact_style_supported():
+            return
+        chosen = {s for s in self._table_contact_styles() if s != default_contact_style()}
+        if chosen:
+            self._append_log(
+                "ATTENZIONE: il generatore installato non conosce ancora il tipo di "
+                "contatto: la scelta viene ignorata e footprint e 3D restano "
+                f"«{CONTACT_STYLE_LABELS.get(default_contact_style(), default_contact_style())}».")
 
     def _sides_from_table(self) -> list[CastellatedSide]:
+        """@brief The castellated sides as the table describes them now.
+
+        @return One `CastellatedSide` per row, in row order.
+        @note `contact_style` e' passato solo se la classe installata lo
+            accetta (stessa introspezione di `phase_kwargs`/`cancel_kwargs`):
+            GUI e generatore evolvono separatamente e un TypeError qui
+            bloccherebbe ogni generazione per un campo accessorio.
+        """
+        style_supported = self._contact_style_supported()
+        styles = self._table_contact_styles()
         sides = []
         for row in range(self.table_sides.rowCount()):
+            extra = {"contact_style": styles[row]} if style_supported else {}
             sides.append(CastellatedSide(
                 edge=self.table_sides.cellWidget(row, 0).currentData(),
                 count=self.table_sides.cellWidget(row, 1).value(),
@@ -4595,8 +4790,83 @@ class MainWindow(QMainWindow):
                 offset=self.table_sides.cellWidget(row, 3).value(),
                 first_pin=self.table_sides.cellWidget(row, 4).value(),
                 reverse=self.table_sides.cellWidget(row, 5).isChecked(),
+                **extra,
             ))
         return sides
+
+    def _serialised_sides(self) -> list[dict]:
+        """@brief The table's sides as extraction-shaped dicts, style included.
+
+        @return Dicts with the keys `_apply_extracted_castellated` reads back.
+        @note Lo stile viene dalla tabella e non dal `CastellatedSide`: e' la
+            scelta dell'utente e va conservata anche quando il generatore
+            installato non la conosce ancora.
+        """
+        return [dict(edge=s.edge, count=s.count, pitch_mm=s.pitch, offset_mm=s.offset,
+                     first_pin=s.first_pin, reverse=s.reverse, contact_style=style)
+                for s, style in zip(self._sides_from_table(), self._table_contact_styles())]
+
+    def _sides_with_table_styles(self, sides):
+        """Carry the table's contact styles onto extraction side dicts.
+
+        Used when an extraction is re-applied without a new reading of the
+        board (inventory relaunch): the style the user corrected must not
+        silently revert to the one of the earlier extraction. Sides are
+        matched by edge, and only when that edge appears exactly once on both
+        sides of the match: with duplicates the pairing would be a guess.
+        """
+        if not sides or not self._is_castellated():
+            return sides
+        rows = [(self.table_sides.cellWidget(r, 0).currentData(), style)
+                for r, style in enumerate(self._table_contact_styles())]
+        edges = [edge for edge, _style in rows]
+        declared = [side.get("edge") for side in sides]
+        result = []
+        for side in sides:
+            edge = side.get("edge")
+            if edges.count(edge) == 1 and declared.count(edge) == 1:
+                side = dict(side, contact_style=rows[edges.index(edge)][1])
+            result.append(side)
+        return result
+
+    def _sync_contact_style_bar(self) -> None:
+        """Mirror the table's contact styles into the 3D-tab combo.
+
+        Shown only for castellated modules with at least one side. When the
+        sides disagree the combo shows a disabled «mixed» entry instead of
+        pretending one style applies to all.
+        """
+        combo = getattr(self, "combo_contact_style_3d", None)
+        if combo is None:
+            return
+        styles = self._table_contact_styles()
+        self.contact_style_bar_3d.setVisible(self._is_castellated() and bool(styles))
+        unique = set(styles)
+        target = styles[0] if len(unique) == 1 else None
+        blocked = combo.blockSignals(True)
+        combo.setCurrentIndex(max(combo.findData(target), 0) if target is not None
+                              else combo.count() - 1)
+        combo.blockSignals(blocked)
+
+    def _on_contact_style_all_changed(self, index: int) -> None:
+        """@brief Apply the 3D-tab contact style to every side of the table.
+
+        @param index Chosen combo index; the «mixed» entry is informative only.
+        @note E' la via della modalita' base: la tabella lati sta nel tab
+            Footprint 2D, nascosto se `advanced_user` e' spento, mentre i
+            difetti dei contatti si scoprono guardando il 3D. Il cambio passa
+            dalla tabella, quindi segue la stessa strada di ogni modifica ai
+            lati: anteprima invalidata, nessuna chiamata AI.
+        """
+        style = self.combo_contact_style_3d.itemData(index)
+        if style is None:
+            return
+        for row in range(self.table_sides.rowCount()):
+            combo = self.table_sides.cellWidget(row, self._SIDE_STYLE_COLUMN)
+            blocked = combo.blockSignals(True)
+            combo.setCurrentIndex(max(combo.findData(style), 0))
+            combo.blockSignals(blocked)
+        self._on_contact_style_edited()
 
     def _current_castellated_params(self) -> CastellatedModuleParams:
         return CastellatedModuleParams(
@@ -4621,7 +4891,23 @@ class MainWindow(QMainWindow):
             components=self._components_from_table(),
             silk_labels=self._silk_labels(),
             sides=self._sides_from_table(),
+            **self._declared_row_spacing_kwargs(),
         )
+
+    def _declared_row_spacing_kwargs(self) -> dict:
+        """@brief La distanza fra le file dichiarata, se c'e' e il generatore la accetta.
+
+        @return {"row_spacing": mm} oppure {}.
+        @note Serve ai contatti a foro passante: dalla distanza fra le file e
+            dalla larghezza del corpo il generatore ricava a che distanza dal
+            bordo stanno i fori. Sulla scheda dell'utente (25,4 mm, file a
+            22,86 mm) sono 1,27 mm; senza questa quota il generatore ripiega su
+            una stima per difetto (1,05 mm) e lo scrive nel log.
+        """
+        spacing = getattr(self, "_declared_row_spacing", None)
+        if spacing is None or not accepts_keyword(CastellatedModuleParams, "row_spacing"):
+            return {}
+        return {"row_spacing": spacing}
 
     def _silk_pin_labels(self) -> bool:
         """@brief Tell whether pin names are engraved on the 3D silkscreen."""
@@ -5735,6 +6021,32 @@ class MainWindow(QMainWindow):
         # User decision 2026-09-13 (MEMORY.md): hide manual AI refinement
         # actions, keeping handlers and the automatic extraction unchanged.
         self.btn_terminal_detail.hide()
+        # Il tipo di contatto va correggibile da qui anche in modalita' base:
+        # e' guardando il solido che si vede un mezzo foro dove la scheda ha un
+        # foro passante, e la tabella dei lati sta in un tab nascosto a chi non
+        # ha scelto la modalita' avanzata. Accanto a «Rigenera» perche' la
+        # correzione e la rigenerazione gratuita sono un unico gesto.
+        self.contact_style_bar_3d = QWidget()
+        style_layout = QHBoxLayout(self.contact_style_bar_3d)
+        style_layout.setContentsMargins(0, 0, 0, 0)
+        style_layout.addWidget(QLabel("Tipo contatto (tutti i lati):"))
+        self.combo_contact_style_3d = self._contact_style_combo(default_contact_style())
+        self.combo_contact_style_3d.addItem(self.i18n.text("Diverso per lato"), None)
+        # Solo informativa: si sceglie un tipo per tutti i lati, oppure si usa
+        # la tabella lati per differenziarli; «diverso» non e' una scelta.
+        self.combo_contact_style_3d.model().item(
+            self.combo_contact_style_3d.count() - 1).setEnabled(False)
+        self.combo_contact_style_3d.setToolTip(self.i18n.text(
+            CONTACT_STYLE_TOOLTIP + "\nVale per tutti i lati; per un tipo diverso "
+            "lato per lato usa la colonna «Tipo contatto» della tabella lati "
+            "(tab Footprint 2D, modalita' avanzata)."))
+        self.combo_contact_style_3d.currentIndexChanged.connect(
+            self._on_contact_style_all_changed)
+        style_layout.addWidget(self.combo_contact_style_3d)
+        regen_row.addWidget(self.contact_style_bar_3d)
+        # Nascosta finche' il modulo non e' castellated con almeno un lato:
+        # la accende `_sync_contact_style_bar`, che la tiene allineata ai lati.
+        self.contact_style_bar_3d.hide()
         self.btn_regen_3d = QPushButton("Rigenera modello 3D (STEP) con queste annotazioni")
         self.btn_regen_3d.setToolTip(
             "Ultimo passo della pipeline — Ricostruisce lo STEP con FreeCAD dai corpi e "

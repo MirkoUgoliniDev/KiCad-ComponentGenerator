@@ -50,9 +50,17 @@ def offline(monkeypatch):
     monkeypatch.setattr(kicad_models, "attach_models", Mock(return_value=0))
 
 
+#: Una sola QApplication per processo, tenuta viva dal legame di modulo. Con il
+#: solo riferimento locale la QApplication veniva distrutta a fine test e
+#: ricostruita al successivo, e il file moriva ogni tanto di segmentation fault
+#: a meta' corsa: causa e misure in `test_photo_inventory_gui._APP`.
+_APP = None
+
+
 @pytest.fixture
 def window(monkeypatch, tmp_path):
-    app = QApplication.instance() or QApplication([])
+    global _APP
+    app = _APP = QApplication.instance() or QApplication([])
     monkeypatch.setattr(gui, "Preview3DVtk", PreviewStub)
     monkeypatch.setattr(gui, "load_config", lambda: {"component_type": "", "language": "en"})
     monkeypatch.setattr(gui, "save_config", lambda *args: None)
@@ -233,3 +241,55 @@ def test_explicit_mating_none_survives_decode_table_and_cad_payload(window, phot
     assert component["mating"] == "none" and component["package"] == decoded[0]["package"]
     assert component["bbox_basis"] == "pads"
     assert component["package_evidence"] == decoded[0]["package_evidence"]
+
+
+def _castellated_sides(window):
+    """@brief Modulo castellated con i due lati predefiniti in tabella."""
+    window.group_castellated.setChecked(True)
+    assert window.table_sides.rowCount() == 2
+    return window.table_sides
+
+
+@pytest.mark.parametrize("column", range(7))
+def test_every_side_table_edit_invalidates_mesh_and_worker_revision(window, monkeypatch, column):
+    """@brief Ogni colonna della tabella lati cambia il solido: il vecchio 3D decade.
+
+    Comprende la colonna «Tipo contatto»: correggerla e rigenerare e' il
+    percorso gratuito, e un'anteprima rimasta a video lo farebbe sembrare gia'
+    fatto. Un risultato CAD marchiato con la revisione vecchia viene rifiutato.
+    """
+    table = _castellated_sides(window)
+    revision, clear = arm_mesh(window, monkeypatch)
+    widget = table.cellWidget(0, column)
+    if column in (0, 6):
+        widget.setCurrentIndex((widget.currentIndex() + 1) % widget.count())
+    elif column == 5:
+        widget.setChecked(not widget.isChecked())
+    else:
+        widget.setValue(widget.value() + 1)
+    assert_invalidated(window, revision, clear)
+    monkeypatch.setattr(window, "sender", lambda: SimpleNamespace(_model_revision=revision))
+    assert not window._cad_result_is_current()
+
+
+@pytest.mark.parametrize("operation", ["add", "remove"])
+def test_side_add_and_remove_invalidate_mesh(window, monkeypatch, operation):
+    table = _castellated_sides(window)
+    table.setCurrentCell(0, 0)
+    revision, clear = arm_mesh(window, monkeypatch)
+    if operation == "add":
+        window._add_side_row_by_user()
+    else:
+        window._remove_side_row()
+    assert_invalidated(window, revision, clear)
+    assert table.rowCount() == (3 if operation == "add" else 1)
+
+
+def test_unchanged_side_style_keeps_the_mesh(window, monkeypatch):
+    """@brief Negativo: ripetere la scelta gia' fatta non e' una modifica."""
+    table = _castellated_sides(window)
+    revision, clear = arm_mesh(window, monkeypatch)
+    combo = table.cellWidget(0, 6)
+    combo.setCurrentIndex(combo.currentIndex())
+    assert window._model_revision == revision and clear.call_count == 0
+    assert window._last_mesh_path == Path("previous.preview.json")

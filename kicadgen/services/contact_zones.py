@@ -16,6 +16,11 @@ from __future__ import annotations
 
 import math
 
+from ..generators.castellated_module import (
+    CONTACT_THROUGH_HOLE, CastellatedModuleParams, fallback_through_hole_inset,
+    opposite_row_edges, through_hole_inset_from_rows,
+)
+
 #: Quanto puo' sporgere un corpo oltre la banda dei contatti restando un
 #: contatto: mezza piazzola. Oltre, e' un corpo che ci sta sopra o accanto.
 _BAND_TOLERANCE = 0.5
@@ -58,6 +63,34 @@ def _band_depth(side, data, pitch):
     return pad_length + hole / 2 + _LABEL_GAP_MM
 
 
+def _through_hole_depth(side, data, edges, extent_mm):
+    """@brief Depth of the strip of a through_hole side: web, ring and label.
+
+    @param side Declared side with contact_style == "through_hole".
+    @param data Extracted parameters (row_spacing_mm, pad_diameter_mm, drill_mm).
+    @param edges Edges that carry declared contacts.
+    @param extent_mm Board extent across this side's row.
+    @return Millimetres from the board edge inward.
+    @note The contact is not an edge pad but a closed ring set back from the
+        edge, with intact board in between. Its centre follows from the SAME
+        declared quantities and the same rule the footprint uses
+        (castellated_module.through_hole_inset_from_rows, or its declared
+        heuristic fallback); ring and bore default to the values the footprint
+        would draw when the extraction does not state them. The strip ends
+        where the label ends by this program's convention: ring edge plus half
+        a bore plus _LABEL_GAP_MM, exactly as for the edge pads.
+    """
+    ring = _number(data.get('pad_diameter_mm')) or CastellatedModuleParams.thru_pad_diameter
+    bore = _number(data.get('drill_mm')) or CastellatedModuleParams.thru_hole_drill
+    inset = None
+    pair = opposite_row_edges(edges)
+    if pair is not None and side.get('edge') in pair:
+        inset = through_hole_inset_from_rows(extent_mm, _number(data.get('row_spacing_mm')))
+    if inset is None:
+        inset = fallback_through_hole_inset(ring)
+    return inset + ring / 2 + bore / 2 + _LABEL_GAP_MM
+
+
 def contact_positions(data, length_mm, width_mm):
     """@brief Centri dei contatti dichiarati, in millimetri dal centro scheda.
 
@@ -73,6 +106,8 @@ def contact_positions(data, length_mm, width_mm):
         return []
     positions = []
     half_x, half_y = length_mm / 2, width_mm / 2
+    edges = [side.get('edge') for side in (data.get('castellated_sides') or [])
+             if isinstance(side, dict)]
     for side in (data.get('castellated_sides') or []):
         if not isinstance(side, dict):
             continue
@@ -84,7 +119,14 @@ def contact_positions(data, length_mm, width_mm):
         if isinstance(count, bool) or not isinstance(count, int) or count < 1 or pitch is None:
             continue
         offset = _number(side.get('offset_mm'), minimum=-math.inf) or 0.0
-        depth = _band_depth(side, data, pitch)
+        # La striscia descrive il contatto che il lato offre davvero: la
+        # piazzola di bordo (default, e tipi con semi-foro) oppure la corona
+        # arretrata di un foro passante.
+        if side.get('contact_style') == CONTACT_THROUGH_HOLE:
+            extent = length_mm if edge in ('left', 'right') else width_mm
+            depth = _through_hole_depth(side, data, edges, extent)
+        else:
+            depth = _band_depth(side, data, pitch)
         start = -(count - 1) * pitch / 2 + offset
         for index in range(count):
             along = start + index * pitch

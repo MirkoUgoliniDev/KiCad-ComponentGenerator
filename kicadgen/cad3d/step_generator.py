@@ -19,7 +19,10 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
-from ..generators.castellated_module import CastellatedModuleParams, pad_positions
+from ..generators.castellated_module import (
+    CONTACT_HALF_AND_THROUGH, CONTACT_THROUGH_HOLE, EDGE_LABELS, CastellatedModuleParams,
+    pad_positions,
+)
 from ..generators.pin_header import PinHeaderParams, pin_positions
 from .annotations import EdgeFilletAnnotation, FaceTextAnnotation
 from .body_params import Body3DParams
@@ -277,6 +280,148 @@ def find_freecadcmd() -> str:
     )
 
 
+#: Margine fra la fine di una piazzola e il centro della sua sigla serigrafata,
+#: oltre al raggio del foro: e' la convenzione con cui il 3D dispone le sigle
+#: (e che contact_zones replica per mascherarle). Non cambia fra i tipi di
+#: contatto: cambia solo dove finisce la piazzola.
+SILK_LABEL_MARGIN_MM = 0.55
+
+
+def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: str):
+    """@brief Describe every contact of a castellated module for the FreeCAD script.
+
+    @param params Validated module description.
+    @param pin_color_hex Colour of every plated feature (same metal everywhere).
+    @return (notches, contacts, silk_texts, silk_outline, notes):
+        `notches` are the cylinders subtracted from the board; `contacts` the
+        plated features, one entry per contact; `silk_texts` the optional
+        labels; `silk_outline` the board silkscreen frame or None; `notes`
+        human-readable lines about estimated quantities (Italian, for the log).
+    @note Per contact style:
+        * half_hole -- a notch of radius hole_diameter/2 at half_hole_inset,
+          and an edge contact (sleeve + rectangular pads on both faces);
+        * half_and_through -- the same, plus the closed hole's notch and, in
+          the contact, a `through_hole` entry {x, y, radius, pad_diameter_mm}
+          so the script plates it with a barrel and a ring on both faces. The
+          entry is new: without it the hole was cut but never plated, and it
+          rendered as a small dark dot instead of a gold ring;
+        * through_hole -- NO edge notch (the board edge stays straight), the
+          through-hole's notch, and a contact with edge="through" and
+          board_edge set to the side, so the script builds barrel and rings
+          and knows which way is "inside" for the label.
+    @note Pure function: no FreeCAD, testable on its own.
+    """
+    half_length = params.body_length / 2
+    half_width = params.body_width / 2
+    radius = params.hole_diameter / 2
+    # Il foro di un castellated non e' centrato sul bordo: e' un foro normale
+    # forato vicino al bordo e poi tagliato via, quindi il suo centro sta
+    # DENTRO la scheda di una frazione del diametro.
+    inset = params.half_hole_inset
+    drill_radius = params.thru_hole_drill / 2
+
+    notches = []
+    contacts = []
+    silk_texts = []
+    label_gap = radius + SILK_LABEL_MARGIN_MM
+    # Profondita' dal bordo occupata da contatti e sigle, per asse: serve alla
+    # cornice serigrafica, che non deve passarci sopra.
+    reach = {"x": 0.0, "y": 0.0}
+    for placement in pad_positions(params):
+        axis = "x" if placement.edge in ("left", "right") else "y"
+        if placement.style == CONTACT_THROUGH_HOLE:
+            centre = (placement.x, placement.y)
+            ring = params.thru_pad_diameter
+            depth = params.through_hole_inset(placement.edge) + ring / 2
+            gap = drill_radius + SILK_LABEL_MARGIN_MM
+            inward = {"left": (1, 0), "right": (-1, 0), "top": (0, 1), "bottom": (0, -1)}[placement.edge]
+            label = (centre[0] + inward[0] * (ring / 2 + gap),
+                     centre[1] + inward[1] * (ring / 2 + gap))
+            notches.append({"x": centre[0], "y": centre[1], "radius": drill_radius})
+            contacts.append({
+                "x": centre[0], "y": centre[1], "radius": drill_radius,
+                "number": placement.number, "edge": "through",
+                "board_edge": placement.edge,
+                "pad_length_mm": ring, "pad_width_mm": ring,
+                "color_hex": pin_color_hex,
+            })
+            reach[axis] = max(reach[axis], depth + 1.6)
+        else:
+            pad_len = placement.width if placement.edge in ("left", "right") else placement.height
+            pad_w = placement.height if placement.edge in ("left", "right") else placement.width
+            # Parte del pad che sta dentro la scheda: e' la piazzola dorata visibile.
+            inner_len = max(0.6, pad_len - params.pad_overhang)
+            if placement.edge == "left":
+                centre = (-half_length + inset, placement.y)
+                label = (-half_length + inner_len + label_gap, placement.y)
+            elif placement.edge == "right":
+                centre = (half_length - inset, placement.y)
+                label = (half_length - inner_len - label_gap, placement.y)
+            elif placement.edge == "top":
+                centre = (placement.x, -half_width + inset)
+                label = (placement.x, -half_width + inner_len + label_gap)
+            else:
+                centre = (placement.x, half_width - inset)
+                label = (placement.x, half_width - inner_len - label_gap)
+            notches.append({"x": centre[0], "y": centre[1], "radius": radius})
+            contact = {
+                "x": centre[0], "y": centre[1], "radius": radius,
+                "number": placement.number, "edge": placement.edge,
+                "pad_length_mm": inner_len, "pad_width_mm": pad_w,
+                "color_hex": pin_color_hex,
+            }
+            if placement.style == CONTACT_HALF_AND_THROUGH and params.has_thru_holes:
+                # Il foro intero non tocca il bordo: e' l'altra meta' del
+                # contatto, quella in cui si salda uno strip. Va tagliato E
+                # metallizzato: stesso numero, stesso metallo, stesso solido.
+                hole_x, hole_y = params.thru_hole_centre(placement)
+                notches.append({"x": hole_x, "y": hole_y, "radius": drill_radius})
+                contact["through_hole"] = {
+                    "x": hole_x, "y": hole_y, "radius": drill_radius,
+                    "pad_diameter_mm": params.thru_pad_diameter,
+                }
+            contacts.append(contact)
+            reach[axis] = max(reach[axis], params.pad_length + 1.6)
+        text = params.silk_labels.get(placement.number, "").strip()
+        if text and params.show_silk_labels_3d:
+            silk_texts.append({
+                "x": label[0], "y": label[1], "text": text, "size_mm": 0.7,
+                "angle": 0, "color_hex": params.silk_color_hex,
+            })
+
+    # Cornice serigrafica: rientra dai bordi con i contatti quanto basta a
+    # non passare sopra piazzole e sigle.
+    inset_x = reach["x"] or 0.4
+    inset_y = reach["y"] or 0.4
+    silk_outline = None
+    if params.body_length - 2 * inset_x > 2 and params.body_width - 2 * inset_y > 2:
+        silk_outline = {
+            "x": 0.0, "y": 0.0,
+            "length_mm": params.body_length - 2 * inset_x,
+            "width_mm": params.body_width - 2 * inset_y,
+        }
+
+    notes = []
+    for side in params.sides:
+        if side.contact_style != CONTACT_THROUGH_HOLE:
+            continue
+        label = EDGE_LABELS.get(side.edge, side.edge)
+        value = params.through_hole_inset(side.edge)
+        source = params.through_hole_inset_source(side.edge)
+        if source == "fallback":
+            notes.append(
+                f"Lato {label}: distanza dal bordo dei fori passanti non dichiarata, "
+                f"stimata {value:.2f}mm (raggio della corona piu' la parete minima). "
+                "E' una stima per difetto: indica la distanza fra le file o la "
+                "distanza dal bordo per averla esatta.")
+        elif source == "row_spacing":
+            notes.append(
+                f"Lato {label}: fori passanti a {value:.2f}mm dal bordo, ricavati da "
+                f"corpo {params.edge_extent(side.edge)}mm e distanza fra le file "
+                f"{params.row_spacing}mm.")
+    return notches, contacts, silk_texts, silk_outline, notes
+
+
 def generate_castellated_3d_model(
     params: CastellatedModuleParams,
     body: Body3DParams,
@@ -289,7 +434,7 @@ def generate_castellated_3d_model(
     model_progress=None,
     cancel=None,
 ) -> dict:
-    """Genera il 3D di un modulo castellated come PCB vero e proprio.
+    """@brief Genera il 3D di un modulo castellated come PCB vero e proprio.
 
     `cancel` e' il canale di rinuncia (vedi `_run_freecad`): un
     `threading.Event` che chi ha avviato il lavoro mette a uno per fermarlo.
@@ -297,9 +442,13 @@ def generate_castellated_3d_model(
     Quello che si vede in un modulo reale, e che qui viene ricostruito:
 
     * il **PCB** -- substrato FR4 tra due strati di soldermask, spesso
-      `pcb_thickness`, con i semi-fori tagliati sul bordo;
+      `pcb_thickness`, con i semi-fori tagliati sul bordo dei soli lati che
+      li hanno (`CastellatedSide.contact_style`): un lato through_hole ha il
+      bordo dritto;
     * i **contatti**: foro metallizzato (manicotto) piu' la piazzola dorata
       sulla faccia superiore e inferiore, cosi' si vedono da entrambi i lati;
+      il foro passante e' metallizzato allo stesso modo, con una corona su
+      entrambe le facce (vedi castellated_contact_payload);
     * la **serigrafia**: sigla accanto a ogni contatto (da `silk_labels`) e
       cornice del bordo;
     * i **componenti** letti dalla foto, ognuno con la forma del suo tipo
@@ -308,72 +457,14 @@ def generate_castellated_3d_model(
       `body.show_markings_3d` non lo chieda: il percorso standard produce
       volumi generici senza scritte.
 
-    Non ci sono pin cilindrici: i contatti sono i semi-fori.
+    Non ci sono pin cilindrici: i contatti sono semi-fori e fori passanti.
+    Le note del risultato dicono da dove viene la distanza dal bordo dei fori
+    passanti, e se e' una stima.
     """
     params.validate()
 
-    half_length = params.body_length / 2
-    half_width = params.body_width / 2
-    radius = params.hole_diameter / 2
-    # Il foro di un castellated non e' centrato sul bordo: e' un foro normale
-    # forato vicino al bordo e poi tagliato via, quindi il suo centro sta
-    # DENTRO la scheda di una frazione del diametro.
-    inset = params.half_hole_inset
-
-    notches = []
-    contacts = []
-    silk_texts = []
-    label_gap = radius + 0.55
-    for placement in pad_positions(params):
-        pad_len = placement.width if placement.edge in ("left", "right") else placement.height
-        pad_w = placement.height if placement.edge in ("left", "right") else placement.width
-        # Parte del pad che sta dentro la scheda: e' la piazzola dorata visibile.
-        inner_len = max(0.6, pad_len - params.pad_overhang)
-        if placement.edge == "left":
-            centre = (-half_length + inset, placement.y)
-            label = (-half_length + inner_len + label_gap, placement.y)
-        elif placement.edge == "right":
-            centre = (half_length - inset, placement.y)
-            label = (half_length - inner_len - label_gap, placement.y)
-        elif placement.edge == "top":
-            centre = (placement.x, -half_width + inset)
-            label = (placement.x, -half_width + inner_len + label_gap)
-        else:
-            centre = (placement.x, half_width - inset)
-            label = (placement.x, half_width - inner_len - label_gap)
-        notches.append({"x": centre[0], "y": centre[1], "radius": radius})
-        if params.has_thru_holes:
-            # Il foro intero non tocca il bordo: e' l'altra meta' del contatto,
-            # quella in cui si salda uno strip. Senza, il bordo resta tutto
-            # aperto e non somiglia al pezzo reale.
-            hole_x, hole_y = params.thru_hole_centre(placement)
-            notches.append({"x": hole_x, "y": hole_y,
-                            "radius": params.thru_hole_drill / 2})
-        contacts.append({
-            "x": centre[0], "y": centre[1], "radius": radius,
-            "number": placement.number, "edge": placement.edge,
-            "pad_length_mm": inner_len, "pad_width_mm": pad_w,
-            "color_hex": body.pin_color_hex,
-        })
-        text = params.silk_labels.get(placement.number, "").strip()
-        if text and params.show_silk_labels_3d:
-            silk_texts.append({
-                "x": label[0], "y": label[1], "text": text, "size_mm": 0.7,
-                "angle": 0, "color_hex": params.silk_color_hex,
-            })
-
-    # Cornice serigrafica: rientra dai bordi con i contatti quanto basta a
-    # non passare sopra piazzole e sigle.
-    edges_used = {c["edge"] for c in contacts}
-    inset_x = (params.pad_length + 1.6) if edges_used & {"left", "right"} else 0.4
-    inset_y = (params.pad_length + 1.6) if edges_used & {"top", "bottom"} else 0.4
-    silk_outline = None
-    if params.body_length - 2 * inset_x > 2 and params.body_width - 2 * inset_y > 2:
-        silk_outline = {
-            "x": 0.0, "y": 0.0,
-            "length_mm": params.body_length - 2 * inset_x,
-            "width_mm": params.body_width - 2 * inset_y,
-        }
+    notches, contacts, silk_texts, silk_outline, inset_notes = castellated_contact_payload(
+        params, body.pin_color_hex)
 
     # Il corpo e' il PCB del modulo; l'altezza totale di `body` resta il
     # riferimento per il blocco componenti quando non c'e' la foto.
@@ -499,6 +590,9 @@ def generate_castellated_3d_model(
     # reali sono stati usati. Senza, l'esito della risoluzione non arriva
     # all'utente e il meccanismo sembra non essere entrato in funzione.
     result["notes"] = ([] if progress else model_notes) + list(result.get("notes", []))
+    # La provenienza della distanza dal bordo dei fori passanti non e' un
+    # dettaglio: quando e' una stima deve arrivare all'utente, sempre.
+    result["notes"] = inset_notes + result["notes"]
     return result
 
 def generate_3d_model(
