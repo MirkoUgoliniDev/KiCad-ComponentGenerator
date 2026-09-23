@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import (
     QGraphicsView, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QDialog, QListWidget, QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea,
     QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QListWidgetItem, QTabWidget, QTextEdit, QVBoxLayout,
-    QWidget,
+    QToolButton, QWidget,
 )
 
 from ..cad3d.annotations import EDGE_NAMES, FACE_NAMES, EdgeFilletAnnotation, FaceTextAnnotation
@@ -78,7 +78,7 @@ from .preview_3d_vtk import Preview3DVtk
 from .settings_dialog import LlmSettingsDialog
 from .profile_dialog import ProfilesDialog, icon_button
 from .translation_dialog import TranslationDialog
-from .theme import BASE, BLUE, SURFACE0, SURFACE1, SURFACE2, TEXT, YELLOW, APP_QSS
+from .theme import BASE, BLUE, RED, SURFACE0, SURFACE1, SURFACE2, TEXT, YELLOW, APP_QSS
 
 APP_DIR = Path(__file__).resolve().parent.parent.parent
 # Generated working files stay separate from installed KiCad libraries.
@@ -329,6 +329,13 @@ def _generate_3d(params, body: Body3DParams, project_dir: Path, fillets, face_te
         **cancel_kwargs(generator, cancel),
         **matching_cancel_kwargs(generator, cancel),
     )
+
+
+#: Livelli della riga di stato del 3D (`MainWindow._set_3d_status`): solo gli
+#: ultimi due vengono mostrati sotto il modello.
+STATUS_INFO = "info"
+STATUS_WARNING = "warning"
+STATUS_ERROR = "error"
 
 
 #: Riga con cui lo script FreeCAD annuncia il componente su cui lavora.
@@ -1360,8 +1367,8 @@ class MainWindow(QMainWindow):
         # Il worker terminali segnala l'attesa nella barra di stato 3D, senza
         # dialogo modale: comportamento su cui si appoggiano i test esistenti.
         if self._terminal_worker is not None and self._terminal_worker.isRunning():
-            self.label_3d_status.setText(self.i18n.text(
-                "Attendi la fine dell'analisi terminali prima di chiudere."))
+            self._set_3d_status(self.i18n.text(
+                "Attendi la fine dell'analisi terminali prima di chiudere."), STATUS_WARNING)
             event.ignore()
             return
         if self._background_work_running():
@@ -1731,12 +1738,15 @@ class MainWindow(QMainWindow):
         self.action_translations.setText(self.i18n.text("Manage translations..."))
         self.action_defaults.setText(self.i18n.text("Default generali AI..."))
         self.action_generation_options.setText(self.i18n.text("Opzioni di generazione..."))
+        self.action_accepted_models.setText(
+            self.i18n.text("Archivio abbinamenti accettati..."))
         self.action_open_config.setText(self.i18n.text("Apri config.json"))
         self.action_open_tool_dir.setText(self.i18n.text("Apri cartella progetto tool"))
         self.action_about.setText(self.i18n.text("About"))
         self._retranslate_component_types()
         self._refresh_model_combo()
         self._refresh_output_actions()
+        self._apply_view_cube_labels()
 
     def _retranslate_component_types(self) -> None:
         """@brief Refresh built-in component type labels without changing selection."""
@@ -3932,10 +3942,10 @@ class MainWindow(QMainWindow):
             except (OSError, ValueError) as exc:
                 QMessageBox.warning(self, "Scelte KiCad non salvate", str(exc))
         self._invalidate_generated_mesh()
-        self.label_3d_status.setText(self.i18n.text(
+        self._set_3d_status(self.i18n.text(
             "Componenti corretti dalla foto. Modello 3D da rigenerare: "
             "premi \"Rigenera modello 3D\" per aggiornare STEP e anteprima."
-        ))
+        ), STATUS_INFO)
         self._append_log(f"Revisione fotografica applicata: {len(components)} componenti; 3D da rigenerare.")
 
     def _invalidate_generated_mesh(self) -> None:
@@ -3945,8 +3955,8 @@ class MainWindow(QMainWindow):
         # Il solido che si stava per accettare non corrisponde piu' ai dati.
         self._set_accept_models_ready(False)
         self.preview_3d.clear_preview()
-        self.label_3d_status.setText(
-            self.i18n.text("Dati modificati. Modello 3D da rigenerare."))
+        self._set_3d_status(
+            self.i18n.text("Dati modificati. Modello 3D da rigenerare."), STATUS_INFO)
 
     def _cad_result_is_current(self) -> bool:
         worker = self.sender()
@@ -5872,8 +5882,8 @@ class MainWindow(QMainWindow):
         if self._automatic_generation_active:
             self._automatic_3d_done = True
         self._append_log(f"OK (3D) -> {path}")
-        self.label_3d_status.setText(
-            self.i18n.tr("status.step_updated", path=path))
+        self._set_3d_status(
+            self.i18n.tr("status.step_updated", path=path), STATUS_INFO)
         self._refresh_output_actions()
         self._show_generated_mesh(Path(path))
         self._set_accept_models_ready(True)
@@ -5956,29 +5966,35 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(10, 10, 10, 10)
         outer.setSpacing(8)
 
-        header = QHBoxLayout()
-        self.chk_pin_numbers = QCheckBox("Numeri pin (vista da sotto)")
-        self.chk_pin_numbers.setToolTip(
-            "I numeri compaiono solo guardando il componente dal lato dei piedini: "
-            "usa il pulsante \"Sotto\" o ruota la vista sotto il piano della scheda."
-        )
+        # Barra di icone degli strumenti di vista (scelta dell'utente,
+        # 2026-09-23): niente testo fisso sopra il modello, i nomi stanno nei
+        # tooltip, tradotti come ogni altro testo dell'interfaccia.
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(4)
+        self.chk_pin_numbers = self._view_tool_button(
+            "pin-numbers.svg",
+            "Numeri pin: compaiono solo guardando il componente dal lato dei piedini "
+            "(clic su SOTTO nel cubo, o ruota la vista sotto il piano della scheda).",
+            checkable=True)
         self.chk_pin_numbers.setChecked(bool(self._config.get("show_pin_numbers_3d", True)))
         self.chk_pin_numbers.toggled.connect(self._on_pin_numbers_toggled)
-        header.addWidget(self.chk_pin_numbers)
-
-        # Il pulsante compare solo con i numeri attivi: e' li' che serve sapere
-        # a quale funzione corrisponde il numero letto sul piedino.
-        self.btn_pinout_3d = QPushButton("Tabella pinout...")
+        toolbar.addWidget(self.chk_pin_numbers)
+        # Sempre disponibile: nella barra un'icona che compare e scompare
+        # sposterebbe le altre sotto il mouse.
+        self.btn_pinout_3d = self._view_tool_button(
+            "pinout-table.svg", "Tabella pinout: numero, nome e funzione di ogni piedino.")
         self.btn_pinout_3d.clicked.connect(self._show_pinout_dialog)
-        self.btn_pinout_3d.setVisible(self.chk_pin_numbers.isChecked())
-        header.addWidget(self.btn_pinout_3d)
-        header.addStretch()
-        outer.addLayout(header)
+        toolbar.addWidget(self.btn_pinout_3d)
+        self.btn_fit_3d = self._view_tool_button(
+            "view-fit.svg", "Inquadra tutto il modello senza cambiare l'angolo di vista.")
+        toolbar.addWidget(self.btn_fit_3d)
+        self.btn_open_3dshapes = self._view_tool_button(
+            "folder-3d.svg", "Apri la cartella 3dshapes con i file STEP generati.")
+        self.btn_open_3dshapes.clicked.connect(self._open_3dshapes_dir)
+        toolbar.addWidget(self.btn_open_3dshapes)
+        toolbar.addStretch()
+        outer.addLayout(toolbar)
 
-        outer.addWidget(QLabel(
-            "Anteprima 3D (ruotabile col mouse) -- dopo la generazione mostra il "
-            "solido reale con fillet e serigrafie:"
-        ))
         self.preview_3d = Preview3DVtk()
         if hasattr(self.preview_3d, 'component_requested'):
             self.preview_3d.component_requested.connect(
@@ -5988,29 +6004,20 @@ class MainWindow(QMainWindow):
         self.preview_3d.show_pin_numbers = self.chk_pin_numbers.isChecked()
         self.preview_3d.setMinimumHeight(120)
         outer.addWidget(self.preview_3d, 1)
+        # Le viste standard si scelgono dal cubo dentro l'anteprima, che ha
+        # preso il posto della riga «Vista: Iso, Sopra, …».
+        self.btn_fit_3d.clicked.connect(self.preview_3d.fit_view)
+        self._apply_view_cube_labels()
 
-        view_row = QHBoxLayout()
-        view_row.addWidget(QLabel("Vista:"))
-        for label, key in (
-            ("Iso", "iso"), ("Sopra", "top"), ("Sotto", "bottom"),
-            ("Fronte", "front"), ("Retro", "back"),
-            ("Sinistra", "left"), ("Destra", "right"),
-        ):
-            button = QPushButton(label)
-            button.clicked.connect(lambda _, k=key: self.preview_3d.show_view(k))
-            view_row.addWidget(button)
-        btn_fit = QPushButton("Centra")
-        btn_fit.clicked.connect(self.preview_3d.fit_view)
-        view_row.addWidget(btn_fit)
-        view_row.addStretch()
-        outer.addLayout(view_row)
-
-        self.label_3d_status = QLabel(
-            "Attiva \"Modello 3D\" nel tab \"Footprint 2D\" per vedere l'anteprima qui."
-        )
+        # Riga di stato del 3D: visibile SOLO per errori e avvisi (scelta
+        # dell'utente). Gli esiti normali restano nel testo -- e nel log -- ma
+        # non occupano lo spazio sotto il modello. Vedi `_set_3d_status`.
+        self.label_3d_status = QLabel()
         self.label_3d_status.setWordWrap(True)
-        self.label_3d_status.setStyleSheet(f"color: {TEXT}; font-style: italic;")
         outer.addWidget(self.label_3d_status)
+        self._set_3d_status(self.i18n.text(
+            "Attiva \"Modello 3D\" nel tab \"Footprint 2D\" per vedere l'anteprima qui."),
+            STATUS_WARNING)
 
         settings = QWidget()
         settings_layout = QVBoxLayout(settings)
@@ -6076,9 +6083,6 @@ class MainWindow(QMainWindow):
         self.btn_accept_models.clicked.connect(self._accept_models)
         self.btn_accept_models.setEnabled(False)
         regen_row.addWidget(self.btn_accept_models)
-        btn_open_3d = QPushButton("Apri cartella 3dshapes")
-        btn_open_3d.clicked.connect(self._open_3dshapes_dir)
-        regen_row.addWidget(btn_open_3d)
         # Copie dei pulsanti della scheda Progetto: da qui si vede il solido
         # e si capisce se mancano corpi, quindi da qui si deve poter tornare
         # alle proposte annotate e ripartire (revisione gratuita; rilancio a
@@ -6117,11 +6121,56 @@ class MainWindow(QMainWindow):
         container_layout.addWidget(self.model_3d_action_bar)
         return container
 
+    def _view_tool_button(self, asset: str, tooltip: str, *, checkable: bool = False):
+        """@brief Icon-only button of the 3D view toolbar.
+
+        @param asset SVG file in `gui/assets`.
+        @param tooltip Italian source text; the i18n pass translates it.
+        @param checkable True for a toggle (e.g. pin numbers).
+        @return The configured QToolButton.
+        @note Icon-only, so the tooltip is also the accessible name: a screen
+            reader and the i18n catalogue both see the same text.
+        """
+        button = QToolButton()
+        button.setIcon(QIcon(str(Path(__file__).parent / "assets" / asset)))
+        button.setIconSize(QSize(22, 22))
+        button.setAutoRaise(True)
+        button.setCheckable(checkable)
+        button.setToolTip(tooltip)
+        button.setProperty("i18n_accessible_name_source", tooltip)
+        button.setAccessibleName(tooltip)
+        return button
+
+    def _apply_view_cube_labels(self) -> None:
+        """@brief Write the translated face names on the navigation cube."""
+        preview = getattr(self, "preview_3d", None)
+        if preview is None or not hasattr(preview, "set_view_cube_labels"):
+            return
+        preview.set_view_cube_labels({
+            "top": self.i18n.text("Sopra"), "bottom": self.i18n.text("Sotto"),
+            "front": self.i18n.text("Fronte"), "back": self.i18n.text("Retro"),
+            "right": self.i18n.text("Destra"), "left": self.i18n.text("Sinistra")})
+
+    def _set_3d_status(self, text: str, level: str = "info") -> None:
+        """@brief Update the 3D status line; show it only for warnings and errors.
+
+        @param text Already translated message.
+        @param level STATUS_INFO, STATUS_WARNING or STATUS_ERROR.
+        @note User decision (2026-09-23): when everything goes well nothing is
+            written under the model. The text is still stored in the label
+            (tests and later appends read it) and the callers keep writing the
+            log, so an outcome is never lost -- it is only not displayed.
+        """
+        self.label_3d_status.setText(text)
+        self.label_3d_status.setProperty("status_level", level)
+        color = {STATUS_WARNING: YELLOW, STATUS_ERROR: RED}.get(level, TEXT)
+        self.label_3d_status.setStyleSheet(f"color: {color};")
+        self.label_3d_status.setVisible(level in (STATUS_WARNING, STATUS_ERROR))
+
     def _on_pin_numbers_toggled(self, checked: bool) -> None:
         self._config["show_pin_numbers_3d"] = checked
         save_config(self._config)
         self.preview_3d.set_pin_numbers(checked)
-        self.btn_pinout_3d.setVisible(checked)
         # Ridisegna la vista corrente: mesh generata se c'e', altrimenti
         # l'approssimazione dai parametri.
         if self._last_mesh_path and Path(self._last_mesh_path).is_file():
@@ -6174,8 +6223,8 @@ class MainWindow(QMainWindow):
             return
         self.btn_terminal_detail.setEnabled(False)
         self.btn_lead_refinement.setEnabled(False)
-        self.label_3d_status.setText(
-            self.i18n.text("Analisi dei terminali nella foto in corso..."))
+        self._set_3d_status(
+            self.i18n.text("Analisi dei terminali nella foto in corso..."), STATUS_INFO)
         worker = TerminalDetailWorker(self._photo_png, components,
                                       self._vision_model(), only_leads=only_leads,
                                       system_prompt=profile['lead_prompt' if only_leads else 'terminal_prompt'])
@@ -6191,7 +6240,7 @@ class MainWindow(QMainWindow):
 
     def _on_terminal_detail_error(self, message):
         self._append_log(message)
-        self.label_3d_status.setText(message)
+        self._set_3d_status(message, STATUS_INFO)
 
     def _on_terminal_detail_done(self, components):
         worker = self._terminal_worker
@@ -6199,23 +6248,23 @@ class MainWindow(QMainWindow):
                 or worker._photo_snapshot != self._photo_png
                 or worker.components != self._photo_components_from_table()):
             self._append_log("Dettaglio terminali scartato: i dati sono cambiati durante l'analisi.")
-            self.label_3d_status.setText(self.i18n.text(
-                "Dati modificati durante l'analisi: ripeti Rileva terminali."))
+            self._set_3d_status(self.i18n.text(
+                "Dati modificati durante l'analisi: ripeti Rileva terminali."), STATUS_WARNING)
             return
         if getattr(worker, 'only_leads', False) and components == worker.components:
-            self.label_3d_status.setText(self.i18n.text(
-                "Nessun nuovo dettaglio dei reofori applicabile: geometria e anteprima conservate."))
+            self._set_3d_status(self.i18n.text(
+                "Nessun nuovo dettaglio dei reofori applicabile: geometria e anteprima conservate."), STATUS_INFO)
             return
         self._set_photo_components(components)
         self._invalidate_generated_mesh()
         count = sum(bool(c.get('terminal_geometry')) for c in components)
-        self.label_3d_status.setText(self.i18n.tr(
-            "status.terminals_observed", count=count))
+        self._set_3d_status(self.i18n.tr(
+            "status.terminals_observed", count=count), STATUS_INFO)
         if getattr(worker, 'only_leads', False):
             count = sum(1 for c in components for t in (c.get('terminal_geometry') or {}).get('terminals',[])
                         if t.get('lead_detail'))
-            self.label_3d_status.setText(self.i18n.tr(
-                "status.leads_observed", count=count))
+            self._set_3d_status(self.i18n.tr(
+                "status.leads_observed", count=count), STATUS_INFO)
 
     def _regenerate_3d(self) -> None:
         """Rigenera solo lo STEP con le annotazioni correnti (il footprint resta com'e')."""
@@ -6240,16 +6289,16 @@ class MainWindow(QMainWindow):
             params.validate()
             body.validate()
         except ValueError as exc:
-            self.label_3d_status.setText(
-                self.i18n.tr("status.parameter_error", error=exc))
+            self._set_3d_status(
+                self.i18n.tr("status.parameter_error", error=exc), STATUS_ERROR)
             self._append_log(f"ERRORE 3D: {exc}")
             return
 
         self.btn_regen_3d.setEnabled(False)
         self.btn_regen_3d.setText(
             self.i18n.text("Generazione in corso (FreeCAD)..."))
-        self.label_3d_status.setText(
-            self.i18n.text("Generazione STEP in corso tramite FreeCAD..."))
+        self._set_3d_status(
+            self.i18n.text("Generazione STEP in corso tramite FreeCAD..."), STATUS_INFO)
         self._append_log(
             f"Rigenerazione 3D {params.name}: {len(self.fillet_annotations)} fillet, "
             f"{len(self.face_text_annotations)} testi incisi"
@@ -6307,8 +6356,8 @@ class MainWindow(QMainWindow):
         if not self._cad_result_is_current():
             return
         self._append_log(f"OK (3D) -> {path}")
-        self.label_3d_status.setText(
-            self.i18n.tr("status.step_updated", path=path))
+        self._set_3d_status(
+            self.i18n.tr("status.step_updated", path=path), STATUS_INFO)
         self._refresh_output_actions()
         self._show_generated_mesh(Path(path))
         self._set_accept_models_ready(True)
@@ -6333,8 +6382,8 @@ class MainWindow(QMainWindow):
         """
         components = self._photo_components_from_table()
         if not components:
-            self.label_3d_status.setText(self.i18n.text(
-                "Nessun componente in tabella: non ci sono modelli KiCad da ricordare."))
+            self._set_3d_status(self.i18n.text(
+                "Nessun componente in tabella: non ci sono modelli KiCad da ricordare."), STATUS_WARNING)
             return
         dialog = ConsolidateDialog(components, self, i18n=self.i18n)
         self.i18n.retranslate_widgets(dialog)
@@ -6351,17 +6400,17 @@ class MainWindow(QMainWindow):
                                        source=self._component_name() or "")
         except (AcceptedModelsError, sqlite3.Error, OSError) as exc:
             self._append_log(f"Abbinamenti accettati NON salvati: {exc}")
-            self.label_3d_status.setText(self.i18n.tr(
-                "status.accepted_models_failed", error=exc))
+            self._set_3d_status(self.i18n.tr(
+                "status.accepted_models_failed", error=exc), STATUS_ERROR)
             return
         self._append_log(
             f"Abbinamenti accettati salvati in {store.path}: {result.created} voci nuove, "
             f"{result.confirmed} conferme di voci esistenti, {len(result.skipped)} esclusi.")
         for name, reason in result.skipped:
             self._append_log(f"  escluso {name}: {reason}")
-        self.label_3d_status.setText(self.i18n.tr(
+        self._set_3d_status(self.i18n.tr(
             "status.accepted_models_saved", stored=result.stored,
-            created=result.created, confirmed=result.confirmed))
+            created=result.created, confirmed=result.confirmed), STATUS_INFO)
 
     def _show_accepted_models(self) -> None:
         """@brief Open the archive list, where wrong entries can be deleted."""
@@ -6409,11 +6458,10 @@ class MainWindow(QMainWindow):
         try:
             self.preview_3d.render_mesh(mesh_path)
             self._last_mesh_path = mesh_path
-            self.label_3d_status.setText(
+            self._set_3d_status(
                 f"{self.label_3d_status.text()}\n"
                 + self.i18n.text(
-                    "Anteprima aggiornata con la geometria reale esportata (fillet e testo inclusi).")
-            )
+                    "Anteprima aggiornata con la geometria reale esportata (fillet e testo inclusi)."), STATUS_INFO)
         except Exception as exc:  # noqa: BLE001 - anteprima non critica
             self._append_log(f"Anteprima mesh non disponibile: {exc}")
 
@@ -6429,13 +6477,13 @@ class MainWindow(QMainWindow):
             return
         if CAD_ABORT_MESSAGE in message:
             self._append_log(f"INTERROTTO 3D: {message}")
-            self.label_3d_status.setText(self.i18n.text(
+            self._set_3d_status(self.i18n.text(
                 "Generazione interrotta dall'utente: il modello 3D non è stato "
-                "aggiornato."))
+                "aggiornato."), STATUS_INFO)
             return
         self._append_log(f"ERRORE 3D: {message}")
-        self.label_3d_status.setText(self.i18n.tr(
-            "status.step_failed", error=message.splitlines()[0]))
+        self._set_3d_status(self.i18n.tr(
+            "status.step_failed", error=message.splitlines()[0]), STATUS_ERROR)
 
     # ── Componenti del modulo (3D) ─────────────────────────────────
 
@@ -7293,27 +7341,27 @@ class MainWindow(QMainWindow):
             if self._last_mesh_path and Path(self._last_mesh_path).is_file():
                 try:
                     self.preview_3d.render_mesh(self._last_mesh_path)
-                    self.label_3d_status.setText(self.i18n.text(
+                    self._set_3d_status(self.i18n.text(
                         "Geometria reale del modulo (PCB con semi-fori sul bordo "
                         "e blocco dei componenti)."
-                    ))
+                    ), STATUS_INFO)
                     return
                 except Exception as exc:  # noqa: BLE001 - anteprima best-effort
                     self._append_log(f"Anteprima mesh non disponibile: {exc}")
             self.preview_3d.clear_preview()
-            self.label_3d_status.setText(self.i18n.text(
+            self._set_3d_status(self.i18n.text(
                 "Attiva \"Modello 3D\" e premi \"Genera footprint\": il modello "
                 "del modulo (PCB con semi-fori + componenti) si vede qui dopo la "
                 "generazione con FreeCAD."
-            ))
+            ), STATUS_WARNING)
             return
 
         body = self._current_body_params()
         if body is None:
             self.preview_3d.clear_preview()
-            self.label_3d_status.setText(self.i18n.text(
+            self._set_3d_status(self.i18n.text(
                 "Attiva \"Modello 3D\" nel tab \"Footprint 2D\" per vedere l'anteprima qui."
-            ))
+            ), STATUS_WARNING)
             return
 
         try:
@@ -7322,14 +7370,14 @@ class MainWindow(QMainWindow):
             self.preview_3d.render_params(params, body)
         except ValueError as exc:
             self.preview_3d.clear_preview()
-            self.label_3d_status.setText(
-                self.i18n.tr("status.parameter_error", error=exc))
+            self._set_3d_status(
+                self.i18n.tr("status.parameter_error", error=exc), STATUS_ERROR)
             return
 
-        self.label_3d_status.setText(self.i18n.text(
+        self._set_3d_status(self.i18n.text(
             "Anteprima approssimata (poligoni, per farsi un'idea dell'ingombro). "
             "Premi \"Genera footprint\" per ottenere il modello .step esatto via FreeCAD."
-        ))
+        ), STATUS_INFO)
 
     # ── Cambio tab ─────────────────────────────────────────────────
 

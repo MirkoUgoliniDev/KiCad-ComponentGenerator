@@ -4703,3 +4703,83 @@ matching, ogni regola con il suo negativo strutturale),
 `KICADGEN_MATCH_DB`: nessun test legge o scrive l'archivio vero dell'utente.
 31 voci nuove nel catalogo (en/it/fr/de), piu' `status.accepted_models_saved`
 e `status.accepted_models_failed`.
+
+# 2026-09-23 (3) — tab 3D: cubo di navigazione, barra di icone, niente testi fissi
+
+Richiesta dell'utente con tre screenshot (il tab 3D con le scritte barrate e
+l'area vuota accanto a «Tabella pinout…» cerchiata; il cubo TOP/FRONT di uno
+slicer). Scelte fatte da lui prima di partire:
+
+1. **Scritte**: solo errori e avvisi sotto il modello.
+2. **Cubo**: cliccabile come lo slicer (facce, spigoli, angoli, casetta).
+3. **Barra di icone**: strumenti di vista (numeri pin, pinout, inquadra,
+   cartella 3dshapes). I passi del lavoro restano in basso con il testo.
+   Richiesta aggiuntiva: **tooltip tradotti**.
+
+## Come e' fatto
+
+- `kicadgen/gui/view_cube.py` (nuovo): `ViewCube` disegna un
+  `vtkAnnotatedCubeActor` in un **renderer suo su un livello sovrapposto**
+  (layer 1) in alto a destra, 96 px logici, e una casetta 2D sotto. Il cubo
+  segue la camera principale (osservatore `StartEvent`), quindi sopravvive a
+  `clear()` e non entra mai nei bounds/picking/`reset_camera` del modello.
+  **Clic analitico**: il punto diventa un raggio della camera parallela del
+  cubo, intersecato con la scatola unitaria (`ray_box_entry`), poi
+  `classify_cube_point` → faccia / spigolo / angolo (fascia di bordo = 15%
+  del lato, `EDGE_FRACTION` 0.7, scelta di interazione dichiarata). Nessun
+  picker VTK (si comporta diversamente con gli assiemi e fuori schermo).
+- `Preview3DVtk`: `mousePressEvent` serve il clic sul cubo e **non** lo passa
+  a VTK (altrimenti partirebbe anche la rotazione); il rilascio dello stesso
+  gesto viene assorbito; doppio clic sul cubo ignorato; cursore a mano sopra
+  il cubo. Nell'angolo vuoto del quadrato del cubo il mouse resta di VTK.
+  `view_direction()` per spigoli e angoli; `set_view_cube_labels()` per le
+  scritte (dal catalogo: Sopra/Sotto/Fronte/Retro/Destra/Sinistra, in
+  maiuscolo), aggiornate anche al cambio lingua.
+- `main_window._build_3d_tab`: tolti la riga «Vista: Iso…Centra» e la frase
+  «Anteprima 3D (ruotabile col mouse)…»; «Apri cartella 3dshapes» passa dalla
+  riga in basso alla barra. Barra = `QToolButton` solo icona
+  (`_view_tool_button`, SVG nuovi `pin-numbers`, `pinout-table`, `view-fit`,
+  `folder-3d`), tooltip = nome accessibile, entrambi ritradotti. Il pinout ora
+  e' **sempre visibile** (prima spariva con i numeri spenti: in una barra
+  sposterebbe le altre icone). Stile `QToolButton` (hover, acceso) in
+  `theme.APP_QSS`.
+- **Riga di stato**: `_set_3d_status(testo, livello)` con `STATUS_INFO /
+  STATUS_WARNING / STATUS_ERROR`; tutte le 24 scritture passano di li'. Solo
+  avvisi (giallo) ed errori (rosso) si vedono; il testo resta comunque nella
+  label e i chiamanti continuano a scrivere il log. Classificati avvisi: «attendi
+  la fine dell'analisi», «dati modificati durante l'analisi», «nessun
+  componente da ricordare», e i due suggerimenti «Attiva Modello 3D…» (senza
+  di loro l'anteprima vuota non si spiega). Errori: parametri non validi, STEP
+  fallito, abbinamenti non salvati. L'interruzione chiesta dall'utente e'
+  informazione, non avviso.
+
+## Limiti / da verificare sulla macchina dell'utente
+
+- Visto in un render fuori schermo (pyvista Plotter): facce leggibili, testo
+  SOPRA ruotato di 90° per leggersi nella vista dall'alto. **Non visto dentro
+  la finestra Qt su Windows**: se il livello sovrapposto non si vedesse (driver
+  OpenGL), il resto dell'anteprima funziona lo stesso e il cubo va rivisto.
+- Il vecchio tooltip «Tabella pinout...» e le voci dei pulsanti vista restano
+  nel catalogo: usate dal cubo (nomi delle facce) o innocue.
+
+## Test
+
+Suite completa: **3630 passati**, 11 saltati, 2 xfail, 19 sottotest, zero rossi.
+Nuovi: `test_view_cube.py` 21 (geometria del clic pura + cubo vero in
+`Preview3DVtk`: faccia, casetta, clic che non arriva alla rotazione VTK e il
+suo negativo, angolo vuoto, spigolo, sopravvivenza a `clear`, etichette),
+`test_3d_toolbar.py` 9 (icone con tooltip tradotti in 4 lingue, cambio lingua,
+pinout sempre raggiungibile, pulsanti vista e frase fissa spariti, stato
+nascosto per gli esiti normali e visibile per avvisi/errori). Quattro voci
+nuove nel catalogo (i tooltip della barra).
+
+## Trappola di consegna nuova: gli SVG passati dal ponte
+
+`device_commit_files` **inietta un manifesto C2PA** (~8 KB di `<metadata>`)
+dentro i file `.svg` che trasferisce: il file resta un SVG valido ma non e'
+quello scritto, e l'md5 non torna. Scoperto qui confrontando gli md5 dopo il
+commit; i quattro SVG sono stati riscritti direttamente sul disco
+dell'utente con `device_bash` e il commit emendato (nessuna traccia di
+`c2pa` nella storia). **Per gli SVG usare `device_bash`, non il ponte**, e
+controllare sempre gli md5 dopo la consegna. I file di testo (.py, .md) non
+vengono toccati.

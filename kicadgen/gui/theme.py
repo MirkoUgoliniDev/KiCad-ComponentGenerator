@@ -229,5 +229,21 @@ APP_QSS = f"""
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
         height: 0;
     }}
+    /* Barre di icone: il pulsante si vede al passaggio del mouse, e un
+       interruttore acceso (es. numeri pin) resta evidenziato. */
+    QToolButton {{
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: 5px;
+        padding: 3px;
+    }}
+    QToolButton:hover {{
+        background: {SURFACE0};
+        border: 1px solid {SURFACE2};
+    }}
+    QToolButton:checked {{
+        background: {SURFACE1};
+        border: 1px solid {BLUE};
+    }}
 {TAB_QSS}
 """

@@ -104,6 +104,17 @@ class Preview3DVtk(QtInteractor):
         except Exception:  # noqa: BLE001 - illuminazione di default
             pass
         self._label_actor = None
+        # Cubo di navigazione in alto a destra (al posto della riga di
+        # pulsanti «Vista»). E' una comodita': se VTK non ha il modulo delle
+        # annotazioni la vista funziona lo stesso, si ruota col mouse.
+        self.view_cube = None
+        self._cube_press = False
+        try:
+            from .view_cube import ViewCube
+            self.view_cube = ViewCube(self.ren_win, self.renderer)
+            self.view_cube.layout(self.width(), self.height())
+        except Exception:  # noqa: BLE001 - il cubo e' accessorio
+            self.view_cube = None
         # Le etichette si aggiornano anche quando l'utente ruota col mouse, non
         # solo premendo i pulsanti di vista.
         try:
@@ -177,8 +188,89 @@ class Preview3DVtk(QtInteractor):
         self.component_menu_requested.emit(index, global_position)
         return True
 
+    # ── Cubo di navigazione ─────────────────────────────────────────
+
+    def set_view_cube_labels(self, labels: dict) -> None:
+        """@brief Translate the face labels of the navigation cube.
+
+        @param labels Mapping view name (top, bottom, front, back, right, left) -> text.
+        """
+        if self.view_cube is not None:
+            self.view_cube.set_labels(labels)
+            self.render()
+
+    def view_direction(self, direction) -> None:
+        """@brief Look at the model from a direction (edge or corner of the cube).
+
+        @param direction Vector pointing from the model towards the camera.
+        """
+        norm = float(np.linalg.norm(direction))
+        if norm <= 0:
+            return
+        unit = np.asarray(direction, dtype=float) / norm
+        focal = np.asarray(self.camera.focal_point, dtype=float)
+        distance = float(np.linalg.norm(np.asarray(self.camera.position) - focal)) or 1.0
+        # Con la camera quasi verticale l'alto non puo' essere Z.
+        up = (0.0, 0.0, 1.0) if abs(unit[2]) < 0.99 else (0.0, 1.0, 0.0)
+        self.camera_position = [tuple(focal + unit * distance), tuple(focal), up]
+        self.fit_view()
+
+    def _cube_clicked(self, target) -> None:
+        """Apply what a click on the cube selected: home, a face or a diagonal."""
+        from .view_cube import view_for_direction
+        if target == "home":
+            self.show_view("iso")
+            return
+        view = view_for_direction(target)
+        if view is not None:
+            self.show_view(view)
+        else:
+            self.view_direction(target)
+
+    def _on_cube(self, event) -> bool:
+        """True when a mouse event falls on the cube or on the house."""
+        if self.view_cube is None:
+            return False
+        point = event.position()
+        return self.view_cube.contains(point.x(), point.y())
+
+    def resizeEvent(self, event):  # noqa: N802 - firma Qt
+        """@brief Keep the cube in the top-right corner at a fixed pixel size."""
+        super().resizeEvent(event)
+        if self.view_cube is not None:
+            self.view_cube.layout(self.width(), self.height())
+
+    def mouseMoveEvent(self, event):  # noqa: N802 - firma Qt
+        """@brief Pointing-hand cursor over the cube, so it reads as clickable."""
+        if self._on_cube(event):
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mouseDoubleClickEvent(self, event):  # noqa: N802 - firma Qt
+        """@brief A double click on the cube is two clicks on the cube, not a component pick."""
+        if self._on_cube(event):
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
     def mousePressEvent(self, event):  # noqa: N802 - firma Qt
-        """@brief Ricorda dove inizia il tasto destro, per distinguere clic e zoom."""
+        """@brief Serve clicks on the cube; remember where a right press starts.
+
+        @note A left click on the cube never reaches VTK: it would also start
+            a camera rotation, and the view would turn under the cursor.
+            Outside the cube's hit area (and in the empty corners of its
+            square) the mouse keeps its usual meaning.
+        """
+        if event.button() == Qt.MouseButton.LeftButton and self._on_cube(event):
+            point = event.position()
+            target = self.view_cube.hit(point.x(), point.y())
+            if target is not None:
+                self._cube_press = True
+                event.accept()
+                self._cube_clicked(target)
+                return
         if event.button() == Qt.MouseButton.RightButton:
             self._right_press = event.pos()
             self._menu_served = False
@@ -197,6 +289,12 @@ class Preview3DVtk(QtInteractor):
         menu solo se il mouse non si e' spostato, altrimenti si e' chiesto
         uno zoom e il menu sarebbe un fastidio.
         """
+        if getattr(self, "_cube_press", False) and event.button() == Qt.MouseButton.LeftButton:
+            # Il clic sul cubo e' gia' servito alla pressione: VTK non ha visto
+            # la pressione e non deve vedere nemmeno il rilascio.
+            self._cube_press = False
+            event.accept()
+            return
         start = getattr(self, "_right_press", None)
         self._right_press = None
         super().mouseReleaseEvent(event)
