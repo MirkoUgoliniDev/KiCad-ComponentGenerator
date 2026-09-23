@@ -1709,6 +1709,11 @@ class PhotoReviewDialog(QDialog):
             warnings.append(self._tr("Importazione STEP fallita: il 3D mostra un segnaposto, non il modello scelto."))
         if (component.get('model_match') or {}).get('status') == 'auto_matched' and selection.get('status') != 'confirmed':
             warnings.append(self._tr("Modello KiCad applicato automaticamente per compatibilità meccanica: identità e polarità non certificate; doppio clic per modificarlo."))
+        elif (component.get('model_match') or {}).get('status') == 'library_matched' and selection.get('status') != 'confirmed':
+            # Scelta dell'utente: «preseleziona, tu confermi». Il modello viene
+            # da un abbinamento gia' approvato su un'altra scheda con la stessa
+            # firma geometrica; il verso dipende da questa scheda.
+            warnings.append(self._tr("Modello KiCad preso dall'archivio dei tuoi abbinamenti accettati (stessa forma e misure): verifica il verso; doppio clic per confermarlo o cambiarlo."))
         elif (component.get('model_match') or {}).get('status') == 'provisional_matched' and selection.get('status') != 'confirmed':
             # Decisione dell'utente (1+3): il provvisorio torna ad agganciare
             # il modello, ma dichiarato come tale, cosi' chi rivede sa che

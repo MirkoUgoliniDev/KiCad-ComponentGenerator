@@ -37,6 +37,7 @@ import json
 import math
 import os
 import re
+import sqlite3
 from pathlib import Path
 from functools import lru_cache
 from typing import Iterable, Optional
@@ -1075,6 +1076,25 @@ def _provisional_terminal_count(component):
     return None
 
 
+def observed_terminal_count(component) -> Optional[int]:
+    """@brief Observed terminal count, when a single supported value exists.
+
+    @param component Component as produced by the inventory.
+    @return The count when the confident observations (`_observed_count`) and
+        the provisional one (`_provisional_terminal_count`) agree on one value;
+        None when they are missing or disagree.
+    @note Part of the accepted-matches signature: two disagreeing values are a
+        doubt, not a signature.
+    """
+    if not isinstance(component, dict):
+        return None
+    counts = set(_observed_count(component))
+    provisional = _provisional_terminal_count(component)
+    if provisional is not None:
+        counts.add(provisional)
+    return next(iter(counts)) if len(counts) == 1 else None
+
+
 def _compatible_candidates(paths, component, note):
     """Reject explicit type/topology contradictions before comparing dimensions."""
     if not component:
@@ -1900,6 +1920,62 @@ def _synchronize_preview_variants(components, note) -> None:
         note(f"Switch preview group '{key}': shared candidate {Path(selected).name} proposed for {len(group)} components.")
 
 
+def _accepted_match(component: dict, roots, note) -> Optional[dict]:
+    """@brief Proposal from the accepted-matches archive, or None.
+
+    @param component Body to match, without an explicit choice.
+    @param roots 3D library roots in use.
+    @param note Diagnostic callback.
+    @return A `library_matched` report with a single candidate, or None to
+        continue with the ordinary search.
+    @note The archive helps, it is not required: an unreadable or newer file
+        is logged and ignored, and matching proceeds as without it. Nothing is
+        written: reading neither creates the archive nor changes its entries.
+    @note Polarity depends on how the part sits on this board. Without a stored
+        manual angle the observed asymmetric landmark decides, as for every
+        automatic attachment; a stored angle is absolute like any explicit
+        choice, so the verse must be checked by the user -- the reasons say so.
+    """
+    from ..services.accepted_models import (
+        ACCEPTED_MATCH_TOLERANCE, AcceptedModelStore, AcceptedModelsError)
+    try:
+        found = AcceptedModelStore().find(component, roots)
+    except (AcceptedModelsError, sqlite3.Error, OSError) as exc:
+        note(f"Archivio abbinamenti accettati ignorato: {exc}")
+        return None
+    if found is None:
+        return None
+    entry, path = found["entry"], found["path"]
+    samples = int(entry.get("samples") or 1)
+    accepted_on = str(entry.get("last_accepted") or "")[:10]
+    count_reason = ("Numero di terminali confrontato: uguale"
+                    if found["terminal_count_checked"] else
+                    "Numero di terminali non confrontato: manca l'osservazione su una delle due schede")
+    reasons = [
+        f"Gia' accettato da te in una scheda precedente ({samples} volte, l'ultima il {accepted_on})",
+        f"Stessa categoria ({entry['category']}) e stessa base di misura; ingombro entro il "
+        f"{ACCEPTED_MATCH_TOLERANCE:.0%} di quello accettato",
+        count_reason,
+        "Proposta da confermare: il verso (polarita') va verificato su questa scheda",
+    ]
+    if found["alternatives"]:
+        reasons.append(f"Altre {found['alternatives']} voci compatibili nell'archivio: "
+                       "vince la piu' vicina e, a parita', la piu' recente")
+    candidate = {"path": str(path), "package": path.stem,
+                 "relative_xy_error": found["relative_xy_error"],
+                 "measurement_basis": "accepted_library",
+                 "family": _candidate_family_for_component(path, component),
+                 "status": "library_matched", "reasons": reasons}
+    note(f"{component.get('name') or path.stem}: modello dall'archivio degli abbinamenti "
+         f"accettati ({path.stem}); misura dei candidati saltata.")
+    return {"status": "library_matched", "candidates": [candidate],
+            "selected_path": str(path), "discovery": "accepted_library",
+            "accepted_entry": {key: entry.get(key) for key in (
+                "id", "category", "basis", "long_mm", "short_mm", "height_mm",
+                "terminal_count", "model_ref", "rotation_deg", "samples",
+                "last_accepted", "source")}}
+
+
 def model_candidates(component: dict, *, limit=5, library=None, log=None,
                      cancel=None) -> dict:
     """@brief Propose bounded, JSON-safe model choices for explicit human review.
@@ -1921,7 +1997,11 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None,
         independently supported unique estimates use auto_matched instead;
         same-footprint alternatives may use provisional_matched, which proposes
         selected_path; attach_models applies it provisionally and says so.
-        Rejection stops discovery. Missing/descriptive packages use family discovery.
+        Rejection stops discovery. Without an explicit choice, a body whose
+        geometric signature matches an entry of the accepted-matches archive
+        (`services.accepted_models`) returns status library_matched with that
+        single candidate, before any library search or CAD measurement.
+        Missing/descriptive packages use family discovery.
         Unknown basis compares independent readings; body/total/pads are strict.
         leads and body_and_leads mean total. At most 64 structurally compatible
         paths are measured; search_truncated flags omitted names, including cold
@@ -1960,6 +2040,12 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None,
     if root is None:
         note("Libreria 3D di KiCad non trovata: si usano le forme approssimate.")
         return result
+    # Prima della ricerca e della misura (la parte lenta): un corpo con la
+    # stessa firma geometrica di uno che l'utente ha gia' accettato riceve
+    # quel modello come proposta da confermare.
+    accepted = _accepted_match(component, roots, note)
+    if accepted is not None:
+        return accepted
     named = list(dict.fromkeys(
         p for search_root in roots
         for p in candidates(package, search_root)
@@ -2174,7 +2260,9 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
         model_match.selected_path so the solid previews the compatible library
         model instead of a generic body, and the report says so with
         model_match.attachment == "provisional" plus attachment_reason, so the
-        picker can replace it.
+        picker can replace it. A library_matched report (accepted-matches
+        archive) is applied the same way with attachment "accepted_library";
+        its stored manual angle, if any, becomes model_rotation_deg.
         Rotation is copied to model_rotation_deg; None or an omitted selection
         rotation clears that override for automatic native-axis inference.
         Explicit zero is retained. Unconfirmed native placement metadata and
@@ -2259,7 +2347,8 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
             else:
                 component["model_rotation_deg"] = rotation
             resolved += 1
-        elif report["status"] in ("auto_matched", "provisional_matched") and report.get("selected_path"):
+        elif (report["status"] in ("auto_matched", "provisional_matched", "library_matched")
+              and report.get("selected_path")):
             # Decisione dell'utente (A): anche la proposta provvisoria aggancia
             # il modello, ma lo dichiara. Lasciare il corpo generico per un
             # candidato che la misura non sa distinguere dalle sue varianti
@@ -2274,6 +2363,14 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
                 report["attachment_reason"] = (
                     "Model applied PROVISIONALLY: identity not verified, the photograph "
                     "cannot separate it from its variants; the picker can change it.")
+            elif report["status"] == "library_matched":
+                # Scelta dell'utente: «preseleziona, tu confermi». Il modello
+                # viene da un abbinamento che hai gia' accettato su un'altra
+                # scheda con la stessa firma geometrica; resta una proposta.
+                report["attachment"] = "accepted_library"
+                report["attachment_reason"] = (
+                    "Modello dall'archivio degli abbinamenti accettati: stessa firma "
+                    "geometrica di una scelta gia' approvata; da confermare nel selettore.")
             else:
                 report["attachment"] = "automatic"
             # Il verso del modello nativo non si decide qui. Fino a poco fa lo
@@ -2289,6 +2386,19 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
             # un altro modello e va comunque tolto.
             component.pop("model_rotation_deg", None)
             component.pop("model_rotation_native_delta_deg", None)
+            # L'angolo scelto a mano nel selettore e' locale al modello, quindi
+            # la voce dell'archivio lo porta con se'. Come ogni scelta
+            # esplicita e' ASSOLUTO: sostituisce la deduzione dell'asse e
+            # quindi anche la correzione del verso dal riferimento osservato
+            # (vedi `freecad_parts._placement_angle`). Per questo il report lo
+            # dice fra i motivi: il verso su questa scheda va verificato.
+            # Senza angolo salvato si torna alla deduzione automatica.
+            accepted_rotation = (report.get("accepted_entry") or {}).get("rotation_deg")
+            if (report["status"] == "library_matched"
+                    and isinstance(accepted_rotation, (int, float))
+                    and not isinstance(accepted_rotation, bool)
+                    and math.isfinite(accepted_rotation)):
+                component["model_rotation_deg"] = float(accepted_rotation)
             if component.get("landmark_side"):
                 report["orientation_landmark"] = {
                     "feature": component.get("landmark_feature"),

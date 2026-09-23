@@ -66,6 +66,7 @@ from ..services.kicad_library import (
 )
 from .app_config import (CONFIG_PATH, DEFAULTS, browse_start_dir, config_path, load_config,
                          remember_browse_dir, save_config)
+from .accepted_models_dialog import AcceptedModelsDialog, ConsolidateDialog
 from .analysis_overlay import AnalysisOverlay
 from .generation_options_dialog import GenerationOptionsDialog
 from .guided_documents import GuidedDocuments
@@ -1191,6 +1192,8 @@ class MainWindow(QMainWindow):
 
         self.action_generation_options = config_menu.addAction(
             self.i18n.text("Opzioni di generazione..."), self._edit_generation_options)
+        self.action_accepted_models = config_menu.addAction(
+            self.i18n.text("Archivio abbinamenti accettati..."), self._show_accepted_models)
 
         config_menu.addSeparator()
         self.action_open_config = config_menu.addAction(self.i18n.text("Apri config.json"), self._open_config_file)
@@ -3939,6 +3942,8 @@ class MainWindow(QMainWindow):
         # Running CAD workers still describe the previous input revision.
         self._model_revision += 1
         self._last_mesh_path = None
+        # Il solido che si stava per accettare non corrisponde piu' ai dati.
+        self._set_accept_models_ready(False)
         self.preview_3d.clear_preview()
         self.label_3d_status.setText(
             self.i18n.text("Dati modificati. Modello 3D da rigenerare."))
@@ -5871,6 +5876,7 @@ class MainWindow(QMainWindow):
             self.i18n.tr("status.step_updated", path=path))
         self._refresh_output_actions()
         self._show_generated_mesh(Path(path))
+        self._set_accept_models_ready(True)
 
     def _on_cad3d_error(self, message: str) -> None:
         """@brief Registra il mancato completamento del modello 3D.
@@ -6055,6 +6061,21 @@ class MainWindow(QMainWindow):
         self.btn_regen_3d.setObjectName("primary")
         self.btn_regen_3d.clicked.connect(self._regenerate_3d)
         regen_row.addWidget(self.btn_regen_3d)
+        # «Accetto, mi piace»: dopo aver guardato il solido, i modelli KiCad
+        # agganciati diventano abbinamenti accettati che le schede future
+        # riusano subito (come proposta da confermare). Acceso solo quando
+        # c'e' un solido generato sui dati correnti: si accetta cio' che si e'
+        # visto, non dati cambiati dopo.
+        self.btn_accept_models = QPushButton("Accetto, mi piace — ricorda questi modelli…")
+        self.btn_accept_models.setToolTip(
+            "Salva nell'archivio degli abbinamenti accettati i modelli KiCad dei componenti "
+            "di questa scheda (categoria, misure, numero di terminali, modello, rotazione "
+            "scelta). In una scheda futura un corpo con la stessa firma riceve subito quel "
+            "modello, senza la misura dei candidati, come proposta da confermare. "
+            "Nessuna richiesta AI: gratuito.")
+        self.btn_accept_models.clicked.connect(self._accept_models)
+        self.btn_accept_models.setEnabled(False)
+        regen_row.addWidget(self.btn_accept_models)
         btn_open_3d = QPushButton("Apri cartella 3dshapes")
         btn_open_3d.clicked.connect(self._open_3dshapes_dir)
         regen_row.addWidget(btn_open_3d)
@@ -6290,6 +6311,63 @@ class MainWindow(QMainWindow):
             self.i18n.tr("status.step_updated", path=path))
         self._refresh_output_actions()
         self._show_generated_mesh(Path(path))
+        self._set_accept_models_ready(True)
+
+    def _set_accept_models_ready(self, ready: bool) -> None:
+        """@brief Enable «Accetto, mi piace» only for a solid generated from the current data.
+
+        @param ready True after a successful generation, False once data change.
+        """
+        button = getattr(self, "btn_accept_models", None)
+        if button is not None:
+            button.setEnabled(bool(ready))
+
+    def _accept_models(self) -> None:
+        """@brief Store the KiCad models of the board just inspected in the archive.
+
+        @note Components are read from the table, where `_show_generated_mesh`
+            has just copied model_path and model_match from the generation: it
+            is exactly what the user saw in the solid. The dialog lists every
+            component, pre-checking those with a model to remember; the outcome
+            goes to the log and the 3D status bar, without message boxes.
+        """
+        components = self._photo_components_from_table()
+        if not components:
+            self.label_3d_status.setText(self.i18n.text(
+                "Nessun componente in tabella: non ci sono modelli KiCad da ricordare."))
+            return
+        dialog = ConsolidateDialog(components, self, i18n=self.i18n)
+        self.i18n.retranslate_widgets(dialog)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        chosen = dialog.selected_components()
+        if not chosen:
+            return
+        from ..cad3d.kicad_models import _search_roots
+        from ..services.accepted_models import AcceptedModelStore, AcceptedModelsError
+        store = AcceptedModelStore()
+        try:
+            result = store.consolidate(chosen, _search_roots(None),
+                                       source=self._component_name() or "")
+        except (AcceptedModelsError, sqlite3.Error, OSError) as exc:
+            self._append_log(f"Abbinamenti accettati NON salvati: {exc}")
+            self.label_3d_status.setText(self.i18n.tr(
+                "status.accepted_models_failed", error=exc))
+            return
+        self._append_log(
+            f"Abbinamenti accettati salvati in {store.path}: {result.created} voci nuove, "
+            f"{result.confirmed} conferme di voci esistenti, {len(result.skipped)} esclusi.")
+        for name, reason in result.skipped:
+            self._append_log(f"  escluso {name}: {reason}")
+        self.label_3d_status.setText(self.i18n.tr(
+            "status.accepted_models_saved", stored=result.stored,
+            created=result.created, confirmed=result.confirmed))
+
+    def _show_accepted_models(self) -> None:
+        """@brief Open the archive list, where wrong entries can be deleted."""
+        dialog = AcceptedModelsDialog(parent=self, i18n=self.i18n)
+        self.i18n.retranslate_widgets(dialog)
+        dialog.exec()
 
     def _show_generated_mesh(self, step_path: Path) -> None:
         """Mostra in anteprima la mesh del solido appena generato (fillet e testo inclusi)."""

@@ -6,6 +6,9 @@ import pytest
 def isolated_profile_paths(monkeypatch, tmp_path):
     monkeypatch.setenv('KICADGEN_PROFILE_DB', str(tmp_path / 'profiles.sqlite3'))
     monkeypatch.setenv('KICADGEN_CONFIG_PATH', str(tmp_path / 'config.json'))
+    # L'archivio degli abbinamenti accettati cambia l'esito del matching: un
+    # test non deve mai leggere (ne' scrivere) quello vero dell'utente.
+    monkeypatch.setenv('KICADGEN_MATCH_DB', str(tmp_path / 'accepted_components.sqlite3'))
 
 
 #: Funzioni che aprono una finestra e restano in attesa di un clic. In un test

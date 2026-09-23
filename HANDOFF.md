@@ -4602,3 +4602,104 @@ Suite completa: **3562 passati**, 11 saltati, 2 xfail, 19 sottotest, zero rossi.
 Nuovi: `test_contact_style.py` 58, `test_contact_style_gui.py` 22 (di cui 8
 sul collegamento della distanza fra le file). `test_board_edit_lifecycle.py`
 36 (+10). Otto voci nuove nel catalogo (en/it/fr/de).
+
+# 2026-09-23 (2) — «Accetto, mi piace»: l'archivio degli abbinamenti accettati
+
+Commit precedente: `44cfc6b` (contatti come nella foto; al momento di questo
+lavoro **non ancora pushato**: il push lo fa l'utente, il ponte non ha le
+credenziali GitHub).
+
+## L'idea dell'utente e le sue quattro scelte
+
+Dopo la generazione FreeCAD, guardando il solido, un pulsante «Accetto, mi
+piace» salva i modelli KiCad della scheda in un archivio SQLite; su una scheda
+successiva un corpo uguale riceve subito quel modello, senza rifare il match.
+Scelte dell'utente (domande fatte prima di partire):
+
+1. **Chiave**: geometria con tolleranza (categoria + misure + n. terminali +
+   base di misura), **mai il nome o la sigla**.
+2. **Riuso**: preselezione, l'utente conferma (non automatico silenzioso).
+3. **Granularita'**: tutta la scheda in un clic, con la possibilita' di
+   togliere la spunta ai componenti che non convincono.
+4. **Archivio**: file SQLite separato (`data/accepted_components.sqlite3`,
+   variabile `KICADGEN_MATCH_DB`), gia' escluso da git da `data/*.sqlite3*`.
+
+## Come e' fatto
+
+- `kicadgen/services/accepted_models.py`: `signature()` (categoria da `kind`,
+  base normalizzata come nel matcher, lati ordinati lungo/corto, altezza solo
+  se dichiarata e solo informativa, n. terminali da
+  `kicad_models.observed_terminal_count` — nuovo, None se le osservazioni
+  mancano o discordano), `eligibility()` (motivo leggibile per ogni escluso),
+  `AcceptedModelStore.find / consolidate / entries / delete`. La lettura non
+  crea mai il file. Schema versionato (`user_version`); una versione piu'
+  nuova e' rifiutata e non toccata.
+- **Riferimento portabile**: il modello si salva relativo alla radice della
+  libreria (`Resistor_SMD.3dshapes/R_0603_1608Metric.step`), cosi' sopravvive
+  a KiCad 9 → 10 e a un altro PC; i modelli fuori libreria restano assoluti.
+  Una voce il cui file non esiste piu' viene saltata, non usata.
+- **Conferme**: stesso modello, stessa firma entro tolleranza → la voce si
+  conferma (`samples`+1, ingombro = media delle misure, angolo = l'ultimo
+  scelto). Modello diverso per la stessa firma → voce nuova; al riuso vince la
+  piu' vicina e, entro il 5%, la **piu' recente** (= la correzione).
+- **Matching** (`kicad_models.model_candidates`): dopo la scelta esplicita
+  (che vince sempre, anche il «rifiutato») e prima di qualunque ricerca o
+  misura FreeCAD, `_accepted_match` consulta l'archivio. Esito: stato nuovo
+  **`library_matched`** con un solo candidato e motivi in italiano (quante
+  volte accettato, tolleranza, se il n. terminali e' stato confrontato, verso
+  da verificare). `attach_models` lo aggancia come gli altri automatici, con
+  `attachment = "accepted_library"`. Un archivio illeggibile viene annotato
+  nel log e ignorato: il matching prosegue come senza.
+- **Rotazione**: si salva SOLO l'angolo scelto a mano nel selettore (locale al
+  modello). Non si salvano il delta del menu 3D ne' il verso dal riferimento
+  asimmetrico: dipendono da come il pezzo e' montato su QUELLA scheda. Un
+  angolo salvato e' assoluto come ogni scelta esplicita, quindi disattiva la
+  correzione automatica del verso: per questo i motivi del report dicono
+  «il verso va verificato su questa scheda».
+- **GUI**: pulsante `btn_accept_models` nella barra del tab 3D accanto a
+  «Rigenera modello 3D»; si accende in `_on_regen_3d_done` /
+  `_on_cad3d_generated` e si spegne in `_invalidate_generated_mesh` (si
+  accetta solo il solido visto sui dati correnti). Apre `ConsolidateDialog`
+  (`gui/accepted_models_dialog.py`): tutti i componenti, spuntati quelli con un
+  modello da ricordare, gli altri non spuntabili con il motivo. Esito nel log
+  e nella barra 3D, nessuna modale. Menu Configurazione → «Archivio abbinamenti
+  accettati...» (`AcceptedModelsDialog`) per vedere e **cancellare** le voci
+  sbagliate. Nella revisione fotografica un componente `library_matched` porta
+  l'avviso «preso dall'archivio… verifica il verso»; il selettore dei candidati
+  lo preseleziona.
+
+## Euristica dichiarata e separazioni fragili
+
+- `ACCEPTED_MATCH_TOLERANCE = 0.15` (asse peggiore, stessa metrica di
+  `size_distance`): meta' della distanza minima fra taglie standard adiacenti
+  (~35%, es. 0603/0805), perche' qui si confrontano DUE misure fotografiche.
+  **Non tarata su dati reali**: se sul campo non riconosce corpi uguali, o ne
+  confonde di diversi, e' il primo numero da rivedere.
+- **Fragile**: package con lo stesso corpo e piedinatura diversa (SOT-23-5 /
+  SOT-23-6) si separano SOLO se il numero di terminali e' osservato su
+  entrambe le schede; altrimenti vince la voce piu' recente e il report dice
+  «numero di terminali non confrontato». Idem per corpi senza tipo: trovano
+  solo voci senza tipo, per ingombro.
+- La categoria e' il `kind` dichiarato dall'inventario: se l'AI classifica lo
+  stesso pezzo in due modi diversi su due schede, l'archivio non lo riconosce.
+
+## Cosa NON fa (detto all'utente)
+
+- Non evita l'AI a pagamento: YOLO e inventario servono ancora per trovare e
+  misurare i corpi. Il risparmio e' sul match (misura FreeCAD) e sulle
+  correzioni manuali.
+- Nel selettore, un componente `library_matched` mostra solo il modello
+  dell'archivio (niente ricerca per misura, che e' proprio cio' che si salta);
+  per altri modelli c'e' il filtro della libreria. Se l'utente vuole anche i
+  candidati misurati accanto, e' un'aggiunta da chiedere.
+
+## Test
+
+Suite completa: **3600 passati**, 11 saltati, 2 xfail, 19 sottotest, zero rossi
+(deselezionato come sempre `test_find_pcbnew_next_to_kicad_cli`, ricerca di
+.exe Windows). Nuovi: `test_accepted_models.py` 29 (servizio + aggancio nel
+matching, ogni regola con il suo negativo strutturale),
+`test_accepted_models_gui.py` 9. `tests/conftest.py` isola anche
+`KICADGEN_MATCH_DB`: nessun test legge o scrive l'archivio vero dell'utente.
+31 voci nuove nel catalogo (en/it/fr/de), piu' `status.accepted_models_saved`
+e `status.accepted_models_failed`.
