@@ -10,7 +10,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 pytest.importorskip("PyQt6")
-from PyQt6.QtCore import QBuffer, QByteArray, QIODevice, QPointF, Qt
+from PyQt6.QtCore import QBuffer, QByteArray, QEvent, QIODevice, QPointF, QRectF, Qt
+from PyQt6.QtGui import QKeyEvent
 from PyQt6.QtGui import QColor, QImage
 from PyQt6.QtWidgets import QApplication
 
@@ -21,6 +22,7 @@ from kicadgen.gui.yolo_review_dialog import (ADDED_COLOR, BOARD_BACKDROP_COLOR,
                                              PHOTO_DIMMED, PHOTO_DIMMED_OPACITY,
                                              PHOTO_FULL, PHOTO_HIDDEN, PHOTO_STATES,
                                              SELECTED_COLOR, SMALL_BOX_PX, STRONG_COLOR,
+                                             MAX_ZOOM, MIN_ZOOM, TOOL_DRAW, TOOL_SELECT,
                                              WEAK_COLOR, YoloReviewDialog, box_pen)
 from kicadgen.services.photo_yolo import detector_classes
 
@@ -285,23 +287,18 @@ def test_moving_beyond_the_frame_keeps_the_size_and_stays_inside(dialog):
     assert x1 - x0 == pytest.approx(FIRST_BOX[2] - FIRST_BOX[0])
 
 
-def test_the_instructions_do_not_set_the_width_of_the_window():
+def test_the_window_can_take_the_size_it_asks_for():
     """@brief La finestra puo' avere la misura che chiede, qualunque sia il carattere.
 
     Su Windows l'etichetta delle istruzioni, su una riga sola, fissava la
-    larghezza minima a 1540 px: la finestra ignorava resize(1100, 700) e
-    usciva da uno schermo da portatile. La prova regge solo se la frase su una
-    riga e' davvero piu' larga della finestra: lo si verifica prima, cosi' un
-    carattere stretto non la fa passare per caso.
+    larghezza minima a 1540 px. Dal 2026-09-24 le istruzioni stanno nel popup
+    dell'icona «i» (scelta dell'utente); il contratto resta: nessun testo
+    della finestra decide la sua larghezza minima.
     """
     app = QApplication.instance() or QApplication([])
     widget = YoloReviewDialog(b"", [_proposal(1, (.2, .2, .4, .4))], LENGTH_MM, WIDTH_MM,
                               detector_classes())
     requested = widget.size()
-    label = widget.instructions
-    one_line = label.fontMetrics().horizontalAdvance(label.text())
-    assert one_line > requested.width(), 'precondizione: la frase non starebbe su una riga'
-    assert label.wordWrap()
     assert widget.minimumSizeHint().width() <= requested.width()
     widget.resize(900, 600)
     widget.show()
@@ -402,11 +399,19 @@ def test_a_box_smaller_than_the_minimum_is_not_shrunk_by_its_own_handle(small_di
     assert view._edited_rect(big, (1, 0), QPointF(-3 * big.width(), 0)).width() == pytest.approx(MIN_BOX_PX)
 
 
-def test_a_drag_on_empty_board_still_adds_a_new_body(dialog):
-    """@brief Le maniglie non hanno rubato il gesto di aggiunta."""
+def test_a_drag_with_the_draw_tool_adds_a_new_body(dialog):
+    """@brief Con lo strumento Disegna, un trascinamento nel vuoto aggiunge un corpo.
+
+    Contratto cambiato di proposito il 2026-09-24 (scelta dell'utente dopo il
+    mockup): prima il trascinamento nel vuoto disegnava SEMPRE, e un clic nel
+    vuoto non toglieva la scelta. Ora disegnare e' uno strumento (R), e con
+    Seleziona lo stesso gesto sposta la vista (prova qui sotto). Le maniglie
+    del riquadro scelto restano prendibili anche con Disegna.
+    """
     widget, _ = dialog
     view = widget.view
     widget._select_row(0)
+    widget.set_tool(TOOL_DRAW)
     frame = view._frame()
     dx, dy = _pixels(view, .40, .60)
     _drag(view, QPointF(frame.x() + dx, frame.y() + dy), _pixels(view, .20, .10))
@@ -595,6 +600,8 @@ def _matching(image, rect, color, tolerance=OUTLINE_TOLERANCE):
         posto del rettangolo se non ce n'e' nessuno.
     """
     color = QColor(color)
+    if isinstance(rect, QRectF):
+        rect = rect.toRect()
     found, bounds = 0, None
     for y in range(max(0, rect.top()), min(image.height() - 1, rect.bottom()) + 1):
         for x in range(max(0, rect.left()), min(image.width() - 1, rect.right()) + 1):
@@ -623,43 +630,39 @@ def _geometry(widget):
 
 
 def test_the_backdrop_control_cycles_three_states_and_names_the_next_step(photo_dialog):
-    """@brief Un comando sotto la foto: il verbo sul pulsante, lo stato accanto.
+    """@brief Un'icona nella barra: disegna lo stato, il tooltip dice il passo successivo.
 
-    Stessa convenzione della revisione fotografica successiva, e per la stessa
-    ragione trovata sul campo: un pulsante che dice «Foto: intera» enuncia uno
-    stato, e una didascalia non si preme. Il pulsante porta il verbo del passo
-    successivo -- che rende prevedibile anche l'ordine del ciclo -- e
-    l'etichetta accanto dice dove si e'. Il pulsante resta premuto finche' la
-    fotografia non e' intera, cosi' una vista che non mostra piu' la scheda
-    vera non viene scambiata per una che la mostra.
+    Contratto cambiato di proposito il 2026-09-24 (barra di icone, scelta
+    dell'utente): pulsante ed etichetta di stato sono diventati un'icona.
+    Resta la lezione trovata sul campo -- un comando che enuncia solo uno
+    stato non si legge come comando -- quindi il NOME del comando (prima riga
+    del tooltip, nome accessibile) e' il verbo del passo successivo, e lo
+    stato attuale e' nel disegno dell'icona, nella seconda riga del tooltip e
+    nel nome accessibile. Il pulsante resta premuto finche' la fotografia non
+    e' intera.
     """
     _app, widget, _ = photo_dialog
-    assert widget.photo_state() == PHOTO_FULL
-    assert widget.photo_button.text() == "Attenua foto"
-    assert widget.photo_state_label.text() == "Foto: intera"
-    assert widget.photo_button.isCheckable() and not widget.photo_button.isChecked()
-    widget.photo_button.click()
-    assert widget.photo_state() == PHOTO_DIMMED
-    assert widget.photo_button.text() == "Nascondi foto"
-    assert widget.photo_state_label.text() == "Foto: attenuata"
-    assert widget.photo_button.isChecked()
-    widget.photo_button.click()
-    assert widget.photo_state() == PHOTO_HIDDEN
-    assert widget.photo_button.text() == "Mostra foto"
-    assert widget.photo_state_label.text() == "Foto: nascosta"
-    assert widget.photo_button.isChecked()
-    # Chi ascolta il pulsante da solo deve sentire anche dove si trova.
-    assert widget.photo_button.accessibleName() == "Mostra foto (stato attuale: Foto: nascosta)"
-    # Negativo: il ciclo si chiude, non resta incastrato sull'ultimo stato.
-    widget.photo_button.click()
-    assert widget.photo_state() == PHOTO_FULL
-    assert not widget.photo_button.isChecked()
-    # Negativo: il pulsante non enuncia mai lo stato, altrimenti tornerebbe a
-    # leggersi come una didascalia.
-    assert not widget.photo_button.text().startswith("Foto:")
-    # Il pulsante non deve diventare il predefinito della finestra: Invio
-    # accetta la revisione, non cambia il modo di guardarla.
-    assert not widget.photo_button.autoDefault()
+    button = widget.photo_button
+    expected = [(PHOTO_FULL, "Attenua foto", "Foto: intera", "photo-full.svg"),
+                (PHOTO_DIMMED, "Nascondi foto", "Foto: attenuata", "photo-dimmed.svg"),
+                (PHOTO_HIDDEN, "Mostra foto", "Foto: nascosta", "photo-hidden.svg")]
+    assert button.text() == "" and not button.icon().isNull()
+    assert button.isCheckable() and not button.isChecked()
+    assets = []
+    for state, action, current, asset in expected + expected[:1]:
+        assert widget.photo_state() == state
+        first, second = button.toolTip().split("\n", 1)
+        assert first == f"{action} (P)"
+        # Negativo: il nome del comando non e' una didascalia di stato.
+        assert not first.startswith("Foto:")
+        assert second.startswith(current)
+        assert button.accessibleName() == f"{action} (stato attuale: {current})"
+        assert button.property("photo_asset") == asset
+        assert button.isChecked() == (state != PHOTO_FULL)
+        assets.append(asset)
+        button.click()
+    # Tre disegni diversi, uno per stato.
+    assert len(set(assets)) == 3
 
 
 def test_hiding_the_photograph_keeps_every_outline_drawn_and_in_place(photo_dialog):
@@ -685,11 +688,11 @@ def test_hiding_the_photograph_keeps_every_outline_drawn_and_in_place(photo_dial
     assert _matching(image, frame, PHOTO_COLOR, tolerance=6)[0] == 0
     # ...e al suo posto c'e' lo sfondo neutro dichiarato.
     assert _matching(image, frame, BOARD_BACKDROP_COLOR, tolerance=2)[0] > 0
-    assert image.pixelColor(frame.center()) == QColor(BOARD_BACKDROP_COLOR)
+    assert image.pixelColor(frame.center().toPoint()) == QColor(BOARD_BACKDROP_COLOR)
     widget.set_photo_state(PHOTO_FULL)
     assert _geometry(widget) == before_geometry
     assert _outline_pixels(app, widget) == before_pixels
-    assert _view_image(app, widget).pixelColor(frame.center()) == QColor(PHOTO_COLOR)
+    assert _view_image(app, widget).pixelColor(frame.center().toPoint()) == QColor(PHOTO_COLOR)
 
 
 def test_the_attenuated_photograph_fades_into_the_neutral_backdrop(photo_dialog):
@@ -704,7 +707,7 @@ def test_the_attenuated_photograph_fades_into_the_neutral_backdrop(photo_dialog)
     before_pixels = _outline_pixels(app, widget)
     widget.set_photo_state(PHOTO_DIMMED)
     assert _outline_pixels(app, widget) == before_pixels
-    pixel = _view_image(app, widget).pixelColor(widget.view._frame().center())
+    pixel = _view_image(app, widget).pixelColor(widget.view._frame().center().toPoint())
 
     def distance(color):
         color = QColor(color)
@@ -815,10 +818,12 @@ def test_every_gesture_still_works_with_the_photograph_hidden(photo_dialog):
     resized = widget.kept()[0]
     assert resized['_box'] == pytest.approx((.20, .20, .50, .40))
     assert resized['length_mm'] == pytest.approx(.30 * LENGTH_MM)
-    # Rettangolo nuovo tracciato sul vuoto.
+    # Rettangolo nuovo tracciato sul vuoto, con lo strumento Disegna.
+    widget.set_tool(TOOL_DRAW)
     frame = view._frame()
     dx, dy = _pixels(view, .40, .60)
     _drag(view, QPointF(frame.x() + dx, frame.y() + dy), _pixels(view, .20, .10))
+    widget.set_tool(TOOL_SELECT)
     assert len(widget.kept()) == 3
     added = widget.kept()[-1]
     assert added['_yolo_origin'] == 'user_added'
@@ -833,7 +838,7 @@ def test_every_gesture_still_works_with_the_photograph_hidden(photo_dialog):
     assert [row['_id'] for row in widget.kept()] == [1, 3]
     # Lo stato non e' cambiato per conto suo durante tutto questo.
     assert widget.photo_state() == PHOTO_HIDDEN
-    assert widget.photo_state_label.text() == "Foto: nascosta"
+    assert widget.photo_button.property("photo_asset") == "photo-hidden.svg"
 
 
 def test_a_click_that_slipped_is_still_not_a_component_without_the_photograph(photo_dialog):
@@ -868,8 +873,8 @@ def test_a_new_review_opens_on_the_photograph(photo_dialog):
     _app2, second, _ = _make_dialog(_photo_png())
     try:
         assert second.photo_state() == PHOTO_FULL
-        assert second.photo_state_label.text() == "Foto: intera"
-        assert second.photo_button.text() == "Attenua foto"
+        assert second.photo_button.property("photo_asset") == "photo-full.svg"
+        assert second.photo_button.accessibleName().startswith("Attenua foto")
         assert not second.photo_button.isChecked()
     finally:
         second.close()
@@ -887,8 +892,8 @@ def test_an_unknown_state_is_refused_instead_of_being_ignored(photo_dialog):
     with pytest.raises(ValueError):
         widget.set_photo_state("transparent")
     assert widget.photo_state() == PHOTO_DIMMED
-    assert widget.photo_state_label.text() == "Foto: attenuata"
-    assert widget.photo_button.text() == "Nascondi foto"
+    assert widget.photo_button.property("photo_asset") == "photo-dimmed.svg"
+    assert widget.photo_button.accessibleName().startswith("Nascondi foto")
 
 
 def test_the_control_works_even_without_a_photograph(dialog):
@@ -923,3 +928,167 @@ class _Mouse:
 
     def button(self):
         return Qt.MouseButton.LeftButton
+
+
+# ── Barra di icone, strumenti, zoom, filtro (utente, 2026-09-24) ─────────
+
+
+def _press_key(widget, key):
+    event = QKeyEvent(QEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier)
+    widget.keyPressEvent(event)
+
+
+def _empty_point(view):
+    """Un punto della foto lontano dai due riquadri di prova."""
+    frame = view._frame()
+    return QPointF(frame.x() + frame.width() * .45, frame.y() + frame.height() * .75)
+
+
+def test_a_still_click_on_empty_board_clears_the_selection(dialog):
+    """@brief Positivo: clic fermo nel vuoto -> nessun riquadro scelto (difetto segnalato).
+
+    Negativo: un clic fermo DENTRO un riquadro lo lascia scelto, e nessuno
+    dei due gesti cambia cio' che la revisione restituisce.
+    """
+    widget, _ = dialog
+    view = widget.view
+    before = widget.kept()
+    _drag(view, view.to_widget(FIRST_BOX).center(), (0, 0))
+    assert view.selected == 0 and widget.btn_delete.isEnabled()
+    _drag(view, _empty_point(view), (0, 0))
+    assert view.selected == -1
+    assert widget.list.currentRow() == -1
+    assert not widget.btn_delete.isEnabled() and not widget.combo_class.isEnabled()
+    assert widget.kept() == before
+
+
+def test_with_select_a_drag_on_empty_board_moves_the_view_and_adds_nothing(dialog):
+    """@brief Scelta dell'utente: trascinare nel vuoto sposta la vista, come una mappa."""
+    widget, _ = dialog
+    view = widget.view
+    view.zoom_at(3)
+    before_frame = view._frame()
+    before = widget.kept()
+    _drag(view, _empty_point(view), (-40, -25))
+    after_frame = view._frame()
+    assert after_frame.x() == pytest.approx(before_frame.x() - 40)
+    assert after_frame.y() == pytest.approx(before_frame.y() - 25)
+    assert widget.kept() == before
+
+
+def test_escape_clears_the_selection_and_never_closes_the_window(dialog):
+    """@brief Esc toglie la scelta; in un QDialog valeva Annulla e perdeva la revisione."""
+    widget, _ = dialog
+    widget._select_row(0)
+    _press_key(widget, Qt.Key.Key_Escape)
+    assert widget.view.selected == -1
+    assert widget.isVisible() and widget.result() == 0
+    _press_key(widget, Qt.Key.Key_Escape)
+    assert widget.isVisible()
+
+
+def test_escape_leaves_the_draw_tool_before_touching_the_selection(dialog):
+    widget, _ = dialog
+    widget._select_row(0)
+    widget.set_tool(TOOL_DRAW)
+    assert widget.btn_draw.isChecked() and not widget.btn_select.isChecked()
+    _press_key(widget, Qt.Key.Key_Escape)
+    assert widget.view.tool == TOOL_SELECT and widget.btn_select.isChecked()
+    assert widget.view.selected == 0
+
+
+def test_zoom_keeps_the_board_point_under_the_pointer_and_changes_no_data(dialog):
+    widget, _ = dialog
+    view = widget.view
+    before = widget.kept()
+    frame = view._frame()
+    anchor = QPointF(frame.x() + frame.width() * .25, frame.y() + frame.height() * .40)
+    view.zoom_at(2.5, anchor)
+    assert view.zoom() == pytest.approx(2.5)
+    zoomed = view._frame()
+    assert (anchor.x() - zoomed.x()) / zoomed.width() == pytest.approx(.25)
+    assert (anchor.y() - zoomed.y()) / zoomed.height() == pytest.approx(.40)
+    assert widget.zoom_label.text() == "250%"
+    assert widget.kept() == before
+
+
+def test_zoom_stays_between_the_fitted_photo_and_the_maximum(dialog):
+    widget, _ = dialog
+    view = widget.view
+    view.zoom_at(1 / 10)
+    assert view.zoom() == MIN_ZOOM
+    view.zoom_at(1000)
+    assert view.zoom() == MAX_ZOOM
+    view.fit_view()
+    assert view.zoom() == MIN_ZOOM and widget.zoom_label.text() == "100%"
+
+
+def test_editing_at_high_zoom_measures_in_photo_fractions_not_screen_pixels(dialog):
+    """@brief Stessa quota in mm a ogni ingrandimento; le maniglie restano in pixel dello schermo."""
+    widget, _ = dialog
+    view = widget.view
+    widget._select_row(0)
+    view.zoom_at(4, view.to_widget(FIRST_BOX).center())
+    rect = view.to_widget(FIRST_BOX)
+    assert view.handle_at(QPointF(rect.right() + HANDLE_RADIUS_PX - 1, rect.center().y())) == (1, 0)
+    assert view.handle_at(QPointF(rect.right() + HANDLE_RADIUS_PX + 3, rect.center().y())) is None
+    before = dict(widget.kept()[0])
+    _drag(view, rect.center(), _pixels(view, .02, .02))
+    moved = widget.kept()[0]
+    assert moved['x_mm'] == pytest.approx(before['x_mm'] + .02 * LENGTH_MM)
+    assert moved['y_mm'] == pytest.approx(before['y_mm'] + .02 * WIDTH_MM)
+
+
+def test_the_category_filter_hides_list_rows_only(dialog):
+    """@brief Positivo: il filtro lascia in lista una categoria. Negativo: foto e dati intatti."""
+    widget, _ = dialog
+    choices = [widget.category_filter.itemData(i) for i in range(widget.category_filter.count())]
+    assert choices == [None, 'capacitor', 'resistor']
+    before = widget.kept()
+    widget.category_filter.setCurrentIndex(choices.index('capacitor'))
+    assert widget.list.isRowHidden(0) and not widget.list.isRowHidden(1)
+    assert widget.kept() == before and len(widget.view.proposals) == 2
+    widget.category_filter.setCurrentIndex(0)
+    assert not widget.list.isRowHidden(0) and not widget.list.isRowHidden(1)
+
+
+def test_the_status_bar_shows_the_board_point_in_millimetres(dialog):
+    widget, _ = dialog
+    view = widget.view
+    frame = view._frame()
+    view.mouseMoveEvent(_Mouse(frame.center()))
+    assert widget.pointer_label.text() == "X 0.00 mm · Y 0.00 mm"
+    corner = QPointF(frame.right() - 0.001, frame.bottom() - 0.001)
+    view.mouseMoveEvent(_Mouse(corner))
+    assert widget.pointer_label.text() == f"X {LENGTH_MM / 2:.2f} mm · Y {WIDTH_MM / 2:.2f} mm"
+    view.mouseMoveEvent(_Mouse(QPointF(frame.x() - 5, frame.y() - 5)))
+    assert widget.pointer_label.text() == "X — · Y —"
+
+
+def test_every_toolbar_command_is_an_icon_named_in_its_tooltip(dialog):
+    widget, _ = dialog
+    buttons = [widget.btn_select, widget.btn_draw, widget.btn_delete, widget.btn_zoom_out,
+               widget.btn_zoom_in, widget.btn_fit, widget.photo_button, widget.btn_info]
+    for button in buttons:
+        assert button.text() == "" and not button.icon().isNull()
+        name = button.accessibleName()
+        assert name and button.toolTip().startswith(name.split(" (stato")[0])
+    assert widget.btn_delete.toolTip().splitlines()[0] == "Elimina il riquadro scelto (Canc)"
+    assert widget.btn_draw.toolTip().splitlines()[0] == "Disegna un riquadro nuovo (R)"
+
+
+def test_the_instructions_open_in_a_popup_inside_the_window(dialog):
+    """@brief Le istruzioni non sono piu' testo fisso: l'icona «i» le apre e le richiude."""
+    widget, _ = dialog
+    app = QApplication.instance()
+    popup = widget.info_popup
+    assert not popup.isVisible()
+    widget.btn_info.click()
+    app.processEvents()
+    assert popup.isVisible()
+    assert "confidenza bassa" in popup.label.text()
+    area = widget.frameGeometry()
+    assert area.contains(popup.frameGeometry())
+    popup.hide()
+    widget.btn_info.click()          # lo stesso clic che l'ha chiusa non la riapre
+    assert not popup.isVisible()

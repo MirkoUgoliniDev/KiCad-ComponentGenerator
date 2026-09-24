@@ -22,7 +22,7 @@ import webbrowser
 from pathlib import Path
 
 from PyQt6.QtCore import QEvent, QObject, QRectF, QThread, QTimer, pyqtSignal, Qt, QSize
-from PyQt6.QtGui import QBrush, QColor, QIcon, QPainterPath, QPen, QPixmap, QTextCursor
+from PyQt6.QtGui import QBrush, QColor, QIcon, QKeySequence, QPainterPath, QPen, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QFrame, QGraphicsEllipseItem, QGraphicsRectItem, QGraphicsScene,
@@ -79,6 +79,12 @@ from .settings_dialog import LlmSettingsDialog
 from .profile_dialog import ProfilesDialog, icon_button
 from .translation_dialog import TranslationDialog
 from .theme import BASE, BLUE, RED, SURFACE0, SURFACE1, SURFACE2, TEXT, YELLOW, APP_QSS
+from .tooltips import install_tooltip_filter
+
+#: Icona di ogni scheda, nell'ordine delle schede: SVG a linea nello stile
+#: delle barre di icone.
+TAB_ICONS = ("tab-project.svg", "tab-footprint.svg", "tab-generate.svg",
+             "tab-preview.svg", "tab-model3d.svg", "tab-kicad.svg")
 
 APP_DIR = Path(__file__).resolve().parent.parent.parent
 # Generated working files stay separate from installed KiCad libraries.
@@ -554,6 +560,21 @@ def phase_kwargs(function, callback) -> dict:
         la firma vera torna visibile: e' quella la soluzione, non una regola
         piu' furba qui.
     """
+    return accepted_kwargs(function, phase=callback)
+
+
+def accepted_kwargs(function, **values) -> dict:
+    """@brief Keep only the keyword arguments the service function accepts.
+
+    @param function Service function about to be called.
+    @param values Candidate keyword arguments.
+    @return The subset of `values` whose names the signature declares; all of
+        them when the signature has `**kwargs` next to at least one named
+        parameter; none when the signature cannot be inspected.
+    @note Same rule and same reasons as `phase_kwargs` (see its notes): the
+        interface and the services change separately, and an argument the
+        installed service does not know must not turn into a TypeError.
+    """
     try:
         import inspect
         parameters = list(inspect.signature(function).parameters.values())
@@ -561,13 +582,11 @@ def phase_kwargs(function, callback) -> dict:
         return {}
     named = [p for p in parameters if p.kind not in (
         inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)]
-    for parameter in parameters:
-        if parameter.kind is inspect.Parameter.VAR_KEYWORD and named:
-            return {"phase": callback}
-        if parameter.name == "phase" and parameter.kind in (
-                inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
-            return {"phase": callback}
-    return {}
+    if named and any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters):
+        return dict(values)
+    keyword = {p.name for p in parameters if p.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)}
+    return {name: value for name, value in values.items() if name in keyword}
 
 
 class GenerateWorker(QThread):
@@ -839,11 +858,15 @@ class TerminalDetailWorker(QThread):
     error = pyqtSignal(str)
     progress = pyqtSignal(str)
 
-    def __init__(self, photo, components, model, only_leads=False, system_prompt=None):
+    def __init__(self, photo, components, model, only_leads=False, system_prompt=None,
+                 cache_dir=None):
         super().__init__()
         self.photo, self.components, self.model = photo, deepcopy(components), model
         self.only_leads = only_leads
         self.system_prompt = system_prompt
+        # Cache del PROGETTO (vedi photo_inventory.PHOTO_CACHE_SUBDIR); None =
+        # nessuna cache, mai una cartella comune.
+        self.cache_dir = cache_dir
 
     def run(self):
         """@brief Provide the run operation for this workflow."""
@@ -855,7 +878,7 @@ class TerminalDetailWorker(QThread):
             operation = refine_leads if self.only_leads else observe_terminals
             self.done.emit(operation(self.photo, self.components, self.model,
                 make_logged_call(call_tool, self.progress.emit, log_prompt=True), self.progress.emit,
-                Path(__file__).resolve().parents[2] / 'generated' / 'photo-cache',
+                self.cache_dir,
                 **({'system_prompt': self.system_prompt} if self.system_prompt else {})))
         except Exception as exc:
             self.error.emit(f"Dettaglio terminali fallito: {exc}")
@@ -993,6 +1016,9 @@ class ExtractWorker(QThread):
                 include_nc_pins=self.include_nc_pins,
                 progress=self.progress.emit,
                 review_proposals=self._review_proposals,
+                # Cartella del PROGETTO assegnata da chi avvia; None = nessuna cache.
+                **accepted_kwargs(extract_pin_header_params,
+                                  photo_cache_dir=getattr(self, "photo_cache_dir", None)),
                 **phase_kwargs(extract_pin_header_params, self._forward_phase),
             )
             self.done.emit(params)
@@ -1106,7 +1132,8 @@ class MainWindow(QMainWindow):
         self._last_extracted: ExtractedParams | None = None
         #: Marca temporale (stesso formato dei file di evidenza) dell'ultima
         #: estrazione avviata: le proposte salvate valgono solo se sono nate
-        #: da quella, perche' la cartella photo-cache e' comune ai componenti.
+        #: da quella: la cartella photo-cache del progetto conserva anche le
+        #: evidenze delle estrazioni precedenti.
         self._extraction_started_stamp: str | None = None
         #: Vero quando la finestra di revisione ha gia' scritto il bundle
         #: photo-review per l'estrazione in corso: allora _on_extracted non
@@ -1231,6 +1258,18 @@ class MainWindow(QMainWindow):
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu(self.i18n.tr("app.file"))
+        # Il progetto E' la sua cartella (utente, 2026-09-24): si crea o si
+        # apre esplicitamente, non scrivendo un nome che per caso coincide con
+        # una cartella esistente.
+        self.action_new_project = file_menu.addAction(
+            self.i18n.text("Nuovo progetto..."), self._new_project)
+        self.action_new_project.setShortcut(QKeySequence.StandardKey.New)
+        self.action_open_project = file_menu.addAction(
+            self.i18n.text("Apri progetto..."), self._open_project)
+        self.action_open_project.setShortcut(QKeySequence.StandardKey.Open)
+        self.action_rename_project = file_menu.addAction(
+            self.i18n.text("Rinomina progetto..."), self._rename_project)
+        file_menu.addSeparator()
         self.action_open_output = file_menu.addAction(self.i18n.text("Apri cartella componente"), self._open_project_dir)
         self.action_test_kicad = file_menu.addAction(
             self.i18n.text("Prova in KiCad..."), self._test_in_kicad)
@@ -1746,12 +1785,16 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         # Navigation tabs use stable translation keys and are refreshed explicitly.
         self.tabs.setProperty("i18n_skip_tabs", True)
-        self.tabs.addTab(project_tab, self.i18n.tr("tab.project"))
-        self.tabs.addTab(footprint_tab, self.i18n.tr("tab.footprint"))
-        self.tabs.addTab(generate_tab, self.i18n.tr("tab.generate"))
-        self.tabs.addTab(preview_tab, self.i18n.tr("tab.preview"))
-        self.tabs.addTab(model_3d_tab, self.i18n.tr("tab.model3d"))
-        self.tabs.addTab(kicad_tab, self.i18n.tr("tab.kicad"))
+        self.tabs.addTab(project_tab, self.i18n.tr("tab.project.name"))
+        self.tabs.addTab(footprint_tab, self.i18n.tr("tab.footprint.name"))
+        self.tabs.addTab(generate_tab, self.i18n.tr("tab.generate.name"))
+        self.tabs.addTab(preview_tab, self.i18n.tr("tab.preview.name"))
+        self.tabs.addTab(model_3d_tab, self.i18n.tr("tab.model3d.name"))
+        self.tabs.addTab(kicad_tab, self.i18n.tr("tab.kicad.name"))
+        # Icone a linea nello stile delle barre, al posto delle emoji a colori
+        # che stavano nel titolo (utente, 2026-09-24: «stonata con il resto»).
+        for index, asset in enumerate(TAB_ICONS):
+            self.tabs.setTabIcon(index, self._asset_icon(asset))
         self._set_acquisition_tabs_enabled(False)
         self.tabs.currentChanged.connect(self._on_tab_changed)
         layout.addWidget(self.tabs)
@@ -1772,12 +1815,12 @@ class MainWindow(QMainWindow):
         self.i18n.set_language(language)
         self._config["language"] = language
         save_config(self._config)
-        self.tabs.setTabText(0, self.i18n.tr("tab.project"))
-        self.tabs.setTabText(1, self.i18n.tr("tab.footprint"))
-        self.tabs.setTabText(2, self.i18n.tr("tab.generate"))
-        self.tabs.setTabText(3, self.i18n.tr("tab.preview"))
-        self.tabs.setTabText(4, self.i18n.tr("tab.model3d"))
-        self.tabs.setTabText(5, self.i18n.tr("tab.kicad"))
+        self.tabs.setTabText(0, self.i18n.tr("tab.project.name"))
+        self.tabs.setTabText(1, self.i18n.tr("tab.footprint.name"))
+        self.tabs.setTabText(2, self.i18n.tr("tab.generate.name"))
+        self.tabs.setTabText(3, self.i18n.tr("tab.preview.name"))
+        self.tabs.setTabText(4, self.i18n.tr("tab.model3d.name"))
+        self.tabs.setTabText(5, self.i18n.tr("tab.kicad.name"))
         self.i18n.retranslate_widgets(self)
         self.menuBar().actions()[0].setText(self.i18n.tr("app.file"))
         self.menuBar().actions()[1].setText(self.i18n.tr("app.configuration"))
@@ -1844,8 +1887,16 @@ class MainWindow(QMainWindow):
         # non apre KiCad. Finche' il campo e' vuoto non si caricano documenti e
         # non si estrae nulla: vedi `_apply_component_name_gate`.
         self.field_name = QLineEdit()
+        # Sola lettura (utente, 2026-09-24): il nome si sceglie con «Nuovo
+        # progetto…», «Apri progetto…» o «Rinomina progetto…» del menu File.
+        # Scritto qui a mano, il nome di una cartella esistente la apriva di
+        # nascosto e l'analisi scriveva nel progetto di qualcun altro.
+        self.field_name.setReadOnly(True)
         self.field_name.setPlaceholderText(
-            "Scrivi il nome del componente: da qui nascono cartella, footprint e modello 3D")
+            "Crea o apri un progetto dal menu File: il suo nome e' quello di cartella, "
+            "footprint e modello 3D")
+        self.field_name.setToolTip(
+            "Si cambia dal menu File: «Nuovo progetto…», «Apri progetto…», «Rinomina progetto…».")
         self.field_name.textChanged.connect(self._on_name_changed)
         folder_layout.addRow("Nome componente:", self.field_name)
 
@@ -2444,7 +2495,7 @@ class MainWindow(QMainWindow):
             evita. Meglio un pulsante spento con scritto perche'.
         """
         named = bool(self._component_name())
-        reason = "" if named else "Scrivi prima il nome del componente."
+        reason = "" if named else "Crea o apri prima un progetto (menu File)."
         # Cambiare nome mentre un worker gira non deve riaccendere i pulsanti
         # che lanciano un'altra analisi: li riabilita la fine del worker.
         busy = self._background_work_running()
@@ -2572,8 +2623,8 @@ class MainWindow(QMainWindow):
             # hanno una cartella e cio' che verrebbe generato non ha un nome.
             QMessageBox.information(
                 self, self.i18n.text("Nome componente"),
-                self.i18n.text("Scrivi prima il nome del componente: da questo nascono la "
-                               "cartella dei documenti, il footprint e il modello 3D."))
+                self.i18n.text("Crea o apri prima un progetto dal menu File: il suo nome e' "
+                               "quello della cartella dei documenti, del footprint e del modello 3D."))
             return
 
         photo_detector, yolo_model_path = self._photo_detector_options()
@@ -2701,6 +2752,9 @@ class MainWindow(QMainWindow):
             extra_instructions=self.field_component_prompt.toPlainText().strip() or None,
             include_nc_pins=bool(self._config.get("include_nc_pins", True)),
         )
+        # Risposte in cache ed evidenze nella cartella del progetto (utente,
+        # 2026-09-24). Qui il nome c'e' sempre: senza nome non si estrae.
+        self._extract_worker.photo_cache_dir = self._photo_cache_dir()
         self._extract_worker.done.connect(self._on_extracted)
         self._extract_worker.error.connect(self._on_extract_error)
         self._extract_worker.progress.connect(self._on_ai_progress)
@@ -2740,15 +2794,17 @@ class MainWindow(QMainWindow):
     def _photo_cache_dir(self) -> Path:
         """@brief Cartella in cui l'inventario fotografico salva cache ed evidenza.
 
-        @return Lo stesso percorso predefinito di datasheet_extractor
-            (`generated/photo-cache` nella radice del tool): il worker di
-            estrazione non ne passa uno diverso, quindi e' li' che finiscono
-            `detector-*.json` e `inventory-*-photo.png`.
-        @note E' una cartella comune a tutti i componenti: per questo le
-            proposte salvate si accettano solo se nate dall'ultima estrazione
-            (vedi _saved_detector_proposals).
+        @return `<cartella del progetto>/photo-cache`: risposte AI in cache,
+            `detector-*.json`, `inventory-*-photo.png` e `yolo-audit/` del
+            progetto corrente (decisione dell'utente del 2026-09-24: ogni
+            interrogazione AI e' specifica del progetto).
+        @throws ValueError quando il componente non ha ancora un nome.
+        @note Nello stesso progetto possono esserci le evidenze di piu'
+            estrazioni: le proposte salvate si accettano solo se nate
+            dall'ultima (vedi _saved_detector_proposals).
         """
-        return Path(__file__).resolve().parents[2] / 'generated' / 'photo-cache'
+        from ..services.photo_inventory import photo_cache_dir
+        return photo_cache_dir(self._project_dir())
 
     def _saved_detector_proposals(self):
         """@brief Le proposte del rilevatore salvate dall'ultima estrazione, se ci sono.
@@ -4089,9 +4145,105 @@ class MainWindow(QMainWindow):
         """
         if not self._suggested_name:
             return
+        # Il nome di un altro progetto non si prende (utente, 2026-09-24):
+        # la rinomina sposterebbe i documenti dentro una cartella che ne ha
+        # gia' di suoi. Si rifiuta e lo si dice; la proposta resta visibile.
+        from .project_dialogs import name_problem
+        problem = name_problem(self._library_root(), self._suggested_name,
+                               self._component_name())
+        if problem:
+            message = self.i18n.text("Nome proposto non applicato: {problem}").format(
+                problem=self.i18n.text(problem))
+            self.lbl_name_suggestion.setText(message)
+            self._append_log(message)
+            return
         applied = self._migrate_docs_to_new_name(self._suggested_name)
         self.field_name.setText(applied)
         self._set_suggested_name(self._suggested_name)
+
+    def _library_root(self) -> Path:
+        """@brief Cartella di lavoro in cui stanno i progetti."""
+        return Path(self.field_library_root.text().strip() or str(DEFAULT_LIBRARY_ROOT))
+
+    def _project_change_blocked(self) -> bool:
+        """@brief Vero, con un avviso, quando un lavoro in corso impedisce di cambiare progetto.
+
+        @note Un'analisi o una generazione scrive nella cartella del progetto
+            in uso: cambiarlo a meta' manderebbe i risultati nel posto sbagliato.
+        """
+        if not (self._background_work_running() or self._automatic_generation_active):
+            return False
+        QMessageBox.information(
+            self, self.i18n.text("Progetto"),
+            self.i18n.text("Aspetta la fine del lavoro in corso prima di cambiare progetto."))
+        return True
+
+    def _new_project(self) -> None:
+        """@brief «Nuovo progetto…»: chiede un nome libero e crea la cartella.
+
+        @note Il nome di una cartella esistente e' rifiutato nel dialogo
+            (`project_dialogs.name_problem`): un progetto nuovo non puo'
+            diventare, per un nome uguale, un progetto vecchio.
+        @note La cartella nasce subito con `docs/`, cosi' il nome e' occupato
+            e compare in «Apri progetto…» anche prima di caricare documenti.
+        """
+        if self._project_change_blocked():
+            return
+        from .project_dialogs import ProjectNameDialog
+        dialog = ProjectNameDialog(self._library_root(), "Nuovo progetto",
+                                   tr=self.i18n.text, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        name = dialog.project_name()
+        try:
+            (self._library_root() / name / DOCS_SUBDIR).mkdir(parents=True, exist_ok=False)
+        except OSError as exc:
+            QMessageBox.warning(self, self.i18n.text("Nuovo progetto"), str(exc))
+            return
+        self._set_suggested_name("")
+        self.field_name.setText(name)
+        self._append_log(f"Nuovo progetto: {self._project_dir()}")
+
+    def _open_project(self) -> None:
+        """@brief «Apri progetto…»: sceglie una cartella esistente della cartella di lavoro.
+
+        @note Torna cio' che il programma sa gia' ricostruire dalla cartella
+            (scelta dell'utente del 2026-09-24): documenti, corpi rivisti,
+            scelte dei modelli 3D, footprint e 3D generati.
+        """
+        if self._project_change_blocked():
+            return
+        from .project_dialogs import OpenProjectDialog
+        dialog = OpenProjectDialog(self._library_root(), self._component_name(),
+                                   tr=self.i18n.text, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.selected_name():
+            return
+        self._set_suggested_name("")
+        self.field_name.setText(dialog.selected_name())
+        self._append_log(f"Progetto aperto: {self._project_dir()}")
+
+    def _rename_project(self) -> None:
+        """@brief «Rinomina progetto…»: nome nuovo, mai quello di un altro progetto.
+
+        @note Stesso spostamento del nome proposto dall'analisi
+            (`_migrate_docs_to_new_name`): documenti, diario, `photo-cache/` e
+            `photo-review/` seguono il nome.
+        """
+        if self._project_change_blocked():
+            return
+        current = self._component_name()
+        if not current:
+            QMessageBox.information(self, self.i18n.text("Rinomina progetto"),
+                                    self.i18n.text("Crea o apri prima un progetto (menu File)."))
+            return
+        from .project_dialogs import ProjectNameDialog
+        dialog = ProjectNameDialog(self._library_root(), "Rinomina progetto", current=current,
+                                   tr=self.i18n.text, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        applied = self._migrate_docs_to_new_name(dialog.project_name())
+        self.field_name.setText(applied)
+        self._set_suggested_name("")
 
     def _migrate_docs_to_new_name(self, new_name: str) -> str:
         """Sposta i documenti nella cartella del nuovo nome componente.
@@ -4118,7 +4270,10 @@ class MainWindow(QMainWindow):
             return old_name
         files = [f for f in old_docs.iterdir() if f.is_file()] if old_docs.is_dir() else []
         if not files:
-            return new_name if self._move_log_to(new_docs.parent) else old_name
+            if not self._move_log_to(new_docs.parent):
+                return old_name
+            self._move_analysis_folders_to(old_docs.parent, new_docs.parent)
+            return new_name
 
         # La rinomina non chiede conferma: interrompeva l'analisi a meta' con
         # una modale, proprio mentre il worker stava ancora lavorando. Resta
@@ -4143,7 +4298,55 @@ class MainWindow(QMainWindow):
             if target.exists():
                 continue
             shutil.move(str(f), str(target))
+        self._move_analysis_folders_to(old_docs.parent, new_docs.parent)
         return new_name
+
+    def _move_analysis_folders_to(self, old_project: Path, new_project: Path) -> None:
+        """@brief Porta nella cartella rinominata tutto cio' che l'analisi ha prodotto.
+
+        @param old_project Cartella del progetto prima della rinomina.
+        @param new_project Cartella del progetto con il nome nuovo.
+        @note Il progetto e' la sua cartella (decisione dell'utente del
+            2026-09-24): con `docs/` e il diario si spostano anche la cache
+            delle risposte AI e le evidenze (`photo-cache/`) e le proposte
+            riviste (`photo-review/`). Prima si spostavano solo documenti e
+            diario, e la revisione restava nella cartella vecchia: «Rivedi
+            corpi» non la trovava piu' sotto il nome nuovo.
+        @note Mai sovrascrivere: un file che esiste gia' nella destinazione
+            resta com'e' e quello vecchio resta dov'era, con una riga di log.
+            Le risposte in cache hanno il nome dato dal loro contenuto e le
+            evidenze una marca temporale, quindi un conflitto vero e' raro.
+        """
+        import shutil
+        from ..services.photo_inventory import PHOTO_CACHE_SUBDIR, REVIEW_BUNDLE_SUBDIR
+        for name in (PHOTO_CACHE_SUBDIR, REVIEW_BUNDLE_SUBDIR):
+            source = old_project / name
+            if not source.is_dir():
+                continue
+            target = new_project / name
+            kept = 0
+            try:
+                for path in sorted(source.rglob("*")):
+                    if not path.is_file():
+                        continue
+                    destination = target / path.relative_to(source)
+                    if destination.exists():
+                        kept += 1
+                        continue
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(path), str(destination))
+                for folder in sorted(source.rglob("*"), reverse=True):
+                    if folder.is_dir() and not any(folder.iterdir()):
+                        folder.rmdir()
+                if not any(source.iterdir()):
+                    source.rmdir()
+            except OSError as exc:
+                self._append_log(f"Rinomina: {name}/ non spostata del tutto ({exc}).")
+                continue
+            if kept:
+                self._append_log(
+                    f"Rinomina: {kept} file di {name}/ esistevano gia' nella nuova cartella "
+                    f"e sono rimasti in {source}.")
 
     def _on_extracted(self, params: ExtractedParams) -> None:
         """@brief Applica i parametri estratti, se sono ancora quelli attesi.
@@ -6170,7 +6373,9 @@ class MainWindow(QMainWindow):
             "revisione dei componenti. Nessuna richiesta AI: gratuito.")
         self.btn_regen_3d.setObjectName("primary")
         self.btn_regen_3d.clicked.connect(self._regenerate_3d)
-        toolbar.addWidget(self.btn_regen_3d)
+        # Aggiunto alla barra PER ULTIMO, dopo il tipo di contatto (scelta
+        # dell'utente, 2026-09-24): prima si correggono corpi e contatti, poi
+        # si rigenera, e la barra si legge nello stesso ordine.
         # «Accetto, mi piace»: dopo aver guardato il solido, i modelli KiCad
         # agganciati diventano abbinamenti accettati che le schede future
         # riusano subito (come proposta da confermare). Acceso solo quando
@@ -6208,7 +6413,7 @@ class MainWindow(QMainWindow):
         # Il tipo di contatto va correggibile da qui anche in modalita' base:
         # e' guardando il solido che si vede un mezzo foro dove la scheda ha un
         # foro passante, e la tabella dei lati sta in un tab nascosto a chi non
-        # ha scelto la modalita' avanzata. Nella stessa barra di «Rigenera»
+        # ha scelto la modalita' avanzata. Subito prima di «Rigenera»
         # perche' la correzione e la rigenerazione gratuita sono un unico
         # gesto. L'etichetta testuale e' diventata un'icona con tooltip.
         self.contact_style_bar_3d = QWidget()
@@ -6241,6 +6446,7 @@ class MainWindow(QMainWindow):
         # Nascosta finche' il modulo non e' castellated con almeno un lato:
         # la accende `_sync_contact_style_bar`, che la tiene allineata ai lati.
         self.contact_style_bar_3d.hide()
+        toolbar.addWidget(self.btn_regen_3d)
 
         self.btn_terminal_detail = QPushButton("Rileva terminali dalla foto...")
         self.btn_terminal_detail.setToolTip(
@@ -6548,7 +6754,8 @@ class MainWindow(QMainWindow):
             self.i18n.text("Analisi dei terminali nella foto in corso..."), STATUS_INFO)
         worker = TerminalDetailWorker(self._photo_png, components,
                                       self._vision_model(), only_leads=only_leads,
-                                      system_prompt=profile['lead_prompt' if only_leads else 'terminal_prompt'])
+                                      system_prompt=profile['lead_prompt' if only_leads else 'terminal_prompt'],
+                                      cache_dir=self._photo_cache_dir() if self._named() else None)
         worker._model_revision = self._model_revision
         worker._photo_snapshot = self._photo_png
         self._terminal_worker = worker
@@ -7882,6 +8089,9 @@ def main() -> None:
     """@brief Provide the main operation for this workflow."""
     app = QApplication(sys.argv)
     app.setStyleSheet(APP_QSS)
+    # Tooltip a capo e dentro la finestra, per tutta l'applicazione: con le
+    # barre di sole icone il tooltip e' l'unico testo di un comando.
+    install_tooltip_filter(app)
     try:
         window = MainWindow()
     except (ProfileError, sqlite3.Error, OSError, ValueError) as exc:

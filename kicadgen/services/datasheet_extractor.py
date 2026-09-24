@@ -1133,7 +1133,7 @@ def extract_pin_header_params(
                 progress=progress, phase=announce, top_photo_index=top_index,
                 **({'top_photo_source': 'utente'} if document_roles is not None else {}),
                 extra_instructions=extra_instructions,
-                cache_dir=photo_cache_dir if photo_cache_dir is not None else Path(__file__).resolve().parents[2]/"generated"/"photo-cache",
+                cache_dir=photo_cache_dir,
                 classifier_model=verification_model or model or DEFAULT_MODEL,
                 grounding_prompt=grounding_prompt, verification_prompt=verification_prompt,
                 **({'detector': photo_detector, 'yolo_model_path': yolo_model_path,
@@ -1163,7 +1163,7 @@ def extract_pin_header_params(
                     photo_report.components = observe_terminals(
                         photo_report.photo_png, photo_report.components, vision_model or DEFAULT_VISION_MODEL,
                         diagnostic_call, progress or (lambda message: None),
-                        photo_cache_dir if photo_cache_dir is not None else Path(__file__).resolve().parents[2]/"generated"/"photo-cache",
+                        photo_cache_dir,
                         **({'system_prompt': terminal_prompt} if terminal_prompt else {}),
                     )
                 except (OpenRouterError, ValueError, OSError) as exc:

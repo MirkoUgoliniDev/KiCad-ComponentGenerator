@@ -58,7 +58,8 @@ from PyQt6.QtCore import (
     QPointF, QRectF, QSignalBlocker, QStringListModel, Qt, QTimer, QThread,
     pyqtSignal,
 )
-from PyQt6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QPolygonF
+from PyQt6.QtGui import (QBrush, QColor, QKeySequence, QPainter, QPen, QPixmap,
+                         QPolygonF, QShortcut)
 from PyQt6.QtWidgets import (
     QAbstractItemView, QComboBox, QCompleter, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFormLayout,
@@ -68,6 +69,10 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit, QPushButton,
     QVBoxLayout, QWidget, QApplication, QMessageBox,
 )
+
+
+from .review_tools import (InfoPopup, asset_icon, set_tool_texts, tool_button,
+                           toolbar_divider)
 
 
 class _MatchWorker(QThread):
@@ -217,6 +222,10 @@ class _PhotoView(QGraphicsView):
     ## already clipped to ``draw_bounds``.
     rectangle_drawn = pyqtSignal(QRectF)
 
+    ## Emitted after every change of scale (zoom, fit): the toolbar shows the
+    ## percentage of the fitted photo.
+    zoom_changed = pyqtSignal()
+
     def __init__(self, scene, parent=None):
         super().__init__(scene, parent)
         self._draw_mode = False
@@ -250,6 +259,7 @@ class _PhotoView(QGraphicsView):
             return
         self.fitInView(self._fit_rect, Qt.AspectRatioMode.KeepAspectRatio)
         self._fit_scale = self.transform().m11()
+        self.zoom_changed.emit()
 
     def resizeEvent(self, event):
         """@brief Keep the photo fitted on viewport resizes while auto-fit is on."""
@@ -269,6 +279,11 @@ class _PhotoView(QGraphicsView):
         current = self.transform().m11()
         target = min(self._fit_scale * 64, max(self._fit_scale / 8, current * factor))
         self.scale(target / current, target / current)
+        self.zoom_changed.emit()
+
+    def zoom_percent(self):
+        """@brief Current scale as a percentage of the fitted photo (100 = fitted)."""
+        return round(self.transform().m11() / self._fit_scale * 100) if self._fit_scale else 100
 
     def wheelEvent(self, event):
         """@brief Zoom around the pointer with the wheel; other wheel input scrolls."""
@@ -605,6 +620,24 @@ UNDETERMINED_TYPE_CONFIDENCES = ("low",)
 ## cannot be read as "fuori PCB" (red) nor as the generic "da verificare"
 ## (orange).
 UNDETERMINED_TYPE_COLOR = "#c58af9"
+
+## Icon drawing the canvas state, per photo state (same icons as the detector
+## review, «Corpi rilevati»).
+_PHOTO_STATE_ICONS = {"full": "photo-full.svg", "dimmed": "photo-dimmed.svg",
+                      "hidden": "photo-hidden.svg"}
+
+## Second line of the photo command's tooltip, after the current state.
+_PHOTO_BUTTON_EXPLANATION = (
+    "Su una foto scura e affollata i contorni si leggono meglio quando la fotografia "
+    "si fa da parte; il bordo della PCB resta disegnato.")
+
+## First paragraph of the «Come si usa» popup.
+_INFO_INTRO = (
+    "Correggi l'inventario: sposta, ridimensiona, aggiungi o elimina i rettangoli, "
+    "poi «Applica correzioni». «Parametri…» apre quote e testi del componente scelto.")
+
+## Coordinate convention, the last line of the popup.
+_INFO_ORIGIN = "Origine: centro PCB, X destra, Y basso; rotazione oraria."
 
 ## Marker appended to the list row of such a body. Distinct from the existing
 ## "[!]", which only says "this row has at least one warning" and is therefore
@@ -985,54 +1018,51 @@ class PhotoReviewDialog(QDialog):
         self.setWindowTitle("Revisione componenti da foto")
         self.resize(1120, 740)
         layout = QVBoxLayout(self)
-        instructions = QLabel(
-            "Seleziona un rettangolo o una voce; trascina per spostare. "
-            "Trascina le maniglie per ridimensionare; «Parametri…» apre quote e testi.\n"
-            "«Aggiungi componente»: traccia il rettangolo sulla foto, poi assegna la tipologia.\n"
-            "Rotella: zoom · Tasto centrale: panoramica · "
-            "Origine: centro PCB, X destra, Y basso; rotazione oraria.")
-        instructions.setWordWrap(True)
-        layout.addWidget(instructions)
-        toolbar = QHBoxLayout()
-        self.add_button = QPushButton("Aggiungi componente")
+        tr = self._tr
+        # Barra di icone in alto, come «Corpi rilevati» e il tab 3D (scelta
+        # dell'utente, 2026-09-24): nome, scorciatoia e spiegazione nei
+        # tooltip; le istruzioni, che prima occupavano tre righe sopra la
+        # foto, stanno nel popup dell'icona «i».
         # Checkable: adding is a mode, and the user must be able to see that
         # the next drag on the photo will create a body instead of moving one.
-        self.add_button.setCheckable(True)
-        self.delete_button = QPushButton("Elimina selezionato")
-        self.fit_button = QPushButton("Adatta foto")
-        self.zoom_in_button = QPushButton("Zoom +")
-        self.zoom_out_button = QPushButton("Zoom −")
+        self.add_button = tool_button(
+            "tool-draw.svg", "Aggiungi componente", "R",
+            "Traccia il rettangolo sulla foto, poi assegna la tipologia. Esc annulla.",
+            checkable=True, tr=tr)
+        self.delete_button = tool_button(
+            "delete.svg", "Elimina selezionato", "Canc",
+            "Toglie il componente scelto dall'inventario.", tr=tr)
+        self.zoom_out_button = tool_button("zoom-out.svg", "Zoom indietro", "-", tr=tr)
+        self.zoom_label = QLabel()
+        self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.zoom_label.setMinimumWidth(self.zoom_label.fontMetrics().horizontalAdvance("6400%") + 8)
+        self.zoom_label.setToolTip(tr("Ingrandimento rispetto alla foto intera"))
+        self.zoom_label.setProperty("i18n_skip", True)
+        self.zoom_in_button = tool_button(
+            "zoom-in.svg", "Zoom +", "+",
+            "Anche con la rotella del mouse, attorno al puntatore.", tr=tr)
+        self.fit_button = tool_button("view-fit.svg", "Adatta foto", "F",
+                                      "Mostra la foto intera nella finestra.", tr=tr)
         # A view control, next to fit and zoom: it changes what the canvas
-        # shows, never what is saved. One button for three states instead of a
-        # mode selector.
-        #
-        # Il comando e lo stato sono due cose diverse e stanno su due widget
-        # diversi. Finche' il pulsante diceva «Foto: intera» enunciava uno
-        # STATO: un utente lo ha guardato e ha chiesto la funzione come se non
-        # esistesse, perche' una didascalia non si preme. Ora il pulsante porta
-        # il VERBO del passo successivo («Attenua foto») e l'etichetta accanto
-        # porta lo stato attuale («Foto: intera»): il comando e' leggibile come
-        # comando senza perdere l'informazione su dove ci si trova, e il verbo
-        # rende anche prevedibile l'ordine del ciclo, che prima si scopriva
-        # solo premendo. Lo stato premuto resta come indizio ridondante.
-        self.photo_button = QPushButton()
-        self.photo_button.setCheckable(True)
-        self.photo_button.setToolTip(
-            "Foto intera, attenuata o nascosta: su una foto scura e affollata i "
-            "contorni si leggono solo quando la fotografia si fa da parte. "
-            "Il bordo della PCB resta sempre disegnato.")
-        for button in (self.add_button, self.delete_button, self.fit_button,
-                       self.zoom_in_button, self.zoom_out_button,
-                       self.photo_button):
-            button.setAutoDefault(False)
-            toolbar.addWidget(button)
-        # Lo stato accanto al comando, non dentro: un'etichetta non si preme e
-        # non promette di farlo, quindi puo' dire soltanto dove siamo.
-        self.photo_state_label = QLabel()
-        self.photo_state_label.setObjectName("photo_state_label")
-        self.photo_state_label.setTextFormat(Qt.TextFormat.PlainText)
-        toolbar.addWidget(self.photo_state_label)
+        # shows, never what is saved. One icon for three states: the drawing
+        # is the state the canvas is in, the tooltip names the next step (see
+        # `_apply_photo_state`). The icon has a fixed size, so pressing it can
+        # no longer change the width of the toolbar and zoom the drawing, as
+        # the old text button did with Windows fonts.
+        self.photo_button = tool_button("photo-full.svg", "", checkable=True, tr=tr)
+        self.info_button = tool_button(
+            "info.svg", "Come si usa", "",
+            "Istruzioni, colori e scorciatoie da tastiera di questa finestra.", tr=tr)
+        self.info_popup = InfoPopup(self._info_html(), self)
+        self.info_button.clicked.connect(lambda: self.info_popup.toggle_under(self.info_button))
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(4)
+        for widget in (self.add_button, self.delete_button, toolbar_divider(),
+                       self.zoom_out_button, self.zoom_label, self.zoom_in_button,
+                       self.fit_button, toolbar_divider(), self.photo_button):
+            toolbar.addWidget(widget)
         toolbar.addStretch()
+        toolbar.addWidget(self.info_button)
         layout.addLayout(toolbar)
         self.draw_hint = QLabel(
             "Modalità disegno attiva: trascina sulla foto per tracciare il nuovo "
@@ -1149,11 +1179,13 @@ class PhotoReviewDialog(QDialog):
         # La legenda dichiara anche la precedenza, perche' il colore e' un
         # canale solo: un corpo fuori PCB e senza tipo e' rosso, e il tipo
         # mancante resta scritto nell'avviso e nel marcatore della lista.
-        self.legend = QLabel(
-            "Verde: rilevato · Arancione: da verificare\n"
-            "Viola [?]: tipo non stabilito, scegli tu il modello KiCad\n"
-            "Rosso: fuori PCB (prevale sugli altri) · Bordo bianco spesso: selezionato")
+        # Compatta e sempre visibile (utente, 2026-09-24): il colore si legge
+        # ogni volta che si guarda la foto, quindi resta qui e non nel popup.
+        # Pallino del colore vero + parola: il colore non e' l'unico canale.
+        self.legend = QLabel(self._legend_html())
+        self.legend.setTextFormat(Qt.TextFormat.RichText)
         self.legend.setWordWrap(True)
+        self.legend.setProperty("i18n_skip", True)
         sidebar.addWidget(self.legend)
         # I dubbi globali dell'inventario arrivavano solo al log. Qui stanno
         # dietro un pulsante che compare solo se ce ne sono: sono prosa del
@@ -1216,7 +1248,10 @@ class PhotoReviewDialog(QDialog):
         self.fit_button.clicked.connect(self.fit_photo)
         self.zoom_in_button.clicked.connect(lambda: self.view.zoom(1.2))
         self.zoom_out_button.clicked.connect(lambda: self.view.zoom(1 / 1.2))
+        self.view.zoom_changed.connect(self._update_zoom_label)
         self.photo_button.clicked.connect(self._photo_button_clicked)
+        self._bind_shortcuts()
+        self._update_zoom_label()
         self._apply_photo_state()
         self.component_list.currentRowChanged.connect(self._select_row)
         self.component_list.itemDoubleClicked.connect(lambda _item: self.choose_model())
@@ -1236,12 +1271,7 @@ class PhotoReviewDialog(QDialog):
         return deepcopy(self._components)
 
     def showEvent(self, event):
-        """@brief Fit the whole photo the first time the editor is shown.
-
-        @note The photo controls reserve their widest text again here: the
-              style sheet can change their font when the window is polished.
-        """
-        self._reserve_photo_control_widths()
+        """@brief Fit the whole photo the first time the editor is shown."""
         super().showEvent(event)
         self.fit_photo()
 
@@ -1345,12 +1375,14 @@ class PhotoReviewDialog(QDialog):
         self.cycle_photo_state()
 
     def _apply_photo_state(self):
-        """Mirror the state onto the canvas, the command and the state readout.
+        """Mirror the state onto the canvas and onto the photo icon.
 
-        The button gets the imperative for the NEXT step of the cycle and the
-        label beside it gets the state the canvas is in now. The accessible
-        name carries both, because a screen reader announces the button alone
-        and would otherwise hear a command with no context.
+        The icon draws the state the canvas is in (three different drawings);
+        the tooltip's first line, which is the command's name, is the
+        imperative for the NEXT step of the cycle, and the second line is the
+        current state. The accessible name carries both, because a screen
+        reader announces the button alone and would otherwise hear a command
+        with no context.
         """
         state = self._photo_state
         # Hiding, not a zero opacity: an invisible item is also out of every
@@ -1361,11 +1393,13 @@ class PhotoReviewDialog(QDialog):
         action, current = self._photo_state_texts(state)
         with QSignalBlocker(self.photo_button):
             self.photo_button.setChecked(state != PHOTO_FULL)
-        self._reserve_photo_control_widths()
-        self.photo_button.setText(action)
+        asset = _PHOTO_STATE_ICONS[state]
+        self.photo_button.setIcon(asset_icon(asset))
+        self.photo_button.setProperty("photo_asset", asset)
+        set_tool_texts(self.photo_button, action, "P",
+                       current + ". " + self._tr(_PHOTO_BUTTON_EXPLANATION))
         self.photo_button.setAccessibleName(
             self._tr("{action} (stato attuale: {state})").format(action=action, state=current))
-        self.photo_state_label.setText(current)
 
     def _photo_state_texts(self, state):
         """Command for the next step and readout of ``state``, translated."""
@@ -1375,28 +1409,67 @@ class PhotoReviewDialog(QDialog):
             return self._tr("Nascondi foto"), self._tr("Foto: attenuata")
         return self._tr("Attenua foto"), self._tr("Foto: intera")
 
-    def _reserve_photo_control_widths(self):
-        """Give the photo command and its readout the width of their widest text.
+    def _update_zoom_label(self):
+        self.zoom_label.setText(f"{self.view.zoom_percent()}%")
 
-        Their text changes at every press, and the toolbar row is what sets the
-        window's minimum width: with Windows fonts a longer text widened the
-        whole window by 12 px, the canvas grew with it and the fit zoomed the
-        drawing, so the outlines shifted on screen exactly when the user hid
-        the photograph to look at them. Reserving the widest of the three
-        texts makes the row, and so the canvas, independent of the state.
-        Each width is the widget's own size hint for that text, so style
-        padding and the current font are included.
+    def _bind_shortcuts(self):
+        """Keyboard shortcuts, the same ones written in the tooltips and the popup."""
+        bindings = (
+            ("R", lambda: self.add_button.setChecked(not self.add_button.isChecked())),
+            (QKeySequence(Qt.Key.Key_Delete), self.delete_selected),
+            ("F", self.fit_photo),
+            ("+", lambda: self.view.zoom(1.2)),
+            ("=", lambda: self.view.zoom(1.2)),
+            ("-", lambda: self.view.zoom(1 / 1.2)),
+            ("P", self.cycle_photo_state),
+        )
+        self._shortcuts = []
+        for key, slot in bindings:
+            sequence = key if isinstance(key, QKeySequence) else QKeySequence(key)
+            shortcut = QShortcut(sequence, self)
+            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            shortcut.activated.connect(slot)
+            self._shortcuts.append(shortcut)
+
+    def _info_html(self):
+        """@brief Instructions of the «Come si usa» popup, translated, as rich text."""
+        tr = self._tr
+        rows = [
+            (tr("Clic"), tr("Sceglie un rettangolo; anche dalla lista a destra")),
+            (tr("Trascina"), tr("Sposta il rettangolo; le maniglie lo ridimensionano")),
+            ("R", tr("Aggiungi componente: traccia il rettangolo, poi assegna la tipologia")),
+            (tr("Canc"), tr("Elimina il componente scelto")),
+            (tr("Rotella"), tr("Zoom attorno al puntatore")),
+            (tr("Tasto centrale"), tr("Sposta la vista")),
+            ("+  -  F", tr("Zoom avanti, indietro, foto intera")),
+            ("P", tr("Foto intera, attenuata, nascosta")),
+            (tr("Doppio clic"), tr("Confronta i modelli 3D KiCad del componente")),
+        ]
+        table = "".join(
+            "<tr><td style='padding:2px 12px 2px 0'><b>" + escape(key) + "</b></td>"
+            "<td style='padding:2px 0'>" + escape(text) + "</td></tr>" for key, text in rows)
+        return ("<p style='margin:0 0 8px 0'><b>" + escape(tr("Come si usa")) + "</b></p>"
+                "<p style='margin:0 0 8px 0'>" + escape(tr(_INFO_INTRO)) + "</p>"
+                "<table>" + table + "</table>"
+                "<p style='margin:8px 0 0 0'>" + escape(tr(_INFO_ORIGIN)) + "</p>")
+
+    def _legend_html(self):
+        """@brief Compact colour legend: a dot in the real outline colour, then its words.
+
+        @note The precedence stays written («prevale»): one outline carries one
+              colour, so a body off the board and without a type shows red.
         """
-        texts = [self._photo_state_texts(state) for state in PHOTO_STATES]
-        for widget, candidates in ((self.photo_button, [a for a, _ in texts]),
-                                   (self.photo_state_label, [c for _, c in texts])):
-            shown = widget.text()
-            widths = []
-            for text in candidates:
-                widget.setText(text)
-                widths.append(widget.sizeHint().width())
-            widget.setText(shown)
-            widget.setMinimumWidth(max(widths))
+        tr = self._tr
+        entries = (("#40dc80", tr("Verde: rilevato")),
+                   ("#ffad33", tr("Arancione: da verificare")),
+                   (UNDETERMINED_TYPE_COLOR, tr("Viola") + f" {UNDETERMINED_LIST_MARKER}: "
+                    + tr("tipo non stabilito")),
+                   ("#ef5350", tr("Rosso: fuori PCB (prevale)")))
+        dots = " &nbsp; ".join(
+            f"<span style='white-space:nowrap'><span style='color:{color}'>&#9679;</span>"
+            f"&nbsp;{escape(text)}</span>"
+            for color, text in entries)
+        return f"<span style='font-size:small'>{dots}</span>"
 
     def _append_item(self, component):
         item = _ComponentItem(self, component)

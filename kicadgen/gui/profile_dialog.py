@@ -28,7 +28,7 @@ HELP = (
     'dei terminali. Le istruzioni foto sono aggiunte ai prompt fotografici, inclusa la verifica. '
     'I prompt tecnici Terminali e Reofori sono avanzati: modificarli non riattiva i pulsanti '
     'manuali nascosti. XY sono stime calibrate e le altezze richiedono conferma. '
-    'La cache in generated/photo-cache distingue input, modello e prompt.',
+    'La cache nella cartella photo-cache del progetto distingue input, modello e prompt.',
     'Verifica la presenza dei corpi nei rettangoli proposti, senza spostare coordinate '
     'o aggiungere ID. Il modello è indipendente da Datasheet e Localizzazione foto.',
 )

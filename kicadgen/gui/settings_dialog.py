@@ -94,7 +94,8 @@ class LlmSettingsDialog(QDialog):
             "poi solo la presenza di corpi montati, senza spostarli o riconoscere il circuito. "
             "L'affidabilità delle coordinate dipende dal modello e dalla qualità della foto. "
             "Le risposte foto sono memorizzate "
-            "in generated/photo-cache; a input invariati non vengono ripetute le chiamate. "
+            "nella cartella photo-cache del progetto; a input invariati non vengono "
+            "ripetute le chiamate. "
             "Il 3D usa ingombri semplici senza scritte. Le quote XY sono stime calibrate; "
             "le altezze sono indicative e richiedono una misura diretta."
         )

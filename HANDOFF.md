@@ -5088,3 +5088,263 @@ pulsante «KiCadGen» nella barra di stato, tramite l'estensione
 `actboy168.tasks`. Trappola: nel campo `command` servono barre `/`; con `\`
 l'estensione mangiava le barre rovesciate e il percorso del Python non
 esisteva piu'.
+
+## Richiesto dall'utente il 24/09, DA FARE (solo annotato, non iniziato)
+
+Finestra «Corpi rilevati» (`kicadgen/gui/yolo_review_dialog.py`), due
+screenshot dell'utente:
+1. **«Elimina il riquadro scelto» diventa un'icona**, con il testo nel
+   tooltip al passaggio del mouse. Nello screenshot la freccia porta il
+   pulsante in alto a sinistra, sopra la foto e sotto le istruzioni: da
+   confermare con l'utente se lo vuole li' o al posto attuale nella colonna.
+   Nel progetto non c'e' ancora un'icona di cestino (esiste `assets/info.svg`).
+2. **Istruzioni in cima («Traccia un rettangolo…») sostituite da un'icona
+   info** che apre il testo in un popup. Esiste gia' il modello: `info.svg`,
+   usato in `generation_options_dialog.py`, `guided_documents.py`,
+   `settings_dialog.py`, `profile_dialog.py`, `main_window.py`: riusarlo.
+   Da chiarire: popup al clic o al passaggio del mouse. Il test
+   `test_the_instructions_do_not_set_the_width_of_the_window` (commit
+   `0378bf1`) usa `self.instructions`: il suo contratto va aggiornato (la
+   finestra non deve comunque dipendere dalla lunghezza del testo).
+3. **«Attenua foto» e lo stato «Foto: intera» diventano icone in alto**
+   (terzo screenshot, 24/09): oggi stanno sotto la foto, a sinistra. Insieme
+   ai punti 1 e 2 fa pensare a UNA barra di icone in alto sopra la foto
+   (cestino, foto intera/attenuata/nascosta, info), come quella del tab 3D:
+   da confermare. Lo stato non deve sparire: oggi e' un'etichetta separata
+   dal comando per una scelta precedente (un utente non capiva il pulsante
+   che enunciava lo stato), quindi con un'icona sola lo stato va reso
+   nell'icona stessa (tre disegni) e nel tooltip. La revisione fotografica
+   (`photo_review_dialog.py`) ha lo stesso pulsante con stato: chiedere se
+   cambiarla allo stesso modo, per coerenza.
+4. **Zoom avanti / indietro** nella stessa finestra (richiesta del 24/09).
+   Oggi la vista YOLO (`BoardView`, un `QWidget` disegnato a mano) NON ha
+   zoom: la foto e' sempre adattata alla finestra (`_frame`, KeepAspectRatio),
+   e tutte le conversioni `to_widget` / `to_normalized` passano da li'. Serve
+   quindi una trasformazione (scala + spostamento) dentro quelle due
+   funzioni, un modo per spostarsi con la foto ingrandita e un «adatta»
+   per tornare alla foto intera. La revisione fotografica ha gia' zoom
+   (`_PhotoView.zoom`, fra 1/8 e 64 volte la scala di adattamento; la rotella
+   o i pulsanti chiudono l'adattamento automatico): prendere lo stesso
+   comportamento. Icone zoom +, zoom -, adatta nella barra in alto.
+   Da decidere: rotella del mouse attiva o solo pulsanti. Attenzione alle
+   maniglie: `HANDLE_RADIUS_PX` e `MIN_BOX_PX` sono in pixel dello schermo
+   e devono restare tali a ogni zoom; i test dei riquadri piccoli ne
+   dipendono.
+5. **Un riquadro scelto non si deseleziona cliccando fuori** (segnalato il
+   24/09, con il dubbio di un blocco). Letto il codice, **non e' un crash**:
+   manca la deselezione. In `BoardView.mousePressEvent` un clic fuori da
+   ogni riquadro avvia solo il tracciamento di un riquadro nuovo
+   (`_drag_from`); al rilascio, se l'area e' sotto `MIN_NEW_BOX`, non
+   succede nulla, e `selected` resta quello di prima. Nel file non esiste
+   nessun punto che rimetta `selected = -1` dopo la costruzione.
+   Da fare: un clic fermo fuori dai riquadri deseleziona (lista, tendina
+   della categoria e pulsante Elimina seguono), mentre un trascinamento
+   fuori continua a tracciare un riquadro nuovo. Test positivo (clic fermo
+   nel vuoto → nessuna selezione) e negativo (trascinamento nel vuoto →
+   riquadro aggiunto; clic fermo DENTRO un riquadro → resta scelto).
+   Attenzione: Esc in un QDialog chiude la finestra come Annulla; chi usa
+   Esc per deselezionare perderebbe le modifiche. Chiedere all'utente se Esc
+   deve deselezionare prima di chiudere.
+   Da verificare comunque a mano sulla sua macchina se c'era anche un blocco
+   vero (finestra che non risponde): dal codice non risulta.
+6. **L'utente vuole «qualcosa di piu' professionale»**: proposto un mockup
+   interattivo della finestra come editor di annotazioni (artifact privato
+   «Corpi rilevati, versione editor»; sorgente nello scratchpad di sessione,
+   non nel repo). Contiene: barra di icone in alto con tooltip e scorciatoie
+   (Seleziona V, Disegna R, Elimina Canc, zoom -, %, zoom +, Adatta F, Foto P,
+   info a destra), due strumenti distinti al posto del trascinamento sempre
+   «disegna», clic nel vuoto e Esc deselezionano, trascinamento nel vuoto
+   sposta la vista, rotella = zoom attorno al puntatore, barra di stato con
+   posizione in mm, zoom e conteggio, filtro per categoria sopra la lista.
+   **Approvato dall'utente il 24/09 («si molto bene adottiamo questo
+   stile»)** per entrambe le finestre. Zoom confermato: in «Corpi rilevati»
+   va aggiunto (oggi manca), in «Revisione componenti» c'e' gia' (rotella,
+   tasto centrale per spostarsi, pulsanti Zoom +/-) e diventa icone.
+   Decisioni dell'utente (24/09), tutte prese:
+   - **trascinamento nel vuoto = sposta la vista** (niente selezione
+     multipla);
+   - «Revisione componenti»: **istruzioni nel popup dell'icona info**,
+     **legenda dei colori compatta e sempre visibile** (pallino + parola);
+   - **filtro per categoria in entrambe le finestre**.
+   Da chiedere ancora solo quando partire con il codice.
+8. **Tooltip che escono dalla finestra** (screenshot del 24/09, tab 3D,
+   tooltip di «Rilancia inventario AI»): il testo lungo sta su UNA riga e
+   sborda oltre la finestra dell'app, fin sopra il desktop. Richiesta:
+   riquadro che non esce mai dall'app, piu' alto e adattato al testo.
+   Causa: in Qt un tooltip di testo semplice non va mai a capo; va a capo
+   solo il rich text. Oggi c'e' solo lo stile `QToolTip` in `theme.py`.
+   Soluzione generale (tutta l'app, non pulsante per pulsante): un filtro
+   eventi sull'applicazione intercetta `QEvent.ToolTip`, rende il testo come
+   rich text con larghezza massima (una colonna leggibile, ma mai piu' larga
+   della finestra meno i margini), e lo posiziona dentro la geometria della
+   finestra principale / del dialogo. Conservare le righe «nome + spiegazione»
+   dei tooltip del tab 3D (la prima riga in evidenza). Test: un tooltip lungo
+   su finestra stretta resta dentro la finestra (positivo) e uno corto resta
+   su una riga (negativo). Serve prima delle barre di icone: con le icone i
+   tooltip diventano l'unico testo dei comandi.
+   Non ancora iniziato: l'utente aveva chiesto di prendere solo nota.
+7. **Stesso trattamento per «Revisione componenti»**
+   (`photo_review_dialog.py`, richiesto il 24/09 con screenshot): i pulsanti
+   di testo (Aggiungi componente, Elimina selezionato, Adatta foto, Zoom +,
+   Zoom -, Attenua foto + «Foto: intera») diventano icone, testo nel
+   tooltip. Da chiedere: se anche le tre righe di istruzioni in alto e la
+   legenda dei colori a destra vanno sotto un'icona info. Attenzione:
+   `_reserve_photo_control_widths` (commit `0378bf1`) esiste per la barra a
+   testo; con le icone la larghezza non cambia piu' con lo stato e va rivisto
+   insieme al suo test (`test_changing_the_photo_state_does_not_resize...`,
+   il cui contratto -- la vista non si muove cambiando stato -- resta valido).
+Tooltip e testi nuovi vanno tradotti nel catalogo (en/it/fr/de). Trappola
+gia' nota: gli SVG nuovi vanno controllati con l'md5 dopo la consegna.
+
+## Fatto il 24/09 pomeriggio sui punti 1-8
+
+L'utente ha detto «fai i fix che ti ho chiesto in questa sessione». Tutto il
+lavoro e' senza chiamate AI.
+
+- **Tooltip (punto 8)** — `kicadgen/gui/tooltips.py`, installato in
+  `main_window.main()`: filtro eventi sull'applicazione. Ogni tooltip e'
+  rich text, largo al massimo `TOOLTIP_MAX_WIDTH_PX` = 420 px (scelta di
+  lettura, non misura) e mai piu' della finestra, la prima riga di un
+  «nome\nspiegazione» in grassetto, e il riquadro viene spostato dentro la
+  finestra. Tutti i tooltip sono trattati come TESTO SEMPLICE ed escapati
+  (nessuno nel programma e' rich text). **Trappola**: su Windows Qt anima il
+  tooltip e durante l'animazione non lo si puo' spostare: le animazioni dei
+  tooltip sono spente (`UI_AnimateTooltip`, `UI_FadeTooltip`). Anche le voci
+  delle liste. Test `tests/test_tooltips.py` (8).
+- **«Rigenera» per ultimo** nella barra del tab 3D, dopo il tipo di contatto.
+  Test in `test_3d_tab_workflow_icons.py`.
+- **«Corpi rilevati»** (`yolo_review_dialog.py`), come il mockup approvato:
+  barra di icone (Seleziona V, Disegna R, Elimina Canc | zoom -, %, zoom +,
+  Adatta F | foto P | «i» a destra), filtro per categoria sopra la lista,
+  barra di stato (punto in mm, conteggi, OK/Annulla). `BoardView`: zoom
+  1x-16x (`MIN_ZOOM`/`MAX_ZOOM`, il massimo e' una scelta dichiarata) attorno
+  al puntatore, spostamento limitato perche' la foto copra la vista, clic
+  fermo nel vuoto = deseleziona (**il difetto segnalato**), trascinamento nel
+  vuoto = sposta la vista, tasto centrale = sposta la vista, Disegna traccia
+  (le maniglie del riquadro scelto restano prendibili). Esc: annulla il
+  tracciamento, poi lo strumento, poi la scelta; **non chiude mai** la
+  finestra (`keyPressEvent`). `_frame()` restituisce ora `QRectF`.
+  Contratti cambiati di proposito (spiegati nei test): il trascinamento nel
+  vuoto che aggiungeva un corpo ora richiede Disegna; il comando della foto e'
+  un'icona (nome = verbo del passo successivo, stato nel disegno, nella
+  seconda riga del tooltip e nel nome accessibile). 11 test nuovi.
+- **«Revisione componenti»** (`photo_review_dialog.py`): stessa barra di
+  icone (Aggiungi R, Elimina Canc | zoom -, %, zoom +, Adatta F | foto P |
+  «i»), istruzioni nel popup, legenda dei colori compatta sempre visibile
+  (pallino del colore vero + parole). `_PhotoView.zoom_changed` e
+  `zoom_percent()`. Tolta `_reserve_photo_control_widths` (serviva al
+  pulsante a testo; con l'icona la larghezza non cambia piu') ma il suo test
+  resta con lo stesso contratto: finestra, vista e trasformazione invariate
+  per tutto il ciclo della foto.
+- **Modulo condiviso** `kicadgen/gui/review_tools.py`: `tool_button`,
+  `set_tool_texts` (tooltip «nome (tasto)\nspiegazione», `i18n_skip` perche'
+  tradotto li'), `InfoPopup` (popup Qt, rich text, largo al massimo 440 px,
+  dentro la finestra, e l'«i» funziona da interruttore).
+- **Icone delle schede**: le emoji dei titoli (📁 👁 🧊 🔌, piu' ▦ e ⚙)
+  sostituite da SVG a linea con `setTabIcon` (`TAB_ICONS` in main_window).
+  **Trappola del catalogo**: il catalogo SQLite aggiunge le chiavi nuove a
+  ogni avvio ma NON riscrive quelle esistenti, quindi i titoli senza emoji
+  hanno chiavi nuove `tab.*.name`; le vecchie `tab.*` restano nel database
+  dell'utente, inutilizzate. Test in `test_i18n.py` (anche su un database
+  creato prima) e in `test_photo_inventory_gui.py`.
+- 14 SVG nuovi in `gui/assets` (tool-select, tool-draw, delete, zoom-in,
+  zoom-out, photo-full/dimmed/hidden, tab-*): scritti in locale, niente
+  ponte, quindi niente manifesto C2PA.
+- 48 voci nuove nel catalogo (en/it/fr/de).
+
+Visti in un render con la foto della scheda dell'utente: le due finestre e il
+popup. Da vedere dall'utente sulla sua macchina: tooltip reali col mouse,
+rotella, sensazione dello zoom.
+
+Suite completa su Windows dopo questi lavori: **3839 passati**, 3 saltati,
+2 xfail, 19 sottotest, zero rossi (384 s).
+
+## Domanda aperta dell'utente (24/09): `generated/photo-cache` per progetto?
+
+L'utente chiede se `photo-cache` non debba stare dentro la cartella del
+progetto. Letto il codice: la cartella mescola DUE cose diverse.
+1. **Evidenze di una corsa** (`detector-<ora>.json`, `inventory-<ora>-photo.png`,
+   `-overlay.png`, `yolo-audit/`): appartengono a un progetto. Stare nella
+   cartella comune e' la causa del ripiego `_extraction_started_stamp` in
+   `main_window` («la cartella photo-cache e' comune ai componenti»): le
+   proposte salvate si accettano solo se nate dall'ultima estrazione.
+2. **Cache delle risposte AI indicizzata per contenuto**
+   (`global-inventory-<sha256>.json`, `yolo-*.json`, chiave = hash degli
+   ingressi in `photo_grounding.py:137`): e' cio' che permette il replay senza
+   pagare. Per progetto si perderebbe quando il progetto viene rinominato
+   (flusso `component.rename_conflict`) o rifatto con un altro nome.
+Proposta fatta all'utente: evidenze nella cartella del progetto, cache per
+contenuto comune. **RESPINTA** (vedi sotto). Complicazione: durante
+l'estrazione il nome definitivo del progetto puo' ancora cambiare (rinomina
+proposta dall'estrazione), quindi le evidenze andrebbero spostate con il
+progetto. Percorsi da toccare: `main_window._photo_cache_dir`, il percorso
+fisso in `TerminalWorker.run` (riga ~864) e il predefinito di
+`datasheet_extractor`.
+
+**Decisione dell'utente (24/09): «deve andare tutto dentro il progetto
+specifico, ogni interrogazione AI e' specifica del progetto».** Fatto:
+- `photo_inventory.PHOTO_CACHE_SUBDIR` / `photo_cache_dir(project_dir)`;
+  `main_window._photo_cache_dir()` = `<progetto>/photo-cache` (ValueError
+  senza nome). `ExtractWorker.photo_cache_dir` assegnato da chi avvia,
+  `TerminalDetailWorker(cache_dir=...)`. `datasheet_extractor` NON ha piu' il
+  ripiego su `generated/photo-cache`: senza cartella niente cache.
+- Il parametro si passa con `accepted_kwargs` (nuovo, generalizza la regola di
+  `phase_kwargs`): solo se la firma del servizio lo dichiara.
+- **Rinomina**: `_move_analysis_folders_to` porta con se' `photo-cache/`
+  (sottocartelle comprese) e `photo-review/`, mai sovrascrivendo. Prima si
+  spostavano solo `docs/` e il diario: `photo-review/` restava indietro
+  (difetto preesistente della stessa classe, corretto insieme).
+- **Catalogo SQLite**: nuovo `i18n.SUPERSEDED_DEFAULTS` + `UPDATE` in
+  `ProfileStore._initialize`: una voce che contiene ESATTAMENTE un vecchio
+  testo predefinito viene aggiornata; una voce modificata dall'utente no.
+  Usato per i due testi d'aiuto che citavano `generated/photo-cache`
+  (`help.profile.stage.1`, `help.settings.stage.1`). Il database dell'utente
+  si aggiornera' al prossimo avvio del programma.
+- Test: `tests/test_project_photo_cache.py` (7).
+- La vecchia `generated/photo-cache` e `generated/Test` le ha cancellate
+  l'utente alle 10:07 (Cestino): «ho fatto pulizia io». Nulla da migrare.
+- Suite completa dopo questi lavori: **3846 passati**, 3 saltati, 2 xfail,
+  19 sottotest, zero rossi.
+
+## Nuova richiesta dell'utente (24/09), da chiarire prima di partire
+
+«Un progetto nuovo non puo' avere il nome di una cartella gia' esistente; da
+interfaccia si deve poter decidere se aprire un progetto vecchio (la
+cartella) o crearne uno nuovo.» Oggi: il campo «Nome» e' testo libero e
+scrivere il nome di una cartella esistente la «apre» di nascosto (compaiono i
+suoi documenti).
+
+**Decisioni dell'utente: 1a, 2a, 3a.** Fatto:
+- 1a: menu File con «Nuovo progetto…» (Ctrl+N), «Apri progetto…» (Ctrl+O),
+  «Rinomina progetto…»; `field_name` in SOLA LETTURA (si cambia solo da
+  li'). Modulo nuovo `kicadgen/gui/project_dialogs.py`: `name_problem`
+  (vuoto, caratteri vietati da Windows, punto finale, nomi riservati, nome gia'
+  usato confrontato SENZA maiuscole, come fa Windows), `list_projects` (solo
+  cartelle con `docs/`, diario, `photo-review/`, `photo-cache/` o
+  `<nome>.pretty`, dalla piu' recente), `ProjectNameDialog` (OK spento con il
+  motivo scritto sotto), `OpenProjectDialog`. «Nuovo» crea subito
+  `<nome>/docs`, cosi' il nome e' occupato. Nessun cambio di progetto durante
+  un lavoro in corso (`_project_change_blocked`).
+- 2a: aprire = impostare il nome; torna cio' che la cartella gia' contiene
+  (documenti, corpi rivisti, scelte dei modelli, footprint e 3D generati).
+  **Non** tornano quote e parametri dei campi: non sono salvati nella cartella.
+  Limite da dire all'utente: un «Nuovo progetto» eredita nei campi i valori
+  del progetto precedente, come succedeva scrivendo un nome nuovo.
+- 3a: `_apply_suggested_name` rifiuta il nome di un altro progetto, con il
+  motivo nell'etichetta della proposta e nel log.
+- 24 voci nuove nel catalogo. Test: `tests/test_project_open_new.py`.
+- Contratto aggiornato di proposito: `test_automatic_generation.py::test_the_name_conflict_no_longer_opens_a_modal` ora attende il messaggio
+  del rifiuto (3a), che scatta prima del conflitto fra documenti.
+- Suite completa: **3866 passati**, 3 saltati, 2 xfail, 19 sottotest, zero rossi.
+- I pulsanti standard Qt (Open, Cancel, OK) restano in inglese in tutto il
+  programma: le traduzioni di Qt non sono caricate. Preesistente, non toccato.
+
+## Commit del 24/09 pomeriggio
+
+Tutto il lavoro del pomeriggio (tooltip, barre di icone delle due revisioni,
+icone delle schede, «Rigenera» in fondo, cache per progetto, progetti
+nuovo/apri/rinomina) e' nel commit che segue `0378bf1` su `YOLO-SOLUTION`
+(«feat: barre di icone nelle revisioni, tooltip dentro la finestra, cache e
+progetti per cartella»), pushato su richiesta dell'utente. Esclusi come
+sempre `data/analysis_profiles.sqlite3`, `Private/`, `Claude outputs/`.
+Suite al commit: 3866 passati, 3 saltati, 2 xfail, 19 sottotest.

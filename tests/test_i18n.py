@@ -166,9 +166,33 @@ def test_translation_catalog_seeds_all_supported_languages(tmp_path):
     """@brief Ensure a new profile database contains the navigation catalog."""
     store = ProfileStore(tmp_path / "profiles.sqlite3")
     i18n = I18n(store, "fr")
-    assert i18n.tr("tab.project") == "📁 Projet"
-    assert i18n.tr("tab.model3d") == "🧊 Modèle 3D"
-    assert i18n.tr("tab.kicad") == "🔌 KiCad"
+    # Titoli senza emoji dal 2026-09-24: l'icona della scheda e' un SVG.
+    assert i18n.tr("tab.project.name") == "Projet"
+    assert i18n.tr("tab.model3d.name") == "Modèle 3D"
+    assert i18n.tr("tab.kicad.name") == "KiCad"
+
+
+def test_emoji_free_tab_titles_reach_a_database_created_before_them(tmp_path):
+    """@brief Un catalogo gia' creato riceve i titoli nuovi senza perdere le modifiche.
+
+    Il catalogo SQLite aggiunge le chiavi mancanti a ogni apertura ma non
+    riscrive quelle esistenti. Per questo i titoli senza emoji hanno chiavi
+    nuove: positivo, un database con le vecchie voci «📁 Progetto» mostra il
+    titolo nuovo; negativo, una modifica dell'utente a una chiave esistente
+    sopravvive alla riapertura.
+    """
+    path = tmp_path / "profiles.sqlite3"
+    store = ProfileStore(path)
+    store.save_translation("tab.project", "it", "📁 Progetto")
+    store.save_translation("tab.project.name", "it", "Il mio progetto")
+    reopened = ProfileStore(path)
+    assert I18n(reopened, "it").tr("tab.project.name") == "Il mio progetto"
+    fresh = tmp_path / "fresh.sqlite3"
+    import sqlite3
+    ProfileStore(fresh)
+    with sqlite3.connect(fresh) as db:
+        db.execute("DELETE FROM translations WHERE key LIKE 'tab.%.name'")
+    assert I18n(ProfileStore(fresh), "it").tr("tab.model3d.name") == "Modello 3D"
 
 
 def test_translation_falls_back_to_english_and_persists_edits(tmp_path):

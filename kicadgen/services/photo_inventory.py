@@ -1032,6 +1032,20 @@ def load_saved_detector_proposals(cache_dir):
 #: nome digitato, senza cercare fra i file di altri componenti e senza
 #: rifare alcuna chiamata AI.
 REVIEW_BUNDLE_SUBDIR = 'photo-review'
+#: Cartella, DENTRO la cartella del progetto, delle risposte AI in cache e
+#: delle evidenze di ogni analisi (decisione dell'utente del 2026-09-24:
+#: «ogni interrogazione AI e' specifica del progetto»). Prima stava in
+#: `generated/photo-cache`, comune a tutti i progetti.
+PHOTO_CACHE_SUBDIR = 'photo-cache'
+
+
+def photo_cache_dir(project_dir):
+    """@brief Cartella della cache AI e delle evidenze di un progetto.
+
+    @param project_dir Cartella del progetto (del componente).
+    @return `project_dir/photo-cache`.
+    """
+    return Path(project_dir) / PHOTO_CACHE_SUBDIR
 REVIEW_BUNDLE_JSON = 'proposals.json'
 REVIEW_BUNDLE_PHOTO = 'photo.png'
 #: Formato del pacchetto scritto da save_review_bundle: chi legge un file di

@@ -17,7 +17,7 @@ from PyQt6.QtGui import QColor, QImage, QMouseEvent, QWheelEvent
 from PyQt6.QtTest import QSignalSpy, QTest
 from PyQt6.QtWidgets import (
     QAbstractButton, QApplication, QDialog, QDialogButtonBox, QGraphicsItem,
-    QGraphicsRectItem, QPlainTextEdit,
+    QGraphicsRectItem, QLabel, QPlainTextEdit,
 )
 
 from kicadgen.gui.photo_review_dialog import (
@@ -1333,75 +1333,72 @@ def _contrast_ratio(first, second):
 #: asserzione sulla "leggibilita' come comando" deve misurare la stessa cosa.
 _PHOTO_COMMAND_VERBS = ("Attenua", "Nascondi", "Mostra")
 
-#: Testi che enunciano soltanto lo STATO. Erano l'etichetta del pulsante, e un
-#: utente li ha letti come didascalia: restano, ma su un'etichetta.
+#: Testi che enunciano soltanto lo STATO. Un utente li ha letti come didascalia
+#: quando erano il nome del pulsante: restano leggibili, ma mai come nome.
 _PHOTO_STATE_TEXTS = ("Foto: intera", "Foto: attenuata", "Foto: nascosta")
 
 
 def test_the_backdrop_control_is_a_view_control_and_cycles_three_states(dialog, app):
-    """@brief One button next to fit and zoom, cycling photograph -> attenuated -> hidden.
+    """@brief One icon next to fit and zoom, cycling photograph -> attenuated -> hidden.
 
-    It is a view control, so it belongs after the zoom buttons and not next to
+    It is a view control, so it belongs after the zoom icons and not next to
     the editing ones, and it stays visibly pressed while the canvas is not
     showing the real photograph, so a hidden board is never mistaken for an
     empty one.
 
-    CONTRACT CHANGE, and the reason for it. The button used to be labelled
-    with the state it was in ("Foto: intera"). A user looked straight at it and
-    asked for the feature as if it did not exist: a label that enunciates a
-    state reads as a caption, and a caption is not pressed. The label now
-    carries the VERB of the next step and a separate ``photo_state_label``
-    carries the state, so nothing is lost and the command is legible as a
-    command. The assertion is not weakened: it still pins the exact text of
-    all three steps, of both widgets, plus the accessible name — it pins a
-    different, stronger contract.
+    CONTRACT CHANGE (user decision 2026-09-24, icon toolbar). The text button
+    and the separate state label became ONE icon. The lesson that split them
+    still holds -- a control named after a state reads as a caption -- so the
+    command's NAME (tooltip first line, accessible name) is the verb of the
+    next step, and the state is in the icon's drawing (three different
+    icons), in the tooltip's second line and in the accessible name. All
+    three steps are still pinned exactly.
     """
     buttons = _toolbar_buttons(dialog)
     assert dialog.photo_button in buttons
-    assert dialog.photo_state_label in buttons
     assert buttons.index(dialog.photo_button) > buttons.index(dialog.zoom_out_button)
     assert buttons.index(dialog.photo_button) > buttons.index(dialog.delete_button)
-    # Lo stato sta accanto al comando, non da un'altra parte della finestra.
-    assert buttons.index(dialog.photo_state_label) == buttons.index(dialog.photo_button) + 1
     assert dialog.photo_button.isCheckable()
-    for expected_state, verb, state_text in (
-        (PHOTO_FULL, "Attenua foto", "Foto: intera"),
-        (PHOTO_DIMMED, "Nascondi foto", "Foto: attenuata"),
-        (PHOTO_HIDDEN, "Mostra foto", "Foto: nascosta"),
+    assert dialog.photo_button.text() == ""
+    assets = []
+    for expected_state, verb, state_text, asset in (
+        (PHOTO_FULL, "Attenua foto", "Foto: intera", "photo-full.svg"),
+        (PHOTO_DIMMED, "Nascondi foto", "Foto: attenuata", "photo-dimmed.svg"),
+        (PHOTO_HIDDEN, "Mostra foto", "Foto: nascosta", "photo-hidden.svg"),
     ):
         assert dialog.photo_state() == expected_state
-        assert dialog.photo_button.text() == verb
-        assert dialog.photo_state_label.text() == state_text
+        first, second = dialog.photo_button.toolTip().split("\n", 1)
+        assert first == f"{verb} (P)"
+        assert second.startswith(state_text)
         assert dialog.photo_button.accessibleName() == f"{verb} (stato attuale: {state_text})"
+        assert dialog.photo_button.property("photo_asset") == asset
         assert dialog.photo_button.isChecked() == (expected_state != PHOTO_FULL)
+        assets.append(asset)
         QTest.mouseClick(dialog.photo_button, Qt.MouseButton.LeftButton)
+    assert len(set(assets)) == 3
     # Negative: the cycle closes, it does not get stuck on the last state.
     assert dialog.photo_state() == PHOTO_FULL
     assert not dialog.photo_button.isChecked()
-    assert dialog.photo_button.text() == "Attenua foto"
 
 
 def test_the_backdrop_control_reads_as_a_command_and_still_shows_its_state(dialog):
     """@brief The discoverability contract, stated without naming the wording.
 
-    Whatever the state, the pressable widget's label (and its accessible name,
-    which is what a screen reader announces) starts with an imperative verb,
-    and no pressable widget is labelled with a bare state. The state itself is
-    never lost: it is readable from a widget that is not a button.
+    Whatever the state, the command's name (tooltip first line and accessible
+    name, which is what a screen reader announces) starts with an imperative
+    verb and is never a bare state; the state itself is never lost: it is in
+    the tooltip and the accessible name.
     """
     for state in PHOTO_STATES:
         dialog.set_photo_state(state)
-        label = dialog.photo_button.text()
-        assert label.split()[0] in _PHOTO_COMMAND_VERBS, label
+        name = dialog.photo_button.toolTip().splitlines()[0]
+        assert name.split()[0] in _PHOTO_COMMAND_VERBS, name
         assert dialog.photo_button.accessibleName().split()[0] in _PHOTO_COMMAND_VERBS
-        # Negative: the command is not a caption any more.
-        assert label not in _PHOTO_STATE_TEXTS
-        # ...and the state survives the change, on something that is not a button.
-        assert dialog.photo_state_label.text() in _PHOTO_STATE_TEXTS
-        assert not isinstance(dialog.photo_state_label, QAbstractButton)
-        assert dialog.photo_state_label.isVisibleTo(dialog)
-    # Negative: the three public states and their order are untouched by the
-    # relabelling — the label is a view of the state, never its source.
+        # Negative: the command is not a caption.
+        assert not any(name.startswith(text) for text in _PHOTO_STATE_TEXTS)
+        # ...and the state survives, in the second line and the accessible name.
+        assert any(text in dialog.photo_button.toolTip().splitlines()[1] for text in _PHOTO_STATE_TEXTS)
+        assert any(text in dialog.photo_button.accessibleName() for text in _PHOTO_STATE_TEXTS)
     assert PHOTO_STATES == (PHOTO_FULL, PHOTO_DIMMED, PHOTO_HIDDEN)
     dialog.set_photo_state(PHOTO_FULL)
     seen = []
@@ -1446,18 +1443,12 @@ def test_hiding_the_photograph_keeps_every_outline_in_place_and_drawn(dialog, ap
 def test_changing_the_photo_state_does_not_resize_the_window_or_zoom_the_canvas(dialog, app):
     """@brief Pressing the photo command leaves the canvas exactly where it was.
 
-    The toolbar row sets the window's minimum width and the command and its
-    readout change text at every press. With Windows fonts the longer text
-    widened the window by 12 px, the canvas grew and the fit zoomed the
-    drawing: the outlines moved on screen right when the photograph was hidden
-    to look at them. The precondition checks that the texts really differ in
-    width, so the test cannot pass just because a font made them equal.
+    With the old text button the toolbar row changed width at every press
+    (Windows fonts: +12 px), the window grew, the canvas refitted and the
+    outlines moved right when the photograph was hidden to look at them. The
+    command is now an icon of fixed size; the contract is unchanged: window,
+    canvas and view transform stay put through the whole cycle.
     """
-    states = [dialog._photo_state_texts(state) for state in PHOTO_STATES]
-    button_metrics = dialog.photo_button.fontMetrics()
-    label_metrics = dialog.photo_state_label.fontMetrics()
-    assert len({button_metrics.horizontalAdvance(action) for action, _ in states}) > 1
-    assert len({label_metrics.horizontalAdvance(current) for _, current in states}) > 1
     app.processEvents()
     before = (dialog.width(), dialog.view.size(), dialog.view.transform())
     for _ in PHOTO_STATES:
@@ -1465,9 +1456,47 @@ def test_changing_the_photo_state_does_not_resize_the_window_or_zoom_the_canvas(
         for _ in range(3):
             app.processEvents()
         assert (dialog.width(), dialog.view.size(), dialog.view.transform()) == before
-        # Every text still fits whole in its reserved width.
-        assert dialog.photo_button.width() >= dialog.photo_button.sizeHint().width()
-        assert dialog.photo_state_label.width() >= dialog.photo_state_label.sizeHint().width()
+
+
+def test_the_toolbar_is_icons_named_in_their_tooltips(dialog):
+    """@brief Stessa barra di «Corpi rilevati» (utente, 2026-09-24): icone, nome e tasto nel tooltip."""
+    buttons = [dialog.add_button, dialog.delete_button, dialog.zoom_out_button,
+               dialog.zoom_in_button, dialog.fit_button, dialog.photo_button, dialog.info_button]
+    for button in buttons:
+        assert button.text() == "" and not button.icon().isNull()
+        assert button.accessibleName()
+    assert dialog.add_button.toolTip().splitlines()[0] == "Aggiungi componente (R)"
+    assert dialog.delete_button.toolTip().splitlines()[0] == "Elimina selezionato (Canc)"
+    assert dialog.add_button.isCheckable()
+
+
+def test_the_zoom_percentage_follows_the_view(dialog, app):
+    """@brief Positivo: zoom e «Adatta» aggiornano la percentuale. Negativo: foto adattata = 100%."""
+    dialog.fit_photo()
+    app.processEvents()
+    assert dialog.zoom_label.text() == "100%"
+    dialog.zoom_in_button.click()
+    assert dialog.zoom_label.text() == "120%"
+    dialog.fit_button.click()
+    assert dialog.zoom_label.text() == "100%"
+
+
+def test_the_instructions_moved_to_a_popup_and_the_colour_legend_stays_visible(dialog, app):
+    """@brief Istruzioni nel popup dell'icona «i»; legenda dei colori compatta e sempre visibile.
+
+    Negativo: nessuna etichetta di istruzioni resta sopra la foto.
+    """
+    texts = [label.text() for label in dialog.findChildren(QLabel)
+             if label is not dialog.info_popup.label]
+    assert not any("Tasto centrale" in text for text in texts if text)
+    assert dialog.legend.isVisibleTo(dialog)
+    assert dialog.legend.text().count("&#9679;") == 4
+    dialog.info_button.click()
+    app.processEvents()
+    assert dialog.info_popup.isVisible()
+    assert "Tasto centrale" in dialog.info_popup.label.text()
+    assert dialog.frameGeometry().contains(dialog.info_popup.frameGeometry())
+    dialog.info_popup.hide()
 
 
 def test_the_attenuated_photograph_fades_into_the_neutral_backdrop(dialog, app):
@@ -1615,8 +1644,8 @@ def test_the_backdrop_state_survives_every_edit_and_the_parameter_modal(dialog, 
         assert dialog.photo_state() == PHOTO_HIDDEN, step
         assert not dialog.photo_item.isVisible(), step
         assert dialog.board_backdrop.isVisible(), step
-        assert dialog.photo_button.text() == "Mostra foto", step
-        assert dialog.photo_state_label.text() == "Foto: nascosta", step
+        assert dialog.photo_button.property("photo_asset") == "photo-hidden.svg", step
+        assert dialog.photo_button.accessibleName().startswith("Mostra foto"), step
 
     dialog.add_component()
     still_hidden("add")
@@ -1663,8 +1692,8 @@ def test_a_new_editor_opens_on_the_photograph(app, png, components):
         assert second.photo_state() == PHOTO_FULL
         assert second.photo_item.isVisible()
         assert not second.board_backdrop.isVisible()
-        assert second.photo_button.text() == "Attenua foto"
-        assert second.photo_state_label.text() == "Foto: intera"
+        assert second.photo_button.property("photo_asset") == "photo-full.svg"
+        assert second.photo_button.accessibleName().startswith("Attenua foto")
     finally:
         second.close()
 
@@ -1675,8 +1704,8 @@ def test_an_unknown_backdrop_state_is_refused(dialog):
     with pytest.raises(ValueError):
         dialog.set_photo_state("transparent")
     assert dialog.photo_state() == PHOTO_DIMMED
-    assert dialog.photo_button.text() == "Nascondi foto"
-    assert dialog.photo_state_label.text() == "Foto: attenuata"
+    assert dialog.photo_button.property("photo_asset") == "photo-dimmed.svg"
+    assert dialog.photo_button.accessibleName().startswith("Nascondi foto")
 
 
 def test_selecting_and_moving_an_outline_still_work_with_the_photograph_hidden(dialog, app):

@@ -295,7 +295,7 @@ def test_kicad_tab_is_visible_in_standard_user_mode(window):
     assert not window._advanced_user()
     assert window.tabs.count() == 6
     assert window.tabs.isTabVisible(5)
-    assert window.tabs.tabText(5) == "🔌 KiCad"
+    assert window.tabs.tabText(5) == "KiCad"
     assert window.tabs.widget(5).isAncestorOf(window.btn_test_kicad)
 
 
@@ -1171,3 +1171,15 @@ def test_the_session_never_recreates_the_qapplication(window, run):
     assert _WINDOW_SAMPLES == run, (
         f"prova {run} con {_WINDOW_SAMPLES} campioni: le prove precedenti non "
         "sono state eseguite, quindi l'unicita' non e' stata verificata")
+
+
+def test_every_tab_has_a_line_icon_and_a_title_without_symbols(window):  # noqa: F811
+    """@brief Icone a linea al posto delle emoji (utente, 2026-09-24: «stonata con il resto»).
+
+    Positivo: ogni scheda ha un'icona. Negativo: nessun titolo comincia con
+    un simbolo o un'emoji, che si sommerebbe all'icona.
+    """
+    for index in range(window.tabs.count()):
+        assert not window.tabs.tabIcon(index).isNull(), index
+        title = window.tabs.tabText(index)
+        assert title and title[0].isalnum(), title

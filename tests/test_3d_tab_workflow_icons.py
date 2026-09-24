@@ -144,6 +144,25 @@ def test_regenerate_is_the_emphasised_primary_command(window):  # noqa: F811
     assert all(button.objectName() != "primary" for button in others)
 
 
+def test_regenerate_is_the_last_command_of_the_bar(window):  # noqa: F811
+    """@brief «Rigenera» chiude la barra, dopo il tipo di contatto (utente, 2026-09-24).
+
+    Si correggono corpi e contatti, poi si rigenera: la barra si legge nello
+    stesso ordine. Negativo: il tipo di contatto resta PRIMA di «Rigenera» e
+    gli altri comandi del flusso restano dopo il divisore, prima di entrambi.
+    """
+    widgets = _bar_widgets(window)
+    # Spazio elastico (None), pulsante nascosto per decisione del 2026-09-13 e
+    # indicatore di caricamento non sono comandi della barra.
+    commands = [w for w in widgets if w is not None
+                and w is not window.btn_terminal_detail and w is not window.loading_3d_indicator]
+    assert commands[-1] is window.btn_regen_3d
+    assert widgets.index(window.contact_style_bar_3d) < widgets.index(window.btn_regen_3d)
+    for button in _workflow(window)[1:]:
+        assert (widgets.index(window.toolbar_3d_divider) < widgets.index(button)
+                < widgets.index(window.contact_style_bar_3d))
+
+
 def test_the_paid_command_stays_recognisable_as_paid(window):  # noqa: F811
     """@brief Positivo: il rilancio a pagamento lo dichiara nel tooltip e ha un'icona propria.
 

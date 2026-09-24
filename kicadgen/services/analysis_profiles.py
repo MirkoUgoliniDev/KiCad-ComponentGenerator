@@ -27,6 +27,18 @@ def _default_translations():
             for language, text in values.items()]
 
 
+def _superseded_translations():
+    """@brief Rows (new text, key, language, old text) for outdated bundled translations.
+
+    @return One row per superseded default text in i18n.SUPERSEDED_DEFAULTS.
+    """
+    from .i18n import DEFAULT_TRANSLATIONS, SUPERSEDED_DEFAULTS
+    return [(DEFAULT_TRANSLATIONS[key][language], key, language, old)
+            for key, languages in SUPERSEDED_DEFAULTS.items()
+            for language, olds in languages.items()
+            for old in olds]
+
+
 def factory_defaults():
     """@brief Provide the factory defaults operation for this workflow."""
     from .datasheet_extractor import DEFAULT_SYSTEM_PROMPT
@@ -89,6 +101,11 @@ class ProfileStore:
                 db.execute('SELECT key,language,text FROM translations LIMIT 1')
                 # Add newly bundled UI keys without overwriting user edits.
                 db.executemany('INSERT OR IGNORE INTO translations VALUES (?,?,?)', _default_translations())
+                # Replace bundled texts that were corrected since, but only where
+                # the stored text is still exactly the old default: an entry the
+                # user edited never matches and is left alone.
+                db.executemany('UPDATE translations SET text=? WHERE key=? AND language=? AND text=?',
+                               _superseded_translations())
                 defaults = dict(db.execute('SELECT name,value FROM ai_defaults'))
                 if set(defaults) != set(PROFILE_FIELDS):
                     raise ProfileError('Default del database incompleti: ripristinare un backup.')

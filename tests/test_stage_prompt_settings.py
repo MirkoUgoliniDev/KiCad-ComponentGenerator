@@ -56,7 +56,8 @@ def test_verification_model_picker_is_independent(monkeypatch):
 
 @pytest.mark.parametrize("index,expected", [
     (0, "OPENROUTER_API_KEY"),
-    (1, "generated/photo-cache"),
+    # Dal 2026-09-24 la cache e' dentro il progetto (decisione dell'utente).
+    (1, "photo-cache del progetto"),
     (2, "Non modifica coordinate"),
 ])
 def test_stage_explanations_are_only_in_info_modal(index, expected):

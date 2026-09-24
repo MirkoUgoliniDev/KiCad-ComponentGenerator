@@ -326,7 +326,11 @@ def test_the_name_conflict_no_longer_opens_a_modal(window, monkeypatch):
     window.btn_use_suggested_name.click()
     assert window._component_name() == original_name, 'il conflitto deve conservare il nome'
     assert (target / 'photo.png').read_bytes() == b'altro progetto', 'documento sovrascritto'
-    assert any('già documenti' in line or 'conten' in line
+    # Dal 2026-09-24 (decisione dell'utente, 3a) il nome di un ALTRO progetto
+    # e' rifiutato prima di qualunque spostamento, anche senza documenti in
+    # conflitto: il messaggio e' quello del rifiuto, non piu' quello del
+    # conflitto fra documenti, che non viene raggiunto.
+    assert any('non applicato' in line and "Esiste gia'" in line
                for line in window.ai_progress_text.toPlainText().splitlines())
     window._on_error('test stopped')
     window._on_generation_finished()

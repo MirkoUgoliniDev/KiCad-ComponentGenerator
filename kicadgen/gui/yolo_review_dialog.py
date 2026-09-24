@@ -11,12 +11,15 @@ Qui si potano prima: costa meno e il modello riceve un problema piu' pulito.
 Chi guarda decide, perche' distinguere un corpo da un riflesso e' esattamente
 cio' che un occhio fa meglio di una soglia.
 """
-from PyQt6.QtCore import (QPoint, QPointF, QRect, QRectF, QSignalBlocker, Qt,
-                          pyqtSignal)
-from PyQt6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
-from PyQt6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QHBoxLayout,
-                             QLabel, QListWidget, QListWidgetItem, QPushButton,
-                             QVBoxLayout, QWidget)
+import html
+
+from PyQt6.QtCore import QPointF, QRectF, QSignalBlocker, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut
+from PyQt6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QDialog,
+                             QDialogButtonBox, QHBoxLayout, QLabel, QListWidget,
+                             QListWidgetItem, QVBoxLayout, QWidget)
+
+from .review_tools import InfoPopup, asset_icon, set_tool_texts, tool_button, toolbar_divider
 
 #: Sotto questa frazione del lato il rettangolo tracciato e' un clic andato
 #: storto, non un corpo: un componente grande come un pixel non esiste.
@@ -95,6 +98,24 @@ PHOTO_DIMMED = "dimmed"
 PHOTO_HIDDEN = "hidden"
 PHOTO_STATES = (PHOTO_FULL, PHOTO_DIMMED, PHOTO_HIDDEN)
 
+#: Per ogni stato: il comando del passo successivo, lo stato attuale e l'icona
+#: che lo disegna. Stessi testi di `photo_review_dialog`.
+PHOTO_STATE_TEXTS = {
+    PHOTO_FULL: ("Attenua foto", "Foto: intera", "photo-full.svg"),
+    PHOTO_DIMMED: ("Nascondi foto", "Foto: attenuata", "photo-dimmed.svg"),
+    PHOTO_HIDDEN: ("Mostra foto", "Foto: nascosta", "photo-hidden.svg"),
+}
+#: Seconda riga del tooltip del comando della foto, dopo lo stato attuale.
+PHOTO_BUTTON_EXPLANATION = (
+    "Su una foto scura e affollata i contorni si leggono meglio quando la fotografia "
+    "si fa da parte; il bordo della PCB resta disegnato.")
+#: Primo paragrafo del popup «Come si usa».
+INFO_INTRO = (
+    "I riquadri sono le proposte del rilevatore. Tieni quelli che sono componenti, "
+    "elimina gli altri, aggiungi quelli che mancano. I tratteggiati sono le proposte "
+    "su cui non si e' fidato: ci sono perche' una confidenza bassa non e' prova di "
+    "assenza.")
+
 #: Opacita' della fotografia attenuata. La scheda resta riconoscibile -- e
 #: capire su QUALE corpo poggia un riquadro e' esattamente cio' che si sta
 #: rivedendo -- mentre quasi tutto il contrasto torna ai contorni. Bassa
@@ -120,6 +141,27 @@ BOARD_BACKDROP_COLOR = "#32373e"
 #: per il tratto colorato di una proposta ne' per le maniglie.
 BOARD_BORDER_COLOR = "#8a93a0"
 BOARD_BORDER_WIDTH_PX = 2
+
+#: Strumenti della vista (scelta dell'utente del 2026-09-24, dopo il mockup):
+#: con Seleziona un clic sceglie un riquadro, un clic nel vuoto toglie la
+#: scelta e un trascinamento nel vuoto sposta la vista; con Disegna un
+#: trascinamento traccia un riquadro nuovo. Prima un trascinamento nel vuoto
+#: disegnava sempre e un clic nel vuoto non faceva nulla: la scelta non si
+#: poteva togliere.
+TOOL_SELECT = "select"
+TOOL_DRAW = "draw"
+TOOLS = (TOOL_SELECT, TOOL_DRAW)
+
+#: Ingrandimento rispetto alla foto adattata alla vista. Sotto 1 la foto si
+#: rimpicciolirebbe dentro una vista vuota senza mostrare nulla di piu'. Il
+#: massimo e' una scelta: a 16x un 0402, che adattato misura pochi pixel,
+#: diventa largo decine di pixel, e oltre si ingrandiscono solo i pixel della
+#: foto stessa.
+MIN_ZOOM = 1.0
+MAX_ZOOM = 16.0
+#: Passo di uno scatto della rotella e di un clic su zoom +/-.
+WHEEL_ZOOM_STEP = 1.15
+BUTTON_ZOOM_STEP = 1.25
 
 
 def _origin_color(proposal):
@@ -150,8 +192,10 @@ class BoardView(QWidget):
     """@brief Fotografia della scheda con sopra i riquadri proposti.
 
     @note Lavora in coordinate normalizzate [0, 1], come `_box` del
-        rilevatore: cosi' la vista puo' essere ridimensionata a piacere senza
-        che le proposte si spostino di un pixel.
+        rilevatore: cosi' la vista puo' essere ridimensionata, ingrandita o
+        spostata a piacere senza che le proposte cambino. Le maniglie e le
+        soglie in pixel (HANDLE_RADIUS_PX, MIN_BOX_PX) restano pixel dello
+        SCHERMO a ogni ingrandimento.
     """
     selection_changed = pyqtSignal(int)
     box_added = pyqtSignal(tuple)
@@ -161,6 +205,11 @@ class BoardView(QWidget):
     #: rilascio e solo se la geometria e' davvero cambiata: un clic fermo su
     #: un riquadro non e' una modifica.
     box_edited = pyqtSignal(int, tuple)
+    #: Ingrandimento o spostamento cambiati: la barra aggiorna la percentuale.
+    view_changed = pyqtSignal()
+    #: Punto della scheda sotto il puntatore, normalizzato (x, y), o None fuori
+    #: dalla foto: la barra di stato lo mostra in millimetri.
+    pointer_moved = pyqtSignal(object)
 
     def __init__(self, pixmap, proposals, parent=None):
         super().__init__(parent)
@@ -176,6 +225,15 @@ class BoardView(QWidget):
         # Stato dello sfondo: appartiene alla vista perche' e' la vista a
         # dipingere. Non tocca nulla di cio' che la finestra restituisce.
         self._photo_state = PHOTO_FULL
+        # Vista: strumento attivo, ingrandimento rispetto alla foto adattata e
+        # spostamento in pixel. Come la foto, non toccano le proposte.
+        self.tool = TOOL_SELECT
+        self._zoom = MIN_ZOOM
+        self._pan = QPointF()
+        # Pressione nel vuoto in corso: (punto, spostamento di partenza,
+        # pulsante, mosso). Un rilascio senza movimento col sinistro
+        # deseleziona; un trascinamento sposta la vista.
+        self._pan_press = None
         self.setMinimumSize(480, 320)
         self.setMouseTracking(True)
 
@@ -217,13 +275,129 @@ class BoardView(QWidget):
         index = (PHOTO_STATES.index(self._photo_state) + 1) % len(PHOTO_STATES)
         self.set_photo_state(PHOTO_STATES[index])
 
-    def _frame(self):
-        """@brief Rettangolo, in pixel, in cui la foto e' disegnata."""
+    def set_tool(self, tool):
+        """@brief Sceglie lo strumento: TOOL_SELECT o TOOL_DRAW.
+
+        @param tool Uno di TOOLS.
+        @throws ValueError per qualunque altro valore.
+        @note Cambiare strumento abbandona un rettangolo in corso di disegno.
+        """
+        if tool not in TOOLS:
+            raise ValueError(f"Unknown tool: {tool!r}")
+        self.tool = tool
+        self._drag_from = self._drag_to = None
+        self.setCursor(Qt.CursorShape.CrossCursor if tool == TOOL_DRAW
+                       else Qt.CursorShape.ArrowCursor)
+        self.update()
+
+    def cancel_drawing(self):
+        """@brief Abbandona il rettangolo che si sta tracciando.
+
+        @return True se ce n'era uno.
+        """
+        if self._drag_from is None:
+            return False
+        self._drag_from = self._drag_to = None
+        self.update()
+        return True
+
+    def zoom(self):
+        """@brief Ingrandimento attuale rispetto alla foto adattata alla vista (1 = adattata)."""
+        return self._zoom
+
+    def zoom_at(self, factor, anchor=None):
+        """@brief Ingrandisce di `factor` tenendo fermo sotto `anchor` il punto della scheda.
+
+        @param factor Moltiplicatore; >1 avvicina.
+        @param anchor Punto della vista che resta fermo (il puntatore per la
+            rotella); il centro della vista se None.
+        @note L'ingrandimento resta fra MIN_ZOOM e MAX_ZOOM.
+        """
+        anchor = QPointF(anchor) if anchor is not None else QPointF(self.width() / 2, self.height() / 2)
+        target = min(MAX_ZOOM, max(MIN_ZOOM, self._zoom * factor))
+        if target == self._zoom:
+            return
+        before = self._frame()
+        nx = (anchor.x() - before.x()) / max(1e-9, before.width())
+        ny = (anchor.y() - before.y()) / max(1e-9, before.height())
+        self._zoom = target
+        self._pan = QPointF()
+        after = self._frame()
+        self._pan = QPointF(anchor.x() - (after.x() + nx * after.width()),
+                            anchor.y() - (after.y() + ny * after.height()))
+        self._clamp_pan()
+        self.update()
+        self.view_changed.emit()
+
+    def fit_view(self):
+        """@brief Torna alla foto intera, adattata alla vista."""
+        self._zoom = MIN_ZOOM
+        self._pan = QPointF()
+        self.update()
+        self.view_changed.emit()
+
+    def _clamp_pan(self):
+        """Tiene la foto ingrandita a coprire la vista: niente vuoto oltre i bordi.
+
+        Su un asse in cui la foto e' piu' piccola della vista resta centrata.
+        """
+        fitted = self._fitted_frame()
+        width = fitted.width() * self._zoom
+        height = fitted.height() * self._zoom
+        cx, cy = fitted.center().x(), fitted.center().y()
+
+        def clamp(value, extent, center, size):
+            if extent <= size:
+                return 0.0
+            return min(extent / 2 - center, max(size - center - extent / 2, value))
+
+        self._pan = QPointF(clamp(self._pan.x(), width, cx, self.width()),
+                            clamp(self._pan.y(), height, cy, self.height()))
+
+    def _fitted_frame(self):
+        """Rettangolo della foto intera adattata alla vista, senza ingrandimento."""
         if self.pixmap.isNull():
-            return QRect(0, 0, max(1, self.width()), max(1, self.height()))
+            return QRectF(0, 0, max(1, self.width()), max(1, self.height()))
         scaled = self.pixmap.size().scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio)
-        return QRect(QPoint((self.width() - scaled.width()) // 2,
-                            (self.height() - scaled.height()) // 2), scaled)
+        return QRectF((self.width() - scaled.width()) // 2,
+                      (self.height() - scaled.height()) // 2,
+                      scaled.width(), scaled.height())
+
+    def _frame(self):
+        """@brief Rettangolo, in pixel della vista, in cui la foto e' disegnata.
+
+        @note Con l'ingrandimento puo' essere piu' grande della vista: tutte le
+            conversioni passano da qui, quindi riquadri, maniglie e disegno
+            restano allineati alla foto a ogni ingrandimento.
+        """
+        fitted = self._fitted_frame()
+        width = fitted.width() * self._zoom
+        height = fitted.height() * self._zoom
+        return QRectF(fitted.center().x() - width / 2 + self._pan.x(),
+                      fitted.center().y() - height / 2 + self._pan.y(), width, height)
+
+    def resizeEvent(self, event):  # noqa: N802 - Qt override
+        """@brief Tiene lo spostamento valido quando la vista cambia misura."""
+        super().resizeEvent(event)
+        self._clamp_pan()
+
+    def wheelEvent(self, event):  # noqa: N802 - Qt override
+        """@brief Rotella: ingrandisce attorno al puntatore."""
+        steps = event.angleDelta().y() / 120
+        if steps:
+            self.zoom_at(WHEEL_ZOOM_STEP ** steps, event.position())
+        event.accept()
+
+    def leaveEvent(self, event):  # noqa: N802 - Qt override
+        """@brief Fuori dalla vista non c'e' un punto della scheda da mostrare."""
+        self.pointer_moved.emit(None)
+        super().leaveEvent(event)
+
+    def _report_pointer(self, position):
+        frame = self._frame()
+        x = (position.x() - frame.x()) / max(1e-9, frame.width())
+        y = (position.y() - frame.y()) / max(1e-9, frame.height())
+        self.pointer_moved.emit((x, y) if 0 <= x <= 1 and 0 <= y <= 1 else None)
 
     def to_widget(self, box):
         """@brief Da coordinate normalizzate a pixel della vista."""
@@ -334,7 +508,7 @@ class BoardView(QWidget):
         if not self.pixmap.isNull() and self._photo_state != PHOTO_HIDDEN:
             if self._photo_state == PHOTO_DIMMED:
                 painter.setOpacity(PHOTO_DIMMED_OPACITY)
-            painter.drawPixmap(frame, self.pixmap)
+            painter.drawPixmap(frame, self.pixmap, QRectF(self.pixmap.rect()))
             painter.setOpacity(1.0)
         if backdrop:
             painter.setPen(QPen(QColor(BOARD_BORDER_COLOR), BOARD_BORDER_WIDTH_PX))
@@ -361,18 +535,28 @@ class BoardView(QWidget):
             painter.drawRect(QRectF(self._drag_from, self._drag_to).normalized())
 
     def mousePressEvent(self, event):
-        """@brief Pressione: prende una maniglia, sceglie un riquadro o ne inizia uno nuovo.
+        """@brief Pressione: prende una maniglia, sceglie un riquadro, sposta la vista o disegna.
 
         @note Le maniglie del riquadro scelto vincono sull'interno di un
             altro riquadro che le copra: chi ha scelto un corpo sta lavorando
             su quello. Scegliere un riquadro avvia anche lo spostamento, ma
             un clic fermo non cambia nulla (vedi mouseReleaseEvent).
+        @note Con Seleziona, una pressione nel vuoto sposta la vista se si
+            trascina e toglie la scelta se si rilascia fermi. Con Disegna, le
+            maniglie del riquadro scelto restano prendibili (lo si aggiusta
+            subito dopo averlo tracciato) e ovunque altrove si traccia. Il
+            tasto centrale sposta la vista con entrambi gli strumenti.
         """
+        position = event.position()
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._pan_press = (position, QPointF(self._pan), event.button(), False)
+            return
         if event.button() != Qt.MouseButton.LeftButton:
             return
-        position = event.position()
         handle = self.handle_at(position)
-        if handle is None:
+        if self.tool == TOOL_DRAW and handle == MOVE_HANDLE:
+            handle = None
+        if handle is None and self.tool == TOOL_SELECT:
             for index in range(len(self.proposals) - 1, -1, -1):
                 if self.to_widget(self.proposals[index]["_box"]).contains(position):
                     self.selected = index
@@ -385,11 +569,15 @@ class BoardView(QWidget):
             self.setCursor(HANDLE_CURSORS[handle])
             self.update()
             return
-        self._drag_from, self._drag_to = position, position
+        if self.tool == TOOL_DRAW:
+            self._drag_from, self._drag_to = position, position
+            return
+        self._pan_press = (position, QPointF(self._pan), event.button(), False)
 
     def mouseMoveEvent(self, event):
         """@brief Trascina cio' che e' stato preso, o mostra cosa si prenderebbe."""
         position = event.position()
+        self._report_pointer(position)
         if self._edit is not None:
             index, handle, origin, start = self._edit
             rect = self._edited_rect(self.to_widget(origin), handle, position - start)
@@ -402,12 +590,26 @@ class BoardView(QWidget):
             self._drag_to = position
             self.update()
             return
+        if self._pan_press is not None:
+            start, origin, button, moved = self._pan_press
+            delta = position - start
+            if not moved and delta.manhattanLength() < QApplication.startDragDistance():
+                return
+            self._pan_press = (start, origin, button, True)
+            self._pan = origin + delta
+            self._clamp_pan()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self.update()
+            return
         handle = self.handle_at(position)
-        self.setCursor(HANDLE_CURSORS[handle] if handle is not None
-                       else Qt.CursorShape.ArrowCursor)
+        if self.tool == TOOL_DRAW and handle in (None, MOVE_HANDLE):
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.setCursor(HANDLE_CURSORS[handle] if handle is not None
+                           else Qt.CursorShape.ArrowCursor)
 
     def mouseReleaseEvent(self, event):
-        """@brief Il rilascio conferma la modifica, o il rettangolo tracciato se ha un'area."""
+        """@brief Il rilascio conferma la modifica, il rettangolo tracciato o la deselezione."""
         if self._edit is not None:
             index, handle, origin, _start = self._edit
             self._edit = None
@@ -422,6 +624,17 @@ class BoardView(QWidget):
                 self.proposals[index]["_box"] = origin
             else:
                 self.box_edited.emit(index, tuple(handle))
+            return
+        if self._pan_press is not None:
+            _start, _origin, button, moved = self._pan_press
+            self._pan_press = None
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            # Clic fermo nel vuoto col sinistro: toglie la scelta. Era il
+            # difetto segnalato dall'utente: la scelta non si poteva togliere.
+            if not moved and button == Qt.MouseButton.LeftButton and self.selected != -1:
+                self.selected = -1
+                self.selection_changed.emit(-1)
+                self.update()
             return
         if self._drag_from is None:
             return
@@ -452,11 +665,21 @@ class YoloReviewDialog(QDialog):
         `kept()` e le proposte non cambiano di un byte, e ogni finestra nuova
         riparte da PHOTO_FULL, perche' la fotografia e' il riferimento da cui
         la revisione comincia.
+    @note Barra di icone in alto (scelta dell'utente del 2026-09-24): strumenti
+        Seleziona (V) e Disegna (R), Elimina (Canc), zoom (+, -, F, rotella),
+        foto (P) e le istruzioni nel popup dell'icona «i». Con Seleziona un
+        clic nel vuoto toglie la scelta e un trascinamento nel vuoto sposta la
+        vista; Esc annulla il gesto, poi lo strumento, poi la scelta, e non
+        chiude mai la finestra. Zoom e spostamento sono solo vista: `kept()`
+        non cambia.
     """
 
     def __init__(self, photo_png, proposals, length_mm, width_mm, classes, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Corpi rilevati: togli quelli che non sono componenti")
+        # Traduzione dei testi dalla finestra che la apre, come la revisione
+        # fotografica: una finestra aperta da sola resta in italiano.
+        self.i18n = getattr(parent, "i18n", None)
+        self.setWindowTitle(self._tr("Corpi rilevati: togli quelli che non sono componenti"))
         self.setModal(True)
         self.length_mm, self.width_mm = float(length_mm), float(width_mm)
         self.classes = list(classes)
@@ -476,89 +699,118 @@ class YoloReviewDialog(QDialog):
         self.view.box_added.connect(self._add_box)
         self.view.box_edited.connect(self._box_edited)
 
+        tr = self._tr
+
+        # ── Barra di icone in alto (utente, 2026-09-24): strumenti, zoom,
+        # fotografia, e a destra le istruzioni sotto l'icona «i». I nomi e le
+        # scorciatoie stanno nei tooltip, tradotti.
+        self.btn_select = tool_button(
+            "tool-select.svg", "Seleziona e sposta", "V",
+            "Clic su un riquadro per sceglierlo, trascinalo per spostarlo. Clic nel "
+            "vuoto: toglie la scelta. Trascinamento nel vuoto: sposta la vista.",
+            checkable=True, tr=tr)
+        self.btn_draw = tool_button(
+            "tool-draw.svg", "Disegna un riquadro nuovo", "R",
+            "Trascina sulla foto per aggiungere un corpo che il rilevatore non ha visto.",
+            checkable=True, tr=tr)
+        self.tool_group = QButtonGroup(self)
+        self.tool_group.setExclusive(True)
+        self.tool_group.addButton(self.btn_select)
+        self.tool_group.addButton(self.btn_draw)
+        self.btn_select.setChecked(True)
+        self.btn_select.clicked.connect(lambda: self.set_tool(TOOL_SELECT))
+        self.btn_draw.clicked.connect(lambda: self.set_tool(TOOL_DRAW))
+        self.btn_delete = tool_button(
+            "delete.svg", "Elimina il riquadro scelto", "Canc",
+            "Toglie la proposta scelta: non e' un componente.", tr=tr)
+        self.btn_delete.setEnabled(False)
+        self.btn_delete.clicked.connect(self._delete_selected)
+        self.btn_zoom_out = tool_button("zoom-out.svg", "Zoom indietro", "-", tr=tr)
+        self.btn_zoom_out.clicked.connect(lambda: self.view.zoom_at(1 / BUTTON_ZOOM_STEP))
+        self.zoom_label = QLabel()
+        self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.zoom_label.setMinimumWidth(self.zoom_label.fontMetrics().horizontalAdvance("1600%") + 8)
+        self.zoom_label.setToolTip(tr("Ingrandimento rispetto alla foto intera"))
+        self.btn_zoom_in = tool_button(
+            "zoom-in.svg", "Zoom avanti", "+",
+            "Anche con la rotella del mouse, attorno al puntatore.", tr=tr)
+        self.btn_zoom_in.clicked.connect(lambda: self.view.zoom_at(BUTTON_ZOOM_STEP))
+        self.btn_fit = tool_button("view-fit.svg", "Adatta la foto alla finestra", "F", tr=tr)
+        self.btn_fit.clicked.connect(lambda: self.view.fit_view())
+        # Comando di vista: cambia cio' che si vede, mai cio' che si tiene. Un
+        # solo pulsante per tre stati; l'icona disegna lo stato attuale e il
+        # tooltip dice il passo successivo (vedi `_apply_photo_state`).
+        self.photo_button = tool_button("photo-full.svg", "", checkable=True, tr=tr)
+        self.photo_button.clicked.connect(self._photo_button_clicked)
+        self.btn_info = tool_button(
+            "info.svg", "Come si usa", "",
+            "Istruzioni e scorciatoie da tastiera di questa finestra.", tr=tr)
+        self.info_popup = InfoPopup(self._info_html(), self)
+        self.btn_info.clicked.connect(lambda: self.info_popup.toggle_under(self.btn_info))
+
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(4)
+        for widget in (self.btn_select, self.btn_draw, self.btn_delete, toolbar_divider(),
+                       self.btn_zoom_out, self.zoom_label, self.btn_zoom_in, self.btn_fit,
+                       toolbar_divider(), self.photo_button):
+            toolbar.addWidget(widget)
+        toolbar.addStretch()
+        toolbar.addWidget(self.btn_info)
+
+        # ── Colonna a destra: filtro, lista, categoria del riquadro scelto.
         self.list = QListWidget()
         self.list.currentRowChanged.connect(self._select_from_list)
+        # Filtro per categoria sopra la lista (utente, 2026-09-24): su decine
+        # di proposte, cercare «i condensatori» non deve voler dire leggere
+        # ogni riga. Nasconde righe della lista, mai riquadri sulla foto, e
+        # non cambia cio' che la revisione restituisce.
+        self.category_filter = QComboBox()
+        self.category_filter.setToolTip(
+            tr("Filtra la lista per categoria; i riquadri sulla foto restano tutti visibili."))
+        self.category_filter.currentIndexChanged.connect(lambda _index: self._apply_filter())
         self.combo_class = QComboBox()
         self.combo_class.addItems(self.classes)
         self.combo_class.setEnabled(False)
         self.combo_class.currentTextChanged.connect(self._change_class)
-        # Comando di vista, sotto la fotografia e non fra i comandi di
-        # modifica: cambia cio' che si vede, mai cio' che si tiene. Un solo
-        # pulsante per tre stati invece di tre alternative.
-        #
-        # Comando e stato stanno su due widget diversi, come nella revisione
-        # fotografica successiva e per la stessa ragione trovata sul campo:
-        # finche' il pulsante diceva «Foto: intera» enunciava uno STATO, e una
-        # didascalia non si preme -- un utente ha chiesto la funzione come se
-        # non esistesse. Il pulsante porta il VERBO del passo successivo e
-        # l'etichetta accanto porta lo stato attuale; il verbo rende anche
-        # prevedibile l'ordine del ciclo, che altrimenti si scopre premendo.
-        # Lo stato premuto resta come indizio ridondante: una vista che non
-        # mostra piu' la scheda vera non va scambiata per una che la mostra.
-        self.photo_button = QPushButton()
-        self.photo_button.setCheckable(True)
-        self.photo_button.setAutoDefault(False)
-        self.photo_button.setToolTip(
-            "Foto intera, attenuata o nascosta: su una foto scura e affollata i "
-            "contorni si leggono solo quando la fotografia si fa da parte. "
-            "Il bordo della PCB resta sempre disegnato.")
-        self.photo_button.clicked.connect(self._photo_button_clicked)
-        # Lo stato accanto al comando, non dentro: un'etichetta non si preme e
-        # non promette di farlo, quindi puo' dire soltanto dove siamo.
-        self.photo_state_label = QLabel()
-        self.btn_delete = QPushButton("Elimina il riquadro scelto")
-        self.btn_delete.setEnabled(False)
-        self.btn_delete.clicked.connect(self._delete_selected)
-        self.summary = QLabel()
-        self.summary.setWordWrap(True)
-
         side = QVBoxLayout()
-        side.addWidget(QLabel("Proposte del rilevatore locale"))
+        side.addWidget(QLabel(tr("Proposte del rilevatore locale")))
+        side.addWidget(self.category_filter)
         side.addWidget(self.list, 1)
-        side.addWidget(QLabel("Categoria del riquadro scelto:"))
+        side.addWidget(QLabel(tr("Categoria del riquadro scelto:")))
         side.addWidget(self.combo_class)
-        side.addWidget(self.btn_delete)
-        side.addWidget(self.summary)
         side_widget = QWidget()
         side_widget.setLayout(side)
         side_widget.setFixedWidth(300)
 
-        # La fotografia si fa da parte con un comando che sta sotto di lei,
-        # non nella colonna delle modifiche: e' l'unica cosa in questa
-        # finestra che cambia come si guarda invece di cosa si tiene.
-        view_bar = QHBoxLayout()
-        view_bar.addWidget(self.photo_button)
-        view_bar.addWidget(self.photo_state_label)
-        view_bar.addStretch()
-        canvas = QVBoxLayout()
-        canvas.addWidget(self.view, 1)
-        canvas.addLayout(view_bar)
-        canvas_widget = QWidget()
-        canvas_widget.setLayout(canvas)
-
         body = QHBoxLayout()
-        body.addWidget(canvas_widget, 1)
+        body.addWidget(self.view, 1)
         body.addWidget(side_widget)
+
+        # ── Barra di stato: punto sotto il puntatore in mm, conteggi, OK/Annulla.
+        self.pointer_label = QLabel()
+        self.summary = QLabel()
+        self.summary.setWordWrap(True)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
                                    | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        status = QHBoxLayout()
+        status.addWidget(self.pointer_label)
+        status.addSpacing(18)
+        status.addWidget(self.summary, 1)
+        status.addWidget(buttons)
+
         layout = QVBoxLayout(self)
-        self.instructions = QLabel(
-            "Traccia un rettangolo sulla foto per aggiungere un corpo che il "
-            "rilevatore non ha visto; trascina l'interno del riquadro scelto per "
-            "spostarlo e le sue maniglie per ridimensionarlo. I tratteggiati sono "
-            "le proposte su cui non si e' fidato: ci sono perche' una confidenza "
-            "bassa non e' prova di assenza.")
-        # Senza a capo la frase su una riga sola fissava la larghezza minima
-        # della finestra (1540 px con i caratteri di Windows), piu' larga della
-        # misura che la finestra stessa chiede qui sotto e di uno schermo da
-        # portatile. Con l'a capo la larghezza la decide la vista.
-        self.instructions.setWordWrap(True)
-        layout.addWidget(self.instructions)
+        layout.addLayout(toolbar)
         layout.addLayout(body, 1)
-        layout.addWidget(buttons)
+        layout.addLayout(status)
+
+        self.view.view_changed.connect(self._update_zoom_label)
+        self.view.pointer_moved.connect(self._update_pointer_label)
+        self._bind_shortcuts()
         self.resize(1100, 700)
+        self._update_zoom_label()
+        self._update_pointer_label(None)
         self._apply_photo_state()
         self._refresh()
 
@@ -596,26 +848,142 @@ class YoloReviewDialog(QDialog):
         self.cycle_photo_state()
 
     def _apply_photo_state(self):
-        """Riporta lo stato sul comando, sulla lettura di stato e sulla spunta.
+        """Riporta lo stato sull'icona, sul tooltip, sul nome accessibile e sulla spunta.
 
-        Il pulsante prende l'imperativo del passo SUCCESSIVO del ciclo e
-        l'etichetta accanto lo stato in cui la vista si trova adesso. Il nome
+        L'icona disegna lo stato in cui la vista si trova (foto intera,
+        attenuata, nascosta: tre disegni diversi); il tooltip porta come nome
+        l'imperativo del passo SUCCESSIVO, che rende prevedibile il ciclo, e
+        sotto lo stato attuale. Resta la lezione trovata sul campo: un comando
+        che enuncia solo uno stato non si legge come comando. Il nome
         accessibile porta entrambi, perche' un lettore di schermo annuncia il
-        pulsante da solo e sentirebbe altrimenti un comando senza contesto.
+        pulsante da solo.
         """
         state = self.view.photo_state()
-        if state == PHOTO_HIDDEN:
-            action, current = "Mostra foto", "Foto: nascosta"
-        elif state == PHOTO_DIMMED:
-            action, current = "Nascondi foto", "Foto: attenuata"
-        else:
-            action, current = "Attenua foto", "Foto: intera"
+        action, current, asset = PHOTO_STATE_TEXTS[state]
         with QSignalBlocker(self.photo_button):
             self.photo_button.setChecked(state != PHOTO_FULL)
-        self.photo_button.setText(action)
+        self.photo_button.setIcon(asset_icon(asset))
+        self.photo_button.setProperty("photo_asset", asset)
+        detail = self._tr(current) + ". " + self._tr(PHOTO_BUTTON_EXPLANATION)
+        set_tool_texts(self.photo_button, self._tr(action), "P", detail)
         self.photo_button.setAccessibleName(
-            "{action} (stato attuale: {state})".format(action=action, state=current))
-        self.photo_state_label.setText(current)
+            self._tr("{action} (stato attuale: {state})").format(
+                action=self._tr(action), state=self._tr(current)))
+
+    def _tr(self, source):
+        """@brief Testo nella lingua dell'interfaccia, o la sorgente italiana."""
+        i18n = getattr(self, "i18n", None)
+        return i18n.text(source) if i18n is not None else source
+
+    def _info_html(self):
+        """@brief Istruzioni del popup «Come si usa», tradotte, in rich text."""
+        tr = self._tr
+        rows = [
+            ("V", tr("Seleziona: clic su un riquadro per sceglierlo, trascinalo per "
+                     "spostarlo, maniglie per ridimensionarlo")),
+            ("R", tr("Disegna: trascina sulla foto per aggiungere un corpo")),
+            (tr("Canc"), tr("Elimina il riquadro scelto")),
+            ("Esc", tr("Toglie la scelta (non chiude la finestra)")),
+            (tr("Clic nel vuoto"), tr("Toglie la scelta")),
+            (tr("Trascina nel vuoto"), tr("Sposta la vista")),
+            (tr("Rotella"), tr("Zoom attorno al puntatore")),
+            ("+  -  F", tr("Zoom avanti, indietro, foto intera")),
+            ("P", tr("Foto intera, attenuata, nascosta")),
+        ]
+        table = "".join(
+            "<tr><td style='padding:2px 12px 2px 0'><b>" + html.escape(key) + "</b></td>"
+            "<td style='padding:2px 0'>" + html.escape(text) + "</td></tr>"
+            for key, text in rows)
+        intro = html.escape(tr(INFO_INTRO))
+        return ("<p style='margin:0 0 8px 0'><b>" + html.escape(tr("Come si usa")) + "</b></p>"
+                "<p style='margin:0 0 8px 0'>" + intro + "</p><table>" + table + "</table>")
+
+    def set_tool(self, tool):
+        """@brief Sceglie lo strumento della vista e lo mostra premuto nella barra.
+
+        @param tool TOOL_SELECT o TOOL_DRAW.
+        @throws ValueError per qualunque altro valore.
+        """
+        self.view.set_tool(tool)
+        (self.btn_draw if tool == TOOL_DRAW else self.btn_select).setChecked(True)
+
+    def _bind_shortcuts(self):
+        """Scorciatoie della finestra: le stesse scritte nei tooltip e nel popup."""
+        bindings = (
+            ("V", lambda: self.set_tool(TOOL_SELECT)),
+            ("R", lambda: self.set_tool(TOOL_DRAW)),
+            (QKeySequence(Qt.Key.Key_Delete), self._delete_selected),
+            ("F", self.view.fit_view),
+            ("+", lambda: self.view.zoom_at(BUTTON_ZOOM_STEP)),
+            ("=", lambda: self.view.zoom_at(BUTTON_ZOOM_STEP)),
+            ("-", lambda: self.view.zoom_at(1 / BUTTON_ZOOM_STEP)),
+            ("P", self.cycle_photo_state),
+        )
+        self._shortcuts = []
+        for key, slot in bindings:
+            sequence = key if isinstance(key, QKeySequence) else QKeySequence(key)
+            shortcut = QShortcut(sequence, self)
+            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            shortcut.activated.connect(slot)
+            self._shortcuts.append(shortcut)
+
+    def escape(self):
+        """@brief Esc: annulla il tracciamento, poi lo strumento Disegna, poi la scelta.
+
+        @note Non chiude MAI la finestra: in un QDialog Esc vale Annulla, e chi
+            lo premeva per togliere la scelta perdeva tutta la revisione. Si
+            chiude con «Annulla» o con la croce della finestra.
+        """
+        if self.view.cancel_drawing():
+            return
+        if self.view.tool == TOOL_DRAW:
+            self.set_tool(TOOL_SELECT)
+            return
+        if self.view.selected != -1:
+            self._select_row(-1)
+
+    def keyPressEvent(self, event):  # noqa: N802 - Qt override
+        """@brief Esc non arriva mai a QDialog, che lo tratterebbe come Annulla."""
+        if event.key() == Qt.Key.Key_Escape:
+            self.escape()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _update_zoom_label(self):
+        self.zoom_label.setText(f"{round(self.view.zoom() * 100)}%")
+
+    def _update_pointer_label(self, point):
+        """Punto della scheda sotto il puntatore, in mm dal centro (X a destra, Y in basso)."""
+        if point is None:
+            self.pointer_label.setText("X — · Y —")
+            return
+        x = (point[0] - 0.5) * self.length_mm
+        y = (point[1] - 0.5) * self.width_mm
+        self.pointer_label.setText(f"X {x:.2f} mm · Y {y:.2f} mm")
+
+    def _apply_filter(self):
+        """Nasconde le righe della lista fuori dalla categoria scelta nel filtro."""
+        wanted = self.category_filter.currentData()
+        for row, proposal in enumerate(self.proposals):
+            hidden = bool(wanted) and (proposal.get("_yolo_class") or "") != wanted
+            self.list.setRowHidden(row, hidden)
+
+    def _refresh_filter_choices(self):
+        """Le voci del filtro sono le categorie presenti: nessuna tassonomia fissa."""
+        present = sorted({p.get("_yolo_class") or "" for p in self.proposals} - {""})
+        current = self.category_filter.currentData()
+        wanted = [None] + present
+        existing = [self.category_filter.itemData(i) for i in range(self.category_filter.count())]
+        if existing == wanted:
+            return
+        with QSignalBlocker(self.category_filter):
+            self.category_filter.clear()
+            self.category_filter.addItem(self._tr("Tutte le categorie"), None)
+            for name in present:
+                self.category_filter.addItem(name, name)
+            index = self.category_filter.findData(current) if current in present else 0
+            self.category_filter.setCurrentIndex(max(0, index))
 
     def kept(self):
         """@brief Proposte sopravvissute alla revisione.
@@ -658,6 +1026,8 @@ class YoloReviewDialog(QDialog):
         if 0 <= current < len(self.proposals):
             self.list.setCurrentRow(current)
         self.list.blockSignals(False)
+        self._refresh_filter_choices()
+        self._apply_filter()
         added = sum(1 for p in self.proposals if p.get("_yolo_origin") == "user_added")
         self.summary.setText(
             f"Il rilevatore ne ha proposte {self._strong + self._weak} "
