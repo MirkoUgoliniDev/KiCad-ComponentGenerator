@@ -1,13 +1,16 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `7223819` (pushato):
-  revisione interfaccia (punti 1-27 in fondo al file), credito e costo AI
-  del progetto, anteprime con zoom, pin dentro la scheda, raccordi
-  impossibili, rigenerazione 3D dopo «Applica». Prima: `3cdea2a`
+- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `99434c5` (pushato):
+  icona dell'archivio degli abbinamenti accettati nella scheda 3D (punto 29).
+  Prima: `7223819` revisione interfaccia (punti 1-27 in fondo al file),
+  credito e costo AI del progetto, anteprime con zoom, pin dentro la scheda,
+  raccordi impossibili, rigenerazione 3D dopo «Applica». Prima: `3cdea2a`
   (localizzazione completa), `b1ee2c0` (.gitignore), `eb633ea` (difetti).
   Aperti SOLO decisioni dell'utente: nomi front/back contro cubo 3D (serve
   migrazione), conferme della scelta STEP a icona, invio all'AI della foto
-  gia' ruotata secondo l'EXIF.
+  gia' ruotata secondo l'EXIF; punto 28 (motivi dei candidati STEP in
+  inglese, solo segnalato); colonna «Stato» troncata nella finestra
+  «Ricorda questi modelli KiCad» (domanda fatta, senza risposta).
 - Suite completa (24/09, dopo l'icona dell'archivio): 4036 passati, 3 saltati,
   2 xfail attesi, 19 sottotest; uscita del processo 0 (controllarla sempre).
 - Difetto 16 CHIUSO (utente, 24/09, scelta «A»): la frase «Tipo SMD di
