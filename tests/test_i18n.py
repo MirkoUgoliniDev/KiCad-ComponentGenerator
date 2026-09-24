@@ -298,7 +298,9 @@ def test_the_scan_sees_the_strings_the_user_actually_reads():
     assert "Componenti: {count} di {total}" in literals, "manca la strada di `self._tr`"
     assert "Modifica la revisione dei componenti…" in literals, \
         "manca il testo scritto nel costruttore del widget"
-    assert any(literal.startswith("Filtra la lista per categoria") for literal in literals), \
+    # Testo del tooltip del filtro aggiornato il 2026-09-24 (il filtro ora
+    # filtra anche la foto): stessa strada, setToolTip su un letterale.
+    assert any(literal.startswith("Filtra per categoria la lista") for literal in literals), \
         "manca il tooltip impostato con setToolTip"
 
 

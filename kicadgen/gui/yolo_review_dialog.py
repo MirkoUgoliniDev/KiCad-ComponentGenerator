@@ -234,6 +234,10 @@ class BoardView(QWidget):
         # pulsante, mosso). Un rilascio senza movimento col sinistro
         # deseleziona; un trascinamento sposta la vista.
         self._pan_press = None
+        # Indici delle proposte nascoste dal filtro per categoria (utente,
+        # 2026-09-24: il filtro filtra anche la foto). Non si disegnano e non
+        # si scelgono; restano nei dati, che il filtro non tocca mai.
+        self.hidden = set()
         self.setMinimumSize(480, 320)
         self.setMouseTracking(True)
 
@@ -518,6 +522,8 @@ class BoardView(QWidget):
             half = BOARD_BORDER_WIDTH_PX / 2
             painter.drawRect(QRectF(frame).adjusted(half, half, -half, -half))
         for index, proposal in enumerate(self.proposals):
+            if index in self.hidden and index != self.selected:
+                continue
             painter.setPen(box_pen(proposal, index == self.selected))
             painter.drawRect(self.to_widget(proposal["_box"]))
         rect = self._selected_rect()
@@ -544,8 +550,11 @@ class BoardView(QWidget):
         @note Con Seleziona, una pressione nel vuoto sposta la vista se si
             trascina e toglie la scelta se si rilascia fermi. Con Disegna, le
             maniglie del riquadro scelto restano prendibili (lo si aggiusta
-            subito dopo averlo tracciato) e ovunque altrove si traccia. Il
-            tasto centrale sposta la vista con entrambi gli strumenti.
+            subito dopo averlo tracciato), un trascinamento traccia e un clic
+            fermo sceglie il riquadro sotto il puntatore (vedi
+            mouseReleaseEvent). Il tasto centrale sposta la vista con entrambi
+            gli strumenti. Fra riquadri sovrapposti vince il piu' piccolo
+            (`box_at`).
         """
         position = event.position()
         if event.button() == Qt.MouseButton.MiddleButton:
@@ -557,12 +566,11 @@ class BoardView(QWidget):
         if self.tool == TOOL_DRAW and handle == MOVE_HANDLE:
             handle = None
         if handle is None and self.tool == TOOL_SELECT:
-            for index in range(len(self.proposals) - 1, -1, -1):
-                if self.to_widget(self.proposals[index]["_box"]).contains(position):
-                    self.selected = index
-                    self.selection_changed.emit(index)
-                    handle = MOVE_HANDLE
-                    break
+            index = self.box_at(position)
+            if index is not None:
+                self.selected = index
+                self.selection_changed.emit(index)
+                handle = MOVE_HANDLE
         if handle is not None:
             self._edit = (self.selected, handle,
                           tuple(self.proposals[self.selected]["_box"]), position)
@@ -573,6 +581,29 @@ class BoardView(QWidget):
             self._drag_from, self._drag_to = position, position
             return
         self._pan_press = (position, QPointF(self._pan), event.button(), False)
+
+    def box_at(self, position):
+        """@brief Il riquadro sotto il punto: fra quelli che lo contengono, il piu' piccolo.
+
+        @param position Punto in pixel della vista.
+        @return Indice della proposta, o None se il punto non tocca nessun riquadro.
+        @note Il piu' piccolo e non l'ultimo dell'elenco: una proposta spuria
+            piccola dentro o sopra un corpo grande (sul bordo del modulo, dentro
+            un regolatore) altrimenti non si poteva prendere, perche' il clic
+            finiva al grande se questo veniva dopo nell'elenco (utente,
+            2026-09-24). A parita' di area vince l'ultimo, che e' disegnato sopra.
+        """
+        found, best = None, None
+        for index, proposal in enumerate(self.proposals):
+            if index in self.hidden:
+                continue
+            rect = self.to_widget(proposal["_box"])
+            if not rect.contains(position):
+                continue
+            area = rect.width() * rect.height()
+            if best is None or area <= best:
+                found, best = index, area
+        return found
 
     def mouseMoveEvent(self, event):
         """@brief Trascina cio' che e' stato preso, o mostra cosa si prenderebbe."""
@@ -646,6 +677,17 @@ class BoardView(QWidget):
         box = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
         if box[2] - box[0] >= MIN_NEW_BOX and box[3] - box[1] >= MIN_NEW_BOX:
             self.box_added.emit(box)
+            return
+        # Con Disegna un clic fermo SCEGLIE (o toglie la scelta nel vuoto):
+        # solo un trascinamento traccia. Prima un clic su un riquadro con
+        # Disegna attivo non faceva nulla, e le proposte spurie non si
+        # potevano scegliere per eliminarle (utente, 2026-09-24).
+        index = self.box_at(start)
+        target = -1 if index is None else index
+        if target != self.selected:
+            self.selected = target
+            self.selection_changed.emit(target)
+            self.update()
 
 
 class YoloReviewDialog(QDialog):
@@ -762,12 +804,12 @@ class YoloReviewDialog(QDialog):
         self.list.currentRowChanged.connect(self._select_from_list)
         # Filtro per categoria sopra la lista (utente, 2026-09-24): su decine
         # di proposte, cercare «i condensatori» non deve voler dire leggere
-        # ogni riga. Nasconde righe della lista, mai riquadri sulla foto, e
-        # non cambia cio' che la revisione restituisce.
+        # ogni riga. Nasconde righe della lista E riquadri della foto, e non
+        # cambia cio' che la revisione restituisce.
         self.category_filter = QComboBox()
         self.category_filter.setToolTip(
-            tr("Filtra la lista per categoria; i riquadri sulla foto restano tutti visibili."))
-        self.category_filter.currentIndexChanged.connect(lambda _index: self._apply_filter())
+            tr("Filtra per categoria la lista e i riquadri sulla foto."))
+        self.category_filter.currentIndexChanged.connect(self._category_filter_changed)
         self.combo_class = QComboBox()
         self.combo_class.addItems(self.classes)
         self.combo_class.setEnabled(False)
@@ -962,12 +1004,34 @@ class YoloReviewDialog(QDialog):
         y = (point[1] - 0.5) * self.width_mm
         self.pointer_label.setText(f"X {x:.2f} mm · Y {y:.2f} mm")
 
-    def _apply_filter(self):
-        """Nasconde le righe della lista fuori dalla categoria scelta nel filtro."""
+    def _category_filter_changed(self, _index):
+        """Nuovo filtro: una proposta scelta fuori categoria perde la scelta.
+
+        Il filtro nasconde anche i riquadri (utente, 2026-09-24): una scelta
+        fuori categoria resterebbe l'unica riga e l'unico riquadro estranei.
+        """
         wanted = self.category_filter.currentData()
+        index = self.view.selected
+        if wanted and 0 <= index < len(self.proposals) and                 (self.proposals[index].get("_yolo_class") or "") != wanted:
+            self._select_row(-1)
+        self._apply_filter()
+
+    def _apply_filter(self):
+        """Nasconde righe della lista e riquadri della foto fuori dalla categoria del filtro.
+
+        La proposta scelta resta visibile anche fuori categoria: capita solo
+        quando le si cambia la categoria mentre il filtro e' attivo, e ci si
+        sta lavorando sopra.
+        """
+        wanted = self.category_filter.currentData()
+        hidden = set()
         for row, proposal in enumerate(self.proposals):
-            hidden = bool(wanted) and (proposal.get("_yolo_class") or "") != wanted
-            self.list.setRowHidden(row, hidden)
+            outside = bool(wanted) and (proposal.get("_yolo_class") or "") != wanted
+            if outside and row != self.view.selected:
+                hidden.add(row)
+            self.list.setRowHidden(row, row in hidden)
+        self.view.hidden = hidden
+        self.view.update()
 
     def _refresh_filter_choices(self):
         """Le voci del filtro sono le categorie presenti: nessuna tassonomia fissa."""

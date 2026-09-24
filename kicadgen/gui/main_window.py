@@ -10,6 +10,7 @@ advanced parameter tabs while preserving their indexes for existing handlers.
 from __future__ import annotations
 
 from copy import deepcopy
+from html import escape
 import json
 import math
 import re
@@ -90,6 +91,40 @@ APP_DIR = Path(__file__).resolve().parent.parent.parent
 # Generated working files stay separate from installed KiCad libraries.
 DEFAULT_LIBRARY_ROOT = APP_DIR / "generated"
 DOCS_SUBDIR = "docs"
+#: Link della finestra About (utente, 2026-09-24): repository del progetto e
+#: sviluppatore, dal remoto su cui il branch viene pubblicato.
+REPOSITORY_URL = "https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator"
+DEVELOPER_URL = "https://github.com/MirkoUgoliniDev"
+DEVELOPER_NAME = "Mirko Ugolini"
+
+#: Campi che appartengono al PROGETTO e finiscono in `project_config.json`
+#: (decisione dell'utente del 2026-09-24). Nell'ordine in cui si riapplicano:
+#: la tipologia prima di tutto, perche' cambiandola cambiano altri campi, e i
+#: gruppi attivabili prima dei loro campi. Restano fuori, di proposito:
+#: lingua, cartella di lavoro, nome del progetto (e' la cartella stessa), i
+#: campi di sola immissione dell'editor delle annotazioni e la griglia
+#: dell'anteprima, che sono modi di guardare.
+PROJECT_WIDGETS = (
+    "combo_component_type", "field_component_prompt", "combo_photo_detector",
+    "field_yolo_model", "group_castellated", "group_3d",
+    "field_description", "field_tags",
+    "field_rows", "field_cols", "field_pitch", "field_row_spacing", "field_pad",
+    "field_drill", "field_populated_pins",
+    "field_body_length", "field_body_width", "field_body_height",
+    "field_body_offset_x", "field_body_offset_y", "field_body_color",
+    "field_pin_color", "field_pin_length_3d", "field_text_color",
+    "field_cast_body_length", "field_cast_body_width", "field_cast_pcb",
+    "field_cast_pad_length", "field_cast_pad_width", "field_cast_overhang",
+    "field_cast_inset", "field_cast_hole", "field_cast_hole_inset",
+    "field_cast_thru_drill", "field_cast_thru_pad", "field_cast_thru_offset",
+)
+#: Opzioni di Configurazione -> Opzioni di generazione che seguono il progetto.
+PROJECT_OPTIONS = ("include_nc_pins", "silk_pin_labels", "pause_after_inventory")
+#: Ogni quanto, in millisecondi, si controlla se il progetto e' cambiato. Una
+#: scelta: abbastanza spesso da non perdere nulla chiudendo di colpo, abbastanza
+#: di rado da non scrivere a ogni tasto. Un file si scrive solo se lo stato e'
+#: davvero diverso da quello salvato.
+PROJECT_AUTOSAVE_MS = 2000
 
 #: Tipologie che dichiarano UN SOLO componente discreto (vedi
 #: `services/component_types.py`). Non sono schede con corpi montati sopra,
@@ -1253,6 +1288,7 @@ class MainWindow(QMainWindow):
                 elif isinstance(widget, QLineEdit) and key in {
                         "field_body_color", "field_pin_color", "field_populated_pins"}:
                     widget.textChanged.connect(self._invalidate_generated_mesh)
+        self._init_project_settings()
 
     # ── Menu ────────────────────────────────────────────────────────
 
@@ -1309,7 +1345,8 @@ class MainWindow(QMainWindow):
     def _edit_generation_options(self) -> None:
         dialog = GenerationOptionsDialog(bool(self._config.get("include_nc_pins", True)), self,
                                          advanced_user=self._advanced_user(),
-                                         silk_pin_labels=self._silk_pin_labels())
+                                         silk_pin_labels=self._silk_pin_labels(),
+                                         pause_after_inventory=self._inventory_pause_enabled())
         self.i18n.retranslate_widgets(dialog)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -1317,7 +1354,11 @@ class MainWindow(QMainWindow):
         self._config["include_nc_pins"] = checked
         self._config['advanced_user'] = dialog.advanced_user()
         self._config['silk_pin_labels'] = dialog.silk_pin_labels()
+        pause = dialog.pause_after_inventory()
+        pause_changed = pause != self._inventory_pause_enabled()
         save_config(self._config)
+        if pause_changed:
+            self._on_inventory_pause_toggled(pause)
         self._apply_user_mode()
         self._append_log(
             "Pin NC: verranno generati." if checked
@@ -1470,6 +1511,8 @@ class MainWindow(QMainWindow):
                 self.i18n.text('Attendi la conclusione dell’operazione prima di chiudere.'))
             event.ignore()
         else:
+            # Le ultime modifiche non aspettano il prossimo giro del salvataggio.
+            self._flush_project_config()
             super().closeEvent(event)
 
     def _edit_profiles(self):
@@ -1615,10 +1658,10 @@ class MainWindow(QMainWindow):
         self.field_yolo_model.setToolTip(
             self._photo_detector_text("path_help", path=default_path))
         self.label_vlm_model.setText(self._photo_detector_text("vlm_model"))
-        self.btn_pick_vlm_model.setText(self._photo_detector_text("vlm_pick"))
-        self.btn_pick_vlm_model.setAccessibleName(self._photo_detector_text("vlm_model"))
-        for widget in (self.field_vlm_model, self.btn_pick_vlm_model):
-            widget.setToolTip(self._photo_detector_text("vlm_help"))
+        self.btn_pick_vlm_model.setAccessibleName(self._photo_detector_text("vlm_pick"))
+        self.btn_pick_vlm_model.setToolTip(
+            self._photo_detector_text("vlm_pick") + "\n" + self._photo_detector_text("vlm_help"))
+        self.field_vlm_model.setToolTip(self._photo_detector_text("vlm_help"))
         self.field_vlm_model.setText(self._photo_detector_model())
         self._on_photo_detector_changed()
 
@@ -1704,11 +1747,32 @@ class MainWindow(QMainWindow):
             save_config(self._config)
         webbrowser.open(config_path().as_uri())
 
+    def _about_html(self) -> str:
+        """@brief Testo della finestra About: descrizione e link a repository e sviluppatore."""
+        description = "<br>".join(escape(line) for line in
+                                  self.i18n.tr("about.description").split("\n"))
+        return (f"<p>{description}</p>"
+                f"<p>{escape(self.i18n.text('Repository GitHub'))}: "
+                f"<a href='{REPOSITORY_URL}'>{escape(REPOSITORY_URL)}</a><br>"
+                f"{escape(self.i18n.text('Sviluppatore'))}: "
+                f"<a href='{DEVELOPER_URL}'>{escape(DEVELOPER_NAME)}</a></p>")
+
     def _show_about(self) -> None:
-        QMessageBox.about(
-            self, self.i18n.text("About"),
-            self.i18n.tr("about.description")
-        )
+        """@brief Finestra About con i link al repository GitHub e allo sviluppatore.
+
+        @note I link si aprono nel browser (QMessageBox apre i link esterni
+            della sua etichetta); per questo il testo e' rich text, con le
+            parti tradotte escapate.
+        """
+        box = QMessageBox(self)
+        box.setWindowTitle(self.i18n.text("About"))
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setTextFormat(Qt.TextFormat.RichText)
+        box.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        box.setText(self._about_html())
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        self._about_box = box
+        box.exec()
 
     def _warn_missing_external_applications(self) -> bool:
         """@brief Warn once when KiCad or FreeCAD is not installed.
@@ -2076,7 +2140,13 @@ class MainWindow(QMainWindow):
         self.label_vlm_model = QLabel()
         self.field_vlm_model = QLineEdit()
         self.field_vlm_model.setReadOnly(True)
+        # Stessa icona e stessa misura del pulsante accanto a «Modello AI»
+        # (utente, 2026-09-24: «uniforma questo per scegliere il modello»);
+        # il nome sta nel tooltip e nel nome accessibile.
         self.btn_pick_vlm_model = QPushButton()
+        self.btn_pick_vlm_model.setIcon(self._asset_icon("model-edit.svg"))
+        self.btn_pick_vlm_model.setIconSize(QSize(20, 20))
+        self.btn_pick_vlm_model.setFixedSize(40, 32)
         self.btn_pick_vlm_model.setAutoDefault(False)
         self.btn_pick_vlm_model.clicked.connect(self._pick_session_vlm_model)
         vlm_row = QHBoxLayout()
@@ -2272,39 +2342,10 @@ class MainWindow(QMainWindow):
 
         outer.addWidget(self.group_component_analysis)
         outer.addStretch()
-        # La pausa dopo l'inventario e' un'impostazione, non un comando: sta
-        # sopra la riga dei rientri perche' e' li' che si ragiona di «dove
-        # posso rimettere le mani», e resta visibile anche prima della prima
-        # analisi -- e' allora che si decide se farsi fermare o no.
-        self.chk_pause_after_inventory = QCheckBox(
-            "Fermati dopo l'inventario AI per rivedere i corpi (gratuito)")
-        self.chk_pause_after_inventory.setToolTip(
-            "Quando l'inventario AI ha finito, la pipeline si ferma e propone la "
-            "revisione dei componenti prima dell'abbinamento dei modelli KiCad e della "
-            "generazione 3D: da lì si spostano, ridimensionano, aggiungono ed eliminano "
-            "i corpi. La revisione non fa richieste AI: è gratuita. Togliendo la spunta "
-            "l'analisi prosegue da sola con i corpi proposti dall'AI.")
-        self.chk_pause_after_inventory.setChecked(self._inventory_pause_enabled())
-        self.chk_pause_after_inventory.toggled.connect(self._on_inventory_pause_toggled)
-        pause_row = QHBoxLayout()
-        pause_row.addStretch()
-        pause_row.addWidget(self.chk_pause_after_inventory)
-        pause_row.addStretch()
-        outer.addLayout(pause_row)
-        # Richiesta dell'utente: «devo poter tornare sui miei passi senza fare
-        # intervenire AI». I tre comandi esistevano gia' ma stavano in fila
-        # senza dire di essere i passi di UNA pipeline ne' quale costasse: qui
-        # l'intestazione li enumera nell'ordine in cui la pipeline li esegue e
-        # dichiara il costo di ciascuno. La riga sotto segue lo stesso ordine.
-        self.lbl_pipeline_steps = QLabel(
-            "Rientri nella pipeline, nell'ordine: 1) rivedi i corpi rilevati — gratuito · "
-            "2) rilancia l'inventario AI — a pagamento · 3) modifica la revisione dei "
-            "componenti — gratuito · poi «Rigenera modello 3D» nella scheda Modello 3D — "
-            "gratuito. Ogni passo riparte da quello che il precedente ha salvato.")
-        self.lbl_pipeline_steps.setWordWrap(True)
-        self.lbl_pipeline_steps.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        self.lbl_pipeline_steps.setStyleSheet("color: #a6adc8;")
-        outer.addWidget(self.lbl_pipeline_steps)
+        # La pausa dopo l'inventario sta in Configurazione -> Opzioni di
+        # generazione, e la riga di testo che elencava i rientri e' stata tolta
+        # (utente, 2026-09-24): ordine e costo di ogni passo sono nel tooltip
+        # del suo pulsante («Passo 1 della pipeline — …»).
         # Richiesta dell'utente: «un pulsante in basso nella scheda
         # principale» per riaprire la revisione dopo averla salvata. Sta
         # sotto tutto, non nella riga degli strumenti dell'analisi, cosi' si
@@ -3099,38 +3140,14 @@ class MainWindow(QMainWindow):
                         or getattr(self, "_photo_overlay_png", None))
         for name in ("btn_edit_component_review", "btn_edit_component_review_3d"):
             self._set_action_available(name, editable)
-        self._refresh_pipeline_steps_label()
-
-    def _refresh_pipeline_steps_label(self) -> None:
-        """@brief L'intestazione dei rientri si vede solo quando un rientro esiste.
-
-        @note Stessa disciplina di `_set_action_available`: una riga che
-            annuncia tre passi sotto una fila vuota di pulsanti descrive
-            qualcosa che non c'e'. Basta UN passo disponibile perche' valga la
-            pena spiegare l'ordine, perche' e' da li' che si riparte.
-        @note `getattr` difensivo: i pulsanti nascono prima dell'intestazione
-            durante la costruzione della scheda, e un ricalcolo anticipato non
-            deve far cadere la finestra.
-        """
-        label = getattr(self, "lbl_pipeline_steps", None)
-        if label is None:
-            return
-        # `isVisibleTo(genitore)` e non `isVisible()`: la finestra dei test non
-        # viene mai mostrata, e `isVisible()` direbbe «nascosto» per tutti,
-        # spegnendo l'intestazione anche quando i comandi ci sono.
-        buttons = [getattr(self, name, None)
-                   for name in ("btn_reopen_review", "btn_relaunch_inventory",
-                                "btn_edit_component_review")]
-        label.setVisible(any(button is not None and button.parentWidget() is not None
-                             and button.isVisibleTo(button.parentWidget())
-                             for button in buttons))
 
     def _on_inventory_pause_toggled(self, checked: bool) -> None:
         """@brief Ricorda la scelta sulla pausa e la scrive nel diario.
 
         @param checked True quando l'utente vuole essere fermato dopo l'inventario.
-        @note Lo stato scritto e' quello del comando: e' l'unico posto da cui
-            si accende e si spegne, quindi non puo' divergere dalle impostazioni.
+        @note Chiamato da Configurazione -> Opzioni di generazione quando la
+            scelta cambia (dal 2026-09-24 la casella non sta piu' nel tab
+            Progetto): quello e' l'unico posto da cui si accende e si spegne.
         """
         self._remember_inventory_pause(checked)
         self._append_log(
@@ -4174,6 +4191,180 @@ class MainWindow(QMainWindow):
         self.field_name.setText(applied)
         self._set_suggested_name(self._suggested_name)
 
+    def _init_project_settings(self) -> None:
+        """@brief Fotografa le impostazioni generali e avvia il salvataggio automatico.
+
+        @note La fotografia e' presa a finestra costruita e prima di qualunque
+            progetto: e' lo stato da cui parte un progetto NUOVO (decisione
+            dell'utente del 2026-09-24).
+        """
+        self._restoring_project = False
+        self._project_config_refused = None
+        self._general_project_state = self._project_state()
+        self._last_saved_project_state = None
+        self._project_autosave = QTimer(self)
+        self._project_autosave.setInterval(PROJECT_AUTOSAVE_MS)
+        self._project_autosave.timeout.connect(self._save_project_config)
+        self._project_autosave.start()
+
+    def _project_state(self) -> dict:
+        """@brief Tutte le impostazioni del progetto aperto, come oggetti JSON.
+
+        @return Dizionario con campi, modelli di sessione, tabelle, annotazioni,
+            pinout e opzioni. Mai chiavi API: non stanno in nessun campo e le
+            impostazioni del profilo AI restano nel database.
+        """
+        from dataclasses import asdict
+        from .project_state import widget_value
+        widgets = {}
+        for name in PROJECT_WIDGETS:
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widgets[name] = widget_value(widget)
+        return {
+            "widgets": widgets,
+            "models": {"session_model": getattr(self, "_session_model", None),
+                       "vlm_model": getattr(self, "_vlm_model", None)},
+            "sides": self._serialised_sides(),
+            "components": self._photo_components_from_table(),
+            "annotations": {"fillets": [asdict(a) for a in self.fillet_annotations],
+                            "texts": [asdict(a) for a in self.face_text_annotations]},
+            "pinout": deepcopy(self.pinout or []),
+            "pin_map": (None if not getattr(self, "pin_map", None) else
+                        [[pin, row, col] for pin, (row, col) in sorted(self.pin_map.items())]),
+            "declared_row_spacing": getattr(self, "_declared_row_spacing", None),
+            "options": {"include_nc_pins": bool(self._config.get("include_nc_pins", True)),
+                        "silk_pin_labels": self._silk_pin_labels(),
+                        "pause_after_inventory": self._inventory_pause_enabled()},
+        }
+
+    def _apply_project_state(self, state: dict) -> None:
+        """@brief Rimette nella finestra le impostazioni salvate di un progetto.
+
+        @param state Oggetto prodotto da `_project_state` (letto dal file o
+            fotografato all'avvio). Chiavi mancanti o valori che non entrano in
+            un campo lasciano il campo com'e', con una riga di log.
+        @note Le opzioni cambiano solo in memoria: config.json resta il
+            default dei progetti nuovi finche' l'utente non le cambia dalle
+            Opzioni di generazione.
+        """
+        from .project_state import set_widget_value
+        from ..cad3d.annotations import EdgeFilletAnnotation, FaceTextAnnotation
+        skipped = []
+        for name in PROJECT_WIDGETS:
+            widget = getattr(self, name, None)
+            values = state.get("widgets") if isinstance(state.get("widgets"), dict) else {}
+            if widget is not None and name in values and not set_widget_value(widget, values[name]):
+                skipped.append(name)
+        models = state.get("models") if isinstance(state.get("models"), dict) else {}
+        session = models.get("session_model")
+        self._session_model = session if isinstance(session, str) and session else None
+        self._refresh_model_combo()
+        vlm = models.get("vlm_model")
+        self._vlm_model = vlm if isinstance(vlm, str) and vlm else None
+        self.field_vlm_model.setText(self._photo_detector_model())
+        self.table_sides.setRowCount(0)
+        for side in state.get("sides") or ():
+            if isinstance(side, dict):
+                self._add_side_row(side)
+        components = [c for c in state.get("components") or () if isinstance(c, dict)]
+        try:
+            self._set_photo_components(components)
+        except (KeyError, TypeError, ValueError) as exc:
+            skipped.append(f"componenti ({exc})")
+            self._set_photo_components([])
+        annotations = state.get("annotations") if isinstance(state.get("annotations"), dict) else {}
+        self.fillet_annotations.clear()
+        self.face_text_annotations.clear()
+        for kind, target, values in ((EdgeFilletAnnotation, self.fillet_annotations,
+                                      annotations.get("fillets")),
+                                     (FaceTextAnnotation, self.face_text_annotations,
+                                      annotations.get("texts"))):
+            for entry in values or ():
+                try:
+                    target.append(kind(**entry))
+                except TypeError:
+                    skipped.append(kind.__name__)
+        self._refresh_annotations_table()
+        self.pinout = [dict(entry) for entry in state.get("pinout") or () if isinstance(entry, dict)]
+        pin_map = state.get("pin_map")
+        try:
+            self.pin_map = ({int(p): (int(r), int(c)) for p, r, c in pin_map}
+                            if pin_map else None)
+        except (TypeError, ValueError):
+            self.pin_map = None
+            skipped.append("pin_map")
+        spacing = state.get("declared_row_spacing")
+        self._declared_row_spacing = (
+            float(spacing) if isinstance(spacing, (int, float)) and not isinstance(spacing, bool)
+            and math.isfinite(float(spacing)) and float(spacing) > 0 else None)
+        options = state.get("options") if isinstance(state.get("options"), dict) else {}
+        for key in PROJECT_OPTIONS:
+            if isinstance(options.get(key), bool):
+                self._config[key] = options[key]
+        if skipped:
+            self._append_log("Impostazioni del progetto non applicate (valori non validi): "
+                             + ", ".join(skipped) + ".")
+
+    def _switch_project(self, name: str, state: dict) -> None:
+        """@brief Apre `name` con le impostazioni `state`, senza salvarle a meta'."""
+        self._restoring_project = True
+        try:
+            self.field_name.setText(name)
+            self._apply_project_state(state)
+        finally:
+            self._restoring_project = False
+        # Lo stato appena applicato e' quello salvato: non va riscritto.
+        self._last_saved_project_state = self._project_state_text()
+
+    def _project_state_text(self) -> str | None:
+        """Stato del progetto come testo confrontabile, o None se non si puo' leggere.
+
+        Gira anche dal timer del salvataggio automatico: in PyQt6 un'eccezione
+        che esce da uno slot chiude il programma, quindi qui si assorbe tutto
+        e lo si dice una volta nel log.
+        """
+        try:
+            text = json.dumps(self._project_state(), sort_keys=True, allow_nan=False,
+                              ensure_ascii=False, default=str)
+        except Exception as exc:  # noqa: BLE001 - il salvataggio non deve far cadere la finestra
+            if not getattr(self, "_project_state_error_logged", False):
+                self._project_state_error_logged = True
+                self._append_log(f"Impostazioni del progetto non leggibili: {exc}")
+            return None
+        self._project_state_error_logged = False
+        return text
+
+    def _save_project_config(self, force: bool = False) -> bool:
+        """@brief Scrive `project_config.json` se le impostazioni sono cambiate.
+
+        @param force Scrive anche se lo stato non e' cambiato (progetto nuovo).
+        @return True quando il file e' stato scritto.
+        @note Mai senza progetto, mai durante un cambio di progetto, mai sopra
+            un file che all'apertura non si e' potuto applicare.
+        """
+        if getattr(self, "_restoring_project", True) or not self._named():
+            return False
+        folder = self._project_dir()
+        if self._project_config_refused is not None and folder == self._project_config_refused:
+            return False
+        text = self._project_state_text()
+        if text is None or (not force and text == self._last_saved_project_state):
+            return False
+        from .project_state import write_project_config
+        try:
+            write_project_config(folder, json.loads(text))
+        except (OSError, TypeError, ValueError) as exc:
+            self._append_log(f"Impostazioni del progetto non salvate: {exc}")
+            return False
+        self._last_saved_project_state = text
+        return True
+
+    def _flush_project_config(self) -> None:
+        """@brief Salva subito le impostazioni del progetto aperto (cambio progetto, chiusura)."""
+        if hasattr(self, "_project_autosave"):
+            self._save_project_config()
+
     def _library_root(self) -> Path:
         """@brief Cartella di lavoro in cui stanno i progetti."""
         return Path(self.field_library_root.text().strip() or str(DEFAULT_LIBRARY_ROOT))
@@ -4213,8 +4404,12 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             QMessageBox.warning(self, self.i18n.text("Nuovo progetto"), str(exc))
             return
+        self._flush_project_config()
         self._set_suggested_name("")
-        self.field_name.setText(name)
+        # Un progetto nuovo parte dalle impostazioni generali, non da quelle
+        # del progetto aperto prima (decisione dell'utente del 2026-09-24).
+        self._switch_project(name, self._general_project_state)
+        self._save_project_config(force=True)
         self._append_log(f"Nuovo progetto: {self._project_dir()}")
 
     def _open_project(self) -> None:
@@ -4231,9 +4426,24 @@ class MainWindow(QMainWindow):
                                    tr=self.i18n.text, parent=self)
         if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.selected_name():
             return
+        self._flush_project_config()
         self._set_suggested_name("")
-        self.field_name.setText(dialog.selected_name())
-        self._append_log(f"Progetto aperto: {self._project_dir()}")
+        name = dialog.selected_name()
+        from .project_state import ProjectConfigError, read_project_config
+        folder = self._library_root() / name
+        try:
+            saved = read_project_config(folder)
+            self._project_config_refused = None
+        except ProjectConfigError as exc:
+            saved = None
+            # Ne' applicato ne' sovrascritto: resta com'e' finche' qualcuno lo guarda.
+            self._project_config_refused = folder
+            self._append_log(f"ATTENZIONE impostazioni del progetto non applicate: {exc}")
+        # Senza file (progetto nato prima di project_config.json) valgono le
+        # impostazioni generali, non quelle del progetto aperto prima.
+        self._switch_project(name, saved if saved is not None else self._general_project_state)
+        self._append_log(f"Progetto aperto: {self._project_dir()}"
+                         + ("" if saved is None else " (impostazioni del progetto applicate)."))
 
     def _rename_project(self) -> None:
         """@brief «Rinomina progetto…»: nome nuovo, mai quello di un altro progetto.
@@ -4332,6 +4542,15 @@ class MainWindow(QMainWindow):
         """
         import shutil
         from ..services.photo_inventory import PHOTO_CACHE_SUBDIR, REVIEW_BUNDLE_SUBDIR
+        from .project_state import PROJECT_CONFIG_NAME
+        # Le impostazioni del progetto seguono il nome come il resto.
+        settings = old_project / PROJECT_CONFIG_NAME
+        if settings.is_file() and not (new_project / PROJECT_CONFIG_NAME).exists():
+            try:
+                new_project.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(settings), str(new_project / PROJECT_CONFIG_NAME))
+            except OSError as exc:
+                self._append_log(f"Rinomina: {PROJECT_CONFIG_NAME} non spostato ({exc}).")
         for name in (PHOTO_CACHE_SUBDIR, REVIEW_BUNDLE_SUBDIR):
             source = old_project / name
             if not source.is_dir():

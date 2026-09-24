@@ -5443,3 +5443,172 @@ richiesta dell'utente. Esclusi `data/analysis_profiles.sqlite3`, `Private/`,
 `Claude outputs/`. Suite al commit: 3871 passati, 3 saltati, 2 xfail, 19
 sottotest. Resta aperta la scelta dell'utente sui riquadri sfalsati
 (inventario AI, non zoom).
+
+## PIANO IN CORSO (24/09 notte) — «non riesco a selezionare riquadri spurii»
+
+Scritto prima di toccare il codice. Screenshot dell'utente dopo una corsa con
+**YOLO locale + verifica AI**: i riquadri sono centrati sui componenti (la
+diagnosi dei riquadri sfalsati era giusta: l'errore veniva dal solo modello
+di visione). Nel secondo screenshot la foto e' nascosta, zoom 156%, e lo
+strumento attivo e' **Disegna**.
+Cause (entrambe nel codice di «Corpi rilevati», `BoardView.mousePressEvent`):
+1. [x] Con Disegna un clic su un riquadro NON lo sceglie: ogni pressione fuori
+   dalle maniglie inizia un tracciamento. Regola nuova: con Disegna un clic
+   FERMO sceglie il riquadro sotto il puntatore (o toglie la scelta nel
+   vuoto); solo un TRASCINAMENTO traccia. Test positivo (clic fermo con
+   Disegna sceglie) e negativo (trascinamento con Disegna traccia ancora).
+2. [x] Riquadri piccoli sopra o dentro riquadri grandi: vince l'ultimo
+   nell'elenco, non quello cliccato. Regola nuova, per entrambi gli
+   strumenti: fra i riquadri che contengono il punto vince il PIU' PICCOLO
+   (area), a parita' l'ultimo disegnato. Test positivo (piccolo dentro
+   grande, qualunque ordine) e negativo (punto solo nel grande: vince il
+   grande).
+
+Fatto: `BoardView.box_at` (vince il riquadro piu' piccolo
+che contiene il punto, a parita' l'ultimo) usato da Seleziona e dal clic
+fermo con Disegna; con Disegna un trascinamento traccia ancora. Stessa classe
+di problema corretta anche in «Revisione componenti»: la Z dei rettangoli
+cresce al diminuire dell'area (il rettangolo scelto resta sopra a tutti), cosi'
+il clic della scena va al piu' piccolo. Test positivi e negativi in
+`test_yolo_review_dialog.py` e `test_photo_review_dialog.py`. Suite completa:
+3874 passati, 3 saltati, 2 xfail, 19 sottotest.
+
+## PIANO IN CORSO (24/09 notte, 2) — il filtro per tipologia filtra anche la foto
+
+Scritto prima di toccare il codice. Richiesta dell'utente (screenshot di
+«Revisione componenti», filtro «capacitor»): il filtro deve nascondere anche i
+riquadri sulla foto, non solo le righe della lista. Vale per le due finestre
+di revisione, che oggi dichiarano di proposito «i riquadri sulla foto restano
+tutti visibili».
+1. [x] «Revisione componenti» (`photo_review_dialog._apply_filter`): i
+   rettangoli fuori categoria si nascondono (con numero e alone).
+2. [x] «Corpi rilevati» (`yolo_review_dialog`): `BoardView` non disegna e non
+   fa scegliere i riquadri fuori categoria.
+3. [x] **Contratto cambiato di proposito**: oggi il componente scelto resta
+   visibile anche fuori categoria (il «1. SW1 (switch)» in cima alla lista
+   filtrata dello screenshot), per non modificare qualcosa di invisibile.
+   Nuova regola: cambiando il filtro, un componente scelto fuori categoria
+   viene DESELEZIONATO; cosi' lista e foto mostrano solo la categoria e non
+   c'e' nulla di invisibile da modificare. Da dire all'utente.
+Test positivi e negativi; i dati restituiti non cambiano mai.
+4. [x] (aggiunto durante il lavoro) «Dubbi dichiarati dal modello (N)…» di
+   «Revisione componenti» diventa un'icona nella barra in alto, subito dopo
+   quella dei dettagli (screenshot dell'utente). Oggi il pulsante compare
+   solo se ci sono dubbi: l'icona segue la stessa regola, e il numero dei
+   dubbi va nel tooltip.
+Nota sul punto 3: la deselezione scatta solo quando si CAMBIA il filtro. Il
+componente scelto resta visibile se e' lui a uscire dalla categoria (tipologia
+ritoccata mentre lo si modifica): ci si sta lavorando sopra.
+
+Fatto. Nota: l'icona dei dubbi apre la stessa finestra
+MODALE di prima (l'utente: «deve aprire modale»), non un popup.
+Difetto trovato da un test esistente e corretto: con il filtro attivo un
+componente appena aggiunto veniva nascosto PRIMA di essere scelto, e Qt non
+sceglie un oggetto nascosto, quindi la tipologia scritta dopo non andava a
+nessuno. `_select_row` rende visibile il componente che sceglie.
+Suite dopo il filtro e l'icona dei dubbi: 3876 passati (aggiornato il
+riferimento del raccoglitore in `test_i18n.py::test_the_scan_sees_...`: il
+tooltip del filtro ha un testo nuovo, la strada verificata e' la stessa).
+
+## PIANO IN CORSO (24/09 notte, 3) — tab Progetto
+
+Scritto prima di toccare il codice. Richieste dell'utente con screenshot:
+A. [x] La casella «Fermati dopo l'inventario AI per rivedere i corpi
+   (gratuito)» esce dal tab Progetto e va in Configurazione → Opzioni di
+   generazione, accanto a «Utente avanzato» e alle altre. Stessa chiave di
+   config (`pause_after_inventory`), stessa semantica (accesa di serie).
+B. [x] Togliere la riga di testo «Rientri nella pipeline, nell'ordine: 1)…»
+   sopra i tre pulsanti di rientro.
+C. [x] «Scegli modello...» del modello di visione diventa un'icona come quella
+   accanto a «Modello AI» (uniforme), con il nome nel tooltip.
+D. [ ] DOMANDA, NON PARTIRE: `project_config.json` nella cartella del
+   progetto con tutte le opzioni e i parametri, riapplicati all'apertura.
+   Chiedere all'utente cosa entra (campi, scelte, opzioni globali?) e la
+   precedenza fra impostazioni del progetto e impostazioni globali. E' anche
+   l'opzione 2b scartata ieri: da dirgli.
+
+A, B, C fatti: pausa nelle Opzioni di generazione (gruppo
+«Analisi AI» con Info, `GenerationOptionsDialog.pause_after_inventory()`,
+chiave `help.generation.pause_after_inventory`); tolte la riga dei rientri e
+la sua funzione `_refresh_pipeline_steps_label` (ordine e costo restano nei
+tooltip «Passo N»); `btn_pick_vlm_model` con l'icona `model-edit.svg` 40x32
+come `btn_pick_model`. Test aggiornati di proposito in
+`test_pipeline_pauses.py` (la pausa si spegne dalle Opzioni; la riga non c'e'
+piu').
+Suite dopo A, B, C: 3876 passati.
+
+E. [x] (richiesta nuova, 24/09 notte) Finestra «About»: aggiungere il link al
+   repository GitHub (https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator,
+   dal remoto del push) e allo sviluppatore (profilo GitHub
+   https://github.com/MirkoUgoliniDev). Niente indirizzo email: non richiesto.
+   Fatto: `REPOSITORY_URL`, `DEVELOPER_URL`, `DEVELOPER_NAME` in main_window,
+   `_show_about` usa una QMessageBox con rich text e link cliccabili. Test
+   `tests/test_about_links.py`.
+Resta aperta la domanda D (`project_config.json`), fatta all'utente.
+
+## PIANO IN CORSO (24/09 notte, 4) — `project_config.json` (decisione D)
+
+Scritto prima di toccare il codice. Decisioni dell'utente: «ok proposte».
+1. **Cosa entra** (dentro il progetto): tipologia componente, prompt del
+   componente, modello AI della sessione, rilevatore foto, pesi YOLO, modello
+   di visione, tutti i campi dei tab Footprint/Genera/3D (matrice, corpo,
+   castellated `field_cast_*`, colori, descrizione, tag, pin popolati), tabella
+   dei lati (`_serialised_sides`, tipo contatto compreso), tabella dei
+   componenti (`_photo_components_from_table` / `_set_photo_components`),
+   annotazioni (fillet e testi incisi), tabella pinout e mappa dei pin,
+   distanza fra le file dichiarata, e le opzioni pin NC, sigle incise, pausa
+   dopo l'inventario. **Fuori**: lingua, cartella di lavoro, «Utente
+   avanzato», chiavi API, e i campi di sola immissione (editor delle
+   annotazioni, griglia dell'anteprima, nome del progetto).
+2. **Chi vince**: aprendo un progetto valgono le sue impostazioni; un
+   progetto NUOVO parte dalle impostazioni generali. Realizzazione: alla fine
+   della costruzione della finestra si fotografa lo stato di partenza (le
+   impostazioni generali) e «Nuovo progetto» lo riapplica. Le tre opzioni
+   restano anche in config.json: l'ultima scelta e' il default dei progetti
+   nuovi (da dire all'utente).
+3. **Quando si salva**: automaticamente a ogni modifica (timer breve per non
+   scrivere a ogni tasto), prima di cambiare progetto e alla chiusura.
+   Scrittura atomica (file temporaneo + sostituzione).
+Modulo nuovo `kicadgen/gui/project_state.py` (lettura/scrittura dei widget,
+file con `format` e `version`, un file illeggibile o di versione piu' nuova
+non si applica ne' si sovrascrive, lo si dice nel log).
+Test positivi e negativi: giro completo salva -> nuovo -> apri; progetto nuovo
+senza i valori del precedente; file illeggibile; chiavi API mai nel file.
+
+**Esito del piano 4 (`project_config.json`)** — fatto.
+- `kicadgen/gui/project_state.py`: `widget_value`/`set_widget_value` (un
+  valore che non entra lascia il campo com'e'), `read_project_config`
+  (None se manca; `ProjectConfigError` se illeggibile, di un altro formato, di
+  versione piu' nuova o senza stato), `write_project_config` atomico,
+  `format` = "kicadgen-project", `version` = 1.
+- `main_window`: `PROJECT_WIDGETS` (elenco esplicito, in ordine di
+  riapplicazione), `PROJECT_OPTIONS`, `_project_state`/`_apply_project_state`,
+  fotografia delle impostazioni generali in `_init_project_settings` (fine del
+  costruttore), `_switch_project` (niente salvataggi a meta' cambio),
+  salvataggio automatico con un timer di `PROJECT_AUTOSAVE_MS` = 2000 ms che
+  scrive solo se lo stato e' cambiato (SCELTA DICHIARATA: controllo periodico
+  invece di un segnale per ogni campo e cella, cosi' non si perde nessuna
+  modifica, tabelle comprese), salvataggio prima di cambiare progetto e alla
+  chiusura. Un file che non si e' potuto applicare non viene sovrascritto. Il
+  file segue la rinomina. Lo slot del timer non lascia mai uscire eccezioni
+  (in PyQt6 chiuderebbero il programma).
+- Modelli: si salvano `_session_model` e `_vlm_model` (non la voce della
+  tendina), cosi' torna anche un modello scelto a mano.
+- NON torna: la foto calibrata in memoria (`_photo_png`) e l'ultimo risultato
+  dell'estrazione (`_last_extracted`): la revisione riparte dal pacchetto
+  `photo-review/`, come prima.
+- Le tre opzioni restano anche in config.json: l'ultima scelta fatta nelle
+  Opzioni di generazione e' il default dei progetti nuovi.
+- Test `tests/test_project_config.py` (15). Suite completa: **3892 passati**,
+  3 saltati, 2 xfail, 19 sottotest.
+
+## Commit del 24/09 notte
+
+Selezione dei riquadri spuri, filtro anche sulla foto, icona dei dubbi, pausa
+nelle Opzioni, riga dei rientri tolta, icona del modello di visione, link
+nella finestra About e `project_config.json`: nel commit che segue `fec6c3a`
+su `YOLO-SOLUTION`, pushato su richiesta dell'utente. Esclusi
+`data/analysis_profiles.sqlite3`, `Private/`, `Claude outputs/`. Suite al
+commit: 3892 passati, 3 saltati, 2 xfail, 19 sottotest.
+Aperto: nulla di richiesto in sospeso; da provare a mano dall'utente il
+salvataggio automatico e la riapertura dei progetti nel programma vero.

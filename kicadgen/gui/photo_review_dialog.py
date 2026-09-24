@@ -1056,6 +1056,11 @@ class PhotoReviewDialog(QDialog):
         # avvisi, cosi' non spariscono alla vista (vedi `_update_details_button`).
         self.details_button = tool_button("component-details.svg", "", tr=tr)
         self._selected_has_warnings = False
+        # Dubbi dichiarati dal modello: da pulsante in colonna a icona nella
+        # barra (utente, 2026-09-24); apre la stessa finestra modale e, come
+        # prima, esiste solo quando ci sono dubbi. Il numero sta nel tooltip.
+        self.uncertainties_button = tool_button("model-doubts.svg", "", tr=tr)
+        self.uncertainties_button.hide()
         self.info_button = tool_button(
             "info.svg", "Come si usa", "",
             "Istruzioni, colori e scorciatoie da tastiera di questa finestra.", tr=tr)
@@ -1066,7 +1071,7 @@ class PhotoReviewDialog(QDialog):
         for widget in (self.add_button, self.delete_button, toolbar_divider(),
                        self.zoom_out_button, self.zoom_label, self.zoom_in_button,
                        self.fit_button, toolbar_divider(), self.photo_button,
-                       self.details_button):
+                       self.details_button, self.uncertainties_button):
             toolbar.addWidget(widget)
         toolbar.addStretch()
         toolbar.addWidget(self.info_button)
@@ -1107,7 +1112,7 @@ class PhotoReviewDialog(QDialog):
         self.category_filter = QComboBox()
         self.category_filter.setObjectName("category_filter")
         self.category_filter.setToolTip(
-            "Filtra la lista per categoria; i rettangoli sulla foto restano tutti visibili.")
+            "Filtra per categoria la lista e i rettangoli sulla foto.")
         self.category_filter.currentIndexChanged.connect(self._category_filter_changed)
         sidebar.addWidget(self.category_filter)
         self.component_list = QListWidget()
@@ -1200,11 +1205,7 @@ class PhotoReviewDialog(QDialog):
         # dietro un pulsante che compare solo se ce ne sono: sono prosa del
         # modello, quindi vanno messi a disposizione senza occupare la barra
         # laterale e senza competere con gli avvisi del componente scelto.
-        self.uncertainties_button = QPushButton()
-        self.uncertainties_button.setAutoDefault(False)
         self.uncertainties_button.clicked.connect(self.show_uncertainties)
-        self.uncertainties_button.hide()
-        sidebar.addWidget(self.uncertainties_button)
         self._uncertainties = []
         self.uncertainties_dialog = QDialog(self)
         self.uncertainties_dialog.setWindowTitle("Dubbi dichiarati dal modello")
@@ -1558,8 +1559,10 @@ class PhotoReviewDialog(QDialog):
                     seen.append(sentence)
         self._uncertainties = seen
         self.uncertainties_button.setVisible(bool(seen))
-        self.uncertainties_button.setText(
-            self._tr("Dubbi dichiarati dal modello ({count})…").format(count=len(seen)))
+        set_tool_texts(
+            self.uncertainties_button,
+            self._tr("Dubbi dichiarati dal modello ({count})…").format(count=len(seen)), "",
+            self._tr("Le frasi del modello sulle incertezze dell'inventario, in una finestra."))
         # Un elenco: numerarlo direbbe una priorita' che il modello non ha
         # dichiarato, quindi ogni frase sta su una riga con lo stesso segno.
         self.uncertainties_view.setPlainText("\n\n".join("• " + sentence for sentence in seen))
@@ -1646,22 +1649,33 @@ class PhotoReviewDialog(QDialog):
         self._apply_filter()
 
     def _category_filter_changed(self, _index):
-        """@brief Apply the category chosen in the combo to the list rows."""
+        """@brief Apply the category chosen in the combo to the list and the photo.
+
+        @note A selected component outside the new category is DESELECTED
+              (user decision 2026-09-24): the filter now hides rectangles too,
+              and keeping an out-of-category selection would leave one odd row
+              and one odd rectangle on screen.
+        """
+        category = self.active_category()
+        selected = self._selected_item()
+        if category is not None and selected is not None and not self._matches_category(selected, category):
+            self.scene.clearSelection()
         self._apply_filter()
 
     def _apply_filter(self):
-        """Hide the list rows outside the active category, keeping every index.
+        """Hide the list rows AND the rectangles outside the active category.
 
-        Rows are hidden, never removed: ``_components``, ``_items`` and the
-        list rows stay index-aligned, so every existing index-based path keeps
-        working while a filter is active.
+        Rows and rectangles are hidden, never removed: ``_components``,
+        ``_items`` and the list rows stay index-aligned, so every existing
+        index-based path keeps working while a filter is active, and what the
+        review returns never depends on the filter. A hidden rectangle takes
+        no click (user decision 2026-09-24: the filter filters the photo too).
 
-        The selected component is an exception and stays visible even out of
-        category. A selection the list does not show is worse than a row too
-        many: the parameter modal, the numeric fields and the delete button all
-        act on it, and the user would be editing something invisible. Hiding a
-        row therefore never deselects it, and clicking its rectangle on the
-        photo brings the row back into view.
+        The selected component stays visible even out of category, which only
+        happens when its own type is edited while the filter is active (a
+        filter CHANGE deselects it, see `_category_filter_changed`): it is the
+        component being worked on, and editing something invisible is worse
+        than one odd row.
         """
         category = self.active_category()
         selected = self._selected_item()
@@ -1678,6 +1692,7 @@ class PhotoReviewDialog(QDialog):
             visible = (category is None or self._matches_category(item, category)
                        or item is selected)
             row.setHidden(not visible)
+            item.setVisible(visible)
         self._update_count()
 
     def _selected_item(self):
@@ -1692,6 +1707,13 @@ class PhotoReviewDialog(QDialog):
         """
         with QSignalBlocker(self.scene):
             for index, item in enumerate(self._items):
+                if index == row and not item.isVisible():
+                    # Qt non seleziona un oggetto nascosto: un componente
+                    # appena aggiunto, o scelto dal tab 3D, fuori dal filtro
+                    # attivo restava non scelto e la tipologia scritta dopo
+                    # non andava a nessuno. Il componente su cui si lavora
+                    # resta visibile (vedi _apply_filter).
+                    item.setVisible(True)
                 item.setSelected(index == row)
         self._selection_changed()
         if center and 0 <= row < len(self._items):
@@ -1891,7 +1913,13 @@ class PhotoReviewDialog(QDialog):
         fill = QColor(color)
         fill.setAlpha(60 if item.isSelected() else 15)
         item.setBrush(QBrush(fill))
-        item.setZValue(2 if item.isSelected() else 1)
+        # Fra rettangoli sovrapposti il clic va al PIU' PICCOLO: sopra i piu'
+        # piccoli, a qualunque posto dell'elenco (utente, 2026-09-24: una
+        # proposta spuria dentro un corpo grande non si poteva scegliere). Il
+        # rettangolo scelto resta sopra tutti.
+        bounds = item.photo_bounds()
+        smallness = 1.0 / (1.0 + max(0.0, bounds.width() * bounds.height()))
+        item.setZValue((3 if item.isSelected() else 1) + smallness)
         item.number.setText(str(index + 1))
         name = item.component.get("name") or item.component.get("kind") or self._tr("Componente")
         text = (f"{index + 1}. {name}"

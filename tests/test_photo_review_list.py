@@ -606,8 +606,9 @@ def test_selecting_a_category_hides_the_other_rows_and_states_both_counts(dialog
     assert dialog.component_list.count() == 3
     assert dialog.component_list.item(2).text().startswith("3. C1")
     assert [entry["name"] for entry in dialog.get_components()] == ["U1", "R1", "C1"]
-    # ...and the outlines on the photo are all still there and still editable.
-    assert all(item.isVisible() for item in dialog._items)
+    # Dal 2026-09-24 il filtro filtra anche la foto (decisione dell'utente):
+    # si vede solo il rettangolo della categoria.
+    assert [item.isVisible() for item in dialog._items] == [False, True, False]
 
 
 def test_clearing_the_filter_shows_every_row_and_the_plain_count(dialog):
@@ -621,43 +622,56 @@ def test_clearing_the_filter_shows_every_row_and_the_plain_count(dialog):
     assert dialog.count_label.text() == "Componenti: 3"
 
 
-def test_a_filtered_out_selection_stays_selected_and_visible(dialog, app):
-    """@brief Documented choice: a filter never deselects, it keeps the odd row out.
+def test_changing_the_filter_deselects_a_component_outside_the_category(dialog, app):
+    """@brief Contratto cambiato di proposito il 2026-09-24 (decisione dell'utente).
 
-    Editing acts on the selected component through the modal, the numeric
-    fields and the delete button; a selection the list does not show would let
-    the user edit something invisible. So the selected row survives the filter
-    as an extra visible row, while the count still reports only the matches.
+    Prima il filtro non deselezionava mai e lasciava visibile la riga scelta
+    fuori categoria (il «1. SW1 (switch)» in cima alla lista filtrata dello
+    screenshot dell'utente). Ora il filtro nasconde anche i rettangoli, e una
+    scelta fuori categoria sarebbe l'unica riga e l'unico rettangolo estranei:
+    cambiando il filtro la scelta si toglie, quindi non resta nulla di
+    invisibile da modificare. Negativo: una scelta DENTRO la categoria resta.
     """
     dialog.component_list.setCurrentRow(0)
     _select_category(dialog, "resistor")
-    assert dialog._items[0].isSelected()
-    assert dialog.component_list.currentRow() == 0
-    assert _visible_rows(dialog) == [0, 1], "the selected row is kept, the third is hidden"
-    assert dialog.count_label.text() == "Componenti: 1 di 3"
-    assert dialog.fields["length_mm"].value() == 8
-    # Moving the selection inside the category releases the odd row again.
-    dialog.component_list.setCurrentRow(1)
+    assert not dialog._items[0].isSelected()
     assert _visible_rows(dialog) == [1]
-    assert dialog.count_label.text() == "Componenti: 1 di 3"
+    assert not dialog._items[0].isVisible()
+    assert not dialog.delete_button.isEnabled()
+    dialog.category_filter.setCurrentIndex(0)
+    dialog.component_list.setCurrentRow(1)
+    _select_category(dialog, "resistor")
+    assert dialog._items[1].isSelected() and _visible_rows(dialog) == [1]
 
 
-def test_clicking_a_rectangle_whose_row_is_hidden_still_selects_it(dialog, app):
-    """@brief The filter is about the list, never about the photo.
+def test_a_component_whose_type_is_edited_out_of_the_filter_stays_visible(dialog, app):
+    """@brief Si sta lavorando su di lui: ritoccarne il tipo non lo fa sparire.
 
-    Every rectangle stays on the photo and clickable whatever the filter says;
-    selecting one brings its row back into view instead of failing silently.
+    La deselezione scatta solo quando si CAMBIA il filtro.
     """
     dialog.component_list.setCurrentRow(1)
     _select_category(dialog, "resistor")
-    assert dialog.component_list.item(2).isHidden()
+    dialog.text_fields["kind"].setText("capacitor")
+    dialog.text_fields["kind"].editingFinished.emit()
+    assert dialog._items[1].isSelected()
+    assert dialog._items[1].isVisible()
+    assert not dialog.component_list.item(1).isHidden()
+
+
+def test_a_rectangle_outside_the_category_cannot_be_clicked(dialog, app):
+    """@brief Il filtro filtra la foto: un rettangolo nascosto non prende il clic.
+
+    Positivo: il rettangolo della categoria si sceglie col clic.
+    """
+    dialog.component_list.setCurrentRow(1)
+    _select_category(dialog, "resistor")
+    assert not dialog._items[2].isVisible()
     dialog.view.zoom(3)
     _click_outline(dialog, app, 2, Qt.KeyboardModifier.NoModifier)
-    assert dialog._items[2].isSelected()
-    assert dialog.component_list.currentRow() == 2
-    assert not dialog.component_list.item(2).isHidden()
-    assert dialog.component_list.item(0).isHidden()
-    assert dialog.text_fields["name"].text() == "C1"
+    assert not dialog._items[2].isSelected()
+    dialog.scene.clearSelection()
+    _click_outline(dialog, app, 1, Qt.KeyboardModifier.NoModifier)
+    assert dialog._items[1].isSelected()
 
 
 def test_the_filter_follows_added_and_deleted_categories(dialog, app):
@@ -733,36 +747,24 @@ def test_the_list_and_the_outlines_stay_in_step_with_the_photograph_hidden(dialo
 
 
 def test_the_category_filter_and_the_backdrop_are_independent(dialog, app):
-    """@brief Negative: neither control resets the other, and neither hides a rectangle.
+    """@brief Negative: neither control resets the other.
 
-    The filter hides list rows, the backdrop control hides the photograph;
-    with both engaged every outline is still drawn and still clickable, which
-    is the contract the filter already carries.
+    The filter hides rows and rectangles, the backdrop control hides the
+    photograph; engaging one never changes the other.
     """
     dialog.set_photo_state(PHOTO_DIMMED)
-    # The selected component is kept visible out of category by contract, so
-    # the selection is moved onto the category being asked for.
     dialog.component_list.setCurrentRow(1)
     _select_category(dialog, "resistor")
     assert _visible_rows(dialog) == [1]
     assert dialog.count_label.text() == "Componenti: 1 di 3"
     assert dialog.photo_state() == PHOTO_DIMMED
-    assert all(item.isVisible() for item in dialog._items)
     dialog.set_photo_state(PHOTO_HIDDEN)
     assert dialog.active_category() == "resistor"
     assert _visible_rows(dialog) == [1]
-    # A rectangle whose row is hidden still selects itself, photograph or not.
-    dialog.view.zoom(3)
-    app.processEvents()
-    item = dialog._items[2]
-    dialog.view.centerOn(item)
-    app.processEvents()
-    QTest.mouseClick(dialog.view.viewport(), Qt.MouseButton.LeftButton,
-                     Qt.KeyboardModifier.NoModifier, dialog.view.mapFromScene(item.scenePos()))
-    app.processEvents()
-    assert dialog.component_list.currentRow() == 2
-    assert _visible_rows(dialog) == [1, 2]
+    assert [item.isVisible() for item in dialog._items] == [False, True, False]
+    dialog.category_filter.setCurrentIndex(0)
     assert dialog.photo_state() == PHOTO_HIDDEN
+    assert all(item.isVisible() for item in dialog._items)
 
 
 def test_the_parameter_modal_edits_live_with_the_photograph_hidden(dialog, app):

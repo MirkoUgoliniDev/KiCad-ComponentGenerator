@@ -1039,17 +1039,37 @@ def test_editing_at_high_zoom_measures_in_photo_fractions_not_screen_pixels(dial
     assert moved['y_mm'] == pytest.approx(before['y_mm'] + .02 * WIDTH_MM)
 
 
-def test_the_category_filter_hides_list_rows_only(dialog):
-    """@brief Positivo: il filtro lascia in lista una categoria. Negativo: foto e dati intatti."""
+def test_the_category_filter_hides_rows_and_boxes_but_never_data(dialog):
+    """@brief Il filtro filtra lista E foto (utente, 2026-09-24); i dati non cambiano.
+
+    Positivo: fuori categoria la riga e' nascosta e il riquadro non si
+    disegna ne' si sceglie. Negativo: cio' che la revisione restituisce resta
+    identico, e togliendo il filtro tutto torna visibile.
+    """
     widget, _ = dialog
+    view = widget.view
     choices = [widget.category_filter.itemData(i) for i in range(widget.category_filter.count())]
     assert choices == [None, 'capacitor', 'resistor']
     before = widget.kept()
     widget.category_filter.setCurrentIndex(choices.index('capacitor'))
     assert widget.list.isRowHidden(0) and not widget.list.isRowHidden(1)
-    assert widget.kept() == before and len(widget.view.proposals) == 2
+    assert view.hidden == {0}
+    assert view.box_at(view.to_widget(FIRST_BOX).center()) is None
+    assert widget.kept() == before and len(view.proposals) == 2
     widget.category_filter.setCurrentIndex(0)
     assert not widget.list.isRowHidden(0) and not widget.list.isRowHidden(1)
+    assert view.hidden == set()
+
+
+def test_changing_the_filter_deselects_a_box_outside_the_category(dialog):
+    """@brief Negativo: una scelta dentro la categoria resta; una fuori si toglie."""
+    widget, _ = dialog
+    choices = [widget.category_filter.itemData(i) for i in range(widget.category_filter.count())]
+    widget._select_row(0)
+    widget.category_filter.setCurrentIndex(choices.index('resistor'))
+    assert widget.view.selected == 0
+    widget.category_filter.setCurrentIndex(choices.index('capacitor'))
+    assert widget.view.selected == -1 and not widget.btn_delete.isEnabled()
 
 
 def test_the_status_bar_shows_the_board_point_in_millimetres(dialog):
@@ -1092,3 +1112,56 @@ def test_the_instructions_open_in_a_popup_inside_the_window(dialog):
     popup.hide()
     widget.btn_info.click()          # lo stesso clic che l'ha chiusa non la riapre
     assert not popup.isVisible()
+
+
+# ── Scegliere le proposte spurie (utente, 2026-09-24 notte) ──────────────
+
+
+def _nested_dialog():
+    """Un riquadro piccolo DENTRO uno grande, con il grande DOPO nell'elenco."""
+    app = QApplication.instance() or QApplication([])
+    proposals = [_proposal(1, (.20, .20, .26, .26), _yolo_review_only=True, _yolo_confidence=.1),
+                 _proposal(2, (.10, .10, .60, .60), _yolo_class='ic')]
+    widget = YoloReviewDialog(b"", proposals, LENGTH_MM, WIDTH_MM, detector_classes())
+    widget.resize(900, 600)
+    widget.show()
+    app.processEvents()
+    return app, widget
+
+
+def test_a_small_box_inside_a_large_one_can_be_chosen():
+    """@brief Positivo: vince il piu' piccolo che contiene il punto, non l'ultimo dell'elenco.
+
+    Negativo: dove c'e' solo il grande, vince il grande.
+    """
+    _app, widget = _nested_dialog()
+    view = widget.view
+    try:
+        _drag(view, view.to_widget((.20, .20, .26, .26)).center(), (0, 0))
+        assert view.selected == 0
+        _drag(view, view.to_widget((.45, .45, .55, .55)).center(), (0, 0))
+        assert view.selected == 1
+    finally:
+        widget.close()
+
+
+def test_with_the_draw_tool_a_still_click_chooses_and_a_drag_still_draws(dialog):
+    """@brief Positivo: con Disegna un clic fermo sceglie il riquadro (e nel vuoto toglie la scelta).
+
+    Negativo: un trascinamento con Disegna traccia ancora un riquadro nuovo.
+    Prima con Disegna attivo le proposte non si potevano scegliere.
+    """
+    widget, _ = dialog
+    view = widget.view
+    widget.set_tool(TOOL_DRAW)
+    before = widget.kept()
+    _drag(view, view.to_widget(FIRST_BOX).center(), (0, 0))
+    assert view.selected == 0 and widget.btn_delete.isEnabled()
+    assert widget.kept() == before
+    _drag(view, _empty_point(view), (0, 0))
+    assert view.selected == -1
+    frame = view._frame()
+    _drag(view, QPointF(frame.x() + frame.width() * .40, frame.y() + frame.height() * .60),
+          _pixels(view, .15, .10))
+    assert len(widget.kept()) == len(before) + 1
+    assert view.tool == TOOL_DRAW

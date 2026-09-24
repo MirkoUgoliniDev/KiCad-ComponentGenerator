@@ -9,11 +9,11 @@ from .profile_dialog import icon_button, show_info
 class GenerationOptionsDialog(QDialog):
     """@brief Edit generation options before a component is produced."""
     def __init__(self, include_nc_pins=True, parent=None, *, advanced_user=False,
-                 silk_pin_labels=False):
+                 silk_pin_labels=False, pause_after_inventory=True):
         super().__init__(parent)
         self.setWindowTitle("Opzioni di generazione")
         self.setModal(True)
-        self.resize(580, 340)
+        self.resize(580, 420)
         layout = QVBoxLayout(self)
         page = QWidget()
         page_layout = QVBoxLayout(page)
@@ -62,6 +62,24 @@ class GenerationOptionsDialog(QDialog):
             'automatica si ferma. Attiva Advanced user per rivedere i dati e generare manualmente.',
             text_key='help.generation.advanced_user')))
         page_layout.addWidget(mode)
+        # La pausa dopo l'inventario AI: un'impostazione, quindi qui e non nel
+        # tab Progetto (utente, 2026-09-24). Stessa chiave di config.json.
+        analysis = QGroupBox("Analisi AI")
+        analysis_layout = QHBoxLayout(analysis)
+        self.pause_checkbox = QCheckBox(
+            "Fermati dopo l'inventario AI per rivedere i corpi (gratuito)")
+        self.pause_checkbox.setChecked(pause_after_inventory)
+        analysis_layout.addWidget(self.pause_checkbox, 1)
+        analysis_layout.addWidget(icon_button('Info', 'info.svg', lambda: show_info(self,
+            'Analisi AI',
+            "Quando l'inventario AI ha finito, la pipeline si ferma e propone la "
+            "revisione dei componenti prima dell'abbinamento dei modelli KiCad e della "
+            "generazione 3D: da li' si spostano, ridimensionano, aggiungono ed eliminano "
+            "i corpi. La revisione non fa richieste AI: e' gratuita.\n\n"
+            "Togliendo la spunta l'analisi prosegue da sola con i corpi proposti dall'AI; "
+            "la revisione resta disponibile dai pulsanti in fondo al tab Progetto.",
+            text_key='help.generation.pause_after_inventory')))
+        page_layout.addWidget(analysis)
         page_layout.addStretch()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -86,3 +104,7 @@ class GenerationOptionsDialog(QDialog):
     def silk_pin_labels(self):
         """@brief Tell whether pin names must be engraved on the 3D silkscreen."""
         return self.silk_labels_checkbox.isChecked()
+
+    def pause_after_inventory(self):
+        """@brief Tell whether the pipeline stops after the AI inventory for a review."""
+        return self.pause_checkbox.isChecked()

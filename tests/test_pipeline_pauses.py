@@ -236,7 +236,15 @@ def test_with_the_setting_off_nothing_is_asked_and_the_run_is_as_before(
     _ready(window, monkeypatch)
     saved = []
     monkeypatch.setattr(gui, "save_config", lambda config: saved.append(dict(config)))
-    window.chk_pause_after_inventory.setChecked(False)
+    # Dal 2026-09-24 la casella sta in Configurazione -> Opzioni di
+    # generazione (utente): la si spegne da li', come fa lui.
+    from kicadgen.gui.generation_options_dialog import GenerationOptionsDialog
+
+    def untick_and_save(dialog):
+        dialog.pause_checkbox.setChecked(False)
+        return QDialog.DialogCode.Accepted
+    monkeypatch.setattr(GenerationOptionsDialog, "exec", untick_and_save)
+    window._edit_generation_options()
     assert saved and saved[-1]["pause_after_inventory"] is False
     assert not window._inventory_pause_enabled()
     _answer_pause(monkeypatch, None)
@@ -751,21 +759,24 @@ def test_the_bottom_row_reads_as_one_pipeline_with_the_price_of_each_step(window
         assert f"Passo {step}" in button.toolTip()
 
 
-def test_the_pipeline_caption_appears_only_when_a_step_is_available(window):  # noqa: F811
-    """@brief Negativo: nessun rientro disponibile, nessuna riga che li annuncia.
+def test_the_pipeline_caption_is_gone_and_the_pause_lives_in_the_options(window):  # noqa: F811
+    """@brief Tolte dal tab Progetto la riga dei rientri e la casella della pausa (utente, 2026-09-24).
 
-    Stessa disciplina dei pulsanti (`_set_action_available`): cio' che non puo'
-    agire non si vede. Una didascalia che elenca tre passi sopra una fila vuota
-    descriverebbe qualcosa che non c'e'.
+    Contratto cambiato di proposito. Negativo: nessun testo «Rientri nella
+    pipeline» e nessuna casella della pausa nel tab Progetto. Positivo: la
+    pausa e' nelle Opzioni di generazione, accesa di serie, e ordine e costo
+    dei rientri restano nel tooltip di ogni pulsante («Passo N»).
     """
-    caption = window.lbl_pipeline_steps
-    assert not caption.isVisibleTo(caption.parentWidget())
-    window._photo_png = b"finta foto"
-    window._refresh_edit_review_buttons()
-    assert window.btn_edit_component_review.isVisibleTo(
-        window.btn_edit_component_review.parentWidget())
-    assert caption.isVisibleTo(caption.parentWidget())
-    assert "gratuito" in caption.text() and "a pagamento" in caption.text()
-    window._photo_png = None
-    window._refresh_edit_review_buttons()
-    assert not caption.isVisibleTo(caption.parentWidget())
+    from PyQt6.QtWidgets import QCheckBox, QLabel
+    from kicadgen.gui.generation_options_dialog import GenerationOptionsDialog
+    project = window.tabs.widget(0)
+    assert not any("Rientri nella pipeline" in label.text()
+                   for label in project.findChildren(QLabel))
+    assert not any("inventario AI" in box.text() for box in project.findChildren(QCheckBox))
+    dialog = GenerationOptionsDialog(pause_after_inventory=window._inventory_pause_enabled())
+    assert dialog.pause_after_inventory() is True
+    for step, button in enumerate((window.btn_reopen_review, window.btn_relaunch_inventory,
+                                   window.btn_edit_component_review), start=1):
+        assert f"Passo {step}" in button.toolTip()
+
+

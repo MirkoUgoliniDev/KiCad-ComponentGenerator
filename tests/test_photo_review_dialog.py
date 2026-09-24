@@ -2049,7 +2049,12 @@ def test_the_global_uncertainties_are_reachable_and_rendered_as_plain_text(
     """
     assert inventory_dialog.model_uncertainties() == [_MODEL_DOUBT]
     assert inventory_dialog.uncertainties_button.isVisibleTo(inventory_dialog)
-    assert "(1)" in inventory_dialog.uncertainties_button.text()
+    # Dal 2026-09-24 e' un'icona della barra: il numero sta nel tooltip e nel
+    # nome accessibile (utente: «sposta questo come icona in alto»).
+    assert "(1)" in inventory_dialog.uncertainties_button.accessibleName()
+    assert inventory_dialog.uncertainties_button.toolTip().startswith(
+        inventory_dialog.uncertainties_button.accessibleName())
+    assert inventory_dialog.uncertainties_button in _toolbar_buttons(inventory_dialog)
     inventory_dialog.show_uncertainties()
     app.processEvents()
     assert inventory_dialog.uncertainties_dialog.isVisible()
@@ -2094,3 +2099,32 @@ def test_deleting_the_last_carrier_takes_the_doubts_away(inventory_dialog, app):
     app.processEvents()
     assert inventory_dialog.model_uncertainties() == []
     assert not inventory_dialog.uncertainties_button.isVisibleTo(inventory_dialog)
+
+
+def test_a_small_outline_inside_a_large_one_is_on_top(app, png):
+    """@brief Positivo: il rettangolo piccolo dentro il grande sta sopra, qualunque sia l'ordine.
+
+    Negativo: il rettangolo scelto resta comunque sopra a tutti.
+    (Utente, 2026-09-24: una proposta spuria dentro un corpo grande non si
+    poteva scegliere col mouse.)
+    """
+    components = [
+        dict(name="small", kind="resistor", x_mm=-10.0, y_mm=0.0, length_mm=1.0, width_mm=.5,
+             height_mm=.5, rotation_deg=0.0, confidence="low"),
+        dict(name="large", kind="ic", x_mm=-10.0, y_mm=0.0, length_mm=12.0, width_mm=8.0,
+             height_mm=1.0, rotation_deg=0.0, confidence="high"),
+    ]
+    widget = PhotoReviewDialog(png, components, 40, 20)
+    widget.show()
+    app.processEvents()
+    try:
+        small, large = widget._items
+        widget.scene.clearSelection()
+        widget._selection_changed()
+        assert small.zValue() > large.zValue()
+        large.setSelected(True)
+        widget._selection_changed()
+        assert large.zValue() > small.zValue()
+    finally:
+        widget.close()
+        app.processEvents()
