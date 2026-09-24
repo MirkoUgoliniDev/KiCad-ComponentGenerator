@@ -1,11 +1,13 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `3cdea2a` (pushato):
-  localizzazione completa di log, diario, avanzamento ed errori (sezione
-  «verifica che non ci siano testi in italiano cablati» in fondo al file).
-  Prima: `b1ee2c0` (.gitignore), `eb633ea` (difetti 1-15 e 17).
-  Lavoro NON committato: punti 1-13 delle segnalazioni dell'utente e il
-  «completa tutto» (in fondo, «PIANO IN CORSO (24/09) — completa tutto»).
+- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `7223819` (pushato):
+  revisione interfaccia (punti 1-27 in fondo al file), credito e costo AI
+  del progetto, anteprime con zoom, pin dentro la scheda, raccordi
+  impossibili, rigenerazione 3D dopo «Applica». Prima: `3cdea2a`
+  (localizzazione completa), `b1ee2c0` (.gitignore), `eb633ea` (difetti).
+  Aperti SOLO decisioni dell'utente: nomi front/back contro cubo 3D (serve
+  migrazione), conferme della scelta STEP a icona, invio all'AI della foto
+  gia' ruotata secondo l'EXIF.
 - Suite completa (24/09, dopo anteprima con zoom): 4032 passati, 3 saltati,
   2 xfail attesi, 19 sottotest; uscita del processo 0 (controllarla sempre).
 - Difetto 16 CHIUSO (utente, 24/09, scelta «A»): la frase «Tipo SMD di
