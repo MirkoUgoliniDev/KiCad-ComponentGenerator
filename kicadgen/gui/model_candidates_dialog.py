@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -12,10 +13,10 @@ import tempfile
 from PyQt6.QtCore import (
     QEvent, QObject, QPointF, QRunnable, QSignalBlocker, Qt, QThreadPool, QTimer, pyqtSignal,
 )
-from PyQt6.QtGui import QBrush, QColor, QIcon, QImage, QPainter, QPen, QPixmap, QPolygonF
+from PyQt6.QtGui import QBrush, QColor, QImage, QPainter, QPen, QPixmap, QPolygonF
 from PyQt6.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QGridLayout,
-    QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton, QToolButton, QVBoxLayout,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton, QVBoxLayout,
     QWidget,
 )
 
@@ -187,6 +188,33 @@ def _step_file(path):
         return False
 
 
+#: QImage text key carrying the angle chosen by the automatic orientation.
+AUTO_ROTATION_KEY = 'kicadgen-auto-rotation-deg'
+
+
+def _reported_auto_angle(output):
+    """Angle in [0, 360) from the importer's ``local_rotation_deg=`` line, or None."""
+    match = re.search(r'local_rotation_deg=(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)', output)
+    if not match:
+        return None
+    value = float(match.group(1))
+    if not math.isfinite(value):
+        return None
+    return round(value % 360, 3) % 360
+
+
+def _image_auto_angle(image):
+    """Angle stored by `_thumbnail` on an automatic preview, or None."""
+    if not isinstance(image, QImage) or image.isNull():
+        return None
+    text = image.text(AUTO_ROTATION_KEY)
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+    return value if math.isfinite(value) else None
+
+
 def _thumbnail(path, rotation, dimensions=None, color=None, view=VIEW_ISOMETRIC):
     """Tessellate STEP; automatic orientation uses the production CAD importer.
 
@@ -199,7 +227,11 @@ def _thumbnail(path, rotation, dimensions=None, color=None, view=VIEW_ISOMETRIC)
     @param view VIEW_PLAN (top view, the dialog default) or VIEW_ISOMETRIC. The
     parameter default stays isometric so direct callers keep the historical
     camera; the dialog always passes the view explicitly.
-    @return QImage of 340x340 pixels with the shape shaded per face.
+    @return QImage of 340x340 pixels with the shape shaded per face. With
+        automatic orientation the image carries the text key
+        ``AUTO_ROTATION_KEY``: the angle the production importer chose (its
+        ``local_rotation_deg=`` line), so the dialog can show it and start the
+        manual rotation from it without a second CAD run.
     @throws ValueError When dimensions, mesh size or mesh coordinates are
     unusable, or when @p view is not a known camera.
     @note The rotation is applied about the model's own Z axis *before* the
@@ -263,9 +295,12 @@ def _thumbnail(path, rotation, dimensions=None, color=None, view=VIEW_ISOMETRIC)
             f'with open({str(output)!r}, "w") as stream:\n'
             '    json.dump({"vertices": [[v.x,v.y,v.z] for v in vertices], '
             '"triangles": triangles}, stream)\n', encoding='utf-8')
-        subprocess.run([executable, str(script)], stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=25, check=True,
-                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        completed = subprocess.run([executable, str(script)], stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, timeout=25, check=True,
+                                   text=True, errors='replace',
+                                   creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        auto_angle = (_reported_auto_angle(getattr(completed, 'stdout', '') or '')
+                      if geometry_source.startswith('sys.path') else None)
         if output.stat().st_size > 20_000_000:
             raise ValueError('Preview mesh too large')
         mesh = json.loads(output.read_text(encoding='utf-8'))
@@ -336,6 +371,8 @@ def _thumbnail(path, rotation, dimensions=None, color=None, view=VIEW_ISOMETRIC)
                         170+(points[i][1]-(ymin+ymax)/2)*scale) for i in face]))
     finally:
         painter.end()
+    if auto_angle is not None:
+        image.setText(AUTO_ROTATION_KEY, f'{auto_angle:g}')
     return image
 
 
@@ -527,18 +564,55 @@ class ModelCandidatesDialog(QDialog):
         preview_grid = QGridLayout(preview_box)
         preview_grid.setContentsMargins(0, 0, 0, 0)
         preview_grid.addWidget(self.preview_label, 0, 0)
-        self.view_button = QToolButton(preview_box)
+        # Rotazione del modello direttamente sull'anteprima (utente,
+        # 2026-09-24): sotto il cubo due frecce a passi di 90 gradi e
+        # «torna all'automatico». Il campo numerico e la casella restano come
+        # stato interno, nascosti: le frecce li comandano.
+        # Il cubo e' costruito come le icone che gli stanno sotto (stessa
+        # misura, stesso stile, tooltip nome + spiegazione): un pulsante a
+        # parte con la misura predefinita di Qt risultava piu' piccolo e fuori
+        # colonna (utente, 2026-09-24).
+        from .review_tools import tool_button
+        self.view_button = tool_button(
+            'step-view-iso.svg', 'Vista isometrica', '',
+            'Premuto: vista isometrica, per ispezionare il modello. Rilasciato: '
+            'vista in pianta, confrontabile con la foto.', checkable=True, tr=tx)
         self.view_button.setObjectName('preview_view_toggle')
-        self.view_button.setCheckable(True)
         self.view_button.setChecked(self._view == VIEW_ISOMETRIC)
-        self.view_button.setAutoRaise(True)
-        self.view_button.setIcon(QIcon(str(Path(__file__).resolve().parent
-                                           / 'assets' / 'step-view-iso.svg')))
-        self.view_button.setToolTip('Vista isometrica (per ispezione); rilasciato: '
-                                    'vista in pianta, confrontabile con la foto')
-        preview_grid.addWidget(self.view_button, 0, 0,
+        self.rotate_ccw_button = tool_button(
+            "rotate-ccw.svg", "Ruota di 90° in senso antiorario", "",
+            "Ruota il modello KiCad di un quarto di giro; passa alla rotazione manuale.",
+            tr=tx)
+        self.rotate_cw_button = tool_button(
+            "rotate-cw.svg", "Ruota di 90° in senso orario", "",
+            "Ruota il modello KiCad di un quarto di giro; passa alla rotazione manuale.",
+            tr=tx)
+        self.rotate_auto_button = tool_button(
+            "rotate-auto.svg", "Automatico: deduci gli assi CAD dall’ingombro", "",
+            "Torna all'orientamento calcolato dal programma. Un giro di 180° non "
+            "si distingue dall'ingombro: se il verso e' sbagliato usa le frecce.",
+            checkable=True, tr=tx)
+        self.rotate_ccw_button.clicked.connect(lambda: self._rotate_by(90))
+        self.rotate_cw_button.clicked.connect(lambda: self._rotate_by(-90))
+        self.rotate_auto_button.toggled.connect(self._auto_button_toggled)
+        preview_tools = QWidget(preview_box)
+        tools_column = QVBoxLayout(preview_tools)
+        tools_column.setContentsMargins(0, 0, 0, 0)
+        tools_column.setSpacing(2)
+        self.view_button.setParent(preview_tools)
+        for button in (self.view_button, self.rotate_ccw_button, self.rotate_cw_button,
+                       self.rotate_auto_button):
+            tools_column.addWidget(button, 0, Qt.AlignmentFlag.AlignRight)
+        self.rotation_angle_label = QLabel()
+        self.rotation_angle_label.setObjectName('rotation_angle')
+        self.rotation_angle_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.rotation_angle_label.setProperty('i18n_skip', True)
+        tools_column.addWidget(self.rotation_angle_label)
+        tools_column.addStretch()
+        preview_grid.addWidget(preview_tools, 0, 0,
                                Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
-        self.view_button.raise_()
+        preview_tools.raise_()
+        self._auto_angle = None
         self.view_button.toggled.connect(self._view_toggled)
         images.addWidget(preview_box)
         layout.addLayout(images)
@@ -610,14 +684,31 @@ class ModelCandidatesDialog(QDialog):
         rotation_row.addWidget(self.rotation_state)
         rotation_row.addStretch(1)
         self._update_rotation_controls()
-        layout.addLayout(rotation_row)
+        # Stato interno, non piu' comandi a vista (utente, 2026-09-24): le
+        # frecce sull'anteprima li sostituiscono.
+        self._rotation_controls = QWidget()
+        self._rotation_controls.setLayout(rotation_row)
+        self._rotation_controls.hide()
+        layout.addWidget(self._rotation_controls)
+        self.auto_rotation.hide()
+        self.rotation_hint.hide()
         controls = QHBoxLayout()
-        self.manual_button = QPushButton('Scegli file STEP…')
+        # Icone con tooltip (utente, 2026-09-24). Le conferme in fondo («Usa il
+        # modello selezionato», «Annulla») restano scritte: sono la decisione
+        # della finestra e devono dire cosa confermano senza passarci sopra.
+        from .review_tools import tool_button
+        self.manual_button = tool_button(
+            "docs-open.svg", "Scegli file STEP…", "",
+            "Usa un file STEP scelto da te al posto dei candidati.", tr=tx)
         self.manual_button.clicked.connect(self._choose_file)
         controls.addWidget(self.manual_button)
-        self.none_button = QPushButton('Nessuno corrisponde — conserva il segnaposto')
+        self.none_button = tool_button(
+            "placeholder-keep.svg", "Nessuno corrisponde — conserva il segnaposto", "",
+            "Nessun modello KiCad va bene: il componente resta con la forma "
+            "approssimata.", tr=tx)
         self.none_button.clicked.connect(self._none_match)
         controls.addWidget(self.none_button)
+        controls.addStretch()
         layout.addLayout(controls)
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText('Usa il modello selezionato')
@@ -674,6 +765,47 @@ class ModelCandidatesDialog(QDialog):
             if automatic else
             tx('Override locale esplicito: anche 0° disattiva l’inferenza degli assi. '
                'La rotazione del componente nella foto resta indipendente.'))
+        if hasattr(self, 'rotation_angle_label'):
+            self._update_rotation_readout()
+
+    def _rotate_by(self, step):
+        """@brief Turn the model by `step` degrees from the angle shown now.
+
+        @param step +90 (counter-clockwise, as KiCad's positive Z) or -90.
+        @note From automatic, the turn starts from the angle the automatic
+            placement chose (`_auto_angle`, reported by the preview), so the
+            first click moves the picture by exactly one quarter; unknown, it
+            starts from 0.
+        """
+        if self.auto_rotation.isChecked():
+            base = self._auto_angle if self._auto_angle is not None else 0.0
+        else:
+            base = self.rotation.value()
+        angle = (base + step) % 360
+        self.rotation.setValue(angle)
+        # Same value as before (e.g. automatic already at that angle): still
+        # an explicit choice.
+        if self.auto_rotation.isChecked():
+            self.auto_rotation.setChecked(False)
+
+    def _auto_button_toggled(self, checked):
+        """Mirror the «automatic» icon onto the internal checkbox."""
+        if self.auto_rotation.isChecked() != checked:
+            self.auto_rotation.setChecked(checked)
+
+    def _update_rotation_readout(self):
+        """Angle under the rotation icons: the one in force, and who chose it."""
+        if self.auto_rotation.isChecked():
+            text = (tx('{angle}° auto', angle=f"{self._auto_angle:g}")
+                    if self._auto_angle is not None else tx('auto'))
+        else:
+            text = f"{self.rotation.value():g}°"
+        self.rotation_angle_label.setText(text)
+        button = self.rotate_auto_button
+        if button.isChecked() != self.auto_rotation.isChecked():
+            button.blockSignals(True)
+            button.setChecked(self.auto_rotation.isChecked())
+            button.blockSignals(False)
 
     def _rotation_claimed(self, *_):
         """Hand the rotation to the explicit override the moment the user acts.
@@ -696,6 +828,7 @@ class ModelCandidatesDialog(QDialog):
             # value; starting a second one here would only bump the token.
             self.auto_rotation.setChecked(False)
             return
+        self._update_rotation_readout()
         self._start_preview()
 
     def _rotation_mode_changed(self, *_):
@@ -927,6 +1060,11 @@ class ModelCandidatesDialog(QDialog):
             self._start_preview()
             return
         self.preview_label.unsetCursor()
+        if worker is not None and worker.rotation is None:
+            # Angle chosen by the automatic placement for THIS model: shown
+            # under the arrows and used as the start of the first manual turn.
+            self._auto_angle = _image_auto_angle(image)
+            self._update_rotation_readout()
         if isinstance(image, QImage) and not image.isNull():
             self._preview_image = image
             self._fit_preview_image()

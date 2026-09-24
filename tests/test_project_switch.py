@@ -52,13 +52,13 @@ def test_opening_another_project_forgets_the_photo_and_the_extraction(window, mo
     window._last_extracted = object()
     window._reviewed_this_extraction = True
     window._refresh_edit_review_buttons()
-    assert window.btn_edit_component_review.isVisibleTo(window)
+    assert window.btn_edit_component_review_top.isVisibleTo(window)
 
     _open(window, monkeypatch, "B")
     assert window._photo_png is None and window._photo_overlay_png is None
     assert window._last_extracted is None and window._reviewed_this_extraction is False
     assert window._last_mesh_path is None and window.package_geometry is None
-    assert not window.btn_edit_component_review.isVisibleTo(window)
+    assert not window.btn_edit_component_review_top.isVisibleTo(window)
     assert window.field_description.text() == "modulo B"
 
 
@@ -242,27 +242,27 @@ def _named_like(root, name):
                   if p.name.casefold() == name or "rinomina" in p.name)
 
 
-# ── «Usa questo nome» durante un lavoro in corso ─────────────────────────
+# ── Rinomina durante un lavoro in corso ──────────────────────────────────
 
-def test_the_suggested_name_waits_for_the_running_work(window, monkeypatch):  # noqa: F811
-    """@brief Positivo: con un lavoro in corso il nome proposto non si applica.
+def test_a_rename_waits_for_the_running_work(window, monkeypatch):  # noqa: F811
+    """@brief Positivo: con un lavoro in corso la rinomina non parte. Negativo: a lavoro finito si'.
 
-    Negativo: a lavoro finito si applica.
+    Prima valeva per «Usa questo nome», tolto il 2026-09-24 (utente): il nome
+    si cambia solo da «Rinomina progetto…», con la stessa guardia.
     """
     monkeypatch.setattr(gui, "save_config", lambda config: None)
     root = window._library_root()
     (root / "Vecchio" / "docs").mkdir(parents=True)
     _open(window, monkeypatch, "Vecchio")
-    window._set_suggested_name("Proposto")
     busy = {"value": True}
     monkeypatch.setattr(window, "_background_work_running", lambda: busy["value"])
     monkeypatch.setattr(gui.QMessageBox, "information", lambda *args, **kwargs: None)
-    window._apply_suggested_name()
+    _name_dialog_returns(monkeypatch, "Proposto")
+    window._rename_project()
     assert window._component_name() == "Vecchio"
     busy["value"] = False
-    window._apply_suggested_name()
+    window._rename_project()
     assert window._component_name() == "Proposto"
-
 
 # ── ramo «documenti in conflitto» di `_migrate_docs_to_new_name` ─────────
 

@@ -42,7 +42,8 @@ def test_warning_reaches_disk_and_ai_dialog_exactly_once(window, handler):
 
 
 @pytest.mark.parametrize("docs_state", ["absent", "empty"])
-def test_name_migration_without_documents_preserves_log_and_continues_it(window, docs_state):
+def test_name_migration_without_documents_preserves_log_and_continues_it(window, docs_state,
+                                                                          monkeypatch):
     source = _prepare_project(window, docs_state)
     original = source.read_bytes()
     target = source.parent.parent / "LogRenamed" / window.LOG_FILENAME
@@ -50,7 +51,7 @@ def test_name_migration_without_documents_preserves_log_and_continues_it(window,
     # L'estrazione propone il nome; il progetto lo cambia solo su richiesta,
     # ed e' li' che il log deve seguire senza perdere una riga.
     window._on_extracted(_extracted("LogRenamed"))
-    window.btn_use_suggested_name.click()
+    _rename_to(window, monkeypatch, "LogRenamed")
 
     assert window._component_name() == "LogRenamed"
     assert window._log_file() == target
@@ -86,10 +87,11 @@ def test_failed_log_move_refuses_rename_and_preserves_project(
     else:
         params = _extracted("LogRenamed")
         window._on_extracted(params)
-        # Il nome proposto non tocca nulla finche' non viene accettato: e'
-        # accettandolo che lo spostamento fallisce e il progetto resta.
+        # Il nome proposto non tocca nulla finche' non viene adottato (da
+        # «Rinomina progetto…» dal 2026-09-24): e' li' che lo spostamento
+        # fallisce e il progetto resta.
         assert params.name == "LogOriginal"
-        window.btn_use_suggested_name.click()
+        _rename_to(window, monkeypatch, "LogRenamed")
 
     assert attempts == [(source, destination / window.LOG_FILENAME)]
     assert window._component_name() == "LogOriginal"
@@ -139,3 +141,16 @@ def test_freecad_component_lines_drive_the_3d_progress():
     assert freecad_progress("FreeCAD: KICADGEN_IMPORT_START:C:\\x\\y.STEP") is None
     assert freecad_progress("Generazione del modello 3D tramite FreeCAD…") is None
     assert freecad_progress("") is None and freecad_progress(None) is None
+
+
+def _rename_to(window, monkeypatch, name):
+    """Rinomina come fa l'utente: File > Rinomina progetto… (dal 2026-09-24 il
+    pulsante «Usa questo nome» non c'e' piu')."""
+    from PyQt6.QtWidgets import QDialog
+    from kicadgen.gui.project_dialogs import ProjectNameDialog
+
+    def accept(self):
+        self.field.setText(name)
+        return QDialog.DialogCode.Accepted
+    monkeypatch.setattr(ProjectNameDialog, "exec", accept)
+    window._rename_project()

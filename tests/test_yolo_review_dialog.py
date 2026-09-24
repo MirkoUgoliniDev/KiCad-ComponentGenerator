@@ -437,7 +437,6 @@ def test_the_caller_list_survives_whatever_happens_in_the_review(dialog):
     widget, proposals = dialog
     original = [dict(row) for row in proposals]
     widget._select_row(0)
-    widget._change_class('inductor')
     widget._delete_selected()
     assert proposals == original
 
@@ -470,11 +469,19 @@ def test_weak_and_strong_stay_distinguishable_to_the_eye_and_to_the_caller(dialo
     assert box_pen(strong, chosen=True).color() != box_pen(strong).color()
 
 
-def test_correcting_the_category_reaches_the_caller(dialog):
+def test_the_detector_category_reaches_the_caller_unchanged(dialog):
+    """@brief Contratto cambiato il 2026-09-24 (utente): il menu per correggere la
+    categoria e' stato tolto, perche' la categoria arriva al modello solo come
+    indizio. Positivo: quella del rilevatore arriva intatta. Negativo: nessun
+    comando della finestra la modifica piu' e un riquadro disegnato a mano non
+    eredita quella dell'ultimo scelto.
+    """
     widget, _ = dialog
     widget._select_row(1)
-    widget._change_class('diode')
-    assert [row['_yolo_class'] for row in widget.kept()] == ['resistor', 'diode']
+    assert [row['_yolo_class'] for row in widget.kept()] == ['resistor', 'capacitor']
+    assert not hasattr(widget, 'combo_class') and not hasattr(widget, '_change_class')
+    widget._add_box((.25, .40, .75, .50))
+    assert widget.kept()[-1]['_yolo_class'] == ''
 
 
 def test_a_hand_drawn_body_is_measured_with_the_board_calibration(dialog):
@@ -828,12 +835,8 @@ def test_every_gesture_still_works_with_the_photograph_hidden(photo_dialog):
     added = widget.kept()[-1]
     assert added['_yolo_origin'] == 'user_added'
     assert added['length_mm'] == pytest.approx(.20 * LENGTH_MM)
-    # Categoria e lista continuano a seguire la scelta.
+    # Eliminazione (la correzione della categoria non esiste piu', 2026-09-24).
     widget._select_row(1)
-    widget._change_class('diode')
-    assert widget.kept()[1]['_yolo_class'] == 'diode'
-    assert 'diode' in widget.list.item(1).text()
-    # Eliminazione.
     widget._delete_selected()
     assert [row['_id'] for row in widget.kept()] == [1, 3]
     # Lo stato non e' cambiato per conto suo durante tutto questo.
@@ -958,7 +961,7 @@ def test_a_still_click_on_empty_board_clears_the_selection(dialog):
     _drag(view, _empty_point(view), (0, 0))
     assert view.selected == -1
     assert widget.list.currentRow() == -1
-    assert not widget.btn_delete.isEnabled() and not widget.combo_class.isEnabled()
+    assert not widget.btn_delete.isEnabled()
     assert widget.kept() == before
 
 

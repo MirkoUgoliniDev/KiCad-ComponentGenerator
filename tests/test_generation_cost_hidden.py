@@ -37,8 +37,8 @@ def _bill(cost=0.05):
 def test_automatic_generation_modal_has_no_cost(window, monkeypatch):  # noqa: F811
     """@brief Positivo: la generazione automatica parte con la modale senza costo.
 
-    Negativo per lo storico: la label sotto il pulsante conserva il costo
-    dell'analisi, che e' un dato vero e va tenuto.
+    Negativo per lo storico: il Log AI conserva il costo dell'analisi, che e'
+    un dato vero e va tenuto (la label sotto il pulsante e' stata tolta).
     """
     begin(window, monkeypatch)
     _bill()
@@ -48,7 +48,9 @@ def test_automatic_generation_modal_has_no_cost(window, monkeypatch):  # noqa: F
     assert 'Generazione' in window.analysis_overlay.title.text()
     assert window.analysis_overlay.cost.text() == ''
     assert window.analysis_overlay.cost.isHidden()
-    assert '0.05' in window.lbl_ai_cost.text(), "lo storico dell'analisi resta"
+    # La label sotto il pulsante non c'e' piu' (utente, 2026-09-24): lo
+    # storico dell'analisi resta nel Log AI.
+    assert '0.05' in window.ai_progress_text.toPlainText(), "lo storico dell'analisi resta"
 
 
 def test_a_late_extraction_finish_does_not_bring_the_cost_back(window, monkeypatch):  # noqa: F811
@@ -56,7 +58,7 @@ def test_a_late_extraction_finish_does_not_bring_the_cost_back(window, monkeypat
 
     Nella corsa vera `finished` dell'estrazione puo' arrivare quando la
     generazione e' gia' partita (qui: il secondo `_on_extract_finished`).
-    Ricalcolare il consuntivo e' giusto per la label; rimetterlo nella modale
+    Ricalcolare il consuntivo e' giusto per il log; rimetterlo nella modale
     della generazione no.
     """
     begin(window, monkeypatch)
@@ -66,7 +68,7 @@ def test_a_late_extraction_finish_does_not_bring_the_cost_back(window, monkeypat
     window._on_extract_finished()
     assert window.analysis_overlay.cost.text() == ''
     assert window.analysis_overlay.cost.isHidden()
-    assert '0.05' in window.lbl_ai_cost.text()
+    assert '0.05' in window.ai_progress_text.toPlainText()
 
 
 def test_the_analysis_modal_still_shows_the_cost(window):  # noqa: F811

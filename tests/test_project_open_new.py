@@ -157,15 +157,25 @@ def test_rename_moves_the_project_under_the_new_name(window, monkeypatch, tmp_pa
     assert (window._docs_dir() / "top.png").is_file()
 
 
-def test_the_proposed_name_of_another_project_is_refused(window):  # noqa: F811
-    """@brief 3a. Positivo: un nome libero si applica. Negativo: quello di un altro progetto no."""
+def test_the_proposed_name_of_another_project_is_refused(window, monkeypatch):  # noqa: F811
+    """@brief 3a. Positivo: un nome libero si applica. Negativo: quello di un altro progetto no.
+
+    Dal 2026-09-24 il nome proposto si adotta da «Rinomina progetto…»: e' il
+    dialogo a rifiutare il nome di un altro progetto (Ok spento).
+    """
     root = window._library_root()
     _project(root, "GiaPresente")
     current = window._component_name()
-    window._set_suggested_name("GiaPresente")
-    window._apply_suggested_name()
-    assert window._component_name() == current
-    assert "non applicato" in window.lbl_name_suggestion.text()
-    window._set_suggested_name("NomeLibero")
-    window._apply_suggested_name()
+    seen = {}
+
+    def try_taken(dialog):
+        dialog.field.setText("GiaPresente")
+        seen["ok"] = dialog.buttons.button(QDialogButtonBox.StandardButton.Ok).isEnabled()
+        return QDialog.DialogCode.Rejected
+    _accept_with(monkeypatch, ProjectNameDialog, lambda d: None)
+    monkeypatch.setattr(ProjectNameDialog, "exec", try_taken)
+    window._rename_project()
+    assert seen["ok"] is False and window._component_name() == current
+    _accept_with(monkeypatch, ProjectNameDialog, lambda d: d.field.setText("NomeLibero"))
+    window._rename_project()
     assert window._component_name() == "NomeLibero"

@@ -407,8 +407,11 @@ def test_view_toggle_defaults_to_plan_and_rerenders_with_the_same_rotation(dialo
                         or _image('#0000ff'))
     assert window.view_button.isCheckable()
     assert not window.view_button.isChecked()
-    assert window.view_button.toolTip() == ('Vista isometrica (per ispezione); rilasciato: '
-                                            'vista in pianta, confrontabile con la foto')
+    # Contratto cambiato di proposito (utente, 2026-09-24): il cubo e' un'icona
+    # come le altre della colonna, con nome e spiegazione nel tooltip.
+    assert window.view_button.toolTip() == (
+        'Vista isometrica\nPremuto: vista isometrica, per ispezionare il modello. '
+        'Rilasciato: vista in pianta, confrontabile con la foto.')
     assert not window.view_button.icon().isNull()
     window.candidate_list.setCurrentRow(0)
     _wait(app, lambda: not window._workers and calls)
@@ -445,12 +448,20 @@ def test_view_toggle_sits_in_the_top_right_corner_of_the_preview(dialog, app):
     window.show()
     app.processEvents()
     label, button = window.preview_label, window.view_button
-    assert button.parent() is label.parent()
+    # Contratto cambiato di proposito (utente, 2026-09-24): il cubo e' il
+    # primo di una colonna di icone (sotto, le frecce di rotazione), quindi il
+    # confronto si fa in coordinate della finestra, non fra fratelli.
     assert button.isVisible()
-    assert button.geometry().top() == label.geometry().top()
-    assert button.geometry().right() == label.geometry().right()
+    area = label.geometry().translated(label.parent().mapTo(window, label.parent().rect().topLeft()))
+    box = button.rect().translated(button.mapTo(window, button.rect().topLeft()))
+    assert box.top() == area.top()
+    assert box.right() == area.right()
     # Sopra l'anteprima, non accanto: il pulsante cade dentro l'area del label.
-    assert label.geometry().contains(button.geometry())
+    assert area.contains(box)
+    # Le frecce stanno sotto il cubo, dentro la stessa area.
+    ccw = window.rotate_ccw_button
+    ccw_box = ccw.rect().translated(ccw.mapTo(window, ccw.rect().topLeft()))
+    assert ccw_box.top() > box.bottom() and area.contains(ccw_box)
     # Negativo: la foto a sinistra non ospita il pulsante.
     photo = window.photo_label
     photo_right = photo.mapTo(window, photo.rect().topRight()).x()
@@ -488,3 +499,26 @@ def test_a_preview_with_room_is_never_enlarged(dialog, app, monkeypatch):
     app.processEvents()
     assert window.preview_label.pixmap().size().width() == 340
     assert window.preview_label.pixmap().size().height() == 340
+
+
+def test_the_cube_matches_the_rotation_icons_in_size_and_column(dialog, app):
+    """@brief Il cubo ha la misura delle icone sotto e sta nella loro colonna.
+
+    Positivo: stessa misura d'icona e stessa larghezza di pulsante, bordo
+    destro comune. Negativo di controllo: l'etichetta dell'angolo non e' un
+    pulsante e puo' essere piu' larga senza spostare le icone.
+    """
+    window, _ = dialog
+    window.show()
+    app.processEvents()
+    buttons = (window.view_button, window.rotate_ccw_button,
+               window.rotate_cw_button, window.rotate_auto_button)
+    assert {b.iconSize().width() for b in buttons} == {window.rotate_ccw_button.iconSize().width()}
+    assert len({b.size().width() for b in buttons}) == 1
+    assert len({b.size().height() for b in buttons}) == 1
+    rights = {b.mapTo(window, b.rect().topRight()).x() for b in buttons}
+    lefts = {b.mapTo(window, b.rect().topLeft()).x() for b in buttons}
+    assert len(rights) == 1 and len(lefts) == 1
+    for button in buttons:
+        first, _, rest = button.toolTip().partition(chr(10))
+        assert first and rest

@@ -1,4 +1,9 @@
-"""Il consuntivo resta visibile dopo la chiusura della modale di avanzamento."""
+"""Il consuntivo resta leggibile dopo la chiusura della modale di avanzamento.
+
+Contratto cambiato il 2026-09-24 (utente): la label sotto «Estrai parametri
+con AI» e' stata tolta. Il consuntivo va nella modale durante l'analisi e
+resta scritto nel Log AI, che e' lo storico; `_cost_line` lo legge da li'.
+"""
 
 import pytest
 
@@ -20,35 +25,43 @@ def clean_totals():
     openrouter.reset_usage()
 
 
-def test_the_cost_is_hidden_until_an_analysis_has_run(window):
-    assert window.lbl_ai_cost.isHidden()
+def _cost_line(window):
+    """L'ultima riga di consuntivo scritta nel Log AI ('' se nessuna)."""
+    lines = [line for line in window.ai_progress_text.toPlainText().splitlines()
+             if "USD" in line or "cache" in line.lower()]
+    return lines[-1] if lines else ""
 
 
-def test_the_cost_appears_when_the_analysis_ends(window):
+def test_there_is_no_cost_label_and_no_cost_before_an_analysis(window):
+    """@brief Negativo: nessuna label sotto il pulsante, nessun consuntivo prima di un'analisi."""
+    assert not hasattr(window, "lbl_ai_cost")
+    assert _cost_line(window) == ""
+
+
+def test_the_cost_is_logged_when_the_analysis_ends(window):
     openrouter._record_usage(response(0.0417, prompt=14820, completion=530))
     window._on_extract_finished()
-    text = window.lbl_ai_cost.text()
-    assert not window.lbl_ai_cost.isHidden()
+    text = _cost_line(window)
     assert "0.0417" in text and "15350" in text
 
 
 def test_a_cached_run_says_so_instead_of_showing_zero(window):
     """Zero USD e zero chiamate non sono la stessa informazione."""
     window._on_extract_finished()
-    assert "cache" in window.lbl_ai_cost.text().lower()
+    assert "cache" in _cost_line(window).lower()
 
 
 def test_an_incomplete_total_is_labelled_as_underestimated(window):
     openrouter._record_usage(response(0.02, prompt=10))
     openrouter._record_usage(response(None, prompt=10))
     window._on_extract_finished()
-    assert "sottostimato" in window.lbl_ai_cost.text()
+    assert "sottostimato" in _cost_line(window)
 
 
 def test_small_amounts_keep_enough_digits(window):
     openrouter._record_usage(response(3.6e-06, prompt=16, completion=2))
     window._on_extract_finished()
-    assert "0.000004" in window.lbl_ai_cost.text()
+    assert "0.000004" in _cost_line(window)
 
 
 @pytest.mark.parametrize("language", ["en", "it", "fr", "de"])
@@ -109,8 +122,8 @@ def test_a_manual_regeneration_shows_no_cost_in_its_modal(window, monkeypatch):
     """"Rigenera modello 3D" non chiama il modello: mostrare li' il costo
     dell'ultima analisi lo fa leggere come il costo di adesso.
 
-    Resta invece sulla label sotto il pulsante, che dice "ultima analisi"
-    ed e' quindi un dato storico, non l'esito di questa operazione.
+    Resta invece nel Log AI, dove e' un dato storico, non l'esito di
+    questa operazione.
     """
     from kicadgen.services.datasheet_extractor import ExtractedParams
 
@@ -131,4 +144,4 @@ def test_a_manual_regeneration_shows_no_cost_in_its_modal(window, monkeypatch):
     assert window._cad3d_worker is not None, window.log_text.toPlainText()
     assert window.analysis_overlay.cost.text() == ''
     assert window.analysis_overlay.cost.isHidden()
-    assert '0.05' in window.lbl_ai_cost.text(), 'lo storico non va perso'
+    assert '0.05' in _cost_line(window), 'lo storico non va perso'

@@ -741,12 +741,16 @@ def test_the_bottom_row_reads_as_one_pipeline_with_the_price_of_each_step(window
     """
     from tests.test_photo_inventory_gui import tab_outer_layout
 
+    # Dal 2026-09-24 (utente) i tre comandi sono icone nella barra IN CIMA
+    # alla scheda, non piu' una riga in fondo: l'ordine si legge li'.
     outer = tab_outer_layout(window)
-    row = outer.itemAt(outer.count() - 1).layout()
-    order = [row.itemAt(i).widget() for i in range(row.count())
-             if row.itemAt(i).widget() is not None]
-    assert order == [window.btn_reopen_review, window.btn_relaunch_inventory,
-                     window.btn_edit_component_review]
+    bar = outer.itemAt(0).layout()
+    order = [bar.itemAt(i).widget() for i in range(bar.count())
+             if bar.itemAt(i).widget() in (window.btn_reopen_review_top,
+                                           window.btn_relaunch_inventory_top,
+                                           window.btn_edit_component_review_top)]
+    assert order == [window.btn_reopen_review_top, window.btn_relaunch_inventory_top,
+                     window.btn_edit_component_review_top]
     assert "gratuito" in window.btn_reopen_review.toolTip()
     assert "a pagamento" not in window.btn_reopen_review.toolTip().lower()
     assert "A PAGAMENTO" in window.btn_relaunch_inventory.toolTip()

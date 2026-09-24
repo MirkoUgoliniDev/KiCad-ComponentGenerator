@@ -231,3 +231,28 @@ def test_header_section_tooltips_go_through_the_filter(app):
         tooltips.show_tooltip = original
     assert shown == [LONG]
     table.close()
+
+
+def test_every_window_shows_tooltips_even_when_not_active(app):
+    """@brief Positivo: finestre principali e dialoghi ricevono l'attributo al primo Show.
+
+    Qt non manda l'evento ToolTip a una finestra non attiva: tornando col mouse
+    da un altro programma, senza cliccare, nessuna icona mostrava il tooltip
+    (utente, 2026-09-24). Negativo: un widget figlio non e' una finestra e non
+    viene toccato (l'attributo conta sulla finestra).
+    """
+    from PyQt6.QtWidgets import QDialog, QWidget
+    install_tooltip_filter(app)
+    always = Qt.WidgetAttribute.WA_AlwaysShowToolTips
+    window = QWidget()
+    child = QPushButton("x", window)
+    dialog = QDialog(window)
+    assert not window.testAttribute(always) and not dialog.testAttribute(always)
+    window.show()
+    dialog.show()
+    app.processEvents()
+    assert window.testAttribute(always)
+    assert dialog.testAttribute(always)
+    assert not child.testAttribute(always)
+    dialog.close()
+    window.close()

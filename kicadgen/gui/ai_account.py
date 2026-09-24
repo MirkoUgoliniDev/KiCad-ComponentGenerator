@@ -1,0 +1,200 @@
+"""@brief One line under «Extract with AI»: OpenRouter balance and project cost.
+
+The balance comes from OpenRouter's two free status endpoints (no tokens, no
+model call), read in the background. The project cost is the running total
+of `services.project_costs`, updated on every paid call as it happens: the
+worker thread reports the call through a Qt signal, and the file is written
+from the GUI thread, into the project in use (a project cannot change while
+an analysis runs).
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Callable, Optional
+
+from PyQt6.QtCore import QObject, QRunnable, Qt, QThreadPool, pyqtSignal
+from PyQt6.QtWidgets import QLabel
+
+from ..services import openrouter
+from ..services.messages import tx
+from ..services.project_costs import ProjectCostsError, add_call, load_project_costs
+
+
+def format_usd(amount: float) -> str:
+    """@brief Money as the line shows it.
+
+    @param amount USD.
+    @return Two decimals from 1 USD up; four below, where two would round a
+        real expense of a few tenths of a cent down to «0.00».
+    """
+    return f"{amount:.2f}" if abs(amount) >= 1 else f"{amount:.4f}"
+
+
+class _UsageBridge(QObject):
+    """Carries a paid call from the worker thread to the GUI thread."""
+
+    recorded = pyqtSignal(dict)
+
+
+class _BalanceSignals(QObject):
+    ready = pyqtSignal(int, object, str)
+
+
+class _BalanceTask(QRunnable):
+    """Reads the balance off the GUI thread: it is a network request."""
+
+    def __init__(self, token: int):
+        super().__init__()
+        self.token = token
+        self.signals = _BalanceSignals()
+
+    def run(self):
+        """@brief Query OpenRouter and report the status or the error text."""
+        try:
+            status = openrouter.credit_status(force_refresh=True)
+        except Exception as exc:  # noqa: BLE001 - riportato sulla riga, mai fatale
+            self.signals.ready.emit(self.token, None, str(exc))
+            return
+        self.signals.ready.emit(self.token, status, "")
+
+
+class AiAccountLine(QLabel):
+    """@brief Label with the OpenRouter balance and the cost of the current project.
+
+    @note The balance is read only when `balance_enabled` is true: the
+        application turns it on in `main()`, so tests and offline runs never
+        touch the network. Without an API key it says «not available».
+    """
+
+    def __init__(self, project_dir: Callable[[], Optional[object]],
+                 log: Callable[[str], None], parent=None):
+        """@brief Build the line and start listening to paid calls.
+
+        @param project_dir Returns the current project folder, or None when
+            the project has no name yet.
+        @param log Writes one line into the AI log.
+        @param parent Parent widget.
+        """
+        super().__init__(parent)
+        self.setObjectName("ai_account")
+        self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.setProperty("i18n_skip", True)
+        self.setStyleSheet("color: #a6adc8;")
+        self.balance_enabled = False
+        self._project_dir = project_dir
+        self._log = log
+        self._status = None
+        self._balance_error = ""
+        self._balance_state = "idle"
+        self._balance_time = ""
+        self._token = 0
+        self._tasks = {}
+        self._reported_errors = set()
+        self._bridge = _UsageBridge(self)
+        self._bridge.recorded.connect(self._on_paid_call)
+        self._listener = self._bridge.recorded.emit
+        openrouter.set_usage_listener(self._listener)
+        self.refresh()
+
+    def detach(self) -> None:
+        """@brief Stop listening, if this line is still the listener."""
+        if openrouter._usage_listener == self._listener:
+            openrouter.set_usage_listener(None)
+
+    def refresh_balance(self) -> None:
+        """@brief Read the balance again in the background (free, no tokens)."""
+        if not self.balance_enabled:
+            return
+        try:
+            openrouter.api_key()
+        except Exception as exc:  # noqa: BLE001 - chiave assente: si dice e basta
+            self._balance_state, self._balance_error = "error", str(exc)
+            self.refresh()
+            return
+        self._token += 1
+        task = _BalanceTask(self._token)
+        task.setAutoDelete(False)
+        task.signals.ready.connect(self._balance_ready)
+        self._tasks[self._token] = task
+        if self._balance_state != "ok":
+            self._balance_state = "loading"
+        self.refresh()
+        QThreadPool.globalInstance().start(task)
+
+    def _balance_ready(self, token, status, error) -> None:
+        self._tasks.pop(token, None)
+        if token != self._token:
+            return  # superata da una lettura piu' recente
+        if status is None:
+            self._balance_state, self._balance_error = "error", error
+        else:
+            self._status, self._balance_state = status, "ok"
+            self._balance_time = datetime.now().strftime("%H:%M")
+        self.refresh()
+
+    def _on_paid_call(self, record: dict) -> None:
+        folder = self._project_dir()
+        if folder is None:
+            self._report(tx("Costo di una chiamata AI non registrato: il progetto non ha un "
+                            "nome."))
+            return
+        try:
+            add_call(folder, record)
+        except (ProjectCostsError, OSError) as exc:
+            self._report(tx("Costo di una chiamata AI non registrato nel progetto: {exc}",
+                            exc=exc))
+            return
+        self.refresh()
+
+    def _report(self, message: str) -> None:
+        """One log line per distinct problem, not one per call."""
+        if message not in self._reported_errors:
+            self._reported_errors.add(message)
+            self._log(message)
+
+    def refresh(self) -> None:
+        """@brief Recompose text and tooltip from the balance and the project file."""
+        parts, details = [], []
+        remaining = self._status.remaining if self._status is not None else None
+        if self._balance_state == "ok" and remaining is not None:
+            parts.append(tx("Saldo OpenRouter: {amount} USD", amount=format_usd(remaining)))
+            details.append(tx("Saldo: credito residuo ({limit}), letto alle {time}.",
+                              limit=self._status.limiting_factor, time=self._balance_time))
+        elif self._balance_state == "ok":
+            parts.append(tx("Saldo OpenRouter: nessun limite"))
+            details.append(tx("Saldo: l'API non riporta un limite di credito."))
+        elif self._balance_state == "loading":
+            parts.append(tx("Saldo OpenRouter: lettura…"))
+        elif self._balance_state == "error":
+            parts.append(tx("Saldo OpenRouter: non disponibile"))
+            details.append(tx("Saldo non letto: {error}", error=self._balance_error))
+        folder = self._project_dir()
+        if folder is not None:
+            try:
+                costs = load_project_costs(folder)
+            except ProjectCostsError as exc:
+                parts.append(tx("Costo del progetto: non leggibile"))
+                details.append(tx("File dei costi non leggibile, lasciato com'e': {exc}",
+                                  exc=exc))
+            else:
+                if not costs.calls:
+                    parts.append(tx("Costo del progetto: nessuna chiamata a pagamento"))
+                elif costs.complete:
+                    parts.append(tx("Costo del progetto: {amount} USD",
+                                    amount=format_usd(costs.total_usd)))
+                else:
+                    parts.append(tx("Costo del progetto: almeno {amount} USD",
+                                    amount=format_usd(costs.total_usd)))
+                if costs.calls:
+                    details.append(tx("Costo del progetto: {calls} chiamate a pagamento dal "
+                                      "{since}, tutti i passaggi compresi.",
+                                      calls=costs.calls, since=costs.since[:10]))
+                if not costs.complete:
+                    details.append(tx("{missing} chiamate senza costo riportato: il totale "
+                                      "e' sottostimato.", missing=costs.calls_without_cost))
+        details.append(tx("Le risposte servite dalla cache locale non costano e non "
+                          "sono contate."))
+        # Riga di un modulo: resta al suo posto anche senza dati.
+        self.setText("  ·  ".join(parts) or "—")
+        self.setToolTip(tx("Credito e spesa AI") + "\n" + "\n".join(details))

@@ -26,6 +26,11 @@ GREEN = "#a6e3a1"      # successo
 RED = "#f38ba8"        # errore
 YELLOW = "#f9e2af"     # warning
 
+#: Schede: quella SCELTA e' la piu' evidente (sfondo chiaro, sottolineatura
+#: blu, testo in grassetto); le altre sono attenuate, le disabilitate ancora di
+#: piu'. Prima la scelta aveva lo sfondo scuro della pagina e le altre uno
+#: piu' chiaro: con Anteprima e Modello 3D disabilitate all'avvio, la scheda
+#: KiCad era la piu' chiara e sembrava lei quella scelta (utente, 2026-09-24).
 TAB_QSS = f"""
     QTabWidget::pane {{
         border: 1px solid {SURFACE1};
@@ -33,8 +38,8 @@ TAB_QSS = f"""
         top: -1px;
     }}
     QTabBar::tab {{
-        background: {SURFACE0};
-        color: {TEXT};
+        background: {MANTLE};
+        color: {SUBTEXT};
         border: 1px solid {SURFACE1};
         border-bottom: none;
         border-top-left-radius: 8px;
@@ -43,15 +48,17 @@ TAB_QSS = f"""
         margin-right: 2px;
     }}
     QTabBar::tab:selected {{
-        background: {BASE};
+        background: {SURFACE0};
         border-bottom: 3px solid {BLUE};
         color: {TEXT};
+        font-weight: 600;
     }}
     QTabBar::tab:hover:!selected {{
         background: #252536;
+        color: {TEXT};
     }}
     QTabBar::tab:disabled {{
-        background: #171722;
+        background: #101017;
         color: #626477;
         border-color: #2b2c3b;
     }}

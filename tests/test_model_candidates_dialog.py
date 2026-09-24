@@ -432,20 +432,30 @@ def test_rapid_rotation_changes_end_on_the_last_value(review, app, monkeypatch):
 
 
 def test_the_mode_in_force_is_readable_on_the_dialog_without_hovering(review, monkeypatch):
-    """@brief Lo stato si legge sul dialogo, non in un tooltip da scoprire."""
-    from PyQt6.QtWidgets import QLabel
+    """@brief Lo stato si legge sul dialogo, non in un tooltip da scoprire.
+
+    Contratto cambiato di proposito (utente, 2026-09-24): il campo numerico e
+    la casella «Automatico» sono diventati stato interno nascosto; cio' che si
+    legge a vista e' l'angolo sotto le frecce, con chi l'ha scelto.
+    """
     dialog, _, _ = review
     monkeypatch.setattr(dialog, '_start_preview', lambda *args: None)
-    assert dialog.rotation_state.isVisibleTo(dialog)
-    assert dialog.rotation_state.text() == 'in uso: override esplicito'
+    label = dialog.rotation_angle_label
+    assert label.isVisibleTo(dialog)
+    assert not dialog.rotation_state.isVisibleTo(dialog)
+    assert label.text() == '37°'
     dialog.auto_rotation.setChecked(True)
+    assert label.text() == 'auto'
+    assert dialog.rotate_auto_button.isChecked()
+    dialog._auto_angle = 90.0
+    dialog._update_rotation_readout()
+    assert label.text() == '90° auto'
+    # Stato interno ancora coerente con il modo in vigore.
     assert dialog.rotation_state.text() == 'non in uso: comanda «Automatico»'
-    # L'indicazione e' un'etichetta del dialogo, non un suggerimento nascosto.
-    assert 'non in uso: comanda «Automatico»' in [
-        label.text() for label in dialog.findChildren(QLabel)]
     assert 'Modificando la rotazione' in dialog.rotation_hint.text()
     dialog.auto_rotation.setChecked(False)
-    assert dialog.rotation_state.text() == 'in uso: override esplicito'
+    assert label.text() == '37°'
+    assert not dialog.rotate_auto_button.isChecked()
     assert '0°' in dialog.rotation_hint.text()
 
 
@@ -1065,3 +1075,135 @@ def test_oversized_mesh_file_is_rejected_before_parsing(app, monkeypatch):
 
     with pytest.raises(ValueError, match='Preview mesh too large'):
         _render(monkeypatch, _CUBE, _CUBE_FACES, writer=huge)
+
+
+# ── Frecce di rotazione sull'anteprima (utente, 2026-09-24) ─────────────────
+
+def test_arrows_turn_from_the_automatic_angle_and_claim_the_override(review, monkeypatch):
+    """@brief Positivo: dall'automatico il primo clic parte dall'angolo scelto dal programma."""
+    dialog, _, _ = review
+    starts = []
+    monkeypatch.setattr(dialog, '_start_preview', lambda *args: starts.append(
+        None if dialog.auto_rotation.isChecked() else dialog.rotation.value()))
+    dialog.auto_rotation.setChecked(True)
+    dialog._auto_angle = 90.0
+    starts.clear()
+    dialog.rotate_ccw_button.click()
+    assert not dialog.auto_rotation.isChecked()
+    assert dialog.rotation.value() == 180
+    assert starts[-1] == 180
+    dialog.rotate_cw_button.click()
+    dialog.rotate_cw_button.click()
+    assert dialog.rotation.value() == 0
+    dialog.rotate_cw_button.click()
+    assert dialog.rotation.value() == 270
+    assert dialog.rotation_angle_label.text() == '270°'
+
+
+def test_arrows_without_a_known_automatic_angle_start_from_zero(review, monkeypatch):
+    """@brief Negativo: angolo automatico ignoto, il giro parte da 0 e non dal valore salvato."""
+    dialog, _, _ = review
+    monkeypatch.setattr(dialog, '_start_preview', lambda *args: None)
+    dialog.auto_rotation.setChecked(True)
+    dialog._auto_angle = None
+    dialog.rotate_ccw_button.click()
+    assert dialog.rotation.value() == 90 and not dialog.auto_rotation.isChecked()
+
+
+def test_an_arrow_landing_on_the_stored_value_still_leaves_automatic(review, monkeypatch):
+    """@brief Stesso valore del campo nascosto: la scelta esplicita vale comunque."""
+    dialog, _, _ = review
+    starts = []
+    monkeypatch.setattr(dialog, '_start_preview', lambda *args: starts.append(dialog.rotation.value()))
+    dialog.rotation.setValue(180)
+    dialog.auto_rotation.setChecked(True)
+    dialog._auto_angle = 90.0
+    starts.clear()
+    dialog.rotate_ccw_button.click()
+    assert not dialog.auto_rotation.isChecked() and dialog.rotation.value() == 180
+    assert starts == [180]
+    selection_rotation = None if dialog.auto_rotation.isChecked() else float(dialog.rotation.value())
+    assert selection_rotation == 180.0
+
+
+def test_the_automatic_icon_restores_the_inferred_orientation(review, monkeypatch):
+    """@brief L'icona «automatico» comanda la stessa modalita' della casella nascosta."""
+    dialog, _, _ = review
+    monkeypatch.setattr(dialog, '_start_preview', lambda *args: None)
+    dialog.auto_rotation.setChecked(False)
+    dialog.rotate_auto_button.click()
+    assert dialog.auto_rotation.isChecked() and dialog.rotate_auto_button.isChecked()
+    dialog.rotate_ccw_button.click()
+    assert not dialog.rotate_auto_button.isChecked()
+
+
+def test_rotation_icons_explain_themselves_in_the_tooltip(review):
+    """@brief Ogni icona ha nome e spiegazione al passaggio del mouse."""
+    dialog, _, _ = review
+    for button in (dialog.rotate_ccw_button, dialog.rotate_cw_button, dialog.rotate_auto_button):
+        tip = button.toolTip()
+        assert '\n' in tip and tip.split('\n')[0].strip()
+    assert 'antiorario' in dialog.rotate_ccw_button.toolTip()
+    assert 'antiorario' not in dialog.rotate_cw_button.toolTip()
+
+
+@pytest.mark.parametrize('output, expected', [
+    ('KICADGEN_IMPORT_OK:a.step; parts=1; local_rotation_deg=270', 270.0),
+    ('KICADGEN_IMPORT_OK:a.step; parts=1; local_rotation_deg=-90', 270.0),
+    ('local_rotation_deg=360', 0.0),
+    ('local_rotation_deg=1e-05', 0.0),
+    ('KICADGEN_IMPORT_OK:a.step; parts=1', None),
+    ('', None),
+])
+def test_the_automatic_angle_is_read_from_the_importer_line(output, expected):
+    assert gui._reported_auto_angle(output) == expected
+
+
+def test_only_the_automatic_preview_carries_the_chosen_angle(monkeypatch):
+    """@brief Positivo in automatico, negativo con angolo esplicito."""
+    import sys
+    from pathlib import Path
+    from types import SimpleNamespace
+    from kicadgen.cad3d import step_generator
+
+    class Shape:
+        def tessellate(self, tolerance):
+            points = [(0, 0, 0), (8, 0, 0), (0, 2, 1)]
+            return [SimpleNamespace(x=x, y=y, z=z) for x, y, z in points], [(0, 1, 2)]
+
+    monkeypatch.setattr(step_generator, 'find_freecadcmd', lambda: 'fake-freecad')
+    monkeypatch.setitem(sys.modules, 'freecad_parts', SimpleNamespace(
+        _library_model=lambda *args: [(Shape(), '#ffffff')]))
+    monkeypatch.setitem(sys.modules, 'Part', SimpleNamespace(
+        read=lambda path: Shape(), makeCompound=lambda shapes: shapes[0]))
+
+    def run(command, **kwargs):
+        old_path = sys.path[:]
+        try:
+            exec(compile(Path(command[1]).read_text(encoding='utf-8'), command[1], 'exec'), {})
+        finally:
+            sys.path[:] = old_path
+        return SimpleNamespace(stdout='KICADGEN_IMPORT_OK:x; parts=1; local_rotation_deg=90\n')
+
+    monkeypatch.setattr(gui.subprocess, 'run', run)
+    automatic = gui._thumbnail('example.step', None, (8, 2))
+    explicit = gui._thumbnail('example.step', 90)
+    assert gui._image_auto_angle(automatic) == 90.0
+    assert gui._image_auto_angle(explicit) is None
+
+
+def test_the_automatic_preview_updates_the_readout(review, app, monkeypatch):
+    """@brief L'angolo scelto dall'automatico arriva sotto le frecce."""
+    dialog, _, _ = review
+    image = QImage(4, 4, QImage.Format.Format_RGB32)
+    image.setText(gui.AUTO_ROTATION_KEY, '90')
+    monkeypatch.setattr(gui, '_thumbnail', lambda *args: image)
+    dialog.auto_rotation.setChecked(True)
+    dialog.candidate_list.setCurrentRow(0)
+    _wait(app, lambda: not dialog._workers)
+    assert dialog._auto_angle == 90.0
+    assert dialog.rotation_angle_label.text() == '90° auto'
+    # Negativo: una miniatura manuale non tocca l'angolo automatico ricordato.
+    dialog.rotate_ccw_button.click()
+    _wait(app, lambda: not dialog._workers)
+    assert dialog._auto_angle == 90.0 and dialog.rotation_angle_label.text() == '180°'

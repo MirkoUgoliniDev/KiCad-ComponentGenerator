@@ -197,6 +197,12 @@ class ToolTipFilter(QObject):
     @note Only QEvent.ToolTip events that carry a text are taken over; any
         other event, or a widget without a tooltip, goes on to Qt untouched,
         so a parent's tooltip still answers for a child without one.
+    @note Every window gets `WA_AlwaysShowToolTips` when first shown. Qt
+        otherwise sends no tooltip event at all to a window that is not the
+        active one: after switching to another program and coming back with
+        the mouse, without clicking, no icon showed its tooltip (user,
+        2026-09-24, progress window and project bar). Measured: 0 of 4
+        tooltips on an inactive window, 4 of 4 with the attribute.
     """
 
     def eventFilter(self, watched, event):  # noqa: N802 - Qt override
@@ -206,7 +212,14 @@ class ToolTipFilter(QObject):
         @param event The event.
         @return True when the tooltip was shown here.
         """
-        if event.type() != QEvent.Type.ToolTip or not isinstance(watched, QWidget):
+        if not isinstance(watched, QWidget):
+            return False
+        if event.type() == QEvent.Type.Show:
+            if watched.isWindow() and not watched.testAttribute(
+                    Qt.WidgetAttribute.WA_AlwaysShowToolTips):
+                watched.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips, True)
+            return False
+        if event.type() != QEvent.Type.ToolTip:
             return False
         text = _text_for(watched, event)
         if not text:

@@ -320,17 +320,13 @@ def test_the_name_conflict_no_longer_opens_a_modal(window, monkeypatch):
     monkeypatch.setattr(QMessageBox, 'information', refuse)
     monkeypatch.setattr(QMessageBox, 'warning', lambda *args: None)
     window._on_extracted(acquired())
-    # L'estrazione non rinomina piu' da sola: il conflitto puo' nascere solo
-    # quando il nome proposto viene accettato, ed e' li' che va verificato.
+    # L'estrazione non rinomina mai: il nome proposto -- qui quello di un
+    # altro progetto -- va solo nel log, e nulla viene toccato. Dal
+    # 2026-09-24 (utente) non c'e' piu' il pulsante per adottarlo: si passa
+    # da «Rinomina progetto…», che rifiuta i nomi di altri progetti.
     assert window._component_name() == original_name
-    window.btn_use_suggested_name.click()
-    assert window._component_name() == original_name, 'il conflitto deve conservare il nome'
     assert (target / 'photo.png').read_bytes() == b'altro progetto', 'documento sovrascritto'
-    # Dal 2026-09-24 (decisione dell'utente, 3a) il nome di un ALTRO progetto
-    # e' rifiutato prima di qualunque spostamento, anche senza documenti in
-    # conflitto: il messaggio e' quello del rifiuto, non piu' quello del
-    # conflitto fra documenti, che non viene raggiunto.
-    assert any('non applicato' in line and "Esiste gia'" in line
+    assert any('AutoModule' in line and 'Rinomina progetto' in line
                for line in window.ai_progress_text.toPlainText().splitlines())
     window._on_error('test stopped')
     window._on_generation_finished()
@@ -356,10 +352,15 @@ def test_the_proposed_name_waits_for_a_click_and_never_opens_a_modal(window, mon
 
     window._on_extracted(acquired())
     assert window._component_name() == chosen
-    assert window._suggested_name == 'AutoModule'
-    assert window.widget_name_suggestion.isVisibleTo(window)
+    # Contratto cambiato il 2026-09-24 (utente): la proposta non ha piu' una
+    # riga col pulsante, sta in UNA riga del log; si adotta da «Rinomina
+    # progetto…», e i documenti seguono il nome come prima.
+    proposals = [line for line in window.ai_progress_text.toPlainText().splitlines()
+                 if 'AutoModule' in line and 'Rinomina progetto' in line]
+    assert len(proposals) == 1
+    assert not hasattr(window, 'btn_use_suggested_name')
 
-    window.btn_use_suggested_name.click()
+    _rename_to(window, monkeypatch, 'AutoModule')
     assert window._component_name() == 'AutoModule'
     assert any('Rinomina automatica' in line for line in
                window.ai_progress_text.toPlainText().splitlines())
@@ -511,3 +512,16 @@ def test_the_modal_says_which_tool_is_working_and_how_far_it_is(window, monkeypa
     window._worker.phase.emit('freecad', 'abbinamento modelli KiCad', 9, 45)
     assert 'FreeCAD' in overlay.tool.text()
     assert overlay.progress_label.text() == '20% · 9/45 componenti'
+
+
+def _rename_to(window, monkeypatch, name):
+    """Rinomina come fa l'utente: File > Rinomina progetto… (dal 2026-09-24 il
+    pulsante «Usa questo nome» non c'e' piu')."""
+    from PyQt6.QtWidgets import QDialog
+    from kicadgen.gui.project_dialogs import ProjectNameDialog
+
+    def accept(self):
+        self.field.setText(name)
+        return QDialog.DialogCode.Accepted
+    monkeypatch.setattr(ProjectNameDialog, "exec", accept)
+    window._rename_project()

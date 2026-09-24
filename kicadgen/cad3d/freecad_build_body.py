@@ -99,6 +99,49 @@ def _edge_name(edge, x0, y0, x1, y1, z1):
     return f"{topbot}-{lr}"
 
 
+#: Faccia del parallelepipedo -> (asse normale, lato). Serve a sapere quale
+#: striscia di quale faccia consuma un raccordo.
+_FACE_SIDES = {"left": ("x", 0), "right": ("x", 1), "front": ("y", 0),
+               "back": ("y", 1), "bottom": ("z", 0), "top": ("z", 1)}
+
+
+def _fillet_conflicts(fillets, extents):
+    """Raccordi che la geometria non puo' contenere, con il motivo.
+
+    Un raccordo di raggio r sullo spigolo fra le facce F1 e F2 toglie una
+    striscia larga r a ciascuna delle due: su F2, dal lato di F1, lungo l'asse
+    normale a F1 (e viceversa). Su ogni faccia, i due raccordi dei lati
+    opposti lungo uno stesso asse devono quindi sommare MENO dell'estensione
+    di quell'asse; a somma uguale o maggiore la faccia sparisce e OpenCascade
+    risponde solo «BRep_API: command not done». Vincolo geometrico, nessuna
+    soglia tarata.
+
+    @param fillets Voci {"edge": nome, "radius_mm": r}; nomi come EDGE_NAMES.
+    @param extents {"x": lunghezza, "y": larghezza, "z": altezza} del box, mm.
+    @return {nome_spigolo: (faccia, asse, somma, estensione)} degli spigoli
+        coinvolti in almeno un vincolo violato; vuoto se tutto e' costruibile.
+    """
+    # (faccia, asse) -> [raggio massimo lato basso, lato alto] e spigoli
+    use, owners = {}, {}
+    for fillet in fillets:
+        name, radius = fillet["edge"], float(fillet["radius_mm"])
+        faces = name.split("-")
+        if len(faces) != 2 or not all(face in _FACE_SIDES for face in faces):
+            continue
+        for face, other in (faces, faces[::-1]):
+            axis, side = _FACE_SIDES[other]
+            slot = use.setdefault((face, axis), [0.0, 0.0])
+            slot[side] = max(slot[side], radius)
+            owners.setdefault((face, axis), set()).add(name)
+    conflicts = {}
+    for (face, axis), (low, high) in sorted(use.items()):
+        extent = float(extents[axis])
+        if low + high >= extent:
+            for name in owners[(face, axis)]:
+                conflicts.setdefault(name, (face, axis, low + high, extent))
+    return conflicts
+
+
 def _apply_fillets(shape, fillets, bounds):
     """Applica i fillet raggruppandoli per raggio: gli spigoli con lo stesso
     raggio finiscono in un'unica makeFillet, cosi' vengono raccordati tutti
@@ -110,6 +153,17 @@ def _apply_fillets(shape, fillets, bounds):
     l'intera generazione dello STEP.
     """
     x0, y0, x1, y1, z1 = bounds
+
+    # Raccordi impossibili scartati PRIMA di chiederli a OpenCascade, con il
+    # motivo misurato: il tentativo fallirebbe comunque con un errore opaco e
+    # trascinerebbe nel fallimento anche gli spigoli buoni dello stesso raggio.
+    conflicts = _fillet_conflicts(fillets, {"x": x1 - x0, "y": y1 - y0, "z": z1})
+    for name, (face, axis, total, extent) in sorted(conflicts.items()):
+        _warn("raccordo su '{name}' non applicato: sulla faccia '{face}' i raccordi "
+              "sommano {total:g} mm lungo {axis}, ma la faccia misura solo "
+              "{extent:g} mm",
+              name=name, face=face, total=total, axis=axis.upper(), extent=extent)
+    fillets = [f for f in fillets if f["edge"] not in conflicts]
 
     by_radius = {}
     for f in fillets:

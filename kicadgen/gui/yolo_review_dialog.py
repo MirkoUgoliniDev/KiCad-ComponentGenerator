@@ -737,7 +737,9 @@ class YoloReviewDialog(QDialog):
     @param proposals Proposte del rilevatore, con `_box` normalizzato.
     @param length_mm Estensione della scheda lungo X, in mm.
     @param width_mm Estensione lungo Y, in mm.
-    @param classes Categorie che il rilevatore conosce.
+    @param classes Categorie che il rilevatore conosce. Dal 2026-09-24 la
+        finestra non ha piu' un menu per correggerle: restano solo nella
+        firma, per chi gia' le passa.
     @note Annullare significa non procedere: chi chiama non deve pagare la
         chiamata di riconciliazione con proposte che non sono state approvate.
     @note La fotografia puo' farsi da parte (`photo_state()`,
@@ -850,16 +852,15 @@ class YoloReviewDialog(QDialog):
         self.category_filter.setToolTip(
             tr("Filtra per categoria la lista e i riquadri sulla foto."))
         self.category_filter.currentIndexChanged.connect(self._category_filter_changed)
-        self.combo_class = QComboBox()
-        self.combo_class.addItems(self.classes)
-        self.combo_class.setEnabled(False)
-        self.combo_class.currentTextChanged.connect(self._change_class)
+        # Niente piu' menu «Categoria del riquadro scelto» (utente,
+        # 2026-09-24): la categoria del rilevatore arriva alla chiamata AI solo
+        # come indizio, e il modello rilegge comunque la foto; correggerla qui
+        # cambiava poco e il menu, lontano dalla foto, mostrava la categoria
+        # dell'ultimo riquadro anche senza una scelta. Il filtro resta.
         side = QVBoxLayout()
         side.addWidget(QLabel(tr("Proposte del rilevatore locale")))
         side.addWidget(self.category_filter)
         side.addWidget(self.list, 1)
-        side.addWidget(QLabel(tr("Categoria del riquadro scelto:")))
-        side.addWidget(self.combo_class)
         side_widget = QWidget()
         side_widget.setLayout(side)
         side_widget.setFixedWidth(300)
@@ -1135,20 +1136,18 @@ class YoloReviewDialog(QDialog):
         self._refresh_filter_choices()
         self._apply_filter()
         added = sum(1 for p in self.proposals if p.get("_yolo_origin") == "user_added")
-        self.summary.setText(
-            f"Il rilevatore ne ha proposte {self._strong + self._weak} "
-            f"({self._strong} sicure, {self._weak} deboli). "
-            f"Ne tieni {len(self.proposals) - added}, piu' {added} aggiunte a mano.")
-        self.combo_class.setEnabled(0 <= current < len(self.proposals))
+        # Una frase intera con i suoi segnaposto: montata da f-string restava
+        # italiana in ogni lingua (utente, 2026-09-24).
+        self.summary.setText(self._tr(
+            "Il rilevatore ne ha proposte {total} ({strong} sicure, {weak} deboli). "
+            "Ne tieni {kept}, piu' {added} aggiunte a mano.").format(
+                total=self._strong + self._weak, strong=self._strong, weak=self._weak,
+                kept=len(self.proposals) - added, added=added))
         self.btn_delete.setEnabled(0 <= current < len(self.proposals))
         self.view.update()
 
     def _select_row(self, index):
         self.view.selected = index
-        if 0 <= index < len(self.proposals):
-            self.combo_class.blockSignals(True)
-            self.combo_class.setCurrentText(self.proposals[index].get("_yolo_class") or "")
-            self.combo_class.blockSignals(False)
         self._refresh()
 
     def _select_from_list(self, index):
@@ -1182,17 +1181,6 @@ class YoloReviewDialog(QDialog):
                         self._shown_by_filter(self.proposals[candidate]):
                     return candidate
         return -1
-
-    def _change_class(self, name):
-        """@brief Corregge la categoria proposta dal rilevatore.
-
-        @note La categoria restringe la famiglia di modelli in cui cercare; il
-            package lo decide comunque la riconciliazione successiva.
-        """
-        index = self.view.selected
-        if 0 <= index < len(self.proposals) and name:
-            self.proposals[index]["_yolo_class"] = name
-            self._refresh()
 
     def geometry_mm(self, box):
         """@brief Quote in millimetri di un riquadro normalizzato.
@@ -1302,7 +1290,9 @@ class YoloReviewDialog(QDialog):
             "color_hex": "#303030", "marking": "", "confidence": "low",
             "_box": (x0, y0, x1, y1), "_source": MANUAL_SOURCE,
             "_uncertain": True, "_id": identifier,
-            "_yolo_class": self.combo_class.currentText() or (self.classes[0] if self.classes else ""),
+            # Nessuna categoria: la decide il modello guardando la foto. Prima
+            # si ereditava quella dell'ultimo riquadro scelto nel menu tolto.
+            "_yolo_class": "",
             "_yolo_confidence": None, "_yolo_proposal_id": None,
             "_yolo_class_ambiguous": False,
             "_yolo_origin": "user_added", "_yolo_review_only": False,

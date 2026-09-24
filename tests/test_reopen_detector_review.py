@@ -666,16 +666,18 @@ def test_reopen_button_sits_at_the_bottom_of_the_project_tab(window):  # noqa: F
     gruppo di analisi. Negativo: non compare piu' nella riga degli strumenti
     accanto a «Rivedi foto…», dove stava prima.
     """
-    from PyQt6.QtWidgets import QLayout, QScrollArea
+    # Contratto cambiato il 2026-09-24 (utente): la riga in fondo e' sparita,
+    # il comando e' un'icona nella barra IN CIMA alla scheda, raggiungibile
+    # sempre -- anche dopo un riavvio, quando la scheda 3D e' ancora spenta.
+    from PyQt6.QtWidgets import QScrollArea
     scroll = window.tabs.widget(0)
     tab = scroll.widget() if isinstance(scroll, QScrollArea) else scroll
     outer = tab.layout()
-    last = outer.itemAt(outer.count() - 1)
-    row = last.layout()
-    assert isinstance(row, QLayout), "l'ultimo elemento della scheda deve essere la riga del pulsante"
-    widgets = [row.itemAt(i).widget() for i in range(row.count())]
-    assert window.btn_reopen_review in widgets
-    assert outer.indexOf(window.group_component_analysis) < outer.count() - 1
+    assert outer.itemAt(0).layout() is window.project_action_bar
+    bar = window.project_action_bar
+    widgets = [bar.itemAt(i).widget() for i in range(bar.count())]
+    assert window.btn_reopen_review_top in widgets
+    assert window.btn_reopen_review_top.accessibleName() == window.btn_reopen_review.text()
     # Negativo: non sta nella riga degli strumenti dell'analisi. Il riferimento
     # e' il gruppo, non piu' il padre di «Rivedi foto…»: quel comando e' stato
     # spostato nella riga in fondo (richiesta dell'utente sui pulsanti
@@ -691,6 +693,8 @@ def test_reopen_button_sits_at_the_bottom_of_the_project_tab(window):  # noqa: F
                 return True
         return False
 
-    assert _contains(tools_row, window.btn_component_prompt)
+    # Negativo: nessuno dei comandi sta fra gli strumenti AI (dal 2026-09-24
+    # anche «Modifica prompt» e' salito nella barra in alto).
+    assert not _contains(tools_row, window.btn_component_prompt)
     assert not _contains(tools_row, window.btn_reopen_review)
     assert not _contains(tools_row, window.btn_edit_component_review)

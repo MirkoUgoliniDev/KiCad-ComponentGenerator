@@ -296,3 +296,31 @@ def test_a_draw_tremor_is_a_click_and_a_real_drag_draws(app):
     view.mouseReleaseEvent(_Mouse(end))
     assert len(added) == 1
     dialog.close()
+
+
+def test_the_detector_summary_follows_the_language(app, tmp_path):
+    """@brief Utente, 2026-09-24: la riga di riepilogo restava italiana in inglese.
+
+    Positivo: con un genitore in inglese la frase e' inglese e porta i numeri.
+    Negativo: senza traduttore resta la sorgente italiana.
+    """
+    from PyQt6.QtWidgets import QWidget
+    from kicadgen.services.analysis_profiles import ProfileStore
+    from kicadgen.services.i18n import I18n
+    parent = QWidget()
+    parent.i18n = I18n(ProfileStore(tmp_path / "p.sqlite3"), "en")
+    english = YoloReviewDialog(b"", [_proposal(1, (.1, .1, .2, .2))], LENGTH_MM, WIDTH_MM,
+                               detector_classes(), parent)
+    assert english.summary.text().startswith("The detector proposed 1 (")
+    assert "You keep 1, plus 0 added by hand." in english.summary.text()
+    italian = _yolo(app, [_proposal(1, (.1, .1, .2, .2))])
+    assert italian.summary.text().startswith("Il rilevatore ne ha proposte 1 (")
+    # Distruzione in ordine, prima la finestra e poi il genitore temporaneo:
+    # lasciata al garbage collector, la coppia faceva cadere il processo a
+    # fine suite (codice 139, dopo che tutti i test erano passati).
+    for dialog in (english, italian):
+        dialog.close()
+        dialog.setParent(None)
+        dialog.deleteLater()
+    parent.deleteLater()
+    app.processEvents()

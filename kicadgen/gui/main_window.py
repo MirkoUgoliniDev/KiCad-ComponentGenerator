@@ -119,6 +119,9 @@ PROJECT_WIDGETS = (
     "field_cast_inset", "field_cast_hole", "field_cast_hole_inset",
     "field_cast_thru_drill", "field_cast_thru_pad", "field_cast_thru_offset",
 )
+#: Margine, in pixel, fra il bordo della finestra e il contenuto delle schede:
+#: la riga della lingua sopra le schede usa lo stesso, cosi' i bordi combaciano.
+CONTENT_MARGIN_PX = 10
 #: Opzioni di Configurazione -> Opzioni di generazione che seguono il progetto.
 PROJECT_OPTIONS = ("include_nc_pins", "silk_pin_labels", "pause_after_inventory")
 #: Ogni quanto, in millisecondi, si controlla se il progetto e' cambiato. Una
@@ -1239,6 +1242,9 @@ class MainWindow(QMainWindow):
         self._applying_extraction = False
         self._extract_finish_pending = False
         self._automatic_generation_active = False
+        # Rigenerazione 3D chiesta da un «Applica» e non ancora partita
+        # (vedi `_run_pending_regen_3d`).
+        self._regen_3d_pending = False
         self._automatic_footprint_done = False
         self._automatic_3d_done = False
         #: True quando la corsa automatica in atto ha chiesto anche il modello
@@ -1555,6 +1561,7 @@ class MainWindow(QMainWindow):
         else:
             # Le ultime modifiche non aspettano il prossimo giro del salvataggio.
             self._flush_project_config()
+            self.ai_account.detach()
             super().closeEvent(event)
 
     def _edit_profiles(self):
@@ -1691,9 +1698,12 @@ class MainWindow(QMainWindow):
             self.combo_photo_detector.setItemText(index, self._photo_detector_text(key))
         self.combo_photo_detector.setToolTip(self._photo_detector_text("help"))
         self.label_yolo_model.setText(self._photo_detector_text("model"))
-        self.btn_pick_yolo_model.setText(self._photo_detector_text("browse"))
+        # Icona, non testo (utente, 2026-09-24): nome «Sfoglia…» come prima riga
+        # del tooltip, spiegazione sotto; il nome accessibile resta quello del
+        # dialogo che apre.
         self.btn_pick_yolo_model.setAccessibleName(self._photo_detector_text("picker"))
-        self.btn_pick_yolo_model.setToolTip(self._photo_detector_text("picker"))
+        self.btn_pick_yolo_model.setToolTip(
+            self._photo_detector_text("browse") + "\n" + self._photo_detector_text("picker"))
         default_path = APP_DIR / "models" / "pcb_yolov8s.onnx"
         self.field_yolo_model.setPlaceholderText(
             self._photo_detector_text("default", path=default_path))
@@ -1874,6 +1884,10 @@ class MainWindow(QMainWindow):
 
         language_row = QHBoxLayout()
         language_row.setSpacing(10)
+        # Stesso margine laterale del contenuto delle schede (10 px): il
+        # layout centrale non ne ha, e la tendina stava incollata al bordo
+        # destro della finestra (utente, 2026-09-24).
+        language_row.setContentsMargins(0, 6, CONTENT_MARGIN_PX, 6)
         language_row.addStretch()
         # Un globo al posto della scritta «Lingua:» (utente, 2026-09-24), come
         # le altre icone: il nome sta nel tooltip e nel nome accessibile della
@@ -1943,6 +1957,7 @@ class MainWindow(QMainWindow):
         self.tabs.setTabText(4, self.i18n.tr("tab.model3d.name"))
         self.tabs.setTabText(5, self.i18n.tr("tab.kicad.name"))
         self.i18n.retranslate_widgets(self)
+        self.ai_account.refresh()
         self.menuBar().actions()[0].setText(self.i18n.tr("app.file"))
         self.menuBar().actions()[1].setText(self.i18n.tr("app.configuration"))
         self.menuBar().actions()[2].setText(self.i18n.tr("app.help"))
@@ -1975,6 +1990,8 @@ class MainWindow(QMainWindow):
         # quote disegnate nell'anteprima 2D (nota 8 dell'utente).
         self._retranslate_contact_style_combos()
         self._refresh_workflow_tooltips()
+        # Icone della modale di avanzamento: tooltip composti, non chiavi.
+        self.analysis_overlay.refresh_command_texts()
         self._draw_preview()
 
     def _retranslate_component_types(self) -> None:
@@ -2000,8 +2017,15 @@ class MainWindow(QMainWindow):
     def _build_project_tab(self) -> QWidget:
         tab = QWidget()
         outer = QVBoxLayout(tab)
-        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setContentsMargins(*(CONTENT_MARGIN_PX,) * 4)
         outer.setSpacing(8)
+
+        # Barra di icone in alto (utente, 2026-09-24), riempita a fine
+        # costruzione della scheda, quando i comandi esistono.
+        self.project_action_bar = QHBoxLayout()
+        self.project_action_bar.setContentsMargins(0, 0, 0, 0)
+        self.project_action_bar.setSpacing(4)
+        outer.addLayout(self.project_action_bar)
 
         folder_group = QGroupBox("Cartella componente")
         folder_layout = QFormLayout(folder_group)
@@ -2026,27 +2050,10 @@ class MainWindow(QMainWindow):
         self.field_name.textChanged.connect(self._on_name_changed)
         folder_layout.addRow("Nome componente:", self.field_name)
 
-        # Il nome proposto dall'estrazione vive qui, accanto al campo, e non
-        # dentro il campo. Prima l'estrazione lo scriveva da sola: ogni analisi
-        # che proponeva un nome diverso spostava docs/ altrove e lasciava
-        # indietro la cartella precedente in area di lavoro.
-        self._suggested_name = ""
-        self.lbl_name_suggestion = QLabel()
-        self.lbl_name_suggestion.setWordWrap(True)
-        self.lbl_name_suggestion.setProperty("i18n_skip", True)
-        self.lbl_name_suggestion.setStyleSheet(f"color: {BLUE};")
-        self.btn_use_suggested_name = QPushButton("Usa questo nome")
-        self.btn_use_suggested_name.setObjectName("useSuggestedNameButton")
-        self.btn_use_suggested_name.clicked.connect(self._apply_suggested_name)
-        suggestion_row = QHBoxLayout()
-        suggestion_row.setContentsMargins(0, 0, 0, 0)
-        suggestion_row.setSpacing(6)
-        suggestion_row.addWidget(self.lbl_name_suggestion, 1)
-        suggestion_row.addWidget(self.btn_use_suggested_name)
-        self.widget_name_suggestion = QWidget()
-        self.widget_name_suggestion.setLayout(suggestion_row)
-        self.widget_name_suggestion.hide()
-        folder_layout.addRow("", self.widget_name_suggestion)
+        # Niente piu' riga «L'analisi propone: … / Usa questo nome» (utente,
+        # 2026-09-24): il nome si cambia solo da File > Rinomina progetto, e
+        # il nome proposto dall'analisi resta scritto nel Log AI
+        # (`_log_proposed_name`).
 
         self.field_library_root = QLineEdit(str(DEFAULT_LIBRARY_ROOT))
         self.field_library_root.textChanged.connect(self._update_project_path_label)
@@ -2178,8 +2185,13 @@ class MainWindow(QMainWindow):
         self.label_yolo_model = QLabel()
         self.field_yolo_model = QLineEdit()
         self.field_yolo_model.setClearButtonEnabled(True)
+        # Stessa cartella e stessa misura del pulsante accanto ad «Area di
+        # lavoro», che fa la stessa cosa: scegliere un file o una cartella.
         self.btn_pick_yolo_model = QPushButton()
         self.btn_pick_yolo_model.setAutoDefault(False)
+        self.btn_pick_yolo_model.setIcon(self._asset_icon("docs-open.svg"))
+        self.btn_pick_yolo_model.setIconSize(QSize(20, 20))
+        self.btn_pick_yolo_model.setFixedSize(40, 32)
         self.btn_pick_yolo_model.clicked.connect(self._pick_session_yolo_model)
         yolo_row = QHBoxLayout()
         yolo_row.addWidget(self.field_yolo_model, 1)
@@ -2203,6 +2215,15 @@ class MainWindow(QMainWindow):
         vlm_row.addWidget(self.btn_pick_vlm_model)
         models_form.addRow(self.label_vlm_model, vlm_row)
         self._row_vlm_model = models_form.rowCount() - 1
+        # Saldo dell'account e costo TOTALE del progetto, tutti i passaggi
+        # compresi (`ai_account`): ultima riga di «Strumenti AI» (utente,
+        # 2026-09-24), accanto ai modelli che quel credito lo spendono. Non e'
+        # il consuntivo dell'ULTIMA analisi, tolto dalla scheda: quello resta
+        # nella modale e nel Log AI (`_show_ai_cost`).
+        from .ai_account import AiAccountLine
+        self.ai_account = AiAccountLine(self._project_dir_or_none, self._append_log)
+        self.label_ai_account = QLabel("Credito AI:")
+        models_form.addRow(self.label_ai_account, self.ai_account)
         self._models_form = models_form
         # These data-bearing widgets use explicit keys and local I18n fallbacks.
         for widget in (self.label_photo_detector, self.combo_photo_detector,
@@ -2219,11 +2240,6 @@ class MainWindow(QMainWindow):
         tools_layout.setContentsMargins(12, 16, 12, 12)
         tools_layout.setSpacing(12)
         tools_layout.addLayout(models_form)
-        tools_row = QHBoxLayout()
-        tools_row.setSpacing(16)
-        tools_row.setContentsMargins(0, 4, 0, 4)
-        tools_layout.addLayout(tools_row)
-        tools_row.addStretch()
         analysis_layout.addWidget(self.group_ai_tools)
 
         self.btn_extract_ai = QPushButton("Estrai parametri con AI")
@@ -2289,10 +2305,11 @@ class MainWindow(QMainWindow):
         self._photo_png = None
         self._photo_overlay_png = None
         self._photo_source = ""
-        self.btn_ai_log = QPushButton("≡ Log AI")
-        self.btn_ai_log.setToolTip("Apri il log completo dell'analisi AI, aggiornato in tempo reale")
-        self.btn_ai_log.setAccessibleName("Apri log analisi AI")
-        tools_row.addWidget(self.btn_ai_log)
+        # Icona nella barra in alto della scheda (utente, 2026-09-24): nome e
+        # spiegazione nel tooltip, come le altre barre di icone.
+        self.btn_ai_log = self._workflow_tool_button(
+            "ai-log.svg", "Log AI",
+            "Apri il log completo dell'analisi AI, aggiornato in tempo reale")
         self.ai_log_dialog = QDialog(self)
         self.ai_log_dialog.setWindowTitle("Log analisi AI")
         self.ai_log_dialog.setModal(True)
@@ -2343,20 +2360,15 @@ class MainWindow(QMainWindow):
         self.ai_log_dialog.resize(1000, 520)
         self.btn_ai_log.clicked.connect(self.ai_log_dialog.exec)
 
-        self.btn_component_prompt = QPushButton("Modifica prompt…")
-        self.btn_component_prompt.setToolTip("Modifica le istruzioni AI specifiche di questo componente")
-        tools_row.addWidget(self.btn_component_prompt)
-        tools_row.addStretch()
+        self.btn_component_prompt = self._workflow_tool_button(
+            "prompt-edit.svg", "Modifica prompt…",
+            "Modifica le istruzioni AI specifiche di questo componente")
         analysis_layout.addSpacing(10)
         analysis_layout.addWidget(self.btn_extract_ai, alignment=Qt.AlignmentFlag.AlignHCenter)
-        # Consuntivo dell'ultima analisi: resta visibile dopo la chiusura
-        # della modale, che sparisce appena il lavoro finisce.
-        self.lbl_ai_cost = QLabel()
-        self.lbl_ai_cost.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        self.lbl_ai_cost.setStyleSheet("color: #a6adc8;")
-        self.lbl_ai_cost.setTextFormat(Qt.TextFormat.PlainText)
-        self.lbl_ai_cost.hide()
-        analysis_layout.addWidget(self.lbl_ai_cost)
+        # Nessun consuntivo sotto il pulsante (utente, 2026-09-24): saldo e
+        # costo del progetto stanno nel riquadro «Strumenti AI».
+        self.field_name.textChanged.connect(self.ai_account.refresh)
+        self.field_library_root.textChanged.connect(self.ai_account.refresh)
         self.component_prompt_dialog = QDialog(self)
         self.component_prompt_dialog.setWindowTitle("Prompt specifico del componente")
         self.component_prompt_dialog.setModal(True)
@@ -2403,13 +2415,34 @@ class MainWindow(QMainWindow):
         # inventario a pagamento -> revisione dei componenti), non quello in
         # cui sono stati aggiunti: e' l'ordine a dire che sono passi di una
         # stessa catena e non tre azioni scorrelate.
-        reopen_row = QHBoxLayout()
-        reopen_row.addStretch()
-        reopen_row.addWidget(self.btn_reopen_review)
-        reopen_row.addWidget(self.btn_relaunch_inventory)
-        reopen_row.addWidget(self.btn_edit_component_review)
-        reopen_row.addStretch()
-        outer.addLayout(reopen_row)
+        # Dal 2026-09-24 (utente) la riga di pulsanti in fondo non c'e' piu':
+        # i tre comandi sono icone nella barra in alto (`project_action_bar`),
+        # copie costruite con lo stesso meccanismo della scheda Modello 3D.
+        # I pulsanti originali restano la FONTE di testo, tooltip e stato, in
+        # un contenitore sempre nascosto: le copie li leggono, i percorsi che
+        # li usano restano gli stessi, e una `setVisible(True)` su di loro non
+        # puo' aprire una finestra a se' perche' hanno un genitore.
+        self._project_action_sources = QWidget(tab)
+        sources_layout = QHBoxLayout(self._project_action_sources)
+        for source in (self.btn_reopen_review, self.btn_relaunch_inventory,
+                       self.btn_edit_component_review):
+            sources_layout.addWidget(source)
+        self._project_action_sources.hide()
+        bar = self.project_action_bar
+        bar.addWidget(self.btn_ai_log)
+        bar.addWidget(self.btn_component_prompt)
+        from .review_tools import toolbar_divider
+        self._project_bar_divider = toolbar_divider()
+        bar.addWidget(self._project_bar_divider)
+        # Stesso ordine della pipeline e stesse icone della scheda Modello 3D.
+        self.btn_reopen_review_top = self._mirror_project_action(
+            self.btn_reopen_review, self._reopen_detector_review, bar, "wf-review.svg")
+        self.btn_relaunch_inventory_top = self._mirror_project_action(
+            self.btn_relaunch_inventory, self._relaunch_inventory, bar, "wf-relaunch-ai.svg")
+        self.btn_edit_component_review_top = self._mirror_project_action(
+            self.btn_edit_component_review, self._show_photo_comparison, bar,
+            "wf-edit-review.svg")
+        bar.addStretch()
         # Stato iniziale coerente con la disciplina della riga: cio' che non
         # puo' agire non si vede, invece di stare acceso a vuoto.
         self._set_review_buttons_enabled(False)
@@ -2471,6 +2504,13 @@ class MainWindow(QMainWindow):
 
     def _component_name(self) -> str:
         return self.field_name.text().strip() if hasattr(self, "field_name") else ""
+
+    def _project_dir_or_none(self) -> Path | None:
+        """@brief Project folder, or None while the project has no name."""
+        try:
+            return self._project_dir()
+        except ValueError:
+            return None
 
     def _project_dir(self) -> Path:
         """@brief Cartella del componente in area di lavoro.
@@ -2553,9 +2593,14 @@ class MainWindow(QMainWindow):
             action = getattr(self, attr, None)
             if action is not None:
                 action.setEnabled(footprint_available)
-                action.setToolTip(
-                    "" if footprint_available else
-                    self.i18n.text("Genera prima il footprint del componente corrente"))
+                reason = ("" if footprint_available else
+                          "Genera prima il footprint del componente corrente")
+                if isinstance(action, QWidget) and action.property("workflow_title_source"):
+                    self._set_workflow_detail(
+                        action, reason or "Apre la cartella del componente con footprint, "
+                        "modello STEP e documenti.")
+                else:
+                    action.setToolTip(self.i18n.text(reason) if reason else "")
         for attr in (
                 "btn_test_kicad", "btn_export", "btn_install_global",
                 "action_test_kicad", "action_export", "action_install_global"):
@@ -2569,11 +2614,16 @@ class MainWindow(QMainWindow):
                 }
                 source = (enabled_tooltips.get(attr, "") if complete_available else
                           "Genera prima footprint e modello STEP del componente corrente")
+                if isinstance(action, QWidget) and action.property("workflow_title_source"):
+                    # Icona: prima riga il nome, poi la spiegazione o il motivo.
+                    self._set_workflow_detail(action, source)
+                    continue
                 rendered = self.i18n.text(source) if source else ""
                 if isinstance(action, QWidget):
                     action.setProperty("i18n_tooltip_source", source)
                     action.setProperty("i18n_tooltip_rendered", rendered)
                 action.setToolTip(rendered)
+        self._refresh_kicad_tab(complete_available)
         if hasattr(self, "label_kicad_footprint"):
             self.label_kicad_footprint.setText(
                 str(footprint) if footprint_available else "—")
@@ -2584,6 +2634,30 @@ class MainWindow(QMainWindow):
                 if complete_available else
                 self.i18n.text("Genera footprint e modello STEP per continuare."))
         return footprint_available
+
+    #: Position of the «KiCad» tab in `self.tabs`.
+    KICAD_TAB_INDEX = 5
+
+    def _refresh_kicad_tab(self, complete: bool) -> None:
+        """@brief Let the «KiCad» tab be chosen only for a completed project.
+
+        @param complete True when the current project folder holds both the
+            footprint and the STEP model: exactly what every operation of the
+            tab needs (test in KiCad, project and global installation).
+        @note User, 2026-09-24: at start-up, with no project, the tab could be
+            opened and showed only dashes and disabled commands. A tab being
+            shown when it gets disabled hands over to «Project», so the window
+            never sits on a tab that cannot be chosen.
+        """
+        tabs = getattr(self, "tabs", None)
+        index = self.KICAD_TAB_INDEX
+        if tabs is None or tabs.count() <= index:
+            return
+        if not complete and tabs.currentIndex() == index:
+            tabs.setCurrentIndex(0)
+        tabs.setTabEnabled(index, complete)
+        tabs.setTabToolTip(index, "" if complete else self.i18n.text(
+            "Disponibile quando il progetto ha footprint e modello STEP generati."))
 
     def _on_name_changed(self, text: str) -> None:
         """@brief Il nome e' la cartella: da qui in avanti il progetto aperto e' quella.
@@ -2910,7 +2984,6 @@ class MainWindow(QMainWindow):
         self._auto_generation_params = None
         self._extract_finish_pending = False
         self.analysis_overlay.clear_cost()
-        self.lbl_ai_cost.hide()
         self.btn_extract_ai.setText(self.i18n.text("Analisi in corso..."))
         self._start_log_session(title)
         self.ai_progress_text.clear()
@@ -3133,6 +3206,23 @@ class MainWindow(QMainWindow):
             return
         button.setEnabled(bool(available))
         button.setVisible(bool(available))
+        self._refresh_project_bar_divider()
+
+    def _refresh_project_bar_divider(self) -> None:
+        """Il separatore della barra in alto si vede solo se separa qualcosa.
+
+        A sinistra stanno sempre le icone dell'analisi; a destra i comandi della
+        pipeline, che compaiono solo quando c'e' cosa riaprire: senza di loro un
+        separatore da solo in coda alla barra sembra un difetto.
+        """
+        divider = getattr(self, "_project_bar_divider", None)
+        if divider is None:
+            return
+        pipeline = [getattr(self, name, None) for name in (
+            "btn_reopen_review_top", "btn_relaunch_inventory_top",
+            "btn_edit_component_review_top")]
+        divider.setVisible(any(b is not None and b.isVisibleTo(b.parentWidget())
+                               for b in pipeline))
 
     def _mirror_project_action(self, source, slot, row, asset: str):
         """@brief Crea nella barra della scheda Modello 3D la copia a icona di un comando della scheda Progetto.
@@ -3193,6 +3283,7 @@ class MainWindow(QMainWindow):
             copie devono restare per costruzione nello stesso stato.
         """
         for name in ("btn_reopen_review", "btn_relaunch_inventory",
+                     "btn_reopen_review_top", "btn_relaunch_inventory_top",
                      "btn_reopen_review_3d", "btn_relaunch_inventory_3d"):
             self._set_action_available(name, bool(enabled))
         self._refresh_edit_review_buttons()
@@ -3213,7 +3304,8 @@ class MainWindow(QMainWindow):
         """
         editable = bool(getattr(self, "_photo_png", None)
                         or getattr(self, "_photo_overlay_png", None))
-        for name in ("btn_edit_component_review", "btn_edit_component_review_3d"):
+        for name in ("btn_edit_component_review", "btn_edit_component_review_top",
+                     "btn_edit_component_review_3d"):
             self._set_action_available(name, editable)
 
     def _on_inventory_pause_toggled(self, checked: bool) -> None:
@@ -3526,6 +3618,9 @@ class MainWindow(QMainWindow):
         if self._analysis_tabs_enabled is not None:
             self.tabs.setEnabled(self._analysis_tabs_enabled)
             self._analysis_tabs_enabled = None
+        if self._regen_3d_pending:
+            # A regeneration asked while this work ran: its turn now.
+            QTimer.singleShot(0, self._run_pending_regen_3d)
 
     # ── Interruzione dell'operazione in corso ──────────────────────
 
@@ -3837,14 +3932,17 @@ class MainWindow(QMainWindow):
             if not totals.complete:
                 text = self.i18n.tr("analysis.cost.partial", summary=text,
                                     missing=totals.calls_without_cost)
-        self.lbl_ai_cost.setText(text)
-        self.lbl_ai_cost.show()
-        # La label sotto il pulsante puo' essere fuori dall'area visibile: il
-        # dato va anche nella modale dell'ANALISI, dove l'utente sta gia'
-        # guardando. Non in quella della generazione: vedi
+        # La label sotto il pulsante e' stata tolta (utente, 2026-09-24): lo
+        # storico del costo resta nel Log AI -- anche dopo un'interruzione,
+        # quando e' l'informazione piu' utile -- e il dato va nella modale
+        # dell'ANALISI, dove l'utente sta gia' guardando. Non in quella della
+        # generazione: vedi
         # `_clear_cost_for_generation` (decisione dell'utente, 2026-09-23).
         # Il caso conta davvero: nella corsa automatica `finished`
         # dell'estrazione arriva quando la generazione e' gia' partita.
+        self._append_log(text)
+        # Il saldo e' cambiato: si rilegge (gratuito, in background).
+        self.ai_account.refresh_balance()
         if self._generation_phase_active():
             return
         self.analysis_overlay.set_cost(text)
@@ -3872,8 +3970,8 @@ class MainWindow(QMainWindow):
             generation path -- automatic, manual with a 3D body, «Rigenera
             modello 3D» -- now starts with a modal without cost. The cost stays
             where it belongs: in the AI modal during the analysis and in the
-            label under the extraction button (`lbl_ai_cost`), which says
-            «ultima analisi» and is untouched here.
+            AI log, where `_show_ai_cost` writes it (the label under the
+            extraction button was removed on 2026-09-24, user decision).
         """
         self.analysis_overlay.clear_cost()
 
@@ -4220,6 +4318,16 @@ class MainWindow(QMainWindow):
         return result
 
     def _apply_photo_review(self, components: list[dict]) -> None:
+        """@brief Apply reviewed components and bring the 3D model up to date.
+
+        @param components Corrected component list (review dialog or 3D menu).
+        @note The old solid no longer matches the data and is cleared (rule 7
+            of the project strategy). When a solid WAS on screen, the 3D is
+            regenerated automatically (user, 2026-09-24: otherwise the 3D tab
+            stays black): FreeCAD only, no AI request. Without a previous
+            solid nothing turns black, and generation stays the user's choice.
+        """
+        had_solid = self._last_mesh_path is not None
         self._set_photo_components(components)
         if self._photo_png:
             from ..services.model_choices import save_choices
@@ -4229,6 +4337,15 @@ class MainWindow(QMainWindow):
             except (OSError, ValueError) as exc:
                 QMessageBox.warning(self, tx("Scelte KiCad non salvate"), str(exc))
         self._invalidate_generated_mesh()
+        if had_solid:
+            self._append_log(tx("Revisione fotografica applicata: {n_components} componenti; "
+                                "rigenerazione automatica del modello 3D.",
+                                n_components=len(components)))
+            self._regen_3d_pending = True
+            # Dopo la chiusura della finestra di revisione, che emette le
+            # correzioni mentre e' ancora aperta.
+            QTimer.singleShot(0, self._run_pending_regen_3d)
+            return
         self._set_3d_status(self.i18n.text(
             "Componenti corretti dalla foto. Modello 3D da rigenerare: "
             "premi \"Rigenera modello 3D\" per aggiornare STEP e anteprima."
@@ -4236,6 +4353,34 @@ class MainWindow(QMainWindow):
         self._append_log(tx("Revisione fotografica applicata: {n_components} componenti; 3D da "
                             "rigenerare.",
                             n_components=len(components)))
+
+    def _run_pending_regen_3d(self) -> None:
+        """@brief Start the 3D regeneration an «Apply» asked for, when possible.
+
+        @note Nothing to do once a solid of the current data is on screen
+            (another generation got there first, e.g. the automatic pipeline).
+            While other work runs the request stays pending and is retried
+            when the progress window closes (`_hide_analysis_overlay`): two
+            FreeCAD runs never overlap. A disabled 3D model is a choice, not
+            an error: the request is dropped with a line in the log, no dialog.
+        """
+        if not self._regen_3d_pending:
+            return
+        if self._last_mesh_path is not None:
+            self._regen_3d_pending = False
+            return
+        if self._background_work_running() or self._automatic_generation_active:
+            return
+        self._regen_3d_pending = False
+        if self._current_body_params() is None:
+            self._set_3d_status(self.i18n.text(
+                "Componenti corretti dalla foto. Modello 3D da rigenerare: "
+                "premi \"Rigenera modello 3D\" per aggiornare STEP e anteprima."
+            ), STATUS_INFO)
+            self._append_log(tx("Rigenerazione automatica del 3D non avviata: il gruppo "
+                                "«Modello 3D» e' spento."))
+            return
+        self._regenerate_3d()
 
     def _invalidate_generated_mesh(self) -> None:
         # Running CAD workers still describe the previous input revision.
@@ -4251,48 +4396,18 @@ class MainWindow(QMainWindow):
         worker = self.sender()
         return worker is None or worker._model_revision == self._model_revision
 
-    def _set_suggested_name(self, name) -> None:
-        """@brief Mostra accanto al campo il nome proposto dall'estrazione.
+    def _log_proposed_name(self, name) -> None:
+        """@brief Scrive nel Log AI il nome che l'analisi propone, se diverso.
 
-        @param name Nome proposto; vuoto o uguale a quello in uso nasconde la riga.
-        @note La proposta non tocca nulla: il nome in uso resta quello scelto
-            dall'utente finche' non preme il pulsante.
+        @param name Nome proposto dall'estrazione.
+        @note Solo una riga di log (utente, 2026-09-24): la riga con «Usa
+            questo nome» e' stata tolta, il nome del progetto si cambia da
+            File > Rinomina progetto. La proposta non tocca nulla.
         """
         proposed = " ".join(str(name or "").split())
-        self._suggested_name = "" if proposed == self._component_name() else proposed
-        if self._suggested_name:
-            self.lbl_name_suggestion.setText(
-                f"L'analisi propone: {self._suggested_name}")
-        self.widget_name_suggestion.setVisible(bool(self._suggested_name))
-
-    def _apply_suggested_name(self) -> None:
-        """@brief Adotta il nome proposto, portandosi dietro i documenti.
-
-        @note La rinomina puo' essere rifiutata (conflitto di documenti): in
-            quel caso il progetto resta quello corrente e la proposta rimane
-            visibile, perche' non e' stata applicata.
-        """
-        if not self._suggested_name:
-            return
-        # Rinominare sposta la cartella in cui un'analisi o una generazione
-        # in corso sta scrivendo: stessa guardia dei comandi del menu File.
-        if self._project_change_blocked():
-            return
-        # Il nome di un altro progetto non si prende (utente, 2026-09-24):
-        # la rinomina sposterebbe i documenti dentro una cartella che ne ha
-        # gia' di suoi. Si rifiuta e lo si dice; la proposta resta visibile.
-        from .project_dialogs import name_problem
-        problem = name_problem(self._library_root(), self._suggested_name,
-                               self._component_name())
-        if problem:
-            message = self.i18n.text("Nome proposto non applicato: {problem}").format(
-                problem=self.i18n.text(problem))
-            self.lbl_name_suggestion.setText(message)
-            self._append_log(message)
-            return
-        applied = self._migrate_docs_to_new_name(self._suggested_name)
-        self.field_name.setText(applied)
-        self._set_suggested_name(self._suggested_name)
+        if proposed and proposed != self._component_name():
+            self._append_log(tx("L'analisi propone il nome «{name}»; per usarlo: File > "
+                                "Rinomina progetto…", name=proposed))
 
     def _init_project_settings(self) -> None:
         """@brief Fotografa le impostazioni generali e avvia il salvataggio automatico.
@@ -4452,6 +4567,8 @@ class MainWindow(QMainWindow):
         self._photo_source = ""
         self.package_geometry = None
         self._extracted_pcb_thickness = None
+        # Una rigenerazione chiesta nel progetto chiuso non riguarda il nuovo.
+        self._regen_3d_pending = False
         self._invalidate_generated_mesh()
         self._set_review_buttons_enabled(False)
 
@@ -4537,7 +4654,6 @@ class MainWindow(QMainWindow):
         # Il salvataggio normale guarda `_project_dir()`, che adesso punta
         # all'altra cartella: si scrive esplicitamente in quella del progetto.
         self._write_open_project_config(folder)
-        self._set_suggested_name("")
         self._switch_project("", self._general_project_state)
         self._append_log(tx("Cartella di lavoro cambiata: progetto {name} salvato in {folder} e "
                             "chiuso.",
@@ -4598,7 +4714,6 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, self.i18n.text("Nuovo progetto"), str(exc))
             return
         self._flush_project_config()
-        self._set_suggested_name("")
         # Un progetto nuovo parte dalle impostazioni generali, non da quelle
         # del progetto aperto prima (decisione dell'utente del 2026-09-24).
         self._switch_project(name, self._general_project_state)
@@ -4620,7 +4735,6 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.selected_name():
             return
         self._flush_project_config()
-        self._set_suggested_name("")
         name = dialog.selected_name()
         from .project_state import ProjectConfigError, read_project_config
         folder = self._library_root() / name
@@ -4663,7 +4777,6 @@ class MainWindow(QMainWindow):
             return
         applied = self._migrate_docs_to_new_name(dialog.project_name())
         self.field_name.setText(applied)
-        self._set_suggested_name("")
 
     def _migrate_docs_to_new_name(self, new_name: str) -> str:
         """Sposta i documenti nella cartella del nuovo nome componente.
@@ -4896,18 +5009,17 @@ class MainWindow(QMainWindow):
         self._photo_source = params.photo_source
         self._refresh_edit_review_buttons()
         self._last_extracted = params
-        # Il nome lo decide chi lavora, non l'estrazione. Il nome proposto
-        # resta visibile accanto al campo e si applica con un clic -- che e'
-        # anche il momento in cui i documenti lo seguono. Riscriverlo da soli
+        # Il nome lo decide chi lavora, non l'estrazione: la proposta va solo
+        # nel log, e si adotta con File > Rinomina progetto, che e' anche il
+        # momento in cui i documenti la seguono. Riscriverlo da soli
         # significava spostare docs/ a ogni analisi e lasciare in area di
         # lavoro una cartella per ogni nome mai proposto.
-        self._set_suggested_name(params.name)
+        self._log_proposed_name(params.name)
         if params.name and not self._component_name():
             # Nessun nome scelto: non c'e' niente da rispettare e la proposta
             # e' meglio di "NUOVO_COMPONENTE".
             params.name = self._migrate_docs_to_new_name(params.name)
             self.field_name.setText(params.name)
-            self._set_suggested_name("")
         else:
             # Tutto cio' che viene generato porta il nome scelto: footprint,
             # modello e cartelle devono restare d'accordo fra loro.
@@ -5142,7 +5254,7 @@ class MainWindow(QMainWindow):
     def _build_footprint_tab(self) -> QWidget:
         tab = QWidget()
         outer = QVBoxLayout(tab)
-        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setContentsMargins(*(CONTENT_MARGIN_PX,) * 4)
         outer.setSpacing(8)
 
         form_group = QGroupBox("Parametri footprint (header THT a matrice)")
@@ -5911,7 +6023,7 @@ class MainWindow(QMainWindow):
     def _build_generate_tab(self) -> QWidget:
         tab = QWidget()
         outer = QVBoxLayout(tab)
-        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setContentsMargins(*(CONTENT_MARGIN_PX,) * 4)
         outer.setSpacing(8)
 
         self.label_summary = QLabel()
@@ -5989,15 +6101,14 @@ class MainWindow(QMainWindow):
             "Crea un piccolo progetto temporaneo con il footprint e il modello 3D, "
             "quindi lo apre nel PCB Editor. In KiCad premi Alt+3 per la vista 3D.")
         review_note.setWordWrap(True)
-        review_layout.addWidget(review_note)
-        self.btn_test_kicad = QPushButton("Prova in KiCad...")
-        self.btn_test_kicad.setObjectName("primary")
-        self.btn_test_kicad.setMinimumHeight(42)
-        self.btn_test_kicad.setToolTip(
+        # Icone al posto dei pulsanti di testo, nome e spiegazione nel tooltip
+        # (utente, 2026-09-24), con lo stesso stile delle altre barre: la
+        # spiegazione della sezione resta scritta accanto all'icona.
+        self.btn_test_kicad = self._workflow_tool_button(
+            "kicad-test.svg", "Prova in KiCad...",
             "Apre un progetto temporaneo: non installa e non modifica librerie KiCad")
         self.btn_test_kicad.clicked.connect(self._test_in_kicad)
-        review_layout.addWidget(
-            self.btn_test_kicad, alignment=Qt.AlignmentFlag.AlignHCenter)
+        review_layout.addLayout(self._note_with_icons(review_note, self.btn_test_kicad))
         outer.addWidget(review_group)
 
         install_group = QGroupBox("Installazione nella libreria")
@@ -6007,38 +6118,52 @@ class MainWindow(QMainWindow):
             "La libreria globale rende il footprint disponibile in tutti i progetti "
             "di questo computer.")
         install_note.setWordWrap(True)
-        install_layout.addWidget(install_note)
-        install_buttons = QHBoxLayout()
-        install_buttons.setSpacing(14)
-        self.btn_export = QPushButton("Installa nel progetto KiCad...")
-        self.btn_export.setToolTip(
+        self.btn_export = self._workflow_tool_button(
+            "install-project.svg", "Installa nel progetto KiCad...",
             "Crea KiCadGen.pretty e KiCadGen.3dshapes nel progetto selezionato")
         self.btn_export.clicked.connect(self._install_project_library)
-        self.btn_install_global = QPushButton("Installa come libreria globale...")
-        self.btn_install_global.setToolTip(
+        self.btn_install_global = self._workflow_tool_button(
+            "install-global.svg", "Installa come libreria globale...",
             "Installa nella cartella scelta e registra la libreria globale di KiCad")
         self.btn_install_global.clicked.connect(self._install_global_library)
-        install_buttons.addStretch()
-        install_buttons.addWidget(self.btn_export)
-        install_buttons.addWidget(self.btn_install_global)
-        install_buttons.addStretch()
-        install_layout.addLayout(install_buttons)
+        install_layout.addLayout(
+            self._note_with_icons(install_note, self.btn_export, self.btn_install_global))
         outer.addWidget(install_group)
 
-        footer = QHBoxLayout()
-        self.btn_open_output = QPushButton("Apri cartella componente")
-        self.btn_open_output.clicked.connect(self._open_project_dir)
-        footer.addWidget(self.btn_open_output)
-        footer.addStretch()
+        # La riga in fondo sta in un riquadro come le altre (utente,
+        # 2026-09-24). Lo stato resta TESTO: e' un esito da leggere subito, non
+        # il nome di un comando da scoprire passando col mouse.
+        folder_group = QGroupBox("Cartella del componente")
+        folder_layout = QVBoxLayout(folder_group)
         self.label_kicad_status = QLabel()
         self.label_kicad_status.setProperty("i18n_skip", True)
         self.label_kicad_status.setWordWrap(True)
         self.label_kicad_status.setStyleSheet(f"color: {YELLOW};")
-        footer.addWidget(self.label_kicad_status, 1)
-        outer.addLayout(footer)
+        self.btn_open_output = self._workflow_tool_button(
+            "docs-open.svg", "Apri cartella componente",
+            "Apre la cartella del componente con footprint, modello STEP e documenti.")
+        self.btn_open_output.clicked.connect(self._open_project_dir)
+        folder_layout.addLayout(self._note_with_icons(self.label_kicad_status,
+                                                      self.btn_open_output))
+        outer.addWidget(folder_group)
         outer.addStretch()
         self._refresh_output_actions()
         return tab
+
+    @staticmethod
+    def _note_with_icons(note, *buttons) -> QHBoxLayout:
+        """@brief A section row: its explanation on the left, its icon commands on the right.
+
+        @param note QLabel with the section text (it takes the free width).
+        @param buttons Icon-only commands of the section, in order.
+        @return The row layout.
+        """
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(note, 1)
+        for button in buttons:
+            row.addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
+        return row
 
     def _show_generate_info(self) -> None:
         self._update_summary()
@@ -6776,15 +6901,18 @@ class MainWindow(QMainWindow):
     def _build_preview_tab(self) -> QWidget:
         tab = QWidget()
         outer = QVBoxLayout(tab)
-        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setContentsMargins(*(CONTENT_MARGIN_PX,) * 4)
         outer.setSpacing(8)
 
         header = QHBoxLayout()
         header.addWidget(QLabel("Anteprima 2D (silkscreen + pad, scala fissa, con quote):"))
         header.addStretch()
-        btn_pinout = QPushButton("Tabella pinout...")
-        btn_pinout.clicked.connect(self._show_pinout_dialog)
-        header.addWidget(btn_pinout)
+        # Stessa icona e stesso tooltip della barra 3D (utente, 2026-09-24):
+        # e' lo stesso comando, deve riconoscersi uguale nelle due schede.
+        self.btn_pinout_2d = self._view_tool_button(
+            "pinout-table.svg", "Tabella pinout: numero, nome e funzione di ogni piedino.")
+        self.btn_pinout_2d.clicked.connect(self._show_pinout_dialog)
+        header.addWidget(self.btn_pinout_2d)
         self.chk_grid = QCheckBox("Griglia")
         self.chk_grid.setChecked(bool(self._config.get("show_grid", True)))
         self.chk_grid.toggled.connect(self._on_grid_toggled)
@@ -6831,7 +6959,7 @@ class MainWindow(QMainWindow):
         # viewport, not a clipped portion of a taller scrollable document.
         tab = QWidget()
         outer = QVBoxLayout(tab)
-        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setContentsMargins(*(CONTENT_MARGIN_PX,) * 4)
         outer.setSpacing(8)
 
         # Una sola barra di icone (scelta dell'utente, 2026-09-23): a sinistra
@@ -7143,6 +7271,19 @@ class MainWindow(QMainWindow):
                 self.i18n.text(button.property("workflow_detail_source") or ""))
         for mirror, source in self._project_action_mirrors:
             self._apply_icon_tooltip(mirror, source.text(), source.toolTip())
+
+    def _set_workflow_detail(self, button, detail: str) -> None:
+        """@brief Change the explanation line of an icon-only command, keeping its name.
+
+        @param button Button made by `_workflow_tool_button`.
+        @param detail Italian source of the new explanation (or disabled reason).
+        @note Stored as the source, so a later language switch translates it
+            again (`_refresh_workflow_tooltips`).
+        """
+        button.setProperty("workflow_detail_source", detail)
+        self._apply_icon_tooltip(
+            button, self.i18n.text(button.property("workflow_title_source") or ""),
+            self.i18n.text(detail) if detail else "")
 
     def _set_regen_busy(self, busy: bool) -> None:
         """@brief Show on the icon-only «Rigenera» that a generation is running.
@@ -8624,6 +8765,10 @@ def main() -> None:
         sys.exit(1)
     window.show()
     QTimer.singleShot(0, window._warn_missing_external_applications)
+    # Solo l'applicazione vera legge il saldo: i test e le finestre costruite
+    # altrove non toccano la rete.
+    window.ai_account.balance_enabled = True
+    window.ai_account.refresh_balance()
     sys.exit(app.exec())
 
 

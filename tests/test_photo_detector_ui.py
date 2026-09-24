@@ -464,3 +464,18 @@ def test_the_photo_call_model_is_always_written_in_the_log(window, monkeypatch):
     window._vlm_model = "cheap/vision-model"
     window._extract_with_ai()
     assert any("cheap/vision-model" in line and "sessione" in line for line in lines), lines
+
+
+def test_the_yolo_browse_command_is_an_icon_with_a_tooltip(window):  # noqa: F811
+    """@brief Utente, 2026-09-24: «Sfoglia» come icona con testo al passaggio del mouse.
+
+    Positivo: nessun testo sul pulsante, icona presente, tooltip con il nome
+    «Sfoglia…» in prima riga e la spiegazione sotto. Negativo: il nome
+    accessibile resta quello del dialogo, non la parola «Sfoglia».
+    """
+    button = window.btn_pick_yolo_model
+    assert button.text() == "" and not button.icon().isNull()
+    lines = button.toolTip().splitlines()
+    assert lines[0] == window._photo_detector_text("browse")
+    assert lines[1] == window._photo_detector_text("picker")
+    assert button.accessibleName() == window._photo_detector_text("picker")

@@ -69,3 +69,17 @@ def no_leftover_message_translator():
     set_translator(None)
     yield
     set_translator(None)
+
+
+@pytest.fixture(autouse=True)
+def no_leftover_usage_listener():
+    """@brief Ogni test parte e finisce senza ascoltatore delle chiamate pagate.
+
+    Una finestra registra la riga del costo come ascoltatore globale di
+    `openrouter`; lasciata attiva, una chiamata finta di un test successivo
+    scriverebbe `ai-costs.json` nella cartella del progetto di quella finestra.
+    """
+    from kicadgen.services.openrouter import set_usage_listener
+    set_usage_listener(None)
+    yield
+    set_usage_listener(None)

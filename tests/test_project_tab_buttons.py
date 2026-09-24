@@ -151,17 +151,33 @@ def test_an_empty_log_file_is_not_an_openable_log(window):  # noqa: F811
 
 # ── «Un pulsante in basso chiaro» per rieditare la fase completata ────────
 
-def test_edit_review_command_sits_in_the_bottom_row_of_the_project_tab(window):  # noqa: F811
-    """@brief Positivo: nella stessa riga di «Rivedi proposte salvate…», in fondo alla scheda."""
+def test_the_pipeline_commands_are_icons_in_the_top_bar_of_the_project_tab(window):  # noqa: F811
+    """@brief Contratto cambiato il 2026-09-24 (utente): niente riga di pulsanti in fondo.
+
+    Positivo: la barra in cima alla scheda porta Log AI, Modifica prompt e le
+    copie a icona dei tre comandi della pipeline, nell'ordine della pipeline.
+    Negativo: in fondo alla scheda non c'e' piu' una riga con i pulsanti, e
+    gli originali non stanno in nessun layout visibile (restano la fonte di
+    testo e stato delle copie).
+    """
     scroll = window.tabs.widget(0)
     tab = scroll.widget() if isinstance(scroll, QScrollArea) else scroll
     outer = tab.layout()
-    row = outer.itemAt(outer.count() - 1).layout()
-    assert isinstance(row, QLayout)
-    widgets = [row.itemAt(i).widget() for i in range(row.count())]
-    assert window.btn_edit_component_review in widgets
-    assert window.btn_reopen_review in widgets and window.btn_relaunch_inventory in widgets
-    assert window.btn_edit_component_review.text().strip()
+    bar = outer.itemAt(0).layout()
+    assert bar is window.project_action_bar
+    widgets = [bar.itemAt(i).widget() for i in range(bar.count())]
+    expected = [window.btn_ai_log, window.btn_component_prompt,
+                window.btn_reopen_review_top, window.btn_relaunch_inventory_top,
+                window.btn_edit_component_review_top]
+    assert [w for w in widgets if w in expected] == expected
+    assert all(w.text() == "" for w in expected), "icone senza testo"
+    for original in (window.btn_reopen_review, window.btn_relaunch_inventory,
+                     window.btn_edit_component_review):
+        assert not _contains(outer, original)
+        assert original.text().strip(), "l'originale resta la fonte del nome"
+    last = outer.itemAt(outer.count() - 1)
+    assert last.layout() is None or not any(
+        _contains(last.layout(), w) for w in expected)
 
 
 def test_edit_review_command_is_mirrored_in_the_3d_toolbar(window):  # noqa: F811
@@ -747,7 +763,12 @@ def test_the_three_3d_mirrors_are_built_from_the_same_helper(window):  # noqa: F
     e la prima riga del tooltip della copia, e il tooltip dell'originale ne e'
     il resto -- nulla di cio' che l'originale dice va perso.
     """
-    pairs = [(window.btn_reopen_review_3d, window.btn_reopen_review),
+    # Dal 2026-09-24 le stesse copie stanno anche nella barra in alto della
+    # scheda Progetto (utente): sei copie, tre per barra, dallo stesso helper.
+    pairs = [(window.btn_reopen_review_top, window.btn_reopen_review),
+             (window.btn_relaunch_inventory_top, window.btn_relaunch_inventory),
+             (window.btn_edit_component_review_top, window.btn_edit_component_review),
+             (window.btn_reopen_review_3d, window.btn_reopen_review),
              (window.btn_relaunch_inventory_3d, window.btn_relaunch_inventory),
              (window.btn_edit_component_review_3d, window.btn_edit_component_review)]
     assert [pair for pair in window._project_action_mirrors] == pairs
@@ -816,3 +837,59 @@ def test_a_mirror_is_enabled_state_is_also_gated_by_its_tab(window):  # noqa: F8
     for mirror in (window.btn_reopen_review_3d, window.btn_relaunch_inventory_3d,
                    window.btn_edit_component_review_3d):
         assert mirror.isEnabled()
+
+
+def test_the_2d_pinout_command_is_the_same_icon_as_the_3d_one(window):  # noqa: F811
+    """@brief Utente, 2026-09-24: «usa questa icona anche qui».
+
+    Positivo: nell'anteprima footprint il comando e' un'icona con lo stesso
+    disegno, tooltip e azione della barra 3D. Negativo: nessun pulsante di
+    testo «Tabella pinout...» resta nella scheda.
+    """
+    from PyQt6.QtWidgets import QPushButton
+    icon_2d, icon_3d = window.btn_pinout_2d, window.btn_pinout_3d
+    assert icon_2d.text() == "" and icon_2d.toolTip() == icon_3d.toolTip()
+    assert icon_2d.icon().cacheKey() != 0
+    preview = window.tabs.widget(3)
+    assert not [b for b in preview.findChildren(QPushButton) if "pinout" in b.text().lower()]
+
+
+def test_the_kicad_tab_commands_are_icons_and_the_status_sits_in_a_group(window):  # noqa: F811
+    """@brief Utente, 2026-09-24: icone con testo nel tooltip, e la riga in fondo in un riquadro.
+
+    Positivo: i quattro comandi sono icone senza testo; il nome e' la prima
+    riga del tooltip e il nome accessibile; da spenti il tooltip dice perche'.
+    Lo stato resta TESTO leggibile, dentro un QGroupBox. Negativo: nessun
+    QPushButton rimasto nella scheda.
+    """
+    from PyQt6.QtWidgets import QGroupBox, QPushButton
+    tab = window.tabs.widget(5)
+    commands = {window.btn_test_kicad: "Prova in KiCad...",
+                window.btn_export: "Installa nel progetto KiCad...",
+                window.btn_install_global: "Installa come libreria globale...",
+                window.btn_open_output: "Apri cartella componente"}
+    window._refresh_output_actions()
+    for button, name in commands.items():
+        assert button.text() == "" and not button.icon().isNull()
+        assert button.toolTip().splitlines()[0] == name
+        assert button.accessibleName() == name
+        assert not button.isEnabled() and "Genera prima" in button.toolTip()
+    assert not tab.findChildren(QPushButton)
+    group = window.label_kicad_status.parentWidget()
+    assert isinstance(group, QGroupBox) and group.isAncestorOf(window.btn_open_output)
+    assert window.label_kicad_status.text()
+
+
+def test_the_top_bar_divider_shows_only_between_two_groups(window):  # noqa: F811
+    """@brief Positivo: con un comando della pipeline visibile il separatore c'e'.
+
+    Negativo: senza comandi della pipeline il separatore non resta da solo.
+    """
+    window._set_review_buttons_enabled(False)
+    window._photo_png = None
+    window._photo_overlay_png = None
+    window._refresh_edit_review_buttons()
+    divider = window._project_bar_divider
+    assert not divider.isVisibleTo(divider.parentWidget())
+    window._set_review_buttons_enabled(True)
+    assert divider.isVisibleTo(divider.parentWidget())

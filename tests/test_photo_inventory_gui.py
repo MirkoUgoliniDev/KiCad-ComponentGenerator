@@ -113,8 +113,11 @@ def test_extraction_action_is_centered_below_separate_tools(window):
     assert not hasattr(window, 'combo_vision_model')
     assert not hasattr(window, 'combo_verification_model')
     assert not window.group_ai_tools.isAncestorOf(window.combo_component_type)
-    assert window.group_ai_tools.isAncestorOf(window.btn_ai_log)
-    assert window.group_ai_tools.isAncestorOf(window.btn_component_prompt)
+    # Dal 2026-09-24 (utente) Log AI e Modifica prompt sono icone nella barra
+    # in cima alla scheda, non piu' pulsanti in fondo agli strumenti AI.
+    assert not window.group_ai_tools.isAncestorOf(window.btn_ai_log)
+    assert not window.group_ai_tools.isAncestorOf(window.btn_component_prompt)
+    assert layout_contains(window.project_action_bar, window.btn_component_prompt)
     # Contratto nuovo, chiesto dall'utente («qui c'è troppa confusione con i
     # pulsanti sotto... se questa fase è stata completata, dovrebbe essere
     # possibile poterla sempre editare, inserire un pulsante in basso chiaro»):
@@ -126,14 +129,13 @@ def test_extraction_action_is_centered_below_separate_tools(window):
     assert not window.group_ai_tools.isAncestorOf(window.btn_edit_component_review)
     review = window.btn_edit_component_review
     assert window.btn_photo_comparison is review, 'un comando solo, non due widget'
-    outer = tab_outer_layout(window)
-    bottom_row = outer.itemAt(outer.count() - 1).layout()
-    assert layout_contains(bottom_row, review), 'il comando vive nella riga in fondo'
+    # Dal 2026-09-24 il comando e' un'icona nella barra in alto (utente):
+    # l'originale resta la fonte di nome e tooltip.
+    assert layout_contains(window.project_action_bar, window.btn_edit_component_review_top)
     assert review.text().strip()
     assert 'Non avvia la generazione' in review.toolTip()
     tools_layout = window.group_ai_tools.layout()
     assert tools_layout.contentsMargins().bottom() >= 12
-    assert tools_layout.itemAt(1).layout().spacing() >= 16
     assert not window.group_ai_tools.isAncestorOf(window.btn_extract_ai)
     layout = window.btn_extract_ai.parentWidget().layout()
     tools_index = layout.indexOf(window.group_ai_tools)
@@ -264,6 +266,25 @@ def test_output_actions_require_current_footprint(window, tmp_path, monkeypatch)
         window.action_install_global,
     )
     controls = footprint_controls + complete_controls
+    # Contratto aggiornato di proposito (utente, 2026-09-24): la scheda KiCad
+    # si apre solo a progetto completato (footprint + STEP), quindi Qt spegne
+    # anche i pulsanti che contiene. Qui si verifica lo stato PROPRIO di ogni
+    # comando (`isEnabledTo` la pagina della scheda); la scheda ha il suo.
+    page = window.tabs.widget(window.KICAD_TAB_INDEX)
+
+    class _Own:
+        def __init__(self, control):
+            self.control = control
+
+        def isEnabled(self):
+            if isinstance(self.control, QWidget) and page.isAncestorOf(self.control):
+                return self.control.isEnabledTo(page)
+            return self.control.isEnabled()
+
+    footprint_controls = tuple(_Own(c) for c in footprint_controls)
+    complete_controls = tuple(_Own(c) for c in complete_controls)
+    controls = footprint_controls + complete_controls
+    tab_open = lambda: window.tabs.isTabEnabled(window.KICAD_TAB_INDEX)  # noqa: E731
     assert all(not control.isEnabled() for control in controls)
     window._docs_dir().mkdir(parents=True, exist_ok=True)
     window._refresh_output_actions()
@@ -277,13 +298,16 @@ def test_output_actions_require_current_footprint(window, tmp_path, monkeypatch)
     window._on_generated(str(footprint))
     assert all(control.isEnabled() for control in footprint_controls)
     assert all(not control.isEnabled() for control in complete_controls)
+    assert not tab_open()  # solo footprint: progetto non completato
     step = window._project_dir() / f"{name}.3dshapes" / f"{name}.step"
     step.parent.mkdir()
     step.write_bytes(b"STEP")
     window._refresh_output_actions()
     assert all(control.isEnabled() for control in controls)
+    assert tab_open()
     window.field_name.setText("AltroComponente")
     assert all(not control.isEnabled() for control in controls)
+    assert not tab_open()
     window.field_name.setText(name)
     assert all(control.isEnabled() for control in controls)
     window.field_library_root.setText(str(tmp_path / "altro"))
@@ -1183,3 +1207,92 @@ def test_every_tab_has_a_line_icon_and_a_title_without_symbols(window):  # noqa:
         assert not window.tabs.tabIcon(index).isNull(), index
         title = window.tabs.tabText(index)
         assert title and title[0].isalnum(), title
+
+
+# ── Rigenerazione automatica dopo «Applica correzioni» (utente, 2026-09-24) ──
+# Prima il tab Modello 3D restava nero: l'anteprima vecchia veniva tolta
+# (regola 7) e nessuno rigenerava. Ora si rigenera da solo, solo FreeCAD.
+
+@pytest.fixture
+def shown_solid(window, raw_params, tmp_path, monkeypatch):
+    """Finestra con dati estratti, 3D attivo e un solido sullo schermo."""
+    raw_params.body_height_mm = 2
+    window._on_extracted(raw_params)
+    window.group_3d.setChecked(True)
+    mesh = tmp_path / "shown.preview.json"
+    mesh.touch()
+    window._last_mesh_path = mesh
+    calls = []
+    monkeypatch.setattr(window, "_regenerate_3d", lambda: calls.append(True))
+    return window, calls
+
+
+def _settle():
+    for _ in range(3):
+        QApplication.processEvents()
+
+
+def test_apply_with_a_solid_on_screen_regenerates_by_itself(shown_solid):
+    """@brief Positivo: c'era un solido -> dopo l'applica parte la rigenerazione."""
+    window, calls = shown_solid
+    window._apply_photo_review(window._photo_components_from_table())
+    assert window._last_mesh_path is None  # il vecchio non si mostra piu'
+    assert calls == []  # parte dopo la chiusura della finestra di revisione
+    _settle()
+    assert calls == [True]
+    assert not window._regen_3d_pending
+    assert "rigenerazione automatica" in window.log_text.toPlainText()
+
+
+def test_apply_without_a_previous_solid_leaves_the_choice_to_the_user(shown_solid):
+    """@brief Negativo: nessun solido prima -> niente diventa nero, nessun avvio."""
+    window, calls = shown_solid
+    window._last_mesh_path = None
+    window._apply_photo_review(window._photo_components_from_table())
+    _settle()
+    assert calls == [] and not window._regen_3d_pending
+    assert "Rigenera modello 3D" in window.label_3d_status.text()
+
+
+def test_apply_during_other_work_waits_for_it_and_runs_once(shown_solid, monkeypatch):
+    """@brief Mai due FreeCAD insieme: si aspetta la fine del lavoro in corso."""
+    window, calls = shown_solid
+    busy = [True]
+    monkeypatch.setattr(window, "_background_work_running", lambda: busy[0])
+    window._apply_photo_review(window._photo_components_from_table())
+    _settle()
+    assert calls == [] and window._regen_3d_pending
+    busy[0] = False
+    window._hide_analysis_overlay()
+    _settle()
+    window._hide_analysis_overlay()  # una seconda chiusura non la ripete
+    _settle()
+    assert calls == [True]
+
+
+def test_a_solid_of_the_current_data_makes_the_pending_request_moot(shown_solid, tmp_path):
+    """@brief Negativo: se un'altra generazione ha gia' mostrato i dati nuovi, nulla."""
+    window, calls = shown_solid
+    window._regen_3d_pending = True
+    window._last_mesh_path = tmp_path / "current.preview.json"
+    window._run_pending_regen_3d()
+    assert calls == [] and not window._regen_3d_pending
+
+
+def test_a_disabled_3d_model_is_not_regenerated_and_says_why(shown_solid):
+    """@brief Negativo: gruppo «Modello 3D» spento -> nessun avvio, motivo nel log."""
+    window, calls = shown_solid
+    window.group_3d.setChecked(False)
+    window._apply_photo_review(window._photo_components_from_table())
+    _settle()
+    assert calls == [] and not window._regen_3d_pending
+    assert "non avviata" in window.log_text.toPlainText()
+
+
+def test_a_project_change_drops_the_pending_regeneration(shown_solid, monkeypatch):
+    """@brief La richiesta del progetto chiuso non tocca quello aperto dopo."""
+    window, calls = shown_solid
+    monkeypatch.setattr(window, "_background_work_running", lambda: True)
+    window._apply_photo_review(window._photo_components_from_table())
+    window._reset_project_runtime_state()
+    assert not window._regen_3d_pending

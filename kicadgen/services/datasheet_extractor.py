@@ -203,10 +203,16 @@ _EXTRACTION_TOOL = {
             "body_offset_y_mm": {
                 "type": "number",
                 "description": (
-                    "Posizione del bordo del corpo lungo Y rispetto alla prima riga di "
+                    "Posizione del bordo del corpo lungo Y rispetto alla PRIMA riga di "
                     "pin (y=0), stessa logica di body_offset_x_mm ma per l'asse "
-                    "perpendicolare (tipicamente meta' della larghezza del corpo, con "
-                    "segno negativo, se le righe di pin sono centrate rispetto al corpo)."
+                    "perpendicolare: valore negativo pari alla distanza fra il bordo del "
+                    "corpo dal lato della prima riga e la prima riga stessa. Si misura "
+                    "dalla prima riga, NON dal centro del corpo: con piu' righe centrate "
+                    "nel corpo vale -(body_width_mm - distanza fra prima e ultima riga)/2 "
+                    "(es. due file distanti 22.86mm in un corpo largo 25.4mm: -1.27, non "
+                    "-12.7). Meta' della larghezza col segno meno e' giusta solo con UNA "
+                    "sola riga centrata. Tutti i centri dei pin devono cadere dentro il "
+                    "corpo."
                 ),
             },
             "pin_length_3d_mm": {
@@ -236,7 +242,21 @@ _EXTRACTION_TOOL = {
                         "edge": {
                             "type": "string",
                             "enum": list(EDGE_NAMES),
-                            "description": "Nome dello spigolo (vedi convenzione: top/bottom-front/back/left/right)",
+                            "description": (
+                                "Nome dello spigolo, fra due facce del parallelepipedo. "
+                                "Convenzione, vista dall'alto con l'asse lungo "
+                                "orizzontale: left/right = lati sinistro/destro, front = "
+                                "lato in ALTO della vista, back = lato in basso, top = "
+                                "faccia superiore, bottom = faccia di appoggio. Gli angoli "
+                                "arrotondati del contorno VISTO DALL'ALTO (es. scheda con "
+                                "angoli tondi) sono gli spigoli verticali front-left, "
+                                "front-right, back-left, back-right. top-*/bottom-* sono "
+                                "invece gli spigoli orizzontali della faccia superiore o "
+                                "inferiore (bordo arrotondato visto di profilo): NON "
+                                "usarli per gli angoli visti dall'alto. Su un corpo sottile "
+                                "(es. una PCB) i raccordi di due spigoli opposti della "
+                                "stessa faccia devono sommare meno del suo spessore."
+                            ),
                         },
                         "radius_mm": {
                             "type": "number",
@@ -1216,9 +1236,72 @@ def extract_pin_header_params(
         params.photo_overlay_png = photo_report.overlay_png
         params.photo_png = photo_report.photo_png
         params.photo_source = photo_report.photo
+    for message in fit_body_to_pin_field(params, component_family):
+        if progress:
+            progress(message)
     if progress:
         progress(usage_totals().describe())
     return params
+
+
+#: Tolleranza, in mm, con cui un centro di pin sul bordo conta come dentro:
+#: solo arrotondamento numerico, non un margine fisico.
+_PIN_FIELD_TOLERANCE_MM = 1e-6
+
+
+def fit_body_to_pin_field(params, component_family) -> list[str]:
+    """@brief Tiene tutti i pin di una scheda popolata a fori passanti dentro la scheda.
+
+    @param params ExtractedParams di layout «matrix»; corretto sul posto.
+    @param component_family Famiglia della tipologia scelta (attributo
+        dichiarato, non il nome del pezzo).
+    @return I messaggi da mostrare nel log: vuoto quando non c'era nulla da dire.
+    @note Solo per `aggregate_tht`: su una scheda popolata a fori passanti i
+        pin passano nei fori DELLA scheda, quindi ogni centro di pin sta dentro
+        il suo contorno. E' un vincolo fisico, non una stima. Un componente
+        singolo THT puo' invece avere gambe fuori dal corpo, e non si tocca.
+    @note Caso visto dall'utente il 2026-09-24 (TEST4): l'AI ha dato
+        `body_offset_y_mm = -12.7`, meta' larghezza, misurando dal centro della
+        scheda invece che dalla prima fila, e la seconda fila e' finita fuori.
+        Quando il campo dei pin esce dalla scheda ma ci sta, lo spostamento di
+        QUELL'asse viene ricentrato: e' una STIMA (il bordo non era quotato in
+        modo coerente) e lo si scrive nelle note e nel log. Quando la scheda e'
+        piu' piccola del campo dei pin nessun valore e' giusto: nessuna
+        correzione, solo l'avviso di quote incoerenti.
+    """
+    if component_family != "aggregate_tht" or params.is_castellated():
+        return []
+    rows, cols, pitch = params.rows, params.cols, params.pitch_mm
+    length, width = params.body_length_mm, params.body_width_mm
+    if not all(isinstance(v, (int, float)) and v > 0 for v in (rows, cols, pitch, length, width)):
+        return []
+    spacing = params.row_spacing_mm if params.row_spacing_mm else pitch
+    messages = []
+    for axis, span, extent, key in (("X", (cols - 1) * pitch, length, "body_offset_x_mm"),
+                                    ("Y", (rows - 1) * spacing, width, "body_offset_y_mm")):
+        offset = getattr(params, key)
+        if offset is None:
+            continue
+        # I pin occupano [0, span] sull'asse; la scheda [offset, offset + extent].
+        if (offset <= _PIN_FIELD_TOLERANCE_MM
+                and offset + extent >= span - _PIN_FIELD_TOLERANCE_MM):
+            continue
+        if extent + _PIN_FIELD_TOLERANCE_MM < span:
+            messages.append(tx(
+                "ATTENZIONE quote incoerenti sull'asse {axis}: i pin occupano {span:.2f} mm "
+                "ma la scheda misura {extent:.2f} mm. Nessuna correzione automatica: "
+                "verificare le quote.", axis=axis, span=span, extent=extent))
+            continue
+        centred = round(-(extent - span) / 2, 3)
+        setattr(params, key, centred)
+        messages.append(tx(
+            "ATTENZIONE spostamento del corpo sull'asse {axis} corretto da {old:.2f} a "
+            "{new:.2f} mm: con il valore dell'analisi una fila di pin cadeva fuori dalla "
+            "scheda. Valore STIMATO (campo dei pin centrato sulla scheda): verificarlo "
+            "con una quota.", axis=axis, old=offset, new=centred))
+    if messages:
+        params.notes = (str(params.notes or "") + "\n" + "\n".join(messages)).strip()
+    return messages
 
 
 def _optional_number(value, *, positive=False, integer=False):

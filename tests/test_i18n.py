@@ -118,6 +118,26 @@ def ui_source_literals():
                             remember(value, path, node.lineno)
             elif name == "addTab" and len(node.args) >= 2 and (value := constant(node.args[1])):
                 remember(value, path, node.lineno)
+            elif name in ("tool_button", "set_tool_texts"):
+                # Pulsanti a icona delle finestre (review_tools): titolo e
+                # spiegazione sono sorgenti del catalogo; il tasto (terzo
+                # argomento in entrambe) e' una sigla e non si traduce.
+                offset = 1
+                for position, argument in enumerate(node.args[offset:], start=offset):
+                    shortcut = position == offset + 1
+                    if not shortcut and (value := constant(argument)):
+                        remember(value, path, node.lineno)
+            elif name in ("_workflow_tool_button", "_view_tool_button", "_set_workflow_detail"):
+                # Comandi a icona: nome e spiegazione sono sorgenti del
+                # catalogo, tradotte quando si compone il tooltip.
+                for argument in node.args[1:]:
+                    if value := constant(argument):
+                        remember(value, path, node.lineno)
+            elif name == "addRow" and len(node.args) >= 2 and (value := constant(node.args[0])):
+                # Etichetta di una riga di QFormLayout: diventa una QLabel che
+                # `retranslate_widgets` ritraduce. Mancava al raccoglitore, e
+                # «Modello AI:» restava italiano in inglese (utente, 24/09).
+                remember(value, path, node.lineno)
             elif (name == "setProperty" and len(node.args) >= 2
                   and isinstance(node.args[0], ast.Constant)
                   and node.args[0].value in _SOURCE_PROPERTIES

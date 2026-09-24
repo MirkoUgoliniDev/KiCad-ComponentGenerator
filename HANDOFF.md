@@ -4,9 +4,10 @@
   localizzazione completa di log, diario, avanzamento ed errori (sezione
   «verifica che non ci siano testi in italiano cablati» in fondo al file).
   Prima: `b1ee2c0` (.gitignore), `eb633ea` (difetti 1-15 e 17).
-  Nessun lavoro in sospeso non committato.
-- Suite completa (24/09, con la localizzazione): 3934 passati, 3 saltati,
-  2 xfail attesi, 19 sottotest.
+  Lavoro NON committato: punti 1-13 delle segnalazioni dell'utente e il
+  «completa tutto» (in fondo, «PIANO IN CORSO (24/09) — completa tutto»).
+- Suite completa (24/09, dopo anteprima con zoom): 4032 passati, 3 saltati,
+  2 xfail attesi, 19 sottotest; uscita del processo 0 (controllarla sempre).
 - Difetto 16 CHIUSO (utente, 24/09, scelta «A»): la frase «Tipo SMD di
   proposito» resta anche sui moduli misti half_hole + through_hole, perche'
   anche quelli si posano e si saldano a rifusione, senza pin nei fori.
@@ -5537,7 +5538,7 @@ B. [x] Togliere la riga di testo «Rientri nella pipeline, nell'ordine: 1)…»
    sopra i tre pulsanti di rientro.
 C. [x] «Scegli modello...» del modello di visione diventa un'icona come quella
    accanto a «Modello AI» (uniforme), con il nome nel tooltip.
-D. [ ] DOMANDA, NON PARTIRE: `project_config.json` nella cartella del
+D. [x] (FATTO poi: «PIANO IN CORSO (24/09 notte, 4)») DOMANDA, NON PARTIRE: `project_config.json` nella cartella del
    progetto con tutte le opzioni e i parametri, riapplicati all'apertura.
    Chiedere all'utente cosa entra (campi, scelte, opzioni globali?) e la
    precedenza fra impostazioni del progetto e impostazioni globali. E' anche
@@ -5819,7 +5820,7 @@ il codice.
    segnaposto; segnalare quelli rimasti italiani.
 2. [x] Scan statico del codice GUI: letterali italiani passati a widget,
    messaggi (QMessageBox), log, overlay, stati, SENZA passare dal catalogo.
-3. [ ] Riferire all'utente numeri e categorie PRIMA di una correzione di
+3. [x] (FATTO: l'utente ha scelto di tradurre tutto, commit 3cdea2a) Riferire all'utente numeri e categorie PRIMA di una correzione di
    massa se la quantita' e' grande (i messaggi di log sono centinaia): la
    scelta di cosa tradurre (interfaccia sicuramente; log/diario?) e' sua.
 
@@ -5928,4 +5929,535 @@ il codice.
      (`messages.child_warning_text`/`render_child_line`) sia le righe in
      diretta (process_log) sia l'elenco finale (step_generator). Il
      marcatore resta. Contratto aggiornato in test_freecad_heartbeat. DA
-     PROVARE con FreeCAD vero.
+     PROVARE con FreeCAD vero. [PROVATO il 24/09 sera: rigenerazione TEST4
+     con FreeCAD 1.1.3, l'avviso dei raccordi arriva nel log formattato.]
+
+## SEGNALAZIONI DELL'UTENTE DA FARE DOPO (24/09) — «non le fare subito, prendi solo nota»
+
+[STATO, riallineato il 24/09 sera] Punti 1-13 TUTTI FATTI: vedi «PIANO IN CORSO
+(24/09) — applica le modifiche richieste». Le caselle qui sotto sono la nota
+originale, lasciata com'era.
+
+1. [ ] All'avvio la scheda «KiCad» SEMBRA selezionata (sfondo chiaro come una
+   scheda attiva), mentre quella attiva e' «Progetto» (ha la sottolineatura).
+   Deve risultare evidente che e' selezionata la prima. Da capire se e'
+   l'hover/focus rimasto sulla scheda KiCad o lo stile di una scheda
+   disabilitata/abilitata diversa dalle altre (screenshot dell'utente in
+   inglese: «KiCad» ha lo sfondo delle schede attive, «Project» no).
+2. [ ] Visto nello stesso screenshot, NON segnalato dall'utente: in inglese
+   l'etichetta «Modello AI:» del gruppo AI tools resta italiana (addRow in
+   main_window, era fra i 14 letterali senza voce di catalogo della verifica
+   e non e' stata coperta). Da correggere insieme al punto 1.
+3. [ ] Finestra «Corpi rilevati»: il menu «Categoria del riquadro scelto» in
+   basso a destra. Spiegato all'utente: corregge la categoria YOLO, che
+   serve SOLO come indizio alla chiamata AI (yolo_class /
+   detector_hint in photo_global_inventory e photo_yolo_review), come
+   etichetta sulla foto numerata mandata al modello e per il filtro; non
+   entra in footprint ne' geometria. Difetti visti: senza riquadro scelto
+   mostra ancora l'ultima categoria («resistor»). Proposta mia: TOGLIERLO
+   (il filtro resta). IN ATTESA della conferma dell'utente.
+4. [ ] Stessa finestra: la riga di riepilogo «Il rilevatore ne ha proposte
+   N (… sicure, … deboli). Ne tieni …» resta italiana in inglese
+   (yolo_review_dialog `_refresh`, testo costruito con f-string).
+5. [ ] Modale «Analisi AI»: «Global inventory: one single paid request on
+   5 immagini; reconciles the 45 proposals…» -- «immagini» e «l'unica
+   proposta» sono pezzi italiani non avvolti in tx
+   (photo_global_inventory ~730, frase montata a 4 frammenti). Proposta
+   data all'utente: frasi INTERE per caso (1/N immagini x rilevatore/nessun
+   rilevatore x 1/N proposte), es. «Inventario globale: una sola richiesta a
+   pagamento con 5 immagini. L'AI riconcilia le 45 proposte del rilevatore
+   locale ed elenca i corpi effettivi.» / «... Nessun rilevatore locale: e'
+   il modello di visione a elencare i corpi.» CLASSE: cercare e rifare TUTTE
+   le frasi montate a frammenti (limite dichiarato della localizzazione),
+   con un test che vieti pezzi italiani fuori da tx nelle concatenazioni.
+6. [ ] Scheda «KiCad», richiesta dell'utente: rendere la grafica piu'
+   professionale. Pulsanti -> icone chiare, testo del pulsante nel tooltip
+   (stile «nome (tasto) + spiegazione» gia' usato nelle revisioni e nel 3D,
+   `review_tools.set_tool_texts`); la riga in fondo («Apri cartella
+   componente» + stato «Footprint e modello STEP pronti per la verifica.»)
+   va in un riquadro (QGroupBox) come quelli sopra.
+   Interpretazioni da confermare all'utente prima di farlo: vale per TUTTI e
+   quattro i pulsanti della scheda (Prova in KiCad, Installa nel progetto,
+   Installa come libreria globale, Apri cartella componente); lo stato resta
+   testo leggibile (non tooltip) perche' e' un esito, non un comando; icone
+   SVG nuove coerenti con quelle esistenti in gui/assets; i test che
+   cercano il testo dei pulsanti vanno aggiornati come contratto (il testo
+   resta nel nome accessibile e nel tooltip).
+7. [ ] Scheda «Progetto»: i pulsanti «Log AI» e «Modifica prompt…» (oggi
+   in fondo al gruppo Strumenti AI) diventano ICONE con tooltip e salgono in
+   ALTO, in una barra di icone nella fascia sopra «Cartella componente»
+   (freccia dell'utente dallo screenshot). Stesso stile uniforme delle altre
+   barre (tool_button, toolbar_divider, tooltip «nome + spiegazione»).
+   «Log AI» mantiene la regola di oggi: l'icona si vede solo se il log c'e'.
+   Da confermare: se nella stessa barra vadano anche i tre pulsanti in fondo
+   (Rivedi proposte salvate / Rilancia inventario AI / Modifica la revisione)
+   -- NON chiesto, solo da proporre.
+8. [ ] Visto nello stesso screenshot, NON segnalato: con l'interfaccia in
+   italiano il consuntivo sotto «Estrai parametri con AI» e' in inglese
+   («Last analysis cost: 1.3977 USD · 3 calls · 115510 tokens»). Da
+   tradurre (testo composto, probabilmente con chiavi analysis.cost.*).
+9. [ ] Scheda «Progetto», proposta dell'utente: togliere i tre pulsanti in
+   fondo (Rivedi proposte salvate / Rilancia inventario AI / Modifica la
+   revisione) e il riepilogo del costo «Last analysis cost …».
+   ATTENZIONE detta all'utente: la scheda Modello 3D (dove ci sono le copie
+   a icona) si accende solo dopo un'estrazione DELLA SESSIONE
+   (`_set_acquisition_tabs_enabled`, main_window ~1910/4892): dopo un
+   riavvio, togliendo i pulsanti dal tab Progetto, «Rivedi proposte salvate»
+   e «Rilancia inventario» non sarebbero raggiungibili senza rifare
+   l'estrazione a pagamento. Proposta: NON eliminarli ma spostarli come
+   icone nella barra in alto del tab Progetto (insieme al punto 7), con la
+   stessa regola di visibilita' di oggi. Il costo: toglierlo va bene, resta
+   nel Log AI («Costo elaborazione AI: …») e nella modale durante
+   l'analisi; risolve anche il punto 8. IN ATTESA della conferma.
+
+## PIANO IN CORSO (24/09) — «applica le modifiche richieste» (punti 1-9 sopra)
+
+Scritto prima di toccare il codice. Scelte sulle domande rimaste aperte
+(l'utente ha risposto «applica», quindi valgono le mie proposte):
+- punto 3: il menu «Categoria del riquadro scelto» si TOGLIE; il filtro resta.
+- punto 6: TUTTI i pulsanti della scheda KiCad diventano icone, anche «Prova
+  in KiCad»; lo stato resta testo; la riga in fondo va in un riquadro.
+- punti 7+9: barra di icone in alto nel tab Progetto con Log AI, Modifica
+  prompt, Rivedi proposte salvate, Rilancia inventario AI, Modifica la
+  revisione; la riga di pulsanti in fondo sparisce; stesse regole di
+  visibilita' di oggi. Il riepilogo del costo si toglie (resta nel log).
+Ordine: 2, 4, 5 (testi e classe delle frasi a frammenti), 3, 7+9+8, 6, 1.
+Ogni punto con test positivo/negativo; suite completa alla fine.
+Punto 10 (aggiunto, domanda dell'utente sulla foto «verticale»): hires.jpg
+di TEST3 ha pixel 1408x3048 con EXIF orientation 6 (ruotare di 90 gradi).
+OpenCV (imread E imdecode, cv2 5.0) applica il tag -> l'analisi la vede
+orizzontale, giusta; l'anteprima della card (guided_documents
+`document_pixmap`, QPixmap) lo ignora -> verticale. Correzione: leggere con
+QImageReader.setAutoTransform(True). Rischio NON verificato da dire
+all'utente: la prima estrazione manda al modello i byte originali del file
+(datasheet_extractor ~729, base64 del file): se il fornitore ignora l'EXIF,
+il modello vede la foto ruotata.
+Punto 11 (aggiunto): la tendina della lingua era incollata al bordo destro
+(layout centrale senza margini). Fatto: `CONTENT_MARGIN_PX = 10` usato dalla
+riga della lingua e dal contenuto delle schede.
+Fatti finora: 2 (e 2 etichette in piu' trovate estendendo il test del
+catalogo a `addRow`), 5, 10 (anteprima con EXIF, test rosso senza), 11.
+Punto 12 (aggiunto, «rimuovi questo»): togliere la riga «L'analisi propone:
+<nome>» con «Usa questo nome» dal gruppo Cartella componente. Il nome si
+cambia solo da File > Rinomina progetto. Il nome proposto dall'analisi resta
+scritto UNA volta nel Log AI (informazione non persa). Vanno via
+`_set_suggested_name`, `_apply_suggested_name` e i widget; i test che
+rinominavano col pulsante passano a «Rinomina progetto…» (stesso contratto:
+documenti e cartelle seguono il nome).
+Punto 13 (aggiunto): «Tabella pinout…» nell'anteprima footprint diventa l'icona della tabella pinout gia' usata nella barra 3D, con tooltip.
+Fatti anche: 3 (menu categoria tolto, riquadri a mano senza categoria), 4 (riepilogo tradotto), 12 (riga del nome proposto tolta; test di rinomina passati a «Rinomina progetto…»).
+Fatti anche 7, 8, 9: barra di icone in cima al tab Progetto (Log AI e
+Modifica prompt come `_workflow_tool_button` con icone nuove ai-log.svg e
+prompt-edit.svg; copie a icona dei tre comandi della pipeline con
+`_mirror_project_action`, nomi *_top). Gli originali restano fonte di testo e
+stato in un contenitore nascosto (`_project_action_sources`). Tolta la label
+del costo: `_show_ai_cost` scrive il consuntivo nel Log AI e nella modale
+dell'analisi. Contratti aggiornati: test_project_tab_buttons (2),
+test_photo_inventory_gui, test_reopen_detector_review, test_ai_cost_label,
+test_generation_cost_hidden.
+Fatto anche 13: «Tabella pinout» nell'anteprima 2D = stessa icona e tooltip della barra 3D (btn_pinout_2d).
+Fatti anche 6 (scheda KiCad: quattro icone kicad-test/install-project/
+install-global/docs-open con nome+spiegazione o motivo nel tooltip via
+`_set_workflow_detail`; nota della sezione a sinistra, icone a destra
+(`_note_with_icons`); stato in un riquadro «Cartella del componente») e 1
+(schede: la scelta e' la piu' chiara e in grassetto, le altre MANTLE, le
+disabilitate #101017; test strutturale sulle luminosita' 59 > 31 > 20).
+Il test del catalogo ora vede anche addRow, _workflow_tool_button,
+_view_tool_button e _set_workflow_detail.
+ESITO (24/09): punti 1-13 fatti, NON committati. Suite completa 3941
+passati, 3 saltati, 2 xfail, 19 sottotest, uscita del processo 0.
+TRAPPOLA trovata e risolta: con tutti i test verdi il processo cadeva
+all'USCITA (segfault, codice 139) -- lo si vede solo guardando il codice di
+uscita, il riepilogo di pytest era verde. Bisezione: il commit e7fd65d
+usciva pulito; la causa era il mio test `test_the_detector_summary_follows_
+the_language` (finestra figlia di un QWidget genitore temporaneo, lasciati
+al garbage collector). Ora il test li distrugge in ordine (setParent(None),
+deleteLater, processEvents). Quando si lancia la suite, controllare SEMPRE
+anche il codice di uscita (echo $?).
+Contratti di test aggiornati oggi, tutti con motivo scritto: yolo (4, menu
+categoria), docs_migration/automatic_generation/live_log/project_open_new
+(rinomina da «Rinomina progetto…»), project_tab_buttons, photo_inventory_gui,
+reopen_detector_review, pipeline_pauses, project_switch, ai_cost_label,
+generation_cost_hidden, photo_global_inventory (frasi intere).
+
+## SEGNALAZIONI DELL'UTENTE DA FARE DOPO (24/09, secondo giro) — «prendi nota»
+
+[STATO, riallineato il 24/09 sera] 14, 17, 18 FATTI; 15 spiegato (stato prima
+dell'estrazione, nessun difetto); 16 non riproducibile, utente invitato a
+riprovare dopo il riavvio. Vedi «PIANO IN CORSO (24/09) — completa tutto».
+
+14. [ ] «Sfoglia…» accanto a «Modello YOLO» (tab Progetto, Strumenti AI)
+    diventa un'icona con tooltip, la stessa cartella del pulsante accanto ad
+    «Area di lavoro» (freccia dell'utente dall'una all'altra).
+15. [ ] Visto nello stesso screenshot, NON segnalato: su TEST4 top.png e
+    hires.jpg mostrano la croce rossa (✗ = «non calibrabile: la scheda non è
+    riconoscibile qui»), su TEST3 invece 12 e 41 px/mm. Da capire se e' un
+    difetto (tipologia diversa? quote del corpo diverse? regressione) prima
+    di dirlo all'utente come tale.
+16. [ ] DIFETTO segnalato: le icone «Log AI» e «Modifica prompt» in cima al
+    tab Progetto non mostrano il tooltip al passaggio del mouse (il testo c'e':
+    toolTip() pieno; con un QHelpEvent sintetico il filtro lo mostra). Causa
+    da trovare col mouse vero.
+17. [ ] Richiesta: nella modale «Analisi AI in corso» i pulsanti «Apri log AI»
+    e «Interrompi» diventano icone con tooltip, e lo stesso in TUTTE le
+    finestre modali successive («adegua tutto, mi raccomando tooltip al mouse
+    over»). Da censire: tutte le QDialog/QMessageBox con pulsanti di testo.
+    Indizio per il 16 (prova col cursore vero, finestra in primo piano,
+    script scratchpad test_tip3.py): al centro dell'icona «Modifica prompt»
+    `QApplication.widgetAt` restituisce un QWidget GENERICO, non il
+    pulsante -> qualcosa copre la barra in alto. Sospetto principale: il
+    contenitore nascosto degli originali `_project_action_sources =
+    QWidget(tab)` (figlio della scheda, fuori da ogni layout, in (0,0)): se
+    risulta visibile copre le icone e si prende gli eventi del mouse. Da
+    verificare (isVisible, geometria) PRIMA di correggere. L'utente ha
+    chiesto di NON fare modifiche ora: solo nota.
+18. [ ] «Scelta del modello STEP» (model_candidates_dialog): l'utente,
+    indicando l'icona a cubo in alto a destra sull'anteprima del modello
+    KiCad: «deve essere possibile ruotare il componente KiCad; ora non
+    funziona; è importante». Stato attuale letto (senza modifiche):
+    l'anteprima e' un'IMMAGINE statica (`_Preview` -> `_thumbnail` in un
+    worker, QLabel con pixmap); l'icona a cubo (`view_button`,
+    'preview_view_toggle') commuta solo fra vista in pianta e vista
+    isometrica; la rotazione si imposta con il campo «Rotazione Z locale del
+    CAD nativo» (override, «Automatico» la disattiva). Da chiarire con
+    l'utente quale delle due intende: (a) l'icona a cubo non commuta la vista
+    (difetto da riprodurre), oppure (b) vuole ruotare il modello con il mouse
+    o con comandi di rotazione (es. ±90°) direttamente sull'anteprima.
+    AGGIORNAMENTO 18 (screenshot dell'utente): con «Rotazione Z locale del
+    CAD nativo» = 90,00° e «Automatico» spento l'anteprima del modello e'
+    IDENTICA a quella a 0° -> la rotazione non arriva all'anteprima (difetto
+    vero, da riprodurre: rendering non rilanciato, o rotazione su asse
+    sbagliato, o camera in pianta simmetrica -- vedi docstring di
+    test_model_preview_view_mode, che parla gia' di un caso simile).
+    Proposta dell'utente, condivisa (in attesa del via): sotto l'icona a cubo
+    due icone ruota antioraria/oraria a passi di 90°; togliere il campo
+    numerico; accanto un'etichetta con l'angolo attuale; «Automatico» resta
+    come icona «torna all'automatico» al posto della casella (premere una
+    freccia passa all'override). Limite detto all'utente: niente angoli non
+    multipli di 90° per il CAD nativo (la rotazione del componente nella
+    foto resta indipendente e non cambia).
+
+## PIANO IN CORSO (24/09) — «accidenti, cosa è successo? fixa tutto» (TEST4)
+
+Screenshot dell'utente, anteprima 3D di TEST4 (tipologia «Componente
+aggregato a fori passanti»): corpo nero ruotato senza componenti montati,
+una fila di pin (1-22) dentro il corpo e l'altra (23-44) FUORI dal corpo.
+Collegato al punto 15 (croce rossa di calibrazione su top.png e hires.jpg).
+Prima la DIAGNOSI dai file locali (diario, project_config, footprint), senza
+chiamate AI; poi il piano di correzione, qui, prima del codice.
+DIAGNOSI (dai file locali, nessuna chiamata AI):
+- L'analisi e' andata bene: 46 corpi, scheda 63.3 x 25.4 mm, 2x22 pin,
+  passo 2.54, file a 22.86 mm. FreeCAD ha costruito tutti i 46 componenti
+  (freecad.log); lo screenshot era una vista DA SOTTO (i numeri dei pin si
+  vedono solo da li'), per questo non si vedevano.
+- Il difetto: `body_offset_y_mm = -12.7` dato dall'AI. Le file stanno a y=0 e
+  y=22.86 (pin_header.pin_positions); la scheda va da -12.7 a +12.7, quindi la
+  fila 23-44 e' FUORI. Il valore e' meta' larghezza: l'AI ha misurato dal
+  centro della scheda, non dalla prima fila come chiede lo schema. Le sue
+  note dicono che la distanza fra le file non e' quotata; il bordo in Y non
+  e' quotato da nessuna parte. offset_x = -5.05 e' invece quotato e coerente.
+- Il punto 15 (croce rossa) non era un difetto: dopo l'estrazione le viste
+  danno 12 e 41 px/mm.
+CORREZIONE (classe, non il caso): per le tipologie che dichiarano una scheda
+popolata a fori passanti (famiglia aggregate_tht, attributo dichiarato) i pin
+passano nei fori della scheda stessa, quindi TUTTI i centri dei pin devono
+stare dentro il contorno della scheda. Dopo l'estrazione:
+  - dentro -> nulla cambia (negativo del test);
+  - fuori, ma la scheda e' abbastanza grande su quell'asse -> offset di
+    quell'asse ricentrato sul campo dei pin, DICHIARATO come stima nelle note
+    e nel log (avviso), da verificare;
+  - scheda piu' piccola del campo dei pin -> nessuna correzione (non c'e' un
+    valore giusto), solo avviso di quote incoerenti.
+  Le altre tipologie (componente singolo THT: le gambe possono uscire dal
+  corpo) non vengono toccate.
+Per TEST4 esistente: basta Offset Y = -1.27 (tab Footprint 2D) e rigenerare;
+non tocco i file dell'utente senza chiedere.
+Da guardare dopo, non urgente: «fillet r=1.0 sugli angoli fallito
+(BRep_API: command not done)» nello stesso freecad.log.
+FATTO (TEST4): `datasheet_extractor.fit_body_to_pin_field`, chiamata alla
+fine di `extract_pin_header_params`. Test `tests/test_pin_field_fit.py`
+(positivo con i numeri di TEST4 -> -1.27, negativi: offset gia' coerenti,
+componente singolo THT, scheda piu' piccola del campo dei pin; integrazione
+offline dell'estrazione). Messaggi tradotti nelle 4 lingue. Verifica sui
+numeri: centro scheda nel 3D = -1.27 + 25.4/2 = 11.43 = meta' fra le file.
+Suite completa 3946 passati, 3 saltati, 2 xfail, uscita 0. NON committato.
+TEST4 dell'utente NON rigenerato: serve Offset Y = -1.27 nel tab Footprint
+2D (o una nuova estrazione) e poi «Rigenera»; chiesto all'utente.
+Aperti: 14 (Sfoglia icona), 16 (tooltip icone in alto: indizio su
+`_project_action_sources`), 17 (icone nella modale e nelle finestre
+successive), 18 (rotazione anteprima STEP: difetto + proposta frecce 90°),
+fillet r=1.0 fallito sugli angoli della scheda (freecad.log di TEST4).
+
+## PIANO IN CORSO (24/09) — «completa tutto»
+
+Scritto prima del codice. L'utente ha risposto «completa tutto» all'elenco
+degli aperti: vale anche come via alla proposta del 18 (frecce a 90°) e alla
+rigenerazione di TEST4.
+- [ ] 16 tooltip delle icone in alto (prima: e' un mio difetto)
+- [x] 14 «Sfoglia…» del modello YOLO -> icona con tooltip
+- [x] 17 modale Analisi AI: «Apri log AI», «Interrompi» -> icone; poi le
+      finestre successive (censimento delle QDialog con pulsanti di testo)
+- [x] 18 anteprima STEP: la rotazione deve arrivare all'anteprima (difetto);
+      frecce antioraria/oraria 90°, etichetta dell'angolo, «torna
+      all'automatico»; tolto il campo numerico
+- [x] angoli arrotondati della scheda (fillet r=1.0 fallito in TEST4)
+- [x] TEST4: offset Y -1.27 nel project_config e rigenerazione 3D
+- [x] suite completa + codice di uscita, handoff, resoconto
+16: NON riproducibile col codice attuale. Prova col cursore vero sulla
+finestra costruita come main(), progetto TEST4 aperto (scratchpad
+real_hover.py): «Log AI» e «Modifica prompt» ricevono l'evento ToolTip e il
+tooltip compare, piu' volte. La prova precedente «nessun evento» era un
+artefatto (il primo passaggio subito dopo l'apertura della finestra non
+genera mai l'evento, qualunque widget). Ipotesi da dire all'utente: istanza
+avviata prima di una modifica, o finestra non attiva. Chiesto di riprovare
+dopo il riavvio. L'indizio su `_project_action_sources` era sbagliato: il
+contenitore risulta nascosto e non copre nulla [CORRETTO].
+FATTI in «completa tutto»: 14 (Sfoglia -> icona cartella, tooltip «Sfoglia…»
++ spiegazione); 17 (modale di avanzamento: log e interrompi icone,
+`refresh_command_texts` al cambio lingua; revisione componenti: Parametri e
+Scegli modello KiCad icone; scelta STEP: Scegli file e Nessuno corrisponde
+icone; conferme in fondo restano testo, scelta dichiarata); il test del
+catalogo vede anche tool_button/set_tool_texts. Test tests/test_modal_icons.py.
+18 FATTO: sotto il cubo dell'anteprima (in alto a destra) tre icone:
+antioraria (+90), oraria (-90), «automatico» (commutabile), piu' l'angolo in
+vigore («90° auto» / «270°»). Campo numerico, casella e suggerimento sono
+stato interno NASCOSTO (55 riferimenti nei test, la logica di override resta
+quella). L'angolo scelto dall'automatico arriva dalla riga
+`local_rotation_deg=` di `_library_model`, letta in `_thumbnail` e portata
+dalla QImage (`AUTO_ROTATION_KEY`, testo dell'immagine) -- scelta per non
+cambiare la firma di `_thumbnail`, che una ventina di finti nei test
+riproducono. Il primo clic parte da quell'angolo; se ignoto, da 0. Diagnosi
+del difetto: la rotazione arrivava gia' all'anteprima; l'automatico e' 180°
+fuori rispetto alla foto (antenna), e 180° non si distingue dall'ingombro:
+le frecce lo correggono. Contratti cambiati di proposito, spiegati nei test:
+stato leggibile = etichetta dell'angolo; cubo primo di una colonna.
+FILLET DIAGNOSI: la scheda (solido del corpo) e' spessa 1.6 mm; r=1.0 su
+top-left + bottom-left somma 2.0 mm sulla faccia sinistra -> OpenCascade
+«command not done», e cadeva l'intero gruppo di raggio. Correzione generale:
+`_fillet_conflicts` in freecad_build_body (vincolo geometrico: su ogni
+faccia i raccordi dei due lati opposti lungo un asse sommano meno
+dell'estensione) scarta PRIMA i soli spigoli impossibili, con avviso
+tradotto che dice faccia, somma e misura. Test tests/test_fillet_feasibility.py.
+SEGNALATO, NON FATTO: con la convenzione dei nomi, «top-left» e' lo spigolo
+fra faccia superiore e sinistra, NON l'angolo in alto a sinistra della foto.
+L'AI ha quasi certamente inteso gli angoli arrotondati visti dall'alto, che
+sono front-left/front-right/back-left/back-right. Chiarirlo nella
+descrizione dello schema cambierebbe il prompt (nuove chiamate a pagamento,
+cache invalidata): da proporre all'utente, non fatto.
+TEST4 FATTO: offset Y -12.7 -> -1.27 nel project_config (copia del vecchio
+nello scratchpad), rigenerato con regen_test4.py: solo FreeCAD, NESSUNA
+chiamata AI, 32 s. I 44 pad stanno tutti dentro la scheda (x 0..53.34 in
+-5.05..58.25; y 0..22.86 in -1.27..24.13). I quattro raccordi della scheda
+sono stati scartati con l'avviso nuovo (vedi sopra), il resto e' esportato.
+Suite completa (24/09, dopo «completa tutto»): 3969 passati, 3 saltati,
+2 xfail attesi, 19 sottotest; uscita 0. Nulla committato.
+
+## PIANO IN CORSO (24/09) — «sistema tutto, in modo super preciso»
+
+Scritto PRIMA del codice. L'utente ha ricordato la regola «generalizzare, non
+far combaciare il caso corrente» (gia' in CLAUDE.md) e ha chiesto di
+sistemare tutto cio' che era rimasto aperto. Interpretazione: autorizzate le
+due correzioni del prompt proposte (causa a monte), piu' TEST4.
+1. [x] Schema `body_offset_y_mm`: la descrizione diceva «tipicamente meta'
+   della larghezza del corpo, con segno negativo» -- vero solo per UNA riga
+   di pin centrata. E' la causa a monte di TEST4 (-12.7). Nuova descrizione:
+   distanza fra bordo del corpo e PRIMA riga, con la formula per file
+   centrate `-(larghezza - distanza fra le file)/2`. `fit_body_to_pin_field`
+   resta come salvaguardia (vincolo fisico).
+2. [x] Schema `edge_fillets.edge`: chiarire la convenzione. Visto dall'alto
+   (asse lungo orizzontale): left/right = lati sinistro/destro, front = lato
+   in ALTO del disegno (Y minima del footprint), back = lato in basso; gli
+   angoli arrotondati visti dall'alto sono gli spigoli VERTICALI
+   front-left/front-right/back-left/back-right; «top-*» e «bottom-*» sono gli
+   spigoli delle facce superiore/inferiore (profilo). Verificato su
+   annotations.py e `_flip_y`/`_swap_front_back`.
+3. [x] TEST4 (dati, non codice): i 4 raccordi «top/bottom-left/right» sono
+   con ogni probabilita' gli angoli visti dall'alto -> portati sugli spigoli
+   verticali, rigenerazione solo FreeCAD. Copia del config gia' nello
+   scratchpad.
+4. [x] Test positivi/negativi sullo schema; suite completa con uscita 0.
+[CORRETTO] Avevo detto all'utente che cambiare il prompt avrebbe invalidato
+la cache e costretto a nuove chiamate a pagamento. Falso per questa
+chiamata: `extract_pin_header_params` non ha cache (le cache sono solo delle
+viste fotografiche, con prompt propri). Cambiare lo schema cambia solo le
+analisi FUTURE, che costano comunque.
+ESITO: 1-2 nello schema di `_EXTRACTION_TOOL`; test in
+tests/test_pin_field_fit.py (esempio del prompt == risultato della
+salvaguardia; 20 combinazioni di schede diverse -- 1-3 file, piccole e
+grandi, pin sul bordo -- con offset giusti e sbagliati in 4 modi: pin sempre
+dentro, asse giusto mai toccato; convenzione degli spigoli coerente con
+annotations). TEST4: raccordi portati su front-left/front-right/back-left/
+back-right, rigenerato (solo FreeCAD, 29 s, nessuna chiamata AI), nessun
+avviso; sul FCStd vero i 4 angoli del substrato sono tondi e i bordi pieni
+(scratchpad corner_check.py). Suite: 3991 passati, 3 saltati, 2 xfail,
+19 sottotest, uscita 0. Nulla committato.
+SEGNALATO, NON AUTORIZZATO: i nomi front/back delle annotazioni (fillet e
+testi) seguono la vista 2D del footprint (front = Y minima = lato in ALTO),
+mentre il cubo della vista 3D chiama «Fronte» il lato Y- del modello, cioe'
+il lato in BASSO della vista dall'alto (convenzione KiCad). Un raccordo
+«front-left» compare quindi dalla parte che il cubo chiama «Retro».
+Allinearli cambia il significato dei progetti salvati (serve una migrazione
+dei nomi): da decidere con l'utente. Il prompt ora usa la convenzione
+effettiva del codice, quindi l'AI e la costruzione sono coerenti fra loro.
+
+## SEGNALAZIONI DELL'UTENTE DA FARE DOPO (24/09, terzo giro) — «prendi nota, non fare nulla ora»
+
+19. [x] Modale «Analisi AI in corso» (analysis_overlay.py): le due icone in
+    fondo («Apri log AI» ai-log.svg, «Interrompi» stop.svg, create con
+    `review_tools.tool_button`) vanno un po' piu' grandi. Oggi hanno la
+    misura standard delle barre di revisione; nella card grande sembrano
+    piccole. Da fare: dimensione di icona/pulsante propria della modale (non
+    cambiare `tool_button` per tutti), test sulla misura. Screenshot
+    dell'utente: images/28.png della sessione.
+20. [x] DIFETTO segnalato (utente, «le icone devono avere SEMPRE un tooltip»):
+    nella modale «Analisi AI in corso» le icone log/interrompi non mostrano
+    il tooltip. Verifica fatta, nessuna modifica: il tooltip E' impostato
+    (`refresh_command_texts` -> `set_tool_texts`: «Apri log AI\n…»,
+    «Interrompi\n…»). Prova col cursore vero (scratchpad overlay_hover.py e
+    overlay_hover2.py: finestra come main(), TEST4, tabs spente,
+    `analysis_overlay.start(abortable=True)`, anche con `set_status` ogni
+    0.3 s per 3 s): evento ToolTip ricevuto e tooltip visibile su entrambe,
+    4 passaggi su 4. NON riprodotto. Ipotesi aperte: (a) durante l'analisi
+    vera il thread della GUI resta occupato (lettura/codifica dei documenti
+    all'inizio: nello screenshot «Tempo trascorso 00:03») e il timer del
+    tooltip non scatta; (b) istanza avviata prima della modifica. Da chiedere
+    all'utente: in che fase ha provato e per quanto e' rimasto sopra l'icona.
+    Se (a): misurare i blocchi del thread GUI nei primi secondi dell'analisi
+    (replay offline, senza chiamate a pagamento).
+21. [x] Scelta del modello STEP: l'icona del cubo (vista
+    pianta/isometrica) in cima alla colonna e' piu' piccola delle tre di
+    rotazione sotto e non allineata con loro. Da fare: stessa misura e stesso
+    stile (`tool_button`) delle altre, colonna allineata; test sulla misura.
+    FATTO: il cubo e' un `tool_button` come le frecce (icona 22 px, stesso
+    stile, tooltip «Vista isometrica
+Premuto: … Rilasciato: …»); test
+    `test_the_cube_matches_the_rotation_icons_in_size_and_column`; contratto
+    del tooltip aggiornato con motivo; voce vecchia del catalogo tolta.
+22. [x] DIFETTO: dopo «Applica correzioni» nella revisione
+    componenti il tab Modello 3D resta NERO (l'anteprima vecchia viene
+    invalidata, regola 7 di CLAUDE.md, ma nessuno rigenera). Richiesta:
+    rigenerare automaticamente il 3D all'applicazione. Solo FreeCAD, nessuna
+    chiamata AI. Da verificare: percorso dell'Applica, regola di
+    invalidazione, risultati CAD tardivi che non devono ripristinare
+    l'anteprima vecchia, conflitto con una generazione gia' in corso.
+
+## PIANO IN CORSO (24/09 sera) — «applica tutte le modifiche in modo chirurgico»
+
+Scritto prima del codice. Ordine: 22, 19, 20.
+- 22: dopo «Applica correzioni» rigenerare il 3D da solo (stesso percorso
+  del pulsante «Rigenera modello 3D», nessuna AI). Se un lavoro e' gia' in
+  corso: non partire in parallelo, rigenerare quando finisce (o dire perche'
+  no). Test positivo (applica -> rigenera) e negativi (annulla -> nulla;
+  3D spento o parametri non validi -> nessun avvio, motivo nel log).
+- 19: icone della modale «Analisi AI in corso» piu' grandi, SOLO li'.
+- 20: tooltip della modale non riprodotto. Intervento: misurare se il
+  thread GUI si blocca all'avvio dell'analisi (replay offline); correggere
+  solo un blocco dimostrato. Se non si dimostra nulla, dirlo all'utente.
+ESITI del piano «chirurgico»: 22 FATTO (`_apply_photo_review` rigenera da
+solo se prima c'era un solido: `_regen_3d_pending` + `_run_pending_regen_3d`,
+ritentato alla chiusura della modale di un lavoro in corso, azzerato al cambio
+progetto; 3D spento -> riga di log, nessun avvio; 6 test in
+test_photo_inventory_gui). 19 FATTO (`OVERLAY_ICON_PX = 30` solo nella
+modale; test in test_modal_icons). 20 DIAGNOSI [CORREGGE la mia ipotesi (a)]:
+misura con rete disattivata (scratchpad gui_stall.py, chiave finta, urlopen
+sostituito): il thread GUI NON si blocca (0.2 s al primo avvio, poi <25 ms
+per 12 s). Causa DIMOSTRATA (overlay_inactive.py): Qt non mostra tooltip se
+la finestra NON e' attiva (utente passato a un'altra finestra e tornato col
+mouse senza cliccare): 0/4 senza, 4/4 con `WA_AlwaysShowToolTips`. Spiega con
+ogni probabilita' anche il 16. FATTO: il filtro dei tooltip (tooltips.py)
+mette l'attributo su OGNI finestra al primo Show; riprova vera su finestra
+non attiva: 4/4. Test in test_tooltips (finestre e dialoghi si', figli no).
+Suite completa: 4000 passati, 3 saltati, 2 xfail, 19 sottotest, uscita 0.
+Nulla committato.
+23. [x] (FATTO, vedi piano sotto) PROPOSTA (utente, 24/09 sera): sotto «Estrai
+    parametri con AI» il saldo dell'account OpenRouter e il costo totale del
+    progetto su tutti i passaggi. Stato del codice: il saldo si legge gia'
+    (`openrouter.credit_status`: GET /credits e /auth/key, gratuiti, nessun
+    token; oggi usato solo da `check_credit` prima dell'analisi e nel log). Il
+    costo per chiamata c'e' (`usage.cost` -> `UsageTotals`), ma solo per la
+    corsa in atto: `reset_usage` all'inizio dell'estrazione, nessun totale
+    per progetto salvato su disco. `analisi-ai.log` di TEST4 contiene UNA sola
+    riga di costo (0.8954 USD), quindi lo storico dei progetti esistenti NON
+    e' ricostruibile per intero. Nota: e' un'informazione diversa dal
+    «costo dell'ultima analisi» che l'utente ha fatto togliere (punto 9).
+
+## PIANO IN CORSO (24/09 sera) — punto 23, saldo e costo del progetto
+
+Via dell'utente: «ok fallo, i progetti vecchi sono test» -> il totale
+parte da zero, nessuna ricostruzione dai log. Scritto prima del codice.
+1. openrouter: `set_usage_listener`; `_record_usage` (l'UNICO punto in cui
+   passa ogni chiamata pagata, anche quelle con risposta inutilizzabile o
+   interrotte dopo la risposta) avvisa l'ascoltatore con costo, token e
+   modello. Un ascoltatore che fallisce non rompe mai la chiamata.
+2. services/project_costs.py: `ai-costs.json` nella cartella del progetto
+   (totale, chiamate, chiamate senza costo, dal, elenco delle chiamate);
+   validazione semantica (numeri finiti non booleani), scrittura atomica; un
+   file illeggibile NON viene sovrascritto (si avvisa nel log).
+3. GUI: ponte Qt dal thread di lavoro al thread della GUI (segnale), che
+   scrive nel progetto corrente; riga sotto «Estrai parametri con AI»:
+   «Saldo OpenRouter: … · Costo del progetto: …», dettagli nel tooltip.
+   Saldo letto in background (GET gratuite) all'avvio e dopo ogni analisi a
+   pagamento; mai nei test (abilitato solo da main()). Aggiornata al cambio
+   progetto/rinomina e al cambio lingua.
+4. Test positivi/negativi; suite; handoff.
+ESITO punto 23: FATTO. `services/project_costs.py` (ai-costs.json:
+totale, chiamate, chiamate senza costo, dal, elenco; validazione; atomico;
+file illeggibile mai sovrascritto), `openrouter.set_usage_listener` chiamato
+da `_record_usage` (unico passaggio di ogni chiamata pagata), `gui/
+ai_account.py` (`AiAccountLine`: ponte Qt thread->GUI, saldo in QRunnable,
+abilitato SOLO da main()). Riga sotto «Estrai parametri con AI», aggiornata
+a ogni chiamata pagata, al cambio nome/cartella e lingua; saldo riletto
+all'avvio e a fine analisi (`_show_ai_cost`). conftest azzera l'ascoltatore
+fra i test; dopo la suite nessun ai-costs.json nei progetti veri.
+Test tests/test_project_costs.py (21). Suite: 4021 passati, 3 saltati,
+2 xfail, 19 sottotest, uscita 0. Nulla committato.
+TRAPPOLA: il saldo si vede solo avviando l'app da main(); nei test e nelle
+finestre di prova la riga mostra solo il costo del progetto.
+24. [x] (utente 24/09 sera) La riga saldo/costo va DENTRO il
+    riquadro «Strumenti AI», non sotto il pulsante: ultima riga del modulo
+    dei modelli, con etichetta a sinistra come le altre righe.
+ESITO 24: riga «Credito AI:» ultima del modulo di «Strumenti AI»
+(`label_ai_account` + `ai_account`, allineata a sinistra; «—» senza dati
+invece di sparire, per non lasciare un'etichetta sola). Contratto del test
+di posizione aggiornato con motivo. Suite: 4021 passati, uscita 0.
+25. [x] (utente 24/09 sera) La scheda «KiCad» NON deve essere
+    selezionabile se non c'e' un progetto attivo completato (screenshot:
+    all'avvio, senza progetto, KiCad accesa mentre Anteprima e Modello 3D
+    sono spente). Da definire «completato» sui dati: cio' che le azioni
+    della scheda richiedono per funzionare (footprint generato nella
+    cartella del progetto corrente).
+ESITO 25: `_refresh_kicad_tab` (chiamato da `_refresh_output_actions`, che
+gira a ogni cambio di nome/cartella e dopo ogni generazione): la scheda si
+sceglie solo con footprint E STEP nella cartella del progetto corrente -- lo
+stesso criterio che accende test in KiCad e installazioni. Se la si sta
+guardando quando si spegne, si torna a «Progetto». Tooltip della scheda col
+motivo. Test tests/test_kicad_tab_gate.py (4). Contratto di
+test_output_actions_require_current_footprint aggiornato con motivo: i
+pulsanti DENTRO la scheda ora risultano spenti anche per Qt quando la scheda
+e' chiusa; il test verifica lo stato proprio (`isEnabledTo` la pagina) e lo
+stato della scheda. CONSEGUENZA da sapere: con il solo footprint (senza
+STEP) «Apri cartella» della scheda non e' raggiungibile; resta la voce del
+menu File. Suite: 4025 passati, uscita 0. Nulla committato.
+26. [x] (utente 24/09 sera) Schede dei documenti: il pulsante di
+    anteprima usa l'icona CARTELLA (docs-open.svg) ma apre un'anteprima nel
+    programma -> occhio stilizzato (tab-preview.svg, come la scheda
+    «Anteprima FootPrint»), tooltip nome + spiegazione.
+27. [x] Finestra di anteprima del documento: zoom avanti/indietro.
+    Oggi l'immagine si apre al 100% con le barre di scorrimento. Da fare:
+    apertura adattata alla finestra, barra con zoom -, percentuale, zoom +,
+    adatta (icone e scorciatoie delle finestre di revisione), Ctrl+rotella e
+    tasti +/-; «Apri file completo» e «Chiudi» restano.
+ESITO 26-27: occhio (tab-preview.svg) e tooltip nome + spiegazione sul
+pulsante di anteprima delle schede; `gui/zoom_image.py` (`ZoomImageView` /
+`ZoomImagePanel`): apertura adattata, rotella attorno al puntatore, pulsanti e
+tasti +/-/F attorno al CENTRO (ancorati al puntatore facevano scivolare la
+vista), 100% = documento intero calcolato senza barre di scorrimento (con le
+barre la percentuale risultava falsata, 253% invece di 250%), limiti
+0.25x-32x. `document_pixmap(..., upscale=False)`: pixel veri per lo zoom
+(immagini fino a 8192 px; PDF a 3x i punti). Test
+tests/test_document_preview_zoom.py (7). Suite 4032, uscita 0.
+NOTA 24/09 19:20: l'UTENTE ha eliminato tutte le cartelle di generated/
+(TEST, TEST2, TEST3, TEST4, TESTMIRKO, TESTSMD; sono nel Cestino di Windows).
+Confermato dall'utente. I riferimenti a TEST4 in questo file e negli script
+dello scratchpad (regen_test4.py, corner_check.py, gui_stall.py) non sono
+piu' riproducibili senza ripristinarle.

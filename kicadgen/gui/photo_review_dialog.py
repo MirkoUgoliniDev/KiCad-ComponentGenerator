@@ -1181,14 +1181,23 @@ class PhotoReviewDialog(QDialog):
         # Edits are live, so closing the modal by any route is a focus change,
         # not an undo: pending text is committed on OK and on Escape alike.
         self.parameters_dialog.finished.connect(self._commit_pending_text)
-        self.parameters_button = QPushButton("Parametri…")
-        self.parameters_button.setAutoDefault(False)
+        # Icone con tooltip (utente, 2026-09-24: «icone anche nelle modali
+        # successive»), nella stessa riga sotto la lista.
+        self.parameters_button = tool_button(
+            "sliders.svg", "Parametri…", "",
+            "Quote, rotazione, altezza e nome del componente scelto.", tr=tr)
         self.parameters_button.clicked.connect(self.open_parameters)
-        sidebar.addWidget(self.parameters_button)
-        self.model_button = QPushButton("Scegli modello KiCad…")
-        self.model_button.setAutoDefault(False)
+        self.model_button = tool_button(
+            "step-view-iso.svg", "Scegli modello KiCad…", "",
+            "Confronta i modelli 3D di KiCad per il componente scelto "
+            "(anche con doppio clic sulla lista).", tr=tr)
         self.model_button.clicked.connect(self.choose_model)
-        sidebar.addWidget(self.model_button)
+        component_actions = QHBoxLayout()
+        component_actions.setSpacing(4)
+        component_actions.addWidget(self.parameters_button)
+        component_actions.addWidget(self.model_button)
+        component_actions.addStretch()
+        sidebar.addLayout(component_actions)
         self.model_status = QLabel("Doppio clic su un componente per confrontare i modelli 3D.")
         self.model_status.setWordWrap(True)
         self.model_status.setTextFormat(Qt.TextFormat.PlainText)

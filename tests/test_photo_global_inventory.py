@@ -1487,7 +1487,11 @@ def test_the_paid_request_line_names_no_proposals_when_none_were_detected():
     modello.
     """
     line = inventory.paid_request_message(4, 0, enumerating=True)
-    assert 'nessun rilevatore locale' in line and 'enumera' in line
+    # Testo rifatto a frasi intere il 2026-09-24 (utente): «Nessun rilevatore
+    # locale: è il modello di visione a elencare i corpi.» Il contratto e' lo
+    # stesso -- dichiarare che il rilevatore non c'e' e chi elenca i corpi --
+    # cambiano solo maiuscola e verbo.
+    assert 'nessun rilevatore locale' in line.lower() and 'elencare i corpi' in line
     assert 'proposte' not in line and 'riconcilia' not in line
     assert 'una sola richiesta a pagamento' in line
 
@@ -1550,7 +1554,9 @@ def test_the_enumeration_line_declares_that_no_local_detector_ran():
     assert len(calls) == 1 and len(result) == 1
     line = _paid_request_line(logs)
     assert 'unchanged/model' not in line
-    assert 'nessun rilevatore locale' in line and 'enumera' in line
+    # Frase intera dal 2026-09-24 (vedi il test della funzione): stesso
+    # contratto, maiuscola e verbo diversi.
+    assert 'nessun rilevatore locale' in line.lower() and 'elencare i corpi' in line
     assert 'proposte' not in line and 'riconcilia' not in line
 
 

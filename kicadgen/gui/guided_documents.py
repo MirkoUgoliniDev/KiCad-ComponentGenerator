@@ -3,17 +3,32 @@ from pathlib import Path
 import webbrowser
 
 from PyQt6.QtCore import Qt, QSize, pyqtSignal
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtGui import QPixmap, QImageReader
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
-    QGroupBox, QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget)
+    QGroupBox, QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget)
 
 from ..services.document_roles import DocumentSet, ROLES, ROLE_HELP, SUFFIXES
 from .profile_dialog import icon_button, show_info
 from ..services.messages import tx
 
 
-def document_pixmap(path, size):
-    """@brief Provide the document pixmap operation for this workflow."""
+#: PDF pages are rendered at this multiple of their size in points when the
+#: caller wants detail for zooming (about 216 dpi).
+PDF_ZOOM_RENDER_SCALE = 3
+
+
+def document_pixmap(path, size, upscale=True):
+    """@brief Pixmap of a document: an image with its EXIF orientation, or a PDF's first page.
+
+    @param path Document file.
+    @param size Box the result must fit into.
+    @param upscale True (cards): the result fills `size`, small images are
+        enlarged. False (zoomable preview): an image keeps its own pixels
+        unless larger than `size`, and a PDF page is rendered at
+        PDF_ZOOM_RENDER_SCALE times its point size, so zooming shows detail
+        instead of an enlarged thumbnail.
+    @return The pixmap, or a null pixmap when the document cannot be drawn.
+    """
     if path.suffix.lower() == '.pdf':
         try:
             from PyQt6.QtPdf import QPdfDocument
@@ -22,15 +37,32 @@ def document_pixmap(path, size):
                 doc.load(str(path))
                 if doc.pageCount():
                     page = doc.pagePointSize(0).toSize()
-                    page.scale(size, Qt.AspectRatioMode.KeepAspectRatio)
+                    if upscale:
+                        page.scale(size, Qt.AspectRatioMode.KeepAspectRatio)
+                    else:
+                        page = page * PDF_ZOOM_RENDER_SCALE
+                        if page.width() > size.width() or page.height() > size.height():
+                            page.scale(size, Qt.AspectRatioMode.KeepAspectRatio)
                     return QPixmap.fromImage(doc.render(0, page))
             finally:
                 doc.close()
         except ImportError:
             pass
         return QPixmap()
-    return QPixmap(str(path)).scaled(size, Qt.AspectRatioMode.KeepAspectRatio,
-                                     Qt.TransformationMode.SmoothTransformation)
+    # Le foto dei telefoni salvano i pixel in un verso e il verso giusto nel
+    # tag EXIF di orientamento. L'analisi (OpenCV, imread e imdecode) lo
+    # applica; QPixmap no, e la foto orizzontale compariva verticale nella
+    # card (utente, 2026-09-24). L'anteprima deve mostrare cio' che l'analisi
+    # vede: il lettore applica il tag.
+    reader = QImageReader(str(path))
+    reader.setAutoTransform(True)
+    image = reader.read()
+    if image.isNull():
+        return QPixmap()
+    if not upscale and image.width() <= size.width() and image.height() <= size.height():
+        return QPixmap.fromImage(image)
+    return QPixmap.fromImage(image).scaled(size, Qt.AspectRatioMode.KeepAspectRatio,
+                                           Qt.TransformationMode.SmoothTransformation)
 
 
 class GuidedDocuments(QWidget):
@@ -94,9 +126,12 @@ class GuidedDocuments(QWidget):
             column.addWidget(verdict)
             actions = QHBoxLayout()
             load = icon_button('Carica…', 'docs-add.svg', lambda checked=False, r=role: self._load(r))
-            view = icon_button('', 'docs-open.svg', lambda checked=False, r=role: self._preview(r))
+            # Occhio, non cartella (utente, 2026-09-24): il pulsante apre
+            # un'anteprima nel programma, non sfoglia file sul disco.
+            view = icon_button('', 'tab-preview.svg', lambda checked=False, r=role: self._preview(r))
             remove = icon_button('', 'docs-remove.svg', lambda checked=False, r=role: self._remove(r))
-            view.setToolTip('Anteprima documento')
+            view.setToolTip('Anteprima documento\nApre il documento in una finestra con lo '
+                            'zoom; il file non viene modificato.')
             localized_label = self.i18n.text(label) if self.i18n is not None else label
             view.setAccessibleName(
                 self.i18n.tr('tooltip.preview_role', role=localized_label)
@@ -368,18 +403,18 @@ class GuidedDocuments(QWidget):
             dialog.setWindowTitle(f'{role_label} — {name}')
             dialog.resize(900, 700)
             layout = QVBoxLayout(dialog)
-            label = QLabel()
-            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            pixmap = document_pixmap(path, QSize(1600, 1200))
+            # Pixel veri, non la miniatura ingrandita: si puo' zoomare
+            # (utente, 2026-09-24). Un'immagine enorme resta sotto 8192 px.
+            pixmap = document_pixmap(path, QSize(8192, 8192), upscale=False)
             if pixmap.isNull():
-                label.setText('Anteprima non disponibile. Usa “Apri file completo” per consultare il documento.')
+                label = QLabel('Anteprima non disponibile. Usa “Apri file completo” per consultare il documento.')
+                label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 label.setWordWrap(True)
+                layout.addWidget(label, 1)
             else:
-                label.setPixmap(pixmap)
-            scroll = QScrollArea()
-            scroll.setWidget(label)
-            scroll.setWidgetResizable(True)
-            layout.addWidget(scroll, 1)
+                from .zoom_image import ZoomImagePanel
+                dialog.zoom_panel = ZoomImagePanel(pixmap, tr=self._tr)
+                layout.addWidget(dialog.zoom_panel, 1)
             open_file = QPushButton('Apri file completo')
             open_file.clicked.connect(lambda: webbrowser.open(path.resolve().as_uri()))
             layout.addWidget(open_file)

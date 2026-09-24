@@ -303,6 +303,24 @@ def _usage_int(container: Any, key: str) -> int:
     return int(value) if math.isfinite(value) and value > 0 else 0
 
 
+#: Called once per paid call, from the thread that made it (see
+#: `set_usage_listener`). None when nobody listens.
+_usage_listener = None
+
+
+def set_usage_listener(listener) -> None:
+    """@brief Be told about every paid call as soon as its answer arrives.
+
+    @param listener Callable taking one dict (``cost_usd`` float or None,
+        ``prompt_tokens``, ``completion_tokens``, ``model``), or None to stop.
+    @note Called from the worker thread that made the call: a GUI must hop to
+        its own thread (e.g. with a Qt signal). A listener that raises never
+        breaks the call it is told about: the answer was paid and is used.
+    """
+    global _usage_listener
+    _usage_listener = listener
+
+
 def _record_usage(payload: Any) -> None:
     """Somma al consuntivo l'uso dichiarato da una risposta dell'API.
 
@@ -325,6 +343,16 @@ def _record_usage(payload: Any) -> None:
                 usage.get("prompt_tokens_details"), "cached_tokens")
             _usage_totals.reasoning_tokens += _usage_int(
                 usage.get("completion_tokens_details"), "reasoning_tokens")
+    listener = _usage_listener
+    if listener is not None:
+        record = {"cost_usd": cost, "model": str((payload.get("model") if isinstance(payload, dict)
+                                              else "") or ""),
+                  "prompt_tokens": _usage_int(usage, "prompt_tokens"),
+                  "completion_tokens": _usage_int(usage, "completion_tokens")}
+        try:
+            listener(record)
+        except Exception:  # noqa: BLE001 - la chiamata e' pagata e resta valida
+            pass
 
 
 def _credit_number(value: Any) -> Optional[float]:

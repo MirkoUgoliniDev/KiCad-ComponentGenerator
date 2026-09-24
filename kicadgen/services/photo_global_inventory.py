@@ -727,13 +727,23 @@ def paid_request_message(images, proposals, enumerating):
         with fewer images, and the test exercises it here instead of leaving
         the agreement unverified.
     """
-    pictures = f'{images} immagini' if images != 1 else '1 immagine'
-    return (tx("Inventario globale: una sola richiesta a pagamento su ") + pictures + '; '
-            + (tx("nessun rilevatore locale, i corpi li enumera il modello di visione.")
-               if enumerating else
-               (tx("riconcilia le {proposals} proposte", proposals=proposals) if proposals != 1
-                else 'riconcilia l’unica proposta')
-               + tx(" del rilevatore locale ed elenca i corpi effettivi.")))
+    # Frasi INTERE, una per caso (utente, 2026-09-24): montata a quattro pezzi
+    # la riga usciva in inglese con «5 immagini» in italiano in mezzo, e un
+    # pezzo non si traduce bene fuori dalla sua frase. Due frasi complete
+    # accostate restano traducibili una per una.
+    request = (tx("Inventario globale: una sola richiesta a pagamento con 1 immagine.")
+               if images == 1 else
+               tx("Inventario globale: una sola richiesta a pagamento con {images} immagini.",
+                  images=images))
+    if enumerating:
+        work = tx("Nessun rilevatore locale: è il modello di visione a elencare i corpi.")
+    elif proposals == 1:
+        work = tx("L'AI riconcilia l’unica proposta del rilevatore locale ed elenca i "
+                  "corpi effettivi.")
+    else:
+        work = tx("L'AI riconcilia le {proposals} proposte del rilevatore locale ed elenca "
+                  "i corpi effettivi.", proposals=proposals)
+    return request + " " + work
 
 
 def _inventory_context(text):

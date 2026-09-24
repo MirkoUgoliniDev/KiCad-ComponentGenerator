@@ -4,7 +4,7 @@ import math
 import re
 from time import monotonic
 
-from PyQt6.QtCore import QEvent, QPointF, QRect, QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QPointF, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPalette,
                          QPen, QTextDocument)
 from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton,
@@ -598,6 +598,10 @@ class AnalysisSpinner(QWidget):
             painter.drawLine(QPointF(20, 27), QPointF(24, 27))
 
 
+#: Icon size of the progress window commands, pixels (toolbars use 22).
+OVERLAY_ICON_PX = 30
+
+
 class AnalysisOverlay(QWidget):
     """@brief Present analysis progress and expose the AI log and abort actions.
 
@@ -705,19 +709,23 @@ class AnalysisOverlay(QWidget):
         # I due comandi stanno sulla stessa riga, nell'ordine in cui l'utente
         # li ha chiesti: il log a sinistra, l'interruzione subito alla sua
         # destra. La riga resta centrata come lo era il solo pulsante del log.
-        self.log_button = QPushButton("Apri log AI")
+        # Icone con nome e spiegazione nel tooltip (utente, 2026-09-24), come
+        # le barre delle altre finestre. I testi li compone
+        # `refresh_command_texts`, anche al cambio di lingua: i pulsanti sono
+        # `i18n_skip` perche' il tooltip composto non e' una chiave.
+        from .review_tools import tool_button
+        self.log_button = tool_button("ai-log.svg", "Apri log AI")
         self.log_button.setObjectName("analysisLogButton")
         self.log_button.clicked.connect(self.log_requested.emit)
-        self.abort_button = QPushButton("Interrompi")
+        self.abort_button = tool_button("stop.svg", "Interrompi")
         self.abort_button.setObjectName("analysisAbortButton")
-        self.abort_button.setToolTip(
-            "Interrompi l'operazione in corso: verrà chiesta conferma.")
         self.abort_button.clicked.connect(self.abort_requested.emit)
-        # Nessuna chiamata a i18n qui, esattamente come per il pulsante
-        # accanto: il testo sorgente resta quello scritto sul pulsante e la
-        # traduzione la applica `retranslate_widgets` in fondo a __init__ (e a
-        # ogni cambio di lingua). Tradurre qui salverebbe il testo gia'
-        # tradotto come chiave della traduzione successiva.
+        # Piu' grandi delle icone delle barre (utente, 2026-09-24): nella card
+        # larga, con il titolo a 18pt, la misura delle barre sembrava piccola.
+        # Solo qui: `tool_button` resta uguale per tutte le altre finestre.
+        for button in (self.log_button, self.abort_button):
+            button.setIconSize(QSize(OVERLAY_ICON_PX, OVERLAY_ICON_PX))
+        self.refresh_command_texts()
         buttons = QHBoxLayout()
         buttons.setContentsMargins(0, 0, 0, 0)
         buttons.setSpacing(12)
@@ -764,6 +772,18 @@ class AnalysisOverlay(QWidget):
         if self.i18n is not None:
             self.i18n.retranslate_widgets(self)
         self.hide()
+
+    def refresh_command_texts(self):
+        """@brief Put name and explanation of the two commands in their tooltips.
+
+        @note Called at construction and by the window on a language change.
+        """
+        from .review_tools import set_tool_texts
+        tr = self.i18n.text if self.i18n is not None else None
+        set_tool_texts(self.log_button, "Apri log AI", "",
+                       "Apri il log completo dell'analisi AI, aggiornato in tempo reale", tr)
+        set_tool_texts(self.abort_button, "Interrompi", "",
+                       "Interrompi l'operazione in corso: verrà chiesta conferma.", tr)
 
     def _available_card_width(self):
         """@brief Widest card the hosting window can show without clipping.
