@@ -1,9 +1,9 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `d492635` (pushato).
-- Lavoro NON committato: correzione dei difetti 1-15 e 17 della verifica con
-  agenti del 24/09 (sezione «PIANO IN CORSO (24/09) — correggi tutti i
-  difetti…» in fondo al file). Si committa solo su richiesta dell'utente.
+- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `eb633ea` (pushato),
+  correzione dei difetti 1-15 e 17 della verifica con agenti del 24/09
+  (dettagli nella sezione «PIANO IN CORSO (24/09) — correggi tutti i
+  difetti…» in fondo al file). Nessun lavoro in sospeso non committato.
 - Suite completa (24/09, dopo le correzioni): 3920 passati, 3 saltati,
   2 xfail attesi, 19 sottotest.
 - Aperto, decisione dell'utente: difetto 16 (frase «Tipo SMD di proposito»
