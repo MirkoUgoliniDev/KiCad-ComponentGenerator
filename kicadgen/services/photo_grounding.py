@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .openrouter import OpenRouterError, DEFAULT_MODEL
 from .photo_inventory import copy_mechanical_metadata, mechanical_metadata_properties
+from .messages import tx, warning
 
 MECHANICAL_EVIDENCE_PROMPT = (
     " FIRST classify the visible physical component family in kind (resistor, capacitor, IC, connector, "
@@ -79,7 +80,7 @@ def decode_boxes(data, region, length, width, kinds, source, log):
     out = []
     raw = data.get("components") if isinstance(data, dict) else None
     if not isinstance(raw, list):
-        raise ValueError("elenco dei rettangoli mancante/non valido")
+        raise ValueError(tx("elenco dei rettangoli mancante/non valido"))
     rx0, ry0, rx1, ry1 = region
     for index, entry in enumerate(raw, 1):
         try:
@@ -87,14 +88,14 @@ def decode_boxes(data, region, length, width, kinds, source, log):
             if not isinstance(box, list) or len(box) != 4 or any(
                 isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v != int(v) for v in box
             ):
-                raise ValueError("box_2d non valido")
+                raise ValueError(tx("box_2d non valido"))
             top, left, bottom, right = (v / 1000 for v in box)
             if not (0 <= left < right <= 1 and 0 <= top < bottom <= 1):
-                raise ValueError("rettangolo fuori foto o invertito")
+                raise ValueError(tx("rettangolo fuori foto o invertito"))
             # Partial detections at interior tile boundaries cannot replace a
             # complete package from the full-board view.
             if (rx0 > 0 and left <= .002) or (rx1 < 1 and right >= .998):
-                raise ValueError("package tagliato al bordo del dettaglio")
+                raise ValueError(tx("package tagliato al bordo del dettaglio"))
             x0, x1 = rx0 + left*(rx1-rx0), rx0 + right*(rx1-rx0)
             y0, y1 = ry0 + top*(ry1-ry0), ry0 + bottom*(ry1-ry0)
             sx, sy = (x1-x0)*length, (y1-y0)*width
@@ -108,7 +109,10 @@ def decode_boxes(data, region, length, width, kinds, source, log):
             ))
             copy_mechanical_metadata(out[-1], entry)
         except (KeyError, TypeError, ValueError, OverflowError) as exc:
-            log(f"{source}: candidato {index} scartato ({exc}).")
+            log(tx("{source}: candidato {index} scartato ({exc}).",
+                   source=source,
+                   index=index,
+                   exc=exc))
     return out
 
 
@@ -192,20 +196,22 @@ def cached_call(call, kwargs, cache_dir, stage, log, expected_ids=None):
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
             if record.get("key") == key and reusable(record.get("response")):
-                log(f"{stage}: risposta recuperata dalla cache locale (nessuna chiamata API).")
+                log(tx("{stage}: risposta recuperata dalla cache locale (nessuna chiamata "
+                       "API).",
+                       stage=stage))
                 return record["response"]
         except (OSError, ValueError, AttributeError):
             pass
     data = call(**kwargs)
     if not isinstance(data, dict):
-        raise ValueError("risposta AI non strutturata")
+        raise ValueError(tx("risposta AI non strutturata"))
     if path and reusable(data):
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(dict(key=key, model=kwargs["model"], stage=stage, response=data),
                                        ensure_ascii=False, indent=2), encoding="utf-8")
         except OSError as exc:
-            log(f"Cache locale non scrivibile: {exc}")
+            log(tx("Cache locale non scrivibile: {exc}", exc=exc))
     return data
 
 
@@ -280,14 +286,14 @@ def apply_classifications(components, response, kinds, length, width, log):
     """@brief Provide the apply classifications operation for this workflow."""
     raw = response.get("components") if isinstance(response,dict) else None
     if not isinstance(raw,list):
-        raise ValueError("classificazioni mancanti")
+        raise ValueError(tx("classificazioni mancanti"))
     known = {c["_id"] for c in components}
     votes = {}
     for entry in raw:
         identity = entry.get("id") if isinstance(entry,dict) else None
         if (isinstance(identity,bool) or not isinstance(identity,(int,float)) or
                 not math.isfinite(identity) or identity != int(identity) or identity not in known):
-            log("Verifica: ID sconosciuto/non valido ignorato.")
+            log(tx("Verifica: ID sconosciuto/non valido ignorato."))
             continue
         votes.setdefault(entry["id"],[]).append(entry)
     output = []
@@ -296,27 +302,30 @@ def apply_classifications(components, response, kinds, length, width, log):
         c['_classification_validated'] = False
         entries = votes.get(c["_id"],[])
         if len(entries) != 1:
-            log(f"#{c['_id']}: verifica assente/duplicata; conservato come dubbio.")
+            log(tx("#{id}: verifica assente/duplicata; conservato come dubbio.", id=c['_id']))
             c["_uncertain"] = True
             output.append(c)
             continue
         entry = entries[0]
         observation = str(entry.get("observation") or "")[:500]
         if entry.get("is_component") is False or entry.get("is_complete_package") is False:
-            log(f"#{c['_id']} {c['name']}: escluso dalla verifica visiva ({observation}).")
+            log(tx("#{id} {name}: escluso dalla verifica visiva ({observation}).",
+                   id=c['_id'],
+                   name=c['name'],
+                   observation=observation))
             continue
         try:
             if entry.get("is_component") is not True or entry.get("is_complete_package") is not True:
                 raise ValueError("verdetto mancante")
             height, angle = float(entry["height_mm"]), entry["rotation_deg"]
             if isinstance(entry['height_mm'],bool) or not math.isfinite(height) or not 0 < height <= 100 or isinstance(angle,bool) or angle not in (0,90,180,270):
-                raise ValueError("altezza/angolo non valido")
+                raise ValueError(tx("altezza/angolo non valido"))
             kind = entry.get("kind")
             if kind not in kinds or entry.get("confidence") not in ("high","medium","low"):
-                raise ValueError("tipo/confidenza non valido")
+                raise ValueError(tx("tipo/confidenza non valido"))
             color = entry.get("color_hex")
             if not isinstance(color,str) or not re.fullmatch(r"#[0-9a-fA-F]{6}",color):
-                raise ValueError("colore non valido")
+                raise ValueError(tx("colore non valido"))
             x0,y0,x1,y1 = c["_box"]
             sx,sy = (x1-x0)*length,(y1-y0)*width
             long,short = (sx,sy) if angle%180==0 else (sy,sx)
@@ -338,11 +347,16 @@ def apply_classifications(components, response, kinds, length, width, log):
                 c["_uncertain"] = True
                 c['kind'],c['name'] = original['kind'],original['name']
                 c['confidence'] = 'low'
-                log(f"#{c['_id']}: tipo discordante ({original['kind']} / {kind}); "
-                    "conservato il tipo della localizzazione, da verificare.")
+                log(warning("#{id}: tipo discordante ({kind} / {kind2}); conservato il tipo della "
+                       "localizzazione, da verificare.",
+                       id=c['_id'],
+                       kind=original['kind'],
+                       kind2=kind))
             log(f"#{c['_id']} {c['name']} [{kind}]: {observation}")
         except (KeyError,TypeError,ValueError,OverflowError) as exc:
-            log(f"#{c['_id']}: verifica non valida ({exc}); geometria conservata come dubbia.")
+            log(warning("#{id}: verifica non valida ({exc}); geometria conservata come dubbia.",
+                   id=c['_id'],
+                   exc=exc))
             c["_uncertain"] = True
         output.append(c)
     return output
@@ -501,8 +515,11 @@ def mechanical_envelopes(photo, components, model, call, log, cache_dir, verific
     for start in range(0,len(envelopes),24):
         batch = envelopes[start:start+24]
         label = f"Verifica ingombri fisici {start+1}-{start+len(batch)}/{len(envelopes)}"
-        log(label + ": presenza, famiglia fisica e package; nessuna identità elettrica esatta.")
-        log(f"{label}: budget risposta/ragionamento {MECHANICAL_MAX_TOKENS} token.")
+        log(label + tx(": presenza, famiglia fisica e package; nessuna identità elettrica "
+                       "esatta."))
+        log(tx("{label}: budget risposta/ragionamento {MECHANICAL_MAX_TOKENS} token.",
+               label=label,
+               MECHANICAL_MAX_TOKENS=MECHANICAL_MAX_TOKENS))
         try:
             data = cached_call(call,dict(model=model,system_prompt=prompt,
                 content_blocks=[image_block(contact_sheet(photo,batch)), _batch_geometry_block(batch)],
@@ -510,7 +527,7 @@ def mechanical_envelopes(photo, components, model, call, log, cache_dir, verific
                 cache_dir,label,log,expected_ids=[c['_id'] for c in batch])
             entries = data.get('components')
             if not isinstance(entries,list):
-                raise ValueError('verdetti di presenza mancanti')
+                raise ValueError(tx("verdetti di presenza mancanti"))
             votes = {}
             for entry in entries:
                 identity = entry.get('id') if isinstance(entry, dict) else None
@@ -522,7 +539,7 @@ def mechanical_envelopes(photo, components, model, call, log, cache_dir, verific
                 if len(responses)==1 and type(responses[0].get('present')) is bool:
                     verdict = responses[0]
                     if verdict['present'] is False:
-                        log(f"#{c['_id']}: escluso, nessun corpo montato nel rettangolo.")
+                        log(tx("#{id}: escluso, nessun corpo montato nel rettangolo.", id=c['_id']))
                         continue
                     c['confidence'] = verdict.get('confidence','low')
                     c['_uncertain'] = c['confidence'] not in ('high','medium')
@@ -532,20 +549,22 @@ def mechanical_envelopes(photo, components, model, call, log, cache_dir, verific
                         c['_detected_kind'] = kind
                     copy_mechanical_metadata(c, verdict)
                 else:
-                    log(f"#{c['_id']}: presenza non confermata, conservato come dubbio.")
+                    log(tx("#{id}: presenza non confermata, conservato come dubbio.", id=c['_id']))
                 result.append(c)
         except (OpenRouterError,ValueError) as exc:
-            log(f"{label}: fallita ({exc}); ingombri conservati come dubbi.")
+            log(warning("{label}: fallita ({exc}); ingombri conservati come dubbi.",
+                   label=label,
+                   exc=exc))
             result.extend(batch)
     for c in result:
         hint = c.get('_detected_kind', 'generic')
         type_status = (c['kind'] if c['kind'] != 'generic' else
-                       "sconosciuto" if hint == 'generic' else f"sconosciuto; ipotesi {hint} non verificata")
+                       "sconosciuto" if hint == 'generic' else tx("sconosciuto; ipotesi {hint} non verificata", hint=hint))
         log(f"#{c['_id']}: tipo fisico={type_status}; confidenza={c['confidence']}; "
             f"package={c.get('package') or 'sconosciuto'}; "
-            f"evidenza={c.get('package_evidence') or 'non fornita'}.")
-    log("Modello a ingombri: XY dalla foto calibrata; altezze approssimative da verificare, "
-        "non misure certificate. Nessuna scritta sui componenti.")
+            f"evidenza={c.get('package_evidence') or tx("non fornita")}.")
+    log(tx("Modello a ingombri: XY dalla foto calibrata; altezze approssimative "
+           "da verificare, non misure certificate. Nessuna scritta sui componenti."))
     return result
 
 
@@ -563,7 +582,8 @@ def reconcile_packages(photo, components, model, length, width, kinds, call, log
     batch = [c for c in components if c["_id"] in suspect][:24]
     if not batch:
         return components
-    label = f"Controllo contestuale di {len(batch)} candidati dubbi/sovrapposti"
+    label = tx("Controllo contestuale di {n_batch} candidati dubbi/sovrapposti",
+               n_batch=len(batch))
     log(label)
     tool = classification_tool(kinds)
     tool["function"]["name"] = "reconcile_fixed_packages"
@@ -615,23 +635,33 @@ def reconcile_packages(photo, components, model, length, width, kinds, call, log
             if type(target) is not int or target == cid or target not in by_id:
                 continue
             if not by_id[cid].get('_classification_validated') or not by_id[target].get('_classification_validated'):
-                log(f"Duplicato #{cid}/#{target}: verifica incompleta, proposta ignorata.")
+                log(tx("Duplicato #{cid}/#{target}: verifica incompleta, proposta ignorata.",
+                       cid=cid,
+                       target=target))
                 continue
             target_entries = unique.get(target,[])
             if len(target_entries)!=1 or target_entries[0].get("duplicate_of",0)!=0:
-                log(f"Duplicato #{cid}: catena/ciclo ambiguo, conservato.")
+                log(tx("Duplicato #{cid}: catena/ciclo ambiguo, conservato.", cid=cid))
                 continue
             if overlap(original_by_id[cid],original_by_id[target])[1] <= .3:
-                log(f"Duplicato #{cid}/#{target}: nessuna sovrapposizione fisica, proposta ignorata.")
+                log(tx("Duplicato #{cid}/#{target}: nessuna sovrapposizione fisica, proposta "
+                       "ignorata.",
+                       cid=cid,
+                       target=target))
                 continue
             remove.add(cid)
-            log(f"#{cid}: stessa entità fisica di #{target}; mantenuto il package completo.")
+            log(tx("#{cid}: stessa entità fisica di #{target}; mantenuto il package "
+                   "completo.",
+                   cid=cid,
+                   target=target))
         for c in revised:
             c.pop("_kind_conflict",None)
         return [by_id[c["_id"]] if c["_id"] in original_by_id else c for c in components
                 if c["_id"] not in remove and (c["_id"] not in original_by_id or c["_id"] in by_id)]
     except (OpenRouterError,ValueError) as exc:
-        log(f"{label}: verifica fallita ({exc}); conservati i candidati dubbi.")
+        log(warning("{label}: verifica fallita ({exc}); conservati i candidati dubbi.",
+               label=label,
+               exc=exc))
         return components
 
 
@@ -641,10 +671,12 @@ def grounded_components(photo, model, length, width, kinds, call, log, cache_dir
     """@brief Provide the grounded components operation for this workflow."""
     from .photo_inventory import image_block, merge_components
     classifier_model = classifier_model or DEFAULT_MODEL
-    log(f"Localizzazione fotografica dedicata: {model}. Geometria e classificazione separate.")
+    log(tx("Localizzazione fotografica dedicata: {model}. Geometria e "
+           "classificazione separate.",
+           model=model))
     groups = []
     for label, region, ownership, crop in grounding_regions(photo):
-        log(f"{label}: ricerca dei package montati...")
+        log(tx("{label}: ricerca dei package montati...", label=label))
         try:
             data = cached_call(call, dict(model=model,system_prompt=(grounding_prompt or "").strip() or GROUNDING_PROMPT,
                 content_blocks=[image_block(crop)],tool=grounding_tool(kinds),max_tokens=8192,has_pdf=False),
@@ -652,9 +684,14 @@ def grounded_components(photo, model, length, width, kinds, call, log, cache_dir
             group = decode_boxes(data,region,length,width,kinds,label,log)
             group = [c for c in group if ownership[0] <= (c['_box'][0]+c['_box'][2])/2 < ownership[1]]
             groups.append(group)
-            log(f"{label}: {len(group)} candidati assegnati alla zona.")
+            log(tx("{label}: {n_group} candidati assegnati alla zona.",
+                   label=label,
+                   n_group=len(group)))
         except (OpenRouterError,ValueError) as exc:
-            log(f"{label}: localizzazione fallita ({exc}); continuo con le viste disponibili.")
+            log(warning("{label}: localizzazione fallita ({exc}); continuo con le viste "
+                   "disponibili.",
+                   label=label,
+                   exc=exc))
     merged = merge_components(groups,log,containment=True)
     for index,component in enumerate(merged,1):
         component["_id"] = index
@@ -667,11 +704,13 @@ def grounded_components(photo, model, length, width, kinds, call, log, cache_dir
             c['name'] = f"Ingombro {index}"
         return result
     result = []
-    log(f"Verifica semantica separata: {classifier_model}; nessuna modifica alle coordinate.")
+    log(tx("Verifica semantica separata: {classifier_model}; nessuna modifica "
+           "alle coordinate.",
+           classifier_model=classifier_model))
     for start in range(0,len(merged),12):
         batch = merged[start:start+12]
         label = f"Verifica package {start+1}-{start+len(batch)}/{len(merged)}"
-        log(label + ": tipo, corpo fisico e colore (scritte omesse)...")
+        log(label + tx(": tipo, corpo fisico e colore (scritte omesse)..."))
         prompt = (
             "Review each numbered target in this contact sheet of PCB package crops. Cyan rectangles are "
             "FIXED target boxes; classify only the object inside each rectangle, not neighboring objects. "
@@ -696,7 +735,9 @@ def grounded_components(photo, model, length, width, kinds, call, log, cache_dir
                 expected_ids=[c['_id'] for c in batch])
             result.extend(apply_classifications(batch,data,kinds,length,width,log))
         except (OpenRouterError,ValueError) as exc:
-            log(f"{label}: fallita ({exc}); candidati conservati come dubbi.")
+            log(warning("{label}: fallita ({exc}); candidati conservati come dubbi.",
+                   label=label,
+                   exc=exc))
             result.extend(batch)
     # Contextual self-review was benchmarked separately: it did not resolve the
     # observed type conflicts reliably, so it is not enabled in production.

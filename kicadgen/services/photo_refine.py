@@ -53,6 +53,7 @@ import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence
+from .messages import tx
 
 try:
     import cv2
@@ -160,13 +161,17 @@ class RefineReport:
     def summary(self) -> str:
         """@brief Provide the summary operation for this workflow."""
         if not self.photo:
-            return "nessuna foto dall'alto utilizzabile per rifinire i componenti (bordi misurati dalla vista dall'alto: nessuna trovata)"
+            return tx("nessuna foto dall'alto utilizzabile per rifinire i componenti (bordi "
+                      "misurati dalla vista dall'alto: nessuna trovata)")
         text = (
-            f"bordi rifiniti dalla foto {Path(self.photo).name}: "
-            f"{self.measured} componenti corretti sui bordi reali"
+            tx("bordi rifiniti dalla foto {name}: {measured} componenti corretti sui "
+               "bordi reali",
+               name=Path(self.photo).name,
+               measured=self.measured)
         )
         if self.skipped:
-            text += f", {len(self.skipped)} lasciati come stimati (bordi non chiari)"
+            text += tx(", {n_skipped} lasciati come stimati (bordi non chiari)",
+                       n_skipped=len(self.skipped))
         return text
 
 

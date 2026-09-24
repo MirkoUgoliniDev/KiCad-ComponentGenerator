@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from ..services.messages import tx
 
 FACE_NAMES = ("top", "bottom", "left", "right", "front", "back")
 
@@ -32,7 +33,9 @@ EDGE_NAMES = (
 def validate_hex_color(value: str, what: str) -> None:
     """Valida un colore nel formato '#rrggbb'."""
     if not isinstance(value, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", value.strip()):
-        raise ValueError(f"{what} non valido: {value!r} (atteso formato '#rrggbb')")
+        raise ValueError(tx("{what} non valido: {value!r} (atteso formato '#rrggbb')",
+                            what=what,
+                            value=value))
 
 
 @dataclass
@@ -54,14 +57,16 @@ class FaceTextAnnotation:
     def validate(self) -> None:
         """@brief Validate the object against its supported contract."""
         if self.face not in FACE_NAMES:
-            raise ValueError(f"Faccia non valida: {self.face!r} (ammesse: {FACE_NAMES})")
+            raise ValueError(tx("Faccia non valida: {face!r} (ammesse: {FACE_NAMES})",
+                                face=self.face,
+                                FACE_NAMES=FACE_NAMES))
         if not self.text.strip():
-            raise ValueError("Il testo dell'annotazione non puo' essere vuoto.")
+            raise ValueError(tx("Il testo dell'annotazione non puo' essere vuoto."))
         if self.size_mm <= 0:
-            raise ValueError("La dimensione del testo deve essere > 0.")
+            raise ValueError(tx("La dimensione del testo deve essere > 0."))
         if self.thickness_mm <= 0:
-            raise ValueError("Lo spessore della scritta deve essere > 0.")
-        validate_hex_color(self.color_hex, "Colore del testo")
+            raise ValueError(tx("Lo spessore della scritta deve essere > 0."))
+        validate_hex_color(self.color_hex, tx("Colore del testo"))
 
 
 @dataclass
@@ -74,6 +79,8 @@ class EdgeFilletAnnotation:
     def validate(self) -> None:
         """@brief Validate the object against its supported contract."""
         if self.edge not in EDGE_NAMES:
-            raise ValueError(f"Spigolo non valido: {self.edge!r} (ammessi: {EDGE_NAMES})")
+            raise ValueError(tx("Spigolo non valido: {edge!r} (ammessi: {EDGE_NAMES})",
+                                edge=self.edge,
+                                EDGE_NAMES=EDGE_NAMES))
         if self.radius_mm <= 0:
-            raise ValueError("Il raggio del fillet deve essere > 0.")
+            raise ValueError(tx("Il raggio del fillet deve essere > 0."))

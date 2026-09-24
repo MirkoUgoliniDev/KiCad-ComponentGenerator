@@ -16,6 +16,7 @@ Ogni builder ritorna una lista di (shape, color_hex): i pezzi restano
 separati per poter avere ciascuno il proprio colore in STEP e VRML.
 """
 
+import json
 import math
 import os
 import sys
@@ -24,6 +25,20 @@ import time
 
 import FreeCAD
 import Part
+
+
+def _warn(template, **values):
+    """Avviso per il processo padre, che lo traduce nella lingua dell'utente.
+
+    Qui dentro (interprete di FreeCAD) non c'e' il catalogo delle traduzioni:
+    si manda il MODELLO italiano con i valori, in JSON, dopo il marcatore
+    `KICADGEN_WARN:`; il padre lo formatta con `messages.tx`
+    (`messages.child_warning_text`). Un valore non JSON diventa testo.
+    """
+    payload = {"t": template,
+               "v": {key: value if value is None or isinstance(value, (bool, int, float, str))
+                     else str(value) for key, value in values.items()}}
+    print("KICADGEN_WARN:" + json.dumps(payload, ensure_ascii=False), flush=True)
 
 V = FreeCAD.Vector
 
@@ -154,7 +169,7 @@ def _validated_terminal_geometry(geometry):
                     from lead_geometry import validated_lead_bbox
                 envelope = validated_lead_bbox(body, envelope, detail)
             except (ValueError,TypeError) as exc:
-                print(f'KICADGEN_WARN: dettaglio reoforo ignorato ({exc}); terminale originale conservato')
+                _warn("dettaglio reoforo ignorato ({exc}); terminale originale conservato", exc=exc)
         boxes.append(envelope)
     return body, boxes
 
@@ -458,7 +473,7 @@ def _connector(cx, cy, z0, length, width, height, color, rotation_deg=0, mating=
     """
     # Dimensions cannot distinguish a top entry from an edge entry.
     if mating not in ("edge", "top"):
-        print("KICADGEN_WARN:connector mating sconosciuto; ingombro generico", flush=True)
+        _warn("connector mating sconosciuto; ingombro generico")
         return _generic(cx, cy, z0, length, width, height, color)
     if mating == "top":
         return _coaxial_connector(cx, cy, z0, length, width, height, color)
@@ -1469,8 +1484,10 @@ def _library_model(component, cx, cy, z0, color):
             try:
                 parts = _read_library_parts(path, color, heartbeat)
             except Exception as exc:
-                print(f"KICADGEN_WARN:colori nativi {path} non disponibili ({exc}); "
-                      "si conserva la geometria con colore fotografico", flush=True)
+                _warn("colori nativi {path} non disponibili ({exc}); si conserva la "
+                   "geometria con colore fotografico",
+                   path=path,
+                   exc=exc)
                 shape = Part.read(str(path))
                 if shape.isNull() or not shape.Solids or not shape.isValid():
                     raise ValueError("library model has no valid solids")
@@ -1540,8 +1557,9 @@ def _library_model(component, cx, cy, z0, color):
         return parts
     except Exception as exc:  # noqa: BLE001 - si ripiega sulla forma sintetica
         component["_model_import_error"] = _safe_import_error(exc)
-        print(f"KICADGEN_WARN:modello {path} non caricabile ({exc}); "
-              "si usa la forma approssimata", flush=True)
+        _warn("modello {path} non caricabile ({exc}); si usa la forma approssimata",
+           path=path,
+           exc=exc)
         return None
 
 
@@ -1589,8 +1607,9 @@ def build_component(component, z0):
         if min(length, width, height) <= 0:
             raise ValueError("dimensions must be positive")
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
-        print(f"KICADGEN_WARN:componente {component.get('name')} skipped: "
-              f"invalid geometry ({exc})", flush=True)
+        _warn("componente {get} skipped: invalid geometry ({exc})",
+           get=component.get('name'),
+           exc=exc)
         return []
     try:
         # Modello reale della libreria KiCad, gia' risolto e verificato dal
@@ -1613,15 +1632,16 @@ def build_component(component, z0):
             return _observed_terminals(cx, cy, z0, length, width, height, color,
                                        component["terminal_geometry"])
         if kind == "ic":
-            print(f"KICADGEN_WARN:componente {component.get('name')} (ic): "
-                  "package sconosciuto, geometria generica senza terminali")
+            _warn("componente {get} (ic): package sconosciuto, geometria generica senza "
+               "terminali",
+               get=component.get('name'))
             return _generic(cx, cy, z0, length, width, height, color)
         if kind == "connector" or (kind == "generic" and (
                 component.get("_detected_kind") == "connector"
                 or component.get("mating") in ("edge", "top"))):
             if component.get("mating") in ("edge", "top"):
-                print(f"KICADGEN_WARN:componente {component.get('name')}: "
-                      "mating osservato; dettagli connettore approssimati", flush=True)
+                _warn("componente {get}: mating osservato; dettagli connettore approssimati",
+                   get=component.get('name'))
             # Unico builder il cui orientamento dipende da dove si trova il
             # componente: la bocca deve guardare fuori scheda DOPO la
             # rotazione applicata dal chiamante, non prima.
@@ -1629,8 +1649,10 @@ def build_component(component, z0):
                               rotation_deg=float(component.get("rotation_deg") or 0),
                               mating=component.get("mating"))
         if kind in BUILDERS and kind != "generic":
-            print(f"KICADGEN_WARN:componente {component.get('name')} ({kind}): "
-                  "geometria approssimata, terminal_geometry assente")
+            _warn("componente {get} ({kind}): geometria approssimata, terminal_geometry "
+               "assente",
+               get=component.get('name'),
+               kind=kind)
         pin_count = component.get("pin_count")
         pins_by_side = component.get("pins_by_side")
         if kind in {"ic_soic", "ic_qfn"} and (pin_count or pins_by_side):
@@ -1638,10 +1660,14 @@ def build_component(component, z0):
                                      pin_count=pin_count, pins_by_side=pins_by_side)
         return builder(cx, cy, z0, length, width, height, color)
     except Exception as exc:  # noqa: BLE001 - si ripiega sulla scatola
-        print(f"KICADGEN_WARN:componente {component.get('name')} ({kind}) semplificato: {exc}")
+        _warn("componente {get} ({kind}) semplificato: {exc}",
+           get=component.get('name'),
+           kind=kind,
+           exc=exc)
         try:
             return _generic(cx, cy, z0, length, width, height, color)
         except Exception as fallback_exc:
-            print(f"KICADGEN_WARN:componente {component.get('name')} skipped: "
-                  f"generic fallback failed ({fallback_exc})", flush=True)
+            _warn("componente {get} skipped: generic fallback failed ({fallback_exc})",
+               get=component.get('name'),
+               fallback_exc=fallback_exc)
             return []

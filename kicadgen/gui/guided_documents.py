@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox,
 
 from ..services.document_roles import DocumentSet, ROLES, ROLE_HELP, SUFFIXES
 from .profile_dialog import icon_button, show_info
+from ..services.messages import tx
 
 
 def document_pixmap(path, size):
@@ -175,7 +176,7 @@ class GuidedDocuments(QWidget):
             # non distingue "non serve" da "non l'ho guardata": si dichiara
             # che il file e' a posto e a cosa serve.
             return ('✓', '', self._tr('documento caricato; non richiede calibrazione.')
-                    + ' ' + ROLE_HELP.get(role, ''), '#a6adc8')
+                    + ' ' + self._tr(ROLE_HELP.get(role, '')), '#a6adc8')
         size = self.body_size() if callable(self.body_size) else None
         if not size or not all(isinstance(v, (int, float)) and v > 0 for v in size):
             return ('·', '', self._tr('quote del corpo non ancora note'), '#a6adc8')
@@ -258,7 +259,8 @@ class GuidedDocuments(QWidget):
                 widgets['verdict'].setToolTip(explanation)
                 widgets['verdict'].setStyleSheet(f'color: {colour};')
                 widgets['verdict'].show()
-            widgets['filename'].setText(filename or ('Non disponibile' if entry.get('unavailable') else '—'))
+            widgets['filename'].setText(filename or (self._tr('Non disponibile')
+                                                     if entry.get('unavailable') else '—'))
             original_name = str(entry.get('original_name', ''))
             widgets['filename'].setToolTip(
                 self.i18n.tr('tooltip.original_name', name=original_name)
@@ -314,7 +316,9 @@ class GuidedDocuments(QWidget):
             if replace and QMessageBox.question(self, self._tr('Sostituisci documento'),
                     self.i18n.tr('document.replace_question', role=role_label)
                     if self.i18n is not None else
-                    f'Sostituire il file per “{ROLES[role]}”? La copia precedente resterà in docs/.history.',
+                    tx("Sostituire il file per “{ROLES}”? La copia precedente resterà in "
+                       "docs/.history.",
+                       ROLES=ROLES[role]),
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
                 return
@@ -335,8 +339,9 @@ class GuidedDocuments(QWidget):
                 if QMessageBox.question(self, self._tr('Rimuovi documento'),
                         self.i18n.tr('document.remove_question', role=role_label)
                         if self.i18n is not None else
-                        f'Rimuovere la copia locale di “{ROLES[role]}”? L’originale non verrà modificato. '
-                        'La copia resterà recuperabile in docs/.history.',
+                        tx("Rimuovere la copia locale di “{ROLES}”? L’originale non verrà "
+                           "modificato. La copia resterà recuperabile in docs/.history.",
+                           ROLES=ROLES[role]),
                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                         QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
                     return
@@ -357,7 +362,7 @@ class GuidedDocuments(QWidget):
                 return
             path = Path(self.directory()) / name
             if not path.is_file():
-                raise ValueError('Il file non è più presente. Caricalo nuovamente.')
+                raise ValueError(tx("Il file non è più presente. Caricalo nuovamente."))
             dialog = QDialog(self)
             role_label = self.i18n.text(ROLES[role]) if self.i18n is not None else ROLES[role]
             dialog.setWindowTitle(f'{role_label} — {name}')

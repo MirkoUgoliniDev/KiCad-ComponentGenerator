@@ -17,6 +17,10 @@ import os
 from numbers import Real
 from pathlib import Path
 import tempfile
+try:
+    from .messages import tx
+except ImportError:  # caricato come file a se' (test di isolamento degli import)
+    from kicadgen.services.messages import tx
 
 
 _CLASSES = (
@@ -619,14 +623,18 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
         emit(f"YOLO local audit: {_write_audit(audit_dir, audit)}")
     if audit_dir is not None or include_review_candidates:
         if include_review_candidates:
-            emit(f"YOLO local: of {len(review_proposals)} low-confidence body hypotheses, "
-                 f"{len(rebuilt)} rebuilt from tile seams are included as uncertain "
-                 f"review-only candidates; the other {len(review_proposals) - len(rebuilt)} "
-                 "are weak detections over areas the detector was unsure about and stay in "
-                 "the audit only, so they neither show in the review nor reach the model.")
+            emit(tx("YOLO local: of {n_review_proposals} low-confidence body hypotheses, "
+                    "{n_rebuilt} rebuilt from tile seams are included as uncertain "
+                    "review-only candidates; the other {value} are weak detections over "
+                    "areas the detector was unsure about and stay in the audit only, so "
+                    "they neither show in the review nor reach the model.",
+                    n_review_proposals=len(review_proposals),
+                    n_rebuilt=len(rebuilt),
+                    value=len(review_proposals) - len(rebuilt)))
         else:
-            emit(f"YOLO local: {len(review_proposals)} additional low-confidence body "
-                 "hypotheses saved for review in audit only; not returned.")
+            emit(tx("YOLO local: {n_review_proposals} additional low-confidence body "
+                    "hypotheses saved for review in audit only; not returned.",
+                    n_review_proposals=len(review_proposals)))
     emit(f"YOLO local: {len(retained)} operating-threshold candidates; "
          f"returned {len(components)} generic hypotheses; heights are placeholders.")
     return components

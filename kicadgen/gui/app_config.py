@@ -19,6 +19,7 @@ from pathlib import Path
 from ..services.datasheet_extractor import DEFAULT_SYSTEM_PROMPT
 from ..services.openrouter import DEFAULT_MODEL
 from ..services.photo_grounding import DEFAULT_VISION_MODEL, GROUNDING_PROMPT, VERIFICATION_PROMPT
+from ..services.messages import tx
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config.json"
 
@@ -85,7 +86,7 @@ def load_config() -> dict:
             with open(config_path(), "r", encoding="utf-8") as fh:
                 loaded = json.load(fh)
                 if not isinstance(loaded, dict):
-                    raise ValueError('La configurazione deve essere un oggetto JSON.')
+                    raise ValueError(tx("La configurazione deve essere un oggetto JSON."))
                 config.update(loaded)
             if _prompt_hash(config.get("system_prompt") or "") in LEGACY_DEFAULT_PROMPT_HASHES:
                 config["system_prompt"] = DEFAULT_SYSTEM_PROMPT

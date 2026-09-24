@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Sequence, Tuple
 
 from .sexpr import YES, SExpr, Symbol, bare, sx
+from ..services.messages import tx
 
 KICAD_VERSION = 20260206
 GENERATOR_VERSION = "10.0"
@@ -78,11 +79,17 @@ class Pad:
 
     def __post_init__(self) -> None:
         if self.pad_type not in PAD_TYPES:
-            raise ValueError(f"pad_type non valido: {self.pad_type!r} (attesi: {PAD_TYPES})")
+            raise ValueError(tx("pad_type non valido: {pad_type!r} (attesi: {PAD_TYPES})",
+                                pad_type=self.pad_type,
+                                PAD_TYPES=PAD_TYPES))
         if self.shape not in PAD_SHAPES:
-            raise ValueError(f"shape non valida: {self.shape!r} (attese: {PAD_SHAPES})")
+            raise ValueError(tx("shape non valida: {shape!r} (attese: {PAD_SHAPES})",
+                                shape=self.shape,
+                                PAD_SHAPES=PAD_SHAPES))
         if self.pad_type in ("thru_hole", "np_thru_hole") and self.drill is None:
-            raise ValueError(f"pad {self.number!r}: drill obbligatorio per pad_type={self.pad_type!r}")
+            raise ValueError(tx("pad {number!r}: drill obbligatorio per pad_type={pad_type!r}",
+                                number=self.number,
+                                pad_type=self.pad_type))
 
     def to_sexpr(self) -> SExpr:
         """@brief Provide the to sexpr operation for this workflow."""

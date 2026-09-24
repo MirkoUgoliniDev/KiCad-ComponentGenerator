@@ -45,6 +45,7 @@ from typing import Dict, Iterator, List, NamedTuple, Optional, Sequence
 
 from ..core.footprint import Footprint, FpCircle, FpRect, FpText, Pad
 from ..core.sexpr import SExpr, sx
+from ..services.messages import tx
 
 #: Parete di rame minima fra il semi-foro sul bordo e il foro passante. Due
 #: cilindri passanti sottratti allo stesso solido restano distinti solo se la
@@ -622,28 +623,30 @@ class CastellatedModuleParams:
     def validate(self) -> None:
         """@brief Provide the validate operation for this workflow."""
         if not self.name.strip():
-            raise ValueError("Il nome del footprint non puo' essere vuoto.")
+            raise ValueError(tx("Il nome del footprint non puo' essere vuoto."))
         if self.body_length <= 0 or self.body_width <= 0:
-            raise ValueError("Le dimensioni del corpo devono essere > 0.")
+            raise ValueError(tx("Le dimensioni del corpo devono essere > 0."))
         if not self.sides:
-            raise ValueError("Serve almeno un lato con dei contatti.")
+            raise ValueError(tx("Serve almeno un lato con dei contatti."))
         # Un valore sconosciuto si rifiuta, non si rimappa: indovinare quale
         # dei tre si intendesse sarebbe esattamente la deduzione che il campo
         # esiste per evitare.
         for side in self.sides:
             if side.contact_style not in CONTACT_STYLES:
                 raise ValueError(
-                    f"Lato {EDGE_LABELS.get(side.edge, side.edge)}: tipo di contatto "
-                    f"{side.contact_style!r} non riconosciuto (ammessi: "
-                    f"{', '.join(CONTACT_STYLES)})."
+                    tx("Lato {get}: tipo di contatto {contact_style!r} non riconosciuto "
+                       "(ammessi: {join}).",
+                       get=EDGE_LABELS.get(side.edge, side.edge),
+                       contact_style=side.contact_style,
+                       join=', '.join(CONTACT_STYLES))
                 )
         # Il semi-foro serve solo ai lati che lo tagliano davvero.
         if self.needs_half_holes() and self.hole_diameter <= 0:
-            raise ValueError("Il diametro del semi-foro deve essere > 0.")
+            raise ValueError(tx("Il diametro del semi-foro deve essere > 0."))
         if self.pcb_thickness <= 0:
-            raise ValueError("Lo spessore del PCB deve essere > 0.")
+            raise ValueError(tx("Lo spessore del PCB deve essere > 0."))
         if self.thru_hole_drill < 0 or self.thru_pad_diameter < 0:
-            raise ValueError("Le quote del foro passante non possono essere negative.")
+            raise ValueError(tx("Le quote del foro passante non possono essere negative."))
         self._validate_through_hole_sides()
         # Il controllo storico del foro dietro al semi-foro vale solo dove
         # entrambi esistono: su un lato through_hole non c'e' semi-foro con cui
@@ -652,9 +655,11 @@ class CastellatedModuleParams:
                                        for side in self.sides):
             if self.thru_pad_diameter <= self.thru_hole_drill:
                 raise ValueError(
-                    f"La piazzola del foro passante ({self.thru_pad_diameter}mm) deve essere "
-                    f"piu' larga del foro ({self.thru_hole_drill}mm): senza corona non c'e' "
-                    "rame su cui saldare."
+                    tx("La piazzola del foro passante ({thru_pad_diameter}mm) deve essere "
+                       "piu' larga del foro ({thru_hole_drill}mm): senza corona non c'e' rame "
+                       "su cui saldare.",
+                       thru_pad_diameter=self.thru_pad_diameter,
+                       thru_hole_drill=self.thru_hole_drill)
                 )
             # Un foro il cui bordo esce dal corpo non e' un foro chiuso: e' un
             # secondo semi-foro, e allora tanto vale non dichiararlo.
@@ -664,24 +669,30 @@ class CastellatedModuleParams:
                 minimum = (self.half_hole_inset + self.hole_diameter / 2
                            + self.thru_hole_drill / 2 + MIN_HOLE_WALL_MM)
                 raise ValueError(
-                    f"Il foro passante e il semi-foro si toccano: i loro assi distano "
-                    f"{self.thru_hole_centre_offset - self.half_hole_inset:.2f}mm ma la somma "
-                    f"dei raggi e' {self.hole_diameter / 2 + self.thru_hole_drill / 2:.2f}mm, "
-                    f"quindi si fonderebbero in un'unica cavita' aperta sul bordo invece di "
-                    f"restare due fori. Porta la distanza dal bordo ad almeno "
-                    f"{minimum:.2f}mm, oppure riduci il semi-foro."
+                    tx("Il foro passante e il semi-foro si toccano: i loro assi distano "
+                       "{value:.2f}mm ma la somma dei raggi e' {value2:.2f}mm, quindi si "
+                       "fonderebbero in un'unica cavita' aperta sul bordo invece di restare "
+                       "due fori. Porta la distanza dal bordo ad almeno {minimum:.2f}mm, "
+                       "oppure riduci il semi-foro.",
+                       value=self.thru_hole_centre_offset - self.half_hole_inset,
+                       value2=self.hole_diameter / 2 + self.thru_hole_drill / 2,
+                       minimum=minimum)
                 )
             if self.thru_hole_centre_offset < self.thru_pad_diameter / 2:
                 raise ValueError(
-                    f"Il centro del foro passante dista {self.thru_hole_centre_offset}mm dal bordo, "
-                    f"meno del raggio della sua piazzola ({self.thru_pad_diameter / 2}mm): "
-                    "resterebbe aperto sul bordo invece di essere chiuso."
+                    tx("Il centro del foro passante dista {thru_hole_centre_offset}mm dal "
+                       "bordo, meno del raggio della sua piazzola ({value}mm): resterebbe "
+                       "aperto sul bordo invece di essere chiuso.",
+                       thru_hole_centre_offset=self.thru_hole_centre_offset,
+                       value=self.thru_pad_diameter / 2)
                 )
             shortest = min(self.body_length, self.body_width)
             if 2 * self.thru_hole_centre_offset + self.thru_pad_diameter > shortest + 1e-6:
                 raise ValueError(
-                    f"I fori passanti dei due lati opposti non stanno in {shortest}mm: "
-                    f"servono almeno {2 * self.thru_hole_centre_offset + self.thru_pad_diameter:.2f}mm."
+                    tx("I fori passanti dei due lati opposti non stanno in {shortest}mm: "
+                       "servono almeno {value:.2f}mm.",
+                       shortest=shortest,
+                       value=2 * self.thru_hole_centre_offset + self.thru_pad_diameter)
                 )
 
         seen_numbers: dict[str, str] = {}
@@ -689,17 +700,19 @@ class CastellatedModuleParams:
             label = EDGE_LABELS.get(side.edge, side.edge)
             if side.edge not in EDGES:
                 raise ValueError(
-                    f"Lato non valido: {side.edge!r} (attesi: {', '.join(EDGES)})."
+                    tx("Lato non valido: {edge!r} (attesi: {join}).",
+                       edge=side.edge,
+                       join=', '.join(EDGES))
                 )
             if side.count < 1:
-                raise ValueError(f"Lato {label}: servono almeno 1 pad.")
+                raise ValueError(tx("Lato {label}: servono almeno 1 pad.", label=label))
             if side.pitch <= 0 and side.count > 1:
-                raise ValueError(f"Lato {label}: il passo deve essere > 0.")
+                raise ValueError(tx("Lato {label}: il passo deve essere > 0.", label=label))
 
             pad_length = self.side_pad_length(side)
             pad_width = self.side_pad_width(side)
             if pad_length <= 0 or pad_width <= 0:
-                raise ValueError(f"Lato {label}: le dimensioni dei pad devono essere > 0.")
+                raise ValueError(tx("Lato {label}: le dimensioni dei pad devono essere > 0.", label=label))
             # La piazzola che si allinea lungo il bordo e' quella che il lato
             # offre davvero: la corona del foro per through_hole, la piazzola
             # rettangolare di bordo per gli altri due tipi.
@@ -707,16 +720,21 @@ class CastellatedModuleParams:
                 land = self.thru_pad_diameter
                 if side.count > 1 and side.pitch < land:
                     raise ValueError(
-                        f"Lato {label}: passo {side.pitch}mm minore del diametro della "
-                        f"corona {land}mm -- le piazzole dei fori passanti si "
-                        "sovrapporrebbero."
+                        tx("Lato {label}: passo {pitch}mm minore del diametro della corona "
+                           "{land}mm -- le piazzole dei fori passanti si sovrapporrebbero.",
+                           label=label,
+                           pitch=side.pitch,
+                           land=land)
                     )
             else:
                 land = pad_width
                 if side.count > 1 and side.pitch < pad_width:
                     raise ValueError(
-                        f"Lato {label}: passo {side.pitch}mm minore della larghezza pad "
-                        f"{pad_width}mm -- i pad si sovrapporrebbero."
+                        tx("Lato {label}: passo {pitch}mm minore della larghezza pad "
+                           "{pad_width}mm -- i pad si sovrapporrebbero.",
+                           label=label,
+                           pitch=side.pitch,
+                           pad_width=pad_width)
                     )
                 if has_continuous_pad(self, side.contact_style):
                     # La piazzola continua contiene anche la corona del foro:
@@ -725,30 +743,44 @@ class CastellatedModuleParams:
                     land = continuous_pad_across(self, pad_width)
                     if side.count > 1 and side.pitch < land:
                         raise ValueError(
-                            f"Lato {label}: passo {side.pitch}mm minore della larghezza "
-                            f"della piazzola continua {land}mm (la maggiore fra pad "
-                            f"{pad_width}mm e corona {self.thru_pad_diameter}mm) -- i pad "
-                            "si sovrapporrebbero."
+                            tx("Lato {label}: passo {pitch}mm minore della larghezza della piazzola "
+                               "continua {land}mm (la maggiore fra pad {pad_width}mm e corona "
+                               "{thru_pad_diameter}mm) -- i pad si sovrapporrebbero.",
+                               label=label,
+                               pitch=side.pitch,
+                               land=land,
+                               pad_width=pad_width,
+                               thru_pad_diameter=self.thru_pad_diameter)
                         )
 
             span = (side.count - 1) * side.pitch + land
             available = self.edge_length(side.edge)
             if span - 1e-6 > available:
                 raise ValueError(
-                    f"Lato {label}: i {side.count} pad occupano {span:.2f}mm ma il "
-                    f"bordo e' lungo {available:.2f}mm."
+                    tx("Lato {label}: i {count} pad occupano {span:.2f}mm ma il bordo e' "
+                       "lungo {available:.2f}mm.",
+                       label=label,
+                       count=side.count,
+                       span=span,
+                       available=available)
                 )
 
             numbers = side.numbers()
             if len(numbers) != side.count:
                 raise ValueError(
-                    f"Lato {label}: {len(numbers)} numeri di pin per {side.count} pad."
+                    tx("Lato {label}: {n_numbers} numeri di pin per {count} pad.",
+                       label=label,
+                       n_numbers=len(numbers),
+                       count=side.count)
                 )
             for number in numbers:
                 if number in seen_numbers:
                     raise ValueError(
-                        f"Il pin {number} compare sia sul lato "
-                        f"{seen_numbers[number]} sia su quello {label}."
+                        tx("Il pin {number} compare sia sul lato {seen_numbers} sia su quello "
+                           "{label}.",
+                           number=number,
+                           seen_numbers=seen_numbers[number],
+                           label=label)
                     )
                 seen_numbers[number] = label
 
@@ -778,14 +810,16 @@ class CastellatedModuleParams:
                     stadium = first if has_continuous_pad(self, first.style) else second
                     pad = continuous_pad(self, stadium)
                     raise ValueError(
-                        f"La piazzola continua del contatto {stadium.number} (lato "
-                        f"{EDGE_LABELS.get(stadium.edge, stadium.edge)}), che dal bordo arriva "
-                        f"{pad.inner_reach:.2f}mm dentro il corpo fino oltre il foro passante, "
-                        f"tocca il rame del contatto "
-                        f"{second.number if stadium is first else first.number} (lato "
-                        f"{EDGE_LABELS.get((second if stadium is first else first).edge, '')}): "
-                        "due pin diversi sarebbero in corto. Avvicina il foro passante al "
-                        "bordo, accorcia la piazzola o riduci la corona."
+                        tx("La piazzola continua del contatto {number} (lato {get}), che dal "
+                           "bordo arriva {inner_reach:.2f}mm dentro il corpo fino oltre il foro "
+                           "passante, tocca il rame del contatto {value} (lato {get2}): due pin "
+                           "diversi sarebbero in corto. Avvicina il foro passante al bordo, "
+                           "accorcia la piazzola o riduci la corona.",
+                           number=stadium.number,
+                           get=EDGE_LABELS.get(stadium.edge, stadium.edge),
+                           inner_reach=pad.inner_reach,
+                           value=second.number if stadium is first else first.number,
+                           get2=EDGE_LABELS.get((second if stadium is first else first).edge, ''))
                     )
 
     def _validate_through_hole_sides(self) -> None:
@@ -799,21 +833,26 @@ class CastellatedModuleParams:
         labels = ", ".join(EDGE_LABELS.get(side.edge, side.edge) for side in through)
         if self.thru_hole_drill <= 0:
             raise ValueError(
-                f"Lato {labels}: i contatti sono fori passanti ma il diametro del foro e' "
-                "zero. Indica il foro, oppure scegli il tipo «mezzo foro sul bordo»."
+                tx("Lato {labels}: i contatti sono fori passanti ma il diametro del foro "
+                   "e' zero. Indica il foro, oppure scegli il tipo «mezzo foro sul bordo».",
+                   labels=labels)
             )
         if self.thru_pad_diameter <= self.thru_hole_drill:
             raise ValueError(
-                f"Lato {labels}: la piazzola del foro passante ({self.thru_pad_diameter}mm) "
-                f"deve essere piu' larga del foro ({self.thru_hole_drill}mm): senza corona "
-                "non c'e' rame su cui saldare."
+                tx("Lato {labels}: la piazzola del foro passante ({thru_pad_diameter}mm) "
+                   "deve essere piu' larga del foro ({thru_hole_drill}mm): senza corona "
+                   "non c'e' rame su cui saldare.",
+                   labels=labels,
+                   thru_pad_diameter=self.thru_pad_diameter,
+                   thru_hole_drill=self.thru_hole_drill)
             )
         spacing = self.row_spacing
         if spacing is not None and (
                 isinstance(spacing, bool) or not isinstance(spacing, (int, float))
                 or not math.isfinite(spacing) or spacing <= 0):
             raise ValueError(
-                f"La distanza fra le file ({self.row_spacing!r}) deve essere un numero > 0."
+                tx("La distanza fra le file ({row_spacing!r}) deve essere un numero > 0.",
+                   row_spacing=self.row_spacing)
             )
         for side in through:
             label = EDGE_LABELS.get(side.edge, side.edge)
@@ -824,29 +863,39 @@ class CastellatedModuleParams:
             # una corona che esce dal corpo sarebbe un semi-foro.
             if inset < radius:
                 if source == "row_spacing":
-                    why = (f"le file dichiarate distano {self.row_spacing}mm su un corpo di "
-                           f"{self.edge_extent(side.edge)}mm, quindi i fori starebbero a "
-                           f"{inset}mm dal bordo")
+                    why = (tx("le file dichiarate distano {row_spacing}mm su un corpo di "
+                              "{edge_extent}mm, quindi i fori starebbero a {inset}mm dal bordo",
+                              row_spacing=self.row_spacing,
+                              edge_extent=self.edge_extent(side.edge),
+                              inset=inset))
                 else:
-                    why = f"il centro del foro dista {inset}mm dal bordo"
+                    why = tx("il centro del foro dista {inset}mm dal bordo", inset=inset)
                 raise ValueError(
-                    f"Lato {label}: {why}, meno del raggio della corona ({radius}mm): "
-                    "il foro resterebbe aperto sul bordo, cioe' sarebbe un semi-foro e "
-                    "non un foro passante."
+                    tx("Lato {label}: {why}, meno del raggio della corona ({radius}mm): il "
+                       "foro resterebbe aperto sul bordo, cioe' sarebbe un semi-foro e non un "
+                       "foro passante.",
+                       label=label,
+                       why=why,
+                       radius=radius)
                 )
             extent = self.edge_extent(side.edge)
             opposite = {"left": "right", "right": "left", "top": "bottom", "bottom": "top"}[side.edge]
             facing = any(other.edge == opposite for other in self.sides)
             if facing and 2 * inset + self.thru_pad_diameter > extent + 1e-6:
                 raise ValueError(
-                    f"Lato {label}: le corone dei fori passanti di due file opposte non "
-                    f"stanno in {extent}mm: servono almeno "
-                    f"{2 * inset + self.thru_pad_diameter:.2f}mm."
+                    tx("Lato {label}: le corone dei fori passanti di due file opposte non "
+                       "stanno in {extent}mm: servono almeno {value:.2f}mm.",
+                       label=label,
+                       extent=extent,
+                       value=2 * inset + self.thru_pad_diameter)
                 )
             if inset + radius > extent + 1e-6:
                 raise ValueError(
-                    f"Lato {label}: il foro passante a {inset}mm dal bordo esce dal lato "
-                    f"opposto del corpo ({extent}mm)."
+                    tx("Lato {label}: il foro passante a {inset}mm dal bordo esce dal lato "
+                       "opposto del corpo ({extent}mm).",
+                       label=label,
+                       inset=inset,
+                       extent=extent)
                 )
 
 
@@ -1055,7 +1104,9 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
         SMD_WITH_DRILLED_PADS_NOTE appended to its description: KiCad flags
         that combination and leaves non-SMD footprints out of the default
         position file, so the reason for keeping "smd" is written where the
-        library user reads it (user decision 2026-09-24).
+        library user reads it (user decision 2026-09-24; confirmed the same
+        day for modules mixing half_hole and through_hole sides, which are
+        reflowed too, with no pins in the holes).
     @note The continuous pad carries F.Paste so the castellations can still be
         reflowed (the old SMD edge pad carried it). KiCad applies the paste to
         the whole copper, drill mouth included: pin-in-paste, which also fills
@@ -1195,6 +1246,8 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
     if fp.attr == "smd" and any(pad.pad_type == "thru_hole" for pad in fp.pads):
         # Il criterio e' la combinazione che KiCad segnala (tipo SMD con pad
         # forati), non il tipo di contatto: vale per le piazzole a stadio e
-        # per un modulo che mescola lati half_hole e through_hole.
+        # per un modulo che mescola lati half_hole e through_hole. L'estensione
+        # ai moduli misti e' confermata dall'utente (2026-09-24, scelta «A»):
+        # anche quelli si posano e si saldano a rifusione, senza pin nei fori.
         fp.description = f"{fp.description} {SMD_WITH_DRILLED_PADS_NOTE}".strip()
     return fp

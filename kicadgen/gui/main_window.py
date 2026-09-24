@@ -81,6 +81,7 @@ from .profile_dialog import ProfilesDialog, icon_button
 from .translation_dialog import TranslationDialog
 from .theme import BASE, BLUE, RED, SURFACE0, SURFACE1, SURFACE2, TEXT, YELLOW, APP_QSS
 from .tooltips import install_tooltip_filter
+from ..services.messages import tx
 
 #: Icona di ogni scheda, nell'ordine delle schede: SVG a linea nello stile
 #: delle barre di icone.
@@ -689,8 +690,8 @@ class GenerateWorker(QThread):
                   if generation_accepts_cancel(generator, self.params) else {})
         if not kwargs:
             self.progress.emit(
-                "ATTENZIONE: il generatore 3D in uso non accetta il canale di "
-                "interruzione; questa generazione non potrà essere fermata.")
+                tx("ATTENZIONE: il generatore 3D in uso non accetta il canale di "
+                   "interruzione; questa generazione non potrà essere fermata."))
         self.cancellable.emit(bool(kwargs))
         return kwargs
 
@@ -722,7 +723,7 @@ class GenerateWorker(QThread):
             costruzione del solido: mostrare il solido di FreeCAD qui faceva
             credere che il modello finale fosse gia' in lavorazione.
         """
-        self.phase.emit('kicad', 'abbinamento modelli KiCad', done, total)
+        self.phase.emit('kicad', tx("abbinamento modelli KiCad"), done, total)
 
     def _cad_progress(self, message: str) -> None:
         """@brief Inoltra la riga al log e, se annuncia un componente, al conteggio."""
@@ -730,13 +731,13 @@ class GenerateWorker(QThread):
         step = freecad_progress(message)
         if step is not None:
             done, total = step
-            self.phase.emit('freecad', 'modello 3D', done, total)
+            self.phase.emit('freecad', tx("modello 3D"), done, total)
 
     def run(self) -> None:
         """@brief Provide the run operation for this workflow."""
         try:
             self.phase.emit('kicad', 'footprint 2D', 0, 0)
-            self.progress.emit('Generazione del footprint KiCad…')
+            self.progress.emit(tx("Generazione del footprint KiCad…"))
             footprint = (
                 build_castellated_module(self.params)
                 if isinstance(self.params, CastellatedModuleParams)
@@ -760,8 +761,8 @@ class GenerateWorker(QThread):
                 # che la correzione vuole attribuita a KiCad, per poi tornare
                 # indietro. Da `freecad` ci passa `_cad_progress`, quando il
                 # solido comincia davvero.
-                self.phase.emit('kicad', 'abbinamento modelli KiCad', 0, 0)
-                self.progress.emit('Generazione del modello 3D tramite FreeCAD…')
+                self.phase.emit('kicad', tx("abbinamento modelli KiCad"), 0, 0)
+                self.progress.emit(tx("Generazione del modello 3D tramite FreeCAD…"))
                 # Risolto una volta sola: introspezione e chiamata devono
                 # riguardare lo stesso oggetto, anche quando e' stato sostituito.
                 generator = _generate_3d
@@ -782,7 +783,7 @@ class GenerateWorker(QThread):
             except Cad3DError as exc:
                 self.cad3d_error.emit(str(exc))
             except Exception as exc:  # noqa: BLE001 - riportato in UI, non e' fatale
-                self.cad3d_error.emit(f"Errore inatteso: {exc}")
+                self.cad3d_error.emit(tx("Errore inatteso: {exc}", exc=exc))
 
 
 class Cad3DWorker(QThread):
@@ -828,8 +829,8 @@ class Cad3DWorker(QThread):
                   if generation_accepts_cancel(generator, self.params) else {})
         if not kwargs:
             self.progress.emit(
-                "ATTENZIONE: il generatore 3D in uso non accetta il canale di "
-                "interruzione; questa generazione non potrà essere fermata.")
+                tx("ATTENZIONE: il generatore 3D in uso non accetta il canale di "
+                   "interruzione; questa generazione non potrà essere fermata."))
         self.cancellable.emit(bool(kwargs))
         return kwargs
 
@@ -851,7 +852,7 @@ class Cad3DWorker(QThread):
             per misurare un candidato non ancora in cache `attach_models` puo'
             avviare `freecadcmd`. Vedi GenerateWorker._model_progress.
         """
-        self.phase.emit('kicad', 'abbinamento modelli KiCad', done, total)
+        self.phase.emit('kicad', tx("abbinamento modelli KiCad"), done, total)
 
     def _cad_progress(self, message: str) -> None:
         """@brief Inoltra la riga al log e, se annuncia un componente, al conteggio."""
@@ -859,14 +860,14 @@ class Cad3DWorker(QThread):
         step = freecad_progress(message)
         if step is not None:
             done, total = step
-            self.phase.emit('freecad', 'modello 3D', done, total)
+            self.phase.emit('freecad', tx("modello 3D"), done, total)
 
     def run(self) -> None:
         try:
             # Stessa ragione di GenerateWorker.run: `_generate_3d` comincia
             # dall'abbinamento dei modelli di KiCad. `_cad_progress` passa a
             # `freecad` quando il solido comincia davvero.
-            self.phase.emit('kicad', 'abbinamento modelli KiCad', 0, 0)
+            self.phase.emit('kicad', tx("abbinamento modelli KiCad"), 0, 0)
             # Vedi GenerateWorker.run: un solo oggetto per introspezione e chiamata.
             generator = _generate_3d
             result = generator(
@@ -884,7 +885,7 @@ class Cad3DWorker(QThread):
         except Cad3DError as exc:
             self.error.emit(str(exc))
         except Exception as exc:  # noqa: BLE001 - riportato in UI, non e' fatale
-            self.error.emit(f"Errore inatteso: {exc}")
+            self.error.emit(tx("Errore inatteso: {exc}", exc=exc))
 
 
 class TerminalDetailWorker(QThread):
@@ -1060,7 +1061,7 @@ class ExtractWorker(QThread):
         except ExtractionError as exc:
             self.error.emit(str(exc))
         except Exception as exc:  # noqa: BLE001 - errori rete/API riportati in UI
-            self.error.emit(f"Errore API: {exc}")
+            self.error.emit(tx("Errore API: {exc}", exc=exc))
 
 
 class ReconcileWorker(QThread):
@@ -1220,6 +1221,10 @@ class MainWindow(QMainWindow):
         self._config = load_config()
         self.profile_store = profile_store or ProfileStore(legacy_config=self._config, legacy_path=config_path())
         self.i18n = I18n(self.profile_store, self._config.get("language", "it"))
+        # Log, avanzamento ed errori passano da `messages.tx`: da qui in avanti
+        # si scrivono nella lingua scelta (utente, 2026-09-24).
+        from ..services.messages import set_translator
+        set_translator(self.i18n.raw)
         # Modello scelto solo per questa sessione (datasheet difficile): non
         # viene salvato in config.json e si perde alla chiusura, per scelta.
         self._session_model: str | None = None
@@ -1361,8 +1366,8 @@ class MainWindow(QMainWindow):
             self._on_inventory_pause_toggled(pause)
         self._apply_user_mode()
         self._append_log(
-            "Pin NC: verranno generati." if checked
-            else "Pin NC: NON verranno generati (attenzione: il piedino fisico resta)."
+            tx("Pin NC: verranno generati.") if checked
+            else tx("Pin NC: NON verranno generati (attenzione: il piedino fisico resta).")
         )
 
     def _edit_llm_settings(self) -> None:
@@ -1393,9 +1398,10 @@ class MainWindow(QMainWindow):
             return
         self._refresh_model_combo()
         self._append_log(
-            f"Impostazioni LLM aggiornate (SQLite). "
-            f"Modello datasheet: {self._default_model()}. "
-            f"Modello foto: {self._vision_model() or 'default del servizio foto'}."
+            tx("Impostazioni LLM aggiornate (SQLite). Modello datasheet: "
+               "{default_model}. Modello foto: {value}.",
+               default_model=self._default_model(),
+               value=self._vision_model() or 'default del servizio foto')
         )
 
     def _advanced_user(self):
@@ -1562,7 +1568,7 @@ class MainWindow(QMainWindow):
                 current = self.profile_store.get_type(self._profile_key())
                 changed_instructions = previous != current
                 self._reload_profile_types(update_prompt=changed_instructions)
-                self._append_log("Tipologie e profili AI aggiornati nel database SQLite.")
+                self._append_log(tx("Tipologie e profili AI aggiornati nel database SQLite."))
         except (ProfileError, sqlite3.Error, OSError) as exc:
             QMessageBox.warning(self, self.i18n.text('Database profili'), str(exc))
         finally:
@@ -1590,7 +1596,7 @@ class MainWindow(QMainWindow):
         combo.setCurrentIndex(max(index, 0))
         combo.blockSignals(blocked)
         if selected and index < 0:
-            self._append_log('Tipologia eliminata o disattivata: selezionare una tipologia attiva.')
+            self._append_log(tx("Tipologia eliminata o disattivata: selezionare una tipologia attiva."))
         self._on_component_type_changed()
         if not update_prompt and index >= 0:
             self.field_component_prompt.setPlainText(original_prompt)
@@ -1742,7 +1748,7 @@ class MainWindow(QMainWindow):
         if chosen:
             self._vlm_model = chosen
             self.field_vlm_model.setText(chosen)
-            self._append_log(f"Modello di visione per questa sessione: {chosen}.")
+            self._append_log(tx("Modello di visione per questa sessione: {chosen}.", chosen=chosen))
 
     def _photo_detector_options(self) -> tuple[str, Path | None]:
         """Snapshot the selected backend; AI ignores any remembered ONNX path."""
@@ -1754,11 +1760,13 @@ class MainWindow(QMainWindow):
         self._session_model = self.combo_model.currentData()
         if self._session_model:
             self._append_log(
-                f"Modello per questa sessione: {self._session_model} "
-                "(il default globale non cambia)."
+                tx("Modello per questa sessione: {session_model} (il default globale non "
+                   "cambia).",
+                   session_model=self._session_model)
             )
         else:
-            self._append_log(f"Modello: default globale ({self._default_model()}).")
+            self._append_log(tx("Modello: default globale ({default_model}).",
+                                default_model=self._default_model()))
 
     def _pick_session_model(self) -> None:
         """Sceglie un modello valido solo per le estrazioni di questa sessione.
@@ -1944,6 +1952,11 @@ class MainWindow(QMainWindow):
         self.action_install_global.setText(
             self.i18n.text("Installa come libreria globale..."))
         self.action_exit.setText(self.i18n.text("Esci"))
+        # Voci del menu File aggiunte il 2026-09-24: prima restavano nella
+        # lingua dell'avvio (verifica «testi cablati» dell'utente).
+        self.action_new_project.setText(self.i18n.text("Nuovo progetto..."))
+        self.action_open_project.setText(self.i18n.text("Apri progetto..."))
+        self.action_rename_project.setText(self.i18n.text("Rinomina progetto..."))
         self.action_profiles.setText(self.i18n.text("Gestione tipologie e profili AI..."))
         self.action_translations.setText(self.i18n.text("Manage translations..."))
         self.action_defaults.setText(self.i18n.text("Default generali AI..."))
@@ -2454,7 +2467,7 @@ class MainWindow(QMainWindow):
             save_config(self._config)
         self._refresh_model_combo()
         if component_type is not None:
-            self._append_log(f"Tipologia componente: {component_type.label}.")
+            self._append_log(tx("Tipologia componente: {label}.", label=component_type.label))
 
     def _component_name(self) -> str:
         return self.field_name.text().strip() if hasattr(self, "field_name") else ""
@@ -2475,7 +2488,7 @@ class MainWindow(QMainWindow):
         name = self._component_name()
         if not name:
             raise ValueError(
-                "Il componente non ha ancora un nome: nessuna cartella da usare.")
+                tx("Il componente non ha ancora un nome: nessuna cartella da usare."))
         root = self.field_library_root.text().strip() or str(DEFAULT_LIBRARY_ROOT)
         return Path(root) / name
 
@@ -2812,11 +2825,14 @@ class MainWindow(QMainWindow):
         verification_model = (self._photo_detector_model()
                               if photo_detector in ('yolo', 'vlm') else model)
         self._append_log(
-            f"Estrazione da {len(doc_paths)} file con il modello AI {model}"
-            + (" (solo questa sessione)." if self._session_model else ".")
+            tx("Estrazione da {n_doc_paths} file con il modello AI {model}",
+               n_doc_paths=len(doc_paths),
+               model=model)
+            + (tx(" (solo questa sessione).") if self._session_model else ".")
         )
-        self._on_ai_progress(f"Profilo AI: {self.combo_component_type.currentText()}.")
-        self._on_ai_progress(f"Modello AI unico: {model}.")
+        self._on_ai_progress(tx("Profilo AI: {currentText}.",
+                                currentText=self.combo_component_type.currentText()))
+        self._on_ai_progress(tx("Modello AI unico: {model}.", model=model))
         if photo_detector in ('yolo', 'vlm') and self._photo_inventory_family() is False:
             # Difetto visto dall'utente: con «YOLO locale + verifica AI» e una
             # tipologia da COMPONENTE SINGOLO il rilevatore non parte, la
@@ -2829,20 +2845,22 @@ class MainWindow(QMainWindow):
             # davvero, senza bloccare nulla: la scelta della tipologia resta
             # dell'utente, e l'estrazione dai documenti ha comunque senso.
             self._on_ai_progress(
-                f"Tipologia «{self.combo_component_type.currentText()}»: l'analisi NON passa "
-                "dall'inventario fotografico, quindi il rilevatore dei corpi e la revisione "
-                "«Corpi rilevati» non verranno eseguiti e nessuna chiamata guardera' la "
-                "fotografia. I corpi dalla foto si ottengono con le tipologie di scheda "
-                "popolata (aggregato a fori passanti o modulo castellated).")
+                tx("Tipologia «{currentText}»: l'analisi NON passa dall'inventario "
+                   "fotografico, quindi il rilevatore dei corpi e la revisione «Corpi "
+                   "rilevati» non verranno eseguiti e nessuna chiamata guardera' la "
+                   "fotografia. I corpi dalla foto si ottengono con le tipologie di "
+                   "scheda popolata (aggregato a fori passanti o modulo castellated).",
+                   currentText=self.combo_component_type.currentText()))
         elif photo_detector in ('yolo', 'vlm'):
             # Detto sempre, non solo quando differisce dal modello principale:
             # e' la chiamata a pagamento che guarda la fotografia, e va scritta
             # nel log prima di partire, non dedotta dopo dalla fattura.
             self._on_ai_progress(
                 f"Chiamata sulla fotografia affidata a {verification_model}"
-                + (" (scelto per questa sessione)." if self._vlm_model else " (da impostazioni)."))
+                + (tx(" (scelto per questa sessione).") if self._vlm_model else tx(" (da impostazioni).")))
         elif verification_model != model:
-            self._on_ai_progress(f"Rilevamento dei corpi affidato a {verification_model}.")
+            self._on_ai_progress(tx("Rilevamento dei corpi affidato a {verification_model}.",
+                                    verification_model=verification_model))
 
         self._extract_worker = ExtractWorker(
             doc_paths,
@@ -2985,7 +3003,7 @@ class MainWindow(QMainWindow):
             return save_review_bundle(self._project_dir(), proposals, photo_png, length, width,
                                       detector=detector, source_json=source_json)
         except (OSError, ValueError) as exc:
-            self._append_log(f"ATTENZIONE proposte non salvate nella cartella del componente: {exc}")
+            self._append_log(tx("ATTENZIONE proposte non salvate nella cartella del componente: {exc}", exc=exc))
             return None
 
     def _fresh_cache_evidence(self):
@@ -3022,7 +3040,9 @@ class MainWindow(QMainWindow):
             try:
                 photo_png = saved.photo_path.read_bytes()
             except OSError as exc:
-                self._append_log(f"Foto calibrata in cache non leggibile ({exc}): uso quella dell'estrazione.")
+                self._append_log(tx("Foto calibrata in cache non leggibile ({exc}): uso quella "
+                                    "dell'estrazione.",
+                                    exc=exc))
         if self._write_review_bundle(saved.proposals, photo_png or self._photo_png,
                                      params.body_length_mm, params.body_width_mm,
                                      source_json=saved.json_path.name) is None:
@@ -3063,8 +3083,10 @@ class MainWindow(QMainWindow):
                                          params.body_length_mm, params.body_width_mm,
                                          source_json=saved.json_path.name)
         if path is not None:
-            self._append_log(f"Proposte del rilevatore salvate in {path} ({len(saved.proposals)} corpi): "
-                             "la revisione si puo' riaprire senza chiamate AI.")
+            self._append_log(tx("Proposte del rilevatore salvate in {path} ({n_proposals} corpi): la "
+                                "revisione si puo' riaprire senza chiamate AI.",
+                                path=path,
+                                n_proposals=len(saved.proposals)))
 
     def _refresh_reopen_review_button(self) -> None:
         """@brief Abilita revisione (gratuita) e rilancio (a pagamento) quando c'e' cosa riaprire.
@@ -3204,11 +3226,12 @@ class MainWindow(QMainWindow):
         """
         self._remember_inventory_pause(checked)
         self._append_log(
-            "Pausa dopo l'inventario AI: attiva. La revisione dei componenti verrà "
-            "proposta prima dell'abbinamento modelli e del 3D (gratuita)."
+            tx("Pausa dopo l'inventario AI: attiva. La revisione dei componenti verrà "
+               "proposta prima dell'abbinamento modelli e del 3D (gratuita).")
             if checked else
-            "Pausa dopo l'inventario AI: disattivata. L'analisi proseguirà da sola con "
-            "i corpi proposti dall'AI; la revisione resta disponibile dai pulsanti in basso.")
+            tx("Pausa dopo l'inventario AI: disattivata. L'analisi proseguirà da sola "
+               "con i corpi proposti dall'AI; la revisione resta disponibile dai "
+               "pulsanti in basso."))
 
     def _ai_log_available(self) -> bool:
         """@brief Dice se esiste davvero un log dell'analisi da aprire.
@@ -3268,10 +3291,11 @@ class MainWindow(QMainWindow):
             try:
                 photo_png = bundle.photo_path.read_bytes()
             except OSError as exc:
-                self._append_log(f"Foto calibrata del pacchetto non leggibile ({exc}).")
+                self._append_log(tx("Foto calibrata del pacchetto non leggibile ({exc}).", exc=exc))
         if not photo_png and self._photo_png:
             photo_png = self._photo_png
-            self._append_log("Foto calibrata assente in photo-review/: uso quella dell'estrazione in memoria.")
+            self._append_log(tx("Foto calibrata assente in photo-review/: uso quella dell'estrazione "
+                                "in memoria."))
         if not photo_png:
             # Testo neutro: arriva sia dal rilancio a pagamento sia dalla
             # riapertura gratuita, e nessuno dei due e' "il rilancio".
@@ -3301,8 +3325,10 @@ class MainWindow(QMainWindow):
         photo_png = self._review_photo(bundle)
         if not photo_png:
             return
-        self._append_log(f"Proposte riaperte da {bundle.json_path}: {len(bundle.proposals)} corpi, "
-                         "nessuna richiesta AI.")
+        self._append_log(tx("Proposte riaperte da {json_path}: {n_proposals} corpi, nessuna "
+                            "richiesta AI.",
+                            json_path=bundle.json_path,
+                            n_proposals=len(bundle.proposals)))
         try:
             from .yolo_review_dialog import YoloReviewDialog
             from ..services.photo_yolo import detector_classes
@@ -3312,17 +3338,20 @@ class MainWindow(QMainWindow):
             accepted = dialog.exec() == QDialog.DialogCode.Accepted
             kept = list(dialog.kept()) if accepted else None
         except Exception as exc:  # noqa: BLE001 - la vista non deve far cadere la finestra
-            self._append_log(f"ATTENZIONE revisione dei corpi non disponibile: {exc}")
+            self._append_log(tx("ATTENZIONE revisione dei corpi non disponibile: {exc}", exc=exc))
             return
         if kept is None:
-            self._append_log("Revisione dei corpi rilevati annullata: nessuna richiesta avviata, file invariato.")
+            self._append_log(tx("Revisione dei corpi rilevati annullata: nessuna richiesta avviata, "
+                                "file invariato."))
             return
         path = self._write_review_bundle(kept, photo_png, bundle.body_length_mm, bundle.body_width_mm,
                                          source_json=bundle.source_json, detector=bundle.detector)
         if path is not None:
-            self._append_log(f"Revisione salvata offline in {path}: {len(kept)} proposte tenute, "
-                             "nessuna richiesta AI (gratuito). Per l'inventario usa «Rilancia "
-                             "inventario AI (a pagamento)…».")
+            self._append_log(tx("Revisione salvata offline in {path}: {n_kept} proposte tenute, "
+                                "nessuna richiesta AI (gratuito). Per l'inventario usa «Rilancia "
+                                "inventario AI (a pagamento)…».",
+                                path=path,
+                                n_kept=len(kept)))
         self._refresh_reopen_review_button()
 
     def _relaunch_base_params(self, bundle):
@@ -3420,13 +3449,16 @@ class MainWindow(QMainWindow):
             # ai campi, non usato per far partire da solo footprint e 3D.
             self._relaunch_base_synthesized = True
             self._auto_after_extraction = False
-            self._append_log("Nessuna estrazione in questa sessione: l'inventario rilanciato "
-                             "aggiorna i componenti senza avviare la generazione automatica.")
+            self._append_log(tx("Nessuna estrazione in questa sessione: l'inventario rilanciato "
+                                "aggiorna i componenti senza avviare la generazione automatica."))
         self._set_review_buttons_enabled(False)
         # Dichiarata PRIMA di partire, nel log e nella modale: e' l'unica
         # spesa di questo percorso e chi preme deve saperlo prima, non dopo.
-        announcement = (f"Rilancio dell'inventario su {len(bundle.proposals)} proposte "
-                        f"da {bundle.json_path.name}: una richiesta a pagamento al modello {model}.")
+        announcement = (tx("Rilancio dell'inventario su {n_proposals} proposte da {name}: una "
+                           "richiesta a pagamento al modello {model}.",
+                           n_proposals=len(bundle.proposals),
+                           name=bundle.json_path.name,
+                           model=model))
         self._on_ai_progress(announcement)
         self._last_extracted = params
         declared = dict(layout=params.layout, castellated_sides=params.castellated_sides,
@@ -3465,18 +3497,19 @@ class MainWindow(QMainWindow):
         """
         from dataclasses import replace
         if not self._analysis_result_is_current():
-            self._append_log("Inventario di un rilancio interrotto dall'utente: scartato, "
-                             "i componenti restano come sono.")
+            self._append_log(tx("Inventario di un rilancio interrotto dall'utente: scartato, i "
+                                "componenti restano come sono."))
             return
         base = self._last_extracted
         if base is None:
-            self._on_extract_error("Nessuna estrazione a cui applicare l'inventario rilanciato.")
+            self._on_extract_error(tx("Nessuna estrazione a cui applicare l'inventario rilanciato."))
             return
         notes = str(base.notes or '').strip()
-        suffix = (f"Inventario rilanciato: {len(report.components)} ingombri riconciliati "
-                  f"da {report.calibration.get('proposal_count', 0)} proposte riviste. "
-                  "Modello meccanico semplificato, senza marcature; altezze indicative, "
-                  "non misure certificate.")
+        suffix = (tx("Inventario rilanciato: {n_components} ingombri riconciliati da {get} "
+                     "proposte riviste. Modello meccanico semplificato, senza marcature; "
+                     "altezze indicative, non misure certificate.",
+                     n_components=len(report.components),
+                     get=report.calibration.get('proposal_count', 0)))
         if report.warnings:
             suffix += "\n" + "\n".join(report.warnings[:6])
         # Il rilancio ripaga l'inventario, non la lettura dei contatti: un tipo
@@ -3610,8 +3643,9 @@ class MainWindow(QMainWindow):
             return
         if self._abort_pending or not worker.isRunning():
             self._append_log(
-                f"Interruzione chiesta dall'utente ({phase}), ma nel frattempo "
-                "l'operazione era già terminata: niente da fermare.")
+                tx("Interruzione chiesta dall'utente ({phase}), ma nel frattempo "
+                   "l'operazione era già terminata: niente da fermare.",
+                   phase=phase))
             self.analysis_overlay.set_abortable(False)
             return
         self._abort_pending = True
@@ -3638,9 +3672,10 @@ class MainWindow(QMainWindow):
             return
         self.analysis_overlay.set_abortable(False)
         self._on_ai_progress(
-            "«Interrompi» non è disponibile per questa generazione: il generatore 3D in "
-            "uso non accetta il canale di interruzione, quindi premerlo non fermerebbe "
-            "nulla. L'attesa va lasciata finire, oppure si chiude il programma.")
+            tx("«Interrompi» non è disponibile per questa generazione: il generatore "
+               "3D in uso non accetta il canale di interruzione, quindi premerlo non "
+               "fermerebbe nulla. L'attesa va lasciata finire, oppure si chiude il "
+               "programma."))
 
     def _abort_cad_run(self, worker, phase: str) -> None:
         """@brief Uccide il processo FreeCAD e lascia che il worker finisca da se'.
@@ -3654,8 +3689,9 @@ class MainWindow(QMainWindow):
             ripristino da tenere allineati per sempre.
         """
         self._on_ai_progress(
-            f"INTERRUZIONE chiesta dall'utente durante: {phase}. "
-            "Il processo FreeCAD viene terminato; il modello 3D non sarà completato.")
+            tx("INTERRUZIONE chiesta dall'utente durante: {phase}. Il processo "
+               "FreeCAD viene terminato; il modello 3D non sarà completato.",
+               phase=phase))
         self.analysis_overlay.set_status(self.i18n.text(
             "Interruzione in corso: chiusura del processo FreeCAD…"))
         worker.request_abort()
@@ -3682,9 +3718,11 @@ class MainWindow(QMainWindow):
         self._analysis_revision += 1
         self._abandoned_workers.append(worker)
         self._on_ai_progress(
-            f"INTERRUZIONE chiesta dall'utente durante: {phase}. La richiesta già "
-            "inviata al modello non si può annullare ed è già a pagamento: la corsa "
-            "viene abbandonata e il suo risultato, quando arriverà, verrà scartato.")
+            tx("INTERRUZIONE chiesta dall'utente durante: {phase}. La richiesta già "
+               "inviata al modello non si può annullare ed è già a pagamento: la "
+               "corsa viene abbandonata e il suo risultato, quando arriverà, verrà "
+               "scartato.",
+               phase=phase))
         self._auto_after_extraction = False
         self._auto_generation_params = None
         self._extract_finish_pending = False
@@ -3743,8 +3781,8 @@ class MainWindow(QMainWindow):
             worker = self.sender()
             self._forget_abandoned_worker(worker)
             self._append_log(
-                "La corsa interrotta dall'utente è terminata adesso: il suo "
-                "risultato è stato scartato, i comandi tornano disponibili.")
+                tx("La corsa interrotta dall'utente è terminata adesso: il suo risultato "
+                   "è stato scartato, i comandi tornano disponibili."))
             self._apply_component_name_gate()
             self._refresh_reopen_review_button()
             self._refresh_ai_log_button()
@@ -3876,8 +3914,8 @@ class MainWindow(QMainWindow):
             return False
         if not self._inventory_pause_enabled():
             self._append_log(
-                "Pausa dopo l'inventario AI: disattivata nelle impostazioni, si prosegue "
-                "con i corpi come li ha proposti l'AI.")
+                tx("Pausa dopo l'inventario AI: disattivata nelle impostazioni, si "
+                   "prosegue con i corpi come li ha proposti l'AI."))
             return False
         components = self._photo_components_from_table()
         if not components:
@@ -3886,8 +3924,8 @@ class MainWindow(QMainWindow):
             # Senza immagine la revisione non ha su cosa disegnare: fermare la
             # corsa per una finestra che non si aprirebbe sarebbe una pausa a
             # vuoto (stessa disciplina di `_refresh_edit_review_buttons`).
-            self._append_log("Pausa dopo l'inventario AI non offerta: manca la fotografia "
-                             "calibrata su cui mostrare i corpi.")
+            self._append_log(tx("Pausa dopo l'inventario AI non offerta: manca la fotografia calibrata "
+                                "su cui mostrare i corpi."))
             return False
         answer = QMessageBox.question(
             self, self.i18n.text("Inventario AI completato"),
@@ -3905,11 +3943,13 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes)
         if answer != QMessageBox.StandardButton.Yes:
-            self._append_log(f"Pausa dopo l'inventario AI: revisione rifiutata, si prosegue "
-                             f"con i {len(components)} corpi proposti dall'AI.")
+            self._append_log(tx("Pausa dopo l'inventario AI: revisione rifiutata, si prosegue con i "
+                                "{n_components} corpi proposti dall'AI.",
+                                n_components=len(components)))
             return False
-        self._append_log(f"Pausa dopo l'inventario AI: revisione dei {len(components)} corpi "
-                         "aperta su richiesta. Nessuna chiamata AI (gratuito).")
+        self._append_log(tx("Pausa dopo l'inventario AI: revisione dei {n_components} corpi aperta "
+                            "su richiesta. Nessuna chiamata AI (gratuito).",
+                            n_components=len(components)))
         overlay_was_visible = self.analysis_overlay.isVisible()
         self._inventory_pause_active = True
         try:
@@ -3920,7 +3960,7 @@ class MainWindow(QMainWindow):
             # Un guasto della revisione non deve buttare via l'analisi appena
             # pagata: si annota e si prosegue con i corpi dell'AI, che e' lo
             # stesso esito del rifiuto.
-            self._append_log(f"ATTENZIONE revisione dei componenti non disponibile: {exc}")
+            self._append_log(tx("ATTENZIONE revisione dei componenti non disponibile: {exc}", exc=exc))
         finally:
             self._inventory_pause_active = False
             if overlay_was_visible:
@@ -3954,10 +3994,12 @@ class MainWindow(QMainWindow):
             accepted = dialog.exec() == QDialog.DialogCode.Accepted
             kept = dialog.kept() if accepted else None
             self._append_log(
-                f"Revisione dei corpi rilevati: {len(kept)} tenute su {len(proposals)}."
-                if kept is not None else "Revisione dei corpi rilevati annullata.")
+                tx("Revisione dei corpi rilevati: {n_kept} tenute su {n_proposals}.",
+                   n_kept=len(kept),
+                   n_proposals=len(proposals))
+                if kept is not None else tx("Revisione dei corpi rilevati annullata."))
         except Exception as exc:  # noqa: BLE001 - un errore qui non deve appendere il worker
-            self._append_log(f"ATTENZIONE revisione dei corpi non disponibile: {exc}")
+            self._append_log(tx("ATTENZIONE revisione dei corpi non disponibile: {exc}", exc=exc))
         finally:
             if worker is not None:
                 worker.deliver_review(kept)
@@ -3988,14 +4030,16 @@ class MainWindow(QMainWindow):
         """
         self._reviewed_this_extraction = True
         if not kept:
-            self._append_log("Revisione dei corpi: nessuna proposta tenuta, pacchetto "
-                             "photo-review non scritto (le proposte grezze non vengono copiate).")
+            self._append_log(tx("Revisione dei corpi: nessuna proposta tenuta, pacchetto photo-review "
+                                "non scritto (le proposte grezze non vengono copiate)."))
             return
         path = self._write_review_bundle([dict(p) for p in kept], photo_png, length_mm, width_mm,
                                          detector=detector)
         if path is not None:
-            self._append_log(f"Proposte tenute dalla revisione salvate in {path} ({len(kept)} corpi): "
-                             "la revisione si puo' riaprire senza chiamate AI.")
+            self._append_log(tx("Proposte tenute dalla revisione salvate in {path} ({n_kept} corpi): "
+                                "la revisione si puo' riaprire senza chiamate AI.",
+                                path=path,
+                                n_kept=len(kept)))
 
     def _on_phase(self, tool: str, detail: str, done: int, total: int) -> None:
         """@brief Porta in modale lo strumento al lavoro e il suo avanzamento.
@@ -4008,7 +4052,7 @@ class MainWindow(QMainWindow):
             cio' che si legge a colpo d'occhio mentre si aspetta.
         """
         self.analysis_overlay.set_tool(tool, detail)
-        self.analysis_overlay.set_progress(done, total, "componenti")
+        self.analysis_overlay.set_progress(done, total, tx("componenti"))
 
     def _overlay_header_detail(self) -> str:
         """@brief Il dettaglio che l'intestazione della modale sta gia' mostrando.
@@ -4181,15 +4225,17 @@ class MainWindow(QMainWindow):
             from ..services.model_choices import save_choices
             try:
                 path = save_choices(self._docs_dir().parent, self._photo_png, components)
-                self._append_log(f"Scelte e candidati KiCad salvati: {path}")
+                self._append_log(tx("Scelte e candidati KiCad salvati: {path}", path=path))
             except (OSError, ValueError) as exc:
-                QMessageBox.warning(self, "Scelte KiCad non salvate", str(exc))
+                QMessageBox.warning(self, tx("Scelte KiCad non salvate"), str(exc))
         self._invalidate_generated_mesh()
         self._set_3d_status(self.i18n.text(
             "Componenti corretti dalla foto. Modello 3D da rigenerare: "
             "premi \"Rigenera modello 3D\" per aggiornare STEP e anteprima."
         ), STATUS_INFO)
-        self._append_log(f"Revisione fotografica applicata: {len(components)} componenti; 3D da rigenerare.")
+        self._append_log(tx("Revisione fotografica applicata: {n_components} componenti; 3D da "
+                            "rigenerare.",
+                            n_components=len(components)))
 
     def _invalidate_generated_mesh(self) -> None:
         # Running CAD workers still describe the previous input revision.
@@ -4365,7 +4411,7 @@ class MainWindow(QMainWindow):
         self._project_options = {key: options[key] for key in PROJECT_OPTIONS
                                  if isinstance(options.get(key), bool)}
         if skipped:
-            self._append_log("Impostazioni del progetto non applicate (valori non validi): "
+            self._append_log(tx("Impostazioni del progetto non applicate (valori non validi): ")
                              + ", ".join(skipped) + ".")
 
     def _switch_project(self, name: str, state: dict) -> None:
@@ -4422,7 +4468,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001 - il salvataggio non deve far cadere la finestra
             if not getattr(self, "_project_state_error_logged", False):
                 self._project_state_error_logged = True
-                self._append_log(f"Impostazioni del progetto non leggibili: {exc}")
+                self._append_log(tx("Impostazioni del progetto non leggibili: {exc}", exc=exc))
             return None
         self._project_state_error_logged = False
         return text
@@ -4455,7 +4501,7 @@ class MainWindow(QMainWindow):
         try:
             write_project_config(folder, json.loads(text))
         except (OSError, TypeError, ValueError) as exc:
-            self._append_log(f"Impostazioni del progetto non salvate: {exc}")
+            self._append_log(tx("Impostazioni del progetto non salvate: {exc}", exc=exc))
             return False
         self._last_saved_project_state = text
         return True
@@ -4493,8 +4539,10 @@ class MainWindow(QMainWindow):
         self._write_open_project_config(folder)
         self._set_suggested_name("")
         self._switch_project("", self._general_project_state)
-        self._append_log(f"Cartella di lavoro cambiata: progetto {folder.name} salvato "
-                         f"in {folder} e chiuso.")
+        self._append_log(tx("Cartella di lavoro cambiata: progetto {name} salvato in {folder} e "
+                            "chiuso.",
+                            name=folder.name,
+                            folder=folder))
 
     def _write_open_project_config(self, folder: Path) -> None:
         """Salva le impostazioni correnti nella cartella del progetto aperto, se cambiate."""
@@ -4508,7 +4556,7 @@ class MainWindow(QMainWindow):
             write_project_config(folder, json.loads(text))
             self._last_saved_project_state = text
         except (OSError, TypeError, ValueError) as exc:
-            self._append_log(f"Impostazioni del progetto non salvate: {exc}")
+            self._append_log(tx("Impostazioni del progetto non salvate: {exc}", exc=exc))
 
     def _library_root(self) -> Path:
         """@brief Cartella di lavoro in cui stanno i progetti."""
@@ -4555,7 +4603,7 @@ class MainWindow(QMainWindow):
         # del progetto aperto prima (decisione dell'utente del 2026-09-24).
         self._switch_project(name, self._general_project_state)
         self._save_project_config(force=True)
-        self._append_log(f"Nuovo progetto: {self._project_dir()}")
+        self._append_log(tx("Nuovo progetto: {project_dir}", project_dir=self._project_dir()))
 
     def _open_project(self) -> None:
         """@brief «Apri progetto…»: sceglie una cartella esistente della cartella di lavoro.
@@ -4583,7 +4631,7 @@ class MainWindow(QMainWindow):
             saved = None
             # Ne' applicato ne' sovrascritto: resta com'e' finche' qualcuno lo guarda.
             self._project_config_refused = folder
-            self._append_log(f"ATTENZIONE impostazioni del progetto non applicate: {exc}")
+            self._append_log(tx("ATTENZIONE impostazioni del progetto non applicate: {exc}", exc=exc))
         # Senza file (progetto nato prima di project_config.json) valgono le
         # impostazioni generali, non quelle del progetto aperto prima.
         self._switch_project(name, saved if saved is not None else self._general_project_state)
@@ -4592,7 +4640,7 @@ class MainWindow(QMainWindow):
             # non alla prima modifica, cosi' ogni progetto aperto ha il suo.
             self._save_project_config(force=True)
         self._append_log(f"Progetto aperto: {self._project_dir()}"
-                         + ("" if saved is None else " (impostazioni del progetto applicate)."))
+                         + ("" if saved is None else tx(" (impostazioni del progetto applicate).")))
 
     def _rename_project(self) -> None:
         """@brief «Rinomina progetto…»: nome nuovo, mai quello di un altro progetto.
@@ -4657,8 +4705,11 @@ class MainWindow(QMainWindow):
         # una modale, proprio mentre il worker stava ancora lavorando. Resta
         # tracciata nel Log AI, cosi' si sa sempre quale cartella e' in uso.
         self._on_ai_progress(
-            f'Rinomina automatica: il progetto {old_name} diventa {new_name}; '
-            f'{len(files)} documenti spostati nella nuova cartella.')
+            tx("Rinomina automatica: il progetto {old_name} diventa {new_name}; "
+               "{n_files} documenti spostati nella nuova cartella.",
+               old_name=old_name,
+               new_name=new_name,
+               n_files=len(files)))
 
         if (old_docs / MANIFEST).is_file() and any((new_docs / f.name).exists() for f in files):
             # Avviso, non domanda: non c'e' nulla da decidere e nulla e' stato
@@ -4696,7 +4747,9 @@ class MainWindow(QMainWindow):
         try:
             old_project.rename(temporary)
         except OSError as exc:
-            self._append_log(f"Rinomina annullata: {old_name} non rinominabile ({exc}).")
+            self._append_log(tx("Rinomina annullata: {old_name} non rinominabile ({exc}).",
+                                old_name=old_name,
+                                exc=exc))
             return old_name
         try:
             temporary.rename(new_project)
@@ -4704,12 +4757,17 @@ class MainWindow(QMainWindow):
             try:
                 temporary.rename(old_project)
             except OSError:
-                self._append_log(f"ATTENZIONE: la cartella del progetto e' rimasta {temporary}.")
-            self._append_log(f"Rinomina annullata: {old_name} non rinominabile ({exc}).")
+                self._append_log(tx("ATTENZIONE: la cartella del progetto e' rimasta {temporary}.",
+                                    temporary=temporary))
+            self._append_log(tx("Rinomina annullata: {old_name} non rinominabile ({exc}).",
+                                old_name=old_name,
+                                exc=exc))
             return old_name
         if self._project_config_refused is not None and self._project_config_refused == old_project:
             self._project_config_refused = new_project
-        self._append_log(f"Progetto rinominato: {old_name} diventa {new_name}.")
+        self._append_log(tx("Progetto rinominato: {old_name} diventa {new_name}.",
+                            old_name=old_name,
+                            new_name=new_name))
         return new_name
 
     def _move_analysis_folders_to(self, old_project: Path, new_project: Path) -> None:
@@ -4744,7 +4802,9 @@ class MainWindow(QMainWindow):
                 new_project.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(settings), str(new_project / PROJECT_CONFIG_NAME))
             except OSError as exc:
-                self._append_log(f"Rinomina: {PROJECT_CONFIG_NAME} non spostato ({exc}).")
+                self._append_log(tx("Rinomina: {PROJECT_CONFIG_NAME} non spostato ({exc}).",
+                                    PROJECT_CONFIG_NAME=PROJECT_CONFIG_NAME,
+                                    exc=exc))
         for name in (PHOTO_CACHE_SUBDIR, REVIEW_BUNDLE_SUBDIR):
             source = old_project / name
             if not source.is_dir():
@@ -4767,12 +4827,15 @@ class MainWindow(QMainWindow):
                 if not any(source.iterdir()):
                     source.rmdir()
             except OSError as exc:
-                self._append_log(f"Rinomina: {name}/ non spostata del tutto ({exc}).")
+                self._append_log(tx("Rinomina: {name}/ non spostata del tutto ({exc}).", name=name, exc=exc))
                 continue
             if kept:
                 self._append_log(
-                    f"Rinomina: {kept} file di {name}/ esistevano gia' nella nuova cartella "
-                    f"e sono rimasti in {source}.")
+                    tx("Rinomina: {kept} file di {name}/ esistevano gia' nella nuova cartella "
+                       "e sono rimasti in {source}.",
+                       kept=kept,
+                       name=name,
+                       source=source))
 
     def _on_extracted(self, params: ExtractedParams) -> None:
         """@brief Applica i parametri estratti, se sono ancora quelli attesi.
@@ -4788,8 +4851,8 @@ class MainWindow(QMainWindow):
             segna nulla -- non ci sarebbe niente da correggere.
         """
         if not self._analysis_result_is_current():
-            self._append_log("Risultato di un'analisi interrotta dall'utente: scartato, "
-                             "i campi restano come sono.")
+            self._append_log(tx("Risultato di un'analisi interrotta dall'utente: scartato, i campi "
+                                "restano come sono."))
             return
         self._inventory_pause_pending = bool(getattr(params, "components_3d", None))
         self._applying_extraction = True
@@ -4801,7 +4864,7 @@ class MainWindow(QMainWindow):
             # rivedere, e fermarsi per una revisione su dati incerti non
             # aiuterebbe nessuno.
             self._inventory_pause_pending = False
-            self._on_extract_error(f'Impossibile applicare i dati estratti: {exc}')
+            self._on_extract_error(tx("Impossibile applicare i dati estratti: {exc}", exc=exc))
         finally:
             self._applying_extraction = False
             if self._extract_finish_pending:
@@ -4858,7 +4921,7 @@ class MainWindow(QMainWindow):
                 params.components_3d = restore_choices(
                     self._docs_dir().parent, self._photo_png, params.components_3d)
             except (OSError, ValueError, TypeError) as exc:
-                self._append_log(f"Scelte KiCad precedenti non ripristinate: {exc}")
+                self._append_log(tx("Scelte KiCad precedenti non ripristinate: {exc}", exc=exc))
         self.field_description.setText(params.description)
         if params.tags:
             self.field_tags.setText(params.tags)
@@ -4874,7 +4937,7 @@ class MainWindow(QMainWindow):
                     f"{len(self.package_geometry.pins)} pad espliciti."
                 )
             except (KeyError, TypeError, ValueError) as exc:
-                self._append_log(f"ATTENZIONE geometria package ignorata: {exc}")
+                self._append_log(tx("ATTENZIONE geometria package ignorata: {exc}", exc=exc))
 
         # Le due disposizioni riempiono gruppi di campi diversi; tutto il
         # resto (corpo 3D, pinout, colori, fillet, riepilogo) e' comune.
@@ -4898,7 +4961,8 @@ class MainWindow(QMainWindow):
         if params.pcb_thickness_mm:
             self.field_cast_pcb.setValue(params.pcb_thickness_mm)
         if params.components_3d and params.pcb_thickness_mm is None:
-            self._append_log("Spessore PCB non quotato: stima 1.6 mm per la scheda THT; verificare con una misura diretta.")
+            self._append_log(tx("Spessore PCB non quotato: stima 1.6 mm per la scheda THT; verificare "
+                                "con una misura diretta."))
 
         if params.is_castellated() and _castellated_body_available(params):
             self._enable_3d_group_from_extraction()
@@ -4925,8 +4989,9 @@ class MainWindow(QMainWindow):
                 int(e["pin"]): (int(e["row"]), int(e["col"])) for e in params.pin_map
             }
             self._append_log(
-                f"Posizione dei pin letta dal disegno ({len(self.pin_map)} pin): "
-                "la numerazione non segue l'ordine colonna per colonna."
+                tx("Posizione dei pin letta dal disegno ({n_pin_map} pin): la numerazione "
+                   "non segue l'ordine colonna per colonna.",
+                   n_pin_map=len(self.pin_map))
             )
 
         if params.body_color_hex:
@@ -4951,7 +5016,10 @@ class MainWindow(QMainWindow):
         )
         if self._auto_after_extraction:
             self._auto_generation_params = params
-            self._on_ai_progress(f'Estrazione completata. Confidenza: {params.confidence}. {params.notes or ""}{fillet_note}')
+            self._on_ai_progress(tx("Estrazione completata. Confidenza: {confidence}. {value}{fillet_note}",
+                                    confidence=params.confidence,
+                                    value=params.notes or '',
+                                    fillet_note=fillet_note))
             return
         if self._relaunch_base_synthesized:
             # Nessuna estrazione e' avvenuta: la base viene dai campi e la
@@ -5019,16 +5087,16 @@ class MainWindow(QMainWindow):
         self._set_photo_components(params.components_3d or [])
         if not self.castellated_components:
             self._append_log(
-                "ATTENZIONE: il modello non ha restituito alcun componente dalla foto "
-                "(components_3d vuoto): nel 3D andra' un blocco unico. Rilancia "
-                "l'estrazione con la foto del lato superiore selezionata, oppure "
-                "aggiungi i componenti a mano nel tab Modello 3D."
+                tx("ATTENZIONE: il modello non ha restituito alcun componente dalla foto "
+                   "(components_3d vuoto): nel 3D andra' un blocco unico. Rilancia "
+                   "l'estrazione con la foto del lato superiore selezionata, oppure "
+                   "aggiungi i componenti a mano nel tab Modello 3D.")
             )
         if self.castellated_components:
             self._append_log(
-                f"{len(self.castellated_components)} componenti letti dalla foto "
-                "(stime visive): compariranno nel modello 3D, modificabili nel "
-                "tab Modello 3D."
+                tx("{n_castellated_components} componenti letti dalla foto (stime "
+                   "visive): compariranno nel modello 3D, modificabili nel tab Modello 3D.",
+                   n_castellated_components=len(self.castellated_components))
             )
 
         # Il tipo di contatto e' scritto accanto a ogni lato, con la sua
@@ -5043,9 +5111,9 @@ class MainWindow(QMainWindow):
                 f"lato {EDGE_LABELS.get(s['edge'], s['edge'])} "
                 f"{s['count']} contatti a {s['pitch_mm']}mm "
                 f"({CONTACT_STYLE_LABELS.get(style, style)}{origin})")
-        self._append_log("Contatti del modulo: " + ", ".join(described))
+        self._append_log(tx("Contatti del modulo: ") + ", ".join(described))
         for line in names:
-            self._append_log(f"Sigle serigrafate {line}")
+            self._append_log(tx("Sigle serigrafate {line}", line=line))
 
     def _on_extract_error(self, message: str) -> None:
         """@brief Riporta la finestra in quiete e dice perche' l'analisi e' fallita.
@@ -5057,7 +5125,7 @@ class MainWindow(QMainWindow):
             rimprovero per una sua scelta. Resta nel log, dove serve.
         """
         if not self._analysis_result_is_current():
-            self._append_log(f"Errore di un'analisi interrotta dall'utente: {message}")
+            self._append_log(tx("Errore di un'analisi interrotta dall'utente: {message}", message=message))
             return
         self._auto_generation_params = None
         self._auto_after_extraction = False
@@ -5066,7 +5134,7 @@ class MainWindow(QMainWindow):
         # il pulsante torna disponibile per riprovare, o resta spento se non
         # c'era nulla.
         self._refresh_reopen_review_button()
-        self._on_ai_progress(f"Estrazione fallita: {message}")
+        self._on_ai_progress(tx("Estrazione fallita: {message}", message=message))
         QMessageBox.warning(self, self.i18n.text("Estrazione fallita"), message)
 
     # ── Tab 2: Footprint 2D ────────────────────────────────────────
@@ -5357,10 +5425,9 @@ class MainWindow(QMainWindow):
                       self.field_body_offset_x, self.field_body_offset_y,
                       self.field_pin_length_3d):
             field.setEnabled(not castellated)
-            field.setToolTip(
-                "Per i moduli castellated questo valore viene dal gruppo "
-                "\"Modulo castellated\"." if castellated else ""
-            )
+            self._set_translated_tooltip(
+                field, "Per i moduli castellated questo valore viene dal gruppo "
+                "\"Modulo castellated\"." if castellated else "")
 
     #: Colonna della tabella lati che porta il tipo di contatto.
     _SIDE_STYLE_COLUMN = 6
@@ -5438,10 +5505,11 @@ class MainWindow(QMainWindow):
         if declared in contact_styles():
             return declared
         self._append_log(
-            f"ATTENZIONE: tipo di contatto sconosciuto {declared!r} sul lato "
-            f"{EDGE_LABELS.get(side.get('edge'), side.get('edge'))}: resta "
-            f"«{CONTACT_STYLE_LABELS.get(default_contact_style(), default_contact_style())}», "
-            "correggilo nella colonna «Tipo contatto».")
+            tx("ATTENZIONE: tipo di contatto sconosciuto {declared!r} sul lato {get}: "
+               "resta «{get2}», correggilo nella colonna «Tipo contatto».",
+               declared=declared,
+               get=EDGE_LABELS.get(side.get('edge'), side.get('edge')),
+               get2=CONTACT_STYLE_LABELS.get(default_contact_style(), default_contact_style())))
         return default_contact_style()
 
     def _contact_style_combo(self, style: str) -> QComboBox:
@@ -5488,6 +5556,11 @@ class MainWindow(QMainWindow):
                 source = (CONTACT_STYLE_MIXED_LABEL if value is None
                           else CONTACT_STYLE_LABELS.get(value, value))
                 combo.setItemText(index, self.i18n.text(source))
+        # Anche il tooltip dell'intestazione «Tipo contatto»: un elemento di
+        # intestazione non e' un widget e la ripassata generica non lo vede.
+        header = self.table_sides.horizontalHeaderItem(self._SIDE_STYLE_COLUMN)
+        if header is not None:
+            header.setToolTip(self.i18n.text(CONTACT_STYLE_TOOLTIP))
 
     def _remove_side_row(self) -> None:
         row = self.table_sides.currentRow()
@@ -5549,9 +5622,9 @@ class MainWindow(QMainWindow):
         chosen = {s for s in self._table_contact_styles() if s != default_contact_style()}
         if chosen:
             self._append_log(
-                "ATTENZIONE: il generatore installato non conosce ancora il tipo di "
-                "contatto: la scelta viene ignorata e footprint e 3D restano "
-                f"«{CONTACT_STYLE_LABELS.get(default_contact_style(), default_contact_style())}».")
+                tx("ATTENZIONE: il generatore installato non conosce ancora il tipo di "
+                   "contatto: la scelta viene ignorata e footprint e 3D restano «{get}».",
+                   get=CONTACT_STYLE_LABELS.get(default_contact_style(), default_contact_style())))
 
     def _sides_from_table(self) -> list[CastellatedSide]:
         """@brief The castellated sides as the table describes them now.
@@ -5973,7 +6046,7 @@ class MainWindow(QMainWindow):
 
     def _open_project_dir(self) -> None:
         if not self._refresh_output_actions():
-            self._append_log("Genera prima il footprint del componente corrente.")
+            self._append_log(tx("Genera prima il footprint del componente corrente."))
             return
         project_dir = self._project_dir()
         webbrowser.open(project_dir.as_uri())
@@ -6189,7 +6262,7 @@ class MainWindow(QMainWindow):
             # Startup can emit messages before project widgets exist.
             if hasattr(self, "log_text") and not getattr(self, "_log_write_failed", False):
                 self._log_write_failed = True
-                self.log_text.insertPlainText(f"Log file non disponibile: {exc}\n")
+                self.log_text.insertPlainText(tx("Log file non disponibile: {exc}\n", exc=exc))
 
     def _start_log_session(self, title: str) -> None:
         """@brief Open a dated section so separate runs stay distinguishable."""
@@ -6223,7 +6296,7 @@ class MainWindow(QMainWindow):
                 shutil.move(str(source), str(target))
             return True
         except OSError as exc:
-            self._append_log(f"Rinomina annullata: impossibile trasferire il log ({exc}).")
+            self._append_log(tx("Rinomina annullata: impossibile trasferire il log ({exc}).", exc=exc))
             return False
 
     def _append_log(self, msg: str) -> None:
@@ -6250,7 +6323,7 @@ class MainWindow(QMainWindow):
             if not token:
                 continue
             if not token.isdigit():
-                raise ValueError(f"\"{token}\" in \"Pin popolati\" non e' un numero valido.")
+                raise ValueError(tx("\"{token}\" in \"Pin popolati\" non e' un numero valido.", token=token))
             pins.add(int(token))
         return pins or None
 
@@ -6366,7 +6439,7 @@ class MainWindow(QMainWindow):
 
     def _automatic_generation_blocked(self, message):
         text = self.i18n.tr("generation.blocked", reason=message)
-        self._on_ai_progress('Generazione automatica non avviata: ' + message)
+        self._on_ai_progress(tx("Generazione automatica non avviata: ") + message)
         QMessageBox.warning(
             self, self.i18n.text('Generazione automatica non avviata'), text)
 
@@ -6374,49 +6447,51 @@ class MainWindow(QMainWindow):
     def _validate_output_name(name):
         if (not name or name in ('.', '..') or name != name.rstrip(' .')
                 or re.search(r'[<>:"/\\|?*\x00-\x1f]', name)):
-            raise ValueError('Il nome del componente non è un nome di file valido.')
+            raise ValueError(tx("Il nome del componente non è un nome di file valido."))
 
     def _validate_automatic_input(self, params):
         self._validate_output_name(params.name or self._component_name())
         if params.package_geometry:
-            raise ValueError('Per questa geometria a pad espliciti il generatore 3D non è ancora supportato. '
-                             'Il footprint può essere generato manualmente in modalità avanzata.')
+            raise ValueError(tx("Per questa geometria a pad espliciti il generatore 3D non è ancora "
+                                "supportato. Il footprint può essere generato manualmente in modalità "
+                                "avanzata."))
         required_dimensions = ('body_length_mm', 'body_width_mm')
         if not params.is_castellated():
             required_dimensions += ('body_height_mm',)
         for field in required_dimensions:
             value = getattr(params, field)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
-                raise ValueError(f'Manca una dimensione valida del corpo 3D: {field}.')
+                raise ValueError(tx("Manca una dimensione valida del corpo 3D: {field}.", field=field))
         dimensions = ((params.body_length_mm, self.field_cast_body_length if params.is_castellated() else self.field_body_length),
                       (params.body_width_mm, self.field_cast_body_width if params.is_castellated() else self.field_body_width))
         if not params.is_castellated():
             dimensions += ((params.body_height_mm, self.field_body_height),)
         if any(not widget.minimum() <= value <= widget.maximum() for value, widget in dimensions):
-            raise ValueError('Le dimensioni estratte superano i limiti dell’editor: serve una revisione.')
+            raise ValueError(tx("Le dimensioni estratte superano i limiti dell’editor: serve una "
+                                "revisione."))
         if params.is_castellated():
             if not params.castellated_sides:
-                raise ValueError('Non sono stati estratti i contatti del modulo castellated.')
+                raise ValueError(tx("Non sono stati estratti i contatti del modulo castellated."))
             for side in params.castellated_sides:
                 if not isinstance(side, dict) or side.get('edge') not in CASTELLATED_EDGES:
-                    raise ValueError('Lato del modulo non valido.')
+                    raise ValueError(tx("Lato del modulo non valido."))
                 for field in ('count', 'pitch_mm'):
                     value = side.get(field)
                     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
-                        raise ValueError(f'Contatti del modulo incompleti: {field}.')
+                        raise ValueError(tx("Contatti del modulo incompleti: {field}.", field=field))
                 if side['count'] != int(side['count']) or side['count'] > 100:
-                    raise ValueError('Il numero di contatti estratto non è supportato dall’editor.')
+                    raise ValueError(tx("Il numero di contatti estratto non è supportato dall’editor."))
         else:
             for field in ('rows', 'cols', 'pitch_mm', 'row_spacing_mm', 'pad_diameter_mm', 'drill_mm'):
                 value = getattr(params, field)
                 if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
-                    raise ValueError(f'Parametro footprint mancante o non valido: {field}.')
+                    raise ValueError(tx("Parametro footprint mancante o non valido: {field}.", field=field))
             for field, widget in (('rows', self.field_rows), ('cols', self.field_cols),
                                   ('pitch_mm', self.field_pitch), ('row_spacing_mm', self.field_row_spacing),
                                   ('pad_diameter_mm', self.field_pad), ('drill_mm', self.field_drill)):
                 value = getattr(params, field)
                 if not widget.minimum() <= value <= widget.maximum() or (field in ('rows', 'cols') and value != int(value)):
-                    raise ValueError(f'Parametro fuori dai limiti dell’editor: {field}.')
+                    raise ValueError(tx("Parametro fuori dai limiti dell’editor: {field}.", field=field))
 
     def _start_automatic_generation(self, extracted):
         """@brief Avvia la generazione automatica dopo un'estrazione, se i dati la permettono.
@@ -6434,7 +6509,7 @@ class MainWindow(QMainWindow):
             self._validate_automatic_input(extracted)
             body = self._current_body_params()
             if body is None and self.group_3d.isChecked():
-                raise ValueError('I parametri del modello 3D non sono disponibili.')
+                raise ValueError(tx("I parametri del modello 3D non sono disponibili."))
             if body is not None:
                 # QSpinBox limits must not silently replace extracted dimensions.
                 dimensions = ((body.length_mm, extracted.body_length_mm),
@@ -6443,7 +6518,8 @@ class MainWindow(QMainWindow):
                     dimensions += ((body.height_mm, extracted.body_height_mm),)
                 if any(not math.isclose(actual, expected, abs_tol=.011)
                        for actual, expected in dimensions):
-                    raise ValueError('Le dimensioni estratte superano i limiti dell’editor: serve una revisione.')
+                    raise ValueError(tx("Le dimensioni estratte superano i limiti dell’editor: serve una "
+                                        "revisione."))
         except (ValueError, TypeError) as exc:
             self._automatic_generation_blocked(str(exc))
             return
@@ -6485,26 +6561,30 @@ class MainWindow(QMainWindow):
             if automatic and body is None and self.group_3d.isChecked():
                 raise ValueError('Mancano i parametri 3D.')
         except ValueError as exc:
-            self._append_log(f"ERRORE: {exc}")
+            self._append_log(tx("ERRORE: {exc}", exc=exc))
             if automatic:
                 self._automatic_generation_blocked(str(exc))
             return
 
         project_dir = self._project_dir()
         if automatic and not self._confirm_output_overwrite(params, project_dir, body):
-            self._on_ai_progress('Generazione annullata: file esistenti conservati.')
+            self._on_ai_progress(tx("Generazione annullata: file esistenti conservati."))
             return
 
         self.btn_generate.setEnabled(False)
         if isinstance(params, PackageGeometry):
             self._append_log(
-                f"Generazione {params.name}: package {params.family}, "
-                f"{len(params.pins)} pad espliciti"
+                tx("Generazione {name}: package {family}, {n_pins} pad espliciti",
+                   name=params.name,
+                   family=params.family,
+                   n_pins=len(params.pins))
             )
         elif isinstance(params, CastellatedModuleParams):
             self._append_log(
-                f"Generazione {params.name}: modulo castellated "
-                f"{params.body_length}x{params.body_width}mm, "
+                tx("Generazione {name}: modulo castellated {body_length}x{body_width}mm, ",
+                   name=params.name,
+                   body_length=params.body_length,
+                   body_width=params.body_width)
                 + ", ".join(
                     f"{EDGE_LABELS.get(s.edge, s.edge)} {s.count}x{s.pitch}mm"
                     for s in params.sides
@@ -6512,15 +6592,22 @@ class MainWindow(QMainWindow):
             )
         else:
             self._append_log(
-                f"Generazione {params.name}: {params.rows}x{params.cols}, "
-                f"pitch={params.pitch}mm, row_spacing={params.effective_row_spacing()}mm, "
-                f"pad={params.pad_diameter}mm, drill={params.drill}mm"
+                tx("Generazione {name}: {rows}x{cols}, pitch={pitch}mm, "
+                   "row_spacing={effective_row_spacing}mm, pad={pad_diameter}mm, "
+                   "drill={drill}mm",
+                   name=params.name,
+                   rows=params.rows,
+                   cols=params.cols,
+                   pitch=params.pitch,
+                   effective_row_spacing=params.effective_row_spacing(),
+                   pad_diameter=params.pad_diameter,
+                   drill=params.drill)
             )
 
         if body is None and (self.fillet_annotations or self.face_text_annotations):
             self._append_log(
-                "ATTENZIONE: annotazioni 3D presenti ma \"Modello 3D\" non e' attivo "
-                "nel tab Footprint 2D -- verranno ignorate."
+                tx("ATTENZIONE: annotazioni 3D presenti ma \"Modello 3D\" non e' attivo nel "
+                   "tab Footprint 2D -- verranno ignorate.")
             )
 
         self._last_params = params
@@ -6613,10 +6700,10 @@ class MainWindow(QMainWindow):
             # un guasto sarebbe rimproverargli la sua decisione. Il consuntivo
             # va comunque scritto, perche' dice che cosa e' rimasto sul disco.
             self._on_ai_progress(
-                'Generazione interrotta dall’utente. '
-                + ('Il footprint scritto prima dell’interruzione resta sul disco; '
-                   if self._automatic_footprint_done else 'Nessun footprint scritto; ')
-                + 'il modello 3D non è stato completato.')
+                tx("Generazione interrotta dall’utente. ")
+                + (tx("Il footprint scritto prima dell’interruzione resta sul disco; ")
+                   if self._automatic_footprint_done else tx("Nessun footprint scritto; "))
+                + tx("il modello 3D non è stato completato."))
         elif self._automatic_generation_errors or not complete:
             details = ('\n'.join(self._automatic_generation_errors)
                        or self.i18n.text('La generazione non ha prodotto entrambi i risultati.'))
@@ -6625,12 +6712,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self, self.i18n.text('Generazione incompleta'), prefix + details)
         elif expected_3d:
-            self._on_ai_progress('Footprint e modello 3D generati. Verifica le anteprime prima dell’utilizzo.')
+            self._on_ai_progress(tx("Footprint e modello 3D generati. Verifica le anteprime prima "
+                                    "dell’utilizzo."))
         else:
             # Consuntivo fedele: il modello 3D non e' stato chiesto, quindi non
             # va ne' promesso ne' lamentato.
-            self._on_ai_progress('Footprint generato; modello 3D non richiesto. '
-                                 'Verifica l’anteprima prima dell’utilizzo.')
+            self._on_ai_progress(tx("Footprint generato; modello 3D non richiesto. Verifica l’anteprima "
+                                    "prima dell’utilizzo."))
 
     def _on_generated(self, path: str) -> None:
         if self._automatic_generation_active:
@@ -6643,7 +6731,7 @@ class MainWindow(QMainWindow):
         self._draw_preview_3d()
 
     def _on_error(self, message: str) -> None:
-        self._append_log(f"ERRORE: {message}")
+        self._append_log(tx("ERRORE: {message}", message=message))
         if self._automatic_generation_active:
             self._automatic_generation_errors.append(message)
 
@@ -6673,7 +6761,7 @@ class MainWindow(QMainWindow):
         if CAD_ABORT_MESSAGE in message:
             self._append_log(f"INTERROTTO 3D: {message}")
             return
-        self._append_log(f"ERRORE 3D: {message}")
+        self._append_log(tx("ERRORE 3D: {message}", message=message))
         if self._automatic_generation_active:
             self._automatic_generation_errors.append(message)
 
@@ -6681,7 +6769,7 @@ class MainWindow(QMainWindow):
         """Annotazione non applicata: il modello c'e' comunque, ma va detto."""
         if not self._cad_result_is_current():
             return
-        self._append_log(f"ATTENZIONE 3D: {message}")
+        self._append_log(tx("ATTENZIONE 3D: {message}", message=message))
 
     # ── Tab 4: Anteprima ───────────────────────────────────────────
 
@@ -7130,7 +7218,7 @@ class MainWindow(QMainWindow):
                 self.preview_3d.render_mesh(self._last_mesh_path)
                 return
             except Exception as exc:  # noqa: BLE001 - si ricade sull'anteprima parametrica
-                self._append_log(f"Anteprima mesh non disponibile: {exc}")
+                self._append_log(tx("Anteprima mesh non disponibile: {exc}", exc=exc))
         self._draw_preview_3d()
 
     def _open_3dshapes_dir(self) -> None:
@@ -7200,7 +7288,7 @@ class MainWindow(QMainWindow):
         if (worker._model_revision != self._model_revision
                 or worker._photo_snapshot != self._photo_png
                 or worker.components != self._photo_components_from_table()):
-            self._append_log("Dettaglio terminali scartato: i dati sono cambiati durante l'analisi.")
+            self._append_log(tx("Dettaglio terminali scartato: i dati sono cambiati durante l'analisi."))
             self._set_3d_status(self.i18n.text(
                 "Dati modificati durante l'analisi: ripeti Rileva terminali."), STATUS_WARNING)
             return
@@ -7244,15 +7332,18 @@ class MainWindow(QMainWindow):
         except ValueError as exc:
             self._set_3d_status(
                 self.i18n.tr("status.parameter_error", error=exc), STATUS_ERROR)
-            self._append_log(f"ERRORE 3D: {exc}")
+            self._append_log(tx("ERRORE 3D: {exc}", exc=exc))
             return
 
         self._set_regen_busy(True)
         self._set_3d_status(
             self.i18n.text("Generazione STEP in corso tramite FreeCAD..."), STATUS_INFO)
         self._append_log(
-            f"Rigenerazione 3D {params.name}: {len(self.fillet_annotations)} fillet, "
-            f"{len(self.face_text_annotations)} testi incisi"
+            tx("Rigenerazione 3D {name}: {n_fillet_annotations} fillet, "
+               "{n_face_text_annotations} testi incisi",
+               name=params.name,
+               n_fillet_annotations=len(self.fillet_annotations),
+               n_face_text_annotations=len(self.face_text_annotations))
         )
 
         self._cad3d_worker = Cad3DWorker(
@@ -7275,7 +7366,7 @@ class MainWindow(QMainWindow):
         # mentre il solido viene costruito su quelli vecchi.
         self._analysis_tabs_enabled = self.tabs.isEnabled()
         self.tabs.setEnabled(False)
-        self._start_log_session("Rigenerazione modello 3D")
+        self._start_log_session(tx("Rigenerazione modello 3D"))
         # Questa e' un'operazione a se', e non chiama il modello AI: lasciare
         # il consuntivo dell'ultima analisi dentro la modale lo farebbe
         # leggere come il costo di cio' che sta accadendo adesso. Resta sulla
@@ -7348,13 +7439,17 @@ class MainWindow(QMainWindow):
             result = store.consolidate(chosen, _search_roots(None),
                                        source=self._component_name() or "")
         except (AcceptedModelsError, sqlite3.Error, OSError) as exc:
-            self._append_log(f"Abbinamenti accettati NON salvati: {exc}")
+            self._append_log(tx("Abbinamenti accettati NON salvati: {exc}", exc=exc))
             self._set_3d_status(self.i18n.tr(
                 "status.accepted_models_failed", error=exc), STATUS_ERROR)
             return
         self._append_log(
-            f"Abbinamenti accettati salvati in {store.path}: {result.created} voci nuove, "
-            f"{result.confirmed} conferme di voci esistenti, {len(result.skipped)} esclusi.")
+            tx("Abbinamenti accettati salvati in {path}: {created} voci nuove, "
+               "{confirmed} conferme di voci esistenti, {n_skipped} esclusi.",
+               path=store.path,
+               created=result.created,
+               confirmed=result.confirmed,
+               n_skipped=len(result.skipped)))
         for name, reason in result.skipped:
             self._append_log(f"  escluso {name}: {reason}")
         self._set_3d_status(self.i18n.tr(
@@ -7374,7 +7469,7 @@ class MainWindow(QMainWindow):
             try:
                 records = json.loads(report_path.read_text(encoding='utf-8'))['components']
                 if not isinstance(records, list) or not all(isinstance(r, dict) for r in records):
-                    raise ValueError('Elenco componenti non valido nel report KiCad')
+                    raise ValueError(tx("Elenco componenti non valido nel report KiCad"))
                 current = self._components_from_table()
                 for fallback_index, record in enumerate(records):
                     index = record.get('source_row', fallback_index)
@@ -7390,15 +7485,15 @@ class MainWindow(QMainWindow):
                     metadata = deepcopy(cell.data(Qt.ItemDataRole.UserRole) or {})
                     match = record.get('model_match')
                     if match is not None and not isinstance(match, dict):
-                        raise ValueError('Report modello KiCad non valido')
+                        raise ValueError(tx("Report modello KiCad non valido"))
                     metadata['model_match'] = match
                     for key in ('model_path', 'model_rotation_deg', 'render_3d', 'rotation_deg'):
                         if key in record:
                             metadata[key] = deepcopy(record[key])
                     cell.setData(Qt.ItemDataRole.UserRole, metadata)
-                self._append_log(f'Candidati KiCad e decisioni: {report_path}')
+                self._append_log(tx("Candidati KiCad e decisioni: {report_path}", report_path=report_path))
             except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
-                self._append_log(f'Report candidati non caricato: {exc}')
+                self._append_log(tx("Report candidati non caricato: {exc}", exc=exc))
         mesh_path = step_path.with_suffix("").with_suffix(".preview.json")
         if not mesh_path.is_file():
             mesh_path = step_path.parent / f"{step_path.stem}.preview.json"
@@ -7412,7 +7507,7 @@ class MainWindow(QMainWindow):
                 + self.i18n.text(
                     "Anteprima aggiornata con la geometria reale esportata (fillet e testo inclusi)."), STATUS_INFO)
         except Exception as exc:  # noqa: BLE001 - anteprima non critica
-            self._append_log(f"Anteprima mesh non disponibile: {exc}")
+            self._append_log(tx("Anteprima mesh non disponibile: {exc}", exc=exc))
 
     def _on_regen_3d_error(self, message: str) -> None:
         """@brief Scrive nel log e sulla barra 3D perche' lo STEP non c'e'.
@@ -7430,7 +7525,7 @@ class MainWindow(QMainWindow):
                 "Generazione interrotta dall'utente: il modello 3D non è stato "
                 "aggiornato."), STATUS_INFO)
             return
-        self._append_log(f"ERRORE 3D: {message}")
+        self._append_log(tx("ERRORE 3D: {message}", message=message))
         self._set_3d_status(self.i18n.tr(
             "status.step_failed", error=message.splitlines()[0]), STATUS_ERROR)
 
@@ -8361,7 +8456,7 @@ class MainWindow(QMainWindow):
                 self.preview_3d.render_mesh(self._last_mesh_path)
                 return
             except Exception as exc:
-                self._append_log(f"Anteprima mesh non disponibile: {exc}")
+                self._append_log(tx("Anteprima mesh non disponibile: {exc}", exc=exc))
         if self._is_castellated():
             # Per i moduli non esiste un'approssimazione parametrica da
             # disegnare al volo (il solido nasce dal taglio dei semi-fori):
@@ -8375,7 +8470,7 @@ class MainWindow(QMainWindow):
                     ), STATUS_INFO)
                     return
                 except Exception as exc:  # noqa: BLE001 - anteprima best-effort
-                    self._append_log(f"Anteprima mesh non disponibile: {exc}")
+                    self._append_log(tx("Anteprima mesh non disponibile: {exc}", exc=exc))
             self.preview_3d.clear_preview()
             self._set_3d_status(self.i18n.text(
                 "Attiva \"Modello 3D\" e premi \"Genera footprint\": il modello "

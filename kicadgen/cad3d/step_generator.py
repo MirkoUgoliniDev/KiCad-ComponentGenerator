@@ -27,6 +27,7 @@ from ..generators.pin_header import PinHeaderParams, pin_positions
 from .annotations import EdgeFilletAnnotation, FaceTextAnnotation
 from .body_params import Body3DParams
 from .process_log import ProcessCancelled, heartbeat_interval
+from ..services.messages import CHILD_WARNING, child_warning_text, tx
 
 DEFAULT_FONT_FILE = r"C:\Windows\Fonts\arial.ttf"
 
@@ -42,7 +43,7 @@ FREECAD_SILENCE_TIMEOUT_S = 300
 #: l'interfaccia ha gia' un percorso che riporta la finestra in quiete quando
 #: il 3D non si completa, e un'interruzione e' un 3D non completato con un
 #: motivo diverso, non un secondo meccanismo da mantenere in parallelo.
-CAD_ABORT_MESSAGE = "Generazione 3D interrotta su richiesta dell'utente."
+CAD_ABORT_MESSAGE = tx("Generazione 3D interrotta su richiesta dell'utente.")
 
 _SCRIPT_PATH = Path(__file__).parent / "freecad_build_body.py"
 
@@ -183,9 +184,13 @@ def find_overlapping_components(components: list) -> list[str]:
             if all(overlap > OVERLAP_TOLERANCE_MM for overlap in overlaps):
                 overlap_x, overlap_y = overlaps[:2]
                 warnings.append(
-                    f"componenti sovrapposti: '{name_a}' e '{name_b}' "
-                    f"({overlap_x:.2f}x{overlap_y:.2f}mm in comune) -- correggi "
-                    "posizione o rotazione nella tabella componenti."
+                    tx("componenti sovrapposti: '{name_a}' e '{name_b}' "
+                       "({overlap_x:.2f}x{overlap_y:.2f}mm in comune) -- correggi posizione o "
+                       "rotazione nella tabella componenti.",
+                       name_a=name_a,
+                       name_b=name_b,
+                       overlap_x=overlap_x,
+                       overlap_y=overlap_y)
                 )
     return warnings
 
@@ -213,14 +218,16 @@ def colorize_step(step_text: str, colors: list) -> str:
     """
     breps = re.findall(r"#(\d+) = MANIFOLD_SOLID_BREP", step_text)
     if not breps:
-        raise ValueError("nessun solido nello STEP")
+        raise ValueError(tx("nessun solido nello STEP"))
     if len(breps) != len(colors):
-        raise ValueError(f"{len(breps)} solidi nello STEP ma {len(colors)} colori")
+        raise ValueError(tx("{n_breps} solidi nello STEP ma {n_colors} colori",
+                            n_breps=len(breps),
+                            n_colors=len(colors)))
     context = re.search(r"#(\d+) = \( GEOMETRIC_REPRESENTATION_CONTEXT", step_text)
     if not context:
-        raise ValueError("contesto geometrico non trovato nello STEP")
+        raise ValueError(tx("contesto geometrico non trovato nello STEP"))
     if "END-ISO-10303-21;" not in step_text:
-        raise ValueError("STEP senza terminatore")
+        raise ValueError(tx("STEP senza terminatore"))
 
     last = max(int(n) for n in re.findall(r"#(\d+)\s*=", step_text))
     entities = []
@@ -275,8 +282,9 @@ def find_freecadcmd() -> str:
         return candidates[0]
 
     raise Cad3DError(
-        "freecadcmd non trovato. Installa FreeCAD, oppure imposta la variabile "
-        "d'ambiente FREECAD_CMD_PATH con il percorso completo di freecadcmd.exe."
+        tx("freecadcmd non trovato. Installa FreeCAD, oppure imposta la variabile "
+           "d'ambiente FREECAD_CMD_PATH con il percorso completo di "
+           "freecadcmd.exe.")
     )
 
 
@@ -429,15 +437,20 @@ def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: 
         source = params.through_hole_inset_source(side.edge)
         if source == "fallback":
             notes.append(
-                f"Lato {label}: distanza dal bordo dei fori passanti non dichiarata, "
-                f"stimata {value:.2f}mm (raggio della corona piu' la parete minima). "
-                "E' una stima per difetto: indica la distanza fra le file o la "
-                "distanza dal bordo per averla esatta.")
+                tx("Lato {label}: distanza dal bordo dei fori passanti non dichiarata, "
+                   "stimata {value:.2f}mm (raggio della corona piu' la parete minima). E' "
+                   "una stima per difetto: indica la distanza fra le file o la distanza "
+                   "dal bordo per averla esatta.",
+                   label=label,
+                   value=value))
         elif source == "row_spacing":
             notes.append(
-                f"Lato {label}: fori passanti a {value:.2f}mm dal bordo, ricavati da "
-                f"corpo {params.edge_extent(side.edge)}mm e distanza fra le file "
-                f"{params.row_spacing}mm.")
+                tx("Lato {label}: fori passanti a {value:.2f}mm dal bordo, ricavati da "
+                   "corpo {edge_extent}mm e distanza fra le file {row_spacing}mm.",
+                   label=label,
+                   value=value,
+                   edge_extent=params.edge_extent(side.edge),
+                   row_spacing=params.row_spacing))
     return notches, contacts, silk_texts, silk_outline, notes
 
 
@@ -584,8 +597,9 @@ def generate_castellated_3d_model(
         # «Interrompi» non farebbe niente di visibile fino alla fine.
         raise Cad3DError(CAD_ABORT_MESSAGE) from exc
     except Exception as exc:  # noqa: BLE001 - la libreria e' un di piu', mai un requisito
-        report_model(f"Libreria 3D KiCad non utilizzabile ({exc}); "
-                           "si usano le forme approssimate.")
+        report_model(tx("Libreria 3D KiCad non utilizzabile ({exc}); si usano le forme "
+                        "approssimate.",
+                        exc=exc))
 
     from ..services.model_choices import save_candidate_report
     candidate_report = save_candidate_report(output_dir, components)
@@ -671,14 +685,14 @@ def _generate_populated_tht(params, body, pins, output_dir, **options):
             progress(message)
     thickness = body.pcb_thickness_mm or 1.6
     if body.pcb_thickness_mm is None:
-        report("Spessore PCB stimato: 1.6 mm (non quotato).")
+        report(tx("Spessore PCB stimato: 1.6 mm (non quotato)."))
     pcb = replace(body, height_mm=thickness)
     centre_x = body.offset_x_mm + body.length_mm / 2
     centre_y = body.offset_y_mm + body.width_mm / 2
     components = []
     for source_row, c in enumerate(body.components or []):
         if not c.is_usable():
-            report(f"Componente {c.name}: dimensioni non valide, escluso.")
+            report(tx("Componente {name}: dimensioni non valide, escluso.", name=c.name))
             continue
         kind = c.kind
         if kind == "generic" and c.detected_kind:
@@ -745,14 +759,15 @@ def _reconcile_model_imports(result, components, output_dir):
                 continue
             report = dict(component.get('model_match') or {})
             report.update(status='import_failed', selected_path=None,
-                          error='Il file STEP selezionato non è stato importato; visualizzato un segnaposto.')
+                          error=tx("Il file STEP selezionato non è stato importato; visualizzato un "
+                                   "segnaposto."))
             component['model_match'] = report
             result.setdefault('warnings', []).append(f"{component.get('name')}: {report['error']}")
         if failed:
             from ..services.model_choices import save_candidate_report
             save_candidate_report(output_dir, components)
     except (OSError, ValueError, TypeError, AttributeError) as exc:
-        result.setdefault('warnings', []).append(f'Verifica importazione modelli non disponibile: {exc}')
+        result.setdefault('warnings', []).append(tx("Verifica importazione modelli non disponibile: {exc}", exc=exc))
 
 
 def _run_freecad(
@@ -915,15 +930,15 @@ def _run_freecad(
     output = (result.stdout or "") + (result.stderr or "")
 
     if "KICADGEN_STEP_OK" not in output or not step_path.is_file():
-        tail = "\n".join(output.strip().splitlines()[-15:]) or "(nessun output)"
-        raise Cad3DError(f"Generazione STEP fallita.\n\nOutput freecadcmd:\n{tail}")
+        tail = "\n".join(output.strip().splitlines()[-15:]) or tx("(nessun output)")
+        raise Cad3DError(tx("Generazione STEP fallita.\n\nOutput freecadcmd:\n{tail}", tail=tail))
 
     # Avvisi dello script (fillet non applicabile, faccia non trovata...): la
     # generazione va comunque a buon fine, ma senza riportarli l'utente vedrebbe
     # un modello privo di un'annotazione senza capire perche'.
     warnings = [
-        line.split("KICADGEN_WARN:", 1)[1].strip()
-        for line in output.splitlines() if "KICADGEN_WARN:" in line
+        child_warning_text(line.split(CHILD_WARNING, 1)[1])
+        for line in output.splitlines() if CHILD_WARNING in line
     ]
 
     # Colori nello STEP: Part.export scrive la sola geometria, e KiCad
@@ -941,7 +956,7 @@ def _run_freecad(
             step_text = step_path.read_text(encoding="utf-8", errors="replace")
             step_path.write_text(colorize_step(step_text, colors), encoding="utf-8")
         except (OSError, ValueError) as exc:
-            warnings.append(f"STEP esportato senza colori: {exc}")
+            warnings.append(tx("STEP esportato senza colori: {exc}", exc=exc))
 
     return {
         "step_path": step_path,

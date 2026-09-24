@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .openrouter import OpenRouterError
+from .messages import CACHE_HIT, WARNING, kind_of, tx, warning
 
 
 def mechanical_metadata_properties():
@@ -140,21 +141,21 @@ def decode_detections(raw, region, body_length, body_width, source, log):
     """Converte box crop -> PCB normalizzata -> mm; scarta voci non misurabili."""
     result = []
     if not isinstance(raw, list):
-        log(f"{source}: elenco componenti non valido.")
+        log(tx("{source}: elenco componenti non valido.", source=source))
         return result
     rx0, ry0, rx1, ry1 = region
     for index, entry in enumerate(raw, 1):
         label = str(entry.get("name") or "Componente") if isinstance(entry, dict) else "?"
         try:
             if not isinstance(entry, dict):
-                raise ValueError("voce non strutturata")
+                raise ValueError(tx("voce non strutturata"))
             if entry.get("object_type") != "component":
-                raise ValueError("elemento della PCB, non componente montato")
+                raise ValueError(tx("elemento della PCB, non componente montato"))
             if entry.get("fully_visible") is not True:
-                raise ValueError("componente tagliato: da cercare nella vista completa")
+                raise ValueError(tx("componente tagliato: da cercare nella vista completa"))
             bbox = entry["bbox"]
             if not isinstance(bbox, list) or len(bbox) != 4:
-                raise ValueError("rettangolo non valido")
+                raise ValueError(tx("rettangolo non valido"))
             left, top, right, bottom = map(float, bbox)
             if not all(math.isfinite(v) and 0 <= v <= 1 for v in (left, top, right, bottom)):
                 raise ValueError("rettangolo fuori foto")
@@ -163,7 +164,7 @@ def decode_detections(raw, region, body_length, body_width, source, log):
             height = float(entry["height_mm"])
             angle = float(entry["rotation_deg"])
             if not math.isfinite(height) or height <= 0 or angle not in (0, 90, 180, 270):
-                raise ValueError("altezza/orientamento non valido")
+                raise ValueError(tx("altezza/orientamento non valido"))
             x0, x1 = rx0 + left * (rx1-rx0), rx0 + right * (rx1-rx0)
             y0, y1 = ry0 + top * (ry1-ry0), ry0 + bottom * (ry1-ry0)
             sx, sy = (x1-x0)*body_length, (y1-y0)*body_width
@@ -181,13 +182,17 @@ def decode_detections(raw, region, body_length, body_width, source, log):
                 angle = (angle + 90) % 360
                 item["_uncertain"] = True
                 item["_reported_rotation_deg"] = entry["rotation_deg"]
-                log(f"{source}: {label} conservato; orientamento incoerente, "
-                    "assi allineati al rettangolo e verso da verificare.")
+                log(tx("{source}: {label} conservato; orientamento incoerente, assi allineati "
+                       "al rettangolo e verso da verificare.",
+                       source=source,
+                       label=label))
             item["name"] = str(entry.get("name") or "Componente")
             item["marking"] = str(entry.get("marking") or "")
             if not re.fullmatch(r"#[0-9a-fA-F]{6}", str(entry.get("color_hex", ""))):
                 item["color_hex"] = "#303030"
-                log(f"{source}: colore non valido per {label}, usato grigio.")
+                log(tx("{source}: colore non valido per {label}, usato grigio.",
+                       source=source,
+                       label=label))
             item.update(x_mm=((x0+x1)/2-.5)*body_length,
                         y_mm=((y0+y1)/2-.5)*body_width,
                         length_mm=length, width_mm=width, height_mm=height,
@@ -203,7 +208,11 @@ def decode_detections(raw, region, body_length, body_width, source, log):
                     item["pins_by_side"] = sides
             result.append(item)
         except (KeyError, TypeError, ValueError, OverflowError) as exc:
-            log(f"{source}: scartato {label} (voce {index}: {exc}).")
+            log(tx("{source}: scartato {label} (voce {index}: {exc}).",
+                   source=source,
+                   label=label,
+                   index=index,
+                   exc=exc))
     return result
 
 
@@ -241,11 +250,17 @@ def _warn_if_too_coarse(crop_px, body_length, warn):
     if readable >= MIN_PACKAGE_PIXELS:
         return
     needed = MIN_PACKAGE_PIXELS / SMALLEST_PASSIVE_MM * body_length
-    warn(f"Risoluzione della foto usata per l'inventario: {scale:.1f} px/mm. Un passivo 0402 "
-         f"misura {readable:.0f} px sul lato corto, meno dei {MIN_PACKAGE_PIXELS} "
-         f"necessari per distinguerlo: i componenti piu' piccoli non verranno "
-         f"rilevati e l'inventario resta incompleto. Servirebbe una foto con la "
-         f"scheda larga almeno {needed:.0f} px (questa ne ha {crop_px}).")
+    warn(tx("Risoluzione della foto usata per l'inventario: {scale:.1f} px/mm. Un "
+            "passivo 0402 misura {readable:.0f} px sul lato corto, meno dei "
+            "{MIN_PACKAGE_PIXELS} necessari per distinguerlo: i componenti piu' "
+            "piccoli non verranno rilevati e l'inventario resta incompleto. "
+            "Servirebbe una foto con la scheda larga almeno {needed:.0f} px "
+            "(questa ne ha {crop_px}).",
+            scale=scale,
+            readable=readable,
+            MIN_PACKAGE_PIXELS=MIN_PACKAGE_PIXELS,
+            needed=needed,
+            crop_px=crop_px))
 
 
 def box_of(item):
@@ -318,11 +333,14 @@ def _associate_view(group, previous, containment):
     return assignments
 
 
-def merge_components(groups, log=lambda message: None, containment=False):
+def merge_components(groups, log=lambda message: None, containment=False, summary=None):
     """Associazione uno-a-uno tra viste, con IoU e rapporto area.
 
     Due pezzi della stessa vista rimangono distinti. Una resistenza accanto a un
     IC non viene assorbita dal raggio proporzionale al lato lungo dell'IC.
+    `summary` riceve la riga finale di riepilogo (per default `log`): chi
+    tratta le altre righe come avvisi la separa cosi', invece di riconoscerla
+    dal testo, che dal 2026-09-24 e' tradotto.
     """
     merged = []
     duplicates = 0
@@ -338,11 +356,16 @@ def merge_components(groups, log=lambda message: None, containment=False):
             existing = merged[index]
             for field in ("package", "mating"):
                 if existing.get(field) and item.get(field) and existing[field] != item[field]:
-                    log(f"Da verificare: {field} discordante tra viste: {existing[field]} / {item[field]}.")
+                    log(warning("Da verificare: {field} discordante tra viste: {existing} / {item}.",
+                           field=field,
+                           existing=existing[field],
+                           item=item[field]))
                     existing["_uncertain"] = True
                     item = dict(item, _uncertain=True)
             if existing.get("kind") != item.get("kind"):
-                log(f"Classificazione discordante nello stesso punto: {existing.get('name')} / {item.get('name')}.")
+                log(warning("Classificazione discordante nello stesso punto: {get} / {get2}.",
+                       get=existing.get('name'),
+                       get2=item.get('name')))
                 existing["_uncertain"] = True
                 item = dict(item, _uncertain=True)
             # Alta confidenza prima; a parità, la vista locale misura più pixel.
@@ -363,7 +386,10 @@ def merge_components(groups, log=lambda message: None, containment=False):
                                          geometry=box_of(item) == box_of(existing))
                 if not existing.get("marking"):
                     existing["marking"] = item.get("marking", "")
-    log(f"Fusione geometrica: {duplicates} duplicati riconciliati, {len(merged)} componenti.")
+    (summary or log)(tx("Fusione geometrica: {duplicates} duplicati riconciliati, {n_merged} "
+           "componenti.",
+           duplicates=duplicates,
+           n_merged=len(merged)))
     for i, a in enumerate(merged):
         for j, b in enumerate(merged[i+1:], i+1):
             _, coverage = overlap(a, b)
@@ -374,11 +400,18 @@ def merge_components(groups, log=lambda message: None, containment=False):
             if (ax0 < (bx0+bx1)/2 < ax1 and ay0 < (by0+by1)/2 < ay1
                     and bx0 < (ax0+ax1)/2 < bx1 and by0 < (ay0+ay1)/2 < by1):
                 a["_uncertain"] = b["_uncertain"] = True
-                log(f"Da verificare: possibile doppione #{i+1}/#{j+1}; centri reciprocamente "
-                    "inclusi, corpi conservati distinti. Confermare sulla foto corpo e piazzole.")
+                log(warning("Da verificare: possibile doppione #{value}/#{value2}; centri "
+                       "reciprocamente inclusi, corpi conservati distinti. Confermare sulla "
+                       "foto corpo e piazzole.",
+                       value=i + 1,
+                       value2=j + 1))
             if coverage > 0.3:
                 a["_uncertain"] = b["_uncertain"] = True
-                log(f"Da verificare: sovrapposizione tra #{i+1} {a.get('name')} e #{j+1} {b.get('name')}.")
+                log(warning("Da verificare: sovrapposizione tra #{value} {get} e #{value2} {get2}.",
+                       value=i + 1,
+                       get=a.get('name'),
+                       value2=j + 1,
+                       get2=b.get('name')))
     return merged
 
 
@@ -465,10 +498,10 @@ def save_inventory_evidence(cache_dir, photo_png, overlay_png, components, log, 
         path.write_text(json.dumps(document, indent=2, ensure_ascii=False, default=str),
                         encoding='utf-8')
         written.append(path)
-        log(('Proposte del rilevatore salvate: ' if label == 'detector' else 'Inventario salvato: ')
+        log((tx("Proposte del rilevatore salvate: ") if label == 'detector' else tx("Inventario salvato: "))
             + '; '.join(str(p) for p in written))
     except (OSError, TypeError, ValueError) as exc:
-        log(f'Inventario non salvato su disco: {exc}')
+        log(tx("Inventario non salvato su disco: {exc}", exc=exc))
     return written
 
 
@@ -481,7 +514,7 @@ def image_block(image):
     else:
         ok, encoded = cv2.imencode(".png", image)
         if not ok:
-            raise ValueError("Impossibile codificare la foto")
+            raise ValueError(tx("Impossibile codificare la foto"))
         encoded_bytes = encoded.tobytes()
     mime = "image/png"
     # Providers count base64 bytes toward the 5 MiB per-image limit.
@@ -491,12 +524,12 @@ def image_block(image):
         import numpy as np
         pixels = cv2.imdecode(np.frombuffer(encoded_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
         if pixels is None:
-            raise ValueError("Impossibile decodificare la foto")
+            raise ValueError(tx("Impossibile decodificare la foto"))
         while True:
             for quality in (95, 90, 85, 75):
                 ok, encoded = cv2.imencode(".jpg", pixels, [cv2.IMWRITE_JPEG_QUALITY, quality])
                 if not ok:
-                    raise ValueError("Impossibile comprimere la foto")
+                    raise ValueError(tx("Impossibile comprimere la foto"))
                 encoded_bytes = encoded.tobytes()
                 if 4 * ((len(encoded_bytes) + 2) // 3) <= budget:
                     break
@@ -596,13 +629,19 @@ def measure_proposal_edges(photo, proposals, positions, length_mm, width_mm, log
         after['_edges_measured'] = True
         after['_box'] = _normalized_box(after, length_mm, width_mm)
     if not report.measured:
-        log('Bordi con OpenCV: nessun contorno utilizzabile; restano le proposte del rilevatore.')
+        log(tx("Bordi con OpenCV: nessun contorno utilizzabile; restano le proposte "
+               "del rilevatore."))
         return measured
     oblique = sum(1 for row in measured if float(row.get('rotation_deg') or 0.0) % 90 != 0)
-    log(f'Bordi con OpenCV: {report.measured} proposte su {len(measured)} misurate sul '
-        f'gradiente ({changed} con geometria diversa da quella del rilevatore, '
-        f'{oblique} non cardinali); {len(report.skipped)} lasciate come proposte '
-        'perche\' il contorno non era chiaro o non era compatibile.')
+    log(tx("Bordi con OpenCV: {measured} proposte su {n_measured} misurate sul "
+           "gradiente ({changed} con geometria diversa da quella del rilevatore, "
+           "{oblique} non cardinali); {n_skipped} lasciate come proposte perche' "
+           "il contorno non era chiaro o non era compatibile.",
+           measured=report.measured,
+           n_measured=len(measured),
+           changed=changed,
+           oblique=oblique,
+           n_skipped=len(report.skipped)))
     return measured
 
 
@@ -702,7 +741,9 @@ def sample_body_colors(photo, components, log=lambda message: None):
         component['color_hex'] = f"#{r:02x}{g:02x}{b:02x}"
         component['_color_source'] = 'photo_median'
         measured += 1
-    log(f'Colori campionati dalla foto: {measured} corpi su {len(components)}.')
+    log(tx("Colori campionati dalla foto: {measured} corpi su {n_components}.",
+           measured=measured,
+           n_components=len(components)))
     return measured
 
 
@@ -749,15 +790,16 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         try:
             phase(tool, detail)
         except Exception as exc:  # noqa: BLE001 - la GUI non deve poter abortire l'estrazione
-            log(f'Segnalazione della fase non riuscita ({exc}); elaborazione proseguita.')
+            log(tx("Segnalazione della fase non riuscita ({exc}); elaborazione proseguita.",
+                   exc=exc))
     if detector not in ('ai', 'yolo', 'vlm'):
-        raise ValueError('Rilevatore fotografico non supportato.')
+        raise ValueError(tx("Rilevatore fotografico non supportato."))
     report = InventoryResult()
     def warn(message):
         report.warnings.append(message)
         log(message)
     if not all(math.isfinite(v) and v > 0 for v in (length,width)):
-        warn("Quote PCB non valide: inventario fotografico saltato.")
+        warn(tx("Quote PCB non valide: inventario fotografico saltato."))
         return report
     # L'utente puo' indicare piu' viste dall'alto: la foto ad alta risoluzione
     # per i componenti piccoli e la vista superiore come riserva. Si provano
@@ -766,7 +808,8 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     allowed = ({top_photo_index} if type(top_photo_index) is int
                else set(top_photo_index) if top_photo_index is not None else None)
     if allowed is not None and (not allowed or allowed == {-1}):
-        warn("Nessuna vista dall'alto indicata dall'analisi principale: crop saltati.")
+        warn(tx("Nessuna vista dall'alto indicata dall'analisi principale: crop "
+                "saltati."))
         return report
     photos = [(i,Path(p)) for i,p in enumerate(paths)
               if Path(p).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}]
@@ -780,20 +823,24 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             if photo is not None:
                 candidates.append((photo.shape[0]*photo.shape[1],path,photo,calibration))
         if not candidates:
-            warn("Nessuna vista dall'alto calibrabile: resta l'inventario principale.")
+            warn(tx("Nessuna vista dall'alto calibrabile: resta l'inventario principale."))
             return report
     except ImportError:
-        warn("OpenCV non disponibile: resta l'inventario principale.")
+        warn(tx("OpenCV non disponibile: resta l'inventario principale."))
         return report
     except (OSError, ValueError) as exc:
-        warn(f"Foto non leggibile: {exc}")
+        warn(tx("Foto non leggibile: {exc}", exc=exc))
         return report
     _, path, photo, report.calibration = max(candidates, key=lambda c:c[0])
     report.photo = path.name
     if top_photo_index is None:
-        warn(f"Vista dall'alto non specificata: scelta euristica {path.name}, verificare la foto nel confronto.")
+        warn(tx("Vista dall'alto non specificata: scelta euristica {name}, verificare "
+                "la foto nel confronto.",
+                name=path.name))
     else:
-        log(f"Vista dall'alto usata, indicata da {top_photo_source}: {path.name}.")
+        log(tx("Vista dall'alto usata, indicata da {top_photo_source}: {name}.",
+               top_photo_source=top_photo_source,
+               name=path.name))
     _warn_if_too_coarse(photo.shape[1], length, warn)
     import cv2
     ok, encoded = cv2.imencode(".png", photo)
@@ -808,14 +855,16 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             # precede non e' rilevamento, e la modale non deve mostrare una
             # fase che non sta girando.
             announce('yolo', 'rilevatore locale ONNX')
-            log('YOLO locale: localizzazione senza invio della foto; verifica package AI successiva.')
+            log(tx("YOLO locale: localizzazione senza invio della foto; verifica package "
+                   "AI successiva."))
             proposals = detect_yolo_components(photo, length, width, model_path=yolo_model_path,
                                               log=log, audit_dir=audit, include_review_candidates=True)
         else:
             # Nessun rilevatore locale: la foto va al modello di visione, che
             # enumera i corpi da solo. Stessa richiesta, stesso schema, stessa
             # conversione in millimetri: cambia solo chi propone i rettangoli.
-            log('Nessun rilevatore locale: i corpi li enumera il modello di visione, in una sola richiesta.')
+            log(tx("Nessun rilevatore locale: i corpi li enumera il modello di visione, "
+                   "in una sola richiesta."))
         if proposals:
             from .contact_zones import contact_positions, contact_proposals
             positions = contact_positions(declared, length, width)
@@ -826,10 +875,14 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                 # piazzole «switch» o «battery», quindi la classe non aiuta.
                 # Qui si usa dove i contatti SONO, secondo le quote dichiarate.
                 proposals = [row for i, row in enumerate(proposals) if i not in dropped]
-                log(f'Contatti dichiarati: {len(dropped)} proposte cadevano sulle piazzole '
-                    f'del modulo ({len(positions)} contatti su quote dichiarate) e sono state tolte.')
+                log(tx("Contatti dichiarati: {n_dropped} proposte cadevano sulle piazzole del "
+                       "modulo ({n_positions} contatti su quote dichiarate) e sono state "
+                       "tolte.",
+                       n_dropped=len(dropped),
+                       n_positions=len(positions)))
             elif positions:
-                log(f'Contatti dichiarati: {len(positions)}; nessuna proposta ci cadeva sopra.')
+                log(tx("Contatti dichiarati: {n_positions}; nessuna proposta ci cadeva sopra.",
+                       n_positions=len(positions)))
             # Il rilevatore dice dove c'e' un corpo; i bordi li misura il
             # gradiente, che non ha bisogno di addestramento. Si fa qui, prima
             # dell'anteprima e della revisione, perche' e' la geometria che
@@ -850,8 +903,10 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             # una chiamata su proposte che non sono state approvate.
             kept = review_proposals(report.photo_png, proposals, length, width)
             if kept is None:
-                raise ReviewCancelled("Revisione dei corpi rilevati annullata.")
-            log(f'Revisione dei corpi: {len(kept)} proposte tenute su {len(proposals)}.')
+                raise ReviewCancelled(tx("Revisione dei corpi rilevati annullata."))
+            log(tx("Revisione dei corpi: {n_kept} proposte tenute su {n_proposals}.",
+                   n_kept=len(kept),
+                   n_proposals=len(proposals)))
             proposals = list(kept)
         # Da qui si paga: la revisione delle proposte e' finita e la richiesta
         # sta per partire, quindi la modale deve tornare a dichiarare il
@@ -878,21 +933,24 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                          for issue in c.get('_global_inventory_errors', [])})
         if issues:
             warn('Inventario globale parziale: ' + '; '.join(issues)
-                 + '. Componenti irrisolti conservati per revisione manuale.')
+                 + tx(". Componenti irrisolti conservati per revisione manuale."))
         report.overlay_png = draw_inventory(photo, report.components)
         save_inventory_evidence(cache_dir, report.photo_png, report.overlay_png,
                                 report.components, log)
-        log(f'Inventario revisionato: {len(report.components)} ipotesi '
-            + (f'da {len(proposals)} proposte YOLO ' if detector == 'yolo'
-               else 'enumerate dal modello di visione ')
-            + 'in una sola richiesta; completezza non certificata. '
-              'Package, altezze e orientamenti dubbi da rivedere.')
+        log(tx("Inventario revisionato: {n_components} ipotesi ",
+               n_components=len(report.components))
+            + (tx("da {n_proposals} proposte YOLO ", n_proposals=len(proposals)) if detector == 'yolo'
+               else tx("enumerate dal modello di visione "))
+            + tx("in una sola richiesta; completezza non certificata. Package, altezze "
+                 "e orientamenti dubbi da rivedere."))
         return report
     if grounding:
         from .photo_grounding import grounded_components
         def report_progress(message):
             log(message)
-            if any(word in message for word in ("fallita", "Da verificare:", "non valida", "discordante")):
+            # Gli avvisi si riconoscono dal tipo, non dalle parole: dal
+            # 2026-09-24 il testo e' nella lingua dell'utente.
+            if kind_of(message) == WARNING:
                 report.warnings.append(message)
         report.components = grounded_components(photo,model,length,width,kinds,call,
                                                report_progress,cache_dir,extra_instructions,classifier_model,mechanical,
@@ -900,18 +958,19 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         for i,c in enumerate(report.components,1):
             log(f"#{i} {c['name']} [{c['kind']}] centro ({c['x_mm']:.2f}, {c['y_mm']:.2f}) mm; "
                 f"{c['length_mm']:.2f} x {c['width_mm']:.2f} mm; "
-                + ("DA VERIFICARE" if c.get('_uncertain') else "verificato dall'AI, non certificato"))
+                + (tx("DA VERIFICARE") if c.get('_uncertain') else tx("verificato dall'AI, non certificato")))
         report.overlay_png = draw_inventory(photo, report.components)
-        log(f"Inventario concluso: {len(report.components)} package; "
-            f"{sum(bool(c.get('_uncertain')) for c in report.components)} dubbi sulla presenza/geometria. "
-            "Altezze tutte stimate e da controllare. "
-            "Apri Rivedi rilevamento foto per controllare o correggere.")
+        log(tx("Inventario concluso: {n_components} package; {sum} dubbi sulla "
+               "presenza/geometria. Altezze tutte stimate e da controllare. Apri "
+               "Rivedi rilevamento foto per controllare o correggere.",
+               n_components=len(report.components),
+               sum=sum((bool(c.get('_uncertain')) for c in report.components))))
         return report
     # Legacy path retained only for reproducible comparisons and integrations
     # explicitly requesting grounding=False.
     groups = []
     for label,region,crop in regions(photo):
-        log(f"{label}: localizzazione rettangoli sulla foto...")
+        log(tx("{label}: localizzazione rettangoli sulla foto...", label=label))
         prompt = (
             "Elenca i componenti realmente montati e INTERAMENTE visibili nella foto corrente. "
             "Scansiona ordinatamente da sinistra a destra e dall'alto in basso, passivi piccoli inclusi. "
@@ -934,23 +993,25 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                         content_blocks=[image_block(crop)], tool=detection_tool(kinds),
                         max_tokens=8192, has_pdf=False)
             if not isinstance(data, dict):
-                raise ValueError("risposta non strutturata")
+                raise ValueError(tx("risposta non strutturata"))
             group = decode_detections(data.get("components"),region,length,width,label,warn)
             for c in group:
                 if c.get("kind") not in kinds:
                     c["kind"] = "generic"
             groups.append(group)
-            log(f"{label}: {len(group)} componenti validi.")
+            log(tx("{label}: {n_group} componenti validi.", label=label, n_group=len(group)))
         except (OpenRouterError, ValueError) as exc:
-            warn(f"{label}: analisi fallita ({exc}); le altre viste vengono conservate.")
+            warn(tx("{label}: analisi fallita ({exc}); le altre viste vengono conservate.",
+                    label=label,
+                    exc=exc))
     report.components = merge_components(
-        groups, lambda message: log(message) if message.startswith("Fusione geometrica:") else warn(message)
-    )
+        groups, warn, summary=log)
     for i,c in enumerate(report.components,1):
         log(f"#{i} {c.get('name')} [{c.get('kind')}] centro ({c['x_mm']:.2f}, {c['y_mm']:.2f}) mm, "
             f"{c['length_mm']:.2f} x {c['width_mm']:.2f} mm, {c['rotation_deg']:g} gradi.")
     report.overlay_png = draw_inventory(photo, report.components)
-    log("Confronto fotografico pronto: verde = rilevato; arancione = da verificare.")
+    log(tx("Confronto fotografico pronto: verde = rilevato; arancione = da "
+           "verificare."))
     return report
 
 
@@ -1171,10 +1232,10 @@ def save_review_bundle(project_dir, proposals, photo_png, length_mm, width_mm, *
         the reconciliation will accept.
     """
     if not all(_positive_extent(v) for v in (length_mm, width_mm)):
-        raise ValueError('Quote PCB non valide: proposte non salvate.')
+        raise ValueError(tx("Quote PCB non valide: proposte non salvate."))
     rows = _valid_proposal_rows(proposals)
     if not rows:
-        raise ValueError('Nessuna proposta valida (serve almeno un riquadro con _id e _box).')
+        raise ValueError(tx("Nessuna proposta valida (serve almeno un riquadro con _id e _box)."))
     folder = review_bundle_dir(project_dir)
     folder.mkdir(parents=True, exist_ok=True)
     document = dict(format=REVIEW_BUNDLE_FORMAT,
@@ -1276,10 +1337,10 @@ def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
     if isinstance(photo, (bytes, bytearray)):
         photo = cv2.imdecode(np.frombuffer(photo, dtype=np.uint8), cv2.IMREAD_COLOR)
     if photo is None or getattr(photo, 'ndim', 0) != 3 or min(photo.shape[:2]) < 1:
-        raise ValueError('Foto calibrata non decodificabile: inventario non rilanciato.')
+        raise ValueError(tx("Foto calibrata non decodificabile: inventario non rilanciato."))
     if not all(isinstance(v, (int, float)) and not isinstance(v, bool)
                and math.isfinite(v) and v > 0 for v in (length, width)):
-        raise ValueError('Quote PCB non valide: inventario non rilanciato.')
+        raise ValueError(tx("Quote PCB non valide: inventario non rilanciato."))
     report = InventoryResult()
     ok, encoded = cv2.imencode('.png', photo)
     report.photo_png = encoded.tobytes() if ok else None
@@ -1293,13 +1354,17 @@ def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
             if isinstance(stated, (int, float)) and not isinstance(stated, bool) \
                     and not math.isclose(float(stated), float(value), abs_tol=0.011):
                 report.warnings.append(
-                    f'Quota dichiarata {key}={stated} diversa da quella di calibrazione {value}: '
-                    'le proposte salvate potrebbero essere su un\'altra scala.')
+                    tx("Quota dichiarata {key}={stated} diversa da quella di calibrazione "
+                       "{value}: le proposte salvate potrebbero essere su un'altra scala.",
+                       key=key,
+                       stated=stated,
+                       value=value))
                 log(report.warnings[-1])
     manual = sum(1 for row in proposals if row.get('_yolo_manual_box') is True)
     log(f'Rilancio dell\'inventario: {len(proposals)} proposte riviste'
-        + (f', di cui {manual} disegnate a mano e inoltrate senza misura ne\' filtro' if manual else '')
-        + '; nessun rilevatore locale e nessun documento vengono rieseguiti.')
+        + (tx(", di cui {manual} disegnate a mano e inoltrate senza misura ne' filtro",
+              manual=manual) if manual else '')
+        + tx("; nessun rilevatore locale e nessun documento vengono rieseguiti."))
     seen = []
     def observe(message):
         seen.append(message)
@@ -1307,10 +1372,10 @@ def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
     report.components = review_global_inventory(
         photo, proposals, length, width, model, call, observe, cache_dir,
         verification_prompt=verification_prompt, extra_instructions=extra_instructions)
-    replayed = any('validated cache hit' in message for message in seen)
+    replayed = any(kind_of(message) == CACHE_HIT for message in seen)
     if replayed:
-        log('Rilancio dell\'inventario: proposte e foto identiche a una richiesta gia\' '
-            'pagata; risposta rigiocata dalla cache, nessun nuovo addebito.')
+        log(tx("Rilancio dell'inventario: proposte e foto identiche a una richiesta "
+               "gia' pagata; risposta rigiocata dalla cache, nessun nuovo addebito."))
     # Stesso ordine del percorso normale: il colore si misura dopo la
     # riconciliazione, che sposta e fonde i riquadri.
     sample_body_colors(photo, report.components, log)
@@ -1323,12 +1388,14 @@ def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
                      for issue in c.get('_global_inventory_errors', [])})
     if issues:
         report.warnings.append('Inventario globale parziale: ' + '; '.join(issues)
-                               + '. Componenti irrisolti conservati per revisione manuale.')
+                               + tx(". Componenti irrisolti conservati per revisione manuale."))
         log(report.warnings[-1])
     report.overlay_png = draw_inventory(photo, report.components)
     save_inventory_evidence(cache_dir, report.photo_png, report.overlay_png,
                             report.components, log, label=INVENTORY_EVIDENCE_LABEL)
-    log(f'Inventario rilanciato: {len(report.components)} ipotesi da {len(proposals)} proposte '
-        'riviste in una sola richiesta; completezza non certificata. '
-        'Package, altezze e orientamenti dubbi da rivedere.')
+    log(tx("Inventario rilanciato: {n_components} ipotesi da {n_proposals} "
+           "proposte riviste in una sola richiesta; completezza non certificata. "
+           "Package, altezze e orientamenti dubbi da rivedere.",
+           n_components=len(report.components),
+           n_proposals=len(proposals)))
     return report

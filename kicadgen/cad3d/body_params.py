@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+from ..services.messages import tx
 
 
 @dataclass
@@ -43,16 +44,17 @@ class Body3DParams:
         """@brief Validate dimensions, colors and pin extrusion constraints."""
         from .annotations import validate_hex_color
 
-        validate_hex_color(self.color_hex, "Colore del corpo")
-        validate_hex_color(self.pin_color_hex, "Colore dei pin")
+        validate_hex_color(self.color_hex, tx("Colore del corpo"))
+        validate_hex_color(self.pin_color_hex, tx("Colore dei pin"))
         if self.pcb_thickness_mm is not None and (
                 not math.isfinite(self.pcb_thickness_mm) or self.pcb_thickness_mm <= 0):
-            raise ValueError("Spessore PCB non valido.")
+            raise ValueError(tx("Spessore PCB non valido."))
         if self.length_mm <= 0 or self.width_mm <= 0 or self.height_mm <= 0:
             raise ValueError(
-                "Le dimensioni del corpo (lunghezza/larghezza/altezza) devono essere > 0."
+                tx("Le dimensioni del corpo (lunghezza/larghezza/altezza) devono essere > "
+                   "0.")
             )
         if self.pin_diameter_mm <= 0:
-            raise ValueError("Il diametro pin (3D) deve essere > 0.")
+            raise ValueError(tx("Il diametro pin (3D) deve essere > 0."))
         if self.pin_length_mm <= 0:
-            raise ValueError("La lunghezza pin (protrusione sotto il corpo) deve essere > 0.")
+            raise ValueError(tx("La lunghezza pin (protrusione sotto il corpo) deve essere > 0."))

@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .openrouter import OpenRouterError
 from .photo_inventory import draw_inventory, image_block
+from .messages import CACHE_HIT, marked, tx
 
 PROMPT_VERSION = 'global-yolo-inventory-6'
 #: Versione del prompt usato quando NESSUN rilevatore locale ha girato e
@@ -344,9 +345,12 @@ def _rescale_boxes(rows, width, height, log):
         if all(0 <= b[0] < b[2] <= 1 and 0 <= b[1] < b[3] <= 1 for b in converted):
             for row, box in zip(rows, boxes):
                 row['bbox'] = [box[0]/dx, box[1]/dy, box[2]/dx, box[3]/dy]
-            log(f'Inventario globale: coordinate ricevute in {name}; convertite in frazioni.')
+            log(tx("Inventario globale: coordinate ricevute in {name}; convertite in "
+                   "frazioni.",
+                   name=name))
             return name
-    log('Inventario globale: coordinate fuori 0..1 e nessuna convenzione coerente; lasciate invariate.')
+    log(tx("Inventario globale: coordinate fuori 0..1 e nessuna convenzione "
+           "coerente; lasciate invariate."))
     return None
 
 
@@ -724,12 +728,12 @@ def paid_request_message(images, proposals, enumerating):
         the agreement unverified.
     """
     pictures = f'{images} immagini' if images != 1 else '1 immagine'
-    return ('Inventario globale: una sola richiesta a pagamento su ' + pictures + '; '
-            + ('nessun rilevatore locale, i corpi li enumera il modello di visione.'
+    return (tx("Inventario globale: una sola richiesta a pagamento su ") + pictures + '; '
+            + (tx("nessun rilevatore locale, i corpi li enumera il modello di visione.")
                if enumerating else
-               (f'riconcilia le {proposals} proposte' if proposals != 1
+               (tx("riconcilia le {proposals} proposte", proposals=proposals) if proposals != 1
                 else 'riconcilia l’unica proposta')
-               + ' del rilevatore locale ed elenca i corpi effettivi.'))
+               + tx(" del rilevatore locale ed elenca i corpi effettivi.")))
 
 
 def _inventory_context(text):
@@ -904,7 +908,8 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
                    + '\n\n'.join(supplements))
     prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
     log(f'Inventario globale: prompt={version}; schema={SCHEMA_VERSION}; sha256={prompt_hash}')
-    log('Inventario globale: le etichette sono ID generati dal modello, non sigle di serigrafia verificate.')
+    log(tx("Inventario globale: le etichette sono ID generati dal modello, non "
+           "sigle di serigrafia verificate."))
     kwargs = dict(model=model, system_prompt=prompt, content_blocks=content,
                   tool=inventory_tool(), max_tokens=24000, has_pdf=False)
     key = hashlib.sha256(json.dumps(kwargs, sort_keys=True, allow_nan=False).encode()).hexdigest()
@@ -916,7 +921,9 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         try:
             record = json.loads(path.read_text(encoding='utf-8'))
             if record.get('key') == key and not _validate(record.get('response'), known, boxes)[2]:
-                data = record['response']; log('Inventario globale: risposta valida ripresa dalla cache, nessuna nuova chiamata a pagamento (validated cache hit).')
+                data = record['response']; log(marked(CACHE_HIT, "Inventario globale: risposta valida ripresa dalla "
+                                                  "cache, nessuna nuova chiamata a pagamento "
+                                                  "(validated cache hit)."))
         except (OSError, ValueError, AttributeError):
             pass
     if data is None:
@@ -934,8 +941,10 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         # ripiega sulla confidenza complessiva (vedi _presence).
         omitted = omitted_required_fields(data)
         if omitted:
-            log('Inventario globale: il modello ha omesso campi obbligatori su OGNI componente '
-                f'({", ".join(omitted)}); un solo nuovo tentativo a pagamento che nomina l’omissione.')
+            log(tx("Inventario globale: il modello ha omesso campi obbligatori su OGNI "
+                   "componente ({join}); un solo nuovo tentativo a pagamento che nomina "
+                   "l’omissione.",
+                   join=', '.join(omitted)))
             retry_kwargs = dict(kwargs, system_prompt=prompt + _OMISSION_REMINDER.format(
                 fields=', '.join(omitted)))
             try:
@@ -954,7 +963,8 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
                       and any(isinstance(row, dict) for row in second['components']))
             if usable and not still:
                 data = second
-                log('Inventario globale: il nuovo tentativo porta i campi obbligatori; si usa quello.')
+                log(tx("Inventario globale: il nuovo tentativo porta i campi obbligatori; si "
+                       "usa quello."))
             else:
                 failure = second.get('error') if isinstance(second, dict) else None
                 # Questa riga dice che una SECONDA chiamata a pagamento e' stata
@@ -966,10 +976,11 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
                 # da come e' punteggiato un errore altrui.
                 log('Inventario globale: nuovo tentativo '
                     + (f'fallito ({_inline_detail(failure)})' if failure else
-                       ('che omette ancora ' + ', '.join(still)) if still else
-                       'senza righe da giudicare')
+                       (tx("che omette ancora ") + ', '.join(still)) if still else
+                       tx("senza righe da giudicare"))
                     + _DETAIL_SEPARATOR
-                    + 'si tiene la prima risposta, la presenza ripiega sulla confidenza complessiva.')
+                    + tx("si tiene la prima risposta, la presenza ripiega sulla confidenza "
+                         "complessiva."))
                 omission_issue = _Issue('model omitted required fields on every component: '
                                         + ', '.join(omitted))
     # Prima di giudicare la risposta, portarla nell'unita' del contratto: un
@@ -997,19 +1008,19 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         log('Inventario globale FAILED/PARTIAL: '
             + _DETAIL_SEPARATOR.join(_inline_detail(error) for error in errors)
             + _DETAIL_SEPARATOR + total
-            + _DETAIL_SEPARATOR + 'proposte irrisolte conservate.')
+            + _DETAIL_SEPARATOR + tx("proposte irrisolte conservate."))
     elif path:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(dict(key=key, response=data), allow_nan=False), encoding='utf-8')
         except OSError as exc:
-            log(f'Inventario globale: cache non disponibile ({exc}).')
+            log(tx("Inventario globale: cache non disponibile ({exc}).", exc=exc))
     uncertainties = data.get('uncertainties', []) if isinstance(data, dict) else []
     if not isinstance(uncertainties, list):
         uncertainties = []
     uncertainties = [u for u in uncertainties if isinstance(u, str)]
     for uncertainty in uncertainties:
-        log('Inventario globale, dubbio dichiarato dal modello: ' + uncertainty)
+        log(tx("Inventario globale, dubbio dichiarato dal modello: ") + uncertainty)
     # Un'incoerenza su una riga degrada QUELLA riga. Ogni errore porta con se'
     # il component_id e le proposte che lo riguardano, e una riga eredita solo
     # gli errori che la nominano o che nominano una proposta che essa
@@ -1064,5 +1075,6 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         raise ValueError(
             'Global inventory returned no bodies at all: a populated board always has some. '
             'The model answered with an empty enumeration; nothing was detected.')
-    log(f'Inventario globale: {len(result)} ipotesi; completezza non certificata.')
+    log(tx("Inventario globale: {n_result} ipotesi; completezza non certificata.",
+           n_result=len(result)))
     return result

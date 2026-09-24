@@ -45,6 +45,7 @@ from typing import Iterable, Optional
 from .model_measurement import normalize_model_measurement
 from .process_log import CANCEL_POLL_INTERVAL_S, ProcessCancelled
 from . import model_size_cache
+from ..services.messages import tx
 
 #: Variabile d'ambiente per indicare una libreria diversa da quella trovata.
 LIBRARY_ENV = "KICAD_3DMODEL_DIR"
@@ -548,7 +549,7 @@ def footprint_sizes(paths, library: Optional[Path] = None, log=None) -> dict:
     root = library.parent / "footprints"
     if not root.is_dir():
         if log:
-            log("Footprint KiCad non disponibili: confronto solo corpo/reofori.")
+            log(tx("Footprint KiCad non disponibili: confronto solo corpo/reofori."))
         return result
     wanted = {Path(p).resolve(): str(p) for p in paths}
     names = {p.name.casefold() for p in wanted}
@@ -575,8 +576,10 @@ def footprint_sizes(paths, library: Optional[Path] = None, log=None) -> dict:
         if log:
             log(f"Lettura footprint KiCad incompleta: {exc}")
     if log:
-        log(f"Footprint KiCad: {sum(map(len, result.values()))} letture collegate; "
-            f"{rejected} footprint pertinenti senza ingombro utilizzabile.")
+        log(tx("Footprint KiCad: {sum} letture collegate; {rejected} footprint "
+               "pertinenti senza ingombro utilizzabile.",
+               sum=sum(map(len, result.values())),
+               rejected=rejected))
     return result
 
 
@@ -1131,24 +1134,32 @@ def _compatible_candidates(paths, component, note):
         elif family and families and family not in families and not (
                 family == "semiconductor" and families <= {"ic", "diode"}) and not (
                 unknown_semiconductor and family in ("ic", "semiconductor", "diode")):
-            reason = f"tipo {','.join(sorted(kinds))} incompatibile con famiglia {family}"
+            reason = tx("tipo {join} incompatibile con famiglia {family}",
+                        join=','.join(sorted(kinds)),
+                        family=family)
         stem = path.stem.upper()
         is_so = path.parent.name.lower() == "package_so.3dshapes" or bool(
             re.match(r"(?:SOIC|SSOP|TSSOP|MSOP|TSOP|SOP)[-_]", stem))
         is_qfn = bool(re.match(r"(?:QFN|DFN)[-_]", stem))
         if ("ic_qfn" in kinds and is_so) or ("ic_soic" in kinds and is_qfn):
-            reason = "topologia QFN/DFN e SO incompatibile con il tipo osservato"
+            reason = tx("topologia QFN/DFN e SO incompatibile con il tipo osservato")
         declared = _declared_count(path)
         if len(counts) > 1:
             reason = "conteggi terminali osservati in conflitto"
         elif counts and declared is not None and declared not in counts:
-            reason = f"terminali osservati {next(iter(counts))}, package dichiara {declared}"
+            reason = tx("terminali osservati {next}, package dichiara {declared}",
+                        next=next(iter(counts)),
+                        declared=declared)
         if reason:
-            evidence = "tipo verificato" if verified else "tipo provvisorio/non verificato"
+            evidence = tx("tipo verificato") if verified else tx("tipo provvisorio/non verificato")
             if provisional is not None:
-                evidence += "; disposizione/numero dei terminali osservati ancora provvisori"
-            note(f"{component.get('package', '')}: rifiutato {path.name}: {reason} ({evidence}); "
-                 "il solo ingombro non conferma il package.")
+                evidence += tx("; disposizione/numero dei terminali osservati ancora provvisori")
+            note(tx("{get}: rifiutato {name}: {reason} ({evidence}); il solo ingombro non "
+                    "conferma il package.",
+                    get=component.get('package', ''),
+                    name=path.name,
+                    reason=reason,
+                    evidence=evidence))
         else:
             accepted.append(path)
     return accepted
@@ -1169,17 +1180,23 @@ def _module_total_fits(path, size, component, length_mm, width_mm, tolerance, no
         return True
     total = size.get("total") if isinstance(size, dict) else size
     if size_distance(total, length_mm, width_mm) is None:
-        note(f"{path.name}: modulo rifiutato, ingombro totale non disponibile; "
-             "schermatura/piazzole non verificano il PCB completo.")
+        note(tx("{name}: modulo rifiutato, ingombro totale non disponibile; "
+                "schermatura/piazzole non verificano il PCB completo.",
+                name=path.name))
         return False
     model_axes = sorted(map(float, total[:2]))
     observed_axes = sorted((float(length_mm), float(width_mm)))
     excess = max((m - observed) / observed for m, observed in zip(model_axes, observed_axes))
     if excess > tolerance:
-        note(f"{path.name}: modulo rifiutato, ingombro totale "
-             f"{float(total[0]):.2f} x {float(total[1]):.2f} mm supera il rettangolo osservato "
-             f"del {excess*100:.1f}% (limite {tolerance*100:.0f}%); "
-             "schermatura/piazzole non possono nascondere estensioni del PCB.")
+        note(tx("{name}: modulo rifiutato, ingombro totale {value:.2f} x {value2:.2f} "
+                "mm supera il rettangolo osservato del {value3:.1f}% (limite "
+                "{value4:.0f}%); schermatura/piazzole non possono nascondere "
+                "estensioni del PCB.",
+                name=path.name,
+                value=float(total[0]),
+                value2=float(total[1]),
+                value3=excess * 100,
+                value4=tolerance * 100))
         return False
     return True
 
@@ -1217,15 +1234,16 @@ def resolve_model(package: str, length_mm: float, width_mm: float, *,
     note = log or (lambda message: None)
     found = candidates(package, library)
     if not found:
-        note(f"{package}: nessun modello nella libreria KiCad.")
+        note(tx("{package}: nessun modello nella libreria KiCad.", package=package))
         return None
     # All solid candidates participate. WRL files are display meshes and must
     # neither consume a candidate budget nor be selected for Part.read.
     shortlist = [p for p in found if p.suffix.lower() in (".step", ".stp")]
     shortlist = _compatible_candidates(shortlist, _component, note)
     if not shortlist:
-        note(f"{package}: nessun solido compatibile con le evidenze di tipo/terminali; "
-             "si usa la forma approssimata.")
+        note(tx("{package}: nessun solido compatibile con le evidenze di "
+                "tipo/terminali; si usa la forma approssimata.",
+                package=package))
         return None
     sizes = model_sizes(shortlist, library)
     lands = (_land_patterns if _land_patterns is not None
@@ -1250,10 +1268,16 @@ def resolve_model(package: str, length_mm: float, width_mm: float, *,
             scored.append((distance, str(path), path))
     if not scored:
         closest = min(distances, default=None)
-        detail = (f"; il piu' vicino sbaglia del {closest*100:.0f}%" if closest is not None
-                  else "; nessun solido con misure utilizzabili dopo i controlli")
-        note(f"{package}: {len(found)} modelli trovati, nessuno compatibile con "
-             f"{length_mm:.2f} x {width_mm:.2f} mm{detail}; si usa la forma approssimata.")
+        detail = (tx("; il piu' vicino sbaglia del {value:.0f}%", value=closest * 100) if closest is not None
+                  else tx("; nessun solido con misure utilizzabili dopo i controlli"))
+        note(tx("{package}: {n_found} modelli trovati, nessuno compatibile con "
+                "{length_mm:.2f} x {width_mm:.2f} mm{detail}; si usa la forma "
+                "approssimata.",
+                package=package,
+                n_found=len(found),
+                length_mm=length_mm,
+                width_mm=width_mm,
+                detail=detail))
         return None
     # La misura non distingue due varianti con lo stesso corpo (SOT-223 e
     # SOT-223-8 differiscono per il numero di reofori, non per l'ingombro).
@@ -1266,9 +1290,11 @@ def resolve_model(package: str, length_mm: float, width_mm: float, *,
     exact_identifier = any(_normalize(p.stem) == wanted for p in equivalent_paths)
     if (_declared_count(Path(str(package))) is None and not exact_identifier
             and len(contact_counts) > 1):
-        note(f"{package}: topologia contatti sconosciuta; candidati equivalenti dichiarano "
-             f"conteggi diversi ({', '.join(map(str, sorted(contact_counts)))}), "
-             "il package proposto non specifica il conteggio; si usa la forma approssimata.")
+        note(tx("{package}: topologia contatti sconosciuta; candidati equivalenti "
+                "dichiarano conteggi diversi ({join}), il package proposto non "
+                "specifica il conteggio; si usa la forma approssimata.",
+                package=package,
+                join=', '.join(map(str, sorted(contact_counts)))))
         return None
     scored.sort(key=lambda item: (item[0] > best + NAME_TIEBREAK_MARGIN,
                                   _normalize(item[2].stem) != wanted,
@@ -1276,13 +1302,23 @@ def resolve_model(package: str, length_mm: float, width_mm: float, *,
     distance, _, path = scored[0]
     equivalent = sum(d <= best + NAME_TIEBREAK_MARGIN for d, _, _ in scored)
     if equivalent > 1:
-        note(f"{package}: {equivalent} modelli con ingombri comparabili; "
-             "la misura non distingue le varianti, scelta per nome non identificativa.")
+        note(tx("{package}: {equivalent} modelli con ingombri comparabili; la misura "
+                "non distingue le varianti, scelta per nome non identificativa.",
+                package=package,
+                equivalent=equivalent))
     evidence = min(((d, label) for label, value in _readings(sizes[str(path)])
                     if (d := size_distance(value, length_mm, width_mm)) is not None))
-    note(f"{package}: modello reale {path.name}, {describe_size(sizes[str(path)])} "
-         f"contro misura {length_mm:.2f} x {width_mm:.2f} mm, scarto {distance*100:.0f}%; "
-         f"lettura: {evidence[1]}. Compatibilità dimensionale, identità/variante non verificata.")
+    note(tx("{package}: modello reale {name}, {describe_size} contro misura "
+            "{length_mm:.2f} x {width_mm:.2f} mm, scarto {value:.0f}%; lettura: "
+            "{evidence}. Compatibilità dimensionale, identità/variante non "
+            "verificata.",
+            package=package,
+            name=path.name,
+            describe_size=describe_size(sizes[str(path)]),
+            length_mm=length_mm,
+            width_mm=width_mm,
+            value=distance * 100,
+            evidence=evidence[1]))
     return path
 
 
@@ -1917,8 +1953,11 @@ def _synchronize_preview_variants(components, note) -> None:
             report["attachment_reason"] = (
                 "Model applied PROVISIONALLY: shared same-family switch candidate, "
                 "identity not verified; the picker can change it.")
-        note(f"Gruppo di interruttori '{key}': proposto il candidato comune {Path(selected).name} "
-             f"per {len(group)} componenti (anteprima coerente, variante da verificare).")
+        note(tx("Gruppo di interruttori '{key}': proposto il candidato comune {name} "
+                "per {n_group} componenti (anteprima coerente, variante da verificare).",
+                key=key,
+                name=Path(selected).name,
+                n_group=len(group)))
 
 
 def _accepted_match(component: dict, roots, note) -> Optional[dict]:
@@ -1942,33 +1981,43 @@ def _accepted_match(component: dict, roots, note) -> Optional[dict]:
     try:
         found = AcceptedModelStore().find(component, roots)
     except (AcceptedModelsError, sqlite3.Error, OSError) as exc:
-        note(f"Archivio abbinamenti accettati ignorato: {exc}")
+        note(tx("Archivio abbinamenti accettati ignorato: {exc}", exc=exc))
         return None
     if found is None:
         return None
     entry, path = found["entry"], found["path"]
     samples = int(entry.get("samples") or 1)
     accepted_on = str(entry.get("last_accepted") or "")[:10]
-    count_reason = ("Numero di terminali confrontato: uguale"
+    count_reason = (tx("Numero di terminali confrontato: uguale")
                     if found["terminal_count_checked"] else
-                    "Numero di terminali non confrontato: manca l'osservazione su una delle due schede")
+                    tx("Numero di terminali non confrontato: manca l'osservazione su una "
+                       "delle due schede"))
     reasons = [
-        f"Gia' accettato da te in una scheda precedente ({samples} volte, l'ultima il {accepted_on})",
-        f"Stessa categoria ({entry['category']}) e stessa base di misura; ingombro entro il "
-        f"{ACCEPTED_MATCH_TOLERANCE:.0%} di quello accettato",
+        tx("Gia' accettato da te in una scheda precedente ({samples} volte, "
+           "l'ultima il {accepted_on})",
+           samples=samples,
+           accepted_on=accepted_on),
+        tx("Stessa categoria ({category}) e stessa base di misura; ingombro entro "
+           "il {ACCEPTED_MATCH_TOLERANCE:.0%} di quello accettato",
+           category=entry['category'],
+           ACCEPTED_MATCH_TOLERANCE=ACCEPTED_MATCH_TOLERANCE),
         count_reason,
-        "Proposta da confermare: il verso (polarita') va verificato su questa scheda",
+        tx("Proposta da confermare: il verso (polarita') va verificato su questa "
+           "scheda"),
     ]
     if found["alternatives"]:
-        reasons.append(f"Altre {found['alternatives']} voci compatibili nell'archivio: "
-                       "vince la piu' vicina e, a parita', la piu' recente")
+        reasons.append(tx("Altre {alternatives} voci compatibili nell'archivio: vince la piu' "
+                          "vicina e, a parita', la piu' recente",
+                          alternatives=found['alternatives']))
     candidate = {"path": str(path), "package": path.stem,
                  "relative_xy_error": found["relative_xy_error"],
                  "measurement_basis": "accepted_library",
                  "family": _candidate_family_for_component(path, component),
                  "status": "library_matched", "reasons": reasons}
-    note(f"{component.get('name') or path.stem}: modello dall'archivio degli abbinamenti "
-         f"accettati ({path.stem}); misura dei candidati saltata.")
+    note(tx("{value}: modello dall'archivio degli abbinamenti accettati ({stem}); "
+            "misura dei candidati saltata.",
+            value=component.get('name') or path.stem,
+            stem=path.stem))
     return {"status": "library_matched", "candidates": [candidate],
             "selected_path": str(path), "discovery": "accepted_library",
             "accepted_entry": {key: entry.get(key) for key in (
@@ -2039,7 +2088,7 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None,
     roots = _search_roots(library)
     root = roots[0] if roots else None
     if root is None:
-        note("Libreria 3D di KiCad non trovata: si usano le forme approssimate.")
+        note(tx("Libreria 3D di KiCad non trovata: si usano le forme approssimate."))
         return result
     # Prima della ricerca e della misura (la parte lenta): un corpo con la
     # stessa firma geometrica di uno che l'utente ha gia' accettato riceve
@@ -2065,12 +2114,14 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None,
             # dimensions and the existing module envelope checks still apply.
             paths, omitted = marking_paths, False
             result["discovery_scope"] = "literal_marking_model"
-            note("Marcatura del modello letta sul componente: la ricerca KiCad si limita ai file STEP "
-                 "con quel nome, ma le misure vanno comunque verificate.")
+            note(tx("Marcatura del modello letta sul componente: la ricerca KiCad si "
+                    "limita ai file STEP con quel nome, ma le misure vanno comunque "
+                    "verificate."))
         elif _tentative_endcap_family(component):
             result["discovery_scope"] = "standard_chip_endcaps"
-            note("Package chip stimato: si provano tutte le misure e varianti standard a terminali "
-                 "di testa, perche' la misura indicata non e' un vincolo esatto.")
+            note(tx("Package chip stimato: si provano tutte le misure e varianti standard "
+                    "a terminali di testa, perche' la misura indicata non e' un vincolo "
+                    "esatto."))
             family_results = [_family_paths(component, search_root, basis)
                               for search_root in roots]
             paths = list(dict.fromkeys(path for family_paths, _ in family_results
@@ -2084,15 +2135,18 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None,
             omitted = any(was_omitted for _, was_omitted in family_results)
         if omitted:
             result["search_truncated"] = True
-            note("Ricerca per famiglia incompleta: esclusi i modelli senza indizi di misura compatibili, "
-                 "quindi niente scelta automatica.")
+            note(tx("Ricerca per famiglia incompleta: esclusi i modelli senza indizi di "
+                    "misura compatibili, quindi niente scelta automatica."))
     else:
         paths = named
     rejections = []
     paths = _compatible_candidates(paths, component, rejections.append)
     if rejections:
         result["rejected_candidate_count"] = len(rejections)
-        note(f"{package}: scartati {len(rejections)} candidati di famiglia o terminali incompatibili; "
+        note(tx("{package}: scartati {n_rejections} candidati di famiglia o terminali "
+                "incompatibili; ",
+                package=package,
+                n_rejections=len(rejections))
              + " | ".join(rejections[:3]))
     # A bare numeric package supplies no family evidence. Do not fill the UI
     # with unclassified custom solids or mechanical hardware of the same size.
@@ -2114,12 +2168,15 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None,
         if unknown_topology:
             result["topology_incomplete"] = True
             paths = [p for p in paths if p not in unknown_topology]
-            note(f"Esclusi {len(unknown_topology)} modelli di circuito integrato con terminali non leggibili: "
-                 "niente scelta automatica per unicita'.")
+            note(tx("Esclusi {n_unknown_topology} modelli di circuito integrato con "
+                    "terminali non leggibili: niente scelta automatica per unicita'.",
+                    n_unknown_topology=len(unknown_topology)))
     if len(paths) > MAX_CANDIDATE_MEASUREMENTS:
         result["search_truncated"] = True
-        note(f"Troppi candidati compatibili: si misurano i primi {MAX_CANDIDATE_MEASUREMENTS} "
-             f"su {len(paths)}.")
+        note(tx("Troppi candidati compatibili: si misurano i primi "
+                "{MAX_CANDIDATE_MEASUREMENTS} su {n_paths}.",
+                MAX_CANDIDATE_MEASUREMENTS=MAX_CANDIDATE_MEASUREMENTS,
+                n_paths=len(paths)))
     paths = paths[:MAX_CANDIDATE_MEASUREMENTS]
     if not paths:
         return result
@@ -2305,8 +2362,10 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
         # rinuncia cade resta intatto invece di restare a meta' strada, senza
         # modello agganciato e con il verdetto della corsa precedente.
         if cancel is not None and cancel.is_set():
-            note(f"Abbinamento modelli KiCad interrotto su richiesta dopo {done - 1} "
-                 f"componenti su {total}.")
+            note(tx("Abbinamento modelli KiCad interrotto su richiesta dopo {value} "
+                    "componenti su {total}.",
+                    value=done - 1,
+                    total=total))
             raise MatchingCancelled(measured={})
         # Il ripristino a True ripulisce lo stato calcolato nella corsa
         # precedente, non la scelta dell'utente: render_3d_override e' l'unico
@@ -2328,8 +2387,10 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
             component.pop("render_3d", None)
             component.pop("model_path", None)
             component.update(restore)
-            note(f"Abbinamento modelli KiCad interrotto su richiesta durante il "
-                 f"componente {done} di {total}.")
+            note(tx("Abbinamento modelli KiCad interrotto su richiesta durante il "
+                    "componente {done} di {total}.",
+                    done=done,
+                    total=total))
             raise
         component["model_match"] = report
         # Lo stato di revisione si dice con un campo, non con un colore: il
@@ -2375,8 +2436,8 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
                 # scheda con la stessa firma geometrica; resta una proposta.
                 report["attachment"] = "accepted_library"
                 report["attachment_reason"] = (
-                    "Modello dall'archivio degli abbinamenti accettati: stessa firma "
-                    "geometrica di una scelta gia' approvata; da confermare nel selettore.")
+                    tx("Modello dall'archivio degli abbinamenti accettati: stessa firma "
+                       "geometrica di una scelta gia' approvata; da confermare nel selettore."))
             else:
                 report["attachment"] = "automatic"
             # Il verso del modello nativo non si decide qui. Fino a poco fa lo
@@ -2425,10 +2486,13 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
                 # which looks like a real component, whatever its colour.
                 component["render_3d"] = False
                 report["render_3d"] = False
-                note(f"Solo ipotesi del rilevatore per {component.get('name')}: tenuta per la revisione, "
-                     "esclusa dal 3D.")
+                note(tx("Solo ipotesi del rilevatore per {get}: tenuta per la revisione, "
+                        "esclusa dal 3D.",
+                        get=component.get('name')))
     _synchronize_preview_variants(components, note)
     if progress is not None:
         progress(total, total)
-    note(f"Modelli KiCad agganciati (scelte esplicite o compatibilita' meccanica): {resolved}.")
+    note(tx("Modelli KiCad agganciati (scelte esplicite o compatibilita' "
+            "meccanica): {resolved}.",
+            resolved=resolved))
     return resolved

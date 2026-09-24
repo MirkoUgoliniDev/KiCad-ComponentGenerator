@@ -30,6 +30,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Sequence
+from .messages import tx
 
 API_BASE = "https://openrouter.ai/api/v1"
 MODELS_URL = f"{API_BASE}/models"
@@ -140,7 +141,7 @@ class ModelInfo:
                 "files": self.supports_pdf}
         unknown = set(capabilities) - set(have)
         if unknown:
-            raise ValueError(f"Capacita' di modello sconosciute: {sorted(unknown)}")
+            raise ValueError(tx("Capacita' di modello sconosciute: {sorted}", sorted=sorted(unknown)))
         return all(have[name] for name in capabilities)
 
 
@@ -157,8 +158,9 @@ def api_key() -> str:
     key = os.environ.get(API_KEY_ENV, "").strip()
     if not key:
         raise OpenRouterError(
-            f"Variabile d'ambiente {API_KEY_ENV} non impostata. "
-            "Inseriscila nel file .env accanto a main.py (vedi .env.example)."
+            tx("Variabile d'ambiente {API_KEY_ENV} non impostata. Inseriscila nel "
+               "file .env accanto a main.py (vedi .env.example).",
+               API_KEY_ENV=API_KEY_ENV)
         )
     return key
 
@@ -198,18 +200,20 @@ class CreditStatus:
         if remaining is None:
             return ""
         if self.key_remaining is not None and remaining == self.key_remaining:
-            return "tetto della chiave" if self.account_remaining is None or \
-                self.key_remaining < self.account_remaining else "account e chiave"
+            return tx("tetto della chiave") if self.account_remaining is None or \
+                self.key_remaining < self.account_remaining else tx("account e chiave")
         return "saldo dell'account"
 
     def describe(self) -> str:
         """@brief Render the credit status as one line for the AI log."""
         remaining = self.remaining
         if remaining is None:
-            return "Credito OpenRouter: nessun limite riportato dall'API."
+            return tx("Credito OpenRouter: nessun limite riportato dall'API.")
         detail = f"Credito OpenRouter: {remaining:.2f} USD residui ({self.limiting_factor})"
         if self.total_credits is not None and self.total_usage is not None:
-            detail += f"; account {self.total_usage:.2f}/{self.total_credits:.2f} USD usati"
+            detail += tx("; account {total_usage:.2f}/{total_credits:.2f} USD usati",
+                         total_usage=self.total_usage,
+                         total_credits=self.total_credits)
         if self.key_remaining is not None and self.key_remaining != remaining:
             detail += f"; chiave {self.key_remaining:.2f} USD"
         return detail + "."
@@ -249,22 +253,27 @@ class UsageTotals:
     def describe(self) -> str:
         """@brief Render the run total as one line for the AI log."""
         if not self.calls:
-            return ("Costo elaborazione AI: nessuna chiamata all'API "
-                    "(risposte servite dalla cache locale).")
+            return (tx("Costo elaborazione AI: nessuna chiamata all'API (risposte servite "
+                       "dalla cache locale)."))
         # Sotto il centesimo le quattro cifre non bastano a distinguere nulla.
         amount = f"{self.cost_usd:.4f}" if self.cost_usd >= 0.01 else f"{self.cost_usd:.6f}"
-        detail = (f"Costo elaborazione AI: {amount} USD su {_calls(self.calls)}; "
-                  f"{self.prompt_tokens} token in ingresso, {self.completion_tokens} in uscita")
+        detail = (tx("Costo elaborazione AI: {amount} USD su {calls}; {prompt_tokens} token "
+                     "in ingresso, {completion_tokens} in uscita",
+                     amount=amount,
+                     calls=_calls(self.calls),
+                     prompt_tokens=self.prompt_tokens,
+                     completion_tokens=self.completion_tokens))
         extra = []
         if self.cached_tokens:
-            extra.append(f"{self.cached_tokens} letti dalla cache del modello")
+            extra.append(tx("{cached_tokens} letti dalla cache del modello",
+                            cached_tokens=self.cached_tokens))
         if self.reasoning_tokens:
-            extra.append(f"{self.reasoning_tokens} di ragionamento")
+            extra.append(tx("{reasoning_tokens} di ragionamento", reasoning_tokens=self.reasoning_tokens))
         if extra:
             detail += " (" + ", ".join(extra) + ")"
         if not self.complete:
-            detail += (f"; {_calls(self.calls_without_cost)} senza costo riportato, "
-                       "totale sottostimato")
+            detail += (tx("; {calls} senza costo riportato, totale sottostimato",
+                          calls=_calls(self.calls_without_cost)))
         return detail + "."
 
 
@@ -338,10 +347,11 @@ def _get_json(url: str, timeout: int) -> dict:
     except urllib.error.HTTPError as exc:
         raise OpenRouterError(_error_message(exc)) from None
     except urllib.error.URLError as exc:
-        raise OpenRouterError(f"connessione fallita: {_safe_error_text(exc.reason)}"
+        raise OpenRouterError(tx("connessione fallita: {safe_error_text}",
+                                 safe_error_text=_safe_error_text(exc.reason))
                               + _diagnostic_context()) from None
     except (ValueError, OSError) as exc:
-        raise OpenRouterError("risposta non decodificabile" + _diagnostic_context()) from None
+        raise OpenRouterError(tx("risposta non decodificabile") + _diagnostic_context()) from None
     return payload if isinstance(payload, dict) else {}
 
 
@@ -382,7 +392,7 @@ def credit_status(force_refresh: bool = False) -> CreditStatus:
         is_free_tier = bool(data.get("is_free_tier"))
         expires_at = str(data.get("expires_at") or "")
     except OpenRouterError as exc:
-        failures.append(f"stato chiave ({exc})")
+        failures.append(tx("stato chiave ({exc})", exc=exc))
 
     if len(failures) == 2:
         raise OpenRouterError("; ".join(failures))
@@ -416,21 +426,25 @@ def check_credit(minimum_usd: float = MIN_CREDIT_USD, progress=None,
     try:
         status = credit_status(force_refresh=force_refresh)
     except OpenRouterError as exc:
-        log(f"Credito OpenRouter non verificabile: {exc}. Si prosegue comunque.")
+        log(tx("Credito OpenRouter non verificabile: {exc}. Si prosegue comunque.", exc=exc))
         return None
 
     log(status.describe())
     remaining = status.remaining
     if remaining is not None and remaining < minimum_usd:
         raise OpenRouterError(
-            f"Credito OpenRouter insufficiente: {remaining:.2f} USD residui "
-            f"({status.limiting_factor}), ne servono almeno {minimum_usd:.2f}. "
-            "Ricarica il credito su https://openrouter.ai/settings/credits "
-            "oppure alza il tetto di spesa della chiave."
+            tx("Credito OpenRouter insufficiente: {remaining:.2f} USD residui "
+               "({limiting_factor}), ne servono almeno {minimum_usd:.2f}. Ricarica il "
+               "credito su https://openrouter.ai/settings/credits oppure alza il "
+               "tetto di spesa della chiave.",
+               remaining=remaining,
+               limiting_factor=status.limiting_factor,
+               minimum_usd=minimum_usd)
         )
     if remaining is not None and remaining < LOW_CREDIT_USD:
-        log(f"Attenzione: credito quasi esaurito ({remaining:.2f} USD). "
-            "L'estrazione parte, ma potrebbe non bastare per quelle successive.")
+        log(tx("Attenzione: credito quasi esaurito ({remaining:.2f} USD). "
+               "L'estrazione parte, ma potrebbe non bastare per quelle successive.",
+               remaining=remaining))
     return status
 
 
@@ -508,7 +522,7 @@ def list_models(force_refresh: bool = False) -> list[ModelInfo]:
             if payload is None:
                 detail = (_error_message(exc) if isinstance(exc, urllib.error.HTTPError)
                           else _safe_error_text(getattr(exc, "reason", None)) + _diagnostic_context())
-                raise OpenRouterError("Elenco modelli non scaricabile: "
+                raise OpenRouterError(tx("Elenco modelli non scaricabile: ")
                                       + detail) from None
         else:
             _write_models_cache(payload)
@@ -526,7 +540,7 @@ def _safe_error_text(value):
     remainder. Do not stringify containers or exception objects.
     """
     if not isinstance(value, str):
-        return "dettagli del provider omessi"
+        return tx("dettagli del provider omessi")
     key = os.environ.get(API_KEY_ENV, "").strip()
     if key:
         value = value.replace(key, "[redacted]")
@@ -546,7 +560,7 @@ def _safe_error_text(value):
                    "content-length header is required"):
         if phrase in lower:
             return phrase
-    return "dettagli del provider omessi"
+    return tx("dettagli del provider omessi")
 
 
 def _diagnostic_context(payload=None, status=None):
@@ -687,16 +701,20 @@ def call_tool(
         image_sizes = [len(block.get("image_url", {}).get("url", ""))
                        for block in content_blocks if block.get("type") == "image_url"]
         raise OpenRouterError(
-            f"OpenRouter ha risposto con un errore: {_error_message(exc)}"
-            f" [request_bytes={len(request.data)}; images={len(image_sizes)}; "
-            f"largest_image_encoded_bytes={max(image_sizes, default=0)}]",
+            tx("OpenRouter ha risposto con un errore: {error_message} "
+               "[request_bytes={n_data}; images={n_image_sizes}; "
+               "largest_image_encoded_bytes={max}]",
+               error_message=_error_message(exc),
+               n_data=len(request.data),
+               n_image_sizes=len(image_sizes),
+               max=max(image_sizes, default=0)),
             retryable=status in {400, 408, 409, 429, 500, 502, 503, 504},
         ) from None
     except urllib.error.URLError as exc:
         raise OpenRouterError(f"Connessione a OpenRouter fallita: {_safe_error_text(exc.reason)}"
                               + _diagnostic_context()) from None
     except ValueError as exc:
-        raise OpenRouterError("Risposta non decodificabile da OpenRouter."
+        raise OpenRouterError(tx("Risposta non decodificabile da OpenRouter.")
                               + _diagnostic_context()) from None
     except OSError as exc:
         raise OpenRouterError("Connessione a OpenRouter fallita: "
@@ -721,7 +739,7 @@ def tool_arguments(payload: dict, tool_name: str) -> dict:
     """
     context = _diagnostic_context(payload)
     if not isinstance(payload, dict):
-        raise OpenRouterError("La risposta di OpenRouter non contiene alcun risultato." + context)
+        raise OpenRouterError(tx("La risposta di OpenRouter non contiene alcun risultato.") + context)
     if payload.get("error"):
         error = payload["error"]
         message = error.get("message") if isinstance(error, dict) else error
@@ -729,7 +747,7 @@ def tool_arguments(payload: dict, tool_name: str) -> dict:
 
     choices = payload.get("choices") or []
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-        raise OpenRouterError("La risposta di OpenRouter non contiene alcun risultato." + context)
+        raise OpenRouterError(tx("La risposta di OpenRouter non contiene alcun risultato.") + context)
 
     message = choices[0].get("message") or {}
     message = message if isinstance(message, dict) else {}
@@ -744,30 +762,30 @@ def tool_arguments(payload: dict, tool_name: str) -> dict:
         if isinstance(arguments, dict):
             return arguments
         if arguments is None or (isinstance(arguments, str) and not arguments.strip()):
-            raise OpenRouterError("Gli argomenti dello strumento sono assenti o vuoti." + context)
+            raise OpenRouterError(tx("Gli argomenti dello strumento sono assenti o vuoti.") + context)
         if not isinstance(arguments, str):
-            raise OpenRouterError("Gli argomenti dello strumento non sono JSON valido (atteso oggetto)." + context)
+            raise OpenRouterError(tx("Gli argomenti dello strumento non sono JSON valido (atteso oggetto).") + context)
         try:
             decoded = json.loads(arguments)
         except ValueError as exc:
             raise OpenRouterError(
-                "Gli argomenti dello strumento non sono JSON valido." + context
+                tx("Gli argomenti dello strumento non sono JSON valido.") + context
             ) from None
         if not isinstance(decoded, dict):
-            raise OpenRouterError("Gli argomenti dello strumento non sono JSON valido (atteso oggetto)." + context)
+            raise OpenRouterError(tx("Gli argomenti dello strumento non sono JSON valido (atteso oggetto).") + context)
         return decoded
 
     if choices[0].get("finish_reason") == "length":
         # A reasoning model can spend its entire completion budget before
         # emitting a tool call. This does not establish lack of tool support.
         raise OpenRouterError(
-            "Risposta troncata: budget di token di completamento esaurito prima "
-            "di restituire la chiamata allo strumento richiesto. "
-            "Nessun tentativo automatico aggiuntivo." + context
+            tx("Risposta troncata: budget di token di completamento esaurito prima di "
+               "restituire la chiamata allo strumento richiesto. Nessun tentativo "
+               "automatico aggiuntivo.") + context
         )
 
     raise OpenRouterError(
-        "Il modello non ha chiamato lo strumento richiesto (potrebbe non "
-        "supportare il tool calling con immagini/PDF): scegline un altro "
-        "dall'elenco, filtrando per costo se serve." + context
+        tx("Il modello non ha chiamato lo strumento richiesto (potrebbe non "
+           "supportare il tool calling con immagini/PDF): scegline un altro "
+           "dall'elenco, filtrando per costo se serve.") + context
     )

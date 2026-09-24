@@ -23,6 +23,7 @@ from math import isfinite
 from typing import Iterator, Optional, Tuple
 
 from ..core.footprint import Footprint, FpCircle, FpRect, Pad
+from ..services.messages import tx
 
 
 @dataclass
@@ -81,17 +82,17 @@ class PinHeaderParams:
         if self.margin < 0:
             raise ValueError("margin must be >= 0.")
         if not self.name.strip():
-            raise ValueError("Il nome del footprint non puo' essere vuoto.")
+            raise ValueError(tx("Il nome del footprint non puo' essere vuoto."))
         if self.rows < 1 or self.cols < 1:
-            raise ValueError("Righe e colonne devono essere >= 1.")
+            raise ValueError(tx("Righe e colonne devono essere >= 1."))
         if self.pitch <= 0:
-            raise ValueError("Il passo (pitch) deve essere > 0.")
+            raise ValueError(tx("Il passo (pitch) deve essere > 0."))
         if self.effective_row_spacing() <= 0:
-            raise ValueError("La distanza tra righe (row spacing) deve essere > 0.")
+            raise ValueError(tx("La distanza tra righe (row spacing) deve essere > 0."))
         if self.drill <= 0:
-            raise ValueError("Il drill deve essere > 0.")
+            raise ValueError(tx("Il drill deve essere > 0."))
         if self.pad_diameter <= self.drill:
-            raise ValueError("Il diametro pad deve essere maggiore del drill.")
+            raise ValueError(tx("Il diametro pad deve essere maggiore del drill."))
         if self.populated_pins is not None:
             max_pin = self.rows * self.cols
             for p in self.populated_pins:
@@ -105,13 +106,22 @@ class PinHeaderParams:
                 row, col = position
                 if not (0 <= row < self.rows) or not (0 <= col < self.cols):
                     raise ValueError(
-                        f"Pin {pin}: posizione (riga {row}, colonna {col}) fuori dalla "
-                        f"matrice {self.rows}x{self.cols}."
+                        tx("Pin {pin}: posizione (riga {row}, colonna {col}) fuori dalla matrice "
+                           "{rows}x{cols}.",
+                           pin=pin,
+                           row=row,
+                           col=col,
+                           rows=self.rows,
+                           cols=self.cols)
                     )
                 if position in seen:
                     raise ValueError(
-                        f"Pin {pin} e pin {seen[position]} occupano la stessa "
-                        f"posizione (riga {row}, colonna {col})."
+                        tx("Pin {pin} e pin {seen} occupano la stessa posizione (riga {row}, "
+                           "colonna {col}).",
+                           pin=pin,
+                           seen=seen[position],
+                           row=row,
+                           col=col)
                     )
                 seen[position] = pin
 

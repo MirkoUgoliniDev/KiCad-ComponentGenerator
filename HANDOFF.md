@@ -1,13 +1,17 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `eb633ea` (pushato),
-  correzione dei difetti 1-15 e 17 della verifica con agenti del 24/09
-  (dettagli nella sezione «PIANO IN CORSO (24/09) — correggi tutti i
-  difetti…» in fondo al file). Nessun lavoro in sospeso non committato.
-- Suite completa (24/09, dopo le correzioni): 3920 passati, 3 saltati,
+- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `b1ee2c0` (pushato;
+  `.gitignore`: `.claude/` su GitHub tranne `worktrees/`, `Private/` fuori).
+  Prima: `07453cc`/`eb633ea`, correzione dei difetti 1-15 e 17.
+- Lavoro NON committato: localizzazione completa di log, avanzamento ed
+  errori (sezione «verifica che non ci siano testi in italiano cablati» in
+  fondo al file). Si committa solo su richiesta dell'utente.
+- Suite completa (24/09, con la localizzazione): 3934 passati, 3 saltati,
   2 xfail attesi, 19 sottotest.
-- Aperto, decisione dell'utente: difetto 16 (frase «Tipo SMD di proposito»
-  estesa anche ai moduli misti half_hole + through_hole).
+- Difetto 16 CHIUSO (utente, 24/09, scelta «A»): la frase «Tipo SMD di
+  proposito» resta anche sui moduli misti half_hole + through_hole, perche'
+  anche quelli si posano e si saldano a rifusione, senza pin nei fori.
+  Nessun cambio di comportamento; commenti aggiornati in castellated_module.
 - Mai committare: `data/analysis_profiles.sqlite3`, `Private/`,
   `Claude outputs/`, `generated/`, `.env`, `config.json`.
 
@@ -5805,4 +5809,124 @@ Suite completa a fine lavoro: 3920 passati, 3 saltati, 2 xfail, 19
 sottotest. Contratto cambiato anche in `test_project_tab_buttons.py` (3
 test): cambiare la cartella di lavoro chiude il progetto, e i test riaprono
 il progetto omonimo nella nuova radice prima di guardare i pulsanti.
-NON toccato: 16 (frase SMD estesa ai moduli misti) — decisione dell'utente.
+16: deciso dall'utente il 24/09, scelta «A» (la frase resta sui moduli misti).
+
+## PIANO IN CORSO (24/09) — «verifica che non ci siano testi in italiano cablati»
+
+Richiesta dell'utente: tutto deve essere localizzato. Scritto prima di toccare
+il codice.
+1. [x] Scan a runtime: finestra principale e dialoghi aperti in en/fr/de;
+   raccolta di testi, tooltip, titoli, voci dei combo, intestazioni, menu,
+   segnaposto; segnalare quelli rimasti italiani.
+2. [x] Scan statico del codice GUI: letterali italiani passati a widget,
+   messaggi (QMessageBox), log, overlay, stati, SENZA passare dal catalogo.
+3. [ ] Riferire all'utente numeri e categorie PRIMA di una correzione di
+   massa se la quantita' e' grande (i messaggi di log sono centinaia): la
+   scelta di cosa tradurre (interfaccia sicuramente; log/diario?) e' sua.
+
+   Esito (script in scratchpad: test_scan_all.py a runtime, static_scan.py
+   su AST):
+   - Interfaccia, finestra principale in en/fr/de: 3 voci del menu File
+     (Nuovo/Apri/Rinomina progetto…) e tooltip dell'intestazione «Tipo
+     contatto» restano italiani. Il resto e' tradotto (i «fr» segnalati
+     erano falsi positivi di parole francesi).
+   - Interfaccia, testi impostati dal codice: 14 letterali senza voce di
+     catalogo (guided_documents, model_candidates_dialog, model_dialog,
+     riepilogo della yolo, «Modello AI:», tooltip castellated) e 3 domande
+     QMessageBox (sostituisci/rimuovi documento, «Scelte KiCad non salvate»).
+   - Log a schermo e diario: ~89 frasi italiane in main_window, piu' ~69
+     messaggi di avanzamento dai servizi (photo_inventory, photo_grounding,
+     step_generator…), che finiscono nello stesso log.
+   - Errori mostrati all'utente: ~162 messaggi di eccezione italiani nei
+     servizi (castellated_module, analysis_profiles, datasheet_extractor…).
+   In attesa della scelta dell'utente sul perimetro (log/diario ed errori).
+   DECISIONE dell'utente (24/09): «Tutto» — interfaccia, log/diario ed
+   errori nelle 4 lingue; il diario si scrive nella LINGUA CORRENTE (un
+   diario lungo puo' mescolare lingue, accettato).
+   Architettura scelta:
+   - `kicadgen/services/messages.py` (niente Qt: i servizi girano anche fuori
+     dalla GUI): `tx(source, **values)` traduce il MODELLO italiano con
+     segnaposto nominati (chiave `ui:<modello>`) e poi lo formatta; senza
+     traduttore attivo restituisce l'italiano formattato (test e script).
+     La finestra registra `I18n.tr` all'avvio. SQLite apre una connessione per
+     chiamata: si puo' chiamare dai worker.
+   - Conversione meccanica (codemod su AST) dei letterali italiani passati a:
+     eccezioni, `_append_log`, `_on_ai_progress`, `log`/`progress`/`emit`/
+     `warn`/`note`/`report`, QMessageBox e testi dinamici; poi passata a mano
+     sui residui (messaggi costruiti in variabili, liste di avvisi).
+   - FUORI perimetro di proposito: i PROMPT mandati ai modelli AI (cambiarli
+     cambia risposte e chiavi di cache), docstring e commenti, il contenuto
+     dei file generati (note nel footprint), le eccezioni di programmazione
+     scritte in inglese.
+   - Controllo automatico: test statico che vieta letterali italiani nei
+     punti di uscita senza `tx(...)`, e copertura del catalogo per ogni
+     `tx(...)` nelle 4 lingue.
+   Avanzamento (24/09):
+   - [x] `messages.py` (`tx`, `set_translator`), `I18n.raw` (testo non
+     formattato), registrazione nella finestra, fixture in conftest che
+     azzera il traduttore fra i test.
+   - [x] Codemod applicato: 356 modelli in 27 file (script in scratchpad
+     `codemod_tx.py`, elenco in `templates.json`). Suite in italiano verde
+     (3920). Trappole trovate: segnaposto `source` = nome del parametro di
+     `tx` (ora solo posizionale); `photo_yolo.py` e' caricato anche come file
+     a se' (import di ripiego); `freecad_parts.py` gira DENTRO FreeCAD e non
+     puo' importare dal pacchetto (escluso, i suoi avvisi vanno tradotti dal
+     processo padre); instradamento «Fusione geometrica:» riconosciuto dal
+     testo -> ora parametro `summary` di `merge_components`.
+   - [x] `.gitignore`: `.claude/` su GitHub tranne `worktrees/`; `Private/`
+     esclusa (richiesta dell'utente, commit `b1ee2c0` pushato).
+   - [x] Residui trattati (vedi sotto). Avvisi FreeCAD tradotti nel padre.
+   - [x] Catalogo: 578 modelli + 13 voci indirette (nomi degli strumenti
+     dell'overlay, aiuto dei ruoli, capacita' dei modelli, titoli) + chiave
+     `help.generation.silk_labels` che mancava (l'aiuto della serigrafia era
+     italiano in ogni lingua). Traduzioni scritte a lotti (scratchpad
+     tr_001..006.json) e validate da inject.py: stessi segnaposto, stessi a
+     capo, stessi marcatori tecnici.
+   - [x] Test: `tests/test_message_localization.py` (meccanismo, copertura
+     del catalogo per ogni tx/warning/marked/_warn nelle 4 lingue con gli
+     stessi segnaposto, divieto di letterali italiani nei punti di uscita con
+     euristica dichiarata e negativo, prova in inglese nella finestra,
+     regressione «ui:»). Contratto aggiornato in test_i18n? NO: il test del
+     selettore modelli e' passato dopo aver usato l'i18n del genitore.
+   - [x] Verifiche: scan a runtime della finestra in inglese 0 testi italiani
+     (prima 7); FreeCAD 1.1.1 vero: avvisi del figlio arrivano come JSON e il
+     padre li mostra in inglese/tedesco. Suite completa: 3934 passati,
+     3 saltati, 2 xfail, 19 sottotest.
+   LIMITI DICHIARATI (non corretti, da dire all'utente):
+   - Restano italiani DI PROPOSITO: prompt mandati ai modelli, descrizioni e
+     note scritte nei file generati (footprint), errori di programmazione in
+     inglese. Anche i nomi di ripiego dei dati («Ingombro N», «Componente»,
+     «revisione manuale» come provenienza) sono dati salvati, non tradotti.
+   - Frasi composte a pezzi (concatenazioni) tradotte a frammenti: la
+     grammatica puo' risultare meno naturale in fr/de.
+   - Un testo dinamico impostato prima di un cambio di lingua resta nella
+     lingua vecchia finche' il codice non lo riscrive (finestre modali:
+     raro). Il diario mescola le lingue se la si cambia a meta' (accettato).
+   - Il testo delle eccezioni di FreeCAD/OpenCV/Qt resta quello della
+     libreria (di solito inglese).
+   - [x] Secondo passaggio (codemod_pass2.py, elenco esplicito file:riga): 181
+     letterali in piu' (frammenti in concatenazioni, ragioni, errori). Frasi
+     spezzate in frammenti: tradotte a pezzi, compromesso dichiarato.
+   - [x] Due instradamenti che leggevano le PAROLE dei messaggi resi
+     strutturali: `messages.Message` (str con `kind`), `warning(...)` e
+     `marked(CACHE_HIT, ...)`; `report_progress` di photo_inventory e il
+     rilancio riconoscono il tipo. Il termine tecnico «validated cache hit»
+     resta nel testo in ogni lingua (i test lo cercano apposta).
+     Suite in italiano verde: 3920.
+   - [x] Finestre: model_candidates_dialog e model_dialog (testi dinamici con
+     `tx`), guided_documents (nome file «Non disponibile», aiuto del ruolo
+     nel tooltip), overlay (nome dello strumento e unita' tradotti: la label
+     e' `i18n_skip`), menu File e tooltip «Tipo contatto» rinfrescati al
+     cambio di lingua, tooltip castellated con sorgente.
+   - [x] DIFETTO MIO del commit eb633ea trovato e corretto: `I18n.text("")`
+     dava «ui:», scritto come tooltip della lista documenti a progetto
+     aperto. Ora un default vuoto resta vuoto (`I18n.raw`).
+   - [x] Frasi singolare/plurale intere («Invio a AI 1 documento…» /
+     «{count} documenti…») invece del suffisso o/i; etichette dei ruoli
+     tradotte nei messaggi.
+   - [x] Avvisi del processo FreeCAD: `_warn(modello, **valori)` nei due file
+     del figlio stampa `KICADGEN_WARN:{json}`; il padre traduce
+     (`messages.child_warning_text`/`render_child_line`) sia le righe in
+     diretta (process_log) sia l'elenco finale (step_generator). Il
+     marcatore resta. Contratto aggiornato in test_freecad_heartbeat. DA
+     PROVARE con FreeCAD vero.

@@ -5,6 +5,7 @@ import math
 from copy import deepcopy
 
 from .openrouter import OpenRouterError
+from .messages import tx
 
 PROMPT = (
     "Inspect the single mounted package in the supplied tightly cropped image. "
@@ -44,9 +45,9 @@ def terminal_tool():
 
 def _box(value):
     if not isinstance(value, (list, tuple)) or len(value) != 4:
-        raise ValueError("rettangolo terminale non valido")
+        raise ValueError(tx("rettangolo terminale non valido"))
     if any(type(v) not in (int, float) or not math.isfinite(v) or not 0 <= v <= 1 for v in value):
-        raise ValueError("coordinate terminale non valide")
+        raise ValueError(tx("coordinate terminale non valide"))
     l,t,r,b = value
     if l >= r or t >= b:
         raise ValueError("rettangolo terminale vuoto")
@@ -72,7 +73,7 @@ def target_crop(photo, box):
     """
     if (not isinstance(box, (list, tuple)) or len(box) != 4
             or any(type(v) not in (int, float) or not math.isfinite(v) for v in box)):
-        raise ValueError("ritaglio terminali non valido")
+        raise ValueError(tx("ritaglio terminali non valido"))
     left, top, right, bottom = box
     if left >= right or top >= bottom or getattr(photo, 'ndim', 0) < 2:
         raise ValueError("ritaglio terminali vuoto")
@@ -82,7 +83,7 @@ def target_crop(photo, box):
     x0, y0 = max(0, min(w, math.floor(left*w))), max(0, min(h, math.floor(top*h)))
     x1, y1 = max(0, min(w, math.ceil(right*w))), max(0, min(h, math.ceil(bottom*h)))
     if x0 >= x1 or y0 >= y1:
-        raise ValueError("ritaglio terminali fuori dalla foto")
+        raise ValueError(tx("ritaglio terminali fuori dalla foto"))
     return photo[y0:y1, x0:x1].copy(), [x0/w, y0/h, x1/w, y1/h]
 
 
@@ -105,7 +106,7 @@ def _to_target_frame(entry, image_box, target_box):
     result['body_bbox'] = convert(result.get('body_bbox'))
     raw = result.get('terminals')
     if not isinstance(raw, list) or not 3 <= len(raw) <= 128:
-        raise ValueError("conteggio terminali non supportato dalla foto")
+        raise ValueError(tx("conteggio terminali non supportato dalla foto"))
     result['terminals'] = [{'bbox': convert(t.get('bbox') if isinstance(t,dict) else None)} for t in raw]
     return result
 
@@ -115,27 +116,27 @@ def decode_terminal_geometry(entry, rotation):
     if entry.get("resolved") is not True or entry.get("confidence") not in ("high", "medium"):
         return None
     if type(rotation) not in (int, float) or not math.isfinite(rotation) or rotation % 90:
-        raise ValueError("rotazione fotografica non cardinale")
+        raise ValueError(tx("rotazione fotografica non cardinale"))
     body = _box(entry.get("body_bbox"))
     raw = entry.get("terminals")
     if not isinstance(raw, list) or not 3 <= len(raw) <= 128:
-        raise ValueError("conteggio terminali non supportato dalla foto")
+        raise ValueError(tx("conteggio terminali non supportato dalla foto"))
     terminals = []
     for item in raw:
         if not isinstance(item, dict):
-            raise ValueError("terminale non strutturato")
+            raise ValueError(tx("terminale non strutturato"))
         box = _box(item.get("bbox"))
         if body[0] <= box[0] and body[1] <= box[1] and box[2] <= body[2] and box[3] <= body[3]:
-            raise ValueError("terminale dentro il corpo: possibile marcatura")
+            raise ValueError(tx("terminale dentro il corpo: possibile marcatura"))
         # Reject islands far from the body; tolerate small image gaps at blurred edges.
         gap_x = max(body[0]-box[2], box[0]-body[2], 0)
         gap_y = max(body[1]-box[3], box[1]-body[3], 0)
         if gap_x > .06 or gap_y > .06:
-            raise ValueError("terminale separato dal corpo")
+            raise ValueError(tx("terminale separato dal corpo"))
         for other in terminals:
             q = other["bbox"]
             if min(box[2],q[2])-max(box[0],q[0]) > 1e-6 and min(box[3],q[3])-max(box[1],q[1]) > 1e-6:
-                raise ValueError("terminali sovrapposti/duplicati")
+                raise ValueError(tx("terminali sovrapposti/duplicati"))
         terminals.append({"bbox": box})
     return {"body_bbox": _local_box(body, rotation),
             "terminals": [{"bbox": _local_box(t["bbox"], rotation)} for t in terminals],
@@ -150,7 +151,7 @@ def observe_terminals(photo_png, components, model, call, log, cache_dir=None, s
     from .photo_inventory import image_block
     image = cv2.imdecode(np.frombuffer(photo_png, np.uint8), cv2.IMREAD_COLOR)
     if image is None:
-        raise ValueError("foto terminali non leggibile")
+        raise ValueError(tx("foto terminali non leggibile"))
     result = deepcopy(components)
     candidates = []
     for index,c in enumerate(result):
@@ -162,7 +163,7 @@ def observe_terminals(photo_png, components, model, call, log, cache_dir=None, s
     for start in range(len(candidates)):
         batch = candidates[start:start+1]
         label = f"Dettaglio terminali {start+1}/{len(candidates)}"
-        log(label + ": corpo e reofori osservati nella foto.")
+        log(label + tx(": corpo e reofori osservati nella foto."))
         try:
             crop, image_box = target_crop(image, batch[0]['_box'])
             data = cached_call(call, dict(model=model, system_prompt=(system_prompt or '').strip() or PROMPT,
@@ -176,7 +177,7 @@ def observe_terminals(photo_png, components, model, call, log, cache_dir=None, s
             for c in batch:
                 votes = [e for e in entries if isinstance(e,dict) and type(e.get('id')) is int and e['id']==c['_id']]
                 if len(votes) != 1:
-                    log(f"#{c['_id']}: terminali assenti/ambigui; ingombro conservato.")
+                    log(tx("#{id}: terminali assenti/ambigui; ingombro conservato.", id=c['_id']))
                     continue
                 try:
                     entry = _to_target_frame(votes[0], image_box, c['_box'])
@@ -185,12 +186,21 @@ def observe_terminals(photo_png, components, model, call, log, cache_dir=None, s
                         geometry['coordinate_frame'] = 'target_image_v2'
                         result[c['_id']-1]['terminal_geometry'] = geometry
                         accepted += 1
-                        log(f"#{c['_id']}: {len(geometry['terminals'])} terminali proposti, confidenza AI {geometry['confidence']}; fedeltà visiva da verificare.")
+                        log(tx("#{id}: {n_items} terminali proposti, confidenza AI {confidence}; "
+                               "fedeltà visiva da verificare.",
+                               id=c['_id'],
+                               n_items=len(geometry['terminals']),
+                               confidence=geometry['confidence']))
                     else:
-                        log(f"#{c['_id']}: terminali non risolti nella foto.")
+                        log(tx("#{id}: terminali non risolti nella foto.", id=c['_id']))
                 except ValueError as exc:
-                    log(f"#{c['_id']}: geometria terminali non valida ({exc}); ingombro conservato.")
+                    log(tx("#{id}: geometria terminali non valida ({exc}); ingombro conservato.",
+                           id=c['_id'],
+                           exc=exc))
         except (OpenRouterError, ValueError) as exc:
-            log(f"{label}: fallita ({exc}); ingombri conservati.")
-    log(f"Terminali fotografici: {accepted}/{len(candidates)} componenti con geometria osservata.")
+            log(tx("{label}: fallita ({exc}); ingombri conservati.", label=label, exc=exc))
+    log(tx("Terminali fotografici: {accepted}/{n_candidates} componenti con "
+           "geometria osservata.",
+           accepted=accepted,
+           n_candidates=len(candidates)))
     return result

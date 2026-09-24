@@ -55,3 +55,17 @@ def no_unattended_modal_dialog(monkeypatch):
             if hasattr(target, method):
                 monkeypatch.setattr(target, method, refuse(f"{class_name}.{method}"),
                                     raising=False)
+
+
+@pytest.fixture(autouse=True)
+def no_leftover_message_translator():
+    """@brief Ogni test parte e finisce senza traduttore dei messaggi registrato.
+
+    Una finestra registra il proprio `I18n` in `messages.tx`; se un test la
+    lascia in inglese, i test successivi dei servizi (che confrontano i
+    messaggi italiani) vedrebbero l'inglese per un effetto di ordine.
+    """
+    from kicadgen.services.messages import set_translator
+    set_translator(None)
+    yield
+    set_translator(None)

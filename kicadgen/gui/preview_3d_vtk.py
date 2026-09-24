@@ -20,6 +20,7 @@ from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import NamedTuple, Optional
+from ..services.messages import tx
 
 os.environ.setdefault("QT_API", "pyqt6")
 
@@ -160,7 +161,7 @@ def _prepare_mesh_scene(mesh_path) -> _PreparedScene:
                                       _component_row(part)))
 
     if not prepared:
-        raise ValueError("mesh senza triangoli")
+        raise ValueError(tx("mesh senza triangoli"))
     return _PreparedScene(tuple(prepared), tuple(anchors))
 
 

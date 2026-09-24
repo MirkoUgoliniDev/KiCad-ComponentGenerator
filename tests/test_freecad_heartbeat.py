@@ -401,7 +401,12 @@ def test_the_heartbeat_stops_when_the_import_raises(parts, monkeypatch, capsys):
     time.sleep(0.2)
     lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
     assert any(line.startswith(BEAT_HEAD) for line in lines)
-    assert lines[-1].startswith("KICADGEN_WARN:modello")
+    # Dal 2026-09-24 il figlio manda l'avviso come modello + valori in JSON
+    # (lo traduce il padre, che conosce la lingua): si guarda la riga come la
+    # mostra il padre, non il suo formato di trasporto.
+    from kicadgen.services.messages import render_child_line
+    assert lines[-1].startswith("KICADGEN_WARN:")
+    assert render_child_line(lines[-1]).startswith("KICADGEN_WARN:modello")
 
 
 def test_a_fast_import_leaves_no_waiting_line(parts, capsys):

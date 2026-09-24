@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import math
 from typing import Iterable, Optional, Sequence
+from ..services.messages import tx
 
 
 PACKAGE_FAMILIES = {
@@ -22,13 +23,15 @@ PAD_SHAPES = {"circle", "rect", "oval", "roundrect", "trapezoid", "custom"}
 
 def _finite(value: float, name: str, positive: bool = False) -> float:
     if isinstance(value, bool):
-        raise ValueError(f"{name} deve essere numerico")
+        raise ValueError(tx("{name} deve essere numerico", name=name))
     try:
         value = float(value)
     except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError(f"{name} deve essere numerico") from exc
+        raise ValueError(tx("{name} deve essere numerico", name=name)) from exc
     if not math.isfinite(value) or (positive and value <= 0):
-        raise ValueError(f"{name} deve essere {'>' if positive else 'finito'} valido")
+        raise ValueError(tx("{name} deve essere {value} valido",
+                            name=name,
+                            value='>' if positive else 'finito'))
     return value
 
 
@@ -50,21 +53,21 @@ class PinSpec:
     def validate(self) -> None:
         """@brief Validate the object against its supported contract."""
         if not str(self.number).strip():
-            raise ValueError("il numero del pin non puo' essere vuoto")
+            raise ValueError(tx("il numero del pin non puo' essere vuoto"))
         _finite(self.x_mm, "x_mm")
         _finite(self.y_mm, "y_mm")
         _finite(self.pad_length_mm, "pad_length_mm", True)
         _finite(self.pad_width_mm, "pad_width_mm", True)
         if self.pad_type not in PAD_TYPES:
-            raise ValueError(f"pad_type non valido: {self.pad_type}")
+            raise ValueError(tx("pad_type non valido: {pad_type}", pad_type=self.pad_type))
         if self.shape not in PAD_SHAPES:
-            raise ValueError(f"shape non valida: {self.shape}")
+            raise ValueError(tx("shape non valida: {shape}", shape=self.shape))
         if self.side is not None and self.side not in {"left", "right", "top", "bottom", "center"}:
-            raise ValueError(f"lato non valido: {self.side}")
+            raise ValueError(tx("lato non valido: {side}", side=self.side))
         _finite(self.rotation_deg, "rotation_deg")
         if self.pad_type in {"thru_hole", "np_thru_hole"}:
             if self.drill_mm is None:
-                raise ValueError(f"il pin {self.number} richiede drill_mm")
+                raise ValueError(tx("il pin {number} richiede drill_mm", number=self.number))
             _finite(self.drill_mm, "drill_mm", True)
 
 
@@ -87,14 +90,14 @@ class PackageGeometry:
     def validate(self) -> None:
         """@brief Validate the object against its supported contract."""
         if self.family not in PACKAGE_FAMILIES:
-            raise ValueError(f"famiglia package non supportata: {self.family}")
+            raise ValueError(tx("famiglia package non supportata: {family}", family=self.family))
         if self.source_view not in {"top", "bottom"}:
-            raise ValueError("source_view deve essere top o bottom")
+            raise ValueError(tx("source_view deve essere top o bottom"))
         if self.origin not in {"body_center", "pin1", "custom"}:
-            raise ValueError("origin non supportata")
+            raise ValueError(tx("origin non supportata"))
         _finite(self.orientation_deg, "orientation_deg")
         if self.confidence not in {"high", "medium", "low"}:
-            raise ValueError("confidence non valida")
+            raise ValueError(tx("confidence non valida"))
         for key in ("body_length_mm", "body_width_mm", "body_height_mm"):
             value = getattr(self, key)
             if value is not None:
@@ -104,7 +107,7 @@ class PackageGeometry:
         for pin in self.pins:
             pin.validate()
             if pin.number in numbers:
-                raise ValueError(f"pin duplicato: {pin.number}")
+                raise ValueError(tx("pin duplicato: {number}", number=pin.number))
             numbers.add(pin.number)
             half_x, half_y = pin.pad_length_mm / 2, pin.pad_width_mm / 2
             rectangle = (pin.x_mm - half_x, pin.y_mm - half_y,
@@ -114,7 +117,9 @@ class PackageGeometry:
                 overlap_y = min(rectangle[3], other[3]) - max(rectangle[1], other[1])
                 if overlap_x > 1e-6 and overlap_y > 1e-6:
                     raise ValueError(
-                        f"pad sovrapposti tra i pin {other_number} e {pin.number}"
+                        tx("pad sovrapposti tra i pin {other_number} e {number}",
+                           other_number=other_number,
+                           number=pin.number)
                     )
             rectangles.append((pin.number, rectangle))
 
@@ -144,7 +149,7 @@ class PackageGeometry:
 def package_from_mapping(data: dict) -> PackageGeometry:
     """Costruisce e valida il modello dal JSON restituito dal tool AI."""
     if not isinstance(data, dict):
-        raise ValueError("geometria package non strutturata")
+        raise ValueError(tx("geometria package non strutturata"))
     raw_pins = data.get("pins") or []
     pins = [PinSpec(
         number=str(p["number"]), x_mm=p["x_mm"], y_mm=p["y_mm"],

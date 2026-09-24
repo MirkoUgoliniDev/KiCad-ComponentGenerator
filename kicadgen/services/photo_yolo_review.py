@@ -15,6 +15,7 @@ from uuid import uuid4
 from .openrouter import OpenRouterError
 from .photo_grounding import cached_call
 from .photo_inventory import image_block, copy_mechanical_metadata
+from .messages import tx
 
 PROMPT_VERSION = 'yolo-package-review-3'
 COVERAGE_PROMPT = """Check PCB detection coverage, not electrical identity.
@@ -105,7 +106,7 @@ def _valid_box(value):
     if not isinstance(value,(list,tuple)) or len(value)!=4:
         raise ValueError('rettangolo mancante')
     if any(isinstance(v,bool) or not isinstance(v,(int,float)) or not 0<=v<=1 or not math.isfinite(v) for v in value):
-        raise ValueError('rettangolo non finito/fuori immagine')
+        raise ValueError(tx("rettangolo non finito/fuori immagine"))
     x,y,a,b=value
     if x>=a or y>=b: raise ValueError('rettangolo vuoto/invertito')
     return list(value)
@@ -120,7 +121,7 @@ def _write_audit(cache_dir, stage, record, log):
         target.write_text(json.dumps(_audit_safe(record),indent=2,ensure_ascii=False,allow_nan=False),encoding='utf-8')
         log(f'Audit {stage}: {target}')
     except (OSError,ValueError) as exc:
-        log(f'Log revisione YOLO non scrivibile: {exc}')
+        log(tx("Log revisione YOLO non scrivibile: {exc}", exc=exc))
 
 
 def _audit_safe(value):
@@ -154,13 +155,19 @@ def recover_coverage(photo, components, length, width, model, call, log, cache_d
                 content_blocks=[image_block(photo),image_block(overview)],
                 tool=grounding_tool(COMPONENT_KINDS),max_tokens=8192,has_pdf=False)
     stage='Controllo copertura YOLO'
-    log(f'{stage}: {model}; ricerca corpi mancanti e involucri completi (servizio AI).')
+    log(tx("{stage}: {model}; ricerca corpi mancanti e involucri completi "
+           "(servizio AI).",
+           stage=stage,
+           model=model))
     data=None
     try:
         data=cached_call(call,kwargs,cache_dir,stage,log)
         extras=decode_boxes(data,(0,0,1,1),length,width,COMPONENT_KINDS,'AI coverage',log)
     except (OpenRouterError,ValueError,OSError) as exc:
-        log(f'{stage}: fallita ({exc}); proposte locali conservate, copertura non verificata.')
+        log(tx("{stage}: fallita ({exc}); proposte locali conservate, copertura non "
+               "verificata.",
+               stage=stage,
+               exc=exc))
         extras=[]
     result=deepcopy(components)
     next_id=max((c['_id'] for c in result),default=0)+1
@@ -185,7 +192,9 @@ def recover_coverage(photo, components, length, width, model, call, log, cache_d
     _write_audit(cache_dir,'coverage',dict(version=PROMPT_VERSION,model=model,
                  prompt=COVERAGE_PROMPT,response=data,input_ids=[c['_id'] for c in components],
                  added=result[len(components):]),log)
-    log(f'{stage}: aggiunte {len(result)-len(components)} ipotesi; nessuna garanzia di completezza.')
+    log(tx("{stage}: aggiunte {value} ipotesi; nessuna garanzia di completezza.",
+           stage=stage,
+           value=len(result) - len(components)))
     return result
 
 
@@ -228,14 +237,17 @@ def apply_review(original, verdict, context, image_shape, length, width, kinds, 
             or not isinstance(verdict.get('package'),str)
             or not isinstance(verdict.get('package_evidence'),str)
             or not verdict['package_evidence'].strip()):
-        log(f"#{c['_id']}: verifica assente/non valida; proposta conservata come dubbia.")
+        log(tx("#{id}: verifica assente/non valida; proposta conservata come dubbia.",
+               id=c['_id']))
         return c
     confidence=verdict['confidence']
     if verdict['present'] is False:
         if confidence=='high':
-            log(f"#{c['_id']}: escluso dalla revisione, {str(verdict.get('package_evidence',''))[:500]}")
+            log(tx("#{id}: escluso dalla revisione, {item}",
+                   id=c['_id'],
+                   item=str(verdict.get('package_evidence', ''))[:500]))
             return None
-        log(f"#{c['_id']}: assenza dubbia; proposta conservata per revisione manuale.")
+        log(tx("#{id}: assenza dubbia; proposta conservata per revisione manuale.", id=c['_id']))
         return c
     kind=verdict.get('kind')
     if kind not in kinds: return c
@@ -245,17 +257,20 @@ def apply_review(original, verdict, context, image_shape, length, width, kinds, 
     if 'refined_bbox' in verdict and confidence in ('high','medium'):
         try:
             if verdict.get('bbox_basis') not in ('body','leads'):
-                raise ValueError('bordi del corpo/terminali non confermati')
+                raise ValueError(tx("bordi del corpo/terminali non confermati"))
             x,y,a,b=_valid_box(verdict['refined_bbox'])
             h,w=image_shape[:2]; left,top,right,bottom=context
             box=[(left+x*(right-left))/w,(top+y*(bottom-top))/h,(left+a*(right-left))/w,(top+b*(bottom-top))/h]
             ox,oy,oa,ob=_valid_box(original['_box'])
             if not (ox<=(box[0]+box[2])/2<=oa and oy<=(box[1]+box[3])/2<=ob):
-                raise ValueError('centro spostato fuori dal target originale')
+                raise ValueError(tx("centro spostato fuori dal target originale"))
             c['_yolo_original_box']=list(original['_box']); c['_box']=_valid_box(box)
             c['_geometry_source']='AI crop-boundary refinement; photographic estimate'
         except ValueError as exc:
-            log(f"#{c['_id']}: contorno rifiutato ({exc}); box YOLO conservato, package non applicato.")
+            log(tx("#{id}: contorno rifiutato ({exc}); box YOLO conservato, package non "
+                   "applicato.",
+                   id=c['_id'],
+                   exc=exc))
             c['package']=''; c['bbox_basis']='unknown'
     x,y,a,b=c['_box']; sx,sy=(a-x)*length,(b-y)*width
     angle=verdict.get('rotation_deg',90 if sy>sx else 0)
@@ -272,9 +287,15 @@ def apply_review(original, verdict, context, image_shape, length, width, kinds, 
     sides=verdict.get('pins_by_side')
     if isinstance(sides,dict) and sides and all(k in ('left','right','top','bottom') and type(v) is int and 0<=v<=512 for k,v in sides.items()):
         if not c.get('pin_count') or sum(sides.values())==c['pin_count']: c['pins_by_side']=dict(sides)
-        else: log(f"#{c['_id']}: conteggio terminali discordante; lati ignorati.")
+        else: log(tx("#{id}: conteggio terminali discordante; lati ignorati.", id=c['_id']))
     c['_review_reason']=str(verdict.get('package_evidence') or '')[:500]
-    log(f"#{c['_id']} {kind}: {long:.2f}x{short:.2f}mm; package={c.get('package') or 'non risolto'}; candidato da controllare.")
+    log(tx("#{id} {kind}: {long:.2f}x{short:.2f}mm; package={value}; candidato da "
+           "controllare.",
+           id=c['_id'],
+           kind=kind,
+           long=long,
+           short=short,
+           value=c.get('package') or 'non risolto'))
     return c
 
 
@@ -324,14 +345,22 @@ def review_yolo_components(photo, components, length, width, model, call, log,
             crop,context=crop_context(photo,c);contexts[c['_id']]=context
             content.append({'type':'text','text':json.dumps(dict(id=c['_id'],detector_hint=c.get('_yolo_class'),target_estimate_mm=[c['length_mm'],c['width_mm']],estimate_basis='detector envelope; may include solder or clip leads; not nominal package size'))})
             content.append(image_block(crop))
-        label=f"Revisione YOLO {start+1}-{start+len(batch)}/{len(components)}"
-        log(f'{label}: {model}; famiglia, contorni, terminali e package (servizio AI).')
+        label=tx("Revisione YOLO {value}-{value2}/{n_components}",
+                 value=start + 1,
+                 value2=start + len(batch),
+                 n_components=len(components))
+        log(tx("{label}: {model}; famiglia, contorni, terminali e package (servizio "
+               "AI).",
+               label=label,
+               model=model))
         try:
             data=cached_call(call,dict(model=model,system_prompt=prompt,content_blocks=content,tool=tool,max_tokens=16384,has_pdf=False),cache_dir,label,log,expected_ids=[c['_id'] for c in batch])
             entries=data.get('components')
             if not isinstance(entries,list): raise ValueError('elenco verdetti mancante')
         except (OpenRouterError,ValueError,OSError) as exc:
-            log(f'{label}: fallita ({exc}); tutte le proposte restano dubbie.')
+            log(tx("{label}: fallita ({exc}); tutte le proposte restano dubbie.",
+                   label=label,
+                   exc=exc))
             entries=[]
         batches.append(dict(label=label,contexts=contexts,response=entries))
         for c in batch:

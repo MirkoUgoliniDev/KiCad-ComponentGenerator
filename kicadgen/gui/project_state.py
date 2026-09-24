@@ -20,6 +20,7 @@ import tempfile
 
 from PyQt6.QtWidgets import (QAbstractSpinBox, QCheckBox, QComboBox, QDoubleSpinBox,
                              QGroupBox, QLineEdit, QPlainTextEdit, QSpinBox, QTextEdit)
+from ..services.messages import tx
 
 #: File name inside the project folder.
 PROJECT_CONFIG_NAME = "project_config.json"
@@ -133,16 +134,18 @@ def read_project_config(project_dir):
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ProjectConfigError(f"{path.name} illeggibile: {exc}") from exc
     if not isinstance(document, dict) or document.get("format") != PROJECT_CONFIG_FORMAT:
-        raise ProjectConfigError(f"{path.name} non e' un file di progetto di KiCadGen")
+        raise ProjectConfigError(tx("{name} non e' un file di progetto di KiCadGen", name=path.name))
     version = document.get("version")
     if not isinstance(version, int) or isinstance(version, bool):
-        raise ProjectConfigError(f"{path.name} senza versione valida")
+        raise ProjectConfigError(tx("{name} senza versione valida", name=path.name))
     if version > PROJECT_CONFIG_VERSION:
         raise ProjectConfigError(
-            f"{path.name} scritto da una versione piu' recente ({version}): non applicato")
+            tx("{name} scritto da una versione piu' recente ({version}): non applicato",
+               name=path.name,
+               version=version))
     state = document.get("state")
     if not isinstance(state, dict):
-        raise ProjectConfigError(f"{path.name} senza impostazioni")
+        raise ProjectConfigError(tx("{name} senza impostazioni", name=path.name))
     return state
 
 

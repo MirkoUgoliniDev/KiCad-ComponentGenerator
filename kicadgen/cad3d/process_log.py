@@ -6,6 +6,7 @@ import subprocess
 import threading
 from datetime import datetime
 from pathlib import Path
+from ..services.messages import render_child_line, tx
 
 
 #: Quanti battiti devono entrare in una finestra di silenzio.
@@ -55,7 +56,7 @@ class ProcessCancelled(Exception):
         @param command Command line whose child was killed.
         @param output Text the child had already written, kept for the log.
         """
-        super().__init__("Esecuzione interrotta su richiesta.")
+        super().__init__(tx("Esecuzione interrotta su richiesta."))
         self.cmd = command
         self.output = output
 
@@ -177,7 +178,9 @@ def run_logged(command, log_path: Path, progress=None, timeout=120, creationflag
                     handle.write(line)
                     handle.flush()
                     if progress and line.strip():
-                        progress("FreeCAD: " + line.rstrip())
+                        # Gli avvisi del figlio arrivano come modello + valori:
+                        # si traducono qui (vedi messages.render_child_line).
+                        progress("FreeCAD: " + render_child_line(line.rstrip()))
                     if timed_out.is_set() or cancelled.is_set():
                         break
                     timer = threading.Timer(timeout, expire)
@@ -200,9 +203,9 @@ def run_logged(command, log_path: Path, progress=None, timeout=120, creationflag
                          # arrivata, il silenzio che segue e' l'effetto
                          # dell'uccisione, non la sua causa: annunciarlo
                          # accuserebbe di un blocco un lavoro che stava bene.
-                         + (f" (nessun output per {timeout} s)"
+                         + (tx(" (nessun output per {timeout} s)", timeout=timeout)
                             if timed_out.is_set() and not cancelled.is_set() else "")
-                         + (" (interrotto su richiesta dell'utente)"
+                         + (tx(" (interrotto su richiesta dell'utente)")
                             if cancelled.is_set() else "")
                          + "\n")
             handle.flush()

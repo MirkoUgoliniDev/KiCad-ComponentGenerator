@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 from concurrent.futures import ThreadPoolExecutor
+from .messages import tx
 
 PROMPT_VERSION = "top-body-inventory-1"
 DETECTION_PROMPT = """Find separately mounted physical component BODIES on this PCB photograph.
@@ -98,7 +99,9 @@ def _decode(response, bounds, sent_size, frame_size, source, log):
     fw, fh = frame_size
     for row in rows:
         if not isinstance(row, dict) or row.get("complete") is not True or not _valid_box(row.get("box"), sw, sh):
-            log(f"{source}: invalid or incomplete candidate retained only in raw response.")
+            log(tx("{source}: invalid or incomplete candidate retained only in raw "
+                   "response.",
+                   source=source))
             continue
         x0, y0, x1, y1 = row["box"]
         # Interior-cut packages are represented by the overview or another tile.

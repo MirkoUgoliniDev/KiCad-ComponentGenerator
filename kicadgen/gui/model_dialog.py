@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
 
 from ..services.openrouter import (DATASHEET_CAPABILITIES, ModelInfo, OpenRouterError,
                                    list_models)
+from ..services.messages import tx
 
 #: Come si chiama, per chi guarda, ogni capacita' richiesta.
 _CAPABILITY_LABELS = {"tools": "tool calling", "images": "immagini", "files": "PDF"}
@@ -89,7 +90,7 @@ class _ModelsWorker(QThread):
         except OpenRouterError as exc:
             self.error.emit(str(exc))
         except Exception as exc:  # noqa: BLE001 - riportato nel dialogo
-            self.error.emit(f"Errore inatteso: {exc}")
+            self.error.emit(tx("Errore inatteso: {exc}", exc=exc))
 
     def _release(self) -> None:
         """Scioglie l'attesa all'uscita e si elimina, una volta finito.
@@ -186,15 +187,23 @@ class ModelPickerDialog(QDialog):
         layout.addLayout(filter_row)
 
         options_row = QHBoxLayout()
+        # Tradotto con l'i18n della finestra genitore, come il resto del
+        # dialogo: il testo e' composto (le capacita' cambiano con lo stadio),
+        # quindi la ritraduzione generica non lo troverebbe nel catalogo.
+        source = "Solo modelli compatibili ({capabilities})"
+        labels = " + ".join(self.i18n.text(_CAPABILITY_LABELS[name]) if self.i18n is not None
+                            else _CAPABILITY_LABELS[name] for name in self.capabilities)
         self.check_compatible = QCheckBox(
-            "Solo modelli compatibili (%s)"
-            % " + ".join(_CAPABILITY_LABELS[name] for name in self.capabilities)
-        )
+            self.i18n.tr("ui:" + source, default=source, capabilities=labels)
+            if self.i18n is not None else source.format(capabilities=labels))
+        # Testo composto e gia' tradotto: la ritraduzione generica non deve
+        # cercarlo nel catalogo come sorgente.
+        self.check_compatible.setProperty("i18n_skip", True)
         self.check_compatible.setChecked(True)
-        self.check_compatible.setToolTip(
-            "L'estrazione manda disegni meccanici e pretende una risposta "
-            "strutturata: un modello senza queste capacita' non puo' funzionare."
-        )
+        tooltip = ("L'estrazione manda disegni meccanici e pretende una risposta "
+                   "strutturata: un modello senza queste capacita' non puo' funzionare.")
+        self.check_compatible.setToolTip(self.i18n.text(tooltip) if self.i18n is not None
+                                         else tooltip)
         self.check_compatible.toggled.connect(self._apply_filters)
         options_row.addWidget(self.check_compatible)
         options_row.addStretch()

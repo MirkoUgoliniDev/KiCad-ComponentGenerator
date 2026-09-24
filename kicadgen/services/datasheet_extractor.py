@@ -32,6 +32,7 @@ from ..generators.castellated_module import (
 )
 from .openrouter import (DEFAULT_MODEL, OpenRouterError, api_key, call_tool, check_credit,
                          reset_usage, usage_totals)
+from .messages import tx
 
 MAX_FILES = 5
 
@@ -717,7 +718,9 @@ def _file_to_content_block(path: Path) -> dict:
     """
     if path.suffix.lower() not in _SUPPORTED_SUFFIXES:
         raise ExtractionError(
-            f"Formato non supportato: {path.name} (ammessi: {', '.join(sorted(_SUPPORTED_SUFFIXES))})"
+            tx("Formato non supportato: {name} (ammessi: {join})",
+               name=path.name,
+               join=', '.join(sorted(_SUPPORTED_SUFFIXES)))
         )
     size = path.stat().st_size
     if size > MAX_FILE_BYTES:
@@ -852,16 +855,20 @@ def _files_sent_message(doc_paths, document_roles: Optional[dict[str, str]] = No
         # produzione: e' il comportamento definito dell'helper per chi lo
         # riusa, cosi' il ramo resta esercitabile e non produce una frase
         # sbagliata se un secondo chiamante arriva.
-        return 'Nessun documento da inviare a AI: layout, quote e pinout non sono estraibili.'
+        return tx("Nessun documento da inviare a AI: layout, quote e pinout non sono "
+                  "estraibili.")
     described = []
     for path in doc_paths:
         name = Path(path).name
         label = ROLES.get((document_roles or {}).get(name))
-        described.append(f'{_log_name(name)} — {label}' if label
-                         else f'{_log_name(name)} — ruolo non dichiarato')
+        described.append(f'{_log_name(name)} — {tx(label)}' if label
+                         else tx("{log_name} — ruolo non dichiarato", log_name=_log_name(name)))
     count = len(described)
-    return (f'Invio a AI {count} document{"o" if count == 1 else "i"} '
-            'per layout, quote e pinout: ' + ' · '.join(described) + '.')
+    # Singolare e plurale sono due frasi intere: ogni lingua li accorda a modo
+    # suo, un suffisso «o»/«i» incollato vale solo per l'italiano.
+    lead = (tx("Invio a AI 1 documento per layout, quote e pinout: ") if count == 1 else
+            tx("Invio a AI {count} documenti per layout, quote e pinout: ", count=count))
+    return lead + ' · '.join(described) + '.'
 
 
 def extract_pin_header_params(
@@ -921,27 +928,27 @@ def extract_pin_header_params(
     risposta senza la chiamata allo strumento.
     """
     if not doc_paths:
-        raise ExtractionError("Nessun file selezionato.")
+        raise ExtractionError(tx("Nessun file selezionato."))
     if photo_detector not in ("ai", "yolo", "vlm"):
-        raise ExtractionError("Rilevatore fotografico non supportato.")
+        raise ExtractionError(tx("Rilevatore fotografico non supportato."))
     if photo_detector == "yolo":
         from .photo_yolo import validate_yolo_setup
         try:
             validate_yolo_setup(yolo_model_path)
         except (ValueError, OSError, ImportError) as exc:
-            raise ExtractionError(f"YOLO locale non disponibile: {exc}") from exc
+            raise ExtractionError(tx("YOLO locale non disponibile: {exc}", exc=exc)) from exc
     from .ai_diagnostics import make_logged_call
     # L'analisi applicativa deve essere auditabile: il log persistente conserva
     # il testo esatto dei prompt/tool e gli hash delle immagini (mai i byte).
     diagnostic_call = make_logged_call(call_tool, progress, log_prompt=True)
     if len(doc_paths) > MAX_FILES:
-        raise ExtractionError(f"Troppi file selezionati (max {MAX_FILES} per chiamata).")
+        raise ExtractionError(tx("Troppi file selezionati (max {MAX_FILES} per chiamata).", MAX_FILES=MAX_FILES))
     from .document_roles import ROLES, ROLE_HELP
     if document_roles is not None:
         if (set(document_roles) != {p.name for p in doc_paths}
                 or len(set(document_roles.values())) != len(doc_paths)
                 or any(role not in ROLES for role in document_roles.values())):
-            raise ExtractionError('Ruoli documenti incompleti, duplicati o non validi.')
+            raise ExtractionError(tx("Ruoli documenti incompleti, duplicati o non validi."))
 
     # Il consuntivo riguarda questa elaborazione: azzerarlo qui, non alla fine,
     # cosi' un'estrazione interrotta non lascia residui nella successiva.
@@ -966,7 +973,8 @@ def extract_pin_header_params(
             phase(tool, detail)
         except Exception as exc:  # noqa: BLE001 - la GUI non deve poter abortire l'analisi
             if progress:
-                progress(f"Segnalazione della fase non riuscita ({exc}); elaborazione proseguita.")
+                progress(tx("Segnalazione della fase non riuscita ({exc}); elaborazione proseguita.",
+                            exc=exc))
 
     # Quale strumento sta lavorando non si deduce dai messaggi di
     # avanzamento, e la differenza pesa: questa e' una chiamata remota che
@@ -1027,13 +1035,15 @@ def extract_pin_header_params(
         raise ExtractionError(str(exc)) from exc
 
     if not isinstance(data, dict):
-        raise ExtractionError("Risposta AI non strutturata.")
+        raise ExtractionError(tx("Risposta AI non strutturata."))
     # Validate geometry before it can be used to calibrate a photograph.
     for key in ("body_length_mm", "body_width_mm", "body_height_mm"):
         original = data.get(key)
         data[key] = _optional_number(original, positive=True)
         if original is not None and data[key] is None:
-            warning = f"{key} scartato: dimensione non valida (serve un numero positivo finito, non booleano)."
+            warning = tx("{key} scartato: dimensione non valida (serve un numero positivo "
+                         "finito, non booleano).",
+                         key=key)
             data["notes"] = (str(data.get("notes") or "") + "\n" + warning).strip()
             if progress:
                 progress(warning)
@@ -1042,7 +1052,9 @@ def extract_pin_header_params(
             _castellated_sides(data.get("castellated_sides"))
         except _PinNumberConflict as exc:
             if progress:
-                progress(f"Numerazione contatti incoerente: {exc}. Richiesta correzione prima dell'analisi foto.")
+                progress(tx("Numerazione contatti incoerente: {exc}. Richiesta correzione prima "
+                            "dell'analisi foto.",
+                            exc=exc))
             repair_blocks = list(content_blocks) + [{"type": "text", "text": (
                 "Correggi esclusivamente la numerazione fisica dei contatti della risposta precedente. "
                 "Confronta il pinout originale: GPIO e sigle elettriche sono pin_names, non numeri pad. "
@@ -1063,15 +1075,16 @@ def extract_pin_header_params(
                     row["edge"] != old.get("edge") or row["count"] != old.get("count")
                     for row, old in zip(corrected, original)
                 ):
-                    raise ExtractionError("La correzione della numerazione ha cambiato i lati o i conteggi.")
+                    raise ExtractionError(tx("La correzione della numerazione ha cambiato i lati o i conteggi."))
                 data["castellated_sides"] = [dict(old, first_pin=row["first_pin"],
                     reverse=row.get("reverse", False)) for old, row in zip(original, corrected)]
-                warning = "Numerazione contatti corretta dopo conflitto AI; verificare la tabella pinout prima dell'utilizzo."
+                warning = tx("Numerazione contatti corretta dopo conflitto AI; verificare la "
+                             "tabella pinout prima dell'utilizzo.")
                 data["notes"] = (str(data.get("notes") or "") + "\n" + warning).strip()
                 if progress:
                     progress(warning)
             except (OpenRouterError, AttributeError) as repair_error:
-                raise ExtractionError("Correzione numerazione non riuscita; analisi foto non avviata.") from repair_error
+                raise ExtractionError(tx("Correzione numerazione non riuscita; analisi foto non avviata.")) from repair_error
         # Dopo l'eventuale correzione, cosi' la riga descrive i lati definitivi.
         notice = _unobserved_contact_style_notice(_castellated_sides(data.get("castellated_sides")))
         if notice:
@@ -1082,8 +1095,10 @@ def extract_pin_header_params(
 
     if progress:
         progress(
-            f"Analisi principale completata: layout={data.get('layout', 'matrix')}, "
-            f"componenti iniziali={len(data.get('components_3d') or [])}."
+            tx("Analisi principale completata: layout={get}, componenti "
+               "iniziali={n_items}.",
+               get=data.get('layout', 'matrix'),
+               n_items=len(data.get('components_3d') or []))
         )
 
     # La foto richiede un passaggio separato: nell'estrazione globale il modello
@@ -1105,11 +1120,11 @@ def extract_pin_header_params(
                    if (role := document_roles[path.name]) in INVENTORY_ROLES}
         top_index = [by_role[r] for r in INVENTORY_ROLES if r in by_role] or [-1]
         if progress:
-            chosen = ', '.join(f'{doc_paths[by_role[r]].name} ({ROLES[r]})'
+            chosen = ', '.join(f'{doc_paths[by_role[r]].name} ({tx(ROLES[r])})'
                                for r in INVENTORY_ROLES if r in by_role)
-            progress('Viste dall’alto disponibili: ' + (
-                chosen + '. Verrà usata la più dettagliata fra quelle calibrabili.'
-                if chosen else 'nessuna; nessun’altra vista verrà usata al suo posto.'))
+            progress(tx('Viste dall’alto disponibili: ') + (
+                chosen + tx(". Verrà usata la più dettagliata fra quelle calibrabili.")
+                if chosen else tx("nessuna; nessun’altra vista verrà usata al suo posto.")))
     populated_board = data.get("layout") == "castellated" or component_family == "aggregate_tht"
     if (populated_board and data.get("body_length_mm")
             and data.get("body_width_mm")):
@@ -1167,22 +1182,26 @@ def extract_pin_header_params(
                         **({'system_prompt': terminal_prompt} if terminal_prompt else {}),
                     )
                 except (OpenRouterError, ValueError, OSError) as exc:
-                    photo_report.warnings.append(f"Dettaglio terminali non disponibile: {exc}")
+                    photo_report.warnings.append(tx("Dettaglio terminali non disponibile: {exc}", exc=exc))
             data["components_3d"] = photo_report.components
             old_notes = str(data.get("notes") or "").strip()
             detailed = sum(bool(c.get("terminal_geometry")) for c in photo_report.components)
-            suffix = (f"Inventario fotografico: {len(photo_report.components)} ingombri su {photo_report.photo}; "
-                      f"{detailed} con terminali osservati. "
-                      "Modello meccanico semplificato, senza marcature. XY stimati dalla foto calibrata; "
-                      "altezze indicative, non misure certificate: verificare con una misura diretta.")
+            suffix = (tx("Inventario fotografico: {n_components} ingombri su {photo}; "
+                         "{detailed} con terminali osservati. Modello meccanico semplificato, "
+                         "senza marcature. XY stimati dalla foto calibrata; altezze indicative, "
+                         "non misure certificate: verificare con una misura diretta.",
+                         n_components=len(photo_report.components),
+                         photo=photo_report.photo,
+                         detailed=detailed))
             data["notes"] = f"{old_notes} {suffix}".strip()
         if photo_report and photo_report.warnings:
             details = "\n".join(photo_report.warnings[:6])
             if len(photo_report.warnings) > 6:
-                details += f"\nAltri {len(photo_report.warnings)-6} avvisi nel log AI."
+                details += tx("\nAltri {value} avvisi nel log AI.", value=len(photo_report.warnings) - 6)
             data["notes"] = (str(data.get("notes") or "") + "\n" + details).strip()
     elif progress and populated_board:
-        progress("Secondo passaggio fotografico non avviato: mancano body_length/body_width.")
+        progress(tx("Secondo passaggio fotografico non avviato: mancano "
+                    "body_length/body_width."))
 
     params = _params_from_tool_arguments(data)
     if populated_board and not (photo_report and photo_report.components):
@@ -1191,9 +1210,8 @@ def extract_pin_header_params(
                              confidence="low", _uncertain=True,
                              _height_source="global_visual_estimate_not_measured")
         if params.components_3d:
-            params.notes = (str(params.notes or "") + "\nIngombri dall'estrazione globale, "
-                            "senza verifica fotografica e senza marcature; altezze indicative, "
-                            "non misure certificate.").strip()
+            params.notes = (str(params.notes or "") + tx("\nIngombri dall'estrazione globale, senza verifica fotografica e senza "
+                                                         "marcature; altezze indicative, non misure certificate.")).strip()
     if photo_report and photo_report.components:
         params.photo_overlay_png = photo_report.overlay_png
         params.photo_png = photo_report.photo_png
@@ -1231,8 +1249,9 @@ def _castellated_sides(raw: Optional[Sequence[dict]]) -> list[dict]:
     """
     if not isinstance(raw, (list, tuple)) or not raw:
         raise ExtractionError(
-            "Il modello ha indicato un modulo con piazzole a mezzo foro ma non ha "
-            "descritto alcun lato. Riprova, eventualmente con un modello piu' capace."
+            tx("Il modello ha indicato un modulo con piazzole a mezzo foro ma non ha "
+               "descritto alcun lato. Riprova, eventualmente con un modello piu' "
+               "capace.")
         )
 
     sides = []
@@ -1263,17 +1282,20 @@ def _castellated_sides(raw: Optional[Sequence[dict]]) -> list[dict]:
             style = entry["contact_style"]
             if style not in CONTACT_STYLES:
                 raise ExtractionError(
-                    f"Lato {EDGE_LABELS.get(edge, edge)}: tipo di contatto {style!r} non "
-                    f"riconosciuto (ammessi: {', '.join(CONTACT_STYLES)}). La risposta non "
-                    "viene adattata: ripeti l'estrazione o scegli il tipo a mano."
+                    tx("Lato {get}: tipo di contatto {style!r} non riconosciuto (ammessi: "
+                       "{join}). La risposta non viene adattata: ripeti l'estrazione o scegli "
+                       "il tipo a mano.",
+                       get=EDGE_LABELS.get(edge, edge),
+                       style=style,
+                       join=', '.join(CONTACT_STYLES))
                 )
             side["contact_style"] = style
         sides.append(side)
 
     if not sides:
         raise ExtractionError(
-            "Nessun lato valido tra quelli restituiti dal modello (servono lato, "
-            "numero di contatti e passo)."
+            tx("Nessun lato valido tra quelli restituiti dal modello (servono lato, "
+               "numero di contatti e passo).")
         )
 
     # Numerazione progressiva sui lati privi di first_pin, nell'ordine in cui
@@ -1285,7 +1307,7 @@ def _castellated_sides(raw: Optional[Sequence[dict]]) -> list[dict]:
             numbers = set(range(side["first_pin"], side["first_pin"] + side["count"]))
             overlap = used & numbers
             if overlap:
-                raise _PinNumberConflict(f"Numero pad duplicato tra lati: {min(overlap)}.")
+                raise _PinNumberConflict(tx("Numero pad duplicato tra lati: {min}.", min=min(overlap)))
             used.update(numbers)
     next_pin = 1
     for side in sides:
@@ -1313,9 +1335,12 @@ def _unobserved_contact_style_notice(sides: Sequence[dict]) -> Optional[str]:
                for side in sides if "contact_style" not in side]
     if not missing:
         return None
-    return (f"Lato {', '.join(missing)}: tipo di contatto non osservato: si assume "
-            f"«{CONTACT_STYLE_NAMES[CONTACT_HALF_AND_THROUGH]}» ({CONTACT_HALF_AND_THROUGH}). "
-            "Verificarlo sulla foto e correggerlo nella tabella dei lati se diverso.")
+    return (tx("Lato {join}: tipo di contatto non osservato: si assume "
+               "«{CONTACT_STYLE_NAMES}» ({CONTACT_HALF_AND_THROUGH}). Verificarlo "
+               "sulla foto e correggerlo nella tabella dei lati se diverso.",
+               join=', '.join(missing),
+               CONTACT_STYLE_NAMES=CONTACT_STYLE_NAMES[CONTACT_HALF_AND_THROUGH],
+               CONTACT_HALF_AND_THROUGH=CONTACT_HALF_AND_THROUGH))
 
 
 def _components_3d(raw: Optional[Sequence[dict]]) -> Optional[list[dict]]:
@@ -1437,10 +1462,10 @@ def _params_from_tool_arguments(data: dict) -> ExtractedParams:
     Separato dalla chiamata di rete per poterlo collaudare senza API.
     """
     if not isinstance(data, dict):
-        raise ExtractionError("Risposta AI non strutturata.")
+        raise ExtractionError(tx("Risposta AI non strutturata."))
     layout = data.get("layout") or "matrix"
     if layout not in ("matrix", "castellated"):
-        raise ExtractionError(f"Disposizione dei contatti sconosciuta: {layout!r}.")
+        raise ExtractionError(tx("Disposizione dei contatti sconosciuta: {layout!r}.", layout=layout))
 
     def _opt_float(key: str) -> Optional[float]:
         return _optional_number(data.get(key), positive=key in (
@@ -1453,8 +1478,9 @@ def _params_from_tool_arguments(data: dict) -> ExtractedParams:
         for key in ("rows", "cols", "pitch_mm", "row_spacing_mm", "pad_diameter_mm", "drill_mm"):
             if data.get(key) is None:
                 raise ExtractionError(
-                    f"La risposta del modello non contiene il campo obbligatorio "
-                    f"'{key}'. Riprova, eventualmente con un modello piu' capace."
+                    tx("La risposta del modello non contiene il campo obbligatorio '{key}'. "
+                       "Riprova, eventualmente con un modello piu' capace.",
+                       key=key)
                 )
 
     populated = data.get("populated_pins")
@@ -1466,7 +1492,7 @@ def _params_from_tool_arguments(data: dict) -> ExtractedParams:
             # available; the GUI must never receive malformed pad coordinates.
             package_from_mapping(package_geometry)
         except (KeyError, TypeError, ValueError) as exc:
-            raise ExtractionError(f"Geometria package non valida: {exc}") from exc
+            raise ExtractionError(tx("Geometria package non valida: {exc}", exc=exc)) from exc
 
     return ExtractedParams(
         name=data.get("name") or "",

@@ -8,6 +8,7 @@ must scope inventories to that image. Nearby or contained boxes are never merged
 
 import hashlib
 import math
+from .messages import tx
 
 
 def _integer(value, name, minimum=1):
@@ -28,7 +29,7 @@ def _numbers(values, length, name):
     except OverflowError:
         valid = False
     if not valid:
-        raise ValueError(f"{name} must contain finite non-boolean numbers")
+        raise ValueError(tx("{name} must contain finite non-boolean numbers", name=name))
     return list(values)
 
 
@@ -226,7 +227,7 @@ def build_candidates(tiles, detections, coordinate_format="xyxy_pixels", *,
     count = 0
     for tile_id, boxes in detections.items():
         if tile_id not in registry or not isinstance(boxes, list):
-            raise ValueError("foreign tile id or non-list detections")
+            raise ValueError(tx("foreign tile id or non-list detections"))
         count += len(boxes)
         if count > max_candidates:
             raise ValueError("candidate budget exceeded")

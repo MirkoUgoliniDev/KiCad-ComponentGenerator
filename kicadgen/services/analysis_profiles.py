@@ -12,6 +12,7 @@ import sqlite3
 import uuid
 
 from .component_types import COMPONENT_TYPES
+from .messages import tx
 
 PROFILE_FIELDS = ('model','vision_model','verification_model','system_prompt','grounding_prompt',
                   'verification_prompt','terminal_prompt','lead_prompt','image_instructions')
@@ -81,7 +82,8 @@ class ProfileStore:
             db.execute('BEGIN IMMEDIATE')
             version = db.execute('PRAGMA user_version').fetchone()[0]
             if version > SCHEMA_VERSION:
-                raise ProfileError('Database profili creato da una versione più recente: nessuna modifica applicata.')
+                raise ProfileError(tx("Database profili creato da una versione più recente: nessuna modifica "
+                                      "applicata."))
             if version == 1:
                 db.execute("INSERT INTO ai_defaults SELECT 'verification_model',value FROM ai_defaults WHERE name='model'")
                 db.execute("INSERT INTO ai_overrides SELECT type_key,'verification_model',value FROM ai_overrides WHERE name='model'")
@@ -108,22 +110,22 @@ class ProfileStore:
                                _superseded_translations())
                 defaults = dict(db.execute('SELECT name,value FROM ai_defaults'))
                 if set(defaults) != set(PROFILE_FIELDS):
-                    raise ProfileError('Default del database incompleti: ripristinare un backup.')
+                    raise ProfileError(tx("Default del database incompleti: ripristinare un backup."))
                 self._validate_values(defaults)
                 for row in db.execute('SELECT name,value FROM ai_overrides'):
                     self._validate_values({row['name']: row['value']})
                 if db.execute('PRAGMA foreign_key_check').fetchone():
-                    raise ProfileError('Relazioni del database incoerenti: ripristinare un backup.')
+                    raise ProfileError(tx("Relazioni del database incoerenti: ripristinare un backup."))
                 return
             if db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchone():
-                raise ProfileError('Database esistente senza versione riconosciuta: migrazione interrotta.')
+                raise ProfileError(tx("Database esistente senza versione riconosciuta: migrazione interrotta."))
             backup = None
             if legacy_path and legacy_path.is_file():
                 raw = legacy_path.read_bytes()
                 # A corrupt source must not silently become a new empty configuration.
                 parsed = json.loads(raw)
                 if not isinstance(parsed,dict):
-                    raise ProfileError('La configurazione precedente non è un oggetto JSON.')
+                    raise ProfileError(tx("La configurazione precedente non è un oggetto JSON."))
                 if legacy is None:
                     legacy = parsed
                 digest = hashlib.sha256(raw).hexdigest()[:16]
@@ -132,10 +134,10 @@ class ProfileStore:
                     with backup.open('xb') as output:
                         output.write(raw)
                 elif backup.read_bytes() != raw:
-                    raise ProfileError('Backup migrazione incoerente: nessuna modifica al database.')
+                    raise ProfileError(tx("Backup migrazione incoerente: nessuna modifica al database."))
             legacy = legacy or {}
             if not isinstance(legacy, dict):
-                raise ProfileError('Configurazione precedente non valida.')
+                raise ProfileError(tx("Configurazione precedente non valida."))
             defaults = factory_defaults()
             for key in PROFILE_FIELDS:
                 if isinstance(legacy.get(key),str) and (legacy[key].strip() or key=='image_instructions'):
@@ -205,12 +207,12 @@ class ProfileStore:
     @staticmethod
     def _validate_values(values,allow_inherit=False):
         if set(values)-set(PROFILE_FIELDS):
-            raise ProfileError('Campo profilo non riconosciuto.')
+            raise ProfileError(tx("Campo profilo non riconosciuto."))
         for key,value in values.items():
             if value is None and allow_inherit:
                 continue
             if not isinstance(value,str) or (not value.strip() and key!='image_instructions'):
-                raise ProfileError(f'{key}: specificare un valore oppure ereditare il default.')
+                raise ProfileError(tx("{key}: specificare un valore oppure ereditare il default.", key=key))
 
     def save_defaults(self,values):
         """@brief Provide the save defaults operation for this workflow."""
@@ -245,7 +247,7 @@ class ProfileStore:
             values = dict(db.execute('SELECT name,value FROM ai_defaults'))
             if key:
                 if not db.execute('SELECT 1 FROM component_types WHERE key=?',(key,)).fetchone():
-                    raise ProfileError('Tipologia non trovata nel database.')
+                    raise ProfileError(tx("Tipologia non trovata nel database."))
                 values.update(dict(db.execute('SELECT name,value FROM ai_overrides WHERE type_key=?',(key,))))
             return values
 
@@ -261,9 +263,9 @@ class ProfileStore:
     def save_type(self,key,*,label,family,instructions='',active=True,overrides=None):
         """@brief Provide the save type operation for this workflow."""
         if not isinstance(label,str) or not label.strip():
-            raise ProfileError('Il nome della tipologia è obbligatorio.')
+            raise ProfileError(tx("Il nome della tipologia è obbligatorio."))
         if family not in FAMILIES or not isinstance(instructions,str) or type(active) is not bool:
-            raise ProfileError('Famiglia geometrica o dati della tipologia non validi.')
+            raise ProfileError(tx("Famiglia geometrica o dati della tipologia non validi."))
         values = overrides or {}
         self._validate_values(values,allow_inherit=True)
         values = {k: v.strip() if k.endswith('model') and v is not None else v for k, v in values.items()}
@@ -272,7 +274,7 @@ class ProfileStore:
         with self._connect() as db:
             exists = db.execute('SELECT 1 FROM component_types WHERE key=?',(key,)).fetchone()
             if not exists and not creating:
-                raise ProfileError('Tipologia non più disponibile: riaprire il catalogo.')
+                raise ProfileError(tx("Tipologia non più disponibile: riaprire il catalogo."))
             if exists:
                 db.execute('UPDATE component_types SET label=?,family=?,instructions=?,active=? WHERE key=?',
                            (label.strip(),family,instructions,int(active),key))
@@ -290,7 +292,7 @@ class ProfileStore:
         """@brief Provide the duplicate operation for this workflow."""
         original = self.get_type(key)
         if not original:
-            raise ProfileError('Tipologia da duplicare non trovata.')
+            raise ProfileError(tx("Tipologia da duplicare non trovata."))
         return self.save_type(None,label=original['label']+' — copia',family=original['family'],
             instructions=original['instructions'],active=True,overrides=self.overrides(key))
 
@@ -298,13 +300,13 @@ class ProfileStore:
         """@brief Provide the delete type operation for this workflow."""
         with self._connect() as db:
             if db.execute('DELETE FROM component_types WHERE key=?',(key,)).rowcount != 1:
-                raise ProfileError('Tipologia da eliminare non trovata.')
+                raise ProfileError(tx("Tipologia da eliminare non trovata."))
 
     def backup(self,destination):
         """@brief Provide the backup operation for this workflow."""
         destination = Path(destination)
         if destination.resolve()==self.path.resolve() or destination.exists():
-            raise ProfileError('Scegliere un nuovo file di backup, diverso dal database attivo.')
+            raise ProfileError(tx("Scegliere un nuovo file di backup, diverso dal database attivo."))
         destination.parent.mkdir(parents=True,exist_ok=True)
         with self._connect() as source:
             target = sqlite3.connect(destination)

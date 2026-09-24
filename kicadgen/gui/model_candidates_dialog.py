@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..services.messages import tx
 from ..services.model_library_search import filter_models, library_models
 
 #: Pause after the last keystroke before the library filter runs, so typing a
@@ -490,11 +491,15 @@ class ModelCandidatesDialog(QDialog):
         if saved_path and not any(c['path'] == saved_path for c in self._candidates):
             existing = next((dict(c) for c in match_report.get('candidates', []) or []
                              if isinstance(c, dict) and str(c.get('path')) == saved_path),
-                            dict(path=saved_path, package=f'Modello attuale: {Path(saved_path).name}'))
+                            dict(path=saved_path, package=tx('Modello attuale: {name}',
+                                                             name=Path(saved_path).name)))
             self._candidates = [existing] + self._candidates[:4]
         layout = QVBoxLayout(self)
-        title = QLabel(f"{component.get('name', 'Componente')} — dimensioni stimate L × W × H (mm): "
-                       f"{_display_dimensions([component.get('length_mm'), component.get('width_mm'), component.get('height_mm')])}")
+        title = QLabel(tx("{name} — dimensioni stimate L × W × H (mm): {dimensions}",
+                          name=component.get('name') or tx('Componente'),
+                          dimensions=_display_dimensions([component.get('length_mm'),
+                                                          component.get('width_mm'),
+                                                          component.get('height_mm')])))
         title.setTextFormat(Qt.TextFormat.PlainText)
         title.setWordWrap(True)
         layout.addWidget(title)
@@ -660,15 +665,15 @@ class ModelCandidatesDialog(QDialog):
         beside it states which mode is actually in charge without hovering.
         """
         automatic = self.auto_rotation.isChecked()
-        self.rotation_state.setText('non in uso: comanda «Automatico»' if automatic
-                                    else 'in uso: override esplicito')
+        self.rotation_state.setText(tx('non in uso: comanda «Automatico»') if automatic
+                                    else tx('in uso: override esplicito'))
         self.rotation_hint.setText(
-            'L’anteprima usa lo stesso allineamento automatico della generazione CAD '
-            '(ingombro totale e sezione del corpo). La rotazione nella foto è indipendente. '
-            'Modificando la rotazione, «Automatico» si disattiva e l’override entra in vigore.'
+            tx('L’anteprima usa lo stesso allineamento automatico della generazione CAD '
+               '(ingombro totale e sezione del corpo). La rotazione nella foto è indipendente. '
+               'Modificando la rotazione, «Automatico» si disattiva e l’override entra in vigore.')
             if automatic else
-            'Override locale esplicito: anche 0° disattiva l’inferenza degli assi. '
-            'La rotazione del componente nella foto resta indipendente.')
+            tx('Override locale esplicito: anche 0° disattiva l’inferenza degli assi. '
+               'La rotazione del componente nella foto resta indipendente.'))
 
     def _rotation_claimed(self, *_):
         """Hand the rotation to the explicit override the moment the user acts.
@@ -737,21 +742,21 @@ class ModelCandidatesDialog(QDialog):
             self._show_library_results([], 0, '')
             return
         if self._library_models is None:
-            self.library_count_label.setText('Indicizzazione della libreria…')
+            self.library_count_label.setText(tx('Indicizzazione della libreria…'))
             self._start_index()
             return
         if not self._library_models:
-            self._show_library_results([], 0, 'libreria KiCad non trovata')
+            self._show_library_results([], 0, tx('libreria KiCad non trovata'))
             return
         result = filter_models(self._library_models, query)
         if result.truncated:
-            text = f'primi {len(result)} di {result.total}'
+            text = tx('primi {shown} di {total}', shown=len(result), total=result.total)
         elif result.total == 0:
-            text = 'nessun modello'
+            text = tx('nessun modello')
         elif result.total == 1:
-            text = '1 modello'
+            text = tx('1 modello')
         else:
-            text = f'{result.total} modelli'
+            text = tx('{total} modelli', total=result.total)
         self._show_library_results(list(result), result.total, text)
 
     def _show_library_results(self, models, total, text):
@@ -794,8 +799,9 @@ class ModelCandidatesDialog(QDialog):
         self._clear_selection(self.candidate_list)
         model = self._library_results[row]
         self._path = str(model.path)
-        self.details_label.setText(f'Dalla libreria KiCad: {self._path}\n'
-                                   'Dimensioni e motivi di corrispondenza non disponibili.')
+        self.details_label.setText(tx('Dalla libreria KiCad: {path}\n'
+                                      'Dimensioni e motivi di corrispondenza non disponibili.',
+                                      path=self._path))
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(_step_file(self._path))
         self._start_preview()
 
@@ -809,27 +815,34 @@ class ModelCandidatesDialog(QDialog):
         if isinstance(reasons, (list, tuple)):
             reasons = '\n'.join(str(reason) for reason in reasons)
         error = _number(candidate.get('relative_xy_error'), float('nan'))
-        error_text = f'{error:.1%}' if math.isfinite(error) else 'non disponibile'
+        error_text = f'{error:.1%}' if math.isfinite(error) else tx('non disponibile')
         # Wording only: the two numbers are not peers. The model dimensions are
         # read off the CAD file, the envelope they are compared against is
         # reconstructed from the photograph, so the error belongs to the
         # estimate. Presenting both as flat facts made the reviewer distrust the
         # model instead of the measurement that is actually uncertain.
-        self.details_label.setText(f"{self._path}\nDimensioni misurate sul modello (mm): {_display_dimensions(candidate['dimensions_mm']) if candidate.get('dimensions_mm') else 'non disponibili'}"
-                                   f"\nErrore relativo XY rispetto all’ingombro stimato dalla foto: {error_text}"
-                                   f"\nMotivi: {reasons or 'non disponibili'}")
+        dimensions = (_display_dimensions(candidate['dimensions_mm'])
+                      if candidate.get('dimensions_mm') else tx('non disponibili'))
+        self.details_label.setText(tx("{path}\nDimensioni misurate sul modello (mm): {dimensions}"
+                                      "\nErrore relativo XY rispetto all’ingombro stimato dalla "
+                                      "foto: {error}\nMotivi: {reasons}",
+                                      path=self._path, dimensions=dimensions, error=error_text,
+                                      reasons=reasons or tx('non disponibili')))
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(_step_file(self._path))
         if preview:
             self._start_preview()
 
     def _choose_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, 'Scegli modello STEP', '', 'Modelli STEP (*.step *.stp *.STEP *.STP)')
+        path, _ = QFileDialog.getOpenFileName(self, tx('Scegli modello STEP'), '',
+                                              tx('Modelli STEP (*.step *.stp *.STEP *.STP)'))
         if not path:
             return
         self.candidate_list.setCurrentRow(-1)
         self._clear_selection(self.library_list)
         self._path = path
-        self.details_label.setText(f'STEP manuale: {path}\nDimensioni e motivi di corrispondenza non disponibili.')
+        self.details_label.setText(tx('STEP manuale: {path}\n'
+                                      'Dimensioni e motivi di corrispondenza non disponibili.',
+                                      path=path))
         self._start_preview()
 
     def eventFilter(self, watched, event):
@@ -888,7 +901,8 @@ class ModelCandidatesDialog(QDialog):
             self._shown_path = None
             self._preview_image = None
             self.preview_label.clear()
-            self.preview_label.setText('Caricamento della geometria STEP reale…' if valid else 'File STEP non disponibile')
+            self.preview_label.setText(tx('Caricamento della geometria STEP reale…') if valid
+                                       else tx('File STEP non disponibile'))
         # At most one process per dialog. Changes coalesce to the latest selection.
         if not valid or self._closed:
             self.preview_label.unsetCursor()
@@ -922,7 +936,8 @@ class ModelCandidatesDialog(QDialog):
         else:
             self._shown_path = None
             self._preview_image = None
-            self.preview_label.setText('Anteprima della geometria reale non disponibile.\nPuoi scegliere il file STEP oppure conservare il segnaposto.')
+            self.preview_label.setText(tx('Anteprima della geometria reale non disponibile.\n'
+                                          'Puoi scegliere il file STEP oppure conservare il segnaposto.'))
 
     def _none_match(self):
         self._selection = dict(status='rejected', path='', rotation_deg=0.0)

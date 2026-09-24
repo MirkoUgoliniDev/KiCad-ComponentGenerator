@@ -1033,6 +1033,10 @@ class AnalysisOverlay(QWidget):
             already carries.
         """
         name, color, glyph = TOOLS.get(str(tool or ""), ("", "#89b4fa", ""))
+        # La label e' `i18n_skip` (porta un dettaglio che non e' testo nostro):
+        # il nome dello strumento si traduce qui, prima di comporla.
+        if name and self.i18n is not None:
+            name = self.i18n.text(name)
         self.spinner.set_tool(glyph, color)
         detail = " ".join(str(detail or "").split())
         self.tool.setText(f"{name} · {detail}" if name and detail else name)
@@ -1060,6 +1064,8 @@ class AnalysisOverlay(QWidget):
         self.progress.setRange(0, total)
         self.progress.setValue(done)
         percent = round(done * 100 / total)
+        if unit and self.i18n is not None:
+            unit = self.i18n.text(unit)
         self.progress_label.setText(
             f"{percent}% · {done}/{total} {unit}".rstrip() if unit
             else f"{percent}% · {done}/{total}")

@@ -35,6 +35,20 @@ try:
 except ImportError:
     Mesh = None
 
+
+def _warn(template, **values):
+    """Avviso per il processo padre, che lo traduce nella lingua dell'utente.
+
+    Qui dentro (interprete di FreeCAD) non c'e' il catalogo delle traduzioni:
+    si manda il MODELLO italiano con i valori, in JSON, dopo il marcatore
+    `KICADGEN_WARN:`; il padre lo formatta con `messages.tx`
+    (`messages.child_warning_text`). Un valore non JSON diventa testo.
+    """
+    payload = {"t": template,
+               "v": {key: value if value is None or isinstance(value, (bool, int, float, str))
+                     else str(value) for key, value in values.items()}}
+    print("KICADGEN_WARN:" + json.dumps(payload, ensure_ascii=False), flush=True)
+
 TOL = 1e-3
 
 
@@ -111,13 +125,16 @@ def _apply_fillets(shape, fillets, bounds):
             _edge_name(e, x0, y0, x1, y1, z1) for e in shape.Edges
         }
         for name in sorted(missing):
-            print(f"KICADGEN_WARN: spigolo '{name}' non trovato sulla geometria corrente")
+            _warn("spigolo '{name}' non trovato sulla geometria corrente", name=name)
         if not target_edges:
             continue
         try:
             shape = shape.makeFillet(radius, target_edges)
         except Exception as exc:  # noqa: BLE001 - segnalato, non fatale
-            print(f"KICADGEN_WARN: fillet r={radius} su {sorted(wanted)} fallito: {exc}")
+            _warn("fillet r={radius} su {sorted} fallito: {exc}",
+               radius=radius,
+               sorted=sorted(wanted),
+               exc=exc)
     return shape
 
 
@@ -134,7 +151,7 @@ def _build_face_text_solids(shape, texts, bounds, font_file):
     for t in texts:
         matching = [f for f in shape.Faces if _face_name(f, x0, y0, x1, y1, z1) == t["face"]]
         if not matching:
-            print(f"KICADGEN_WARN: faccia '{t['face']}' non trovata per il testo")
+            _warn("faccia '{face}' non trovata per il testo", face=t['face'])
             continue
         face = max(matching, key=lambda f: f.Area)
         normal = face.normalAt(0, 0)
@@ -733,7 +750,7 @@ def main():
         try:
             plated.append((contact, _contact_features(contact, bounds, plating, pad_t)))
         except Exception as exc:  # noqa: BLE001 - un contatto in meno non e' fatale
-            print(f"KICADGEN_WARN:contatto {contact.get('number')} non generato: {exc}")
+            _warn("contatto {get} non generato: {exc}", get=contact.get('number'), exc=exc)
     drills = [drill for _, features in plated for drill in features["drills"]]
 
     # Semi-fori e fori (moduli castellated): cilindri di cui resta nel solido
@@ -753,8 +770,10 @@ def main():
             )
             body_shape = body_shape.cut(cutter)
         except Exception as exc:  # noqa: BLE001 - un semi-foro in meno non e' fatale
-            print(f"KICADGEN_WARN:semi-foro non applicato in "
-                  f"({notch.get('x')}, {notch.get('y')}): {exc}")
+            _warn("semi-foro non applicato in ({get}, {get2}): {exc}",
+               get=notch.get('x'),
+               get2=notch.get('y'),
+               exc=exc)
 
     body_color = body.get("color_hex", "#1a1a1a")
     pin_color = data.get("pin_color_hex", "#b0b0b0")
@@ -800,7 +819,7 @@ def main():
             add(f"Pin{contact['number']}", shape, contact.get("color_hex", pin_color))
             label_anchors[f"Pin{contact['number']}"] = features["label"]
         except Exception as exc:  # noqa: BLE001 - un contatto in meno non e' fatale
-            print(f"KICADGEN_WARN:contatto {contact.get('number')} non generato: {exc}")
+            _warn("contatto {get} non generato: {exc}", get=contact.get('number'), exc=exc)
 
     # Serigrafia del modulo: sigle accanto ai contatti e cornice del bordo.
     silk_z = z1 + 0.004
@@ -812,14 +831,14 @@ def main():
             if shape is not None:
                 add(f"Silk_{i}", shape, item.get("color_hex", silk_color))
         except Exception as exc:  # noqa: BLE001
-            print(f"KICADGEN_WARN:serigrafia '{item.get('text')}' non generata: {exc}")
+            _warn("serigrafia '{get}' non generata: {exc}", get=item.get('text'), exc=exc)
     rim = data.get("silk_outline")
     if rim:
         try:
             add("Silk_outline", _rim(rim["x"], rim["y"], rim["length_mm"], rim["width_mm"],
                                      silk_z, line=0.1), silk_color)
         except Exception as exc:  # noqa: BLE001
-            print(f"KICADGEN_WARN:cornice serigrafica non generata: {exc}")
+            _warn("cornice serigrafica non generata: {exc}", exc=exc)
 
     # Componenti montati sul modulo: forma per tipo (vedi freecad_parts).
     components = data.get("components", [])
@@ -903,7 +922,7 @@ def main():
                         mark_obj = add(f"{base}_mark", text_shape, component.get("marking_color_hex", "#c8c8c0"))
                         metadata[mark_obj.Name] = {"source_row": component.get("source_row", index)}
             except Exception as exc:  # noqa: BLE001 - un componente in meno non e' fatale
-                print(f"KICADGEN_WARN:componente '{component.get('name')}' non generato: {exc}")
+                _warn("componente '{get}' non generato: {exc}", get=component.get('name'), exc=exc)
 
     # Solidi aggiuntivi generici (box con colore proprio).
     for i, box in enumerate(data.get("extra_boxes", [])):
@@ -933,7 +952,7 @@ def main():
         step_colors_exported = True
         print(f"KICADGEN_STEP_COLORS_OK:{step_path}", flush=True)
     except Exception as exc:
-        print(f"KICADGEN_WARN:export colori STEP fallito ({exc}); solo geometria", flush=True)
+        _warn("export colori STEP fallito ({exc}); solo geometria", exc=exc)
         Part.export(objects, step_path)
     print(f"KICADGEN_STEP_OK:{step_path}", flush=True)
 
@@ -946,8 +965,9 @@ def main():
             # Il marcatore sopra resta per chi legge l'output riga per riga,
             # ma solo le righe KICADGEN_WARN: arrivano all'utente: senza
             # questa il sorgente FreeCAD spariva senza che nessuno lo dicesse.
-            print(f"KICADGEN_WARN:sorgente FreeCAD non salvata ({exc}); "
-                  "STEP e anteprima non ne risentono", flush=True)
+            _warn("sorgente FreeCAD non salvata ({exc}); STEP e anteprima non ne "
+               "risentono",
+               exc=exc)
 
     tessellated = []
     for obj, color in colored:

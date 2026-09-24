@@ -25,6 +25,7 @@ import os
 from pathlib import Path
 import sqlite3
 from typing import Iterable, Optional
+from .messages import tx
 
 #: Nome del file dentro `data/` quando non c'e' la variabile d'ambiente.
 DEFAULT_FILENAME = "accepted_components.sqlite3"
@@ -284,14 +285,14 @@ class AcceptedModelStore:
         try:
             connection = sqlite3.connect(self.path, timeout=5)
         except sqlite3.Error as exc:
-            raise AcceptedModelsError(f"Archivio abbinamenti non apribile: {exc}") from exc
+            raise AcceptedModelsError(tx("Archivio abbinamenti non apribile: {exc}", exc=exc)) from exc
         connection.row_factory = sqlite3.Row
         try:
             with connection:
                 self._ensure_schema(connection, create)
                 yield connection
         except sqlite3.DatabaseError as exc:
-            raise AcceptedModelsError(f"Archivio abbinamenti non leggibile: {exc}") from exc
+            raise AcceptedModelsError(tx("Archivio abbinamenti non leggibile: {exc}", exc=exc)) from exc
         finally:
             connection.close()
 
@@ -300,12 +301,13 @@ class AcceptedModelStore:
         version = db.execute("PRAGMA user_version").fetchone()[0]
         if version > SCHEMA_VERSION:
             raise AcceptedModelsError(
-                "Archivio abbinamenti creato da una versione piu' recente: non viene toccato.")
+                tx("Archivio abbinamenti creato da una versione piu' recente: non viene "
+                   "toccato."))
         if version == SCHEMA_VERSION:
             return
         if not create:
             # Un file vuoto o estraneo in sola lettura: nessuna voce, nessuna scrittura.
-            raise AcceptedModelsError("Archivio abbinamenti senza schema riconosciuto.")
+            raise AcceptedModelsError(tx("Archivio abbinamenti senza schema riconosciuto."))
         db.execute(
             "CREATE TABLE IF NOT EXISTS accepted_models ("
             " id INTEGER PRIMARY KEY,"

@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import tempfile
 import uuid
+from .messages import tx
 
 ROLES = {'pinout': 'Pinout / disposizione contatti', 'top': 'Immagine con quote',
          'hires': 'Foto ad alta risoluzione'}
@@ -46,20 +47,22 @@ class DocumentSet:
         try:
             data = json.loads(self.path.read_text(encoding='utf-8'))
             if data.get('version') != 1 or not isinstance(data.get('roles'), dict):
-                raise ValueError('versione non riconosciuta')
+                raise ValueError(tx("versione non riconosciuta"))
             if set(data['roles']) - set(ROLES):
-                raise ValueError('ruolo non riconosciuto')
+                raise ValueError(tx("ruolo non riconosciuto"))
             for role, row in data['roles'].items():
                 if not isinstance(row, dict) or type(row.get('unavailable', False)) is not bool:
-                    raise ValueError('ruolo non valido')
+                    raise ValueError(tx("ruolo non valido"))
                 name = row.get('filename')
                 if name is not None and (not isinstance(name, str) or name not in {role + ext for ext in SUFFIXES}):
-                    raise ValueError('nome file non valido')
+                    raise ValueError(tx("nome file non valido"))
                 if name and row.get('unavailable'):
                     raise ValueError('ruolo ambiguo')
             return data
         except (ValueError, AttributeError, TypeError) as exc:
-            raise DocumentError(f'Associazioni documenti non valide: {exc}. Il file non è stato modificato.') from exc
+            raise DocumentError(tx("Associazioni documenti non valide: {exc}. Il file non è stato "
+                                   "modificato.",
+                                   exc=exc)) from exc
 
     def _write(self, data):
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -87,32 +90,32 @@ class DocumentSet:
     def import_file(self, role, source, *, replace=False):
         """@brief Provide the import file operation for this workflow."""
         if role not in ROLES:
-            raise DocumentError('Ruolo non riconosciuto.')
+            raise DocumentError(tx("Ruolo non riconosciuto."))
         source = Path(source)
         suffix = source.suffix.lower()
         if suffix not in SUFFIXES or not source.is_file():
-            raise DocumentError('Carica un’immagine PNG, JPEG, WEBP, GIF o un PDF.')
+            raise DocumentError(tx("Carica un’immagine PNG, JPEG, WEBP, GIF o un PDF."))
         if not 0 < source.stat().st_size <= 20 * 1024 * 1024:
-            raise DocumentError('File vuoto o superiore al limite di 20 MB.')
+            raise DocumentError(tx("File vuoto o superiore al limite di 20 MB."))
         if suffix == '.pdf':
             with source.open('rb') as stream:
                 if b'%PDF-' not in stream.read(1024):
-                    raise DocumentError('Il file non contiene un PDF riconoscibile.')
+                    raise DocumentError(tx("Il file non contiene un PDF riconoscibile."))
         else:
             from PIL import Image
             try:
                 with Image.open(source) as img:
                     expected = {'.png': 'PNG', '.jpg': 'JPEG', '.jpeg': 'JPEG', '.webp': 'WEBP', '.gif': 'GIF'}
                     if img.format != expected[suffix]:
-                        raise DocumentError('Estensione e formato dell’immagine non corrispondono.')
+                        raise DocumentError(tx("Estensione e formato dell’immagine non corrispondono."))
                     img.verify()
             except (OSError, Image.DecompressionBombError) as exc:
-                raise DocumentError('Immagine non leggibile o troppo grande.') from exc
+                raise DocumentError(tx("Immagine non leggibile o troppo grande.")) from exc
         data = self.read()
         target = self.directory / (role + suffix)
         old_name = data['roles'].get(role, {}).get('filename')
         if (old_name or target.exists()) and not replace:
-            raise DocumentError('Confermare la sostituzione del documento esistente.')
+            raise DocumentError(tx("Confermare la sostituzione del documento esistente."))
         self.directory.mkdir(parents=True, exist_ok=True)
         previous = self.directory / old_name if old_name else None
         protected = list(dict.fromkeys(p for p in (target, previous, self.path) if p is not None))
@@ -144,7 +147,7 @@ class DocumentSet:
     def clear(self, role, *, unavailable=False):
         """@brief Provide the clear operation for this workflow."""
         if role not in ROLES:
-            raise DocumentError('Ruolo non riconosciuto.')
+            raise DocumentError(tx("Ruolo non riconosciuto."))
         data = self.read()
         name = data['roles'].get(role, {}).get('filename')
         old = self.directory / name if name else None
@@ -165,12 +168,14 @@ class DocumentSet:
                 continue
             name = row.get('filename')
             if not name:
-                raise DocumentError(f'{label}: carica un file oppure indica “Non disponibile”.')
+                raise DocumentError(tx("{label}: carica un file oppure indica “Non disponibile”.", label=label))
             path = self.directory / name
             if not path.is_file():
-                raise DocumentError(f'File mancante per {label}: {name}. Caricalo nuovamente.')
+                raise DocumentError(tx("File mancante per {label}: {name}. Caricalo nuovamente.",
+                                       label=label,
+                                       name=name))
             paths.append(path)
             roles[name] = role
         if not paths:
-            raise DocumentError('Carica almeno un documento per avviare l’analisi.')
+            raise DocumentError(tx("Carica almeno un documento per avviare l’analisi."))
         return paths, roles
