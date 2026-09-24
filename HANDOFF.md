@@ -1,11 +1,10 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `b1ee2c0` (pushato;
-  `.gitignore`: `.claude/` su GitHub tranne `worktrees/`, `Private/` fuori).
-  Prima: `07453cc`/`eb633ea`, correzione dei difetti 1-15 e 17.
-- Lavoro NON committato: localizzazione completa di log, avanzamento ed
-  errori (sezione «verifica che non ci siano testi in italiano cablati» in
-  fondo al file). Si committa solo su richiesta dell'utente.
+- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `3cdea2a` (pushato):
+  localizzazione completa di log, diario, avanzamento ed errori (sezione
+  «verifica che non ci siano testi in italiano cablati» in fondo al file).
+  Prima: `b1ee2c0` (.gitignore), `eb633ea` (difetti 1-15 e 17).
+  Nessun lavoro in sospeso non committato.
 - Suite completa (24/09, con la localizzazione): 3934 passati, 3 saltati,
   2 xfail attesi, 19 sottotest.
 - Difetto 16 CHIUSO (utente, 24/09, scelta «A»): la frase «Tipo SMD di
