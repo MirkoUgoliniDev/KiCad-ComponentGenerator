@@ -209,3 +209,16 @@ def test_a_failure_while_reading_the_state_never_reaches_the_timer(window, monke
     monkeypatch.setattr(window, "_project_state", broken)
     assert window._save_project_config() is False
     assert "non leggibili" in window.ai_progress_text.toPlainText()
+
+
+def test_opening_a_project_without_the_file_creates_it(window, monkeypatch):  # noqa: F811
+    """@brief Positivo: un progetto nato prima del file lo riceve all'apertura.
+
+    Negativo: un file illeggibile non viene sostituito (vedi il test sopra).
+    """
+    monkeypatch.setattr(gui, "save_config", lambda config: None)
+    root = window._library_root()
+    (root / "Vecchio" / "docs").mkdir(parents=True)
+    assert not (root / "Vecchio" / PROJECT_CONFIG_NAME).exists()
+    _open(window, monkeypatch, "Vecchio")
+    assert read_project_config(root / "Vecchio") is not None

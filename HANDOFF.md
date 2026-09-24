@@ -5612,3 +5612,24 @@ su `YOLO-SOLUTION`, pushato su richiesta dell'utente. Esclusi
 commit: 3892 passati, 3 saltati, 2 xfail, 19 sottotest.
 Aperto: nulla di richiesto in sospeso; da provare a mano dall'utente il
 salvataggio automatico e la riapertura dei progetti nel programma vero.
+
+## PIANO IN CORSO (24/09) — «nelle due cartelle non vedo project_config.json»
+
+Diagnosi: `generated/Test` (ultima modifica 10:49) e `generated/TEST2`
+(11:23) non sono mai passati per la versione con `project_config.json`
+(commit `b894903` delle 12:53); il programma non e' in esecuzione. Ma c'e' un
+buco vero: aprendo un progetto SENZA file, il file nasceva solo alla prima
+modifica di un campo. Correzione:
+1. [x] «Apri progetto…» su un progetto senza file lo scrive subito
+   (impostazioni generali), cosi' ogni progetto aperto ha il suo file.
+   Un file illeggibile resta intoccato come prima. Test positivo e negativo.
+   Fatto, test in `tests/test_project_config.py`. Suite completa: 3893
+   passati. Committato e pushato nel commit che segue `b894903`.
+
+## Verifica con agenti (richiesta dell'utente, 24/09)
+
+Quattro revisori in sola lettura, in parallelo, su aree disgiunte: finestre
+di revisione; progetti, `project_config.json` e cache; tooltip, tema,
+traduzioni e icone; aderenza dei test alle regole di CLAUDE.md. Nessuno
+modifica file ne' fa commit; i difetti trovati si correggono solo su richiesta
+dell'utente. Esiti: vedi la sezione successiva quando arrivano.

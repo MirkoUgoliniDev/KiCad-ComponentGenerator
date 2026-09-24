@@ -4442,6 +4442,10 @@ class MainWindow(QMainWindow):
         # Senza file (progetto nato prima di project_config.json) valgono le
         # impostazioni generali, non quelle del progetto aperto prima.
         self._switch_project(name, saved if saved is not None else self._general_project_state)
+        if saved is None and self._project_config_refused is None:
+            # Progetto nato prima di project_config.json: il file nasce subito,
+            # non alla prima modifica, cosi' ogni progetto aperto ha il suo.
+            self._save_project_config(force=True)
         self._append_log(f"Progetto aperto: {self._project_dir()}"
                          + ("" if saved is None else " (impostazioni del progetto applicate)."))
 
