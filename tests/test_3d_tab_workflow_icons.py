@@ -132,16 +132,20 @@ def test_icon_tooltips_follow_the_language(window):  # noqa: F811
     assert window.btn_regen_3d.accessibleName().startswith("Rigenera")
 
 
-def test_regenerate_is_the_emphasised_primary_command(window):  # noqa: F811
-    """@brief Positivo: «Rigenera» e' il comando principale e il tema lo evidenzia.
+def test_every_icon_of_the_bar_shares_one_style(window):  # noqa: F811
+    """@brief Una barra uniforme (utente, 2026-09-24): nessuna icona con una cornice sua.
 
-    Negativo: nessun altro comando della barra reclama la stessa enfasi.
+    Contratto cambiato di proposito: «Rigenera» portava una cornice blu fissa
+    (objectName «primary»), che lo faceva sembrare un interruttore acceso come
+    «Numeri pin». Positivo: nessun pulsante della barra ha un nome di stile
+    proprio e il tema non ne definisce per QToolButton. Negativo: lo stato
+    premuto resta distinguibile, ma solo per chi e' davvero premuto.
     """
-    assert window.btn_regen_3d.objectName() == "primary"
-    assert "QToolButton#primary" in theme.APP_QSS
-    others = [button for button in _workflow(window) + _view_tools(window)
-              if button is not window.btn_regen_3d]
-    assert all(button.objectName() != "primary" for button in others)
+    buttons = _workflow(window) + _view_tools(window)
+    assert all(button.objectName() == "" for button in buttons)
+    assert "QToolButton#" not in theme.APP_QSS
+    assert "QToolButton:checked" in theme.APP_QSS
+    assert not window.btn_regen_3d.isCheckable()
 
 
 def test_regenerate_is_the_last_command_of_the_bar(window):  # noqa: F811

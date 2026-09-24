@@ -19,6 +19,12 @@ This repository generates KiCad component libraries from mechanical and electric
 **Regola dell'utente, vincolante.** `HANDOFF.md` nella radice del progetto va
 tenuto allineato al lavoro in corso, non scritto alla fine.
 
+- **Prima di partire con le modifiche, l'handoff si aggiorna** (regola
+  dell'utente del 2026-09-24): quando l'utente dice di applicare delle
+  modifiche, PRIMA si scrive nell'handoff l'elenco di cio' che si sta per
+  fare (richieste, decisioni, interpretazioni e dubbi), POI si tocca il
+  codice. Se il lavoro si interrompe a meta', chi riprende sa cosa era in
+  corso e cosa mancava.
 - **Aggiornarlo appena lo stato cambia in modo sostanziale**: un pezzo
   completato, una diagnosi che ribalta quella precedente, una decisione presa
   dall'utente, un difetto trovato e non risolto.

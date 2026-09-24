@@ -1767,16 +1767,20 @@ class MainWindow(QMainWindow):
         language_row = QHBoxLayout()
         language_row.setSpacing(10)
         language_row.addStretch()
-        self.language_label = QLabel(self.i18n.tr("language.label"))
-        self.language_label.setProperty("i18n_source", "Lingua:")
-        self.language_label.setMinimumWidth(62)
+        # Un globo al posto della scritta «Lingua:» (utente, 2026-09-24), come
+        # le altre icone: il nome sta nel tooltip e nel nome accessibile della
+        # tendina, e si ritraduce con la lingua (`_refresh_language_texts`).
+        self.language_label = QLabel()
+        self.language_label.setPixmap(self._asset_icon("language.svg").pixmap(QSize(20, 20)))
+        self.language_label.setProperty("i18n_skip", True)
         language_row.addWidget(self.language_label)
         self.language_combo = QComboBox()
         for code, label in LANGUAGES.items():
             self.language_combo.addItem(label, code)
         self.language_combo.setCurrentIndex(max(0, self.language_combo.findData(self.i18n.language)))
-        self.language_combo.setToolTip("Select the interface language")
-        self.language_combo.setAccessibleName("Interface language")
+        self.language_combo.setProperty("i18n_skip", True)
+        self.language_label.setBuddy(self.language_combo)
+        self._refresh_language_texts()
         self.language_combo.setMinimumWidth(120)
         self.language_combo.currentIndexChanged.connect(self._on_language_changed)
         language_row.addWidget(self.language_combo)
@@ -1807,6 +1811,14 @@ class MainWindow(QMainWindow):
         # Apply the persisted language to all catalogued widgets on first render.
         self.i18n.retranslate_widgets(self)
 
+    def _refresh_language_texts(self) -> None:
+        """@brief Nome dell'icona e della tendina della lingua, nella lingua in uso."""
+        name = self.i18n.tr("language.name")
+        self.language_label.setToolTip(name)
+        self.language_label.setAccessibleName(name)
+        self.language_combo.setToolTip(name)
+        self.language_combo.setAccessibleName(name)
+
     def _on_language_changed(self, index: int) -> None:
         """@brief Persist the selected language and refresh navigation labels."""
         language = self.language_combo.itemData(index)
@@ -1815,6 +1827,7 @@ class MainWindow(QMainWindow):
         self.i18n.set_language(language)
         self._config["language"] = language
         save_config(self._config)
+        self._refresh_language_texts()
         self.tabs.setTabText(0, self.i18n.tr("tab.project.name"))
         self.tabs.setTabText(1, self.i18n.tr("tab.footprint.name"))
         self.tabs.setTabText(2, self.i18n.tr("tab.generate.name"))
@@ -6356,22 +6369,21 @@ class MainWindow(QMainWindow):
 
         # Divisore verticale fra la vista (non cambia nulla) e il flusso di
         # lavoro (rigenera, accetta, torna alla revisione).
-        self.toolbar_3d_divider = QFrame()
-        self.toolbar_3d_divider.setFrameShape(QFrame.Shape.VLine)
-        self.toolbar_3d_divider.setFrameShadow(QFrame.Shadow.Plain)
-        self.toolbar_3d_divider.setStyleSheet(f"color: {SURFACE1};")
-        self.toolbar_3d_divider.setFixedWidth(9)
+        # Lo stesso divisore delle barre delle revisioni: una barra uniforme.
+        from .review_tools import toolbar_divider
+        self.toolbar_3d_divider = toolbar_divider()
         toolbar.addWidget(self.toolbar_3d_divider)
 
-        # Comando principale della scheda: evidenziato (objectName «primary»,
-        # vedi theme.py) perche' e' l'ultimo passo gratuito della pipeline.
+        # Comando principale della scheda: l'ultimo passo gratuito della pipeline.
         self.btn_regen_3d = self._workflow_tool_button(
             "wf-regenerate.svg",
             "Rigenera modello 3D (STEP) con queste annotazioni",
             "Ultimo passo della pipeline — Ricostruisce lo STEP con FreeCAD dai corpi e "
             "dalle annotazioni attuali, comprese le correzioni appena applicate nella "
             "revisione dei componenti. Nessuna richiesta AI: gratuito.")
-        self.btn_regen_3d.setObjectName("primary")
+        # Nessuna enfasi propria (utente, 2026-09-24: «deve essere una cosa
+        # uniforme»): la cornice blu fissa lo faceva sembrare un interruttore
+        # acceso. Si distingue per la posizione, ultimo della barra.
         self.btn_regen_3d.clicked.connect(self._regenerate_3d)
         # Aggiunto alla barra PER ULTIMO, dopo il tipo di contatto (scelta
         # dell'utente, 2026-09-24): prima si correggono corpi e contatti, poi

@@ -49,7 +49,7 @@ DEFAULT_TRANSLATIONS = {
     "tab.preview.name": {"en": "Footprint preview", "it": "Anteprima FootPrint", "fr": "Aperçu empreinte", "de": "Footprint-Vorschau"},
     "tab.model3d.name": {"en": "3D model", "it": "Modello 3D", "fr": "Modèle 3D", "de": "3D-Modell"},
     "tab.kicad.name": {"en": "KiCad", "it": "KiCad", "fr": "KiCad", "de": "KiCad"},
-    "language.label": {"en": "Language:", "it": "Lingua:", "fr": "Langue :", "de": "Sprache:"},
+    "language.name": {"en": "Language", "it": "Lingua", "fr": "Langue", "de": "Sprache"},
     "component_type.none": {"en": "(not specified)", "it": "(non specificata)", "fr": "(non spécifié)", "de": "(nicht angegeben)"},
     "component_type.single_tht": {"en": "Single through-hole component (THT)", "it": "Componente singolo a fori passanti (THT)", "fr": "Composant traversant individuel (THT)", "de": "Einzelnes Durchsteckbauteil (THT)"},
     "component_type.single_smd": {"en": "Single SMD component", "it": "Componente singolo SMD", "fr": "Composant CMS individuel", "de": "Einzelnes SMD-Bauteil"},
@@ -839,6 +839,10 @@ DEFAULT_TRANSLATIONS = {
     "ui:Questo nome e' riservato da Windows.": {"en": "This name is reserved by Windows.", "it": "Questo nome e' riservato da Windows.", "fr": "Ce nom est réservé par Windows.", "de": "Dieser Name ist von Windows reserviert."},
     "ui:Esiste gia' un progetto con questo nome: aprilo da «Apri progetto…».": {"en": "A project with this name already exists: open it from «Open project…».", "it": "Esiste gia' un progetto con questo nome: aprilo da «Apri progetto…».", "fr": "Un projet portant ce nom existe déjà : ouvrez-le depuis « Ouvrir un projet… ».", "de": "Ein Projekt mit diesem Namen existiert bereits: Öffnen Sie es über „Projekt öffnen…“."},
     "ui:E' gia' il nome del progetto.": {"en": "It is already the project's name.", "it": "E' gia' il nome del progetto.", "fr": "C’est déjà le nom du projet.", "de": "Das ist bereits der Projektname."},
+    # Dettagli del componente scelto in un popup (utente, 2026-09-24 sera).
+    "ui:Dettagli del componente scelto": {"en": "Details of the selected component", "it": "Dettagli del componente scelto", "fr": "Détails du composant sélectionné", "de": "Details des ausgewählten Bauteils"},
+    "ui:Il componente scelto ha avvisi: aprili qui.": {"en": "The selected component has warnings: open them here.", "it": "Il componente scelto ha avvisi: aprili qui.", "fr": "Le composant sélectionné a des avertissements : ouvrez-les ici.", "de": "Das ausgewählte Bauteil hat Warnungen: hier öffnen."},
+    "ui:Stato del modello KiCad, avvisi e legenda dei colori.": {"en": "KiCad model status, warnings and colour legend.", "it": "Stato del modello KiCad, avvisi e legenda dei colori.", "fr": "État du modèle KiCad, avertissements et légende des couleurs.", "de": "Status des KiCad-Modells, Warnungen und Farblegende."},
 }
 
 #: Testi predefiniti SOSTITUITI, per chiave e lingua. Il catalogo SQLite

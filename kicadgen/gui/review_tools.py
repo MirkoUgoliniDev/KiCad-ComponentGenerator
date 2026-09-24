@@ -13,6 +13,8 @@ from PyQt6.QtCore import QPoint, QRect, QSize, Qt
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QFrame, QLabel, QToolButton, QVBoxLayout, QWidget
 
+from .theme import SURFACE1
+
 ASSETS = Path(__file__).resolve().parent / "assets"
 
 #: Widest the info popup may be, in pixels: a comfortable reading column
@@ -88,46 +90,42 @@ def tool_button(asset: str, title: str, shortcut: str = "", detail: str = "",
 
 
 def toolbar_divider() -> QFrame:
-    """@brief Thin vertical line between groups of toolbar icons."""
+    """@brief Thin vertical line between groups of toolbar icons.
+
+    @note The one divider of every icon bar (3D tab and review windows), so
+        the bars stay uniform.
+    """
     line = QFrame()
     line.setFrameShape(QFrame.Shape.VLine)
     line.setFrameShadow(QFrame.Shadow.Plain)
     line.setFixedWidth(9)
-    line.setStyleSheet("color: #45475a;")
+    line.setStyleSheet(f"color: {SURFACE1};")
     return line
 
 
-class InfoPopup(QFrame):
-    """@brief Instructions shown on demand under an «i» button, never outside the window.
+class AnchoredPopup(QFrame):
+    """@brief A popup opened under a toolbar icon, never outside the window.
 
-    @note A Qt popup: any click outside it closes it, as a menu. The text is
-        rich text, wrapped to at most INFO_POPUP_MAX_WIDTH_PX and never wider
-        than the window it opens in; the box is placed under the button,
-        aligned to its right edge, and moved inside the window if needed.
+    @note A Qt popup: any click outside it closes it, as a menu. It holds any
+        widgets, laid out vertically at most INFO_POPUP_MAX_WIDTH_PX wide and
+        never wider than the window it opens in; the box is placed under the
+        icon, from its left edge, and moved inside the window if needed.
     """
 
-    def __init__(self, html_text: str, parent: QWidget):
+    def __init__(self, widgets, parent: QWidget):
         super().__init__(parent, Qt.WindowType.Popup)
         self.setObjectName("info_popup")
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setStyleSheet(
             "QFrame#info_popup { background: #11111b; border: 1px solid #45475a; "
             "border-radius: 6px; } QLabel { color: #cdd6f4; background: transparent; }")
-        self.label = QLabel(html_text)
-        self.label.setTextFormat(Qt.TextFormat.RichText)
-        self.label.setWordWrap(True)
-        self.label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
-        layout.addWidget(self.label)
+        layout.setSpacing(8)
+        for widget in widgets:
+            layout.addWidget(widget)
         self._hidden_at = 0.0
-
-    def set_text(self, html_text: str) -> None:
-        """@brief Replace the popup text (e.g. after a language change).
-
-        @param html_text Rich text.
-        """
-        self.label.setText(html_text)
+        self._anchor = None
 
     def hideEvent(self, event):  # noqa: N802 - Qt override
         """@brief Remember when the popup closed, for the reopen guard."""
@@ -137,10 +135,10 @@ class InfoPopup(QFrame):
     def toggle_under(self, anchor: QWidget) -> None:
         """@brief Open the popup under `anchor`, or leave it closed.
 
-        @param anchor The «i» button.
-        @note Called by the button's click. When the same click has just
-            closed the popup (Qt closes it on the press), nothing reopens it,
-            so the «i» works as an on/off switch.
+        @param anchor The toolbar icon.
+        @note Called by the icon's click. When the same click has just closed
+            the popup (Qt closes it on the press), nothing reopens it, so the
+            icon works as an on/off switch.
         """
         if self.isVisible():
             self.hide()
@@ -149,23 +147,53 @@ class InfoPopup(QFrame):
             return
         self.open_under(anchor)
 
+    def refit(self) -> None:
+        """@brief Re-measure and re-place an open popup whose content changed."""
+        if self.isVisible() and self._anchor is not None:
+            self.open_under(self._anchor)
+
     def open_under(self, anchor: QWidget) -> None:
         """@brief Show the popup below `anchor`, inside the anchor's window.
 
         @param anchor Widget the popup belongs to.
         """
+        self._anchor = anchor
         window = anchor.window()
         area = QRect(window.mapToGlobal(QPoint(0, 0)), window.size())
-        margins = self.layout().contentsMargins()
         width = max(160, min(INFO_POPUP_MAX_WIDTH_PX, area.width() - 2 * INFO_POPUP_MARGIN_PX))
-        text_width = width - margins.left() - margins.right()
-        self.label.setFixedWidth(text_width)
-        height = self.label.heightForWidth(text_width) + margins.top() + margins.bottom()
-        self.resize(width, height)
-        below = anchor.mapToGlobal(QPoint(anchor.width(), anchor.height() + 4))
-        x = below.x() - width
+        self.setFixedWidth(width)
+        layout = self.layout()
+        layout.activate()
+        height = (layout.totalHeightForWidth(width) if layout.hasHeightForWidth()
+                  else layout.totalSizeHint().height())
+        self.setFixedHeight(height)
+        # Sotto l'icona, dal suo bordo sinistro; se uscirebbe a destra rientra
+        # (per l'icona «i» in fondo alla barra finisce allineato a destra).
+        below = anchor.mapToGlobal(QPoint(0, anchor.height() + 4))
+        x = below.x()
         y = below.y()
         x = min(max(x, area.left() + INFO_POPUP_MARGIN_PX), area.right() - INFO_POPUP_MARGIN_PX - width)
         y = min(max(y, area.top() + INFO_POPUP_MARGIN_PX), area.bottom() - INFO_POPUP_MARGIN_PX - height)
         self.move(x, y)
         self.show()
+
+
+class InfoPopup(AnchoredPopup):
+    """@brief Instructions shown on demand under an «i» icon.
+
+    @note Rich text in one wrapped label; see AnchoredPopup for placement.
+    """
+
+    def __init__(self, html_text: str, parent: QWidget):
+        self.label = QLabel(html_text)
+        self.label.setTextFormat(Qt.TextFormat.RichText)
+        self.label.setWordWrap(True)
+        self.label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        super().__init__([self.label], parent)
+
+    def set_text(self, html_text: str) -> None:
+        """@brief Replace the popup text (e.g. after a language change).
+
+        @param html_text Rich text.
+        """
+        self.label.setText(html_text)

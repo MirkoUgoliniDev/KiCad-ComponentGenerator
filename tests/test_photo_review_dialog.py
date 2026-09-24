@@ -1481,15 +1481,19 @@ def test_the_zoom_percentage_follows_the_view(dialog, app):
     assert dialog.zoom_label.text() == "100%"
 
 
-def test_the_instructions_moved_to_a_popup_and_the_colour_legend_stays_visible(dialog, app):
-    """@brief Istruzioni nel popup dell'icona «i»; legenda dei colori compatta e sempre visibile.
+def test_the_instructions_moved_to_a_popup_and_the_details_to_another(dialog, app):
+    """@brief Istruzioni nel popup «i»; stato del modello, avvisi e legenda nel popup dei dettagli.
 
-    Negativo: nessuna etichetta di istruzioni resta sopra la foto.
+    Contratto cambiato di proposito il 2026-09-24 (sera): la legenda compatta
+    sempre visibile in colonna, scelta del pomeriggio, e' stata rovesciata
+    dall'utente, che vuole in un popup tutto il testo della colonna.
+    Negativo: nessuno di quei testi resta fisso nella finestra.
     """
-    texts = [label.text() for label in dialog.findChildren(QLabel)
-             if label is not dialog.info_popup.label]
-    assert not any("Tasto centrale" in text for text in texts if text)
-    assert dialog.legend.isVisibleTo(dialog)
+    fixed = [label.text() for label in dialog.findChildren(QLabel)
+             if label.window() is dialog]
+    assert not any("Tasto centrale" in text for text in fixed if text)
+    for label in (dialog.model_status, dialog.warning_label, dialog.legend):
+        assert label.window() is dialog.details_popup
     assert dialog.legend.text().count("&#9679;") == 4
     dialog.info_button.click()
     app.processEvents()
@@ -1497,6 +1501,27 @@ def test_the_instructions_moved_to_a_popup_and_the_colour_legend_stays_visible(d
     assert "Tasto centrale" in dialog.info_popup.label.text()
     assert dialog.frameGeometry().contains(dialog.info_popup.frameGeometry())
     dialog.info_popup.hide()
+    dialog.details_button.click()
+    app.processEvents()
+    assert dialog.details_popup.isVisible()
+    assert dialog.frameGeometry().contains(dialog.details_popup.frameGeometry())
+    dialog.details_popup.hide()
+
+
+def test_the_details_icon_says_when_the_selected_component_has_warnings(dialog):
+    """@brief Gli avvisi non spariscono alla vista: l'icona diventa arancione.
+
+    Positivo: il componente 2 della fixture e' a bassa confidenza, quindi ha
+    avvisi. Negativo: senza scelta l'icona e' quella normale.
+    """
+    dialog.component_list.setCurrentRow(1)
+    assert dialog.details_button.property("has_warnings") is True
+    assert "avvisi" in dialog.details_button.toolTip().splitlines()[1]
+    assert "incerto" in dialog.warning_label.text()
+    dialog.scene.clearSelection()
+    dialog._selection_changed()
+    assert dialog.details_button.property("has_warnings") is False
+    assert dialog.details_button.toolTip().splitlines()[0] == "Dettagli del componente scelto"
 
 
 def test_the_attenuated_photograph_fades_into_the_neutral_backdrop(dialog, app):

@@ -5348,3 +5348,98 @@ nuovo/apri/rinomina) e' nel commit che segue `0378bf1` su `YOLO-SOLUTION`
 progetti per cartella»), pushato su richiesta dell'utente. Esclusi come
 sempre `data/analysis_profiles.sqlite3`, `Private/`, `Claude outputs/`.
 Suite al commit: 3866 passati, 3 saltati, 2 xfail, 19 sottotest.
+
+## Segnalato dall'utente il 24/09 sera, DA FARE DOPO (solo annotato)
+
+- Casella «Fermati dopo l'inventario AI per rivedere i corpi (gratuito)» nel
+  tab Progetto: «deve essere di default». Verificato: nel codice e' GIA'
+  accesa di serie (`_inventory_pause_enabled`, vero finche' qualcuno non la
+  spegne) e nel `config.json` dell'utente `pause_after_inventory` e' `true`.
+  Nel suo screenshot la casella E' spuntata, ma non si capisce: lo stile
+  `QCheckBox::indicator:checked` in `theme.py` riempie il quadrato di blu
+  SENZA segno di spunta, e un quadrato pieno non si legge come «acceso».
+  Probabile correzione: segno di spunta (SVG) nell'indicatore, per TUTTE le
+  caselle dell'app. Da confermare con l'utente prima di toccare.
+- Scritta «Lingua:» in alto a destra (accanto alla tendina della lingua):
+  sostituirla con un'icona (globo, SVG a linea come le altre), con il nome
+  nel tooltip e come nome accessibile della tendina. Solo annotato.
+- **Riquadri «sfalsati quando zoomo»** in Revisione componenti (screenshot
+  del 24/09, progetto Test a 173%). **Diagnosi: NON e' lo zoom.** L'overlay
+  salvato dall'analisi stessa (`generated/Test/photo-cache/inventory-
+  20260924-104442-overlay.png`, disegnato sulla foto calibrata prima di ogni
+  finestra) mostra gli stessi sfalsamenti (48, 49 sotto i componenti, 12, 33,
+  50). Per tutti i 53 componenti `x_mm/y_mm` coincidono con `_box` su una
+  scheda 63,3 x 25,4 mm, e il rapporto della foto (2,4885) e' quello della
+  scheda: la finestra disegna esattamente cio' che l'inventario ha prodotto.
+  La corsa era «Solo modello di visione (nessun rilevatore locale)»: i
+  riquadri li stima il modello AI e sbaglia di qualche decimo di mm sui
+  corpi piccoli (qui verso il basso in basso a destra). Opzioni date
+  all'utente: rifare con il rilevatore locale YOLO (consigliato), correggere
+  a mano, oppure cercare un riallineamento automatico (ma l'aggancio ai bordi
+  era gia' stato provato e tolto dal percorso standard per regressioni).
+  In attesa della sua scelta.
+- **Barra del tab 3D uniforme** (24/09 sera, fatto): «Rigenera»
+  aveva una cornice blu fissa (`QToolButton#primary`) e sembrava un
+  interruttore acceso. Tolti l'objectName, le regole `QToolButton#primary` e
+  le costanti `BLUE_TINT*` del tema; il divisore del tab 3D e quello delle
+  revisioni sono ora lo stesso `review_tools.toolbar_divider()` (colore dal
+  tema). Contratto cambiato di proposito in
+  `test_3d_tab_workflow_icons.py::test_every_icon_of_the_bar_shares_one_style`.
+  Interpretazione dell'utente da confermare: ho supposto che «altro stile»
+  fosse la cornice di «Rigenera». I QPushButton «primary» (Estrai parametri,
+  Genera, Test KiCad) restano: sono pulsanti con testo, non icone di barra.
+
+## PIANO IN CORSO (24/09 sera) — «applica tutte le modifiche»
+
+Scritto PRIMA di toccare il codice, come chiede la nuova regola in
+`.claude/CLAUDE.md` («Prima di partire con le modifiche, l'handoff si
+aggiorna»). Stato di ogni punto aggiornato man mano.
+
+1. [x] **Testi della colonna di «Revisione componenti» in un popup** aperto da
+   un'icona info nella barra, accanto all'icona della foto (screenshot
+   dell'utente). Vanno nel popup: il suggerimento «Doppio clic…», lo stato del
+   modello KiCad del componente scelto, gli avvisi del componente scelto e la
+   legenda dei colori. **Rovescia la scelta di ieri pomeriggio** (legenda
+   compatta sempre visibile): decisione nuova dell'utente. Rischio da
+   evitare: gli avvisi del componente scelto non devono sparire alla vista;
+   l'icona cambia aspetto (colore d'attenzione) quando il componente scelto
+   ha avvisi, e il popup si aggiorna col componente scelto. I pulsanti
+   «Parametri…», «Scegli modello KiCad…» e «Dubbi dichiarati…» restano.
+2. [x] **Segno di spunta nelle caselle** di tutta l'app (`theme.py`,
+   `QCheckBox::indicator:checked` + SVG). L'utente non ha risposto alla
+   domanda «spunta o pausa sempre attiva»: interpreto «applica tutte le
+   modifiche» come la mia proposta (spunta), la pausa resta una casella gia'
+   accesa di serie. Da dirgli.
+3. [x] **Icona globo al posto della scritta «Lingua:»**, nome nel tooltip e
+   nome accessibile della tendina.
+4. [x] Barra del tab 3D uniforme (fatto prima di questo piano).
+5. NON e' una modifica da applicare: i riquadri sfalsati sono un errore
+   dell'inventario AI (vedi sopra); resta in attesa della scelta dell'utente
+   fra le tre possibilita'.
+
+**Esito del piano del 24/09 sera**: punti 1, 2, 3 fatti.
+- 1: `review_tools.AnchoredPopup` (popup generico con widget qualsiasi;
+  `InfoPopup` ne e' un caso), si apre dal bordo SINISTRO dell'icona e rientra
+  nella finestra. In «Revisione componenti» icona «Dettagli del componente
+  scelto» accanto alla foto: popup con `model_status`, `warning_label` e
+  legenda; l'icona diventa arancione (`component-details-warn.svg`,
+  proprieta' `has_warnings`) quando il componente scelto ha avvisi.
+  Difetto trovato dal test negativo e corretto: togliendo la scelta l'icona
+  restava arancione.
+- 2: segno di spunta nelle caselle accese (`assets/check-mark.svg`,
+  `theme._CHECK_MARK`). Test `tests/test_theme_indicators.py`.
+- 3: globo (`assets/language.svg`) al posto di «Lingua:»; nome in tooltip e
+  nome accessibile di icona e tendina, ritradotti al cambio lingua
+  (`_refresh_language_texts`, chiave `language.name` che sostituisce
+  `language.label`). Test `tests/test_language_icon.py`.
+- Suite completa: **3871 passati**, 3 saltati, 2 xfail, 19 sottotest.
+
+## Commit del 24/09 sera
+
+Barra 3D uniforme, regola «handoff prima di partire» in `.claude/CLAUDE.md`,
+popup dei dettagli in Revisione componenti, spunta nelle caselle, globo della
+lingua: nel commit che segue `7cc15cb` su `YOLO-SOLUTION`, pushato su
+richiesta dell'utente. Esclusi `data/analysis_profiles.sqlite3`, `Private/`,
+`Claude outputs/`. Suite al commit: 3871 passati, 3 saltati, 2 xfail, 19
+sottotest. Resta aperta la scelta dell'utente sui riquadri sfalsati
+(inventario AI, non zoom).

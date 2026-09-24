@@ -71,7 +71,7 @@ from PyQt6.QtWidgets import (
 )
 
 
-from .review_tools import (InfoPopup, asset_icon, set_tool_texts, tool_button,
+from .review_tools import (AnchoredPopup, InfoPopup, asset_icon, set_tool_texts, tool_button,
                            toolbar_divider)
 
 
@@ -1050,6 +1050,12 @@ class PhotoReviewDialog(QDialog):
         # no longer change the width of the toolbar and zoom the drawing, as
         # the old text button did with Windows fonts.
         self.photo_button = tool_button("photo-full.svg", "", checkable=True, tr=tr)
+        # Dettagli del componente scelto (utente, 2026-09-24): stato del modello
+        # KiCad, avvisi e legenda dei colori stanno in un popup invece che in
+        # colonna. L'icona diventa arancione quando il componente scelto ha
+        # avvisi, cosi' non spariscono alla vista (vedi `_update_details_button`).
+        self.details_button = tool_button("component-details.svg", "", tr=tr)
+        self._selected_has_warnings = False
         self.info_button = tool_button(
             "info.svg", "Come si usa", "",
             "Istruzioni, colori e scorciatoie da tastiera di questa finestra.", tr=tr)
@@ -1059,7 +1065,8 @@ class PhotoReviewDialog(QDialog):
         toolbar.setSpacing(4)
         for widget in (self.add_button, self.delete_button, toolbar_divider(),
                        self.zoom_out_button, self.zoom_label, self.zoom_in_button,
-                       self.fit_button, toolbar_divider(), self.photo_button):
+                       self.fit_button, toolbar_divider(), self.photo_button,
+                       self.details_button):
             toolbar.addWidget(widget)
         toolbar.addStretch()
         toolbar.addWidget(self.info_button)
@@ -1171,22 +1178,24 @@ class PhotoReviewDialog(QDialog):
         self.model_status = QLabel("Doppio clic su un componente per confrontare i modelli 3D.")
         self.model_status.setWordWrap(True)
         self.model_status.setTextFormat(Qt.TextFormat.PlainText)
-        sidebar.addWidget(self.model_status)
         self.warning_label = QLabel()
         self.warning_label.setWordWrap(True)
         self.warning_label.setTextFormat(Qt.TextFormat.PlainText)
-        sidebar.addWidget(self.warning_label)
         # La legenda dichiara anche la precedenza, perche' il colore e' un
         # canale solo: un corpo fuori PCB e senza tipo e' rosso, e il tipo
         # mancante resta scritto nell'avviso e nel marcatore della lista.
-        # Compatta e sempre visibile (utente, 2026-09-24): il colore si legge
-        # ogni volta che si guarda la foto, quindi resta qui e non nel popup.
         # Pallino del colore vero + parola: il colore non e' l'unico canale.
+        # Nel popup dei dettagli insieme a stato del modello e avvisi (utente,
+        # 2026-09-24, che rovescia la scelta del pomeriggio di tenerla sempre
+        # visibile in colonna).
         self.legend = QLabel(self._legend_html())
         self.legend.setTextFormat(Qt.TextFormat.RichText)
         self.legend.setWordWrap(True)
         self.legend.setProperty("i18n_skip", True)
-        sidebar.addWidget(self.legend)
+        self.details_popup = AnchoredPopup(
+            [self.model_status, self.warning_label, self.legend], self)
+        self.details_button.clicked.connect(
+            lambda: self.details_popup.toggle_under(self.details_button))
         # I dubbi globali dell'inventario arrivavano solo al log. Qui stanno
         # dietro un pulsante che compare solo se ce ne sono: sono prosa del
         # modello, quindi vanno messi a disposizione senza occupare la barra
@@ -1252,6 +1261,7 @@ class PhotoReviewDialog(QDialog):
         self.photo_button.clicked.connect(self._photo_button_clicked)
         self._bind_shortcuts()
         self._update_zoom_label()
+        self._update_details_button()
         self._apply_photo_state()
         self.component_list.currentRowChanged.connect(self._select_row)
         self.component_list.itemDoubleClicked.connect(lambda _item: self.choose_model())
@@ -1411,6 +1421,23 @@ class PhotoReviewDialog(QDialog):
 
     def _update_zoom_label(self):
         self.zoom_label.setText(f"{self.view.zoom_percent()}%")
+
+    def _update_details_button(self):
+        """Icona e tooltip dei dettagli: arancione quando il componente scelto ha avvisi.
+
+        Gli avvisi stavano sempre sotto gli occhi in colonna; nel popup
+        sparirebbero, quindi l'icona dice che ce ne sono e il tooltip quanti.
+        Un popup aperto si ridimensiona sul testo nuovo.
+        """
+        warned = self._selected_has_warnings
+        self.details_button.setIcon(asset_icon(
+            "component-details-warn.svg" if warned else "component-details.svg"))
+        self.details_button.setProperty("has_warnings", warned)
+        set_tool_texts(
+            self.details_button, self._tr("Dettagli del componente scelto"), "",
+            self._tr("Il componente scelto ha avvisi: aprili qui." if warned else
+                     "Stato del modello KiCad, avvisi e legenda dei colori."))
+        self.details_popup.refit()
 
     def _bind_shortcuts(self):
         """Keyboard shortcuts, the same ones written in the tooltips and the popup."""
@@ -1694,6 +1721,8 @@ class PhotoReviewDialog(QDialog):
             self._reload_fields()
         else:
             self.warning_label.setText(self._tr("Seleziona o aggiungi un componente."))
+            self._selected_has_warnings = False
+            self._update_details_button()
         self._refresh_parameters_title()
         for item in self._items:
             self._refresh_item(item)
@@ -1885,6 +1914,8 @@ class PhotoReviewDialog(QDialog):
                 "\n".join(warnings)
                 if warnings else self._tr("Nessun avviso per questo componente.")
             )
+            self._selected_has_warnings = bool(warnings)
+            self._update_details_button()
 
     def _tr(self, source):
         """@brief Translate runtime status text without modifying component data."""

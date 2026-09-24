@@ -9,6 +9,9 @@ se una gira su Windows con tema chiaro di sistema.
 from pathlib import Path
 
 _COMBO_ARROW = (Path(__file__).resolve().parent / "assets" / "combo-arrow.svg").as_posix()
+#: Segno di spunta delle caselle accese: senza, una casella accesa era solo
+#: un quadrato pieno di blu, che non si legge come «acceso» (utente, 2026-09-24).
+_CHECK_MARK = (Path(__file__).resolve().parent / "assets" / "check-mark.svg").as_posix()
 
 # Palette Catppuccin Mocha (stessi valori esadecimali usati in Pm3ToWav)
 BASE = "#1e1e2e"       # sfondo finestra
@@ -24,8 +27,6 @@ RED = "#f38ba8"        # errore
 YELLOW = "#f9e2af"     # warning
 # Tinte di BLUE su BASE (20% e 30%): sfondo di un comando principale a sola
 # icona, dove il blu pieno toglierebbe contrasto al tratto chiaro dell'icona.
-BLUE_TINT = "#333c57"
-BLUE_TINT_HOVER = "#3e4b6b"
 
 
 TAB_QSS = f"""
@@ -178,6 +179,7 @@ APP_QSS = f"""
     QCheckBox::indicator:checked {{
         background: {BLUE};
         border: 1px solid {BLUE};
+        image: url("{_CHECK_MARK}");
     }}
     QListWidget, QTableWidget {{
         background: {SURFACE0};
@@ -248,23 +250,6 @@ APP_QSS = f"""
     QToolButton:checked {{
         background: {SURFACE1};
         border: 1px solid {BLUE};
-    }}
-    /* Comando principale in una barra di icone (es. «Rigenera modello 3D»):
-       stessa enfasi di QPushButton#primary, adattata a un'icona chiara. Uno
-       sfondo pieno BLUE spegnerebbe il tratto #cdd6f4 dell'icona, quindi il
-       blu sta nel bordo e in una tinta scura dello sfondo, sempre visibili e
-       non solo al passaggio del mouse. */
-    QToolButton#primary {{
-        background: {BLUE_TINT};
-        border: 1px solid {BLUE};
-    }}
-    QToolButton#primary:hover {{
-        background: {BLUE_TINT_HOVER};
-        border: 1px solid {BLUE};
-    }}
-    QToolButton#primary:disabled {{
-        background: transparent;
-        border: 1px solid {SURFACE1};
     }}
 {TAB_QSS}
 """
