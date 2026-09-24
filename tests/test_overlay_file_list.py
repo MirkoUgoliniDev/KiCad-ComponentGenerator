@@ -316,21 +316,31 @@ def test_the_log_line_stays_one_plain_line():
 def test_a_very_long_term_is_elided_in_bold_without_breaking_the_markup(make_overlay):
     """@brief Accorciamento col testo ricco: si accorcia il testo semplice e
     POI si costruisce il markup, quindi il taglio non cade mai dentro un tag o
-    un'entita'. Un termine piu' largo della scheda si accorcia da solo (col
-    font in grassetto con cui e' disegnato) e la descrizione sparisce; un
-    termine corto con una descrizione lunghissima tiene il termine intero e
-    accorcia la descrizione."""
+    un'entita'. Un termine piu' largo della scheda con una descrizione breve
+    si accorcia NEL MEZZO (col font in grassetto con cui e' disegnato: restano
+    inizio ed estensione) e la descrizione resta intera; un termine corto con
+    una descrizione lunghissima tiene il termine intero e accorcia la
+    descrizione.
+
+    CAMBIATO il 2026-09-24: prima il termine lunghissimo si accorciava in coda
+    e la descrizione spariva. Su Windows lo stesso ordine tagliava il ruolo di
+    un documento («Foto ad alta risoluzio…») anche con un nome gia' accorciato
+    dal mittente, in contrasto con
+    test_a_very_long_name_is_shortened_by_the_sender_and_shown_whole_line; i
+    due contratti convivevano solo perche' coi caratteri di Linux quella riga
+    stava nella scheda. La regola e' in `_elide_row`."""
     overlay, _, app = make_overlay()
     long_name = "&<" + "nome-lunghissimo-" * 30 + ".png"
     long_role = "descrizione " * 40
     overlay.set_status(f"Documenti: {long_name} — ruolo · corto.png — {long_role}")
     lines = _lines(overlay)
     assert len(lines) == 3
-    assert lines[1].startswith("&<nome-lunghissimo-") and lines[1].endswith("…")
-    assert " — " not in lines[1]
+    shown, separator, role = lines[1].partition(" — ")
+    assert separator and role == "ruolo"
+    assert shown.startswith("&<nome-lunghissimo-") and shown.endswith(".png") and "…" in shown
     assert lines[2].startswith("corto.png — descrizione") and lines[2].endswith("…")
     runs = _bold_runs(overlay.status)
-    assert runs == [lines[1], "corto.png"]
+    assert runs == [shown, "corto.png"]
     _assert_fully_visible(overlay, app)
 
 

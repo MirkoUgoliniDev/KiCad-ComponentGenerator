@@ -25,7 +25,7 @@ from kicadgen.generators.castellated_module import (
     CONTACT_HALF_AND_THROUGH, CONTACT_HALF_HOLE, CONTACT_STYLES, CONTACT_THROUGH_HOLE,
     EDGES, MIN_HOLE_WALL_MM, CastellatedModuleParams, CastellatedSide,
     build_castellated_module, continuous_pad, fallback_through_hole_inset, opposite_row_edges,
-    pad_positions, through_hole_inset_from_rows,
+    SMD_WITH_DRILLED_PADS_NOTE, pad_positions, through_hole_inset_from_rows,
 )
 from kicadgen.core.footprint import FpCircle, FpText
 
@@ -127,7 +127,18 @@ def test_the_contract_names_and_default_are_the_agreed_ones():
 #: bordo piu' un pad THT tondo separato. Valori precedenti, per traccia:
 #: rs485 47dcab5e..., four 78160c60... La forma nuova e' verificata per
 #: struttura in tests/test_contact_pad_shape.py, non solo dall'impronta.
+#: CAMBIATO DI NUOVO il 2026-09-24 (decisione dell'utente: il footprint resta
+#: `smd` anche con le piazzole forate, e la ragione va scritta nella
+#: descrizione): l'unica differenza e' SMD_WITH_DRILLED_PADS_NOTE in coda a
+#: `descr`. Tolta quella frase, l'uscita coincide con i valori del 2026-09-23
+#: (rs485 ab8e4527..., four 87c86d6b...), come prova
+#: test_the_only_change_of_2026_09_24_is_the_smd_sentence.
 PINNED_FOOTPRINT = {
+    "rs485": "701474f9d7cafc34bb029b814e365a43f0ebfdd0472ac141b004d36018f503e8",
+    "four": "cb4ba41dda8425847de81f9097c107c9730ba215ccebfd4124f848b6810ac894",
+}
+#: Impronte del 2026-09-23, prima della frase sul tipo SMD.
+PINNED_FOOTPRINT_BEFORE_SMD_NOTE = {
     "rs485": "ab8e45275e6f5842bf4a0d79af3e1fdcb52bc7c47c472979a0f2d6a93913ad15",
     "four": "87c86d6b8cd8c540036c119f67cc0385b13507824800474696213dc29aef4002",
 }
@@ -150,6 +161,15 @@ BUILDERS = {"rs485": rs485, "four": four_sided}
 def test_default_footprint_is_byte_identical_to_the_pinned_output(name):
     rendered = _uuidless(build_castellated_module(BUILDERS[name]()))
     assert hashlib.sha256(rendered.encode()).hexdigest() == PINNED_FOOTPRINT[name]
+
+
+@pytest.mark.parametrize("name", sorted(BUILDERS))
+def test_the_only_change_of_2026_09_24_is_the_smd_sentence(name):
+    """@brief Tolta la frase sul tipo SMD, l'impronta e' quella del 2026-09-23."""
+    rendered = _uuidless(build_castellated_module(BUILDERS[name]()))
+    assert rendered.count(SMD_WITH_DRILLED_PADS_NOTE) == 1
+    stripped = rendered.replace(" " + SMD_WITH_DRILLED_PADS_NOTE, "")
+    assert hashlib.sha256(stripped.encode()).hexdigest() == PINNED_FOOTPRINT_BEFORE_SMD_NOTE[name]
 
 
 @pytest.mark.parametrize("name", sorted(BUILDERS))

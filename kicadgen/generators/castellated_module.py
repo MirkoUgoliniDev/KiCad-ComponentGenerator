@@ -75,6 +75,17 @@ CONTACT_HALF_AND_THROUGH = "half_and_through"
 #: modello, non dedotto da una soglia dimensionale: vedi datasheet_extractor.
 CONTACT_STYLES = (CONTACT_HALF_HOLE, CONTACT_THROUGH_HOLE, CONTACT_HALF_AND_THROUGH)
 
+#: Frase aggiunta alla descrizione di un footprint dichiarato SMD che porta
+#: pad forati. KiCad considera incoerente il tipo (controllo DRC
+#: `footprint_type_mismatch`, spento di serie in KiCad 10) e di norma esporta
+#: nel file di posizionamento solo i footprint SMD. Il tipo resta SMD per
+#: scelta dell'utente (2026-09-24): il modulo si posa e si salda a rifusione,
+#: quindi deve restare in quel file; la frase lo dice a chi apre la libreria.
+SMD_WITH_DRILLED_PADS_NOTE = (
+    "Tipo SMD di proposito anche con piazzole forate: il modulo si posa e si "
+    "salda a rifusione, i fori non ospitano pin."
+)
+
 #: Nomi leggibili dei tipi di contatto, per i messaggi d'errore e i log.
 CONTACT_STYLE_NAMES = {
     CONTACT_HALF_HOLE: "mezzo foro sul bordo",
@@ -1038,12 +1049,20 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
         castellations cannot be reflowed onto edge pads, so such a footprint
         could not be soldered to the part. The footprint attribute stays
         "smd" whenever some side has castellations (the module is reflowed),
-        "through_hole" when every contact is a through-hole.
+        "through_hole" when every contact is a through-hole. An "smd"
+        footprint that carries drilled pads (continuous pads, or a side of
+        through-holes next to castellated sides) gets
+        SMD_WITH_DRILLED_PADS_NOTE appended to its description: KiCad flags
+        that combination and leaves non-SMD footprints out of the default
+        position file, so the reason for keeping "smd" is written where the
+        library user reads it (user decision 2026-09-24).
     @note The continuous pad carries F.Paste so the castellations can still be
         reflowed (the old SMD edge pad carried it). KiCad applies the paste to
         the whole copper, drill mouth included: pin-in-paste, which also fills
-        the module's through-hole above. It carries no `pad_prop_castellated`:
-        this footprint is the land on the HOST board, which is not cut by any
+        the module's through-hole above. Kept on purpose (user decision
+        2026-09-24), knowing it is more paste than the old edge land and can
+        bridge contacts on a tight pitch; no paste-only pad is added. It
+        carries no `pad_prop_castellated`: this footprint is the land on the HOST board, which is not cut by any
         board edge; the castellation belongs to the module and is in the 3D.
     @note half_hole and through_hole contacts are emitted exactly as before
         (byte-identical output).
@@ -1173,4 +1192,9 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
                 size=0.8, thickness=0.12,
             ))
 
+    if fp.attr == "smd" and any(pad.pad_type == "thru_hole" for pad in fp.pads):
+        # Il criterio e' la combinazione che KiCad segnala (tipo SMD con pad
+        # forati), non il tipo di contatto: vale per le piazzole a stadio e
+        # per un modulo che mescola lati half_hole e through_hole.
+        fp.description = f"{fp.description} {SMD_WITH_DRILLED_PADS_NOTE}".strip()
     return fp

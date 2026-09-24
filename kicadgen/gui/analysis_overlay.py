@@ -346,9 +346,21 @@ def _elide_row(line, width, regular, bold, is_item):
     termine col font in grassetto con cui verra' disegnato: misurato col peso
     normale, il grassetto sborderebbe di qualche pixel.
 
-    Come `ElideRight` sulla riga intera, si tiene la TESTA: prima si accorcia la
-    descrizione; se non resta posto neppure per l'ellissi dopo il termine, si
-    accorcia il termine stesso e la descrizione sparisce (l'ellissi lo dice).
+    Quando la riga non sta, si accorcia prima il TERMINE nel mezzo (restano
+    l'inizio e la fine, cioe' l'estensione di un nome di file) e la
+    descrizione resta intera, purche' la descrizione col separatore occupi al
+    massimo meta' della riga. Il termine e' un dato lungo quanto vuole chi lo
+    ha scritto; la descrizione, nelle righe che la portano (il ruolo di un
+    documento), e' un'etichetta breve che dice la cosa da sapere. Prima si
+    tagliava la descrizione: con i caratteri di Windows un nome gia'
+    accorciato a 40 caratteri dal mittente lasciava «Foto ad alta risoluzio…».
+
+    La meta' e' una scelta dichiarata, non una misura: nessuna delle due parti
+    toglie all'altra piu' dello spazio che lascia. Non e' tarata su nessun
+    caso; sarebbe superflua se le righe dell'elenco potessero andare a capo.
+    Oltre quella soglia vale la regola di `ElideRight`: si tiene la TESTA, si
+    accorcia la descrizione; se non resta posto neppure per l'ellissi dopo il
+    termine, si accorcia il termine e la descrizione sparisce.
     """
     parts = enumeration_term(line) if is_item else None
     if parts is None:
@@ -357,6 +369,9 @@ def _elide_row(line, width, regular, bold, is_item):
     lead = bold.horizontalAdvance(term) + regular.horizontalAdvance(_TERM_SEPARATOR)
     if lead + regular.horizontalAdvance(description) <= width:
         return term, description
+    tail = regular.horizontalAdvance(_TERM_SEPARATOR + description)
+    if tail <= width / 2:
+        return bold.elidedText(term, Qt.TextElideMode.ElideMiddle, width - tail), description
     if lead + regular.horizontalAdvance("…") <= width:
         return term, regular.elidedText(description, Qt.TextElideMode.ElideRight,
                                         width - lead)
@@ -888,6 +903,12 @@ class AnalysisOverlay(QWidget):
         self.status.setMinimumHeight(self._status_base_height + self._status_extra)
         self.tool.setMinimumHeight(self.tool.fontMetrics().lineSpacing())
         self.cost.setMinimumHeight(self.cost.fontMetrics().lineSpacing())
+        # Anche il tempo trascorso: nasce vuoto e riceve il primo testo in
+        # `start`, DOPO questo calcolo. Una label vuota e una con testo non
+        # chiedono la stessa altezza (14 e 12 px su una piattaforma di prova),
+        # quindi la prima operazione aveva una scheda di 2 px diversa dalle
+        # successive. Una riga intera riservata la rende indipendente dal testo.
+        self.elapsed.setMinimumHeight(self.elapsed.fontMetrics().lineSpacing())
         # Spazio riservato anche quando la riga e' nascosta: evita che la scheda
         # salti quando lo strumento, la barra o il costo compaiono a operazione
         # avviata. La visibilita' logica non cambia (isVisibleTo resta falso).

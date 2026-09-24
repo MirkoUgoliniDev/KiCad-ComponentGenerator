@@ -4902,3 +4902,189 @@ senza testo (nome nel tooltip / nome accessibile); barra in alto in
 Gli SVG nuovi (`step-view-iso.svg`, `wf-*.svg`) vanno scritti sul disco
 dell'utente con `device_bash`, non con `device_commit_files` (che vi inietta
 il manifesto C2PA).
+
+# 2026-09-24 — verifiche su Windows: suite, FreeCAD 1.1 e KiCad 10 veri
+
+Branch `YOLO-SOLUTION`, ultimo commit `3d9df9f`, **pushato** (0/0 rispetto a
+`origin/YOLO-SOLUTION` dopo `git fetch`). Sessione di sola verifica: nessuna
+modifica al codice, nessuna chiamata AI (solo geometria locale, FreeCAD,
+kicad-cli). Macchina: Windows 11, FreeCAD 1.1.1, KiCad 10.0.6, GPU AMD Radeon
+integrata, schermo 1920x1200 a DPR 1.0.
+
+## Suite completa su Windows
+
+3807 raccolti: **3793 passati**, 3 saltati, 2 xfail, 19 sottotest,
+**6 falliti e 3 errori** (488 s). Su Linux: 3793 passati, 11 saltati, zero rossi.
+Otto test prima saltati qui girano; fra questi `test_find_pcbnew_next_to_kicad_cli`,
+che **passa**.
+
+I 9 rossi, in ordine di importanza (nessuno corretto, in attesa dell'utente):
+
+1. `test_freecad_import_failure_backend.py::test_real_freecad_corrupt_step_exports_failure_metadata`
+   (FreeCAD vero, su Linux sempre saltato). **Contratto del test superato, non un
+   difetto del prodotto**: il test (09ac162) chiede un `_silk` attorno al
+   segnaposto dell'import fallito; 3ae0f9e, lo stesso giorno, ha messo la
+   cornice solo dove il corpo non contrasta col fondo. Il segnaposto e' magenta
+   (`freecad_parts.py`, `color_hex = "#FF00FF"`), contrasta col PCB scuro,
+   quindi niente cornice, ed e' giusto cosi'. Il componente scuro «After» la
+   cornice ce l'ha. Da aggiornare il contratto (positivo: niente cornice sul
+   magenta; negativo: cornice sul corpo scuro), non allentare.
+2. `test_yolo_review_dialog.py`, 3 ERROR nel fixture `small_dialog`: la
+   precondizione «riquadro < MIN_BOX_PX» non regge (16,3 px contro 12).
+   Qui Qt usa la piattaforma `windows` vera (conftest non forza `offscreen`) e la
+   vista finisce a un'altra scala. Il test vale solo alla scala in cui e' nato:
+   il riquadro va ricavato dalla scala della vista.
+   **[CORRETTO nel pomeriggio]** La scala era diversa per un difetto vero:
+   la finestra non poteva stare sotto i 1540 px (vedi «Lavoro fatto»).
+3. `test_analysis_overlay.py`, 2 fallimenti da metrica dei font:
+   - `..._shown_whole_line`: con i font Windows e' il **ruolo** a essere
+     accorciato («Foto ad alta risoluzio…»), non il nome. Sulla scheda vera
+     l'utente perderebbe la fine del ruolo: **difetto cosmetico reale su Windows**.
+   - `..._does_not_shrink_back...`: 372 contro 374 px dopo `start()`, 2 px di
+     metrica. **[CORRETTO nel pomeriggio]** Non era solo metrica: la prima
+     operazione aveva una scheda diversa dalle successive (vedi «Lavoro fatto»).
+4. `test_photo_review_dialog.py`, 3 fallimenti:
+   - `..._37_degrees...`: componente v residua 0,0506 mm con soglia fissa 0,05
+     tarata sulla scala Linux. La soglia va ricavata da mezzo pixel della vista.
+   - `..._hiding_the_photograph...` e `..._attenuated_photograph...`: conteggio
+     dei pixel entro ±40 dal colore della penna. **Controllo visivo fatto**
+     (immagini della vista con foto e senza): entrambi i contorni restano
+     disegnati e fermi, quindi non e' un difetto visibile. E' fragile la misura,
+     che dipende dal rasterizzatore.
+     **[CORRETTO nel pomeriggio]** Diagnosi sbagliata: il controllo visivo era
+     fatto fuori dalla suite, a finestra ferma. Nella suite la finestra si
+     allargava di 12 px quando cambia lo stato della foto e i contorni si
+     spostavano davvero (vedi «Lavoro fatto»).
+
+## STEP reale di un castellated half_and_through (FreeCAD 1.1.1)
+
+Modulo di prova 25,4x20 mm, 2x8 contatti, passo 1,27, foro passante a 1,27 mm
+dal bordo (esplicito), stadio 1,82x1,1 mm. Generazione 5,1 s, nessun avviso.
+Ogni `PinN` ha 4 solidi: mezza canna, canna del foro passante, stadio sopra,
+stadio sotto. Tutte le forme sono `isValid()`.
+- **Continuita'**: stadio sopra e sotto = 1 solido, 1 guscio, da x=-12,70
+  (bordo) a -10,88 (lato lontano della corona). Raggi verticali ogni 0,02 mm
+  sull'asse, sopra e sotto, lati sinistro e destro: **0 anomalie**, oro anche
+  sulla parete di 0,27 mm fra i due fori e fori aperti. Fuori asse (0,6 e 0,9
+  della semilarghezza) le uniche «anomalie» cadono oltre l'estremita' tonda
+  dello stadio, cioe' sono giuste.
+- **Sfarfallio**: 0 volumi sovrapposti (contatto contro contatto, scheda,
+  serigrafia). Facce coincidenti trovate solo con normale **opposta**, a
+  contatto schiena contro schiena (canne contro pareti forate, stadio sulla
+  maschera). **Zero** facce complanari con la stessa normale fra oggetti
+  diversi.
+- Render ravvicinato dalla mesh esportata: stadio dorato continuo, nessun nero
+  fra mezzo foro e foro passante.
+- Diverso ma innocuo: i pin di sinistra hanno 32 facce e quelli di destra 28,
+  con lo stesso volume (0,3021). La cucitura del cilindro cade nella meta'
+  tenuta solo a sinistra.
+- Rumore nel log: FreeCAD stampa «File format not supported: ...kicadgen_params»,
+  perche' prova ad aprire come documento il file dei parametri passato in argv.
+  Innocuo, ma finisce nel log dell'utente.
+
+## Footprint con kicad-cli 10.0.6 (sola lettura, file nello scratchpad)
+
+- Pad: `thru_hole oval`, `(size 2.62 1.1)`, `(drill 0.6 (offset 0.76 0))` a
+  sinistra e `(offset -0.76 0)` a destra. Il centro del foro sta a 1,27 mm dal
+  bordo, lo sbalzo e' 0,8 mm. `fp upgrade`: letto senza errori, gia' al formato
+  corrente.
+- DRC su una scheda minima con il footprint impaginato:
+  - **`footprint_type_mismatch` NON compare con le impostazioni predefinite**:
+    in KiCad 10 la regola e' `ignore` di serie (anche nei progetti demo). Forzata
+    a `error` compare solo su half_and_through: «Tipo impronta non corrispondente
+    con le sue piazzole (atteso 'Foro passante'; effettivo 'SMD')».
+    half_hole e through_hole restano puliti.
+  - `silk_over_copper` (16) sul contorno F.SilkS che passa sulle piazzole: c'e'
+    **identico anche in half_hole**, quindi non viene dallo stadio.
+  - `clearance` 0,17 mm contro 0,20 di default: dipende dalle MIE quote di prova
+    (pad da 1,1 mm a passo 1,27) e compare uguale in half_hole (14 coppie su
+    F.Cu contro 28 su F.Cu+B.Cu). Non e' una classe nuova. Da notare pero':
+    `validate()` rifiuta solo passo < larghezza stadio, non la distanza di
+    isolamento.
+
+## Tempo di ingresso nel tab 3D su generated/Test2 (finestra e VTK veri)
+
+Mesh attuale: 20,9 MB, 464 parti, 461k triangoli. I numeri della sessione
+precedente (171 pezzi, 287k) erano di una mesh piu' vecchia: il file e' stato
+rigenerato il 23/09 alle 20:02. Due processi separati:
+- 1° ingresso: `setCurrentIndex` torna in 44–53 ms (la scheda si disegna subito
+  con l'indicatore), render completo **3,17–3,20 s** (`render_mesh` 3,0 s, di
+  cui `json.load` 0,36 s).
+- Rientri con lo stesso file: **36–81 ms**, `render_mesh` non chiamato
+  (`is_showing` = True).
+
+## Decisioni dell'utente (24/09, dopo le domande con i disegni)
+
+1. **Pasta saldante: resta su tutta la piazzola a stadio**, bocca del foro
+   compresa (pin-in-paste). Nessuna piazzola di sola pasta. Scelta fatta
+   sapendo del rischio di ponti col passo stretto.
+2. **Attributo: resta `(attr smd)`** anche con soli pad passanti: il modulo si
+   salda a rifusione e deve restare nel file di posizionamento. La ragione va
+   scritta nella descrizione del footprint, solo quando ci sono piazzole a
+   stadio (half_hole e through_hole restano byte per byte identici).
+3. **Correggere tutti e 9 i test rossi su Windows**, aggiornando il contratto
+   di ciascuno senza allentarlo, e correggere il ruolo accorciato nella modale.
+
+## Lavoro fatto il 24/09 sulle tre decisioni (non committato)
+
+**Decisione 2, frase nella descrizione.** `SMD_WITH_DRILLED_PADS_NOTE` in
+`castellated_module.py`, aggiunta in coda a `descr` quando il footprint e'
+`smd` e ha almeno un pad `thru_hole`. Il criterio e' la combinazione che KiCad
+segnala, non il tipo di contatto: vale anche per un modulo che mescola lati
+half_hole e through_hole (generalizzato di proposito, da dire all'utente).
+Impronte fissate `rs485`/`four` in `test_contact_style.py` aggiornate; un test
+prova che, tolta la frase, l'uscita e' quella del 23/09. half_hole e
+through_hole puri restano byte per byte identici. Nuovo
+`tests/test_smd_drilled_note.py`: 2 positivi, 3 negativi, descrizione estratta
+conservata, frase presente nel file. Docstring aggiornate anche per la pasta
+(decisione 1: nessun cambio di codice).
+
+**Decisione 3, i 9 test. La diagnosi del mattino era incompleta**: tre di
+quelli dati come «fragilita' della misura» nascondevano difetti veri
+dell'interfaccia, visibili sulla macchina dell'utente.
+1. FreeCAD, cornice: contratto aggiornato (nessuna cornice sul magenta,
+   cornice con `source_row` 2 sul corpo scuro nella stessa corsa).
+2. YOLO, 3 errori: **difetto vero**. L'etichetta delle istruzioni non andava a
+   capo e fissava la larghezza minima della finestra a 1540 px, piu' della
+   misura che la finestra chiede (1100) e di uno schermo da portatile.
+   `self.instructions` con `setWordWrap(True)`: minimo 826 px. Nuovo test con
+   precondizione (la frase su una riga e' piu' larga della finestra).
+3. Revisione fotografica, pixel dei contorni (2): **difetto vero**. La
+   larghezza minima della finestra e' quella della barra; pulsante foto ed
+   etichetta di stato cambiano testo a ogni pressione e con i font Windows la
+   finestra passava da 1162 a 1174 px: la vista si riadattava e i contorni si
+   spostavano proprio quando si nascondeva la foto.
+   `_reserve_photo_control_widths` riserva la larghezza del testo piu' lungo
+   dei tre stati (misurata con il `sizeHint` del widget), anche in
+   `showEvent`. Nuovo test: finestra, vista e trasformazione invariate per
+   tutto il ciclo; verificato che fallisce con la correzione disattivata.
+4. Revisione fotografica, 37°: la soglia fissa 0,05 mm diventa il limite
+   fisico dell'arrotondamento (mezzo pixel della vista per asse, proiettato
+   su v). Alla scala Windows vale 0,058: e' il limite giusto per quella scala.
+5. Modale, ruolo accorciato: **difetto vero** (gia' segnalato).
+   `_elide_row` ora accorcia prima il nome nel mezzo e tiene intera la
+   descrizione, se questa occupa al massimo meta' della riga. **Euristica
+   dichiarata**: la meta' e' una scelta, non tarata su nessun caso. Contratto
+   cambiato di proposito in
+   `test_overlay_file_list.py::test_a_very_long_term_is_elided_in_bold...`,
+   che chiedeva il contrario (i due test convivevano solo coi font Linux).
+6. Modale, 372 contro 374 px: **difetto vero**, un sobbalzo di 2 px fra la
+   prima operazione e le successive. L'etichetta del tempo trascorso riceve il
+   primo testo dopo il dimensionamento, e vuota chiede un'altezza diversa.
+   Ora ha una riga riservata come strumento e costo. Nuovo test.
+   Nota: `test_analysis_overlay.py` imposta `QT_QPA_PLATFORM=offscreen` solo se
+   e' il primo modulo a creare la QApplication; nella suite completa la
+   piattaforma e' quella vera di Windows. Da qui le differenze di font fra
+   corse isolate e suite.
+
+Suite completa su Windows dopo le correzioni: **3814 passati**, 3 saltati,
+2 xfail, 19 sottotest, **zero rossi** (338 s). Committato e pushato su
+richiesta dell'utente nel commit che segue `3d9df9f` su `YOLO-SOLUTION`
+(«fix: le tre decisioni del 24/09 ...»). Da riprovare anche su Linux (la piattaforma `offscreen`
+ha altri font).
+
+Fuori dal codice: `.vscode/tasks.json` locale (ignorato da git) con il
+pulsante «KiCadGen» nella barra di stato, tramite l'estensione
+`actboy168.tasks`. Trappola: nel campo `command` servono barre `/`; con `\`
+l'estensione mangiava le barre rovesciate e il percorso del Python non
+esisteva piu'.

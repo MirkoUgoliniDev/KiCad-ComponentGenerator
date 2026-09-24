@@ -1156,12 +1156,18 @@ def test_corner_handle_at_37_degrees_moving_along_one_local_axis_leaves_the_othe
     dx_mm, dy_mm = displacement.x() / 10, displacement.y() / 5
     grown_u = dx_mm * c + dy_mm * s
     grown_v = -dx_mm * s + dy_mm * c
-    # Rounding to whole viewport pixels leaves a sub-pixel v component.
-    assert abs(grown_v) < .05 < grown_u
+    # Rounding to whole viewport pixels leaves a sub-pixel v component, at
+    # most half a viewport pixel per axis. Its bound comes from the scale the
+    # view actually has: a fixed 0.05 mm held at the Linux test scale and was
+    # exceeded (0.0506) at the Windows one, where the geometry was right.
+    half_px_mm_x = .5 / scale / 10
+    half_px_mm_y = .5 / scale / 5
+    rounding_v = abs(s) * half_px_mm_x + abs(c) * half_px_mm_y
+    assert abs(grown_v) <= rounding_v < grown_u
     actual = dialog.get_components()[1]
     assert actual["length_mm"] == pytest.approx(before["length_mm"] + grown_u)
     assert actual["width_mm"] == pytest.approx(before["width_mm"] + grown_v)
-    assert abs(actual["width_mm"] - before["width_mm"]) < .05
+    assert abs(actual["width_mm"] - before["width_mm"]) <= rounding_v
 
 
 @pytest.mark.parametrize("angle", [90, 37])
@@ -1435,6 +1441,33 @@ def test_hiding_the_photograph_keeps_every_outline_in_place_and_drawn(dialog, ap
     assert dialog.photo_item.opacity() == 1.0
     assert not dialog.board_backdrop.isVisible()
     assert _scene_geometry(dialog) == before_geometry
+
+
+def test_changing_the_photo_state_does_not_resize_the_window_or_zoom_the_canvas(dialog, app):
+    """@brief Pressing the photo command leaves the canvas exactly where it was.
+
+    The toolbar row sets the window's minimum width and the command and its
+    readout change text at every press. With Windows fonts the longer text
+    widened the window by 12 px, the canvas grew and the fit zoomed the
+    drawing: the outlines moved on screen right when the photograph was hidden
+    to look at them. The precondition checks that the texts really differ in
+    width, so the test cannot pass just because a font made them equal.
+    """
+    states = [dialog._photo_state_texts(state) for state in PHOTO_STATES]
+    button_metrics = dialog.photo_button.fontMetrics()
+    label_metrics = dialog.photo_state_label.fontMetrics()
+    assert len({button_metrics.horizontalAdvance(action) for action, _ in states}) > 1
+    assert len({label_metrics.horizontalAdvance(current) for _, current in states}) > 1
+    app.processEvents()
+    before = (dialog.width(), dialog.view.size(), dialog.view.transform())
+    for _ in PHOTO_STATES:
+        dialog.cycle_photo_state()
+        for _ in range(3):
+            app.processEvents()
+        assert (dialog.width(), dialog.view.size(), dialog.view.transform()) == before
+        # Every text still fits whole in its reserved width.
+        assert dialog.photo_button.width() >= dialog.photo_button.sizeHint().width()
+        assert dialog.photo_state_label.width() >= dialog.photo_state_label.sizeHint().width()
 
 
 def test_the_attenuated_photograph_fades_into_the_neutral_backdrop(dialog, app):

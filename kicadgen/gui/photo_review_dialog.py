@@ -1236,7 +1236,12 @@ class PhotoReviewDialog(QDialog):
         return deepcopy(self._components)
 
     def showEvent(self, event):
-        """@brief Fit the whole photo the first time the editor is shown."""
+        """@brief Fit the whole photo the first time the editor is shown.
+
+        @note The photo controls reserve their widest text again here: the
+              style sheet can change their font when the window is polished.
+        """
+        self._reserve_photo_control_widths()
         super().showEvent(event)
         self.fit_photo()
 
@@ -1353,18 +1358,45 @@ class PhotoReviewDialog(QDialog):
         self.photo_item.setVisible(state != PHOTO_HIDDEN)
         self.photo_item.setOpacity(PHOTO_DIMMED_OPACITY if state == PHOTO_DIMMED else 1.0)
         self.board_backdrop.setVisible(state != PHOTO_FULL)
-        if state == PHOTO_HIDDEN:
-            action, current = self._tr("Mostra foto"), self._tr("Foto: nascosta")
-        elif state == PHOTO_DIMMED:
-            action, current = self._tr("Nascondi foto"), self._tr("Foto: attenuata")
-        else:
-            action, current = self._tr("Attenua foto"), self._tr("Foto: intera")
+        action, current = self._photo_state_texts(state)
         with QSignalBlocker(self.photo_button):
             self.photo_button.setChecked(state != PHOTO_FULL)
+        self._reserve_photo_control_widths()
         self.photo_button.setText(action)
         self.photo_button.setAccessibleName(
             self._tr("{action} (stato attuale: {state})").format(action=action, state=current))
         self.photo_state_label.setText(current)
+
+    def _photo_state_texts(self, state):
+        """Command for the next step and readout of ``state``, translated."""
+        if state == PHOTO_HIDDEN:
+            return self._tr("Mostra foto"), self._tr("Foto: nascosta")
+        if state == PHOTO_DIMMED:
+            return self._tr("Nascondi foto"), self._tr("Foto: attenuata")
+        return self._tr("Attenua foto"), self._tr("Foto: intera")
+
+    def _reserve_photo_control_widths(self):
+        """Give the photo command and its readout the width of their widest text.
+
+        Their text changes at every press, and the toolbar row is what sets the
+        window's minimum width: with Windows fonts a longer text widened the
+        whole window by 12 px, the canvas grew with it and the fit zoomed the
+        drawing, so the outlines shifted on screen exactly when the user hid
+        the photograph to look at them. Reserving the widest of the three
+        texts makes the row, and so the canvas, independent of the state.
+        Each width is the widget's own size hint for that text, so style
+        padding and the current font are included.
+        """
+        texts = [self._photo_state_texts(state) for state in PHOTO_STATES]
+        for widget, candidates in ((self.photo_button, [a for a, _ in texts]),
+                                   (self.photo_state_label, [c for _, c in texts])):
+            shown = widget.text()
+            widths = []
+            for text in candidates:
+                widget.setText(text)
+                widths.append(widget.sizeHint().width())
+            widget.setText(shown)
+            widget.setMinimumWidth(max(widths))
 
     def _append_item(self, component):
         item = _ComponentItem(self, component)

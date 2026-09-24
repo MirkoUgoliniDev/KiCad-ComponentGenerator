@@ -544,12 +544,18 @@ class YoloReviewDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
+        self.instructions = QLabel(
             "Traccia un rettangolo sulla foto per aggiungere un corpo che il "
             "rilevatore non ha visto; trascina l'interno del riquadro scelto per "
             "spostarlo e le sue maniglie per ridimensionarlo. I tratteggiati sono "
             "le proposte su cui non si e' fidato: ci sono perche' una confidenza "
-            "bassa non e' prova di assenza."))
+            "bassa non e' prova di assenza.")
+        # Senza a capo la frase su una riga sola fissava la larghezza minima
+        # della finestra (1540 px con i caratteri di Windows), piu' larga della
+        # misura che la finestra stessa chiede qui sotto e di uno schermo da
+        # portatile. Con l'a capo la larghezza la decide la vista.
+        self.instructions.setWordWrap(True)
+        layout.addWidget(self.instructions)
         layout.addLayout(body, 1)
         layout.addWidget(buttons)
         self.resize(1100, 700)

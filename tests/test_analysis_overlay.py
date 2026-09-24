@@ -543,6 +543,22 @@ def test_the_card_does_not_shrink_back_when_the_list_is_gone(overlay):
     assert overlay.card.minimumHeight() == small
 
 
+def test_the_elapsed_time_row_does_not_change_the_card_height(overlay):
+    """La riga del tempo trascorso nasce vuota e riceve il primo testo in
+    `start`, dopo il dimensionamento. Una label vuota e una con testo non
+    chiedono sempre la stessa altezza (14 e 12 px sulla piattaforma offscreen),
+    e la prima operazione aveva una scheda di 2 px diversa dalle successive:
+    la riga ha quindi un'intera riga di testo riservata, come strumento e
+    costo, e l'altezza della scheda non dipende da cosa c'e' scritto."""
+    assert overlay.elapsed.minimumHeight() >= overlay.elapsed.fontMetrics().lineSpacing()
+    heights = []
+    for text in ("", "12 s", "1 h 05 min"):
+        overlay.elapsed.setText(text)
+        overlay._size_the_card()
+        heights.append(overlay.card.minimumHeight())
+    assert len(set(heights)) == 1
+
+
 def _render(spinner):
     """Disegna lo spinner in un'immagine confrontabile, ad angolo fermo."""
     spinner.angle = 0

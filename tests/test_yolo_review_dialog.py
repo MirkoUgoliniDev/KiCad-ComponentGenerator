@@ -285,6 +285,31 @@ def test_moving_beyond_the_frame_keeps_the_size_and_stays_inside(dialog):
     assert x1 - x0 == pytest.approx(FIRST_BOX[2] - FIRST_BOX[0])
 
 
+def test_the_instructions_do_not_set_the_width_of_the_window():
+    """@brief La finestra puo' avere la misura che chiede, qualunque sia il carattere.
+
+    Su Windows l'etichetta delle istruzioni, su una riga sola, fissava la
+    larghezza minima a 1540 px: la finestra ignorava resize(1100, 700) e
+    usciva da uno schermo da portatile. La prova regge solo se la frase su una
+    riga e' davvero piu' larga della finestra: lo si verifica prima, cosi' un
+    carattere stretto non la fa passare per caso.
+    """
+    app = QApplication.instance() or QApplication([])
+    widget = YoloReviewDialog(b"", [_proposal(1, (.2, .2, .4, .4))], LENGTH_MM, WIDTH_MM,
+                              detector_classes())
+    requested = widget.size()
+    label = widget.instructions
+    one_line = label.fontMetrics().horizontalAdvance(label.text())
+    assert one_line > requested.width(), 'precondizione: la frase non starebbe su una riga'
+    assert label.wordWrap()
+    assert widget.minimumSizeHint().width() <= requested.width()
+    widget.resize(900, 600)
+    widget.show()
+    app.processEvents()
+    assert widget.width() == 900
+    widget.close()
+
+
 #: Un corpo piccolo sullo schermo: mezzo centesimo del ritaglio lungo X e un
 #: centesimo lungo Y, che nella finestra di prova vale meno di MIN_BOX_PX su
 #: entrambi gli assi (un 0402 su una scheda intera). E' il caso in cui le
