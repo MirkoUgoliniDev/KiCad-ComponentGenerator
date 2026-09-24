@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView, QDialog, QDialogButtonBox, QHBoxLayout, QHeaderView, QLabel,
     QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
@@ -33,6 +34,10 @@ def _millimetres(*values) -> str:
         except (TypeError, ValueError):
             parts.append("?")
     return " × ".join(parts)
+
+
+#: Background of the archive rows this board uses: the accent, faint.
+_BOARD_ROW = QColor(137, 180, 250, 48)
 
 
 def _item(text, *, data=None) -> QTableWidgetItem:
@@ -142,16 +147,26 @@ class ConsolidateDialog(QDialog):
 class AcceptedModelsDialog(QDialog):
     """@brief List archive entries and delete the wrong ones."""
 
-    def __init__(self, store: AcceptedModelStore | None = None, parent=None, i18n=None):
+    def __init__(self, store: AcceptedModelStore | None = None, parent=None, i18n=None,
+                 components=None, roots=None):
         """@brief Build the dialog and load the entries.
 
         @param store Archive to show; default the user's archive.
         @param parent Owner window.
         @param i18n Optional translator for text composed at runtime.
+        @param components Components of the board in view, or None (menu).
+        @param roots 3D library roots, needed with `components`.
+        @note With `components` the entries the archive would give to this
+            board come first and are highlighted, with the component names in
+            the tooltip. «Would give» is decided by `AcceptedModelStore.find`,
+            the very rule used when matching: no second criterion that could
+            disagree with what the generation does.
         """
         super().__init__(parent)
         self.i18n = i18n
         self.store = store or AcceptedModelStore()
+        self._components = list(components or ())
+        self._roots = list(roots or ())
         self.setWindowTitle("Archivio abbinamenti accettati")
         self.resize(980, 520)
         layout = QVBoxLayout(self)
@@ -198,15 +213,23 @@ class AcceptedModelsDialog(QDialog):
     def reload(self) -> None:
         """@brief Reload the entries; an unreadable archive is reported, not hidden."""
         self.path_label.setText(str(self.store.path))
+        board = {}
         try:
             entries = self.store.entries()
+            board = self._board_matches()
         except AcceptedModelsError as exc:
             entries = []
             self.status_label.setText(str(exc))
         else:
-            self.status_label.setText(
-                self._tr("Nessun abbinamento accettato finora.") if not entries else
-                self._tr("Voci nell'archivio: {count}.").format(count=len(entries)))
+            text = (self._tr("Nessun abbinamento accettato finora.") if not entries else
+                    self._tr("Voci nell'archivio: {count}.").format(count=len(entries)))
+            if self._components and entries:
+                text += " " + self._tr(
+                    "Usate da questa scheda: {count} (in cima, evidenziate).").format(
+                        count=len(board))
+            self.status_label.setText(text)
+        # Prima le voci di questa scheda, nell'ordine dell'archivio.
+        entries.sort(key=lambda entry: entry.get("id") not in board)
         self.table.setRowCount(len(entries))
         for index, entry in enumerate(entries):
             rotation = entry.get("rotation_deg")
@@ -221,12 +244,28 @@ class AcceptedModelsDialog(QDialog):
                       entry.get("model_name"),
                       f"{float(rotation):g}°" if rotation is not None else self._tr("automatica"),
                       entry.get("samples"), accepted]
+            names = board.get(entry.get("id"))
             for column, value in enumerate(values):
                 item = _item(value, data=entry.get("id") if column == 0 else None)
                 if column == 4:
                     item.setToolTip(str(entry.get("model_ref") or ""))
+                if names:
+                    item.setBackground(_BOARD_ROW)
+                    item.setToolTip(self._tr("Usata da questa scheda per: {names}").format(
+                        names=", ".join(names)))
                 self.table.setItem(index, column, item)
         self._refresh_buttons()
+
+    def _board_matches(self) -> dict:
+        """Entry id -> names of this board's components that would receive it."""
+        matches = {}
+        for index, component in enumerate(self._components):
+            found = self.store.find(component, self._roots)
+            if found is None:
+                continue
+            name = str(component.get("name") or "").strip() or f"#{index + 1}"
+            matches.setdefault(found["entry"].get("id"), []).append(name)
+        return matches
 
     def _selected_ids(self) -> list[int]:
         rows = sorted({index.row() for index in self.table.selectedIndexes()})

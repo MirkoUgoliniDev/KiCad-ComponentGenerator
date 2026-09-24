@@ -11,7 +11,7 @@ import pytest
 pytest.importorskip("PyQt6")
 pytest.importorskip("pyvistaqt")
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QDialog
+from PyQt6.QtWidgets import QApplication, QDialog
 
 from kicadgen.cad3d import kicad_models as km
 from kicadgen.gui import main_window as gui
@@ -164,3 +164,90 @@ def test_a_write_failure_is_reported_on_the_status_bar(window, library, monkeypa
 
 def test_the_archive_is_reachable_from_the_configuration_menu(window):
     assert window.action_accepted_models.isEnabled()
+
+
+# ── Icona «archivio» nella scheda 3D (utente, 2026-09-24) ───────────────────
+
+C0805 = "Capacitor_SMD.3dshapes/C_0805_2012Metric.step"
+
+
+def _two_entries(library):
+    """Archivio con due voci: un resistore 0603 e un condensatore 0805."""
+    (library / "Capacitor_SMD.3dshapes").mkdir(parents=True, exist_ok=True)
+    (library / C0805).write_text("ISO-10303-21;\n", encoding="utf-8")
+    store = am.AcceptedModelStore()
+    store.consolidate(_board(library), [library])
+    store.consolidate([{"name": "C9", "kind": "capacitor", "length_mm": 2.0, "width_mm": 1.25,
+                        "bbox_basis": "body", "model_path": str(library / C0805),
+                        "model_match": {"status": "auto_matched"}}], [library])
+    return store
+
+
+def test_the_entries_this_board_uses_come_first_and_are_highlighted(window, library):
+    """Positivo: R7 riceverebbe la voce 0603 -> in cima, evidenziata, nome nel tooltip.
+
+    Negativo: la voce 0805 viene da un'altra scheda e nessun corpo di questa la
+    riceverebbe (categoria diversa): resta sotto, senza evidenziazione.
+    """
+    store = _two_entries(library)
+    board = [{"name": "R7", "kind": "resistor", "length_mm": 1.62, "width_mm": 0.82,
+              "bbox_basis": "body"},
+             {"name": "U1", "kind": "ic", "length_mm": 5, "width_mm": 4}]
+    dialog = AcceptedModelsDialog(store, components=board, roots=[library])
+    assert dialog.table.rowCount() == 2
+    first, second = dialog.table.item(0, 4), dialog.table.item(1, 4)
+    assert first.text() == "R_0603_1608Metric" and second.text() == "C_0805_2012Metric"
+    assert first.background().color().alpha() > 0
+    assert "R7" in first.toolTip()
+    assert second.background().style() == Qt.BrushStyle.NoBrush
+    assert "Usate da questa scheda: 1" in dialog.status_label.text()
+    _dispose(dialog)
+
+
+def test_from_the_menu_nothing_is_highlighted(window, library):
+    store = _two_entries(library)
+    dialog = AcceptedModelsDialog(store)
+    assert all(dialog.table.item(row, 0).background().style() == Qt.BrushStyle.NoBrush
+               for row in range(dialog.table.rowCount()))
+    assert "questa scheda" not in dialog.status_label.text()
+    _dispose(dialog)
+
+
+def test_an_entry_whose_file_vanished_is_not_claimed_for_the_board(window, library):
+    """Negativo: stessa regola della generazione, che salta i file spariti."""
+    store = _two_entries(library)
+    (library / R0603).unlink()
+    board = [{"name": "R7", "kind": "resistor", "length_mm": 1.62, "width_mm": 0.82,
+              "bbox_basis": "body"}]
+    dialog = AcceptedModelsDialog(store, components=board, roots=[library])
+    assert "Usate da questa scheda: 0" in dialog.status_label.text()
+    _dispose(dialog)
+
+
+def test_the_3d_tab_icon_is_always_on_and_opens_the_board_view(window, monkeypatch):
+    button = window.btn_accepted_archive
+    assert button.isEnabledTo(window.tabs.widget(4))
+    first, _, rest = button.toolTip().partition("\n")
+    assert first and rest
+    opened = []
+
+    def fake_exec(dialog):
+        opened.append(dialog)
+        return QDialog.DialogCode.Rejected
+    monkeypatch.setattr(AcceptedModelsDialog, "exec", fake_exec)
+    monkeypatch.setattr(window, "_photo_components_from_table",
+                        lambda: [{"name": "R7", "kind": "resistor"}])
+    window._set_acquisition_tabs_enabled(True)  # la scheda 3D, come dopo un'estrazione
+    button.click()
+    assert len(opened) == 1 and opened[0]._components == [{"name": "R7", "kind": "resistor"}]
+    _dispose(opened[0])
+
+
+def _dispose(widget):
+    """Distruzione ordinata: un widget Qt lasciato al garbage collector puo'
+    essere distrutto dopo la QApplication e far cadere il processo all'uscita
+    (codice 139, visto il 2026-09-24)."""
+    widget.close()
+    widget.setParent(None)
+    widget.deleteLater()
+    QApplication.processEvents()

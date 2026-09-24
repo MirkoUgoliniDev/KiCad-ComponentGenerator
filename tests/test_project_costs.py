@@ -126,6 +126,7 @@ def test_a_call_from_a_worker_thread_is_written_into_the_project(app, tmp_path):
     first, _, rest = line.toolTip().partition("\n")
     assert first and "1 chiamate a pagamento" in rest
     line.detach()
+    _dispose(line)
 
 
 def test_without_a_project_name_the_cost_is_reported_once_not_lost_silently(app):
@@ -136,6 +137,7 @@ def test_without_a_project_name_the_cost_is_reported_once_not_lost_silently(app)
         line._on_paid_call({"cost_usd": 0.1})
     assert len(log) == 1 and "non ha un nome" in log[0]
     line.detach()
+    _dispose(line)
 
 
 def test_the_balance_is_never_read_unless_the_application_enables_it(app, monkeypatch):
@@ -147,6 +149,7 @@ def test_the_balance_is_never_read_unless_the_application_enables_it(app, monkey
     line.refresh_balance()
     assert "Saldo" not in line.text() and line.text() == "—"
     line.detach()
+    _dispose(line)
 
 
 def test_the_balance_is_read_in_background_and_shown(app, monkeypatch):
@@ -160,6 +163,7 @@ def test_the_balance_is_read_in_background_and_shown(app, monkeypatch):
     _wait(app, lambda: "11.92" in line.text())
     assert line.text() == "Saldo OpenRouter: 11.92 USD"
     line.detach()
+    _dispose(line)
 
 
 def test_an_unreadable_balance_says_not_available(app, monkeypatch):
@@ -175,6 +179,7 @@ def test_an_unreadable_balance_says_not_available(app, monkeypatch):
     _wait(app, lambda: "non disponibile" in line.text())
     assert "connessione fallita" in line.toolTip()
     line.detach()
+    _dispose(line)
 
 
 def test_detach_only_removes_its_own_listener(app):
@@ -184,6 +189,8 @@ def test_detach_only_removes_its_own_listener(app):
     first.detach()  # non e' piu' l'ascoltatore: non tocca quello del secondo
     assert openrouter._usage_listener is not None
     second.detach()
+    _dispose(first)
+    _dispose(second)
     assert openrouter._usage_listener is None
 
 
@@ -215,4 +222,16 @@ def test_the_project_tab_shows_the_line_under_the_extract_button(tmp_path, monke
     finally:
         window.close()
         app.processEvents()
+        window.deleteLater()
+        app.processEvents()
     assert openrouter._usage_listener is None  # chiusa la finestra, nessun ascoltatore
+
+
+def _dispose(widget):
+    """Distruzione ordinata: un widget Qt lasciato al garbage collector puo'
+    essere distrutto dopo la QApplication e far cadere il processo all'uscita
+    (codice 139, visto il 2026-09-24)."""
+    widget.close()
+    widget.setParent(None)
+    widget.deleteLater()
+    QApplication.processEvents()

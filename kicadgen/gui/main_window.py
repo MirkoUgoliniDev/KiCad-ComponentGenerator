@@ -7033,6 +7033,17 @@ class MainWindow(QMainWindow):
         self.btn_accept_models.clicked.connect(self._accept_models)
         self.btn_accept_models.setEnabled(False)
         toolbar.addWidget(self.btn_accept_models)
+        # Accanto a chi lo riempie, l'archivio si rivede (utente, 2026-09-24):
+        # prima stava solo nel menu Configurazione, che resta. Sempre attivo:
+        # consultare l'archivio non chiede un solido generato.
+        self.btn_accepted_archive = self._workflow_tool_button(
+            "wf-archive.svg",
+            "Archivio abbinamenti accettati…",
+            "Rivedi i modelli KiCad ricordati con «Accetto, mi piace» ed elimina quelli "
+            "sbagliati. In cima, evidenziate, le voci che valgono per i componenti di "
+            "questa scheda. Nessuna richiesta AI: gratuito.")
+        self.btn_accepted_archive.clicked.connect(self._show_accepted_models_for_board)
+        toolbar.addWidget(self.btn_accepted_archive)
         # Copie dei pulsanti della scheda Progetto: da qui si vede il solido
         # e si capisce se mancano corpi, quindi da qui si deve poter tornare
         # alle proposte annotate e ripartire (revisione gratuita; rilancio a
@@ -7600,6 +7611,20 @@ class MainWindow(QMainWindow):
     def _show_accepted_models(self) -> None:
         """@brief Open the archive list, where wrong entries can be deleted."""
         dialog = AcceptedModelsDialog(parent=self, i18n=self.i18n)
+        self.i18n.retranslate_widgets(dialog)
+        dialog.exec()
+
+    def _show_accepted_models_for_board(self) -> None:
+        """@brief Open the archive from the 3D tab, this board's entries first.
+
+        @note The components are the ones in the table now; the library roots
+            are those used by the matching, so an entry whose STEP file is gone
+            is not claimed for this board, exactly as the generation skips it.
+        """
+        from ..cad3d.kicad_models import _search_roots
+        dialog = AcceptedModelsDialog(parent=self, i18n=self.i18n,
+                                      components=self._photo_components_from_table(),
+                                      roots=_search_roots(None))
         self.i18n.retranslate_widgets(dialog)
         dialog.exec()
 

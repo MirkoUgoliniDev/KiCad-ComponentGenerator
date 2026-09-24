@@ -8,7 +8,7 @@
   Aperti SOLO decisioni dell'utente: nomi front/back contro cubo 3D (serve
   migrazione), conferme della scelta STEP a icona, invio all'AI della foto
   gia' ruotata secondo l'EXIF.
-- Suite completa (24/09, dopo anteprima con zoom): 4032 passati, 3 saltati,
+- Suite completa (24/09, dopo l'icona dell'archivio): 4036 passati, 3 saltati,
   2 xfail attesi, 19 sottotest; uscita del processo 0 (controllarla sempre).
 - Difetto 16 CHIUSO (utente, 24/09, scelta «A»): la frase «Tipo SMD di
   proposito» resta anche sui moduli misti half_hole + through_hole, perche'
@@ -6463,3 +6463,37 @@ NOTA 24/09 19:20: l'UTENTE ha eliminato tutte le cartelle di generated/
 Confermato dall'utente. I riferimenti a TEST4 in questo file e negli script
 dello scratchpad (regen_test4.py, corner_check.py, gui_stall.py) non sono
 piu' riproducibili senza ripristinarle.
+DECISIONE UTENTE (24/09 sera): NON raccogliere i riquadri corretti in
+«Corpi rilevati» come esempi per riaddestrare YOLO («no lascia stare»).
+I riquadri restano solo in photo-review/proposals.json del progetto.
+28. [ ] DIFETTO VISTO (non segnalato, NON autorizzato, 24/09 sera): nella
+    «Scelta del modello STEP» i «Motivi» del candidato sono in inglese
+    nell'interfaccia italiana («Family and dimension discovery», «No declared
+    family or terminal conflict», «Compatible body dimensions», «Identity and
+    variant require user review», «Exact literal model marking…»). Vengono
+    dal backend dei candidati (kicad_models / report dei candidati), sfuggiti
+    alla localizzazione di 3cdea2a. Da correggere solo su richiesta.
+29. [x] (utente 24/09 sera, «ok procedi, poi committa e pusha»)
+    Scheda Modello 3D: icona accanto a «Accetto, mi piace» che apre
+    l'archivio degli abbinamenti accettati (stessa `AcceptedModelsDialog`
+    del menu Configurazione, che resta). Sempre attiva. Aperta dalla scheda
+    3D evidenzia le voci che valgono per i componenti di QUESTA scheda (stesso
+    criterio di riuso dell'archivio, `AcceptedModelStore.find`, niente regole
+    nuove). Tooltip nome + spiegazione, traduzioni, test, suite, commit, push.
+ESITO 29: icona `btn_accepted_archive` (wf-archive.svg) accanto a
+«Accetto, mi piace», sempre attiva; `_show_accepted_models_for_board` apre
+`AcceptedModelsDialog(components=..., roots=_search_roots(None))`: le voci
+che `AcceptedModelStore.find` darebbe ai componenti in tabella vanno in
+cima, sfondo accento tenue, nomi dei componenti nel tooltip, conteggio nella
+riga di stato. Dal menu Configurazione nessuna evidenziazione (invariato).
+Test in test_accepted_models_gui (4 nuovi: positivo, voce di altra scheda,
+file sparito, icona).
+TRAPPOLA RIVISTA 24/09 sera: la prima suite completa dopo il punto 29 e'
+uscita con 139 (segfault alla chiusura) con TUTTI i test verdi; la seconda
+con 0 -> intermittente. Corretto con distruzione ordinata (`_dispose`:
+close, setParent(None), deleteLater, processEvents) nei test nuovi di oggi
+(accepted_models_gui, document_preview_zoom, project_costs, compresa la
+finestra principale creata a mano). Dopo la correzione 2 suite complete su 2
+con uscita 0: il dubbio si riduce ma un intermittente non si esclude con due
+giri. Se ricompare 139: cercare widget Qt creati nei test e lasciati al
+garbage collector.

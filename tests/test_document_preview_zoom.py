@@ -44,7 +44,7 @@ def test_the_preview_opens_fitted_and_zooms_in_and_out(app):
     assert view.zoom_percent() < 100
     panel.fit_button.click()
     assert view.auto_fit and view.zoom_percent() == 100
-    panel.close()
+    _dispose(panel)
 
 
 def test_the_wheel_zooms_like_the_review_canvas(app):
@@ -56,7 +56,7 @@ def test_the_wheel_zooms_like_the_review_canvas(app):
                         Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
     QApplication.sendEvent(view.viewport(), event)
     assert view.zoom_percent() > 100
-    panel.close()
+    _dispose(panel)
 
 
 def test_zoom_has_limits_both_ways(app):
@@ -65,7 +65,7 @@ def test_zoom_has_limits_both_ways(app):
     assert panel.view.zoom_percent() == round(100 * MAX_ZOOM)
     panel.view.zoom(1e-9)
     assert panel.view.zoom_percent() == round(100 * MIN_ZOOM)
-    panel.close()
+    _dispose(panel)
 
 
 def test_a_chosen_zoom_survives_a_resize_and_fit_follows_it(app):
@@ -80,7 +80,7 @@ def test_a_chosen_zoom_survives_a_resize_and_fit_follows_it(app):
     panel.resize(500, 400)
     app.processEvents()
     assert panel.view.zoom_percent() == 100
-    panel.close()
+    _dispose(panel)
 
 
 def test_the_zoomable_preview_keeps_the_real_pixels(tmp_path, app):
@@ -117,6 +117,7 @@ def test_the_card_button_is_an_eye_that_opens_the_zoomable_preview(window, monke
     assert len(opened) == 1
     zoom_panel = opened[0].zoom_panel
     assert zoom_panel.view._item.pixmap().width() == 300  # pixel veri
+    _dispose(opened[0])
 
 
 def test_buttons_zoom_around_the_centre_and_the_percentage_stays_true(app):
@@ -130,4 +131,14 @@ def test_buttons_zoom_around_the_centre_and_the_percentage_stays_true(app):
     assert abs(centre_after.x() - centre_before.x()) < 8
     assert abs(centre_after.y() - centre_before.y()) < 8
     assert view.zoom_percent() == 200
-    panel.close()
+    _dispose(panel)
+
+
+def _dispose(widget):
+    """Distruzione ordinata: un widget Qt lasciato al garbage collector puo'
+    essere distrutto dopo la QApplication e far cadere il processo all'uscita
+    (codice 139, visto il 2026-09-24)."""
+    widget.close()
+    widget.setParent(None)
+    widget.deleteLater()
+    QApplication.processEvents()
