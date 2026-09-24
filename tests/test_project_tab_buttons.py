@@ -81,6 +81,22 @@ def _clear_log(window):  # noqa: F811
     window._refresh_ai_log_button()
 
 
+def _move_root(window, root):  # noqa: F811
+    """@brief Cambia la cartella di lavoro e riapre il progetto omonimo che sta li'.
+
+    Contratto cambiato il 2026-09-24 (revisore 2, difetto 7): cambiare la
+    cartella di lavoro SALVA E CHIUDE il progetto aperto, invece di tenere il
+    nome e guardare (e poi sovrascrivere) il progetto omonimo dell'altra
+    cartella. Questi test verificano che i pulsanti seguano la cartella del
+    progetto in uso: il progetto nella nuova radice si apre come fa la
+    fixture, scrivendo il nome.
+    """
+    name = window._component_name()
+    window.field_library_root.setText(str(root))
+    assert window._component_name() == "", "la cartella di lavoro cambiata chiude il progetto"
+    window.field_name.setText(name)
+
+
 def _contains(layout, widget):
     for index in range(layout.count()):
         item = layout.itemAt(index)
@@ -653,9 +669,15 @@ def test_changing_the_library_root_refreshes_the_ai_log_button(window, tmp_path)
     without_log = tmp_path / "senza-diario"
     without_log.mkdir()
 
-    window.field_library_root.setText(str(with_log))
+    _move_root(window, with_log)
     assert _own_visible(window.btn_ai_log), "il diario c'e' in questa radice"
-    window.field_library_root.setText(str(without_log))
+    _move_root(window, without_log)
+    # La chiusura del progetto scrive una riga nel log a schermo, che basta da
+    # sola ad accendere «Log AI» (vedi test_ai_log_button_counts_the_elements_list_too):
+    # qui si guarda il DIARIO su disco, quindi si toglie solo il testo a schermo.
+    window.ai_progress_text.clear()
+    window._pending_log_lines = []
+    window._refresh_ai_log_button()
     assert not _own_visible(window.btn_ai_log), "altra radice, nessun diario"
 
 
@@ -670,13 +692,16 @@ def test_changing_the_library_root_refreshes_the_reopen_review_button(window, tm
     with_bundle = tmp_path / "con-pacchetto"
     empty = tmp_path / "senza-pacchetto"
     empty.mkdir()
-    window.field_library_root.setText(str(with_bundle))
+    _move_root(window, with_bundle)
     written = window._write_review_bundle(
         [{"_id": 1, "_box": [0.1, 0.1, 0.4, 0.4]}], b"photo", 10.0, 5.0)
     assert written is not None, "presupposto: il pacchetto e' stato scritto in questa radice"
-    window.field_library_root.setText(str(empty))
+    _move_root(window, empty)
+    window._photo_png = b"photo"
     assert not _own_visible(window.btn_reopen_review), "in questa radice non c'e' nulla da riaprire"
-    window.field_library_root.setText(str(with_bundle))
+    _move_root(window, with_bundle)
+    window._photo_png = b"photo"
+    window._refresh_reopen_review_button()
     assert _own_visible(window.btn_reopen_review), "il pacchetto e' qui: il comando si riaccende"
 
 
@@ -694,7 +719,7 @@ def test_ai_log_button_counts_the_elements_list_too(window, tmp_path):  # noqa: 
     """
     regular_file = tmp_path / "non-e-una-cartella"
     regular_file.write_text("x", encoding="utf-8")
-    window.field_library_root.setText(str(regular_file))
+    _move_root(window, regular_file)
     _clear_log(window)
     window.ai_elements_list.clear()
     window._refresh_ai_log_button()

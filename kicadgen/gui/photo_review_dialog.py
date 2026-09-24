@@ -27,10 +27,10 @@ The photograph itself is a view setting, never data: ``photo_state()`` /
 thin outline over a dark, crowded board can be read on its own. Whatever the
 state, the board rectangle keeps being drawn and every edit, selection and
 measurement behaves identically; the saved inventory is unaffected. The
-control that drives it is split in two: ``photo_button`` carries the VERB of
-the next step ("Attenua foto", "Nascondi foto", "Mostra foto") and
-``photo_state_label`` carries the state the canvas is in. See
-``_apply_photo_state``.
+control that drives it is the ``photo_button`` icon (key P): the icon draws
+the state the canvas is in, the first tooltip line is the VERB of the next
+step ("Attenua foto", "Nascondi foto", "Mostra foto") and the second line the
+current state. See ``_apply_photo_state``.
 
 Bodies the detection declined to type are surfaced here, because this is
 where the fix costs one double click. ``type_undetermined()`` reads the
@@ -71,7 +71,8 @@ from PyQt6.QtWidgets import (
 )
 
 
-from .review_tools import (AnchoredPopup, InfoPopup, asset_icon, set_tool_texts, tool_button,
+from .review_tools import (ZOOM_STEP, AnchoredPopup, InfoPopup, asset_icon,
+                           give_combos_their_keys, set_tool_texts, tool_button,
                            toolbar_divider)
 
 
@@ -289,7 +290,7 @@ class _PhotoView(QGraphicsView):
         """@brief Zoom around the pointer with the wheel; other wheel input scrolls."""
         delta = event.angleDelta().y() or event.pixelDelta().y()
         if delta:
-            self.zoom(1.2 ** max(-4, min(4, delta / 120)))
+            self.zoom(ZOOM_STEP ** max(-4, min(4, delta / 120)))
             event.accept()
         else:
             super().wheelEvent(event)
@@ -935,9 +936,14 @@ class PhotoReviewDialog(QDialog):
     Public integration API: ``components_applied(list)``, ``get_components()``,
     and the standard QDialog accepted/rejected result. Apply closes the dialog.
 
-    Layout contract: the sidebar is dominated by ``component_list`` with
-    ``count_label`` ("Componenti: N") and the ``category_filter`` combo above
-    it; the parameter form
+    Layout contract: one bar of icons at the top (user decision 2026-09-24:
+    add, delete, zoom, fit, photo, component details, model doubts, «i»),
+    each named in its tooltip with its key; the sidebar is dominated by
+    ``component_list`` with ``count_label`` ("Componenti: N") and the
+    ``category_filter`` combo above it. Model status, warnings and the colour
+    legend of the chosen component sit in ``details_popup`` under
+    ``details_button``, which turns orange when there are warnings. The
+    parameter form
     (``form_widget`` holding ``text_fields`` and ``fields``) lives in the
     window-modal ``parameters_dialog`` opened by ``parameters_button``
     or ``open_parameters()``. The field widgets are the same objects whether
@@ -952,6 +958,7 @@ class PhotoReviewDialog(QDialog):
 
     A body whose type the detection declined to establish (``type_undetermined``)
     is carried by the mechanisms that already exist: a line in ``warning_label``
+    (inside ``details_popup``)
     naming the manual action, a distinct outline status (UNDETERMINED_TYPE_COLOR,
     which yields to "fuori PCB" and wins over the generic "da verificare") and
     the UNDETERMINED_LIST_MARKER on its list row beside the existing "[!]".
@@ -959,17 +966,19 @@ class PhotoReviewDialog(QDialog):
     ``uncertainties_button`` / ``show_uncertainties()`` and readable through
     ``model_uncertainties()``; the button is hidden when there are none.
 
-    ``category_filter`` hides the list rows whose ``kind`` does not match the
-    chosen category. It hides rows, it never rebuilds the list: ``_components``
-    and every row index keep their meaning while a filter is active. The
-    filter is about the list only — the rectangles on the photo are never
-    hidden, and clicking one always selects it, filtered out or not.
+    ``category_filter`` hides the list rows AND the rectangles on the photo
+    whose ``kind`` does not match the chosen category (user decision
+    2026-09-24: the filter filters the photo too). It hides, it never
+    rebuilds: ``_components`` and every row index keep their meaning while a
+    filter is active, and a hidden rectangle takes no click. Changing the
+    filter deselects an out-of-category component; after a deletion the
+    selection moves to the nearest component the filter shows, or to none.
 
     ``photo_button`` sits with the view controls and cycles the canvas
     backdrop (``photo_state()``, ``set_photo_state()``, ``cycle_photo_state()``)
     between the photograph whole, attenuated and gone. It reads as a command:
-    its label is the imperative of the next step and ``photo_state_label``,
-    immediately beside it, states which of the three the canvas is in. A dark, crowded board
+    the first line of its tooltip is the imperative of the next step, the
+    second the state the canvas is in, and the icon draws that state. A dark, crowded board
     swallows a thin coloured outline; in the last two states the board area is
     filled with the neutral BOARD_BACKDROP_COLOR and framed with
     BOARD_BORDER_COLOR, so the outlines and the PCB edge stay readable. It is
@@ -1256,11 +1265,13 @@ class PhotoReviewDialog(QDialog):
         self.view.rectangle_drawn.connect(self._component_from_rectangle)
         self.delete_button.clicked.connect(self.delete_selected)
         self.fit_button.clicked.connect(self.fit_photo)
-        self.zoom_in_button.clicked.connect(lambda: self.view.zoom(1.2))
-        self.zoom_out_button.clicked.connect(lambda: self.view.zoom(1 / 1.2))
+        self.zoom_in_button.clicked.connect(lambda: self.view.zoom(ZOOM_STEP))
+        self.zoom_out_button.clicked.connect(lambda: self.view.zoom(1 / ZOOM_STEP))
         self.view.zoom_changed.connect(self._update_zoom_label)
         self.photo_button.clicked.connect(self._photo_button_clicked)
         self._bind_shortcuts()
+        # Un combo con il fuoco tiene le sue lettere (revisore 1, difetto 4).
+        self._combo_keys = give_combos_their_keys(self)
         self._update_zoom_label()
         self._update_details_button()
         self._apply_photo_state()
@@ -1446,9 +1457,9 @@ class PhotoReviewDialog(QDialog):
             ("R", lambda: self.add_button.setChecked(not self.add_button.isChecked())),
             (QKeySequence(Qt.Key.Key_Delete), self.delete_selected),
             ("F", self.fit_photo),
-            ("+", lambda: self.view.zoom(1.2)),
-            ("=", lambda: self.view.zoom(1.2)),
-            ("-", lambda: self.view.zoom(1 / 1.2)),
+            ("+", lambda: self.view.zoom(ZOOM_STEP)),
+            ("=", lambda: self.view.zoom(ZOOM_STEP)),
+            ("-", lambda: self.view.zoom(1 / ZOOM_STEP)),
             ("P", self.cycle_photo_state),
         )
         self._shortcuts = []
@@ -1915,11 +1926,14 @@ class PhotoReviewDialog(QDialog):
         item.setBrush(QBrush(fill))
         # Fra rettangoli sovrapposti il clic va al PIU' PICCOLO: sopra i piu'
         # piccoli, a qualunque posto dell'elenco (utente, 2026-09-24: una
-        # proposta spuria dentro un corpo grande non si poteva scegliere). Il
-        # rettangolo scelto resta sopra tutti.
+        # proposta spuria dentro un corpo grande non si poteva scegliere).
+        # Solo l'area decide, anche per il rettangolo scelto: prima la scelta
+        # lo portava sopra tutti, e scelto un corpo grande i piccoli dentro
+        # non si prendevano piu' (revisore 1, difetto 2). La scelta si vede
+        # dall'alone, dal tratto e dal riempimento, non dall'ordine.
         bounds = item.photo_bounds()
         smallness = 1.0 / (1.0 + max(0.0, bounds.width() * bounds.height()))
-        item.setZValue((3 if item.isSelected() else 1) + smallness)
+        item.setZValue(1 + smallness)
         item.number.setText(str(index + 1))
         name = item.component.get("name") or item.component.get("kind") or self._tr("Componente")
         text = (f"{index + 1}. {name}"
@@ -2283,8 +2297,23 @@ class PhotoReviewDialog(QDialog):
             self.component_list.takeItem(index)
         # A category can disappear with its last component.
         self._refresh_categories()
-        self._select_row(min(index, len(self._items) - 1))
+        self._select_row(self._nearest_shown(index))
         self._update_scene_rect()
+
+    def _nearest_shown(self, index):
+        """Row of the outline nearest to `index` that the category filter shows; -1 if none.
+
+        Forward first, as before. Before, the next row was selected even when
+        the filter hid it, and `_select_row` made it visible: a second Delete
+        removed a component the filter was hiding (reviewer 1, defect 1).
+        """
+        category = self.active_category()
+        for distance in range(len(self._items)):
+            for candidate in (index + distance, index - distance - 1):
+                if 0 <= candidate < len(self._items) and (
+                        category is None or self._matches_category(self._items[candidate], category)):
+                    return candidate
+        return -1
 
     def accept(self):
         """@brief Apply: emit a detached corrected list once, then close.

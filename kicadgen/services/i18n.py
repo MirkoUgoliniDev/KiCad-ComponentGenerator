@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QAbstractButton,
     QAbstractSpinBox,
     QComboBox,
@@ -853,6 +854,11 @@ DEFAULT_TRANSLATIONS = {
     # Link della finestra About (utente, 2026-09-24).
     "ui:Repository GitHub": {"en": "GitHub repository", "it": "Repository GitHub", "fr": "Dépôt GitHub", "de": "GitHub-Repository"},
     "ui:Sviluppatore": {"en": "Developer", "it": "Sviluppatore", "fr": "Développeur", "de": "Entwickler"},
+    # Testi rimasti in italiano in en/fr/de (revisore 3, difetto 10, 2026-09-24).
+    "ui:FreeCAD trovato: il modello 3D viene generato insieme al footprint.": {"en": "FreeCAD found: the 3D model is generated together with the footprint.", "it": "FreeCAD trovato: il modello 3D viene generato insieme al footprint.", "fr": "FreeCAD trouvé : le modèle 3D est généré avec l’empreinte.", "de": "FreeCAD gefunden: Das 3D-Modell wird zusammen mit dem Footprint erzeugt."},
+    "ui:freecadcmd non trovato: installa FreeCAD o imposta FREECAD_CMD_PATH.": {"en": "freecadcmd not found: install FreeCAD or set FREECAD_CMD_PATH.", "it": "freecadcmd non trovato: installa FreeCAD o imposta FREECAD_CMD_PATH.", "fr": "freecadcmd introuvable : installez FreeCAD ou définissez FREECAD_CMD_PATH.", "de": "freecadcmd nicht gefunden: Installieren Sie FreeCAD oder setzen Sie FREECAD_CMD_PATH."},
+    "ui:Semi-foro dentro il bordo (0 = auto):": {"en": "Half-hole inside the edge (0 = auto):", "it": "Semi-foro dentro il bordo (0 = auto):", "fr": "Demi-trou à l’intérieur du bord (0 = auto) :", "de": "Halbloch innerhalb der Kante (0 = auto):"},
+    "ui:Foro passante dal bordo (0 = auto):": {"en": "Through hole from the edge (0 = auto):", "it": "Foro passante dal bordo (0 = auto):", "fr": "Trou traversant depuis le bord (0 = auto) :", "de": "Durchgangsloch vom Rand (0 = auto):"},
 }
 
 #: Testi predefiniti SOSTITUITI, per chiave e lingua. Il catalogo SQLite
@@ -931,7 +937,11 @@ class I18n:
             return
         widgets = [root] if isinstance(root, QWidget) else []
         widgets.extend(root.findChildren(QWidget))
+        # Le viste a elenco entrano solo per tooltip e nome accessibile: le loro
+        # righe sono dati e restano intatte (revisore 3, difetto 10: il tooltip
+        # della lista degli elementi restava in italiano).
         translatable_types = (
+            QAbstractItemView,
             QAbstractButton,
             QAbstractSpinBox,
             QComboBox,

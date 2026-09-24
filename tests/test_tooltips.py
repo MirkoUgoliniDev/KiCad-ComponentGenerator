@@ -21,6 +21,9 @@ from kicadgen.gui.tooltips import (TOOLTIP_MAX_WIDTH_PX, WINDOW_MARGIN_PX, ToolT
                                    tooltip_html)
 from PyQt6.QtCore import QRect
 
+#: Tolleranza del box rispetto alla colonna di testo, vedi il test che la usa.
+TOOLTIP_CHROME_ALLOWANCE_PX = 48
+
 LONG = ("Rilancia inventario AI (a pagamento)...\n"
         "Passo 2 della pipeline — Rilancia solo l'inventario AI sulle proposte salvate "
         "in photo-review/: una richiesta A PAGAMENTO al modello che guarda la foto, poi "
@@ -87,7 +90,11 @@ def test_a_long_tooltip_wraps_and_stays_inside_the_window(app):
     box = label.frameGeometry()
     assert area.adjusted(WINDOW_MARGIN_PX - 1, WINDOW_MARGIN_PX - 1,
                          -WINDOW_MARGIN_PX + 1, -WINDOW_MARGIN_PX + 1).contains(box), (box, area)
-    assert box.width() <= TOOLTIP_MAX_WIDTH_PX + 40
+    # La colonna di testo e' al massimo TOOLTIP_MAX_WIDTH_PX; il box aggiunge
+    # la cornice: padding e bordo del tema (18 px) piu' margine della
+    # etichetta di Qt e del documento (26 px), 44 px misurati su Windows con
+    # APP_QSS. 48 lascia qualche pixel di arrotondamento dei caratteri.
+    assert box.width() <= TOOLTIP_MAX_WIDTH_PX + TOOLTIP_CHROME_ALLOWANCE_PX
     # E' andato a capo: e' piu' alto di due righe.
     assert box.height() > 3 * label.fontMetrics().lineSpacing()
     window.close()
@@ -153,3 +160,74 @@ def test_list_items_get_the_same_treatment(app):
 def test_the_filter_is_installed_once(app):
     first = install_tooltip_filter(app)
     assert install_tooltip_filter(app) is first
+
+
+def test_a_long_tooltip_in_a_narrow_window_stays_inside_it(app):
+    """@brief La cornice vera del tooltip conta: in 300 px il box non sfora a destra.
+
+    Negativo: in una finestra larga la colonna resta TOOLTIP_MAX_WIDTH_PX
+    (nessun restringimento senza bisogno).
+    """
+    from kicadgen.gui.theme import APP_QSS
+    previous = app.styleSheet()
+    app.setStyleSheet(APP_QSS)
+    try:
+        window, button = _window_with_button(app, LONG, width=300)
+        _hover(button)
+        app.processEvents()
+        box = _tip_label().frameGeometry()
+        area = QRect(window.mapToGlobal(QPoint(0, 0)), window.size())
+        assert box.left() >= area.left() + WINDOW_MARGIN_PX - 1
+        assert box.right() <= area.right() - WINDOW_MARGIN_PX + 1, (box, area)
+        window.close()
+        QToolTip.hideText()
+        window, button = _window_with_button(app, LONG, width=1400, at_right=False)
+        _hover(button)
+        app.processEvents()
+        label = _tip_label()
+        assert label.contentsRect().width() >= TOOLTIP_MAX_WIDTH_PX
+        window.close()
+    finally:
+        app.setStyleSheet(previous)
+
+
+def test_the_area_is_the_part_of_the_window_on_screen():
+    """@brief Revisore 3, difetto 12: finestra in parte fuori schermo -> area ristretta.
+
+    Negativi: finestra tutta dentro -> la finestra; tutta fuori -> lo schermo.
+    """
+    from kicadgen.gui.tooltips import visible_area
+    screen = QRect(0, 0, 1920, 1080)
+    assert visible_area(QRect(1700, 100, 600, 400), screen) == QRect(1700, 100, 220, 400)
+    assert visible_area(QRect(100, 100, 600, 400), screen) == QRect(100, 100, 600, 400)
+    assert visible_area(QRect(3000, 100, 600, 400), screen) == screen
+    assert visible_area(QRect(100, 100, 600, 400), None) == QRect(100, 100, 600, 400)
+
+
+def test_header_section_tooltips_go_through_the_filter(app):
+    """@brief Revisore 3, difetto 11: il tooltip di un'intestazione e' preso dal filtro.
+
+    Negativo: una sezione senza tooltip resta a Qt.
+    """
+    from PyQt6.QtWidgets import QTableWidget, QTableWidgetItem
+    table = QTableWidget(1, 2)
+    table.setHorizontalHeaderLabels(["Tipo contatto", "Passo"])
+    table.horizontalHeaderItem(0).setToolTip(LONG)
+    table.resize(400, 200)
+    table.show()
+    app.processEvents()
+    header = table.horizontalHeader()
+    shown = []
+    import kicadgen.gui.tooltips as tooltips
+    original = tooltips.show_tooltip
+    tooltips.show_tooltip = lambda widget, pointer, text: shown.append(text)
+    try:
+        for section in (0, 1):
+            local = QPoint(header.sectionViewportPosition(section) + 5, 5)
+            event = QHelpEvent(QEvent.Type.ToolTip, local, header.viewport().mapToGlobal(local))
+            handled = ToolTipFilter().eventFilter(header.viewport(), event)
+            assert handled is (section == 0)
+    finally:
+        tooltips.show_tooltip = original
+    assert shown == [LONG]
+    table.close()

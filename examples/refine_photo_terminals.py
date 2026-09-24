@@ -1,4 +1,9 @@
-"""Reobserve visible terminals in a saved calibrated photo inventory (API call)."""
+"""Reobserve visible terminals in a saved calibrated photo inventory (API call).
+
+The output folder acts as the project: cached AI answers go to
+`<output>/photo-cache`, as `<project>/photo-cache` does in the application
+(user decision of 2026-09-24: every AI query belongs to its project).
+"""
 import argparse
 import json
 import sys
@@ -8,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from kicadgen.services.openrouter import call_tool
 from kicadgen.services.photo_grounding import DEFAULT_VISION_MODEL
+from kicadgen.services.photo_inventory import photo_cache_dir
 from kicadgen.services.photo_terminals import observe_terminals
 
 
@@ -36,7 +42,7 @@ def main():
     from kicadgen.services.photo_leads import refine_leads
     operation = refine_leads if args.leads_only else observe_terminals
     refined = operation(args.photo.read_bytes(), selected,
-        args.model, call_tool, log, ROOT / 'generated' / 'photo-cache')
+        args.model, call_tool, log, photo_cache_dir(args.output))
     for index, component in zip(indices, refined):
         data['components'][index] = component
     args.output.mkdir(parents=True, exist_ok=True)

@@ -9,21 +9,35 @@ popup instead of sitting above the photo as fixed text.
 from pathlib import Path
 from time import monotonic
 
-from PyQt6.QtCore import QPoint, QRect, QSize, Qt
+from PyQt6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt
 from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import QFrame, QLabel, QToolButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (QComboBox, QFrame, QLabel, QScrollArea, QToolButton,
+                             QVBoxLayout, QWidget)
 
 from .theme import SURFACE1
 
 ASSETS = Path(__file__).resolve().parent / "assets"
 
-#: Widest the info popup may be, in pixels: a comfortable reading column
-#: (the same choice as tooltips.TOOLTIP_MAX_WIDTH_PX), narrowed further by a
-#: narrow window.
+#: Widest the info popup box may be, in pixels, narrowed further by a narrow
+#: window. A reading choice: minus the padding (POPUP_PADDING_PX, 28 px) the
+#: text column is 412 px, about the tooltip column
+#: (tooltips.TOOLTIP_MAX_WIDTH_PX, 420 px) so the two read alike.
 INFO_POPUP_MAX_WIDTH_PX = 440
+
+#: Zoom factor of one wheel notch and of one click on zoom +/- (or the keys
+#: + and -), in BOTH review windows. A choice, not a measurement: 20% per step
+#: is large enough that five steps more than double the scale and small
+#: enough that a single notch never loses the spot under the pointer. Before
+#: 2026-09-24 the windows used 1.15/1.25 and 1.2, with no reason for the
+#: difference (reviewer 4, defect 17): one value, so the hand learns one
+#: gesture.
+ZOOM_STEP = 1.2
 
 #: Distance kept between the popup and the edges of its window, in pixels.
 INFO_POPUP_MARGIN_PX = 8
+
+#: Inner padding of the popup box (left, top, right, bottom), in pixels.
+POPUP_PADDING_PX = (14, 12, 14, 12)
 
 #: A click on the «i» that has just closed the popup (Qt closes a popup on any
 #: press outside it, the button included) must not reopen it at once: within
@@ -103,6 +117,45 @@ def toolbar_divider() -> QFrame:
     return line
 
 
+class _TypingGoesToCombos(QObject):
+    """Event filter: a focused, non-editable combo box keeps its printable keys."""
+
+    def eventFilter(self, watched, event):  # noqa: N802 - Qt override
+        """@brief Accept ShortcutOverride for plain printable keys on a non-editable combo.
+
+        @note Accepting the override is how a widget tells Qt that it wants the
+            key itself: the window shortcut does not fire and the combo gets
+            the key press, which it uses to jump to the entry with that
+            initial. Modified keys (Ctrl, Alt) and non-printable ones (Delete,
+            Escape, arrows) keep going to the window.
+        """
+        if (event.type() == QEvent.Type.ShortcutOverride and isinstance(watched, QComboBox)
+                and not watched.isEditable()):
+            plain = not (event.modifiers() & ~(Qt.KeyboardModifier.ShiftModifier
+                                              | Qt.KeyboardModifier.KeypadModifier))
+            text = event.text()
+            if plain and text and text.isprintable():
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
+
+
+def give_combos_their_keys(root: QWidget) -> QObject:
+    """@brief Let the combo boxes of `root` win over its single-key shortcuts.
+
+    @param root Window whose QComboBox children get the filter.
+    @return The installed filter, owned by `root`.
+    @note Reviewer 1, defect 4: the single-letter window shortcuts (R, P, F,
+        +, -) took the keys away from a focused combo box, so typing an
+        initial in the category filter switched tool or photo state instead.
+        Editable combos and line edits already claim printable keys in Qt.
+    """
+    guard = _TypingGoesToCombos(root)
+    for combo in root.findChildren(QComboBox):
+        combo.installEventFilter(guard)
+    return guard
+
+
 class AnchoredPopup(QFrame):
     """@brief A popup opened under a toolbar icon, never outside the window.
 
@@ -110,6 +163,9 @@ class AnchoredPopup(QFrame):
         widgets, laid out vertically at most INFO_POPUP_MAX_WIDTH_PX wide and
         never wider than the window it opens in; the box is placed under the
         icon, from its left edge, and moved inside the window if needed.
+    @note Never taller than the window either: longer content scrolls inside
+        the popup. Before, a popup taller than a small window was pushed out
+        through the top edge (reviewer 1, suspected defect).
     """
 
     def __init__(self, widgets, parent: QWidget):
@@ -119,11 +175,24 @@ class AnchoredPopup(QFrame):
         self.setStyleSheet(
             "QFrame#info_popup { background: #11111b; border: 1px solid #45475a; "
             "border-radius: 6px; } QLabel { color: #cdd6f4; background: transparent; }")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(8)
+        self.content = QWidget()
+        self.content.setObjectName("info_popup_content")
+        self._content_layout = QVBoxLayout(self.content)
+        self._content_layout.setContentsMargins(0, 0, 0, 0)
+        self._content_layout.setSpacing(8)
         for widget in widgets:
-            layout.addWidget(widget)
+            self._content_layout.addWidget(widget)
+        self.scroll = QScrollArea()
+        self.scroll.setWidget(self.content)
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setStyleSheet("QScrollArea, QWidget#info_popup_content "
+                                  "{ background: transparent; }")
+        self.scroll.viewport().setAutoFillBackground(False)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(*POPUP_PADDING_PX)
+        layout.addWidget(self.scroll)
         self._hidden_at = 0.0
         self._anchor = None
 
@@ -162,10 +231,18 @@ class AnchoredPopup(QFrame):
         area = QRect(window.mapToGlobal(QPoint(0, 0)), window.size())
         width = max(160, min(INFO_POPUP_MAX_WIDTH_PX, area.width() - 2 * INFO_POPUP_MARGIN_PX))
         self.setFixedWidth(width)
-        layout = self.layout()
-        layout.activate()
-        height = (layout.totalHeightForWidth(width) if layout.hasHeightForWidth()
-                  else layout.totalSizeHint().height())
+        left, top, right, bottom = POPUP_PADDING_PX
+        inner = width - left - right
+        content = self._content_layout
+        content.activate()
+        needed = (content.totalHeightForWidth(inner) if content.hasHeightForWidth()
+                  else content.totalSizeHint().height()) + top + bottom
+        available = area.height() - 2 * INFO_POPUP_MARGIN_PX
+        # Piu' alto della finestra: si ferma al suo bordo e il resto scorre.
+        height = min(needed, available)
+        self.scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded if needed > available
+            else Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setFixedHeight(height)
         # Sotto l'icona, dal suo bordo sinistro; se uscirebbe a destra rientra
         # (per l'icona «i» in fondo alla barra finisce allineato a destra).

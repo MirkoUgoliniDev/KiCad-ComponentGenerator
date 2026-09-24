@@ -1343,7 +1343,7 @@ class MainWindow(QMainWindow):
         self.action_about = help_menu.addAction(self.i18n.text("About"), self._show_about)
 
     def _edit_generation_options(self) -> None:
-        dialog = GenerationOptionsDialog(bool(self._config.get("include_nc_pins", True)), self,
+        dialog = GenerationOptionsDialog(self._include_nc_pins(), self,
                                          advanced_user=self._advanced_user(),
                                          silk_pin_labels=self._silk_pin_labels(),
                                          pause_after_inventory=self._inventory_pause_enabled())
@@ -1351,11 +1351,11 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         checked = dialog.include_nc_pins()
-        self._config["include_nc_pins"] = checked
-        self._config['advanced_user'] = dialog.advanced_user()
-        self._config['silk_pin_labels'] = dialog.silk_pin_labels()
         pause = dialog.pause_after_inventory()
         pause_changed = pause != self._inventory_pause_enabled()
+        self._set_project_option("include_nc_pins", checked)
+        self._set_project_option("silk_pin_labels", dialog.silk_pin_labels())
+        self._config['advanced_user'] = dialog.advanced_user()
         save_config(self._config)
         if pause_changed:
             self._on_inventory_pause_toggled(pause)
@@ -1401,6 +1401,42 @@ class MainWindow(QMainWindow):
     def _advanced_user(self):
         return self._config.get('advanced_user', False) is True
 
+    def _project_option(self, key: str, default):
+        """@brief Valore di un'opzione che segue il progetto (`PROJECT_OPTIONS`).
+
+        @param key Nome dell'opzione.
+        @param default Valore quando ne' il progetto ne' config.json la dicono.
+        @return Il valore del progetto aperto se lo dichiara, altrimenti
+            quello generale di config.json.
+        @note Le opzioni di un progetto stanno in `_project_options`, NON in
+            `self._config`: prima l'apertura di un progetto le scriveva in
+            `self._config`, e il primo `save_config` per qualunque altro
+            motivo le rendeva generali, cosi' dopo un riavvio i progetti nuovi
+            partivano dall'ultimo progetto aperto (revisore 2, difetto 8).
+        """
+        options = getattr(self, "_project_options", None) or {}
+        return options[key] if key in options else self._config.get(key, default)
+
+    def _set_project_option(self, key: str, value: bool) -> None:
+        """@brief Scelta dell'utente da Opzioni di generazione: vale per il progetto E come generale.
+
+        @param key Nome dell'opzione (`PROJECT_OPTIONS`).
+        @param value Valore scelto.
+        @note Il chiamante salva config.json. Anche la fotografia generale da
+            cui partono i progetti nuovi si aggiorna, cosi' in questa sessione
+            e dopo un riavvio un progetto nuovo parte dallo stesso valore.
+        """
+        self._config[key] = bool(value)
+        self._project_options = dict(getattr(self, "_project_options", None) or {})
+        self._project_options[key] = bool(value)
+        general = getattr(self, "_general_project_state", None)
+        if isinstance(general, dict):
+            general.setdefault("options", {})[key] = bool(value)
+
+    def _include_nc_pins(self) -> bool:
+        """@brief Dice se i pin NC fisicamente presenti vanno generati (predefinito si')."""
+        return bool(self._project_option("include_nc_pins", True))
+
     def _inventory_pause_enabled(self) -> bool:
         """@brief Dice se dopo l'inventario a pagamento ci si ferma a rivederlo.
 
@@ -1417,7 +1453,7 @@ class MainWindow(QMainWindow):
             che non sia un booleano (una stringa, un numero) non deve valere
             come «spenta» per caso.
         """
-        return self._config.get('pause_after_inventory', True) is not False
+        return self._project_option('pause_after_inventory', True) is not False
 
     def _remember_inventory_pause(self, enabled: bool) -> None:
         """@brief Ricorda in config.json se la pausa dell'inventario va offerta.
@@ -1426,7 +1462,7 @@ class MainWindow(QMainWindow):
         @note Stesso deposito e stesso metodo di «utente avanzato»: la scelta
             vale per le corse successive, non solo per questa sessione.
         """
-        self._config['pause_after_inventory'] = bool(enabled)
+        self._set_project_option('pause_after_inventory', enabled)
         save_config(self._config)
 
     def _photo_inventory_family(self) -> bool | None:
@@ -2410,8 +2446,12 @@ class MainWindow(QMainWindow):
         if key and hasattr(self, "group_castellated"):
             self.group_castellated.setChecked(self._selected_family() == "aggregate_castellated")
 
-        self._config["component_type"] = key
-        save_config(self._config)
+        # La tipologia riapplicata aprendo un progetto e' del progetto, non una
+        # scelta generale: scriverla in config.json farebbe partire i progetti
+        # nuovi dall'ultimo aperto (revisore 2, difetto 8).
+        if not getattr(self, "_restoring_project", False):
+            self._config["component_type"] = key
+            save_config(self._config)
         self._refresh_model_combo()
         if component_type is not None:
             self._append_log(f"Tipologia componente: {component_type.label}.")
@@ -2533,6 +2573,15 @@ class MainWindow(QMainWindow):
         return footprint_available
 
     def _on_name_changed(self, text: str) -> None:
+        """@brief Il nome e' la cartella: da qui in avanti il progetto aperto e' quella.
+
+        @param text Nome nuovo.
+        @note Solo il nome definisce `_open_project_folder`, non la cartella di
+            lavoro: cambiare quella non sposta il progetto aperto, lo chiude
+            (`_on_library_root_changed`).
+        """
+        if hasattr(self, "_open_project_folder"):
+            self._open_project_folder = self._project_dir() if self._component_name() else None
         if hasattr(self, "field_name_mirror"):
             self.field_name_mirror.setText(text)
         self._update_project_path_label()
@@ -2563,13 +2612,17 @@ class MainWindow(QMainWindow):
                 # e' cosi' che il controllo del catalogo (tests/test_i18n.py)
                 # lo vede. Se cambia qui deve cambiare la' -- il costo
                 # dichiarato e' la parte che non puo' divergere.
-                widget.setToolTip(reason or
-                                  "Avvia l'estrazione dai documenti e dalle foto selezionati. "
-                                  "Analisi A PAGAMENTO: consuma credito OpenRouter. I modelli usati e la "
-                                  "spesa vengono scritti nel log prima di partire.")
+                # Tradotti qui E ricordati come sorgente: scritti in italiano
+                # restavano tali in en/fr/de fino al cambio di lingua
+                # successivo (revisore 3, difetto 10).
+                self._set_translated_tooltip(
+                    widget, reason or
+                    "Avvia l'estrazione dai documenti e dalle foto selezionati. "
+                    "Analisi A PAGAMENTO: consuma credito OpenRouter. I modelli usati e la "
+                    "spesa vengono scritti nel log prima di partire.")
             else:
                 widget.setEnabled(named)
-                widget.setToolTip(reason)
+                self._set_translated_tooltip(widget, reason)
         # Il nome decide anche la cartella in cui cercare le proposte salvate:
         # cambiato il nome, i pulsanti della revisione vanno ricalcolati --
         # ma non durante un'analisi, dove restano spenti fino alla fine.
@@ -2804,7 +2857,7 @@ class MainWindow(QMainWindow):
             yolo_model_path=yolo_model_path,
             system_prompt=profile['system_prompt'],
             extra_instructions=self.field_component_prompt.toPlainText().strip() or None,
-            include_nc_pins=bool(self._config.get("include_nc_pins", True)),
+            include_nc_pins=self._include_nc_pins(),
         )
         # Risposte in cache ed evidenze nella cartella del progetto (utente,
         # 2026-09-24). Qui il nome c'e' sempre: senza nome non si estrae.
@@ -4175,6 +4228,10 @@ class MainWindow(QMainWindow):
         """
         if not self._suggested_name:
             return
+        # Rinominare sposta la cartella in cui un'analisi o una generazione
+        # in corso sta scrivendo: stessa guardia dei comandi del menu File.
+        if self._project_change_blocked():
+            return
         # Il nome di un altro progetto non si prende (utente, 2026-09-24):
         # la rinomina sposterebbe i documenti dentro una cartella che ne ha
         # gia' di suoi. Si rifiuta e lo si dice; la proposta resta visibile.
@@ -4200,7 +4257,12 @@ class MainWindow(QMainWindow):
         """
         self._restoring_project = False
         self._project_config_refused = None
+        self._project_options = {}
+        self._open_project_folder = None
         self._general_project_state = self._project_state()
+        # Collegato qui e non alla costruzione del campo: prima della
+        # fotografia generale non c'e' un progetto da salvare e chiudere.
+        self.field_library_root.textChanged.connect(self._on_library_root_changed)
         self._last_saved_project_state = None
         self._project_autosave = QTimer(self)
         self._project_autosave.setInterval(PROJECT_AUTOSAVE_MS)
@@ -4233,7 +4295,7 @@ class MainWindow(QMainWindow):
             "pin_map": (None if not getattr(self, "pin_map", None) else
                         [[pin, row, col] for pin, (row, col) in sorted(self.pin_map.items())]),
             "declared_row_spacing": getattr(self, "_declared_row_spacing", None),
-            "options": {"include_nc_pins": bool(self._config.get("include_nc_pins", True)),
+            "options": {"include_nc_pins": self._include_nc_pins(),
                         "silk_pin_labels": self._silk_pin_labels(),
                         "pause_after_inventory": self._inventory_pause_enabled()},
         }
@@ -4244,9 +4306,10 @@ class MainWindow(QMainWindow):
         @param state Oggetto prodotto da `_project_state` (letto dal file o
             fotografato all'avvio). Chiavi mancanti o valori che non entrano in
             un campo lasciano il campo com'e', con una riga di log.
-        @note Le opzioni cambiano solo in memoria: config.json resta il
-            default dei progetti nuovi finche' l'utente non le cambia dalle
-            Opzioni di generazione.
+        @note Le opzioni vanno in `_project_options`, mai in `self._config`:
+            config.json resta il default dei progetti nuovi finche' l'utente
+            non le cambia dalle Opzioni di generazione. Un'opzione che lo
+            stato non dichiara torna al valore generale.
         """
         from .project_state import set_widget_value
         from ..cad3d.annotations import EdgeFilletAnnotation, FaceTextAnnotation
@@ -4299,9 +4362,8 @@ class MainWindow(QMainWindow):
             float(spacing) if isinstance(spacing, (int, float)) and not isinstance(spacing, bool)
             and math.isfinite(float(spacing)) and float(spacing) > 0 else None)
         options = state.get("options") if isinstance(state.get("options"), dict) else {}
-        for key in PROJECT_OPTIONS:
-            if isinstance(options.get(key), bool):
-                self._config[key] = options[key]
+        self._project_options = {key: options[key] for key in PROJECT_OPTIONS
+                                 if isinstance(options.get(key), bool)}
         if skipped:
             self._append_log("Impostazioni del progetto non applicate (valori non validi): "
                              + ", ".join(skipped) + ".")
@@ -4310,12 +4372,42 @@ class MainWindow(QMainWindow):
         """@brief Apre `name` con le impostazioni `state`, senza salvarle a meta'."""
         self._restoring_project = True
         try:
+            self._reset_project_runtime_state()
             self.field_name.setText(name)
             self._apply_project_state(state)
         finally:
             self._restoring_project = False
         # Lo stato appena applicato e' quello salvato: non va riscritto.
         self._last_saved_project_state = self._project_state_text()
+        # Dopo il nome e dopo lo stato: i pulsanti di revisione guardano la
+        # cartella del progetto appena aperto, non piu' la foto del precedente.
+        if hasattr(self, "btn_reopen_review") and not self._background_work_running():
+            self._refresh_reopen_review_button()
+
+    def _reset_project_runtime_state(self) -> None:
+        """@brief Dimentica cio' che resta in memoria del progetto chiuso.
+
+        @note Revisore 2, difetto 5: aprendo o creando un progetto restavano
+            la foto calibrata, la sovrapposizione, l'ultima estrazione, la mesh
+            e i flag di revisione del progetto PRECEDENTE, e «Modifica la
+            revisione» del nuovo lavorava sulla foto del vecchio scrivendo
+            nella cartella del nuovo. Si azzera la stessa lista dell'inizio di
+            un'estrazione, piu' cio' che solo l'estrazione produce e che il
+            file di progetto non conserva (geometria del package, spessore
+            PCB estratto): un progetto riaperto riparte dai suoi campi.
+        """
+        self._extraction_started_stamp = None
+        self._declared_row_spacing = None
+        self._reviewed_this_extraction = False
+        self._relaunch_base_synthesized = False
+        self._last_extracted = None
+        self._photo_png = None
+        self._photo_overlay_png = None
+        self._photo_source = ""
+        self.package_geometry = None
+        self._extracted_pcb_thickness = None
+        self._invalidate_generated_mesh()
+        self._set_review_buttons_enabled(False)
 
     def _project_state_text(self) -> str | None:
         """Stato del progetto come testo confrontabile, o None se non si puo' leggere.
@@ -4341,11 +4433,19 @@ class MainWindow(QMainWindow):
         @param force Scrive anche se lo stato non e' cambiato (progetto nuovo).
         @return True quando il file e' stato scritto.
         @note Mai senza progetto, mai durante un cambio di progetto, mai sopra
-            un file che all'apertura non si e' potuto applicare.
+            un file che all'apertura non si e' potuto applicare, mai fuori
+            dalla cartella del progetto aperto (`_open_project_folder`).
         """
         if getattr(self, "_restoring_project", True) or not self._named():
             return False
-        folder = self._project_dir()
+        folder = getattr(self, "_open_project_folder", None)
+        # Il file va nella cartella del progetto APERTO. Se la cartella di
+        # lavoro e' cambiata, `_project_dir()` punta a un progetto omonimo di
+        # un'altra cartella, che non si deve sovrascrivere (revisore 2,
+        # difetto 7): finche' `_on_library_root_changed` non chiude il
+        # progetto, qui non si scrive.
+        if folder is None or folder != self._project_dir():
+            return False
         if self._project_config_refused is not None and folder == self._project_config_refused:
             return False
         text = self._project_state_text()
@@ -4364,6 +4464,51 @@ class MainWindow(QMainWindow):
         """@brief Salva subito le impostazioni del progetto aperto (cambio progetto, chiusura)."""
         if hasattr(self, "_project_autosave"):
             self._save_project_config()
+
+    def _on_library_root_changed(self, _text: str = "") -> None:
+        """@brief Cambiare la cartella di lavoro salva e chiude il progetto aperto.
+
+        @note Revisore 2, difetto 7: prima il nome restava e il salvataggio
+            automatico scriveva nel progetto OMONIMO dell'altra cartella di
+            lavoro, sovrascrivendolo. Ora il progetto aperto e' una cartella
+            (`_open_project_folder`): le sue impostazioni si salvano li' e poi
+            il progetto si chiude; come per «Nuovo» restano le impostazioni
+            generali. Un lavoro in corso scrive nella cartella del progetto:
+            in quel caso la cartella di lavoro torna com'era.
+        """
+        folder = getattr(self, "_open_project_folder", None)
+        if folder is None or getattr(self, "_restoring_project", False):
+            return
+        if self._library_root() / self._component_name() == folder:
+            return
+        if self._background_work_running() or self._automatic_generation_active:
+            self.field_library_root.blockSignals(True)
+            self.field_library_root.setText(str(folder.parent))
+            self.field_library_root.blockSignals(False)
+            self._update_project_path_label()
+            self._project_change_blocked()
+            return
+        # Il salvataggio normale guarda `_project_dir()`, che adesso punta
+        # all'altra cartella: si scrive esplicitamente in quella del progetto.
+        self._write_open_project_config(folder)
+        self._set_suggested_name("")
+        self._switch_project("", self._general_project_state)
+        self._append_log(f"Cartella di lavoro cambiata: progetto {folder.name} salvato "
+                         f"in {folder} e chiuso.")
+
+    def _write_open_project_config(self, folder: Path) -> None:
+        """Salva le impostazioni correnti nella cartella del progetto aperto, se cambiate."""
+        if self._project_config_refused is not None and folder == self._project_config_refused:
+            return
+        text = self._project_state_text()
+        if text is None or text == self._last_saved_project_state:
+            return
+        from .project_state import write_project_config
+        try:
+            write_project_config(folder, json.loads(text))
+            self._last_saved_project_state = text
+        except (OSError, TypeError, ValueError) as exc:
+            self._append_log(f"Impostazioni del progetto non salvate: {exc}")
 
     def _library_root(self) -> Path:
         """@brief Cartella di lavoro in cui stanno i progetti."""
@@ -4494,6 +4639,12 @@ class MainWindow(QMainWindow):
         old_docs = self._docs_dir()
         new_docs = Path(self.field_library_root.text().strip()) / new_name / DOCS_SUBDIR
         if new_docs.resolve() == old_docs.resolve():
+            if new_name != old_name:
+                # Cambiano solo le maiuscole: su un disco che non le distingue
+                # (Windows) e' la stessa cartella, e prima la rinomina non
+                # faceva nulla, senza dirlo (revisore 2, difetto 9).
+                return self._rename_folder_case(old_docs.parent, new_docs.parent,
+                                                old_name, new_name)
             return old_name
         files = [f for f in old_docs.iterdir() if f.is_file()] if old_docs.is_dir() else []
         if not files:
@@ -4528,6 +4679,39 @@ class MainWindow(QMainWindow):
         self._move_analysis_folders_to(old_docs.parent, new_docs.parent)
         return new_name
 
+    def _rename_folder_case(self, old_project: Path, new_project: Path,
+                            old_name: str, new_name: str) -> str:
+        """Rinomina la cartella del progetto cambiando solo le maiuscole, in due passi.
+
+        Si passa da un nome temporaneo accanto, che su un disco senza
+        distinzione di maiuscole e' l'unico modo sicuro. Se il secondo passo
+        fallisce si torna al nome vecchio: la cartella non resta col nome
+        temporaneo. Tutto il contenuto segue, perche' si sposta la cartella
+        intera. Restituisce il nome effettivo.
+        """
+        if not old_project.is_dir():
+            return new_name
+        import uuid
+        temporary = old_project.parent / f".{old_project.name}-rinomina-{uuid.uuid4().hex[:8]}"
+        try:
+            old_project.rename(temporary)
+        except OSError as exc:
+            self._append_log(f"Rinomina annullata: {old_name} non rinominabile ({exc}).")
+            return old_name
+        try:
+            temporary.rename(new_project)
+        except OSError as exc:
+            try:
+                temporary.rename(old_project)
+            except OSError:
+                self._append_log(f"ATTENZIONE: la cartella del progetto e' rimasta {temporary}.")
+            self._append_log(f"Rinomina annullata: {old_name} non rinominabile ({exc}).")
+            return old_name
+        if self._project_config_refused is not None and self._project_config_refused == old_project:
+            self._project_config_refused = new_project
+        self._append_log(f"Progetto rinominato: {old_name} diventa {new_name}.")
+        return new_name
+
     def _move_analysis_folders_to(self, old_project: Path, new_project: Path) -> None:
         """@brief Porta nella cartella rinominata tutto cio' che l'analisi ha prodotto.
 
@@ -4547,6 +4731,12 @@ class MainWindow(QMainWindow):
         import shutil
         from ..services.photo_inventory import PHOTO_CACHE_SUBDIR, REVIEW_BUNDLE_SUBDIR
         from .project_state import PROJECT_CONFIG_NAME
+        # Un file rifiutato all'apertura resta rifiutato anche dopo la
+        # rinomina: il blocco segue la cartella (revisore 2, difetto 6).
+        # Prima restava sulla cartella vecchia e il salvataggio automatico
+        # riscriveva in versione 1 il file spostato.
+        if self._project_config_refused is not None and self._project_config_refused == old_project:
+            self._project_config_refused = new_project
         # Le impostazioni del progetto seguono il nome come il resto.
         settings = old_project / PROJECT_CONFIG_NAME
         if settings.is_file() and not (new_project / PROJECT_CONFIG_NAME).exists():
@@ -5505,7 +5695,7 @@ class MainWindow(QMainWindow):
 
     def _silk_pin_labels(self) -> bool:
         """@brief Tell whether pin names are engraved on the 3D silkscreen."""
-        return self._config.get('silk_pin_labels', False) is True
+        return self._project_option('silk_pin_labels', False) is True
 
     def _silk_labels(self) -> dict[str, str]:
         """Sigla serigrafata per ogni pad, dalla tabella pinout.

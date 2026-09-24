@@ -1224,8 +1224,14 @@ def test_selection_halo_stacks_behind_and_handles_above_the_label(dialog):
     # the parent, otherwise the photo would hide them.
     assert not (item.flags() & QGraphicsItem.GraphicsItemFlag.ItemStacksBehindParent)
     assert not (item.number.flags() & QGraphicsItem.GraphicsItemFlag.ItemStacksBehindParent)
-    # A selected outline is drawn above unselected neighbours.
-    assert item.zValue() > dialog._items[1].zValue()
+    # Contract changed on 2026-09-24 (reviewer 1, defect 2): the stacking is
+    # by area only, selected or not, so a smaller outline inside the selected
+    # one stays clickable. Selection is shown by halo, pen and fill.
+    def area(outline):
+        bounds = outline.photo_bounds()
+        return bounds.width() * bounds.height()
+    other = dialog._items[1]
+    assert (item.zValue() > other.zValue()) == (area(item) < area(other))
 
 
 def test_handle_cursors_follow_the_on_screen_edge_direction(dialog):
@@ -2102,9 +2108,12 @@ def test_deleting_the_last_carrier_takes_the_doubts_away(inventory_dialog, app):
 
 
 def test_a_small_outline_inside_a_large_one_is_on_top(app, png):
-    """@brief Positivo: il rettangolo piccolo dentro il grande sta sopra, qualunque sia l'ordine.
+    """@brief Il rettangolo piccolo dentro il grande sta sopra, qualunque sia l'ordine.
 
-    Negativo: il rettangolo scelto resta comunque sopra a tutti.
+    Positivo: anche con il grande SCELTO il piccolo resta sopra. Contratto
+    cambiato di proposito (revisore 1, difetto 2): prima la scelta portava il
+    grande sopra tutti e i piccoli dentro non si prendevano piu'. Negativo:
+    scelto il piccolo, l'ordine non cambia (non e' la scelta a decidere).
     (Utente, 2026-09-24: una proposta spuria dentro un corpo grande non si
     poteva scegliere col mouse.)
     """
@@ -2124,7 +2133,11 @@ def test_a_small_outline_inside_a_large_one_is_on_top(app, png):
         assert small.zValue() > large.zValue()
         large.setSelected(True)
         widget._selection_changed()
-        assert large.zValue() > small.zValue()
+        assert small.zValue() > large.zValue()
+        widget.scene.clearSelection()
+        small.setSelected(True)
+        widget._selection_changed()
+        assert small.zValue() > large.zValue()
     finally:
         widget.close()
         app.processEvents()

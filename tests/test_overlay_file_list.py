@@ -354,3 +354,32 @@ def test_the_plain_reader_of_the_status_sees_what_is_shown(make_overlay):
     assert "<b>" in overlay.status.text()
     assert "<" not in overlay.status_plain_text()
     assert overlay.card.minimumHeight() + 2 * _OVERLAY_MARGIN <= 650
+
+
+def test_a_long_term_with_a_description_over_half_the_row_keeps_the_head():
+    """@brief Ramo di `_elide_row` rimasto senza test (revisore 4, difetto 14).
+
+    Positivo: termine piu' largo della riga E descrizione oltre meta' riga ->
+    vale ElideRight: il termine si accorcia in coda e la descrizione sparisce.
+    Negativo: stesso termine con una descrizione breve -> il termine si
+    accorcia NEL MEZZO e la descrizione resta intera.
+    """
+    from PyQt6.QtGui import QFontMetrics
+    from kicadgen.gui.analysis_overlay import _elide_row
+    app = QApplication.instance() or QApplication([])
+    regular_font = app.font()
+    bold_font = QFont(regular_font)
+    bold_font.setBold(True)
+    regular, bold = QFontMetrics(regular_font), QFontMetrics(bold_font)
+    width = 300
+    term = "nome-lunghissimo-" * 20 + ".png"
+    long_description = "descrizione " * 20
+    assert regular.horizontalAdvance(" — " + long_description) > width / 2
+    shown, description = _elide_row(f"{term} — {long_description}", width, regular, bold, True)
+    assert description == ""
+    assert shown.startswith("nome-lunghissimo-") and shown.endswith("…")
+    assert bold.horizontalAdvance(shown) <= width
+
+    shown, description = _elide_row(f"{term} — ruolo", width, regular, bold, True)
+    assert description == "ruolo"
+    assert shown.startswith("nome-") and shown.endswith(".png") and "…" in shown

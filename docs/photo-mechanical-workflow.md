@@ -59,7 +59,9 @@ per la verifica di presenza (nella prova: `anthropic/claude-sonnet-5`). Non si c
 il modello datasheet già configurato. Il percorso standard con 42 candidati usa
 4 chiamate di localizzazione e 2 di presenza, oltre alla prima estrazione generale.
 
-Le risposte vengono salvate in `generated/photo-cache`, senza chiave API e senza
+Le risposte vengono salvate nella cartella del progetto, `<progetto>/photo-cache`
+(dal 2026-09-24; prima in `generated/photo-cache`, comune a tutti i progetti;
+gli script di `examples/` usano `<output>/photo-cache`), senza chiave API e senza
 duplicare i dati immagine. La chiave include modello, schema, prompt, parametri e
 pixel; una ripetizione identica riusa la cache. Risposte incomplete non sono
 trattate come successi riutilizzabili. La cache può contenere informazioni estratte

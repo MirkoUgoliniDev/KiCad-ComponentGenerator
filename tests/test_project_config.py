@@ -117,7 +117,15 @@ def test_a_project_reopens_with_its_settings_and_a_new_one_with_the_general_ones
     window.field_rows.setValue(default_rows + 3)
     window.field_component_prompt.setPlainText("note del progetto A")
     window.field_description.setText("modulo di prova A")
-    window._config["include_nc_pins"] = False
+    # Dal difetto 8 (revisore 2) le opzioni del progetto stanno in una
+    # sovrapposizione propria e non in `_config`: si cambiano come l'utente,
+    # dalle Opzioni di generazione (`_set_project_option`), e si leggono
+    # dagli accessori.
+    window._set_project_option("include_nc_pins", False)
+    general_nc = window._config.get("include_nc_pins")
+    # La scelta aggiorna anche la fotografia generale: per vedere che B non
+    # eredita il valore di A, la generale si riporta a quella di avvio.
+    window._general_project_state["options"]["include_nc_pins"] = True
     assert window._save_project_config()
     saved = json.loads((window._project_dir() / PROJECT_CONFIG_NAME).read_text(encoding="utf-8"))
     assert saved["state"]["widgets"]["field_rows"] == default_rows + 3
@@ -126,14 +134,15 @@ def test_a_project_reopens_with_its_settings_and_a_new_one_with_the_general_ones
     assert window.field_rows.value() == default_rows
     assert window.field_component_prompt.toPlainText() != "note del progetto A"
     assert window.field_description.text() != "modulo di prova A"
-    assert window._config["include_nc_pins"] is window._general_project_state["options"]["include_nc_pins"]
+    assert window._include_nc_pins() is True
+    assert general_nc is False  # la scelta dall'interfaccia vale anche come generale
 
     _open(window, monkeypatch, "ProgettoA")
     assert window._component_name() == "ProgettoA"
     assert window.field_rows.value() == default_rows + 3
     assert window.field_component_prompt.toPlainText() == "note del progetto A"
     assert window.field_description.text() == "modulo di prova A"
-    assert window._config["include_nc_pins"] is False
+    assert window._include_nc_pins() is False
 
 
 def test_the_sides_table_and_the_contact_style_come_back(window, monkeypatch):  # noqa: F811

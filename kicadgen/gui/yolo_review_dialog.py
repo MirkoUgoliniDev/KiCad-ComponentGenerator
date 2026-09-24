@@ -19,7 +19,8 @@ from PyQt6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QDialog,
                              QDialogButtonBox, QHBoxLayout, QLabel, QListWidget,
                              QListWidgetItem, QVBoxLayout, QWidget)
 
-from .review_tools import InfoPopup, asset_icon, set_tool_texts, tool_button, toolbar_divider
+from .review_tools import (ZOOM_STEP, InfoPopup, asset_icon, give_combos_their_keys,
+                           set_tool_texts, tool_button, toolbar_divider)
 
 #: Sotto questa frazione del lato il rettangolo tracciato e' un clic andato
 #: storto, non un corpo: un componente grande come un pixel non esiste.
@@ -159,9 +160,9 @@ TOOLS = (TOOL_SELECT, TOOL_DRAW)
 #: foto stessa.
 MIN_ZOOM = 1.0
 MAX_ZOOM = 16.0
-#: Passo di uno scatto della rotella e di un clic su zoom +/-.
-WHEEL_ZOOM_STEP = 1.15
-BUTTON_ZOOM_STEP = 1.25
+#: Passo di uno scatto della rotella e di un clic su zoom +/-: lo stesso
+#: della finestra «Revisione componenti», vedi `review_tools.ZOOM_STEP`.
+WHEEL_ZOOM_STEP = BUTTON_ZOOM_STEP = ZOOM_STEP
 
 
 def _origin_color(proposal):
@@ -304,6 +305,31 @@ class BoardView(QWidget):
         self._drag_from = self._drag_to = None
         self.update()
         return True
+
+    def cancel_gesture(self):
+        """@brief Abbandona qualunque gesto del mouse in corso, riportando le cose com'erano.
+
+        @return True se c'era un gesto da abbandonare.
+        @note Serve a Canc premuto DURANTE un trascinamento (revisore 1,
+            difetto 3): `_edit` tiene l'indice della proposta presa, che dopo
+            la cancellazione punta alla successiva, e il rilascio la spostava
+            alle coordinate di quella cancellata marcandola manuale. Il
+            riquadro trascinato torna dov'era: la cancellazione decide, non il
+            movimento a meta'.
+        """
+        active = self._edit is not None or self._drag_from is not None or self._pan_press is not None
+        if self._edit is not None:
+            index, _handle, origin, _start = self._edit
+            if 0 <= index < len(self.proposals):
+                self.proposals[index]["_box"] = origin
+        self._edit = None
+        self._drag_from = self._drag_to = None
+        self._pan_press = None
+        if active:
+            self.setCursor(Qt.CursorShape.CrossCursor if self.tool == TOOL_DRAW
+                           else Qt.CursorShape.ArrowCursor)
+            self.update()
+        return active
 
     def zoom(self):
         """@brief Ingrandimento attuale rispetto alla foto adattata alla vista (1 = adattata)."""
@@ -545,8 +571,10 @@ class BoardView(QWidget):
 
         @note Le maniglie del riquadro scelto vincono sull'interno di un
             altro riquadro che le copra: chi ha scelto un corpo sta lavorando
-            su quello. Scegliere un riquadro avvia anche lo spostamento, ma
-            un clic fermo non cambia nulla (vedi mouseReleaseEvent).
+            su quello. Il suo interno invece no: un riquadro piu' piccolo che
+            ci sta dentro si sceglie (`box_at`). Scegliere un riquadro avvia
+            anche lo spostamento, ma un clic fermo non cambia nulla (vedi
+            mouseReleaseEvent).
         @note Con Seleziona, una pressione nel vuoto sposta la vista se si
             trascina e toglie la scelta se si rilascia fermi. Con Disegna, le
             maniglie del riquadro scelto restano prendibili (lo si aggiusta
@@ -564,6 +592,12 @@ class BoardView(QWidget):
             return
         handle = self.handle_at(position)
         if self.tool == TOOL_DRAW and handle == MOVE_HANDLE:
+            handle = None
+        if handle == MOVE_HANDLE and self.box_at(position) not in (None, self.selected):
+            # L'interno del riquadro scelto non copre i riquadri piu' piccoli
+            # che gli stanno dentro: si sceglie quello (revisore 1, difetto
+            # 2), con la stessa regola del clic su un riquadro non scelto.
+            # Le maniglie invece restano del riquadro scelto.
             handle = None
         if handle is None and self.tool == TOOL_SELECT:
             index = self.box_at(position)
@@ -675,7 +709,13 @@ class BoardView(QWidget):
         x0, y0 = self.to_normalized(start)
         x1, y1 = self.to_normalized(end)
         box = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
-        if box[2] - box[0] >= MIN_NEW_BOX and box[3] - box[1] >= MIN_NEW_BOX:
+        # Un tremolio della mano non e' un trascinamento: sotto la distanza
+        # che Qt usa per iniziare un trascinamento (la stessa dello
+        # spostamento della vista) e' un clic, a qualunque ingrandimento.
+        # Prima contava solo MIN_NEW_BOX, relativo alla foto: al 100% un
+        # tremolio di pochi pixel creava un riquadro invece di scegliere.
+        dragged = (end - start).manhattanLength() >= QApplication.startDragDistance()
+        if dragged and box[2] - box[0] >= MIN_NEW_BOX and box[3] - box[1] >= MIN_NEW_BOX:
             self.box_added.emit(box)
             return
         # Con Disegna un clic fermo SCEGLIE (o toglie la scelta nel vuoto):
@@ -850,6 +890,8 @@ class YoloReviewDialog(QDialog):
         self.view.view_changed.connect(self._update_zoom_label)
         self.view.pointer_moved.connect(self._update_pointer_label)
         self._bind_shortcuts()
+        # Un combo con il fuoco tiene le sue lettere (revisore 1, difetto 4).
+        self._combo_keys = give_combos_their_keys(self)
         self.resize(1100, 700)
         self._update_zoom_label()
         self._update_pointer_label(None)
@@ -1113,12 +1155,33 @@ class YoloReviewDialog(QDialog):
         self._select_row(index)
 
     def _delete_selected(self):
-        """@brief Toglie la proposta scelta: non e' un componente."""
+        """@brief Toglie la proposta scelta: non e' un componente.
+
+        @note Un gesto in corso si abbandona prima (vedi
+            `BoardView.cancel_gesture`). La scelta passa al vicino VISIBILE
+            nel filtro, o a nessuno: prima passava all'indice successivo
+            anche se il filtro lo nascondeva, lo rimostrava, e un secondo Canc
+            cancellava un corpo che non si vedeva (revisore 1, difetto 1).
+        """
+        self.view.cancel_gesture()
         index = self.view.selected
         if 0 <= index < len(self.proposals):
             del self.proposals[index]
-            self.view.selected = min(index, len(self.proposals) - 1)
-            self._select_row(self.view.selected)
+            self._select_row(self._nearest_shown(index))
+
+    def _shown_by_filter(self, proposal):
+        """Vero quando la proposta rientra nella categoria del filtro (o non c'e' filtro)."""
+        wanted = self.category_filter.currentData()
+        return not wanted or (proposal.get("_yolo_class") or "") == wanted
+
+    def _nearest_shown(self, index):
+        """Indice della proposta visibile piu' vicina a `index`, prima in avanti; -1 se nessuna."""
+        for distance in range(len(self.proposals)):
+            for candidate in (index + distance, index - distance - 1):
+                if 0 <= candidate < len(self.proposals) and \
+                        self._shown_by_filter(self.proposals[candidate]):
+                    return candidate
+        return -1
 
     def _change_class(self, name):
         """@brief Corregge la categoria proposta dal rilevatore.

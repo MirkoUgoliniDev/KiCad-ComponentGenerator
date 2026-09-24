@@ -1,3 +1,16 @@
+# STATO ATTUALE (aggiornare a ogni commit)
+
+- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `d492635` (pushato).
+- Lavoro NON committato: correzione dei difetti 1-15 e 17 della verifica con
+  agenti del 24/09 (sezione «PIANO IN CORSO (24/09) — correggi tutti i
+  difetti…» in fondo al file). Si committa solo su richiesta dell'utente.
+- Suite completa (24/09, dopo le correzioni): 3920 passati, 3 saltati,
+  2 xfail attesi, 19 sottotest.
+- Aperto, decisione dell'utente: difetto 16 (frase «Tipo SMD di proposito»
+  estesa anche ai moduli misti half_hole + through_hole).
+- Mai committare: `data/analysis_profiles.sqlite3`, `Private/`,
+  `Claude outputs/`, `generated/`, `.env`, `config.json`.
+
 # 2026-09-20 (16) — la validazione nuova rigiocata sulla risposta AI vera
 
 Terza prova offline, sui dati della corsa che ha prodotto il modulo sbagliato.
@@ -5633,3 +5646,163 @@ di revisione; progetti, `project_config.json` e cache; tooltip, tema,
 traduzioni e icone; aderenza dei test alle regole di CLAUDE.md. Nessuno
 modifica file ne' fa commit; i difetti trovati si correggono solo su richiesta
 dell'utente. Esiti: vedi la sezione successiva quando arrivano.
+
+## Esiti della verifica con agenti (24/09) — NON corretti, in attesa dell'utente
+
+### Revisore 1, finestre di revisione (difetti riprodotti anche dal coordinatore)
+1. media — Canc con il filtro attivo sceglie e RIMOSTRA un componente di un
+   altro filtro (yolo `_delete_selected` `min(index, len-1)`; foto
+   `delete_selected` -> `_select_row` che rende visibile). Un secondo Canc
+   cancella un corpo che il filtro nascondeva. Nato oggi (filtro sulla foto).
+2. media — un riquadro piccolo DENTRO il riquadro grande gia' scelto non si
+   sceglie: yolo con Seleziona `handle_at` da' MOVE_HANDLE sull'interno del
+   scelto e `box_at` non viene consultato (con Disegna invece si'); foto: la Z
+   del scelto (3 + ...) sta sopra tutti. All'apertura la riga 0 e' scelta:
+   se e' il corpo grande si ricade nel caso segnalato dall'utente.
+3. media — Canc premuto DURANTE un trascinamento (yolo): `_edit` tiene
+   l'indice, che dopo la cancellazione punta al corpo successivo, che viene
+   spostato alle coordinate di quello cancellato e marcato manuale.
+4. bassa — le scorciatoie di una lettera (R, P, F, +, -) rubano i tasti ai
+   combo non modificabili (filtro categoria, categoria nella yolo).
+Sospetti non riprodotti (bassa): popup piu' alto della finestra esce in alto;
+con Disegna un tremolio di ~3 px al 100% crea un riquadro invece di scegliere
+(MIN_NEW_BOX normalizzato vs `startDragDistance` per lo spostamento).
+Script di riproduzione: C:\Users\mirko\AppData\Local\Temp\claude\agent-review-A\repro1-4.py
+
+### Revisore 2, progetti e project_config.json (riprodotti dal coordinatore: 6 test falliti su 7)
+Script: C:\Users\mirko\AppData\Local\Temp\claude\agent-review-B\test_review_b.py
+(eseguire con `PYTHONPATH="tests;."`; importa l'isolamento di conftest).
+5. ALTA — aprendo o creando un progetto restano in memoria foto calibrata,
+   overlay, `_last_extracted`, `_last_mesh_path` e flag di revisione del
+   progetto PRECEDENTE: «Modifica la revisione» di B lavora sulla foto di A e
+   scrive in B/photo-review; il rilancio usa l'estrazione di A.
+6. ALTA — un file di progetto rifiutato (es. versione piu' nuova) viene
+   spostato dalla rinomina, ma il blocco resta sulla cartella vecchia: il file
+   originale viene poi sovrascritto con la versione 1.
+7. ALTA — cambiare la «Cartella di lavoro» con un progetto aperto: il
+   salvataggio automatico scrive nel progetto con lo stesso nome dell'ALTRA
+   cartella di lavoro, sovrascrivendolo.
+8. MEDIA — le impostazioni di un progetto finiscono in config.json:
+   `_on_component_type_changed` salva la tipologia a ogni apertura, e le tre
+   opzioni messe in `self._config` vengono salvate come generali al primo
+   save_config per qualunque motivo. I progetti nuovi dopo un riavvio
+   partono dall'ultimo progetto aperto: contraddice la decisione 2.
+9. BASSA — rinomina che cambia solo le maiuscole: accettata dal dialogo ma
+   non fa nulla (stessa cartella su Windows), senza log.
+Sospetto: «Usa questo nome» non e' bloccato durante un lavoro in corso.
+
+### Revisore 3, tooltip, traduzioni, icone (riprodotti)
+10. MEDIA — il motivo del blocco senza progetto («Crea o apri prima un
+    progetto…») e il tooltip di «Estrai parametri» sono scritti in italiano
+    senza passare da `i18n.text` (difetto gia' presente con la frase vecchia);
+    altri tre testi preesistenti restano in italiano in en/fr/de.
+11. BASSA/MEDIA — i tooltip delle INTESTAZIONI di tabella scavalcano il filtro
+    (QHeaderView.indexAt non valido): il lungo tooltip «Tipo contatto» esce
+    ancora su una riga e fuori dalla finestra.
+12. BASSA — `place_inside` tiene il tooltip dentro la finestra ma non dentro lo
+    schermo: con la finestra in parte fuori schermo il tooltip esce.
+Verificato senza difetti: escaping, icone, SVG, catalogo nelle 4 lingue.
+
+### Revisore 4, regole di CLAUDE.md (controllati a campione)
+Test modificati: tutti aggiornamenti di contratto spiegati, nessuno indebolito.
+Da sistemare:
+13. ALTA (documentazione) — docstring false in photo_review_dialog.py (modulo
+    righe 30-33 e classe ~962-975): parlano di `photo_state_label` e di un
+    filtro che non nasconde i rettangoli.
+14. MEDIA — il ramo «termine troppo lungo e descrizione oltre meta' riga» di
+    `_elide_row` non ha piu' test; il ramo `component.rename_conflict` non e'
+    piu' raggiunto (forse codice morto).
+15. MEDIA — HANDOFF senza testata aggiornata (branch, ultimo commit, suite);
+    `.claude/CLAUDE.md` con la baseline vecchia (1061/692ca95); docs/ ed
+    examples/ citano ancora `generated/photo-cache`.
+16. MEDIA — la frase «Tipo SMD di proposito» estesa ai moduli misti
+    (half_hole + through_hole) oltre la decisione dell'utente: da dirgli.
+17. BASSA — commenti/valori: `INFO_POPUP_MAX_WIDTH_PX` 440 dichiarato «come
+    420»; `WHEEL_ZOOM_STEP`/`BUTTON_ZOOM_STEP` senza motivo; commento orfano
+    su BLUE_TINT in theme.py; tolleranza `+ 40` non spiegata in test_tooltips.
+
+## PIANO IN CORSO (24/09) — «correggi tutti i difetti trovati in modo rigoroso»
+
+Scritto prima di toccare il codice. Ogni correzione con test positivo e
+negativo; si procede per gruppi, con i test mirati dopo ogni gruppo e la suite
+completa alla fine.
+Gruppo P, progetti:
+- [x] 5 stato in memoria del progetto precedente: un cambio di progetto
+  azzera foto, overlay, ultima estrazione, mesh e flag di revisione (stessa
+  lista dell'azzeramento a inizio estrazione) e ricalcola i pulsanti.
+- [x] 6 file rifiutato + rinomina: il blocco segue la cartella rinominata.
+- [x] 7 cambio della cartella di lavoro: il progetto aperto e' ricordato come
+  CARTELLA (`_project_folder_open`); si salva solo li', e cambiare la
+  cartella di lavoro salva e chiude il progetto aperto.
+- [x] 8 le impostazioni del progetto non vanno piu' in config.json: opzioni
+  del progetto in una sovrapposizione separata letta dagli accessori; la
+  tipologia non si salva come generale durante il ripristino.
+- [x] 9 rinomina che cambia solo le maiuscole: rinomina vera in due passi.
+- [x] sospetto: «Usa questo nome» bloccato durante un lavoro in corso.
+  Gruppo P fatto: `tests/test_project_switch.py` (10 test, positivo e
+  negativo); le 7 riproduzioni del revisore 2 passano (prima 6 fallite).
+  Scelte: il progetto aperto e' `_open_project_folder` (fissato dal nome);
+  le opzioni stanno in `_project_options` e si leggono con
+  `_project_option`; cambiarle dalle Opzioni di generazione vale per il
+  progetto E come generale (config.json e fotografia generale). Al cambio
+  di progetto si azzerano anche `package_geometry` e lo spessore estratto,
+  che il file di progetto non conserva: un progetto riaperto riparte dai
+  suoi campi (limite noto, come dopo un riavvio). Contratto cambiato in
+  `test_project_config.py`: le opzioni non sono piu' in `_config`.
+Gruppo R, finestre di revisione:
+- [x] 1 dopo Canc la scelta va al vicino VISIBILE nel filtro (o a nessuno).
+- [x] 2 un riquadro piu' piccolo dentro quello scelto si sceglie: yolo, clic
+  nell'interno del scelto consulta `box_at`; foto, l'ordine Z e' solo per area
+  (il piu' piccolo sopra anche se il grande e' scelto).
+- [x] 3 Canc durante un trascinamento annulla il gesto in corso.
+- [x] 4 i combo non modificabili hanno la precedenza sulle scorciatoie di una
+  lettera (ShortcutOverride accettato per i tasti stampabili).
+- [x] sospetti: popup piu' alto della finestra (scorre invece di uscire);
+  con Disegna un tremolio sotto `startDragDistance` e' un clic.
+  Gruppo R fatto: `tests/test_review_windows_fixes.py` (10 test); le 4
+  riproduzioni del revisore 1 danno ora il risultato giusto. Contratto
+  cambiato in `test_photo_review_dialog.py` (2 test): l'ordine Z e' SOLO per
+  area. Compromesso da sapere: nella finestra foto le maniglie sono figlie
+  del rettangolo, quindi un rettangolo piu' piccolo sopra una maniglia del
+  grande scelto prende il clic (resta il ridimensionamento dalle quote);
+  nella yolo le maniglie vincono ancora sull'interno degli altri. Nuovi:
+  `BoardView.cancel_gesture`, `review_tools.give_combos_their_keys`,
+  popup con `QScrollArea` (`AnchoredPopup.scroll`, `.content`).
+Gruppo T, tooltip e traduzioni:
+- [x] 10 motivo del blocco e tooltip di «Estrai parametri» tradotti; gli altri
+  tre testi rimasti in italiano.
+- [x] 11 tooltip delle intestazioni di tabella nel filtro.
+- [x] 12 tooltip dentro finestra E schermo.
+  Gruppo T fatto: `tests/test_untranslated_texts.py` (falliscono senza la
+  correzione), 3 test nuovi in `test_tooltips.py`. Uno scan della finestra in
+  inglese ha trovato un QUARTO testo oltre ai tre del revisore: l'etichetta
+  «Foro passante dal bordo (0 = auto):». `retranslate_widgets` ora ritraduce
+  tooltip e nome accessibile anche delle viste a elenco (le righe no, sono
+  dati). Difetto NUOVO trovato misurando e corretto: la cornice del tooltip
+  e' di 44 px, non dei 18 stimati da `_FRAME_X_PX`, e in una finestra
+  stretta il box usciva a destra; `show_tooltip` misura il box mostrato e
+  stringe la colonna di quanto sfora (test verificato rosso senza).
+Gruppo D, documentazione e test:
+- [x] 13 docstring di photo_review_dialog riallineate.
+- [x] 14 test per il ramo «termine e descrizione lunghi» di `_elide_row` e per
+  il conflitto di documenti di `_migrate_docs_to_new_name`.
+- [x] 15 testata dell'HANDOFF, baseline in CLAUDE.md, docs/ ed examples/ senza
+  `generated/photo-cache`.
+- [x] 17 commenti e valori: larghezza del popup, passi di zoom, commento
+  orfano BLUE_TINT, tolleranza `+ 40` in test_tooltips.
+  Gruppo D: 13 docstring del modulo e della classe riallineate (barra di
+  icone, popup dei dettagli, filtro che nasconde anche i rettangoli). 14 test
+  nuovi: ramo «termine lungo e descrizione oltre meta' riga» in
+  `test_overlay_file_list.py`; ramo conflitto di documenti (difensivo: il
+  dialogo lo previene) in `test_project_switch.py`. 17: passo di zoom UNICO
+  `review_tools.ZOOM_STEP = 1.2` per rotella e pulsanti nelle due finestre
+  (prima 1.15/1.25 e 1.2 senza motivo), commento orfano BLUE_TINT tolto,
+  commento di `INFO_POPUP_MAX_WIDTH_PX` reso vero, tolleranza del test dei
+  tooltip spiegata e nominata. 15: docs/ citano `<progetto>/photo-cache`; i
+  due esempi usano `<output>/photo-cache` (la cartella di output fa da
+  progetto: niente piu' cache comune). Testata e baseline: vedi in cima.
+Suite completa a fine lavoro: 3920 passati, 3 saltati, 2 xfail, 19
+sottotest. Contratto cambiato anche in `test_project_tab_buttons.py` (3
+test): cambiare la cartella di lavoro chiude il progetto, e i test riaprono
+il progetto omonimo nella nuova radice prima di guardare i pulsanti.
+NON toccato: 16 (frase SMD estesa ai moduli misti) — decisione dell'utente.

@@ -205,10 +205,10 @@ per configurazione e valori predefiniti.
 The repository now includes a dedicated KiCad tab with three operations: test
 the generated result in an isolated PCB Editor project, install a portable
 project library, or install a global library. The current full-suite baseline
-is 1061 passed, 2 expected failures and 19 subtests. The last published
-integration is merge commit `692ca95` on `main`, with implementation commit
-`0513e89` on `FIX`. Update these historical values after future packaging
-changes.
+(2026-09-24, branch `YOLO-SOLUTION`, last pushed commit `d492635` plus the
+uncommitted reviewer fixes recorded in HANDOFF.md) is 3920 passed, 3 skipped,
+2 expected failures and 19 subtests. The last packaging integration was merge
+commit `692ca95` on `main`. Keep these values aligned with HANDOFF.md.
 
 Eseguire la suite dalla radice del repository:
 

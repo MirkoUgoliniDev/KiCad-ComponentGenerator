@@ -12,7 +12,9 @@ takes over every tooltip:
 * a tooltip written as «name\\nexplanation» (the convention of the icon-only
   commands) shows the name in bold on its own line;
 * the box is moved inside the window's geometry, below the pointer when it
-  fits and above it otherwise.
+  fits and above it otherwise, and never outside the screen either (the part
+  of the window that is on screen; the screen alone when none is).
+* header sections of tables and trees go through the same path.
 
 Short tooltips keep their natural size: the width cap applies only to text
 that would be wider.
@@ -21,7 +23,7 @@ import html
 
 from PyQt6.QtCore import QEvent, QObject, QPoint, QRect, Qt
 from PyQt6.QtGui import QTextDocument
-from PyQt6.QtWidgets import QAbstractItemView, QApplication, QToolTip, QWidget
+from PyQt6.QtWidgets import QAbstractItemView, QApplication, QHeaderView, QToolTip, QWidget
 
 #: Widest a tooltip may be, in pixels. A reading choice, not a measurement:
 #: about 60 characters of the default 9 pt interface font, the usual limit of
@@ -35,9 +37,12 @@ WINDOW_MARGIN_PX = 8
 #: QTipLabel::placeTip); undone here so the box lands where it is computed.
 _QT_TIP_OFFSET = QPoint(2, 16)
 
-#: Horizontal room the stylesheet adds around the text (padding 8 px per
-#: side plus a 1 px border, theme.APP_QSS), used only to keep the whole box,
-#: not just its text, inside the window.
+#: First estimate of the horizontal room the tooltip box adds around its text
+#: column (stylesheet padding 8 px + 1 px border per side, theme.APP_QSS).
+#: It is only a first guess: Qt's tooltip label adds its own margin and the
+#: document margin on top (44 px in all, measured on Windows with APP_QSS), so
+#: `show_tooltip` measures the real box and narrows the column if it is still
+#: wider than the room available.
 _FRAME_X_PX = 2 * (8 + 1)
 
 
@@ -93,6 +98,22 @@ def _window_rect(widget: QWidget) -> QRect:
     return QRect(window.mapToGlobal(QPoint(0, 0)), window.size())
 
 
+def visible_area(window: QRect, screen) -> QRect:
+    """@brief Where a tooltip may go: the part of the window that is on screen.
+
+    @param window Global rectangle of the window.
+    @param screen Available geometry of the screen under the pointer, or None.
+    @return The intersection; the screen alone when the window is entirely
+        off it; the window when the screen is unknown.
+    @note Reviewer 3, defect 12: a window partly off screen kept the tooltip
+        inside the window but pushed it off the screen.
+    """
+    if screen is None or screen.isEmpty():
+        return QRect(window)
+    common = window.intersected(screen)
+    return common if not common.isEmpty() else QRect(screen)
+
+
 def _tip_label():
     """The label Qt uses for the visible tooltip, or None."""
     for candidate in QApplication.topLevelWidgets():
@@ -129,19 +150,40 @@ def show_tooltip(widget: QWidget, pointer: QPoint, text: str) -> None:
     @param pointer Global position of the mouse.
     @param text Tooltip text, plain or rich.
     """
-    area = _window_rect(widget)
+    screen = QApplication.screenAt(pointer) or widget.screen()
+    area = visible_area(_window_rect(widget), screen.availableGeometry() if screen else None)
     QToolTip.showText(pointer, fitted_tooltip(text, area.width()), widget)
     label = _tip_label()
-    if label is not None:
-        label.move(place_inside(label.frameGeometry(), pointer, area))
+    if label is None:
+        return
+    # La cornice vera (margini di Qt compresi) si conosce solo a tooltip
+    # mostrato: se il box e' ancora piu' largo dello spazio, si stringe la
+    # colonna di quanto sfora. Prima la stima fissa di 18 px lasciava
+    # uscire a destra un tooltip lungo in una finestra stretta.
+    excess = label.frameGeometry().width() - (area.width() - 2 * WINDOW_MARGIN_PX)
+    if excess > 0:
+        QToolTip.showText(pointer, fitted_tooltip(text, area.width() - excess), widget)
+        label = _tip_label()
+        if label is None:
+            return
+    label.move(place_inside(label.frameGeometry(), pointer, area))
 
 
 def _text_for(watched: QWidget, event) -> str:
-    """Tooltip text of the widget, or of the item under the pointer in a view."""
+    """Tooltip text of the widget, or of the item or header section under the pointer."""
     text = watched.toolTip()
     if text:
         return text
-    view = watched.parent()
+    view = watched.parent() if not isinstance(watched, QHeaderView) else watched
+    if isinstance(view, QHeaderView) and watched in (view, view.viewport()):
+        # Un'intestazione non ha righe: `indexAt` non trova nulla e il
+        # tooltip della sezione passava a Qt, su una riga e fuori dalla
+        # finestra (revisore 3, difetto 11).
+        section = view.logicalIndexAt(event.pos())
+        model = view.model()
+        value = (model.headerData(section, view.orientation(), Qt.ItemDataRole.ToolTipRole)
+                 if section >= 0 and model is not None else None)
+        return value if isinstance(value, str) else ""
     if isinstance(view, QAbstractItemView) and watched is view.viewport():
         index = view.indexAt(event.pos())
         value = index.data(Qt.ItemDataRole.ToolTipRole) if index.isValid() else None

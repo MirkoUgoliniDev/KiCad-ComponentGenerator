@@ -78,7 +78,7 @@ to force its whole envelope inside the substrate.
 ## Logs and reproducibility
 
 The component's `analisi-ai.log` receives the existing GUI progress stream and
-is flushed for reading while work continues. `generated/photo-cache/yolo-audit/`
+is flushed for reading while work continues. `<project>/photo-cache/yolo-audit/`
 (or the supplied cache directory) contains unique detector, coverage and review
 JSON files. Review audits preserve the exact prompt, model, individual crop
 coordinate transforms, parsed responses and resulting hypotheses. They do not

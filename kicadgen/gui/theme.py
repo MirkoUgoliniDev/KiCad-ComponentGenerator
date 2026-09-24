@@ -25,9 +25,6 @@ BLUE = "#89b4fa"       # accento (selezione, focus, progress)
 GREEN = "#a6e3a1"      # successo
 RED = "#f38ba8"        # errore
 YELLOW = "#f9e2af"     # warning
-# Tinte di BLUE su BASE (20% e 30%): sfondo di un comando principale a sola
-# icona, dove il blu pieno toglierebbe contrasto al tratto chiaro dell'icona.
-
 
 TAB_QSS = f"""
     QTabWidget::pane {{

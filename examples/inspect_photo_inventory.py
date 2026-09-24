@@ -2,6 +2,12 @@
 
 Salva JSON e confronto PNG sotto generated/photo-review per misurare e
 ispezionare la localizzazione senza rigenerare il modello FreeCAD.
+
+La cartella di output fa da progetto: la cache delle risposte AI sta in
+`<output>/photo-cache`, come `<progetto>/photo-cache` nell'applicazione
+(decisione dell'utente del 2026-09-24: ogni interrogazione AI e' del suo
+progetto). Rilanciare con la stessa `--output` riusa la cache, senza nuove
+chiamate a pagamento.
 """
 import argparse
 import json
@@ -15,7 +21,7 @@ from dotenv import load_dotenv
 from kicadgen.services.datasheet_extractor import COMPONENT_KINDS
 from kicadgen.services.openrouter import call_tool, DEFAULT_MODEL
 from kicadgen.services.photo_grounding import DEFAULT_VISION_MODEL
-from kicadgen.services.photo_inventory import extract_inventory
+from kicadgen.services.photo_inventory import extract_inventory, photo_cache_dir
 
 
 def main():
@@ -38,7 +44,7 @@ def main():
     model = args.model or config.get("vision_model") or DEFAULT_VISION_MODEL
     result = extract_inventory([args.photo],model,
                                args.length,args.width,COMPONENT_KINDS,call_tool,
-                               progress=log,top_photo_index=0,cache_dir=ROOT/"generated"/"photo-cache",
+                               progress=log,top_photo_index=0,cache_dir=photo_cache_dir(args.output),
                                classifier_model=args.classifier_model or config.get("model") or DEFAULT_MODEL)
     args.output.mkdir(parents=True,exist_ok=True)
     (args.output/"inventory.json").write_text(json.dumps({

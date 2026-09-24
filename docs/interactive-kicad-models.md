@@ -9,7 +9,7 @@ i terminali in questa modalita'. Il default AI e' `anthropic/claude-opus-5`.
 Il prompt richiede corpi completi, terminali e linguette, package meccanico,
 marcature leggibili e incertezze; non prova la funzione elettrica. La versione,
 l'hash, il prompt effettivo e il JSON di risposta sono nel log/audit sotto
-`generated/photo-cache/yolo-audit`. Una risposta parziale viene segnalata e
+`<progetto>/photo-cache/yolo-audit` (la cache e' del progetto dal 2026-09-24). Una risposta parziale viene segnalata e
 non entra nella cache delle risposte complete.
 
 ## Uso
