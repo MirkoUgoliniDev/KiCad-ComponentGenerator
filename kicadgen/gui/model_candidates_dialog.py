@@ -10,12 +10,13 @@ import subprocess
 import tempfile
 
 from PyQt6.QtCore import (
-    QObject, QPointF, QRunnable, QSignalBlocker, Qt, QThreadPool, QTimer, pyqtSignal,
+    QEvent, QObject, QPointF, QRunnable, QSignalBlocker, Qt, QThreadPool, QTimer, pyqtSignal,
 )
-from PyQt6.QtGui import QBrush, QColor, QImage, QPainter, QPen, QPixmap, QPolygonF
+from PyQt6.QtGui import QBrush, QColor, QIcon, QImage, QPainter, QPen, QPixmap, QPolygonF
 from PyQt6.QtWidgets import (
-    QCheckBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QHBoxLayout,
-    QLabel, QLineEdit, QListWidget, QPushButton, QVBoxLayout,
+    QCheckBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QGridLayout,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton, QToolButton, QVBoxLayout,
+    QWidget,
 )
 
 from ..services.model_library_search import filter_models, library_models
@@ -54,6 +55,48 @@ _LIGHT = (-0.398015, -0.597022, 0.696526)
 #: +85% over a flat fill (a flat fill that rebuilt QPen/QBrush per triangle
 #: would take 856 ms, which is the cost this cache avoids, not the baseline).
 _SHADE_STEPS = 64
+
+#: Preview camera looking straight down -Z: the same top view as the photo crop
+#: shown beside it, so the model can be compared with the photograph directly
+#: and a local Z rotation turns the model in the image plane. Dialog default.
+VIEW_PLAN = 'plan'
+
+#: Preview camera from above the front-right corner, for inspecting heights.
+VIEW_ISOMETRIC = 'isometric'
+
+#: View the dialog opens with (see VIEW_PLAN for why).
+DEFAULT_PREVIEW_VIEW = VIEW_PLAN
+
+#: Orthographic cameras as three CAD-space rows: screen x (right), screen y
+#: (down) and depth (towards the viewer). Both are proper rotations — right x
+#: up = towards — so the image is never a mirror of the part: a positive
+#: (counter-clockwise, seen from +Z) rotation reads counter-clockwise on screen
+#: in both views, as it does in KiCad. CAD +Y points up the screen, the KiCad
+#: 3D-model convention (footprint Y down = model Y up).
+#: @note The isometric camera used before this table mapped screen x to x-y and
+#: depth to x+y+z; right x up then equals *minus* the depth axis, i.e. the old
+#: picture was the mirror image of the part, and a positive rotation turned
+#: clockwise on screen. The camera now sits above (+1, -1, +1), the corner a
+#: CAD isometric view uses, with +X to the lower right and +Y to the upper right.
+_CAMERAS = {
+    VIEW_PLAN: ((1.0, 0.0, 0.0), (0.0, -1.0, 0.0), (0.0, 0.0, 1.0)),
+    VIEW_ISOMETRIC: ((0.70710678, 0.70710678, 0.0),
+                     (0.40824829, -0.40824829, -0.81649658),
+                     (0.57735027, -0.57735027, 0.57735027)),
+}
+
+#: Plan-view height cue: share of the Lambert shading a face keeps at the
+#: lowest height of the mesh; it rises linearly to the full term at the top.
+#: @note Seen from straight above every horizontal face has the same normal,
+#: so Lambert alone paints the board and a shield standing on it in one tone
+#: and the part collapses into a flat silhouette — for a near-square module
+#: that silhouette barely changes under a 90-degree turn, which is exactly the
+#: case the plan view exists for. Lightness therefore also encodes height
+#: (higher is brighter, the usual reading of a top-lit relief). The value is a
+#: legibility choice, not a measurement: low enough that the lowest face is
+#: clearly darker than the highest, high enough that it stays well above the
+#: ambient floor and the dark canvas.
+_PLAN_HEIGHT_FLOOR = 0.45
 
 
 def _face_intensity(a, b, c):
@@ -143,7 +186,7 @@ def _step_file(path):
         return False
 
 
-def _thumbnail(path, rotation, dimensions=None, color=None):
+def _thumbnail(path, rotation, dimensions=None, color=None, view=VIEW_ISOMETRIC):
     """Tessellate STEP; automatic orientation uses the production CAD importer.
 
     @param path STEP file to preview.
@@ -152,8 +195,20 @@ def _thumbnail(path, rotation, dimensions=None, color=None):
     @param color Body colour of the component, typically the ``color_hex`` the
     photo pipeline sampled. When the caller knows no colour, DEFAULT_BODY_COLOR
     is used, so the preview still renders a coherent material.
+    @param view VIEW_PLAN (top view, the dialog default) or VIEW_ISOMETRIC. The
+    parameter default stays isometric so direct callers keep the historical
+    camera; the dialog always passes the view explicitly.
     @return QImage of 340x340 pixels with the shape shaded per face.
-    @throws ValueError When dimensions, mesh size or mesh coordinates are unusable.
+    @throws ValueError When dimensions, mesh size or mesh coordinates are
+    unusable, or when @p view is not a known camera.
+    @note The rotation is applied about the model's own Z axis *before* the
+    camera, then the result is fitted to the canvas. In the isometric view the
+    camera looks down a 45-degree diagonal, so a 90-degree turn of a part that
+    is mirror-symmetric about one of its own axes projects to the mirror image
+    of the unrotated silhouette, and a 180-degree turn of a part symmetric
+    about both axes to the very same picture: for a near-square module the two
+    angles look alike. The plan view has no such ambiguity, the turn happens in
+    the image plane, which is why it is the default.
     @note The triangles are painted back to front by centroid depth. That is an
     approximation, not a visibility solution: where solids overlap or
     interpenetrate — exactly what the automatic branch builds, since
@@ -174,6 +229,9 @@ def _thumbnail(path, rotation, dimensions=None, color=None):
     """
     from ..cad3d.step_generator import find_freecadcmd
 
+    camera = _CAMERAS.get(view)
+    if camera is None:
+        raise ValueError(f'Unknown preview view: {view!r}')
     executable = find_freecadcmd()
     if rotation is None:
         length, width = dimensions or (None, None)
@@ -215,15 +273,23 @@ def _thumbnail(path, rotation, dimensions=None, color=None):
         raise ValueError('Preview geometry unavailable or too complex')
     angle = math.radians(rotation)
     c, s = math.cos(angle), math.sin(angle)
+    (rx, ry, rz), (dx, dy, dz), (tx, ty, tz) = camera
     points = []
     for x, y, z in vertices:
+        # Local Z rotation of the model first, camera second: the rotation is a
+        # property of the part, the camera only decides how it is looked at.
         x, y = c*x-s*y, s*x+c*y
-        point = ((x-y)*0.7071, (x+y)*0.4082-z*0.8165, (x+y+z)*0.5774)
+        point = (rx*x + ry*y + rz*z, dx*x + dy*y + dz*z, tx*x + ty*y + tz*z)
         if not all(math.isfinite(v) for v in point):
             raise ValueError('Invalid mesh coordinates')
         points.append(point)
     xmin, xmax = min(p[0] for p in points), max(p[0] for p in points)
     ymin, ymax = min(p[1] for p in points), max(p[1] for p in points)
+    # Height cue, plan view only (see _PLAN_HEIGHT_FLOOR); the isometric view
+    # already separates heights through the flanks it shows.
+    height_cue = view == VIEW_PLAN
+    depth_min = min(p[2] for p in points)
+    depth_span = max(p[2] for p in points) - depth_min
     scale = 280 / max(xmax-xmin, ymax-ymin, 0.001)
     # Stripped here too, so the guarantee does not depend on which caller
     # sampled the colour.
@@ -245,7 +311,14 @@ def _thumbnail(path, rotation, dimensions=None, color=None):
         for face in sorted(triangles, key=lambda f: sum(points[i][2] for i in f)):
             if len(face) != 3:
                 raise ValueError('Invalid mesh triangle')
-            step = int(_face_intensity(*(points[i] for i in face)) * _SHADE_STEPS)
+            intensity = _face_intensity(*(points[i] for i in face))
+            if height_cue:
+                # A flat mesh has no height to encode: it keeps the full term.
+                height = (sum(points[i][2] for i in face)/3 - depth_min)/depth_span \
+                    if depth_span > 1e-9 else 1.0
+                intensity = _AMBIENT + (intensity - _AMBIENT) * (
+                    _PLAN_HEIGHT_FLOOR + (1.0 - _PLAN_HEIGHT_FLOOR) * height)
+            step = int(intensity * _SHADE_STEPS)
             pair = shades.get(step)
             if pair is None:
                 shade = _shaded_color(base, (step + 0.5) / _SHADE_STEPS)
@@ -298,18 +371,21 @@ class _Signals(QObject):
 
 
 class _Preview(QRunnable):
-    def __init__(self, token, path, rotation, dimensions=None, color=None):
+    def __init__(self, token, path, rotation, dimensions=None, color=None,
+                 view=DEFAULT_PREVIEW_VIEW):
         super().__init__()
         self.signals = _Signals()
         self.token, self.path, self.rotation = token, path, rotation
         self.dimensions = dimensions
         self.color = color
+        self.view = view
 
     def run(self):
         """@brief Generate an optional thumbnail without blocking the Qt event loop."""
         try:
-            result = (_thumbnail(self.path, None, self.dimensions, self.color) if self.rotation is None
-                      else _thumbnail(self.path, self.rotation, None, self.color))
+            result = (_thumbnail(self.path, None, self.dimensions, self.color, self.view)
+                      if self.rotation is None
+                      else _thumbnail(self.path, self.rotation, None, self.color, self.view))
         except Exception:
             result = None
         self.signals.ready.emit(self.token, result)
@@ -352,6 +428,13 @@ class ModelCandidatesDialog(QDialog):
     clears the automatic tick and puts the explicit override in force, and the
     label beside the field says which mode is in charge. selected_selection()
     is unaffected: automatic still reports rotation None, explicit the value.
+    @note A checkable tool button in the top-right corner of the preview picks
+    the camera: released is the plan view (VIEW_PLAN, the default, comparable
+    with the top-view photo crop), pressed the isometric one. It only changes
+    how the model is looked at: the choice lives as long as the dialog, is never
+    persisted and never enters selected_selection(). Re-rendering the model
+    already shown (new angle, mode or view) keeps the previous picture until the
+    new one arrives; a different model clears it at once.
     """
 
     def __init__(self, component: dict, match_report: dict, photo_crop=None, parent=None):
@@ -422,7 +505,37 @@ class ModelCandidatesDialog(QDialog):
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             label.setMinimumSize(340, 220)
             label.setWordWrap(True)
-            images.addWidget(label)
+        images.addWidget(self.photo_label)
+        # Scelta della vista: pianta (predefinita, confrontabile con la foto a
+        # sinistra, che e' una vista dall'alto) o isometrica (per ispezione).
+        # Un solo pulsante a levetta nell'angolo in alto a destra dell'anteprima:
+        # label e pulsante condividono la stessa cella di una griglia, cosi' il
+        # pulsante resta agganciato all'angolo qualunque sia la dimensione.
+        # La scelta vale per la vita del dialogo, senza persistenza.
+        self._view = DEFAULT_PREVIEW_VIEW
+        self._shown_path = None
+        self._preview_image = None
+        # La miniatura e' 340x340 ma il label puo' essere piu' basso: senza
+        # adattarla, un pezzo ruotato di 90 gradi perdeva le estremita' tagliate.
+        self.preview_label.installEventFilter(self)
+        preview_box = QWidget()
+        preview_grid = QGridLayout(preview_box)
+        preview_grid.setContentsMargins(0, 0, 0, 0)
+        preview_grid.addWidget(self.preview_label, 0, 0)
+        self.view_button = QToolButton(preview_box)
+        self.view_button.setObjectName('preview_view_toggle')
+        self.view_button.setCheckable(True)
+        self.view_button.setChecked(self._view == VIEW_ISOMETRIC)
+        self.view_button.setAutoRaise(True)
+        self.view_button.setIcon(QIcon(str(Path(__file__).resolve().parent
+                                           / 'assets' / 'step-view-iso.svg')))
+        self.view_button.setToolTip('Vista isometrica (per ispezione); rilasciato: '
+                                    'vista in pianta, confrontabile con la foto')
+        preview_grid.addWidget(self.view_button, 0, 0,
+                               Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
+        self.view_button.raise_()
+        self.view_button.toggled.connect(self._view_toggled)
+        images.addWidget(preview_box)
         layout.addLayout(images)
         self._set_photo(photo_crop)
         # Library filter: the whole installed library, filtered KiCad-style by
@@ -719,32 +832,96 @@ class ModelCandidatesDialog(QDialog):
         self.details_label.setText(f'STEP manuale: {path}\nDimensioni e motivi di corrispondenza non disponibili.')
         self._start_preview()
 
+    def eventFilter(self, watched, event):
+        """@brief Qt override: refit the preview picture when its label is resized.
+
+        @param watched Object the event is addressed to.
+        @param event Qt event; only resizes of preview_label are acted upon.
+        @return The base-class result: the event is never consumed here.
+        """
+        if (watched is getattr(self, 'preview_label', None)
+                and event.type() == QEvent.Type.Resize
+                and getattr(self, '_preview_image', None) is not None):
+            self._fit_preview_image()
+        return super().eventFilter(watched, event)
+
+    def _fit_preview_image(self):
+        """Show the last rendered picture whole inside the preview label.
+
+        @note Only shrinks, never enlarges: the render is 340 px and blowing it
+        up would only blur it. Aspect ratio is kept, so a turned part is shown
+        turned, not squeezed.
+        """
+        pixmap = QPixmap.fromImage(self._preview_image)
+        room = self.preview_label.contentsRect().size()
+        if room.width() > 0 and room.height() > 0 and (
+                pixmap.width() > room.width() or pixmap.height() > room.height()):
+            pixmap = pixmap.scaled(room, Qt.AspectRatioMode.KeepAspectRatio,
+                                   Qt.TransformationMode.SmoothTransformation)
+        self.preview_label.setPixmap(pixmap)
+
+    def _view_toggled(self, isometric):
+        """Switch the preview camera and re-render with the rotation in force.
+
+        @param isometric True for VIEW_ISOMETRIC, False for VIEW_PLAN.
+        @note Without a selected model there is nothing to re-render: the choice
+        is only remembered, and the invitation to pick a candidate stays shown.
+        """
+        self._view = VIEW_ISOMETRIC if isometric else VIEW_PLAN
+        if getattr(self, '_path', ''):
+            self._start_preview()
+
     def _start_preview(self, *_):
         self._token += 1
-        valid = _step_file(getattr(self, '_path', ''))
+        path = getattr(self, '_path', '')
+        valid = _step_file(path)
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(valid)
-        self.preview_label.clear()
-        self.preview_label.setText('Caricamento della geometria STEP reale…' if valid else 'File STEP non disponibile')
+        # Re-rendering the model already on screen (new angle, mode or view)
+        # keeps its picture until the new one arrives: clearing it made the
+        # preview flash «Caricamento…» on every step of the rotation. A
+        # different model, or a file that is no longer usable, must not borrow
+        # the old picture, so those still clear it.
+        pixmap = self.preview_label.pixmap()
+        keep = (valid and path == self._shown_path
+                and pixmap is not None and not pixmap.isNull())
+        if not keep:
+            self._shown_path = None
+            self._preview_image = None
+            self.preview_label.clear()
+            self.preview_label.setText('Caricamento della geometria STEP reale…' if valid else 'File STEP non disponibile')
         # At most one process per dialog. Changes coalesce to the latest selection.
-        if not valid or self._closed or self._workers:
+        if not valid or self._closed:
+            self.preview_label.unsetCursor()
+            return
+        # The kept picture is stale until the new one lands; the busy cursor
+        # over it says so without replacing it.
+        self.preview_label.setCursor(Qt.CursorShape.BusyCursor)
+        if self._workers:
             return
         worker = _Preview(self._token, self._path,
                           None if self.auto_rotation.isChecked() else self.rotation.value(),
-                          self._dimensions, self._body_color)
+                          self._dimensions, self._body_color, self._view)
         self._workers[self._token] = worker
         worker.signals.ready.connect(self._preview_ready)
         QThreadPool.globalInstance().start(worker)
 
     def _preview_ready(self, token, image):
-        self._workers.pop(token, None)
+        worker = self._workers.pop(token, None)
         if self._closed:
             return
         if token != self._token:
             self._start_preview()
             return
+        self.preview_label.unsetCursor()
         if isinstance(image, QImage) and not image.isNull():
-            self.preview_label.setPixmap(QPixmap.fromImage(image))
+            self._preview_image = image
+            self._fit_preview_image()
+            # The token matched, so no selection change happened since the
+            # worker started; its own path is still recorded for robustness.
+            self._shown_path = worker.path if worker is not None else getattr(self, '_path', '')
         else:
+            self._shown_path = None
+            self._preview_image = None
             self.preview_label.setText('Anteprima della geometria reale non disponibile.\nPuoi scegliere il file STEP oppure conservare il segnaposto.')
 
     def _none_match(self):

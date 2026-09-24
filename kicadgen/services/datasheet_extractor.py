@@ -773,8 +773,8 @@ def _merge_photo_components(groups):
 #: (`analysis_overlay.enumeration_lines`), quindi un nome lungo non spinge piu'
 #: fuori i nomi successivi: accorcia soltanto SE STESSO. Il limite resta perche'
 #: una riga della scheda porta circa ottantotto caratteri (e' la larghezza su
-#: cui la scheda e' dimensionata), e una voce e' «nome, ruolo»: con i quaranta
-#: caratteri di qui piu' la virgola e l'etichetta di ruolo piu' lunga fra quelle
+#: cui la scheda e' dimensionata), e una voce e' «nome — ruolo»: con i quaranta
+#: caratteri di qui piu' il separatore e l'etichetta di ruolo piu' lunga fra quelle
 #: dichiarate in `document_roles.ROLES` (trenta caratteri) si resta sotto quella
 #: larghezza, cioe' il ruolo si legge sempre. Oltre il limite la scheda
 #: accorcerebbe comunque la riga, ma tagliando la CODA, quindi il ruolo: qui si
@@ -814,21 +814,33 @@ def _files_sent_message(doc_paths, document_roles: Optional[dict[str, str]] = No
         readers at once.
 
         The modal hides the lines a machine writes for itself, recognizing them
-        by an UPPERCASE_UNDERSCORE token followed by a space, a colon or an
-        equals sign, in FIRST position. A file name is user data and is never
-        rewritten, so the line is built so that our own punctuation never
-        follows a name with a bare space: the role comes after a comma, the
-        documents are separated by a middle dot, and no name ever opens the
-        line. A name that carries a space inside itself is still beyond this
-        line's reach, and belongs to the marker rule, not here.
+        by an UPPERCASE_UNDERSCORE token in FIRST position (`analysis_overlay.
+        _MACHINE_MARKER`). A file name is user data and is never rewritten, so
+        the line is built so that no name ever opens it: the lead-in does. That
+        is what keeps a document called «MOD_REV_B» from hiding the one line
+        that says what is being paid for; the old requirement that no bare
+        space follow a name dated from an unanchored marker rule and no longer
+        applies. A name that carries the separators below inside itself is
+        still beyond this line's reach.
 
-        The same two signs are what the card reads to lay the documents out one
-        per line (`analysis_overlay.enumeration_lines`): the colon closes the
-        lead-in, and every middle dot starts a new line. The line written to
-        the log stays ONE line with one timestamp, as every other log entry;
-        the list exists only on the card. Replacing the middle dot with a
-        semicolon, or dropping the colon, would silently take the list away
-        without breaking anything else -- hence this note.
+        Three signs are read by the card (`analysis_overlay`), while the line
+        written to the log stays ONE line with one timestamp, as every other
+        log entry:
+
+        - the colon closes the lead-in and every middle dot starts a new line
+          (`enumeration_lines`): the documents are listed one per line;
+        - " — " (space, em dash, space) separates each file name from its role
+          (`enumeration_term`): the card shows the name in bold, set apart from
+          the role, as the user asked («i nomi dei file non sono evidenziati,
+          troppo attaccati al testo»). It replaced the comma, which the card
+          could not tell apart from a comma inside a file name without guessing
+          what a file name looks like.
+
+        Replacing the middle dot with a semicolon, dropping the colon, or going
+        back to the comma would silently take the list or the highlighting away
+        without breaking anything else -- hence this note. The role labels
+        never contain " — ", so the first occurrence in an item always ends the
+        name unless the name itself contains the sign.
     """
     from .document_roles import ROLES
     if not doc_paths:
@@ -845,8 +857,8 @@ def _files_sent_message(doc_paths, document_roles: Optional[dict[str, str]] = No
     for path in doc_paths:
         name = Path(path).name
         label = ROLES.get((document_roles or {}).get(name))
-        described.append(f'{_log_name(name)}, {label}' if label
-                         else f'{_log_name(name)}, ruolo non dichiarato')
+        described.append(f'{_log_name(name)} — {label}' if label
+                         else f'{_log_name(name)} — ruolo non dichiarato')
     count = len(described)
     return (f'Invio a AI {count} document{"o" if count == 1 else "i"} '
             'per layout, quote e pinout: ' + ' · '.join(described) + '.')

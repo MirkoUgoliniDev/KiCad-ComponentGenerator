@@ -143,26 +143,30 @@ def test_unknown_edge_is_rejected():
 # ── Footprint ───────────────────────────────────────────────────────
 
 def test_every_contact_gets_a_half_hole_and_a_closed_hole():
-    """@brief Due appigli per contatto, come sulle schede vere.
+    """@brief Due appigli per contatto, come sulle schede vere, su UN solo rame.
 
-    Il mezzo foro sul bordo serve alla rifusione SMD, il foro intero poco piu'
+    Il mezzo foro sul bordo serve alla rifusione, il foro intero poco piu'
     dentro a saldarci uno strip. Generando solo il primo il bordo restava tutto
-    aperto e i pin non si potevano saldare. I due pad portano lo STESSO numero:
-    sono due appigli di un contatto, non due contatti.
+    aperto e i pin non si potevano saldare.
+
+    Contratto CAMBIATO DI PROPOSITO il 2026-09-23 (decisione dell'utente sulla
+    foto di una scheda reale): prima erano due pad con lo stesso numero, uno
+    SMD rettangolare di bordo e uno THT tondo, con scheda nuda fra i due. Ora
+    e' UN pad per contatto, a stadio ("oval"), dal bordo fino oltre la corona,
+    con il foro decentrato al suo interno e la pasta per la rifusione.
     """
-    fp = build_castellated_module(rs485_module())
+    params = rs485_module()
+    fp = build_castellated_module(params)
     assert fp.attr == "smd"
-    smd = [p for p in fp.pads if p.pad_type == "smd"]
-    thru = [p for p in fp.pads if p.pad_type == "thru_hole"]
-    assert len(smd) == 8 and len(thru) == 8
-    assert sorted(p.number for p in smd) == sorted(p.number for p in thru)
-    for pad in smd:
-        assert pad.drill is None
-        assert list(pad.layers) == ["F.Cu", "F.Paste", "F.Mask"]
-    for pad in thru:
-        assert pad.shape == "circle" and pad.drill == 1.0
-        assert pad.size == (1.7, 1.7)
-        assert list(pad.layers) == ["*.Cu", "*.Mask"]
+    assert len(fp.pads) == 8
+    assert sorted(p.number for p in fp.pads) == sorted(p.number for p in pad_positions(params))
+    for pad in fp.pads:
+        assert pad.pad_type == "thru_hole" and pad.shape == "oval" and pad.drill == 1.0
+        assert list(pad.layers) == ["*.Cu", "*.Mask", "F.Paste"]
+        # La corona dichiarata (1.7 mm) sta tutta dentro: lo stadio e' largo
+        # almeno quanto lei, anche se la piazzola di bordo e' 1.2 mm.
+        assert min(pad.size) == pytest.approx(1.7)
+        assert pad.drill_offset != (0.0, 0.0)
 
 
 def test_a_module_with_only_half_holes_declares_it_with_a_zero():
@@ -185,7 +189,10 @@ def test_the_closed_hole_stays_inside_the_body_on_every_edge():
     half_l, half_w = params.body_length / 2, params.body_width / 2
     ring = params.thru_pad_diameter / 2
     for pad in (p for p in fp.pads if p.pad_type == "thru_hole"):
-        x, y = pad.at
+        # Il centro del FORO: dal 2026-09-23 il pad e' la piazzola continua e
+        # il foro vi sta decentrato (drill offset).
+        x = pad.at[0] + pad.drill_offset[0]
+        y = pad.at[1] + pad.drill_offset[1]
         assert abs(x) + ring <= half_l + 1e-6
         assert abs(y) + ring <= half_w + 1e-6
 
@@ -199,7 +206,9 @@ def test_footprint_writes_valid_file(tmp_path):
     assert "(attr smd)" in content
     assert "F.CrtYd" in content
     # Il footprint e' ibrido: rifusione sui mezzi fori, strip nei fori interi.
-    assert "thru_hole" in content and "(drill 1)" in content
+    # Dal 2026-09-23 il foro sta decentrato nella piazzola continua, quindi il
+    # nodo drill porta anche l'offset.
+    assert "thru_hole oval" in content and "(drill 1" in content and "(offset " in content
 
 
 def test_footprint_has_reference_on_fab_layer():

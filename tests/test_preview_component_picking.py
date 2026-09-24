@@ -2,6 +2,7 @@
 
 import json
 import os
+from collections import OrderedDict
 from types import SimpleNamespace
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
@@ -116,9 +117,15 @@ def test_render_maps_all_component_subparts_but_not_board_or_pins(tmp_path, meta
                                               triangles=[[0,1,2]],
                                               **(metadata if name.startswith('Cmp') else {})) for name in names]}))
     actors = iter(_actor(name) for name in names)
+    # render_mesh now also consults the file-identity cache and batches the
+    # renders (note 10): the stand-in carries that state, the mapping
+    # contract checked below is unchanged.
     viewer = SimpleNamespace(_component_actors={'stale': 9},
                              add_mesh=lambda *args, **kw: next(actors),
-                             _add_pin_labels=lambda anchors: None, _finish=lambda: None)
+                             _add_pin_labels=lambda anchors: None, _finish=lambda: None,
+                             _mesh_cache=OrderedDict(), _shown_mesh_key=None,
+                             suppress_rendering=False, render=lambda: None)
+    viewer._rendering_suppressed = lambda: Preview3DVtk._rendering_suppressed(viewer)
     viewer._reset = lambda: viewer._component_actors.clear()
     Preview3DVtk.render_mesh(viewer, path)
     assert viewer._component_actors == expected

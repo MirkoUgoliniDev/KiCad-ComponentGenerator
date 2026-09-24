@@ -1146,7 +1146,7 @@ def _compatible_candidates(paths, component, note):
         if reason:
             evidence = "tipo verificato" if verified else "tipo provvisorio/non verificato"
             if provisional is not None:
-                evidence += "; observed terminal layout/count is provisional"
+                evidence += "; disposizione/numero dei terminali osservati ancora provvisori"
             note(f"{component.get('package', '')}: rifiutato {path.name}: {reason} ({evidence}); "
                  "il solo ingombro non conferma il package.")
         else:
@@ -1917,7 +1917,8 @@ def _synchronize_preview_variants(components, note) -> None:
             report["attachment_reason"] = (
                 "Model applied PROVISIONALLY: shared same-family switch candidate, "
                 "identity not verified; the picker can change it.")
-        note(f"Switch preview group '{key}': shared candidate {Path(selected).name} proposed for {len(group)} components.")
+        note(f"Gruppo di interruttori '{key}': proposto il candidato comune {Path(selected).name} "
+             f"per {len(group)} componenti (anteprima coerente, variante da verificare).")
 
 
 def _accepted_match(component: dict, roots, note) -> Optional[dict]:
@@ -2064,10 +2065,12 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None,
             # dimensions and the existing module envelope checks still apply.
             paths, omitted = marking_paths, False
             result["discovery_scope"] = "literal_marking_model"
-            note("Literal model marking: restricting KiCad search to matching STEP filenames; dimensions still require verification.")
+            note("Marcatura del modello letta sul componente: la ricerca KiCad si limita ai file STEP "
+                 "con quel nome, ma le misure vanno comunque verificate.")
         elif _tentative_endcap_family(component):
             result["discovery_scope"] = "standard_chip_endcaps"
-            note("Estimated chip package: checking all standard endcap sizes and variants; nominated size is not an exact constraint.")
+            note("Package chip stimato: si provano tutte le misure e varianti standard a terminali "
+                 "di testa, perche' la misura indicata non e' un vincolo esatto.")
             family_results = [_family_paths(component, search_root, basis)
                               for search_root in roots]
             paths = list(dict.fromkeys(path for family_paths, _ in family_results
@@ -2081,14 +2084,15 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None,
             omitted = any(was_omitted for _, was_omitted in family_results)
         if omitted:
             result["search_truncated"] = True
-            note("Family discovery omitted cold models without compatible dimension hints; automatic selection disabled.")
+            note("Ricerca per famiglia incompleta: esclusi i modelli senza indizi di misura compatibili, "
+                 "quindi niente scelta automatica.")
     else:
         paths = named
     rejections = []
     paths = _compatible_candidates(paths, component, rejections.append)
     if rejections:
         result["rejected_candidate_count"] = len(rejections)
-        note(f"{package}: rejected {len(rejections)} family/terminal-incompatible candidates; "
+        note(f"{package}: scartati {len(rejections)} candidati di famiglia o terminali incompatibili; "
              + " | ".join(rejections[:3]))
     # A bare numeric package supplies no family evidence. Do not fill the UI
     # with unclassified custom solids or mechanical hardware of the same size.
@@ -2110,10 +2114,12 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None,
         if unknown_topology:
             result["topology_incomplete"] = True
             paths = [p for p in paths if p not in unknown_topology]
-            note(f"Withheld {len(unknown_topology)} IC models with unreadable terminal topology; automatic uniqueness disabled.")
+            note(f"Esclusi {len(unknown_topology)} modelli di circuito integrato con terminali non leggibili: "
+                 "niente scelta automatica per unicita'.")
     if len(paths) > MAX_CANDIDATE_MEASUREMENTS:
         result["search_truncated"] = True
-        note(f"Candidate measurement budget: first {MAX_CANDIDATE_MEASUREMENTS} of {len(paths)} compatible names.")
+        note(f"Troppi candidati compatibili: si misurano i primi {MAX_CANDIDATE_MEASUREMENTS} "
+             f"su {len(paths)}.")
     paths = paths[:MAX_CANDIDATE_MEASUREMENTS]
     if not paths:
         return result

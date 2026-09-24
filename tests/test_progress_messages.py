@@ -19,6 +19,14 @@ from kicadgen.services.datasheet_extractor import _files_sent_message, _LOG_NAME
 
 
 # ── 1. Quali file sono stati inviati alla chiamata a pagamento ───────
+#
+# CONTRATTO CAMBIATO, di proposito: fra il nome del file e il suo ruolo c'era
+# una virgola («pinout.png, Pinout / …»), ora c'e' " — ". L'utente ha chiesto
+# i nomi in grassetto e staccati dal ruolo, e la scheda deve sapere DOVE finisce
+# il nome senza indovinarlo dalla sua forma: la virgola compare anche dentro i
+# nomi dei file, e riconoscere un nome da «stem.ext» avrebbe lasciato senza
+# grassetto i nomi con spazi o senza estensione. Le asserzioni sotto sono le
+# stesse di prima, con il nuovo separatore; nessuna e' stata allentata.
 
 
 def test_one_document_is_named_with_the_role_it_is_sent_as():
@@ -26,7 +34,7 @@ def test_one_document_is_named_with_the_role_it_is_sent_as():
     message = _files_sent_message([Path('/tmp/progetto/pinout.pdf')],
                                  {'pinout.pdf': 'pinout'})
     assert message == ('Invio a AI 1 documento per layout, quote e pinout: '
-                       'pinout.pdf, Pinout / disposizione contatti.')
+                       'pinout.pdf — Pinout / disposizione contatti.')
     assert '\n' not in message
 
 
@@ -40,9 +48,9 @@ def test_every_document_is_named_with_its_role_in_request_order():
     roles = {'pinout.png': 'pinout', 'top.png': 'top', 'hires.jpg': 'hires'}
     message = _files_sent_message(paths, roles)
     assert message == ('Invio a AI 3 documenti per layout, quote e pinout: '
-                       'pinout.png, Pinout / disposizione contatti · '
-                       'top.png, Immagine con quote · '
-                       'hires.jpg, Foto ad alta risoluzione.')
+                       'pinout.png — Pinout / disposizione contatti · '
+                       'top.png — Immagine con quote · '
+                       'hires.jpg — Foto ad alta risoluzione.')
 
 
 @pytest.mark.parametrize('roles', [None, {}, {'altro.png': 'top'}, {'foto.png': 'inventato'}])
@@ -55,7 +63,7 @@ def test_an_unknown_role_is_declared_unknown_and_never_guessed(roles):
     """
     message = _files_sent_message([Path('x/foto.png')], roles)
     assert message == ('Invio a AI 1 documento per layout, quote e pinout: '
-                       'foto.png, ruolo non dichiarato.')
+                       'foto.png — ruolo non dichiarato.')
     assert 'Immagine con quote' not in message
 
 
@@ -63,8 +71,8 @@ def test_a_mixed_set_keeps_the_known_roles_and_marks_only_the_unknown_one():
     """@brief Un ruolo ignoto non cancella quelli dichiarati sugli altri file."""
     message = _files_sent_message([Path('q/top.png'), Path('q/extra.pdf')],
                                  {'top.png': 'top'})
-    assert 'top.png, Immagine con quote' in message
-    assert 'extra.pdf, ruolo non dichiarato' in message
+    assert 'top.png — Immagine con quote' in message
+    assert 'extra.pdf — ruolo non dichiarato' in message
     assert message.startswith('Invio a AI 2 documenti')
 
 
@@ -102,7 +110,7 @@ def test_a_very_long_name_is_shortened_but_stays_recognizable():
     name = 'scheda-radio-vista-dall-alto-alta-risoluzione-rev-C-2026.png'
     assert len(name) > _LOG_NAME_CHARS
     message = _files_sent_message([Path('d')/name], {name: 'hires'})
-    shown = message.split(': ', 1)[1].split(', ')[0]
+    shown = message.split(': ', 1)[1].split(' — ')[0]
     assert len(shown) <= _LOG_NAME_CHARS
     assert shown.startswith('scheda-radio-vista') and shown.endswith('.png')
     assert '…' in shown
@@ -135,7 +143,7 @@ def test_the_extraction_log_names_the_documents_and_their_roles(monkeypatch, tmp
                                        photo_cache_dir=tmp_path / 'cache')
     (line,) = [l for l in logs if l.startswith('Invio a AI')]
     assert '2 documenti' in line
-    assert 'pinout.pdf, Pinout / disposizione contatti' in line
+    assert 'pinout.pdf — Pinout / disposizione contatti' in line
     assert 'Foto ad alta risoluzione' in line and '…' in line
     assert str(tmp_path) not in line
     sent = ' '.join(b['text'] for b in call.call_args.kwargs['content_blocks']
@@ -195,9 +203,9 @@ def test_the_card_puts_one_document_per_line_with_its_role():
     roles = {'pinout.png': 'pinout', 'top.png': 'top', 'hires.jpg': 'hires'}
     lines = _card_lines(_files_sent_message(paths, roles))
     assert lines == ['Invio a AI 3 documenti per layout, quote e pinout:',
-                     'pinout.png, Pinout / disposizione contatti',
-                     'top.png, Immagine con quote',
-                     'hires.jpg, Foto ad alta risoluzione.']
+                     'pinout.png — Pinout / disposizione contatti',
+                     'top.png — Immagine con quote',
+                     'hires.jpg — Foto ad alta risoluzione.']
 
 
 @pytest.mark.parametrize('paths,roles', [
@@ -233,7 +241,7 @@ def test_a_name_shaped_like_a_service_marker_still_reaches_the_card(name):
     assert not overlay.is_machine_line(message)
     assert not window.per_item_detail(message)
     lines = overlay.enumeration_lines(message)
-    assert lines[1] == f'{name}, Pinout / disposizione contatti'
+    assert lines[1] == f'{name} — Pinout / disposizione contatti'
     assert overlay.elide_paths(message) == message, (
         'un nome di file non e’ un percorso e non va accorciato come tale')
 

@@ -582,20 +582,24 @@ def test_3d_viewport_is_not_inside_scrolling_settings(window):
     assert splitter.widget(1).widget() is not splitter.widget(0)
 
 
-def test_3d_actions_are_centered_outside_scroll_and_splitter(window):
+def test_3d_actions_are_in_the_top_bar_outside_scroll_and_splitter(window):
+    """Contratto aggiornato di proposito (scelta dell'utente, 2026-09-23, nota 6):
+    la barra delle azioni e' l'unica barra di icone in CIMA alla scheda, allineata
+    a sinistra con gli strumenti di vista (non piu' una riga centrata in fondo).
+    Resta il contratto di fondo: fuori da scorrimento e splitter."""
     from PyQt6.QtWidgets import QScrollArea, QSplitter
     bar = window.model_3d_action_bar
     assert bar.isAncestorOf(window.btn_regen_3d)
     layout = bar.layout()
-    assert layout.itemAt(0).spacerItem() is not None
-    assert layout.itemAt(layout.count() - 1).spacerItem() is not None
+    assert layout.itemAt(0).widget() is window.chk_pin_numbers
+    assert any(layout.itemAt(i).spacerItem() is not None for i in range(layout.count()))
     parent = bar.parentWidget()
     while parent is not None:
         assert not isinstance(parent, (QScrollArea, QSplitter))
         parent = parent.parentWidget()
     container_layout = bar.parentWidget().layout()
-    assert isinstance(container_layout.itemAt(0).widget(), QSplitter)
-    assert container_layout.itemAt(1).widget() is bar
+    assert container_layout.itemAt(0).widget() is bar
+    assert isinstance(container_layout.itemAt(1).widget(), QSplitter)
 
 
 def test_comparison_button_opens_valid_image_and_resets_on_next_result(window,monkeypatch):

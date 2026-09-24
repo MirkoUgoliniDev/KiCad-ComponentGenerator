@@ -21,11 +21,11 @@ import time
 import webbrowser
 from pathlib import Path
 
-from PyQt6.QtCore import QThread, QTimer, pyqtSignal, Qt, QSize
-from PyQt6.QtGui import QBrush, QColor, QIcon, QPen, QPixmap, QTextCursor
+from PyQt6.QtCore import QEvent, QObject, QRectF, QThread, QTimer, pyqtSignal, Qt, QSize
+from PyQt6.QtGui import QBrush, QColor, QIcon, QPainterPath, QPen, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
-    QFormLayout, QGraphicsEllipseItem, QGraphicsRectItem, QGraphicsScene,
+    QFormLayout, QFrame, QGraphicsEllipseItem, QGraphicsRectItem, QGraphicsScene,
     QGraphicsView, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QDialog, QListWidget, QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea,
     QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QListWidgetItem, QTabWidget, QTextEdit, QVBoxLayout,
@@ -122,6 +122,47 @@ CONTACT_STYLE_TOOLTIP = (
     "bordo e un foro intero poco piu' dentro.\n"
     "Cambiarlo non richiede nessuna analisi AI: basta rigenerare."
 )
+
+#: Voce informativa del selettore «tutti i lati» quando i lati differiscono.
+CONTACT_STYLE_MIXED_LABEL = "Diverso per lato"
+
+
+class _ToolTipFollower(QObject):
+    """@brief Re-run a callback whenever the watched widget's tooltip changes.
+
+    @note Used by the icon-only copies of the Project-tab commands in the 3D
+        tab: the copy composes its tooltip from the original's text and
+        tooltip, so it must be recomposed whenever the original changes --
+        on a language switch, or when some code rewrites the original's
+        tooltip. Qt delivers `QEvent.ToolTipChange` synchronously from
+        `setToolTip`, so the copy is never observed out of step.
+    """
+
+    def __init__(self, watched, callback) -> None:
+        """@brief Install the filter on `watched`, parented to it for lifetime.
+
+        @param watched Widget whose tooltip is followed.
+        @param callback Zero-argument callable run after each change.
+        """
+        super().__init__(watched)
+        self._callback = callback
+        watched.installEventFilter(self)
+
+    def eventFilter(self, watched, event) -> bool:
+        """@brief Qt override: run the callback on ToolTipChange, never consume.
+
+        @param watched The followed widget.
+        @param event Incoming event.
+        @return Always False: the original widget keeps handling its events.
+        """
+        if event.type() == QEvent.Type.ToolTipChange:
+            try:
+                self._callback()
+            except RuntimeError:
+                # La copia e' gia' stata distrutta (chiusura della finestra):
+                # non c'e' piu' nulla da allineare.
+                pass
+        return False
 
 
 def contact_styles() -> tuple:
@@ -1150,6 +1191,19 @@ class MainWindow(QMainWindow):
         #: Coppie (copia nella scheda Modello 3D, originale nella scheda
         #: Progetto), per allinearne la visibilita' a genitore acquisito.
         self._project_action_mirrors: list = []
+        #: Comandi a sola icona della barra 3D con testi propri (rigenera,
+        #: accetta): i loro tooltip si ricompongono a ogni cambio di lingua.
+        self._workflow_buttons: list = []
+        #: Rendering del modello 3D rimandato all'ingresso nella scheda:
+        #: (revisione del modello, percorso della mesh) finche' la chiamata
+        #: differita non e' partita, None altrimenti. Vedi `_enter_3d_tab`.
+        self._pending_3d_render = None
+        #: True mentre `render_mesh` sta lavorando: un secondo ingresso nella
+        #: scheda in quel momento non deve accodare un altro rendering.
+        self._rendering_3d = False
+        #: True finche' il cursore di attesa messo dall'indicatore e' attivo:
+        #: `restoreOverrideCursor` va chiamato una volta per ogni `set`.
+        self._loading_cursor_set = False
 
         self._build_menu()
         self._build_central()
@@ -1747,6 +1801,12 @@ class MainWindow(QMainWindow):
         self._refresh_model_combo()
         self._refresh_output_actions()
         self._apply_view_cube_labels()
+        # Testi che la ripassata generica non copre: voci dei selettori del
+        # tipo di contatto, tooltip composti delle icone della barra 3D e
+        # quote disegnate nell'anteprima 2D (nota 8 dell'utente).
+        self._retranslate_contact_style_combos()
+        self._refresh_workflow_tooltips()
+        self._draw_preview()
 
     def _retranslate_component_types(self) -> None:
         """@brief Refresh built-in component type labels without changing selection."""
@@ -2889,30 +2949,41 @@ class MainWindow(QMainWindow):
         button.setEnabled(bool(available))
         button.setVisible(bool(available))
 
-    def _mirror_project_action(self, source, slot, row):
-        """@brief Crea nella riga della scheda Modello 3D la copia di un comando della scheda Progetto.
+    def _mirror_project_action(self, source, slot, row, asset: str):
+        """@brief Crea nella barra della scheda Modello 3D la copia a icona di un comando della scheda Progetto.
 
         @param source Pulsante originale: unica fonte di testo, suggerimento e stato.
         @param slot Slot da collegare -- e' lo STESSO comando, non una variante.
-        @param row Layout della riga in cui inserire la copia.
-        @return Il pulsante copia, gia' inserito nella riga.
+        @param row Layout della barra in cui inserire la copia.
+        @param asset Icona SVG della copia, in `gui/assets`.
+        @return Il pulsante copia, gia' inserito nella barra.
         @note Le tre copie passano tutte da qui. Prima due copiavano solo
             `setEnabled(...)` e la terza anche `isVisibleTo(...)`: partivano in
             stati diversi pur essendo lo stesso comando, e bastava che il
             primo ricalcolo arrivasse dopo per far vedere un pulsante che
             l'originale aveva gia' nascosto.
-        @note La visibilita' NON si applica qui: finche' `regen_row` non e'
-            installata su un widget le copie non hanno un genitore, e
-            `setVisible(True)` su un widget senza genitore lo mostrerebbe come
-            finestra a se' stante. Si registra la coppia e si allinea in
-            `_apply_project_action_mirror_visibility()`, dopo `setLayout`.
+        @note Scelta dell'utente (2026-09-23): nella scheda Modello 3D la copia
+            e' un'icona senza testo; il testo dell'originale diventa la prima
+            riga del tooltip e il nome accessibile, il tooltip dell'originale
+            la spiegazione. Un `_ToolTipFollower` ricompone il tooltip a ogni
+            cambio del tooltip dell'originale -- anche quello del cambio di
+            lingua -- quindi la copia segue l'originale per costruzione. Lo
+            stato abilitato/visibile resta quello impostato insieme da
+            `_set_action_available`.
+        @note La visibilita' NON si applica qui: `_apply_project_action_mirror_visibility()`
+            la allinea dopo che la barra e' montata. Oggi la barra ha gia' il
+            suo widget quando le copie nascono, ma l'ordine resta quello
+            sicuro: `setVisible(True)` su un widget senza genitore lo
+            mostrerebbe come finestra a se' stante.
         """
-        mirror = QPushButton(source.text())
-        mirror.setToolTip(source.toolTip())
+        mirror = self._icon_only_button(asset)
         mirror.setEnabled(source.isEnabled())
         mirror.clicked.connect(slot)
         row.addWidget(mirror)
         self._project_action_mirrors.append((mirror, source))
+        self._apply_icon_tooltip(mirror, source.text(), source.toolTip())
+        _ToolTipFollower(source, lambda: self._apply_icon_tooltip(
+            mirror, source.text(), source.toolTip()))
         return mirror
 
     def _apply_project_action_mirror_visibility(self) -> None:
@@ -3591,10 +3662,43 @@ class MainWindow(QMainWindow):
                                     missing=totals.calls_without_cost)
         self.lbl_ai_cost.setText(text)
         self.lbl_ai_cost.show()
-        # La label sotto il pulsante puo' essere fuori dall'area visibile e
-        # durante la generazione e' comunque coperta dalla modale: il dato va
-        # anche dove l'utente sta gia' guardando.
+        # La label sotto il pulsante puo' essere fuori dall'area visibile: il
+        # dato va anche nella modale dell'ANALISI, dove l'utente sta gia'
+        # guardando. Non in quella della generazione: vedi
+        # `_clear_cost_for_generation` (decisione dell'utente, 2026-09-23).
+        # Il caso conta davvero: nella corsa automatica `finished`
+        # dell'estrazione arriva quando la generazione e' gia' partita.
+        if self._generation_phase_active():
+            return
         self.analysis_overlay.set_cost(text)
+
+    def _generation_phase_active(self) -> bool:
+        """@brief Tell whether the progress modal is currently the generation modal.
+
+        @return True during the automatic generation after an extraction, a
+            manual generation with a 3D body, or a 3D regeneration.
+        """
+        worker = getattr(self, "_cad3d_worker", None)
+        return bool(getattr(self, "_automatic_generation_active", False)
+                    or getattr(self, "_manual_cad_overlay", False)
+                    or (worker is not None and worker.isRunning()))
+
+    def _clear_cost_for_generation(self) -> None:
+        """@brief Remove the analysis cost from the modal as a generation phase starts.
+
+        @note User decision (2026-09-23, note 4), which REVERSES the earlier
+            choice: the automatic generation used to keep «Costo ultima
+            analisi: … USD» on its modal, on the grounds that extraction and
+            generation were one continuous operation. The user disagrees:
+            footprint, KiCad matching and FreeCAD make no model call, so a cost
+            on that modal reads as the price of what is happening now. Every
+            generation path -- automatic, manual with a 3D body, «Rigenera
+            modello 3D» -- now starts with a modal without cost. The cost stays
+            where it belongs: in the AI modal during the analysis and in the
+            label under the extraction button (`lbl_ai_cost`), which says
+            «ultima analisi» and is untouched here.
+        """
+        self.analysis_overlay.clear_cost()
 
     def _offer_inventory_review(self) -> bool:
         """@brief Pausa fra l'inventario a pagamento e tutto cio' che ne discende.
@@ -4712,13 +4816,49 @@ class MainWindow(QMainWindow):
         return default_contact_style()
 
     def _contact_style_combo(self, style: str) -> QComboBox:
-        """Combo offering the contact styles, with the telling-apart tooltip."""
+        """Combo offering the contact styles, with the telling-apart tooltip.
+
+        Item texts are translated here and again by
+        `_retranslate_contact_style_combos` on every language switch; item
+        DATA (the style keys) never change, so a switch cannot alter a choice.
+        """
         combo = QComboBox()
         for value in contact_styles():
             combo.addItem(self.i18n.text(CONTACT_STYLE_LABELS.get(value, value)), value)
         combo.setCurrentIndex(max(combo.findData(style), 0))
-        combo.setToolTip(self.i18n.text(CONTACT_STYLE_TOOLTIP))
+        self._set_translated_tooltip(combo, CONTACT_STYLE_TOOLTIP)
         return combo
+
+    def _contact_style_combos(self) -> list:
+        """@brief Every contact-style combo of the window: the 3D-tab one and one per side row."""
+        combos = []
+        combo_3d = getattr(self, "combo_contact_style_3d", None)
+        if combo_3d is not None:
+            combos.append(combo_3d)
+        table = getattr(self, "table_sides", None)
+        if table is not None:
+            for row in range(table.rowCount()):
+                combo = table.cellWidget(row, self._SIDE_STYLE_COLUMN)
+                if isinstance(combo, QComboBox):
+                    combos.append(combo)
+        return combos
+
+    def _retranslate_contact_style_combos(self) -> None:
+        """@brief Translate the contact-style items again after a language switch.
+
+        @note Note 8 of the user (2026-09-23): the items stayed Italian in an
+            English interface. `I18n.retranslate_widgets` deliberately leaves
+            combo ITEMS alone (they are often data), so these combos are
+            refreshed here. The Italian source is derived from the item data
+            -- the style key, or None for the informative «mixed» entry --
+            hence the data, the current index and the signals stay untouched.
+        """
+        for combo in self._contact_style_combos():
+            for index in range(combo.count()):
+                value = combo.itemData(index)
+                source = (CONTACT_STYLE_MIXED_LABEL if value is None
+                          else CONTACT_STYLE_LABELS.get(value, value))
+                combo.setItemText(index, self.i18n.text(source))
 
     def _remove_side_row(self) -> None:
         row = self.table_sides.currentRow()
@@ -5782,6 +5922,7 @@ class MainWindow(QMainWindow):
             # corsa automatica: qui l'utente ha avviato lui il lavoro e il
             # resto della finestra non e' in mezzo alla catena.
             self._manual_cad_overlay = True
+            self._clear_cost_for_generation()
             self.analysis_overlay.start('Generazione footprint e modello 3D',
                                         'Preparazione della generazione…', abortable=True)
         if automatic:
@@ -5798,6 +5939,7 @@ class MainWindow(QMainWindow):
             self._generation_menu_enabled = self.menuBar().isEnabled()
             self.menuBar().setEnabled(False)
             self.btn_extract_ai.setEnabled(False)
+            self._clear_cost_for_generation()
             self.analysis_overlay.start('Generazione footprint e modello 3D',
                                         'Preparazione della generazione…', abortable=True)
         try:
@@ -5959,6 +6101,15 @@ class MainWindow(QMainWindow):
     # ── Tab 5: Modello 3D ──────────────────────────────────────────
 
     def _build_3d_tab(self) -> QWidget:
+        """@brief Build the 3D tab: one icon toolbar, the preview, the status line.
+
+        @return The tab container (preview/settings splitter).
+        @note User choice (2026-09-23, note 6): the workflow commands that sat in
+            a row under the model moved into the single toolbar at the top, as
+            icon-only buttons after the view tools and a vertical divider. The
+            preview gains the height of the old row; names and explanations
+            live in the translated tooltips and accessible names.
+        """
         # Only the settings scroll. The renderer must occupy its actual visible
         # viewport, not a clipped portion of a taller scrollable document.
         tab = QWidget()
@@ -5966,10 +6117,17 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(10, 10, 10, 10)
         outer.setSpacing(8)
 
-        # Barra di icone degli strumenti di vista (scelta dell'utente,
-        # 2026-09-23): niente testo fisso sopra il modello, i nomi stanno nei
-        # tooltip, tradotti come ogni altro testo dell'interfaccia.
-        toolbar = QHBoxLayout()
+        # Una sola barra di icone (scelta dell'utente, 2026-09-23): a sinistra
+        # gli strumenti di vista, poi un divisore, poi i comandi del flusso
+        # di lavoro. Niente testo fisso sopra il modello: i nomi stanno nei
+        # tooltip, tradotti come ogni altro testo dell'interfaccia. Il widget
+        # conserva il nome `model_3d_action_bar`: e' ancora la barra delle
+        # azioni della scheda, solo spostata in alto.
+        self.model_3d_action_bar = QWidget()
+        toolbar = QHBoxLayout(self.model_3d_action_bar)
+        # Stessi margini laterali della scheda sotto: le icone restano in
+        # colonna con il bordo del modello.
+        toolbar.setContentsMargins(10, 8, 10, 0)
         toolbar.setSpacing(4)
         self.chk_pin_numbers = self._view_tool_button(
             "pin-numbers.svg",
@@ -5992,8 +6150,131 @@ class MainWindow(QMainWindow):
             "folder-3d.svg", "Apri la cartella 3dshapes con i file STEP generati.")
         self.btn_open_3dshapes.clicked.connect(self._open_3dshapes_dir)
         toolbar.addWidget(self.btn_open_3dshapes)
+
+        # Divisore verticale fra la vista (non cambia nulla) e il flusso di
+        # lavoro (rigenera, accetta, torna alla revisione).
+        self.toolbar_3d_divider = QFrame()
+        self.toolbar_3d_divider.setFrameShape(QFrame.Shape.VLine)
+        self.toolbar_3d_divider.setFrameShadow(QFrame.Shadow.Plain)
+        self.toolbar_3d_divider.setStyleSheet(f"color: {SURFACE1};")
+        self.toolbar_3d_divider.setFixedWidth(9)
+        toolbar.addWidget(self.toolbar_3d_divider)
+
+        # Comando principale della scheda: evidenziato (objectName «primary»,
+        # vedi theme.py) perche' e' l'ultimo passo gratuito della pipeline.
+        self.btn_regen_3d = self._workflow_tool_button(
+            "wf-regenerate.svg",
+            "Rigenera modello 3D (STEP) con queste annotazioni",
+            "Ultimo passo della pipeline — Ricostruisce lo STEP con FreeCAD dai corpi e "
+            "dalle annotazioni attuali, comprese le correzioni appena applicate nella "
+            "revisione dei componenti. Nessuna richiesta AI: gratuito.")
+        self.btn_regen_3d.setObjectName("primary")
+        self.btn_regen_3d.clicked.connect(self._regenerate_3d)
+        toolbar.addWidget(self.btn_regen_3d)
+        # «Accetto, mi piace»: dopo aver guardato il solido, i modelli KiCad
+        # agganciati diventano abbinamenti accettati che le schede future
+        # riusano subito (come proposta da confermare). Acceso solo quando
+        # c'e' un solido generato sui dati correnti: si accetta cio' che si e'
+        # visto, non dati cambiati dopo.
+        self.btn_accept_models = self._workflow_tool_button(
+            "wf-accept.svg",
+            "Accetto, mi piace — ricorda questi modelli…",
+            "Salva nell'archivio degli abbinamenti accettati i modelli KiCad dei componenti "
+            "di questa scheda (categoria, misure, numero di terminali, modello, rotazione "
+            "scelta). In una scheda futura un corpo con la stessa firma riceve subito quel "
+            "modello, senza la misura dei candidati, come proposta da confermare. "
+            "Nessuna richiesta AI: gratuito.")
+        self.btn_accept_models.clicked.connect(self._accept_models)
+        self.btn_accept_models.setEnabled(False)
+        toolbar.addWidget(self.btn_accept_models)
+        # Copie dei pulsanti della scheda Progetto: da qui si vede il solido
+        # e si capisce se mancano corpi, quindi da qui si deve poter tornare
+        # alle proposte annotate e ripartire (revisione gratuita; rilancio a
+        # pagamento, dichiarato -- anche dall'icona, che porta una moneta).
+        # Stesso stato delle copie in Progetto.
+        self.btn_reopen_review_3d = self._mirror_project_action(
+            self.btn_reopen_review, self._reopen_detector_review, toolbar,
+            "wf-review.svg")
+        self.btn_relaunch_inventory_3d = self._mirror_project_action(
+            self.btn_relaunch_inventory, self._relaunch_inventory, toolbar,
+            "wf-relaunch-ai.svg")
+        # Anche la modifica della revisione va specchiata qui: e' guardando il
+        # solido che si scopre un corpo sbagliato, e tornare alla scheda
+        # Progetto per correggerlo era lavoro in piu' senza motivo.
+        self.btn_edit_component_review_3d = self._mirror_project_action(
+            self.btn_edit_component_review, self._show_photo_comparison, toolbar,
+            "wf-edit-review.svg")
+
+        # Il tipo di contatto va correggibile da qui anche in modalita' base:
+        # e' guardando il solido che si vede un mezzo foro dove la scheda ha un
+        # foro passante, e la tabella dei lati sta in un tab nascosto a chi non
+        # ha scelto la modalita' avanzata. Nella stessa barra di «Rigenera»
+        # perche' la correzione e la rigenerazione gratuita sono un unico
+        # gesto. L'etichetta testuale e' diventata un'icona con tooltip.
+        self.contact_style_bar_3d = QWidget()
+        style_layout = QHBoxLayout(self.contact_style_bar_3d)
+        style_layout.setContentsMargins(6, 0, 0, 0)
+        style_layout.setSpacing(4)
+        self.icon_contact_style_3d = QLabel()
+        self.icon_contact_style_3d.setPixmap(
+            QIcon(str(Path(__file__).parent / "assets" / "wf-contact.svg")).pixmap(QSize(20, 20)))
+        self.icon_contact_style_3d.setToolTip("Tipo contatto (tutti i lati)")
+        self.icon_contact_style_3d.setAccessibleName("Tipo contatto (tutti i lati)")
+        style_layout.addWidget(self.icon_contact_style_3d)
+        self.combo_contact_style_3d = self._contact_style_combo(default_contact_style())
+        self.combo_contact_style_3d.addItem(self.i18n.text(CONTACT_STYLE_MIXED_LABEL), None)
+        # Solo informativa: si sceglie un tipo per tutti i lati, oppure si usa
+        # la tabella lati per differenziarli; «diverso» non e' una scelta.
+        self.combo_contact_style_3d.model().item(
+            self.combo_contact_style_3d.count() - 1).setEnabled(False)
+        self._set_translated_tooltip(
+            self.combo_contact_style_3d,
+            CONTACT_STYLE_TOOLTIP + "\nVale per tutti i lati; per un tipo diverso "
+            "lato per lato usa la colonna «Tipo contatto» della tabella lati "
+            "(tab Footprint 2D, modalita' avanzata).")
+        self.combo_contact_style_3d.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.combo_contact_style_3d.currentIndexChanged.connect(
+            self._on_contact_style_all_changed)
+        style_layout.addWidget(self.combo_contact_style_3d)
+        toolbar.addWidget(self.contact_style_bar_3d)
+        # Nascosta finche' il modulo non e' castellated con almeno un lato:
+        # la accende `_sync_contact_style_bar`, che la tiene allineata ai lati.
+        self.contact_style_bar_3d.hide()
+
+        self.btn_terminal_detail = QPushButton("Rileva terminali dalla foto...")
+        self.btn_terminal_detail.setToolTip(
+            "Analisi AI della foto calibrata tramite OpenRouter; conserva posizioni e footprint.")
+        self.btn_terminal_detail.clicked.connect(self._refine_photo_terminals)
+        toolbar.addWidget(self.btn_terminal_detail)
+        # User decision 2026-09-13 (MEMORY.md): hide manual AI refinement
+        # actions, keeping handlers and the automatic extraction unchanged.
+        self.btn_terminal_detail.hide()
         toolbar.addStretch()
-        outer.addLayout(toolbar)
+
+        # Indicatore di caricamento (nota 10 dell'utente, 2026-09-23): entrare
+        # nella scheda con una mesh grande bloccava la finestra per secondi
+        # senza alcun segno. Sta nella barra, a destra, e non sopra il
+        # disegno: il visore VTK e' una superficie OpenGL nativa su cui un
+        # widget figlio non si compone in modo affidabile, e un banner
+        # inserito sopra l'anteprima la ridimensionerebbe proprio mentre la si
+        # disegna. Il cursore di attesa copre l'area del modello.
+        self.loading_3d_indicator = QWidget()
+        loading_layout = QHBoxLayout(self.loading_3d_indicator)
+        loading_layout.setContentsMargins(0, 0, 0, 0)
+        loading_layout.setSpacing(4)
+        loading_icon = QLabel()
+        loading_icon.setPixmap(
+            QIcon(str(Path(__file__).parent / "assets" / "wf-loading.svg")).pixmap(QSize(18, 18)))
+        loading_layout.addWidget(loading_icon)
+        self.label_3d_loading = QLabel("Caricamento del modello 3D…")
+        self.label_3d_loading.setStyleSheet(f"color: {BLUE}; font-weight: bold;")
+        loading_layout.addWidget(self.label_3d_loading)
+        toolbar.addWidget(self.loading_3d_indicator)
+        self.loading_3d_indicator.hide()
+        # Adesso le copie hanno un genitore: prima di qui `setVisible(True)`
+        # avrebbe aperto finestre a se' stanti.
+        self._apply_project_action_mirror_visibility()
 
         self.preview_3d = Preview3DVtk()
         if hasattr(self.preview_3d, 'component_requested'):
@@ -6024,80 +6305,6 @@ class MainWindow(QMainWindow):
         settings_layout.addWidget(self._build_annotations_group())
         settings_layout.addWidget(self._build_components_group())
 
-        regen_row = QHBoxLayout()
-        regen_row.addStretch()
-        self.btn_terminal_detail = QPushButton("Rileva terminali dalla foto...")
-        self.btn_terminal_detail.setToolTip(
-            "Analisi AI della foto calibrata tramite OpenRouter; conserva posizioni e footprint.")
-        self.btn_terminal_detail.clicked.connect(self._refine_photo_terminals)
-        regen_row.addWidget(self.btn_terminal_detail)
-        # User decision 2026-09-13 (MEMORY.md): hide manual AI refinement
-        # actions, keeping handlers and the automatic extraction unchanged.
-        self.btn_terminal_detail.hide()
-        # Il tipo di contatto va correggibile da qui anche in modalita' base:
-        # e' guardando il solido che si vede un mezzo foro dove la scheda ha un
-        # foro passante, e la tabella dei lati sta in un tab nascosto a chi non
-        # ha scelto la modalita' avanzata. Accanto a «Rigenera» perche' la
-        # correzione e la rigenerazione gratuita sono un unico gesto.
-        self.contact_style_bar_3d = QWidget()
-        style_layout = QHBoxLayout(self.contact_style_bar_3d)
-        style_layout.setContentsMargins(0, 0, 0, 0)
-        style_layout.addWidget(QLabel("Tipo contatto (tutti i lati):"))
-        self.combo_contact_style_3d = self._contact_style_combo(default_contact_style())
-        self.combo_contact_style_3d.addItem(self.i18n.text("Diverso per lato"), None)
-        # Solo informativa: si sceglie un tipo per tutti i lati, oppure si usa
-        # la tabella lati per differenziarli; «diverso» non e' una scelta.
-        self.combo_contact_style_3d.model().item(
-            self.combo_contact_style_3d.count() - 1).setEnabled(False)
-        self.combo_contact_style_3d.setToolTip(self.i18n.text(
-            CONTACT_STYLE_TOOLTIP + "\nVale per tutti i lati; per un tipo diverso "
-            "lato per lato usa la colonna «Tipo contatto» della tabella lati "
-            "(tab Footprint 2D, modalita' avanzata)."))
-        self.combo_contact_style_3d.currentIndexChanged.connect(
-            self._on_contact_style_all_changed)
-        style_layout.addWidget(self.combo_contact_style_3d)
-        regen_row.addWidget(self.contact_style_bar_3d)
-        # Nascosta finche' il modulo non e' castellated con almeno un lato:
-        # la accende `_sync_contact_style_bar`, che la tiene allineata ai lati.
-        self.contact_style_bar_3d.hide()
-        self.btn_regen_3d = QPushButton("Rigenera modello 3D (STEP) con queste annotazioni")
-        self.btn_regen_3d.setToolTip(
-            "Ultimo passo della pipeline — Ricostruisce lo STEP con FreeCAD dai corpi e "
-            "dalle annotazioni attuali, comprese le correzioni appena applicate nella "
-            "revisione dei componenti. Nessuna richiesta AI: gratuito.")
-        self.btn_regen_3d.setObjectName("primary")
-        self.btn_regen_3d.clicked.connect(self._regenerate_3d)
-        regen_row.addWidget(self.btn_regen_3d)
-        # «Accetto, mi piace»: dopo aver guardato il solido, i modelli KiCad
-        # agganciati diventano abbinamenti accettati che le schede future
-        # riusano subito (come proposta da confermare). Acceso solo quando
-        # c'e' un solido generato sui dati correnti: si accetta cio' che si e'
-        # visto, non dati cambiati dopo.
-        self.btn_accept_models = QPushButton("Accetto, mi piace — ricorda questi modelli…")
-        self.btn_accept_models.setToolTip(
-            "Salva nell'archivio degli abbinamenti accettati i modelli KiCad dei componenti "
-            "di questa scheda (categoria, misure, numero di terminali, modello, rotazione "
-            "scelta). In una scheda futura un corpo con la stessa firma riceve subito quel "
-            "modello, senza la misura dei candidati, come proposta da confermare. "
-            "Nessuna richiesta AI: gratuito.")
-        self.btn_accept_models.clicked.connect(self._accept_models)
-        self.btn_accept_models.setEnabled(False)
-        regen_row.addWidget(self.btn_accept_models)
-        # Copie dei pulsanti della scheda Progetto: da qui si vede il solido
-        # e si capisce se mancano corpi, quindi da qui si deve poter tornare
-        # alle proposte annotate e ripartire (revisione gratuita; rilancio a
-        # pagamento, dichiarato). Stesso stato delle copie in Progetto.
-        self.btn_reopen_review_3d = self._mirror_project_action(
-            self.btn_reopen_review, self._reopen_detector_review, regen_row)
-        self.btn_relaunch_inventory_3d = self._mirror_project_action(
-            self.btn_relaunch_inventory, self._relaunch_inventory, regen_row)
-        # Anche la modifica della revisione va specchiata qui: e' guardando il
-        # solido che si scopre un corpo sbagliato, e tornare alla scheda
-        # Progetto per correggerlo era lavoro in piu' senza motivo.
-        self.btn_edit_component_review_3d = self._mirror_project_action(
-            self.btn_edit_component_review, self._show_photo_comparison, regen_row)
-        regen_row.addStretch()
-
         scroll = QScrollArea()
         scroll.setWidget(settings)
         scroll.setWidgetResizable(True)
@@ -6112,13 +6319,14 @@ class MainWindow(QMainWindow):
         container = QWidget()
         container_layout = QVBoxLayout(container)
         container_layout.setContentsMargins(0, 0, 0, 0)
-        container_layout.addWidget(splitter, 1)
-        self.model_3d_action_bar = QWidget()
-        self.model_3d_action_bar.setLayout(regen_row)
-        # Adesso le copie hanno un genitore: prima di qui `setVisible(True)`
-        # avrebbe aperto finestre a se' stanti.
-        self._apply_project_action_mirror_visibility()
+        container_layout.setSpacing(0)
+        # La barra sta sopra il divisore, fuori da scorrimento e splitter:
+        # resta sempre raggiungibile, qualunque altezza abbia il pannello
+        # delle impostazioni, ed e' la prima cosa che l'occhio incontra.
         container_layout.addWidget(self.model_3d_action_bar)
+        container_layout.addWidget(splitter, 1)
+        self.model_3d_page = container
+        self._refresh_workflow_tooltips()
         return container
 
     def _view_tool_button(self, asset: str, tooltip: str, *, checkable: bool = False):
@@ -6140,6 +6348,119 @@ class MainWindow(QMainWindow):
         button.setProperty("i18n_accessible_name_source", tooltip)
         button.setAccessibleName(tooltip)
         return button
+
+    @staticmethod
+    def _asset_icon(asset: str) -> QIcon:
+        """@brief Icon loaded from `gui/assets`.
+
+        @param asset SVG file name.
+        @return The QIcon (null when the file is missing).
+        """
+        return QIcon(str(Path(__file__).parent / "assets" / asset))
+
+    def _icon_only_button(self, asset: str) -> QToolButton:
+        """@brief Bare icon-only button of the 3D toolbar, without texts yet.
+
+        @param asset SVG file in `gui/assets`.
+        @return The QToolButton, marked `i18n_skip`.
+        @note Its tooltip is COMPOSED (name + explanation) by
+            `_refresh_workflow_tooltips`, which translates each half from the
+            catalogue. The generic pass `I18n.retranslate_widgets` would take
+            the composed text as a catalogue key it cannot find, so the button
+            opts out of it and is refreshed explicitly on a language change.
+        """
+        button = QToolButton()
+        button.setIcon(self._asset_icon(asset))
+        button.setIconSize(QSize(22, 22))
+        button.setAutoRaise(True)
+        button.setProperty("i18n_skip", True)
+        return button
+
+    def _workflow_tool_button(self, asset: str, title: str, detail: str) -> QToolButton:
+        """@brief Icon-only workflow command of the 3D toolbar.
+
+        @param asset SVG file in `gui/assets`.
+        @param title Italian source of the command name (the former button text).
+        @param detail Italian source of the explanation (the former tooltip).
+        @return The QToolButton; its tooltip and accessible name follow the
+            interface language through `_refresh_workflow_tooltips`.
+        """
+        button = self._icon_only_button(asset)
+        button.setProperty("workflow_icon", asset)
+        button.setProperty("workflow_idle_title_source", title)
+        button.setProperty("workflow_title_source", title)
+        button.setProperty("workflow_detail_source", detail)
+        self._workflow_buttons.append(button)
+        self._apply_icon_tooltip(button, self.i18n.text(title), self.i18n.text(detail))
+        return button
+
+    @staticmethod
+    def _apply_icon_tooltip(button, title: str, detail: str) -> None:
+        """@brief Put a command's name and explanation on an icon-only button.
+
+        @param button Target button.
+        @param title Translated command name: first tooltip line and accessible name.
+        @param detail Translated explanation; may be empty.
+        @note The name leads the tooltip because the icon alone does not say
+            it; the accessible name is the name only, as a screen reader
+            expects, and the explanation becomes the accessible description.
+        """
+        button.setToolTip(f"{title}\n{detail}" if detail else title)
+        button.setAccessibleName(title)
+        button.setAccessibleDescription(detail or "")
+
+    def _refresh_workflow_tooltips(self) -> None:
+        """@brief Recompose the tooltips of every icon-only workflow command.
+
+        @note Own commands (regenerate, accept) translate their stored Italian
+            sources; the copies of the Project-tab commands read the ORIGINAL
+            button's current text and tooltip, which the i18n pass has already
+            translated, so a copy can never say something its original does not.
+        """
+        for button in self._workflow_buttons:
+            self._apply_icon_tooltip(
+                button,
+                self.i18n.text(button.property("workflow_title_source") or ""),
+                self.i18n.text(button.property("workflow_detail_source") or ""))
+        for mirror, source in self._project_action_mirrors:
+            self._apply_icon_tooltip(mirror, source.text(), source.toolTip())
+
+    def _set_regen_busy(self, busy: bool) -> None:
+        """@brief Show on the icon-only «Rigenera» that a generation is running.
+
+        @param busy True while FreeCAD builds the STEP.
+        @note The old text button changed its label to «Generazione in corso
+            (FreeCAD)...». An icon has no label, so the busy state is carried
+            by three signs together: the button is disabled, the icon becomes
+            the hourglass, and the tooltip/accessible name read «Generazione in
+            corso (FreeCAD)...». The progress modal is open meanwhile anyway.
+        """
+        button = self.btn_regen_3d
+        button.setEnabled(not busy)
+        button.setProperty("workflow_busy", bool(busy))
+        button.setProperty(
+            "workflow_title_source",
+            "Generazione in corso (FreeCAD)..." if busy
+            else button.property("workflow_idle_title_source"))
+        button.setIcon(self._asset_icon(
+            "wf-loading.svg" if busy else button.property("workflow_icon")))
+        self._refresh_workflow_tooltips()
+
+    def _set_translated_tooltip(self, widget, source: str) -> None:
+        """@brief Set a translated tooltip that later language switches keep translating.
+
+        @param widget Target widget.
+        @param source Italian catalogue source.
+        @note Writing `setToolTip(self.i18n.text(source))` alone makes
+            `retranslate_widgets` capture the TRANSLATED text as the source on
+            its first pass, so the next language switch looks up an English
+            sentence in an Italian-keyed catalogue and leaves it unchanged.
+            Recording the source and what was rendered keeps the pass exact.
+        """
+        rendered = self.i18n.text(source)
+        widget.setToolTip(rendered)
+        widget.setProperty("i18n_tooltip_source", source)
+        widget.setProperty("i18n_tooltip_rendered", rendered)
 
     def _apply_view_cube_labels(self) -> None:
         """@brief Write the translated face names on the navigation cube."""
@@ -6294,9 +6615,7 @@ class MainWindow(QMainWindow):
             self._append_log(f"ERRORE 3D: {exc}")
             return
 
-        self.btn_regen_3d.setEnabled(False)
-        self.btn_regen_3d.setText(
-            self.i18n.text("Generazione in corso (FreeCAD)..."))
+        self._set_regen_busy(True)
         self._set_3d_status(
             self.i18n.text("Generazione STEP in corso tramite FreeCAD..."), STATUS_INFO)
         self._append_log(
@@ -6329,9 +6648,9 @@ class MainWindow(QMainWindow):
         # il consuntivo dell'ultima analisi dentro la modale lo farebbe
         # leggere come il costo di cio' che sta accadendo adesso. Resta sulla
         # label sotto il pulsante, che dice esplicitamente "ultima analisi".
-        # Nella generazione automatica il costo va invece tenuto: li' estrazione
-        # e generazione sono un'unica operazione continua (vedi clear_cost).
-        self.analysis_overlay.clear_cost()
+        # Vale per OGNI generazione, anche quella automatica: vedi
+        # `_clear_cost_for_generation`.
+        self._clear_cost_for_generation()
         self.analysis_overlay.start('Generazione modello 3D',
                                     'Avvio di FreeCAD…', abortable=True)
         self._cad3d_worker.start()
@@ -6348,9 +6667,7 @@ class MainWindow(QMainWindow):
         """
         self._abort_pending = False
         self._hide_analysis_overlay()
-        self.btn_regen_3d.setEnabled(True)
-        self.btn_regen_3d.setText(self.i18n.text(
-            "Rigenera modello 3D (STEP) con queste annotazioni"))
+        self._set_regen_busy(False)
 
     def _on_regen_3d_done(self, path: str) -> None:
         if not self._cad_result_is_current():
@@ -7116,13 +7433,9 @@ class MainWindow(QMainWindow):
             h = placement.height * mm_to_px
             x = placement.x * mm_to_px
             y = placement.y * mm_to_px
-            xs_px.extend([x - w / 2, x + w / 2])
-            ys_px.extend([y - h / 2, y + h / 2])
 
-            item = QGraphicsRectItem(x - w / 2, y - h / 2, w, h)
-            item.setPen(pad_pen)
-            item.setBrush(pad_brush)
-            self.preview_scene.addItem(item)
+            self._add_castellated_pad_shape(p, placement, mm_to_px, pad_pen, pad_brush,
+                                            xs_px, ys_px)
 
             number = self.preview_scene.addSimpleText(placement.number)
             number.setBrush(QBrush(QColor(BASE)))
@@ -7137,12 +7450,73 @@ class MainWindow(QMainWindow):
         if xs_px and ys_px:
             left, right = min(xs_px + [-half_l]), max(xs_px + [half_l])
             top, bottom = min(ys_px + [-half_w]), max(ys_px + [half_w])
-            self._add_dim_h(-half_l, half_l, top - 40, f"corpo {p.body_length:.2f} mm")
-            self._add_dim_v(-half_w, half_w, left - 40, f"corpo {p.body_width:.2f} mm")
-            self._add_dim_h(left, right, bottom + 60, f"totale {(right - left) / mm_to_px:.2f} mm")
+            self._add_dim_h(-half_l, half_l, top - 40, self._dim_label("dim.body", p.body_length))
+            self._add_dim_v(-half_w, half_w, left - 40, self._dim_label("dim.body", p.body_width))
+            self._add_dim_h(left, right, bottom + 60, self._dim_label("dim.total", (right - left) / mm_to_px))
 
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
+
+    def _add_castellated_pad_shape(self, p, placement, mm_to_px, pen, brush,
+                                   xs_px, ys_px) -> None:
+        """@brief Draw one contact exactly as the footprint writes it.
+
+        @param p Castellated module parameters.
+        @param placement Contact from pad_positions().
+        @param mm_to_px Scene scale.
+        @param pen Outline pen of the copper.
+        @param brush Copper fill.
+        @param xs_px Extents accumulator (x, scene px), extended in place.
+        @param ys_px Extents accumulator (y, scene px), extended in place.
+        @note Three shapes, the same three the footprint builder writes: the
+            continuous stadium of a half_and_through contact with its offset
+            drill (user decision 2026-09-23; the module's edge half-hole is not
+            part of the host-board land, so it is not drawn), the round ring of a through_hole contact, and the
+            rectangular edge land of a half_hole contact. Drawing the edge
+            rectangle for all three showed a footprint that is not the one
+            written to the .kicad_mod.
+        """
+        from ..generators.castellated_module import CONTACT_THROUGH_HOLE, continuous_pad
+        hole_brush = QBrush(QColor(BASE))
+        hole_pen = QPen(QColor(SURFACE2))
+        pad = continuous_pad(p, placement)
+        if pad is not None:
+            w, h = pad.width * mm_to_px, pad.height * mm_to_px
+            x, y = pad.x * mm_to_px, pad.y * mm_to_px
+            radius = min(w, h) / 2
+            path = QPainterPath()
+            path.addRoundedRect(QRectF(x - w / 2, y - h / 2, w, h), radius, radius)
+            copper = self.preview_scene.addPath(path, pen, brush)
+            copper.setZValue(1)
+            # Solo il foro passante: il footprint e' la piazzola sulla scheda
+            # che ospita il modulo, e li' il mezzo foro non esiste (e' una
+            # lavorazione del bordo del MODULO, che vive nel modello 3D).
+            if pad.drill and pad.drill > 0:
+                d = pad.drill * mm_to_px
+                hole = self.preview_scene.addEllipse(
+                    pad.drill_x * mm_to_px - d / 2, pad.drill_y * mm_to_px - d / 2, d, d,
+                    hole_pen, hole_brush)
+                hole.setZValue(2)
+            xs_px.extend([x - w / 2, x + w / 2])
+            ys_px.extend([y - h / 2, y + h / 2])
+            return
+        w, h = placement.width * mm_to_px, placement.height * mm_to_px
+        x, y = placement.x * mm_to_px, placement.y * mm_to_px
+        if placement.style == CONTACT_THROUGH_HOLE:
+            ring = self.preview_scene.addEllipse(x - w / 2, y - h / 2, w, h, pen, brush)
+            ring.setZValue(1)
+            d = p.thru_hole_drill * mm_to_px
+            if d > 0:
+                hole = self.preview_scene.addEllipse(x - d / 2, y - d / 2, d, d, hole_pen, hole_brush)
+                hole.setZValue(2)
+        else:
+            item = QGraphicsRectItem(x - w / 2, y - h / 2, w, h)
+            item.setPen(pen)
+            item.setBrush(brush)
+            item.setZValue(1)
+            self.preview_scene.addItem(item)
+        xs_px.extend([x - w / 2, x + w / 2])
+        ys_px.extend([y - h / 2, y + h / 2])
 
     def _draw_preview(self) -> None:
         if self._last_params is None:
@@ -7215,9 +7589,9 @@ class MainWindow(QMainWindow):
 
         # Quota vicina al componente: passo (in alto) e distanza righe (a sinistra)
         if p.cols >= 2:
-            self._add_dim_h(0, p.pitch * mm_to_px, top - 20, f"passo {p.pitch:.2f} mm")
+            self._add_dim_h(0, p.pitch * mm_to_px, top - 20, self._dim_label("dim.pitch", p.pitch))
         if p.rows >= 2:
-            self._add_dim_v(0, row_spacing * mm_to_px, left - 20, f"righe {row_spacing:.2f} mm")
+            self._add_dim_v(0, row_spacing * mm_to_px, left - 20, self._dim_label("dim.row_spacing", row_spacing))
 
         # Catena di quote: margine sinistro / span pin / margine destro (sotto)
         if xs_px:
@@ -7242,8 +7616,8 @@ class MainWindow(QMainWindow):
                 self._add_dim_v(bottommost_y, bottom, chain_x, f"{(bottom - bottommost_y) / mm_to_px:.2f} mm")
 
         # Quote totali (piu' lontane): larghezza/altezza silkscreen
-        self._add_dim_h(left, right, bottom + 60, f"totale {width + 2 * margin:.2f} mm")
-        self._add_dim_v(top, bottom, right + 60, f"totale {height + 2 * margin:.2f} mm")
+        self._add_dim_h(left, right, bottom + 60, self._dim_label("dim.total", width + 2 * margin))
+        self._add_dim_v(top, bottom, right + 60, self._dim_label("dim.total", height + 2 * margin))
 
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
@@ -7286,10 +7660,32 @@ class MainWindow(QMainWindow):
         bottom = (body_w / 2 + margin) * mm_to_px
         self._draw_grid(mm_to_px, body_l, body_w, margin,
                         x0=-body_l / 2, y0=-body_w / 2)
-        self._add_dim_h(left, right, bottom + 40, f"totale {body_l + 2 * margin:.2f} mm")
-        self._add_dim_v(top, bottom, right + 40, f"totale {body_w + 2 * margin:.2f} mm")
+        self._add_dim_h(left, right, bottom + 40, self._dim_label("dim.total", body_l + 2 * margin))
+        self._add_dim_v(top, bottom, right + 40, self._dim_label("dim.total", body_w + 2 * margin))
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
+
+    #: Italian fallbacks of the dimension-label keys, used only until the
+    #: catalogue carries them: `I18n.tr` would otherwise show the bare key.
+    _DIM_LABEL_FALLBACKS = {
+        "dim.body": "corpo {value:.2f} mm",
+        "dim.total": "totale {value:.2f} mm",
+        "dim.pitch": "passo {value:.2f} mm",
+        "dim.row_spacing": "righe {value:.2f} mm",
+    }
+
+    def _dim_label(self, key: str, value_mm: float) -> str:
+        """@brief Translated label of a dimension line in the 2D preview.
+
+        @param key Catalogue key (`dim.body`, `dim.total`, `dim.pitch`, `dim.row_spacing`).
+        @param value_mm Measured value in millimetres.
+        @return The label in the interface language, e.g. «body 12.00 mm».
+        @note Note 8 of the user (2026-09-23): these words were Italian
+            literals inside f-strings, so the drawing stayed Italian in any
+            language. The number is a parameter of the entry, formatted by the
+            entry itself (`{value:.2f}`), so every language keeps two decimals.
+        """
+        return self.i18n.tr(key, self._DIM_LABEL_FALLBACKS.get(key), value=float(value_mm))
 
     def _add_dim_h(self, x1: float, x2: float, y: float, text: str) -> None:
         """Disegna una linea di quota orizzontale con tacche e testo centrato."""
@@ -7390,7 +7786,96 @@ class MainWindow(QMainWindow):
         elif index == 3:
             self._draw_preview()
         elif index == 4:
+            self._enter_3d_tab()
+
+    # ── Ingresso nella scheda 3D: caricamento con indicatore ───────
+
+    def _mesh_already_showing(self, path) -> bool:
+        """@brief Ask the viewer whether that exact, unchanged mesh is on screen.
+
+        @param path Mesh file about to be shown.
+        @return True only when the viewer says so; False when it cannot tell.
+        @note `Preview3DVtk.is_showing` is optional (older viewers and the
+            test stubs do not have it) and must never break the tab switch:
+            any failure means «not known to be showing», i.e. render it.
+        """
+        is_showing = getattr(self.preview_3d, "is_showing", None)
+        if not callable(is_showing):
+            return False
+        try:
+            return bool(is_showing(path))
+        except Exception:  # noqa: BLE001 - la risposta e' solo un'ottimizzazione
+            return False
+
+    def _enter_3d_tab(self) -> None:
+        """@brief Show the model when the user opens the 3D tab, without freezing silently.
+
+        @note Note 10 of the user (2026-09-23): `render_mesh` on a large
+            generated mesh (13 MB of JSON on the user's board) blocked the
+            window for seconds right after the click, with no feedback. Now:
+            nothing heavy happens when the viewer already shows that mesh;
+            otherwise the loading indicator appears FIRST and the render is
+            deferred with `QTimer.singleShot(0, …)`, so the tab switch and the
+            indicator are painted before the event loop is blocked.
+        @note Without a generated mesh the preview is the parametric
+            approximation (or an empty view with a hint), which is cheap and
+            stays synchronous.
+        """
+        path = self._last_mesh_path
+        if not (path and Path(path).is_file()):
             self._draw_preview_3d()
+            return
+        if self._mesh_already_showing(path):
+            return
+        if self._rendering_3d or self._pending_3d_render is not None:
+            # Gia' in corso o gia' accodato: un secondo rendering della stessa
+            # scena non aggiunge nulla, e accodarlo lo farebbe partire due volte.
+            return
+        self._pending_3d_render = (self._model_revision, Path(path))
+        self._show_3d_loading(True)
+        QTimer.singleShot(0, self._run_pending_3d_render)
+
+    def _run_pending_3d_render(self) -> None:
+        """@brief Deferred half of `_enter_3d_tab`: render, then always hide the indicator.
+
+        @note Skipped -- indicator hidden, nothing rendered -- when, between the
+            click and this call, the data changed (model revision), the mesh
+            was replaced or invalidated, or the user left the 3D tab. In the
+            last case the next visit schedules it again, because the viewer
+            still does not show that mesh.
+        """
+        pending, self._pending_3d_render = self._pending_3d_render, None
+        try:
+            if pending is None:
+                return
+            revision, path = pending
+            current = self._last_mesh_path
+            if (revision != self._model_revision
+                    or current is None or Path(current) != path
+                    or self.tabs.currentWidget() is not getattr(self, "model_3d_page", None)):
+                return
+            self._rendering_3d = True
+            self._draw_preview_3d()
+        finally:
+            self._rendering_3d = False
+            self._show_3d_loading(False)
+
+    def _show_3d_loading(self, visible: bool) -> None:
+        """@brief Show or hide the 3D loading indicator and the wait cursor together.
+
+        @param visible True before a heavy render, False after it (also on error).
+        @note The override cursor is counted by Qt: it is set once and
+            restored once, whatever the order of the calls.
+        """
+        indicator = getattr(self, "loading_3d_indicator", None)
+        if indicator is not None:
+            indicator.setVisible(bool(visible))
+        if visible and not self._loading_cursor_set:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            self._loading_cursor_set = True
+        elif not visible and self._loading_cursor_set:
+            QApplication.restoreOverrideCursor()
+            self._loading_cursor_set = False
 
 
 def main() -> None:

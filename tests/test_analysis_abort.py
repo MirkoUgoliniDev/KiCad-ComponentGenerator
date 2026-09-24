@@ -314,7 +314,10 @@ def test_aborting_a_generation_kills_the_child_and_gives_the_window_back(
     assert window.tabs.isEnabled()
     assert not window.analysis_overlay.abort_button.isEnabled()
     assert window.btn_regen_3d.isEnabledTo(window.btn_regen_3d.parentWidget())
-    assert "Rigenera" in window.btn_regen_3d.text()
+    # Il comando e' un'icona senza testo (scelta dell'utente, 2026-09-23): il
+    # ritorno a riposo si legge nel nome accessibile, non piu' in `text()`.
+    assert "Rigenera" in window.btn_regen_3d.accessibleName()
+    assert not window.btn_regen_3d.property("workflow_busy")
     log = window.log_text.toPlainText()
     assert "INTERRUZIONE chiesta dall'utente durante" in log
     assert "Rigenerazione del modello 3D" in log, "il log deve dire a che punto si era"

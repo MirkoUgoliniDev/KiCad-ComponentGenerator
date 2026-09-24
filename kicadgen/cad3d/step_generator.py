@@ -21,7 +21,7 @@ from typing import Optional
 
 from ..generators.castellated_module import (
     CONTACT_HALF_AND_THROUGH, CONTACT_THROUGH_HOLE, EDGE_LABELS, CastellatedModuleParams,
-    pad_positions,
+    continuous_pad, pad_positions,
 )
 from ..generators.pin_header import PinHeaderParams, pin_positions
 from .annotations import EdgeFilletAnnotation, FaceTextAnnotation
@@ -304,7 +304,12 @@ def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: 
           the contact, a `through_hole` entry {x, y, radius, pad_diameter_mm}
           so the script plates it with a barrel and a ring on both faces. The
           entry is new: without it the hole was cut but never plated, and it
-          rendered as a small dark dot instead of a gold ring;
+          rendered as a small dark dot instead of a gold ring. The contact
+          also carries `stadium` {length_mm, width_mm}: ONE continuous gold
+          pad per face, from the board edge inward to length_mm, width_mm
+          wide (the same continuous_pad the footprint draws), which replaces
+          the rectangular edge pads and the separate rings -- so there is no
+          bare board between the half-hole and the through-hole;
         * through_hole -- NO edge notch (the board edge stays straight), the
           through-hole's notch, and a contact with edge="through" and
           board_edge set to the side, so the script builds barrel and rings
@@ -370,6 +375,7 @@ def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: 
                 "pad_length_mm": inner_len, "pad_width_mm": pad_w,
                 "color_hex": pin_color_hex,
             }
+            copper_reach = params.pad_length
             if placement.style == CONTACT_HALF_AND_THROUGH and params.has_thru_holes:
                 # Il foro intero non tocca il bordo: e' l'altra meta' del
                 # contatto, quella in cui si salda uno strip. Va tagliato E
@@ -380,8 +386,21 @@ def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: 
                     "x": hole_x, "y": hole_y, "radius": drill_radius,
                     "pad_diameter_mm": params.thru_pad_diameter,
                 }
+                # Rame continuo dal bordo fino oltre la corona, come sulla
+                # scheda reale: sostituisce piazzola di bordo e corone.
+                # Stesse quote della piazzola del footprint (continuous_pad),
+                # misurate dal bordo verso l'interno: il modulo non ha rame
+                # oltre il proprio bordo, lo sbalzo e' della scheda madre.
+                land = continuous_pad(params, placement)
+                contact["stadium"] = {"length_mm": land.inner_reach, "width_mm": land.across}
+                inward = {"left": (1, 0), "right": (-1, 0), "top": (0, 1), "bottom": (0, -1)}[placement.edge]
+                edge_x = centre[0] - inward[0] * inset
+                edge_y = centre[1] - inward[1] * inset
+                depth = max(inner_len, land.inner_reach) + label_gap
+                label = (edge_x + inward[0] * depth, edge_y + inward[1] * depth)
+                copper_reach = max(params.pad_length, land.inner_reach)
             contacts.append(contact)
-            reach[axis] = max(reach[axis], params.pad_length + 1.6)
+            reach[axis] = max(reach[axis], copper_reach + 1.6)
         text = params.silk_labels.get(placement.number, "").strip()
         if text and params.show_silk_labels_3d:
             silk_texts.append({
@@ -448,7 +467,9 @@ def generate_castellated_3d_model(
     * i **contatti**: foro metallizzato (manicotto) piu' la piazzola dorata
       sulla faccia superiore e inferiore, cosi' si vedono da entrambi i lati;
       il foro passante e' metallizzato allo stesso modo, con una corona su
-      entrambe le facce (vedi castellated_contact_payload);
+      entrambe le facce; un contatto half_and_through e' UNA piazzola dorata
+      continua dal bordo fino oltre la corona, come sulla scheda reale (vedi
+      castellated_contact_payload);
     * la **serigrafia**: sigla accanto a ogni contatto (da `silk_labels`) e
       cornice del bordo;
     * i **componenti** letti dalla foto, ognuno con la forma del suo tipo

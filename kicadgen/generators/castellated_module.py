@@ -29,7 +29,12 @@ Convenzioni geometriche:
 * ogni pad e' lungo `pad_length` in direzione perpendicolare al bordo e
   largo `pad_width` lungo il bordo, e sporge di `pad_overhang` oltre il
   bordo del modulo, cosi' che il menisco di saldatura resti ispezionabile
-  a modulo montato.
+  a modulo montato;
+* un contatto half_and_through con foro passante dichiarato non ha due
+  piazzole ma UNA sola, continua, a stadio (`continuous_pad`): dallo stesso
+  sbalzo esterno fino oltre la corona del foro, con il foro decentrato al suo
+  interno. E' quello che mostra la foto di una scheda reale (decisione
+  dell'utente del 2026-09-23) ed e' la stessa forma che il 3D disegna.
 """
 
 from __future__ import annotations
@@ -39,6 +44,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Iterator, List, NamedTuple, Optional, Sequence
 
 from ..core.footprint import Footprint, FpCircle, FpRect, FpText, Pad
+from ..core.sexpr import SExpr, sx
 
 #: Parete di rame minima fra il semi-foro sul bordo e il foro passante. Due
 #: cilindri passanti sottratti allo stesso solido restano distinti solo se la
@@ -59,7 +65,10 @@ CONTACT_HALF_HOLE = "half_hole"
 #: E' il caso delle schede di sviluppo con gli strip a passo 2.54.
 CONTACT_THROUGH_HOLE = "through_hole"
 #: Entrambe le feature sullo stesso contatto: il semi-foro sul bordo e un foro
-#: passante poco piu' dentro. E' il comportamento storico del generatore.
+#: passante poco piu' dentro, uniti da UNA piazzola di rame continua a stadio
+#: (come nelle schede reali: il rame parte dal bordo, dove si apre il
+#: semi-foro, e prosegue senza interruzioni fino oltre la corona del foro).
+#: E' il comportamento predefinito del generatore.
 CONTACT_HALF_AND_THROUGH = "half_and_through"
 #: Valori ammessi per `CastellatedSide.contact_style`. Quale sia quello giusto
 #: si vede nella fotografia (il bordo taglia il foro oppure no) e va chiesto al
@@ -184,6 +193,127 @@ class PadPlacement(NamedTuple):
     # sono il diametro della corona, perche' e' l'unica piazzola che il pezzo
     # offre; per gli altri due e' la piazzola rettangolare di bordo di sempre.
     style: str = CONTACT_HALF_AND_THROUGH
+
+
+#: Versore verso l'interno del corpo per ogni lato, in coordinate footprint
+#: (Y verso il basso): il lato "top" sta a Y negativo, quindi entra verso +Y.
+INWARD_FOOTPRINT = {"left": (1.0, 0.0), "right": (-1.0, 0.0), "top": (0.0, 1.0), "bottom": (0.0, -1.0)}
+
+
+def _clean(value: float) -> float:
+    """Round float noise away and turn -0.0 into 0.0, so S-expressions stay stable."""
+    return round(float(value), 6) + 0.0
+
+
+class ContactPad(NamedTuple):
+    """@brief The ONE continuous copper land of a half_and_through contact.
+
+    A stadium (KiCad "oval") whose long axis is perpendicular to the board
+    edge: it starts at the outer end of the edge land (pad_overhang beyond the
+    edge, where the solder fillet of the castellation is inspected) and runs
+    inward, past the ring of the through-hole, without interruption. All
+    values are in mm, footprint coordinates (origin at the body centre, Y down).
+
+    @note The drill is NOT at the stadium centre: it sits where
+        CastellatedModuleParams.thru_hole_centre puts it, so the footprint pad
+        carries it as a KiCad drill offset (see `drill_offset`).
+    """
+
+    number: str
+    edge: str
+    #: Centre of the stadium (the KiCad pad `at`).
+    x: float
+    y: float
+    #: Oriented size along X and Y (the KiCad pad `size`, no rotation).
+    width: float
+    height: float
+    #: Through-hole drill diameter and its absolute centre.
+    drill: float
+    drill_x: float
+    drill_y: float
+    #: Centre (inside the board) and diameter of the plated half-hole at the edge.
+    half_hole_x: float
+    half_hole_y: float
+    half_hole_diameter: float
+    #: Distance from the board edge of the inner (rounded) end, measured inward.
+    inner_reach: float
+    #: Distance of the outer end beyond the board edge (= pad_overhang).
+    outer_reach: float
+    #: Stadium width, measured along the edge (the diameter of its round ends).
+    across: float
+
+    @property
+    def drill_offset(self) -> tuple:
+        """@brief Drill centre relative to the pad centre, in mm (KiCad `(drill D (offset dx dy))`).
+
+        @return (dx, dy) in footprint coordinates; the pad is never rotated,
+            so pad-local and footprint axes coincide.
+        """
+        return (_clean(self.drill_x - self.x), _clean(self.drill_y - self.y))
+
+    @property
+    def length(self) -> float:
+        """@brief Stadium length perpendicular to the edge, in mm (outer_reach + inner_reach)."""
+        return self.outer_reach + self.inner_reach
+
+    def axis(self) -> tuple:
+        """@brief Segment joining the centres of the two round ends.
+
+        @return ((x0, y0), (x1, y1)) in mm, outer end first. A point belongs to
+            the stadium when its distance from this segment is <= across / 2.
+        """
+        nx, ny = INWARD_FOOTPRINT[self.edge]
+        half = max(self.length / 2 - self.across / 2, 0.0)
+        return ((self.x - nx * half, self.y - ny * half), (self.x + nx * half, self.y + ny * half))
+
+    def contains(self, px: float, py: float, tolerance: float = 1e-9) -> bool:
+        """@brief Tell whether a point lies on the copper of this stadium.
+
+        @param px Point X, mm (footprint coordinates).
+        @param py Point Y, mm.
+        @param tolerance Numeric slack, mm.
+        @return True when the distance from the stadium axis is <= across / 2.
+        """
+        (ax, ay), (bx, by) = self.axis()
+        return _point_segment_distance(px, py, ax, ay, bx, by) <= self.across / 2 + tolerance
+
+
+def _point_segment_distance(px, py, ax, ay, bx, by) -> float:
+    """Euclidean distance from point P to segment AB, in mm."""
+    dx, dy = bx - ax, by - ay
+    length_sq = dx * dx + dy * dy
+    t = 0.0 if length_sq == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length_sq))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+class OffsetDrillPad(Pad):
+    """@brief A KiCad pad whose drill sits off the pad centre.
+
+    KiCad writes it as `(drill D (offset dx dy))`, dx/dy in mm in pad-local
+    axes; it is how a single plated pad can carry one hole away from the
+    middle of its copper (KiCad 6 and later, unchanged in the 8/9/10 formats).
+    Kept here rather than in core.footprint so that every other generator's
+    output stays byte-identical.
+    """
+
+    def __init__(self, *args, drill_offset=(0.0, 0.0), **kwargs):
+        """@brief Build the pad.
+
+        @param drill_offset (dx, dy) of the drill from the pad centre, mm.
+        @param args Forwarded to Pad.
+        @param kwargs Forwarded to Pad.
+        """
+        super().__init__(*args, **kwargs)
+        self.drill_offset = (_clean(drill_offset[0]), _clean(drill_offset[1]))
+
+    def to_sexpr(self) -> SExpr:
+        """@brief Serialize like Pad, adding `(offset dx dy)` inside `(drill ...)` when non-zero."""
+        node = super().to_sexpr()
+        if self.drill_offset != (0.0, 0.0):
+            for child in node.args:
+                if isinstance(child, SExpr) and child.name == "drill":
+                    child.add(sx("offset", *self.drill_offset))
+        return node
 
 
 @dataclass
@@ -577,6 +707,18 @@ class CastellatedModuleParams:
                         f"Lato {label}: passo {side.pitch}mm minore della larghezza pad "
                         f"{pad_width}mm -- i pad si sovrapporrebbero."
                     )
+                if has_continuous_pad(self, side.contact_style):
+                    # La piazzola continua contiene anche la corona del foro:
+                    # e' larga quanto la maggiore delle due, e il passo deve
+                    # lasciarle separate.
+                    land = continuous_pad_across(self, pad_width)
+                    if side.count > 1 and side.pitch < land:
+                        raise ValueError(
+                            f"Lato {label}: passo {side.pitch}mm minore della larghezza "
+                            f"della piazzola continua {land}mm (la maggiore fra pad "
+                            f"{pad_width}mm e corona {self.thru_pad_diameter}mm) -- i pad "
+                            "si sovrapporrebbero."
+                        )
 
             span = (side.count - 1) * side.pitch + land
             available = self.edge_length(side.edge)
@@ -599,6 +741,41 @@ class CastellatedModuleParams:
                     )
                 seen_numbers[number] = label
 
+        self._validate_continuous_pad_clearance()
+
+    def _validate_continuous_pad_clearance(self) -> None:
+        """Refuse a continuous pad that reaches the copper of another contact.
+
+        A half_and_through pad runs from the edge to beyond its through-hole
+        however far in that hole is (see continuous_pad): the only limit is
+        physical -- two different pins must not share copper. Checked against
+        every other contact (other sides included, e.g. near a corner, or the
+        facing row of a narrow body), and only for pairs involving a continuous
+        pad, so half_hole and through_hole modules accept exactly what they
+        accepted before. Copper that merely touches is accepted, as the
+        pitch == pad width case always was.
+        """
+        placements = list(pad_positions(self))
+        outlines = [(placement, _copper_outline(self, placement)) for placement in placements]
+        for i, (first, a) in enumerate(outlines):
+            for second, b in outlines[i + 1:]:
+                if not (has_continuous_pad(self, first.style) or has_continuous_pad(self, second.style)):
+                    continue
+                if first.number == second.number:
+                    continue
+                if _box_distance(a, b) < a[4] + b[4] - 1e-9:
+                    stadium = first if has_continuous_pad(self, first.style) else second
+                    pad = continuous_pad(self, stadium)
+                    raise ValueError(
+                        f"La piazzola continua del contatto {stadium.number} (lato "
+                        f"{EDGE_LABELS.get(stadium.edge, stadium.edge)}), che dal bordo arriva "
+                        f"{pad.inner_reach:.2f}mm dentro il corpo fino oltre il foro passante, "
+                        f"tocca il rame del contatto "
+                        f"{second.number if stadium is first else first.number} (lato "
+                        f"{EDGE_LABELS.get((second if stadium is first else first).edge, '')}): "
+                        "due pin diversi sarebbero in corto. Avvicina il foro passante al "
+                        "bordo, accorcia la piazzola o riduci la corona."
+                    )
 
     def _validate_through_hole_sides(self) -> None:
         """Checks for sides whose only feature is a full through-hole."""
@@ -675,6 +852,10 @@ def pad_positions(params: CastellatedModuleParams) -> Iterator[PadPlacement]:
         half_hole and half_and_through, the annular ring of the through-hole
         (centre at through_hole_inset, size = ring diameter) for through_hole,
         because that ring is the only land such a part offers.
+    @note For half_and_through with a declared through-hole the edge pad
+        yielded here is the REFERENCE the continuous copper is built from
+        (same outer end, same along-edge position): the copper actually drawn
+        is continuous_pad(params, placement), which replaces it.
     """
     half_length = params.body_length / 2
     half_width = params.body_width / 2
@@ -709,19 +890,163 @@ def pad_positions(params: CastellatedModuleParams) -> Iterator[PadPlacement]:
                 yield PadPlacement(number, along, center_offset, pad_width, pad_length, side.edge, style)
 
 
+def has_continuous_pad(params: CastellatedModuleParams, style: str) -> bool:
+    """@brief Tell whether contacts of `style` are drawn as one continuous stadium pad.
+
+    @param params Module description.
+    @param style One of CONTACT_STYLES.
+    @return True for CONTACT_HALF_AND_THROUGH when the module declares a closed
+        through-hole (params.has_thru_holes). With a zero drill such a side is
+        "half-holes only" and keeps its historical rectangular edge land.
+    """
+    return style == CONTACT_HALF_AND_THROUGH and params.has_thru_holes
+
+
+def continuous_pad_across(params: CastellatedModuleParams, land_width: float) -> float:
+    """@brief Width (along the edge) of the continuous pad of a half_and_through contact, mm.
+
+    @param params Module description (for the through-hole ring diameter).
+    @param land_width Declared width of the edge land (side pad_width), mm.
+    @return max(land_width, thru_pad_diameter).
+    @note Not a tuned value: the copper must contain BOTH declared lands, the
+        edge land (land_width wide) and the full annular ring of the
+        through-hole (thru_pad_diameter), so the narrowest stadium doing so is
+        as wide as the larger of the two. This keeps the declared annular ring
+        (thru_pad_diameter - drill) / 2 all around the drill.
+    """
+    return max(land_width, params.thru_pad_diameter)
+
+
+def continuous_pad(params: CastellatedModuleParams, placement: PadPlacement) -> Optional[ContactPad]:
+    """@brief The single continuous copper land of a half_and_through contact.
+
+    @param params Module description.
+    @param placement The contact's edge land, from pad_positions().
+    @return ContactPad, or None when the contact is not drawn as one
+        continuous pad (see has_continuous_pad): half_hole and through_hole
+        contacts, and half_and_through ones without a declared through-hole,
+        keep exactly their historical lands.
+    @note Rule (user decision 2026-09-23, from the photo of a real board:
+        each contact is ONE elongated gold pad, no bare board between the
+        castellation and the through-hole). Every dimension comes from declared
+        parameters:
+        * outer end: pad_overhang beyond the board edge, like the edge land;
+        * inner end: the farthest of the edge land's inner end
+          (pad_length - pad_overhang) and the far side of the through-hole
+          ring (thru_hole_centre_offset + thru_pad_diameter / 2);
+        * width: continuous_pad_across();
+        * geometric floor: a stadium is never shorter than it is wide (else
+          its round ends would turn along the edge), and its inner end is at
+          least half a width inside the edge (else the 3D copper, which starts
+          at the edge, would have no room for its round end). Both only
+          lengthen the pad inward, never move the outer end.
+        However far the through-hole sits, the pad stays continuous: that is
+        what the style declares physically. The limits are physical and are
+        enforced by validate(): the pad must not reach another contact's copper.
+    """
+    if not has_continuous_pad(params, placement.style):
+        return None
+    vertical_edge = placement.edge in ("left", "right")
+    land_length = placement.width if vertical_edge else placement.height
+    land_width = placement.height if vertical_edge else placement.width
+    across = continuous_pad_across(params, land_width)
+    overhang = params.pad_overhang
+    inner = max(land_length - overhang,
+                params.thru_hole_centre_offset + params.thru_pad_diameter / 2,
+                across - overhang,
+                across / 2)
+    length = overhang + inner
+    nx, ny = INWARD_FOOTPRINT[placement.edge]
+    # Punto del bordo sull'asse del contatto: da li' si misura tutto.
+    if placement.edge == "left":
+        edge_x, edge_y = -params.body_length / 2, placement.y
+    elif placement.edge == "right":
+        edge_x, edge_y = params.body_length / 2, placement.y
+    elif placement.edge == "top":
+        edge_x, edge_y = placement.x, -params.body_width / 2
+    else:
+        edge_x, edge_y = placement.x, params.body_width / 2
+    centre_depth = (inner - overhang) / 2
+    drill_x, drill_y = params.thru_hole_centre(placement)
+    size = (length, across) if vertical_edge else (across, length)
+    return ContactPad(
+        number=placement.number, edge=placement.edge,
+        x=_clean(edge_x + nx * centre_depth), y=_clean(edge_y + ny * centre_depth),
+        width=_clean(size[0]), height=_clean(size[1]),
+        drill=params.thru_hole_drill, drill_x=_clean(drill_x), drill_y=_clean(drill_y),
+        half_hole_x=_clean(edge_x + nx * params.half_hole_inset),
+        half_hole_y=_clean(edge_y + ny * params.half_hole_inset),
+        half_hole_diameter=params.hole_diameter,
+        inner_reach=_clean(inner), outer_reach=_clean(overhang), across=_clean(across),
+    )
+
+
+def continuous_pads(params: CastellatedModuleParams) -> Iterator[ContactPad]:
+    """@brief Yield the continuous pad of every contact that has one, in pad_positions() order.
+
+    @param params Module description.
+    @return Iterator of ContactPad (half_and_through contacts with a through-hole only).
+    @note The GUI preview can draw each one as a rounded rectangle of size
+        (width, height) centred at (x, y) with corner radius across / 2, plus
+        the drill circle at (drill_x, drill_y); the edge land of the same
+        number from pad_positions() is then entirely replaced by it.
+    """
+    for placement in pad_positions(params):
+        pad = continuous_pad(params, placement)
+        if pad is not None:
+            yield pad
+
+
+def _copper_outline(params: CastellatedModuleParams, placement: PadPlacement) -> tuple:
+    """Copper of one contact as (core box x0, y0, x1, y1, radius), footprint mm.
+
+    The copper is the set of points within `radius` of the (possibly
+    degenerate) axis-aligned core box: a stadium is its axis segment with
+    radius across/2, a ring is its centre with radius ring/2, a rectangular
+    edge land is its own box with radius 0 (a conservative bound for a
+    roundrect).
+    """
+    pad = continuous_pad(params, placement)
+    if pad is not None:
+        (ax, ay), (bx, by) = pad.axis()
+        return (min(ax, bx), min(ay, by), max(ax, bx), max(ay, by), pad.across / 2)
+    if placement.style == CONTACT_THROUGH_HOLE:
+        return (placement.x, placement.y, placement.x, placement.y, params.thru_pad_diameter / 2)
+    return (placement.x - placement.width / 2, placement.y - placement.height / 2,
+            placement.x + placement.width / 2, placement.y + placement.height / 2, 0.0)
+
+
+def _box_distance(a: tuple, b: tuple) -> float:
+    """Distance between two axis-aligned boxes (x0, y0, x1, y1, ...), mm; 0 when they meet."""
+    dx = max(0.0, a[0] - b[2], b[0] - a[2])
+    dy = max(0.0, a[1] - b[3], b[1] - a[3])
+    return math.hypot(dx, dy)
+
+
 def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
     """@brief Build the KiCad footprint of the module described by `params`.
 
     @param params Module description; validated first.
     @return Footprint with, per contact, exactly the lands the part offers:
-        an SMD edge pad for half_hole, an SMD edge pad plus a THT pad for
-        half_and_through (as before), a THT pad only for through_hole.
+        an SMD edge pad for half_hole; for half_and_through ONE plated pad
+        whose copper is a stadium ("oval") running from the outer end of the
+        edge land to beyond the through-hole ring, with the drill offset inside
+        it (see continuous_pad), or the SMD edge pad alone when no
+        through-hole is declared; a THT pad only for through_hole.
     @throws ValueError When `params` does not validate.
     @note A through_hole side emits no edge pad: a board without
         castellations cannot be reflowed onto edge pads, so such a footprint
-        could not be soldered to the part. The footprint attribute follows the
-        lands: "smd" when any SMD pad exists (unchanged for existing modules),
+        could not be soldered to the part. The footprint attribute stays
+        "smd" whenever some side has castellations (the module is reflowed),
         "through_hole" when every contact is a through-hole.
+    @note The continuous pad carries F.Paste so the castellations can still be
+        reflowed (the old SMD edge pad carried it). KiCad applies the paste to
+        the whole copper, drill mouth included: pin-in-paste, which also fills
+        the module's through-hole above. It carries no `pad_prop_castellated`:
+        this footprint is the land on the HOST board, which is not cut by any
+        board edge; the castellation belongs to the module and is in the 3D.
+    @note half_hole and through_hole contacts are emitted exactly as before
+        (byte-identical output).
     """
     params.validate()
 
@@ -752,10 +1077,14 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
         ))
 
     placements = list(pad_positions(params))
+    # Piazzola continua (half_and_through con foro): sostituisce sia la
+    # piazzola di bordo sia la corona separata dello stesso contatto.
+    stadiums = [continuous_pad(params, placement) for placement in placements]
 
     # Courtyard: ingombro reale, corpo piu' i pad che sporgono dal bordo.
-    extent_x = max([half_length] + [abs(p.x) + p.width / 2 for p in placements])
-    extent_y = max([half_width] + [abs(p.y) + p.height / 2 for p in placements])
+    lands = placements + [pad for pad in stadiums if pad is not None]
+    extent_x = max([half_length] + [abs(p.x) + p.width / 2 for p in lands])
+    extent_y = max([half_width] + [abs(p.y) + p.height / 2 for p in lands])
     fp.add_graphic(FpRect(
         start=(-extent_x - params.margin, -extent_y - params.margin),
         end=(extent_x + params.margin, extent_y + params.margin),
@@ -769,8 +1098,21 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
     fp.add_graphic(FpText(kind="user", text="${REFERENCE}", at=(0, 0), layer="F.Fab"))
 
     first_number = placements[0].number if placements else None
-    for placement in placements:
-        if placement.style != CONTACT_THROUGH_HOLE:
+    for placement, stadium in zip(placements, stadiums):
+        if stadium is not None:
+            # UN solo pad per contatto, come sulla scheda reale: rame continuo
+            # dal bordo fino oltre la corona, foro passante decentrato dentro.
+            fp.add_pad(OffsetDrillPad(
+                number=placement.number,
+                pad_type="thru_hole",
+                shape="oval",
+                at=(stadium.x, stadium.y),
+                size=(stadium.width, stadium.height),
+                layers=["*.Cu", "*.Mask", "F.Paste"],
+                drill=params.thru_hole_drill,
+                drill_offset=stadium.drill_offset,
+            ))
+        elif placement.style != CONTACT_THROUGH_HOLE:
             fp.add_pad(Pad(
                 number=placement.number,
                 pad_type="smd",
@@ -780,10 +1122,7 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
                 layers=["F.Cu", "F.Paste", "F.Mask"],
                 roundrect_rratio=0.25,
             ))
-        if placement.style == CONTACT_THROUGH_HOLE or (
-                placement.style == CONTACT_HALF_AND_THROUGH and params.has_thru_holes):
-            # Stesso numero del pad SMD: sono due appigli dello stesso
-            # contatto, non due contatti. KiCad li tratta come una sola rete.
+        if placement.style == CONTACT_THROUGH_HOLE:
             fp.add_pad(Pad(
                 number=placement.number,
                 pad_type="thru_hole",
@@ -796,10 +1135,15 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
         if placement.number == first_number:
             # Marcatore del pin 1, affiancato al suo pad lungo il bordo
             # (non verso l'esterno, dove finirebbe sotto il pad stesso).
+            # Distanza misurata dal rame vero: la piazzola continua puo'
+            # essere piu' larga della piazzola di bordo (contiene la corona).
+            half_along = (stadium.across / 2 if stadium is not None
+                          else (placement.height if placement.edge in ("left", "right")
+                                else placement.width) / 2)
             if placement.edge in ("left", "right"):
-                center = (placement.x, placement.y - placement.height / 2 - 0.5)
+                center = (placement.x, placement.y - half_along - 0.5)
             else:
-                center = (placement.x - placement.width / 2 - 0.5, placement.y)
+                center = (placement.x - half_along - 0.5, placement.y)
             fp.add_graphic(FpCircle(
                 center=center, radius=0.25, layer="F.SilkS", fill=True,
             ))
@@ -811,7 +1155,12 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
         label = params.silk_labels.get(placement.number, "").strip()
         if label:
             gap = 0.6
-            if placement.edge == "left":
+            if stadium is not None:
+                # Oltre la fine interna del rame continuo, non sopra di esso.
+                nx, ny = INWARD_FOOTPRINT[placement.edge]
+                reach = (stadium.length / 2 + gap)
+                label_at = (_clean(stadium.x + nx * reach), _clean(stadium.y + ny * reach))
+            elif placement.edge == "left":
                 label_at = (placement.x + placement.width / 2 + gap, placement.y)
             elif placement.edge == "right":
                 label_at = (placement.x - placement.width / 2 - gap, placement.y)

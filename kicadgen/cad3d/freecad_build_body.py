@@ -472,22 +472,32 @@ def _contact_features(contact, bounds, plating, pad_t):
     @param plating Barrel wall thickness, mm.
     @param pad_t Pad/ring thickness, mm.
     @return Dict with `tubes` (barrels and rings), `boxes` (rectangular edge
-        pads {x0, y0, x1, y1, z0, z1}), `bores` (x, y, r) every box is cut by
-        so no pad covers a hole, `drills` (x, y, r) to remove from the board
-        before it is sliced, and `label` [x, y, z] where the GUI writes the
-        contact number.
+        pads {x0, y0, x1, y1, z0, z1}), `stadiums` (continuous pads, see
+        below), `bores` (x, y, r) every box and stadium is cut by so no pad
+        covers a hole, `drills` (x, y, r) to remove from the board before it
+        is sliced, and `label` [x, y, z] where the GUI writes the contact
+        number.
     @throws ValueError On a through-hole whose ring is not wider than its bore.
     @note Everything belongs to ONE contact and becomes one solid named after
         its number: a half_and_through contact is one net with two features,
         not two contacts. Kept free of FreeCAD so the geometry handed to it
         can be tested with plain Python.
+    @note A contact carrying `stadium` {length_mm, width_mm} gets ONE
+        continuous gold pad per face instead of the rectangular edge pad and
+        the two rings of its through-hole: spec {x, y, nx, ny, length, r, z0,
+        z1} = starting on the board edge at (x, y), running inward along
+        (nx, ny) for `length`, 2 * r wide, with a round inner end of radius r
+        (a stadium whose outer half-disc is cut away by the board edge). The
+        through-hole keeps only its barrel: its rings would lie inside the
+        stadium, on the same faces, and two coincident gold faces flicker.
     """
     x0, y0, x1, y1, z1 = bounds
     cx, cy, radius = float(contact["x"]), float(contact["y"]), float(contact["radius"])
     edge = contact.get("edge")
     pad_len = float(contact.get("pad_length_mm", 2.4))
     pad_w = float(contact.get("pad_width_mm", 1.8))
-    tubes, boxes, bores, drills = [], [], [], []
+    tubes, boxes, bores, drills, stadiums = [], [], [], [], []
+    stadium = contact.get("stadium")
     if edge == "through":
         # Through contacts use an observed circular land diameter,
         # independent of board-edge orientation or pad length.
@@ -509,7 +519,7 @@ def _contact_features(contact, bounds, plating, pad_t):
                           z0=0.0, z1=z1, clip=True))
         drills.append((cx, cy, radius + plating))
         bores.append((cx, cy, radius))
-        for z in (z1, -pad_t):
+        for z in ((z1, -pad_t) if not isinstance(stadium, dict) else ()):
             if edge in ("left", "right"):
                 px = x0 + pad_len / 2 if edge == "left" else x1 - pad_len / 2
                 boxes.append(dict(x0=px - pad_len / 2, y0=cy - pad_w / 2,
@@ -526,11 +536,29 @@ def _contact_features(contact, bounds, plating, pad_t):
             tr = float(through["radius"])
             found, holes = _through_features(tx, ty, tr, float(through["pad_diameter_mm"]),
                                              z1, plating, pad_t, clip=False)
+            if isinstance(stadium, dict):
+                # Solo la canna: le corone starebbero dentro la piazzola
+                # continua, sulle stesse facce (vedi @note).
+                found = [t for t in found if t["z0"] == 0.0 and t["z1"] == z1]
             tubes += found
             drills += holes
             # La piazzola di bordo puo' arrivare sopra il foro: va forata
             # anche li', o coprirebbe la bocca del foro passante.
             bores.append((tx, ty, tr))
+        if isinstance(stadium, dict):
+            # Un'unica piazzola dorata dal bordo fino oltre la corona, su
+            # entrambe le facce: niente scheda scoperta fra semi-foro e foro.
+            nx, ny = _INWARD[edge]
+            ex = x0 if edge == "left" else x1 if edge == "right" else cx
+            ey = y0 if edge == "top" else y1 if edge == "bottom" else cy
+            s_len = float(stadium["length_mm"])
+            s_r = float(stadium["width_mm"]) / 2
+            if s_len < s_r:
+                raise ValueError("stadium shorter than its round end")
+            for z in (z1, -pad_t):
+                stadiums.append(dict(x=ex, y=ey, nx=nx, ny=ny, length=s_len, r=s_r,
+                                     z0=z, z1=z + pad_t))
+            pad_len = max(pad_len, s_len)
         # Il numero va oltre la fine della piazzola, non a distanza fissa
         # dal foro: le piazzole possono avere lunghezze diverse per lato.
         clearance = pad_len + 0.8
@@ -542,8 +570,8 @@ def _contact_features(contact, bounds, plating, pad_t):
             label = [cx, y0 + clearance]
         else:
             label = [cx, y1 - clearance]
-    return {"tubes": tubes, "boxes": boxes, "bores": bores, "drills": drills,
-            "label": [label[0], label[1], -pad_t]}
+    return {"tubes": tubes, "boxes": boxes, "stadiums": stadiums, "bores": bores,
+            "drills": drills, "label": [label[0], label[1], -pad_t]}
 
 
 def _covered_by_drill(notch, drills):
@@ -586,7 +614,41 @@ def _contact_shape(features, uncut_body):
                                             FreeCAD.Vector(bx, by, spec["z0"] - 1.0),
                                             FreeCAD.Vector(0, 0, 1)))
         pieces.append(box)
+    for spec in features.get("stadiums", []):
+        pad = _stadium_solid(spec)
+        for bx, by, br in features["bores"]:
+            pad = pad.cut(Part.makeCylinder(br, spec["z1"] - spec["z0"] + 2.0,
+                                            FreeCAD.Vector(bx, by, spec["z0"] - 1.0),
+                                            FreeCAD.Vector(0, 0, 1)))
+        pieces.append(pad)
     return Part.makeCompound([piece for piece in pieces if piece.Volume > 0])
+
+
+def _stadium_solid(spec):
+    """Extrude one continuous pad spec from _contact_features into a FreeCAD solid.
+
+    Outline: straight sides from the board edge to the centre of the round
+    end, then a half-circle of radius r; the edge side is a straight line, so
+    the pad ends exactly on the board edge where the half-hole opens.
+    """
+    ex, ey, nx, ny = spec["x"], spec["y"], spec["nx"], spec["ny"]
+    r, length, z = spec["r"], spec["length"], spec["z0"]
+    tx, ty = -ny, nx
+    reach = length - r
+
+    def point(along_n, along_t):
+        return FreeCAD.Vector(ex + nx * along_n + tx * along_t,
+                              ey + ny * along_n + ty * along_t, z)
+
+    edges = []
+    if reach > 1e-9:
+        edges.append(Part.LineSegment(point(0.0, r), point(reach, r)).toShape())
+    edges.append(Part.Arc(point(reach, r), point(length, 0.0), point(reach, -r)).toShape())
+    if reach > 1e-9:
+        edges.append(Part.LineSegment(point(reach, -r), point(0.0, -r)).toShape())
+    edges.append(Part.LineSegment(point(0.0, -r), point(0.0, r)).toShape())
+    face = Part.Face(Part.Wire(edges))
+    return face.extrude(FreeCAD.Vector(0, 0, spec["z1"] - spec["z0"]))
 
 
 def _long_path(path):

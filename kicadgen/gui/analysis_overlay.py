@@ -1,10 +1,12 @@
 """Non-blocking progress overlay: which tool is working, real progress only."""
+import html
 import math
 import re
 from time import monotonic
 
 from PyQt6.QtCore import QEvent, QPointF, QRect, QRectF, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPalette, QPen
+from PyQt6.QtGui import (QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPalette,
+                         QPen, QTextDocument)
 from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton,
                              QVBoxLayout, QWidget)
 
@@ -194,6 +196,29 @@ _STATUS_CHAR_LIMIT = 220
 #: elenchi, non una regola sul messaggio dei documenti.
 _LIST_SEPARATOR = " · "
 
+#: Separatore fra il TERMINE di una voce e la sua descrizione: «pinout.png —
+#: Pinout / disposizione contatti». E' la convenzione tipografica della voce di
+#: un elenco di definizioni (termine, lineetta, spiegazione), e la scheda la
+#: rende come tale: il termine in grassetto, la lineetta spaziata che lo stacca
+#: dal resto. Richiesta dell'utente: «i nomi dei file non sono evidenziati,
+#: troppo attaccati al testo».
+#:
+#: Regola sulla FORMA, come le due precedenti: non guarda se il termine
+#: "sembra" un nome di file (un nome puo' avere spazi, nessuna estensione,
+#: maiuscole e underscore), guarda solo se la voce DICHIARA un termine con
+#: questo segno. La sorgente dei documenti lo scrive apposta
+#: (`datasheet_extractor._files_sent_message`); una voce che non lo porta -- i
+#: motivi di un inventario parziale, «component J2: …» -- resta testo semplice.
+#:
+#: SEPARAZIONE DICHIARATA FRAGILE: il segno non e' riservato. Un nome di file
+#: che contenga esso stesso " — " verrebbe diviso li' (grassetto solo sulla
+#: prima parte; il testo resta tutto, cambia solo il peso), e un testo altrui
+#: interpolato in una voce (l'errore di un'API) che lo contenga avrebbe la
+#: prima parte in grassetto. Si divide sulla PRIMA occorrenza perche' il
+#: termine sta in testa per definizione. Diventerebbe superflua se lo stato
+#: arrivasse alla scheda come dato strutturato invece che come stringa.
+_TERM_SEPARATOR = " — "
+
 #: Righe di testo riservate allo stato. La scheda e' dimensionata su questo
 #: numero, non sulla frase che passa in quel momento: una scheda che cambia
 #: altezza a ogni messaggio e' piu' fastidiosa di una scheda un po' piu' alta.
@@ -290,6 +315,108 @@ def enumeration_lines(text):
     items = [item.strip().strip("·").strip() for item in tail.split(_LIST_SEPARATOR)]
     items = [item for item in items if item]
     return [f"{head}:"] + items if len(items) > 1 else None
+
+
+def enumeration_term(item):
+    """@brief Split one enumeration item into its declared term and description.
+
+    @param item One item line, as `enumeration_lines` returns it (lead-in
+        excluded: the lead-in announces the list, it is not a term).
+    @return (term, description) when the item declares a term with
+        `_TERM_SEPARATOR` and both sides carry text; None otherwise, and the
+        item is then shown as plain text.
+    @note The rule is on the separator only, never on what the term looks
+        like: a file name may have spaces, no extension or UPPER_SNAKE words,
+        and a shape test would highlight some documents of a list and not the
+        others. See `_TERM_SEPARATOR` for the declared fragility.
+    """
+    term, separator, description = str(item or "").partition(_TERM_SEPARATOR)
+    term, description = term.strip(), description.strip()
+    if not separator or not term or not description:
+        return None
+    return term, description
+
+
+def _elide_row(line, width, regular, bold, is_item):
+    """Accorcia UNA riga dell'elenco alla larghezza vera, sul testo semplice.
+
+    Restituisce (termine, testo): il termine e' None per le righe senza
+    termine dichiarato. Si accorcia PRIMA di costruire il markup, cosi' il taglio
+    non puo' cadere dentro un tag o dentro un'entita' HTML, e si misura il
+    termine col font in grassetto con cui verra' disegnato: misurato col peso
+    normale, il grassetto sborderebbe di qualche pixel.
+
+    Come `ElideRight` sulla riga intera, si tiene la TESTA: prima si accorcia la
+    descrizione; se non resta posto neppure per l'ellissi dopo il termine, si
+    accorcia il termine stesso e la descrizione sparisce (l'ellissi lo dice).
+    """
+    parts = enumeration_term(line) if is_item else None
+    if parts is None:
+        return None, regular.elidedText(line, Qt.TextElideMode.ElideRight, width)
+    term, description = parts
+    lead = bold.horizontalAdvance(term) + regular.horizontalAdvance(_TERM_SEPARATOR)
+    if lead + regular.horizontalAdvance(description) <= width:
+        return term, description
+    if lead + regular.horizontalAdvance("…") <= width:
+        return term, regular.elidedText(description, Qt.TextElideMode.ElideRight,
+                                        width - lead)
+    return bold.elidedText(term, Qt.TextElideMode.ElideRight, width), ""
+
+
+def _row_width(row, font):
+    """Larghezza di UNA riga come la disegna il documento della label."""
+    document = QTextDocument()
+    document.setDefaultFont(font)
+    document.setDocumentMargin(0)
+    document.setHtml(_enumeration_markup([row]))
+    return document.idealWidth()
+
+
+def _fit_row(line, width, font, is_item):
+    """Accorcia una riga finche' il documento che la disegna sta in `width`.
+
+    Le metriche del font sommate pezzo per pezzo (termine in grassetto, poi il
+    resto) possono differire di una frazione di pixel dal layout del documento,
+    che posiziona i glifi a modo suo. Invece di un margine scelto a occhio si
+    MISURA la riga come verra' disegnata e, se sborda, si riaccorcia togliendo
+    esattamente l'eccesso. Il ciclo e' corto per costruzione: ogni giro riduce
+    lo spazio di almeno un pixel, e l'eccesso e' una frazione di glifo.
+    """
+    regular = QFontMetricsF(font)
+    bold_font = QFont(font)
+    bold_font.setBold(True)
+    bold = QFontMetricsF(bold_font)
+    budget = float(width)
+    row = _elide_row(line, budget, regular, bold, is_item)
+    for _ in range(4):
+        excess = _row_width(row, font) - width
+        if excess <= 0:
+            break
+        budget -= math.ceil(excess)
+        row = _elide_row(line, budget, regular, bold, is_item)
+    return row
+
+
+def _enumeration_markup(rows):
+    """Markup dell'elenco: una riga per voce, termine in grassetto, nulla a capo.
+
+    Tutto cio' che arriva dalle righe e' ESCAPATO: nomi di file e testi altrui
+    sono dati, e un nome come «<b>x</b>.png» deve leggersi com'e', non
+    cambiare il peso del resto. `white-space: pre` vieta l'a capo: ogni riga e'
+    gia' stata accorciata alla larghezza vera, quindi il numero di righe
+    disegnate e' ESATTAMENTE il numero di voci, ed e' su quel numero che la
+    scheda si dimensiona.
+    """
+    shown = []
+    for term, text in rows:
+        if term is None:
+            shown.append(html.escape(text, quote=False))
+            continue
+        row = f"<b>{html.escape(term, quote=False)}</b>"
+        if text:
+            row += html.escape(_TERM_SEPARATOR + text, quote=False)
+        shown.append(row)
+    return '<div style="white-space:pre">' + "<br>".join(shown) + "</div>"
 
 
 def elide_paths(text):
@@ -598,9 +725,18 @@ class AnalysisOverlay(QWidget):
         #: dimensionamento esiste per evitare.
         self._status_base_height = 0
         self._status_extra = 0
+        #: Stato da mostrare, gia' tradotto e coi percorsi accorciati ma NON
+        #: ancora impaginato. Si conserva perche' l'impaginazione dipende dalla
+        #: geometria: se la finestra o il font cambiano mentre un elenco e' sulla
+        #: scheda, l'elenco va riaccorciato e rimisurato sulla larghezza nuova,
+        #: altrimenti le righe accorciate per la larghezza vecchia sbordano.
+        self._status_source = ""
+        # La scheda entra nell'overlay PRIMA di essere misurata: il bordo di 1 px
+        # che il foglio di stile dell'overlay le da' restringe lo spazio del
+        # testo, e una scheda non ancora figlia dell'overlay non lo conosce.
+        outer.addWidget(self.card, alignment=Qt.AlignmentFlag.AlignHCenter)
         self._size_the_card()
         self.status.installEventFilter(self)
-        outer.addWidget(self.card, alignment=Qt.AlignmentFlag.AlignHCenter)
         outer.addStretch()
         self.timer = QTimer(self)
         self.timer.setInterval(40)
@@ -663,10 +799,37 @@ class AnalysisOverlay(QWidget):
         spare = self._available_card_height() - self.card.sizeHint().height()
         return self.status.minimumHeight() + max(0, spare)
 
+    def _status_text_width(self):
+        """@brief Width in pixels the status label really lays its text out in.
+
+        @return Card width minus the card's own contents margins (they include
+            the 1 px style-sheet border of the QFrame), the layout padding, and
+            the label's contents margins and margin.
+        @note CAUSA del difetto «ultima riga tagliata a meta'»: prima si usava
+            `larghezza della scheda - 2 * _CARD_PADDING`, cioe' 2 px in piu'
+            della label vera (il bordo della scheda). Le righe dell'elenco
+            venivano accorciate a QUELLA larghezza, e `elidedText` riempie la
+            riga fino al limite: una riga accorciata cadeva facilmente negli
+            ultimi 2 px, la label vera la mandava a capo, e l'elenco occupava una
+            riga in piu' di quella misurata e riservata. Dove la finestra non
+            concedeva altro spazio, la label restava piu' bassa del suo testo e
+            l'ultima riga si vedeva a meta'. La misura ora e' quella dello spazio
+            in cui il testo viene davvero disegnato.
+        """
+        # Il foglio di stile applica bordo e font solo alla lucidatura: misurare
+        # prima darebbe la larghezza di una scheda senza bordo.
+        self.card.ensurePolished()
+        card = self.card.contentsMargins()
+        padding = self.card.layout().contentsMargins()
+        label = self.status.contentsMargins()
+        return max(1, self.card.minimumWidth()
+                   - card.left() - card.right()
+                   - padding.left() - padding.right()
+                   - label.left() - label.right() - 2 * self.status.margin())
+
     def _status_height(self):
-        """Altezza che il testo attuale dello stato occupa alla larghezza della scheda."""
-        usable = max(1, self.card.minimumWidth() - 2 * _CARD_PADDING)
-        return self.status.heightForWidth(usable)
+        """Altezza che il testo attuale dello stato occupa alla larghezza vera della label."""
+        return self.status.heightForWidth(self._status_text_width())
 
     def _size_the_card(self):
         """@brief Size the card on its content, not on the texts of one run.
@@ -696,6 +859,10 @@ class AnalysisOverlay(QWidget):
         @note L'intestazione dello strumento si accorcia da sola (ElidedLabel),
             quindi una riga le basta a qualunque font e non entra nel conteggio.
         """
+        # Prima di leggere le metriche: la lucidatura puo' cambiare il font della
+        # label (foglio di stile dell'applicazione), e misurare col font vecchio
+        # darebbe righe e larghezze di un altro testo.
+        self.card.ensurePolished()
         metrics = self.status.fontMetrics()
         # Mezza riga di margine: `averageCharWidth` e' una media, e con una frase
         # di lettere larghe il testo troncato sborderebbe sulla quarta riga
@@ -706,7 +873,9 @@ class AnalysisOverlay(QWidget):
         width = min(self._available_card_width(), max(_CARD_MIN_WIDTH, wanted))
         self.card.setMinimumWidth(width)
         self.card.setMaximumWidth(width)
-        usable = max(1, width - 2 * _CARD_PADDING)
+        # Le righe si contano alla larghezza in cui la label disegna davvero,
+        # bordo della scheda escluso (vedi `_status_text_width`).
+        usable = self._status_text_width()
         wrapped = metrics.boundingRect(QRect(0, 0, usable, 0),
                                        int(Qt.TextFlag.TextWordWrap),
                                        _WORST_CASE_STATUS)
@@ -741,7 +910,26 @@ class AnalysisOverlay(QWidget):
             return
         if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange,
                             QEvent.Type.ApplicationFontChange):
-            self._size_the_card()
+            self._refit()
+
+    def _refit(self):
+        """@brief Re-derive the card AND re-lay the current status on new geometry.
+
+        @note Un elenco sulla scheda e' accorciato e misurato per una larghezza e
+            un font precisi. Ridimensionare solo la scheda lasciava le righe
+            accorciate per la geometria vecchia: su una scheda piu' stretta
+            andavano a capo (o sbordavano) e l'ultima riga finiva fuori
+            dall'altezza riservata.
+        @note Il supplemento d'altezza, monotono fra un messaggio e l'altro,
+            qui si RIDERIVA da zero: e' stato misurato su una geometria che non
+            esiste piu', e tenerlo farebbe restare la scheda piu' alta della
+            finestra appena rimpicciolita. Il sobbalzo che la monotonia evita e'
+            quello fra due messaggi; un ridimensionamento cambia gia' la scheda.
+        """
+        self._status_extra = 0
+        self._size_the_card()
+        if getattr(self, "_status_source", ""):
+            self._render_status()
 
     def eventFilter(self, watched, event):
         """@brief Keep the overlay covering its parent and sized on its metrics.
@@ -757,9 +945,9 @@ class AnalysisOverlay(QWidget):
         """
         if watched is self.parentWidget() and event.type() == QEvent.Type.Resize:
             self.setGeometry(watched.rect())
-            self._size_the_card()
+            self._refit()
         elif watched is self.status and event.type() == QEvent.Type.FontChange:
-            self._size_the_card()
+            self._refit()
         return super().eventFilter(watched, event)
 
     def set_abortable(self, abortable):
@@ -801,6 +989,7 @@ class AnalysisOverlay(QWidget):
         # svuota prima la label perche' il suo testo vecchio, se era un elenco,
         # terrebbe alto il `sizeHint` su cui la scheda si ridimensiona.
         self._status_extra = 0
+        self._status_source = ""
         self.status.clear()
         self._size_the_card()
         self.set_status(status)
@@ -902,16 +1091,44 @@ class AnalysisOverlay(QWidget):
             scheda si allunga per contenerle. La riga che va nel log resta una
             sola, con una marca temporale sola: la divisione fra il log e la
             scheda avviene qui, non alla sorgente (vedi `enumeration_lines`).
+        @note In un elenco, la voce che dichiara un termine («nome — ruolo»,
+            vedi `enumeration_term`) mostra il termine in grassetto, staccato
+            dalla descrizione. E' l'unico caso in cui la label passa al testo
+            ricco, e tutto il testo che arriva dal messaggio viene escapato: un
+            nome di file non puo' diventare markup. Ogni altra riga resta
+            `PlainText`, letterale com'era.
         """
         # Full messages stay in the log; keep the card stable for long replies.
         source = " ".join(str(message).split())
         if is_machine_line(source):
             return
         text = self.i18n.text(source) if self.i18n is not None else source
-        text = elide_paths(text)
+        self._status_source = elide_paths(text)
+        self._render_status()
+
+    def status_plain_text(self):
+        """@brief Return the status exactly as the reader sees it, without markup.
+
+        @return The shown text, one "\\n" per shown line. For a plain status it
+            is `status.text()`; for a list it is the text of the rich document
+            the label draws, so bold terms, escapes and separators come back as
+            the characters on screen.
+        @note `status.text()` returns the MARKUP when a list is shown: reading it
+            to know what the user sees would compare tags, not words.
+        """
+        if self.status.textFormat() != Qt.TextFormat.RichText:
+            return self.status.text()
+        document = QTextDocument()
+        document.setHtml(self.status.text())
+        return document.toPlainText()
+
+    def _render_status(self):
+        """Impagina lo stato conservato: elenco se elenca e ci sta, riga sola altrimenti."""
+        text = self._status_source
         lines = enumeration_lines(text)
         if lines is not None and self._show_enumeration(lines):
             return
+        self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status.setText(text if len(text) <= _STATUS_CHAR_LIMIT
                             else text[:_STATUS_CHAR_LIMIT - 3] + "…")
@@ -923,12 +1140,16 @@ class AnalysisOverlay(QWidget):
         @return True when the list is on the card; False when there is not even
             room for two lines, and the caller must fall back to the one-line
             form -- a list that does not fit is not an improvement.
-        @note Ogni riga viene accorciata alla larghezza VERA della scheda
-            (`elidedText`, le stesse metriche con cui la scheda e' stata
-            dimensionata) invece di essere mandata a capo: cosi' una voce
+        @note Ogni riga viene accorciata alla larghezza in cui la label disegna
+            DAVVERO (`_status_text_width`, bordo della scheda escluso) invece di
+            essere mandata a capo, e il markup vieta l'a capo: cosi' una voce
             occupa una riga e una sola, il conteggio delle righe e' esatto e il
             nome del file resta allineato sotto il precedente, che e' cio' che
             l'utente ha chiesto. Il testo integrale e' nel log.
+        @note L'altezza si misura sul documento che la label disegna
+            (`heightForWidth` del testo ricco), non su `lineSpacing` moltiplicato
+            per le righe: interlinea, grassetto e font di ripiego sono gia'
+            dentro la misura, perche' misura e disegno sono lo stesso layout.
         @note Se le voci non ci stanno in altezza si TAGLIA l'elenco, non lo si
             lascia debordare: si tolgono le ultime voci e il taglio si dichiara
             con un'ellissi su una riga propria -- lo stesso segno con cui
@@ -941,23 +1162,25 @@ class AnalysisOverlay(QWidget):
             elencate restano centrate come prima.
         """
         metrics = self.status.fontMetrics()
-        usable = max(1, self.card.minimumWidth() - 2 * _CARD_PADDING)
-        shown = [metrics.elidedText(line, Qt.TextElideMode.ElideRight, usable)
-                 for line in lines]
+        width = self._status_text_width()
+        shown = [_fit_row(line, width, self.status.font(), index > 0)
+                 for index, line in enumerate(lines)]
         room = self._status_height_room()
         if room < 2 * metrics.lineSpacing() + metrics.descent():
             return False
+        ellipsis = (None, "…")
+        self.status.setTextFormat(Qt.TextFormat.RichText)
         self.status.setAlignment(Qt.AlignmentFlag.AlignLeft
                                  | Qt.AlignmentFlag.AlignVCenter)
-        self.status.setText("\n".join(shown))
+        self.status.setText(_enumeration_markup(shown))
         while len(shown) > 2 and self._status_height() > room:
             # La prima potatura sostituisce l'ultima voce con l'ellissi (stesso
             # numero di righe, una voce in meno); dalla seconda in poi si toglie
             # anche l'ellissi, quindi ogni giro perde una riga e il ciclo
             # termina sempre, al piu' sulle due righe del limite.
-            del shown[-2 if shown[-1] == "…" else -1:]
-            shown.append("…")
-            self.status.setText("\n".join(shown))
+            del shown[-2 if shown[-1] == ellipsis else -1:]
+            shown.append(ellipsis)
+            self.status.setText(_enumeration_markup(shown))
         self._reserve_status_height(self._status_height())
         return True
 

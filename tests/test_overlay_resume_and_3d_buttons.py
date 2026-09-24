@@ -67,9 +67,20 @@ def test_a_fresh_start_after_stop_does_not_inherit_the_hidden_time(window, clock
 
 
 def test_3d_tab_has_the_same_review_buttons_with_the_same_state(window):  # noqa: F811
-    """@brief Le copie nel tab Modello 3D esistono, seguono lo stato e chiamano gli stessi comandi."""
-    assert window.btn_reopen_review_3d.text() == window.btn_reopen_review.text()
-    assert window.btn_relaunch_inventory_3d.text() == window.btn_relaunch_inventory.text()
+    """@brief Le copie nel tab Modello 3D esistono, seguono lo stato e chiamano gli stessi comandi.
+
+    Contratto aggiornato di proposito (scelta dell'utente, 2026-09-23, nota 6):
+    nella scheda Modello 3D le copie sono icone senza testo. Prima si
+    confrontava `text()` delle due copie; ora il testo dell'originale e' il
+    NOME ACCESSIBILE della copia e la prima riga del suo tooltip, ed e' li'
+    che si verifica che si tratti dello stesso comando.
+    """
+    for mirror, source in ((window.btn_reopen_review_3d, window.btn_reopen_review),
+                           (window.btn_relaunch_inventory_3d, window.btn_relaunch_inventory)):
+        assert mirror.text() == "", "copia a sola icona"
+        assert not mirror.icon().isNull()
+        assert mirror.accessibleName() == source.text()
+        assert mirror.toolTip().splitlines()[0] == source.text()
     # Il tab Modello 3D e' spento finche' non c'e' un modello: si guarda lo
     # stato proprio del pulsante, non quello ereditato dal tab.
     def own(button):
@@ -102,9 +113,17 @@ def test_3d_tab_buttons_trigger_the_same_handlers(window, monkeypatch):  # noqa:
     assert calls == ["reopen", "relaunch"]
 
 
-def test_the_buttons_sit_in_the_bottom_row_of_the_3d_tab(window):  # noqa: F811
-    """@brief «Un pulsante in basso»: nella stessa riga di «Rigenera modello 3D»."""
-    row = window.btn_regen_3d.parentWidget().layout()
+def test_the_buttons_sit_in_the_top_bar_of_the_3d_tab(window):  # noqa: F811
+    """@brief Nella stessa barra di «Rigenera modello 3D», che ora sta in cima alla scheda.
+
+    Contratto aggiornato di proposito (scelta dell'utente, 2026-09-23, nota 6):
+    la riga in basso non esiste piu', i comandi sono icone nella barra unica
+    sopra il modello. Resta il contratto di fondo -- le copie stanno accanto a
+    «Rigenera» -- e si aggiunge dove sta la barra: sopra l'anteprima.
+    """
+    bar = window.btn_regen_3d.parentWidget()
+    assert bar is window.model_3d_action_bar
+    row = bar.layout()
 
     def _contains(layout, widget):
         for i in range(layout.count()):
@@ -117,3 +136,7 @@ def test_the_buttons_sit_in_the_bottom_row_of_the_3d_tab(window):  # noqa: F811
 
     assert _contains(row, window.btn_reopen_review_3d)
     assert _contains(row, window.btn_relaunch_inventory_3d)
+    page = window.model_3d_page.layout()
+    widgets = [page.itemAt(i).widget() for i in range(page.count())]
+    splitter = next(w for w in widgets if w is not bar and w.isAncestorOf(window.preview_3d))
+    assert widgets.index(bar) < widgets.index(splitter), "la barra sta sopra il modello"

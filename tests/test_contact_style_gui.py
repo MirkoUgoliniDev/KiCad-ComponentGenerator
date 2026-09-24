@@ -22,6 +22,7 @@ from kicadgen.cad3d import step_generator as step
 from kicadgen.generators import castellated_module
 from kicadgen.services import openrouter
 from kicadgen.services.datasheet_extractor import ExtractedParams
+from kicadgen.services.i18n import DEFAULT_TRANSLATIONS
 
 
 STYLE_COLUMN = 6
@@ -393,3 +394,68 @@ def test_the_inventory_relaunch_keeps_the_declared_spacing(window):
     rebuilt = window._relaunch_base_params(
         SimpleNamespace(body_length_mm=40.0, body_width_mm=25.4, photo_path=None))
     assert rebuilt.row_spacing_mm == pytest.approx(22.86)
+
+
+# ── Nota 8a: le voci dei selettori seguono la lingua ─────────────────────
+
+
+def _items(combo):
+    return [(combo.itemText(i), combo.itemData(i)) for i in range(combo.count())]
+
+
+def test_contact_style_items_follow_a_language_switch(window):
+    """@brief Positivo: dopo il passaggio all'inglese le voci sono inglesi, anche la «mista».
+
+    Caso dell'utente (2026-09-23): con l'interfaccia in inglese il selettore
+    mostrava ancora «Mezzo foro sul bordo», «Foro passante»… perche' le voci
+    si traducevano solo alla costruzione e la ripassata generica delle
+    traduzioni lascia stare le voci dei combo.
+    """
+    castellated(window)
+    choose(style_combo(window, 0), "half_hole")
+    window._on_language_changed(window.language_combo.findData("en"))
+    for combo in (window.combo_contact_style_3d, style_combo(window, 0), style_combo(window, 1)):
+        for text, data in _items(combo):
+            source = (gui.CONTACT_STYLE_MIXED_LABEL if data is None
+                      else gui.CONTACT_STYLE_LABELS[data])
+            assert text == DEFAULT_TRANSLATIONS["ui:" + source]["en"], (text, data)
+    assert "Half-hole" in style_combo(window, 0).currentText()
+
+
+def test_a_language_switch_changes_texts_not_choices(window):
+    """@brief Negativo: dati, voce scelta e lati restano quelli di prima; nessuna invalidazione.
+
+    Poi il ritorno all'italiano rimette i testi italiani: la sorgente non e'
+    il testo tradotto del passaggio precedente.
+    """
+    castellated(window)
+    choose(style_combo(window, 1), "through_hole")
+    before = [[data for _text, data in _items(combo)]
+              for combo in (window.combo_contact_style_3d, style_combo(window, 0))]
+    chosen = window._table_contact_styles()
+    current_3d = window.combo_contact_style_3d.currentIndex()
+    revision = window._model_revision
+    window._on_language_changed(window.language_combo.findData("de"))
+    after = [[data for _text, data in _items(combo)]
+             for combo in (window.combo_contact_style_3d, style_combo(window, 0))]
+    assert after == before
+    assert window._table_contact_styles() == chosen
+    assert window.combo_contact_style_3d.currentIndex() == current_3d
+    assert window._model_revision == revision, "cambiare lingua non cambia il modello"
+    window._on_language_changed(window.language_combo.findData("it"))
+    assert style_combo(window, 1).currentText() == "Foro passante"
+
+
+def test_contact_style_tooltip_is_retranslated_both_ways(window):
+    """@brief Il tooltip del selettore segue la lingua in andata e in ritorno.
+
+    Negativo: impostato come testo gia' tradotto, la prima ripassata lo
+    catturava come sorgente e il ritorno all'italiano lo lasciava inglese.
+    """
+    castellated(window)
+    window._on_language_changed(window.language_combo.findData("en"))
+    english = DEFAULT_TRANSLATIONS["ui:" + gui.CONTACT_STYLE_TOOLTIP]["en"]
+    assert style_combo(window, 0).toolTip() == english
+    window._on_language_changed(window.language_combo.findData("it"))
+    assert "materiale della scheda" in style_combo(window, 0).toolTip()
+    assert "materiale della scheda" in window.combo_contact_style_3d.toolTip()

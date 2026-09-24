@@ -6,7 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 pytest.importorskip("PyQt6")
 from PyQt6.QtCore import QPoint, Qt
-from PyQt6.QtGui import QFont, QImage, QRegion
+from PyQt6.QtGui import QFont, QImage, QRegion, QTextDocument
 from PyQt6.QtTest import QSignalSpy
 from PyQt6.QtWidgets import QApplication, QLabel, QWidget
 from kicadgen.gui.analysis_overlay import (TOOLS, AnalysisOverlay, AnalysisSpinner,
@@ -300,19 +300,57 @@ def _document_line(count):
 
 
 def _card_lines(overlay):
-    return overlay.status.text().split("\n")
+    """Le righe che l'utente LEGGE sulla scheda.
+
+    CONTRATTO CAMBIATO: un elenco ora e' testo ricco (nome del file in
+    grassetto), quindi `status.text()` restituisce il markup e non le parole.
+    Si legge il testo del documento che la label disegna, che e' cio' che le
+    asserzioni di questo file hanno sempre inteso."""
+    return overlay.status_plain_text().split("\n")
 
 
 def _assert_nothing_clipped(overlay):
     """Positivo di misura: il testo scritto sta TUTTO nello spazio riservato,
     in altezza e in larghezza. E' la differenza fra un elenco e un elenco
-    tagliato a meta' dell'ultima riga."""
-    usable = overlay.card.minimumWidth() - 2 * _CARD_PADDING
-    assert overlay.status.heightForWidth(usable) <= overlay.status.minimumHeight()
+    tagliato a meta' dell'ultima riga.
+
+    Si misura alla larghezza in cui la label disegna DAVVERO (bordo della
+    scheda escluso), non a `larghezza scheda - 2 * _CARD_PADDING`: quella
+    misura era 2 px piu' larga della label, ed e' proprio lo scarto che faceva
+    andare a capo le righe accorciate (vedi tests/test_overlay_file_list.py)."""
+    real = overlay._status_text_width()
+    assert overlay.status.heightForWidth(real) <= overlay.status.minimumHeight()
+    assert _required_height(overlay.status, real) <= overlay.status.minimumHeight()
     assert overlay.card.minimumHeight() >= overlay.status.minimumHeight()
-    metrics = overlay.status.fontMetrics()
-    for line in _card_lines(overlay):
-        assert metrics.horizontalAdvance(line) <= usable, f"riga oltre la scheda: {line}"
+    assert _widest_line(overlay.status) <= real, (
+        f"riga oltre la label: {_card_lines(overlay)}")
+
+
+def _required_height(label, width):
+    """Altezza che il testo della label chiede a quella larghezza, SENZA il
+    minimo imposto: `heightForWidth` della label stessa restituisce almeno il
+    suo `minimumHeight`, quindi non puo' dire se il testo ci sta. Si chiede a
+    una label gemella con lo stesso font, formato e testo."""
+    twin = QLabel()
+    twin.setFont(label.font())
+    twin.setTextFormat(label.textFormat())
+    twin.setWordWrap(label.wordWrap())
+    twin.setAlignment(label.alignment())
+    twin.setText(label.text())
+    return twin.heightForWidth(width)
+
+
+def _widest_line(label):
+    """Larghezza della riga piu' larga COME VIENE DISEGNATA: col grassetto,
+    per il testo ricco; con le metriche del font, per il testo semplice."""
+    if label.textFormat() == Qt.TextFormat.RichText:
+        document = QTextDocument()
+        document.setDefaultFont(label.font())
+        document.setDocumentMargin(0)
+        document.setHtml(label.text())
+        return document.idealWidth()
+    metrics = label.fontMetrics()
+    return max(metrics.horizontalAdvance(line) for line in label.text().split("\n"))
 
 
 def test_the_documents_are_listed_one_per_line_with_name_and_role(overlay):
@@ -326,9 +364,9 @@ def test_the_documents_are_listed_one_per_line_with_name_and_role(overlay):
     overlay.set_status(message)
     assert _card_lines(overlay) == [
         'Invio a AI 3 documenti per layout, quote e pinout:',
-        'pinout.png, Pinout / disposizione contatti',
-        'top.png, Immagine con quote',
-        'hires.jpg, Foto ad alta risoluzione.']
+        'pinout.png — Pinout / disposizione contatti',
+        'top.png — Immagine con quote',
+        'hires.jpg — Foto ad alta risoluzione.']
     _assert_nothing_clipped(overlay)
     # Incolonnati a sinistra: centrati, i nomi partirebbero da una colonna
     # diversa per riga, che e' il difetto che l'elenco deve togliere.
@@ -354,7 +392,7 @@ def test_the_card_makes_room_for_eight_documents_without_clipping():
         lines = _card_lines(overlay)
         assert len(lines) == 9 and lines[-1].endswith('.'), (
             "l'elenco deve arrivare in fondo, senza troncature")
-        assert all(', ' in line for line in lines[1:])
+        assert all(' — ' in line for line in lines[1:])
         _assert_nothing_clipped(overlay)
         assert overlay.card.minimumHeight() > before, (
             "la scheda deve crescere per contenere l'elenco")
@@ -383,7 +421,7 @@ def test_a_window_too_short_cuts_the_list_instead_of_overflowing():
         app.processEvents()
         lines = _card_lines(overlay)
         assert 2 < len(lines) < 9 and lines[-1] == '…'
-        assert lines[0].endswith(':') and ', ' in lines[1]
+        assert lines[0].endswith(':') and ' — ' in lines[1]
         _assert_nothing_clipped(overlay)
         assert overlay.card.minimumHeight() + 2 * _OVERLAY_MARGIN <= 480
     finally:
@@ -418,7 +456,7 @@ def test_a_document_named_like_a_service_marker_still_reaches_the_card(overlay, 
     assert not is_machine_line(message) and not window.per_item_detail(message)
     overlay.set_status(message)
     lines = _card_lines(overlay)
-    assert lines[1] == f'{name}, Pinout / disposizione contatti'
+    assert lines[1] == f'{name} — Pinout / disposizione contatti'
     assert len(lines) == 3
 
 
@@ -433,10 +471,10 @@ def test_a_very_long_name_is_shortened_by_the_sender_and_shown_whole_line(overla
     overlay.set_status(message)
     lines = _card_lines(overlay)
     assert len(lines) == 3
-    shown, _, role = lines[1].partition(', ')
+    shown, _, role = lines[1].partition(' — ')
     assert role == 'Foto ad alta risoluzione' and '…' in shown
     assert shown.startswith('scheda-radio-vista') and shown.endswith('.png')
-    assert name not in overlay.status.text()
+    assert name not in overlay.status_plain_text()
     _assert_nothing_clipped(overlay)
 
 
@@ -639,8 +677,13 @@ def test_the_card_is_sized_on_its_content_and_does_not_jump(parent_width,
         assert overlay.card.minimumHeight() >= overlay.status.minimumHeight()
         # Il testo peggiore possibile deve STARE nell'altezza riservata: e' la
         # differenza fra una riga che va a capo e una riga tagliata a meta'.
-        usable = overlay.card.minimumWidth() - 2 * _CARD_PADDING
+        # Misurato alla larghezza VERA della label (bordo della scheda escluso):
+        # la vecchia `larghezza - 2 * _CARD_PADDING` era 2 px piu' larga, cioe'
+        # contava meno righe di quelle che la label disegna.
+        usable = overlay._status_text_width()
         overlay.set_status(WORST_CASE_STATUS)
+        app.processEvents()
+        assert usable == overlay.status.contentsRect().width()
         assert overlay.status.heightForWidth(usable) <= overlay.status.minimumHeight(), (
             "alla larghezza sopravvissuta lo stato occupa piu' righe di quelle"
             " riservate: il testo verrebbe tagliato")

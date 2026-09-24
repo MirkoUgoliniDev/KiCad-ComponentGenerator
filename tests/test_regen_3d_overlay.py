@@ -24,7 +24,34 @@ def test_the_overlay_closes_when_the_worker_ends(window):
     # isEnabled() resta False finche' il pannello Annotazioni 3D e' nascosto
     # in modalita' standard: qui conta che il comando torni disponibile in se'.
     assert window.btn_regen_3d.isEnabledTo(window.btn_regen_3d.parentWidget())
-    assert 'Rigenera' in window.btn_regen_3d.text()
+    # Contratto aggiornato di proposito (scelta dell'utente, 2026-09-23): il
+    # comando e' un'icona senza testo, quindi il ritorno allo stato di riposo
+    # si legge nel nome accessibile e nel tooltip, non piu' in `text()`.
+    assert 'Rigenera' in window.btn_regen_3d.accessibleName()
+    assert window.btn_regen_3d.toolTip().startswith('Rigenera')
+    assert not window.btn_regen_3d.property('workflow_busy')
+
+
+def test_the_icon_only_command_shows_it_is_busy_and_then_recovers(window, monkeypatch):
+    """Positivo: durante la generazione l'icona dice «in corso»; negativo: a riposo no.
+
+    Con il pulsante a testo lo stato occupato era la scritta «Generazione in
+    corso (FreeCAD)...». Un'icona non ha scritta: lo stato deve restare
+    visibile in altro modo -- comando spento, icona della clessidra, nome e
+    tooltip che dicono «in corso».
+    """
+    idle_icon = window.btn_regen_3d.icon().cacheKey()
+    window._set_regen_busy(True)
+    button = window.btn_regen_3d
+    assert not button.isEnabledTo(button.parentWidget())
+    assert button.property('workflow_busy')
+    assert button.icon().cacheKey() != idle_icon
+    assert 'in corso' in button.accessibleName()
+    assert button.toolTip().startswith('Generazione in corso')
+    window._on_regen_3d_finished()
+    assert button.isEnabledTo(button.parentWidget())
+    assert 'in corso' not in button.accessibleName()
+    assert not button.property('workflow_busy')
 
 
 def test_worker_messages_reach_the_overlay(window):

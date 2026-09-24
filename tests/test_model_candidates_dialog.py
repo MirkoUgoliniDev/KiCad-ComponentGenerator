@@ -294,7 +294,10 @@ def test_turning_the_rotation_takes_over_from_automatic_and_is_previewed(review,
     _wait(app, lambda: not dialog._workers and len(calls) == 2)
     assert not dialog.auto_rotation.isChecked()
     assert dialog.rotation_state.text() == 'in uso: override esplicito'
-    assert calls[-1] == (report['candidates'][0]['path'], 45.0, None, None)
+    # Quinto argomento: la vista dell'anteprima. Contratto cambiato di proposito
+    # quando e' stata introdotta la scelta pianta/isometrica: il worker dice al
+    # renderer quale camera usare, e il dialogo si apre in pianta.
+    assert calls[-1] == (report['candidates'][0]['path'], 45.0, None, None, gui.VIEW_PLAN)
     dialog.accept()
     assert dialog.selected_selection() == dict(
         status='confirmed', path=report['candidates'][0]['path'], rotation_deg=45.0)
@@ -309,7 +312,10 @@ def test_untouched_automatic_still_asks_for_the_inferred_orientation(review, app
     dialog.candidate_list.setCurrentRow(1)
     _wait(app, lambda: not dialog._workers and calls)
     # Nessuna rotazione esplicita si insinua: il worker riceve None e le quote.
-    assert calls == [(report['candidates'][1]['path'], None, (3, 2), None)]
+    # Quinto argomento: la vista dell'anteprima. Contratto cambiato di proposito
+    # quando e' stata introdotta la scelta pianta/isometrica: il worker dice al
+    # renderer quale camera usare, e il dialogo si apre in pianta.
+    assert calls == [(report['candidates'][1]['path'], None, (3, 2), None, gui.VIEW_PLAN)]
     assert dialog.auto_rotation.isChecked()
     assert dialog.rotation_state.text() == 'non in uso: comanda «Automatico»'
     dialog.accept()
@@ -344,7 +350,10 @@ def test_explicit_zero_typed_over_automatic_zero_is_not_swallowed(review, app, m
         assert '0°' in dialog.rotation_hint.text()
         _wait(app, lambda: not dialog._workers and len(calls) == 2)
         # Zero esplicito, non None: l'inferenza degli assi resta disattivata.
-        assert calls[-1] == (report['candidates'][0]['path'], 0.0, None, None)
+        # Quinto argomento: la vista dell'anteprima. Contratto cambiato di proposito
+        # quando e' stata introdotta la scelta pianta/isometrica: il worker dice al
+        # renderer quale camera usare, e il dialogo si apre in pianta.
+        assert calls[-1] == (report['candidates'][0]['path'], 0.0, None, None, gui.VIEW_PLAN)
         dialog.accept()
         assert dialog.selected_selection()['rotation_deg'] == 0.0
     finally:
@@ -449,7 +458,10 @@ def test_auto_worker_receives_component_dimensions(review, app, monkeypatch):
     _wait(app, lambda: not dialog._workers)
     # The fourth argument is the sampled body colour: this component declares
     # none, so the renderer must fall back to its documented default.
-    assert calls == [(report['candidates'][0]['path'], None, (3, 2), None)]
+    # Quinto argomento: la vista dell'anteprima. Contratto cambiato di proposito
+    # quando e' stata introdotta la scelta pianta/isometrica: il worker dice al
+    # renderer quale camera usare, e il dialogo si apre in pianta.
+    assert calls == [(report['candidates'][0]['path'], None, (3, 2), None, gui.VIEW_PLAN)]
 
 
 @pytest.mark.parametrize('dimensions', [(8, 2), (2, 8)])
@@ -591,10 +603,13 @@ def test_library_row_starts_the_same_preview_as_candidates(review, app, library,
     _filter(app, dialog, 'usb')
     dialog.library_list.setCurrentRow(0)
     _wait(app, lambda: not dialog._workers)
-    assert calls == [(str(models[3].path), 37.0, None, None)]
+    # Quinto argomento: la vista dell'anteprima. Contratto cambiato di proposito
+    # quando e' stata introdotta la scelta pianta/isometrica: il worker dice al
+    # renderer quale camera usare, e il dialogo si apre in pianta.
+    assert calls == [(str(models[3].path), 37.0, None, None, gui.VIEW_PLAN)]
     dialog.auto_rotation.setChecked(True)
     _wait(app, lambda: len(calls) == 2 and not dialog._workers)
-    assert calls[-1] == (str(models[3].path), None, (3, 2), None)
+    assert calls[-1] == (str(models[3].path), None, (3, 2), None, gui.VIEW_PLAN)
 
 
 def test_empty_filter_shows_nothing_and_keeps_candidate_selection(review, app, library, monkeypatch):
@@ -907,8 +922,11 @@ _UNDERCUT_FACES = [
     (6, 7, 8), (6, 8, 9),                     # top
     (4, 7, 8), (4, 8, 5),                     # +X flank above the chamfer
     (1, 4, 5), (1, 5, 2),                     # the chamfer itself
-    (3, 2, 5), (3, 5, 8), (3, 8, 9),          # +Y flank
-    (0, 1, 4), (0, 4, 7), (0, 7, 6),          # -Y flank, hidden
+    # Visible faces depend on the camera: the isometric camera sits above
+    # (+1, -1, +1) since the mirrored projection was fixed, so the lit flank
+    # is now -Y and +Y is hidden. The chamfer normal is the same in both.
+    (3, 2, 5), (3, 5, 8), (3, 8, 9),          # +Y flank, hidden
+    (0, 1, 4), (0, 4, 7), (0, 7, 6),          # -Y flank, lit
     (0, 3, 9), (0, 9, 6),                     # -X flank, hidden
     (0, 1, 2), (0, 2, 3),                     # bottom, hidden
 ]

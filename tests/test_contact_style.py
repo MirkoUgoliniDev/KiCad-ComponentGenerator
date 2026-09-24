@@ -24,8 +24,8 @@ import pytest
 from kicadgen.generators.castellated_module import (
     CONTACT_HALF_AND_THROUGH, CONTACT_HALF_HOLE, CONTACT_STYLES, CONTACT_THROUGH_HOLE,
     EDGES, MIN_HOLE_WALL_MM, CastellatedModuleParams, CastellatedSide,
-    build_castellated_module, fallback_through_hole_inset, opposite_row_edges, pad_positions,
-    through_hole_inset_from_rows,
+    build_castellated_module, continuous_pad, fallback_through_hole_inset, opposite_row_edges,
+    pad_positions, through_hole_inset_from_rows,
 )
 from kicadgen.core.footprint import FpCircle, FpText
 
@@ -118,14 +118,29 @@ def test_the_contract_names_and_default_are_the_agreed_ones():
 
 # ── Default: identico a prima, byte per byte ────────────────────────
 
-#: sha256 del .kicad_mod (uuid esclusi) prodotto PRIMA di questa modifica.
+#: sha256 del .kicad_mod (uuid esclusi) del tipo predefinito half_and_through.
+#: CAMBIATO DI PROPOSITO il 2026-09-23 (decisione dell'utente, guardando la
+#: foto ad alta risoluzione di una scheda reale: «i pin castellation sono
+#: orrendi, guarda la realta'»): ogni contatto e' ora UNA piazzola di rame
+#: continua a stadio, dal bordo fino oltre la corona del foro, con il foro
+#: decentrato dentro (`(drill D (offset dx dy))`), invece di un pad SMD di
+#: bordo piu' un pad THT tondo separato. Valori precedenti, per traccia:
+#: rs485 47dcab5e..., four 78160c60... La forma nuova e' verificata per
+#: struttura in tests/test_contact_pad_shape.py, non solo dall'impronta.
 PINNED_FOOTPRINT = {
-    "rs485": "47dcab5e1cb0756a785df2691db7b1dda8c87020f0fc41987d54eaa742e3b5dd",
-    "four": "78160c60c7b8d55ba257da1904382177fe53952408c17fd4ec8381fb04dfff28",
+    "rs485": "ab8e45275e6f5842bf4a0d79af3e1fdcb52bc7c47c472979a0f2d6a93913ad15",
+    "four": "87c86d6b8cd8c540036c119f67cc0385b13507824800474696213dc29aef4002",
 }
-#: sha256 di notches/edge_contacts/extra_boxes/extra_payload PRIMA della modifica.
+#: sha256 di notches/edge_contacts/extra_boxes/extra_payload, tolte le voci
+#: `through_hole` e `stadium` dei contatti (verificate a parte, qui sotto).
+#: "four" e' identico a prima della piazzola continua. "rs485" e' CAMBIATO DI
+#: PROPOSITO il 2026-09-23 (stessa decisione) solo in due punti, entrambi
+#: conseguenza del rame che ora arriva oltre la corona: le sigle serigrafate
+#: 3D stanno oltre la fine della piazzola continua (x -18.7 -> -16.954) e la
+#: cornice serigrafica rientra di conseguenza (lunghezza 36.0 -> 33.508).
+#: Valore precedente, per traccia: bc59c263...
 PINNED_PAYLOAD = {
-    "rs485": "bc59c26398d4c8d5db38dcfc3520ac682ba59cc75d3306facb68753211830980",
+    "rs485": "f7ad6446f577ccf0c0136a4b36d77ec1c12194e5913a523de979b1ac5258fb71",
     "four": "ba8a6bc6160f30c8aae2a63c798d55b6d34dbff70fc3120fd86bc79cd42ba44e",
 }
 BUILDERS = {"rs485": rs485, "four": four_sided}
@@ -148,12 +163,25 @@ def test_default_3d_payload_is_the_pinned_one_plus_only_the_plated_ring(name, mo
     params = BUILDERS[name]()
     captured, _ = _payload(params, monkeypatch, tmp_path, pin_color="#b0b0b0")
     rings = [c.pop("through_hole") for c in captured["edge_contacts"]]
+    # La piazzola continua (2026-09-23): stesse quote di quella del footprint.
+    stadiums = [c.pop("stadium") for c in captured["edge_contacts"]]
     pinned = {k: captured[k] for k in ("notches", "edge_contacts", "extra_boxes", "extra_payload")}
     assert hashlib.sha256(json.dumps(pinned, sort_keys=True).encode()).hexdigest() == PINNED_PAYLOAD[name]
-    for ring, placement in zip(rings, pad_positions(params)):
+    for ring, stadium, placement in zip(rings, stadiums, pad_positions(params)):
         assert (ring["x"], ring["y"]) == params.thru_hole_centre(placement)
         assert ring["radius"] == params.thru_hole_drill / 2
         assert ring["pad_diameter_mm"] == params.thru_pad_diameter
+        land = continuous_pad(params, placement)
+        assert stadium == {"length_mm": land.inner_reach, "width_mm": land.across}
+    # Le sole differenze di rs485 rispetto a prima, ricavate dalla regola:
+    # sigla oltre la fine del rame continuo, cornice che rientra quanto basta.
+    if name == "rs485":
+        first = continuous_pad(params, next(pad_positions(params)))
+        label_gap = params.hole_diameter / 2 + 0.55
+        pe = next(t for t in captured["extra_payload"]["silk_texts"] if t["text"] == "PE")
+        assert pe["x"] == pytest.approx(-params.body_length / 2 + first.inner_reach + label_gap)
+        assert captured["extra_payload"]["silk_outline"]["length_mm"] == pytest.approx(
+            params.body_length - 2 * (first.inner_reach + 1.6))
 
 
 # ── through_hole ────────────────────────────────────────────────────
@@ -225,8 +253,10 @@ def test_the_closed_hole_of_a_double_contact_is_now_plated_too(script, monkeypat
     """@brief La causa del puntino scuro, anche per il default.
 
     Prima il foro chiuso di un contatto half_and_through era solo sottratto al
-    PCB: si vedeva il substrato scuro dentro un buco. Ora ha canna e corona, e
-    la piazzola di bordo viene forata dove arriva sopra la sua bocca.
+    PCB: si vedeva il substrato scuro dentro un buco. Ora ha la sua canna, e il
+    rame della faccia -- dal 2026-09-23 la piazzola continua a stadio, non piu'
+    due corone separate (decisione dell'utente sulla foto della scheda reale)
+    -- lo copre tutto intorno ed e' forato sulla sua bocca.
     """
     params = CastellatedModuleParams(
         name="M", body_length=30, body_width=20, pad_length=3.6, pad_overhang=1.4,
@@ -235,13 +265,15 @@ def test_the_closed_hole_of_a_double_contact_is_now_plated_too(script, monkeypat
     contact = captured["edge_contacts"][0]
     features = script["_contact_features"](contact, (-15, -10, 15, 10, 1.0), 0.06, 0.025)
     through = contact["through_hole"]
-    rings = [t for t in features["tubes"]
-             if (t["x"], t["y"]) == (through["x"], through["y"]) and t["r_out"] == pytest.approx(0.85)]
-    assert len(rings) == 2
+    barrels = [t for t in features["tubes"]
+               if (t["x"], t["y"]) == (through["x"], through["y"])
+               and (t["z0"], t["z1"]) == (0.0, 1.0)]
+    assert len(barrels) == 1 and barrels[0]["r_in"] == pytest.approx(through["radius"])
     assert (through["x"], through["y"], through["radius"]) in features["bores"]
-    # Con questi valori la piazzola di bordo (2.2 mm dentro) copre la bocca.
-    pad_end = -15 + (3.6 - 1.4)
-    assert through["x"] - through["radius"] < pad_end
+    # Il rame di faccia arriva oltre l'intera corona dichiarata (0.85 mm).
+    assert len(features["stadiums"]) == 2
+    for pad in features["stadiums"]:
+        assert pad["x"] + pad["length"] >= through["x"] + 0.85 - 1e-9
 
 
 def test_each_hole_is_cut_once_and_at_the_barrel_outer_radius(script):
@@ -425,6 +457,14 @@ def test_numbers_names_and_pin_one_do_not_change_across_styles(builder):
         markers = _pin_one_marker(fp)
         assert len(markers) == 1
         first = placements[0]
+        # Il marcatore segue il rame che il tipo offre davvero: per il contatto
+        # doppio, dal 2026-09-23, la piazzola continua, larga quanto la
+        # maggiore fra piazzola di bordo e corona (qui conta per rs485, 1.2 vs
+        # 1.7 mm). Resta a 0.5 mm dal bordo del RAME, come per gli altri tipi.
+        land = continuous_pad(params, first)
+        if land is not None:
+            first = first._replace(**({"height": land.across} if first.edge in ("left", "right")
+                                      else {"width": land.across}))
         along = (markers[0].center[1] if first.edge in ("left", "right") else markers[0].center[0])
         labels = sorted(g.text for g in fp.graphics if isinstance(g, FpText) and g.kind == "user")
         # Il marcatore sta accanto al pad del pin 1, lungo il bordo.
@@ -562,7 +602,13 @@ def test_the_through_hole_strip_covers_ring_and_label_and_nothing_inside():
 def test_the_edge_pad_strip_does_not_reach_a_ring_label():
     """@brief Negativo: con la piazzola di bordo dichiarata corta, la sigla
     di una corona arretrata resterebbe fuori. E' la geometria del tipo a
-    decidere la striscia, non un margine allargato per tutti."""
+    decidere la striscia, non un margine allargato per tutti.
+
+    Dal 2026-09-23 un half_and_through OSSERVATO e' una piazzola continua fino
+    oltre la corona, e la sua striscia arriva li' (caso positivo in
+    tests/test_contact_pad_shape.py). Il tipo non dichiarato resta qui fra i
+    negativi: a valle e' disegnato come half_and_through, ma sulla foto non si
+    maschera un'ipotesi."""
     from kicadgen.services.contact_zones import contact_positions, contact_proposals
     x = contact_positions(_declared("through_hole"), *BOARD)[0]["x_mm"]
     label = _proposal(x, -12.7 + 2.9, 1.0, 0.7)

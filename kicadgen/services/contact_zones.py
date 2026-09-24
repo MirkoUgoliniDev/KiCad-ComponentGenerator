@@ -17,8 +17,8 @@ from __future__ import annotations
 import math
 
 from ..generators.castellated_module import (
-    CONTACT_THROUGH_HOLE, CastellatedModuleParams, fallback_through_hole_inset,
-    opposite_row_edges, through_hole_inset_from_rows,
+    CONTACT_HALF_AND_THROUGH, CONTACT_THROUGH_HOLE, CastellatedModuleParams,
+    fallback_through_hole_inset, opposite_row_edges, through_hole_inset_from_rows,
 )
 
 #: Quanto puo' sporgere un corpo oltre la banda dei contatti restando un
@@ -38,6 +38,36 @@ def _number(value, minimum=0.0):
         return None
     value = float(value)
     return value if math.isfinite(value) and value > minimum else None
+
+
+def _continuous_pad_depth(side, data, pitch):
+    """@brief Depth of the strip of a half_and_through side: continuous pad and label.
+
+    @param side Declared side whose OBSERVED contact_style is half_and_through
+        (an absent style is not assumed here: see contact_positions).
+    @param data Extracted parameters (pad_diameter_mm, drill_mm).
+    @param pitch Declared pitch of the side, the last-resort pad length.
+    @return Millimetres from the board edge inward.
+    @note The footprint and the 3D draw such a contact as ONE gold pad from the
+        edge to beyond the through-hole ring (castellated_module.continuous_pad),
+        so the strip must reach the far side of that ring, not just the end of
+        the declared edge pad. The ring's position follows from the SAME rule
+        the generator uses (CastellatedModuleParams.thru_hole_centre_offset,
+        derived from the half-hole and the drill), with the generator's
+        defaults for what the extraction does not state; the label margin is
+        the one _band_depth uses.
+    """
+    ring = _number(data.get('pad_diameter_mm')) or CastellatedModuleParams.thru_pad_diameter
+    bore = _number(data.get('drill_mm')) or CastellatedModuleParams.thru_hole_drill
+    half_hole = _number(side.get('hole_diameter_mm')) or CastellatedModuleParams.hole_diameter
+    offset = CastellatedModuleParams(hole_diameter=half_hole, thru_hole_drill=bore,
+                                     thru_pad_diameter=ring).thru_hole_centre_offset
+    pad_length = (_number(side.get('pad_length_mm')) or _number(data.get('pad_length_mm'))
+                  or pitch)
+    edge_band = _band_depth(side, data, pitch)
+    # Stesso margine della sigla della piazzola di bordo, contato dalla fine
+    # del rame continuo quando questa sta piu' dentro.
+    return edge_band + max(0.0, offset + ring / 2 - pad_length)
 
 
 def _band_depth(side, data, pitch):
@@ -122,9 +152,17 @@ def contact_positions(data, length_mm, width_mm):
         # La striscia descrive il contatto che il lato offre davvero: la
         # piazzola di bordo (default, e tipi con semi-foro) oppure la corona
         # arretrata di un foro passante.
-        if side.get('contact_style') == CONTACT_THROUGH_HOLE:
+        # Solo un tipo OSSERVATO allarga la striscia. Un tipo assente viene
+        # disegnato a valle come half_and_through, ma e' un'ipotesi: mascherare
+        # la foto su un'ipotesi toglierebbe dalla misura i corpi montati vicino
+        # al bordo (vedi il @note di contact_positions). Senza tipo resta la
+        # striscia della piazzola di bordo dichiarata, come prima.
+        style = side.get('contact_style')
+        if style == CONTACT_THROUGH_HOLE:
             extent = length_mm if edge in ('left', 'right') else width_mm
             depth = _through_hole_depth(side, data, edges, extent)
+        elif style == CONTACT_HALF_AND_THROUGH:
+            depth = _continuous_pad_depth(side, data, pitch)
         else:
             depth = _band_depth(side, data, pitch)
         start = -(count - 1) * pitch / 2 + offset

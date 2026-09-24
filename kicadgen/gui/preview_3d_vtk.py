@@ -15,11 +15,16 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
+from collections import OrderedDict
+from contextlib import contextmanager
+from pathlib import Path
+from typing import NamedTuple, Optional
 
 os.environ.setdefault("QT_API", "pyqt6")
 
 import numpy as np
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from pyvistaqt import QtInteractor
 
 from ..cad3d.body_params import Body3DParams
@@ -62,6 +67,103 @@ def _component_row(part):
     return _component_index(part.get('name'))
 
 
+#: Prepared scenes kept in memory, least recently used dropped first. The
+#: window shows one generated model at a time; two entries also cover going
+#: back and forth between two files. The real 13 MB preview of a module (171
+#: parts, 287k triangles) takes ~27 MB once prepared, so the cache stays small.
+_MESH_CACHE_SIZE = 2
+
+
+class _PreparedPart(NamedTuple):
+    """One drawable part: normals already computed, row for picking."""
+    mesh: object
+    color: object
+    row: Optional[int]
+
+
+class _PreparedScene(NamedTuple):
+    """Everything render_mesh needs from a preview JSON, ready to draw."""
+    parts: tuple
+    anchors: tuple
+
+
+def _mesh_file_key(mesh_path) -> tuple:
+    """@brief Identity of a preview file: resolved path, device, inode, size, mtime.
+
+    @param mesh_path Path of the preview JSON.
+    @return Hashable key; a rewritten file gets a new one.
+    @throws OSError when the file cannot be inspected.
+    @note Content is not hashed (hashing 13 MB at every tab switch is what we
+        want to avoid). A rewrite that keeps size, inode and mtime_ns would go
+        unnoticed; with nanosecond mtimes that needs a same-size rewrite within
+        the filesystem timestamp resolution (2 s on FAT) -- regenerating a model
+        takes much longer than that.
+    """
+    resolved = Path(mesh_path).resolve()
+    stat = resolved.stat()
+    return (str(resolved), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+
+def _prepare_mesh_scene(mesh_path) -> _PreparedScene:
+    """@brief Read a FreeCAD preview JSON and build the meshes to draw.
+
+    @param mesh_path Path of the preview JSON (parts with vertices/triangles).
+    @return Prepared scene: one entry per part with triangles, pin label anchors.
+    @throws ValueError when the file has no parts or no triangles.
+    @note Pure data work, nothing touches the render window: a failure leaves
+        the scene on screen as it was.
+    """
+    import pyvista as pv
+
+    with open(mesh_path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+
+    parts = data.get("parts")
+    if not parts:
+        raise ValueError("mesh vuota")
+
+    prepared = []
+    anchors = []
+    for part in parts:
+        vertices = np.asarray(part["vertices"], dtype=float)
+        triangles = np.asarray(part.get("triangles", []), dtype=int)
+        if len(vertices) == 0 or len(triangles) == 0:
+            continue
+
+        # I pezzi dei piedini si chiamano "Pin<numero>" (vedi
+        # freecad_build_body.py): da li' si ricava l'etichetta, ancorata
+        # alla punta del pin.
+        name = str(part.get("name", ""))
+        if name.startswith("Pin") and name[3:].isdigit():
+            label = part.get("label")
+            if label:
+                # Punto scelto da chi ha costruito il pezzo (es. accanto al
+                # semi-foro di un modulo, non sopra): il numero non copre il metallo.
+                point = _spaced_label(label, vertices)
+                anchors.append((int(name[3:]), *point))
+            else:
+                centre = vertices.mean(axis=0)
+                anchors.append(
+                    (int(name[3:]), float(centre[0]), float(centre[1]),
+                     float(vertices[:, 2].min()))
+                )
+        # PyVista vuole le facce come [n_punti, i, j, k, n_punti, ...]
+        faces = np.hstack([np.full((len(triangles), 1), 3), triangles]).ravel()
+        mesh = pv.PolyData(vertices, faces)
+        # Normali con feature angle: gli spigoli vivi restano netti, mentre
+        # raccordi e cilindri dei pin vengono sfumati e si leggono come curvi
+        # (con l'ombreggiatura piatta i fillet piccoli sparivano sul nero).
+        mesh = mesh.compute_normals(
+            feature_angle=30, split_vertices=True, consistent_normals=True,
+        )
+        prepared.append(_PreparedPart(mesh, part.get("color", _APPROX_BODY_COLOR),
+                                      _component_row(part)))
+
+    if not prepared:
+        raise ValueError("mesh senza triangoli")
+    return _PreparedScene(tuple(prepared), tuple(anchors))
+
+
 def _spaced_label(label, vertices):
     """Keep legacy mesh labels away from the contact, without changing CAD."""
     point = np.asarray(label, dtype=float).copy()
@@ -74,13 +176,19 @@ def _spaced_label(label, vertices):
 
 
 class Preview3DVtk(QtInteractor):
-    """Vista 3D interattiva: mostra la mesh reale generata o l'approssimazione."""
+    """@brief Interactive 3D view: the real generated mesh or the parametric approximation."""
 
     component_requested = pyqtSignal(int)
     #: Tasto destro su un componente: indice di riga e punto globale dove
     #: aprire il menu. La vista non sa cosa si possa fare su un componente --
     #: le voci le costruisce la finestra, che ha la tabella e i modelli.
     component_menu_requested = pyqtSignal(int, object)
+
+    #: Duration of the animated view change asked by the navigation cube, in
+    #: ms; 0 or less jumps at once. 250 ms is the usual slicer/CAD feel.
+    camera_animation_ms = 250
+    #: Frame period of the animation (about 60 frames per second).
+    CAMERA_FRAME_MS = 16
 
     def __init__(self, parent=None):
         """@brief Initialize the viewport and optional component picking.
@@ -90,7 +198,18 @@ class Preview3DVtk(QtInteractor):
         self._component_actors = {}
         self._right_press = None
         self._menu_served = False
+        # Scena mostrata e scene gia' preparate, per chiave d'identita' del file.
+        self._mesh_cache = OrderedDict()
+        self._shown_mesh_key = None
+        self._mesh_anchors = ()
+        # Animazione della camera (cubo di navigazione).
+        self._camera_animation = None
+        self._camera_timer = None
+        self._camera_clock = time.monotonic
         super().__init__(parent)
+        self._camera_timer = QTimer(self)
+        self._camera_timer.setInterval(self.CAMERA_FRAME_MS)
+        self._camera_timer.timeout.connect(self._on_camera_tick)
         self.setToolTip('Doppio clic su un componente: scegli modello KiCad e ruota il modello.\n'
                         'Tasto destro: elimina, ruota o cambia il modello.')
         self._configure_component_picking()
@@ -200,10 +319,12 @@ class Preview3DVtk(QtInteractor):
             self.render()
 
     def view_direction(self, direction) -> None:
-        """@brief Look at the model from a direction (edge or corner of the cube).
+        """@brief Look at the model from a direction (edge or corner of the cube), at once.
 
         @param direction Vector pointing from the model towards the camera.
+        @note Stops a running camera animation: the last request wins.
         """
+        self.stop_camera_animation()
         norm = float(np.linalg.norm(direction))
         if norm <= 0:
             return
@@ -219,13 +340,126 @@ class Preview3DVtk(QtInteractor):
         """Apply what a click on the cube selected: home, a face or a diagonal."""
         from .view_cube import view_for_direction
         if target == "home":
-            self.show_view("iso")
+            self.animate_to_view("iso")
             return
         view = view_for_direction(target)
         if view is not None:
-            self.show_view(view)
+            self.animate_to_view(view)
         else:
-            self.view_direction(target)
+            self.animate_to_direction(target)
+
+    # ── Animazione della camera ─────────────────────────────────────
+
+    def animate_to_view(self, view: str) -> None:
+        """@brief Turn the camera smoothly to a standard view.
+
+        @param view Name accepted by show_view (iso, top, bottom, front, ...).
+        @note The last frame is show_view(view) itself, so the final camera
+            is exactly the one the immediate call gives, framing included.
+        """
+        self._animate_camera(lambda: self.show_view(view))
+
+    def animate_to_direction(self, direction) -> None:
+        """@brief Turn the camera smoothly to look from a direction.
+
+        @param direction Vector pointing from the model towards the camera.
+        @note The last frame is view_direction(direction) itself.
+        """
+        self._animate_camera(lambda: self.view_direction(direction))
+
+    def is_camera_animating(self) -> bool:
+        """@brief Whether an animated view change is in progress."""
+        return self._camera_animation is not None
+
+    def stop_camera_animation(self) -> None:
+        """@brief Stop an animated view change where it is (no jump to its end).
+
+        @note Safe on a half-built widget: clear() can run before __init__ ends.
+        """
+        timer = getattr(self, "_camera_timer", None)
+        if timer is not None:
+            timer.stop()
+        self._camera_animation = None
+
+    def _camera_pose(self):
+        from .view_cube import CameraPose
+        camera = self.camera
+        return CameraPose(tuple(camera.GetPosition()), tuple(camera.GetFocalPoint()),
+                          tuple(camera.GetViewUp()), float(camera.GetParallelScale()),
+                          float(camera.GetViewAngle()))
+
+    def _set_camera_pose(self, pose) -> None:
+        camera = self.camera
+        camera.SetFocalPoint(*pose.focal)
+        camera.SetPosition(*pose.position)
+        camera.SetViewUp(*pose.up)
+        camera.SetParallelScale(pose.parallel_scale)
+        camera.SetViewAngle(pose.view_angle)
+        self.renderer.ResetCameraClippingRange()
+
+    @contextmanager
+    def _rendering_suppressed(self):
+        """Batch scene or camera changes into one final render."""
+        previous = self.suppress_rendering
+        self.suppress_rendering = True
+        try:
+            yield
+        finally:
+            self.suppress_rendering = previous
+
+    def _pose_after(self, apply):
+        """Camera pose that `apply` would produce, without showing it.
+
+        The camera, the "camera already set" flag and the pin label
+        visibility are restored afterwards; nothing is rendered meanwhile.
+        """
+        from vtkmodules.vtkRenderingCore import vtkCamera
+        saved = vtkCamera()
+        saved.DeepCopy(self.camera)
+        camera_set = self.renderer.camera_set
+        labels = self._label_actor.GetVisibility() if self._label_actor is not None else None
+        try:
+            with self._rendering_suppressed():
+                apply()
+            return self._camera_pose()
+        finally:
+            self.camera.DeepCopy(saved)
+            self.renderer.camera_set = camera_set
+            if labels is not None:
+                self._label_actor.SetVisibility(labels)
+
+    def _animate_camera(self, apply) -> None:
+        """Start (or restart, from the current camera) an animation towards `apply`'s view."""
+        self.stop_camera_animation()
+        duration = float(self.camera_animation_ms or 0) / 1000.0
+        if duration <= 0 or self._camera_timer is None:
+            apply()
+            return
+        start = self._camera_pose()
+        end = self._pose_after(apply)
+        if all(np.allclose(a, b, rtol=1e-9, atol=1e-9) for a, b in zip(start, end)):
+            apply()  # gia' li': niente da animare, solo l'inquadratura finale
+            return
+        self._camera_animation = (start, end, apply, self._camera_clock(), duration)
+        self._camera_timer.start()
+
+    def _on_camera_tick(self) -> None:
+        """One animation frame; the last one applies the exact target view."""
+        from .view_cube import ease_in_out, interpolate_pose
+        animation = self._camera_animation
+        if animation is None or getattr(self, "_closed", False):
+            self.stop_camera_animation()
+            return
+        start, end, apply, started, duration = animation
+        progress = (self._camera_clock() - started) / duration
+        if progress >= 1.0:
+            self.stop_camera_animation()
+            apply()
+            return
+        self._set_camera_pose(interpolate_pose(start, end, ease_in_out(progress)))
+        if self._label_actor is not None:
+            self._label_actor.SetVisibility(self.show_pin_numbers and self._viewing_from_below())
+        self.render()
 
     def _on_cube(self, event) -> bool:
         """True when a mouse event falls on the cube or on the house."""
@@ -239,6 +473,16 @@ class Preview3DVtk(QtInteractor):
         super().resizeEvent(event)
         if self.view_cube is not None:
             self.view_cube.layout(self.width(), self.height())
+
+    def closeEvent(self, event):  # noqa: N802 - firma Qt
+        """@brief Stop the camera animation before the render window goes away."""
+        self.stop_camera_animation()
+        super().closeEvent(event)
+
+    def wheelEvent(self, event):  # noqa: N802 - firma Qt
+        """@brief A wheel zoom takes over the camera: stop a running view animation."""
+        self.stop_camera_animation()
+        super().wheelEvent(event)
 
     def mouseMoveEvent(self, event):  # noqa: N802 - firma Qt
         """@brief Pointing-hand cursor over the cube, so it reads as clickable."""
@@ -261,7 +505,8 @@ class Preview3DVtk(QtInteractor):
         @note A left click on the cube never reaches VTK: it would also start
             a camera rotation, and the view would turn under the cursor.
             Outside the cube's hit area (and in the empty corners of its
-            square) the mouse keeps its usual meaning.
+            square) the mouse keeps its usual meaning, and any press there
+            stops a running view animation.
         """
         if event.button() == Qt.MouseButton.LeftButton and self._on_cube(event):
             point = event.position()
@@ -271,6 +516,9 @@ class Preview3DVtk(QtInteractor):
                 event.accept()
                 self._cube_clicked(target)
                 return
+        # Qualunque altro gesto prende la camera in mano: l'animazione del
+        # cubo non deve continuare a muoverla sotto il mouse.
+        self.stop_camera_animation()
         if event.button() == Qt.MouseButton.RightButton:
             self._right_press = event.pos()
             self._menu_served = False
@@ -331,8 +579,16 @@ class Preview3DVtk(QtInteractor):
             self.component_requested.emit(index)
 
     def clear(self) -> None:
-        """@brief Clear actors and invalidate component picking for the old mesh."""
+        """@brief Clear actors and invalidate component picking for the old mesh.
+
+        @note Also forgets which mesh file is shown (is_showing becomes False)
+            and stops a camera animation; the prepared-mesh cache is kept, so
+            showing the same file again does not re-read it.
+        """
         self._component_actors.clear()
+        self._shown_mesh_key = None
+        self._mesh_anchors = ()
+        self.stop_camera_animation()
         super().clear()
 
     def set_pin_numbers(self, enabled: bool) -> None:
@@ -408,7 +664,12 @@ class Preview3DVtk(QtInteractor):
         self.render()
 
     def show_view(self, view: str) -> None:
-        """Vista standard: iso / top / bottom / front / back / left / right."""
+        """@brief Standard view at once: iso / top / bottom / front / back / left / right.
+
+        @param view View name; anything else is the initial isometric view.
+        @note Stops a running camera animation: the last request wins.
+        """
+        self.stop_camera_animation()
         if view == "top":
             self.view_xy()
         elif view == "bottom":
@@ -428,15 +689,45 @@ class Preview3DVtk(QtInteractor):
         self.fit_view()
 
     def clear_preview(self) -> None:
-        """@brief Provide the clear preview operation for this workflow."""
+        """@brief Empty the preview; the next render_mesh() redraws even the same file."""
         self._reset()
         self.render()
 
+    def is_showing(self, mesh_path) -> bool:
+        """@brief Whether this very file, unchanged, is the mesh on screen.
+
+        Cheap (one stat call): the window uses it to decide whether entering
+        the 3D tab needs a loading indicator.
+
+        @param mesh_path Path of a preview JSON.
+        @return True when render_mesh(mesh_path) would redraw nothing: the
+            same resolved file, with the same size and modification time, is
+            displayed and the scene was not cleared or replaced since.
+        """
+        if self._shown_mesh_key is None or not mesh_path:
+            return False
+        try:
+            return _mesh_file_key(mesh_path) == self._shown_mesh_key
+        except (OSError, TypeError, ValueError):
+            return False
+
     def render_params(self, pin_params: PinHeaderParams, body: Body3DParams) -> None:
-        """Anteprima approssimata (prima della generazione): scatola + cilindri."""
+        """@brief Approximate preview before generation: a box and pin cylinders.
+
+        @param pin_params Pin layout.
+        @param body Body dimensions.
+        @throws ValueError when the body parameters are invalid.
+        @note Drawn with one render at the end, not one per pin.
+        """
         import pyvista as pv
 
         body.validate()
+        with self._rendering_suppressed():
+            self._draw_params(pv, pin_params, body)
+        self.render()
+
+    def _draw_params(self, pv, pin_params, body) -> None:
+        """Build the approximate scene; the caller renders once at the end."""
         self._reset()
 
         box = pv.Box(bounds=(
@@ -444,7 +735,8 @@ class Preview3DVtk(QtInteractor):
             body.offset_y_mm, body.offset_y_mm + body.width_mm,
             0.0, body.height_mm,
         ))
-        self.add_mesh(box, color=_APPROX_BODY_COLOR, opacity=0.65, specular=0.2)
+        self.add_mesh(box, color=_APPROX_BODY_COLOR, opacity=0.65, specular=0.2,
+                      reset_camera=False, render=False)
 
         radius = body.pin_diameter_mm / 2.0
         anchors = []
@@ -453,73 +745,76 @@ class Preview3DVtk(QtInteractor):
                 center=(x, y, -body.pin_length_mm / 2.0), direction=(0, 0, 1),
                 radius=radius, height=body.pin_length_mm,
             )
-            self.add_mesh(pin, color=_APPROX_PIN_COLOR, specular=0.4)
+            self.add_mesh(pin, color=_APPROX_PIN_COLOR, specular=0.4,
+                          reset_camera=False, render=False)
             anchors.append((number, x, y, -body.pin_length_mm))
 
         self._add_pin_labels(anchors)
         self._finish()
 
     def render_mesh(self, mesh_path) -> None:
-        """Mesh tassellata scritta da FreeCAD: geometria reale, un colore per pezzo."""
-        import pyvista as pv
+        """@brief Show the tessellated mesh written by FreeCAD, one colour per part.
 
-        with open(mesh_path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
+        @param mesh_path Path of the preview JSON.
+        @throws OSError when the file cannot be read.
+        @throws ValueError when it holds no parts or no triangles; the scene on
+            screen is then left untouched.
+        @note Re-entering the 3D tab calls this every time. When the same
+            unchanged file is already shown (see is_showing) nothing is rebuilt:
+            scene and camera stay, only the pin labels follow the current
+            setting. Otherwise the prepared meshes come from a small cache keyed
+            by the file identity, so only a new or changed file is parsed.
+        @note The scene is built with rendering suppressed and drawn once: a
+            render per added part used to redraw the growing scene ~170 times
+            for a real module.
+        """
+        key = _mesh_file_key(mesh_path)
+        if key == self._shown_mesh_key:
+            self._refresh_pin_labels()
+            return
+        scene = self._mesh_cache.get(key)
+        if scene is None:
+            scene = _prepare_mesh_scene(mesh_path)
+            self._mesh_cache[key] = scene
+            while len(self._mesh_cache) > _MESH_CACHE_SIZE:
+                self._mesh_cache.popitem(last=False)
+        else:
+            self._mesh_cache.move_to_end(key)
 
-        parts = data.get("parts")
-        if not parts:
-            raise ValueError("mesh vuota")
+        with self._rendering_suppressed():
+            self._reset()
+            for part in scene.parts:
+                # ambient alto: i moduli reali sono quasi neri (#1a1a1a) e con la
+                # sola luce diffusa, su sfondo scuro, diventavano una macchia
+                # indistinguibile.
+                actor = self.add_mesh(
+                    part.mesh, color=part.color,
+                    smooth_shading=True, specular=0.4, specular_power=20,
+                    ambient=0.35, diffuse=0.75, reset_camera=False, render=False,
+                )
+                if part.row is not None:
+                    self._component_actors[actor.GetAddressAsString('')] = part.row
+            self._mesh_anchors = scene.anchors
+            self._add_pin_labels(list(scene.anchors))
+            self._finish()
+        self._shown_mesh_key = key
+        self.render()
 
-        self._reset()
-        drawn = 0
-        anchors = []
-        for part in parts:
-            vertices = np.asarray(part["vertices"], dtype=float)
-            triangles = np.asarray(part.get("triangles", []), dtype=int)
-            if len(vertices) == 0 or len(triangles) == 0:
-                continue
+    def _refresh_pin_labels(self) -> None:
+        """Pin labels of the mesh on screen follow the current setting, no rebuild.
 
-            # I pezzi dei piedini si chiamano "Pin<numero>" (vedi
-            # freecad_build_body.py): da li' si ricava l'etichetta, ancorata
-            # alla punta del pin.
-            name = str(part.get("name", ""))
-            if name.startswith("Pin") and name[3:].isdigit():
-                label = part.get("label")
-                if label:
-                    # Punto scelto da chi ha costruito il pezzo (es. accanto al
-                    # semi-foro di un modulo, non sopra): il numero non copre il metallo.
-                    point = _spaced_label(label, vertices)
-                    anchors.append((int(name[3:]), *point))
-                else:
-                    centre = vertices.mean(axis=0)
-                    anchors.append(
-                        (int(name[3:]), float(centre[0]), float(centre[1]),
-                         float(vertices[:, 2].min()))
-                    )
-            # PyVista vuole le facce come [n_punti, i, j, k, n_punti, ...]
-            faces = np.hstack([np.full((len(triangles), 1), 3), triangles]).ravel()
-            mesh = pv.PolyData(vertices, faces)
-            # Normali con feature angle: gli spigoli vivi restano netti, mentre
-            # raccordi e cilindri dei pin vengono sfumati e si leggono come curvi
-            # (con l'ombreggiatura piatta i fillet piccoli sparivano sul nero).
-            mesh = mesh.compute_normals(
-                feature_angle=30, split_vertices=True, consistent_normals=True,
-            )
-            # ambient alto: i moduli reali sono quasi neri (#1a1a1a) e con la
-            # sola luce diffusa, su sfondo scuro, diventavano una macchia
-            # indistinguibile.
-            actor = self.add_mesh(
-                mesh,
-                color=part.get("color", _APPROX_BODY_COLOR),
-                smooth_shading=True, specular=0.4, specular_power=20,
-                ambient=0.35, diffuse=0.75,
-            )
-            index = _component_row(part)
-            if index is not None:
-                self._component_actors[actor.GetAddressAsString('')] = index
-            drawn += 1
-
-        if not drawn:
-            raise ValueError("mesh senza triangoli")
-        self._add_pin_labels(anchors)
-        self._finish()
+        Renders only when something changed: showing the tab repaints the
+        widget anyway, and a full frame of a large module is not free.
+        """
+        changed = False
+        if self.show_pin_numbers and self._label_actor is None and self._mesh_anchors:
+            with self._rendering_suppressed():
+                self._add_pin_labels(list(self._mesh_anchors))
+            changed = True
+        if self._label_actor is not None:
+            visible = bool(self.show_pin_numbers and self._viewing_from_below())
+            if bool(self._label_actor.GetVisibility()) != visible:
+                self._label_actor.SetVisibility(visible)
+                changed = True
+        if changed:
+            self.render()

@@ -148,11 +148,20 @@ def test_edit_review_command_sits_in_the_bottom_row_of_the_project_tab(window): 
     assert window.btn_edit_component_review.text().strip()
 
 
-def test_edit_review_command_is_mirrored_in_the_3d_bottom_row(window):  # noqa: F811
-    """@brief La copia nel tab Modello 3D e' lo stesso comando con lo stesso testo."""
+def test_edit_review_command_is_mirrored_in_the_3d_toolbar(window):  # noqa: F811
+    """@brief La copia nel tab Modello 3D e' lo stesso comando con lo stesso nome.
+
+    Contratto aggiornato di proposito (scelta dell'utente, 2026-09-23, nota 6):
+    la copia sta nella barra di icone in cima alla scheda, accanto a «Rigenera»,
+    e non ha testo; il nome dell'originale e' il suo nome accessibile e la
+    prima riga del suo tooltip.
+    """
     row = window.btn_regen_3d.parentWidget().layout()
     assert _contains(row, window.btn_edit_component_review_3d)
-    assert window.btn_edit_component_review_3d.text() == window.btn_edit_component_review.text()
+    mirror = window.btn_edit_component_review_3d
+    assert mirror.text() == ""
+    assert mirror.accessibleName() == window.btn_edit_component_review.text()
+    assert mirror.toolTip().splitlines()[0] == window.btn_edit_component_review.text()
 
 
 def test_both_edit_review_copies_open_the_component_review(window, monkeypatch):  # noqa: F811
@@ -702,10 +711,16 @@ def test_ai_log_button_counts_the_elements_list_too(window, tmp_path):  # noqa: 
 # ── Le tre copie nella scheda Modello 3D nascono uguali ───────────────────
 
 def test_the_three_3d_mirrors_are_built_from_the_same_helper(window):  # noqa: F811
-    """@brief Positivo: testo, suggerimento, stato e visibilita' copiati per tutte e tre.
+    """@brief Positivo: nome, suggerimento, stato e visibilita' copiati per tutte e tre.
 
     Prima due copie prendevano solo `setEnabled(...)` e la terza anche
     `isVisibleTo(...)`: lo stesso comando nasceva in tre stati diversi.
+
+    Contratto aggiornato di proposito (scelta dell'utente, 2026-09-23, nota 6):
+    le copie sono icone senza testo. Prima si esigeva `text()` e `toolTip()`
+    identici all'originale; ora il testo dell'originale e' il nome accessibile
+    e la prima riga del tooltip della copia, e il tooltip dell'originale ne e'
+    il resto -- nulla di cio' che l'originale dice va perso.
     """
     pairs = [(window.btn_reopen_review_3d, window.btn_reopen_review),
              (window.btn_relaunch_inventory_3d, window.btn_relaunch_inventory),
@@ -715,10 +730,37 @@ def test_the_three_3d_mirrors_are_built_from_the_same_helper(window):  # noqa: F
     for enabled in (True, False):
         window._set_review_buttons_enabled(enabled)
         for mirror, source in pairs:
-            assert mirror.text() == source.text()
-            assert mirror.toolTip() == source.toolTip()
+            assert mirror.text() == ""
+            assert mirror.accessibleName() == source.text()
+            assert mirror.toolTip() == f"{source.text()}\n{source.toolTip()}"
             assert _own_visible(mirror) is _own_visible(source), (
-                f"{mirror.text()!r}: visibilita' propria allineata all'originale")
+                f"{source.text()!r}: visibilita' propria allineata all'originale")
+
+
+def test_a_mirror_tooltip_follows_its_original_when_that_changes(window):  # noqa: F811
+    """@brief Positivo: la copia a icona segue il tooltip dell'originale quando cambia.
+
+    Negativo: cambiare il tooltip di UN originale non tocca le altre copie.
+    La copia compone il proprio tooltip dall'originale, quindi senza un
+    aggancio al cambiamento resterebbe ferma al testo della costruzione.
+    """
+    before = window.btn_reopen_review_3d.toolTip()
+    window.btn_relaunch_inventory.setToolTip("Spiegazione riscritta a runtime.")
+    assert window.btn_relaunch_inventory_3d.toolTip().endswith("Spiegazione riscritta a runtime.")
+    assert window.btn_reopen_review_3d.toolTip() == before
+
+
+def test_mirrors_follow_the_originals_through_a_language_switch(window):  # noqa: F811
+    """@brief Positivo: dopo il cambio di lingua la copia dice cio' che dice l'originale, tradotto.
+
+    Negativo: il nome italiano non resta nella copia di un'interfaccia inglese.
+    """
+    window._on_language_changed(window.language_combo.findData("en"))
+    mirror, source = window.btn_relaunch_inventory_3d, window.btn_relaunch_inventory
+    assert source.text() != "Rilancia inventario AI (a pagamento)…", "premessa: l'originale e' tradotto"
+    assert mirror.accessibleName() == source.text()
+    assert mirror.toolTip() == f"{source.text()}\n{source.toolTip()}"
+    assert "Rilancia" not in mirror.toolTip()
 
 
 def test_a_mirror_is_enabled_state_is_also_gated_by_its_tab(window):  # noqa: F811

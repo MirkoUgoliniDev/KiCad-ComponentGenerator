@@ -4783,3 +4783,122 @@ dell'utente con `device_bash` e il commit emendato (nessuna traccia di
 `c2pa` nella storia). **Per gli SVG usare `device_bash`, non il ponte**, e
 controllare sempre gli md5 dopo la consegna. I file di testo (.py, .md) non
 vengono toccati.
+
+# 2026-09-23 (4) — dieci note dell'utente sulla GUI e sui contatti
+
+L'utente ha mandato dieci note (screenshot) chiedendo di non procedere finche'
+non avesse finito, poi «fai tutte le modifiche in modo scrupoloso». Scelte
+fatte da lui prima di partire: animazione al clic sul cubo (non trascinamento);
+pulsanti del lavoro come icone nella barra IN ALTO; tipo contatto = icona +
+tendina compatta; anteprima STEP con interruttore pianta/isometrica.
+Cinque sottoagenti su file disgiunti, integrazione del coordinatore.
+
+## Note e cosa e' stato fatto
+
+1. **Elenco file tagliato nella modale AI** (`analysis_overlay.py`): causa
+   vera = larghezza sbagliata. Si accorciava e si misurava a
+   `card.minimumWidth() - 2*padding` (528 px) mentre la label vera e' 526 px
+   (il bordo di 1 px per lato del foglio di stile): una riga accorciata a
+   filo andava a capo e l'ultima riga restava tagliata a meta'. Nuovo
+   `_status_text_width()` usato per accorciare, misurare e dimensionare;
+   `_refit()` su ridimensionamento / cambio font.
+2. **Nomi dei file in grassetto e staccati**: separatore fra nome e ruolo in
+   `_files_sent_message` cambiato da `", "` a `" — "` (una virgola puo' stare
+   nel nome del file); la scheda mette in grassetto la parte prima del primo
+   `" — "` (regola sul separatore, non sulla forma del nome), testo escapato,
+   rich text SOLO per gli elenchi, log invariato su una riga. Fragile e
+   dichiarato: un nome che contiene `" — "` e' in grassetto solo fino li'.
+3. **Anteprima STEP non ruotata** (`model_candidates_dialog.py`): la rotazione
+   arrivava al disegno; era la camera isometrica a 45° che rendeva un quarto
+   di giro di un pezzo quasi quadrato indistinguibile (immagine specchiata).
+   In piu' la vecchia proiezione era essa stessa specchiata (angolo positivo =
+   orario, al contrario di KiCad). Due camere vere (pianta predefinita,
+   isometrica per ispezione) con interruttore in alto a destra
+   (`assets/step-view-iso.svg`); in pianta la luminosita' cresce con l'altezza
+   (`_PLAN_HEIGHT_FLOOR`, scelta di leggibilita' dichiarata). Niente piu'
+   «Caricamento…» a ogni cambio d'angolo: resta l'immagine precedente dello
+   stesso modello finche' arriva la nuova.
+4. **Costo sulla modale di generazione**: tolto in tutte le vie
+   (`_clear_cost_for_generation`, e `_show_ai_cost` non scrive in modale
+   durante la generazione). Decisione dell'utente che rovescia la regola
+   precedente «nella generazione automatica il costo va tenuto».
+5. **Cubo non fluido**: animazione di 250 ms (ease-in-out, direzione su arco
+   di cerchio massimo, alto ricostruito perpendicolare, distanza e angolo di
+   vista interpolati); la posa finale e' ESATTAMENTE quella di
+   `show_view`/`view_direction`. Opposti (sopra→sotto): orbita attorno
+   all'alto dello schermo (scelta di interazione dichiarata).
+6. **Pulsanti del lavoro come icone** in un'unica barra in alto: strumenti di
+   vista | divisore | Rigenera (primario), Accetto, Rivedi, Rilancia AI
+   (moneta gialla = a pagamento), Modifica, poi icona + tendina del tipo
+   contatto e l'indicatore di caricamento. Riga in basso eliminata. Tooltip =
+   nome + spiegazione, tradotti; le copie dei pulsanti della scheda Progetto
+   seguono anche il tooltip dell'originale (`_ToolTipFollower`). Icone
+   `assets/wf-*.svg`.
+7. **Cubo piu' grande (120 px) e scritte che ci stanno**: scala dalle misure
+   vere di `vtkVectorText`; gli accenti vengono ripiegati in ASCII perche'
+   vtkVectorText li salta in silenzio («ARRIÈRE» diventava «ARRIRE»).
+8. **Traduzioni mancanti**: voci delle tendine del tipo contatto, quote
+   dell'anteprima 2D (`dim.body`, `dim.total`, `dim.pitch`,
+   `dim.row_spacing`), sette note in inglese di `kicad_models.py` rese in
+   italiano (resta inglese di proposito la riga per-elemento che
+   `per_item_detail` riconosce dalla forma).
+9. **Contatti «mezzo foro + foro passante»**: UNA piazzola continua a stadio
+   per contatto, come nella foto reale. Footprint: `thru_hole oval` con
+   `(drill D (offset dx dy))` (nuova `OffsetDrillPad`), un solo numero per
+   contatto, niente `pad_prop_castellated` (il footprint e' la piazzola sulla
+   scheda ospite, dove il mezzo foro non esiste). 3D: stadio dorato su
+   entrambe le facce dal bordo a oltre il foro, canna del foro passante e
+   mezza canna al bordo, niente corone sovrapposte. Misure solo dai
+   parametri dichiarati; `validate()` rifiuta passo < larghezza dello stadio
+   e stadi che toccano il rame di un altro pin. `half_hole` e `through_hole`
+   byte per byte identici (test che lo fissano). L'anteprima 2D del footprint
+   (coordinatore) disegna ora le tre forme vere: stadio con foro, corona,
+   rettangolo di bordo.
+10. **Tab 3D lento**: misurato sul file vero (13 MB, 171 pezzi, 287k
+    triangoli). La causa principale non era il JSON: `render_mesh` ridisegnava
+    la scena ~180 volte per caricamento (`add_mesh` con render=True di
+    default). Ora un solo render; rientrare nel tab con lo stesso file non
+    ricostruisce nulla (identita' = percorso, device, inode, dimensione,
+    mtime_ns; `is_showing(path)`); cache delle mesh preparate (2 file). Nel
+    software GL qui: rientro da ~28 s a 0–2 ms, primo caricamento da 10,5 s a
+    ~2–3,7 s. La finestra mostra «Caricamento del modello 3D…» nella barra e
+    rimanda il render con `QTimer.singleShot(0)` cosi' il tab si disegna prima.
+
+## Decisioni aperte (da chiedere all'utente, non prese)
+
+- **Pasta saldante**: F.Paste copre ora tutto lo stadio, foro compreso
+  (pin-in-paste): molta piu' pasta della vecchia piazzola di bordo.
+  Alternativa: pad di sola pasta sulla vecchia area di bordo.
+- `(attr smd)` con soli pad passanti: probabile avviso «footprint type
+  mismatch» in KiCad (il footprint misto di prima c'era gia').
+- Lato senza tipo di contatto dichiarato: footprint e 3D disegnano lo stadio
+  (default), la maschera fotografica no (non si maschera la foto su un'ipotesi).
+- `_show_generated_mesh`/`_on_generated` fanno ancora il render sincrono (la
+  modale di generazione e' aperta); il cambio dei numeri pin si affida alla
+  cache.
+
+## Non verificato qui
+
+FreeCAD assente: il 3D dello stadio e' provato sul payload e con FreeCAD
+finto. Tempi reali su GPU, fluidita' dell'animazione e layout sulla finestra
+Windows dell'utente: da vedere da lui.
+
+## Test
+
+Suite completa: **3793 passati**, 11 saltati, 2 xfail, 19 sottotest, zero rossi.
+Nuovi file: `test_overlay_file_list.py`, `test_model_preview_view_mode.py`,
+`test_preview_mesh_cache.py`, `test_contact_pad_shape.py`,
+`test_3d_tab_workflow_icons.py`, `test_3d_tab_loading.py`,
+`test_generation_cost_hidden.py`, `test_footprint_preview_contacts.py`.
+Contratti cambiati di proposito (spiegati nei test): separatore `" — "` in
+`test_progress_messages.py`; firma del worker con la vista in
+`test_model_candidates_dialog.py`; clic sul cubo → `animate_to_view`; hash del
+footprint `half_and_through` in `test_contact_style.py`; pulsanti del tab 3D
+senza testo (nome nel tooltip / nome accessibile); barra in alto in
+`test_photo_inventory_gui.py`.
+
+## Trappola di consegna (ripetuta)
+
+Gli SVG nuovi (`step-view-iso.svg`, `wf-*.svg`) vanno scritti sul disco
+dell'utente con `device_bash`, non con `device_commit_files` (che vi inietta
+il manifesto C2PA).
