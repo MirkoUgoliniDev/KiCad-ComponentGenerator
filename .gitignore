@@ -51,5 +51,11 @@ docs/ESP32/
 # Local detector weights (large binaries; review upstream licences before redistribution).
 models/*.onnx
 
-# Alberi di lavoro temporanei e configurazione locale dell agente.
-.claude/
+# .claude/ va su GitHub (istruzioni, agenti, skill: utente, 2026-09-24);
+# restano fuori solo gli alberi di lavoro temporanei dei sottoagenti, che sono
+# copie complete del repository.
+.claude/worktrees/
+.claude/settings.local.json
+
+# Materiale privato dell'utente: mai su GitHub (utente, 2026-09-24).
+Private/
