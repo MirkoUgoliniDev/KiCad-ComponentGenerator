@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `ae1d8e9` (pushato):
+- Branch: `main` (= `YOLO-SOLUTION`, portato su main il 25/09 sera). Ultimo commit pubblicato: vedi git log (pushato):
   correzione di TUTTI gli esiti della verifica avversariale del 25/09 (A-G,
   punti 35-41 e piano «fai tutto»), documentazione @brief imposta dal test,
   blocco dei segnali alla chiusura della finestra (crash vero dimostrato),
@@ -7622,3 +7622,14 @@ scuro e chiaro (fogli di anteprima in scratchpad/icon). packaging/
 KiCadGen.ico rigenerato con tools/make_app_icon.py; banner e immagine
 dell'installer (make_installer_assets.py) verificati in scratch: usano gia'
 la stessa sorgente. Nessun marchio altrui.
+
+47. [x] (utente 25/09: «facciamo diventare questo branch il main, ormai non si
+    torna indietro») FATTI: origin/main ha 5 commit non presenti qui, tutti
+    merge senza differenze di contenuto (diff YOLO-SOLUTION...origin/main
+    vuoto). PIANO: merge di origin/main in YOLO-SOLUTION (verifica: albero
+    invariato), push, poi main portato avanti con push normale
+    (YOLO-SOLUTION:main, nessun force), branch locale main allineato.
+ESITO 47: merge di origin/main fatto (albero invariato, verificato), main
+portato avanti a questo branch con push normale. DA ORA si lavora su main;
+YOLO-SOLUTION resta come riferimento. Regola del progetto: commit sul branch
+di default solo se l'utente lo chiede (altrimenti creare un branch).
