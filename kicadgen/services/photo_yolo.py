@@ -28,11 +28,93 @@ _CLASSES = (
     "display", "fuse", "heatsink", "ic", "inductor", "led", "pads", "pins",
     "potentiometer", "relay", "resistor", "switch", "transformer", "transistor",
 )
+#: Soglia operativa PREDEFINITA. E' una proprieta' del modello (quanto e'
+#: calibrata la sua confidenza), non della scheda: 0.25 va bene per l'ONNX
+#: yolov8s di base; un YOLO26 addestrato su Roboflow rende meglio piu' in
+#: alto (utente, 2026-09-25). Per questo chi usa il rilevatore la puo'
+#: scegliere (detect_yolo_components(confidence=...)), come il cursore di
+#: Roboflow; qui resta solo il valore di partenza.
 _CONFIDENCE = 0.25
 _AUDIT_CONFIDENCE = 0.05
+
+
+def operating_confidence(value=None) -> float:
+    """@brief Validate the operating confidence threshold chosen for a run.
+
+    @param value Threshold in (0.05, 1), or None for the default _CONFIDENCE.
+    @return The threshold as a float.
+    @throws ValueError For a non-number, a boolean, a non-finite value or a
+        value outside (audit floor, 1): below the audit floor the weak
+        proposals would not even be recorded.
+    """
+    if value is None:
+        return _CONFIDENCE
+    if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value):
+        raise ValueError("YOLO confidence threshold must be a finite number")
+    if not _AUDIT_CONFIDENCE < float(value) < 1:
+        raise ValueError(f"YOLO confidence threshold must be between {_AUDIT_CONFIDENCE} and 1")
+    return float(value)
 _NMS_IOU = 0.5
 _EXCLUDED = {"pads", "pins"}
+#: Lati delle tessere ingrandite, in pixel della foto calibrata.
+_TILE_SIZES = (640, 1280)
 
+#: Parametri del rilevatore che l'utente puo' scegliere (utente, 2026-09-25:
+#: modale «Parametri YOLO»). I valori sono quelli usati finora: scegliere
+#: nulla lascia il comportamento identico. Restano fuori di proposito l'unione
+#: dei frammenti (_FRAGMENT_COVERED, interna e dichiarata fragile), la soglia
+#: d'audit (non cambia il risultato) e l'ingresso a 640 px (lo fissa
+#: l'addestramento del modello).
+YOLO_SETTING_DEFAULTS = {"confidence": 0.25, "nms_iou": _NMS_IOU,
+                         "tile_sizes": list(_TILE_SIZES), "tile_overlap": 0.25}
+
+
+def yolo_settings(values=None) -> dict:
+    """@brief Validate the detector settings chosen by the user and fill in the defaults.
+
+    @param values Mapping with any of the YOLO_SETTING_DEFAULTS keys, or None.
+    @return A new dict with every key: confidence (operating threshold),
+        nms_iou (overlap above which two boxes are the same body), tile_sizes
+        (magnified tile sides in px, subset of 640 and 1280; empty = the whole
+        photo only, as Roboflow does) and tile_overlap (fraction of a tile
+        repeated in the next one).
+    @throws ValueError For an unknown key or a value outside its range:
+        confidence as operating_confidence; nms_iou in [0.1, 0.95];
+        tile_overlap in [0.1, 0.5]; tile_sizes a list of distinct 640/1280.
+    """
+    values = {} if values is None else dict(values)
+    unknown = set(values) - set(YOLO_SETTING_DEFAULTS)
+    if unknown:
+        raise ValueError(f"unknown YOLO settings: {', '.join(sorted(unknown))}")
+    result = {key: (list(value) if isinstance(value, list) else value)
+              for key, value in YOLO_SETTING_DEFAULTS.items()}
+    result.update(values)
+    result["confidence"] = operating_confidence(result["confidence"])
+
+    def bounded(key, low, high):
+        value = result[key]
+        if (isinstance(value, bool) or not isinstance(value, Real)
+                or not math.isfinite(value) or not low <= float(value) <= high):
+            raise ValueError(f"YOLO setting {key} must be between {low} and {high}")
+        result[key] = float(value)
+
+    bounded("nms_iou", 0.1, 0.95)
+    bounded("tile_overlap", 0.1, 0.5)
+    sizes = result["tile_sizes"]
+    if (not isinstance(sizes, (list, tuple)) or len(set(sizes)) != len(sizes)
+            or any(isinstance(size, bool) or size not in _TILE_SIZES for size in sizes)):
+        raise ValueError("YOLO setting tile_sizes must list distinct values among "
+                         + ", ".join(map(str, _TILE_SIZES)))
+    result["tile_sizes"] = sorted(int(size) for size in sizes)
+    return result
+
+
+try:
+    from ..app_paths import resource_path
+except ImportError:  # modulo caricato da solo (test): stessa regola del sorgente
+    def resource_path(*parts):
+        """Fallback: the repository layout."""
+        return Path(__file__).resolve().parents[2].joinpath(*parts)
 
 def detector_classes() -> tuple:
     """@brief Categorie che il rilevatore locale sa assegnare.
@@ -45,23 +127,31 @@ def detector_classes() -> tuple:
     return tuple(name for name in _CLASSES if name not in _EXCLUDED)
 
 
+#: Weights formats the detector loads: ONNX with onnxruntime, PyTorch
+#: checkpoints with Ultralytics (user's request, 2026-09-25).
+_MODEL_SUFFIXES = (".onnx", ".pt")
+
+
 def resolve_yolo_model(model_path=None) -> Path:
-    """@brief Resolve and check a readable, nonempty local ONNX weights file.
+    """@brief Resolve and check a readable, nonempty local weights file.
 
     @param model_path Optional local path overriding KICADGEN_YOLO_MODEL.
     @return Absolute Path, defaulting to repository models/pcb_yolov8s.onnx.
-    @throws ValueError If the path is invalid, missing, unreadable, or not ONNX.
-    @note No downloads, pickle deserialization, or optional imports occur here.
+    @throws ValueError If the path is invalid, missing, unreadable, or neither
+        .onnx nor .pt.
+    @note No downloads, deserialization or optional imports occur here. A .pt
+        file is a Python pickle: LOADING it (in `_setup`) runs code from the
+        file, so only files the user chose themselves are ever loaded.
     """
     selected = model_path if model_path is not None else os.environ.get(
-        "KICADGEN_YOLO_MODEL", Path(__file__).resolve().parents[2] / "models" / "pcb_yolov8s.onnx"
+        "KICADGEN_YOLO_MODEL", resource_path("models", "pcb_yolov8s.onnx")
     )
     try:
         if not os.fspath(selected).strip():
             raise ValueError("empty model path")
         path = Path(selected).expanduser().resolve()
-        if path.suffix.lower() != ".onnx":
-            raise ValueError("expected a .onnx file; pickle/.pt weights are unsupported")
+        if path.suffix.lower() not in _MODEL_SUFFIXES:
+            raise ValueError("expected a .onnx or .pt weights file")
         with path.open("rb") as handle:
             if not handle.read(1):
                 raise ValueError("weights file is empty")
@@ -69,7 +159,7 @@ def resolve_yolo_model(model_path=None) -> Path:
     except (OSError, TypeError, ValueError, RuntimeError) as exc:
         raise ValueError(
             f"Cannot read local YOLO weights {selected!r}: {exc}. Supply model_path "
-            "or set KICADGEN_YOLO_MODEL to the existing 21-class PCB .onnx file."
+            "or set KICADGEN_YOLO_MODEL to an existing PCB .onnx or .pt detection model."
         ) from exc
 
 
@@ -88,8 +178,209 @@ def _dependencies():
     return np, cv2, ort
 
 
+#: Name of each weights format as the user reads it.
+_FORMAT_NAMES = {".onnx": "ONNX", ".pt": "PyTorch"}
+
+
+def model_label(model_path=None) -> str:
+    """@brief Short description of the model the detector is going to use.
+
+    @param model_path The same argument given to detect_yolo_components.
+    @return File name and format, e.g. «pcb_yolov8s.onnx (ONNX)» or
+        «pcb_component_detector_yolo26_roboflow_m.pt (PyTorch)».
+    @note Same choice as resolve_yolo_model (argument, then
+        KICADGEN_YOLO_MODEL, then the default), but nothing is opened or
+        loaded: it only names what the progress window is about to run.
+    """
+    selected = model_path if model_path is not None else os.environ.get(
+        "KICADGEN_YOLO_MODEL", resource_path("models", "pcb_yolov8s.onnx"))
+    path = Path(os.fspath(selected))
+    return f"{path.name} ({_FORMAT_NAMES.get(path.suffix.lower(), path.suffix or '?')})"
+
+
+def _image_dependencies():
+    """numpy and OpenCV only: what every weights format needs."""
+    try:
+        import numpy as np
+        import cv2
+    except (ImportError, OSError) as exc:
+        raise ValueError(
+            "Local YOLO runtime is unavailable. Install requirements-yolo.txt "
+            f"(numpy, opencv-python), then retry. Details: {exc}") from exc
+    return np, cv2
+
+
+def class_mapping(names) -> list:
+    """@brief Map the classes a model declares onto the detector's own classes, by name.
+
+    @param names The model's class table {index: name}, indexes 0..n-1.
+    @return For each model class index, the index of the same class in
+        _CLASSES.
+    @throws ValueError For a malformed table, a duplicated name or a name
+        the detector does not know.
+    @note Names match ignoring case and surrounding spaces («IC» is «ic»).
+        A model may declare fewer classes than the detector: the missing
+        ones simply never score. It may not declare an unknown class: what
+        that class means cannot be known, and reading it as another one
+        would label bodies wrongly without any error (user, 2026-09-25: a
+        16-class YOLO26 model in a different order was the case).
+    """
+    if (not isinstance(names, dict) or not names
+            or sorted(names) != list(range(len(names)))
+            or any(type(key) is not int for key in names)):
+        raise ValueError("class metadata must be a table {0: name, 1: name, ...}")
+    known = {name: index for index, name in enumerate(_CLASSES)}
+    mapping = []
+    for index in range(len(names)):
+        name = str(names[index]).strip().casefold()
+        if name not in known:
+            raise ValueError(f"unknown class {names[index]!r}; the detector knows: "
+                             + ", ".join(_CLASSES))
+        mapping.append(known[name])
+    if len(set(mapping)) != len(mapping):
+        raise ValueError("class metadata declares the same class twice")
+    return mapping
+
+
+def _mapping_info(names, mapping) -> dict:
+    """Audit fields describing how the model's classes were read."""
+    return {"model_classes": [str(names[i]) for i in range(len(names))],
+            "missing_classes": [c for i, c in enumerate(_CLASSES) if i not in mapping],
+            "class_order": "detector order" if mapping == list(range(len(_CLASSES)))
+            else "remapped by name"}
+
+
+def _remap_scores(raw, mapping, np):
+    """[1, 4 + model classes, rows] -> [1, 4 + len(_CLASSES), rows], zero where absent."""
+    rows = np.zeros((1, 4 + len(_CLASSES), raw.shape[2]), np.float32)
+    rows[0, :4] = raw[0, :4]
+    rows[0, [4 + target for target in mapping]] = raw[0, 4:]
+    return rows
+
+
+class _RemappedSession:
+    """@brief ONNX session whose class scores come back in the detector's order.
+
+    Used only when the model's class table differs from _CLASSES; a model
+    with the detector's own table keeps its plain session.
+    """
+
+    def __init__(self, session, mapping, np):
+        self._session, self._mapping, self._np = session, list(mapping), np
+
+    def run(self, output_names, feeds):
+        """@brief Run the model, then reorder its scores; see _remap_scores."""
+        return [_remap_scores(raw, self._mapping, self._np) if isinstance(raw, self._np.ndarray)
+                and raw.ndim == 3 and raw.shape[1] == 4 + len(self._mapping) else raw
+                for raw in self._session.run(output_names, feeds)]
+
+
+class _TorchSession:
+    """A PyTorch detection network behind the `run` interface of onnxruntime.
+
+    The detector code (letterbox, thresholds, NMS, audit, review candidates)
+    stays the same for .onnx and .pt: only this object differs. `run` gets the
+    same [1, 3, 640, 640] float32 tensor and returns a raw
+    [1, 4 + classes, rows] float32 array: centre x, centre y, width, height in
+    letterbox pixels, then one score per class, like the ONNX export.
+    """
+
+    def __init__(self, network, torch, np, input_name, end_to_end=False, mapping=None):
+        self._network, self._torch, self._np = network, torch, np
+        self._input = input_name
+        self._end_to_end = end_to_end
+        # Indice di classe del modello -> indice in _CLASSES (class_mapping).
+        self._mapping = list(mapping) if mapping is not None else list(range(len(_CLASSES)))
+
+    def run(self, output_names, feeds):
+        """@brief Run the network on one letterboxed tensor; return [raw output]."""
+        np = self._np
+        tensor = self._torch.from_numpy(feeds[self._input])
+        with self._torch.no_grad():
+            output = self._network(tensor)
+        raw = output[0] if isinstance(output, (list, tuple)) else output
+        raw = np.ascontiguousarray(raw.detach().cpu().numpy(), dtype=np.float32)
+        if not self._end_to_end:
+            if self._mapping == list(range(len(_CLASSES))):
+                return [raw]
+            return [_remap_scores(raw, self._mapping, np)]
+        # Testa end-to-end: [1, K, 6] = x0, y0, x1, y1, confidenza, classe.
+        # Diventa [1, 4 + classi, K] con la confidenza nella SOLA colonna della
+        # sua classe: e' tutto cio' che questa testa dice (vedi _setup_torch).
+        detections = raw[0]
+        rows = np.zeros((4 + len(_CLASSES), len(detections)), np.float32)
+        x0, y0, x1, y1 = detections[:, 0], detections[:, 1], detections[:, 2], detections[:, 3]
+        rows[0], rows[1] = (x0 + x1) / 2, (y0 + y1) / 2
+        rows[2], rows[3] = x1 - x0, y1 - y0
+        classes = detections[:, 5].astype(int)
+        known = (classes >= 0) & (classes < len(self._mapping))
+        targets = np.asarray(self._mapping, int)[classes[known]]
+        rows[4 + targets, np.flatnonzero(known)] = detections[known, 4]
+        return [rows[None]]
+
+
+def _setup_torch(path):
+    """Load a .pt checkpoint with Ultralytics, checked like the ONNX model."""
+    np, cv2 = _image_dependencies()
+    try:
+        import torch
+        import ultralytics
+        from ultralytics import YOLO
+    except (ImportError, OSError) as exc:
+        raise ValueError(
+            "PyTorch support for .pt models is not installed. Install "
+            "requirements-yolo-pt.txt in the application's Python environment, or "
+            "use an .onnx export of the same model. The Windows installer does not "
+            f"include PyTorch. Details: {exc}") from exc
+    try:
+        weights = path.read_bytes()
+        model = YOLO(str(path), task="detect")
+        if model.task != "detect":
+            raise ValueError("model task must be 'detect'")
+        names = dict(model.names)
+        mapping = class_mapping(names)
+        network = model.model.float().eval()
+        head = network.model[-1]
+        # Testa end-to-end (YOLO26, YOLOv10): si usa SEMPRE la sua inferenza
+        # ufficiale, uno-a-uno, forzata qui perche' il valore predefinito
+        # cambia fra versioni di Ultralytics (8.4.37 accesa, 8.4.163 spenta).
+        # Verificato il 2026-09-25 su una foto reale: il ramo uno-a-molti con
+        # il nostro NMS trovava 38 corpi e ne ritrovava 39 dei 46 dell'uno-a-
+        # uno; la scorciatoia cambiava il modello, non solo il codice.
+        # LIMITE dichiarato: questa testa da' la sola classe migliore, non i
+        # punteggi di tutte le classi; il recupero «pads/pins con un corpo
+        # concorrente» non ha nulla da confrontare e resta inerte.
+        end_to_end = hasattr(head, "one2one_cv2") or bool(getattr(head, "end2end", False))
+        if end_to_end:
+            head.end2end = True
+        session = _TorchSession(network, torch, np, "images", end_to_end=end_to_end,
+                                mapping=mapping)
+        probe = session.run(None, {"images": np.zeros((1, 3, 640, 640), np.float32)})[0]
+        if probe.ndim != 3 or probe.shape[:2] != (1, 4 + len(_CLASSES)) or probe.shape[2] < 1:
+            raise ValueError(f"expected raw output [1, {4 + len(_CLASSES)}, rows], got {list(probe.shape)}")
+    except Exception as exc:
+        raise ValueError(
+            f"Cannot load compatible local YOLO model {path}: {exc}. Use a PCB YOLO "
+            "detection checkpoint trained at 640 px whose classes are among: "
+            + ", ".join(_CLASSES) + ".") from exc
+    info = {
+        "model_path": str(path), "model_sha256": hashlib.sha256(weights).hexdigest(),
+        "model_format": "pt",
+        "model_metadata": {"task": model.task, "names": str(names),
+                           "raw_head": "one-to-one (end-to-end; top class only)"
+                           if end_to_end else "standard"},
+        "classes": list(_CLASSES), "input_shape": [1, 3, 640, 640],
+        "output_shape": list(probe.shape), "providers": ["torch-cpu"],
+        "runtime": f"torch {torch.__version__}; ultralytics {ultralytics.__version__}",
+        **_mapping_info(names, mapping),
+    }
+    return session, "images", np, cv2, info
+
+
 def _setup(model_path):
     path = resolve_yolo_model(model_path)
+    if path.suffix.lower() == ".pt":
+        return _setup_torch(path)
     np, cv2, ort = _dependencies()
     try:
         # Use the same bytes for the session and audit digest. Loading bytes also
@@ -104,14 +395,12 @@ def _setup(model_path):
         if (len(inputs) != 1 or inputs[0].type != "tensor(float)"
                 or list(inputs[0].shape) != [1, 3, 640, 640]):
             raise ValueError("expected one float32 input [1, 3, 640, 640]")
-        if (len(outputs) != 1 or outputs[0].type != "tensor(float)"
-                or list(outputs[0].shape) != [1, 25, 8400]):
-            raise ValueError("expected one raw YOLOv8 float32 output [1, 25, 8400]")
         metadata = dict(session.get_modelmeta().custom_metadata_map)
         names = ast.literal_eval(metadata["names"])
-        if (not isinstance(names, dict) or any(type(k) is not int for k in names)
-                or names != dict(enumerate(_CLASSES))):
-            raise ValueError("class metadata must match the supported 21 PCB classes in order")
+        mapping = class_mapping(names)
+        if (len(outputs) != 1 or outputs[0].type != "tensor(float)"
+                or list(outputs[0].shape) != [1, 4 + len(names), 8400]):
+            raise ValueError(f"expected one raw YOLOv8 float32 output [1, {4 + len(names)}, 8400]")
         if metadata.get("task") != "detect":
             raise ValueError("model task metadata must be 'detect'")
         for key, expected in (("imgsz", [640, 640]), ("batch", 1), ("stride", 32)):
@@ -123,14 +412,24 @@ def _setup(model_path):
     except Exception as exc:
         raise ValueError(
             f"Cannot load compatible local YOLO model {path}: {exc}. Use a "
-            "self-contained 21-class PCB YOLOv8 ONNX export with fixed 640 input "
-            "and raw [1, 25, 8400] output; check the CPU onnxruntime installation."
+            "self-contained PCB YOLOv8 ONNX export with fixed 640 input, raw "
+            "[1, 4 + classes, 8400] output and classes among: " + ", ".join(_CLASSES)
+            + "; check the CPU onnxruntime installation."
         ) from exc
+    # Il rilevatore legge i punteggi nell'ordine di _CLASSES: un modello con
+    # una tabella diversa passa da una sessione che li riordina. Con la
+    # tabella del rilevatore la sessione resta quella di onnxruntime.
+    if mapping != list(range(len(_CLASSES))):
+        session = _RemappedSession(session, mapping, np)
     info = {
         "model_path": str(path), "model_sha256": hashlib.sha256(weights).hexdigest(),
+        "model_format": "onnx",
         "model_metadata": metadata, "classes": list(_CLASSES),
-        "input_shape": list(inputs[0].shape), "output_shape": list(outputs[0].shape),
+        "input_shape": list(inputs[0].shape),
+        "output_shape": [1, 4 + len(_CLASSES), 8400],
+        "model_output_shape": list(outputs[0].shape),
         "providers": providers, "runtime": getattr(ort, "__version__", "unknown"),
+        **_mapping_info(names, mapping),
     }
     return session, inputs[0].name, np, cv2, info
 
@@ -152,10 +451,11 @@ def validate_yolo_setup(model_path=None) -> dict:
 _TILE_OVERLAP_FRACTION = 0.25
 
 
-def view_overlap_px(view):
+def view_overlap_px(view, overlap=_TILE_OVERLAP_FRACTION):
     """@brief Quanto una tessera si sovrappone alla successiva, in pixel.
 
     @param view Nome della vista, come lo genera _views.
+    @param overlap Frazione di tessera ripetuta, la stessa data a _views.
     @return Pixel di sovrapposizione, o infinito per la vista d'insieme.
     @note E' la quota che decide che cosa quella vista puo' misurare: un corpo
         piu' grande della sovrapposizione tocca un bordo in OGNI tessera che lo
@@ -169,10 +469,10 @@ def view_overlap_px(view):
         size = int(name.split("-")[0][4:])
     except ValueError:
         return float("inf")
-    return size * _TILE_OVERLAP_FRACTION
+    return size * overlap
 
 
-def _prefer_complete_views(rows, complete):
+def _prefer_complete_views(rows, complete, overlap=_TILE_OVERLAP_FRACTION):
     """@brief Toglie i frammenti che nessuna tessera poteva misurare.
 
     @param rows Righe da filtrare.
@@ -198,7 +498,7 @@ def _prefer_complete_views(rows, complete):
         size = max(box[2] - box[0], box[3] - box[1])
         covering = [other for other in complete if other is not row
                     and _cover(box, other["box"]) >= _FRAGMENT_COVERED]
-        if sides and size > view_overlap_px(row.get("view")) and covering:
+        if sides and size > view_overlap_px(row.get("view"), overlap) and covering:
             # Presenza ed ingombro sono due fatti distinti. Se il frammento che
             # cede il posto era sopra la soglia operativa, la PRESENZA del corpo
             # e' attestata da un rilevamento sicuro: a cedere e' solo la misura
@@ -213,12 +513,13 @@ def _prefer_complete_views(rows, complete):
     return keep
 
 
-def _views(width, height):
+def _views(width, height, sizes=_TILE_SIZES, overlap=_TILE_OVERLAP_FRACTION):
+    """Whole photo, then the magnified tiles of each chosen side (none = whole photo only)."""
     yield "overview", (0, 0, width, height)
-    for size in (640, 1280):
+    for size in sizes:
         def starts(length):
             values = range(0, max(1, length - size + 1),
-                           int(size * (1 - _TILE_OVERLAP_FRACTION)))
+                           max(1, int(size * (1 - overlap))))
             return sorted(set(values) | {max(0, length - size)})
 
         for y in starts(height):
@@ -239,7 +540,7 @@ def _letterbox(image, np, cv2):
     return tensor / 255.0, ratio, left, top
 
 
-def _nms(rows, np, trace=None, stage=None):
+def _nms(rows, np, trace=None, stage=None, iou=_NMS_IOU):
     """Suppress alternate boxes regardless of class; do not suppress containment alone."""
     if not rows:
         return []
@@ -255,11 +556,11 @@ def _nms(rows, np, trace=None, stage=None):
         intersection = wh[:, 0] * wh[:, 1]
         overlap = intersection / (areas[index] + areas[rest] - intersection)
         if trace is not None:
-            for suppressed, iou in zip(rest[overlap > _NMS_IOU], overlap[overlap > _NMS_IOU]):
+            for suppressed, value in zip(rest[overlap > iou], overlap[overlap > iou]):
                 trace.append({"proposal_id": rows[suppressed]["proposal_id"],
                               "suppressed_by": rows[index]["proposal_id"],
-                              "stage": stage, "iou": float(iou)})
-        order = rest[overlap <= _NMS_IOU]
+                              "stage": stage, "iou": float(value)})
+        order = rest[overlap <= iou]
     return retained
 
 
@@ -277,7 +578,7 @@ def _cover(first, second):
     return (wide * high / area) if area > 0 else 0.0
 
 
-def _recover_clipped(retained, fragments):
+def _recover_clipped(retained, fragments, confidence=_CONFIDENCE):
     """@brief Ricompone i corpi che nessuna vista ha visto per intero.
 
     @param retained Rilevamenti interni sopravvissuti alla NMS globale.
@@ -344,12 +645,12 @@ def _recover_clipped(retained, fragments):
         recovered.append(dict(best, box=box, clipped_by_tile=True,
                               clipped_sides=still_clipped,
                               recovered_from=[row["proposal_id"] for row in group],
-                              rejection=(None if best["confidence"] >= _CONFIDENCE
+                              rejection=(None if best["confidence"] >= confidence
                                          else "below_confidence")))
     return recovered
 
 
-def _proposals(raw, bounds, image_size, transform, view, np):
+def _proposals(raw, bounds, image_size, transform, view, np, confidence_threshold=_CONFIDENCE):
     """Keep auditable pre-NMS proposals; reject malformed or cropped body boxes."""
     x, y, x1, y1 = bounds
     width, height = image_size
@@ -371,7 +672,8 @@ def _proposals(raw, bounds, image_size, transform, view, np):
         # Argmax alone is not evidence of absence. Preserve a competing body
         # hypothesis at the SAME operating threshold, as uncertain review input.
         # This is a recall heuristic, not validation that a pad is a mounted body.
-        ambiguous_body = _CLASSES[class_id] in _EXCLUDED and body_confidence >= _CONFIDENCE
+        ambiguous_body = (_CLASSES[class_id] in _EXCLUDED
+                          and body_confidence >= confidence_threshold)
         selected_id = body_id if ambiguous_body else class_id
         selected_confidence = body_confidence if ambiguous_body else confidence
         cx, cy, bw, bh = map(float, prediction[:4])
@@ -398,7 +700,7 @@ def _proposals(raw, bounds, image_size, transform, view, np):
             reason = "excluded_class"
         elif cut:
             reason = "clipped_by_tile"
-        elif confidence < _CONFIDENCE:
+        elif confidence < confidence_threshold:
             reason = "below_confidence"
         rows.append({"proposal_id": f"{view}:{int(index)}",
                      "view": view, "prediction_index": int(index), "box": box,
@@ -441,15 +743,23 @@ def _write_audit(audit_dir, document):
 
 
 def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None,
-                           audit_dir=None, include_review_candidates=False) -> list[dict]:
+                           audit_dir=None, include_review_candidates=False,
+                           confidence=None, settings=None) -> list[dict]:
     """@brief Detect generic mechanical candidates on an already calibrated photo.
 
     @param photo Nonempty H x W x 3 uint8 NumPy image in OpenCV BGR order.
     @param length_mm Finite positive board extent along image X, in mm.
     @param width_mm Finite positive board extent along image Y, in mm.
-    @param model_path Optional local ONNX weights path; see resolve_yolo_model.
+    @param model_path Optional local .onnx or .pt weights path; see resolve_yolo_model.
     @param log Optional callable receiving progress and audit-path strings.
     @param audit_dir Optional directory receiving a unique yolo-*.json audit.
+    @param confidence Operating confidence threshold; None keeps the default
+        (_CONFIDENCE, 0.25). Validated by operating_confidence and recorded in
+        the log and in the audit recipe. Below it a proposal is weak
+        (review-only or audit-only), exactly as with the default. When given
+        it overrides settings["confidence"].
+    @param settings Detector settings chosen by the user (see yolo_settings);
+        None keeps every default. Recorded in the log and the audit recipe.
     @param include_review_candidates Include the subthreshold bodies REBUILT
         from tile seams as generic uncertain review-only candidates, even
         without an audit directory. Defaults to False for standalone detector
@@ -485,16 +795,34 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
     if log is not None and not callable(log):
         raise ValueError("log must be callable or None.")
     emit = log if log is not None else lambda message: None
-    np, cv2, _ort = _dependencies()
+    # Solo numpy/OpenCV qui: onnxruntime serve ai soli .onnx (vedi _setup).
+    np, cv2 = _image_dependencies()
     if (not isinstance(photo, np.ndarray) or photo.ndim != 3
             or photo.shape[2] != 3 or min(photo.shape[:2]) <= 0
             or photo.dtype != np.uint8):
         raise ValueError("photo must be a nonempty uint8 BGR NumPy image of shape H x W x 3.")
+    chosen = yolo_settings(settings)
+    if confidence is not None:
+        chosen["confidence"] = operating_confidence(confidence)
+    threshold, nms_iou = chosen["confidence"], chosen["nms_iou"]
+    overlap = chosen["tile_overlap"]
     session, input_name, np, cv2, info = _setup(model_path)
+    expected_shape = tuple(info["output_shape"])
+    emit(f"YOLO local model: {Path(info['model_path']).name} "
+         f"({info.get('model_format', 'onnx')}; {info.get('runtime', 'unknown')}).")
+    if info.get("class_order") == "remapped by name":
+        missing = info.get("missing_classes") or []
+        emit(f"YOLO local: {len(info['model_classes'])} model classes read by name"
+             + (f"; not in this model: {', '.join(missing)}" if missing else "") + "."
+             + (" Without pads/pins the recovery of bodies mistaken for pads or pins "
+                "has nothing to compare." if {"pads", "pins"} & set(missing) else ""))
     height, width = photo.shape[:2]
-    views = list(_views(width, height))
-    emit(f"YOLO local: {len(views)} views; confidence {_CONFIDENCE}; "
-         f"audit floor {_AUDIT_CONFIDENCE}; class-agnostic NMS IoU {_NMS_IOU}; CPU inference.")
+    views = list(_views(width, height, chosen["tile_sizes"], overlap))
+    emit(f"YOLO local: {len(views)} views (tiles: "
+         + (", ".join(f"{size} px" for size in chosen["tile_sizes"]) or "none, whole photo only")
+         + f"; tile overlap {overlap:g}); confidence {threshold:g}"
+         + (" (default)" if threshold == _CONFIDENCE else " (chosen)") + "; "
+         f"audit floor {_AUDIT_CONFIDENCE}; class-agnostic NMS IoU {nms_iou:g}; CPU inference.")
     proposals, candidates, view_records, fragments, whole = [], [], [], [], []
     nms_trace = [] if audit_dir is not None else None
     for view, bounds in views:
@@ -503,14 +831,16 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
         try:
             result = session.run(None, {input_name: tensor})
             if (len(result) != 1 or not isinstance(result[0], np.ndarray)
-                    or result[0].shape != (1, 25, 8400) or result[0].dtype != np.float32):
-                raise ValueError("expected float32 output [1, 25, 8400]")
+                    or result[0].shape != expected_shape or result[0].dtype != np.float32):
+                # La forma misurata al caricamento, per ogni modello: 8400 righe
+                # per l'ONNX (contratto invariato), quella della testa per un .pt.
+                raise ValueError(f"expected float32 output {list(expected_shape)}")
         except Exception as exc:
             raise ValueError(f"Local YOLO inference failed in {view}: {exc}") from exc
         rows, invalid = _proposals(result[0], bounds, (width, height),
-                                   (ratio, left, top), view, np)
+                                   (ratio, left, top), view, np, threshold)
         eligible = [row for row in rows if row["rejection"] is None]
-        selected = _nms(eligible, np, nms_trace, "eligible_per_view")
+        selected = _nms(eligible, np, nms_trace, "eligible_per_view", nms_iou)
         candidates.extend(selected)
         # Raccolti sempre, non solo per l'audit: senza di loro un corpo piu'
         # grande della sovrapposizione fra tessere non arriva da nessuna parte.
@@ -523,24 +853,24 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
             proposals.extend(rows)
         view_records.append({"name": view, "bounds": list(bounds), "scale": ratio,
                              "padding_left_top": [left, top], "invalid_rows": invalid,
-                             "valid_rows_below_audit_floor": 8400 - invalid - len(rows),
+                             "valid_rows_below_audit_floor": result[0].shape[2] - invalid - len(rows),
                              "filter_rejections": dict(Counter(
                                  row["rejection"] for row in rows if row["rejection"])),
                              "eligible_before_nms": len(eligible),
                              "raw_proposals": len(rows), "retained_before_global_nms": len(selected)})
         emit(f"YOLO local {view}: {len(selected)} candidates; {invalid} invalid rows rejected.")
-    retained = _nms(candidates, np, nms_trace, "global")
+    retained = _nms(candidates, np, nms_trace, "global", nms_iou)
     # Cio' che nessuna vista ha visto intero torna in gioco: sopra soglia come
     # candidato, sotto soglia come ipotesi da rivedere, come qualunque altro.
-    recovered = _recover_clipped(retained, fragments)
+    recovered = _recover_clipped(retained, fragments, threshold)
     confident = [row for row in recovered if row["rejection"] is None]
     if confident:
-        retained = _nms(retained + confident, np, nms_trace, "global")
+        retained = _nms(retained + confident, np, nms_trace, "global", nms_iou)
     retained.sort(key=lambda row: (row["box"][1], row["box"][0]))
     # Chi ha visto un corpo per intero vale come misura anche se non era
     # abbastanza sicuro da diventare un candidato.
     before_preference = len(retained)
-    retained = _prefer_complete_views(retained, whole)
+    retained = _prefer_complete_views(retained, whole, overlap)
     if len(retained) < before_preference:
         emit(f"YOLO local: {before_preference - len(retained)} clipped detections dropped; "
              "they are larger than the tile overlap, so that view could not measure them, "
@@ -556,8 +886,9 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
         review_pool = retained + [row for row in proposals if row["rejection"] == "below_confidence"]
         review_pool += [row for row in recovered if row["rejection"] == "below_confidence"]
         review_proposals = _prefer_complete_views(
-            [row for row in _nms(review_pool, np) if row["rejection"] == "below_confidence"],
-            whole)
+            [row for row in _nms(review_pool, np, iou=nms_iou)
+             if row["rejection"] == "below_confidence"],
+            whole, overlap)
     # Le proposte deboli non arrivano piu' alla revisione ne' al modello: sulla
     # scheda di prova erano 35 su 82, quasi tutte su zone dove non c'e' nulla
     # montato, e rendevano piu' rumorosa (e piu' cara) l'unica chiamata a
@@ -606,11 +937,12 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
                      image_size=[width, height], board_size_mm=[length_mm, width_mm],
                      audit_scope="Detector only; proposals below audit floor are not recorded; "
                                  "downstream AI decisions require their own audit.",
-                     recipe={"overview": True, "input_size": 640, "tile_sizes": [640, 1280],
-                             "overlap_fraction": 0.25, "confidence": _CONFIDENCE,
+                     recipe={"overview": True, "input_size": 640,
+                             "tile_sizes": list(chosen["tile_sizes"]),
+                             "overlap_fraction": overlap, "confidence": threshold,
                              "raw_proposal_min_confidence": _AUDIT_CONFIDENCE,
                              "include_review_candidates": include_review_candidates,
-                             "nms_iou": _NMS_IOU, "class_agnostic": True,
+                             "nms_iou": nms_iou, "class_agnostic": True,
                              "nms_stages": ["eligible_per_view", "global"],
                              "tile_edge_margin_px": 1, "excluded_classes": sorted(_EXCLUDED),
                              "excluded_class_policy": "retain uncertain competing body class "

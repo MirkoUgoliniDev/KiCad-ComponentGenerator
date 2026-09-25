@@ -1,0 +1,5 @@
+# Optional: load YOLO .pt checkpoints with PyTorch (Ultralytics), in addition
+# to the .onnx models of requirements-yolo.txt. Large (PyTorch CPU) and NOT
+# part of the Windows installer; install it only where .pt models are used.
+-r requirements-yolo.txt
+ultralytics>=8.4

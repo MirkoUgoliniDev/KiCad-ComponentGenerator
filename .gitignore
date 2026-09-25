@@ -5,6 +5,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .venv/
+.venv-build/
 venv/
 env/
 
@@ -50,6 +51,8 @@ docs/ESP32/
 
 # Local detector weights (large binaries; review upstream licences before redistribution).
 models/*.onnx
+# Pesi PyTorch dei modelli addestrati (Colab, Roboflow): licenza da decidere.
+models/*.pt
 
 # .claude/ va su GitHub (istruzioni, agenti, skill: utente, 2026-09-24);
 # restano fuori solo gli alberi di lavoro temporanei dei sottoagenti, che sono
@@ -59,3 +62,5 @@ models/*.onnx
 
 # Materiale privato dell'utente: mai su GitHub (utente, 2026-09-24).
 Private/
+# Stessa cartella scritta in minuscolo (dataset, annotazioni private): mai su GitHub.
+private/

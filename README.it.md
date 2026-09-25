@@ -4,6 +4,12 @@ Tool Python per generare automaticamente componenti KiCad completi
 (impronta 2D `.kicad_mod` + modello 3D parametrico `.step`) a partire da
 dimensioni/quote/immagini inseriti in una GUI.
 
+## Installazione su Windows
+
+Scarica `KiCadGen-X.Y.Z.msi` dalle Release di GitHub e segui
+[docs/INSTALLATION-WINDOWS.md](docs/INSTALLATION-WINDOWS.md). Come si
+costruiscono eseguibile e installer: [docs/PACKAGING-WINDOWS-MSI.md](docs/PACKAGING-WINDOWS-MSI.md).
+
 ## Struttura del progetto
 
 ```
@@ -586,3 +592,34 @@ posizioni) — vedi `tests/test_cad3d.py` per il test di integrazione
 - `pad_type` ammessi: `thru_hole`, `smd`, `np_thru_hole`.
 - `shape` ammesse: `circle`, `rect`, `oval`, `roundrect` (+ `trapezoid`,
   `custom` dichiarate ma non ancora gestite con geometria dedicata).
+
+## Licenza
+
+Il codice sorgente e la documentazione di KiCadGen sono distribuiti con la
+**GNU Affero General Public License v3.0** (`LICENSE`).
+Copyright (c) 2026 Mirko Ugolini.
+
+Fino al 25/09/2026 il progetto era MIT. È passato ad AGPL-3.0 perché usa
+Ultralytics (AGPL-3.0) per i modelli YOLO `.pt` e perché i pesi YOLO usati
+dichiarano AGPL-3.0.
+
+I pesi dei modelli YOLO e il dataset di addestramento **hanno licenze proprie,
+che possono essere diverse da quella del codice**. Sono elencati uno per uno in
+`THIRD_PARTY_NOTICES.md`, insieme alle dipendenze Python:
+
+- nel repository non ci sono pesi (`models/*.pt` e `models/*.onnx` sono
+  esclusi da Git). I checkpoint usati nello sviluppo dichiarano AGPL-3.0 nei
+  metadati. La licenza del modello ONNX di base non è ancora chiarita (MIT
+  nella model card, AGPL-3.0 nei metadati);
+- i modelli YOLO26 di Roboflow sono addestrati sul
+  [dataset CompDetect](https://universe.roboflow.com/dataset-lmrsw/compdetect),
+  con licenza [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Il
+  dataset non è ridistribuito qui e i suoi autori non approvano questo
+  progetto;
+- FreeCAD e KiCad sono programmi separati, con licenze proprie, e non sono
+  inclusi.
+
+Footprint e modelli 3D generati, datasheet e foto forniti dall'utente possono
+avere licenze o limiti d'uso propri, da verificare. Questa sezione non afferma
+che un uso, commerciale o no, sia consentito oltre quanto dicono le singole
+licenze.

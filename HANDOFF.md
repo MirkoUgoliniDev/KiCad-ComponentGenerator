@@ -1,15 +1,19 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `3a50491` (pushato):
-  le 5 decisioni del 25/09 (front/back del cubo 3D con conversione dei
-  progetti, motivi STEP tradotti, colonna Stato, conferme STEP a icona, foto
-  EXIF dritte per l'AI). Prima: `794c5ed` correzioni della verifica con
-  agenti (V1-V9, A1-A7, P1-P3, test) e apertura dei progetti, `99434c5` icona dell'archivio (punto 29), `7223819` revisione interfaccia (punti 1-27 in fondo al file),
-  credito e costo AI del progetto, anteprime con zoom, pin dentro la scheda,
-  raccordi impossibili, rigenerazione 3D dopo «Applica». Prima: `3cdea2a`
-  (localizzazione completa), `b1ee2c0` (.gitignore), `eb633ea` (difetti).
-  Nessuna decisione aperta: le cinque del 25/09 sono state fatte.
-- Suite completa (25/09, dopo le 5 decisioni): 4109 passati, 3 saltati,
+- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `PENDING` (pushato):
+  installer Windows MSI (PyInstaller + WiX, app_paths), modelli YOLO .pt con
+  PyTorch, classi dei modelli lette per nome, pretest «Solo YOLO locale»
+  (nessuna AI), «Parametri YOLO» (soglia, doppioni, tessere) per entrambe le
+  modalita' YOLO, licenza del codice AGPL-3.0 + THIRD_PARTY_NOTICES.md e menu
+  «?» > «Licenze» (punti 31-40 in fondo al file). Prima: `3a50491` le 5
+  decisioni del 25/09, `794c5ed` correzioni della verifica con agenti,
+  `7223819` revisione interfaccia (punti 1-27).
+- APERTO, richiesto dall'utente: licenze IN SOSPESO (ID Roboflow del Large
+  `compdetect-dnwth-2-yolo26l-t1` e dataset «Detecting the PCB object» di
+  Arshiasbn, MIT, da riportare nei notice dopo conferma del modello a cui si
+  riferisce; vedi punto 36 e seguenti). Prova d'installazione dell'MSI in una
+  macchina virtuale (utente).
+- Suite completa (25/09, dopo il punto 40): 4196 passati, 3 saltati,
   2 xfail attesi, 19 sottotest; uscita del processo 0 (controllarla sempre).
 - Difetto 16 CHIUSO (utente, 24/09, scelta «A»): la frase «Tipo SMD di
   proposito» resta anche sui moduli misti half_hole + through_hole, perche'
@@ -6701,3 +6705,481 @@ ESITO delle 5 decisioni (25/09):
 5. Foto EXIF: `_upright_image_bytes` in `_file_to_content_block`: foto con
    tag di rotazione mandata gia' ruotata e senza tag; senza tag byte identici;
    file illeggibile -> originale. Test test_ai_photo_orientation.
+
+## PIANO IN CORSO (25/09) — eseguibile Windows e setup MSI
+
+Richiesta dell'utente: distribuire il programma come eseguibile Windows con
+setup standard, sul modello di C:\Lavori\VSCode\employee-scheduling (MSI
+WiX 3.14 via jpackage, immagini banner/dialogo, menu Start, collegamento,
+scelta cartella, dati in %LOCALAPPDATA%, build GitHub Actions windows-latest,
+publish-release.ps1, docs PACKAGING/INSTALLATION, skill installer-change,
+prova solo in VM). Decisioni dell'utente (25/09):
+1. MSI con WiX 3.14, come l'altro progetto.
+2. Installazione per tutti gli utenti, in Program Files (serve amministratore).
+3. Chiave API: NESSUNA finestra di inserimento per ora («poi troviamo un
+   modo»). Nel programma installato si legge anche il .env nella cartella dati
+   dell'utente (Program Files non e' scrivibile): va detto nella documentazione.
+4. Lavoro su questo branch (YOLO-SOLUTION), non su main.
+Fasi:
+F1 (codice) percorsi: da sorgente tutto come oggi; da eseguibile dati in
+   %LOCALAPPDATA%\KiCadGen (config.json, data/*.sqlite3, cache modelli, .env),
+   progetti in Documenti\KiCadGen, database iniziale copiato al primo avvio,
+   risorse di sola lettura (modello YOLO, script FreeCAD, icone) nel pacchetto.
+   Numero di versione unico (kicadgen.__version__) nella finestra About.
+F2 PyInstaller a cartella + script di build riproducibile + controllo
+   `--check-runtime` sull'eseguibile. Il database iniziale si prende da git
+   HEAD, mai la copia locale modificata (data/analysis_profiles.sqlite3 locale
+   non va mai distribuito ne' committato).
+F3 MSI WiX 3.14 (heat per raccogliere la cartella, UpgradeCode fisso,
+   per-machine, menu Start, desktop, scelta cartella, immagini, avviso se
+   mancano FreeCAD/KiCad, disinstallazione che non tocca i dati utente).
+F4 publish-release.ps1, workflow GitHub Actions, docs, skill con verifica.
+   Prova dell'MSI solo in VM o Windows Sandbox.
+PROGRESSO F1 (25/09): FATTA. `kicadgen/app_paths.py` (is_frozen, install_dir,
+resource_path, user_data_dir, default_projects_dir, data_file con seme,
+env_files); collegati app_config.CONFIG_PATH, ProfileStore (seme al primo
+avvio), accepted_models.default_path, openrouter.MODELS_CACHE_PATH e
+messaggio della chiave (indica il file vero), photo_yolo (resource_path, con
+ripiego per il caricamento isolato), main_window (APP_DIR = install_dir,
+DEFAULT_LIBRARY_ROOT = default_projects_dir, «Apri cartella» = dati utente),
+main.py (.env da env_files). `kicadgen.__version__ = "1.0.0"` nella finestra
+About. Test tests/test_app_paths.py (7); test_photo_yolo aggiornato (stesso
+contratto, meccanismo resource_path).
+PROGRESSO F2/F3 (25/09, in corso): icona app (assets/app-icon.svg ->
+packaging/KiCadGen.ico via tools/make_app_icon.py, anche icona della
+finestra); requirements-build.txt (+ pyinstaller, ambiente .venv-build,
+ignorato da git); packaging/KiCadGen.spec (cartella unica, senza console,
+risorse con la stessa struttura del pacchetto, script cad3d come file veri,
+database iniziale da build/seed preso da git HEAD, VERSIONINFO dal numero di
+versione); scripts/build-windows.ps1 (-Package app-image|msi: ambiente,
+seme, icona, PyInstaller, prova `--check-runtime`); scripts/build-msi.ps1
+(WiX 3.14 in C:\tools\wix314 gia' presente; heat/candle/light);
+packaging/KiCadGen.wxs (per-machine, UpgradeCode E97182CB-C126-4B0C-B336-
+172FE2830FB7 DA NON CAMBIARE MAI, MajorUpgrade, scelta cartella, licenza,
+menu Start e desktop, «Launch KiCadGen», ricerca di FreeCAD/KiCad con avviso
+nell'ultima pagina); tools/make_installer_assets.py (banner 493x58, dialogo
+493x312, licenza RTF). Prima build in corso (download delle librerie).
+TRAPPOLA: il launcher `py -3.13` su questa macchina non funziona («Parametro
+non corretto»): lo script cerca Python 3.13 fra i candidati e lo interroga.
+PROGRESSO (25/09): PRIMA BUILD RIUSCITA. dist\KiCadGen (PyInstaller 6.22.3,
+.venv-build con Python 3.13.12): `--check-runtime` OK per PyQt6, PIL, cv2,
+pyvista, pyvistaqt, numpy, onnxruntime; avvio vero senza finestra con
+KICADGEN_DATA_DIR temporanea: resta in esecuzione, copia il database
+iniziale. MSI dist\KiCadGen-1.0.0.msi 201.7 MB: letto in sola lettura,
+ALLUSERS=1, UpgradeCode fisso, versione 1.0.0, collegamenti menu Start e
+desktop, 1719 file. Correzioni fatte durante la build: ARPNOMODIFY duplicato
+(lo imposta WixUI_InstallDir); WixShellExecTarget via SetProperty dopo
+CostFinalize; chiavi dei collegamenti sotto HKCU (ICE38/43/57). Restano
+avvisi ICE60 (lingua dei file delle librerie): innocui.
+NON ANCORA PROVATO: installazione vera, generazione FreeCAD dall'eseguibile
+installato, disinstallazione/aggiornamento -> solo in VM o Windows Sandbox.
+SCOPERTA E DECISIONE MIA DA CONFERMARE (25/09): i pesi YOLO
+models/pcb_yolov8s.onnx hanno licenza AMBIGUA (model card MIT, metadati
+AGPL; handoff 2026-09-2x e docs/yolo-photo-workflow.md: «nessuna
+ridistribuzione finche' la licenza non e' chiarita»). La prima MSI li
+conteneva: CORRETTO, ora sono esclusi per default e si includono solo con
+`build-windows.ps1 -IncludeYoloModel`. Il programma parte anche senza (prova
+fatta). I pesi sono anche ignorati da git: la build su GitHub Actions non li
+avrebbe comunque.
+F4 FATTA: scripts/publish-release.ps1 (versione, commit, tag, push; dal
+branch corrente per scelta dell'utente), .github/workflows/release.yml (tag
+v*.*.* -> controllo tag/versione, test, MSI, GitHub Release),
+docs/PACKAGING-WINDOWS-MSI.md, docs/INSTALLATION-WINDOWS.md (chiave API in
+%LOCALAPPDATA%\KiCadGen\.env), skill .claude/skills/installer-change,
+tests/test_packaging.py (10), README e .env.example aggiornati.
+Build finale da un solo comando: dist\KiCadGen-1.0.0.msi 167.1 MB (senza
+pesi), `--check-runtime` OK, avvio senza pesi OK.
+DA FARE (utente): prova d'installazione in una VM (Windows Sandbox non e'
+attivo su questa macchina); publish-release.ps1 SOLO quando l'utente lo
+chiede (pubblica tag e Release su GitHub).
+SUITE (25/09, dopo il packaging): 4126 passati, 3 saltati, 2 xfail,
+19 sottotest, uscita 0. Un test aggiornato (test_photo_detector_ui: stesso
+contratto, ora si simula `resource_path` invece di APP_DIR). NON committato.
+DECISIONE UTENTE (25/09): licenze dei modelli YOLO (onnx e .pt) «vediamo
+dopo». Nel frattempo: nessun peso nell'installer per default
+(-IncludeYoloModel resta opt-in) e nessun peso su git. L'utente ha aggiunto
+in models/ due checkpoint PyTorch: pcb_component_detector_yolov8m_best.pt
+(Colab, 52 MB) e pcb_component_detector_yolo26_roboflow_m.pt (Roboflow,
+44 MB); `models/*.pt` aggiunto al .gitignore. KiCadGen legge solo ONNX:
+per usarli servono esportazione ONNX (Ultralytics, in YOLO\research\
+investigation\.venv-train) e, per YOLO26, gestione del formato di uscita
+diverso e verifica delle classi. NON avviato: in attesa del via.
+
+## PIANO IN CORSO (25/09) — modelli YOLO .pt con PyTorch
+
+Richiesta dell'utente: «se il file ha estensione .pt devi usare PyTorch».
+Scritto prima del codice. Fatti verificati (con l'ambiente del progetto
+YOLO, sola lettura): i due .pt hanno ESATTAMENTE le 21 classi, nello stesso
+ordine, del modello ONNX; YOLOv8m da' l'uscita grezza [1, 25, 8400] come
+l'ONNX; YOLO26 di suo da' [1, 300, 6] (testa uno-a-uno, gia' filtrata), con
+`head.end2end = False` da' [1, 25, 8400] (testa uno-a-molti, addestrata).
+Scelta: il .pt passa dallo STESSO codice dell'ONNX (letterbox, soglie, NMS,
+audit, revisione): un «session» PyTorch con la stessa interfaccia `run`.
+Per YOLO26 e' una deviazione dall'inferenza ufficiale (uno-a-uno): euristica
+DICHIARATA nel codice, da confrontare con predict() prima di fidarsene.
+Dipendenza: ultralytics (+ torch CPU) nell'ambiente di sviluppo, requisito
+opzionale a parte; NON nell'installer (dimensione, licenza AGPL da decidere):
+nell'eseguibile un .pt da' un errore chiaro. Sicurezza: un .pt e' pickle,
+caricarlo esegue codice: solo file scelti dall'utente, detto nel codice.
+Contratto cambiato: test «unsafe.pt rifiutato» -> il .pt e' accettato.
+ESITO .pt (25/09): FATTO. photo_yolo accetta .onnx (onnxruntime, contratto
+invariato) e .pt (Ultralytics/PyTorch, `_setup_torch` + `_TorchSession` con
+la stessa interfaccia `run`); stesso codice a valle. Forma dell'uscita
+verificata contro quella misurata al caricamento (ONNX resta 8400 righe).
+DIAGNOSI CORRETTA [CORRETTO]: la prima scelta (YOLO26 via ramo uno-a-molti
++ nostro NMS) e' stata BOCCIATA dalla verifica: su AltaRisoluzione2.jpg
+trovava 38 corpi e ne ritrovava 39/46 della testa ufficiale uno-a-uno. Ora
+per le teste end-to-end si usa SEMPRE l'uno-a-uno, forzata (Ultralytics
+8.4.37 la tiene accesa, 8.4.163 spenta): 46/46 ritrovati, 45 stessa classe,
+0 in piu' (43 riquadri dopo il nostro NMS, 3 coppie fuse). Limite: solo la
+classe migliore per rilevamento. YOLOv8m: 45/47 contro predict ufficiale.
+ultralytics 8.4.163 + torch 2.14 CPU installati in .venv (requirements-
+yolo-pt.txt); esclusi da PyInstaller (spec excludes). UI: filtro *.onnx *.pt
+e testi nelle 4 lingue. Test tests/test_photo_yolo_pt.py (fake + integrazione
+con i .pt veri, saltata se assenti); test «unsafe.pt rifiutato» aggiornato
+(ora «weights.bin» ed «empty.pt»). Regressione mia trovata e corretta: il
+controllo della forma allentato valeva anche per l'ONNX.
+TRAPPOLA NUOVA (25/09): ultralytics 8.4.163 installa per errore un pacchetto
+`tests` di primo livello in site-packages. La nostra cartella tests/ non ha
+__init__.py (namespace) e perdeva sempre: 17 file di test non si caricavano
+(`No module named 'tests.test_photo_inventory_gui'`). Corretto in
+tests/conftest.py legando il nome `tests` alla nostra cartella prima di ogni
+import. NON aggiungere tests/__init__.py (romperebbe i ~25 import senza
+prefisso) e non cancellare i file in site-packages (tornano a ogni installazione).
+SUITE (25/09, dopo .pt): 4136 passati, 3 saltati, 2 xfail, 19 sottotest,
+uscita 0. Tutto NON committato.
+31. [x] (utente 25/09) Modale «Analisi AI in corso»: durante la fase
+    YOLO la riga dello strumento dice fisso «rilevatore locale ONNX» anche con
+    un .pt. Deve indicare chiaramente il modello usato (file e formato).
+ESITO 31: `photo_yolo.model_label(model_path)` (stessa scelta di
+resolve_yolo_model, senza aprire il file) -> «nome.pt (PyTorch)» /
+«nome.onnx (ONNX)»; photo_inventory annuncia la fase YOLO con quello.
+Test: 3 nuovi in test_photo_yolo_pt, 2 contratti aggiornati
+(test_extraction_phase_contract, test_progress_messages: ora il modello del
+test, fixture.onnx). Suite: 4139 passati, uscita 0. NON committato.
+32. [x] (utente 25/09) «puoi aggiungere una voce solo YOLO locale ?» e poi
+    «se abbiamo solo YOLO si fermi li e basta, fa vedere solo i rettangoli
+    individuati». PIANO (scritto prima del codice):
+    - nuovo valore del rilevatore `yolo_only`, aggiunto IN CODA alla combo
+      (gli indici di ai/yolo/vlm non cambiano), testi nelle 4 lingue;
+    - extract_inventory: stesso percorso di `yolo` (rilevatore, filtro dei
+      contatti dichiarati, misura dei bordi, evidenza, revisione «Corpi
+      rilevati»), poi SI FERMA: nessuna `review_global_inventory`, nessuna
+      fase 'llm' per la foto. I riquadri tenuti diventano i componenti, con
+      il colore campionato dalla foto (gratis) e l'overlay dei rettangoli;
+    - senza revisore (review_proposals None) restano fuori le proposte
+      deboli (`_yolo_review_only`, sotto soglia operativa): nel percorso
+      AI le giudicava la chiamata a pagamento, qui nessuno;
+    - tipo (`kind`) dalla classe YOLO con tabella DICHIARATA (classi uguali
+      ai tipi -> stesse; transistor -> ic come nel percorso AI; clock ->
+      crystal; button -> switch; le altre, o classe ambigua -> generic).
+      Altezze: segnaposto 1.0 mm dichiarato. Nome «<classe> N» (come la
+      riconciliazione): il nome «YOLO candidate» e' la regola che esclude
+      dal 3D le ipotesi NON riviste; qui sono l'inventario finale e vanno
+      nel 3D come volumi generici;
+    - datasheet_extractor/main_window: `yolo_only` valida il modello come
+      `yolo`; nessuna chiamata sulla foto annunciata; il campo del modello
+      di visione nascosto (non serve). L'analisi dei DOCUMENTI resta una
+      chiamata AI: la voce toglie solo la verifica della foto.
+    - test: con `yolo_only` nessuna chiamata `call`, componenti = riquadri
+      tenuti; con `yolo` la riconciliazione parte ancora (caso negativo).
+ESITO 32: FATTO come da piano. `photo_inventory.yolo_only_components` +
+`YOLO_CLASS_KINDS` + `PHOTO_DETECTORS`/`LOCAL_DETECTORS`; ramo `yolo_only`
+in extract_inventory che ritorna dopo la revisione (colori campionati,
+overlay, evidenza) e chiude la fase con phase('', ''). datasheet_extractor
+e main_window accettano `yolo_only` (validazione del modello come `yolo`,
+riga del modello di visione nascosta, log «la fotografia non viene inviata a
+nessun modello»); tooltip e voce nelle 4 lingue; 4 messaggi nel catalogo
+(tr_031.json). Nota: la combo si salva nel progetto PER VALORE
+(project_state.widget_value), non per posizione. Doc: sezione «Local YOLO
+only» in docs/yolo-photo-workflow.md. Test: tests/test_yolo_only_detector.py
+(8: tabella dei tipi, deboli senza revisore, esclusione dal 3D solo per le
+ipotesi grezze, nessuna richiesta sulla foto con yolo_only vs riconciliazione
+con yolo, combo e log). DA VERIFICARE DALL'UTENTE su una foto vera: e' il
+modo per vedere come si comporta il modello nuovo senza l'AI in mezzo.
+NON committato.
+SUITE (25/09, dopo punto 32): 4147 passati, 3 saltati, 2 xfail, 19 sottotest, uscita 0.
+
+33. [x] (utente 25/09) CORREZIONE del punto 32 [CORRETTO]: l'avevo capito
+    male. «se scelgo solo YOLO non deve partire con AI ... serve a fare un
+    pretest di come vengono individuati i componenti senza fare altro».
+    Quindi `yolo_only` NON e' un'estrazione con i documenti via AI: e' un
+    PRETEST locale, nessuna chiamata AI di nessun tipo. PIANO:
+    - «Rilevamento foto» diventa la PRIMA riga di «Strumenti AI»;
+    - con «Solo YOLO locale» si nascondono «Modello AI» e «Modello di
+      visione» (resta «Modello YOLO»; il credito resta, e' del progetto);
+    - il pulsante di estrazione con questa voce avvia il pretest (testo
+      «Rileva componenti con YOLO»): worker locale che chiama
+      extract_inventory(detector='yolo_only', call=None) sulle viste
+      dall'alto dichiarate nei ruoli dei documenti (hires, top), con le
+      quote della scheda prese dai campi Lunghezza/Larghezza corpo
+      (DUBBIO dichiarato: senza AI non c'e' altra fonte; se la calibrazione
+      fallisce lo si dice chiedendo di controllare le quote);
+    - mostra i rettangoli nella revisione «Corpi rilevati»; all'OK salva il
+      pacchetto photo-review (riapribile gratis; da li' si puo' poi pagare
+      «Rilancia inventario AI»). Non tocca campi, tabella componenti, 3D;
+    - si tolgono i rami `yolo_only` aggiunti al punto 32 in
+      datasheet_extractor e nel log di _start_extract_worker (percorso che
+      col pretest non esiste piu'); resta il ramo di extract_inventory.
+    - test: pretest senza nessuna chiamata (call=None, rete bloccata), righe
+      nascoste/visibili, ordine delle righe, negativo con `yolo`.
+ESITO 33: FATTO. «Rilevamento foto» prima riga di Strumenti AI; con «Solo
+YOLO locale (pretest, nessuna AI)» spariscono Modello AI e Modello di
+visione. Il pulsante avvia `YoloPretestWorker` (sottoclasse di
+ExtractWorker per riusare la revisione): extract_inventory(detector=
+'yolo_only') con `call` che solleva se mai invocata, quote dai campi del
+corpo, viste dall'alto dai ruoli (hires, top). Modale «Pretest YOLO in
+corso». «Interrompi» sul pretest = natura 'local': abbandono senza parlare di
+addebiti e senza consuntivo. Tolti i rami yolo_only del punto 32 in
+datasheet_extractor (git checkout: il file non aveva altre modifiche) e nel
+log di _start_extract_worker; tolta dal catalogo la frase «l'analisi dei
+documenti resta una chiamata AI». Test: tests/test_yolo_only_detector.py
+(13). Doc: sezione «Local YOLO only (pretest)».
+NOTA 25/09: nello screenshot dell'utente («ma no!!! deve partire con analisi
+YOLO») la combo era su «YOLO locale + verifica AI», non sulla voce nuova:
+quella corsa era a pagamento per scelta della voce, non per un difetto.
+Attenzione: aprendo un progetto la combo torna al valore salvato nel
+progetto (project_config.json), quindi va riscelta dopo l'apertura.
+TRAPPOLA: 1 volta su 2 suite complete test_photo_review_dialog::
+test_abnormal_teardown_with_a_focused_editor_does_not_abort[quit] e' uscito
+con access violation (0xC0000005) nel sottoprocesso; 5/5 verde da solo e
+suite successiva verde. Instabile, non legato a queste modifiche; non indagato.
+SUITE (25/09, dopo punto 33): 4152 passati, 3 saltati, 2 xfail, 19 sottotest, uscita 0. NON committato.
+
+34. [x] (utente 25/09, screenshot «porca la paletta») Pretest: «Nessuna vista
+    dall'alto calibrabile» con la tipologia castellated, mentre la card della
+    foto hires diceva 61 px/mm. CAUSA (mia, punto 33): il pretest leggeva
+    `field_body_length/width` (matrice, 10x10 predefiniti); con castellated
+    le quote stanno in `field_cast_body_length/width`. La card usa
+    `_body_size()`, che sceglie i campi giusti per tipologia. PIANO: il
+    pretest usa `_body_size()` (stessa fonte della card: se la card dice
+    calibrabile, il pretest calibra); se None, avviso prima di partire;
+    testo dell'avviso e messaggio d'errore senza nominare campi sbagliati
+    ne' «inventario principale». Test positivo (castellated -> campi cast) e
+    negativo (matrice -> campi body).
+ESITO 34: FATTO. Pretest con `_body_size()`; senza quote avviso e nessuna
+partenza; con yolo_only l'errore di calibrazione cita le quote usate invece di
+«resta l'inventario principale». 2 test nuovi (castellated -> campi cast,
+nessuna quota -> non parte) + il caso matrice nel test del pulsante.
+PROVA REALE offline (solo YOLO locale, `call` che solleva): progetto
+generated/YOL, hires.jpg, quote castellated del progetto 42.8 x 15.2 mm
+(sono i PREDEFINITI della tipologia, non la scheda vera): ritaglio 2593x1042,
+51 riquadri alla soglia operativa (9 deboli esclusi senza revisore), overlay
+corretto su tutta la scheda. DUBBIO: il rapporto del ritaglio (2.49) non e'
+quello delle quote (2.82): i rettangoli sono giusti in pixel, i mm valgono
+quanto le quote inserite.
+SUITE (25/09, dopo punto 34): 4154 passati, 3 saltati, 2 xfail, 19 sottotest,
+uscita 0. NON committato.
+
+## PIANO IN CORSO (25/09) — licenze e modelli con classi diverse
+
+35. [x] (utente 25/09, «ok» alla proposta) Modello
+    `pcb_component_detector_yolo26_roboflow_l.pt` rifiutato: dichiara 16
+    classi (IC, LED, battery, buzzer, capacitor, clock, connector, diode,
+    display, fuse, inductor, potentiometer, relay, resistor, switch,
+    transistor), ordine diverso, maiuscole, senza button/heatsink/pads/pins/
+    transformer. Il rilevatore legge i punteggi PER POSIZIONE sulle 21 classi
+    fisse. PIANO (generale, niente casi per nome di file): leggere i nomi
+    dichiarati dal modello (.pt: model.names; .onnx: metadati `names`),
+    abbinarli per nome ignorando le maiuscole alle 21 classi interne,
+    riordinare le righe dei punteggi nell'ordine interno, lasciare a zero
+    le classi assenti; RIFIUTARE un modello con una classe sconosciuta
+    (non si sa cosa sia) o con nomi duplicati. Registrare nell'audit e nel
+    log la mappa e le classi assenti. Limite dichiarato: senza pads/pins il
+    recupero «corpo contro piazzola/pin» non ha nulla da confrontare.
+    Test: positivo (16 classi riordinate -> stessa classe interna), negativo
+    (classe sconosciuta rifiutata; 21 classi in ordine invariato).
+36. [x] (utente 25/09, handoff licenze incollato + decisioni) DECISIONI
+    DELL'UTENTE: codice da MIT ad AGPL-3.0; modelli NON spostati (restano in
+    models\, l'handoff parla di models\roboflow|colab|base: si documentano i
+    percorsi veri). FATTI VERIFICATI: LICENSE esistente MIT (e7cdd64); i tre
+    .pt dichiarano nei metadati «AGPL-3.0 (https://ultralytics.com/license)»
+    (_m e _l Ultralytics 8.4.55, 25/09; yolov8m_best 8.4.37 da yolov8m.pt su
+    dataset.verified.yaml in Colab); pesi esclusi da git e dall'MSI salvo
+    opzione; private\datasets\compdetect NON esiste qui. PIANO:
+    - LICENSE = testo ufficiale GNU AGPL-3.0 (copia locale verificata);
+    - THIRD_PARTY_NOTICES.md: codice, pesi (per file: licenza da metadati,
+      ID Roboflow noto solo per _m; _l da verificare), ONNX (conflitto MIT
+      model card / AGPL metadati, come gia' documentato), dataset CompDetect
+      CC BY 4.0 con attribuzione, dipendenze principali (PyQt6 GPL-3.0,
+      Ultralytics AGPL-3.0, PyTorch BSD, OpenCV Apache-2.0, onnxruntime MIT,
+      VTK BSD), FreeCAD/KiCad programmi esterni non inclusi;
+    - README.md sezione License riscritta (+ README.it.md «Licenza»);
+    - .gitignore: `private/` esplicito (Private/ gia' c'era; core.ignorecase);
+    - menu «?»: voce «Licenze» con LICENSE e THIRD_PARTY_NOTICES; file
+      inclusi nell'eseguibile (spec); la pagina licenza dell'MSI legge gia'
+      LICENSE;
+    - commenti su «licenza ambigua» in spec/script/doc: il codice ora e'
+      AGPL, ma la redistribuzione dei pesi resta opt-in (ID _l e checkpoint
+      yolov8m da confermare): NON si cambia il comportamento dell'installer.
+    NON FATTO di proposito: data\data.yaml, classes.txt,
+    download_dataset.ps1 dell'handoff: questo repository non addestra e non
+    ha il dataset; `data\` qui e' il database dei profili. Da decidere con
+    l'utente se vanno nel progetto di addestramento.
+ESITO 35: FATTO. photo_yolo.class_mapping (per nome, maiuscole ignorate;
+rifiuta classe sconosciuta, duplicati, indici non da 0), _remap_scores,
+_RemappedSession (ONNX, solo se la tabella differisce), _TorchSession con
+mapping (testa standard e uno-a-uno). Audit: model_classes, missing_classes,
+class_order; log con le classi assenti e il limite pads/pins. Contratti
+aggiornati: test_reject_reordered_classes -> test_reordered_classes_are_read_
+by_name; test_a_pt_with_other_classes_is_refused -> ..._unknown_class_....
+PROVA REALE offline con _l.pt su generated/YOL/hires.jpg (quote 42.8x15.2):
+57 riquadri alla soglia (26 capacitor, 12 resistor, 6 ic, 4 led, 3
+connector, 2 switch, 2 transistor, 1 diode, 1 inductor). OSSERVATO (non
+corretto, e' il comportamento del modello): riquadri su 2 piazzole in alto
+a sinistra, sulla scritta serigrafata verticale, sul QR code, su una scritta
+dello schermo del modulo e su un foro di fissaggio. Nel pretest il filtro
+dei contatti dichiarati non gira (nessuna quota dei contatti senza AI).
+ESITO 36: FATTO. LICENSE = testo GNU AGPL-3.0 (34523 byte, sha256 0d96a4ff...,
+copia della dist-info di ultralytics 8.4.163). THIRD_PARTY_NOTICES.md (pesi
+con sha256 e licenza dai metadati; ID Roboflow _l e licenza Roboflow _l DA
+VERIFICARE; dataset del checkpoint yolov8m DA CONFERMARE; ONNX irrisolto;
+CompDetect CC BY 4.0 con attribuzione e «modifiche da registrare»;
+dipendenze con licenze lette dai metadati dei pacchetti). README.md
+«Licensing» e README.it.md «Licenza». .gitignore `private/`. Menu «?» >
+«Licenze» (2 schede: AGPL, terze parti) con LICENSE e notices nello spec.
+Test: tests/test_licenses_dialog.py (3) + 1 in test_packaging.
+APERTO per l'utente: ID e licenza Roboflow del modello Large; origine e
+licenza del dataset del checkpoint Colab; preprocessing reale di CompDetect;
+i file data\data.yaml ecc. dell'handoff (non creati qui, vedi piano 36).
+SUITE (25/09, dopo 35-36): 4164 passati, 3 saltati, 2 xfail, 19 sottotest,
+uscita 0. NON committato.
+
+DIAGNOSI 25/09 (domanda dell'utente: su Roboflow il modello _l non sbaglia,
+da noi mette riquadri su QR, scritte, fori). ID Roboflow del Large letto
+dallo screenshot dell'utente: `compdetect-dnwth-2-yolo26l-t1` (da mettere
+in THIRD_PARTY_NOTICES quando si riprendono le licenze, ora IN SOSPESO per
+scelta dell'utente). Prova offline con predict() ufficiale di Ultralytics
+sulla stessa hires.jpg intera: conf 0.46 / IoU 0.68 (i cursori di Roboflow)
+-> 25 oggetti, identico a Roboflow; conf 0.25 -> 34; foto stirata 640x640 ->
+26. Quindi il modello e' lo stesso e il preprocessing e' equivalente: la
+differenza e' la NOSTRA pipeline: (1) soglia 0.25 invece di 0.46; (2) le
+tessere 640/1280 px, che mostrano al modello la scheda ingrandita 2-4 volte
+rispetto a come e' stato addestrato (schede intere a 640): li' nascono i
+falsi positivi su QR, serigrafie e fori, ma anche i passivi piccoli in piu'.
+NESSUNA modifica fatta: opzioni proposte all'utente, in attesa di scelta.
+CORREZIONE della diagnosi qui sopra [CORRETTO, 25/09]: le tessere NON sono
+la causa principale. Audit della corsa _l (soglia 0.25): dei 5 falsi positivi
+2 vengono dalla vista intera (scritta serigrafata ic 0.54, scritta cinese
+capacitor 0.27) e 3 dalle tessere (piazzole connector 0.30, QR resistor 0.26,
+foro inductor 0.26). 4 su 5 stanno fra 0.26 e 0.30; i corpi veri delle
+tessere stanno quasi tutti sopra 0.7. Stessa pipeline (tessere comprese) a
+0.46: 44 riquadri, resta solo la serigrafia, persi i pulsanti BOOT/RESET;
+a 0.35: 50 riquadri. La soglia operativa e' una proprieta' del MODELLO
+(calibrazione diversa fra ONNX yolov8s e YOLO26 l), non una costante.
+
+37. [x] (utente 25/09: «cerchiamo di far funzionare anche questo modello,
+    possiamo ritestare?») PIANO: soglia di confidenza YOLO scelta
+    dall'utente, come il cursore di Roboflow, NON una nuova costante tarata
+    su questa foto:
+    - photo_yolo.detect_yolo_components(confidence=None): None = _CONFIDENCE
+      (0.25, contratto invariato); valore validato (finito, 0.05 < c < 1,
+      sopra la soglia d'audit); registrato in audit e log;
+    - extract_inventory(yolo_confidence=None) inoltra; ExtractWorker,
+      YoloPretestWorker e datasheet_extractor idem;
+    - GUI: campo «Soglia YOLO» accanto al modello YOLO (visibile con yolo e
+      yolo_only), predefinito 0.25, salvato nel progetto (PROJECT_WIDGETS);
+    - test positivo (soglia alta toglie la proposta debole) e negativo
+      (None = 0.25; valori fuori intervallo rifiutati).
+    DICHIARATO: 0.46 e' il valore di Roboflow per questa corsa, non una
+    raccomandazione generale; va scelto guardando il pretest.
+ESITO 37: FATTO. photo_yolo.operating_confidence (None -> 0.25; rifiuta
+bool, non numeri, non finiti, fuori da (0.05, 1)); detect_yolo_components(
+confidence=), soglia passata a _proposals e _recover_clipped, nel log
+(«chosen»/«default») e nella ricetta dell'audit. extract_inventory(
+yolo_confidence=), extract_pin_header_params(yolo_confidence=, controllata
+prima delle chiamate a pagamento), ExtractWorker e YoloPretestWorker.
+GUI: riga «Soglia YOLO» (0.06-0.95, passo 0.05, predefinito 0.25) visibile
+con yolo e yolo_only, tooltip nelle 4 lingue, salvata nel progetto.
+PROVA REALE (worker del pretest, _l.pt, soglia 0.46, YOL/hires.jpg): 44 corpi
+sicuri + 2 deboli ricomposti dalle tessere; resta 1 falso positivo (scritta
+serigrafata verticale, ic 0.54), persi BOOT/RESET (switch ~0.36). Test: 3 in
+test_photo_yolo, 1 in test_yolo_only_detector. SUITE (25/09, dopo 37): 4174
+passati, 3 saltati, 2 xfail, 19 sottotest, uscita 0. NON committato.
+
+LICENZE (in sospeso per scelta dell'utente) — dato nuovo dall'utente, 25/09:
+dataset usato: «Detecting the PCB object» di Arshiasbn,
+https://universe.roboflow.com/arshiasbn-4s0xh/detecting-the-pcb-object/dataset/3
+(versione v3 del 2025-12-23, 2047 immagini; licenza mostrata: MIT; v1/v2
+preprocess «Stretch to 512x512»). DA CONFERMARE con l'utente a quale modello
+si riferisce: presumibilmente il checkpoint Colab yolov8m_best (era l'unico
+con dataset ignoto). Nota: l'autore coincide con la fonte dell'ONNX di base
+(Arshia82sbn/pcb-yolov8s-detection). Da riportare in THIRD_PARTY_NOTICES.md
+alla ripresa delle licenze.
+
+38. [x] (utente 25/09, screenshot: «se ho selezionato solo YOLO, il pulsante
+    e il popup non sono corretti»; poi «anche il credito AI ... non ha senso
+    farlo vedere») Il «non parte» era questo: il pulsante diceva «Estrai
+    parametri con AI» e il suggerimento «Analisi A PAGAMENTO» anche col
+    pretest. Riproduzione sulla finestra vera (copia di YOL, offscreen): il
+    pretest partiva e finiva correttamente. FATTO: _extract_button_sources /
+    _refresh_extract_button (testo «Rileva componenti con YOLO», suggerimento
+    «Pretest locale e GRATUITO...»; sorgenti i18n registrate, cambio lingua
+    ok), chiamato alla creazione, al cambio rilevatore, a fine corsa e
+    all'interruzione; il cancello del nome usa lo stesso suggerimento. Riga
+    «Credito AI» nascosta con yolo_only. Test in test_yolo_only_detector
+    (pulsante per rilevatore, lingua, riga del credito).
+SUITE (25/09, dopo 38): 4176 passati, 3 saltati, 2 xfail, 19 sottotest, uscita 0. NON committato.
+
+39. [x] (utente 25/09: «possiamo mettere qui [accanto a Soglia YOLO] un
+    pulsante che apre una modale con i valori possibili? popolato
+    all'apertura con valori di default plausibili»). Contesto: l'utente ha
+    detto di lasciar stare le sovrapposizioni (le corregge a mano) e ha
+    chiesto quali altri parametri ci sono. PIANO:
+    - photo_yolo: YOLO_SETTING_DEFAULTS + yolo_settings(values) che valida e
+      completa: confidence (0.25), nms_iou (0.50, = «Overlap Threshold» di
+      Roboflow), tile_sizes ([640, 1280]; vuoto = sola vista intera come
+      Roboflow), tile_overlap (0.25). NON esposti: unione dei frammenti
+      (interno e dichiarato fragile), soglia d'audit (non cambia il
+      risultato), dimensione d'ingresso 640 (fissata dall'addestramento).
+      _views, view_overlap_px, _prefer_complete_views, _nms ricevono i
+      valori (predefiniti invariati); log e ricetta dell'audit li registrano.
+    - detect_yolo_components(settings=), extract_inventory(yolo_settings=),
+      extract_pin_header_params(yolo_settings=, validato prima di pagare),
+      ExtractWorker e YoloPretestWorker.
+    - GUI: pulsante-icona accanto a «Soglia YOLO» con tooltip; modale
+      «Parametri YOLO» (nuovo file gui/yolo_settings_dialog.py) con i valori
+      correnti, spiegazione di ciascuno, «Ripristina predefiniti», OK/Annulla;
+      soglia sincronizzata con il campo; valori salvati nel progetto
+      (project_state["yolo_settings"]). 4 lingue.
+    - test: positivo/negativo per validazione, viste senza tessere, NMS più
+      severa, persistenza nel progetto, modale (predefiniti e ripristino).
+ESITO 39: FATTO come da piano. Richiesta aggiuntiva dell'utente durante il
+lavoro: «la scelta dei parametri rimane quando scelgo YOLO + AI» -> gli stessi
+parametri vanno a ExtractWorker (yolo) e a YoloPretestWorker (yolo_only).
+Nuovo file kicadgen/gui/yolo_settings_dialog.py; pulsante btn_yolo_settings
+(icona sliders.svg) accanto a «Soglia YOLO», acceso solo con yolo/yolo_only.
+Stato del progetto: chiave "yolo_settings" (senza confidence, che sta nel
+campo); progetti senza la chiave -> predefiniti. TRAPPOLA: diversi test
+sostituiscono `kicadgen.services.photo_yolo` con un modulo finto; per questo
+main_window lega `yolo_settings` all'import (validate_yolo_settings) e non al
+clic. PROVA REALE (_l.pt, YOL/hires.jpg, soglia 0.46, IoU 0.68, nessuna
+tessera = come Roboflow): 1 vista, 23 riquadri (Roboflow 25: noi guardiamo
+il ritaglio calibrato della scheda, Roboflow la foto intera con lo sfondo).
+Test: 5 in test_photo_yolo, 7 in tests/test_yolo_settings_dialog.py.
+SUITE (25/09, dopo 39): 4194 passati, 3 saltati, 2 xfail, 19 sottotest,
+uscita 0. NON committato.
+
+40. [x] (utente 25/09, screenshot: «no, ma così non mi pare corretto»;
+    risposta alla domanda: «Solo nella finestra») La soglia compariva due
+    volte (campo «Soglia YOLO» e modale). PIANO: via il campo numerico; riga
+    «Parametri YOLO:» con riepilogo (soglia · doppioni · tessere) e il
+    pulsante che apre la modale; la soglia vive in `_yolo_settings` insieme
+    agli altri (stato del progetto "yolo_settings" con confidence). Migrazione:
+    progetti salvati oggi con widgets.field_yolo_confidence -> quel valore
+    diventa la soglia. Ai worker va l'insieme completo. Difetto visto nello
+    stesso screenshot: «Cancel» della modale in inglese (pulsanti standard di
+    Qt non tradotti) -> testi dei pulsanti impostati con il catalogo.
+ESITO 40: FATTO. Riga «Parametri YOLO:» (nome confermato dall'utente:
+«Soglia YOLO -> Parametri YOLO») con label_yolo_summary («soglia 0.25 ·
+doppioni 0.50 · tessere 640 + 1280 px», 4 lingue) e btn_yolo_settings;
+field_yolo_confidence rimosso (anche da PROJECT_WIDGETS). _yolo_settings
+contiene l'insieme completo, confidence compresa; ai worker va yolo_settings
+(yolo_confidence resta nell'API dei servizi ma la GUI non lo usa piu').
+Migrazione dei progetti salvati oggi con widgets.field_yolo_confidence.
+Pulsanti della modale tradotti (OK/Annulla). Log «Parametri YOLO: soglia
+...» (voce vecchia tolta dal catalogo e da tr_038). Contratti aggiornati:
+test del pretest (riepilogo invece del campo), test dei segnaposto della
+sezione (anche confidence/nms_iou/tiles). Test nuovi: migrazione, pulsanti
+tradotti. SUITE (25/09, dopo 40): 4196 passati, 3 saltati, 2 xfail,
+19 sottotest, uscita 0. NON committato.

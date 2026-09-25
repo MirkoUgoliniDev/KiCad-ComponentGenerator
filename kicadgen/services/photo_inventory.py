@@ -768,11 +768,19 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                       grounding=True, cache_dir=None, classifier_model=None, mechanical=True,
                       grounding_prompt=None, verification_prompt=None, top_photo_source='AI',
                       detector='ai', yolo_model_path=None, review_proposals=None,
-                      declared=None, phase=None):
+                      declared=None, phase=None, yolo_confidence=None, yolo_settings=None):
     """@brief Calibrate the photo and extract reviewed component envelopes.
 
-    @param detector ai preserves the existing localization; yolo uses local ONNX proposals.
-    @param yolo_model_path Optional compatible ONNX weight file for the local detector.
+    @param detector ai preserves the existing localization; yolo uses local
+        proposals plus one paid reconciliation; yolo_only stops after the local
+        detector and the user's review (no paid call on the photograph: the
+        kept boxes become the components, see yolo_only_components); vlm lets
+        the vision model enumerate the bodies.
+    @param yolo_model_path Optional compatible .onnx or .pt weight file for the local detector.
+    @param yolo_confidence Operating confidence threshold of the local
+        detector; None keeps its default. See photo_yolo.operating_confidence.
+    @param yolo_settings Other local-detector settings (photo_yolo.yolo_settings);
+        None keeps the defaults.
     @param declared Extracted board parameters, used to recognize the module's
         own declared contacts among the local detector's proposals. Without
         them nothing is filtered: guessing where the contacts are would delete
@@ -792,7 +800,9 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         immediately before the paid reconciliation. The 'yolo' announcement is
         never emitted for detector 'ai' or 'vlm': with a vision-only detector
         no local detection runs, and the modal must not claim a phase that is
-        not running. None (the default) is a no-op, and an exception raised by
+        not running. With 'yolo_only' the 'llm' announcement is never
+        emitted (nothing is paid on the photograph); phase('', '') closes the
+        local phase once the inventory is built. None (the default) is a no-op, and an exception raised by
         the callback is logged and swallowed, exactly like for `progress`: the
         notification is informative and must never abort a paid extraction.
     @note Local detections are hypotheses, not package identities; AI review may cost credit.
@@ -808,7 +818,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         except Exception as exc:  # noqa: BLE001 - la GUI non deve poter abortire l'estrazione
             log(tx("Segnalazione della fase non riuscita ({exc}); elaborazione proseguita.",
                    exc=exc))
-    if detector not in ('ai', 'yolo', 'vlm'):
+    if detector not in PHOTO_DETECTORS:
         raise ValueError(tx("Rilevatore fotografico non supportato."))
     report = InventoryResult()
     def warn(message):
@@ -839,7 +849,10 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             if photo is not None:
                 candidates.append((photo.shape[0]*photo.shape[1],path,photo,calibration))
         if not candidates:
-            warn(tx("Nessuna vista dall'alto calibrabile: resta l'inventario principale."))
+            warn(tx("Nessuna vista dall'alto calibrabile con le quote {length:.2f} x "
+                    "{width:.2f} mm.", length=length, width=width)
+                 if detector == 'yolo_only' else
+                 tx("Nessuna vista dall'alto calibrabile: resta l'inventario principale."))
             return report
     except ImportError:
         warn(tx("OpenCV non disponibile: resta l'inventario principale."))
@@ -861,20 +874,25 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     import cv2
     ok, encoded = cv2.imencode(".png", photo)
     report.photo_png = encoded.tobytes() if ok else None
-    if detector in ('yolo', 'vlm'):
+    if detector in ('yolo', 'yolo_only', 'vlm'):
         from .photo_global_inventory import review_global_inventory
         proposals = []
-        if detector == 'yolo':
-            from .photo_yolo import detect_yolo_components
+        if detector in LOCAL_DETECTORS:
+            from .photo_yolo import detect_yolo_components, model_label
             audit = Path(cache_dir)/'yolo-audit' if cache_dir else None
             # La fase locale va annunciata QUI, non prima: la calibrazione che
             # precede non e' rilevamento, e la modale non deve mostrare una
-            # fase che non sta girando.
-            announce('yolo', 'rilevatore locale ONNX')
+            # fase che non sta girando. Il dettaglio e' il modello VERO (file e
+            # formato): prima diceva sempre «ONNX», anche con un .pt (utente,
+            # 2026-09-25).
+            announce('yolo', model_label(yolo_model_path))
             log(tx("YOLO locale: localizzazione senza invio della foto; verifica package "
-                   "AI successiva."))
+                   "AI successiva.") if detector == 'yolo' else
+                tx("Solo YOLO locale: la foto non viene inviata a nessun modello; i "
+                   "riquadri tenuti nella revisione saranno il risultato."))
             proposals = detect_yolo_components(photo, length, width, model_path=yolo_model_path,
-                                              log=log, audit_dir=audit, include_review_candidates=True)
+                                              log=log, audit_dir=audit, include_review_candidates=True,
+                                              confidence=yolo_confidence, settings=yolo_settings)
         else:
             # Nessun rilevatore locale: la foto va al modello di visione, che
             # enumera i corpi da solo. Stessa richiesta, stesso schema, stessa
@@ -924,6 +942,28 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                    n_kept=len(kept),
                    n_proposals=len(proposals)))
             proposals = list(kept)
+        if detector == 'yolo_only':
+            # Scelta dell'utente (25/09): «si fermi li' e basta, fa vedere solo
+            # i rettangoli individuati». Nessuna riconciliazione a pagamento:
+            # cio' che il rilevatore ha proposto e la revisione ha tenuto e'
+            # l'inventario. Solo passi gratuiti sui pixel del ritaglio.
+            report.components = yolo_only_components(
+                proposals, reviewed=review_proposals is not None, log=log)
+            sample_body_colors(photo, report.components, log)
+            report.calibration['detector'] = detector
+            report.calibration['proposal_count'] = len(proposals)
+            report.calibration['inventory_strategy'] = 'local-detector-only'
+            report.overlay_png = draw_inventory(photo, report.components)
+            save_inventory_evidence(cache_dir, report.photo_png, report.overlay_png,
+                                    report.components, log)
+            log(tx("Inventario solo YOLO: {n_components} riquadri, nessuna verifica AI "
+                   "della foto; tipi dalla classe del rilevatore, altezze segnaposto da "
+                   "rivedere.", n_components=len(report.components)))
+            # Il rilevatore ha finito e nessuno strumento prende il suo posto:
+            # tool vuoto = nessuna fase rivendicata, altrimenti la modale
+            # resterebbe su YOLO per il resto della corsa.
+            announce('', '')
+            return report
         # Da qui si paga: la revisione delle proposte e' finita e la richiesta
         # sta per partire, quindi la modale deve tornare a dichiarare il
         # modello remoto anche quando il rilevamento locale ha girato.
@@ -955,7 +995,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                                 report.components, log)
         log(tx("Inventario revisionato: {n_components} ipotesi ",
                n_components=len(report.components))
-            + (tx("da {n_proposals} proposte YOLO ", n_proposals=len(proposals)) if detector == 'yolo'
+            + (tx("da {n_proposals} proposte YOLO ", n_proposals=len(proposals)) if detector in LOCAL_DETECTORS
                else tx("enumerate dal modello di visione "))
             + tx("in una sola richiesta; completezza non certificata. Package, altezze "
                  "e orientamenti dubbi da rivedere."))
@@ -1029,6 +1069,71 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     log(tx("Confronto fotografico pronto: verde = rilevato; arancione = da "
            "verificare."))
     return report
+
+
+#: Rilevatori fotografici accettati da extract_inventory. `yolo_only` e'
+#: `yolo` senza la riconciliazione a pagamento (utente, 2026-09-25).
+PHOTO_DETECTORS = ('ai', 'yolo', 'yolo_only', 'vlm')
+#: Rilevatori che fanno girare il modello YOLO locale.
+LOCAL_DETECTORS = ('yolo', 'yolo_only')
+
+#: Classe del rilevatore -> tipo del componente, per il percorso senza
+#: riconciliazione. Tabella DICHIARATA, non dedotta: le classi che hanno un
+#: tipo omonimo restano tali; transistor -> ic come fa gia' la riconciliazione
+#: (photo_global_inventory._normalize); clock (oscillatori e quarzi) ->
+#: crystal; button (pulsanti tattili) -> switch. Batterie, buzzer, display,
+#: fusibili, dissipatori, trimmer, rele': nessun tipo dedicato, restano
+#: generic. Il tipo sceglie solo la forma generica del volume, non un package.
+YOLO_CLASS_KINDS = {
+    'capacitor': 'capacitor', 'resistor': 'resistor', 'inductor': 'inductor',
+    'diode': 'diode', 'led': 'led', 'connector': 'connector', 'switch': 'switch',
+    'ic': 'ic', 'transformer': 'transformer', 'transistor': 'ic',
+    'clock': 'crystal', 'button': 'switch',
+}
+
+
+def yolo_only_components(proposals, *, reviewed, log=None):
+    """@brief Turn the local detector's proposals into the final inventory, without AI.
+
+    @param proposals Proposal rows from detect_yolo_components, as kept by the
+        review (they may include boxes the user drew or edited).
+    @param reviewed True when a person reviewed the proposals. Without a
+        review, weak proposals (`_yolo_review_only`, below the operating
+        threshold) are dropped: on the paid path the reconciliation judged
+        them, here nobody would.
+    @param log Optional callable(str) for the progress log.
+    @return New component dicts (the input rows are not modified), in the
+        same order, renumbered from 1.
+    @note `kind` comes from YOLO_CLASS_KINDS; an ambiguous class
+        (`_yolo_class_ambiguous`) or an unmapped one gives `generic`. Heights
+        stay the detector's declared placeholder. Every row stays
+        `_uncertain`: presence was seen by the detector (and by the user when
+        reviewed), identity and height were never checked.
+    @note The name is «<class> N», not «YOLO candidate N»: that name marks
+        detector hypotheses kept only for review and excluded from 3D
+        (kicad_models._is_yolo_only_hypothesis); here the rows are the
+        inventory the user asked for and must become generic 3D volumes.
+    """
+    log = log or (lambda message: None)
+    rows = [row for row in proposals if reviewed or not row.get('_yolo_review_only')]
+    if len(rows) != len(proposals):
+        log(tx("Solo YOLO senza revisione: {n_weak} proposte deboli (sotto la soglia "
+               "operativa) lasciate fuori.", n_weak=len(proposals) - len(rows)))
+    components = []
+    for identity, row in enumerate(rows, 1):
+        yolo_class = row.get('_yolo_class')
+        kind = ('generic' if row.get('_yolo_class_ambiguous')
+                else YOLO_CLASS_KINDS.get(yolo_class, 'generic'))
+        component = dict(row)
+        component.update(
+            _id=identity, kind=kind, _detected_kind=kind,
+            name=f"{yolo_class or 'generic'} {identity}",
+            _source=str(row.get('_source') or 'YOLO local') + ' (no AI verification)',
+            _geometry_source='local detector box; not nominal package',
+            _uncertain=True, _presence_reviewed_by_user=bool(reviewed),
+            package='', marking='')
+        components.append(component)
+    return components
 
 
 #: Prefissi dei file di evidenza scritti da save_inventory_evidence: il

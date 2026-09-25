@@ -88,7 +88,8 @@ def default_path() -> Path:
     override = os.environ.get(DB_ENV)
     if override:
         return Path(override)
-    return Path(__file__).resolve().parents[2] / "data" / DEFAULT_FILENAME
+    from ..app_paths import data_file
+    return data_file(DEFAULT_FILENAME)
 
 
 def _finite_positive(value) -> Optional[float]:

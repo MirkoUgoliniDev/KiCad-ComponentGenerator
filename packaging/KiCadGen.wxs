@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  KiCadGen MSI (WiX 3.14), built by scripts/build-msi.ps1.
+
+  - Per-machine install in Program Files (administrator rights), directory
+    chooser, Start menu and desktop shortcuts, «Launch KiCadGen» on the last
+    page, uninstall from Settings > Apps.
+  - The UpgradeCode never changes: a newer version replaces the installed one
+    (MajorUpgrade), a same or older version is refused with a message.
+  - The application files come from heat (AppFiles.wxs, component group
+    AppFiles) harvested from dist\KiCadGen.
+  - The user's data (%LOCALAPPDATA%\KiCadGen, Documents\KiCadGen) is written
+    by the program, not by the installer: uninstalling never removes it.
+  - FreeCAD and KiCad are separate programs: the installer only looks for
+    them and, when one is missing, says so on the last page.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="KiCadGen" Language="1033" Version="$(var.Version)"
+           Manufacturer="Mirko Ugolini" UpgradeCode="E97182CB-C126-4B0C-B336-172FE2830FB7">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" Platform="x64"
+             Description="KiCadGen $(var.Version) - KiCad component generator" />
+
+    <MajorUpgrade AllowSameVersionUpgrades="no"
+                  DowngradeErrorMessage="A newer version of KiCadGen is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="KiCadGenIcon" SourceFile="$(var.IconFile)" />
+    <Property Id="ARPPRODUCTICON" Value="KiCadGenIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator" />
+
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
+    <WixVariable Id="WixUIBannerBmp" Value="$(var.BannerBmp)" />
+    <WixVariable Id="WixUIDialogBmp" Value="$(var.DialogBmp)" />
+
+    <!-- External programs: searched, never required. Depth 2 covers the
+         versioned folders, e.g. «FreeCAD 1.1\bin» and «KiCad\10.0\bin». -->
+    <Property Id="FREECADCMD">
+      <DirectorySearch Id="FreeCadRoot" Path="[ProgramFiles64Folder]" Depth="2">
+        <FileSearch Name="freecadcmd.exe" />
+      </DirectorySearch>
+    </Property>
+    <Property Id="KICADEXE">
+      <DirectorySearch Id="KiCadRoot" Path="[ProgramFiles64Folder]KiCad" Depth="2">
+        <FileSearch Name="kicad.exe" />
+      </DirectorySearch>
+    </Property>
+    <SetProperty Id="WIXUI_EXITDIALOGOPTIONALTEXT" After="AppSearch" Sequence="first"
+                 Value="KiCadGen uses FreeCAD for the 3D models and KiCad to check and install the libraries. Not found on this computer: [MISSINGAPPS]. Install them from freecad.org and kicad.org; KiCadGen will find them.">
+      NOT FREECADCMD OR NOT KICADEXE
+    </SetProperty>
+    <SetProperty Id="MISSINGAPPS" Before="SetWIXUI_EXITDIALOGOPTIONALTEXT" Sequence="first"
+                 Value="FreeCAD">NOT FREECADCMD AND KICADEXE</SetProperty>
+    <SetProperty Id="MISSINGAPPS" Action="SetMissingKiCad" Before="SetWIXUI_EXITDIALOGOPTIONALTEXT"
+                 Sequence="first" Value="KiCad">FREECADCMD AND NOT KICADEXE</SetProperty>
+    <SetProperty Id="MISSINGAPPS" Action="SetMissingBoth" Before="SetWIXUI_EXITDIALOGOPTIONALTEXT"
+                 Sequence="first" Value="FreeCAD, KiCad">NOT FREECADCMD AND NOT KICADEXE</SetProperty>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="KiCadGen" />
+      </Directory>
+      <Directory Id="ProgramMenuFolder" />
+      <Directory Id="DesktopFolder" />
+    </Directory>
+
+    <DirectoryRef Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="CB30D8C7-8646-417B-9B11-770B67D7E68C">
+        <Shortcut Id="StartMenuKiCadGen" Name="KiCadGen" Description="KiCad component generator"
+                  Target="[INSTALLFOLDER]KiCadGen.exe" WorkingDirectory="INSTALLFOLDER"
+                  Icon="KiCadGenIcon" />
+        <RegistryValue Root="HKCU" Key="Software\KiCadGen" Name="StartMenuShortcut" Type="integer"
+                       Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+    <DirectoryRef Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="F31E80AD-EAE2-44DE-8886-4C86E8CA05B0">
+        <Shortcut Id="DesktopKiCadGen" Name="KiCadGen" Description="KiCad component generator"
+                  Target="[INSTALLFOLDER]KiCadGen.exe" WorkingDirectory="INSTALLFOLDER"
+                  Icon="KiCadGenIcon" />
+        <RegistryValue Root="HKCU" Key="Software\KiCadGen" Name="DesktopShortcut" Type="integer"
+                       Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="Main" Title="KiCadGen" Level="1">
+      <ComponentGroupRef Id="AppFiles" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="DesktopShortcut" />
+    </Feature>
+
+    <!-- Standard pages: welcome, license, folder, ready, progress, finish. -->
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch KiCadGen" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <!-- Calcolato dopo la scelta della cartella: una Property fissa non
+         risolverebbe [INSTALLFOLDER]. -->
+    <SetProperty Id="WixShellExecTarget" Value="[INSTALLFOLDER]KiCadGen.exe" After="CostFinalize"
+                 Sequence="ui" />
+    <CustomAction Id="LaunchKiCadGen" BinaryKey="WixCA" DllEntry="WixShellExec" Impersonate="yes" />
+    <UI>
+      <UIRef Id="WixUI_InstallDir" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchKiCadGen">
+        WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed
+      </Publish>
+    </UI>
+  </Product>
+</Wix>

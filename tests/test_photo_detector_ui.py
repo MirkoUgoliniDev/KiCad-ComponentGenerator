@@ -109,7 +109,10 @@ def test_new_window_defaults_to_yolo_without_restoring_custom_session_path(windo
     default_path = tmp_path / "models" / "pcb_yolov8s.onnx"
     default_path.parent.mkdir()
     default_path.touch()
-    monkeypatch.setattr(gui, "APP_DIR", tmp_path)
+    # Contratto invariato, meccanismo cambiato (2026-09-25): la cartella del
+    # programma arriva da `app_paths.resource_path` (repository da sorgente,
+    # pacchetto installato nell'eseguibile), non piu' da APP_DIR.
+    monkeypatch.setattr(gui, "resource_path", lambda *parts: tmp_path.joinpath(*parts))
     window.combo_photo_detector.setCurrentIndex(0)
     window.field_yolo_model.setText("session.onnx")
 
@@ -144,8 +147,11 @@ def test_language_switch_preserves_selection_and_localizes_all_controls(
     for key, translations in gui._PHOTO_DETECTOR_TRANSLATIONS.items():
         assert set(translations) == {"it", "en", "fr", "de"}
         assert all(translations.values())
-        assert window._photo_detector_text(key, path="weights.onnx", error="test") == (
-            translations[language].format(path="weights.onnx", error="test"))
+        # Segnaposto di tutti i testi della sezione; dal 25/09 anche quelli del
+        # riepilogo «Parametri YOLO» (soglia, doppioni, tessere).
+        fields = dict(path="weights.onnx", error="test", confidence=0.25, nms_iou=0.5,
+                      tiles="640 + 1280 px")
+        assert window._photo_detector_text(key, **fields) == translations[language].format(**fields)
     assert window.btn_pick_yolo_model.accessibleName() == window._photo_detector_text("picker")
     assert not any(row["key"].startswith("photo_detector.")
                    for row in window.profile_store.list_translations(language))

@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Sequence
 from .messages import tx
+from ..app_paths import env_files, is_frozen, user_data_dir
 
 API_BASE = "https://openrouter.ai/api/v1"
 MODELS_URL = f"{API_BASE}/models"
@@ -44,7 +45,7 @@ API_KEY_ENV = "OPENROUTER_API_KEY"
 DEFAULT_MODEL = "anthropic/claude-opus-5"
 
 #: Cache locale dell'elenco modelli (e' lungo ~1 MB e cambia di rado).
-MODELS_CACHE_PATH = Path(__file__).resolve().parents[2] / ".openrouter_models.json"
+MODELS_CACHE_PATH = user_data_dir() / ".openrouter_models.json"
 MODELS_CACHE_TTL_S = 24 * 3600
 
 # Header opzionali di OpenRouter: identificano l'applicazione chiamante
@@ -159,8 +160,9 @@ def api_key() -> str:
     if not key:
         raise OpenRouterError(
             tx("Variabile d'ambiente {API_KEY_ENV} non impostata. Inseriscila nel "
-               "file .env accanto a main.py (vedi .env.example).",
-               API_KEY_ENV=API_KEY_ENV)
+               "file {path} (vedi .env.example).",
+               API_KEY_ENV=API_KEY_ENV, path=env_files()[-1] if not is_frozen()
+               else env_files()[0])
         )
     return key
 

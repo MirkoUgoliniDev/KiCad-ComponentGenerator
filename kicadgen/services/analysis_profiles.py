@@ -61,8 +61,12 @@ class ProfileError(ValueError):
 class ProfileStore:
     """@brief Persist and retrieve component analysis profiles in SQLite."""
     def __init__(self,path=None,*,legacy_config=None,legacy_path=None):
-        root = Path(__file__).resolve().parents[2]
-        self.path = Path(path or os.environ.get('KICADGEN_PROFILE_DB',root/'data'/'analysis_profiles.sqlite3'))
+        # Da sorgente il database del repository (come prima); installato,
+        # la copia dell'utente, creata al primo avvio da quella distribuita.
+        if not path and not os.environ.get('KICADGEN_PROFILE_DB'):
+            from ..app_paths import data_file
+            path = data_file('analysis_profiles.sqlite3', seed=True)
+        self.path = Path(path or os.environ['KICADGEN_PROFILE_DB'])
         self.path.parent.mkdir(parents=True,exist_ok=True)
         self._initialize(legacy_config,Path(legacy_path) if legacy_path else None)
 

@@ -69,6 +69,11 @@ from ..services.kicad_library import (
 from .app_config import (CONFIG_PATH, DEFAULTS, browse_start_dir, config_path, load_config,
                          remember_browse_dir, save_config)
 from .accepted_models_dialog import AcceptedModelsDialog, ConsolidateDialog
+from ..app_paths import default_projects_dir, install_dir, resource_path, user_data_dir
+# Solo la validazione dei parametri (libreria standard): onnxruntime e PyTorch
+# restano caricati al bisogno. Legata qui, all'import, e non al clic: i test
+# che sostituiscono il modulo con un finto non devono cambiarne il contratto.
+from ..services.photo_yolo import yolo_settings as validate_yolo_settings
 from .analysis_overlay import AnalysisOverlay
 from .generation_options_dialog import GenerationOptionsDialog
 from .guided_documents import GuidedDocuments
@@ -89,9 +94,11 @@ from ..services.messages import tx
 TAB_ICONS = ("tab-project.svg", "tab-footprint.svg", "tab-generate.svg",
              "tab-preview.svg", "tab-model3d.svg", "tab-kicad.svg")
 
-APP_DIR = Path(__file__).resolve().parent.parent.parent
+#: Cartella del programma (sola lettura una volta installato) e cartella di
+#: lavoro predefinita dei progetti: vedi `kicadgen.app_paths`.
+APP_DIR = install_dir()
 # Generated working files stay separate from installed KiCad libraries.
-DEFAULT_LIBRARY_ROOT = APP_DIR / "generated"
+DEFAULT_LIBRARY_ROOT = default_projects_dir()
 DOCS_SUBDIR = "docs"
 #: Link della finestra About (utente, 2026-09-24): repository del progetto e
 #: sviluppatore, dal remoto su cui il branch viene pubblicato.
@@ -241,12 +248,53 @@ _PHOTO_DETECTOR_TRANSLATIONS = {
            "fr": "IA (actuelle)", "de": "KI (bisherig)"},
     "yolo": {"it": "YOLO locale + verifica AI", "en": "Local YOLO + AI verification",
              "fr": "YOLO local + vérification IA", "de": "Lokales YOLO + KI-Prüfung"},
+    "yolo_only": {"it": "Solo YOLO locale (pretest, nessuna AI)",
+                  "en": "Local YOLO only (pretest, no AI)",
+                  "fr": "YOLO local seul (prétest, aucune IA)",
+                  "de": "Nur lokales YOLO (Vortest, keine KI)"},
     "vlm": {"it": "Solo modello di visione (nessun rilevatore locale)",
             "en": "Vision model only (no local detector)",
             "fr": "Modèle de vision seul (aucun détecteur local)",
             "de": "Nur Sehmodell (kein lokaler Detektor)"},
     "model": {"it": "Modello YOLO:", "en": "YOLO model:",
               "fr": "Modèle YOLO :", "de": "YOLO-Modell:"},
+    "params": {"it": "Parametri YOLO:", "en": "YOLO settings:",
+               "fr": "Paramètres YOLO :", "de": "YOLO-Parameter:"},
+    "summary": {"it": "soglia {confidence:.2f} · doppioni {nms_iou:.2f} · tessere {tiles}",
+                "en": "threshold {confidence:.2f} · duplicates {nms_iou:.2f} · tiles {tiles}",
+                "fr": "seuil {confidence:.2f} · doublons {nms_iou:.2f} · tuiles {tiles}",
+                "de": "Schwelle {confidence:.2f} · Duplikate {nms_iou:.2f} · Kacheln {tiles}"},
+    "no_tiles": {"it": "nessuna (solo foto intera)", "en": "none (whole photo only)",
+                 "fr": "aucune (photo entière seulement)", "de": "keine (nur ganzes Foto)"},
+    "settings": {"it": "Parametri YOLO", "en": "YOLO settings",
+                 "fr": "Paramètres YOLO", "de": "YOLO-Parameter"},
+    "settings_help": {
+        "it": "Soglia di confidenza, sovrapposizione per i doppioni e viste ingrandite del "
+              "rilevatore. Valgono per entrambe le modalità YOLO e si salvano con il progetto.",
+        "en": "Confidence threshold, duplicate overlap and magnified views of the detector. "
+              "They apply to both YOLO modes and are saved with the project.",
+        "fr": "Seuil de confiance, chevauchement des doublons et vues agrandies du détecteur. "
+              "Ils valent pour les deux modes YOLO et sont enregistrés avec le projet.",
+        "de": "Konfidenzschwelle, Überlappung für Duplikate und vergrößerte Ansichten des "
+              "Detektors. Sie gelten für beide YOLO-Modi und werden mit dem Projekt gespeichert."},
+    "threshold_help": {
+        "it": "Confidenza minima perché un riquadro YOLO conti come corpo (0.25 predefinito). "
+              "Dipende dal modello: alzala se il pretest mostra riquadri su scritte, fori o "
+              "piazzole, abbassala se perde componenti. È lo stesso cursore «Confidence "
+              "Threshold» di Roboflow. I riquadri sotto soglia restano nell'audit.",
+        "en": "Minimum confidence for a YOLO box to count as a body (default 0.25). It "
+              "depends on the model: raise it if the pretest shows boxes on text, holes or "
+              "pads, lower it if components are missed. It is Roboflow's «Confidence "
+              "Threshold» slider. Boxes below the threshold stay in the audit.",
+        "fr": "Confiance minimale pour qu'un rectangle YOLO compte comme un corps (0.25 par "
+              "défaut). Elle dépend du modèle : augmentez-la si le prétest montre des "
+              "rectangles sur des textes, trous ou pastilles, baissez-la s'il manque des "
+              "composants. C'est le curseur « Confidence Threshold » de Roboflow. Les "
+              "rectangles sous le seuil restent dans l'audit.",
+        "de": "Mindestkonfidenz, ab der ein YOLO-Rahmen als Körper zählt (Standard 0.25). "
+              "Sie hängt vom Modell ab: erhöhen, wenn der Vortest Rahmen auf Beschriftungen, "
+              "Löchern oder Pads zeigt, senken, wenn Bauteile fehlen. Es ist Roboflows "
+              "Regler „Confidence Threshold“. Rahmen unter der Schwelle bleiben im Audit."},
     "vlm_model": {"it": "Modello di visione:", "en": "Vision model:",
                   "fr": "Modèle de vision :", "de": "Sehmodell:"},
     "vlm_pick": {"it": "Scegli modello…", "en": "Choose model…",
@@ -261,33 +309,34 @@ _PHOTO_DETECTOR_TRANSLATIONS = {
                        "Leer: dasselbe KI-Modell wie die Extraktion."},
     "browse": {"it": "Sfoglia…", "en": "Browse…",
                "fr": "Parcourir…", "de": "Durchsuchen…"},
-    "picker": {"it": "Seleziona modello YOLO ONNX per questa sessione",
-               "en": "Select a YOLO ONNX model for this session",
-               "fr": "Choisir un modèle YOLO ONNX pour cette session",
-               "de": "YOLO-ONNX-Modell für diese Sitzung auswählen"},
-    "filter": {"it": "Modelli ONNX (*.onnx)", "en": "ONNX models (*.onnx)",
-               "fr": "Modèles ONNX (*.onnx)", "de": "ONNX-Modelle (*.onnx)"},
+    # .onnx con onnxruntime, .pt con PyTorch/Ultralytics (utente, 2026-09-25).
+    "picker": {"it": "Seleziona modello YOLO (ONNX o PyTorch) per questa sessione",
+               "en": "Select a YOLO model (ONNX or PyTorch) for this session",
+               "fr": "Choisir un modèle YOLO (ONNX ou PyTorch) pour cette session",
+               "de": "YOLO-Modell (ONNX oder PyTorch) für diese Sitzung auswählen"},
+    "filter": {"it": "Modelli YOLO (*.onnx *.pt)", "en": "YOLO models (*.onnx *.pt)",
+               "fr": "Modèles YOLO (*.onnx *.pt)", "de": "YOLO-Modelle (*.onnx *.pt)"},
     "default": {"it": "Predefinito: {path}", "en": "Default: {path}",
                 "fr": "Par défaut : {path}", "de": "Standard: {path}"},
     "path_help": {
-        "it": "File .onnx facoltativo, solo per questa sessione. Lascia vuoto per usare {path}. La presenza del file non attiva YOLO automaticamente.",
-        "en": "Optional .onnx file, for this session only. Leave empty to use {path}. An existing file does not enable YOLO automatically.",
-        "fr": "Fichier .onnx facultatif, pour cette session uniquement. Laisser vide pour utiliser {path}. La présence du fichier n’active pas YOLO automatiquement.",
-        "de": "Optionale .onnx-Datei, nur für diese Sitzung. Leer lassen, um {path} zu verwenden. Eine vorhandene Datei aktiviert YOLO nicht automatisch.",
+        "it": "File .onnx o .pt facoltativo, solo per questa sessione (.pt richiede PyTorch). Lascia vuoto per usare {path}. La presenza del file non attiva YOLO automaticamente.",
+        "en": "Optional .onnx or .pt file, for this session only (.pt needs PyTorch). Leave empty to use {path}. An existing file does not enable YOLO automatically.",
+        "fr": "Fichier .onnx ou .pt facultatif, pour cette session uniquement (.pt nécessite PyTorch). Laisser vide pour utiliser {path}. La présence du fichier n’active pas YOLO automatiquement.",
+        "de": "Optionale .onnx- oder .pt-Datei, nur für diese Sitzung (.pt benötigt PyTorch). Leer lassen, um {path} zu verwenden. Eine vorhandene Datei aktiviert YOLO nicht automatisch.",
     },
     "help": {
-        "it": "YOLO locale propone i riquadri dei componenti. Il verificatore AI configurato continua a consumare credito AI. L’abbinamento ai modelli KiCad avviene dopo; i rilevamenti incerti richiedono revisione. La scelta vale solo per questa sessione.",
-        "en": "Local YOLO proposes component boxes. The configured AI verifier still uses AI credit. KiCad model matching happens afterwards; uncertain detections require review. This choice applies only to this session.",
-        "fr": "YOLO local propose les rectangles des composants. Le vérificateur IA configuré consomme toujours du crédit IA. L’association aux modèles KiCad intervient ensuite ; les détections incertaines nécessitent une révision. Ce choix s’applique uniquement à cette session.",
-        "de": "Lokales YOLO schlägt Begrenzungsrahmen für Bauteile vor. Die konfigurierte KI-Prüfung verbraucht weiterhin KI-Guthaben. Die Zuordnung zu KiCad-Modellen erfolgt anschließend; unsichere Erkennungen müssen überprüft werden. Diese Auswahl gilt nur für diese Sitzung.",
+        "it": "YOLO locale propone i riquadri dei componenti. Il verificatore AI configurato continua a consumare credito AI. L’abbinamento ai modelli KiCad avviene dopo; i rilevamenti incerti richiedono revisione. «Solo YOLO locale» è un pretest: mostra soltanto i riquadri trovati da YOLO sulla foto, senza nessuna chiamata AI. La scelta vale solo per questa sessione.",
+        "en": "Local YOLO proposes component boxes. The configured AI verifier still uses AI credit. KiCad model matching happens afterwards; uncertain detections require review. «Local YOLO only» is a pretest: it only shows the boxes YOLO finds on the photo, with no AI call at all. This choice applies only to this session.",
+        "fr": "YOLO local propose les rectangles des composants. Le vérificateur IA configuré consomme toujours du crédit IA. L’association aux modèles KiCad intervient ensuite ; les détections incertaines nécessitent une révision. « YOLO local seul » est un prétest : il montre seulement les rectangles trouvés par YOLO sur la photo, sans aucun appel IA. Ce choix s’applique uniquement à cette session.",
+        "de": "Lokales YOLO schlägt Begrenzungsrahmen für Bauteile vor. Die konfigurierte KI-Prüfung verbraucht weiterhin KI-Guthaben. Die Zuordnung zu KiCad-Modellen erfolgt anschließend; unsichere Erkennungen müssen überprüft werden. „Nur lokales YOLO“ ist ein Vortest: Es zeigt nur die von YOLO auf dem Foto gefundenen Rahmen, ohne jeden KI-Aufruf. Diese Auswahl gilt nur für diese Sitzung.",
     },
     "error_title": {"it": "YOLO locale non disponibile", "en": "Local YOLO unavailable",
                     "fr": "YOLO local indisponible", "de": "Lokales YOLO nicht verfügbar"},
     "error": {
-        "it": "Impossibile avviare YOLO locale: {error}\nSeleziona un modello ONNX valido e verifica che onnxruntime sia installato, oppure scegli AI. Nessuna richiesta AI è stata avviata; i risultati precedenti sono conservati.",
-        "en": "Cannot start local YOLO: {error}\nSelect a valid ONNX model and check that onnxruntime is installed, or choose AI. No AI request was started; previous results are preserved.",
-        "fr": "Impossible de démarrer YOLO local : {error}\nChoisir un modèle ONNX valide et vérifier qu’onnxruntime est installé, ou choisir IA. Aucune requête IA n’a été lancée ; les résultats précédents sont conservés.",
-        "de": "Lokales YOLO kann nicht gestartet werden: {error}\nWählen Sie ein gültiges ONNX-Modell und prüfen Sie, ob onnxruntime installiert ist, oder wählen Sie KI. Es wurde keine KI-Anfrage gestartet; bisherige Ergebnisse bleiben erhalten.",
+        "it": "Impossibile avviare YOLO locale: {error}\nSeleziona un modello .onnx o .pt valido e verifica che sia installato onnxruntime (per .onnx) o PyTorch/Ultralytics (per .pt), oppure scegli AI. Nessuna richiesta AI è stata avviata; i risultati precedenti sono conservati.",
+        "en": "Cannot start local YOLO: {error}\nSelect a valid .onnx or .pt model and check that onnxruntime (for .onnx) or PyTorch/Ultralytics (for .pt) is installed, or choose AI. No AI request was started; previous results are preserved.",
+        "fr": "Impossible de démarrer YOLO local : {error}\nChoisir un modèle .onnx ou .pt valide et vérifier qu’onnxruntime (pour .onnx) ou PyTorch/Ultralytics (pour .pt) est installé, ou choisir IA. Aucune requête IA n’a été lancée ; les résultats précédents sont conservés.",
+        "de": "Lokales YOLO kann nicht gestartet werden: {error}\nWählen Sie ein gültiges .onnx- oder .pt-Modell und prüfen Sie, ob onnxruntime (für .onnx) oder PyTorch/Ultralytics (für .pt) installiert ist, oder wählen Sie KI. Es wurde keine KI-Anfrage gestartet; bisherige Ergebnisse bleiben erhalten.",
     },
 }
 
@@ -959,6 +1008,7 @@ class ExtractWorker(QThread):
         document_roles: dict | None = None,
         component_family: str | None = None,
         *, photo_detector: str = "ai", yolo_model_path: Path | None = None,
+        yolo_confidence: float | None = None, yolo_settings: dict | None = None,
     ):
         """@brief Snapshot extraction settings before starting background work.
 
@@ -976,6 +1026,8 @@ class ExtractWorker(QThread):
         @param component_family Selected component geometry family.
         @param photo_detector Photo proposal backend, ai by default or yolo.
         @param yolo_model_path Optional session ONNX path; None uses the service default.
+        @param yolo_confidence YOLO operating threshold; None uses the service default.
+        @param yolo_settings Other YOLO detector settings; None uses the defaults.
         @note YOLO changes photo proposals only; AI verification remains configured.
         """
         super().__init__()
@@ -993,6 +1045,8 @@ class ExtractWorker(QThread):
         self.component_family = component_family
         self.photo_detector = photo_detector
         self.yolo_model_path = yolo_model_path
+        self.yolo_confidence = yolo_confidence
+        self.yolo_settings = dict(yolo_settings) if yolo_settings is not None else None
         self._review_answered = threading.Event()
         self._review_result = None
 
@@ -1058,7 +1112,9 @@ class ExtractWorker(QThread):
                 review_proposals=self._review_proposals,
                 # Cartella del PROGETTO assegnata da chi avvia; None = nessuna cache.
                 **accepted_kwargs(extract_pin_header_params,
-                                  photo_cache_dir=getattr(self, "photo_cache_dir", None)),
+                                  photo_cache_dir=getattr(self, "photo_cache_dir", None),
+                                  yolo_confidence=self.yolo_confidence,
+                                  yolo_settings=self.yolo_settings),
                 **phase_kwargs(extract_pin_header_params, self._forward_phase),
             )
             self.done.emit(params)
@@ -1066,6 +1122,67 @@ class ExtractWorker(QThread):
             self.error.emit(str(exc))
         except Exception as exc:  # noqa: BLE001 - errori rete/API riportati in UI
             self.error.emit(tx("Errore API: {exc}", exc=exc))
+
+
+class YoloPretestWorker(ExtractWorker):
+    """@brief Local YOLO detection on the top view only: the «Solo YOLO locale» pretest.
+
+    Reuses ExtractWorker's review hand-off (review_requested /
+    deliver_review) and its signals; nothing else of the extraction runs.
+    """
+
+    def __init__(self, doc_paths, document_roles, length_mm, width_mm,
+                 yolo_model_path, cache_dir, yolo_confidence=None, yolo_settings=None):
+        """@brief Snapshot the pretest inputs.
+
+        @param doc_paths Selected documents.
+        @param document_roles Document roles by file name, or None.
+        @param length_mm Board X extent used to calibrate the photo, in mm.
+        @param width_mm Board Y extent, in mm.
+        @param yolo_model_path Weights path, or None for the default model.
+        @param cache_dir Project photo-cache folder for detector evidence.
+        @param yolo_confidence YOLO operating threshold; None uses the default.
+        @param yolo_settings Other YOLO detector settings; None uses the defaults.
+        """
+        super().__init__(list(doc_paths), document_roles=document_roles,
+                         photo_detector="yolo_only", yolo_model_path=yolo_model_path,
+                         yolo_confidence=yolo_confidence, yolo_settings=yolo_settings)
+        self.length_mm, self.width_mm = float(length_mm), float(width_mm)
+        self.photo_cache_dir = cache_dir
+
+    def _top_views(self):
+        """Indexes of the declared top views, as the extractor picks them."""
+        if self.document_roles is None:
+            return None
+        from ..services.document_roles import INVENTORY_ROLES
+        by_role = {self.document_roles.get(path.name): i for i, path in enumerate(self.doc_paths)}
+        return [by_role[role] for role in INVENTORY_ROLES if role in by_role] or [-1]
+
+    def run(self) -> None:
+        """@brief Detect, let the user review, emit the report (None if cancelled)."""
+        from ..services.datasheet_extractor import COMPONENT_KINDS
+        from ..services.photo_inventory import ReviewCancelled, extract_inventory
+
+        def no_ai(**_kwargs):
+            # Il ramo yolo_only non chiama mai il modello: se succedesse sarebbe
+            # un difetto, e deve fermarsi invece di spendere.
+            raise RuntimeError("the YOLO pretest must not call any AI model")
+
+        try:
+            report = extract_inventory(
+                self.doc_paths, "", self.length_mm, self.width_mm, COMPONENT_KINDS, no_ai,
+                progress=self.progress.emit, phase=self._forward_phase,
+                top_photo_index=self._top_views(), top_photo_source="utente",
+                cache_dir=self.photo_cache_dir, detector="yolo_only",
+                yolo_model_path=self.yolo_model_path,
+                yolo_confidence=self.yolo_confidence,
+                yolo_settings=self.yolo_settings,
+                review_proposals=self._review_proposals)
+            self.done.emit(report)
+        except ReviewCancelled:
+            self.done.emit(None)
+        except Exception as exc:  # noqa: BLE001 - riportato in UI come ogni errore del worker
+            self.error.emit(str(exc))
 
 
 class ReconcileWorker(QThread):
@@ -1368,9 +1485,13 @@ class MainWindow(QMainWindow):
         help_menu = self.menuBar().addMenu(self.i18n.tr("app.help"))
         self.action_open_tool_dir = help_menu.addAction(
             self.i18n.text("Apri cartella progetto tool"),
-            lambda: webbrowser.open(APP_DIR.as_uri()),
+            # Installato, la cartella scrivibile (config, database) e' quella
+            # dell'utente, non quella del programma.
+            lambda: webbrowser.open(user_data_dir().as_uri()),
         )
         help_menu.addSeparator()
+        # Licenza del programma e componenti di terze parti (utente, 2026-09-25).
+        self.action_licenses = help_menu.addAction(self.i18n.text("Licenze"), self._show_licenses)
         self.action_about = help_menu.addAction(self.i18n.text("About"), self._show_about)
 
     def _edit_generation_options(self) -> None:
@@ -1722,17 +1843,22 @@ class MainWindow(QMainWindow):
     def _refresh_photo_detector_controls(self) -> None:
         """Translate session controls without changing selected data or paths."""
         self.label_photo_detector.setText(self._photo_detector_text("label"))
-        for index, key in enumerate(("ai", "yolo", "vlm")):
+        for index, key in enumerate(("ai", "yolo", "vlm", "yolo_only")):
             self.combo_photo_detector.setItemText(index, self._photo_detector_text(key))
         self.combo_photo_detector.setToolTip(self._photo_detector_text("help"))
         self.label_yolo_model.setText(self._photo_detector_text("model"))
+        self.label_yolo_params.setText(self._photo_detector_text("params"))
+        self._refresh_yolo_summary()
+        self.btn_yolo_settings.setAccessibleName(self._photo_detector_text("settings"))
+        self.btn_yolo_settings.setToolTip(
+            self._photo_detector_text("settings") + "\n" + self._photo_detector_text("settings_help"))
         # Icona, non testo (utente, 2026-09-24): nome «Sfoglia…» come prima riga
         # del tooltip, spiegazione sotto; il nome accessibile resta quello del
         # dialogo che apre.
         self.btn_pick_yolo_model.setAccessibleName(self._photo_detector_text("picker"))
         self.btn_pick_yolo_model.setToolTip(
             self._photo_detector_text("browse") + "\n" + self._photo_detector_text("picker"))
-        default_path = APP_DIR / "models" / "pcb_yolov8s.onnx"
+        default_path = resource_path("models", "pcb_yolov8s.onnx")
         self.field_yolo_model.setPlaceholderText(
             self._photo_detector_text("default", path=default_path))
         self.field_yolo_model.setToolTip(
@@ -1753,20 +1879,78 @@ class MainWindow(QMainWindow):
             riga che resta e' quella su cui si puo' davvero intervenire.
         """
         detector = self.combo_photo_detector.currentData()
-        self.field_yolo_model.setEnabled(detector == "yolo")
-        self.btn_pick_yolo_model.setEnabled(detector == "yolo")
+        self._refresh_extract_button()
+        local = detector in ("yolo", "yolo_only")
+        self.field_yolo_model.setEnabled(local)
+        self.btn_pick_yolo_model.setEnabled(local)
+        self.btn_yolo_settings.setEnabled(local)
         if hasattr(self, "_models_form"):
-            self._models_form.setRowVisible(self._row_yolo_model, detector == "yolo")
+            self._models_form.setRowVisible(self._row_yolo_model, local)
+            self._models_form.setRowVisible(self._row_yolo_params, local)
             # Il modello di visione serve in entrambi i percorsi fotografici:
             # con vlm rileva ed elenca, con yolo riconcilia le proposte locali.
-            # E' sempre «il modello che guarda la fotografia».
+            # E' sempre «il modello che guarda la fotografia». Con yolo_only
+            # nessun modello AI lavora (pretest locale, utente 2026-09-25):
+            # ne' quello dei documenti ne' quello della foto, e le due righe
+            # spariscono.
             self._models_form.setRowVisible(self._row_vlm_model, detector in ("yolo", "vlm"))
+            self._models_form.setRowVisible(self._row_ai_model, detector != "yolo_only")
+            # Anche il credito (utente, 2026-09-25): il pretest non spende nulla.
+            if hasattr(self, "_row_ai_account"):
+                self._models_form.setRowVisible(self._row_ai_account, detector != "yolo_only")
+
+    def _open_yolo_settings(self) -> None:
+        """@brief «Parametri YOLO»: edit the detector settings in a modal, then keep them.
+
+        @note This modal is the only place where the settings are chosen
+            (threshold included: user, 2026-09-25, «solo nella finestra»).
+            Confirming keeps them in `_yolo_settings`, updates the summary
+            and saves the project. Cancelling changes nothing. No detection
+            starts from here.
+        """
+        from .yolo_settings_dialog import YoloSettingsDialog
+        dialog = YoloSettingsDialog(self._chosen_yolo_settings(), self)
+        self._yolo_settings_dialog = dialog
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        values = dialog.values()
+        self._yolo_settings = values
+        self._refresh_yolo_summary()
+        self._append_log(tx("Parametri YOLO: soglia {confidence:g}; sovrapposizione per i "
+                            "doppioni {nms_iou:g}; viste ingrandite {tiles}; sovrapposizione "
+                            "fra tessere {overlap:g}.",
+                            confidence=values["confidence"],
+                            nms_iou=values["nms_iou"],
+                            tiles=", ".join(f"{size} px" for size in values["tile_sizes"])
+                            or tx("nessuna (solo foto intera)"),
+                            overlap=values["tile_overlap"]))
+        self._save_project_config()
+
+    def _chosen_yolo_settings(self) -> dict:
+        """@brief The detector settings as the user chose them.
+
+        @return Complete dict (confidence, nms_iou, tile_sizes, tile_overlap):
+            the defaults until the user changes them or a project restores them.
+        """
+        return validate_yolo_settings(getattr(self, "_yolo_settings", None) or {})
+
+    def _refresh_yolo_summary(self) -> None:
+        """@brief Show the chosen settings, read-only, in the «Parametri YOLO» row."""
+        label = getattr(self, "label_yolo_summary", None)
+        if label is None:
+            return
+        values = self._chosen_yolo_settings()
+        tiles = (" + ".join(str(size) for size in values["tile_sizes"]) + " px"
+                 if values["tile_sizes"] else self._photo_detector_text("no_tiles"))
+        label.setText(self._photo_detector_text(
+            "summary", confidence=values["confidence"], nms_iou=values["nms_iou"], tiles=tiles))
+        label.setToolTip(self._photo_detector_text("settings_help"))
 
     def _pick_session_yolo_model(self) -> None:
         """Select optional ONNX weights without reading or saving preferences."""
         selected, _ = QFileDialog.getOpenFileName(
             self, self._photo_detector_text("picker"),
-            self.field_yolo_model.text().strip() or str(APP_DIR / "models"),
+            self.field_yolo_model.text().strip() or str(resource_path("models")),
             self._photo_detector_text("filter"),
         )
         if selected:
@@ -1792,7 +1976,7 @@ class MainWindow(QMainWindow):
         """Snapshot the selected backend; AI ignores any remembered ONNX path."""
         detector = self.combo_photo_detector.currentData() or "ai"
         path = self.field_yolo_model.text().strip()
-        return detector, Path(path) if detector == "yolo" and path else None
+        return detector, Path(path) if detector in ("yolo", "yolo_only") and path else None
 
     def _on_model_combo_changed(self) -> None:
         self._session_model = self.combo_model.currentData()
@@ -1833,7 +2017,9 @@ class MainWindow(QMainWindow):
         """@brief Testo della finestra About: descrizione e link a repository e sviluppatore."""
         description = "<br>".join(escape(line) for line in
                                   self.i18n.tr("about.description").split("\n"))
-        return (f"<p>{description}</p>"
+        from .. import __version__
+        return (f"<p><b>KiCadGen {escape(__version__)}</b></p>"
+                f"<p>{description}</p>"
                 f"<p>{escape(self.i18n.text('Repository GitHub'))}: "
                 f"<a href='{REPOSITORY_URL}'>{escape(REPOSITORY_URL)}</a><br>"
                 f"{escape(self.i18n.text('Sviluppatore'))}: "
@@ -1855,6 +2041,58 @@ class MainWindow(QMainWindow):
         box.setStandardButtons(QMessageBox.StandardButton.Ok)
         self._about_box = box
         box.exec()
+
+    def _license_texts(self) -> tuple[str, str]:
+        """@brief Read the program license and the third-party notices.
+
+        @return (LICENSE text, THIRD_PARTY_NOTICES.md markdown). A missing or
+            unreadable file becomes a sentence saying so, never an exception:
+            the dialog must open even in an incomplete installation.
+        @note Both files ship next to the program (packaging/KiCadGen.spec)
+            and are found through resource_path, as in the repository.
+        """
+        texts = []
+        for name in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
+            try:
+                texts.append(resource_path(name).read_text(encoding="utf-8"))
+            except OSError:
+                texts.append(self.i18n.text("File non trovato:") + f" {name}")
+        return texts[0], texts[1]
+
+    def _show_licenses(self) -> None:
+        """@brief Show the program license and the third-party notices, read-only.
+
+        @note Two tabs: the full AGPL-3.0 text, and the notices for model
+            weights, dataset and dependencies. The notices are the English
+            file of the repository, shown as it is: it is a legal record and
+            is not translated.
+        """
+        from PyQt6.QtWidgets import QDialogButtonBox, QTextBrowser
+        license_text, notices = self._license_texts()
+        dialog = QDialog(self)
+        dialog.setWindowTitle(self.i18n.text("Licenze"))
+        dialog.resize(820, 640)
+        layout = QVBoxLayout(dialog)
+        summary = QLabel(self.i18n.text(
+            "KiCadGen è software libero: codice e documentazione sono distribuiti con la "
+            "GNU Affero General Public License v3.0. Pesi dei modelli YOLO, dataset e "
+            "dipendenze hanno licenze proprie, elencate nella seconda scheda."))
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        tabs = QTabWidget(dialog)
+        program = QTextBrowser(tabs)
+        program.setPlainText(license_text)
+        third_party = QTextBrowser(tabs)
+        third_party.setOpenExternalLinks(True)
+        third_party.setMarkdown(notices)
+        tabs.addTab(program, self.i18n.text("Licenza del programma (AGPL-3.0)"))
+        tabs.addTab(third_party, self.i18n.text("Componenti di terze parti"))
+        layout.addWidget(tabs, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dialog)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        self._licenses_dialog = dialog
+        dialog.exec()
 
     def _warn_missing_external_applications(self) -> bool:
         """@brief Warn once when KiCad or FreeCAD is not installed.
@@ -2232,16 +2470,23 @@ class MainWindow(QMainWindow):
         model_row = QHBoxLayout()
         model_row.addWidget(self.combo_model, 1)
         model_row.addWidget(self.btn_pick_model)
-        models_form.addRow("Modello AI:", model_row)
         self.label_photo_detector = QLabel()
         self.combo_photo_detector = QComboBox()
         self.combo_photo_detector.addItem("", "ai")
         self.combo_photo_detector.addItem("", "yolo")
         self.combo_photo_detector.addItem("", "vlm")
+        # In coda, non in mezzo (utente, 2026-09-25): le tre voci esistenti
+        # restano nella loro posizione. I progetti salvati ricordano la voce
+        # per valore (project_state.widget_value), non per posizione.
+        self.combo_photo_detector.addItem("", "yolo_only")
         # User-selected startup default; explicit AI fallback remains available.
         self.combo_photo_detector.setCurrentIndex(self.combo_photo_detector.findData("yolo"))
         self.combo_photo_detector.currentIndexChanged.connect(self._on_photo_detector_changed)
+        # Prima riga del riquadro (utente, 2026-09-25): la scelta del
+        # rilevatore decide quali delle righe sotto servono.
         models_form.addRow(self.label_photo_detector, self.combo_photo_detector)
+        models_form.addRow("Modello AI:", model_row)
+        self._row_ai_model = models_form.rowCount() - 1
         self.label_yolo_model = QLabel()
         self.field_yolo_model = QLineEdit()
         self.field_yolo_model.setClearButtonEnabled(True)
@@ -2258,6 +2503,23 @@ class MainWindow(QMainWindow):
         yolo_row.addWidget(self.btn_pick_yolo_model)
         models_form.addRow(self.label_yolo_model, yolo_row)
         self._row_yolo_model = models_form.rowCount() - 1
+        # Parametri del rilevatore (utente, 2026-09-25): soglia, doppioni e
+        # tessere si scelgono SOLO nella modale «Parametri YOLO»; qui un
+        # riepilogo in sola lettura e il pulsante, stessa misura e stile di
+        # quello del modello. La soglia dipende dal modello, come su Roboflow.
+        self.label_yolo_params = QLabel()
+        self.label_yolo_summary = QLabel()
+        self.btn_yolo_settings = QPushButton()
+        self.btn_yolo_settings.setAutoDefault(False)
+        self.btn_yolo_settings.setIcon(self._asset_icon("sliders.svg"))
+        self.btn_yolo_settings.setIconSize(QSize(20, 20))
+        self.btn_yolo_settings.setFixedSize(40, 32)
+        self.btn_yolo_settings.clicked.connect(self._open_yolo_settings)
+        params_row = QHBoxLayout()
+        params_row.addWidget(self.label_yolo_summary, 1)
+        params_row.addWidget(self.btn_yolo_settings)
+        models_form.addRow(self.label_yolo_params, params_row)
+        self._row_yolo_params = models_form.rowCount() - 1
         self.label_vlm_model = QLabel()
         self.field_vlm_model = QLineEdit()
         self.field_vlm_model.setReadOnly(True)
@@ -2284,10 +2546,13 @@ class MainWindow(QMainWindow):
         self.ai_account = AiAccountLine(self._project_dir_or_none, self._append_log)
         self.label_ai_account = QLabel("Credito AI:")
         models_form.addRow(self.label_ai_account, self.ai_account)
+        self._row_ai_account = models_form.rowCount() - 1
         self._models_form = models_form
         # These data-bearing widgets use explicit keys and local I18n fallbacks.
         for widget in (self.label_photo_detector, self.combo_photo_detector,
                        self.label_yolo_model, self.field_yolo_model, self.btn_pick_yolo_model,
+                       self.label_yolo_params, self.label_yolo_summary,
+                       self.btn_yolo_settings,
                        self.label_vlm_model, self.field_vlm_model, self.btn_pick_vlm_model):
             widget.setProperty("i18n_skip", True)
         self._refresh_photo_detector_controls()
@@ -2316,6 +2581,9 @@ class MainWindow(QMainWindow):
             "Analisi A PAGAMENTO: consuma credito OpenRouter. I modelli usati e la "
             "spesa vengono scritti nel log prima di partire.")
         self.btn_extract_ai.clicked.connect(self._extract_with_ai)
+        # Testo e suggerimento seguono il rilevatore: con «Solo YOLO locale» il
+        # comando e' un pretest gratuito, non un'analisi a pagamento.
+        self._refresh_extract_button()
         # Riapre «Corpi rilevati» sulle proposte salvate nella cartella del
         # componente e, all'OK, le RISALVA li': gratuito, nessuna chiamata AI.
         # Decisione dell'utente: «se il file json esiste nella cartella deve
@@ -2770,10 +3038,7 @@ class MainWindow(QMainWindow):
                 # restavano tali in en/fr/de fino al cambio di lingua
                 # successivo (revisore 3, difetto 10).
                 self._set_translated_tooltip(
-                    widget, reason or
-                    "Avvia l'estrazione dai documenti e dalle foto selezionati. "
-                    "Analisi A PAGAMENTO: consuma credito OpenRouter. I modelli usati e la "
-                    "spesa vengono scritti nel log prima di partire.")
+                    widget, reason or self._extract_button_sources()[1])
             else:
                 widget.setEnabled(named)
                 self._set_translated_tooltip(widget, reason)
@@ -2889,7 +3154,7 @@ class MainWindow(QMainWindow):
             return
 
         photo_detector, yolo_model_path = self._photo_detector_options()
-        if photo_detector == "yolo":
+        if photo_detector in ("yolo", "yolo_only"):
             try:
                 # Optional runtime stays lazy: AI-only sessions do not require it.
                 # Validate before paid requests or clearing any previous results.
@@ -2908,6 +3173,12 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self, self.i18n.text("Completa la documentazione"), str(exc)
             )
+            return
+
+        if photo_detector == "yolo_only":
+            # Pretest (utente, 2026-09-25): solo i riquadri di YOLO sulla
+            # foto, nessuna chiamata AI, nessun campo modificato.
+            self._start_yolo_pretest(doc_paths, document_roles, yolo_model_path)
             return
 
         try:
@@ -3014,6 +3285,9 @@ class MainWindow(QMainWindow):
             component_family=self._selected_family(),
             photo_detector=photo_detector,
             yolo_model_path=yolo_model_path,
+            # Stessi parametri del pretest (utente, 2026-09-25: «la scelta dei
+            # parametri rimane quando scelgo la modalità YOLO + AI»).
+            yolo_settings=(self._chosen_yolo_settings() if photo_detector == "yolo" else None),
             system_prompt=profile['system_prompt'],
             extra_instructions=self.field_component_prompt.toPlainText().strip() or None,
             include_nc_pins=self._include_nc_pins(),
@@ -3034,6 +3308,131 @@ class MainWindow(QMainWindow):
         self.tabs.setEnabled(False)
         self.analysis_overlay.start(abortable=True)
         self._extract_worker.start()
+
+    def _start_yolo_pretest(self, doc_paths, document_roles, yolo_model_path) -> None:
+        """@brief Run only the local YOLO detector on the top view and show its boxes.
+
+        @param doc_paths Selected documents; only the top views are used.
+        @param document_roles Roles of the documents (None when not assigned).
+        @param yolo_model_path Session weights path, or None for the default.
+        @note No AI call of any kind (user, 2026-09-25: «un pretest di come
+            vengono individuati i componenti senza fare altro»). The board
+            extents come from the «Lunghezza/Larghezza corpo» fields: without
+            the document analysis there is no other source, and the photo
+            calibration needs them. They are read through `_body_size()`, the
+            same source the document cards use to say «calibrabile, N px/mm»:
+            the castellated fields for a castellated type, the matrix body
+            fields otherwise. Reading the matrix fields for every type made a
+            castellated board fail on their 10 x 10 mm defaults while its
+            card reported the photo as usable (user, 2026-09-25). Fields, component table and 3D are not
+            touched; the boxes kept in the review are saved in photo-review/
+            like after an extraction, so they can be reopened for free.
+        """
+        size = self._body_size()
+        if size is None:
+            QMessageBox.information(self, self.i18n.text("Pretest YOLO"),
+                                    self.i18n.text('Quote del corpo non note: inserisci Lunghezza corpo e Larghezza corpo nei parametri della tipologia scelta. Il pretest non legge i documenti e con quelle quote ritaglia e calibra la foto.'))
+            return
+        length, width = (float(value) for value in size)
+        self.btn_extract_ai.setEnabled(False)
+        self._start_log_session("Pretest YOLO")
+        self.ai_progress_text.clear()
+        self.ai_elements_list.clear()
+        self._on_ai_progress(
+            tx("Pretest solo YOLO locale: nessuna chiamata AI. Quote della scheda dai campi "
+               "del corpo: {length:.2f} x {width:.2f} mm.", length=length, width=width))
+        worker = YoloPretestWorker(doc_paths, document_roles, length, width,
+                                   yolo_model_path, self._photo_cache_dir(),
+                                   yolo_settings=self._chosen_yolo_settings())
+        self._extract_worker = worker
+        worker.done.connect(self._on_yolo_pretest_done)
+        worker.error.connect(self._on_extract_error)
+        worker.progress.connect(self._on_ai_progress)
+        worker.phase.connect(self._on_phase)
+        worker.review_requested.connect(self._on_review_requested)
+        worker.finished.connect(self._on_yolo_pretest_finished)
+        worker._analysis_revision = self._analysis_revision
+        self._analysis_tabs_enabled = self.tabs.isEnabled()
+        self.tabs.setEnabled(False)
+        # Titolo proprio: «Analisi AI in corso» direbbe il falso (nessuna AI).
+        self.analysis_overlay.start("Pretest YOLO in corso",
+                                    "Rilevamento dei componenti sulla foto…", abortable=True)
+        worker.start()
+
+    def _on_yolo_pretest_done(self, report) -> None:
+        """@brief Report what the pretest found.
+
+        @param report InventoryResult of the yolo_only path, or None when the
+            review was cancelled.
+        @note When nothing could be detected the reason (no top view, photo
+            not calibratable) is in the report's warnings: the board extents
+            are the usual cause, so the message says where to fix them.
+        """
+        if not self._analysis_result_is_current():
+            return
+        if report is None:
+            self._on_ai_progress(tx("Pretest YOLO annullato nella revisione: nulla salvato."))
+            return
+        found = len(report.components)
+        self._on_ai_progress(tx("Pretest YOLO concluso: {found} riquadri tenuti; nessuna chiamata AI.",
+                                found=found))
+        if not found and report.warnings:
+            QMessageBox.information(
+                self, self.i18n.text("Pretest YOLO"),
+                "\n".join(report.warnings) + "\n\n" + self.i18n.text(
+                    'Se la foto non si calibra, controlla Lunghezza corpo e Larghezza corpo nei parametri della tipologia scelta: il pretest non legge i documenti e usa quei valori come quote della scheda.'))
+
+    def _on_yolo_pretest_finished(self) -> None:
+        """@brief Give the window back after the pretest, with no cost to report."""
+        if not self._analysis_result_is_current():
+            self._forget_abandoned_worker(self.sender())
+            self._apply_component_name_gate()
+            self._refresh_reopen_review_button()
+            return
+        self._hide_analysis_overlay()
+        self.btn_extract_ai.setEnabled(True)
+        self._refresh_extract_button()
+        self._apply_component_name_gate()
+        self._refresh_reopen_review_button()
+
+    def _extract_button_sources(self) -> tuple[str, str]:
+        """@brief Italian sources of the extraction button's text and tooltip.
+
+        @return (text, tooltip) for the selected photo detector.
+        @note With «Solo YOLO locale» the button starts the free local pretest
+            (user, 2026-09-25: «se ho selezionato solo YOLO il pulsante e il
+            popup non sono corretti»); every other choice starts the paid AI
+            extraction, and the tooltip says so before anything is spent. Both
+            texts are written literally here so the catalogue check sees them.
+        """
+        combo = getattr(self, "combo_photo_detector", None)
+        if combo is not None and combo.currentData() == "yolo_only":
+            return ('Rileva componenti con YOLO',
+                    "Pretest locale e GRATUITO: YOLO cerca i componenti nella foto dall'alto e mostra i riquadri da rivedere. Nessuna chiamata AI, nessun credito consumato, documenti non letti; campi, tabella e 3D non cambiano.")
+        return ("Estrai parametri con AI",
+                "Avvia l'estrazione dai documenti e dalle foto selezionati. Analisi A PAGAMENTO: consuma credito OpenRouter. I modelli usati e la spesa vengono scritti nel log prima di partire.")
+
+    def _refresh_extract_button(self) -> None:
+        """@brief Put the idle text and tooltip of the extraction button in line with the detector.
+
+        @note Called at rest only (construction, detector change, end of a
+            run): during a run the detector combo is disabled, so the busy
+            text is never overwritten. It does not ask `_background_work_running`,
+            because a queued `finished` may arrive while the QThread still
+            reports itself running, and the button would keep its busy text.
+            Both properties are recorded as catalogue sources, so a later
+            language switch translates them instead of freezing the rendered text.
+        """
+        button = getattr(self, "btn_extract_ai", None)
+        if button is None:
+            return
+        text, tooltip = self._extract_button_sources()
+        rendered = self.i18n.text(text)
+        button.setText(rendered)
+        button.setProperty("i18n_source", text)
+        button.setProperty("i18n_rendered", rendered)
+        if self._component_name():
+            self._set_translated_tooltip(button, tooltip)
 
     def _begin_ai_run(self, title: str) -> None:
         """@brief Prepara log, consuntivo e pulsanti per un'analisi AI che sta per partire.
@@ -3728,8 +4127,9 @@ class MainWindow(QMainWindow):
     def _abortable_operation(self):
         """@brief L'operazione in corso che «Interrompi» puo' fermare, se c'e'.
 
-        @return (natura, worker, fase) con natura in {'cad', 'ai'}, oppure None
-            quando non c'e' nulla da fermare.
+        @return (natura, worker, fase) con natura in {'cad', 'ai', 'local'},
+            oppure None quando non c'e' nulla da fermare. 'local' e' il
+            pretest solo YOLO: si abbandona come una corsa AI, ma non costa.
         @note Un worker gia' abbandonato NON e' piu' un candidato: continua a
             girare (e a contare per la guardia di chiusura) ma la finestra e'
             gia' tornata all'utente, quindi non c'e' piu' niente da chiedergli.
@@ -3740,6 +4140,8 @@ class MainWindow(QMainWindow):
                 continue
             if any(worker is abandoned for abandoned in self._abandoned_workers):
                 continue
+            if isinstance(worker, YoloPretestWorker):
+                return "local", worker, label
             return kind, worker, label
         return None
 
@@ -3770,7 +4172,13 @@ class MainWindow(QMainWindow):
         @note Nel caso `ai` la spesa va detta QUI, prima del danno: la
             richiesta e' gia' partita e nessuna interfaccia la puo' richiamare.
         """
-        if kind == "cad":
+        if kind == "local":
+            # Pretest solo YOLO: nessuna richiesta a pagamento da dichiarare.
+            detail = self.i18n.text(
+                "Il rilevamento YOLO locale viene abbandonato: nessun costo, la "
+                "finestra torna subito utilizzabile e il risultato, se arriverà, "
+                "verrà scartato.")
+        elif kind == "cad":
             detail = self.i18n.text(
                 "Il processo FreeCAD in corso verrà terminato e il modello 3D non "
                 "sarà completato: il lavoro fatto finora va perso e la generazione "
@@ -3828,7 +4236,7 @@ class MainWindow(QMainWindow):
         if kind == "cad":
             self._abort_cad_run(worker, phase)
         else:
-            self._abort_ai_run(worker, phase)
+            self._abort_ai_run(worker, phase, paid=kind == "ai")
 
     def _on_cad_cancellable(self, cancellable: bool) -> None:
         """@brief Toglie «Interrompi» quando il generatore in uso non sa fermarsi.
@@ -3871,11 +4279,13 @@ class MainWindow(QMainWindow):
             "Interruzione in corso: chiusura del processo FreeCAD…"))
         worker.request_abort()
 
-    def _abort_ai_run(self, worker, phase: str) -> None:
+    def _abort_ai_run(self, worker, phase: str, *, paid: bool = True) -> None:
         """@brief Abbandona la corsa AI: la finestra torna subito, il risultato si scarta.
 
-        @param worker ExtractWorker o ReconcileWorker in corso.
+        @param worker ExtractWorker, ReconcileWorker o YoloPretestWorker in corso.
         @param phase Fase in corso, per il log.
+        @param paid False per il pretest solo YOLO: stesso abbandono, ma il
+            log non parla di una spesa che non c'e' e non c'e' consuntivo.
         @note Non si finge di aver fermato la chiamata: il thread resta vivo
             finche' `urllib` non restituisce, e per questo il worker continua a
             contare per la guardia di `closeEvent` -- chiudere la finestra con
@@ -3897,7 +4307,10 @@ class MainWindow(QMainWindow):
                "inviata al modello non si può annullare ed è già a pagamento: la "
                "corsa viene abbandonata e il suo risultato, quando arriverà, verrà "
                "scartato.",
-               phase=phase))
+               phase=phase) if paid else
+            tx("INTERRUZIONE chiesta dall'utente durante: {phase}. Il rilevamento "
+               "YOLO locale viene abbandonato, senza costi; il suo risultato verrà "
+               "scartato.", phase=phase))
         self._auto_after_extraction = False
         self._auto_generation_params = None
         self._extract_finish_pending = False
@@ -3909,9 +4322,10 @@ class MainWindow(QMainWindow):
         # sia. Non comprende la richiesta ancora in volo, che verra' pagata
         # lo stesso ma non ha ancora restituito i propri conteggi: e' scritto
         # nella riga di log qui sopra.
-        self._show_ai_cost()
+        if paid:
+            self._show_ai_cost()
         self._hide_analysis_overlay()
-        self.btn_extract_ai.setText(self.i18n.text("Estrai parametri con AI"))
+        self._refresh_extract_button()
         self._apply_component_name_gate()
         self._refresh_ai_log_button()
         # Niente da attendere: la finestra e' gia' tornata all'utente.
@@ -3975,7 +4389,7 @@ class MainWindow(QMainWindow):
             return
         self._hide_analysis_overlay()
         self.btn_extract_ai.setEnabled(True)
-        self.btn_extract_ai.setText(self.i18n.text("Estrai parametri con AI"))
+        self._refresh_extract_button()
         params = self._auto_generation_params
         self._auto_generation_params = None
         self._auto_after_extraction = False
@@ -4538,6 +4952,7 @@ class MainWindow(QMainWindow):
             "pin_map": (None if not getattr(self, "pin_map", None) else
                         [[pin, row, col] for pin, (row, col) in sorted(self.pin_map.items())]),
             "declared_row_spacing": getattr(self, "_declared_row_spacing", None),
+            "yolo_settings": self._chosen_yolo_settings(),
             "options": {"include_nc_pins": self._include_nc_pins(),
                         "silk_pin_labels": self._silk_pin_labels(),
                         "pause_after_inventory": self._inventory_pause_enabled()},
@@ -4562,6 +4977,21 @@ class MainWindow(QMainWindow):
             values = state.get("widgets") if isinstance(state.get("widgets"), dict) else {}
             if widget is not None and name in values and not set_widget_value(widget, values[name]):
                 skipped.append(name)
+        # Parametri YOLO del progetto; assenti (progetti precedenti) = predefiniti.
+        saved_yolo = dict(state.get("yolo_settings") or {}) if isinstance(
+            state.get("yolo_settings") or {}, dict) else {}
+        # Salvati il 25/09 prima di questa versione: la soglia stava in un campo.
+        legacy_threshold = (state.get("widgets") or {}).get("field_yolo_confidence") \
+            if isinstance(state.get("widgets"), dict) else None
+        if "confidence" not in saved_yolo and isinstance(legacy_threshold, (int, float)) \
+                and not isinstance(legacy_threshold, bool):
+            saved_yolo["confidence"] = round(float(legacy_threshold), 2)
+        try:
+            self._yolo_settings = validate_yolo_settings(saved_yolo)
+        except ValueError as exc:
+            self._yolo_settings = None
+            skipped.append(f"yolo_settings ({exc})")
+        self._refresh_yolo_summary()
         models = state.get("models") if isinstance(state.get("models"), dict) else {}
         session = models.get("session_model")
         self._session_model = session if isinstance(session, str) and session else None
@@ -8964,6 +9394,8 @@ class MainWindow(QMainWindow):
 def main() -> None:
     """@brief Provide the main operation for this workflow."""
     app = QApplication(sys.argv)
+    # Icona del programma: finestra e barra delle applicazioni (anche da sorgente).
+    app.setWindowIcon(QIcon(str(resource_path("kicadgen", "gui", "assets", "app-icon.svg"))))
     app.setStyleSheet(APP_QSS)
     # Tooltip a capo e dentro la finestra, per tutta l'applicazione: con le
     # barre di sole icone il tooltip e' l'unico testo di un comando.

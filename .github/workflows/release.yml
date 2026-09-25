@@ -1,0 +1,57 @@
+name: Windows MSI release
+
+# Started by scripts/publish-release.ps1, which pushes a tag vX.Y.Z.
+# Builds the executable and the MSI on Windows and attaches the MSI to the
+# GitHub Release of that tag. The YOLO weights are NOT shipped (license to
+# be clarified, see docs/yolo-photo-workflow.md).
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  windows-msi:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Check that the tag matches the program version
+        shell: pwsh
+        run: |
+          $text = Get-Content kicadgen/__init__.py -Raw
+          $version = [regex]::Match($text, '__version__\s*=\s*"(\d+\.\d+\.\d+)"').Groups[1].Value
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            throw "Tag ${{ github.ref_name }} does not match kicadgen.__version__ $version."
+          }
+
+      - name: Run the test suite
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m pip install --disable-pip-version-check -q -r requirements.txt -r requirements-yolo.txt
+          python -m pytest -q -p no:cacheprovider
+
+      - name: Build the executable and the MSI
+        shell: pwsh
+        run: ./scripts/build-windows.ps1 -Package msi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-msi
+          path: dist/*.msi
+
+      - name: Publish the GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" (Get-ChildItem dist/*.msi).FullName `
+            --title "KiCadGen ${{ github.ref_name }}" --generate-notes

@@ -101,16 +101,23 @@ def test_model_resolution_priority_and_default(setup, monkeypatch, tmp_path):
     assert yolo.resolve_yolo_model(explicit) == explicit.resolve()
     assert yolo.resolve_yolo_model() == path.resolve()
     monkeypatch.delenv("KICADGEN_YOLO_MODEL")
-    monkeypatch.setattr(yolo, "__file__", str(tmp_path / "kicadgen" / "services" / "photo_yolo.py"))
+    # Contratto invariato, meccanismo cambiato (2026-09-25): il default e' la
+    # risorsa del programma (`app_paths.resource_path`), che da sorgente e' il
+    # repository e nell'eseguibile e' il pacchetto installato.
+    monkeypatch.setattr(yolo, "resource_path", lambda *parts: tmp_path.joinpath(*parts))
     default = tmp_path / "models" / "pcb_yolov8s.onnx"
     default.parent.mkdir()
     default.write_bytes(b"default")
     assert yolo.resolve_yolo_model() == default.resolve()
 
 
-@pytest.mark.parametrize("filename,content", [("missing.onnx", None), ("empty.onnx", b""), ("unsafe.pt", b"data")])
+# Contratto cambiato di proposito (utente, 2026-09-25): i .pt si caricano con
+# PyTorch (tests/test_photo_yolo_pt.py). Resta rifiutato un formato che non e'
+# ne' .onnx ne' .pt.
+@pytest.mark.parametrize("filename,content", [("missing.onnx", None), ("empty.onnx", b""),
+                                              ("empty.pt", b""), ("weights.bin", b"data")])
 def test_missing_empty_or_non_onnx_weights(tmp_path, filename, content):
-    """@brief Reject missing, empty and pickle-format weights with actionable guidance."""
+    """@brief Reject missing, empty and unsupported-format weights with actionable guidance."""
     path = tmp_path / filename
     if content is not None:
         path.write_bytes(content)
@@ -174,14 +181,65 @@ def test_reject_incompatible_model_contract(setup, field, value):
     assert not session.calls
 
 
-def test_reject_reordered_classes(setup):
-    """@brief Reject a same-sized model whose class indices have different semantics."""
+def test_reordered_classes_are_read_by_name(setup):
+    """@brief Contratto cambiato (utente, 2026-09-25): una tabella in un altro ordine
+    si legge per NOME, non si rifiuta. Prima si rifiutava perche' i punteggi
+    si leggevano per posizione; ora vengono riordinati nell'ordine del rilevatore.
+    """
     session, _ = setup
     names = dict(enumerate(_NAMES))
     names[13], names[10] = names[10], names[13]
     session.metadata["names"] = repr(names)
-    with pytest.raises(ValueError, match="21 PCB classes in order"):
+    raw = np.zeros((1, 25, 8400), np.float32)
+    raw[0, 4 + 10, 0] = 0.8  # colonna 10 del MODELLO = names[10] = la classe interna 13
+    session.raw = raw
+    info = yolo.validate_yolo_setup()
+    assert info["class_order"] == "remapped by name" and info["output_shape"] == [1, 25, 8400]
+    model_session, input_name, *_ = yolo._setup(None)
+    out = model_session.run(None, {input_name: np.zeros((1, 3, 640, 640), np.float32)})[0]
+    assert out[0, 4 + 13, 0] == pytest.approx(0.8) and out[0, 4 + 10, 0] == 0
+
+
+def test_a_model_with_fewer_classes_keeps_the_absent_ones_at_zero(setup):
+    """@brief Positivo: 16 classi, maiuscole diverse, ordine diverso (YOLO26 «_l»)."""
+    session, _ = setup
+    declared = ["IC", "LED", "battery", "buzzer", "capacitor", "clock", "connector", "diode",
+                "display", "fuse", "inductor", "potentiometer", "relay", "resistor",
+                "switch", "transistor"]
+    session.metadata["names"] = repr(dict(enumerate(declared)))
+    session.outputs[0].shape = [1, 4 + len(declared), 8400]
+    raw = np.zeros((1, 4 + len(declared), 8400), np.float32)
+    raw[0, 4 + declared.index("IC"), 0] = 0.7
+    session.raw = raw
+    info = yolo.validate_yolo_setup()
+    assert set(info["missing_classes"]) == {"button", "heatsink", "pads", "pins", "transformer"}
+    model_session, input_name, *_ = yolo._setup(None)
+    out = model_session.run(None, {input_name: np.zeros((1, 3, 640, 640), np.float32)})[0]
+    assert out.shape == (1, 25, 8400)
+    assert out[0, 4 + _NAMES.index("ic"), 0] == pytest.approx(0.7)
+    assert out[0, 4:, 0].sum() == pytest.approx(0.7)
+
+
+@pytest.mark.parametrize("names", [
+    {0: "ic", 1: "gearbox"},                 # classe sconosciuta: non si sa cosa sia
+    {0: "ic", 1: "IC"},                      # la stessa classe due volte
+    {1: "ic", 2: "led"},                     # indici non da 0
+])
+def test_unknown_or_ambiguous_class_tables_are_refused(setup, names):
+    """@brief Negativo: rimappare richiede di sapere cosa sia ogni classe."""
+    session, _ = setup
+    session.metadata["names"] = repr(names)
+    session.outputs[0].shape = [1, 4 + len(names), 8400]
+    with pytest.raises(ValueError, match="class"):
         yolo.validate_yolo_setup()
+
+
+def test_the_detector_order_keeps_the_plain_session(setup):
+    """@brief Negativo del riordino: con la tabella del rilevatore nulla cambia."""
+    session, _ = setup
+    model_session, *_rest, info = yolo._setup(None)
+    assert model_session is session and info["class_order"] == "detector order"
+    assert info["missing_classes"] == []
 
 
 def test_corrupt_model_load_is_actionable(setup, monkeypatch):
@@ -762,3 +820,73 @@ def test_only_the_weak_bodies_rebuilt_from_seams_reach_the_review(setup):
     assert rebuilt, 'il corpo ricomposto dalla cucitura deve arrivare alla revisione'
     assert all(row['_yolo_clipped_recovery'] or not row['_yolo_review_only'] for row in rows), \
         'una debole non ricomposta non deve uscire dal rilevatore'
+
+
+def test_a_chosen_threshold_turns_a_weak_proposal_into_audit_only(setup):
+    """@brief Soglia scelta (utente, 2026-09-25): la stessa proposta a 0.40 conta con la
+    soglia predefinita (0.25) e non conta con 0.46, il valore usato su Roboflow."""
+    session, _ = setup
+    raw = np.zeros((1, 25, 8400), np.float32)
+    raw[0, :4, 0] = [320, 320, 60, 40]
+    raw[0, 4 + _NAMES.index("capacitor"), 0] = 0.40
+    session.raw = raw
+    photo = np.zeros((640, 640, 3), np.uint8)
+    default = yolo.detect_yolo_components(photo, 20, 20)
+    chosen = yolo.detect_yolo_components(photo, 20, 20, confidence=0.46)
+    assert len(default) >= 1 and chosen == []
+
+
+@pytest.mark.parametrize("value", [0.05, 0.0, 1.0, 1.5, float("nan"), True, "0.4"])
+def test_an_out_of_range_threshold_is_refused(value):
+    with pytest.raises(ValueError, match="threshold"):
+        yolo.operating_confidence(value)
+
+
+def test_no_threshold_keeps_the_default():
+    assert yolo.operating_confidence(None) == yolo._CONFIDENCE == 0.25
+    assert yolo.operating_confidence(0.46) == 0.46
+
+
+def test_settings_default_to_the_values_used_so_far():
+    """@brief «Parametri YOLO» (utente, 2026-09-25): nessuna scelta = comportamento di prima."""
+    assert yolo.yolo_settings() == {"confidence": 0.25, "nms_iou": 0.5,
+                                    "tile_sizes": [640, 1280], "tile_overlap": 0.25}
+    assert [name for name, _ in yolo._views(2593, 1042)] == [
+        name for name, _ in yolo._views(2593, 1042, [640, 1280], 0.25)]
+
+
+@pytest.mark.parametrize("values", [
+    {"nms_iou": 0.05}, {"nms_iou": True}, {"tile_overlap": 0.9},
+    {"tile_sizes": [512]}, {"tile_sizes": [640, 640]}, {"tile_sizes": "640"},
+    {"confidence": 2}, {"stride": 32},
+])
+def test_invalid_settings_are_refused(values):
+    with pytest.raises(ValueError):
+        yolo.yolo_settings(values)
+
+
+def test_without_tiles_only_the_whole_photo_is_seen(setup):
+    """@brief Positivo: senza tessere una sola passata, come Roboflow. Negativo: con i
+    predefiniti le viste sono piu' di una."""
+    session, _ = setup
+    photo = np.zeros((1042, 2593, 3), np.uint8)
+    yolo.detect_yolo_components(photo, 60, 24, settings={"tile_sizes": []})
+    assert len(session.calls) == 1
+    session.calls.clear()
+    yolo.detect_yolo_components(photo, 60, 24)
+    assert len(session.calls) > 1
+
+
+def test_a_stricter_overlap_merges_boxes_the_default_keeps_apart(setup):
+    """@brief Due riquadri con IoU ~0.43: distinti a 0.50 (predefinito), uno solo a 0.40."""
+    session, _ = setup
+    raw = np.zeros((1, 25, 8400), np.float32)
+    cap = 4 + _NAMES.index("capacitor")
+    raw[0, :4, 0] = [300, 320, 100, 60]
+    raw[0, :4, 1] = [340, 320, 100, 60]
+    raw[0, cap, 0], raw[0, cap, 1] = 0.9, 0.8
+    session.raw = raw
+    photo = np.zeros((640, 640, 3), np.uint8)
+    apart = yolo.detect_yolo_components(photo, 20, 20, settings={"tile_sizes": []})
+    merged = yolo.detect_yolo_components(photo, 20, 20, settings={"tile_sizes": [], "nms_iou": 0.4})
+    assert len(apart) == 2 and len(merged) == 1

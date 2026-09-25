@@ -133,6 +133,12 @@ buttons for analysis and detected elements.
 
 ## Installation
 
+**Windows users**: download `KiCadGen-X.Y.Z.msi` from the GitHub Releases and
+follow [docs/INSTALLATION-WINDOWS.md](docs/INSTALLATION-WINDOWS.md). How the
+executable and the installer are built: [docs/PACKAGING-WINDOWS-MSI.md](docs/PACKAGING-WINDOWS-MSI.md).
+
+From the sources:
+
 Requirements:
 
 - Python 3.11 or newer;
@@ -267,12 +273,34 @@ Future extensions can add more source roles, richer review tools, additional
 geometry families and project-level reproducibility metadata without changing
 the existing role contract.
 
-## License
+## Licensing
 
-This project is licensed under the MIT License in LICENSE.
-
+KiCadGen's source code and documentation are licensed under the
+**GNU Affero General Public License v3.0** (`LICENSE`).
 Copyright (c) 2026 Mirko Ugolini.
 
-The license applies to this project's source code and documentation. Generated
-footprints, 3D models, datasheets, images and other third-party materials may
-have separate licenses or usage restrictions and must be checked independently.
+The project previously used the MIT License; it moved to AGPL-3.0 on
+2026-09-25 because it uses Ultralytics (AGPL-3.0) for `.pt` YOLO models and the
+YOLO weights it works with declare AGPL-3.0.
+
+The YOLO model weights and the training dataset **have their own licenses,
+which may differ from the code's**. They are listed one by one in
+`THIRD_PARTY_NOTICES.md`, together with the Python dependencies. In short:
+
+- No weights are stored in this repository (`models/*.pt` and `models/*.onnx`
+  are ignored by Git). The checkpoints used during development declare
+  AGPL-3.0 in their metadata. The license of the base ONNX model is still
+  unresolved (MIT model card, AGPL-3.0 metadata).
+- The Roboflow YOLO26 models were trained on the
+  [CompDetect dataset](https://universe.roboflow.com/dataset-lmrsw/compdetect),
+  licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+  The dataset was exported from Roboflow for training; the preprocessing
+  actually applied is recorded in `THIRD_PARTY_NOTICES.md`. The dataset is not
+  redistributed here, and its authors do not endorse this project.
+- FreeCAD and KiCad are separate programs with their own licenses and are not
+  included.
+
+Generated footprints, 3D models, and the datasheets and photos you provide may
+have their own licenses or usage restrictions: check them yourself. This
+section does not state that any use, commercial or otherwise, is allowed
+beyond what the individual licenses say.

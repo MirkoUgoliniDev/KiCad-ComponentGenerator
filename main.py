@@ -53,7 +53,11 @@ def main():
         return int(failed)
     try:
         from dotenv import load_dotenv
-        load_dotenv(root / ".env")
+        from kicadgen.app_paths import env_files
+        # Da sorgente il .env del repository; installato, quello nella
+        # cartella dati dell'utente (Program Files e' in sola lettura).
+        for env_file in env_files():
+            load_dotenv(env_file)
     except ImportError:
         pass
     from kicadgen.gui.main_window import main as run_gui

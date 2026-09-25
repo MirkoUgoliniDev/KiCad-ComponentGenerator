@@ -304,7 +304,8 @@ def test_local_detection_is_announced_before_it_starts_then_the_paid_call(invent
     riconciliazione, non quello della vista.
     """
     calls, _ = inventory['execute']()
-    assert calls == [('yolo', 'rilevatore locale ONNX'), ('llm', 'paid/global-model')]
+    # Contratto aggiornato (utente, 2026-09-25): il modello vero, file e formato.
+    assert calls == [('yolo', 'fixture.onnx (ONNX)'), ('llm', 'paid/global-model')]  # il modello del test
     assert inventory['detect'].called and inventory['reconcile'].called
 
 

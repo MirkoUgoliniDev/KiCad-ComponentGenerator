@@ -1,0 +1,5 @@
+# Build dell'eseguibile Windows e dell'installer MSI (scripts/build-windows.ps1).
+# Installato in un ambiente dedicato, .venv-build, mai in quello di sviluppo.
+-r requirements.txt
+-r requirements-yolo.txt
+pyinstaller>=6.10,<7

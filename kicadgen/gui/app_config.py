@@ -20,8 +20,11 @@ from ..services.datasheet_extractor import DEFAULT_SYSTEM_PROMPT
 from ..services.openrouter import DEFAULT_MODEL
 from ..services.photo_grounding import DEFAULT_VISION_MODEL, GROUNDING_PROMPT, VERIFICATION_PROMPT
 from ..services.messages import tx
+from ..app_paths import user_data_dir
 
-CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config.json"
+#: config.json nella cartella dati: il repository da sorgente (come prima),
+#: %LOCALAPPDATA%\KiCadGen nel programma installato (vedi `app_paths`).
+CONFIG_PATH = user_data_dir() / "config.json"
 
 
 def config_path() -> Path:

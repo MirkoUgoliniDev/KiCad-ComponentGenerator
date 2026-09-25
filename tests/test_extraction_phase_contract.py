@@ -93,7 +93,9 @@ def test_the_local_phase_is_closed_when_the_detector_dies_after_validation(
 
     phases, _, params = extraction()
 
-    assert ('yolo', 'rilevatore locale ONNX') in phases
+    # Contratto aggiornato (utente, 2026-09-25): il dettaglio nomina il modello
+    # vero, file e formato, non piu' un «ONNX» fisso.
+    assert ('yolo', 'fixture.onnx (ONNX)') in phases  # il modello passato dal test
     assert phases[-1] == ('', ''), 'la fase va chiusa: nessuno strumento sta lavorando'
     assert phases[-1][0] != 'yolo'
     assert 'Inventario fotografico fallito' in (params.notes or '')

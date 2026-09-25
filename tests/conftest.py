@@ -1,5 +1,22 @@
 """Keep configuration and SQLite tests away from the user's live preferences."""
+import sys
+import types
+from pathlib import Path
+
 import pytest
+
+# `tests` e' la cartella di questi test. Ultralytics 8.4.x (requirements-yolo-
+# pt.txt, modelli .pt) installa per errore un suo pacchetto `tests` di primo
+# livello in site-packages; questa cartella non ha __init__.py, quindi per
+# Python e' un pacchetto «namespace» e quello di Ultralytics vince sempre,
+# e `from tests.test_photo_inventory_gui import ...` falliva in 17 file
+# (2026-09-25). Il nome si lega qui, prima di ogni import dei test.
+_TESTS_DIR = Path(__file__).resolve().parent
+_bound = sys.modules.get("tests")
+if _bound is None or str(_TESTS_DIR) not in [str(Path(p).resolve()) for p in getattr(_bound, "__path__", [])]:
+    _package = types.ModuleType("tests")
+    _package.__path__ = [str(_TESTS_DIR)]
+    sys.modules["tests"] = _package
 
 
 @pytest.fixture(autouse=True)

@@ -968,6 +968,8 @@ def extract_pin_header_params(
     component_family: Optional[str] = None,
     photo_detector: str = "ai",
     yolo_model_path: Optional[Path] = None,
+    yolo_confidence: Optional[float] = None,
+    yolo_settings: Optional[dict] = None,
     phase: Optional[Callable[..., None]] = None,
     review_proposals: Optional[Callable[..., object]] = None,
 ) -> ExtractedParams:
@@ -977,6 +979,10 @@ def extract_pin_header_params(
         proposals plus one AI reconciliation) or vlm (no local detector: the
         vision model enumerates the bodies in that same single request).
     @param yolo_model_path Optional compatible ONNX file; validated before paid calls.
+    @param yolo_confidence Operating confidence threshold of the local YOLO
+        detector; None keeps its default (photo_yolo.operating_confidence).
+    @param yolo_settings Other local-detector settings (photo_yolo.yolo_settings);
+        None keeps the defaults. Validated before any paid call.
     @param phase Optional callable(tool, detail) telling the caller WHICH tool
         is working, so a progress modal can distinguish a paid remote call
         ('llm') from local detection ('yolo'). It is forwarded to the photo
@@ -1012,8 +1018,12 @@ def extract_pin_header_params(
     if photo_detector not in ("ai", "yolo", "vlm"):
         raise ExtractionError(tx("Rilevatore fotografico non supportato."))
     if photo_detector == "yolo":
-        from .photo_yolo import validate_yolo_setup
+        from .photo_yolo import operating_confidence, validate_yolo_setup
+        from .photo_yolo import yolo_settings as check_yolo_settings
         try:
+            # Anche soglia e parametri si controllano qui, prima di pagare.
+            operating_confidence(yolo_confidence)
+            check_yolo_settings(yolo_settings)
             validate_yolo_setup(yolo_model_path)
         except (ValueError, OSError, ImportError) as exc:
             raise ExtractionError(tx("YOLO locale non disponibile: {exc}", exc=exc)) from exc
@@ -1232,7 +1242,8 @@ def extract_pin_header_params(
                 classifier_model=verification_model or model or DEFAULT_MODEL,
                 grounding_prompt=grounding_prompt, verification_prompt=verification_prompt,
                 **({'detector': photo_detector, 'yolo_model_path': yolo_model_path,
-                    'review_proposals': review_proposals, 'declared': data}
+                    'review_proposals': review_proposals, 'declared': data,
+                    'yolo_confidence': yolo_confidence, 'yolo_settings': yolo_settings}
                    if photo_detector in ('yolo', 'vlm') else {}),
             )
         except ReviewCancelled as exc:
