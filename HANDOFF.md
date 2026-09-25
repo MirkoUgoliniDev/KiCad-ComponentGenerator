@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `658e161` (pushato):
+- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `PENDING` (pushato): icone Nuovo/Apri progetto nella barra della scheda Progetto (punto 41). Prima `658e161`:
   installer Windows MSI (PyInstaller + WiX, app_paths), modelli YOLO .pt con
   PyTorch, classi dei modelli lette per nome, pretest «Solo YOLO locale»
   (nessuna AI), «Parametri YOLO» (soglia, doppioni, tessere) per entrambe le
@@ -13,7 +13,7 @@
   Arshiasbn, MIT, da riportare nei notice dopo conferma del modello a cui si
   riferisce; vedi punto 36 e seguenti). Prova d'installazione dell'MSI in una
   macchina virtuale (utente).
-- Suite completa (25/09, dopo il punto 40): 4196 passati, 3 saltati,
+- Suite completa (25/09, dopo il punto 41): 4199 passati, 3 saltati,
   2 xfail attesi, 19 sottotest; uscita del processo 0 (controllarla sempre).
 - Difetto 16 CHIUSO (utente, 24/09, scelta «A»): la frase «Tipo SMD di
   proposito» resta anche sui moduli misti half_hole + through_hole, perche'
@@ -7183,3 +7183,19 @@ test del pretest (riepilogo invece del campo), test dei segnaposto della
 sezione (anche confidence/nms_iou/tiles). Test nuovi: migrazione, pulsanti
 tradotti. SUITE (25/09, dopo 40): 4196 passati, 3 saltati, 2 xfail,
 19 sottotest, uscita 0. NON committato.
+
+41. [x] (utente 25/09, screenshot: «aggiungi icone apri progetto e nuovo
+    progetto qui») Barra di icone in alto nella scheda Progetto (oggi: Log AI,
+    Prompt del componente). PIANO: due icone nuove all'inizio della barra,
+    «Nuovo progetto» (cartella con +) e «Apri progetto» (cartella aperta), con
+    _workflow_tool_button (tooltip nome + spiegazione, tradotti), che chiamano
+    le stesse funzioni del menu File (_new_project, _open_project: stesse
+    guardie, stesso blocco durante un lavoro). Separatore dopo di loro.
+    SVG nuovi project-new.svg / project-open.svg nello stile delle altre.
+ESITO 41: FATTO. btn_new_project_top / btn_open_project_top (icone
+project-new.svg, project-open.svg) in testa a project_action_bar, poi un
+divisore, poi Log AI e Prompt. Collegati a _new_project/_open_project (stessa
+guardia _project_change_blocked del menu). Tooltip tradotti. Test:
+tests/test_project_toolbar_icons.py (ordine, collegamento vero, lingua).
+SUITE (25/09, dopo 41): 4199 passati, 3 saltati, 2 xfail, 19 sottotest,
+uscita 0. NON committato (dopo c30f0fb).

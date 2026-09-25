@@ -2757,9 +2757,23 @@ class MainWindow(QMainWindow):
             sources_layout.addWidget(source)
         self._project_action_sources.hide()
         bar = self.project_action_bar
+        from .review_tools import toolbar_divider
+        # Nuovo e Apri progetto in testa alla barra (utente, 2026-09-25): gli
+        # stessi comandi del menu File, con le stesse guardie (nessun cambio di
+        # progetto mentre un lavoro scrive nella cartella in uso).
+        self.btn_new_project_top = self._workflow_tool_button(
+            "project-new.svg", "Nuovo progetto",
+            "Crea la cartella di un nuovo componente nella cartella di lavoro (Ctrl+N)")
+        self.btn_new_project_top.clicked.connect(self._new_project)
+        self.btn_open_project_top = self._workflow_tool_button(
+            "project-open.svg", "Apri progetto",
+            "Apre un componente esistente della cartella di lavoro (Ctrl+O)")
+        self.btn_open_project_top.clicked.connect(self._open_project)
+        bar.addWidget(self.btn_new_project_top)
+        bar.addWidget(self.btn_open_project_top)
+        bar.addWidget(toolbar_divider())
         bar.addWidget(self.btn_ai_log)
         bar.addWidget(self.btn_component_prompt)
-        from .review_tools import toolbar_divider
         self._project_bar_divider = toolbar_divider()
         bar.addWidget(self._project_bar_divider)
         # Stesso ordine della pipeline e stesse icone della scheda Modello 3D.

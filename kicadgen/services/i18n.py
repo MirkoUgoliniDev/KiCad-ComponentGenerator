@@ -1601,6 +1601,9 @@ DEFAULT_TRANSLATIONS = {
     "ui:nessuna (solo foto intera)": {"en": "none (whole photo only)", "it": "nessuna (solo foto intera)", "fr": "aucune (photo entière seulement)", "de": "keine (nur ganzes Foto)"},
     # Messaggi di log, avanzamento ed errori (messages.tx), 2026-09-24.
     "ui:Parametri YOLO: soglia {confidence:g}; sovrapposizione per i doppioni {nms_iou:g}; viste ingrandite {tiles}; sovrapposizione fra tessere {overlap:g}.": {"en": "YOLO settings: threshold {confidence:g}; duplicate overlap {nms_iou:g}; magnified views {tiles}; tile overlap {overlap:g}.", "it": "Parametri YOLO: soglia {confidence:g}; sovrapposizione per i doppioni {nms_iou:g}; viste ingrandite {tiles}; sovrapposizione fra tessere {overlap:g}.", "fr": "Paramètres YOLO : seuil {confidence:g} ; chevauchement des doublons {nms_iou:g} ; vues agrandies {tiles} ; chevauchement des tuiles {overlap:g}.", "de": "YOLO-Parameter: Schwelle {confidence:g}; Überlappung für Duplikate {nms_iou:g}; vergrößerte Ansichten {tiles}; Kachelüberlappung {overlap:g}."},
+    # Messaggi di log, avanzamento ed errori (messages.tx), 2026-09-24.
+    "ui:Apre un componente esistente della cartella di lavoro (Ctrl+O)": {"en": "Opens an existing component of the workspace (Ctrl+O)", "it": "Apre un componente esistente della cartella di lavoro (Ctrl+O)", "fr": "Ouvre un composant existant du dossier de travail (Ctrl+O)", "de": "Öffnet ein vorhandenes Bauteil des Arbeitsordners (Strg+O)"},
+    "ui:Crea la cartella di un nuovo componente nella cartella di lavoro (Ctrl+N)": {"en": "Creates the folder of a new component in the workspace (Ctrl+N)", "it": "Crea la cartella di un nuovo componente nella cartella di lavoro (Ctrl+N)", "fr": "Crée le dossier d’un nouveau composant dans le dossier de travail (Ctrl+N)", "de": "Legt den Ordner eines neuen Bauteils im Arbeitsordner an (Strg+N)"},
 }
 
 #: Testi predefiniti SOSTITUITI, per chiave e lingua. Il catalogo SQLite
