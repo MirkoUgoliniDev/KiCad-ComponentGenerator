@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `PENDING` (pushato): icone Nuovo/Apri progetto nella barra della scheda Progetto (punto 41). Prima `658e161`:
+- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `978c53e` (pushato): icone Nuovo/Apri progetto nella barra della scheda Progetto (punto 41). Prima `658e161`:
   installer Windows MSI (PyInstaller + WiX, app_paths), modelli YOLO .pt con
   PyTorch, classi dei modelli lette per nome, pretest «Solo YOLO locale»
   (nessuna AI), «Parametri YOLO» (soglia, doppioni, tessere) per entrambe le
