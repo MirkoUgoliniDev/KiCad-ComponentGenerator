@@ -11,6 +11,7 @@ an analysis runs).
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Callable, Optional
 
 from PyQt6.QtCore import QObject, QRunnable, Qt, QThreadPool, pyqtSignal
@@ -26,9 +27,20 @@ def format_usd(amount: float) -> str:
 
     @param amount USD.
     @return Two decimals from 1 USD up; four below, where two would round a
-        real expense of a few tenths of a cent down to «0.00».
+        real expense of a few tenths of a cent down to «0.00»; «< 0.0001»
+        for a real but smaller amount, which four decimals would show as 0.
     """
+    if 0 < amount < 0.00005:
+        return "< 0.0001"
     return f"{amount:.2f}" if abs(amount) >= 1 else f"{amount:.4f}"
+
+
+def _local_date(stamp: str) -> str:
+    """Date of an ISO timestamp in the local time zone (the file stores UTC)."""
+    try:
+        return datetime.fromisoformat(stamp).astimezone().strftime("%Y-%m-%d")
+    except ValueError:
+        return stamp[:10]
 
 
 class _UsageBridge(QObject):
@@ -91,6 +103,9 @@ class AiAccountLine(QLabel):
         self._token = 0
         self._tasks = {}
         self._reported_errors = set()
+        #: Paid calls not written yet (file busy): (folder, record), written
+        #: before the next call. Kept in memory only for this session.
+        self._pending = []
         self._bridge = _UsageBridge(self)
         self._bridge.recorded.connect(self._on_paid_call)
         self._listener = self._bridge.recorded.emit
@@ -134,18 +149,44 @@ class AiAccountLine(QLabel):
         self.refresh()
 
     def _on_paid_call(self, record: dict) -> None:
-        folder = self._project_dir()
-        if folder is None:
-            self._report(tx("Costo di una chiamata AI non registrato: il progetto non ha un "
-                            "nome."))
-            return
+        """Write the paid call into the project in use; never let an error escape.
+
+        An exception leaving a Qt slot aborts the program in PyQt6: here it
+        would happen in the middle of a paid analysis. Every failure becomes
+        one log line. A file busy for a moment keeps the call in memory and
+        writes it before the next one.
+        """
         try:
-            add_call(folder, record)
-        except (ProjectCostsError, OSError) as exc:
+            folder = self._project_dir()
+            if folder is None:
+                self._report(tx("Costo di una chiamata AI non registrato: il progetto non ha "
+                                "un nome."))
+                return
+            self._pending.append((Path(folder), record))
+            self._flush_pending()
+            self.refresh()
+        except Exception as exc:  # noqa: BLE001 - uno slot che solleva chiude l'app
             self._report(tx("Costo di una chiamata AI non registrato nel progetto: {exc}",
                             exc=exc))
-            return
-        self.refresh()
+
+    def _flush_pending(self) -> None:
+        """Write the queued calls in order; stop at the first busy file."""
+        while self._pending:
+            folder, record = self._pending[0]
+            try:
+                add_call(folder, record)
+            except ProjectCostsError as exc:
+                # File damaged: never overwritten, so the call cannot go in.
+                self._pending.pop(0)
+                self._report(tx("Costo di una chiamata AI non registrato nel progetto: {exc}",
+                                exc=exc))
+                continue
+            except OSError as exc:
+                self._report(tx("File dei costi occupato ({exc}): {count} chiamate in attesa, "
+                                "saranno scritte alla prossima.", exc=exc,
+                                count=len(self._pending)))
+                return
+            self._pending.pop(0)
 
     def _report(self, message: str) -> None:
         """One log line per distinct problem, not one per call."""
@@ -161,6 +202,11 @@ class AiAccountLine(QLabel):
             parts.append(tx("Saldo OpenRouter: {amount} USD", amount=format_usd(remaining)))
             details.append(tx("Saldo: credito residuo ({limit}), letto alle {time}.",
                               limit=self._status.limiting_factor, time=self._balance_time))
+        elif self._balance_state == "ok" and self._status.account_error:
+            # Saldo dell'account non letto e chiave senza tetto: mancano i
+            # dati, non c'e' «nessun limite».
+            parts.append(tx("Saldo OpenRouter: non disponibile"))
+            details.append(tx("Saldo non letto: {error}", error=self._status.account_error))
         elif self._balance_state == "ok":
             parts.append(tx("Saldo OpenRouter: nessun limite"))
             details.append(tx("Saldo: l'API non riporta un limite di credito."))
@@ -173,9 +219,11 @@ class AiAccountLine(QLabel):
         if folder is not None:
             try:
                 costs = load_project_costs(folder)
+            except OSError:
+                parts.append(tx("Costo del progetto: lettura…"))
             except ProjectCostsError as exc:
                 parts.append(tx("Costo del progetto: non leggibile"))
-                details.append(tx("File dei costi non leggibile, lasciato com'e': {exc}",
+                details.append(tx("File dei costi non leggibile, lasciato com’è: {exc}",
                                   exc=exc))
             else:
                 if not costs.calls:
@@ -186,13 +234,17 @@ class AiAccountLine(QLabel):
                 else:
                     parts.append(tx("Costo del progetto: almeno {amount} USD",
                                     amount=format_usd(costs.total_usd)))
-                if costs.calls:
+                since = _local_date(costs.since)
+                if costs.calls == 1:
+                    details.append(tx("Costo del progetto: 1 chiamata a pagamento dal "
+                                      "{since}, tutti i passaggi compresi.", since=since))
+                elif costs.calls:
                     details.append(tx("Costo del progetto: {calls} chiamate a pagamento dal "
                                       "{since}, tutti i passaggi compresi.",
-                                      calls=costs.calls, since=costs.since[:10]))
+                                      calls=costs.calls, since=since))
                 if not costs.complete:
                     details.append(tx("{missing} chiamate senza costo riportato: il totale "
-                                      "e' sottostimato.", missing=costs.calls_without_cost))
+                                      "è sottostimato.", missing=costs.calls_without_cost))
         details.append(tx("Le risposte servite dalla cache locale non costano e non "
                           "sono contate."))
         # Riga di un modulo: resta al suo posto anche senza dati.

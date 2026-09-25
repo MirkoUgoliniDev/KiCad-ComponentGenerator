@@ -1048,7 +1048,7 @@ class PhotoReviewDialog(QDialog):
         self.zoom_label.setToolTip(tr("Ingrandimento rispetto alla foto intera"))
         self.zoom_label.setProperty("i18n_skip", True)
         self.zoom_in_button = tool_button(
-            "zoom-in.svg", "Zoom +", "+",
+            "zoom-in.svg", "Zoom avanti", "+",
             "Anche con la rotella del mouse, attorno al puntatore.", tr=tr)
         self.fit_button = tool_button("view-fit.svg", "Adatta foto", "F",
                                       "Mostra la foto intera nella finestra.", tr=tr)

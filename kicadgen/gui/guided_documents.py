@@ -17,6 +17,45 @@ from ..services.messages import tx
 PDF_ZOOM_RENDER_SCALE = 3
 
 
+#: Largest side decoded for a card thumbnail before the final scaling: well
+#: above any card, far below Qt's allocation limit.
+_CARD_DECODE_PX = 2048
+
+
+def _on_white(image):
+    """A rendered PDF page on white paper: QPdfDocument leaves the background
+    transparent, and on the dark viewer black text became unreadable."""
+    from PyQt6.QtGui import QImage, QPainter
+    paper = QImage(image.size(), QImage.Format.Format_RGB32)
+    paper.fill(Qt.GlobalColor.white)
+    painter = QPainter(paper)
+    painter.drawImage(0, 0, image)
+    painter.end()
+    return paper
+
+
+def _decode_size(reader, size, upscale):
+    """Size to decode at, in the file's own (untransformed) orientation.
+
+    Never larger than the file. For the zoomable preview (`upscale` False)
+    the transformed image must fit `size`; for a card, a moderate size that
+    the final smooth scaling reduces further.
+    """
+    from PyQt6.QtGui import QImageIOHandler
+    raw = reader.size()
+    if not raw.isValid() or raw.isEmpty():
+        return QSize()
+    width, height = raw.width(), raw.height()
+    turned = bool(reader.transformation() & QImageIOHandler.Transformation.TransformationRotate90)
+    shown_w, shown_h = (height, width) if turned else (width, height)
+    limit_w, limit_h = ((_CARD_DECODE_PX, _CARD_DECODE_PX) if upscale
+                        else (size.width(), size.height()))
+    factor = min(1.0, limit_w / shown_w, limit_h / shown_h)
+    if factor >= 1.0:
+        return QSize()
+    return QSize(max(1, round(width * factor)), max(1, round(height * factor)))
+
+
 def document_pixmap(path, size, upscale=True):
     """@brief Pixmap of a document: an image with its EXIF orientation, or a PDF's first page.
 
@@ -43,7 +82,7 @@ def document_pixmap(path, size, upscale=True):
                         page = page * PDF_ZOOM_RENDER_SCALE
                         if page.width() > size.width() or page.height() > size.height():
                             page.scale(size, Qt.AspectRatioMode.KeepAspectRatio)
-                    return QPixmap.fromImage(doc.render(0, page))
+                    return QPixmap.fromImage(_on_white(doc.render(0, page)))
             finally:
                 doc.close()
         except ImportError:
@@ -56,6 +95,10 @@ def document_pixmap(path, size, upscale=True):
     # vede: il lettore applica il tag.
     reader = QImageReader(str(path))
     reader.setAutoTransform(True)
+    # Riduzione GIA' in lettura: decodificare a piena risoluzione e poi
+    # ridurre falliva oltre il limite di memoria di Qt (256 MB, ~8192x8192):
+    # una foto da 108 MP dava un'anteprima vuota (audit 25/09).
+    reader.setScaledSize(_decode_size(reader, size, upscale))
     image = reader.read()
     if image.isNull():
         return QPixmap()
@@ -404,7 +447,8 @@ class GuidedDocuments(QWidget):
             dialog.resize(900, 700)
             layout = QVBoxLayout(dialog)
             # Pixel veri, non la miniatura ingrandita: si puo' zoomare
-            # (utente, 2026-09-24). Un'immagine enorme resta sotto 8192 px.
+            # (utente, 2026-09-24). Un'immagine piu' grande di 8192 px viene
+            # ridotta gia' in lettura (`_decode_size`), non rifiutata.
             pixmap = document_pixmap(path, QSize(8192, 8192), upscale=False)
             if pixmap.isNull():
                 label = QLabel('Anteprima non disponibile. Usa “Apri file completo” per consultare il documento.')

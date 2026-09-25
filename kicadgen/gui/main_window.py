@@ -1145,6 +1145,25 @@ class ReconcileWorker(QThread):
             self.error.emit(f"Rilancio dell'inventario fallito: {exc}")
 
 
+def _step_older_than_footprint(footprint: Path, step: Path) -> bool:
+    """@brief Tell whether the STEP predates the footprint it would ship with.
+
+    @param footprint Generated .kicad_mod.
+    @param step Generated .step of the same project.
+    @return True when the STEP was written before the footprint.
+    @note Heuristic, declared (audit 2026-09-25): a full generation writes the
+        footprint first and the STEP after it, a 3D regeneration rewrites only
+        the STEP; only a footprint-only generation leaves the STEP older. That
+        STEP may still be right (the body may not have changed), so this is a
+        warning, never a block. What would make it superfluous: a record of
+        the parameters each file was generated from.
+    """
+    try:
+        return step.stat().st_mtime < footprint.stat().st_mtime
+    except OSError:
+        return False
+
+
 class MainWindow(QMainWindow):
     """@brief Coordinate the six-tab component generation workflow."""
 
@@ -1562,6 +1581,14 @@ class MainWindow(QMainWindow):
             # Le ultime modifiche non aspettano il prossimo giro del salvataggio.
             self._flush_project_config()
             self.ai_account.detach()
+            # Una finestra chiusa non reagisce piu' ai cambi di scheda: quando
+            # Qt la distrugge, il QTabWidget che si svuota emette
+            # currentChanged e `_on_tab_changed` girerebbe su widget gia'
+            # distrutti (segfault 139 all'uscita dei test, 2026-09-25).
+            try:
+                self.tabs.currentChanged.disconnect(self._on_tab_changed)
+            except TypeError:
+                pass  # gia' scollegato: una seconda chiusura
             super().closeEvent(event)
 
     def _edit_profiles(self):
@@ -2011,6 +2038,38 @@ class MainWindow(QMainWindow):
         """Enable previews only after the first successful parameter acquisition."""
         for index in (3, 4):
             self.tabs.setTabEnabled(index, enabled)
+
+    def _refresh_preview_tabs(self, footprint_available: bool) -> None:
+        """@brief Open «Footprint preview» and «3D model» when there is something to show.
+
+        @param footprint_available True when the current project folder holds
+            its generated footprint.
+        @note Before, only an extraction of THIS session opened them: reopening
+            a finished project left both tabs off (user, 2026-09-25). There is
+            something to preview when the project was extracted in this
+            session or when its footprint was generated -- the parameters that
+            produced it are restored with the project. A project with neither
+            keeps them off: they would show only default values.
+        """
+        self._set_acquisition_tabs_enabled(
+            bool(getattr(self, "_acquisition_completed", False)) or footprint_available)
+
+    def _restore_saved_mesh(self) -> None:
+        """@brief Point the 3D tab at the model saved in the project folder, if any.
+
+        @note Called after the project state is applied: applying fields clears
+            the mesh on purpose (`_invalidate_generated_mesh`). The file on disk
+            is the model KiCad would use for this project, so it is what the
+            tab shows until the user regenerates; it is rendered on entering
+            the tab (`_draw_preview_3d`), not while the project opens.
+        """
+        name = self._component_name()
+        if not name:
+            return
+        shapes = self._project_dir() / f"{name}.3dshapes"
+        mesh = shapes / f"{name}.preview.json"
+        if (shapes / f"{name}.step").is_file() and mesh.is_file():
+            self._last_mesh_path = mesh
 
     # ── Tab 1: Progetto ────────────────────────────────────────────
 
@@ -2624,15 +2683,22 @@ class MainWindow(QMainWindow):
                     action.setProperty("i18n_tooltip_rendered", rendered)
                 action.setToolTip(rendered)
         self._refresh_kicad_tab(complete_available)
+        if hasattr(self, "tabs"):
+            self._refresh_preview_tabs(footprint_available)
         if hasattr(self, "label_kicad_footprint"):
             self.label_kicad_footprint.setText(
                 str(footprint) if footprint_available else "—")
             self.label_kicad_step.setText(
                 str(step) if (step is not None and step.is_file()) else "—")
-            self.label_kicad_status.setText(
-                self.i18n.text("Footprint e modello STEP pronti per la verifica.")
-                if complete_available else
-                self.i18n.text("Genera footprint e modello STEP per continuare."))
+            status = (self.i18n.text("Footprint e modello STEP pronti per la verifica.")
+                      if complete_available else
+                      self.i18n.text("Genera footprint e modello STEP per continuare."))
+            if complete_available and _step_older_than_footprint(footprint, step):
+                status += "\n" + self.i18n.text(
+                    "ATTENZIONE: il modello STEP è più vecchio del footprint. Se dopo "
+                    "l'ultimo 3D hai cambiato il corpo, rigenera il modello 3D prima di "
+                    "installare.")
+            self.label_kicad_status.setText(status)
         return footprint_available
 
     #: Position of the «KiCad» tab in `self.tabs`.
@@ -3224,8 +3290,21 @@ class MainWindow(QMainWindow):
         divider.setVisible(any(b is not None and b.isVisibleTo(b.parentWidget())
                                for b in pipeline))
 
+    def changeEvent(self, event):  # noqa: N802 - Qt override
+        """@brief Re-check the generated files when the window becomes active again.
+
+        @param event Qt change event.
+        @note Files can be deleted or regenerated outside the program (File
+            Explorer, KiCad): coming back to the window is the moment the user
+            looks at the tabs again, and a few `is_file` calls are cheap.
+        """
+        super().changeEvent(event)
+        if (event.type() == QEvent.Type.ActivationChange and self.isActiveWindow()
+                and hasattr(self, "tabs") and not self._background_work_running()):
+            self._refresh_output_actions()
+
     def _mirror_project_action(self, source, slot, row, asset: str):
-        """@brief Crea nella barra della scheda Modello 3D la copia a icona di un comando della scheda Progetto.
+        """@brief Crea in una barra di icone (scheda Progetto o Modello 3D) la copia di un comando.
 
         @param source Pulsante originale: unica fonte di testo, suggerimento e stato.
         @param slot Slot da collegare -- e' lo STESSO comando, non una variante.
@@ -3911,12 +3990,13 @@ class MainWindow(QMainWindow):
             self._start_automatic_generation(params)
 
     def _show_ai_cost(self) -> None:
-        """Mostra il consuntivo dell'ultima analisi sotto il pulsante.
+        """@brief Write the cost of the last analysis in the AI log and the analysis modal.
 
-        La modale di avanzamento sparisce appena il lavoro finisce: il costo
-        deve restare leggibile dopo, senza dover aprire il Log AI. Il testo si
-        compone dai valori grezzi, non dalla frase del servizio, cosi' segue
-        la lingua scelta nell'interfaccia.
+        @note There is no label under the button any more (user,
+            2026-09-24): the log keeps the history, the modal shows it while
+            the user is looking. The text is built from the raw values, so it
+            follows the interface language. The running PROJECT total and the
+            balance are the «Credito AI» line (`ai_account`), refreshed here.
         """
         from ..services.openrouter import usage_totals
 
@@ -4378,7 +4458,7 @@ class MainWindow(QMainWindow):
                 "premi \"Rigenera modello 3D\" per aggiornare STEP e anteprima."
             ), STATUS_INFO)
             self._append_log(tx("Rigenerazione automatica del 3D non avviata: il gruppo "
-                                "«Modello 3D» e' spento."))
+                                "«Modello 3D» è spento."))
             return
         self._regenerate_3d()
 
@@ -4536,8 +4616,19 @@ class MainWindow(QMainWindow):
             self._reset_project_runtime_state()
             self.field_name.setText(name)
             self._apply_project_state(state)
+            self._restore_saved_mesh()
         finally:
             self._restoring_project = False
+        # Le schede di anteprima seguono cio' che il progetto aperto contiene.
+        self._refresh_output_actions()
+        # La scheda aperta mostra il progetto nuovo, non quello chiuso: senza,
+        # restava il disegno del precedente e il 3D non si ridisegnava (audit
+        # 25/09). Le altre schede si ridisegnano all'ingresso, come sempre.
+        index = self.tabs.currentIndex()
+        if index == 3:
+            self._draw_preview()
+        elif index == 4:
+            self._enter_3d_tab()
         # Lo stato appena applicato e' quello salvato: non va riscritto.
         self._last_saved_project_state = self._project_state_text()
         # Dopo il nome e dopo lo stato: i pulsanti di revisione guardano la
@@ -4569,6 +4660,11 @@ class MainWindow(QMainWindow):
         self._extracted_pcb_thickness = None
         # Una rigenerazione chiesta nel progetto chiuso non riguarda il nuovo.
         self._regen_3d_pending = False
+        # L'estrazione fatta nella sessione era del progetto chiuso.
+        self._acquisition_completed = False
+        # Anche l'ultima generazione: l'anteprima 2D non deve mostrare il
+        # footprint del progetto precedente (`_preview_params`).
+        self._last_params = None
         self._invalidate_generated_mesh()
         self._set_review_buttons_enabled(False)
 
@@ -4708,6 +4804,13 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         name = dialog.project_name()
+        # La creazione di docs/ non basta a rifiutare un nome gia' usato: una
+        # cartella di progetto senza docs/ verrebbe riusata (audit 25/09).
+        from .project_dialogs import name_problem
+        problem = name_problem(self._library_root(), name)
+        if problem:
+            QMessageBox.warning(self, self.i18n.text("Nuovo progetto"), self.i18n.text(problem))
+            return
         try:
             (self._library_root() / name / DOCS_SUBDIR).mkdir(parents=True, exist_ok=False)
         except OSError as exc:
@@ -4774,6 +4877,14 @@ class MainWindow(QMainWindow):
         dialog = ProjectNameDialog(self._library_root(), "Rinomina progetto", current=current,
                                    tr=self.i18n.text, parent=self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        # Controllo anche qui, non solo nel pulsante OK della finestra: il
+        # nome di un altro progetto fonderebbe due progetti (audit 25/09).
+        from .project_dialogs import name_problem
+        problem = name_problem(self._library_root(), dialog.project_name(), current)
+        if problem:
+            self._append_log(tx("Rinomina non applicata: {problem}",
+                                problem=self.i18n.text(problem)))
             return
         applied = self._migrate_docs_to_new_name(dialog.project_name())
         self.field_name.setText(applied)
@@ -4908,15 +5019,24 @@ class MainWindow(QMainWindow):
         # riscriveva in versione 1 il file spostato.
         if self._project_config_refused is not None and self._project_config_refused == old_project:
             self._project_config_refused = new_project
-        # Le impostazioni del progetto seguono il nome come il resto.
-        settings = old_project / PROJECT_CONFIG_NAME
-        if settings.is_file() and not (new_project / PROJECT_CONFIG_NAME).exists():
+        # Le impostazioni del progetto e il suo costo AI seguono il nome come
+        # il resto (il costo restava nella vecchia cartella: audit 25/09).
+        from ..services.project_costs import COSTS_FILE
+        for file_name in (PROJECT_CONFIG_NAME, COSTS_FILE):
+            settings = old_project / file_name
+            if not settings.is_file():
+                continue
+            if (new_project / file_name).exists():
+                self._append_log(tx("Rinomina: {PROJECT_CONFIG_NAME} non spostato ({exc}).",
+                                    PROJECT_CONFIG_NAME=file_name,
+                                    exc=tx("esiste già nella cartella nuova")))
+                continue
             try:
                 new_project.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(settings), str(new_project / PROJECT_CONFIG_NAME))
+                shutil.move(str(settings), str(new_project / file_name))
             except OSError as exc:
                 self._append_log(tx("Rinomina: {PROJECT_CONFIG_NAME} non spostato ({exc}).",
-                                    PROJECT_CONFIG_NAME=PROJECT_CONFIG_NAME,
+                                    PROJECT_CONFIG_NAME=file_name,
                                     exc=exc))
         for name in (PHOTO_CACHE_SUBDIR, REVIEW_BUNDLE_SUBDIR):
             source = old_project / name
@@ -6194,6 +6314,17 @@ class MainWindow(QMainWindow):
                 f"kicad.error.{error.code}", **error.context)
         return self.i18n.tr("kicad.error.unexpected", error=error)
 
+    def _kicad_outputs_went_missing(self) -> None:
+        """@brief Say what is missing and realign the KiCad tab (audit 2026-09-25).
+
+        @note Footprint or STEP deleted outside the program while the tab was
+            open: the command used to return without a word, the tab stayed
+            open and still said «ready». Now the existing message names the
+            missing file, and the gate is recomputed.
+        """
+        self._current_kicad_artifacts()
+        self._refresh_output_actions()
+
     def _kicad_output_complete(self) -> bool:
         """@brief Return whether the current footprint and STEP both exist."""
         name = self._component_name()
@@ -6207,6 +6338,7 @@ class MainWindow(QMainWindow):
     def _test_in_kicad(self) -> None:
         """@brief Open an isolated preview board without installing a library."""
         if not self._kicad_output_complete():
+            self._kicad_outputs_went_missing()
             return
         artifacts = self._current_kicad_artifacts()
         if artifacts is None:
@@ -6234,6 +6366,7 @@ class MainWindow(QMainWindow):
     def _install_project_library(self) -> None:
         """@brief Install the current artifacts as a portable project library."""
         if not self._kicad_output_complete():
+            self._kicad_outputs_went_missing()
             return
         artifacts = self._current_kicad_artifacts()
         if artifacts is None:
@@ -6261,6 +6394,7 @@ class MainWindow(QMainWindow):
     def _install_global_library(self) -> None:
         """@brief Install the current artifacts in the global KiCad table."""
         if not self._kicad_output_complete():
+            self._kicad_outputs_went_missing()
             return
         artifacts = self._current_kicad_artifacts()
         if artifacts is None:
@@ -7521,8 +7655,8 @@ class MainWindow(QMainWindow):
         self._start_log_session(tx("Rigenerazione modello 3D"))
         # Questa e' un'operazione a se', e non chiama il modello AI: lasciare
         # il consuntivo dell'ultima analisi dentro la modale lo farebbe
-        # leggere come il costo di cio' che sta accadendo adesso. Resta sulla
-        # label sotto il pulsante, che dice esplicitamente "ultima analisi".
+        # leggere come il costo di cio' che sta accadendo adesso. Resta nel
+        # Log AI, che dice esplicitamente "ultima analisi".
         # Vale per OGNI generazione, anche quella automatica: vedi
         # `_clear_cost_for_generation`.
         self._clear_cost_for_generation()
@@ -8411,16 +8545,45 @@ class MainWindow(QMainWindow):
         xs_px.extend([x - w / 2, x + w / 2])
         ys_px.extend([y - h / 2, y + h / 2])
 
+    def _preview_params(self):
+        """@brief Parameters the 2D preview draws, or None when there are none.
+
+        @return The parameters of this session's last generation; otherwise
+            the ones of the open project, chosen and validated like the
+            footprint part of «Generate» (package, castellated module or pin
+            header); None when the fields do not make a valid footprint.
+        @note User, 2026-09-25: reopening a generated project showed an empty
+            preview, because only a generation of THIS session set
+            `_last_params`. The fields restored with the project are the ones
+            its footprint was generated from.
+        """
+        if self._last_params is not None:
+            return self._last_params
+        try:
+            params = (
+                self.package_geometry if self.package_geometry is not None else
+                self._current_castellated_params() if self._is_castellated()
+                else self._current_params()
+            )
+            params.validate()
+        except (ValueError, TypeError):
+            # Campi incompleti o stato di progetto non coerente: nessun
+            # disegno, mai un'eccezione fuori da un gestore Qt.
+            return None
+        return params
+
     def _draw_preview(self) -> None:
-        if self._last_params is None:
+        params = self._preview_params()
+        if params is None:
+            self.preview_scene.clear()
             return
-        if isinstance(self._last_params, PackageGeometry):
-            self._draw_preview_package(self._last_params)
+        if isinstance(params, PackageGeometry):
+            self._draw_preview_package(params)
             return
-        if isinstance(self._last_params, CastellatedModuleParams):
-            self._draw_preview_castellated(self._last_params)
+        if isinstance(params, CastellatedModuleParams):
+            self._draw_preview_castellated(params)
             return
-        p = self._last_params
+        p = params
         self.preview_scene.clear()
 
         mm_to_px = 20.0
@@ -8672,6 +8835,11 @@ class MainWindow(QMainWindow):
 
     def _on_tab_changed(self, index: int) -> None:
         self._refresh_output_actions()
+        # Il riallineamento puo' aver spento questa scheda e spostato la
+        # finestra altrove (currentChanged annidato): il lavoro di una scheda
+        # che non si vede piu' non si fa (audit 25/09).
+        if index != self.tabs.currentIndex():
+            return
         if index == 0:
             self._refresh_docs_list()
         elif index == 2:

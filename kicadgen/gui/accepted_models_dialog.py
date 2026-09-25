@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import sqlite3
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
@@ -217,7 +218,7 @@ class AcceptedModelsDialog(QDialog):
         try:
             entries = self.store.entries()
             board = self._board_matches()
-        except AcceptedModelsError as exc:
+        except (AcceptedModelsError, sqlite3.Error, OSError) as exc:
             entries = []
             self.status_label.setText(str(exc))
         else:
@@ -247,19 +248,28 @@ class AcceptedModelsDialog(QDialog):
             names = board.get(entry.get("id"))
             for column, value in enumerate(values):
                 item = _item(value, data=entry.get("id") if column == 0 else None)
-                if column == 4:
-                    item.setToolTip(str(entry.get("model_ref") or ""))
+                usage = (self._tr("Usata da questa scheda per: {names}").format(
+                    names=", ".join(names)) if names else "")
+                # Il percorso del modello resta nel tooltip della sua colonna,
+                # anche sulle righe evidenziate (prima veniva sovrascritto).
+                tip = [str(entry.get("model_ref") or "")] if column == 4 else []
+                tip += [usage] if usage else []
+                if tip:
+                    item.setToolTip("\n".join(part for part in tip if part))
                 if names:
                     item.setBackground(_BOARD_ROW)
-                    item.setToolTip(self._tr("Usata da questa scheda per: {names}").format(
-                        names=", ".join(names)))
                 self.table.setItem(index, column, item)
         self._refresh_buttons()
 
     def _board_matches(self) -> dict:
         """Entry id -> names of this board's components that would receive it."""
+        from ..cad3d.kicad_models import archive_can_match
         matches = {}
         for index, component in enumerate(self._components):
+            # Stesse condizioni della generazione: un modello confermato o
+            # rifiutato a mano non passa dall'archivio (audit 25/09).
+            if not archive_can_match(component):
+                continue
             found = self.store.find(component, self._roots)
             if found is None:
                 continue

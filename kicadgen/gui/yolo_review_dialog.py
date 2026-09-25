@@ -730,6 +730,15 @@ class BoardView(QWidget):
             self.update()
 
 
+#: Filter value of the proposals without a detector class (drawn by hand).
+NO_CLASS = "<senza categoria>"
+
+
+def _filter_class(proposal) -> str:
+    """Class a proposal is filtered by; NO_CLASS when it has none."""
+    return proposal.get("_yolo_class") or NO_CLASS
+
+
 class YoloReviewDialog(QDialog):
     """@brief Mostra le proposte del rilevatore e restituisce quelle da tenere.
 
@@ -1055,7 +1064,7 @@ class YoloReviewDialog(QDialog):
         """
         wanted = self.category_filter.currentData()
         index = self.view.selected
-        if wanted and 0 <= index < len(self.proposals) and                 (self.proposals[index].get("_yolo_class") or "") != wanted:
+        if wanted and 0 <= index < len(self.proposals) and                 _filter_class(self.proposals[index]) != wanted:
             self._select_row(-1)
         self._apply_filter()
 
@@ -1069,7 +1078,7 @@ class YoloReviewDialog(QDialog):
         wanted = self.category_filter.currentData()
         hidden = set()
         for row, proposal in enumerate(self.proposals):
-            outside = bool(wanted) and (proposal.get("_yolo_class") or "") != wanted
+            outside = bool(wanted) and _filter_class(proposal) != wanted
             if outside and row != self.view.selected:
                 hidden.add(row)
             self.list.setRowHidden(row, row in hidden)
@@ -1078,7 +1087,10 @@ class YoloReviewDialog(QDialog):
 
     def _refresh_filter_choices(self):
         """Le voci del filtro sono le categorie presenti: nessuna tassonomia fissa."""
-        present = sorted({p.get("_yolo_class") or "" for p in self.proposals} - {""})
+        classes = {_filter_class(p) for p in self.proposals}
+        # I riquadri disegnati a mano non hanno categoria: senza una voce loro,
+        # con un filtro attivo sparivano appena deselezionati (audit 25/09).
+        present = sorted(classes - {NO_CLASS}) + ([NO_CLASS] if NO_CLASS in classes else [])
         current = self.category_filter.currentData()
         wanted = [None] + present
         existing = [self.category_filter.itemData(i) for i in range(self.category_filter.count())]
@@ -1088,7 +1100,8 @@ class YoloReviewDialog(QDialog):
             self.category_filter.clear()
             self.category_filter.addItem(self._tr("Tutte le categorie"), None)
             for name in present:
-                self.category_filter.addItem(name, name)
+                label = self._tr("Senza categoria (aggiunti a mano)") if name == NO_CLASS else name
+                self.category_filter.addItem(label, name)
             index = self.category_filter.findData(current) if current in present else 0
             self.category_filter.setCurrentIndex(max(0, index))
 
@@ -1109,14 +1122,14 @@ class YoloReviewDialog(QDialog):
         origin = proposal.get("_yolo_origin")
         confidence = proposal.get("_yolo_confidence")
         if origin == "user_added":
-            state = "aggiunto a mano"
+            state = self._tr("aggiunto a mano")
         else:
             state = f"{confidence:.2f}" if isinstance(confidence, (int, float)) else "?"
             if proposal.get("_yolo_review_only"):
-                state += " · debole"
+                state += " · " + self._tr("debole")
             if proposal.get("_yolo_manual_box"):
-                state += " · ritoccato"
-        text = f"{proposal.get('_yolo_class') or 'generico'} · {state}"
+                state += " · " + self._tr("ritoccato")
+        text = f"{proposal.get('_yolo_class') or self._tr('generico')} · {state}"
         length, width = proposal.get("length_mm"), proposal.get("width_mm")
         if isinstance(length, (int, float)) and isinstance(width, (int, float)):
             text += f" · {length:.1f}×{width:.1f} mm"
@@ -1140,7 +1153,7 @@ class YoloReviewDialog(QDialog):
         # italiana in ogni lingua (utente, 2026-09-24).
         self.summary.setText(self._tr(
             "Il rilevatore ne ha proposte {total} ({strong} sicure, {weak} deboli). "
-            "Ne tieni {kept}, piu' {added} aggiunte a mano.").format(
+            "Ne tieni {kept}, più {added} aggiunte a mano.").format(
                 total=self._strong + self._weak, strong=self._strong, weak=self._weak,
                 kept=len(self.proposals) - added, added=added))
         self.btn_delete.setEnabled(0 <= current < len(self.proposals))

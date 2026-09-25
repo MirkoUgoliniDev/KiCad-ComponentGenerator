@@ -1960,6 +1960,34 @@ def _synchronize_preview_variants(components, note) -> None:
                 n_group=len(group)))
 
 
+def _matching_basis(component: dict) -> str:
+    """Measurement basis as the matching understands it."""
+    basis = component.get("bbox_basis") or "unknown"
+    return {"leads": "total", "body_and_leads": "total"}.get(str(basis), basis)
+
+
+def archive_can_match(component) -> bool:
+    """@brief Tell whether the matching looks for a model for this component at all.
+
+    @param component Component mapping from the table.
+    @return False for a model rejected or confirmed by the user, for
+        dimensions that cannot be compared, and for an unsupported basis:
+        in those cases neither the archive nor the search is consulted.
+    @note One place for the rule, used by `model_candidates` and by the
+        archive window that highlights the entries this board would use
+        (audit 2026-09-25: the window claimed entries the generation skipped).
+    """
+    if not isinstance(component, dict):
+        return False
+    selection = component.get("model_selection")
+    if isinstance(selection, dict) and selection.get("status") in ("rejected", "confirmed"):
+        return False
+    length, width = component.get("length_mm"), component.get("width_mm")
+    if size_distance([length, width], length, width) is None:
+        return False
+    return _matching_basis(component) in ("unknown", "body", "total", "pads")
+
+
 def _accepted_match(component: dict, roots, note) -> Optional[dict]:
     """@brief Proposal from the accepted-matches archive, or None.
 
@@ -2077,13 +2105,10 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None,
     if type(limit) is not int or limit <= 0:
         return result
     limit = min(limit, 5)
+    if not archive_can_match(component):
+        return result
     length, width = component.get("length_mm"), component.get("width_mm")
-    if size_distance([length, width], length, width) is None:
-        return result
-    basis = component.get("bbox_basis") or "unknown"
-    basis = {"leads": "total", "body_and_leads": "total"}.get(str(basis), basis)
-    if basis not in ("unknown", "body", "total", "pads"):
-        return result
+    basis = _matching_basis(component)
     package = str(component.get("package") or "").strip()
     roots = _search_roots(library)
     root = roots[0] if roots else None

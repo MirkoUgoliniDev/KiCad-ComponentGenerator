@@ -18,6 +18,7 @@ import json
 import math
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,12 @@ from typing import Any, Optional
 
 #: File name inside the project folder.
 COSTS_FILE = "ai-costs.json"
+#: Attempts and first pause (s) when Windows keeps the file busy for a moment
+#: (antivirus, indexer, a second instance): the pause doubles each time, so
+#: the GUI thread waits at most about 0.15 s before the call is queued.
+RETRY_ATTEMPTS = 4
+RETRY_FIRST_PAUSE_S = 0.02
+
 #: Format marker and version; a newer version is refused, not rewritten.
 FORMAT = "kicadgen-ai-costs"
 VERSION = 1
@@ -70,9 +77,12 @@ def _read(path: Path) -> Optional[dict]:
     """Validated content of the file, or None when it does not exist."""
     if not path.exists():
         return None
+    # OSError (file busy for a moment) goes up as it is: it is not a damaged
+    # file and must never be reported, or treated, as one.
+    text = path.read_text(encoding="utf-8")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
+        data = json.loads(text)
+    except ValueError as exc:
         raise ProjectCostsError(f"{path.name}: {exc}") from None
     if not isinstance(data, dict) or data.get("format") != FORMAT:
         raise ProjectCostsError(f"{path.name}: unknown format")
@@ -96,6 +106,7 @@ def load_project_costs(project_dir: Path) -> ProjectCosts:
     @param project_dir Project folder.
     @return The totals (all zero and empty `since` when the file is absent).
     @throws ProjectCostsError When the file exists but is not usable.
+    @throws OSError When the file exists but cannot be read right now.
     """
     data = _read(Path(project_dir) / COSTS_FILE)
     if data is None:
@@ -116,9 +127,23 @@ def add_call(project_dir: Path, record: dict, now: Optional[datetime] = None) ->
     @return The new totals.
     @throws ProjectCostsError When the existing file is not usable: it is
         left untouched and the call is not recorded.
-    @throws OSError When the file cannot be written.
+    @throws OSError When the file stays busy after RETRY_ATTEMPTS attempts;
+        the caller keeps the call and tries again later.
     """
-    folder = Path(project_dir)
+    pause = RETRY_FIRST_PAUSE_S
+    for attempt in range(RETRY_ATTEMPTS):
+        try:
+            return _add_call_once(Path(project_dir), record, now)
+        except PermissionError:
+            if attempt == RETRY_ATTEMPTS - 1:
+                raise
+            time.sleep(pause)
+            pause *= 2
+    raise AssertionError("unreachable")
+
+
+def _add_call_once(folder: Path, record: dict, now: Optional[datetime]) -> ProjectCosts:
+    """One read-modify-write of the cost file (see `add_call`)."""
     path = folder / COSTS_FILE
     stamp = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
     data = _read(path) or {"format": FORMAT, "version": VERSION, "since": stamp,
@@ -151,4 +176,5 @@ def add_call(project_dir: Path, record: dict, now: Optional[datetime] = None) ->
             pass
         raise
     return ProjectCosts(total_usd=float(data["total_usd"]), calls=data["calls"],
-                        calls_without_cost=data["calls_without_cost"], since=data["since"])
+                        calls_without_cost=data["calls_without_cost"],
+                        since=data.get("since", ""))

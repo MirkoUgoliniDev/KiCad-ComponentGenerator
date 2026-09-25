@@ -197,7 +197,9 @@ _EXTRACTION_TOOL = {
                     "sempre nell'origine x=0 del footprint). Tipicamente un valore "
                     "negativo pari alla distanza dal bordo sinistro del corpo al pin 1, "
                     "presa dalla quota del disegno meccanico (es. se il pin 1 e' a 3.0mm "
-                    "dal bordo sinistro, body_offset_x_mm = -3.0)."
+                    "dal bordo sinistro, body_offset_x_mm = -3.0). Leggilo sullo STESSO "
+                    "disegno da cui leggi pin_map, cosi' come lo vedi: se e' una vista "
+                    "dal basso lo ribalta il programma insieme alle colonne."
                 ),
             },
             "body_offset_y_mm": {
@@ -782,6 +784,29 @@ def _pin_map_seen_from_top(
     return entries
 
 
+def _offset_x_seen_from_top(offset, length, cols, pitch, view):
+    """Body X offset of a BOTTOM VIEW drawing, taken to the view from above.
+
+    `_pin_map_seen_from_top` mirrors the columns of a bottom view; the body
+    must be mirrored with them, or its left and right margins swap and the
+    whole body shifts by their difference (audit 25/09, e.g. 3.0 and 5.05 mm
+    margins -> 2.05 mm). In the drawing the body spans [offset, offset +
+    length] over pins [0, span]; mirrored, its left margin is the old right
+    one: length - span + offset. Only when the columns ARE mirrored (a
+    pin_map read on a bottom view); otherwise the offset is returned as is.
+    """
+    if view != "bottom" or offset is None or length is None or not pitch:
+        return offset
+    try:
+        cols = int(cols)
+    except (TypeError, ValueError):
+        return offset
+    if cols < 1:
+        return offset
+    span = (cols - 1) * pitch
+    return round(-(length - span + offset), 3)
+
+
 def _merge_photo_components(groups):
     """Compatibilita' per chiamanti che usano l'inventario in millimetri."""
     from .photo_inventory import merge_components
@@ -1249,6 +1274,29 @@ def extract_pin_header_params(
 _PIN_FIELD_TOLERANCE_MM = 1e-6
 
 
+def _pin_field_positions(params) -> list:
+    """Positions (x, y) in mm of the pins that exist, as the footprint draws them.
+
+    Same function as the footprint and the 3D pins (`pin_header.pin_positions`),
+    so populated_pins and an explicit pin_map count exactly as they will be
+    drawn. Empty when the grid is not usable.
+    """
+    from ..generators.pin_header import PinHeaderParams, pin_positions
+    mapping = None
+    if params.pin_map:
+        mapping = {int(entry["pin"]): (int(entry["row"]), int(entry["col"]))
+                   for entry in params.pin_map}
+    grid = PinHeaderParams(
+        rows=int(params.rows), cols=int(params.cols), pitch=float(params.pitch_mm),
+        row_spacing=params.row_spacing_mm or None,
+        populated_pins=set(params.populated_pins) if params.populated_pins else None,
+        pin_map=mapping)
+    try:
+        return [(x, y) for _, x, y in pin_positions(grid)]
+    except (TypeError, ValueError, KeyError):
+        return []
+
+
 def fit_body_to_pin_field(params, component_family) -> list[str]:
     """@brief Tiene tutti i pin di una scheda popolata a fori passanti dentro la scheda.
 
@@ -1275,16 +1323,24 @@ def fit_body_to_pin_field(params, component_family) -> list[str]:
     length, width = params.body_length_mm, params.body_width_mm
     if not all(isinstance(v, (int, float)) and v > 0 for v in (rows, cols, pitch, length, width)):
         return []
-    spacing = params.row_spacing_mm if params.row_spacing_mm else pitch
+    positions = _pin_field_positions(params)
+    if not positions:
+        return []
     messages = []
-    for axis, span, extent, key in (("X", (cols - 1) * pitch, length, "body_offset_x_mm"),
-                                    ("Y", (rows - 1) * spacing, width, "body_offset_y_mm")):
+    for axis, index, extent, key in (("X", 0, length, "body_offset_x_mm"),
+                                     ("Y", 1, width, "body_offset_y_mm")):
         offset = getattr(params, key)
         if offset is None:
             continue
-        # I pin occupano [0, span] sull'asse; la scheda [offset, offset + extent].
-        if (offset <= _PIN_FIELD_TOLERANCE_MM
-                and offset + extent >= span - _PIN_FIELD_TOLERANCE_MM):
+        # Campo dei pin PRESENTI (populated_pins, pin_map), non della matrice
+        # dichiarata: una colonna vuota in fondo non e' un pin fuori scheda
+        # (audit 25/09: un offset giusto veniva «corretto»). I pin occupano
+        # [low, high] sull'asse; la scheda [offset, offset + extent].
+        low = min(point[index] for point in positions)
+        high = max(point[index] for point in positions)
+        span = high - low
+        if (offset <= low + _PIN_FIELD_TOLERANCE_MM
+                and offset + extent >= high - _PIN_FIELD_TOLERANCE_MM):
             continue
         if extent + _PIN_FIELD_TOLERANCE_MM < span:
             messages.append(tx(
@@ -1292,7 +1348,7 @@ def fit_body_to_pin_field(params, component_family) -> list[str]:
                 "ma la scheda misura {extent:.2f} mm. Nessuna correzione automatica: "
                 "verificare le quote.", axis=axis, span=span, extent=extent))
             continue
-        centred = round(-(extent - span) / 2, 3)
+        centred = round(low - (extent - span) / 2, 3)
         setattr(params, key, centred)
         messages.append(tx(
             "ATTENZIONE spostamento del corpo sull'asse {axis} corretto da {old:.2f} a "
@@ -1597,7 +1653,6 @@ def _params_from_tool_arguments(data: dict) -> ExtractedParams:
         body_width_mm=_opt_float("body_width_mm"),
         body_height_mm=_opt_float("body_height_mm"),
         pcb_thickness_mm=_optional_number(data.get("pcb_thickness_mm"), positive=True),
-        body_offset_x_mm=_opt_float("body_offset_x_mm"),
         body_offset_y_mm=_opt_float("body_offset_y_mm"),
         pin_length_3d_mm=_opt_float("pin_length_3d_mm"),
         edge_fillets=data.get("edge_fillets") or None,
@@ -1607,6 +1662,10 @@ def _params_from_tool_arguments(data: dict) -> ExtractedParams:
         pin_map=_pin_map_seen_from_top(
             data.get("pin_map"), int(data["cols"]), data.get("pin_map_view"),
         ) if layout == "matrix" else None,
+        body_offset_x_mm=_offset_x_seen_from_top(
+            _opt_float("body_offset_x_mm"), _opt_float("body_length_mm"),
+            data.get("cols"), _opt_float("pitch_mm"),
+            data.get("pin_map_view") if layout == "matrix" and data.get("pin_map") else None),
         body_color_hex=data.get("body_color_hex") or None,
         text_color_hex=data.get("text_color_hex") or None,
         package_geometry=package_geometry,

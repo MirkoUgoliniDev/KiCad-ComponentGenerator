@@ -50,7 +50,7 @@ def test_automatic_generation_modal_has_no_cost(window, monkeypatch):  # noqa: F
     assert window.analysis_overlay.cost.isHidden()
     # La label sotto il pulsante non c'e' piu' (utente, 2026-09-24): lo
     # storico dell'analisi resta nel Log AI.
-    assert '0.05' in window.ai_progress_text.toPlainText(), "lo storico dell'analisi resta"
+    assert '0.05' in _cost_line(window), "lo storico dell'analisi resta"
 
 
 def test_a_late_extraction_finish_does_not_bring_the_cost_back(window, monkeypatch):  # noqa: F811
@@ -68,7 +68,7 @@ def test_a_late_extraction_finish_does_not_bring_the_cost_back(window, monkeypat
     window._on_extract_finished()
     assert window.analysis_overlay.cost.text() == ''
     assert window.analysis_overlay.cost.isHidden()
-    assert '0.05' in window.ai_progress_text.toPlainText()
+    assert '0.05' in _cost_line(window)
 
 
 def test_the_analysis_modal_still_shows_the_cost(window):  # noqa: F811
@@ -103,3 +103,12 @@ def test_generation_phase_is_recognised_only_while_it_runs(window):  # noqa: F81
     assert window._generation_phase_active()
     window._manual_cad_overlay = False
     assert not window._generation_phase_active()
+
+
+
+def _cost_line(window):  # noqa: F811
+    """Riga del consuntivo nel Log AI: il valore va cercato li', non in tutto il
+    log dove «0.05» potrebbe stare in una quota in mm (audit 25/09)."""
+    prefix = window.i18n.tr("analysis.cost", amount="\x01", calls=0, tokens=0).split("\x01")[0]
+    lines = [line for line in window.ai_progress_text.toPlainText().splitlines() if prefix in line]
+    return lines[-1] if lines else ""

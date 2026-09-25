@@ -136,6 +136,9 @@ def test_extraction_action_is_centered_below_separate_tools(window):
     assert 'Non avvia la generazione' in review.toolTip()
     tools_layout = window.group_ai_tools.layout()
     assert tools_layout.contentsMargins().bottom() >= 12
+    # Tolto di proposito il controllo sulla spaziatura della seconda riga di
+    # «Strumenti AI» (Log AI e Modifica prompt): quella riga non esiste piu',
+    # i due comandi sono saliti nella barra in alto (utente, 2026-09-24).
     assert not window.group_ai_tools.isAncestorOf(window.btn_extract_ai)
     layout = window.btn_extract_ai.parentWidget().layout()
     tools_index = layout.indexOf(window.group_ai_tools)
@@ -340,9 +343,14 @@ def test_output_handlers_do_not_open_or_export_without_footprint(window, monkeyp
     calls = []
     monkeypatch.setattr(gui.webbrowser, "open", lambda *args: calls.append(args))
     monkeypatch.setattr(gui.QFileDialog, "getExistingDirectory", lambda *args: calls.append(args))
+    # Contratto aggiornato di proposito (audit 2026-09-25): senza file il
+    # comando non fa nulla MA dice che cosa manca, invece di tacere.
+    warnings = []
+    monkeypatch.setattr(gui.QMessageBox, "warning", lambda *args: warnings.append(args))
     window._open_project_dir()
     window._export_component()
     assert calls == []
+    assert len(warnings) == 1
 
 
 def _write_complete_kicad_output(window):

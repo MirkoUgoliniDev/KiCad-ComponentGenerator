@@ -448,6 +448,8 @@ def test_the_mode_in_force_is_readable_on_the_dialog_without_hovering(review, mo
     assert label.text() == 'auto'
     assert dialog.rotate_auto_button.isChecked()
     dialog._auto_angle = 90.0
+    # Angolo del modello mostrato ora (dal 25/09 vale solo per quello).
+    dialog._auto_angle_path = getattr(dialog, '_path', '')
     dialog._update_rotation_readout()
     assert label.text() == '90° auto'
     # Stato interno ancora coerente con il modo in vigore.
@@ -1087,6 +1089,8 @@ def test_arrows_turn_from_the_automatic_angle_and_claim_the_override(review, mon
         None if dialog.auto_rotation.isChecked() else dialog.rotation.value()))
     dialog.auto_rotation.setChecked(True)
     dialog._auto_angle = 90.0
+    # Angolo del modello mostrato ora (dal 25/09 vale solo per quello).
+    dialog._auto_angle_path = getattr(dialog, '_path', '')
     starts.clear()
     dialog.rotate_ccw_button.click()
     assert not dialog.auto_rotation.isChecked()
@@ -1106,6 +1110,8 @@ def test_arrows_without_a_known_automatic_angle_start_from_zero(review, monkeypa
     monkeypatch.setattr(dialog, '_start_preview', lambda *args: None)
     dialog.auto_rotation.setChecked(True)
     dialog._auto_angle = None
+    # Angolo del modello mostrato ora (dal 25/09 vale solo per quello).
+    dialog._auto_angle_path = getattr(dialog, '_path', '')
     dialog.rotate_ccw_button.click()
     assert dialog.rotation.value() == 90 and not dialog.auto_rotation.isChecked()
 
@@ -1118,12 +1124,17 @@ def test_an_arrow_landing_on_the_stored_value_still_leaves_automatic(review, mon
     dialog.rotation.setValue(180)
     dialog.auto_rotation.setChecked(True)
     dialog._auto_angle = 90.0
+    # Angolo del modello mostrato ora (dal 25/09 vale solo per quello).
+    dialog._auto_angle_path = getattr(dialog, '_path', '')
     starts.clear()
     dialog.rotate_ccw_button.click()
     assert not dialog.auto_rotation.isChecked() and dialog.rotation.value() == 180
     assert starts == [180]
-    selection_rotation = None if dialog.auto_rotation.isChecked() else float(dialog.rotation.value())
-    assert selection_rotation == 180.0
+    # Il valore salvato passa da accept(), non da una formula ripetuta nel test.
+    dialog.candidate_list.setCurrentRow(0)
+    dialog.rotation.setValue(180)
+    dialog.accept()
+    assert dialog.selected_selection()['rotation_deg'] == 180.0
 
 
 def test_the_automatic_icon_restores_the_inferred_orientation(review, monkeypatch):
@@ -1197,7 +1208,13 @@ def test_the_automatic_preview_updates_the_readout(review, app, monkeypatch):
     dialog, _, _ = review
     image = QImage(4, 4, QImage.Format.Format_RGB32)
     image.setText(gui.AUTO_ROTATION_KEY, '90')
-    monkeypatch.setattr(gui, '_thumbnail', lambda *args: image)
+    # Un'anteprima manuale che portasse un angolo DIVERSO: se la guardia
+    # «solo le anteprime automatiche» sparisse, `_auto_angle` diventerebbe 0 e
+    # il negativo qui sotto fallirebbe (audit 25/09: prima era sempre 90).
+    manual = QImage(4, 4, QImage.Format.Format_RGB32)
+    manual.setText(gui.AUTO_ROTATION_KEY, '0')
+    monkeypatch.setattr(gui, '_thumbnail',
+                        lambda path, rotation, *rest: image if rotation is None else manual)
     dialog.auto_rotation.setChecked(True)
     dialog.candidate_list.setCurrentRow(0)
     _wait(app, lambda: not dialog._workers)
@@ -1207,3 +1224,76 @@ def test_the_automatic_preview_updates_the_readout(review, app, monkeypatch):
     dialog.rotate_ccw_button.click()
     _wait(app, lambda: not dialog._workers)
     assert dialog._auto_angle == 90.0 and dialog.rotation_angle_label.text() == '180°'
+
+
+# ── Audit 2026-09-25: angolo automatico del modello giusto, anteprima come il CAD ──
+
+def test_the_previous_models_automatic_angle_is_not_used_for_the_next(review, monkeypatch):
+    """Negativo: A in automatico a 90; si sceglie B, la sua anteprima non e' ancora
+    arrivata -> nessun «90° auto» e la prima freccia parte da 0, non da 90."""
+    dialog, _, _ = review
+    monkeypatch.setattr(dialog, '_start_preview', lambda *args: None)
+    dialog.auto_rotation.setChecked(True)
+    dialog._auto_angle, dialog._auto_angle_path = 90.0, 'A.step'
+    dialog._path = 'B.step'
+    dialog._update_rotation_readout()
+    assert dialog.rotation_angle_label.text() == 'auto'
+    dialog.rotate_ccw_button.click()
+    assert dialog.rotation.value() == 90
+
+
+def test_leaving_automatic_from_the_icon_keeps_the_model_where_it_is(review, monkeypatch):
+    """Positivo: automatico a 90 per il modello mostrato -> manuale a 90, nessun salto."""
+    dialog, _, _ = review
+    monkeypatch.setattr(dialog, '_start_preview', lambda *args: None)
+    dialog.rotation.setValue(0)
+    dialog.auto_rotation.setChecked(True)
+    dialog._auto_angle = 90.0
+    dialog._auto_angle_path = getattr(dialog, '_path', '')
+    dialog.rotate_auto_button.click()
+    assert not dialog.auto_rotation.isChecked() and dialog.rotation.value() == 90
+
+
+def test_the_automatic_preview_gets_the_same_placement_as_the_final_cad(monkeypatch):
+    """Verso osservato e delta del menu 3D arrivano all'importatore dell'anteprima."""
+    import sys
+    from pathlib import Path
+    from types import SimpleNamespace
+    from kicadgen.cad3d import step_generator
+    seen = []
+
+    class Shape:
+        def tessellate(self, tolerance):
+            points = [(0, 0, 0), (8, 0, 0), (0, 2, 1)]
+            return [SimpleNamespace(x=x, y=y, z=z) for x, y, z in points], [(0, 1, 2)]
+
+    def library_model(component, *args):
+        seen.append(component)
+        return [(Shape(), '#ffffff')]
+    monkeypatch.setattr(step_generator, 'find_freecadcmd', lambda: 'fake-freecad')
+    monkeypatch.setitem(sys.modules, 'freecad_parts', SimpleNamespace(_library_model=library_model))
+    monkeypatch.setitem(sys.modules, 'Part', SimpleNamespace(
+        read=lambda path: Shape(), makeCompound=lambda shapes: shapes[0]))
+
+    def run(command, **kwargs):
+        exec(compile(Path(command[1]).read_text(encoding='utf-8'), command[1], 'exec'), {})
+        return SimpleNamespace(stdout='')
+    monkeypatch.setattr(gui.subprocess, 'run', run)
+    worker = gui._Preview(1, 'x.step', None, (8, 2), placement={
+        'landmark_side': 'left', 'model_rotation_delta_deg': 90})
+    worker.run()
+    assert seen and seen[0]['landmark_side'] == 'left'
+    assert seen[0]['model_rotation_delta_deg'] == 90
+
+
+def test_an_explicit_angle_is_previewed_with_the_3d_menu_delta(review, app, monkeypatch):
+    """Il CAD finale somma il delta del menu 3D anche a un angolo scelto: l'anteprima pure."""
+    dialog, _, _ = review
+    calls = []
+    monkeypatch.setattr(gui, '_thumbnail', lambda *args: calls.append(args[1]))
+    dialog._placement = {'model_rotation_delta_deg': 90}
+    dialog.auto_rotation.setChecked(False)
+    dialog.rotation.setValue(180)
+    dialog.candidate_list.setCurrentRow(0)
+    _wait(app, lambda: not dialog._workers and calls)
+    assert calls[-1] == 270

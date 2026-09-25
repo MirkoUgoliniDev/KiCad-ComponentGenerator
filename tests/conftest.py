@@ -79,7 +79,11 @@ def no_leftover_usage_listener():
     `openrouter`; lasciata attiva, una chiamata finta di un test successivo
     scriverebbe `ai-costs.json` nella cartella del progetto di quella finestra.
     """
-    from kicadgen.services.openrouter import set_usage_listener
+    from kicadgen.services.openrouter import reset_usage, set_usage_listener
     set_usage_listener(None)
+    # Anche il consuntivo della corsa: un test che chiama `_record_usage` non
+    # deve lasciare chiamate «pagate» al successivo (audit 25/09).
+    reset_usage()
     yield
     set_usage_listener(None)
+    reset_usage()

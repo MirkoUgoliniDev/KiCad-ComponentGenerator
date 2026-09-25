@@ -1168,3 +1168,23 @@ def test_with_the_draw_tool_a_still_click_chooses_and_a_drag_still_draws(dialog)
           _pixels(view, .15, .10))
     assert len(widget.kept()) == len(before) + 1
     assert view.tool == TOOL_DRAW
+
+
+def test_hand_drawn_boxes_have_their_own_filter_entry():
+    """@brief Audit 2026-09-25: un riquadro a mano non ha categoria e, con un filtro
+    attivo, spariva appena deselezionato. Positivo: voce «senza categoria» che
+    lo mostra. Negativo: filtrando una categoria vera resta nascosto."""
+    from kicadgen.gui import yolo_review_dialog as yolo
+    app = QApplication.instance() or QApplication([])
+    proposals = [_proposal(1, FIRST_BOX), _proposal(2, (.60, .10, .80, .30), _yolo_class='')]
+    widget = YoloReviewDialog(b"", proposals, LENGTH_MM, WIDTH_MM, detector_classes())
+    choices = [widget.category_filter.itemData(i) for i in range(widget.category_filter.count())]
+    assert choices == [None, 'resistor', yolo.NO_CLASS]
+    widget.category_filter.setCurrentIndex(choices.index(yolo.NO_CLASS))
+    assert widget.list.isRowHidden(0) and not widget.list.isRowHidden(1)
+    widget.category_filter.setCurrentIndex(choices.index('resistor'))
+    assert not widget.list.isRowHidden(0) and widget.list.isRowHidden(1)
+    widget.close()
+    widget.setParent(None)
+    widget.deleteLater()
+    app.processEvents()

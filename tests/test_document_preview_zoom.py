@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import QApplication, QDialog, QFileDialog
 
 from kicadgen.gui.guided_documents import document_pixmap
 from kicadgen.gui.zoom_image import MAX_ZOOM, MIN_ZOOM, ZoomImagePanel
-from test_photo_inventory_gui import window, gui  # noqa: F401
+from tests.test_photo_inventory_gui import window, gui  # noqa: F401
 
 
 @pytest.fixture
@@ -142,3 +142,57 @@ def _dispose(widget):
     widget.setParent(None)
     widget.deleteLater()
     QApplication.processEvents()
+
+
+# ── Audit 2026-09-25 ────────────────────────────────────────────────────────
+
+def test_a_pdf_page_is_shown_on_white_paper(tmp_path, app):
+    """Negativo al difetto: QPdfDocument lascia il fondo trasparente, e sul
+    visore scuro il testo nero diventava illeggibile."""
+    pytest.importorskip("PyQt6.QtPdf")
+    from PyQt6.QtGui import QPageSize, QPainter, QPdfWriter
+    pdf = tmp_path / "datasheet.pdf"
+    writer = QPdfWriter(str(pdf))
+    writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+    painter = QPainter(writer)
+    painter.drawText(200, 200, "PIN 1")
+    painter.end()
+    pixmap = document_pixmap(pdf, QSize(8192, 8192), upscale=False)
+    corner = pixmap.toImage().pixelColor(2, 2)
+    assert corner.alpha() == 255 and corner.lightness() > 240
+
+
+@pytest.mark.parametrize("size, upscale", [((9000, 3000), False), ((9000, 3000), True)])
+def test_a_huge_photo_is_reduced_while_read_not_refused(tmp_path, app, size, upscale):
+    """Oltre ~8192 px Qt rifiutava la decodifica (limite 256 MB): anteprima e
+    miniatura vuote. Ora la riduzione avviene in lettura."""
+    path = tmp_path / "huge.png"
+    Image.new("RGB", size, "blue").save(path)
+    box = QSize(8192, 8192) if not upscale else QSize(240, 76)
+    pixmap = document_pixmap(path, box, upscale=upscale)
+    assert not pixmap.isNull()
+    assert pixmap.width() <= box.width() and pixmap.height() <= box.height()
+
+
+def test_a_rotated_huge_photo_keeps_its_orientation(tmp_path, app):
+    """Il tag EXIF 6 ruota di 90 gradi: la riduzione tiene conto del verso."""
+    path = tmp_path / "rotated.jpg"
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    Image.new("RGB", (9000, 3000), "green").save(path, "JPEG", exif=exif.tobytes())
+    pixmap = document_pixmap(path, QSize(8192, 8192), upscale=False)
+    assert pixmap.height() > pixmap.width() and pixmap.height() <= 8192
+
+
+def test_zoom_stays_within_limits_after_the_window_grows(app):
+    """Zoom al minimo, poi finestra ingrandita: la percentuale non scende sotto
+    il limite e «zoom indietro» non ingrandisce."""
+    panel = _panel(app)
+    panel.view.zoom(1e-9)
+    panel.resize(1400, 1100)
+    app.processEvents()
+    assert panel.view.zoom_percent() >= round(100 * MIN_ZOOM)
+    before = panel.view.transform().m11()
+    panel.zoom_out_button.click()
+    assert panel.view.transform().m11() <= before
+    _dispose(panel)

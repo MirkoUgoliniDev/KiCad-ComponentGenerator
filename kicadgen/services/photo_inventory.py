@@ -415,14 +415,27 @@ def merge_components(groups, log=lambda message: None, containment=False, summar
     return merged
 
 
-def prepare_photo(path, length, width, metadata=None):
-    """@brief Provide the prepare photo operation for this workflow."""
+def read_photo(path):
+    """@brief Read a photo as the analysis sees it (BGR array), or None.
+
+    @param path Image file; Unicode paths work on Windows.
+    @return The decoded image with its EXIF orientation applied, or None.
+    @note The EXIF orientation matters: phones store the pixels one way and
+        the right way in the tag. The document preview applies it too
+        (`guided_documents.document_pixmap`), so both show the same photo.
+    """
     import cv2
     import numpy as np
-    from .photo_refine import find_board
-    # imdecode supporta anche percorsi Unicode su Windows.
+    # imdecode supporta anche percorsi Unicode su Windows; IMREAD_COLOR
+    # applica il tag di orientamento.
     encoded = np.fromfile(str(path), dtype=np.uint8)
-    image = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+    return cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+
+
+def prepare_photo(path, length, width, metadata=None):
+    """@brief Provide the prepare photo operation for this workflow."""
+    from .photo_refine import find_board
+    image = read_photo(path)
     if image is None:
         return None
     frame = find_board(image, length, width)
@@ -445,7 +458,10 @@ def prepare_photo(path, length, width, metadata=None):
         return None
     if metadata is not None:
         import hashlib
-        metadata.update(source_sha256=hashlib.sha256(encoded.tobytes()).hexdigest(),
+        # Stessi byte che `read_photo` decodifica: l'impronta non cambia.
+        with open(path, 'rb') as stream:
+            source_bytes = stream.read()
+        metadata.update(source_sha256=hashlib.sha256(source_bytes).hexdigest(),
                         crop_bbox_original_px=[x0,y0,x1,y1],
                         image_width=x1-x0,image_height=y1-y0)
     return image[y0:y1, x0:x1].copy()

@@ -31,6 +31,9 @@ def mesh(window, tmp_path):  # noqa: F811
     """@brief Una mesh generata sui dati correnti, con il visore che registra i rendering."""
     path = tmp_path / "board.preview.json"
     path.write_text("{}", encoding="utf-8")
+    # Stato che lascia un'estrazione vera (2026-09-25): le schede di anteprima
+    # ora seguono i dati a ogni cambio di scheda, non la sola chiamata interna.
+    window._acquisition_completed = True
     window._set_acquisition_tabs_enabled(True)
     window._last_mesh_path = path
     window.rendered = []
@@ -167,6 +170,9 @@ def test_two_quick_entries_render_once(window, mesh):  # noqa: F811
 
 def test_without_a_mesh_the_cheap_preview_stays_synchronous(window, tmp_path):  # noqa: F811
     """@brief Negativo: senza mesh generata non c'e' nulla di pesante, niente indicatore."""
+    # Stato che lascia un'estrazione vera (2026-09-25): le schede di anteprima
+    # ora seguono i dati a ogni cambio di scheda, non la sola chiamata interna.
+    window._acquisition_completed = True
     window._set_acquisition_tabs_enabled(True)
     window._last_mesh_path = None
     calls = []

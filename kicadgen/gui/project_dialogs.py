@@ -139,13 +139,30 @@ class ProjectNameDialog(QDialog):
         self.resize(460, self.sizeHint().height())
         self._validate()
 
-    def _validate(self):
+    def _problem(self) -> str:
+        """Why the typed name cannot be used, or ""."""
         name = self.field.text()
         problem = name_problem(self._root, name, self._current)
         if not problem and self._current and name.strip() == self._current.strip():
             problem = "E' gia' il nome del progetto."
-        self.problem.setText(self._tr(problem) if problem and name.strip() else "")
+        return problem
+
+    def _validate(self):
+        problem = self._problem()
+        self.problem.setText(self._tr(problem) if problem and self.field.text().strip() else "")
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(not problem)
+
+    def accept(self):
+        """@brief Close with OK only for a usable name.
+
+        @note The disabled OK button is not the only way to accept (Enter in
+            the field, a caller): the name is checked again here, so an
+            existing project's name can never get through.
+        """
+        if self._problem():
+            self._validate()
+            return
+        super().accept()
 
     def project_name(self) -> str:
         """@brief The accepted name, without surrounding spaces."""

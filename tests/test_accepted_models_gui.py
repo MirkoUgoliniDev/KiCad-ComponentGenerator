@@ -237,6 +237,9 @@ def test_the_3d_tab_icon_is_always_on_and_opens_the_board_view(window, monkeypat
     monkeypatch.setattr(AcceptedModelsDialog, "exec", fake_exec)
     monkeypatch.setattr(window, "_photo_components_from_table",
                         lambda: [{"name": "R7", "kind": "resistor"}])
+    # Stato che lascia un'estrazione vera (2026-09-25): le schede di anteprima
+    # ora seguono i dati a ogni cambio di scheda, non la sola chiamata interna.
+    window._acquisition_completed = True
     window._set_acquisition_tabs_enabled(True)  # la scheda 3D, come dopo un'estrazione
     button.click()
     assert len(opened) == 1 and opened[0]._components == [{"name": "R7", "kind": "resistor"}]
@@ -251,3 +254,24 @@ def _dispose(widget):
     widget.setParent(None)
     widget.deleteLater()
     QApplication.processEvents()
+
+
+def test_a_model_confirmed_by_hand_is_not_claimed_from_the_archive(window, library):
+    """Negativo (audit 2026-09-25): la generazione non consulta l'archivio per un
+    modello confermato o rifiutato a mano; la finestra non deve dire il contrario."""
+    store = _two_entries(library)
+    board = [{"name": "R7", "kind": "resistor", "length_mm": 1.62, "width_mm": 0.82,
+              "bbox_basis": "body", "model_selection": {"status": "confirmed"}}]
+    dialog = AcceptedModelsDialog(store, components=board, roots=[library])
+    assert "Usate da questa scheda: 0" in dialog.status_label.text()
+    _dispose(dialog)
+
+
+def test_the_model_path_tooltip_survives_the_highlight(window, library):
+    store = _two_entries(library)
+    board = [{"name": "R7", "kind": "resistor", "length_mm": 1.62, "width_mm": 0.82,
+              "bbox_basis": "body"}]
+    dialog = AcceptedModelsDialog(store, components=board, roots=[library])
+    tip = dialog.table.item(0, 4).toolTip()
+    assert R0603 in tip.replace("\\", "/") and "R7" in tip
+    _dispose(dialog)

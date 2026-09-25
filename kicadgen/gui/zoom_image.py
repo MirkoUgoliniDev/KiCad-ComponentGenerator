@@ -78,7 +78,7 @@ class ZoomImageView(QGraphicsView):
         current = self.transform().m11()
         wanted = min(max(current * factor, self._fit_scale * MIN_ZOOM),
                      self._fit_scale * MAX_ZOOM)
-        if current > 0 and wanted != current:
+        if current > 0 and abs(wanted - current) > 1e-9 * current:
             self.setTransformationAnchor(
                 QGraphicsView.ViewportAnchor.AnchorUnderMouse if around_pointer
                 else QGraphicsView.ViewportAnchor.AnchorViewCenter)
@@ -104,7 +104,10 @@ class ZoomImageView(QGraphicsView):
             self.fit()
         else:
             self._fit_scale = self._fitted_scale()
-            self.zoom_changed.emit()
+            # Riportata nei limiti: dopo un ingrandimento della finestra lo
+            # zoom minimo scendeva sotto il limite, e «zoom indietro» finiva
+            # per ingrandire (audit 25/09).
+            self.zoom(1.0)
 
     def showEvent(self, event):  # noqa: N802 - Qt override
         """@brief Fit on first show, when the viewport has its real size."""
@@ -126,9 +129,11 @@ class ZoomImagePanel(QWidget):
         super().__init__(parent)
         translate = tr or (lambda text: text)
         self.view = ZoomImageView(pixmap)
-        self.zoom_out_button = tool_button("zoom-out.svg", "Zoom indietro", "-", tr=tr)
+        self.zoom_out_button = tool_button(
+            "zoom-out.svg", "Zoom indietro", "-",
+            "Anche con la rotella del mouse, attorno al puntatore.", tr=tr)
         self.zoom_in_button = tool_button(
-            "zoom-in.svg", "Zoom +", "+",
+            "zoom-in.svg", "Zoom avanti", "+ / =",
             "Anche con la rotella del mouse, attorno al puntatore.", tr=tr)
         self.fit_button = tool_button("view-fit.svg", "Adatta alla finestra", "F",
                                       "Mostra il documento intero nella finestra.", tr=tr)

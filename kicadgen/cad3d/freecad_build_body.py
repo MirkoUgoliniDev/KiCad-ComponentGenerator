@@ -165,11 +165,62 @@ def _apply_fillets(shape, fillets, bounds):
               name=name, face=face, total=total, axis=axis.upper(), extent=extent)
     fillets = [f for f in fillets if f["edge"] not in conflicts]
 
+    groups = _fillet_groups(fillets)
+    # L'esito di OpenCascade dipende dall'ordine dei gruppi (audit 25/09: r=0.5
+    # sul bordo superiore prima di r=3 sugli angoli faceva fallire gli angoli;
+    # nell'ordine inverso riuscivano entrambi). Si prova prima l'ordine
+    # canonico, poi gli altri, e si tiene quello che applica piu' spigoli:
+    # nessuna regola tarata, solo la geometria che OpenCascade accetta.
+    best = None
+    for order in _fillet_orders(groups):
+        result, applied, failed = _try_fillet_groups(shape, order, bounds)
+        if best is None or applied > best[1]:
+            best = (result, applied, failed)
+        if not failed:
+            break
+    shape, _, failed = best if best is not None else (shape, 0, [])
+    for radius, names, exc in failed:
+        _warn("fillet r={radius} su {sorted} fallito: {exc}",
+              radius=radius, sorted=sorted(names), exc=exc)
+    return shape
+
+
+def _fillet_groups(fillets):
+    """Groups (radius, [edge names]) in canonical order: larger radius first,
+    and at equal radius the vertical edges (corners seen from above) first."""
     by_radius = {}
     for f in fillets:
-        by_radius.setdefault(f["radius_mm"], []).append(f["edge"])
+        by_radius.setdefault(float(f["radius_mm"]), []).append(f["edge"])
 
-    for radius, edge_names in by_radius.items():
+    def vertical(names):
+        return any(not name.startswith(("top-", "bottom-")) for name in names)
+    return sorted(by_radius.items(), key=lambda item: (-item[0], not vertical(item[1])))
+
+
+#: Oltre questo numero di gruppi di raggio non si provano tutte le
+#: permutazioni (4! = 24 tentativi): solo l'ordine canonico e il suo inverso.
+_MAX_PERMUTED_FILLET_GROUPS = 4
+
+
+def _fillet_orders(groups):
+    """Canonical order first, then the other orders worth trying."""
+    import itertools
+    yield list(groups)
+    if len(groups) <= 1:
+        return
+    if len(groups) <= _MAX_PERMUTED_FILLET_GROUPS:
+        for order in itertools.permutations(groups):
+            if list(order) != list(groups):
+                yield list(order)
+    else:
+        yield list(reversed(groups))
+
+
+def _try_fillet_groups(shape, groups, bounds):
+    """Apply the groups in this order; return (shape, edges applied, failures)."""
+    x0, y0, x1, y1, z1 = bounds
+    applied, failed = 0, []
+    for radius, edge_names in groups:
         wanted = set(edge_names)
         target_edges = [
             e for e in shape.Edges
@@ -184,12 +235,10 @@ def _apply_fillets(shape, fillets, bounds):
             continue
         try:
             shape = shape.makeFillet(radius, target_edges)
+            applied += len(wanted)
         except Exception as exc:  # noqa: BLE001 - segnalato, non fatale
-            _warn("fillet r={radius} su {sorted} fallito: {exc}",
-               radius=radius,
-               sorted=sorted(wanted),
-               exc=exc)
-    return shape
+            failed.append((radius, wanted, exc))
+    return shape, applied, failed
 
 
 def _build_face_text_solids(shape, texts, bounds, font_file):

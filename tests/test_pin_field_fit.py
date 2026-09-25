@@ -154,3 +154,51 @@ def test_the_fillet_edge_convention_points_corners_to_vertical_edges():
         assert name in text
     assert "front = lato in ALTO" in text
     assert "NON usarli per gli angoli visti dall'alto" in " ".join(text.split())
+
+
+# ── Pin presenti, non matrice dichiarata; asse X; vista dal basso (audit 2026-09-25) ──
+
+def test_an_empty_end_column_is_not_a_pin_outside_the_board():
+    """Negativo: 1x10 con i soli pin 1..6 (x 0..12.7), scheda 25 mm da -4.0 -> giusto, intatto."""
+    params = _params(rows=1, cols=10, row_spacing_mm=None, populated_pins=[1, 2, 3, 4, 5, 6],
+                     body_length_mm=25.0, body_width_mm=5.0,
+                     body_offset_x_mm=-4.0, body_offset_y_mm=-2.5)
+    assert fit_body_to_pin_field(params, "aggregate_tht") == []
+    assert params.body_offset_x_mm == -4.0
+
+
+def test_a_partial_field_outside_the_board_is_recentred_on_the_real_pins():
+    """Positivo: stessi pin, offset sbagliato -> centrato sui pin PRESENTI (0..12.7)."""
+    params = _params(rows=1, cols=10, row_spacing_mm=None, populated_pins=[1, 2, 3, 4, 5, 6],
+                     body_length_mm=16.0, body_width_mm=5.0,
+                     body_offset_x_mm=5.0, body_offset_y_mm=-2.5)
+    messages = fit_body_to_pin_field(params, "aggregate_tht")
+    assert len(messages) == 1 and "X" in messages[0]
+    assert params.body_offset_x_mm == pytest.approx(-(16.0 - 12.7) / 2)
+
+
+def test_an_explicit_pin_map_decides_the_field():
+    """pin_map con la sola colonna 3 occupata: il campo e' x = 7.62, non 0..7.62."""
+    params = _params(rows=1, cols=4, row_spacing_mm=None, body_length_mm=4.0, body_width_mm=4.0,
+                     body_offset_x_mm=5.62, body_offset_y_mm=-2.0,
+                     pin_map=[{"pin": 1, "row": 0, "col": 3}])
+    assert fit_body_to_pin_field(params, "aggregate_tht") == []
+
+
+def test_the_x_axis_is_checked_like_the_y_axis():
+    """Asse X: offset positivo (scheda a destra del pin 1) -> ricentrato, Y intatto."""
+    params = _params(body_offset_x_mm=2.0, body_offset_y_mm=-1.27)
+    messages = fit_body_to_pin_field(params, "aggregate_tht")
+    assert len(messages) == 1 and "X" in messages[0]
+    assert params.body_offset_x_mm == pytest.approx(-(63.3 - 21 * 2.54) / 2)
+    assert params.body_offset_y_mm == -1.27
+
+
+@pytest.mark.parametrize("view, expected", [("bottom", -5.05), ("top", -3.0), (None, -3.0)])
+def test_a_bottom_view_offset_is_mirrored_with_the_columns(view, expected):
+    """Margini 3.0 (sinistra) e 5.05 (destra) nel disegno: dal basso, visto dall'alto
+    il margine sinistro e' 5.05. Vista dall'alto o sconosciuta: invariato."""
+    from kicadgen.services.datasheet_extractor import _offset_x_seen_from_top
+    length = 21 * 2.54 + 3.0 + 5.05
+    assert _offset_x_seen_from_top(-3.0, length, 22, 2.54, view) == pytest.approx(expected)
+    assert _offset_x_seen_from_top(None, length, 22, 2.54, view) is None

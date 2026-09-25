@@ -8,8 +8,8 @@ della finestra, e il negativo di ogni test lo verifica.
 import pytest
 from PyQt6.QtWidgets import QApplication, QDialogButtonBox, QToolButton
 
-from test_photo_inventory_gui import window, gui  # noqa: F401
-from test_review_windows_fixes import _component, _photo
+from tests.test_photo_inventory_gui import window, gui  # noqa: F401
+from tests.test_review_windows_fixes import _component, _photo
 
 
 @pytest.fixture

@@ -1,9 +1,10 @@
-"""Tema Catppuccin Mocha condiviso, stessa palette usata in Pm3ToWav (C:\\Lavori\\Python\\Pm3ToWav).
+"""@brief Shared Catppuccin Mocha theme: palette and style sheets of the application.
 
-Espone la QSS applicata all'intera applicazione (`APP_QSS`) e quella
-specifica per i tab (`TAB_QSS`, identica a `_apply_tab_style()` in
-Pm3ToWav/main.py) cosi' le due app hanno lo stesso look coerente anche
-se una gira su Windows con tema chiaro di sistema.
+Espone la QSS applicata all'intera applicazione (`APP_QSS`) e quella delle
+schede (`TAB_QSS`). La palette e' la stessa di Pm3ToWav; le schede non sono
+piu' identiche alle sue (2026-09-24: scelta in grassetto e piu' chiara, le
+altre scure, le disabilitate quasi nere). La scheda scelta si allarga di
+qualche pixel per il grassetto: e' il prezzo accettato della scelta grafica.
 """
 
 from pathlib import Path

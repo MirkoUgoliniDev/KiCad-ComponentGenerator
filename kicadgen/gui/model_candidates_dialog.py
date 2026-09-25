@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import math
 import os
@@ -272,6 +273,11 @@ def _thumbnail(path, rotation, dimensions=None, color=None, view=VIEW_ISOMETRIC)
         if length is None or width is None or min(length, width) <= 0:
             raise ValueError('Automatic orientation requires positive component dimensions')
         component = dict(model_path=str(path), length_mm=length, width_mm=width)
+        # Le stesse correzioni del CAD finale (`freecad_parts._placement_angle`
+        # e la correzione di verso del riferimento fotografico): senza,
+        # l'anteprima automatica poteva mostrare il modello girato di 180 gradi
+        # rispetto al 3D generato (audit 25/09).
+        component.update(_PREVIEW_PLACEMENT.get() or {})
         # Use the actual placement helper so body-section / total-envelope
         # comparisons and tie-breaking cannot diverge from generated CAD.
         cad_directory = str(Path(__file__).resolve().parents[1] / 'cad3d')
@@ -408,18 +414,29 @@ class _Signals(QObject):
     ready = pyqtSignal(int, object)
 
 
+#: Keys of the component that move the model in the final CAD besides the
+#: axis inference: they reach the automatic preview too.
+PREVIEW_PLACEMENT_KEYS = ('landmark_side', 'landmark_feature', 'model_rotation_delta_deg')
+
+#: Placement keys of the preview running in THIS thread (a worker sets it for
+#: its own run): `_thumbnail` keeps its signature, which tests replace.
+_PREVIEW_PLACEMENT = contextvars.ContextVar('preview_placement', default=None)
+
+
 class _Preview(QRunnable):
     def __init__(self, token, path, rotation, dimensions=None, color=None,
-                 view=DEFAULT_PREVIEW_VIEW):
+                 view=DEFAULT_PREVIEW_VIEW, placement=None):
         super().__init__()
         self.signals = _Signals()
         self.token, self.path, self.rotation = token, path, rotation
         self.dimensions = dimensions
         self.color = color
         self.view = view
+        self.placement = dict(placement or {})
 
     def run(self):
         """@brief Generate an optional thumbnail without blocking the Qt event loop."""
+        _PREVIEW_PLACEMENT.set(self.placement)
         try:
             result = (_thumbnail(self.path, None, self.dimensions, self.color, self.view)
                       if self.rotation is None
@@ -495,6 +512,8 @@ class ModelCandidatesDialog(QDialog):
         self._closed = False
         self._workers = {}
         self._dimensions = (component.get('length_mm'), component.get('width_mm'))
+        self._placement = {key: component[key] for key in PREVIEW_PLACEMENT_KEYS
+                           if component.get(key) not in (None, '')}
         # The photo pipeline samples the body colour into color_hex; shading the
         # preview with it beats a fixed constant, and an unusable value falls back
         # to DEFAULT_BODY_COLOR instead of painting an invalid colour.
@@ -590,7 +609,7 @@ class ModelCandidatesDialog(QDialog):
         self.rotate_auto_button = tool_button(
             "rotate-auto.svg", "Automatico: deduci gli assi CAD dall’ingombro", "",
             "Torna all'orientamento calcolato dal programma. Un giro di 180° non "
-            "si distingue dall'ingombro: se il verso e' sbagliato usa le frecce.",
+            "si distingue dall'ingombro: se il verso è sbagliato usa le frecce.",
             checkable=True, tr=tx)
         self.rotate_ccw_button.clicked.connect(lambda: self._rotate_by(90))
         self.rotate_cw_button.clicked.connect(lambda: self._rotate_by(-90))
@@ -613,6 +632,7 @@ class ModelCandidatesDialog(QDialog):
                                Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
         preview_tools.raise_()
         self._auto_angle = None
+        self._auto_angle_path = None
         self.view_button.toggled.connect(self._view_toggled)
         images.addWidget(preview_box)
         layout.addLayout(images)
@@ -778,7 +798,8 @@ class ModelCandidatesDialog(QDialog):
             starts from 0.
         """
         if self.auto_rotation.isChecked():
-            base = self._auto_angle if self._auto_angle is not None else 0.0
+            known = self._known_auto_angle()
+            base = known if known is not None else 0.0
         else:
             base = self.rotation.value()
         angle = (base + step) % 360
@@ -788,16 +809,36 @@ class ModelCandidatesDialog(QDialog):
         if self.auto_rotation.isChecked():
             self.auto_rotation.setChecked(False)
 
+    def _known_auto_angle(self):
+        """Angle the automatic placement chose for the model on screen, or None.
+
+        None while the preview of a newly selected model is still running:
+        the previous model's angle must not be shown or used as a start.
+        """
+        if self._auto_angle_path is not None and self._auto_angle_path == getattr(self, '_path', ''):
+            return self._auto_angle
+        return None
+
     def _auto_button_toggled(self, checked):
-        """Mirror the «automatic» icon onto the internal checkbox."""
+        """Mirror the «automatic» icon onto the internal checkbox.
+
+        Leaving automatic from the icon keeps the model where it is: the
+        manual angle starts from the automatic one when it is known,
+        instead of jumping to whatever the hidden field held (audit 25/09).
+        """
+        if not checked and self.auto_rotation.isChecked():
+            known = self._known_auto_angle()
+            if known is not None and self.rotation.value() != known:
+                self.rotation.setValue(known)  # esce dall'automatico da solo
         if self.auto_rotation.isChecked() != checked:
             self.auto_rotation.setChecked(checked)
 
     def _update_rotation_readout(self):
         """Angle under the rotation icons: the one in force, and who chose it."""
         if self.auto_rotation.isChecked():
-            text = (tx('{angle}° auto', angle=f"{self._auto_angle:g}")
-                    if self._auto_angle is not None else tx('auto'))
+            known = self._known_auto_angle()
+            text = (tx('{angle}° auto', angle=f"{known:g}")
+                    if known is not None else tx('auto'))
         else:
             text = f"{self.rotation.value():g}°"
         self.rotation_angle_label.setText(text)
@@ -1045,9 +1086,14 @@ class ModelCandidatesDialog(QDialog):
         self.preview_label.setCursor(Qt.CursorShape.BusyCursor)
         if self._workers:
             return
+        # Un angolo scelto e' assoluto, ma il delta del menu 3D si somma anche a
+        # lui nel CAD finale (`_placement_angle`): l'anteprima fa lo stesso.
+        delta = float(self._placement.get('model_rotation_delta_deg') or 0)
         worker = _Preview(self._token, self._path,
-                          None if self.auto_rotation.isChecked() else self.rotation.value(),
-                          self._dimensions, self._body_color, self._view)
+                          None if self.auto_rotation.isChecked()
+                          else self.rotation.value() + delta,
+                          self._dimensions, self._body_color, self._view,
+                          placement=self._placement)
         self._workers[self._token] = worker
         worker.signals.ready.connect(self._preview_ready)
         QThreadPool.globalInstance().start(worker)
@@ -1064,6 +1110,7 @@ class ModelCandidatesDialog(QDialog):
             # Angle chosen by the automatic placement for THIS model: shown
             # under the arrows and used as the start of the first manual turn.
             self._auto_angle = _image_auto_angle(image)
+            self._auto_angle_path = worker.path
             self._update_rotation_readout()
         if isinstance(image, QImage) and not image.isNull():
             self._preview_image = image

@@ -6500,3 +6500,172 @@ finestra principale creata a mano). Dopo la correzione 2 suite complete su 2
 con uscita 0: il dubbio si riduce ma un intermittente non si esclude con due
 giri. Se ricompare 139: cercare widget Qt creati nei test e lasciati al
 garbage collector.
+
+# 2026-09-25
+
+30. [x] DIFETTO segnalato: aprendo un progetto esistente
+    (screenshot: TEST con footprint e STEP, scheda KiCad accesa) «Anteprima
+    FootPrint» e «Modello 3D» restano SPENTE: si accendono solo dopo
+    un'estrazione della sessione (`_set_acquisition_tabs_enabled`, limite
+    gia' annotato al punto 9). Da fare: stesso criterio sui dati quando si
+    apre/crea/rinomina un progetto; test positivo e negativo.
+ESITO 30 (+ «non carica il footprint», stessa radice):
+- `_refresh_preview_tabs` (da `_refresh_output_actions`): Anteprima e
+  Modello 3D accese se c'e' stata un'estrazione NELLA SESSIONE
+  (`_acquisition_completed`, ora azzerato al cambio progetto) oppure il
+  progetto ha il suo footprint generato. `_restore_saved_mesh` (in
+  `_switch_project`, DOPO lo stato, che azzera la mesh di proposito): se ci
+  sono STEP e .preview.json, la scheda 3D mostra il modello salvato.
+- Anteprima 2D vuota alla riapertura: disegnava solo `_last_params`, messo
+  SOLO dalla generazione della sessione (e mai azzerato: un progetto aperto
+  poteva mostrare il footprint del precedente). Ora `_preview_params`: ultima
+  generazione, altrimenti i campi del progetto costruiti come fa «Genera»;
+  None se non validi. `_last_params` azzerato al cambio progetto.
+- 4 punti di test che accendevano le schede con la sola chiamata interna
+  ora mettono anche `_acquisition_completed = True` (stato vero dopo
+  un'estrazione): preparazione aggiornata, asserzioni invariate.
+- SEGFAULT 139 DIVENTATO SISTEMATICO dopo questa modifica (2/2 suite, tutti
+  i test verdi). Bisezione: meta' B cade, i suoi due quarti da soli no ->
+  effetto di accumulo di finestre. Causa: alla distruzione Qt svuota il
+  QTabWidget, che emette currentChanged; `_on_tab_changed` girava su una
+  finestra a meta' distrutta, e ora tocca anche setTabEnabled. Correzione:
+  in closeEvent (accettato) si scollega `_on_tab_changed`. Meta' B dopo la
+  correzione: uscita 0. Test `test_a_closed_window_no_longer_reacts_to_tab_changes`.
+Test tests/test_open_project_tabs.py.
+ESITO SUITE dopo la correzione del 139 (25/09): giro 1 uscita 0 (4044
+passati); giro 2 uscita 1 per UN errore di preparazione «sqlite3
+OperationalError: disk I/O error» sul database dei profili temporaneo
+(ambiente: giro durato 10 min invece di 5, disco sotto carico; spazio
+libero 1.3 TB; il file rilanciato passa); giro 3 uscita 0 (4044 passati, ma
+16 min: macchina lenta in quel momento). Nessun 139 in 3 giri. Utente:
+«bene, funziona». NON committato: in attesa di richiesta.
+
+## PIANO IN CORSO (25/09) — verifica approfondita con agenti
+
+Richiesta dell'utente: «rilancia agenti e fai una verifica approfondita di
+tutto». Scritto prima di lanciarli. Ambito: tutto il lavoro dal commit
+`3cdea2a` (commit 7223819, 99434c5 e modifiche non committate del 25/09).
+Agenti SOLO IN LETTURA, ambiti disgiunti (regola di CLAUDE.md), nessuna
+chiamata AI a pagamento, nessuna rete, test mirati con --basetemp dedicato:
+1. GUI principale: schede, apertura progetto, anteprima 2D, rigenerazione
+   automatica, chiusura finestra, tooltip (main_window.py, tooltips.py).
+2. Credito e costo AI: openrouter listener, project_costs.py, ai_account.py.
+3. Geometria e CAD: fit_body_to_pin_field e schema, raccordi, rotazione e
+   angolo automatico della scelta STEP.
+4. Finestre e widget: zoom_image, guided_documents, analysis_overlay,
+   photo_review, accepted_models_dialog, yolo_review, tema; catalogo i18n
+   (4 lingue, segnaposto) e documentazione Doxygen.
+5. Qualita' dei test nuovi/modificati: contratti indeboliti, coppie
+   positivo/negativo, fragilita' Qt (139).
+6. kicad-workflow-reviewer: scheda KiCad (blocco a progetto completato) e
+   flusso di consegna.
+Poi: verifica centrale di ogni segnalazione (riprodurre prima di credere),
+resoconto all'utente; correzioni solo dopo il suo via.
+ESITO VERIFICA CON AGENTI (25/09) — segnalazioni ricontrollate centralmente
+(scratchpad verify_audit.py, verify_audit2.py, fillet_order.py; nessuna
+rete, nessuna AI). NULLA CORRETTO: in attesa del via dell'utente.
+RIPRODOTTI da me:
+ V1 rinomina: ai-costs.json NON segue il progetto (`_move_analysis_folders_to`
+    sposta solo project_config, photo-cache, photo-review).        [alta]
+ V2 ai-costs.json senza «since» -> KeyError in add_call, non catturato dallo
+    slot -> l'app abortisce durante un'analisi.                    [media]
+ V3 fit_body_to_pin_field con populated_pins/pin_map parziali: sposta un
+    offset GIUSTO (-4.0 -> -1.07). Usare pin_positions().          [media]
+ V4 raccordi: esito dipende dall'ordine (r=0.5 top prima di r=3 verticali
+    -> i verticali falliscono; ordine inverso ok). FreeCAD vero.   [media]
+ V5 cambio progetto sulla scheda Anteprima: resta il disegno del precedente. [media]
+ V6 cambio progetto sulla scheda 3D: nessun ridisegno del modello salvato. [media-bassa]
+ V7 anteprima PDF: fondo trasparente su sfondo scuro -> quasi illeggibile. [media]
+ V8 foto > ~8192 px: anteprima e card vuote (Qt rifiuta >256 MB). [media]
+ V9 «saldo dell'account» non tradotto (openrouter.limiting_factor). [bassa]
+DA AGENTI, verificati per lettura (non riprodotti da me):
+ A1 file cancellati fuori dall'app: scheda KiCad resta aperta, comandi muti.
+ A2 saldo «nessun limite» quando /credits fallisce e la chiave non ha tetto.
+ A3 _auto_angle non azzerato al cambio di candidato STEP.
+ A4 evidenziazione archivio diverge dalla generazione per scelte confermate/rifiutate.
+ A5 ai-costs.json: PermissionError/lettura durante sostituzione -> chiamata persa, nessuna riprova.
+ A6 _enter_3d_tab eseguito dopo che la finestra ha lasciato la scheda 3D.
+ A7 zoom: limiti non riapplicati dopo un ridimensionamento.
+PREESISTENTI (non di oggi): offset X con pin_map vista dal basso; anteprima
+automatica senza correzione di verso 180 gradi; STEP vecchio che soddisfa il gate.
+TEST: negativo debole in test_the_automatic_preview_updates_the_readout;
+rinomina con nome occupato protetta solo dal pulsante OK; manca il positivo
+«dopo un'estrazione vera le anteprime restano aperte»; asserzioni del costo
+piu' deboli; totali di openrouter non azzerati fra test; asse X di
+fit_body_to_pin_field e integrazione di _apply_fillets non coperti.
+MINORI: voci di catalogo morte (4), apostrofi al posto degli accenti,
+«Zoom +» contro «Zoom indietro», scheda in grassetto che cambia larghezza,
+commenti non aggiornati, «1 chiamate».
+
+## PIANO IN CORSO (25/09) — «fixa tutto in modo preciso»
+
+Via dell'utente su TUTTE le segnalazioni verificate (V1-V9, A1-A7, i tre
+preesistenti P1-P3, test T, minori M). Scritto prima del codice.
+Costo AI: V1 rinomina sposta ai-costs.json; V2 «since» facoltativo e slot
+che non lascia uscire eccezioni; A5 riprova breve su file bloccato + coda in
+memoria delle chiamate non scritte, svuotata alla successiva; A2 saldo
+parziale = «non disponibile» con motivo; V9 «saldo dell'account» tradotto;
+plurale «1 chiamata»; importi sotto 0.0001 mostrati «< 0.0001».
+Geometria: V3 campo dei pin da pin_positions() (populated_pins/pin_map);
+V4 raccordi in ordine deterministico (verticali prima, poi raggio
+decrescente) con funzione pura testata + prova FreeCAD; P1 offset X con
+pin_map in vista dal basso riportato alla vista dall'alto; P2 anteprima
+automatica STEP con le stesse informazioni del CAD finale (verso, delta).
+GUI: V5/V6 al cambio progetto si ridisegna la scheda corrente; A6
+`_on_tab_changed` ignora un indice non piu' corrente; A1 file cancellati
+fuori: ricontrollo all'attivazione della finestra e avviso nei comandi;
+P3 STEP piu' vecchio del footprint: avviso dichiarato (euristica) nella
+scheda KiCad; A3 angolo automatico azzerato al cambio candidato; A4
+evidenziazione dell'archivio con le stesse condizioni della generazione;
+A7 zoom riportato nei limiti dopo un ridimensionamento; V7 PDF su fondo
+bianco; V8 foto enormi ridotte in lettura (setScaledSize, verso EXIF).
+Test: T negativi veri, rinomina con nome occupato rifiutata anche
+dall'applicazione, positivo dopo estrazione vera, asserzioni del costo
+legate alla riga, azzeramento dei totali openrouter fra test, asse X,
+import coerenti `tests.`, commenti mancanti.
+Minori: voci di catalogo morte, accenti nei testi nuovi, «Zoom +» ->
+«Zoom avanti», commenti non aggiornati. La larghezza della scheda in
+grassetto e' la scelta grafica approvata: da spiegare, non da cambiare.
+PROGRESSO: FATTI V1, V2, A5, A2, V9, plurale, importi minimi; rinomina e
+nuovo progetto rifiutano un nome occupato anche nell'applicazione (non solo
+col pulsante OK; «Nuovo» riusava una cartella senza docs/); helper _rename_to
+dei test rispetta OK. Test test_project_costs (+8) e test_project_names_guard (4).
+PROGRESSO: FATTI V3 (`_pin_field_positions` via pin_header.pin_positions),
+V4 (`_fillet_groups`/`_fillet_orders`/`_try_fillet_groups`: si provano gli
+ordini, si tiene quello che applica piu' spigoli; FreeCAD: 304.73 in
+entrambi gli ordini), P1 (`_offset_x_seen_from_top`, solo con pin_map in
+vista dal basso; schema aggiornato), P2 (anteprima STEP con landmark e delta
+come il CAD, ContextVar `_PREVIEW_PLACEMENT` per non cambiare la firma di
+`_thumbnail`), A3 (`_known_auto_angle`: angolo solo del modello mostrato),
+A9 (uscita dall'automatico dall'icona senza salto), T1 e T12 rinforzati.
+PROGRESSO: FATTI V5/V6 (ridisegno della scheda corrente al cambio progetto;
+scena svuotata senza parametri), A6, A1 (avviso nei comandi KiCad +
+`changeEvent` che ricontrolla all'attivazione), P3 (`_step_older_than_footprint`,
+avviso dichiarato, mai blocco), A4 (`kicad_models.archive_can_match`, unica
+regola per generazione e finestra; tooltip del percorso conservato), V7
+(`_on_white`), V8 (`_decode_size` con verso EXIF), A7, filtro YOLO «senza
+categoria», «Zoom avanti», voci morte tolte, accenti, testi YOLO e titolo
+tradotti, commenti e docstring aggiornati, `read_photo` estratta e testata,
+test rinforzati (T1, T3, T4, T5, T7, T8, T10, T12). TRAPPOLE VISTE: (1) uno
+script inline in heredoc ha scritto caratteri di controllo veri (NUL, 0x01)
+nei sorgenti: controllare con `grep -rlP '[\x00-\x08\x0b\x0c\x0e-\x1f]'`;
+(2) inject.py rimette le chiavi vecchie dei lotti tr_*.json se si cambia una
+chiave nel catalogo: aggiornare anche i lotti.
+CORREZIONE DI UN MIO ERRORE (25/09): estraendo `read_photo` da
+`prepare_photo` avevo tolto la variabile `encoded`, usata piu' sotto per
+l'impronta sha256 della foto -> NameError, 2 test di
+test_geometry_audit_regressions rossi nella suite completa. Corretto:
+l'impronta si calcola dagli stessi byte del file (valore identico). Il mio
+controllo cercava solo «cv2.»/«np.»: per le estrazioni di funzioni usare un
+controllo dei nomi non definiti (script AST nello scratchpad, niente pyflakes).
+Anche il test della scena (test_open_project_tabs) aveva causato un
+access violation durante la suite: teneva un riferimento Python a un elemento
+di scena distrutto; ora cerca un dato comune (setData) senza riferimenti.
+ESITO FINALE «fixa tutto» (25/09): tutte le segnalazioni V1-V9, A1-A7,
+P1-P3, test T e minori corrette (dettagli nei PROGRESSO sopra). Suite
+completa: 4087 passati, 3 saltati, 2 xfail, 19 sottotest, uscita 0.
+Committato e pushato su richiesta dell'utente («committa e pusha tutto»).
+NON cambiato di proposito: larghezza della scheda in grassetto (scelta
+grafica approvata, spiegata nella docstring di theme.py); import senza
+prefisso `tests.` nei ~25 test piu' vecchi (stile preesistente); limite
+del disconnect in closeEvent (copre le finestre chiuse con close()).

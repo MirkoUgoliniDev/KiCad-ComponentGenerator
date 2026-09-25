@@ -698,7 +698,7 @@ class AnalysisOverlay(QWidget):
         # consuntivo arriva, e la scheda cambiava altezza sotto gli occhi --
         # esattamente cio' che il dimensionamento deve evitare. Il numero sta in
         # testa alla frase, quindi resta leggibile anche accorciata, e il testo
-        # integrale e' nel suggerimento e sulla label sotto il pulsante.
+        # integrale e' nel suggerimento e nel Log AI.
         self.cost = ElidedLabel()
         self.cost.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.cost.setTextFormat(Qt.TextFormat.PlainText)
@@ -1103,9 +1103,9 @@ class AnalysisOverlay(QWidget):
     def set_cost(self, text):
         """Mostra il consuntivo dell'analisi AI dentro la modale.
 
-        Durante la generazione automatica la modale resta aperta e copre la
-        label sotto il pulsante: senza questa riga il costo passava senza
-        essere visto, pur essendo gia' calcolato.
+        Il costo dell'ultima analisi non ha piu' una label sotto il pulsante
+        (utente, 2026-09-24): resta qui, nella modale che si sta guardando, e
+        nel Log AI.
         """
         self.cost.setText(str(text or ""))
         self.cost.setToolTip(self.cost.text())

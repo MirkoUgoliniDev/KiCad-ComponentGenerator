@@ -35,9 +35,15 @@ def test_the_preview_applies_the_exif_orientation(tmp_path):
 
 
 def test_the_analysis_sees_the_same_orientation(tmp_path):
-    """@brief Il riferimento: OpenCV applica il tag, quindi l'anteprima ora combacia."""
-    cv2 = pytest.importorskip("cv2")
-    np = pytest.importorskip("numpy")
-    path = _photo(tmp_path / "rotated.jpg", 6)
-    height, width = cv2.imdecode(np.fromfile(str(path), dtype=np.uint8), cv2.IMREAD_COLOR).shape[:2]
+    """@brief La lettura dell'analisi (`photo_inventory.read_photo`) applica il tag.
+
+    Passa dal codice del progetto, non da OpenCV direttamente (audit 25/09):
+    se la lettura smettesse di applicare il tag, questo test fallirebbe.
+    Negativo: senza tag la foto resta verticale.
+    """
+    pytest.importorskip("cv2")
+    from kicadgen.services.photo_inventory import read_photo
+    height, width = read_photo(_photo(tmp_path / "rotated.jpg", 6)).shape[:2]
     assert width > height
+    height, width = read_photo(_photo(tmp_path / "plain.jpg")).shape[:2]
+    assert height > width

@@ -26,9 +26,16 @@ def clean_totals():
 
 
 def _cost_line(window):
-    """L'ultima riga di consuntivo scritta nel Log AI ('' se nessuna)."""
+    """L'ultima riga di consuntivo scritta nel Log AI ('' se nessuna).
+
+    Riconosciuta dall'inizio delle due frasi del consuntivo (con costo, o
+    servita dalla cache), non da una parola qualsiasi: una riga del log che
+    nomina la cache non la sostituisce (audit 25/09).
+    """
+    cost = window.i18n.tr("analysis.cost", amount="\x01", calls=0, tokens=0).split("\x01")[0]
+    cached = window.i18n.tr("analysis.cost.cached")
     lines = [line for line in window.ai_progress_text.toPlainText().splitlines()
-             if "USD" in line or "cache" in line.lower()]
+             if cost in line or cached in line]
     return lines[-1] if lines else ""
 
 

@@ -108,7 +108,7 @@ def test_a_failing_listener_never_breaks_the_paid_call():
     assert openrouter.usage_totals().calls == 2
 
 
-# ── Riga sotto «Estrai parametri con AI» ────────────────────────────────────
+# ── Riga «Credito AI» nel riquadro «Strumenti AI» ───────────────────────────
 
 def test_a_call_from_a_worker_thread_is_written_into_the_project(app, tmp_path):
     """Positivo, percorso vero: thread di lavoro -> segnale Qt -> file del progetto."""
@@ -124,7 +124,7 @@ def test_a_call_from_a_worker_thread_is_written_into_the_project(app, tmp_path):
     assert load_project_costs(tmp_path).total_usd == pytest.approx(1.5)
     assert "Costo del progetto: 1.50 USD" in line.text()
     first, _, rest = line.toolTip().partition("\n")
-    assert first and "1 chiamate a pagamento" in rest
+    assert first and "1 chiamata a pagamento" in rest  # singolare corretto (audit 25/09)
     line.detach()
     _dispose(line)
 
@@ -194,10 +194,10 @@ def test_detach_only_removes_its_own_listener(app):
     assert openrouter._usage_listener is None
 
 
-def test_the_project_tab_shows_the_line_under_the_extract_button(tmp_path, monkeypatch):
+def test_the_project_tab_shows_the_line_in_the_ai_tools_box(tmp_path, monkeypatch):
     """La riga segue il progetto: nome cambiato -> costo dell'altra cartella."""
     from kicadgen.gui import main_window as gui
-    from test_photo_inventory_gui import PreviewStub
+    from tests.test_photo_inventory_gui import PreviewStub
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(gui, "Preview3DVtk", PreviewStub)
     monkeypatch.setattr(gui, "load_config", lambda: {"component_type": "", "system_prompt": ""})
@@ -235,3 +235,111 @@ def _dispose(widget):
     widget.setParent(None)
     widget.deleteLater()
     QApplication.processEvents()
+
+
+# ── Correzioni dell'audit del 2026-09-25 ────────────────────────────────────
+
+def test_a_file_without_since_is_still_counted(tmp_path):
+    """Negativo al vecchio KeyError: «since» manca in un file scritto a mano."""
+    (tmp_path / COSTS_FILE).write_text(json.dumps({
+        "format": "kicadgen-ai-costs", "version": 1, "total_usd": 1.0, "calls": 1,
+        "calls_without_cost": 0, "entries": []}), encoding="utf-8")
+    costs = add_call(tmp_path, {"cost_usd": 0.5})
+    assert costs.calls == 2 and costs.total_usd == pytest.approx(1.5) and costs.since == ""
+
+
+def test_a_briefly_busy_file_is_retried(tmp_path, monkeypatch):
+    """Positivo: due PermissionError (antivirus, indicizzatore), poi la scrittura riesce."""
+    import os
+    from kicadgen.services import project_costs
+    real, failures = os.replace, [2]
+
+    def flaky(src, dst):
+        if failures[0]:
+            failures[0] -= 1
+            raise PermissionError(13, "file in uso")
+        return real(src, dst)
+    monkeypatch.setattr(project_costs.os, "replace", flaky)
+    monkeypatch.setattr(project_costs, "RETRY_FIRST_PAUSE_S", 0)
+    assert add_call(tmp_path, {"cost_usd": 0.25}).calls == 1
+    assert not list(tmp_path.glob(".ai-costs-*"))
+
+
+def test_a_file_that_stays_busy_keeps_the_call_for_the_next_one(app, tmp_path, monkeypatch):
+    """Negativo: file sempre occupato -> la chiamata resta in coda, non si perde."""
+    from kicadgen.gui.ai_account import AiAccountLine
+    from kicadgen.services import project_costs
+    busy = [True]
+    real = project_costs.os.replace
+
+    def replace(src, dst):
+        if busy[0]:
+            raise PermissionError(13, "file in uso")
+        return real(src, dst)
+    monkeypatch.setattr(project_costs.os, "replace", replace)
+    monkeypatch.setattr(project_costs, "RETRY_FIRST_PAUSE_S", 0)
+    log = []
+    line = AiAccountLine(lambda: tmp_path, log.append)
+    line._on_paid_call({"cost_usd": 0.1})
+    assert not (tmp_path / COSTS_FILE).exists() and len(line._pending) == 1
+    assert any("attesa" in entry for entry in log)
+    busy[0] = False
+    line._on_paid_call({"cost_usd": 0.2})
+    costs = load_project_costs(tmp_path)
+    assert costs.calls == 2 and costs.total_usd == pytest.approx(0.3) and not line._pending
+    line.detach()
+    _dispose(line)
+
+
+def test_an_unexpected_error_in_the_slot_never_escapes(app, tmp_path, monkeypatch):
+    """Un'eccezione fuori da uno slot chiude PyQt6: qui diventa una riga di log."""
+    from kicadgen.gui import ai_account
+    monkeypatch.setattr(ai_account, "add_call", lambda *a: (_ for _ in ()).throw(KeyError("x")))
+    log = []
+    line = ai_account.AiAccountLine(lambda: tmp_path, log.append)
+    line._on_paid_call({"cost_usd": 0.1})
+    assert len(log) == 1
+    line.detach()
+    _dispose(line)
+
+
+def test_a_partly_read_balance_is_not_called_unlimited(app, monkeypatch):
+    """Negativo: /credits fallito e chiave senza tetto -> «non disponibile», col motivo."""
+    from kicadgen.gui.ai_account import AiAccountLine
+    monkeypatch.setattr(openrouter, "api_key", lambda: "chiave-finta")
+    monkeypatch.setattr(openrouter, "credit_status", lambda **k: openrouter.CreditStatus(
+        account_error="HTTP 500"))
+    line = AiAccountLine(lambda: None, lambda m: None)
+    line.balance_enabled = True
+    line.refresh_balance()
+    _wait(app, lambda: "Saldo" in line.text() and "lettura" not in line.text())
+    assert line.text() == "Saldo OpenRouter: non disponibile" and "HTTP 500" in line.toolTip()
+    line.detach()
+    _dispose(line)
+
+
+def test_a_key_without_ceiling_and_a_read_account_can_still_be_unlimited():
+    """Positivo al caso sopra: letti entrambi, nessun limite e' un dato vero."""
+    status = openrouter.CreditStatus()
+    assert status.remaining is None and status.account_error == ""
+
+
+def test_money_and_plural_are_written_right(app, tmp_path):
+    from kicadgen.gui.ai_account import AiAccountLine, format_usd
+    assert format_usd(0.00001) == "< 0.0001"
+    assert format_usd(0.0) == "0.0000"
+    assert format_usd(0.8954) == "0.8954" and format_usd(2.144) == "2.14"
+    add_call(tmp_path, {"cost_usd": 0.5})
+    line = AiAccountLine(lambda: tmp_path, lambda m: None)
+    assert "1 chiamata a pagamento" in line.toolTip()
+    add_call(tmp_path, {"cost_usd": 0.5})
+    line.refresh()
+    assert "2 chiamate a pagamento" in line.toolTip()
+    line.detach()
+    _dispose(line)
+
+
+def test_the_limiting_factor_is_translated():
+    from kicadgen.services.i18n import DEFAULT_TRANSLATIONS
+    entry = DEFAULT_TRANSLATIONS["ui:saldo dell'account"]
+    assert entry["en"] and entry["en"] != "saldo dell'account"

@@ -150,7 +150,9 @@ def _rename_to(window, monkeypatch, name):
     from kicadgen.gui.project_dialogs import ProjectNameDialog
 
     def accept(self):
+        # Come l'utente: con OK spento (nome non valido) non si accetta.
         self.field.setText(name)
-        return QDialog.DialogCode.Accepted
+        ok = self.buttons.button(self.buttons.StandardButton.Ok)
+        return QDialog.DialogCode.Accepted if ok.isEnabled() else QDialog.DialogCode.Rejected
     monkeypatch.setattr(ProjectNameDialog, "exec", accept)
     window._rename_project()

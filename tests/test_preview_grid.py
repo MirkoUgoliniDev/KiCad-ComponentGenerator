@@ -17,6 +17,9 @@ def test_repeated_grid_changes_preserve_view(window, family, initial_grid, zoom)
         package=PackageGeometry(family='soic', body_length_mm=5, body_width_mm=4,
             pins=[PinSpec('1', -2, -1, 1.2, .6), PinSpec('2', 2, -1, 1.2, .6)]))
     window._last_params = choices[family]
+    # Stato che lascia un'estrazione vera (2026-09-25): le schede di anteprima
+    # ora seguono i dati a ogni cambio di scheda, non la sola chiamata interna.
+    window._acquisition_completed = True
     window._set_acquisition_tabs_enabled(True)
     window.tabs.setCurrentIndex(3)
     window.show()

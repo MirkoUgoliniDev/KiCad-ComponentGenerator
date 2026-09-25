@@ -186,6 +186,10 @@ class CreditStatus:
     total_usage: Optional[float] = None
     is_free_tier: bool = False
     expires_at: str = ""
+    #: Why the account balance (/credits) could not be read; empty when it
+    #: was read. With a key without its own ceiling, `remaining` is then None
+    #: for lack of data, not because there is no limit.
+    account_error: str = ""
 
     @property
     def remaining(self) -> Optional[float]:
@@ -202,14 +206,15 @@ class CreditStatus:
         if self.key_remaining is not None and remaining == self.key_remaining:
             return tx("tetto della chiave") if self.account_remaining is None or \
                 self.key_remaining < self.account_remaining else tx("account e chiave")
-        return "saldo dell'account"
+        return tx("saldo dell'account")
 
     def describe(self) -> str:
         """@brief Render the credit status as one line for the AI log."""
         remaining = self.remaining
         if remaining is None:
             return tx("Credito OpenRouter: nessun limite riportato dall'API.")
-        detail = f"Credito OpenRouter: {remaining:.2f} USD residui ({self.limiting_factor})"
+        detail = tx("Credito OpenRouter: {remaining} USD residui ({limit})",
+                    remaining=f"{remaining:.2f}", limit=self.limiting_factor)
         if self.total_credits is not None and self.total_usage is not None:
             detail += tx("; account {total_usage:.2f}/{total_credits:.2f} USD usati",
                          total_usage=self.total_usage,
@@ -401,6 +406,7 @@ def credit_status(force_refresh: bool = False) -> CreditStatus:
             return cached
 
     failures = []
+    account_error = ""
     account_remaining = total_credits = total_usage = None
     try:
         data = _get_json(CREDITS_URL, _HTTP_TIMEOUT_CREDITS_S).get("data") or {}
@@ -409,7 +415,8 @@ def credit_status(force_refresh: bool = False) -> CreditStatus:
         if total_credits is not None and total_usage is not None:
             account_remaining = total_credits - total_usage
     except OpenRouterError as exc:
-        failures.append(f"saldo account ({exc})")
+        account_error = str(exc)
+        failures.append(tx("saldo account ({exc})", exc=exc))
 
     key_remaining, is_free_tier, expires_at = None, False, ""
     try:
@@ -428,7 +435,7 @@ def credit_status(force_refresh: bool = False) -> CreditStatus:
     status = CreditStatus(
         account_remaining=account_remaining, key_remaining=key_remaining,
         total_credits=total_credits, total_usage=total_usage,
-        is_free_tier=is_free_tier, expires_at=expires_at,
+        is_free_tier=is_free_tier, expires_at=expires_at, account_error=account_error,
     )
     _credit_cache = (time.time(), status)
     return status
