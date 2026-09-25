@@ -141,8 +141,9 @@ def test_the_prompt_example_and_the_safeguard_give_the_same_offset():
 def test_the_fillet_edge_convention_points_corners_to_vertical_edges():
     """@brief Gli angoli visti dall'alto sono spigoli verticali, e lo schema lo dice.
 
-    Coerenza col codice: in annotations front = Y minima del footprint, cioe'
-    il lato in alto della vista (Y verso il basso come in KiCad).
+    Coerenza col codice (convenzione 2, 2026-09-25): front = lato -Y del
+    modello 3D, la faccia «Fronte» del cubo, cioe' il lato in basso della
+    vista dall'alto.
     """
     from kicadgen.cad3d.annotations import EDGE_NAMES
     fillet = _EXTRACTION_TOOL["input_schema"]["properties"]["edge_fillets"]
@@ -152,7 +153,8 @@ def test_the_fillet_edge_convention_points_corners_to_vertical_edges():
     assert sorted(vertical) == ["back-left", "back-right", "front-left", "front-right"]
     for name in vertical:
         assert name in text
-    assert "front = lato in ALTO" in text
+    # Convenzione 2 (utente, 2026-09-25): i nomi del cubo 3D.
+    assert "front = lato in BASSO" in text
     assert "NON usarli per gli angoli visti dall'alto" in " ".join(text.split())
 
 

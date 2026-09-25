@@ -1960,6 +1960,60 @@ def _synchronize_preview_variants(components, note) -> None:
                 n_group=len(group)))
 
 
+#: Fixed reasons written by the matching into the candidate reports (data on
+#: disk, kept in English as they always were) -> Italian source of the text
+#: shown to the user. Translated when SHOWN (`localized_reason`), so reports
+#: already saved are shown in the interface language too.
+_REASON_SOURCES = {
+    "Family and dimension discovery": "Trovato per famiglia e misure",
+    "Package name compatible": "Nome del package compatibile",
+    "No declared family or terminal conflict":
+        "Nessun conflitto di famiglia dichiarata o di terminali",
+    "Identity and variant require user review":
+        "Identità e variante da verificare a mano",
+    "Exact literal model marking and compatible dimensions; orientation remains reviewable":
+        "Marcatura del modello identica e misure compatibili; orientamento da verificare",
+    "Mechanical estimate; identity and variant not verified":
+        "Stima meccanica; identità e variante non verificate",
+    "Applied provisionally: identity not verified; package variant and "
+    "orientation require user review and the picker can replace it":
+        "Applicato in via provvisoria: identità non verificata; variante e "
+        "orientamento da verificare, il selettore può sostituirlo",
+    "Common same-family switch candidate selected for consistent preview; "
+    "package variant remains reviewable":
+        "Candidato comune della stessa famiglia di pulsanti, scelto per "
+        "un'anteprima coerente; variante del package da verificare",
+}
+
+_COMPATIBLE_DIMENSIONS = re.compile(r"^Compatible (body|total|piazzole (.*)) dimensions$")
+
+
+def localized_reason(reason) -> str:
+    """@brief Text of one candidate reason in the interface language.
+
+    @param reason Reason as stored in a candidate report.
+    @return The translated text; a reason the matching did not write (or
+        already Italian, e.g. from the accepted-matches archive) is returned
+        unchanged.
+    @note «Compatible piazzole <path> dimensions» used to be shown as it was
+        stored: English words around an Italian word and a full path. The
+        path is reduced to the file name of the footprint it was measured on.
+    """
+    text = str(reason)
+    source = _REASON_SOURCES.get(text)
+    if source is not None:
+        return tx(source)
+    match = _COMPATIBLE_DIMENSIONS.match(text)
+    if match is None:
+        return text
+    if match.group(1) == "body":
+        return tx("Misure del corpo compatibili")
+    if match.group(1) == "total":
+        return tx("Ingombro totale compatibile")
+    return tx("Misure compatibili con le piazzole di {footprint}",
+              footprint=Path(match.group(2).strip()).name or match.group(2))
+
+
 def _matching_basis(component: dict) -> str:
     """Measurement basis as the matching understands it."""
     basis = component.get("bbox_basis") or "unknown"

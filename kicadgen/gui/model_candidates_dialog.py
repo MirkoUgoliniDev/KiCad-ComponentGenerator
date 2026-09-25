@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 
 from PyQt6.QtCore import (
-    QEvent, QObject, QPointF, QRunnable, QSignalBlocker, Qt, QThreadPool, QTimer, pyqtSignal,
+    QEvent, QObject, QPointF, QRunnable, QSignalBlocker, QSize, Qt, QThreadPool, QTimer, pyqtSignal,
 )
 from PyQt6.QtGui import QBrush, QColor, QImage, QPainter, QPen, QPixmap, QPolygonF
 from PyQt6.QtWidgets import (
@@ -731,8 +731,21 @@ class ModelCandidatesDialog(QDialog):
         controls.addStretch()
         layout.addLayout(controls)
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText('Usa il modello selezionato')
-        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText('Annulla')
+        # Anche le conferme sono icone con nome e spiegazione nel tooltip
+        # (utente, 2026-09-25); restano i pulsanti OK/Annulla della finestra,
+        # quindi Invio ed Esc funzionano come prima.
+        from .review_tools import asset_icon, set_tool_texts
+        for role, asset, title, detail in (
+                (QDialogButtonBox.StandardButton.Ok, 'confirm-use.svg',
+                 'Usa il modello selezionato',
+                 'Conferma il modello KiCad scelto e la sua rotazione per questo componente.'),
+                (QDialogButtonBox.StandardButton.Cancel, 'cancel.svg', 'Annulla',
+                 'Chiude senza cambiare il modello del componente.')):
+            button = self.buttons.button(role)
+            button.setText('')
+            button.setIcon(asset_icon(asset))
+            button.setIconSize(QSize(22, 22))
+            set_tool_texts(button, title, '', detail, tx)
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
@@ -987,7 +1000,10 @@ class ModelCandidatesDialog(QDialog):
         self._path = candidate['path']
         reasons = candidate.get('reasons') or []
         if isinstance(reasons, (list, tuple)):
-            reasons = '\n'.join(str(reason) for reason in reasons)
+            # Tradotti al momento di mostrarli: i report salvati restano come
+            # sono (audit 25/09: «Family and dimension discovery» in italiano).
+            from ..cad3d.kicad_models import localized_reason
+            reasons = '\n'.join(localized_reason(reason) for reason in reasons)
         error = _number(candidate.get('relative_xy_error'), float('nan'))
         error_text = f'{error:.1%}' if math.isfinite(error) else tx('non disponibile')
         # Wording only: the two numbers are not peers. The model dimensions are

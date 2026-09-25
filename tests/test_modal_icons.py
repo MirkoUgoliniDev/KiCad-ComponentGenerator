@@ -43,14 +43,23 @@ def test_the_component_review_actions_are_icons_and_apply_stays_text(app):
     dialog.close()
 
 
-def test_the_step_choice_actions_are_icons_and_confirm_stays_text(app):
+def test_the_step_choice_actions_and_confirms_are_icons(app):
+    """Contratto cambiato di proposito (utente, 2026-09-25): anche le conferme
+    della scelta STEP sono icone con nome e spiegazione. Restano i pulsanti OK e
+    Annulla della finestra (Invio/Esc). Negativo: le conferme delle ALTRE finestre
+    restano scritte (vedi `test_the_component_review_actions_are_icons_and_apply_stays_text`)."""
     from kicadgen.gui import model_candidates_dialog as mcd
     dialog = mcd.ModelCandidatesDialog({"name": "U1", "length_mm": 3, "width_mm": 3,
                                         "height_mm": 1}, {"candidates": []})
     assert _is_icon_command(dialog.manual_button, "Scegli file STEP…")
     assert _is_icon_command(dialog.none_button, "Nessuno corrisponde — conserva il segnaposto")
     ok = dialog.buttons.button(QDialogButtonBox.StandardButton.Ok)
-    assert ok.text() == "Usa il modello selezionato"
+    cancel = dialog.buttons.button(QDialogButtonBox.StandardButton.Cancel)
+    for button, name in ((ok, "Usa il modello selezionato"), (cancel, "Annulla")):
+        assert button.text() == "" and not button.icon().isNull()
+        first, _, rest = button.toolTip().partition("\n")
+        assert first == name and rest
+    assert not ok.isEnabled()  # nessun modello scelto: la conferma resta spenta
     dialog.close()
 
 

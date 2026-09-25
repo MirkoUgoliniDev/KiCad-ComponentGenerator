@@ -7,7 +7,11 @@ serve un picker 3D a click sull'anteprima):
 Facce (6): top, bottom, left, right, front, back
     - top/bottom: normale lungo Z (top = altezza massima, bottom = piano di saldatura Z=0)
     - left/right: normale lungo X (left = X minimo, right = X massimo)
-    - front/back: normale lungo Y (front = Y minimo, back = Y massimo)
+    - front/back: normale lungo Y DEL MODELLO 3D (Y verso l'alto, come in
+      KiCad): front = lato -Y, cioe' il lato in BASSO della vista dall'alto;
+      back = lato +Y, in alto. E' la faccia che il cubo della vista 3D chiama
+      «Fronte» (convenzione 2, dal 2026-09-25; prima front era il lato in alto
+      della vista 2D e il cubo lo chiamava «Retro»).
 
 Spigoli (12): combinazione di due facce adiacenti, es. "top-front",
 "front-left" -- lo script FreeCAD (freecad_build_body.py) classifica gli
@@ -22,6 +26,23 @@ from dataclasses import dataclass
 from ..services.messages import tx
 
 FACE_NAMES = ("top", "bottom", "left", "right", "front", "back")
+
+#: Convenzione dei nomi front/back scritta nei progetti. 1 (o assente): front
+#: era il lato in alto della vista dall'alto; 2: front e' il lato in basso,
+#: come il cubo 3D e KiCad.
+ANNOTATION_CONVENTION = 2
+
+
+def swap_front_back(name: str) -> str:
+    """@brief Swap «front» and «back» in a face or edge name.
+
+    @param name Face or edge name, e.g. "front-left".
+    @return The same name with front/back exchanged, e.g. "back-left".
+    @note Used once to bring annotations saved with convention 1 to the
+        current one: the physical side stays the same, only its name changes.
+    """
+    swap = {"front": "back", "back": "front"}
+    return "-".join(swap.get(part, part) for part in str(name).split("-"))
 
 EDGE_NAMES = (
     "top-front", "top-back", "top-left", "top-right",

@@ -500,15 +500,13 @@ def _flip_y(data):
     modello costruito con le coordinate del footprint appare specchiato nel
     viewer 3D -- invisibile sulle griglie simmetriche, evidente su un modulo
     con lati diversi e scritte. Le forme sono simmetriche e non cambiano; si
-    negano le posizioni Y, gli angoli, e si scambiano i nomi front/back di
-    fillet e testi (che l'utente sceglie guardando l'anteprima 2D).
+    negano le posizioni Y e gli angoli. I nomi front/back di fillet e testi NON
+    si toccano: dalla convenzione 2 (2026-09-25) sono gia' quelli del modello
+    3D (front = lato -Y, la faccia «Fronte» del cubo), gli stessi con cui
+    `_edge_name` e `_face_name` classificano il solido qui sotto.
     """
     body = data["body"]
     body["offset_y_mm"] = -(body["offset_y_mm"] + body["width_mm"])
-    for f in data.get("fillets", []):
-        f["edge"] = _swap_front_back(f["edge"])
-    for t in data.get("face_texts", []):
-        t["face"] = _swap_front_back(t["face"])
     for key in ("notches", "edge_contacts", "silk_texts", "components"):
         for item in data.get(key, []) or []:
             try:

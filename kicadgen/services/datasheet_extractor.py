@@ -248,7 +248,7 @@ _EXTRACTION_TOOL = {
                                 "Nome dello spigolo, fra due facce del parallelepipedo. "
                                 "Convenzione, vista dall'alto con l'asse lungo "
                                 "orizzontale: left/right = lati sinistro/destro, front = "
-                                "lato in ALTO della vista, back = lato in basso, top = "
+                                "lato in BASSO della vista, back = lato in alto, top = "
                                 "faccia superiore, bottom = faccia di appoggio. Gli angoli "
                                 "arrotondati del contorno VISTO DALL'ALTO (es. scheda con "
                                 "angoli tondi) sono gli spigoli verticali front-left, "
@@ -731,6 +731,38 @@ def _guess_media_type(path: Path) -> str:
     return "application/octet-stream"
 
 
+#: EXIF tag of the orientation; 1 means «stored upright».
+_EXIF_ORIENTATION = 0x0112
+
+
+def _upright_image_bytes(data: bytes) -> bytes:
+    """The image as the analysis and the preview see it, EXIF orientation applied.
+
+    Phones store the pixels one way and the right way in the orientation tag.
+    OpenCV (the analysis) and the preview apply it; a provider may not, and
+    the model would then read a rotated photo (utente, 2026-09-25). A photo
+    without a rotation tag is returned byte for byte; one with it is rotated
+    and re-encoded in the same format, without the tag. Any decoding problem
+    returns the original bytes: sending the file as it is was the old
+    behaviour, never worse than failing.
+    """
+    try:
+        from io import BytesIO
+        from PIL import Image, ImageOps
+        with Image.open(BytesIO(data)) as image:
+            orientation = image.getexif().get(_EXIF_ORIENTATION, 1)
+            if orientation in (None, 1):
+                return data
+            file_format = image.format or "PNG"
+            upright = ImageOps.exif_transpose(image)
+            out = BytesIO()
+            options = {"quality": 95} if file_format.upper() in ("JPEG", "WEBP") else {}
+            upright.save(out, format=file_format, **options)
+            return out.getvalue()
+    except Exception:  # noqa: BLE001 - si ripiega sul file originale
+        return data
+
+
 def _file_to_content_block(path: Path) -> dict:
     """Un file di documentazione come blocco di contenuto per OpenRouter.
 
@@ -748,8 +780,11 @@ def _file_to_content_block(path: Path) -> dict:
     if size > MAX_FILE_BYTES:
         raise ExtractionError(f"{path.name} troppo grande ({size / 1_048_576:.1f} MB, max 20 MB)")
 
-    data_b64 = base64.b64encode(path.read_bytes()).decode("ascii")
     media_type = _guess_media_type(path)
+    payload = path.read_bytes()
+    if media_type.startswith("image/"):
+        payload = _upright_image_bytes(payload)
+    data_b64 = base64.b64encode(payload).decode("ascii")
     data_url = f"data:{media_type};base64,{data_b64}"
 
     if media_type == "application/pdf":

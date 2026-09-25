@@ -67,7 +67,7 @@ class ConsolidateDialog(QDialog):
         super().__init__(parent)
         self.i18n = i18n
         self.setWindowTitle("Ricorda questi modelli KiCad")
-        self.resize(900, 520)
+        self.resize(1100, 560)
         self._components = list(components or [])
         layout = QVBoxLayout(self)
         intro = QLabel(
@@ -103,7 +103,15 @@ class ConsolidateDialog(QDialog):
                 component.get("length_mm"), component.get("width_mm"))))
             model = component.get("model_path")
             self.table.setItem(row, 3, _item(Path(model).stem if ok else "—"))
-            self.table.setItem(row, 4, _item(self._tr("da ricordare") if ok else self._tr(reason)))
+            status = _item(self._tr("da ricordare") if ok else self._tr(reason))
+            status.setToolTip(status.text())
+            self.table.setItem(row, 4, status)
+        # Il motivo va letto per intero (utente, 2026-09-25: «nessun modello
+        # KiCad …» troncato): la colonna «Stato» va a capo e la riga si alza,
+        # e il testo completo e' anche nel tooltip della cella.
+        self.table.setWordWrap(True)
+        self.table.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.table, 1)
         self.summary = QLabel()
         self.summary.setWordWrap(True)

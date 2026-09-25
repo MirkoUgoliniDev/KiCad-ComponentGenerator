@@ -275,3 +275,20 @@ def test_the_model_path_tooltip_survives_the_highlight(window, library):
     tip = dialog.table.item(0, 4).toolTip()
     assert R0603 in tip.replace("\\", "/") and "R7" in tip
     _dispose(dialog)
+
+
+def test_the_whole_reason_of_an_excluded_row_can_be_read(window, library):
+    """Utente, 2026-09-25: «nessun modello KiCad …» troncato nella colonna Stato.
+    Positivo: la riga va a capo (altezza sul contenuto), niente puntini, testo
+    completo nel tooltip. Negativo: la riga «da ricordare» resta su una riga."""
+    from PyQt6.QtWidgets import QApplication
+    dialog = ConsolidateDialog(_board(library))
+    dialog.resize(700, 400)
+    dialog.show()
+    QApplication.processEvents()
+    table = dialog.table
+    excluded = table.item(1, 4)
+    assert excluded.toolTip() == excluded.text() and "nessun modello KiCad" in excluded.text()
+    assert table.textElideMode() == Qt.TextElideMode.ElideNone and table.wordWrap()
+    assert table.rowHeight(1) > table.rowHeight(0)
+    _dispose(dialog)

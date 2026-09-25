@@ -33,7 +33,8 @@ from PyQt6.QtWidgets import (
     QToolButton, QWidget,
 )
 
-from ..cad3d.annotations import EDGE_NAMES, FACE_NAMES, EdgeFilletAnnotation, FaceTextAnnotation
+from ..cad3d.annotations import (ANNOTATION_CONVENTION, EDGE_NAMES, FACE_NAMES, EdgeFilletAnnotation,
+                                  FaceTextAnnotation, swap_front_back)
 from ..cad3d.body_params import Body3DParams
 from ..cad3d.step_generator import (
     CAD_ABORT_MESSAGE, Cad3DError, find_freecadcmd, generate_3d_model,
@@ -4530,7 +4531,8 @@ class MainWindow(QMainWindow):
                        "vlm_model": getattr(self, "_vlm_model", None)},
             "sides": self._serialised_sides(),
             "components": self._photo_components_from_table(),
-            "annotations": {"fillets": [asdict(a) for a in self.fillet_annotations],
+            "annotations": {"convention": ANNOTATION_CONVENTION,
+                            "fillets": [asdict(a) for a in self.fillet_annotations],
                             "texts": [asdict(a) for a in self.face_text_annotations]},
             "pinout": deepcopy(self.pinout or []),
             "pin_map": (None if not getattr(self, "pin_map", None) else
@@ -4580,15 +4582,29 @@ class MainWindow(QMainWindow):
         annotations = state.get("annotations") if isinstance(state.get("annotations"), dict) else {}
         self.fillet_annotations.clear()
         self.face_text_annotations.clear()
-        for kind, target, values in ((EdgeFilletAnnotation, self.fillet_annotations,
-                                      annotations.get("fillets")),
-                                     (FaceTextAnnotation, self.face_text_annotations,
-                                      annotations.get("texts"))):
+        # Progetti salvati prima del 2026-09-25 (convenzione 1 o assente):
+        # front era il lato in alto della vista dall'alto. Il lato fisico
+        # resta quello, cambia solo il nome: si converte una volta, lo si dice.
+        legacy = annotations.get("convention") != ANNOTATION_CONVENTION
+        converted = 0
+        for kind, target, values, key in ((EdgeFilletAnnotation, self.fillet_annotations,
+                                           annotations.get("fillets"), "edge"),
+                                          (FaceTextAnnotation, self.face_text_annotations,
+                                           annotations.get("texts"), "face")):
             for entry in values or ():
                 try:
+                    entry = dict(entry)
+                    if legacy and isinstance(entry.get(key), str):
+                        renamed = swap_front_back(entry[key])
+                        converted += renamed != entry[key]
+                        entry[key] = renamed
                     target.append(kind(**entry))
-                except TypeError:
+                except (TypeError, ValueError):
                     skipped.append(kind.__name__)
+        if converted:
+            self._append_log(tx("Annotazioni 3D: {count} nomi fronte/retro convertiti alla "
+                                "convenzione del cubo 3D (il lato fisico non cambia).",
+                                count=converted))
         self._refresh_annotations_table()
         self.pinout = [dict(entry) for entry in state.get("pinout") or () if isinstance(entry, dict)]
         pin_map = state.get("pin_map")
@@ -8208,6 +8224,12 @@ class MainWindow(QMainWindow):
         fillet_row.addWidget(QLabel("Spigolo:"))
         self.combo_fillet_edge = QComboBox()
         self.combo_fillet_edge.addItems(EDGE_NAMES)
+        # I nomi seguono il cubo della vista 3D (convenzione 2, 2026-09-25).
+        self.combo_fillet_edge.setToolTip(
+            "Spigolo fra due facce, con i nomi del cubo della vista 3D: front = faccia "
+            "«Fronte» (lato in basso della vista dall'alto), back = «Retro» (in alto). "
+            "Gli angoli arrotondati visti dall'alto sono gli spigoli verticali "
+            "front-left, front-right, back-left, back-right.")
         fillet_row.addWidget(self.combo_fillet_edge)
         fillet_row.addWidget(QLabel("Raggio:"))
         self.spin_fillet_radius = QDoubleSpinBox()

@@ -6670,3 +6670,37 @@ NON cambiato di proposito: larghezza della scheda in grassetto (scelta
 grafica approvata, spiegata nella docstring di theme.py); import senza
 prefisso `tests.` nei ~25 test piu' vecchi (stile preesistente); limite
 del disconnect in closeEvent (copre le finestre chiuse con close()).
+
+## PIANO IN CORSO (25/09) — «fai tutto, in modo chirurgico» (5 decisioni aperte)
+
+Via dell'utente su tutte e cinque. Scritto prima del codice.
+1. Motivi dei candidati STEP in inglese (punto 28): tradurli nelle 4 lingue
+   senza perdere i report gia' salvati.
+2. Colonna «Stato» troncata in «Ricorda questi modelli KiCad»: testo intero
+   leggibile (tooltip + larghezza).
+3. Nomi front/back delle annotazioni allineati al cubo 3D (front = lato -Y
+   del modello = lato in BASSO della vista dall'alto, convenzione KiCad):
+   serve migrare i progetti salvati e i prompt. Da fare con una versione del
+   formato, mai reinterpretando in silenzio i dati vecchi.
+4. Conferme della scelta STEP a icona con tooltip.
+5. Foto con orientamento EXIF: all'AI si manda l'immagine gia' ruotata.
+ESITO delle 5 decisioni (25/09):
+1. Motivi STEP: `kicad_models.localized_reason` + `_REASON_SOURCES`; i report
+   su disco restano in inglese (dati), la traduzione e' al momento di mostrarli;
+   «Compatible piazzole <percorso> dimensions» -> «Misure compatibili con le
+   piazzole di <file>». Test test_candidate_reasons_i18n (un motivo nuovo
+   senza traduzione fa fallire il test).
+2. Colonna «Stato»: a capo, altezza della riga sul contenuto, niente puntini,
+   testo intero nel tooltip; finestra 1100x560.
+3. front/back: CONVENZIONE 2 = nomi del cubo 3D / KiCad (front = lato -Y del
+   modello = lato in BASSO della vista dall'alto). `_flip_y` non scambia piu'
+   i nomi di fillet e testi; `annotations.ANNOTATION_CONVENTION = 2` salvata
+   nel progetto; all'apertura i progetti senza convenzione vengono convertiti
+   UNA volta (`swap_front_back`) con una riga di log; schema dell'AI e tooltip
+   del menu spigoli aggiornati. Test test_front_back_convention.
+4. Conferme della scelta STEP a icona (confirm-use.svg, cancel.svg) con
+   tooltip nome + spiegazione; restano OK/Annulla (Invio/Esc). Le conferme
+   delle altre finestre restano testo.
+5. Foto EXIF: `_upright_image_bytes` in `_file_to_content_block`: foto con
+   tag di rotazione mandata gia' ruotata e senza tag; senza tag byte identici;
+   file illeggibile -> originale. Test test_ai_photo_orientation.
