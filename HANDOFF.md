@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `PENDING` (pushato):
+- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `ae1d8e9` (pushato):
   correzione di TUTTI gli esiti della verifica avversariale del 25/09 (A-G,
   punti 35-41 e piano «fai tutto»), documentazione @brief imposta dal test,
   blocco dei segnali alla chiusura della finestra (crash vero dimostrato),
