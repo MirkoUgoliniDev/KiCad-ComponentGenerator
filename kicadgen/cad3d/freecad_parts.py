@@ -218,8 +218,11 @@ def _observed_terminals(cx, cy, z0, length, width, height, color, geometry):
     return parts
 
 
-def _ic_soic(cx, cy, z0, length, width, height, color):
+def _ic_soic(cx, cy, z0, length, width, height, color, marker=None):
     """Integrato con reofori a ala di gabbiano sui due lati lunghi.
+
+    `marker` e' la direzione locale (Y verso l'alto) di un riferimento pin 1
+    OSSERVATO nella foto; senza, il corpo resta liscio.
 
     Il corpo e' sollevato di uno standoff e piu' stretto dell'ingombro totale,
     perche' l'ingombro letto dalla foto comprende i reofori. Il numero di
@@ -237,15 +240,10 @@ def _ic_soic(cx, cy, z0, length, width, height, color):
     body = _box(cx, cy, z0 + standoff, span if along_x else body_depth,
                 body_depth if along_x else span, body_h)
     body = _fillet(body, min(0.15, body_h * 0.15), _top_edges(body))
-    # Tacca del pin 1 nell'angolo, come sui package reali.
-    dimple = Part.makeCylinder(min(0.35, depth * 0.08), 0.3,
-                               V(cx - (span / 2 - 0.9 if along_x else body_depth / 2 - 0.6),
-                                 cy - (body_depth / 2 - 0.6 if along_x else span / 2 - 0.9),
-                                 z0 + height - 0.12), V(0, 0, 1))
-    try:
-        body = body.cut(dimple)
-    except Exception:  # noqa: BLE001 - senza tacca
-        pass
+    # Pin-1 dimple only where the photograph showed a pin-1/polarity mark: a
+    # corner chosen here would be an invented orientation (E10).
+    body = _cut_marker(body, marker, cx, cy, span if along_x else body_depth,
+                       body_depth if along_x else span, z0 + height)
     parts.append((body, color))
 
     n_leads = max(2, min(14, int(round((span - 1.0) / LEAD_PITCH_MM))))
@@ -275,21 +273,94 @@ def _ic_soic(cx, cy, z0, length, width, height, color):
     return parts
 
 
-def _ic_qfn(cx, cy, z0, length, width, height, color):
+def _ic_qfn(cx, cy, z0, length, width, height, color, marker=None):
+    """@brief Leadless IC body; a pin-1 dot only on an observed landmark side.
+
+    @param marker Local (dx, dy) of an observed pin-1/polarity mark, or None.
+    @return List of (shape, colour).
+    """
     body = _box(cx, cy, z0, length, width, height)
-    dot = Part.makeCylinder(min(0.3, length * 0.08), 0.2,
-                            V(cx - length / 2 + 0.6, cy - width / 2 + 0.6, z0 + height - 0.08),
-                            V(0, 0, 1))
+    return [(_cut_marker(body, marker, cx, cy, length, width, z0 + height), color)]
+
+
+def _cut_marker(body, marker, cx, cy, length, width, ztop):
+    """@brief Sink a small pin-1 dimple towards an OBSERVED landmark side.
+
+    @param body Solid to mark.
+    @param marker Local unit direction (dx, dy), Y up, or None for no mark.
+    @param cx Centre X of the marked face, mm.
+    @param cy Centre Y of the marked face, mm.
+    @param length Face extent along local X, mm.
+    @param width Face extent along local Y, mm.
+    @param ztop Z of the top face, mm.
+    @return The marked solid, or @p body unchanged when there is no evidence
+        or the dimple does not fit.
+    @note A single observed side cannot name a corner, so the dimple is centred
+        on that side instead of guessing one: the mark says "this end", which
+        is all the photograph established.
+    """
+    if not marker:
+        return body
+    dx, dy = marker
+    radius = min(0.35, 0.08 * min(length, width))
+    reach = (length if dx else width) / 2 - 2.5 * radius
+    if radius < 0.05 or reach <= 0:
+        return body
+    dimple = Part.makeCylinder(radius, 0.3, V(cx + dx * reach, cy + dy * reach, ztop - 0.12),
+                               V(0, 0, 1))
     try:
-        body = body.cut(dot)
-    except Exception:  # noqa: BLE001
-        pass
-    return [(body, color)]
+        return body.cut(dimple)
+    except Exception:  # noqa: BLE001 - senza tacca
+        return body
 
 
-def _ic_observed_pins(cx, cy, z0, length, width, height, color, kind, pin_count=None, pins_by_side=None):
-    """IC body plus terminals counted from the photo, when supplied by AI."""
-    parts = [(_box(cx, cy, z0, length, width, height), color)]
+def _end_marker(marker, along_x):
+    """@brief Sign (+1/-1) of an observed marker lying on the long axis, or None.
+
+    @param marker Local unit direction (dx, dy) or None.
+    @param along_x True when the long axis is local X.
+    @return +1 or -1 when the mark sits on one END of the part; None when there
+        is no mark or it sits on a long side, where a band or stripe cannot be.
+    """
+    if not marker:
+        return None
+    value = marker[0] if along_x else marker[1]
+    return (1 if value > 0 else -1) if value else None
+
+
+def _end_strip(cx, cy, along_x, cross, offset, strip, ztop, thickness=0.03):
+    """Thin strip across the part, centred `offset` from the centre on the long axis."""
+    if along_x:
+        return Part.makeBox(strip, cross, thickness,
+                            V(cx + offset - strip / 2, cy - cross / 2, ztop))
+    return Part.makeBox(cross, strip, thickness,
+                        V(cx - cross / 2, cy + offset - strip / 2, ztop))
+
+
+def _ic_observed_pins(cx, cy, z0, length, width, height, color, kind, pin_count=None,
+                      pins_by_side=None, marker=None):
+    """@brief IC body plus terminals counted from the photo, inside the envelope.
+
+    @param cx Component centre X in the model frame (Y up), mm.
+    @param cy Component centre Y in the model frame, mm.
+    @param z0 Seating plane, mm.
+    @param length Photographed envelope along local X, mm (leads included).
+    @param width Photographed envelope along local Y, mm (leads included).
+    @param height Estimated height, mm.
+    @param color Body colour.
+    @param kind "ic_soic" or "ic_qfn": only used to spread a bare pin_count.
+    @param pin_count Observed total count, used when pins_by_side is absent.
+    @param pins_by_side Observed counts per image side (left/right/top/bottom).
+    @param marker Optional local (dx, dy) of an OBSERVED pin-1 landmark.
+    @return List of (shape, colour).
+    @note Side names are image sides (Y down). The caller has already negated
+        Y and the rotation, so the image "top" is local +Y here, exactly as
+        `_observed_terminals` inverts its local Y. Placing "top" pads at -Y
+        put them on the opposite side of the body.
+    @note The photographed rectangle already includes the leads (as for
+        `_ic_soic`): the body shrinks on each side that carries leads and the
+        pads stay inside length x width instead of growing the envelope.
+    """
     sides = dict(pins_by_side or {})
     if not sides and pin_count:
         if kind == "ic_qfn":
@@ -300,30 +371,45 @@ def _ic_observed_pins(cx, cy, z0, length, width, height, color, kind, pin_count=
         else:
             left = pin_count // 2
             sides = {"left": left, "right": pin_count - left}
+    counts = {side: max(0, int(sides.get(side, 0) or 0))
+              for side in ("left", "right", "top", "bottom")}
     lead_t = min(0.18, max(0.08, height * 0.12))
-    lead_out = min(0.8, max(0.3, min(length, width) * 0.16))
+    # Lead projection is a visual estimate; capped at a quarter of the short
+    # side so that two opposite rows always leave half of the body.
+    lead_out = min(0.8, max(0.3, min(length, width) * 0.16), 0.25 * min(length, width))
     metal_w = min(0.42, max(0.18, min(length, width) / 8))
-    for side in ("left", "right", "top", "bottom"):
-        count = int(sides.get(side, 0) or 0)
+    x_min, x_max = cx - length / 2, cx + length / 2
+    y_min, y_max = cy - width / 2, cy + width / 2
+    body_left = x_min + (lead_out if counts["left"] else 0.0)
+    body_right = x_max - (lead_out if counts["right"] else 0.0)
+    # Image "top" is local +Y in this Y-up frame (see the note above).
+    body_top = y_max - (lead_out if counts["top"] else 0.0)
+    body_bottom = y_min + (lead_out if counts["bottom"] else 0.0)
+    body = Part.makeBox(body_right - body_left, body_top - body_bottom, height,
+                        V(body_left, body_bottom, z0))
+    body = _cut_marker(body, marker, (body_left + body_right) / 2,
+                       (body_bottom + body_top) / 2, body_right - body_left,
+                       body_top - body_bottom, z0 + height)
+    parts = [(body, color)]
+    metal_w = min(metal_w, 0.8 * (body_top - body_bottom), 0.8 * (body_right - body_left))
+    for side, count in counts.items():
         if count <= 0:
             continue
-        span = width if side in ("left", "right") else length
-        pitch = span / (count + 1)
+        vertical = side in ("left", "right")
+        low, high = (body_bottom, body_top) if vertical else (body_left, body_right)
+        pitch = (high - low) / (count + 1)
         for index in range(count):
-            along = -span / 2 + (index + 1) * pitch
+            along = low + (index + 1) * pitch
             if side == "left":
-                pad = Part.makeBox(lead_out, metal_w, lead_t,
-                                   V(cx - length / 2 - lead_out, cy + along - metal_w / 2, z0))
+                origin = V(x_min, along - metal_w / 2, z0)
             elif side == "right":
-                pad = Part.makeBox(lead_out, metal_w, lead_t,
-                                   V(cx + length / 2, cy + along - metal_w / 2, z0))
+                origin = V(body_right, along - metal_w / 2, z0)
             elif side == "top":
-                pad = Part.makeBox(metal_w, lead_out, lead_t,
-                                   V(cx + along - metal_w / 2, cy - width / 2 - lead_out, z0))
+                origin = V(along - metal_w / 2, body_top, z0)
             else:
-                pad = Part.makeBox(metal_w, lead_out, lead_t,
-                                   V(cx + along - metal_w / 2, cy + width / 2, z0))
-            parts.append((pad, METAL))
+                origin = V(along - metal_w / 2, y_min, z0)
+            size = (lead_out, metal_w) if vertical else (metal_w, lead_out)
+            parts.append((Part.makeBox(size[0], size[1], lead_t, origin), METAL))
     return parts
 
 
@@ -347,40 +433,82 @@ def _led(cx, cy, z0, length, width, height, color):
     return parts
 
 
-def _tantalum(cx, cy, z0, length, width, height, color):
-    """Condensatore al tantalio: case raccordato e striscia di polarita'."""
+def _tantalum(cx, cy, z0, length, width, height, color, marker=None):
+    """@brief Tantalum capacitor: rounded case, stripe only where observed.
+
+    @param marker Local (dx, dy) of an observed polarity mark, or None.
+    @return List of (shape, colour).
+    @note The stripe used to sit at +X on every part: a polarity invented by
+        the builder. It is now drawn only at the end the photograph marked.
+    """
     parts = _rounded_box(cx, cy, z0, length, width, height, color, ratio=0.12, cap=0.35)
-    stripe_len = max(0.2, length * 0.14)
-    stripe = Part.makeBox(stripe_len, width * 0.9, 0.03,
-                          V(cx + length / 2 - stripe_len - 0.05, cy - width * 0.45, z0 + height))
-    parts.append((stripe, "#f0e6c8"))
+    along_x = length >= width
+    span, cross = (length, width) if along_x else (width, length)
+    end = _end_marker(marker, along_x)
+    if end is not None:
+        stripe_len = min(max(0.2, span * 0.14), span * 0.3)
+        offset = end * (span / 2 - stripe_len / 2 - min(0.05, span * 0.05))
+        parts.append((_end_strip(cx, cy, along_x, cross * 0.9, offset, stripe_len,
+                                 z0 + height), "#f0e6c8"))
     return parts
+
+
+def _chip_cap(span):
+    """Termination length: visible on small parts, never more than 30% of the span."""
+    return min(max(0.15, span * 0.2), span * 0.3)
 
 
 def _chip(cx, cy, z0, length, width, height, color):
-    """Passivo chip (resistenza/condensatore): corpo + terminazioni metalliche."""
-    cap = max(0.15, length * 0.2)
-    body = _box(cx, cy, z0, length - 2 * cap + 0.02, width, height)
-    parts = [(body, color)]
+    """@brief Chip passive: body plus metal terminations on the two SHORT ends.
+
+    @return List of (shape, colour).
+    @note The terminations follow the long side, whichever local axis it is
+        (as `_ic_soic` and `_diode_melf` already do): a chip whose length was
+        read along local Y used to get its caps on the long sides.
+    @note The termination is capped at 30% of the long side, so a tiny chip
+        keeps a positive body instead of raising (a 0.25 mm part used to make
+        `makeBox` fail and lose its terminations).
+    """
+    along_x = length >= width
+    span, cross = (length, width) if along_x else (width, length)
+    cap = _chip_cap(span)
+    core = span - 2 * cap + min(0.02, span * 0.05)
+    parts = [(_box(cx, cy, z0, core if along_x else cross, cross if along_x else core,
+                   height), color)]
     for side in (-1, 1):
-        x = cx + side * (length / 2 - cap / 2)
-        parts.append((_box(x, cy, z0, cap, width, height), METAL))
+        offset = side * (span / 2 - cap / 2)
+        if along_x:
+            parts.append((_box(cx + offset, cy, z0, cap, cross, height), METAL))
+        else:
+            parts.append((_box(cx, cy + offset, z0, cross, cap, height), METAL))
     return parts
 
 
-def _diode(cx, cy, z0, length, width, height, color):
+def _diode(cx, cy, z0, length, width, height, color, marker=None):
+    """@brief SMD diode: chip body; cathode band only on the observed end.
+
+    @param marker Local (dx, dy) of an observed polarity mark, or None.
+    @return List of (shape, colour).
+    """
     parts = _chip(cx, cy, z0, length, width, height, color or "#1c1c1c")
-    band = Part.makeBox(max(0.15, length * 0.08), width, 0.03,
-                        V(cx - length / 2 + length * 0.3, cy - width / 2, z0 + height))
-    parts.append((band, "#e8e8e8"))
+    along_x = length >= width
+    span, cross = (length, width) if along_x else (width, length)
+    end = _end_marker(marker, along_x)
+    if end is not None:
+        band_w = min(max(0.15, span * 0.08), span * 0.15)
+        offset = end * max(0.0, span / 2 - _chip_cap(span) - band_w)
+        parts.append((_end_strip(cx, cy, along_x, cross, offset, band_w, z0 + height),
+                      "#e8e8e8"))
     return parts
 
 
-def _diode_melf(cx, cy, z0, length, width, height, color):
+def _diode_melf(cx, cy, z0, length, width, height, color, marker=None):
     """Diodo MELF: cilindro di vetro sdraiato lungo X, cappucci metallici e banda.
 
     Il diametro e' la dimensione minore dell'ingombro; l'altezza dichiarata
-    non conta, un cilindro sdraiato e' alto quanto il suo diametro.
+    non conta, un cilindro sdraiato e' alto quanto il suo diametro. La banda
+    del catodo si disegna solo dal capo su cui la foto l'ha vista (`marker`):
+    metterla sempre dallo stesso capo inventava la polarita'.
     """
     along_x = length >= width
     span = length if along_x else width
@@ -394,8 +522,13 @@ def _diode_melf(cx, cy, z0, length, width, height, color):
     for offset in (0.0, span - cap):
         base = V(cx - span / 2 + offset, cy, zc) if along_x else V(cx, cy - span / 2 + offset, zc)
         parts.append((Part.makeCylinder(radius, cap, base, axis), METAL))
+    end = _end_marker(marker, along_x)
+    if end is None:
+        return parts
     band_w = max(0.12, span * 0.08)
     band_at = cap + span * 0.08
+    if end > 0:
+        band_at = span - band_at - band_w
     base = V(cx - span / 2 + band_at, cy, zc) if along_x else V(cx, cy - span / 2 + band_at, zc)
     parts.append((Part.makeCylinder(radius * 0.98, band_w, base, axis), "#1c1c1c"))
     return parts
@@ -432,8 +565,15 @@ def _coaxial_connector(cx, cy, z0, length, width, height, color):
     return parts
 
 
-def _outward_sign(cx, cy, axis, rotation_deg):
+def _outward_sign(cx, cy, axis, rotation_deg, centre=(0.0, 0.0)):
     """Verso locale che, DOPO la rotazione del chiamante, guarda fuori scheda.
+
+    @param centre (x, y) del centro della scheda nello stesso sistema di
+        `cx`/`cy`. Il default (0, 0) vale solo per le schede centrate
+        nell'origine (moduli castellated); una scheda con l'origine sul pin 1
+        di un connettore (generatore a matrice) ha il centro altrove, e
+        misurare dall'origine faceva guardare verso l'interno i connettori
+        da bordo.
 
     Il builder lavora nel sistema locale non ruotato: e' il chiamante che
     ruota la forma di `rotation_deg` attorno al centro del componente. Se il
@@ -447,12 +587,14 @@ def _outward_sign(cx, cy, axis, rotation_deg):
     """
     angle = math.radians(rotation_deg or 0)
     cos_a, sin_a = math.cos(angle), math.sin(angle)
+    rx, ry = cx - float(centre[0]), cy - float(centre[1])
     # Immagine globale degli assi locali X e Y dopo la rotazione.
-    projection = (cx * cos_a + cy * sin_a) if axis == 0 else (-cx * sin_a + cy * cos_a)
+    projection = (rx * cos_a + ry * sin_a) if axis == 0 else (-rx * sin_a + ry * cos_a)
     return -1.0 if projection < 0 else 1.0
 
 
-def _connector(cx, cy, z0, length, width, height, color, rotation_deg=0, mating=None):
+def _connector(cx, cy, z0, length, width, height, color, rotation_deg=0, mating=None,
+               board_centre=(0.0, 0.0)):
     """Approximate an observed entry; unknown entry stays a generic envelope.
 
     Top-entry barrels and edge-entry shells are visual estimates, not observed
@@ -486,7 +628,7 @@ def _connector(cx, cy, z0, length, width, height, color, rotation_deg=0, mating=
         return [(shell, color)]
 
     axis = 0 if length <= width else 1
-    sign = _outward_sign(cx, cy, axis, rotation_deg)
+    sign = _outward_sign(cx, cy, axis, rotation_deg, board_centre)
     if axis == 0:
         mating = length
         cross_w, cross_h = width - 2 * wall, height - 2 * wall
@@ -1227,6 +1369,38 @@ LANDMARK_INDEX_FILENAME = "kicadgen-landmark-index.json"
 _LANDMARK_MISS = object()
 
 
+#: Cartelle di cache scelte dal processo padre (`model_size_cache.user_cache_dirs`),
+#: la preferita per prima. Vuota = solo la posizione storica. Arriva dal file
+#: dei parametri perche' questo modulo, dentro FreeCAD, non puo' importare
+#: `kicadgen.app_paths`.
+_CACHE_DIRS = []
+
+
+def set_cache_dirs(folders):
+    """@brief Adopt the cache folders resolved by the parent process.
+
+    @param folders Iterable of folder paths, preferred first; anything that is
+        not a non-empty string is ignored.
+    @return The folders actually adopted.
+    @note Called by freecad_build_body.main() with the `cache_dirs` field of
+        the params file, so KICADGEN_DATA_DIR reaches the FreeCAD child too.
+    """
+    global _CACHE_DIRS
+    try:
+        _CACHE_DIRS = [str(folder) for folder in folders or ()
+                       if isinstance(folder, str) and folder.strip()]
+    except TypeError:
+        _CACHE_DIRS = []
+    return list(_CACHE_DIRS)
+
+
+def _legacy_cache_dir():
+    """Historic location: %LOCALAPPDATA%\\kicadgen (or ~/.cache/kicadgen)."""
+    base = os.environ.get("LOCALAPPDATA") or os.path.join(
+        os.path.expanduser("~"), ".cache")
+    return os.path.join(base, "kicadgen")
+
+
 def _landmark_cache_paths():
     """Dove vive l'indice dei versi gia' misurati.
 
@@ -1235,10 +1409,19 @@ def _landmark_cache_paths():
     cartella la sporcherebbe. La chiave porta identita' del file e
     riferimento, quindi un solo indice condiviso non puo' confondere due
     modelli.
+
+    La cartella preferita e' quella dei dati utente scelta dal padre
+    (KICADGEN_DATA_DIR compreso); la posizione storica resta in coda, cosi'
+    un indice gia' scritto la' si legge ancora e al primo salvataggio migra
+    nella nuova (model_size_cache unisce le fonti e scrive nella prima).
     """
-    base = os.environ.get("LOCALAPPDATA") or os.path.join(
-        os.path.expanduser("~"), ".cache")
-    return [os.path.join(base, "kicadgen", LANDMARK_INDEX_FILENAME)]
+    folders = list(_CACHE_DIRS) + [_legacy_cache_dir()]
+    paths = []
+    for folder in folders:
+        path = os.path.join(folder, LANDMARK_INDEX_FILENAME)
+        if path not in paths:
+            paths.append(path)
+    return paths
 
 
 def _landmark_store():
@@ -1401,25 +1584,75 @@ def _cached_landmark_direction(shape, reference, path, heartbeat=None):
     return direction
 
 
-def _verse_correction(native_direction, inferred, observed_side):
+def _cardinal_quarters(angle):
+    """@brief Quarter turns of a cardinal angle, or None for any other angle.
+
+    @param angle Rotation in degrees (any sign, any number of turns).
+    @return 0..3, or None when @p angle is not finite or not a multiple of 90.
+    """
+    try:
+        value = float(angle or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(value):
+        return None
+    quarters = value / 90.0
+    nearest = round(quarters)
+    if abs(quarters - nearest) > 1e-6:
+        return None
+    return int(nearest) % 4
+
+
+def _local_side_direction(observed_side, component_rotation=0.0):
+    """@brief Direction of an observed box side in the component's LOCAL frame.
+
+    @param observed_side left/right/top/bottom in the photo frame (X right,
+        Y down), as `photo_global_inventory` declares `landmark_side`.
+    @param component_rotation Rotation the caller applies to the built shapes,
+        in degrees, in the model frame (Y up: the payload angle already
+        negated by `freecad_build_body._flip_y`).
+    @return Cardinal (dx, dy) in the local Y-up frame, or None when the side is
+        unknown or the rotation is not a multiple of 90 degrees.
+    @note Two conversions, in this order: the photo's Y grows downwards, the
+        model's upwards (flip); then the component rotation, which the caller
+        applies AFTER the builder, is undone. A side of a box rotated by 30
+        degrees is not a cardinal direction in its own frame, so no answer is
+        better than a rounded one.
+    """
+    wanted = _LANDMARK_DIRECTIONS.get(observed_side)
+    if wanted is None:
+        return None
+    quarters = _cardinal_quarters(component_rotation)
+    if quarters is None:
+        return None
+    return _rotated((wanted[0], -wanted[1]), -90 * quarters)
+
+
+def _verse_correction(native_direction, inferred, observed_side, component_rotation=0.0):
     """@brief Rotazione che porta il riferimento nativo dove lo si e' osservato.
 
     @param native_direction (dx, dy) del baricentro nel frame del modello, o None.
     @param inferred Angolo dell'asse gia' scelto sull'ingombro, 0 o 90 gradi.
-    @param observed_side Lato dichiarato dall'osservazione: left/right/top/bottom.
+    @param observed_side Lato dichiarato dall'osservazione: left/right/top/bottom,
+        nel frame GLOBALE della foto (X a destra, Y in basso).
+    @param component_rotation Rotazione che il chiamante applica DOPO al
+        componente, in gradi, nel frame del modello (Y in alto).
     @return 0 o 180 gradi da sommare, oppure None se non si puo' stabilire.
     @note Si cercano solo 0 e 180 di proposito: l'asse l'ha gia' deciso la
         misura dell'ingombro, e una correzione di 90 lo smentirebbe. Se ne' 0
         ne' 180 portano il riferimento dalla parte osservata, i due dati si
         contraddicono e non si corregge nulla: meglio un verso non verificato
         che uno inventato.
+    @note Il lato osservato e' globale, il confronto e' locale: senza togliere
+        la rotazione del componente, a 90/180/270 gradi il riferimento finiva
+        dal lato sbagliato o la correzione veniva scartata. Una rotazione non
+        cardinale non ha lati cardinali nel frame locale: None.
     """
-    wanted = _LANDMARK_DIRECTIONS.get(observed_side)
-    if native_direction is None or wanted is None:
+    if native_direction is None:
         return None
-    # Il costruttore lavora con Y verso l'alto, l'osservazione con Y verso il
-    # basso: senza questo ribaltamento "sopra" e "sotto" si scambierebbero.
-    wanted = (wanted[0], -wanted[1])
+    wanted = _local_side_direction(observed_side, component_rotation)
+    if wanted is None:
+        return None
     for extra in (0, 180):
         if _rotated(native_direction, inferred + extra) == wanted:
             return extra
@@ -1528,7 +1761,7 @@ def _library_model(component, cx, cy, z0, color):
             verse = _verse_correction(
                 _cached_landmark_direction(combined, reference, path, heartbeat)
                 if observed_side else None,
-                inferred, observed_side)
+                inferred, observed_side, component.get("rotation_deg") or 0.0)
             if verse:
                 print(f"KICADGEN_VERSE:{path}; landmark="
                       f"{component.get('landmark_feature')} on "
@@ -1561,6 +1794,45 @@ def _library_model(component, cx, cy, z0, color):
            path=path,
            exc=exc)
         return None
+
+
+#: Landmark features that establish polarity or pin 1 (enum of
+#: `photo_global_inventory.LANDMARK_FEATURES`). Only these may draw a stripe,
+#: band or dimple on an approximate shape; a connector opening or a chamfer
+#: tells the ends apart but says nothing about polarity.
+_POLARITY_FEATURES = ("polarity_marker", "pin1_marker")
+
+#: Builders that can draw an observed polarity/pin-1 mark.
+_MARKED_KINDS = ("ic_soic", "ic_qfn", "capacitor_tantalum", "diode", "diode_melf")
+
+
+def _observed_marker(component):
+    """@brief Local direction of an OBSERVED polarity/pin-1 mark, or None.
+
+    @param component Component payload (model frame, after `_flip_y`).
+    @return (dx, dy) in the local Y-up frame, or None without photographic
+        evidence, with a low confidence or with a non-cardinal rotation.
+    @note Without this the builders drew stripes, bands and dimples in a fixed
+        place: a polarity nobody observed, shown as if it were geometry.
+    """
+    if component.get("landmark_feature") not in _POLARITY_FEATURES:
+        return None
+    if component.get("landmark_confidence") not in ("high", "medium"):
+        return None
+    return _local_side_direction(component.get("landmark_side"),
+                                 component.get("rotation_deg") or 0.0)
+
+
+def _board_centre(component):
+    """(x, y) of the board centre in the model frame; (0, 0) when not supplied."""
+    value = component.get("board_centre_xy")
+    try:
+        x, y = (float(value[0]), float(value[1]))
+    except (TypeError, ValueError, IndexError, KeyError, OverflowError):
+        return (0.0, 0.0)
+    if not (math.isfinite(x) and math.isfinite(y)):
+        return (0.0, 0.0)
+    return (x, y)
 
 
 def _safe_import_error(exc):
@@ -1647,7 +1919,8 @@ def build_component(component, z0):
             # rotazione applicata dal chiamante, non prima.
             return _connector(cx, cy, z0, length, width, height, color,
                               rotation_deg=float(component.get("rotation_deg") or 0),
-                              mating=component.get("mating"))
+                              mating=component.get("mating"),
+                              board_centre=_board_centre(component))
         if kind in BUILDERS and kind != "generic":
             _warn("componente {get} ({kind}): geometria approssimata, terminal_geometry "
                "assente",
@@ -1655,9 +1928,13 @@ def build_component(component, z0):
                kind=kind)
         pin_count = component.get("pin_count")
         pins_by_side = component.get("pins_by_side")
+        marker = _observed_marker(component) if kind in _MARKED_KINDS else None
         if kind in {"ic_soic", "ic_qfn"} and (pin_count or pins_by_side):
             return _ic_observed_pins(cx, cy, z0, length, width, height, color, kind,
-                                     pin_count=pin_count, pins_by_side=pins_by_side)
+                                     pin_count=pin_count, pins_by_side=pins_by_side,
+                                     marker=marker)
+        if kind in _MARKED_KINDS:
+            return builder(cx, cy, z0, length, width, height, color, marker=marker)
         return builder(cx, cy, z0, length, width, height, color)
     except Exception as exc:  # noqa: BLE001 - si ripiega sulla scatola
         _warn("componente {get} ({kind}) semplificato: {exc}",

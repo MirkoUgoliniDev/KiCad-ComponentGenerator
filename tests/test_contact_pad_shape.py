@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from kicadgen.core.footprint import Pad
+from kicadgen.core.footprint import FpLine, FpRect, Pad
 from kicadgen.generators.castellated_module import (
     CONTACT_HALF_AND_THROUGH, CONTACT_HALF_HOLE, CONTACT_THROUGH_HOLE,
     CastellatedModuleParams, CastellatedSide, OffsetDrillPad, build_castellated_module,
@@ -44,12 +44,26 @@ PLATING, PAD_T, Z1 = 0.06, 0.025, 1.0
 
 # ── Aiuti geometrici indipendenti dal generatore ────────────────────
 
+def _copper_centre(pad):
+    """Centro del RAME di un pad, secondo il modello KiCad.
+
+    CONTRATTO CORRETTO il 2026-09-25 (verificato con pcbnew 10): in KiCad `at`
+    e' la posizione del FORO (GetPosition) e `(drill D (offset dx dy))` sposta
+    il RAME, centrato in at + offset (ShapePos). Questi aiuti leggevano il
+    contrario (rame in `at`, foro in at + offset), cioe' lo stesso errore del
+    generatore, e per questo non potevano accorgersene; ora lo verifica anche
+    tests/test_fixG_kicad_roundtrip.py con il pcbnew vero.
+    """
+    offset = getattr(pad, "drill_offset", (0.0, 0.0))
+    return (pad.at[0] + offset[0], pad.at[1] + offset[1])
+
+
 def _stadium_of(pad):
     """Asse (A, B) e raggio del rame di un pad KiCad "oval", dai soli campi del pad.
 
     Non usa ContactPad: il controllo deve reggere anche se il helper sbagliasse.
     """
-    (x, y), (w, h) = pad.at, pad.size
+    (x, y), (w, h) = _copper_centre(pad), pad.size
     r = min(w, h) / 2
     half = max(w, h) / 2 - r
     if w >= h:
@@ -71,8 +85,8 @@ def _in_pad(pad, point, slack=1e-6):
 
 
 def _drill_centre(pad):
-    offset = getattr(pad, "drill_offset", (0.0, 0.0))   # un Pad semplice ha il foro al centro
-    return (pad.at[0] + offset[0], pad.at[1] + offset[1])
+    # KiCad: il foro sta SEMPRE in `at`, con o senza offset (vedi _copper_centre).
+    return pad.at
 
 
 def _half_hole_centre(params, placement):
@@ -190,6 +204,9 @@ def test_pad_sexpression_is_a_single_oval_with_an_offset_drill():
     placement = next(pad_positions(params))
     land = continuous_pad(params, placement)
     dx, dy = land.drill_offset
+    # KiCad: `at` = foro, offset = centro del rame - foro (contratto 2026-09-25).
+    assert (dx, dy) == pytest.approx((land.x - land.drill_x, land.y - land.drill_y))
+    assert f"(at {land.drill_x:g} {land.drill_y:g})" in blocks[0][1]
     assert f"(drill 1\n\t\t\t(offset {dx:g} {dy:g})\n\t\t)" in blocks[0][1]
     assert '(layers "*.Cu" "*.Mask" "F.Paste")' in blocks[0][1]
     assert "pad_prop_castellated" not in text
@@ -221,8 +238,9 @@ def test_pin_one_marker_and_courtyard_follow_the_copper():
     assert _distance_to_segment(marker.center, a, b) - r - marker.radius == pytest.approx(0.25)
     court = next(g for g in fp.graphics if getattr(g, "layer", "") == "F.CrtYd")
     for p in fp.pads:
-        assert court.start[0] <= p.at[0] - p.size[0] / 2 and p.at[0] + p.size[0] / 2 <= court.end[0]
-        assert court.start[1] <= p.at[1] - p.size[1] / 2 and p.at[1] + p.size[1] / 2 <= court.end[1]
+        cx, cy = _copper_centre(p)
+        assert court.start[0] <= cx - p.size[0] / 2 and cx + p.size[0] / 2 <= court.end[0]
+        assert court.start[1] <= cy - p.size[1] / 2 and cy + p.size[1] / 2 <= court.end[1]
 
 
 # ── Regole dichiarate: positivi e negativi ──────────────────────────
@@ -359,6 +377,28 @@ UNCHANGED = {
 }
 
 
+def _with_legacy_silk(fp):
+    """The same footprint with the body silk written as the pre-2026-09-25 FpRect.
+
+    CONTRACT CHANGED 2026-09-25 (silk-to-pad clearance): the edge pads overhang
+    the body, so the silk body outline crossed them; it is now split into
+    FpLine pieces that keep clear of the copper. Folding those pieces back into
+    the single rectangle they come from must give back EXACTLY the pinned
+    output: that proves the silk clipping is the only change, while the pieces
+    themselves are checked in tests/test_fixG_castellated.py.
+    """
+    fp = copy.deepcopy(fp)
+    pieces = [g for g in fp.graphics if isinstance(g, FpLine) and g.layer == "F.SilkS"]
+    if pieces:
+        xs = [c for g in pieces for c in (g.start[0], g.end[0])]
+        ys = [c for g in pieces for c in (g.start[1], g.end[1])]
+        first = fp.graphics.index(pieces[0])
+        fp.graphics = [g for g in fp.graphics if g not in pieces]
+        fp.graphics.insert(first, FpRect(start=(min(xs), min(ys)), end=(max(xs), max(ys)),
+                                         layer="F.SilkS"))
+    return fp
+
+
 def _unchanged_case(name):
     if name == "rs485_half":
         return rs485(CONTACT_HALF_HOLE)
@@ -403,7 +443,7 @@ def _bounds(params):
 def test_half_hole_and_through_hole_outputs_are_byte_identical(name, script):
     params = _unchanged_case(name)
     footprint, payload, features = UNCHANGED[name]
-    rendered = _uuidless(build_castellated_module(params))
+    rendered = _uuidless(_with_legacy_silk(build_castellated_module(params)))
     assert hashlib.sha256(rendered.encode()).hexdigest() == footprint
     described = step_generator.castellated_contact_payload(params, "#d4af37")
     assert hashlib.sha256(json.dumps(described, sort_keys=True).encode()).hexdigest() == payload

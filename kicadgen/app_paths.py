@@ -13,14 +13,23 @@ Two layouts, one rule each:
 
 The environment variables already used by the tests (``KICADGEN_CONFIG_PATH``,
 ``KICADGEN_PROFILE_DB``, ``KICADGEN_MATCH_DB``, ``KICADGEN_YOLO_MODEL``) keep
-priority over both layouts; ``KICADGEN_DATA_DIR`` moves the whole data folder.
+priority over both layouts. ``KICADGEN_DATA_DIR`` moves what is resolved
+through this module: ``user_data_dir()``, ``data_file()``, ``env_files()``
+and ``default_projects_dir()`` (``<dir>/generated``). A file whose path is
+computed elsewhere does not follow it, and a path computed at import time
+(e.g. ``app_config.CONFIG_PATH``) follows it only when the variable is set
+before the program starts.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
+import sqlite3
 import sys
+import tempfile
+from .fsutil import replace_file
+import time
 from pathlib import Path
 
 #: Folder name under %LOCALAPPDATA% and under Documents.
@@ -109,21 +118,107 @@ def default_projects_dir() -> Path:
     return install_dir() / "generated"
 
 
+#: First 16 bytes of every SQLite 3 database file.
+SQLITE_HEADER = b"SQLite format 3\x00"
+#: Files SQLite keeps next to a database; they follow it when it is set aside.
+_SQLITE_COMPANIONS = ("-journal", "-wal", "-shm")
+
+
+def _has_sqlite_header(path: Path) -> bool:
+    """True when the file starts with the SQLite 3 magic header."""
+    try:
+        with path.open("rb") as handle:
+            return handle.read(len(SQLITE_HEADER)) == SQLITE_HEADER
+    except OSError:
+        return False
+
+
+def is_damaged_sqlite(path: Path) -> bool:
+    """@brief Tell whether a file is definitely not a usable SQLite database.
+
+    @param path Existing file to check (opened read-only, never modified).
+    @return True when the header is wrong (empty or truncated copy, another
+        format) or SQLite itself reports it as not a database or corrupt;
+        False for a sound database and for any doubtful case.
+    @note A locked or busy database, or an I/O error, is NOT damage: those
+        answers are transient, and a False positive would set user data aside.
+    """
+    if not _has_sqlite_header(path):
+        return True
+    try:
+        connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=1)
+        try:
+            row = connection.execute("PRAGMA quick_check(1)").fetchone()
+        finally:
+            connection.close()
+    except sqlite3.DatabaseError as exc:
+        return getattr(exc, "sqlite_errorname", "") in ("SQLITE_NOTADB", "SQLITE_CORRUPT")
+    return not row or row[0] != "ok"
+
+
+def _set_aside(target: Path) -> Path:
+    """Rename a damaged file (and its SQLite companions) to ``.corrupt-<time>``."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    aside = target.with_name(f"{target.name}.corrupt-{stamp}")
+    counter = 1
+    while aside.exists():
+        aside = target.with_name(f"{target.name}.corrupt-{stamp}-{counter}")
+        counter += 1
+    os.replace(target, aside)
+    for suffix in _SQLITE_COMPANIONS:
+        companion = target.with_name(target.name + suffix)
+        if companion.exists():
+            # A stale journal must never be replayed onto the fresh seed.
+            os.replace(companion, aside.with_name(aside.name + suffix))
+    return aside
+
+
+def _copy_atomically(source: Path, target: Path) -> None:
+    """Copy through a temporary file in the target folder, then rename."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    handle, temporary = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp",
+                                         dir=target.parent)
+    os.close(handle)
+    try:
+        shutil.copy2(source, temporary)
+        replace_file(temporary, target)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
 def data_file(name: str, *, seed: bool = False) -> Path:
     """@brief Path of a writable file in the data folder's ``data/``.
 
     @param name File name, e.g. ``analysis_profiles.sqlite3``.
-    @param seed True to copy the copy shipped with the program the first
-        time, when the user's file does not exist yet.
+    @param seed True to copy the copy shipped with the program when the
+        user's file does not exist yet, or when the shipped copy is a SQLite
+        database and the user's file is definitely not one (see
+        ``is_damaged_sqlite``, e.g. a copy truncated by a crash).
     @return The path in the user's data folder.
-    @note The shipped copy is never modified: it only seeds a new user.
+    @throws OSError When the seed cannot be copied or a damaged file cannot
+        be set aside; the user's file is then left as it was.
+    @note The shipped copy is never modified: it only seeds a new user. The
+        copy is atomic (temporary file in the same folder, then
+        ``os.replace``): an interrupted copy never leaves a truncated file
+        under the final name. A damaged file is never deleted: it is renamed
+        ``<name>.corrupt-<YYYYmmdd-HHMMSS>`` next to the new seed.
     """
     target = user_data_dir() / "data" / name
-    if seed and not target.exists():
-        shipped = resource_path("data", name)
-        if shipped.is_file() and shipped.resolve() != target.resolve():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(shipped, target)
+    if not seed:
+        return target
+    shipped = resource_path("data", name)
+    if not shipped.is_file() or shipped.resolve() == target.resolve():
+        return target
+    if target.exists():
+        # Only a shipped SQLite seed defines what a valid user file looks like.
+        if not (_has_sqlite_header(shipped) and target.is_file() and is_damaged_sqlite(target)):
+            return target
+        _set_aside(target)
+    _copy_atomically(shipped, target)
     return target
 
 

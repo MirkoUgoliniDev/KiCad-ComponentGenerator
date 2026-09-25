@@ -1,4 +1,6 @@
-"""Prova esplicita su una foto superiore: 4 localizzazioni + verifica a gruppi.
+"""@brief Explicit top-photo inventory run: localization plus grouped verification, saved for inspection.
+
+Prova esplicita su una foto superiore: 4 localizzazioni + verifica a gruppi.
 
 Salva JSON e confronto PNG sotto generated/photo-review per misurare e
 ispezionare la localizzazione senza rigenerare il modello FreeCAD.
@@ -25,8 +27,8 @@ from kicadgen.services.photo_inventory import extract_inventory, photo_cache_dir
 
 
 def main():
-    """@brief Run the public entry point for this workflow."""
-    parser = argparse.ArgumentParser(description=__doc__)
+    """@brief Parse the CLI, run the photo inventory with the project cache and save JSON, PNG and log."""
+    parser = argparse.ArgumentParser(description=(__doc__ or "").replace("@brief ", "", 1))
     parser.add_argument("photo", type=Path)
     parser.add_argument("--length",type=float,required=True)
     parser.add_argument("--width",type=float,required=True)

@@ -190,9 +190,10 @@ def test_the_closed_hole_stays_inside_the_body_on_every_edge():
     ring = params.thru_pad_diameter / 2
     for pad in (p for p in fp.pads if p.pad_type == "thru_hole"):
         # Il centro del FORO: dal 2026-09-23 il pad e' la piazzola continua e
-        # il foro vi sta decentrato (drill offset).
-        x = pad.at[0] + pad.drill_offset[0]
-        y = pad.at[1] + pad.drill_offset[1]
+        # il foro vi sta decentrato. CONTRATTO CORRETTO il 2026-09-25: in KiCad
+        # il foro e' `at` e l'offset sposta il RAME (verificato con pcbnew 10);
+        # prima qui si leggeva at + offset, lo stesso scambio del generatore.
+        x, y = pad.at
         assert abs(x) + ring <= half_l + 1e-6
         assert abs(y) + ring <= half_w + 1e-6
 

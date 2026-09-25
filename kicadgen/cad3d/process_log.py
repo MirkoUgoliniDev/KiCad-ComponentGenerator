@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
 from datetime import datetime
@@ -81,7 +82,7 @@ def heartbeat_interval(timeout) -> float:
 
 
 def run_logged(command, log_path: Path, progress=None, timeout=120, creationflags=0,
-               cancel=None):
+               cancel=None, env=None):
     """@brief Execute CAD, flushing each output line before notifying the GUI.
 
     @param log_path UTF-8 append-only diagnostic file for the component.
@@ -91,6 +92,9 @@ def run_logged(command, log_path: Path, progress=None, timeout=120, creationflag
     @param cancel Canale di rinuncia: un oggetto con `is_set()` e
         `wait(seconds)` (tipicamente `threading.Event`) che il chiamante mette
         a uno per chiedere la fine del lavoro. None = nessuno puo' fermarlo.
+    @param env Environment of the child; None means a copy of os.environ with
+        PYTHONDONTWRITEBYTECODE=1, so the FreeCAD child never writes
+        __pycache__ next to scripts installed read-only.
     @return CompletedProcess with merged stdout/stderr.
     @throws subprocess.TimeoutExpired After killing and reaping a hung child.
     @throws ProcessCancelled After killing the child because @p cancel was set.
@@ -131,7 +135,9 @@ def run_logged(command, log_path: Path, progress=None, timeout=120, creationflag
         handle.flush()
         with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                               text=True, encoding="utf-8", errors="replace",
-                              creationflags=creationflags, bufsize=1) as process:
+                              creationflags=creationflags, bufsize=1,
+                              env=(dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+                                   if env is None else env)) as process:
             def kill_child():
                 """Unico punto in cui il figlio viene ucciso: watchdog e rinuncia."""
                 try:

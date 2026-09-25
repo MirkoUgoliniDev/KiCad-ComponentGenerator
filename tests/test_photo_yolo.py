@@ -452,7 +452,11 @@ def test_audit_contains_hash_recipe_raw_and_retained_without_overwrite(setup, tm
     assert audit["model_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
     assert audit["recipe"]["tile_sizes"] == [640, 1280]
     assert audit["recipe"]["confidence"] == 0.25
-    assert len(audit["raw_proposals"]) == 6 and len(audit["retained_detector_results"]) == 1
+    # Contratto aggiornato (fix A10): su una foto 640 x 640 le tessere da 640
+    # e da 1280 hanno gli stessi limiti della vista d'insieme e non si
+    # ripetono piu': una sola vista, quindi 2 proposte grezze invece di 6.
+    assert [view["name"] for view in audit["views"]] == ["overview"]
+    assert len(audit["raw_proposals"]) == 2 and len(audit["retained_detector_results"]) == 1
     assert any(row["rejection"] == "excluded_class" for row in audit["raw_proposals"])
     assert audit["components"] == json.loads(json.dumps(results))
     assert any("audit:" in message for message in logs)
@@ -486,8 +490,10 @@ def test_inference_failure_does_not_return_partial_inventory(setup):
             raise RuntimeError("simulated CPU failure")
         return _raw(([320, 320, 100, 100], 10, 0.9))
     session.raw = output
+    # Foto piu' larga di una tessera (fix A10): una 640 x 640 ha ormai una
+    # sola vista, e il guasto della seconda inferenza non avverrebbe mai.
     with pytest.raises(ValueError, match="simulated CPU failure"):
-        yolo.detect_yolo_components(np.zeros((640, 640, 3), np.uint8), 64, 64)
+        yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64)
 
 
 def test_unwritable_audit_is_reported(setup, tmp_path):
@@ -514,11 +520,20 @@ def test_audit_accounts_for_every_proposal_and_links_components(setup, tmp_path)
     rejected = {key for key, row in proposals.items() if row['rejection']}
     suppressed = {row['proposal_id'] for row in audit['nms_suppressions']}
     retained = {row['proposal_id'] for row in audit['retained_detector_results']}
-    assert len(proposals) == len(audit['raw_proposals']) == 12
+    # Contratto aggiornato (fix A10): la foto 640 x 640 ha una sola vista, le
+    # tessere identiche non si ripetono. Prima 12 proposte e 5 soppressioni
+    # erano per meta' copie della stessa inferenza; la NMS globale fra viste
+    # diverse resta coperta da test_nms_trace_* e dal test che segue.
+    assert len(proposals) == len(audit['raw_proposals']) == 4
     assert not (rejected & suppressed or rejected & retained or suppressed & retained)
     assert rejected | suppressed | retained == proposals.keys()
-    assert len(audit['nms_suppressions']) == len(suppressed) == 5
-    assert {row['stage'] for row in audit['nms_suppressions']} == {'eligible_per_view', 'global'}
+    assert len(audit['nms_suppressions']) == len(suppressed) == 1
+    assert {row['stage'] for row in audit['nms_suppressions']} == {'eligible_per_view'}
+    # Tutte le passate di NMS dichiarate (fix A8), anche quella della revisione.
+    assert audit['recipe']['nms_stages'] == ['eligible_per_view', 'global',
+                                             'global_with_recovered', 'presence_attested',
+                                             'review_pool']
+    assert isinstance(audit['review_nms_suppressions'], list)
     for row in audit['nms_suppressions']:
         assert row['suppressed_by'] in proposals
         assert row['iou'] > audit['recipe']['nms_iou']

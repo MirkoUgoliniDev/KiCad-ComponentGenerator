@@ -69,7 +69,7 @@ from ..services.kicad_library import (
 from .app_config import (CONFIG_PATH, DEFAULTS, browse_start_dir, config_path, load_config,
                          remember_browse_dir, save_config)
 from .accepted_models_dialog import AcceptedModelsDialog, ConsolidateDialog
-from ..app_paths import default_projects_dir, install_dir, resource_path, user_data_dir
+from ..app_paths import default_projects_dir, install_dir, resource_path
 # Solo la validazione dei parametri (libreria standard): onnxruntime e PyTorch
 # restano caricati al bisogno. Legata qui, all'import, e non al clic: i test
 # che sostituiscono il modulo con un finto non devono cambiarne il contratto.
@@ -679,7 +679,9 @@ def accepted_kwargs(function, **values) -> dict:
 
 
 class GenerateWorker(QThread):
-    """QThread che costruisce/salva un Footprint e, se richiesto, il modello 3D.
+    """@brief Worker thread that builds and saves the footprint and, when requested, the 3D model.
+
+    QThread che costruisce/salva un Footprint e, se richiesto, il modello 3D.
 
     Il footprint 2D e il modello 3D sono riportati separatamente: un
     fallimento della generazione 3D (es. freecadcmd non trovato) non deve
@@ -787,7 +789,7 @@ class GenerateWorker(QThread):
             self.phase.emit('freecad', tx("modello 3D"), done, total)
 
     def run(self) -> None:
-        """@brief Provide the run operation for this workflow."""
+        """@brief QThread override: save the footprint, then generate the 3D model, reporting each through its own signals."""
         try:
             self.phase.emit('kicad', 'footprint 2D', 0, 0)
             self.progress.emit(tx("Generazione del footprint KiCad…"))
@@ -840,7 +842,9 @@ class GenerateWorker(QThread):
 
 
 class Cad3DWorker(QThread):
-    """QThread che rigenera solo il modello 3D (STEP/VRML), senza rifare il footprint.
+    """@brief Worker thread that regenerates only the 3D model (STEP/VRML), not the footprint.
+
+    QThread che rigenera solo il modello 3D (STEP/VRML), senza rifare il footprint.
 
     Serve al pulsante "Rigenera modello 3D" del tab Modello 3D: dopo aver
     aggiunto/tolto annotazioni non ha senso riscrivere anche il .kicad_mod.
@@ -916,6 +920,7 @@ class Cad3DWorker(QThread):
             self.phase.emit('freecad', tx("modello 3D"), done, total)
 
     def run(self) -> None:
+        """@brief QThread override: regenerate the 3D model and emit done, warning or error."""
         try:
             # Stessa ragione di GenerateWorker.run: `_generate_3d` comincia
             # dall'abbinamento dei modelli di KiCad. `_cad_progress` passa a
@@ -942,7 +947,7 @@ class Cad3DWorker(QThread):
 
 
 class TerminalDetailWorker(QThread):
-    """Optional photo detail pass; never regenerates the footprint."""
+    """@brief Optional photo detail pass; never regenerates the footprint."""
     done = pyqtSignal(object)
     error = pyqtSignal(str)
     progress = pyqtSignal(str)
@@ -958,7 +963,7 @@ class TerminalDetailWorker(QThread):
         self.cache_dir = cache_dir
 
     def run(self):
-        """@brief Provide the run operation for this workflow."""
+        """@brief QThread override: observe terminals (or refine leads only) and emit the updated components."""
         from ..services.photo_terminals import observe_terminals
         from ..services.photo_leads import refine_leads
         from ..services.openrouter import call_tool
@@ -1047,6 +1052,10 @@ class ExtractWorker(QThread):
         self.yolo_model_path = yolo_model_path
         self.yolo_confidence = yolo_confidence
         self.yolo_settings = dict(yolo_settings) if yolo_settings is not None else None
+        # «Interrompi» lo alza: il servizio lo controlla prima di ogni chiamata
+        # a pagamento, cosi' dopo l'interruzione non ne parte nessun'altra
+        # (verifica del 25/09, D8). Quella gia' in volo non si puo' richiamare.
+        self.cancel_event = threading.Event()
         self._review_answered = threading.Event()
         self._review_result = None
 
@@ -1114,7 +1123,8 @@ class ExtractWorker(QThread):
                 **accepted_kwargs(extract_pin_header_params,
                                   photo_cache_dir=getattr(self, "photo_cache_dir", None),
                                   yolo_confidence=self.yolo_confidence,
-                                  yolo_settings=self.yolo_settings),
+                                  yolo_settings=self.yolo_settings,
+                                  cancel=self.cancel_event),
                 **phase_kwargs(extract_pin_header_params, self._forward_phase),
             )
             self.done.emit(params)
@@ -1140,7 +1150,9 @@ class YoloPretestWorker(ExtractWorker):
         @param length_mm Board X extent used to calibrate the photo, in mm.
         @param width_mm Board Y extent, in mm.
         @param yolo_model_path Weights path, or None for the default model.
-        @param cache_dir Project photo-cache folder for detector evidence.
+        @param cache_dir Folder for the detector evidence: the window passes
+            the pretest's own `yolo-pretest/photo-cache`, never the
+            extraction's, so this evidence is never read as an extraction's.
         @param yolo_confidence YOLO operating threshold; None uses the default.
         @param yolo_settings Other YOLO detector settings; None uses the defaults.
         """
@@ -1232,6 +1244,8 @@ class ReconcileWorker(QThread):
         self.verification_prompt = verification_prompt
         self.extra_instructions = extra_instructions
         self.detector = detector
+        # Come ExtractWorker.cancel_event: alzato da «Interrompi».
+        self.cancel_event = threading.Event()
 
     def _forward_phase(self, tool: str, detail: str = "") -> None:
         """@brief Inoltra alla modale la fase dichiarata dal servizio.
@@ -1244,6 +1258,13 @@ class ReconcileWorker(QThread):
         """
         self.phase.emit(str(tool or ""), str(detail or ""), 0, 0)
 
+    def _raise_if_cancelled(self) -> None:
+        """Checker for make_logged_call: stop before a paid call once «Interrompi» was pressed."""
+        if self.cancel_event.is_set():
+            from ..services.ai_diagnostics import CallCancelled
+            raise CallCancelled(tx("Rilancio dell'inventario interrotto dall'utente: nessuna "
+                                   "nuova richiesta."))
+
     def run(self) -> None:
         """@brief Esegue la riconciliazione con la stessa chiamata registrata dell'estrazione."""
         from ..services.photo_inventory import reconcile_saved_proposals
@@ -1253,7 +1274,9 @@ class ReconcileWorker(QThread):
             self.phase.emit('llm', self.model, 0, 0)
             report = reconcile_saved_proposals(
                 self.photo_png, self.proposals, self.length_mm, self.width_mm, self.model,
-                make_logged_call(call_tool, self.progress.emit, log_prompt=True),
+                make_logged_call(call_tool, self.progress.emit, log_prompt=True,
+                                 **accepted_kwargs(make_logged_call,
+                                                   cancel=self._raise_if_cancelled)),
                 self.progress.emit, self.cache_dir, declared=self.declared,
                 verification_prompt=self.verification_prompt,
                 extra_instructions=self.extra_instructions, detector=self.detector,
@@ -1358,6 +1381,12 @@ class MainWindow(QMainWindow):
         #: Vero mentre una generazione manuale sta mostrando la modale: e' la
         #: finestra ad averla aperta, quindi e' lei a doverla chiudere.
         self._manual_cad_overlay = False
+        #: Vero dall'avvio di un'estrazione, di un rilancio o di un pretest
+        #: fino alla loro fine (o all'abbandono): finche' e' vero, testo e
+        #: suggerimento del pulsante di estrazione e i comandi YOLO non si
+        #: toccano (audit 25/09, B6). Un flag esplicito e non
+        #: QThread.isRunning, che puo' restare vero dopo `finished`.
+        self._extraction_busy = False
         self._config = load_config()
         self.profile_store = profile_store or ProfileStore(legacy_config=self._config, legacy_path=config_path())
         self.i18n = I18n(self.profile_store, self._config.get("language", "it"))
@@ -1453,14 +1482,10 @@ class MainWindow(QMainWindow):
         self.action_open_project.setShortcut(QKeySequence.StandardKey.Open)
         self.action_rename_project = file_menu.addAction(
             self.i18n.text("Rinomina progetto..."), self._rename_project)
-        file_menu.addSeparator()
-        self.action_open_output = file_menu.addAction(self.i18n.text("Apri cartella componente"), self._open_project_dir)
-        self.action_test_kicad = file_menu.addAction(
-            self.i18n.text("Prova in KiCad..."), self._test_in_kicad)
-        self.action_export = file_menu.addAction(
-            self.i18n.text("Installa nel progetto KiCad..."), self._install_project_library)
-        self.action_install_global = file_menu.addAction(
-            self.i18n.text("Installa come libreria globale..."), self._install_global_library)
+        # Tolte dall'utente il 2026-09-25: «Apri cartella componente», «Prova
+        # in KiCad», «Installa nel progetto KiCad», «Installa come libreria
+        # globale». Restano nella scheda KiCad e nell'icona della cartella;
+        # un'eventuale voce di menu dedicata e' una decisione rimandata.
         file_menu.addSeparator()
         self.action_exit = file_menu.addAction(self.i18n.text("Esci"), self.close)
 
@@ -1478,18 +1503,13 @@ class MainWindow(QMainWindow):
             self.i18n.text("Opzioni di generazione..."), self._edit_generation_options)
         self.action_accepted_models = config_menu.addAction(
             self.i18n.text("Archivio abbinamenti accettati..."), self._show_accepted_models)
-
-        config_menu.addSeparator()
-        self.action_open_config = config_menu.addAction(self.i18n.text("Apri config.json"), self._open_config_file)
+        # «Apri config.json» tolta dall'utente il 2026-09-25; se servira', avra'
+        # una voce di menu dedicata (decisione rimandata). Resta il metodo
+        # `_open_config_file`, che nessun menu chiama piu'.
 
         help_menu = self.menuBar().addMenu(self.i18n.tr("app.help"))
-        self.action_open_tool_dir = help_menu.addAction(
-            self.i18n.text("Apri cartella progetto tool"),
-            # Installato, la cartella scrivibile (config, database) e' quella
-            # dell'utente, non quella del programma.
-            lambda: webbrowser.open(user_data_dir().as_uri()),
-        )
-        help_menu.addSeparator()
+        # «Apri cartella progetto tool» tolta dall'utente il 2026-09-25: nel
+        # menu restano solo licenze e informazioni sul programma.
         # Licenza del programma e componenti di terze parti (utente, 2026-09-25).
         self.action_licenses = help_menu.addAction(self.i18n.text("Licenze"), self._show_licenses)
         self.action_about = help_menu.addAction(self.i18n.text("About"), self._show_about)
@@ -1703,14 +1723,20 @@ class MainWindow(QMainWindow):
             # Le ultime modifiche non aspettano il prossimo giro del salvataggio.
             self._flush_project_config()
             self.ai_account.detach()
-            # Una finestra chiusa non reagisce piu' ai cambi di scheda: quando
-            # Qt la distrugge, il QTabWidget che si svuota emette
-            # currentChanged e `_on_tab_changed` girerebbe su widget gia'
-            # distrutti (segfault 139 all'uscita dei test, 2026-09-25).
-            try:
-                self.tabs.currentChanged.disconnect(self._on_tab_changed)
-            except TypeError:
-                pass  # gia' scollegato: una seconda chiusura
+            # Una finestra chiusa davvero sta solo per essere distrutta, e
+            # distruggendola Qt svuota elenchi, testi e schede: i figli
+            # emettono rowsRemoved, modelReset, textChanged, currentChanged, e
+            # gli slot Python collegati girerebbero su widget a meta'
+            # distruzione. Segfault 139 intermittente all'uscita, 2026-09-25:
+            # prima corretto solo per il cambio di scheda, poi riprodotto in
+            # modo deterministico distruggendo il «Log analisi AI»
+            # (`_refresh_ai_copy_buttons`). Si blocca l'intera classe: tutti i
+            # segnali di tutti gli oggetti figli, non un collegamento alla volta.
+            for child in self.findChildren(QObject):
+                try:
+                    child.blockSignals(True)
+                except RuntimeError:
+                    pass  # oggetto C++ gia' distrutto
             super().closeEvent(event)
 
     def _edit_profiles(self):
@@ -1879,11 +1905,19 @@ class MainWindow(QMainWindow):
             riga che resta e' quella su cui si puo' davvero intervenire.
         """
         detector = self.combo_photo_detector.currentData()
-        self._refresh_extract_button()
         local = detector in ("yolo", "yolo_only")
-        self.field_yolo_model.setEnabled(local)
-        self.btn_pick_yolo_model.setEnabled(local)
-        self.btn_yolo_settings.setEnabled(local)
+        # Durante una corsa (audit 25/09, B6) non si riaccendono i comandi
+        # YOLO e non si riscrive il pulsante: ci pensa la fine della corsa.
+        busy = getattr(self, "_extraction_busy", False)
+        if not busy:
+            self._refresh_extract_button()
+            self.field_yolo_model.setEnabled(local)
+            self.btn_pick_yolo_model.setEnabled(local)
+            self.btn_yolo_settings.setEnabled(local)
+            # La riga della revisione dipende dal rilevatore: con «Solo YOLO
+            # locale» riapre il pretest (vedi _refresh_reopen_review_button).
+            if hasattr(self, "btn_reopen_review") and not self._background_work_running():
+                self._refresh_reopen_review_button()
         if hasattr(self, "_models_form"):
             self._models_form.setRowVisible(self._row_yolo_model, local)
             self._models_form.setRowVisible(self._row_yolo_params, local)
@@ -2066,6 +2100,9 @@ class MainWindow(QMainWindow):
             weights, dataset and dependencies. The notices are the English
             file of the repository, shown as it is: it is a legal record and
             is not translated.
+        @note The Close button text comes from the catalogue (Qt would show
+            its own English «Close»), and the dialog is released with
+            deleteLater once closed: each opening builds a new one.
         """
         from PyQt6.QtWidgets import QDialogButtonBox, QTextBrowser
         license_text, notices = self._license_texts()
@@ -2089,10 +2126,16 @@ class MainWindow(QMainWindow):
         tabs.addTab(third_party, self.i18n.text("Componenti di terze parti"))
         layout.addWidget(tabs, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dialog)
+        close = buttons.button(QDialogButtonBox.StandardButton.Close)
+        close.setText(self.i18n.text("Chiudi"))
+        close.setToolTip(self.i18n.text("Chiudi"))
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
         self._licenses_dialog = dialog
-        dialog.exec()
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
 
     def _warn_missing_external_applications(self) -> bool:
         """@brief Warn once when KiCad or FreeCAD is not installed.
@@ -2227,11 +2270,6 @@ class MainWindow(QMainWindow):
         self.menuBar().actions()[0].setText(self.i18n.tr("app.file"))
         self.menuBar().actions()[1].setText(self.i18n.tr("app.configuration"))
         self.menuBar().actions()[2].setText(self.i18n.tr("app.help"))
-        self.action_open_output.setText(self.i18n.text("Apri cartella componente"))
-        self.action_test_kicad.setText(self.i18n.text("Prova in KiCad..."))
-        self.action_export.setText(self.i18n.text("Installa nel progetto KiCad..."))
-        self.action_install_global.setText(
-            self.i18n.text("Installa come libreria globale..."))
         self.action_exit.setText(self.i18n.text("Esci"))
         # Voci del menu File aggiunte il 2026-09-24: prima restavano nella
         # lingua dell'avvio (verifica «testi cablati» dell'utente).
@@ -2244,8 +2282,7 @@ class MainWindow(QMainWindow):
         self.action_generation_options.setText(self.i18n.text("Opzioni di generazione..."))
         self.action_accepted_models.setText(
             self.i18n.text("Archivio abbinamenti accettati..."))
-        self.action_open_config.setText(self.i18n.text("Apri config.json"))
-        self.action_open_tool_dir.setText(self.i18n.text("Apri cartella progetto tool"))
+        self.action_licenses.setText(self.i18n.text("Licenze"))
         self.action_about.setText(self.i18n.text("About"))
         self._retranslate_component_types()
         self._refresh_model_combo()
@@ -3323,6 +3360,31 @@ class MainWindow(QMainWindow):
         self.analysis_overlay.start(abortable=True)
         self._extract_worker.start()
 
+    #: Estensioni delle foto che l'inventario prova come vista dall'alto
+    #: (stesso filtro di `photo_inventory.extract_inventory`).
+    _PRETEST_PHOTO_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
+
+    @classmethod
+    def _pretest_top_views(cls, doc_paths, document_roles) -> list:
+        """@brief The photographs the pretest would try as top view.
+
+        @param doc_paths Selected documents.
+        @param document_roles Roles by file name, or None when not assigned.
+        @return Paths of the images declared «Immagine con quote» or «Foto ad
+            alta risoluzione»; with no roles at all, every image (the
+            extractor then picks one heuristically and says so).
+        @note Same selection as YoloPretestWorker._top_views and the
+            extractor: with roles assigned but none of them a top view the
+            extractor stops at «Nessuna vista dall'alto indicata», so the
+            window asks for the role BEFORE starting (audit 25/09, B9).
+        """
+        from ..services.document_roles import INVENTORY_ROLES
+        images = [Path(path) for path in doc_paths
+                  if Path(path).suffix.lower() in cls._PRETEST_PHOTO_SUFFIXES]
+        if document_roles is None:
+            return images
+        return [path for path in images if document_roles.get(path.name) in INVENTORY_ROLES]
+
     def _start_yolo_pretest(self, doc_paths, document_roles, yolo_model_path) -> None:
         """@brief Run only the local YOLO detector on the top view and show its boxes.
 
@@ -3339,48 +3401,72 @@ class MainWindow(QMainWindow):
             fields otherwise. Reading the matrix fields for every type made a
             castellated board fail on their 10 x 10 mm defaults while its
             card reported the photo as usable (user, 2026-09-25). Fields, component table and 3D are not
-            touched; the boxes kept in the review are saved in photo-review/
-            like after an extraction, so they can be reopened for free.
+            touched; the boxes kept in the review are saved in
+            `<project>/yolo-pretest/photo-review/` and the detector evidence
+            in `<project>/yolo-pretest/photo-cache/`, apart from the
+            extraction's (audit 25/09, B2): the paid relaunch never picks
+            them up, and «Riapri revisione» reopens them for free while
+            «Solo YOLO locale» is selected.
+        @note A missing top view is reported before anything starts (B9).
+            Everything after the first visible state change runs under the
+            same try/except as `_extract_with_ai`: an exception escaping a
+            Qt slot aborts PyQt6, and a half-started pretest would leave the
+            button off and the tabs disabled (B8).
         """
         size = self._body_size()
         if size is None:
             QMessageBox.information(self, self.i18n.text("Pretest YOLO"),
                                     self.i18n.text('Quote del corpo non note: inserisci Lunghezza corpo e Larghezza corpo nei parametri della tipologia scelta. Il pretest non legge i documenti e con quelle quote ritaglia e calibra la foto.'))
             return
+        if not self._pretest_top_views(doc_paths, document_roles):
+            QMessageBox.information(self, self.i18n.text("Pretest YOLO"),
+                                    self.i18n.text("Il pretest YOLO lavora sulla foto vista dall'alto: assegna a una foto il ruolo «Immagine con quote» o «Foto ad alta risoluzione» e riprova."))
+            return
         length, width = (float(value) for value in size)
         self.btn_extract_ai.setEnabled(False)
-        self._start_log_session("Pretest YOLO")
-        self.ai_progress_text.clear()
-        self.ai_elements_list.clear()
-        self._on_ai_progress(
-            tx("Pretest solo YOLO locale: nessuna chiamata AI. Quote della scheda dai campi "
-               "del corpo: {length:.2f} x {width:.2f} mm.", length=length, width=width))
-        worker = YoloPretestWorker(doc_paths, document_roles, length, width,
-                                   yolo_model_path, self._photo_cache_dir(),
-                                   yolo_settings=self._chosen_yolo_settings())
-        self._extract_worker = worker
-        worker.done.connect(self._on_yolo_pretest_done)
-        worker.error.connect(self._on_extract_error)
-        worker.progress.connect(self._on_ai_progress)
-        worker.phase.connect(self._on_phase)
-        worker.review_requested.connect(self._on_review_requested)
-        worker.finished.connect(self._on_yolo_pretest_finished)
-        worker._analysis_revision = self._analysis_revision
-        self._analysis_tabs_enabled = self.tabs.isEnabled()
-        self.tabs.setEnabled(False)
-        # Titolo proprio: «Analisi AI in corso» direbbe il falso (nessuna AI).
-        self.analysis_overlay.start("Pretest YOLO in corso",
-                                    "Rilevamento dei componenti sulla foto…", abortable=True)
-        worker.start()
+        self._extraction_busy = True
+        try:
+            self._start_log_session("Pretest YOLO")
+            self.ai_progress_text.clear()
+            self.ai_elements_list.clear()
+            # Il consuntivo dell'ultima analisi a pagamento non riguarda il
+            # pretest, che non spende nulla (audit 25/09, B4).
+            self.analysis_overlay.clear_cost()
+            self._on_ai_progress(
+                tx("Pretest solo YOLO locale: nessuna chiamata AI. Quote della scheda dai campi "
+                   "del corpo: {length:.2f} x {width:.2f} mm.", length=length, width=width))
+            from ..services.photo_inventory import photo_cache_dir
+            worker = YoloPretestWorker(doc_paths, document_roles, length, width,
+                                       yolo_model_path, photo_cache_dir(self._pretest_root()),
+                                       yolo_settings=self._chosen_yolo_settings())
+            self._extract_worker = worker
+            worker.done.connect(self._on_yolo_pretest_done)
+            worker.error.connect(self._on_yolo_pretest_error)
+            worker.progress.connect(self._on_ai_progress)
+            worker.phase.connect(self._on_phase)
+            worker.review_requested.connect(self._on_review_requested)
+            worker.finished.connect(self._on_yolo_pretest_finished)
+            worker._analysis_revision = self._analysis_revision
+            self._analysis_tabs_enabled = self.tabs.isEnabled()
+            self.tabs.setEnabled(False)
+            # Titolo proprio: «Analisi AI in corso» direbbe il falso (nessuna AI).
+            self.analysis_overlay.start("Pretest YOLO in corso",
+                                        "Rilevamento dei componenti sulla foto…", abortable=True)
+            worker.start()
+        except Exception as exc:  # noqa: BLE001 - qualunque guasto riporta la UI in quiete
+            self._on_yolo_pretest_finished()
+            self._on_yolo_pretest_error(str(exc))
 
     def _on_yolo_pretest_done(self, report) -> None:
         """@brief Report what the pretest found.
 
         @param report InventoryResult of the yolo_only path, or None when the
             review was cancelled.
-        @note When nothing could be detected the reason (no top view, photo
-            not calibratable) is in the report's warnings: the board extents
-            are the usual cause, so the message says where to fix them.
+        @note When nothing was kept, the popup explains why with the report's
+            warnings. The hint about the board extents is added only when a
+            photograph was tried and none could be calibrated: when the
+            photograph was calibrated (YOLO simply found nothing) or no top
+            view could be tried, the extents are not the cause (B9).
         """
         if not self._analysis_result_is_current():
             return
@@ -3391,23 +3477,79 @@ class MainWindow(QMainWindow):
         self._on_ai_progress(tx("Pretest YOLO concluso: {found} riquadri tenuti; nessuna chiamata AI.",
                                 found=found))
         if not found and report.warnings:
-            QMessageBox.information(
-                self, self.i18n.text("Pretest YOLO"),
-                "\n".join(report.warnings) + "\n\n" + self.i18n.text(
-                    'Se la foto non si calibra, controlla Lunghezza corpo e Larghezza corpo nei parametri della tipologia scelta: il pretest non legge i documenti e usa quei valori come quote della scheda.'))
+            worker = self.sender()
+            tried = bool(worker is None or self._pretest_top_views(
+                getattr(worker, "doc_paths", ()), getattr(worker, "document_roles", None)))
+            message = "\n".join(report.warnings)
+            if tried and report.photo_png is None:
+                message += "\n\n" + self.i18n.text(
+                    'Se la foto non si calibra, controlla Lunghezza corpo e Larghezza corpo nei parametri della tipologia scelta: il pretest non legge i documenti e usa quei valori come quote della scheda.')
+            QMessageBox.information(self, self.i18n.text("Pretest YOLO"), message)
+
+    def _on_yolo_pretest_error(self, message: str) -> None:
+        """@brief Say that the pretest failed, in pretest words, and give the window back.
+
+        @param message Error text from the worker.
+        @note Dedicated to the pretest (audit 25/09, B5): `_on_extract_error`
+            speaks of a failed «Estrazione», which never started. The error
+            of a pretest abandoned with «Interrompi» goes to the log only.
+        """
+        if not self._analysis_result_is_current():
+            self._append_log(tx("Errore di un pretest YOLO interrotto dall'utente: {message}",
+                                message=message))
+            return
+        self._hide_analysis_overlay()
+        self._on_ai_progress(tx("Pretest YOLO non riuscito: {message}", message=message))
+        QMessageBox.warning(self, self.i18n.text("Pretest YOLO non riuscito"), message)
 
     def _on_yolo_pretest_finished(self) -> None:
-        """@brief Give the window back after the pretest, with no cost to report."""
+        """@brief Give the window back after the pretest, with no cost to report.
+
+        @note A pretest abandoned with «Interrompi» already gave the window
+            back; its late end only releases the worker and, as a safety net,
+            closes a modal that no remaining operation owns (B1).
+        """
         if not self._analysis_result_is_current():
             self._forget_abandoned_worker(self.sender())
+            self._release_orphan_overlay()
             self._apply_component_name_gate()
             self._refresh_reopen_review_button()
             return
         self._hide_analysis_overlay()
         self.btn_extract_ai.setEnabled(True)
-        self._refresh_extract_button()
+        self._end_extraction_busy()
         self._apply_component_name_gate()
         self._refresh_reopen_review_button()
+
+    def _end_extraction_busy(self) -> None:
+        """@brief Clear the run flag and bring the detector controls and the button back to rest.
+
+        @note The flag, not QThread.isRunning, tells `_on_photo_detector_changed`
+            that a run owns the button (B6): a queued `finished` may arrive
+            while the thread still reports itself running.
+        """
+        self._extraction_busy = False
+        if hasattr(self, "combo_photo_detector"):
+            self._on_photo_detector_changed()
+        else:
+            self._refresh_extract_button()
+
+    def _release_orphan_overlay(self) -> None:
+        """@brief Hide the modal when no operation that could own it is left.
+
+        @note Safety net for the late end of an abandoned run (audit 25/09,
+            B1): the abort already hid the modal, but anything that showed it
+            again afterwards would leave it on screen with nobody to close
+            it. A running operation, the automatic generation, a manual CAD
+            run or the inventory pause still own it and are left alone.
+        """
+        if (self._abortable_operation() is not None
+                or self._automatic_generation_active
+                or getattr(self, "_manual_cad_overlay", False)
+                or getattr(self, "_inventory_pause_active", False)):
+            return
+        if not self.analysis_overlay.isHidden():
+            self._hide_analysis_overlay()
 
     def _extract_button_sources(self) -> tuple[str, str]:
         """@brief Italian sources of the extraction button's text and tooltip.
@@ -3429,24 +3571,39 @@ class MainWindow(QMainWindow):
     def _refresh_extract_button(self) -> None:
         """@brief Put the idle text and tooltip of the extraction button in line with the detector.
 
-        @note Called at rest only (construction, detector change, end of a
-            run): during a run the detector combo is disabled, so the busy
-            text is never overwritten. It does not ask `_background_work_running`,
+        @note Does nothing while `_extraction_busy` is set: the detector combo
+            is not the only way here -- a model change from Configurazione ->
+            Default generali AI goes through `_refresh_model_combo` and
+            `_on_photo_detector_changed` in the middle of a run, and used to
+            put the idle text back over «Analisi in corso...» (audit 25/09,
+            B6). The run's end clears the flag and calls this again through
+            `_end_extraction_busy`. It does not ask `_background_work_running`,
             because a queued `finished` may arrive while the QThread still
             reports itself running, and the button would keep its busy text.
             Both properties are recorded as catalogue sources, so a later
             language switch translates them instead of freezing the rendered text.
         """
         button = getattr(self, "btn_extract_ai", None)
-        if button is None:
+        if button is None or getattr(self, "_extraction_busy", False):
             return
         text, tooltip = self._extract_button_sources()
+        self._set_extract_button_text(text)
+        if self._component_name():
+            self._set_translated_tooltip(button, tooltip)
+
+    def _set_extract_button_text(self, text: str) -> None:
+        """@brief Show `text` (Italian catalogue source) on the extraction button, translated.
+
+        @param text Italian source string.
+        @note Records source and rendering like the other catalogued widgets,
+            so a language switch during a run translates the busy text too
+            instead of replacing it with the stale idle source.
+        """
+        button = self.btn_extract_ai
         rendered = self.i18n.text(text)
         button.setText(rendered)
         button.setProperty("i18n_source", text)
         button.setProperty("i18n_rendered", rendered)
-        if self._component_name():
-            self._set_translated_tooltip(button, tooltip)
 
     def _begin_ai_run(self, title: str) -> None:
         """@brief Prepara log, consuntivo e pulsanti per un'analisi AI che sta per partire.
@@ -3464,7 +3621,15 @@ class MainWindow(QMainWindow):
         self._auto_generation_params = None
         self._extract_finish_pending = False
         self.analysis_overlay.clear_cost()
-        self.btn_extract_ai.setText(self.i18n.text("Analisi in corso..."))
+        # Ogni chiamata di questa corsa si addebita al progetto di adesso, anche
+        # se nel frattempo se ne apre un altro (verifica del 25/09, D7). Si
+        # rilascia quando il worker finisce davvero (_on_extract_finished).
+        if hasattr(self, "ai_account"):
+            self.ai_account.bind_run_project(self._project_dir_or_none())
+        self._set_extract_button_text("Analisi in corso...")
+        # Dopo il testo: da qui fino alla fine della corsa il pulsante e i
+        # comandi YOLO non si toccano piu' (vedi _refresh_extract_button).
+        self._extraction_busy = True
         self._start_log_session(title)
         self.ai_progress_text.clear()
         self.ai_elements_list.clear()
@@ -3525,26 +3690,74 @@ class MainWindow(QMainWindow):
                         for v in (params.body_length_mm, params.body_width_mm)))
 
     def _review_bundle(self):
-        """@brief Il pacchetto di revisione salvato nella cartella del componente.
+        """@brief Il pacchetto di revisione DELL'ESTRAZIONE salvato nella cartella del componente.
 
         @return ReviewBundle, oppure None: senza nome non c'e' cartella, e un
             pacchetto assente o corrotto vale come nessun pacchetto.
         @note E' l'unica fonte che sopravvive al riavvio: sta nella cartella
             del componente, non nella cache comune, quindi con il solo nome
             digitato si sa gia' se c'e' qualcosa da riaprire.
+        @note Un pacchetto il cui rilevatore dichiarato e' `yolo_only` non e'
+            dell'estrazione: e' un pretest scritto qui prima che i pretest
+            avessero la loro cartella (audit 25/09, B2). Non vale come base
+            per il rilancio a pagamento; si riapre gratis come pretest
+            (`_pretest_bundle`). La regola guarda l'attributo registrato nel
+            pacchetto, non il nome di un file.
         """
+        bundle = self._load_bundle(None)
+        if bundle is not None and bundle.detector == self._PRETEST_DETECTOR:
+            return None
+        return bundle
+
+    #: Rilevatore registrato nei pacchetti del pretest solo YOLO.
+    _PRETEST_DETECTOR = "yolo_only"
+    #: Sotto-cartella del progetto riservata al pretest: contiene il suo
+    #: `photo-review/` e la sua `photo-cache/`, separati da quelli
+    #: dell'estrazione (audit 25/09, B2).
+    PRETEST_SUBDIR = "yolo-pretest"
+
+    def _pretest_root(self) -> Path:
+        """@brief Folder that plays the role of the component folder for the pretest.
+
+        @return `<project>/yolo-pretest`. The service functions append their
+            usual `photo-review/` and `photo-cache/` to it, so the pretest
+            bundle and its detector evidence never mix with the extraction's.
+        @throws ValueError When the component has no name yet.
+        """
+        return self._project_dir() / self.PRETEST_SUBDIR
+
+    def _pretest_bundle(self):
+        """@brief The reviewed boxes of the last «Solo YOLO locale» pretest, if any.
+
+        @return ReviewBundle from `<project>/yolo-pretest/photo-review/`, or a
+            legacy `photo-review/` bundle recorded with detector `yolo_only`
+            (written by the pretest before it had its own folder); None
+            otherwise.
+        """
+        bundle = self._load_bundle(self._pretest_root() if self._named() else None)
+        if bundle is not None:
+            return bundle
+        legacy = self._load_bundle(None)
+        if legacy is not None and legacy.detector == self._PRETEST_DETECTOR:
+            return legacy
+        return None
+
+    def _load_bundle(self, root):
+        """Legge il pacchetto sotto `root` (None = cartella del componente); None se inutilizzabile."""
         from ..services.photo_inventory import load_review_bundle
         if not self._named():
             return None
         try:
-            return load_review_bundle(self._project_dir())
+            return load_review_bundle(root if root is not None else self._project_dir())
         except (OSError, ValueError):
             return None
 
     def _write_review_bundle(self, proposals, photo_png, length, width, *,
-                             source_json='', detector='yolo'):
+                             source_json='', detector='yolo', root=None):
         """@brief Scrive il pacchetto di revisione nella cartella del componente.
 
+        @param root Cartella che fa da cartella del componente: None per il
+            pacchetto dell'estrazione, `_pretest_root()` per quello del pretest.
         @return Percorso di `proposals.json`, oppure None se non c'e' un nome
             o la scrittura fallisce (annotato nel log, senza fermare nulla).
         @note Operazione offline e gratuita: nessuna chiamata a modelli.
@@ -3553,7 +3766,8 @@ class MainWindow(QMainWindow):
         if not self._named():
             return None
         try:
-            return save_review_bundle(self._project_dir(), proposals, photo_png, length, width,
+            return save_review_bundle(root if root is not None else self._project_dir(),
+                                      proposals, photo_png, length, width,
                                       detector=detector, source_json=source_json)
         except (OSError, ValueError) as exc:
             self._append_log(tx("ATTENZIONE proposte non salvate nella cartella del componente: {exc}", exc=exc))
@@ -3651,6 +3865,14 @@ class MainWindow(QMainWindow):
             entrambi spenti. Non serve un'estrazione in questa sessione:
             appena il nome punta a una cartella con il pacchetto, si riapre.
         """
+        if self._pretest_mode():
+            # Con «Solo YOLO locale» la riga riguarda il pretest (audit 25/09,
+            # B2): si riapre gratis il suo pacchetto, e il rilancio A
+            # PAGAMENTO sparisce come spariscono modelli AI e credito.
+            bundle = self._pretest_bundle()
+            self._set_review_buttons_available(
+                bundle is not None and bundle.photo_path is not None, False)
+            return
         bundle = self._review_bundle()
         if bundle is not None:
             # Senza foto calibrata i riquadri non si possono ne' vedere ne'
@@ -3659,6 +3881,11 @@ class MainWindow(QMainWindow):
         else:
             available = self._fresh_cache_evidence() is not None
         self._set_review_buttons_enabled(available)
+
+    def _pretest_mode(self) -> bool:
+        """@brief True when the detector choice is the free «Solo YOLO locale» pretest."""
+        combo = getattr(self, "combo_photo_detector", None)
+        return combo is not None and combo.currentData() == self._PRETEST_DETECTOR
 
     def _set_action_available(self, name: str, available: bool) -> None:
         """@brief Un comando che non puo' agire si nasconde, non resta acceso a vuoto.
@@ -3775,10 +4002,22 @@ class MainWindow(QMainWindow):
             potrebbe fare nulla. Sta qui e non in un metodo a parte perche' le
             copie devono restare per costruzione nello stesso stato.
         """
-        for name in ("btn_reopen_review", "btn_relaunch_inventory",
-                     "btn_reopen_review_top", "btn_relaunch_inventory_top",
-                     "btn_reopen_review_3d", "btn_relaunch_inventory_3d"):
-            self._set_action_available(name, bool(enabled))
+        self._set_review_buttons_available(bool(enabled), bool(enabled))
+
+    def _set_review_buttons_available(self, reopen: bool, relaunch: bool) -> None:
+        """@brief Set the free review commands and the paid relaunch commands separately.
+
+        @param reopen True when «Riapri revisione» has a bundle to open.
+        @param relaunch True when the paid relaunch has an extraction bundle.
+        @note The two differ only in pretest mode, where the reopened bundle
+            is the pretest's and nothing may be paid (audit 25/09, B2). The
+            copies of each command still move together.
+        """
+        for name in ("btn_reopen_review", "btn_reopen_review_top", "btn_reopen_review_3d"):
+            self._set_action_available(name, bool(reopen))
+        for name in ("btn_relaunch_inventory", "btn_relaunch_inventory_top",
+                     "btn_relaunch_inventory_3d"):
+            self._set_action_available(name, bool(relaunch))
         self._refresh_edit_review_buttons()
 
     def _refresh_edit_review_buttons(self) -> None:
@@ -3900,10 +4139,16 @@ class MainWindow(QMainWindow):
             e tutti i campi cosi' come sono. Chi vuole ripagare l'inventario
             ha il pulsante accanto (`_relaunch_inventory`). Annullare non
             tocca il file.
+        @note Con «Solo YOLO locale» scelto il pacchetto riaperto e risalvato
+            e' quello del pretest (`<progetto>/yolo-pretest/photo-review/`),
+            e il rilancio a pagamento non e' offerto (audit 25/09, B2).
         """
         if self._background_work_running() or self._automatic_generation_active:
             return
-        bundle = self._ensure_review_bundle()
+        # Con «Solo YOLO locale» si riapre il pacchetto del pretest, che si
+        # risalva nella sua cartella: mai in quella dell'estrazione.
+        pretest = self._pretest_mode()
+        bundle = self._pretest_bundle() if pretest else self._ensure_review_bundle()
         if bundle is None:
             self._refresh_reopen_review_button()
             return
@@ -3930,8 +4175,15 @@ class MainWindow(QMainWindow):
                                 "file invariato."))
             return
         path = self._write_review_bundle(kept, photo_png, bundle.body_length_mm, bundle.body_width_mm,
-                                         source_json=bundle.source_json, detector=bundle.detector)
-        if path is not None:
+                                         source_json=bundle.source_json, detector=bundle.detector,
+                                         root=self._pretest_root() if pretest else None)
+        if path is not None and pretest:
+            # Il pretest non ha rilancio: non si indica un comando a pagamento
+            # che in questa modalita' non c'e'.
+            self._append_log(tx("Revisione del pretest YOLO salvata offline in {path}: {n_kept} "
+                                "proposte tenute, nessuna richiesta AI (gratuito).",
+                                path=path, n_kept=len(kept)))
+        elif path is not None:
             self._append_log(tx("Revisione salvata offline in {path}: {n_kept} proposte tenute, "
                                 "nessuna richiesta AI (gratuito). Per l'inventario usa «Rilancia "
                                 "inventario AI (a pagamento)…».",
@@ -3978,6 +4230,10 @@ class MainWindow(QMainWindow):
 
     def _relaunch_inventory(self) -> None:
         """@brief Ripaga la sola riconciliazione sulle proposte del pacchetto salvato.
+
+        @note Solo il pacchetto dell'ESTRAZIONE (`_ensure_review_bundle`):
+            i riquadri di un pretest solo YOLO non vengono mai riconciliati a
+            pagamento da qui (audit 25/09, B2).
 
         @note E' l'unica spesa di questo percorso e viene dichiarata PRIMA
             di partire, nel log e nella modale. Le proposte arrivano dal file
@@ -4137,13 +4393,17 @@ class MainWindow(QMainWindow):
         ("ai", "_extract_worker", "Analisi AI dei documenti"),
         ("ai", "_reconcile_worker", "Rilancio dell'inventario"),
     )
+    #: Nome dell'operazione quando nello slot dell'estrazione gira il pretest
+    #: solo YOLO (vedi _abortable_operation).
+    _PRETEST_LABEL = "Pretest YOLO locale"
 
     def _abortable_operation(self):
         """@brief L'operazione in corso che «Interrompi» puo' fermare, se c'e'.
 
         @return (natura, worker, fase) con natura in {'cad', 'ai', 'local'},
             oppure None quando non c'e' nulla da fermare. 'local' e' il
-            pretest solo YOLO: si abbandona come una corsa AI, ma non costa.
+            pretest solo YOLO: si abbandona come una corsa AI, ma non costa,
+            e la fase e' `_PRETEST_LABEL`, non l'etichetta dello slot.
         @note Un worker gia' abbandonato NON e' piu' un candidato: continua a
             girare (e a contare per la guardia di chiusura) ma la finestra e'
             gia' tornata all'utente, quindi non c'e' piu' niente da chiedergli.
@@ -4155,7 +4415,10 @@ class MainWindow(QMainWindow):
             if any(worker is abandoned for abandoned in self._abandoned_workers):
                 continue
             if isinstance(worker, YoloPretestWorker):
-                return "local", worker, label
+                # Lo slot e' quello dell'estrazione, ma il lavoro no: la
+                # domanda di conferma e il log devono nominare il pretest,
+                # non un'«Analisi AI» che non e' mai partita.
+                return "local", worker, self._PRETEST_LABEL
             return kind, worker, label
         return None
 
@@ -4316,6 +4579,10 @@ class MainWindow(QMainWindow):
         """
         self._analysis_revision += 1
         self._abandoned_workers.append(worker)
+        # Le chiamate a pagamento non ancora partite non partono piu'.
+        cancel_event = getattr(worker, "cancel_event", None)
+        if cancel_event is not None:
+            cancel_event.set()
         self._on_ai_progress(
             tx("INTERRUZIONE chiesta dall'utente durante: {phase}. La richiesta già "
                "inviata al modello non si può annullare ed è già a pagamento: la "
@@ -4339,7 +4606,8 @@ class MainWindow(QMainWindow):
         if paid:
             self._show_ai_cost()
         self._hide_analysis_overlay()
-        self._refresh_extract_button()
+        # La finestra torna all'utente: il pulsante torna a riposo.
+        self._end_extraction_busy()
         self._apply_component_name_gate()
         self._refresh_ai_log_button()
         # Niente da attendere: la finestra e' gia' tornata all'utente.
@@ -4376,6 +4644,10 @@ class MainWindow(QMainWindow):
                 setattr(self, attribute, None)
 
     def _on_extract_finished(self) -> None:
+        # Il worker ha finito, anche se abbandonato: le sue chiamate sono
+        # tutte registrate, il progetto della corsa si puo' rilasciare.
+        if hasattr(self, "ai_account"):
+            self.ai_account.release_run_project()
         if not self._analysis_result_is_current():
             # Corsa abbandonata con «Interrompi»: la finestra e' gia' tornata
             # all'utente da un pezzo. Qui si prende atto che la chiamata a
@@ -4386,6 +4658,9 @@ class MainWindow(QMainWindow):
             self._append_log(
                 tx("La corsa interrotta dall'utente è terminata adesso: il suo risultato "
                    "è stato scartato, i comandi tornano disponibili."))
+            # Rete di sicurezza (audit 25/09, B1): una modale rimasta aperta
+            # senza piu' nessuna operazione che la possa chiudere.
+            self._release_orphan_overlay()
             self._apply_component_name_gate()
             self._refresh_reopen_review_button()
             self._refresh_ai_log_button()
@@ -4403,7 +4678,7 @@ class MainWindow(QMainWindow):
             return
         self._hide_analysis_overlay()
         self.btn_extract_ai.setEnabled(True)
-        self._refresh_extract_button()
+        self._end_extraction_busy()
         params = self._auto_generation_params
         self._auto_generation_params = None
         self._auto_after_extraction = False
@@ -4589,8 +4864,28 @@ class MainWindow(QMainWindow):
             di quella chiamata e non dopo. Se invece la vista non si apre
             affatto si prosegue con tutte le proposte: un difetto della
             revisione non deve buttare via l'analisi gia' pagata fin qui.
+        @note La risposta va al MITTENTE del segnale, non allo slot
+            `_extract_worker`: dopo «Interrompi» lo slot puo' gia' ospitare
+            un'altra corsa (o nessuna), e sbloccare quella sbagliata lascerebbe
+            il worker vero appeso per sempre.
+        @note Una corsa abbandonata con «Interrompi» riceve None SENZA che si
+            apra nulla (audit 25/09, B1): prima la vista si apriva lo stesso,
+            l'OK sovrascriveva `photo-review/proposals.json`, rimostrava la
+            modale -- che nessuna fine di corsa scaduta avrebbe piu' nascosto
+            -- e con il rilevatore 'yolo' la corsa abbandonata proseguiva fino
+            alla riconciliazione A PAGAMENTO. None la ferma prima di spendere.
+        @note Il pretest solo YOLO salva nel proprio pacchetto
+            (`_pretest_root`), mai in quello dell'estrazione: vedi
+            `_store_reviewed_proposals`.
         """
-        worker = self._extract_worker
+        worker = self.sender() or self._extract_worker
+        if self._review_request_is_stale(worker):
+            self._append_log(tx("Revisione dei corpi di una corsa interrotta dall'utente: non "
+                                "aperta, la corsa si ferma senza altre richieste."))
+            if worker is not None:
+                worker.deliver_review(None)
+            return
+        pretest = isinstance(worker, YoloPretestWorker)
         kept = list(proposals)
         try:
             from .yolo_review_dialog import YoloReviewDialog
@@ -4608,6 +4903,11 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001 - un errore qui non deve appendere il worker
             self._append_log(tx("ATTENZIONE revisione dei corpi non disponibile: {exc}", exc=exc))
         finally:
+            # La vista gira un event loop annidato: se nel frattempo la corsa
+            # e' stata dichiarata scaduta, non si salva e non si riapre la
+            # modale -- vale lo stesso ragionamento dell'inizio.
+            if kept is not None and self._review_request_is_stale(worker):
+                kept = None
             if worker is not None:
                 worker.deliver_review(kept)
             if kept is not None:
@@ -4618,12 +4918,29 @@ class MainWindow(QMainWindow):
                 # riquadri corretti. Si scrive qui, e _on_extracted non lo tocca.
                 self._store_reviewed_proposals(
                     kept, photo_png, length_mm, width_mm,
-                    detector=getattr(worker, 'photo_detector', 'yolo'))
+                    detector=getattr(worker, 'photo_detector', 'yolo'), pretest=pretest)
                 self.analysis_overlay.show()
                 self.analysis_overlay.raise_()
 
+    def _review_request_is_stale(self, worker) -> bool:
+        """@brief True when a review request comes from a run the user abandoned.
+
+        @param worker Worker that asked for the review (the signal sender).
+        @return True for a worker carrying an older `_analysis_revision` or
+            listed among the abandoned workers; False for None (direct call).
+        @note Asked about the worker itself, not about `self.sender()`: the
+            question is repeated after the nested event loop of the dialog,
+            where the sender is no longer defined.
+        """
+        if worker is None:
+            return False
+        if any(worker is abandoned for abandoned in self._abandoned_workers):
+            return True
+        return getattr(worker, "_analysis_revision",
+                       self._analysis_revision) != self._analysis_revision
+
     def _store_reviewed_proposals(self, kept, photo_png, length_mm, width_mm, *,
-                                  detector='yolo') -> None:
+                                  detector='yolo', pretest=False) -> None:
         """@brief Write the proposals kept by the in-extraction review to the component folder.
 
         @param kept Proposal rows kept by the review dialog (may be empty).
@@ -4631,17 +4948,23 @@ class MainWindow(QMainWindow):
         @param length_mm Board X extent in mm the boxes were calibrated with.
         @param width_mm Board Y extent in mm.
         @param detector Name of the detector the proposals came from.
+        @param pretest True for the «Solo YOLO locale» pretest: the rows go to
+            the pretest bundle (`_pretest_root`) and the extraction state is
+            left alone.
         @note Marks the extraction as reviewed in every case, including an
             empty selection or a failed write: the cache rows are the
-            pre-review set and must never replace what the user decided.
+            pre-review set and must never replace what the user decided. A
+            pretest is not an extraction and does not set the mark.
         """
-        self._reviewed_this_extraction = True
+        if not pretest:
+            self._reviewed_this_extraction = True
         if not kept:
             self._append_log(tx("Revisione dei corpi: nessuna proposta tenuta, pacchetto photo-review "
                                 "non scritto (le proposte grezze non vengono copiate)."))
             return
         path = self._write_review_bundle([dict(p) for p in kept], photo_png, length_mm, width_mm,
-                                         detector=detector)
+                                         detector=detector,
+                                         root=self._pretest_root() if pretest else None)
         if path is not None:
             self._append_log(tx("Proposte tenute dalla revisione salvate in {path} ({n_kept} corpi): "
                                 "la revisione si puo' riaprire senza chiamate AI.",
@@ -4992,19 +5315,22 @@ class MainWindow(QMainWindow):
             if widget is not None and name in values and not set_widget_value(widget, values[name]):
                 skipped.append(name)
         # Parametri YOLO del progetto; assenti (progetti precedenti) = predefiniti.
-        saved_yolo = dict(state.get("yolo_settings") or {}) if isinstance(
-            state.get("yolo_settings") or {}, dict) else {}
+        raw_yolo = state.get("yolo_settings")
+        if raw_yolo is None:
+            saved_yolo = {}
+        elif isinstance(raw_yolo, dict):
+            saved_yolo = dict(raw_yolo)
+        else:
+            # Prima veniva scartato in silenzio (audit 25/09, B10).
+            saved_yolo = {}
+            skipped.append(f"yolo_settings ({type(raw_yolo).__name__})")
         # Salvati il 25/09 prima di questa versione: la soglia stava in un campo.
         legacy_threshold = (state.get("widgets") or {}).get("field_yolo_confidence") \
             if isinstance(state.get("widgets"), dict) else None
         if "confidence" not in saved_yolo and isinstance(legacy_threshold, (int, float)) \
                 and not isinstance(legacy_threshold, bool):
             saved_yolo["confidence"] = round(float(legacy_threshold), 2)
-        try:
-            self._yolo_settings = validate_yolo_settings(saved_yolo)
-        except ValueError as exc:
-            self._yolo_settings = None
-            skipped.append(f"yolo_settings ({exc})")
+        self._yolo_settings = self._valid_yolo_settings(saved_yolo, skipped)
         self._refresh_yolo_summary()
         models = state.get("models") if isinstance(state.get("models"), dict) else {}
         session = models.get("session_model")
@@ -5068,6 +5394,31 @@ class MainWindow(QMainWindow):
         if skipped:
             self._append_log(tx("Impostazioni del progetto non applicate (valori non validi): ")
                              + ", ".join(skipped) + ".")
+
+    @staticmethod
+    def _valid_yolo_settings(saved: dict, skipped: list) -> dict:
+        """@brief Keep the valid YOLO settings of a project, key by key.
+
+        @param saved Settings read from the project file.
+        @param skipped List that receives one entry per ignored key, for the log.
+        @return Complete validated settings: every valid saved key, the
+            default for the others.
+        @note One bad key used to reset them all to the defaults (audit 25/09,
+            B10). Each key is checked on its own against the service's
+            validator, which stays the only definition of a valid value. The
+            file is not rewritten here: `_switch_project` records the applied
+            state as already saved, so it is written only when the user
+            changes something.
+        """
+        accepted = {}
+        for key, value in saved.items():
+            try:
+                validate_yolo_settings({**accepted, key: value})
+            except (TypeError, ValueError) as exc:
+                skipped.append(f"yolo_settings.{key} ({exc})")
+                continue
+            accepted[key] = value
+        return validate_yolo_settings(accepted)
 
     def _switch_project(self, name: str, state: dict) -> None:
         """@brief Apre `name` con le impostazioni `state`, senza salvarle a meta'."""
@@ -6908,17 +7259,42 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 return
             overwrite = True
-        try:
-            result = install_component_library(
-                artifacts, destination, library_name="KiCadGen",
-                project_library=project_library, table_path=table_path,
-                overwrite=overwrite,
-            )
-        except (KiCadLibraryError, OSError) as exc:
-            QMessageBox.warning(
-                self, self.i18n.text("Installazione KiCad non riuscita"),
-                self._kicad_error_text(exc))
-            return
+        replace_entry = False
+        while True:
+            try:
+                result = install_component_library(
+                    artifacts, destination, library_name="KiCadGen",
+                    project_library=project_library, table_path=table_path,
+                    overwrite=overwrite, replace_library_entry=replace_entry,
+                )
+                break
+            except KiCadLibraryError as exc:
+                # La voce «KiCadGen» della tabella punta gia' a un'altra
+                # cartella: ripuntarla toglierebbe a ogni progetto i componenti
+                # installati la'. Nulla e' stato scritto; si chiede, nominando
+                # la cartella vecchia e quella nuova (verifica del 25/09, F2).
+                if (getattr(exc, "code", None) == "library_entry_conflict"
+                        and not replace_entry):
+                    answer = QMessageBox.question(
+                        self, self.i18n.text("Libreria KiCadGen già registrata"),
+                        self.i18n.tr("kicad.confirm_replace_library_entry",
+                                     **dict(getattr(exc, "context", {}) or {})),
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No,
+                    )
+                    if answer != QMessageBox.StandardButton.Yes:
+                        return
+                    replace_entry = True
+                    continue
+                QMessageBox.warning(
+                    self, self.i18n.text("Installazione KiCad non riuscita"),
+                    self._kicad_error_text(exc))
+                return
+            except OSError as exc:
+                QMessageBox.warning(
+                    self, self.i18n.text("Installazione KiCad non riuscita"),
+                    self._kicad_error_text(exc))
+                return
         message = self.i18n.tr(
             "kicad.install_complete", identifier=result.identifier,
             footprint=result.footprint_path, table=result.table_path)
@@ -7407,6 +7783,11 @@ class MainWindow(QMainWindow):
         self._hide_analysis_overlay()
         self.menuBar().setEnabled(self._generation_menu_enabled)
         self.btn_extract_ai.setEnabled(True)
+        if self._extraction_busy:
+            # L'estrazione e' finita con la generazione automatica gia'
+            # attiva (_on_extract_finished esce prima): il pulsante torna a
+            # riposo solo adesso.
+            self._end_extraction_busy()
         if self._automatic_3d_done:
             self.tabs.setCurrentIndex(4)
         elif self._automatic_footprint_done:
@@ -8471,6 +8852,12 @@ class MainWindow(QMainWindow):
                     'presence_confidence', 'class_confidence', 'confidence',
                     '_yolo_review_only', '_yolo_origin', 'terminal_count',
                     'terminal_layout', 'terminal_count_basis', '_global_inventory_status', 'class',
+                    # Campi strutturali che il 3D legge al posto del nome
+                    # (verifica del 25/09, E11): chi e' solo un'ipotesi del
+                    # rilevatore, chi e' stato visto dall'utente, e il conteggio
+                    # completo dei reofori per il caso «tre piu' linguetta».
+                    '_yolo_proposal_id', '_presence_reviewed_by_user',
+                    'lead_count', 'lead_count_complete',
                     # Il riferimento asimmetrico deve arrivare fino al
                     # costruttore: e' li' che si confronta col baricentro del
                     # modello nativo per stabilire il verso.
@@ -8633,6 +9020,12 @@ class MainWindow(QMainWindow):
                     'presence_confidence', 'class_confidence', 'confidence',
                     '_yolo_review_only', '_yolo_origin', 'terminal_count',
                     'terminal_layout', 'terminal_count_basis', '_global_inventory_status', 'class',
+                    # Campi strutturali che il 3D legge al posto del nome
+                    # (verifica del 25/09, E11): chi e' solo un'ipotesi del
+                    # rilevatore, chi e' stato visto dall'utente, e il conteggio
+                    # completo dei reofori per il caso «tre piu' linguetta».
+                    '_yolo_proposal_id', '_presence_reviewed_by_user',
+                    'lead_count', 'lead_count_complete',
                     # Il riferimento asimmetrico deve arrivare fino al
                     # costruttore: e' li' che si confronta col baricentro del
                     # modello nativo per stabilire il verso.
@@ -9406,7 +9799,7 @@ class MainWindow(QMainWindow):
 
 
 def main() -> None:
-    """@brief Provide the main operation for this workflow."""
+    """@brief Start the Qt application, show the main window and run the event loop until exit."""
     app = QApplication(sys.argv)
     # Icona del programma: finestra e barra delle applicazioni (anche da sorgente).
     app.setWindowIcon(QIcon(str(resource_path("kicadgen", "gui", "assets", "app-icon.svg"))))

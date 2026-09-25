@@ -180,34 +180,125 @@ def test_invalid_arguments_raise_from_original_callable():
     assert len(events) == 2 and "error=TypeError" in events[-1]
 
 
-def test_retryable_http_failure_gets_one_logged_compatibility_retry():
+# Contract changed (audit D8, 2026-09-25). Before: any "retryable" error got
+# exactly one immediate retry in the compatibility form, a plain HTTP 400
+# included. Now the boundary says WHY a retry may help: `compatibility` (a 400
+# about tool_choice) gets one immediate retry in the portable form; `retryable`
+# (transient 408/409/429/5xx) gets the SAME request again, up to MAX_ATTEMPTS,
+# after a bounded exponential backoff honouring Retry-After.
+
+
+@pytest.fixture
+def waits(monkeypatch):
+    """Record backoff waits instead of sleeping."""
+    recorded = []
+    monkeypatch.setattr(diagnostics, "_sleep", recorded.append)
+    return recorded
+
+
+def test_compatibility_failure_gets_one_logged_compatibility_retry(waits):
     events, modes = [], []
 
     def call(*, model, tool, compatibility_retry=False):
         modes.append(compatibility_retry)
         if len(modes) == 1:
-            raise OpenRouterError("safe HTTP 400", retryable=True)
+            raise OpenRouterError("safe HTTP 400 tool_choice", compatibility=True)
         return {"components": []}
 
     result = diagnostics.make_logged_call(call, events.append)(
         model="provider/model", tool={"function": {"name": "report"}})
     assert result == {"components": []}
-    assert modes == [False, True]
-    assert any(event.startswith("AI_CALL_RETRY ") and "attempt=2" in event for event in events)
+    assert modes == [False, True] and waits == []
+    assert any(event.startswith("AI_CALL_RETRY ") and "attempt=2" in event
+               and "reason=compatibility" in event for event in events)
     assert events[-1].startswith("AI_CALL_END ")
 
 
-def test_retryable_http_failure_stops_after_second_attempt():
+def test_transient_failure_is_retried_unchanged_with_exponential_backoff(waits):
+    events, modes = [], []
+
+    def call(*, model, tool, compatibility_retry=False):
+        modes.append(compatibility_retry)
+        if len(modes) < 3:
+            raise OpenRouterError("safe HTTP 503", retryable=True)
+        return {"components": []}
+
+    result = diagnostics.make_logged_call(call, events.append)(
+        model="provider/model", tool={"function": {"name": "report"}})
+    assert result == {"components": []}
+    assert modes == [False, False, False]
+    # First retry after BACKOFF_BASE_S, the second after twice as long.
+    assert sum(waits) == pytest.approx(diagnostics.BACKOFF_BASE_S * 3)
+
+
+def test_retry_after_is_honoured_and_bounded():
+    assert diagnostics.retry_delay(1, 7) == 7
+    assert diagnostics.retry_delay(1, 10_000) == diagnostics.BACKOFF_CAP_S
+    assert diagnostics.retry_delay(3, None) == diagnostics.BACKOFF_BASE_S * 4
+    for bad in (True, -1, float("nan"), "5"):
+        assert diagnostics.retry_delay(1, bad) == diagnostics.BACKOFF_BASE_S
+
+
+def test_transient_failure_stops_after_max_attempts(waits):
     events, errors = [], []
 
     def call(*, model, tool, compatibility_retry=False):
-        error = OpenRouterError("safe HTTP 400", retryable=True)
+        error = OpenRouterError("safe HTTP 429", retryable=True, retry_after=1.5)
         errors.append(error)
         raise error
 
     wrapped = diagnostics.make_logged_call(call, events.append)
     with pytest.raises(OpenRouterError) as caught:
         wrapped(model="provider/model", tool={"function": {"name": "report"}})
-    assert caught.value is errors[-1] and len(errors) == 2
-    assert sum(event.startswith("AI_CALL_RETRY ") for event in events) == 1
-    assert events[-1].startswith("AI_CALL_FAILURE ") and "attempts=2" in events[-1]
+    assert caught.value is errors[-1] and len(errors) == diagnostics.MAX_ATTEMPTS
+    assert sum(event.startswith("AI_CALL_RETRY ") for event in events) == diagnostics.MAX_ATTEMPTS - 1
+    assert sum(waits) == pytest.approx(1.5 * (diagnostics.MAX_ATTEMPTS - 1))
+    assert events[-1].startswith("AI_CALL_FAILURE ") and f"attempts={diagnostics.MAX_ATTEMPTS}" in events[-1]
+
+
+def test_a_plain_error_is_not_retried(waits):
+    """Negative: a 400 without the compatibility mark is refused again if repeated."""
+    events, calls = [], []
+
+    def call(*, model, tool, compatibility_retry=False):
+        calls.append(1)
+        raise OpenRouterError("safe HTTP 400")
+
+    with pytest.raises(OpenRouterError):
+        diagnostics.make_logged_call(call, events.append)(
+            model="provider/model", tool={"function": {"name": "report"}})
+    assert len(calls) == 1 and waits == []
+    assert not any(event.startswith("AI_CALL_RETRY ") for event in events)
+
+
+def test_cancel_is_checked_before_every_paid_attempt(waits):
+    class Stop(diagnostics.CallCancelled):
+        pass
+    state = {"stop": False, "calls": 0}
+
+    def cancel():
+        if state["stop"]:
+            raise Stop("cancelled")
+
+    def call(*, model, tool):
+        state["calls"] += 1
+        state["stop"] = True  # the user presses Stop during the first request
+        raise OpenRouterError("safe HTTP 503", retryable=True)
+
+    events = []
+    wrapped = diagnostics.make_logged_call(call, events.append, cancel=cancel)
+    with pytest.raises(Stop):
+        wrapped(model="provider/model", tool={"function": {"name": "report"}})
+    assert state["calls"] == 1
+    assert any(event.startswith("AI_CALL_CANCELLED ") for event in events)
+    with pytest.raises(Stop):
+        wrapped(model="provider/model", tool={"function": {"name": "report"}})
+    assert state["calls"] == 1  # nothing paid once cancelled
+
+
+def test_cancel_without_progress_still_wraps():
+    """With a cancel channel the wrapper is applied even without a log callback."""
+    wrapped = diagnostics.make_logged_call(lambda **kw: "ok", None, cancel=lambda: None)
+    assert wrapped(model="m", tool={}) == "ok"
+    original = lambda **kw: "ok"
+    assert diagnostics.make_logged_call(original, None) is original

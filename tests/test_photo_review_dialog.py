@@ -871,7 +871,8 @@ def test_the_quit_promise_is_released_when_the_measurement_thread_ends(dialog, a
 _TEARDOWN_SCRIPT = """
 import gc, os, sys
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
+from PyQt6 import sip
+from PyQt6.QtCore import QBuffer, QByteArray, QIODevice, QTimer
 from PyQt6.QtGui import QColor, QImage
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
@@ -901,6 +902,21 @@ if sys.argv[1] == "drop":
     del dialog
     gc.collect()
     app.processEvents()
+else:
+    # "quit": the application really quits while the modal is up and its
+    # editor focused (event loop running, quit posted), then the dialog is
+    # destroyed from C++ (sip.delete, no Python-side close) and only then the
+    # application object goes away: dialog before app, never the reverse.
+    QTimer.singleShot(0, app.quit)
+    # Qt 6 quit() first asks every top-level window to close, so the focused
+    # editor loses focus inside the running loop (the path a real quit takes).
+    app.exec()
+    sip.delete(dialog)
+    del dialog
+    gc.collect()
+    app.processEvents()
+    del app
+    gc.collect()
 print("SURVIVED")
 """
 
@@ -917,8 +933,15 @@ def test_abnormal_teardown_with_a_focused_editor_does_not_abort(mode):
     by PyQt together with the receiver. The process must end normally in
     both modes, with and without an explicit ``del`` + ``gc.collect()``.
     """
+    # The child imports kicadgen from THIS checkout whatever the caller's cwd:
+    # run it from the repository root with the root on PYTHONPATH.
+    root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(root)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
     result = subprocess.run([sys.executable, "-c", _TEARDOWN_SCRIPT, mode],
-                            capture_output=True, text=True, timeout=120)
+                            capture_output=True, text=True, timeout=120,
+                            cwd=str(root), env=env)
     assert result.returncode == 0, result.stderr
     assert "SURVIVED" in result.stdout
     assert "TypeError" not in result.stderr and "Aborted" not in result.stderr

@@ -66,6 +66,10 @@ def restore_choices(directory, photo_png, components):
     """@brief Restore only explicit choices for identical photos and unchanged component geometry.
 
     @return Independent component list; missing state is normal, corrupt state raises ValueError.
+    @note Restored: an explicit confirmed/rejected model_selection (with the
+        model_match report saved alongside it), the manual exclusion and the
+        manual rotation delta. An automatic model_match without an explicit
+        selection stays in the audit JSON only.
     @note AI responses never authorize arbitrary model paths; only this local choice store does.
     """
     result = deepcopy(components)
@@ -89,9 +93,13 @@ def restore_choices(directory, photo_png, components):
     for component in result:
         record = choices.get(component_key(component), {})
         selection = record.get('model_selection')
-        if isinstance(selection, dict) and selection.get('status') in ('confirmed', 'rejected'):
+        explicit = isinstance(selection, dict) and selection.get('status') in ('confirmed', 'rejected')
+        if explicit:
             component['model_selection'] = deepcopy(selection)
-        if isinstance(record.get('model_match'), dict):
+        # The match report travels only with the explicit decision it
+        # documents: an automatic report is recomputed, never replayed, so a
+        # stale automatic match cannot pose as a user choice.
+        if explicit and isinstance(record.get('model_match'), dict):
             component['model_match'] = deepcopy(record['model_match'])
         # Esclusione e rotazione manuali: sono scelte dell'utente come la
         # selezione del modello, quindi devono sopravvivere alla rigenerazione

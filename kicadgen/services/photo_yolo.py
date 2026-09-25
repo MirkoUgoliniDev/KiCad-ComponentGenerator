@@ -1,10 +1,16 @@
-"""@brief Detect generic PCB envelopes with a strictly local, optional ONNX model.
+"""@brief Detect generic PCB envelopes with a strictly local, optional YOLO model.
 
 @note The caller supplies an already calibrated BGR board crop. This module does
-not calibrate, download weights, infer package identity, or measure height. The
-frozen experiment recipe uses one overview and native 640/1280-pixel tiles with
-25% overlap, confidence 0.25, and class-agnostic IoU NMS 0.50. View count depends
-on image dimensions (41 for 4000 x 1848); no components are silently capped.
+not calibrate, download weights, infer package identity, or measure height.
+Weights are a local .onnx file (onnxruntime, CPU) or a local .pt checkpoint
+(PyTorch/Ultralytics, optional install); both go through the same letterbox,
+thresholds, NMS and audit code.
+@note The recipe is chosen per run through yolo_settings (defaults in
+YOLO_SETTING_DEFAULTS): one overview plus magnified 640 and/or 1280 px tiles
+with a chosen overlap (tile_sizes may be empty: overview only), an operating
+confidence threshold, and class-agnostic IoU NMS. A tile whose bounds repeat
+the overview or another view is not inferred again. The view count depends
+on the image size; no components are silently capped.
 """
 from __future__ import annotations
 
@@ -58,6 +64,10 @@ _NMS_IOU = 0.5
 _EXCLUDED = {"pads", "pins"}
 #: Lati delle tessere ingrandite, in pixel della foto calibrata.
 _TILE_SIZES = (640, 1280)
+#: Frazione di tessera che si ripete nella successiva. Il passo e' il
+#: complemento: e' la stessa costante usata da _views, tenuta qui perche' da
+#: essa dipende quale corpo una tessera puo' misurare e quale no.
+_TILE_OVERLAP_FRACTION = 0.25
 
 #: Parametri del rilevatore che l'utente puo' scegliere (utente, 2026-09-25:
 #: modale «Parametri YOLO»). I valori sono quelli usati finora: scegliere
@@ -65,8 +75,9 @@ _TILE_SIZES = (640, 1280)
 #: dei frammenti (_FRAGMENT_COVERED, interna e dichiarata fragile), la soglia
 #: d'audit (non cambia il risultato) e l'ingresso a 640 px (lo fissa
 #: l'addestramento del modello).
-YOLO_SETTING_DEFAULTS = {"confidence": 0.25, "nms_iou": _NMS_IOU,
-                         "tile_sizes": list(_TILE_SIZES), "tile_overlap": 0.25}
+YOLO_SETTING_DEFAULTS = {"confidence": _CONFIDENCE, "nms_iou": _NMS_IOU,
+                         "tile_sizes": list(_TILE_SIZES),
+                         "tile_overlap": _TILE_OVERLAP_FRACTION}
 
 
 def yolo_settings(values=None) -> dict:
@@ -113,7 +124,10 @@ try:
     from ..app_paths import resource_path
 except ImportError:  # modulo caricato da solo (test): stessa regola del sorgente
     def resource_path(*parts):
-        """Fallback: the repository layout."""
+        """@brief Resolve a resource path inside the source repository when app_paths is unavailable.
+
+        Fallback: the repository layout.
+        """
         return Path(__file__).resolve().parents[2].joinpath(*parts)
 
 def detector_classes() -> tuple:
@@ -292,31 +306,103 @@ class _TorchSession:
         # Indice di classe del modello -> indice in _CLASSES (class_mapping).
         self._mapping = list(mapping) if mapping is not None else list(range(len(_CLASSES)))
 
-    def run(self, output_names, feeds):
-        """@brief Run the network on one letterboxed tensor; return [raw output]."""
+    def raw_output(self, feeds):
+        """@brief Run the network and return its first output as float32, unconverted."""
         np = self._np
         tensor = self._torch.from_numpy(feeds[self._input])
         with self._torch.no_grad():
             output = self._network(tensor)
         raw = output[0] if isinstance(output, (list, tuple)) else output
-        raw = np.ascontiguousarray(raw.detach().cpu().numpy(), dtype=np.float32)
+        return np.ascontiguousarray(raw.detach().cpu().numpy(), dtype=np.float32)
+
+    def run(self, output_names, feeds):
+        """@brief Run the network on one letterboxed tensor; return [raw output]."""
+        np = self._np
+        raw = self.raw_output(feeds)
         if not self._end_to_end:
             if self._mapping == list(range(len(_CLASSES))):
                 return [raw]
             return [_remap_scores(raw, self._mapping, np)]
-        # Testa end-to-end: [1, K, 6] = x0, y0, x1, y1, confidenza, classe.
-        # Diventa [1, 4 + classi, K] con la confidenza nella SOLA colonna della
-        # sua classe: e' tutto cio' che questa testa dice (vedi _setup_torch).
-        detections = raw[0]
-        rows = np.zeros((4 + len(_CLASSES), len(detections)), np.float32)
-        x0, y0, x1, y1 = detections[:, 0], detections[:, 1], detections[:, 2], detections[:, 3]
-        rows[0], rows[1] = (x0 + x1) / 2, (y0 + y1) / 2
-        rows[2], rows[3] = x1 - x0, y1 - y0
-        classes = detections[:, 5].astype(int)
-        known = (classes >= 0) & (classes < len(self._mapping))
-        targets = np.asarray(self._mapping, int)[classes[known]]
-        rows[4 + targets, np.flatnonzero(known)] = detections[known, 4]
-        return [rows[None]]
+        return [_one_to_one_rows(raw, self._mapping, np)]
+
+
+def _one_to_one_rows(raw, mapping, np):
+    """@brief Convert end-to-end detections [1, K, 6] into raw rows [1, 4 + classes, K].
+
+    @param raw Detections x0, y0, x1, y1, confidence, class (letterbox pixels).
+    @param mapping Model class index -> index in _CLASSES (class_mapping).
+    @param np NumPy module.
+    @return Rows in the layout of the standard head, K columns (the shape the
+        probe measured, so every view keeps the same output shape).
+    @note Class ids must be finite, integral and within the model's table; a
+        row whose id is not (NaN, 2.7, -1, 99) carries no class and is left
+        with zero scores, i.e. below the audit floor. Truncating 2.7 to 2
+        would label a body with a class the model never gave.
+    @note The one-to-one head ranks anchors x classes jointly (Ultralytics
+        get_topk_index flattens them), so ONE anchor may come back as several
+        rows with the same box and different classes. Those rows are merged
+        into the first one, keeping every class score, exactly like a
+        standard-head row: _proposals then applies the same rule to both
+        formats (pads/pins winning over a body class that reaches the
+        operating threshold -> class_ambiguous uncertain body). The same box
+        is recognized by bitwise-equal coordinates, which is what gathering
+        the same anchor produces; two different anchors with identical boxes
+        would be one body for NMS anyway.
+    """
+    detections = raw[0]
+    count = len(detections)
+    rows = np.zeros((4 + len(_CLASSES), count), np.float32)
+    ids = detections[:, 5].astype(np.float64)
+    with np.errstate(invalid="ignore"):
+        valid = (np.isfinite(ids) & (ids == np.round(ids))
+                 & (ids >= 0) & (ids < len(mapping)))
+    targets = np.asarray(mapping, int)
+    first_of = {}
+    for index in np.flatnonzero(valid):
+        box = tuple(float(value) for value in detections[index, :4])
+        column = first_of.setdefault(box, int(index))
+        if column == index:
+            x0, y0, x1, y1 = box
+            rows[:4, column] = [(x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0]
+        target = 4 + targets[int(ids[index])]
+        rows[target, column] = max(rows[target, column], detections[index, 4])
+    return rows[None]
+
+
+def _force_one_to_one(head, probe) -> bool:
+    """@brief Switch an end-to-end head to its one-to-one inference, only if it really has one.
+
+    @param head Last module of the network (the detection head).
+    @param probe Callable running the network on a blank input and returning
+        its raw first output as a NumPy array (_TorchSession.raw_output).
+    @return True when the head now produces end-to-end detections [1, K, 6];
+        False, with the head left as found, otherwise.
+    @note The attribute's mere presence is not evidence: a FUSED checkpoint of
+        an end-to-end model keeps `one2one_cv2` set to None (Ultralytics
+        Detect.fuse removes the unused branch), and forcing end2end on it has
+        no effect -- the output stays [1, 4 + classes, 8400]. Reading that as
+        [K, 6] would turn class scores into boxes. So the switch is kept only
+        if the head reports end2end True afterwards AND a probe returns a 3-D
+        array whose last dimension is 6.
+    """
+    declared = (getattr(head, "one2one_cv2", None) is not None
+                or getattr(head, "end2end", False) is True)
+    if not declared:
+        return False
+    previous = getattr(head, "end2end", None)
+    try:
+        head.end2end = True
+    except (AttributeError, TypeError):
+        return False
+    if getattr(head, "end2end", None) is True:
+        shape = tuple(probe().shape)
+        if len(shape) == 3 and shape[0] == 1 and shape[-1] == 6:
+            return True
+    try:
+        head.end2end = previous
+    except (AttributeError, TypeError):
+        pass
+    return False
 
 
 def _setup_torch(path):
@@ -347,12 +433,12 @@ def _setup_torch(path):
         # Verificato il 2026-09-25 su una foto reale: il ramo uno-a-molti con
         # il nostro NMS trovava 38 corpi e ne ritrovava 39 dei 46 dell'uno-a-
         # uno; la scorciatoia cambiava il modello, non solo il codice.
-        # LIMITE dichiarato: questa testa da' la sola classe migliore, non i
-        # punteggi di tutte le classi; il recupero «pads/pins con un corpo
-        # concorrente» non ha nulla da confrontare e resta inerte.
-        end_to_end = hasattr(head, "one2one_cv2") or bool(getattr(head, "end2end", False))
-        if end_to_end:
-            head.end2end = True
+        # La testa uno-a-uno ordina ancore x classi insieme, quindi la stessa
+        # ancora puo' tornare con piu' classi: _one_to_one_rows le riunisce e
+        # il recupero «pads/pins con un corpo concorrente» vale come per l'ONNX.
+        session = _TorchSession(network, torch, np, "images", mapping=mapping)
+        blank = {"images": np.zeros((1, 3, 640, 640), np.float32)}
+        end_to_end = _force_one_to_one(head, lambda: session.raw_output(blank))
         session = _TorchSession(network, torch, np, "images", end_to_end=end_to_end,
                                 mapping=mapping)
         probe = session.run(None, {"images": np.zeros((1, 3, 640, 640), np.float32)})[0]
@@ -367,7 +453,8 @@ def _setup_torch(path):
         "model_path": str(path), "model_sha256": hashlib.sha256(weights).hexdigest(),
         "model_format": "pt",
         "model_metadata": {"task": model.task, "names": str(names),
-                           "raw_head": "one-to-one (end-to-end; top class only)"
+                           "raw_head": "one-to-one (end-to-end; anchor x class rows "
+                                       "merged per box)"
                            if end_to_end else "standard"},
         "classes": list(_CLASSES), "input_shape": [1, 3, 640, 640],
         "output_shape": list(probe.shape), "providers": ["torch-cpu"],
@@ -439,16 +526,13 @@ def validate_yolo_setup(model_path=None) -> dict:
 
     @param model_path Optional weights path; resolution follows resolve_yolo_model.
     @return Dictionary containing model path/hash, metadata, classes and shapes.
-    @throws ValueError For missing weights/runtime or an incompatible ONNX model.
-    @note Creates a CPU session but does not run inference or access the network.
+    @throws ValueError For missing weights/runtime or an incompatible model.
+    @note Never accesses the network. An .onnx model gets a CPU session and no
+        inference; a .pt checkpoint is loaded (which runs code from the file,
+        see resolve_yolo_model) and runs one or two probe inferences on a
+        blank 640 x 640 input to learn the real output shape of its head.
     """
     return _setup(model_path)[-1]
-
-
-#: Frazione di tessera che si ripete nella successiva. Il passo e' il
-#: complemento: e' la stessa costante usata da _views, tenuta qui perche' da
-#: essa dipende quale corpo una tessera puo' misurare e quale no.
-_TILE_OVERLAP_FRACTION = 0.25
 
 
 def view_overlap_px(view, overlap=_TILE_OVERLAP_FRACTION):
@@ -490,6 +574,11 @@ def _prefer_complete_views(rows, complete, overlap=_TILE_OVERLAP_FRACTION):
         aggiunge nulla -- anzi, e' cio' che creava il falso accordo su un bordo
         di tessera. Sotto la sovrapposizione la regola non si applica: un corpo
         piccolo che sfiora una cucitura resta un corpo osservato.
+    @note Side effect: when the dropped fragment was at the operating
+        threshold and no covering view is, the most confident covering view
+        gets `attests_presence` True, `presence_attested_by` (fragment ids)
+        and `presence_confidence`. detect_yolo_components then emits it as an
+        operating-threshold body whose geometry comes from a weaker view.
     """
     keep = []
     for row in rows:
@@ -505,16 +594,30 @@ def _prefer_complete_views(rows, complete, overlap=_TILE_OVERLAP_FRACTION):
             # dell'ingombro, che passa alla vista che lo contiene. Quella vista
             # va quindi tenuta anche se debole, altrimenti si perderebbe due
             # volte un corpo che era stato visto benissimo.
-            if row.get("rejection") is None:
-                for other in covering:
-                    other["attests_presence"] = True
+            # Se una vista che lo contiene e' gia' sopra soglia, la presenza e'
+            # gia' portata da lei: nulla da promuovere. Altrimenti la promossa
+            # e' UNA sola, la piu' sicura, per non moltiplicare lo stesso corpo.
+            if (row.get("rejection") is None
+                    and not any(other.get("rejection") is None for other in covering)):
+                best = max(covering, key=lambda other: other["confidence"])
+                best["attests_presence"] = True
+                best.setdefault("presence_attested_by", []).append(row["proposal_id"])
+                best["presence_confidence"] = max(best.get("presence_confidence", 0.0),
+                                                  row["confidence"])
             continue
         keep.append(row)
     return keep
 
 
 def _views(width, height, sizes=_TILE_SIZES, overlap=_TILE_OVERLAP_FRACTION):
-    """Whole photo, then the magnified tiles of each chosen side (none = whole photo only)."""
+    """Whole photo, then the magnified tiles of each chosen side (none = whole photo only).
+
+    A tile whose bounds equal a view already produced (the overview, when the
+    photo is smaller than the tile; a 1280 tile equal to a 640 one) is not
+    produced again: same pixels through the same letterbox means the same
+    inference repeated, whose duplicate rows NMS would only remove again.
+    """
+    seen = {(0, 0, width, height)}
     yield "overview", (0, 0, width, height)
     for size in sizes:
         def starts(length):
@@ -524,7 +627,11 @@ def _views(width, height, sizes=_TILE_SIZES, overlap=_TILE_OVERLAP_FRACTION):
 
         for y in starts(height):
             for x in starts(width):
-                yield f"tile{size}-{x}-{y}", (x, y, min(width, x + size), min(height, y + size))
+                bounds = (x, y, min(width, x + size), min(height, y + size))
+                if bounds in seen:
+                    continue
+                seen.add(bounds)
+                yield f"tile{size}-{x}-{y}", bounds
 
 
 def _letterbox(image, np, cv2):
@@ -865,7 +972,7 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
     recovered = _recover_clipped(retained, fragments, threshold)
     confident = [row for row in recovered if row["rejection"] is None]
     if confident:
-        retained = _nms(retained + confident, np, nms_trace, "global", nms_iou)
+        retained = _nms(retained + confident, np, nms_trace, "global_with_recovered", nms_iou)
     retained.sort(key=lambda row: (row["box"][1], row["box"][0]))
     # Chi ha visto un corpo per intero vale come misura anche se non era
     # abbastanza sicuro da diventare un candidato.
@@ -875,6 +982,22 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
         emit(f"YOLO local: {before_preference - len(retained)} clipped detections dropped; "
              "they are larger than the tile overlap, so that view could not measure them, "
              "and a view containing them whole is available.")
+    # Presenza e ingombro restano due fatti distinti. Il frammento sicuro che
+    # ha ceduto il posto ATTESTA che il corpo c'e': la vista che lo contiene
+    # ne da' solo la misura. Se quella vista e' sotto soglia, il corpo esce
+    # comunque come corpo a soglia operativa -- sempre, anche senza revisione
+    # -- con la marca che la sua geometria viene dalla vista piu' debole.
+    # Prima restava «below_confidence»: diventava un'ipotesi da rivedere e
+    # spariva del tutto senza include_review_candidates.
+    attested = [dict(row, rejection=None, geometry_from_weaker_view=True)
+                for row in whole if row.get("attests_presence")
+                and row.get("rejection") == "below_confidence"]
+    if attested:
+        retained = _nms(retained + attested, np, nms_trace, "presence_attested", nms_iou)
+        retained.sort(key=lambda row: (row["box"][1], row["box"][0]))
+        emit(f"YOLO local: {len(attested)} bodies attested by a confident clipped detection "
+             "are kept at the operating threshold; their extent comes from a weaker view "
+             "that contains them whole.")
     if recovered:
         emit(f"YOLO local: {len(recovered)} bodies rebuilt from tile seams "
              f"({len(confident)} at the operating threshold); no view saw them whole, "
@@ -882,11 +1005,12 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
     # Retained detections outrank weak proposals. Excluded classes cannot enter
     # through this route, regardless of audit storage.
     review_proposals = []
+    review_trace = [] if audit_dir is not None else None
     if audit_dir is not None or include_review_candidates:
         review_pool = retained + [row for row in proposals if row["rejection"] == "below_confidence"]
         review_pool += [row for row in recovered if row["rejection"] == "below_confidence"]
         review_proposals = _prefer_complete_views(
-            [row for row in _nms(review_pool, np, iou=nms_iou)
+            [row for row in _nms(review_pool, np, review_trace, "review_pool", nms_iou)
              if row["rejection"] == "below_confidence"],
             whole, overlap)
     # Le proposte deboli non arrivano piu' alla revisione ne' al modello: sulla
@@ -898,8 +1022,9 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
     # piu' di un pezzo -- non perche' il rilevatore dubiti che il corpo ci sia.
     # Scartarli vorrebbe dire perdere proprio i corpi che nessuna tessera
     # contiene per intero, che sono quelli piu' facili da non vedere a occhio.
-    rebuilt = [row for row in review_proposals
-               if row.get("recovered_from") or row.get("attests_presence")]
+    # Le viste che attestano una presenza non passano piu' da qui: sono gia'
+    # fra i corpi a soglia operativa (vedi `attested` sopra).
+    rebuilt = [row for row in review_proposals if row.get("recovered_from")]
     returned = retained + (rebuilt if include_review_candidates else [])
     returned.sort(key=lambda row: (row["box"][1], row["box"][0]))
     components = []
@@ -929,6 +1054,12 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
             "_yolo_origin": ("low_confidence_review" if row["rejection"] == "below_confidence"
                              else "operating_threshold"),
             "_yolo_review_only": row["rejection"] == "below_confidence",
+            # Presenza attestata da un frammento sicuro, ingombro misurato da
+            # una vista che lo contiene per intero ma con meno confidenza.
+            "_yolo_geometry_from_weaker_view": bool(row.get("geometry_from_weaker_view")),
+            **({"_yolo_presence_attested_by": list(row.get("presence_attested_by") or ()),
+                "_yolo_presence_confidence": row.get("presence_confidence")}
+               if row.get("geometry_from_weaker_view") else {}),
         })
     if audit_dir is not None:
         audit = dict(info, audit_schema_version=2,
@@ -943,13 +1074,19 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
                              "raw_proposal_min_confidence": _AUDIT_CONFIDENCE,
                              "include_review_candidates": include_review_candidates,
                              "nms_iou": nms_iou, "class_agnostic": True,
-                             "nms_stages": ["eligible_per_view", "global"],
+                             # Tutte le passate di NMS che girano, nell'ordine;
+                             # review_pool traccia a parte (review_nms_suppressions)
+                             # perche' li' le deboli competono con i corpi tenuti.
+                             "nms_stages": ["eligible_per_view", "global",
+                                            "global_with_recovered", "presence_attested",
+                                            "review_pool"],
                              "tile_edge_margin_px": 1, "excluded_classes": sorted(_EXCLUDED),
                              "excluded_class_policy": "retain uncertain competing body class "
                                                       "only at ordinary confidence threshold",
                              "component_limit": None},
                      views=view_records, raw_proposals=proposals,
-                     nms_suppressions=nms_trace, recovered_clipped_fragments=recovered,
+                     nms_suppressions=nms_trace, review_nms_suppressions=review_trace,
+                     recovered_clipped_fragments=recovered,
                      low_confidence_review_proposals=review_proposals,
                      retained_detector_results=retained, components=components)
         emit(f"YOLO local audit: {_write_audit(audit_dir, audit)}")

@@ -1,4 +1,6 @@
-"""Orchestrazione della generazione 3D: chiama freecadcmd in headless.
+"""@brief Orchestrate 3D generation by running freecadcmd headless on a JSON job.
+
+Orchestrazione della generazione 3D: chiama freecadcmd in headless.
 
 Costruisce un JSON con corpo+pin, lo passa a freecad_build_body.py (che gira
 dentro l'interprete Python embedded di FreeCAD) via subprocess, e verifica
@@ -67,6 +69,12 @@ def _match_evidence(component):
         return {}
     fields = ("presence_confidence", "class_confidence", "confidence",
               "_yolo_review_only", "_yolo_origin", "terminal_count",
+              # Identita' della proposta e decisione di presenza: servono a
+              # kicad_models._is_yolo_only_hypothesis per riconoscere per
+              # struttura, non per nome, un'ipotesi del solo rilevatore.
+              "_yolo_proposal_id", "_presence_reviewed_by_user",
+              # Conteggi strutturali di reofori e terminali (3 reofori + aletta).
+              "lead_count", "lead_count_complete",
               "terminal_layout", "terminal_count_basis", "_global_inventory_status", "class",
               # Riferimento asimmetrico osservato: il costruttore lo confronta
               # col baricentro del modello nativo per ricavare il verso.
@@ -115,11 +123,35 @@ def _rectangle_axes(rotation: float) -> tuple[tuple[float, float], tuple[float, 
     return (c, s), (-s, c)
 
 
+def _is_finite_number(value) -> bool:
+    """True for a finite int/float that is not a bool."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def has_finite_geometry(component) -> bool:
+    """@brief Tell whether a ComponentBox has finite position, size and rotation.
+
+    @param component Object with x, y, length, width, height and rotation.
+    @return False when any of them is missing, boolean, NaN or infinite.
+    @note `ComponentBox.is_usable` only checks that the sizes are positive:
+        NaN fails that test, but an infinite size and a NaN/inf position or
+        rotation pass it and used to become invented coordinates (a NaN centre
+        clamped to the board edge, a NaN rotation to the centre).
+    """
+    return all(_is_finite_number(getattr(component, field, None))
+               for field in ("x", "y", "length", "width", "height", "rotation"))
+
+
 def clamp_component_position(
     x: float, y: float, length: float, width: float, rotation: float,
     body_length: float, body_width: float, margin: float = COMPONENT_EDGE_MARGIN_MM,
 ) -> tuple[float, float]:
-    """Tiene il centro di un componente dentro il perimetro del modulo.
+    """@brief Tiene il centro di un componente dentro il perimetro del modulo.
 
     Le stime di posizione dell'estrazione a volte cadono a cavallo del
     bordo (letto vicino al margine della foto, o con un componente grande
@@ -127,7 +159,15 @@ def clamp_component_position(
     qualunque componente di qualunque modulo, non una correzione per un
     pezzo particolare. Proietta il rettangolo ruotato sugli assi X/Y;
     a 90/270 gradi lunghezza e larghezza si scambiano.
+
+    @return (x, y) clampati, in mm.
+    @throws ValueError Se un valore non e' un numero finito: un NaN finiva
+        spinto sul bordo e una rotazione NaN o una lunghezza infinita al
+        centro, cioe' coordinate inventate.
     """
+    if not all(_is_finite_number(value) for value in
+               (x, y, length, width, rotation, body_length, body_width, margin)):
+        raise ValueError("component position, size and rotation must be finite numbers")
     (c, s), _ = _rectangle_axes(rotation)
     footprint_x = abs(c) * length + abs(s) * width
     footprint_y = abs(s) * length + abs(c) * width
@@ -142,7 +182,9 @@ OVERLAP_TOLERANCE_MM = 0.05
 
 
 def find_overlapping_components(components: list) -> list[str]:
-    """Coppie di componenti le cui sagome (gia' clampate, gia' ruotate) si
+    """@brief Return log warnings for pairs of components whose rotated outlines overlap.
+
+    Coppie di componenti le cui sagome (gia' clampate, gia' ruotate) si
     sovrappongono, come avvisi pronti per il log.
 
     Le posizioni vengono dalla stima dell'estrazione, presa componente per
@@ -157,11 +199,19 @@ def find_overlapping_components(components: list) -> list[str]:
     """
     boxes = []
     for component in components:
-        rotation = float(component.get("rotation_deg") or 0.0)
-        length = float(component["length_mm"])
-        width = float(component["width_mm"])
+        try:
+            rotation = float(component.get("rotation_deg") or 0.0)
+            length = float(component["length_mm"])
+            width = float(component["width_mm"])
+            x, y = float(component["x"]), float(component["y"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        # Un valore non finito non ha una sagoma da confrontare: NaN rendeva
+        # falso ogni confronto e la coppia spariva senza avvisi. Il componente
+        # e' gia' escluso a monte; qui non si inventa nulla.
+        if not all(math.isfinite(value) for value in (rotation, length, width, x, y)):
+            continue
         u, v = _rectangle_axes(rotation)
-        x, y = float(component["x"]), float(component["y"])
         corners = [
             (x + a * length / 2 * u[0] + b * width / 2 * v[0],
              y + a * length / 2 * u[1] + b * width / 2 * v[1])
@@ -204,7 +254,9 @@ def _hex_to_rgb(color: str) -> tuple[float, float, float]:
 
 
 def colorize_step(step_text: str, colors: list) -> str:
-    """Aggiunge a uno STEP AP214 un colore per ogni solido, nell'ordine di export.
+    """@brief Add one colour per solid, in export order, to an AP214 STEP text.
+
+    Aggiunge a uno STEP AP214 un colore per ogni solido, nell'ordine di export.
 
     `Part.export` di FreeCAD scrive la sola geometria: senza queste entita' di
     presentazione KiCad e gli altri CAD mostrano tutto in grigio. Per ogni
@@ -261,11 +313,50 @@ def colorize_step(step_text: str, colors: list) -> str:
 
 
 class Cad3DError(Exception):
-    """Errore applicativo: freecadcmd non trovato, o generazione fallita."""
+    """@brief Application error: freecadcmd missing or 3D generation failed or cancelled.
+
+    Errore applicativo: freecadcmd non trovato, o generazione fallita.
+    """
+
+
+def child_environment() -> dict:
+    """@brief Environment for every freecadcmd child launched by this package.
+
+    @return A copy of os.environ with PYTHONDONTWRITEBYTECODE=1.
+    @note The FreeCAD scripts are imported from the program folder, which is
+        read-only once installed: without this the child would try to write
+        __pycache__ next to them (and leave stale bytecode in a checkout).
+    """
+    return dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+
+
+def _output_text(value) -> str:
+    """Decode subprocess output that may be None, bytes or str."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _timeout_error(exc) -> "Cad3DError":
+    """@brief Turn a FreeCAD watchdog timeout into the application's CAD error.
+
+    @param exc subprocess.TimeoutExpired raised by run_logged or subprocess.run.
+    @return Cad3DError carrying the last lines of the child's output, so the
+        interface shows the FreeCAD tail instead of an "unexpected error".
+    """
+    output = _output_text(getattr(exc, "output", None)) + _output_text(getattr(exc, "stderr", None))
+    tail = "\n".join(output.strip().splitlines()[-15:]) or tx("(nessun output)")
+    return Cad3DError(tx("Generazione STEP interrotta: FreeCAD non ha prodotto output per "
+                         "{timeout} s.\n\nOutput freecadcmd:\n{tail}",
+                         timeout=getattr(exc, "timeout", FREECAD_SILENCE_TIMEOUT_S), tail=tail))
 
 
 def find_freecadcmd() -> str:
-    """Cerca freecadcmd: variabile d'ambiente FREECAD_CMD_PATH, poi le
+    """@brief Locate freecadcmd via FREECAD_CMD_PATH or typical installation folders; raise Cad3DError if absent.
+
+    Cerca freecadcmd: variabile d'ambiente FREECAD_CMD_PATH, poi le
     installazioni tipiche di Windows sotto Program Files."""
     env_path = os.environ.get("FREECAD_CMD_PATH")
     if env_path and Path(env_path).is_file():
@@ -506,7 +597,15 @@ def generate_castellated_3d_model(
     component_height = body.height_mm - params.pcb_thickness
 
     components = []
+    # Ogni valore cambiato qui (centro spostato dentro il modulo, altezza
+    # stimata ridotta) e' una correzione di una stima: va detta, non fatta in
+    # silenzio (regola del progetto sulle altezze stimate).
+    placement_notes = []
     for source_row, component in enumerate(params.components):
+        if not has_finite_geometry(component):
+            placement_notes.append(tx("Componente {name}: posizione, rotazione o quote non "
+                                      "finite, escluso.", name=component.name))
+            continue
         if not component.is_usable():
             continue
         # An observed edge-mating connector can legitimately project beyond
@@ -518,6 +617,18 @@ def generate_castellated_3d_model(
                 component.x, component.y, component.length, component.width,
                 component.rotation, params.body_length, params.body_width,
             )
+            if abs(x - component.x) > 1e-9 or abs(y - component.y) > 1e-9:
+                placement_notes.append(tx(
+                    "Componente {name}: centro spostato da ({x0:.2f}, {y0:.2f}) a "
+                    "({x1:.2f}, {y1:.2f}) mm per restare dentro il modulo.",
+                    name=component.name, x0=component.x, y0=component.y, x1=x, y1=y))
+        height = component.height
+        if 0 < component_height < component.height:
+            height = component_height
+            placement_notes.append(tx(
+                "Componente {name}: altezza stimata {height:.2f} mm ridotta a {cap:.2f} mm "
+                "(altezza del corpo meno lo spessore del PCB).",
+                name=component.name, height=component.height, cap=component_height))
         render_kind = component.kind
         if render_kind == "generic" and component.detected_kind:
             render_kind = component.detected_kind
@@ -532,7 +643,7 @@ def generate_castellated_3d_model(
             "kind": render_kind,
             "x": x, "y": y,
             "length_mm": component.length, "width_mm": component.width,
-            "height_mm": min(component.height, component_height) if component_height > 0 else component.height,
+            "height_mm": height,
             "color_hex": component.color_hex, "marking": component.marking,
             "rotation_deg": component.rotation,
             "pin_count": component.pin_count,
@@ -568,12 +679,6 @@ def generate_castellated_3d_model(
             "color_hex": params.component_color_hex,
         })
 
-    # Rilevato PRIMA di chiamare FreeCAD: e' un controllo geometrico sui dati
-    # gia' pronti, non serve costruire il solido per accorgersene, e cosi'
-    # l'avviso arriva anche se la sovrapposizione manda in errore una delle
-    # forme (fillet/taglio che si scontrano) piu' avanti nello script.
-    overlap_warnings = find_overlapping_components(components)
-
     # Modelli 3D reali dalla libreria di KiCad, quando il package e' noto e
     # l'ingombro lo conferma. La risoluzione avviene QUI e non dentro
     # freecad_parts: misurare un modello richiede a sua volta FreeCAD, e non
@@ -601,6 +706,15 @@ def generate_castellated_3d_model(
                         "approssimate.",
                         exc=exc))
 
+    # Rilevato PRIMA di chiamare FreeCAD: e' un controllo geometrico sui dati
+    # gia' pronti, non serve costruire il solido per accorgersene, e cosi'
+    # l'avviso arriva anche se la sovrapposizione manda in errore una delle
+    # forme (fillet/taglio che si scontrano) piu' avanti nello script. DOPO
+    # l'abbinamento, pero': e' li' che le ipotesi del solo rilevatore vengono
+    # escluse dal 3D, e un corpo che non verra' costruito non si sovrappone a
+    # nulla.
+    overlap_warnings = find_overlapping_components(_rendered(components))
+
     from ..services.model_choices import save_candidate_report
     candidate_report = save_candidate_report(output_dir, components)
     result = _run_freecad(
@@ -627,8 +741,14 @@ def generate_castellated_3d_model(
     result["notes"] = ([] if progress else model_notes) + list(result.get("notes", []))
     # La provenienza della distanza dal bordo dei fori passanti non e' un
     # dettaglio: quando e' una stima deve arrivare all'utente, sempre.
-    result["notes"] = inset_notes + result["notes"]
+    result["notes"] = inset_notes + placement_notes + result["notes"]
     return result
+
+
+def _rendered(components):
+    """Components that the FreeCAD script will actually build."""
+    return [component for component in components
+            if component.get("render_3d", True) is not False]
 
 def generate_3d_model(
     pin_params: PinHeaderParams,
@@ -642,7 +762,9 @@ def generate_3d_model(
     model_progress=None,
     cancel=None,
 ) -> dict:
-    """Genera <Nome>.step (e best-effort <Nome>.wrl) in output_dir/<Nome>.3dshapes/.
+    """@brief Generate the STEP (and best-effort WRL) model of a pin header body in output_dir.
+
+    Genera <Nome>.step (e best-effort <Nome>.wrl) in output_dir/<Nome>.3dshapes/.
 
     `fillets` e `face_texts` sono liste di EdgeFilletAnnotation/FaceTextAnnotation
     (kicadgen.cad3d.annotations) applicate al corpo prima dell'export: fillet
@@ -691,6 +813,10 @@ def _generate_populated_tht(params, body, pins, output_dir, **options):
     centre_y = body.offset_y_mm + body.width_mm / 2
     components = []
     for source_row, c in enumerate(body.components or []):
+        if not has_finite_geometry(c):
+            report(tx("Componente {name}: posizione, rotazione o quote non finite, escluso.",
+                      name=c.name))
+            continue
         if not c.is_usable():
             report(tx("Componente {name}: dimensioni non valide, escluso.", name=c.name))
             continue
@@ -737,7 +863,8 @@ def _generate_populated_tht(params, body, pins, output_dir, **options):
         extra_payload={"components": components,
                        "substrate": {"color_hex": "#2f3f1f", "mask_thickness_mm": .02}},
         **options)
-    result["warnings"] = find_overlapping_components(components) + result.get("warnings", [])
+    result["warnings"] = (find_overlapping_components(_rendered(components))
+                          + result.get("warnings", []))
     result["notes"] = [] if progress else notes
     result["candidate_report_path"] = candidate_report
     _reconcile_model_imports(result, components, output_dir)
@@ -873,6 +1000,11 @@ def _run_freecad(
     # trasformare una corsa sana nel silenzio che il watchdog uccide. Una
     # manopola sola, quindi non possono divergere.
     payload["heartbeat_interval_s"] = heartbeat_interval(FREECAD_SILENCE_TIMEOUT_S)
+    # Cartelle delle cache utente (indice dei versi dei modelli nativi): il
+    # figlio non puo' importare kicadgen.app_paths, quindi le riceve qui, con
+    # KICADGEN_DATA_DIR gia' applicato.
+    from . import model_size_cache
+    payload["cache_dirs"] = [str(folder) for folder in model_size_cache.user_cache_dirs()]
 
     # Suffisso non ".json": freecadcmd tenta di aprire come documento ogni
     # argomento extra con estensione che riconosce come formato importabile
@@ -909,6 +1041,8 @@ def _run_freecad(
                 )
             except ProcessCancelled as exc:
                 raise Cad3DError(CAD_ABORT_MESSAGE) from exc
+            except subprocess.TimeoutExpired as exc:
+                raise _timeout_error(exc) from exc
         else:
             # LIMITE DICHIARATO: senza `progress` nessuno legge le righe, quindi
             # qui il timeout resta quello che subprocess.run sa fare -- la
@@ -916,11 +1050,17 @@ def _run_freecad(
             # usata solo da script e prove non interattive, dove non c'e' una
             # modale da informare; l'interfaccia passa sempre `progress`. Per
             # renderlo superfluo servirebbe leggere lo stdout anche qui.
-            result = subprocess.run(
-                [freecadcmd, str(_SCRIPT_PATH), json_path],
-                capture_output=True, text=True, timeout=FREECAD_SILENCE_TIMEOUT_S,
-                creationflags=_CFLAGS,
-            )
+            # Il figlio scrive UTF-8 (stdout riconfigurato, avvisi JSON): il
+            # codec della localita' (cp1252) ne storpiava le lettere accentate.
+            try:
+                result = subprocess.run(
+                    [freecadcmd, str(_SCRIPT_PATH), json_path],
+                    capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    timeout=FREECAD_SILENCE_TIMEOUT_S, creationflags=_CFLAGS,
+                    env=child_environment(),
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise _timeout_error(exc) from exc
     finally:
         try:
             os.unlink(json_path)

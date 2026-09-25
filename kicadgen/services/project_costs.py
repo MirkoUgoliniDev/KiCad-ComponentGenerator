@@ -32,6 +32,21 @@ COSTS_FILE = "ai-costs.json"
 RETRY_ATTEMPTS = 4
 RETRY_FIRST_PAUSE_S = 0.02
 
+#: Lock file next to the cost file: it serializes the read-modify-write of
+#: two application instances (or two threads) on the same project, which
+#: would otherwise both read N calls and both write N + 1.
+LOCK_FILE = COSTS_FILE + ".lock"
+#: Longest wait (s) for the lock before giving up with TimeoutError (an
+#: OSError: the caller keeps the call and writes it later). Short on purpose:
+#: the GUI thread writes the file.
+LOCK_TIMEOUT_S = 0.5
+LOCK_POLL_S = 0.01
+#: A lock older than this (s) is left over by a crashed process and removed.
+#: Heuristic bound, not a measurement: one read-modify-write of this small
+#: file takes milliseconds, so a holder alive for this long does not exist in
+#: practice; a lock-aware file API would make the bound unnecessary.
+LOCK_STALE_S = 30.0
+
 #: Format marker and version; a newer version is refused, not rewritten.
 FORMAT = "kicadgen-ai-costs"
 VERSION = 1
@@ -127,19 +142,67 @@ def add_call(project_dir: Path, record: dict, now: Optional[datetime] = None) ->
     @return The new totals.
     @throws ProjectCostsError When the existing file is not usable: it is
         left untouched and the call is not recorded.
-    @throws OSError When the file stays busy after RETRY_ATTEMPTS attempts;
-        the caller keeps the call and tries again later.
+    @throws OSError When the file stays busy after RETRY_ATTEMPTS attempts, or
+        TimeoutError (an OSError) when another writer holds the lock longer
+        than LOCK_TIMEOUT_S; the caller keeps the call and tries again later.
+    @note The read-modify-write runs under an exclusive lock file
+        (LOCK_FILE), so two instances writing the same project never lose a
+        call to each other.
     """
     pause = RETRY_FIRST_PAUSE_S
+    folder = Path(project_dir)
     for attempt in range(RETRY_ATTEMPTS):
         try:
-            return _add_call_once(Path(project_dir), record, now)
+            with _exclusive_lock(folder):
+                return _add_call_once(folder, record, now)
         except PermissionError:
             if attempt == RETRY_ATTEMPTS - 1:
                 raise
             time.sleep(pause)
             pause *= 2
     raise AssertionError("unreachable")
+
+
+class _exclusive_lock:
+    """Exclusive lock file created with O_CREAT | O_EXCL (atomic on local disks)."""
+
+    def __init__(self, folder: Path):
+        self.path = folder / LOCK_FILE
+        self.handle = None
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + LOCK_TIMEOUT_S
+        while True:
+            try:
+                self.handle = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(self.handle, str(os.getpid()).encode("ascii"))
+                return self
+            except FileExistsError:
+                try:
+                    if time.time() - self.path.stat().st_mtime > LOCK_STALE_S:
+                        os.unlink(self.path)
+                        continue
+                except FileNotFoundError:
+                    continue  # released between the two calls: try again at once
+                except OSError:
+                    pass
+            except PermissionError:
+                # Windows reports a file being deleted by its holder this way.
+                pass
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"{COSTS_FILE}: locked by another writer")
+            time.sleep(LOCK_POLL_S)
+
+    def __exit__(self, *exc_info):
+        try:
+            os.close(self.handle)
+        finally:
+            try:
+                os.unlink(self.path)
+            except OSError:
+                pass
+        return False
 
 
 def _add_call_once(folder: Path, record: dict, now: Optional[datetime]) -> ProjectCosts:

@@ -136,8 +136,11 @@ def test_one_to_one_classes_of_a_remapped_model_land_in_the_detector_column():
     declared = {0: "IC", 1: "LED", 2: "capacitor"}
     mapping = yolo.class_mapping(declared)
     detections = np.zeros((1, 2, 6), np.float32)
+    # Riquadri DIVERSI (contratto aggiornato, fix A8): due righe con lo stesso
+    # riquadro sono la stessa ancora e ora si riuniscono in una colonna sola
+    # (vedi test_one_to_one_rows_of_the_same_anchor_are_merged_*).
     detections[0, 0] = [0, 0, 10, 10, 0.9, 1]   # LED del modello
-    detections[0, 1] = [0, 0, 10, 10, 0.6, 0]   # IC del modello
+    detections[0, 1] = [20, 0, 30, 10, 0.6, 0]  # IC del modello
 
     class Network:
         def __call__(self, tensor):

@@ -339,3 +339,29 @@ def test_observed_terminal_count_is_none_when_observations_disagree():
     disagreeing = dict(_counted(5), terminal_count=6, terminal_layout="two rows",
                        presence_confidence="high")
     assert km.observed_terminal_count(disagreeing) is None
+
+
+def test_a_confirmation_without_angle_keeps_the_confirmed_angle(library):
+    """A later acceptance with no explicit angle must not erase the stored one."""
+    explicit = _accepted(library, R0603, model_selection={
+        "status": "confirmed", "path": str(library / R0603), "rotation_deg": 90.0})
+    store = am.AcceptedModelStore()
+    store.consolidate([explicit], [library])
+    # Same model and signature, accepted again from an automatic match.
+    result = store.consolidate([_accepted(library, R0603, length=1.62)], [library])
+    assert result.confirmed == 1
+    [entry] = store.entries()
+    assert entry["rotation_deg"] == 90.0 and entry["samples"] == 2
+
+
+def test_a_confirmation_with_a_new_explicit_angle_replaces_it(library):
+    """Negative case: an explicit new choice is still the latest choice."""
+    first = _accepted(library, R0603, model_selection={
+        "status": "confirmed", "path": str(library / R0603), "rotation_deg": 90.0})
+    second = _accepted(library, R0603, length=1.62, model_selection={
+        "status": "confirmed", "path": str(library / R0603), "rotation_deg": 180.0})
+    store = am.AcceptedModelStore()
+    store.consolidate([first], [library])
+    store.consolidate([second], [library])
+    [entry] = store.entries()
+    assert entry["rotation_deg"] == 180.0

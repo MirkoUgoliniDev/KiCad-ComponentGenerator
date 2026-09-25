@@ -1,4 +1,4 @@
-"""Generation preferences, edited transactionally before saving."""
+"""@brief Generation preferences, edited transactionally before saving."""
 from PyQt6.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QGroupBox, QHBoxLayout,
     QScrollArea, QVBoxLayout, QWidget,
@@ -94,11 +94,11 @@ class GenerationOptionsDialog(QDialog):
         layout.addWidget(self.buttons)
 
     def include_nc_pins(self):
-        """@brief Provide the include nc pins operation for this workflow."""
+        """@brief Return whether not-connected pins are included in the generated component."""
         return self.include_nc_checkbox.isChecked()
 
     def advanced_user(self):
-        """@brief Provide the advanced user operation for this workflow."""
+        """@brief Return whether advanced-user mode (manual generation, 2D and Generate tabs visible) is checked."""
         return self.advanced_user_checkbox.isChecked()
 
     def silk_pin_labels(self):

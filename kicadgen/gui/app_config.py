@@ -1,4 +1,6 @@
-"""Configurazione applicativa persistente (config.json accanto a main.py).
+"""@brief Persistent application preferences stored in config.json.
+
+Configurazione applicativa persistente (config.json accanto a main.py).
 
 Qui restano le preferenze dell'interfaccia. Prompt e modelli precedenti vengono
 letti solo per la migrazione iniziale al database SQLite dei profili AI;
@@ -28,7 +30,7 @@ CONFIG_PATH = user_data_dir() / "config.json"
 
 
 def config_path() -> Path:
-    """@brief Provide the config path operation for this workflow."""
+    """@brief Return the config.json path, overridable through KICADGEN_CONFIG_PATH."""
     return Path(os.environ.get("KICADGEN_CONFIG_PATH", CONFIG_PATH))
 
 #: SHA-256 dei prompt di sistema che sono stati il default in passato.
@@ -82,7 +84,10 @@ DEFAULTS = {
 
 
 def load_config() -> dict:
-    """Legge config.json, completando le chiavi mancanti con i default."""
+    """@brief Read config.json merged over the defaults; an unreadable file yields the defaults.
+
+    Legge config.json, completando le chiavi mancanti con i default.
+    """
     config = dict(DEFAULTS)
     if config_path().is_file():
         try:
@@ -101,7 +106,9 @@ def load_config() -> dict:
 
 
 def browse_start_dir(config, fallback="") -> str:
-    """Cartella da cui far partire un dialogo di caricamento documenti.
+    """@brief Return the last document folder if it still exists, otherwise `fallback`.
+
+    Cartella da cui far partire un dialogo di caricamento documenti.
 
     Vale l'ultima cartella usata, ma solo se esiste ancora: una cartella
     rimossa o su un disco scollegato aprirebbe il dialogo in un punto morto,
@@ -117,7 +124,9 @@ def browse_start_dir(config, fallback="") -> str:
 
 
 def remember_browse_dir(config, selected) -> None:
-    """Memorizza la cartella del file scelto, aggiornando anche config.json.
+    """@brief Remember the folder of the selected file in `config` and save config.json.
+
+    Memorizza la cartella del file scelto, aggiornando anche config.json.
 
     `config` e' il dizionario vivo della finestra: aggiornarlo qui evita che
     un salvataggio successivo, fatto con la copia in memoria, riscriva sopra
@@ -142,7 +151,7 @@ def remember_browse_dir(config, selected) -> None:
 
 
 def save_config(config: dict) -> None:
-    """@brief Provide the save config operation for this workflow."""
+    """@brief Write the interface preferences to config.json, leaving out the AI profile fields."""
     # AI profiles are persisted only in SQLite after startup migration.
     from ..services.analysis_profiles import PROFILE_FIELDS
     preferences = {k: v for k, v in config.items() if k not in PROFILE_FIELDS}

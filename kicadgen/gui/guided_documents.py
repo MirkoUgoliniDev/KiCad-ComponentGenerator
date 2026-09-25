@@ -1,4 +1,4 @@
-"""Guided document slots with explicit roles and local-copy previews."""
+"""@brief Guided document slots with explicit roles and local-copy previews."""
 from pathlib import Path
 import webbrowser
 
@@ -198,7 +198,7 @@ class GuidedDocuments(QWidget):
         self.refresh()
 
     def store(self):
-        """@brief Provide the store operation for this workflow."""
+        """@brief Return a DocumentSet for the folder currently provided by the `directory` callable."""
         return DocumentSet(self.directory())
 
     def _tr(self, source):
@@ -206,7 +206,9 @@ class GuidedDocuments(QWidget):
         return self.i18n.text(source) if self.i18n is not None else source
 
     def set_busy(self, role, busy):
-        """Mette la card in attesa mentre il file viene copiato e letto.
+        """@brief Show or clear the waiting state of a role card while its file is copied and previewed.
+
+        Mette la card in attesa mentre il file viene copiato e letto.
 
         La copia e' immediata, ma generare l'anteprima costa decine di
         millisecondi per una foto e puo' arrivare a secondi su un PDF: senza

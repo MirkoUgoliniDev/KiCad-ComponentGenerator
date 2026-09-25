@@ -15,12 +15,15 @@ every normal check and fails only once installed.
 kicadgen/app_paths.py           where the program reads and writes (sources vs installed)
 packaging/KiCadGen.spec         PyInstaller: resources, hidden imports, version info
 packaging/KiCadGen.wxs          WiX: product, UpgradeCode, shortcuts, UI, FreeCAD/KiCad search
-scripts/build-windows.ps1       build env, seed DB from git HEAD, icon, PyInstaller, smoke test
-scripts/build-msi.ps1           heat / candle / light
+scripts/build-windows.ps1       build env (+ constraints), seed DB, licenses, icon, PyInstaller, smoke test
+scripts/build-msi.ps1           heat / candle / light; WiX download only with a verified SHA-256
 scripts/publish-release.ps1     version, commit, tag, push
+tools/make_seed_db.py           seed profile DB generated from the code and verified
+tools/collect_licenses.py       license files of the build env + CPython -> _internal\licenses
 tools/make_app_icon.py          SVG -> .ico
 tools/make_installer_assets.py  banner, dialog image, license RTF
-.github/workflows/release.yml   tag -> tests -> MSI -> GitHub Release
+requirements-release-constraints.txt  exact versions of release builds (pip -c)
+.github/workflows/release.yml   tag -> build job (read-only) -> publish job (write) -> Release
 docs/PACKAGING-WINDOWS-MSI.md   and docs/INSTALLATION-WINDOWS.md
 ```
 
@@ -33,7 +36,14 @@ docs/PACKAGING-WINDOWS-MSI.md   and docs/INSTALLATION-WINDOWS.md
   `kicadgen/gui/assets` and the FreeCAD scripts relative to its modules). The
   `kicadgen/cad3d/*.py` files must stay REAL files: freecadcmd runs them.
 - **The UpgradeCode never changes** (`tests/test_packaging.py` guards it).
-- **The seed profile database comes from git HEAD**, never the local copy.
+- **The seed profile database is generated from the code** by
+  `tools/make_seed_db.py` and verified (defaults equal `factory_defaults()`,
+  no local path in its metadata): never the local copy, never the tracked one.
+- **Every bundled component's license ships** in `_internal\licenses`
+  (`tools/collect_licenses.py`); a new bundled library needs its entry in
+  `THIRD_PARTY_NOTICES.md` too.
+- **The release workflow keeps write access out of the build job**; the tag
+  goes through the `TAG` environment variable, never `${{ }}` in a script.
 - **The YOLO weights are opt-in** (`-IncludeYoloModel`) until their license
   is clarified.
 - **Uninstall never removes user data** (`%LOCALAPPDATA%\KiCadGen`, `Documents\KiCadGen`).

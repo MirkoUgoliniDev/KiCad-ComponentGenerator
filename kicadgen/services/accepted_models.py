@@ -407,7 +407,8 @@ class AcceptedModelStore:
         @note An entry with the same category, basis, terminal count and SAME
             model within tolerance is confirmed: its envelope becomes the mean
             of the measurements, `samples` grows and the angle becomes the
-            latest choice. A different model for the same signature creates a
+            latest EXPLICIT choice: a confirmation without an explicit angle
+            keeps the stored one instead of erasing it. A different model for the same signature creates a
             new entry, which wins on reuse because it is more recent.
         """
         result = ConsolidationResult()
@@ -450,7 +451,12 @@ class AcceptedModelStore:
                         " WHERE id=?",
                         ((row["long_mm"] * n + sig["long_mm"]) / (n + 1),
                          (row["short_mm"] * n + sig["short_mm"]) / (n + 1),
-                         height, rotation, n + 1, now, source, name, row["id"]))
+                         height,
+                         # Una nuova accettazione senza scelta esplicita
+                         # dell'angolo non e' una scelta di "nessun angolo":
+                         # l'angolo confermato in precedenza resta valido.
+                         rotation if rotation is not None else row["rotation_deg"],
+                         n + 1, now, source, name, row["id"]))
                     result.confirmed += 1
                 else:
                     db.execute(

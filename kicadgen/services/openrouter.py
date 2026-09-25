@@ -46,6 +46,10 @@ DEFAULT_MODEL = "anthropic/claude-opus-5"
 
 #: Cache locale dell'elenco modelli (e' lungo ~1 MB e cambia di rado).
 MODELS_CACHE_PATH = user_data_dir() / ".openrouter_models.json"
+#: File name of the cache inside the user data directory; `_models_cache_path`
+#: resolves it at use time, so a data directory chosen after import is honoured.
+_MODELS_CACHE_NAME = ".openrouter_models.json"
+_IMPORT_TIME_CACHE_PATH = MODELS_CACHE_PATH
 MODELS_CACHE_TTL_S = 24 * 3600
 
 # Header opzionali di OpenRouter: identificano l'applicazione chiamante
@@ -79,17 +83,29 @@ class OpenRouterError(Exception):
     """@brief Report an OpenRouter failure without exposing request content.
 
     @param message Privacy-safe diagnostic text.
-    @param retryable Whether one controlled application retry may be attempted.
+    @param retryable Whether the failure is transient (timeout, conflict, rate
+        limit, 5xx): the SAME request may succeed after a backoff.
+    @param retry_after Provider-requested wait in seconds (Retry-After
+        header), or None when not given or not parseable.
+    @param compatibility Whether the provider rejected the request FORM
+        (HTTP 400 about tool_choice), so one retry in the portable
+        required-tool form may succeed. A plain 400 is neither retryable nor
+        compatibility: repeating an invalid request only pays for the refusal.
     """
 
-    def __init__(self, message: str, *, retryable: bool = False):
+    def __init__(self, message: str, *, retryable: bool = False,
+                 retry_after: Optional[float] = None, compatibility: bool = False):
         super().__init__(message)
         self.retryable = retryable
+        self.retry_after = retry_after
+        self.compatibility = compatibility
 
 
 @dataclass(frozen=True)
 class ModelInfo:
-    """Un modello dell'elenco OpenRouter, con quello che serve per sceglierlo.
+    """@brief OpenRouter catalogue model with prices in USD per million tokens and capabilities.
+
+    Un modello dell'elenco OpenRouter, con quello che serve per sceglierlo.
 
     I prezzi arrivati dall'API sono in dollari per singolo token; qui sono
     gia' convertiti in dollari per milione di token, che e' l'unita' con
@@ -106,21 +122,23 @@ class ModelInfo:
 
     @property
     def supports_images(self) -> bool:
-        """@brief Provide the supports images operation for this workflow."""
+        """@brief Return whether the model accepts image input."""
         return "image" in self.input_modalities
 
     @property
     def supports_pdf(self) -> bool:
-        """@brief Provide the supports pdf operation for this workflow."""
+        """@brief Return whether the model accepts file (PDF) input."""
         return "file" in self.input_modalities
 
     @property
     def is_free(self) -> bool:
-        """@brief Provide the is free operation for this workflow."""
+        """@brief Return whether both prompt and completion prices are zero."""
         return self.prompt_usd_per_mtok <= 0 and self.completion_usd_per_mtok <= 0
 
     def usable_for_datasheets(self) -> bool:
-        """True se il modello puo' fare il lavoro: tool calling + PDF/immagini.
+        """@brief Return whether the model supports tool calling plus PDF or image input for datasheets.
+
+        True se il modello puo' fare il lavoro: tool calling + PDF/immagini.
 
         L'estrazione manda disegni meccanici (immagini o PDF) e pretende la
         risposta come chiamata a uno strumento: un modello senza queste due
@@ -155,7 +173,10 @@ PHOTO_CAPABILITIES = ("tools", "images")
 
 
 def api_key() -> str:
-    """Ritorna la chiave OpenRouter dall'ambiente, o solleva OpenRouterError."""
+    """@brief Return the OpenRouter API key from the environment or raise OpenRouterError.
+
+    Ritorna la chiave OpenRouter dall'ambiente, o solleva OpenRouterError.
+    """
     key = os.environ.get(API_KEY_ENV, "").strip()
     if not key:
         raise OpenRouterError(
@@ -169,7 +190,9 @@ def api_key() -> str:
 
 @dataclass(frozen=True)
 class CreditStatus:
-    """Credito residuo su OpenRouter, visto dai due vincoli indipendenti.
+    """@brief Remaining OpenRouter credit as the minimum of account balance and key limit.
+
+    Credito residuo su OpenRouter, visto dai due vincoli indipendenti.
 
     Il saldo dell'account (``/credits``) e il tetto di spesa della singola
     chiave (``/auth/key``) sono limiti separati e non coincidono: una chiave
@@ -222,18 +245,22 @@ class CreditStatus:
                          total_usage=self.total_usage,
                          total_credits=self.total_credits)
         if self.key_remaining is not None and self.key_remaining != remaining:
-            detail += f"; chiave {self.key_remaining:.2f} USD"
+            detail += tx("; chiave {key_remaining:.2f} USD", key_remaining=self.key_remaining)
         return detail + "."
 
 
 def _calls(count: int) -> str:
-    """@brief Render a call count with the right Italian plural."""
-    return f"{count} chiamata" if count == 1 else f"{count} chiamate"
+    """@brief Render a call count with the singular or plural of the active language."""
+    # Singolare e plurale sono due frasi intere nel catalogo: ogni lingua li
+    # accorda a modo suo.
+    return tx("{count} chiamata", count=count) if count == 1 else tx("{count} chiamate", count=count)
 
 
 @dataclass
 class UsageTotals:
-    """Consuntivo di una elaborazione: chiamate, token e costo effettivo.
+    """@brief Totals of one processing run: calls, tokens and actual cost reported by OpenRouter.
+
+    Consuntivo di una elaborazione: chiamate, token e costo effettivo.
 
     Il costo arriva da OpenRouter con la risposta di ogni chiamata (campo
     ``usage.cost``, in USD), non da una stima sui listini: tiene gia' conto
@@ -337,6 +364,10 @@ def _record_usage(payload: Any) -> None:
     """
     usage = payload.get("usage") if isinstance(payload, dict) else None
     cost = _credit_number((usage or {}).get("cost")) if isinstance(usage, dict) else None
+    # A negative cost is not a refund to subtract from the run: it is a
+    # malformed report, counted as missing exactly like project_costs does.
+    if cost is not None and cost < 0:
+        cost = None
     with _usage_lock:
         _usage_totals.calls += 1
         if cost is None:
@@ -391,7 +422,9 @@ def _get_json(url: str, timeout: int) -> dict:
 
 
 def credit_status(force_refresh: bool = False) -> CreditStatus:
-    """Interroga i due endpoint di credito e ne ricava il vincolo effettivo.
+    """@brief Query both credit endpoints (cached) and return the effective credit constraint.
+
+    Interroga i due endpoint di credito e ne ricava il vincolo effettivo.
 
     I due endpoint sono indipendenti: basta che ne risponda uno perche' il
     controllo abbia comunque un limite da applicare. Solleva OpenRouterError
@@ -445,7 +478,9 @@ def credit_status(force_refresh: bool = False) -> CreditStatus:
 
 def check_credit(minimum_usd: float = MIN_CREDIT_USD, progress=None,
                  force_refresh: bool = False) -> Optional[CreditStatus]:
-    """Verifica il credito PRIMA di spendere; solleva se non basta.
+    """@brief Check the credit before spending; raise OpenRouterError only when it is known to be too low.
+
+    Verifica il credito PRIMA di spendere; solleva se non basta.
 
     Tre esiti distinti, perche' vanno trattati in modo diverso:
 
@@ -495,49 +530,105 @@ def _parse_price(value: Any) -> float:
     return price * 1_000_000 if price > 0 else 0.0
 
 
-def _model_from_payload(raw: dict) -> Optional[ModelInfo]:
-    model_id = raw.get("id")
-    if not model_id:
+def _model_from_payload(raw: Any) -> Optional[ModelInfo]:
+    """One catalog entry as ModelInfo; None for an entry that cannot be used.
+
+    Malformed entries (not an object, id not a string, odd containers) are
+    skipped one by one, so a single bad record never hides the others.
+    """
+    if not isinstance(raw, dict):
         return None
-    pricing = raw.get("pricing") or {}
-    architecture = raw.get("architecture") or {}
+    model_id = raw.get("id")
+    if not isinstance(model_id, str) or not model_id.strip():
+        return None
+    pricing = raw.get("pricing") if isinstance(raw.get("pricing"), dict) else {}
+    architecture = raw.get("architecture") if isinstance(raw.get("architecture"), dict) else {}
+    context = raw.get("context_length")
+    try:
+        context_length = (int(context) if not isinstance(context, bool) and context is not None
+                          and math.isfinite(float(context)) and float(context) > 0 else 0)
+    except (TypeError, ValueError, OverflowError):
+        context_length = 0
+    modalities = architecture.get("input_modalities")
+    parameters = raw.get("supported_parameters")
+    name = raw.get("name")
     return ModelInfo(
         id=model_id,
-        name=raw.get("name") or model_id,
+        name=name if isinstance(name, str) and name else model_id,
         prompt_usd_per_mtok=_parse_price(pricing.get("prompt")),
         completion_usd_per_mtok=_parse_price(pricing.get("completion")),
-        context_length=int(raw.get("context_length") or 0),
-        input_modalities=tuple(architecture.get("input_modalities") or ()),
-        supports_tools="tools" in (raw.get("supported_parameters") or ()),
+        context_length=context_length,
+        input_modalities=tuple(m for m in modalities if isinstance(m, str))
+        if isinstance(modalities, (list, tuple)) else (),
+        supports_tools=isinstance(parameters, (list, tuple)) and "tools" in parameters,
     )
 
 
+def _models_cache_path() -> Path:
+    """Where the model list cache lives NOW.
+
+    MODELS_CACHE_PATH is kept for callers that patch it (tests, tools); when
+    it still holds its import-time default the path is recomputed, so a user
+    data directory configured after import is honoured.
+    """
+    default = _IMPORT_TIME_CACHE_PATH
+    if MODELS_CACHE_PATH != default:
+        return MODELS_CACHE_PATH
+    return user_data_dir() / _MODELS_CACHE_NAME
+
+
+def _models_list(payload: Any) -> Optional[list]:
+    """The model list of a /models payload or cache file; None when unusable.
+
+    Accepts the API envelope {"data": [...]} and the bare list the cache
+    stores; any other shape is unusable rather than an exception.
+    """
+    if isinstance(payload, dict):
+        payload = payload.get("data")
+    return payload if isinstance(payload, list) else None
+
+
 def _load_models_cache(ignore_ttl: bool = False) -> Optional[list[dict]]:
-    """Legge la cache su disco; None se manca, e' illeggibile o e' scaduta."""
-    if not MODELS_CACHE_PATH.is_file():
+    """Legge la cache su disco; None se manca, e' illeggibile, corrotta o scaduta."""
+    path = _models_cache_path()
+    if not path.is_file():
         return None
     try:
         if not ignore_ttl:
-            age = time.time() - MODELS_CACHE_PATH.stat().st_mtime
+            age = time.time() - path.stat().st_mtime
             if age > MODELS_CACHE_TTL_S:
                 return None
-        with open(MODELS_CACHE_PATH, "r", encoding="utf-8") as fh:
-            return json.load(fh)
+        with open(path, "r", encoding="utf-8") as fh:
+            return _models_list(json.load(fh))
     except (OSError, ValueError):
         return None
 
 
 def _write_models_cache(payload: list[dict]) -> None:
+    """Atomic cache write: a temporary file in the same directory, then os.replace.
+
+    An interrupted write can never leave a truncated cache behind; the parent
+    directory is created when missing.
+    """
+    path = _models_cache_path()
+    temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
     try:
-        with open(MODELS_CACHE_PATH, "w", encoding="utf-8") as fh:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(temporary, "w", encoding="utf-8") as fh:
             json.dump(payload, fh)
+        os.replace(temporary, path)
     except OSError:
         # La cache e' un'ottimizzazione: se non si puo' scrivere, pazienza.
-        pass
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
 
 
 def list_models(force_refresh: bool = False) -> list[ModelInfo]:
-    """Elenco dei modelli disponibili su OpenRouter, ordinato per costo.
+    """@brief Return the OpenRouter models sorted by cost, using a one-day disk cache and offline fallback.
+
+    Elenco dei modelli disponibili su OpenRouter, ordinato per costo.
 
     L'endpoint /models e' pubblico (non serve la API key) e restituisce
     prezzi e modalita' di input di ogni modello: e' quello che permette
@@ -553,7 +644,9 @@ def list_models(force_refresh: bool = False) -> list[ModelInfo]:
         request = urllib.request.Request(MODELS_URL, headers=_APP_HEADERS)
         try:
             with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_MODELS_S) as response:
-                payload = json.load(response).get("data") or []
+                payload = _models_list(json.load(response))
+            if payload is None:
+                raise ValueError("unexpected /models payload shape")
         except (urllib.error.URLError, ValueError, OSError) as exc:
             payload = _load_models_cache(ignore_ttl=True)
             if payload is None:
@@ -668,6 +761,34 @@ def _error_message(exc: urllib.error.HTTPError) -> str:
     return f"HTTP {status} {_safe_error_text(exc.reason)}" + _diagnostic_context(status=status)
 
 
+#: HTTP statuses of transient failures: the same request may succeed later.
+#: 400 is deliberately absent (see OpenRouterError.compatibility).
+TRANSIENT_HTTP_STATUSES = frozenset({408, 409, 429, 500, 502, 503, 504})
+
+
+def _retry_after(exc: urllib.error.HTTPError) -> Optional[float]:
+    """Provider Retry-After in seconds (delta-seconds or HTTP date), or None."""
+    try:
+        value = exc.headers.get("Retry-After") if exc.headers is not None else None
+    except Exception:  # noqa: BLE001 - header objects of odd shape are just absent
+        return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        seconds = float(value.strip())
+    except ValueError:
+        try:
+            from email.utils import parsedate_to_datetime
+            from datetime import datetime, timezone
+            when = parsedate_to_datetime(value.strip())
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            seconds = (when - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return None
+    return max(0.0, seconds) if math.isfinite(seconds) else None
+
+
 def call_tool(
     model: str,
     system_prompt: str,
@@ -737,25 +858,33 @@ def call_tool(
         status = exc.code if type(exc.code) is int else 0
         image_sizes = [len(block.get("image_url", {}).get("url", ""))
                        for block in content_blocks if block.get("type") == "image_url"]
+        error_message = _error_message(exc)
         raise OpenRouterError(
             tx("OpenRouter ha risposto con un errore: {error_message} "
                "[request_bytes={n_data}; images={n_image_sizes}; "
                "largest_image_encoded_bytes={max}]",
-               error_message=_error_message(exc),
+               error_message=error_message,
                n_data=len(request.data),
                n_image_sizes=len(image_sizes),
                max=max(image_sizes, default=0)),
-            retryable=status in {400, 408, 409, 429, 500, 502, 503, 504},
+            retryable=status in TRANSIENT_HTTP_STATUSES,
+            retry_after=_retry_after(exc) if status in TRANSIENT_HTTP_STATUSES else None,
+            # Only a 400 whose safe category names the tool_choice parameter is
+            # attributable to the request form that the compatibility retry
+            # changes; any other 400 would be refused again, and paid again.
+            compatibility=status == 400 and "tool_choice" in error_message,
         ) from None
     except urllib.error.URLError as exc:
-        raise OpenRouterError(f"Connessione a OpenRouter fallita: {_safe_error_text(exc.reason)}"
+        raise OpenRouterError(tx("Connessione a OpenRouter fallita: {reason}",
+                                 reason=_safe_error_text(exc.reason))
                               + _diagnostic_context()) from None
     except ValueError as exc:
         raise OpenRouterError(tx("Risposta non decodificabile da OpenRouter.")
                               + _diagnostic_context()) from None
     except OSError as exc:
-        raise OpenRouterError("Connessione a OpenRouter fallita: "
-                              + _safe_error_text(str(exc) if isinstance(exc, TimeoutError) else None)
+        raise OpenRouterError(tx("Connessione a OpenRouter fallita: {reason}",
+                                 reason=_safe_error_text(str(exc) if isinstance(exc, TimeoutError)
+                                                         else None))
                               + _diagnostic_context()) from None
 
     # Prima di tool_arguments, che puo' sollevare: la chiamata e' stata pagata

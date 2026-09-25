@@ -50,14 +50,21 @@ def test_the_yolo_weights_are_never_shipped_by_default():
     assert "$env:KICADGEN_BUNDLE_YOLO_MODEL = '0'" in build
 
 
-def test_the_seed_database_comes_from_git_not_from_the_local_copy():
+def test_the_seed_database_is_generated_from_the_code_not_copied():
+    """Contract changed (fix C2): git HEAD held stale prompts and a developer
+    path in metadata.legacy_backup; the seed is now built by make_seed_db."""
     build = (ROOT / "scripts" / "build-windows.ps1").read_text(encoding="utf-8")
-    assert "git','show','HEAD:data/analysis_profiles.sqlite3'" in build
+    assert "tools\\make_seed_db.py" in build
+    assert "build\\seed\\data\\analysis_profiles.sqlite3" in build
+    assert "git','show'" not in build and "HEAD:data/" not in build
+    spec = (ROOT / "packaging" / "KiCadGen.spec").read_text(encoding="utf-8")
+    assert '(str(SEED / "data" / "analysis_profiles.sqlite3"), "data")' in spec
+    assert '(str(ROOT / "data"' not in spec  # never the repository copy
 
 
 def test_build_outputs_and_environment_are_ignored_by_git():
     ignored = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
-    for entry in (".venv-build/", "dist/", "build/"):
+    for entry in (".venv-build/", "dist/", "build/", "Claude outputs/"):
         assert entry in ignored, entry
 
 

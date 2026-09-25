@@ -7,8 +7,11 @@ KiCadGen uses two free programs, installed separately:
 - **FreeCAD** (freecad.org) — builds the 3D models of the components.
 - **KiCad** (kicad.org) — to check the result and install the libraries.
 
-Install them before or after KiCadGen: it finds them in `C:\Program Files`.
-The installer tells you on its last page if one of them is missing.
+Install them before or after KiCadGen: it finds them in `C:\Program Files`
+(or `Program Files (x86)`), on PATH, or through the `FREECAD_CMD_PATH` and
+`KICAD_CLI_PATH` variables. The installer only looks in Program Files: on its
+last page it says which of them it **may not** have found. If they are
+installed somewhere else, KiCadGen can still find them.
 
 ## 2. Install
 
@@ -37,6 +40,13 @@ The AI analysis needs an OpenRouter API key. For now it is set in a text file:
 
 The key stays on your computer, in your user folder.
 
+The program's messages may refer to `.env.example`: it is the commented
+template of that file. In the installed program it is in the program folder,
+`C:\Program Files\KiCadGen\_internal\.env.example` (or `_internal` under the
+folder you chose); open it with a text editor, copy the lines you need into
+your `%LOCALAPPDATA%\KiCadGen\.env`, and never edit the copy in Program
+Files.
+
 ## 4. Where your files are
 
 | What | Where |
@@ -47,8 +57,10 @@ The key stays on your computer, in your user folder.
 
 ## 5. Update and uninstall
 
-- **Update**: open the newer MSI; it replaces the installed version and keeps
-  your projects and settings.
+- **Update**: open the newer MSI (or a rebuilt MSI of the same version); it
+  replaces the installed version and keeps your projects and settings. The
+  folder you chose at install is proposed again (from the versions that
+  remember it onwards).
 - **Uninstall**: Settings > Apps > KiCadGen > Uninstall. Your projects and
   `%LOCALAPPDATA%\KiCadGen` are **not** removed; delete them yourself if you
   no longer need them.

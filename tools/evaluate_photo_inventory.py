@@ -1,4 +1,4 @@
-"""Offline evaluation of photo_inventory _box coordinates; never calls an API.
+"""@brief Offline evaluation of photo_inventory _box coordinates; never calls an API.
 
 Examples (run from the repository root):
   python tools/evaluate_photo_inventory.py inventory.json --crop 315 117 1435 519
@@ -40,6 +40,14 @@ DEFAULT_REFERENCE = ROOT / "tests" / "fixtures" / "pcb_reference.json"
 
 
 def checked_box(value, label="box", bounds=None):
+    """@brief Validate a finite, non-empty (x0, y0, x1, y1) box.
+
+    @param value Candidate sequence of four numbers.
+    @param label Prefix used in error messages.
+    @param bounds Optional (x0, y0, x1, y1) limits the box must lie within.
+    @return The box as a tuple of floats.
+    @throws ValueError When the box is malformed, inverted or out of bounds.
+    """
     if not isinstance(value, (list, tuple)) or len(value) != 4:
         raise ValueError(f"{label}: expected four coordinates")
     if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in value):
@@ -58,6 +66,10 @@ def checked_box(value, label="box", bounds=None):
 
 
 def positive_number(value, label):
+    """@brief Return `value` when it is a positive finite non-boolean number.
+
+    @throws ValueError Otherwise, naming `label`.
+    """
     if (isinstance(value, bool) or not isinstance(value, (int, float))
             or not math.isfinite(value) or value <= 0):
         raise ValueError(f"{label}: expected a positive finite number")
@@ -65,6 +77,12 @@ def positive_number(value, label):
 
 
 def validate_reference(reference):
+    """@brief Validate the manual reference annotation (schema 1) and return it unchanged.
+
+    @param reference Parsed reference JSON.
+    @return The same reference dictionary.
+    @throws ValueError On unsupported schema, bad image/board sizes, or malformed or duplicate components.
+    """
     if not isinstance(reference, dict) or reference.get("schema_version") != 1:
         raise ValueError("reference: unsupported schema_version")
     image = reference.get("image", {})
@@ -101,6 +119,12 @@ def validate_reference(reference):
 
 
 def normalized_to_original(box, crop):
+    """@brief Map a crop-normalized box to original-photo pixel coordinates.
+
+    @param box Box normalized to the whole calibrated crop.
+    @param crop Crop rectangle in original-photo pixels.
+    @return Box in original-photo pixels.
+    """
     x0, y0, x1, y1 = checked_box(box, "prediction _box", (0, 0, 1, 1))
     cx0, cy0, cx1, cy1 = checked_box(crop, "crop")
     return (cx0 + x0 * (cx1-cx0), cy0 + y0 * (cy1-cy0),
@@ -108,6 +132,7 @@ def normalized_to_original(box, crop):
 
 
 def box_iou(a, b):
+    """@brief Return the intersection-over-union of two (x0, y0, x1, y1) boxes."""
     x0, y0 = max(a[0], b[0]), max(a[1], b[1])
     x1, y1 = min(a[2], b[2]), min(a[3], b[3])
     intersection = max(0, x1-x0) * max(0, y1-y0)
@@ -116,7 +141,10 @@ def box_iou(a, b):
 
 
 def maximum_matching(scores, threshold):
-    """Iterative augmenting paths: maximum cardinality, no recursion/dependencies."""
+    """@brief Match predictions to references one-to-one with maximum cardinality above an IoU threshold.
+
+    Iterative augmenting paths: maximum cardinality, no recursion/dependencies.
+    """
     edges = [sorted((r for r, score in enumerate(row) if score >= threshold),
                     key=lambda r: (-row[r], r)) for row in scores]
     pred_to_ref, ref_to_pred = {}, {}
@@ -147,6 +175,7 @@ def maximum_matching(scores, threshold):
 
 
 def error_summary(values):
+    """@brief Summarize errors as mean, median, RMSE and maximum; all None for an empty list."""
     if not values:
         return {key: None for key in ("mean", "median", "rmse", "max")}
     return {"mean": statistics.mean(values), "median": statistics.median(values),
@@ -154,7 +183,10 @@ def error_summary(values):
 
 
 def evaluate_inventory(reference, predictions, crop, iou_threshold=0.5):
-    """Return auditable localization metrics; reject malformed input, never drop it."""
+    """@brief Compare predicted inventory boxes with the manual reference and report precision, recall and errors.
+
+    Return auditable localization metrics; reject malformed input, never drop it.
+    """
     validate_reference(reference)
     positive_number(iou_threshold, "IoU threshold")
     if iou_threshold > 1:
@@ -235,7 +267,10 @@ def evaluate_inventory(reference, predictions, crop, iou_threshold=0.5):
 
 
 def verify_photo(path, reference):
-    """Verify this fixture's original PNG, without image or network dependencies."""
+    """@brief Check that a file is the reference PNG (size and optional SHA-256) and describe it.
+
+    Verify this fixture's original PNG, without image or network dependencies.
+    """
     data = Path(path).read_bytes()
     if data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR" or len(data) < 24:
         raise ValueError("reference photo must be an original PNG")
@@ -251,6 +286,11 @@ def verify_photo(path, reference):
 
 
 def calibrate_crop(path, reference):
+    """@brief Recompute the calibrated board crop of the reference photo with find_board.
+
+    @return Crop rectangle in original-photo pixels.
+    @throws ValueError When the photo does not match the reference, cannot be decoded or calibrated.
+    """
     import cv2
     import numpy as np
     if str(ROOT) not in sys.path:
@@ -270,7 +310,10 @@ def calibrate_crop(path, reference):
 
 
 def draw_overlay(photo, reference, report, output):
-    """Generated review output only; labels are annotation IDs, not PCB identities."""
+    """@brief Draw references, excluded regions and predictions on a double-size photo and save it.
+
+    Generated review output only; labels are annotation IDs, not PCB identities.
+    """
     import cv2
     import numpy as np
     verify_photo(photo, reference)
@@ -302,7 +345,12 @@ def draw_overlay(photo, reference, report, output):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    """@brief Run the evaluation or reference-review CLI and print or save the JSON report.
+
+    @param argv Optional argument list; None uses sys.argv.
+    @return Process exit code 0; argument and input errors exit through argparse.
+    """
+    parser = argparse.ArgumentParser(description=(__doc__ or "").replace("@brief ", "", 1), formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("inventory", type=Path, nargs="?")
     parser.add_argument("--reference", type=Path, default=DEFAULT_REFERENCE)
     parser.add_argument("--crop", type=float, nargs=4, metavar=("LEFT", "TOP", "RIGHT", "BOTTOM"))

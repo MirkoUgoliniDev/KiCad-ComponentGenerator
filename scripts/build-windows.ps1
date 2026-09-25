@@ -5,13 +5,22 @@ the MSI installer (WiX 3.14).
 
 .DESCRIPTION
 Steps, each one stopping the build on failure:
-  1. dedicated build environment .venv-build (never the development .venv);
-  2. initial profile database taken from git HEAD (never the local copy,
-     which holds the developer's own profiles and translations);
-  3. application icon rendered from kicadgen/gui/assets/app-icon.svg;
-  4. PyInstaller one-folder build into dist\KiCadGen;
-  5. smoke test: KiCadGen.exe --check-runtime must exit with 0;
-  6. (-Package msi) MSI into dist\KiCadGen-<version>.msi.
+  1. dedicated build environment .venv-build (never the development .venv),
+     recreated when its Python is not 3.13, with the exact versions of
+     requirements-release-constraints.txt;
+  2. initial profile database generated from the code by
+     tools/make_seed_db.py (never a copy of data/analysis_profiles.sqlite3,
+     which can hold stale defaults and developer metadata) and verified;
+  3. license files of the build environment and of CPython collected by
+     tools/collect_licenses.py into build\licenses (shipped as
+     _internal\licenses);
+  4. application icon rendered from kicadgen/gui/assets/app-icon.svg;
+  5. PyInstaller one-folder build into dist\KiCadGen;
+  6. smoke test: KiCadGen.exe --check-runtime must exit with 0;
+  7. (-Package msi) MSI into dist\KiCadGen-<version>.msi.
+
+The caller's current location is restored when the script ends, also on
+failure.
 
 Never test the installer by installing it on the development machine:
 use a virtual machine or Windows Sandbox.
@@ -33,7 +42,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path $PSScriptRoot -Parent
-Set-Location $Root
+# PyInstaller and the tools resolve paths from the repository root; the
+# caller's location comes back in the finally block at the end.
+Push-Location $Root
+try {
 
 function Assert-LastCommand([string]$description) {
     if ($LASTEXITCODE -ne 0) {
@@ -70,6 +82,18 @@ function Find-BasePython {
     throw 'Python 3.13 not found. Install it or set KICADGEN_BUILD_PYTHON to its python.exe.'
 }
 
+function Test-BuildPython {
+    # An existing .venv-build made with another Python (e.g. before an
+    # upgrade) would build a different runtime than the one documented.
+    if (-not (Test-Path $python)) { return $false }
+    $answer = & $python -c "import sys; print(sys.version_info[:2] == (3, 13))" 2>$null
+    return ($answer -eq 'True')
+}
+
+if ((Test-Path $venv) -and -not (Test-BuildPython)) {
+    Write-Host '.venv-build is not a Python 3.13 environment: recreating it...' -ForegroundColor Yellow
+    Remove-Item -Recurse -Force $venv
+}
 if (-not (Test-Path $python)) {
     $base = Find-BasePython
     Write-Host "Creating the build environment .venv-build with $base..."
@@ -77,21 +101,24 @@ if (-not (Test-Path $python)) {
     Assert-LastCommand 'Creating .venv-build'
 }
 Write-Host 'Installing build requirements...'
-& $python -m pip install --disable-pip-version-check -q -r (Join-Path $Root 'requirements-build.txt')
+& $python -m pip install --disable-pip-version-check -q -r (Join-Path $Root 'requirements-build.txt') `
+    -c (Join-Path $Root 'requirements-release-constraints.txt')
 Assert-LastCommand 'Installing requirements-build.txt'
 
-# -- 2. Initial profile database from git HEAD ---------------------------------
-$seed = Join-Path $Root 'build\seed\data'
-New-Item -ItemType Directory -Force -Path $seed | Out-Null
-# Bytes written by Python: a PowerShell redirection would re-encode the binary.
-& $python -c "import subprocess,sys; open(sys.argv[1],'wb').write(subprocess.check_output(['git','show','HEAD:data/analysis_profiles.sqlite3']))" (Join-Path $seed 'analysis_profiles.sqlite3')
-Assert-LastCommand 'Extracting data/analysis_profiles.sqlite3 from git HEAD'
+# -- 2. Initial profile database generated from the code -------------------------
+$seed = Join-Path $Root 'build\seed\data\analysis_profiles.sqlite3'
+& $python (Join-Path $Root 'tools\make_seed_db.py') $seed
+Assert-LastCommand 'Generating the seed profile database (tools\make_seed_db.py)'
 
-# -- 3. Icon ---------------------------------------------------------------------
+# -- 3. License files --------------------------------------------------------------
+& $python (Join-Path $Root 'tools\collect_licenses.py') (Join-Path $Root 'build\licenses')
+Assert-LastCommand 'Collecting the license files (tools\collect_licenses.py)'
+
+# -- 4. Icon ---------------------------------------------------------------------
 & $python (Join-Path $Root 'tools\make_app_icon.py') (Join-Path $Root 'packaging\KiCadGen.ico')
 Assert-LastCommand 'Rendering the application icon'
 
-# -- 4. PyInstaller ---------------------------------------------------------------
+# -- 5. PyInstaller ---------------------------------------------------------------
 if ($IncludeYoloModel) {
     if (-not (Test-Path (Join-Path $Root 'models\pcb_yolov8s.onnx'))) { throw 'models\pcb_yolov8s.onnx not found.' }
     Write-Host 'Including the YOLO weights (license must allow redistribution).' -ForegroundColor Yellow
@@ -106,7 +133,7 @@ Assert-LastCommand 'PyInstaller build'
 $exe = Join-Path $Root 'dist\KiCadGen\KiCadGen.exe'
 if (-not (Test-Path $exe)) { throw "Executable not produced: $exe" }
 
-# -- 5. Smoke test ---------------------------------------------------------------
+# -- 6. Smoke test ---------------------------------------------------------------
 Write-Host 'Checking the executable (--check-runtime)...'
 $check = Start-Process -FilePath $exe -ArgumentList '--check-runtime' -Wait -PassThru -NoNewWindow
 if ($check.ExitCode -ne 0) { throw "KiCadGen.exe --check-runtime failed (exit $($check.ExitCode))." }
@@ -114,6 +141,10 @@ Write-Host "Executable ready: $exe" -ForegroundColor Green
 
 if ($Package -eq 'app-image') { return }
 
-# -- 6. MSI (phase 3) --------------------------------------------------------------
+# -- 7. MSI --------------------------------------------------------------
 & (Join-Path $PSScriptRoot 'build-msi.ps1') -Version $version
 Assert-LastCommand 'Building the MSI'
+}
+finally {
+    Pop-Location
+}

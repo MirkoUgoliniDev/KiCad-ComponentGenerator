@@ -1,4 +1,4 @@
-"""Optional separation of visible metal leads from solder, on fixed geometry."""
+"""@brief Optional separation of visible metal leads from solder, on fixed geometry."""
 from copy import deepcopy
 import json
 
@@ -23,7 +23,7 @@ PROMPT = (
 
 
 def separation_tool():
-    """@brief Provide the separation tool operation for this workflow."""
+    """@brief Return the separate_visible_leads tool schema for lead boxes inside fixed terminal envelopes."""
     props = dict(id={'type':'integer'}, resolved={'type':'boolean'},
         confidence={'type':'string','enum':['high','low']},
         lead_bbox={'type':'array','items':{'type':'number'},
@@ -43,7 +43,7 @@ def _frame_box(box, source, destination):
 
 
 def refine_leads(photo_png, components, model, call, log, cache_dir=None, system_prompt=None):
-    """Only attach optional lead_detail; preserve every existing field on failure."""
+    """@brief Only attach optional lead_detail; preserve every existing field on failure."""
     import cv2
     import numpy as np
     from .photo_grounding import cached_call

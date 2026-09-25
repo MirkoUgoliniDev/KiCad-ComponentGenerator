@@ -203,8 +203,31 @@ def test_both_edit_review_copies_open_the_component_review(window, monkeypatch):
     le uniche due copie: riga in fondo alla scheda Progetto e riga in fondo
     alla scheda Modello 3D.
     """
+    # CONTRATTO CORRETTO il 2026-09-25: prima il segnale veniva scollegato e
+    # ricollegato a mano al sensore, quindi la prova non poteva fallire per un
+    # collegamento sbagliato. Ora il collegamento resta quello della finestra
+    # e si osserva l'effetto del gestore VERO: `_show_photo_comparison`, con
+    # la foto in memoria, costruisce un PhotoReviewDialog e lo esegue. Il
+    # dialogo e' sostituito a livello di modulo (il gestore lo legge dal
+    # modulo a ogni chiamata) da uno che registra l'apertura e torna subito.
+    from PyQt6.QtCore import pyqtSignal
+    from PyQt6.QtWidgets import QDialog
+
     calls = []
-    monkeypatch.setattr(window, "_show_photo_comparison", lambda *a, **k: calls.append(True))
+
+    class _RecordingReview(QDialog):
+        components_applied = pyqtSignal(list)
+
+        def __init__(self, png, components, length, width, parent=None):
+            super().__init__(parent)
+            self._items = []
+            self.png = png
+
+        def exec(self):
+            calls.append(self.png == b"photo")
+            return 0
+
+    monkeypatch.setattr(gui, "PhotoReviewDialog", _RecordingReview)
     window._photo_png = b"photo"
     window._set_review_buttons_enabled(True)
     # Il tab Modello 3D e' spento finche' non c'e' un modello: si riaccende
@@ -220,12 +243,6 @@ def test_both_edit_review_copies_open_the_component_review(window, monkeypatch):
         # comando collegato due volte -- il difetto tipico di un pulsante
         # ricostruito senza togliere il precedente.
         assert button.receivers(button.clicked) == 1, "un comando, un collegamento"
-        # Il collegamento vero punta al metodo originale (Qt tiene il bound
-        # method creato al momento della connessione, che monkeypatch non
-        # raggiunge): per osservare il clic senza aprire la revisione vera si
-        # sostituisce il collegamento con il sensore.
-        button.clicked.disconnect()
-        button.clicked.connect(window._show_photo_comparison)
         button.click()
     assert calls == [True, True]
 

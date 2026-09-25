@@ -342,14 +342,19 @@ def _index_path(library: Path) -> Path:
     beside = library / INDEX_FILENAME
     if os.access(library, os.W_OK):
         return beside
-    cache = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".cache") / "kicadgen"
-    return cache / INDEX_FILENAME
+    return model_size_cache.user_cache_dirs()[0] / INDEX_FILENAME
 
 
 def _index_paths(library):
-    """Try actual cache writes, not just os.access, before falling back to user data."""
-    user_cache = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".cache") / "kicadgen" / INDEX_FILENAME
-    return list(dict.fromkeys((_index_path(library), library / INDEX_FILENAME, user_cache)))
+    """Try actual cache writes, not just os.access, before falling back to user data.
+
+    The user-level fallbacks follow `model_size_cache.user_cache_dirs`, so
+    KICADGEN_DATA_DIR and the installed layout are honoured; the historic
+    %LOCALAPPDATA%\\kicadgen index stays in the list, readable, and migrates
+    on the next save.
+    """
+    user_caches = [folder / INDEX_FILENAME for folder in model_size_cache.user_cache_dirs()]
+    return list(dict.fromkeys((_index_path(library), library / INDEX_FILENAME, *user_caches)))
 
 
 def load_index(library: Optional[Path] = None) -> dict:
@@ -702,37 +707,38 @@ def _partial_measurements(progress_path: Path) -> dict:
 def measure_models(paths, timeout: int = 300, *, cancel=None) -> dict:
     """@brief Measure model body and total X/Y/Z dimensions in mm using FreeCAD.
 
-    Una sola invocazione per l'intero lotto: aprire un processo per file
-    costerebbe secondi a pezzo. I modelli illeggibili finiscono a ``None``
-    invece di far fallire il lotto -- un file rotto nella libreria non deve
-    impedire di risolvere gli altri.
+    Una sola invocazione per lotto: aprire un processo per file costerebbe
+    secondi a pezzo. I modelli illeggibili finiscono a ``None`` invece di far
+    fallire il lotto -- un file rotto nella libreria non deve impedire di
+    risolvere gli altri.
 
     Solo STEP: il VRML e' una mesh per la visualizzazione e FreeCAD non lo
     importa come solido.
 
     @param paths Percorsi dei modelli da misurare.
-    @param timeout Secondi concessi all'intero lotto prima di considerarlo fermo.
+    @param timeout Secondi di SILENZIO concessi a un singolo modello: il conto
+        riparte a ogni misura conclusa (una riga in `progress.jsonl`), quindi
+        non e' un budget per l'intero lotto.
     @param cancel Canale di rinuncia: un oggetto con `is_set()` (tipicamente
         `threading.Event`) che il chiamante mette a uno per chiedere la fine
         del lavoro. **None significa non interrompibile**, ed e' il valore
-        predefinito: senza canale questa funzione si comporta esattamente come
-        prima, figlio compreso.
-    @return Mappa percorso -> misura; `{}` quando il lotto non e' utilizzabile
-        (FreeCAD assente, lancio fallito, lotto fermo oltre @p timeout).
+        predefinito.
+    @return Mappa percorso -> misura. Contiene anche le misure concluse prima
+        di un lotto fallito o di un modello fermo; un modello fermo oltre
+        @p timeout vale ``None`` (non misurabile in questa corsa) e il lotto
+        riparte dai modelli che lo seguono. `{}` quando nulla e' stato misurato
+        (FreeCAD assente, lancio fallito).
     @throws MatchingCancelled Quando @p cancel viene messo a uno: il figlio
         `freecadcmd` viene UCCISO -- non abbandonato -- con la stessa logica di
         `process_log.run_logged`, e le misure gia' finite viaggiano
         nell'eccezione (`measured`) perche' chi chiama possa metterle in cache.
+    @note Prima un budget unico di 300 s copriva fino a 64 file e, scaduto,
+        restituiva `{}`: nulla finiva in cache e ogni corsa successiva si
+        fermava di nuovo allo stesso punto. Ora il silenzio si misura per
+        modello e il lavoro gia' fatto sopravvive sempre.
     @note Il canale si guarda ogni `process_log.CANCEL_POLL_INTERVAL_S`: e'
-        la stessa promessa di reattivita' fatta alla costruzione del solido, e
-        la costante e' una sola perche' le due attese sono la stessa attesa.
-        Non basterebbe guardarlo FRA una misura e l'altra: un singolo STEP
-        grande puo' occupare da solo decine di secondi.
+        la stessa promessa di reattivita' fatta alla costruzione del solido.
     """
-    import subprocess
-    import tempfile
-    import time
-
     readable = [str(p) for p in paths if Path(p).suffix.lower() in (".step", ".stp")]
     if not readable:
         return {}
@@ -745,26 +751,60 @@ def measure_models(paths, timeout: int = 300, *, cancel=None) -> dict:
         freecad = find_freecadcmd()
     except Exception:  # noqa: BLE001 - senza FreeCAD si resta senza misure
         return {}
+    measured = {}
+    remaining = list(readable)
+    while remaining:
+        outcome, batch, stopped = _measure_batch(freecad, remaining, timeout, cancel)
+        measured.update(batch)
+        if stopped is not None:
+            stopped.measured = dict(measured)
+            raise stopped
+        if outcome != "stalled":
+            return measured
+        # Il modello in corso quando il silenzio e' scaduto e' il primo non
+        # ancora concluso: lo si dichiara non misurabile in QUESTA corsa e si
+        # riparte dai successivi, che non hanno colpa. Ogni giro toglie almeno
+        # un file, quindi il ciclo termina.
+        pending = [path for path in remaining if path not in batch]
+        if not pending:
+            return measured
+        measured[pending[0]] = None
+        remaining = pending[1:]
+    return measured
+
+
+def _measure_batch(freecad, paths, timeout, cancel):
+    """@brief Run one measuring child with a per-model silence watchdog.
+
+    @param freecad freecadcmd executable.
+    @param paths Models for this child, in order.
+    @param timeout Seconds without a completed measurement before the child
+        is considered stuck.
+    @param cancel Optional cancellation channel (see `measure_models`).
+    @return (outcome, measured, stopped): outcome is "done", "stalled" or
+        "failed"; measured holds every measurement already written to
+        `progress.jsonl` (the whole `out.json` when done); stopped is a
+        MatchingCancelled to raise, or None.
+    """
+    import subprocess
+    import tempfile
+    import time
+
     with tempfile.TemporaryDirectory() as folder:
         base = Path(folder)
-        (base / "in.json").write_text(json.dumps(readable), encoding="utf-8")
+        progress_path = base / "progress.jsonl"
+        (base / "in.json").write_text(json.dumps(paths), encoding="utf-8")
         script = base / "measure.py"
         script.write_text(_MEASURE_SCRIPT, encoding="utf-8")
-        environment = dict(os.environ, KICADGEN_MEASURE_DIR=str(base))
+        # PYTHONDONTWRITEBYTECODE: il figlio non deve lasciare __pycache__
+        # accanto ai moduli, che nell'installazione stanno in sola lettura.
+        environment = dict(os.environ, KICADGEN_MEASURE_DIR=str(base),
+                           PYTHONDONTWRITEBYTECODE="1")
         command = [freecad, str(script)]
-        if cancel is None:
-            try:
-                subprocess.run(command, capture_output=True, text=True,
-                               timeout=timeout, env=environment)
-                return json.loads((base / "out.json").read_text(encoding="utf-8"))
-            except (OSError, ValueError, subprocess.SubprocessError):
-                return {}
-        # Con il canale il figlio va sorvegliato, quindi non si puo' usare
-        # `subprocess.run`: aspetta e basta. L'uscita finisce su file e non su
-        # una pipe perche' nessuno la legge -- una pipe piena bloccherebbe il
-        # figlio, che e' il difetto che questo ramo non deve introdurre.
+        # L'uscita finisce su file e non su una pipe perche' nessuno la legge:
+        # una pipe piena bloccherebbe il figlio.
         log_path = base / "freecad.out"
-        stopped = None
+        outcome, stopped = "failed", None
         try:
             with log_path.open("wb") as sink, subprocess.Popen(
                     command, stdout=sink, stderr=subprocess.STDOUT,
@@ -778,14 +818,22 @@ def measure_models(paths, timeout: int = 300, *, cancel=None) -> dict:
                         pass
                     process.wait()
 
+                def progress_size():
+                    try:
+                        return progress_path.stat().st_size
+                    except OSError:
+                        return 0
+
+                seen = progress_size()
                 deadline = time.monotonic() + timeout
                 while True:
                     try:
                         process.wait(timeout=CANCEL_POLL_INTERVAL_S)
+                        outcome = "done"
                         break
                     except subprocess.TimeoutExpired:
                         pass
-                    if cancel.is_set():
+                    if cancel is not None and cancel.is_set():
                         kill_child()
                         # Letture difensive: un errore nel raccogliere il
                         # bottino non deve trasformare una rinuncia in un
@@ -794,22 +842,31 @@ def measure_models(paths, timeout: int = 300, *, cancel=None) -> dict:
                             tail = log_path.read_text(encoding="utf-8", errors="replace")
                         except OSError:
                             tail = ""
-                        stopped = MatchingCancelled(
-                            command, output=tail,
-                            measured=_partial_measurements(base / "progress.jsonl"))
+                        stopped = MatchingCancelled(command, output=tail)
                         break
-                    if time.monotonic() >= deadline:
+                    size = progress_size()
+                    if size != seen:
+                        # Una misura conclusa: il figlio e' vivo, il conto
+                        # del silenzio riparte per il modello successivo.
+                        seen, deadline = size, time.monotonic() + timeout
+                    elif time.monotonic() >= deadline:
                         kill_child()
-                        # Un lotto fermo resta un lotto FALLITO, come prima:
-                        # non e' una decisione di nessuno, e' una diagnosi.
-                        return {}
-            if stopped is None:
-                return json.loads((base / "out.json").read_text(encoding="utf-8"))
+                        outcome = "stalled"
+                        break
         except (OSError, ValueError, subprocess.SubprocessError):
-            return {}
-    # Fuori dal `try`: una rinuncia non e' un errore di lettura, e non deve
-    # poter essere riassorbita nel verdetto «lotto non utilizzabile».
-    raise stopped
+            return "failed", _partial_measurements(progress_path), None
+        partial = _partial_measurements(progress_path)
+        if outcome == "done":
+            try:
+                complete = json.loads((base / "out.json").read_text(encoding="utf-8"))
+                if isinstance(complete, dict):
+                    return "done", dict(partial, **complete), None
+            except (OSError, ValueError):
+                pass
+            # Uscito senza out.json (FreeCAD fallito a meta'): resta cio' che
+            # e' stato scritto riga per riga.
+            return "failed", partial, None
+        return outcome, partial, stopped
 
 
 def model_sizes(paths, library: Optional[Path] = None, *, cancel=None) -> dict:
@@ -1043,7 +1100,13 @@ def _observed_count(component):
 
 
 def _declared_count(path):
-    """Only count-bearing KiCad package syntax: SOT-23 does NOT mean 23 pins."""
+    """Only count-bearing KiCad package syntax: SOT-23 does NOT mean 23 pins.
+
+    DECLARED CONVENTION: this reads the KiCad library naming convention
+    (KLC), where a package token such as SOIC-8 or QFN-32 carries the terminal
+    count. It is a property of the library's file names, not of a component or
+    brand; a custom model outside that convention simply declares no count.
+    """
     # SOT's first number identifies the package; only a separate variant suffix
     # declares terminals. Bare SOT packages deliberately remain uncounted.
     sot = re.match(r"(?:SOT|SC)[-_]?\d+[-_]([1-9]\d*)(?=[_]|$)", path.stem, re.IGNORECASE)
@@ -1138,6 +1201,8 @@ def _compatible_candidates(paths, component, note):
                         join=','.join(sorted(kinds)),
                         family=family)
         stem = path.stem.upper()
+        # DECLARED CONVENTION: KiCad library folder and package-token names
+        # (KLC), used as the model's declared topology; not a component name.
         is_so = path.parent.name.lower() == "package_so.3dshapes" or bool(
             re.match(r"(?:SOIC|SSOP|TSSOP|MSOP|TSOP|SOP)[-_]", stem))
         is_qfn = bool(re.match(r"(?:QFN|DFN)[-_]", stem))
@@ -1173,6 +1238,8 @@ def _module_total_fits(path, size, component, length_mm, width_mm, tolerance, no
     Ordinary ICs retain their body/lead alternatives.
     """
     component = component or {}
+    # DECLARED CONVENTION: the KiCad library keeps board modules in the
+    # RF_Module.3dshapes folder; the component side uses declared kinds.
     is_module = path.parent.name.lower() == "rf_module.3dshapes" or any(
         str(component.get(key) or "").lower() in ("module", "rf_module", "pcb_module")
         for key in ("kind", "detected_kind", "_detected_kind"))
@@ -1702,16 +1769,7 @@ def _provisional_geometry_choice(component, choices, complete, basis):
             or component.get("_yolo_origin") == "low_confidence_review"
             or component.get("_global_inventory_status") in ("invalid", "rejected")):
         return None
-    morphology = " ".join(str(component.get(key) or "")
-                           for key in ("terminal_layout", "package_evidence", "package"))
-    three_lead_tab = bool(re.search(
-        r"\b(?:three|3)\s+(?:wide\s+)?(?:gull[- ]wing\s+)?leads?\b"
-        r".*\b(?:one|1)\s+(?:large\s+)?(?:rectangular\s+)?tab\b",
-        morphology, re.I | re.S,
-    )) and not bool(re.search(
-        r"\b(?:unknown|unresolved|uncertain|unclear|maybe|possibly|not visible|hidden)\b",
-        morphology, re.I,
-    ))
+    three_lead_tab = _three_leads_one_tab(component)
     # A three-lead body with one large tab is enough to preview the mechanical
     # SOT-223 family even when the electrical class is still unknown.  It is
     # deliberately a geometry-only exception: the report remains provisional
@@ -1863,13 +1921,82 @@ def _band_is_homogeneous(band, length_mm, width_mm):
                for axis in zip(*deviations))
 
 
+#: Verdetti di presenza di chi ha GIUDICATO il corpo (riconciliazione AI).
+_PRESENCE_VERDICTS = ("high", "medium", "low")
+
+
+def _three_leads_one_tab(component: dict) -> bool:
+    """@brief Observed morphology "three ordinary leads plus one tab".
+
+    @param component Component evidence.
+    @return True when the observation describes exactly three leads and a tab.
+    @note Structural first: the inventory schema declares `lead_count`
+        (ordinary leads only) and `terminal_count` (leads INCLUDING a visible
+        tab), so 3 + 1 is `lead_count == 3`, `terminal_count == 4` with a
+        complete lead count. When both counts are present, only the counts
+        decide -- prose cannot override them.
+    @note HEURISTIC, declared: rows that do not carry the counts (older runs,
+        or payloads that forward only the prose fields) fall back to reading
+        the English prose of `terminal_layout`/`package_evidence`/`package`
+        with a pattern, and any hedging word vetoes it. It was written on the
+        SOT-223-like cases of the observed boards; it becomes superfluous once
+        every payload carries `lead_count`/`terminal_count`.
+    """
+    leads, terminals = component.get("lead_count"), component.get("terminal_count")
+    if all(type(value) is int for value in (leads, terminals)):
+        return (type(leads) is int and leads == 3
+                and type(terminals) is int and terminals == 4
+                and component.get("lead_count_complete") is True)
+    morphology = " ".join(str(component.get(key) or "")
+                          for key in ("terminal_layout", "package_evidence", "package"))
+    return bool(re.search(
+        r"\b(?:three|3)\s+(?:wide\s+)?(?:gull[- ]wing\s+)?leads?\b"
+        r".*\b(?:one|1)\s+(?:large\s+)?(?:rectangular\s+)?tab\b",
+        morphology, re.I | re.S,
+    )) and not bool(re.search(
+        r"\b(?:unknown|unresolved|uncertain|unclear|maybe|possibly|not visible|hidden)\b",
+        morphology, re.I,
+    ))
+
+
 def _is_yolo_only_hypothesis(component: dict) -> bool:
-    """Identify detector-only rows which are useful for review, not for 3D."""
+    """@brief Identify detector-only rows which are useful for review, not for 3D.
+
+    @param component Component payload (dict).
+    @return True for a detector proposal nobody has judged yet.
+    @note Structural rule (E11): the row carries a detector identity
+        (`_yolo_proposal_id`) and NO presence verdict -- neither the reconciliation's `presence_confidence` or
+        `_global_inventory_status`, nor the `_presence_reviewed_by_user` field
+        that the detector-only inventory (`photo_inventory`) writes on every
+        row the user chose to keep as inventory, reviewed or not. A confirmed
+        model selection always wins. Renaming a row no longer changes the
+        verdict, in either direction.
+    @note `_yolo_origin` alone is deliberately NOT an identity: payloads that
+        forward it without `_presence_reviewed_by_user` (the GUI evidence list
+        before fix E) would otherwise hide the detector-only inventory the
+        user asked for. The proposal id and the review flag travel together.
+    @note Legacy compatibility, declared: a row saved before these fields
+        reached the 3D payload carries only its detector name ("YOLO candidate
+        N"). When a row has neither a detector identity nor a verdict, that
+        name is the only evidence left and keeps the historic exclusion. It is
+        not a rule on a component or brand name: it is the label the detector
+        itself wrote, and any structural field overrides it.
+    """
+    if (isinstance(component.get("model_selection"), dict)
+            and component["model_selection"].get("status") == "confirmed"):
+        return False
+    proposal = component.get("_yolo_proposal_id")
+    identity = isinstance(proposal, str) and bool(proposal.strip())
+    verdict = (isinstance(component.get("_presence_reviewed_by_user"), bool)
+               or component.get("presence_confidence") in _PRESENCE_VERDICTS
+               or component.get("_global_inventory_status") in (
+                   "validated_hypotheses", "partial"))
+    if verdict:
+        return False
+    if identity:
+        return True
     name = str(component.get("name") or "").strip().lower()
-    return name.startswith("yolo candidate") and not (
-        isinstance(component.get("model_selection"), dict)
-        and component["model_selection"].get("status") == "confirmed"
-    )
+    return name.startswith("yolo candidate")
 
 
 def _switch_group_key(component: dict) -> str:

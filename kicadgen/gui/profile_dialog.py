@@ -1,4 +1,4 @@
-"""SQLite profile CRUD. Editors stage changes locally until explicit Save."""
+"""@brief SQLite profile CRUD. Editors stage changes locally until explicit Save."""
 from pathlib import Path
 import sqlite3
 
@@ -46,7 +46,7 @@ def _find_i18n(widget):
 
 
 def icon_button(text, asset, callback):
-    """@brief Provide the icon button operation for this workflow."""
+    """@brief Create a non-default push button with a 20 px asset icon wired to `callback`."""
     button = QPushButton(text)
     button.setIcon(QIcon(str(ASSETS / asset)))
     button.setIconSize(QSize(20, 20))
@@ -56,7 +56,7 @@ def icon_button(text, asset, callback):
 
 
 def show_info(parent, title, text, *, text_key=None, **values):
-    """@brief Provide the show info operation for this workflow."""
+    """@brief Show a modal read-only information dialog, translated when an i18n catalogue is reachable."""
     i18n = _find_i18n(parent)
     dialog = QDialog(parent)
     dialog.setWindowTitle(

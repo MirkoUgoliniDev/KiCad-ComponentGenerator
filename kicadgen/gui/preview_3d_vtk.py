@@ -1,4 +1,6 @@
-"""Anteprima 3D con VTK/PyVista: renderer con z-buffer reale e interattivo.
+"""@brief Interactive 3D preview based on VTK/PyVista with a real z-buffer.
+
+Anteprima 3D con VTK/PyVista: renderer con z-buffer reale e interattivo.
 
 Sostituisce l'anteprima matplotlib (kicadgen.gui.preview_3d), che usa
 l'algoritmo del pittore ordinando i poligoni per centroide: sulle geometrie
@@ -593,7 +595,9 @@ class Preview3DVtk(QtInteractor):
         super().clear()
 
     def set_pin_numbers(self, enabled: bool) -> None:
-        """Attiva/disattiva le etichette dei pin (restano comunque limitate alla
+        """@brief Enable or disable the pin number labels (still shown only from the pin side).
+
+        Attiva/disattiva le etichette dei pin (restano comunque limitate alla
         vista dal lato piedini)."""
         self.show_pin_numbers = enabled
         self._update_label_visibility()
@@ -644,7 +648,10 @@ class Preview3DVtk(QtInteractor):
         self.show_view("iso")
 
     def fit_view(self) -> None:
-        """Inquadra tutto il componente lasciando un margine."""
+        """@brief Frame the whole component with a margin after resynchronizing the render window size.
+
+        Inquadra tutto il componente lasciando un margine.
+        """
         # VTK puo' avere in cache una dimensione della render window diversa
         # da quella attuale del widget Qt -- capita quando il widget vive
         # dentro un layout che cambia dimensione dopo il primo render.

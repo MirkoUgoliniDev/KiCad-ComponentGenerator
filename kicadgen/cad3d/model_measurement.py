@@ -15,6 +15,7 @@ from os import PathLike
 from pathlib import PurePosixPath
 
 
+# DECLARED CONVENTION (KiCad library naming, KLC).
 # These complete KiCad identifiers describe individual rectangular end-terminated
 # chips, not arbitrary LED/passive parts. Metric is required: vendor suffixes,
 # arrays, RGB, side-view and reverse-mount variants are deliberately not matched.
@@ -70,7 +71,13 @@ def _dimensions(value):
 
 
 def _section_is_not_body(path):
-    """Assemblies/optics/actuators have no body guarantee from one Z section."""
+    """Assemblies/optics/actuators have no body guarantee from one Z section.
+
+    DECLARED CONVENTION: the families are read from the KiCad library naming
+    convention (KLC folder names such as LED_SMD.3dshapes, Button_Switch_*,
+    Connector_*, RF_Module and the matching file prefixes). It classifies the
+    library's own file names, never a component, brand or photographed marking.
+    """
     name, folder = _parts(path)
     folder = folder.removesuffix(".3dshapes")
     return (folder.startswith(("led_", "button_switch", "connector_", "module"))

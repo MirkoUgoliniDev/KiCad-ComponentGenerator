@@ -79,14 +79,23 @@ def fillets():
     """Estrae le funzioni dei raccordi con un _warn che registra."""
     names = {"_edge_name", "_fillet_conflicts", "_apply_fillets", "_fillet_groups",
              "_fillet_orders", "_try_fillet_groups"}
-    constants = {"_FACE_SIDES", "TOL", "_MAX_PERMUTED_FILLET_GROUPS"}
+    # Contratto aggiornato (fix E5): la prova degli ordini batte per il
+    # watchdog del silenzio, quindi servono anche la classe del battito, il
+    # suo intervallo e i moduli standard che usa.
+    constants = {"_FACE_SIDES", "TOL", "_MAX_PERMUTED_FILLET_GROUPS", "_HEARTBEAT_INTERVAL_S"}
+    classes = {"_StepHeartbeat"}
     tree = ast.parse(SRC.read_text(encoding="utf-8"))
     wanted = [node for node in tree.body
               if (isinstance(node, ast.FunctionDef) and node.name in names)
+              or (isinstance(node, ast.ClassDef) and node.name in classes)
               or (isinstance(node, ast.Assign)
                   and any(getattr(t, "id", "") in constants for t in node.targets))]
     warnings = []
-    namespace = {"_warn": lambda template, **values: warnings.append(values)}
+    import sys
+    import threading
+    import time
+    namespace = {"_warn": lambda template, **values: warnings.append(values),
+                 "sys": sys, "threading": threading, "time": time}
     exec(compile(ast.Module(body=wanted, type_ignores=[]), str(SRC), "exec"), namespace)
     namespace["warnings"] = warnings
     return namespace

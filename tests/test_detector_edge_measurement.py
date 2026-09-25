@@ -81,7 +81,10 @@ def test_crop_frame_refuses_quotes_that_do_not_hold():
 DECLARED_EDGE = {"castellated_sides": [
     {"edge": "top", "count": 4, "pitch_mm": 2.54, "pad_length_mm": 1.6,
      "pad_width_mm": 0.9, "offset_mm": 0.0}]}
-DECLARED_MATRIX = {"rows": 2, "cols": 5, "pitch_mm": 2.54, "row_spacing_mm": 2.54}
+# Contratto aggiornato (verifica del 25/09, A2): i contatti di una matrice si
+# collocano solo con gli offset dichiarati del corpo; senza, non si filtra nulla.
+DECLARED_MATRIX = {"rows": 2, "cols": 5, "pitch_mm": 2.54, "row_spacing_mm": 2.54,
+                   "body_offset_x_mm": -1.27, "body_offset_y_mm": -1.27}
 
 
 def test_contact_rects_cover_the_declared_strip_along_its_edge():

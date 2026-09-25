@@ -8,11 +8,26 @@ heat harvests dist\KiCadGen into the AppFiles component group, candle and
 light compile packaging\KiCadGen.wxs with the WixUI and WixUtil extensions.
 WiX is looked for in C:\tools\wix314 and in Program Files; when missing, the
 official 3.14 binaries are downloaded into C:\tools\wix314 (as in the
-employee-scheduling project).
+employee-scheduling project) and used ONLY if their SHA-256 matches the value
+given by the maintainer (-WixSha256 or KICADGEN_WIX_SHA256). The hash is not
+written in this script because it has not been verified against the release
+page; without it the download is refused (fail closed).
+
+light suppresses ICE61 on purpose: MajorUpgrade allows same-version upgrades
+(a rebuilt MSI of the same version replaces the installed one), which ICE61
+reports as a warning.
+
+.PARAMETER Version
+Program version, three numbers.
+
+.PARAMETER WixSha256
+Expected SHA-256 of wix314-binaries.zip, copied by the maintainer from the
+official WiX 3.14.1 release page. Needed only when WiX must be downloaded.
 #>
 param(
     [Parameter(Mandatory = $true)]
-    [string]$Version
+    [string]$Version,
+    [string]$WixSha256 = $env:KICADGEN_WIX_SHA256
 )
 
 $ErrorActionPreference = 'Stop'
@@ -36,11 +51,22 @@ function Find-Wix {
     foreach ($candidate in $candidates) {
         if (Test-Path (Join-Path $candidate 'candle.exe')) { return $candidate }
     }
+    $expected = "$WixSha256".Trim().ToUpperInvariant()
+    if ($expected -notmatch '^[0-9A-F]{64}$') {
+        throw ('WiX 3.14 not found and no valid SHA-256 to verify a download. Install WiX 3.14, ' +
+               'or pass -WixSha256 (or set KICADGEN_WIX_SHA256) with the hash of wix314-binaries.zip ' +
+               'published on https://github.com/wixtoolset/wix3/releases/tag/wix3141rtm.')
+    }
     Write-Host 'WiX 3.14 not found: downloading the official binaries (39 MB)...'
     $target = 'C:\tools\wix314'
-    New-Item -ItemType Directory -Force -Path $target | Out-Null
     $zip = Join-Path $env:TEMP 'wix314-binaries.zip'
     Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip' -OutFile $zip
+    $actual = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToUpperInvariant()
+    if ($actual -ne $expected) {
+        Remove-Item -Force $zip
+        throw "WiX download rejected: SHA-256 $actual differs from the expected $expected."
+    }
+    New-Item -ItemType Directory -Force -Path $target | Out-Null
     Expand-Archive -Path $zip -DestinationPath $target -Force
     if (-not (Test-Path (Join-Path $target 'candle.exe'))) { throw 'WiX download did not produce candle.exe.' }
     return $target
@@ -75,7 +101,7 @@ Assert-LastCommand 'heat (harvesting dist\KiCadGen)'
 Assert-LastCommand 'candle'
 
 & (Join-Path $wix 'light.exe') -nologo -ext WixUIExtension -ext WixUtilExtension `
-    -cultures:en-us -spdb -out $Output (Join-Path $Work 'KiCadGen.wixobj') (Join-Path $Work 'AppFiles.wixobj')
+    -cultures:en-us -spdb -sice:ICE61 -out $Output (Join-Path $Work 'KiCadGen.wixobj') (Join-Path $Work 'AppFiles.wixobj')
 Assert-LastCommand 'light'
 
 $size = [math]::Round((Get-Item $Output).Length / 1MB, 1)

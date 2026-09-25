@@ -295,10 +295,17 @@ which may differ from the code's**. They are listed one by one in
   [CompDetect dataset](https://universe.roboflow.com/dataset-lmrsw/compdetect),
   licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
   The dataset was exported from Roboflow for training; the preprocessing
-  actually applied is recorded in `THIRD_PARTY_NOTICES.md`. The dataset is not
-  redistributed here, and its authors do not endorse this project.
+  actually applied (resize, augmentation, conversion, filtering, class
+  changes) **must be recorded** in `THIRD_PARTY_NOTICES.md` and is still
+  pending. The dataset is not redistributed here, and its authors do not
+  endorse this project.
 - FreeCAD and KiCad are separate programs with their own licenses and are not
   included.
+- The Windows installer also bundles the CPython runtime, the Qt 6 libraries,
+  PyQt6 and the FFmpeg library shipped with OpenCV, each under its own license
+  (PSF-2.0, LGPL-3.0, GPL-3.0, LGPL-2.1); their license files are copied into
+  the installed program's `_internal\licenses` folder, and
+  `THIRD_PARTY_NOTICES.md` lists them with the upstream sources.
 
 Generated footprints, 3D models, and the datasheets and photos you provide may
 have their own licenses or usage restrictions: check them yourself. This

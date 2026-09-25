@@ -1,4 +1,6 @@
-"""Annotazioni di post-elaborazione per il corpo 3D (testo su faccia, fillet su spigolo).
+"""@brief Post-processing annotations for the 3D body: text on a face and fillet on an edge.
+
+Annotazioni di post-elaborazione per il corpo 3D (testo su faccia, fillet su spigolo).
 
 Il corpo e' sempre un parallelepipedo assi-allineato, quindi facce e
 spigoli hanno nomi fissi e prevedibili, selezionabili da una lista (non
@@ -21,6 +23,7 @@ stessa logica di FACE_NAMES/EDGE_NAMES qui sotto.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from ..services.messages import tx
@@ -51,8 +54,21 @@ EDGE_NAMES = (
 )
 
 
+def _positive(value) -> bool:
+    """True for a finite number > 0; NaN and infinity are rejected explicitly."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value) and value > 0
+    except OverflowError:
+        return False
+
+
 def validate_hex_color(value: str, what: str) -> None:
-    """Valida un colore nel formato '#rrggbb'."""
+    """@brief Raise ValueError unless `value` is a '#rrggbb' colour; `what` names it in the message.
+
+    Valida un colore nel formato '#rrggbb'.
+    """
     if not isinstance(value, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", value.strip()):
         raise ValueError(tx("{what} non valido: {value!r} (atteso formato '#rrggbb')",
                             what=what,
@@ -61,7 +77,9 @@ def validate_hex_color(value: str, what: str) -> None:
 
 @dataclass
 class FaceTextAnnotation:
-    """Scritta serigrafata su una faccia del corpo.
+    """@brief Printed text layer laid on one face of the body, exported as its own coloured solid.
+
+    Scritta serigrafata su una faccia del corpo.
 
     Non e' un'incisione: e' uno strato sottile di "vernice" appoggiato sopra la
     superficie (un solido a se', con un colore proprio), come la serigrafia
@@ -83,16 +101,19 @@ class FaceTextAnnotation:
                                 FACE_NAMES=FACE_NAMES))
         if not self.text.strip():
             raise ValueError(tx("Il testo dell'annotazione non puo' essere vuoto."))
-        if self.size_mm <= 0:
+        if not _positive(self.size_mm):
             raise ValueError(tx("La dimensione del testo deve essere > 0."))
-        if self.thickness_mm <= 0:
+        if not _positive(self.thickness_mm):
             raise ValueError(tx("Lo spessore della scritta deve essere > 0."))
         validate_hex_color(self.color_hex, tx("Colore del testo"))
 
 
 @dataclass
 class EdgeFilletAnnotation:
-    """Raccordo (fillet) su uno spigolo del corpo."""
+    """@brief Fillet of a given radius (mm) on one named edge of the body.
+
+    Raccordo (fillet) su uno spigolo del corpo.
+    """
 
     edge: str
     radius_mm: float = 0.5
@@ -103,5 +124,5 @@ class EdgeFilletAnnotation:
             raise ValueError(tx("Spigolo non valido: {edge!r} (ammessi: {EDGE_NAMES})",
                                 edge=self.edge,
                                 EDGE_NAMES=EDGE_NAMES))
-        if self.radius_mm <= 0:
+        if not _positive(self.radius_mm):
             raise ValueError(tx("Il raggio del fillet deve essere > 0."))

@@ -1,4 +1,6 @@
-"""Inventario fotografico: rettangoli locali, conversione metrica e verifica visiva.
+"""@brief Photo inventory: local boxes, metric conversion and visual verification.
+
+Inventario fotografico: rettangoli locali, conversione metrica e verifica visiva.
 
 La geometria usa bounding box normalizzati sul crop (0..1). L'AI non deve
 calcolare offset e scala del modulo. Un passaggio sulla scheda intera conserva
@@ -87,7 +89,7 @@ class InventoryResult:
 
 
 def detection_tool(kinds):
-    """@brief Provide the detection tool operation for this workflow."""
+    """@brief Return the tool schema asking for normalized component boxes with kind, rotation, height and colour."""
     properties = {
         "name": {"type": "string"},
         "kind": {"type": "string", "enum": list(kinds)},
@@ -138,7 +140,10 @@ def detection_tool(kinds):
 
 
 def decode_detections(raw, region, body_length, body_width, source, log):
-    """Converte box crop -> PCB normalizzata -> mm; scarta voci non misurabili."""
+    """@brief Convert crop boxes to board-normalized boxes and millimetres, discarding unmeasurable entries.
+
+    Converte box crop -> PCB normalizzata -> mm; scarta voci non misurabili.
+    """
     result = []
     if not isinstance(raw, list):
         log(tx("{source}: elenco componenti non valido.", source=source))
@@ -264,7 +269,7 @@ def _warn_if_too_coarse(crop_px, body_length, warn):
 
 
 def box_of(item):
-    """@brief Provide the box of operation for this workflow."""
+    """@brief Return the item's normalized `_box`, or its axis-aligned box computed from mm centre and size."""
     if "_box" in item:
         return item["_box"]
     x, y, length, width = (item[k] for k in ("x_mm", "y_mm", "length_mm", "width_mm"))
@@ -273,7 +278,7 @@ def box_of(item):
 
 
 def overlap(a, b):
-    """@brief Provide the overlap operation for this workflow."""
+    """@brief Return (IoU, intersection over the smaller area) of two items' boxes."""
     ax0, ay0, ax1, ay1 = box_of(a)
     bx0, by0, bx1, by1 = box_of(b)
     intersection = max(0, min(ax1,bx1)-max(ax0,bx0))*max(0, min(ay1,by1)-max(ay0,by0))
@@ -334,7 +339,9 @@ def _associate_view(group, previous, containment):
 
 
 def merge_components(groups, log=lambda message: None, containment=False, summary=None):
-    """Associazione uno-a-uno tra viste, con IoU e rapporto area.
+    """@brief Associate detections across views one-to-one using IoU and area ratio.
+
+    Associazione uno-a-uno tra viste, con IoU e rapporto area.
 
     Due pezzi della stessa vista rimangono distinti. Una resistenza accanto a un
     IC non viene assorbita dal raggio proporzionale al lato lungo dell'IC.
@@ -433,7 +440,14 @@ def read_photo(path):
 
 
 def prepare_photo(path, length, width, metadata=None):
-    """@brief Provide the prepare photo operation for this workflow."""
+    """@brief Read a photo, locate the board (deskewing if needed) and return the calibrated crop.
+
+    @param path Photo file.
+    @param length Board length in mm.
+    @param width Board width in mm.
+    @param metadata Optional dictionary updated with source hash, crop box and crop size.
+    @return BGR crop of the board, or None when the photo cannot be read or calibrated.
+    """
     from .photo_refine import find_board
     image = read_photo(path)
     if image is None:
@@ -468,7 +482,7 @@ def prepare_photo(path, length, width, metadata=None):
 
 
 def regions(image):
-    """@brief Provide the regions operation for this workflow."""
+    """@brief Yield (label, normalized region, pixels) for the full view and six overlapping 3x2 crops."""
     h, w = image.shape[:2]
     yield "Vista completa", (0.,0.,1.,1.), image
     # Contesto extra attorno a una griglia 3x2. Il passaggio completo conserva
@@ -523,7 +537,13 @@ def save_inventory_evidence(cache_dir, photo_png, overlay_png, components, log, 
 
 
 def image_block(image):
-    """@brief Provide the image block operation for this workflow."""
+    """@brief Encode an image as a data-URL content block within the 5 MiB base64 provider limit.
+
+    Large images are JPEG-compressed first and downscaled only if still too big.
+    @param image BGR array or already encoded bytes.
+    @return OpenAI-style image_url content block.
+    @throws ValueError When the image cannot be encoded, decoded or compressed.
+    """
     import cv2
     if isinstance(image, bytes):
         encoded_bytes = image
@@ -561,7 +581,7 @@ def image_block(image):
 
 
 def draw_inventory(image, components, use_ids=False):
-    """@brief Provide the draw inventory operation for this workflow."""
+    """@brief Return a PNG of the image with numbered component boxes (orange when uncertain), or None."""
     import cv2
     canvas = image.copy()
     h, w = canvas.shape[:2]
@@ -629,11 +649,15 @@ def measure_proposal_edges(photo, proposals, positions, length_mm, width_mm, log
         sarebbe falso.
     """
     from .contact_zones import contact_rects_mm
-    from .photo_refine import crop_frame, refine_on_frame
-    frame = crop_frame(photo, length_mm, width_mm)
+    from .photo_refine import isotropic_crop_frame, refine_on_frame
+    # Il ritaglio conserva il rapporto della scheda TROVATA, che puo' scostarsi
+    # da quello dichiarato; le proposte sono in mm per asse. Si misura su
+    # un'immagine a pixel quadrati, altrimenti la scala unica della misura
+    # sposterebbe e stirerebbe ogni Y (vedi photo_refine.isotropic_board).
+    image, frame = isotropic_crop_frame(photo, length_mm, width_mm)
     if frame is None:
         return proposals
-    measured, report = refine_on_frame(photo, frame, proposals,
+    measured, report = refine_on_frame(image, frame, proposals,
                                        contact_rects_mm(positions, length_mm, width_mm))
     keys = ('x_mm', 'y_mm', 'length_mm', 'width_mm', 'rotation_deg')
     changed = 0
@@ -893,6 +917,14 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             proposals = detect_yolo_components(photo, length, width, model_path=yolo_model_path,
                                               log=log, audit_dir=audit, include_review_candidates=True,
                                               confidence=yolo_confidence, settings=yolo_settings)
+            report.calibration['detector_proposal_count'] = len(proposals)
+            if not proposals and detector == 'yolo':
+                # Il rilevatore HA girato e non ha trovato nulla: l'enumerazione
+                # a pagamento puo' partire, ma deve dirlo com'e', non come se il
+                # rilevatore non ci fosse (vedi review_global_inventory,
+                # detector_ran).
+                log(tx("Il rilevatore locale non ha trovato corpi: i corpi li enumera il "
+                       "modello di visione, in una sola richiesta."))
         else:
             # Nessun rilevatore locale: la foto va al modello di visione, che
             # enumera i corpi da solo. Stessa richiesta, stesso schema, stessa
@@ -941,6 +973,20 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             log(tx("Revisione dei corpi: {n_kept} proposte tenute su {n_proposals}.",
                    n_kept=len(kept),
                    n_proposals=len(proposals)))
+            report.calibration['reviewed_proposal_count'] = len(kept)
+            if not kept and detector == 'yolo':
+                # Chi ha rivisto ha tolto TUTTO, di proposito: non e' «nessun
+                # rilevatore», e pagare un'enumerazione da zero rifarebbe il
+                # lavoro appena rifiutato. Ci si ferma qui, senza chiamate, e lo
+                # si dice; l'inventario fotografico resta vuoto.
+                warn(tx("Revisione dei corpi: tutte le {n_proposals} proposte sono state "
+                        "tolte; nessuna richiesta a pagamento, l'inventario fotografico "
+                        "resta vuoto.", n_proposals=len(proposals)))
+                report.calibration['detector'] = detector
+                report.calibration['proposal_count'] = 0
+                report.calibration['inventory_strategy'] = 'review-kept-none'
+                announce('', '')
+                return report
             proposals = list(kept)
         if detector == 'yolo_only':
             # Scelta dell'utente (25/09): «si fermi li' e basta, fa vedere solo
@@ -971,7 +1017,8 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         report.components = review_global_inventory(
             photo, proposals, length, width, classifier_model or model, call, log,
             cache_dir, verification_prompt=verification_prompt,
-            extra_instructions=extra_instructions)
+            extra_instructions=extra_instructions,
+            **({'detector_ran': True} if detector in LOCAL_DETECTORS else {}))
         # Il colore si misura QUI e non prima: la riconciliazione fonde e
         # sposta i riquadri, e un colore campionato sulle proposte grezze
         # descriverebbe un rettangolo che non esiste piu'. Il rilevatore e il
@@ -995,7 +1042,8 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                                 report.components, log)
         log(tx("Inventario revisionato: {n_components} ipotesi ",
                n_components=len(report.components))
-            + (tx("da {n_proposals} proposte YOLO ", n_proposals=len(proposals)) if detector in LOCAL_DETECTORS
+            + (tx("da {n_proposals} proposte YOLO ", n_proposals=len(proposals))
+               if detector in LOCAL_DETECTORS and proposals
                else tx("enumerate dal modello di visione "))
             + tx("in una sola richiesta; completezza non certificata. Package, altezze "
                  "e orientamenti dubbi da rivedere."))
@@ -1490,9 +1538,14 @@ def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
     def observe(message):
         seen.append(message)
         log(message)
+    # Un pacchetto venuto dal rilevatore locale dice che il rilevatore HA
+    # girato: con zero proposte il prompt non deve dire il contrario
+    # (verifica del 25/09, A5; il pacchetto vuoto oggi non viene scritto,
+    # ma la frase deve restare vera anche se un giorno lo fosse).
     report.components = review_global_inventory(
         photo, proposals, length, width, model, call, observe, cache_dir,
-        verification_prompt=verification_prompt, extra_instructions=extra_instructions)
+        verification_prompt=verification_prompt, extra_instructions=extra_instructions,
+        detector_ran=detector in LOCAL_DETECTORS)
     replayed = any(kind_of(message) == CACHE_HIT for message in seen)
     if replayed:
         log(tx("Rilancio dell'inventario: proposte e foto identiche a una richiesta "

@@ -49,7 +49,7 @@ print("KICADGEN_STEP_OK", flush=True)
 """
 
 
-def _child_script(tmp_path, flag, steps=400, interval=0.02):
+def _child_script(tmp_path, flag, steps=3000, interval=0.02):
     """@brief Scrive il finto freecadcmd e restituisce (script, file di fine)."""
     script = tmp_path / "fake_freecad_child.py"
     script.write_text(_CHATTY_CHILD.format(steps=steps, interval=interval, flag=flag),
@@ -57,9 +57,12 @@ def _child_script(tmp_path, flag, steps=400, interval=0.02):
     return script
 
 
-def _arm_fake_freecad(monkeypatch, tmp_path, *, steps=400, interval=0.02):
+def _arm_fake_freecad(monkeypatch, tmp_path, *, steps=3000, interval=0.02):
     """@brief Mette al posto di freecadcmd un figlio Python che stampa e dura.
 
+    @note Di norma dura un minuto (3000 x 0.02 s): ben oltre qualunque attesa
+        dei test, cosi' "non e' arrivato in fondo" dipende dall'uccisione e
+        non dalla velocita' della macchina. Ogni test lo termina comunque.
     @return Il percorso del file che il figlio scrive SOLO se arriva in fondo.
     """
     flag = tmp_path / "child-completed.flag"
@@ -188,9 +191,13 @@ def test_run_logged_cancelled_before_the_first_line_never_lets_it_work(tmp_path)
         run_logged(_python_child(f"""
             import time
             from pathlib import Path
-            time.sleep(3)
+            time.sleep(0.5)
             Path(r'{flag}').write_text('x', encoding='utf-8')
         """), log, progress=lambda line: None, timeout=30, cancel=cancel)
+    # Si guarda DOPO il momento in cui un figlio sopravvissuto avrebbe scritto
+    # il file (0.5 s), con margine: controllare subito, con un figlio da 3 s,
+    # passava anche se l'uccisione non fosse avvenuta.
+    time.sleep(1.5)
     assert not flag.exists(), "il figlio ha continuato a lavorare dopo la rinuncia"
 
 

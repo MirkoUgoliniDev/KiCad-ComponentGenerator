@@ -1,4 +1,4 @@
-"""Reobserve visible terminals in a saved calibrated photo inventory (API call).
+"""@brief Reobserve visible terminals in a saved calibrated photo inventory (API call).
 
 The output folder acts as the project: cached AI answers go to
 `<output>/photo-cache`, as `<project>/photo-cache` does in the application
@@ -18,10 +18,10 @@ from kicadgen.services.photo_terminals import observe_terminals
 
 
 def main():
-    """@brief Run the public entry point for this workflow."""
+    """@brief Parse the CLI, reobserve terminals (or leads only) of selected components and save an audit overlay."""
     from dotenv import load_dotenv
     load_dotenv(ROOT / '.env')
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=(__doc__ or "").replace("@brief ", "", 1))
     parser.add_argument('inventory', type=Path)
     parser.add_argument('photo', type=Path)
     parser.add_argument('output', type=Path)

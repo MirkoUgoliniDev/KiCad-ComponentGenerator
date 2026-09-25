@@ -1,4 +1,6 @@
-"""Confronta due modelli di visione sullo STESSO insieme di proposte YOLO.
+"""@brief Compare two vision models on the same set of YOLO proposals (paid API calls, cached).
+
+Confronta due modelli di visione sullo STESSO insieme di proposte YOLO.
 
 Serve a rispondere a una domanda sola: quale modello riconosce meglio tipo,
 quote e orientamento dei componenti? Per poterlo dire, l'unica cosa che cambia
@@ -44,7 +46,7 @@ def parse_arguments(argv=None):
     @param argv Argomenti, o None per quelli del processo.
     @return Namespace con foto, quote, modelli e cartella di uscita.
     """
-    parser = argparse.ArgumentParser(description=__doc__,
+    parser = argparse.ArgumentParser(description=(__doc__ or "").replace("@brief ", "", 1),
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('photo', type=Path, help='Fotografia dall\'alto, non ritagliata.')
     parser.add_argument('--length', type=float, required=True,

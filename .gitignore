@@ -64,3 +64,6 @@ models/*.pt
 Private/
 # Stessa cartella scritta in minuscolo (dataset, annotazioni private): mai su GitHub.
 private/
+
+# Output di lavoro degli agenti Claude: mai su GitHub.
+Claude outputs/

@@ -346,9 +346,17 @@ def test_a_child_that_stops_beating_mid_import_is_killed(tmp_path):
 def test_the_heartbeat_beats_while_the_import_is_stuck(parts, capsys):
     """@brief Positivo: durante un import muto escono righe a intervalli regolari."""
     parts.set_heartbeat_interval(0.05)
+    # Si attende la CONDIZIONE (tre battiti), con una scadenza larga, invece
+    # di contare i battiti in una finestra fissa di 0.3 s: su una macchina
+    # carica il timer puo' ritardare senza che il battito sia rotto.
+    out = ""
     with parts._ImportHeartbeat("/lib/ESP32-S3-WROOM-1U.STEP"):
-        time.sleep(0.3)
-    beats = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+        deadline = time.monotonic() + 10.0
+        while out.count(BEAT_HEAD) < 3 and time.monotonic() < deadline:
+            time.sleep(0.02)
+            out += capsys.readouterr().out
+    out += capsys.readouterr().out
+    beats = [line for line in out.splitlines() if line.strip()]
     assert len(beats) >= 3
     assert all(line.startswith(BEAT_HEAD) for line in beats)
     assert all("ESP32-S3-WROOM-1U.STEP" in line for line in beats)
@@ -447,10 +455,16 @@ def test_stopping_twice_is_harmless(parts, capsys):
     """@brief Negativo: stop() ripetuto non solleva e non lascia uscire altre righe."""
     heartbeat = parts._ImportHeartbeat("/lib/BIG.STEP", interval=0.02)
     heartbeat.start()
-    time.sleep(0.07)
+    # Attesa della condizione (due battiti) con scadenza larga, non di una
+    # finestra fissa da 70 ms che una macchina carica puo' non rispettare.
+    emitted = ""
+    deadline = time.monotonic() + 10.0
+    while emitted.count(BEAT_HEAD) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+        emitted += capsys.readouterr().out
     heartbeat.stop()
     heartbeat.stop()
-    emitted = capsys.readouterr().out
+    emitted += capsys.readouterr().out
     assert emitted.count(BEAT_HEAD) >= 2
     time.sleep(0.08)
     heartbeat.beat_if_due()

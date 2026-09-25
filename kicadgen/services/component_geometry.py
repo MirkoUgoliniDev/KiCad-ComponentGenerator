@@ -1,4 +1,4 @@
-"""Conservative, model-free geometry on a BGR PCB crop.
+"""@brief Conservative, model-free geometry on a BGR PCB crop.
 
 Boxes are normalized ``(left, top, right, bottom)`` in *this crop*, as in
 photo_inventory._box; pixel boxes use exclusive right/bottom boundaries.
@@ -32,7 +32,7 @@ Box = tuple[float, float, float, float]
 
 @dataclass(frozen=True)
 class GeometryConfig:
-    """Scale-relative limits; thresholds are heuristics, not probabilities."""
+    """@brief Scale-relative limits; thresholds are heuristics, not probabilities."""
 
     search_fraction: float = 0.18
     min_side_px: int = 10
@@ -113,7 +113,7 @@ def _iou(a, b):
 
 
 class ComponentGeometry:
-    """Cache image evidence once; use refine_box/propose_candidates repeatedly."""
+    """@brief Cache image evidence once; use refine_box/propose_candidates repeatedly."""
 
     def __init__(self, image: np.ndarray, config: GeometryConfig | None = None):
         if (not isinstance(image, np.ndarray) or image.dtype != np.uint8
@@ -166,7 +166,7 @@ class ComponentGeometry:
                 self._side(y1-1, x0, x1, False, white))
 
     def edge_support(self, bbox: Sequence[float]):
-        """Directional support fractions in left, top, right, bottom order."""
+        """@brief Directional support fractions in left, top, right, bottom order."""
         return self._support(self._pixels(_box(bbox)))
 
     def _cuts_possible_terminal(self, original, candidate):
@@ -190,7 +190,7 @@ class ComponentGeometry:
         return False
 
     def propose_candidates(self) -> tuple[GeometryCandidate, ...]:
-        """Return unclassified image regions. Never add these as mounted parts."""
+        """@brief Return unclassified image regions. Never add these as mounted parts."""
         found = []
         for mask, source in ((self.white, "silkscreen_frame"), (self.edges, "edge_rectangle")):
             contours, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
@@ -222,7 +222,7 @@ class ComponentGeometry:
         return tuple(kept[:self.config.max_proposals])
 
     def refine_box(self, bbox: Sequence[float], neighbors: Sequence[Sequence[float]] = ()) -> GeometryDecision:
-        """Attempt a small correction; abstention returns the exact original box.
+        """@brief Attempt a small correction; abstention returns the exact original box.
 
         ``accepted`` means a local fit passed these heuristics, not that its
         extent/identity is correct. This experimental operation requires review.
@@ -323,7 +323,7 @@ class ComponentGeometry:
 
 def analyze_geometry(image: np.ndarray, detections: Sequence[Mapping], *,
                      config: GeometryConfig | None = None, refine: bool = False) -> GeometryAnalysis:
-    """Analyze ``_box`` detections without changing metadata or metric geometry.
+    """@brief Analyze ``_box`` detections without changing metadata or metric geometry.
 
     Validation is atomic: a malformed detection raises ValueError before any
     decisions are returned. Batch refinements are checked against both original

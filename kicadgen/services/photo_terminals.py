@@ -1,4 +1,4 @@
-"""Observe lead geometry on fixed photograph targets; never infer electrical pins."""
+"""@brief Observe lead geometry on fixed photograph targets; never infer electrical pins."""
 from __future__ import annotations
 
 import math
@@ -27,7 +27,7 @@ PROMPT = (
 
 
 def terminal_tool():
-    """@brief Provide the terminal tool operation for this workflow."""
+    """@brief Return the observe_package_terminals tool schema: body box and terminal boxes per fixed target."""
     # Use the portable tool-schema subset; all geometric constraints are
     # enforced locally by decode_terminal_geometry before a CAD payload exists.
     box = {"type": "array", "items": {"type": "number"},
@@ -66,7 +66,7 @@ def _local_box(box, angle):
 
 
 def target_crop(photo, box):
-    """Return unadorned target pixels and their exact full-photo coordinates.
+    """@brief Return unadorned target pixels and their exact full-photo coordinates.
 
     Pixel rounding is reported explicitly so normalization is never delegated
     to the vision model. Partially outside targets are intersected with the photo.
@@ -112,7 +112,13 @@ def _to_target_frame(entry, image_box, target_box):
 
 
 def decode_terminal_geometry(entry, rotation):
-    """@brief Provide the decode terminal geometry operation for this workflow."""
+    """@brief Validate an observed body and terminals and return them in package-local coordinates.
+
+    @param entry One component answer of observe_package_terminals.
+    @param rotation Component rotation in degrees; must be a multiple of 90.
+    @return Geometry dictionary, or None when unresolved or low confidence.
+    @throws ValueError On non-cardinal rotation, unsupported terminal count or implausible terminals.
+    """
     if entry.get("resolved") is not True or entry.get("confidence") not in ("high", "medium"):
         return None
     if type(rotation) not in (int, float) or not math.isfinite(rotation) or rotation % 90:
@@ -144,7 +150,7 @@ def decode_terminal_geometry(entry, rotation):
 
 
 def observe_terminals(photo_png, components, model, call, log, cache_dir=None, system_prompt=None):
-    """Enrich fixed components independently; missing evidence retains envelopes."""
+    """@brief Enrich fixed components independently; missing evidence retains envelopes."""
     import cv2
     import numpy as np
     from .photo_grounding import cached_call

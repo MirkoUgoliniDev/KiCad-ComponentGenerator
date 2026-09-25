@@ -94,23 +94,42 @@ def test_3d_tab_has_the_same_review_buttons_with_the_same_state(window):  # noqa
 
 
 def test_3d_tab_buttons_trigger_the_same_handlers(window, monkeypatch):  # noqa: F811
+    """@brief Il clic sulle copie del tab 3D arriva ai VERI gestori collegati.
+
+    CONTRATTO CORRETTO il 2026-09-25: la versione precedente scollegava il
+    segnale e lo ricollegava a mano al sensore, quindi passava anche con il
+    pulsante collegato al comando sbagliato o a nessuno. Ora il collegamento
+    resta quello creato dalla finestra; si osserva il gestore vero attraverso
+    la prima cosa che fa, la guardia `_background_work_running()` (letta per
+    attributo a ogni chiamata, quindi raggiungibile da monkeypatch). La
+    guardia risponde «occupato», cosi' il gestore esce subito: nessuna
+    revisione aperta, nessuna spesa. Il nome del chiamante dice QUALE gestore
+    e' partito.
+    """
+    import sys
     calls = []
-    monkeypatch.setattr(window, "_reopen_detector_review", lambda: calls.append("reopen"))
-    monkeypatch.setattr(window, "_relaunch_inventory", lambda: calls.append("relaunch"))
-    # I segnali sono gia' collegati ai metodi originali: si verifica il
-    # collegamento attraverso l'attributo, come fa Qt con i bound method.
+
+    def busy():
+        calls.append(sys._getframe(1).f_code.co_name)
+        return True
+
+    monkeypatch.setattr(window, "_background_work_running", busy)
     window._set_review_buttons_enabled(True)
     page = window.btn_reopen_review_3d
     while page.parentWidget() is not None and page.parentWidget() is not window.tabs:
         page = page.parentWidget()
         page.setEnabled(True)  # come dopo una generazione: il tab 3D e' attivo
-    window.btn_reopen_review_3d.clicked.disconnect()
-    window.btn_reopen_review_3d.clicked.connect(window._reopen_detector_review)
-    window.btn_relaunch_inventory_3d.clicked.disconnect()
-    window.btn_relaunch_inventory_3d.clicked.connect(window._relaunch_inventory)
+    for button in (window.btn_reopen_review_3d, window.btn_relaunch_inventory_3d):
+        assert button.receivers(button.clicked) == 1, "un comando, un collegamento"
     window.btn_reopen_review_3d.click()
     window.btn_relaunch_inventory_3d.click()
-    assert calls == ["reopen", "relaunch"]
+    assert calls == ["_reopen_detector_review", "_relaunch_inventory"]
+    # Negativo: le copie dello stesso comando nella scheda Progetto arrivano
+    # agli stessi gestori, non ad altri (i due comandi non sono scambiati).
+    calls.clear()
+    window.btn_reopen_review.click()
+    window.btn_relaunch_inventory.click()
+    assert calls == ["_reopen_detector_review", "_relaunch_inventory"]
 
 
 def test_the_buttons_sit_in_the_top_bar_of_the_3d_tab(window):  # noqa: F811

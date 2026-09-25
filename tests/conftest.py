@@ -104,3 +104,4 @@ def no_leftover_usage_listener():
     yield
     set_usage_listener(None)
     reset_usage()
+

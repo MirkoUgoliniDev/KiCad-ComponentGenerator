@@ -1,4 +1,4 @@
-"""Explicit document roles per project, with recoverable local copies."""
+"""@brief Explicit document roles per project, with recoverable local copies."""
 import json
 import os
 from pathlib import Path
@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import uuid
 from .messages import tx
+from ..fsutil import replace_file
 
 ROLES = {'pinout': 'Pinout / disposizione contatti', 'top': 'Immagine con quote',
          'hires': 'Foto ad alta risoluzione'}
@@ -41,7 +42,11 @@ class DocumentSet:
         self.path = self.directory / MANIFEST
 
     def read(self):
-        """@brief Provide the read operation for this workflow."""
+        """@brief Read and validate the role manifest; a missing manifest yields an empty one.
+
+        @return Manifest dictionary with `version` and `roles`.
+        @throws DocumentError When the manifest is malformed; the file is left untouched.
+        """
         if not self.path.exists():
             return {'version': 1, 'roles': {}}
         try:
@@ -72,7 +77,7 @@ class DocumentSet:
                 json.dump(data, output, ensure_ascii=False, indent=2)
                 output.flush()
                 os.fsync(output.fileno())
-            os.replace(path, self.path)
+            replace_file(path, self.path)
         finally:
             if os.path.exists(path):
                 os.unlink(path)
@@ -88,7 +93,15 @@ class DocumentSet:
         return directory
 
     def import_file(self, role, source, *, replace=False):
-        """@brief Provide the import file operation for this workflow."""
+        """@brief Copy a validated image or PDF into the project as the document of `role`.
+
+        The previous files are archived first and restored if the update fails.
+        @param role Document role key.
+        @param source File to import, at most 20 MB.
+        @param replace Confirmation that an existing document may be replaced.
+        @return Path of the installed local copy.
+        @throws DocumentError On unknown role, unsupported or unreadable file, or missing confirmation.
+        """
         if role not in ROLES:
             raise DocumentError(tx("Ruolo non riconosciuto."))
         source = Path(source)
@@ -125,7 +138,7 @@ class DocumentSet:
         installed = False
         try:
             shutil.copyfile(source, staged)
-            os.replace(staged, target)
+            replace_file(staged, target)
             installed = True
             data['roles'][role] = {'filename': target.name, 'original_name': source.name, 'unavailable': False}
             self._write(data)
@@ -145,7 +158,11 @@ class DocumentSet:
         return target
 
     def clear(self, role, *, unavailable=False):
-        """@brief Provide the clear operation for this workflow."""
+        """@brief Remove the document of `role` after archiving it, optionally marking it unavailable.
+
+        @return The .history folder holding the previous files, or None when nothing was archived.
+        @throws DocumentError When the role is unknown.
+        """
         if role not in ROLES:
             raise DocumentError(tx("Ruolo non riconosciuto."))
         data = self.read()
@@ -159,7 +176,11 @@ class DocumentSet:
         return archive
 
     def selected(self):
-        """@brief Provide the selected operation for this workflow."""
+        """@brief Return the documents to analyse and their roles.
+
+        @return Tuple (paths, roles) where roles maps each file name to its role.
+        @throws DocumentError When a role is neither loaded nor unavailable, a file is missing, or nothing is loaded.
+        """
         rows = self.read()['roles']
         paths, roles = [], {}
         for role, label in ROLES.items():

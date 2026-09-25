@@ -1,4 +1,6 @@
-"""Ritrova nella foto i bordi reali dei componenti, via edge detection.
+"""@brief Find the real component edges in the photo through edge detection.
+
+Ritrova nella foto i bordi reali dei componenti, via edge detection.
 
 Il modello linguistico stima bene *quali* componenti ci sono ma sbaglia
 spesso *dove* e *come* sono orientati: due stime indipendenti possono
@@ -133,7 +135,10 @@ MORPH_GROWTH_PX = 2.0
 
 @dataclass
 class BoardFrame:
-    """Dove sta la scheda nella foto: centro in px, scala px/mm."""
+    """@brief Board placement in the photo: centre in pixels and px/mm scale.
+
+    Dove sta la scheda nella foto: centro in px, scala px/mm.
+    """
 
     cx: float
     cy: float
@@ -142,12 +147,12 @@ class BoardFrame:
     height_px: float
 
     def to_px(self, x_mm: float, y_mm: float) -> tuple[float, float]:
-        """@brief Provide the to px operation for this workflow."""
+        """@brief Convert board millimetres (origin at centre, Y down) to photo pixels."""
         # Y del footprint verso il basso, come le righe dell'immagine.
         return self.cx + x_mm * self.scale, self.cy + y_mm * self.scale
 
     def to_mm(self, x_px: float, y_px: float) -> tuple[float, float]:
-        """@brief Provide the to mm operation for this workflow."""
+        """@brief Convert photo pixels to board millimetres (origin at centre, Y down)."""
         return (x_px - self.cx) / self.scale, (y_px - self.cy) / self.scale
 
 
@@ -159,7 +164,7 @@ class RefineReport:
     skipped: list = field(default_factory=list)
 
     def summary(self) -> str:
-        """@brief Provide the summary operation for this workflow."""
+        """@brief Return a translated log line summarizing measured and skipped components."""
         if not self.photo:
             return tx("nessuna foto dall'alto utilizzabile per rifinire i componenti (bordi "
                       "misurati dalla vista dall'alto: nessuna trovata)")
@@ -220,7 +225,9 @@ def _texture_mask(image):
 
 
 def deskew_board(image, body_length: float, body_width: float):
-    """Raddrizza la foto quando la scheda e' inquadrata storta.
+    """@brief Rotate a tilted board photo upright, or return None when not needed or not possible.
+
+    Raddrizza la foto quando la scheda e' inquadrata storta.
 
     `find_board` non rettifica la rotazione, per non falsare scala e
     coordinate: tollera percio' meno di un grado. Su una foto scattata a mano
@@ -280,7 +287,10 @@ def deskew_board(image, body_length: float, body_width: float):
 
 
 def find_board(image, body_length: float, body_width: float) -> Optional[BoardFrame]:
-    """Trova il rettangolo della scheda nella foto; None se non e' una vista dall'alto."""
+    """@brief Locate the board rectangle in the photo; None when it is not a top view.
+
+    Trova il rettangolo della scheda nella foto; None se non e' una vista dall'alto.
+    """
     if not all(math.isfinite(v) and v > 0 for v in (body_length, body_width)):
         return None
     expected = body_length / body_width
@@ -492,7 +502,9 @@ def _axis_rotation(angle: float, rw: float, rh: float, short_side_px: float) -> 
 
 def refine_component_edges(image, frame: BoardFrame, component: dict, forbidden=None,
                           margin_mm: Optional[float] = None) -> Optional[dict]:
-    """Cerca i bordi reali di un componente nella foto.
+    """@brief Measure the real edges of one component in the photo, or return None when unclear.
+
+    Cerca i bordi reali di un componente nella foto.
 
     Ritorna {x_mm, y_mm, length_mm, width_mm, rotation_deg} misurati, o
     None se nella finestra non c'e' un contorno abbastanza chiaro e
@@ -589,7 +601,9 @@ def refine_components(
     components: Sequence[dict],
     exclude_rects_mm: Sequence[tuple] = (),
 ) -> tuple[list[dict], RefineReport]:
-    """Rifinisce posizione, ingombro e orientamento di ogni componente
+    """@brief Refine position, size and orientation of each component from the first usable top photo.
+
+    Rifinisce posizione, ingombro e orientamento di ogni componente
     misurandone i bordi nella prima foto dall'alto utilizzabile.
 
     Non tocca nome, tipo, colore, marcatura: solo la geometria, e solo
@@ -615,6 +629,10 @@ def refine_components(
     if frame is None:
         return refined, report
 
+    # Stessa scala su X e Y prima di misurare: find_board accetta un ritaglio
+    # il cui rapporto differisce da quello dichiarato fino a
+    # MAX_BOARD_ASPECT_ERROR, e una scala unica sposterebbe le misure su Y.
+    image, frame = isotropic_board(image, frame, body_length, body_width)
     measured_components, loop_report = refine_on_frame(image, frame, refined, exclude_rects_mm)
     loop_report.photo = report.photo
     return measured_components, loop_report
@@ -632,8 +650,12 @@ def crop_frame(image, body_length: float, body_width: float) -> Optional[BoardFr
         perche' li' il rettangolo scuro piu' grande puo' essere un componente.
         Qui il riferimento si costruisce dalle quote dichiarate e dai pixel del
         ritaglio, senza nessuna ricerca.
-    @note La scala si prende dal lato lungo, come `find_board`: e' il lato su
-        cui l'errore relativo di ritaglio pesa meno.
+    @note La scala si prende dal lato lungo: e' il lato su cui l'errore
+        relativo di ritaglio pesa meno. Vale per ENTRAMBI gli assi, quindi
+        e' corretta solo se il ritaglio ha lo stesso rapporto delle quote
+        dichiarate. `find_board` ne accetta uno diverso fino a
+        MAX_BOARD_ASPECT_ERROR: chi misura su un ritaglio qualsiasi passa
+        prima da `isotropic_crop_frame`, che ricampiona l'immagine.
     """
     if image is None or body_length <= 0 or body_width <= 0:
         return None
@@ -643,6 +665,70 @@ def crop_frame(image, body_length: float, body_width: float) -> Optional[BoardFr
     return BoardFrame(cx=width_px / 2, cy=height_px / 2,
                       scale=width_px / body_length,
                       width_px=float(width_px), height_px=float(height_px))
+
+
+def isotropic_board(image, frame: BoardFrame, body_length: float, body_width: float):
+    """@brief Resample a photo so the board has the same px/mm on both axes.
+
+    @param image BGR photo containing the board.
+    @param frame Board reference in that photo (width_px along X, height_px
+        along Y, both measured on the photo).
+    @param body_length Declared board extent along X, in mm.
+    @param body_width Declared board extent along Y, in mm.
+    @return (image, frame): the inputs themselves when the two axis scales
+        already agree, otherwise a resampled copy of the image and a
+        BoardFrame whose single `scale` holds on X and on Y.
+    @note The detected board rectangle may differ from the declared aspect
+        ratio (find_board accepts up to MAX_BOARD_ASPECT_ERROR). Every other
+        consumer maps pixels to mm per axis (x / length, y / width); the edge
+        measurement works in pixels with ONE scale, so without this step a
+        crop 10% taller than declared would shift and stretch every measured
+        Y. Only the lower-resolution axis is upsampled: no pixel of the photo
+        is thrown away.
+    """
+    if cv2 is None or image is None or frame is None or body_length <= 0 or body_width <= 0:
+        return image, frame
+    extents = (getattr(frame, "width_px", None), getattr(frame, "height_px", None))
+    if not all(isinstance(value, (int, float)) and not isinstance(value, bool)
+               for value in extents):
+        # Riferimento senza estensioni numeriche: non c'e' nulla da cui
+        # ricavare le due scale, quindi non si ricampiona.
+        return image, frame
+    scale_x = extents[0] / body_length
+    scale_y = extents[1] / body_width
+    if not (math.isfinite(scale_x) and math.isfinite(scale_y)) or scale_x <= 0 or scale_y <= 0:
+        return image, frame
+    if abs(scale_x - scale_y) <= 1e-9 * max(scale_x, scale_y):
+        return image, frame
+    target = max(scale_x, scale_y)
+    height, width = image.shape[:2]
+    new_width = max(1, round(width * target / scale_x))
+    new_height = max(1, round(height * target / scale_y))
+    # Fattori effettivi, dopo l'arrotondamento a pixel interi.
+    factor_x, factor_y = new_width / width, new_height / height
+    resized = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+    board_width, board_height = frame.width_px * factor_x, frame.height_px * factor_y
+    return resized, BoardFrame(cx=frame.cx * factor_x, cy=frame.cy * factor_y,
+                               scale=(board_width / body_length + board_height / body_width) / 2,
+                               width_px=board_width, height_px=board_height)
+
+
+def isotropic_crop_frame(image, body_length: float, body_width: float):
+    """@brief Reference of a calibrated board crop, resampled to square pixels if needed.
+
+    @param image Crop in which the board fills the whole image.
+    @param body_length Declared board extent along X, in mm.
+    @param body_width Declared board extent along Y, in mm.
+    @return (image, frame), where frame.scale holds on both axes of the
+        returned image, or (image, None) when the dimensions do not hold.
+    @note Use this, not crop_frame alone, whenever mm are read back from
+        pixels: the calibrated crop keeps the aspect of the detected board,
+        which may differ from the declared one (see isotropic_board).
+    """
+    frame = crop_frame(image, body_length, body_width)
+    if frame is None:
+        return image, None
+    return isotropic_board(image, frame, body_length, body_width)
 
 
 def refine_on_frame(image, frame: BoardFrame, components: Sequence[dict],

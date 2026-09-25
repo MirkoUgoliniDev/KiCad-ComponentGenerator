@@ -4,12 +4,17 @@ The balance comes from OpenRouter's two free status endpoints (no tokens, no
 model call), read in the background. The project cost is the running total
 of `services.project_costs`, updated on every paid call as it happens: the
 worker thread reports the call through a Qt signal, and the file is written
-from the GUI thread, into the project in use (a project cannot change while
-an analysis runs).
+from the GUI thread.
+
+The project a cost belongs to is the project of the RUN that paid it, not the
+project in use when the queued signal arrives: `bind_run_project` captures it
+when a run starts, and the worker-thread listener stamps every record with it
+at the moment of the call. Without a bound run the project in use is taken.
 """
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
@@ -106,11 +111,52 @@ class AiAccountLine(QLabel):
         #: Paid calls not written yet (file busy): (folder, record), written
         #: before the next call. Kept in memory only for this session.
         self._pending = []
+        #: Project of the running analysis, captured by bind_run_project and
+        #: read from worker threads: guarded by a lock.
+        self._run_lock = threading.Lock()
+        self._run_bound = False
+        self._run_project: Optional[Path] = None
         self._bridge = _UsageBridge(self)
         self._bridge.recorded.connect(self._on_paid_call)
-        self._listener = self._bridge.recorded.emit
+        self._listener = self._stamp_and_forward
         openrouter.set_usage_listener(self._listener)
         self.refresh()
+
+    def bind_run_project(self, folder) -> None:
+        """@brief Charge every paid call from now on to `folder`, the project of the run.
+
+        @param folder Project folder captured when the run starts, or None when
+            the project has no name yet (its calls are then logged as not
+            recorded, one line each).
+        @note Call it on the GUI thread right before starting a paid run and
+            `release_run_project` when the run has finished. The folder is
+            attached to each record in the worker thread at the time of the
+            call, so a project switched while queued signals are still in
+            flight cannot receive another project's costs.
+        """
+        with self._run_lock:
+            self._run_bound = True
+            self._run_project = Path(folder) if folder is not None else None
+
+    def release_run_project(self) -> None:
+        """@brief Stop charging calls to the bound run; later calls go to the project in use.
+
+        @note Records already stamped keep their run project even when their
+            queued signal is delivered after this call.
+        """
+        with self._run_lock:
+            self._run_bound = False
+            self._run_project = None
+
+    def _stamp_and_forward(self, record: dict) -> None:
+        """Worker-thread listener: stamp the bound run project, then hop to the GUI thread."""
+        with self._run_lock:
+            if self._run_bound:
+                # A str, not a Path: the record crosses a queued Qt signal.
+                record = dict(record, _run_bound=True,
+                              _run_project=(str(self._run_project)
+                                            if self._run_project is not None else None))
+        self._bridge.recorded.emit(record)
 
     def detach(self) -> None:
         """@brief Stop listening, if this line is still the listener."""
@@ -157,17 +203,33 @@ class AiAccountLine(QLabel):
         writes it before the next one.
         """
         try:
-            folder = self._project_dir()
+            record = dict(record)
+            if record.pop("_run_bound", False):
+                folder = record.pop("_run_project", None)
+            else:
+                record.pop("_run_project", None)
+                folder = self._project_dir()
             if folder is None:
-                self._report(tx("Costo di una chiamata AI non registrato: il progetto non ha "
-                                "un nome."))
+                # Every dropped cost gets its own line: a de-duplicated
+                # message would hide how much went unrecorded.
+                self._log(tx("Costo di una chiamata AI non registrato ({cost} USD, {model}): "
+                             "il progetto non ha un nome.", cost=self._cost_text(record),
+                             model=record.get("model") or "?"))
                 return
             self._pending.append((Path(folder), record))
             self._flush_pending()
             self.refresh()
         except Exception as exc:  # noqa: BLE001 - uno slot che solleva chiude l'app
-            self._report(tx("Costo di una chiamata AI non registrato nel progetto: {exc}",
-                            exc=exc))
+            self._log(tx("Costo di una chiamata AI non registrato nel progetto ({cost} USD): "
+                         "{exc}", cost=self._cost_text(record), exc=exc))
+
+    @staticmethod
+    def _cost_text(record) -> str:
+        """Cost of a record for a log line; «?» when it was not reported."""
+        cost = record.get("cost_usd") if isinstance(record, dict) else None
+        if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+            return "?"
+        return format_usd(float(cost))
 
     def _flush_pending(self) -> None:
         """Write the queued calls in order; stop at the first busy file."""
@@ -177,9 +239,10 @@ class AiAccountLine(QLabel):
                 add_call(folder, record)
             except ProjectCostsError as exc:
                 # File damaged: never overwritten, so the call cannot go in.
+                # One line per dropped call, never de-duplicated.
                 self._pending.pop(0)
-                self._report(tx("Costo di una chiamata AI non registrato nel progetto: {exc}",
-                                exc=exc))
+                self._log(tx("Costo di una chiamata AI non registrato nel progetto ({cost} USD): "
+                             "{exc}", cost=self._cost_text(record), exc=exc))
                 continue
             except OSError as exc:
                 self._report(tx("File dei costi occupato ({exc}): {count} chiamate in attesa, "

@@ -6,7 +6,15 @@
     chooser, Start menu and desktop shortcuts, «Launch KiCadGen» on the last
     page, uninstall from Settings > Apps.
   - The UpgradeCode never changes: a newer version replaces the installed one
-    (MajorUpgrade), a same or older version is refused with a message.
+    (MajorUpgrade), and so does a rebuilt MSI of the SAME version
+    (AllowSameVersionUpgrades="yes"; with Product Id="*" every build is a new
+    product, so "no" would install it side by side). An older version is
+    refused with a message. light runs with -sice:ICE61, the warning this
+    choice raises. Windows Installer compares only the first three version
+    fields, which are the program's three numbers.
+  - A custom install folder is remembered (HKLM\Software\KiCadGen,
+    InstallFolder) and proposed again by the next upgrade; it works from the
+    first version that writes the value onwards.
   - The application files come from heat (AppFiles.wxs, component group
     AppFiles) harvested from dist\KiCadGen.
   - The user's data (%LOCALAPPDATA%\KiCadGen, Documents\KiCadGen) is written
@@ -20,7 +28,7 @@
     <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" Platform="x64"
              Description="KiCadGen $(var.Version) - KiCad component generator" />
 
-    <MajorUpgrade AllowSameVersionUpgrades="no"
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
                   DowngradeErrorMessage="A newer version of KiCadGen is already installed." />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
@@ -32,20 +40,34 @@
     <WixVariable Id="WixUIBannerBmp" Value="$(var.BannerBmp)" />
     <WixVariable Id="WixUIDialogBmp" Value="$(var.DialogBmp)" />
 
-    <!-- External programs: searched, never required. Depth 2 covers the
-         versioned folders, e.g. «FreeCAD 1.1\bin» and «KiCad\10.0\bin». -->
+    <!-- External programs: searched, never required. The searches follow the
+         program's own detection as far as AppSearch allows: freecadcmd.exe in
+         «Program Files[ (x86)]\FreeCAD*\bin» (kicadgen/cad3d/step_generator.py)
+         and kicad-cli.exe in «Program Files[ (x86)]\KiCad[\<version>]\bin»
+         (kicadgen/services/system_dependencies.py). Depth 2 covers the
+         versioned folders, e.g. «FreeCAD 1.1\bin» and «KiCad\10.0\bin».
+         AppSearch cannot see PATH or the FREECAD_CMD_PATH / KICAD_CLI_PATH
+         overrides the program also honours, so the last page says "may not
+         have been found" instead of claiming the program is absent. Several
+         searches in one Property: the last one that finds a file wins. -->
     <Property Id="FREECADCMD">
       <DirectorySearch Id="FreeCadRoot" Path="[ProgramFiles64Folder]" Depth="2">
         <FileSearch Name="freecadcmd.exe" />
       </DirectorySearch>
+      <DirectorySearch Id="FreeCadRootX86" Path="[ProgramFilesFolder]" Depth="2">
+        <FileSearch Id="FreeCadCmdX86" Name="freecadcmd.exe" />
+      </DirectorySearch>
     </Property>
     <Property Id="KICADEXE">
       <DirectorySearch Id="KiCadRoot" Path="[ProgramFiles64Folder]KiCad" Depth="2">
-        <FileSearch Name="kicad.exe" />
+        <FileSearch Name="kicad-cli.exe" />
+      </DirectorySearch>
+      <DirectorySearch Id="KiCadRootX86" Path="[ProgramFilesFolder]KiCad" Depth="2">
+        <FileSearch Id="KiCadCliX86" Name="kicad-cli.exe" />
       </DirectorySearch>
     </Property>
     <SetProperty Id="WIXUI_EXITDIALOGOPTIONALTEXT" After="AppSearch" Sequence="first"
-                 Value="KiCadGen uses FreeCAD for the 3D models and KiCad to check and install the libraries. Not found on this computer: [MISSINGAPPS]. Install them from freecad.org and kicad.org; KiCadGen will find them.">
+                 Value="KiCadGen uses FreeCAD for the 3D models and KiCad to check and install the libraries. The installer may not have found: [MISSINGAPPS] (it only looks in Program Files). If they are not installed, get them from freecad.org and kicad.org; KiCadGen will find them, also through PATH or the FREECAD_CMD_PATH and KICAD_CLI_PATH variables.">
       NOT FREECADCMD OR NOT KICADEXE
     </SetProperty>
     <SetProperty Id="MISSINGAPPS" Before="SetWIXUI_EXITDIALOGOPTIONALTEXT" Sequence="first"
@@ -55,6 +77,25 @@
     <SetProperty Id="MISSINGAPPS" Action="SetMissingBoth" Before="SetWIXUI_EXITDIALOGOPTIONALTEXT"
                  Sequence="first" Value="FreeCAD, KiCad">NOT FREECADCMD AND NOT KICADEXE</SetProperty>
 
+    <!-- Remembered install folder (WiX «remember property» pattern): the value
+         written by the InstallFolderRegistry component at install is read back
+         by AppSearch, so an upgrade proposes the folder the user chose.
+         CMDLINEINSTALLFOLDER is copied before AppSearch, when INSTALLFOLDER
+         can only come from the command line, so an explicit
+         INSTALLFOLDER=... keeps priority. Sequence="first": the directory is
+         set once, in the UI sequence when there is one (the execute sequence
+         then receives the folder chosen in the dialog), otherwise in the
+         execute sequence of a silent install. -->
+    <Property Id="REMEMBEREDINSTALLFOLDER" Secure="yes">
+      <RegistrySearch Id="RememberedInstallFolder" Root="HKLM" Key="Software\KiCadGen"
+                      Name="InstallFolder" Type="raw" Win64="yes" />
+    </Property>
+    <SetProperty Id="CMDLINEINSTALLFOLDER" Value="[INSTALLFOLDER]" Before="AppSearch"
+                 Sequence="first">INSTALLFOLDER</SetProperty>
+    <SetDirectory Id="INSTALLFOLDER" Value="[REMEMBEREDINSTALLFOLDER]" Sequence="first">
+      REMEMBEREDINSTALLFOLDER AND NOT CMDLINEINSTALLFOLDER
+    </SetDirectory>
+
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="ProgramFiles64Folder">
         <Directory Id="INSTALLFOLDER" Name="KiCadGen" />
@@ -63,6 +104,23 @@
       <Directory Id="DesktopFolder" />
     </Directory>
 
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="InstallFolderRegistry" Guid="5B0C7E2D-3F4A-4C1B-9E8D-2A6F1C3B7D90" Win64="yes">
+        <RegistryValue Root="HKLM" Key="Software\KiCadGen" Name="InstallFolder" Type="string"
+                       Value="[INSTALLFOLDER]" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- Shortcut components and HKCU key paths: ICE38 and ICE43 require a
+         component installing a shortcut into a profile folder
+         (ProgramMenuFolder, DesktopFolder) to have an HKCU registry key path,
+         because the ICEs cannot know that ALLUSERS=1 (perMachine) redirects
+         those folders to the all-users locations. The HKCU value is only a
+         marker. Known leftover: it is written into the hive of the
+         administrator who installs; an uninstall run by another account
+         removes the shortcuts but cannot reach that hive, so
+         HKCU\Software\KiCadGen (two DWORDs) may remain for the first user.
+         It is harmless and never read by the program. -->
     <DirectoryRef Id="ProgramMenuFolder">
       <Component Id="StartMenuShortcut" Guid="CB30D8C7-8646-417B-9B11-770B67D7E68C">
         <Shortcut Id="StartMenuKiCadGen" Name="KiCadGen" Description="KiCad component generator"
@@ -84,6 +142,7 @@
 
     <Feature Id="Main" Title="KiCadGen" Level="1">
       <ComponentGroupRef Id="AppFiles" />
+      <ComponentRef Id="InstallFolderRegistry" />
       <ComponentRef Id="StartMenuShortcut" />
       <ComponentRef Id="DesktopShortcut" />
     </Feature>
@@ -92,14 +151,18 @@
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch KiCadGen" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
-    <!-- Calcolato dopo la scelta della cartella: una Property fissa non
-         risolverebbe [INSTALLFOLDER]. -->
-    <SetProperty Id="WixShellExecTarget" Value="[INSTALLFOLDER]KiCadGen.exe" After="CostFinalize"
-                 Sequence="ui" />
+    <!-- WixShellExecTarget is set by the Finish button itself, just before the
+         launch: only then is INSTALLFOLDER final. A SetProperty in the UI
+         sequence (e.g. after CostFinalize) runs BEFORE InstallDirDlg, so a
+         folder chosen there would launch the default path, or nothing. -->
     <CustomAction Id="LaunchKiCadGen" BinaryKey="WixCA" DllEntry="WixShellExec" Impersonate="yes" />
     <UI>
       <UIRef Id="WixUI_InstallDir" />
-      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchKiCadGen">
+      <Publish Dialog="ExitDialog" Control="Finish" Property="WixShellExecTarget"
+               Value="[INSTALLFOLDER]KiCadGen.exe" Order="1">
+        WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed
+      </Publish>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchKiCadGen" Order="2">
         WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed
       </Publish>
     </UI>

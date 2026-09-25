@@ -86,6 +86,11 @@ def test_global_install_uses_absolute_paths_and_requested_table(tmp_path):
     artifacts = _artifacts(tmp_path)
     destination = tmp_path / "GlobalLibraries"
     table = tmp_path / "config" / "fp-lib-table"
+    # Contract changed (fix F4): a global install no longer creates a missing
+    # global table, because KiCad would then skip its first-run library setup.
+    # The table therefore exists here, as it does after KiCad's first start.
+    table.parent.mkdir(parents=True)
+    table.write_text("(fp_lib_table\n  (version 7)\n)\n", encoding="utf-8")
     result = install_component_library(
         artifacts, destination, project_library=False, table_path=table)
     footprint = result.footprint_path.read_text(encoding="utf-8")
@@ -143,6 +148,8 @@ def test_install_restores_existing_component_when_table_update_fails(
     assert first.step_path.read_bytes() == b"OLD STEP"
     assert first.wrl_path.read_bytes() == b"OLD WRL"
     assert first.table_path.read_text(encoding="utf-8") == table_before
+    # A fully successful rollback no longer needs its copies.
+    assert not list(destination.glob(".kicadgen-rollback-*"))
 
 
 def test_install_cleans_staging_files_when_copy_fails(tmp_path, monkeypatch):

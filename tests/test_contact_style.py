@@ -133,14 +133,29 @@ def test_the_contract_names_and_default_are_the_agreed_ones():
 #: `descr`. Tolta quella frase, l'uscita coincide con i valori del 2026-09-23
 #: (rs485 ab8e4527..., four 87c86d6b...), come prova
 #: test_the_only_change_of_2026_09_24_is_the_smd_sentence.
+#: CAMBIATO DI NUOVO il 2026-09-25 (verifica avversariale, difetti G1 e G9):
+#: G1 -- in KiCad `(at)` e' il FORO e `(offset)` sposta il RAME (verificato
+#: con pcbnew 10: GetPosition = foro, ShapePos = rame); prima erano scambiati.
+#: G9 -- la serigrafia del corpo si interrompe dove attraversa i pad.
+#: Annullando queste due sole correzioni l'uscita torna identica ai valori
+#: del 24/09 (rs485 701474f9..., four cb4ba41d...), come prova
+#: tests/test_fixG_generators.py::
+#: test_undoing_the_offset_fix_and_the_silk_clipping_gives_the_pinned_output.
 PINNED_FOOTPRINT = {
+    "rs485": "7eaa34e7cf07d35d9d60b50b3812a1200cd3adcc0e1a76101ba0967d85159576",
+    "four": "82bc177fcf3c5b7b0c2052fe546c446ce34def025b952cc5d617bf883684525c",
+}
+#: Impronte del 2026-09-24, prima di G1 e G9: il riferimento di
+#: test_undoing_the_offset_fix_and_the_silk_clipping_gives_the_pinned_output.
+PINNED_FOOTPRINT_2026_09_24 = {
     "rs485": "701474f9d7cafc34bb029b814e365a43f0ebfdd0472ac141b004d36018f503e8",
     "four": "cb4ba41dda8425847de81f9097c107c9730ba215ccebfd4124f848b6810ac894",
 }
-#: Impronte del 2026-09-23, prima della frase sul tipo SMD.
+#: Stesse impronte senza la frase sul tipo SMD (valori del 2026-09-23 prima
+#: di G1 e G9: rs485 ab8e4527..., four 87c86d6b...).
 PINNED_FOOTPRINT_BEFORE_SMD_NOTE = {
-    "rs485": "ab8e45275e6f5842bf4a0d79af3e1fdcb52bc7c47c472979a0f2d6a93913ad15",
-    "four": "87c86d6b8cd8c540036c119f67cc0385b13507824800474696213dc29aef4002",
+    "rs485": "0b97e456eb66dd3e7f4bc37e0c1b3330ee360ee3a7d0c32ab87a744a3065b011",
+    "four": "28ad0a912b02dc5e218bdb5fa8ad359f18fa93478a8e9e2beadf320fb053a692",
 }
 #: sha256 di notches/edge_contacts/extra_boxes/extra_payload, tolte le voci
 #: `through_hole` e `stadium` dei contatti (verificate a parte, qui sotto).

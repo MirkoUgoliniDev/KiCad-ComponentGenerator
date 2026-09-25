@@ -1,4 +1,4 @@
-"""Non-blocking progress overlay: which tool is working, real progress only."""
+"""@brief Non-blocking progress overlay: which tool is working, real progress only."""
 import html
 import math
 import re
@@ -1091,7 +1091,9 @@ class AnalysisOverlay(QWidget):
             else f"{percent}% · {done}/{total}")
 
     def clear_cost(self):
-        """Azzera il consuntivo all'inizio di una NUOVA analisi AI.
+        """@brief Clear and hide the AI cost summary at the start of a new AI analysis.
+
+        Azzera il consuntivo all'inizio di una NUOVA analisi AI.
 
         Non in start(): la modale riparte anche per la generazione FreeCAD,
         che non fa chiamate al modello. Azzerare li' faceva sparire il costo
@@ -1101,7 +1103,9 @@ class AnalysisOverlay(QWidget):
         self.cost.hide()
 
     def set_cost(self, text):
-        """Mostra il consuntivo dell'analisi AI dentro la modale.
+        """@brief Show the AI analysis cost summary inside the overlay; an empty text hides it.
+
+        Mostra il consuntivo dell'analisi AI dentro la modale.
 
         Il costo dell'ultima analisi non ha piu' una label sotto il pulsante
         (utente, 2026-09-24): resta qui, nella modale che si sta guardando, e

@@ -1,4 +1,7 @@
-"""Esperimento riproducibile di localizzazione (API); conserva risposte per replay offline."""
+"""@brief Reproducible photo-localization benchmark (API calls); stores raw answers for offline replay.
+
+Esperimento riproducibile di localizzazione (API); conserva risposte per replay offline.
+"""
 import argparse
 import json
 import sys
@@ -27,7 +30,7 @@ PROMPT = (
 
 
 def tool():
-    """@brief Provide the tool operation for this workflow."""
+    """@brief Return the OpenAI-style tool schema asking the model for 0-1000 normalized component boxes."""
     return {"type":"function","function":{
         "name":"locate_components", "description":"PCB component bounding boxes",
         "parameters":{"type":"object","properties":{
@@ -40,7 +43,16 @@ def tool():
 
 
 def components_from_response(data, length, width, region=(0,0,1,1)):
-    """@brief Provide the components from response operation for this workflow."""
+    """@brief Convert a locate_components answer into centred millimetre component boxes.
+
+    Boxes are 0-1000 normalized [y0, x0, y1, x1] inside `region`; malformed or
+    empty boxes are skipped. The height is a fixed 0.6 mm placeholder.
+    @param data Tool answer containing a `components` list.
+    @param length Board length in mm (X axis of the calibrated crop).
+    @param width Board width in mm (Y axis of the calibrated crop).
+    @param region Normalized (x0, y0, x1, y1) tile of the whole crop the boxes refer to.
+    @return List of component dictionaries with an internal `_box` in whole-crop coordinates.
+    """
     out=[]
     rx0,ry0,rx1,ry1=region
     for d in data.get("components",[]):
@@ -62,8 +74,8 @@ def components_from_response(data, length, width, region=(0,0,1,1)):
 
 
 def main():
-    """@brief Provide the main operation for this workflow."""
-    parser=argparse.ArgumentParser(description=__doc__)
+    """@brief Parse the CLI, localize components tile by tile and write raw answers, inventory and overlay."""
+    parser=argparse.ArgumentParser(description=(__doc__ or "").replace("@brief ", "", 1))
     parser.add_argument("photo",type=Path)
     parser.add_argument("--model",required=True)
     parser.add_argument("--length",type=float,default=42.8)

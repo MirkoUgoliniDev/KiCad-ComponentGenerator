@@ -1,4 +1,6 @@
-"""Parametri del modello 3D parametrico (corpo rettangolare + pin cilindrici).
+"""@brief Parameters of the parametric 3D model: rectangular body plus cylindrical THT pins.
+
+Parametri del modello 3D parametrico (corpo rettangolare + pin cilindrici).
 
 Il modello geometrico e' volutamente semplice: un parallelepipedo per il
 corpo del componente (ingombro meccanico, es. per il controllo di
@@ -15,6 +17,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 from ..services.messages import tx
+
+
+def _finite(value) -> bool:
+    """True for a finite real number (bool excluded)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _positive(value) -> bool:
+    """True for a finite number > 0: `value <= 0` alone lets NaN through."""
+    return _finite(value) and value > 0
 
 
 @dataclass
@@ -41,7 +58,12 @@ class Body3DParams:
     show_markings_3d: bool = False
 
     def validate(self) -> None:
-        """@brief Validate dimensions, colors and pin extrusion constraints."""
+        """@brief Validate dimensions, colors and pin extrusion constraints.
+
+        @throws ValueError When a colour is malformed or a dimension, offset or
+            pin value is not a finite number in range (NaN and infinity are
+            rejected explicitly: `x <= 0` is False for NaN).
+        """
         from .annotations import validate_hex_color
 
         validate_hex_color(self.color_hex, tx("Colore del corpo"))
@@ -49,12 +71,15 @@ class Body3DParams:
         if self.pcb_thickness_mm is not None and (
                 not math.isfinite(self.pcb_thickness_mm) or self.pcb_thickness_mm <= 0):
             raise ValueError(tx("Spessore PCB non valido."))
-        if self.length_mm <= 0 or self.width_mm <= 0 or self.height_mm <= 0:
+        if not all(_positive(v) for v in (self.length_mm, self.width_mm, self.height_mm)):
             raise ValueError(
                 tx("Le dimensioni del corpo (lunghezza/larghezza/altezza) devono essere > "
                    "0.")
             )
-        if self.pin_diameter_mm <= 0:
+        if not all(_finite(v) for v in (self.offset_x_mm, self.offset_y_mm)):
+            raise ValueError(tx("Lo scostamento del corpo (offset X/Y) deve essere un numero "
+                                "finito."))
+        if not _positive(self.pin_diameter_mm):
             raise ValueError(tx("Il diametro pin (3D) deve essere > 0."))
-        if self.pin_length_mm <= 0:
+        if not _positive(self.pin_length_mm):
             raise ValueError(tx("La lunghezza pin (protrusione sotto il corpo) deve essere > 0."))

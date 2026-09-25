@@ -1,20 +1,26 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `978c53e` (pushato): icone Nuovo/Apri progetto nella barra della scheda Progetto (punto 41). Prima `658e161`:
-  installer Windows MSI (PyInstaller + WiX, app_paths), modelli YOLO .pt con
-  PyTorch, classi dei modelli lette per nome, pretest «Solo YOLO locale»
-  (nessuna AI), «Parametri YOLO» (soglia, doppioni, tessere) per entrambe le
-  modalita' YOLO, licenza del codice AGPL-3.0 + THIRD_PARTY_NOTICES.md e menu
-  «?» > «Licenze» (punti 31-40 in fondo al file). Prima: `3a50491` le 5
-  decisioni del 25/09, `794c5ed` correzioni della verifica con agenti,
-  `7223819` revisione interfaccia (punti 1-27).
-- APERTO, richiesto dall'utente: licenze IN SOSPESO (ID Roboflow del Large
-  `compdetect-dnwth-2-yolo26l-t1` e dataset «Detecting the PCB object» di
-  Arshiasbn, MIT, da riportare nei notice dopo conferma del modello a cui si
-  riferisce; vedi punto 36 e seguenti). Prova d'installazione dell'MSI in una
-  macchina virtuale (utente).
-- Suite completa (25/09, dopo il punto 41): 4199 passati, 3 saltati,
-  2 xfail attesi, 19 sottotest; uscita del processo 0 (controllarla sempre).
+- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `PENDING` (pushato):
+  correzione di TUTTI gli esiti della verifica avversariale del 25/09 (A-G,
+  punti 35-41 e piano «fai tutto»), documentazione @brief imposta dal test,
+  blocco dei segnali alla chiusura della finestra (crash vero dimostrato),
+  replace_file con nuovi tentativi su Windows, voci di menu tolte (43-45),
+  nuova icona (46). Prima: `978c53e` icone Nuovo/Apri progetto, `658e161`
+  installer MSI, modelli .pt, pretest YOLO, parametri YOLO, licenza AGPL.
+- APERTO, richiesto dall'utente: (1) crash 139 intermittente all'uscita della
+  suite DOPO il riepilogo (punto 42: causa non ancora dimostrata; ipotesi
+  gc.collect a fine sessione in prova); (2) licenze in sospeso (ID Large e
+  dataset «Detecting the PCB object»); (3) prova dell'MSI in VM, SHA-256 di
+  WiX come variabile di repository, offerta dei sorgenti GPL/LGPL; (4)
+  decisioni: cache delle risposte vuote del grounding, pin alfanumerici,
+  voce di menu dedicata per le voci tolte; (5) proposte di professionalita'
+  (schermata iniziale e progetti recenti, gestione della chiave API, titolo e
+  testi coerenti, barra dei passi, aiuto/log/aggiornamenti, firma digitale):
+  in attesa della scelta dell'utente.
+- Suite completa (25/09 sera, 3 corse dopo tutte le correzioni): 4714
+  passati, 3 saltati, 2 xfail, 19 sottotest in tutte; uscita 0, 139, 139
+  (crash DOPO i test, vedi punto 42). Modifiche successive (menu, icona)
+  verificate con i test mirati.
 - Difetto 16 CHIUSO (utente, 24/09, scelta «A»): la frase «Tipo SMD di
   proposito» resta anche sui moduli misti half_hole + through_hole, perche'
   anche quelli si posano e si saldano a rifusione, senza pin nei fori.
@@ -7199,3 +7205,420 @@ guardia _project_change_blocked del menu). Tooltip tradotti. Test:
 tests/test_project_toolbar_icons.py (ordine, collegamento vero, lingua).
 SUITE (25/09, dopo 41): 4199 passati, 3 saltati, 2 xfail, 19 sottotest,
 uscita 0. NON committato (dopo c30f0fb).
+
+## PIANO IN CORSO (25/09, dopo 1f0f8fe) — verifica avversariale con agenti
+
+Richiesta dell'utente: «rilancia una verifica avversariale su tutto il codice,
+fallo con agenti esperti e sii preciso e puntiglioso». Agenti in parallelo,
+SOLA LETTURA (nessuna modifica al repository, nessuna chiamata AI a
+pagamento, niente commit), ambiti disgiunti; ogni difetto con file:riga,
+scenario concreto, gravita' e verifica (lettura del codice o prova offline).
+Ambiti: A rilevatore YOLO e inventario fotografico; B GUI (main_window e
+dialoghi); C installer, app_paths, licenze; D estrazione AI, cache, servizi
+OpenRouter/profili/i18n; E geometria CAD 3D e modelli KiCad; F libreria KiCad
+e flusso della scheda KiCad (agente kicad-workflow-reviewer); G generatori
+footprint/simboli e qualita' dei test. Esiti: raccolti qui, NON corretti
+finche' l'utente non decide.
+ESITO AGENTE D (estrazione AI, servizi) — da verificare dal coordinatore, NON
+corretto: D1 alta: risposta principale del datasheet quasi senza validazione
+numerica (rows=True/2.7/-2, pitch<=0, drill>=pad accettati; NaN/"abc"/pin_map
+malformato -> ValueError/KeyError grezzi dopo la chiamata pagata, non
+ExtractionError; _params_from_tool_arguments ~1644-1718). D2 media: la
+riparazione della numerazione castellated confronta la lista grezza con
+quella normalizzata (~1161) -> rifiuta una correzione valida dopo 2 chiamate.
+D3 media: _castellated_sides accetta due lati sullo stesso bordo, non
+controlla len(pin_names)==count ne' count enormi. D4 media: consolidamento
+dell'archivio dei modelli accettati cancella rotation_deg scelta
+(accepted_models.py ~447). D5 media: risposta di grounding vuota salvata in
+cache come successo (photo_grounding.py ~188). D6: enum non validati in
+mechanical_envelopes/photo_top_inventory. D7: costi attribuiti al progetto
+attivo all'arrivo del segnale, non a quello della corsa; read-modify-write
+senza lock. D8-D13 minori (niente annullo della catena a pagamento e retry
+immediato di 400/429; eccezioni non previste perdono la risposta pagata; tx
+non cattura TypeError; testi italiani in usage describe/errori; list_models
+fragile; reset_usage dopo la validazione YOLO).
+ESITO AGENTE B (GUI) — da verificare, NON corretto: B1 alta (confermata con
+script): dopo «Interrompi» il worker abbandonato apre comunque «Corpi
+rilevati» (_on_review_requested non controlla _analysis_result_is_current):
+all'OK sovrascrive photo-review/proposals.json, rimostra la modale che poi
+resta sopra la finestra per sempre (senza Interrompi), e nel percorso yolo a
+pagamento procede alla riconciliazione di una corsa scartata. B2 media: il
+pretest sovrascrive il pacchetto di revisione di un'estrazione pagata e
+«Rilancia inventario» paga poi sui riquadri del pretest; detector-*.json di
+un pretest annullato preso come evidenza fresca. B3: conferma/log di
+interruzione del pretest dicono «Analisi AI dei documenti». B4: la modale del
+pretest mostra il costo della corsa pagata precedente (manca clear_cost). B5:
+errori del pretest titolati «Estrazione fallita». B6: cambiare i modelli AI
+dal menu durante una corsa rimette il testo a riposo del pulsante. B7: voce
+«Licenze» non ritradotta al cambio lingua, «Close» in inglese, dialogo mai
+deleteLater. B8: _start_yolo_pretest senza try/restore. B9: messaggio
+fuorviante senza vista dall'alto dichiarata. B10: un parametro YOLO salvato
+non valido azzera tutti gli altri. B11: mancano test del percorso reale di
+fine pretest e del caso interrotto-poi-revisione.
+ESITO AGENTE F (libreria KiCad) — da verificare, NON corretto: F1 alta
+(fault injection): rollback fallito distrugge i file del componente
+dell'utente (kicad_library.py ~420-438: unlink poi copy, e il finally
+cancella comunque la cartella dei backup). F2 alta: l'installazione
+globale/progetto ripunta in silenzio una voce «KiCadGen» esistente a un'altra
+cartella (~311-322); la conferma di sovrascrittura guarda solo i file del
+componente e il testo promette che il resto non cambia. F3 media: nome non
+tra virgolette nella tabella non riconosciuto -> nickname duplicato. F4
+media: tabella globale assente -> se ne crea una con solo KiCadGen (KiCad al
+primo avvio non configura piu' le librerie standard). F5: file temporaneo e
+cartelle vuote lasciati se os.replace fallisce. F6: backup della tabella
+scritto una sola volta, mai aggiornato. F7: KICAD_CONFIG_HOME ignorato. F8:
+anteprima riscritta senza controllare se aperta in KiCad. F9: nessun test GUI
+dei flussi di installazione/sovrascrittura. Verificati corretti: cancello
+della scheda KiCad, isolamento dell'anteprima, nomi coerenti, ${KIPRJMOD},
+prove con kicad-cli 10.0.6 in scratch.
+ESITO AGENTE E (geometria CAD) — da verificare, NON corretto: E1 alta
+(simulata): la correzione del verso (_verse_correction, freecad_parts.py
+~1404-1426) confronta landmark_side, che e' nel riferimento della foto, con
+la direzione nativa ruotata SOLO di inferred+extra, senza togliere la
+rotazione del componente: a 90/180/270 gradi il riferimento finisce sul lato
+sbagliato o la correzione salta; test solo a rotazione 0. E2 media
+(FreeCAD): _ic_observed_pins mette i pad top/bottom specchiati e fuori
+dall'ingombro misurato (~290-327). E3 media: _outward_sign assume il centro
+scheda in (0,0), falso sulle schede THT popolate (origine = pin 1). E4
+media: misura dei modelli con un solo budget di 300 s per tutto il lotto e
+nessun risultato salvato al timeout (kicad_models.py ~702-812). E5: passi
+lunghi del processo FreeCAD senza output (export, tessellazione): il
+watchdog di silenzio puo' uccidere una build sana alla fine. E6: NaN/inf in
+posizione/rotazione diventano coordinate inventate (clamp, is_usable,
+validatori con <=0). E7: clamp e taglio delle altezze senza nota. E8:
+TimeoutExpired di FreeCAD non diventa Cad3DError; decodifica cp1252 nel
+percorso non interattivo. E9: testi sulle facce laterali capovolti/verticali.
+E10: forme approssimate che inventano polarita'/pin 1 senza evidenza. E11
+regole per nome: _is_yolo_only_hypothesis (prefisso «yolo candidate»,
+rischio medio, esistono campi strutturali), regex in inglese
+three_lead_tab; convenzioni di nomi delle librerie KiCad (rischio basso,
+dichiarate). E12: mancano test combinati (flip Y + rotazione + lato).
+Verificati corretti: composizione flip Y e rotazione (build FreeCAD reale),
+convenzione fronte/retro 2, SAT per le sovrapposizioni ruotate, cache delle
+misure.
+ESITO AGENTE A (YOLO e inventario) — da verificare, NON corretto: A1 alta
+(confermata): la misura dei bordi usa la scala X anche per Y (crop_frame,
+photo_refine.py ~623-645) mentre i mm YOLO usano scale separate: con un
+ritaglio fuori rapporto (find_board tollera fino al 12%) i riquadri
+«misurati» peggiorano (prova 40x20 mm, 800x440 px: box spostato di ~44 px).
+A2 alta (confermata): contact_zones per le matrici ignora body_offset_x/y e
+centra la griglia dei pin: corpi veri cancellati prima della revisione
+(0603 al centro scheda tolto). A3 media (Ultralytics reale): checkpoint
+«fused» con one2one_cv2=None letto come end-to-end -> uscita spazzatura
+accettata (hasattr invece di is not None; sonda [1,25,25] passa). A4 media:
+_rescale_boxes va in TypeError con una riga non-dict dopo la chiamata
+pagata. A5: nel percorso yolo a pagamento, zero proposte (o revisione che le
+toglie tutte) -> enumerazione a pagamento con prompt «nessun rilevatore
+locale», falso. A6: corpo sicuro tagliato dalle tessere declassato a debole
+se una vista intera debole lo copre. A7: id di classe end-to-end troncati
+invece che controllati. A8: docstring non piu' vere (testa uno-a-uno «solo
+classe migliore», validate_yolo_setup «nessuna inferenza», docstring del
+modulo, 0.25 duplicato, nms_stages). A9: _rescale_boxes muta la risposta
+(cache e replay diversi). A10: foto piu' piccola di una tessera inferita 3
+volte. A11: test deboli (checkpoint veri su foto grigia; tile_overlap non
+testato nei punti interni). A12: bande dei contatti castellated =
+convenzioni, non misure (euristica non dichiarata come tale). Verificato:
+.pt yolov8m identico a YOLO.predict; mappa delle classi; parametri passati
+ovunque; ramo yolo_only.
+ESITO AGENTE C (installer, percorsi, licenze) — da verificare, NON
+corretto: C1 media: «Avvia KiCadGen» a fine installazione calcolato prima
+della scelta della cartella (SetProperty After=CostFinalize): con cartella
+diversa dal predefinito l'avvio fallisce. C2 media (confermata): il DB seme
+preso da git HEAD e' vecchio (prompt predefiniti del 20/09 diversi da
+factory_defaults) e contiene un percorso dello sviluppatore
+(metadata.legacy_backup); proposta: generarlo dal codice con ProfileStore su
+percorso vuoto. C3 media: stessa versione reinstallata = secondo prodotto
+affiancato (Product Id="*" + AllowSameVersionUpgrades="no"), i documenti
+dicono «rifiutata». C4 media (licenze): notice senza CPython, Qt LGPL,
+PyQt6-sip, FFmpeg di opencv, OpenSSL/SQLite/libffi; nessun riferimento ai
+sorgenti GPL/LGPL; testi di licenza dei pacchetti non garantiti nel pacchetto;
+versioni non bloccate. C5: workflow di rilascio con token in scrittura
+esposto a codice non bloccato, ref_name interpolato in pwsh. C6
+(simulata): copia del seme non atomica, un DB troncato non viene piu'
+ripristinato e l'app non parte. C7: --check-runtime prova poco (non importa
+QtWidgets/main_window ne' controlla le risorse). C8-C15 minori (chiavi HKCU
+per le scorciatoie, cartella non ricordata all'aggiornamento, __pycache__ in
+Program Files se lanciato elevato, README dice «preprocessing registrato» ma
+non lo e', KICADGEN_DATA_DIR non sposta gli indici dei modelli, download WiX
+senza hash, ricerca FreeCAD/KiCad dell'installer diversa da quella dell'app,
+`Claude outputs/` non in .gitignore). Verificati corretti: versione unica,
+UpgradeCode, nessun segreto nel pacchetto, risorse incluse, nessuna
+scrittura nella cartella di installazione, dichiarazioni di licenza
+coerenti.
+ESITO AGENTE G (generatori, test) — da verificare, NON corretto: G1
+CRITICA (dichiarata confermata con pcbnew 10): nei contatti castellated con
+foro l'offset del foro e' scritto al contrario: in KiCad (at) e' il FORO e
+(offset) sposta il RAME; il codice scrive at = centro dello stadio e offset =
+foro-centro -> foro 0.82 mm dentro il modulo, rame spostato verso l'interno
+(castellated_module.py ~1175-1184, ContactPad.drill_offset ~258); i test
+usano lo stesso modello sbagliato. G2 alta: rame di pin diversi sovrapposto
+non rifiutato (lati diversi, angoli; offset del lato non controllato; passo
+= larghezza pad accettato). G3 alta: package_geometry ruota posizioni e
+forme dei pad in versi opposti (angoli non multipli di 90 sbagliati), vista
+bottom non nega la rotazione. G4: NPTH con i layer SMD; controllo
+sovrapposizione pad ignora la rotazione; niente courtyard/fab/pin 1 nel
+generatore package. G5: newline in una stringa -> KiCad rifiuta il
+footprint; nan/inf scritti nudi. G6: marcatore pin 1 non sul pin 1
+(castellated reverse, pin_header con pin_map). G7: pin popolati assenti dal
+pin_map scartati in silenzio. G8: rifiuto errato di moduli lunghi e stretti.
+G9-G11 minori. Test: test che codificano il modello KiCad sbagliato; test di
+cablaggio che ricollegano a mano; test della documentazione che controlla
+solo la docstring del modulo (28 moduli e 165 API pubbliche senza @brief);
+2 xfail strict su un difetto aperto (lead che non toccano il corpo); test a
+tempo fragili; crash «quit» dipendente dall'ordine di distruzione.
+VERIFICHE DEL COORDINATORE (25/09): G1 CONFERMATA con pcbnew 10 in scratch
+(footprint di prova: (at 0 0) + (drill 1 (offset 1 0)) -> GetPosition (0,0)
+= foro, ShapePos (1,0) = rame; il generatore scrive at = centro dello stadio,
+quindi foro e rame scambiati). A2 CONFERMATA leggendo: contact_zones.py non
+legge mai body_offset_*. B1 CONFERMATA leggendo: _on_review_requested non
+controlla _analysis_result_is_current. Gli altri esiti sono come riportati
+dagli agenti (molti con prova eseguita da loro). NESSUNA correzione fatta:
+in attesa della decisione dell'utente su cosa correggere.
+
+## PIANO IN CORSO (25/09) — «fai tutto»: correzione di tutti gli esiti A-G
+
+Decisione dell'utente: correggere TUTTI i difetti della verifica avversariale
+(elenchi A-G qui sopra). Organizzazione (regola del progetto: file disgiunti,
+integrazione centrale, nessun commit degli agenti):
+- Agente A: photo_yolo, photo_inventory, photo_global_inventory,
+  photo_yolo_review, contact_zones, photo_refine (+ loro test). Esiti A1-A12.
+- Agente B: gui/main_window.py, yolo_settings_dialog, yolo_review_dialog,
+  analysis_overlay, project_state, project_dialogs, guided_documents (+ test
+  GUI). Esiti B1-B11, B7 licenze nel menu.
+- Agente C: packaging/, scripts/, .github/, tools/, app_paths.py, main.py,
+  requirements*, .gitignore, THIRD_PARTY_NOTICES.md, README (licenze), docs
+  packaging. Esiti C1-C15 (dataset in sospeso NON aggiunto; ID del Large si').
+- Agente D: datasheet_extractor, openrouter, ai_diagnostics, photo_grounding,
+  photo_terminals, photo_leads, photo_top_inventory, project_costs,
+  accepted_models, model_choices, messages, gui/ai_account.py. Esiti D1-D13.
+- Agente E: kicadgen/cad3d/ + step_generator. Esiti E1-E12, C10
+  (PYTHONDONTWRITEBYTECODE), C12 (indici modelli e KICADGEN_DATA_DIR).
+- Agente F: services/kicad_library.py (+ test). Esiti F1-F9 (lato servizio).
+- Agente G: generators/, core/, package_geometry, gui/pinout_dialog.py, test
+  di qualita' (cablaggio ricollegato a mano, test a tempo, crash «quit»).
+  Esiti G1-G11.
+- Coordinatore: catalogo i18n (lotti JSON degli agenti), collegamenti GUI dei
+  servizi nuovi (F2 conferma di sovrascrittura, D8 annullo), test della
+  documentazione (@brief mancanti) a fine giro, suite completa, handoff.
+FIX F FATTO (agente, 25/09): F1-F9 corretti in kicad_library.py; test
+tests/test_fixF_kicad_library_safety.py (22) + 2 contratti aggiornati in
+test_kicad_library.py (installazione globale ora richiede la tabella
+esistente; il rollback completo deve rimuovere la sua cartella). API nuove:
+install_component_library(..., replace_library_entry=False), errori
+KiCadLibraryError con codici library_entry_conflict (context old_uri,
+new_uri, old_type, path), duplicate_library_entry, global_table_missing,
+preview_locked, rollback_incomplete; find_library_entry, kicad_lock_file.
+DA FARE (coordinatore): in main_window._install_kicad_library catturare
+library_entry_conflict e chiedere conferma con i18n.tr(
+"kicad.confirm_replace_library_entry", **exc.context), poi ripetere con
+replace_library_entry=True; chiavi i18n in scratchpad/tr_fix_F.json (formato
+diverso: chiavi tr, non tx). Backup della tabella: ultimi 3.
+FIX C FATTO (agente, 25/09): C1-C15 (C4 e C5 con riserve). Seme del DB ora
+generato dal codice (tools/make_seed_db.py, niente piu' git show HEAD);
+licenze dei pacchetti raccolte in build/licenses -> _internal/licenses
+(tools/collect_licenses.py + MANIFEST.txt); requirements-release-
+constraints.txt (versioni lette da .venv-build) usato da build e workflow;
+workflow diviso in build (contents: read, persist-credentials false, TAG via
+env) e publish (contents: write); WiX: avvio a fine installazione dal
+pulsante Fine, AllowSameVersionUpgrades=yes (-sice:ICE61), cartella ricordata
+in HKLM, ricerca kicad-cli/freecadcmd anche in (x86), pagina finale «potrebbe
+non aver trovato»; app_paths: copia del seme atomica e DB danneggiato messo
+da parte (.corrupt-<data>) e riseminato; --check-runtime importa QtWidgets/
+QtSvg/main_window e controlla 7 risorse. Nota: PyQt6-sip e' BSD-2-Clause.
+TRAPPOLE / APERTO PER L'UTENTE: (1) il download di WiX ora richiede lo
+SHA-256 ufficiale (parametro -WixSha256, env KICADGEN_WIX_SHA256, in CI la
+variabile di repository WIX314_SHA256): senza, il rilascio si ferma se WiX
+non e' gia' installato sul runner; (2) come offrire i sorgenti GPL/LGPL a
+ogni rilascio; versione esatta di FFmpeg in opencv; SHA delle Actions;
+(3) modifiche WiX e datas PyInstaller NON provate con una build reale:
+serve build + installazione in VM. Heredoc via Bash possono trasformare \
+in \ (ha messo un NUL e un BEL, corretti): controllare i caratteri di
+controllo dopo modifiche da shell.
+FIX B FATTO (agente, 25/09): B1-B11 in main_window.py; test nuovi
+tests/test_fixB_pretest_and_abort.py (17). NUOVA DISPOSIZIONE: il pretest
+lavora in <progetto>/yolo-pretest/ (photo-review/ e photo-cache/ propri);
+l'estrazione non vede mai quelle proposte; «Riapri revisione» segue la voce
+del rilevatore (con «Solo YOLO locale» riapre il pacchetto del pretest e
+nasconde il rilancio a pagamento); un vecchio pacchetto photo-review/ con
+detector yolo_only non e' mai base di un rilancio. Flag esplicito
+_extraction_busy (non QThread.isRunning) per non toccare pulsante e
+controlli durante una corsa. Revisione di una corsa interrotta: rifiutata
+(deliver_review(None)), modale orfana nascosta. Stringhe in tr_fix_B.json.
+COORDINATORE: F2 collegato in main_window._install_kicad_library (su
+library_entry_conflict chiede con kicad.confirm_replace_library_entry e
+ripete con replace_library_entry=True). DA FARE a fine giro: iniettare
+tr_fix_*.json (formato ui) e tr_fix_F.json (chiavi tr, con
+scratchpad/inject_keys.py) + tr_coord.json, DOPO che l'agente D ha finito
+(D puo' toccare I18n.tr in i18n.py). Test GUI di F2 da scrivere.
+FIX A FATTO (agente, 25/09): A1-A12. Misura dei bordi su un'immagine
+ricampionata a scala unica (isotropic_board/isotropic_crop_frame); filtro
+contatti a matrice posizionato con body_offset e pin_positions del footprint
+(senza offset: nessun filtro); testa .pt «fused» -> percorso standard;
+_rescale_boxes robusto e su copia (cache con le unita' del fornitore);
+revisione che toglie tutto -> nessuna chiamata a pagamento
+(inventory_strategy 'review-kept-none'); rilevatore che non trova nulla ->
+prompt veritiero (detector_ran); corpo sicuro tagliato dalle tessere resta
+corpo; id di classe validati; righe uno-a-uno dello stesso box unite (classe
+ambigua come ONNX); viste duplicate saltate; euristica delle bande dei
+contatti dichiarata. Test: tests/test_fixA_detector.py, test_fixA_edge_aspect.py
++ contratti aggiornati. Stringhe in tr_fix_A.json.
+FIX D FATTO (agente, 25/09): D1-D13. Validazione completa della risposta
+principale (ExtractionError con raw_response; opzionali scartati con nota);
+riparazione castellated confronta normalizzati; lati duplicati/fuori bordo
+rifiutati; rotazione confermata conservata nell'archivio; grounding vuoto in
+cache con marcatore empty_response e log (SCELTA: marcatore + log invece di
+non salvare, per non rompere i replay; DA CONFERMARE CON L'UTENTE); enum
+validati; costi con lock file (ai-costs.json.lock, 0.5 s, lock vecchio >30 s
+rimosso: euristica dichiarata) e AiAccountLine.bind_run_project/
+release_run_project; retry solo 408/409/429/5xx con backoff 2-4 s (max 30,
+Retry-After), 400 non ripetuto salvo compatibilita' tool_choice;
+extract_pin_header_params(cancel=Event) con ExtractionCancelled; tx e
+I18n.tr catturano TypeError; testi tradotti; list_models robusto e cache
+atomica; reset_usage all'inizio. Test tests/test_fixD_*.py (5 file) +
+contratti aggiornati (test_ai_diagnostics retry, test_project_costs log).
+FIX G FATTO (agente, 25/09): G1-G11 + qualita' dei test. G1: (at) sul foro,
+offset = centro del rame - foro (verificato pcbnew 10 sui 4 lati); G2
+controllo di distanza del rame fra tutte le coppie di pad diversi (anche
+contatto = corto), offset del lato entro il bordo; G3 rotazioni di posizioni
+e pad nello stesso verso KiCad, vista bottom nega entrambi; G4 layer per tipo
+(NPTH senza pasta), footprint_attr, courtyard/fab/pin 1, sovrapposizione con
+rettangoli ruotati (SAT); G5 escape di \n \r \t, NaN/inf rifiutati; G6
+marcatore del pin 1 accanto al pad «1»; G7 pin popolati senza posizione nel
+pin_map rifiutati; G8 fori opposti solo sulle coppie half_and_through;
+G9 sbalzo dei pad validato, numeri di pin vuoti rifiutati, serigrafia
+interrotta sui pad (nuovo kicadgen/core/silk.py, KLC F5.1); G10 ordinamento
+naturale nel dialogo del pinout; G11 minori. Test: tests/test_fixG_
+kicad_roundtrip.py (pcbnew in sottoprocesso, saltato senza KiCad),
+tests/test_fixG_generators.py (77) + contratti aggiornati; test di cablaggio
+e a tempo riscritti; teardown «quit» reale. COORDINATORE: hash di
+test_contact_style aggiornati (cambiano SOLO per G1+G9: annullandole si torna
+ai valori del 24/09, ora in PINNED_FOOTPRINT_2026_09_24).
+CAMBI DI COMPORTAMENTO per progetti salvati: moduli con pad che si toccano,
+angoli che si toccano o offset oltre il bordo ora rifiutati.
+APERTO (non corretto, da decidere): lo schema dell'estrazione forza pin
+interi (datasheet_extractor): pin alfanumerici (A1, EP) non esprimibili.
+FIX E FATTO (agente, 25/09): E1-E12 + C10 + C12. Verso dei modelli nel
+riferimento del componente (flip Y e rotazione tolti, None se non cardinale);
+pad di _ic_observed_pins dal lato giusto e dentro l'ingombro; «verso
+l'esterno» dei connettori dal centro vero della scheda (board_centre_xy);
+misura dei modelli con timeout per modello, file bloccato saltato, risultati
+parziali salvati; heartbeat nei passi lunghi di FreeCAD (KICADGEN_HEARTBEAT);
+NaN/inf rifiutati (has_finite_geometry, validatori); note su centro spostato
+e altezza ridotta; timeout FreeCAD -> Cad3DError con coda, UTF-8; testi sulle
+facce laterali dritti; polarita'/pin 1 disegnati solo con un riferimento
+osservato; _is_yolo_only_hypothesis strutturale (nome solo per compatibilita');
+sovrapposizioni solo sulle righe davvero disegnate; PYTHONDONTWRITEBYTECODE
+nei figli; cache in user_data_dir()/cache con KICADGEN_DATA_DIR o installato.
+Test tests/test_fixE_*.py; contratto aggiornato test_fillet_feasibility.
+COORDINATORE (25/09): ComponentBox.is_usable controlla la finitezza (test in
+tests/test_fixCoord_run_wiring.py); main_window inoltra nel match_evidence
+_yolo_proposal_id, _presence_reviewed_by_user, lead_count,
+lead_count_complete; D7 (bind/release del progetto della corsa) e D8
+(cancel_event di ExtractWorker/ReconcileWorker alzato da «Interrompi")
+collegati; F2 collegato; traduzioni di tutti i lotti inserite (tr_fix_F con
+scratchpad/inject_keys.py, gli altri con inject2.py). IN CORSO: agente della
+documentazione (@brief ovunque + test della documentazione piu' severo).
+DOCUMENTAZIONE FATTA (agente, 25/09): tests/test_documentation.py ora
+controlla davvero @brief su moduli, classi/funzioni/metodi pubblici e
+override Qt (anche sotto if/try), rifiuta i segnaposto «... for this
+workflow.» e ha un auto-test; 194 docstring aggiunte o riscritte senza
+cambiare il codice (AST identico). Coordinatore: argparse degli script in
+examples/ e tools/ toglie «@brief » dalla descrizione di --help. NON fatto:
+~156 @brief ancora in italiano (il test non controlla la lingua).
+SUITE (25/09, dopo tutte le correzioni): 4707 passati, 3 saltati, 2 xfail,
+19 sottotest. ATTENZIONE: 1 corsa su 3 termina con segfault (139) DOPO il
+riepilogo, alla chiusura dell'interprete; ipotesi: la fixture `window`
+chiude ma non distrugge le MainWindow (centinaia vive all'uscita, distrutte
+in ordine casuale insieme a QThread). IN CORSO: due suite con
+PYTHONFAULTHANDLER per catturare la traccia prima di correggere.
+ESITO DIAGNOSI (25/09): due suite complete con PYTHONFAULTHANDLER (in
+parallelo, 49 min ciascuna): entrambe 4707 passati, uscita 0, nessun crash.
+Totale dopo le correzioni: 1 crash all'uscita su 5 corse complete (prima
+delle correzioni ~10 corse tutte con uscita 0). Causa NON dimostrata; non
+corretto alla cieca. Candidati: QThread veri nei test nuovi
+(tests/test_fixB_pretest_and_abort.py), MainWindow chiuse ma non distrutte
+dalla fixture `window`. Prossimo passo proposto: bisezione ripetendo i
+sottoinsiemi di test GUI.
+
+42. [ ] (utente 25/09: «indaga» il crash all'uscita della suite) PROVE
+    (plugin diagnostico fuori dal repository, scratchpad/exitprobe): a fine
+    suite completa restano vivi 186 widget di primo livello (84 QFrame, 45
+    QDialog, 40 QMenu, 10 MainWindow, ...) e 6 QThread fermi; su un
+    sottoinsieme sospetto (test fixB/fixD/heartbeat) nulla. Distrutti
+    dall'interprete in ordine casuale all'uscita = scenario tipico del crash
+    139 intermittente. Nella stessa corsa un secondo difetto intermittente:
+    test_guided_documents: os.replace di .document-roles.json -> WinError 5
+    (file tenuto aperto un istante da un altro processo, antivirus/indice).
+    PIANO: (a) tests/conftest.py: a fine sessione chiudere e distruggere in
+    modo deterministico tutti i widget di primo livello (deleteLater +
+    DeferredDelete + processEvents) finche' la QApplication e' viva, e
+    verificarlo con la sonda (0 widget vivi); (b) document_roles._write:
+    ritentare os.replace per un tempo breve e limitato sugli errori di
+    accesso transitori di Windows, poi rilanciare (test positivo e negativo);
+    (c) piu' corse complete per misurare.
+ESITO 42 (causa DIMOSTRATA): distruggendo il «Log analisi AI» prima della
+finestra (ordine possibile a caso all'uscita dell'interprete) l'elenco degli
+elementi e il testo emettono rowsRemoved/modelReset/textChanged e
+_refresh_ai_copy_buttons gira su widget a meta' distruzione -> crash
+deterministico (riprodotto con uno script e con una sonda che distrugge i
+widget uno alla volta). La correzione del 25/09 mattina copriva solo
+tabs.currentChanged. CORRETTO per la classe: MainWindow.closeEvent, quando la
+chiusura e' accettata, blocca i segnali di TUTTI gli oggetti figli.
+Test tests/test_window_teardown_signals.py: distruzione vera in un processo a
+parte (FALLISCE senza la correzione, verificato; passa con), tutti i figli
+bloccati dopo la chiusura, chiusura rifiutata con lavoro in corso = nulla
+bloccato (negativo). Sonda: 170 widget distrutti uno a uno senza crash.
+Tentativo scartato: distruzione forzata dei widget in conftest a fine
+sessione (causava proprio il crash; non corrisponde a nessun percorso reale).
+SECONDO DIFETTO (stessa corsa): os.replace rifiutato per un istante da
+Windows (WinError 5) su .document-roles.json. CORRETTO per la classe: nuovo
+kicadgen/fsutil.replace_file (ritenta solo PermissionError, 5 tentativi,
+<1 s), usato da document_roles, project_state, kicad_library, app_paths
+(model_size_cache escluso: gira anche dentro FreeCAD). Test tests/test_fsutil.py.
+CORREZIONE [CORRETTO, 25/09 sera]: il blocco dei segnali alla chiusura corregge
+un crash VERO e dimostrato (distruzione del Log AI), ma NON e' la causa del
+crash 139 all'uscita della suite: dopo la correzione 3 suite complete ->
+4714 passati in tutte, uscita 0, 139, 139. Indagine riaperta: cattura della
+traccia con faulthandler + sonda di fine sessione.
+
+43. [x] (utente 25/09, screenshot: «rimuovi questa voce, la prima») Menu «?»:
+    togliere «Apri cartella progetto tool» (action_open_tool_dir). Restano
+    «Licenze» e «About».
+ESITO 43: FATTO. Voce e ritraduzione tolte, import user_data_dir inutilizzato tolto; test in tests/test_licenses_dialog.py (menu «?» = Licenze, About).
+44. [x] (utente 25/09, screenshot: «rimuovi questo») Menu Configurazione:
+    togliere «Apri config.json» (action_open_config) e il separatore prima di
+    essa. L'utente: «poi vedremo se inserire una voce di menu specifica» per
+    le voci tolte (43, 44): decisione rimandata.
+ESITO 44: FATTO. Voce e separatore tolti, ritraduzione tolta; _open_config_file resta (nessun menu lo chiama) per la futura voce dedicata. Test in tests/test_licenses_dialog.py.
+DIAGNOSI 42 (continua): con faulthandler attivo 4 corse su 4 senza crash
+(2 in parallelo senza sonda, 2 in sequenza con la sonda che fa anche
+gc.collect a fine sessione); senza faulthandler 3 su 6 con crash 139.
+IPOTESI in prova: raccolta di cicli di oggetti Qt durante la chiusura
+dell'interprete, dopo la distruzione della QApplication. PROVA IN CORSO: 4
+corse con il solo gc.collect() in pytest_unconfigure (plugin fuori dal
+repository, scratchpad/exitprobe/gc_only.py).
+45. [x] (utente 25/09, screenshot: «rimuovi queste voci») Menu File: togliere
+    «Apri cartella componente», «Prova in KiCad...», «Installa nel progetto
+    KiCad...», «Installa come libreria globale...» (restano Nuovo, Apri,
+    Rinomina progetto, Esci). Le funzioni restano raggiungibili dalla scheda
+    KiCad e dall'icona della cartella. Aggiornare cancelli e test che le usano.
+ESITO 45: FATTO. Voci e ritraduzioni tolte; cancelli invariati (getattr
+sicuro); contratto di test_output_actions_require_current_footprint
+aggiornato con commento; test nuovo del menu File in test_licenses_dialog.
+46. [x] (utente 25/09: «puoi creare una icona o logo piu' grande e
+    visibile? che poi useremo anche nella procedura di installer e come
+    icona Windows») L'icona attuale (kicadgen/gui/assets/app-icon.svg) nella
+    barra del titolo e' quasi invisibile. PIANO: nuova icona piena e ad alto
+    contrasto, leggibile a 16 px (niente tratti sottili), senza marchi altrui
+    (niente logo KiCad); stesso file app-icon.svg cosi' finestra,
+    KiCadGen.ico (tools/make_app_icon.py) e immagini dell'installer
+    (tools/make_installer_assets.py) la prendono tutte; anteprime a
+    16/24/32/48/256 px per controllo; test di packaging (icona identica al
+    file generato) da aggiornare rigenerando l'ico.
+ESITO 46: FATTO. Nuova kicadgen/gui/assets/app-icon.svg: quadrato verde
+(gradiente #34c77b -> #138a4f, bordo #0b5d34), chip scuro #1b1f2a con 12
+piedini chiari spessi e punto del pin 1 giallo; leggibile a 16 px su sfondo
+scuro e chiaro (fogli di anteprima in scratchpad/icon). packaging/
+KiCadGen.ico rigenerato con tools/make_app_icon.py; banner e immagine
+dell'installer (make_installer_assets.py) verificati in scratch: usano gia'
+la stessa sorgente. Nessun marchio altrui.

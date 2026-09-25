@@ -1,4 +1,4 @@
-"""Pure constraints for optional photo-derived lead/solder separation.
+"""@brief Pure constraints for optional photo-derived lead/solder separation.
 
 No package-specific proportions, names, pitch, hidden leads or height inference.
 Shared by the photo service and the embedded FreeCAD renderer.
@@ -7,7 +7,11 @@ import math
 
 
 def rect(value):
-    """@brief Provide the rect operation for this workflow."""
+    """@brief Validate a normalized, non-empty [x0, y0, x1, y1] rectangle inside 0..1.
+
+    @return The rectangle as a list.
+    @throws ValueError When it is malformed, out of range or empty.
+    """
     if (not isinstance(value, (list, tuple)) or len(value) != 4
             or any(isinstance(v, bool) or not isinstance(v, (int, float))
                    or not math.isfinite(v) or not 0 <= v <= 1 for v in value)):
@@ -18,7 +22,10 @@ def rect(value):
 
 
 def validated_lead_bbox(body, envelope, detail):
-    """None means no detail. Invalid detail must preserve the original terminal."""
+    """@brief Validate a photo-separated lead rectangle against the body and the terminal envelope.
+
+    None means no detail. Invalid detail must preserve the original terminal.
+    """
     if detail is None:
         return None
     if (not isinstance(detail, dict) or detail.get('confidence') != 'high'

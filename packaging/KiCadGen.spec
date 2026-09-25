@@ -2,7 +2,10 @@
 """PyInstaller spec: KiCadGen as a one-folder Windows GUI application.
 
 Run through scripts/build-windows.ps1, which prepares build/seed (the initial
-profile database taken from git HEAD) and the .venv-build environment.
+profile database generated from the code by tools/make_seed_db.py),
+build/licenses (license files collected by tools/collect_licenses.py) and the
+.venv-build environment. Both folders are required: PyInstaller stops when a
+data source is missing, so a package can never ship without them.
 Read-only resources keep the package layout, because the code finds them
 relative to its own modules (kicadgen/gui/assets, kicadgen/cad3d scripts run
 by freecadcmd as real files) or through kicadgen.app_paths.resource_path.
@@ -17,6 +20,7 @@ from PyInstaller.utils.win32.versioninfo import (FixedFileInfo, StringFileInfo, 
 
 ROOT = Path(SPECPATH).resolve().parent
 SEED = ROOT / "build" / "seed"
+LICENSES = ROOT / "build" / "licenses"
 VERSION = re.search(r'__version__\s*=\s*"(\d+\.\d+\.\d+)"',
                     (ROOT / "kicadgen" / "__init__.py").read_text(encoding="utf-8")).group(1)
 NUMBERS = tuple(int(part) for part in VERSION.split(".")) + (0,)
@@ -30,6 +34,10 @@ datas = [
     # Licenza e avvisi di terze parti: li mostra il menu «?» > «Licenze».
     (str(ROOT / "LICENSE"), "."),
     (str(ROOT / "THIRD_PARTY_NOTICES.md"), "."),
+    # License files of the bundled components (CPython, Qt, PyQt6, OpenCV's
+    # FFmpeg, ...) as _internal/licenses, collected offline by
+    # tools/collect_licenses.py.
+    (str(LICENSES), "licenses"),
 ]
 # Pesi YOLO: licenza non chiarita (model card MIT, metadati AGPL; vedi
 # THIRD_PARTY_NOTICES.md). Il codice e' AGPL-3.0 dal 2026-09-25, ma i pesi

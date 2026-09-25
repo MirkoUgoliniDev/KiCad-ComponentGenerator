@@ -8,7 +8,11 @@ from __future__ import annotations
 
 import math
 from concurrent.futures import ThreadPoolExecutor
+from .ai_diagnostics import CallCancelled
 from .messages import tx
+
+#: Confidence values the detector schema allows; anything else is stored as low.
+_CONFIDENCES = ("high", "medium", "low")
 
 PROMPT_VERSION = "top-body-inventory-1"
 DETECTION_PROMPT = """Find separately mounted physical component BODIES on this PCB photograph.
@@ -110,8 +114,11 @@ def _decode(response, bounds, sent_size, frame_size, source, log):
             continue
         rect = ((bx0 + x0 * (bx1-bx0)/sw)/fw, (by0 + y0 * (by1-by0)/sh)/fh,
                 (bx0 + x1 * (bx1-bx0)/sw)/fw, (by0 + y1 * (by1-by0)/sh)/fh)
+        confidence = row.get("confidence")
+        # Enum-checked before copying: a fresh (uncached) answer reaches this
+        # decoder even when it fails the schema, so the value is not trusted.
         output.append(dict(_box=rect, _source=source, kind="generic", name="Mounted body",
-            confidence=row.get("confidence", "low"), _uncertain=True,
+            confidence=confidence if confidence in _CONFIDENCES else "low", _uncertain=True,
             _body_evidence=str(row.get("evidence", ""))[:500]))
     return output
 
@@ -199,9 +206,13 @@ def detect_top_bodies(photo, model, call, log, cache_dir=None, *, core_width=800
                 cache_dir, stage, log)
             components = _decode(response, job["bounds"], (iw, ih), (w, h), stage, log)
             return components, dict(stage=stage, bounds=job["bounds"], state="processed", count=len(components))
+        except CallCancelled:
+            # The user's cancellation is not a failed region: stop the chain.
+            raise
         except Exception as exc:
             # A bounded experimental strategy must not silently lose failed regions.
-            log(f"{stage}: failed ({type(exc).__name__}); region remains unaudited.")
+            log(tx("{stage}: non riuscita ({error}); la zona resta non verificata.",
+                   stage=stage, error=type(exc).__name__))
             return [], dict(stage=stage, bounds=job["bounds"], state="failed", error=type(exc).__name__)
 
     def run_jobs(items, function):
@@ -256,8 +267,11 @@ def detect_top_bodies(photo, model, call, log, cache_dir=None, *, core_width=800
                     tool=review_tool(), max_tokens=4096, has_pdf=False), cache_dir, stage, log,
                     expected_ids=[c["_id"] for c in selected])
                 return _review_votes(data.get("components"), [c["_id"] for c in selected]), dict(stage=stage, state="processed")
+            except CallCancelled:
+                raise
             except Exception as exc:
-                log(f"{stage}: failed ({type(exc).__name__}); candidates stay uncertain.")
+                log(tx("{stage}: non riuscita ({error}); i candidati restano dubbi.",
+                       stage=stage, error=type(exc).__name__))
                 return _review_votes([], [c["_id"] for c in selected]), dict(stage=stage, state="failed")
 
         votes = {}

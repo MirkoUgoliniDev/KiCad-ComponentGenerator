@@ -1,4 +1,7 @@
-"""Impostazioni LLM: modello di default e prompt di sistema dell'estrazione."""
+"""@brief LLM settings dialog: default models and system prompts of the extraction.
+
+Impostazioni LLM: modello di default e prompt di sistema dell'estrazione.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +21,9 @@ from .model_dialog import pick_model
 
 
 class LlmSettingsDialog(QDialog):
-    """Editor del modello di default e del prompt di sistema.
+    """@brief Editor of the default models and of the system prompts used by the analyses.
+
+    Editor del modello di default e del prompt di sistema.
 
     Ogni analisi ha modello e prompt globali, ereditati dalle tipologie
     che non hanno un override nel profilo SQLite:
@@ -235,15 +240,15 @@ class LlmSettingsDialog(QDialog):
             self.field_verification_model.setText(chosen)
 
     def verification_model(self):
-        """@brief Provide the verification model operation for this workflow."""
+        """@brief Return the model chosen for the verification pass (defaults to the main model)."""
         return self._verification_model
 
     def grounding_prompt(self):
-        """@brief Provide the grounding prompt operation for this workflow."""
+        """@brief Return the edited grounding prompt, or the built-in one when left empty."""
         return self.grounding_editor.toPlainText().strip() or GROUNDING_PROMPT
 
     def verification_prompt(self):
-        """@brief Provide the verification prompt operation for this workflow."""
+        """@brief Return the edited verification prompt, or the built-in one when left empty."""
         return self.verification_editor.toPlainText().strip() or VERIFICATION_PROMPT
 
     def _pick_vision_model(self) -> None:
@@ -254,15 +259,15 @@ class LlmSettingsDialog(QDialog):
             self.field_vision_model.setText(chosen)
 
     def vision_model(self) -> str:
-        """@brief Provide the vision model operation for this workflow."""
+        """@brief Return the chosen vision model, or the default vision model when empty."""
         return self._vision_model.strip() or DEFAULT_VISION_MODEL
 
     def prompt(self) -> str:
-        """@brief Provide the prompt operation for this workflow."""
+        """@brief Return the edited extraction system prompt, stripped."""
         return self.editor.toPlainText().strip()
 
     def model(self) -> str:
-        """@brief Provide the model operation for this workflow."""
+        """@brief Return the chosen default model, or DEFAULT_MODEL when empty."""
         return self._model.strip() or DEFAULT_MODEL
 
 

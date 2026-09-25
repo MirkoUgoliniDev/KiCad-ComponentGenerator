@@ -1,4 +1,6 @@
-"""Modello dati e generatore di footprint KiCad (.kicad_mod).
+"""@brief KiCad footprint (.kicad_mod) data model and writer.
+
+Modello dati e generatore di footprint KiCad (.kicad_mod).
 
 Fornisce classi ad alto livello (Pad, FpLine, FpRect, FpCircle, FpText)
 che si convertono in S-expression tramite core.sexpr, e la classe
@@ -55,7 +57,9 @@ def _text_effects(size: float = 1.0, thickness: float = 0.15) -> SExpr:
 
 @dataclass
 class Pad:
-    """Piazzola (pad) di un footprint.
+    """@brief Footprint pad: number, type, shape, position, size, layers and optional drill.
+
+    Piazzola (pad) di un footprint.
 
     - number: nome/numero pin (es. "1", "A2", "" per pad meccaniche senza rete)
     - pad_type: "thru_hole" | "smd" | "np_thru_hole"
@@ -92,12 +96,11 @@ class Pad:
                                 pad_type=self.pad_type))
 
     def to_sexpr(self) -> SExpr:
-        """@brief Provide the to sexpr operation for this workflow."""
-        """@brief Provide the to sexpr operation for this workflow."""
-        """@brief Provide the to sexpr operation for this workflow."""
-        """@brief Provide the to sexpr operation for this workflow."""
-        """@brief Provide the to sexpr operation for this workflow."""
-        """@brief Provide the to sexpr operation for this workflow."""
+        """@brief Serialize this pad to a KiCad `(pad ...)` S-expression.
+
+        @return The pad node; `at` is the pad position (for a drilled pad, the
+            hole position: KiCad places the copper at `at` plus the drill offset).
+        """
         node = sx("pad", self.number, Symbol(self.pad_type), Symbol(self.shape))
         node.add(_at_node(self.at, self.rotation))
         node.add(sx("size", *self.size))
@@ -112,7 +115,10 @@ class Pad:
 
 @dataclass
 class FpLine:
-    """Segmento grafico (bordo silkscreen/fab/courtyard ecc.)."""
+    """@brief Graphic line segment on a footprint layer.
+
+    Segmento grafico (bordo silkscreen/fab/courtyard ecc.).
+    """
 
     start: Point
     end: Point
@@ -130,7 +136,10 @@ class FpLine:
 
 @dataclass
 class FpRect:
-    """Rettangolo grafico (es. contorno serigrafia)."""
+    """@brief Graphic rectangle on a footprint layer, optionally filled.
+
+    Rettangolo grafico (es. contorno serigrafia).
+    """
 
     start: Point
     end: Point
@@ -150,7 +159,10 @@ class FpRect:
 
 @dataclass
 class FpCircle:
-    """Cerchio grafico (es. marcatore pin 1)."""
+    """@brief Graphic circle on a footprint layer, optionally filled.
+
+    Cerchio grafico (es. marcatore pin 1).
+    """
 
     center: Point
     radius: float
@@ -171,7 +183,10 @@ class FpCircle:
 
 @dataclass
 class FpText:
-    """Testo grafico (usato per riferimenti extra, non Reference/Value)."""
+    """@brief Graphic text item on a footprint layer.
+
+    Testo grafico (usato per riferimenti extra, non Reference/Value).
+    """
 
     kind: str  # "user" | "reference" | "value"
     text: str
@@ -192,7 +207,10 @@ class FpText:
 
 @dataclass
 class Footprint:
-    """Footprint KiCad completo, esportabile come file .kicad_mod."""
+    """@brief Complete KiCad footprint that renders and saves as a .kicad_mod file.
+
+    Footprint KiCad completo, esportabile come file .kicad_mod.
+    """
 
     name: str
     description: str = ""
@@ -205,12 +223,12 @@ class Footprint:
     graphics: list = field(default_factory=list)  # FpLine | FpRect | FpCircle | FpText
 
     def add_pad(self, pad: Pad) -> "Footprint":
-        """@brief Provide the add pad operation for this workflow."""
+        """@brief Append a pad and return self for chaining."""
         self.pads.append(pad)
         return self
 
     def add_graphic(self, item) -> "Footprint":
-        """@brief Provide the add graphic operation for this workflow."""
+        """@brief Append a graphic item (line, rectangle, circle or text) and return self for chaining."""
         self.graphics.append(item)
         return self
 
@@ -253,11 +271,14 @@ class Footprint:
         return root
 
     def render(self) -> str:
-        """@brief Provide the render operation for this workflow."""
+        """@brief Return the complete .kicad_mod file text, newline-terminated."""
         return self.to_sexpr().render(0) + "\n"
 
     def save(self, path: str) -> None:
-        """Scrive il file .kicad_mod. Crea le cartelle mancanti (incluso il .pretty)."""
+        """@brief Write the .kicad_mod file to `path`, creating missing folders.
+
+        Scrive il file .kicad_mod. Crea le cartelle mancanti (incluso il .pretty).
+        """
         import os
 
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)

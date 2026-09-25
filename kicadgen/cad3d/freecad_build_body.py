@@ -17,10 +17,13 @@ del punto medio (spigoli) con i bordi noti del box, entro una tolleranza.
 """
 
 import json
+import math
 import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 
 import FreeCAD
 import Part
@@ -50,6 +53,84 @@ def _warn(template, **values):
     print("KICADGEN_WARN:" + json.dumps(payload, ensure_ascii=False), flush=True)
 
 TOL = 1e-3
+
+#: Seconds between two heartbeat lines. Fallback only: main() replaces it with
+#: the `heartbeat_interval_s` of the params file, derived from the watchdog
+#: timeout in kicadgen.cad3d.process_log (this script cannot import it).
+_HEARTBEAT_INTERVAL_S = 60.0
+
+
+class _StepHeartbeat:
+    """@brief Keep the parent's silence watchdog quiet during one long step.
+
+    @note Export, 0.03 mm tessellation, mesh dump, recompute, fillet
+        permutations and per-hole booleans can each stay silent longer than the
+        watchdog tolerates (process_log.run_logged kills the child after
+        FREECAD_SILENCE_TIMEOUT_S without output), killing a healthy build.
+        A daemon thread prints a KICADGEN_HEARTBEAT line every interval; the
+        GUI treats it as a machine line, the watchdog as proof of life.
+    @note The thread never touches FreeCAD: it only formats and prints a
+        string. DECLARED LIMIT, as for freecad_parts._ImportHeartbeat: it can
+        only run while the C++ call releases the GIL; `beat_if_due` is called
+        from the Python loops of the same steps so they beat regardless.
+    """
+
+    def __init__(self, step, interval=None):
+        self._step = str(step)
+        self._interval = float(interval or _HEARTBEAT_INTERVAL_S)
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._thread = None
+        self._started = self._last = time.monotonic()
+
+    def __enter__(self):
+        self._started = self._last = time.monotonic()
+        self._thread = threading.Thread(target=self._loop, daemon=True,
+                                        name="kicadgen-step-heartbeat")
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        with self._lock:
+            self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=min(self._interval, 5.0))
+            self._thread = None
+        return False
+
+    def beat_if_due(self):
+        """@brief Beat from the working thread when an interval has elapsed."""
+        if time.monotonic() - self._last >= self._interval:
+            self._beat()
+
+    def _loop(self):
+        while not self._stop.wait(self._interval):
+            self._beat()
+
+    def _beat(self):
+        with self._lock:
+            if self._stop.is_set():
+                return
+            now = time.monotonic()
+            self._last = now
+            try:
+                sys.stdout.write(f"KICADGEN_HEARTBEAT:{self._step}; "
+                                 f"elapsed={int(now - self._started)}s\n")
+                sys.stdout.flush()
+            except Exception:  # noqa: BLE001 - closed stdout: the beat is not the work
+                self._stop.set()
+
+
+def _set_heartbeat_interval(seconds):
+    """Adopt a positive finite heartbeat interval from the params file."""
+    global _HEARTBEAT_INTERVAL_S
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        return _HEARTBEAT_INTERVAL_S
+    if value > 0 and math.isfinite(value):
+        _HEARTBEAT_INTERVAL_S = value
+    return _HEARTBEAT_INTERVAL_S
 
 
 def _face_name(face, x0, y0, x1, y1, z1):
@@ -172,12 +253,14 @@ def _apply_fillets(shape, fillets, bounds):
     # canonico, poi gli altri, e si tiene quello che applica piu' spigoli:
     # nessuna regola tarata, solo la geometria che OpenCascade accetta.
     best = None
-    for order in _fillet_orders(groups):
-        result, applied, failed = _try_fillet_groups(shape, order, bounds)
-        if best is None or applied > best[1]:
-            best = (result, applied, failed)
-        if not failed:
-            break
+    with _StepHeartbeat("fillets") as heartbeat:
+        for order in _fillet_orders(groups):
+            heartbeat.beat_if_due()
+            result, applied, failed = _try_fillet_groups(shape, order, bounds)
+            if best is None or applied > best[1]:
+                best = (result, applied, failed)
+            if not failed:
+                break
     shape, _, failed = best if best is not None else (shape, 0, [])
     for radius, names, exc in failed:
         _warn("fillet r={radius} su {sorted} fallito: {exc}",
@@ -278,14 +361,44 @@ def _build_face_text_solids(shape, texts, bounds, font_file):
         # Rotazione + posizionamento sulla faccia vanno COMPOSTI con la
         # centratura appena fatta: assegnare direttamente .Placement la
         # sovrascriverebbe, lasciando la scritta fuori centro (sbordava dal corpo).
-        target = FreeCAD.Placement(
-            center - normal * sink,
-            FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), normal),
-        )
+        # Il frame e' esplicito (normale, alto = +Z): Rotation(Z, normale)
+        # sceglieva la rotazione minima, che capovolgeva la scritta sulla
+        # faccia posteriore e la metteva in verticale su quelle laterali.
+        x_axis, y_axis, z_axis = _text_frame((normal.x, normal.y, normal.z))
+        matrix = FreeCAD.Matrix(x_axis[0], y_axis[0], z_axis[0], 0,
+                                x_axis[1], y_axis[1], z_axis[1], 0,
+                                x_axis[2], y_axis[2], z_axis[2], 0,
+                                0, 0, 0, 1)
+        target = FreeCAD.Placement(matrix)
+        target.Base = center - normal * sink
         solid.Placement = target.multiply(solid.Placement)
 
         solids.append((solid, t.get("color_hex", "#ffffff")))
     return solids
+
+
+def _text_frame(normal):
+    """@brief Right-handed frame for text lying on a face with this outward normal.
+
+    @param normal Outward face normal (x, y, z); need not be unit length.
+    @return (x_axis, y_axis, z_axis) unit tuples: z_axis is the normal, y_axis
+        the text "up", x_axis the reading direction.
+    @note Up is +Z on every side face, so the text reads upright and
+        left-to-right to someone looking at that face from outside. On the top
+        and bottom faces up is +Y (the back of the part): top text reads along
+        +X seen from above, bottom text along -X seen from below.
+    """
+    nx, ny, nz = (float(v) for v in normal)
+    norm = math.sqrt(nx * nx + ny * ny + nz * nz) or 1.0
+    nx, ny, nz = nx / norm, ny / norm, nz / norm
+    up = (0.0, 1.0, 0.0) if abs(nz) > 0.9 else (0.0, 0.0, 1.0)
+    # x = up x n
+    x = (up[1] * nz - up[2] * ny, up[2] * nx - up[0] * nz, up[0] * ny - up[1] * nx)
+    length = math.sqrt(sum(c * c for c in x)) or 1.0
+    x = tuple(c / length for c in x)
+    # y = n x x (exactly `up` projected on the face)
+    y = (ny * x[2] - nz * x[1], nz * x[0] - nx * x[2], nx * x[1] - ny * x[0])
+    return x, y, (nx, ny, nz)
 
 
 def _hex_to_rgb(color):
@@ -804,12 +917,13 @@ def _save_fcstd(doc, fcstd_path):
 
 
 def main():
-    """@brief Run the public entry point for this workflow."""
+    """@brief Build body, pins, substrate, fillets and texts inside FreeCAD from the JSON job and export them."""
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
     json_path = sys.argv[2]
     with open(json_path, "r", encoding="utf-8") as f:
         data = _flip_y(json.load(f))
+    _set_heartbeat_interval(data.get("heartbeat_interval_s"))
 
     body = data["body"]
     pins = data["pins"]
@@ -861,7 +975,11 @@ def main():
     # ne ha uno per foro come prima.
     cutters = [n for n in data.get("notches", []) if not _covered_by_drill(n, drills)]
     cutters += [{"x": x, "y": y, "radius": r} for x, y, r in drills]
+    cut_heartbeat = _StepHeartbeat("holes").__enter__()
+    # Ogni iterazione intercetta le proprie eccezioni, quindi l'uscita qui
+    # sotto si raggiunge sempre: il battito non sopravvive al passo.
     for notch in cutters:
+        cut_heartbeat.beat_if_due()
         try:
             x, y, radius = notch["x"], notch["y"], notch["radius"]
             cutter = Part.makeCylinder(
@@ -875,6 +993,7 @@ def main():
                get=notch.get('x'),
                get2=notch.get('y'),
                exc=exc)
+    cut_heartbeat.__exit__(None, None, None)
 
     body_color = body.get("color_hex", "#1a1a1a")
     pin_color = data.get("pin_color_hex", "#b0b0b0")
@@ -954,6 +1073,15 @@ def main():
         # -- due copie si scollegherebbero alla prima modifica e il watchdog
         # tornerebbe a uccidere import sani.
         freecad_parts.set_heartbeat_interval(data.get("heartbeat_interval_s"))
+        # Cartelle di cache risolte dal padre (KICADGEN_DATA_DIR compreso).
+        freecad_parts.set_cache_dirs(data.get("cache_dirs"))
+        # Centro della scheda nel frame del modello: i connettori da bordo
+        # guardano fuori scheda rispetto a QUESTO punto, non all'origine, che
+        # nel generatore a matrice sta sul pin 1 e non al centro.
+        board_centre = [(x0 + x1) / 2, (y0 + y1) / 2]
+        for component in components:
+            if isinstance(component, dict):
+                component.setdefault("board_centre_xy", board_centre)
         for index, component in enumerate(components):
             base = _safe(component.get("name"), index)
             if component.get("render_3d", True) is False:
@@ -1040,26 +1168,29 @@ def main():
             FreeCAD.Vector(0, 0, 1),
         ), pin_color)
 
-    doc.recompute()
+    with _StepHeartbeat("recompute"):
+        doc.recompute()
     objects = [obj for obj, _ in colored]
 
     step_colors_exported = False
     print(f"KICADGEN_EXPORT_START:{step_path}", flush=True)
-    try:
-        import Import
-        styled = [(obj, getattr(color, "face_colors", None)
-                   or [_hex_to_rgb(color)] * len(obj.Shape.Faces)) for obj, color in colored]
-        Import.export(styled, step_path)
-        step_colors_exported = True
-        print(f"KICADGEN_STEP_COLORS_OK:{step_path}", flush=True)
-    except Exception as exc:
-        _warn("export colori STEP fallito ({exc}); solo geometria", exc=exc)
-        Part.export(objects, step_path)
+    with _StepHeartbeat("step_export"):
+        try:
+            import Import
+            styled = [(obj, getattr(color, "face_colors", None)
+                       or [_hex_to_rgb(color)] * len(obj.Shape.Faces)) for obj, color in colored]
+            Import.export(styled, step_path)
+            step_colors_exported = True
+            print(f"KICADGEN_STEP_COLORS_OK:{step_path}", flush=True)
+        except Exception as exc:
+            _warn("export colori STEP fallito ({exc}); solo geometria", exc=exc)
+            Part.export(objects, step_path)
     print(f"KICADGEN_STEP_OK:{step_path}", flush=True)
 
     if fcstd_path:
         try:
-            _save_fcstd(doc, fcstd_path)
+            with _StepHeartbeat("fcstd_save"):
+                _save_fcstd(doc, fcstd_path)
             print(f"KICADGEN_FCSTD_OK:{fcstd_path}")
         except Exception as exc:  # noqa: BLE001 - sorgente FreeCAD e' best-effort
             print(f"KICADGEN_FCSTD_FAILED:{exc}")
@@ -1071,17 +1202,20 @@ def main():
                exc=exc)
 
     tessellated = []
-    for obj, color in colored:
-        face_colors = getattr(color, "face_colors", None)
-        if face_colors:
-            groups = {}
-            for face, rgba in zip(obj.Shape.Faces, face_colors):
-                rgb = "#" + "".join(f"{round(max(0, min(1, c)) * 255):02x}" for c in rgba[:3])
-                groups.setdefault(rgb, []).append(face)
-            for rgb, faces in groups.items():
-                tessellated.append((obj, rgb, Part.makeCompound(faces).tessellate(0.03)))
-        else:
-            tessellated.append((obj, color, obj.Shape.tessellate(0.03)))
+    with _StepHeartbeat("tessellation") as heartbeat:
+        for obj, color in colored:
+            heartbeat.beat_if_due()
+            face_colors = getattr(color, "face_colors", None)
+            if face_colors:
+                groups = {}
+                for face, rgba in zip(obj.Shape.Faces, face_colors):
+                    rgb = "#" + "".join(f"{round(max(0, min(1, c)) * 255):02x}" for c in rgba[:3])
+                    groups.setdefault(rgb, []).append(face)
+                for rgb, faces in groups.items():
+                    heartbeat.beat_if_due()
+                    tessellated.append((obj, rgb, Part.makeCompound(faces).tessellate(0.03)))
+            else:
+                tessellated.append((obj, color, obj.Shape.tessellate(0.03)))
 
     # Mesh tassellata: la GUI la usa per l'anteprima della geometria REALE, e il
     # generatore Python la usa per colorare lo STEP (un colore per solido, nello
@@ -1091,26 +1225,30 @@ def main():
         try:
             parts = []
             counted = set()
-            for obj, color, (verts, facets) in tessellated:
-                parts.append({
-                    "name": obj.Name if obj.Name not in counted else f"{obj.Name}_color{len(parts)}",
-                    "color": color,
-                    "solids": len(obj.Shape.Solids) if obj.Name not in counted else 0,
-                    **metadata.get(obj.Name, {}),
-                    "label": label_anchors.get(obj.Name),
-                    "vertices": [[p.x, p.y, p.z] for p in verts],
-                    "triangles": [list(f) for f in facets],
-                })
-                counted.add(obj.Name)
-            with open(mesh_path, "w", encoding="utf-8") as fh:
-                json.dump({"parts": parts, "step_colors_exported": step_colors_exported}, fh)
+            with _StepHeartbeat("mesh_json") as mesh_heartbeat:
+                for obj, color, (verts, facets) in tessellated:
+                    mesh_heartbeat.beat_if_due()
+                    parts.append({
+                        "name": (obj.Name if obj.Name not in counted
+                                 else f"{obj.Name}_color{len(parts)}"),
+                        "color": color,
+                        "solids": len(obj.Shape.Solids) if obj.Name not in counted else 0,
+                        **metadata.get(obj.Name, {}),
+                        "label": label_anchors.get(obj.Name),
+                        "vertices": [[p.x, p.y, p.z] for p in verts],
+                        "triangles": [list(f) for f in facets],
+                    })
+                    counted.add(obj.Name)
+                with open(mesh_path, "w", encoding="utf-8") as fh:
+                    json.dump({"parts": parts, "step_colors_exported": step_colors_exported}, fh)
             print(f"KICADGEN_MESH_OK:{mesh_path}")
         except Exception as exc:  # noqa: BLE001 - anteprima e' best-effort
             print(f"KICADGEN_MESH_FAILED:{exc}")
 
     if wrl_path:
         try:
-            _write_vrml(wrl_path, tessellated)
+            with _StepHeartbeat("vrml_export"):
+                _write_vrml(wrl_path, tessellated)
             print(f"KICADGEN_WRL_OK:{wrl_path}")
         except Exception as exc:  # noqa: BLE001 - export VRML e' best-effort
             print(f"KICADGEN_WRL_FAILED:{exc}")

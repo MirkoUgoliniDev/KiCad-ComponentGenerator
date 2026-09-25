@@ -99,3 +99,21 @@ def test_a_malformed_stored_choice_falls_back_to_the_automatic_behaviour(tmp_pat
     restored = restore_choices(tmp_path, b'photo', [deepcopy(component())])[0]
     assert 'render_3d_override' not in restored
     assert 'model_rotation_delta_deg' not in restored
+
+
+def test_an_automatic_match_alone_is_not_restored(tmp_path):
+    """Only explicit choices come back (audit D13): an automatic report is recomputed."""
+    automatic = component()
+    automatic.pop('model_selection')
+    save_choices(tmp_path, b'photo', [automatic])
+    fresh = deepcopy(automatic); fresh.pop('model_match')
+    assert 'model_match' not in restore_choices(tmp_path, b'photo', [fresh])[0]
+
+
+def test_the_match_report_of_an_explicit_choice_is_restored(tmp_path):
+    """Negative: with a confirmed selection its saved report comes back with it."""
+    chosen = component()
+    save_choices(tmp_path, b'photo', [chosen])
+    fresh = deepcopy(chosen); fresh.pop('model_selection'); fresh.pop('model_match')
+    restored = restore_choices(tmp_path, b'photo', [fresh])[0]
+    assert restored['model_match'] == chosen['model_match']

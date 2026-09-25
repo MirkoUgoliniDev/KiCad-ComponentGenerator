@@ -59,7 +59,9 @@ def tx(source: str, /, **values: object) -> str:
     for candidate in (text, source):
         try:
             return candidate.format(**values)
-        except (KeyError, IndexError, ValueError, AttributeError):
+        # TypeError: a value that does not accept the format spec, e.g.
+        # «{a:.2f}» with a=None -- same fallback as the other errors.
+        except (KeyError, IndexError, ValueError, AttributeError, TypeError):
             continue
     return source
 

@@ -1,4 +1,4 @@
-"""Versioned SQLite catalog of component types and inherited AI profiles.
+"""@brief Versioned SQLite catalog of component types and inherited AI profiles.
 
 Connections are short-lived; analysis workers receive resolved snapshots, never
 connections. The legacy JSON is backed up and imported once, never overwritten.
@@ -41,7 +41,7 @@ def _superseded_translations():
 
 
 def factory_defaults():
-    """@brief Provide the factory defaults operation for this workflow."""
+    """@brief Return the built-in AI defaults (models and prompts) used to seed the profile database."""
     from .datasheet_extractor import DEFAULT_SYSTEM_PROMPT
     from .openrouter import DEFAULT_MODEL
     from .photo_grounding import DEFAULT_VISION_MODEL, GROUNDING_PROMPT, VERIFICATION_PROMPT
@@ -204,7 +204,7 @@ class ProfileStore:
             return [dict(row) for row in rows]
 
     def defaults(self):
-        """@brief Provide the defaults operation for this workflow."""
+        """@brief Return the global AI default values as a name-to-value dictionary."""
         with self._connect() as db:
             return dict(db.execute('SELECT name,value FROM ai_defaults'))
 
@@ -219,14 +219,18 @@ class ProfileStore:
                 raise ProfileError(tx("{key}: specificare un valore oppure ereditare il default.", key=key))
 
     def save_defaults(self,values):
-        """@brief Provide the save defaults operation for this workflow."""
+        """@brief Validate and store global AI default values; model ids are stripped.
+
+        @param values Mapping of default names to their new values.
+        @throws ProfileError When a value fails validation.
+        """
         self._validate_values(values)
         values = {k: v.strip() if k.endswith('model') else v for k, v in values.items()}
         with self._connect() as db:
             db.executemany('UPDATE ai_defaults SET value=? WHERE name=?',[(v,k) for k,v in values.items()])
 
     def list_types(self,include_inactive=False):
-        """@brief Provide the list types operation for this workflow."""
+        """@brief Return the component types ordered by position and label, only active ones unless `include_inactive`."""
         with self._connect() as db:
             query = 'SELECT * FROM component_types'
             if not include_inactive:
@@ -234,18 +238,23 @@ class ProfileStore:
             return [dict(r) for r in db.execute(query+' ORDER BY position,label,key')]
 
     def get_type(self,key):
-        """@brief Provide the get type operation for this workflow."""
+        """@brief Return the component type row for `key` as a dictionary, or None when absent."""
         with self._connect() as db:
             row = db.execute('SELECT * FROM component_types WHERE key=?',(key,)).fetchone()
             return dict(row) if row else None
 
     def overrides(self,key):
-        """@brief Provide the overrides operation for this workflow."""
+        """@brief Return the AI values overridden by the component type `key`."""
         with self._connect() as db:
             return dict(db.execute('SELECT name,value FROM ai_overrides WHERE type_key=?',(key,)))
 
     def resolve(self,key=''):
-        """Effective values without composing instructions or changing persisted text."""
+        """@brief Return the effective AI values: global defaults updated with the overrides of `key`.
+
+        No instructions are composed and no persisted text is changed.
+        @param key Component type key; empty for the global defaults only.
+        @throws ProfileError When `key` is not in the catalogue.
+        """
         with self._connect() as db:
             db.execute('BEGIN')
             values = dict(db.execute('SELECT name,value FROM ai_defaults'))
@@ -256,7 +265,7 @@ class ProfileStore:
             return values
 
     def snapshot(self,key=''):
-        """@brief Provide the snapshot operation for this workflow."""
+        """@brief Return resolved values with the type image instructions appended to every photo prompt."""
         values = self.resolve(key)
         extra = values['image_instructions'].strip()
         if extra:
@@ -265,7 +274,13 @@ class ProfileStore:
         return values
 
     def save_type(self,key,*,label,family,instructions='',active=True,overrides=None):
-        """@brief Provide the save type operation for this workflow."""
+        """@brief Create (empty `key`) or update a component type and optionally replace its overrides.
+
+        @param key Existing type key, or a false value to create a new custom type.
+        @param overrides New override mapping (None values inherit); None keeps the stored ones.
+        @return The key of the saved type.
+        @throws ProfileError On missing label, invalid family or data, or a type removed meanwhile.
+        """
         if not isinstance(label,str) or not label.strip():
             raise ProfileError(tx("Il nome della tipologia è obbligatorio."))
         if family not in FAMILIES or not isinstance(instructions,str) or type(active) is not bool:
@@ -293,7 +308,10 @@ class ProfileStore:
         return key
 
     def duplicate(self,key):
-        """@brief Provide the duplicate operation for this workflow."""
+        """@brief Create an active copy of type `key`, including its overrides, and return the new key.
+
+        @throws ProfileError When `key` does not exist.
+        """
         original = self.get_type(key)
         if not original:
             raise ProfileError(tx("Tipologia da duplicare non trovata."))
@@ -301,13 +319,21 @@ class ProfileStore:
             instructions=original['instructions'],active=True,overrides=self.overrides(key))
 
     def delete_type(self,key):
-        """@brief Provide the delete type operation for this workflow."""
+        """@brief Delete the component type `key` from the catalogue.
+
+        @throws ProfileError When `key` does not exist.
+        """
         with self._connect() as db:
             if db.execute('DELETE FROM component_types WHERE key=?',(key,)).rowcount != 1:
                 raise ProfileError(tx("Tipologia da eliminare non trovata."))
 
     def backup(self,destination):
-        """@brief Provide the backup operation for this workflow."""
+        """@brief Copy the database into a new file with the SQLite backup API.
+
+        @param destination New file path, different from the active database.
+        @return The destination path.
+        @throws ProfileError When the destination is the active database or already exists.
+        """
         destination = Path(destination)
         if destination.resolve()==self.path.resolve() or destination.exists():
             raise ProfileError(tx("Scegliere un nuovo file di backup, diverso dal database attivo."))

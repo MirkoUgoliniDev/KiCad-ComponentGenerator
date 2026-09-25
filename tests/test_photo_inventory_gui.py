@@ -262,11 +262,11 @@ def test_generation_options_save_or_cancel(window, monkeypatch, accept):
 
 
 def test_output_actions_require_current_footprint(window, tmp_path, monkeypatch):
-    footprint_controls = (window.btn_open_output, window.action_open_output)
+    # Contratto aggiornato (utente, 2026-09-25): le voci equivalenti del menu
+    # File sono state tolte; restano i pulsanti, che il cancello deve seguire.
+    footprint_controls = (window.btn_open_output,)
     complete_controls = (
         window.btn_test_kicad, window.btn_export, window.btn_install_global,
-        window.action_test_kicad, window.action_export,
-        window.action_install_global,
     )
     controls = footprint_controls + complete_controls
     # Contratto aggiornato di proposito (utente, 2026-09-24): la scheda KiCad

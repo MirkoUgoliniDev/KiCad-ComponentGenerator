@@ -1,4 +1,6 @@
-"""Estrazione parametri footprint da datasheet tramite l'API OpenRouter.
+"""@brief Footprint parameter extraction from datasheets through the OpenRouter API.
+
+Estrazione parametri footprint da datasheet tramite l'API OpenRouter.
 
 Manda i file di documentazione (PDF/immagini) a OpenRouter -- che con una
 sola chiave da' accesso ai modelli di tutti i fornitori -- e richiede di
@@ -18,6 +20,7 @@ Richiede la variabile d'ambiente OPENROUTER_API_KEY (di norma nel file
 from __future__ import annotations
 
 import base64
+import copy
 import mimetypes
 import math
 import re
@@ -30,6 +33,7 @@ from ..core.package_geometry import package_from_mapping
 from ..generators.castellated_module import (
     CONTACT_HALF_AND_THROUGH, CONTACT_STYLE_NAMES, CONTACT_STYLES, EDGE_LABELS, EDGES,
 )
+from .ai_diagnostics import CallCancelled
 from .openrouter import (DEFAULT_MODEL, OpenRouterError, api_key, call_tool, check_credit,
                          reset_usage, usage_totals)
 from .messages import tx
@@ -669,7 +673,9 @@ DEFAULT_SYSTEM_PROMPT = _SYSTEM_PROMPT
 
 @dataclass
 class ExtractedParams:
-    """Risultato dell'estrazione, per entrambe le disposizioni di contatti.
+    """@brief Extraction result for matrix and castellated contact layouts.
+
+    Risultato dell'estrazione, per entrambe le disposizioni di contatti.
 
     `layout` dice quali campi sono significativi: "matrix" valorizza
     righe/colonne/passo/pad/drill, "castellated" valorizza
@@ -710,16 +716,66 @@ class ExtractedParams:
     package_geometry: Optional[dict] = None
 
     def has_3d_body(self) -> bool:
-        """@brief Provide the has 3d body operation for this workflow."""
+        """@brief Return whether body length, width and height are all known, so a 3D body can be built."""
         return self.body_length_mm is not None and self.body_width_mm is not None and self.body_height_mm is not None
 
     def is_castellated(self) -> bool:
-        """@brief Provide the is castellated operation for this workflow."""
+        """@brief Return whether the contacts use the castellated (per-edge) layout."""
         return self.layout == "castellated"
 
 
 class ExtractionError(Exception):
-    """Errore applicativo (chiave mancante, file non valido, risposta inattesa)."""
+    """@brief Application error of the extraction: missing key, invalid file or unexpected answer.
+
+    Errore applicativo (chiave mancante, file non valido, risposta inattesa).
+
+    @note `raw_response`, when set, is the paid main answer that failed the
+        validation, kept so a retry can be compared with it (it is also
+        written to the AI log as an AI_RESPONSE_REJECTED line).
+    """
+
+    raw_response = None
+
+
+class ExtractionCancelled(ExtractionError, CallCancelled):
+    """@brief The user cancelled the extraction before the next paid call.
+
+    @note Subclass of ExtractionError, so existing handlers still stop the
+        run; also a CallCancelled, so no optional step (photo inventory,
+        tiles, reviews) downgrades it to a note.
+    """
+
+
+#: Bound of the rejected main answer written to the log, in characters: the
+#: tool arguments of one component are a few kB, so this keeps every real
+#: answer whole while a runaway one cannot flood the log.
+_REJECTED_RESPONSE_MAX_CHARS = 200_000
+
+
+def _log_rejected_response(data, exc: ExtractionError, progress) -> None:
+    """Keep the paid answer that failed validation, so a retry is not blind.
+
+    The answer is attached to the exception and written to the AI log as one
+    machine line (AI_RESPONSE_REJECTED ...). It is never cached: an invalid
+    answer must not be replayed as a success.
+    """
+    exc.raw_response = data
+    if not progress:
+        return
+    import json
+    try:
+        text = json.dumps(data, ensure_ascii=False, sort_keys=True, default=repr)
+    except (TypeError, ValueError):
+        text = repr(data)
+    if len(text) > _REJECTED_RESPONSE_MAX_CHARS:
+        text = text[:_REJECTED_RESPONSE_MAX_CHARS] + " …[truncated]"
+    try:
+        progress(tx("Risposta principale scartata dalla validazione: {exc}. Il testo della "
+                    "risposta resta nel log AI (riga AI_RESPONSE_REJECTED) per confrontarlo "
+                    "con un nuovo tentativo.", exc=exc))
+        progress("AI_RESPONSE_REJECTED " + text)
+    except Exception:  # noqa: BLE001 - il log non deve nascondere l'errore vero
+        pass
 
 
 def _guess_media_type(path: Path) -> str:
@@ -778,7 +834,9 @@ def _file_to_content_block(path: Path) -> dict:
         )
     size = path.stat().st_size
     if size > MAX_FILE_BYTES:
-        raise ExtractionError(f"{path.name} troppo grande ({size / 1_048_576:.1f} MB, max 20 MB)")
+        raise ExtractionError(tx("{name} troppo grande ({size:.1f} MB, max {limit} MB)",
+                                 name=path.name, size=size / 1_048_576,
+                                 limit=MAX_FILE_BYTES // 1_048_576))
 
     media_type = _guess_media_type(path)
     payload = path.read_bytes()
@@ -793,7 +851,8 @@ def _file_to_content_block(path: Path) -> dict:
 
 
 def _pin_map_seen_from_top(
-    pin_map: Optional[Sequence[dict]], cols: int, view: Optional[str]
+    pin_map: Optional[Sequence[dict]], cols: int, view: Optional[str],
+    rows: Optional[int] = None,
 ) -> Optional[list]:
     """Converte le posizioni lette dal disegno in coordinate viste dall'alto.
 
@@ -805,14 +864,41 @@ def _pin_map_seen_from_top(
     La trasformazione si fa qui e non nel prompt perche' e' una riflessione
     geometrica esatta: il modello legge (compito percettivo), il codice ribalta
     (compito deterministico).
+
+    @throws ExtractionError When an entry is not an object with integral
+        pin >= 1, row >= 0 and col >= 0 (booleans and fractions rejected),
+        lies outside the rows x cols matrix (rows checked when given), or
+        repeats a pin number or a position. The map is a numbering convention
+        as a whole, so one bad entry invalidates it.
     """
     if not pin_map:
         return None
-
-    entries = [
-        {"pin": int(e["pin"]), "row": int(e["row"]), "col": int(e["col"])}
-        for e in pin_map
-    ]
+    if not isinstance(pin_map, (list, tuple)):
+        raise ExtractionError(tx("pin_map non e' un elenco di posizioni."))
+    entries = []
+    pins, positions = {}, {}
+    for index, raw in enumerate(pin_map, 1):
+        values = {}
+        if isinstance(raw, dict):
+            values = {key: _optional_number(raw.get(key), integer=True)
+                      for key in ("pin", "row", "col")}
+        if (not values or any(v is None for v in values.values())
+                or values["pin"] < 1 or values["row"] < 0 or values["col"] < 0):
+            raise ExtractionError(tx("pin_map, voce {index}: servono pin, row e col interi "
+                                     "(pin da 1, row e col da 0).", index=index))
+        pin, row, col = values["pin"], values["row"], values["col"]
+        if col >= cols or (rows is not None and row >= rows):
+            raise ExtractionError(tx("pin_map: pin {pin} in riga {row}, colonna {col}, fuori "
+                                     "dalla matrice {rows}x{cols}.", pin=pin, row=row, col=col,
+                                     rows=rows if rows is not None else "?", cols=cols))
+        if pin in pins:
+            raise ExtractionError(tx("pin_map: il pin {pin} compare piu' volte.", pin=pin))
+        if (row, col) in positions:
+            raise ExtractionError(tx("pin_map: i pin {pin} e {other} occupano la stessa "
+                                     "posizione.", pin=pin, other=positions[(row, col)]))
+        pins[pin] = True
+        positions[(row, col)] = pin
+        entries.append({"pin": pin, "row": row, "col": col})
     if view == "bottom":
         for entry in entries:
             entry["col"] = cols - 1 - entry["col"]
@@ -972,8 +1058,16 @@ def extract_pin_header_params(
     yolo_settings: Optional[dict] = None,
     phase: Optional[Callable[..., None]] = None,
     review_proposals: Optional[Callable[..., object]] = None,
+    cancel: Optional[object] = None,
 ) -> ExtractedParams:
     """@brief Extract dimensions and pinout, optionally using local YOLO photo proposals.
+
+    @param cancel Optional cancellation channel: a threading.Event (or any
+        object with is_set()) or a zero-argument callable returning True when
+        the user asked to stop. It is checked before EVERY paid call, retries
+        and the photo inventory included, and during retry backoff waits.
+        When set, ExtractionCancelled is raised and no further call is paid.
+        None (default) keeps the previous behaviour.
 
     @param photo_detector Photo localization backend: ai (legacy), yolo (local
         proposals plus one AI reconciliation) or vlm (no local detector: the
@@ -1011,8 +1105,14 @@ def extract_pin_header_params(
 
     Solleva ExtractionError per qualunque problema applicativo: chiave
     mancante, file non supportati o troppo grandi, errori di rete/API,
-    risposta senza la chiamata allo strumento.
+    risposta senza la chiamata allo strumento. A main answer rejected by the
+    validation keeps its content in `ExtractionError.raw_response` and in
+    the AI log.
     """
+    # Il consuntivo riguarda questa elaborazione: azzerarlo PRIMA di ogni
+    # controllo, cosi' anche un rifiuto in validazione (YOLO, ruoli, file)
+    # non lascia mostrare il costo della corsa precedente come se fosse suo.
+    reset_usage()
     if not doc_paths:
         raise ExtractionError(tx("Nessun file selezionato."))
     if photo_detector not in ("ai", "yolo", "vlm"):
@@ -1030,7 +1130,16 @@ def extract_pin_header_params(
     from .ai_diagnostics import make_logged_call
     # L'analisi applicativa deve essere auditabile: il log persistente conserva
     # il testo esatto dei prompt/tool e gli hash delle immagini (mai i byte).
-    diagnostic_call = make_logged_call(call_tool, progress, log_prompt=True)
+    cancelled = _cancel_predicate(cancel)
+
+    def check_cancel():
+        """Raise ExtractionCancelled when the user asked to stop."""
+        if cancelled is not None and cancelled():
+            raise ExtractionCancelled(tx("Estrazione annullata dall'utente: nessuna altra "
+                                         "chiamata a pagamento."))
+
+    diagnostic_call = make_logged_call(call_tool, progress, log_prompt=True,
+                                       cancel=check_cancel if cancelled is not None else None)
     if len(doc_paths) > MAX_FILES:
         raise ExtractionError(tx("Troppi file selezionati (max {MAX_FILES} per chiamata).", MAX_FILES=MAX_FILES))
     from .document_roles import ROLES, ROLE_HELP
@@ -1040,9 +1149,7 @@ def extract_pin_header_params(
                 or any(role not in ROLES for role in document_roles.values())):
             raise ExtractionError(tx("Ruoli documenti incompleti, duplicati o non validi."))
 
-    # Il consuntivo riguarda questa elaborazione: azzerarlo qui, non alla fine,
-    # cosi' un'estrazione interrotta non lascia residui nella successiva.
-    reset_usage()
+    check_cancel()
     try:
         api_key()
         # Il credito va verificato qui, prima del primo blocco di contenuto:
@@ -1125,7 +1232,62 @@ def extract_pin_header_params(
         raise ExtractionError(str(exc)) from exc
 
     if not isinstance(data, dict):
-        raise ExtractionError(tx("Risposta AI non strutturata."))
+        error = ExtractionError(tx("Risposta AI non strutturata."))
+        _log_rejected_response(data, error, progress)
+        raise error
+    raw_main = copy.deepcopy(data)
+    try:
+        _validate_main_response(data, content_blocks, diagnostic_call, model, system_prompt,
+                                has_pdf, progress)
+    except ExtractionCancelled:
+        raise
+    except ExtractionError as exc:
+        _log_rejected_response(raw_main, exc, progress)
+        raise
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError) as exc:
+        # A shape no rule above anticipated: still an application error with
+        # the answer preserved, never a raw exception out of the extraction.
+        error = ExtractionError(tx("Risposta AI non valida: {exc}", exc=exc))
+        _log_rejected_response(raw_main, error, progress)
+        raise error from exc
+
+    if progress:
+        progress(
+            tx("Analisi principale completata: layout={get}, componenti "
+               "iniziali={n_items}.",
+               get=data.get('layout', 'matrix'),
+               n_items=len(data.get('components_3d') or []))
+        )
+    return _extract_photo_stage(
+        data, doc_paths, progress=progress, announce=announce, check_cancel=check_cancel,
+        document_roles=document_roles, component_family=component_family,
+        photo_detector=photo_detector, vision_model=vision_model, model=model,
+        verification_model=verification_model, diagnostic_call=diagnostic_call,
+        extra_instructions=extra_instructions, photo_cache_dir=photo_cache_dir,
+        grounding_prompt=grounding_prompt, verification_prompt=verification_prompt,
+        terminal_prompt=terminal_prompt, yolo_model_path=yolo_model_path,
+        review_proposals=review_proposals, yolo_confidence=yolo_confidence,
+        yolo_settings=yolo_settings)
+
+
+def _cancel_predicate(cancel):
+    """Normalize the cancellation channel to a zero-argument predicate, or None."""
+    if cancel is None:
+        return None
+    if hasattr(cancel, "is_set"):
+        return cancel.is_set
+    if callable(cancel):
+        return lambda: bool(cancel())
+    raise ExtractionError(tx("Canale di annullamento non valido."))
+
+
+def _validate_main_response(data, content_blocks, diagnostic_call, model, system_prompt,
+                            has_pdf, progress) -> None:
+    """Sanitize and validate the main answer in place; ExtractionError when unusable.
+
+    Body dimensions are sanitized with a note, castellated numbering conflicts
+    get one paid repair, and the complete answer must then build ExtractedParams.
+    """
     # Validate geometry before it can be used to calibrate a photograph.
     for key in ("body_length_mm", "body_width_mm", "body_height_mm"):
         original = data.get(key)
@@ -1137,9 +1299,10 @@ def extract_pin_header_params(
             data["notes"] = (str(data.get("notes") or "") + "\n" + warning).strip()
             if progress:
                 progress(warning)
+    dims = dict(body_length=data.get("body_length_mm"), body_width=data.get("body_width_mm"))
     if data.get("layout") == "castellated":
         try:
-            _castellated_sides(data.get("castellated_sides"))
+            _castellated_sides(data.get("castellated_sides"), **dims)
         except _PinNumberConflict as exc:
             if progress:
                 progress(tx("Numerazione contatti incoerente: {exc}. Richiesta correzione prima "
@@ -1159,10 +1322,13 @@ def extract_pin_header_params(
                     system_prompt=system_prompt or _SYSTEM_PROMPT,
                     content_blocks=repair_blocks, tool=_openai_tool(),
                     max_tokens=16384, has_pdf=has_pdf)
-                corrected = _castellated_sides(repaired.get("castellated_sides"))
-                original = data["castellated_sides"]
+                corrected = _castellated_sides(repaired.get("castellated_sides"), **dims)
+                # Normalized against normalized: the raw original may hold
+                # entries the normalization drops, or edges written
+                # differently, which are not changes made by the correction.
+                original = _normalized_castellated_sides(data["castellated_sides"])
                 if len(corrected) != len(original) or any(
-                    row["edge"] != old.get("edge") or row["count"] != old.get("count")
+                    row["edge"] != old["edge"] or row["count"] != old["count"]
                     for row, old in zip(corrected, original)
                 ):
                     raise ExtractionError(tx("La correzione della numerazione ha cambiato i lati o i conteggi."))
@@ -1176,21 +1342,22 @@ def extract_pin_header_params(
             except (OpenRouterError, AttributeError) as repair_error:
                 raise ExtractionError(tx("Correzione numerazione non riuscita; analisi foto non avviata.")) from repair_error
         # Dopo l'eventuale correzione, cosi' la riga descrive i lati definitivi.
-        notice = _unobserved_contact_style_notice(_castellated_sides(data.get("castellated_sides")))
+        notice = _unobserved_contact_style_notice(_castellated_sides(data.get("castellated_sides"), **dims))
         if notice:
             data["notes"] = (str(data.get("notes") or "") + "\n" + notice).strip()
             if progress:
                 progress(notice)
     _params_from_tool_arguments(data)
 
-    if progress:
-        progress(
-            tx("Analisi principale completata: layout={get}, componenti "
-               "iniziali={n_items}.",
-               get=data.get('layout', 'matrix'),
-               n_items=len(data.get('components_3d') or []))
-        )
 
+def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, document_roles,
+                         component_family, photo_detector, vision_model, model,
+                         verification_model, diagnostic_call, extra_instructions,
+                         photo_cache_dir, grounding_prompt, verification_prompt,
+                         terminal_prompt, yolo_model_path, review_proposals,
+                         yolo_confidence, yolo_settings) -> ExtractedParams:
+    """Optional photo inventory and final assembly of a validated main answer."""
+    from .document_roles import ROLES
     # La foto richiede un passaggio separato: nell'estrazione globale il modello
     # deve anche leggere quote, pinout e layout, e tende a sacrificare i passivi
     # piccoli. I crop sono best-effort: se falliscono, resta il risultato globale.
@@ -1231,6 +1398,7 @@ def extract_pin_header_params(
         # visione, e va detto perche' e' cio' che si paga.
         if photo_detector != "yolo":
             announce("llm", vision_model or DEFAULT_VISION_MODEL)
+        check_cancel()
         try:
             photo_report = extract_inventory(
                 doc_paths, vision_model or DEFAULT_VISION_MODEL, data["body_length_mm"],
@@ -1250,7 +1418,13 @@ def extract_pin_header_params(
             # Un annullo non e' un guasto dell'inventario: proseguire qui
             # vorrebbe dire pagare la riconciliazione sulle proposte rifiutate.
             raise ExtractionError(str(exc)) from exc
-        except (OpenRouterError, ValueError, OSError) as exc:
+        except CallCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001 - l'inventario e' facoltativo
+            # Qualunque guasto dell'inventario (anche KeyError/TypeError di
+            # una risposta malformata) non deve far perdere la risposta
+            # principale, gia' pagata e valida: diventa una nota, con la
+            # traccia completa nel log per chi deve correggerlo.
             # L'errore viene inghiottito nelle note e l'elaborazione prosegue
             # senza inventario: bisogna chiudere la fase annunciata, altrimenti
             # la modale resta per tutto il resto della corsa sull'ultimo
@@ -1259,12 +1433,18 @@ def extract_pin_header_params(
             # quello strumento non sta piu' lavorando. Tool vuoto = nessuna
             # fase rivendicata, non una fase sbagliata.
             announce("", "")
-            data["notes"] = (str(data.get("notes") or "") + f"\nInventario fotografico fallito: {exc}").strip()
+            if progress:
+                import traceback
+                progress("AI_PHOTO_INVENTORY_TRACEBACK " + "".join(
+                    traceback.format_exception(type(exc), exc, exc.__traceback__)).strip())
+            data["notes"] = (str(data.get("notes") or "") + "\n"
+                             + tx("Inventario fotografico fallito: {exc}", exc=exc)).strip()
         if photo_report and photo_report.components:
             # The global YOLO reconciliation already reports terminal evidence.
             # Further paid crop calls are an explicit optional UI action only.
             if photo_detector not in ('yolo', 'vlm') and isinstance(getattr(photo_report, "photo_png", None), bytes):
                 from .photo_terminals import observe_terminals
+                check_cancel()
                 try:
                     photo_report.components = observe_terminals(
                         photo_report.photo_png, photo_report.components, vision_model or DEFAULT_VISION_MODEL,
@@ -1425,12 +1605,13 @@ class _PinNumberConflict(ExtractionError):
     """@brief Reject overlapping physical pad ranges before photographic analysis."""
 
 
-def _castellated_sides(raw: Optional[Sequence[dict]]) -> list[dict]:
-    """Normalizza i lati di un modulo castellated, scartando quelli inutilizzabili.
+def _normalized_castellated_sides(raw, notes: Optional[list] = None) -> list[dict]:
+    """Per-side normalization of castellated sides, WITHOUT pad numbering.
 
-    Il modello puo' restituire un lato senza passo o con zero contatti: si
-    preferisce ignorarlo e dirlo, piuttosto che propagare un lato che
-    farebbe fallire la generazione con un errore geometrico oscuro.
+    Separated from the numbering so that a numbering repair can compare the
+    normalized original with the normalized correction: comparing the raw list
+    with the normalized one rejected valid corrections whenever the raw list
+    held a discarded entry or a differently written edge.
     """
     if not isinstance(raw, (list, tuple)) or not raw:
         raise ExtractionError(
@@ -1440,13 +1621,19 @@ def _castellated_sides(raw: Optional[Sequence[dict]]) -> list[dict]:
         )
 
     sides = []
-    for entry in raw:
+    for index, entry in enumerate(raw, 1):
         if not isinstance(entry, dict):
+            if notes is not None:
+                notes.append(tx("Lato {index} scartato: servono lato, numero di contatti e "
+                                "passo validi.", index=index))
             continue
         edge = str(entry.get("edge") or "").strip().lower()
         count = _optional_number(entry.get("count"), positive=True, integer=True)
         pitch = _optional_number(entry.get("pitch_mm", 0))
         if edge not in EDGES or count is None or pitch is None or pitch < 0 or (count > 1 and pitch == 0):
+            if notes is not None:
+                notes.append(tx("Lato {index} scartato: servono lato, numero di contatti e "
+                                "passo validi.", index=index))
             continue
         side = {"edge": edge, "count": count, "pitch_mm": pitch}
         for key in ("first_pin", "offset_mm", "pad_length_mm", "pad_width_mm"):
@@ -1456,7 +1643,16 @@ def _castellated_sides(raw: Optional[Sequence[dict]]) -> list[dict]:
         if entry.get("reverse") is True:
             side["reverse"] = True
         if isinstance(entry.get("pin_names"), (list, tuple)) and entry["pin_names"]:
-            side["pin_names"] = [str(n) for n in entry["pin_names"]]
+            names = [str(n) for n in entry["pin_names"]]
+            if len(names) == count:
+                side["pin_names"] = names
+            elif notes is not None:
+                # A name list of the wrong length cannot be aligned with the
+                # pads: any alignment would put a name on the wrong contact.
+                notes.append(tx("Lato {label}: {n_names} nomi per {count} contatti; nomi "
+                                "scartati per non assegnarli ai pad sbagliati.",
+                                label=EDGE_LABELS.get(edge, edge), n_names=len(names),
+                                count=count))
         # Il tipo di contatto si vede nella foto e non si ricava dalle quote:
         # un valore fuori elenco non si corregge ne' si scarta in silenzio,
         # perche' qualunque sostituzione sarebbe proprio la deduzione che il
@@ -1482,25 +1678,82 @@ def _castellated_sides(raw: Optional[Sequence[dict]]) -> list[dict]:
             tx("Nessun lato valido tra quelli restituiti dal modello (servono lato, "
                "numero di contatti e passo).")
         )
+    # One row of contacts per edge: two descriptions of the same edge would
+    # put two pad rows on top of each other, and nothing says which is right.
+    seen = set()
+    for side in sides:
+        if side["edge"] in seen:
+            raise ExtractionError(
+                tx("Il lato {label} compare piu' volte nella risposta: non si puo' stabilire "
+                   "quale descrizione sia quella giusta.",
+                   label=EDGE_LABELS.get(side["edge"], side["edge"])))
+        seen.add(side["edge"])
+    return sides
+
+
+def _check_sides_fit_edges(sides, body_length, body_width) -> None:
+    """Reject a side whose contact centres cannot fit along its board edge.
+
+    Physical bound, not a tuned limit: the centres of `count` contacts at
+    `pitch` span (count - 1) * pitch, which cannot exceed the edge the row sits
+    on (left/right edges run along the board width, top/bottom along its
+    length). Skipped when the board dimensions are unknown; the generator
+    repeats a stricter check that includes the pad land.
+    """
+    for side in sides:
+        edge_length = body_width if side["edge"] in ("left", "right") else body_length
+        if edge_length is None:
+            continue
+        span = (side["count"] - 1) * side["pitch_mm"]
+        if span > edge_length + _PIN_FIELD_TOLERANCE_MM:
+            raise ExtractionError(
+                tx("Lato {label}: {count} contatti a passo {pitch} mm occupano {span:.2f} mm, "
+                   "ma il bordo e' lungo {edge:.2f} mm.",
+                   label=EDGE_LABELS.get(side["edge"], side["edge"]), count=side["count"],
+                   pitch=side["pitch_mm"], span=span, edge=edge_length))
+
+
+def _castellated_sides(raw: Optional[Sequence[dict]], *, body_length: Optional[float] = None,
+                       body_width: Optional[float] = None,
+                       notes: Optional[list] = None) -> list[dict]:
+    """Normalizza i lati di un modulo castellated, scartando quelli inutilizzabili.
+
+    Il modello puo' restituire un lato senza passo o con zero contatti: si
+    preferisce ignorarlo e dirlo (in `notes`, quando fornito), piuttosto che
+    propagare un lato che farebbe fallire la generazione con un errore
+    geometrico oscuro. Two sides on the same edge, or a side whose contacts
+    cannot fit along the known board edge (`body_length`/`body_width`, mm),
+    raise ExtractionError.
+
+    Pad ranges are compared as intervals and never materialized: a huge
+    declared count must not allocate memory proportional to it.
+    """
+    sides = _normalized_castellated_sides(raw, notes)
+    _check_sides_fit_edges(sides, body_length, body_width)
 
     # Numerazione progressiva sui lati privi di first_pin, nell'ordine in cui
     # sono stati elencati: meglio una numerazione coerente da correggere a
     # mano che dei pad senza numero.
-    used = set()
+    used: list[tuple[int, int]] = []  # half-open [start, stop) pad ranges
     for side in sides:
         if "first_pin" in side:
-            numbers = set(range(side["first_pin"], side["first_pin"] + side["count"]))
-            overlap = used & numbers
-            if overlap:
-                raise _PinNumberConflict(tx("Numero pad duplicato tra lati: {min}.", min=min(overlap)))
-            used.update(numbers)
+            start, stop = side["first_pin"], side["first_pin"] + side["count"]
+            shared = [max(start, a) for a, b in used if max(start, a) < min(stop, b)]
+            if shared:
+                raise _PinNumberConflict(tx("Numero pad duplicato tra lati: {min}.", min=min(shared)))
+            used.append((start, stop))
     next_pin = 1
     for side in sides:
         if "first_pin" not in side:
-            while used.intersection(range(next_pin, next_pin + side["count"])):
-                next_pin += 1
+            while True:
+                clash = [b for a, b in used
+                         if max(next_pin, a) < min(next_pin + side["count"], b)]
+                if not clash:
+                    break
+                # Jump past the blocking range instead of stepping by one pad.
+                next_pin = max(clash)
             side["first_pin"] = next_pin
-            used.update(range(next_pin, next_pin + side["count"]))
+            used.append((next_pin, next_pin + side["count"]))
         next_pin = int(side["first_pin"]) + side["count"]
     return sides
 
@@ -1641,34 +1894,131 @@ def _components_3d(raw: Optional[Sequence[dict]]) -> Optional[list[dict]]:
     return components or None
 
 
+#: Matrix fields that are integer counts; every one must be >= 1.
+_MATRIX_INT_FIELDS = ("rows", "cols")
+#: Matrix fields that are physical lengths in mm; every one must be > 0.
+_MATRIX_LENGTH_FIELDS = ("pitch_mm", "row_spacing_mm", "pad_diameter_mm", "drill_mm")
+#: Optional signed offsets in mm: any finite number is meaningful.
+_SIGNED_OPTIONAL_FIELDS = ("body_offset_x_mm", "body_offset_y_mm")
+#: Optional physical lengths in mm: only finite values > 0 are meaningful.
+_POSITIVE_OPTIONAL_FIELDS = ("body_length_mm", "body_width_mm", "body_height_mm",
+                             "pin_length_3d_mm", "pcb_thickness_mm")
+
+
+def _required_matrix_value(data: dict, key: str):
+    """One mandatory matrix field, validated; ExtractionError when unusable.
+
+    Counts must be integral (2.0 accepted, 2.7 and True rejected) and >= 1;
+    lengths must be finite and > 0. Nothing is truncated or coerced silently.
+    """
+    raw = data.get(key)
+    if raw is None:
+        raise ExtractionError(
+            tx("La risposta del modello non contiene il campo obbligatorio '{key}'. "
+               "Riprova, eventualmente con un modello piu' capace.",
+               key=key)
+        )
+    if key in _MATRIX_INT_FIELDS:
+        value = _optional_number(raw, positive=True, integer=True)
+        if value is None:
+            raise ExtractionError(tx("Campo obbligatorio '{key}' non valido: {value!r} (serve un "
+                                     "intero maggiore di zero, non booleano).",
+                                     key=key, value=raw))
+        return value
+    value = _optional_number(raw, positive=True)
+    if value is None:
+        raise ExtractionError(tx("Campo obbligatorio '{key}' non valido: {value!r} (serve un "
+                                 "numero finito maggiore di zero, non booleano).",
+                                 key=key, value=raw))
+    return value
+
+
+def _validated_populated_pins(raw, max_pin: Optional[int], notes: list) -> Optional[list]:
+    """Optional populated_pins: keep the valid, in-range pin numbers once each.
+
+    Invalid entries (booleans, fractions, non-numbers, out of 1..max_pin) are
+    dropped and reported in `notes`, like repeated numbers; the valid ones are
+    kept, as for any partial response. None when nothing valid remains.
+    """
+    if raw is None or (isinstance(raw, (list, tuple)) and not raw):
+        return None
+    if not isinstance(raw, (list, tuple)):
+        notes.append(tx("populated_pins scartato: valore non valido ({value!r}).", value=raw))
+        return None
+    kept, rejected, repeated = [], [], []
+    for item in raw:
+        number = _optional_number(item, positive=True, integer=True)
+        if number is None or (max_pin is not None and number > max_pin):
+            rejected.append(item)
+        elif number in kept:
+            repeated.append(number)
+        else:
+            kept.append(number)
+    if rejected:
+        notes.append(tx("populated_pins: scartate le voci non valide o fuori matrice {values!r}; "
+                        "verificare i pin presenti.", values=rejected))
+    if repeated:
+        notes.append(tx("populated_pins: rimossi i numeri ripetuti {values!r}.", values=repeated))
+    return kept or None
+
+
 def _params_from_tool_arguments(data: dict) -> ExtractedParams:
     """Costruisce ExtractedParams dagli argomenti dello strumento.
 
     Separato dalla chiamata di rete per poterlo collaudare senza API.
+
+    @throws ExtractionError For any unusable MANDATORY field (missing,
+        boolean, non-finite, non-integral count, non-positive length, drill
+        not smaller than the pad) and for invalid castellated sides. Invalid
+        OPTIONAL fields never fail the paid response: they are dropped and
+        the reason is appended to `notes`.
     """
     if not isinstance(data, dict):
         raise ExtractionError(tx("Risposta AI non strutturata."))
     layout = data.get("layout") or "matrix"
     if layout not in ("matrix", "castellated"):
         raise ExtractionError(tx("Disposizione dei contatti sconosciuta: {layout!r}.", layout=layout))
+    notes: list[str] = []
 
     def _opt_float(key: str) -> Optional[float]:
-        return _optional_number(data.get(key), positive=key in (
-            "body_length_mm", "body_width_mm", "body_height_mm", "pin_length_3d_mm"))
+        """Optional numeric field; an invalid value is dropped with a note."""
+        raw = data.get(key)
+        value = _optional_number(raw, positive=key in _POSITIVE_OPTIONAL_FIELDS)
+        if raw is not None and value is None:
+            notes.append(tx("{key} scartato: valore non valido ({value!r}).", key=key, value=raw))
+        return value
 
+    matrix: dict = {}
     if layout == "castellated":
-        sides = _castellated_sides(data.get("castellated_sides"))
+        sides = _castellated_sides(
+            data.get("castellated_sides"),
+            body_length=_optional_number(data.get("body_length_mm"), positive=True),
+            body_width=_optional_number(data.get("body_width_mm"), positive=True),
+            notes=notes)
+        # A castellated module has no matrix: counts or lengths it still sends
+        # are informative only and dropped with a note when malformed.
+        for key in _MATRIX_INT_FIELDS:
+            raw = data.get(key)
+            matrix[key] = _optional_number(raw, positive=True, integer=True)
+            if raw is not None and matrix[key] is None:
+                notes.append(tx("{key} scartato: valore non valido ({value!r}).", key=key, value=raw))
+        for key in _MATRIX_LENGTH_FIELDS:
+            raw = data.get(key)
+            matrix[key] = _optional_number(raw, positive=True)
+            if raw is not None and matrix[key] is None:
+                notes.append(tx("{key} scartato: valore non valido ({value!r}).", key=key, value=raw))
     else:
         sides = None
-        for key in ("rows", "cols", "pitch_mm", "row_spacing_mm", "pad_diameter_mm", "drill_mm"):
-            if data.get(key) is None:
-                raise ExtractionError(
-                    tx("La risposta del modello non contiene il campo obbligatorio '{key}'. "
-                       "Riprova, eventualmente con un modello piu' capace.",
-                       key=key)
-                )
+        for key in _MATRIX_INT_FIELDS + _MATRIX_LENGTH_FIELDS:
+            matrix[key] = _required_matrix_value(data, key)
+        if matrix["drill_mm"] >= matrix["pad_diameter_mm"]:
+            raise ExtractionError(tx("Foratura non valida: drill_mm {drill} deve essere minore di "
+                                     "pad_diameter_mm {pad}.", drill=matrix["drill_mm"],
+                                     pad=matrix["pad_diameter_mm"]))
 
-    populated = data.get("populated_pins")
+    rows, cols = matrix["rows"], matrix["cols"]
+    max_pin = rows * cols if layout == "matrix" else None
+    populated = _validated_populated_pins(data.get("populated_pins"), max_pin, notes)
 
     package_geometry = data.get("package_geometry")
     if package_geometry is not None:
@@ -1679,40 +2029,63 @@ def _params_from_tool_arguments(data: dict) -> ExtractedParams:
         except (KeyError, TypeError, ValueError) as exc:
             raise ExtractionError(tx("Geometria package non valida: {exc}", exc=exc)) from exc
 
-    return ExtractedParams(
-        name=data.get("name") or "",
-        description=data.get("description") or "",
-        tags=data.get("tags") or "",
+    pin_map = None
+    view = data.get("pin_map_view")
+    # La specchiatura di pin_map ha senso solo sulla matrice: per i moduli
+    # castellated le posizioni vengono dai lati, non da righe/colonne.
+    if layout == "matrix" and data.get("pin_map"):
+        try:
+            pin_map = _pin_map_seen_from_top(data.get("pin_map"), cols, view, rows)
+        except ExtractionError as exc:
+            # Optional field: the paid response survives, but automatic
+            # numbering replaces the map, so the note must say it loudly.
+            notes.append(tx("ATTENZIONE pin_map scartata ({exc}): numerazione automatica colonna "
+                            "per colonna, da verificare sul pinout.", exc=exc))
+
+    body_length = _opt_float("body_length_mm")
+    confidence = data.get("confidence", "low")
+    if confidence not in ("high", "medium", "low"):
+        confidence = "low"
+    base_notes = data.get("notes", "")
+    base_notes = base_notes if isinstance(base_notes, str) else str(base_notes or "")
+
+    def _text(key: str) -> str:
+        value = data.get(key)
+        return value if isinstance(value, str) else ""
+
+    params = ExtractedParams(
+        name=_text("name"),
+        description=_text("description"),
+        tags=_text("tags"),
         layout=layout,
-        rows=int(data["rows"]) if data.get("rows") is not None else None,
-        cols=int(data["cols"]) if data.get("cols") is not None else None,
-        pitch_mm=_opt_float("pitch_mm"),
-        row_spacing_mm=_opt_float("row_spacing_mm"),
-        pad_diameter_mm=_opt_float("pad_diameter_mm"),
-        drill_mm=_opt_float("drill_mm"),
+        rows=rows,
+        cols=cols,
+        pitch_mm=matrix["pitch_mm"],
+        row_spacing_mm=matrix["row_spacing_mm"],
+        pad_diameter_mm=matrix["pad_diameter_mm"],
+        drill_mm=matrix["drill_mm"],
         castellated_sides=sides,
         components_3d=_components_3d(data.get("components_3d")),
-        confidence=data.get("confidence", "low"),
-        notes=data.get("notes", ""),
-        populated_pins=[int(p) for p in populated] if populated else None,
-        body_length_mm=_opt_float("body_length_mm"),
+        confidence=confidence,
+        notes=base_notes,
+        populated_pins=populated,
+        body_length_mm=body_length,
         body_width_mm=_opt_float("body_width_mm"),
         body_height_mm=_opt_float("body_height_mm"),
-        pcb_thickness_mm=_optional_number(data.get("pcb_thickness_mm"), positive=True),
+        pcb_thickness_mm=_opt_float("pcb_thickness_mm"),
         body_offset_y_mm=_opt_float("body_offset_y_mm"),
         pin_length_3d_mm=_opt_float("pin_length_3d_mm"),
         edge_fillets=data.get("edge_fillets") or None,
         pinout=data.get("pinout") or None,
-        # La specchiatura di pin_map ha senso solo sulla matrice: per i moduli
-        # castellated le posizioni vengono dai lati, non da righe/colonne.
-        pin_map=_pin_map_seen_from_top(
-            data.get("pin_map"), int(data["cols"]), data.get("pin_map_view"),
-        ) if layout == "matrix" else None,
+        pin_map=pin_map,
         body_offset_x_mm=_offset_x_seen_from_top(
-            _opt_float("body_offset_x_mm"), _opt_float("body_length_mm"),
-            data.get("cols"), _opt_float("pitch_mm"),
-            data.get("pin_map_view") if layout == "matrix" and data.get("pin_map") else None),
+            _opt_float("body_offset_x_mm"), body_length,
+            cols, matrix["pitch_mm"],
+            view if pin_map else None),
         body_color_hex=data.get("body_color_hex") or None,
         text_color_hex=data.get("text_color_hex") or None,
         package_geometry=package_geometry,
     )
+    if notes:
+        params.notes = (params.notes + "\n" + "\n".join(notes)).strip()
+    return params

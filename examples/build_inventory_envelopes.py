@@ -1,4 +1,4 @@
-"""Build a mechanical-only STEP from a photo inventory; no API calls.
+"""@brief Build a mechanical-only STEP from a photo inventory; no API calls.
 
 Example: python examples/build_inventory_envelopes.py inventory.json --side left:3:5.08 --side right:4:2.54
 Contact spacing is supplied explicitly, never inferred from package boxes.
@@ -16,8 +16,8 @@ from kicadgen.cad3d.step_generator import generate_castellated_3d_model
 
 
 def main():
-    """@brief Run the public entry point for this workflow."""
-    parser = argparse.ArgumentParser(description=__doc__)
+    """@brief Parse the CLI, build the castellated-module STEP from the inventory and render its mesh."""
+    parser = argparse.ArgumentParser(description=(__doc__ or "").replace("@brief ", "", 1))
     parser.add_argument('inventory',type=Path)
     parser.add_argument('--side',action='append',required=True,help='edge:count:pitch_mm')
     parser.add_argument('--output',type=Path)

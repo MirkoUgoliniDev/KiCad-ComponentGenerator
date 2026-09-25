@@ -1,4 +1,6 @@
-"""Geometria generica dei package e dei loro pad.
+"""@brief Generic package and pad geometry, not limited to pin matrices.
+
+Geometria generica dei package e dei loro pad.
 
 Il modello non presume che i pin siano una matrice: la matrice dei pin header
 e' solo un caso particolare. Le coordinate sono locali al package e viste
@@ -103,51 +105,126 @@ class PackageGeometry:
             if value is not None:
                 _finite(value, key, True)
         numbers = set()
-        rectangles = []
+        outlines = []
         for pin in self.pins:
             pin.validate()
             if pin.number in numbers:
                 raise ValueError(tx("pin duplicato: {number}", number=pin.number))
             numbers.add(pin.number)
-            half_x, half_y = pin.pad_length_mm / 2, pin.pad_width_mm / 2
-            rectangle = (pin.x_mm - half_x, pin.y_mm - half_y,
-                         pin.x_mm + half_x, pin.y_mm + half_y)
-            for other_number, other in rectangles:
-                overlap_x = min(rectangle[2], other[2]) - max(rectangle[0], other[0])
-                overlap_y = min(rectangle[3], other[3]) - max(rectangle[1], other[1])
-                if overlap_x > 1e-6 and overlap_y > 1e-6:
+            # Rettangolo ruotato del pad (convenzione KiCad): un controllo su
+            # rettangoli allineati agli assi rifiuterebbe pad di QFN ruotati
+            # che non si toccano e accetterebbe pad ruotati che si toccano.
+            outline = pad_outline(pin.x_mm, pin.y_mm, pin.pad_length_mm,
+                                  pin.pad_width_mm, pin.rotation_deg)
+            for other_number, other in outlines:
+                if polygon_separation(outline, other) <= 1e-6:
                     raise ValueError(
                         tx("pad sovrapposti tra i pin {other_number} e {number}",
                            other_number=other_number,
                            number=pin.number)
                     )
-            rectangles.append((pin.number, rectangle))
+            outlines.append((pin.number, outline))
 
     def pins_seen_from_top(self) -> list[PinSpec]:
-        """Restituisce pin normalizzati dalla vista della fonte a quella KiCad."""
+        """@brief Return the pins normalized from the source view to KiCad's top view.
+
+        @return New PinSpec objects in footprint coordinates (mm, Y down) whose
+            `rotation_deg` is the KiCad pad angle.
+        @note Every angle follows KiCad's convention: degrees counter-clockwise
+            as seen on screen, with Y pointing down, which is the direction
+            KiCad rotates a pad written as `(at x y angle)` (verified with
+            pcbnew 10: angle 30 turns the local +X axis to (cos30, -sin30)).
+            Positions and pad angles are rotated by the SAME convention, so a
+            pad keeps its alignment to its own position at any angle, not only
+            at multiples of 90 degrees.
+        @note A bottom view (and an explicit mirror) is a reflection across
+            the Y axis: it negates X and, with it, every pad angle; the package
+            orientation is applied after the reflection.
+        """
         self.validate()
         result = []
         angle = math.radians(self.orientation_deg % 360)
         cos_a, sin_a = math.cos(angle), math.sin(angle)
+        flips = int(self.source_view == "bottom") + int(bool(self.mirrored))
         for pin in self.pins:
             x, y = pin.x_mm, pin.y_mm
-            if self.source_view == "bottom":
-                x = -x
-            if self.mirrored:
-                x = -x
-            rx, ry = x * cos_a - y * sin_a, x * sin_a + y * cos_a
+            pad_angle = pin.rotation_deg
+            if flips % 2:
+                x, pad_angle = -x, -pad_angle
+            rx, ry = _rotate_kicad(x, y, cos_a, sin_a)
             result.append(PinSpec(
-                number=pin.number, x_mm=rx, y_mm=ry,
+                number=pin.number, x_mm=rx + 0.0, y_mm=ry + 0.0,
                 pad_length_mm=pin.pad_length_mm, pad_width_mm=pin.pad_width_mm,
                 side=pin.side, name=pin.name, pad_type=pin.pad_type,
-                shape=pin.shape, rotation_deg=pin.rotation_deg + self.orientation_deg,
+                shape=pin.shape, rotation_deg=_normal_angle(pad_angle + self.orientation_deg),
                 drill_mm=pin.drill_mm,
             ))
         return result
 
 
+def _rotate_kicad(x: float, y: float, cos_a: float, sin_a: float) -> tuple:
+    """Rotate (x, y) counter-clockwise on screen (Y down), as KiCad rotates a pad."""
+    return (x * cos_a + y * sin_a, -x * sin_a + y * cos_a)
+
+
+def _normal_angle(angle: float) -> float:
+    """Map an angle in degrees to [0, 360) with no float noise and no -0."""
+    value = round(float(angle) % 360.0, 9)
+    return 0.0 if value in (0.0, 360.0) else value + 0.0
+
+
+def pad_outline(x: float, y: float, size_x: float, size_y: float,
+                rotation_deg: float = 0.0) -> list:
+    """@brief Corners of a rotated rectangular pad, in mm.
+
+    @param x Pad centre X, mm.
+    @param y Pad centre Y, mm (KiCad axes, Y down).
+    @param size_x Pad size along its local X, mm.
+    @param size_y Pad size along its local Y, mm.
+    @param rotation_deg KiCad pad angle (counter-clockwise on screen), degrees.
+    @return Four (x, y) corners in order. For round or rounded shapes this is
+        the bounding rectangle, a conservative envelope of the copper.
+    """
+    angle = math.radians(rotation_deg)
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    corners = []
+    for dx, dy in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
+        rx, ry = _rotate_kicad(dx * size_x / 2, dy * size_y / 2, cos_a, sin_a)
+        corners.append((x + rx, y + ry))
+    return corners
+
+
+def polygon_separation(first: Sequence, second: Sequence) -> float:
+    """@brief Largest gap between two convex polygons along their edge normals, mm.
+
+    @param first Corners of a convex polygon, in order.
+    @param second Corners of a convex polygon, in order.
+    @return A positive value when a separating axis exists (the polygons are
+        apart by at least that much along it), zero when they touch, negative
+        when they overlap (separating axis theorem).
+    """
+    best = -math.inf
+    for polygon in (first, second):
+        count = len(polygon)
+        for i in range(count):
+            (ax, ay), (bx, by) = polygon[i], polygon[(i + 1) % count]
+            nx, ny = by - ay, ax - bx
+            norm = math.hypot(nx, ny)
+            if norm == 0:
+                continue
+            nx, ny = nx / norm, ny / norm
+            proj_a = [px * nx + py * ny for px, py in first]
+            proj_b = [px * nx + py * ny for px, py in second]
+            gap = max(min(proj_b) - max(proj_a), min(proj_a) - max(proj_b))
+            best = max(best, gap)
+    return best
+
+
 def package_from_mapping(data: dict) -> PackageGeometry:
-    """Costruisce e valida il modello dal JSON restituito dal tool AI."""
+    """@brief Build and validate a PackageGeometry from the AI tool JSON; raise ValueError when invalid.
+
+    Costruisce e valida il modello dal JSON restituito dal tool AI.
+    """
     if not isinstance(data, dict):
         raise ValueError(tx("geometria package non strutturata"))
     raw_pins = data.get("pins") or []

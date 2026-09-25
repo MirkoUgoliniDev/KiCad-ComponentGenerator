@@ -22,7 +22,8 @@ from dataclasses import dataclass, field
 from math import isfinite
 from typing import Iterator, Optional, Tuple
 
-from ..core.footprint import Footprint, FpCircle, FpRect, Pad
+from ..core.footprint import Footprint, FpRect, Pad
+from ..core.silk import keepout_box, pin_one, pin_one_marker, silk_rectangle
 from ..services.messages import tx
 
 
@@ -100,6 +101,17 @@ class PinHeaderParams:
                     raise ValueError(
                         f"Pin {p} in populated_pins fuori range (1..{max_pin})."
                     )
+            # Con una mappa esplicita un pin popolato senza posizione verrebbe
+            # scartato in silenzio (pin_positions itera solo la mappa): il
+            # footprint perderebbe un pin del pinout sorgente.
+            if self.pin_map:
+                missing = sorted(set(self.populated_pins) - set(self.pin_map))
+                if missing:
+                    raise ValueError(
+                        tx("I pin {pins} sono popolati ma non hanno una posizione nella mappa "
+                           "dei pin.",
+                           pins=", ".join(str(pin) for pin in missing))
+                    )
         if self.pin_map:
             seen = {}
             for pin, position in self.pin_map.items():
@@ -153,6 +165,28 @@ def pin_positions(params: PinHeaderParams) -> Iterator[Tuple[int, float, float]]
             pin += 1
 
 
+def _pin_one_marker(start, end, positions, pad_radius: float):
+    """Silk dot outside the outline corner nearest the pad numbered 1.
+
+    The corner is chosen from where pin 1 actually is (a pin map can put it
+    anywhere in the grid, e.g. a bottom-view DIP numbering), not assumed to be
+    the top-left one; without pads the top-left corner is kept. The dot sits
+    0.5 mm diagonally outside that corner and is pushed further out along the
+    same diagonal when it would lie on copper.
+    """
+    number = pin_one(pin for pin, _, _ in positions)
+    corners = [(start[0], start[1]), (end[0], start[1]), (end[0], end[1]), (start[0], end[1])]
+    corner = corners[0]
+    if number is not None:
+        _, px, py = next(item for item in positions if str(item[0]) == number)
+        corner = min(corners, key=lambda c: (c[0] - px) ** 2 + (c[1] - py) ** 2)
+    sx = -1.0 if corner[0] == start[0] else 1.0
+    sy = -1.0 if corner[1] == start[1] else 1.0
+    keepouts = [keepout_box(x - pad_radius, y - pad_radius, x + pad_radius, y + pad_radius,
+                            line_width=0.0) for _, x, y in positions]
+    return pin_one_marker((corner[0] + 0.5 * sx, corner[1] + 0.5 * sy), keepouts, (sx, sy))
+
+
 def build_pin_header(params: PinHeaderParams) -> Footprint:
     """@brief Build a THT footprint with body contours and a union courtyard.
 
@@ -181,20 +215,20 @@ def build_pin_header(params: PinHeaderParams) -> Footprint:
         start = (params.body_offset_x, params.body_offset_y)
         end = (start[0] + params.body_length, start[1] + params.body_width)
         fp.add_graphic(FpRect(start=start, end=end, layer="F.Fab", width=0.1))
+    if not all(isfinite(v) for v in (*start, *end)):
+        raise ValueError("Computed footprint bounds must be finite.")
 
-    fp.add_graphic(FpRect(
-        start=start,
-        end=end,
-        layer="F.SilkS",
-    ))
-    fp.add_graphic(FpCircle(
-        center=(start[0] - 0.5, start[1] - 0.5),
-        radius=0.25,
-        layer="F.SilkS",
-        fill=True,
-    ))
+    positions = list(pin_positions(params))
+    # La serigrafia non copre il rame: con margin minore del raggio del pad
+    # il contorno passerebbe sopra le piazzole.
+    radius = params.pad_diameter / 2
+    keepouts = [keepout_box(x - radius, y - radius, x + radius, y + radius, line_width=0.12)
+                for _, x, y in positions]
+    for graphic in silk_rectangle(start, end, keepouts):
+        fp.add_graphic(graphic)
+    fp.add_graphic(_pin_one_marker(start, end, positions, radius))
 
-    for pin, x, y in pin_positions(params):
+    for pin, x, y in positions:
         shape = "rect" if pin == 1 else "circle"
         fp.add_pad(Pad(
             number=str(pin),

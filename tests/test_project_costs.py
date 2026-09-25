@@ -129,13 +129,17 @@ def test_a_call_from_a_worker_thread_is_written_into_the_project(app, tmp_path):
     _dispose(line)
 
 
-def test_without_a_project_name_the_cost_is_reported_once_not_lost_silently(app):
+def test_without_a_project_name_every_dropped_cost_is_reported_not_lost_silently(app):
+    # Contract changed (audit D7, 2026-09-25): every dropped cost gets its own
+    # log line with its amount. The former single de-duplicated line hid how
+    # many paid calls went unrecorded.
     from kicadgen.gui.ai_account import AiAccountLine
     log = []
     line = AiAccountLine(lambda: None, log.append)
-    for _ in range(2):
-        line._on_paid_call({"cost_usd": 0.1})
-    assert len(log) == 1 and "non ha un nome" in log[0]
+    for cost in (0.1, 0.2):
+        line._on_paid_call({"cost_usd": cost})
+    assert len(log) == 2 and all("non ha un nome" in entry for entry in log)
+    assert "0.1000" in log[0] and "0.2000" in log[1]
     line.detach()
     _dispose(line)
 

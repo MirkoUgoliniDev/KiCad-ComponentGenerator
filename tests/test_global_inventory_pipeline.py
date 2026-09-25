@@ -375,3 +375,50 @@ def test_an_empty_enumeration_is_a_failure_and_not_a_result(pipeline):
     recovered = pipeline['execute']()
     assert len(recovered.components_3d) == 2
     assert all(row['_uncertain'] for row in recovered.components_3d)
+
+
+# ── fix A5: zero proposals in the paid 'yolo' path ──────────────────────────
+
+def test_a_detector_that_found_nothing_is_not_described_as_absent(pipeline):
+    """@brief Il rilevatore HA girato e non ha trovato nulla: lo si dice com'e'.
+
+    Prima il percorso 'yolo' con zero proposte ricadeva sull'enumerazione con
+    un prompt «NO local detector ran» e un log «Nessun rilevatore locale»:
+    falso, e chi legge il log non poteva distinguere i due casi.
+    """
+    pipeline['detection'].return_value = []
+    pipeline['inventory'] = dict(components=[_body(sources=[])], candidate_decisions=[],
+                                 uncertainties=[])
+    params = pipeline['execute']()
+    pipeline['detection'].assert_called_once()
+    assert len(pipeline['requests']) == 2
+    request = pipeline['requests'][1]
+    system = request['system_prompt']
+    assert 'NO local detector ran' not in system
+    assert 'A local detector ran on this photograph and left NO candidate body' in system
+    inputs = json.loads(request['content_blocks'][2]['text'])
+    assert inputs['candidates'] == []
+    assert inputs['prompt_version'] == \
+        global_inventory.ENUMERATION_AFTER_EMPTY_DETECTOR_PROMPT_VERSION
+    logs = ' '.join(pipeline['logs'])
+    assert 'non ha trovato corpi' in logs
+    assert 'nessun rilevatore locale' not in logs.lower()
+    assert len(params.components_3d) == 1
+
+
+def test_a_review_that_removed_every_proposal_stops_without_paying(pipeline):
+    """@brief Chi rivede ha tolto tutto di proposito: nessuna enumerazione a pagamento.
+
+    Negativo strutturale del test precedente: li' il rilevatore non aveva
+    trovato nulla e l'enumerazione e' legittima; qui le proposte c'erano e
+    l'utente le ha rifiutate tutte, quindi rifarle pagando contraddice la sua
+    scelta. La richiesta dell'inventario globale non deve partire.
+    """
+    before = len(pipeline['requests'])
+    params = pipeline['execute'](review_proposals=lambda *args: [])
+    assert len(pipeline['requests']) == before + 1  # solo l'estrazione della scheda
+    assert all(request['tool']['function']['name'] != 'report_global_inventory'
+               for request in pipeline['requests'])
+    pipeline['global_review'].assert_not_called()
+    assert any('tutte le 2 proposte sono state tolte' in message for message in pipeline['logs'])
+    assert not params.components_3d

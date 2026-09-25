@@ -203,14 +203,17 @@ def test_a_slow_but_talking_process_is_not_killed(tmp_path):
     in fondo.
     """
     path = tmp_path / "freecad.log"
+    # Silenzio massimo 1.5 s (0.4 s prima: l'avvio dell'interprete su una
+    # macchina carica bastava a superarlo), durata totale 2.4 s: il processo
+    # dura comunque piu' del limite e parla ogni 0.15 s.
     script = ("import time,sys\n"
-              "for i in range(6):\n"
-              "    print('KICADGEN_COMPONENT_START:%d/6' % (i + 1), flush=True)\n"
+              "for i in range(16):\n"
+              "    print('KICADGEN_COMPONENT_START:%d/16' % (i + 1), flush=True)\n"
               "    time.sleep(0.15)\n")
     result = run_logged([sys.executable, "-c", script], path, progress=lambda _: None,
-                        timeout=0.4)
+                        timeout=1.5)
     assert result.returncode == 0
-    assert result.stdout.count("KICADGEN_COMPONENT_START") == 6
+    assert result.stdout.count("KICADGEN_COMPONENT_START") == 16
     assert "timeout=False" in path.read_text(encoding="utf-8")
 
 

@@ -17,6 +17,7 @@ import math
 import os
 from pathlib import Path
 import tempfile
+from ..fsutil import replace_file
 
 from PyQt6.QtWidgets import (QAbstractSpinBox, QCheckBox, QComboBox, QDoubleSpinBox,
                              QGroupBox, QLineEdit, QPlainTextEdit, QSpinBox, QTextEdit)
@@ -172,7 +173,7 @@ def write_project_config(project_dir, state: dict) -> Path:
         with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
             stream.write(text + "\n")
         target = project_config_path(folder)
-        os.replace(temporary, target)
+        replace_file(temporary, target)
     except BaseException:
         try:
             os.unlink(temporary)

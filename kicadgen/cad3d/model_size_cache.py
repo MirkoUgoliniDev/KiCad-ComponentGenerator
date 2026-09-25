@@ -47,6 +47,47 @@ def _paths(paths: _PathInput) -> list[Path]:
     return result
 
 
+def legacy_cache_dir() -> Path:
+    """@brief Historic folder of the CAD measurement caches.
+
+    @return ``%LOCALAPPDATA%\\kicadgen``, or ``~/.cache/kicadgen`` without it.
+    @note Kept readable forever: `load` merges every path it is given, so an
+        index written here before the data folder became configurable is still
+        replayed, and the next `save` copies it into the preferred folder.
+    """
+    base = os.environ.get("LOCALAPPDATA")
+    return (Path(base) if base else Path.home() / ".cache") / "kicadgen"
+
+
+def user_cache_dirs() -> list[Path]:
+    """@brief Folders for the user-level CAD caches, preferred first.
+
+    @return ``<user data folder>/cache`` followed by `legacy_cache_dir`, or
+        only the legacy folder when the program runs from the sources without
+        ``KICADGEN_DATA_DIR``.
+    @note The user data folder comes from `kicadgen.app_paths.user_data_dir`,
+        so ``KICADGEN_DATA_DIR`` and the installed layout are honoured. From
+        the sources that folder is the repository itself: writing caches there
+        would leave untracked files in the checkout, so the historic location
+        is kept, which is exactly the previous behaviour.
+    @note Imported lazily: this module also runs inside FreeCAD's embedded
+        interpreter, where the ``kicadgen`` package is not importable. The
+        FreeCAD child receives the folders from the parent in its params file.
+    """
+    legacy = legacy_cache_dir()
+    try:
+        from ..app_paths import install_dir, is_frozen, user_data_dir
+        if is_frozen() or os.environ.get("KICADGEN_DATA_DIR"):
+            preferred = user_data_dir() / "cache"
+            if os.path.normcase(os.fspath(preferred)) != os.path.normcase(os.fspath(legacy)):
+                return [preferred, legacy]
+        elif user_data_dir() != install_dir():
+            return [user_data_dir() / "cache", legacy]
+    except (ImportError, OSError, ValueError):
+        pass
+    return [legacy]
+
+
 def file_identity(path: str | os.PathLike[str]) -> str | None:
     """@brief Identify a file by absolute path, byte size and nanosecond mtime.
 

@@ -1,4 +1,6 @@
-"""Generatore parametrico: modulo con piazzole a mezzo foro (castellated).
+"""@brief Parametric generator for modules with castellated (half-hole) edge contacts.
+
+Generatore parametrico: modulo con piazzole a mezzo foro (castellated).
 
 I moduli su PCB (RS485/TTL isolati, WiFi/BLE tipo ESP32, nRF...) portano i
 contatti come semi-fori metallizzati sul bordo della schedina e si saldano
@@ -44,6 +46,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Iterator, List, NamedTuple, Optional, Sequence
 
 from ..core.footprint import Footprint, FpCircle, FpRect, FpText, Pad
+from ..core.silk import keepout_box, pin_one, pin_one_marker, silk_rectangle
 from ..core.sexpr import SExpr, sx
 from ..services.messages import tx
 
@@ -227,13 +230,15 @@ class ContactPad(NamedTuple):
     values are in mm, footprint coordinates (origin at the body centre, Y down).
 
     @note The drill is NOT at the stadium centre: it sits where
-        CastellatedModuleParams.thru_hole_centre puts it, so the footprint pad
-        carries it as a KiCad drill offset (see `drill_offset`).
+        CastellatedModuleParams.thru_hole_centre puts it. In KiCad a pad's
+        `at` is the HOLE position and `(drill D (offset dx dy))` moves the
+        COPPER away from it, so the footprint pad is written at the drill
+        centre with offset = copper centre - drill centre (see `drill_offset`).
     """
 
     number: str
     edge: str
-    #: Centre of the stadium (the KiCad pad `at`).
+    #: Centre of the stadium copper (the KiCad pad `at` plus its drill offset).
     x: float
     y: float
     #: Oriented size along X and Y (the KiCad pad `size`, no rotation).
@@ -256,12 +261,18 @@ class ContactPad(NamedTuple):
 
     @property
     def drill_offset(self) -> tuple:
-        """@brief Drill centre relative to the pad centre, in mm (KiCad `(drill D (offset dx dy))`).
+        """@brief KiCad drill offset: copper centre relative to the hole, in mm.
 
-        @return (dx, dy) in footprint coordinates; the pad is never rotated,
-            so pad-local and footprint axes coincide.
+        @return (dx, dy) = stadium centre - drill centre, in footprint
+            coordinates; the pad is never rotated, so pad-local and footprint
+            axes coincide.
+        @note KiCad semantics, verified with pcbnew 10: for `(at X Y)` with
+            `(drill D (offset dx dy))` the hole is at (X, Y) (GetPosition) and
+            the copper shape is centred at (X + dx, Y + dy) (ShapePos). Until
+            2026-09-25 this returned drill - centre and the writer put `at` on
+            the copper centre, which swapped hole and copper in KiCad.
         """
-        return (_clean(self.drill_x - self.x), _clean(self.drill_y - self.y))
+        return (_clean(self.x - self.drill_x), _clean(self.y - self.drill_y))
 
     @property
     def length(self) -> float:
@@ -304,6 +315,9 @@ class OffsetDrillPad(Pad):
     KiCad writes it as `(drill D (offset dx dy))`, dx/dy in mm in pad-local
     axes; it is how a single plated pad can carry one hole away from the
     middle of its copper (KiCad 6 and later, unchanged in the 8/9/10 formats).
+    The pad `at` is the HOLE position and the offset moves the COPPER shape:
+    copper centre = at + offset (pcbnew GetPosition() is the hole, ShapePos()
+    the copper centre).
     Kept here rather than in core.footprint so that every other generator's
     output stays byte-identical.
     """
@@ -311,7 +325,8 @@ class OffsetDrillPad(Pad):
     def __init__(self, *args, drill_offset=(0.0, 0.0), **kwargs):
         """@brief Build the pad.
 
-        @param drill_offset (dx, dy) of the drill from the pad centre, mm.
+        @param drill_offset (dx, dy) of the copper centre from the hole
+            (the pad `at`), mm, as KiCad defines the drill offset.
         @param args Forwarded to Pad.
         @param kwargs Forwarded to Pad.
         """
@@ -330,7 +345,9 @@ class OffsetDrillPad(Pad):
 
 @dataclass
 class ComponentBox:
-    """Un componente montato sul modulo, approssimato a parallelepipedo.
+    """@brief Component mounted on the module, approximated as a box for the 3D model only.
+
+    Un componente montato sul modulo, approssimato a parallelepipedo.
 
     Serve solo al modello 3D: un modulo reale non e' una lastra liscia, e
     riconoscerlo a colpo d'occhio (il trasformatore, gli integrati, i LED)
@@ -389,13 +406,24 @@ class ComponentBox:
     model_rotation_delta_deg: float = 0.0
 
     def is_usable(self) -> bool:
-        """@brief Provide the is usable operation for this workflow."""
+        """@brief Tell whether the box can become a 3D body.
+
+        @return True when position, sizes and rotation are finite numbers and
+            the three sizes are positive. NaN or infinity would otherwise be
+            turned into invented coordinates downstream (audit 2026-09-25, E6).
+        """
+        values = (self.x, self.y, self.length, self.width, self.height, self.rotation)
+        if not all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                   and math.isfinite(value) for value in values):
+            return False
         return self.length > 0 and self.width > 0 and self.height > 0
 
 
 @dataclass
 class CastellatedSide:
-    """I contatti su un lato del modulo.
+    """@brief Contacts on one module edge: count, pitch, offset and pin numbering.
+
+    I contatti su un lato del modulo.
 
     `offset` sposta il gruppo di pad lungo il bordo rispetto alla posizione
     centrata: serve per i moduli in cui i contatti non sono simmetrici
@@ -429,7 +457,10 @@ class CastellatedSide:
     contact_style: str = CONTACT_HALF_AND_THROUGH
 
     def numbers(self) -> List[str]:
-        """Numeri dei pad nell'ordine in cui si incontrano lungo il bordo."""
+        """@brief Return the pad numbers in the order they are met along the edge.
+
+        Numeri dei pad nell'ordine in cui si incontrano lungo il bordo.
+        """
         if self.pin_numbers is not None:
             return [str(n) for n in self.pin_numbers]
         numbers = [str(self.first_pin + i) for i in range(self.count)]
@@ -438,7 +469,10 @@ class CastellatedSide:
 
 @dataclass
 class CastellatedModuleParams:
-    """Parametri di un modulo castellated: corpo + contatti per lato."""
+    """@brief Parameters of a castellated module: body size plus contacts per edge.
+
+    Parametri di un modulo castellated: corpo + contatti per lato.
+    """
 
     name: str = "CastellatedModule"
     description: str = ""
@@ -609,19 +643,32 @@ class CastellatedModuleParams:
         return (placement.x, self.body_width / 2 - offset)
 
     def side_pad_length(self, side: CastellatedSide) -> float:
-        """@brief Provide the side pad length operation for this workflow."""
+        """@brief Return the pad length in mm for `side`, falling back to the module default."""
         return side.pad_length if side.pad_length is not None else self.pad_length
 
     def side_pad_width(self, side: CastellatedSide) -> float:
-        """@brief Provide the side pad width operation for this workflow."""
+        """@brief Return the pad width in mm for `side`, falling back to the module default."""
         return side.pad_width if side.pad_width is not None else self.pad_width
 
     def edge_length(self, edge: str) -> float:
-        """Lunghezza del bordo lungo cui si distribuiscono i pad."""
+        """@brief Return the body edge length in mm along which the pads of `edge` are spread.
+
+        Lunghezza del bordo lungo cui si distribuiscono i pad.
+        """
         return self.body_width if edge in ("left", "right") else self.body_length
 
     def validate(self) -> None:
-        """@brief Provide the validate operation for this workflow."""
+        """@brief Check that the module can be drawn as a manufacturable footprint.
+
+        @throws ValueError With a localized message on the first violation.
+        @note Contract: every dimension is a finite number; every contact row
+            fits inside its edge, offset included; the copper of two different
+            pins never touches (strictly positive gap, every pair of contacts,
+            any side, any contact style); a pad keeps part of its land under
+            the module (0 <= pad_overhang < pad_length); every pin number is
+            non-empty and unique.
+        """
+        self._validate_finite_numbers()
         if not self.name.strip():
             raise ValueError(tx("Il nome del footprint non puo' essere vuoto."))
         if self.body_length <= 0 or self.body_width <= 0:
@@ -647,6 +694,11 @@ class CastellatedModuleParams:
             raise ValueError(tx("Lo spessore del PCB deve essere > 0."))
         if self.thru_hole_drill < 0 or self.thru_pad_diameter < 0:
             raise ValueError(tx("Le quote del foro passante non possono essere negative."))
+        if self.pad_overhang < 0:
+            raise ValueError(
+                tx("Lo sbalzo dei pad oltre il bordo ({pad_overhang}mm) non puo' essere negativo.",
+                   pad_overhang=self.pad_overhang)
+            )
         self._validate_through_hole_sides()
         # Il controllo storico del foro dietro al semi-foro vale solo dove
         # entrambi esistono: su un lato through_hole non c'e' semi-foro con cui
@@ -686,14 +738,24 @@ class CastellatedModuleParams:
                        thru_hole_centre_offset=self.thru_hole_centre_offset,
                        value=self.thru_pad_diameter / 2)
                 )
-            shortest = min(self.body_length, self.body_width)
-            if 2 * self.thru_hole_centre_offset + self.thru_pad_diameter > shortest + 1e-6:
-                raise ValueError(
-                    tx("I fori passanti dei due lati opposti non stanno in {shortest}mm: "
-                       "servono almeno {value:.2f}mm.",
-                       shortest=shortest,
-                       value=2 * self.thru_hole_centre_offset + self.thru_pad_diameter)
-                )
+            # Solo le coppie di lati opposti che portano DAVVERO fori passanti
+            # half_and_through si contendono l'ingombro: un modulo 30x4 con
+            # contatti solo a sinistra e destra misura 30 mm fra le due file,
+            # non 4. Un lato senza dirimpettaio e' gia' coperto dai controlli
+            # sopra (il foro resta chiuso dentro il corpo).
+            carrying = {side.edge for side in self.sides
+                        if side.contact_style == CONTACT_HALF_AND_THROUGH}
+            for pair in OPPOSITE_EDGE_PAIRS:
+                if not set(pair) <= carrying:
+                    continue
+                shortest = self.edge_extent(pair[0])
+                if 2 * self.thru_hole_centre_offset + self.thru_pad_diameter > shortest + 1e-6:
+                    raise ValueError(
+                        tx("I fori passanti dei due lati opposti non stanno in {shortest}mm: "
+                           "servono almeno {value:.2f}mm.",
+                           shortest=shortest,
+                           value=2 * self.thru_hole_centre_offset + self.thru_pad_diameter)
+                    )
 
         seen_numbers: dict[str, str] = {}
         for side in self.sides:
@@ -713,6 +775,17 @@ class CastellatedModuleParams:
             pad_width = self.side_pad_width(side)
             if pad_length <= 0 or pad_width <= 0:
                 raise ValueError(tx("Lato {label}: le dimensioni dei pad devono essere > 0.", label=label))
+            # Una piazzola tutta fuori dal bordo non sta sotto il modulo: non
+            # c'e' nulla da saldare. Vale per i lati con piazzola di bordo.
+            if side.contact_style != CONTACT_THROUGH_HOLE and self.pad_overhang >= pad_length:
+                raise ValueError(
+                    tx("Lato {label}: lo sbalzo dei pad oltre il bordo ({pad_overhang}mm) non e' "
+                       "minore della loro lunghezza ({pad_length}mm): la piazzola starebbe tutta "
+                       "fuori dal modulo.",
+                       label=label,
+                       pad_overhang=self.pad_overhang,
+                       pad_length=pad_length)
+                )
             # La piazzola che si allinea lungo il bordo e' quella che il lato
             # offre davvero: la corona del foro per through_hole, la piazzola
             # rettangolare di bordo per gli altri due tipi.
@@ -764,6 +837,22 @@ class CastellatedModuleParams:
                        span=span,
                        available=available)
                 )
+            # Il gruppo e' centrato e poi spostato di `offset`: anche spostato
+            # deve restare entro il bordo, altrimenti i pad finiscono oltre
+            # l'angolo del modulo.
+            if abs(side.offset) + span / 2 > available / 2 + 1e-6:
+                raise ValueError(
+                    tx("Lato {label}: spostati di {offset}mm, i pad escono dal bordo: "
+                       "occupano fino a {reach:.2f}mm dal centro, il bordo arriva a "
+                       "{half:.2f}mm.",
+                       label=label,
+                       offset=side.offset,
+                       reach=abs(side.offset) + span / 2,
+                       half=available / 2)
+                )
+            if side.pin_numbers is not None and any(
+                    n is None or not str(n).strip() for n in side.pin_numbers):
+                raise ValueError(tx("Lato {label}: un numero di pin e' vuoto.", label=label))
 
             numbers = side.numbers()
             if len(numbers) != side.count:
@@ -784,29 +873,59 @@ class CastellatedModuleParams:
                     )
                 seen_numbers[number] = label
 
-        self._validate_continuous_pad_clearance()
+        self._validate_copper_clearance()
 
-    def _validate_continuous_pad_clearance(self) -> None:
-        """Refuse a continuous pad that reaches the copper of another contact.
+    def _validate_finite_numbers(self) -> None:
+        """Refuse NaN, infinities, booleans and non-numbers before any comparison.
 
-        A half_and_through pad runs from the edge to beyond its through-hole
-        however far in that hole is (see continuous_pad): the only limit is
-        physical -- two different pins must not share copper. Checked against
-        every other contact (other sides included, e.g. near a corner, or the
-        facing row of a narrow body), and only for pairs involving a continuous
-        pad, so half_hole and through_hole modules accept exactly what they
-        accepted before. Copper that merely touches is accepted, as the
-        pitch == pad width case always was.
+        A NaN compares False with everything, so every `<= 0` check below
+        would silently accept it and the footprint writer would emit "nan".
+        """
+        def check(value, name, optional=False):
+            if value is None and optional:
+                return
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(tx("{name} deve essere un numero finito (mm).", name=name))
+
+        for name in ("body_length", "body_width", "pad_length", "pad_width", "pad_overhang",
+                     "hole_diameter", "thru_hole_drill", "thru_pad_diameter", "thru_hole_offset",
+                     "pcb_thickness", "margin"):
+            check(getattr(self, name), name)
+        # row_spacing ha il suo controllo, con il suo messaggio, dove serve
+        # davvero (lati through_hole): altrove non entra nella geometria.
+        check(self.hole_inset, "hole_inset", optional=True)
+        for side in self.sides:
+            label = EDGE_LABELS.get(side.edge, side.edge)
+            for name in ("pitch", "offset"):
+                check(getattr(side, name), f"{name} ({label})")
+            for name in ("pad_length", "pad_width"):
+                check(getattr(side, name), f"{name} ({label})", optional=True)
+            for name in ("count", "first_pin"):
+                value = getattr(side, name)
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise ValueError(tx("Lato {label}: {name} deve essere un numero intero.",
+                                        label=label, name=name))
+
+    def _validate_copper_clearance(self) -> None:
+        """Refuse any two contacts of different pins whose copper touches or overlaps.
+
+        One rule for every pair (same side, adjacent sides near a corner,
+        facing rows of a narrow body) and every contact style: the copper of
+        each contact is the envelope from _copper_outline() and the gap
+        between two envelopes must be strictly positive. Copper that merely
+        touches is a short on the host board, so it is refused too (until
+        2026-09-25 touching was accepted and only pairs involving a continuous
+        pad were checked). Contacts with the same number may share copper.
         """
         placements = list(pad_positions(self))
         outlines = [(placement, _copper_outline(self, placement)) for placement in placements]
         for i, (first, a) in enumerate(outlines):
             for second, b in outlines[i + 1:]:
-                if not (has_continuous_pad(self, first.style) or has_continuous_pad(self, second.style)):
-                    continue
                 if first.number == second.number:
                     continue
-                if _box_distance(a, b) < a[4] + b[4] - 1e-9:
+                if _box_distance(a, b) - a[4] - b[4] > 1e-6:
+                    continue
+                if has_continuous_pad(self, first.style) or has_continuous_pad(self, second.style):
                     stadium = first if has_continuous_pad(self, first.style) else second
                     pad = continuous_pad(self, stadium)
                     raise ValueError(
@@ -821,6 +940,15 @@ class CastellatedModuleParams:
                            value=second.number if stadium is first else first.number,
                            get2=EDGE_LABELS.get((second if stadium is first else first).edge, ''))
                     )
+                raise ValueError(
+                    tx("Il rame del contatto {first} (lato {first_edge}) tocca quello del "
+                       "contatto {second} (lato {second_edge}): due pin diversi sarebbero in "
+                       "corto. Aumenta il passo, sposta i contatti o riduci le piazzole.",
+                       first=first.number,
+                       first_edge=EDGE_LABELS.get(first.edge, first.edge),
+                       second=second.number,
+                       second_edge=EDGE_LABELS.get(second.edge, second.edge))
+                )
 
     def _validate_through_hole_sides(self) -> None:
         """Checks for sides whose only feature is a full through-hole."""
@@ -1076,6 +1204,12 @@ def _copper_outline(params: CastellatedModuleParams, placement: PadPlacement) ->
             placement.x + placement.width / 2, placement.y + placement.height / 2, 0.0)
 
 
+def _copper_outline_bbox(params: CastellatedModuleParams, placement: PadPlacement) -> tuple:
+    """Axis-aligned bounding box (x0, y0, x1, y1) of one contact's copper, mm."""
+    x0, y0, x1, y1, radius = _copper_outline(params, placement)
+    return (x0 - radius, y0 - radius, x1 + radius, y1 + radius)
+
+
 def _box_distance(a: tuple, b: tuple) -> float:
     """Distance between two axis-aligned boxes (x0, y0, x1, y1, ...), mm; 0 when they meet."""
     dx = max(0.0, a[0] - b[2], b[0] - a[2])
@@ -1137,19 +1271,26 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
     half_length = params.body_length / 2
     half_width = params.body_width / 2
 
-    # Contorno del corpo: e' il modulo vero e proprio, quindi va sia in
-    # serigrafia sia su F.Fab (dove serve al disegno di assemblaggio).
-    for layer in ("F.SilkS", "F.Fab"):
-        fp.add_graphic(FpRect(
-            start=(-half_length, -half_width),
-            end=(half_length, half_width),
-            layer=layer,
-        ))
-
     placements = list(pad_positions(params))
     # Piazzola continua (half_and_through con foro): sostituisce sia la
     # piazzola di bordo sia la corona separata dello stesso contatto.
     stadiums = [continuous_pad(params, placement) for placement in placements]
+    # Rame esposto di ogni contatto, allargato della distanza serigrafia-pad:
+    # la serigrafia non deve mai coprire una piazzola (i pad di bordo
+    # sporgono oltre il contorno del corpo e lo attraversano).
+    keepouts = [keepout_box(*_copper_outline_bbox(params, placement), line_width=0.12)
+                for placement in placements]
+
+    # Contorno del corpo: e' il modulo vero e proprio, quindi va sia in
+    # serigrafia (interrotta dove passano i pad) sia su F.Fab, intero (serve
+    # al disegno di assemblaggio e non va in produzione).
+    for graphic in silk_rectangle((-half_length, -half_width), (half_length, half_width), keepouts):
+        fp.add_graphic(graphic)
+    fp.add_graphic(FpRect(
+        start=(-half_length, -half_width),
+        end=(half_length, half_width),
+        layer="F.Fab",
+    ))
 
     # Courtyard: ingombro reale, corpo piu' i pad che sporgono dal bordo.
     lands = placements + [pad for pad in stadiums if pad is not None]
@@ -1167,16 +1308,22 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
     # di assemblaggio.
     fp.add_graphic(FpText(kind="user", text="${REFERENCE}", at=(0, 0), layer="F.Fab"))
 
-    first_number = placements[0].number if placements else None
+    # Il marcatore indica il pad numerato "1" (o il numero piu' basso), non il
+    # primo pad prodotto: con reverse=True o con i lati elencati a partire da
+    # destra il primo prodotto e' un altro pin.
+    first_number = pin_one(placement.number for placement in placements)
     for placement, stadium in zip(placements, stadiums):
         if stadium is not None:
             # UN solo pad per contatto, come sulla scheda reale: rame continuo
             # dal bordo fino oltre la corona, foro passante decentrato dentro.
+            # KiCad: `at` e' il FORO, l'offset sposta il RAME (verificato con
+            # pcbnew 10). Scrivere il centro del rame in `at` scambiava foro e
+            # rame sulla scheda.
             fp.add_pad(OffsetDrillPad(
                 number=placement.number,
                 pad_type="thru_hole",
                 shape="oval",
-                at=(stadium.x, stadium.y),
+                at=(stadium.drill_x, stadium.drill_y),
                 size=(stadium.width, stadium.height),
                 layers=["*.Cu", "*.Mask", "F.Paste"],
                 drill=params.thru_hole_drill,
@@ -1203,20 +1350,32 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
                 drill=params.thru_hole_drill,
             ))
         if placement.number == first_number:
+            first_number = None   # un solo marcatore anche se il numero si ripete
             # Marcatore del pin 1, affiancato al suo pad lungo il bordo
             # (non verso l'esterno, dove finirebbe sotto il pad stesso).
             # Distanza misurata dal rame vero: la piazzola continua puo'
             # essere piu' larga della piazzola di bordo (contiene la corona).
+            # Il lato scelto e' quello opposto agli altri pad della stessa
+            # fila, cosi' il marcatore non finisce fra il pin 1 e il suo vicino
+            # (numerazione inversa); con un pad solo resta verso l'inizio.
             half_along = (stadium.across / 2 if stadium is not None
                           else (placement.height if placement.edge in ("left", "right")
                                 else placement.width) / 2)
-            if placement.edge in ("left", "right"):
-                center = (placement.x, placement.y - half_along - 0.5)
+            vertical = placement.edge in ("left", "right")
+            along = placement.y if vertical else placement.x
+            row = [(p.y if vertical else p.x) for p in placements
+                   if p.edge == placement.edge and p.number != placement.number]
+            sign = 1.0 if row and sum(row) / len(row) < along else -1.0
+            offset = sign * (half_along + 0.5)
+            if vertical:
+                center, direction = (placement.x, placement.y + offset), (0.0, sign)
             else:
-                center = (placement.x - half_along - 0.5, placement.y)
-            fp.add_graphic(FpCircle(
-                center=center, radius=0.25, layer="F.SilkS", fill=True,
-            ))
+                center, direction = (placement.x + offset, placement.y), (sign, 0.0)
+            # Il disco e' pieno: la distanza si misura dal suo bordo, senza la
+            # mezza larghezza del tratto usata per il contorno.
+            marker_keepouts = [keepout_box(*_copper_outline_bbox(params, p), line_width=0.0)
+                               for p in placements]
+            fp.add_graphic(pin_one_marker(center, marker_keepouts, direction))
 
         # Sigla del contatto (PE, B-, A+, GND...) su F.Fab, oltre il bordo
         # interno del pad: leggibile nel disegno di assemblaggio senza

@@ -9,8 +9,22 @@ sbagliata -- e nemmeno per dimensione, perche' una piazzola e un condensatore
 Ma la posizione dei contatti non e' un'incognita: l'estrazione la dichiara
 (lati, numero, passo, offset) ed e' la stessa geometria con cui il footprint
 disegna le piazzole. Un riquadro che cade su un contatto dichiarato, e che e'
-piccolo quanto il passo, e' quel contatto. Nessuna soglia scelta a mano:
-i due criteri sono entrambi quote dichiarate.
+piccolo quanto il passo, e' quel contatto.
+
+EURISTICA DICHIARATA (non una regola fisica). Posizione, passo e lunghezza
+della piazzola sono quote dichiarate; non lo sono i margini con cui la
+striscia del contatto viene allargata: la profondita' aggiunge mezzo foro e
+_LABEL_GAP_MM per la sigla serigrafata, e la tolleranza lungo il bordo e'
+_BAND_TOLERANCE (mezzo passo). Sono convenzioni: la prima e' come QUESTO
+programma dispone la serigrafia, non come l'ha stampata il produttore del
+pezzo; la seconda e' la meta' del passo, cioe' il confine con il contatto
+vicino. Sono state osservate, non misurate, sulla scheda di prova (moduli
+castellated a passo 2,54 mm), dove il rilevatore annotava piazzola e sigla
+insieme. Le renderebbe superflue una misura della serigrafia reale (per
+esempio la maschera delle piazzole ricavata dalla foto, o le quote della
+serigrafia nel disegno meccanico). Fragilita' nota: un corpo montato a meno
+di mezzo foro + 0,55 mm dalla fine della piazzola, piccolo quanto il passo,
+cade nella striscia e viene tolto come se fosse un contatto.
 """
 from __future__ import annotations
 
@@ -23,13 +37,17 @@ from ..generators.castellated_module import (
 
 #: Quanto puo' sporgere un corpo oltre la banda dei contatti restando un
 #: contatto: mezza piazzola. Oltre, e' un corpo che ci sta sopra o accanto.
+#: EURISTICA (vedi docstring del modulo): mezzo passo e' il confine con il
+#: contatto vicino, non una misura della piazzola annotata dal rilevatore.
 _BAND_TOLERANCE = 0.5
 
 #: Distanza fra la fine della piazzola e la sua sigla serigrafata, come la
 #: dispone il generatore del footprint (`label_gap` in step_generator): mezzo
-#: foro piu' questo margine. Non e' un numero scelto per far tornare un caso:
-#: e' la convenzione con cui questo programma disegna la serigrafia, e le
-#: sigle stampate sul pezzo reale stanno grosso modo li'.
+#: foro piu' questo margine. Non e' stato scelto per far tornare un caso, ma
+#: resta un'EURISTICA: e' la convenzione con cui questo programma disegna la
+#: serigrafia, e che le sigle stampate sul pezzo reale stiano grosso modo li'
+#: e' un'osservazione sulla scheda di prova, non una misura (vedi docstring
+#: del modulo per cosa la renderebbe superflua).
 _LABEL_GAP_MM = 0.55
 
 
@@ -82,7 +100,8 @@ def _band_depth(side, data, pitch):
         zona ridotta al solo centro del contatto non li prende, ed e'
         esattamente cio' che lasciava passare le file di piazzole. La
         profondita' si ricava dalle quote dichiarate piu' la convenzione di
-        serigrafia del generatore, non da una misura sulla foto.
+        serigrafia del generatore, non da una misura sulla foto: e' quindi
+        un'euristica, dichiarata come tale nella docstring del modulo.
     """
     pad_length = (_number(side.get('pad_length_mm')) or _number(data.get('pad_length_mm'))
                   or pitch)
@@ -128,6 +147,9 @@ def contact_positions(data, length_mm, width_mm):
     @param length_mm Estensione della scheda lungo X.
     @param width_mm Estensione lungo Y.
     @return Lista di dizionari con x_mm, y_mm, pitch_mm, edge, depth_mm.
+    @note Per una matrice servono anche body_offset_x_mm e body_offset_y_mm:
+        la griglia sta dove la mettono gli offset dichiarati, non al centro
+        della scheda (vedi _matrix_positions).
     @note Ritorna una lista vuota quando le quote dichiarate non bastano: senza
         di esse non si filtra nulla, perche' un filtro che indovina dove sono i
         contatti cancellerebbe componenti veri.
@@ -179,23 +201,69 @@ def contact_positions(data, length_mm, width_mm):
                 positions.append(dict(common, x_mm=along, y_mm=half_y))
     if positions:
         return positions
-    # Matrice passante: i pin stanno su una griglia, e anche qui il passo e la
-    # distanza fra le file sono dichiarati.
+    return _matrix_positions(data, length_mm, width_mm)
+
+
+def _matrix_positions(data, length_mm, width_mm):
+    """@brief Centres of the pins of a declared through-hole matrix, board-centred.
+
+    @param data Extracted parameters as the extraction returns them (raw):
+        rows, cols, pitch_mm, row_spacing_mm, body_offset_x_mm,
+        body_offset_y_mm and optionally pin_map, pin_map_view and
+        populated_pins.
+    @param length_mm Board extent along X.
+    @param width_mm Board extent along Y.
+    @return One entry per pin that exists, or [] when the grid cannot be
+        placed from declared quantities.
+    @note The grid is NOT centred on the board. Its placement is declared:
+        body_offset_x_mm / body_offset_y_mm are the body's minimum X / Y
+        measured from pin 1 and from the first row (the same quantities the
+        footprint uses, pin_header.PinHeaderParams.body_offset_*). A module
+        whose header sits along one edge would otherwise get phantom pins in
+        the middle of the board, and real bodies there would be deleted
+        before anyone reviews them. Without the offsets the position is
+        unknown and, as for any missing quantity here, nothing is filtered.
+    @note Pin positions come from pin_header.pin_positions, the single source
+        the footprint and the 3D pins use: pin_map and populated_pins count
+        exactly as they will be drawn, and an empty grid position is not a pin.
+    """
     rows, cols = data.get('rows'), data.get('cols')
     pitch = _number(data.get('pitch_mm'))
     spacing = _number(data.get('row_spacing_mm'))
-    if (isinstance(rows, int) and not isinstance(rows, bool) and rows >= 1
+    offset_x = _number(data.get('body_offset_x_mm'), minimum=-math.inf)
+    offset_y = _number(data.get('body_offset_y_mm'), minimum=-math.inf)
+    if not (isinstance(rows, int) and not isinstance(rows, bool) and rows >= 1
             and isinstance(cols, int) and not isinstance(cols, bool) and cols >= 1
-            and pitch is not None and (spacing is not None or rows == 1)):
-        spacing = spacing or 0.0
-        for row in range(rows):
-            for col in range(cols):
-                positions.append(dict(
-                    x_mm=(col - (cols - 1) / 2) * pitch,
-                    y_mm=(row - (rows - 1) / 2) * spacing,
-                    pitch_mm=pitch, edge='matrix',
-                    depth_mm=_band_depth({}, data, pitch)))
-    return positions
+            and pitch is not None and (spacing is not None or rows == 1)
+            and offset_x is not None and offset_y is not None):
+        return []
+    from ..generators.pin_header import PinHeaderParams, pin_positions
+    try:
+        mapping = None
+        if data.get('pin_map'):
+            mapping = {int(entry['pin']): (int(entry['row']), int(entry['col']))
+                       for entry in data['pin_map']}
+        populated = data.get('populated_pins')
+        grid = PinHeaderParams(rows=rows, cols=cols, pitch=pitch, row_spacing=spacing,
+                               populated_pins=set(int(p) for p in populated) if populated else None,
+                               pin_map=mapping)
+        grid.validate()
+        pins = [(x, y) for _, x, y in pin_positions(grid)]
+    except (TypeError, ValueError, KeyError):
+        # Pinout non leggibile: dove stanno i pin non si sa, quindi non si filtra.
+        return []
+    # Il bordo sinistro della scheda (-length/2) sta a offset_x dal pin 1,
+    # quello superiore (-width/2) a offset_y dalla prima fila.
+    origin_x, origin_y = -length_mm / 2 - offset_x, -width_mm / 2 - offset_y
+    # Un pin_map letto su una BOTTOM VIEW porta con se' colonne e offset X di
+    # quella vista; l'estrazione li ribalta insieme (_pin_map_seen_from_top e
+    # _offset_x_seen_from_top in datasheet_extractor), che equivale a
+    # specchiare l'intero campo dei pin attorno al centro della scheda. Qui
+    # arrivano i valori grezzi, quindi si applica la stessa riflessione.
+    mirror = -1.0 if (data.get('pin_map') and data.get('pin_map_view') == 'bottom') else 1.0
+    depth = _band_depth({}, data, pitch)
+    return [dict(x_mm=mirror * (origin_x + x), y_mm=origin_y + y, pitch_mm=pitch,
+                 edge='matrix', depth_mm=depth) for x, y in pins]
 
 
 def contact_rects_mm(positions, length_mm, width_mm):
@@ -208,9 +276,10 @@ def contact_rects_mm(positions, length_mm, width_mm):
     @note Serve a dire alla misura dei bordi dove NON guardare: la piazzola
         dorata ha un contorno netto quanto quello di un componente, e senza
         questa esclusione una misura buona viene sostituita dal bordo della
-        piazzola vicina. La zona e' quella dichiarata -- mezzo passo lungo il
-        bordo, la profondita' della piazzola con la sua sigla -- non una
-        fascia scelta guardando la foto.
+        piazzola vicina. La zona parte dalle quote dichiarate -- mezzo passo
+        lungo il bordo, la profondita' della piazzola -- piu' il margine
+        convenzionale della sigla (euristica dichiarata nella docstring del
+        modulo), non una fascia scelta guardando la foto.
     @note Le matrici passanti restano fuori: li' un connettore sta proprio
         sopra i suoi pin, e mascherare la zona impedirebbe di misurarlo.
     """

@@ -171,6 +171,22 @@ image_size_px in the JSON is context, not the unit of your answer.
 #: Il prompt di enumerazione completo: testa nuova, coda identica all'altro.
 PROMPT_ENUMERATE = _ENUMERATION_HEAD + PROMPT[PROMPT.index(_COMMON_FROM):]
 
+#: Frase del prompt di enumerazione che dice PERCHE' non ci sono candidati.
+_NO_DETECTOR_SENTENCE = "NO local detector ran: there are no candidates, so"
+
+#: Stesso prompt quando il rilevatore locale HA girato e non ha proposto nulla.
+#: Dire al modello che nessun rilevatore ha girato sarebbe falso, e il suo
+#: silenzio non e' prova di una scheda vuota: la frase lo dice, il resto e'
+#: identico parola per parola.
+PROMPT_ENUMERATE_AFTER_EMPTY_DETECTOR = PROMPT_ENUMERATE.replace(
+    _NO_DETECTOR_SENTENCE,
+    "A local detector ran on this photograph and left NO candidate body; its\n"
+    "silence is not evidence of an empty board. There are no candidates, so", 1)
+assert PROMPT_ENUMERATE_AFTER_EMPTY_DETECTOR != PROMPT_ENUMERATE
+
+#: Versione del prompt precedente, distinta nell'audit e nella cache.
+ENUMERATION_AFTER_EMPTY_DETECTOR_PROMPT_VERSION = ENUMERATION_PROMPT_VERSION + '+empty-local-detector'
+
 
 
 def inventory_tool():
@@ -306,7 +322,8 @@ _BOX_SCALES = (('normalized_1000', 1000.0, 1000.0), ('pixels', None, None))
 def _rescale_boxes(rows, width, height, log):
     """@brief Riporta a frazioni 0..1 i rettangoli consegnati in un'altra unita'.
 
-    @param rows Componenti della risposta, modificati sul posto.
+    @param rows Componenti della risposta, modificati sul posto: chi deve
+        conservare la risposta originale passa una copia (_in_contract_units).
     @param width Larghezza della fotografia in pixel.
     @param height Altezza della fotografia in pixel.
     @param log Callback di avanzamento: dice quale convenzione e' stata usata.
@@ -343,7 +360,12 @@ def _rescale_boxes(rows, width, height, log):
         dx, dy = (sx or float(width)), (sy or float(height))
         converted = [[box[0]/dx, box[1]/dy, box[2]/dx, box[3]/dy] for box in boxes]
         if all(0 <= b[0] < b[2] <= 1 and 0 <= b[1] < b[3] <= 1 for b in converted):
-            for row, box in zip(rows, boxes):
+            # Solo le righe-dizionario hanno un rettangolo, e `boxes` e' stato
+            # costruito da loro nello stesso ordine. Accoppiarlo a TUTTE le
+            # righe spostava i rettangoli e, con una riga non-dizionario,
+            # sollevava TypeError dopo la chiamata pagata. Le righe malformate
+            # restano come sono: le segnala _validate come righe non valide.
+            for row, box in zip((row for row in rows if isinstance(row, dict)), boxes):
                 row['bbox'] = [box[0]/dx, box[1]/dy, box[2]/dx, box[3]/dy]
             log(tx("Inventario globale: coordinate ricevute in {name}; convertite in "
                    "frazioni.",
@@ -352,6 +374,27 @@ def _rescale_boxes(rows, width, height, log):
     log(tx("Inventario globale: coordinate fuori 0..1 e nessuna convenzione "
            "coerente; lasciate invariate."))
     return None
+
+
+def _in_contract_units(data, width, height, log):
+    """@brief Copy of a provider response with its boxes in the contract's unit.
+
+    @param data Decoded provider response (any type).
+    @param width Photograph width in pixels.
+    @param height Photograph height in pixels.
+    @param log Progress callback receiving the conversion line, if any.
+    @return (response to validate, name of the conversion applied or None).
+    @note The provider response itself is never modified: the cache and the
+        audit store what the provider said, so a replay converts it again and
+        carries the same _global_inventory_box_scale as the live run. Before,
+        the conversion happened in place, the cache stored fractions and a
+        replay lost the metadata (and the audit no longer showed the unit the
+        provider had actually used).
+    """
+    if not (isinstance(data, dict) and isinstance(data.get('components'), list)):
+        return data, None
+    converted = deepcopy(data)
+    return converted, _rescale_boxes(converted['components'], width, height, log)
 
 
 def omitted_required_fields(data):
@@ -708,13 +751,15 @@ def _inline_detail(text):
     return ' '.join(str(text).replace(';', ',').split())
 
 
-def paid_request_message(images, proposals, enumerating):
+def paid_request_message(images, proposals, enumerating, detector_ran=False):
     """@brief The one progress line that announces the paid inventory request.
 
     @param images Number of images travelling in the request.
     @param proposals Number of local detector proposals to reconcile.
-    @param enumerating True when no local detector ran and the vision model
-        enumerates the bodies by itself.
+    @param enumerating True when there are no local proposals and the vision
+        model enumerates the bodies by itself.
+    @param detector_ran True when the local detector DID run and found no
+        body: the line then says so instead of «no local detector».
     @return One line stating that exactly one paid call is made and what it is
         for, with the count and the noun in agreement.
     @note The model identifier is deliberately absent: the modal already shows
@@ -735,7 +780,10 @@ def paid_request_message(images, proposals, enumerating):
                if images == 1 else
                tx("Inventario globale: una sola richiesta a pagamento con {images} immagini.",
                   images=images))
-    if enumerating:
+    if enumerating and detector_ran:
+        work = tx("Il rilevatore locale non ha trovato corpi: è il modello di visione a "
+                  "elencarli.")
+    elif enumerating:
         work = tx("Nessun rilevatore locale: è il modello di visione a elencare i corpi.")
     elif proposals == 1:
         work = tx("L'AI riconcilia l’unica proposta del rilevatore locale ed elenca i "
@@ -839,7 +887,8 @@ def _normalize(row, identity, length, width, issues, manual_ids=frozenset()):
 
 
 def review_global_inventory(photo, components, length, width, model, call, log, cache_dir=None,
-                            *, verification_prompt=None, extra_instructions=None):
+                            *, verification_prompt=None, extra_instructions=None,
+                            detector_ran=False):
     """@brief Make one global semantic request, or replay a validated versioned cache.
     @param photo Calibrated BGR top photograph.
     @param components All YOLO candidates with unique integer IDs and global boxes.
@@ -851,6 +900,9 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     @param cache_dir Optional response cache and audit directory.
     @param verification_prompt Custom notes; recognized legacy defaults are excluded.
     @param extra_instructions User notes; delimited board extraction blocks are excluded.
+    @param detector_ran True when a local detector ran on this photograph. With
+        no components it selects the enumeration prompt that says the detector
+        ran and found nothing, instead of «NO local detector ran».
     @return Normalized component hypotheses, retaining unresolved input on failure.
     @throws ValueError Invalid photo, dimensions or candidate IDs/boxes; failed empty inventory.
     @note Arbitrary angles remain photographic evidence; CAD envelopes stay axis aligned.
@@ -896,7 +948,9 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     # Senza candidati non c'e' nulla da riconciliare: cambia il prompt e cade
     # la sovrapposizione numerata, che sarebbe una copia vuota della foto.
     enumerating = not candidates
-    version = ENUMERATION_PROMPT_VERSION if enumerating else PROMPT_VERSION
+    empty_detector = enumerating and detector_ran is True
+    version = (ENUMERATION_AFTER_EMPTY_DETECTOR_PROMPT_VERSION if empty_detector
+               else ENUMERATION_PROMPT_VERSION if enumerating else PROMPT_VERSION)
     inputs = dict(prompt_version=version, schema_version=SCHEMA_VERSION,
                   board_size_mm=[length, width], image_size_px=[w, h], candidates=candidates)
     content = [{'type': 'text', 'text': 'Full calibrated photograph; all coordinates refer to this image.'},
@@ -909,7 +963,8 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         left = max(0, round((i/3-.05)*w)); right = min(w, max(left+1, round(((i+1)/3+.05)*w)))
         content.extend([{'type': 'text', 'text': f'Context strip {i+1}; GLOBAL bounds {[left/w, 0, right/w, 1]}'},
                         image_block(photo[:, left:right])])
-    prompt = PROMPT_ENUMERATE if enumerating else PROMPT
+    prompt = (PROMPT_ENUMERATE_AFTER_EMPTY_DETECTOR if empty_detector
+              else PROMPT_ENUMERATE if enumerating else PROMPT)
     supplements = [clean for s in (verification_prompt or '', extra_instructions or '')
                    if (clean := _inventory_context(s))]
     if supplements:
@@ -930,7 +985,10 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     if path and path.exists():
         try:
             record = json.loads(path.read_text(encoding='utf-8'))
-            if record.get('key') == key and not _validate(record.get('response'), known, boxes)[2]:
+            # La cache conserva la risposta del fornitore com'era: si valida
+            # nella stessa unita' in cui la valida la corsa dal vivo.
+            replay, _ = _in_contract_units(record.get('response'), w, h, lambda _m: None)
+            if record.get('key') == key and not _validate(replay, known, boxes)[2]:
                 data = record['response']; log(marked(CACHE_HIT, "Inventario globale: risposta valida ripresa dalla "
                                                   "cache, nessuna nuova chiamata a pagamento "
                                                   "(validated cache hit)."))
@@ -938,7 +996,7 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
             pass
     if data is None:
         images = sum(1 for block in content if block.get('type') == 'image_url')
-        log(paid_request_message(images, len(candidates), enumerating))
+        log(paid_request_message(images, len(candidates), enumerating, empty_detector))
         try:
             data = call(**kwargs)
         except (OpenRouterError, ValueError, OSError) as exc:
@@ -995,10 +1053,8 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
                                         + ', '.join(omitted))
     # Prima di giudicare la risposta, portarla nell'unita' del contratto: un
     # rettangolo giusto consegnato in pixel non e' una risposta sbagliata.
-    box_scale = None
-    if isinstance(data, dict) and isinstance(data.get('components'), list):
-        box_scale = _rescale_boxes(data['components'], w, h, log)
-    rows, safe, errors = _validate(data, known, boxes)
+    checked, box_scale = _in_contract_units(data, w, h, log)
+    rows, safe, errors = _validate(checked, known, boxes)
     if isinstance(data, dict) and data.get('error'):
         errors.append(_Issue(str(data['error'])))
     if omission_issue is not None:

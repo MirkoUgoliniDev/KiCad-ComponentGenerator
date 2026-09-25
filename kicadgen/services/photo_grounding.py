@@ -1,4 +1,4 @@
-"""Calibrated visual grounding followed by classification of fixed package crops.
+"""@brief Calibrated visual grounding followed by classification of fixed package crops.
 
 Coordinates and semantics are separate contracts. The classifier cannot add or
 move boxes. Native box_2d order follows the documented Gemini grounding format;
@@ -62,7 +62,7 @@ GROUNDING_PROMPT = (
 
 
 def grounding_tool(kinds):
-    """@brief Provide the grounding tool operation for this workflow."""
+    """@brief Return the locate_components tool schema: 0-1000 box_2d, label, kind and mechanical metadata."""
     metadata = mechanical_metadata_properties()
     return {"type": "function", "function": {
         "name": "locate_components", "description": "PCB component bounding boxes",
@@ -76,7 +76,19 @@ def grounding_tool(kinds):
 
 
 def decode_boxes(data, region, length, width, kinds, source, log):
-    """@brief Provide the decode boxes operation for this workflow."""
+    """@brief Convert a locate_components answer into low-confidence millimetre candidates.
+
+    Invalid entries and packages cut at an interior detail border are logged and skipped.
+    @param data Tool answer with a `components` list of [top, left, bottom, right] 0-1000 boxes.
+    @param region Normalized (x0, y0, x1, y1) part of the whole crop shown to the model.
+    @param length Board length in mm.
+    @param width Board width in mm.
+    @param kinds Allowed component kinds; others become generic.
+    @param source View label stored in `_source` and used in log lines.
+    @param log Callable receiving diagnostic lines.
+    @return List of candidate dictionaries marked `_uncertain`, with a whole-crop `_box`.
+    @throws ValueError When the components list is missing or not a list.
+    """
     out = []
     raw = data.get("components") if isinstance(data, dict) else None
     if not isinstance(raw, list):
@@ -117,7 +129,7 @@ def decode_boxes(data, region, length, width, kinds, source, log):
 
 
 def grounding_regions(photo):
-    """Full image retains large packages; three overlapping vertical details.
+    """@brief Full image retains large packages; three overlapping vertical details.
 
     Ownership is by center in non-overlapping thirds, eliminating the need to
     merge the same small object across six arbitrarily overlapping quadrants.
@@ -131,12 +143,21 @@ def grounding_regions(photo):
 
 
 def cached_call(call, kwargs, cache_dir, stage, log, expected_ids=None):
-    """Content-addressed parsed response cache; never stores API keys/images.
+    """@brief Content-addressed parsed response cache; never stores API keys/images.
 
     Changing model, prompt, schema, image pixels or parameters invalidates it.
     Network/API errors are not cached. Corrupt or partial cache entries are
     ignored. Fresh partial responses still reach the per-entry decoders without
     a retry. expected_ids is local validation metadata, not part of the key.
+
+    @note Empty answers. An empty `components` list is never stored as a
+        success, with one declared exception: the localization tool
+        (`locate_components`), where "no mounted body in this region" is a
+        legitimate, complete answer (a detail third of a sparse board) and
+        replaying it keeps offline replays identical. Such a record carries
+        `"empty_response": true`, and both storing and reusing it write an
+        explicit log line, so an empty replay is never mistaken for a found
+        list. Every other tool retries an empty list instead of caching it.
     """
     key = hashlib.sha256(json.dumps(kwargs, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
     path = Path(cache_dir)/f"{key}.json" if cache_dir else None
@@ -191,14 +212,24 @@ def cached_call(call, kwargs, cache_dir, stage, log, expected_ids=None):
             if (any(isinstance(i, bool) or not isinstance(i, (int, float)) for i in ids)
                     or len(ids) != len(set(ids)) or set(ids) != set(expected_ids)):
                 return False
-        return bool(entries) or kwargs.get('tool',{}).get('function',{}).get('name') == 'locate_components'
+        return bool(entries) or empty_allowed
+    tool_name = kwargs.get('tool',{}).get('function',{}).get('name')
+    empty_allowed = tool_name == 'locate_components'
+
+    def empty(data):
+        return isinstance(data, dict) and data.get("components") == []
     if path:
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
             if record.get("key") == key and reusable(record.get("response")):
-                log(tx("{stage}: risposta recuperata dalla cache locale (nessuna chiamata "
-                       "API).",
-                       stage=stage))
+                if empty(record["response"]):
+                    log(tx("{stage}: risposta VUOTA (nessun corpo nella zona) recuperata dalla "
+                           "cache locale; per richiederla di nuovo eliminare la voce di cache.",
+                           stage=stage))
+                else:
+                    log(tx("{stage}: risposta recuperata dalla cache locale (nessuna chiamata "
+                           "API).",
+                           stage=stage))
                 return record["response"]
         except (OSError, ValueError, AttributeError):
             pass
@@ -206,17 +237,22 @@ def cached_call(call, kwargs, cache_dir, stage, log, expected_ids=None):
     if not isinstance(data, dict):
         raise ValueError(tx("risposta AI non strutturata"))
     if path and reusable(data):
+        record = dict(key=key, model=kwargs["model"], stage=stage, response=data)
+        if empty(data):
+            record["empty_response"] = True
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(dict(key=key, model=kwargs["model"], stage=stage, response=data),
-                                       ensure_ascii=False, indent=2), encoding="utf-8")
+            path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+            if empty(data):
+                log(tx("{stage}: risposta vuota (nessun corpo nella zona) memorizzata come tale "
+                       "nella cache locale.", stage=stage))
         except OSError as exc:
             log(tx("Cache locale non scrivibile: {exc}", exc=exc))
     return data
 
 
 def classification_tool(kinds):
-    """@brief Provide the classification tool operation for this workflow."""
+    """@brief Return the tool schema used to verify and classify fixed package crops by ID."""
     properties = {
         "id": {"type": "integer"},
         "is_component": {"type": "boolean"},
@@ -260,7 +296,7 @@ def classification_tool(kinds):
 
 
 def contact_sheet(photo, components, *, cell_width=240, cell_height=180, columns=4):
-    """@brief Provide the contact sheet operation for this workflow."""
+    """@brief Return a BGR contact sheet with one padded, ID-labelled crop per component and its box outlined."""
     import cv2
     import numpy as np
     cell_w, cell_h = cell_width, cell_height
@@ -283,7 +319,19 @@ def contact_sheet(photo, components, *, cell_width=240, cell_height=180, columns
 
 
 def apply_classifications(components, response, kinds, length, width, log):
-    """@brief Provide the apply classifications operation for this workflow."""
+    """@brief Apply per-ID verification answers to candidates without moving their boxes.
+
+    Candidates with a missing, duplicate or invalid verdict are kept as uncertain;
+    those judged not to be complete packages are dropped.
+    @param components Candidates with `_id` and `_box`.
+    @param response Classification tool answer.
+    @param kinds Allowed component kinds.
+    @param length Board length in mm.
+    @param width Board width in mm.
+    @param log Callable receiving diagnostic lines.
+    @return The kept components with verified attributes.
+    @throws ValueError When the answer has no components list.
+    """
     raw = response.get("components") if isinstance(response,dict) else None
     if not isinstance(raw,list):
         raise ValueError(tx("classificazioni mancanti"))
@@ -317,8 +365,13 @@ def apply_classifications(components, response, kinds, length, width, log):
         try:
             if entry.get("is_component") is not True or entry.get("is_complete_package") is not True:
                 raise ValueError("verdetto mancante")
-            height, angle = float(entry["height_mm"]), entry["rotation_deg"]
-            if isinstance(entry['height_mm'],bool) or not math.isfinite(height) or not 0 < height <= 100 or isinstance(angle,bool) or angle not in (0,90,180,270):
+            raw_height, angle = entry["height_mm"], entry["rotation_deg"]
+            # A number only: a string such as "1.5" is not what the schema
+            # asks for, and float() would silently accept it.
+            if isinstance(raw_height, bool) or not isinstance(raw_height, (int, float)):
+                raise ValueError(tx("altezza/angolo non valido"))
+            height = float(raw_height)
+            if not math.isfinite(height) or not 0 < height <= 100 or isinstance(angle,bool) or angle not in (0,90,180,270):
                 raise ValueError(tx("altezza/angolo non valido"))
             kind = entry.get("kind")
             if kind not in kinds or entry.get("confidence") not in ("high","medium","low"):
@@ -541,8 +594,15 @@ def mechanical_envelopes(photo, components, model, call, log, cache_dir, verific
                     if verdict['present'] is False:
                         log(tx("#{id}: escluso, nessun corpo montato nel rettangolo.", id=c['_id']))
                         continue
-                    c['confidence'] = verdict.get('confidence','low')
-                    c['_uncertain'] = c['confidence'] not in ('high','medium')
+                    confidence = verdict.get('confidence')
+                    if confidence not in ('high','medium','low'):
+                        # Outside the enum: never copied as it is. A present
+                        # body with an unusable confidence stays low/uncertain.
+                        log(tx("#{id}: confidenza non valida ({value!r}); conservato come dubbio.",
+                               id=c['_id'], value=confidence))
+                        confidence = 'low'
+                    c['confidence'] = confidence
+                    c['_uncertain'] = confidence not in ('high','medium')
                     kind = verdict.get('kind')
                     if isinstance(kind, str) and kind in COMPONENT_KINDS:
                         c['kind'] = kind
@@ -569,7 +629,7 @@ def mechanical_envelopes(photo, components, model, call, log, cache_dir, verific
 
 
 def reconcile_packages(photo, components, model, length, width, kinds, call, log, cache_dir):
-    """Experimental contextual review, NOT enabled in the production pipeline."""
+    """@brief Experimental contextual review, NOT enabled in the production pipeline."""
     from .photo_inventory import image_block, draw_inventory, overlap
     suspect = set()
     for c in components:
@@ -668,7 +728,7 @@ def reconcile_packages(photo, components, model, length, width, kinds, call, log
 def grounded_components(photo, model, length, width, kinds, call, log, cache_dir=None,
                         extra_instructions=None, classifier_model=None, mechanical=True,
                         grounding_prompt=None, verification_prompt=None):
-    """@brief Provide the grounded components operation for this workflow."""
+    """@brief Localize packages over the full view and three details, then verify them in batches of 12; returns renumbered components."""
     from .photo_inventory import image_block, merge_components
     classifier_model = classifier_model or DEFAULT_MODEL
     log(tx("Localizzazione fotografica dedicata: {model}. Geometria e "

@@ -614,10 +614,18 @@ che possono essere diverse da quella del codice**. Sono elencati uno per uno in
 - i modelli YOLO26 di Roboflow sono addestrati sul
   [dataset CompDetect](https://universe.roboflow.com/dataset-lmrsw/compdetect),
   con licenza [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Il
-  dataset non è ridistribuito qui e i suoi autori non approvano questo
-  progetto;
+  dataset è stato esportato da Roboflow per l'addestramento; le elaborazioni
+  applicate davvero (ridimensionamento, aumentazione, conversione, filtri,
+  modifiche alle classi) **vanno registrate** in `THIRD_PARTY_NOTICES.md` e
+  sono ancora da registrare. Il dataset non è ridistribuito qui e i suoi
+  autori non approvano questo progetto;
 - FreeCAD e KiCad sono programmi separati, con licenze proprie, e non sono
-  inclusi.
+  inclusi;
+- l'installer Windows include anche il runtime CPython, le librerie Qt 6,
+  PyQt6 e la libreria FFmpeg distribuita con OpenCV, ognuno con la propria
+  licenza (PSF-2.0, LGPL-3.0, GPL-3.0, LGPL-2.1); i loro file di licenza sono
+  copiati nella cartella `_internal\licenses` del programma installato e
+  `THIRD_PARTY_NOTICES.md` li elenca con le sorgenti a monte.
 
 Footprint e modelli 3D generati, datasheet e foto forniti dall'utente possono
 avere licenze o limiti d'uso propri, da verificare. Questa sezione non afferma

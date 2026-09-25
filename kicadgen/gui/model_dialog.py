@@ -1,4 +1,6 @@
-"""Scelta del modello LLM dall'elenco OpenRouter, con filtro sul costo.
+"""@brief LLM model picker over the OpenRouter catalogue, with a cost filter.
+
+Scelta del modello LLM dall'elenco OpenRouter, con filtro sul costo.
 
 OpenRouter pubblica centinaia di modelli a prezzi che vanno da zero a
 qualche decina di dollari per milione di token: la tabella qui sotto li
@@ -133,7 +135,9 @@ class _NumericItem(QTableWidgetItem):
 
 
 class ModelPickerDialog(QDialog):
-    """Elenco modelli OpenRouter con ricerca, filtro costo e selezione.
+    """@brief Dialog listing OpenRouter models with search, cost filter and selection; it saves nothing.
+
+    Elenco modelli OpenRouter con ricerca, filtro costo e selezione.
 
     Il dialogo non salva nulla: ritorna solo l'id del modello scelto
     (`selected_model()`), e sta al chiamante decidere se diventa il default
@@ -432,7 +436,7 @@ class ModelPickerDialog(QDialog):
             ok_button.setEnabled(bool(self._selected))
 
     def selected_model(self) -> str:
-        """@brief Provide the selected model operation for this workflow."""
+        """@brief Return the id of the model chosen in the dialog."""
         return self._selected
 
 
@@ -447,7 +451,9 @@ def _price_text(value: float, i18n=None) -> str:
 
 def pick_model(current_model: Optional[str], parent=None, title: str = "Scegli il modello LLM",
                capabilities=DATASHEET_CAPABILITIES) -> Optional[str]:
-    """Apre il dialogo e ritorna l'id scelto, o None se si annulla.
+    """@brief Open the model picker and return the chosen model id, or None when cancelled.
+
+    Apre il dialogo e ritorna l'id scelto, o None se si annulla.
 
     @param capabilities Capacita' che il modello dovra' avere per il lavoro a
         cui e' destinato: vedi ModelInfo.usable_for. Chiederne piu' del

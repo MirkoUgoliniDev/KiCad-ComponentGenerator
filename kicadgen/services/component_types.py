@@ -1,4 +1,6 @@
-"""Tipologie di componente da dichiarare prima dell'estrazione AI.
+"""@brief Component types declared before the AI extraction, each with its instruction block.
+
+Tipologie di componente da dichiarare prima dell'estrazione AI.
 
 Sapere in anticipo *che cosa* si sta leggendo cambia completamente quali
 quote il modello deve cercare nel datasheet: un componente SMD non ha
@@ -26,7 +28,10 @@ BLOCK_END = "--- fine tipologia componente ---"
 
 @dataclass(frozen=True)
 class ComponentType:
-    """Una tipologia selezionabile, con l'istruzione da passare al modello."""
+    """@brief Selectable component type with the instruction passed to the model.
+
+    Una tipologia selezionabile, con l'istruzione da passare al modello.
+    """
 
     key: str
     label: str
@@ -133,17 +138,25 @@ _BY_KEY = {ct.key: ct for ct in COMPONENT_TYPES}
 
 
 def get(key: Optional[str]) -> Optional[ComponentType]:
-    """Tipologia dal suo `key`, oppure None se sconosciuta o non indicata."""
+    """@brief Return the component type for `key`, or None when unknown or not given.
+
+    Tipologia dal suo `key`, oppure None se sconosciuta o non indicata.
+    """
     return _BY_KEY.get(key) if key else None
 
 
 def build_block(component_type: ComponentType) -> str:
-    """Blocco di testo delimitato dai marcatori, pronto per le note."""
+    """@brief Return the type instruction wrapped in the block markers, ready for the notes.
+
+    Blocco di testo delimitato dai marcatori, pronto per le note.
+    """
     return f"{BLOCK_START}\n{component_type.prompt}\n{BLOCK_END}"
 
 
 def strip_block(text: str) -> str:
-    """Toglie dal testo il blocco tipologia, lasciando intatto il resto.
+    """@brief Remove the component type block from the notes, keeping the user text.
+
+    Toglie dal testo il blocco tipologia, lasciando intatto il resto.
 
     Serve a cambiare tipologia senza cancellare le note scritte a mano:
     si rimuove il blocco precedente e si reinserisce quello nuovo.
@@ -161,7 +174,9 @@ def strip_block(text: str) -> str:
 
 
 def apply_block(text: str, component_type: Optional[ComponentType]) -> str:
-    """Testo delle note con il blocco della tipologia scelta in testa.
+    """@brief Return the notes with the block of the chosen type at the top (only removed when None).
+
+    Testo delle note con il blocco della tipologia scelta in testa.
 
     Con `component_type=None` (tipologia non indicata) si limita a
     rimuovere l'eventuale blocco precedente.

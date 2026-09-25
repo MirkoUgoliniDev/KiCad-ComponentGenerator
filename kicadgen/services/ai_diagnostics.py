@@ -11,7 +11,9 @@ import hashlib
 import inspect
 from itertools import count
 import json
+import math
 import re
+import time
 from time import perf_counter
 from typing import Callable, Optional
 
@@ -142,8 +144,49 @@ def _usage_delta(before):
     return f" tokens_in={tokens_in} tokens_out={tokens_out} cost_usd={cost:.4f}"
 
 
+class CallCancelled(Exception):
+    """@brief Base class of the cancellation raised before a paid AI call.
+
+    @note Optional pipeline steps that downgrade their own failures to notes
+        (photo inventory, detection tiles, reviews) must re-raise this class:
+        a cancellation is the user's decision, not a failure of the step.
+    """
+
+
+#: Maximum attempts of one call when the provider reports a transient failure
+#: (rate limit, timeout, 5xx): the first request plus two retries.
+MAX_ATTEMPTS = 3
+#: First backoff delay in seconds; doubled at every further retry.
+BACKOFF_BASE_S = 2.0
+#: Upper bound of any single wait, including a provider Retry-After: a longer
+#: pause would look like a hang in the GUI, and failing is then clearer.
+BACKOFF_CAP_S = 30.0
+#: Granularity with which a cancellation is noticed during a backoff wait.
+_CANCEL_POLL_S = 0.25
+
+
+def _sleep(seconds: float) -> None:
+    """Indirection over time.sleep, so tests can observe waits without waiting."""
+    time.sleep(seconds)
+
+
+def retry_delay(attempt: int, retry_after=None) -> float:
+    """@brief Seconds to wait before retry number `attempt` (1 = first retry).
+
+    @param attempt 1-based retry index.
+    @param retry_after Provider Retry-After in seconds, or None.
+    @return The provider delay when it is a finite non-negative number, else
+        BACKOFF_BASE_S * 2**(attempt-1); always bounded by BACKOFF_CAP_S.
+    """
+    if (not isinstance(retry_after, bool) and isinstance(retry_after, (int, float))
+            and math.isfinite(retry_after) and retry_after >= 0):
+        return min(float(retry_after), BACKOFF_CAP_S)
+    return min(BACKOFF_BASE_S * 2 ** (max(1, attempt) - 1), BACKOFF_CAP_S)
+
+
 def make_logged_call(call_tool: Callable, progress: Optional[Callable[[str], None]], *,
-                     log_prompt: bool = False) -> Callable:
+                     log_prompt: bool = False,
+                     cancel: Optional[Callable[[], None]] = None) -> Callable:
     """@brief Wrap a synchronous AI call with lifecycle and optional prompt diagnostics.
 
     @param call_tool Callable receiving the original positional and keyword arguments.
@@ -151,17 +194,26 @@ def make_logged_call(call_tool: Callable, progress: Optional[Callable[[str], Non
     @param log_prompt When true, log the exact textual request components and a
         hash/size summary for binary blocks.  Disabled by default for callers
         that do not explicitly opt into an audit trail.
+    @param cancel Optional checker called before EVERY paid attempt (retries
+        included) and during backoff waits; it aborts the chain by raising,
+        preferably a CallCancelled subclass. None = no cancellation channel.
     @return Callable preserving argument objects, result identity and original exceptions;
-        the original callable itself when progress is None.
-    @throws BaseException The original callable's exception, re-raised unchanged.
+        the original callable itself when both progress and cancel are None.
+    @throws BaseException The original callable's exception, re-raised unchanged,
+        or the exception raised by `cancel`.
     @note Callback failures are best-effort and cannot replace a call result/error.
         Failure logs contain exception type only, never the exception message.
         Each wrapper numbers its own calls; elapsed time uses a monotonic clock.
-        One retry is performed only when the OpenRouter boundary explicitly marks
-        an HTTP failure as retryable. The retry is logged and uses the portable
-        required-tool form when supported by the callable.
+        Retry policy, decided by the OpenRouter boundary and never by guessing
+        here: an error marked `retryable` (transient: 408/409/429/5xx) is
+        retried with the SAME request up to MAX_ATTEMPTS attempts, after a
+        bounded exponential backoff that honours the provider Retry-After; an
+        error marked `compatibility` (a 400 about the tool_choice form) gets one
+        immediate retry in the portable required-tool form when the callable
+        supports it. Any other error, a plain 400 included, is not retried:
+        repeating an invalid request only pays for the same refusal.
     """
-    if progress is None:
+    if progress is None and cancel is None:
         return call_tool
     try:
         signature = inspect.signature(call_tool)
@@ -170,6 +222,8 @@ def make_logged_call(call_tool: Callable, progress: Optional[Callable[[str], Non
     sequence = count(1)
 
     def emit(message):
+        if progress is None:
+            return
         try:
             progress(message)
         except Exception:
@@ -188,9 +242,33 @@ def make_logged_call(call_tool: Callable, progress: Optional[Callable[[str], Non
                 pass  # Let the actual callable raise its own argument error.
         return arguments
 
+    def check_cancel():
+        if cancel is not None:
+            cancel()
+
+    def wait(seconds):
+        """Backoff wait that still notices a cancellation within a fraction of a second."""
+        remaining = seconds
+        while remaining > 0:
+            check_cancel()
+            step = min(_CANCEL_POLL_S, remaining)
+            _sleep(step)
+            remaining -= step
+        check_cancel()
+
+    def log_prompt_lines(context, arguments, suffix=""):
+        digest, lines = _prompt_snapshot(arguments)
+        emit(f"AI_CALL_PROMPT_BEGIN {context}{suffix} sha256={digest} "
+             f"blocks={len(arguments.get('content_blocks') or [])}")
+        for line in lines:
+            emit(line)
+        emit(f"AI_CALL_PROMPT_END {context}{suffix} sha256={digest}")
+
     @wraps(call_tool)
     def logged_call(*args, **kwargs):
         """@brief Forward one invocation and emit allowlisted diagnostics."""
+        # Before anything is logged or paid: a cancelled chain starts nothing.
+        check_cancel()
         arguments = bound_arguments(args, kwargs)
         tool = arguments.get("tool")
         name = None
@@ -201,11 +279,7 @@ def make_logged_call(call_tool: Callable, progress: Optional[Callable[[str], Non
                    f"tool={_identifier(name)}")
         emit(f"AI_CALL_START {context}")
         if log_prompt:
-            digest, lines = _prompt_snapshot(arguments)
-            emit(f"AI_CALL_PROMPT_BEGIN {context} sha256={digest} blocks={len(arguments.get('content_blocks') or [])}")
-            for line in lines:
-                emit(line)
-            emit(f"AI_CALL_PROMPT_END {context} sha256={digest}")
+            log_prompt_lines(context, arguments)
         started = perf_counter()
         # Il consuntivo dei token e' globale: la differenza prima/dopo e'
         # l'unico modo per sapere quanto e' entrato in QUESTA chiamata. Serve
@@ -213,33 +287,43 @@ def make_logged_call(call_tool: Callable, progress: Optional[Callable[[str], Non
         # richiesta con quattro fotografie che costa poche migliaia di token
         # non le ha ricevute, per quanto la risposta sembri legittima.
         before = _usage_snapshot()
-        try:
-            result = call_tool(*args, **kwargs)
-        except BaseException as exc:
-            if getattr(exc, "retryable", False) is True:
-                emit(f"AI_CALL_RETRY {context} attempt=2 reason=retryable_http")
-                retry_kwargs = dict(kwargs)
-                if signature is not None and "compatibility_retry" in signature.parameters:
-                    retry_kwargs["compatibility_retry"] = True
-                if log_prompt:
-                    retry_arguments = bound_arguments(args, retry_kwargs)
-                    retry_digest, retry_lines = _prompt_snapshot(retry_arguments)
-                    emit(f"AI_CALL_PROMPT_BEGIN {context} attempt=2 sha256={retry_digest} blocks={len(retry_arguments.get('content_blocks') or [])}")
-                    for line in retry_lines:
-                        emit(line)
-                    emit(f"AI_CALL_PROMPT_END {context} attempt=2 sha256={retry_digest}")
-                try:
-                    result = call_tool(*args, **retry_kwargs)
-                except BaseException as retry_exc:
-                    elapsed = perf_counter() - started
-                    emit(f"AI_CALL_FAILURE {context} elapsed={elapsed:.3f}s attempts=2 "
-                         f"error={_identifier(type(retry_exc).__name__)}")
+        attempt_kwargs = kwargs
+        attempt = 1
+        compatibility_used = False
+        while True:
+            try:
+                result = call_tool(*args, **attempt_kwargs)
+                break
+            except BaseException as exc:
+                if isinstance(exc, CallCancelled):
                     raise
-            else:
-                elapsed = perf_counter() - started
-                emit(f"AI_CALL_FAILURE {context} elapsed={elapsed:.3f}s attempts=1 "
-                     f"error={_identifier(type(exc).__name__)}")
-                raise
+                compatibility = (getattr(exc, "compatibility", False) is True
+                                 and not compatibility_used and signature is not None
+                                 and "compatibility_retry" in signature.parameters)
+                transient = getattr(exc, "retryable", False) is True
+                if attempt >= MAX_ATTEMPTS or not (compatibility or transient):
+                    elapsed = perf_counter() - started
+                    emit(f"AI_CALL_FAILURE {context} elapsed={elapsed:.3f}s attempts={attempt} "
+                         f"error={_identifier(type(exc).__name__)}")
+                    raise
+                attempt += 1
+                if compatibility:
+                    compatibility_used = True
+                    attempt_kwargs = dict(attempt_kwargs, compatibility_retry=True)
+                    emit(f"AI_CALL_RETRY {context} attempt={attempt} reason=compatibility")
+                    check_cancel()
+                else:
+                    delay = retry_delay(attempt - 1, getattr(exc, "retry_after", None))
+                    emit(f"AI_CALL_RETRY {context} attempt={attempt} reason=retryable_http "
+                         f"delay={delay:.1f}s")
+                    try:
+                        wait(delay)
+                    except BaseException:
+                        emit(f"AI_CALL_CANCELLED {context} attempts={attempt - 1}")
+                        raise
+                if log_prompt:
+                    log_prompt_lines(context, bound_arguments(args, attempt_kwargs),
+                                     f" attempt={attempt}")
         elapsed = perf_counter() - started
         emit(f"AI_CALL_END {context} elapsed={elapsed:.3f}s result={_result_summary(result)}"
              + _usage_delta(before))
