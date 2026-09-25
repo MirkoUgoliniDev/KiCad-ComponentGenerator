@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-- Branch: `main` (= `YOLO-SOLUTION`, portato su main il 25/09 sera). Ultimo commit pubblicato: vedi git log (pushato):
+- Branch di lavoro: `FIX`, creato da `main` (8a9d7e3) il 25/09 sera; gli altri branch sono stati cancellati. Ultimo commit pubblicato: vedi git log (pushato):
   correzione di TUTTI gli esiti della verifica avversariale del 25/09 (A-G,
   punti 35-41 e piano «fai tutto»), documentazione @brief imposta dal test,
   blocco dei segnali alla chiusura della finestra (crash vero dimostrato),
@@ -7633,3 +7633,20 @@ ESITO 47: merge di origin/main fatto (albero invariato, verificato), main
 portato avanti a questo branch con push normale. DA ORA si lavora su main;
 YOLO-SOLUTION resta come riferimento. Regola del progetto: commit sul branch
 di default solo se l'utente lo chiede (altrimenti creare un branch).
+
+48. [x] (utente 25/09: «rimuovi tutti i branch e crea nuovo branch FIX da
+    main») FATTI: tutti i branch (locali FIX, PCB-CD, YOLO-SOLUTION,
+    worktree-agent-a9d7ffbb2967037f7, worktree-agent-ac90135ea2beabb34;
+    remoti FIX, FIX-WITH_FREECAD, YOLO-SOLUTION) hanno 0 commit fuori da main.
+    I due worktree .claude/worktrees/agent-* hanno modifiche NON committate
+    (vecchi agenti, base 37f31cb): salvate come patch in
+    scratchpad/branch-backup/ prima di rimuovere i worktree. Worktree senza
+    branch (.kilo, .codex, altro progetto) lasciati. PIANO: rimuovere i due
+    worktree, cancellare i branch locali e remoti, creare FIX da main,
+    pubblicarlo e lavorare su FIX.
+ESITO 48: FATTO. Worktree rimossi (patch salvate in
+scratchpad/branch-backup/). Branch cancellati, con l'ultimo commit per un
+eventuale recupero (tutti contenuti in main): FIX 801dd5f, PCB-CD 2ffc123,
+YOLO-SOLUTION 8a9d7e3, worktree-agent-* 37f31cb; remoti FIX,
+FIX-WITH_FREECAD, YOLO-SOLUTION. Nuovo branch FIX creato da main 8a9d7e3 e
+pubblicato: si lavora su FIX.
