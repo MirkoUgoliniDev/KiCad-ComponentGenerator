@@ -1,8 +1,9 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `99434c5` (pushato):
-  icona dell'archivio degli abbinamenti accettati nella scheda 3D (punto 29).
-  Prima: `7223819` revisione interfaccia (punti 1-27 in fondo al file),
+- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `794c5ed` (pushato):
+  correzioni della verifica con agenti del 25/09 (V1-V9, A1-A7, P1-P3,
+  test) e apertura dei progetti (punto 30, «PIANO IN CORSO (25/09)» in
+  fondo). Prima: `99434c5` icona dell'archivio (punto 29), `7223819` revisione interfaccia (punti 1-27 in fondo al file),
   credito e costo AI del progetto, anteprime con zoom, pin dentro la scheda,
   raccordi impossibili, rigenerazione 3D dopo «Applica». Prima: `3cdea2a`
   (localizzazione completa), `b1ee2c0` (.gitignore), `eb633ea` (difetti).
@@ -11,7 +12,7 @@
   gia' ruotata secondo l'EXIF; punto 28 (motivi dei candidati STEP in
   inglese, solo segnalato); colonna «Stato» troncata nella finestra
   «Ricorda questi modelli KiCad» (domanda fatta, senza risposta).
-- Suite completa (24/09, dopo l'icona dell'archivio): 4036 passati, 3 saltati,
+- Suite completa (25/09, dopo le correzioni della verifica): 4087 passati, 3 saltati,
   2 xfail attesi, 19 sottotest; uscita del processo 0 (controllarla sempre).
 - Difetto 16 CHIUSO (utente, 24/09, scelta «A»): la frase «Tipo SMD di
   proposito» resta anche sui moduli misti half_hole + through_hole, perche'
