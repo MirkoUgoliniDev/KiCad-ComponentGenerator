@@ -205,9 +205,9 @@ per configurazione e valori predefiniti.
 The repository now includes a dedicated KiCad tab with three operations: test
 the generated result in an isolated PCB Editor project, install a portable
 project library, or install a global library. The current full-suite baseline
-(2026-09-25, branch `YOLO-SOLUTION`, commit `3a50491`: interface review,
-project AI cost, zoomable previews, accepted-matches archive, agent-audit
-fixes, front/back naming of the 3D cube, see HANDOFF.md) is 4109 passed, 3 skipped,
+(2026-09-25, branch `YOLO-SOLUTION`, commit `658e161`: Windows MSI installer,
+.pt YOLO models, local YOLO-only pretest, YOLO settings, AGPL-3.0 code license,
+see HANDOFF.md) is 4196 passed, 3 skipped,
 2 expected failures and 19 subtests. The last packaging integration was merge
 commit `692ca95` on `main`. Keep these values aligned with HANDOFF.md.
 
