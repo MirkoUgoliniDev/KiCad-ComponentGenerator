@@ -1,18 +1,15 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `794c5ed` (pushato):
-  correzioni della verifica con agenti del 25/09 (V1-V9, A1-A7, P1-P3,
-  test) e apertura dei progetti (punto 30, «PIANO IN CORSO (25/09)» in
-  fondo). Prima: `99434c5` icona dell'archivio (punto 29), `7223819` revisione interfaccia (punti 1-27 in fondo al file),
+- Branch: `YOLO-SOLUTION`. Ultimo commit pubblicato: `3a50491` (pushato):
+  le 5 decisioni del 25/09 (front/back del cubo 3D con conversione dei
+  progetti, motivi STEP tradotti, colonna Stato, conferme STEP a icona, foto
+  EXIF dritte per l'AI). Prima: `794c5ed` correzioni della verifica con
+  agenti (V1-V9, A1-A7, P1-P3, test) e apertura dei progetti, `99434c5` icona dell'archivio (punto 29), `7223819` revisione interfaccia (punti 1-27 in fondo al file),
   credito e costo AI del progetto, anteprime con zoom, pin dentro la scheda,
   raccordi impossibili, rigenerazione 3D dopo «Applica». Prima: `3cdea2a`
   (localizzazione completa), `b1ee2c0` (.gitignore), `eb633ea` (difetti).
-  Aperti SOLO decisioni dell'utente: nomi front/back contro cubo 3D (serve
-  migrazione), conferme della scelta STEP a icona, invio all'AI della foto
-  gia' ruotata secondo l'EXIF; punto 28 (motivi dei candidati STEP in
-  inglese, solo segnalato); colonna «Stato» troncata nella finestra
-  «Ricorda questi modelli KiCad» (domanda fatta, senza risposta).
-- Suite completa (25/09, dopo le correzioni della verifica): 4087 passati, 3 saltati,
+  Nessuna decisione aperta: le cinque del 25/09 sono state fatte.
+- Suite completa (25/09, dopo le 5 decisioni): 4109 passati, 3 saltati,
   2 xfail attesi, 19 sottotest; uscita del processo 0 (controllarla sempre).
 - Difetto 16 CHIUSO (utente, 24/09, scelta «A»): la frase «Tipo SMD di
   proposito» resta anche sui moduli misti half_hole + through_hole, perche'
