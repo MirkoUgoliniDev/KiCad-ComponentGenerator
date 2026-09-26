@@ -981,6 +981,27 @@ class ModelCandidatesDialog(QDialog):
         preview_grid.addWidget(preview_tools, 0, 0,
                                Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
         preview_tools.raise_()
+        # Anello animato mentre FreeCAD legge il modello o l'anteprima si
+        # ridisegna (utente, 2026-09-26: «qui ci vuole un loader»): lo stesso
+        # anello della finestra di avanzamento, col segno e il colore di
+        # FreeCAD. Sta sopra la scritta di caricamento (lo spazio sotto lo
+        # tiene staccato) e, quando si ridisegna un'immagine gia' mostrata,
+        # sopra l'immagine vecchia finche' arriva la nuova.
+        from .analysis_overlay import TOOLS, AnalysisSpinner
+        self.preview_loader = QWidget(preview_box)
+        self.preview_loader.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        loader_layout = QVBoxLayout(self.preview_loader)
+        loader_layout.setContentsMargins(0, 0, 0, 0)
+        self.preview_spinner = AnalysisSpinner(self.preview_loader)
+        _name, color, glyph = TOOLS["freecad"]
+        self.preview_spinner.set_tool(glyph, color)
+        loader_layout.addWidget(self.preview_spinner, 0, Qt.AlignmentFlag.AlignHCenter)
+        loader_layout.addSpacing(self.preview_label.fontMetrics().lineSpacing() * 4)
+        preview_grid.addWidget(self.preview_loader, 0, 0, Qt.AlignmentFlag.AlignCenter)
+        self.preview_loader.hide()
+        self._loader_timer = QTimer(self)
+        self._loader_timer.setInterval(40)
+        self._loader_timer.timeout.connect(self._advance_loader)
         self._auto_angle = None
         self._auto_angle_path = None
         self.view_button.toggled.connect(self._view_toggled)
@@ -1433,6 +1454,25 @@ class ModelCandidatesDialog(QDialog):
         if getattr(self, '_path', ''):
             self._start_preview()
 
+    def _set_loading(self, active: bool) -> None:
+        """@brief Show or hide the animated ring over the preview.
+
+        @param active True while a preview render is pending.
+        """
+        loader = getattr(self, 'preview_loader', None)
+        if loader is None:
+            return
+        loader.setVisible(active)
+        if active:
+            loader.raise_()
+            self._loader_timer.start()
+        else:
+            self._loader_timer.stop()
+
+    def _advance_loader(self) -> None:
+        self.preview_spinner.angle = (self.preview_spinner.angle + 9) % 360
+        self.preview_spinner.update()
+
     def _start_preview(self, *_):
         self._token += 1
         path = getattr(self, '_path', '')
@@ -1455,10 +1495,12 @@ class ModelCandidatesDialog(QDialog):
         # At most one process per dialog. Changes coalesce to the latest selection.
         if not valid or self._closed:
             self.preview_label.unsetCursor()
+            self._set_loading(False)
             return
         # The kept picture is stale until the new one lands; the busy cursor
-        # over it says so without replacing it.
+        # and the ring over it say so without replacing it.
         self.preview_label.setCursor(Qt.CursorShape.BusyCursor)
+        self._set_loading(True)
         if self._workers:
             return
         # Un angolo scelto e' assoluto, ma il delta del menu 3D si somma anche a
@@ -1482,6 +1524,7 @@ class ModelCandidatesDialog(QDialog):
             self._start_preview()
             return
         self.preview_label.unsetCursor()
+        self._set_loading(False)
         if worker is not None and worker.rotation is None:
             # Angle chosen by the automatic placement for THIS model: shown
             # under the arrows and used as the start of the first manual turn.
@@ -1517,6 +1560,7 @@ class ModelCandidatesDialog(QDialog):
         @param result Qt Accepted or Rejected dialog result.
         """
         self._closed = True
+        self._set_loading(False)
         self._token += 1
         self._index_token += 1
         self._filter_timer.stop()

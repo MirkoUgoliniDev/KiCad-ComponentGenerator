@@ -126,7 +126,10 @@ def test_height_and_text_edits_keep_rectangle_evidence(editor):
     dialog.text_fields["name"].setText("Edited name")
     dialog._text_edited("name")
     expected = deepcopy(before)
-    expected[0].update(height_mm=2., name="Edited name")
+    # Dal 26/09 un'altezza scritta a mano e' una lettura dell'utente, non piu'
+    # una stima: la provenienza lo dice (component_state.mark_height_measured).
+    expected[0].update(height_mm=2., name="Edited name", _height_source="user",
+                       _height_estimated=False)
     assert dialog.get_components() == expected
 
 

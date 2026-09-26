@@ -103,8 +103,8 @@ def test_the_card_button_is_an_eye_that_opens_the_zoomable_preview(window, monke
     source = tmp_path / "board.png"
     Image.new("RGB", (300, 150), "blue").save(source)
     monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a: (str(source), ""))
-    panel.cards["top"]["load"].click()
-    view_button = panel.cards["top"]["view"]
+    panel.add_button.click()
+    view_button = panel.cards["board.png"]["view"]
     name, _, detail = view_button.toolTip().partition("\n")
     assert name == "Anteprima documento" and "zoom" in detail
     opened = []

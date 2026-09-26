@@ -341,12 +341,17 @@ def test_without_a_top_view_the_pretest_asks_for_the_role(window, monkeypatch):
     monkeypatch.setattr(gui.QMessageBox, "information", lambda *a: shown.append(a[2]))
     monkeypatch.setattr(gui.QThread, "start", lambda self: shown.append("started"))
     _pretest_ready(window, monkeypatch)
-    _start_pretest(window, roles={"top.png": "pinout"})
-    assert shown and "Immagine con quote" in shown[0] and "started" not in shown
+    _start_pretest(window, roles={"top.png": ["pinout"]})
+    assert shown and "Foto" in shown[0] and "started" not in shown
     assert "Lunghezza corpo" not in shown[0]
-    # Negativo: la stessa foto con il ruolo di vista dall'alto parte.
+    # Dal 26/09 (ruoli multipli) conta solo il ruolo foto: anche il disegno
+    # quotato dall'alto, senza «Foto», non e' una fotografia da esaminare.
     shown.clear()
-    _start_pretest(window, roles={"top.png": "top"})
+    _start_pretest(window, roles={"top.png": ["top"]})
+    assert shown and "started" not in shown
+    # Negativo: la stessa immagine spuntata anche come foto parte.
+    shown.clear()
+    _start_pretest(window, roles={"top.png": ["top", "hires"]})
     assert shown == ["started"]
     window._on_yolo_pretest_finished()
 

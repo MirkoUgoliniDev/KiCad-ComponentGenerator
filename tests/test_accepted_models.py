@@ -9,6 +9,7 @@ Ogni regola ha il suo caso negativo, costruito perche' differisca per una
 ragione STRUTTURALE (categoria, base di misura, numero di terminali, taglia
 standard vicina), non per una coincidenza numerica.
 """
+from pathlib import Path
 import sqlite3
 
 import pytest
@@ -79,7 +80,9 @@ def test_same_signature_on_another_board_reuses_the_accepted_model(library):
     found = store.find(_body(name="R7", length=0.85, width=1.66), [library])
     assert found is not None
     assert found["path"] == library / R0603
-    assert found["relative_xy_error"] < am.ACCEPTED_MATCH_TOLERANCE
+    # CONTRACT CHANGED 2026-09-26 (punto 84 medio 8): la tolleranza non e' piu'
+    # un 15% relativo fisso ma l'incertezza delle due misure, in mm per lato.
+    assert abs(1.66 - 1.6) <= found["tolerance_mm"] and abs(0.85 - 0.8) <= found["tolerance_mm"]
     assert found["entry"]["model_ref"] == R0603  # relativo alla libreria
 
 
@@ -116,20 +119,22 @@ def test_terminal_counts_must_agree_when_both_are_observed(library):
     assert store.find(_body(**same_body, **_counted(6)), [library]) is None
     found = store.find(_body(**same_body, **_counted(5)), [library])
     assert found is not None and found["terminal_count_checked"] is True
-    # Separazione FRAGILE dichiarata: senza osservazione sulla nuova scheda il
-    # conteggio non si confronta, e il report lo dice.
-    unobserved = store.find(_body(**same_body), [library])
-    assert unobserved is not None and unobserved["terminal_count_checked"] is False
+    # CONTRACT CHANGED 2026-09-26 (punto 84 medio 8): per un integrato lo stesso
+    # corpo esiste con piedinature diverse, quindi senza osservazione sulla
+    # nuova scheda l'archivio non propone nulla (prima proponeva la voce piu'
+    # recente e diceva che il conteggio non era stato confrontato).
+    assert store.find(_body(**same_body), [library]) is None
 
 
 def test_the_latest_acceptance_wins_for_the_same_geometry(library):
     """Una correzione dell'utente (altro modello, stessa firma) prevale."""
+    # Un integrato si riusa solo con il numero di terminali osservato (punto 84).
     store = am.AcceptedModelStore()
-    store.consolidate([_accepted(library, SOT5, name="U1", kind="ic", length=2.9, width=1.6)],
-                      [library])
-    store.consolidate([_accepted(library, SOT6, name="U1", kind="ic", length=2.9, width=1.6)],
-                      [library])
-    found = store.find(_body(kind="ic", length=2.92, width=1.58), [library])
+    store.consolidate([_accepted(library, SOT5, name="U1", kind="ic", length=2.9, width=1.6,
+                                 **_counted(5))], [library])
+    store.consolidate([_accepted(library, SOT6, name="U1", kind="ic", length=2.9, width=1.6,
+                                 **_counted(5))], [library])
+    found = store.find(_body(kind="ic", length=2.92, width=1.58, **_counted(5)), [library])
     assert found["path"] == library / SOT6
     assert found["alternatives"] == 1
 
@@ -137,9 +142,11 @@ def test_the_latest_acceptance_wins_for_the_same_geometry(library):
 def test_a_clearly_closer_entry_beats_a_more_recent_one(library):
     """Negativo della regola precedente: la recenza decide solo a parita' di misura."""
     store = am.AcceptedModelStore()
-    store.consolidate([_accepted(library, SOT5, kind="ic", length=3.0, width=1.6)], [library])
-    store.consolidate([_accepted(library, SOT6, kind="ic", length=3.3, width=1.6)], [library])
-    found = store.find(_body(kind="ic", length=3.0, width=1.6), [library])
+    store.consolidate([_accepted(library, SOT5, kind="ic", length=3.0, width=1.6,
+                                 **_counted(5))], [library])
+    store.consolidate([_accepted(library, SOT6, kind="ic", length=3.3, width=1.6,
+                                 **_counted(5))], [library])
+    found = store.find(_body(kind="ic", length=3.0, width=1.6, **_counted(5)), [library])
     assert found["path"] == library / SOT5
 
 
@@ -249,23 +256,37 @@ def test_only_an_explicit_angle_is_stored(library):
 
 @pytest.fixture
 def no_measurement(monkeypatch):
-    """Il riuso deve saltare la misura: se viene chiamata, il test fallisce."""
-    def refuse(*args, **kwargs):
-        raise AssertionError("misura dei candidati chiamata nonostante l'archivio")
-    monkeypatch.setattr(km, "model_sizes", refuse)
-    monkeypatch.setattr(km, "footprint_sizes", refuse)
+    """Misura finta dei modelli della libreria di prova.
+
+    CONTRACT CHANGED 2026-09-26 (punto 84 medio 8, decisione dell'utente): la
+    ricerca in libreria gira SEMPRE, anche con una voce dell'archivio, perche'
+    vinca il modello piu' vicino alla misura. Prima questo fixture rifiutava
+    ogni misura; ora la fornisce e registra che e' avvenuta.
+    """
+    sizes = {"R_0603_1608Metric": [1.6, 0.8, 0.45], "R_0805_2012Metric": [2.0, 1.25, 0.5],
+             "SOT-23-5": [2.9, 1.6, 1.1], "SOT-23-6": [2.9, 1.6, 1.1]}
+    measured = []
+
+    def measure(paths, *args, **kwargs):
+        measured.extend(paths)
+        return {str(p): {"body": sizes[Path(p).stem], "total": sizes[Path(p).stem]}
+                for p in paths if Path(p).stem in sizes}
+    monkeypatch.setattr(km, "model_sizes", measure)
+    monkeypatch.setattr(km, "footprint_sizes", lambda *a, **k: {})
+    return measured
 
 
-def test_model_candidates_uses_the_archive_before_any_measurement(library, no_measurement):
+def test_model_candidates_proposes_the_archive_model_and_still_searches(library, no_measurement):
     am.AcceptedModelStore().consolidate([_accepted(library, R0603)], [library])
     notes = []
     report = km.model_candidates(_body(length=1.62, width=0.79), library=library,
                                  log=notes.append)
     assert report["status"] == "library_matched"
     assert report["selected_path"] == str(library / R0603)
-    assert [c["status"] for c in report["candidates"]] == ["library_matched"]
+    assert report["candidates"][0]["status"] == "library_matched"
     assert report["candidates"][0]["reasons"][0].startswith("Gia' accettato da te")
-    assert any("misura dei candidati saltata" in note for note in notes)
+    assert no_measurement, "la ricerca in libreria deve girare comunque"
+    assert any("ricerca in libreria" in note for note in notes)
 
 
 def test_an_explicit_choice_on_this_board_beats_the_archive(library, no_measurement):

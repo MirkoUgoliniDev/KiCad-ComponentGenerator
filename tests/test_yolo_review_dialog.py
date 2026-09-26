@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import QApplication
 from kicadgen.gui.theme import BASE
 from kicadgen.gui.yolo_review_dialog import (ADDED_COLOR, BOARD_BACKDROP_COLOR,
                                              BOARD_BORDER_COLOR, HANDLE_RADIUS_PX,
-                                             MIN_BOX_PX, MIN_NEW_BOX, MOVE_HANDLE,
+                                             MIN_BOX_PX, MIN_NEW_BOX_MM, MOVE_HANDLE,
                                              PHOTO_DIMMED, PHOTO_DIMMED_OPACITY,
                                              PHOTO_FULL, PHOTO_HIDDEN, PHOTO_STATES,
                                              SELECTED_COLOR, SMALL_BOX_PX, STRONG_COLOR,
@@ -522,7 +522,7 @@ def test_a_click_that_slipped_is_not_a_component(dialog):
     view = widget.view
     frame = view._frame()
     start = QPointF(frame.x() + frame.width() * .5, frame.y() + frame.height() * .9)
-    tiny = MIN_NEW_BOX / 3
+    tiny = MIN_NEW_BOX_MM / LENGTH_MM / 3
     end = QPointF(start.x() + frame.width() * tiny, start.y() + frame.height() * tiny)
     view._drag_from, view._drag_to = start, start
     view.mouseReleaseEvent(_Mouse(end))
@@ -856,7 +856,7 @@ def test_a_click_that_slipped_is_still_not_a_component_without_the_photograph(ph
     before = len(widget.kept())
     frame = view._frame()
     start = QPointF(frame.x() + frame.width() * .5, frame.y() + frame.height() * .9)
-    tiny = MIN_NEW_BOX / 3
+    tiny = MIN_NEW_BOX_MM / LENGTH_MM / 3
     end = QPointF(start.x() + frame.width() * tiny, start.y() + frame.height() * tiny)
     view._drag_from, view._drag_to = start, start
     view.mouseReleaseEvent(_Mouse(end))

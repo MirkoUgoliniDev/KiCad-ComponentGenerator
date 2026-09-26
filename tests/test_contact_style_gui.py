@@ -5,7 +5,9 @@ bordo, foro passante chiuso, oppure entrambi) e deve poterlo correggere e
 rigenerare SENZA pagare un'altra analisi AI. Qui si verifica che la scelta:
 compaia nel selettore del tab 3D con le tre voci e il suggerimento per
 riconoscerle (la tabella lati e' stata tolta il 2026-09-26); arrivi al `CastellatedSide` consegnato alla generazione;
-venga letta dall'estrazione quando c'e' e lasci il predefinito quando manca;
+venga letta dall'estrazione quando c'e' e, quando la foto non la mostra, venga
+CHIESTA all'utente (dal 26/09: niente predefinito indovinato, e chi annulla non
+genera);
 sopravviva ai punti in cui i lati vengono serializzati e riletti; sia
 raggiungibile dal tab 3D; funzioni sia con il generatore
 che conosce gia' il campo sia con quello che non lo conosce ancora.
@@ -151,13 +153,14 @@ def side(edge, first_pin, **extra):
 def test_the_3d_selector_offers_the_three_styles_with_the_telling_apart_tooltip(window):
     castellated(window)
     combo = window.combo_contact_style_3d
-    # Tre scelte piu' la voce informativa «diverso per lato», spenta.
+    # Tre scelte piu' le voci informative «diverso per lato» e «da scegliere», spente.
     assert [combo.itemData(i) for i in range(combo.count())] == [
-        "half_hole", "through_hole", "half_and_through", None]
+        "half_hole", "through_hole", "half_and_through", None, ""]
     assert [combo.itemText(i) for i in range(3)] == [
         window.i18n.text(gui.CONTACT_STYLE_LABELS[s])
         for s in ("half_hole", "through_hole", "half_and_through")]
     assert not combo.model().item(3).isEnabled()
+    assert not combo.model().item(4).isEnabled()
     # Il suggerimento deve dire COME distinguerli, non solo elencarli: il
     # bordo che taglia il foro contro il materiale fra foro e bordo.
     assert "tagliato dal bordo" in combo.toolTip()
@@ -218,23 +221,103 @@ def test_extraction_declaring_the_style_sets_the_combo(window):
     assert window._table_contact_styles() == ["through_hole", "half_hole"]
 
 
-def test_extraction_without_the_key_keeps_the_default(window, monkeypatch):
+def ask_answering(window, monkeypatch, answer):
+    """@brief Sostituisce la domanda con una risposta fissa e ne registra le chiamate."""
+    asked = []
+    monkeypatch.setattr(window, "_ask_contact_style",
+                        lambda sides: asked.append([s["edge"] for s in sides]) or answer)
+    return asked
+
+
+@pytest.mark.parametrize("unobserved", [None, "absent"])
+def test_extraction_without_the_style_asks_the_user(window, monkeypatch, unobserved):
+    """@brief Positivo: stile non osservato (None o chiave assente) -> domanda, risposta applicata."""
+    logs = []
+    monkeypatch.setattr(window, "_append_log", logs.append)
+    asked = ask_answering(window, monkeypatch, "through_hole")
+    extra = {} if unobserved == "absent" else {"contact_style": None}
+    window._apply_extracted_castellated(extracted([
+        side("left", 1, contact_style="half_hole"), side("right", 4, **extra)]))
+    assert asked == [["right"]], "si chiede una volta e solo per il lato non osservato"
+    assert window._table_contact_styles() == ["half_hole", "through_hole"]
+    assert any("scelto dall'utente" in line for line in logs)
+    assert not any("predefinito" in line for line in logs)
+
+
+def test_a_declared_style_is_never_asked(window, monkeypatch):
+    """@brief Negativo: con lo stile letto dalla foto non si disturba l'utente."""
+    asked = ask_answering(window, monkeypatch, "through_hole")
+    window._apply_extracted_castellated(extracted([
+        side("left", 1, contact_style="half_hole"), side("right", 4, contact_style="half_hole")]))
+    assert asked == [] and window._table_contact_styles() == ["half_hole", "half_hole"]
+
+
+def test_cancelling_the_question_blocks_the_generation(window, monkeypatch):
+    """@brief Chi annulla non genera con uno stile indovinato; lo sceglie dopo nel tab 3D."""
+    ask_answering(window, monkeypatch, None)
     logs = []
     monkeypatch.setattr(window, "_append_log", logs.append)
     window._apply_extracted_castellated(extracted([side("left", 1), side("right", 4)]))
-    assert window._table_contact_styles() == ["half_and_through", "half_and_through"]
-    # Il log dice che e' un predefinito, non una lettura della scheda.
-    assert any("predefinito" in line for line in logs)
-    assert not any("sconosciuto" in line for line in logs)
+    assert window._table_contact_styles() == [None, None]
+    assert window.combo_contact_style_3d.currentData() == ""
+    started = []
+    monkeypatch.setattr(gui.GenerateWorker, "start", lambda self: started.append(self))
+    window.group_3d.setChecked(False)
+    window._generate()
+    assert started == []
+    assert any("tipo di contatto non indicato" in line for line in logs)
+    # Scelto nel tab 3D, la stessa generazione parte.
+    choose(window.combo_contact_style_3d, "half_hole")
+    window._generate()
+    assert len(started) == 1
+    assert [s.contact_style for s in started[0].params.sides] == ["half_hole", "half_hole"]
+
+
+def test_automatic_generation_is_blocked_with_an_explanation(window, monkeypatch):
+    ask_answering(window, monkeypatch, None)
+    blocked = []
+    monkeypatch.setattr(window, "_automatic_generation_blocked", blocked.append)
+    window._apply_extracted_castellated(extracted([side("left", 1), side("right", 4)]))
+    window._generate(automatic=True)
+    assert blocked and "tipo di contatto non indicato" in blocked[0]
 
 
 def test_unknown_declared_style_is_not_guessed_into_another_one(window, monkeypatch):
     logs = []
     monkeypatch.setattr(window, "_append_log", logs.append)
+    asked = ask_answering(window, monkeypatch, "half_hole")
     window._apply_extracted_castellated(extracted([
-        side("left", 1, contact_style="castellated_via"), side("right", 4)]))
-    assert window._table_contact_styles() == ["half_and_through", "half_and_through"]
+        side("left", 1, contact_style="castellated_via"),
+        side("right", 4, contact_style="through_hole")]))
+    assert asked == [["left"]]
+    assert window._table_contact_styles() == ["half_hole", "through_hole"]
     assert any("sconosciuto" in line and "castellated_via" in line for line in logs)
+
+
+def test_the_question_offers_the_three_styles_and_preselects_none(window, monkeypatch):
+    """@brief La finestra vera: tre scelte con le etichette di sempre, OK spento finche' non si sceglie."""
+    from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QRadioButton
+    seen = {}
+
+    def inspect(dialog):
+        radios = dialog.findChildren(QRadioButton)
+        seen["labels"] = [r.text() for r in radios]
+        seen["checked"] = [r.isChecked() for r in radios]
+        box = dialog.findChildren(QDialogButtonBox)[0]
+        seen["ok_before"] = box.button(QDialogButtonBox.StandardButton.Ok).isEnabled()
+        radios[1].click()
+        seen["ok_after"] = box.button(QDialogButtonBox.StandardButton.Ok).isEnabled()
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(QDialog, "exec", inspect)
+    answer = gui.MainWindow._ask_contact_style(window, [side("left", 1)])
+    assert seen["labels"] == [window.i18n.text(gui.CONTACT_STYLE_LABELS[s])
+                              for s in gui.contact_styles()]
+    assert seen["checked"] == [False, False, False]
+    assert seen["ok_before"] is False and seen["ok_after"] is True
+    assert answer == gui.contact_styles()[1]
+    monkeypatch.setattr(QDialog, "exec", lambda dialog: QDialog.DialogCode.Rejected)
+    assert gui.MainWindow._ask_contact_style(window, [side("left", 1)]) is None
 
 
 # ── Serializzazione e ripristino ───────────────────────────────────────
@@ -253,15 +336,25 @@ def test_relaunch_base_round_trips_the_style_through_the_table(window):
     assert window._table_contact_styles() == ["half_hole", "through_hole"]
 
 
-def test_old_saved_sides_without_the_key_load_with_the_default(window):
+def test_old_saved_sides_without_the_key_load_with_the_style_they_were_generated_with(window):
+    """@brief Un progetto salvato prima della chiave e' stato generato con lo stile di allora."""
     castellated(window)
     set_side_style(window, 0, "through_hole")
-    old_record = [side("left", 1), side("right", 4)]
-    assert all("contact_style" not in s for s in old_record)
-    window._apply_extracted_castellated(extracted(old_record))
-    # Il record vecchio sostituisce la tabella: nessun residuo della scelta
-    # precedente, nessuna deduzione, il comportamento di sempre.
+    state = window._project_state()
+    state["sides"] = [side("left", 1), side("right", 4)]
+    assert all("contact_style" not in s for s in state["sides"])
+    window._apply_project_state(state)
     assert window._table_contact_styles() == ["half_and_through", "half_and_through"]
+
+
+def test_a_saved_unknown_style_stays_unknown(window):
+    """@brief Negativo: None salvato (domanda annullata) non diventa un predefinito alla riapertura."""
+    castellated(window)
+    state = window._project_state()
+    state["sides"] = [side("left", 1, contact_style=None), side("right", 4)]
+    window._apply_project_state(state)
+    assert window._table_contact_styles() == [None, "half_and_through"]
+    assert window._missing_contact_style_message()
 
 
 def test_inventory_relaunch_keeps_the_style_corrected_after_the_extraction(window):
@@ -416,8 +509,12 @@ def test_contact_style_items_follow_a_language_switch(window):
     combo = window.combo_contact_style_3d
     for text, data in _items(combo):
         source = (gui.CONTACT_STYLE_MIXED_LABEL if data is None
+                  else gui.CONTACT_STYLE_UNKNOWN_LABEL if data == ""
                   else gui.CONTACT_STYLE_LABELS[data])
-        assert text == DEFAULT_TRANSLATIONS["ui:" + source]["en"], (text, data)
+        assert text == window.i18n.text(source), (text, data)
+        if data != "":
+            # «Da scegliere» e' nuova (26/09): la sua traduzione arriva con il catalogo.
+            assert text == DEFAULT_TRANSLATIONS["ui:" + source]["en"], (text, data)
     # Lati diversi: il selettore mostra la voce «mista», tradotta.
     assert combo.currentData() is None
 

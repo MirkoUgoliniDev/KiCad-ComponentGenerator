@@ -21,10 +21,15 @@ from PyQt6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QDialog,
 
 from .review_tools import (ZOOM_STEP, InfoPopup, asset_icon, give_combos_their_keys,
                            set_tool_texts, tool_button, toolbar_divider)
+from ..services.photo_yolo import awaiting_user_keep
 
-#: Sotto questa frazione del lato il rettangolo tracciato e' un clic andato
-#: storto, non un corpo: un componente grande come un pixel non esiste.
-MIN_NEW_BOX = 0.004
+#: Lato minimo, in mm SULLA SCHEDA, di un riquadro tracciato a mano: sotto
+#: non c'e' un corpo montato possibile (il chip piu' piccolo in commercio,
+#: 008004, misura 0.25 x 0.125 mm). E' in millimetri e non in frazione della
+#: foto: la frazione fissa (0.004) su una scheda da oltre 125 mm impediva di
+#: tracciare il lato corto di uno 0402 (0.5 mm). Il tremolio della mano lo
+#: scarta gia' la distanza di trascinamento di Qt, in pixel dello schermo.
+MIN_NEW_BOX_MM = 0.1
 
 #: Semilato, in pixel della vista, delle maniglie di ridimensionamento e
 #: della zona in cui il puntatore le "prende". Piu' piccolo e' impreciso da
@@ -89,6 +94,11 @@ STRONG_COLOR = "#a6e3a1"
 WEAK_COLOR = "#f9e2af"
 ADDED_COLOR = "#89b4fa"
 SELECTED_COLOR = "#f38ba8"
+#: Proposte sotto la soglia operativa (`_yolo_low_confidence`): mostrate ma
+#: NON tenute finche' l'utente non le tiene (photo_yolo.awaiting_user_keep).
+#: Tinta propria, oltre al tratteggio, perche' la decisione qui e' opposta a
+#: quella delle altre: sulle altre si toglie, su queste si aggiunge.
+LOW_CONFIDENCE_COLOR = "#cba6f7"
 
 #: Stati dello sfondo della vista, nell'ordine in cui il pulsante li
 #: attraversa: fotografia intera, attenuata, tolta. Stessi identificatori e
@@ -116,6 +126,12 @@ INFO_INTRO = (
     "elimina gli altri, aggiungi quelli che mancano. I tratteggiati sono le proposte "
     "su cui non si e' fidato: ci sono perche' una confidenza bassa non e' prova di "
     "assenza.")
+
+#: Secondo paragrafo del popup: le proposte a bassa confidenza sono opt-in.
+INFO_LOW_CONFIDENCE = (
+    "Le proposte puntinate sono sotto la soglia di confidenza del rilevatore: le vedi, "
+    "ma restano escluse e non vanno al modello a pagamento finché non le tieni (T). "
+    "Spostarne o ridimensionarne una vale come tenerla.")
 
 #: Opacita' della fotografia attenuata. La scheda resta riconoscibile -- e
 #: capire su QUALE corpo poggia un riquadro e' esattamente cio' che si sta
@@ -169,6 +185,8 @@ def _origin_color(proposal):
     """@brief Colore di un riquadro secondo la sua provenienza."""
     if proposal.get("_yolo_origin") == "user_added":
         return ADDED_COLOR
+    if proposal.get("_yolo_low_confidence"):
+        return LOW_CONFIDENCE_COLOR
     return WEAK_COLOR if proposal.get("_yolo_review_only") else STRONG_COLOR
 
 
@@ -184,7 +202,11 @@ def box_pen(proposal, chosen=False):
     """
     pen = QPen(QColor(SELECTED_COLOR if chosen else _origin_color(proposal)),
                2.5 if chosen else 1.4)
-    if proposal.get("_yolo_review_only"):
+    if awaiting_user_keep(proposal):
+        # Non tenuta: puntinata, piu' rada del tratteggio delle deboli, cosi'
+        # si distingue anche senza distinguere i colori.
+        pen.setStyle(Qt.PenStyle.DotLine)
+    elif proposal.get("_yolo_review_only"):
         pen.setStyle(Qt.PenStyle.DashLine)
     return pen
 
@@ -239,6 +261,10 @@ class BoardView(QWidget):
         # 2026-09-24: il filtro filtra anche la foto). Non si disegnano e non
         # si scelgono; restano nei dati, che il filtro non tocca mai.
         self.hidden = set()
+        # Quote della scheda (lungo X, lungo Y) in mm, per il lato minimo di
+        # un riquadro tracciato (MIN_NEW_BOX_MM). None: nessun minimo in mm,
+        # resta solo la distanza di trascinamento.
+        self.board_mm = None
         self.setMinimumSize(480, 320)
         self.setMouseTracking(True)
 
@@ -616,6 +642,19 @@ class BoardView(QWidget):
             return
         self._pan_press = (position, QPointF(self._pan), event.button(), False)
 
+    def large_enough(self, box):
+        """@brief Tell whether a drawn box can be a mounted body, in millimetres on the board.
+
+        @param box Normalized (x0, y0, x1, y1).
+        @return True when both sides reach MIN_NEW_BOX_MM on the board (or
+            when the board size is unknown, board_mm None).
+        """
+        if self.board_mm is None:
+            return box[2] > box[0] and box[3] > box[1]
+        length, width = self.board_mm
+        return ((box[2] - box[0]) * length >= MIN_NEW_BOX_MM
+                and (box[3] - box[1]) * width >= MIN_NEW_BOX_MM)
+
     def box_at(self, position):
         """@brief Il riquadro sotto il punto: fra quelli che lo contengono, il piu' piccolo.
 
@@ -712,10 +751,10 @@ class BoardView(QWidget):
         # Un tremolio della mano non e' un trascinamento: sotto la distanza
         # che Qt usa per iniziare un trascinamento (la stessa dello
         # spostamento della vista) e' un clic, a qualunque ingrandimento.
-        # Prima contava solo MIN_NEW_BOX, relativo alla foto: al 100% un
+        # Prima contava solo un minimo relativo alla foto: al 100% un
         # tremolio di pochi pixel creava un riquadro invece di scegliere.
         dragged = (end - start).manhattanLength() >= QApplication.startDragDistance()
-        if dragged and box[2] - box[0] >= MIN_NEW_BOX and box[3] - box[1] >= MIN_NEW_BOX:
+        if dragged and self.large_enough(box):
             self.box_added.emit(box)
             return
         # Con Disegna un clic fermo SCEGLIE (o toglie la scelta nel vuoto):
@@ -751,6 +790,10 @@ class YoloReviewDialog(QDialog):
         firma, per chi gia' le passa.
     @note Annullare significa non procedere: chi chiama non deve pagare la
         chiamata di riconciliazione con proposte che non sono state approvate.
+    @note Proposte a bassa confidenza (`_yolo_low_confidence`, utente 26/09):
+        disegnate puntinate con LOW_CONFIDENCE_COLOR ed etichettate «bassa
+        confidenza», partono NON tenute e `kept()` le esclude finche' l'utente
+        non le tiene (Tieni, T) o non le ritocca (mark_manual).
     @note La fotografia puo' farsi da parte (`photo_state()`,
         `set_photo_state()`, `cycle_photo_state()`): su una scheda affollata i
         corpi piccoli sono illeggibili sopra la foto, e qui la leggibilita'
@@ -759,7 +802,8 @@ class YoloReviewDialog(QDialog):
         riparte da PHOTO_FULL, perche' la fotografia e' il riferimento da cui
         la revisione comincia.
     @note Barra di icone in alto (scelta dell'utente del 2026-09-24): strumenti
-        Seleziona (V) e Disegna (R), Elimina (Canc), zoom (+, -, F, rotella),
+        Seleziona (V) e Disegna (R), Elimina (Canc), Tieni (T, solo per le
+        proposte a bassa confidenza), zoom (+, -, F, rotella),
         foto (P) e le istruzioni nel popup dell'icona «i». Con Seleziona un
         clic nel vuoto toglie la scelta e un trascinamento nel vuoto sposta la
         vista; Esc annulla il gesto, poi lo strumento, poi la scelta, e non
@@ -781,6 +825,9 @@ class YoloReviewDialog(QDialog):
         self.proposals = [dict(p) for p in proposals]
         self._strong = sum(1 for p in self.proposals if not p.get("_yolo_review_only"))
         self._weak = len(self.proposals) - self._strong
+        # Proposte sotto soglia da tenere a mano (photo_yolo.awaiting_user_keep):
+        # contate a parte, perche' qui l'azione di chi guarda e' tenerle.
+        self._low = sum(1 for p in self.proposals if p.get("_yolo_low_confidence"))
 
         pixmap = QPixmap()
         if photo_png:
@@ -788,6 +835,7 @@ class YoloReviewDialog(QDialog):
             image.loadFromData(bytes(photo_png))
             pixmap = QPixmap.fromImage(image)
         self.view = BoardView(pixmap, self.proposals)
+        self.view.board_mm = (self.length_mm, self.width_mm)
         self.view.selection_changed.connect(self._select_row)
         self.view.box_added.connect(self._add_box)
         self.view.box_edited.connect(self._box_edited)
@@ -818,6 +866,15 @@ class YoloReviewDialog(QDialog):
             "Toglie la proposta scelta: non e' un componente.", tr=tr)
         self.btn_delete.setEnabled(False)
         self.btn_delete.clicked.connect(self._delete_selected)
+        # Tieni: solo per le proposte a bassa confidenza, che partono NON
+        # tenute (utente, 26/09). Stessa icona di Seleziona: e' una scelta,
+        # non un disegno. Riusa un'icona esistente per non aggiungere asset.
+        self.btn_keep = tool_button(
+            "tool-select.svg", "Tieni o lascia la proposta a bassa confidenza scelta", "T",
+            "Le proposte a bassa confidenza (puntinate) partono escluse: tenute, vanno al "
+            "modello come le altre.", checkable=True, tr=tr)
+        self.btn_keep.setEnabled(False)
+        self.btn_keep.clicked.connect(lambda _checked=False: self.toggle_keep())
         self.btn_zoom_out = tool_button("zoom-out.svg", "Zoom indietro", "-", tr=tr)
         self.btn_zoom_out.clicked.connect(lambda: self.view.zoom_at(1 / BUTTON_ZOOM_STEP))
         self.zoom_label = QLabel()
@@ -843,7 +900,8 @@ class YoloReviewDialog(QDialog):
 
         toolbar = QHBoxLayout()
         toolbar.setSpacing(4)
-        for widget in (self.btn_select, self.btn_draw, self.btn_delete, toolbar_divider(),
+        for widget in (self.btn_select, self.btn_draw, self.btn_delete, self.btn_keep,
+                       toolbar_divider(),
                        self.btn_zoom_out, self.zoom_label, self.btn_zoom_in, self.btn_fit,
                        toolbar_divider(), self.photo_button):
             toolbar.addWidget(widget)
@@ -977,6 +1035,7 @@ class YoloReviewDialog(QDialog):
                      "spostarlo, maniglie per ridimensionarlo")),
             ("R", tr("Disegna: trascina sulla foto per aggiungere un corpo")),
             (tr("Canc"), tr("Elimina il riquadro scelto")),
+            ("T", tr("Tieni o lascia la proposta a bassa confidenza scelta")),
             ("Esc", tr("Toglie la scelta (non chiude la finestra)")),
             (tr("Clic nel vuoto"), tr("Toglie la scelta")),
             (tr("Trascina nel vuoto"), tr("Sposta la vista")),
@@ -989,8 +1048,10 @@ class YoloReviewDialog(QDialog):
             "<td style='padding:2px 0'>" + html.escape(text) + "</td></tr>"
             for key, text in rows)
         intro = html.escape(tr(INFO_INTRO))
+        low = html.escape(tr(INFO_LOW_CONFIDENCE))
         return ("<p style='margin:0 0 8px 0'><b>" + html.escape(tr("Come si usa")) + "</b></p>"
-                "<p style='margin:0 0 8px 0'>" + intro + "</p><table>" + table + "</table>")
+                "<p style='margin:0 0 8px 0'>" + intro + "</p>"
+                "<p style='margin:0 0 8px 0'>" + low + "</p><table>" + table + "</table>")
 
     def set_tool(self, tool):
         """@brief Sceglie lo strumento della vista e lo mostra premuto nella barra.
@@ -1007,6 +1068,7 @@ class YoloReviewDialog(QDialog):
             ("V", lambda: self.set_tool(TOOL_SELECT)),
             ("R", lambda: self.set_tool(TOOL_DRAW)),
             (QKeySequence(Qt.Key.Key_Delete), self._delete_selected),
+            ("T", self.toggle_keep),
             ("F", self.view.fit_view),
             ("+", lambda: self.view.zoom_at(BUTTON_ZOOM_STEP)),
             ("=", lambda: self.view.zoom_at(BUTTON_ZOOM_STEP)),
@@ -1109,8 +1171,33 @@ class YoloReviewDialog(QDialog):
         """@brief Proposte sopravvissute alla revisione.
 
         @return Lista di dizionari nello stesso formato del rilevatore.
+        @note Le proposte a bassa confidenza che nessuno ha tenuto
+            (photo_yolo.awaiting_user_keep) NON sono tenute: si vedono, ma
+            sono un'aggiunta da scegliere, non una tara da togliere.
         """
-        return [dict(p) for p in self.proposals]
+        return [dict(p) for p in self.proposals if not awaiting_user_keep(p)]
+
+    def toggle_keep(self, index=None):
+        """@brief Tiene, o lascia di nuovo, una proposta a bassa confidenza.
+
+        @param index Posizione della proposta; None per quella scelta.
+        @return True se la proposta e' ora tenuta, False se lasciata, None se
+            non e' una proposta a bassa confidenza (nulla cambia).
+        @note Tenerla e' la decisione di presenza di chi guarda, come
+            ritoccarla (mark_manual): `_yolo_user_kept` diventa True e
+            `_yolo_review_only` False. Lasciarla riporta entrambi com'erano.
+        """
+        index = self.view.selected if index is None else index
+        if not 0 <= index < len(self.proposals):
+            return None
+        proposal = self.proposals[index]
+        if not proposal.get("_yolo_low_confidence"):
+            return None
+        keep = awaiting_user_keep(proposal)
+        proposal["_yolo_user_kept"] = keep
+        proposal["_yolo_review_only"] = not keep
+        self._refresh()
+        return keep
 
     def _label(self, proposal):
         """@brief Testo della voce in lista: categoria, stato e quote in mm.
@@ -1125,7 +1212,11 @@ class YoloReviewDialog(QDialog):
             state = self._tr("aggiunto a mano")
         else:
             state = f"{confidence:.2f}" if isinstance(confidence, (int, float)) else "?"
-            if proposal.get("_yolo_review_only"):
+            if proposal.get("_yolo_low_confidence"):
+                state += " · " + self._tr("bassa confidenza") + " · " + (
+                    self._tr("non tenuta") if awaiting_user_keep(proposal)
+                    else self._tr("tenuta"))
+            elif proposal.get("_yolo_review_only"):
                 state += " · " + self._tr("debole")
             if proposal.get("_yolo_manual_box"):
                 state += " · " + self._tr("ritoccato")
@@ -1155,8 +1246,21 @@ class YoloReviewDialog(QDialog):
             "Il rilevatore ne ha proposte {total} ({strong} sicure, {weak} deboli). "
             "Ne tieni {kept}, più {added} aggiunte a mano.").format(
                 total=self._strong + self._weak, strong=self._strong, weak=self._weak,
-                kept=len(self.proposals) - added, added=added))
+                kept=len(self.kept()) - added, added=added))
+        if self._low:
+            waiting = sum(1 for p in self.proposals if awaiting_user_keep(p))
+            self.summary.setText(self.summary.text() + " " + self._tr(
+                "Di {low} a bassa confidenza ne tieni {low_kept}: le altre non vanno "
+                "al modello.").format(
+                    low=sum(1 for p in self.proposals if p.get("_yolo_low_confidence")),
+                    low_kept=sum(1 for p in self.proposals if p.get("_yolo_low_confidence"))
+                    - waiting))
         self.btn_delete.setEnabled(0 <= current < len(self.proposals))
+        chosen = self.proposals[current] if 0 <= current < len(self.proposals) else {}
+        with QSignalBlocker(self.btn_keep):
+            self.btn_keep.setEnabled(bool(chosen.get("_yolo_low_confidence")))
+            self.btn_keep.setChecked(bool(chosen.get("_yolo_low_confidence"))
+                                     and not awaiting_user_keep(chosen))
         self.view.update()
 
     def _select_row(self, index):
@@ -1271,6 +1375,10 @@ class YoloReviewDialog(QDialog):
             if "_yolo_origin" in proposal and "_yolo_origin_before_manual" not in proposal:
                 proposal["_yolo_origin_before_manual"] = proposal["_yolo_origin"]
             proposal["_yolo_review_only"] = False
+        # Stessa regola per le proposte a bassa confidenza: ritoccarla e'
+        # guardarla, quindi e' tenuta (photo_yolo.awaiting_user_keep).
+        if proposal.get("_yolo_low_confidence"):
+            proposal["_yolo_user_kept"] = True
 
     def _box_edited(self, index, handle):
         """@brief Un riquadro esistente e' stato spostato o ridimensionato.

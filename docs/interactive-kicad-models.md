@@ -1,8 +1,8 @@
 # Revisione interattiva dei modelli KiCad
 
 Il percorso `YOLO locale + verifica AI` usa il localizzatore ONNX locale, poi
-una richiesta fotografica globale con foto completa, overlay numerato, tre
-strisce contestuali e JSON dei candidati. L'analisi iniziale dei documenti per
+una richiesta fotografica globale con foto completa, overlay numerato, i
+dettagli ingranditi calcolati dalle quote della scheda e JSON dei candidati. L'analisi iniziale dei documenti per
 quote/pinout resta separata. Non ci sono ulteriori chiamate automatiche per
 i terminali in questa modalita'. Il default AI e' `anthropic/claude-opus-5`.
 

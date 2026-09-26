@@ -93,3 +93,20 @@ def test_a_reopened_project_finds_the_fields_matching_its_saved_photo(window):  
     window._photo_png, window._photo_body_fields = None, None
     window._restore_saved_photo()
     assert window._photo_body_fields is None
+
+
+def test_the_3d_components_carry_the_scale_of_the_calibrated_photo(window):  # noqa: F811
+    """@brief Il 3D ricava l'incertezza in mm dalla scala della foto, non da un ripiego."""
+    _board_then_matrix_type(window)
+    window._photo_png, window._photo_body_fields = _png(633, 254), "cast"
+    window._photo_rows = [dict(name="U1", x_mm=0, y_mm=0, length_mm=5, width_mm=5, height_mm=1)]
+    boxes = window._components_from_table()
+    assert boxes[0].match_evidence["photo_scale_px_per_mm"] == pytest.approx(633 / 63.3)
+
+
+def test_without_a_calibrated_photo_no_scale_is_invented(window):  # noqa: F811
+    """@brief Negativo: senza foto calibrata nessuna scala; il 3D usa il suo ripiego dichiarato."""
+    window._photo_png = None
+    window._photo_rows = [dict(name="U1", x_mm=0, y_mm=0, length_mm=5, width_mm=5, height_mm=1)]
+    boxes = window._components_from_table()
+    assert "photo_scale_px_per_mm" not in boxes[0].match_evidence

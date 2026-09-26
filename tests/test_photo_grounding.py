@@ -30,6 +30,26 @@ def forbid_network(monkeypatch):
     monkeypatch.setattr(openrouter.urllib.request, "urlopen", forbidden)
 
 
+def _legacy_three_strips(length_mm, width_mm, image_size_px=None):
+    """The three overlapping vertical strips these pipeline tests were scripted for."""
+    return [((max(0., col/3 - .08), 0., min(1., (col+1)/3 + .08), 1.),
+             (col/3, 0., (col+1)/3, 1.)) for col in range(3)]
+
+
+@pytest.fixture(autouse=True)
+def three_detail_views(monkeypatch):
+    """Pin the detail grid to three vertical strips for the pipeline tests.
+
+    Contratto aggiornato (26/09): la griglia dei dettagli si calcola dalle
+    quote in mm (grounding.detail_grid, provata in
+    tests/test_photo_detection_generality.py). Questi test verificano altro --
+    cache, errori per vista, proprieta' dei rilevamenti, ordine delle chiamate
+    -- e sono scritti per una vista completa piu' tre dettagli: fissare qui la
+    griglia tiene quel contratto invariato senza legarlo alla griglia vera.
+    """
+    monkeypatch.setattr(grounding, "detail_grid", _legacy_three_strips)
+
+
 @pytest.fixture
 def photo():
     # Different pixels in each third prevent accidental cache-key collisions
@@ -172,15 +192,17 @@ def test_full_view_board_edges_and_just_inside_tile_margin_are_allowed():
 
 
 def test_regions_match_actual_pixel_slices_and_partition_ownership(photo):
-    regions = list(grounding.grounding_regions(photo))
+    regions = list(grounding.grounding_regions(photo, 40, 20))
     assert len(regions) == 4
-    assert regions[0][1:3] == (FULL, (0., 1.))
+    assert regions[0][1:3] == (FULL, FULL)
     assert regions[0][3] is photo
     for i, (_, region, ownership, crop) in enumerate(regions[1:]):
-        assert ownership == (i/3, (i+1)/3)
+        assert ownership == (i/3, 0., (i+1)/3, 1.)
         left, right = round(region[0]*301), round(region[2]*301)
-        assert np.array_equal(crop, photo[:, left:right])
-        assert region[0] <= ownership[0] < ownership[1] <= region[2]
+        top, bottom = round(region[1]*90), round(region[3]*90)
+        assert np.array_equal(crop, photo[top:bottom, left:right])
+        assert region[0] <= ownership[0] < ownership[2] <= region[2]
+        assert region[1] <= ownership[1] < ownership[3] <= region[3]
     assert regions[1][1][2] > regions[2][1][0]
     assert regions[2][1][2] > regions[3][1][0]
 
@@ -188,8 +210,8 @@ def test_regions_match_actual_pixel_slices_and_partition_ownership(photo):
 def test_tile_ownership_is_half_open_without_merging_to_hide_duplicates(monkeypatch, photo):
     # Every view reports the same packages. Boundaries are exactly representable
     # native centers here; the ownership stage alone must assign one copy each.
-    monkeypatch.setattr(grounding, "grounding_regions", lambda image: iter([
-        ("left", FULL, (0, .5), image), ("right", FULL, (.5, 1), image)]))
+    monkeypatch.setattr(grounding, "grounding_regions", lambda image, *size: iter([
+        ("left", FULL, (0, 0, .5, 1), image), ("right", FULL, (.5, 0, 1, 1), image)]))
     entries = [native([100, 190, 200, 210], label="left"),
                native([100, 490, 200, 510], label="boundary"),
                native([100, 790, 200, 810], label="right")]
@@ -1032,14 +1054,18 @@ def test_containment_merge_does_not_absorb_small_or_adjacent_parts(other):
 
 def test_grounded_path_enables_containment_only_for_cross_view_merge(monkeypatch, photo):
     real_merge = inventory.merge_components
-    flags = []
-    def capture(groups, log, containment=False):
+    flags, sizes = [], []
+    def capture(groups, log, containment=False, image_px=None):
         flags.append(containment)
-        return real_merge(groups, log, containment=containment)
+        sizes.append(image_px)
+        return real_merge(groups, log, containment=containment, image_px=image_px)
     monkeypatch.setattr(inventory, "merge_components", capture)
     call, _ = api_script({"components": [native()]}, *([{"components": []}]*3), {"components": [vote()]})
     assert len(run_grounding(photo, call)) == 1
     assert flags == [True, False]
+    # The containment merge knows the photo resolution, so duplicates are
+    # judged within the measurement uncertainty (photo_inventory.same_body).
+    assert sizes[0] == (photo.shape[1], photo.shape[0])
 
 
 def occupancy(identifier=1, present=True, confidence="high", package="", **updates):
@@ -1064,8 +1090,12 @@ def test_mechanical_envelopes_accept_verified_family_but_keep_unmarked_fixed_geo
         _box=[0, 0, 1, 1], x_mm=999)]}])
     c = result[0]
     assert c["kind"] == "ic_soic" and c["name"] == "Ingombro 1" and c["marking"] == ""
-    assert c["color_hex"] == "#1d1309" and c["height_mm"] == .6
+    # Contratto aggiornato (26/09): l'altezza stimata segue la famiglia
+    # VERIFICATA (ic_soic, 1.75 mm), non quella dell'ipotesi iniziale
+    # (resistor, 0.6); l'altezza scritta dal modello (88) resta ignorata.
+    assert c["color_hex"] == "#1d1309" and c["height_mm"] == 1.75
     assert c["_height_source"] == "coarse_visual_prior_not_measured"
+    assert c["_height_estimated"] is True
     for key in ("_box", "x_mm", "y_mm", "length_mm", "width_mm", "rotation_deg", "_id"):
         assert c[key] == before[key]
     assert original == before and np.array_equal(photo, pixels)

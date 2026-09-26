@@ -131,33 +131,41 @@ modello 3D.</p>
 
 <h2 id="documenti">4. Caricare i documenti</h2>
 <p>Nella scheda <span class="ui">Progetto</span>, il riquadro della documentazione ha
-tre schede, una per ruolo. Dichiarare il ruolo di ogni file dice al modello come
-usarlo:</p>
+una scheda per ogni file caricato. Per ogni file spunti <strong>tutti</strong> i ruoli che
+contiene: un datasheet PDF, per esempio, è spesso pinout, quote e land pattern insieme.
+Dichiarare i ruoli dice al modello come usare ogni file:</p>
 <table>
-  <tr><th>Ruolo</th><th>Che cosa caricare</th></tr>
-  <tr><td class="ui">Pinout / disposizione contatti</td>
-      <td>Il disegno o la tabella con numerazione e posizione dei contatti. Il
-      programma non presume che sia visto dall'alto: se il documento mostra una
-      vista dal basso (bottom view), la specchiatura la fa il codice.</td></tr>
-  <tr><td class="ui">Immagine con quote</td>
-      <td>La vista dall'alto con le quote meccaniche: lunghezza e larghezza del
-      corpo, posizione dei fori, distanze fra le file di contatti.</td></tr>
-  <tr><td class="ui">Foto ad alta risoluzione</td>
-      <td>Una fotografia vera del pezzo, dall'alto: serve a individuare i
-      componenti piccoli. Non un disegno tecnico.</td></tr>
+  <tr><th>Ruolo</th><th>Che cosa contiene</th></tr>
+  <tr><td class="ui">Pinout</td>
+      <td>La numerazione e la posizione dei contatti. Il programma non presume che
+      sia visto dall'alto: il modello dice da che lato è visto il disegno e la
+      specchiatura la fa il codice.</td></tr>
+  <tr><td class="ui">Quote</td>
+      <td>Il disegno quotato visto dall'alto: lunghezza e larghezza del corpo,
+      posizione dei fori, distanze fra le file di contatti.</td></tr>
+  <tr><td class="ui">Foto</td>
+      <td>Una fotografia vera del pezzo, dall'alto: serve a individuare i componenti
+      montati. Solo i file spuntati come foto vanno al riconoscimento dei componenti
+      e alla calibrazione; devono essere immagini, non PDF.</td></tr>
+  <tr><td class="ui">Land pattern</td>
+      <td>L'impronta consigliata dal costruttore: forma e posizione delle piazzole.</td></tr>
+  <tr><td class="ui">Vista laterale</td>
+      <td>Le altezze: del corpo, dei componenti, lo spessore della scheda.</td></tr>
 </table>
 <ul>
-  <li><span class="ui">Carica…</span> copia il file nella cartella <code>docs</code>
-  del progetto (l'originale non viene toccato); poi il pulsante diventa
-  <span class="ui">Sostituisci…</span>. Formati: PDF, PNG, JPG, WEBP, GIF.</li>
-  <li>L'icona dell'occhio apre l'anteprima con lo zoom; l'icona di rimozione toglie
-  la copia locale, che resta recuperabile.</li>
-  <li>Se un documento non esiste, spunta <span class="ui">Non disponibile</span>:
-  il programma sa che manca e non lo aspetta.</li>
+  <li><span class="ui">Aggiungi…</span>, nella scheda <span class="ui">Nuovo documento</span>,
+  copia il file nella cartella <code>docs</code> del progetto (l'originale non viene
+  toccato). Formati: PDF, PNG, JPG, WEBP, GIF. Poi spunta i suoi ruoli: un file senza
+  ruoli blocca l'analisi finché non ne scegli uno o lo rimuovi.</li>
+  <li>Sulla scheda di ogni file: la cartella sostituisce il file mantenendo i ruoli,
+  l'occhio apre l'anteprima con lo zoom, il cestino toglie la copia locale, che resta
+  recuperabile in <code>docs/.history</code>.</li>
+  <li>Un ruolo che nessun file ha è semplicemente «non fornito»: il modello lo sa e
+  non lo sostituisce con altri file.</li>
 </ul>
 <div class="note">Le foto dall'alto vengono calibrate sulle quote della scheda.
-Serve una foto scattata dall'alto, quasi allineata, con il lato lungo in
-orizzontale e il contorno della scheda riconoscibile. Il programma non corregge la
+Serve una foto scattata dall'alto, quasi allineata, con la lunghezza della scheda in
+orizzontale e il contorno della scheda distinguibile dallo sfondo (di qualunque colore). Il programma non corregge la
 prospettiva: una foto inclinata viene rifiutata, e la scheda del ruolo lo
 segnala.</div>
 

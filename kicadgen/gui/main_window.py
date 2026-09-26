@@ -80,8 +80,8 @@ from ..services.photo_yolo import yolo_settings as validate_yolo_settings
 from .component_editor_dialog import ComponentEditorDialog
 from .workflow_bar import WorkflowBar
 from .start_page import StartPage
-from .component_state import (BoundedValue, FlagValue, TextValue,
-                              normalised_side)
+from .component_state import (BoundedValue, FlagValue, MAX_LENGTH_MM, MIN_HEIGHT_MM,
+                              MIN_LENGTH_MM, TextValue, normalised_side)
 from .analysis_overlay import AnalysisOverlay
 from .generation_options_dialog import GenerationOptionsDialog
 from .guided_documents import GuidedDocuments
@@ -201,6 +201,30 @@ CONTACT_STYLE_TOOLTIP = (
 
 #: Voce informativa del selettore «tutti i lati» quando i lati differiscono.
 CONTACT_STYLE_MIXED_LABEL = "Diverso per lato"
+#: Voce informativa del selettore quando almeno un lato non ha un tipo di
+#: contatto: la foto non lo mostrava e nessuno lo ha scelto (2026-09-26).
+CONTACT_STYLE_UNKNOWN_LABEL = "Da scegliere"
+
+#: Spessore di una scheda quando i documenti non lo quotano, in mm: 1.6 mm e'
+#: lo spessore standard delle schede FR-4 (decisione dell'utente, 26/09: per
+#: TUTTE le disposizioni, dichiarato nel log). E' lo stesso valore che il
+#: generatore 3D usa per una scheda a fori passanti senza spessore
+#: (`step_generator`, ramo `pcb_thickness_mm is None`).
+STANDARD_PCB_THICKNESS_MM = 1.6
+#: Colore di una scheda quando l'analisi non lo dichiara e la foto non si puo'
+#: campionare: il solder mask verde standard, il preset «Green» dello stackup
+#: di KiCad (RGB 20, 51, 36). Dichiarato nel log ogni volta che si usa.
+STANDARD_SOLDER_MASK_HEX = "#143324"
+#: Colore del corpo di un componente singolo quando l'analisi non lo dichiara:
+#: il valore iniziale del campo (plastica nera), dichiarato nel log.
+DEFAULT_BODY_COLOR_HEX = "#1a1a1a"
+#: Intervallo PLAUSIBILE del passo e dell'interasse, in mm. Euristica
+#: dichiarata, non un limite: dal passo fine piu' stretto dei package comuni
+#: (0.3 mm) al pollice dei morsetti di potenza (25.4 mm). Fuori da qui il
+#: valore si applica comunque e il log avvisa, perche' e' piu' probabile un
+#: errore di lettura (per esempio pollici letti come mm) che un pezzo reale;
+#: lo renderebbe superfluo un controllo di coerenza con il land pattern.
+PLAUSIBLE_PITCH_MM = (0.3, 25.4)
 
 
 class _ToolTipFollower(QObject):
@@ -465,8 +489,19 @@ def generation_accepts_cancel(generator, params) -> bool:
     return True
 
 
+def _photo_scale_kwargs(generator, scale) -> dict:
+    """@brief `{'photo_scale_px_per_mm': scala}` solo se il generatore chiamato la accetta.
+
+    @param generator Funzione 3D che il worker sta per chiamare (l'involucro o
+        un sostituto di prova con la firma di prima).
+    @param scale Scala della foto calibrata in px/mm, o None.
+    """
+    return ({"photo_scale_px_per_mm": scale}
+            if accepts_keyword(generator, "photo_scale_px_per_mm") else {})
+
+
 def _generate_3d(params, body: Body3DParams, project_dir: Path, fillets, face_texts,
-                 progress=None, model_progress=None, cancel=None):
+                 progress=None, model_progress=None, cancel=None, photo_scale_px_per_mm=None):
     """Genera il 3D con il generatore adatto al tipo di componente.
 
     I due modelli sono diversi in modo sostanziale: il pin header e' un
@@ -480,13 +515,21 @@ def _generate_3d(params, body: Body3DParams, project_dir: Path, fillets, face_te
     e `matching_cancel_kwargs` guardano la firma installata -- perche' questo
     involucro e i generatori evolvono separatamente e una funzionalita'
     accessoria non deve far cadere una generazione buona con un TypeError.
+
+    `photo_scale_px_per_mm` e' la scala della foto calibrata (pixel per mm
+    lungo la lunghezza della scheda), o None senza foto: il generatore ne
+    ricava l'incertezza di misura dei corpi (`cad3d.measurement_uncertainty`).
+    Stessa disciplina: passata solo se la firma installata la dichiara.
     """
     generator = _generation_target(params)
+    scale = ({"photo_scale_px_per_mm": photo_scale_px_per_mm}
+             if accepts_keyword(generator, "photo_scale_px_per_mm") else {})
     return generator(
         params, body, project_dir, fillets=fillets, face_texts=face_texts,
         progress=progress, model_progress=model_progress,
         **cancel_kwargs(generator, cancel),
         **matching_cancel_kwargs(generator, cancel),
+        **scale,
     )
 
 
@@ -748,6 +791,9 @@ class GenerateWorker(QThread):
         #: worker e non sulla finestra: e' la corsa a poter essere fermata, e
         #: una corsa successiva deve nascere con un canale pulito.
         self.cancel = threading.Event()
+        #: Scala della foto calibrata (px/mm) o None: la imposta la finestra
+        #: dopo la costruzione, vedi `MainWindow._photo_scale_px_per_mm`.
+        self.photo_scale_px_per_mm = None
 
     def _cancel_kwargs(self, generator) -> dict:
         """@brief Il canale di rinuncia da passare al generatore, se lo accetta.
@@ -852,6 +898,7 @@ class GenerateWorker(QThread):
                         progress=self._cad_progress,
                         model_progress=self._model_progress,
                         **self._cancel_kwargs(generator),
+                        **_photo_scale_kwargs(generator, self.photo_scale_px_per_mm),
                     )
                 for warning in result.get('warnings', []):
                     self.warning.emit(warning)
@@ -921,6 +968,8 @@ class Cad3DWorker(QThread):
         self.face_texts = face_texts
         #: Vedi GenerateWorker.cancel.
         self.cancel = threading.Event()
+        #: Vedi GenerateWorker.photo_scale_px_per_mm.
+        self.photo_scale_px_per_mm = None
 
     def _cancel_kwargs(self, generator) -> dict:
         """@brief Vedi GenerateWorker._cancel_kwargs: stesso canale, stesso avviso."""
@@ -977,6 +1026,7 @@ class Cad3DWorker(QThread):
                     progress=self._cad_progress,
                     model_progress=self._model_progress,
                     **self._cancel_kwargs(generator),
+                    **_photo_scale_kwargs(generator, self.photo_scale_px_per_mm),
                 )
             for note in result.get("notes", []):
                 self.progress.emit(note)
@@ -987,6 +1037,17 @@ class Cad3DWorker(QThread):
             self.error.emit(str(exc))
         except Exception as exc:  # noqa: BLE001 - riportato in UI, non e' fatale
             self.error.emit(tx("Errore inatteso: {exc}", exc=exc))
+
+
+def _side_size(side: dict, name: str):
+    """A side's hole size for the generator: declared as is, estimated as AssumedSize, or None."""
+    value = side.get(f"{name}_mm")
+    if value is None:
+        return None
+    if side.get(f"{name}_declared") is True:
+        return float(value)
+    from ..generators.castellated_module import AssumedSize
+    return AssumedSize(float(value))
 
 
 def _declared_size(value, reference):
@@ -1113,7 +1174,10 @@ class ExtractWorker(QThread):
         self.verification_prompt = verification_prompt
         self.verification_model = verification_model
         self.terminal_prompt = terminal_prompt
-        self.document_roles = dict(document_roles) if document_roles is not None else None
+        # Copia anche delle liste: dal 26/09 ogni file porta una lista di ruoli.
+        self.document_roles = ({name: (list(roles) if isinstance(roles, (list, tuple)) else roles)
+                                for name, roles in document_roles.items()}
+                               if document_roles is not None else None)
         self.component_family = component_family
         self.photo_detector = photo_detector
         self.yolo_model_path = yolo_model_path
@@ -1230,12 +1294,22 @@ class YoloPretestWorker(ExtractWorker):
         self.photo_cache_dir = cache_dir
 
     def _top_views(self):
-        """Indexes of the declared top views, as the extractor picks them."""
+        """Indexes of the documents declared as a photograph, or [-1] when none is.
+
+        Only a file ticked «Foto» (`document_roles.PHOTO_ROLE`) is a photograph
+        of the board: a dimensioned drawing is never searched for bodies.
+        """
         if self.document_roles is None:
             return None
-        from ..services.document_roles import INVENTORY_ROLES
-        by_role = {self.document_roles.get(path.name): i for i, path in enumerate(self.doc_paths)}
-        return [by_role[role] for role in INVENTORY_ROLES if role in by_role] or [-1]
+        # Stessa scelta dell'estrattore quando c'e' il suo helper: il pretest
+        # deve provare esattamente le foto che l'analisi proverebbe.
+        from ..services import datasheet_extractor
+        indices = getattr(datasheet_extractor, "photo_document_indices", None)
+        if callable(indices):
+            return indices(self.doc_paths, self.document_roles)
+        from ..services.document_roles import PHOTO_ROLE, role_list
+        return [i for i, path in enumerate(self.doc_paths)
+                if PHOTO_ROLE in role_list(self.document_roles.get(path.name))] or [-1]
 
     def run(self) -> None:
         """@brief Detect, let the user review, emit the report (None if cancelled)."""
@@ -1478,6 +1552,10 @@ class MainWindow(QMainWindow):
         # si scrivono nella lingua scelta (utente, 2026-09-24).
         from ..services.messages import set_translator
         set_translator(self.i18n.raw)
+        # Anche i testi propri di Qt (Si'/No/Annulla dei QMessageBox, menu
+        # contestuali) nella lingua scelta, non in inglese (26/09).
+        from .qt_translations import install_qt_translations
+        install_qt_translations(self.i18n.language)
         # Modello scelto solo per questa sessione (datasheet difficile): non
         # viene salvato in config.json e si perde alla chiusura, per scelta.
         self._session_model: str | None = None
@@ -2586,6 +2664,8 @@ class MainWindow(QMainWindow):
         if not language or language == self.i18n.language:
             return
         self.i18n.set_language(language)
+        from .qt_translations import install_qt_translations
+        install_qt_translations(language)
         self._config["language"] = language
         save_config(self._config)
         self._refresh_language_texts()
@@ -3770,9 +3850,10 @@ class MainWindow(QMainWindow):
         fields = []
         for label in ("Lunghezza (mm)", "Larghezza (mm)"):
             field = QDoubleSpinBox()
-            field.setRange(0.5, 1000.0)
+            # Stessi limiti fisici dei campi che ricevono i valori.
+            field.setRange(MIN_LENGTH_MM, MAX_LENGTH_MM)
             field.setDecimals(2)
-            field.setValue(0.5)
+            field.setValue(MIN_LENGTH_MM)
             form.addRow(self.i18n.text(label), field)
             fields.append(field)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
@@ -4085,20 +4166,34 @@ class MainWindow(QMainWindow):
 
         @param doc_paths Selected documents.
         @param document_roles Roles by file name, or None when not assigned.
-        @return Paths of the images declared «Immagine con quote» or «Foto ad
-            alta risoluzione»; with no roles at all, every image (the
-            extractor then picks one heuristically and says so).
+        @return Paths of the images declared as a photograph (role
+            `document_roles.PHOTO_ROLE`, among the roles of the file); with no
+            roles at all, every image (the extractor then picks one
+            heuristically and says so).
         @note Same selection as YoloPretestWorker._top_views and the
             extractor: with roles assigned but none of them a top view the
             extractor stops at «Nessuna vista dall'alto indicata», so the
             window asks for the role BEFORE starting (audit 25/09, B9).
         """
-        from ..services.document_roles import INVENTORY_ROLES
         images = [Path(path) for path in doc_paths
                   if Path(path).suffix.lower() in cls._PRETEST_PHOTO_SUFFIXES]
         if document_roles is None:
             return images
-        return [path for path in images if document_roles.get(path.name) in INVENTORY_ROLES]
+        # Stessa scelta del worker e dell'estrattore (`photo_document_indices`
+        # quando c'e'): solo i file con il ruolo foto.
+        from ..services import datasheet_extractor
+        indices = getattr(datasheet_extractor, "photo_document_indices", None)
+        from ..services.document_roles import photo_paths
+        chosen = set(photo_paths(doc_paths, document_roles))
+        if callable(indices):
+            paths = [Path(path) for path in doc_paths]
+            try:
+                chosen = {paths[i] for i in (indices(paths, document_roles) or []) if i >= 0}
+            except Exception:  # noqa: BLE001 - ExtractionError non e' un ValueError
+                # Ruoli che l'estrattore rifiuterebbe: lo dira' l'analisi; qui
+                # vale la lettura diretta dei ruoli, mai un'eccezione da uno slot.
+                pass
+        return [path for path in images if path in chosen]
 
     def _start_yolo_pretest(self, doc_paths, document_roles, yolo_model_path) -> None:
         """@brief Run only the local YOLO detector on the top view and show its boxes.
@@ -4133,7 +4228,7 @@ class MainWindow(QMainWindow):
             return
         if not self._pretest_top_views(doc_paths, document_roles):
             QMessageBox.information(self, self.i18n.text("Pretest YOLO"),
-                                    self.i18n.text("Il pretest YOLO lavora sulla foto vista dall'alto: assegna a una foto il ruolo «Immagine con quote» o «Foto ad alta risoluzione» e riprova."))
+                                    self.i18n.text("Il pretest YOLO lavora sulla foto vista dall'alto: spunta «Foto» sulla fotografia della scheda nei documenti e riprova."))
             return
         length, width = (float(value) for value in size)
         self.btn_extract_ai.setEnabled(False)
@@ -6141,7 +6236,9 @@ class MainWindow(QMainWindow):
         self._sides.clear()
         for side in state.get("sides") or ():
             if isinstance(side, dict):
-                self._add_side_row(side)
+                # Un progetto salvato prima della chiave e' stato generato con
+                # lo stile di allora: lo si conserva, non e' una deduzione.
+                self._add_side_row(side, missing_style=default_contact_style())
         # Anche senza lati salvati: la barra del tipo contatto non deve restare
         # quella del progetto precedente.
         self._sync_contact_style_bar()
@@ -6831,12 +6928,7 @@ class MainWindow(QMainWindow):
                 if params.populated_pins else ""
             )
 
-        self._extracted_pcb_thickness = params.pcb_thickness_mm
-        if params.pcb_thickness_mm:
-            self.field_cast_pcb.setValue(params.pcb_thickness_mm)
-        if params.components_3d and params.pcb_thickness_mm is None:
-            self._append_log(tx("Spessore PCB non quotato: stima 1.6 mm per la scheda THT; verificare "
-                                "con una misura diretta."))
+        self._apply_extracted_pcb_thickness(params)
 
         if params.is_castellated() and _castellated_body_available(params):
             self._enable_3d_group_from_extraction()
@@ -6868,8 +6960,10 @@ class MainWindow(QMainWindow):
                    n_pin_map=len(self.pin_map))
             )
 
-        if params.body_color_hex:
-            self.field_body_color.setText(params.body_color_hex)
+        self._apply_extracted_body_color(params)
+        for warning in self._plausibility_warnings(params):
+            self._append_log(tx("ATTENZIONE: ") + warning)
+        self._log_values_to_review(params)
 
         if params.edge_fillets:
             for f in params.edge_fillets:
@@ -6911,6 +7005,274 @@ class MainWindow(QMainWindow):
                 fillet_note=fillet_note)
         )
 
+    def _extraction_has_board(self, params) -> bool:
+        """@brief Whether the extracted component is a board (module or populated board).
+
+        @param params Extracted parameters.
+        @return True for a castellated module, for any result carrying photo
+            components, and for the declared «aggregate_tht» family: the cases
+            whose 3D has a PCB, so a PCB thickness and a board colour.
+        """
+        return bool(params.is_castellated() or getattr(params, "components_3d", None)
+                    or self._selected_family() == "aggregate_tht")
+
+    def _apply_extracted_pcb_thickness(self, params) -> None:
+        """@brief Set the PCB thickness of a new extraction and say which value is used.
+
+        @param params Extracted parameters.
+        @note Decision of the user (2026-09-26): without a thickness in the
+            documents every layout uses STANDARD_PCB_THICKNESS_MM, the field is
+            reset at every extraction (the previous project's value never
+            survives) and the log states the value actually used. Before, a
+            castellated module kept the field's 1.0 mm while the log spoke of
+            1.6 mm for THT boards.
+        """
+        if self._relaunch_base_synthesized:
+            # Inventario rilanciato su una base costruita dai campi: nessuna
+            # nuova lettura dei documenti, lo spessore resta quello del progetto.
+            return
+        value = getattr(params, "pcb_thickness_mm", None)
+        declared = (float(value) if isinstance(value, (int, float)) and not isinstance(value, bool)
+                    and math.isfinite(float(value)) and float(value) > 0 else None)
+        self._extracted_pcb_thickness = declared
+        self.field_cast_pcb.setValue(declared if declared is not None else STANDARD_PCB_THICKNESS_MM)
+        if not self._extraction_has_board(params):
+            return
+        used = self.field_cast_pcb.value()
+        if declared is None:
+            self._append_log(tx("Spessore PCB non quotato nei documenti: usato {value} mm, lo "
+                                "spessore standard delle schede FR-4 (stima, da verificare con "
+                                "una misura diretta).", value=f"{used:.2f}"))
+        else:
+            self._append_log(tx("Spessore PCB dai documenti: {value} mm.", value=f"{used:.2f}"))
+
+    def _sample_board_color(self, photo_png):
+        """@brief The board colour sampled from the calibrated photo, or why it could not be.
+
+        @param photo_png PNG bytes of the calibrated board crop, or None.
+        @return (colour '#rrggbb' or None, reason when None).
+        @note `photo_refine.sample_board_color(crop)` takes a BGR crop and
+            returns '#rrggbb'. It is looked up at call time: when the function
+            is missing (older installation) the caller falls back to the
+            declared standard colour instead of failing.
+        """
+        if not isinstance(photo_png, (bytes, bytearray)) or not photo_png:
+            return None, tx("nessuna foto calibrata")
+        try:
+            import cv2
+            import numpy as np
+            from ..services import photo_refine
+        except ImportError:
+            return None, tx("campionamento del colore non disponibile")
+        sampler = getattr(photo_refine, "sample_board_color", None)
+        if not callable(sampler):
+            return None, tx("campionamento del colore non disponibile")
+        try:
+            crop = cv2.imdecode(np.frombuffer(bytes(photo_png), np.uint8), cv2.IMREAD_COLOR)
+            if crop is None:
+                return None, tx("foto calibrata non leggibile")
+            colour = sampler(crop)
+        except Exception as exc:  # noqa: BLE001 - un campionamento fallito non ferma l'analisi
+            return None, str(exc)
+        if not isinstance(colour, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", colour.strip()):
+            return None, tx("colore campionato non valido")
+        return colour.strip().lower(), ""
+
+    def _apply_extracted_body_color(self, params) -> None:
+        """@brief Set the body/board colour of a new extraction; a missing one is never carried over.
+
+        @param params Extracted parameters.
+        @note Decision of the user (2026-09-26): a colour the analysis does not
+            declare is, for a board, sampled from the calibrated photo; without
+            a usable photo the standard green solder mask
+            (STANDARD_SOLDER_MASK_HEX) is used and said in the log. A single
+            component falls back to DEFAULT_BODY_COLOR_HEX, also declared.
+            Either way the field is reset at every extraction: the previous
+            project's colour never survives.
+        """
+        if self._relaunch_base_synthesized:
+            # Come lo spessore: senza una nuova analisi il colore del progetto resta.
+            return
+        declared = str(getattr(params, "body_color_hex", "") or "").strip()
+        if re.fullmatch(r"#[0-9a-fA-F]{6}", declared):
+            self.field_body_color.setText(declared)
+            return
+        if not self._extraction_has_board(params):
+            self.field_body_color.setText(DEFAULT_BODY_COLOR_HEX)
+            self._append_log(tx("Colore del corpo non dichiarato: usato il nero predefinito "
+                                "{color}.", color=DEFAULT_BODY_COLOR_HEX))
+            return
+        colour, reason = self._sample_board_color(getattr(params, "photo_png", None))
+        if colour is not None:
+            self.field_body_color.setText(colour)
+            self._append_log(tx("Colore della scheda non dichiarato: campionato dalla foto "
+                                "calibrata ({color}).", color=colour))
+            return
+        self.field_body_color.setText(STANDARD_SOLDER_MASK_HEX)
+        self._append_log(tx("Colore della scheda non dichiarato e non campionabile ({reason}): "
+                            "usato il verde standard del solder mask {color}.",
+                            reason=reason, color=STANDARD_SOLDER_MASK_HEX))
+
+    def _log_values_to_review(self, params) -> None:
+        """@brief Say in the log which extracted values are estimates or were not declared.
+
+        @param params Extracted parameters.
+        @note The extractor marks the provenance of each value
+            (`ExtractedParams.value_sources`: read, derived, estimated,
+            undeclared); the fields are not shown anywhere since 2026-09-26, so
+            the log is where an estimate must be visible as such. Looked up at
+            call time: an older extractor without the method logs nothing.
+        """
+        review = getattr(params, "values_to_review", None)
+        if not callable(review):
+            return
+        try:
+            keys = list(review())
+        except Exception:  # noqa: BLE001 - informativo: non deve fermare l'applicazione
+            return
+        if keys:
+            self._append_log(tx("Valori stimati o non dichiarati nei documenti, da verificare: "
+                                "{keys}.", keys=", ".join(str(key) for key in keys)))
+
+    def _plausibility_warnings(self, params) -> list:
+        """@brief Warnings for extracted values that are possible but unusual.
+
+        @param params Extracted parameters.
+        @return Messages for the log; nothing here blocks the generation.
+        @note Impossible values are refused by `_validate_automatic_input`;
+            these are the physically possible ones that more often reveal a
+            reading error: a pin grid wider than the body (true for a DIP,
+            whose rows lie outside the moulding, so only a warning) and a pitch
+            outside PLAUSIBLE_PITCH_MM (declared heuristic, see there).
+        """
+        warnings = []
+
+        def number(value):
+            return (float(value) if isinstance(value, (int, float)) and not isinstance(value, bool)
+                    and math.isfinite(float(value)) and float(value) > 0 else None)
+
+        low, high = PLAUSIBLE_PITCH_MM
+        pitches = []
+        if params.is_castellated():
+            pitches = [(tx("passo del lato {edge}",
+                           edge=EDGE_LABELS.get(side.get("edge"), side.get("edge"))),
+                        number(side.get("pitch_mm")))
+                       for side in params.castellated_sides or () if isinstance(side, dict)]
+        elif not getattr(params, "package_geometry", None):
+            pitches = [(tx("passo"), number(params.pitch_mm)),
+                       (tx("interasse fra le file"), number(params.row_spacing_mm))]
+            rows, cols = number(params.rows), number(params.cols)
+            pad = number(params.pad_diameter_mm) or 0.0
+            for count, pitch, body, axis in (
+                    (cols, number(params.pitch_mm), number(params.body_length_mm), "X"),
+                    (rows, number(params.row_spacing_mm), number(params.body_width_mm), "Y")):
+                if count and count > 1 and pitch and body:
+                    extent = (count - 1) * pitch + pad
+                    if extent > body:
+                        warnings.append(tx(
+                            "i pin occupano {extent} mm lungo {axis}, più del corpo dichiarato "
+                            "({body} mm): possibile (per esempio un DIP), ma controlla file, "
+                            "passo e quote.", extent=f"{extent:.2f}", axis=axis, body=f"{body:.2f}"))
+        for label, value in pitches:
+            if value is not None and not low <= value <= high:
+                warnings.append(tx("{label} di {value} mm, fuori dall'intervallo abituale "
+                                   "{low}-{high} mm: controlla l'unità di misura del disegno.",
+                                   label=label, value=f"{value:g}", low=f"{low:g}", high=f"{high:g}"))
+        return warnings
+
+    def _ask_contact_style(self, sides: list) -> str | None:
+        """@brief Ask the user the contact style of sides whose style nobody observed.
+
+        @param sides The side dicts (edge, count, pitch_mm) without a style.
+        @return One of `contact_styles()`, or None when the user cancels.
+        @note Decision of the user (2026-09-26): the photo may not show the
+            edge, and then the style cannot be read; it is asked, never taken
+            from a default. No choice is preselected, so «OK» without looking
+            is impossible. The labels are CONTACT_STYLE_LABELS and the help is
+            CONTACT_STYLE_TOOLTIP, the same as the 3D-tab selector.
+        """
+        from PyQt6.QtWidgets import QButtonGroup, QDialogButtonBox, QRadioButton
+        dialog = QDialog(self)
+        dialog.setWindowTitle(self.i18n.text("Tipo di contatto dei lati"))
+        layout = QVBoxLayout(dialog)
+        intro = QLabel(self.i18n.text(
+            "La foto non mostra il tipo di contatto di questi lati e non viene indovinato. "
+            "Guarda la scheda e scegli:"))
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        listing = QLabel("\n".join(self._side_summary(side) for side in sides))
+        listing.setProperty("i18n_skip", True)
+        listing.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addWidget(listing)
+        group = QButtonGroup(dialog)
+        for style in contact_styles():
+            radio = QRadioButton(self.i18n.text(CONTACT_STYLE_LABELS.get(style, style)))
+            radio.setProperty("contact_style", style)
+            group.addButton(radio)
+            layout.addWidget(radio)
+        explanation = QLabel(self.i18n.text(CONTACT_STYLE_TOOLTIP))
+        explanation.setWordWrap(True)
+        explanation.setStyleSheet("color: #a6adc8;")
+        layout.addWidget(explanation)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                                   | QDialogButtonBox.StandardButton.Cancel)
+        ok = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        ok.setEnabled(False)
+        group.buttonClicked.connect(lambda _button: ok.setEnabled(True))
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        self._contact_style_dialog = dialog
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted or group.checkedButton() is None:
+                return None
+            return group.checkedButton().property("contact_style")
+        finally:
+            self._contact_style_dialog = None
+            dialog.deleteLater()
+
+    @staticmethod
+    def _side_summary(side: dict) -> str:
+        """@brief One castellated side in words: edge, contacts and pitch."""
+        return tx("lato {edge}: {count} contatti a {pitch} mm",
+                  edge=EDGE_LABELS.get(side.get("edge"), side.get("edge")),
+                  count=side.get("count"), pitch=side.get("pitch_mm"))
+
+    def _resolve_unknown_contact_styles(self) -> None:
+        """@brief Ask once for the style of every side that has none, and log the answer.
+
+        @note A cancelled question leaves the sides without a style: the
+            generation then stops with `_missing_contact_style_message`, it is
+            never done with a guessed style.
+        """
+        unknown = [side for side in self._sides if side["contact_style"] is None]
+        if not unknown:
+            return
+        names = ", ".join(str(EDGE_LABELS.get(side["edge"], side["edge"])) for side in unknown)
+        choice = self._ask_contact_style(unknown)
+        if choice in contact_styles():
+            for side in unknown:
+                side["contact_style"] = choice
+            self._append_log(tx("Tipo di contatto dei lati {sides} scelto dall'utente: «{style}» "
+                                "(la foto non lo mostrava).", sides=names,
+                                style=self.i18n.text(CONTACT_STYLE_LABELS.get(choice, choice))))
+        else:
+            self._append_log(tx("ATTENZIONE: ") + self._missing_contact_style_message())
+        self._on_sides_changed()
+
+    def _missing_contact_style_message(self) -> str:
+        """@brief Why the generation cannot run while a side has no contact style.
+
+        @return The explanation, or "" when every side has a known style.
+        """
+        missing = [side for side in self._sides if side["contact_style"] not in contact_styles()]
+        if not missing:
+            return ""
+        return tx("tipo di contatto non indicato per i lati {sides}: la foto non lo mostrava e "
+                  "non viene indovinato. Sceglilo nel tab Modello 3D (Tipo contatto) e rigenera.",
+                  sides=", ".join(str(EDGE_LABELS.get(side["edge"], side["edge"]))
+                                  for side in missing))
+
     def _apply_extracted_castellated(self, params: ExtractedParams) -> None:
         """Riempie il gruppo "Modulo castellated" con i lati estratti.
 
@@ -6943,7 +7305,14 @@ class MainWindow(QMainWindow):
         self._sides.clear()
         names = []
         pinout = []
+        sources = getattr(params, "value_sources", None) or {}
         for side in params.castellated_sides or ():
+            side = dict(side)
+            # Diametri dei fori: dichiarati solo se letti o ricavati dai
+            # documenti; stimati o senza provenienza restano stime (26/09).
+            for field in ("half_hole_diameter_mm", "through_hole_drill_mm"):
+                source = sources.get(f"castellated_sides.{side.get('edge')}.{field}")
+                side[field.replace("_mm", "_declared")] = source in ("read", "derived")
             self._add_side_row(side)
             label = EDGE_LABELS.get(side["edge"], side["edge"])
             if side.get("pin_names"):
@@ -6970,18 +7339,26 @@ class MainWindow(QMainWindow):
                    n_castellated_components=len(self.castellated_components))
             )
 
-        # Il tipo di contatto e' scritto accanto a ogni lato, con la sua
-        # provenienza: dichiarato dall'estrazione o predefinito perche' assente.
-        # Chi vede «predefinito» sa che nessuno lo ha letto sulla scheda.
+        # Il tipo di contatto non osservato si chiede, non si indovina
+        # (decisione dell'utente, 26/09); poi e' scritto accanto a ogni lato con
+        # la sua provenienza: letto dall'estrazione, scelto dall'utente o
+        # ancora da scegliere.
+        self._resolve_unknown_contact_styles()
         styles = self._table_contact_styles()
         described = []
         for index, s in enumerate(params.castellated_sides or ()):
-            style = styles[index] if index < len(styles) else default_contact_style()
-            origin = "" if s.get("contact_style") in contact_styles() else ", predefinito"
+            style = styles[index] if index < len(styles) else None
+            if s.get("contact_style") in contact_styles():
+                origin = ""
+            elif style is None:
+                origin = tx(", da scegliere")
+            else:
+                origin = tx(", scelto dall'utente")
+            label = CONTACT_STYLE_LABELS.get(style, style) if style else CONTACT_STYLE_UNKNOWN_LABEL
             described.append(
                 f"lato {EDGE_LABELS.get(s['edge'], s['edge'])} "
                 f"{s['count']} contatti a {s['pitch_mm']}mm "
-                f"({CONTACT_STYLE_LABELS.get(style, style)}{origin})")
+                f"({label}{origin})")
         self._append_log(tx("Contatti del modulo: ") + ", ".join(described))
         for line in names:
             self._append_log(tx("Sigle serigrafate {line}", line=line))
@@ -7013,35 +7390,45 @@ class MainWindow(QMainWindow):
     def _init_parameters(self) -> None:
         """@brief Create the footprint and 3D parameters the generation reads.
 
-        @note Same defaults, ranges and precision as the editors of the removed
-            Footprint 2D tab (user, 2026-09-26): an extracted value outside a
-            range is still rejected by `_validate_automatic_input`, and one
-            written by the program is clamped exactly as the editor did.
+        @note Same defaults and precision as the editors of the removed
+            Footprint 2D tab (user, 2026-09-26). The ranges are PHYSICAL
+            limits since the same day (decision of the user): lengths up to
+            MAX_LENGTH_MM, heights from MIN_HEIGHT_MM, pitches above zero,
+            counts limited only by what fits (checked from the declared sizes,
+            see `_validate_automatic_input`). An extracted value outside a
+            range is rejected by `_validate_automatic_input`; an unusual one is
+            applied and reported by `_plausibility_warnings`.
         """
         # Dati del componente e matrice THT.
         self.field_description = TextValue()
         self.field_tags = TextValue("pin header THT")
-        self.field_rows = BoundedValue(2, 1, 40, decimals=0, integer=True)
-        self.field_cols = BoundedValue(4, 1, 40, decimals=0, integer=True)
-        self.field_pitch = BoundedValue(2.54, 0.5, 20.0)
-        self.field_row_spacing = BoundedValue(2.54, 0.5, 50.0)
+        # Righe e colonne: nessun tetto proprio; quante ne stanno lo dicono il
+        # passo e le quote (`_validate_automatic_input`). Il massimo qui tiene
+        # solo il numero memorizzabile.
+        self.field_rows = BoundedValue(2, 1, 10000, decimals=0, integer=True)
+        self.field_cols = BoundedValue(4, 1, 10000, decimals=0, integer=True)
+        # Passo e interasse: maggiori di zero (0.01 mm e' la risoluzione).
+        self.field_pitch = BoundedValue(2.54, 0.01, MAX_LENGTH_MM)
+        self.field_row_spacing = BoundedValue(2.54, 0.01, MAX_LENGTH_MM)
         self.field_populated_pins = TextValue()
-        self.field_pad = BoundedValue(1.7, 0.2, 10.0)
-        self.field_drill = BoundedValue(1.0, 0.1, 8.0)
+        self.field_pad = BoundedValue(1.7, 0.01, MAX_LENGTH_MM)
+        self.field_drill = BoundedValue(1.0, 0.01, MAX_LENGTH_MM)
 
         # Modulo castellated. La matrice e i moduli castellated si escludono:
         # in un modulo ogni lato ha il suo numero di contatti e il suo passo,
         # che una griglia a passo unico non sa descrivere.
         self.group_castellated = FlagValue(False)
-        self.field_cast_body_length = BoundedValue(42.8, 0.0, 300.0)
-        self.field_cast_body_width = BoundedValue(15.2, 0.0, 300.0)
-        self.field_cast_pad_length = BoundedValue(3.6, 0.0, 20.0)
-        self.field_cast_pad_width = BoundedValue(1.8, 0.0, 20.0)
+        self.field_cast_body_length = BoundedValue(42.8, 0.0, MAX_LENGTH_MM)
+        self.field_cast_body_width = BoundedValue(15.2, 0.0, MAX_LENGTH_MM)
+        self.field_cast_pad_length = BoundedValue(3.6, 0.0, MAX_LENGTH_MM)
+        self.field_cast_pad_width = BoundedValue(1.8, 0.0, MAX_LENGTH_MM)
         #: Sporgenza della piazzola oltre il bordo (menisco ispezionabile).
         self.field_cast_overhang = BoundedValue(1.4, 0.0, 5.0)
         #: Diametro del semi-foro metallizzato: i semi-fori si tagliano nel 3D.
         self.field_cast_hole = BoundedValue(1.7, 0.0, 10.0)
-        self.field_cast_pcb = BoundedValue(1.0, 0.0, 10.0)
+        #: Spessore della scheda; senza quota, lo standard dichiarato (vedi
+        #: `_apply_extracted_pcb_thickness`).
+        self.field_cast_pcb = BoundedValue(STANDARD_PCB_THICKNESS_MM, 0.0, 10.0)
         #: Rientro del blocco componenti dal bordo del PCB.
         self.field_cast_inset = BoundedValue(1.0, 0.0, 20.0)
         #: Foro passante chiuso accanto al semi-foro (0 = nessuno): ci si
@@ -7067,14 +7454,14 @@ class MainWindow(QMainWindow):
         # la ricerca su disco: vedi `_enable_3d_group_from_extraction`.
         self._freecad_available = freecad_available
         self.group_3d = FlagValue(freecad_available)
-        self.field_body_length = BoundedValue(10.0, 0.5, 300.0)
-        self.field_body_width = BoundedValue(10.0, 0.5, 300.0)
-        self.field_body_height = BoundedValue(5.0, 0.5, 100.0)
+        self.field_body_length = BoundedValue(10.0, MIN_LENGTH_MM, MAX_LENGTH_MM)
+        self.field_body_width = BoundedValue(10.0, MIN_LENGTH_MM, MAX_LENGTH_MM)
+        self.field_body_height = BoundedValue(5.0, MIN_HEIGHT_MM, MAX_LENGTH_MM)
         #: Bordo del corpo rispetto al pin 1 (X) e alla prima riga (Y).
-        self.field_body_offset_x = BoundedValue(0.0, -150.0, 150.0)
-        self.field_body_offset_y = BoundedValue(0.0, -150.0, 150.0)
-        self.field_pin_length_3d = BoundedValue(3.0, 0.1, 20.0)
-        self.field_body_color = TextValue("#1a1a1a")
+        self.field_body_offset_x = BoundedValue(0.0, -MAX_LENGTH_MM, MAX_LENGTH_MM)
+        self.field_body_offset_y = BoundedValue(0.0, -MAX_LENGTH_MM, MAX_LENGTH_MM)
+        self.field_pin_length_3d = BoundedValue(3.0, 0.01, MAX_LENGTH_MM)
+        self.field_body_color = TextValue(DEFAULT_BODY_COLOR_HEX)
         self.field_pin_color = TextValue("#b0b0b0")
 
         self.group_castellated.on_change(self._on_castellated_toggled)
@@ -7090,8 +7477,14 @@ class MainWindow(QMainWindow):
         """La matrice e i moduli castellated sono alternativi, mai insieme."""
         if checked and not self._sides:
             # Due lati opposti sono la configurazione di gran lunga piu' comune.
-            self._add_side_row({"edge": "left", "count": 3, "pitch_mm": 2.54, "first_pin": 1})
-            self._add_side_row({"edge": "right", "count": 3, "pitch_mm": 2.54, "first_pin": 4})
+            # Segnaposto di chi accende il modulo a mano, prima di ogni analisi:
+            # un'estrazione li sostituisce tutti (e chiede lo stile che la foto
+            # non mostra). Lo stile qui e' quello del selettore del tab 3D.
+            style = default_contact_style()
+            self._add_side_row({"edge": "left", "count": 3, "pitch_mm": 2.54, "first_pin": 1,
+                                "contact_style": style})
+            self._add_side_row({"edge": "right", "count": 3, "pitch_mm": 2.54, "first_pin": 4,
+                                "contact_style": style})
         self._sync_3d_fields_for_castellated(checked)
         self._sync_contact_style_bar()
         self._draw_preview()
@@ -7105,41 +7498,47 @@ class MainWindow(QMainWindow):
         if castellated and self.field_pin_color.text().strip().lower() == "#b0b0b0":
             self.field_pin_color.setText("#c9a227")
 
-    def _add_side_row(self, side: dict | None = None) -> None:
+    def _add_side_row(self, side: dict | None = None, *, missing_style: str | None = None) -> None:
         """Append one castellated side, filled from an extracted/serialised side dict.
 
         Programmatic: it does NOT invalidate the generated 3D, because its
         callers (a new extraction, the castellated switch, a reopened project)
         already describe a new input revision. An unknown edge falls back to
-        the first edge, as the former table did.
+        the first edge, as the former table did. `missing_style` is the style
+        of a dict WITHOUT the key (a project saved before the key existed,
+        generated with that style); an extraction passes None, so an
+        unobserved style stays unknown and is asked.
         """
         side = dict(side or {})
         if side.get("edge") not in CASTELLATED_EDGES:
             side["edge"] = CASTELLATED_EDGES[0]
-        side["contact_style"] = self._declared_contact_style(side)
-        self._sides.append(normalised_side(side, default_contact_style()))
+        side["contact_style"] = self._declared_contact_style(side, missing_style)
+        self._sides.append(normalised_side(side))
         self._on_sides_changed()
 
-    def _declared_contact_style(self, side: dict) -> str:
-        """Contact style declared by a side dict, or the default when absent.
+    def _declared_contact_style(self, side: dict, missing_style: str | None = None) -> str | None:
+        """Contact style declared by a side dict, or None when nobody observed it.
 
-        An absent key is today's behaviour, not a question: the default is
-        kept silently. An unknown value is NOT guessed into one of the three:
-        it falls back to the default and the log says so, so that the user
-        knows the combo shows a default and not what the data said.
+        Since 2026-09-26 (decision of the user) a style that is absent or None
+        is not replaced by a default: it stays None and the user is asked
+        (`_resolve_unknown_contact_styles`). Only a dict without the key at all
+        takes `missing_style` (see `_add_side_row`). An unknown value is NOT
+        guessed into one of the three either: it becomes None and the log
+        says so.
         """
+        if "contact_style" not in side:
+            return missing_style
         declared = side.get("contact_style")
         if declared is None:
-            return default_contact_style()
+            return None
         if declared in contact_styles():
             return declared
         self._append_log(
-            tx("ATTENZIONE: tipo di contatto sconosciuto {declared!r} sul lato {get}: "
-               "resta «{get2}», correggilo nella colonna «Tipo contatto».",
+            tx("ATTENZIONE: tipo di contatto sconosciuto {declared!r} sul lato {get}: non "
+               "viene indovinato, va scelto.",
                declared=declared,
-               get=EDGE_LABELS.get(side.get('edge'), side.get('edge')),
-               get2=CONTACT_STYLE_LABELS.get(default_contact_style(), default_contact_style())))
-        return default_contact_style()
+               get=EDGE_LABELS.get(side.get('edge'), side.get('edge'))))
+        return None
 
     def _contact_style_combo(self, style: str) -> QComboBox:
         """Combo offering the contact styles, with the telling-apart tooltip.
@@ -7174,6 +7573,7 @@ class MainWindow(QMainWindow):
             for index in range(combo.count()):
                 value = combo.itemData(index)
                 source = (CONTACT_STYLE_MIXED_LABEL if value is None
+                          else CONTACT_STYLE_UNKNOWN_LABEL if value == ""
                           else CONTACT_STYLE_LABELS.get(value, value))
                 combo.setItemText(index, self.i18n.text(source))
 
@@ -7223,7 +7623,8 @@ class MainWindow(QMainWindow):
         """
         if self._contact_style_supported():
             return
-        chosen = {s for s in self._table_contact_styles() if s != default_contact_style()}
+        chosen = {s for s in self._table_contact_styles()
+                  if s is not None and s != default_contact_style()}
         if chosen:
             self._append_log(
                 tx("ATTENZIONE: il generatore installato non conosce ancora il tipo di "
@@ -7245,9 +7646,12 @@ class MainWindow(QMainWindow):
         for side in self._sides:
             extra = {"contact_style": side["contact_style"]} if style_supported else {}
             if sizes_supported:
-                # Diametri letti dall'analisi per questo lato (None = non dichiarati).
-                extra.update(hole_diameter=side.get("half_hole_diameter_mm"),
-                             thru_hole_drill=side.get("through_hole_drill_mm"))
+                # Diametri del lato: una misura dichiarata si passa com'e' (il
+                # generatore la rispetta o la rifiuta), una stima come
+                # AssumedSize (il generatore la riduce se non sta e lo annota).
+                extra.update(
+                    hole_diameter=_side_size(side, "half_hole_diameter"),
+                    thru_hole_drill=_side_size(side, "through_hole_drill"))
             sides.append(CastellatedSide(
                 edge=side["edge"], count=side["count"], pitch=side["pitch_mm"],
                 offset=side["offset_mm"], first_pin=side["first_pin"],
@@ -7265,9 +7669,12 @@ class MainWindow(QMainWindow):
         """
         return [dict(edge=s.edge, count=s.count, pitch_mm=s.pitch, offset_mm=s.offset,
                      first_pin=s.first_pin, reverse=s.reverse, contact_style=style,
-                     half_hole_diameter_mm=getattr(s, "hole_diameter", None),
-                     through_hole_drill_mm=getattr(s, "thru_hole_drill", None))
-                for s, style in zip(self._sides_from_table(), self._table_contact_styles())]
+                     half_hole_diameter_mm=raw.get("half_hole_diameter_mm"),
+                     through_hole_drill_mm=raw.get("through_hole_drill_mm"),
+                     half_hole_diameter_declared=bool(raw.get("half_hole_diameter_declared")),
+                     through_hole_drill_declared=bool(raw.get("through_hole_drill_declared")))
+                for s, style, raw in zip(self._sides_from_table(), self._table_contact_styles(),
+                                         self._sides)]
 
     def _sides_with_table_styles(self, sides):
         """Carry the table's contact styles onto extraction side dicts.
@@ -7304,10 +7711,15 @@ class MainWindow(QMainWindow):
         styles = self._table_contact_styles()
         self.contact_style_bar_3d.setVisible(self._is_castellated() and bool(styles))
         unique = set(styles)
-        target = styles[0] if len(unique) == 1 else None
         blocked = combo.blockSignals(True)
-        combo.setCurrentIndex(max(combo.findData(target), 0) if target is not None
-                              else combo.count() - 1)
+        if None in unique:
+            # Almeno un lato senza tipo: la voce «Da scegliere» (ultima).
+            combo.setCurrentIndex(combo.count() - 1)
+        elif len(unique) == 1:
+            combo.setCurrentIndex(max(combo.findData(styles[0]), 0))
+        else:
+            # Lati diversi: la voce «Diverso per lato» (penultima).
+            combo.setCurrentIndex(combo.count() - 2)
         combo.blockSignals(blocked)
 
     def _on_contact_style_all_changed(self, index: int) -> None:
@@ -7319,7 +7731,8 @@ class MainWindow(QMainWindow):
             modifica ai lati: anteprima invalidata, nessuna chiamata AI.
         """
         style = self.combo_contact_style_3d.itemData(index)
-        if style is None:
+        if not style:
+            # «Diverso per lato» e «Da scegliere» sono solo informative.
             return
         for side in self._sides:
             side["contact_style"] = style
@@ -7966,13 +8379,12 @@ class MainWindow(QMainWindow):
             value = getattr(params, field)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                 raise ValueError(tx("Manca una dimensione valida del corpo 3D: {field}.", field=field))
-        dimensions = ((params.body_length_mm, self.field_cast_body_length if params.is_castellated() else self.field_body_length),
-                      (params.body_width_mm, self.field_cast_body_width if params.is_castellated() else self.field_body_width))
+        dimensions = (('body_length_mm', self.field_cast_body_length if params.is_castellated() else self.field_body_length),
+                      ('body_width_mm', self.field_cast_body_width if params.is_castellated() else self.field_body_width))
         if not params.is_castellated():
-            dimensions += ((params.body_height_mm, self.field_body_height),)
-        if any(not widget.minimum() <= value <= widget.maximum() for value, widget in dimensions):
-            raise ValueError(tx("Le dimensioni estratte superano i limiti ammessi: controlla i "
-                                "documenti e ripeti l’analisi."))
+            dimensions += (('body_height_mm', self.field_body_height),)
+        for field, widget in dimensions:
+            self._require_in_range(field, getattr(params, field), widget)
         if params.is_castellated():
             if not params.castellated_sides:
                 raise ValueError(tx("Non sono stati estratti i contatti del modulo castellated."))
@@ -7983,8 +8395,13 @@ class MainWindow(QMainWindow):
                     value = side.get(field)
                     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                         raise ValueError(tx("Contatti del modulo incompleti: {field}.", field=field))
-                if side['count'] != int(side['count']) or side['count'] > 100:
-                    raise ValueError(tx("Il numero di contatti estratto non è supportato dall’editor."))
+                if side['count'] != int(side['count']):
+                    raise ValueError(tx("Numero di contatti non intero: {value}.", value=side['count']))
+                # Quanti contatti stanno sul lato lo decide il generatore dalle
+                # quote della scheda; qui si rifiuta solo cio' che non puo'
+                # esistere: una fila piu' lunga della scheda piu' grande.
+                self._require_extent(side['count'], side['pitch_mm'],
+                                     tx("lato {edge}", edge=EDGE_LABELS.get(side['edge'], side['edge'])))
         else:
             # Griglia di pin passanti: passo solo con piu' colonne, interasse
             # solo con piu' file (stesso contratto dell'estrattore dal 26/09).
@@ -8003,8 +8420,44 @@ class MainWindow(QMainWindow):
                 value = getattr(params, field)
                 if value is None:
                     continue
-                if not widget.minimum() <= value <= widget.maximum() or (field in ('rows', 'cols') and value != int(value)):
-                    raise ValueError(tx("Parametro fuori dai limiti ammessi: {field}.", field=field))
+                if field in ('rows', 'cols') and value != int(value):
+                    raise ValueError(tx("Numero di file o colonne non intero: {field} = {value}.",
+                                        field=field, value=value))
+                self._require_in_range(field, value, widget)
+            if params.cols > 1:
+                self._require_extent(params.cols, params.pitch_mm, 'cols')
+            if params.rows > 1:
+                self._require_extent(params.rows, params.row_spacing_mm, 'rows')
+
+    @staticmethod
+    def _require_in_range(field, value, widget) -> None:
+        """@brief Refuse an extracted value outside the physical range of its parameter.
+
+        @param field Name of the extracted field, for the message.
+        @param value Extracted value.
+        @param widget The BoundedValue that will store it.
+        @throws ValueError Naming the field, the value and the accepted range.
+        """
+        if not widget.minimum() <= value <= widget.maximum():
+            raise ValueError(tx("Valore impossibile: {field} = {value} (ammesso da {minimum} a "
+                                "{maximum}). Controlla i documenti e ripeti l’analisi.",
+                                field=field, value=value, minimum=widget.minimum(),
+                                maximum=widget.maximum()))
+
+    @staticmethod
+    def _require_extent(count, pitch, what) -> None:
+        """@brief Refuse a row of contacts longer than the largest board the program handles.
+
+        @param count Number of contacts in the row.
+        @param pitch Distance between neighbouring contacts, mm.
+        @param what Name of the row, for the message.
+        @throws ValueError When (count - 1) * pitch exceeds MAX_LENGTH_MM.
+        """
+        extent = (count - 1) * pitch
+        if extent > MAX_LENGTH_MM:
+            raise ValueError(tx("Valore impossibile: {what} occupa {extent} mm, più della scheda "
+                                "più grande gestita ({maximum} mm).", what=what,
+                                extent=f"{extent:.2f}", maximum=f"{MAX_LENGTH_MM:g}"))
 
     def _start_automatic_generation(self, extracted):
         """@brief Avvia la generazione automatica dopo un'estrazione, se i dati la permettono.
@@ -8065,6 +8518,8 @@ class MainWindow(QMainWindow):
                 self._current_castellated_params() if self._is_castellated()
                 else self._current_params()
             )
+            if isinstance(params, CastellatedModuleParams) and self._missing_contact_style_message():
+                raise ValueError(self._missing_contact_style_message())
             params.validate()
             self._validate_output_name(params.name)
             body = None if isinstance(params, PackageGeometry) else self._current_body_params()
@@ -8134,6 +8589,7 @@ class MainWindow(QMainWindow):
             fillets=list(self.fillet_annotations), face_texts=list(self.face_text_annotations),
         )
         self._worker._model_revision = self._model_revision
+        self._worker.photo_scale_px_per_mm = self._photo_scale_px_per_mm()
         self._worker.done.connect(self._on_generated)
         self._worker.error.connect(self._on_error)
         self._worker.cad3d_done.connect(self._on_cad3d_generated)
@@ -8512,10 +8968,12 @@ class MainWindow(QMainWindow):
         style_layout.addWidget(self.icon_contact_style_3d)
         self.combo_contact_style_3d = self._contact_style_combo(default_contact_style())
         self.combo_contact_style_3d.addItem(self.i18n.text(CONTACT_STYLE_MIXED_LABEL), None)
-        # Solo informativa: si sceglie un tipo per tutti i lati, oppure si usa
-        # la tabella lati per differenziarli; «diverso» non e' una scelta.
-        self.combo_contact_style_3d.model().item(
-            self.combo_contact_style_3d.count() - 1).setEnabled(False)
+        self.combo_contact_style_3d.addItem(self.i18n.text(CONTACT_STYLE_UNKNOWN_LABEL), "")
+        # Solo informative: si sceglie un tipo per tutti i lati; «diverso» e
+        # «da scegliere» descrivono lo stato, non sono una scelta.
+        for index in (self.combo_contact_style_3d.count() - 2,
+                      self.combo_contact_style_3d.count() - 1):
+            self.combo_contact_style_3d.model().item(index).setEnabled(False)
         self._set_translated_tooltip(
             self.combo_contact_style_3d,
             CONTACT_STYLE_TOOLTIP + "\nVale per tutti i lati.")
@@ -8910,6 +9368,8 @@ class MainWindow(QMainWindow):
                 self._current_castellated_params() if self._is_castellated()
                 else self._current_params()
             )
+            if isinstance(params, CastellatedModuleParams) and self._missing_contact_style_message():
+                raise ValueError(self._missing_contact_style_message())
             params.validate()
             body.validate()
         except ValueError as exc:
@@ -8934,6 +9394,7 @@ class MainWindow(QMainWindow):
             list(self.fillet_annotations), list(self.face_text_annotations),
         )
         self._cad3d_worker._model_revision = self._model_revision
+        self._cad3d_worker.photo_scale_px_per_mm = self._photo_scale_px_per_mm()
         self._cad3d_worker.done.connect(self._on_regen_3d_done)
         self._cad3d_worker.progress.connect(self._on_ai_progress)
         self._cad3d_worker.phase.connect(self._on_phase)
@@ -9147,7 +9608,10 @@ class MainWindow(QMainWindow):
         'terminal_layout', 'terminal_count_basis', '_global_inventory_status', 'class',
         '_yolo_proposal_id', '_presence_reviewed_by_user',
         'lead_count', 'lead_count_complete',
-        'landmark_feature', 'landmark_side', 'landmark_confidence')
+        'landmark_feature', 'landmark_side', 'landmark_confidence',
+        # Scala della foto (o incertezza dichiarata): il 3D ne ricava in mm
+        # l'incertezza di misura per sporgenze e archivio degli abbinamenti.
+        'measurement_uncertainty_mm', 'photo_scale_px_per_mm')
 
     @classmethod
     def _component_from_photo(cls, c: dict) -> ComponentBox:
@@ -9368,8 +9832,42 @@ class MainWindow(QMainWindow):
         self._apply_photo_review(self._photo_components_from_table())
 
     def _components_from_table(self) -> list[ComponentBox]:
-        """@brief The photo components as they are now, corrections included."""
-        return [self._component_from_photo(row) for row in self._photo_rows]
+        """@brief The photo components as they are now, corrections included.
+
+        @note Each one carries the scale of the calibrated photo it was
+            measured on (`photo_scale_px_per_mm`), unless it already declares
+            its own: the 3D turns it into the measurement uncertainty in mm
+            (cad3d.measurement_uncertainty) instead of a declared fallback.
+        """
+        scale = self._photo_scale_px_per_mm()
+        rows = []
+        for row in self._photo_rows:
+            if scale is not None and "photo_scale_px_per_mm" not in row:
+                row = dict(row, photo_scale_px_per_mm=scale)
+            rows.append(row)
+        return [self._component_from_photo(row) for row in rows]
+
+    def _photo_scale_px_per_mm(self) -> float | None:
+        """@brief Pixels per millimetre of the calibrated photo, along the board length.
+
+        @return Width of `_photo_png` in pixels divided by the length (mm) of
+            the photographed board -- the body fields `_photo_review_frame`
+            reads (those of the type used by the extraction), without its log
+            line -- or None when there is no calibrated PNG or no positive length.
+        @note The width is read from the PNG header (IHDR): nothing is decoded
+            at every generation. The calibrated photo is always a PNG
+            (`photo_inventory`, `cv2.imencode('.png')`); anything else gives None.
+        """
+        png = getattr(self, "_photo_png", None)
+        if (not isinstance(png, (bytes, bytearray)) or len(png) < 24
+                or bytes(png[:8]) != b"\x89PNG\r\n\x1a\n"):
+            return None
+        width_px = int.from_bytes(bytes(png[16:20]), "big")
+        current = "cast" if self._is_castellated() else "matrix"
+        length_mm = self._body_sizes()[getattr(self, "_photo_body_fields", None) or current][0]
+        if width_px <= 0 or not length_mm or length_mm <= 0:
+            return None
+        return width_px / float(length_mm)
 
     def _current_system_prompt(self) -> str | None:
         """Prompt globale da usare per l'estrazione: None se e' quello di default."""

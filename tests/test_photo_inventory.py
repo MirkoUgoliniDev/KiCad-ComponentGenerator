@@ -177,7 +177,11 @@ def test_pipeline_passes_source_selection_and_retains_overlay(monkeypatch,tmp_pa
         return {"components":[dict(label='R',kind='resistor',box_2d=[200,100,400,300])] if len(requests)==2 else []}
     monkeypatch.setattr(ext,"call_tool",call)
     result = ext.extract_pin_header_params([photo],photo_cache_dir=tmp_path/'cache')
-    assert len(requests)==5  # The two identical uniform side crops share a cache entry.
+    # Contratto aggiornato (26/09, griglia di dettaglio in mm): la foto finta e'
+    # a 10 px/mm, sotto l'obiettivo dei dettagli, quindi nessun dettaglio
+    # ingrandito (un ritaglio non aggiunge pixel): estrazione, vista completa,
+    # classificazione.
+    assert len(requests)==3
     assert len(result.components_3d)==1
     assert result.photo_source=="top.png"
     assert result.photo_overlay_png.startswith(b"\x89PNG")
@@ -211,11 +215,17 @@ def test_same_package_seen_twice_with_slightly_different_boxes_is_reconciled():
     e nel modello 3D si compenetravano al 100%: il piu' piccolo spariva
     dentro il piu' grande. Il discriminante e' la coincidenza dei centri,
     non il rapporto esatto delle aree.
+
+    Contratto aggiornato (26/09): nessun tetto sulle aree. I centri coincidono
+    entro l'incertezza di misura, che dipende dai pixel della foto su cui i
+    riquadri sono normalizzati (qui un ritaglio largo 770 px, come nel caso
+    reale): senza conoscerli non c'e' incertezza misurata e la fusione non
+    avviene (vedi tests/test_duplicate_criterion.py).
     """
     big = decode([detection(bbox=[.200, .200, .288, .258], kind="capacitor")])
     small = decode([detection(bbox=[.217, .212, .270, .246], kind="capacitor")],
                    source="B")
-    merged = inv.merge_components([big, small], containment=True)
+    merged = inv.merge_components([big, small], containment=True, image_px=(770, 385))
     assert len(merged) == 1, "la stessa rilevazione e' rimasta duplicata"
 
 

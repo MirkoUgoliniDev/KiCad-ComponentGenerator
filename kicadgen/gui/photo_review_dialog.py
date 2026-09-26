@@ -71,6 +71,8 @@ from PyQt6.QtWidgets import (
 )
 
 
+from .component_state import (height_is_estimated, mark_height_measured,
+                              mark_height_placeholder)
 from .review_tools import (ZOOM_STEP, AnchoredPopup, InfoPopup, asset_icon,
                            give_combos_their_keys, set_tool_texts, tool_button,
                            toolbar_divider)
@@ -1132,6 +1134,7 @@ class PhotoReviewDialog(QDialog):
         # works whether or not the modal is shown.
         self.form_widget = QWidget()
         form = QFormLayout(self.form_widget)
+        self._form = form
         self.text_fields = {}
         # Gli slot sono metodi legati, non closure: se l'applicazione esce
         # con la finestra ancora aperta, il distruttore C++ non passa da
@@ -1779,6 +1782,27 @@ class PhotoReviewDialog(QDialog):
                 field.setValue(float(selected.component.get(key, 0 if key == "rotation_deg" else 1)))
         for key, field in self.text_fields.items():
             field.setText(str(selected.component.get(key, "")))
+        self._refresh_height_label(selected.component)
+
+    def _refresh_height_label(self, component):
+        """Label of the height field: «Altezza (stimata)» while the height is not a reading.
+
+        An estimated height (declared by the pipeline, or a placeholder) looks
+        exactly like a measured one in a spin box; the label says which one it
+        is, and a value typed by hand turns it into a reading
+        (`component_state.mark_height_measured`).
+        """
+        label = self._form.labelForField(self.fields["height_mm"])
+        if label is None:
+            return
+        estimated = height_is_estimated(component)
+        source = "Altezza (stimata)" if estimated else "Altezza"
+        label.setText(self._tr(source))
+        label.setProperty("i18n_source", source)
+        label.setProperty("i18n_rendered", label.text())
+        label.setToolTip(self._tr("Stimata, non misurata: scrivi il valore vero se lo conosci.")
+                         if estimated else "")
+        self.fields["height_mm"].setToolTip(label.toolTip())
 
     def _commit_pending_text(self):
         """Store text and numbers still being typed, as a focus change would."""
@@ -1959,8 +1983,9 @@ class PhotoReviewDialog(QDialog):
         # da sola -- il colore e il marcatore si vedono senza puntare nulla.
         self.component_list.item(index).setToolTip(tooltip)
         if item.isSelected():
-            if item.component.get('_height_source'):
-                warnings.append(self._tr("Altezza indicativa: verificare con una misura diretta."))
+            if height_is_estimated(item.component):
+                warnings.append(self._tr("Altezza stimata, non misurata: correggila in "
+                                         "Parametri se la conosci."))
             self.warning_label.setText(
                 "\n".join(warnings)
                 if warnings else self._tr("Nessun avviso per questo componente.")
@@ -2068,6 +2093,11 @@ class PhotoReviewDialog(QDialog):
         if value == float(item.component.get(key, 0 if key == "rotation_deg" else 1)):
             return
         item.component[key] = value
+        if key == "height_mm":
+            # Scritta a mano: da qui e' una lettura dell'utente, non una stima.
+            mark_height_measured(item.component)
+            self._refresh_height_label(item.component)
+            self._refresh_item(item)
         if key in self._GEOMETRY_FIELDS:
             item.sync_geometry()
             self._geometry_changed(item, rotation_only=key == "rotation_deg")
@@ -2278,6 +2308,8 @@ class PhotoReviewDialog(QDialog):
         component = dict(name=self._tr("Nuovo componente"), kind="generic", x_mm=x_mm, y_mm=y_mm,
                          length_mm=length, width_mm=width, height_mm=1.0, rotation_deg=0.0,
                          confidence="low", _uncertain=True)
+        # 1 mm e' un segnaposto: marcato come stima finche' l'utente non lo scrive.
+        mark_height_placeholder(component)
         self._components.append(component)
         self._append_item(component)
         self._update_scene_rect()

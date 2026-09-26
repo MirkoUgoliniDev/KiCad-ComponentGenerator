@@ -572,16 +572,21 @@ def test_a_declared_style_is_parsed():
     assert _unobserved_contact_style_notice(sides) is None
 
 
-def test_a_missing_style_keeps_the_default_and_says_so():
+def test_a_missing_style_is_unknown_and_says_so():
+    """Not observed means unknown (None): no default is assumed (user decision 26/09).
+
+    The former default was the style of the sample board; the GUI now asks
+    the user for it, and the note must not name any style as assumed.
+    """
     from kicadgen.services.datasheet_extractor import _castellated_sides, _unobserved_contact_style_notice
     sides = _castellated_sides([dict(edge="top", count=2, pitch_mm=2.54),
                                 dict(edge="bottom", count=2, pitch_mm=2.54, contact_style="half_hole")])
-    # Assente resta assente: chi costruisce il modulo applica il default, e la
-    # GUI continua a distinguere un tipo osservato da uno assunto.
-    assert "contact_style" not in sides[0]
+    assert sides[0]["contact_style"] is None
+    assert sides[1]["contact_style"] == "half_hole"
     notice = _unobserved_contact_style_notice(sides)
-    assert "tipo di contatto non osservato: si assume" in notice
-    assert "half_and_through" in notice and "superiore" in notice and "inferiore" not in notice
+    assert "tipo di contatto non osservato" in notice and "Nessun tipo assunto" in notice
+    assert "superiore" in notice and "inferiore" not in notice
+    assert not any(style in notice for style in CONTACT_STYLES)
 
 
 @pytest.mark.parametrize("bad", ["castellated", "HALF_HOLE", "", 3, True])
@@ -603,14 +608,15 @@ def _run_extraction(monkeypatch, tmp_path, sides):
     return ext, call, log, lambda: ext.extract_pin_header_params([source], progress=log.append)
 
 
-def test_extraction_logs_the_assumed_style(monkeypatch, tmp_path):
+def test_extraction_leaves_an_unobserved_style_to_the_user(monkeypatch, tmp_path):
     ext, call, log, run = _run_extraction(monkeypatch, tmp_path,
                                           [dict(edge="top", count=2, pitch_mm=2.54)])
     result = run()
     assert call.call_count == 1
-    assert any("tipo di contatto non osservato: si assume" in line for line in log)
+    assert any("tipo di contatto non osservato" in line for line in log)
     assert "tipo di contatto non osservato" in result.notes
-    assert "contact_style" not in result.castellated_sides[0]
+    assert result.castellated_sides[0]["contact_style"] is None
+    assert result.unobserved_contact_style_edges() == ["top"]
 
 
 def test_extraction_with_observed_styles_logs_no_assumption(monkeypatch, tmp_path):
@@ -675,13 +681,22 @@ def test_the_edge_pad_strip_does_not_reach_a_ring_label():
     oltre la corona, e la sua striscia arriva li' (caso positivo in
     tests/test_contact_pad_shape.py). Il tipo non dichiarato resta qui fra i
     negativi: a valle e' disegnato come half_and_through, ma sulla foto non si
-    maschera un'ipotesi."""
-    from kicadgen.services.contact_zones import contact_positions, contact_proposals
+    maschera un'ipotesi.
+
+    Contratto aggiornato (26/09, per lato): un half_hole OSSERVATO prende il
+    semi-foro del SUO lato (side_geometry, qui il riferimento 1.7 mm che sta
+    nel passo), non il foro passante del modulo (drill_mm) come prima; il tipo
+    non dichiarato resta sulle sole quote dichiarate. In entrambi i casi la
+    sigla della corona resta fuori."""
+    from kicadgen.services.contact_zones import (contact_positions, contact_proposals,
+                                                 declared_module)
     x = contact_positions(_declared("through_hole"), *BOARD)[0]["x_mm"]
     label = _proposal(x, -12.7 + 2.9, 1.0, 0.7)
-    for style in ("half_hole", None):
+    module, pairs = declared_module(_declared("half_hole"), *BOARD)
+    half_hole = module.side_geometry(pairs[0][1]).half_hole
+    for style, depth in (("half_hole", 1.0 + half_hole / 2 + 0.55), (None, 1.0 + 0.5 + 0.55)):
         positions = contact_positions(_declared(style), *BOARD)
-        assert positions[0]["depth_mm"] == pytest.approx(1.0 + 0.5 + 0.55)
+        assert positions[0]["depth_mm"] == pytest.approx(depth)
         assert contact_proposals([label], positions, *BOARD) == set()
 
 

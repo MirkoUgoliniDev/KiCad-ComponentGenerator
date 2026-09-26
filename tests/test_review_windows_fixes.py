@@ -272,7 +272,7 @@ def test_a_draw_tremor_is_a_click_and_a_real_drag_draws(app):
     """@brief Positivo: con Disegna un movimento sotto startDragDistance sceglie.
 
     Negativo: un trascinamento vero, anche corto ma oltre la soglia e sopra
-    MIN_NEW_BOX, traccia un riquadro nuovo.
+    MIN_NEW_BOX_MM, traccia un riquadro nuovo.
     """
     dialog = _yolo(app, [_proposal(1, (.1, .1, .5, .5))])
     dialog.set_tool(TOOL_DRAW)

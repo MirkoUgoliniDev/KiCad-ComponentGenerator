@@ -40,11 +40,14 @@ relative chiamate e può quindi comportare nuove inferenze a pagamento.
   orizzontale ed essere quasi ortogonale: non viene rettificata la prospettiva.
   Inclinazioni significative vengono rifiutate; resta una piccola tolleranza
   di rasterizzazione. Una foto rifiutata non viene usata per calibrare le quote.
-- Localizzazione dedicata: una vista completa e tre strisce sovrapposte. I grandi
-  package restano nella vista completa; i piccoli sono assegnati per centro alla
-  propria zona, evitando il conteggio ripetuto tra strisce.
-- Associazione geometrica uno-a-uno tra viste: IoU oppure contenimento con limiti
-  su rapporto delle aree e distanza dei centri. Un piccolo passivo non viene
+- Localizzazione dedicata: una vista completa e una griglia di dettagli
+  ingranditi calcolata dalle quote della scheda su entrambi gli assi, per dare
+  al componente piu' piccolo che si assume presente (lato corto di un 0402) una
+  risoluzione sufficiente; le schede grandi hanno piu' dettagli (piu' chiamate),
+  le piccole meno. I grandi package restano nella vista completa; i piccoli sono
+  assegnati per centro alla propria cella, evitando il conteggio ripetuto.
+- Associazione geometrica uno-a-uno tra viste: IoU oppure contenimento con centri
+  coincidenti entro l'incertezza di misura in pixel della foto. Un piccolo passivo non viene
   assorbito da un grande IC solo perché gli sta vicino. L'assegnazione considera
   l'intera vista per evitare duplicati causati dall'ordine dei rilevamenti.
 - Verifica della sola presenza di corpi montati, in gruppi di massimo 24.

@@ -216,7 +216,8 @@ def test_unusable_sides_are_discarded():
 def test_malformed_castellated_side_does_not_kill_valid_sibling(bad):
     from kicadgen.services.datasheet_extractor import _castellated_sides
     good = dict(edge="left", count=2, pitch_mm=2.54)
-    assert _castellated_sides([bad, good]) == [dict(good, first_pin=1)]
+    # contact_style None: not observed, never a default (user decision 26/09).
+    assert _castellated_sides([bad, good]) == [dict(good, first_pin=1, contact_style=None)]
     with pytest.raises(ExtractionError):
         _castellated_sides([bad])
 
@@ -227,21 +228,21 @@ def test_invalid_optional_side_numerics_are_omitted(bad):
     result = _castellated_sides([dict(edge="left", count=1, pitch_mm=0,
         first_pin=bad, offset_mm=bad, pad_length_mm=bad, pad_width_mm=bad),
         dict(edge="right", count=1, offset_mm=-2)])
-    assert result[0] == dict(edge="left", count=1, pitch_mm=0, first_pin=1)
+    assert result[0] == dict(edge="left", count=1, pitch_mm=0, first_pin=1, contact_style=None)
     assert result[1]["first_pin"] == 2 and result[1]["offset_mm"] == -2
 
 
 def test_nonpositive_optional_pad_dimensions_and_fractional_first_pin_are_omitted():
     from kicadgen.services.datasheet_extractor import _castellated_sides
     assert _castellated_sides([dict(edge="left", count=1, first_pin=1.5,
-        pad_length_mm=0, pad_width_mm=-1)]) == [dict(edge="left", count=1, pitch_mm=0, first_pin=1)]
+        pad_length_mm=0, pad_width_mm=-1)]) == [dict(edge="left", count=1, pitch_mm=0, first_pin=1, contact_style=None)]
 
 
 @pytest.mark.parametrize("bad", [123, "false", {"pin": "A"}, True])
 def test_malformed_optional_side_names_and_reverse_are_ignored(bad):
     from kicadgen.services.datasheet_extractor import _castellated_sides
     side = dict(edge="left", count=1, pin_names=bad, reverse="false")
-    assert _castellated_sides([side]) == [dict(edge="left", count=1, pitch_mm=0, first_pin=1)]
+    assert _castellated_sides([side]) == [dict(edge="left", count=1, pitch_mm=0, first_pin=1, contact_style=None)]
 
 
 @pytest.mark.parametrize("names", [["A", 2], ("A", 2)])

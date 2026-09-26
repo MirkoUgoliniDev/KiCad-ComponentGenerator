@@ -251,11 +251,18 @@ def test_a_nan_component_is_excluded_with_a_note(monkeypatch, tmp_path):
 
 
 def test_clamping_and_height_capping_are_announced(monkeypatch, tmp_path):
-    """@brief E7 positive: every changed estimate leaves a note."""
+    """@brief E7 positive: every changed estimate leaves a note.
+
+    CONTRACT CHANGED 2026-09-26 (punto 84 medio 4): un corpo viene riportato
+    dentro solo se sporge meno dell'incertezza di misura. Il vecchio caso
+    (x=9.8, 0.8 mm oltre il bordo) ora resta dov'e' con una nota: lo copre
+    tests/test_overhang_uncertainty.py. Qui x=9.1 sporge di 0.1 mm, meno
+    dell'incertezza di ripiego (0.17 mm), e viene ancora spostato.
+    """
     result, built = _castellated(monkeypatch, tmp_path, [
-        ComponentBox(9.8, 0, 2, 1, 5.0, name="Sporgente")], height=3.0)
+        ComponentBox(9.1, 0, 2, 1, 5.0, name="Sporgente")], height=3.0)
     (component,) = built
-    assert component["x"] < 9.8
+    assert component["x"] < 9.1
     thickness = CastellatedModuleParams(name="x").pcb_thickness
     assert component["height_mm"] == pytest.approx(3.0 - thickness)
     notes = [n for n in result["notes"] if "Sporgente" in n]

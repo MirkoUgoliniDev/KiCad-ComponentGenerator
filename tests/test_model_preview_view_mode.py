@@ -522,3 +522,33 @@ def test_the_cube_matches_the_rotation_icons_in_size_and_column(dialog, app):
     for button in buttons:
         first, _, rest = button.toolTip().partition(chr(10))
         assert first and rest
+
+
+def test_a_ring_turns_while_the_preview_is_being_drawn(dialog, app, monkeypatch):
+    """@brief Utente 26/09: «qui ci vuole un loader». Visibile durante il disegno, via all'arrivo."""
+    window, _ = dialog
+    entered, release = threading.Event(), threading.Event()
+
+    def thumbnail(*_args, **_kwargs):
+        entered.set()
+        release.wait(2)
+        return _image('#0000ff')
+
+    monkeypatch.setattr(gui, '_thumbnail', thumbnail)
+    window.show()
+    window.candidate_list.setCurrentRow(0)
+    assert entered.wait(1)
+    assert window.preview_loader.isVisibleTo(window) and window._loader_timer.isActive()
+    angle = window.preview_spinner.angle
+    _wait(app, lambda: window.preview_spinner.angle != angle)
+    release.set()
+    _wait(app, lambda: not window._workers)
+    assert not window.preview_loader.isVisibleTo(window) and not window._loader_timer.isActive()
+
+
+def test_no_ring_when_there_is_nothing_to_draw(dialog, app, monkeypatch, tmp_path):
+    """@brief Negativo: un file STEP non disponibile non fa girare nulla."""
+    window, _ = dialog
+    window._path = str(tmp_path / "manca.step")
+    window._start_preview()
+    assert not window.preview_loader.isVisibleTo(window) and not window._loader_timer.isActive()

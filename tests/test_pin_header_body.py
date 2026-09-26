@@ -115,9 +115,14 @@ def test_legacy_silk_and_marker_survive_and_large_pads_fit_courtyard():
     it. Now the outline keeps only the pieces clear of the pads and the
     marker is pushed diagonally out of the pin-1 corner until it clears them.
     """
+    # CONTRACT CHANGED 2026-09-26 (punto 84 medio 9): pad da 4 mm a passo 2 mm
+    # si sovrapponevano e ora sono rifiutati (distanza minima di rame 0.2 mm).
+    # 1.8 mm e' il pad piu' grande ammesso a questo passo: resta molto piu'
+    # grande del margine di 0.25 mm, quindi il caso provato (serigrafia e
+    # marcatore sopra il rame) e' lo stesso.
     fp = build_pin_header(PinHeaderParams(
         rows=2, cols=3, pitch=2.0, row_spacing=5.0,
-        pad_diameter=4.0, margin=0.25, body_offset_x=99.0,
+        pad_diameter=1.8, margin=0.25, body_offset_x=99.0,
     ))
     for a, b, _ in _silk_segments(fp):
         assert _on_outline(a, (-0.25, -0.25), (4.25, 5.25))
@@ -132,8 +137,8 @@ def test_legacy_silk_and_marker_survive_and_large_pads_fit_courtyard():
     assert math.dist(marker.center, pad1.at) == min(math.dist(marker.center, p.at) for p in fp.pads)
     assert not any(g.layer == "F.Fab" for g in fp.graphics)
     courtyard = _rect(fp, "F.CrtYd")
-    assert courtyard.start == (-2.25, -2.25)
-    assert courtyard.end == (6.25, 7.25)
+    assert courtyard.start == pytest.approx((-1.15, -1.15))
+    assert courtyard.end == pytest.approx((5.15, 6.15))
 
 
 @pytest.mark.parametrize("field", [

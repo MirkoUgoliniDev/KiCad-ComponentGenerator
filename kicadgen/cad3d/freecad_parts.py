@@ -43,7 +43,10 @@ def _warn(template, **values):
 V = FreeCAD.Vector
 
 METAL = "#c8c8c8"
-LEAD_PITCH_MM = 1.27  # passo tipico dei reofori SOIC
+#: Passo dei reofori della famiglia SOIC (JEDEC MS-012/MS-013). Serve SOLO
+#: quando il numero di reofori non e' dichiarato: allora il conteggio e' una
+#: STIMA dalla lunghezza del corpo (vedi `_soic_leads`) e il log lo dice.
+LEAD_PITCH_MM = 1.27
 
 
 def _box(cx, cy, z0, length, width, height):
@@ -218,7 +221,30 @@ def _observed_terminals(cx, cy, z0, length, width, height, color, geometry):
     return parts
 
 
-def _ic_soic(cx, cy, z0, length, width, height, color, marker=None):
+def _soic_leads(span, lead_count=None):
+    """@brief Leads per side and pitch of a gull-wing body along its lead side.
+
+    @param span Body length along the side carrying the leads, mm.
+    @param lead_count Declared/observed TOTAL lead count (both sides), or None.
+    @return (leads_per_side, pitch_mm, estimated) -- estimated is True when the
+        count was not declared and comes from the body length.
+    @note A declared even count >= 4 wins: the pitch is then span / per-side,
+        because a gull-wing body is about one pitch longer than the span of
+        its lead centres (SOIC-8: 4 x 1.27 = 5.08 against 4.9 mm; TSSOP-20:
+        10 x 0.65 = 6.5 against 6.5 mm). Without a count the SOIC pitch is
+        assumed and the count follows from the same relation, uncapped (a
+        wide SOIC-28 has 14 per side, a long body more): an ESTIMATE, which
+        the caller reports.
+    """
+    if (type(lead_count) is int and lead_count >= 4 and lead_count % 2 == 0
+            and span > 0):
+        per_side = lead_count // 2
+        return per_side, span / per_side, False
+    per_side = max(2, int(round(span / LEAD_PITCH_MM)))
+    return per_side, LEAD_PITCH_MM, True
+
+
+def _ic_soic(cx, cy, z0, length, width, height, color, marker=None, lead_count=None):
     """Integrato con reofori a ala di gabbiano sui due lati lunghi.
 
     `marker` e' la direzione locale (Y verso l'alto) di un riferimento pin 1
@@ -226,8 +252,9 @@ def _ic_soic(cx, cy, z0, length, width, height, color, marker=None):
 
     Il corpo e' sollevato di uno standoff e piu' stretto dell'ingombro totale,
     perche' l'ingombro letto dalla foto comprende i reofori. Il numero di
-    reofori si ricava dal passo standard: per l'aspetto conta che ci siano,
-    non che siano esattamente quelli del datasheet.
+    reofori e il passo vengono dal conteggio dichiarato (`lead_count`, totale
+    dei due lati) quando c'e'; altrimenti sono una stima dalla lunghezza del
+    corpo con il passo SOIC (vedi `_soic_leads`), e il chiamante lo segnala.
     """
     parts = []
     along_x = length >= width
@@ -246,13 +273,15 @@ def _ic_soic(cx, cy, z0, length, width, height, color, marker=None):
                        body_depth if along_x else span, z0 + height)
     parts.append((body, color))
 
-    n_leads = max(2, min(14, int(round((span - 1.0) / LEAD_PITCH_MM))))
-    lead_w = 0.42
+    n_leads, pitch, _ = _soic_leads(span, lead_count)
+    # Larghezza del reoforo proporzionale al passo (0.42 mm a 1.27, come
+    # prima): a passo fine reofori larghi si fonderebbero fra loro.
+    lead_w = min(0.42, pitch * 0.35)
     lead_t = 0.22
-    start = -(n_leads - 1) * LEAD_PITCH_MM / 2
+    start = -(n_leads - 1) * pitch / 2
     riser_h = max(0.2, body_h * 0.55)
     for i in range(n_leads):
-        along = start + i * LEAD_PITCH_MM
+        along = start + i * pitch
         for side in (-1, 1):
             edge = side * (body_depth / 2)
             if along_x:
@@ -593,14 +622,66 @@ def _outward_sign(cx, cy, axis, rotation_deg, centre=(0.0, 0.0)):
     return -1.0 if projection < 0 else 1.0
 
 
+#: Riferimenti osservati che dicono da che lato si innesta un connettore:
+#: la bocca stessa o il lato da cui esce il cavo.
+_MOUTH_FEATURES = ("connector_opening", "cable_exit")
+
+
+def _observed_mouth_side(component):
+    """@brief Photo-frame side of an OBSERVED connector mouth, or None.
+
+    @param component Component payload carrying the landmark fields.
+    @return left/right/top/bottom (photo frame, X right, Y down) when the
+        photograph showed the opening or the cable exit with high/medium
+        confidence; None otherwise.
+    """
+    if component.get("landmark_feature") not in _MOUTH_FEATURES:
+        return None
+    if component.get("landmark_confidence") not in ("high", "medium"):
+        return None
+    side = component.get("landmark_side")
+    return side if side in _LANDMARK_DIRECTIONS else None
+
+
+def _mouth_axis(observed_side, rotation_deg):
+    """@brief Local (axis, sign) of the mouth from an observed photo-frame side.
+
+    @param observed_side left/right/top/bottom in the photo frame.
+    @param rotation_deg Rotation the caller applies after the builder, model
+        frame (Y up), any angle.
+    @return (0 or 1, +1.0 or -1.0), or None when the side is unknown or lies
+        on a diagonal of the rotated body (no local face points there).
+    """
+    wanted = _LANDMARK_DIRECTIONS.get(observed_side)
+    if wanted is None:
+        return None
+    gx, gy = wanted[0], -wanted[1]          # photo Y down -> model Y up
+    angle = math.radians(rotation_deg or 0.0)
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    local_x = gx * cos_a + gy * sin_a        # projection on the rotated local X
+    local_y = -gx * sin_a + gy * cos_a       # projection on the rotated local Y
+    if abs(abs(local_x) - abs(local_y)) < 1e-6:
+        return None
+    if abs(local_x) > abs(local_y):
+        return 0, (1.0 if local_x > 0 else -1.0)
+    return 1, (1.0 if local_y > 0 else -1.0)
+
+
 def _connector(cx, cy, z0, length, width, height, color, rotation_deg=0, mating=None,
-               board_centre=(0.0, 0.0)):
+               board_centre=(0.0, 0.0), mouth_side=None):
     """Approximate an observed entry; unknown entry stays a generic envelope.
 
     Top-entry barrels and edge-entry shells are visual estimates, not observed
-    connector identities. The short-axis/outward direction below remains a
-    legacy heuristic from the USB example; an observed entry vector would
-    replace it. Mating alone does not establish barrel shape or entry polarity.
+    connector identities. Mating alone does not establish barrel shape or
+    entry polarity.
+
+    `mouth_side` is the OBSERVED side of the opening (photo frame, see
+    `_observed_mouth_side`): when present it decides both the mating axis and
+    its verse. Without it the fallback below applies -- a DECLARED HEURISTIC
+    written on a USB receptacle at the board edge: mating axis along the
+    shorter horizontal side, mouth facing away from the board centre. It is
+    wrong for a connector whose insertion depth is its longer side or that
+    sits away from the edge; the caller reports when it is used.
 
     Un connettore si innesta lateralmente (USB, jack, header schermato): la
     bocca sta sulla faccia rivolta verso l'esterno della scheda, non sul
@@ -627,8 +708,12 @@ def _connector(cx, cy, z0, length, width, height, color, rotation_deg=0, mating=
     if min(length, width, height) <= 2.5 * wall:
         return [(shell, color)]
 
-    axis = 0 if length <= width else 1
-    sign = _outward_sign(cx, cy, axis, rotation_deg, board_centre)
+    observed = _mouth_axis(mouth_side, rotation_deg) if mouth_side else None
+    if observed is not None:
+        axis, sign = observed
+    else:
+        axis = 0 if length <= width else 1
+        sign = _outward_sign(cx, cy, axis, rotation_deg, board_centre)
     if axis == 0:
         mating = length
         cross_w, cross_h = width - 2 * wall, height - 2 * wall
@@ -755,6 +840,24 @@ def _crystal(cx, cy, z0, length, width, height, color):
                         ratio=0.3, cap=0.8)
 
 
+def _electrolytic(cx, cy, z0, length, width, height, color):
+    """@brief Upright can on a square plastic base, inside the measured envelope.
+
+    @return [(base, colour), (can, colour)]; a plain box when the envelope is
+        too flat or too small for the two parts.
+    @note The can diameter is the short side of the measured box and the base
+        takes a tenth of the height: proportions of an SMD electrolytic, not a
+        measurement. The envelope (length x width x height) is never exceeded.
+    """
+    radius = min(length, width) / 2
+    base_h = height * 0.1
+    if radius <= 0.2 or height - base_h <= 0.2 or base_h <= 0.02:
+        return [(_box(cx, cy, z0, length, width, height), color)]
+    base = _box(cx, cy, z0, length, width, base_h)
+    can = Part.makeCylinder(radius * 0.98, height - base_h, V(cx, cy, z0 + base_h))
+    return [(base, "#202020"), (can, color)]
+
+
 BUILDERS = {
     "generic": _generic,
     # An unidentified IC does not establish a package or terminal layout.
@@ -773,6 +876,31 @@ BUILDERS = {
     "connector": _connector,
     "switch": _tactile_switch,
     "crystal": _crystal,
+    # Tipi aggiunti al vocabolario dell'estrazione (punto 84 medio 13). Finche'
+    # non hanno una forma propria usano la forma esistente piu' vicina, SENZA
+    # inventare terminali: un QFP/BGA resta un corpo piatto (come il QFN, con
+    # il riferimento pin 1 solo se osservato); un SOT non usa i reofori SOIC,
+    # che su 3-6 reofori a passo 0.65-0.95 sarebbero inventati; un package con
+    # aletta, un rele', un display, una batteria, un cicalino, un trimmer e un
+    # connettore a pettine restano l'ingombro misurato (_connector senza
+    # innesto osservato ripiega comunque sul blocco); lo schermo e' una
+    # scatola raccordata come il modulo. Approssimazioni dichiarate, da
+    # sostituire con forme dedicate.
+    "ic_sot": _generic,
+    "ic_qfp": _ic_qfn,
+    "ic_bga": _ic_qfn,
+    "power_tab": _generic,
+    "shield_can": _transformer,
+    "capacitor_electrolytic": _electrolytic,
+    "inductor_power": _transformer,
+    "pin_header": _generic,
+    "socket_header": _generic,
+    "relay": _generic,
+    "potentiometer": _generic,
+    "crystal_can": _crystal,
+    "battery": _generic,
+    "display": _generic,
+    "buzzer": _generic,
 }
 
 #: Elenco esposto allo schema di estrazione (kicadgen.services) -- tenerlo
@@ -1803,7 +1931,8 @@ def _library_model(component, cx, cy, z0, color):
 _POLARITY_FEATURES = ("polarity_marker", "pin1_marker")
 
 #: Builders that can draw an observed polarity/pin-1 mark.
-_MARKED_KINDS = ("ic_soic", "ic_qfn", "capacitor_tantalum", "diode", "diode_melf")
+_MARKED_KINDS = ("ic_soic", "ic_qfn", "ic_qfp", "ic_bga", "capacitor_tantalum", "diode",
+                 "diode_melf")
 
 
 def _observed_marker(component):
@@ -1821,6 +1950,19 @@ def _observed_marker(component):
         return None
     return _local_side_direction(component.get("landmark_side"),
                                  component.get("rotation_deg") or 0.0)
+
+
+def _declared_lead_count(component):
+    """Total ordinary lead count declared by the observation, or None.
+
+    `lead_count` counts ordinary leads only (the inventory schema; a tab is in
+    `terminal_count`), and is used only when marked complete: a partial count
+    would draw a body with too few leads as if it were measured.
+    """
+    count = component.get("lead_count")
+    if type(count) is int and count > 0 and component.get("lead_count_complete") is True:
+        return count
+    return None
 
 
 def _board_centre(component):
@@ -1916,11 +2058,18 @@ def build_component(component, z0):
                    get=component.get('name'))
             # Unico builder il cui orientamento dipende da dove si trova il
             # componente: la bocca deve guardare fuori scheda DOPO la
-            # rotazione applicata dal chiamante, non prima.
+            # rotazione applicata dal chiamante, non prima. Il lato della
+            # bocca osservato nella foto vince sulla stima.
+            mouth_side = _observed_mouth_side(component)
+            if component.get("mating") == "edge" and mouth_side is None:
+                _warn("componente {get}: lato della bocca non osservato; stimato sul lato "
+                      "corto, verso l'esterno della scheda",
+                      get=component.get('name'))
             return _connector(cx, cy, z0, length, width, height, color,
                               rotation_deg=float(component.get("rotation_deg") or 0),
                               mating=component.get("mating"),
-                              board_centre=_board_centre(component))
+                              board_centre=_board_centre(component),
+                              mouth_side=mouth_side)
         if kind in BUILDERS and kind != "generic":
             _warn("componente {get} ({kind}): geometria approssimata, terminal_geometry "
                "assente",
@@ -1933,6 +2082,14 @@ def build_component(component, z0):
             return _ic_observed_pins(cx, cy, z0, length, width, height, color, kind,
                                      pin_count=pin_count, pins_by_side=pins_by_side,
                                      marker=marker)
+        if kind == "ic_soic":
+            lead_count = _declared_lead_count(component)
+            if _soic_leads(max(length, width), lead_count)[2]:
+                _warn("componente {get} (ic_soic): numero di reofori non dichiarato, "
+                      "stimato dalla lunghezza del corpo con passo {pitch} mm",
+                      get=component.get('name'), pitch=LEAD_PITCH_MM)
+            return builder(cx, cy, z0, length, width, height, color, marker=marker,
+                           lead_count=lead_count)
         if kind in _MARKED_KINDS:
             return builder(cx, cy, z0, length, width, height, color, marker=marker)
         return builder(cx, cy, z0, length, width, height, color)

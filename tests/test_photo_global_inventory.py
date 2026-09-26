@@ -8,6 +8,7 @@ import pytest
 
 from kicadgen.services import photo_global_inventory as inventory
 from kicadgen.services.photo_yolo_review import review_yolo_components
+from kicadgen.services.photo_grounding import detail_grid
 
 
 @pytest.mark.parametrize('kind,basis,presence,accepted', [
@@ -343,7 +344,12 @@ def test_single_call_five_images_all_candidates_and_retained_parent():
     items = [candidate(1), candidate(2)]; before = deepcopy(items)
     result, calls, logs = run(response(), items)
     assert items == before and len(calls) == 1
-    assert len([b for b in calls[0]['content_blocks'] if b['type'] == 'image_url']) == 5
+    # Foto piena e sovrapposizione numerata, piu' i dettagli della griglia in mm
+    # (photo_grounding.detail_grid): la foto finta e' a 3 px/mm, sotto
+    # l'obiettivo, quindi nessun dettaglio. Contratto aggiornato il 26/09.
+    tiles = detail_grid(40, 20, (120, 60))
+    assert tiles == []
+    assert len([b for b in calls[0]['content_blocks'] if b['type'] == 'image_url']) == 2 + len(tiles)
     metadata = json.loads(calls[0]['content_blocks'][4]['text'])
     assert [c['id'] for c in metadata['candidates']] == [1, 2]
     assert calls[0]['model'] == 'unchanged/model'

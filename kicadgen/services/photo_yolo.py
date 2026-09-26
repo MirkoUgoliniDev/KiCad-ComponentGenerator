@@ -1,7 +1,9 @@
 """@brief Detect generic PCB envelopes with a strictly local, optional YOLO model.
 
 @note The caller supplies an already calibrated BGR board crop. This module does
-not calibrate, download weights, infer package identity, or measure height.
+not calibrate, download weights, infer package identity, or measure height: the
+height it writes is an estimate from the detector class and the plan
+(photo_heights), always marked `_height_estimated`.
 Weights are a local .onnx file (onnxruntime, CPU) or a local .pt checkpoint
 (PyTorch/Ultralytics, optional install); both go through the same letterbox,
 thresholds, NMS and audit code.
@@ -25,8 +27,10 @@ from pathlib import Path
 import tempfile
 try:
     from .messages import tx
+    from .photo_heights import estimate_body_height
 except ImportError:  # caricato come file a se' (test di isolamento degli import)
     from kicadgen.services.messages import tx
+    from kicadgen.services.photo_heights import estimate_body_height
 
 
 _CLASSES = (
@@ -822,6 +826,41 @@ def _proposals(raw, bounds, image_size, transform, view, np, confidence_threshol
     return rows, invalid_count
 
 
+def awaiting_user_keep(proposal) -> bool:
+    """@brief Tell whether a proposal waits for a person to keep it before anything uses it.
+
+    @param proposal Detector proposal (dict).
+    @return True for a sub-threshold proposal (`_yolo_low_confidence`) that
+        nobody kept in the review (`_yolo_user_kept` not True).
+    @note Contract of the low-confidence proposals (user decision 2026-09-26):
+        they are SHOWN in the review, dashed and labelled as low confidence,
+        but they are opt-in -- not accepted by default and never sent to the
+        paid AI verification unless the user keeps them. On the test board
+        most of them were noise over empty areas, which is why they are not
+        sent by default; low confidence is still not proof of absence, which
+        is why they are shown instead of dropped. Proposals rebuilt from tile
+        seams are weak for a geometric reason and are NOT flagged: they keep
+        going to the review and to the model as before.
+    """
+    return (isinstance(proposal, dict) and proposal.get("_yolo_low_confidence") is True
+            and proposal.get("_yolo_user_kept") is not True)
+
+
+def split_ai_candidates(proposals):
+    """@brief Separate the proposals that may reach the paid AI from those still awaiting a person.
+
+    @param proposals Detector proposals, possibly after the review.
+    @return (sent, withheld): two new lists, input order preserved; the dicts
+        themselves are not copied or modified.
+    @note Every paid path filters through here, so a caller that skips the
+        review cannot send unkept low-confidence proposals by mistake.
+    """
+    sent, withheld = [], []
+    for proposal in proposals:
+        (withheld if awaiting_user_keep(proposal) else sent).append(proposal)
+    return sent, withheld
+
+
 def _dimension(value, name):
     if isinstance(value, bool) or not isinstance(value, Real):
         raise ValueError(f"{name} must be a finite positive number in mm (not a boolean).")
@@ -867,20 +906,25 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
         it overrides settings["confidence"].
     @param settings Detector settings chosen by the user (see yolo_settings);
         None keeps every default. Recorded in the log and the audit recipe.
-    @param include_review_candidates Include the subthreshold bodies REBUILT
-        from tile seams as generic uncertain review-only candidates, even
-        without an audit directory. Defaults to False for standalone detector
-        compatibility. The other weak proposals are never returned: they stay
-        in the audit only, because on a populated board they are mostly noise
-        over areas where nothing is mounted, and they make the single paid call
-        noisier and dearer. Reuses the same inference views; stores weak
-        proposals in memory and runs extra NMS (quadratic worst case).
+    @param include_review_candidates Also return the sub-threshold body
+        hypotheses, deduplicated against the retained bodies, even without an
+        audit directory. Defaults to False for standalone detector
+        compatibility. Those REBUILT from tile seams come back as uncertain
+        review-only candidates, as before. The other weak proposals come back
+        flagged `_yolo_low_confidence` True: shown in the review as low
+        confidence, opt-in, and withheld from every paid AI call until a
+        person keeps them (awaiting_user_keep, split_ai_candidates). Reuses
+        the same inference views; stores weak proposals in memory and runs
+        extra NMS (quadratic worst case).
     @return photo_grounding-compatible dictionaries ordered top-to-bottom then
         left-to-right, with normalized _box and board-centered mm coordinates.
     @throws ValueError For invalid photo/dimensions/model/runtime, failed inference
         or an unwritable audit directory. Partial inference is never returned.
     @note X points right and Y down. Long/short dimensions determine rotation
-        0/90; height_mm=1.0 is explicitly an estimated, unmeasured placeholder.
+        0/90. height_mm is an ESTIMATE from the detector class and the plan
+        (photo_heights.estimate_body_height; 1.0 mm placeholder for an
+        ambiguous or unknown class), never a measurement: `_height_estimated`
+        is always True and `_height_source` ends in `_not_measured`.
         Classes/confidence remain detector evidence only; all kinds are generic.
         Pads/pins winners with competing body evidence at the normal confidence
         threshold survive as uncertain generic candidates, never verified bodies.
@@ -888,8 +932,8 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
         before filtering/NMS, invalid-row counts, and retained detector results.
         Schema 2 adds decoded BGR pixel hash, NMS suppressor links and detector
         proposal IDs on components. Low-confidence body proposals are separately
-        deduplicated for review; of those, only the ones rebuilt from tile
-        seams are returned, and only with include_review_candidates.
+        deduplicated for review and returned only with
+        include_review_candidates (`_yolo_low_confidence` marks the opt-in ones).
         _yolo_origin and _yolo_review_only distinguish operating-threshold output
         from weak review hypotheses. IDs are unique within each returned run.
         No evidence below the audit floor is stored;
@@ -1013,31 +1057,44 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
             [row for row in _nms(review_pool, np, review_trace, "review_pool", nms_iou)
              if row["rejection"] == "below_confidence"],
             whole, overlap)
-    # Le proposte deboli non arrivano piu' alla revisione ne' al modello: sulla
-    # scheda di prova erano 35 su 82, quasi tutte su zone dove non c'e' nulla
-    # montato, e rendevano piu' rumorosa (e piu' cara) l'unica chiamata a
-    # pagamento. Restano nell'audit, dove si possono sempre guardare.
-    # Fanno eccezione i corpi RICOMPOSTI dalle cuciture fra tessere: quelli
-    # stanno sotto soglia per un motivo geometrico -- nessuna vista ne ha visto
-    # piu' di un pezzo -- non perche' il rilevatore dubiti che il corpo ci sia.
-    # Scartarli vorrebbe dire perdere proprio i corpi che nessuna tessera
-    # contiene per intero, che sono quelli piu' facili da non vedere a occhio.
-    # Le viste che attestano una presenza non passano piu' da qui: sono gia'
-    # fra i corpi a soglia operativa (vedi `attested` sopra).
+    # Le proposte deboli tornano VISIBILI nella revisione (utente, 26/09):
+    # prima sparivano, perche' sulla scheda di prova erano 35 su 82, quasi
+    # tutte su zone vuote, e rendevano piu' rumorosa (e piu' cara) l'unica
+    # chiamata a pagamento. Ma una confidenza bassa non e' prova di assenza, e
+    # la soglia che le separava viene da quella scheda. Ora escono marcate
+    # `_yolo_low_confidence`: la revisione le mostra tratteggiate e NON tenute,
+    # e nessun percorso a pagamento le manda al modello se l'utente non le
+    # tiene (awaiting_user_keep / split_ai_candidates).
+    # I corpi RICOMPOSTI dalle cuciture fra tessere restano come prima, non
+    # marcati: sono sotto soglia per un motivo geometrico -- nessuna vista ne
+    # ha visto piu' di un pezzo -- non perche' il rilevatore dubiti che il
+    # corpo ci sia. Le viste che attestano una presenza non passano da qui:
+    # sono gia' fra i corpi a soglia operativa (vedi `attested` sopra).
     rebuilt = [row for row in review_proposals if row.get("recovered_from")]
-    returned = retained + (rebuilt if include_review_candidates else [])
+    weak = [row for row in review_proposals if not row.get("recovered_from")]
+    returned = retained + ((rebuilt + weak) if include_review_candidates else [])
     returned.sort(key=lambda row: (row["box"][1], row["box"][0]))
     components = []
     for identifier, row in enumerate(returned, 1):
         x0, y0, x1, y1 = [v / dim for v, dim in zip(row["box"], (width, height, width, height))]
         sx, sy = (x1 - x0) * length_mm, (y1 - y0) * width_mm
+        low_confidence = row["rejection"] == "below_confidence" and not row.get("recovered_from")
+        # Altezza: stima dalla classe del rilevatore e dalla pianta, mai una
+        # misura (photo_heights). Una classe ambigua o senza regola resta il
+        # segnaposto dichiarato di sempre.
+        estimate = (None if row["class_ambiguous"]
+                    else estimate_body_height(row["class"], sx, sy))
+        body_height, height_basis = estimate if estimate is not None else (
+            1.0, "estimated_placeholder_not_measured")
         components.append({
             "name": f"YOLO candidate {identifier}", "kind": "generic",
             "x_mm": ((x0 + x1) / 2 - 0.5) * length_mm,
             "y_mm": ((y0 + y1) / 2 - 0.5) * width_mm,
             "length_mm": max(sx, sy), "width_mm": min(sx, sy),
-            "rotation_deg": 0 if sx >= sy else 90, "height_mm": 1.0,
-            "_height_source": "estimated_placeholder_not_measured", "_height_estimated": True,
+            "rotation_deg": 0 if sx >= sy else 90, "height_mm": body_height,
+            "_height_source": ("detector_class_" + height_basis if estimate is not None
+                               else height_basis),
+            "_height_basis": height_basis, "_height_estimated": True,
             "color_hex": "#303030", "marking": "", "confidence": "low",
             "_box": (x0, y0, x1, y1),
             "_source": ("YOLO local, ricomposto da cucitura" if row.get("recovered_from")
@@ -1054,6 +1111,9 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
             "_yolo_origin": ("low_confidence_review" if row["rejection"] == "below_confidence"
                              else "operating_threshold"),
             "_yolo_review_only": row["rejection"] == "below_confidence",
+            # Sotto soglia e non ricomposta: visibile in revisione, ma da
+            # tenere a mano prima di qualunque uso (awaiting_user_keep).
+            "_yolo_low_confidence": low_confidence,
             # Presenza attestata da un frammento sicuro, ingombro misurato da
             # una vista che lo contiene per intero ma con meno confidenza.
             "_yolo_geometry_from_weaker_view": bool(row.get("geometry_from_weaker_view")),
@@ -1092,14 +1152,13 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
         emit(f"YOLO local audit: {_write_audit(audit_dir, audit)}")
     if audit_dir is not None or include_review_candidates:
         if include_review_candidates:
-            emit(tx("YOLO local: of {n_review_proposals} low-confidence body hypotheses, "
-                    "{n_rebuilt} rebuilt from tile seams are included as uncertain "
-                    "review-only candidates; the other {value} are weak detections over "
-                    "areas the detector was unsure about and stay in the audit only, so "
-                    "they neither show in the review nor reach the model.",
+            emit(tx("YOLO locale: {n_review_proposals} ipotesi sotto la soglia operativa. "
+                    "{n_rebuilt} ricomposte dalle cuciture fra tessere entrano come candidati "
+                    "dubbi; le altre {value} compaiono nella revisione come «bassa "
+                    "confidenza», non tenute: arrivano al modello solo se le tieni.",
                     n_review_proposals=len(review_proposals),
                     n_rebuilt=len(rebuilt),
-                    value=len(review_proposals) - len(rebuilt)))
+                    value=len(weak)))
         else:
             emit(tx("YOLO local: {n_review_proposals} additional low-confidence body "
                     "hypotheses saved for review in audit only; not returned.",

@@ -55,7 +55,7 @@ def test_an_accepted_photo_is_green_and_keeps_the_resolution_visible(window, tmp
 def test_a_coarse_photo_is_amber_not_green(window, tmp_path):
     """Calibra, ma a quella scala i passivi piccoli restano invisibili."""
     icon, summary, explanation, colour = verdict_for(
-        window, 'top', board_photo(tmp_path, 'b.png', 8))
+        window, ['top', 'hires'], board_photo(tmp_path, 'b.png', 8))
     assert icon == '\u26a0' and colour == '#f9e2af'
     assert 'px/mm' in summary and 'piccoli' in explanation
 
@@ -96,7 +96,7 @@ def test_the_explanation_goes_to_the_tooltip_not_into_the_card(window, tmp_path,
     DocumentSet(window._docs_dir()).import_file('hires', board_photo(tmp_path, 'src.png', 30))
     panel._calibration_cache.clear()
     panel.refresh()
-    label = panel.cards['hires']['verdict']
+    label = panel.cards['src.png']['verdict']
     assert 'px/mm' in label.text()
     assert 'utilizzabile' not in label.text()
     assert 'utilizzabile' in label.toolTip()
@@ -110,3 +110,22 @@ def test_the_verdict_strings_are_translated(window, language):
                    'documento caricato; non richiede calibrazione.'):
         entry = DEFAULT_TRANSLATIONS.get(f'ui:{source}')
         assert entry and entry.get(language), f'manca {language} per «{source}»'
+
+
+def test_only_a_file_ticked_as_photo_is_calibrated(window, tmp_path):
+    """Stessa immagine, ruoli diversi: il disegno quotato non va al riconoscimento.
+
+    Dal 26/09 un file puo' avere piu' ruoli e solo la foto (hires) viene
+    calibrata e passata al rilevatore; prima anche la vista quotata lo era.
+    """
+    path = board_photo(tmp_path, 'same.png', 30)
+    drawing = verdict_for(window, ['top'], path)
+    photo = verdict_for(window, ['top', 'hires'], path)
+    assert drawing[0] == '✓' and 'px/mm' not in drawing[1]
+    assert 'calibrazione' in drawing[2]
+    assert 'px/mm' in photo[1] and photo[3] == '#a6e3a1'
+
+
+def test_a_file_without_roles_is_flagged(window, tmp_path):
+    icon, summary, explanation, colour = verdict_for(window, [], board_photo(tmp_path, 'n.png', 30))
+    assert icon == '⚠' and colour == '#f9e2af' and 'ruolo' in explanation
