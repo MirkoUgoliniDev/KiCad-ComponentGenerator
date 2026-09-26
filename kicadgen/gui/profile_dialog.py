@@ -227,7 +227,8 @@ class ProfileEditor(QDialog):
                   'Salva conferma le modifiche; Annulla le scarta. '
                   'La famiglia geometrica deve essere una di quelle supportate dal generatore. '
                   'Gli schemi JSON e i controlli geometrici sono gestiti dal codice, non dai prompt. '
-                  'La chiave OPENROUTER_API_KEY resta nel file .env, mai nel database.',
+                  'La chiave OpenRouter resta nel Gestore credenziali di Windows (o nel file .env), '
+                  'mai nel database.',
                   text_key=f'help.profile.stage.{index}')
 
     def _save(self):

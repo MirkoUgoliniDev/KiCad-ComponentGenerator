@@ -82,6 +82,17 @@ def user_data_dir() -> Path:
     return install_dir()
 
 
+def logs_dir() -> Path:
+    """@brief Folder of the program's own logs (crash reports among them).
+
+    @return ``<user_data_dir()>/logs``: ``%LOCALAPPDATA%\\KiCadGen\\logs`` when
+        installed, ``<repository>/logs`` from the sources.
+    @note Never created here, like `user_data_dir`. The logs of an analysis
+        (`analisi-ai.log`, `freecad.log`) stay in the project folder.
+    """
+    return user_data_dir() / "logs"
+
+
 def _documents_dir() -> Path:
     """The user's Documents folder, following a redirection (e.g. OneDrive)."""
     if os.name == "nt":

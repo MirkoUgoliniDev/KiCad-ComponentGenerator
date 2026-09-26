@@ -103,7 +103,8 @@ flowchart LR
     Q --> O[Generation or review]
 ~~~
 
-The API key is read from the local .env file and is never stored in the profile
+The API key is kept in the Windows Credential Manager (Configuration →
+«AI account...») or in a local .env file, and is never stored in the profile
 database. Cached AI responses and generated output are local data.
 
 ## Workflow
@@ -162,13 +163,19 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ~~~
 
-Create a local .env file with an OpenRouter key:
+Set the OpenRouter key from the program: Configuration → «AI account...»,
+paste the key, press «Verify», then «Save». It is stored in the Windows
+Credential Manager of your user account, not in a file.
+
+A local .env file still works, for example on a development machine:
 
 ~~~text
 OPENROUTER_API_KEY=your-key-here
 ~~~
 
-Do not commit .env, API keys, generated output or migration backups.
+The key is looked up in this order: the `OPENROUTER_API_KEY` environment
+variable, the Windows Credential Manager, the .env file. Do not commit .env,
+API keys, generated output or migration backups.
 
 ## Run the application
 

@@ -18,10 +18,12 @@ richiesta esplicita.
 Oggi, all'apertura senza progetto, si vedono tre riquadri «Nessun file», un
 campo nome disabilitato e un grande pulsante che non si può usare.
 
-- [ ] **Schermata iniziale** quando nessun progetto è aperto: «Nuovo
+- [x] **Schermata iniziale** quando nessun progetto è aperto: «Nuovo
       progetto», «Apri progetto», **elenco dei progetti recenti**, e
-      facoltativamente un **progetto di esempio**.
-- [ ] Voce **«Progetti recenti»** nel menu File.
+      facoltativamente un **progetto di esempio**. *(26/09: fatta, con
+      l'area di lavoro modificabile; il progetto di esempio aspetta una
+      decisione dell'utente: quale scheda e con quali documenti.)*
+- [x] Voce **«Progetti recenti»** nel menu File.
 
 Fatto quando: aprendo il programma senza progetto non c'è nessun controllo
 disabilitato senza spiegazione, e un progetto recente si riapre con un clic.
@@ -31,22 +33,22 @@ disabilitato senza spiegazione, e un progetto recente si riapre con un clic.
 Oggi la chiave OpenRouter va scritta a mano in un file `.env`: per un utente
 normale è il primo ostacolo.
 
-- [ ] Finestra **«Account AI»** dove incollare la chiave e **verificarla**.
-- [ ] Chiave salvata nel **Gestore credenziali di Windows**, non in chiaro.
-- [ ] Il `.env` resta valido per chi lo usa già (compatibilità).
+- [x] Finestra **«Account AI»** dove incollare la chiave e **verificarla**.
+- [x] Chiave salvata nel **Gestore credenziali di Windows**, non in chiaro.
+- [x] Il `.env` resta valido per chi lo usa già (compatibilità).
 
 Fatto quando: un utente appena installato arriva alla prima analisi senza
 aprire nessun file a mano.
 
 ## 3. Identità coerente
 
-- [ ] Titolo della finestra con progetto e versione, per esempio
+- [x] Titolo della finestra con progetto e versione, per esempio
       **«YOL — KiCadGen 1.0.0»** (oggi dice «KiCadGen-Tool»).
-- [ ] Testi incoerenti da correggere:
-  - [ ] «Anteprima FootPrint» → «Anteprima footprint»;
-  - [ ] «About» rimasto in inglese nel menu italiano → **«Informazioni su
+- [x] Testi incoerenti da correggere:
+  - [x] «Anteprima FootPrint» → «Anteprima footprint»;
+  - [x] «About» rimasto in inglese nel menu italiano → **«Informazioni su
         KiCadGen»**;
-  - [ ] le lineette «—» sotto i riquadri vuoti dei documenti.
+  - [x] le lineette «—» sotto i riquadri vuoti dei documenti.
 
 Fatto quando: nome del prodotto uguale ovunque (titolo, installer, About,
 documentazione) e nessun testo in una lingua diversa da quella scelta.
@@ -56,44 +58,55 @@ documentazione) e nessun testo in una lingua diversa da quella scelta.
 Il flusso ha fasi precise: documenti → analisi → revisione dei corpi → 3D →
 KiCad.
 
-- [ ] **Barra dei passi** in alto: passo corrente evidenziato, passi fatti
+- [x] **Barra dei passi** in alto: passo corrente evidenziato, passi fatti
       spuntati.
-- [ ] **Barra di stato** in basso (oggi assente): «Pronto», «Analisi in
+- [x] **Barra di stato** in basso (oggi assente): «Pronto», «Analisi in
       corso…», saldo, progetto aperto.
 
 ## 5. Aiuto e assistenza
 
 Nel menu «?» mancano:
 
-- [ ] **Guida d'uso**: una pagina o un PDF con un esempio completo;
-- [ ] **«Segnala un problema»**: apre GitHub con versione e log già allegati;
-- [ ] **«Apri cartella dei log»**.
-- [ ] Decidere dove ridare un posto alle voci tolte il 25/09 (vedi sotto),
-      per esempio in un menu **«Strumenti»**.
+- [x] **Guida d'uso**: una pagina o un PDF con un esempio completo;
+      *(26/09: pagina HTML in italiano, F1; solo italiano per ora.)*
+- [x] **«Segnala un problema»**: apre GitHub con versione e log già allegati;
+      *(26/09: GitHub non accetta allegati da un link: si apre la pagina
+      precompilata SENZA percorsi né nomi utente e insieme la cartella dei
+      log, da allegare dopo averli controllati.)*
+- [x] **«Apri cartella dei log»**.
+- [x] Decidere dove ridare un posto alle voci tolte il 25/09 (vedi sotto),
+      per esempio in un menu **«Strumenti»**. *(26/09: deciso e fatto, menu
+      «Strumenti» con tutte e sei le voci.)*
 
 ## 6. Affidabilità percepita
 
 - [ ] **Firma digitale** dell'installer: senza, Windows mostra «Editore
       sconosciuto» e molti si fermano lì. Richiede l'acquisto di un
       certificato (decisione e spesa dell'utente).
-- [ ] **Controllo aggiornamenti** all'avvio, confrontando con l'ultima
-      release su GitHub.
-- [ ] **Log su file e rapporto di crash**, per capire cosa è successo sul
-      computer di un utente.
+- [x] **Controllo aggiornamenti** all'avvio, confrontando con l'ultima
+      release su GitHub. *(26/09: fatto SOLO a richiesta, «?» →
+      «Controlla aggiornamenti...»; l'utente ha deciso di NON farlo
+      all'avvio: nessuna chiamata di rete non chiesta.)*
+- [x] **Log su file e rapporto di crash**, per capire cosa è successo sul
+      computer di un utente. *(26/09: rapporti in
+      `%LOCALAPPDATA%\KiCadGen\logs\crash-reports`, ripuliti da nomi utente
+      e chiavi; dopo un errore non gestito il programma si ferma come prima:
+      continuare è una decisione dell'utente.)*
 
 ## 7. Finiture
 
-- [ ] **Scorciatoie da tastiera** per le azioni principali, con l'elenco nel
+- [x] **Scorciatoie da tastiera** per le azioni principali, con l'elenco nel
       menu.
 - [ ] **Tema chiaro** oltre a quello scuro.
-- [ ] Controllo a schermi ad **alta risoluzione** (150% e 200%).
+- [x] Controllo a schermi ad **alta risoluzione** (150% e 200%).
 
 ---
 
 ## Voci di menu tolte il 25/09 (decisione rimandata)
 
-Tolte su richiesta dell'utente; le funzioni esistono ancora. Resta da decidere
-se dare loro una voce di menu dedicata (per esempio «Strumenti»):
+Tolte su richiesta dell'utente il 25/09. **Dal 26/09 stanno tutte nel menu
+«Strumenti»** (decisione dell'utente); i comandi KiCad restano anche nella
+scheda KiCad:
 
 - «?» → «Apri cartella progetto tool» (cartella dei dati dell'utente);
 - Configurazione → «Apri config.json» (il metodo `_open_config_file` è

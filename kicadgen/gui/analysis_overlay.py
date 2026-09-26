@@ -756,6 +756,10 @@ class AnalysisOverlay(QWidget):
     #: Emesso quando l'utente chiude una scheda rimasta aperta a lavoro finito
     #: (`show_completed`): chi l'ha lasciata aperta riprende da li'.
     closed = pyqtSignal()
+    #: Emesso all'inizio di un'operazione con il titolo gia' tradotto, e alla
+    #: fine: la barra di stato della finestra dice «Pronto» o cosa e' in corso.
+    operation_started = pyqtSignal(str)
+    operation_finished = pyqtSignal()
 
     def __init__(self, parent, *, i18n=None):
         super().__init__(parent)
@@ -1222,6 +1226,7 @@ class AnalysisOverlay(QWidget):
         self.raise_()
         self.log_button.setFocus()
         self.timer.start()
+        self.operation_started.emit(self.title.text())
 
     def set_tool(self, tool, detail=""):
         """@brief Name the tool now at work, with its own mark and color.
@@ -1301,6 +1306,7 @@ class AnalysisOverlay(QWidget):
         self.set_status(message)
         self.close_button.show()
         self.close_button.setFocus()
+        self.operation_finished.emit()
 
     def is_holding_completed(self):
         """@brief Tell whether the card is open on a finished job, waiting for «Chiudi»."""
@@ -1546,6 +1552,7 @@ class AnalysisOverlay(QWidget):
         self.set_progress(None, None)
         self.set_abortable(False)
         self.hide()
+        self.operation_finished.emit()
 
     def hideEvent(self, event):
         """@brief Stop the animation whenever the overlay goes away.

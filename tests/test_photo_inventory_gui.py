@@ -77,6 +77,11 @@ def window(monkeypatch, tmp_path):
     monkeypatch.setattr(gui, "save_config", lambda config: None)
     monkeypatch.setattr(QMessageBox, "information", lambda *args: None)
     monkeypatch.setattr(gui, "DEFAULT_LIBRARY_ROOT", tmp_path)
+    # Questi test simulano chi ha gia' configurato l'AI: dal 26/09 i comandi a
+    # pagamento chiedono la chiave prima di partire (`_ensure_api_key`). Una
+    # chiave finta, mai usata in rete (i lavori AI sono sostituiti nei test);
+    # il caso senza chiave ha i suoi test in test_ai_account_menu.py.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test-fixture")
     w = gui.MainWindow()
     # Geometry/lifecycle tests inject their document selection independently of
     # the guided uploader; uploader integration has dedicated tests.

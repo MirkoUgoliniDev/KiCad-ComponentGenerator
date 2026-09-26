@@ -64,7 +64,8 @@ def test_project_change_refreshes_roles_instead_of_reusing_previous_files(window
     assert window.guided_docs.cards['top']['filename'].text() == 'top.png'
     old_name = window._component_name()
     window.field_name.setText('Other')
-    assert window.guided_docs.cards['top']['filename'].text() == '—'
+    # Nessuna lineetta finta sotto un riquadro vuoto (PIANO-FIX, identita').
+    assert window.guided_docs.cards['top']['filename'].text() == ''
     window.field_name.setText(old_name)
     assert window.guided_docs.cards['top']['filename'].text() == 'top.png'
 

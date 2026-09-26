@@ -26,27 +26,44 @@ def test_a_missing_file_is_said_not_raised(window, monkeypatch, tmp_path):  # no
 
 
 def test_the_help_menu_holds_only_licenses_and_about(window):  # noqa: F811
-    """@brief Utente, 25/09: tolta «Apri cartella progetto tool» dal menu «?»."""
+    """@brief Utente, 25/09: tolta «Apri cartella progetto tool» dal menu «?».
+
+    PIANO-FIX 5-7 (26/09) aggiunge guida, log, segnalazione, aggiornamenti e
+    scorciatoie; la voce tolta resta tolta.
+    """
     actions = [a for a in window.menuBar().actions()][-1].menu().actions()
     texts = [a.text() for a in actions if not a.isSeparator()]
-    assert texts == ["Licenze", "About"]
-    assert not hasattr(window, "action_open_tool_dir")
+    assert texts == ["Guida d'uso", "Apri cartella dei log", "Segnala un problema...",
+                     "Controlla aggiornamenti...", "Licenze", "Informazioni su KiCadGen",
+                     "Scorciatoie da tastiera..."]
+    assert not any("progetto tool" in text for text in texts)
+    # Dal 26/09 la voce vive nel menu «Strumenti» (decisione dell'utente).
+    assert window.action_open_tool_dir not in actions
+    assert window.action_open_tool_dir in window.menu_tools.actions()
 
 
 def test_the_configuration_menu_no_longer_opens_config_json(window):  # noqa: F811
-    """@brief Utente, 25/09: tolta «Apri config.json» dal menu Configurazione."""
-    menus = [a.menu() for a in window.menuBar().actions() if a.menu()]
+    """@brief Utente, 25/09: tolta «Apri config.json» dal menu Configurazione.
+
+    Dal 26/09 sta nel menu «Strumenti» (decisione dell'utente), in nessun altro.
+    """
+    menus = [a.menu() for a in window.menuBar().actions()
+             if a.menu() and a.menu() is not window.menu_tools]
     texts = [a.text() for menu in menus for a in menu.actions()]
     assert "Apri config.json" not in texts
     assert "Archivio abbinamenti accettati..." in texts  # il resto del menu c'e'
-    assert not hasattr(window, "action_open_config")
+    assert window.action_open_config in window.menu_tools.actions()
 
 
 def test_the_file_menu_holds_only_the_project_commands(window):  # noqa: F811
     """@brief Utente, 25/09: dal menu File tolte cartella componente e comandi KiCad."""
     file_menu = window.menuBar().actions()[0].menu()
     texts = [a.text() for a in file_menu.actions() if not a.isSeparator()]
-    assert texts == ["Nuovo progetto...", "Apri progetto...", "Rinomina progetto...", "Esci"]
+    # «Progetti recenti» (PIANO-FIX 1, 26/09) e' un sottomenu di progetti.
+    assert texts == ["Nuovo progetto...", "Apri progetto...", "Rinomina progetto...",
+                     "Progetti recenti", "Esci"]
+    # Dal 26/09 queste voci stanno nel menu «Strumenti» (decisione dell'utente).
     for name in ("action_open_output", "action_test_kicad", "action_export",
                  "action_install_global"):
-        assert not hasattr(window, name)
+        assert getattr(window, name) not in file_menu.actions()
+        assert getattr(window, name) in window.menu_tools.actions()

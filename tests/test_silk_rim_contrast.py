@@ -11,12 +11,12 @@ SRC = Path(__file__).resolve().parents[1] / "kicadgen" / "cad3d" / "freecad_buil
 def rim():
     """Estrae le sole funzioni del contrasto: il modulo intero pretende FreeCAD."""
     tree = ast.parse(SRC.read_text(encoding="utf-8"))
-    wanted = {"_relative_luminance", "_needs_silk_rim"}
+    wanted = {"_relative_luminance", "_needs_silk_rim", "_needs_component_rim"}
     body = [n for n in tree.body
             if (isinstance(n, ast.FunctionDef) and n.name in wanted)
             or (isinstance(n, ast.Assign)
                 and any(getattr(t, "id", "") == "SILK_RIM_MIN_CONTRAST" for t in n.targets))]
-    assert len(body) == 3, [getattr(n, "name", n) for n in body]
+    assert len(body) == 4, [getattr(n, "name", n) for n in body]
     namespace = {}
     exec(compile(ast.Module(body=body, type_ignores=[]), "<rim>", "exec"), namespace)
     return namespace
@@ -55,3 +55,21 @@ def test_the_relation_is_symmetric_and_survives_a_broken_colour(rim):
     # Un colore illeggibile non deve far cadere la generazione: vale nero, e
     # nero su PCB scuro la cornice se la merita.
     assert rim["_needs_silk_rim"]("non-un-colore", PCB) is True
+
+
+class _Library(str):
+    """Colore di una parte importata: una stringa che porta `model_path`."""
+    model_path = "C:/KiCad/3dmodels/modulo.step"
+
+
+def test_a_dark_body_from_the_kicad_library_gets_no_frame(rim):
+    """@brief Il modello KiCad ha i suoi colori: niente cornice anche se la foto e' scura."""
+    built = [(object(), _Library("#b0c7db"))]
+    assert rim["_needs_component_rim"]("#1a1a1a", PCB, built) is False
+
+
+def test_a_dark_approximated_body_keeps_its_frame(rim):
+    """@brief Negativo: forma approssimata scura (anche il ripiego di un import fallito)."""
+    built = [(object(), "#1a1a1a"), (object(), "#c8c8c8")]
+    assert rim["_needs_component_rim"]("#1a1a1a", PCB, built) is True
+    assert rim["_needs_component_rim"]("#ffffff", PCB, built) is False

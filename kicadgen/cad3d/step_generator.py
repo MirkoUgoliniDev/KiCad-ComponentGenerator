@@ -391,11 +391,14 @@ def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: 
 
     @param params Validated module description.
     @param pin_color_hex Colour of every plated feature (same metal everywhere).
-    @return (notches, contacts, silk_texts, silk_outline, notes):
+    @return (notches, contacts, silk_texts, notes):
         `notches` are the cylinders subtracted from the board; `contacts` the
         plated features, one entry per contact; `silk_texts` the optional
-        labels; `silk_outline` the board silkscreen frame or None; `notes`
-        human-readable lines about estimated quantities (Italian, for the log).
+        labels; `notes` human-readable lines about estimated quantities
+        (Italian, for the log).
+    @note No board silkscreen frame any more (user, 2026-09-26): it was a
+        rectangle drawn inside the contacts, taken from no document or photo,
+        and it read as a real feature of the board.
     @note Per contact style:
         * half_hole -- a notch of radius hole_diameter/2 at half_hole_inset,
           and an edge contact (sleeve + rectangular pads on both faces);
@@ -428,15 +431,10 @@ def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: 
     contacts = []
     silk_texts = []
     label_gap = radius + SILK_LABEL_MARGIN_MM
-    # Profondita' dal bordo occupata da contatti e sigle, per asse: serve alla
-    # cornice serigrafica, che non deve passarci sopra.
-    reach = {"x": 0.0, "y": 0.0}
     for placement in pad_positions(params):
-        axis = "x" if placement.edge in ("left", "right") else "y"
         if placement.style == CONTACT_THROUGH_HOLE:
             centre = (placement.x, placement.y)
             ring = params.thru_pad_diameter
-            depth = params.through_hole_inset(placement.edge) + ring / 2
             gap = drill_radius + SILK_LABEL_MARGIN_MM
             inward = {"left": (1, 0), "right": (-1, 0), "top": (0, 1), "bottom": (0, -1)}[placement.edge]
             label = (centre[0] + inward[0] * (ring / 2 + gap),
@@ -449,7 +447,6 @@ def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: 
                 "pad_length_mm": ring, "pad_width_mm": ring,
                 "color_hex": pin_color_hex,
             })
-            reach[axis] = max(reach[axis], depth + 1.6)
         else:
             pad_len = placement.width if placement.edge in ("left", "right") else placement.height
             pad_w = placement.height if placement.edge in ("left", "right") else placement.width
@@ -474,7 +471,6 @@ def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: 
                 "pad_length_mm": inner_len, "pad_width_mm": pad_w,
                 "color_hex": pin_color_hex,
             }
-            copper_reach = params.pad_length
             if placement.style == CONTACT_HALF_AND_THROUGH and params.has_thru_holes:
                 # Il foro intero non tocca il bordo: e' l'altra meta' del
                 # contatto, quella in cui si salda uno strip. Va tagliato E
@@ -497,27 +493,13 @@ def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: 
                 edge_y = centre[1] - inward[1] * inset
                 depth = max(inner_len, land.inner_reach) + label_gap
                 label = (edge_x + inward[0] * depth, edge_y + inward[1] * depth)
-                copper_reach = max(params.pad_length, land.inner_reach)
             contacts.append(contact)
-            reach[axis] = max(reach[axis], copper_reach + 1.6)
         text = params.silk_labels.get(placement.number, "").strip()
         if text and params.show_silk_labels_3d:
             silk_texts.append({
                 "x": label[0], "y": label[1], "text": text, "size_mm": 0.7,
                 "angle": 0, "color_hex": params.silk_color_hex,
             })
-
-    # Cornice serigrafica: rientra dai bordi con i contatti quanto basta a
-    # non passare sopra piazzole e sigle.
-    inset_x = reach["x"] or 0.4
-    inset_y = reach["y"] or 0.4
-    silk_outline = None
-    if params.body_length - 2 * inset_x > 2 and params.body_width - 2 * inset_y > 2:
-        silk_outline = {
-            "x": 0.0, "y": 0.0,
-            "length_mm": params.body_length - 2 * inset_x,
-            "width_mm": params.body_width - 2 * inset_y,
-        }
 
     notes = []
     for side in params.sides:
@@ -542,7 +524,7 @@ def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: 
                    value=value,
                    edge_extent=params.edge_extent(side.edge),
                    row_spacing=params.row_spacing))
-    return notches, contacts, silk_texts, silk_outline, notes
+    return notches, contacts, silk_texts, notes
 
 
 def castellated_header_pins(params: CastellatedModuleParams):
@@ -627,7 +609,7 @@ def generate_castellated_3d_model(
     """
     params.validate()
 
-    notches, contacts, silk_texts, silk_outline, inset_notes = castellated_contact_payload(
+    notches, contacts, silk_texts, inset_notes = castellated_contact_payload(
         params, body.pin_color_hex)
 
     # Strip maschi solo nei fori passanti veri (decisione dell'utente,
@@ -654,6 +636,9 @@ def generate_castellated_3d_model(
     # stimata ridotta) e' una correzione di una stima: va detta, non fatta in
     # silenzio (regola del progetto sulle altezze stimate).
     placement_notes = []
+    # Note di altezza ridotta in attesa dell'abbinamento ai modelli KiCad:
+    # (dizionario del corpo, testo). Vedi sotto, dopo `attach_models`.
+    height_notes = []
     for source_row, component in enumerate(params.components):
         if not has_finite_geometry(component):
             placement_notes.append(tx("Componente {name}: posizione, rotazione o quote non "
@@ -676,12 +661,13 @@ def generate_castellated_3d_model(
                     "({x1:.2f}, {y1:.2f}) mm per restare dentro il modulo.",
                     name=component.name, x0=component.x, y0=component.y, x1=x, y1=y))
         height = component.height
+        height_note = None
         if 0 < component_height < component.height:
             height = component_height
-            placement_notes.append(tx(
+            height_note = tx(
                 "Componente {name}: altezza stimata {height:.2f} mm ridotta a {cap:.2f} mm "
                 "(altezza del corpo meno lo spessore del PCB).",
-                name=component.name, height=component.height, cap=component_height))
+                name=component.name, height=component.height, cap=component_height)
         render_kind = component.kind
         if render_kind == "generic" and component.detected_kind:
             render_kind = component.detected_kind
@@ -714,6 +700,8 @@ def generate_castellated_3d_model(
             **_model_placement(component),
             **_match_evidence(component),
         })
+        if height_note:
+            height_notes.append((components[-1], height_note))
 
     extra_boxes = []
     inset_c = params.component_inset
@@ -758,6 +746,15 @@ def generate_castellated_3d_model(
         report_model(tx("Libreria 3D KiCad non utilizzabile ({exc}); si usano le forme "
                         "approssimate.",
                         exc=exc))
+    # L'altezza ridotta vale solo per i corpi costruiti come forma
+    # approssimata: un corpo che riceve un modello della libreria KiCad viene
+    # importato con l'altezza del modello, quindi la nota lo darebbe per
+    # schiacciato quando non lo e' (punto 66c, decisione dell'utente del
+    # 2026-09-26). Se poi l'import del modello fallisce, FreeCAD ripiega sulla
+    # forma approssimata con l'altezza ridotta; quel corpo e' gia' segnalato
+    # come import fallito (magenta, avviso), non da questa nota.
+    placement_notes.extend(note for rendered, note in height_notes
+                           if not rendered.get("model_path"))
 
     # Rilevato PRIMA di chiamare FreeCAD: e' un controllo geometrico sui dati
     # gia' pronti, non serve costruire il solido per accorgersene, e cosi'
@@ -780,7 +777,6 @@ def generate_castellated_3d_model(
         extra_payload={
             "substrate": {"color_hex": params.substrate_color_hex, "mask_thickness_mm": 0.02},
             "silk_texts": silk_texts,
-            "silk_outline": silk_outline,
             "silk_color_hex": params.silk_color_hex,
             "components": components,
             **header_payload,

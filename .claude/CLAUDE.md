@@ -205,10 +205,11 @@ per configurazione e valori predefiniti.
 The repository now includes a dedicated KiCad tab with three operations: test
 the generated result in an isolated PCB Editor project, install a portable
 project library, or install a global library. The current full-suite baseline
-(2026-09-26, branch `FIX` merged into `main`: advanced-user mode and the
-Footprint 2D / Genera tabs removed, parameters as non-graphical data, step-by-step
-progress window, optional male headers, coloured STEP preview, see HANDOFF.md
-points 50-69) is 4786 passed, 3 skipped, 2 expected failures and 19 subtests. The last packaging integration was merge
+(2026-09-26 evening, branch `FIX` merged into `main`: PIANO-FIX start page and
+recent projects, «Account AI...» with the Windows Credential Manager, workflow and
+status bars, help/log/update/crash-report menu, «Strumenti» menu, STEP preview
+mesh cache, no board silkscreen frame, see HANDOFF.md points 71-74) is 5022 passed,
+4 skipped, 2 expected failures and 19 subtests. The last packaging integration was merge
 commit `692ca95` on `main`. Keep these values aligned with HANDOFF.md.
 
 Eseguire la suite dalla radice del repository:

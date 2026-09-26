@@ -92,7 +92,7 @@ class LlmSettingsDialog(QDialog):
             "Questo e' il default generale, ereditato dalle tipologie senza override. Per un datasheet "
             "difficile se ne puo' usare uno piu' potente dal tab \"Progetto\", "
             "solo per quella sessione, senza cambiare il default. "
-            "Serve la chiave OPENROUTER_API_KEY nel file .env."
+            "La chiave OpenRouter si inserisce da Configurazione → «Account AI...»."
         )
         vision_note = (
             "Le foto usano un modello dedicato alla localizzazione; il modello di verifica foto conferma "
