@@ -150,12 +150,19 @@ def _another_component_type(window):  # noqa: F811
 
 
 def test_opening_a_project_never_writes_config_json(window, monkeypatch):  # noqa: F811
-    """@brief Positivo: aprire un progetto con altra tipologia e opzioni non scrive config.json.
+    """@brief Positivo: aprire un progetto con altra tipologia e opzioni non cambia le
+    impostazioni generali di config.json.
 
     Negativo: la stessa tipologia scelta a mano dall'utente si salva come generale.
+    @note Dal 26/09 (PIANO-FIX 1) aprire un progetto aggiorna l'elenco dei
+        progetti recenti, che sta in config.json: quella e' l'unica chiave che
+        un'apertura puo' scrivere.
     """
-    saved = []
-    monkeypatch.setattr(gui, "save_config", lambda config: saved.append(dict(config)))
+    from kicadgen.services import recent_projects
+    written = []
+    monkeypatch.setattr(gui, "save_config", lambda config: written.append(dict(config)))
+    general = {key: value for key, value in window._config.items()
+               if key != recent_projects.CONFIG_KEY}
     root = window._library_root()
     other = _another_component_type(window)
     write_project_config(root / "T", {
@@ -165,11 +172,14 @@ def test_opening_a_project_never_writes_config_json(window, monkeypatch):  # noq
     _open(window, monkeypatch, "T")
     assert window.combo_component_type.currentData() == other
     assert window._include_nc_pins() is False and window._silk_pin_labels() is True
-    assert not saved
+    for config in written:
+        assert {key: value for key, value in config.items()
+                if key != recent_projects.CONFIG_KEY} == general
+    assert written and str(root / "T") in written[-1][recent_projects.CONFIG_KEY]
 
     combo = window.combo_component_type
     combo.setCurrentIndex(combo.findData(_another_component_type(window)))
-    assert saved and saved[-1]["component_type"] == combo.currentData()
+    assert written[-1]["component_type"] == combo.currentData()
 
 
 def test_project_options_do_not_leak_through_a_later_save(window, monkeypatch):  # noqa: F811

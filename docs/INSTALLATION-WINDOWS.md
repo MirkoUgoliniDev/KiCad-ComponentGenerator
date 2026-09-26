@@ -25,20 +25,23 @@ installed somewhere else, KiCadGen can still find them.
 
 ## 3. OpenRouter API key (AI analysis)
 
-The AI analysis needs an OpenRouter API key. For now it is set in a text file:
+The AI analysis needs an OpenRouter API key. Set it from the program:
 
-1. Open the folder `%LOCALAPPDATA%\KiCadGen` (paste it in the File Explorer
-   address bar). It exists after KiCadGen has been started once.
-2. Create a file named `.env` containing one line:
+1. Open Configuration → «AI account...».
+2. Paste the key and press «Verify»: the check reads your credit and spends
+   nothing.
+3. Press «Save». The key is stored in the Windows Credential Manager of your
+   user account, not in a file. «Remove key» deletes it again.
 
-   ```
-   OPENROUTER_API_KEY=sk-or-...
-   ```
+The «AI credit» line in the Project tab shows the balance when the key works.
+If no key is set, KiCadGen says so before starting an analysis and offers to
+open «AI account...».
 
-3. Restart KiCadGen. The «AI credit» line in the Project tab shows the
-   balance when the key works.
-
-The key stays on your computer, in your user folder.
+A text file still works as an alternative, as in earlier versions: create
+`%LOCALAPPDATA%\KiCadGen\.env` (paste the folder in the File Explorer address
+bar; it exists after KiCadGen has been started once) with the line
+`OPENROUTER_API_KEY=sk-or-...`, then restart KiCadGen. A key saved with
+«AI account...» takes precedence over the file.
 
 The program's messages may refer to `.env.example`: it is the commented
 template of that file. In the installed program it is in the program folder,
@@ -52,7 +55,8 @@ Files.
 | What | Where |
 |---|---|
 | Your projects | `Documents\KiCadGen` (you can choose another workspace in the program) |
-| Settings, AI profiles, accepted models, API key | `%LOCALAPPDATA%\KiCadGen` |
+| Settings, AI profiles, accepted models, `.env` key file (if used), logs | `%LOCALAPPDATA%\KiCadGen` |
+| API key saved with «AI account...» | Windows Credential Manager (generic credential `KiCadGen/OpenRouter`) |
 | The program | `C:\Program Files\KiCadGen` |
 
 ## 5. Update and uninstall
@@ -63,4 +67,5 @@ Files.
   remember it onwards).
 - **Uninstall**: Settings > Apps > KiCadGen > Uninstall. Your projects and
   `%LOCALAPPDATA%\KiCadGen` are **not** removed; delete them yourself if you
-  no longer need them.
+  no longer need them. A key saved with «AI account...» also stays: remove it
+  first with «Remove key», or later from the Windows Credential Manager.

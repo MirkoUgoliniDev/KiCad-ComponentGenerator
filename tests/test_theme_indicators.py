@@ -52,3 +52,13 @@ def test_the_selected_tab_is_the_most_visible_one():
     disabled = background("QTabBar::tab:disabled")
     assert selected > normal > disabled
     assert "font-weight" in re.search(r"QTabBar::tab:selected\s*\{([^}]*)\}", theme.TAB_QSS).group(1)
+
+
+def test_a_disabled_menu_entry_does_not_look_enabled():
+    """@brief Voce di menu spenta: grigia, non del colore del testo (26/09, menu «Strumenti»)."""
+    import re
+    from kicadgen.gui import theme
+    rule = re.search(r"QMenu::item:disabled\s*\{([^}]*)\}", theme.APP_QSS)
+    assert rule is not None
+    color = re.search(r"color:\s*(#[0-9a-fA-F]{6})", rule.group(1))
+    assert color is not None and color.group(1).lower() != theme.TEXT.lower()

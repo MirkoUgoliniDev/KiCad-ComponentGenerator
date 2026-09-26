@@ -36,9 +36,41 @@ RUNTIME_RESOURCES = (
     ("kicadgen", "cad3d", "freecad_parts.py"),
     ("kicadgen", "cad3d", "model_size_cache.py"),
     ("kicadgen", "gui", "assets", "app-icon.svg"),
+    ("kicadgen", "gui", "assets", "help", "guida.html"),
 )
 #: Present only in the package: collected by tools/collect_licenses.py.
 PACKAGE_RESOURCES = (("licenses", "MANIFEST.txt"),)
+
+
+def install_crash_reports(exit_process=os._exit):
+    """@brief Write a crash report for every unhandled exception, then stop as before.
+
+    @param exit_process Function called with the exit status after the report
+        (os._exit; replaceable in tests).
+    @note Reports go to `app_paths.logs_dir()/crash-reports` (see
+        `kicadgen.crash_report`). PyQt6 stops the program after an exception
+        in a slot only while `sys.excepthook` is the default one; any other
+        hook would let the window keep running on a possibly inconsistent
+        state. Until the user decides otherwise, the program stops as it did
+        before, after the report and the usual traceback. Exceptions in
+        worker threads keep ending only their thread, as before.
+    """
+    from kicadgen import crash_report
+    from kicadgen.app_paths import logs_dir
+    crash_report.install(logs_dir)
+    report = sys.excepthook
+
+    def report_and_stop(exc_type, exc_value, exc_tb):
+        report(exc_type, exc_value, exc_tb)
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except Exception:  # noqa: BLE001 - uscire resta la cosa importante
+                pass
+        exit_process(1)
+
+    sys.excepthook = report_and_stop
+    return report_and_stop
 
 
 def check_runtime(resource_path=None, modules=RUNTIME_MODULES, resources=None):
@@ -116,10 +148,20 @@ def main():
         from kicadgen.app_paths import env_files
         # Da sorgente il .env del repository; installato, quello nella
         # cartella dati dell'utente (Program Files e' in sola lettura).
+        key_preset = "OPENROUTER_API_KEY" in os.environ
         for env_file in env_files():
             load_dotenv(env_file)
+        # The OpenRouter key of a .env file must not stay in the process
+        # environment: there it would outrank the key saved with «Account AI…»
+        # in the Windows Credential Manager. openrouter.api_key() reads the
+        # .env file itself, after the Credential Manager. A key that was
+        # already in the real environment is left alone.
+        if not key_preset:
+            os.environ.pop("OPENROUTER_API_KEY", None)
     except ImportError:
         pass
+    # Before the GUI import, so that a failing import is reported too.
+    install_crash_reports()
     from kicadgen.gui.main_window import main as run_gui
     return run_gui()
 

@@ -27,6 +27,8 @@ dist/
 build/
 *.tmp
 *.log
+# Log del programma avviato da sorgente (rapporti di crash compresi).
+logs/
 
 # FreeCAD temporary files
 *.FCStd1

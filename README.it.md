@@ -234,16 +234,22 @@ parsing a mano. Implementato in
 `kicadgen/services/datasheet_extractor.py`, chiamato dalla GUI in un
 `QThread` (`ExtractWorker`, stesso pattern degli altri worker).
 
-Setup della API key (una delle due):
+Setup della API key (una delle tre):
 
-1. **File `.env`** (consigliato): copia `.env.example` in `.env` nella
-   cartella del progetto e inserisci `OPENROUTER_API_KEY=sk-or-v1-...`.
-   Il file `.env` e' in `.gitignore`, non finisce mai in git. Viene
-   caricato automaticamente da `main.py` (richiede `python-dotenv`,
-   gia' in `requirements.txt`).
-2. **Variabile d'ambiente di sistema**: se preferisci non usare `.env`,
-   imposta `OPENROUTER_API_KEY` nell'ambiente prima di lanciare
-   `python main.py`.
+1. **Finestra «Account AI...»** (consigliata): menu Configurazione →
+   «Account AI...», incolla la chiave, premi «Verifica» e poi «Salva». La
+   chiave va nel Gestore credenziali di Windows del tuo utente, non in un
+   file.
+2. **File `.env`**: copia `.env.example` in `.env` nella cartella del
+   progetto e inserisci `OPENROUTER_API_KEY=sk-or-v1-...`. Il file `.env`
+   e' in `.gitignore`, non finisce mai in git; il programma lo legge da
+   solo (richiede `python-dotenv`, gia' in `requirements.txt`).
+3. **Variabile d'ambiente di sistema**: imposta `OPENROUTER_API_KEY`
+   nell'ambiente prima di lanciare `python main.py`.
+
+Se la chiave e' in piu' posti vale quest'ordine: variabile d'ambiente,
+Gestore credenziali di Windows, file `.env`. Senza chiave il programma lo
+dice prima di avviare un'analisi e offre di aprire «Account AI...».
 
 Con OpenRouter una sola chiave da' accesso ai modelli di tutti i
 fornitori (Anthropic, OpenAI, Google, ...): le chiamate HTTP usano solo

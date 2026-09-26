@@ -355,24 +355,30 @@ def test_without_a_declared_through_hole_the_edge_land_is_kept():
 #: Calcolati PRIMA della piazzola continua (2026-09-23): footprint senza uuid,
 #: payload 3D completo, specifiche FreeCAD dei contatti (tolta la chiave
 #: `stadiums`, che per questi tipi deve essere vuota).
+#: Il secondo hash (payload 3D) e' CAMBIATO DI PROPOSITO il 2026-09-26
+#: (utente: niente cornice serigrafica della scheda): la tupla ha perso il
+#: solo elemento `silk_outline`. Verificato prima di aggiornare: la tupla
+#: della versione precedente, tolto quell'elemento, ha esattamente questi
+#: hash. Valori precedenti, per traccia: 37b3028b..., f5603278...,
+#: 2c853adb..., 8ad269c7..., 4810a717...
 UNCHANGED = {
     "rs485_half": ("68b398ea85d13078729a4851d5b8da0b192ad989a24270e6f989af0f62e2bb58",
-                   "37b3028b97a7d6ac897e51818d0569a3a32bc591c3cf89c6010d81ea30f64416",
+                   "20233a9d628f799fd067a2735f610d354b228d90a09deec20e8d6fffa015ae9e",
                    "a1ae1dd7b034ffd728352774b07c5a99eeb74878b500f41a7f8a8f4de533536b"),
     "four_half": ("03d98fad773efa0771ec6058037719f2d78a4eeaa579eb68212f2b5ee860541e",
-                  "f56032783776ebf1b0cc06c89cf3d330d724dd809e26a2829406a76cc4d0e25d",
+                  "beb7f9726f143a5ce56ce5fb83dd1f4f1a64c3efd5e8f1e0245fa99069ca7332",
                   "7b6b36b511151cd0868a68f34109511283296f3fb8d4ddf5c7a5b46a570f2f43"),
     "dev_through": ("0c3e9aa471b4a1cd21640263b6a8e147b01f097a4d0e7cba3f6dfcf787b9e508",
-                    "2c853adbffecc9f6448c293dbb42cad9e6a29ca2715a2d01696879774fed0d74",
+                    "46f4b61df1d4139a585bf0b7455e1581835dd0a1dea3776fef368a26fa2eb784",
                     "541fc60733ce7c39987865c4289d0937118ed4e55d2b0f9f2830cdab5e5647c3"),
     "four_through": ("cb0b51c179e468db32e13c1d98227337e4b8534e49c1ad560e0d8c74571e7757",
-                     "8ad269c78836ab8e13af53ff05848925e8b69103ffbf02b077bb9bde2cf0e0e0",
+                     "3c8e021086481606de65ffd0549291308f03fc9d2a90e3d6c82e8990e066deed",
                      "e70d82826c1db32dbe648c0e83bf07b756c09cd322feadcbf8d0708a7fac0d30"),
     "rs485_nohole": ("68b398ea85d13078729a4851d5b8da0b192ad989a24270e6f989af0f62e2bb58",
-                     "37b3028b97a7d6ac897e51818d0569a3a32bc591c3cf89c6010d81ea30f64416",
+                     "20233a9d628f799fd067a2735f610d354b228d90a09deec20e8d6fffa015ae9e",
                      "a1ae1dd7b034ffd728352774b07c5a99eeb74878b500f41a7f8a8f4de533536b"),
     "rs485_through": ("5dc1789ff219e83442d5b8dd9d5d96e2024bd0e1fa5f767fd4b25ce0daf0c429",
-                      "4810a71729f2a67768060c30a52bea814f8528d1335a472aed82d964c17ebeca",
+                      "a97089016aa7d57568e765fabe7975c892af2917ad62d341b43870b8f473515b",
                       "ae697d04ee6ef2765e6072246dc043b6193c41b033e501bcff073ec8e5cf9f85"),
 }
 
@@ -469,7 +475,7 @@ def _in_d_shape(spec, point, slack=1e-6):
 @pytest.mark.parametrize("name", sorted(CASES))
 def test_3d_gold_pad_contains_both_hole_centres_on_both_faces(name, script):
     params = CASES[name]()
-    _, contacts, _, _, _ = step_generator.castellated_contact_payload(params, "#d4af37")
+    _, contacts, _, _ = step_generator.castellated_contact_payload(params, "#d4af37")
     for contact, placement in zip(contacts, pad_positions(params)):
         land = continuous_pad(params, placement)
         assert contact["stadium"] == {"length_mm": land.inner_reach, "width_mm": land.across}
@@ -500,7 +506,7 @@ def test_3d_has_barrels_but_no_face_rings_coplanar_with_the_pad(script):
     conserva le sue corone su entrambe le facce.
     """
     params = _double()
-    _, contacts, _, _, _ = step_generator.castellated_contact_payload(params, "#d4af37")
+    _, contacts, _, _ = step_generator.castellated_contact_payload(params, "#d4af37")
     features = script["_contact_features"](contacts[0], _bounds(params), PLATING, PAD_T)
     through = contacts[0]["through_hole"]
     on_faces = [t for t in features["tubes"] if t["z0"] >= Z1 or t["z1"] <= 0.0]
@@ -520,7 +526,7 @@ def test_3d_has_barrels_but_no_face_rings_coplanar_with_the_pad(script):
 def test_3d_pad_follows_the_flip_to_model_coordinates(script):
     """@brief Dopo `_flip_y` (Y verso l'alto) la piazzola parte ancora dal bordo giusto."""
     params = dev_kit(CONTACT_HALF_AND_THROUGH)
-    _, contacts, _, _, _ = step_generator.castellated_contact_payload(params, "#d4af37")
+    _, contacts, _, _ = step_generator.castellated_contact_payload(params, "#d4af37")
     data = {"body": {"offset_y_mm": -params.body_width / 2, "width_mm": params.body_width},
             "edge_contacts": copy.deepcopy(contacts)}
     flipped = script["_flip_y"](data)["edge_contacts"]
@@ -535,7 +541,7 @@ def test_3d_pad_follows_the_flip_to_model_coordinates(script):
 
 def test_3d_label_sits_beyond_the_continuous_pad(script):
     params = _double(thru_hole_offset=5.0)
-    _, contacts, _, _, _ = step_generator.castellated_contact_payload(params, "#d4af37")
+    _, contacts, _, _ = step_generator.castellated_contact_payload(params, "#d4af37")
     features = script["_contact_features"](contacts[0], _bounds(params), PLATING, PAD_T)
     assert features["label"][0] > -params.body_length / 2 + contacts[0]["stadium"]["length_mm"]
 

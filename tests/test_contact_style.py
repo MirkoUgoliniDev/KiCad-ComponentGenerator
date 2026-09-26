@@ -165,9 +165,13 @@ PINNED_FOOTPRINT_BEFORE_SMD_NOTE = {
 #: 3D stanno oltre la fine della piazzola continua (x -18.7 -> -16.954) e la
 #: cornice serigrafica rientra di conseguenza (lunghezza 36.0 -> 33.508).
 #: Valore precedente, per traccia: bc59c263...
+#: CAMBIATO DI PROPOSITO il 2026-09-26 (utente: «evitare la cornice bianca»):
+#: tolta la sola chiave `silk_outline`. Verificato prima di aggiornare: il
+#: payload vecchio SENZA quella chiave ha esattamente gli hash qui sotto.
+#: Valori precedenti, per traccia: rs485 f7ad6446..., four ba8a6bc6...
 PINNED_PAYLOAD = {
-    "rs485": "f7ad6446f577ccf0c0136a4b36d77ec1c12194e5913a523de979b1ac5258fb71",
-    "four": "ba8a6bc6160f30c8aae2a63c798d55b6d34dbff70fc3120fd86bc79cd42ba44e",
+    "rs485": "6f7d1df01ec4fd08a5e7d4ae057a7a4de5c3b48b1cbe5da7d84d2679ee962db0",
+    "four": "d52f2a1a64da7b2d45ce8e8069146ee7b23bf3d288e6c594b0d95b903c8a0435",
 }
 BUILDERS = {"rs485": rs485, "four": four_sided}
 
@@ -216,15 +220,15 @@ def test_default_3d_payload_is_the_pinned_one_plus_only_the_plated_ring(name, mo
         assert ring["pad_diameter_mm"] == params.thru_pad_diameter
         land = continuous_pad(params, placement)
         assert stadium == {"length_mm": land.inner_reach, "width_mm": land.across}
+    # Nessuna cornice serigrafica della scheda (utente, 2026-09-26).
+    assert "silk_outline" not in captured["extra_payload"]
     # Le sole differenze di rs485 rispetto a prima, ricavate dalla regola:
-    # sigla oltre la fine del rame continuo, cornice che rientra quanto basta.
+    # sigla oltre la fine del rame continuo.
     if name == "rs485":
         first = continuous_pad(params, next(pad_positions(params)))
         label_gap = params.hole_diameter / 2 + 0.55
         pe = next(t for t in captured["extra_payload"]["silk_texts"] if t["text"] == "PE")
         assert pe["x"] == pytest.approx(-params.body_length / 2 + first.inner_reach + label_gap)
-        assert captured["extra_payload"]["silk_outline"]["length_mm"] == pytest.approx(
-            params.body_length - 2 * (first.inner_reach + 1.6))
 
 
 # ── through_hole ────────────────────────────────────────────────────

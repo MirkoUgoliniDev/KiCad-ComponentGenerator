@@ -24,13 +24,14 @@ import webbrowser
 from pathlib import Path
 
 from PyQt6.QtCore import QEvent, QObject, QRectF, QThread, QTimer, pyqtSignal, Qt, QSize
-from PyQt6.QtGui import QBrush, QColor, QIcon, QKeySequence, QPainterPath, QPen, QPixmap, QTextCursor
+from PyQt6.QtGui import (QBrush, QColor, QIcon, QKeySequence, QPainterPath, QPen, QPixmap,
+                         QShortcut, QTextCursor)
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog,
     QFormLayout, QFrame, QGraphicsEllipseItem, QGraphicsRectItem, QGraphicsScene,
     QGraphicsView, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
     QDialog, QListWidget, QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea,
-    QSplitter, QListWidgetItem, QTabWidget, QTextEdit, QVBoxLayout,
+    QSplitter, QListWidgetItem, QStackedWidget, QTabWidget, QTextEdit, QVBoxLayout,
     QToolButton, QWidget,
 )
 
@@ -50,7 +51,7 @@ from ..generators import castellated_module as _castellated_module
 from ..generators.pin_header import PinHeaderParams, build_pin_header, pin_positions
 from ..generators.package import build_package
 from ..core.package_geometry import PackageGeometry, package_from_mapping
-from ..services import component_types
+from ..services import component_types, recent_projects
 from ..services.analysis_profiles import ProfileStore, ProfileError
 from ..services.i18n import DEFAULT_TRANSLATIONS, I18n, LANGUAGES
 from ..services.document_roles import DocumentSet, MANIFEST, SUFFIXES
@@ -71,12 +72,14 @@ from ..services.kicad_library import (
 from .app_config import (CONFIG_PATH, DEFAULTS, browse_start_dir, config_path, load_config,
                          remember_browse_dir, save_config)
 from .accepted_models_dialog import AcceptedModelsDialog, ConsolidateDialog
-from ..app_paths import default_projects_dir, install_dir, resource_path
+from ..app_paths import default_projects_dir, install_dir, logs_dir, resource_path, user_data_dir
 # Solo la validazione dei parametri (libreria standard): onnxruntime e PyTorch
 # restano caricati al bisogno. Legata qui, all'import, e non al clic: i test
 # che sostituiscono il modulo con un finto non devono cambiarne il contratto.
 from ..services.photo_yolo import yolo_settings as validate_yolo_settings
 from .component_editor_dialog import ComponentEditorDialog
+from .workflow_bar import WorkflowBar
+from .start_page import StartPage
 from .component_state import (BoundedValue, FlagValue, TextValue,
                               normalised_side)
 from .analysis_overlay import AnalysisOverlay
@@ -986,6 +989,16 @@ class Cad3DWorker(QThread):
             self.error.emit(tx("Errore inatteso: {exc}", exc=exc))
 
 
+class UpdateCheckWorker(QThread):
+    """@brief Ask GitHub for the latest release off the GUI thread."""
+    done = pyqtSignal(object)
+
+    def run(self):
+        """@brief QThread override: emit the `UpdateCheckResult` (the check never raises)."""
+        from ..services import update_check
+        self.done.emit(update_check.check_latest_release())
+
+
 class TerminalDetailWorker(QThread):
     """@brief Optional photo detail pass; never regenerates the footprint."""
     done = pyqtSignal(object)
@@ -1350,7 +1363,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, profile_store=None):
         super().__init__()
-        self.setWindowTitle("KiCadGen-Tool")
+        self._refresh_window_title()
         # Size requested for startup; reserve space for the native frame/taskbar.
         screen = self.screen()
         available = screen.availableGeometry() if screen is not None else None
@@ -1487,6 +1500,7 @@ class MainWindow(QMainWindow):
 
         self._build_menu()
         self._build_central()
+        self._install_shortcuts()
         # Project type is restored before the footprint parameters are used.
         self.group_castellated.setChecked(
             self._selected_family() == "aggregate_castellated"
@@ -1503,11 +1517,12 @@ class MainWindow(QMainWindow):
                         "field_body_color", "field_pin_color", "field_populated_pins"}):
                     value.on_change(lambda _value: self._invalidate_generated_mesh())
         self._init_project_settings()
+        self._refresh_start_page()
 
     # ── Menu ────────────────────────────────────────────────────────
 
     def _build_menu(self) -> None:
-        file_menu = self.menuBar().addMenu(self.i18n.tr("app.file"))
+        file_menu = self.menu_file = self.menuBar().addMenu(self.i18n.tr("app.file"))
         # Il progetto E' la sua cartella (utente, 2026-09-24): si crea o si
         # apre esplicitamente, non scrivendo un nome che per caso coincide con
         # una cartella esistente.
@@ -1519,35 +1534,83 @@ class MainWindow(QMainWindow):
         self.action_open_project.setShortcut(QKeySequence.StandardKey.Open)
         self.action_rename_project = file_menu.addAction(
             self.i18n.text("Rinomina progetto..."), self._rename_project)
-        # Tolte dall'utente il 2026-09-25: «Apri cartella componente», «Prova
-        # in KiCad», «Installa nel progetto KiCad», «Installa come libreria
-        # globale». Restano nella scheda KiCad e nell'icona della cartella;
-        # un'eventuale voce di menu dedicata e' una decisione rimandata.
+        # Progetti recenti (PIANO-FIX 1): riempito a ogni apertura, cosi'
+        # elenca solo le cartelle che sono ancora progetti.
+        self.menu_recent = file_menu.addMenu(self.i18n.text("Progetti recenti"))
+        self.menu_recent.setToolTipsVisible(True)
+        self.menu_recent.aboutToShow.connect(self._fill_recent_menu)
+        # «Apri cartella componente» e i comandi KiCad, tolti da qui il
+        # 2026-09-25, stanno nel menu «Strumenti» (decisione del 2026-09-26).
         file_menu.addSeparator()
         self.action_exit = file_menu.addAction(self.i18n.text("Esci"), self.close)
 
-        config_menu = self.menuBar().addMenu(self.i18n.tr("app.configuration"))
+        config_menu = self.menu_config = self.menuBar().addMenu(self.i18n.tr("app.configuration"))
+        config_menu.setToolTipsVisible(True)
         self.action_profiles = config_menu.addAction(
             QIcon(str(Path(__file__).parent / 'assets' / 'profile-edit.svg')),
             self.i18n.text("Gestione tipologie e profili AI..."), self._edit_profiles)
         self.action_defaults = config_menu.addAction(
             self.i18n.text("Default generali AI..."), self._edit_llm_settings)
+        # Chiave OpenRouter nel Gestore credenziali di Windows (PIANO-FIX 2).
+        self.action_ai_account = config_menu.addAction(
+            self.i18n.text("Account AI..."), self._open_ai_account)
+        self.action_ai_account.setToolTip(self.i18n.text(
+            "Chiave OpenRouter, credito e limiti: incolla, verifica e salva la chiave nel "
+            "Gestore credenziali di Windows."))
         config_menu.addSeparator()
 
         self.action_generation_options = config_menu.addAction(
             self.i18n.text("Opzioni di generazione..."), self._edit_generation_options)
         self.action_accepted_models = config_menu.addAction(
             self.i18n.text("Archivio abbinamenti accettati..."), self._show_accepted_models)
-        # «Apri config.json» tolta dall'utente il 2026-09-25; se servira', avra'
-        # una voce di menu dedicata (decisione rimandata). Resta il metodo
-        # `_open_config_file`, che nessun menu chiama piu'.
+        # «Apri config.json» e' nel menu «Strumenti» (decisione del 2026-09-26).
 
-        help_menu = self.menuBar().addMenu(self.i18n.tr("app.help"))
-        # «Apri cartella progetto tool» tolta dall'utente il 2026-09-25: nel
-        # menu restano solo licenze e informazioni sul programma.
+        # Strumenti (utente, 2026-09-26): le sei voci tolte il 25/09 dai menu
+        # File, Configurazione e «?». I comandi KiCad restano anche nella
+        # scheda KiCad; voci e pulsanti si accendono insieme
+        # (`_refresh_output_actions_inner` gestisce entrambi per nome).
+        tools_menu = self.menu_tools = self.menuBar().addMenu(self.i18n.tr("app.tools"))
+        tools_menu.setToolTipsVisible(True)
+        self.action_open_output = tools_menu.addAction(
+            self.i18n.text("Apri cartella componente"), self._open_project_dir)
+        tools_menu.addSeparator()
+        self.action_test_kicad = tools_menu.addAction(
+            self.i18n.text("Prova in KiCad..."), self._test_in_kicad)
+        self.action_export = tools_menu.addAction(
+            self.i18n.text("Installa nel progetto KiCad..."), self._install_project_library)
+        self.action_install_global = tools_menu.addAction(
+            self.i18n.text("Installa come libreria globale..."), self._install_global_library)
+        tools_menu.addSeparator()
+        # Installato, la cartella scrivibile (config, database) e' quella
+        # dell'utente, non quella del programma.
+        self.action_open_tool_dir = tools_menu.addAction(
+            self.i18n.text("Apri cartella progetto tool"),
+            lambda: webbrowser.open(user_data_dir().as_uri()))
+        self.action_open_config = tools_menu.addAction(
+            self.i18n.text("Apri config.json"), self._open_config_file)
+
+        help_menu = self.menu_help = self.menuBar().addMenu(self.i18n.tr("app.help"))
+        # «Apri cartella progetto tool» tolta dall'utente il 2026-09-25.
+        # Aiuto e assistenza (PIANO-FIX 5 e 6, 2026-09-26): guida, log,
+        # segnalazione su GitHub, aggiornamenti solo a richiesta (nessuna
+        # chiamata di rete all'avvio senza una decisione dell'utente).
+        self.action_user_guide = help_menu.addAction(
+            self.i18n.text("Guida d'uso"), self._open_user_guide)
+        self.action_user_guide.setShortcut(QKeySequence.StandardKey.HelpContents)
+        self.action_open_logs = help_menu.addAction(
+            self.i18n.text("Apri cartella dei log"), self._open_log_folder)
+        self.action_report_problem = help_menu.addAction(
+            self.i18n.text("Segnala un problema..."), self._report_problem)
+        self.action_check_updates = help_menu.addAction(
+            self.i18n.text("Controlla aggiornamenti..."), self._check_for_updates)
+        help_menu.addSeparator()
         # Licenza del programma e componenti di terze parti (utente, 2026-09-25).
         self.action_licenses = help_menu.addAction(self.i18n.text("Licenze"), self._show_licenses)
-        self.action_about = help_menu.addAction(self.i18n.text("About"), self._show_about)
+        self.action_about = help_menu.addAction(
+            self.i18n.text("Informazioni su KiCadGen"), self._show_about)
+        help_menu.addSeparator()
+        self.action_shortcuts = help_menu.addAction(
+            self.i18n.text("Scorciatoie da tastiera..."), self._show_shortcuts)
 
     def _edit_generation_options(self) -> None:
         dialog = GenerationOptionsDialog(self._include_nc_pins(), self,
@@ -2067,7 +2130,7 @@ class MainWindow(QMainWindow):
             parti tradotte escapate.
         """
         box = QMessageBox(self)
-        box.setWindowTitle(self.i18n.text("About"))
+        box.setWindowTitle(self.i18n.text("Informazioni su KiCadGen"))
         box.setIcon(QMessageBox.Icon.Information)
         box.setTextFormat(Qt.TextFormat.RichText)
         box.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
@@ -2092,6 +2155,205 @@ class MainWindow(QMainWindow):
             except OSError:
                 texts.append(self.i18n.text("File non trovato:") + f" {name}")
         return texts[0], texts[1]
+
+    #: Scorciatoie da tastiera (PIANO-FIX 7, 2026-09-26): una sola tabella da
+    #: cui nascono i tasti E l'elenco del menu «?», cosi' non possono divergere.
+    #: (tasto, descrizione italiana, nome del metodo). Nessuna scorciatoia avvia
+    #: l'analisi AI: e' a pagamento e un tasto premuto per errore costa.
+    SHORTCUTS = (
+        ("Ctrl+N", "Nuovo progetto", "_new_project"),
+        ("Ctrl+O", "Apri progetto", "_open_project"),
+        ("F2", "Rinomina progetto", "_rename_project"),
+        ("Ctrl+1", "Scheda Progetto", "_shortcut_tab_project"),
+        ("Ctrl+2", "Scheda Anteprima footprint", "_shortcut_tab_preview"),
+        ("Ctrl+3", "Scheda Modello 3D", "_shortcut_tab_model_3d"),
+        ("Ctrl+4", "Scheda KiCad", "_shortcut_tab_kicad"),
+        ("F5", "Rigenera il modello 3D (FreeCAD, gratuito)", "_shortcut_regenerate_3d"),
+        ("Ctrl+E", "Modifica componenti", "_shortcut_edit_components"),
+        ("Ctrl+L", "Apri il log AI", "_shortcut_ai_log"),
+        ("Ctrl+Q", "Esci", "close"),
+    )
+
+    def _install_shortcuts(self) -> None:
+        """@brief Bind every entry of SHORTCUTS to the window.
+
+        @note Ctrl+N and Ctrl+O are also on their File menu actions (standard
+            keys shown next to the entries); the window shortcuts here cover
+            the others. Each handler checks that its command is available, so
+            a key never does what the interface would not allow by mouse.
+        """
+        menu_keys = {"Ctrl+N", "Ctrl+O"}
+        self._shortcuts = []
+        for key, _label, method in self.SHORTCUTS:
+            if key in menu_keys:
+                continue
+            shortcut = QShortcut(QKeySequence(key), self)
+            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            shortcut.activated.connect(getattr(self, method))
+            self._shortcuts.append(shortcut)
+        self.action_rename_project.setShortcut(QKeySequence("F2"))
+        self.action_exit.setShortcut(QKeySequence("Ctrl+Q"))
+
+    def _shortcut_tab(self, index: int) -> None:
+        if self.tabs.isEnabled() and self.tabs.isTabEnabled(index):
+            self.tabs.setCurrentIndex(index)
+
+    def _shortcut_tab_project(self) -> None:
+        self._shortcut_tab(TAB_PROJECT)
+
+    def _shortcut_tab_preview(self) -> None:
+        self._shortcut_tab(TAB_PREVIEW)
+
+    def _shortcut_tab_model_3d(self) -> None:
+        self._shortcut_tab(TAB_MODEL_3D)
+
+    def _shortcut_tab_kicad(self) -> None:
+        self._shortcut_tab(TAB_KICAD)
+
+    def _click_if_available(self, button) -> None:
+        """Press a command only when the interface offers it (visible and enabled)."""
+        if button is not None and button.isEnabled() and button.isVisibleTo(self):
+            button.click()
+
+    def _shortcut_regenerate_3d(self) -> None:
+        self._click_if_available(getattr(self, "btn_regen_3d", None))
+
+    def _shortcut_edit_components(self) -> None:
+        self._click_if_available(getattr(self, "btn_edit_components_3d", None))
+
+    def _shortcut_ai_log(self) -> None:
+        self._click_if_available(getattr(self, "btn_ai_log", None))
+
+    def _show_shortcuts(self) -> None:
+        """@brief List the keyboard shortcuts, from the same table that binds them."""
+        rows = "".join(
+            f"<tr><td style='padding-right:18px'><b>{escape(key)}</b></td>"
+            f"<td>{escape(self.i18n.text(label))}</td></tr>"
+            for key, label, _method in self.SHORTCUTS)
+        box = QMessageBox(self)
+        box.setWindowTitle(self.i18n.text("Scorciatoie da tastiera"))
+        box.setTextFormat(Qt.TextFormat.RichText)
+        box.setText(f"<table>{rows}</table>")
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        self._shortcuts_box = box
+        box.exec()
+
+    def _open_user_guide(self) -> None:
+        """@brief «Guida d'uso»: open the HTML guide shipped with the program."""
+        guide = resource_path("kicadgen", "gui", "assets", "help", "guida.html")
+        if not guide.is_file():
+            QMessageBox.warning(self, self.i18n.text("Guida d'uso"),
+                                tx("Guida d'uso non trovata: {path}", path=guide))
+            return
+        webbrowser.open(guide.as_uri())
+
+    def _log_folder(self) -> Path:
+        """@brief Folder whose logs describe the current work.
+
+        @return The open project's folder (it holds `analisi-ai.log` and
+            `freecad.log`); without a project, the program's log folder,
+            created if needed, where crash reports are written.
+        @throws OSError When the program's log folder cannot be created.
+        """
+        project = self._project_dir_or_none() if self._component_name() else None
+        if project is not None and project.is_dir():
+            return project
+        folder = logs_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    def _open_log_folder(self) -> None:
+        """@brief «Apri cartella dei log»: show the log folder in the file manager."""
+        try:
+            folder = self._log_folder()
+        except OSError as exc:
+            QMessageBox.warning(self, self.i18n.text("Apri cartella dei log"), str(exc))
+            return
+        webbrowser.open(folder.as_uri())
+
+    def _report_problem(self) -> None:
+        """@brief «Segnala un problema…»: prefilled GitHub issue plus the log folder.
+
+        @note Nothing is sent from here: the browser opens a new-issue page
+            filled with versions only (no user name, machine name or path,
+            see `issue_report`), and the user attaches the logs after checking
+            them. The latest crash report is named so it is easy to find.
+        """
+        from .. import crash_report
+        from ..services.issue_report import build_issue_url
+        message = self.i18n.text(
+            "Si apre la pagina di GitHub per una nuova segnalazione, già compilata con la "
+            "versione del programma e del sistema. Si apre anche la cartella dei log: allega "
+            "i file utili dopo averli controllati, perché possono contenere i nomi delle tue "
+            "cartelle. La segnalazione è pubblica e parte solo quando la invii.")
+        latest = crash_report.latest_reports(limit=1, base=logs_dir())
+        if latest:
+            message += "\n\n" + tx("Ultimo rapporto di crash: {path}", path=latest[0])
+        answer = QMessageBox.information(
+            self, self.i18n.text("Segnala un problema"), message,
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
+        if answer != QMessageBox.StandardButton.Ok:
+            return
+        self._open_log_folder()
+        # Con un progetto aperto la cartella dei log e' la sua: i rapporti di
+        # crash stanno altrove e si aprono a parte.
+        try:
+            folder = self._log_folder()
+        except OSError:
+            folder = None
+        if latest and (folder is None or not latest[0].is_relative_to(folder)):
+            webbrowser.open(latest[0].parent.as_uri())
+        webbrowser.open(build_issue_url())
+
+    def _check_for_updates(self) -> None:
+        """@brief «Controlla aggiornamenti…»: ask GitHub, only when the user asks.
+
+        @note The request can take a few seconds (timeout 5 s): it runs in
+            `UpdateCheckWorker`, the window stays responsive and the command
+            is disabled until the answer arrives.
+        """
+        if getattr(self, "_update_worker", None) is not None:
+            return
+        self.action_check_updates.setEnabled(False)
+        self.statusBar().showMessage(self.i18n.text("Controlla aggiornamenti") + "\u2026")
+        worker = UpdateCheckWorker()
+        worker.done.connect(self._on_update_checked)
+        self._update_worker = worker
+        worker.start()
+
+    def _on_update_checked(self, result) -> None:
+        """@brief Show the outcome of an update check.
+
+        @param result `update_check.UpdateCheckResult`.
+        """
+        worker, self._update_worker = self._update_worker, None
+        if worker is not None:
+            worker.wait()
+        self.action_check_updates.setEnabled(True)
+        if not self.analysis_overlay.isVisible():
+            self.statusBar().showMessage(self.i18n.text("Pronto"))
+        title = self.i18n.text("Controlla aggiornamenti")
+        if result.update_available:
+            answer = QMessageBox.question(
+                self, title, tx("È disponibile KiCadGen {latest} (questa è la {current}). "
+                                "Aprire la pagina della versione?",
+                                latest=result.latest_version, current=result.current_version))
+            if answer == QMessageBox.StandardButton.Yes:
+                webbrowser.open(result.release_url)
+            return
+        if result.ok:
+            QMessageBox.information(self, title, tx("Hai già la versione più recente ({current}).",
+                                                    current=result.current_version))
+        elif result.error_kind == "no_release":
+            QMessageBox.information(self, title, self.i18n.text(
+                "Su GitHub non c'è ancora nessuna versione pubblicata."))
+        elif result.error_kind in ("timeout", "network"):
+            QMessageBox.warning(self, title, tx(
+                "Impossibile contattare GitHub: controlla la connessione e riprova. ({error})",
+                error=result.error))
+        else:
+            QMessageBox.warning(self, title, tx("Risposta di GitHub non utilizzabile ({error}).",
+                                                error=result.error))
 
     def _show_licenses(self) -> None:
         """@brief Show the program license and the third-party notices, read-only.
@@ -2197,6 +2459,11 @@ class MainWindow(QMainWindow):
         # layout centrale non ne ha, e la tendina stava incollata al bordo
         # destro della finestra (utente, 2026-09-24).
         language_row.setContentsMargins(0, 6, CONTENT_MARGIN_PX, 6)
+        # Barra dei passi del flusso (PIANO-FIX 4): a sinistra della lingua,
+        # sulla stessa riga, per non togliere altezza alle schede.
+        self.workflow_bar = WorkflowBar(self.i18n.text)
+        self.workflow_bar.step_clicked.connect(self._on_workflow_step_clicked)
+        language_row.addWidget(self.workflow_bar)
         language_row.addStretch()
         # Un globo al posto della scritta «Lingua:» (utente, 2026-09-24), come
         # le altre icone: il nome sta nel tooltip e nel nome accessibile della
@@ -2230,13 +2497,41 @@ class MainWindow(QMainWindow):
             self.tabs.setTabIcon(index, self._asset_icon(asset))
         self._set_acquisition_tabs_enabled(False)
         self.tabs.currentChanged.connect(self._on_tab_changed)
-        layout.addWidget(self.tabs)
+        # Pagina iniziale (PIANO-FIX 1): al posto delle schede finche' non c'e'
+        # un progetto aperto (`_refresh_start_page`). Le schede senza progetto
+        # erano riquadri vuoti e un pulsante inutilizzabile.
+        self.start_page = StartPage(tr=self.i18n.text, type_label=self.i18n.component_type)
+        self.start_page.new_requested.connect(self._new_project)
+        self.start_page.open_requested.connect(self._open_project)
+        self.start_page.open_recent_requested.connect(self._open_recent_project)
+        self.start_page.remove_recent_requested.connect(self._forget_recent_project)
+        self.start_page.choose_root_requested.connect(self._browse_library_root)
+        self.start_page.set_library_root(self._library_root())
+        self.field_library_root.textChanged.connect(
+            lambda _text: self.start_page.set_library_root(self._library_root()))
+        self.central_stack = QStackedWidget()
+        self.central_stack.addWidget(self.start_page)
+        self.central_stack.addWidget(self.tabs)
+        layout.addWidget(self.central_stack)
 
         self.setCentralWidget(central)
         self.analysis_overlay = AnalysisOverlay(central, i18n=self.i18n)
         self.analysis_overlay.log_requested.connect(self.ai_log_dialog.exec)
         self.analysis_overlay.abort_requested.connect(self._request_abort)
         self.analysis_overlay.closed.connect(self._on_completed_overlay_closed)
+        # Barra di stato (PIANO-FIX 4): cosa sta facendo il programma, il
+        # progetto aperto e quanto e' costato finora in chiamate AI.
+        self.status_project = QLabel()
+        self.status_project.setProperty("i18n_skip", True)
+        self.status_cost = QLabel()
+        self.status_cost.setProperty("i18n_skip", True)
+        self.statusBar().addPermanentWidget(self.status_project)
+        self.statusBar().addPermanentWidget(self.status_cost)
+        self.statusBar().showMessage(self.i18n.text("Pronto"))
+        self.analysis_overlay.operation_started.connect(
+            lambda title: self.statusBar().showMessage(title + "\u2026"))
+        self.analysis_overlay.operation_finished.connect(
+            lambda: self.statusBar().showMessage(self.i18n.text("Pronto")))
         self._analysis_tabs_enabled = None
         # Apply the persisted language to all catalogued widgets on first render.
         self.i18n.retranslate_widgets(self)
@@ -2263,23 +2558,47 @@ class MainWindow(QMainWindow):
         self.tabs.setTabText(TAB_MODEL_3D, self.i18n.tr("tab.model3d.name"))
         self.tabs.setTabText(TAB_KICAD, self.i18n.tr("tab.kicad.name"))
         self.i18n.retranslate_widgets(self)
+        if hasattr(self, "workflow_bar"):
+            self.workflow_bar.retranslate()
+            self._refresh_workflow_state()
+            if not self.analysis_overlay.isVisible():
+                self.statusBar().showMessage(self.i18n.text("Pronto"))
         self.ai_account.refresh()
-        self.menuBar().actions()[0].setText(self.i18n.tr("app.file"))
-        self.menuBar().actions()[1].setText(self.i18n.tr("app.configuration"))
-        self.menuBar().actions()[2].setText(self.i18n.tr("app.help"))
+        self.menu_file.setTitle(self.i18n.tr("app.file"))
+        self.menu_config.setTitle(self.i18n.tr("app.configuration"))
+        self.menu_tools.setTitle(self.i18n.tr("app.tools"))
+        self.menu_help.setTitle(self.i18n.tr("app.help"))
+        self.action_open_output.setText(self.i18n.text("Apri cartella componente"))
+        self.action_test_kicad.setText(self.i18n.text("Prova in KiCad..."))
+        self.action_export.setText(self.i18n.text("Installa nel progetto KiCad..."))
+        self.action_install_global.setText(self.i18n.text("Installa come libreria globale..."))
+        self.action_open_tool_dir.setText(self.i18n.text("Apri cartella progetto tool"))
+        self.action_open_config.setText(self.i18n.text("Apri config.json"))
         self.action_exit.setText(self.i18n.text("Esci"))
         # Voci del menu File aggiunte il 2026-09-24: prima restavano nella
         # lingua dell'avvio (verifica «testi cablati» dell'utente).
         self.action_new_project.setText(self.i18n.text("Nuovo progetto..."))
         self.action_open_project.setText(self.i18n.text("Apri progetto..."))
         self.action_rename_project.setText(self.i18n.text("Rinomina progetto..."))
+        self.menu_recent.setTitle(self.i18n.text("Progetti recenti"))
+        self.start_page.refresh()
         self.action_profiles.setText(self.i18n.text("Gestione tipologie e profili AI..."))
         self.action_defaults.setText(self.i18n.text("Default generali AI..."))
+        self.action_ai_account.setText(self.i18n.text("Account AI..."))
+        self.action_ai_account.setToolTip(self.i18n.text(
+            "Chiave OpenRouter, credito e limiti: incolla, verifica e salva la chiave nel "
+            "Gestore credenziali di Windows."))
         self.action_generation_options.setText(self.i18n.text("Opzioni di generazione..."))
         self.action_accepted_models.setText(
             self.i18n.text("Archivio abbinamenti accettati..."))
         self.action_licenses.setText(self.i18n.text("Licenze"))
-        self.action_about.setText(self.i18n.text("About"))
+        self.action_about.setText(self.i18n.text("Informazioni su KiCadGen"))
+        if hasattr(self, "action_shortcuts"):
+            self.action_shortcuts.setText(self.i18n.text("Scorciatoie da tastiera..."))
+        self.action_user_guide.setText(self.i18n.text("Guida d'uso"))
+        self.action_open_logs.setText(self.i18n.text("Apri cartella dei log"))
+        self.action_report_problem.setText(self.i18n.text("Segnala un problema..."))
+        self.action_check_updates.setText(self.i18n.text("Controlla aggiornamenti..."))
         self._retranslate_component_types()
         self._refresh_model_combo()
         self._refresh_output_actions()
@@ -3015,6 +3334,85 @@ class MainWindow(QMainWindow):
         return str(self._project_dir()) if self._named() else "—"
 
     def _refresh_output_actions(self) -> bool:
+        footprint_available = self._refresh_output_actions_inner()
+        self._refresh_workflow_state()
+        return footprint_available
+
+    def _workflow_facts(self) -> dict:
+        """@brief Facts of the open project that decide the workflow steps.
+
+        @return dict with name, documents, analysis, board, review, step (bools).
+        @note Only facts, no guesses: files on disk and what happened in this
+            session. A reopened project whose footprint exists has been
+            analysed, even if not in this session.
+        """
+        name = self._component_name()
+        facts = dict(name=bool(name), documents=False, analysis=False, board=False,
+                     review=False, step=False)
+        if not name:
+            return facts
+        project = self._project_dir()
+        footprint = (project / f"{name}.pretty" / f"{name}.kicad_mod").is_file()
+        facts["step"] = footprint and (project / f"{name}.3dshapes" / f"{name}.step").is_file()
+        docs_list = getattr(self, "docs_list", None)
+        facts["documents"] = bool(docs_list is not None and docs_list.count())
+        facts["analysis"] = bool(getattr(self, "_acquisition_completed", False)) or footprint
+        facts["board"] = self._photo_inventory_family() is True if self._selected_family() else False
+        facts["review"] = facts["board"] and (
+            bool(getattr(self, "_reviewed_this_extraction", False))
+            or self._review_bundle() is not None)
+        return facts
+
+    def _refresh_workflow_state(self) -> None:
+        """@brief Tick the done steps, highlight the next one, refresh the status bar."""
+        bar = getattr(self, "workflow_bar", None)
+        if bar is None:
+            return
+        facts = self._workflow_facts()
+        done = {key for key, flag in (("documents", facts["documents"]),
+                                      ("analysis", facts["analysis"]),
+                                      ("review", facts["review"]),
+                                      ("model3d", facts["step"])) if flag}
+        skipped = {}
+        if facts["name"] and not facts["board"]:
+            skipped["review"] = "Solo per le schede con componenti."
+        order = ("documents", "analysis", "review", "model3d", "kicad")
+        current = (next((key for key in order if key not in done and key not in skipped), None)
+                   if facts["name"] else None)
+        bar.set_state(done, current, skipped)
+        self._refresh_status_bar(facts["name"])
+
+    def _refresh_status_bar(self, named: bool) -> None:
+        """@brief Show the open project and its AI cost in the status bar."""
+        label = getattr(self, "status_project", None)
+        if label is None:
+            return
+        if not named:
+            label.setText(self.i18n.text("Nessun progetto aperto"))
+            self.status_cost.setText("")
+            self.status_cost.setVisible(False)
+            return
+        label.setText(self.i18n.tr("status.project", name=self._component_name()))
+        try:
+            from ..services.project_costs import load_project_costs
+            costs = load_project_costs(self._project_dir())
+        except Exception:  # noqa: BLE001 - il costo e' informativo
+            costs = None
+        if costs is None or not costs.calls:
+            self.status_cost.setText("")
+            self.status_cost.setVisible(False)
+            return
+        text = self.i18n.tr("status.project_cost", total=f"{costs.total_usd:.2f}", calls=costs.calls)
+        self.status_cost.setText(text + ("" if costs.complete else " (+?)"))
+        self.status_cost.setVisible(True)
+
+    def _on_workflow_step_clicked(self, step: str) -> None:
+        """@brief Open the tab where a step is done, when the tab is available."""
+        target = {"model3d": TAB_MODEL_3D, "kicad": TAB_KICAD}.get(step, TAB_PROJECT)
+        if self.tabs.isEnabled() and self.tabs.isTabEnabled(target):
+            self.tabs.setCurrentIndex(target)
+
+    def _refresh_output_actions_inner(self) -> bool:
         name = self._component_name()
         if name:
             project = self._project_dir()
@@ -3113,9 +3511,109 @@ class MainWindow(QMainWindow):
             (`_on_library_root_changed`).
         """
         if hasattr(self, "_open_project_folder"):
+            previous = self._open_project_folder
             self._open_project_folder = self._project_dir() if self._component_name() else None
+            self._remember_recent_project(previous)
         self._update_project_path_label()
         self._apply_component_name_gate()
+        self._refresh_window_title()
+        self._refresh_start_page()
+
+    def _remember_recent_project(self, previous) -> None:
+        """@brief Put the open project first among the recent projects.
+
+        @param previous Project folder open before this name change, or None.
+        @note Every way of opening a project passes through the name (new,
+            open, recent, rename, name proposed by the analysis), so this is
+            the one place that records it. A rename drops the old folder only
+            when it no longer exists, instead of letting it hold a slot until
+            the cap pushes it out.
+        """
+        folder = self._open_project_folder
+        if folder is None:
+            return
+        if previous is not None and previous != folder and not previous.exists():
+            recent_projects.remove(self._config, previous)
+        recent_projects.remember(self._config, folder, save=save_config)
+
+    def _refresh_start_page(self) -> None:
+        """@brief Show the start page without an open project, the tabs with one."""
+        stack = getattr(self, "central_stack", None)
+        if stack is None:
+            return
+        if self._component_name():
+            stack.setCurrentWidget(self.tabs)
+            return
+        self.start_page.set_recent(recent_projects.load(self._config))
+        stack.setCurrentWidget(self.start_page)
+
+    def _forget_recent_project(self, path: str) -> None:
+        """@brief «Rimuovi dall'elenco»: drop a recent project; its folder is not touched.
+
+        @param path Absolute project folder.
+        """
+        recent_projects.forget(self._config, path, save=save_config)
+        self._refresh_start_page()
+
+    def _fill_recent_menu(self) -> None:
+        """@brief Fill File > «Progetti recenti» with the projects that still exist.
+
+        @note Two projects with the same name in different working folders
+            also show their parent folder; the tooltip always has the full path.
+        """
+        menu = self.menu_recent
+        menu.clear()
+        paths = recent_projects.load(self._config)
+        names = [Path(path).name for path in paths]
+        for path, name in zip(paths, names):
+            text = name if names.count(name) == 1 else f"{name} \u2014 {Path(path).parent}"
+            action = menu.addAction(text)
+            action.setToolTip(path)
+            action.setStatusTip(path)
+            action.triggered.connect(lambda _checked=False, target=path:
+                                     self._open_recent_project(target))
+        if not paths:
+            menu.addAction(self.i18n.text("Nessun progetto recente")).setEnabled(False)
+
+    def _open_recent_project(self, path: str) -> None:
+        """@brief Reopen a recent project, moving to its working folder if needed.
+
+        @param path Absolute project folder.
+        @note `_project_dir()` is always «working folder / name», so a project
+            of another working folder is opened by moving the working folder
+            to its parent (for this session, like the folder button); that
+            change saves and closes the project open before, as always.
+        """
+        if self._project_change_blocked():
+            return
+        folder = Path(path)
+        if not recent_projects.is_project(folder):
+            # Elencato un attimo fa ma sparito (disco scollegato, cartella
+            # tolta): resta nell'elenco, come fa `load`, e si spiega il motivo.
+            QMessageBox.information(self, self.i18n.text("Progetti recenti"),
+                                    tx("Il progetto {path} non e' raggiungibile.", path=folder))
+            self._refresh_start_page()
+            return
+        if getattr(self, "_open_project_folder", None) == folder:
+            self._refresh_start_page()
+            return
+        self._flush_project_config()
+        if folder.parent != self._library_root():
+            self.field_library_root.setText(str(folder.parent))
+        self._open_project_at(folder)
+
+    def _refresh_window_title(self) -> None:
+        """@brief Show the open project and the product version in the title bar.
+
+        @note «<progetto> — KiCadGen <versione>», or «KiCadGen <versione>»
+            without a project (PIANO-FIX, identity): the same product name as
+            the installer and the About window; the name is a proper noun and
+            is not translated.
+        """
+        from .. import __version__
+        name = self._component_name()
+        product = f"KiCadGen {__version__}"
+        self.setWindowTitle(f"{name} \u2014 {product}" if name else product)
 
     def _apply_component_name_gate(self) -> None:
         """@brief Senza nome non si carica nulla e non si estrae nulla.
@@ -3209,6 +3707,8 @@ class MainWindow(QMainWindow):
             self.guided_docs.refresh()
             if hasattr(self, 'i18n'):
                 self.i18n.retranslate_widgets(self.guided_docs)
+        # Il passo «Documenti» segue l'elenco appena riletto.
+        self._refresh_workflow_state()
 
     def _selected_documents(self):
         return DocumentSet(self._docs_dir()).selected()
@@ -3288,6 +3788,8 @@ class MainWindow(QMainWindow):
             # foto, nessuna chiamata AI, nessun campo modificato.
             self._start_yolo_pretest(doc_paths, document_roles, yolo_model_path)
             return
+        if not self._ensure_api_key():
+            return
 
         try:
             profile = self.profile_store.snapshot(self._profile_key())
@@ -3306,6 +3808,42 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001 - qualunque guasto riporta la UI in quiete
             self._on_extract_finished()
             self._on_extract_error(str(exc))
+
+    def _ensure_api_key(self) -> bool:
+        """@brief Before a paid AI run: True when an OpenRouter key is configured.
+
+        @return False when there is none; the user is offered «Account AI...»
+            and the run does not start either way (a key saved there is used
+            by the next run, which the user starts again).
+        @note Checked on the GUI thread before any worker or modal starts:
+            the worker would fail with the same explanation, but only after
+            the progress window had opened. `openrouter.api_key` reads no
+            network (environment, Credential Manager, `.env`).
+        """
+        from ..services import openrouter
+        try:
+            openrouter.api_key()
+        except openrouter.MissingApiKeyError:
+            answer = QMessageBox.question(
+                self, self.i18n.text("Account AI"),
+                self.i18n.text("Nessuna chiave OpenRouter configurata. Aprire «Account AI...» "
+                               "per inserirla?"))
+            if answer == QMessageBox.StandardButton.Yes:
+                self._open_ai_account()
+            return False
+        return True
+
+    def _open_ai_account(self) -> None:
+        """@brief «Account AI...»: paste, verify, save or remove the OpenRouter key.
+
+        @note The dialog translates itself through this window's `i18n`; a
+            saved or removed key refreshes the balance line at once.
+        """
+        from .ai_account_dialog import AiAccountDialog
+        dialog = AiAccountDialog(self)
+        dialog.key_changed.connect(self.ai_account.refresh_balance)
+        self._ai_account_dialog = dialog
+        dialog.exec()
 
     def _start_extract_worker(self, doc_paths, document_roles, profile,
                               photo_detector, yolo_model_path) -> None:
@@ -4320,6 +4858,8 @@ class MainWindow(QMainWindow):
             profile = self.profile_store.snapshot(self._profile_key())
         except (ProfileError, sqlite3.Error, OSError) as exc:
             QMessageBox.warning(self, self.i18n.text('Profilo AI non disponibile'), str(exc))
+            return
+        if not self._ensure_api_key():
             return
         self._begin_ai_run("Rilancio inventario")
         try:
@@ -5746,10 +6286,19 @@ class MainWindow(QMainWindow):
                                    tr=self.i18n.text, parent=self)
         if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.selected_name():
             return
+        self._open_project_at(self._library_root() / dialog.selected_name())
+
+    def _open_project_at(self, folder: Path) -> None:
+        """@brief Open the project `folder` of the current working folder.
+
+        @param folder Project folder; its parent must be `_library_root()`,
+            because from here on the project is addressed by name.
+        @note Applies the project's own settings when its project_config.json
+            is readable; a refused file is neither applied nor overwritten.
+        """
         self._flush_project_config()
-        name = dialog.selected_name()
+        name = folder.name
         from .project_state import ProjectConfigError, read_project_config
-        folder = self._library_root() / name
         try:
             saved = read_project_config(folder)
             self._project_config_refused = None
@@ -8065,6 +8614,8 @@ class MainWindow(QMainWindow):
                 self, self.i18n.text("Terminali non disponibili"),
                 self.i18n.text(
                     "Usa prima Rileva terminali dalla foto. L'affinamento conserva corpo e terminali esistenti."))
+            return
+        if not self._ensure_api_key():
             return
         question_key = ('terminal.confirm_leads' if only_leads
                         else 'terminal.confirm_geometry')

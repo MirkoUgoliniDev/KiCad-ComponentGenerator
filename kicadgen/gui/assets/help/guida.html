@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Guida d'uso di KiCadGen</title>
+<!--
+  Guida d'uso di KiCadGen, aperta dal menu «?» nel browser predefinito.
+  Pagina autonoma: nessuna risorsa esterna (font, script, immagini), l'unico
+  collegamento esterno e' il repository GitHub del progetto. Ogni frase
+  descrive un comando che esiste nel codice: quando un comando cambia nome o
+  sparisce, la guida va aggiornata insieme al codice.
+-->
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1f2330; --muted: #5b6070; --accent: #1d5fd1;
+    --panel: #f3f5f9; --border: #d6dae3; --note: #fff7e0; --note-border: #e0b44c;
+    --code: #eef1f6;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1e1e2e; --fg: #cdd6f4; --muted: #a6adc8; --accent: #89b4fa;
+      --panel: #262637; --border: #45475a; --note: #3a3322; --note-border: #b8923c;
+      --code: #313244;
+    }
+  }
+  html { background: var(--bg); }
+  body {
+    margin: 0 auto; max-width: 52rem; padding: 1.5rem 1rem 4rem;
+    background: var(--bg); color: var(--fg);
+    font: 16px/1.6 "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  h1 { font-size: 1.9rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1.35rem; margin-top: 2.5rem; padding-bottom: .3rem;
+       border-bottom: 1px solid var(--border); }
+  h3 { font-size: 1.1rem; margin-top: 1.6rem; }
+  a { color: var(--accent); }
+  p.lead { color: var(--muted); margin-top: 0; }
+  nav { background: var(--panel); border: 1px solid var(--border);
+        border-radius: 8px; padding: .75rem 1.25rem; }
+  nav ol { margin: .25rem 0; padding-left: 1.25rem; }
+  code, kbd { background: var(--code); border-radius: 4px; padding: 0 .3em;
+              font-family: Consolas, "Cascadia Mono", monospace; font-size: .92em; }
+  kbd { border: 1px solid var(--border); }
+  .note { background: var(--note); border-left: 4px solid var(--note-border);
+          border-radius: 4px; padding: .6rem 1rem; margin: 1rem 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid var(--border); padding: .4rem .6rem; text-align: left;
+           vertical-align: top; }
+  th { background: var(--panel); }
+  .ui { font-weight: 600; }
+  footer { margin-top: 3rem; color: var(--muted); font-size: .9rem; }
+</style>
+</head>
+<body>
+
+<h1>Guida d'uso di KiCadGen</h1>
+<p class="lead">Dall'idea al componente in una libreria KiCad: un esempio completo,
+passo per passo.</p>
+
+<nav>
+  <strong>Indice</strong>
+  <ol>
+    <li><a href="#cosa-fa">Che cosa fa KiCadGen</a></li>
+    <li><a href="#prima">Prima di iniziare</a></li>
+    <li><a href="#progetto">Creare il progetto</a></li>
+    <li><a href="#documenti">Caricare i documenti</a></li>
+    <li><a href="#tipologia">Scegliere la tipologia del componente</a></li>
+    <li><a href="#analisi">Avviare l'analisi e controllare i costi</a></li>
+    <li><a href="#revisione">Rivedere i corpi trovati sulla foto</a></li>
+    <li><a href="#generazione">Generazione: footprint e modello 3D</a></li>
+    <li><a href="#modello3d">La scheda «Modello 3D»</a></li>
+    <li><a href="#step">Scegliere il modello STEP di un componente</a></li>
+    <li><a href="#pin">Pin maschi sotto la scheda</a></li>
+    <li><a href="#kicad">La scheda «KiCad»: prova e installazione</a></li>
+    <li><a href="#log">Dove sono i log</a></li>
+    <li><a href="#aiuto">Segnalare un problema e aggiornamenti</a></li>
+    <li><a href="#limiti">Limiti da conoscere</a></li>
+  </ol>
+</nav>
+
+<h2 id="cosa-fa">1. Che cosa fa KiCadGen</h2>
+<p>KiCadGen crea un componente per KiCad a partire da documenti tecnici e
+fotografie: il <strong>footprint</strong> (<code>.kicad_mod</code>) e il
+<strong>modello 3D</strong> (<code>.step</code>). I documenti vengono letti da
+un modello di intelligenza artificiale tramite OpenRouter; il programma
+trasforma poi quello che il modello ha letto in geometria, con regole
+deterministiche.</p>
+<p>Per una scheda con componenti montati sopra (un modulo, una scheda di
+sviluppo) KiCadGen ricostruisce gli <strong>ingombri meccanici</strong>: posizione,
+dimensioni e orientamento dei corpi visibili nella foto. Non fa reverse
+engineering: i corpi sono volumi generici, oppure modelli 3D della libreria di
+KiCad scelti per somiglianza di misure.</p>
+
+<h2 id="prima">2. Prima di iniziare</h2>
+<ul>
+  <li><strong>FreeCAD</strong> (freecad.org) costruisce i modelli 3D. Senza FreeCAD
+  si ottiene comunque il footprint; la finestra di avanzamento dice quali passi
+  non possono essere eseguiti e perché.</li>
+  <li><strong>KiCad</strong> (kicad.org) serve per provare il risultato e per
+  installare le librerie.</li>
+  <li><strong>Chiave OpenRouter</strong>: l'analisi dei documenti è a pagamento e
+  richiede una chiave. Si inserisce da <span class="ui">Configurazione</span> →
+  <span class="ui">Account AI...</span>: incollala, premi
+  <span class="ui">Verifica</span> e poi <span class="ui">Salva</span>; resta nel
+  Gestore credenziali di Windows. Il vecchio file <code>.env</code> (riga
+  <code>OPENROUTER_API_KEY=sk-or-...</code> nella cartella
+  <code>%LOCALAPPDATA%\KiCadGen</code>) resta valido. Se manca la chiave,
+  il programma lo dice prima di avviare un'analisi e offre di aprire la finestra.
+  Quando la chiave funziona, la riga <span class="ui">Credito AI</span> della
+  scheda <span class="ui">Progetto</span> mostra il saldo.</li>
+</ul>
+<p>La lingua dell'interfaccia (italiano, inglese, francese, tedesco) si sceglie
+dall'elenco sopra le schede.</p>
+
+<h2 id="progetto">3. Creare il progetto</h2>
+<p>Un progetto è una cartella: il suo nome è anche il nome del footprint e del
+modello 3D.</p>
+<ol>
+  <li>Menu <span class="ui">File → Nuovo progetto...</span> (<kbd>Ctrl</kbd>+<kbd>N</kbd>).
+  Scrivi il nome, per esempio <code>RS485_TTL</code>, e conferma.</li>
+  <li>La cartella viene creata nell'<span class="ui">Area di lavoro</span> indicata
+  nella scheda <span class="ui">Progetto</span> (nel programma installato,
+  per default <code>Documenti\KiCadGen</code>). Il pulsante con la cartella accanto
+  al campo permette di sceglierne un'altra.</li>
+  <li>Per riprendere un lavoro: <span class="ui">File → Apri progetto...</span>
+  (<kbd>Ctrl</kbd>+<kbd>O</kbd>) elenca i progetti dell'area di lavoro, dal più recente.
+  <span class="ui">File → Rinomina progetto...</span> cambia il nome della cartella.</li>
+</ol>
+
+<h2 id="documenti">4. Caricare i documenti</h2>
+<p>Nella scheda <span class="ui">Progetto</span>, il riquadro della documentazione ha
+tre schede, una per ruolo. Dichiarare il ruolo di ogni file dice al modello come
+usarlo:</p>
+<table>
+  <tr><th>Ruolo</th><th>Che cosa caricare</th></tr>
+  <tr><td class="ui">Pinout / disposizione contatti</td>
+      <td>Il disegno o la tabella con numerazione e posizione dei contatti. Il
+      programma non presume che sia visto dall'alto: se il documento mostra una
+      vista dal basso (bottom view), la specchiatura la fa il codice.</td></tr>
+  <tr><td class="ui">Immagine con quote</td>
+      <td>La vista dall'alto con le quote meccaniche: lunghezza e larghezza del
+      corpo, posizione dei fori, distanze fra le file di contatti.</td></tr>
+  <tr><td class="ui">Foto ad alta risoluzione</td>
+      <td>Una fotografia vera del pezzo, dall'alto: serve a individuare i
+      componenti piccoli. Non un disegno tecnico.</td></tr>
+</table>
+<ul>
+  <li><span class="ui">Carica…</span> copia il file nella cartella <code>docs</code>
+  del progetto (l'originale non viene toccato); poi il pulsante diventa
+  <span class="ui">Sostituisci…</span>. Formati: PDF, PNG, JPG, WEBP, GIF.</li>
+  <li>L'icona dell'occhio apre l'anteprima con lo zoom; l'icona di rimozione toglie
+  la copia locale, che resta recuperabile.</li>
+  <li>Se un documento non esiste, spunta <span class="ui">Non disponibile</span>:
+  il programma sa che manca e non lo aspetta.</li>
+</ul>
+<div class="note">Le foto dall'alto vengono calibrate sulle quote della scheda.
+Serve una foto scattata dall'alto, quasi allineata, con il lato lungo in
+orizzontale e il contorno della scheda riconoscibile. Il programma non corregge la
+prospettiva: una foto inclinata viene rifiutata, e la scheda del ruolo lo
+segnala.</div>
+
+<h2 id="tipologia">5. Scegliere la tipologia del componente</h2>
+<p>Nella scheda <span class="ui">Progetto</span>, <span class="ui">Tipologia
+componente</span> dice al modello che cosa sta leggendo, e quindi quali quote
+cercare.</p>
+<table>
+  <tr><th>Tipologia</th><th>Che cosa succede</th></tr>
+  <tr><td class="ui">Componente singolo a fori passanti (THT)</td>
+      <td>Pad con foro, quote dal layout consigliato del datasheet.</td></tr>
+  <tr><td class="ui">Componente singolo SMD</td>
+      <td>Nessun foro, dimensioni dal land pattern consigliato.</td></tr>
+  <tr><td class="ui">Scheda con componenti · connettori passanti</td>
+      <td rowspan="2">Oltre al footprint, parte l'<strong>inventario
+      fotografico</strong>: i corpi montati sulla scheda vengono cercati sulla foto,
+      misurati e trasformati in volumi 3D, che poi si rivedono e si correggono.</td></tr>
+  <tr><td class="ui">Scheda con componenti · connettori castellated (mezzo foro)</td></tr>
+</table>
+<p>Per i <strong>componenti singoli</strong> l'inventario fotografico non viene
+eseguito: niente rilevatore dei corpi, niente revisione dei corpi, niente pausa
+dopo l'inventario.</p>
+<p>Il riquadro <span class="ui">Strumenti AI</span> contiene le altre scelte:</p>
+<ul>
+  <li><span class="ui">Rilevamento foto</span> (conta solo per le schede):
+    <span class="ui">YOLO locale + verifica AI</span> (il rilevatore sul tuo
+    computer propone i riquadri, il modello AI li verifica),
+    <span class="ui">AI (attuale)</span>,
+    <span class="ui">Solo modello di visione (nessun rilevatore locale)</span>, oppure
+    <span class="ui">Solo YOLO locale (pretest, nessuna AI)</span>, che mostra
+    soltanto i riquadri trovati dal rilevatore senza nessuna chiamata a pagamento.
+    Il rilevatore locale richiede un file del modello YOLO, che si sceglie nella riga
+    <span class="ui">Modello YOLO</span>: <code>.onnx</code> (i file <code>.pt</code>
+    funzionano solo avviando il programma dai sorgenti). Se il file manca o non è
+    compatibile, l'analisi si ferma prima di spendere.</li>
+  <li><span class="ui">Modello AI</span>: il modello usato per l'analisi. Il
+  pulsante accanto sceglie un modello diverso <em>solo per questa sessione</em>;
+  il predefinito si imposta da <span class="ui">Configurazione → Gestione
+  tipologie e profili AI...</span>.</li>
+</ul>
+
+<h2 id="analisi">6. Avviare l'analisi e controllare i costi</h2>
+<ol>
+  <li>Premi <span class="ui">Estrai parametri con AI</span>. È un'analisi
+  <strong>a pagamento</strong>: consuma credito OpenRouter. Prima di partire, il
+  log scrive quali modelli verranno usati.</li>
+  <li>Una finestra mostra l'avanzamento. <span class="ui">Interrompi</span> ferma il
+  lavoro.</li>
+  <li>Alla fine, il costo dell'ultima analisi compare nella finestra e nel
+  <span class="ui">Log AI</span> (icona in alto nella scheda
+  <span class="ui">Progetto</span>). Se la risposta è stata presa dalla cache
+  locale, non c'è stata nessuna chiamata a pagamento e il log lo dice.</li>
+  <li>La riga <span class="ui">Credito AI</span> mostra il saldo del conto
+  OpenRouter e il <strong>costo totale del progetto</strong>, somma di tutte le
+  chiamate a pagamento fatte per quel progetto.</li>
+</ol>
+<div class="note">Ogni comando che spende lo dice nel suo suggerimento (il testo che
+compare fermando il mouse sul pulsante). I comandi di revisione e di rigenerazione
+del 3D sono gratuiti.</div>
+
+<h2 id="revisione">7. Rivedere i corpi trovati sulla foto</h2>
+<p>Solo per le due tipologie <span class="ui">Scheda con componenti</span>.</p>
+<h3>Corpi rilevati</h3>
+<p>Con il rilevatore YOLO, prima della verifica a pagamento si apre la finestra
+<span class="ui">Corpi rilevati: togli quelli che non sono componenti</span>. Togli i
+riquadri che cadono su scritte, fori o piazzole vuote, aggiungi quelli mancanti,
+poi <span class="ui">OK</span>. Annullando, l'analisi si ferma senza pagare la
+verifica.</p>
+<h3>Pausa dopo l'inventario</h3>
+<p>Quando l'inventario AI è finito, il programma chiede se vuoi rivedere gli
+ingombri <strong>prima</strong> della scelta dei modelli e della generazione 3D. La
+revisione è gratuita. Rispondendo <span class="ui">No</span> si prosegue con i corpi
+come li ha proposti l'AI. La pausa si attiva o si disattiva da
+<span class="ui">Configurazione → Opzioni di generazione...</span>
+(<span class="ui">Fermati dopo l'inventario AI per rivedere i corpi</span>).</p>
+<h3>Revisione componenti da foto</h3>
+<p>La finestra mostra la foto con un rettangolo per ogni corpo:</p>
+<ul>
+  <li><span class="ui">Aggiungi componente</span> (<kbd>R</kbd>): traccia un
+  rettangolo sulla foto, poi assegna la tipologia.
+  <span class="ui">Elimina selezionato</span> (<kbd>Canc</kbd>) toglie il corpo
+  scelto.</li>
+  <li>Zoom con <kbd>+</kbd>, <kbd>-</kbd> o la rotella del mouse;
+  <span class="ui">Adatta foto</span> (<kbd>F</kbd>) mostra la foto intera.</li>
+  <li><span class="ui">Parametri…</span>: quote, rotazione, altezza e nome del
+  componente scelto. <span class="ui">Scegli modello KiCad…</span> (anche con doppio
+  clic nella lista): vedi il <a href="#step">capitolo 10</a>.</li>
+  <li><span class="ui">Applica correzioni</span> salva; <span class="ui">Annulla</span>
+  lascia tutto com'era.</li>
+</ul>
+<p>Più tardi, dalla scheda <span class="ui">Progetto</span>:</p>
+<ul>
+  <li><span class="ui">Rivedi proposte salvate…</span> riapre i corpi rilevati
+  salvati nel progetto. Gratuito.</li>
+  <li><span class="ui">Rilancia inventario AI (a pagamento)…</span> rifà solo
+  l'inventario sulle proposte salvate. È l'unico dei tre che spende.</li>
+  <li><span class="ui">Modifica la revisione dei componenti…</span> riapre la
+  revisione: ingombri, quote e scelta dei modelli KiCad. Gratuito.</li>
+</ul>
+
+<h2 id="generazione">8. Generazione: footprint e modello 3D</h2>
+<p>Quando l'analisi è valida, la generazione parte da sola. La finestra di
+avanzamento mostra tre passi, e per ciascuno chi lo esegue:</p>
+<ol>
+  <li><span class="ui">Footprint 2D (KiCadGen)</span>: il file
+  <code>.kicad_mod</code>, scritto dal programma.</li>
+  <li><span class="ui">Modelli 3D dalla libreria KiCad</span>: per ogni corpo si
+  cercano i modelli della libreria 3D di KiCad con misure compatibili.</li>
+  <li><span class="ui">Solido 3D con FreeCAD</span>: il file <code>.step</code>.</li>
+</ol>
+<p>Quando un passo non può essere eseguito (per esempio FreeCAD non installato) la
+finestra ne dice il motivo. Un errore del 3D non annulla il footprint già
+scritto.</p>
+<p>A generazione riuscita la finestra resta aperta con tutti i passi spuntati e lo
+stato «Completato»: si chiude con <span class="ui">Chiudi</span>. In caso di errore
+o interruzione si chiude da sola e l'errore viene mostrato.</p>
+<p>La scheda <span class="ui">Anteprima footprint</span> mostra il disegno 2D in
+scala con le quote, i numeri dei pin e la <span class="ui">Griglia</span> (passo
+1 mm oppure 0.1 in); l'icona della tabella apre il pinout.</p>
+
+<h2 id="modello3d">9. La scheda «Modello 3D»</h2>
+<p>Il modello si ruota con il mouse; il cubo di navigazione porta sulle viste
+standard. Nella barra in alto:</p>
+<ul>
+  <li><strong>Numeri dei pin</strong>: compaiono solo guardando il pezzo dal lato
+  dei piedini (vista da sotto). Guardando da sotto si ritrova la bottom view del
+  datasheet: è un controllo pratico della specchiatura.</li>
+  <li><strong>Tabella pinout</strong>, <strong>Inquadra</strong>, e l'apertura della
+  cartella <code>3dshapes</code> con i file STEP.</li>
+  <li><span class="ui">Modifica componenti…</span>: nome, tipo, posizione, quote,
+  rotazione, colore e marcatura di ogni corpo, a mano. Funziona anche senza la foto.
+  Dopo <span class="ui">Applica</span> il modello 3D si rigenera con FreeCAD.
+  Nessuna richiesta AI.</li>
+  <li><strong>Rigenera modello 3D (STEP)</strong>: ricostruisce lo STEP dai corpi
+  attuali, comprese le correzioni appena applicate. Gratuito.</li>
+  <li><span class="ui">Accetto, mi piace — ricorda questi modelli…</span>: salva gli
+  abbinamenti fra corpi e modelli KiCad, che in una scheda futura verranno proposti
+  subito (da confermare). L'archivio si rivede con
+  <span class="ui">Archivio abbinamenti accettati…</span>.</li>
+  <li>Per i moduli castellated, una tendina corregge il <strong>tipo di
+  contatto</strong> di tutti i lati.</li>
+</ul>
+<p>Con il tasto destro su un corpo del modello: <span class="ui">Elimina dal modello
+3D (falso positivo)</span> (e <span class="ui">Rimetti nel modello 3D</span>),
+<span class="ui">Ruota il solido</span>, <span class="ui">Modifica
+componente...</span> e <span class="ui">Cambia modello KiCad...</span>.</p>
+
+<h2 id="step">10. Scegliere il modello STEP di un componente</h2>
+<p>La finestra <span class="ui">Scelta del modello STEP</span> si apre da
+<span class="ui">Scegli modello KiCad…</span> nella revisione o da
+<span class="ui">Cambia modello KiCad...</span> nel 3D. Mostra fino a cinque
+candidati della libreria KiCad, con le loro misure, accanto al ritaglio della foto
+del componente.</p>
+<ul>
+  <li>L'anteprima del candidato è orientata come verrà montato sulla scheda. La
+  rotazione si imposta a mano, oppure con <span class="ui">Automatico: deduci gli
+  assi CAD dall'ingombro</span>.</li>
+  <li>La spunta <span class="ui">Colori</span> mostra l'anteprima con i colori del
+  file STEP; spenta, l'anteprima è a tinta unica ed è più veloce. La scelta viene
+  ricordata.</li>
+</ul>
+
+<h2 id="pin">11. Pin maschi sotto la scheda</h2>
+<p>Per le due tipologie <span class="ui">Scheda con componenti</span>, la spunta
+<span class="ui">Pin quadrati per il collegamento alla scheda principale (solo modello
+3D)</span> nella scheda <span class="ui">Progetto</span> aggiunge sotto la scheda gli
+strip maschi a pin quadrati, come una scheda con gli strip già saldati. Sulle
+schede castellated vengono messi solo sui contatti con foro passante.</p>
+<p>Non cambia né l'analisi né il footprint: dopo averla cambiata basta
+rigenerare il modello 3D.</p>
+
+<h2 id="kicad">12. La scheda «KiCad»: prova e installazione</h2>
+<p>La scheda elenca i file pronti (footprint e modello STEP) e offre tre
+operazioni.</p>
+<table>
+  <tr><th>Comando</th><th>Che cosa fa</th></tr>
+  <tr><td class="ui">Prova in KiCad...</td>
+      <td>Crea un piccolo progetto temporaneo con il footprint e il modello 3D, nella
+      sottocartella <code>.kicad-preview</code> del componente, e lo apre nel PCB
+      Editor. In KiCad premi <kbd>Alt</kbd>+<kbd>3</kbd> per la vista 3D. Non installa
+      e non modifica nessuna libreria di KiCad.</td></tr>
+  <tr><td class="ui">Installa nel progetto KiCad...</td>
+      <td>La scelta consigliata. Scegli la cartella di un progetto KiCad: vengono
+      creati <code>KiCadGen.pretty</code> e <code>KiCadGen.3dshapes</code> e la
+      libreria viene registrata nella tabella del progetto con percorsi relativi
+      (<code>${KIPRJMOD}</code>), quindi il progetto resta portabile.</td></tr>
+  <tr><td class="ui">Installa come libreria globale...</td>
+      <td>Rende il footprint disponibile in tutti i progetti di questo computer.
+      Richiede che KiCad sia installato; scegli la cartella delle librerie e la
+      libreria viene registrata nella tabella globale di KiCad. Le altre librerie
+      della tabella restano come sono.</td></tr>
+</table>
+<p>Prima di sovrascrivere un componente già installato, o di spostare una libreria
+<code>KiCadGen</code> già registrata altrove, il programma chiede conferma.
+<span class="ui">Apri cartella componente</span> apre la cartella con footprint,
+modello STEP e documenti.</p>
+
+<h2 id="log">13. Dove sono i log</h2>
+<table>
+  <tr><th>File</th><th>Dove</th><th>Contenuto</th></tr>
+  <tr><td><code>analisi-ai.log</code></td><td>Nella cartella del progetto</td>
+      <td>Il diario dell'analisi, scritto riga per riga mentre il lavoro procede:
+      passi, modelli usati, costi, avvisi. Si legge anche dal programma con
+      l'icona <span class="ui">Log AI</span>.</td></tr>
+  <tr><td><code>freecad.log</code></td><td>Nella cartella del progetto</td>
+      <td>L'uscita di FreeCAD durante la costruzione del modello 3D.</td></tr>
+  <tr><td><code>crash-reports</code></td><td>Cartella <code>logs</code> dei dati del
+      programma (installato: <code>%LOCALAPPDATA%\KiCadGen\logs</code>)</td>
+      <td>Un file per ogni errore imprevisto del programma, con versione, sistema e
+      traccia dell'errore. Sono tenuti solo i più recenti.</td></tr>
+</table>
+<p>Il menu <span class="ui">? → Apri cartella dei log</span> apre la cartella del
+progetto aperto, dove sono <code>analisi-ai.log</code> e <code>freecad.log</code>;
+senza un progetto aperto apre la cartella <code>logs</code> dei dati del
+programma.</p>
+
+<h2 id="aiuto">14. Segnalare un problema e aggiornamenti</h2>
+<ul>
+  <li><span class="ui">? → Segnala un problema</span> apre nel browser una nuova
+  segnalazione sul repository GitHub del progetto, già compilata con la versione di
+  KiCadGen, il sistema operativo e la presenza di FreeCAD e KiCad. Il programma apre
+  anche la cartella dei log: allega tu i file utili, dopo averli guardati, perché
+  possono contenere i nomi delle tue cartelle e dei tuoi progetti. La segnalazione
+  su GitHub è pubblica e non parte finché non la invii.</li>
+  <li><span class="ui">? → Controlla aggiornamenti…</span> confronta questa versione
+  con l'ultima pubblicata su GitHub. Il controllo avviene solo quando lo chiedi.</li>
+</ul>
+<p>Il progetto: <a href="https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator">github.com/MirkoUgoliniDev/KiCad-ComponentGenerator</a>.</p>
+
+<h2 id="limiti">15. Limiti da conoscere</h2>
+<ul>
+  <li>L'analisi AI può sbagliare: controlla sempre footprint e modello 3D nelle
+  anteprime prima di usarli.</li>
+  <li>Le altezze dei corpi ricavate da una sola foto dall'alto sono
+  <strong>stime</strong>, non misure. Verifica le altezze e le distanze critiche con
+  disegni quotati o con una misura.</li>
+  <li>L'inventario fotografico non garantisce di aver trovato tutti i corpi: per
+  questo esistono la revisione e <span class="ui">Modifica componenti…</span>.</li>
+</ul>
+
+<footer>KiCadGen — guida d'uso. Il programma è distribuito con licenza GNU AGPL-3.0;
+le licenze dei componenti di terze parti sono nel menu
+<span class="ui">? → Licenze</span>.</footer>
+</body>
+</html>

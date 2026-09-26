@@ -75,6 +75,29 @@ def no_unattended_modal_dialog(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_real_api_key_sources(monkeypatch, tmp_path):
+    """@brief No test reads the developer's real OpenRouter key, from any source.
+
+    `openrouter.api_key` looks in the environment, the Windows Credential
+    Manager and the `.env` files. The repository holds a real `.env` and the
+    developer may have saved a key with «Account AI...»: a test that expects
+    «no key» would find it, and one that writes a key would overwrite it.
+    Here the environment variable is removed, the Credential Manager becomes
+    an empty in-memory vault (`fake_credman.FakeAdvapi32`) and the `.env`
+    files are looked up in the test's own tmp folder. Tests that need a key
+    set it themselves, as they already did with `monkeypatch.setenv`.
+    """
+    from fake_credman import FakeAdvapi32
+    from kicadgen.services import credentials, openrouter
+    monkeypatch.delenv(openrouter.API_KEY_ENV, raising=False)
+    monkeypatch.setattr(credentials, "_advapi32", FakeAdvapi32())
+    monkeypatch.setattr(openrouter, "env_files", lambda: [tmp_path / "dotenv" / ".env"])
+    openrouter.invalidate_credit_cache()
+    yield
+    openrouter.invalidate_credit_cache()
+
+
+@pytest.fixture(autouse=True)
 def no_leftover_message_translator():
     """@brief Ogni test parte e finisce senza traduttore dei messaggi registrato.
 

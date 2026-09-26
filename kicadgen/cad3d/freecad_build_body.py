@@ -564,6 +564,26 @@ def _needs_silk_rim(component_color, substrate_color):
     return (lighter + 0.05) / (darker + 0.05) < SILK_RIM_MIN_CONTRAST
 
 
+def _needs_component_rim(component_color, substrate_color, built):
+    """@brief Cornice di contrasto per UN componente gia' costruito?
+
+    @param component_color Colore del corpo letto dalla fotografia.
+    @param substrate_color Colore su cui il corpo appoggia.
+    @param built Parti costruite, (forma, colore); il colore delle parti
+        importate dalla libreria KiCad porta `model_path`.
+    @return True solo per un corpo costruito come forma approssimata che
+        sparirebbe nel fondo (`_needs_silk_rim`).
+    @note Un modello della libreria KiCad porta i propri colori e la propria
+        forma: la cornice, decisa sul colore della FOTO, gli girava attorno
+        anche quando il modello era bianco o metallico (utente, 2026-09-26).
+        Conta l'esito vero dell'import: se fallisce, il ripiego e' una forma
+        approssimata e la regola del contrasto torna a valere.
+    """
+    if any(getattr(color, "model_path", None) for _shape, color in built):
+        return False
+    return _needs_silk_rim(component_color, substrate_color)
+
+
 def _marking_to_print(component, data):
     """@brief Testo da stampare sopra un componente, o stringa vuota.
 
@@ -649,9 +669,6 @@ def _flip_y(data):
         through = c.get("through_hole")
         if isinstance(through, dict) and "y" in through:
             through["y"] = -float(through["y"])
-    rim = data.get("silk_outline")
-    if rim:
-        rim["y"] = -rim["y"]
     for box in data.get("extra_boxes", []):
         box["y"] = -(box["y"] + box["width_mm"])
     data["pins"] = [[n, x, -y] for n, x, y in data.get("pins", [])]
@@ -1041,7 +1058,8 @@ def main():
         except Exception as exc:  # noqa: BLE001 - un contatto in meno non e' fatale
             _warn("contatto {get} non generato: {exc}", get=contact.get('number'), exc=exc)
 
-    # Serigrafia del modulo: sigle accanto ai contatti e cornice del bordo.
+    # Serigrafia del modulo: sigle accanto ai contatti. Nessuna cornice del
+    # bordo (utente, 2026-09-26): era un rettangolo che nessun dato descrive.
     silk_z = z1 + 0.004
     for i, item in enumerate(data.get("silk_texts", [])):
         try:
@@ -1052,13 +1070,6 @@ def main():
                 add(f"Silk_{i}", shape, item.get("color_hex", silk_color))
         except Exception as exc:  # noqa: BLE001
             _warn("serigrafia '{get}' non generata: {exc}", get=item.get('text'), exc=exc)
-    rim = data.get("silk_outline")
-    if rim:
-        try:
-            add("Silk_outline", _rim(rim["x"], rim["y"], rim["length_mm"], rim["width_mm"],
-                                     silk_z, line=0.1), silk_color)
-        except Exception as exc:  # noqa: BLE001
-            _warn("cornice serigrafica non generata: {exc}", exc=exc)
 
     # Componenti montati sul modulo: forma per tipo (vedi freecad_parts).
     components = data.get("components", [])
@@ -1126,8 +1137,9 @@ def main():
                 # sparirebbero nel modello anche con la geometria giusta. Un
                 # modulo bianco o un guscio metallico si distinguono da soli,
                 # e li' la cornice e' solo disturbo.
-                if _needs_silk_rim(component.get("color_hex", body_color),
-                                   (substrate or {}).get("color_hex", body_color)):
+                if _needs_component_rim(component.get("color_hex", body_color),
+                                        (substrate or {}).get("color_hex", body_color),
+                                        built):
                     rim = _rim(component["x"], component["y"],
                                component["length_mm"] + 0.36, component["width_mm"] + 0.32,
                                silk_z, line=0.08)

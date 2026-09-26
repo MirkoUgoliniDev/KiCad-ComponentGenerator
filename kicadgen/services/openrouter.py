@@ -30,6 +30,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Sequence
+from . import credentials
 from .messages import tx
 from ..app_paths import env_files, is_frozen, user_data_dir
 
@@ -56,7 +57,7 @@ MODELS_CACHE_TTL_S = 24 * 3600
 # nelle statistiche del proprio account.
 _APP_HEADERS = {
     "HTTP-Referer": "https://github.com/kicadgen-tool",
-    "X-Title": "KiCadGen-Tool",
+    "X-Title": "KiCadGen",
 }
 
 _HTTP_TIMEOUT_MODELS_S = 30
@@ -91,14 +92,31 @@ class OpenRouterError(Exception):
         (HTTP 400 about tool_choice), so one retry in the portable
         required-tool form may succeed. A plain 400 is neither retryable nor
         compatibility: repeating an invalid request only pays for the refusal.
+    @param http_status HTTP status of a refused status request, when known.
+    @param unreachable Whether no HTTP answer arrived at all (network down,
+        DNS, timeout).
     """
 
     def __init__(self, message: str, *, retryable: bool = False,
-                 retry_after: Optional[float] = None, compatibility: bool = False):
+                 retry_after: Optional[float] = None, compatibility: bool = False,
+                 http_status: Optional[int] = None, unreachable: bool = False):
         super().__init__(message)
         self.retryable = retryable
         self.retry_after = retry_after
         self.compatibility = compatibility
+        #: HTTP status of the refusal, or None when no HTTP answer arrived.
+        self.http_status = http_status
+        #: True when OpenRouter could not be reached at all (DNS, connection,
+        #: timeout): the request, and so the key, were never judged.
+        self.unreachable = unreachable
+
+
+class MissingApiKeyError(OpenRouterError):
+    """@brief No OpenRouter API key in any of the sources `api_key` reads.
+
+    @note A subclass, so every caller that catches OpenRouterError keeps
+        working; the GUI can tell this case apart and offer «Account AI...».
+    """
 
 
 @dataclass(frozen=True)
@@ -172,20 +190,135 @@ DATASHEET_CAPABILITIES = ("tools", "images", "files")
 PHOTO_CAPABILITIES = ("tools", "images")
 
 
-def api_key() -> str:
-    """@brief Return the OpenRouter API key from the environment or raise OpenRouterError.
+#: Where the key in use comes from; values of `ApiKeySource.kind`.
+KEY_SOURCE_ENVIRONMENT = "environment"
+KEY_SOURCE_CREDENTIAL_MANAGER = "credential_manager"
+KEY_SOURCE_DOTENV = "dotenv"
+KEY_SOURCE_NONE = "none"
 
-    Ritorna la chiave OpenRouter dall'ambiente, o solleva OpenRouterError.
+
+@dataclass(frozen=True)
+class ApiKeySource:
+    """@brief Where the OpenRouter key in use comes from, without the key itself.
+
+    @note `kind` is one of the KEY_SOURCE_* constants. `location` names the
+        place (variable name, credential target or .env path) and is empty
+        for KEY_SOURCE_NONE. `stored` tells whether the Credential Manager
+        holds a key even when another source outranks it; `credential_error`
+        is the reason it could not be read, empty when the read worked.
     """
-    key = os.environ.get(API_KEY_ENV, "").strip()
+
+    kind: str
+    location: str = ""
+    stored: bool = False
+    credential_error: str = ""
+
+
+def _stored_key() -> tuple[str, str]:
+    """The key saved in the Windows Credential Manager and the read error, if any.
+
+    Never raises: a store that cannot be read must not hide a `.env` key.
+    """
+    if not credentials.is_supported():
+        return "", ""
+    try:
+        return (credentials.read_secret(credentials.OPENROUTER_TARGET) or "").strip(), ""
+    except credentials.CredentialError as exc:
+        return "", str(exc)
+
+
+def _dotenv_key() -> tuple[str, Optional[Path]]:
+    """The key written in the first `.env` file that sets it, and that file.
+
+    Same files and same parser as the launcher used to load into the process
+    environment (`app_paths.env_files`, python-dotenv). Without python-dotenv
+    no `.env` is read, exactly as before.
+    """
+    try:
+        from dotenv import dotenv_values
+    except ImportError:
+        return "", None
+    for path in env_files():
+        try:
+            if not path.is_file():
+                continue
+            value = dotenv_values(path).get(API_KEY_ENV)
+        except (OSError, ValueError):
+            continue
+        if value and value.strip():
+            return value.strip(), path
+    return "", None
+
+
+def _resolve_api_key() -> tuple[str, ApiKeySource]:
+    """The key in use (empty when none) and its source, in `api_key` order."""
+    environment = os.environ.get(API_KEY_ENV, "").strip()
+    stored, credential_error = _stored_key()
+    if environment:
+        return environment, ApiKeySource(KEY_SOURCE_ENVIRONMENT, API_KEY_ENV, bool(stored),
+                                          credential_error)
+    if stored:
+        return stored, ApiKeySource(KEY_SOURCE_CREDENTIAL_MANAGER,
+                                    credentials.OPENROUTER_TARGET, True)
+    from_file, path = _dotenv_key()
+    if from_file:
+        return from_file, ApiKeySource(KEY_SOURCE_DOTENV, str(path), False, credential_error)
+    return "", ApiKeySource(KEY_SOURCE_NONE, "", False, credential_error)
+
+
+def api_key_source() -> ApiKeySource:
+    """@brief Tell where the OpenRouter key in use comes from, never the key itself.
+
+    @return The source `api_key` would use now (KEY_SOURCE_NONE when there is
+        no key), plus whether the Credential Manager holds a key.
+    @note Reads the same sources as `api_key`, in the same order; no network.
+    """
+    return _resolve_api_key()[1]
+
+
+def api_key() -> str:
+    """@brief Return the OpenRouter API key, looked up in three sources in order.
+
+    Resolution order (the first non-empty value wins):
+    1. the process environment variable ``OPENROUTER_API_KEY`` -- a key set
+       on purpose for this process (shell, CI, script) outranks the others;
+    2. the Windows Credential Manager entry `credentials.OPENROUTER_TARGET`,
+       written by the «Account AI...» window;
+    3. the ``.env`` files of `app_paths.env_files()`, read directly -- the
+       place existing installations keep the key, still valid.
+
+    @return The key, stripped of surrounding blanks.
+    @throws MissingApiKeyError (an OpenRouterError) when no source has a key;
+        the message points to «Account AI...» and never contains a key.
+    @note The launcher (`main.py`) loads the ``.env`` files into the process
+        environment for the other variables they may set, but takes the
+        OpenRouter key back out when it was not already in the environment:
+        left there, a ``.env`` key would pose as source 1 and hide a key
+        saved later with «Account AI...».
+    @note A Credential Manager that cannot be read is not fatal: the lookup
+        continues with the ``.env`` files and the read error is appended to
+        the «no key» message.
+    """
+    key, source = _resolve_api_key()
     if not key:
-        raise OpenRouterError(
-            tx("Variabile d'ambiente {API_KEY_ENV} non impostata. Inseriscila nel "
-               "file {path} (vedi .env.example).",
-               API_KEY_ENV=API_KEY_ENV, path=env_files()[-1] if not is_frozen()
-               else env_files()[0])
-        )
+        message = tx("Chiave OpenRouter non configurata: inseriscila da Configurazione → "
+                     "«Account AI...». In alternativa imposta la variabile d'ambiente "
+                     "{API_KEY_ENV} o scrivila nel file {path} (vedi .env.example).",
+                     API_KEY_ENV=API_KEY_ENV, path=env_files()[-1] if not is_frozen()
+                     else env_files()[0])
+        if source.credential_error:
+            message += " " + tx("Gestore credenziali di Windows non leggibile: {error}",
+                                error=source.credential_error)
+        raise MissingApiKeyError(message)
     return key
+
+
+def _key_for_redaction() -> str:
+    """The key in use for scrubbing error texts; empty when none or unreadable."""
+    try:
+        return _resolve_api_key()[0]
+    except Exception:  # noqa: BLE001 - redaction must never replace the error it cleans
+        return ""
 
 
 @dataclass(frozen=True)
@@ -401,23 +534,34 @@ def _credit_number(value: Any) -> Optional[float]:
     return number if math.isfinite(number) else None
 
 
-def _get_json(url: str, timeout: int) -> dict:
-    """GET autenticata che ritorna il corpo JSON; solleva OpenRouterError."""
+def _get_json(url: str, timeout: int, key: Optional[str] = None) -> dict:
+    """GET autenticata che ritorna il corpo JSON; solleva OpenRouterError.
+
+    `key` e' la chiave da usare al posto di quella in uso (verifica di una
+    chiave appena incollata, non ancora salvata). L'errore dice se e' arrivato
+    un rifiuto HTTP (`http_status`) o se OpenRouter non e' stato raggiunto
+    (`unreachable`).
+    """
     request = urllib.request.Request(
         url,
-        headers={"Authorization": f"Bearer {api_key()}", **_APP_HEADERS},
+        headers={"Authorization": f"Bearer {key if key is not None else api_key()}",
+                 **_APP_HEADERS},
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.load(response)
     except urllib.error.HTTPError as exc:
-        raise OpenRouterError(_error_message(exc)) from None
+        status = exc.code if type(exc.code) is int else None
+        raise OpenRouterError(_error_message(exc), http_status=status) from None
     except urllib.error.URLError as exc:
         raise OpenRouterError(tx("connessione fallita: {safe_error_text}",
                                  safe_error_text=_safe_error_text(exc.reason))
-                              + _diagnostic_context()) from None
+                              + _diagnostic_context(), unreachable=True) from None
     except (ValueError, OSError) as exc:
-        raise OpenRouterError(tx("risposta non decodificabile") + _diagnostic_context()) from None
+        # Un OSError che non e' un ValueError e' un guasto di trasporto
+        # (timeout in lettura, connessione chiusa): la risposta non e' arrivata.
+        raise OpenRouterError(tx("risposta non decodificabile") + _diagnostic_context(),
+                              unreachable=not isinstance(exc, ValueError)) from None
     return payload if isinstance(payload, dict) else {}
 
 
@@ -442,38 +586,105 @@ def credit_status(force_refresh: bool = False) -> CreditStatus:
 
     failures = []
     account_error = ""
-    account_remaining = total_credits = total_usage = None
+    account = (None, None, None)
     try:
-        data = _get_json(CREDITS_URL, _HTTP_TIMEOUT_CREDITS_S).get("data") or {}
-        total_credits = _credit_number(data.get("total_credits"))
-        total_usage = _credit_number(data.get("total_usage"))
-        if total_credits is not None and total_usage is not None:
-            account_remaining = total_credits - total_usage
+        account = _account_balance(None)
     except OpenRouterError as exc:
         account_error = str(exc)
         failures.append(tx("saldo account ({exc})", exc=exc))
 
-    key_remaining, is_free_tier, expires_at = None, False, ""
+    limits = (None, False, "")
     try:
-        data = _get_json(KEY_STATUS_URL, _HTTP_TIMEOUT_CREDITS_S).get("data") or {}
-        # limit = None significa chiave senza tetto proprio: non e' un vincolo.
-        if _credit_number(data.get("limit")) is not None:
-            key_remaining = _credit_number(data.get("limit_remaining"))
-        is_free_tier = bool(data.get("is_free_tier"))
-        expires_at = str(data.get("expires_at") or "")
+        limits = _key_limits(None)
     except OpenRouterError as exc:
         failures.append(tx("stato chiave ({exc})", exc=exc))
 
     if len(failures) == 2:
         raise OpenRouterError("; ".join(failures))
 
-    status = CreditStatus(
+    status = _status_from(account, limits, account_error)
+    _credit_cache = (time.time(), status)
+    return status
+
+
+def _account_balance(key: Optional[str]) -> tuple:
+    """(remaining, total_credits, total_usage) from /credits; raises OpenRouterError."""
+    data = _get_json(CREDITS_URL, _HTTP_TIMEOUT_CREDITS_S, key).get("data") or {}
+    total_credits = _credit_number(data.get("total_credits"))
+    total_usage = _credit_number(data.get("total_usage"))
+    remaining = (total_credits - total_usage
+                 if total_credits is not None and total_usage is not None else None)
+    return remaining, total_credits, total_usage
+
+
+def _key_limits(key: Optional[str]) -> tuple:
+    """(key_remaining, is_free_tier, expires_at) from /auth/key; raises OpenRouterError."""
+    data = _get_json(KEY_STATUS_URL, _HTTP_TIMEOUT_CREDITS_S, key).get("data") or {}
+    # limit = None significa chiave senza tetto proprio: non e' un vincolo.
+    key_remaining = (_credit_number(data.get("limit_remaining"))
+                     if _credit_number(data.get("limit")) is not None else None)
+    return key_remaining, bool(data.get("is_free_tier")), str(data.get("expires_at") or "")
+
+
+def _status_from(account: tuple, limits: tuple, account_error: str) -> "CreditStatus":
+    """CreditStatus from the two partial readings."""
+    account_remaining, total_credits, total_usage = account
+    key_remaining, is_free_tier, expires_at = limits
+    return CreditStatus(
         account_remaining=account_remaining, key_remaining=key_remaining,
         total_credits=total_credits, total_usage=total_usage,
         is_free_tier=is_free_tier, expires_at=expires_at, account_error=account_error,
     )
-    _credit_cache = (time.time(), status)
-    return status
+
+
+def invalidate_credit_cache() -> None:
+    """@brief Forget the cached credit status, e.g. after the key in use changed.
+
+    @note The cache belongs to the key in use: a key saved or removed with
+        «Account AI...» must not inherit the previous key's credit.
+    """
+    global _credit_cache
+    _credit_cache = None
+
+
+def key_rejected(error: OpenRouterError) -> bool:
+    """@brief Tell whether OpenRouter answered that the key itself is not valid.
+
+    @param error The failure of a key check.
+    @return True for HTTP 401 and 403, the answers to a missing, revoked or
+        unknown key. False when OpenRouter was unreachable or failed for
+        another reason: then the key was never judged.
+    """
+    return error.http_status in (401, 403)
+
+
+def verify_api_key(key: str) -> "CreditStatus":
+    """@brief Check a key against OpenRouter without spending credit.
+
+    @param key The key to check, typically pasted and not yet saved; the key
+        in use is neither read nor changed.
+    @return Credit and limits read with that key. The account balance is
+        best effort (`account_error` says why it is missing); the key status
+        is required.
+    @throws OpenRouterError When the key is empty or /auth/key fails: see
+        `key_rejected` (HTTP 401/403) and `OpenRouterError.unreachable` to
+        tell a refused key from a network that is down. The message never
+        contains the key.
+    @note Only the two free status endpoints are called (/auth/key and
+        /credits): no model, no tokens, no cost. The result is not cached,
+        since it may belong to a key other than the one in use.
+    """
+    key = (key or "").strip()
+    if not key:
+        raise OpenRouterError(tx("La chiave è vuota."))
+    limits = _key_limits(key)
+    account_error = ""
+    account = (None, None, None)
+    try:
+        account = _account_balance(key)
+    except OpenRouterError as exc:
+        account_error = str(exc)
+    return _status_from(account, limits, account_error)
 
 
 def check_credit(minimum_usd: float = MIN_CREDIT_USD, progress=None,
@@ -671,7 +882,7 @@ def _safe_error_text(value):
     """
     if not isinstance(value, str):
         return tx("dettagli del provider omessi")
-    key = os.environ.get(API_KEY_ENV, "").strip()
+    key = _key_for_redaction()
     if key:
         value = value.replace(key, "[redacted]")
     value = value[:65536]

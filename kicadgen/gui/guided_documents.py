@@ -155,7 +155,11 @@ class GuidedDocuments(QWidget):
             preview.setFixedHeight(76)
             preview.setTextFormat(Qt.TextFormat.PlainText)
             column.addWidget(preview)
-            filename = QLabel('—')
+            # Vuoto finche' non c'e' un file: «Da caricare» sopra lo dice gia',
+            # e la lineetta sembrava un dato (PIANO-FIX, identita'). Una riga
+            # riservata tiene ferma l'altezza della scheda quando il file arriva.
+            filename = QLabel('')
+            filename.setMinimumHeight(filename.fontMetrics().lineSpacing())
             # File names are user data, never localization source strings.
             filename.setProperty('i18n_skip', True)
             filename.setTextFormat(Qt.TextFormat.PlainText)
@@ -340,7 +344,7 @@ class GuidedDocuments(QWidget):
                 widgets['verdict'].setStyleSheet(f'color: {colour};')
                 widgets['verdict'].show()
             widgets['filename'].setText(filename or (self._tr('Non disponibile')
-                                                     if entry.get('unavailable') else '—'))
+                                                     if entry.get('unavailable') else ''))
             original_name = str(entry.get('original_name', ''))
             widgets['filename'].setToolTip(
                 self.i18n.tr('tooltip.original_name', name=original_name)

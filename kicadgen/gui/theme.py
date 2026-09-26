@@ -87,6 +87,12 @@ APP_QSS = f"""
     QMenu::item:selected {{
         background: {SURFACE0};
     }}
+    /* Voce spenta (per esempio i comandi KiCad senza footprint): senza questa
+       regola sembrava uguale a una voce attiva. Stesso grigio delle schede
+       spente. */
+    QMenu::item:disabled {{
+        color: #626477;
+    }}
     QGroupBox {{
         border: 1px solid {SURFACE1};
         border-radius: 6px;

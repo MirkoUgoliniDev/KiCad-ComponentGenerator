@@ -10,6 +10,8 @@ import re
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
+from collections import OrderedDict
 
 from PyQt6.QtCore import (
     QEvent, QObject, QPointF, QRunnable, QSignalBlocker, QSize, Qt, QThreadPool, QTimer, pyqtSignal,
@@ -357,6 +359,83 @@ def _triangle_colors(runs, count):
 
 
 #: Chiave di config.json con la scelta «Colori» dell'anteprima (predefinito si').
+#: Meshes that FreeCAD tessellated for the preview, the slow part of it (about
+#: 7.5 s for an ESP32 module, measured 2026-09-26). The view and a manual
+#: rotation are applied afterwards in Python, so switching them must not read
+#: the file again: before this cache every click on the view button took that
+#: long with the old picture still on screen, and looked like a button that did
+#: not work. The key is the file identity (absolute path, size, modification
+#: time: a replaced file is read again) plus what the child script depends on
+#: (automatic placement data, colours). A path that cannot be stat'ed is never
+#: cached. Bounded, because a module mesh can hold up to 100 000 triangles.
+_MESH_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
+_MESH_CACHE_SIZE = 8
+_MESH_CACHE_LOCK = threading.Lock()
+#: Finished pictures of a cached mesh, keyed by the mesh key plus everything
+#: that changes the drawing (view, angle, board rotation, body colour): going
+#: back to a view already seen costs nothing. Drawing a module mesh takes about
+#: 1.4 s in Python (measured 2026-09-26), the rest of a toggle.
+_IMAGE_CACHE: "OrderedDict[tuple, QImage]" = OrderedDict()
+_IMAGE_CACHE_SIZE = 32
+
+
+def _mesh_cache_key(path, automatic, component, colors):
+    """Cache key of a preview mesh, or None when the file cannot be identified."""
+    try:
+        info = os.stat(path)
+    except (OSError, TypeError, ValueError):
+        return None
+    placement = (json.dumps(component, sort_keys=True, default=str)
+                 if automatic else None)
+    return (os.path.normcase(os.path.abspath(str(path))), info.st_size, info.st_mtime_ns,
+            placement, bool(colors))
+
+
+def _cached_mesh(key):
+    """(mesh, auto_angle) stored under `key`, or None."""
+    if key is None:
+        return None
+    with _MESH_CACHE_LOCK:
+        entry = _MESH_CACHE.get(key)
+        if entry is not None:
+            _MESH_CACHE.move_to_end(key)
+        return entry
+
+
+def _cached_image(key):
+    """A copy of the picture stored under `key`, or None."""
+    if key is None:
+        return None
+    with _MESH_CACHE_LOCK:
+        image = _IMAGE_CACHE.get(key)
+        if image is None:
+            return None
+        _IMAGE_CACHE.move_to_end(key)
+        return image.copy()
+
+
+def _store_image(key, image):
+    """Remember a finished picture (a copy: the caller keeps its own)."""
+    if key is None:
+        return
+    with _MESH_CACHE_LOCK:
+        _IMAGE_CACHE[key] = image.copy()
+        _IMAGE_CACHE.move_to_end(key)
+        while len(_IMAGE_CACHE) > _IMAGE_CACHE_SIZE:
+            _IMAGE_CACHE.popitem(last=False)
+
+
+def _store_mesh(key, mesh, auto_angle):
+    """Remember a validated mesh, dropping the least recently used beyond the bound."""
+    if key is None:
+        return
+    with _MESH_CACHE_LOCK:
+        _MESH_CACHE[key] = (mesh, auto_angle)
+        _MESH_CACHE.move_to_end(key)
+        while len(_MESH_CACHE) > _MESH_CACHE_SIZE:
+            _MESH_CACHE.popitem(last=False)
+
+
 PREVIEW_COLORS_KEY = "step_preview_colors"
 
 
@@ -462,6 +541,7 @@ def _thumbnail(path, rotation, dimensions=None, color=None, view=VIEW_ISOMETRIC,
     executable = find_freecadcmd()
     cad_directory = str(Path(__file__).resolve().parents[1] / 'cad3d')
     automatic = rotation is None
+    component = None
     if automatic:
         length, width = dimensions or (None, None)
         length, width = _number(length, None), _number(width, None)
@@ -503,27 +583,39 @@ def _thumbnail(path, rotation, dimensions=None, color=None, view=VIEW_ISOMETRIC,
             '    parts = None\n'
             'if not parts:\n'
             f'    parts = [(Part.read({str(path)!r}), None)]\n')
-    with tempfile.TemporaryDirectory(prefix='kicad-candidate-') as directory:
-        output = Path(directory) / 'mesh.json'
-        script = Path(directory) / 'preview.py'
-        # Paths are encoded as Python literals, never interpolated into shell code.
-        script.write_text(
-            'import Part, json, sys\n' + geometry_source + _CHILD_TESSELLATION +
-            f'with open({str(output)!r}, "w") as stream:\n'
-            '    json.dump({"vertices": vertices, "triangles": triangles, '
-            '"color_runs": runs}, stream)\n', encoding='utf-8')
-        completed = subprocess.run([executable, str(script)], stdout=subprocess.PIPE,
-                                   stderr=subprocess.DEVNULL, timeout=25, check=True,
-                                   text=True, errors='replace',
-                                   creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-        auto_angle = (_reported_auto_angle(getattr(completed, 'stdout', '') or '')
-                      if automatic else None)
-        if output.stat().st_size > 20_000_000:
-            raise ValueError('Preview mesh too large')
-        mesh = json.loads(output.read_text(encoding='utf-8'))
+    cache_key = _mesh_cache_key(path, automatic, component, colors)
+    cached = _cached_mesh(cache_key)
+    if cached is not None:
+        mesh, auto_angle = cached
+    else:
+        with tempfile.TemporaryDirectory(prefix='kicad-candidate-') as directory:
+            output = Path(directory) / 'mesh.json'
+            script = Path(directory) / 'preview.py'
+            # Paths are encoded as Python literals, never interpolated into shell code.
+            script.write_text(
+                'import Part, json, sys\n' + geometry_source + _CHILD_TESSELLATION +
+                f'with open({str(output)!r}, "w") as stream:\n'
+                '    json.dump({"vertices": vertices, "triangles": triangles, '
+                '"color_runs": runs}, stream)\n', encoding='utf-8')
+            completed = subprocess.run([executable, str(script)], stdout=subprocess.PIPE,
+                                       stderr=subprocess.DEVNULL, timeout=25, check=True,
+                                       text=True, errors='replace',
+                                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            auto_angle = (_reported_auto_angle(getattr(completed, 'stdout', '') or '')
+                          if automatic else None)
+            if output.stat().st_size > 20_000_000:
+                raise ValueError('Preview mesh too large')
+            mesh = json.loads(output.read_text(encoding='utf-8'))
     vertices, triangles = mesh['vertices'], mesh['triangles']
     if not vertices or not triangles or len(triangles) > 100_000:
         raise ValueError('Preview geometry unavailable or too complex')
+    # Only a usable mesh is remembered: a broken read is retried next time.
+    _store_mesh(cache_key, mesh, auto_angle)
+    image_key = (None if cache_key is None else
+                 (cache_key, view, float(rotation), float(board_rotation or 0.0), str(color)))
+    image = _cached_image(image_key)
+    if image is not None:
+        return image
     # None: no native colour anywhere, the historical single tint.
     native_colors = _triangle_colors(mesh.get('color_runs'), len(triangles))
     angle = math.radians(rotation + float(board_rotation or 0.0))
@@ -607,6 +699,7 @@ def _thumbnail(path, rotation, dimensions=None, color=None, view=VIEW_ISOMETRIC,
         painter.end()
     if auto_angle is not None:
         image.setText(AUTO_ROTATION_KEY, f'{auto_angle:g}')
+    _store_image(image_key, image)
     return image
 
 
