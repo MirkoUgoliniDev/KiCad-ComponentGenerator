@@ -144,8 +144,7 @@ def test_gui_family_keeps_pcb_mode_after_last_component_removed(window, photo_co
     window._extracted_pcb_thickness = 1.2
     window._set_photo_components(photo_components[:1])
     populated = window._current_body_params()
-    window.table_components.setCurrentCell(0, 0)
-    window._remove_component_row()
+    window._set_photo_components([])  # l'ultimo corpo tolto dalla revisione
     empty = window._current_body_params()
     assert populated.populated_board and empty.populated_board
     assert empty.components == [] and empty.pcb_thickness_mm == 1.2
@@ -157,35 +156,6 @@ def test_gui_family_keeps_pcb_mode_after_last_component_removed(window, photo_co
     assert run.call_args.kwargs["notches"]
 
 
-@pytest.mark.parametrize("column", range(10))
-def test_every_table_edit_invalidates_mesh_and_worker_revision(window, photo_components, monkeypatch, column):
-    window._set_photo_components(photo_components)
-    revision, clear = arm_mesh(window, monkeypatch)
-    widget = window.table_components.cellWidget(0, column)
-    if column in (0, 8, 9):
-        widget.setText("#ABCDEF" if column == 8 else "Edited")
-    elif column in (1, 7):
-        widget.setCurrentIndex((widget.currentIndex() + 1) % widget.count())
-    else:
-        widget.setValue(widget.value() + .5)
-    assert_invalidated(window, revision, clear)
-    monkeypatch.setattr(window, "sender", lambda: SimpleNamespace(_model_revision=revision))
-    assert not window._cad_result_is_current()
-
-
-@pytest.mark.parametrize("operation", ["add", "remove"])
-def test_table_add_and_remove_invalidate_mesh(window, photo_components, monkeypatch, operation):
-    window._set_photo_components(photo_components)
-    window.table_components.setCurrentCell(0, 0)
-    revision, clear = arm_mesh(window, monkeypatch)
-    if operation == "add":
-        window._add_component_row()
-    else:
-        window._remove_component_row()
-    assert_invalidated(window, revision, clear)
-    assert window.table_components.rowCount() == (3 if operation == "add" else 1)
-
-
 @pytest.mark.parametrize("field", ["field_body_length", "field_body_width", "field_body_height",
                                    "field_body_offset_x", "field_body_offset_y", "field_drill"])
 def test_body_and_hole_edits_invalidate_mesh(window, monkeypatch, field):
@@ -193,36 +163,6 @@ def test_body_and_hole_edits_invalidate_mesh(window, monkeypatch, field):
     widget = getattr(window, field)
     widget.setValue(widget.value() + .1)
     assert_invalidated(window, revision, clear)
-
-
-@pytest.mark.parametrize("column", [4, 5])
-def test_resizing_table_rectangle_discards_only_its_geometry_evidence(window, photo_components, column):
-    before = deepcopy(photo_components)
-    window._set_photo_components(photo_components)
-    untouched = window.table_components.item(1, 0).data(Qt.ItemDataRole.UserRole)
-    widget = window.table_components.cellWidget(0, column)
-    widget.setValue(widget.value() / 2)
-    metadata = window.table_components.item(0, 0).data(Qt.ItemDataRole.UserRole)
-    assert metadata["bbox_basis"] == "unknown"
-    assert "package_evidence" not in metadata and "terminal_geometry" not in metadata
-    assert metadata["package"] == before[0]["package"] and metadata["mating"] == "none"
-    assert metadata["provenance"] == before[0]["provenance"]
-    assert window.table_components.item(1, 0).data(Qt.ItemDataRole.UserRole) == untouched
-    assert photo_components == before
-    assert window._components_from_table()[0].terminal_geometry is None
-
-
-def test_unchanged_and_height_edits_preserve_photo_rectangle_evidence(window, photo_components, monkeypatch):
-    window._set_photo_components(photo_components)
-    before = window.table_components.item(0, 0).data(Qt.ItemDataRole.UserRole)
-    revision, clear = arm_mesh(window, monkeypatch)
-    widget = window.table_components.cellWidget(0, 4)
-    widget.setValue(widget.value())
-    assert window._model_revision == revision and clear.call_count == 0
-    height = window.table_components.cellWidget(0, 6)
-    height.setValue(height.value() + .5)
-    assert_invalidated(window, revision, clear)
-    assert window.table_components.item(0, 0).data(Qt.ItemDataRole.UserRole) == before
 
 
 def test_explicit_mating_none_survives_decode_table_and_cad_payload(window, photo_components, monkeypatch, tmp_path):
@@ -244,52 +184,47 @@ def test_explicit_mating_none_survives_decode_table_and_cad_payload(window, phot
 
 
 def _castellated_sides(window):
-    """@brief Modulo castellated con i due lati predefiniti in tabella."""
+    """@brief Modulo castellated con i due lati predefiniti."""
     window.group_castellated.setChecked(True)
-    assert window.table_sides.rowCount() == 2
-    return window.table_sides
+    assert len(window._sides) == 2
+    return window._sides
 
 
-@pytest.mark.parametrize("column", range(7))
-def test_every_side_table_edit_invalidates_mesh_and_worker_revision(window, monkeypatch, column):
-    """@brief Ogni colonna della tabella lati cambia il solido: il vecchio 3D decade.
+def test_contact_style_from_the_3d_tab_invalidates_mesh_and_worker_revision(window, monkeypatch):
+    """@brief Positivo: il tipo di contatto cambia il solido, il vecchio 3D decade.
 
-    Comprende la colonna «Tipo contatto»: correggerla e rigenerare e' il
-    percorso gratuito, e un'anteprima rimasta a video lo farebbe sembrare gia'
-    fatto. Un risultato CAD marchiato con la revisione vecchia viene rifiutato.
+    Correggerlo e rigenerare e' il percorso gratuito, e un'anteprima rimasta a
+    video lo farebbe sembrare gia' fatto. Un risultato CAD marchiato con la
+    revisione vecchia viene rifiutato.
     """
-    table = _castellated_sides(window)
+    sides = _castellated_sides(window)
     revision, clear = arm_mesh(window, monkeypatch)
-    widget = table.cellWidget(0, column)
-    if column in (0, 6):
-        widget.setCurrentIndex((widget.currentIndex() + 1) % widget.count())
-    elif column == 5:
-        widget.setChecked(not widget.isChecked())
-    else:
-        widget.setValue(widget.value() + 1)
+    combo = window.combo_contact_style_3d
+    target = next(combo.itemData(i) for i in range(3)
+                  if combo.itemData(i) != sides[0]["contact_style"])
+    combo.setCurrentIndex(combo.findData(target))
+    assert [side["contact_style"] for side in sides] == [target, target]
     assert_invalidated(window, revision, clear)
     monkeypatch.setattr(window, "sender", lambda: SimpleNamespace(_model_revision=revision))
     assert not window._cad_result_is_current()
 
 
-@pytest.mark.parametrize("operation", ["add", "remove"])
-def test_side_add_and_remove_invalidate_mesh(window, monkeypatch, operation):
-    table = _castellated_sides(window)
-    table.setCurrentCell(0, 0)
+@pytest.mark.parametrize("field", ["field_cast_body_length", "field_cast_hole",
+                                   "field_cast_thru_drill"])
+def test_castellated_parameter_changes_invalidate_mesh(window, monkeypatch, field):
+    _castellated_sides(window)
     revision, clear = arm_mesh(window, monkeypatch)
-    if operation == "add":
-        window._add_side_row_by_user()
-    else:
-        window._remove_side_row()
+    value = getattr(window, field)
+    value.setValue(value.value() + .5)
     assert_invalidated(window, revision, clear)
-    assert table.rowCount() == (3 if operation == "add" else 1)
 
 
 def test_unchanged_side_style_keeps_the_mesh(window, monkeypatch):
     """@brief Negativo: ripetere la scelta gia' fatta non e' una modifica."""
-    table = _castellated_sides(window)
+    _castellated_sides(window)
     revision, clear = arm_mesh(window, monkeypatch)
-    combo = table.cellWidget(0, 6)
+    combo = window.combo_contact_style_3d
     combo.setCurrentIndex(combo.currentIndex())
     assert window._model_revision == revision and clear.call_count == 0
     assert window._last_mesh_path == Path("previous.preview.json")
+

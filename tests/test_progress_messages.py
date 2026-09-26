@@ -300,12 +300,13 @@ def test_local_detection_is_announced_before_it_starts_then_the_paid_call(invent
 
     L'ordine e' il contratto: la modale deve mostrare la fase locale mentre
     ONNX gira, e tornare al modello remoto quando la richiesta parte. Il
-    dettaglio della fase 'llm' e' il modello effettivamente usato per la
+    dettaglio della fase 'llm_inventory' e' il modello effettivamente usato per la
     riconciliazione, non quello della vista.
     """
     calls, _ = inventory['execute']()
     # Contratto aggiornato (utente, 2026-09-25): il modello vero, file e formato.
-    assert calls == [('yolo', 'fixture.onnx (ONNX)'), ('llm', 'paid/global-model')]  # il modello del test
+    # 'llm_inventory' (26/09): la chiamata pagata spedisce la foto della scheda.
+    assert calls == [('yolo', 'fixture.onnx (ONNX)'), ('llm_inventory', 'paid/global-model')]  # il modello del test
     assert inventory['detect'].called and inventory['reconcile'].called
 
 
@@ -316,7 +317,7 @@ def test_the_vision_only_detector_never_claims_a_local_phase(inventory):
     annunciare 'yolo' descriverebbe un lavoro che non sta avvenendo.
     """
     calls, _ = inventory['execute'](detector='vlm')
-    assert calls == [('llm', 'paid/global-model')]
+    assert calls == [('llm_inventory', 'paid/global-model')]
     assert not inventory['detect'].called
     assert not any(tool == 'yolo' for tool, _ in calls)
 
@@ -334,7 +335,7 @@ def test_the_local_phase_is_announced_before_the_detector_runs(inventory, monkey
                         Mock(side_effect=lambda *a, **k: order.append('paid call') or []))
     calls, _ = inventory['execute'](
         phase=lambda tool, detail: order.append(f'phase:{tool}'))
-    assert order == ['phase:yolo', 'detect', 'phase:llm', 'paid call']
+    assert order == ['phase:yolo', 'detect', 'phase:llm_inventory', 'paid call']
     assert calls == []
 
 

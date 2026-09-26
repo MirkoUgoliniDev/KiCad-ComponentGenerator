@@ -2294,11 +2294,19 @@ class PhotoReviewDialog(QDialog):
             self.text_fields[focus].selectAll()
 
     def delete_selected(self):
-        """@brief Remove the selected outline and renumber; selection moves to its neighbour."""
+        """@brief Remove the selected outline and renumber; selection moves to its neighbour.
+
+        @note The view does not move (user, 2026-09-26): centring on the
+            neighbour, or a scene rect shrinking with the removed outline,
+            scrolled the photo away, and the user could not see the rectangle
+            disappear. Zoom and scroll position are kept exactly as they were.
+        """
         item = self._selected_item()
         if item is None:
             return
         index = self._items.index(item)
+        horizontal = self.view.horizontalScrollBar().value()
+        vertical = self.view.verticalScrollBar().value()
         with QSignalBlocker(self.scene), QSignalBlocker(self.component_list):
             self.scene.removeItem(item)
             self._items.pop(index)
@@ -2306,8 +2314,10 @@ class PhotoReviewDialog(QDialog):
             self.component_list.takeItem(index)
         # A category can disappear with its last component.
         self._refresh_categories()
-        self._select_row(self._nearest_shown(index))
+        self._select_row(self._nearest_shown(index), center=False)
         self._update_scene_rect()
+        self.view.horizontalScrollBar().setValue(horizontal)
+        self.view.verticalScrollBar().setValue(vertical)
 
     def _nearest_shown(self, index):
         """Row of the outline nearest to `index` that the category filter shows; -1 if none.

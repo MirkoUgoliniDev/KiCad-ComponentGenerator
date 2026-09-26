@@ -104,6 +104,10 @@ class PackageGeometry:
             value = getattr(self, key)
             if value is not None:
                 _finite(value, key, True)
+        # Il modello esiste per descrivere pad espliciti: senza pad non c'e'
+        # footprint da scrivere, e un .kicad_mod vuoto passerebbe per buono.
+        if not self.pins:
+            raise ValueError(tx("la geometria package non ha pad"))
         numbers = set()
         outlines = []
         for pin in self.pins:

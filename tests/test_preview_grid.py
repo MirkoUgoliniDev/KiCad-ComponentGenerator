@@ -21,7 +21,7 @@ def test_repeated_grid_changes_preserve_view(window, family, initial_grid, zoom)
     # ora seguono i dati a ogni cambio di scheda, non la sola chiamata interna.
     window._acquisition_completed = True
     window._set_acquisition_tabs_enabled(True)
-    window.tabs.setCurrentIndex(3)
+    window.tabs.setCurrentIndex(gui.TAB_PREVIEW)
     window.show()
     QApplication.processEvents()
     window._draw_preview()

@@ -81,7 +81,7 @@ _SINGLE_SMD = ComponentType(
 
 _AGGREGATE_THT = ComponentType(
     key="aggregate_tht",
-    label="Componente aggregato a fori passanti (modulo/scheda)",
+    label="Scheda con componenti · connettori passanti",
     prompt=(
         "TIPOLOGIA: componente AGGREGATO a FORI PASSANTI -- un modulo o schedina "
         "assemblata (es. convertitore DC-DC, modulo radio, breakout) che si monta "
@@ -102,7 +102,7 @@ _AGGREGATE_THT = ComponentType(
 
 _AGGREGATE_CASTELLATED = ComponentType(
     key="aggregate_castellated",
-    label="Componente aggregato con piazzole a mezzo foro (castellated holes)",
+    label="Scheda con componenti · connettori castellated (mezzo foro)",
     prompt=(
         "TIPOLOGIA: componente AGGREGATO con PIAZZOLE A MEZZO FORO (castellated "
         "holes) -- modulo su PCB (es. modulo WiFi/BLE tipo ESP32, nRF) i cui "
@@ -135,6 +135,15 @@ COMPONENT_TYPES: tuple[ComponentType, ...] = (
 )
 
 _BY_KEY = {ct.key: ct for ct in COMPONENT_TYPES}
+
+#: Former labels of the built-in types, replaced in an existing profile
+#: database only where the stored label is still exactly the old one (a label
+#: the user edited is left alone). Names clarified by the user on 2026-09-26:
+#: a «board with components» is analysed differently from a single component.
+SUPERSEDED_LABELS: dict[str, tuple[str, ...]] = {
+    "aggregate_tht": ("Componente aggregato a fori passanti (modulo/scheda)",),
+    "aggregate_castellated": ("Componente aggregato con piazzole a mezzo foro (castellated holes)",),
+}
 
 
 def get(key: Optional[str]) -> Optional[ComponentType]:

@@ -568,8 +568,9 @@ def test_synthesized_relaunch_closes_with_an_inventory_message_not_an_extraction
     _retype_name(window)
     shown = []
     monkeypatch.setattr(QMessageBox, 'information', lambda *args: shown.append((args[1], args[2])))
-    window._auto_after_extraction = False
-    monkeypatch.setattr(window, '_advanced_user', lambda: True)
+    # Qui conta la modale finale, non la generazione automatica che segue.
+    monkeypatch.setattr(window, '_start_automatic_generation', lambda extracted: None)
+    monkeypatch.setattr(window, '_validate_automatic_input', lambda params: None)
     window.btn_relaunch_inventory.click()
     _run_worker(window)
     titles = [title for title, _text in shown]

@@ -1079,7 +1079,8 @@ def extract_pin_header_params(
         None keeps the defaults. Validated before any paid call.
     @param phase Optional callable(tool, detail) telling the caller WHICH tool
         is working, so a progress modal can distinguish a paid remote call
-        ('llm') from local detection ('yolo'). It is forwarded to the photo
+        ('llm' for the documents, 'llm_inventory' for the board photo) from
+        local detection ('yolo'). It is forwarded to the photo
         inventory, which announces the local and the paid steps as they start.
         None disables the notification; a failing callback never aborts the
         extraction, exactly like `progress`.
@@ -1397,7 +1398,7 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
         # il prossimo passo e' davvero la chiamata a pagamento al modello di
         # visione, e va detto perche' e' cio' che si paga.
         if photo_detector != "yolo":
-            announce("llm", vision_model or DEFAULT_VISION_MODEL)
+            announce("llm_inventory", vision_model or DEFAULT_VISION_MODEL)
         check_cancel()
         try:
             photo_report = extract_inventory(
@@ -2021,6 +2022,17 @@ def _params_from_tool_arguments(data: dict) -> ExtractedParams:
     populated = _validated_populated_pins(data.get("populated_pins"), max_pin, notes)
 
     package_geometry = data.get("package_geometry")
+    if isinstance(package_geometry, dict) and not package_geometry.get("pins"):
+        # Campo facoltativo tornato vuoto ({} o «pins»: []): nessun pad
+        # esplicito, quindi nessuna geometria package. Non e' un errore della
+        # risposta -- lo schema non impone un minimo di pin -- e rifiutarla
+        # butterebbe un'estrazione pagata con dati di matrice o modulo validi.
+        # La regola «senza pad non c'e' footprint» resta in
+        # PackageGeometry.validate, dove si genera.
+        if package_geometry:
+            notes.append(tx("Geometria package senza pad espliciti ignorata: si usano i "
+                            "parametri a matrice o del modulo."))
+        package_geometry = None
     if package_geometry is not None:
         try:
             # Validate now, while the source response and its warnings are still

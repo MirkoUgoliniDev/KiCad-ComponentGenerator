@@ -56,6 +56,11 @@ class Body3DParams:
     # l'abbinamento ai modelli di libreria, non un dato geometrico da
     # incidere. Chi vuole davvero le scritte lo dichiara qui.
     show_markings_3d: bool = False
+    # Cilindri dei pin sotto il piano di saldatura (utente, 2026-09-26: «se
+    # scegli fori passanti non devi mettere i pin, oppure un'opzione»). Spento,
+    # il solido non ha i pin ma i fori restano: e' il modulo come si compra,
+    # senza strip saldati. Il footprint non cambia.
+    show_pins_3d: bool = True
 
     def validate(self) -> None:
         """@brief Validate dimensions, colors and pin extrusion constraints.

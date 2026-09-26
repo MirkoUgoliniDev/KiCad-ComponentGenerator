@@ -305,7 +305,7 @@ def test_aborting_a_generation_kills_the_child_and_gives_the_window_back(
     _prepare_3d(window)
     window._regenerate_3d()
     assert window._cad3d_worker is not None
-    assert _pump(lambda: "KICADGEN_COMPONENT_START" in window.log_text.toPlainText()), (
+    assert _pump(lambda: "KICADGEN_COMPONENT_START" in window._log_plain_text()), (
         "il finto freecadcmd non ha nemmeno cominciato a stampare")
     assert window.analysis_overlay.abort_button.isEnabled()
 
@@ -325,7 +325,7 @@ def test_aborting_a_generation_kills_the_child_and_gives_the_window_back(
     # ritorno a riposo si legge nel nome accessibile, non piu' in `text()`.
     assert "Rigenera" in window.btn_regen_3d.accessibleName()
     assert not window.btn_regen_3d.property("workflow_busy")
-    log = window.log_text.toPlainText()
+    log = window._log_plain_text()
     assert "INTERRUZIONE chiesta dall'utente durante" in log
     assert "Rigenerazione del modello 3D" in log, "il log deve dire a che punto si era"
     assert "INTERROTTO 3D" in log
@@ -343,7 +343,7 @@ def test_declining_the_confirmation_leaves_everything_running(
     _say_no(monkeypatch, answers)
     _prepare_3d(window)
     window._regenerate_3d()
-    assert _pump(lambda: "KICADGEN_COMPONENT_START" in window.log_text.toPlainText())
+    assert _pump(lambda: "KICADGEN_COMPONENT_START" in window._log_plain_text())
 
     window.analysis_overlay.abort_button.click()
     QApplication.processEvents()
@@ -356,7 +356,7 @@ def test_declining_the_confirmation_leaves_everything_running(
     assert not window.tabs.isEnabled()
     assert window.analysis_overlay.abort_button.isEnabled(), (
         "il comando deve restare per ripensarci")
-    assert "INTERRUZIONE" not in window.log_text.toPlainText()
+    assert "INTERRUZIONE" not in window._log_plain_text()
     _finish_cad_worker(window)
 
 
@@ -376,7 +376,7 @@ def test_pressing_abort_twice_asks_once_and_sends_one_order(
     monkeypatch.setattr(gui.Cad3DWorker, "request_abort", counting_abort)
     _prepare_3d(window)
     window._regenerate_3d()
-    assert _pump(lambda: "KICADGEN_COMPONENT_START" in window.log_text.toPlainText())
+    assert _pump(lambda: "KICADGEN_COMPONENT_START" in window._log_plain_text())
 
     window.analysis_overlay.abort_button.click()
     window.analysis_overlay.abort_button.click()
@@ -433,7 +433,7 @@ def test_a_run_that_ends_while_the_question_is_open_is_not_ordered_around(
     monkeypatch.setattr(QMessageBox, "question", slow_question)
     _prepare_3d(window)
     window._regenerate_3d()
-    assert _pump(lambda: "KICADGEN_COMPONENT_START" in window.log_text.toPlainText())
+    assert _pump(lambda: "KICADGEN_COMPONENT_START" in window._log_plain_text())
 
     window.analysis_overlay.abort_button.click()
     QApplication.processEvents()
@@ -442,7 +442,7 @@ def test_a_run_that_ends_while_the_question_is_open_is_not_ordered_around(
     assert not window._cad3d_worker.cancel.is_set()
     assert not window._abort_pending
     assert window.tabs.isEnabled()
-    log = window.log_text.toPlainText()
+    log = window._log_plain_text()
     assert "era già terminata" in log
     assert "INTERRUZIONE chiesta dall'utente durante" not in log
 
@@ -463,10 +463,11 @@ def _start_blocking_extraction(window, monkeypatch, released, result):  # noqa: 
         return result
 
     monkeypatch.setattr(gui, "extract_pin_header_params", blocking_extract)
-    # Modalita' avanzata: qui si prova l'interruzione, non la generazione
-    # automatica che in modalita' standard parte da sola a estrazione finita e
-    # aprirebbe le proprie finestre su parametri finti.
-    window._config["advanced_user"] = True
+    # Qui si prova l'interruzione, non la generazione automatica, che parte da
+    # sola a estrazione finita e aprirebbe le proprie finestre su parametri
+    # finti. (Prima si accendeva la modalita' avanzata, tolta il 2026-09-26.)
+    monkeypatch.setattr(window, "_start_automatic_generation", lambda extracted: None)
+    monkeypatch.setattr(window, "_validate_automatic_input", lambda params: None)
     window.combo_photo_detector.setCurrentIndex(
         window.combo_photo_detector.findData("ai"))
     row = QListWidgetItem("photo.png")
@@ -508,7 +509,7 @@ def test_aborting_an_ai_run_abandons_it_honestly_and_returns_the_window(
         assert window.tabs.isEnabled()
         assert not window.analysis_overlay.is_abortable()
         assert window._analysis_revision == 1
-        log = window.log_text.toPlainText()
+        log = window._log_plain_text()
         assert "INTERRUZIONE chiesta dall'utente durante" in log
         assert "Analisi AI dei documenti" in log
         assert "non si può annullare" in log
@@ -546,7 +547,7 @@ def test_the_late_result_of_an_abandoned_run_is_discarded(window, monkeypatch): 
     assert window.field_description.text() == "prima", "i campi sono stati ripopolati"
     assert window._last_extracted is None
     assert window._abandoned_workers == []
-    log = window.log_text.toPlainText()
+    log = window._log_plain_text()
     assert "scartato" in log
     # Chiusa la corsa fantasma, i comandi tornano disponibili da soli.
     assert not window._background_work_running()
@@ -593,7 +594,7 @@ def test_aborting_the_automatic_generation_restores_the_window_without_alarms(
     _prepare_3d(window)
     window._generate(automatic=True)
     assert window._worker is not None
-    assert _pump(lambda: "KICADGEN_COMPONENT_START" in window.log_text.toPlainText())
+    assert _pump(lambda: "KICADGEN_COMPONENT_START" in window._log_plain_text())
     assert window.analysis_overlay.abort_button.isEnabled()
     assert not window.menuBar().isEnabled()
 
@@ -609,9 +610,8 @@ def test_aborting_the_automatic_generation_restores_the_window_without_alarms(
     assert window.analysis_overlay.isHidden()
     assert window.tabs.isEnabled()
     assert window.menuBar().isEnabled()
-    assert window.btn_generate.isEnabled()
     assert not window._abort_pending
-    log = window.log_text.toPlainText()
+    log = window._log_plain_text()
     assert "INTERRUZIONE chiesta dall'utente durante" in log
     assert "Generazione di footprint e modello 3D" in log
     assert "Generazione interrotta dall’utente" in log

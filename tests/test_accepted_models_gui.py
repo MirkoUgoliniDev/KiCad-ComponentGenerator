@@ -226,7 +226,7 @@ def test_an_entry_whose_file_vanished_is_not_claimed_for_the_board(window, libra
 
 def test_the_3d_tab_icon_is_always_on_and_opens_the_board_view(window, monkeypatch):
     button = window.btn_accepted_archive
-    assert button.isEnabledTo(window.tabs.widget(4))
+    assert button.isEnabledTo(window.tabs.widget(gui.TAB_MODEL_3D))
     first, _, rest = button.toolTip().partition("\n")
     assert first and rest
     opened = []

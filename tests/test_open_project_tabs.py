@@ -9,7 +9,7 @@ import pytest
 
 from tests.test_photo_inventory_gui import window, raw_params, gui  # noqa: F401
 
-PREVIEW, MODEL_3D = 3, 4
+PREVIEW, MODEL_3D = gui.TAB_PREVIEW, gui.TAB_MODEL_3D
 
 
 def _generated(root, name, step=True):

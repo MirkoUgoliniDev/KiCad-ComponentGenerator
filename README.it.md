@@ -87,13 +87,16 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Cinque tab:
+Quattro tab (i tab «Footprint 2D» e «Genera» e la modalità «Utente avanzato»
+sono stati tolti il 2026-09-26: la generazione parte da sola dopo un'analisi
+valida, e i parametri sono dati non grafici in
+`kicadgen/gui/component_state.py`, con gli stessi limiti e la stessa
+precisione che imponevano gli editor):
 
 1. **📁 Progetto** — area di lavoro + nome del componente
    (il campo "Nome" vive qui: la cartella è
    `generated/NomeComponente/`, con la stessa struttura usata nel resto
-   del repo, es. `ESP32-S3-N16R8/ESP32_S3_N16R8.pretty/`; il tab
-   Footprint 2D ne mostra solo uno specchio in sola lettura). Gestione
+   del repo, es. `ESP32-S3-N16R8/ESP32_S3_N16R8.pretty/`). Gestione
    della documentazione: bottone "Aggiungi documentazione..." copia i
    file scelti (datasheet PDF, immagini, ecc.) in `NomeComponente/docs/`;
    lista con rimozione (richiede conferma) e apertura cartella.
@@ -101,31 +104,14 @@ Cinque tab:
    (singolo/aggregato, THT/SMD/castellated) e **modello LLM** da usare.
    Bottone **"✨ Estrai parametri con AI dal datasheet"**: manda i file
    selezionati in lista a OpenRouter
-   (`kicadgen.services.datasheet_extractor`) e pre-compila
-   righe/colonne/passo/pad/drill nel tab Footprint 2D — vedi sezione
-   "Estrazione da datasheet (AI)" sotto.
-2. **▦ Footprint 2D** — parametri del generatore: nome, descrizione, tag,
-   righe/colonne, passo (`pitch`, tra pin nella stessa riga), **distanza
-   tra righe** (indipendente dal pitch — nei moduli DIP-style come i
-   convertitori DC/DC e' quasi sempre molto maggiore, es. 10.16mm contro
-   2.54mm), **pin popolati** (lista opzionale per pinout parziali, es.
-   `1,7,8,9,10,16` su una matrice 2x8), diametro pad, drill. Sotto, il
-   gruppo opzionale **"Modello 3D"** (checkbox per attivarlo): lunghezza/
-   larghezza/altezza del corpo, offset X/Y del corpo rispetto al pin 1,
-   lunghezza pin (protrusione 3D).
-3. **⚙ Genera** — riepilogo parametri correnti, pulsante "Genera
-   footprint" che lancia `kicadgen.generators.pin_header.build_pin_header()`
-   in un `QThread` (`GenerateWorker`, stesso pattern di `ConvertWorker`
-   in `Pm3ToWav/main.py`); se il gruppo "Modello 3D" e' attivo, lo stesso
-   worker chiama poi `kicadgen.cad3d.step_generator.generate_3d_model()`
-   (freecadcmd headless) per lo `.step` — un fallimento della generazione
-   3D non invalida il footprint 2D gia' scritto, viene solo loggato a
-   parte. Log esito/errori per entrambi. Pulsante **"Esporta in
-   libreria..."**: copia la cartella del componente dall'area di lavoro
-   (`generated/`) alla libreria scelta — la generazione resta sempre
-   locale, l'export è un passo separato ed esplicito così la libreria
-   vera riceve solo componenti già verificati.
-4. **👁 Anteprima FootPrint** — disegno 2D a scala (silkscreen + pad) via
+   (`kicadgen.services.datasheet_extractor`), che ricava i parametri
+   del footprint (righe/colonne, passo, **distanza tra righe**, pin
+   popolati, pad, drill, oppure i lati di un modulo castellated) e del
+   corpo 3D; a estrazione valida partono da sole la generazione del
+   footprint (`GenerateWorker`) e, se FreeCAD c'è, del modello `.step`
+   — un fallimento del 3D non invalida il footprint già scritto. Vedi
+   sezione "Estrazione da datasheet (AI)" sotto.
+2. **👁 Anteprima FootPrint** — disegno 2D a scala (silkscreen + pad) via
    `QGraphicsScene`, con quote complete in stile disegno tecnico: margini
    bordo→pin, span tra i pin estremi, passo, distanza righe e totali.
    Spunta **"Griglia"** per sovrapporre una griglia di riferimento, con
@@ -161,7 +147,7 @@ solo *cosa vede* (`pin_map` così com'è disegnata) più *da che lato*
 una trasformazione geometrica esatta e va tenuta deterministica.
 
 Copertura in `tests/test_pin_map.py`, sul layout reale del TEL8WI.
-5. **🧊 Modello 3D** — anteprima 3D interattiva (VTK/PyVista,
+3. **🧊 Modello 3D** — anteprima 3D interattiva (VTK/PyVista,
    `kicadgen/gui/preview_3d_vtk.py`), ruotabile col mouse, in due
    modalità: *prima* della generazione mostra un'approssimazione a
    parallelepipedo costruita dai soli parametri (senza bisogno di
@@ -338,12 +324,11 @@ che descrive il modulo **lato per lato**:
   pad -- stessa convenzione usata nel modello 3D, ma sul file `.kicad_mod`
   vero che KiCad carica, non solo nell'anteprima.
 
-Nella GUI si usa il gruppo **"Modulo castellated"** del tab Footprint 2D:
-e' alternativo alla matrice (attivandolo il gruppo a matrice si disabilita)
-e contiene le quote del corpo, quelle dei pad e la tabella dei lati.
-Selezionando la tipologia "aggregato con piazzole a mezzo foro" nel tab
-Progetto il gruppo si attiva da solo, e l'estrazione AI (layout
-`castellated`) lo riempie con i lati letti dal datasheet.
+Nella GUI la disposizione «modulo castellated» è alternativa alla matrice:
+si attiva selezionando la tipologia "aggregato con piazzole a mezzo foro"
+nel tab Progetto, e l'estrazione AI (layout `castellated`) la riempie con
+le quote del corpo, quelle dei pad e i lati letti dal datasheet. Il tipo
+di contatto di tutti i lati si corregge dalla barra del tab Modello 3D.
 
 La validazione rifiuta i casi che darebbero un footprint inutilizzabile:
 pad sovrapposti (passo minore della larghezza pad), pad che non entrano
@@ -464,19 +449,18 @@ pinout..."), associate ai numeri di pin di ogni lato.
 Limiti applicativi (in `datasheet_extractor.py`): max 5 file per
 chiamata, max 20 MB per file, formati supportati PDF/PNG/JPG/WEBP/GIF.
 La risposta include sempre un livello di confidenza e note testuali
-sulle assunzioni fatte — **controlla sempre i valori pre-compilati nel
-tab "Footprint 2D" prima di generare**, l'estrazione può sbagliare.
+sulle assunzioni fatte — **controlla sempre il risultato nelle anteprime
+2D e 3D prima di usarlo**, l'estrazione può sbagliare.
 
 Se il datasheet include un disegno meccanico con l'ingombro del corpo
 (sezione tipo "Outline Dimensions"), l'estrazione compila anche i campi
 3D (`body_length_mm`, `body_width_mm`, `body_height_mm`,
-`body_offset_x_mm`, `body_offset_y_mm`, `pin_length_3d_mm`) e attiva
-automaticamente il gruppo "Modello 3D" nel tab Footprint 2D.
+`body_offset_x_mm`, `body_offset_y_mm`, `pin_length_3d_mm`); il modello 3D
+si genera quando FreeCAD è installato.
 
 Se tra i file selezionati c'è anche una **foto reale del prodotto** (non
 il disegno tecnico) con spigoli visibilmente arrotondati, l'estrazione
-compila `edge_fillets` e le righe compaiono già pronte nella tabella
-annotazioni del tab "Modello 3D" (restano modificabili/rimovibili). Il
+compila `edge_fillets`, che il modello 3D applica agli spigoli. Il
 raggio è una stima visiva: le foto prodotto non riportano mai un raggio
 quotato.
 

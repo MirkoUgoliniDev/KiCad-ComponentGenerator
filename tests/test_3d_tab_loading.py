@@ -23,7 +23,9 @@ from PyQt6.QtWidgets import QApplication
 from tests.test_photo_inventory_gui import window  # noqa: F401 - fixture condivisa
 
 
-MODEL_TAB = 4
+from kicadgen.gui import main_window as gui  # noqa: E402
+
+MODEL_TAB = gui.TAB_MODEL_3D
 
 
 @pytest.fixture
@@ -91,7 +93,7 @@ def test_a_render_error_inside_the_viewer_is_logged_and_hides_the_indicator(wind
     window.preview_3d.render_mesh = broken
     window.tabs.setCurrentIndex(MODEL_TAB)
     _flush()
-    assert "Anteprima mesh non disponibile" in window.log_text.toPlainText()
+    assert "Anteprima mesh non disponibile" in window._log_plain_text()
     assert not _indicator_shown(window)
     assert QApplication.overrideCursor() is None
 

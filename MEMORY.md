@@ -113,7 +113,8 @@ categorie": richiesta esplicita dell'utente.
 - “Rivedi rilevamento foto…” è il nome del precedente “Confronta foto”: revisione
   degli ingombri sulla foto, non comando di generazione. Mantenere margini interni
   e separazione tra i pulsanti degli strumenti AI.
-- Mostrare “Rivedi rilevamento foto…” solo con Advanced user attivo. Il cambio
+- [SUPERATO 2026-09-26: la modalità Advanced user è stata tolta, vedi sotto]
+  Mostrare “Rivedi rilevamento foto…” solo con Advanced user attivo. Il cambio
   di modalità nasconde il pulsante senza cancellare foto, risultati o funzionalità;
   non modificare l'analisi fotografica automatica. Log AI resta disponibile a tutti.
 - Nel Log AI, un'icona Copia per ciascun riquadro copia l'intero contenuto in testo
@@ -162,6 +163,15 @@ delle geometrie ricavate dalle foto e non autorizza commit, merge o push automat
   i pulsanti manuali nascosti; la sua analisi automatica resta attiva.
 
 ## 2026-09-13 — Modalità standard e Advanced user
+
+**SUPERATO il 2026-09-26 (richiesta dell'utente):** la modalità Advanced user,
+la sua spunta, i tab Footprint 2D e Genera, i pannelli Annotazioni 3D e
+Componenti sul modulo e l'editor delle traduzioni sono stati TOLTI, non
+nascosti. La generazione è sempre automatica. I dati che quei widget tenevano
+stanno in valori non grafici (`kicadgen/gui/component_state.py`, `_sides`,
+`_photo_rows`); i corpi si modificano con «Modifica componenti…»
+(`component_editor_dialog.py`). Le note qui sotto descrivono la situazione
+precedente e restano solo come storia (vedi HANDOFF.md, punti 50-59).
 
 - Opzione persistente `advanced_user` nelle Opzioni di generazione (preferenza UI JSON).
 - Default standard: nascondere i tab Footprint 2D e Genera, senza distruggerne widget o dati.

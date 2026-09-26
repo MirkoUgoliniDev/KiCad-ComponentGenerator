@@ -44,29 +44,40 @@ def begin(window, monkeypatch):
     window._extract_with_ai()
 
 
-def test_standard_tabs_hidden_and_advanced_toggle_preserves_fields(window, monkeypatch):
-    assert not window.tabs.isTabVisible(1) and not window.tabs.isTabVisible(2)
-    assert window.tabs.isTabVisible(0) and window.tabs.isTabVisible(3) and window.tabs.isTabVisible(4)
-    old_tab = window.tabs.widget(1)
-    window.field_rows.setValue(3)
-    generate = Mock()
-    monkeypatch.setattr(window, '_generate', generate)
-    window._config['advanced_user'] = True
-    window._apply_user_mode()
-    window.tabs.setCurrentIndex(1)
-    window._config['advanced_user'] = False
-    window._apply_user_mode()
-    assert window.tabs.currentIndex() == 0
-    assert window.tabs.widget(1) is old_tab and window.field_rows.value() == 3
-    generate.assert_not_called()
+def test_only_the_four_workflow_tabs_exist(window):
+    """@brief I tab Footprint 2D e Genera sono stati cancellati (utente, 2026-09-26).
+
+    Positivo: restano Progetto, Anteprima, Modello 3D e KiCad, negli indici
+    delle costanti. Negativo: nessun widget dei parametri sopravvive; i
+    parametri sono valori non grafici con gli stessi limiti degli editor.
+    """
+    from kicadgen.gui.component_state import BoundedValue
+    assert window.tabs.count() == 4
+    assert (gui.TAB_PROJECT, gui.TAB_PREVIEW, gui.TAB_MODEL_3D, gui.TAB_KICAD) == (0, 1, 2, 3)
+    assert window.tabs.tabText(gui.TAB_MODEL_3D) == window.i18n.tr("tab.model3d.name")
+    for name in ('footprint_subtabs', 'label_summary', 'btn_generate', 'table_sides',
+                 'table_components', 'table_annotations', 'log_text',
+                 'model_3d_settings_scroll'):
+        assert not hasattr(window, name), name
+    assert isinstance(window.field_rows, BoundedValue)
+    assert (window.field_rows.minimum(), window.field_rows.maximum()) == (1, 40)
 
 
-def test_photo_model_review_is_available_in_both_modes_and_preserves_photo(window):
-    """@brief La revisione foto/modelli resta raggiungibile in entrambe le modalita'.
+def test_the_advanced_mode_is_gone():
+    """@brief Negativo: nessuna spunta, chiave o editor di traduzioni sopravvive."""
+    from kicadgen.gui import app_config
+    from kicadgen.gui.generation_options_dialog import GenerationOptionsDialog
+    assert 'advanced_user' not in app_config.DEFAULTS
+    assert not hasattr(GenerationOptionsDialog, 'advanced_user')
+    assert not hasattr(gui.MainWindow, '_advanced_user')
+    assert not hasattr(gui.MainWindow, '_edit_translations')
 
-    Il contratto garantito e' lo stesso di prima: il comando non appartiene
-    alla modalita' avanzata, diventa utilizzabile appena esiste una foto, e i
-    passaggi di modalita' non buttano via la foto in memoria.
+
+def test_photo_model_review_is_available_and_preserves_photo(window):
+    """@brief La revisione foto/modelli resta raggiungibile senza tab dei parametri.
+
+    Il comando diventa utilizzabile appena esiste una foto, e nascondere gli
+    editor dei parametri non butta via la foto in memoria.
 
     Cambia solo cio' che la vecchia versione pretendeva sulla visibilita'.
     Prima il comando stava sempre visibile e restava spento finche' non c'era
@@ -86,42 +97,26 @@ def test_photo_model_review_is_available_in_both_modes_and_preserves_photo(windo
     window._on_extracted(params)
     assert review.isVisibleTo(review.parentWidget())
     assert review.isEnabled()
-    for advanced in (True, False, True):
-        window._config['advanced_user'] = advanced
-        window._apply_user_mode()
-        assert review.isVisibleTo(review.parentWidget())
-        assert review.isEnabled()
-        assert window._photo_png == b'photo fixture'
-        assert not window.btn_ai_log.isHidden()
-        assert not window.btn_component_prompt.isHidden()
+    assert review.isVisibleTo(review.parentWidget())
+    assert review.isEnabled()
+    assert window._photo_png == b'photo fixture'
+    assert not window.btn_ai_log.isHidden()
+    assert not window.btn_component_prompt.isHidden()
 
 
-def test_3d_editors_follow_expert_mode_without_discarding_data(window):
+def test_3d_data_is_kept_without_editors(window):
+    """@brief Annotazioni e corpi della foto restano dati: nessun editor li mostra."""
     from kicadgen.cad3d.annotations import EdgeFilletAnnotation
-    assert window.model_3d_settings_scroll.isHidden()
-    assert window.group_annotations.isHidden()
-    assert window.group_components.isHidden()
     window._on_extracted(acquired('castellated'))
     window.fillet_annotations.append(EdgeFilletAnnotation(edge='top-left', radius_mm=1))
-    window._refresh_annotations_table()
     window._set_photo_components([dict(name='body', kind='generic', x_mm=0, y_mm=0,
                                       length_mm=2, width_mm=1, height_mm=1)])
     original = window._components_from_table()
-    assert window.group_components.isHidden()  # Extraction must not reveal the editor.
-    for advanced in (True, False, True):
-        window._config['advanced_user'] = advanced
-        window._apply_user_mode()
-        assert window.model_3d_settings_scroll.isHidden() is (not advanced)
-        assert window.group_annotations.isHidden() is (not advanced)
-        assert window.group_components.isHidden() is (not advanced)
-        assert window.table_annotations.rowCount() == 1
-        assert window.fillet_annotations[0].radius_mm == 1
-        assert window._components_from_table() == original
-        assert not window.btn_regen_3d.isHidden()
-        assert window.btn_terminal_detail.isHidden() and window.btn_lead_refinement.isHidden()
-    window.group_castellated.setChecked(False)
-    assert window.group_components.isHidden()
-    assert not window.group_annotations.isHidden()
+    assert window.fillet_annotations[-1].radius_mm == 1
+    assert [c.name for c in original] == ['body']
+    assert window._components_from_table() == original
+    assert not window.btn_regen_3d.isHidden()
+    assert window.btn_terminal_detail.isHidden() and window.btn_lead_refinement.isHidden()
 
 
 @pytest.mark.parametrize('layout', ['matrix', 'castellated'])
@@ -145,21 +140,42 @@ def test_standard_starts_exactly_once_after_extract_thread_finished(window, monk
     worker.cad3d_done.emit('model.step')
     worker.finished.emit()
     assert not window._automatic_generation_active
-    assert window.analysis_overlay.isHidden()
+    # Contratto del 2026-09-26 (utente): a lavoro riuscito la modale resta
+    # aperta con tutti i passi spuntati e si chiude solo con «Chiudi».
+    overlay = window.analysis_overlay
+    assert overlay.is_holding_completed()
+    assert overlay._step_current == len(overlay._step_labels) == 3
+    assert "✓ 3" in overlay.steps_plain_text()
+    assert not overlay.is_abortable()
+    overlay.close_button.click()
+    assert overlay.isHidden()
     assert window.tabs.isEnabled() and window.menuBar().isEnabled()
-    assert window.btn_extract_ai.isEnabled() and window.btn_generate.isEnabled()
-    assert window.tabs.currentIndex() == 4
-    assert not window.tabs.isTabVisible(1)
+    assert window.btn_extract_ai.isEnabled()
+    assert window.tabs.currentIndex() == gui.TAB_MODEL_3D
 
 
-def test_advanced_keeps_manual_generation(window, monkeypatch):
-    window._config['advanced_user'] = True
-    window._apply_user_mode()
+def test_explicit_pad_geometry_writes_the_footprint_only(window, monkeypatch):
+    """@brief Positivo: i pad espliciti, prima solo manuali, ora si generano da soli.
+
+    Il 3D non li supporta: la corsa scrive il solo footprint e lo dichiara.
+    """
     begin(window, monkeypatch)
-    window._on_extracted(acquired())
+    params = acquired()
+    params.package_geometry = {
+        "family": "tssop", "body_length_mm": 5, "body_width_mm": 4,
+        "pins": [
+            {"number": "1", "x_mm": -2.5, "y_mm": -1.27,
+             "pad_length_mm": 1.2, "pad_width_mm": .6, "side": "left"},
+            {"number": "2", "x_mm": -2.5, "y_mm": 1.27,
+             "pad_length_mm": 1.2, "pad_width_mm": .6, "side": "left"},
+        ],
+    }
+    window._on_extracted(params)
     window._on_extract_finished()
-    assert window._worker is None
-    assert window.tabs.isTabVisible(1) and window.tabs.isTabVisible(2)
+    worker = window._worker
+    assert worker is not None and worker.body is None
+    assert isinstance(worker.params, gui.PackageGeometry)
+    assert window._automatic_generation_active and not window._automatic_3d_expected
 
 
 def test_castellated_missing_overall_height_starts_generation(window, monkeypatch):
@@ -173,7 +189,7 @@ def test_castellated_missing_overall_height_starts_generation(window, monkeypatc
     assert window._worker.body.height_mm == window.field_cast_pcb.value()
 
 
-@pytest.mark.parametrize('failure', ['missing_body', 'invalid_footprint', 'failed_extraction', 'unsupported_3d', 'unsafe_name'])
+@pytest.mark.parametrize('failure', ['missing_body', 'invalid_footprint', 'failed_extraction', 'invalid_package', 'unsafe_name'])
 def test_bad_analysis_never_autogenerates_or_reuses_old_body(window, monkeypatch, failure):
     warnings = []
     monkeypatch.setattr(QMessageBox, 'warning', lambda *args: warnings.append(args))
@@ -184,12 +200,14 @@ def test_bad_analysis_never_autogenerates_or_reuses_old_body(window, monkeypatch
     else:
         if failure == 'missing_body': params.body_height_mm = None
         if failure == 'invalid_footprint': params.drill_mm = 2  # Greater than pad size.
-        if failure == 'unsupported_3d': params.package_geometry = {'family': 'qfn'}
+        # Negativo della prova sui pad espliciti: una geometria scartata non deve
+        # far generare il footprint a griglia al suo posto.
+        if failure == 'invalid_package': params.package_geometry = {'family': 'qfn'}
         if failure == 'unsafe_name': params.name = '../outside'
         window._on_extracted(params)
     window._on_extract_finished()
     assert window._worker is None
-    assert window.btn_extract_ai.isEnabled() and window.btn_generate.isEnabled()
+    assert window.btn_extract_ai.isEnabled()
     assert not window._automatic_generation_active and window.analysis_overlay.isHidden()
     assert warnings
 
@@ -240,11 +258,11 @@ def test_generation_failure_releases_ui_and_reports_partial_success(window, monk
         window._worker.done.emit('footprint.kicad_mod')
         window._worker.cad3d_error.emit('FreeCAD unavailable')
         window._worker.finished.emit()
-        assert window.tabs.currentIndex() == 3
+        assert window.tabs.currentIndex() == gui.TAB_PREVIEW
         assert 'Footprint generato' in warnings[0][2]
     assert warnings
     assert window.tabs.isEnabled() and window.menuBar().isEnabled()
-    assert window.btn_generate.isEnabled() and window.btn_extract_ai.isEnabled()
+    assert window.btn_extract_ai.isEnabled()
     assert window.analysis_overlay.isHidden()
 
 
@@ -263,14 +281,14 @@ def test_no_overlapping_generation_or_extraction(window, monkeypatch):
     window._on_generation_finished()
 
 
-def test_mode_preference_survives_restart(window, monkeypatch):
+def test_an_old_advanced_preference_is_ignored(window, monkeypatch):
+    """@brief Negativo: un config.json scritto prima della rimozione non riapre i tab."""
     from kicadgen.gui import app_config
     app_config.save_config({'advanced_user': True})
     monkeypatch.setattr(gui, 'load_config', app_config.load_config)
     restored = gui.MainWindow()
     try:
-        assert restored._advanced_user()
-        assert restored.tabs.isTabVisible(1) and restored.tabs.isTabVisible(2)
+        assert restored.tabs.count() == 4
     finally:
         restored.close()
 
@@ -426,8 +444,10 @@ def test_real_qthread_handoff_generates_footprint_and_requests_3d(window, monkey
     name = window._component_name()
     assert (window._project_dir() / f'{name}.pretty' / f'{name}.kicad_mod').is_file()
     assert (window._project_dir() / f'{name}.3dshapes' / f'{name}.step').is_file()
-    assert window.tabs.currentIndex() == 4
-    assert window.tabs.isEnabled() and window.analysis_overlay.isHidden()
+    assert window.tabs.currentIndex() == gui.TAB_MODEL_3D
+    assert window.tabs.isEnabled() and window.analysis_overlay.is_holding_completed()
+    window.analysis_overlay.close_button.click()
+    assert window.analysis_overlay.isHidden()
 
 
 def test_guided_name_collision_keeps_documents_and_generates_after_real_thread(window, monkeypatch, tmp_path):
@@ -488,7 +508,7 @@ def test_guided_name_collision_keeps_documents_and_generates_after_real_thread(w
     assert all(path.read_bytes() == content for path, content in before.items())
     assert conflict.read_bytes() == b'other project: must never change'
     assert window._extract_worker.document_roles == {f'{role}.png': role for role in ROLES}
-    assert window.tabs.currentIndex() == 4
+    assert window.tabs.currentIndex() == gui.TAB_MODEL_3D
 
 
 def test_the_modal_says_which_tool_is_working_and_how_far_it_is(window, monkeypatch):
@@ -527,3 +547,20 @@ def _rename_to(window, monkeypatch, name):
         return QDialog.DialogCode.Accepted if ok.isEnabled() else QDialog.DialogCode.Rejected
     monkeypatch.setattr(ProjectNameDialog, "exec", accept)
     window._rename_project()
+
+
+def test_an_incomplete_generation_does_not_hold_the_card(window, monkeypatch):
+    """@brief Negativo: un 3D fallito non lascia la modale aperta come «Completato»."""
+    warnings = []
+    monkeypatch.setattr(QMessageBox, 'warning', lambda *a: warnings.append(a))
+    begin(window, monkeypatch)
+    window._on_extracted(acquired())
+    window._on_extract_finished()
+    monkeypatch.setattr(window, '_draw_preview', lambda: None)
+    monkeypatch.setattr(window, '_draw_preview_3d', lambda: None)
+    window._worker.done.emit('footprint.kicad_mod')
+    window._worker.cad3d_error.emit('FreeCAD unavailable')
+    window._worker.finished.emit()
+    assert warnings
+    assert window.analysis_overlay.isHidden()
+    assert not window.analysis_overlay.is_holding_completed()

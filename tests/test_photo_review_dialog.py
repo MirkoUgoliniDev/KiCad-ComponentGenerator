@@ -2164,3 +2164,40 @@ def test_a_small_outline_inside_a_large_one_is_on_top(app, png):
     finally:
         widget.close()
         app.processEvents()
+
+
+def test_deleting_keeps_zoom_and_scroll_so_the_removal_is_visible(dialog, app):
+    """@brief Utente, 2026-09-26: eliminando un corpo la vista non deve spostarsi.
+
+    Positivo: zoom e scorrimento identici prima e dopo, e il rettangolo non c'e'
+    piu'. Prima la selezione passava al vicino CENTRANDO la vista su di lui, e
+    la foto scorreva via proprio mentre si guardava il corpo eliminato.
+    """
+    view = dialog.view
+    view.zoom(6)  # lo zoom dell'utente: spegne l'adattamento automatico
+    app.processEvents()
+    view.horizontalScrollBar().setValue(view.horizontalScrollBar().maximum() // 3)
+    view.verticalScrollBar().setValue(view.verticalScrollBar().maximum() // 2)
+    before = (view.transform().m11(), view.horizontalScrollBar().value(),
+              view.verticalScrollBar().value())
+    dialog._select_row(1, center=False)
+    removed = dialog._items[1]
+    dialog.delete_selected()
+    app.processEvents()
+    after = (view.transform().m11(), view.horizontalScrollBar().value(),
+             view.verticalScrollBar().value())
+    assert after == before
+    assert removed not in dialog._items and removed.scene() is None
+    assert len(dialog._items) == 1
+
+
+def test_choosing_a_row_from_the_list_still_centres_on_it(dialog, app):
+    """@brief Negativo: la scelta dalla lista continua a portare il corpo al centro."""
+    view = dialog.view
+    view.zoom(6)  # lo zoom dell'utente: spegne l'adattamento automatico
+    app.processEvents()
+    view.horizontalScrollBar().setValue(0)
+    before = view.horizontalScrollBar().value()
+    dialog._select_row(1)
+    app.processEvents()
+    assert view.horizontalScrollBar().value() != before

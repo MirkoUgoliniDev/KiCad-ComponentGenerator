@@ -37,7 +37,7 @@ def test_warning_reaches_disk_and_ai_dialog_exactly_once(window, handler):
     assert window.ai_log_dialog.isAncestorOf(window.ai_progress_text)
     assert window._log_file().read_text(encoding="utf-8").count(message) == 1
     assert window.ai_progress_text.toPlainText().count(message) == 1
-    assert window.log_text.toPlainText().count(message) == 1
+    assert window._log_plain_text().count(message) == 1
     assert window.btn_copy_ai_log.isEnabled()
 
 
@@ -106,7 +106,7 @@ def test_failed_log_move_refuses_rename_and_preserves_project(
     warning = "Rinomina annullata: impossibile trasferire il log (log-move-denied-proof)."
     assert source.read_text(encoding="utf-8").count(warning) == 1
     assert window.ai_progress_text.toPlainText().count(warning) == 1
-    assert window.log_text.toPlainText().count(warning) == 1
+    assert window._log_plain_text().count(warning) == 1
     window._append_log("still-original-proof")
     assert source.read_text(encoding="utf-8").count("still-original-proof") == 1
 

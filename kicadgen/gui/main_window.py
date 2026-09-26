@@ -12,6 +12,7 @@ from __future__ import annotations
 from copy import deepcopy
 from html import escape
 import json
+from functools import partial
 import math
 import re
 import threading
@@ -25,17 +26,18 @@ from pathlib import Path
 from PyQt6.QtCore import QEvent, QObject, QRectF, QThread, QTimer, pyqtSignal, Qt, QSize
 from PyQt6.QtGui import QBrush, QColor, QIcon, QKeySequence, QPainterPath, QPen, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
+    QApplication, QCheckBox, QComboBox, QFileDialog,
     QFormLayout, QFrame, QGraphicsEllipseItem, QGraphicsRectItem, QGraphicsScene,
-    QGraphicsView, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+    QGraphicsView, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
     QDialog, QListWidget, QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea,
-    QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QListWidgetItem, QTabWidget, QTextEdit, QVBoxLayout,
+    QSplitter, QListWidgetItem, QTabWidget, QTextEdit, QVBoxLayout,
     QToolButton, QWidget,
 )
 
-from ..cad3d.annotations import (ANNOTATION_CONVENTION, EDGE_NAMES, FACE_NAMES, EdgeFilletAnnotation,
+from ..cad3d.annotations import (ANNOTATION_CONVENTION, EdgeFilletAnnotation,
                                   FaceTextAnnotation, swap_front_back)
 from ..cad3d.body_params import Body3DParams
+from ..cad3d.kicad_models import measuring_listener
 from ..cad3d.step_generator import (
     CAD_ABORT_MESSAGE, Cad3DError, find_freecadcmd, generate_3d_model,
     generate_castellated_3d_model,
@@ -53,7 +55,7 @@ from ..services.analysis_profiles import ProfileStore, ProfileError
 from ..services.i18n import DEFAULT_TRANSLATIONS, I18n, LANGUAGES
 from ..services.document_roles import DocumentSet, MANIFEST, SUFFIXES
 from ..services.datasheet_extractor import (
-    COMPONENT_KINDS, DEFAULT_SYSTEM_PROMPT, ExtractedParams, ExtractionError,
+    DEFAULT_SYSTEM_PROMPT, ExtractedParams, ExtractionError,
     extract_pin_header_params,
 )
 from ..services.openrouter import DEFAULT_MODEL
@@ -74,6 +76,9 @@ from ..app_paths import default_projects_dir, install_dir, resource_path
 # restano caricati al bisogno. Legata qui, all'import, e non al clic: i test
 # che sostituiscono il modulo con un finto non devono cambiarne il contratto.
 from ..services.photo_yolo import yolo_settings as validate_yolo_settings
+from .component_editor_dialog import ComponentEditorDialog
+from .component_state import (BoundedValue, FlagValue, TextValue,
+                              normalised_side)
 from .analysis_overlay import AnalysisOverlay
 from .generation_options_dialog import GenerationOptionsDialog
 from .guided_documents import GuidedDocuments
@@ -84,15 +89,27 @@ from .photo_review_dialog import PhotoReviewDialog, PhotoTransform
 from .preview_3d_vtk import Preview3DVtk
 from .settings_dialog import LlmSettingsDialog
 from .profile_dialog import ProfilesDialog, icon_button
-from .translation_dialog import TranslationDialog
-from .theme import BASE, BLUE, RED, SURFACE0, SURFACE1, SURFACE2, TEXT, YELLOW, APP_QSS
+from .theme import BASE, BLUE, RED, SURFACE1, SURFACE2, TEXT, YELLOW, APP_QSS
 from .tooltips import install_tooltip_filter
 from ..services.messages import tx
 
 #: Icona di ogni scheda, nell'ordine delle schede: SVG a linea nello stile
 #: delle barre di icone.
-TAB_ICONS = ("tab-project.svg", "tab-footprint.svg", "tab-generate.svg",
-             "tab-preview.svg", "tab-model3d.svg", "tab-kicad.svg")
+TAB_ICONS = ("tab-project.svg", "tab-preview.svg", "tab-model3d.svg", "tab-kicad.svg")
+
+#: Positions of the tabs in `MainWindow.tabs`. Footprint 2D and Genera were
+#: removed on 2026-09-26 with the «Utente avanzato» mode; their parameters
+#: live in `component_state` values, not in widgets.
+TAB_PROJECT, TAB_PREVIEW, TAB_MODEL_3D, TAB_KICAD = range(4)
+
+#: I tre passi di una generazione, come li mostra la modale (utente,
+#: 2026-09-26). Chi lavora in ciascuno lo dice l'intestazione: vedi
+#: `analysis_overlay.TOOLS`.
+GENERATION_STEPS = ("Footprint 2D (KiCadGen)", "Modelli 3D dalla libreria KiCad",
+                    "Solido 3D con FreeCAD")
+#: Passo di ogni fase annunciata dai worker. Le misure di FreeCAD appartengono
+#: alla scelta dei modelli: servono a confrontare i candidati.
+GENERATION_STEP_OF = {"footprint": 0, "kicad": 1, "freecad_measure": 1, "freecad": 2}
 
 #: Cartella del programma (sola lettura una volta installato) e cartella di
 #: lavoro predefinita dei progetti: vedi `kicadgen.app_paths`.
@@ -113,15 +130,17 @@ DEVELOPER_NAME = "Mirko Ugolini"
 #: lingua, cartella di lavoro, nome del progetto (e' la cartella stessa), i
 #: campi di sola immissione dell'editor delle annotazioni e la griglia
 #: dell'anteprima, che sono modi di guardare.
+#: `group_3d` is not saved: since 2026-09-26 it follows FreeCAD's availability
+#: only, and an old file with it off would silently disable every 3D model.
 PROJECT_WIDGETS = (
     "combo_component_type", "field_component_prompt", "combo_photo_detector",
-    "field_yolo_model", "group_castellated", "group_3d",
+    "field_yolo_model", "group_castellated",
     "field_description", "field_tags",
     "field_rows", "field_cols", "field_pitch", "field_row_spacing", "field_pad",
     "field_drill", "field_populated_pins",
     "field_body_length", "field_body_width", "field_body_height",
     "field_body_offset_x", "field_body_offset_y", "field_body_color",
-    "field_pin_color", "field_pin_length_3d", "field_text_color",
+    "field_pin_color", "field_pin_length_3d",
     "field_cast_body_length", "field_cast_body_width", "field_cast_pcb",
     "field_cast_pad_length", "field_cast_pad_width", "field_cast_overhang",
     "field_cast_inset", "field_cast_hole", "field_cast_hole_inset",
@@ -131,7 +150,8 @@ PROJECT_WIDGETS = (
 #: la riga della lingua sopra le schede usa lo stesso, cosi' i bordi combaciano.
 CONTENT_MARGIN_PX = 10
 #: Opzioni di Configurazione -> Opzioni di generazione che seguono il progetto.
-PROJECT_OPTIONS = ("include_nc_pins", "silk_pin_labels", "pause_after_inventory")
+PROJECT_OPTIONS = ("include_nc_pins", "silk_pin_labels", "pause_after_inventory",
+                   "show_pins_3d")
 #: Ogni quanto, in millisecondi, si controlla se il progetto e' cambiato. Una
 #: scelta: abbastanza spesso da non perdere nulla chiudendo di colpo, abbastanza
 #: di rado da non scrivere a ogni tasto. Un file si scrive solo se lo stato e'
@@ -778,7 +798,7 @@ class GenerateWorker(QThread):
             costruzione del solido: mostrare il solido di FreeCAD qui faceva
             credere che il modello finale fosse gia' in lavorazione.
         """
-        self.phase.emit('kicad', tx("abbinamento modelli KiCad"), done, total)
+        self.phase.emit('kicad', tx("scelta del modello per ogni componente"), done, total)
 
     def _cad_progress(self, message: str) -> None:
         """@brief Inoltra la riga al log e, se annuncia un componente, al conteggio."""
@@ -786,12 +806,13 @@ class GenerateWorker(QThread):
         step = freecad_progress(message)
         if step is not None:
             done, total = step
-            self.phase.emit('freecad', tx("modello 3D"), done, total)
+            self.phase.emit('freecad', tx("costruzione del solido 3D"), done, total)
 
     def run(self) -> None:
         """@brief QThread override: save the footprint, then generate the 3D model, reporting each through its own signals."""
         try:
-            self.phase.emit('kicad', 'footprint 2D', 0, 0)
+            # Il file lo scrive questo programma: KiCad non e' in esecuzione.
+            self.phase.emit('footprint', tx("scrittura del file .kicad_mod"), 0, 0)
             self.progress.emit(tx("Generazione del footprint KiCad…"))
             footprint = (
                 build_castellated_module(self.params)
@@ -816,18 +837,19 @@ class GenerateWorker(QThread):
                 # che la correzione vuole attribuita a KiCad, per poi tornare
                 # indietro. Da `freecad` ci passa `_cad_progress`, quando il
                 # solido comincia davvero.
-                self.phase.emit('kicad', tx("abbinamento modelli KiCad"), 0, 0)
+                self.phase.emit('kicad', tx("scelta del modello per ogni componente"), 0, 0)
                 self.progress.emit(tx("Generazione del modello 3D tramite FreeCAD…"))
                 # Risolto una volta sola: introspezione e chiamata devono
                 # riguardare lo stesso oggetto, anche quando e' stato sostituito.
                 generator = _generate_3d
-                result = generator(
-                    self.params, self.body, self.project_dir,
-                    self.fillets, self.face_texts,
-                    progress=self._cad_progress,
-                    model_progress=self._model_progress,
-                    **self._cancel_kwargs(generator),
-                )
+                with measuring_listener(partial(_announce_freecad_measuring, self)):
+                    result = generator(
+                        self.params, self.body, self.project_dir,
+                        self.fillets, self.face_texts,
+                        progress=self._cad_progress,
+                        model_progress=self._model_progress,
+                        **self._cancel_kwargs(generator),
+                    )
                 for warning in result.get('warnings', []):
                     self.warning.emit(warning)
                 # Le note della risoluzione modelli vanno nel log anche nella
@@ -839,6 +861,23 @@ class GenerateWorker(QThread):
                 self.cad3d_error.emit(str(exc))
             except Exception as exc:  # noqa: BLE001 - riportato in UI, non e' fatale
                 self.cad3d_error.emit(tx("Errore inatteso: {exc}", exc=exc))
+
+
+def _announce_freecad_measuring(worker, started: bool, count: int) -> None:
+    """@brief Switch the modal to FreeCAD while it measures candidate models, then back.
+
+    @param worker CAD worker whose `phase` signal reaches the modal.
+    @param started True when a `freecadcmd` child is about to measure.
+    @param count Models in that batch.
+    @note Called by `kicad_models.measuring_listener` only when FreeCAD is
+        really launched: models already in the measurement cache launch
+        nothing, and the modal then keeps showing the KiCad library.
+    """
+    if started:
+        worker.phase.emit('freecad_measure',
+                          tx("misura di {count} modelli candidati", count=count), 0, 0)
+    else:
+        worker.phase.emit('kicad', tx("scelta del modello per ogni componente"), 0, 0)
 
 
 class Cad3DWorker(QThread):
@@ -909,7 +948,7 @@ class Cad3DWorker(QThread):
             per misurare un candidato non ancora in cache `attach_models` puo'
             avviare `freecadcmd`. Vedi GenerateWorker._model_progress.
         """
-        self.phase.emit('kicad', tx("abbinamento modelli KiCad"), done, total)
+        self.phase.emit('kicad', tx("scelta del modello per ogni componente"), done, total)
 
     def _cad_progress(self, message: str) -> None:
         """@brief Inoltra la riga al log e, se annuncia un componente, al conteggio."""
@@ -917,7 +956,7 @@ class Cad3DWorker(QThread):
         step = freecad_progress(message)
         if step is not None:
             done, total = step
-            self.phase.emit('freecad', tx("modello 3D"), done, total)
+            self.phase.emit('freecad', tx("costruzione del solido 3D"), done, total)
 
     def run(self) -> None:
         """@brief QThread override: regenerate the 3D model and emit done, warning or error."""
@@ -925,16 +964,17 @@ class Cad3DWorker(QThread):
             # Stessa ragione di GenerateWorker.run: `_generate_3d` comincia
             # dall'abbinamento dei modelli di KiCad. `_cad_progress` passa a
             # `freecad` quando il solido comincia davvero.
-            self.phase.emit('kicad', tx("abbinamento modelli KiCad"), 0, 0)
+            self.phase.emit('kicad', tx("scelta del modello per ogni componente"), 0, 0)
             # Vedi GenerateWorker.run: un solo oggetto per introspezione e chiamata.
             generator = _generate_3d
-            result = generator(
-                self.params, self.body, self.project_dir,
-                self.fillets, self.face_texts,
-                progress=self._cad_progress,
-                model_progress=self._model_progress,
-                **self._cancel_kwargs(generator),
-            )
+            with measuring_listener(partial(_announce_freecad_measuring, self)):
+                result = generator(
+                    self.params, self.body, self.project_dir,
+                    self.fillets, self.face_texts,
+                    progress=self._cad_progress,
+                    model_progress=self._model_progress,
+                    **self._cancel_kwargs(generator),
+                )
             for note in result.get("notes", []):
                 self.progress.emit(note)
             for warning in result.get("warnings", []):
@@ -1271,7 +1311,7 @@ class ReconcileWorker(QThread):
         from ..services.openrouter import call_tool
         from ..services.ai_diagnostics import make_logged_call
         try:
-            self.phase.emit('llm', self.model, 0, 0)
+            self.phase.emit('llm_inventory', self.model, 0, 0)
             report = reconcile_saved_proposals(
                 self.photo_png, self.proposals, self.length_mm, self.width_mm, self.model,
                 make_logged_call(call_tool, self.progress.emit, log_prompt=True,
@@ -1347,8 +1387,11 @@ class MainWindow(QMainWindow):
         self.face_text_annotations: list[FaceTextAnnotation] = []
         self.pinout: list[dict] = []
         # Componenti del modulo letti dalla foto: alimentano il 3D, non il
-        # footprint, quindi non vivono nei campi del tab Footprint 2D.
+        # footprint (vedi `_photo_rows`, che ne tiene anche i metadati).
         self.castellated_components: list[ComponentBox] = []
+        #: Componenti della foto come dict (geometria + metadati del
+        #: rilevamento): la fonte di verita' dei corpi, vedi `_photo_row`.
+        self._photo_rows: list[dict] = []
         self._extracted_pcb_thickness = None
         self.pin_map: dict | None = None
         self._last_mesh_path: Path | None = None
@@ -1418,12 +1461,10 @@ class MainWindow(QMainWindow):
         self._automatic_3d_expected = True
         self._automatic_generation_errors = []
         self._startup_dependencies_checked = False
-        #: None finche' l'utente non tocca il gruppo «Modello 3D»; True/False
-        #: dopo un suo clic. Serve a non revocare la sua scelta quando arriva
-        #: una nuova estrazione.
-        self._user_3d_choice: bool | None = None
-        #: True/False appena `_build_3d_group` ha interrogato il sistema; None
-        #: finche' il gruppo non esiste. Va ricordato: `find_freecadcmd()` e' una
+        #: Messaggi del log della sessione, in ordine (vedi `_log_plain_text`).
+        self._log_lines: list[str] = []
+        #: True/False appena `_init_parameters` ha interrogato il sistema; None
+        #: prima. Va ricordato: `find_freecadcmd()` e' una
         #: ricerca su disco e l'estrazione non deve rifarla per sapere se il
         #: modello 3D e' generabile.
         self._freecad_available: bool | None = None
@@ -1446,25 +1487,21 @@ class MainWindow(QMainWindow):
 
         self._build_menu()
         self._build_central()
-        self._apply_user_mode()
-        # Project type is restored before the footprint widgets exist.
+        # Project type is restored before the footprint parameters are used.
         self.group_castellated.setChecked(
             self._selected_family() == "aggregate_castellated"
         )
-        self._sync_footprint_subtabs()
         self._refresh_docs_list()
         # Il campo nasce vuoto, quindi nessun segnale di modifica lo annuncia:
         # il blocco va applicato una volta all'avvio.
         self._apply_component_name_gate()
 
         # Connect after initialization so construction does not invalidate a worker.
-        for key, widget in vars(self).copy().items():
+        for key, value in vars(self).copy().items():
             if key.startswith("field_"):
-                if isinstance(widget, QDoubleSpinBox) or isinstance(widget, QSpinBox):
-                    widget.valueChanged.connect(self._invalidate_generated_mesh)
-                elif isinstance(widget, QLineEdit) and key in {
-                        "field_body_color", "field_pin_color", "field_populated_pins"}:
-                    widget.textChanged.connect(self._invalidate_generated_mesh)
+                if isinstance(value, BoundedValue) or (isinstance(value, TextValue) and key in {
+                        "field_body_color", "field_pin_color", "field_populated_pins"}):
+                    value.on_change(lambda _value: self._invalidate_generated_mesh())
         self._init_project_settings()
 
     # ── Menu ────────────────────────────────────────────────────────
@@ -1493,8 +1530,6 @@ class MainWindow(QMainWindow):
         self.action_profiles = config_menu.addAction(
             QIcon(str(Path(__file__).parent / 'assets' / 'profile-edit.svg')),
             self.i18n.text("Gestione tipologie e profili AI..."), self._edit_profiles)
-        self.action_translations = config_menu.addAction(
-            self.i18n.text("Manage translations..."), self._edit_translations)
         self.action_defaults = config_menu.addAction(
             self.i18n.text("Default generali AI..."), self._edit_llm_settings)
         config_menu.addSeparator()
@@ -1516,7 +1551,6 @@ class MainWindow(QMainWindow):
 
     def _edit_generation_options(self) -> None:
         dialog = GenerationOptionsDialog(self._include_nc_pins(), self,
-                                         advanced_user=self._advanced_user(),
                                          silk_pin_labels=self._silk_pin_labels(),
                                          pause_after_inventory=self._inventory_pause_enabled())
         self.i18n.retranslate_widgets(dialog)
@@ -1527,11 +1561,9 @@ class MainWindow(QMainWindow):
         pause_changed = pause != self._inventory_pause_enabled()
         self._set_project_option("include_nc_pins", checked)
         self._set_project_option("silk_pin_labels", dialog.silk_pin_labels())
-        self._config['advanced_user'] = dialog.advanced_user()
         save_config(self._config)
         if pause_changed:
             self._on_inventory_pause_toggled(pause)
-        self._apply_user_mode()
         self._append_log(
             tx("Pin NC: verranno generati.") if checked
             else tx("Pin NC: NON verranno generati (attenzione: il piedino fisico resta).")
@@ -1570,9 +1602,6 @@ class MainWindow(QMainWindow):
                default_model=self._default_model(),
                value=self._vision_model() or 'default del servizio foto')
         )
-
-    def _advanced_user(self):
-        return self._config.get('advanced_user', False) is True
 
     def _project_option(self, key: str, default):
         """@brief Valore di un'opzione che segue il progetto (`PROJECT_OPTIONS`).
@@ -1615,7 +1644,7 @@ class MainWindow(QMainWindow):
 
         @return True finche' qualcuno non ha chiesto esplicitamente di non
             fermarsi piu'.
-        @note Predefinito ACCESO, al contrario di `advanced_user`: la pausa e'
+        @note Predefinito ACCESO: la pausa e'
             cio' che l'utente ha chiesto («dopo l'elaborazione AI stessa cosa,
             non ho visto la pausa»), e un impianto che comincia a correre da
             solo verso l'abbinamento modelli e FreeCAD gli toglie l'unico
@@ -1632,7 +1661,7 @@ class MainWindow(QMainWindow):
         """@brief Ricorda in config.json se la pausa dell'inventario va offerta.
 
         @param enabled False quando l'utente ha chiesto di non essere piu' fermato.
-        @note Stesso deposito e stesso metodo di «utente avanzato»: la scelta
+        @note Stesso deposito delle altre opzioni di generazione: la scelta
             vale per le corse successive, non solo per questa sessione.
         """
         self._set_project_option('pause_after_inventory', enabled)
@@ -1670,28 +1699,6 @@ class MainWindow(QMainWindow):
         if self._selected_family() in _SINGLE_COMPONENT_FAMILIES:
             return False
         return None
-
-    def _apply_user_mode(self):
-        advanced = self._advanced_user()
-        # Keep widget instances and numeric tab indexes stable for existing handlers.
-        if not advanced and self.tabs.currentIndex() in (1, 2):
-            self.tabs.setCurrentIndex(0)
-        self.tabs.setTabVisible(1, advanced)
-        self.tabs.setTabVisible(2, advanced)
-        self.model_3d_settings_scroll.setVisible(advanced)
-        self.group_annotations.setVisible(advanced)
-        # Stessa condizione dell'inventario fotografico: la tabella dei corpi
-        # esiste solo per le schede popolate, che sono le sole a produrli. Solo
-        # `True` conta: con la previsione incerta (None) non si mostra una
-        # tabella che potrebbe restare vuota per sempre.
-        self.group_components.setVisible(advanced and self._photo_inventory_family() is True)
-        # La modifica della revisione non dipende dalla modalita' d'uso: la sua
-        # condizione e' la fotografia in memoria. Qui si ri-applica quella
-        # disciplina invece di forzare la visibilita', altrimenti un cambio di
-        # modalita' riaccenderebbe un comando che non ha nulla da aprire.
-        self._refresh_edit_review_buttons()
-        if hasattr(self, "action_translations"):
-            self.action_translations.setVisible(advanced)
 
     def _background_work_running(self):
         return any(worker is not None and worker.isRunning() for worker in
@@ -1756,13 +1763,6 @@ class MainWindow(QMainWindow):
         finally:
             if dialog is not None:
                 dialog.deleteLater()
-
-    def _edit_translations(self) -> None:
-        """@brief Open the Advanced-user translation catalog editor."""
-        dialog = TranslationDialog(self.profile_store, self)
-        self.i18n.retranslate_widgets(dialog)
-        dialog.exec()
-        dialog.deleteLater()
 
     def _reload_profile_types(self, *, update_prompt=True):
         combo = self.combo_component_type
@@ -2184,9 +2184,9 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        # I parametri esistono prima di ogni scheda: le schede li leggono.
+        self._init_parameters()
         project_tab = self._build_project_tab()
-        footprint_tab = self._build_footprint_tab()
-        generate_tab = self._build_generate_tab()
         preview_tab = self._build_preview_tab()
         model_3d_tab = self._build_3d_tab()
         kicad_tab = self._build_kicad_tab()
@@ -2221,8 +2221,6 @@ class MainWindow(QMainWindow):
         # Navigation tabs use stable translation keys and are refreshed explicitly.
         self.tabs.setProperty("i18n_skip_tabs", True)
         self.tabs.addTab(project_tab, self.i18n.tr("tab.project.name"))
-        self.tabs.addTab(footprint_tab, self.i18n.tr("tab.footprint.name"))
-        self.tabs.addTab(generate_tab, self.i18n.tr("tab.generate.name"))
         self.tabs.addTab(preview_tab, self.i18n.tr("tab.preview.name"))
         self.tabs.addTab(model_3d_tab, self.i18n.tr("tab.model3d.name"))
         self.tabs.addTab(kicad_tab, self.i18n.tr("tab.kicad.name"))
@@ -2238,6 +2236,7 @@ class MainWindow(QMainWindow):
         self.analysis_overlay = AnalysisOverlay(central, i18n=self.i18n)
         self.analysis_overlay.log_requested.connect(self.ai_log_dialog.exec)
         self.analysis_overlay.abort_requested.connect(self._request_abort)
+        self.analysis_overlay.closed.connect(self._on_completed_overlay_closed)
         self._analysis_tabs_enabled = None
         # Apply the persisted language to all catalogued widgets on first render.
         self.i18n.retranslate_widgets(self)
@@ -2259,12 +2258,10 @@ class MainWindow(QMainWindow):
         self._config["language"] = language
         save_config(self._config)
         self._refresh_language_texts()
-        self.tabs.setTabText(0, self.i18n.tr("tab.project.name"))
-        self.tabs.setTabText(1, self.i18n.tr("tab.footprint.name"))
-        self.tabs.setTabText(2, self.i18n.tr("tab.generate.name"))
-        self.tabs.setTabText(3, self.i18n.tr("tab.preview.name"))
-        self.tabs.setTabText(4, self.i18n.tr("tab.model3d.name"))
-        self.tabs.setTabText(5, self.i18n.tr("tab.kicad.name"))
+        self.tabs.setTabText(TAB_PROJECT, self.i18n.tr("tab.project.name"))
+        self.tabs.setTabText(TAB_PREVIEW, self.i18n.tr("tab.preview.name"))
+        self.tabs.setTabText(TAB_MODEL_3D, self.i18n.tr("tab.model3d.name"))
+        self.tabs.setTabText(TAB_KICAD, self.i18n.tr("tab.kicad.name"))
         self.i18n.retranslate_widgets(self)
         self.ai_account.refresh()
         self.menuBar().actions()[0].setText(self.i18n.tr("app.file"))
@@ -2277,7 +2274,6 @@ class MainWindow(QMainWindow):
         self.action_open_project.setText(self.i18n.text("Apri progetto..."))
         self.action_rename_project.setText(self.i18n.text("Rinomina progetto..."))
         self.action_profiles.setText(self.i18n.text("Gestione tipologie e profili AI..."))
-        self.action_translations.setText(self.i18n.text("Manage translations..."))
         self.action_defaults.setText(self.i18n.text("Default generali AI..."))
         self.action_generation_options.setText(self.i18n.text("Opzioni di generazione..."))
         self.action_accepted_models.setText(
@@ -2312,7 +2308,7 @@ class MainWindow(QMainWindow):
 
     def _set_acquisition_tabs_enabled(self, enabled: bool) -> None:
         """Enable previews only after the first successful parameter acquisition."""
-        for index in (3, 4):
+        for index in (TAB_PREVIEW, TAB_MODEL_3D):
             self.tabs.setTabEnabled(index, enabled)
 
     def _refresh_preview_tabs(self, footprint_available: bool) -> None:
@@ -2346,6 +2342,31 @@ class MainWindow(QMainWindow):
         mesh = shapes / f"{name}.preview.json"
         if (shapes / f"{name}.step").is_file() and mesh.is_file():
             self._last_mesh_path = mesh
+
+    def _restore_saved_photo(self) -> None:
+        """@brief Reload the calibrated photo of a reopened project from its review bundle.
+
+        @note The photo lived only in memory after an extraction: reopening a
+            project left it None, and «Modifica la revisione», the double click
+            on a body and «Cambia modello KiCad...» had nothing to open (user,
+            2026-09-26). The extraction's bundle keeps the calibrated photo the
+            bodies are measured on, the same frame the photo review uses. A
+            pretest bundle is not the extraction and is not used; a missing or
+            unreadable file leaves things as they were.
+        """
+        if self._photo_png is not None:
+            return
+        bundle = self._review_bundle()
+        path = getattr(bundle, "photo_path", None)
+        if path is None:
+            return
+        try:
+            self._photo_png = Path(path).read_bytes()
+        except OSError as exc:
+            self._append_log(tx("Foto calibrata del progetto non leggibile: {exc}", exc=exc))
+            return
+        self._photo_source = Path(path).name
+        self._refresh_edit_review_buttons()
 
     # ── Tab 1: Progetto ────────────────────────────────────────────
 
@@ -2439,8 +2460,8 @@ class MainWindow(QMainWindow):
         note = QLabel(
             "Il nome del componente e' anche il nome del footprint generato "
             "(es. area_di_lavoro/MioComponente/MioComponente.pretty/...). "
-            "Tutto viene generato qui; per portarlo nella libreria vera usa "
-            "\"Esporta in libreria...\" nel tab \"Genera\"."
+            "Tutto viene generato qui; per provarlo in KiCad o installarlo come "
+            "libreria usa il tab \"KiCad\"."
         )
         note.setWordWrap(True)
         info_layout.addWidget(note)
@@ -2483,6 +2504,16 @@ class MainWindow(QMainWindow):
             self._on_component_type_changed
         )
         ai_form.addRow("Tipologia componente:", self.combo_component_type)
+        # Solo modello 3D: gli strip non cambiano ne' l'analisi ne' il
+        # footprint (utente, 2026-09-26). Spenti di default.
+        self.chk_header_pins = QCheckBox(
+            "Pin quadrati per il collegamento alla scheda principale (solo modello 3D)")
+        self.chk_header_pins.setToolTip(
+            "Aggiunge sotto la scheda gli strip maschi a pin quadrati, come una scheda "
+            "con gli strip gia' saldati. Sulle schede castellated solo sui contatti con "
+            "foro passante. Non cambia l'analisi ne' il footprint: basta rigenerare il 3D.")
+        self.chk_header_pins.toggled.connect(self._on_header_pins_toggled)
+        ai_form.addRow("", self.chk_header_pins)
         _align_form_labels(ai_form)
         models_form = QFormLayout()
 
@@ -2866,8 +2897,8 @@ class MainWindow(QMainWindow):
             )
         )
 
-        # La tipologia decide anche quale gruppo di parametri si usa nel tab
-        # "Footprint 2D": i moduli castellated non stanno in una matrice.
+        # La tipologia decide anche quali parametri del footprint si usano:
+        # i moduli castellated non stanno in una matrice.
         if key and hasattr(self, "group_castellated"):
             self.group_castellated.setChecked(self._selected_family() == "aggregate_castellated")
 
@@ -2878,8 +2909,36 @@ class MainWindow(QMainWindow):
             self._config["component_type"] = key
             save_config(self._config)
         self._refresh_model_combo()
+        self._refresh_type_effect()
         if component_type is not None:
-            self._append_log(tx("Tipologia componente: {label}.", label=component_type.label))
+            self._append_log(tx("Tipologia componente: {label}.",
+                                label=self.i18n.component_type(key, component_type.label)))
+
+    def _refresh_type_effect(self) -> None:
+        """@brief Offer the header pins choice for boards only, showing the project's value.
+
+        @note Structural, not by name: `_photo_inventory_family` tells boards
+            from single components. The line that described the analysis under
+            the type was removed by the user (2026-09-26).
+        """
+        if getattr(self, "chk_header_pins", None) is None:
+            return
+        # Senza tipologia la disposizione rimasta dalla scelta precedente non
+        # dice nulla su che cosa si sta analizzando.
+        board = self._photo_inventory_family() if self._selected_family() else None
+        blocked = self.chk_header_pins.blockSignals(True)
+        self.chk_header_pins.setChecked(self._show_pins_3d())
+        self.chk_header_pins.blockSignals(blocked)
+        self.chk_header_pins.setVisible(board is True)
+
+    def _on_header_pins_toggled(self, checked: bool) -> None:
+        """@brief Record the pins choice for the project; the solid on screen is stale.
+
+        @param checked New state of the checkbox.
+        """
+        self._set_project_option("show_pins_3d", checked)
+        save_config(self._config)
+        self._invalidate_generated_mesh()
 
     def _component_name(self) -> str:
         return self.field_name.text().strip() if hasattr(self, "field_name") else ""
@@ -3022,7 +3081,7 @@ class MainWindow(QMainWindow):
         return footprint_available
 
     #: Position of the «KiCad» tab in `self.tabs`.
-    KICAD_TAB_INDEX = 5
+    KICAD_TAB_INDEX = TAB_KICAD
 
     def _refresh_kicad_tab(self, complete: bool) -> None:
         """@brief Let the «KiCad» tab be chosen only for a completed project.
@@ -3055,8 +3114,6 @@ class MainWindow(QMainWindow):
         """
         if hasattr(self, "_open_project_folder"):
             self._open_project_folder = self._project_dir() if self._component_name() else None
-        if hasattr(self, "field_name_mirror"):
-            self.field_name_mirror.setText(text)
         self._update_project_path_label()
         self._apply_component_name_gate()
 
@@ -3617,7 +3674,8 @@ class MainWindow(QMainWindow):
             anche per la generazione FreeCAD.
         """
         self.btn_extract_ai.setEnabled(False)
-        self._auto_after_extraction = not self._advanced_user()
+        # Sempre automatica: la modalita' manuale e' stata tolta (utente, 2026-09-26).
+        self._auto_after_extraction = True
         self._auto_generation_params = None
         self._extract_finish_pending = False
         self.analysis_overlay.clear_cost()
@@ -4362,6 +4420,27 @@ class MainWindow(QMainWindow):
                          notes=f"{notes} {suffix}".strip())
         self._on_extracted(params)
 
+    def _hold_completed_overlay(self, message: str) -> None:
+        """@brief Leave the modal open on a finished generation, steps ticked, until «Chiudi».
+
+        @param message Italian source of the final outcome.
+        @note The window underneath is given back exactly as `_hide_analysis_overlay`
+            does; only the card stays. Without steps (an operation of one
+            phase) there is nothing to show ticked and the card simply closes.
+        """
+        if not self.analysis_overlay._step_labels:
+            self._hide_analysis_overlay()
+            return
+        if self._analysis_tabs_enabled is not None:
+            self.tabs.setEnabled(self._analysis_tabs_enabled)
+            self._analysis_tabs_enabled = None
+        self.analysis_overlay.show_completed(self.i18n.text(message))
+
+    def _on_completed_overlay_closed(self) -> None:
+        """@brief The user closed the finished card: a regeneration waiting for it may start."""
+        if self._regen_3d_pending:
+            QTimer.singleShot(0, self._run_pending_regen_3d)
+
     def _hide_analysis_overlay(self) -> None:
         self.analysis_overlay.stop()
         if self._analysis_tabs_enabled is not None:
@@ -4983,6 +5062,17 @@ class MainWindow(QMainWindow):
         """
         self.analysis_overlay.set_tool(tool, detail)
         self.analysis_overlay.set_progress(done, total, tx("componenti"))
+        # Fuori da una generazione la mappa non c'e' (o la modale non ha passi):
+        # `set_current_step` allora non fa nulla.
+        step = (getattr(self, "_generation_step_of", None) or {}).get(tool)
+        if step is not None and step != self.analysis_overlay._step_current:
+            self.analysis_overlay.set_current_step(step)
+            # Nel log con l'ora: dice quando la finestra e' passata al passo,
+            # cioe' quando e' cominciato il lavoro di chi lo esegue.
+            if self.analysis_overlay._step_current == step:
+                self._append_log(tx("Passo {n} di {total}: {label}", n=step + 1,
+                                    total=len(self.analysis_overlay._step_labels),
+                                    label=self.analysis_overlay._step_labels[step]))
 
     def _overlay_header_detail(self) -> str:
         """@brief Il dettaglio che l'intestazione della modale sta gia' mostrando.
@@ -5079,6 +5169,16 @@ class MainWindow(QMainWindow):
             QApplication.clipboard().setText(text)
 
     def _show_photo_comparison(self, _checked=False, *, component_row=None) -> None:
+        if component_row is not None and not self._photo_png:
+            # Dal 3D (doppio clic o «Cambia modello KiCad...»): senza foto la
+            # revisione non si apre, e prima il clic restava muto.
+            QMessageBox.information(
+                self, self.i18n.text("Foto non disponibile"),
+                self.i18n.text("La scelta del modello KiCad passa dalla revisione fotografica, "
+                               "che richiede la foto calibrata del progetto: ripeti l'analisi "
+                               "con la foto dall'alto. Nome, tipo, posizione e quote si "
+                               "modificano comunque con «Modifica componenti…»."))
+            return
         if self._photo_png:
             length = (self.field_cast_body_length.value() if self._is_castellated()
                       else self.field_body_length.value())
@@ -5112,7 +5212,8 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(dialog)
         note = QLabel(
             "Rettangoli dell'ultima estrazione: verde = rilevato, arancione = da verificare. "
-            "I numeri corrispondono alle righe della tabella componenti prima delle modifiche manuali."
+            "I numeri seguono l'ordine dei componenti di «Modifica componenti…» prima delle "
+            "modifiche manuali."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -5127,23 +5228,15 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _photo_components_from_table(self) -> list[dict]:
-        """Current table geometry plus detection metadata attached to each row."""
+        """Current photo components: geometry plus the detection metadata of each one."""
         length = (self.field_cast_body_length.value() if self._is_castellated()
                   else self.field_body_length.value())
         width = (self.field_cast_body_width.value() if self._is_castellated()
                  else self.field_body_width.value())
         transform = PhotoTransform(1, 1, length, width)
         result = []
-        for row, component in enumerate(self._components_from_table()):
-            cell = self.table_components.item(row, 0)
-            entry = deepcopy(cell.data(Qt.ItemDataRole.UserRole) or {}) if cell else {}
-            entry.update(
-                name=component.name, kind=component.kind,
-                x_mm=component.x, y_mm=component.y,
-                length_mm=component.length, width_mm=component.width,
-                height_mm=component.height, rotation_deg=component.rotation,
-                color_hex=component.color_hex, marking=component.marking,
-            )
+        for row in self._photo_rows:
+            entry = deepcopy(row)
             if "_box" in entry:
                 entry["_box"] = transform.normalized_box(entry)
             result.append(entry)
@@ -5292,6 +5385,7 @@ class MainWindow(QMainWindow):
             "yolo_settings": self._chosen_yolo_settings(),
             "options": {"include_nc_pins": self._include_nc_pins(),
                         "silk_pin_labels": self._silk_pin_labels(),
+                        "show_pins_3d": self._show_pins_3d(),
                         "pause_after_inventory": self._inventory_pause_enabled()},
         }
 
@@ -5339,10 +5433,13 @@ class MainWindow(QMainWindow):
         vlm = models.get("vlm_model")
         self._vlm_model = vlm if isinstance(vlm, str) and vlm else None
         self.field_vlm_model.setText(self._photo_detector_model())
-        self.table_sides.setRowCount(0)
+        self._sides.clear()
         for side in state.get("sides") or ():
             if isinstance(side, dict):
                 self._add_side_row(side)
+        # Anche senza lati salvati: la barra del tipo contatto non deve restare
+        # quella del progetto precedente.
+        self._sync_contact_style_bar()
         components = [c for c in state.get("components") or () if isinstance(c, dict)]
         try:
             self._set_photo_components(components)
@@ -5375,7 +5472,6 @@ class MainWindow(QMainWindow):
             self._append_log(tx("Annotazioni 3D: {count} nomi fronte/retro convertiti alla "
                                 "convenzione del cubo 3D (il lato fisico non cambia).",
                                 count=converted))
-        self._refresh_annotations_table()
         self.pinout = [dict(entry) for entry in state.get("pinout") or () if isinstance(entry, dict)]
         pin_map = state.get("pin_map")
         try:
@@ -5391,6 +5487,7 @@ class MainWindow(QMainWindow):
         options = state.get("options") if isinstance(state.get("options"), dict) else {}
         self._project_options = {key: options[key] for key in PROJECT_OPTIONS
                                  if isinstance(options.get(key), bool)}
+        self._refresh_type_effect()
         if skipped:
             self._append_log(tx("Impostazioni del progetto non applicate (valori non validi): ")
                              + ", ".join(skipped) + ".")
@@ -5428,6 +5525,7 @@ class MainWindow(QMainWindow):
             self.field_name.setText(name)
             self._apply_project_state(state)
             self._restore_saved_mesh()
+            self._restore_saved_photo()
         finally:
             self._restoring_project = False
         # Le schede di anteprima seguono cio' che il progetto aperto contiene.
@@ -5436,9 +5534,9 @@ class MainWindow(QMainWindow):
         # restava il disegno del precedente e il 3D non si ridisegnava (audit
         # 25/09). Le altre schede si ridisegnano all'ingresso, come sempre.
         index = self.tabs.currentIndex()
-        if index == 3:
+        if index == TAB_PREVIEW:
             self._draw_preview()
-        elif index == 4:
+        elif index == TAB_MODEL_3D:
             self._enter_3d_tab()
         # Lo stato appena applicato e' quello salvato: non va riscritto.
         self._last_saved_project_state = self._project_state_text()
@@ -5928,7 +6026,6 @@ class MainWindow(QMainWindow):
             self.pinout, self.pin_map = [], None
             self.fillet_annotations.clear()
             self.face_text_annotations.clear()
-            self._refresh_annotations_table()
             self.field_body_offset_x.setValue(0)
             self.field_body_offset_y.setValue(0)
             self.field_pin_length_3d.setValue(3.0)
@@ -6039,8 +6136,6 @@ class MainWindow(QMainWindow):
 
         if params.body_color_hex:
             self.field_body_color.setText(params.body_color_hex)
-        if params.text_color_hex:
-            self.field_text_color.setText(params.text_color_hex)
 
         if params.edge_fillets:
             for f in params.edge_fillets:
@@ -6050,7 +6145,6 @@ class MainWindow(QMainWindow):
                 except ValueError:
                     continue
                 self.fillet_annotations.append(ann)
-            self._refresh_annotations_table()
 
         fillet_note = (
             self.i18n.tr(
@@ -6112,7 +6206,7 @@ class MainWindow(QMainWindow):
             if side.get("pad_width_mm"):
                 self.field_cast_pad_width.setValue(float(side["pad_width_mm"]))
 
-        self.table_sides.setRowCount(0)
+        self._sides.clear()
         names = []
         pinout = []
         for side in params.castellated_sides or ():
@@ -6180,359 +6274,117 @@ class MainWindow(QMainWindow):
         self._on_ai_progress(tx("Estrazione fallita: {message}", message=message))
         QMessageBox.warning(self, self.i18n.text("Estrazione fallita"), message)
 
-    # ── Tab 2: Footprint 2D ────────────────────────────────────────
+    # ── Parametri del footprint e del corpo 3D (dati, nessun widget) ──
 
-    def _build_footprint_tab(self) -> QWidget:
-        tab = QWidget()
-        outer = QVBoxLayout(tab)
-        outer.setContentsMargins(*(CONTENT_MARGIN_PX,) * 4)
-        outer.setSpacing(8)
+    def _init_parameters(self) -> None:
+        """@brief Create the footprint and 3D parameters the generation reads.
 
-        form_group = QGroupBox("Parametri footprint (header THT a matrice)")
-        form = QFormLayout(form_group)
-        general_group = QGroupBox("Dati del componente")
-        general_form = QFormLayout(general_group)
-
-        self.field_name_mirror = QLineEdit(self.field_name.text())
-        self.field_name_mirror.setReadOnly(True)
-        self.field_name_mirror.setToolTip("Modificabile nel tab \"Progetto\"")
-        general_form.addRow("Nome (da tab Progetto):", self.field_name_mirror)
-
-        self.field_description = QLineEdit()
-        self.field_description.setPlaceholderText("(auto-generata se vuota)")
-        self.field_tags = QLineEdit("pin header THT")
-
-        self.field_rows = QSpinBox()
-        self.field_rows.setRange(1, 40)
-        self.field_rows.setValue(2)
-
-        self.field_cols = QSpinBox()
-        self.field_cols.setRange(1, 40)
-        self.field_cols.setValue(4)
-
-        self.field_pitch = QDoubleSpinBox()
-        self.field_pitch.setRange(0.5, 20.0)
-        self.field_pitch.setSingleStep(0.01)
-        self.field_pitch.setDecimals(2)
-        self.field_pitch.setSuffix(" mm")
-        self.field_pitch.setValue(2.54)
-        self.field_pitch.setToolTip("Passo tra pin adiacenti sulla stessa riga")
-
-        self.field_row_spacing = QDoubleSpinBox()
-        self.field_row_spacing.setRange(0.5, 50.0)
-        self.field_row_spacing.setSingleStep(0.01)
-        self.field_row_spacing.setDecimals(2)
-        self.field_row_spacing.setSuffix(" mm")
-        self.field_row_spacing.setValue(2.54)
-        self.field_row_spacing.setToolTip(
-            "Distanza perpendicolare tra le due file di pin. Nei moduli DIP-style "
-            "(es. convertitori DC/DC) e' quasi sempre molto maggiore del passo."
-        )
-
-        self.field_populated_pins = QLineEdit()
-        self.field_populated_pins.setPlaceholderText(
-            "(vuoto = tutte le posizioni popolate) es. 1,7,8,9,10,16"
-        )
-
-        self.field_pad = QDoubleSpinBox()
-        self.field_pad.setRange(0.2, 10.0)
-        self.field_pad.setSingleStep(0.05)
-        self.field_pad.setDecimals(2)
-        self.field_pad.setSuffix(" mm")
-        self.field_pad.setValue(1.7)
-
-        self.field_drill = QDoubleSpinBox()
-        self.field_drill.setRange(0.1, 8.0)
-        self.field_drill.setSingleStep(0.05)
-        self.field_drill.setDecimals(2)
-        self.field_drill.setSuffix(" mm")
-        self.field_drill.setValue(1.0)
-
-        general_form.addRow("Descrizione:", self.field_description)
-        general_form.addRow("Tag:", self.field_tags)
-        form.addRow("Righe:", self.field_rows)
-        form.addRow("Colonne:", self.field_cols)
-        form.addRow("Passo (pitch, tra pin nella riga):", self.field_pitch)
-        form.addRow("Distanza tra righe:", self.field_row_spacing)
-        form.addRow("Pin popolati:", self.field_populated_pins)
-        form.addRow("Diametro pad:", self.field_pad)
-        form.addRow("Drill:", self.field_drill)
-
-        self.group_matrix = form_group
-        castellated_group = self._build_castellated_group()
-        body_group = self._build_3d_group()
-        self.footprint_subtabs = QTabWidget()
-        for title, group in (
-            ("Generale", general_group),
-            ("Matrice THT", form_group),
-            ("Modulo castellated", castellated_group),
-            ("Parametri 3D", body_group),
-        ):
-            page = QWidget()
-            page_layout = QVBoxLayout(page)
-            page_layout.addWidget(group)
-            page_layout.addStretch()
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
-            scroll.setWidget(page)
-            self.footprint_subtabs.addTab(scroll, title)
-        outer.addWidget(self.footprint_subtabs)
-        return tab
-
-    # ── Modulo castellated ──────────────────────────────────────────
-
-    def _build_castellated_group(self) -> QGroupBox:
-        """Gruppo alternativo alla matrice, per i moduli con semi-fori sul bordo.
-
-        Quando e' attivo la matrice righe x colonne non viene usata: i due
-        modelli geometrici si escludono, perche' in un modulo castellated
-        ogni lato ha il suo numero di contatti e il suo passo -- ed e'
-        esattamente quello che una griglia a passo unico non sa descrivere.
+        @note Same defaults, ranges and precision as the editors of the removed
+            Footprint 2D tab (user, 2026-09-26): an extracted value outside a
+            range is still rejected by `_validate_automatic_input`, and one
+            written by the program is clamped exactly as the editor did.
         """
-        group = QGroupBox("Modulo castellated (piazzole a mezzo foro sul bordo)")
-        group.setCheckable(True)
-        group.setChecked(False)
-        group.toggled.connect(self._on_castellated_toggled)
-        self.group_castellated = group
+        # Dati del componente e matrice THT.
+        self.field_description = TextValue()
+        self.field_tags = TextValue("pin header THT")
+        self.field_rows = BoundedValue(2, 1, 40, decimals=0, integer=True)
+        self.field_cols = BoundedValue(4, 1, 40, decimals=0, integer=True)
+        self.field_pitch = BoundedValue(2.54, 0.5, 20.0)
+        self.field_row_spacing = BoundedValue(2.54, 0.5, 50.0)
+        self.field_populated_pins = TextValue()
+        self.field_pad = BoundedValue(1.7, 0.2, 10.0)
+        self.field_drill = BoundedValue(1.0, 0.1, 8.0)
 
-        layout = QVBoxLayout(group)
-        form = QFormLayout()
+        # Modulo castellated. La matrice e i moduli castellated si escludono:
+        # in un modulo ogni lato ha il suo numero di contatti e il suo passo,
+        # che una griglia a passo unico non sa descrivere.
+        self.group_castellated = FlagValue(False)
+        self.field_cast_body_length = BoundedValue(42.8, 0.0, 300.0)
+        self.field_cast_body_width = BoundedValue(15.2, 0.0, 300.0)
+        self.field_cast_pad_length = BoundedValue(3.6, 0.0, 20.0)
+        self.field_cast_pad_width = BoundedValue(1.8, 0.0, 20.0)
+        #: Sporgenza della piazzola oltre il bordo (menisco ispezionabile).
+        self.field_cast_overhang = BoundedValue(1.4, 0.0, 5.0)
+        #: Diametro del semi-foro metallizzato: i semi-fori si tagliano nel 3D.
+        self.field_cast_hole = BoundedValue(1.7, 0.0, 10.0)
+        self.field_cast_pcb = BoundedValue(1.0, 0.0, 10.0)
+        #: Rientro del blocco componenti dal bordo del PCB.
+        self.field_cast_inset = BoundedValue(1.0, 0.0, 20.0)
+        #: Foro passante chiuso accanto al semi-foro (0 = nessuno): ci si
+        #: salda uno strip; generando solo il semi-foro il bordo restava aperto.
+        self.field_cast_thru_drill = BoundedValue(1.0, 0.0, 10.0)
+        self.field_cast_thru_pad = BoundedValue(1.7, 0.0, 10.0)
+        #: Distanza del foro passante dal bordo (0 = la calcola il generatore).
+        self.field_cast_thru_offset = BoundedValue(0.0, 0.0, 20.0)
+        #: Quanto il centro del semi-foro sta dentro il bordo (0 = convenzione).
+        self.field_cast_hole_inset = BoundedValue(0.0, 0.0, 10.0)
+        #: Lati del modulo, uno per contatti con passo proprio (vedi
+        #: `component_state.normalised_side`).
+        self._sides: list[dict] = []
 
-        def _mm(value: float, maximum: float = 300.0, minimum: float = 0.0) -> QDoubleSpinBox:
-            spin = QDoubleSpinBox()
-            spin.setRange(minimum, maximum)
-            spin.setDecimals(2)
-            spin.setSingleStep(0.05)
-            spin.setSuffix(" mm")
-            spin.setValue(value)
-            return spin
+        # Corpo 3D. Acceso di default se FreeCAD c'e': chi lo ha installato
+        # vuole il 3D; senza FreeCAD resta spento e la generazione non fallisce.
+        try:
+            find_freecadcmd()
+            freecad_available = True
+        except Cad3DError:
+            freecad_available = False
+        # Ricordato perche' l'estrazione deve poterlo consultare senza rifare
+        # la ricerca su disco: vedi `_enable_3d_group_from_extraction`.
+        self._freecad_available = freecad_available
+        self.group_3d = FlagValue(freecad_available)
+        self.field_body_length = BoundedValue(10.0, 0.5, 300.0)
+        self.field_body_width = BoundedValue(10.0, 0.5, 300.0)
+        self.field_body_height = BoundedValue(5.0, 0.5, 100.0)
+        #: Bordo del corpo rispetto al pin 1 (X) e alla prima riga (Y).
+        self.field_body_offset_x = BoundedValue(0.0, -150.0, 150.0)
+        self.field_body_offset_y = BoundedValue(0.0, -150.0, 150.0)
+        self.field_pin_length_3d = BoundedValue(3.0, 0.1, 20.0)
+        self.field_body_color = TextValue("#1a1a1a")
+        self.field_pin_color = TextValue("#b0b0b0")
 
-        self.field_cast_body_length = _mm(42.8)
-        self.field_cast_body_length.setToolTip(
-            "Lunghezza del corpo del modulo, asse X (lati \"top\"/\"bottom\")."
-        )
-        self.field_cast_body_width = _mm(15.2)
-        self.field_cast_body_width.setToolTip(
-            "Larghezza del corpo del modulo, asse Y (lati \"left\"/\"right\")."
-        )
-        self.field_cast_pad_length = _mm(3.6, maximum=20.0)
-        self.field_cast_pad_length.setToolTip(
-            "Lunghezza della piazzola perpendicolarmente al bordo."
-        )
-        self.field_cast_pad_width = _mm(1.8, maximum=20.0)
-        self.field_cast_pad_width.setToolTip(
-            "Larghezza della piazzola lungo il bordo (poco piu' del semi-foro)."
-        )
-        self.field_cast_overhang = _mm(1.4, maximum=5.0)
-        self.field_cast_overhang.setToolTip(
-            "Quanto la piazzola sporge oltre il bordo del modulo: serve a lasciare "
-            "ispezionabile il menisco di saldatura."
-        )
-
-        form.addRow("Lunghezza corpo:", self.field_cast_body_length)
-        form.addRow("Larghezza corpo:", self.field_cast_body_width)
-        form.addRow("Lunghezza pad:", self.field_cast_pad_length)
-        form.addRow("Larghezza pad:", self.field_cast_pad_width)
-        self.field_cast_hole = _mm(1.7, maximum=10.0)
-        self.field_cast_hole.setToolTip(
-            "Diametro del semi-foro metallizzato sul bordo: serve al modello 3D, "
-            "dove i semi-fori vengono tagliati nel PCB del modulo."
-        )
-        self.field_cast_pcb = _mm(1.0, maximum=10.0)
-        self.field_cast_pcb.setToolTip(
-            "Spessore del PCB del modulo. Nel 3D il modulo e' un PCB sottile con "
-            "sopra un blocco che rappresenta i componenti montati: l'altezza "
-            "totale si imposta in \"Modello 3D\"."
-        )
-        self.field_cast_inset = _mm(1.0, maximum=20.0)
-        self.field_cast_inset.setToolTip(
-            "Quanto il blocco dei componenti rientra dal bordo del PCB: sul bordo "
-            "ci sono i semi-fori, li' non e' montato nulla."
-        )
-        # Ogni contatto di una scheda di sviluppo ha due appigli: il mezzo foro
-        # sul bordo per la rifusione SMD e un foro intero poco piu' dentro, in
-        # cui si salda uno strip. Generando solo il primo il bordo restava
-        # tutto aperto e i pin non si potevano saldare.
-        self.field_cast_thru_drill = _mm(1.0, maximum=10.0)
-        self.field_cast_thru_drill.setToolTip(
-            "Diametro del foro passante chiuso accanto al semi-foro, quello in cui "
-            "si salda lo strip. A zero il modulo ha solo i semi-fori sul bordo."
-        )
-        self.field_cast_thru_pad = _mm(1.7, maximum=10.0)
-        self.field_cast_thru_pad.setToolTip(
-            "Diametro della piazzola attorno al foro passante: deve essere maggiore "
-            "del foro, altrimenti non resta rame su cui saldare."
-        )
-        self.field_cast_thru_offset = _mm(0.0, maximum=20.0)
-        self.field_cast_thru_offset.setToolTip(
-            "Distanza del centro del foro passante dal bordo del corpo. A zero la "
-            "calcola il programma, tenendo il foro abbastanza lontano dal semi-foro "
-            "perche' i due non si fondano in un'unica cavita' aperta: con un semi-foro "
-            "piu' stretto il minimo scende da solo. Un valore scritto a mano viene "
-            "rispettato, ma rifiutato se i due fori si toccherebbero."
-        )
-        self.field_cast_hole_inset = _mm(0.0, maximum=10.0)
-        self.field_cast_hole_inset.setToolTip(
-            "Quanto il centro del semi-foro sta DENTRO il bordo: e' cio' che decide "
-            "quanto la mezzaluna resta aperta. A zero vale la convenzione (0,76 raggi); "
-            "a zero vero il semi-foro diventa una mezzaluna esatta."
-        )
-        for field in (self.field_cast_body_length, self.field_cast_body_width,
+        self.group_castellated.on_change(self._on_castellated_toggled)
+        for value in (self.field_cast_body_length, self.field_cast_body_width,
                       self.field_cast_hole, self.field_cast_pcb, self.field_cast_inset,
                       self.field_cast_thru_drill, self.field_cast_thru_pad,
                       self.field_cast_thru_offset, self.field_cast_hole_inset):
-            field.valueChanged.connect(self._on_sides_changed)
+            value.on_change(lambda _value: self._on_sides_changed())
 
-        form.addRow("Sporgenza pad dal bordo:", self.field_cast_overhang)
-        form.addRow("Diametro semi-foro (3D):", self.field_cast_hole)
-        form.addRow("Foro passante (0 = nessuno):", self.field_cast_thru_drill)
-        form.addRow("Piazzola foro passante:", self.field_cast_thru_pad)
-        form.addRow("Foro passante dal bordo (0 = auto):", self.field_cast_thru_offset)
-        form.addRow("Semi-foro dentro il bordo (0 = auto):", self.field_cast_hole_inset)
-        form.addRow("Spessore PCB (3D):", self.field_cast_pcb)
-        form.addRow("Rientro componenti (3D):", self.field_cast_inset)
-        layout.addLayout(form)
-
-        side_note = QLabel(
-            "Contatti lato per lato (ogni lato ha il suo passo). Il primo pin di "
-            "ogni lato si conta dall'alto in basso sui lati verticali, da sinistra "
-            "a destra su quelli orizzontali."
-        )
-        side_note.setWordWrap(True)
-        layout.addWidget(side_note)
-
-        self.table_sides = QTableWidget(0, 7)
-        self.table_sides.setHorizontalHeaderLabels(
-            ["Lato", "N. contatti", "Passo", "Offset", "Primo pin", "Numerazione inversa",
-             "Tipo contatto"]
-        )
-        self.table_sides.horizontalHeaderItem(self._SIDE_STYLE_COLUMN).setToolTip(
-            self.i18n.text(CONTACT_STYLE_TOOLTIP))
-        self.table_sides.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch
-        )
-        self.table_sides.setMinimumHeight(150)
-        self.table_sides.setMaximumHeight(200)
-        layout.addWidget(self.table_sides)
-
-        buttons = QHBoxLayout()
-        btn_add = QPushButton("Aggiungi lato")
-        btn_add.clicked.connect(self._add_side_row_by_user)
-        btn_remove = QPushButton("Rimuovi lato selezionato")
-        btn_remove.clicked.connect(self._remove_side_row)
-        buttons.addWidget(btn_add)
-        buttons.addWidget(btn_remove)
-        buttons.addStretch()
-        layout.addLayout(buttons)
-
-        return group
+    # ── Modulo castellated ──────────────────────────────────────────
 
     def _on_castellated_toggled(self, checked: bool) -> None:
         """La matrice e i moduli castellated sono alternativi, mai insieme."""
-        if hasattr(self, "group_matrix"):
-            self.group_matrix.setEnabled(not checked)
-        if hasattr(self, "footprint_subtabs"):
-            self._sync_footprint_subtabs()
-            self.footprint_subtabs.setCurrentIndex(2 if checked else 1)
-        if checked and self.table_sides.rowCount() == 0:
+        if checked and not self._sides:
             # Due lati opposti sono la configurazione di gran lunga piu' comune.
             self._add_side_row({"edge": "left", "count": 3, "pitch_mm": 2.54, "first_pin": 1})
             self._add_side_row({"edge": "right", "count": 3, "pitch_mm": 2.54, "first_pin": 4})
         self._sync_3d_fields_for_castellated(checked)
         self._sync_contact_style_bar()
-        if hasattr(self, "group_components"):
-            self.group_components.setVisible(self._advanced_user() and (
-                checked or self._selected_family() == "aggregate_tht"))
-        self._update_summary()
         self._draw_preview()
 
-    def _sync_footprint_subtabs(self) -> None:
-        """Only expose the geometry editor used by the current layout."""
-        castellated = self._is_castellated()
-        self.footprint_subtabs.setTabVisible(1, not castellated)
-        self.footprint_subtabs.setTabVisible(2, castellated)
-
     def _sync_3d_fields_for_castellated(self, castellated: bool) -> None:
-        """Nei moduli castellated il corpo 3D viene dal modulo, non a mano.
+        """Nei moduli castellated il corpo 3D viene dal modulo, non dai campi 3D.
 
-        Lunghezza, larghezza e offset descrivono il PCB del modulo, che e'
-        gia' definito nel gruppo qui sopra: lasciarli modificabili
-        permetterebbe di generare un 3D scollegato dal footprint. La
-        lunghezza dei pin non serve: non ci sono pin che sporgono.
+        I contatti dei moduli sono quasi sempre dorati (ENIG): se il colore
+        pin e' ancora quello di default dei piedini stagnati, si passa all'oro.
         """
-        # I contatti dei moduli sono quasi sempre dorati (ENIG): se il colore
-        # pin e' ancora quello di default dei piedini stagnati, si passa all'oro.
         if castellated and self.field_pin_color.text().strip().lower() == "#b0b0b0":
             self.field_pin_color.setText("#c9a227")
-        for field in (self.field_body_length, self.field_body_width,
-                      self.field_body_offset_x, self.field_body_offset_y,
-                      self.field_pin_length_3d):
-            field.setEnabled(not castellated)
-            self._set_translated_tooltip(
-                field, "Per i moduli castellated questo valore viene dal gruppo "
-                "\"Modulo castellated\"." if castellated else "")
-
-    #: Colonna della tabella lati che porta il tipo di contatto.
-    _SIDE_STYLE_COLUMN = 6
 
     def _add_side_row(self, side: dict | None = None) -> None:
-        """Append one side row, filled from an extracted/serialised side dict.
+        """Append one castellated side, filled from an extracted/serialised side dict.
 
         Programmatic: it does NOT invalidate the generated 3D, because its
-        callers (a new extraction, the castellated toggle) already describe a
-        new input revision. Edits made afterwards in the row do invalidate it.
+        callers (a new extraction, the castellated switch, a reopened project)
+        already describe a new input revision. An unknown edge falls back to
+        the first edge, as the former table did.
         """
-        side = side or {}
-        row = self.table_sides.rowCount()
-        self.table_sides.insertRow(row)
-
-        combo = QComboBox()
-        for edge in CASTELLATED_EDGES:
-            combo.addItem(EDGE_LABELS.get(edge, edge), edge)
-        index = combo.findData(side.get("edge", "left"))
-        combo.setCurrentIndex(max(index, 0))
-        combo.currentIndexChanged.connect(self._on_side_edited)
-        self.table_sides.setCellWidget(row, 0, combo)
-
-        count = QSpinBox()
-        count.setRange(1, 100)
-        count.setValue(int(side.get("count", 2)))
-        count.valueChanged.connect(self._on_side_edited)
-        self.table_sides.setCellWidget(row, 1, count)
-
-        for column, key, default, minimum in (
-            (2, "pitch_mm", 2.54, 0.0), (3, "offset_mm", 0.0, -200.0),
-        ):
-            spin = QDoubleSpinBox()
-            spin.setRange(minimum, 200.0)
-            spin.setDecimals(2)
-            spin.setSingleStep(0.01)
-            spin.setSuffix(" mm")
-            spin.setValue(float(side.get(key, default)))
-            spin.valueChanged.connect(self._on_side_edited)
-            self.table_sides.setCellWidget(row, column, spin)
-
-        first_pin = QSpinBox()
-        first_pin.setRange(1, 999)
-        first_pin.setValue(int(side.get("first_pin", 1)))
-        first_pin.valueChanged.connect(self._on_side_edited)
-        self.table_sides.setCellWidget(row, 4, first_pin)
-
-        reverse = QCheckBox()
-        reverse.setChecked(bool(side.get("reverse")))
-        reverse.toggled.connect(self._on_side_edited)
-        self.table_sides.setCellWidget(row, 5, reverse)
-
-        style = self._contact_style_combo(self._declared_contact_style(side))
-        style.currentIndexChanged.connect(self._on_contact_style_edited)
-        self.table_sides.setCellWidget(row, self._SIDE_STYLE_COLUMN, style)
-
+        side = dict(side or {})
+        if side.get("edge") not in CASTELLATED_EDGES:
+            side["edge"] = CASTELLATED_EDGES[0]
+        side["contact_style"] = self._declared_contact_style(side)
+        self._sides.append(normalised_side(side, default_contact_style()))
         self._on_sides_changed()
-
-    def _add_side_row_by_user(self) -> None:
-        """«Aggiungi lato»: a new side changes the module, the old 3D is stale."""
-        self._add_side_row()
-        self._invalidate_generated_mesh()
 
     def _declared_contact_style(self, side: dict) -> str:
         """Contact style declared by a side dict, or the default when absent.
@@ -6570,18 +6422,9 @@ class MainWindow(QMainWindow):
         return combo
 
     def _contact_style_combos(self) -> list:
-        """@brief Every contact-style combo of the window: the 3D-tab one and one per side row."""
-        combos = []
+        """@brief Every contact-style combo of the window: today only the 3D-tab one."""
         combo_3d = getattr(self, "combo_contact_style_3d", None)
-        if combo_3d is not None:
-            combos.append(combo_3d)
-        table = getattr(self, "table_sides", None)
-        if table is not None:
-            for row in range(table.rowCount()):
-                combo = table.cellWidget(row, self._SIDE_STYLE_COLUMN)
-                if isinstance(combo, QComboBox):
-                    combos.append(combo)
-        return combos
+        return [combo_3d] if combo_3d is not None else []
 
     def _retranslate_contact_style_combos(self) -> None:
         """@brief Translate the contact-style items again after a language switch.
@@ -6599,20 +6442,8 @@ class MainWindow(QMainWindow):
                 source = (CONTACT_STYLE_MIXED_LABEL if value is None
                           else CONTACT_STYLE_LABELS.get(value, value))
                 combo.setItemText(index, self.i18n.text(source))
-        # Anche il tooltip dell'intestazione «Tipo contatto»: un elemento di
-        # intestazione non e' un widget e la ripassata generica non lo vede.
-        header = self.table_sides.horizontalHeaderItem(self._SIDE_STYLE_COLUMN)
-        if header is not None:
-            header.setToolTip(self.i18n.text(CONTACT_STYLE_TOOLTIP))
-
-    def _remove_side_row(self) -> None:
-        row = self.table_sides.currentRow()
-        if row >= 0:
-            self.table_sides.removeRow(row)
-            self._on_side_edited()
 
     def _on_sides_changed(self) -> None:
-        self._update_summary()
         self._draw_preview()
         self._sync_contact_style_bar()
 
@@ -6641,12 +6472,8 @@ class MainWindow(QMainWindow):
         self._on_side_edited()
 
     def _table_contact_styles(self) -> list[str]:
-        """Contact style of each table row, in row order."""
-        styles = []
-        for row in range(self.table_sides.rowCount()):
-            combo = self.table_sides.cellWidget(row, self._SIDE_STYLE_COLUMN)
-            styles.append(combo.currentData() if combo is not None else default_contact_style())
-        return styles
+        """Contact style of each castellated side, in side order."""
+        return [side["contact_style"] for side in self._sides]
 
     @staticmethod
     def _contact_style_supported() -> bool:
@@ -6679,18 +6506,13 @@ class MainWindow(QMainWindow):
             bloccherebbe ogni generazione per un campo accessorio.
         """
         style_supported = self._contact_style_supported()
-        styles = self._table_contact_styles()
         sides = []
-        for row in range(self.table_sides.rowCount()):
-            extra = {"contact_style": styles[row]} if style_supported else {}
+        for side in self._sides:
+            extra = {"contact_style": side["contact_style"]} if style_supported else {}
             sides.append(CastellatedSide(
-                edge=self.table_sides.cellWidget(row, 0).currentData(),
-                count=self.table_sides.cellWidget(row, 1).value(),
-                pitch=self.table_sides.cellWidget(row, 2).value(),
-                offset=self.table_sides.cellWidget(row, 3).value(),
-                first_pin=self.table_sides.cellWidget(row, 4).value(),
-                reverse=self.table_sides.cellWidget(row, 5).isChecked(),
-                **extra,
+                edge=side["edge"], count=side["count"], pitch=side["pitch_mm"],
+                offset=side["offset_mm"], first_pin=side["first_pin"],
+                reverse=side["reverse"], **extra,
             ))
         return sides
 
@@ -6717,8 +6539,7 @@ class MainWindow(QMainWindow):
         """
         if not sides or not self._is_castellated():
             return sides
-        rows = [(self.table_sides.cellWidget(r, 0).currentData(), style)
-                for r, style in enumerate(self._table_contact_styles())]
+        rows = [(side["edge"], side["contact_style"]) for side in self._sides]
         edges = [edge for edge, _style in rows]
         declared = [side.get("edge") for side in sides]
         result = []
@@ -6752,20 +6573,15 @@ class MainWindow(QMainWindow):
         """@brief Apply the 3D-tab contact style to every side of the table.
 
         @param index Chosen combo index; the «mixed» entry is informative only.
-        @note E' la via della modalita' base: la tabella lati sta nel tab
-            Footprint 2D, nascosto se `advanced_user` e' spento, mentre i
-            difetti dei contatti si scoprono guardando il 3D. Il cambio passa
-            dalla tabella, quindi segue la stessa strada di ogni modifica ai
-            lati: anteprima invalidata, nessuna chiamata AI.
+        @note E' l'unica via per cambiarlo: i difetti dei contatti si
+            scoprono guardando il 3D. Il cambio segue la stessa strada di ogni
+            modifica ai lati: anteprima invalidata, nessuna chiamata AI.
         """
         style = self.combo_contact_style_3d.itemData(index)
         if style is None:
             return
-        for row in range(self.table_sides.rowCount()):
-            combo = self.table_sides.cellWidget(row, self._SIDE_STYLE_COLUMN)
-            blocked = combo.blockSignals(True)
-            combo.setCurrentIndex(max(combo.findData(style), 0))
-            combo.blockSignals(blocked)
+        for side in self._sides:
+            side["contact_style"] = style
         self._on_contact_style_edited()
 
     def _current_castellated_params(self) -> CastellatedModuleParams:
@@ -6809,6 +6625,14 @@ class MainWindow(QMainWindow):
             return {}
         return {"row_spacing": spacing}
 
+    def _show_pins_3d(self) -> bool:
+        """@brief Tell whether a board's 3D model shows male header pins below it.
+
+        @return False unless the project turned them on (user, 2026-09-26:
+            «possibilità di aggiungere» -- off by default on both boards).
+        """
+        return self._project_option('show_pins_3d', False) is True
+
     def _silk_pin_labels(self) -> bool:
         """@brief Tell whether pin names are engraved on the 3D silkscreen."""
         return self._project_option('silk_pin_labels', False) is True
@@ -6838,161 +6662,16 @@ class MainWindow(QMainWindow):
     def _enable_3d_group_from_extraction(self) -> None:
         """@brief Accende il gruppo «Modello 3D» quando l'estrazione porta un solido.
 
-        @note Non riaccende cio' che l'utente ha spento a mano: `_user_3d_choice`
-            registra solo le sue interazioni, perche' `QGroupBox.clicked` scatta
-            sul clic e non sulle `setChecked()` del programma. Una nuova
-            estrazione descrive i dati, non revoca una decisione presa da chi
-            lavora: riaccendere il gruppo qui significherebbe generare (e far
-            aspettare) un modello 3D che era stato escluso apposta.
-        @note Senza FreeCAD non si accende affatto. Lo spegnimento iniziale di
-            `_build_3d_group` e' programmatico, quindi NON lascia traccia in
-            `_user_3d_choice` e non frenava questa riaccensione: l'estrazione
-            ribaltava la regola dichiarata la' («Senza FreeCAD resta spento,
-            cosi' la generazione non fallisce») e ogni generazione finiva con un
-            `cad3d_error`. Si guarda la disponibilita' ricordata, non
-            `isChecked()`, perche' un gruppo spento puo' esserlo per la scelta
-            dell'utente o per l'assenza dello strumento: sono due ragioni
-            diverse e solo la seconda e' definitiva.
+        @note Senza FreeCAD non si accende affatto: riaccenderlo faceva finire
+            ogni generazione con un `cad3d_error`. Dal 2026-09-26 l'interruttore
+            non e' piu' a disposizione dell'utente (il tab Footprint 2D e' stato
+            tolto), quindi il 3D si chiede sempre quando FreeCAD c'e'.
         """
-        if self._user_3d_choice is False or self._freecad_available is False:
+        if self._freecad_available is False:
             return
         self.group_3d.setChecked(True)
 
-    def _on_3d_group_clicked(self, checked: bool) -> None:
-        """@brief Registra la scelta esplicita dell'utente sul gruppo «Modello 3D».
-
-        @param checked Stato del gruppo dopo il clic.
-        """
-        self._user_3d_choice = bool(checked)
-
-    def _build_3d_group(self) -> QGroupBox:
-        group = QGroupBox("Modello 3D (opzionale, richiede FreeCAD installato)")
-        group.setCheckable(True)
-        # Attivo di default se FreeCAD c'e': chi lo ha installato vuole il 3D,
-        # e scoprire a generazione finita che era spento e' solo tempo perso.
-        # Senza FreeCAD resta spento, cosi' la generazione non fallisce.
-        try:
-            find_freecadcmd()
-            freecad_available = True
-        except Cad3DError:
-            freecad_available = False
-        # Ricordato perche' l'estrazione deve poterlo consultare senza rifare
-        # la ricerca su disco: vedi `_enable_3d_group_from_extraction`.
-        self._freecad_available = freecad_available
-        group.setChecked(freecad_available)
-        group.setToolTip(
-            "FreeCAD trovato: il modello 3D viene generato insieme al footprint."
-            if freecad_available else
-            "freecadcmd non trovato: installa FreeCAD o imposta FREECAD_CMD_PATH."
-        )
-        self.group_3d = group
-        # `clicked` distingue l'interazione umana dalle accensioni del
-        # programma: `toggled` scatterebbe anche per le nostre setChecked().
-        group.clicked.connect(self._on_3d_group_clicked)
-        form3d = QFormLayout(group)
-
-        self.field_body_length = QDoubleSpinBox()
-        self.field_body_length.setRange(0.5, 300.0)
-        self.field_body_length.setDecimals(2)
-        self.field_body_length.setSuffix(" mm")
-        self.field_body_length.setValue(10.0)
-        self.field_body_length.setToolTip("Lunghezza corpo, asse X (stessa direzione del pitch)")
-
-        self.field_body_width = QDoubleSpinBox()
-        self.field_body_width.setRange(0.5, 300.0)
-        self.field_body_width.setDecimals(2)
-        self.field_body_width.setSuffix(" mm")
-        self.field_body_width.setValue(10.0)
-        self.field_body_width.setToolTip("Larghezza corpo, asse Y (stessa direzione della distanza tra righe)")
-
-        self.field_body_height = QDoubleSpinBox()
-        self.field_body_height.setRange(0.5, 100.0)
-        self.field_body_height.setDecimals(2)
-        self.field_body_height.setSuffix(" mm")
-        self.field_body_height.setValue(5.0)
-
-        self.field_body_offset_x = QDoubleSpinBox()
-        self.field_body_offset_x.setRange(-150.0, 150.0)
-        self.field_body_offset_x.setDecimals(2)
-        self.field_body_offset_x.setSuffix(" mm")
-        self.field_body_offset_x.setValue(0.0)
-        self.field_body_offset_x.setToolTip("Posizione del bordo corpo lungo X rispetto al pin 1 (x=0)")
-
-        self.field_body_offset_y = QDoubleSpinBox()
-        self.field_body_offset_y.setRange(-150.0, 150.0)
-        self.field_body_offset_y.setDecimals(2)
-        self.field_body_offset_y.setSuffix(" mm")
-        self.field_body_offset_y.setValue(0.0)
-        self.field_body_offset_y.setToolTip("Posizione del bordo corpo lungo Y rispetto alla prima riga di pin (y=0)")
-
-        self.field_pin_length_3d = QDoubleSpinBox()
-        self.field_pin_length_3d.setRange(0.1, 20.0)
-        self.field_pin_length_3d.setDecimals(2)
-        self.field_pin_length_3d.setSuffix(" mm")
-        self.field_pin_length_3d.setValue(3.0)
-        self.field_pin_length_3d.setToolTip("Lunghezza pin che sporge sotto il corpo, verso il PCB")
-
-        form3d.addRow("Lunghezza corpo:", self.field_body_length)
-        form3d.addRow("Larghezza corpo:", self.field_body_width)
-        form3d.addRow("Altezza corpo:", self.field_body_height)
-        form3d.addRow("Offset X (da pin 1):", self.field_body_offset_x)
-        form3d.addRow("Offset Y (da riga pin):", self.field_body_offset_y)
-        self.field_body_color = QLineEdit("#1a1a1a")
-        self.field_body_color.setToolTip("Colore del case, formato #rrggbb (estratto dalla foto)")
-
-        self.field_pin_color = QLineEdit("#b0b0b0")
-        self.field_pin_color.setToolTip("Colore dei pin, formato #rrggbb")
-
-        form3d.addRow("Lunghezza pin (3D):", self.field_pin_length_3d)
-        form3d.addRow("Colore corpo:", self.field_body_color)
-        form3d.addRow("Colore pin:", self.field_pin_color)
-
-        return group
-
     # ── Tab 3: Genera ──────────────────────────────────────────────
-
-    def _build_generate_tab(self) -> QWidget:
-        tab = QWidget()
-        outer = QVBoxLayout(tab)
-        outer.setContentsMargins(*(CONTENT_MARGIN_PX,) * 4)
-        outer.setSpacing(8)
-
-        self.label_summary = QLabel()
-        self.label_summary.setWordWrap(True)
-        self.label_summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.generate_info_dialog = QDialog(self)
-        self.generate_info_dialog.setWindowTitle("Riepilogo della generazione")
-        self.generate_info_dialog.setModal(True)
-        summary_layout = QVBoxLayout(self.generate_info_dialog)
-        summary_layout.addWidget(self.label_summary)
-        summary_close = QPushButton("Chiudi")
-        summary_close.clicked.connect(self.generate_info_dialog.accept)
-        summary_layout.addWidget(summary_close, alignment=Qt.AlignmentFlag.AlignRight)
-        self.generate_info_dialog.resize(680, 240)
-
-        btn_row = QHBoxLayout()
-        self.btn_generate = QPushButton("Genera footprint")
-        self.btn_generate.setObjectName("primary")
-        self.btn_generate.clicked.connect(self._generate)
-        btn_row.addWidget(self.btn_generate)
-        btn_row.addStretch()
-        self.btn_generate_info = QPushButton()
-        self.btn_generate_info.setIcon(QIcon(str(Path(__file__).resolve().parent / "assets" / "info.svg")))
-        self.btn_generate_info.setIconSize(QSize(22, 22))
-        self.btn_generate_info.setFixedSize(36, 32)
-        self.btn_generate_info.setStyleSheet("QPushButton { padding: 4px; }")
-        self.btn_generate_info.setToolTip("Riepilogo del componente e dei parametri di generazione")
-        self.btn_generate_info.setAccessibleName("Riepilogo della generazione")
-        self.btn_generate_info.clicked.connect(self._show_generate_info)
-        btn_row.addWidget(self.btn_generate_info)
-        outer.addLayout(btn_row)
-
-        outer.addWidget(QLabel("Log:"))
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        outer.addWidget(self.log_text)
-
-        return tab
 
     # ── Tab 6: KiCad ──────────────────────────────────────────────
 
@@ -7095,10 +6774,6 @@ class MainWindow(QMainWindow):
         for button in buttons:
             row.addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
         return row
-
-    def _show_generate_info(self) -> None:
-        self._update_summary()
-        self.generate_info_dialog.exec()
 
     def _open_project_dir(self) -> None:
         if not self._refresh_output_actions():
@@ -7355,9 +7030,14 @@ class MainWindow(QMainWindow):
                 handle.flush()
         except (OSError, AttributeError) as exc:
             # Startup can emit messages before project widgets exist.
-            if hasattr(self, "log_text") and not getattr(self, "_log_write_failed", False):
+            if not getattr(self, "_log_write_failed", False):
                 self._log_write_failed = True
-                self.log_text.insertPlainText(tx("Log file non disponibile: {exc}\n", exc=exc))
+                # Stessa frase (a capo compreso) della voce di catalogo.
+                # NON nel pannello del Log AI: quello e' il log dell'analisi, e
+                # una riga di servizio lo farebbe comparire vuoto di analisi
+                # (test_ai_log_button_counts_the_elements_list_too).
+                self._log_lines.append(
+                    tx("Log file non disponibile: {exc}\n", exc=exc).rstrip("\n"))
 
     def _start_log_session(self, title: str) -> None:
         """@brief Open a dated section so separate runs stay distinguishable."""
@@ -7400,13 +7080,16 @@ class MainWindow(QMainWindow):
             self.ai_progress_text.moveCursor(QTextCursor.MoveOperation.End)
             self.ai_progress_text.insertPlainText(msg + "\n")
             self.ai_progress_text.ensureCursorVisible()
-        # I tab si costruiscono in ordine: quello "Progetto" puo' gia' emettere
-        # messaggi (tipologia componente, modello) quando il log del tab
-        # "Genera" non esiste ancora.
-        if not hasattr(self, "log_text"):
-            return
-        self.log_text.moveCursor(QTextCursor.MoveOperation.End)
-        self.log_text.insertPlainText(msg + "\n")
+        # Copia in memoria del log della sessione (il tab «Genera» che lo
+        # mostrava e' stato tolto il 2026-09-26): la legge `_log_plain_text`.
+        self._log_lines.append(msg)
+
+    def _log_plain_text(self) -> str:
+        """@brief Return the session log written so far, one message per line.
+
+        @return Every message passed to `_append_log`, newline-terminated.
+        """
+        return "".join(line + "\n" for line in self._log_lines)
 
     def _parse_populated_pins(self) -> set | None:
         text = self.field_populated_pins.text().strip()
@@ -7473,6 +7156,7 @@ class MainWindow(QMainWindow):
                 pin_length_mm=module.pcb_thickness,
                 color_hex=self.field_body_color.text().strip(),
                 pin_color_hex=self.field_pin_color.text().strip(),
+                **self._pins_3d_kwargs(),
             )
         return Body3DParams(
             length_mm=self.field_body_length.value(),
@@ -7487,50 +7171,19 @@ class MainWindow(QMainWindow):
             pcb_thickness_mm=self._extracted_pcb_thickness,
             components=self._components_from_table(),
             populated_board=self._selected_family() == "aggregate_tht",
+            **self._pins_3d_kwargs(),
         )
 
-    def _update_summary(self) -> None:
-        if self._is_castellated():
-            self._update_summary_castellated()
-            return
-        try:
-            params = self._current_params()
-        except ValueError as exc:
-            self.label_summary.setText(
-                self.i18n.tr("summary.parameter_error", error=exc))
-            return
-        row_spacing = params.effective_row_spacing()
-        populated = (
-            self.i18n.tr(
-                "summary.populated_pins", count=len(params.populated_pins),
-                total=params.rows * params.cols)
-            if params.populated_pins else ""
-        )
-        self.label_summary.setText(self.i18n.tr(
-            "summary.pin_header", name=params.name or self.i18n.text('(nome vuoto)'),
-            folder=self._project_dir_text(), rows=params.rows, cols=params.cols,
-            pitch=params.pitch, row_spacing=row_spacing, pad=params.pad_diameter,
-            drill=params.drill, populated=populated))
+    def _pins_3d_kwargs(self) -> dict:
+        """@brief The pins choice for Body3DParams, for boards only.
 
-    def _update_summary_castellated(self) -> None:
-        params = self._current_castellated_params()
-        sides = ", ".join(
-            self.i18n.tr(
-                "summary.side", side=self.i18n.text(EDGE_LABELS.get(s.edge, s.edge)),
-                count=s.count, pitch=s.pitch)
-            for s in params.sides
-        ) or self.i18n.text("nessun lato definito")
-        try:
-            params.validate()
-            error = ""
-        except ValueError as exc:
-            error = self.i18n.tr("summary.parameter_error_line", error=exc)
-        self.label_summary.setText(self.i18n.tr(
-            "summary.castellated", name=params.name or self.i18n.text('(nome vuoto)'),
-            folder=self._project_dir_text(), length=params.body_length,
-            width=params.body_width, pad_length=params.pad_length,
-            pad_width=params.pad_width, overhang=params.pad_overhang,
-            sides=sides, error=error))
+        @return {"show_pins_3d": choice} for a board with components; {} for a
+            single component, whose leads are part of the component and always
+            drawn (Body3DParams default).
+        """
+        if self._photo_inventory_family() is not True:
+            return {}
+        return {"show_pins_3d": self._show_pins_3d()}
 
     def _automatic_generation_blocked(self, message):
         text = self.i18n.tr("generation.blocked", reason=message)
@@ -7547,9 +7200,21 @@ class MainWindow(QMainWindow):
     def _validate_automatic_input(self, params):
         self._validate_output_name(params.name or self._component_name())
         if params.package_geometry:
-            raise ValueError(tx("Per questa geometria a pad espliciti il generatore 3D non è ancora "
-                                "supportato. Il footprint può essere generato manualmente in modalità "
-                                "avanzata."))
+            # Pad espliciti: il generatore 3D non li supporta, e le quote del
+            # corpo e della griglia qui sotto non li descrivono. Si scrive solo
+            # il footprint (vedi `_generate`), come faceva la modalita' manuale
+            # tolta il 2026-09-26. Si controlla con lo stesso parser che
+            # l'applicazione usera': una geometria che li' verrebbe scartata
+            # lascerebbe `_generate` sui campi a griglia, cioe' un footprint
+            # che non e' quello del componente.
+            try:
+                geometry_data = dict(params.package_geometry)
+                geometry_data.setdefault("name", params.name or self._component_name())
+                package_from_mapping(geometry_data)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    tx("Geometria a pad espliciti non valida: nessun file generato.")) from exc
+            return
         required_dimensions = ('body_length_mm', 'body_width_mm')
         if not params.is_castellated():
             required_dimensions += ('body_height_mm',)
@@ -7562,8 +7227,8 @@ class MainWindow(QMainWindow):
         if not params.is_castellated():
             dimensions += ((params.body_height_mm, self.field_body_height),)
         if any(not widget.minimum() <= value <= widget.maximum() for value, widget in dimensions):
-            raise ValueError(tx("Le dimensioni estratte superano i limiti dell’editor: serve una "
-                                "revisione."))
+            raise ValueError(tx("Le dimensioni estratte superano i limiti ammessi: controlla i "
+                                "documenti e ripeti l’analisi."))
         if params.is_castellated():
             if not params.castellated_sides:
                 raise ValueError(tx("Non sono stati estratti i contatti del modulo castellated."))
@@ -7586,7 +7251,7 @@ class MainWindow(QMainWindow):
                                   ('pad_diameter_mm', self.field_pad), ('drill_mm', self.field_drill)):
                 value = getattr(params, field)
                 if not widget.minimum() <= value <= widget.maximum() or (field in ('rows', 'cols') and value != int(value)):
-                    raise ValueError(tx("Parametro fuori dai limiti dell’editor: {field}.", field=field))
+                    raise ValueError(tx("Parametro fuori dai limiti ammessi: {field}.", field=field))
 
     def _start_automatic_generation(self, extracted):
         """@brief Avvia la generazione automatica dopo un'estrazione, se i dati la permettono.
@@ -7602,6 +7267,9 @@ class MainWindow(QMainWindow):
         """
         try:
             self._validate_automatic_input(extracted)
+            if extracted.package_geometry:
+                self._generate(automatic=True)
+                return
             body = self._current_body_params()
             if body is None and self.group_3d.isChecked():
                 raise ValueError(tx("I parametri del modello 3D non sono disponibili."))
@@ -7613,8 +7281,8 @@ class MainWindow(QMainWindow):
                     dimensions += ((body.height_mm, extracted.body_height_mm),)
                 if any(not math.isclose(actual, expected, abs_tol=.011)
                        for actual, expected in dimensions):
-                    raise ValueError(tx("Le dimensioni estratte superano i limiti dell’editor: serve una "
-                                        "revisione."))
+                    raise ValueError(tx("Le dimensioni estratte superano i limiti ammessi: controlla i "
+                                        "documenti e ripeti l’analisi."))
         except (ValueError, TypeError) as exc:
             self._automatic_generation_blocked(str(exc))
             return
@@ -7653,7 +7321,8 @@ class MainWindow(QMainWindow):
             # «Modello 3D» spento e' una scelta, non un dato mancante: la
             # generazione automatica deve comunque scrivere il footprint.
             # Vedi `_current_body_params` e `_start_automatic_generation`.
-            if automatic and body is None and self.group_3d.isChecked():
+            if (automatic and body is None and self.group_3d.isChecked()
+                    and not isinstance(params, PackageGeometry)):
                 raise ValueError('Mancano i parametri 3D.')
         except ValueError as exc:
             self._append_log(tx("ERRORE: {exc}", exc=exc))
@@ -7666,7 +7335,6 @@ class MainWindow(QMainWindow):
             self._on_ai_progress(tx("Generazione annullata: file esistenti conservati."))
             return
 
-        self.btn_generate.setEnabled(False)
         if isinstance(params, PackageGeometry):
             self._append_log(
                 tx("Generazione {name}: package {family}, {n_pins} pad espliciti",
@@ -7674,6 +7342,8 @@ class MainWindow(QMainWindow):
                    family=params.family,
                    n_pins=len(params.pins))
             )
+            self._append_log(tx("Modello 3D non generato: il generatore 3D non supporta ancora la "
+                                "geometria a pad espliciti. Viene scritto solo il footprint."))
         elif isinstance(params, CastellatedModuleParams):
             self._append_log(
                 tx("Generazione {name}: modulo castellated {body_length}x{body_width}mm, ",
@@ -7701,8 +7371,8 @@ class MainWindow(QMainWindow):
 
         if body is None and (self.fillet_annotations or self.face_text_annotations):
             self._append_log(
-                tx("ATTENZIONE: annotazioni 3D presenti ma \"Modello 3D\" non e' attivo nel "
-                   "tab Footprint 2D -- verranno ignorate.")
+                tx("ATTENZIONE: annotazioni 3D presenti ma il modello 3D non viene generato "
+                   "(FreeCAD non disponibile): verranno ignorate.")
             )
 
         self._last_params = params
@@ -7736,6 +7406,7 @@ class MainWindow(QMainWindow):
             self._clear_cost_for_generation()
             self.analysis_overlay.start('Generazione footprint e modello 3D',
                                         'Preparazione della generazione…', abortable=True)
+            self._show_generation_steps(params, body)
         if automatic:
             self._automatic_generation_active = True
             self._automatic_footprint_done = self._automatic_3d_done = False
@@ -7753,11 +7424,30 @@ class MainWindow(QMainWindow):
             self._clear_cost_for_generation()
             self.analysis_overlay.start('Generazione footprint e modello 3D',
                                         'Preparazione della generazione…', abortable=True)
+            self._show_generation_steps(params, body)
         try:
             self._worker.start()
         except Exception as exc:
             self._on_error(str(exc))
             self._on_generation_finished()
+
+    def _show_generation_steps(self, params, body) -> None:
+        """@brief Put the three generation steps on the modal, with the missing ones explained.
+
+        @param params Footprint parameters about to be generated.
+        @param body 3D body, or None when no 3D model will be built.
+        @note Steps 2 and 3 need FreeCAD and a 3D body; when they will not run
+            the modal says why instead of letting them silently not happen.
+        """
+        unavailable = {}
+        if body is None:
+            reason = ("il generatore 3D non supporta i pad espliciti"
+                      if isinstance(params, PackageGeometry)
+                      else "FreeCAD non installato" if self._freecad_available is False
+                      else "modello 3D non richiesto")
+            unavailable = {1: reason, 2: reason}
+        self.analysis_overlay.set_steps(GENERATION_STEPS, unavailable)
+        self._generation_step_of = dict(GENERATION_STEP_OF)
 
     def _on_generation_finished(self):
         """@brief Riporta la finestra in quiete alla fine della generazione.
@@ -7770,7 +7460,6 @@ class MainWindow(QMainWindow):
         """
         aborted = self._abort_pending
         self._abort_pending = False
-        self.btn_generate.setEnabled(True)
         if self._manual_cad_overlay:
             # La modale della generazione manuale la chiude chi l'ha aperta:
             # la corsa automatica ha la sua chiusura piu' sotto, insieme a
@@ -7780,7 +7469,11 @@ class MainWindow(QMainWindow):
         if not self._automatic_generation_active:
             return
         self._automatic_generation_active = False
-        self._hide_analysis_overlay()
+        expected_3d = getattr(self, "_automatic_3d_expected", True)
+        complete = self._automatic_footprint_done and (self._automatic_3d_done or not expected_3d)
+        succeeded = not aborted and not self._automatic_generation_errors and complete
+        if not succeeded:
+            self._hide_analysis_overlay()
         self.menuBar().setEnabled(self._generation_menu_enabled)
         self.btn_extract_ai.setEnabled(True)
         if self._extraction_busy:
@@ -7789,11 +7482,9 @@ class MainWindow(QMainWindow):
             # riposo solo adesso.
             self._end_extraction_busy()
         if self._automatic_3d_done:
-            self.tabs.setCurrentIndex(4)
+            self.tabs.setCurrentIndex(TAB_MODEL_3D)
         elif self._automatic_footprint_done:
-            self.tabs.setCurrentIndex(3)
-        expected_3d = getattr(self, "_automatic_3d_expected", True)
-        complete = self._automatic_footprint_done and (self._automatic_3d_done or not expected_3d)
+            self.tabs.setCurrentIndex(TAB_PREVIEW)
         if aborted:
             # Nessun avviso di «generazione incompleta»: l'incompletezza e'
             # esattamente cio' che l'utente ha chiesto, e restituirgliela come
@@ -7814,11 +7505,13 @@ class MainWindow(QMainWindow):
         elif expected_3d:
             self._on_ai_progress(tx("Footprint e modello 3D generati. Verifica le anteprime prima "
                                     "dell’utilizzo."))
+            self._hold_completed_overlay("Completato: footprint e modello 3D generati.")
         else:
             # Consuntivo fedele: il modello 3D non e' stato chiesto, quindi non
             # va ne' promesso ne' lamentato.
             self._on_ai_progress(tx("Footprint generato; modello 3D non richiesto. Verifica l’anteprima "
                                     "prima dell’utilizzo."))
+            self._hold_completed_overlay("Completato: footprint generato.")
 
     def _on_generated(self, path: str) -> None:
         if self._automatic_generation_active:
@@ -7923,7 +7616,7 @@ class MainWindow(QMainWindow):
     def _build_3d_tab(self) -> QWidget:
         """@brief Build the 3D tab: one icon toolbar, the preview, the status line.
 
-        @return The tab container (preview/settings splitter).
+        @return The tab container (toolbar above the preview).
         @note User choice (2026-09-23, note 6): the workflow commands that sat in
             a row under the model moved into the single toolbar at the top, as
             icon-only buttons after the view tools and a vertical divider. The
@@ -8036,11 +7729,22 @@ class MainWindow(QMainWindow):
         self.btn_edit_component_review_3d = self._mirror_project_action(
             self.btn_edit_component_review, self._show_photo_comparison, toolbar,
             "wf-edit-review.svg")
+        # Modifica a mano dei corpi (utente, 2026-09-26): la tabella sotto il
+        # 3D e' stata tolta, i dati no. Serve anche senza la foto in memoria,
+        # che la revisione fotografica invece richiede.
+        self.btn_edit_components_3d = self._workflow_tool_button(
+            "wf-components-edit.svg",
+            "Modifica componenti…",
+            "Nome, tipo, posizione, quote, rotazione, colore e marcatura di ogni corpo, "
+            "a mano. Funziona anche senza la foto. Nessuna richiesta AI: dopo «Applica» "
+            "il modello 3D si rigenera con FreeCAD.")
+        self.btn_edit_components_3d.clicked.connect(lambda: self._edit_components())
+        toolbar.addWidget(self.btn_edit_components_3d)
+        self._refresh_components_editor_button()
 
-        # Il tipo di contatto va correggibile da qui anche in modalita' base:
-        # e' guardando il solido che si vede un mezzo foro dove la scheda ha un
-        # foro passante, e la tabella dei lati sta in un tab nascosto a chi non
-        # ha scelto la modalita' avanzata. Subito prima di «Rigenera»
+        # Il tipo di contatto va correggibile da qui: e' guardando il solido
+        # che si vede un mezzo foro dove la scheda ha un foro passante, e la
+        # tabella dei lati sta in un tab che non si mostra. Subito prima di «Rigenera»
         # perche' la correzione e la rigenerazione gratuita sono un unico
         # gesto. L'etichetta testuale e' diventata un'icona con tooltip.
         self.contact_style_bar_3d = QWidget()
@@ -8061,9 +7765,7 @@ class MainWindow(QMainWindow):
             self.combo_contact_style_3d.count() - 1).setEnabled(False)
         self._set_translated_tooltip(
             self.combo_contact_style_3d,
-            CONTACT_STYLE_TOOLTIP + "\nVale per tutti i lati; per un tipo diverso "
-            "lato per lato usa la colonna «Tipo contatto» della tabella lati "
-            "(tab Footprint 2D, modalita' avanzata).")
+            CONTACT_STYLE_TOOLTIP + "\nVale per tutti i lati.")
         self.combo_contact_style_3d.setSizeAdjustPolicy(
             QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.combo_contact_style_3d.currentIndexChanged.connect(
@@ -8083,6 +7785,14 @@ class MainWindow(QMainWindow):
         # User decision 2026-09-13 (MEMORY.md): hide manual AI refinement
         # actions, keeping handlers and the automatic extraction unchanged.
         self.btn_terminal_detail.hide()
+        # Stessa decisione (MEMORY.md, 2026-09-13): nascosto, non rimosso. Stava
+        # sotto la tabella componenti, tolta il 2026-09-26 con il suo pannello.
+        self.btn_lead_refinement = QPushButton("Affina reofori / saldature...")
+        self.btn_lead_refinement.setToolTip(
+            "Passaggio AI facoltativo: conserva corpi e conteggio, separa solo i reofori distinguibili.")
+        self.btn_lead_refinement.clicked.connect(self._refine_photo_leads)
+        toolbar.addWidget(self.btn_lead_refinement)
+        self.btn_lead_refinement.hide()
         toolbar.addStretch()
 
         # Indicatore di caricamento (nota 10 dell'utente, 2026-09-23): entrare
@@ -8129,35 +7839,15 @@ class MainWindow(QMainWindow):
         self.label_3d_status = QLabel()
         self.label_3d_status.setWordWrap(True)
         outer.addWidget(self.label_3d_status)
-        self._set_3d_status(self.i18n.text(
-            "Attiva \"Modello 3D\" nel tab \"Footprint 2D\" per vedere l'anteprima qui."),
-            STATUS_WARNING)
+        self._set_3d_status(*self._no_3d_status())
 
-        settings = QWidget()
-        settings_layout = QVBoxLayout(settings)
-        settings_layout.addWidget(self._build_annotations_group())
-        settings_layout.addWidget(self._build_components_group())
-
-        scroll = QScrollArea()
-        scroll.setWidget(settings)
-        scroll.setWidgetResizable(True)
-        self.model_3d_settings_scroll = scroll
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.addWidget(tab)
-        splitter.addWidget(scroll)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([600, 200])
-        splitter.setCollapsible(0, False)
         container = QWidget()
         container_layout = QVBoxLayout(container)
         container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.setSpacing(0)
-        # La barra sta sopra il divisore, fuori da scorrimento e splitter:
-        # resta sempre raggiungibile, qualunque altezza abbia il pannello
-        # delle impostazioni, ed e' la prima cosa che l'occhio incontra.
+        # La barra sta sopra l'anteprima: e' la prima cosa che l'occhio incontra.
         container_layout.addWidget(self.model_3d_action_bar)
-        container_layout.addWidget(splitter, 1)
+        container_layout.addWidget(tab, 1)
         self.model_3d_page = container
         self._refresh_workflow_tooltips()
         return container
@@ -8434,6 +8124,21 @@ class MainWindow(QMainWindow):
             self._set_3d_status(self.i18n.tr(
                 "status.leads_observed", count=count), STATUS_INFO)
 
+    def _no_3d_status(self, pending: str = "Il modello 3D compare qui dopo la generazione."):
+        """@brief Why the 3D tab has no model, as (text, status level).
+
+        @param pending Italian text for the case FreeCAD is available and the
+            model has simply not been generated yet.
+        @return (translated text, STATUS_WARNING or STATUS_INFO).
+        @note The «Modello 3D» switch lived in the removed Footprint 2D tab;
+            today the 3D is off only when FreeCAD is missing, so that is what
+            the text says instead of pointing to a control that no longer exists.
+        """
+        if self._freecad_available is False:
+            return (self.i18n.text("FreeCAD non trovato: il modello 3D non può essere generato. "
+                                   "Installa FreeCAD o imposta FREECAD_CMD_PATH."), STATUS_WARNING)
+        return self.i18n.text(pending), STATUS_INFO
+
     def _regenerate_3d(self) -> None:
         """Rigenera solo lo STEP con le annotazioni correnti (il footprint resta com'e')."""
         if self._background_work_running() or self._automatic_generation_active:
@@ -8442,11 +8147,7 @@ class MainWindow(QMainWindow):
         body = self._current_body_params()
         if body is None:
             QMessageBox.information(
-                self, self.i18n.text("Modello 3D non attivo"),
-                self.i18n.text(
-                    "Attiva il gruppo \"Modello 3D\" nel tab \"Footprint 2D\" "
-                    "e compila le dimensioni del corpo prima di generare.")
-            )
+                self, self.i18n.text("Modello 3D non disponibile"), self._no_3d_status()[0])
             return
 
         try:
@@ -8503,6 +8204,10 @@ class MainWindow(QMainWindow):
         self._clear_cost_for_generation()
         self.analysis_overlay.start('Generazione modello 3D',
                                     'Avvio di FreeCAD…', abortable=True)
+        # Il footprint non si riscrive: restano i due passi del 3D.
+        self.analysis_overlay.set_steps(GENERATION_STEPS[1:])
+        self._generation_step_of = {tool: index - 1 for tool, index in GENERATION_STEP_OF.items()
+                                    if index > 0}
         self._cad3d_worker.start()
 
     def _on_regen_3d_progress(self, message: str) -> None:
@@ -8515,13 +8220,18 @@ class MainWindow(QMainWindow):
         @note Vale anche per l'interruzione: `finished` scatta comunque, ed e'
             qui che si chiude la richiesta di fermarsi (`_abort_pending`).
         """
-        self._abort_pending = False
-        self._hide_analysis_overlay()
+        aborted, self._abort_pending = self._abort_pending, False
+        succeeded, self._regen_3d_succeeded = getattr(self, "_regen_3d_succeeded", False), False
+        if succeeded and not aborted:
+            self._hold_completed_overlay("Completato: modello 3D rigenerato.")
+        else:
+            self._hide_analysis_overlay()
         self._set_regen_busy(False)
 
     def _on_regen_3d_done(self, path: str) -> None:
         if not self._cad_result_is_current():
             return
+        self._regen_3d_succeeded = True
         self._append_log(f"OK (3D) -> {path}")
         self._set_3d_status(
             self.i18n.tr("status.step_updated", path=path), STATUS_INFO)
@@ -8622,8 +8332,7 @@ class MainWindow(QMainWindow):
                             or record.get('length_mm') != component.length
                             or record.get('width_mm') != component.width):
                         continue
-                    cell = self.table_components.item(index, 0)
-                    metadata = deepcopy(cell.data(Qt.ItemDataRole.UserRole) or {})
+                    metadata = self._photo_rows[index]
                     match = record.get('model_match')
                     if match is not None and not isinstance(match, dict):
                         raise ValueError(tx("Report modello KiCad non valido"))
@@ -8631,7 +8340,6 @@ class MainWindow(QMainWindow):
                     for key in ('model_path', 'model_rotation_deg', 'render_3d', 'rotation_deg'):
                         if key in record:
                             metadata[key] = deepcopy(record[key])
-                    cell.setData(Qt.ItemDataRole.UserRole, metadata)
                 self._append_log(tx("Candidati KiCad e decisioni: {report_path}", report_path=report_path))
             except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
                 self._append_log(tx("Report candidati non caricato: {exc}", exc=exc))
@@ -8672,225 +8380,138 @@ class MainWindow(QMainWindow):
 
     # ── Componenti del modulo (3D) ─────────────────────────────────
 
-    _COMPONENT_COLUMNS = ("Nome", "Tipo", "X", "Y", "Lung.", "Larg.", "Alt.", "Rot.", "Colore", "Marcatura")
+    #: Keys of a photo component carried into `ComponentBox.match_evidence`.
+    #: Campi strutturali che il 3D legge al posto del nome (verifica del 25/09,
+    #: E11): chi e' solo un'ipotesi del rilevatore, chi e' stato visto
+    #: dall'utente, il conteggio completo dei reofori per il caso «tre piu'
+    #: linguetta», e il riferimento asimmetrico che il costruttore confronta col
+    #: baricentro del modello nativo per stabilire il verso.
+    _MATCH_EVIDENCE_KEYS = (
+        'presence_confidence', 'class_confidence', 'confidence',
+        '_yolo_review_only', '_yolo_origin', 'terminal_count',
+        'terminal_layout', 'terminal_count_basis', '_global_inventory_status', 'class',
+        '_yolo_proposal_id', '_presence_reviewed_by_user',
+        'lead_count', 'lead_count_complete',
+        'landmark_feature', 'landmark_side', 'landmark_confidence')
 
-    def _build_components_group(self) -> QGroupBox:
-        """Tabella dei componenti montati sul modulo, letti dalla foto.
+    @classmethod
+    def _component_from_photo(cls, c: dict) -> ComponentBox:
+        """@brief Build the CAD box of one photo component dict.
 
-        Le stime dell'estrazione sono visive e ogni tanto sbagliano (un diodo
-        letto come "varistore" e disegnato come una scatola): qui si corregge
-        il singolo componente -- tipo, posizione, ingombro, colore, marcatura
-        -- invece di rilanciare l'estrazione e sperare. Vale solo per i moduli
-        castellated: e' nascosta negli altri casi.
+        @param c Photo component (extraction, review or saved project format).
+        @return The `ComponentBox` the 3D generator receives.
+        @throws KeyError When a geometry key (x_mm, y_mm, length_mm, width_mm) is missing.
         """
-        group = QGroupBox(
-            "Componenti sul modulo (letti dalla foto, modificabili) -- "
-            "origine al centro del modulo, X a destra, Y in basso come nel footprint; "
-            "Lung. = asse lungo del componente, Rot. = come sta sul modulo"
+        return ComponentBox(
+            x=c["x_mm"], y=c["y_mm"], length=c["length_mm"], width=c["width_mm"],
+            height=c.get("height_mm", 1.0), name=str(c.get("name") or "").strip() or "Componente",
+            color_hex=str(c.get("color_hex") or "").strip() or "#303030",
+            kind=c.get("kind") or "generic",
+            marking=str(c.get("marking") or "").strip(), rotation=float(c.get("rotation_deg", 0.0)),
+            model_rotation_deg=c.get("model_rotation_deg"),
+            model_selection=deepcopy(c.get("model_selection")),
+            model_match=deepcopy(c.get("model_match")),
+            match_evidence={key: deepcopy(c[key]) for key in cls._MATCH_EVIDENCE_KEYS if key in c},
+            model_z_offset_mm=float(c.get("model_z_offset_mm") or 0.0),
+            pin_count=c.get("pin_count"), pins_by_side=deepcopy(c.get("pins_by_side")),
+            pin_count_confidence=str(c.get("pin_count_confidence") or ""),
+            pin_count_source=str(c.get("pin_count_source") or ""),
+            detected_kind=c.get("_detected_kind"),
+            terminal_geometry=deepcopy(c.get("terminal_geometry")),
+            package=str(c.get("package") or ""),
+            mating=str(c.get("mating") or ""),
+            bbox_basis=str(c.get("bbox_basis") or "unknown"),
+            package_evidence=str(c.get("package_evidence") or ""),
+            render_3d_override=(c.get("render_3d_override")
+                                if isinstance(c.get("render_3d_override"), bool) else None),
+            model_rotation_delta_deg=float(c.get("model_rotation_delta_deg") or 0.0),
         )
-        self.group_components = group
-        layout = QVBoxLayout(group)
 
-        self.table_components = QTableWidget(0, len(self._COMPONENT_COLUMNS))
-        self.table_components.setHorizontalHeaderLabels(list(self._COMPONENT_COLUMNS))
-        header = self.table_components.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(9, QHeaderView.ResizeMode.Stretch)
-        self.table_components.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table_components.setMinimumHeight(160)
-        layout.addWidget(self.table_components)
+    @staticmethod
+    def _photo_row(component: ComponentBox, photo: dict | None) -> dict:
+        """@brief One stored photo component: detection metadata plus CAD geometry.
 
-        buttons = QHBoxLayout()
-        btn_add = QPushButton("Aggiungi componente")
-        btn_add.clicked.connect(lambda: self._add_component_row())
-        btn_remove = QPushButton("Rimuovi componente selezionato")
-        btn_remove.clicked.connect(self._remove_component_row)
-        buttons.addWidget(btn_add)
-        buttons.addWidget(btn_remove)
-        self.btn_lead_refinement = QPushButton("Affina reofori / saldature...")
-        self.btn_lead_refinement.setToolTip(
-            "Passaggio AI facoltativo: conserva corpi e conteggio, separa solo i reofori distinguibili.")
-        self.btn_lead_refinement.clicked.connect(self._refine_photo_leads)
-        buttons.addWidget(self.btn_lead_refinement)
-        # Intentionally hidden, not removed: see project MEMORY.md.
-        self.btn_lead_refinement.hide()
-        buttons.addStretch()
-        layout.addLayout(buttons)
-
-        group.setVisible(False)
-        return group
-
-    def _add_component_row(self, component: ComponentBox | None = None,
-                           photo_metadata: dict | None = None) -> None:
-        component = component or ComponentBox(x=0.0, y=0.0, length=2.0, width=1.2, height=0.6)
-        table = self.table_components
-        row = table.rowCount()
-        table.insertRow(row)
-        metadata = QTableWidgetItem()
-        row_metadata = deepcopy(photo_metadata or {})
+        @param component Normalised CAD box of the component.
+        @param photo The dict it came from; unknown keys are kept beside it.
+        @return The row as `_photo_components_from_table` returns it.
+        @note Absent optional keys mean «the automatism decides»: they are
+            removed instead of being written with a neutral value, which would
+            read as an explicit choice.
+        """
+        row = deepcopy(photo or {})
         for key, value in (component.match_evidence or {}).items():
-            row_metadata.setdefault(key, deepcopy(value))
-        row_metadata.update(pin_count=component.pin_count, pins_by_side=component.pins_by_side,
-                            pin_count_confidence=component.pin_count_confidence,
-                            pin_count_source=component.pin_count_source,
-                            _detected_kind=component.detected_kind,
-                            terminal_geometry=component.terminal_geometry,
-                            package=component.package, mating=component.mating,
-                            bbox_basis=component.bbox_basis,
-                            model_selection=deepcopy(component.model_selection),
-                            model_match=deepcopy(component.model_match),
-                            package_evidence=component.package_evidence)
+            row.setdefault(key, deepcopy(value))
+        # Copie, non riferimenti: chi legge o modifica la riga non deve poter
+        # toccare il componente da cui e' nata, e viceversa.
+        row.update(pin_count=component.pin_count, pins_by_side=deepcopy(component.pins_by_side),
+                   pin_count_confidence=component.pin_count_confidence,
+                   pin_count_source=component.pin_count_source,
+                   _detected_kind=component.detected_kind,
+                   terminal_geometry=deepcopy(component.terminal_geometry),
+                   package=component.package, mating=component.mating,
+                   bbox_basis=component.bbox_basis,
+                   model_selection=deepcopy(component.model_selection),
+                   model_match=deepcopy(component.model_match),
+                   package_evidence=component.package_evidence)
         # None leaves native-model axis inference enabled; zero is an explicit
         # local CAD override, independent of the photo rectangle's rotation.
         if component.model_rotation_deg is None:
-            row_metadata.pop("model_rotation_deg", None)
+            row.pop("model_rotation_deg", None)
         else:
-            row_metadata["model_rotation_deg"] = component.model_rotation_deg
-        if component.model_z_offset_mm:
-            row_metadata["model_z_offset_mm"] = component.model_z_offset_mm
-        else:
-            row_metadata.pop("model_z_offset_mm", None)
-        # Scelte del menu contestuale della vista 3D: assenti significa
-        # "decide l'automatismo", quindi la chiave si toglie invece di
-        # scriverci un valore neutro che sembrerebbe una scelta fatta.
+            row["model_rotation_deg"] = component.model_rotation_deg
+        for key, value in (("model_z_offset_mm", component.model_z_offset_mm),
+                           ("model_rotation_delta_deg", component.model_rotation_delta_deg)):
+            if value:
+                row[key] = value
+            else:
+                row.pop(key, None)
         if isinstance(component.render_3d_override, bool):
-            row_metadata["render_3d_override"] = component.render_3d_override
+            row["render_3d_override"] = component.render_3d_override
         else:
-            row_metadata.pop("render_3d_override", None)
-        if component.model_rotation_delta_deg:
-            row_metadata["model_rotation_delta_deg"] = component.model_rotation_delta_deg
-        else:
-            row_metadata.pop("model_rotation_delta_deg", None)
-        metadata.setData(Qt.ItemDataRole.UserRole, row_metadata)
-        table.setItem(row, 0, metadata)
-
-        name = QLineEdit(component.name)
-        table.setCellWidget(row, 0, name)
-
-        kind = QComboBox()
-        for key in COMPONENT_KINDS:
-            kind.addItem(key, key)
-        if kind.findData(component.kind) < 0:
-            kind.addItem(component.kind, component.kind)
-        kind.setCurrentIndex(max(kind.findData(component.kind), 0))
-        table.setCellWidget(row, 1, kind)
-
-        for column, value, minimum in (
-            (2, component.x, -300.0), (3, component.y, -300.0),
-            (4, component.length, 0.05), (5, component.width, 0.05), (6, component.height, 0.05),
-        ):
-            spin = QDoubleSpinBox()
-            # Keep precision and small packages from manual photo corrections.
-            spin.setDecimals(6)
-            spin.setRange(min(minimum, float(value)), max(300.0, float(value)))
-            spin.setSingleStep(0.1)
-            spin.setValue(float(value))
-            table.setCellWidget(row, column, spin)
-
-        rotation = QComboBox()
-        for degrees in (0, 90, 180, 270):
-            rotation.addItem(f"{degrees}\u00b0", float(degrees))
-        angle = float(component.rotation) % 360
-        if rotation.findData(angle) < 0:
-            rotation.addItem(f"{angle:g}\u00b0", angle)
-        rotation.setCurrentIndex(max(rotation.findData(float(component.rotation) % 360), 0))
-        table.setCellWidget(row, 7, rotation)
-        color = QLineEdit(component.color_hex)
-        color.setMaxLength(7)
-        table.setCellWidget(row, 8, color)
-        marking = QLineEdit(component.marking)
-        table.setCellWidget(row, 9, marking)
-        for column in range(10):
-            widget = table.cellWidget(row, column)
-            if isinstance(widget, QDoubleSpinBox):
-                widget.valueChanged.connect(
-                    lambda _value, item=metadata, geometry=column in (4, 5):
-                    self._component_edited(item, geometry))
-            elif isinstance(widget, QComboBox):
-                widget.currentIndexChanged.connect(
-                    lambda _value, item=metadata: self._component_edited(item, match=True))
-            elif isinstance(widget, QLineEdit):
-                widget.textChanged.connect(self._invalidate_generated_mesh)
-        if not getattr(self, "_refreshing_component_rows", False):
-            self._invalidate_generated_mesh()
-
-    def _component_edited(self, item, geometry=False, match=False) -> None:
-        """@brief Invalidate CAD and evidence tied to an edited photo rectangle."""
-        if geometry:
-            metadata = deepcopy(item.data(Qt.ItemDataRole.UserRole) or {})
-            metadata["bbox_basis"] = "unknown"
-            metadata.pop("package_evidence", None)
-            metadata.pop("terminal_geometry", None)
-            metadata.pop("model_match", None)
-            metadata.pop("model_selection", None)
-            item.setData(Qt.ItemDataRole.UserRole, metadata)
-        elif match:
-            metadata = deepcopy(item.data(Qt.ItemDataRole.UserRole) or {})
-            metadata.pop("model_match", None)
-            metadata.pop("model_selection", None)
-            item.setData(Qt.ItemDataRole.UserRole, metadata)
-        self._invalidate_generated_mesh()
-
-    def _remove_component_row(self) -> None:
-        row = self.table_components.currentRow()
-        if row >= 0:
-            self.table_components.removeRow(row)
-            self._invalidate_generated_mesh()
+            row.pop("render_3d_override", None)
+        # Sei decimali come l'editor che ha preceduto questi dati: le correzioni
+        # fotografiche conservano la precisione dei piccoli package.
+        row.update(name=component.name, kind=component.kind,
+                   x_mm=round(float(component.x), 6), y_mm=round(float(component.y), 6),
+                   length_mm=round(float(component.length), 6),
+                   width_mm=round(float(component.width), 6),
+                   height_mm=round(float(component.height), 6),
+                   rotation_deg=float(component.rotation) % 360,
+                   color_hex=component.color_hex, marking=component.marking)
+        return row
 
     def _set_photo_components(self, components: list[dict]) -> None:
-        """Replace component rows, retaining unknown metadata beside each row."""
-        self.castellated_components = [
-            ComponentBox(
-                x=c["x_mm"], y=c["y_mm"], length=c["length_mm"], width=c["width_mm"],
-                height=c.get("height_mm", 1.0), name=c.get("name", "Componente"),
-                color_hex=c.get("color_hex") or "#303030", kind=c.get("kind", "generic"),
-                marking=c.get("marking", ""), rotation=float(c.get("rotation_deg", 0.0)),
-                model_rotation_deg=c.get("model_rotation_deg"),
-                model_selection=deepcopy(c.get("model_selection")),
-                model_match=deepcopy(c.get("model_match")),
-                match_evidence={key: deepcopy(c[key]) for key in (
-                    'presence_confidence', 'class_confidence', 'confidence',
-                    '_yolo_review_only', '_yolo_origin', 'terminal_count',
-                    'terminal_layout', 'terminal_count_basis', '_global_inventory_status', 'class',
-                    # Campi strutturali che il 3D legge al posto del nome
-                    # (verifica del 25/09, E11): chi e' solo un'ipotesi del
-                    # rilevatore, chi e' stato visto dall'utente, e il conteggio
-                    # completo dei reofori per il caso «tre piu' linguetta».
-                    '_yolo_proposal_id', '_presence_reviewed_by_user',
-                    'lead_count', 'lead_count_complete',
-                    # Il riferimento asimmetrico deve arrivare fino al
-                    # costruttore: e' li' che si confronta col baricentro del
-                    # modello nativo per stabilire il verso.
-                    'landmark_feature', 'landmark_side', 'landmark_confidence') if key in c},
-                model_z_offset_mm=float(c.get("model_z_offset_mm") or 0.0),
-                pin_count=c.get("pin_count"), pins_by_side=c.get("pins_by_side"),
-                pin_count_confidence=str(c.get("pin_count_confidence") or ""),
-                pin_count_source=str(c.get("pin_count_source") or ""),
-                detected_kind=c.get("_detected_kind"),
-                terminal_geometry=deepcopy(c.get("terminal_geometry")),
-                package=str(c.get("package") or ""),
-                mating=str(c.get("mating") or ""),
-                bbox_basis=str(c.get("bbox_basis") or "unknown"),
-                package_evidence=str(c.get("package_evidence") or ""),
-                render_3d_override=(c.get("render_3d_override")
-                                    if isinstance(c.get("render_3d_override"), bool) else None),
-                model_rotation_delta_deg=float(c.get("model_rotation_delta_deg") or 0.0),
-            ) for c in components
-        ]
-        self._refresh_components_table(components)
+        """@brief Replace the photo components, keeping unknown metadata beside each one.
 
-    def _refresh_components_table(self, photo_components: list[dict] | None = None) -> None:
-        """Riscrive la tabella dall'elenco appena estratto."""
-        if not hasattr(self, "table_components"):
-            return
-        self._refreshing_component_rows = True
-        try:
-            self.table_components.setRowCount(0)
-            for index, component in enumerate(self.castellated_components):
-                metadata = photo_components[index] if photo_components is not None else None
-                self._add_component_row(component, metadata)
-        finally:
-            self._refreshing_component_rows = False
+        @param components Photo component dicts.
+        @throws KeyError When a component misses a geometry key; nothing is replaced then.
+        """
+        boxes = [self._component_from_photo(c) for c in components]
+        self.castellated_components = boxes
+        self._photo_rows = [self._photo_row(box, c) for box, c in zip(boxes, components)]
+        self._refresh_components_editor_button()
+
+    def _refresh_components_editor_button(self) -> None:
+        """@brief Offer the hand editor only when there are bodies to edit."""
+        button = getattr(self, "btn_edit_components_3d", None)
+        if button is not None:
+            button.setVisible(bool(self._photo_rows))
+
+    def _edit_components(self, select_row=None) -> None:
+        """@brief Open the hand editor of the mounted bodies.
+
+        @param select_row Row to select first (right click on a body in 3D).
+        @note Edits the stored components, not a copy that lives with the
+            window: «Applica» goes through `_apply_photo_review`, like the
+            photo review, so the choices are saved and the 3D is rebuilt.
+        """
+        from ..services.datasheet_extractor import COMPONENT_KINDS
+        dialog = ComponentEditorDialog(self._photo_components_from_table(), COMPONENT_KINDS,
+                                       self, select_row=select_row)
+        dialog.components_applied.connect(self._apply_photo_review)
+        self.i18n.retranslate_widgets(dialog)
+        dialog.exec()
+        dialog.deleteLater()
 
     #: Correzioni di orientamento offerte dal menu contestuale. Solo multipli
     #: di un quarto di giro: i modelli della libreria KiCad seguono la
@@ -8902,17 +8523,14 @@ class MainWindow(QMainWindow):
         """@brief Menu del tasto destro su un componente della vista 3D.
 
         La vista 3D serve solo a indicare quale riga: le voci agiscono sui
-        metadati della tabella componenti, che resta la fonte di verita'.
+        metadati dei componenti salvati (`_photo_rows`), che restano la fonte di verita'.
         Ogni scelta viene scritta nel JSON delle scelte e ha effetto dalla
         rigenerazione FreeCAD successiva, senza ripassare dal modello AI.
         """
-        table = getattr(self, "table_components", None)
-        if table is None or not 0 <= row < table.rowCount():
+        if not 0 <= row < len(self._photo_rows):
             return
-        cell = table.item(row, 0)
-        metadata = deepcopy(cell.data(Qt.ItemDataRole.UserRole) or {}) if cell else {}
-        label = table.cellWidget(row, 0)
-        name = (label.text().strip() if label is not None else "") or "?"
+        metadata = self._photo_rows[row]
+        name = str(metadata.get("name") or "").strip() or "?"
         hidden = metadata.get("render_3d_override") is False
         delta = float(metadata.get("model_rotation_delta_deg") or 0.0)
 
@@ -8936,6 +8554,10 @@ class MainWindow(QMainWindow):
         reset = rotate.addAction(self.i18n.text("Azzera la correzione"))
         reset.setEnabled(bool(delta))
         reset.triggered.connect(lambda: self._rotate_component_model(row, None))
+
+        edit = menu.addAction(self.i18n.text("Modifica componente..."))
+        edit.triggered.connect(
+            lambda: QTimer.singleShot(0, lambda: self._edit_components(select_row=row)))
 
         change = menu.addAction(self.i18n.text("Cambia modello KiCad..."))
         change.triggered.connect(
@@ -8962,8 +8584,7 @@ class MainWindow(QMainWindow):
         if degrees is None:
             self._update_component_metadata(row, {"model_rotation_delta_deg": None})
             return
-        cell = self.table_components.item(row, 0)
-        metadata = cell.data(Qt.ItemDataRole.UserRole) if cell else None
+        metadata = self._photo_rows[row] if 0 <= row < len(self._photo_rows) else None
         current = float((metadata or {}).get("model_rotation_delta_deg") or 0.0)
         total = (current + float(degrees)) % 360
         self._update_component_metadata(
@@ -8975,20 +8596,16 @@ class MainWindow(QMainWindow):
         Un valore None toglie la chiave: significa "torna all'automatismo",
         che non e' la stessa cosa di una scelta esplicita dal valore neutro.
         """
-        table = getattr(self, "table_components", None)
-        cell = table.item(row, 0) if table is not None else None
-        if cell is None:
+        if not 0 <= row < len(self._photo_rows):
             return
-        metadata = deepcopy(cell.data(Qt.ItemDataRole.UserRole) or {})
+        metadata = self._photo_rows[row]
         for key, value in changes.items():
             if value is None:
                 metadata.pop(key, None)
             else:
                 metadata[key] = value
-        cell.setData(Qt.ItemDataRole.UserRole, metadata)
-        name = table.cellWidget(row, 0)
         self._append_log(
-            f"Componente '{name.text().strip() if name else row}': "
+            f"Componente '{str(metadata.get('name') or '').strip() or row}': "
             + ", ".join(f"{k}={metadata.get(k, 'automatico')}" for k in changes))
         # Stesso percorso della revisione fotografica: salva il JSON delle
         # scelte e marca il 3D da rigenerare. La rigenerazione e' FreeCAD e
@@ -8996,198 +8613,8 @@ class MainWindow(QMainWindow):
         self._apply_photo_review(self._photo_components_from_table())
 
     def _components_from_table(self) -> list[ComponentBox]:
-        """Componenti come sono ORA nella tabella (con le correzioni a mano)."""
-        if not hasattr(self, "table_components"):
-            return list(self.castellated_components)
-        table = self.table_components
-        components = []
-        for row in range(table.rowCount()):
-            cell = table.item(row, 0)
-            metadata = deepcopy(cell.data(Qt.ItemDataRole.UserRole) or {}) if cell else {}
-            components.append(ComponentBox(
-                name=table.cellWidget(row, 0).text().strip() or "Componente",
-                kind=table.cellWidget(row, 1).currentData() or "generic",
-                x=table.cellWidget(row, 2).value(),
-                y=table.cellWidget(row, 3).value(),
-                length=table.cellWidget(row, 4).value(),
-                width=table.cellWidget(row, 5).value(),
-                height=table.cellWidget(row, 6).value(),
-                rotation=float(table.cellWidget(row, 7).currentData() or 0.0),
-                model_rotation_deg=metadata.get("model_rotation_deg"),
-                model_selection=deepcopy(metadata.get("model_selection")),
-                model_match=deepcopy(metadata.get("model_match")),
-                match_evidence={key: deepcopy(metadata[key]) for key in (
-                    'presence_confidence', 'class_confidence', 'confidence',
-                    '_yolo_review_only', '_yolo_origin', 'terminal_count',
-                    'terminal_layout', 'terminal_count_basis', '_global_inventory_status', 'class',
-                    # Campi strutturali che il 3D legge al posto del nome
-                    # (verifica del 25/09, E11): chi e' solo un'ipotesi del
-                    # rilevatore, chi e' stato visto dall'utente, e il conteggio
-                    # completo dei reofori per il caso «tre piu' linguetta».
-                    '_yolo_proposal_id', '_presence_reviewed_by_user',
-                    'lead_count', 'lead_count_complete',
-                    # Il riferimento asimmetrico deve arrivare fino al
-                    # costruttore: e' li' che si confronta col baricentro del
-                    # modello nativo per stabilire il verso.
-                    'landmark_feature', 'landmark_side', 'landmark_confidence') if key in metadata},
-                model_z_offset_mm=float(metadata.get("model_z_offset_mm") or 0.0),
-                color_hex=table.cellWidget(row, 8).text().strip() or "#303030",
-                marking=table.cellWidget(row, 9).text().strip(),
-                pin_count=metadata.get("pin_count"),
-                pin_count_confidence=str(metadata.get("pin_count_confidence") or ""),
-                pin_count_source=str(metadata.get("pin_count_source") or ""),
-                pins_by_side=metadata.get("pins_by_side"),
-                detected_kind=metadata.get("_detected_kind"),
-                terminal_geometry=metadata.get("terminal_geometry"),
-                package=str(metadata.get("package") or ""),
-                mating=str(metadata.get("mating") or ""),
-                bbox_basis=str(metadata.get("bbox_basis") or "unknown"),
-                package_evidence=str(metadata.get("package_evidence") or ""),
-                render_3d_override=(metadata.get("render_3d_override")
-                                    if isinstance(metadata.get("render_3d_override"), bool) else None),
-                model_rotation_delta_deg=float(metadata.get("model_rotation_delta_deg") or 0.0),
-            ))
-        return components
-
-    def _build_annotations_group(self) -> QGroupBox:
-        group = QGroupBox(
-            "Annotazioni per il modello 3D (fillet su spigoli, testo inciso su facce) "
-            "-- rivedi la lista prima di generare"
-        )
-        self.group_annotations = group
-        layout = QVBoxLayout(group)
-
-        fillet_row = QHBoxLayout()
-        fillet_row.addWidget(QLabel("Spigolo:"))
-        self.combo_fillet_edge = QComboBox()
-        self.combo_fillet_edge.addItems(EDGE_NAMES)
-        # I nomi seguono il cubo della vista 3D (convenzione 2, 2026-09-25).
-        self.combo_fillet_edge.setToolTip(
-            "Spigolo fra due facce, con i nomi del cubo della vista 3D: front = faccia "
-            "«Fronte» (lato in basso della vista dall'alto), back = «Retro» (in alto). "
-            "Gli angoli arrotondati visti dall'alto sono gli spigoli verticali "
-            "front-left, front-right, back-left, back-right.")
-        fillet_row.addWidget(self.combo_fillet_edge)
-        fillet_row.addWidget(QLabel("Raggio:"))
-        self.spin_fillet_radius = QDoubleSpinBox()
-        self.spin_fillet_radius.setRange(0.05, 20.0)
-        self.spin_fillet_radius.setDecimals(2)
-        self.spin_fillet_radius.setSuffix(" mm")
-        self.spin_fillet_radius.setValue(0.5)
-        fillet_row.addWidget(self.spin_fillet_radius)
-        btn_add_fillet = QPushButton("Aggiungi fillet")
-        btn_add_fillet.clicked.connect(self._add_fillet_annotation)
-        fillet_row.addWidget(btn_add_fillet)
-        fillet_row.addStretch()
-        layout.addLayout(fillet_row)
-
-        text_row = QHBoxLayout()
-        text_row.addWidget(QLabel("Faccia:"))
-        self.combo_text_face = QComboBox()
-        self.combo_text_face.addItems(FACE_NAMES)
-        text_row.addWidget(self.combo_text_face)
-        text_row.addWidget(QLabel("Testo da incidere:"))
-        self.field_annotation_text = QLineEdit()
-        self.field_annotation_text.setPlaceholderText("scrivi qui (es. TEL8WI)")
-        self.field_annotation_text.setMinimumWidth(180)
-        self.field_annotation_text.setStyleSheet(
-            f"border: 1px solid {BLUE}; background: {SURFACE0};"
-        )
-        text_row.addWidget(self.field_annotation_text, 1)
-        text_row.addWidget(QLabel("Dim.:"))
-        self.spin_text_size = QDoubleSpinBox()
-        self.spin_text_size.setRange(0.5, 30.0)
-        self.spin_text_size.setDecimals(2)
-        self.spin_text_size.setSuffix(" mm")
-        self.spin_text_size.setValue(2.0)
-        text_row.addWidget(self.spin_text_size)
-        text_row.addWidget(QLabel("Spessore:"))
-        self.spin_text_depth = QDoubleSpinBox()
-        self.spin_text_depth.setRange(0.02, 5.0)
-        self.spin_text_depth.setDecimals(2)
-        self.spin_text_depth.setSuffix(" mm")
-        self.spin_text_depth.setValue(0.06)
-        self.spin_text_depth.setToolTip("Spessore dello strato di vernice serigrafata")
-        text_row.addWidget(self.spin_text_depth)
-        text_row.addWidget(QLabel("Colore:"))
-        self.field_text_color = QLineEdit("#ffffff")
-        self.field_text_color.setMaximumWidth(90)
-        self.field_text_color.setToolTip("Colore della scritta, formato #rrggbb")
-        text_row.addWidget(self.field_text_color)
-        btn_add_text = QPushButton("Aggiungi testo")
-        btn_add_text.clicked.connect(self._add_text_annotation)
-        text_row.addWidget(btn_add_text)
-        layout.addLayout(text_row)
-
-        self.table_annotations = QTableWidget(0, 3)
-        self.table_annotations.setHorizontalHeaderLabels(["Tipo", "Target", "Dettagli"])
-        self.table_annotations.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        self.table_annotations.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table_annotations.setMinimumHeight(120)
-        layout.addWidget(self.table_annotations)
-
-        btn_remove = QPushButton("Rimuovi annotazione selezionata")
-        btn_remove.clicked.connect(self._remove_selected_annotation)
-        layout.addWidget(btn_remove)
-
-        return group
-
-    def _refresh_annotations_table(self) -> None:
-        rows = (
-            [("Fillet", f.edge, f"raggio {f.radius_mm:.2f} mm") for f in self.fillet_annotations]
-            + [
-                (
-                    "Serigrafia", t.face,
-                    f"\"{t.text}\", {t.size_mm:.2f}mm, spessore {t.thickness_mm:.2f}mm, {t.color_hex}",
-                )
-                for t in self.face_text_annotations
-            ]
-        )
-        self.table_annotations.setRowCount(len(rows))
-        for i, (tipo, target, dettagli) in enumerate(rows):
-            self.table_annotations.setItem(i, 0, QTableWidgetItem(tipo))
-            self.table_annotations.setItem(i, 1, QTableWidgetItem(target))
-            self.table_annotations.setItem(i, 2, QTableWidgetItem(dettagli))
-
-    def _add_fillet_annotation(self) -> None:
-        ann = EdgeFilletAnnotation(edge=self.combo_fillet_edge.currentText(), radius_mm=self.spin_fillet_radius.value())
-        try:
-            ann.validate()
-        except ValueError as exc:
-            QMessageBox.warning(
-                self, self.i18n.text("Fillet non valido"), str(exc))
-            return
-        self.fillet_annotations.append(ann)
-        self._refresh_annotations_table()
-
-    def _add_text_annotation(self) -> None:
-        ann = FaceTextAnnotation(
-            face=self.combo_text_face.currentText(),
-            text=self.field_annotation_text.text().strip(),
-            size_mm=self.spin_text_size.value(),
-            thickness_mm=self.spin_text_depth.value(),
-            color_hex=self.field_text_color.text().strip(),
-        )
-        try:
-            ann.validate()
-        except ValueError as exc:
-            QMessageBox.warning(
-                self, self.i18n.text("Testo non valido"), str(exc))
-            return
-        self.face_text_annotations.append(ann)
-        self.field_annotation_text.clear()
-        self._refresh_annotations_table()
-
-    def _remove_selected_annotation(self) -> None:
-        row = self.table_annotations.currentRow()
-        if row < 0:
-            return
-        n_fillets = len(self.fillet_annotations)
-        if row < n_fillets:
-            del self.fillet_annotations[row]
-        else:
-            del self.face_text_annotations[row - n_fillets]
-        self._refresh_annotations_table()
+        """@brief The photo components as they are now, corrections included."""
+        return [self._component_from_photo(row) for row in self._photo_rows]
 
     def _current_system_prompt(self) -> str | None:
         """Prompt globale da usare per l'estrazione: None se e' quello di default."""
@@ -9432,6 +8859,11 @@ class MainWindow(QMainWindow):
         return params
 
     def _draw_preview(self) -> None:
+        # I parametri nascono prima delle schede (`_init_parameters`): la
+        # tipologia scelta mentre si costruisce il tab Progetto li cambia
+        # quando l'anteprima non esiste ancora, e non c'e' nulla da ridisegnare.
+        if not hasattr(self, "preview_scene"):
+            return
         params = self._preview_params()
         if params is None:
             self.preview_scene.clear()
@@ -9660,19 +9092,15 @@ class MainWindow(QMainWindow):
                 except Exception as exc:  # noqa: BLE001 - anteprima best-effort
                     self._append_log(tx("Anteprima mesh non disponibile: {exc}", exc=exc))
             self.preview_3d.clear_preview()
-            self._set_3d_status(self.i18n.text(
-                "Attiva \"Modello 3D\" e premi \"Genera footprint\": il modello "
-                "del modulo (PCB con semi-fori + componenti) si vede qui dopo la "
-                "generazione con FreeCAD."
-            ), STATUS_WARNING)
+            self._set_3d_status(*self._no_3d_status(
+                "Il modello del modulo (PCB con semi-fori + componenti) si vede qui dopo "
+                "la generazione con FreeCAD."))
             return
 
         body = self._current_body_params()
         if body is None:
             self.preview_3d.clear_preview()
-            self._set_3d_status(self.i18n.text(
-                "Attiva \"Modello 3D\" nel tab \"Footprint 2D\" per vedere l'anteprima qui."
-            ), STATUS_WARNING)
+            self._set_3d_status(*self._no_3d_status())
             return
 
         try:
@@ -9687,7 +9115,7 @@ class MainWindow(QMainWindow):
 
         self._set_3d_status(self.i18n.text(
             "Anteprima approssimata (poligoni, per farsi un'idea dell'ingombro). "
-            "Premi \"Genera footprint\" per ottenere il modello .step esatto via FreeCAD."
+            "Il modello .step esatto arriva con la generazione via FreeCAD."
         ), STATUS_INFO)
 
     # ── Cambio tab ─────────────────────────────────────────────────
@@ -9699,13 +9127,11 @@ class MainWindow(QMainWindow):
         # che non si vede piu' non si fa (audit 25/09).
         if index != self.tabs.currentIndex():
             return
-        if index == 0:
+        if index == TAB_PROJECT:
             self._refresh_docs_list()
-        elif index == 2:
-            self._update_summary()
-        elif index == 3:
+        elif index == TAB_PREVIEW:
             self._draw_preview()
-        elif index == 4:
+        elif index == TAB_MODEL_3D:
             self._enter_3d_tab()
 
     # ── Ingresso nella scheda 3D: caricamento con indicatore ───────

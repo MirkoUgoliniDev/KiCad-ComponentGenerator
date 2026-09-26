@@ -81,7 +81,7 @@ def test_a_project_saved_before_is_converted_once_and_says_so(window, tmp_path):
     window._switch_project("VECCHIO", state)
     assert [a.edge for a in window.fillet_annotations] == ["back-left", "top-right"]
     assert window.face_text_annotations[0].face == "back"
-    assert "convertiti" in window.log_text.toPlainText()
+    assert "convertiti" in window._log_plain_text()
     saved = window._project_state()["annotations"]
     assert saved["convention"] == ANNOTATION_CONVENTION
     assert saved["fillets"][0]["edge"] == "back-left"
@@ -95,4 +95,4 @@ def test_a_project_saved_with_the_new_convention_is_not_touched(window, tmp_path
                         ANNOTATION_CONVENTION)
     window._switch_project("NUOVO", state)
     assert [a.edge for a in window.fillet_annotations] == ["front-left"]
-    assert "convertiti" not in window.log_text.toPlainText()
+    assert "convertiti" not in window._log_plain_text()

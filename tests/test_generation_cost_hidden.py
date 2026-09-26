@@ -88,7 +88,7 @@ def test_manual_generation_with_a_3d_body_has_no_cost(window, monkeypatch):  # n
     window.group_3d.setChecked(True)
     window.analysis_overlay.set_cost('Costo ultima analisi: 0.05 USD')
     window._generate()
-    assert window._manual_cad_overlay, window.log_text.toPlainText()
+    assert window._manual_cad_overlay, window._log_plain_text()
     assert window.analysis_overlay.cost.text() == ''
     assert window.analysis_overlay.cost.isHidden()
 

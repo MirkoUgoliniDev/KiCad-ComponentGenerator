@@ -1,4 +1,4 @@
-"""@brief Keep photographic matching evidence across the editable table."""
+"""@brief Keep photographic matching evidence across the stored photo components."""
 from test_photo_inventory_gui import window
 
 
@@ -13,6 +13,6 @@ def test_matching_evidence_roundtrip(window):
         length_mm=3, width_mm=2, height_mm=1, **evidence)])
     box = window._components_from_table()[0]
     assert box.match_evidence == evidence
-    window.castellated_components = [box]
-    window._refresh_components_table()
+    # Il giro completo: dai dati salvati di nuovo ai componenti.
+    window._set_photo_components(window._photo_components_from_table())
     assert window._components_from_table()[0].match_evidence == evidence

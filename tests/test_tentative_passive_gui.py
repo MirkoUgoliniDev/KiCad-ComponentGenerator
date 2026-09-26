@@ -77,7 +77,7 @@ def test_synthetic_tentative_c0603_auto_matches_through_real_gui_and_freecad(
 
     window._generate()
     worker = window._worker
-    assert worker is not None, window.log_text.toPlainText()
+    assert worker is not None, window._log_plain_text()
     while worker.isRunning():
         QTest.qWait(25)
     worker.wait()
@@ -87,8 +87,8 @@ def test_synthetic_tentative_c0603_auto_matches_through_real_gui_and_freecad(
     assert project.is_relative_to(tmp_path)
     step = project / f'{fixture.name}.3dshapes' / f'{fixture.name}.step'
     preview_path = step.with_suffix('.preview.json')
-    assert step.is_file() and step.stat().st_size > 0, window.log_text.toPlainText()
-    assert window._last_mesh_path == preview_path, window.log_text.toPlainText()
+    assert step.is_file() and step.stat().st_size > 0, window._log_plain_text()
+    assert window._last_mesh_path == preview_path, window._log_plain_text()
     report = json.loads((project / 'kicad-model-candidates.json').read_text(encoding='utf-8'))
     assert len(report['components']) == 1
     item = report['components'][0]

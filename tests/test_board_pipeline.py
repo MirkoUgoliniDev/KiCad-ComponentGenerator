@@ -63,19 +63,6 @@ def _castellated_raw(**overrides):
     return ext._params_from_tool_arguments(raw)
 
 
-def _click_3d_group(window):
-    """@brief Inverte il gruppo «Modello 3D» come farebbe l'utente col mouse.
-
-    Serve il clic vero e non `setChecked()`: e' proprio la differenza fra i due
-    che la finestra usa per riconoscere una scelta umana.
-    """
-    from PyQt6.QtCore import QPoint, Qt
-    from PyQt6.QtTest import QTest
-    before = window.group_3d.isChecked()
-    QTest.mouseClick(window.group_3d, Qt.MouseButton.LeftButton, pos=QPoint(8, 8))
-    assert window.group_3d.isChecked() is not before, "il clic deve colpire l'indicatore"
-
-
 def test_castellated_module_has_a_body_even_outside_automatic_generation(window):
     """@brief Il corpo 3D di un modulo castellato segue i dati, non il percorso di avvio.
 
@@ -114,32 +101,6 @@ def test_castellated_module_has_a_body_even_outside_automatic_generation(window)
     window._on_extracted(_castellated_raw(body_length_mm=None, body_width_mm=None))
     assert not window.group_3d.isChecked(), "senza ingombro non c'e' un solido da costruire"
     assert window._current_body_params() is None
-
-
-def test_extraction_does_not_revoke_the_3d_choice_made_by_hand(window):
-    """@brief Negativo: cio' che l'utente ha spento col clic resta spento.
-
-    Un'estrazione descrive i dati del componente; non e' il permesso di
-    rimettere in coda una generazione 3D esclusa apposta. Il clic umano si
-    distingue dalle `setChecked()` del programma perche' solo il primo emette
-    `QGroupBox.clicked`, che qui si simula con `click()`.
-
-    Positivo (nella stessa prova): se l'utente il gruppo lo accende, una
-    successiva estrazione lo lascia acceso.
-    """
-    window.group_3d.setChecked(True)
-    # Un clic sull'indicatore di un QGroupBox spuntabile ne inverte lo stato.
-    _click_3d_group(window)
-    assert not window.group_3d.isChecked()
-    window._on_extracted(_castellated_raw())
-    assert not window.group_3d.isChecked()
-    assert window._current_body_params() is None
-
-    _click_3d_group(window)
-    assert window.group_3d.isChecked()
-    window._on_extracted(_castellated_raw())
-    assert window.group_3d.isChecked()
-    assert window._current_body_params() is not None
 
 
 def test_all_gui_logs_are_flushed_once(window):
@@ -254,25 +215,24 @@ def _wait_for_worker(window, qt_app=None):
 
 
 def test_a_deliberate_2d_only_run_still_produces_the_footprint(window, monkeypatch):
-    """@brief Positivo: con il gruppo «Modello 3D» spento la generazione automatica scrive il .kicad_mod.
+    """@brief Positivo: con il 3D spento la generazione automatica scrive il .kicad_mod.
 
-    Sequenza riprodotta dall'utente: utente avanzato, gruppo «Modello 3D»
-    spento col mouse nel tab Footprint 2D, poi ritorno alla modalita' normale
-    (che riaccende la generazione automatica) e nuova estrazione. Il gruppo
-    spento fa restituire None a `_current_body_params()`, e quel None veniva
-    trattato come dato mancante: l'esito era un avviso e NESSUN footprint.
-    Un modello 3D non richiesto non puo' mancare.
+    Il 3D e' spento quando FreeCAD manca (l'interruttore manuale stava nel
+    tab Footprint 2D, tolto il 2026-09-26). Il gruppo spento fa restituire
+    None a `_current_body_params()`, e quel None veniva trattato come dato
+    mancante: l'esito era un avviso e NESSUN footprint. Un modello 3D non
+    richiesto non puo' mancare.
     """
     monkeypatch.setattr(gui.QMessageBox, "warning",
                         lambda *a, **k: pytest.fail("nessun avviso: il 2D e' un esito valido"))
     monkeypatch.setattr(gui.QMessageBox, "question",
                         lambda *a, **k: gui.QMessageBox.StandardButton.Yes)
+    window._freecad_available = False
     window.group_3d.setChecked(False)
-    window._user_3d_choice = False  # come dopo il clic umano sul titolo del gruppo
     params = _castellated_raw()
     window._auto_after_extraction = True
     window._on_extracted(params)
-    assert not window.group_3d.isChecked(), "la scelta umana non si revoca"
+    assert not window.group_3d.isChecked(), "senza FreeCAD il 3D resta spento"
     assert window._current_body_params() is None
 
     window._start_automatic_generation(window._auto_generation_params)
@@ -303,9 +263,8 @@ def test_a_missing_body_with_the_3d_group_on_still_blocks(window, monkeypatch):
 def test_the_3d_group_stays_off_when_freecad_is_absent(window):
     """@brief Negativo: senza FreeCAD l'estrazione non accende il gruppo «Modello 3D».
 
-    `_build_3d_group` lo spegne per una ragione dichiarata («Senza FreeCAD
-    resta spento, cosi' la generazione non fallisce»), ma quello spegnimento e'
-    programmatico e non lascia traccia in `_user_3d_choice`: l'estrazione lo
+    `_init_parameters` lo spegne per una ragione dichiarata («Senza FreeCAD
+    resta spento, cosi' la generazione non fallisce»): l'estrazione lo
     riaccendeva, e ogni generazione finiva con un `cad3d_error`.
 
     Positivo: con FreeCAD disponibile la stessa estrazione lo accende.

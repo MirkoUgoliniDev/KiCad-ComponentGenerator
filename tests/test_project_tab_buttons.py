@@ -288,7 +288,7 @@ def test_per_item_matcher_detail_stays_in_the_log_only(window):  # noqa: F811
     window._on_ai_progress(MATCHER_LINE)
     assert window.analysis_overlay.status.text() == PHASE_LINE
     assert MATCHER_LINE in window.ai_progress_text.toPlainText()
-    assert MATCHER_LINE in window.log_text.toPlainText()
+    assert MATCHER_LINE in window._log_plain_text()
 
 
 def test_a_phase_sentence_still_reaches_the_modal(window):  # noqa: F811
@@ -656,12 +656,14 @@ def test_generate_worker_never_shows_freecad_during_the_kicad_matching(monkeypat
     )
     phases = _run_worker_phases(monkeypatch, worker)
     tools = [tool for tool, _ in phases]
-    assert tools[0] == "kicad", "si comincia dal footprint 2D, che e' KiCad"
+    # Contratto del 2026-09-26: il footprint lo scrive questo programma, non
+    # KiCad; poi la libreria di KiCad; poi il solido di FreeCAD.
+    assert phases[0] == ("footprint", "scrittura del file .kicad_mod")
     first_freecad = tools.index("freecad")
-    assert all(tool == "kicad" for tool in tools[:first_freecad]), (
+    assert all(tool in ("footprint", "kicad") for tool in tools[:first_freecad]), (
         "nessun annuncio di FreeCAD prima che il solido cominci: " + repr(phases))
-    assert phases[first_freecad] == ("freecad", "modello 3D")
-    assert ("kicad", "abbinamento modelli KiCad") in phases[:first_freecad]
+    assert phases[first_freecad] == ("freecad", "costruzione del solido 3D")
+    assert ("kicad", "scelta del modello per ogni componente") in phases[:first_freecad]
 
 
 def test_cad3d_worker_announces_the_matching_before_the_solid(monkeypatch, tmp_path):
@@ -680,9 +682,9 @@ def test_cad3d_worker_announces_the_matching_before_the_solid(monkeypatch, tmp_p
                      pin_diameter_mm=1, pin_length_mm=3),
         tmp_path, [], [])
     phases = _run_worker_phases(monkeypatch, worker)
-    assert phases[0] == ("kicad", "abbinamento modelli KiCad")
-    assert ("freecad", "modello 3D") in phases
-    assert phases.index(("freecad", "modello 3D")) > 0
+    assert phases[0] == ("kicad", "scelta del modello per ogni componente")
+    assert ("freecad", "costruzione del solido 3D") in phases
+    assert phases.index(("freecad", "costruzione del solido 3D")) > 0
 
 
 # ── La radice della libreria decide gli stessi file dei pulsanti ──────────
@@ -867,7 +869,7 @@ def test_the_2d_pinout_command_is_the_same_icon_as_the_3d_one(window):  # noqa: 
     icon_2d, icon_3d = window.btn_pinout_2d, window.btn_pinout_3d
     assert icon_2d.text() == "" and icon_2d.toolTip() == icon_3d.toolTip()
     assert icon_2d.icon().cacheKey() != 0
-    preview = window.tabs.widget(3)
+    preview = window.tabs.widget(gui.TAB_PREVIEW)
     assert not [b for b in preview.findChildren(QPushButton) if "pinout" in b.text().lower()]
 
 
@@ -880,7 +882,7 @@ def test_the_kicad_tab_commands_are_icons_and_the_status_sits_in_a_group(window)
     QPushButton rimasto nella scheda.
     """
     from PyQt6.QtWidgets import QGroupBox, QPushButton
-    tab = window.tabs.widget(5)
+    tab = window.tabs.widget(gui.TAB_KICAD)
     commands = {window.btn_test_kicad: "Prova in KiCad...",
                 window.btn_export: "Installa nel progetto KiCad...",
                 window.btn_install_global: "Installa come libreria globale...",

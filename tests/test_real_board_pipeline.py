@@ -93,7 +93,7 @@ def test_synthetic_r0603_through_gui_resolver_and_real_freecad(
     # FreeCAD subprocesses have their own bounded timeouts in production.
     window._generate()
     worker = window._worker
-    assert worker is not None, window.log_text.toPlainText()
+    assert worker is not None, window._log_plain_text()
     while worker.isRunning():
         QTest.qWait(25)
     worker.wait()
@@ -104,9 +104,9 @@ def test_synthetic_r0603_through_gui_resolver_and_real_freecad(
     stem = fixture.name
     step = project / f"{stem}.3dshapes" / f"{stem}.step"
     preview_path = step.with_suffix(".preview.json")
-    assert step.is_file() and step.stat().st_size > 0, window.log_text.toPlainText()
+    assert step.is_file() and step.stat().st_size > 0, window._log_plain_text()
     assert (project / f"{stem}.pretty" / f"{stem}.kicad_mod").is_file()
-    assert window._last_mesh_path == preview_path, window.log_text.toPlainText()
+    assert window._last_mesh_path == preview_path, window._log_plain_text()
     preview = json.loads(preview_path.read_text(encoding="utf-8"))
     mounted = [part for part in preview["parts"] if part.get("component_index") == 0]
     assert mounted, "Generated preview must contain the actual mounted component"
@@ -130,7 +130,7 @@ def test_synthetic_r0603_through_gui_resolver_and_real_freecad(
     assert f"KICADGEN_IMPORT_OK:{expected_model}" in freecad_log
     assert "KICADGEN_STEP_COLORS_OK:" in freecad_log
     assert "colori nativi" not in freecad_log  # This text marks color-import fallback.
-    gui_log = window.log_text.toPlainText()
+    gui_log = window._log_plain_text()
     assert "R_0603_1608Metric.step" in gui_log
     # Contratto aggiornato: la riga era in inglese dentro un'interfaccia
     # italiana e finiva nella modale sotto gli occhi dell'utente. Cio' che il

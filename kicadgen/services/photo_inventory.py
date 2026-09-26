@@ -820,11 +820,12 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         tool is working, so a progress modal can show the local-detection phase
         and its icon instead of only free log text. It is called as
         phase('yolo', <short label of the local detector>) right before the
-        local ONNX detection starts, and as phase('llm', <model identifier>)
-        immediately before the paid reconciliation. The 'yolo' announcement is
+        local ONNX detection starts, and as phase('llm_inventory', <model identifier>)
+        immediately before the paid reconciliation (the paid call on the board
+        photo, drawn by the modal as board -> cloud). The 'yolo' announcement is
         never emitted for detector 'ai' or 'vlm': with a vision-only detector
         no local detection runs, and the modal must not claim a phase that is
-        not running. With 'yolo_only' the 'llm' announcement is never
+        not running. With 'yolo_only' the 'llm_inventory' announcement is never
         emitted (nothing is paid on the photograph); phase('', '') closes the
         local phase once the inventory is built. None (the default) is a no-op, and an exception raised by
         the callback is logged and swallowed, exactly like for `progress`: the
@@ -1013,7 +1014,10 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         # Da qui si paga: la revisione delle proposte e' finita e la richiesta
         # sta per partire, quindi la modale deve tornare a dichiarare il
         # modello remoto anche quando il rilevamento locale ha girato.
-        announce('llm', classifier_model or model)
+        # 'llm_inventory': stessa chiamata remota di 'llm', ma cio' che parte e'
+        # la foto della scheda con le proposte, non i documenti (la modale
+        # disegna la sorgente giusta).
+        announce('llm_inventory', classifier_model or model)
         report.components = review_global_inventory(
             photo, proposals, length, width, classifier_model or model, call, log,
             cache_dir, verification_prompt=verification_prompt,

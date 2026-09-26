@@ -133,5 +133,7 @@ def test_the_paid_vision_call_is_still_announced_for_the_detectors_that_make_it(
     phases, _, _ = extraction(photo_detector=detector, vision_model='vision/paid-model')
 
     assert inventory_call.called
-    assert ('llm', 'vision/paid-model') in phases
+    # La chiamata spedisce la foto della scheda, non i documenti: fase
+    # 'llm_inventory' (stessa chiamata remota, sorgente diversa nella modale).
+    assert ('llm_inventory', 'vision/paid-model') in phases
     assert not any(tool == 'yolo' for tool, _ in phases), phases

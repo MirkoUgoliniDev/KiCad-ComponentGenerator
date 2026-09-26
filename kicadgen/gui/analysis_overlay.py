@@ -15,11 +15,37 @@ from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QProgressBar, QPushBut
 #: rilevatore locale non costa nulla e dura poco, la chiamata al modello si
 #: paga, il CAD tiene occupata la macchina per minuti. Il colore da solo non
 #: basta a dirlo, quindi ogni strumento ha anche una forma diversa.
+#:
+#: La generazione ha tre passi e ognuno dice CHI lavora (utente, 2026-09-26:
+#: «voglio vedere bene quando entra in azione FreeCAD o KiCad»): il footprint
+#: lo scrive il codice di questo programma (KiCad non e' in esecuzione); la
+#: scelta dei modelli legge i FILE della libreria 3D di KiCad e, per i
+#: candidati non ancora misurati, avvia FreeCAD (`freecad_measure`, stesso
+#: colore di FreeCAD, segno del calibro); il solido lo costruisce FreeCAD.
 TOOLS = {
     "llm": ("Modello AI (remoto, a consumo)", "#f9e2af", "cloud"),
     "yolo": ("YOLO (rilevamento locale)", "#a6e3a1", "frame"),
+    "footprint": ("KiCadGen (footprint 2D, calcolo locale)", "#89b4fa", "pads"),
+    "kicad": ("Libreria modelli 3D di KiCad", "#94e2d5", "library"),
+    "freecad_measure": ("FreeCAD (misura dei modelli)", "#cba6f7", "caliper"),
     "freecad": ("FreeCAD (modellazione locale)", "#cba6f7", "cube"),
-    "kicad": ("KiCad (footprint e libreria)", "#89b4fa", "pads"),
+}
+
+#: Fasi che sono la *stessa* chiamata remota di una voce di TOOLS (stesso nome,
+#: colore e segno) ma partono da dati diversi. Restano fuori da TOOLS perche'
+#: la', per contratto, ogni strumento ha una forma sua: qui cambia solo cio'
+#: che viene spedito, non chi lavora.
+TOOL_ALIASES = {
+    "llm_inventory": "llm",
+}
+
+#: Cosa parte dalla macchina verso il modello remoto, per le fasi che spediscono
+#: dati: "documents" sono i documenti dell'estrazione, "board" la fotografia
+#: della scheda con i corpi proposti dal rilevatore (inventario globale). Una
+#: fase assente da qui non spedisce nulla e mostra solo l'anello.
+TRANSFER_SOURCES = {
+    "llm": "documents",
+    "llm_inventory": "board",
 }
 
 #: Righe che il programma scrive per se' stesso: marcatori delle chiamate AI,
@@ -578,6 +604,22 @@ class AnalysisSpinner(QWidget):
                                (right, low_r), (low_l, bottom), (low_r, bottom),
                                (left, centre), (right, centre), (top, centre)):
                 painter.drawLine(start, end)
+        elif self.glyph == "library":
+            # Libreria: tre dorsi di libro su uno scaffale, uno inclinato. Si
+            # sceglie un file gia' esistente, non si costruisce nulla.
+            for x, top in ((17.0, 19.0), (22.0, 17.0), (27.0, 20.0)):
+                painter.drawRoundedRect(QRectF(x, top, 4, 38 - top), 1, 1)
+            painter.drawLine(QPointF(33, 21), QPointF(38, 37))
+            painter.drawLine(QPointF(15, 38), QPointF(41, 38))
+        elif self.glyph == "caliper":
+            # Calibro: asta con due becchi, uno fisso e uno scorrevole. FreeCAD
+            # qui MISURA dei modelli esistenti, non costruisce il solido.
+            painter.drawLine(QPointF(16, 22), QPointF(40, 22))
+            painter.drawLine(QPointF(18, 22), QPointF(18, 36))
+            painter.drawLine(QPointF(18, 36), QPointF(21, 33))
+            painter.drawRect(QRectF(28, 19, 5, 6))
+            painter.drawLine(QPointF(30.5, 25), QPointF(30.5, 36))
+            painter.drawLine(QPointF(30.5, 36), QPointF(27.5, 33))
         elif self.glyph == "pads":
             # Footprint: due file di piazzole *piene* attorno al contorno del
             # corpo. Le piazzole vuote si leggevano come un altro riquadro; il
@@ -596,6 +638,98 @@ class AnalysisSpinner(QWidget):
             # segno del pin 1 a sinistra: e' come si legge un footprint.
             painter.drawRect(QRectF(20, 24, 16, 8))
             painter.drawLine(QPointF(20, 27), QPointF(24, 27))
+
+
+class TransferAnimation(QWidget):
+    """@brief Local data icon with packets travelling right, towards the spinner.
+
+    Sits at the left of the spinner while a remote model call is running: the
+    spinner on the right carries the cloud, this widget carries what left the
+    machine. Together they read «local data -> AI cloud».
+
+    @note The packets say only that a remote request is in flight. They are
+        NOT an upload or processing percentage: the HTTP call reports no
+        progress, so a phase-by-phase animation would present a guess as a
+        fact (same rule as `AnalysisOverlay.set_progress`).
+    @note The board pictogram is a fixed drawing, not the detector's count:
+        the number of real proposals is in the status line.
+    """
+
+    #: Travelling packets on the path at the same time.
+    PACKETS = 4
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(150, 56)
+        self.source = "documents"
+        self.color = "#f9e2af"
+        #: Position of the first packet along the path, 0..1.
+        self.offset = 0.0
+
+    def set_source(self, source, color):
+        """@brief Choose what is drawn as leaving the machine.
+
+        @param source "documents" or "board" (see TRANSFER_SOURCES); anything
+            else falls back to the documents icon rather than raising.
+        @param color Packet color, the same as the tool at work.
+        """
+        self.source = source if source in ("documents", "board") else "documents"
+        self.color = color
+        self.update()
+
+    def advance(self, step=0.012):
+        """@brief Move the packets one animation step towards the cloud.
+
+        @param step Fraction of the path covered per call (timer runs at 25 Hz).
+        """
+        self.offset = (self.offset + step) % 1.0
+        self.update()
+
+    def paintEvent(self, event):
+        """@brief Paint the source icon and the packets moving to the right."""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor("#cdd6f4"), 1.6)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        if self.source == "board":
+            self._paint_board(painter)
+        else:
+            self._paint_documents(painter)
+        # Binario tratteggiato fra i dati e la nuvola, poi i pacchetti.
+        start, end, y = 56.0, float(self.width() - 8), 28.0
+        rail = QPen(QColor("#45475a"), 1.4, Qt.PenStyle.DashLine)
+        painter.setPen(rail)
+        painter.drawLine(QPointF(start, y), QPointF(end, y))
+        painter.setPen(Qt.PenStyle.NoPen)
+        for index in range(self.PACKETS):
+            t = (self.offset + index / self.PACKETS) % 1.0
+            color = QColor(self.color)
+            # Compaiono e svaniscono agli estremi invece di saltare.
+            color.setAlphaF(max(0.0, min(1.0, 4 * t, 4 * (1 - t))))
+            painter.setBrush(color)
+            x = start + t * (end - start)
+            painter.drawRoundedRect(QRectF(x - 3, y - 3, 6, 6), 1.5, 1.5)
+
+    @staticmethod
+    def _paint_documents(painter):
+        """Two stacked sheets with text lines: the documents being sent."""
+        painter.setBrush(QColor("#1e1e2e"))
+        painter.drawRoundedRect(QRectF(16, 10, 22, 28), 2.5, 2.5)
+        painter.drawRoundedRect(QRectF(10, 16, 22, 28), 2.5, 2.5)
+        for row in (23.0, 28.0, 33.0, 38.0):
+            painter.drawLine(QPointF(14, row), QPointF(28 if row < 38 else 22, row))
+
+    @staticmethod
+    def _paint_board(painter):
+        """A board outline with a few bodies on it: the photographed module."""
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(QRectF(6, 13, 40, 30), 3, 3)
+        painter.setBrush(QColor("#cdd6f4"))
+        for body in (QRectF(11, 18, 12, 9), QRectF(27, 18, 6, 4), QRectF(36, 19, 5, 7),
+                     QRectF(27, 31, 14, 7), QRectF(12, 32, 5, 4)):
+            painter.drawRect(body)
 
 
 #: Icon size of the progress window commands, pixels (toolbars use 22).
@@ -619,6 +753,9 @@ class AnalysisOverlay(QWidget):
     #: lavoro sceglie. E' anche il motivo per cui questo modulo non importa
     #: main_window: la dipendenza va in un verso solo.
     abort_requested = pyqtSignal()
+    #: Emesso quando l'utente chiude una scheda rimasta aperta a lavoro finito
+    #: (`show_completed`): chi l'ha lasciata aperta riprende da li'.
+    closed = pyqtSignal()
 
     def __init__(self, parent, *, i18n=None):
         super().__init__(parent)
@@ -643,7 +780,22 @@ class AnalysisOverlay(QWidget):
         content.setContentsMargins(_CARD_PADDING, 24, _CARD_PADDING, 24)
         content.setSpacing(16)
         self.spinner = AnalysisSpinner()
-        content.addWidget(self.spinner, alignment=Qt.AlignmentFlag.AlignHCenter)
+        # Per le chiamate remote i dati locali stanno a sinistra dell'anello con
+        # la nuvola, e i pacchetti vanno verso di essa (utente, 2026-09-26). La
+        # riga ha l'altezza dell'anello: comparire o sparire non fa sobbalzare
+        # la scheda.
+        self.transfer = TransferAnimation()
+        self.transfer.hide()
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(0)
+        header.addStretch()
+        header.addWidget(self.transfer)
+        header.addWidget(self.spinner)
+        header.addStretch()
+        self.header_row = QWidget()
+        self.header_row.setLayout(header)
+        content.addWidget(self.header_row)
         self.title = title = QLabel("Analisi AI in corso")
         title.setStyleSheet("font-size: 18pt; font-weight: 600;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -662,6 +814,21 @@ class AnalysisOverlay(QWidget):
         self.tool.setStyleSheet("font-weight: 600;")
         self.tool.hide()
         content.addWidget(self.tool)
+        # I passi di un lavoro in piu' fasi (generazione): quello in corso in
+        # evidenza, quelli fatti spuntati, quelli non disponibili barrati con
+        # il motivo. Nascosta per le operazioni di una fase sola.
+        self.steps = QLabel()
+        self.steps.setObjectName("analysisSteps")
+        self.steps.setTextFormat(Qt.TextFormat.RichText)
+        self.steps.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.steps.setWordWrap(True)
+        self.steps.setProperty("i18n_skip", True)
+        self.steps.hide()
+        content.addWidget(self.steps)
+        #: Testi (gia' tradotti) dei passi, passo corrente, motivi di chi non c'e'.
+        self._step_labels: list[str] = []
+        self._step_current = -1
+        self._step_unavailable: dict[int, str] = {}
         self.status = QLabel()
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setWordWrap(True)
@@ -732,6 +899,14 @@ class AnalysisOverlay(QWidget):
         buttons.addStretch()
         buttons.addWidget(self.log_button)
         buttons.addWidget(self.abort_button)
+        # A lavoro finito la scheda resta aperta con tutti i passi spuntati e
+        # si chiude solo da qui (utente, 2026-09-26: il passo FreeCAD non si
+        # vedeva mai concluso, la scheda spariva appena finiva).
+        self.close_button = QPushButton("Chiudi")
+        self.close_button.setObjectName("analysisCloseButton")
+        self.close_button.clicked.connect(self._close_completed)
+        self.close_button.hide()
+        buttons.addWidget(self.close_button)
         buttons.addStretch()
         self.button_row = QWidget()
         self.button_row.setLayout(buttons)
@@ -922,6 +1097,11 @@ class AnalysisOverlay(QWidget):
         # l'elenco finisce e' lo stesso sobbalzo di una che si alza).
         self.status.setMinimumHeight(self._status_base_height + self._status_extra)
         self.tool.setMinimumHeight(self.tool.fontMetrics().lineSpacing())
+        # Due righe per i passi, ma solo quando ci sono: con i motivi dei passi
+        # non disponibili la riga puo' andare a capo. Le operazioni di una fase
+        # sola non pagano quello spazio (una finestra bassa non lo ha).
+        self.steps.setMinimumHeight(
+            2 * self.steps.fontMetrics().lineSpacing() if self._step_labels else 0)
         self.cost.setMinimumHeight(self.cost.fontMetrics().lineSpacing())
         # Anche il tempo trascorso: nasce vuoto e riceve il primo testo in
         # `start`, DOPO questo calcolo. Una label vuota e una con testo non
@@ -1025,6 +1205,8 @@ class AnalysisOverlay(QWidget):
         self._hidden_at = None
         self.spinner.angle = 0
         self.set_tool(None)
+        self.clear_steps()
+        self.close_button.hide()
         # Nuova operazione, nuovo ingombro: il supplemento concesso all'elenco
         # della corsa precedente si azzera QUI e in nessun altro punto. Si
         # svuota prima la label perche' il suo testo vecchio, se era un elenco,
@@ -1044,7 +1226,9 @@ class AnalysisOverlay(QWidget):
     def set_tool(self, tool, detail=""):
         """@brief Name the tool now at work, with its own mark and color.
 
-        @param tool Key in TOOLS, or None/unknown to show the bare ring.
+        @param tool Key in TOOLS or TOOL_ALIASES, or None/unknown to show the
+            bare ring. Keys in TRANSFER_SOURCES also show the local data being
+            sent, at the left of the ring.
         @param detail Free text appended in parentheses, e.g. the model name.
         @note An unknown key is treated as no tool rather than raising: a new
             phase must never be able to take down a running analysis.
@@ -1052,12 +1236,17 @@ class AnalysisOverlay(QWidget):
             main_window reads `tool.text()` to know which detail the header
             already carries.
         """
-        name, color, glyph = TOOLS.get(str(tool or ""), ("", "#89b4fa", ""))
+        key = str(tool or "")
+        name, color, glyph = TOOLS.get(TOOL_ALIASES.get(key, key), ("", "#89b4fa", ""))
         # La label e' `i18n_skip` (porta un dettaglio che non e' testo nostro):
         # il nome dello strumento si traduce qui, prima di comporla.
         if name and self.i18n is not None:
             name = self.i18n.text(name)
         self.spinner.set_tool(glyph, color)
+        source = TRANSFER_SOURCES.get(key)
+        if source is not None:
+            self.transfer.set_source(source, color)
+        self.transfer.setVisible(source is not None)
         detail = " ".join(str(detail or "").split())
         self.tool.setText(f"{name} · {detail}" if name and detail else name)
         self.tool.setToolTip(self.tool.text())
@@ -1066,6 +1255,89 @@ class AnalysisOverlay(QWidget):
         self.tool.setVisible(bool(name))
         self.progress.setStyleSheet(
             f"QProgressBar::chunk {{ background: {color}; border-radius: 5px; }}")
+
+    def set_steps(self, labels, unavailable=None):
+        """@brief Show the steps of a multi-phase job, none of them started yet.
+
+        @param labels Italian source texts of the steps, in order.
+        @param unavailable Optional {index: reason}: steps that will not run
+            (e.g. FreeCAD missing), drawn struck through with the reason.
+        """
+        translate = self.i18n.text if self.i18n is not None else (lambda text: text)
+        self._step_labels = [translate(str(label)) for label in labels]
+        self._step_unavailable = {int(index): translate(str(reason))
+                                  for index, reason in (unavailable or {}).items()}
+        self._step_current = -1
+        self._render_steps()
+        # Chiamata subito dopo `start`, prima del primo disegno: la scheda
+        # prende adesso l'altezza che terra' per tutta la generazione.
+        self._size_the_card()
+
+    def set_current_step(self, index):
+        """@brief Mark step `index` as running and every earlier step as done.
+
+        @param index Position in the list given to `set_steps`; an index out of
+            range, or no steps shown, is ignored rather than raising.
+        """
+        if not self._step_labels or not 0 <= int(index) < len(self._step_labels):
+            return
+        self._step_current = int(index)
+        self._render_steps()
+
+    def show_completed(self, message):
+        """@brief Keep the card open on a finished job: every step ticked, «Chiudi» to leave.
+
+        @param message Final outcome, already translated, shown as the status.
+        @note The clock and the animation stop (nothing is running any more)
+            and the abort command goes away; the card closes only through
+            «Chiudi», which emits `closed`.
+        """
+        self.timer.stop()
+        if self._step_labels:
+            self._step_current = len(self._step_labels)
+            self._render_steps()
+        self.set_progress(None, None)
+        self.set_abortable(False)
+        self.set_status(message)
+        self.close_button.show()
+        self.close_button.setFocus()
+
+    def is_holding_completed(self):
+        """@brief Tell whether the card is open on a finished job, waiting for «Chiudi»."""
+        return not self.isHidden() and not self.close_button.isHidden()
+
+    def _close_completed(self):
+        self.close_button.hide()
+        self.stop()
+        self.closed.emit()
+
+    def clear_steps(self):
+        """@brief Hide the step row (single-phase operations have none)."""
+        self._step_labels, self._step_unavailable, self._step_current = [], {}, -1
+        self.steps.clear()
+        self.steps.hide()
+
+    def steps_plain_text(self):
+        """@brief The step row as plain text, marks included (for logs and tests)."""
+        document = QTextDocument()
+        document.setHtml(self.steps.text())
+        return document.toPlainText()
+
+    def _render_steps(self):
+        parts = []
+        for index, label in enumerate(self._step_labels):
+            text = html.escape(f"{index + 1} · {label}")
+            if index in self._step_unavailable:
+                reason = html.escape(self._step_unavailable[index])
+                parts.append(f'<span style="color:#6c7086"><s>{text}</s> ({reason})</span>')
+            elif index < self._step_current:
+                parts.append(f'<span style="color:#a6e3a1">&#10003; {text}</span>')
+            elif index == self._step_current:
+                parts.append(f'<span style="color:#f5e0dc; font-weight:600">&#9679; {text}</span>')
+            else:
+                parts.append(f'<span style="color:#a6adc8">&#9675; {text}</span>')
+        self.steps.setText('&nbsp;&nbsp;&#8250;&nbsp;&nbsp;'.join(parts))
+        self.steps.setVisible(bool(parts))
 
     def set_progress(self, done=None, total=None, unit=""):
         """@brief Show a percentage only when a real count backs it.
@@ -1258,6 +1530,8 @@ class AnalysisOverlay(QWidget):
         self.elapsed.setText(elapsed)
         self.spinner.angle = (self.spinner.angle + 9) % 360
         self.spinner.update()
+        if self.transfer.isVisible():
+            self.transfer.advance()
 
     def stop(self):
         """@brief Hide the overlay and stop the animation.

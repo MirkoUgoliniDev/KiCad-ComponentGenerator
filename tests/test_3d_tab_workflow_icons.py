@@ -74,8 +74,8 @@ def test_the_bottom_row_is_gone_and_the_bar_sits_above_the_model(window):  # noq
     fuori dal pannello delle impostazioni avanzate, che ha i suoi pulsanti --
     non resta nessun pulsante a testo visibile, e dopo la riga di stato non
     c'e' piu' nulla: la vecchia riga in basso era fatta di QPushButton. Il
-    solo QPushButton rimasto e' «Rileva terminali», nascosto per decisione
-    dell'utente (2026-09-13) e verificato altrove.
+    soli QPushButton rimasti sono «Rileva terminali» e «Affina reofori»,
+    nascosti per decisione dell'utente (2026-09-13) e verificati altrove.
     """
     page = window.model_3d_page.layout()
     widgets = [page.itemAt(i).widget() for i in range(page.count())]
@@ -156,10 +156,11 @@ def test_regenerate_is_the_last_command_of_the_bar(window):  # noqa: F811
     gli altri comandi del flusso restano dopo il divisore, prima di entrambi.
     """
     widgets = _bar_widgets(window)
-    # Spazio elastico (None), pulsante nascosto per decisione del 2026-09-13 e
-    # indicatore di caricamento non sono comandi della barra.
+    # Spazio elastico (None), i due pulsanti nascosti per decisione del
+    # 2026-09-13 e indicatore di caricamento non sono comandi della barra.
     commands = [w for w in widgets if w is not None
-                and w is not window.btn_terminal_detail and w is not window.loading_3d_indicator]
+                and w not in (window.btn_terminal_detail, window.btn_lead_refinement,
+                              window.loading_3d_indicator)]
     assert commands[-1] is window.btn_regen_3d
     assert widgets.index(window.contact_style_bar_3d) < widgets.index(window.btn_regen_3d)
     for button in _workflow(window)[1:]:

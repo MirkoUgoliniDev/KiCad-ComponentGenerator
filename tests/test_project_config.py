@@ -149,7 +149,7 @@ def test_the_sides_table_and_the_contact_style_come_back(window, monkeypatch):  
     monkeypatch.setattr(gui, "save_config", lambda config: None)
     _new(window, monkeypatch, "Castellated")
     window.group_castellated.setChecked(True)
-    window.table_sides.setRowCount(0)
+    window._sides.clear()
     window._add_side_row({"edge": "left", "count": 7, "pitch_mm": 1.27,
                           "contact_style": "through_hole"})
     before = window._serialised_sides()
