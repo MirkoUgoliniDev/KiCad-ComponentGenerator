@@ -19,12 +19,24 @@ posizioni vengono generate (comportamento di un normale pin header).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from math import isfinite
+from math import hypot, isfinite
 from typing import Iterator, Optional, Tuple
 
 from ..core.footprint import Footprint, FpRect, Pad
 from ..core.silk import keepout_box, pin_one, pin_one_marker, silk_rectangle
 from ..services.messages import tx
+from .castellated_module import MIN_HOLE_WALL_MM
+
+#: Rame libero minimo fra due piazzole adiacenti, in mm.
+#:
+#: E' lo stesso minimo del generatore castellated (`MIN_HOLE_WALL_MM`, 0.2
+#: mm), riusato di proposito: vale come limite inferiore anche fra due
+#: piazzole di rame, perche' 0.2 mm e' la distanza di isolamento predefinita
+#: di un progetto KiCad (classe Default) e sta sopra il minimo di spaziatura
+#: dei produttori di PCB standard (tipicamente 0.1-0.15 mm). Un footprint che
+#: non la rispetta ha piazzole che si toccano o che il DRC segnala subito. E'
+#: un LIMITE INFERIORE di fabbricabilita', non una distanza consigliata.
+MIN_PAD_GAP_MM = MIN_HOLE_WALL_MM
 
 
 @dataclass
@@ -136,6 +148,46 @@ class PinHeaderParams:
                            col=col)
                     )
                 seen[position] = pin
+        self._validate_pad_clearance()
+
+    def _validate_pad_clearance(self) -> None:
+        """Refuse populated pads closer than MIN_PAD_GAP_MM of free copper.
+
+        The pads actually emitted are checked (pin_positions), so a sparse
+        pin map with a small grid pitch is accepted when the populated pads
+        are far apart, and a full grid is checked along the pitch, the row
+        spacing and the diagonal alike. Pin 1 is a square pad (see
+        build_pin_header): its corner reaches further than a circle.
+        """
+        radius = self.pad_diameter / 2
+        pads = sorted(pin_positions(self), key=lambda item: item[1])
+        for index, (pin_a, xa, ya) in enumerate(pads):
+            for pin_b, xb, yb in pads[index + 1:]:
+                if xb - xa >= 2 * radius + MIN_PAD_GAP_MM:
+                    break  # sorted by x: every later pad is further along X
+                gap = _pad_gap(xa, ya, pin_a == 1, xb, yb, pin_b == 1, radius)
+                if gap < MIN_PAD_GAP_MM - 1e-9:
+                    distance = hypot(xb - xa, yb - ya)
+                    raise ValueError(tx(
+                        "Pad {a} e {b}: piazzole di {pad:.2f} mm con i centri a {distance:.2f} "
+                        "mm lasciano {gap:.2f} mm di rame libero, meno del minimo di "
+                        "{minimum:.2f} mm (si toccherebbero o quasi). Riduci il diametro del "
+                        "pad o controlla passo e distanza tra righe.",
+                        a=pin_a, b=pin_b, pad=self.pad_diameter, distance=distance,
+                        gap=max(gap, 0.0), minimum=MIN_PAD_GAP_MM))
+
+
+def _pad_gap(xa, ya, square_a, xb, yb, square_b, radius) -> float:
+    """Free copper between two pads of the same size (circle, or square for pin 1)."""
+    if not square_a and not square_b:
+        return hypot(xb - xa, yb - ya) - 2 * radius
+    if square_a and square_b:
+        dx, dy = abs(xb - xa) - 2 * radius, abs(yb - ya) - 2 * radius
+        return hypot(dx, dy) if dx > 0 and dy > 0 else max(dx, dy)
+    # Square (half side = radius) against a circle of the same radius.
+    dx = max(0.0, abs(xb - xa) - radius)
+    dy = max(0.0, abs(yb - ya) - radius)
+    return hypot(dx, dy) - radius
 
 
 def pin_positions(params: PinHeaderParams) -> Iterator[Tuple[int, float, float]]:

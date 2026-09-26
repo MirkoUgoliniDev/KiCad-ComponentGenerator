@@ -17,11 +17,15 @@ with the same rules the old table applied:
   removed (the old table did the same on every combo change).
 
 Position, height, color and marking keep the evidence: they move or paint the
-same body.
+same body. A height that is an estimate (`component_state.height_is_estimated`)
+is marked «stimata» in its cell; changing it by hand records it as the
+user's reading (`component_state.mark_height_measured`).
 """
 from copy import deepcopy
 
 from PyQt6.QtCore import pyqtSignal
+
+from .component_state import height_is_estimated, mark_height_measured, mark_height_placeholder
 from PyQt6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QDialogButtonBox,
                              QDoubleSpinBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
                              QPushButton, QTableWidget, QVBoxLayout)
@@ -81,7 +85,7 @@ class ComponentEditorDialog(QDialog):
             self._add_row(deepcopy(component), original=True)
         buttons_row = QHBoxLayout()
         self.btn_add = QPushButton("Aggiungi componente")
-        self.btn_add.clicked.connect(lambda: self._add_row(dict(NEW_COMPONENT), original=False))
+        self.btn_add.clicked.connect(self._add_new_row)
         self.btn_remove = QPushButton("Rimuovi componente selezionato")
         self.btn_remove.clicked.connect(self._remove_selected)
         buttons_row.addWidget(self.btn_add)
@@ -120,6 +124,13 @@ class ComponentEditorDialog(QDialog):
             spin.setRange(min(minimum, value), max(300.0, value))
             spin.setSingleStep(0.1)
             spin.setValue(value)
+            if key == "height_mm" and height_is_estimated(component):
+                # Stessa cella, ma si legge che e' una stima e non una misura.
+                spin.setSuffix(" ~")
+                tip = "Altezza stimata, non misurata: correggila se la conosci."
+                i18n = getattr(self.parent(), "i18n", None)
+                spin.setToolTip(i18n.text(tip) if i18n is not None else tip)
+                spin.setStyleSheet("color: #f9e2af;")
             self.table.setCellWidget(row, column, spin)
         rotation = QComboBox()
         for degrees in (0, 90, 180, 270):
@@ -135,6 +146,12 @@ class ComponentEditorDialog(QDialog):
         self.table.setCellWidget(row, 9, QLineEdit(str(component.get("marking") or "")))
         # I dati non mostrati (metadati del rilevamento) viaggiano con la riga.
         self._rows_data.append(component)
+
+    def _add_new_row(self) -> None:
+        """Add a body by hand; its height is a placeholder until typed."""
+        component = dict(NEW_COMPONENT)
+        mark_height_placeholder(component)
+        self._add_row(component, original=False)
 
     def _remove_selected(self) -> None:
         row = self.table.currentRow()
@@ -157,6 +174,12 @@ class ComponentEditorDialog(QDialog):
             entry["kind"] = self.table.cellWidget(row, 1).currentData() or "generic"
             for column, key, _minimum in _NUMBERS:
                 entry[key] = self.table.cellWidget(row, column).value()
+            # La cella mostrava l'altezza del componente, o quella del nuovo
+            # componente se mancava: un valore diverso e' stato scritto a mano.
+            before = (original if original is not None else {}).get(
+                "height_mm", NEW_COMPONENT["height_mm"])
+            if abs(float(entry["height_mm"]) - float(before or 0.0)) > 1e-9:
+                mark_height_measured(entry)
             entry["rotation_deg"] = float(self.table.cellWidget(row, 7).currentData() or 0.0)
             entry["color_hex"] = self.table.cellWidget(row, 8).text().strip() or "#303030"
             entry["marking"] = self.table.cellWidget(row, 9).text().strip()

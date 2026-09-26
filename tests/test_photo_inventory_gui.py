@@ -101,6 +101,12 @@ def window(monkeypatch, tmp_path):
     # Questi test partono con le quote dei campi, come prima; il caso delle
     # quote ignote ha i suoi test in test_board_size_known.py.
     w._board_size_known = True
+    # Dal 26/09 lo stile dei contatti castellated che la foto non mostra si
+    # CHIEDE all'utente con una piccola finestra modale. Questi test simulano
+    # chi risponde «Mezzo foro + foro passante», lo stile che prima veniva
+    # messo da solo: i loro contratti restano quelli di prima. La domanda, la
+    # rinuncia e il blocco hanno i loro test in test_contact_style_gui.py.
+    monkeypatch.setattr(w, '_ask_contact_style', lambda sides: gui.default_contact_style())
     monkeypatch.setattr(w, '_extract_block_reason',
                         lambda: "" if w._component_name() else
                         "Crea o apri prima un progetto (menu File).")

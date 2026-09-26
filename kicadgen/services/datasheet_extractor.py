@@ -31,7 +31,7 @@ from typing import Callable, Optional, Sequence
 from ..cad3d.annotations import EDGE_NAMES
 from ..core.package_geometry import package_from_mapping
 from ..generators.castellated_module import (
-    CONTACT_HALF_AND_THROUGH, CONTACT_STYLE_NAMES, CONTACT_STYLES, EDGE_LABELS, EDGES,
+    CONTACT_STYLES, EDGE_LABELS, EDGES,
 )
 from .ai_diagnostics import CallCancelled
 from .openrouter import (DEFAULT_MODEL, OpenRouterError, api_key, call_tool, check_credit,
@@ -40,14 +40,105 @@ from .messages import tx
 
 MAX_FILES = 5
 
-#: Tipi di package che il modello 3D sa disegnare (cad3d/freecad_parts.py:
-#: BUILDERS). Duplicato qui perche' quel modulo gira solo dentro FreeCAD.
-COMPONENT_KINDS = ('generic', 'ic', 'ic_soic', 'ic_qfn', 'transformer', 'module', 'led', 'capacitor_tantalum', 'capacitor', 'resistor', 'inductor', 'diode', 'diode_melf', 'connector', 'switch', 'crystal')
+#: Mechanical body kinds a photo or a drawing may declare for a mounted part,
+#: each with the description the model reads (Italian, like every prompt).
+#:
+#: A kind is a STRUCTURAL class -- the shape of the body and of its terminals,
+#: which decides the 3D shape and the plausible height of an unmeasured body --
+#: never a brand, a part number or an electrical function. The set covers the
+#: shapes whose height or outline differs enough to matter for a mechanical
+#: envelope (a flat chip, a gull-wing package, a can standing on the board, a
+#: strip of posts, a flat panel...); anything else is "generic", and an
+#: unknown value sent by a model degrades to "generic" with a note
+#: (`_components_3d`). The 3D side keeps its own copy (cad3d/freecad_parts.
+#: BUILDERS, which only runs inside FreeCAD): a kind it does not draw yet is
+#: drawn as the generic block.
+COMPONENT_KIND_DESCRIPTIONS: dict[str, str] = {
+    "generic": "corpo non riconoscibile: blocco semplice",
+    "ic": "integrato di package non riconoscibile",
+    "ic_soic": ("integrato rettangolare con reofori ad ala di gabbiano su due lati opposti "
+                "(SO, SOIC, SSOP, TSSOP, MSOP)"),
+    "ic_sot": ("piccolo package plastico con pochi reofori corti su uno o due lati (famiglia "
+               "SOT e SC-70, anche con linguetta)"),
+    "ic_qfn": ("integrato piatto senza reofori sporgenti, contatti sotto il bordo del corpo "
+               "(QFN, DFN, LGA)"),
+    "ic_qfp": "integrato con reofori ad ala di gabbiano su quattro lati (QFP, LQFP, TQFP)",
+    "ic_bga": "integrato con sfere sotto il corpo e nessun terminale visibile ai lati (BGA, CSP)",
+    "power_tab": ("package di potenza con linguetta metallica di dissipazione (TO-252/DPAK, "
+                  "TO-263/D2PAK, TO-220)"),
+    "transformer": "trasformatore o avvolgimento su nucleo, corpo alto",
+    "module": "sotto-modulo su una propria PCB montato sulla scheda",
+    "shield_can": "schermo metallico di lamiera sopra un gruppo di componenti",
+    "led": "LED a montaggio superficiale con lente",
+    "capacitor_tantalum": "condensatore stampato con striscia di polarita' (tantalio o polimero)",
+    "capacitor": "condensatore chip rettangolare con due terminazioni metalliche",
+    "capacitor_electrolytic": ("condensatore elettrolitico cilindrico (lattina su base plastica "
+                               "o radiale), in piedi sulla scheda"),
+    "resistor": "resistenza chip rettangolare con due terminazioni metalliche",
+    "inductor": "induttore chip o bobinato di piccole dimensioni",
+    "inductor_power": ("induttore di potenza stampato o schermato, quadrato o tondo, con "
+                       "altezza paragonabile al lato"),
+    "diode": "diodo in package plastico piatto con banda (SOD, SMA, SMB, SMC)",
+    "diode_melf": "diodo cilindrico di vetro con banda e cappucci metallici, da non confondere con un chip",
+    "connector": "connettore non meglio classificabile (USB, coassiale, morsettiera, FPC...)",
+    "pin_header": "fila o matrice di pin maschi a passo regolare su una base plastica",
+    "socket_header": "fila o matrice di contatti femmina in un corpo plastico chiuso",
+    "switch": "pulsante o interruttore",
+    "relay": "rele': blocco plastico chiuso, alto",
+    "potentiometer": "trimmer o potenziometro con vite o albero di regolazione",
+    "crystal": "quarzo o oscillatore piatto in contenitore ceramico o metallico",
+    "crystal_can": "quarzo in contenitore metallico ovale alto",
+    "battery": "batteria o portabatteria (a bottone o cilindrica)",
+    "display": "display piatto (vetro LCD od OLED), con o senza cornice",
+    "buzzer": "cicalino o trasduttore cilindrico",
+}
+
+#: The kinds, in the order the schemas offer them.
+COMPONENT_KINDS = tuple(COMPONENT_KIND_DESCRIPTIONS)
 MAX_FILE_BYTES = 20 * 1024 * 1024  # 20 MB, limite ragionevole per singolo file API
 
 _SUPPORTED_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
 _TOOL_NAME = "report_pin_header_params"
+
+#: Length fields of the answer, per level: every one is a length in the
+#: declared drawing unit and becomes millimetres after `_canonicalize_answer`.
+#: They are also the key dimensions whose provenance the model declares
+#: (`value_sources`).
+_TOP_LENGTH_KEYS = ("pitch_mm", "row_spacing_mm", "pad_diameter_mm", "drill_mm",
+                    "body_length_mm", "body_width_mm", "body_height_mm", "pcb_thickness_mm",
+                    "body_offset_x_mm", "body_offset_y_mm", "pin_length_3d_mm")
+_SIDE_LENGTH_KEYS = ("pitch_mm", "offset_mm", "pad_length_mm", "pad_width_mm",
+                     "half_hole_diameter_mm", "through_hole_drill_mm")
+
+#: Provenance the model may declare for a value (`value_sources`): "read"
+#: written in a document (a dimension, a table), "derived" computed from read
+#: values only, "estimated" judged by eye on a photograph, scaled from other
+#: dimensions or taken from a design rule because no document gives it.
+VALUE_SOURCES = ("read", "derived", "estimated")
+#: Provenance recorded for a value the answer carries without a valid source:
+#: it is treated as needing review, exactly like an estimated one, so a value
+#: whose origin nobody declared never passes for a read one.
+UNDECLARED_SOURCE = "undeclared"
+#: Provenances that ask for a review before the value is used.
+REVIEW_SOURCES = ("estimated", UNDECLARED_SOURCE)
+
+
+def _value_sources_schema(keys, where: str) -> dict:
+    """Schema of a `value_sources` object: one optional provenance per length key."""
+    return {
+        "type": "object",
+        "description": (
+            f"Provenienza di ogni quota che compili {where}, campo per campo (chiave = "
+            "nome del campo): \"read\" se e' scritta nel documento (quota del disegno, "
+            "tabella); \"derived\" se la calcoli SOLO da quote lette (somma, differenza, "
+            "meta'); \"estimated\" se la stimi: a occhio da una foto, in proporzione ad "
+            "altre quote o con una regola di progetto perche' il documento non la riporta. "
+            "Dichiarala per OGNI quota che compili: una quota senza provenienza viene "
+            "trattata come stimata e segnalata all'utente."
+        ),
+        "properties": {key: {"type": "string", "enum": list(VALUE_SOURCES)} for key in keys},
+    }
 
 _EXTRACTION_TOOL = {
     "name": _TOOL_NAME,
@@ -242,9 +333,9 @@ _EXTRACTION_TOOL = {
                     "disegno meccanico quotato o misura diretta) -- e' una quota "
                     "COMPLETAMENTE DIVERSA da row_spacing_mm e body_width_mm (che sono "
                     "quote della vista dall'alto, assi X/Y). Cercala nella vista "
-                    "laterale del disegno, di solito la quota piu' piccola vicino ai "
-                    "pin (es. per un case tipo DIP-16 di pochi mm di spessore e' "
-                    "spesso 5-10mm, quasi sempre diversa dalla riga precedente)."
+                    "laterale del disegno (o nel documento dichiarato come vista "
+                    "laterale), nell'unita' di drawing_unit; non riusare un numero "
+                    "letto in pianta."
                 ),
             },
             "body_offset_x_mm": {
@@ -253,8 +344,8 @@ _EXTRACTION_TOOL = {
                     "Posizione del bordo del corpo lungo X rispetto al pin 1 (che e' "
                     "sempre nell'origine x=0 del footprint). Tipicamente un valore "
                     "negativo pari alla distanza dal bordo sinistro del corpo al pin 1, "
-                    "presa dalla quota del disegno meccanico (es. se il pin 1 e' a 3.0mm "
-                    "dal bordo sinistro, body_offset_x_mm = -3.0). Leggilo sullo STESSO "
+                    "presa dalla quota del disegno meccanico (se il pin 1 dista d dal "
+                    "bordo sinistro, body_offset_x_mm = -d). Leggilo sullo STESSO "
                     "disegno da cui leggi i pin, cosi' come lo vedi: se contacts_view e' "
                     "\"bottom\" lo ribalta il programma insieme alle colonne."
                 ),
@@ -267,9 +358,9 @@ _EXTRACTION_TOOL = {
                     "perpendicolare: valore negativo pari alla distanza fra il bordo del "
                     "corpo dal lato della prima riga e la prima riga stessa. Si misura "
                     "dalla prima riga, NON dal centro del corpo: con piu' righe centrate "
-                    "nel corpo vale -(body_width_mm - distanza fra prima e ultima riga)/2 "
-                    "(es. due file distanti 22.86mm in un corpo largo 25.4mm: -1.27, non "
-                    "-12.7). Meta' della larghezza col segno meno e' giusta solo con UNA "
+                    "nel corpo vale -(body_width_mm - distanza fra prima e ultima riga)/2, "
+                    "non -body_width_mm/2. Meta' della larghezza col segno meno e' giusta "
+                    "solo con UNA "
                     "sola riga centrata. Tutti i centri dei pin devono cadere dentro il "
                     "corpo."
                 ),
@@ -365,8 +456,8 @@ _EXTRACTION_TOOL = {
                 "description": (
                     "Tabella pinout del datasheet: per ogni pin FISICAMENTE PRESENTE, "
                     "il numero e la funzione. Se il datasheet elenca piu' configurazioni "
-                    "(es. colonne 'Single' e 'Dual'), riporta la prima e aggiungi "
-                    "l'alternativa tra parentesi solo se diversa (es. 'NC (Dual: Common)'). "
+                    "(varianti in colonne diverse), riporta la prima e aggiungi "
+                    "l'alternativa tra parentesi solo se diversa. "
                     "Ometti se nel documento non c'e' una tabella pinout."
                 ),
                 "items": {
@@ -375,7 +466,10 @@ _EXTRACTION_TOOL = {
                         "pin": {"type": "integer", "description": "Numero del pin"},
                         "name": {
                             "type": "string",
-                            "description": "Funzione del pin, es. '-Vin (GND)', 'NC', '+Vout'",
+                            "description": (
+                                "Funzione del pin come la scrive il documento (NC se "
+                                "non collegato)."
+                            ),
                         },
                     },
                     "required": ["pin", "name"],
@@ -493,7 +587,9 @@ _EXTRACTION_TOOL = {
                                 "corona e il bordo, che resta dritto; "
                                 "\"half_and_through\" se sullo stesso contatto ci sono "
                                 "entrambi, la mezzaluna sul bordo e un foro intero poco "
-                                "piu' dentro. Ometti se la foto non mostra il bordo."
+                                "piu' dentro. Ometti se la foto non mostra il bordo o se "
+                                "non distingui il tipo: non dedurlo e non scegliere un "
+                                "valore abituale, il programma lo chiedera' all'utente."
                             ),
                         },
                         "half_hole_diameter_mm": {
@@ -503,8 +599,8 @@ _EXTRACTION_TOOL = {
                                 "(il cerchio intero di cui il bordo mostra meta'), "
                                 "nell'unita' di drawing_unit: dalla quota del disegno "
                                 "o, se non quotato, stimato dalla foto in proporzione "
-                                "alle quote note (scrivilo nelle note). Ometti se il "
-                                "lato non ha semi-fori o non si vedono."
+                                "alle quote note (\"estimated\" in value_sources). Ometti "
+                                "se il lato non ha semi-fori o non si vedono."
                             ),
                         },
                         "through_hole_drill_mm": {
@@ -514,10 +610,11 @@ _EXTRACTION_TOOL = {
                                 "bordo) dei contatti di questo lato, nell'unita' di "
                                 "drawing_unit: dalla quota del disegno o, se non "
                                 "quotato, stimato dalla foto in proporzione alle quote "
-                                "note (scrivilo nelle note). Solo se il lato ha fori "
-                                "interi; altrimenti ometti."
+                                "note (\"estimated\" in value_sources). Solo se il lato "
+                                "ha fori interi; altrimenti ometti."
                             ),
                         },
+                        "value_sources": _value_sources_schema(_SIDE_LENGTH_KEYS, "per questo lato"),
                         "pin_names": {
                             "type": "array",
                             "items": {"type": "string"},
@@ -540,14 +637,14 @@ _EXTRACTION_TOOL = {
                     "file c'e' una FOTO del lato superiore: i componenti visibili, "
                     "approssimati a blocchi rettangolari, per dare al modello 3D "
                     "l'aspetto del modulo reale invece di una lastra liscia. "
-                    "Elenca TUTTI i componenti visibili, uno per uno: trasformatore, "
-                    "integrati, connettori, LED e anche OGNI singolo passivo piccolo "
-                    "(resistenze e condensatori chip 0402/0603/0805, diodi), ciascuno "
-                    "con la propria posizione e il proprio orientamento (length_mm "
-                    "asse lungo locale, width_mm asse corto, rotation_deg orientamento). Un modulo tipico ne ha 30-50: la "
-                    "lista e' lunga ed e' giusto cosi'. Nessuna quota di questi e' "
-                    "data dal datasheet -- sono stime visive in proporzione alle "
-                    "dimensioni note del modulo, ed e' normale che sia cosi'. "
+                    "Elenca TUTTI i componenti visibili, uno per uno, grandi e piccoli, "
+                    "compreso OGNI singolo passivo, ciascuno con la propria posizione e "
+                    "il proprio orientamento (length_mm asse lungo locale, width_mm asse "
+                    "corto, rotation_deg orientamento). Non esiste un numero atteso: "
+                    "riporta i corpi che vedi, senza aggiungerne ne' toglierne per "
+                    "arrivare a un conteggio. Nessuna quota di questi e' data dal "
+                    "datasheet -- sono stime visive in proporzione alle dimensioni note "
+                    "del modulo, ed e' normale che sia cosi'. "
                     "Ometti il campo se non c'e' una foto dall'alto."
                 ),
                 "items": {
@@ -556,8 +653,8 @@ _EXTRACTION_TOOL = {
                         "name": {
                             "type": "string",
                             "description": (
-                                "Sigla o tipo del componente, es. \"trasformatore\", "
-                                "\"SP3485\", \"LED_R\": finisce nel nome del solido."
+                                "Tipo del corpo in parole semplici, senza codici "
+                                "commerciali: finisce nel nome del solido."
                             ),
                         },
                         "x_mm": {
@@ -580,9 +677,9 @@ _EXTRACTION_TOOL = {
                         "length_mm": {
                             "type": "number",
                             "description": (
-                                "Lunghezza del componente lungo il SUO asse lungo (es. 1.6 "
-                                "per un chip 0603, 2.0 per un diodo MELF), indipendentemente "
-                                "da come e' ruotato sul modulo: l'orientamento va in rotation_deg."
+                                "Lunghezza del componente lungo il SUO asse lungo, "
+                                "indipendentemente da come e' ruotato sul modulo: "
+                                "l'orientamento va in rotation_deg."
                             ),
                         },
                         "width_mm": {
@@ -603,10 +700,11 @@ _EXTRACTION_TOOL = {
                         "height_mm": {
                             "type": "number",
                             "description": (
-                                "Altezza sopra il PCB, stimata dal tipo di package (es. "
-                                "~1.0mm per un SOIC, ~0.5mm per resistenze/LED 0805, "
-                                "qualche mm per un trasformatore). Non superare "
-                                "l'altezza totale del modulo meno lo spessore del PCB."
+                                "Altezza sopra il PCB: da una vista laterale quotata se "
+                                "c'e', altrimenti stimata dal tipo di corpo (kind) e dalle "
+                                "sue dimensioni in pianta; da una sola foto dall'alto e' "
+                                "sempre una stima. Non superare l'altezza totale del "
+                                "modulo meno lo spessore del PCB."
                             ),
                         },
                         "color_hex": {
@@ -615,22 +713,21 @@ _EXTRACTION_TOOL = {
                         },
                         "kind": {
                             "type": "string",
-                            "enum": ['generic', 'ic', 'ic_soic', 'ic_qfn', 'transformer', 'module', 'led', 'capacitor_tantalum', 'capacitor', 'resistor', 'inductor', 'diode', 'diode_melf', 'connector', 'switch', 'crystal'],
+                            "enum": list(COMPONENT_KINDS),
                             "description": (
-                                "Tipo di package, riconosciuto dalla foto: decide la forma "
-                                "nel modello 3D (un SOIC ha i reofori sui lati, un LED la "
-                                "lente, un tantalio la striscia di polarita'). "
-                                "\"capacitor\"/\"resistor\" sono i chip SMD rettangolari con le "
-                                "due terminazioni metalliche; \"diode_melf\" e' il diodo "
-                                "CILINDRICO di vetro (spesso rosso o nero) con banda e cappucci, "
-                                "da non confondere con un chip; \"generic\" se non riconoscibile."
+                                "Tipo di corpo riconosciuto dalla foto dalla sua FORMA "
+                                "(non dalla funzione elettrica ne' dalla marca): decide la "
+                                "forma nel modello 3D e l'altezza plausibile. \"generic\" "
+                                "se non riconoscibile. Valori: "
+                                + "; ".join(f"{kind} = {text}" for kind, text
+                                            in COMPONENT_KIND_DESCRIPTIONS.items()) + "."
                             ),
                         },
                         "marking": {
                             "type": "string",
                             "description": (
                                 "Scritta stampata sul componente, SOLO se leggibile nella "
-                                "foto (es. \"SP3485\", \"VPT\", \"102\"): serve a cercare il "
+                                "foto, copiata carattere per carattere: serve a cercare il "
                                 "modello di libreria per marcatura, non viene stampata sul "
                                 "solido. Non inventare codici."
                             ),
@@ -639,6 +736,8 @@ _EXTRACTION_TOOL = {
                     "required": ["x_mm", "y_mm", "length_mm", "width_mm", "height_mm"],
                 },
             },
+            "value_sources": _value_sources_schema(
+                _TOP_LENGTH_KEYS, "a questo livello (i lati castellated hanno il loro)"),
             "confidence": {
                 "type": "string",
                 "enum": ["high", "medium", "low"],
@@ -694,8 +793,12 @@ _SYSTEM_PROMPT = (
     "stesso numero per entrambi a meno che il disegno meccanico non lo confermi "
     "esplicitamente. Se il pinout mostra che solo alcune posizioni della matrice hanno "
     "un pin fisico, usa populated_pins per elencarle invece di generare una matrice "
-    "completa. Se un valore non e' presente nel datasheet, stima il valore standard "
-    "piu' plausibile (es. drill 1.0mm per pad 1.7mm passo 2.54mm) e scrivilo nelle note. "
+    "completa. Per ogni quota che compili dichiara in value_sources (e, per i lati "
+    "castellated, nel value_sources del lato) se l'hai letta (\"read\"), ricavata "
+    "solo da quote lette (\"derived\") o stimata (\"estimated\"). Se un valore "
+    "necessario non e' presente nei documenti, stimalo dalle altre quote o dalle "
+    "regole di progetto del tipo di contatto, dichiaralo \"estimated\" e scrivi in "
+    "notes da cosa lo hai ricavato: un valore stimato non deve mai sembrare letto. "
     "Se il datasheet include un disegno meccanico con l'ingombro del corpo (es. sezione "
     "\"Outline Dimensions\"), compila anche i campi body_* e pin_length_3d_mm; se non "
     "c'e' alcun disegno meccanico dell'ingombro 3D, ometti tutti i campi body_* e "
@@ -730,7 +833,8 @@ _SYSTEM_PROMPT = (
     "foto: half_hole se il foro metallizzato e' tagliato dal bordo (mezzaluna aperta "
     "verso l'esterno), through_hole se il foro e' intero, con corona chiusa e scheda "
     "intatta fra la corona e il bordo, half_and_through se lo stesso contatto ha "
-    "entrambi; ometti il campo se il bordo non si vede. Se quotati o visibili, "
+    "entrambi; ometti il campo se il bordo non si vede o il tipo non si distingue "
+    "(il programma lo chiedera' all'utente). Se quotati o visibili, "
     "riporta per lato anche half_hole_diameter_mm e through_hole_drill_mm. "
     "Per i moduli su PCB, se c'e' una foto del lato superiore, elenca in "
     "components_3d TUTTI i componenti visibili, uno per uno, compresi i passivi "
@@ -739,10 +843,11 @@ _SYSTEM_PROMPT = (
     "verticale, letto dalla foto) e colore stimati a occhio in proporzione alle dimensioni note "
     "del modulo. Servono a dare al modello 3D l'aspetto del pezzo reale, e "
     "nessuna di quelle quote e' riportata dal datasheet -- e' normale e atteso "
-    "stimarle; una lista di 30-50 elementi e' il risultato giusto. Compila sempre "
+    "stimarle. Non esiste un numero atteso di componenti: elenca quelli che vedi, "
+    "senza aggiungerne ne' toglierne per raggiungere un conteggio. Compila sempre "
     "anche pinout con la funzione di ogni contatto, leggendola dalle sigle "
-    "serigrafate accanto ai contatti nella foto (es. PE, B-, A+, G, R, T, P, V) "
-    "o dalle etichette di un'immagine descrittiva del prodotto. "
+    "serigrafate accanto ai contatti nella foto o dalle etichette di "
+    "un'immagine descrittiva del prodotto. "
     "Rispondi SOLO chiamando lo strumento fornito."
 )
 
@@ -755,9 +860,12 @@ DEFAULT_SYSTEM_PROMPT = _SYSTEM_PROMPT
 #: of them receives the current DEFAULT_SYSTEM_PROMPT (see
 #: analysis_profiles.ProfileStore); a prompt the user edited never matches and
 #: is kept. Digests rather than texts because each old prompt is several kB;
-#: the texts are in the git history of this file (the last one is the prompt
+#: the texts are in the git history of this file. The last two: the prompt
 #: that described only a through-hole pin matrix, before `drawing_unit`,
-#: `contacts_view` and the SMD route through package_geometry).
+#: `contacts_view` and the SMD route through package_geometry; then the one of
+#: commit 8970c7e, which still carried numbers and names of the sample board
+#: (a 30-50 component count, its silkscreen names, a 2.54 mm drill/pad
+#: "standard") and no per-value provenance (replaced 2026-09-26).
 SUPERSEDED_SYSTEM_PROMPT_DIGESTS = frozenset({
     "c744e556d5e1eba95f41d69b5eb635c2ab8bcc0cf77f5c1d163b18ca3a41feea",
     "920e38029a2f7b6da293539e9a4ec3ea9b2d8465b51f45a49cea33a008671d57",
@@ -765,6 +873,7 @@ SUPERSEDED_SYSTEM_PROMPT_DIGESTS = frozenset({
     "eefd487b98f9217c71c14976fe71ac0095a14dd8ed9b8bd1b5d58e8231c0aafa",
     "31a4c60ce3dedcce3efe236114fa2b963fcbfed652a40f62cbc6609e5e426715",
     "2e420a121ee16fc0877e6d74ac4efdc7e0731f2e3cc29b4c32c0d014364877d0",
+    "d00743ee29a91d396eae57cd56e40dbc2e03825d571960dd09f88ba36d0f754f",
 })
 
 
@@ -789,10 +898,21 @@ class ExtractedParams:
         set, `pitch_mm` set when cols > 1 and `row_spacing_mm` when rows > 1
         (None otherwise: a single column or row has no such distance).
     @note Keys of each `castellated_sides` dict: edge, count, pitch_mm,
-        first_pin, and optionally reverse, offset_mm, pad_length_mm,
-        pad_width_mm, contact_style, pin_names, half_hole_diameter_mm (plated
+        first_pin, contact_style, and optionally reverse, offset_mm,
+        pad_length_mm, pad_width_mm, pin_names, half_hole_diameter_mm (plated
         half-hole cut by the edge) and through_hole_drill_mm (drill of the full
-        hole), all lengths in mm.
+        hole), all lengths in mm. `contact_style` is always present: one of
+        castellated_module.CONTACT_STYLES when the model observed it, None
+        when it did not -- never a default, so the caller must ask the user
+        (see `unobserved_contact_style_edges`).
+    @note `value_sources` maps every key dimension the result carries to its
+        provenance: "read", "derived", "estimated" (VALUE_SOURCES) or
+        "undeclared" when the model gave none. Keys are the field names of
+        this class (e.g. "body_height_mm") and, for a castellated side,
+        "castellated_sides.<edge>.<field>" with the edge seen from above
+        (e.g. "castellated_sides.left.half_hole_diameter_mm"). A value the
+        program itself estimated (e.g. `fit_body_to_pin_field`) is
+        "estimated". Absent keys are values the result does not carry.
     """
 
     name: str
@@ -826,6 +946,26 @@ class ExtractedParams:
     body_color_hex: Optional[str] = None
     text_color_hex: Optional[str] = None
     package_geometry: Optional[dict] = None
+    value_sources: Optional[dict] = None
+
+    def values_to_review(self) -> list[str]:
+        """@brief Return the keys of `value_sources` whose value was not read nor derived.
+
+        @return Sorted keys whose provenance is "estimated" or "undeclared":
+            the values to show as estimates and to confirm before use.
+        """
+        return sorted(key for key, source in (self.value_sources or {}).items()
+                      if source in REVIEW_SOURCES)
+
+    def unobserved_contact_style_edges(self) -> list[str]:
+        """@brief Return the castellated edges whose contact style nobody observed.
+
+        @return Edges (seen from above, in side order) whose side has
+            `contact_style` None: the style must be asked to the user, never
+            assumed. Empty for a non-castellated result.
+        """
+        return [side["edge"] for side in (self.castellated_sides or ())
+                if side.get("contact_style") is None]
 
     def has_3d_body(self) -> bool:
         """@brief Return whether body length, width and height are all known, so a 3D body can be built."""
@@ -1048,13 +1188,6 @@ def _offset_x_seen_from_top(offset, length, cols, pitch, view):
 #: (`drawing_unit`). Exact by definition: 1 inch = 25.4 mm, 1 mil = 0.001 inch.
 _UNIT_TO_MM = {"mm": 1.0, "inch": 25.4, "mil": 0.0254}
 
-#: Length fields of the answer, per level: every one is a length in the
-#: declared drawing unit and becomes millimetres after `_canonicalize_answer`.
-_TOP_LENGTH_KEYS = ("pitch_mm", "row_spacing_mm", "pad_diameter_mm", "drill_mm",
-                    "body_length_mm", "body_width_mm", "body_height_mm", "pcb_thickness_mm",
-                    "body_offset_x_mm", "body_offset_y_mm", "pin_length_3d_mm")
-_SIDE_LENGTH_KEYS = ("pitch_mm", "offset_mm", "pad_length_mm", "pad_width_mm",
-                     "half_hole_diameter_mm", "through_hole_drill_mm")
 _PACKAGE_LENGTH_KEYS = ("body_length_mm", "body_width_mm", "body_height_mm")
 _PACKAGE_PIN_LENGTH_KEYS = ("x_mm", "y_mm", "pad_length_mm", "pad_width_mm", "drill_mm")
 _COMPONENT_LENGTH_KEYS = ("x_mm", "y_mm", "length_mm", "width_mm", "height_mm")
@@ -1330,15 +1463,155 @@ def _log_name(name: str) -> str:
     return name[:_LOG_NAME_CHARS - 1 - tail] + '…' + name[-tail:]
 
 
-def _files_sent_message(doc_paths, document_roles: Optional[dict[str, str]] = None) -> str:
+#: Roles a document may carry (document manifest version 2). One file may
+#: carry several at once: a datasheet page is often pinout, dimensioned top
+#: view and land pattern together.
+DOCUMENT_ROLE_KEYS = ("pinout", "top", "hires", "land_pattern", "side_view")
+#: The role of the photographs of the real part: only files carrying it go to
+#: the photo inventory (component recognition).
+PHOTO_ROLE = "hires"
+
+#: How each role is presented to the model: (name, instruction). Prompt text
+#: (Italian, like every prompt), not a user-visible message; the names are
+#: the labels of document_roles.ROLES, so the model and the user read the same
+#: words (tests/test_extraction_prompts.py checks it).
+_ROLE_PROMPTS = {
+    "pinout": ("Pinout / disposizione contatti",
+               "usalo per contatti, numerazione, funzioni dei pin e quote dei contatti. "
+               "Non assumere che il disegno sia visto dall'alto: dichiara in contacts_view "
+               "la vista che il documento indica."),
+    "top": ("Immagine con quote",
+            "disegno quotato visto dall'alto: usalo per le quote meccaniche in pianta -- "
+            "lunghezza e larghezza del corpo, posizione dei contatti e delle file, "
+            "spostamenti del corpo rispetto ai contatti."),
+    "hires": ("Foto ad alta risoluzione",
+              "fotografia del pezzo reale vista dall'alto: usala per cio' che si vede -- "
+              "tipo di contatto sul bordo, colori, sigle serigrafate, spigoli arrotondati, "
+              "componenti montati. Non e' un disegno quotato: una misura ricavata da qui e' "
+              "una stima (\"estimated\" in value_sources)."),
+    "land_pattern": ("Land pattern consigliato",
+                     "piazzole consigliate sulla scheda che ospita il componente: usalo per "
+                     "dimensioni e posizioni di piazzole e fori (pad_diameter_mm, drill_mm, "
+                     "pad_length_mm, pad_width_mm, package_geometry). Le piazzole non sono il "
+                     "corpo: non ricavarne le quote body_*."),
+    "side_view": ("Vista laterale / altezze",
+                  "vista di profilo: usala per le quote in altezza -- body_height_mm, "
+                  "pcb_thickness_mm, pin_length_3d_mm e altezze dei componenti. Lunghezze, "
+                  "larghezze e passi in pianta non si leggono da questa vista."),
+}
+
+
+def _role_label(role: str) -> str:
+    """User-visible label of a role: the document catalogue's, else the model-facing name."""
+    from .document_roles import ROLES
+    return ROLES.get(role) or _ROLE_PROMPTS[role][0]
+
+
+def _declared_role_keys(value) -> tuple:
+    """The known role keys in one declared value (a key or a collection of keys), tolerantly.
+
+    Used where an unknown role must read as «not declared» instead of failing
+    (the log line); `normalize_document_roles` is the strict version.
+    """
+    if isinstance(value, str):
+        value = (value,)
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        return ()
+    return tuple(key for key in DOCUMENT_ROLE_KEYS if key in value)
+
+
+def normalize_document_roles(document_roles, file_names) -> Optional[dict[str, tuple]]:
+    """@brief Validate the user-declared document roles and give every file its tuple of roles.
+
+    @param document_roles None (no roles declared), or a mapping file name ->
+        role key (legacy form, one role per file, as in manifest version 1)
+        or file name -> list/tuple/set of role keys (manifest version 2).
+        Role keys are those of DOCUMENT_ROLE_KEYS.
+    @param file_names Names of the documents sent, without directories.
+    @return None when `document_roles` is None; otherwise file name -> tuple
+        of role keys, without repetitions, in DOCUMENT_ROLE_KEYS order.
+    @throws ExtractionError When the mapping does not name exactly the files
+        sent, a file has no role or an unknown one, or -- legacy form only --
+        two files declare the same role (a version 1 manifest has one file
+        per role).
+    @note Legacy form only: when no file is declared a photograph ('hires'),
+        the files declared 'top' also become photographs. That was the
+        behaviour of version 1, where the dimensioned top view stood in for a
+        missing photo, and it is the same migration the manifest applies
+        (version 1 -> 2), so an old caller sees the same result. A version 2
+        mapping is taken as declared: only files marked 'hires' are photos.
+    """
+    if document_roles is None:
+        return None
+    invalid = ExtractionError(tx("Ruoli documenti incompleti, duplicati o non validi."))
+    names = list(file_names)
+    if not isinstance(document_roles, dict) or set(document_roles) != set(names):
+        raise invalid
+    legacy = all(isinstance(value, str) for value in document_roles.values())
+    if legacy and len(set(document_roles.values())) != len(names):
+        raise invalid
+    roles = {}
+    for name, value in document_roles.items():
+        keys = (value,) if isinstance(value, str) else value
+        if (not isinstance(keys, (list, tuple, set, frozenset)) or not keys
+                or any(not isinstance(key, str) or key not in DOCUMENT_ROLE_KEYS
+                       for key in keys)):
+            raise invalid
+        roles[name] = _declared_role_keys(keys)
+    if legacy and not any(PHOTO_ROLE in keys for keys in roles.values()):
+        roles = {name: _declared_role_keys(keys + (PHOTO_ROLE,)) if "top" in keys else keys
+                 for name, keys in roles.items()}
+    return roles
+
+
+def photo_document_indices(doc_paths, document_roles) -> Optional[list[int]]:
+    """@brief Indices of the documents declared photographs, the only inputs of the photo inventory.
+
+    @param doc_paths Documents in request order.
+    @param document_roles Declared roles, in any form `normalize_document_roles`
+        accepts, or None.
+    @return None when no roles are declared (the model's `top_photo_index`
+        decides); otherwise the indices of the files carrying PHOTO_ROLE, in
+        request order, or [-1] when none does (no other document is used in
+        their place).
+    @throws ExtractionError When the roles are invalid (see
+        `normalize_document_roles`).
+    """
+    names = [Path(path).name for path in doc_paths]
+    roles = normalize_document_roles(document_roles, names)
+    if roles is None:
+        return None
+    return [index for index, name in enumerate(names) if PHOTO_ROLE in roles[name]] or [-1]
+
+
+def _role_description(keys) -> str:
+    """How one file and its declared roles are introduced to the model."""
+    names = " + ".join(_ROLE_PROMPTS[key][0] for key in keys)
+    lead = "RUOLO DICHIARATO DALL’UTENTE" if len(keys) == 1 else "RUOLI DICHIARATI DALL’UTENTE"
+    lines = [f"{lead}: {names}."]
+    lines += [f"- {_ROLE_PROMPTS[key][0]}: {_ROLE_PROMPTS[key][1]}" for key in keys]
+    if len(keys) > 1:
+        lines.append("Lo stesso file vale per tutti questi ruoli: leggi da ogni parte del "
+                     "documento le informazioni del ruolo corrispondente.")
+    if "pinout" in keys and "top" not in keys:
+        # Only when the SAME file is not also the dimensioned top view: a
+        # datasheet page that is both must be read for both.
+        lines.append("Questo file non e' dichiarato disegno quotato dall'alto: non usarlo "
+                     "per gli ingombri del corpo.")
+    return "\n".join(lines)
+
+
+def _files_sent_message(doc_paths, document_roles: Optional[dict] = None) -> str:
     """@brief Name the documents about to travel in the paid analysis request.
 
     @param doc_paths Documents in request order; only their file names are
         reported, because the directories say nothing about what is being sent
         and would take the room the names and the roles need.
-    @param document_roles Optional file name -> role mapping declared by the
-        user. A name missing from it, or a role that is not a known one, is
-        reported as undeclared: the role is never guessed from the file name.
+    @param document_roles Optional file name -> role key, or file name ->
+        collection of role keys, as declared by the user. A name missing from
+        it, or without any known role, is reported as undeclared: the role is
+        never guessed from the file name. Several roles of one file are listed
+        joined by « + ».
     @return One readable line listing every document and, where known, the
         role it is sent as.
     @note The count and the noun agree for one document as well as for many,
@@ -1375,7 +1648,6 @@ def _files_sent_message(doc_paths, document_roles: Optional[dict[str, str]] = No
         never contain " — ", so the first occurrence in an item always ends the
         name unless the name itself contains the sign.
     """
-    from .document_roles import ROLES
     if not doc_paths:
         # Invariante difensiva dell'helper: la riga descrive un invio, e senza
         # documenti non c'e' invio da descrivere. Un «Invio a AI 0 file»
@@ -1390,8 +1662,9 @@ def _files_sent_message(doc_paths, document_roles: Optional[dict[str, str]] = No
     described = []
     for path in doc_paths:
         name = Path(path).name
-        label = ROLES.get((document_roles or {}).get(name))
-        described.append(f'{_log_name(name)} — {tx(label)}' if label
+        keys = _declared_role_keys((document_roles or {}).get(name))
+        label = ' + '.join(tx(_role_label(key)) for key in keys)
+        described.append(f'{_log_name(name)} — {label}' if label
                          else tx("{log_name} — ruolo non dichiarato", log_name=_log_name(name)))
     count = len(described)
     # Singolare e plurale sono due frasi intere: ogni lingua li accorda a modo
@@ -1414,7 +1687,7 @@ def extract_pin_header_params(
     verification_prompt: Optional[str] = None,
     verification_model: Optional[str] = None,
     terminal_prompt: Optional[str] = None,
-    document_roles: Optional[dict[str, str]] = None,
+    document_roles: Optional[dict] = None,
     component_family: Optional[str] = None,
     photo_detector: str = "ai",
     yolo_model_path: Optional[Path] = None,
@@ -1432,6 +1705,12 @@ def extract_pin_header_params(
         and the photo inventory included, and during retry backoff waits.
         When set, ExtractionCancelled is raised and no further call is paid.
         None (default) keeps the previous behaviour.
+    @param document_roles None, or the roles the user declared for each file:
+        file name -> list of role keys among DOCUMENT_ROLE_KEYS ('pinout',
+        'top', 'hires', 'land_pattern', 'side_view'; one file may carry
+        several), or the legacy file name -> single role key. Validated
+        before any paid call (see `normalize_document_roles`); only the files
+        carrying 'hires' go to the photo inventory (`photo_document_indices`).
 
     @param photo_detector Photo localization backend: ai (legacy), yolo (local
         proposals plus one AI reconciliation) or vlm (no local detector: the
@@ -1507,12 +1786,9 @@ def extract_pin_header_params(
                                        cancel=check_cancel if cancelled is not None else None)
     if len(doc_paths) > MAX_FILES:
         raise ExtractionError(tx("Troppi file selezionati (max {MAX_FILES} per chiamata).", MAX_FILES=MAX_FILES))
-    from .document_roles import ROLES, ROLE_HELP
-    if document_roles is not None:
-        if (set(document_roles) != {p.name for p in doc_paths}
-                or len(set(document_roles.values())) != len(doc_paths)
-                or any(role not in ROLES for role in document_roles.values())):
-            raise ExtractionError(tx("Ruoli documenti incompleti, duplicati o non validi."))
+    # Legacy strings and lists alike become tuples of roles, checked before
+    # anything is paid; from here on only the normalized form travels.
+    document_roles = normalize_document_roles(document_roles, [p.name for p in doc_paths])
 
     check_cancel()
     try:
@@ -1550,15 +1826,16 @@ def extract_pin_header_params(
     for index, path in enumerate(doc_paths):
         description = f"FILE {index}: {path.name}"
         if document_roles is not None:
-            role = document_roles[path.name]
-            description += f'\nRUOLO DICHIARATO DALL’UTENTE: {ROLES[role]}. {ROLE_HELP[role]}'
+            description += "\n" + _role_description(document_roles[path.name])
         content_blocks.append({"type": "text", "text": description})
         content_blocks.append(_file_to_content_block(path))
-    request = "Estrai i parametri del pin header da questi documenti e chiama lo strumento."
+    request = ("Estrai i parametri meccanici del componente da questi documenti e chiama lo "
+               "strumento.")
     if document_roles is not None:
-        missing = [label for role, label in ROLES.items() if role not in document_roles.values()]
+        declared = {key for keys in document_roles.values() for key in keys}
+        missing = [_ROLE_PROMPTS[key][0] for key in DOCUMENT_ROLE_KEYS if key not in declared]
         request += ('\nI ruoli dei file sono espliciti: rispettali, non dedurli dai nomi originali. '
-                    'Non usare il pinout come vista dall’alto per gli ingombri. '
+                    'Un file con piu\' ruoli vale per ciascuno di essi. '
                     'Segnala dati mancanti e incongruenze, senza inventare quote per completare le viste assenti.')
         if missing:
             request += '\nViste non fornite: ' + ', '.join(missing) + '.'
@@ -1635,6 +1912,93 @@ def extract_pin_header_params(
         yolo_settings=yolo_settings)
 
 
+def _side_contradictions(raw, body_length, body_width) -> list[str]:
+    """Self-contradictions of the castellated sides of ONE answer, for the model.
+
+    Structural, not tuned: a side cannot hold a different number of contacts
+    than the names it lists for them, and (count - 1) * pitch contact centres
+    cannot run past the edge they sit on. Both sides of each comparison come
+    from the same answer, in its own drawing unit. Sides the normalization
+    would discard are left to it.
+    """
+    try:
+        sides = _normalized_castellated_sides(raw)
+    except ExtractionError:
+        return []
+    names = {}
+    for entry in raw:
+        if (isinstance(entry, dict) and isinstance(entry.get("pin_names"), (list, tuple))
+                and entry["pin_names"]):
+            names[str(entry.get("edge") or "").strip().lower()] = len(entry["pin_names"])
+    problems = []
+    for side in sides:
+        edge, count = side["edge"], side["count"]
+        if names.get(edge, count) != count:
+            problems.append(f"lato {edge}: count={count} ma pin_names ha {names[edge]} voci")
+        edge_length = body_width if edge in ("left", "right") else body_length
+        span = (count - 1) * side["pitch_mm"]
+        if edge_length is not None and span > edge_length + _PIN_FIELD_TOLERANCE_MM:
+            problems.append(f"lato {edge}: (count-1) x pitch_mm = ({count}-1) x "
+                            f"{side['pitch_mm']:g} = {span:.2f}, piu' del bordo lungo "
+                            f"{edge_length:g}")
+    return problems
+
+
+def _recount_contradictory_sides(data, content_blocks, diagnostic_call, model, system_prompt,
+                                 has_pdf, progress, dims) -> None:
+    """One paid recount of castellated sides that contradict themselves (user, 2026-09-26).
+
+    The model is not deterministic: the same documents once gave 22 contacts
+    per side, once 28 with 22 names on a 63.3 mm edge. Failing there wasted the
+    whole analysis; guessing the count from the names would not be safer (the
+    two sides listed 22 and 23). The contradiction is sent back with the same
+    documents, its exact numbers and the edge lengths; the recounted sides
+    replace the old ones, provenance included. Whatever is still wrong is
+    handled as before: contacts that do not fit are an error, names of the
+    wrong length are dropped with a note. At most one extra call.
+    """
+    problems = _side_contradictions(data.get("castellated_sides"), **dims)
+    if not problems:
+        return
+    summary = "; ".join(problems)
+    if progress:
+        progress(tx("Risposta AI incoerente sui contatti ({summary}). Richiesta di ricontarli "
+                    "sugli stessi documenti: una chiamata in piu'.", summary=summary))
+    unit = data.get("drawing_unit") or "mm"
+    repair_blocks = list(content_blocks) + [{"type": "text", "text": (
+        "La risposta precedente si contraddice sui contatti dei lati castellated: "
+        f"{summary}. Riconta sui documenti (pinout e disegno quotato) i contatti FISICI di "
+        "ogni lato: count e' il loro numero, pin_names ne elenca esattamente uno per "
+        "contatto nell'ordine lungo il bordo, e (count-1) x pitch_mm deve stare nel bordo "
+        f"(body_length_mm={dims['body_length']} per i lati top e bottom, "
+        f"body_width_mm={dims['body_width']} per left e right). Usa la stessa unita' della "
+        f"risposta precedente (drawing_unit={unit}). Non inventare valori che i documenti "
+        "non danno: se non puoi stabilirli, ometti i nomi e spiegalo in notes. Restituisci "
+        f"la risposta completa. Lati precedenti: {data.get('castellated_sides')!r}"
+    )}]
+    try:
+        repaired = diagnostic_call(model=model or DEFAULT_MODEL,
+                                   system_prompt=system_prompt or _SYSTEM_PROMPT,
+                                   content_blocks=repair_blocks, tool=_openai_tool(),
+                                   max_tokens=16384, has_pdf=has_pdf)
+    except OpenRouterError as error:
+        raise ExtractionError(tx("Ricontrollo dei contatti non riuscito; analisi foto non "
+                                 "avviata.")) from error
+    sides = repaired.get("castellated_sides") if isinstance(repaired, dict) else None
+    repaired_unit = repaired.get("drawing_unit") if isinstance(repaired, dict) else None
+    if not isinstance(sides, list) or not sides or repaired_unit not in (None, unit):
+        # Lati mancanti o in un'altra unita': non confrontabili con corpo e
+        # passo della risposta principale, che restano quelli.
+        raise ExtractionError(tx("Il ricontrollo dei contatti non ha restituito lati "
+                                 "utilizzabili; analisi foto non avviata."))
+    data["castellated_sides"] = sides
+    warning = tx("Contatti dei lati ricontati dopo una risposta AI incoerente ({summary}); "
+                 "verificare conteggi e nomi prima dell'utilizzo.", summary=summary)
+    data["notes"] = (str(data.get("notes") or "") + "\n" + warning).strip()
+    if progress:
+        progress(warning)
+
+
 def _cancel_predicate(cancel):
     """Normalize the cancellation channel to a zero-argument predicate, or None."""
     if cancel is None:
@@ -1650,8 +2014,10 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
                             has_pdf, progress) -> None:
     """Sanitize and validate the main answer in place; ExtractionError when unusable.
 
-    Body dimensions are sanitized with a note, castellated numbering conflicts
-    get one paid repair, and the complete answer must then build ExtractedParams.
+    Body dimensions are sanitized with a note; castellated sides that
+    contradict themselves (count against pin_names, contacts longer than
+    their edge) get one paid recount, numbering conflicts get one paid
+    repair, and the complete answer must then build ExtractedParams.
     """
     # Validate geometry before it can be used to calibrate a photograph.
     for key in ("body_length_mm", "body_width_mm", "body_height_mm"):
@@ -1666,6 +2032,8 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
                 progress(warning)
     dims = dict(body_length=data.get("body_length_mm"), body_width=data.get("body_width_mm"))
     if data.get("layout") == "castellated":
+        _recount_contradictory_sides(data, content_blocks, diagnostic_call, model,
+                                     system_prompt, has_pdf, progress, dims)
         try:
             _castellated_sides(data.get("castellated_sides"), **dims)
         except _PinNumberConflict as exc:
@@ -1697,8 +2065,17 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
                     for row, old in zip(corrected, original)
                 ):
                     raise ExtractionError(tx("La correzione della numerazione ha cambiato i lati o i conteggi."))
-                data["castellated_sides"] = [dict(old, first_pin=row["first_pin"],
-                    reverse=row.get("reverse", False)) for old, row in zip(original, corrected)]
+                # The normalized sides drop the declared provenance: carry it
+                # over by edge (edges are unique), or every value of the
+                # repaired sides would read as undeclared.
+                provenance = {str(entry.get("edge") or "").strip().lower(): entry["value_sources"]
+                              for entry in data["castellated_sides"]
+                              if isinstance(entry, dict) and "value_sources" in entry}
+                data["castellated_sides"] = [
+                    dict(old, first_pin=row["first_pin"], reverse=row.get("reverse", False),
+                         **({"value_sources": provenance[old["edge"]]}
+                            if old["edge"] in provenance else {}))
+                    for old, row in zip(original, corrected)]
                 warning = tx("Numerazione contatti corretta dopo conflitto AI; verificare la "
                              "tabella pinout prima dell'utilizzo.")
                 data["notes"] = (str(data.get("notes") or "") + "\n" + warning).strip()
@@ -1715,16 +2092,13 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
         if progress:
             for note in data["_canonical_notes"]:
                 progress(note)
-    if data.get("layout") == "castellated":
-        dims = dict(body_length=_optional_number(data.get("body_length_mm"), positive=True),
-                    body_width=_optional_number(data.get("body_width_mm"), positive=True))
-        # Dopo l'eventuale correzione, cosi' la riga descrive i lati definitivi.
-        notice = _unobserved_contact_style_notice(_castellated_sides(data.get("castellated_sides"), **dims))
-        if notice:
-            data["notes"] = (str(data.get("notes") or "") + "\n" + notice).strip()
-            if progress:
-                progress(notice)
-    _params_from_tool_arguments(data)
+    # Dopo l'eventuale correzione, cosi' le righe descrivono i lati definitivi:
+    # stile dei contatti non osservato e valori stimati vanno nel log subito,
+    # e restano nelle note del risultato (_params_from_tool_arguments).
+    params = _params_from_tool_arguments(data)
+    if progress:
+        for line in _review_notes(params.castellated_sides, params.value_sources):
+            progress(line)
 
 
 def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, document_roles,
@@ -1734,7 +2108,6 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
                          terminal_prompt, yolo_model_path, review_proposals,
                          yolo_confidence, yolo_settings) -> ExtractedParams:
     """Optional photo inventory and final assembly of a validated main answer."""
-    from .document_roles import ROLES
     # La foto richiede un passaggio separato: nell'estrazione globale il modello
     # deve anche leggere quote, pinout e layout, e tende a sacrificare i passivi
     # piccoli. I crop sono best-effort: se falliscono, resta il risultato globale.
@@ -1742,20 +2115,14 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
     top_index = data.get('top_photo_index')
     if document_roles is not None:
         # User-assigned roles are authoritative. Never calibrate the wrong view.
-        # Tra le viste dall'alto vince la piu' dettagliata: a parita' di
-        # algoritmo e' la risoluzione a decidere quanti passivi piccoli si
-        # riescono a distinguere. Se manca, si ricade sulla vista superiore.
-        # Si passano TUTTE le viste dall'alto assegnate: l'inventario sceglie
-        # la piu' dettagliata fra quelle che riesce a calibrare. Indicare solo
-        # la foto ad alta risoluzione lascerebbe senza inventario quando e'
-        # un primo piano parziale, invece di ricadere sulla vista superiore.
-        from .document_roles import INVENTORY_ROLES
-        by_role = {role: i for i, path in enumerate(doc_paths)
-                   if (role := document_roles[path.name]) in INVENTORY_ROLES}
-        top_index = [by_role[r] for r in INVENTORY_ROLES if r in by_role] or [-1]
+        # Only the files declared photographs (PHOTO_ROLE) go to the
+        # inventory, all of them: it picks the most detailed one it can
+        # calibrate. A dimensioned drawing is not a photograph, whatever
+        # other role the same file carries (user decision 2026-09-26).
+        top_index = photo_document_indices(doc_paths, document_roles)
         if progress:
-            chosen = ', '.join(f'{doc_paths[by_role[r]].name} ({tx(ROLES[r])})'
-                               for r in INVENTORY_ROLES if r in by_role)
+            chosen = ', '.join(f'{doc_paths[i].name} ({tx(_role_label(PHOTO_ROLE))})'
+                               for i in top_index if i >= 0)
             progress(tx('Viste dall’alto disponibili: ') + (
                 chosen + tx(". Verrà usata la più dettagliata fra quelle calibrabili.")
                 if chosen else tx("nessuna; nessun’altra vista verrà usata al suo posto.")))
@@ -1919,7 +2286,8 @@ def fit_body_to_pin_field(params, component_family) -> list[str]:
         scheda invece che dalla prima fila, e la seconda fila e' finita fuori.
         Quando il campo dei pin esce dalla scheda ma ci sta, lo spostamento di
         QUELL'asse viene ricentrato: e' una STIMA (il bordo non era quotato in
-        modo coerente) e lo si scrive nelle note e nel log. Quando la scheda e'
+        modo coerente) e lo si scrive nelle note, nel log e in
+        `params.value_sources` ("estimated"). Quando la scheda e'
         piu' piccola del campo dei pin nessun valore e' giusto: nessuna
         correzione, solo l'avviso di quote incoerenti.
     """
@@ -1958,6 +2326,9 @@ def fit_body_to_pin_field(params, component_family) -> list[str]:
             continue
         centred = round(low - (extent - span) / 2, 3)
         setattr(params, key, centred)
+        # The program chose this value: it is an estimate, whatever the
+        # model declared for the value it replaces.
+        params.value_sources = dict(params.value_sources or {}, **{key: "estimated"})
         messages.append(tx(
             "ATTENZIONE spostamento del corpo sull'asse {axis} corretto da {old:.2f} a "
             "{new:.2f} mm: con il valore dell'analisi una fila di pin cadeva fuori dalla "
@@ -2083,9 +2454,11 @@ def _normalized_castellated_sides(raw, notes: Optional[list] = None) -> list[dic
         # Il tipo di contatto si vede nella foto e non si ricava dalle quote:
         # un valore fuori elenco non si corregge ne' si scarta in silenzio,
         # perche' qualunque sostituzione sarebbe proprio la deduzione che il
-        # campo esiste per evitare. Assente resta assente: il default lo
-        # applica chi costruisce il modulo, e il log lo dice (vedi
+        # campo esiste per evitare. Assente diventa None, cioe' «sconosciuto»:
+        # nessun tipo predefinito (decisione dell'utente 26/09, era quello della
+        # scheda campione), lo sceglie l'utente (vedi
         # _unobserved_contact_style_notice).
+        side["contact_style"] = None
         if "contact_style" in entry and entry["contact_style"] is not None:
             style = entry["contact_style"]
             if style not in CONTACT_STYLES:
@@ -2190,37 +2563,118 @@ def _unobserved_contact_style_notice(sides: Sequence[dict]) -> Optional[str]:
     """@brief Say which castellated sides came back without a contact style.
 
     @param sides Normalized sides, as returned by _castellated_sides.
-    @return One Italian log line naming those sides and the style assumed for
-        them, or None when every side declares its own style.
-    @note The default is applied downstream (CastellatedSide.contact_style),
-        never written into the side: the GUI keeps telling an observed style
-        from an assumed one. This line is what keeps the assumption from being
-        silent.
+    @return One Italian log line naming those sides and saying that no style
+        is assumed for them, or None when every side declares its own style.
+    @note The style of such a side is None (unknown) in the extracted data:
+        whether a contact is a half-hole, a full hole or both is seen on the
+        board edge and cannot be deduced from dimensions, so no default is
+        substituted (user decision 2026-09-26; the former default was the
+        style of the sample board). The GUI asks the user for it
+        (ExtractedParams.unobserved_contact_style_edges).
     """
     missing = [EDGE_LABELS.get(side["edge"], side["edge"])
-               for side in sides if "contact_style" not in side]
+               for side in sides if side.get("contact_style") is None]
     if not missing:
         return None
-    return (tx("Lato {join}: tipo di contatto non osservato: si assume "
-               "«{CONTACT_STYLE_NAMES}» ({CONTACT_HALF_AND_THROUGH}). Verificarlo "
-               "sulla foto e correggerlo nella tabella dei lati se diverso.",
-               join=', '.join(missing),
-               CONTACT_STYLE_NAMES=CONTACT_STYLE_NAMES[CONTACT_HALF_AND_THROUGH],
-               CONTACT_HALF_AND_THROUGH=CONTACT_HALF_AND_THROUGH))
+    return tx("Lato {join}: tipo di contatto non osservato (contact_style vuoto). Nessun tipo "
+              "assunto: va scelto a mano fra solo semi-foro, solo foro passante o entrambi.",
+              join=', '.join(missing))
 
 
-def _components_3d(raw: Optional[Sequence[dict]]) -> Optional[list[dict]]:
+def _declared_sources(raw, keys, notes: list, label: str) -> dict:
+    """Valid provenances declared at one level of the answer: {field: source}.
+
+    A value outside VALUE_SOURCES, or a field that is not a key dimension of
+    that level, is ignored: the field then counts as undeclared, which is
+    reviewed exactly like an estimate, so nothing is lost by ignoring it. A
+    `value_sources` that is not an object is dropped with a note.
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        notes.append(tx("{key} scartato: valore non valido ({value!r}).", key=label, value=raw))
+        return {}
+    return {key: source for key, source in raw.items()
+            if key in keys and isinstance(source, str) and source in VALUE_SOURCES}
+
+
+def _value_sources(data: dict, params: "ExtractedParams", sides, notes: list) -> dict:
+    """Provenance of every key dimension the validated result carries.
+
+    @param data Canonical answer (millimetres, contacts seen from above): its
+        castellated sides were mirrored in place, together with their nested
+        `value_sources`, so the edges here are those of the result.
+    @param params The result built from `data`; only the values it carries
+        get a provenance.
+    @param sides Normalized castellated sides, or None.
+    @param notes Notes of the result, for a malformed `value_sources`.
+    @return {field: source} with the key scheme of ExtractedParams.value_sources;
+        a value without a valid declaration is UNDECLARED_SOURCE, never "read".
+    """
+    sources = {}
+    declared = _declared_sources(data.get("value_sources"), _TOP_LENGTH_KEYS, notes,
+                                 "value_sources")
+    for key in _TOP_LENGTH_KEYS:
+        if getattr(params, key) is not None:
+            sources[key] = declared.get(key, UNDECLARED_SOURCE)
+    if not sides:
+        return sources
+    raw_by_edge = {}
+    for entry in data.get("castellated_sides") or ():
+        if isinstance(entry, dict) and "value_sources" in entry:
+            raw_by_edge[str(entry.get("edge") or "").strip().lower()] = entry["value_sources"]
+    for side in sides:
+        edge = side["edge"]
+        declared = _declared_sources(raw_by_edge.get(edge), _SIDE_LENGTH_KEYS, notes,
+                                     f"castellated_sides[{edge}].value_sources")
+        for key in _SIDE_LENGTH_KEYS:
+            # A single contact has no pitch: its placeholder is not a value.
+            if side.get(key) is None or (key == "pitch_mm" and side["count"] < 2):
+                continue
+            sources[f"castellated_sides.{edge}.{key}"] = declared.get(key, UNDECLARED_SOURCE)
+    return sources
+
+
+def _review_notes(sides, value_sources) -> list[str]:
+    """@brief Lines telling what the user must decide or check before using a result.
+
+    @param sides Normalized castellated sides, or None.
+    @param value_sources Provenance map (ExtractedParams.value_sources), or None.
+    @return Italian log lines: sides whose contact style was not observed,
+        values estimated by the model and values whose provenance it did not
+        declare. Empty when there is nothing to review.
+    """
+    lines = []
+    notice = _unobserved_contact_style_notice(sides) if sides else None
+    if notice:
+        lines.append(notice)
+    sources = value_sources or {}
+    estimated = sorted(key for key, source in sources.items() if source == "estimated")
+    undeclared = sorted(key for key, source in sources.items() if source == UNDECLARED_SOURCE)
+    if estimated:
+        lines.append(tx("Valori STIMATI, non letti dai documenti: {fields}. Verificarli prima "
+                        "dell'uso.", fields=", ".join(estimated)))
+    if undeclared:
+        lines.append(tx("Valori senza provenienza dichiarata dal modello, trattati come stime "
+                        "da verificare: {fields}.", fields=", ".join(undeclared)))
+    return lines
+
+
+def _components_3d(raw: Optional[Sequence[dict]],
+                   notes: Optional[list] = None) -> Optional[list[dict]]:
     """Componenti letti dalla foto, scartando quelli senza un ingombro reale.
 
     Sono stime visive: un blocco con una dimensione nulla o negativa non e'
     un componente mal misurato, e' rumore, e nel solido 3D darebbe errore.
+    A `kind` outside COMPONENT_KINDS becomes "generic", with a line in
+    `notes` when given.
     """
     if not isinstance(raw, (list, tuple)) or not raw:
         return None
     components = []
     for entry in raw:
         if not isinstance(entry, dict):
-            # Con liste lunghe (30-50 elementi richiesti) il modello a volte
+            # Con liste lunghe il modello a volte
             # deraglia dallo schema e infila una voce come semplice stringa
             # invece che come oggetto: si scarta quella voce, non l'intera
             # estrazione -- gli altri componenti restano validi.
@@ -2264,7 +2718,15 @@ def _components_3d(raw: Optional[Sequence[dict]]) -> Optional[list[dict]]:
         if entry.get("color_hex"):
             component["color_hex"] = str(entry["color_hex"])
         kind = str(entry.get("kind") or "generic")
-        component["kind"] = kind if kind in COMPONENT_KINDS else "generic"
+        if kind not in COMPONENT_KINDS:
+            # A kind outside the vocabulary has no shape nor height rule: the
+            # body stays a generic block, and the note says so instead of
+            # letting the change pass unseen.
+            if notes is not None:
+                notes.append(tx("{name}: tipo di corpo {kind!r} non previsto, trattato come "
+                                "generico (blocco semplice).", name=component["name"], kind=kind))
+            kind = "generic"
+        component["kind"] = kind
         if entry.get("marking"):
             marking = str(entry["marking"]).strip()
             # Normalize only whole-field AI absence/illegibility sentinels;
@@ -2300,6 +2762,9 @@ def _components_3d(raw: Optional[Sequence[dict]]) -> Optional[list[dict]]:
                     'class', 'component_id', 'source_candidate_ids', 'terminal_count', 'terminal_layout',
                     'terminal_count_basis', 'lead_count', 'lead_count_complete', 'lead_count_confidence',
                     '_reported_rotation_deg', '_height_estimated', '_global_inventory_status',
+                    # Misura dai bordi, regola dell'altezza stimata e scelta
+                    # dell'utente sulle proposte deboli: la GUI li mostra.
+                    '_edges_measured', '_height_basis', '_yolo_low_confidence', '_yolo_user_kept',
                     '_global_inventory_errors', '_global_inventory_uncertainties',
                     '_global_inventory_prompt_version', '_global_inventory_prompt_hash',
                     # Il riferimento asimmetrico serve al costruttore 3D per
@@ -2569,7 +3034,7 @@ def _params_from_tool_arguments(data: dict) -> ExtractedParams:
         pad_diameter_mm=matrix["pad_diameter_mm"],
         drill_mm=matrix["drill_mm"],
         castellated_sides=sides,
-        components_3d=_components_3d(data.get("components_3d")),
+        components_3d=_components_3d(data.get("components_3d"), notes),
         confidence=confidence,
         notes=base_notes,
         populated_pins=populated,
@@ -2587,6 +3052,8 @@ def _params_from_tool_arguments(data: dict) -> ExtractedParams:
         text_color_hex=data.get("text_color_hex") or None,
         package_geometry=package_geometry,
     )
+    params.value_sources = _value_sources(data, params, sides, notes)
+    notes.extend(_review_notes(sides, params.value_sources))
     if notes:
         params.notes = (params.notes + "\n" + "\n".join(notes)).strip()
     return params

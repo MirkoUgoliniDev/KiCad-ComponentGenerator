@@ -102,8 +102,10 @@ def test_guide_follows_light_and_dark_theme(guide_text):
 
 
 @pytest.mark.parametrize("label", [
-    "Nuovo progetto...", "Pinout / disposizione contatti", "Immagine con quote",
-    "Foto ad alta risoluzione", "Scheda con componenti · connettori passanti",
+    # Dal 26/09 i documenti hanno piu' ruoli per file: le caselle usano le
+    # etichette brevi dei ruoli (document_roles.ROLE_SHORT).
+    "Nuovo progetto...", "Pinout", "Quote", "Foto", "Land pattern", "Vista laterale",
+    "Nuovo documento", "Aggiungi…", "Scheda con componenti · connettori passanti",
     "Scheda con componenti · connettori castellated (mezzo foro)",
     "Estrai parametri con AI", "Credito AI", "Footprint 2D (KiCadGen)",
     "Modelli 3D dalla libreria KiCad", "Solido 3D con FreeCAD", "Chiudi",
@@ -130,7 +132,9 @@ def test_guide_names_the_real_commands(guide_text, label):
     ("Prova in KiCad...", "kicadgen/gui/main_window.py"),
     ("Scelta del modello STEP", "kicadgen/gui/model_candidates_dialog.py"),
     ("Colori", "kicadgen/gui/model_candidates_dialog.py"),
-    ("Immagine con quote", "kicadgen/services/document_roles.py"),
+    ("'top': 'Quote'", "kicadgen/services/document_roles.py"),
+    ("'side_view': 'Vista laterale'", "kicadgen/services/document_roles.py"),
+    ("Nuovo documento", "kicadgen/gui/guided_documents.py"),
 ])
 def test_quoted_labels_still_exist_in_the_code(label, source):
     """@brief When a command is renamed in the code, this fails and the guide is updated."""

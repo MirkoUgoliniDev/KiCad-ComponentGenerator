@@ -59,8 +59,8 @@ _SINGLE_THT = ComponentType(
         "pad_diameter_mm. Leggi le due quote dalla tabella/disegno \"Recommended "
         "PCB layout\", \"PCB hole dimensions\" o simili; se il datasheet da' solo "
         "il diametro del terminale, stima drill_mm = diametro terminale + "
-        "0.2..0.3 mm e pad_diameter_mm = drill_mm + 0.7..0.9 mm, scrivendolo "
-        "nelle note.\n"
+        "0.2..0.3 mm e pad_diameter_mm = drill_mm + 0.7..0.9 mm: dichiara "
+        "entrambi \"estimated\" in value_sources e spiega la stima nelle note.\n"
         "- pitch_mm e row_spacing_mm sono quote distinte e si leggono dalla vista "
         "dall'alto o dal basso del disegno meccanico quotato, non dalla vista "
         "laterale: dichiara in contacts_view quale vista hai letto (la "
@@ -136,11 +136,14 @@ _AGGREGATE_CASTELLATED = ComponentType(
         "lati diversi possono avere numero di contatti e passo diversi.\n"
         "- La numerazione fisica dei pad (first_pin, reverse) e' unica su tutti "
         "i lati; le sigle serigrafate vanno in pin_names, non nei numeri.\n"
-        "- Per ogni lato leggi dalla foto del bordo contact_style e, se quotati o "
-        "visibili, half_hole_diameter_mm (diametro del semi-foro sul bordo) e "
-        "through_hole_drill_mm (diametro del foro intero); dalla tabella "
+        "- Per ogni lato leggi dalla foto del bordo contact_style; se il bordo non "
+        "si vede o il tipo non si distingue ometti contact_style: lo sceglie "
+        "l'utente, non va dedotto. Se quotati o visibili riporta anche "
+        "half_hole_diameter_mm (diametro del semi-foro sul bordo) e "
+        "through_hole_drill_mm (diametro del foro intero), e dalla tabella "
         "\"Recommended PCB land pattern\" pad_length_mm e pad_width_mm della "
-        "piazzola sulla scheda madre.\n"
+        "piazzola sulla scheda madre. Nel value_sources del lato dichiara per "
+        "ciascuno se e' letto, ricavato o stimato dalla foto.\n"
         "- Dichiara in contacts_view da che lato e' visto il disegno o la foto da "
         "cui leggi i lati: la specchiatura la fa il programma.\n"
         "- Contatti che non stanno sul bordo (per esempio un pad termico o una "
@@ -178,11 +181,16 @@ SUPERSEDED_LABELS: dict[str, tuple[str, ...]] = {
 #: contradicted the extraction schema: «imposta drill_mm = 0» for SMD pads the
 #: pin grid cannot draw, «lo schema attuale descrive solo una matrice di pin su
 #: due file» although castellated_sides and package_geometry exist, and
-#: product examples in a structural type.
+#: product examples in a structural type. The texts of commit 8970c7e for
+#: single_tht and aggregate_castellated were replaced the same day because
+#: they let an estimated drill/pad or hole size go without declaring it as
+#: such (value_sources) and did not say that an unobserved contact style is
+#: left to the user.
 SUPERSEDED_INSTRUCTION_DIGESTS: dict[str, frozenset[str]] = {
     "single_tht": frozenset({
         "b4ac3268f0ad952b7e6547d640017fba687cec112b7473c04464eaff04ef15a0",
         "a22b90207ad9a7c73c6cb09623cd0f7b9a1b948eda120ea1985dbc4780328555",
+        "dfcb4dd38185961f7d5e72fef151657f8b22090d065917434e3ff1cd66de5155",
     }),
     "single_smd": frozenset({
         "8c8b7b749de39798ae1b1cf71b263b94dc34b3c82f338a828e7bcf6b8c7326b2",
@@ -192,6 +200,7 @@ SUPERSEDED_INSTRUCTION_DIGESTS: dict[str, frozenset[str]] = {
     }),
     "aggregate_castellated": frozenset({
         "46414d2eeb091695755cc41eaa9c1d387f7bfe03cf76932c138093596c4749c9",
+        "2a307c67e5df3ff3b3150c69de731dc7828b4781949d47391f9b6fe903263de6",
     }),
 }
 

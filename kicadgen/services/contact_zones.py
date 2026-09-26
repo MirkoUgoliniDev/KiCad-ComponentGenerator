@@ -28,11 +28,12 @@ cade nella striscia e viene tolto come se fosse un contatto.
 """
 from __future__ import annotations
 
+import dataclasses
 import math
 
 from ..generators.castellated_module import (
-    CONTACT_HALF_AND_THROUGH, CONTACT_THROUGH_HOLE, CastellatedModuleParams,
-    fallback_through_hole_inset, opposite_row_edges, through_hole_inset_from_rows,
+    CONTACT_HALF_AND_THROUGH, CONTACT_HALF_HOLE, CONTACT_STYLES, CONTACT_THROUGH_HOLE,
+    AssumedSize, CastellatedModuleParams, CastellatedSide,
 )
 
 #: Quanto puo' sporgere un corpo oltre la banda dei contatti restando un
@@ -58,34 +59,184 @@ def _number(value, minimum=0.0):
     return value if math.isfinite(value) and value > minimum else None
 
 
-def _continuous_pad_depth(side, data, pitch):
+def _read(side, *names):
+    """First non-None value among `names`, read from a dict or an object's attributes."""
+    for name in names:
+        value = side.get(name) if isinstance(side, dict) else getattr(side, name, None)
+        if value is not None:
+            return value
+    return None
+
+
+def _side_value(side, *names):
+    """First positive finite value among `names`, read from a dict or an object."""
+    for name in names:
+        number = _number(_read(side, name))
+        if number is not None:
+            return number
+    return None
+
+
+#: Campi che il CastellatedSide installato accetta: i diametri per lato sono
+#: arrivati dopo, e un lato costruito con un campo che la classe non conosce
+#: fermerebbe il filtro dei contatti per un dato accessorio.
+_SIDE_FIELDS = frozenset(field.name for field in dataclasses.fields(CastellatedSide))
+
+
+def _hole_size(side, data, field, *names):
+    """Per-side hole size with its provenance: declared as a float, else AssumedSize.
+
+    A size is declared only when something says it was read or derived from
+    the documents: the side's `<name>_declared` flag (GUI table), the side's
+    own `value_sources` or the extraction's `castellated_sides.<edge>.<field>`
+    entry. An estimate, or a value with no provenance at all, stays an
+    assumption the generator may reduce to fit, exactly as the footprint and
+    the 3D treat it; a declared size that does not fit makes side_geometry
+    refuse the side instead.
+    """
+    value = _side_value(side, field, *names)
+    if value is None:
+        return None
+    flag = _read(side, field.replace('_mm', '_declared'))
+    own = _read(side, 'value_sources')
+    module = data.get('value_sources') if isinstance(data, dict) else None
+    sources = (own.get(field) if isinstance(own, dict) else None,
+               module.get(f"castellated_sides.{_read(side, 'edge')}.{field}")
+               if isinstance(module, dict) else None)
+    if flag is True or any(source in ('read', 'derived') for source in sources):
+        return value
+    return AssumedSize(value)
+
+
+def _module_size(data, key):
+    """Module-wide hole size with its provenance, same rule as _hole_size.
+
+    Declared only when the extraction's top-level `value_sources` says the
+    value was read or derived; otherwise an AssumedSize, so that a per-side
+    estimate still outranks it and a read row spacing can reduce it.
+    """
+    value = _number(data.get(key))
+    if value is None:
+        return None
+    sources = data.get('value_sources')
+    if isinstance(sources, dict) and sources.get(key) in ('read', 'derived'):
+        return value
+    return AssumedSize(value)
+
+
+def declared_module(data, length_mm, width_mm):
+    """@brief The castellated module the footprint would draw from the declared quantities.
+
+    @param data Extracted parameters (raw): castellated_sides with edge, count,
+        pitch_mm, offset_mm, contact_style and the optional per-side hole sizes
+        half_hole_diameter_mm (legacy hole_diameter_mm) and
+        through_hole_drill_mm; module-wide drill_mm / pad_diameter_mm for the
+        through-hole and row_spacing_mm.
+    @param length_mm Board extent along X.
+    @param width_mm Board extent along Y.
+    @return (CastellatedModuleParams, list of (declared side, CastellatedSide))
+        for the sides that carry a valid edge, count and pitch.
+    @note Hole sizes and through-hole positions are then read per side with
+        CastellatedModuleParams.side_geometry, the same rule the footprint and
+        the 3D use: a side's declared size wins over the module's, an
+        undeclared or merely estimated one is an assumed size (reduced to fit
+        the pitch and the declared row spacing when needed, see _hole_size), and the through-hole of a half_and_through side
+        sits where the declared row spacing puts it. Before this, the photo
+        mask used module-wide values and a through-hole offset that ignored
+        the row spacing, so it could disagree with the footprint it filters for.
+    @note Tolerant of side descriptions that are objects rather than dicts
+        (attributes pitch/offset/hole_diameter/... as CastellatedSide names
+        them), and of an installed CastellatedSide without the per-side size
+        fields: those sizes are then simply not passed.
+    """
+    pairs = []
+    sides = data.get('castellated_sides') if isinstance(data, dict) else None
+    for side in sides or []:
+        if not isinstance(side, dict) and not hasattr(side, 'edge'):
+            continue
+        edge, count = _read(side, 'edge'), _read(side, 'count')
+        pitch = _side_value(side, 'pitch_mm', 'pitch')
+        if edge not in ('left', 'right', 'top', 'bottom') or pitch is None:
+            continue
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            continue
+        style = _read(side, 'contact_style')
+        options = dict(
+            contact_style=style if style in CONTACT_STYLES else CONTACT_HALF_AND_THROUGH,
+            hole_diameter=_hole_size(side, data, 'half_hole_diameter_mm', 'hole_diameter_mm',
+                                     'hole_diameter'),
+            thru_hole_drill=_hole_size(side, data, 'through_hole_drill_mm', 'thru_hole_drill'),
+            thru_pad_diameter=_side_value(side, 'thru_pad_diameter'))
+        pairs.append((side, CastellatedSide(
+            edge=edge, count=count, pitch=pitch,
+            **{key: value for key, value in options.items() if key in _SIDE_FIELDS})))
+    declared = data if isinstance(data, dict) else {}
+    module = CastellatedModuleParams(
+        body_length=length_mm, body_width=width_mm, sides=[built for _, built in pairs],
+        # None = non dichiarato: il generatore usa la sua quota di riferimento.
+        # Stima o valore senza provenienza = AssumedSize (vedi _module_size).
+        thru_hole_drill=_module_size(declared, 'drill_mm'),
+        thru_pad_diameter=_module_size(declared, 'pad_diameter_mm'),
+        row_spacing=_number(declared.get('row_spacing_mm')))
+    return module, pairs
+
+
+def _geometry(module, built):
+    """Side geometry, or None when the installed generator cannot give it."""
+    resolve = getattr(module, 'side_geometry', None)
+    if resolve is None:
+        return None
+    try:
+        return resolve(built)
+    except (TypeError, ValueError, ArithmeticError):
+        return None
+
+
+def _pad_length(side, data, pitch):
+    """Declared land length of a side: the side's, the module's, else the pitch."""
+    return (_side_value(side, 'pad_length_mm', 'pad_length')
+            or _number(data.get('pad_length_mm')) or pitch)
+
+
+def _continuous_pad_depth(side, data, pitch, geometry):
     """@brief Depth of the strip of a half_and_through side: continuous pad and label.
 
     @param side Declared side whose OBSERVED contact_style is half_and_through
         (an absent style is not assumed here: see contact_positions).
-    @param data Extracted parameters (pad_diameter_mm, drill_mm).
+    @param data Extracted parameters (pad_length_mm).
     @param pitch Declared pitch of the side, the last-resort pad length.
+    @param geometry SideGeometry of the side (declared_module + side_geometry).
     @return Millimetres from the board edge inward.
     @note The footprint and the 3D draw such a contact as ONE gold pad from the
         edge to beyond the through-hole ring (castellated_module.continuous_pad),
         so the strip must reach the far side of that ring, not just the end of
-        the declared edge pad. The ring's position follows from the SAME rule
-        the generator uses (CastellatedModuleParams.thru_hole_centre_offset,
-        derived from the half-hole and the drill), with the generator's
-        defaults for what the extraction does not state; the label margin is
-        the one _band_depth uses.
+        the declared edge pad. Ring and its distance from the edge are the
+        side's own (SideGeometry.thru_inset and ring, row spacing included),
+        the label margin is the 3D generator's (half-hole radius plus
+        _LABEL_GAP_MM). Without a through-hole (drill or ring zero) the
+        contact is the edge pad alone.
     """
-    ring = _number(data.get('pad_diameter_mm')) or CastellatedModuleParams.thru_pad_diameter
-    bore = _number(data.get('drill_mm')) or CastellatedModuleParams.thru_hole_drill
-    half_hole = _number(side.get('hole_diameter_mm')) or CastellatedModuleParams.hole_diameter
-    offset = CastellatedModuleParams(hole_diameter=half_hole, thru_hole_drill=bore,
-                                     thru_pad_diameter=ring).thru_hole_centre_offset
-    pad_length = (_number(side.get('pad_length_mm')) or _number(data.get('pad_length_mm'))
-                  or pitch)
-    edge_band = _band_depth(side, data, pitch)
+    pad_length = _pad_length(side, data, pitch)
+    edge_band = pad_length + geometry.half_hole / 2 + _LABEL_GAP_MM
+    if not geometry.has_thru_holes or geometry.thru_inset is None:
+        return edge_band
     # Stesso margine della sigla della piazzola di bordo, contato dalla fine
     # del rame continuo quando questa sta piu' dentro.
-    return edge_band + max(0.0, offset + ring / 2 - pad_length)
+    return edge_band + max(0.0, geometry.thru_inset + geometry.ring / 2 - pad_length)
+
+
+def _half_hole_depth(side, data, pitch, geometry):
+    """@brief Depth of the strip of a half_hole side: edge pad, half-hole and label.
+
+    @param side Declared side whose OBSERVED contact_style is half_hole.
+    @param data Extracted parameters (pad_length_mm).
+    @param pitch Declared pitch of the side, the last-resort pad length.
+    @param geometry SideGeometry of the side.
+    @return Millimetres from the board edge inward: pad length plus half the
+        side's half-hole plus _LABEL_GAP_MM, the label convention of the 3D
+        generator (label_gap = half-hole radius + margin).
+    """
+    return _pad_length(side, data, pitch) + geometry.half_hole / 2 + _LABEL_GAP_MM
 
 
 def _band_depth(side, data, pitch):
@@ -102,42 +253,36 @@ def _band_depth(side, data, pitch):
         profondita' si ricava dalle quote dichiarate piu' la convenzione di
         serigrafia del generatore, non da una misura sulla foto: e' quindi
         un'euristica, dichiarata come tale nella docstring del modulo.
+    @note Usata quando il tipo di contatto NON e' osservato (e per le matrici):
+        qui si prendono solo quote dichiarate, mai le misure assunte del
+        generatore, perche' allargare la maschera su un'ipotesi toglierebbe
+        dalla misura i corpi montati vicino al bordo. Il semi-foro dichiarato
+        del lato viene prima di ogni altra quota trasversale.
     """
-    pad_length = (_number(side.get('pad_length_mm')) or _number(data.get('pad_length_mm'))
-                  or pitch)
+    pad_length = _pad_length(side, data, pitch)
     # Nei castellated il foro non e' quotato e drill_mm vale 0 per convenzione:
     # in quel caso la larghezza della piazzola e' la misura trasversale nota.
-    hole = (_number(side.get('hole_diameter_mm')) or _number(data.get('drill_mm'))
-            or _number(side.get('pad_width_mm')) or _number(data.get('pad_diameter_mm')) or 0.0)
+    hole = (_side_value(side, 'half_hole_diameter_mm', 'hole_diameter_mm')
+            or _number(data.get('drill_mm'))
+            or _side_value(side, 'pad_width_mm', 'pad_width')
+            or _number(data.get('pad_diameter_mm')) or 0.0)
     return pad_length + hole / 2 + _LABEL_GAP_MM
 
 
-def _through_hole_depth(side, data, edges, extent_mm):
+def _through_hole_depth(geometry):
     """@brief Depth of the strip of a through_hole side: web, ring and label.
 
-    @param side Declared side with contact_style == "through_hole".
-    @param data Extracted parameters (row_spacing_mm, pad_diameter_mm, drill_mm).
-    @param edges Edges that carry declared contacts.
-    @param extent_mm Board extent across this side's row.
+    @param geometry SideGeometry of a side with contact_style == "through_hole".
     @return Millimetres from the board edge inward.
     @note The contact is not an edge pad but a closed ring set back from the
-        edge, with intact board in between. Its centre follows from the SAME
-        declared quantities and the same rule the footprint uses
-        (castellated_module.through_hole_inset_from_rows, or its declared
-        heuristic fallback); ring and bore default to the values the footprint
-        would draw when the extraction does not state them. The strip ends
-        where the label ends by this program's convention: ring edge plus half
-        a bore plus _LABEL_GAP_MM, exactly as for the edge pads.
+        edge, with intact board in between. Its centre, ring and bore are the
+        side's own, from the same rule the footprint uses
+        (CastellatedModuleParams.side_geometry: declared row spacing, else its
+        declared heuristic fallback). The strip ends where the label ends by
+        this program's convention: ring edge plus half a bore plus
+        _LABEL_GAP_MM, exactly as for the edge pads.
     """
-    ring = _number(data.get('pad_diameter_mm')) or CastellatedModuleParams.thru_pad_diameter
-    bore = _number(data.get('drill_mm')) or CastellatedModuleParams.thru_hole_drill
-    inset = None
-    pair = opposite_row_edges(edges)
-    if pair is not None and side.get('edge') in pair:
-        inset = through_hole_inset_from_rows(extent_mm, _number(data.get('row_spacing_mm')))
-    if inset is None:
-        inset = fallback_through_hole_inset(ring)
-    return inset + ring / 2 + bore / 2 + _LABEL_GAP_MM
+    return geometry.thru_inset + geometry.ring / 2 + geometry.drill / 2 + _LABEL_GAP_MM
 
 
 def contact_positions(data, length_mm, width_mm):
@@ -158,19 +303,10 @@ def contact_positions(data, length_mm, width_mm):
         return []
     positions = []
     half_x, half_y = length_mm / 2, width_mm / 2
-    edges = [side.get('edge') for side in (data.get('castellated_sides') or [])
-             if isinstance(side, dict)]
-    for side in (data.get('castellated_sides') or []):
-        if not isinstance(side, dict):
-            continue
-        edge = side.get('edge')
-        count = side.get('count')
-        pitch = _number(side.get('pitch_mm'))
-        if edge not in ('left', 'right', 'top', 'bottom'):
-            continue
-        if isinstance(count, bool) or not isinstance(count, int) or count < 1 or pitch is None:
-            continue
-        offset = _number(side.get('offset_mm'), minimum=-math.inf) or 0.0
+    module, pairs = declared_module(data, length_mm, width_mm)
+    for side, built in pairs:
+        edge, count, pitch = built.edge, built.count, float(built.pitch)
+        offset = _number(_read(side, 'offset_mm', 'offset'), minimum=-math.inf) or 0.0
         # La striscia descrive il contatto che il lato offre davvero: la
         # piazzola di bordo (default, e tipi con semi-foro) oppure la corona
         # arretrata di un foro passante.
@@ -179,12 +315,15 @@ def contact_positions(data, length_mm, width_mm):
         # la foto su un'ipotesi toglierebbe dalla misura i corpi montati vicino
         # al bordo (vedi il @note di contact_positions). Senza tipo resta la
         # striscia della piazzola di bordo dichiarata, come prima.
-        style = side.get('contact_style')
-        if style == CONTACT_THROUGH_HOLE:
-            extent = length_mm if edge in ('left', 'right') else width_mm
-            depth = _through_hole_depth(side, data, edges, extent)
-        elif style == CONTACT_HALF_AND_THROUGH:
-            depth = _continuous_pad_depth(side, data, pitch)
+        style = _read(side, 'contact_style')
+        geometry = _geometry(module, built) if style in CONTACT_STYLES else None
+        if (geometry is not None and style == CONTACT_THROUGH_HOLE
+                and geometry.thru_inset is not None):
+            depth = _through_hole_depth(geometry)
+        elif geometry is not None and style == CONTACT_HALF_AND_THROUGH:
+            depth = _continuous_pad_depth(side, data, pitch, geometry)
+        elif geometry is not None and style == CONTACT_HALF_HOLE:
+            depth = _half_hole_depth(side, data, pitch, geometry)
         else:
             depth = _band_depth(side, data, pitch)
         start = -(count - 1) * pitch / 2 + offset

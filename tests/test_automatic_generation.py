@@ -60,7 +60,8 @@ def test_only_the_four_workflow_tabs_exist(window):
                  'model_3d_settings_scroll'):
         assert not hasattr(window, name), name
     assert isinstance(window.field_rows, BoundedValue)
-    assert (window.field_rows.minimum(), window.field_rows.maximum()) == (1, 40)
+    # Dal 26/09 limiti fisici, non quelli dell'editor tolto (40 righe).
+    assert window.field_rows.minimum() == 1 and window.field_rows.maximum() > 40
 
 
 def test_the_advanced_mode_is_gone():
@@ -459,9 +460,11 @@ def test_guided_name_collision_keeps_documents_and_generates_after_real_thread(w
     original_name = window._component_name()
     original_project = window._project_dir()
     store = DocumentSet(window._docs_dir())
-    for role in ROLES:
+    # Colori diversi: dal 26/09 lo stesso contenuto caricato due volte diventa
+    # UN documento con piu' ruoli, qui servono cinque documenti distinti.
+    for index, role in enumerate(ROLES):
         source = tmp_path / f'source-{role}.png'
-        Image.new('RGB', (30, 20), 'blue').save(source)
+        Image.new('RGB', (30, 20), (10 * index, 40, 200)).save(source)
         store.import_file(role, source)
     before = {p: p.read_bytes() for p in store.directory.iterdir() if p.is_file()}
     destination = original_project.parent / 'AutoModule' / 'docs'
@@ -507,7 +510,7 @@ def test_guided_name_collision_keeps_documents_and_generates_after_real_thread(w
     assert (original_project / f'{original_name}.3dshapes' / f'{original_name}.step').is_file()
     assert all(path.read_bytes() == content for path, content in before.items())
     assert conflict.read_bytes() == b'other project: must never change'
-    assert window._extract_worker.document_roles == {f'{role}.png': role for role in ROLES}
+    assert window._extract_worker.document_roles == {f'source-{role}.png': [role] for role in ROLES}
     assert window.tabs.currentIndex() == gui.TAB_MODEL_3D
 
 

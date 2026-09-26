@@ -14,7 +14,13 @@ from pathlib import Path
 
 from .openrouter import OpenRouterError, DEFAULT_MODEL
 from .photo_inventory import copy_mechanical_metadata, mechanical_metadata_properties
+from .photo_heights import estimate_body_height
 from .messages import tx, warning
+
+#: Altezza segnaposto, in mm, di un corpo la cui famiglia non ha una stima
+#: (generic, o un tipo senza regola): lo stesso valore usato finora. Esce
+#: sempre marcato come segnaposto non misurato.
+UNKNOWN_FAMILY_HEIGHT_MM = 1.5
 
 MECHANICAL_EVIDENCE_PROMPT = (
     " FIRST classify the visible physical component family in kind (resistor, capacitor, IC, connector, "
@@ -105,8 +111,11 @@ def decode_boxes(data, region, length, width, kinds, source, log):
             if not (0 <= left < right <= 1 and 0 <= top < bottom <= 1):
                 raise ValueError(tx("rettangolo fuori foto o invertito"))
             # Partial detections at interior tile boundaries cannot replace a
-            # complete package from the full-board view.
-            if (rx0 > 0 and left <= .002) or (rx1 < 1 and right >= .998):
+            # complete package from the full-board view. Both axes: the
+            # details are a grid, so a body can be cut at the top or bottom
+            # of a detail exactly as at its sides.
+            if ((rx0 > 0 and left <= .002) or (rx1 < 1 and right >= .998)
+                    or (ry0 > 0 and top <= .002) or (ry1 < 1 and bottom >= .998)):
                 raise ValueError(tx("package tagliato al bordo del dettaglio"))
             x0, x1 = rx0 + left*(rx1-rx0), rx0 + right*(rx1-rx0)
             y0, y1 = ry0 + top*(ry1-ry0), ry0 + bottom*(ry1-ry0)
@@ -116,7 +125,11 @@ def decode_boxes(data, region, length, width, kinds, source, log):
                 name=str(entry.get("label") or "Componente"), kind=kind if kind in kinds else "generic",
                 x_mm=((x0+x1)/2-.5)*length, y_mm=((y0+y1)/2-.5)*width,
                 length_mm=max(sx,sy), width_mm=min(sx,sy), rotation_deg=0 if sx >= sy else 90,
-                height_mm=.6, color_hex="#303030", marking="", confidence="low",
+                # Segnaposto dichiarato: la verifica successiva lo sostituisce
+                # con una stima di famiglia; se non arriva, resta marcato.
+                height_mm=.6, _height_source="estimated_placeholder_not_measured",
+                _height_estimated=True,
+                color_hex="#303030", marking="", confidence="low",
                 _box=(x0,y0,x1,y1), _source=source, _uncertain=True,
             ))
             copy_mechanical_metadata(out[-1], entry)
@@ -128,18 +141,143 @@ def decode_boxes(data, region, length, width, kinds, source, log):
     return out
 
 
-def grounding_regions(photo):
-    """@brief Full image retains large packages; three overlapping vertical details.
+#: Lato corto, in mm, del package piu' piccolo che le viste di dettaglio devono
+#: rendere leggibile: il chip 0402 imperiale (1.0 x 0.5 mm). ASSUNZIONE
+#: DICHIARATA sul contenuto di una scheda qualunque, non misura della scheda
+#: in lavorazione: uno 0201 (0.3 mm) resterebbe sotto l'obiettivo.
+SMALLEST_PACKAGE_SHORT_SIDE_MM = 0.5
+#: Pixel che quel lato corto deve occupare nell'immagine COME IL MODELLO LA
+#: RICEVE. Scelta di compromesso fra risoluzione e costo, non limite fisico:
+#: sopra la soglia minima di distinguibilita' usata dall'inventario
+#: (photo_inventory.MIN_PACKAGE_PIXELS, 12 px) con margine per il
+#: ricampionamento del fornitore, e sotto un token visivo intero (~28 px),
+#: il cui costo in riquadri crescerebbe col quadrato. Dichiarato anche questo:
+#: con 20 px una scheda come quella di prova (63.3 x 25.4 mm) riceve gli
+#: stessi tre dettagli delle vecchie strisce fisse, cioe' lo stesso numero di
+#: chiamate; e' un vincolo di costo chiesto dall'utente, non una taratura
+#: della geometria. Diventerebbe superfluo se il modello dichiarasse la
+#: risoluzione a cui ha davvero guardato.
+DETAIL_TARGET_PX = 20
+#: Budget d'immagine del modello di visione: lato lungo e pixel totali oltre
+#: i quali il fornitore riduce l'immagine prima di guardarla. Sono i limiti
+#: documentati del modello di verifica predefinito (Anthropic: 1568 px sul
+#: lato lungo, ~1.15 megapixel), il piu' restrittivo fra i predefiniti: un
+#: modello che conserva piu' pixel riceve piu' dell'obiettivo, mai meno.
+MODEL_IMAGE_LONG_SIDE_PX = 1568
+MODEL_IMAGE_MAX_PIXELS = 1_150_000
+#: Frazione di cella condivisa da due dettagli adiacenti (mezza per lato
+#: interno): la stessa sovrapposizione del rilevatore locale
+#: (photo_yolo._TILE_OVERLAP_FRACTION). Un corpo a cavallo di un confine di
+#: proprieta' resta intero nel dettaglio che lo possiede finche' e' piu'
+#: piccolo di meta' della sovrapposizione; quelli piu' grandi li risolve gia'
+#: la vista completa, che non ha confini interni.
+DETAIL_OVERLAP_FRACTION = 0.25
+#: Tetto di sicurezza sul numero di celle per asse: impedisce una ricerca
+#: senza fine su quote assurde, non limita schede reali (100 x 80 mm ne usa 6).
+_MAX_CELLS_PER_AXIS = 64
 
-    Ownership is by center in non-overlapping thirds, eliminating the need to
-    merge the same small object across six arbitrarily overlapping quadrants.
+
+def model_px_per_mm(tile_length_mm, tile_width_mm):
+    """@brief Scala, in px/mm, a cui il modello vede una zona della scheda.
+
+    @param tile_length_mm Estensione della zona lungo X, in mm.
+    @param tile_width_mm Estensione lungo Y, in mm.
+    @return I pixel per millimetro dopo la riduzione del fornitore, se la foto
+        ne ha abbastanza (vedi MODEL_IMAGE_LONG_SIDE_PX e MODEL_IMAGE_MAX_PIXELS).
     """
-    width = photo.shape[1]
-    yield "Scheda completa", (0.,0.,1.,1.), (0.,1.), photo
-    for col in range(3):
-        left = max(0, round((col/3-.08)*width))
-        right = min(width, round(((col+1)/3+.08)*width))
-        yield f"Dettaglio {col+1}/3", (left/width,0.,right/width,1.), (col/3,(col+1)/3), photo[:,left:right]
+    long_side = max(tile_length_mm, tile_width_mm)
+    return min(MODEL_IMAGE_LONG_SIDE_PX / long_side,
+               math.sqrt(MODEL_IMAGE_MAX_PIXELS / (tile_length_mm * tile_width_mm)))
+
+
+def detail_grid(length_mm, width_mm, image_size_px=None):
+    """@brief Griglia delle viste di dettaglio, su entrambi gli assi, dalle quote reali della scheda.
+
+    @param length_mm Estensione della scheda lungo X, in mm.
+    @param width_mm Estensione lungo Y, in mm.
+    @param image_size_px (larghezza, altezza) della foto calibrata in pixel, o
+        None. Serve a non ingrandire oltre la risoluzione della foto: un
+        ritaglio non aggiunge pixel che la foto non ha.
+    @return Lista di (region, ownership), entrambi (x0, y0, x1, y1) normalizzati
+        sulla foto intera. region include la sovrapposizione; ownership sono
+        celle disgiunte che coprono la scheda: un corpo appartiene al dettaglio
+        che contiene il suo centro. Lista vuota quando la vista completa
+        raggiunge gia' l'obiettivo.
+    @throws ValueError Per quote non finite o non positive.
+    @note Obiettivo: SMALLEST_PACKAGE_SHORT_SIDE_MM a DETAIL_TARGET_PX pixel
+        nell'immagine che il modello riceve (model_px_per_mm), ma mai oltre la
+        risoluzione della foto. Fra le griglie che lo raggiungono si sceglie
+        quella con meno celle (ogni dettaglio e' una chiamata), a parita' la
+        piu' quadrata. Si misura sul dettaglio peggiore: quello interno, che
+        ha sovrapposizione su entrambi i lati.
+    """
+    for value in (length_mm, width_mm):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                or not math.isfinite(value) or value <= 0:
+            raise ValueError("board dimensions must be finite positive millimetres")
+    target = DETAIL_TARGET_PX / SMALLEST_PACKAGE_SHORT_SIDE_MM
+    if image_size_px is not None:
+        photo_scale = min(image_size_px[0] / length_mm, image_size_px[1] / width_mm)
+        if photo_scale > 0:
+            target = min(target, photo_scale)
+    if model_px_per_mm(length_mm, width_mm) >= target:
+        return []
+
+    def worst_span(total, cells):
+        cell = total / cells
+        interior_sides = min(cells - 1, 2)
+        return cell * (1 + DETAIL_OVERLAP_FRACTION * interior_sides / 2)
+
+    best = None
+    for nx in range(1, _MAX_CELLS_PER_AXIS + 1):
+        for ny in range(1, _MAX_CELLS_PER_AXIS + 1):
+            if nx * ny == 1:
+                continue
+            span_x, span_y = worst_span(length_mm, nx), worst_span(width_mm, ny)
+            if model_px_per_mm(span_x, span_y) < target:
+                continue
+            rank = (nx * ny, max(span_x, span_y) / min(span_x, span_y))
+            if best is None or rank < best[0]:
+                best = (rank, nx, ny)
+            break  # a larger ny for this nx only adds cells
+    if best is None:
+        nx = ny = _MAX_CELLS_PER_AXIS
+    else:
+        _, nx, ny = best
+    tiles = []
+    margin = DETAIL_OVERLAP_FRACTION / 2
+    for row in range(ny):
+        for col in range(nx):
+            cell = (col / nx, row / ny, (col + 1) / nx, (row + 1) / ny)
+            region = (max(0.0, cell[0] - margin / nx), max(0.0, cell[1] - margin / ny),
+                      min(1.0, cell[2] + margin / nx), min(1.0, cell[3] + margin / ny))
+            tiles.append((region, cell))
+    return tiles
+
+
+def grounding_regions(photo, length_mm, width_mm):
+    """@brief Full image retains large packages; a grid of overlapping details sized in mm.
+
+    @param photo Calibrated board crop (H x W x 3).
+    @param length_mm Board extent along X, in mm.
+    @param width_mm Board extent along Y, in mm.
+    @return Iterator of (label, region, ownership, crop): region and ownership
+        are normalized (x0, y0, x1, y1); region matches the crop's pixels.
+    @note The details follow detail_grid on BOTH axes: a tall or large board
+        is split along Y as well, a small one may need none. Ownership is by
+        center in non-overlapping cells, eliminating the need to merge the
+        same small object across arbitrarily overlapping views.
+    """
+    height, width = photo.shape[:2]
+    yield "Scheda completa", (0., 0., 1., 1.), (0., 0., 1., 1.), photo
+    tiles = detail_grid(length_mm, width_mm, (width, height))
+    for index, (region, cell) in enumerate(tiles, 1):
+        left, right = max(0, round(region[0]*width)), min(width, round(region[2]*width))
+        top, bottom = max(0, round(region[1]*height)), min(height, round(region[3]*height))
+        right, bottom = max(right, left + 1), max(bottom, top + 1)
+        yield (f"Dettaglio {index}/{len(tiles)}",
+               (left/width, top/height, right/width, bottom/height), cell,
+               photo[top:bottom, left:right])
 
 
 def cached_call(call, kwargs, cache_dir, stage, log, expected_ids=None):
@@ -251,6 +389,16 @@ def cached_call(call, kwargs, cache_dir, stage, log, expected_ids=None):
     return data
 
 
+#: Descrizione del campo `package` negli strumenti fotografici. Gli esempi sono
+#: famiglie generiche e diverse fra loro, scelti apposta fuori dalla scheda di
+#: prova: un esempio preso dal campione e' un suggerimento di risposta.
+PACKAGE_DESCRIPTION = (
+    "Sigla standard del CORPO come si usa nelle librerie (per esempio SOT-23, "
+    "SOIC-8, QFN-32, R_0603, C_0805). E' una forma fisica, non una funzione "
+    "elettrica. Stringa vuota se non la si riconosce con certezza: meglio "
+    "vuota che inventata.")
+
+
 def classification_tool(kinds):
     """@brief Return the tool schema used to verify and classify fixed package crops by ID."""
     properties = {
@@ -269,17 +417,15 @@ def classification_tool(kinds):
         # Il nome standard del package apre la libreria 3D di KiCad, che
         # contiene il modello vero gia' disegnato. `kind` non basta: e' una
         # lista chiusa di famiglie, e "ic" non corrisponde ad alcun file.
+        # Esempi generici di famiglie diverse, NON presi dalla scheda di prova
+        # (utente, 26/09: gli esempi del campione orientavano il modello).
         "package": {"type": "string",
-                    "description": ("Sigla standard del package come si usa nelle "
-                                    "librerie (SOT-223, SOIC-8, R_0402, C_0603, "
-                                    "U.FL, USB_C_Receptacle, ESP32-S3-WROOM-1). "
-                                    "Stringa vuota se non la si riconosce con "
-                                    "certezza: meglio vuota che inventata.")},
+                    "description": PACKAGE_DESCRIPTION},
         "mating": {"type": "string", "enum": ["edge", "top", "none"],
                    "description": ("Solo per i connettori: dove si affaccia l'apertura. "
-                                   "\"edge\" se guarda il bordo della scheda (USB, jack "
-                                   "laterale), \"top\" se il cavo entra dall'alto "
-                                   "(coassiale U.FL/IPEX, header verticale). "
+                                   "\"edge\" se guarda il bordo della scheda (innesto "
+                                   "laterale), \"top\" se il cavo o la spina entrano "
+                                   "dall'alto (innesto verticale). "
                                    "\"none\" per tutto il resto.")},
     }
     required = [key for key in properties if key != "mating"]
@@ -390,7 +536,9 @@ def apply_classifications(components, response, kinds, length, width, log):
                      rotation_deg=angle,length_mm=long,width_mm=short,color_hex=color,
                      marking="",confidence=entry["confidence"],
                      _uncertain=inconsistent or entry["confidence"]=="low",_review_reason=observation,
-                     _height_source="visual_package_estimate")
+                     # Stima del modello guardando il package dall'alto: mai
+                     # una misura, e la revisione deve poterlo dire.
+                     _height_source="visual_package_estimate", _height_estimated=True)
             copy_mechanical_metadata(c, entry)
             c['_classification_validated'] = True
             if kind != original["kind"] and original["kind"] != "generic":
@@ -498,13 +646,26 @@ def mechanical_envelopes(photo, components, model, call, log, cache_dir, verific
     A valid family vote updates public kind and _detected_kind, with confidence
     retained separately. Omitted/invalid votes keep generic public kind and a
     tentative detection hint, never a verification claim.
+    @note The height follows the FINAL family (after the vote), estimated by
+        photo_heights.estimate_body_height from family and plan: a body
+        voted as a module no longer keeps the height of the resistor it was
+        first taken for, and a can-sized capacitor is not a 0.8 mm disc.
+        Every height carries _height_estimated True, _height_source
+        "coarse_visual_prior_not_measured" and the rule in _height_basis.
     """
     import numpy as np
     from .datasheet_extractor import COMPONENT_KINDS
     from .photo_inventory import image_block
-    height_priors = {"ic_soic":1.75,"ic_qfn":1.0,"module":4.0,"transformer":4.0,
-        "led":1.0,"capacitor_tantalum":1.5,"capacitor":.8,"resistor":.6,
-        "inductor":1.5,"diode":1.2,"diode_melf":1.5,"connector":3.0,"switch":1.7,"crystal":1.5}
+
+    def estimate_height(c):
+        """Family/plan estimate for the current _detected_kind; 1.5 mm placeholder otherwise."""
+        estimate = estimate_body_height(c.get("_detected_kind"), c.get("length_mm"),
+                                        c.get("width_mm"))
+        c["height_mm"], c["_height_basis"] = (
+            estimate if estimate is not None
+            else (UNKNOWN_FAMILY_HEIGHT_MM, "estimated_placeholder_not_measured"))
+        c["_height_source"] = "coarse_visual_prior_not_measured"
+        c["_height_estimated"] = True
     # `package` e' una identificazione MECCANICA, non elettrica: dice quale
     # corpo standard e' quel volume, non che funzione svolge nel circuito.
     # Sta quindi dentro il mandato di questa verifica, e apre la libreria 3D
@@ -514,12 +675,7 @@ def mechanical_envelopes(photo, components, model, call, log, cache_dir, verific
         "parameters":{"type":"object","properties":{"components":{"type":"array","items":{
             "type":"object","properties":{"id":{"type":"integer"},"present":{"type":"boolean"},
                 "confidence":{"type":"string","enum":["high","medium","low"]},
-                "package":{"type":"string","description":(
-                    "Sigla standard del CORPO come si usa nelle librerie "
-                    "(SOT-223, SOIC-8, R_0402, C_0603, U.FL, USB_C_Receptacle, "
-                    "ESP32-S3-WROOM-1). E' una forma fisica, non una funzione "
-                    "elettrica. Stringa vuota se non la si riconosce con "
-                    "certezza: meglio vuota che inventata.")}},
+                "package":{"type":"string","description":PACKAGE_DESCRIPTION}},
             "required":["id","present","confidence","package"]}}},"required":["components"]}}}
     properties = tool["function"]["parameters"]["properties"]["components"]["items"]["properties"]
     properties.update({k: v for k, v in mechanical_metadata_properties().items()
@@ -546,7 +702,7 @@ def mechanical_envelopes(photo, components, model, call, log, cache_dir, verific
         c = dict(original)
         hint = c.get("_detected_kind", c["kind"])
         c["_detected_kind"] = hint if isinstance(hint, str) else "generic"
-        c["height_mm"] = height_priors.get(c["_detected_kind"],1.5)
+        estimate_height(c)
         # La verifica meccanica non certifica l'identita' elettrica: la
         # Stay generic until an explicit visual family vote supersedes the
         # tentative hint; this does not claim an exact electrical identity.
@@ -555,7 +711,6 @@ def mechanical_envelopes(photo, components, model, call, log, cache_dir, verific
         c["marking"] = ""
         c["_uncertain"] = True
         c["confidence"] = "low"
-        c["_height_source"] = "coarse_visual_prior_not_measured"
         x0,y0,x1,y1 = c["_box"]
         cx,cy = (x0+x1)*w/2,(y0+y1)*h/2
         dx,dy = max(1,(x1-x0)*w*.2),max(1,(y1-y0)*h*.2)
@@ -607,6 +762,8 @@ def mechanical_envelopes(photo, components, model, call, log, cache_dir, verific
                     if isinstance(kind, str) and kind in COMPONENT_KINDS:
                         c['kind'] = kind
                         c['_detected_kind'] = kind
+                        # La famiglia verificata decide l'altezza stimata.
+                        estimate_height(c)
                     copy_mechanical_metadata(c, verdict)
                 else:
                     log(tx("#{id}: presenza non confermata, conservato come dubbio.", id=c['_id']))
@@ -728,21 +885,33 @@ def reconcile_packages(photo, components, model, length, width, kinds, call, log
 def grounded_components(photo, model, length, width, kinds, call, log, cache_dir=None,
                         extra_instructions=None, classifier_model=None, mechanical=True,
                         grounding_prompt=None, verification_prompt=None):
-    """@brief Localize packages over the full view and three details, then verify them in batches of 12; returns renumbered components."""
+    """@brief Localize packages over the full view and a mm-sized detail grid, then verify them in batches; returns renumbered components.
+
+    @note The detail grid comes from detail_grid (both axes, sized from the
+        board's millimetres); each detail is one grounding call, and the
+        count is written to the log before the calls start.
+    """
     from .photo_inventory import image_block, merge_components
     classifier_model = classifier_model or DEFAULT_MODEL
     log(tx("Localizzazione fotografica dedicata: {model}. Geometria e "
            "classificazione separate.",
            model=model))
+    regions = list(grounding_regions(photo, length, width))
+    log(tx("Viste per la localizzazione: la scheda intera più {n_details} dettagli "
+           "ingranditi (una chiamata ciascuno), calcolati dalle quote {length:g} x "
+           "{width:g} mm.", n_details=len(regions) - 1, length=length, width=width))
     groups = []
-    for label, region, ownership, crop in grounding_regions(photo):
+    for label, region, ownership, crop in regions:
         log(tx("{label}: ricerca dei package montati...", label=label))
         try:
             data = cached_call(call, dict(model=model,system_prompt=(grounding_prompt or "").strip() or GROUNDING_PROMPT,
                 content_blocks=[image_block(crop)],tool=grounding_tool(kinds),max_tokens=8192,has_pdf=False),
                 cache_dir,label,log)
             group = decode_boxes(data,region,length,width,kinds,label,log)
-            group = [c for c in group if ownership[0] <= (c['_box'][0]+c['_box'][2])/2 < ownership[1]]
+            # Proprieta' per centro in celle disgiunte, su entrambi gli assi.
+            group = [c for c in group
+                     if ownership[0] <= (c['_box'][0]+c['_box'][2])/2 < ownership[2]
+                     and ownership[1] <= (c['_box'][1]+c['_box'][3])/2 < ownership[3]]
             groups.append(group)
             log(tx("{label}: {n_group} candidati assegnati alla zona.",
                    label=label,
@@ -752,7 +921,11 @@ def grounded_components(photo, model, length, width, kinds, call, log, cache_dir
                    "disponibili.",
                    label=label,
                    exc=exc))
-    merged = merge_components(groups,log,containment=True)
+    # Doppioni riconosciuti entro l'incertezza di misura della foto calibrata
+    # (photo_inventory.same_body): senza la risoluzione solo i riquadri
+    # coincidenti si fondono per contenimento.
+    merged = merge_components(groups,log,containment=True,
+                              image_px=(photo.shape[1], photo.shape[0]))
     for index,component in enumerate(merged,1):
         component["_id"] = index
     if mechanical:

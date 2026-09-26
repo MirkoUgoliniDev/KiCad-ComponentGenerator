@@ -671,12 +671,19 @@ class CastellatedModuleParams:
         the largest 0.01 mm step that fits (an estimate, declared in the notes
         by geometry_notes). When nothing positive fits, the assumed value is
         kept and validate() reports why.
+        Precedence: side declared, module declared, side assumed (e.g. an
+        estimate from the photo, AssumedSize), module assumed, reference. A
+        per-side estimate is closer to the part than the historical reference
+        but never outranks a measure (2026-09-26: an estimated half-hole passed
+        as declared made validate() refuse the row spacing read from the
+        drawing).
         """
-        if side_value is not None:
+        if side_value is not None and is_declared_size(side_value):
             return float(side_value), SIZE_SIDE
         if is_declared_size(module_value):
             return float(module_value), SIZE_MODULE
-        value = float(reference if module_value is None else module_value)
+        value = float(side_value if side_value is not None
+                      else reference if module_value is None else module_value)
         limits = [b for b in bounds if b is not None]
         if not limits or value <= min(limits) + 1e-9:
             return value, SIZE_REFERENCE
@@ -848,7 +855,7 @@ class CastellatedModuleParams:
                         "riferimento {reference}mm non sta nel passo {pitch}mm con la parete "
                         "minima di {wall}mm, quindi e' stimato {value:.2f}mm (il massimo che ci "
                         "sta). Indica il diametro misurato per averlo esatto.",
-                        label=label, reference=float(self._reference("hole_diameter")),
+                        label=label, reference=float(self._reference("hole_diameter", side)),
                         pitch=side.pitch, wall=MIN_HOLE_WALL_MM, value=geometry.half_hole))
                 elif geometry.half_hole_source == SIZE_ESTIMATE_ROWS:
                     notes.append(tx(
@@ -858,7 +865,7 @@ class CastellatedModuleParams:
                         "{wall}mm, quindi e' stimato {value:.2f}mm. Indica il diametro misurato "
                         "per averlo esatto.",
                         label=label, inset=geometry.thru_inset, row_spacing=self.row_spacing,
-                        reference=float(self._reference("hole_diameter")),
+                        reference=float(self._reference("hole_diameter", side)),
                         wall=MIN_HOLE_WALL_MM, value=geometry.half_hole))
             if style == CONTACT_THROUGH_HOLE or geometry.has_thru_holes:
                 if geometry.ring_source == SIZE_ESTIMATE_PITCH:
@@ -867,7 +874,7 @@ class CastellatedModuleParams:
                         "riferimento {reference}mm non sta nel passo {pitch}mm con la distanza "
                         "minima di {wall}mm, quindi e' stimata {value:.2f}mm (il massimo che ci "
                         "sta). Indica il diametro misurato per averlo esatto.",
-                        label=label, reference=float(self._reference("thru_pad_diameter")),
+                        label=label, reference=float(self._reference("thru_pad_diameter", side)),
                         pitch=side.pitch, wall=MIN_HOLE_WALL_MM, value=geometry.ring))
                 if geometry.drill_source == SIZE_ESTIMATE_PITCH:
                     notes.append(tx(
@@ -876,14 +883,21 @@ class CastellatedModuleParams:
                         "{ring:.2f}mm con la parete minima di {wall}mm, quindi e' stimato "
                         "{value:.2f}mm (il massimo che ci sta). Indica il diametro misurato per "
                         "averlo esatto.",
-                        label=label, reference=float(self._reference("thru_hole_drill")),
+                        label=label, reference=float(self._reference("thru_hole_drill", side)),
                         pitch=side.pitch, ring=geometry.ring, wall=MIN_HOLE_WALL_MM,
                         value=geometry.drill))
             notes.extend(self._inset_notes(side, geometry, label))
         return notes
 
-    def _reference(self, name: str) -> float:
-        """The assumed module-level size an estimate started from, before any reduction, mm."""
+    def _reference(self, name: str, side: Optional[CastellatedSide] = None) -> float:
+        """The assumed size an estimate started from, before any reduction, mm.
+
+        The side's own assumed value when it has one (same precedence as
+        _sized), else the module's, else the historical reference.
+        """
+        own = getattr(side, name, None) if side is not None else None
+        if own is not None and not is_declared_size(own):
+            return float(own)
         value = getattr(self, name)
         if value is None:
             value = {"hole_diameter": REFERENCE_HALF_HOLE_MM,
@@ -962,8 +976,8 @@ class CastellatedModuleParams:
             due fori lasciando MIN_HOLE_WALL_MM di parete fra loro.
         @note Non e' una quota scelta su una scheda: e' la distanza sotto la
             quale le due cavita' si fondono, piu' una parete. Usa le sole
-            quote del modulo, senza lati: serve a chi descrive un contatto
-            senza avere i lati (services/contact_zones). La posizione vera di
+            quote del modulo, senza lati: e' la stima a livello di modulo
+            (services/contact_zones usa ormai SideGeometry). La posizione vera di
             ogni lato -- che tiene conto dei fori del lato e della distanza
             fra le file dichiarata -- e' SideGeometry.thru_inset.
         """

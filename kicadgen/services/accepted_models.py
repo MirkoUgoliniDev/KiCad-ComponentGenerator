@@ -11,6 +11,14 @@ PROPOSAL to confirm (user decision: "preselect, you confirm").
     model depends on the package, not on the marking, and the project forbids
     name-based rules. Signatures are compared within a declared tolerance,
     never for equality, because two photographs never yield identical sizes.
+    The tolerance is the measurement uncertainty of the two photographs
+    (`cad3d.measurement_uncertainty`), in millimetres per side: neighbouring
+    standard sizes are separated by an absolute step (QFN 6x6 / 7x7 / 8x8 by
+    1 mm, 0402 / 0603 by 0.6 x 0.3 mm), not by a constant percentage.
+@note Families whose same outline exists with several terminal counts
+    (TERMINAL_COUNT_CATEGORIES: SOT-23-3/5/6, QFN-40/48 in 6x6 and 7x7...) are
+    reused only when the terminal count was observed on BOTH boards and is
+    equal.
 @note The archive is a separate SQLite file (`data/accepted_components.sqlite3`
     or `KICADGEN_MATCH_DB`) so it can be copied, backed up or shared without
     touching AI profiles and translations. Reading never creates the file.
@@ -33,25 +41,28 @@ DEFAULT_FILENAME = "accepted_components.sqlite3"
 #: Variabile che sposta l'archivio (usata anche dai test per isolarsi).
 DB_ENV = "KICADGEN_MATCH_DB"
 
-SCHEMA_VERSION = 1
+#: 2: colonna `side_uncertainty_mm` (incertezza della misura archiviata).
+#: Un archivio della versione 1 resta leggibile (la colonna manca = incertezza
+#: non nota) e viene aggiornato alla prima scrittura.
+SCHEMA_VERSION = 2
 
-#: EURISTICA DICHIARATA -- scarto relativo massimo (sull'asse peggiore, come
-#: `kicad_models.size_distance`) fra l'ingombro di una voce accettata e quello
-#: misurato sulla nuova foto.
-#:
-#: Derivazione: le taglie standard adiacenti distano almeno ~35% sull'asse
-#: peggiore (0603 1.6x0.8 contro 0805 2.0x1.25: 56% sul lato corto; 0402
-#: contro 0603: 60%). Qui si confrontano DUE misure fotografiche, ognuna con il
-#: suo errore: con meta' di quella distanza, due letture che sbagliano in
-#: versi opposti di ~15% non scavalcano ancora la taglia vicina. La
-#: `DEFAULT_SIZE_TOLERANCE` (30%) del matcher e' il limite oltre cui la misura
-#: non conferma piu' nulla; qui la misura deve IDENTIFICARE, quindi serve
-#: stretta.
-#: Separazione FRAGILE, dichiarata: due package con lo stesso corpo e
-#: piedinatura diversa (SOT-23-3 e SOT-23-5) si separano solo se il numero di
-#: terminali e' stato osservato su entrambe le schede; altrimenti vince la
-#: voce piu' recente e l'utente conferma. Da rivedere con dati reali.
-ACCEPTED_MATCH_TOLERANCE = 0.15
+#: CORREZIONE (audit 26/09, punto 82 medio 8): la vecchia tolleranza relativa
+#: fissa del 15% si giustificava con «le taglie adiacenti distano almeno
+#: ~35%», che e' falso: QFN 6x6 contro 7x7 distano il 14%, 7x7 contro 8x8 il
+#: 12.5%, e piu' il package e' grande piu' la distanza relativa si riduce.
+#: Le taglie standard sono separate da un passo ASSOLUTO, quindi la tolleranza
+#: e' ora in millimetri per lato e viene dall'incertezza delle due misure
+#: fotografiche (vedi `match_tolerance_mm`).
+
+#: Categorie in cui lo stesso ingombro esiste con numeri di terminali diversi
+#: (SOT-23-3/5/6, SOIC/QFN con passi diversi nello stesso corpo, QFN-48 sia
+#: 6x6 sia 7x7): per queste l'ingombro non identifica il modello e il numero
+#: di terminali deve essere stato osservato su ENTRAMBE le schede, uguale.
+#: Sono i tipi strutturati che il matcher tratta come circuito integrato o
+#: semiconduttore (`kicad_models._compatible_candidates`), non nomi di parti.
+TERMINAL_COUNT_CATEGORIES = frozenset({
+    "ic", "ic_soic", "ic_qfn", "ic_qfp", "ic_bga", "ic_sot", "power_tab",
+    "semiconductor", "semiconductor_unknown", "transistor"})
 
 #: Entro questo scarto due voci sono sostenute dalla misura allo stesso modo
 #: (stesso valore di `kicad_models.NAME_TIEBREAK_MARGIN`): decide la scelta
@@ -157,6 +168,59 @@ def signature(component: dict) -> Optional[dict]:
             "long_mm": long_mm, "short_mm": short_mm,
             "height_mm": declared_height(component),
             "terminal_count": observed_terminal_count(component)}
+
+
+def match_tolerance_mm(component: dict, stored_side_uncertainty=None) -> tuple[float, str]:
+    """@brief Largest per-side difference, in mm, that two photographic envelopes may show and still be one size.
+
+    @param component New measurement; it may declare its own uncertainty or
+        the scale of its photograph (see `cad3d.measurement_uncertainty`).
+    @param stored_side_uncertainty Side uncertainty of the archived
+        measurement, in mm, when it was recorded (None for entries written
+        before it was, or without a known scale).
+    @return (tolerance_mm, source) where source says where the NEW
+        measurement's uncertainty comes from (declared, photo_scale, assumed).
+    @note Two independent measurements: the tolerance is the sum of their side
+        uncertainties. An archived entry without its own uncertainty is
+        assumed as good as the new one (declared estimate). Without any data
+        the fallback of `measurement_uncertainty` applies (24 px/mm, the
+        coarsest scale at which the inventory claims completeness): about
+        0.33 mm per side, which separates 0402/0603/0805 and QFN 6x6/7x7 but
+        not 01005 from 0201 -- sizes that such a photo cannot resolve anyway.
+    """
+    from ..cad3d.measurement_uncertainty import (
+        component_edge_uncertainty, side_uncertainty_mm)
+    edge, source = component_edge_uncertainty(component)
+    new_side = side_uncertainty_mm(edge)
+    stored = _finite_positive(stored_side_uncertainty)
+    return new_side + (stored if stored is not None else new_side), source
+
+
+def side_uncertainty_of(component: dict) -> Optional[float]:
+    """@brief Side uncertainty of a measurement, in mm, only when it is known.
+
+    @param component Component mapping.
+    @return The uncertainty derived from a declared value or from the photo
+        scale; None when only the fallback would apply (nothing to record).
+    """
+    from ..cad3d.measurement_uncertainty import (
+        SOURCE_ASSUMED, component_edge_uncertainty, side_uncertainty_mm)
+    edge, source = component_edge_uncertainty(component)
+    return None if source == SOURCE_ASSUMED else side_uncertainty_mm(edge)
+
+
+def within_tolerance(long_a, short_a, long_b, short_b, tolerance_mm: float) -> bool:
+    """@brief Tell whether two sorted envelopes differ by at most tolerance_mm on both sides.
+
+    @param long_a Long side of the first envelope, mm.
+    @param short_a Short side of the first envelope, mm.
+    @param long_b Long side of the second envelope, mm.
+    @param short_b Short side of the second envelope, mm.
+    @param tolerance_mm Largest accepted difference per side, mm.
+    @return True when both sides agree within the tolerance.
+    """
+    return (abs(long_a - long_b) <= tolerance_mm + 1e-9
+            and abs(short_a - short_b) <= tolerance_mm + 1e-9)
 
 
 def xy_error(long_a, short_a, long_b, short_b) -> float:
@@ -306,6 +370,14 @@ class AcceptedModelStore:
                    "toccato."))
         if version == SCHEMA_VERSION:
             return
+        if version == 1:
+            # Versione 1: stessa tabella senza l'incertezza. In lettura la
+            # colonna mancante vale «non nota»; alla prima scrittura si
+            # aggiunge, senza toccare le voci esistenti.
+            if create:
+                db.execute("ALTER TABLE accepted_models ADD COLUMN side_uncertainty_mm REAL")
+                db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            return
         if not create:
             # Un file vuoto o estraneo in sola lettura: nessuna voce, nessuna scrittura.
             raise AcceptedModelsError(tx("Archivio abbinamenti senza schema riconosciuto."))
@@ -325,7 +397,8 @@ class AcceptedModelStore:
             " first_accepted TEXT NOT NULL,"
             " last_accepted TEXT NOT NULL,"
             " source TEXT NOT NULL DEFAULT '',"
-            " example_name TEXT NOT NULL DEFAULT '')")
+            " example_name TEXT NOT NULL DEFAULT '',"
+            " side_uncertainty_mm REAL)")
         db.execute("CREATE INDEX IF NOT EXISTS accepted_models_key "
                    "ON accepted_models(category, basis)")
         db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -353,11 +426,15 @@ class AcceptedModelStore:
             `relative_xy_error`, `terminal_count_checked` and `alternatives`
             (other compatible entries not chosen).
         @throws AcceptedModelsError When the file is unreadable or newer.
+        @return The mapping also carries `tolerance_mm` and
+            `tolerance_source` (where the new measurement's uncertainty
+            comes from).
         @note Rules: same category and basis; when both terminal counts are
-            known they must be equal; worst-axis error within
-            ACCEPTED_MATCH_TOLERANCE. The closest entry wins; within
-            RECENCY_TIE_MARGIN the most recent acceptance wins (the user's
-            latest correction). Entries whose file vanished are skipped.
+            known they must be equal, and for TERMINAL_COUNT_CATEGORIES both
+            must be known; each side within `match_tolerance_mm`. The closest
+            entry (worst-axis relative error) wins; within RECENCY_TIE_MARGIN
+            the most recent acceptance wins (the user's latest correction).
+            Entries whose file vanished are skipped.
         """
         sig = signature(component)
         if sig is None:
@@ -369,28 +446,38 @@ class AcceptedModelStore:
             rows = [dict(row) for row in db.execute(
                 "SELECT * FROM accepted_models WHERE category=? AND basis=?",
                 (sig["category"], sig["basis"]))]
+        needs_count = sig["category"] in TERMINAL_COUNT_CATEGORIES
+        if needs_count and sig["terminal_count"] is None:
+            # Stesso ingombro, piedinature diverse: senza il conteggio su
+            # questa scheda l'archivio non sa quale modello proporre.
+            return None
         compatible = []
         for row in rows:
             stored_count = row.get("terminal_count")
+            if needs_count and stored_count is None:
+                continue
             if (sig["terminal_count"] is not None and stored_count is not None
                     and int(stored_count) != sig["terminal_count"]):
                 continue
-            error = xy_error(row["long_mm"], row["short_mm"], sig["long_mm"], sig["short_mm"])
-            if error > ACCEPTED_MATCH_TOLERANCE:
+            tolerance, source = match_tolerance_mm(component, row.get("side_uncertainty_mm"))
+            if not within_tolerance(row["long_mm"], row["short_mm"],
+                                    sig["long_mm"], sig["short_mm"], tolerance):
                 continue
             path = resolve_reference(row["model_ref"], roots)
             if path is None:
                 continue
-            compatible.append((error, row, path))
+            error = xy_error(row["long_mm"], row["short_mm"], sig["long_mm"], sig["short_mm"])
+            compatible.append((error, row, path, tolerance, source))
         if not compatible:
             return None
-        closest = min(error for error, _, _ in compatible)
+        closest = min(item[0] for item in compatible)
         band = [item for item in compatible if item[0] <= closest + RECENCY_TIE_MARGIN]
         band.sort(key=lambda item: (item[1]["last_accepted"], item[1]["id"]), reverse=True)
-        error, row, path = band[0]
+        error, row, path, tolerance, source = band[0]
         return {"entry": row, "path": path, "relative_xy_error": error,
                 "terminal_count_checked": (sig["terminal_count"] is not None
                                            and row.get("terminal_count") is not None),
+                "tolerance_mm": tolerance, "tolerance_source": source,
                 "alternatives": len(compatible) - 1}
 
     # ── Scrittura ───────────────────────────────────────────────────
@@ -405,8 +492,10 @@ class AcceptedModelStore:
         @return Counts of new entries and confirmations plus skipped rows.
         @throws AcceptedModelsError When the archive cannot be written.
         @note An entry with the same category, basis, terminal count and SAME
-            model within tolerance is confirmed: its envelope becomes the mean
-            of the measurements, `samples` grows and the angle becomes the
+            model within `match_tolerance_mm` is confirmed: its envelope becomes the mean
+            of the measurements, its recorded uncertainty the larger of the
+            two known ones (conservative: a mean does not remove a systematic
+            error), `samples` grows and the angle becomes the
             latest EXPLICIT choice: a confirmation without an explicit angle
             keeps the stored one instead of erasing it. A different model for the same signature creates a
             new entry, which wins on reuse because it is more recent.
@@ -434,9 +523,13 @@ class AcceptedModelStore:
                     "SELECT * FROM accepted_models WHERE category=? AND basis=? AND model_ref=?"
                     " AND terminal_count IS ?",
                     (sig["category"], sig["basis"], reference, sig["terminal_count"]))]
+                uncertainty = side_uncertainty_of(component)
                 near = [(xy_error(r["long_mm"], r["short_mm"], sig["long_mm"], sig["short_mm"]), r)
-                        for r in rows]
-                near = [item for item in near if item[0] <= ACCEPTED_MATCH_TOLERANCE]
+                        for r in rows
+                        if within_tolerance(r["long_mm"], r["short_mm"],
+                                            sig["long_mm"], sig["short_mm"],
+                                            match_tolerance_mm(
+                                                component, r.get("side_uncertainty_mm"))[0])]
                 if near:
                     _, row = min(near, key=lambda item: item[0])
                     n = int(row["samples"])
@@ -445,9 +538,12 @@ class AcceptedModelStore:
                         height = (row["height_mm"] * n + height) / (n + 1)
                     elif height is None:
                         height = row["height_mm"]
+                    known = [value for value in (row.get("side_uncertainty_mm"), uncertainty)
+                             if _finite_positive(value) is not None]
                     db.execute(
                         "UPDATE accepted_models SET long_mm=?, short_mm=?, height_mm=?,"
-                        " rotation_deg=?, samples=?, last_accepted=?, source=?, example_name=?"
+                        " rotation_deg=?, samples=?, last_accepted=?, source=?, example_name=?,"
+                        " side_uncertainty_mm=?"
                         " WHERE id=?",
                         ((row["long_mm"] * n + sig["long_mm"]) / (n + 1),
                          (row["short_mm"] * n + sig["short_mm"]) / (n + 1),
@@ -456,18 +552,20 @@ class AcceptedModelStore:
                          # dell'angolo non e' una scelta di "nessun angolo":
                          # l'angolo confermato in precedenza resta valido.
                          rotation if rotation is not None else row["rotation_deg"],
-                         n + 1, now, source, name, row["id"]))
+                         n + 1, now, source, name, max(known) if known else None,
+                         row["id"]))
                     result.confirmed += 1
                 else:
                     db.execute(
                         "INSERT INTO accepted_models (category, basis, long_mm, short_mm,"
                         " height_mm, terminal_count, model_ref, model_name, rotation_deg,"
-                        " samples, first_accepted, last_accepted, source, example_name)"
-                        " VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?,?)",
+                        " samples, first_accepted, last_accepted, source, example_name,"
+                        " side_uncertainty_mm)"
+                        " VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?,?,?)",
                         (sig["category"], sig["basis"], sig["long_mm"], sig["short_mm"],
                          sig["height_mm"], sig["terminal_count"], reference,
                          Path(component["model_path"]).stem, rotation, now, now,
-                         source, name))
+                         source, name, uncertainty))
                     result.created += 1
         return result
 

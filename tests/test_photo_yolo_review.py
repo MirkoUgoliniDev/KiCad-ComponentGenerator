@@ -89,7 +89,7 @@ def test_crop_review_uses_v3_contract_without_conflicting_profile_or_module_note
         verification_prompt='PRIVATE LEGACY PROFILE',
         extra_instructions='PRIVATE WHOLE MODULE NOTES')
     prompt=calls[0]['system_prompt']
-    assert review.PROMPT_VERSION == 'yolo-package-review-3'
+    assert review.PROMPT_VERSION == 'yolo-package-review-4'
     assert 'target_estimate_mm' in prompt and 'complete chip and metal end caps' in prompt
     assert 'PRIVATE LEGACY PROFILE' not in prompt
     assert 'PRIVATE WHOLE MODULE NOTES' not in prompt
@@ -183,7 +183,10 @@ def test_incomplete_rejection_does_not_delete(vote):
 
 def test_huge_numeric_values_do_not_crash_review():
     result=apply(verdict(refined_bbox=[0,0,10**400,.5],bbox_basis='body',height_mm=10**400))
-    assert result['_box']==proposal()['_box'] and result['height_mm']==1
+    # Contratto aggiornato (26/09): l'altezza invalida del modello e' ignorata e
+    # resta la STIMA di famiglia del tipo votato (resistor, 0.6 mm), marcata.
+    assert result['_box']==proposal()['_box'] and result['height_mm']==.6
+    assert result['_height_estimated'] is True
 
 
 @pytest.mark.parametrize('box',[[.7,.2,.3,.4],[.3,.2,float('nan'),.4]])

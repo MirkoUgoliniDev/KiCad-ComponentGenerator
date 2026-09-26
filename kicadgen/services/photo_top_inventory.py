@@ -128,9 +128,14 @@ def _tiles(width, height, core_width, core_height, halo):
     yield from make_core_tiles(width, height, (core_width, core_height), halo)
 
 
-def _merge(groups, log):
+def _merge(groups, log, frame_size=None):
+    """Merge views one-to-one; frame_size (width, height) px sets the duplicate tolerance.
+
+    Without frame_size only coinciding boxes merge by containment (see
+    photo_inventory.merge_components, image_px).
+    """
     from .photo_inventory import merge_components
-    return merge_components(groups, log, containment=True)
+    return merge_components(groups, log, containment=True, image_px=frame_size)
 
 
 def _review_votes(rows, ids):
@@ -223,7 +228,7 @@ def detect_top_bodies(photo, model, call, log, cache_dir=None, *, core_width=800
 
     initial = run_jobs(jobs, detect)
     coverage.extend(status for _, status in initial)
-    candidates = _merge([rows for rows, _ in initial], log)
+    candidates = _merge([rows for rows, _ in initial], log, (w, h))
 
     def review(candidates, prefix):
         for cid, c in enumerate(candidates, 1):
@@ -299,7 +304,7 @@ def detect_top_bodies(photo, model, call, log, cache_dir=None, *, core_width=800
             return detect(job, known)
         residual_results = run_jobs(jobs[1:], residual_job)
         coverage.extend(status for _, status in residual_results)
-        combined = _merge([retained]+[rows for rows, _ in residual_results], log)
+        combined = _merge([retained]+[rows for rows, _ in residual_results], log, (w, h))
         retained, second_rejected = review(combined, "final-review-")
         rejected.extend(second_rejected)
     for cid, c in enumerate(retained, 1):

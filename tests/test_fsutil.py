@@ -51,8 +51,10 @@ def test_document_roles_survive_a_transient_refusal(tmp_path, monkeypatch):
     from kicadgen.services.document_roles import DocumentSet
     monkeypatch.setattr(fsutil, "REPLACE_FIRST_PAUSE_S", 0.0)
     store = DocumentSet(tmp_path / "docs")
-    store.clear("pinout", unavailable=True)
+    source = tmp_path / "a.pdf"
+    source.write_bytes(b"%PDF-1.4\nfixture")
+    store.import_file("pinout", source)
     calls = _flaky(monkeypatch, 1)
-    store.clear("hires", unavailable=True)
+    store.set_roles("a.pdf", ["pinout", "top"])
     assert len(calls) == 2
     assert DocumentSet(tmp_path / "docs").selected is not None

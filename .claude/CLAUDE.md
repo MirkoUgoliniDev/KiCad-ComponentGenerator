@@ -210,8 +210,10 @@ recent projects, «Account AI...» with the Windows Credential Manager, workflow
 status bars, help/log/update/crash-report menu, «Strumenti» menu, STEP preview
 mesh cache, no board silkscreen frame, YOLO model picker, wheel guard, analysis
 blocked without a component type, fixes of the adversarial generality audit, see
-HANDOFF.md points 71-83) is 5150 passed,
-4 skipped, 2 expected failures and 19 subtests. The last packaging integration was merge
+HANDOFF.md points 71-83; then points 84-91: medium/low audit fixes, STEP preview
+loader, per-side hole provenance, AI recount of self-contradictory sides, Qt buttons
+in the chosen language) is 5488 passed,
+6 skipped, 2 expected failures and 19 subtests. The last packaging integration was merge
 commit `692ca95` on `main`. Keep these values aligned with HANDOFF.md.
 
 Eseguire la suite dalla radice del repository:

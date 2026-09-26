@@ -96,12 +96,20 @@ MODEL_SUFFIXES = (".step", ".stp", ".wrl")
 #: Scarto relativo massimo fra l'ingombro del modello e quello misurato sulla
 #: fotografia.
 #:
-#: Il valore e' derivato, non tarato su un caso. Fra due taglie standard
-#: adiacenti corre almeno il 60% (0402 e' 1.0x0.5, 0603 e' 1.6x0.8), e la
-#: scelta avviene comunque per vicinanza: perche' il modello sbagliato risulti
-#: piu' vicino di quello giusto servirebbe un errore di misura superiore al
-#: 30%. Questa soglia e' quindi il limite oltre il quale la misura non
-#: conferma piu' nulla, non il criterio di scelta.
+#: EURISTICA DICHIARATA. Non e' il criterio di scelta -- fra i candidati entro
+#: la soglia la scelta avviene per vicinanza -- ma il limite oltre il quale la
+#: misura non conferma piu' nulla e il candidato non viene nemmeno proposto.
+#:
+#: CORREZIONE (audit 26/09, punto 82 medio 8): il commento precedente diceva
+#: che fra due taglie standard adiacenti corre «almeno il 60%». Vale per i
+#: passivi piccoli (0402 1.0x0.5 contro 0603 1.6x0.8), non in generale: QFN
+#: 6x6 contro 7x7 distano il 14%, 7x7 contro 8x8 il 12.5%, e la distanza
+#: relativa cala al crescere del package. Il 30% quindi NON separa le taglie
+#: vicine dei package grandi: le lascia entrambe nella lista, e a separarle
+#: sono la vicinanza (ordinamento), il numero di terminali dichiarato e la
+#: revisione dell'utente. Tarato come limite largo per misure fotografiche a
+#: bassa risoluzione; lo renderebbe superfluo una tolleranza per candidato
+#: ricavata dall'incertezza di misura (`measurement_uncertainty`).
 DEFAULT_SIZE_TOLERANCE = 0.30
 
 #: Entro questo scarto due candidati sono sostenuti dalla misura allo stesso
@@ -272,17 +280,38 @@ def _normalize(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(text or "").lower())
 
 
+#: Caratteri alfanumerici minimi di una sigla letta sul componente perche'
+#: diventi una chiave di ricerca nei nomi dei file STEP.
+#:
+#: EURISTICA DICHIARATA: la chiave si cerca come SOTTOSTRINGA fra migliaia di
+#: nomi di file. Codici di 3-4 caratteri (valori «103», «R10», lotti «A1B2»,
+#: taglie «0805») compaiono per caso dentro nomi che non c'entrano; da 5
+#: caratteri con lettere E cifre la coincidenza casuale diventa rara. Non
+#: dipende da una marca: vale per qualunque sigla. Lo renderebbe superfluo un
+#: confronto per token interi invece che per sottostringa.
+MIN_MARKING_TOKEN_CHARS = 5
+
+
 def _marking_model_tokens(component: dict) -> tuple[str, ...]:
-    """Extract conservative multi-part model identifiers from literal marking."""
+    """Extract part-number-like identifiers from the literal marking.
+
+    A token is a run of letters, digits and inner hyphens/underscores/dots
+    (``ESP32-S3-WROOM-1U``, ``ESP-12F``, ``RFM95W``, ``E73-2G4M08S1C``) that
+    contains BOTH letters and digits and at least MIN_MARKING_TOKEN_CHARS
+    alphanumerics. The shape is structural: plain words (``WIFI``, ``MADE``)
+    have no digits, values and date codes (``103``, ``2023``) have no letters.
+    Tokens are only literal filename hints for discovery; identity still
+    requires the exact filename (_marked_model_is_named) and compatible
+    dimensions. No brand or vendor list is involved.
+    """
     marking = str(component.get("marking") or "")
-    # A model identifier such as ESP32-S3-WROOM-1U is useful only as a literal
-    # filename hint. Require at least two separators so FCC/IC identifiers and
-    # arbitrary single words do not become packages by accident.
-    matches = re.findall(r"(?<![A-Z0-9])([A-Z][A-Z0-9]*(?:-[A-Z0-9]+){2,})(?![A-Z0-9])",
-                         marking.upper())
+    matches = re.findall(r"[A-Z0-9]+(?:[-_.][A-Z0-9]+)*", marking.upper())
     unique = {}
     for value in matches:
-        unique[_normalize(value)] = value
+        normalized = _normalize(value)
+        if (len(normalized) >= MIN_MARKING_TOKEN_CHARS
+                and re.search(r"[a-z]", normalized) and re.search(r"\d", normalized)):
+            unique[normalized] = value
     return tuple(unique.values())
 
 
@@ -1061,6 +1090,23 @@ def size_matches(model_size, length_mm, width_mm,
     return distance is not None and distance <= tolerance
 
 
+#: Tipo strutturato del corpo -> famiglia di modelli KiCad (vedi
+#: _candidate_family). Unica tabella per il filtro di compatibilita' e per la
+#: scoperta per famiglia: i tipi aggiunti al vocabolario dell'estrazione
+#: (punto 84 medio 13) vi entrano qui una volta sola. Un tipo senza famiglia
+#: (display, rele', batteria...) non restringe la ricerca per famiglia.
+KIND_FAMILY_ALIASES = {
+    "ic_soic": "ic", "ic_qfn": "ic", "ic_qfp": "ic", "ic_bga": "ic",
+    "ic_sot": "semiconductor", "power_tab": "semiconductor",
+    "tantalum": "capacitor", "capacitor_tantalum": "capacitor",
+    "capacitor_electrolytic": "capacitor", "inductor_power": "inductor",
+    "diode_melf": "diode", "crystal_can": "crystal",
+    "pin_header": "connector", "socket_header": "connector",
+    "rf_module": "module", "pcb_module": "module", "shield_can": "module",
+    "semiconductor_unknown": "semiconductor", "transistor": "semiconductor",
+}
+
+
 def _candidate_family(path):
     """Recognize explicit KiCad taxonomy; never assign unknown packages by size."""
     folder = path.parent.name.lower().removesuffix(".3dshapes")
@@ -1212,10 +1258,7 @@ def _compatible_candidates(paths, component, note):
     """Reject explicit type/topology contradictions before comparing dimensions."""
     if not component:
         return paths
-    aliases = {"ic_soic": "ic", "ic_qfn": "ic", "ic_qfp": "ic", "ic_bga": "ic",
-               "tantalum": "capacitor", "diode_melf": "diode",
-               "rf_module": "module", "pcb_module": "module",
-               "semiconductor_unknown": "semiconductor", "transistor": "semiconductor"}
+    aliases = KIND_FAMILY_ALIASES
     known = {"resistor", "resistor_array", "capacitor", "diode", "led", "inductor",
              "connector", "crystal", "ic", "fuse", "mechanical", "switch", "module", "semiconductor"}
     kinds = {str(component.get(key) or "").lower() for key in
@@ -1579,10 +1622,7 @@ def _family_paths(component, root, basis):
     # mechanical class for discovery without rewriting the rendering metadata.
     if observed_class in ("semiconductor_unknown", "transistor", "regulator"):
         kind = observed_class
-    aliases = {"ic_soic": "ic", "ic_qfn": "ic", "ic_qfp": "ic", "ic_bga": "ic",
-               "rf_module": "module", "pcb_module": "module", "tantalum": "capacitor",
-               "diode_melf": "diode", "semiconductor_unknown": "semiconductor",
-               "transistor": "semiconductor", "regulator": "semiconductor"}
+    aliases = dict(KIND_FAMILY_ALIASES, regulator="semiconductor")
     family = aliases.get(kind, kind)
     # Discovery must cover every family accepted by the compatibility filter:
     # a generic IC can use SO/QFN or SOT. Omitting SOT would manufacture a unique
@@ -1849,15 +1889,8 @@ def _provisional_geometry_choice(component, choices, complete, basis):
     if (first.get("family") in ("module", "ic")
             and _marked_model_matches(Path(first["path"]), component)):
         return first
-    if morphology_exception:
-        # SOT-223 is the only common KiCad semiconductor preview whose
-        # mechanical evidence is three leads plus a large tab.  Do not accept
-        # a distant second family alternative as if it were equivalent.
-        if (first.get("family") == "semiconductor"
-                and best_error <= 0.12
-                and re.search(r"(?:^|[-_])SOT[-_]?223(?:\.|$)",
-                              Path(first["path"]).name, re.I)):
-            return first
+    if morphology_exception and _leads_and_tab_agree(first, choices, component):
+        return first
     if component.get("topology_incomplete"):
         return None
     # La banda di pareggio e' l'insieme di TUTTI i candidati che la misura
@@ -1887,6 +1920,89 @@ def _provisional_geometry_choice(component, choices, complete, basis):
         return first if complete and len(choices) >= 2 else None
     return first if _band_is_homogeneous(
         band, component.get("length_mm"), component.get("width_mm")) else None
+
+
+#: Rapporto d'area minimo perche' una piazzola del footprint conti come
+#: aletta (tab) rispetto alla piazzola mediana del footprint.
+#:
+#: EURISTICA DICHIARATA: un'aletta dissipa e si stende su piu' larghezze di
+#: reoforo. Nella libreria KiCad 10 l'aletta del SOT-223 e' 2.53 volte la
+#: piazzola di un reoforo (2.0x3.8 contro 2.0x1.5), quella del TO-252 oltre
+#: 14 volte, mentre la piazzola 1 allargata del SOT-143 (non un'aletta) e'
+#: 1.67 volte le altre. Separazione con margine MODESTO fra 1.67 e 2.53,
+#: dichiarata: la renderebbe superflua un attributo «tab» nel footprint.
+TAB_AREA_RATIO = 2.0
+
+
+def _declared_land_pattern(path: Path, library: Optional[Path] = None):
+    """Pads declared by the KiCad footprints linked to a model: (copper pads, tabs).
+
+    A tab is a copper pad whose area is at least TAB_AREA_RATIO times the
+    median pad area of the same footprint. Pad NUMBERS are not used: the
+    library links the same solid to footprints that number the tab
+    differently (SOT-223: tab as 4, or as 2 in SOT-223-3_TabPin2), while the
+    copper lands are the same. The footprint is read, never the file name.
+    @return (pads, tabs) when every footprint linking the model agrees, else
+        None (no footprint, unreadable, or disagreement).
+    """
+    if library is None:
+        # Layout of a KiCad installation: 3dmodels/<Lib>.3dshapes/<Name>.step
+        # beside footprints/<Lib>.pretty/<Name>.kicad_mod.
+        library = Path(path).parent.parent
+    root = library.parent / "footprints"
+    if not root.is_dir():
+        return None
+    target = Path(path).resolve()
+    found = set()
+    try:
+        for footprint in sorted(root.rglob("*.kicad_mod")):
+            stamp = index_key(footprint)
+            hints, variable = _link_hints(footprint, stamp)
+            if not variable and target.name.casefold() not in hints:
+                continue
+            try:
+                tree = _sexpr(footprint.read_text(encoding="utf-8-sig"))
+                models = _children(tree, "model")
+                if len(models) != 1 or _model_link(models[0], footprint, library) != target:
+                    continue
+                bounds = [b for pad in _children(tree, "pad")
+                          if (b := _pad_bounds(pad)) is not None]
+            except (OSError, ValueError, TypeError, IndexError, RecursionError):
+                continue
+            if not bounds:
+                continue
+            areas = sorted((b[2] - b[0]) * (b[3] - b[1]) for b in bounds)
+            median = areas[len(areas) // 2] if len(areas) % 2 else (
+                areas[len(areas) // 2 - 1] + areas[len(areas) // 2]) / 2
+            tabs = sum(1 for area in areas if area >= TAB_AREA_RATIO * median)
+            found.add((len(areas), tabs))
+    except OSError:
+        return None
+    return next(iter(found)) if len(found) == 1 else None
+
+
+def _leads_and_tab_agree(first, choices, component) -> bool:
+    """Whether the head candidate's land pattern declares "N leads plus one tab" as observed.
+
+    Replaces a rule keyed on the SOT-223 file name and a 0.12 error bound
+    tuned on it. The observation is structural (`_three_leads_one_tab`: three
+    ordinary leads and one tab); the model side is what its KiCad footprint
+    declares -- N + 1 copper pads of which exactly one is a tab
+    (_declared_land_pattern) -- never its name. A model whose footprint is
+    missing declares nothing and is not promoted (it stays in the picker).
+    Every candidate the photograph cannot separate from the head (the tie
+    band) must declare the same land pattern and, when there are several,
+    form a homogeneous band; otherwise the doubt goes to the picker.
+    """
+    band = _tie_band(choices)
+    if not band or not any(item is first for item in band):
+        return False
+    leads = component.get("lead_count")
+    leads = leads if type(leads) is int and leads > 0 else 3
+    if any(_declared_land_pattern(Path(item["path"])) != (leads + 1, 1) for item in band):
+        return False
+    return len(band) == 1 or _band_is_homogeneous(
+        band, component.get("length_mm"), component.get("width_mm"))
 
 
 def _tie_band(choices):
@@ -2222,8 +2338,9 @@ def _accepted_match(component: dict, roots, note) -> Optional[dict]:
     @param component Body to match, without an explicit choice.
     @param roots 3D library roots in use.
     @param note Diagnostic callback.
-    @return A `library_matched` report with a single candidate, or None to
-        continue with the ordinary search.
+    @return A `library_matched` report with a single candidate, or None.
+        The ordinary search runs in both cases; `_prefer_closer` decides
+        whether this proposal or a closer library model wins.
     @note The archive helps, it is not required: an unreadable or newer file
         is logged and ignored, and matching proceeds as without it. Nothing is
         written: reading neither creates the archive nor changes its entries.
@@ -2232,8 +2349,8 @@ def _accepted_match(component: dict, roots, note) -> Optional[dict]:
         automatic attachment; a stored angle is absolute like any explicit
         choice, so the verse must be checked by the user -- the reasons say so.
     """
-    from ..services.accepted_models import (
-        ACCEPTED_MATCH_TOLERANCE, AcceptedModelStore, AcceptedModelsError)
+    from ..services.accepted_models import AcceptedModelStore, AcceptedModelsError
+    from .measurement_uncertainty import SOURCE_ASSUMED, SOURCE_DECLARED
     try:
         found = AcceptedModelStore().find(component, roots)
     except (AcceptedModelsError, sqlite3.Error, OSError) as exc:
@@ -2254,9 +2371,13 @@ def _accepted_match(component: dict, roots, note) -> Optional[dict]:
            samples=samples,
            accepted_on=accepted_on),
         tx("Stessa categoria ({category}) e stessa base di misura; ingombro entro "
-           "il {ACCEPTED_MATCH_TOLERANCE:.0%} di quello accettato",
-           category=entry['category'],
-           ACCEPTED_MATCH_TOLERANCE=ACCEPTED_MATCH_TOLERANCE),
+           "{tolerance:.2f} mm per lato da quello accettato ({basis})",
+           category=entry['category'], tolerance=found["tolerance_mm"],
+           basis=(tx("incertezza dichiarata dalla misura")
+                  if found["tolerance_source"] == SOURCE_DECLARED else
+                  tx("incertezza stimata: scala della foto non nota")
+                  if found["tolerance_source"] == SOURCE_ASSUMED else
+                  tx("incertezza dalla scala della foto"))),
         count_reason,
         tx("Proposta da confermare: il verso (polarita') va verificato su questa "
            "scheda"),
@@ -2271,7 +2392,7 @@ def _accepted_match(component: dict, roots, note) -> Optional[dict]:
                  "family": _candidate_family_for_component(path, component),
                  "status": "library_matched", "reasons": reasons}
     note(tx("{value}: modello dall'archivio degli abbinamenti accettati ({stem}); "
-            "misura dei candidati saltata.",
+            "si confronta comunque con la ricerca in libreria.",
             value=component.get('name') or path.stem,
             stem=path.stem))
     return {"status": "library_matched", "candidates": [candidate],
@@ -2305,8 +2426,10 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None,
         selected_path; attach_models applies it provisionally and says so.
         Rejection stops discovery. Without an explicit choice, a body whose
         geometric signature matches an entry of the accepted-matches archive
-        (`services.accepted_models`) returns status library_matched with that
-        single candidate, before any library search or CAD measurement.
+        (`services.accepted_models`) gets that entry as a proposal, but the
+        library search ALWAYS runs as well (user decision, 2026-09-26): the
+        archive entry wins (status library_matched) unless the search found a
+        model clearly closer to the measurement (see _prefer_closer).
         Missing/descriptive packages use family discovery.
         Unknown basis compares independent readings; body/total/pads are strict.
         leads and body_and_leads mean total. At most 64 structurally compatible
@@ -2335,20 +2458,64 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None,
     limit = min(limit, 5)
     if not archive_can_match(component):
         return result
-    length, width = component.get("length_mm"), component.get("width_mm")
-    basis = _matching_basis(component)
-    package = str(component.get("package") or "").strip()
     roots = _search_roots(library)
     root = roots[0] if roots else None
     if root is None:
         note(tx("Libreria 3D di KiCad non trovata: si usano le forme approssimate."))
         return result
-    # Prima della ricerca e della misura (la parte lenta): un corpo con la
-    # stessa firma geometrica di uno che l'utente ha gia' accettato riceve
-    # quel modello come proposta da confermare.
+    # Un corpo con la stessa firma geometrica di uno che l'utente ha gia'
+    # accettato riceve quel modello come proposta da confermare; la ricerca in
+    # libreria gira comunque, e vince il modello piu' vicino alla misura.
     accepted = _accepted_match(component, roots, note)
-    if accepted is not None:
-        return accepted
+    result = _library_search(component, result, limit=limit, roots=roots, root=root,
+                             note=note, cancel=cancel)
+    return _prefer_closer(accepted, result, limit, note) if accepted else result
+
+
+def _prefer_closer(accepted: dict, searched: dict, limit: int, note) -> dict:
+    """Choose between the archive proposal and the library search result.
+
+    The archived model keeps its place unless the search found a candidate
+    whose worst-axis error is smaller than the archived model's by more than
+    NAME_TIEBREAK_MARGIN (the margin within which the photograph cannot
+    separate two solids; there the user's earlier acceptance decides). The
+    archived model's error is the one measured by the search when the search
+    measured that same file, otherwise the error against the archived
+    photographic envelope -- the same quantity against a different reference,
+    a declared approximation.
+    """
+    archived = accepted["candidates"][0]
+    same = next((item for item in searched.get("candidates", ())
+                 if item["path"] == archived["path"]), None)
+    archived_error = (same or archived)["relative_xy_error"]
+    others = [item for item in searched.get("candidates", ()) if item["path"] != archived["path"]]
+    best = min(others, key=lambda item: item["relative_xy_error"], default=None)
+    if best is not None and best["relative_xy_error"] + NAME_TIEBREAK_MARGIN < archived_error:
+        note(tx("Archivio abbinamenti: {archived} non proposto, la libreria ha {best} "
+                "piu' vicino alla misura ({best_error:.0%} contro {archived_error:.0%}).",
+                archived=Path(archived["path"]).stem, best=best["package"],
+                best_error=best["relative_xy_error"], archived_error=archived_error))
+        return searched
+    merged = dict(accepted)
+    if same is not None:
+        archived["relative_xy_error"] = same["relative_xy_error"]
+        if "dimensions_mm" in same:
+            archived["dimensions_mm"] = same["dimensions_mm"]
+    # The search's own verdict on the alternatives (auto/provisional) is
+    # superseded by the archive proposal: they stay listed for review only.
+    alternatives = [dict(item, status="review_required") for item in others[:max(0, limit - 1)]]
+    merged["candidates"] = [archived] + alternatives
+    for key in ("search_truncated", "topology_incomplete", "rejected_candidate_count"):
+        if key in searched:
+            merged[key] = searched[key]
+    return merged
+
+
+def _library_search(component: dict, result: dict, *, limit, roots, root, note, cancel) -> dict:
+    """Ordinary library discovery and measurement for one component (see model_candidates)."""
+    length, width = component.get("length_mm"), component.get("width_mm")
+    basis = _matching_basis(component)
+    package = str(component.get("package") or "").strip()
     named = list(dict.fromkeys(
         p for search_root in roots
         for p in candidates(package, search_root)

@@ -17,13 +17,14 @@ from .photo_grounding import cached_call
 from .photo_inventory import image_block, copy_mechanical_metadata
 from .messages import tx
 
-PROMPT_VERSION = 'yolo-package-review-3'
+PROMPT_VERSION = 'yolo-package-review-4'
 COVERAGE_PROMPT = """Check PCB detection coverage, not electrical identity.
 The first image is the calibrated TOP photograph; the second shows existing
 numbered detector proposals. Return ONLY separately mounted bodies missed by
 those proposals, or a COMPLETE assembly envelope when existing boxes cover only
-fragments. An RF module with shield, substrate and coax socket is ONE assembly.
-Do not report its shield or socket separately. Do not add correctly covered
+fragments. A module assembled on its own substrate (with any shield and the
+parts mounted on that substrate) is ONE assembly: do not report its parts
+separately. Do not add correctly covered
 bodies, empty pads, silkscreen, vias, holes or traces. There is no target count.
 Use box_2d=[ymin,xmin,ymax,xmax], integers 0..1000 relative to the WHOLE first
 photograph. Tight visible body/attached-lead bounds, not solder lands or guessed
@@ -38,8 +39,9 @@ The overview gives context; each following image is one labelled padded crop.
 Proposals are not ground truth. First decide whether each cyan target contains
 a separately mounted physical component. Reject empty pads, vias, silkscreen,
 holes or isolated leads only when clear. Keep doubtful real bodies as generic.
-A complete RF module includes its substrate, shield and onboard connector: ONE
-assembly, not separate parts. Do not add IDs or force a component count.
+A module assembled on its own substrate, with any shield and every part mounted
+on that substrate, is ONE assembly, not separate parts. Do not add IDs or force a
+component count.
 If a complete assembly and a fragment of that SAME assembly are both numbered,
 reject only the fragment. For duplicate complete bodies keep the lower ID.
 
@@ -133,6 +135,16 @@ def _audit_safe(value):
     return value
 
 
+def _withhold_unkept(components, log):
+    """Drop low-confidence proposals nobody kept before a paid call, saying how many."""
+    from .photo_yolo import split_ai_candidates
+    sent, withheld = split_ai_candidates(components)
+    if withheld:
+        log(tx("Revisione YOLO: {n_withheld} proposte a bassa confidenza non tenute "
+               "restano fuori dalla richiesta a pagamento.", n_withheld=len(withheld)))
+    return sent
+
+
 def recover_coverage(photo, components, length, width, model, call, log, cache_dir=None):
     """@brief Add uncertain whole-body proposals missed or clipped by local YOLO.
     @param photo Calibrated BGR image authorized for external AI analysis.
@@ -144,12 +156,15 @@ def recover_coverage(photo, components, length, width, model, call, log, cache_d
     @param log Persistent progress callback.
     @param cache_dir Optional response cache and unique audit records.
     @return Local and additional AI proposals, all pending crop verification.
+        Low-confidence proposals nobody kept (photo_yolo.awaiting_user_keep)
+        are neither drawn in the paid overview nor returned.
     """
     import cv2
     import numpy as np
     from .datasheet_extractor import COMPONENT_KINDS
     from .photo_grounding import grounding_tool, decode_boxes
     from .photo_inventory import draw_inventory
+    components = _withhold_unkept(components, log)
     overview=cv2.imdecode(np.frombuffer(draw_inventory(photo,components,use_ids=True),dtype=np.uint8),cv2.IMREAD_COLOR)
     kwargs=dict(model=model,system_prompt=COVERAGE_PROMPT,
                 content_blocks=[image_block(photo),image_block(overview)],
@@ -227,10 +242,22 @@ def apply_review(original, verdict, context, image_shape, length, width, kinds, 
     @param kinds Supported physical family names.
     @param log Progress callback.
     @return Reviewed component or None for a high-confidence non-component.
+    @note Geometry: a proposal whose edges were measured on the photograph
+        (photo_global_inventory.measured_body) and whose box the reviewer did
+        not refine keeps its measured sides, centre and ANY angle; rebuilding
+        them from the axis-aligned box would inflate an oblique body
+        (5x5 mm at 45 degrees -> 7.1x7.1 mm). The reviewer's 0/90/180/270
+        angle is then kept as _reported_rotation_deg.
+    @note Height: the reviewer's estimate when valid, otherwise the family and
+        plan estimate of photo_heights for the voted kind; always marked
+        `_height_estimated` True, never a measurement.
     """
+    from .photo_global_inventory import measured_body
+    from .photo_heights import estimate_body_height
     c=deepcopy(original)
     c.update(_uncertain=True,confidence='low',_package_verified=False,
-             _height_source='coarse_visual_prior_not_measured',_orientation_verified=False)
+             _height_source='coarse_visual_prior_not_measured',_height_estimated=True,
+             _orientation_verified=False)
     if (not isinstance(verdict,dict) or type(verdict.get('present')) is not bool
             or verdict.get('confidence') not in ('high','medium','low')
             or verdict.get('kind') not in kinds
@@ -277,10 +304,25 @@ def apply_review(original, verdict, context, image_shape, length, width, kinds, 
     if type(angle) is not int or angle not in (0,90,180,270): angle=90 if sy>sx else 0
     long,short=(sx,sy) if angle%180==0 else (sy,sx)
     if short>long*1.2: angle=(angle+90)%360;long,short=short,long
-    c.update(x_mm=((x+a)/2-.5)*length,y_mm=((y+b)/2-.5)*width,length_mm=long,width_mm=short,rotation_deg=angle)
+    body=measured_body(original) if list(c['_box'])==list(original['_box']) else None
+    if body is not None:
+        # Misura dei bordi conservata: il riquadro e' quello misurato.
+        c['_reported_rotation_deg']=angle
+        long,short=max(body['length_mm'],body['width_mm']),min(body['length_mm'],body['width_mm'])
+        c.update(x_mm=body['x_mm'],y_mm=body['y_mm'],length_mm=long,width_mm=short,
+                 rotation_deg=body['rotation_deg'] if body['length_mm']>=body['width_mm']
+                 else (body['rotation_deg']+90)%180)
+    else:
+        c.pop('_edges_measured',None)
+        c.update(x_mm=((x+a)/2-.5)*length,y_mm=((y+b)/2-.5)*width,length_mm=long,width_mm=short,rotation_deg=angle)
     height=verdict.get('height_mm')
     if isinstance(height,(int,float)) and not isinstance(height,bool) and 0<height<=100 and math.isfinite(height):
         c['height_mm']=height;c['_height_source']='visual_package_estimate_not_measured'
+        c['_height_basis']='model_visual_estimate'
+    else:
+        estimate=estimate_body_height(kind,c['length_mm'],c['width_mm'])
+        if estimate is not None:
+            c['height_mm'],c['_height_basis']=estimate
     count=verdict.get('pin_count'); count_confidence=verdict.get('pin_count_confidence')
     if type(count) is int and 0<count<=512 and count_confidence in ('high','medium','low'):
         c.update(pin_count=count,pin_count_confidence=count_confidence,pin_count_source='photo_observation')
@@ -319,6 +361,9 @@ def review_yolo_components(photo, components, length, width, model, call, log,
     @param strategy 'global' reconciles all proposals and missing bodies in one
         request; caller must skip recover_coverage. 'crop' preserves legacy behavior.
     @throws ValueError If the strategy or global input calibration is invalid.
+    @note Low-confidence proposals nobody kept in the review
+        (photo_yolo.awaiting_user_keep) never reach the paid reviewer, in
+        either strategy, and are not returned.
     """
     if strategy == 'global':
         from .photo_global_inventory import review_global_inventory
@@ -331,6 +376,7 @@ def review_yolo_components(photo, components, length, width, model, call, log,
     import numpy as np
     from .datasheet_extractor import COMPONENT_KINDS
     from .photo_inventory import draw_inventory
+    components = _withhold_unkept(components, log)
     if not components: return []
     prompt=REVIEW_PROMPT
     tool=review_tool(COMPONENT_KINDS)

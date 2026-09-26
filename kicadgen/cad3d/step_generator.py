@@ -28,6 +28,10 @@ from ..generators.castellated_module import (
 from ..generators.pin_header import PinHeaderParams, pin_positions
 from .annotations import EdgeFilletAnnotation, FaceTextAnnotation
 from .body_params import Body3DParams
+from .measurement_uncertainty import (
+    ASSUMED_SCALE_PX_PER_MM, SCALE_KEY, SOURCE_ASSUMED, SOURCE_DECLARED, UNCERTAINTY_KEY,
+    component_edge_uncertainty, side_uncertainty_mm,
+)
 from .process_log import ProcessCancelled, heartbeat_interval
 from ..services.messages import CHILD_WARNING, child_warning_text, tx
 
@@ -58,7 +62,8 @@ def _safe_name(name: str, index: int) -> str:
     return f"Cmp{index}_{cleaned}"[:40] if cleaned else f"Cmp{index}"
 
 
-#: Distanza minima tenuta tra il bordo di un componente e il bordo del modulo.
+#: Distanza minima tenuta tra il bordo di un componente e il bordo del modulo,
+#: quando il componente viene riportato dentro (vedi `place_component`).
 COMPONENT_EDGE_MARGIN_MM = 0.2
 
 
@@ -78,7 +83,11 @@ def _match_evidence(component):
               "terminal_layout", "terminal_count_basis", "_global_inventory_status", "class",
               # Riferimento asimmetrico osservato: il costruttore lo confronta
               # col baricentro del modello nativo per ricavare il verso.
-              "landmark_feature", "landmark_side", "landmark_confidence")
+              "landmark_feature", "landmark_side", "landmark_confidence",
+              # Incertezza della misura fotografica (mm per bordo) o scala
+              # della foto (px/mm): decidono se due ingombri sono la stessa
+              # taglia (archivio degli abbinamenti, kicad_models).
+              UNCERTAINTY_KEY, SCALE_KEY)
     return {key: evidence[key] for key in fields if key in evidence}
 
 
@@ -174,6 +183,87 @@ def clamp_component_position(
     half_x = max(0.0, body_length / 2 - footprint_x / 2 - margin)
     half_y = max(0.0, body_width / 2 - footprint_y / 2 - margin)
     return max(-half_x, min(half_x, x)), max(-half_y, min(half_y, y))
+
+
+def component_overhang(
+    x: float, y: float, length: float, width: float, rotation: float,
+    body_length: float, body_width: float,
+) -> tuple[float, float]:
+    """@brief How far a component's rotated outline extends beyond the module edge, per axis.
+
+    @param x Centre X of the component, mm (origin at the module centre).
+    @param y Centre Y of the component, mm.
+    @param length Long side of the component, mm.
+    @param width Short side of the component, mm.
+    @param rotation Rotation on the module, degrees (any angle).
+    @param body_length Module size along X, mm.
+    @param body_width Module size along Y, mm.
+    @return (overhang_x, overhang_y) in mm, zero on an axis where the outline
+        stays inside the module.
+    @throws ValueError When a value is not a finite number.
+    """
+    if not all(_is_finite_number(value) for value in
+               (x, y, length, width, rotation, body_length, body_width)):
+        raise ValueError("component position, size and rotation must be finite numbers")
+    (c, s), _ = _rectangle_axes(rotation)
+    footprint_x = abs(c) * length + abs(s) * width
+    footprint_y = abs(s) * length + abs(c) * width
+    return (max(0.0, abs(x) + footprint_x / 2 - body_length / 2),
+            max(0.0, abs(y) + footprint_y / 2 - body_width / 2))
+
+
+def place_component(
+    x: float, y: float, length: float, width: float, rotation: float,
+    body_length: float, body_width: float, tolerance_mm: float,
+    margin: float = COMPONENT_EDGE_MARGIN_MM,
+) -> tuple[float, float, float, float]:
+    """@brief Decide, per axis, whether an overhanging component is kept or moved inside.
+
+    Decisione dell'utente (2026-09-26): un corpo che sporge dal bordo resta
+    dove e' stato misurato, con una nota nel log; viene riportato dentro
+    (con `margin`) solo quando lo sforamento e' minore dell'incertezza di
+    misura, cioe' quando la sporgenza non si distingue dall'errore della
+    foto. Un modulo con un'antenna, un connettore o un pulsante a sbalzo
+    conserva cosi' la sua geometria reale.
+
+    @param x Measured centre X, mm.
+    @param y Measured centre Y, mm.
+    @param length Long side, mm.
+    @param width Short side, mm.
+    @param rotation Rotation on the module, degrees.
+    @param body_length Module size along X, mm.
+    @param body_width Module size along Y, mm.
+    @param tolerance_mm Uncertainty of the overhang: an overhang up to this
+        value is treated as measurement error.
+    @param margin Clearance kept from the edge when a body is moved inside.
+    @return (x, y, kept_overhang_x, kept_overhang_y): the centre to build and,
+        per axis, the overhang left in place (zero when none was kept).
+    @throws ValueError When a value is not a finite number or the tolerance
+        is negative.
+    @note Each axis is decided on its own: a body can project 3 mm beyond one
+        edge (kept) and 0.1 mm beyond the other (measurement error, moved).
+        A body that does not overhang at all is treated as before: moved only
+        to keep `margin` from the edge.
+    """
+    if not _is_finite_number(tolerance_mm) or tolerance_mm < 0:
+        raise ValueError("overhang tolerance must be a finite non-negative number")
+    over_x, over_y = component_overhang(x, y, length, width, rotation,
+                                        body_length, body_width)
+    clamped_x, clamped_y = clamp_component_position(
+        x, y, length, width, rotation, body_length, body_width, margin)
+    keep_x, keep_y = over_x > tolerance_mm, over_y > tolerance_mm
+    return (x if keep_x else clamped_x, y if keep_y else clamped_y,
+            over_x if keep_x else 0.0, over_y if keep_y else 0.0)
+
+
+def _uncertainty_basis(source: str) -> str:
+    """Italian phrase saying where the overhang tolerance comes from."""
+    if source == SOURCE_DECLARED:
+        return tx("dichiarata dalla misura")
+    if source == SOURCE_ASSUMED:
+        return tx("stimata: scala della foto non nota, ipotizzati {scale:.0f} px/mm",
+                  scale=ASSUMED_SCALE_PX_PER_MM)
+    return tx("dalla scala della foto")
 
 
 #: Sovrapposizione minima, su entrambi gli assi, perche' due componenti
@@ -562,11 +652,22 @@ def generate_castellated_3d_model(
     progress=None,
     model_progress=None,
     cancel=None,
+    photo_scale_px_per_mm: Optional[float] = None,
 ) -> dict:
     """@brief Genera il 3D di un modulo castellated come PCB vero e proprio.
 
     `cancel` e' il canale di rinuncia (vedi `_run_freecad`): un
     `threading.Event` che chi ha avviato il lavoro mette a uno per fermarlo.
+
+    `photo_scale_px_per_mm` e' la scala della foto calibrata da cui vengono le
+    posizioni dei componenti, quando e' nota: da essa si ricava l'incertezza
+    di misura (vedi `measurement_uncertainty`). Un componente che porta la
+    propria (`measurement_uncertainty_mm` o `photo_scale_px_per_mm` nelle
+    evidenze) usa quella. Senza nessuna delle due si usa un ripiego
+    dichiarato e la nota lo dice. Un corpo che sporge dal bordo piu'
+    dell'incertezza resta dove e' stato misurato (nota nel log); uno che
+    sporge meno viene riportato dentro (vedi `place_component`). I connettori
+    con innesto dal bordo (`mating == "edge"`) non vengono mai spostati.
 
     Quello che si vede in un modulo reale, e che qui viene ricostruito:
 
@@ -640,15 +741,26 @@ def generate_castellated_3d_model(
         if component.mating == "edge":
             x, y = component.x, component.y
         else:
-            x, y = clamp_component_position(
+            # L'incertezza della sporgenza e' quella di due bordi misurati
+            # sulla stessa foto: il bordo del corpo e il bordo della scheda.
+            edge_mm, source = component_edge_uncertainty(component, photo_scale_px_per_mm)
+            tolerance = side_uncertainty_mm(edge_mm)
+            x, y, kept_x, kept_y = place_component(
                 component.x, component.y, component.length, component.width,
-                component.rotation, params.body_length, params.body_width,
+                component.rotation, params.body_length, params.body_width, tolerance,
             )
             if abs(x - component.x) > 1e-9 or abs(y - component.y) > 1e-9:
                 placement_notes.append(tx(
                     "Componente {name}: centro spostato da ({x0:.2f}, {y0:.2f}) a "
                     "({x1:.2f}, {y1:.2f}) mm per restare dentro il modulo.",
                     name=component.name, x0=component.x, y0=component.y, x1=x, y1=y))
+            if kept_x or kept_y:
+                placement_notes.append(tx(
+                    "Componente {name}: sporge dal bordo del modulo di {overhang:.2f} mm, "
+                    "piu' dell'incertezza di misura ({tolerance:.2f} mm, {basis}): "
+                    "lasciato dove e' stato misurato.",
+                    name=component.name, overhang=max(kept_x, kept_y),
+                    tolerance=tolerance, basis=_uncertainty_basis(source)))
         height = component.height
         height_note = None
         if 0 < component_height < component.height:

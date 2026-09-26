@@ -292,7 +292,12 @@ def test_observation_takes_precedence_over_legacy_kind(cad, kind, capsys):
     assert not capsys.readouterr().out
 
 
-@pytest.mark.parametrize("kind,count", [("ic_soic", 15), ("resistor", 3)])
+# CONTRACT CHANGED 2026-09-26 (punto 82, SOIC senza terminali osservati): la
+# stima dei reofori per lato e' ora lunghezza / passo (SOIC-8 4.9 mm -> 4,
+# SOIC-16 9.9 mm -> 8), non (lunghezza - 1) / passo, che contava sempre un
+# reoforo in meno (SOIC-8 -> 3). Il corpo di prova da 10 mm ha quindi 8
+# reofori per lato: 16 + il corpo = 17 forme (prima 15).
+@pytest.mark.parametrize("kind,count", [("ic_soic", 17), ("resistor", 3)])
 def test_explicit_legacy_builders_are_preserved_with_approximation_warning(cad, kind, count, capsys):
     module, _ = cad
     parts = module.build_component(component(kind=kind), 0)

@@ -19,6 +19,8 @@ from pathlib import Path
 
 from .openrouter import OpenRouterError
 from .messages import CACHE_HIT, WARNING, kind_of, tx, warning
+# Solo costanti: photo_refine regge l'assenza di OpenCV da se'.
+from .photo_refine import MIN_PACKAGE_PIXELS_HINT, SMALLEST_EXPECTED_PART_MM
 
 
 def mechanical_metadata_properties():
@@ -221,47 +223,121 @@ def decode_detections(raw, region, body_length, body_width, source, log):
     return result
 
 
-#: Quanto possono differire le aree di due rettangoli perche' restino
-#: candidati a essere lo stesso pezzo. Il discriminante forte e' la
-#: coincidenza dei centri, verificata subito sotto; questo tetto serve solo a
-#: non assorbire un pezzo piccolo dentro il rettangolo generoso di un modulo,
-#: caso che sta tre ordini di grandezza piu' in la'. A 2.5 restavano fuori
-#: rilevazioni doppie dello stesso package per pochi centesimi.
-CONTAINMENT_MAX_AREA_RATIO = 3.5
+#: Incertezza di posizione di UN bordo di riquadro, in pixel della foto
+#: calibrata su cui i riquadri sono normalizzati. E' il limite inferiore
+#: fisico, la quantizzazione: nessun rilevatore colloca un bordo meglio di un
+#: pixel dell'immagine che ha visto (le strisce di dettaglio sono ritagliate
+#: dalla stessa foto, stessi pixel). Ripiego dichiarato: il vero errore di
+#: localizzazione di un modello di visione e' di solito piu' grande, ma non e'
+#: misurato; con questo minimo due riquadri si fondono solo quando coincidono
+#: davvero, e i doppioni meno precisi restano distinti e segnalati come
+#: «possibile doppione» per la revisione invece di essere fusi in silenzio.
+#: Una stima dell'errore del rilevatore (per esempio dal confronto con bordi
+#: misurati) lo renderebbe superfluo.
+DETECTION_EDGE_UNCERTAINTY_PX = 1.0
+
+
+def detection_tolerance(image_px, edge_uncertainty_px=DETECTION_EDGE_UNCERTAINTY_PX):
+    """@brief How far two boxes of the SAME body may differ, per edge, in normalized units.
+
+    @param image_px (width, height) in pixels of the calibrated board photo the
+        normalized boxes refer to, or None when unknown.
+    @param edge_uncertainty_px Uncertainty of one box edge, in pixels.
+    @return (tolerance along X, tolerance along Y) in normalized [0, 1] units:
+        twice the edge uncertainty (each of the two boxes carries its own), so
+        2 px / width and 2 px / height. With an unknown or invalid image size
+        the tolerance is the floating-point noise only: without pixels there
+        is no measured uncertainty, and only coinciding boxes are provably the
+        same body.
+    @note In millimetres this is 2 * edge_uncertainty_px / (px/mm): the scale
+        of the calibrated photo decides it, not a threshold chosen on a board.
+    """
+    floor = 1e-9
+    try:
+        width, height = (float(v) for v in image_px)
+    except (TypeError, ValueError):
+        return floor, floor
+    if not all(math.isfinite(v) and v > 0 for v in (width, height)):
+        return floor, floor
+    spread = 2.0 * max(float(edge_uncertainty_px), 0.0)
+    return max(spread / width, floor), max(spread / height, floor)
+
+
+def same_body(first, second, tolerance):
+    """@brief True when two boxes are one physical body seen twice, within the measurement uncertainty.
+
+    @param first Item with `_box` (or mm geometry, see box_of).
+    @param second Idem.
+    @param tolerance (tx, ty) from detection_tolerance, in the units of the boxes.
+    @return True when the centres coincide within the tolerance on both axes
+        AND either every edge agrees within it (same size) or one box contains
+        the other within it (a tight box and a looser one of the same part).
+    @note Physical basis: two mounted bodies cannot be stacked in plan view, so
+        two boxes that share their centre to within the measurement
+        uncertainty describe one body. A small passive next to, or inside the
+        generous box of, a larger part does not share its centre and is never
+        absorbed, whatever the ratio of the areas (CLAUDE.md strategy point 4).
+        This replaces CONTAINMENT_MAX_AREA_RATIO, an area ratio that had been
+        raised from 2.5 to 3.5 until one observed duplicate merged.
+    @note Declared limit: a part mounted ON a larger one (a component on a
+        module) and centred on it within the uncertainty would be taken for
+        the same body.
+    """
+    tol_x, tol_y = tolerance
+    ax0, ay0, ax1, ay1 = box_of(first)
+    bx0, by0, bx1, by1 = box_of(second)
+    if abs((ax0 + ax1) - (bx0 + bx1)) / 2 > tol_x or abs((ay0 + ay1) - (by0 + by1)) / 2 > tol_y:
+        return False
+    def inside(inner, outer):
+        return (inner[0] >= outer[0] - tol_x and inner[2] <= outer[2] + tol_x
+                and inner[1] >= outer[1] - tol_y and inner[3] <= outer[3] + tol_y)
+
+    # Due riquadri con tutti i bordi entro la tolleranza (stessa misura) sono
+    # il caso particolare in cui ciascuno contiene l'altro: basta il contenimento.
+    a, b = (ax0, ay0, ax1, ay1), (bx0, by0, bx1, by1)
+    return inside(a, b) or inside(b, a)
 
 
 #: Pixel minimi sul lato corto di un package perche' l'AI possa distinguerlo
-#: dal soldermask. Sotto, il pezzo e' qualche pixel scuro: non lo riconosce
-#: un modello e non lo riconoscerebbe una persona.
-MIN_PACKAGE_PIXELS = 12
-#: Lato corto del passivo piu' piccolo che ci si aspetta di trovare montato
-#: su una scheda di sviluppo (0402).
-SMALLEST_PASSIVE_MM = 0.5
+#: dal soldermask (stesso valore di photo_refine.MIN_PACKAGE_PIXELS_HINT, che
+#: la GUI usa senza importare l'inventario). Sotto, il pezzo e' qualche pixel
+#: scuro: non lo riconosce un modello e non lo riconoscerebbe una persona.
+MIN_PACKAGE_PIXELS = MIN_PACKAGE_PIXELS_HINT
 
 
-def _warn_if_too_coarse(crop_px, body_length, warn):
+def _warn_if_too_coarse(crop_px, body_length, warn, smallest_part_mm=None):
     """Segnala quando la foto usata non puo' contenere i pezzi piccoli.
 
     L'inventario non e' limitato dall'algoritmo ma dai pixel disponibili: a
-    12 px/mm un 0402 occupa 6 px sul lato corto. Senza questo avviso un
-    inventario necessariamente incompleto sembra completo, ed e' l'errore
-    piu' costoso -- si finisce a cercare il difetto nel codice invece che
-    nella fotografia.
+    12 px/mm un corpo con il lato corto di 0.5 mm occupa 6 px. Senza questo
+    avviso un inventario necessariamente incompleto sembra completo, ed e'
+    l'errore piu' costoso -- si finisce a cercare il difetto nel codice invece
+    che nella fotografia.
+
+    @param smallest_part_mm Lato corto del corpo piu' piccolo che ci si aspetta
+        sulla scheda, in mm; None = photo_refine.SMALLEST_EXPECTED_PART_MM, che
+        e' un'IPOTESI dichiarata (non una misura di questa scheda). L'avviso la
+        riporta, cosi' chi lo legge sa rispetto a quale taglia e' stato dato.
     """
-    if not (crop_px > 0 and math.isfinite(body_length) and body_length > 0):
+    if smallest_part_mm is None:
+        smallest_part_mm = SMALLEST_EXPECTED_PART_MM
+    if not (crop_px > 0 and math.isfinite(body_length) and body_length > 0
+            and math.isfinite(smallest_part_mm) and smallest_part_mm > 0):
         return
     scale = crop_px / body_length
-    readable = scale * SMALLEST_PASSIVE_MM
+    readable = scale * smallest_part_mm
     if readable >= MIN_PACKAGE_PIXELS:
         return
-    needed = MIN_PACKAGE_PIXELS / SMALLEST_PASSIVE_MM * body_length
+    needed = MIN_PACKAGE_PIXELS / smallest_part_mm * body_length
     warn(tx("Risoluzione della foto usata per l'inventario: {scale:.1f} px/mm. Un "
-            "passivo 0402 misura {readable:.0f} px sul lato corto, meno dei "
-            "{MIN_PACKAGE_PIXELS} necessari per distinguerlo: i componenti piu' "
-            "piccoli non verranno rilevati e l'inventario resta incompleto. "
+            "corpo con il lato corto di {smallest:.2f} mm (il piu' piccolo che si "
+            "assume presente, non una misura di questa scheda) misura {readable:.0f} px, "
+            "meno dei {MIN_PACKAGE_PIXELS} necessari per distinguerlo: i componenti "
+            "piu' piccoli non verranno rilevati e l'inventario resta incompleto. "
             "Servirebbe una foto con la scheda larga almeno {needed:.0f} px "
             "(questa ne ha {crop_px}).",
             scale=scale,
+            smallest=smallest_part_mm,
             readable=readable,
             MIN_PACKAGE_PIXELS=MIN_PACKAGE_PIXELS,
             needed=needed,
@@ -286,12 +362,14 @@ def overlap(a, b):
     return intersection / max(1e-12, aa+ba-intersection), intersection / max(1e-12, min(aa,ba))
 
 
-def _associate_view(group, previous, containment):
+def _associate_view(group, previous, containment, tolerance=(1e-9, 1e-9)):
     """Maximum-cardinality association on a frozen pairwise overlap graph.
 
     Canonical geometric ordering breaks ties independently of AI list order.
     Augmenting paths let a flexible detection relinquish a match needed by a
     constrained detection, instead of appending a false extra component.
+    With `containment`, a pair is also an edge of the graph when same_body()
+    says so within `tolerance` (see detection_tolerance).
     """
     def key(item):
         return (*box_of(item), str(item.get('name', '')), str(item.get('kind', '')),
@@ -301,17 +379,8 @@ def _associate_view(group, previous, containment):
     for current, item in enumerate(group):
         candidates = []
         for index, existing in enumerate(previous):
-            iou, coverage = overlap(item, existing)
-            contained = False
-            if containment and coverage >= .7 and iou >= 1 / CONTAINMENT_MAX_AREA_RATIO:
-                ax0,ay0,ax1,ay1 = box_of(item)
-                bx0,by0,bx1,by1 = box_of(existing)
-                aw,ah,bw,bh = ax1-ax0,ay1-ay0,bx1-bx0,by1-by0
-                ratio = max(aw*ah,bw*bh)/max(1e-12,min(aw*ah,bw*bh))
-                contained = (ratio <= CONTAINMENT_MAX_AREA_RATIO and
-                    abs((ax0+ax1-bx0-bx1)/2) <= .5*min(aw,bw) and
-                    abs((ay0+ay1-by0-by1)/2) <= .5*min(ah,bh))
-            if iou >= .60 or contained:
+            iou, _ = overlap(item, existing)
+            if iou >= .60 or (containment and same_body(item, existing, tolerance)):
                 candidates.append((index, iou))
         edges[current] = [i for i, _ in sorted(candidates, key=lambda pair: (-pair[1], key(previous[pair[0]])))]
 
@@ -338,10 +407,17 @@ def _associate_view(group, previous, containment):
     return assignments
 
 
-def merge_components(groups, log=lambda message: None, containment=False, summary=None):
-    """@brief Associate detections across views one-to-one using IoU and area ratio.
+def merge_components(groups, log=lambda message: None, containment=False, summary=None,
+                     image_px=None):
+    """@brief Associate detections across views one-to-one by overlap and physical coincidence.
 
-    Associazione uno-a-uno tra viste, con IoU e rapporto area.
+    Associazione uno-a-uno tra viste: IoU, oppure (con `containment`) stesso
+    corpo entro l'incertezza di misura (vedi same_body).
+
+    @param image_px (width, height) in pixels of the calibrated photo the
+        normalized boxes refer to; it sets the measurement uncertainty of the
+        containment criterion (detection_tolerance). None = unknown: only
+        coinciding boxes are merged by containment.
 
     Due pezzi della stessa vista rimangono distinti. Una resistenza accanto a un
     IC non viene assorbita dal raggio proporzionale al lato lungo dell'IC.
@@ -351,9 +427,10 @@ def merge_components(groups, log=lambda message: None, containment=False, summar
     """
     merged = []
     duplicates = 0
+    tolerance = detection_tolerance(image_px)
     for group in groups:
         group = list(group)
-        assignments = _associate_view(group, merged, containment)
+        assignments = _associate_view(group, merged, containment, tolerance)
         for current, item in enumerate(group):
             if current not in assignments:
                 merged.append(dict(item))
@@ -1185,6 +1262,10 @@ def yolo_only_components(proposals, *, reviewed, log=None):
         inventory the user asked for and must become generic 3D volumes.
     """
     log = log or (lambda message: None)
+    # Le proposte a bassa confidenza entrano solo se chi rivede le ha tenute,
+    # anche quando la revisione restituisce tutto (26/09).
+    from .photo_yolo import split_ai_candidates
+    proposals = split_ai_candidates(list(proposals))[0]
     rows = [row for row in proposals if reviewed or not row.get('_yolo_review_only')]
     if len(rows) != len(proposals):
         log(tx("Solo YOLO senza revisione: {n_weak} proposte deboli (sotto la soglia "

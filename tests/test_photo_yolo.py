@@ -291,8 +291,11 @@ def test_letterbox_rgb_normalization_and_geometry(setup):
     assert c["rotation_deg"] == 0
     assert c["kind"] == "generic" and c["name"] == "YOLO candidate 1"
     assert c["_id"] == 1 and c["_source"] == "YOLO local" and c["_uncertain"] is True
-    assert c["height_mm"] == 1.0 and c["_height_estimated"] is True
-    assert "placeholder" in c["_height_source"] and "not_measured" in c["_height_source"]
+    # Contratto aggiornato (26/09): altezza stimata dalla classe e dalla pianta
+    # (photo_heights), non piu' 1.0 per tutti; resta una stima dichiarata.
+    assert c["height_mm"] == 0.6 and c["_height_estimated"] is True
+    assert c["_height_source"].startswith("detector_class_")
+    assert c["_height_source"].endswith("_not_measured")
     assert c["_yolo_class"] == "resistor" and c["_yolo_confidence"] == 0.75
     assert c["color_hex"] == "#303030" and c["marking"] == ""
     assert "package" not in c and "_detected_kind" not in c
@@ -616,12 +619,13 @@ def test_review_queue_preserves_weak_bodies_without_promoting_pads_or_duplicates
 
 @pytest.mark.parametrize('audit_enabled', [False, True])
 def test_opt_in_review_candidates_are_deduplicated_and_audit_independent(setup, tmp_path, audit_enabled):
-    """@brief Le proposte deboli restano nell'audit e non escono dal rilevatore.
+    """@brief Le proposte deboli escono marcate «bassa confidenza», deduplicate.
 
-    Erano il grosso del rumore mandato alla revisione e alla chiamata a
-    pagamento: su una scheda popolata cadono quasi tutte dove non c'e' nulla
-    montato. Restano registrate nell'audit, dove si possono sempre guardare,
-    ma non compaiono nell'anteprima e non arrivano al modello.
+    Contratto aggiornato (utente, 26/09): prima restavano solo nell'audit; ora
+    tornano VISIBILI nella revisione, marcate `_yolo_low_confidence` e da tenere
+    a mano (awaiting_user_keep), mai inviate al modello per default. Restano
+    fuori i doppioni di un corpo tenuto, le classi escluse (pads/pins) e cio'
+    che sta sotto la soglia d'audit.
     """
     session, _ = setup
     session.raw = _raw(([100, 100, 20, 20], 10, .8),
@@ -634,11 +638,17 @@ def test_opt_in_review_candidates_are_deduplicated_and_audit_independent(setup, 
     baseline = yolo.detect_yolo_components(photo, 64, 64)
     result = yolo.detect_yolo_components(photo, 64, 64, include_review_candidates=True,
                                          audit_dir=tmp_path if audit_enabled else None)
-    # Nessuna debole in uscita: nemmeno chiedendole esplicitamente, perche' qui
-    # non ce ne sono di ricomposte da cuciture ne' che attestino una presenza.
-    assert len(baseline) == 1 and len(result) == 1
-    assert result == baseline
-    assert not any(c['_yolo_review_only'] for c in result)
+    # Senza l'adesione esplicita nessuna debole; con l'adesione UNA sola: la
+    # (300, 300). La (100, 100) e' un doppione del corpo tenuto, pads/pins
+    # sono esclusi, 0.01 sta sotto la soglia d'audit.
+    assert len(baseline) == 1 and not baseline[0]['_yolo_low_confidence']
+    assert len(result) == 2
+    weak = [c for c in result if c['_yolo_low_confidence']]
+    assert len(weak) == 1 and weak[0]['_yolo_review_only'] is True
+    assert weak[0]['_yolo_confidence'] == pytest.approx(.2)
+    assert weak[0]['x_mm'] == pytest.approx(-2)
+    assert yolo.awaiting_user_keep(weak[0])
+    assert not yolo.awaiting_user_keep(dict(weak[0], _yolo_user_kept=True))
     if audit_enabled:
         audit = json.loads(next(tmp_path.glob('yolo-*.json')).read_text())
         assert audit['recipe']['include_review_candidates'] is True
@@ -712,7 +722,9 @@ def test_production_inventory_sends_weak_bodies_to_global_review(setup, monkeypa
         detector='yolo', top_photo_index=0,
         cache_dir=tmp_path / 'cache' if audit_enabled else None)
     assert len(requests) == 1 and len(report.components) == 1
-    assert report.calibration['proposal_count'] == 1
+    # Il rilevatore consegna anche la debole (visibile in revisione); senza
+    # nessuno che la tenga, la richiesta ne porta una sola (vedi `review`).
+    assert report.calibration['detector_proposal_count'] == 2
     assert report.photo_png and report.overlay_png
     assert not any(c.get('_yolo_review_only') for c in report.components)
 
@@ -833,8 +845,13 @@ def test_only_the_weak_bodies_rebuilt_from_seams_reach_the_review(setup):
                                        include_review_candidates=True)
     rebuilt = [row for row in rows if row['_yolo_clipped_recovery']]
     assert rebuilt, 'il corpo ricomposto dalla cucitura deve arrivare alla revisione'
-    assert all(row['_yolo_clipped_recovery'] or not row['_yolo_review_only'] for row in rows), \
-        'una debole non ricomposta non deve uscire dal rilevatore'
+    # Contratto aggiornato (26/09): la debole isolata esce, ma marcata come
+    # «bassa confidenza» e da tenere a mano; la ricomposta no.
+    assert not any(row['_yolo_low_confidence'] for row in rebuilt)
+    isolated = [row for row in rows if not row['_yolo_clipped_recovery']]
+    assert isolated and all(row['_yolo_low_confidence'] and yolo.awaiting_user_keep(row)
+                            for row in isolated), \
+        'una debole non ricomposta esce solo come proposta da tenere a mano'
 
 
 def test_a_chosen_threshold_turns_a_weak_proposal_into_audit_only(setup):

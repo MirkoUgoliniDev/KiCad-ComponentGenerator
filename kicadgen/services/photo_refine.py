@@ -25,11 +25,15 @@ Procedimento, deterministico e indipendente dal modulo:
    scheda ruotata di 90 gradi rispetto alle quote) viene scartata con un
    motivo esplicito, mai ritagliata a caso;
 2. per ogni componente stimato dal modello si ritaglia una finestra
-   intorno alla posizione dichiarata, si cercano i bordi con Canny, si
-   dilatano quanto basta a chiudere i contorni spezzati e si cerca il
-   contorno chiuso piu' compatibile per area e distanza dal centro;
-3. il rettangolo minimo che lo contiene da' posizione, ingombro e
-   orientamento misurati. L'angolo si tiene come misurato: il generatore
+   intorno alla posizione dichiarata, si cercano i bordi con Canny (soglie
+   dal gradiente della finestra e dal suo rumore, non dalla luminosita':
+   vale per schede nere, verdi, blu e bianche), si dilatano quanto basta a
+   chiudere i contorni spezzati e si cerca il contorno chiuso piu'
+   compatibile per area e distanza dal centro;
+3. il rettangolo minimo che lo contiene da' l'orientamento; posizione e
+   ingombro si rileggono sui pixel di Canny che il contorno racchiude, lungo
+   quell'orientamento, cosi' la crescita della dilatazione non gonfia la
+   misura (errore entro un pixel a ogni scala). L'angolo si tiene come misurato: il generatore
    CAD applica rotazioni qualsiasi (`_rectangle_axes` ha il ramo non
    cardinale). Si riporta alla cardinale solo quando lo scarto e' piu'
    piccolo dell'incertezza -- il residuo di inclinazione che la
@@ -55,6 +59,7 @@ componenti, non come una correzione automatica di cui fidarsi alla cieca.
 
 from __future__ import annotations
 
+import functools
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -95,10 +100,19 @@ MIN_BOARD_SCALE_PX_PER_MM = 4.0
 #: la scheda e' il soggetto: un candidato che ne copre una porzione irrisoria
 #: e' un dettaglio interno (un connettore, un'etichetta), non il modulo.
 MIN_BOARD_IMAGE_FRACTION = 0.02
-#: Pixel minimi sul lato corto di un passivo 0402 perche' sia distinguibile.
-#: Duplicato della soglia usata dall'inventario, esposto qui perche' la
-#: GUI possa giudicare una foto senza importare l'intera catena.
+#: Pixel minimi sul lato corto del corpo piu' piccolo perche' sia
+#: distinguibile. Esposto qui (e riusato dall'inventario) perche' la GUI possa
+#: giudicare una foto senza importare l'intera catena.
 MIN_PACKAGE_PIXELS_HINT = 12
+#: Lato corto, in mm, del corpo piu' piccolo che si assume montato sulla
+#: scheda quando si giudica se una foto e' abbastanza fine. IPOTESI
+#: DICHIARATA, non una misura e non ricavata da una scheda: 0.5 mm e' il lato
+#: corto di un passivo 0402 (1.0 x 0.5 mm), il piu' piccolo package comune
+#: sulle schede assemblate in serie. Una scheda con 0201 (0.3 mm) richiede
+#: foto piu' fini, una con soli 0805 ne tollera di piu' grossolane: chi conosce
+#: la scheda puo' passare la propria taglia (photo_inventory._warn_if_too_coarse),
+#: e l'avviso dice sempre rispetto a quale taglia e' stato dato.
+SMALLEST_EXPECTED_PART_MM = 0.5
 #: TETTO di quanto ci si allontana dalla posizione stimata nel cercare i bordi,
 #: oltre il semi-ingombro del componente. Non e' la finestra: quella si ferma a
 #: meta' strada dal corpo piu' vicino (vedi `search_margin_mm`). Resta come
@@ -135,6 +149,15 @@ CONTOUR_NOISE_PX = 1.0
 #: a 84 px: il contorno risulta piu' largo di 4.4-4.8 px in tutto, quindi 2.0
 #: per lato e' il valore che il kernel prevede ed e' anche quello osservato.
 MORPH_GROWTH_PX = 2.0
+#: Spessore, in pixel, della fascia di pixel di bordo che descrive UN lato di
+#: un corpo in `_edge_extent`. Non e' una soglia tarata: il salto di
+#: luminosita' cade fra due pixel adiacenti e Canny ne marca uno dei due, quindi
+#: i pixel di un lato stanno in una fascia larga un pixel dal piu' esterno.
+#: La media di quella fascia sta entro mezzo pixel dal bordo vero, per lato:
+#: l'ingombro misurato resta entro un pixel da quello del corpo a ogni scala,
+#: mentre il contorno dilatato lo gonfiava di una quantita' costante in pixel
+#: (+0.25 mm a 12 px/mm, +0.38 mm a 8 px/mm).
+EDGE_SIDE_BAND_PX = 1.0
 #: Spessore dell'anello di cornice da cui si stima lo sfondo, come frazione
 #: del lato corto dell'immagine (minimo BACKGROUND_RING_MIN_PX). In una vista
 #: dall'alto la cornice e' sfondo per costruzione: la scheda deve stare tutta
@@ -743,28 +766,186 @@ def _frame_from(candidates, body_length, body_width):
     return BoardFrame(cx=cx, cy=cy, scale=scale, width_px=w, height_px=h)
 
 
+#: Quante deviazioni standard del rumore deve superare il gradiente perche'
+#: Canny lo prenda anche solo come bordo debole (soglia bassa). Ripiego
+#: dichiarato, non tarato su una foto: per un gradiente di puro rumore
+#: gaussiano il modulo supera 3 sigma con probabilita' exp(-4.5) ~ 1% per
+#: pixel, e la soppressione dei non massimi ne lascia una frazione; su
+#: rumore sintetico (sigma 1-6, grigio 22-225) nessuna misura falsa. Lo
+#: renderebbe superfluo un modello del rumore della fotocamera.
+EDGE_NOISE_SIGMAS = 3.0
+
+
+@functools.lru_cache(maxsize=1)
+def _gradient_gain() -> float:
+    """Deviazione standard del gradiente Sobel (ksize 3) di un rumore bianco
+    unitario dopo la sfocatura gaussiana 3x3 usata da `_canny_edges`.
+
+    Si misura applicando gli stessi due filtri a un impulso: la norma L2 della
+    risposta e' il guadagno esatto della catena, nessun numero ricopiato.
+    """
+    impulse = np.zeros((11, 11), np.float32)
+    impulse[5, 5] = 1.0
+    response = cv2.Sobel(cv2.GaussianBlur(impulse, (3, 3), 0), cv2.CV_32F, 1, 0, ksize=3)
+    return float(np.sqrt(np.sum(response ** 2)))
+
+
+def _noise_sigma(gray) -> float:
+    """Rumore dei livelli di grigio della finestra (stimatore di Immerkaer, 1996).
+
+    Il nucleo [[1,-2,1],[-2,4,-2],[1,-2,1]] e' il prodotto di due derivate
+    seconde: su un bordo rettilineo risponde zero, quindi il bordo di un corpo
+    non passa per rumore. La mediana (invece della media dello stimatore
+    originale) toglie anche il peso degli spigoli e delle scritte. Il minimo e'
+    il rumore di quantizzazione a 8 bit (1/sqrt(12) livelli): un'immagine
+    sintetica senza rumore non ha soglia zero.
+    """
+    kernel = np.array([[1, -2, 1], [-2, 4, -2], [1, -2, 1]], np.float32)
+    response = cv2.filter2D(gray.astype(np.float32), -1, kernel,
+                            borderType=cv2.BORDER_REFLECT)[1:-1, 1:-1]
+    # 0.6745 = mediana di |N(0,1)|; 6 = norma L2 del nucleo.
+    sigma = float(np.median(np.abs(response))) / (0.6745 * 6.0) if response.size else 0.0
+    return max(sigma, 1.0 / math.sqrt(12.0))
+
+
+def _otsu_level(values) -> float:
+    """Soglia di Otsu su valori float (256 classi fra minimo e massimo)."""
+    if values.size == 0:
+        return 0.0
+    hist, bounds = np.histogram(values, bins=256)
+    centres = (bounds[:-1] + bounds[1:]) / 2
+    below = np.cumsum(hist).astype(np.float64)
+    moment = np.cumsum(hist * centres)
+    total, mean_total = below[-1], moment[-1]
+    above = total - below
+    valid = (below > 0) & (above > 0)
+    if not np.any(valid):
+        return float(centres[-1])
+    between = np.zeros_like(centres, dtype=np.float64)
+    between[valid] = ((mean_total * below[valid] - moment[valid] * total) ** 2
+                      / (below[valid] * above[valid]))
+    return float(centres[int(np.argmax(between))])
+
+
+def canny_thresholds(gray, blurred=None) -> tuple:
+    """@brief Canny hysteresis thresholds from the gradient statistics of a window.
+
+    @param gray Grey window (8 bit), as it comes from the photo: its noise is
+        measured here, before any smoothing.
+    @param blurred The same window smoothed as Canny will see it (3x3
+        Gaussian); computed from `gray` when omitted.
+    @return (low, high) in the units of Canny's L1 Sobel magnitude.
+    @note Canny compares GRADIENT magnitudes, so its thresholds must come from
+        gradients, not from brightness. The former rule (low/high from the
+        median intensity) set high = 255 on a white board: a body had to differ
+        by ~85 grey levels to count as an edge there, while on a black board 20
+        were enough -- fine measurement switched off on light boards.
+    @note high = Otsu split of the window's gradient magnitudes (flat surfaces
+        versus edges: the two populations are there whatever the colours), low =
+        high / 2 (Canny's own 2:1 hysteresis ratio). Both are kept above the
+        gradient that pure noise produces, EDGE_NOISE_SIGMAS standard deviations
+        of the measured noise (low) and twice that (high): a window with nothing
+        in it gives no edges instead of an Otsu split of its noise.
+    """
+    if blurred is None:
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+    gx = cv2.Sobel(blurred, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(blurred, cv2.CV_32F, 0, 1, ksize=3)
+    magnitude = np.abs(gx) + np.abs(gy)          # stessa norma L1 di cv2.Canny
+    # Modulo L1 di due componenti con deviazione s: sta sotto sqrt(2) volte il
+    # modulo euclideo, la cui coda oltre k*s e' exp(-k^2/2) (Rayleigh).
+    # Il guadagno comprende gia' la sfocatura: il rumore si misura prima.
+    floor = EDGE_NOISE_SIGMAS * math.sqrt(2.0) * _noise_sigma(gray) * _gradient_gain()
+    split = _otsu_level(magnitude.ravel())
+    return max(split / 2.0, floor), max(split, 2.0 * floor)
+
+
+def _canny_edges(window) -> "np.ndarray":
+    """Bordi di Canny della finestra, con soglie dal gradiente (vedi canny_thresholds)."""
+    gray = cv2.cvtColor(window, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+    low, high = canny_thresholds(gray, blurred)
+    return cv2.Canny(blurred, low, high)
+
+
+def _closed_edges(edges) -> "np.ndarray":
+    """Chiusura minima dei bordi: dilatazione e chiusura con nucleo 3x3.
+
+    Un solo giro, kernel minimo: su una scheda densa (componenti vicini,
+    ognuno con la propria cornice serigrafica) una chiusura piu' aggressiva
+    salda i contorni di pezzi ADIACENTI in un unico blob, che poi
+    sostituirebbe la stima con la sagoma sbagliata (il gruppo, non il pezzo).
+    """
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    edges = cv2.dilate(edges, kernel, iterations=1)
+    return cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+
 def _edge_mask(window) -> "np.ndarray":
     """Contorni chiusi e utilizzabili nella finestra: Canny + chiusura morfologica.
 
     Canny lavora sul gradiente locale, non su una soglia assoluta: separa
     un componente nero da un PCB nero se c'e' anche una minima differenza
     di riflettanza tra le due superfici, cosa che una soglia di colore non
-    puo' fare.
+    puo' fare. Le sue soglie vengono dal gradiente della finestra
+    (`canny_thresholds`), non dalla luminosita'.
     """
-    gray = cv2.cvtColor(window, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
-    median = float(np.median(blurred))
-    low = int(max(10, 0.5 * median))
-    high = int(min(255, 1.5 * median + 30))
-    edges = cv2.Canny(blurred, low, high)
-    # Un solo giro, kernel minimo: su una scheda densa (componenti vicini,
-    # ognuno con la propria cornice serigrafica) una chiusura piu' aggressiva
-    # salda i contorni di pezzi ADIACENTI in un unico blob, che poi
-    # sostituirebbe la stima con la sagoma sbagliata (il gruppo, non il pezzo).
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    edges = cv2.dilate(edges, kernel, iterations=1)
-    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=1)
-    return edges
+    return _closed_edges(_canny_edges(window))
+
+
+def _edge_extent(edges, contour, rotation_deg):
+    """Centro ed estensione dei bordi VERI (non dilatati) racchiusi dal contorno scelto.
+
+    Il contorno viene dalla maschera dilatata e chiusa, quindi e' piu' largo
+    del corpo di quanto la morfologia l'ha gonfiato (circa MORPH_GROWTH_PX per
+    lato, ma dipende dal nucleo e dalla posa). Invece di togliere una costante
+    si rilegge il corpo sui pixel di Canny che il contorno racchiude,
+    proiettati sull'asse lungo dichiarato (`rotation_deg`, lo stesso che la
+    misura riporta) e sul suo perpendicolare: la crescita sparisce lungo
+    ciascun asse, qualunque sia il nucleo, e resta l'errore di quantizzazione
+    del bordo. Proiettare sugli assi RIPORTATI, non su quelli grezzi di
+    minAreaRect, tiene coerenti ingombro e orientamento: su un corpo piccolo il
+    rettangolo grezzo puo' essere storto di qualche grado che la misura poi
+    riporta alla cardinale (vedi _axis_rotation).
+
+    Ritorna (cx, cy, lunghezza, larghezza) in pixel della finestra, o None se
+    il contorno non racchiude abbastanza pixel di bordo.
+    """
+    filled = np.zeros(edges.shape[:2], dtype="uint8")
+    cv2.drawContours(filled, [contour], -1, 255, thickness=-1)
+    ys, xs = np.nonzero((edges > 0) & (filled > 0))
+    if xs.size < 4:
+        return None
+    points = np.stack([xs, ys], axis=1).astype(np.float64)
+    # Righe dell'immagine verso il basso: e' lo stesso verso degli angoli di
+    # minAreaRect da cui viene rotation_deg.
+    angle = math.radians(float(rotation_deg))
+    along = np.array([math.cos(angle), math.sin(angle)])
+    across = np.array([-math.sin(angle), math.cos(angle)])
+    projections = [points @ along, points @ across]
+    spans, middle = [], np.zeros(2)
+    for index, axis in enumerate((along, across)):
+        projection, other = projections[index], projections[1 - index]
+        # Il salto di luminosita' cade FRA due pixel e Canny ne marca uno, a
+        # volte quello interno e a volte quello esterno: il bordo di un lato e'
+        # la media dei pixel entro EDGE_SIDE_BAND_PX dal suo estremo, non
+        # l'estremo stesso (che su un lato lungo prende sempre il pixel piu'
+        # esterno, su uno corto no: l'errore dipenderebbe dalla taglia). Gli
+        # angoli si lasciano fuori: i pixel dei due lati perpendicolari che ci
+        # cadono sono gia' dentro il corpo e sul lato corto di un passivo
+        # piccolo ne sposterebbero la media verso l'interno.
+        core = ((other > other.min() + EDGE_SIDE_BAND_PX + 1e-9)
+                & (other < other.max() - EDGE_SIDE_BAND_PX - 1e-9))
+        extreme_low, extreme_high = float(projection.min()), float(projection.max())
+        sides = []
+        for band in (projection <= extreme_low + EDGE_SIDE_BAND_PX + 1e-9,
+                     projection >= extreme_high - EDGE_SIDE_BAND_PX - 1e-9):
+            chosen = band & core if np.any(band & core) else band
+            sides.append(float(projection[chosen].mean()))
+        low, high = sides
+        spans.append(max(high - low, 1.0))
+        middle += axis * (low + high) / 2
+    return float(middle[0]), float(middle[1]), spans[0], spans[1]
 
 
 def _forbidden_mask(image, frame: BoardFrame, exclude_rects_mm) -> "np.ndarray":
@@ -884,6 +1065,19 @@ def refine_component_edges(image, frame: BoardFrame, component: dict, forbidden=
     Ritorna {x_mm, y_mm, length_mm, width_mm, rotation_deg} misurati, o
     None se nella finestra non c'e' un contorno abbastanza chiaro e
     compatibile con la stima di partenza.
+
+    @param image BGR photo.
+    @param frame Board reference in the photo.
+    @param component Estimate with x_mm, y_mm, length_mm, width_mm, rotation_deg.
+    @param forbidden Optional mask (1 = ignore) of the whole photo.
+    @param margin_mm Search margin beyond the half extent; None = SEARCH_MARGIN_MM.
+    @return The measured geometry, or None.
+    @note The contour is chosen on the closed (dilated) edge mask, and the
+        orientation read on its minimum rectangle; centre and size are then
+        read on the undilated Canny pixels it encloses, along that orientation
+        (_edge_extent). Measured sizes are therefore not inflated by the
+        morphological growth, which is constant in pixels and so worth more
+        millimetres the coarser the photo.
     """
     length = float(component["length_mm"])
     width = float(component["width_mm"])
@@ -909,9 +1103,12 @@ def refine_component_edges(image, frame: BoardFrame, component: dict, forbidden=
         return None
 
     window = image[y0:y1, x0:x1]
-    edges = _edge_mask(window)
+    raw_edges = _canny_edges(window)
+    edges = _closed_edges(raw_edges)
     if forbidden is not None:
-        edges[forbidden[y0:y1, x0:x1] == 1] = 0
+        blocked = forbidden[y0:y1, x0:x1] == 1
+        edges[blocked] = 0
+        raw_edges[blocked] = 0
     contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
@@ -951,14 +1148,23 @@ def refine_component_edges(image, frame: BoardFrame, component: dict, forbidden=
     (rcx, rcy), (rw, rh), angle = cv2.minAreaRect(best)
     if rw <= 0 or rh <= 0:
         return None
+    # L'orientamento si legge sul contorno chiuso (angular_resolution_deg ne
+    # conosce la crescita); centro e ingombro sui bordi veri che racchiude,
+    # lungo l'asse riportato, cosi' la crescita morfologica non entra nella
+    # misura (vedi _edge_extent). Senza pixel di bordo utili resta il
+    # rettangolo del contorno, meno la crescita dichiarata per lato.
+    new_rotation = _axis_rotation(angle, rw, rh, min(rw, rh))
+    extent = _edge_extent(raw_edges, best, new_rotation)
+    if extent is not None:
+        rcx, rcy, long_span, short_span = extent
+    else:
+        long_span = max(max(rw, rh) - 2 * MORPH_GROWTH_PX, 1.0)
+        short_span = max(min(rw, rh) - 2 * MORPH_GROWTH_PX, 1.0)
     x_mm, y_mm = frame.to_mm(x0 + rcx, y0 + rcy)
     if math.hypot(x_mm - float(component["x_mm"]), y_mm - float(component["y_mm"])) > MAX_SHIFT_MM:
         return None
-
-    long_side, short_side = max(rw, rh), min(rw, rh)
-    new_rotation = _axis_rotation(angle, rw, rh, short_side)
-    measured_length = long_side / frame.scale
-    measured_width = short_side / frame.scale
+    measured_length = long_span / frame.scale
+    measured_width = short_span / frame.scale
 
     return {
         "x_mm": round(x_mm, 2),
@@ -1011,6 +1217,76 @@ def refine_components(
     measured_components, loop_report = refine_on_frame(image, frame, refined, exclude_rects_mm)
     loop_report.photo = report.photo
     return measured_components, loop_report
+
+
+#: Lato delle classi di colore (Delta E CIE76) dell'istogramma con cui
+#: `sample_board_color` cerca il colore piu' esteso della scheda. Ripiego
+#: dichiarato: circa due soglie di percettibilita' (MIN_BACKGROUND_DELTA_E),
+#: abbastanza stretto da separare il soldermask dai corpi e dalle piazzole,
+#: abbastanza largo da tenere insieme il rumore di una superficie. Non decide
+#: da solo: il conteggio si fa sulla classe e le sue vicine (3x3x3), quindi il
+#: risultato non dipende da dove cadono i confini delle classi.
+BOARD_COLOR_BIN_DELTA_E = 5.0
+#: Lato lungo, in pixel, a cui si riduce il ritaglio prima di contare i
+#: colori: solo velocita'. La riduzione per area media i dettagli fini
+#: (serigrafie, piste) ma non sposta il colore di una superficie estesa.
+BOARD_COLOR_MAX_SIDE_PX = 512
+
+
+def sample_board_color(crop) -> Optional[str]:
+    """@brief Solder-mask colour of a calibrated board crop, sampled from the photo.
+
+    @param crop BGR image in which the board fills the whole frame (the
+        calibrated crop that prepare_photo returns).
+    @return "#rrggbb" (lower case), or None when OpenCV is missing or the
+        crop is not a non-empty three-channel image.
+    @note The mask is the surface that covers the largest area of the board:
+        components, pads, silkscreen and holes are many small patches of other
+        colours. The crop is binned in CIE L*a*b* (BOARD_COLOR_BIN_DELTA_E
+        per class), each class counted together with its 26 neighbours, and
+        the result is the per-channel median of the pixels of the winning
+        neighbourhood -- so noise and gentle shading of the mask stay inside
+        it, and the median ignores the rest.
+    @note Declared limit: when one other colour covers more of the board than
+        the visible mask (a metal shield or a module over most of it), that
+        colour is returned. The caller should present it as sampled, not
+        measured, and let the user correct it.
+    """
+    if cv2 is None or crop is None or getattr(crop, "ndim", 0) != 3 or crop.shape[2] < 3:
+        return None
+    height, width = crop.shape[:2]
+    if height < 1 or width < 1:
+        return None
+    image = np.ascontiguousarray(crop[:, :, :3])
+    longest = max(height, width)
+    if longest > BOARD_COLOR_MAX_SIDE_PX:
+        factor = BOARD_COLOR_MAX_SIDE_PX / longest
+        image = cv2.resize(image, (max(1, round(width * factor)), max(1, round(height * factor))),
+                           interpolation=cv2.INTER_AREA)
+    pixels = image.reshape(-1, 3)
+    lab = _lab(image).reshape(-1, 3)
+    # Classi: L in [0, 100], a e b in [-128, 128]; indici non negativi.
+    step = BOARD_COLOR_BIN_DELTA_E
+    offsets = np.array([0.0, 128.0, 128.0], dtype=np.float32)
+    index = np.floor((lab + offsets) / step).astype(np.int64)
+    shape = tuple(int(v) for v in np.ceil(np.array([100.0, 256.0, 256.0]) / step) + 1)
+    index = np.clip(index, 0, np.array(shape) - 1)
+    counts = np.zeros(shape, dtype=np.int64)
+    np.add.at(counts, (index[:, 0], index[:, 1], index[:, 2]), 1)
+    # Somma sulla classe e le sue vicine: un colore a cavallo di due classi
+    # conta per intero, come uno che cade nel mezzo di una.
+    padded = np.pad(counts, 1)
+    smoothed = np.zeros_like(counts)
+    for dl in range(3):
+        for da in range(3):
+            for db in range(3):
+                smoothed += padded[dl:dl + shape[0], da:da + shape[1], db:db + shape[2]]
+    mode = np.array(np.unravel_index(int(np.argmax(smoothed)), shape))
+    member = np.all(np.abs(index - mode) <= 1, axis=1)
+    if not np.any(member):
+        member = np.ones(len(pixels), dtype=bool)
+    b, g, r = (int(v) for v in np.median(pixels[member], axis=0))
+    return f"#{r:02x}{g:02x}{b:02x}"
 
 
 def crop_frame(image, body_length: float, body_width: float) -> Optional[BoardFrame]:

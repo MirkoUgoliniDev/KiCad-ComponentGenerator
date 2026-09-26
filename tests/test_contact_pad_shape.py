@@ -624,17 +624,32 @@ def test_the_photo_mask_of_a_double_contact_covers_its_continuous_pad():
     non ce l'ha, e il tipo non dichiarato, che a valle diventa half_and_through
     ma resta un'ipotesi (sulla foto non si maschera un'ipotesi), conservano la
     striscia della piazzola di bordo.
+
+    Contratto aggiornato (26/09, misure per lato): la corona sta dove la mette
+    la geometria DEL LATO (side_geometry: qui la distanza fra le file
+    dichiarata, 22.86 mm su 25.4, cioe' 1.27 mm dal bordo), non all'offset di
+    modulo thru_hole_centre_offset che ignorava le file; la sigla segue il
+    semi-foro del lato, non il foro passante del modulo.
     """
-    from kicadgen.services.contact_zones import contact_positions, contact_proposals
+    from kicadgen.services.contact_zones import (contact_positions, contact_proposals,
+                                                 declared_module)
     from test_contact_style import BOARD, _declared, _proposal
-    defaults = CastellatedModuleParams(thru_hole_drill=1.0, thru_pad_diameter=1.7)
-    ring_end = defaults.thru_hole_centre_offset + defaults.thru_pad_diameter / 2
+    module, pairs = declared_module(_declared(CONTACT_HALF_AND_THROUGH), *BOARD)
+    geometry = module.side_geometry(pairs[0][1])
+    assert geometry.thru_inset == pytest.approx((25.4 - 22.86) / 2)
+    ring_end = geometry.thru_inset + geometry.ring / 2
     x = contact_positions(_declared("through_hole"), *BOARD)[0]["x_mm"]
     beyond_ring = _proposal(x, -12.7 + ring_end + 0.4, 1.0, 0.7)   # sigla oltre il rame
     positions = contact_positions(_declared(CONTACT_HALF_AND_THROUGH), *BOARD)
-    assert positions[0]["depth_mm"] == pytest.approx(ring_end + 0.5 + 0.55)
+    assert positions[0]["depth_mm"] == pytest.approx(ring_end + geometry.half_hole / 2 + 0.55)
     assert contact_proposals([beyond_ring], positions, *BOARD) == {0}
-    for style in (CONTACT_HALF_HOLE, None):
+    half_module, half_pairs = declared_module(_declared(CONTACT_HALF_HOLE), *BOARD)
+    half_hole = half_module.side_geometry(half_pairs[0][1]).half_hole
+    for style, depth in ((CONTACT_HALF_HOLE, 1.0 + half_hole / 2 + 0.55),
+                         (None, 1.0 + 0.5 + 0.55)):
         positions = contact_positions(_declared(style), *BOARD)
-        assert positions[0]["depth_mm"] == pytest.approx(1.0 + 0.5 + 0.55)
+        assert positions[0]["depth_mm"] == pytest.approx(depth)
+        # La sigla oltre la corona sta davvero fuori da queste strisce: il
+        # negativo non passa per un margine casuale.
+        assert depth < ring_end + 0.4
         assert contact_proposals([beyond_ring], positions, *BOARD) == set()

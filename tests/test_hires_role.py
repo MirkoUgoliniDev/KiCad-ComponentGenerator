@@ -15,9 +15,11 @@ def test_the_new_role_is_declared_like_the_others():
     assert set(ROLES) == set(ROLE_HELP)
 
 
-def test_the_inventory_prefers_the_detailed_view_but_keeps_the_fallback():
-    """Preferenza, non esclusivita': la vista superiore resta la riserva."""
-    assert INVENTORY_ROLES == ('hires', 'top')
+def test_only_the_photograph_goes_to_the_inventory():
+    """Dal 26/09 (manifest versione 2) un file ha piu' ruoli: all'inventario va
+    SOLO quello spuntato come foto. Il disegno quotato che faceva da foto nei
+    progetti vecchi riceve il ruolo foto dalla migrazione (test_document_roles)."""
+    assert INVENTORY_ROLES == ('hires',)
 
 
 def test_the_help_says_it_must_be_a_photograph_not_a_drawing():
@@ -75,8 +77,8 @@ def test_no_top_view_at_all_is_still_reported(monkeypatch):
 
 
 @pytest.mark.parametrize("language", ["en", "it", "fr", "de"])
-def test_the_guided_help_describes_all_four_roles(language):
-    """La guida non deve restare a tre ruoli dopo l'aggiunta del quarto."""
+def test_the_guided_help_describes_every_role(language):
+    """La guida non deve restare indietro quando si aggiunge un ruolo."""
     text = DEFAULT_TRANSLATIONS["help.guided_documents"][language]
     for role in ROLES:
         assert role in text, f"{role} non citato nella guida in {language}"

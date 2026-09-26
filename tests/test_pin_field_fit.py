@@ -28,6 +28,9 @@ def test_a_row_outside_the_board_is_recentred_and_declared_as_an_estimate():
     assert params.body_offset_x_mm == -5.05
     assert len(messages) == 1 and "STIMATO" in messages[0] and "Y" in messages[0]
     assert "STIMATO" in params.notes
+    # The recentred value is the program's estimate: its provenance says so.
+    assert params.value_sources == {"body_offset_y_mm": "estimated"}
+    assert params.values_to_review() == ["body_offset_y_mm"]
 
 
 def test_consistent_offsets_are_left_alone():
@@ -35,6 +38,7 @@ def test_consistent_offsets_are_left_alone():
     params = _params(body_offset_y_mm=-2.0)
     assert fit_body_to_pin_field(params, "aggregate_tht") == []
     assert params.body_offset_y_mm == -2.0 and params.notes == ""
+    assert params.value_sources is None
 
 
 def test_a_single_component_may_have_legs_outside_its_body():
@@ -123,19 +127,25 @@ def test_any_board_ends_with_every_pin_inside_or_untouched(rows, cols, pitch, sp
         assert y0 == offset_y
 
 
-def test_the_prompt_example_and_the_safeguard_give_the_same_offset():
+def test_the_prompt_formula_and_the_safeguard_give_the_same_offset():
     """@brief La formula del prompt e la salvaguardia non si contraddicono.
 
-    Positivo: l'esempio scritto nello schema (-1.27) e' quello che la
-    salvaguardia ricava dal valore sbagliato. Negativo: lo schema non indica
-    piu' «meta' della larghezza» come valore tipico.
+    Positivo: la formula scritta nello schema, -(body_width_mm - distanza fra
+    prima e ultima riga)/2, applicata alle quote della prova da' il valore che
+    la salvaguardia ricava dal valore sbagliato. Negativo: lo schema non
+    indica piu' «meta' della larghezza» come valore tipico, e non porta piu'
+    l'esempio numerico della scheda campione (decisione dell'utente 26/09:
+    niente numeri del campione nei prompt), solo la formula.
     """
     text = _EXTRACTION_TOOL["input_schema"]["properties"]["body_offset_y_mm"]["description"]
-    assert "-1.27" in text and "PRIMA riga" in text
+    assert "-(body_width_mm - distanza fra prima e ultima riga)/2" in text
+    assert "PRIMA riga" in text
     assert "tipicamente meta' della larghezza" not in text
+    assert not any(number in text for number in ("-1.27", "22.86", "25.4", "12.7"))
     params = _params()
+    width, span = params.body_width_mm, params.row_spacing_mm * (params.rows - 1)
     fit_body_to_pin_field(params, "aggregate_tht")
-    assert f"{params.body_offset_y_mm:.2f}" in text
+    assert params.body_offset_y_mm == round(-(width - span) / 2, 3)
 
 
 def test_the_fillet_edge_convention_points_corners_to_vertical_edges():

@@ -125,6 +125,16 @@ def pipeline(monkeypatch, tmp_path):
     return state
 
 
+def _tiles(request):
+    """Detail tiles announced in the request (each is followed by its image).
+
+    Contratto aggiornato (26/09): i dettagli non sono piu' tre strisce fisse
+    ma la griglia in mm di photo_grounding.detail_grid, provata a parte.
+    """
+    return sum(1 for b in request['content_blocks']
+               if b['type'] == 'text' and b['text'].startswith('Context tile '))
+
+
 @pytest.mark.parametrize('family', ['castellated', 'aggregate_tht'])
 def test_extractor_yolo_calls_global_once_without_legacy_or_terminals(pipeline, family):
     """@brief Check both supported populated-board entry routes through real services."""
@@ -138,7 +148,8 @@ def test_extractor_yolo_calls_global_once_without_legacy_or_terminals(pipeline, 
     request = pipeline['requests'][1]
     assert request['tool']['function']['name'] == 'report_global_inventory'
     assert request['model'] == 'offline/global'
-    assert sum(b['type'] == 'image_url' for b in request['content_blocks']) == 5
+    # Foto piena, sovrapposizione numerata e i dettagli della griglia in mm.
+    assert sum(b['type'] == 'image_url' for b in request['content_blocks']) == 2 + _tiles(request)
     inputs = json.loads(request['content_blocks'][4]['text'])
     assert [row['id'] for row in inputs['candidates']] == [1, 2]
     assert inputs['board_size_mm'] == [40, 20]
@@ -329,8 +340,9 @@ def test_without_a_local_detector_the_vision_model_enumerates_the_bodies(pipelin
     assert len(pipeline['requests']) == 2
     request = pipeline['requests'][1]
     assert request['tool']['function']['name'] == 'report_global_inventory'
-    # Quattro immagini, non cinque: la foto piena e le tre strisce.
-    assert sum(b['type'] == 'image_url' for b in request['content_blocks']) == 4
+    # Una immagine in meno dell'altro percorso: niente sovrapposizione numerata,
+    # solo la foto piena e i dettagli della griglia in mm.
+    assert sum(b['type'] == 'image_url' for b in request['content_blocks']) == 1 + _tiles(request)
     inputs = json.loads(request['content_blocks'][2]['text'])
     assert inputs['candidates'] == [] and inputs['board_size_mm'] == [40, 20]
     assert inputs['prompt_version'] == global_inventory.ENUMERATION_PROMPT_VERSION
@@ -350,7 +362,7 @@ def test_the_yolo_path_keeps_its_own_prompt_and_its_numbered_overlay(pipeline):
     """@brief Caso negativo del precedente: con le proposte nulla cambia."""
     pipeline['execute']()
     request = pipeline['requests'][1]
-    assert sum(b['type'] == 'image_url' for b in request['content_blocks']) == 5
+    assert sum(b['type'] == 'image_url' for b in request['content_blocks']) == 2 + _tiles(request)
     assert json.loads(request['content_blocks'][4]['text'])['prompt_version'] \
         == global_inventory.PROMPT_VERSION
     assert 'NO local detector ran' not in request['system_prompt']

@@ -154,7 +154,7 @@ def test_rename_moves_the_project_under_the_new_name(window, monkeypatch, tmp_pa
     _accept_with(monkeypatch, ProjectNameDialog, lambda d: d.field.setText("NomeNuovo"))
     window._rename_project()
     assert window._component_name() == "NomeNuovo"
-    assert (window._docs_dir() / "top.png").is_file()
+    assert (window._docs_dir() / "a.png").is_file()
 
 
 def test_the_proposed_name_of_another_project_is_refused(window, monkeypatch):  # noqa: F811
