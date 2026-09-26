@@ -299,3 +299,25 @@ def test_a_scrolling_list_keeps_rows_inside_the_viewport(page, tmp_path):
     widths = {page.recent_list.visualItemRect(page.recent_list.item(row)).width()
               for row in range(page.recent_list.count())}
     assert widths and max(widths) <= viewport
+
+
+# ── Prima riga della scheda: nome e tipo (utente, 2026-09-26) ─────────────
+
+def test_a_short_name_leaves_the_type_whole():
+    """@brief «frrr» e un tipo lungo: il tipo non va tagliato a meta' riga."""
+    from kicadgen.gui.start_page import split_first_line
+    name, kind = split_first_line(560, 40, 330, 16)
+    assert kind == 330 and name + kind + 16 <= 560
+
+
+def test_when_both_are_long_they_share_the_line():
+    """@brief Negativo: nome e tipo lunghi si dividono la riga, nessuno sparisce."""
+    from kicadgen.gui.start_page import split_first_line
+    name, kind = split_first_line(560, 500, 500, 16)
+    assert kind == (560 - 16) // 2 and name == 560 - 16 - kind
+
+
+def test_a_long_name_does_not_cut_a_short_type_and_no_type_gives_the_name_everything():
+    from kicadgen.gui.start_page import split_first_line
+    assert split_first_line(560, 900, 90, 16) == (560 - 16 - 90, 90)
+    assert split_first_line(560, 900, 0, 16) == (560, 0)
