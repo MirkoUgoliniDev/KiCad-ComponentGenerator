@@ -445,13 +445,24 @@ def prepare_photo(path, length, width, metadata=None):
     @param path Photo file.
     @param length Board length in mm.
     @param width Board width in mm.
-    @param metadata Optional dictionary updated with source hash, crop box and crop size.
+    @param metadata Optional dictionary updated with source hash, crop box and crop size;
+        when the board is not found, `board_failure` holds the reason for the user.
     @return BGR crop of the board, or None when the photo cannot be read or calibrated.
     """
-    from .photo_refine import find_board
+    from .photo_refine import find_board, locate_board
     image = read_photo(path)
     if image is None:
         return None
+
+    def not_found(original):
+        # Il motivo (scheda ruotata di 90 gradi rispetto alle quote, oppure
+        # nessuna regione distinta dallo sfondo) arriva al log invece del
+        # generico «nessuna vista calibrabile» (26/09).
+        if metadata is not None:
+            metadata["board_failure"] = locate_board(original, length, width).message(length, width)
+        return None
+
+    original = image
     frame = find_board(image, length, width)
     if frame is None:
         # Una foto scattata a mano libera e' quasi sempre storta di qualche
@@ -460,12 +471,14 @@ def prepare_photo(path, length, width, metadata=None):
         from .photo_refine import deskew_board
         straight = deskew_board(image, length, width)
         if straight is None:
-            return None
+            return not_found(original)
         image, frame = straight, find_board(straight, length, width)
         if frame is None:
-            return None
-    # find_board non rettifica la prospettiva: rifiuta le foto verticali anziché
-    # scambiarne implicitamente gli assi. La convenzione richiede X orizzontale.
+            return not_found(original)
+    # find_board non rettifica la prospettiva ne' scambia gli assi: la
+    # lunghezza dichiarata corre lungo X (orizzontale nella foto). Una scheda
+    # dichiarata con lunghezza < larghezza e' attesa verticale (26/09); una
+    # scheda fotografata ruotata di 90 gradi rispetto alle quote e' rifiutata.
     x0, y0 = round(frame.cx-frame.width_px/2), round(frame.cy-frame.height_px/2)
     x1, y1 = round(frame.cx+frame.width_px/2), round(frame.cy+frame.height_px/2)
     if x0 < 0 or y0 < 0 or x1 > image.shape[1] or y1 > image.shape[0]:
@@ -868,11 +881,16 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         photos = [(i,p) for i,p in photos if i in allowed]
     try:
         candidates = []
+        failures = []
         for i,path in photos:
             calibration = {}
             photo = prepare_photo(path,length,width,calibration)
             if photo is not None:
                 candidates.append((photo.shape[0]*photo.shape[1],path,photo,calibration))
+            elif calibration.get("board_failure"):
+                failures.append(f"{Path(path).name}: {calibration['board_failure']}")
+        for failure in failures:
+            warn(failure)
         if not candidates:
             warn(tx("Nessuna vista dall'alto calibrabile con le quote {length:.2f} x "
                     "{width:.2f} mm.", length=length, width=width)

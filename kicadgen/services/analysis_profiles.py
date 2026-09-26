@@ -40,6 +40,35 @@ def _superseded_translations():
             for old in olds]
 
 
+def _replace_superseded_texts(db):
+    """@brief Replace outdated built-in instructions and system prompt still stored verbatim.
+
+    @param db Open connection inside the initialization transaction.
+    @note A stored text is replaced only when its SHA-256 digest is one of the
+        known former defaults (component_types.SUPERSEDED_INSTRUCTION_DIGESTS,
+        datasheet_extractor.SUPERSEDED_SYSTEM_PROMPT_DIGESTS): a text the user
+        edited, even by one character, never matches and is kept. Only the
+        global system prompt and the built-in types are touched; a per-type
+        override or a custom type copied from a built-in one is a deliberate
+        choice of the user and stays as it is. The UPDATE repeats the old text
+        in its condition, so a concurrent edit is never overwritten.
+    """
+    from .component_types import SUPERSEDED_INSTRUCTION_DIGESTS, get as builtin_type, text_digest
+    from .datasheet_extractor import DEFAULT_SYSTEM_PROMPT, SUPERSEDED_SYSTEM_PROMPT_DIGESTS
+    rows = db.execute('SELECT key,instructions FROM component_types WHERE builtin=1').fetchall()
+    for key, instructions in rows:
+        current = builtin_type(key)
+        if (current is not None and instructions != current.prompt
+                and text_digest(instructions) in SUPERSEDED_INSTRUCTION_DIGESTS.get(key, ())):
+            db.execute('UPDATE component_types SET instructions=? '
+                       'WHERE key=? AND builtin=1 AND instructions=?',
+                       (current.prompt, key, instructions))
+    row = db.execute("SELECT value FROM ai_defaults WHERE name='system_prompt'").fetchone()
+    if row is not None and text_digest(row[0]) in SUPERSEDED_SYSTEM_PROMPT_DIGESTS:
+        db.execute("UPDATE ai_defaults SET value=? WHERE name='system_prompt' AND value=?",
+                   (DEFAULT_SYSTEM_PROMPT, row[0]))
+
+
 def factory_defaults():
     """@brief Return the built-in AI defaults (models and prompts) used to seed the profile database."""
     from .datasheet_extractor import DEFAULT_SYSTEM_PROMPT
@@ -118,6 +147,9 @@ class ProfileStore:
                     'UPDATE component_types SET label=? WHERE key=? AND builtin=1 AND label=?',
                     [(_builtin_type(key).label, key, old)
                      for key, olds in SUPERSEDED_LABELS.items() for old in olds])
+                # And for the instructions of the built-in types and the global
+                # system prompt, known by digest (see _replace_superseded_texts).
+                _replace_superseded_texts(db)
                 defaults = dict(db.execute('SELECT name,value FROM ai_defaults'))
                 if set(defaults) != set(PROFILE_FIELDS):
                     raise ProfileError(tx("Default del database incompleti: ripristinare un backup."))

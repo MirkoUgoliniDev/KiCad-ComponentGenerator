@@ -36,13 +36,19 @@ Convenzioni geometriche:
   piazzole ma UNA sola, continua, a stadio (`continuous_pad`): dallo stesso
   sbalzo esterno fino oltre la corona del foro, con il foro decentrato al suo
   interno. E' quello che mostra la foto di una scheda reale (decisione
-  dell'utente del 2026-09-23) ed e' la stessa forma che il 3D disegna.
+  dell'utente del 2026-09-23) ed e' la stessa forma che il 3D disegna;
+* le quote dei fori (semi-foro, foro passante, corona) possono essere
+  dichiarate lato per lato; quelle non dichiarate sono un riferimento
+  (AssumedSize) che, se non sta nel passo del lato o dietro ai fori passanti
+  collocati dalla distanza fra le file, viene ridotto e dichiarato come stima
+  (CastellatedModuleParams.side_geometry / geometry_notes). Una quota
+  dichiarata che non sta viene rifiutata, mai ridotta.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, Iterator, List, NamedTuple, Optional, Sequence
 
 from ..core.footprint import Footprint, FpCircle, FpRect, FpText, Pad
@@ -56,7 +62,75 @@ from ..services.messages import tx
 #: ottengono due feature ma un unico buco di serratura aperto sul bordo, che e'
 #: esattamente il difetto trovato misurando il solido generato (44 pareti da
 #: 164,7 gradi invece di 44 fori chiusi).
+#: La stessa parete vale fra i fori di due contatti DIVERSI (semi-fori vicini
+#: sullo stesso lato, fori vicini a un angolo): e' il "web" minimo di materiale
+#: fra due fori forati. Giustificazione dalla pratica di fabbricazione, non dal
+#: campione: 0,2 mm (8 mil) e' l'ordine di grandezza del minimo foro-foro delle
+#: tabelle di capacita' dei produttori di PCB standard (tipicamente 0,2-0,5 mm
+#: secondo produttore e reti). E' un LIMITE INFERIORE: garantisce due fori
+#: distinti e fabbricabili, non una distanza consigliata.
 MIN_HOLE_WALL_MM = 0.2
+
+#: Centro del semi-foro rispetto al bordo, in frazioni del raggio, quando non e'
+#: dichiarato (convenzione storica: un castellated e' un foro forato vicino al
+#: bordo e poi tagliato, il centro sta DENTRO la scheda).
+HALF_HOLE_INSET_RATIO = 0.76
+
+
+class AssumedSize(float):
+    """@brief A hole size, in mm, that the generator ASSUMED because nobody declared it.
+
+    Behaves exactly like the float it wraps (arithmetic, comparisons,
+    formatting, JSON, copy and pickle); only its type records the provenance.
+    A plain float passed by a caller (document, photo measure, user field) is
+    a DECLARED size.
+    @note Why a type and not a flag: the three module-level sizes have always
+        been plain floats read by several callers (3D generator, contact
+        zones, GUI); keeping them floats keeps every caller working, while the
+        type lets validate() tell "declared, must be respected" from "assumed,
+        may be reduced to fit the pitch" (see CastellatedModuleParams.side_geometry).
+    @note A JSON round trip turns it into a plain float, i.e. a declared size:
+        callers that persist parameters must persist the provenance themselves
+        (or pass None for a size that was not declared).
+    """
+
+    __slots__ = ()
+
+
+#: Diametri di riferimento (mm) del campione storico RS485/TTL a passo 2,54:
+#: NON misurati sul modulo in lavorazione. Si usano solo dove nessuno dichiara
+#: una quota, e solo se ci stanno nel passo del lato; altrimenti si stima il
+#: massimo che ci sta e lo si scrive nelle note (CastellatedModuleParams.geometry_notes).
+REFERENCE_HALF_HOLE_MM = AssumedSize(1.7)
+REFERENCE_THRU_DRILL_MM = AssumedSize(1.0)
+REFERENCE_THRU_RING_MM = AssumedSize(1.7)
+
+#: Provenienza di una quota di foro risolta per un lato (SideGeometry).
+SIZE_SIDE = "side"                    # dichiarata sul lato
+SIZE_MODULE = "module"                # dichiarata per tutto il modulo
+SIZE_REFERENCE = "reference"          # di riferimento, non dichiarata, ci sta
+SIZE_ESTIMATE_PITCH = "estimate_pitch"  # stimata: il riferimento non stava nel passo
+SIZE_ESTIMATE_ROWS = "estimate_rows"    # stimata: il riferimento non stava dietro ai fori passanti
+
+#: Provenienza della distanza dal bordo del foro passante di un lato.
+INSET_EXPLICIT = "explicit"           # thru_hole_offset dichiarato
+INSET_ROW_SPACING = "row_spacing"     # corpo e distanza fra le file dichiarata
+INSET_HALF_HOLE_ROWS = "half_hole_rows"  # la distanza fra le file e' quella dei semi-fori
+INSET_FALLBACK = "fallback"           # stima dichiarata (minimo compatibile)
+
+
+def is_declared_size(value) -> bool:
+    """@brief Tell whether a hole size was declared by a caller rather than assumed.
+
+    @param value A size in mm, an AssumedSize, or None.
+    @return False for None and for AssumedSize instances, True otherwise.
+    """
+    return value is not None and not isinstance(value, AssumedSize)
+
+
+def _floor_hundredth(value: float) -> float:
+    """Round DOWN to 0.01 mm, so an estimate that must fit never grows past its bound."""
+    return math.floor(value * 100 + 1e-9) / 100
 
 #: Lati del modulo su cui possono stare i contatti.
 EDGES = ("left", "right", "top", "bottom")
@@ -208,6 +282,34 @@ class PadPlacement(NamedTuple):
     # sono il diametro della corona, perche' e' l'unica piazzola che il pezzo
     # offre; per gli altri due e' la piazzola rettangolare di bordo di sempre.
     style: str = CONTACT_HALF_AND_THROUGH
+
+
+class SideGeometry(NamedTuple):
+    """@brief Hole sizes and through-hole position resolved for one side, in mm.
+
+    Every value is what the footprint, the 3D model and validate() use for the
+    contacts of that side; each carries its provenance (SIZE_* / INSET_*), so
+    an estimate can always be told from a declared quantity.
+    """
+
+    #: Diameter of the plated half-hole cut by the edge.
+    half_hole: float
+    half_hole_source: str
+    #: Distance of the half-hole centre from the edge, measured inward.
+    half_hole_inset: float
+    #: Drill of the closed through-hole.
+    drill: float
+    drill_source: str
+    #: Outer diameter of the annular ring around the through-hole.
+    ring: float
+    ring_source: str
+    #: True when the contacts of this side carry a closed through-hole.
+    has_thru_holes: bool
+    #: Distance of the through-hole centre from the edge (None without one).
+    thru_inset: Optional[float]
+    thru_inset_source: Optional[str]
+    #: Inset implied by a declared row spacing attributable to this side, or None.
+    rows_inset: Optional[float]
 
 
 #: Versore verso l'interno del corpo per ogni lato, in coordinate footprint
@@ -439,6 +541,14 @@ class CastellatedSide:
     `contact_style` (uno di CONTACT_STYLES) dice quali feature porta ogni
     contatto del lato: decide le piazzole del footprint e i fori del 3D, mai
     la numerazione.
+
+    `hole_diameter`, `thru_hole_drill` e `thru_pad_diameter` (mm, facoltativi)
+    sono le quote dei fori DI QUESTO LATO quando sono state dichiarate (misura,
+    documento, utente): i lati di un modulo possono avere passi diversi e fori
+    diversi. None = si usa la quota del modulo (vedi
+    CastellatedModuleParams.side_geometry).
+    @note A declared per-side size is always respected: validate() refuses it
+        when it does not fit the side's pitch; it is never reduced.
     """
 
     edge: str
@@ -455,6 +565,10 @@ class CastellatedSide:
     # comportamento storico, cosi' ogni progetto e scelta gia' salvati
     # continuano a produrre esattamente cio' che producevano.
     contact_style: str = CONTACT_HALF_AND_THROUGH
+    # Quote dei fori dichiarate per questo lato, in mm (None = quota del modulo).
+    hole_diameter: Optional[float] = None       # semi-foro sul bordo
+    thru_hole_drill: Optional[float] = None     # foro passante chiuso
+    thru_pad_diameter: Optional[float] = None   # corona del foro passante
 
     def numbers(self) -> List[str]:
         """@brief Return the pad numbers in the order they are met along the edge.
@@ -490,7 +604,12 @@ class CastellatedModuleParams:
     # Diametro del semi-foro metallizzato sul bordo: non serve al footprint
     # (i pad sono rettangolari) ma al modello 3D, dove i semi-fori vanno
     # tagliati nel solido perche' il pezzo somigli a quello reale.
-    hole_diameter: float = 1.7
+    # Le tre quote dei fori valgono per tutti i lati che non dichiarano la
+    # propria. Il default e' un AssumedSize (riferimento, non una misura):
+    # se non sta nel passo di un lato viene ridotto per quel lato e la stima
+    # finisce nelle note. Un numero passato dal chiamante e' dichiarato e
+    # viene rispettato (o rifiutato). None = non dichiarato.
+    hole_diameter: float = REFERENCE_HALF_HOLE_MM
     # Distanza del centro del semi-foro dal bordo (None = 0.76 * raggio): un
     # castellated e' un foro normale forato vicino al bordo e poi tagliato.
     hole_inset: Optional[float] = None
@@ -499,17 +618,17 @@ class CastellatedModuleParams:
     # entrambi) non si decide qui: e' `CastellatedSide.contact_style`, letto
     # dalla fotografia. Mettere il diametro a zero resta il modo storico di
     # dire "solo semi-fori" per i lati half_and_through.
-    thru_hole_drill: float = 1.0
-    thru_pad_diameter: float = 1.7
+    thru_hole_drill: float = REFERENCE_THRU_DRILL_MM
+    thru_pad_diameter: float = REFERENCE_THRU_RING_MM
     # Distanza del centro del foro chiuso dal bordo. A zero la calcola il
-    # programma: per half_and_through dal semi-foro (i due fori non devono
-    # toccarsi), per through_hole dalle file dichiarate (vedi
-    # through_hole_inset). Un numero esplicito viene rispettato, ma controllato.
+    # programma: dalle file dichiarate quando la distanza fra le file e'
+    # attribuibile al lato, altrimenti con una stima dichiarata (vedi
+    # side_geometry). Un numero esplicito viene rispettato, ma controllato.
     thru_hole_offset: float = 0.0
     # Distanza dichiarata fra i centri di due file di contatti su lati
-    # opposti (ExtractedParams.row_spacing_mm). Serve solo ai lati
-    # through_hole: con l'ingombro del corpo da' la distanza dal bordo dei
-    # fori senza inventarla. None = non dichiarata.
+    # opposti (ExtractedParams.row_spacing_mm). Serve ai lati con foro
+    # passante (through_hole e half_and_through): con l'ingombro del corpo
+    # da' la distanza dal bordo dei fori senza inventarla. None = non dichiarata.
     row_spacing: Optional[float] = None
     # Il modulo non e' un blocco pieno: e' un PCB sottile con sopra i
     # componenti. Il modello 3D lo costruisce come due solidi, perche' un
@@ -529,29 +648,324 @@ class CastellatedModuleParams:
     components: List[ComponentBox] = field(default_factory=list)
     margin: float = 0.25
 
+    def __post_init__(self) -> None:
+        """@brief Turn an explicit None hole size into the assumed reference size.
+
+        @note None is how a caller says "not declared" (e.g. the extraction
+            did not measure it); the reference value then applies, as an
+            estimate that may be reduced per side (see side_geometry).
+        """
+        for name, reference in (("hole_diameter", REFERENCE_HALF_HOLE_MM),
+                                ("thru_hole_drill", REFERENCE_THRU_DRILL_MM),
+                                ("thru_pad_diameter", REFERENCE_THRU_RING_MM)):
+            if getattr(self, name) is None:
+                setattr(self, name, reference)
+
+    @staticmethod
+    def _sized(side_value, module_value, reference, bounds) -> tuple:
+        """Resolve one hole size: (value mm, SIZE_* source).
+
+        A declared size (on the side, or module-wide) is returned as is, even
+        when it does not fit: validate() refuses it, it is never reduced. An
+        assumed size is kept when it fits every bound, otherwise it becomes
+        the largest 0.01 mm step that fits (an estimate, declared in the notes
+        by geometry_notes). When nothing positive fits, the assumed value is
+        kept and validate() reports why.
+        """
+        if side_value is not None:
+            return float(side_value), SIZE_SIDE
+        if is_declared_size(module_value):
+            return float(module_value), SIZE_MODULE
+        value = float(reference if module_value is None else module_value)
+        limits = [b for b in bounds if b is not None]
+        if not limits or value <= min(limits) + 1e-9:
+            return value, SIZE_REFERENCE
+        best = _floor_hundredth(min(limits))
+        if best <= 0:
+            return value, SIZE_REFERENCE
+        return best, SIZE_ESTIMATE_PITCH
+
+    def _half_hole_inset_for(self, diameter: float) -> float:
+        """Half-hole centre distance from the edge for a given diameter, mm."""
+        return (self.hole_inset if self.hole_inset is not None
+                else round(diameter / 2 * HALF_HOLE_INSET_RATIO, 3))
+
+    def _largest_half_hole_before(self, limit: float) -> float:
+        """Largest half-hole (0.01 mm steps) whose far side stays within `limit` of the edge, mm."""
+        if self.hole_inset is not None:
+            diameter = 2 * (limit - self.hole_inset)
+        else:
+            diameter = limit / (HALF_HOLE_INSET_RATIO / 2 + 0.5)
+        diameter = _floor_hundredth(diameter)
+        # L'arrotondamento del centro a 0,001 mm puo' spostarlo di un soffio:
+        # si scende finche' la quota sta davvero entro il limite.
+        while diameter > 0 and self._half_hole_inset_for(diameter) + diameter / 2 > limit + 1e-9:
+            diameter = round(diameter - 0.01, 2)
+        return diameter
+
+    def side_of(self, placement: "PadPlacement") -> Optional[CastellatedSide]:
+        """@brief The side a placed contact belongs to.
+
+        @param placement Contact from pad_positions().
+        @return The side on the same edge whose numbers include the contact's,
+            else the first side on that edge, else None.
+        @note Matched by edge AND pin number, which validate() keeps unique,
+            so two sides declared on the same edge are still told apart.
+        """
+        fallback = None
+        for side in self.sides:
+            if side.edge != placement.edge:
+                continue
+            if fallback is None:
+                fallback = side
+            if placement.number in side.numbers():
+                return side
+        return fallback
+
+    def contact_geometry(self, placement: "PadPlacement") -> SideGeometry:
+        """@brief Resolved hole geometry of the side of a placed contact.
+
+        @param placement Contact from pad_positions().
+        @return side_geometry() of its side; for a placement that matches no
+            side, the geometry of a single contact of its edge and style.
+        """
+        side = self.side_of(placement)
+        if side is None:
+            side = CastellatedSide(edge=placement.edge, count=1, pitch=0,
+                                   contact_style=placement.style)
+        return self.side_geometry(side)
+
+    def side_geometry(self, side: CastellatedSide) -> SideGeometry:
+        """@brief Hole sizes and through-hole position of the contacts of one side.
+
+        @param side One of self.sides (or an equivalent description).
+        @return SideGeometry, all lengths in mm.
+        @note Sizes: the side's declared value, else the module's declared
+            value, else the assumed reference (AssumedSize). An ASSUMED size
+            that does not fit the side is reduced to the largest that fits,
+            with the provenance set to an estimate:
+            * pitch (sides with more than one contact): adjacent holes of the
+              side need MIN_HOLE_WALL_MM of board between them, so half-hole,
+              ring and drill are each at most pitch - MIN_HOLE_WALL_MM (for
+              the ring the same margin keeps two copper rings apart);
+            * an estimated ring also bounds an assumed drill to ring -
+              2 * MIN_HOLE_WALL_MM (the same web, as annular ring);
+            * a declared row spacing that fixes the through-hole: an assumed
+              half-hole must leave MIN_HOLE_WALL_MM before that hole.
+            A declared size is never reduced: validate() refuses it instead.
+        @note Through-hole position (sides that carry one): thru_hole_offset
+            when declared; else the inset implied by a row spacing that can be
+            attributed to the side's opposite pair (through_hole_inset_from_rows),
+            for BOTH styles with a through-hole; else a declared estimate --
+            fallback_through_hole_inset for through_hole, the minimum behind
+            the half-hole for half_and_through. For half_and_through, a row
+            spacing whose centres could not hold a closed ring (inset < ring
+            radius) cannot be the through-hole rows: the only other row that
+            side has is the castellations, so it is not used to place the
+            through-holes (INSET_HALF_HOLE_ROWS, declared in the notes).
+        @note HEURISTIC in the estimates: MIN_HOLE_WALL_MM as the web and the
+            annular ring is a fabrication lower bound, not a measure; the
+            reference sizes come from one historical sample. A measured size
+            per side makes all of it unnecessary.
+        """
+        style = side.contact_style
+        count = side.count if isinstance(side.count, int) else 0
+        pitch_bound = (side.pitch - MIN_HOLE_WALL_MM
+                       if count > 1 and side.pitch > 0 else None)
+        through = style_has_through_hole(style)
+        half_style = style_has_half_hole(style)
+
+        ring, ring_source = self._sized(getattr(side, "thru_pad_diameter", None), self.thru_pad_diameter,
+                                        REFERENCE_THRU_RING_MM, [pitch_bound] if through else [])
+        drill_bounds = [pitch_bound] if through else []
+        if through and ring_source == SIZE_ESTIMATE_PITCH:
+            drill_bounds.append(ring - 2 * MIN_HOLE_WALL_MM)
+        drill, drill_source = self._sized(getattr(side, "thru_hole_drill", None), self.thru_hole_drill,
+                                          REFERENCE_THRU_DRILL_MM, drill_bounds)
+        half, half_source = self._sized(getattr(side, "hole_diameter", None), self.hole_diameter,
+                                        REFERENCE_HALF_HOLE_MM, [pitch_bound] if half_style else [])
+        has_thru = through and drill > 0 and ring > 0
+
+        rows_inset = None
+        pair = self._row_spacing_edges()
+        if pair is not None and side.edge in pair:
+            rows_inset = through_hole_inset_from_rows(self.edge_extent(side.edge), self.row_spacing)
+
+        inset, inset_source = None, None
+        if style == CONTACT_THROUGH_HOLE:
+            if self.thru_hole_offset > 0:
+                inset, inset_source = self.thru_hole_offset, INSET_EXPLICIT
+            elif rows_inset is not None:
+                inset, inset_source = rows_inset, INSET_ROW_SPACING
+            else:
+                inset, inset_source = fallback_through_hole_inset(ring), INSET_FALLBACK
+        elif has_thru:
+            if self.thru_hole_offset > 0:
+                inset, inset_source = self.thru_hole_offset, INSET_EXPLICIT
+            elif rows_inset is not None and rows_inset >= ring / 2 - 1e-9:
+                inset, inset_source = rows_inset, INSET_ROW_SPACING
+                limit = rows_inset - drill / 2 - MIN_HOLE_WALL_MM
+                # Solo un semi-foro ASSUNTO si riduce; uno dichiarato che non
+                # lascia la parete e' un errore (validate).
+                if (half_style and half_source in (SIZE_REFERENCE, SIZE_ESTIMATE_PITCH)
+                        and self._half_hole_inset_for(half) + half / 2 > limit + 1e-9):
+                    largest = self._largest_half_hole_before(limit)
+                    if 0 < largest < half:
+                        half, half_source = largest, SIZE_ESTIMATE_ROWS
+            else:
+                inset_source = (INSET_HALF_HOLE_ROWS if rows_inset is not None
+                                else INSET_FALLBACK)
+        half_inset = self._half_hole_inset_for(half)
+        if has_thru and inset is None:
+            # Il minimo che tiene il foro separato dal semi-foro con la parete
+            # minima: stessa espressione di thru_hole_centre_offset.
+            inset = round(half_inset + half / 2 + drill / 2 + MIN_HOLE_WALL_MM, 3)
+        return SideGeometry(half, half_source, half_inset, drill, drill_source, ring, ring_source,
+                            has_thru, inset, inset_source, rows_inset)
+
+    def geometry_notes(self) -> List[str]:
+        """@brief Human-readable notes on every estimated hole quantity (Italian, via tx).
+
+        @return One line per estimate, side by side in declaration order:
+            reduced assumed sizes first, then where the through-holes come
+            from when that is not an explicit offset.
+        @note Nothing estimated is left silent (project rule on estimated
+            dimensions). Reference sizes that fit are not listed: they are the
+            historical default, and listing them would change the pinned
+            payload of the default cases.
+        """
+        notes = []
+        for side in self.sides:
+            if side.edge not in EDGES or side.contact_style not in CONTACT_STYLES:
+                continue
+            label = EDGE_LABELS[side.edge]
+            geometry = self.side_geometry(side)
+            style = side.contact_style
+            if style_has_half_hole(style):
+                if geometry.half_hole_source == SIZE_ESTIMATE_PITCH:
+                    notes.append(tx(
+                        "Lato {label}: diametro del semi-foro non dichiarato; il valore di "
+                        "riferimento {reference}mm non sta nel passo {pitch}mm con la parete "
+                        "minima di {wall}mm, quindi e' stimato {value:.2f}mm (il massimo che ci "
+                        "sta). Indica il diametro misurato per averlo esatto.",
+                        label=label, reference=float(self._reference("hole_diameter")),
+                        pitch=side.pitch, wall=MIN_HOLE_WALL_MM, value=geometry.half_hole))
+                elif geometry.half_hole_source == SIZE_ESTIMATE_ROWS:
+                    notes.append(tx(
+                        "Lato {label}: diametro del semi-foro non dichiarato; con i fori passanti "
+                        "a {inset:.2f}mm dal bordo (distanza fra le file {row_spacing}mm) il "
+                        "valore di riferimento {reference}mm non lascia la parete minima di "
+                        "{wall}mm, quindi e' stimato {value:.2f}mm. Indica il diametro misurato "
+                        "per averlo esatto.",
+                        label=label, inset=geometry.thru_inset, row_spacing=self.row_spacing,
+                        reference=float(self._reference("hole_diameter")),
+                        wall=MIN_HOLE_WALL_MM, value=geometry.half_hole))
+            if style == CONTACT_THROUGH_HOLE or geometry.has_thru_holes:
+                if geometry.ring_source == SIZE_ESTIMATE_PITCH:
+                    notes.append(tx(
+                        "Lato {label}: corona del foro passante non dichiarata; il valore di "
+                        "riferimento {reference}mm non sta nel passo {pitch}mm con la distanza "
+                        "minima di {wall}mm, quindi e' stimata {value:.2f}mm (il massimo che ci "
+                        "sta). Indica il diametro misurato per averlo esatto.",
+                        label=label, reference=float(self._reference("thru_pad_diameter")),
+                        pitch=side.pitch, wall=MIN_HOLE_WALL_MM, value=geometry.ring))
+                if geometry.drill_source == SIZE_ESTIMATE_PITCH:
+                    notes.append(tx(
+                        "Lato {label}: diametro del foro passante non dichiarato; il valore di "
+                        "riferimento {reference}mm non sta nel passo {pitch}mm e nella corona di "
+                        "{ring:.2f}mm con la parete minima di {wall}mm, quindi e' stimato "
+                        "{value:.2f}mm (il massimo che ci sta). Indica il diametro misurato per "
+                        "averlo esatto.",
+                        label=label, reference=float(self._reference("thru_hole_drill")),
+                        pitch=side.pitch, ring=geometry.ring, wall=MIN_HOLE_WALL_MM,
+                        value=geometry.drill))
+            notes.extend(self._inset_notes(side, geometry, label))
+        return notes
+
+    def _reference(self, name: str) -> float:
+        """The assumed module-level size an estimate started from, before any reduction, mm."""
+        value = getattr(self, name)
+        if value is None:
+            value = {"hole_diameter": REFERENCE_HALF_HOLE_MM,
+                     "thru_hole_drill": REFERENCE_THRU_DRILL_MM,
+                     "thru_pad_diameter": REFERENCE_THRU_RING_MM}[name]
+        return value
+
+    def _inset_notes(self, side: CastellatedSide, geometry: SideGeometry, label: str) -> List[str]:
+        """Notes on where the through-holes of one side are, when not explicit."""
+        source = geometry.thru_inset_source
+        notes = []
+        if side.contact_style == CONTACT_THROUGH_HOLE:
+            # Stessi testi (e stessi valori) che il generatore 3D scriveva prima
+            # che le note passassero di qui: il payload predefinito non cambia.
+            if source == INSET_FALLBACK:
+                notes.append(
+                    tx("Lato {label}: distanza dal bordo dei fori passanti non dichiarata, "
+                       "stimata {value:.2f}mm (raggio della corona piu' la parete minima). E' "
+                       "una stima per difetto: indica la distanza fra le file o la distanza "
+                       "dal bordo per averla esatta.",
+                       label=label,
+                       value=geometry.thru_inset))
+            elif source == INSET_ROW_SPACING:
+                notes.append(
+                    tx("Lato {label}: fori passanti a {value:.2f}mm dal bordo, ricavati da "
+                       "corpo {edge_extent}mm e distanza fra le file {row_spacing}mm.",
+                       label=label,
+                       value=geometry.thru_inset,
+                       edge_extent=self.edge_extent(side.edge),
+                       row_spacing=self.row_spacing))
+            return notes
+        if not geometry.has_thru_holes:
+            return notes
+        if source == INSET_ROW_SPACING:
+            notes.append(
+                tx("Lato {label}: fori passanti a {value:.2f}mm dal bordo, ricavati da "
+                   "corpo {edge_extent}mm e distanza fra le file {row_spacing}mm.",
+                   label=label,
+                   value=geometry.thru_inset,
+                   edge_extent=self.edge_extent(side.edge),
+                   row_spacing=self.row_spacing))
+        elif source in (INSET_FALLBACK, INSET_HALF_HOLE_ROWS):
+            if source == INSET_HALF_HOLE_ROWS:
+                notes.append(tx(
+                    "Lato {label}: con la distanza fra le file dichiarata ({row_spacing}mm) i "
+                    "centri starebbero a {inset:.2f}mm dal bordo, meno del raggio della corona "
+                    "({radius:.2f}mm): un foro passante chiuso non ci sta, quindi e' la distanza "
+                    "fra le file di semi-fori e non viene usata per i fori passanti.",
+                    label=label, row_spacing=self.row_spacing, inset=geometry.rows_inset,
+                    radius=geometry.ring / 2))
+            notes.append(tx(
+                "Lato {label}: distanza dal bordo dei fori passanti non dichiarata, stimata "
+                "{value:.2f}mm (la minima che li separa dal semi-foro con la parete minima). "
+                "E' una stima per difetto: indica la distanza fra le file o la distanza dal "
+                "bordo per averla esatta.",
+                label=label, value=geometry.thru_inset))
+        return notes
+
     @property
     def half_hole_inset(self) -> float:
-        """@brief Distanza dal bordo del centro del semi-foro, in mm.
+        """@brief Distanza dal bordo del centro del semi-foro del MODULO, in mm.
 
-        @return Il valore dichiarato, oppure 0.76 raggi come da convenzione.
+        @return Il valore dichiarato, oppure HALF_HOLE_INSET_RATIO raggi come da
+            convenzione, calcolato sul diametro del modulo (hole_diameter).
         @note Un castellated e' un foro normale forato vicino al bordo e poi
-            tagliato: il centro sta DENTRO la scheda. La stessa formula era
-            scritta nel generatore 3D e non era visibile da qui, quindi la
-            validazione non poteva tenerne conto -- ed e' per questo che due
-            fori sovrapposti passavano senza che nessuno se ne accorgesse.
+            tagliato: il centro sta DENTRO la scheda. Il valore di ogni lato,
+            che puo' avere un semi-foro suo, e' SideGeometry.half_hole_inset.
         """
-        return (self.hole_inset if self.hole_inset is not None
-                else round(self.hole_diameter / 2 * 0.76, 3))
+        return self._half_hole_inset_for(self.hole_diameter)
 
     @property
     def thru_hole_centre_offset(self) -> float:
-        """@brief Distanza dal bordo del centro del foro passante, in mm.
+        """@brief Distanza dal bordo del foro passante dietro al semi-foro, quote del MODULO, mm.
 
         @return Il valore dichiarato, oppure il minimo che tiene separati i
             due fori lasciando MIN_HOLE_WALL_MM di parete fra loro.
         @note Non e' una quota scelta su una scheda: e' la distanza sotto la
-            quale le due cavita' si fondono, piu' una parete. Derivarla invece
-            di fissarla la rende giusta con qualunque semi-foro.
+            quale le due cavita' si fondono, piu' una parete. Usa le sole
+            quote del modulo, senza lati: serve a chi descrive un contatto
+            senza avere i lati (services/contact_zones). La posizione vera di
+            ogni lato -- che tiene conto dei fori del lato e della distanza
+            fra le file dichiarata -- e' SideGeometry.thru_inset.
         """
         if self.thru_hole_offset > 0:
             return self.thru_hole_offset
@@ -560,12 +974,13 @@ class CastellatedModuleParams:
 
     @property
     def has_thru_holes(self) -> bool:
-        """@brief True quando ogni contatto porta anche un foro passante chiuso.
+        """@brief True quando il MODULO dichiara un foro passante chiuso (quote del modulo).
 
-        @return True se sia il foro sia la sua piazzola sono dichiarati.
+        @return True se sia il foro sia la sua piazzola del modulo sono > 0.
         @note Mettere il diametro a zero e' il modo di dire "questo modulo ha
             solo i semi-fori": non esiste un foro di diametro nullo, quindi lo
-            zero non puo' essere confuso con una quota.
+            zero non puo' essere confuso con una quota. Per un lato con quote
+            proprie vale SideGeometry.has_thru_holes.
         """
         return self.thru_hole_drill > 0 and self.thru_pad_diameter > 0
 
@@ -584,40 +999,38 @@ class CastellatedModuleParams:
             return None
         return opposite_row_edges(side.edge for side in self.sides)
 
+    def _through_geometry(self, edge: str) -> SideGeometry:
+        """Geometry of the first side on `edge`, described as a through_hole side if it has no through-hole."""
+        side = next((s for s in self.sides if s.edge == edge), None)
+        if side is None:
+            side = CastellatedSide(edge=edge, count=1, pitch=0, contact_style=CONTACT_THROUGH_HOLE)
+        geometry = self.side_geometry(side)
+        if geometry.thru_inset is None:
+            geometry = self.side_geometry(replace(side, contact_style=CONTACT_THROUGH_HOLE))
+        return geometry
+
     def through_hole_inset_source(self, edge: str) -> str:
-        """@brief Where the through-hole inset of a CONTACT_THROUGH_HOLE side comes from.
+        """@brief Where the through-hole inset of the side on `edge` comes from.
 
         @param edge Edge of the side.
         @return "explicit" (thru_hole_offset), "row_spacing" (body extent and
-            declared row spacing) or "fallback" (declared heuristic, see
-            fallback_through_hole_inset).
+            declared row spacing), "half_hole_rows" (half_and_through side
+            whose declared rows are the castellations) or "fallback" (declared
+            estimate). See side_geometry.
         """
-        if self.thru_hole_offset > 0:
-            return "explicit"
-        pair = self._row_spacing_edges()
-        if (pair is not None and edge in pair
-                and through_hole_inset_from_rows(self.edge_extent(edge), self.row_spacing) is not None):
-            return "row_spacing"
-        return "fallback"
+        return self._through_geometry(edge).thru_inset_source
 
     def through_hole_inset(self, edge: str) -> float:
-        """@brief Distance from the edge of the through-hole centres of a through_hole side.
+        """@brief Distance from the edge of the through-hole centres of the side on `edge`, mm.
 
         @param edge Edge of the side.
-        @return In mm: the explicit thru_hole_offset when given; otherwise
+        @return The explicit thru_hole_offset when given; otherwise
             (extent - row_spacing) / 2 when a row spacing is declared for this
-            edge's opposite pair; otherwise the declared heuristic
-            fallback_through_hole_inset().
-        @note Distinct from thru_hole_centre_offset, which places the hole of a
-            half_and_through contact behind its half-hole: with no half-hole
-            that derivation has nothing to refer to.
+            edge's opposite pair (and, for half_and_through, can hold a closed
+            ring); otherwise the declared estimate of the side's style.
+        @note Same value the footprint and the 3D use (side_geometry).
         """
-        source = self.through_hole_inset_source(edge)
-        if source == "explicit":
-            return self.thru_hole_offset
-        if source == "row_spacing":
-            return through_hole_inset_from_rows(self.edge_extent(edge), self.row_spacing)
-        return fallback_through_hole_inset(self.thru_pad_diameter)
+        return self._through_geometry(edge).thru_inset
 
     def needs_half_holes(self) -> bool:
         """@brief True when at least one side cuts half-holes into the edge."""
@@ -628,12 +1041,15 @@ class CastellatedModuleParams:
 
         @param placement Contatto gia' posizionato sul suo bordo.
         @return (x, y) in mm: il foro sta sulla stessa riga del contatto, ma
-            spostato verso l'interno del corpo. Per un contatto through_hole la
+            spostato verso l'interno del corpo della distanza del suo lato
+            (SideGeometry.thru_inset). Per un contatto through_hole la
             piazzola E' la corona del foro, quindi il suo centro e' gia' quello.
         """
         if placement.style == CONTACT_THROUGH_HOLE:
             return (placement.x, placement.y)
-        offset = self.thru_hole_centre_offset
+        offset = self.contact_geometry(placement).thru_inset
+        if offset is None:
+            offset = self.thru_hole_centre_offset
         if placement.edge == "left":
             return (-self.body_length / 2 + offset, placement.y)
         if placement.edge == "right":
@@ -666,7 +1082,13 @@ class CastellatedModuleParams:
             pins never touches (strictly positive gap, every pair of contacts,
             any side, any contact style); a pad keeps part of its land under
             the module (0 <= pad_overhang < pad_length); every pin number is
-            non-empty and unique.
+            non-empty and unique; every half-hole is really cut by the edge;
+            two drilled holes of different contacts (half-holes and closed
+            through-holes, same side or not) keep at least MIN_HOLE_WALL_MM of
+            board between them, and so do the two holes of one half_and_through
+            contact. Sizes are the per-side ones (side_geometry): a declared
+            size that does not fit is refused, an assumed one was already
+            reduced to fit and is reported by geometry_notes().
         """
         self._validate_finite_numbers()
         if not self.name.strip():
@@ -688,11 +1110,16 @@ class CastellatedModuleParams:
                        join=', '.join(CONTACT_STYLES))
                 )
         # Il semi-foro serve solo ai lati che lo tagliano davvero.
-        if self.needs_half_holes() and self.hole_diameter <= 0:
+        if any(style_has_half_hole(side.contact_style) and self.side_geometry(side).half_hole <= 0
+               for side in self.sides):
             raise ValueError(tx("Il diametro del semi-foro deve essere > 0."))
         if self.pcb_thickness <= 0:
             raise ValueError(tx("Lo spessore del PCB deve essere > 0."))
-        if self.thru_hole_drill < 0 or self.thru_pad_diameter < 0:
+        declared_through = [self.thru_hole_drill, self.thru_pad_diameter] + [
+            getattr(side, name, None) for side in self.sides
+            for name in ("thru_hole_drill", "thru_pad_diameter")]
+        declared_through = [value for value in declared_through if value is not None]
+        if any(value < 0 for value in declared_through):
             raise ValueError(tx("Le quote del foro passante non possono essere negative."))
         if self.pad_overhang < 0:
             raise ValueError(
@@ -700,62 +1127,7 @@ class CastellatedModuleParams:
                    pad_overhang=self.pad_overhang)
             )
         self._validate_through_hole_sides()
-        # Il controllo storico del foro dietro al semi-foro vale solo dove
-        # entrambi esistono: su un lato through_hole non c'e' semi-foro con cui
-        # fondersi, su un lato half_hole non c'e' foro.
-        if self.has_thru_holes and any(side.contact_style == CONTACT_HALF_AND_THROUGH
-                                       for side in self.sides):
-            if self.thru_pad_diameter <= self.thru_hole_drill:
-                raise ValueError(
-                    tx("La piazzola del foro passante ({thru_pad_diameter}mm) deve essere "
-                       "piu' larga del foro ({thru_hole_drill}mm): senza corona non c'e' rame "
-                       "su cui saldare.",
-                       thru_pad_diameter=self.thru_pad_diameter,
-                       thru_hole_drill=self.thru_hole_drill)
-                )
-            # Un foro il cui bordo esce dal corpo non e' un foro chiuso: e' un
-            # secondo semi-foro, e allora tanto vale non dichiararlo.
-            gap = (self.thru_hole_centre_offset - self.half_hole_inset
-                   - self.hole_diameter / 2 - self.thru_hole_drill / 2)
-            if gap < 0:
-                minimum = (self.half_hole_inset + self.hole_diameter / 2
-                           + self.thru_hole_drill / 2 + MIN_HOLE_WALL_MM)
-                raise ValueError(
-                    tx("Il foro passante e il semi-foro si toccano: i loro assi distano "
-                       "{value:.2f}mm ma la somma dei raggi e' {value2:.2f}mm, quindi si "
-                       "fonderebbero in un'unica cavita' aperta sul bordo invece di restare "
-                       "due fori. Porta la distanza dal bordo ad almeno {minimum:.2f}mm, "
-                       "oppure riduci il semi-foro.",
-                       value=self.thru_hole_centre_offset - self.half_hole_inset,
-                       value2=self.hole_diameter / 2 + self.thru_hole_drill / 2,
-                       minimum=minimum)
-                )
-            if self.thru_hole_centre_offset < self.thru_pad_diameter / 2:
-                raise ValueError(
-                    tx("Il centro del foro passante dista {thru_hole_centre_offset}mm dal "
-                       "bordo, meno del raggio della sua piazzola ({value}mm): resterebbe "
-                       "aperto sul bordo invece di essere chiuso.",
-                       thru_hole_centre_offset=self.thru_hole_centre_offset,
-                       value=self.thru_pad_diameter / 2)
-                )
-            # Solo le coppie di lati opposti che portano DAVVERO fori passanti
-            # half_and_through si contendono l'ingombro: un modulo 30x4 con
-            # contatti solo a sinistra e destra misura 30 mm fra le due file,
-            # non 4. Un lato senza dirimpettaio e' gia' coperto dai controlli
-            # sopra (il foro resta chiuso dentro il corpo).
-            carrying = {side.edge for side in self.sides
-                        if side.contact_style == CONTACT_HALF_AND_THROUGH}
-            for pair in OPPOSITE_EDGE_PAIRS:
-                if not set(pair) <= carrying:
-                    continue
-                shortest = self.edge_extent(pair[0])
-                if 2 * self.thru_hole_centre_offset + self.thru_pad_diameter > shortest + 1e-6:
-                    raise ValueError(
-                        tx("I fori passanti dei due lati opposti non stanno in {shortest}mm: "
-                           "servono almeno {value:.2f}mm.",
-                           shortest=shortest,
-                           value=2 * self.thru_hole_centre_offset + self.thru_pad_diameter)
-                    )
+        self._validate_double_contacts()
 
         seen_numbers: dict[str, str] = {}
         for side in self.sides:
@@ -789,8 +1161,9 @@ class CastellatedModuleParams:
             # La piazzola che si allinea lungo il bordo e' quella che il lato
             # offre davvero: la corona del foro per through_hole, la piazzola
             # rettangolare di bordo per gli altri due tipi.
+            geometry = self.side_geometry(side)
             if side.contact_style == CONTACT_THROUGH_HOLE:
-                land = self.thru_pad_diameter
+                land = geometry.ring
                 if side.count > 1 and side.pitch < land:
                     raise ValueError(
                         tx("Lato {label}: passo {pitch}mm minore del diametro della corona "
@@ -809,11 +1182,11 @@ class CastellatedModuleParams:
                            pitch=side.pitch,
                            pad_width=pad_width)
                     )
-                if has_continuous_pad(self, side.contact_style):
+                if has_continuous_pad(self, side.contact_style, side):
                     # La piazzola continua contiene anche la corona del foro:
                     # e' larga quanto la maggiore delle due, e il passo deve
                     # lasciarle separate.
-                    land = continuous_pad_across(self, pad_width)
+                    land = continuous_pad_across(self, pad_width, geometry.ring)
                     if side.count > 1 and side.pitch < land:
                         raise ValueError(
                             tx("Lato {label}: passo {pitch}mm minore della larghezza della piazzola "
@@ -823,7 +1196,7 @@ class CastellatedModuleParams:
                                pitch=side.pitch,
                                land=land,
                                pad_width=pad_width,
-                               thru_pad_diameter=self.thru_pad_diameter)
+                               thru_pad_diameter=geometry.ring)
                         )
 
             span = (side.count - 1) * side.pitch + land
@@ -874,6 +1247,8 @@ class CastellatedModuleParams:
                 seen_numbers[number] = label
 
         self._validate_copper_clearance()
+        self._validate_half_hole_insets()
+        self._validate_hole_walls()
 
     def _validate_finite_numbers(self) -> None:
         """Refuse NaN, infinities, booleans and non-numbers before any comparison.
@@ -890,16 +1265,21 @@ class CastellatedModuleParams:
         for name in ("body_length", "body_width", "pad_length", "pad_width", "pad_overhang",
                      "hole_diameter", "thru_hole_drill", "thru_pad_diameter", "thru_hole_offset",
                      "pcb_thickness", "margin"):
-            check(getattr(self, name), name)
+            # None per le quote dei fori = non dichiarata (vale il riferimento).
+            check(getattr(self, name), name,
+                  optional=name in ("hole_diameter", "thru_hole_drill", "thru_pad_diameter"))
         # row_spacing ha il suo controllo, con il suo messaggio, dove serve
-        # davvero (lati through_hole): altrove non entra nella geometria.
+        # davvero (lati con foro passante): altrove non entra nella geometria.
         check(self.hole_inset, "hole_inset", optional=True)
         for side in self.sides:
             label = EDGE_LABELS.get(side.edge, side.edge)
             for name in ("pitch", "offset"):
                 check(getattr(side, name), f"{name} ({label})")
-            for name in ("pad_length", "pad_width"):
-                check(getattr(side, name), f"{name} ({label})", optional=True)
+            for name in ("pad_length", "pad_width", "hole_diameter", "thru_hole_drill",
+                         "thru_pad_diameter"):
+                # getattr con default: un lato descritto da un oggetto piu' vecchio,
+                # senza le quote dei fori per lato, resta valido.
+                check(getattr(side, name, None), f"{name} ({label})", optional=True)
             for name in ("count", "first_pin"):
                 value = getattr(side, name)
                 if isinstance(value, bool) or not isinstance(value, int):
@@ -918,6 +1298,7 @@ class CastellatedModuleParams:
         pad were checked). Contacts with the same number may share copper.
         """
         placements = list(pad_positions(self))
+        stadiums = {id(placement): continuous_pad(self, placement) for placement in placements}
         outlines = [(placement, _copper_outline(self, placement)) for placement in placements]
         for i, (first, a) in enumerate(outlines):
             for second, b in outlines[i + 1:]:
@@ -925,9 +1306,9 @@ class CastellatedModuleParams:
                     continue
                 if _box_distance(a, b) - a[4] - b[4] > 1e-6:
                     continue
-                if has_continuous_pad(self, first.style) or has_continuous_pad(self, second.style):
-                    stadium = first if has_continuous_pad(self, first.style) else second
-                    pad = continuous_pad(self, stadium)
+                if stadiums[id(first)] is not None or stadiums[id(second)] is not None:
+                    stadium = first if stadiums[id(first)] is not None else second
+                    pad = stadiums[id(stadium)]
                     raise ValueError(
                         tx("La piazzola continua del contatto {number} (lato {get}), che dal "
                            "bordo arriva {inner_reach:.2f}mm dentro il corpo fino oltre il foro "
@@ -950,30 +1331,99 @@ class CastellatedModuleParams:
                        second_edge=EDGE_LABELS.get(second.edge, second.edge))
                 )
 
-    def _validate_through_hole_sides(self) -> None:
-        """Checks for sides whose only feature is a full through-hole."""
-        # Un lato con bordo non valido viene rifiutato piu' avanti, con il suo
-        # messaggio: qui non ha una geometria da controllare.
-        through = [side for side in self.sides
-                   if side.contact_style == CONTACT_THROUGH_HOLE and side.edge in EDGES]
-        if not through:
-            return
-        labels = ", ".join(EDGE_LABELS.get(side.edge, side.edge) for side in through)
-        if self.thru_hole_drill <= 0:
-            raise ValueError(
-                tx("Lato {labels}: i contatti sono fori passanti ma il diametro del foro "
-                   "e' zero. Indica il foro, oppure scegli il tipo «mezzo foro sul bordo».",
-                   labels=labels)
-            )
-        if self.thru_pad_diameter <= self.thru_hole_drill:
-            raise ValueError(
-                tx("Lato {labels}: la piazzola del foro passante ({thru_pad_diameter}mm) "
-                   "deve essere piu' larga del foro ({thru_hole_drill}mm): senza corona "
-                   "non c'e' rame su cui saldare.",
-                   labels=labels,
-                   thru_pad_diameter=self.thru_pad_diameter,
-                   thru_hole_drill=self.thru_hole_drill)
-            )
+    def _validate_half_hole_insets(self) -> None:
+        """Refuse a half-hole whose centre is so far in that the edge does not cut it.
+
+        A declared hole_inset is module-wide while half-hole diameters can
+        differ per side: an inset valid for a large half-hole can leave a
+        small one entirely inside the board, where it would be drawn as a
+        castellation that does not exist.
+        """
+        for side in self.sides:
+            if not style_has_half_hole(side.contact_style):
+                continue
+            geometry = self.side_geometry(side)
+            if geometry.half_hole_inset >= geometry.half_hole / 2 - 1e-9:
+                raise ValueError(
+                    tx("Lato {label}: il centro del semi-foro dista {inset}mm dal bordo, non "
+                       "meno del suo raggio ({radius}mm): il bordo non lo taglierebbe e non "
+                       "sarebbe un semi-foro. Riduci la distanza dal bordo del semi-foro.",
+                       label=EDGE_LABELS.get(side.edge, side.edge),
+                       inset=geometry.half_hole_inset,
+                       radius=geometry.half_hole / 2)
+                )
+
+    def drilled_holes(self) -> List[tuple]:
+        """@brief Every drilled cylinder of the module board, per contact.
+
+        @return List of (placement, kind, x, y, radius) in footprint mm;
+            kind is "half" (plated half-hole cut by the edge, full cylinder)
+            or "through" (closed through-hole drill).
+        @note The same cylinders the 3D generator subtracts from the board.
+        """
+        holes = []
+        for placement in pad_positions(self):
+            geometry = self.contact_geometry(placement)
+            if style_has_half_hole(placement.style):
+                nx, ny = INWARD_FOOTPRINT[placement.edge]
+                edge_x, edge_y = _edge_point(self, placement)
+                holes.append((placement, "half",
+                              edge_x + nx * geometry.half_hole_inset,
+                              edge_y + ny * geometry.half_hole_inset,
+                              geometry.half_hole / 2))
+            if placement.style == CONTACT_THROUGH_HOLE or geometry.has_thru_holes:
+                if geometry.drill > 0:
+                    x, y = self.thru_hole_centre(placement)
+                    holes.append((placement, "through", x, y, geometry.drill / 2))
+        return holes
+
+    def _validate_hole_walls(self) -> None:
+        """Refuse two drilled holes of different contacts closer than MIN_HOLE_WALL_MM.
+
+        Same rule for every pair -- adjacent contacts on one side (the pitch
+        case), contacts of two sides near a corner, a half-hole next to a
+        neighbour's through-hole -- so it is not tied to the pitch alone.
+        Below the wall the two cylinders merge into one slot in the 3D solid
+        and the board could not be drilled as two holes. Holes of the same
+        contact are checked by _validate_double_contacts.
+        """
+        holes = self.drilled_holes()
+        for i, (first, kind_a, xa, ya, ra) in enumerate(holes):
+            for second, kind_b, xb, yb, rb in holes[i + 1:]:
+                if first.number == second.number:
+                    continue
+                wall = math.hypot(xa - xb, ya - yb) - ra - rb
+                if wall >= MIN_HOLE_WALL_MM - 1e-6:
+                    continue
+                side_a, side_b = self.side_of(first), self.side_of(second)
+                if kind_a == kind_b == "half" and side_a is side_b and side_a is not None:
+                    raise ValueError(
+                        tx("Lato {label}: semi-fori da {diameter}mm a passo {pitch}mm: fra due "
+                           "semi-fori vicini restano {wall:.2f}mm di scheda, meno della parete "
+                           "minima di {minimum}mm, e si fonderebbero in un'unica asola. Indica il "
+                           "diametro reale del semi-foro di questo lato (al massimo {largest:.2f}mm).",
+                           label=EDGE_LABELS.get(first.edge, first.edge),
+                           diameter=2 * ra,
+                           pitch=side_a.pitch,
+                           wall=wall,
+                           minimum=MIN_HOLE_WALL_MM,
+                           largest=side_a.pitch - MIN_HOLE_WALL_MM)
+                    )
+                raise ValueError(
+                    tx("Fra il foro del contatto {first} (lato {first_edge}) e quello del "
+                       "contatto {second} (lato {second_edge}) restano {wall:.2f}mm di scheda, "
+                       "meno della parete minima di {minimum}mm: i due fori si fonderebbero. "
+                       "Riduci i fori o allontana i contatti.",
+                       first=first.number,
+                       first_edge=EDGE_LABELS.get(first.edge, first.edge),
+                       second=second.number,
+                       second_edge=EDGE_LABELS.get(second.edge, second.edge),
+                       wall=wall,
+                       minimum=MIN_HOLE_WALL_MM)
+                )
+
+    def _validate_row_spacing(self) -> None:
+        """Refuse a declared row spacing that is not a positive finite number."""
         spacing = self.row_spacing
         if spacing is not None and (
                 isinstance(spacing, bool) or not isinstance(spacing, (int, float))
@@ -982,15 +1432,141 @@ class CastellatedModuleParams:
                 tx("La distanza fra le file ({row_spacing!r}) deve essere un numero > 0.",
                    row_spacing=self.row_spacing)
             )
-        for side in through:
+
+    def _validate_double_contacts(self) -> None:
+        """Checks for half_and_through sides that carry a closed through-hole.
+
+        The historical checks (ring wider than the drill, through-hole not
+        merging with the half-hole, ring closed inside the board, facing rows
+        fitting the body) now run per side, on the side's own sizes and
+        position -- which may come from a declared row spacing.
+        """
+        sides = [side for side in self.sides
+                 if side.contact_style == CONTACT_HALF_AND_THROUGH and side.edge in EDGES
+                 and self.side_geometry(side).has_thru_holes]
+        if not sides:
+            return
+        self._validate_row_spacing()
+        for side in sides:
+            geometry = self.side_geometry(side)
+            label = EDGE_LABELS[side.edge]
+            if geometry.ring <= geometry.drill:
+                raise ValueError(
+                    tx("La piazzola del foro passante ({thru_pad_diameter}mm) deve essere "
+                       "piu' larga del foro ({thru_hole_drill}mm): senza corona non c'e' rame "
+                       "su cui saldare.",
+                       thru_pad_diameter=geometry.ring,
+                       thru_hole_drill=geometry.drill)
+                )
+            # Un foro il cui bordo esce dal corpo non e' un foro chiuso: e' un
+            # secondo semi-foro, e allora tanto vale non dichiararlo.
+            inset = geometry.thru_inset
+            gap = inset - geometry.half_hole_inset - geometry.half_hole / 2 - geometry.drill / 2
+            minimum = (geometry.half_hole_inset + geometry.half_hole / 2
+                       + geometry.drill / 2 + MIN_HOLE_WALL_MM)
+            if geometry.thru_inset_source == INSET_ROW_SPACING and gap < MIN_HOLE_WALL_MM - 1e-6:
+                raise ValueError(
+                    tx("Lato {label}: le file dichiarate distano {row_spacing}mm su un corpo di "
+                       "{edge_extent}mm, quindi i fori passanti starebbero a {inset}mm dal bordo: "
+                       "fra ciascun foro e il semi-foro dello stesso contatto resterebbero "
+                       "{wall:.2f}mm di scheda, meno della parete minima di {minimum}mm. "
+                       "Controlla la distanza fra le file e il diametro dei fori.",
+                       label=label,
+                       row_spacing=self.row_spacing,
+                       edge_extent=self.edge_extent(side.edge),
+                       inset=inset,
+                       wall=gap,
+                       minimum=MIN_HOLE_WALL_MM)
+                )
+            if gap < 0:
+                raise ValueError(
+                    tx("Il foro passante e il semi-foro si toccano: i loro assi distano "
+                       "{value:.2f}mm ma la somma dei raggi e' {value2:.2f}mm, quindi si "
+                       "fonderebbero in un'unica cavita' aperta sul bordo invece di restare "
+                       "due fori. Porta la distanza dal bordo ad almeno {minimum:.2f}mm, "
+                       "oppure riduci il semi-foro.",
+                       value=inset - geometry.half_hole_inset,
+                       value2=geometry.half_hole / 2 + geometry.drill / 2,
+                       minimum=minimum)
+                )
+            if gap < MIN_HOLE_WALL_MM - 1e-6:
+                raise ValueError(
+                    tx("Lato {label}: fra il foro passante e il semi-foro dello stesso contatto "
+                       "restano {wall:.2f}mm di scheda, meno della parete minima di {wall_min}mm. "
+                       "Porta la distanza dal bordo ad almeno {minimum:.2f}mm, oppure riduci il "
+                       "semi-foro.",
+                       label=label,
+                       wall=gap,
+                       wall_min=MIN_HOLE_WALL_MM,
+                       minimum=minimum)
+                )
+            if inset < geometry.ring / 2:
+                raise ValueError(
+                    tx("Il centro del foro passante dista {thru_hole_centre_offset}mm dal "
+                       "bordo, meno del raggio della sua piazzola ({value}mm): resterebbe "
+                       "aperto sul bordo invece di essere chiuso.",
+                       thru_hole_centre_offset=inset,
+                       value=geometry.ring / 2)
+                )
+        # Solo le coppie di lati opposti che portano DAVVERO fori passanti
+        # half_and_through si contendono l'ingombro: un modulo 30x4 con
+        # contatti solo a sinistra e destra misura 30 mm fra le due file,
+        # non 4. Un lato senza dirimpettaio e' gia' coperto dai controlli
+        # sopra (il foro resta chiuso dentro il corpo).
+        carrying = {}
+        for side in sides:
+            carrying.setdefault(side.edge, self.side_geometry(side))
+        for pair in OPPOSITE_EDGE_PAIRS:
+            if not set(pair) <= set(carrying):
+                continue
+            a, b = carrying[pair[0]], carrying[pair[1]]
+            shortest = self.edge_extent(pair[0])
+            needed = a.thru_inset + b.thru_inset + (a.ring + b.ring) / 2
+            if needed > shortest + 1e-6:
+                raise ValueError(
+                    tx("I fori passanti dei due lati opposti non stanno in {shortest}mm: "
+                       "servono almeno {value:.2f}mm.",
+                       shortest=shortest,
+                       value=needed)
+                )
+
+    def _validate_through_hole_sides(self) -> None:
+        """Checks for sides whose only feature is a full through-hole."""
+        # Un lato con bordo non valido viene rifiutato piu' avanti, con il suo
+        # messaggio: qui non ha una geometria da controllare.
+        through = [side for side in self.sides
+                   if side.contact_style == CONTACT_THROUGH_HOLE and side.edge in EDGES]
+        if not through:
+            return
+        geometries = [self.side_geometry(side) for side in through]
+        without = [side for side, geometry in zip(through, geometries) if geometry.drill <= 0]
+        if without:
+            raise ValueError(
+                tx("Lato {labels}: i contatti sono fori passanti ma il diametro del foro "
+                   "e' zero. Indica il foro, oppure scegli il tipo «mezzo foro sul bordo».",
+                   labels=", ".join(EDGE_LABELS[side.edge] for side in without))
+            )
+        thin = [(side, geometry) for side, geometry in zip(through, geometries)
+                if geometry.ring <= geometry.drill]
+        if thin:
+            raise ValueError(
+                tx("Lato {labels}: la piazzola del foro passante ({thru_pad_diameter}mm) "
+                   "deve essere piu' larga del foro ({thru_hole_drill}mm): senza corona "
+                   "non c'e' rame su cui saldare.",
+                   labels=", ".join(EDGE_LABELS[side.edge] for side, _ in thin),
+                   thru_pad_diameter=thin[0][1].ring,
+                   thru_hole_drill=thin[0][1].drill)
+            )
+        self._validate_row_spacing()
+        for side, geometry in zip(through, geometries):
             label = EDGE_LABELS.get(side.edge, side.edge)
-            source = self.through_hole_inset_source(side.edge)
-            inset = self.through_hole_inset(side.edge)
-            radius = self.thru_pad_diameter / 2
+            source = geometry.thru_inset_source
+            inset = geometry.thru_inset
+            radius = geometry.ring / 2
             # Un contatto through_hole ha per definizione il bordo intatto:
             # una corona che esce dal corpo sarebbe un semi-foro.
             if inset < radius:
-                if source == "row_spacing":
+                if source == INSET_ROW_SPACING:
                     why = (tx("le file dichiarate distano {row_spacing}mm su un corpo di "
                               "{edge_extent}mm, quindi i fori starebbero a {inset}mm dal bordo",
                               row_spacing=self.row_spacing,
@@ -1009,13 +1585,13 @@ class CastellatedModuleParams:
             extent = self.edge_extent(side.edge)
             opposite = {"left": "right", "right": "left", "top": "bottom", "bottom": "top"}[side.edge]
             facing = any(other.edge == opposite for other in self.sides)
-            if facing and 2 * inset + self.thru_pad_diameter > extent + 1e-6:
+            if facing and 2 * inset + geometry.ring > extent + 1e-6:
                 raise ValueError(
                     tx("Lato {label}: le corone dei fori passanti di due file opposte non "
                        "stanno in {extent}mm: servono almeno {value:.2f}mm.",
                        label=label,
                        extent=extent,
-                       value=2 * inset + self.thru_pad_diameter)
+                       value=2 * inset + geometry.ring)
                 )
             if inset + radius > extent + 1e-6:
                 raise ValueError(
@@ -1025,6 +1601,17 @@ class CastellatedModuleParams:
                        inset=inset,
                        extent=extent)
                 )
+
+
+def _edge_point(params: CastellatedModuleParams, placement: PadPlacement) -> tuple:
+    """Point of the board edge on the axis of a contact, footprint mm."""
+    if placement.edge == "left":
+        return (-params.body_length / 2, placement.y)
+    if placement.edge == "right":
+        return (params.body_length / 2, placement.y)
+    if placement.edge == "top":
+        return (placement.x, -params.body_width / 2)
+    return (placement.x, params.body_width / 2)
 
 
 def pad_positions(params: CastellatedModuleParams) -> Iterator[PadPlacement]:
@@ -1058,9 +1645,11 @@ def pad_positions(params: CastellatedModuleParams) -> Iterator[PadPlacement]:
         outer = (half_length if side.edge in ("left", "right") else half_width)
         if style == CONTACT_THROUGH_HOLE:
             # La corona sta arretrata dal bordo: fra lei e il bordo c'e'
-            # scheda intatta, quindi nessuna parte sporge.
-            center_offset = outer - params.through_hole_inset(side.edge)
-            pad_length = pad_width = params.thru_pad_diameter
+            # scheda intatta, quindi nessuna parte sporge. Distanza e corona
+            # sono quelle del lato (side_geometry).
+            geometry = params.side_geometry(side)
+            center_offset = outer - geometry.thru_inset
+            pad_length = pad_width = geometry.ring
         else:
             # Il pad sporge di pad_overhang oltre il bordo, il resto della sua
             # lunghezza entra sotto il modulo.
@@ -1078,31 +1667,42 @@ def pad_positions(params: CastellatedModuleParams) -> Iterator[PadPlacement]:
                 yield PadPlacement(number, along, center_offset, pad_width, pad_length, side.edge, style)
 
 
-def has_continuous_pad(params: CastellatedModuleParams, style: str) -> bool:
+def has_continuous_pad(params: CastellatedModuleParams, style: str,
+                       side: Optional[CastellatedSide] = None) -> bool:
     """@brief Tell whether contacts of `style` are drawn as one continuous stadium pad.
 
     @param params Module description.
     @param style One of CONTACT_STYLES.
-    @return True for CONTACT_HALF_AND_THROUGH when the module declares a closed
-        through-hole (params.has_thru_holes). With a zero drill such a side is
+    @param side The side the contacts belong to; None = module-level sizes only.
+    @return True for CONTACT_HALF_AND_THROUGH when a closed through-hole is
+        declared -- for the side (SideGeometry.has_thru_holes, which honours
+        per-side sizes) or, without a side, for the module
+        (params.has_thru_holes). With a zero drill such a side is
         "half-holes only" and keeps its historical rectangular edge land.
     """
-    return style == CONTACT_HALF_AND_THROUGH and params.has_thru_holes
+    if style != CONTACT_HALF_AND_THROUGH:
+        return False
+    if side is None:
+        return params.has_thru_holes
+    return params.side_geometry(side).has_thru_holes
 
 
-def continuous_pad_across(params: CastellatedModuleParams, land_width: float) -> float:
+def continuous_pad_across(params: CastellatedModuleParams, land_width: float,
+                          ring: Optional[float] = None) -> float:
     """@brief Width (along the edge) of the continuous pad of a half_and_through contact, mm.
 
     @param params Module description (for the through-hole ring diameter).
     @param land_width Declared width of the edge land (side pad_width), mm.
-    @return max(land_width, thru_pad_diameter).
+    @param ring Ring diameter of the contact's side (SideGeometry.ring), mm;
+        None = the module's thru_pad_diameter.
+    @return max(land_width, ring).
     @note Not a tuned value: the copper must contain BOTH declared lands, the
         edge land (land_width wide) and the full annular ring of the
         through-hole (thru_pad_diameter), so the narrowest stadium doing so is
         as wide as the larger of the two. This keeps the declared annular ring
         (thru_pad_diameter - drill) / 2 all around the drill.
     """
-    return max(land_width, params.thru_pad_diameter)
+    return max(land_width, float(params.thru_pad_diameter) if ring is None else ring)
 
 
 def continuous_pad(params: CastellatedModuleParams, placement: PadPlacement) -> Optional[ContactPad]:
@@ -1132,28 +1732,24 @@ def continuous_pad(params: CastellatedModuleParams, placement: PadPlacement) -> 
         what the style declares physically. The limits are physical and are
         enforced by validate(): the pad must not reach another contact's copper.
     """
-    if not has_continuous_pad(params, placement.style):
+    if placement.style != CONTACT_HALF_AND_THROUGH:
+        return None
+    geometry = params.contact_geometry(placement)
+    if not geometry.has_thru_holes:
         return None
     vertical_edge = placement.edge in ("left", "right")
     land_length = placement.width if vertical_edge else placement.height
     land_width = placement.height if vertical_edge else placement.width
-    across = continuous_pad_across(params, land_width)
+    across = continuous_pad_across(params, land_width, geometry.ring)
     overhang = params.pad_overhang
     inner = max(land_length - overhang,
-                params.thru_hole_centre_offset + params.thru_pad_diameter / 2,
+                geometry.thru_inset + geometry.ring / 2,
                 across - overhang,
                 across / 2)
     length = overhang + inner
     nx, ny = INWARD_FOOTPRINT[placement.edge]
     # Punto del bordo sull'asse del contatto: da li' si misura tutto.
-    if placement.edge == "left":
-        edge_x, edge_y = -params.body_length / 2, placement.y
-    elif placement.edge == "right":
-        edge_x, edge_y = params.body_length / 2, placement.y
-    elif placement.edge == "top":
-        edge_x, edge_y = placement.x, -params.body_width / 2
-    else:
-        edge_x, edge_y = placement.x, params.body_width / 2
+    edge_x, edge_y = _edge_point(params, placement)
     centre_depth = (inner - overhang) / 2
     drill_x, drill_y = params.thru_hole_centre(placement)
     size = (length, across) if vertical_edge else (across, length)
@@ -1161,10 +1757,10 @@ def continuous_pad(params: CastellatedModuleParams, placement: PadPlacement) -> 
         number=placement.number, edge=placement.edge,
         x=_clean(edge_x + nx * centre_depth), y=_clean(edge_y + ny * centre_depth),
         width=_clean(size[0]), height=_clean(size[1]),
-        drill=params.thru_hole_drill, drill_x=_clean(drill_x), drill_y=_clean(drill_y),
-        half_hole_x=_clean(edge_x + nx * params.half_hole_inset),
-        half_hole_y=_clean(edge_y + ny * params.half_hole_inset),
-        half_hole_diameter=params.hole_diameter,
+        drill=geometry.drill, drill_x=_clean(drill_x), drill_y=_clean(drill_y),
+        half_hole_x=_clean(edge_x + nx * geometry.half_hole_inset),
+        half_hole_y=_clean(edge_y + ny * geometry.half_hole_inset),
+        half_hole_diameter=geometry.half_hole,
         inner_reach=_clean(inner), outer_reach=_clean(overhang), across=_clean(across),
     )
 
@@ -1199,7 +1795,8 @@ def _copper_outline(params: CastellatedModuleParams, placement: PadPlacement) ->
         (ax, ay), (bx, by) = pad.axis()
         return (min(ax, bx), min(ay, by), max(ax, bx), max(ay, by), pad.across / 2)
     if placement.style == CONTACT_THROUGH_HOLE:
-        return (placement.x, placement.y, placement.x, placement.y, params.thru_pad_diameter / 2)
+        ring = params.contact_geometry(placement).ring
+        return (placement.x, placement.y, placement.x, placement.y, ring / 2)
     return (placement.x - placement.width / 2, placement.y - placement.height / 2,
             placement.x + placement.width / 2, placement.y + placement.height / 2, 0.0)
 
@@ -1326,7 +1923,7 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
                 at=(stadium.drill_x, stadium.drill_y),
                 size=(stadium.width, stadium.height),
                 layers=["*.Cu", "*.Mask", "F.Paste"],
-                drill=params.thru_hole_drill,
+                drill=stadium.drill,
                 drill_offset=stadium.drill_offset,
             ))
         elif placement.style != CONTACT_THROUGH_HOLE:
@@ -1340,14 +1937,15 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
                 roundrect_rratio=0.25,
             ))
         if placement.style == CONTACT_THROUGH_HOLE:
+            geometry = params.contact_geometry(placement)
             fp.add_pad(Pad(
                 number=placement.number,
                 pad_type="thru_hole",
                 shape="circle",
                 at=params.thru_hole_centre(placement),
-                size=(params.thru_pad_diameter, params.thru_pad_diameter),
+                size=(geometry.ring, geometry.ring),
                 layers=["*.Cu", "*.Mask"],
-                drill=params.thru_hole_drill,
+                drill=geometry.drill,
             ))
         if placement.number == first_number:
             first_number = None   # un solo marcatore anche se il numero si ripete

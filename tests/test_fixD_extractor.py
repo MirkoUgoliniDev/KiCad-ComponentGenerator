@@ -73,12 +73,26 @@ def test_valid_populated_pins_leave_no_note():
     [{"pin": 1, "row": 0.5, "col": 0}],
 ])
 def test_invalid_pin_map_is_dropped_with_a_loud_note(pin_map):
-    params = _params_from_tool_arguments(matrix(pin_map=pin_map, pin_map_view="bottom",
+    """@brief The drawn map is dropped loudly; the view still applies to what remains.
+
+    Contract updated on 2026-09-26 (audit finding 5): the view is a property
+    of the DRAWING, not of pin_map. Before, an invalid map on a bottom view
+    left columns and body offset unmirrored, i.e. a footprint mirrored with
+    respect to the part. Now the fallback column-order numbering and the body
+    offset read on that bottom view are both mirrored; on a top view nothing
+    is mirrored and no map is invented.
+    """
+    bottom = _params_from_tool_arguments(matrix(pin_map=pin_map, contacts_view="bottom",
                                                 body_offset_x_mm=-1.0, body_length_mm=12.0))
-    assert params.pin_map is None
-    assert "ATTENZIONE pin_map scartata" in params.notes
-    # Columns were not mirrored, so the body offset is not mirrored either.
-    assert params.body_offset_x_mm == -1.0
+    assert "ATTENZIONE pin_map scartata" in bottom.notes
+    # Column order read from below: pin 1 ends up in the last column seen from above.
+    assert {e["pin"]: e["col"] for e in bottom.pin_map}[1] == 3
+    # Margins swap: left margin seen from above = 12 - 7.62 - 1.0.
+    assert bottom.body_offset_x_mm == pytest.approx(-3.38)
+    top = _params_from_tool_arguments(matrix(pin_map=pin_map, contacts_view="top",
+                                             body_offset_x_mm=-1.0, body_length_mm=12.0))
+    assert top.pin_map is None and "ATTENZIONE pin_map scartata" in top.notes
+    assert top.body_offset_x_mm == -1.0
 
 
 def test_valid_bottom_view_pin_map_is_mirrored():

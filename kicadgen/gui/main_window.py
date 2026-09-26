@@ -989,6 +989,11 @@ class Cad3DWorker(QThread):
             self.error.emit(tx("Errore inatteso: {exc}", exc=exc))
 
 
+def _declared_size(value, reference):
+    """The field value as a declared size, or None when it is still the reference value."""
+    return None if abs(float(value) - reference) < 1e-9 else float(value)
+
+
 def _positive_frame(length, width):
     """(length, width) in mm when both are finite and positive, else None."""
     try:
@@ -1461,6 +1466,11 @@ class MainWindow(QMainWindow):
         #: valori attuali, cosi' una correzione delle quote vale e un cambio di
         #: tipologia non sposta la scala. None = ignoto.
         self._photo_body_fields = None
+        #: Vero quando le quote della scheda sono NOTE (da un'analisi o scritte
+        #: dall'utente). Prima valevano sempre i valori iniziali dei campi
+        #: (42.8 x 15.2 mm, un modulo di prova), e il pretest calibrava la foto
+        #: su quelli: sull'ESP32 la scala usciva del 32% sbagliata (26/09).
+        self._board_size_known = False
         self._config = load_config()
         self.profile_store = profile_store or ProfileStore(legacy_config=self._config, legacy_path=config_path())
         self.i18n = I18n(self.profile_store, self._config.get("language", "it"))
@@ -3729,6 +3739,8 @@ class MainWindow(QMainWindow):
         None finche' non sono note: senza di esse non si puo' dire se una
         foto sia calibrabile, e dichiararlo comunque sarebbe una supposizione.
         """
+        if not getattr(self, "_board_size_known", False):
+            return None
         try:
             length = (self.field_cast_body_length.value() if self._is_castellated()
                       else self.field_body_length.value())
@@ -3737,6 +3749,51 @@ class MainWindow(QMainWindow):
         except AttributeError:
             return None
         return (length, width) if length > 0 and width > 0 else None
+
+    def _ask_board_size(self):
+        """@brief Ask the board size when it is not known yet (pretest without analysis).
+
+        @return (length, width) in mm, or None when the user cancels.
+        @note The values go into the body fields of the current type and the
+            size becomes known for this project: the same fields the analysis
+            fills, so a later analysis simply replaces them.
+        """
+        from PyQt6.QtWidgets import QDialogButtonBox, QDoubleSpinBox
+        dialog = QDialog(self)
+        dialog.setWindowTitle(self.i18n.text("Quote della scheda"))
+        form = QFormLayout(dialog)
+        note = QLabel(self.i18n.text(
+            "Il pretest non legge i documenti: servono le quote della scheda per ritagliare "
+            "e calibrare la foto. La lunghezza e' lungo l'asse X della foto."))
+        note.setWordWrap(True)
+        form.addRow(note)
+        fields = []
+        for label in ("Lunghezza (mm)", "Larghezza (mm)"):
+            field = QDoubleSpinBox()
+            field.setRange(0.5, 1000.0)
+            field.setDecimals(2)
+            field.setValue(0.5)
+            form.addRow(self.i18n.text(label), field)
+            fields.append(field)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                                   | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        self._board_size_dialog = dialog
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        length, width = (field.value() for field in fields)
+        if self._is_castellated():
+            self.field_cast_body_length.setValue(length)
+            self.field_cast_body_width.setValue(width)
+        else:
+            self.field_body_length.setValue(length)
+            self.field_body_width.setValue(width)
+        self._board_size_known = True
+        if hasattr(self, "guided_docs"):
+            self.guided_docs.refresh()
+        return length, width
 
     def _refresh_docs_list(self) -> None:
         if not hasattr(self, "docs_list"):
@@ -4071,10 +4128,8 @@ class MainWindow(QMainWindow):
             Qt slot aborts PyQt6, and a half-started pretest would leave the
             button off and the tabs disabled (B8).
         """
-        size = self._body_size()
+        size = self._body_size() or self._ask_board_size()
         if size is None:
-            QMessageBox.information(self, self.i18n.text("Pretest YOLO"),
-                                    self.i18n.text('Quote del corpo non note: inserisci Lunghezza corpo e Larghezza corpo nei parametri della tipologia scelta. Il pretest non legge i documenti e con quelle quote ritaglia e calibra la foto.'))
             return
         if not self._pretest_top_views(doc_paths, document_roles):
             QMessageBox.information(self, self.i18n.text("Pretest YOLO"),
@@ -5844,6 +5899,12 @@ class MainWindow(QMainWindow):
                 return key
         return None
 
+    def _project_has_footprint(self) -> bool:
+        """@brief True when the open project already has its generated footprint."""
+        name = self._component_name()
+        return bool(name) and (self._project_dir() / f"{name}.pretty"
+                               / f"{name}.kicad_mod").is_file()
+
     def _photo_review_frame(self) -> tuple[float, float]:
         """@brief Board size (mm) that gives the photo its scale in the review.
 
@@ -6025,6 +6086,7 @@ class MainWindow(QMainWindow):
             "pin_map": (None if not getattr(self, "pin_map", None) else
                         [[pin, row, col] for pin, (row, col) in sorted(self.pin_map.items())]),
             "declared_row_spacing": getattr(self, "_declared_row_spacing", None),
+            "board_size_known": bool(getattr(self, "_board_size_known", False)),
             "yolo_settings": self._chosen_yolo_settings(),
             "options": {"include_nc_pins": self._include_nc_pins(),
                         "silk_pin_labels": self._silk_pin_labels(),
@@ -6127,6 +6189,11 @@ class MainWindow(QMainWindow):
         self._declared_row_spacing = (
             float(spacing) if isinstance(spacing, (int, float)) and not isinstance(spacing, bool)
             and math.isfinite(float(spacing)) and float(spacing) > 0 else None)
+        known = state.get("board_size_known")
+        # Progetti salvati prima del 26/09: le quote sono note se il progetto
+        # ha gia' un footprint, cioe' se un'analisi le ha scritte.
+        self._board_size_known = (known if isinstance(known, bool)
+                                  else self._project_has_footprint())
         options = state.get("options") if isinstance(state.get("options"), dict) else {}
         self._project_options = {key: options[key] for key in PROJECT_OPTIONS
                                  if isinstance(options.get(key), bool)}
@@ -6686,6 +6753,10 @@ class MainWindow(QMainWindow):
         self._set_acquisition_tabs_enabled(True)
         self._invalidate_generated_mesh()
         self._photo_png = getattr(params, "photo_png", None)
+        # Le quote della scheda vengono dall'analisi: da qui sono note.
+        if _positive_frame(getattr(params, "body_length_mm", None),
+                           getattr(params, "body_width_mm", None)) is not None:
+            self._board_size_known = True
         # Stesso criterio con cui l'estrazione sceglie i campi da riempire (piu'
         # sotto): qui i campi non sono ancora stati applicati.
         is_castellated = getattr(params, "is_castellated", None)
@@ -6744,12 +6815,17 @@ class MainWindow(QMainWindow):
         else:
             self._set_photo_components(params.components_3d or [])
             self.group_castellated.setChecked(False)
-            self.field_rows.setValue(params.rows)
-            self.field_cols.setValue(params.cols)
-            self.field_pitch.setValue(params.pitch_mm)
-            self.field_row_spacing.setValue(params.row_spacing_mm)
-            self.field_pad.setValue(params.pad_diameter_mm)
-            self.field_drill.setValue(params.drill_mm)
+            # Dal 26/09 l'estrazione lascia None cio' che la risposta non ha:
+            # il passo per una sola colonna, l'interasse per una sola fila, la
+            # griglia intera per un componente a pad espliciti (SMD). Si scrive
+            # solo cio' che c'e'; il resto resta com'era e non viene usato.
+            for widget, value in ((self.field_rows, params.rows), (self.field_cols, params.cols),
+                                  (self.field_pitch, params.pitch_mm),
+                                  (self.field_row_spacing, params.row_spacing_mm),
+                                  (self.field_pad, params.pad_diameter_mm),
+                                  (self.field_drill, params.drill_mm)):
+                if value is not None:
+                    widget.setValue(value)
             self.field_populated_pins.setText(
                 ",".join(str(p) for p in sorted(params.populated_pins))
                 if params.populated_pins else ""
@@ -7164,9 +7240,14 @@ class MainWindow(QMainWindow):
             bloccherebbe ogni generazione per un campo accessorio.
         """
         style_supported = self._contact_style_supported()
+        sizes_supported = accepts_keyword(CastellatedSide, "hole_diameter")
         sides = []
         for side in self._sides:
             extra = {"contact_style": side["contact_style"]} if style_supported else {}
+            if sizes_supported:
+                # Diametri letti dall'analisi per questo lato (None = non dichiarati).
+                extra.update(hole_diameter=side.get("half_hole_diameter_mm"),
+                             thru_hole_drill=side.get("through_hole_drill_mm"))
             sides.append(CastellatedSide(
                 edge=side["edge"], count=side["count"], pitch=side["pitch_mm"],
                 offset=side["offset_mm"], first_pin=side["first_pin"],
@@ -7183,7 +7264,9 @@ class MainWindow(QMainWindow):
             installato non la conosce ancora.
         """
         return [dict(edge=s.edge, count=s.count, pitch_mm=s.pitch, offset_mm=s.offset,
-                     first_pin=s.first_pin, reverse=s.reverse, contact_style=style)
+                     first_pin=s.first_pin, reverse=s.reverse, contact_style=style,
+                     half_hole_diameter_mm=getattr(s, "hole_diameter", None),
+                     through_hole_drill_mm=getattr(s, "thru_hole_drill", None))
                 for s, style in zip(self._sides_from_table(), self._table_contact_styles())]
 
     def _sides_with_table_styles(self, sides):
@@ -7252,9 +7335,12 @@ class MainWindow(QMainWindow):
             pad_length=self.field_cast_pad_length.value(),
             pad_width=self.field_cast_pad_width.value(),
             pad_overhang=self.field_cast_overhang.value(),
-            hole_diameter=self.field_cast_hole.value(),
-            thru_hole_drill=self.field_cast_thru_drill.value(),
-            thru_pad_diameter=self.field_cast_thru_pad.value(),
+            # Un valore di riferimento non e' una misura: passato come None il
+            # generatore lo usa come stima e, se non sta nel passo di un lato,
+            # lo riduce e lo scrive nelle note invece di rifiutare (26/09).
+            hole_diameter=_declared_size(self.field_cast_hole.value(), 1.7),
+            thru_hole_drill=_declared_size(self.field_cast_thru_drill.value(), 1.0),
+            thru_pad_diameter=_declared_size(self.field_cast_thru_pad.value(), 1.7),
             thru_hole_offset=self.field_cast_thru_offset.value(),
             hole_inset=(self.field_cast_hole_inset.value() or None),
             pcb_thickness=self.field_cast_pcb.value(),
@@ -7900,7 +7986,14 @@ class MainWindow(QMainWindow):
                 if side['count'] != int(side['count']) or side['count'] > 100:
                     raise ValueError(tx("Il numero di contatti estratto non è supportato dall’editor."))
         else:
-            for field in ('rows', 'cols', 'pitch_mm', 'row_spacing_mm', 'pad_diameter_mm', 'drill_mm'):
+            # Griglia di pin passanti: passo solo con piu' colonne, interasse
+            # solo con piu' file (stesso contratto dell'estrattore dal 26/09).
+            required = ['rows', 'cols', 'pad_diameter_mm', 'drill_mm']
+            if isinstance(params.cols, (int, float)) and params.cols > 1:
+                required.append('pitch_mm')
+            if isinstance(params.rows, (int, float)) and params.rows > 1:
+                required.append('row_spacing_mm')
+            for field in required:
                 value = getattr(params, field)
                 if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                     raise ValueError(tx("Parametro footprint mancante o non valido: {field}.", field=field))
@@ -7908,6 +8001,8 @@ class MainWindow(QMainWindow):
                                   ('pitch_mm', self.field_pitch), ('row_spacing_mm', self.field_row_spacing),
                                   ('pad_diameter_mm', self.field_pad), ('drill_mm', self.field_drill)):
                 value = getattr(params, field)
+                if value is None:
+                    continue
                 if not widget.minimum() <= value <= widget.maximum() or (field in ('rows', 'cols') and value != int(value)):
                     raise ValueError(tx("Parametro fuori dai limiti ammessi: {field}.", field=field))
 
@@ -9478,7 +9573,10 @@ class MainWindow(QMainWindow):
         if placement.style == CONTACT_THROUGH_HOLE:
             ring = self.preview_scene.addEllipse(x - w / 2, y - h / 2, w, h, pen, brush)
             ring.setZValue(1)
-            d = p.thru_hole_drill * mm_to_px
+            # Foro del lato di questo contatto (i lati possono avere fori diversi).
+            geometry = getattr(p, "contact_geometry", None)
+            drill = geometry(placement).drill if callable(geometry) else p.thru_hole_drill
+            d = drill * mm_to_px
             if d > 0:
                 hole = self.preview_scene.addEllipse(x - d / 2, y - d / 2, d, d, hole_pen, hole_brush)
                 hole.setZValue(2)

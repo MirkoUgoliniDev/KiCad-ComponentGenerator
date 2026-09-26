@@ -184,11 +184,13 @@ def test_without_body_dimensions_the_pretest_does_not_start(window, monkeypatch)
     monkeypatch.setattr(window, "_selected_documents", lambda: ([Path("hires.jpg")], None))
     monkeypatch.setattr(gui.QThread, "start", lambda self: pytest.fail("must not start"))
     monkeypatch.setattr(window, "_body_size", lambda: None)
-    shown = []
-    monkeypatch.setattr(gui.QMessageBox, "information", lambda *a: shown.append(a[2]))
+    # Dal 26/09 le quote ignote si chiedono (prima un messaggio rimandava a
+    # campi che non esistono piu'); chi annulla non avvia il pretest.
+    asked = []
+    monkeypatch.setattr(window, "_ask_board_size", lambda: asked.append(True) or None)
     window.combo_photo_detector.setCurrentIndex(window.combo_photo_detector.findData("yolo_only"))
     window._extract_with_ai()
-    assert shown and "Quote del corpo non note" in shown[0]
+    assert asked == [True]
     assert window.btn_extract_ai.isEnabled()
 
 

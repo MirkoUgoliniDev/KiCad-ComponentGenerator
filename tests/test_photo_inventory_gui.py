@@ -96,6 +96,11 @@ def window(monkeypatch, tmp_path):
     # Questi test riguardano altro e girano con la tipologia «(non
     # specificata)» di sempre: qui conta solo il nome. La regola ha i suoi
     # test in test_type_required.py, che rimettono il metodo vero.
+    # Anche le quote della scheda: dal 26/09 sono «ignote» finche' un'analisi o
+    # l'utente non le dichiarano, e il pretest le chiederebbe con una modale.
+    # Questi test partono con le quote dei campi, come prima; il caso delle
+    # quote ignote ha i suoi test in test_board_size_known.py.
+    w._board_size_known = True
     monkeypatch.setattr(w, '_extract_block_reason',
                         lambda: "" if w._component_name() else
                         "Crea o apri prima un progetto (menu File).")

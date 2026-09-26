@@ -430,13 +430,33 @@ def test_a_row_spacing_is_not_attributed_when_it_cannot_be():
     assert single.through_hole_inset_source("top") == "fallback"
 
 
-def test_row_spacing_does_not_move_the_hole_of_a_double_contact():
-    """@brief La distanza fra le file vale per i lati through_hole soltanto."""
+def test_row_spacing_moves_the_hole_of_a_double_contact_too():
+    """@brief La distanza fra le file vale per OGNI tipo con foro passante.
+
+    CONTRATTO CAMBIATO il 2026-09-26 (difetto 8 confermato dal coordinatore):
+    prima la distanza fra le file dichiarata valeva solo per i lati
+    through_hole, e un half_and_through la ignorava in silenzio -- sulla
+    scheda 63.3x25.4 con file a 22.86 mm i fori finivano a 21.008 mm senza
+    nessuna nota. Ora la usano entrambi i tipi.
+    """
     plain = rs485()
     declared = rs485()
-    declared.row_spacing = 38.0
+    declared.row_spacing = 38.0                       # 42.8 mm di corpo -> 2.4 dal bordo
+    geometry = declared.side_geometry(declared.sides[0])
+    assert geometry.thru_inset_source == "row_spacing"
+    assert geometry.thru_inset == pytest.approx(2.4)
+    drills = [pad.at[0] for pad in build_castellated_module(declared).pads]
+    assert all(abs(x) == pytest.approx(42.8 / 2 - 2.4) for x in drills)
+    # La proprieta' del modulo (senza lati) resta quella di prima: serve a
+    # contact_zones, che non ha i lati.
     assert declared.thru_hole_centre_offset == plain.thru_hole_centre_offset
-    assert _uuidless(build_castellated_module(declared)) == _uuidless(build_castellated_module(plain))
+    # Prova che la distanza fra le file sposta SOLO il foro: dichiarando le
+    # file proprio dove la regola storica metteva i fori, l'impronta e'
+    # identica byte per byte a quella senza distanza dichiarata.
+    same = rs485()
+    same.row_spacing = 42.8 - 2 * plain.thru_hole_centre_offset
+    assert same.side_geometry(same.sides[0]).thru_inset_source == "row_spacing"
+    assert _uuidless(build_castellated_module(same)) == _uuidless(build_castellated_module(plain))
 
 
 # ── Validazione ─────────────────────────────────────────────────────

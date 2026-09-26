@@ -52,8 +52,10 @@ _TOOL_NAME = "report_pin_header_params"
 _EXTRACTION_TOOL = {
     "name": _TOOL_NAME,
     "description": (
-        "Riporta i parametri meccanici di un connettore/header a matrice di pin "
-        "(righe x colonne, passo, diametro pad, drill) estratti dal datasheet."
+        "Riporta i parametri meccanici di un componente estratti dai documenti: "
+        "contatti (matrice di pin passanti, lati di un modulo castellated oppure "
+        "pad espliciti in package_geometry), corpo, pinout, unita' di misura e "
+        "vista del disegno letto."
     ),
     "input_schema": {
         "type": "object",
@@ -63,25 +65,60 @@ _EXTRACTION_TOOL = {
                 "enum": ["matrix", "castellated"],
                 "description": (
                     "Come sono disposti i contatti del componente.\n"
-                    "- \"matrix\": pin su una griglia regolare righe x colonne con UN "
-                    "SOLO passo (pin header, moduli DIP-style, componenti THT o SMD "
-                    "a due file simmetriche). Compila rows, cols, pitch_mm, "
-                    "row_spacing_mm, pad_diameter_mm, drill_mm.\n"
-                    "- \"castellated\": modulo su PCB con semi-fori metallizzati sul "
-                    "bordo (es. moduli WiFi/BLE, convertitori isolati). Compila "
-                    "castellated_sides e i campi body_*; NON forzare i contatti in una "
-                    "matrice, perche' lati diversi hanno spesso numero di contatti e "
-                    "passo diversi (es. 3 contatti a 5.08mm a sinistra e 5 a 2.54mm a "
-                    "destra): in quel caso \"matrix\" darebbe un footprint sbagliato."
+                    "- \"matrix\": pin a foro passante su una griglia regolare righe x "
+                    "colonne (pin header, moduli DIP-style, componenti THT). Compila "
+                    "rows, cols, pad_diameter_mm, drill_mm, pitch_mm se cols > 1 e "
+                    "row_spacing_mm se rows > 1. Usa \"matrix\" anche quando i pad "
+                    "sono descritti uno per uno in package_geometry (componenti SMD, "
+                    "package irregolari): allora package_geometry e' il footprint e i "
+                    "campi della matrice sono facoltativi.\n"
+                    "- \"castellated\": modulo su PCB con contatti metallizzati sul "
+                    "bordo (semi-fori). Compila castellated_sides e i campi body_*; NON "
+                    "forzare i contatti in una matrice, perche' lati diversi hanno "
+                    "spesso numero di contatti e passo diversi: in quel caso "
+                    "\"matrix\" darebbe un footprint sbagliato."
+                ),
+            },
+            "drawing_unit": {
+                "type": "string",
+                "enum": ["mm", "inch", "mil"],
+                "description": (
+                    "Unita' di misura delle quote del disegno che leggi: \"mm\" "
+                    "millimetri, \"inch\" pollici, \"mil\" millesimi di pollice. TUTTE "
+                    "le lunghezze di questa risposta (ogni campo con suffisso _mm, "
+                    "anche dentro castellated_sides, package_geometry, components_3d "
+                    "ed edge_fillets) vanno riportate in questa unita', con i numeri "
+                    "COSI' COME LI LEGGI, senza convertirli: la conversione in "
+                    "millimetri la fa il programma. Se il disegno riporta due unita' "
+                    "affiancate, usa i millimetri. Senza disegno quotato usa \"mm\"."
+                ),
+            },
+            "contacts_view": {
+                "type": "string",
+                "enum": ["top", "bottom", "unknown"],
+                "description": (
+                    "Da che lato e' visto il disegno (o la foto) da cui leggi la "
+                    "disposizione dei contatti: pin_map, l'ordine di numerazione della "
+                    "matrice, castellated_sides, body_offset_x_mm e body_offset_y_mm. "
+                    "\"bottom\" se e' etichettato BOTTOM VIEW o mostra il lato "
+                    "inferiore, \"top\" se e' una vista dall'alto o una foto del lato "
+                    "componenti, \"unknown\" se il documento non permette di "
+                    "stabilirlo. Riporta tutto COME LO VEDI, senza ribaltare nulla: il "
+                    "footprint KiCad si disegna visto dall'alto e la specchiatura "
+                    "sinistra-destra di una bottom view la fa il programma. "
+                    "package_geometry dichiara la sua vista in source_view."
                 ),
             },
             "package_geometry": {
                 "type": "object",
                 "description": (
-                    "Geometria generica opzionale per IC e package non rappresentabili "
-                    "come matrice. Usala per SOIC, TSSOP, QFN, QFP, DIP irregolari e "
-                    "package custom: riporta un pad per pin con coordinate locali "
-                    "viste dall'alto o indica source_view=bottom. Non inventare "
+                    "Pad espliciti, uno per pin: il modo di descrivere i componenti SMD "
+                    "(pad senza foro, pad_type \"smd\") e i package non rappresentabili "
+                    "come matrice (SOIC, TSSOP, QFN, QFP, DIP irregolari, package "
+                    "custom). Quando e' presente e' la fonte del footprint. Coordinate "
+                    "locali del centro di ogni pad, come appaiono nella vista indicata "
+                    "da source_view (la specchiatura della vista dal basso la fa il "
+                    "programma). Un pad esposto/termico e' un pin a se'. Non inventare "
                     "coordinate non supportate dal documento."
                 ),
                 "properties": {
@@ -132,22 +169,37 @@ _EXTRACTION_TOOL = {
             "cols": {"type": "integer", "description": "Numero di colonne della matrice (pin per riga)"},
             "pitch_mm": {
                 "type": "number",
-                "description": "Passo tra pin ADIACENTI sulla STESSA riga, in millimetri (es. 2.54mm)",
+                "description": (
+                    "Passo tra pin ADIACENTI sulla STESSA riga, nell'unita' di "
+                    "drawing_unit. Ometti con una sola colonna."
+                ),
             },
             "row_spacing_mm": {
                 "type": "number",
                 "description": (
-                    "Distanza PERPENDICOLARE tra le due file di pin, in millimetri. "
-                    "IMPORTANTE: nei package DIP-style (es. moduli/convertitori DC-DC) "
-                    "questa e' quasi sempre molto maggiore del pitch (es. 7.62/10.16/15.24mm "
-                    "contro un pitch di 2.54mm) -- non confonderla col pitch. "
+                    "Distanza PERPENDICOLARE tra i centri di due file di pin adiacenti, "
+                    "nell'unita' di drawing_unit. Ometti con una sola riga (rows=1). "
+                    "IMPORTANTE: e' una quota distinta dal pitch e nei package "
+                    "DIP-style e' di norma molto maggiore: leggile separatamente, non "
+                    "riusare un numero per l'altro. "
                     "Anche con layout=\"castellated\", se i contatti stanno su due lati "
                     "opposti: distanza fra i CENTRI dei contatti delle due file, se quotata "
                     "o leggibile sulla griglia; ometti se non la conosci."
                 ),
             },
-            "pad_diameter_mm": {"type": "number", "description": "Diametro pad THT in millimetri"},
-            "drill_mm": {"type": "number", "description": "Diametro foro (drill) in millimetri"},
+            "pad_diameter_mm": {
+                "type": "number",
+                "description": "Diametro del pad a foro passante della matrice, nell'unita' di drawing_unit.",
+            },
+            "drill_mm": {
+                "type": "number",
+                "description": (
+                    "Diametro del foro (drill) dei pad della matrice, nell'unita' di "
+                    "drawing_unit: sempre maggiore di zero e minore di pad_diameter_mm. "
+                    "I pad SMD non hanno foro: per un componente SMD ometti questo "
+                    "campo e descrivi i pad in package_geometry."
+                ),
+            },
             "populated_pins": {
                 "type": "array",
                 "items": {"type": "integer"},
@@ -164,7 +216,8 @@ _EXTRACTION_TOOL = {
                 "description": (
                     "SOLO se il datasheet ha un disegno meccanico (\"Outline Dimensions\" "
                     "o simile) con l'ingombro del corpo del componente: lunghezza del "
-                    "corpo (asse X, stessa direzione del pitch) in millimetri. Ometti se "
+                    "corpo (asse X, stessa direzione del pitch) nell'unita' di "
+                    "drawing_unit. Ometti se "
                     "il disegno meccanico non e' presente."
                 ),
             },
@@ -202,8 +255,8 @@ _EXTRACTION_TOOL = {
                     "negativo pari alla distanza dal bordo sinistro del corpo al pin 1, "
                     "presa dalla quota del disegno meccanico (es. se il pin 1 e' a 3.0mm "
                     "dal bordo sinistro, body_offset_x_mm = -3.0). Leggilo sullo STESSO "
-                    "disegno da cui leggi pin_map, cosi' come lo vedi: se e' una vista "
-                    "dal basso lo ribalta il programma insieme alle colonne."
+                    "disegno da cui leggi i pin, cosi' come lo vedi: se contacts_view e' "
+                    "\"bottom\" lo ribalta il programma insieme alle colonne."
                 ),
             },
             "body_offset_y_mm": {
@@ -225,7 +278,8 @@ _EXTRACTION_TOOL = {
                 "type": "number",
                 "description": (
                     "Lunghezza del pin che sporge sotto il corpo (protrusione verso il "
-                    "PCB), in millimetri -- quota meccanica, NON il drill del footprint."
+                    "PCB), nell'unita' di drawing_unit -- quota meccanica, NON il "
+                    "drill del footprint."
                 ),
             },
             "edge_fillets": {
@@ -267,7 +321,8 @@ _EXTRACTION_TOOL = {
                         "radius_mm": {
                             "type": "number",
                             "description": (
-                                "Raggio stimato in millimetri dalla foto (nessuna quota "
+                                "Raggio stimato dalla foto, nell'unita' di drawing_unit "
+                                "(nessuna quota "
                                 "disponibile per un raggio visivo: usa una stima standard "
                                 "plausibile, es. 0.5-1.5mm per un case plastico stampato)."
                             ),
@@ -282,11 +337,12 @@ _EXTRACTION_TOOL = {
                     "Posizione di ogni pin nella matrice, ESATTAMENTE COME APPARE NEL "
                     "DISEGNO: non ribaltare e non ruotare nulla, riporta solo cio' che "
                     "vedi (dell'eventuale specchiatura si occupa il programma, in base "
-                    "a pin_map_view). Serve quando la numerazione NON segue l'ordine "
-                    "colonna per colonna (1,2 poi 3,4...) tipico dei pin header: i "
-                    "package DIP-style numerano a U (1..N lungo una fila, poi a ritroso "
-                    "sull'altra). Ometti solo se il documento non mostra la disposizione "
-                    "fisica dei pin."
+                    "a contacts_view). Serve quando la numerazione NON segue, nel "
+                    "disegno letto, l'ordine colonna per colonna (1,2 poi 3,4...) "
+                    "tipico dei pin header: i package DIP-style numerano a U (1..N "
+                    "lungo una fila, poi a ritroso sull'altra). Se la numerazione segue "
+                    "l'ordine delle colonne puoi ometterla: contacts_view vale comunque, "
+                    "e una bottom view viene specchiata anche senza pin_map."
                 ),
                 "items": {
                     "type": "object",
@@ -303,18 +359,6 @@ _EXTRACTION_TOOL = {
                     },
                     "required": ["pin", "row", "col"],
                 },
-            },
-            "pin_map_view": {
-                "type": "string",
-                "enum": ["top", "bottom"],
-                "description": (
-                    "Da che lato e' visto il disegno da cui hai letto pin_map: 'bottom' "
-                    "se e' etichettato BOTTOM VIEW (vista da sotto, quella tipica dei "
-                    "datasheet dei moduli), 'top' se e' una vista dall'alto. E' "
-                    "un'informazione critica: il footprint KiCad si disegna visto "
-                    "dall'alto, quindi una bottom view va specchiata -- ci pensa il "
-                    "programma, a te basta dire quale vista hai letto."
-                ),
             },
             "pinout": {
                 "type": "array",
@@ -360,10 +404,12 @@ _EXTRACTION_TOOL = {
                 "type": "array",
                 "description": (
                     "SOLO con layout=\"castellated\": un elemento per ogni lato del "
-                    "modulo che porta contatti, letto dal disegno/foto visto DALL'ALTO "
-                    "(top view). Ogni lato ha il suo numero di contatti e il suo passo: "
-                    "e' proprio il motivo per cui questi moduli non stanno in una "
-                    "matrice. L'origine e' il centro del corpo."
+                    "modulo che porta contatti (fino a quattro), letto COSI' COME "
+                    "APPARE nel disegno o nella foto, senza ribaltare nulla: la vista "
+                    "letta va dichiarata in contacts_view e la specchiatura di una "
+                    "bottom view la fa il programma. Ogni lato ha il suo numero di "
+                    "contatti e il suo passo: e' proprio il motivo per cui questi "
+                    "moduli non stanno in una matrice. L'origine e' il centro del corpo."
                 ),
                 "items": {
                     "type": "object",
@@ -372,8 +418,8 @@ _EXTRACTION_TOOL = {
                             "type": "string",
                             "enum": list(EDGES),
                             "description": (
-                                "Lato del modulo visto dall'alto: \"left\"/\"right\" i "
-                                "due lati corti o lunghi verticali, \"top\"/\"bottom\" "
+                                "Lato del modulo come appare nella vista letta: "
+                                "\"left\"/\"right\" i lati verticali, \"top\"/\"bottom\" "
                                 "quelli orizzontali. \"top\" e' il lato in alto nel "
                                 "disegno."
                             ),
@@ -385,9 +431,9 @@ _EXTRACTION_TOOL = {
                         "pitch_mm": {
                             "type": "number",
                             "description": (
-                                "Passo tra contatti adiacenti SU QUESTO LATO, in "
-                                "millimetri: puo' essere diverso da quello degli altri "
-                                "lati (es. 5.08 su un lato e 2.54 sull'altro)."
+                                "Passo tra contatti adiacenti SU QUESTO LATO, "
+                                "nell'unita' di drawing_unit: puo' essere diverso da "
+                                "quello degli altri lati."
                             ),
                         },
                         "first_pin": {
@@ -412,7 +458,8 @@ _EXTRACTION_TOOL = {
                             "type": "number",
                             "description": (
                                 "Spostamento del gruppo di contatti lungo il bordo "
-                                "rispetto alla posizione centrata, in millimetri "
+                                "rispetto alla posizione centrata, nell'unita' di "
+                                "drawing_unit "
                                 "(positivo verso il basso o verso destra). Ometti o 0 "
                                 "se i contatti sono centrati sul lato."
                             ),
@@ -449,14 +496,37 @@ _EXTRACTION_TOOL = {
                                 "piu' dentro. Ometti se la foto non mostra il bordo."
                             ),
                         },
+                        "half_hole_diameter_mm": {
+                            "type": "number", "exclusiveMinimum": 0,
+                            "description": (
+                                "Diametro del semi-foro metallizzato tagliato dal bordo "
+                                "(il cerchio intero di cui il bordo mostra meta'), "
+                                "nell'unita' di drawing_unit: dalla quota del disegno "
+                                "o, se non quotato, stimato dalla foto in proporzione "
+                                "alle quote note (scrivilo nelle note). Ometti se il "
+                                "lato non ha semi-fori o non si vedono."
+                            ),
+                        },
+                        "through_hole_drill_mm": {
+                            "type": "number", "exclusiveMinimum": 0,
+                            "description": (
+                                "Diametro del foro intero (foro passante vicino al "
+                                "bordo) dei contatti di questo lato, nell'unita' di "
+                                "drawing_unit: dalla quota del disegno o, se non "
+                                "quotato, stimato dalla foto in proporzione alle quote "
+                                "note (scrivilo nelle note). Solo se il lato ha fori "
+                                "interi; altrimenti ometti."
+                            ),
+                        },
                         "pin_names": {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": (
                                 "Sigle serigrafate accanto ai contatti di questo lato, "
-                                "nell'ordine in cui si incontrano lungo il bordo (es. "
-                                "[\"PE\", \"B-\", \"A+\"]). Servono a documentare il "
-                                "pinout, non a numerare i pad."
+                                "nell'ordine in cui si incontrano lungo il bordo nella "
+                                "vista letta (dall'alto in basso sui lati verticali, da "
+                                "sinistra a destra su quelli orizzontali). Servono a "
+                                "documentare il pinout, non a numerare i pad."
                             ),
                         },
                     },
@@ -494,7 +564,7 @@ _EXTRACTION_TOOL = {
                             "type": "number",
                             "description": (
                                 "Posizione del CENTRO del componente lungo X rispetto al "
-                                "centro del modulo, in millimetri: negativa verso "
+                                "centro del modulo, nell'unita' di drawing_unit: negativa verso "
                                 "sinistra, positiva verso destra nella foto vista "
                                 "dall'alto (il modulo e' lungo body_length_mm)."
                             ),
@@ -580,9 +650,13 @@ _EXTRACTION_TOOL = {
             },
         },
         # Obbligatori sempre; i campi della matrice e quelli dei lati
-        # castellated sono richiesti a seconda del layout, e il controllo
-        # si fa in _params_from_tool_arguments() dove si conosce il valore.
-        "required": ["layout", "confidence"],
+        # castellated sono richiesti a seconda di cio' che la risposta e'
+        # (layout, pad espliciti, numero di righe e colonne), e il controllo
+        # si fa in _params_from_tool_arguments() dove si conoscono i valori.
+        # Unita' e vista sono obbligatorie perche' il modello le dichiari
+        # sempre; una risposta che le omette resta leggibile (millimetri,
+        # vista ignota dichiarata come dubbio nelle note).
+        "required": ["layout", "confidence", "drawing_unit", "contacts_view"],
     },
 }
 
@@ -606,11 +680,16 @@ def _openai_tool() -> dict:
 
 
 _SYSTEM_PROMPT = (
-    "Sei un assistente che legge datasheet di connettori/header/moduli elettronici "
-    "(PDF o immagini di disegni meccanici quotati) ed estrae i parametri "
-    "geometrici necessari per generare un footprint KiCad THT a matrice di pin. "
-    "Distingui SEMPRE con attenzione il pitch (passo tra pin adiacenti sulla stessa "
-    "riga) dalla row_spacing (distanza perpendicolare tra le due righe di pin): sono "
+    "Sei un assistente che legge datasheet di componenti, connettori e moduli "
+    "elettronici (PDF o immagini di disegni meccanici quotati) ed estrae i parametri "
+    "geometrici necessari per generare un footprint KiCad: una matrice di pin a foro "
+    "passante, i lati di un modulo castellated oppure i pad espliciti in "
+    "package_geometry (l'unico modo di descrivere pad SMD, che non hanno foro). "
+    "Riporta le quote COSI' COME LE LEGGI: dichiara in drawing_unit l'unita' del "
+    "disegno (mm, inch o mil) e in contacts_view da che lato e' visto il disegno dei "
+    "contatti (top, bottom o unknown); conversione e specchiatura le fa il programma. "
+    "Distingui SEMPRE con attenzione pitch_mm (passo tra pin adiacenti sulla stessa "
+    "riga) da row_spacing_mm (distanza perpendicolare tra file di pin adiacenti): sono "
     "quasi sempre valori molto diversi tra loro nei moduli DIP-style, non usare lo "
     "stesso numero per entrambi a meno che il disegno meccanico non lo confermi "
     "esplicitamente. Se il pinout mostra che solo alcune posizioni della matrice hanno "
@@ -640,18 +719,19 @@ _SYSTEM_PROMPT = (
     "text_color_hex (colore delle scritte serigrafate sul case): servono per dare "
     "al modello 3D l'aspetto del componente reale. "
     "PRIMA DI TUTTO scegli la disposizione dei contatti (campo layout): "
-    "\"matrix\" per i pin su griglia regolare con un solo passo (pin header, "
-    "moduli DIP-style), \"castellated\" per i moduli su PCB con semi-fori "
+    "\"matrix\" per i pin a foro passante su griglia regolare (pin header, "
+    "moduli DIP-style) e per i componenti descritti pad per pad in "
+    "package_geometry, \"castellated\" per i moduli su PCB con semi-fori "
     "metallizzati sul bordo. Nei moduli castellated ogni lato ha spesso un "
-    "numero di contatti e un passo diversi dagli altri (es. 3 contatti a 5.08mm "
-    "su un lato e 5 a 2.54mm sull'altro): descrivili in castellated_sides, un "
+    "numero di contatti e un passo diversi dagli altri: descrivili in castellated_sides, un "
     "elemento per lato, invece di comprimerli in una matrice righe x colonne che "
     "non li rappresenta e produrrebbe un footprint sbagliato. "
     "Per ogni lato castellated indica anche contact_style guardando il bordo nella "
     "foto: half_hole se il foro metallizzato e' tagliato dal bordo (mezzaluna aperta "
     "verso l'esterno), through_hole se il foro e' intero, con corona chiusa e scheda "
     "intatta fra la corona e il bordo, half_and_through se lo stesso contatto ha "
-    "entrambi; ometti il campo se il bordo non si vede. "
+    "entrambi; ometti il campo se il bordo non si vede. Se quotati o visibili, "
+    "riporta per lato anche half_hole_diameter_mm e through_hole_drill_mm. "
     "Per i moduli su PCB, se c'e' una foto del lato superiore, elenca in "
     "components_3d TUTTI i componenti visibili, uno per uno, compresi i passivi "
     "piccoli (resistenze, condensatori chip, diodi): posizione, ingombro (asse "
@@ -670,6 +750,23 @@ _SYSTEM_PROMPT = (
 # editabile, e passa la versione modificata a extract_pin_header_params().
 DEFAULT_SYSTEM_PROMPT = _SYSTEM_PROMPT
 
+#: SHA-256 (hex digest of the UTF-8 text) of every earlier built-in system
+#: prompt. A profile database whose global system prompt is still exactly one
+#: of them receives the current DEFAULT_SYSTEM_PROMPT (see
+#: analysis_profiles.ProfileStore); a prompt the user edited never matches and
+#: is kept. Digests rather than texts because each old prompt is several kB;
+#: the texts are in the git history of this file (the last one is the prompt
+#: that described only a through-hole pin matrix, before `drawing_unit`,
+#: `contacts_view` and the SMD route through package_geometry).
+SUPERSEDED_SYSTEM_PROMPT_DIGESTS = frozenset({
+    "c744e556d5e1eba95f41d69b5eb635c2ab8bcc0cf77f5c1d163b18ca3a41feea",
+    "920e38029a2f7b6da293539e9a4ec3ea9b2d8465b51f45a49cea33a008671d57",
+    "4d9766aa02d962df5d1da6a726280f44e9404247e23e59f1cc1443bbde17ec82",
+    "eefd487b98f9217c71c14976fe71ac0095a14dd8ed9b8bd1b5d58e8231c0aafa",
+    "31a4c60ce3dedcce3efe236114fa2b963fcbfed652a40f62cbc6609e5e426715",
+    "2e420a121ee16fc0877e6d74ac4efdc7e0731f2e3cc29b4c32c0d014364877d0",
+})
+
 
 @dataclass
 class ExtractedParams:
@@ -681,6 +778,21 @@ class ExtractedParams:
     righe/colonne/passo/pad/drill, "castellated" valorizza
     `castellated_sides` (un elemento per lato del modulo) e lascia a None i
     campi della matrice, che per quei componenti non esistono.
+
+    @note Every length is in millimetres and every contact position is seen
+        from above, whatever unit and view the model read (see
+        `_canonicalize_answer`); conversions and doubts are in `notes`.
+    @note When `package_geometry` is set (explicit pads, e.g. an SMD part) it
+        is the footprint: the matrix fields are informative and may be None,
+        and `drill_mm` is None for pads without hole. Otherwise a "matrix"
+        result is a through-hole grid with rows, cols, pad and drill always
+        set, `pitch_mm` set when cols > 1 and `row_spacing_mm` when rows > 1
+        (None otherwise: a single column or row has no such distance).
+    @note Keys of each `castellated_sides` dict: edge, count, pitch_mm,
+        first_pin, and optionally reverse, offset_mm, pad_length_mm,
+        pad_width_mm, contact_style, pin_names, half_hole_diameter_mm (plated
+        half-hole cut by the edge) and through_hole_drill_mm (drill of the full
+        hole), all lengths in mm.
     """
 
     name: str
@@ -916,7 +1028,7 @@ def _offset_x_seen_from_top(offset, length, cols, pitch, view):
     one: length - span + offset. Only when the columns ARE mirrored (a
     pin_map read on a bottom view); otherwise the offset is returned as is.
     """
-    if view != "bottom" or offset is None or length is None or not pitch:
+    if view != "bottom" or offset is None or length is None:
         return offset
     try:
         cols = int(cols)
@@ -924,8 +1036,260 @@ def _offset_x_seen_from_top(offset, length, cols, pitch, view):
         return offset
     if cols < 1:
         return offset
-    span = (cols - 1) * pitch
+    # One column: every pin is at x = 0, so the pitch plays no part and the
+    # mirror only swaps the body margins. With more columns the span needs it.
+    if cols > 1 and not pitch:
+        return offset
+    span = (cols - 1) * pitch if cols > 1 else 0.0
     return round(-(length - span + offset), 3)
+
+
+#: Millimetres per unit, for the drawing units the schema accepts
+#: (`drawing_unit`). Exact by definition: 1 inch = 25.4 mm, 1 mil = 0.001 inch.
+_UNIT_TO_MM = {"mm": 1.0, "inch": 25.4, "mil": 0.0254}
+
+#: Length fields of the answer, per level: every one is a length in the
+#: declared drawing unit and becomes millimetres after `_canonicalize_answer`.
+_TOP_LENGTH_KEYS = ("pitch_mm", "row_spacing_mm", "pad_diameter_mm", "drill_mm",
+                    "body_length_mm", "body_width_mm", "body_height_mm", "pcb_thickness_mm",
+                    "body_offset_x_mm", "body_offset_y_mm", "pin_length_3d_mm")
+_SIDE_LENGTH_KEYS = ("pitch_mm", "offset_mm", "pad_length_mm", "pad_width_mm",
+                     "half_hole_diameter_mm", "through_hole_drill_mm")
+_PACKAGE_LENGTH_KEYS = ("body_length_mm", "body_width_mm", "body_height_mm")
+_PACKAGE_PIN_LENGTH_KEYS = ("x_mm", "y_mm", "pad_length_mm", "pad_width_mm", "drill_mm")
+_COMPONENT_LENGTH_KEYS = ("x_mm", "y_mm", "length_mm", "width_mm", "height_mm")
+_FILLET_LENGTH_KEYS = ("radius_mm",)
+
+#: Views a contact drawing can be read from (`contacts_view`).
+_CONTACT_VIEWS = ("top", "bottom")
+
+#: Heuristic threshold, in mm, below which a pitch declared in millimetres is
+#: reported as a probable unit error. DECLARED HEURISTIC, not a rule: the
+#: finest centre-to-centre pitch of production packages is about 0.3 mm
+#: (wafer-level chip-scale packages), so a smaller pitch describes no real
+#: part, while an inch drawing read as millimetres gives 0.1, 0.05 or
+#: 0.0197 for 2.54, 1.27 and 0.5 mm. The margin below 0.3 mm keeps every
+#: real pitch clear of it. A body/pitch ratio would not help: it is
+#: dimensionless, identical in both units. It never converts anything, it
+#: only writes a doubt; a declared `drawing_unit` is what makes it
+#: superfluous, and it would miss an inch drawing whose pitch is 0.3 inch or
+#: more (7.62 mm), which reads as a plausible millimetre pitch.
+_UNIT_DOUBT_PITCH_MM = 0.25
+
+
+def _scale_lengths(entry, keys, factor: float) -> None:
+    """Multiply the numeric length fields of one dict by `factor`, in place.
+
+    Values that are not numbers are left untouched, so the validation that
+    follows still sees (and reports) them exactly as the model sent them.
+    """
+    if not isinstance(entry, dict):
+        return
+    for key in keys:
+        number = _optional_number(entry.get(key))
+        if number is not None:
+            entry[key] = round(number * factor, 6)
+
+
+def _convert_units(data: dict, factor: float) -> None:
+    """Convert every length of the answer to millimetres, in place."""
+    _scale_lengths(data, _TOP_LENGTH_KEYS, factor)
+    if isinstance(data.get("castellated_sides"), (list, tuple)):
+        for side in data["castellated_sides"]:
+            _scale_lengths(side, _SIDE_LENGTH_KEYS, factor)
+    geometry = data.get("package_geometry")
+    if isinstance(geometry, dict):
+        _scale_lengths(geometry, _PACKAGE_LENGTH_KEYS, factor)
+        if isinstance(geometry.get("pins"), (list, tuple)):
+            for pin in geometry["pins"]:
+                _scale_lengths(pin, _PACKAGE_PIN_LENGTH_KEYS, factor)
+    for key, keys in (("components_3d", _COMPONENT_LENGTH_KEYS),
+                      ("edge_fillets", _FILLET_LENGTH_KEYS)):
+        if isinstance(data.get(key), (list, tuple)):
+            for entry in data[key]:
+                _scale_lengths(entry, keys, factor)
+
+
+def _declared_pitches(data: dict, layout: str) -> list:
+    """(label, pitch in mm) of every pitch the answer declares, for the unit doubt.
+
+    Matrix pitch (with more than one column), per-side castellated pitches
+    (with more than one contact) and the smallest centre distance between the
+    explicit pads of package_geometry: all are centre-to-centre distances of
+    real contacts, the quantity whose physical floor the heuristic uses.
+    """
+    pitches = []
+    if layout == "matrix":
+        cols = _optional_number(data.get("cols"), positive=True, integer=True)
+        pitch = _optional_number(data.get("pitch_mm"), positive=True)
+        if cols and cols > 1 and pitch:
+            pitches.append(("pitch_mm", pitch))
+    sides = data.get("castellated_sides")
+    if layout == "castellated" and isinstance(sides, (list, tuple)):
+        for side in sides:
+            if not isinstance(side, dict):
+                continue
+            count = _optional_number(side.get("count"), positive=True, integer=True)
+            pitch = _optional_number(side.get("pitch_mm"), positive=True)
+            if count and count > 1 and pitch:
+                pitches.append((f"castellated_sides[{side.get('edge')}].pitch_mm", pitch))
+    geometry = data.get("package_geometry")
+    if isinstance(geometry, dict) and isinstance(geometry.get("pins"), (list, tuple)):
+        centres = []
+        for pin in geometry["pins"]:
+            if isinstance(pin, dict):
+                x, y = _optional_number(pin.get("x_mm")), _optional_number(pin.get("y_mm"))
+                if x is not None and y is not None:
+                    centres.append((x, y))
+        distances = [math.dist(a, b) for i, a in enumerate(centres) for b in centres[i + 1:]]
+        distances = [d for d in distances if d > 0]
+        if distances:
+            pitches.append(("package_geometry", min(distances)))
+    return pitches
+
+
+def _unit_doubt(data: dict, layout: str) -> Optional[str]:
+    """A doubt note when a pitch read as millimetres is below any real package.
+
+    See `_UNIT_DOUBT_PITCH_MM` for why this is a declared heuristic.
+    """
+    suspicious = [(label, pitch) for label, pitch in _declared_pitches(data, layout)
+                  if pitch < _UNIT_DOUBT_PITCH_MM]
+    if not suspicious:
+        return None
+    label, pitch = min(suspicious, key=lambda item: item[1])
+    return tx("DUBBIO unita' di misura: {label} vale {pitch:g} mm, meno del passo piu' fine "
+              "dei package reali (circa 0.3 mm). Se il disegno e' in pollici varrebbe "
+              "{inch:.4g} mm: verificare l'unita' del disegno e ripetere l'analisi. Nessuna "
+              "conversione applicata.", label=label, pitch=pitch, inch=pitch * 25.4)
+
+
+def _mirror_castellated_sides(sides) -> None:
+    """Take castellated sides read on a BOTTOM VIEW to the view from above, in place.
+
+    The bottom view is the part turned over about the vertical axis of the
+    drawing: left and right swap, top and bottom stay. Along a vertical edge
+    the order from top to bottom is unchanged; along a horizontal edge the
+    order from left to right is reversed, so the numbering direction flips,
+    the offset (positive to the right) changes sign and the silkscreen names,
+    listed in the order met along the edge, are reversed with the contacts.
+    """
+    if not isinstance(sides, (list, tuple)):
+        return
+    for side in sides:
+        if not isinstance(side, dict):
+            continue
+        edge = str(side.get("edge") or "").strip().lower()
+        if edge in ("left", "right"):
+            side["edge"] = "right" if edge == "left" else "left"
+            continue
+        if edge not in ("top", "bottom"):
+            continue
+        side["reverse"] = side.get("reverse") is not True
+        offset = _optional_number(side.get("offset_mm"))
+        if offset is not None:
+            side["offset_mm"] = -offset + 0.0
+        if isinstance(side.get("pin_names"), list):
+            side["pin_names"] = list(reversed(side["pin_names"]))
+
+
+def _mirrored_column_order(rows: int, cols: int) -> list:
+    """Column-order numbering (pin_header.pin_positions) read on a bottom view, seen from top."""
+    return [{"pin": col * rows + row + 1, "row": row, "col": cols - 1 - col}
+            for col in range(cols) for row in range(rows)]
+
+
+def _has_explicit_pads(data: dict) -> bool:
+    """True when package_geometry carries pads, i.e. it is the footprint source."""
+    geometry = data.get("package_geometry")
+    return isinstance(geometry, dict) and bool(geometry.get("pins"))
+
+
+def _canonicalize_answer(data: dict) -> None:
+    """Bring a tool answer to millimetres and to the view from above, in place.
+
+    The model reports the numbers and the contact layout as it reads them
+    (`drawing_unit`, `contacts_view`); every conversion is done here, once,
+    because it is deterministic geometry, not perception. Afterwards the
+    answer says `drawing_unit="mm"` and, when the view was known,
+    `contacts_view="top"`; the legacy `pin_map_view` is folded in and
+    removed. What was done, and every doubt, is kept in `_canonical_notes`;
+    `_canonical` marks the answer so that a second call does nothing: the
+    photo stage and `_params_from_tool_arguments` read the same answer again.
+    Invalid values are left for the validation to reject or report.
+    """
+    if data.get("_canonical"):
+        return
+    notes: list[str] = []
+    layout = data.get("layout") or "matrix"
+
+    unit = data.get("drawing_unit")
+    if unit is None:
+        unit = "mm"
+    elif unit not in _UNIT_TO_MM:
+        notes.append(tx("DUBBIO unita' di misura {unit!r} non riconosciuta: quote trattate come "
+                        "millimetri, da verificare.", unit=unit))
+        unit = "mm"
+    if unit != "mm":
+        _convert_units(data, _UNIT_TO_MM[unit])
+        notes.append(tx("Quote lette in {unit} e convertite in millimetri (x {factor:g}).",
+                        unit=unit, factor=_UNIT_TO_MM[unit]))
+    else:
+        doubt = _unit_doubt(data, layout)
+        if doubt:
+            notes.append(doubt)
+    data["drawing_unit"] = "mm"
+
+    view = data.get("contacts_view")
+    if view is None:
+        view = data.get("pin_map_view")
+    view = view if view in _CONTACT_VIEWS else "unknown"
+    data.pop("pin_map_view", None)
+    reads_contacts = layout == "castellated" or (layout == "matrix" and not _has_explicit_pads(data))
+    if view == "unknown" and reads_contacts:
+        notes.append(tx("DUBBIO vista: il documento non dice se i contatti sono visti dall'alto o "
+                        "dal basso; interpretati come vista dall'alto. Se il disegno era una "
+                        "BOTTOM VIEW il footprint risulta specchiato: verificarlo sul disegno."))
+    if layout == "castellated" and view == "bottom":
+        _mirror_castellated_sides(data.get("castellated_sides"))
+        notes.append(tx("Lati del modulo letti su una vista dal basso: specchiati nella vista "
+                        "dall'alto del footprint."))
+    if layout == "matrix":
+        rows = _optional_number(data.get("rows"), positive=True, integer=True)
+        cols = _optional_number(data.get("cols"), positive=True, integer=True)
+        pitch = _optional_number(data.get("pitch_mm"), positive=True)
+        if data.get("pin_map"):
+            if cols is None:
+                notes.append(tx("pin_map ignorata: la matrice non ha un numero di colonne valido."))
+                data["pin_map"] = None
+            else:
+                try:
+                    data["pin_map"] = _pin_map_seen_from_top(
+                        data["pin_map"], cols, "bottom" if view == "bottom" else "top", rows)
+                except ExtractionError as exc:
+                    # Optional field: the paid response survives, but automatic
+                    # numbering replaces the map, so the note must say it loudly.
+                    notes.append(tx("ATTENZIONE pin_map scartata ({exc}): numerazione automatica "
+                                    "colonna per colonna, da verificare sul pinout.", exc=exc))
+                    data["pin_map"] = None
+        if view == "bottom" and cols is not None:
+            if not data.get("pin_map") and rows is not None:
+                # Column order read on a bottom view is NOT column order seen
+                # from above: the mirrored numbering needs an explicit map.
+                data["pin_map"] = _mirrored_column_order(rows, cols)
+            offset = _optional_number(data.get("body_offset_x_mm"))
+            length = _optional_number(data.get("body_length_mm"), positive=True)
+            mirrored = _offset_x_seen_from_top(offset, length, cols, pitch, "bottom")
+            if offset is not None and mirrored is not None:
+                data["body_offset_x_mm"] = mirrored
+            notes.append(tx("Pin letti su una vista dal basso: colonne e spostamento del corpo "
+                            "specchiati nella vista dall'alto del footprint."))
+    if view in _CONTACT_VIEWS:
+        data["contacts_view"] = "top"
+    else:
+        data["contacts_view"] = "unknown"
+    data["_canonical_notes"] = notes
+    data["_canonical"] = True
 
 
 def _merge_photo_components(groups):
@@ -1342,6 +1706,18 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
                     progress(warning)
             except (OpenRouterError, AttributeError) as repair_error:
                 raise ExtractionError(tx("Correzione numerazione non riuscita; analisi foto non avviata.")) from repair_error
+    if (data.get("layout") or "matrix") in ("matrix", "castellated"):
+        # After the numbering repair, which compares sides in the drawing's own
+        # unit and view, and before the photo stage, which calibrates on the
+        # body dimensions and masks the declared contacts: both must read
+        # millimetres seen from above.
+        _canonicalize_answer(data)
+        if progress:
+            for note in data["_canonical_notes"]:
+                progress(note)
+    if data.get("layout") == "castellated":
+        dims = dict(body_length=_optional_number(data.get("body_length_mm"), positive=True),
+                    body_width=_optional_number(data.get("body_width_mm"), positive=True))
         # Dopo l'eventuale correzione, cosi' la riga descrive i lati definitivi.
         notice = _unobserved_contact_style_notice(_castellated_sides(data.get("castellated_sides"), **dims))
         if notice:
@@ -1514,7 +1890,10 @@ def _pin_field_positions(params) -> list:
         mapping = {int(entry["pin"]): (int(entry["row"]), int(entry["col"]))
                    for entry in params.pin_map}
     grid = PinHeaderParams(
-        rows=int(params.rows), cols=int(params.cols), pitch=float(params.pitch_mm),
+        # With one column every pin is at x = 0 whatever the pitch, and a single
+        # column declares none: 1.0 is a placeholder with no geometric effect.
+        rows=int(params.rows), cols=int(params.cols),
+        pitch=float(params.pitch_mm) if params.pitch_mm else 1.0,
         row_spacing=params.row_spacing_mm or None,
         populated_pins=set(params.populated_pins) if params.populated_pins else None,
         pin_map=mapping)
@@ -1548,7 +1927,9 @@ def fit_body_to_pin_field(params, component_family) -> list[str]:
         return []
     rows, cols, pitch = params.rows, params.cols, params.pitch_mm
     length, width = params.body_length_mm, params.body_width_mm
-    if not all(isinstance(v, (int, float)) and v > 0 for v in (rows, cols, pitch, length, width)):
+    if not all(isinstance(v, (int, float)) and v > 0 for v in (rows, cols, length, width)):
+        return []
+    if cols > 1 and not (isinstance(pitch, (int, float)) and pitch > 0):
         return []
     positions = _pin_field_positions(params)
     if not positions:
@@ -1604,6 +1985,51 @@ def _optional_number(value, *, positive=False, integer=False):
 
 class _PinNumberConflict(ExtractionError):
     """@brief Reject overlapping physical pad ranges before photographic analysis."""
+
+
+#: Optional per-side hole sizes, in mm, as observed on the board: the diameter
+#: of the plated half-hole cut by the edge and the drill of the full through
+#: hole. Which of the two a contact carries is `contact_style`.
+_SIDE_HOLE_KEYS = ("half_hole_diameter_mm", "through_hole_drill_mm")
+
+#: Contact styles that carry each hole (see castellated_module.CONTACT_STYLES).
+_STYLES_WITH_HOLE = {"half_hole_diameter_mm": ("half_hole", "half_and_through"),
+                     "through_hole_drill_mm": ("through_hole", "half_and_through")}
+
+
+def _add_hole_sizes(side: dict, entry: dict, notes: Optional[list]) -> None:
+    """Copy the optional hole diameters of one castellated side, validated.
+
+    A diameter must be a finite number > 0 and, with more than one contact,
+    smaller than the pitch: two holes of that diameter at that pitch would
+    merge into one slot, which is not a row of contacts (physical bound, not a
+    tuned limit). An invalid value is dropped with a note; a hole the declared
+    contact style does not carry is kept, with a note, because the two
+    observations contradict each other and nothing says which one is wrong.
+    """
+    label = EDGE_LABELS.get(side["edge"], side["edge"])
+    for key in _SIDE_HOLE_KEYS:
+        raw = entry.get(key)
+        if raw is None:
+            continue
+        value = _optional_number(raw, positive=True)
+        if value is None:
+            if notes is not None:
+                notes.append(tx("Lato {label}: {key} scartato, valore non valido ({value!r}).",
+                                label=label, key=key, value=raw))
+            continue
+        if side["count"] > 1 and value >= side["pitch_mm"]:
+            if notes is not None:
+                notes.append(tx("Lato {label}: {key} {value:g} mm non minore del passo "
+                                "{pitch:g} mm, i fori adiacenti si unirebbero; valore scartato.",
+                                label=label, key=key, value=value, pitch=side["pitch_mm"]))
+            continue
+        side[key] = value
+        style = side.get("contact_style")
+        if style is not None and style not in _STYLES_WITH_HOLE[key] and notes is not None:
+            notes.append(tx("Lato {label}: {key} indicato ma il tipo di contatto osservato "
+                            "({style}) non ha quel foro; valore conservato, da verificare.",
+                            label=label, key=key, style=style))
 
 
 def _normalized_castellated_sides(raw, notes: Optional[list] = None) -> list[dict]:
@@ -1672,6 +2098,7 @@ def _normalized_castellated_sides(raw, notes: Optional[list] = None) -> list[dic
                        join=', '.join(CONTACT_STYLES))
                 )
             side["contact_style"] = style
+        _add_hole_sizes(side, entry, notes)
         sides.append(side)
 
     if not sides:
@@ -1963,14 +2390,90 @@ def _validated_populated_pins(raw, max_pin: Optional[int], notes: list) -> Optio
     return kept or None
 
 
+def _informative_matrix(data: dict, notes: list) -> dict:
+    """Matrix fields that do not define the footprint: kept when valid, else noted.
+
+    Used for a castellated module and for a part whose explicit pads
+    (package_geometry) are the footprint. A drill of 0 is not an error here:
+    it is how a pad without hole (SMD) is written, so it becomes None silently.
+    """
+    matrix = {}
+    for key in _MATRIX_INT_FIELDS:
+        raw = data.get(key)
+        matrix[key] = _optional_number(raw, positive=True, integer=True)
+        if raw is not None and matrix[key] is None:
+            notes.append(tx("{key} scartato: valore non valido ({value!r}).", key=key, value=raw))
+    for key in _MATRIX_LENGTH_FIELDS:
+        raw = data.get(key)
+        matrix[key] = _optional_number(raw, positive=True)
+        if key == "drill_mm" and _optional_number(raw) == 0:
+            continue
+        if raw is not None and matrix[key] is None:
+            notes.append(tx("{key} scartato: valore non valido ({value!r}).", key=key, value=raw))
+    return matrix
+
+
+def _footprint_matrix(data: dict, notes: list) -> dict:
+    """Matrix fields of a through-hole pin grid that IS the footprint.
+
+    Required fields follow from what the grid structurally is: rows, cols,
+    pad and drill always; the pitch only with more than one column and the
+    row spacing only with more than one row, because a single column or row
+    has no such distance (it is left None, never borrowed from the other
+    quantity). A given but invalid optional distance is dropped with a note.
+
+    @throws ExtractionError For a missing or invalid required field, for a
+        drill not smaller than the pad, and for a pad without hole: the grid
+        generator draws only drilled pads, and a pad without hole needs its
+        own shape, which only package_geometry describes.
+    """
+    matrix = {key: _required_matrix_value(data, key) for key in _MATRIX_INT_FIELDS}
+    for key, count in (("pitch_mm", matrix["cols"]), ("row_spacing_mm", matrix["rows"])):
+        if count > 1:
+            matrix[key] = _required_matrix_value(data, key)
+            continue
+        raw = data.get(key)
+        matrix[key] = _optional_number(raw, positive=True)
+        if raw is not None and matrix[key] is None and _optional_number(raw) != 0:
+            notes.append(tx("{key} scartato: valore non valido ({value!r}).", key=key, value=raw))
+    matrix["pad_diameter_mm"] = _required_matrix_value(data, "pad_diameter_mm")
+    raw_drill = data.get("drill_mm")
+    if raw_drill is None or _optional_number(raw_drill) == 0:
+        raise ExtractionError(tx(
+            "Pad senza foro (drill_mm assente o 0) e nessun pad esplicito in "
+            "package_geometry: la matrice di pin genera solo pad a foro passante, e un "
+            "componente SMD richiede i pad descritti uno per uno. Riprova, eventualmente "
+            "con un modello piu' capace."))
+    matrix["drill_mm"] = _required_matrix_value(data, "drill_mm")
+    if matrix["drill_mm"] >= matrix["pad_diameter_mm"]:
+        raise ExtractionError(tx("Foratura non valida: drill_mm {drill} deve essere minore di "
+                                 "pad_diameter_mm {pad}.", drill=matrix["drill_mm"],
+                                 pad=matrix["pad_diameter_mm"]))
+    return matrix
+
+
 def _params_from_tool_arguments(data: dict) -> ExtractedParams:
-    """Costruisce ExtractedParams dagli argomenti dello strumento.
+    """@brief Build ExtractedParams from the tool arguments, without any network access.
 
-    Separato dalla chiamata di rete per poterlo collaudare senza API.
+    Costruisce ExtractedParams dagli argomenti dello strumento. Separato
+    dalla chiamata di rete per poterlo collaudare senza API.
 
+    @param data Tool arguments as the model returned them, or as
+        `_validate_main_response` canonicalized them. The input is never
+        modified: a raw answer is canonicalized on a copy
+        (`_canonicalize_answer`: lengths to millimetres from `drawing_unit`,
+        contacts to the view from above from `contacts_view`).
+    @return The validated parameters, with every conversion, doubt and
+        dropped optional value written in `notes`.
+    @note What is required depends on what the answer structurally is. Valid
+        explicit pads (package_geometry) are the footprint: the matrix fields
+        become informative, and a drill of 0 or none means pads without hole.
+        Without them, a "matrix" answer is a through-hole pin grid (see
+        `_footprint_matrix`); a "castellated" one is its edge sides.
     @throws ExtractionError For any unusable MANDATORY field (missing,
         boolean, non-finite, non-integral count, non-positive length, drill
-        not smaller than the pad) and for invalid castellated sides. Invalid
+        not smaller than the pad, pad without hole and without explicit pads),
+        for invalid explicit pads and for invalid castellated sides. Invalid
         OPTIONAL fields never fail the paid response: they are dropped and
         the reason is appended to `notes`.
     """
@@ -1979,7 +2482,10 @@ def _params_from_tool_arguments(data: dict) -> ExtractedParams:
     layout = data.get("layout") or "matrix"
     if layout not in ("matrix", "castellated"):
         raise ExtractionError(tx("Disposizione dei contatti sconosciuta: {layout!r}.", layout=layout))
-    notes: list[str] = []
+    if not data.get("_canonical"):
+        data = copy.deepcopy(data)
+        _canonicalize_answer(data)
+    notes: list[str] = list(data.get("_canonical_notes") or ())
 
     def _opt_float(key: str) -> Optional[float]:
         """Optional numeric field; an invalid value is dropped with a note."""
@@ -1988,38 +2494,6 @@ def _params_from_tool_arguments(data: dict) -> ExtractedParams:
         if raw is not None and value is None:
             notes.append(tx("{key} scartato: valore non valido ({value!r}).", key=key, value=raw))
         return value
-
-    matrix: dict = {}
-    if layout == "castellated":
-        sides = _castellated_sides(
-            data.get("castellated_sides"),
-            body_length=_optional_number(data.get("body_length_mm"), positive=True),
-            body_width=_optional_number(data.get("body_width_mm"), positive=True),
-            notes=notes)
-        # A castellated module has no matrix: counts or lengths it still sends
-        # are informative only and dropped with a note when malformed.
-        for key in _MATRIX_INT_FIELDS:
-            raw = data.get(key)
-            matrix[key] = _optional_number(raw, positive=True, integer=True)
-            if raw is not None and matrix[key] is None:
-                notes.append(tx("{key} scartato: valore non valido ({value!r}).", key=key, value=raw))
-        for key in _MATRIX_LENGTH_FIELDS:
-            raw = data.get(key)
-            matrix[key] = _optional_number(raw, positive=True)
-            if raw is not None and matrix[key] is None:
-                notes.append(tx("{key} scartato: valore non valido ({value!r}).", key=key, value=raw))
-    else:
-        sides = None
-        for key in _MATRIX_INT_FIELDS + _MATRIX_LENGTH_FIELDS:
-            matrix[key] = _required_matrix_value(data, key)
-        if matrix["drill_mm"] >= matrix["pad_diameter_mm"]:
-            raise ExtractionError(tx("Foratura non valida: drill_mm {drill} deve essere minore di "
-                                     "pad_diameter_mm {pad}.", drill=matrix["drill_mm"],
-                                     pad=matrix["pad_diameter_mm"]))
-
-    rows, cols = matrix["rows"], matrix["cols"]
-    max_pin = rows * cols if layout == "matrix" else None
-    populated = _validated_populated_pins(data.get("populated_pins"), max_pin, notes)
 
     package_geometry = data.get("package_geometry")
     if isinstance(package_geometry, dict) and not package_geometry.get("pins"):
@@ -2041,16 +2515,34 @@ def _params_from_tool_arguments(data: dict) -> ExtractedParams:
         except (KeyError, TypeError, ValueError) as exc:
             raise ExtractionError(tx("Geometria package non valida: {exc}", exc=exc)) from exc
 
+    if layout == "castellated":
+        sides = _castellated_sides(
+            data.get("castellated_sides"),
+            body_length=_optional_number(data.get("body_length_mm"), positive=True),
+            body_width=_optional_number(data.get("body_width_mm"), positive=True),
+            notes=notes)
+        # A castellated module has no matrix: counts or lengths it still sends
+        # are informative only and dropped with a note when malformed.
+        matrix = _informative_matrix(data, notes)
+    elif package_geometry is not None:
+        sides = None
+        matrix = _informative_matrix(data, notes)
+    else:
+        sides = None
+        matrix = _footprint_matrix(data, notes)
+
+    rows, cols = matrix["rows"], matrix["cols"]
+    max_pin = rows * cols if layout == "matrix" and rows and cols else None
+    populated = _validated_populated_pins(data.get("populated_pins"), max_pin, notes)
+
     pin_map = None
-    view = data.get("pin_map_view")
-    # La specchiatura di pin_map ha senso solo sulla matrice: per i moduli
+    # La specchiatura di pin_map e' gia' stata fatta (_canonicalize_answer):
+    # qui la mappa e' vista dall'alto e si ricontrolla soltanto. Per i moduli
     # castellated le posizioni vengono dai lati, non da righe/colonne.
-    if layout == "matrix" and data.get("pin_map"):
+    if layout == "matrix" and data.get("pin_map") and cols:
         try:
-            pin_map = _pin_map_seen_from_top(data.get("pin_map"), cols, view, rows)
+            pin_map = _pin_map_seen_from_top(data.get("pin_map"), cols, "top", rows)
         except ExtractionError as exc:
-            # Optional field: the paid response survives, but automatic
-            # numbering replaces the map, so the note must say it loudly.
             notes.append(tx("ATTENZIONE pin_map scartata ({exc}): numerazione automatica colonna "
                             "per colonna, da verificare sul pinout.", exc=exc))
 
@@ -2090,10 +2582,7 @@ def _params_from_tool_arguments(data: dict) -> ExtractedParams:
         edge_fillets=data.get("edge_fillets") or None,
         pinout=data.get("pinout") or None,
         pin_map=pin_map,
-        body_offset_x_mm=_offset_x_seen_from_top(
-            _opt_float("body_offset_x_mm"), body_length,
-            cols, matrix["pitch_mm"],
-            view if pin_map else None),
+        body_offset_x_mm=_opt_float("body_offset_x_mm"),
         body_color_hex=data.get("body_color_hex") or None,
         text_color_hex=data.get("text_color_hex") or None,
         package_geometry=package_geometry,

@@ -111,7 +111,8 @@ def test_tilt_rejection_uses_existing_calibration_warning_without_api(tmp_path):
     assert cv2.imwrite(str(path), _board_image(35))
     metadata = {}
     assert prepare_photo(path, 40, 16, metadata) is None
-    assert metadata == {}
+    # Nessun dato di ritaglio; dal 26/09 c'e' pero' il motivo per l'utente.
+    assert set(metadata) == {"board_failure"} and metadata["board_failure"]
 
     def no_api(*args, **kwargs):
         pytest.fail("Rejected calibration must not call a model")
@@ -119,7 +120,8 @@ def test_tilt_rejection_uses_existing_calibration_warning_without_api(tmp_path):
     report = extract_inventory([path], "unused", 40, 16, [], no_api, top_photo_index=0)
     assert report.components == []
     assert report.calibration == {}
-    assert report.warnings == ["Nessuna vista dall'alto calibrabile: resta l'inventario principale."]
+    assert report.warnings == [f"tilted.png: {metadata['board_failure']}",
+                               "Nessuna vista dall'alto calibrabile: resta l'inventario principale."]
     components = [dict(name="R1", x_mm=2, y_mm=1, length_mm=2, width_mm=1)]
     refined, refinement = refine_components([path], 40, 16, components)
     assert refined == components

@@ -95,7 +95,9 @@ def _half_hole_centre(params, placement):
         edge = (math.copysign(params.body_length / 2, -inward[0]), placement.y)
     else:
         edge = (placement.x, math.copysign(params.body_width / 2, -inward[1]))
-    return (edge[0] + inward[0] * params.half_hole_inset, edge[1] + inward[1] * params.half_hole_inset)
+    # Il semi-foro del LATO del contatto (i lati possono avere fori diversi).
+    inset = params.contact_geometry(placement).half_hole_inset
+    return (edge[0] + inward[0] * inset, edge[1] + inward[1] * inset)
 
 
 def _double(**changes):
@@ -147,7 +149,7 @@ def test_copper_is_continuous_from_the_half_hole_to_beyond_the_ring(name):
             t = i / 20
             point = (half[0] + t * (hole[0] - half[0]), half[1] + t * (hole[1] - half[1]))
             assert _in_pad(pad, point), (placement.number, point)
-        ring = params.thru_pad_diameter / 2
+        ring = params.contact_geometry(placement).ring / 2
         for k in range(36):
             angle = 2 * math.pi * k / 36
             assert _in_pad(pad, (hole[0] + ring * math.cos(angle), hole[1] + ring * math.sin(angle)))
@@ -155,19 +157,26 @@ def test_copper_is_continuous_from_the_half_hole_to_beyond_the_ring(name):
 
 @pytest.mark.parametrize("name", sorted(CASES))
 def test_the_pad_starts_where_the_edge_land_started_and_ends_past_the_ring(name):
-    """@brief Quote dai parametri: sbalzo esterno invariato, fine oltre la corona."""
+    """@brief Quote dai parametri: sbalzo esterno invariato, fine oltre la corona.
+
+    La corona e la sua distanza dal bordo sono quelle del LATO (side_geometry):
+    dal 2026-09-26 un half_and_through usa anche la distanza fra le file
+    dichiarata (dev_kit: fori a 1.27 mm dal bordo), che la vecchia formula del
+    modulo (thru_hole_centre_offset) ignorava.
+    """
     params = CASES[name]()
     for placement in pad_positions(params):
         land = continuous_pad(params, placement)
+        geometry = params.contact_geometry(placement)
         vertical = placement.edge in ("left", "right")
         edge_land_length = placement.width if vertical else placement.height
         assert land.outer_reach == params.pad_overhang
         assert land.inner_reach == pytest.approx(max(
             edge_land_length - params.pad_overhang,
-            params.thru_hole_centre_offset + params.thru_pad_diameter / 2,
+            geometry.thru_inset + geometry.ring / 2,
             land.across - params.pad_overhang, land.across / 2))
         assert land.across == max(placement.height if vertical else placement.width,
-                                  params.thru_pad_diameter)
+                                  geometry.ring)
         # Il lato esterno coincide con quello della vecchia piazzola di bordo.
         outer_old = (abs(placement.x) + placement.width / 2 if vertical
                      else abs(placement.y) + placement.height / 2)
@@ -316,8 +325,14 @@ def test_the_pitch_must_leave_room_for_the_ring_inside_the_pad():
     Pad di bordo 1.0 mm, corona 1.7 mm, passo 1.5 mm: prima accettato (con due
     corone vicine sovrapposte), ora rifiutato. Lo stesso passo con il solo
     semi-foro, che una corona non ce l'ha, resta valido.
+
+    CONTRATTO PRECISATO il 2026-09-26: la corona da 1.7 mm deve essere
+    DICHIARATA per essere rifiutata. Quella di riferimento (non dichiarata)
+    viene invece ridotta al massimo che sta nel passo e scritta nelle note
+    (tests/test_hole_sizes_per_side.py): prima il riferimento del campione
+    storico veniva trattato come una misura.
     """
-    params = _double(pad_width=1.0)
+    params = _double(pad_width=1.0, thru_pad_diameter=1.7)
     for side in params.sides:
         side.pitch = 1.5
     with pytest.raises(ValueError, match="piazzola continua 1.7mm"):

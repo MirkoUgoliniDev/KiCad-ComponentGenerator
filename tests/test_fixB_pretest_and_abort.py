@@ -245,8 +245,10 @@ def test_the_abort_names_the_pretest_through_the_real_path(window, monkeypatch):
 def test_the_pretest_modal_does_not_show_the_last_paid_cost(window, monkeypatch):
     monkeypatch.setattr(gui.QThread, "start", lambda self: None)
     window.analysis_overlay.set_cost("Costo analisi: 0.1234 USD")
-    # Negativo: senza quote il pretest non parte e il consuntivo resta.
+    # Negativo: senza quote il pretest non parte e il consuntivo resta. Dal
+    # 26/09 le quote ignote si chiedono: qui chi le chiede annulla.
     monkeypatch.setattr(window, "_body_size", lambda: None)
+    monkeypatch.setattr(window, "_ask_board_size", lambda: None)
     _start_pretest(window)
     assert not window.analysis_overlay.cost.isHidden()
     monkeypatch.undo()

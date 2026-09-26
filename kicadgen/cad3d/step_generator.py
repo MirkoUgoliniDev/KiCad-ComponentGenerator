@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..generators.castellated_module import (
-    CONTACT_HALF_AND_THROUGH, CONTACT_THROUGH_HOLE, EDGE_LABELS, CastellatedModuleParams,
+    CONTACT_HALF_AND_THROUGH, CONTACT_THROUGH_HOLE, CastellatedModuleParams,
     continuous_pad, pad_positions, style_has_through_hole,
 )
 from ..generators.pin_header import PinHeaderParams, pin_positions
@@ -395,7 +395,11 @@ def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: 
         `notches` are the cylinders subtracted from the board; `contacts` the
         plated features, one entry per contact; `silk_texts` the optional
         labels; `notes` human-readable lines about estimated quantities
-        (Italian, for the log).
+        (Italian, for the log): params.geometry_notes().
+    @note Hole sizes and through-hole positions are the per-side ones
+        (CastellatedModuleParams.side_geometry): each side may declare its own
+        half-hole, drill and ring, and an assumed size too large for the pitch
+        is reduced there (and reported in `notes`), never here.
     @note No board silkscreen frame any more (user, 2026-09-26): it was a
         rectangle drawn inside the contacts, taken from no document or photo,
         and it read as a real feature of the board.
@@ -420,21 +424,23 @@ def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: 
     """
     half_length = params.body_length / 2
     half_width = params.body_width / 2
-    radius = params.hole_diameter / 2
-    # Il foro di un castellated non e' centrato sul bordo: e' un foro normale
-    # forato vicino al bordo e poi tagliato via, quindi il suo centro sta
-    # DENTRO la scheda di una frazione del diametro.
-    inset = params.half_hole_inset
-    drill_radius = params.thru_hole_drill / 2
 
     notches = []
     contacts = []
     silk_texts = []
-    label_gap = radius + SILK_LABEL_MARGIN_MM
     for placement in pad_positions(params):
+        # Quote dei fori del LATO del contatto: i lati possono averne di diverse.
+        geometry = params.contact_geometry(placement)
+        radius = geometry.half_hole / 2
+        # Il foro di un castellated non e' centrato sul bordo: e' un foro normale
+        # forato vicino al bordo e poi tagliato via, quindi il suo centro sta
+        # DENTRO la scheda di una frazione del diametro.
+        inset = geometry.half_hole_inset
+        drill_radius = geometry.drill / 2
+        label_gap = radius + SILK_LABEL_MARGIN_MM
         if placement.style == CONTACT_THROUGH_HOLE:
             centre = (placement.x, placement.y)
-            ring = params.thru_pad_diameter
+            ring = geometry.ring
             gap = drill_radius + SILK_LABEL_MARGIN_MM
             inward = {"left": (1, 0), "right": (-1, 0), "top": (0, 1), "bottom": (0, -1)}[placement.edge]
             label = (centre[0] + inward[0] * (ring / 2 + gap),
@@ -471,7 +477,7 @@ def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: 
                 "pad_length_mm": inner_len, "pad_width_mm": pad_w,
                 "color_hex": pin_color_hex,
             }
-            if placement.style == CONTACT_HALF_AND_THROUGH and params.has_thru_holes:
+            if placement.style == CONTACT_HALF_AND_THROUGH and geometry.has_thru_holes:
                 # Il foro intero non tocca il bordo: e' l'altra meta' del
                 # contatto, quella in cui si salda uno strip. Va tagliato E
                 # metallizzato: stesso numero, stesso metallo, stesso solido.
@@ -479,7 +485,7 @@ def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: 
                 notches.append({"x": hole_x, "y": hole_y, "radius": drill_radius})
                 contact["through_hole"] = {
                     "x": hole_x, "y": hole_y, "radius": drill_radius,
-                    "pad_diameter_mm": params.thru_pad_diameter,
+                    "pad_diameter_mm": geometry.ring,
                 }
                 # Rame continuo dal bordo fino oltre la corona, come sulla
                 # scheda reale: sostituisce piazzola di bordo e corone.
@@ -501,29 +507,10 @@ def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: 
                 "angle": 0, "color_hex": params.silk_color_hex,
             })
 
-    notes = []
-    for side in params.sides:
-        if side.contact_style != CONTACT_THROUGH_HOLE:
-            continue
-        label = EDGE_LABELS.get(side.edge, side.edge)
-        value = params.through_hole_inset(side.edge)
-        source = params.through_hole_inset_source(side.edge)
-        if source == "fallback":
-            notes.append(
-                tx("Lato {label}: distanza dal bordo dei fori passanti non dichiarata, "
-                   "stimata {value:.2f}mm (raggio della corona piu' la parete minima). E' "
-                   "una stima per difetto: indica la distanza fra le file o la distanza "
-                   "dal bordo per averla esatta.",
-                   label=label,
-                   value=value))
-        elif source == "row_spacing":
-            notes.append(
-                tx("Lato {label}: fori passanti a {value:.2f}mm dal bordo, ricavati da "
-                   "corpo {edge_extent}mm e distanza fra le file {row_spacing}mm.",
-                   label=label,
-                   value=value,
-                   edge_extent=params.edge_extent(side.edge),
-                   row_spacing=params.row_spacing))
+    # Le note sulle quote stimate (distanza dal bordo dei fori passanti, fori
+    # ridotti per stare nel passo) le scrive il generatore del footprint:
+    # sono le stesse quote, quindi una sola fonte.
+    notes = params.geometry_notes()
     return notches, contacts, silk_texts, notes
 
 
@@ -538,8 +525,9 @@ def castellated_header_pins(params: CastellatedModuleParams):
         contacts that have no closed through-hole (half-hole only).
     @note Rule (user decision, 2026-09-26): a strip is soldered only in a real
         through-hole -- contact style through_hole or half_and_through AND a
-        declared hole (params.has_thru_holes: drill and ring > 0, the same
-        condition under which the 3D cuts and plates the hole). A half-hole
+        declared hole on the contact's side (SideGeometry.has_thru_holes:
+        drill and ring > 0, the same condition under which the 3D cuts and
+        plates the hole). A half-hole
         alone cannot hold a pin. The centre comes from
         params.thru_hole_centre(), the function the footprint and the 3D
         contacts already use, never from a second formula.
@@ -553,7 +541,8 @@ def castellated_header_pins(params: CastellatedModuleParams):
         pitch = side.pitch if side.pitch > 0 else REFERENCE_PITCH_MM
         for _number in side.numbers():
             placement = next(placements)
-            if style_has_through_hole(placement.style) and params.has_thru_holes:
+            if (style_has_through_hole(placement.style)
+                    and params.contact_geometry(placement).has_thru_holes):
                 x, y = params.thru_hole_centre(placement)
                 pins.append([placement.number, x, y])
                 pitches.append(pitch)
