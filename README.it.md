@@ -141,10 +141,12 @@ C'è una seconda insidia: i datasheet dei moduli mostrano quasi sempre una
 **BOTTOM VIEW**, mentre il footprint KiCad si disegna dal lato componenti.
 Senza specchiare si otterrebbe un footprint speculare, con i fori in
 posizioni che non coincidono col pezzo reale. Il modello riporta quindi
-solo *cosa vede* (`pin_map` così com'è disegnata) più *da che lato*
-(`pin_map_view`), e **la riflessione la fa il codice**
-(`_pin_map_seen_from_top`): leggere è un compito percettivo, ribaltare è
-una trasformazione geometrica esatta e va tenuta deterministica.
+solo *cosa vede* (pin, lati del modulo e quote così come sono disegnati)
+più *da che lato* (`contacts_view`: dall'alto, dal basso o non detto) e
+*in che unità* (`drawing_unit`), e **ribaltamento e conversione li fa il
+codice** (`_canonicalize_answer`): leggere è un compito percettivo,
+ribaltare e convertire sono trasformazioni esatte e vanno tenute
+deterministiche. Una vista non dichiarata resta un dubbio scritto nelle note.
 
 Copertura in `tests/test_pin_map.py`, sul layout reale del TEL8WI.
 3. **🧊 Modello 3D** — anteprima 3D interattiva (VTK/PyVista,

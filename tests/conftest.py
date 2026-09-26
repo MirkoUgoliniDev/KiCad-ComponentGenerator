@@ -1,4 +1,5 @@
 """Keep configuration and SQLite tests away from the user's live preferences."""
+import os
 import sys
 import tempfile
 import types
@@ -134,8 +135,19 @@ def no_leftover_usage_listener():
 #: Tempo massimo di un singolo test, in secondi. Il piu' lento della suite
 #: (FreeCAD reale) resta sotto il minuto: il margine e' ampio di proposito.
 TEST_WATCHDOG_S = 300
-#: Dove finisce lo stack di un test bloccato (vedi `hang_watchdog`).
-HANG_REPORT = Path(tempfile.gettempdir()) / "kicadgen-test-hang.txt"
+#: Dove finisce lo stack di un test bloccato (vedi `hang_watchdog`). Un file
+#: per processo: piu' suite in parallelo (agenti) non si sovrascrivono a
+#: vicenda. A fine sessione senza blocchi il file viene cancellato, quindi un
+#: file rimasto in %TEMP% e' sempre il segno di una suite bloccata.
+HANG_REPORT = Path(tempfile.gettempdir()) / f"kicadgen-test-hang-{os.getpid()}.txt"
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """@brief Remove this process's hang report: the session ended without a hang."""
+    try:
+        HANG_REPORT.unlink()
+    except OSError:
+        pass
 
 
 @pytest.fixture(autouse=True)
@@ -148,12 +160,11 @@ def hang_watchdog():
     selettore di file) ha tenuto ferma la suite completa senza nessun
     messaggio. Con `faulthandler` (libreria standard, nessuna dipendenza) un
     blocco oltre TEST_WATCHDOG_S scrive lo stack di tutti i thread in
-    HANG_REPORT e termina il processo: la causa si legge subito invece di
+    HANG_REPORT (%TEMP%\kicadgen-test-hang-<pid>.txt) e termina il processo: la causa si legge subito invece di
     aspettare. Su file e non su stderr perche' pytest cattura stderr e, con
     l'uscita immediata, quel testo andrebbe perso.
     """
     import faulthandler
-    import os
     HANG_REPORT.parent.mkdir(parents=True, exist_ok=True)
     with open(HANG_REPORT, "w", encoding="utf-8") as report:
         # Riscritto a ogni test: lo stack segue questa riga SOLO se il test

@@ -22,7 +22,8 @@ from __future__ import annotations
 from typing import Callable
 
 #: Keys of a castellated side as stored in `MainWindow._sides`.
-SIDE_KEYS = ("edge", "count", "pitch_mm", "offset_mm", "first_pin", "reverse", "contact_style")
+SIDE_KEYS = ("edge", "count", "pitch_mm", "offset_mm", "first_pin", "reverse", "contact_style",
+             "half_hole_diameter_mm", "through_hole_drill_mm")
 
 
 class _Observable:
@@ -158,7 +159,9 @@ def normalised_side(side: dict | None, default_style: str) -> dict:
     """@brief One castellated side with the ranges of the former sides table.
 
     @param side Extracted or serialised side; missing keys take the table's
-        defaults (left edge, 2 contacts, 2.54 mm pitch, first pin 1).
+        defaults (left edge, 2 contacts, 2.54 mm pitch, first pin 1). The
+        per-side hole sizes (`half_hole_diameter_mm`, `through_hole_drill_mm`)
+        stay None when the side does not declare them (2026-09-26).
     @param default_style Contact style used when the side declares none.
     @return A new dict with exactly the keys in SIDE_KEYS.
     @note Ranges: count 1..100, pitch 0..200 mm, offset -200..200 mm,
@@ -172,4 +175,14 @@ def normalised_side(side: dict | None, default_style: str) -> dict:
     return dict(edge=side.get("edge", "left"), count=count.value(), pitch_mm=pitch.value(),
                 offset_mm=offset.value(), first_pin=first.value(),
                 reverse=bool(side.get("reverse")),
-                contact_style=side.get("contact_style") or default_style)
+                contact_style=side.get("contact_style") or default_style,
+                half_hole_diameter_mm=_optional_size(side.get("half_hole_diameter_mm")),
+                through_hole_drill_mm=_optional_size(side.get("through_hole_drill_mm")))
+
+
+def _optional_size(value):
+    """A declared hole size in mm (0.01 mm steps), or None when not declared or invalid."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = round(float(value), 2)
+    return number if 0 < number < 200 else None

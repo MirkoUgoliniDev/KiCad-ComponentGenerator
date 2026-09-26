@@ -209,7 +209,8 @@ project library, or install a global library. The current full-suite baseline
 recent projects, «Account AI...» with the Windows Credential Manager, workflow and
 status bars, help/log/update/crash-report menu, «Strumenti» menu, STEP preview
 mesh cache, no board silkscreen frame, YOLO model picker, wheel guard, analysis
-blocked without a component type, see HANDOFF.md points 71-80) is 5048 passed,
+blocked without a component type, fixes of the adversarial generality audit, see
+HANDOFF.md points 71-83) is 5150 passed,
 4 skipped, 2 expected failures and 19 subtests. The last packaging integration was merge
 commit `692ca95` on `main`. Keep these values aligned with HANDOFF.md.
 

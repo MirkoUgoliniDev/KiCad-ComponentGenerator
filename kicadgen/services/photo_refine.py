@@ -16,10 +16,14 @@ diversi (lucido vs. opaco, plastica vs. soldermask): per questo qui si usa
 
 Procedimento, deterministico e indipendente dal modulo:
 
-1. nella foto dall'alto si trova la scheda (il rettangolo scuro piu'
-   grande) e dal suo lato lungo si ricava la scala px/mm; una foto con un
-   rapporto lunghezza/larghezza incompatibile con il modulo (vista
-   laterale, dettaglio) viene scartata;
+1. nella foto dall'alto si trova la scheda per CONTRASTO CON LO SFONDO,
+   qualunque ne siano i colori: lo sfondo si stima dalla cornice della foto,
+   e una regione e' la scheda solo se non tocca la cornice su due o piu'
+   lati, e' circondata dallo sfondo su ogni lato libero e ha le proporzioni
+   dichiarate NEL VERSO dichiarato (X = lunghezza). Dalle sue estensioni si
+   ricava la scala px/mm; una foto incompatibile (vista laterale, dettaglio,
+   scheda ruotata di 90 gradi rispetto alle quote) viene scartata con un
+   motivo esplicito, mai ritagliata a caso;
 2. per ogni componente stimato dal modello si ritaglia una finestra
    intorno alla posizione dichiarata, si cercano i bordi con Canny, si
    dilatano quanto basta a chiudere i contorni spezzati e si cerca il
@@ -131,6 +135,39 @@ CONTOUR_NOISE_PX = 1.0
 #: a 84 px: il contorno risulta piu' largo di 4.4-4.8 px in tutto, quindi 2.0
 #: per lato e' il valore che il kernel prevede ed e' anche quello osservato.
 MORPH_GROWTH_PX = 2.0
+#: Spessore dell'anello di cornice da cui si stima lo sfondo, come frazione
+#: del lato corto dell'immagine (minimo BACKGROUND_RING_MIN_PX). In una vista
+#: dall'alto la cornice e' sfondo per costruzione: la scheda deve stare tutta
+#: nell'inquadratura. Ripiego dichiarato sullo spessore: abbastanza sottile da
+#: non entrare nella scheda con un margine normale, abbastanza spesso da dare
+#: migliaia di campioni anche su una foto piccola.
+BACKGROUND_RING_FRACTION = 0.02
+BACKGROUND_RING_MIN_PX = 2
+#: Quante deviazioni robuste (MAD scalata a sigma) oltre la mediana della
+#: cornice un colore deve distare dallo sfondo per non esserlo. Ripiego
+#: dichiarato, non tarato su una foto: 4 sigma sarebbero la coda di un rumore
+#: gaussiano, ma Delta E e' un modulo con coda a destra e su rumore sintetico
+#: lascia fuori soglia ~0.5% dei pixel di sfondo, isolati; li toglie il voto
+#: a maggioranza di `_contrast_mask`, non questa costante. Su uno sfondo
+#: davvero non uniforme (vignettatura, due superfici) la statistica della
+#: cornice non basta: e' un limite dichiarato.
+BACKGROUND_SPREAD_SIGMAS = 4.0
+#: Distanza di colore minima (Delta E CIE76) sotto cui due superfici non si
+#: distinguono: la soglia di percettibilita' (JND) classica. Serve solo
+#: quando la cornice e' perfettamente uniforme (disegni, rendering), dove la
+#: dispersione misurata e' zero e ogni pixel antialias sembrerebbe "scheda".
+MIN_BACKGROUND_DELTA_E = 2.3
+#: Frazione della fascia appena FUORI da ogni lato libero della scheda che
+#: deve somigliare allo sfondo. La scheda e' circondata dallo sfondo; un
+#: dettaglio interno (un integrato, uno schermo, una zona fitta di
+#: componenti) e' circondato dalla scheda su almeno un lato. Maggioranza
+#: semplice: un cavo, un connettore sporgente o una quota che attraversano il
+#: bordo ne coprono una parte minore, un lato interno lo copre quasi tutto.
+MIN_OUTSIDE_BACKGROUND_SHARE = 0.5
+#: Lati della cornice che un candidato puo' toccare. Una regione che ne tocca
+#: due o piu' e' lo sfondo stesso (o una superficie che esce dall'inquadratura)
+#: e la sua estensione vera non e' misurabile: non e' mai la scheda.
+MAX_FRAME_SIDES_TOUCHED = 1
 
 
 @dataclass
@@ -184,31 +221,146 @@ class RefineReport:
 #: una vista dall'alto storta ma un'inquadratura prospettica, che una
 #: rotazione rigida non puo' correggere.
 MAX_DESKEW_DEG = 20.0
+#: Fascia di verifica del contorno della scheda, come frazione del suo lato
+#: corto in pixel: `gap` salta la transizione antialias e le piazzole
+#: castellate che sporgono di qualche pixel, `band` e' lo spessore esaminato.
+#: Ripiego dichiarato sulle proporzioni (1% e 3%): servono solo a campionare
+#: una striscia sottile a ridosso del bordo, il verdetto lo da' la
+#: maggioranza (BOUNDARY_MAJORITY_SHARE), non questi valori.
+BOUNDARY_GAP_FRACTION = 0.01
+BOUNDARY_GAP_MIN_PX = 2
+BOUNDARY_BAND_FRACTION = 0.03
+BOUNDARY_BAND_MIN_PX = 3
+#: Maggioranza richiesta su ogni lato libero: fuori deve prevalere lo sfondo,
+#: dentro deve prevalere cio' che sfondo non e'.
+BOUNDARY_MAJORITY_SHARE = 0.5
+
+#: Codici del motivo per cui `locate_board` non ha trovato la scheda.
+BOARD_FOUND = "found"
+BOARD_NOT_FOUND = "not_found"
+BOARD_ROTATED_90 = "rotated_90"
+
+
+@dataclass(frozen=True)
+class BackgroundModel:
+    """@brief Colour of the photo background, estimated from the image frame.
+
+    @note Colours are CIE L*a*b* with L in 0..100, so distances are Delta E
+        CIE76 and mean the same for dark, light and saturated surfaces: a
+        black board on a black mat and a green board on a white sheet are
+        judged by the same rule.
+    """
+
+    #: Median background colour, (L, a, b).
+    lab: tuple
+    #: Median background colour in the photo's BGR, used to fill new canvas.
+    bgr: tuple
+    #: Delta E under which a pixel is indistinguishable from the background.
+    tolerance: float
+
+
+def _lab(image):
+    """Immagine BGR a 8 bit in L*a*b* float (L 0..100): distanze in Delta E."""
+    return cv2.cvtColor(image.astype(np.float32) / 255.0, cv2.COLOR_BGR2Lab)
+
+
+def estimate_background(image) -> Optional[BackgroundModel]:
+    """@brief Estimate the background colour and its spread from a ring along the image frame.
+
+    @param image BGR photo (three channels).
+    @return BackgroundModel, or None when OpenCV is missing, the image is not
+        a three-channel picture or it is too small to hold a ring.
+    @note A top view frames the whole board, so the frame is background by
+        construction. Median and MAD are robust: dimension lines, a cable or
+        one board side grazing the frame are a minority of the ring and do
+        not move the estimate.
+    @note Limit: one colour for the whole background. A strongly vignetted
+        or two-surface background is only partly "background" under this
+        model; the regions that differ touch the frame and are rejected as
+        candidates, so the failure is a declared one, not a wrong crop.
+    """
+    if cv2 is None or image is None or getattr(image, "ndim", 0) != 3 or image.shape[2] != 3:
+        return None
+    height, width = image.shape[:2]
+    ring = max(BACKGROUND_RING_MIN_PX,
+               int(round(BACKGROUND_RING_FRACTION * min(height, width))))
+    if min(height, width) <= 2 * ring:
+        return None
+
+    def frame_pixels(array):
+        return np.concatenate([array[:ring].reshape(-1, 3), array[-ring:].reshape(-1, 3),
+                               array[ring:-ring, :ring].reshape(-1, 3),
+                               array[ring:-ring, -ring:].reshape(-1, 3)])
+
+    samples = frame_pixels(_lab(image))
+    centre = np.median(samples, axis=0)
+    distance = np.linalg.norm(samples - centre, axis=1)
+    median = float(np.median(distance))
+    # MAD scalata a sigma (1.4826): stessa unita' di una deviazione standard.
+    spread = 1.4826 * float(np.median(np.abs(distance - median)))
+    tolerance = max(MIN_BACKGROUND_DELTA_E, median + BACKGROUND_SPREAD_SIGMAS * spread)
+    bgr = tuple(int(v) for v in np.median(frame_pixels(image), axis=0))
+    return BackgroundModel(lab=tuple(float(v) for v in centre), bgr=bgr,
+                           tolerance=float(tolerance))
+
+
+def _background_distance(image, background: BackgroundModel):
+    """Delta E di ogni pixel dal colore dello sfondo."""
+    return np.linalg.norm(_lab(image) - np.array(background.lab, dtype=np.float32), axis=2)
+
+
+def _clean_mask(mask, shape):
+    """Chiusura (ricuce) e apertura (toglie linee sottili: quote, piste)."""
+    close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+    open_size = max(9, int(min(shape[:2]) * 0.02) | 1)
+    open_k = cv2.getStructuringElement(cv2.MORPH_RECT, (open_size, open_size))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_k)
+    return cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_k)
 
 
 def _board_mask(image):
-    """Maschera del rettangolo scuro della scheda, come la vede find_board."""
+    """Maschera storica dei pixel molto scuri (grigio < 70).
+
+    Non e' piu' il criterio che decide cos'e' la scheda: e' una delle
+    segmentazioni provate, e ogni suo candidato deve superare le stesse
+    verifiche di contrasto con lo sfondo (`_board_candidates`). Resta la prima
+    per compatibilita': sulle foto scure-su-chiaro in cui era gia' corretta
+    riproduce al pixel il ritaglio di prima, e con esso le risposte in cache.
+    La soglia 70 e' ereditata, non derivata: su uno sfondo scuro la maschera
+    prende lo sfondo, che tocca la cornice e viene scartato.
+    """
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     _, dark = cv2.threshold(gray, 70, 255, cv2.THRESH_BINARY_INV)
-    close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
-    open_size = max(9, int(min(image.shape[:2]) * 0.02) | 1)
-    open_k = cv2.getStructuringElement(cv2.MORPH_RECT, (open_size, open_size))
-    dark = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, close_k)
-    return cv2.morphologyEx(dark, cv2.MORPH_OPEN, open_k)
+    return _clean_mask(dark, image.shape)
+
+
+def _contrast_mask(distance, background: BackgroundModel, shape):
+    """Maschera di cio' che si distingue dallo sfondo, qualunque colore abbia.
+
+    La distanza Delta E e' un modulo, con coda a destra: anche oltre la
+    tolleranza resta qualche pixel di rumore isolato (misurato ~0.5% su
+    rumore gaussiano sintetico). La chiusura 15x15 li salderebbe alla scheda
+    in escrescenze che ne allargano il riquadro. Prima si vota a maggioranza
+    su 5x5 (filtro mediano): la scheda e' una regione, un pixel isolato no. Un
+    bordo rettilineo resta dov'e', uno spigolo si arrotonda di un pixel senza
+    cambiare il riquadro.
+    """
+    mask = np.where(distance > background.tolerance, 255, 0).astype("uint8")
+    return _clean_mask(cv2.medianBlur(mask, 5), shape)
 
 
 def _texture_mask(image):
-    """Maschera della scheda per tessitura, non per luminosita'.
+    """Maschera della scheda per tessitura, non per colore.
 
     Su una fotografia la scheda e' fitta di componenti, serigrafie e piste,
-    mentre gli sfondi -- sia il piano chiaro sia l'ombra scura accanto --
-    sono lisci. L'energia del gradiente separa le due cose anche quando i
-    livelli di grigio si sovrappongono: su questo modulo lo schermo metallico
-    sta a 201 e lo sfondo a 204, indistinguibili per soglia, ma il primo e'
-    pieno di bordi e il secondo no.
+    mentre uno sfondo uniforme e' liscio. L'energia del gradiente separa le
+    due cose anche quando i colori si sovrappongono: uno schermo metallico
+    chiaro quasi quanto il piano d'appoggio e' pieno di bordi, il piano no.
 
     La chiusura morfologica con kernel largo ricuce l'interno della scheda,
     compreso lo schermo: quello che conta e' la sagoma esterna.
+    Limite: uno sfondo a sua volta tessuto (legno, tessuto) non si separa
+    cosi'; i suoi blob toccano la cornice e vengono scartati.
     """
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -224,6 +376,142 @@ def _texture_mask(image):
     return cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_k)
 
 
+def _segmentations(image, background: BackgroundModel, distance):
+    """Maschere in ordine di prova, ciascuna con l'indicazione se il riquadro
+    va riportato a meta' del salto di contrasto (`_mid_step_box`).
+
+    1. pixel molto scuri (storica, vedi `_board_mask`): riquadro invariato,
+       per riprodurre al pixel i ritagli di prima;
+    2. contrasto con lo sfondo stimato dalla cornice: il criterio generale,
+       che vale per scheda verde su nero, bianca su scuro, rossa su grigio;
+    3. tessitura: ripiego per le parti della scheda dello stesso colore dello
+       sfondo (schermi metallici), dove nessuna maschera a colore vede il bordo.
+    """
+    # Generatore: una maschera si calcola solo se le precedenti non bastano.
+    yield _board_mask(image), False
+    yield _contrast_mask(distance, background, image.shape), True
+    yield _texture_mask(image), False
+
+
+def _mid_step_box(distance, background: BackgroundModel, bx, by, bw, bh):
+    """Riquadro del candidato con il bordo a meta' del salto sfondo -> scheda.
+
+    La maschera di contrasto usa la tolleranza del rumore, cioe' il piede del
+    gradino: su un bordo sfocato (ottica, ricampionamento) prende tutta la
+    sfumatura e allarga il riquadro del raggio di sfocatura per lato, un
+    errore di scala sistematico. Il punto di un gradino sfocato che non si
+    sposta con la sfocatura e' quello a meta' ampiezza: qui si ri-soglia la
+    finestra del candidato a meta' del contrasto mediano della scheda (mai
+    sotto la tolleranza del rumore) e se ne prende il riquadro.
+    """
+    height, width = distance.shape[:2]
+    _, gap = _side_bands(bx, by, bw, bh, width, height)
+    interior = distance[by + gap:by + bh - gap, bx + gap:bx + bw - gap]
+    if interior.size == 0:
+        return bx, by, bw, bh
+    level = max(background.tolerance, 0.5 * float(np.median(interior)))
+    x0, y0 = max(0, bx - gap), max(0, by - gap)
+    x1, y1 = min(width, bx + bw + gap), min(height, by + bh + gap)
+    window = np.where(distance[y0:y1, x0:x1] > level, 255, 0).astype("uint8")
+    # Cornice di zeri piu' larga del kernel di chiusura: senza, la chiusura
+    # (erosione con bordo "infinito") non erode dal lato della finestra e la
+    # regione si allarga fino al bordo della finestra stessa.
+    pad = 16
+    window = cv2.copyMakeBorder(cv2.medianBlur(window, 5), pad, pad, pad, pad,
+                                cv2.BORDER_CONSTANT, value=0)
+    window = _clean_mask(window, distance.shape)
+    contours, _ = cv2.findContours(window, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return bx, by, bw, bh
+    rx, ry, rw, rh = cv2.boundingRect(max(contours, key=cv2.contourArea))
+    return x0 + rx - pad, y0 + ry - pad, rw, rh
+
+
+def _frame_sides_touched(bx, by, bw, bh, width, height) -> int:
+    """Quanti lati della cornice il riquadro raggiunge."""
+    return sum((bx <= 0, by <= 0, bx + bw >= width, by + bh >= height))
+
+
+def _side_bands(bx, by, bw, bh, width, height):
+    """Coppie (fascia esterna, fascia interna) per ogni lato non sulla cornice."""
+    short = min(bw, bh)
+    gap = max(BOUNDARY_GAP_MIN_PX, int(round(BOUNDARY_GAP_FRACTION * short)))
+    band = max(BOUNDARY_BAND_MIN_PX, int(round(BOUNDARY_BAND_FRACTION * short)))
+    x1, y1 = bx + bw, by + bh
+    rows, cols = slice(by, y1), slice(bx, x1)
+    sides = []
+    left = (max(0, bx - gap - band), max(0, bx - gap))
+    if left[1] > left[0]:
+        sides.append(((rows, slice(*left)), (rows, slice(bx + gap, min(x1, bx + gap + band)))))
+    right = (min(width, x1 + gap), min(width, x1 + gap + band))
+    if right[1] > right[0]:
+        sides.append(((rows, slice(*right)), (rows, slice(max(bx, x1 - gap - band), x1 - gap))))
+    top = (max(0, by - gap - band), max(0, by - gap))
+    if top[1] > top[0]:
+        sides.append(((slice(*top), cols), (slice(by + gap, min(y1, by + gap + band)), cols)))
+    bottom = (min(height, y1 + gap), min(height, y1 + gap + band))
+    if bottom[1] > bottom[0]:
+        sides.append(((slice(*bottom), cols), (slice(max(by, y1 - gap - band), y1 - gap), cols)))
+    return sides, gap
+
+
+def _surrounded_by_background(distance, background: BackgroundModel, bx, by, bw, bh) -> bool:
+    """Il riquadro separa, lato per lato, cio' che sfondo non e' dallo sfondo.
+
+    Fuori: un pixel conta come sfondo se e' piu' vicino allo sfondo che alla
+    scheda (meta' del salto di contrasto, il criterio del bordo a gradino), o
+    comunque indistinguibile dallo sfondo. Cosi' un alone chiaro, un'ombra
+    tenue o una piazzola che sporge di un pixel restano "fuori", mentre la
+    scheda attorno a un dettaglio interno no.
+
+    Dentro: la fascia deve essere in maggioranza distinguibile dallo sfondo.
+    Una maschera che mette un lato dove dentro c'e' sfondo ha incollato alla
+    scheda qualcosa di esterno (il testo di una quota, un connettore
+    sporgente): il riquadro e' sbagliato. Vale per tutte le segmentazioni:
+    sulla foto quotata di riferimento la tessitura incollava le quote alla
+    scheda e dava un riquadro con il 7% di scarto d'aspetto, dentro la
+    tolleranza, che senza questa verifica passava in silenzio. Limite
+    dichiarato: una scheda il cui lato e' occupato per piu' di meta' da una
+    superficie indistinguibile dallo sfondo (schermo metallico fino al bordo
+    su un piano dello stesso colore) viene rifiutata, non misurata.
+
+    Un lato che giace sulla cornice non si puo' verificare e si salta; se non
+    resta nessun lato verificabile la scheda non e' dimostrabilmente
+    circondata dallo sfondo e il candidato si scarta.
+    """
+    height, width = distance.shape[:2]
+    sides, gap = _side_bands(bx, by, bw, bh, width, height)
+    if not sides:
+        return False
+    interior = distance[by + gap:by + bh - gap, bx + gap:bx + bw - gap]
+    if interior.size == 0:
+        interior = distance[by:by + bh, bx:bx + bw]
+    outside_tolerance = max(background.tolerance, 0.5 * float(np.median(interior)))
+    for outer, inner in sides:
+        outside = distance[outer]
+        if outside.size and np.mean(outside <= outside_tolerance) < BOUNDARY_MAJORITY_SHARE:
+            return False
+        inside = distance[inner]
+        if inside.size and np.mean(inside <= background.tolerance) >= BOUNDARY_MAJORITY_SHARE:
+            return False
+    return True
+
+
+def _aspect_error(width_px, height_px, body_length, body_width) -> float:
+    """Scarto relativo del rapporto X/Y trovato da quello dichiarato, nel verso dichiarato.
+
+    Il confronto si fa sul rapporto lato lungo / lato corto DELLE QUOTE: con
+    L >= W la scheda deve essere orizzontale (w/h contro L/W, come sempre), con
+    L < W verticale (h/w contro W/L). Una scheda con il verso sbagliato da' un
+    rapporto < 1 contro uno >= 1 e viene scartata, senza scambiare gli assi.
+    """
+    if body_length >= body_width:
+        found, expected = width_px / height_px, body_length / body_width
+    else:
+        found, expected = height_px / width_px, body_width / body_length
+    return abs(found - expected) / expected
+
+
 def deskew_board(image, body_length: float, body_width: float):
     """@brief Rotate a tilted board photo upright, or return None when not needed or not possible.
 
@@ -235,27 +523,39 @@ def deskew_board(image, body_length: float, body_width: float):
     motivo per cui una foto vera ad alta risoluzione veniva scartata in favore
     di un disegno a bassa risoluzione.
 
-    Qui si misura l'inclinazione del rettangolo scuro piu' grande compatibile
-    con le proporzioni del modulo e si ruota l'intera immagine. E' una
-    trasformazione rigida: lunghezze e proporzioni restano quelle vere, quindi
-    la scala ricavata dopo il raddrizzamento e' altrettanto valida. La tela
-    viene allargata, cosi' la rotazione non taglia gli angoli.
+    Qui si misura l'inclinazione della regione piu' grande compatibile con le
+    proporzioni del modulo (in qualunque verso: il verso lo giudica poi
+    `find_board`) e che non tocca la cornice su due o piu' lati, e si ruota
+    l'intera immagine. E' una trasformazione rigida: lunghezze e proporzioni
+    restano quelle vere, quindi la scala ricavata dopo il raddrizzamento e'
+    altrettanto valida. La tela viene allargata, cosi' la rotazione non taglia
+    gli angoli, e riempita con il colore dello sfondo stimato: un riempimento
+    bianco fisso creerebbe su uno sfondo scuro un bordo che non esiste.
 
-    Ritorna l'immagine raddrizzata, oppure None se non c'e' niente da
-    raddrizzare o l'inclinazione e' troppo grande per essere una vista
-    dall'alto.
+    @param image BGR photo.
+    @param body_length Declared board extent along X, in mm.
+    @param body_width Declared board extent along Y, in mm.
+    @return The straightened image, or None when there is nothing to
+        straighten or the tilt is too large for a top view.
     """
     if cv2 is None or not all(math.isfinite(v) and v > 0 for v in (body_length, body_width)):
         return None
-    expected = body_length / body_width
+    background = estimate_background(image)
+    if background is None:
+        return None
+    expected = max(body_length, body_width) / min(body_length, body_width)
+    height, width = image.shape[:2]
+    distance = _background_distance(image, background)
     contours = []
-    for mask in (_board_mask(image), _texture_mask(image)):
+    for mask, _ in _segmentations(image, background, distance):
         found, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         contours.extend(found)
     best = None
     for contour in contours:
         (cx, cy), (rw, rh), angle = cv2.minAreaRect(contour)
         if min(rw, rh) < 20:
+            continue
+        if _frame_sides_touched(*cv2.boundingRect(contour), width, height) > MAX_FRAME_SIDES_TOUCHED:
             continue
         # Sul rettangolo ruotato il rapporto e' quello vero della scheda: il
         # bounding box assiale di un rettangolo storto e' sempre piu' tozzo.
@@ -277,50 +577,115 @@ def deskew_board(image, body_length: float, body_width: float):
         return None
     matrix = cv2.getRotationMatrix2D((cx, cy), tilt, 1.0)
     radians = math.radians(abs(tilt))
-    height, width = image.shape[:2]
     new_w = int(width * math.cos(radians) + height * math.sin(radians)) + 2
     new_h = int(width * math.sin(radians) + height * math.cos(radians)) + 2
     matrix[0, 2] += new_w / 2 - cx
     matrix[1, 2] += new_h / 2 - cy
     return cv2.warpAffine(image, matrix, (new_w, new_h), flags=cv2.INTER_CUBIC,
-                          borderValue=(255, 255, 255))
+                          borderValue=background.bgr)
+
+
+@dataclass(frozen=True)
+class BoardSearch:
+    """@brief Outcome of the board search: the frame, or why there is none."""
+
+    #: Board reference in the photo, None when the board was not found.
+    frame: Optional[BoardFrame]
+    #: BOARD_FOUND, BOARD_NOT_FOUND or BOARD_ROTATED_90.
+    reason: str
+
+    def message(self, body_length: float, body_width: float) -> str:
+        """@brief Translated explanation for the user; empty when the board was found.
+
+        @param body_length Declared board extent along X, in mm.
+        @param body_width Declared board extent along Y, in mm.
+        @return Log line in the active language.
+        """
+        if self.reason == BOARD_FOUND:
+            return ""
+        if self.reason == BOARD_ROTATED_90:
+            return tx("La scheda nella foto e' ruotata di 90 gradi rispetto alle quote "
+                      "dichiarate: la lunghezza ({length:.2f} mm) corre lungo X, cioe' in "
+                      "orizzontale nella foto, la larghezza ({width:.2f} mm) in verticale. "
+                      "Ruotare la foto di 90 gradi, oppure verificare che lunghezza e "
+                      "larghezza non siano state inserite al contrario.",
+                      length=body_length, width=body_width)
+        return tx("Scheda non riconosciuta nella foto: nessuna regione distinta dallo "
+                  "sfondo, interamente inquadrata e con le proporzioni "
+                  "{length:.2f} x {width:.2f} mm.",
+                  length=body_length, width=body_width)
+
+
+def _search(image, body_length, body_width, background, distance) -> Optional[BoardFrame]:
+    """Prima segmentazione che da' candidati validi; il piu' grande vince."""
+    for mask, mid_step in _segmentations(image, background, distance):
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        candidates = _board_candidates(contours, image, body_length, body_width,
+                                       distance, background, mid_step)
+        if candidates:
+            return _frame_from(candidates, body_length, body_width)
+    return None
+
+
+def locate_board(image, body_length: float, body_width: float) -> BoardSearch:
+    """@brief Locate the board by contrast with the background and say why it failed, if it did.
+
+    @param image BGR photo.
+    @param body_length Declared board extent along X (horizontal in the photo), in mm.
+    @param body_width Declared board extent along Y (vertical in the photo), in mm.
+    @return BoardSearch with the frame, or with the reason it is missing.
+    @note A board is a region that differs from the background estimated on
+        the image frame, touches at most one side of the frame, is surrounded
+        by background on every free side, is axis-aligned within
+        MAX_BOARD_TILT_DEG, has the declared X/Y proportions IN THE DECLARED
+        ORIENTATION within MAX_BOARD_ASPECT_ERROR, at least
+        MIN_BOARD_SCALE_PX_PER_MM and MIN_BOARD_IMAGE_FRACTION of the photo.
+        When nothing qualifies there is no frame: a wrong rectangle is never
+        returned in its place.
+    @note No image is rotated to guess the orientation. When the board only
+        fits with the axes swapped the reason is BOARD_ROTATED_90, so the user
+        can rotate the photo or correct the dimensions.
+    """
+    if cv2 is None or not all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                              and math.isfinite(v) and v > 0
+                              for v in (body_length, body_width)):
+        return BoardSearch(None, BOARD_NOT_FOUND)
+    background = estimate_background(image)
+    if background is None:
+        return BoardSearch(None, BOARD_NOT_FOUND)
+    distance = _background_distance(image, background)
+    frame = _search(image, body_length, body_width, background, distance)
+    if frame is not None:
+        return BoardSearch(frame, BOARD_FOUND)
+    if body_length != body_width and _search(image, body_width, body_length,
+                                             background, distance) is not None:
+        return BoardSearch(None, BOARD_ROTATED_90)
+    return BoardSearch(None, BOARD_NOT_FOUND)
 
 
 def find_board(image, body_length: float, body_width: float) -> Optional[BoardFrame]:
-    """@brief Locate the board rectangle in the photo; None when it is not a top view.
+    """@brief Locate the board rectangle in the photo; None when it is not a usable top view.
 
-    Trova il rettangolo della scheda nella foto; None se non e' una vista dall'alto.
+    Trova il rettangolo della scheda nella foto; None se non e' una vista
+    dall'alto utilizzabile. Il motivo del rifiuto lo da' `locate_board`.
+
+    @param image BGR photo.
+    @param body_length Declared board extent along X, in mm.
+    @param body_width Declared board extent along Y, in mm.
+    @return BoardFrame whose width_px/height_px are the X/Y extents, or None.
     """
-    if not all(math.isfinite(v) and v > 0 for v in (body_length, body_width)):
-        return None
-    expected = body_length / body_width
-    # Due segmentazioni, provate in quest'ordine. La soglia sul buio e' esatta
-    # su disegni e rendering, dove il PCB e' nero uniforme. Su una fotografia
-    # reale fallisce: uno schermo metallico e' chiaro quanto lo sfondo e
-    # un'ombra sul tavolo e' scura quanto la scheda, cosi' il "rettangolo
-    # scuro piu' grande" diventa un blob senza significato. La tessitura non
-    # ha quel problema, ma su un disegno pulito e' meno precisa: resta il
-    # ripiego, non il criterio principale.
-    for mask in (_board_mask(image), _texture_mask(image)):
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if contours:
-            candidates = _board_candidates(contours, image, expected, body_length)
-            if candidates:
-                break
-    else:
-        return None
-    if not candidates:
-        return None
-    return _frame_from(candidates, body_length, body_width)
+    return locate_board(image, body_length, body_width).frame
 
 
-def _board_candidates(contours, image, expected, body_length):
+def _board_candidates(contours, image, body_length, body_width, distance, background,
+                      mid_step=False):
     """Rettangoli compatibili col modulo, filtrati come da contratto."""
     # Le foto dei moduli sono spesso corredate da quote: linee e frecce possono
     # formare il contorno più grande, ma con un rapporto molto diverso da quello
     # reale della scheda. Scegliamo quindi il candidato più grande tra quelli
     # geometricamente compatibili, invece di usare sempre max(contourArea).
     candidates = []
+    height, width = image.shape[:2]
     for contour in contours:
         (_, _), (rw, rh), angle = cv2.minAreaRect(contour)
         if min(rw, rh) < 20:
@@ -336,36 +701,46 @@ def _board_candidates(contours, image, expected, body_length):
         if tilt > MAX_BOARD_TILT_DEG or edge_drift > drift_allowance:
             continue
         bx, by, bw, bh = cv2.boundingRect(contour)
+        if mid_step:
+            bx, by, bw, bh = _mid_step_box(distance, background, bx, by, bw, bh)
         w, h = float(bw), float(bh)
-        # I consumatori usano X orizzontale. Non fingere che una scheda
-        # verticale sia orizzontale scambiando solo width_px e height_px.
-        if w < h:
-            continue
-        long_px, short_px = max(w, h), min(w, h)
-        found = long_px / short_px
-        error = abs(found - expected) / expected
+        # I consumatori usano X = lunghezza dichiarata. Il verso si confronta
+        # con quello delle quote: nessuno scambio implicito di assi.
+        error = _aspect_error(w, h, body_length, body_width)
         if error > MAX_BOARD_ASPECT_ERROR:
             continue
         # Il solo rapporto d'aspetto non identifica la scheda: su una foto
         # reale un connettore o un'etichetta scura possono avere lo stesso
-        # rapporto. Senza questi due filtri il candidato sbagliato veniva
+        # rapporto. Senza questi filtri il candidato sbagliato veniva
         # accettato in silenzio e calibrava tutto l'inventario su un ritaglio
-        # di pochi pixel -- un errore muto, peggiore di un rifiuto.
-        if long_px / body_length < MIN_BOARD_SCALE_PX_PER_MM:
+        # sbagliato -- un errore muto, peggiore di un rifiuto.
+        if w / body_length < MIN_BOARD_SCALE_PX_PER_MM:
             continue
-        if (w * h) < MIN_BOARD_IMAGE_FRACTION * image.shape[0] * image.shape[1]:
+        if (w * h) < MIN_BOARD_IMAGE_FRACTION * height * width:
+            continue
+        # Una regione che raggiunge due o piu' lati della cornice e' lo sfondo
+        # (o esce dall'inquadratura): la sua estensione non e' misurabile.
+        if _frame_sides_touched(bx, by, bw, bh, width, height) > MAX_FRAME_SIDES_TOUCHED:
+            continue
+        # La scheda e' circondata dallo sfondo; un dettaglio interno con le
+        # stesse proporzioni no.
+        if not _surrounded_by_background(distance, background, bx, by, bw, bh):
             continue
         candidates.append((cv2.contourArea(contour), error, bx, by, w, h))
     return candidates
 
 
 def _frame_from(candidates, body_length, body_width):
-    """Il candidato piu' grande diventa il riferimento della scheda."""
+    """Il candidato piu' grande diventa il riferimento della scheda.
+
+    width_px e height_px sono le estensioni su X e su Y dell'immagine, nel
+    verso dichiarato (X = lunghezza): per una scheda dichiarata verticale
+    width_px e' il lato corto.
+    """
     _, _, bx, by, w, h = max(candidates, key=lambda item: item[0])
     cx, cy = bx + w / 2, by + h / 2
-    long_px, short_px = max(w, h), min(w, h)
-    scale = (long_px / body_length + short_px / body_width) / 2
-    return BoardFrame(cx=cx, cy=cy, scale=scale, width_px=long_px, height_px=short_px)
+    scale = (w / body_length + h / body_width) / 2
+    return BoardFrame(cx=cx, cy=cy, scale=scale, width_px=w, height_px=h)
 
 
 def _edge_mask(window) -> "np.ndarray":
