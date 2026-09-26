@@ -22,6 +22,7 @@ from ..fsutil import replace_file
 from PyQt6.QtWidgets import (QAbstractSpinBox, QCheckBox, QComboBox, QDoubleSpinBox,
                              QGroupBox, QLineEdit, QPlainTextEdit, QSpinBox, QTextEdit)
 from ..services.messages import tx
+from .component_state import BoundedValue, FlagValue, TextValue
 
 #: File name inside the project folder.
 PROJECT_CONFIG_NAME = "project_config.json"
@@ -39,18 +40,20 @@ def widget_value(widget):
     """@brief JSON-friendly value of an input widget.
 
     @param widget QLineEdit, QTextEdit/QPlainTextEdit, QSpinBox,
-        QDoubleSpinBox, QCheckBox, checkable QGroupBox or QComboBox.
+        QDoubleSpinBox, QCheckBox, checkable QGroupBox or QComboBox, or one of
+        the non-graphical parameters of `component_state` (saved exactly like
+        the editor it replaced, so older project files stay valid).
     @return The text, number or state; for a combo box {"data", "text"}, so
         it can be restored by its data first and by its text otherwise.
     @throws TypeError For any other widget type.
     """
-    if isinstance(widget, QLineEdit):
+    if isinstance(widget, (QLineEdit, TextValue)):
         return widget.text()
     if isinstance(widget, (QTextEdit, QPlainTextEdit)):
         return widget.toPlainText()
-    if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+    if isinstance(widget, (QSpinBox, QDoubleSpinBox, BoundedValue)):
         return widget.value()
-    if isinstance(widget, (QCheckBox, QGroupBox)):
+    if isinstance(widget, (QCheckBox, QGroupBox, FlagValue)):
         return widget.isChecked()
     if isinstance(widget, QComboBox):
         data = widget.currentData()
@@ -68,19 +71,21 @@ def set_widget_value(widget, value) -> bool:
         widget (wrong type, a number outside the range, a combo entry that no
         longer exists): the widget then keeps its current value.
     """
-    if isinstance(widget, QLineEdit) and isinstance(value, str):
+    if isinstance(widget, (QLineEdit, TextValue)) and isinstance(value, str):
         widget.setText(value)
         return True
     if isinstance(widget, (QTextEdit, QPlainTextEdit)) and isinstance(value, str):
         widget.setPlainText(value)
         return True
-    if isinstance(widget, (QSpinBox, QDoubleSpinBox)) and isinstance(value, (int, float)) \
+    if isinstance(widget, (QSpinBox, QDoubleSpinBox, BoundedValue)) \
+            and isinstance(value, (int, float)) \
             and not isinstance(value, bool) and math.isfinite(float(value)):
         if not widget.minimum() <= value <= widget.maximum():
             return False
-        widget.setValue(int(value) if isinstance(widget, QSpinBox) else float(value))
+        integer = isinstance(widget, QSpinBox) or isinstance(widget.value(), int)
+        widget.setValue(int(value) if integer else float(value))
         return True
-    if isinstance(widget, QCheckBox) and isinstance(value, bool):
+    if isinstance(widget, (QCheckBox, FlagValue)) and isinstance(value, bool):
         widget.setChecked(value)
         return True
     if isinstance(widget, QGroupBox) and widget.isCheckable() and isinstance(value, bool):

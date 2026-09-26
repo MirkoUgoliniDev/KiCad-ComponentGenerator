@@ -3,11 +3,11 @@
 L'utente vede sulla scheda che contatto ha ogni lato (mezzo foro tagliato dal
 bordo, foro passante chiuso, oppure entrambi) e deve poterlo correggere e
 rigenerare SENZA pagare un'altra analisi AI. Qui si verifica che la scelta:
-compaia nella tabella lati con le tre voci e il suggerimento per
-riconoscerle; arrivi al `CastellatedSide` consegnato alla generazione;
+compaia nel selettore del tab 3D con le tre voci e il suggerimento per
+riconoscerle (la tabella lati e' stata tolta il 2026-09-26); arrivi al `CastellatedSide` consegnato alla generazione;
 venga letta dall'estrazione quando c'e' e lasci il predefinito quando manca;
 sopravviva ai punti in cui i lati vengono serializzati e riletti; sia
-raggiungibile dal tab 3D in modalita' base; funzioni sia con il generatore
+raggiungibile dal tab 3D; funzioni sia con il generatore
 che conosce gia' il campo sia con quello che non lo conosce ancora.
 """
 from dataclasses import dataclass, fields
@@ -23,9 +23,6 @@ from kicadgen.generators import castellated_module
 from kicadgen.services import openrouter
 from kicadgen.services.datasheet_extractor import ExtractedParams
 from kicadgen.services.i18n import DEFAULT_TRANSLATIONS
-
-
-STYLE_COLUMN = 6
 
 
 class PaidCallAttempted(AssertionError):
@@ -114,12 +111,19 @@ def real_generator_with_field(monkeypatch):
 def castellated(window):
     """@brief Accende il modulo castellated: nascono i due lati predefiniti."""
     window.group_castellated.setChecked(True)
-    assert window.table_sides.rowCount() == 2
+    assert len(window._sides) == 2
     return window
 
 
-def style_combo(window, row):
-    return window.table_sides.cellWidget(row, STYLE_COLUMN)
+def set_side_style(window, row, style):
+    """@brief Corregge il tipo di contatto di UN lato nei dati.
+
+    La tabella lati con una tendina per lato e' stata tolta il 2026-09-26 con
+    il tab Footprint 2D; lati diversi arrivano dall'estrazione o da un progetto
+    salvato. Si segue la stessa strada che seguiva la tendina.
+    """
+    window._sides[row]["contact_style"] = style
+    window._on_contact_style_edited()
 
 
 def choose(combo, style):
@@ -141,24 +145,23 @@ def side(edge, first_pin, **extra):
                 reverse=False, **extra)
 
 
-# ── La colonna ─────────────────────────────────────────────────────────
+# ── Il selettore ───────────────────────────────────────────────────
 
 
-def test_column_offers_the_three_styles_with_the_telling_apart_tooltip(window):
+def test_the_3d_selector_offers_the_three_styles_with_the_telling_apart_tooltip(window):
     castellated(window)
-    header = window.table_sides.horizontalHeaderItem(STYLE_COLUMN)
-    assert header.text() == window.i18n.text("Tipo contatto")
-    combo = style_combo(window, 0)
+    combo = window.combo_contact_style_3d
+    # Tre scelte piu' la voce informativa «diverso per lato», spenta.
     assert [combo.itemData(i) for i in range(combo.count())] == [
-        "half_hole", "through_hole", "half_and_through"]
-    assert [combo.itemText(i) for i in range(combo.count())] == [
+        "half_hole", "through_hole", "half_and_through", None]
+    assert [combo.itemText(i) for i in range(3)] == [
         window.i18n.text(gui.CONTACT_STYLE_LABELS[s])
         for s in ("half_hole", "through_hole", "half_and_through")]
+    assert not combo.model().item(3).isEnabled()
     # Il suggerimento deve dire COME distinguerli, non solo elencarli: il
     # bordo che taglia il foro contro il materiale fra foro e bordo.
-    for tip in (combo.toolTip(), header.toolTip()):
-        assert "tagliato dal bordo" in tip
-        assert "materiale della scheda" in tip
+    assert "tagliato dal bordo" in combo.toolTip()
+    assert "materiale della scheda" in combo.toolTip()
     # Negativo: il predefinito e' il comportamento di oggi, non un'altra voce.
     assert combo.currentData() == "half_and_through"
 
@@ -171,12 +174,9 @@ def test_choosing_through_hole_reaches_the_side_given_to_generation(
     castellated(window)
     logs = []
     monkeypatch.setattr(window, "_append_log", logs.append)
-    combo = style_combo(window, 1)
-    # Con o senza le costanti del generatore la combo offre gli stessi valori.
-    assert [combo.itemData(i) for i in range(combo.count())] == [
-        "half_hole", "through_hole", "half_and_through"]
+    # Con o senza le costanti del generatore si offrono gli stessi valori.
     assert gui.contact_styles() == ("half_hole", "through_hole", "half_and_through")
-    choose(combo, "through_hole")
+    set_side_style(window, 1, "through_hole")
     sides = window._sides_from_table()
     params = window._current_castellated_params()
     if generator_state:
@@ -201,7 +201,7 @@ def test_footprint_generation_receives_the_chosen_style(
     captured = []
     monkeypatch.setattr(gui.GenerateWorker, "start", lambda self: captured.append(self))
     window.group_3d.setChecked(False)
-    choose(style_combo(window, 0), "through_hole")
+    set_side_style(window, 0, "through_hole")
     window._generate()
     assert len(captured) == 1
     assert [s.contact_style for s in captured[0].params.sides] == [
@@ -242,20 +242,20 @@ def test_unknown_declared_style_is_not_guessed_into_another_one(window, monkeypa
 
 def test_relaunch_base_round_trips_the_style_through_the_table(window):
     castellated(window)
-    choose(style_combo(window, 0), "half_hole")
-    choose(style_combo(window, 1), "through_hole")
+    set_side_style(window, 0, "half_hole")
+    set_side_style(window, 1, "through_hole")
     window._last_extracted = None
     bundle = SimpleNamespace(body_length_mm=40.0, body_width_mm=20.0, photo_path=None)
     base = window._relaunch_base_params(bundle)
     assert [s["contact_style"] for s in base.castellated_sides] == ["half_hole", "through_hole"]
-    window.table_sides.setRowCount(0)
+    window._sides.clear()
     window._apply_extracted_castellated(base)
     assert window._table_contact_styles() == ["half_hole", "through_hole"]
 
 
 def test_old_saved_sides_without_the_key_load_with_the_default(window):
     castellated(window)
-    choose(style_combo(window, 0), "through_hole")
+    set_side_style(window, 0, "through_hole")
     old_record = [side("left", 1), side("right", 4)]
     assert all("contact_style" not in s for s in old_record)
     window._apply_extracted_castellated(extracted(old_record))
@@ -266,7 +266,7 @@ def test_old_saved_sides_without_the_key_load_with_the_default(window):
 
 def test_inventory_relaunch_keeps_the_style_corrected_after_the_extraction(window):
     window._apply_extracted_castellated(extracted([side("left", 1), side("right", 4)]))
-    choose(style_combo(window, 1), "through_hole")
+    set_side_style(window, 1, "through_hole")
     earlier = [side("left", 1), side("right", 4)]
     carried = window._sides_with_table_styles(earlier)
     assert [s["contact_style"] for s in carried] == ["half_and_through", "through_hole"]
@@ -276,17 +276,16 @@ def test_inventory_relaunch_keeps_the_style_corrected_after_the_extraction(windo
 def test_inventory_relaunch_does_not_pair_ambiguous_sides(window):
     """@brief Negativo: due righe sullo stesso bordo non si abbinano a indovinare."""
     window._apply_extracted_castellated(extracted([side("left", 1), side("left", 4)]))
-    choose(style_combo(window, 1), "through_hole")
+    set_side_style(window, 1, "through_hole")
     earlier = [side("left", 1), side("left", 4)]
     assert window._sides_with_table_styles(earlier) == earlier
 
 
-# ── Modalita' base: dal tab 3D ─────────────────────────────────────────
+# ── Dal tab 3D: la tabella lati non si mostra ─────────────────────────
 
 
-def test_basic_mode_reaches_the_style_from_the_3d_tab(window):
-    assert not window._advanced_user()
-    assert not window.tabs.isTabVisible(1), "la tabella lati e' nascosta in modalita' base"
+def test_the_style_is_reached_from_the_3d_tab(window):
+    assert window.tabs.count() == 4, "la tabella lati non esiste piu'"
     assert window.contact_style_bar_3d.isHidden(), "senza modulo castellated non serve"
     castellated(window)
     assert not window.contact_style_bar_3d.isHidden()
@@ -303,14 +302,14 @@ def test_basic_mode_reaches_the_style_from_the_3d_tab(window):
 
 def test_3d_combo_shows_mixed_sides_without_choosing_for_the_user(window):
     castellated(window)
-    choose(style_combo(window, 0), "half_hole")
+    set_side_style(window, 0, "half_hole")
     combo = window.combo_contact_style_3d
     assert combo.currentData() is None
     assert not combo.model().item(combo.currentIndex()).isEnabled()
     # Negativo: selezionare la voce informativa non tocca i lati.
     window._on_contact_style_all_changed(combo.currentIndex())
     assert window._table_contact_styles() == ["half_hole", "half_and_through"]
-    choose(style_combo(window, 0), "half_and_through")
+    set_side_style(window, 0, "half_and_through")
     assert combo.currentData() == "half_and_through"
 
 
@@ -412,14 +411,15 @@ def test_contact_style_items_follow_a_language_switch(window):
     traduzioni lascia stare le voci dei combo.
     """
     castellated(window)
-    choose(style_combo(window, 0), "half_hole")
+    set_side_style(window, 0, "half_hole")
     window._on_language_changed(window.language_combo.findData("en"))
-    for combo in (window.combo_contact_style_3d, style_combo(window, 0), style_combo(window, 1)):
-        for text, data in _items(combo):
-            source = (gui.CONTACT_STYLE_MIXED_LABEL if data is None
-                      else gui.CONTACT_STYLE_LABELS[data])
-            assert text == DEFAULT_TRANSLATIONS["ui:" + source]["en"], (text, data)
-    assert "Half-hole" in style_combo(window, 0).currentText()
+    combo = window.combo_contact_style_3d
+    for text, data in _items(combo):
+        source = (gui.CONTACT_STYLE_MIXED_LABEL if data is None
+                  else gui.CONTACT_STYLE_LABELS[data])
+        assert text == DEFAULT_TRANSLATIONS["ui:" + source]["en"], (text, data)
+    # Lati diversi: il selettore mostra la voce «mista», tradotta.
+    assert combo.currentData() is None
 
 
 def test_a_language_switch_changes_texts_not_choices(window):
@@ -429,21 +429,20 @@ def test_a_language_switch_changes_texts_not_choices(window):
     il testo tradotto del passaggio precedente.
     """
     castellated(window)
-    choose(style_combo(window, 1), "through_hole")
-    before = [[data for _text, data in _items(combo)]
-              for combo in (window.combo_contact_style_3d, style_combo(window, 0))]
+    set_side_style(window, 1, "through_hole")
+    before = [data for _text, data in _items(window.combo_contact_style_3d)]
     chosen = window._table_contact_styles()
     current_3d = window.combo_contact_style_3d.currentIndex()
     revision = window._model_revision
     window._on_language_changed(window.language_combo.findData("de"))
-    after = [[data for _text, data in _items(combo)]
-             for combo in (window.combo_contact_style_3d, style_combo(window, 0))]
+    after = [data for _text, data in _items(window.combo_contact_style_3d)]
     assert after == before
     assert window._table_contact_styles() == chosen
     assert window.combo_contact_style_3d.currentIndex() == current_3d
     assert window._model_revision == revision, "cambiare lingua non cambia il modello"
     window._on_language_changed(window.language_combo.findData("it"))
-    assert style_combo(window, 1).currentText() == "Foro passante"
+    combo = window.combo_contact_style_3d
+    assert combo.itemText(combo.findData("through_hole")) == "Foro passante"
 
 
 def test_contact_style_tooltip_is_retranslated_both_ways(window):
@@ -454,8 +453,8 @@ def test_contact_style_tooltip_is_retranslated_both_ways(window):
     """
     castellated(window)
     window._on_language_changed(window.language_combo.findData("en"))
-    english = DEFAULT_TRANSLATIONS["ui:" + gui.CONTACT_STYLE_TOOLTIP]["en"]
-    assert style_combo(window, 0).toolTip() == english
+    tooltip = gui.CONTACT_STYLE_TOOLTIP + "\nVale per tutti i lati."
+    english = DEFAULT_TRANSLATIONS["ui:" + tooltip]["en"]
+    assert window.combo_contact_style_3d.toolTip() == english
     window._on_language_changed(window.language_combo.findData("it"))
-    assert "materiale della scheda" in style_combo(window, 0).toolTip()
     assert "materiale della scheda" in window.combo_contact_style_3d.toolTip()

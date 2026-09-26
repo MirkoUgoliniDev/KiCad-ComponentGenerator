@@ -38,6 +38,8 @@ import math
 import os
 import re
 import sqlite3
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from functools import lru_cache
 from typing import Iterable, Optional
@@ -49,6 +51,42 @@ from ..services.messages import tx
 
 #: Variabile d'ambiente per indicare una libreria diversa da quella trovata.
 LIBRARY_ENV = "KICAD_3DMODEL_DIR"
+
+#: Chi vuole sapere quando FreeCAD sta DAVVERO misurando dei modelli, per
+#: thread: la finestra di avanzamento lo mostra invece di attribuire tutta la
+#: fase alla libreria di KiCad (utente, 2026-09-26). Per thread perche' ogni
+#: generazione gira nel proprio QThread e non deve sentire le misure altrui.
+_measuring_listener = threading.local()
+
+
+@contextmanager
+def measuring_listener(callback):
+    """@brief Tell `callback(started, count)` when FreeCAD starts/ends measuring models.
+
+    @param callback Called with (True, n) right before a `freecadcmd` child is
+        launched to measure n candidate models, and with (False, n) when it is
+        over. Models already in the measurement cache launch nothing, so the
+        callback is not called for them.
+    @note Scoped to the calling thread and to the `with` block; a failing
+        callback is ignored, because progress reporting must never stop a
+        generation.
+    """
+    previous = getattr(_measuring_listener, "callback", None)
+    _measuring_listener.callback = callback
+    try:
+        yield
+    finally:
+        _measuring_listener.callback = previous
+
+
+def _announce_measuring(started: bool, count: int) -> None:
+    callback = getattr(_measuring_listener, "callback", None)
+    if callback is None:
+        return
+    try:
+        callback(started, count)
+    except Exception:  # noqa: BLE001 - l'avanzamento non deve fermare il lavoro
+        pass
 
 #: Estensioni dei modelli, in ordine di preferenza: lo STEP e' geometria
 #: solida ed e' cio' che serve per un componente montato; il VRML e' solo
@@ -753,6 +791,15 @@ def measure_models(paths, timeout: int = 300, *, cancel=None) -> dict:
         return {}
     measured = {}
     remaining = list(readable)
+    _announce_measuring(True, len(readable))
+    try:
+        return _measure_remaining(freecad, remaining, measured, timeout, cancel)
+    finally:
+        _announce_measuring(False, len(readable))
+
+
+def _measure_remaining(freecad, remaining, measured, timeout, cancel) -> dict:
+    """Measure `remaining` in batches, skipping a model that stalls (see `measure_models`)."""
     while remaining:
         outcome, batch, stopped = _measure_batch(freecad, remaining, timeout, cancel)
         measured.update(batch)

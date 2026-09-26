@@ -373,7 +373,9 @@ def test_nullable_incomplete_lead_observation_keeps_semantic_component():
     assert result[0]['package'] == 'ESP32-S3-WROOM-1U'
     assert result[0]['marking'] == 'ESPRESSIF ESP32-S3-WROOM-1U'
     assert result[0]['lead_count'] is None
-    assert result[0]['lead_count_confidence'] == 'low'
+    # Contract changed on purpose (2026-09-26): an omitted/null confidence is
+    # recorded as explicitly undeclared, no longer as a guessed 'low'.
+    assert result[0]['lead_count_confidence'] == inventory.LEAD_COUNT_CONFIDENCE_UNDECLARED
     assert not any('invalid or duplicate component' in line for line in logs)
 
 

@@ -99,7 +99,7 @@ def test_an_unnamed_component_takes_the_proposal_without_asking(window, tmp_path
     assert window.field_name.text() == "NOME_NUOVO"
 
 
-def test_extracted_fillets_populate_annotation_table(window, tmp_path):
+def test_extracted_fillets_populate_the_annotations(window, tmp_path):
     window.field_library_root.setText(str(tmp_path))
     window.field_name.setText("COMP")
 
@@ -108,8 +108,7 @@ def test_extracted_fillets_populate_annotation_table(window, tmp_path):
         {"edge": "top-back", "radius_mm": 1.0},
     ]))
 
-    assert len(window.fillet_annotations) == 2
-    assert window.table_annotations.rowCount() == 2
+    assert [a.edge for a in window.fillet_annotations] == ["top-front", "top-back"]
 
 
 def test_invalid_extracted_fillets_are_skipped(window, tmp_path):

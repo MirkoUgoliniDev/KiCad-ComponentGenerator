@@ -74,7 +74,6 @@ DEFAULTS = {
     # modulo a passo fitto i nomi lunghi si sovrappongono fra loro e finiscono
     # sopra i componenti, rendendo il solido meno leggibile invece che piu'.
     "silk_pin_labels": False,
-    "advanced_user": False,
     "show_grid": True,
     "grid_unit": "mm",  # "mm" oppure "inch" (passo 2.54mm, standard THT)
     "show_pin_numbers_3d": True,

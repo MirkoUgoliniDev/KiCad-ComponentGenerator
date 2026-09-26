@@ -12,7 +12,7 @@ def test_corrupt_candidate_record_does_not_hide_mesh(window,tmp_path):
     window.preview_3d.render_mesh=Mock()
     window._show_generated_mesh(step)
     window.preview_3d.render_mesh.assert_called_once_with(mesh)
-    assert 'Report candidati non caricato' in window.log_text.toPlainText()
+    assert 'Report candidati non caricato' in window._log_plain_text()
 
 
 def test_report_source_row_not_filtered_index(window,tmp_path):

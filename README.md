@@ -88,8 +88,7 @@ from global defaults.
 
 The same SQLite catalog stores the user-interface translation keys for Italian,
 English, French and German. Select the active language from the selector in the
-top-right corner. Advanced users can edit the catalog through
-Configuration -> Manage translations; missing entries fall back to English.
+top-right corner. Missing entries fall back to English.
 
 ~~~mermaid
 flowchart LR
@@ -107,29 +106,40 @@ flowchart LR
 The API key is read from the local .env file and is never stored in the profile
 database. Cached AI responses and generated output are local data.
 
-## Standard and Advanced user modes
+## Workflow
 
 ~~~mermaid
 stateDiagram-v2
-    [*] --> Standard
-    Standard --> AIExtraction: Run extraction
+    [*] --> AIExtraction: Run extraction
     AIExtraction --> AutomaticGeneration: Valid result
     AutomaticGeneration --> Preview: Footprint and 3D complete
-    AutomaticGeneration --> ReviewRequired: Missing or unsupported data
-    ReviewRequired --> Advanced: Enable Advanced user
-    Advanced --> ManualReview: Inspect parameters
-    ManualReview --> Preview: Generate explicitly
+    AutomaticGeneration --> Stopped: Missing or unsupported data
+    Stopped --> AIExtraction: Complete the documents
 ~~~
 
-Standard mode hides the detailed Footprint 2D, Generate, 3D annotation and
-component-editing panels while preserving their data and implementation. A valid
-extraction starts the existing footprint and 3D generation flow automatically.
-Existing output files require confirmation before replacement.
+A valid extraction starts footprint and 3D generation automatically. There are
+no manual parameter editors: footprint, castellated sides, 3D body, annotations
+and photographed components are kept as non-graphical data
+(`kicadgen/gui/component_state.py`) with the same ranges and precision the
+editors enforced, and are saved in the project file. Explicit-pad package geometries produce the footprint
+only, because the 3D generator does not support them yet. Existing output files
+require confirmation before replacement. The photo review can be reopened from
+the Project tab; the AI Log includes copy buttons for analysis and detected
+elements.
 
-Advanced user mode exposes the detailed editors and the Review photo detection
-action. This action inspects and corrects detected component envelopes; it is not
-a generation command. The AI Log is available in both modes and includes copy
-buttons for analysis and detected elements.
+The component type decides the analysis: the two «Board with components» types (through-hole or castellated
+connectors) run the photo inventory of the mounted bodies, the two single
+component types do not. For boards, «Square pins to connect to the main board»
+(off by default) adds male headers under the board in the 3D model only; on
+castellated boards only on contacts that have a through hole. It changes
+neither the analysis nor the footprint. Mounted bodies can be edited by hand at
+any time with «Edit components…» in the 3D toolbar or from the right-click
+menu on a body, with or without the photo.
+
+The progress window shows the three generation steps and who works in each:
+the footprint is written by this program (KiCad is not running), 3D models are
+chosen from the KiCad library files (FreeCAD measures candidates that are not
+cached yet), and FreeCAD builds the solid.
 
 ## Installation
 
@@ -166,9 +176,7 @@ Do not commit .env, API keys, generated output or migration backups.
 python main.py
 ~~~
 
-The standard path keeps the first-run experience focused on documents,
-extraction and verification. Advanced user mode exposes detailed geometry
-editors and manual generation.
+The workflow stays focused on documents, extraction and verification.
 
 ## Output structure
 

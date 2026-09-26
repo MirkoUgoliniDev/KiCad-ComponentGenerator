@@ -26,7 +26,7 @@ def app():
 @pytest.fixture
 def review(app, tmp_path, monkeypatch):
     pool = QThreadPool.globalInstance()
-    monkeypatch.setattr(gui, '_thumbnail', lambda *args: None)
+    monkeypatch.setattr(gui, '_thumbnail', lambda *args, **kwargs: None)
     candidates = []
     for index in range(7):
         path = tmp_path / f'{index}.step'
@@ -129,7 +129,7 @@ def test_preview_is_nonblocking_coalesces_and_ignores_late_result(review, app, m
     entered, release = threading.Event(), threading.Event()
     calls = []
 
-    def thumbnail(path, rotation, *_):
+    def thumbnail(path, rotation, *_, **kwargs):
         calls.append((path, rotation))
         entered.set()
         release.wait(2)
@@ -156,7 +156,7 @@ def test_cancel_while_worker_runs_is_immediate(review, app, monkeypatch):
     dialog, _, _ = review
     entered, release = threading.Event(), threading.Event()
 
-    def thumbnail(*args):
+    def thumbnail(*args, **kwargs):
         entered.set()
         release.wait(2)
         return None
@@ -283,7 +283,7 @@ def test_turning_the_rotation_takes_over_from_automatic_and_is_previewed(review,
     """
     dialog, _, report = review
     calls = []
-    monkeypatch.setattr(gui, '_thumbnail', lambda *args: calls.append(args))
+    monkeypatch.setattr(gui, '_thumbnail', lambda *args, **kwargs: calls.append(args))
     dialog.auto_rotation.setChecked(True)
     dialog.candidate_list.setCurrentRow(0)
     _wait(app, lambda: not dialog._workers and calls)
@@ -307,7 +307,7 @@ def test_untouched_automatic_still_asks_for_the_inferred_orientation(review, app
     """@brief Negativo: senza toccare la rotazione, l'anteprima resta automatica."""
     dialog, _, report = review
     calls = []
-    monkeypatch.setattr(gui, '_thumbnail', lambda *args: calls.append(args))
+    monkeypatch.setattr(gui, '_thumbnail', lambda *args, **kwargs: calls.append(args))
     dialog.auto_rotation.setChecked(True)
     dialog.candidate_list.setCurrentRow(1)
     _wait(app, lambda: not dialog._workers and calls)
@@ -337,7 +337,7 @@ def test_explicit_zero_typed_over_automatic_zero_is_not_swallowed(review, app, m
                                         path=report['candidates'][0]['path'])
     dialog = gui.ModelCandidatesDialog(component, report)
     calls = []
-    monkeypatch.setattr(gui, '_thumbnail', lambda *args: calls.append(args))
+    monkeypatch.setattr(gui, '_thumbnail', lambda *args, **kwargs: calls.append(args))
     try:
         assert dialog.auto_rotation.isChecked() and dialog.rotation.value() == 0
         dialog.show()
@@ -410,7 +410,7 @@ def test_rapid_rotation_changes_end_on_the_last_value(review, app, monkeypatch):
     entered, release = threading.Event(), threading.Event()
     calls = []
 
-    def thumbnail(path, rotation, *_):
+    def thumbnail(path, rotation, *_, **kwargs):
         calls.append((path, rotation))
         if len(calls) == 1:
             entered.set()
@@ -464,7 +464,7 @@ def test_the_mode_in_force_is_readable_on_the_dialog_without_hovering(review, mo
 def test_auto_worker_receives_component_dimensions(review, app, monkeypatch):
     dialog, _, report = review
     calls = []
-    monkeypatch.setattr(gui, '_thumbnail', lambda *args: calls.append(args))
+    monkeypatch.setattr(gui, '_thumbnail', lambda *args, **kwargs: calls.append(args))
     dialog.auto_rotation.setChecked(True)
     dialog.candidate_list.setCurrentRow(0)
     _wait(app, lambda: not dialog._workers)
@@ -611,7 +611,7 @@ def test_library_row_starts_the_same_preview_as_candidates(review, app, library,
     dialog, _, _ = review
     models, _ = library
     calls = []
-    monkeypatch.setattr(gui, '_thumbnail', lambda *args: calls.append(args))
+    monkeypatch.setattr(gui, '_thumbnail', lambda *args, **kwargs: calls.append(args))
     _filter(app, dialog, 'usb')
     dialog.library_list.setCurrentRow(0)
     _wait(app, lambda: not dialog._workers)
@@ -1214,7 +1214,7 @@ def test_the_automatic_preview_updates_the_readout(review, app, monkeypatch):
     manual = QImage(4, 4, QImage.Format.Format_RGB32)
     manual.setText(gui.AUTO_ROTATION_KEY, '0')
     monkeypatch.setattr(gui, '_thumbnail',
-                        lambda path, rotation, *rest: image if rotation is None else manual)
+                        lambda path, rotation, *rest, **kwargs: image if rotation is None else manual)
     dialog.auto_rotation.setChecked(True)
     dialog.candidate_list.setCurrentRow(0)
     _wait(app, lambda: not dialog._workers)
@@ -1290,7 +1290,7 @@ def test_an_explicit_angle_is_previewed_with_the_3d_menu_delta(review, app, monk
     """Il CAD finale somma il delta del menu 3D anche a un angolo scelto: l'anteprima pure."""
     dialog, _, _ = review
     calls = []
-    monkeypatch.setattr(gui, '_thumbnail', lambda *args: calls.append(args[1]))
+    monkeypatch.setattr(gui, '_thumbnail', lambda *args, **kwargs: calls.append(args[1]))
     dialog._placement = {'model_rotation_delta_deg': 90}
     dialog.auto_rotation.setChecked(False)
     dialog.rotation.setValue(180)

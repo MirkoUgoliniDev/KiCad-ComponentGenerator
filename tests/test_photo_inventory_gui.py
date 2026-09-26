@@ -99,7 +99,7 @@ def window(monkeypatch, tmp_path):
 def test_progress_is_visible_on_project_tab_and_literal(window):
     window._on_ai_progress("Crop 1: <b>R1</b> & C1")
     assert "<b>R1</b> & C1" in window.ai_progress_text.toPlainText()
-    assert "<b>R1</b> & C1" in window.log_text.toPlainText()
+    assert "<b>R1</b> & C1" in window._log_plain_text()
     assert window.analysis_overlay.status.text() == "Crop 1: <b>R1</b> & C1"
 
 
@@ -246,8 +246,7 @@ def test_generation_options_save_or_cancel(window, monkeypatch, accept):
         observed.append(dialog.isVisible() and dialog.isModal())
         assert dialog.include_nc_checkbox.isChecked()
         dialog.include_nc_checkbox.setChecked(False)
-        assert not dialog.advanced_user_checkbox.isChecked()
-        dialog.advanced_user_checkbox.setChecked(True)
+        assert not hasattr(dialog, "advanced_user_checkbox")
         role = (QDialogButtonBox.StandardButton.Save if accept
                 else QDialogButtonBox.StandardButton.Cancel)
         dialog.buttons.button(role).click()
@@ -256,9 +255,8 @@ def test_generation_options_save_or_cancel(window, monkeypatch, accept):
     assert observed == [True]
     assert window._config["include_nc_pins"] is (not accept)
     assert len(saved) == int(accept)
-    assert window._advanced_user() is accept
-    assert window.tabs.isTabVisible(1) is accept
-    assert window.tabs.isTabVisible(2) is accept
+    # Nessuna scelta di modalita': salvare non fa ricomparire tab di parametri.
+    assert window.tabs.count() == 4
 
 
 def test_output_actions_require_current_footprint(window, tmp_path, monkeypatch):
@@ -317,13 +315,12 @@ def test_output_actions_require_current_footprint(window, tmp_path, monkeypatch)
     assert all(not control.isEnabled() for control in controls)
 
 
-def test_kicad_tab_is_visible_in_standard_user_mode(window):
-    """@brief Keep the final review workflow available outside advanced mode."""
-    assert not window._advanced_user()
-    assert window.tabs.count() == 6
-    assert window.tabs.isTabVisible(5)
-    assert window.tabs.tabText(5) == "KiCad"
-    assert window.tabs.widget(5).isAncestorOf(window.btn_test_kicad)
+def test_kicad_tab_is_visible(window):
+    """@brief Keep the final review workflow available."""
+    assert window.tabs.count() == 4
+    assert window.tabs.isTabVisible(gui.TAB_KICAD)
+    assert window.tabs.tabText(gui.TAB_KICAD) == "KiCad"
+    assert window.tabs.widget(gui.TAB_KICAD).isAncestorOf(window.btn_test_kicad)
 
 
 def test_kicad_workflow_errors_follow_selected_language(window):
@@ -412,61 +409,42 @@ def test_kicad_tab_installs_portable_project_library(window, tmp_path, monkeypat
         encoding="utf-8")
 
 
-def test_footprint_sections_have_independent_scroll_tabs(window):
-    from PyQt6.QtWidgets import QScrollArea
-    tabs = window.footprint_subtabs
-    assert [tabs.tabText(i) for i in range(tabs.count())] == [
-        "Generale", "Matrice THT", "Modulo castellated", "Parametri 3D"]
-    for index, field in enumerate((window.field_description, window.field_pitch,
-                                   window.table_sides, window.field_body_height)):
-        page = tabs.widget(index)
-        assert isinstance(page, QScrollArea)
-        assert page.widgetResizable()
-        assert page.widget().isAncestorOf(field)
-    assert window.table_sides.minimumHeight() >= 150
+def test_switching_layout_does_not_change_the_parameters(window):
+    """@brief I parametri non dipendono dalla disposizione attiva.
 
-
-def test_footprint_tab_navigation_does_not_change_layout_or_values(window):
+    Positivo: passando da modulo castellated a matrice e ritorno, quote e
+    descrizione restano quelle scritte. (Prima lo garantivano i sotto-tab del
+    tab Footprint 2D, tolto il 2026-09-26.)
+    """
     window.group_castellated.setChecked(True)
-    assert window.footprint_subtabs.currentIndex() == 2
     window.field_cast_body_length.setValue(42.8)
-    window.field_description.setText("Descrizione modificabile")
-    for index in range(4):
-        window.footprint_subtabs.setCurrentIndex(index)
-        assert window._is_castellated()
-        assert window.field_cast_body_length.value() == 42.8
-        assert window.field_description.isEnabled()
-        assert not window.field_pitch.isEnabled()
+    window.field_pitch.setValue(2.0)
+    window.field_description.setText("Descrizione conservata")
     window.group_castellated.setChecked(False)
-    assert window.footprint_subtabs.currentIndex() == 1
-    assert window.field_pitch.isEnabled()
-    assert window.field_description.text() == "Descrizione modificabile"
+    assert not window._is_castellated()
+    window.group_castellated.setChecked(True)
+    assert window.field_cast_body_length.value() == 42.8
+    assert window.field_pitch.value() == 2.0
+    assert window.field_description.text() == "Descrizione conservata"
 
 
-def test_only_relevant_geometry_subtab_is_visible(window):
-    tabs = window.footprint_subtabs
-    assert tabs.isTabVisible(1)
-    assert not tabs.isTabVisible(2)
+def test_the_component_type_decides_the_layout(window):
+    """@brief Positivo e negativo: la tipologia castellated accende la disposizione, l'uscita la spegne."""
+    assert not window._is_castellated()
     combo = window.combo_component_type
     combo.setCurrentIndex(combo.findData("aggregate_castellated"))
-    assert not tabs.isTabVisible(1)
-    assert tabs.isTabVisible(2)
-    assert tabs.currentIndex() == 2
-    assert tabs.isTabVisible(0) and tabs.isTabVisible(3)
+    assert window._is_castellated()
+    assert len(window._sides) == 2, "i due lati opposti predefiniti"
     window.group_castellated.setChecked(False)
-    assert tabs.isTabVisible(1)
-    assert not tabs.isTabVisible(2)
-    assert tabs.currentIndex() == 1
+    assert not window._is_castellated()
 
 
-def test_saved_castellated_type_restores_matching_subtab(window, monkeypatch):
+def test_saved_castellated_type_restores_the_layout(window, monkeypatch):
     monkeypatch.setattr(gui, "load_config", lambda: {
         "component_type": "aggregate_castellated", "system_prompt": ""})
     restored = gui.MainWindow()
     try:
         assert restored._is_castellated()
-        assert restored.footprint_subtabs.isTabVisible(2)
-        assert not restored.footprint_subtabs.isTabVisible(1)
     finally:
         restored.close()
 
@@ -527,23 +505,6 @@ def test_project_info_is_only_in_modal(window):
     assert not dialog.isVisible()
 
 
-def test_generate_summary_is_in_modal_and_refreshed_on_open(window):
-    from PyQt6.QtCore import QTimer
-    dialog = window.generate_info_dialog
-    assert window.label_summary.parentWidget() is dialog
-    assert dialog.isModal() and not dialog.isVisible()
-    assert not window.btn_generate_info.icon().isNull()
-    window.field_name.setText("Modulo_verifica")
-    observed = []
-    def check_and_close():
-        observed.append((dialog.isVisible(), window.label_summary.text()))
-        dialog.accept()
-    QTimer.singleShot(0, check_and_close)
-    window.btn_generate_info.click()
-    assert observed[0][0]
-    assert "Modulo_verifica" in observed[0][1]
-    assert not dialog.isVisible()
-
 
 def test_ai_log_modal_preserves_history_and_receives_live_updates(window):
     from PyQt6.QtCore import QTimer
@@ -599,26 +560,20 @@ def test_copy_ai_panels_copies_all_plain_text_without_modifying_logs(window, mon
     assert not window.btn_copy_ai_elements.isEnabled()
 
 
-def test_3d_viewport_is_not_inside_scrolling_settings(window):
+def test_3d_viewport_is_not_inside_scrolling_or_split_panels(window):
+    """@brief L'anteprima 3D occupa la scheda: il pannello delle impostazioni e' stato tolto."""
     from PyQt6.QtWidgets import QScrollArea, QSplitter
     parent = window.preview_3d.parentWidget()
-    splitter = None
     while parent is not None:
-        assert not isinstance(parent, QScrollArea)
-        if isinstance(parent, QSplitter):
-            splitter = parent
-            break
+        assert not isinstance(parent, (QScrollArea, QSplitter))
         parent = parent.parentWidget()
-    assert splitter is not None
-    assert isinstance(splitter.widget(1), QScrollArea)
-    assert splitter.widget(1).widget() is not splitter.widget(0)
 
 
 def test_3d_actions_are_in_the_top_bar_outside_scroll_and_splitter(window):
     """Contratto aggiornato di proposito (scelta dell'utente, 2026-09-23, nota 6):
     la barra delle azioni e' l'unica barra di icone in CIMA alla scheda, allineata
     a sinistra con gli strumenti di vista (non piu' una riga centrata in fondo).
-    Resta il contratto di fondo: fuori da scorrimento e splitter."""
+    Resta il contratto di fondo: fuori da scorrimento e splitter, sopra l'anteprima."""
     from PyQt6.QtWidgets import QScrollArea, QSplitter
     bar = window.model_3d_action_bar
     assert bar.isAncestorOf(window.btn_regen_3d)
@@ -631,7 +586,7 @@ def test_3d_actions_are_in_the_top_bar_outside_scroll_and_splitter(window):
         parent = parent.parentWidget()
     container_layout = bar.parentWidget().layout()
     assert container_layout.itemAt(0).widget() is bar
-    assert isinstance(container_layout.itemAt(1).widget(), QSplitter)
+    assert container_layout.itemAt(1).widget().isAncestorOf(window.preview_3d)
 
 
 def test_comparison_button_opens_valid_image_and_resets_on_next_result(window,monkeypatch):
@@ -674,7 +629,7 @@ def raw_params():
 
 def test_raw_photo_opens_with_current_table_dimensions_and_cancel_is_unchanged(window, raw_params, monkeypatch):
     window._on_extracted(raw_params)
-    window.table_components.cellWidget(0, 2).setValue(-7.5)
+    window._photo_rows[0]["x_mm"] = -7.5  # correzione gia' fatta sul corpo
     window.field_cast_body_length.setValue(50)
     window._last_mesh_path = Path("previous.preview.json")
     before = window._photo_components_from_table()
@@ -740,16 +695,6 @@ def test_photo_apply_updates_table_metadata_arbitrary_rotation_and_invalidates_m
     assert window._photo_components_from_table()[0]["vendor_data"] == original[0]["vendor_data"]
 
 
-def test_row_metadata_survives_deleting_earlier_row_and_adding_table_row(window, raw_params):
-    window._on_extracted(raw_params)
-    window.table_components.setCurrentCell(0, 0)
-    window._remove_component_row()
-    window._add_component_row()
-    actual = window._photo_components_from_table()
-    assert actual[0]["name"] == "R1"
-    assert actual[0]["vendor_data"] == {"pins": [3, 4]}
-    assert "vendor_data" not in actual[1]
-
 
 def test_no_photo_next_extraction_clears_raw_and_disables_editor(window, raw_params):
     window._on_extracted(raw_params)
@@ -763,10 +708,9 @@ def test_no_photo_next_extraction_clears_raw_and_disables_editor(window, raw_par
     assert not window.btn_photo_comparison.isEnabled()
 
 
-def test_table_changes_refresh_normalized_geometry_cache(window, raw_params):
+def test_geometry_changes_refresh_normalized_geometry_cache(window, raw_params):
     window._on_extracted(raw_params)
-    window.table_components.cellWidget(0, 2).setValue(0)
-    window.table_components.cellWidget(0, 3).setValue(0)
+    window._photo_rows[0].update(x_mm=0, y_mm=0)
     # Local 6 x 2 at 90 degrees has board-aligned span 2 x 6 mm.
     assert window._photo_components_from_table()[0]["_box"] == pytest.approx((.475, .35, .525, .65))
 
@@ -951,7 +895,7 @@ def test_start_extraction_uses_single_model_and_resets_photo_state(window, raw_p
     assert window._photo_overlay_png is None
     assert not window.btn_photo_comparison.isEnabled()
     assert "Modello AI unico: vendor/datasheet" in window.ai_progress_text.toPlainText()
-    assert "modello AI vendor/datasheet" in window.log_text.toPlainText()
+    assert "modello AI vendor/datasheet" in window._log_plain_text()
 
 
 @pytest.mark.parametrize("layout", ["castellated", "matrix"])
@@ -1000,7 +944,7 @@ def test_queued_cad_result_respects_photo_revision(
         else:
             window._generate()
             worker = window._worker
-        assert worker is not None, window.log_text.toPlainText()
+        assert worker is not None, window._log_plain_text()
         return worker
 
     worker = start()
@@ -1040,15 +984,15 @@ def test_queued_cad_result_respects_photo_revision(
         assert rendered == []
         assert window._last_mesh_path is None
         assert window.label_3d_status.text() == status
-        assert "OK (3D)" not in window.log_text.toPlainText()
+        assert "OK (3D)" not in window._log_plain_text()
         # Stale failures/warnings must not overwrite the pending revision either.
         (worker.error if regenerate else worker.cad3d_error).emit("obsolete error")
         worker.warning.emit("obsolete warning")
         assert window.label_3d_status.text() == status
-        assert "obsolete" not in window.log_text.toPlainText()
+        assert "obsolete" not in window._log_plain_text()
 
     worker.finished.emit()
-    assert (window.btn_regen_3d if regenerate else window.btn_generate).isEnabled()
+    assert window.btn_regen_3d.isEnabled() or not regenerate
     if change != "cancel":
         current_worker = start()
         (current_worker.done if regenerate else current_worker.cad3d_done).emit(str(step))
@@ -1148,7 +1092,6 @@ def test_without_a_name_there_is_no_folder_path_at_all(window):
     window._update_project_path_label()
     window._refresh_docs_list()
     window._refresh_output_actions()
-    window._update_summary()
 
 
 #: Oggetti visti dai test che seguono, non i loro indirizzi: due oggetti con
@@ -1249,7 +1192,7 @@ def test_apply_with_a_solid_on_screen_regenerates_by_itself(shown_solid):
     _settle()
     assert calls == [True]
     assert not window._regen_3d_pending
-    assert "rigenerazione automatica" in window.log_text.toPlainText()
+    assert "rigenerazione automatica" in window._log_plain_text()
 
 
 def test_apply_without_a_previous_solid_leaves_the_choice_to_the_user(shown_solid):
@@ -1294,7 +1237,7 @@ def test_a_disabled_3d_model_is_not_regenerated_and_says_why(shown_solid):
     window._apply_photo_review(window._photo_components_from_table())
     _settle()
     assert calls == [] and not window._regen_3d_pending
-    assert "non avviata" in window.log_text.toPlainText()
+    assert "non avviata" in window._log_plain_text()
 
 
 def test_a_project_change_drops_the_pending_regeneration(shown_solid, monkeypatch):

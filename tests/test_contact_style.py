@@ -200,8 +200,16 @@ def test_default_3d_payload_is_the_pinned_one_plus_only_the_plated_ring(name, mo
     rings = [c.pop("through_hole") for c in captured["edge_contacts"]]
     # La piazzola continua (2026-09-23): stesse quote di quella del footprint.
     stadiums = [c.pop("stadium") for c in captured["edge_contacts"]]
+    # Strip maschi (utente, 2026-09-26): con i pin accesi -- predefinito di
+    # Body3DParams -- ogni contatto con foro passante ne riceve uno. E' un
+    # AGGIUNTA al payload, verificata a parte; tolta quella, l'impronta e' la
+    # stessa di prima.
+    pin_style = captured["extra_payload"].pop("pin_style", None)
+    header_pitches = captured["extra_payload"].pop("header_pitches", None)
     pinned = {k: captured[k] for k in ("notches", "edge_contacts", "extra_boxes", "extra_payload")}
     assert hashlib.sha256(json.dumps(pinned, sort_keys=True).encode()).hexdigest() == PINNED_PAYLOAD[name]
+    assert pin_style == "male_header"
+    assert len(header_pitches) == len(rings), "un passo dichiarato per ogni pin"
     for ring, stadium, placement in zip(rings, stadiums, pad_positions(params)):
         assert (ring["x"], ring["y"]) == params.thru_hole_centre(placement)
         assert ring["radius"] == params.thru_hole_drill / 2

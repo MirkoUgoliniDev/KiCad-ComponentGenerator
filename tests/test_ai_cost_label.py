@@ -148,7 +148,7 @@ def test_a_manual_regeneration_shows_no_cost_in_its_modal(window, monkeypatch):
     assert '0.05' in window.analysis_overlay.cost.text(), 'premessa: il costo era mostrato'
 
     window._regenerate_3d()
-    assert window._cad3d_worker is not None, window.log_text.toPlainText()
+    assert window._cad3d_worker is not None, window._log_plain_text()
     assert window.analysis_overlay.cost.text() == ''
     assert window.analysis_overlay.cost.isHidden()
     assert '0.05' in _cost_line(window), 'lo storico non va perso'

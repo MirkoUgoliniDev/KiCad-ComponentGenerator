@@ -93,8 +93,11 @@ def test_nullable_and_boundary_observations_remain_incomplete(count):
     {'lead_count': -1}, {'lead_count': 513}, {'lead_count': None},
     {'lead_count_complete': 1}, {'lead_count_complete': 'true'},
     {'lead_count_complete': None}, {'lead_count_confidence': 'certain'},
-    {'lead_count_confidence': None}, {'lead_count': 5}])
+    {'lead_count': 5}])
 def test_malformed_or_incoherent_observation_is_not_valid(changes):
+    # Contract changed on purpose (2026-09-26): a null lead_count_confidence is
+    # «not declared», no longer malformed; see tests/test_inventory_confidence_optional.py.
+    # A declared but unknown level ('certain') is still malformed.
     raw = _body(lead_count=3, lead_count_complete=True, lead_count_confidence='high')
     raw.update(changes)
     before = deepcopy(raw)
@@ -102,8 +105,10 @@ def test_malformed_or_incoherent_observation_is_not_valid(changes):
     assert raw == before
 
 
-@pytest.mark.parametrize('missing', ['lead_count', 'lead_count_complete', 'lead_count_confidence'])
+@pytest.mark.parametrize('missing', ['lead_count', 'lead_count_complete'])
 def test_partial_new_observation_is_not_mistaken_for_legacy_absence(missing):
+    # Only DATA fields are listed: the qualifier lead_count_confidence may be
+    # omitted since 2026-09-26 (NON_BLOCKING_QUALIFIERS).
     raw = _body(lead_count=3, lead_count_complete=True, lead_count_confidence='high')
     del raw[missing]
     assert not inventory._component_valid(raw, set())

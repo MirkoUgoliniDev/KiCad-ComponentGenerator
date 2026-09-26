@@ -23,7 +23,7 @@ from typing import Optional
 
 from ..generators.castellated_module import (
     CONTACT_HALF_AND_THROUGH, CONTACT_THROUGH_HOLE, EDGE_LABELS, CastellatedModuleParams,
-    continuous_pad, pad_positions,
+    continuous_pad, pad_positions, style_has_through_hole,
 )
 from ..generators.pin_header import PinHeaderParams, pin_positions
 from .annotations import EdgeFilletAnnotation, FaceTextAnnotation
@@ -191,7 +191,7 @@ def find_overlapping_components(components: list) -> list[str]:
     componente: nulla impedisce a due stime indipendenti di finire una
     sopra l'altra. Non si tenta di risolverlo spostando qualcosa (sarebbe
     una scelta arbitraria, non geometria) -- si segnala la coppia, cosi'
-    si corregge nella tabella componenti invece di scoprirlo solo nel
+    si corregge con «Modifica componenti…» invece di scoprirlo solo nel
     modello 3D finito.
 
     Il test degli assi separatori confronta i rettangoli orientati, evitando
@@ -236,7 +236,7 @@ def find_overlapping_components(components: list) -> list[str]:
                 warnings.append(
                     tx("componenti sovrapposti: '{name_a}' e '{name_b}' "
                        "({overlap_x:.2f}x{overlap_y:.2f}mm in comune) -- correggi posizione o "
-                       "rotazione nella tabella componenti.",
+                       "rotazione con «Modifica componenti…» nel tab Modello 3D.",
                        name_a=name_a,
                        name_b=name_b,
                        overlap_x=overlap_x,
@@ -545,6 +545,41 @@ def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: 
     return notches, contacts, silk_texts, silk_outline, notes
 
 
+def castellated_header_pins(params: CastellatedModuleParams):
+    """@brief Where a male header can be soldered on a castellated module.
+
+    @param params Validated module description.
+    @return (pins, pitches, skipped): `pins` a list of [number, x, y] at the
+        CLOSED through-hole centre of every contact that has one (footprint
+        coordinates, mm, Y down); `pitches` the declared pitch (mm) of the
+        side of each pin, aligned with `pins`; `skipped` the numbers of the
+        contacts that have no closed through-hole (half-hole only).
+    @note Rule (user decision, 2026-09-26): a strip is soldered only in a real
+        through-hole -- contact style through_hole or half_and_through AND a
+        declared hole (params.has_thru_holes: drill and ring > 0, the same
+        condition under which the 3D cuts and plates the hole). A half-hole
+        alone cannot hold a pin. The centre comes from
+        params.thru_hole_centre(), the function the footprint and the 3D
+        contacts already use, never from a second formula.
+    @note A side with a single contact may declare no pitch (0): the
+        reference 2.54 mm header is drawn, which is an estimate.
+    """
+    from .header_geometry import REFERENCE_PITCH_MM
+    placements = iter(pad_positions(params))
+    pins, pitches, skipped = [], [], []
+    for side in params.sides:
+        pitch = side.pitch if side.pitch > 0 else REFERENCE_PITCH_MM
+        for _number in side.numbers():
+            placement = next(placements)
+            if style_has_through_hole(placement.style) and params.has_thru_holes:
+                x, y = params.thru_hole_centre(placement)
+                pins.append([placement.number, x, y])
+                pitches.append(pitch)
+            else:
+                skipped.append(placement.number)
+    return pins, pitches, skipped
+
+
 def generate_castellated_3d_model(
     params: CastellatedModuleParams,
     body: Body3DParams,
@@ -583,6 +618,10 @@ def generate_castellated_3d_model(
       volumi generici senza scritte.
 
     Non ci sono pin cilindrici: i contatti sono semi-fori e fori passanti.
+    Con `body.show_pins_3d` ogni contatto che ha un foro passante chiuso
+    riceve uno strip maschio saldato sotto (vedi castellated_header_pins e
+    header_geometry); i contatti a solo mezzo foro restano senza, e una nota
+    lo dice quando la scheda ha entrambi i tipi.
     Le note del risultato dicono da dove viene la distanza dal bordo dei fori
     passanti, e se e' una stima.
     """
@@ -590,6 +629,20 @@ def generate_castellated_3d_model(
 
     notches, contacts, silk_texts, silk_outline, inset_notes = castellated_contact_payload(
         params, body.pin_color_hex)
+
+    # Strip maschi solo nei fori passanti veri (decisione dell'utente,
+    # 2026-09-26). Senza pin da mostrare il payload resta quello di prima:
+    # nessun pin e nessuno stile.
+    header_pins, header_pitches, header_skipped = (
+        castellated_header_pins(params) if getattr(body, "show_pins_3d", True) else ([], [], []))
+    header_payload = ({"pin_style": "male_header", "header_pitches": header_pitches}
+                      if header_pins else {})
+    header_notes = []
+    if header_pins and header_skipped:
+        header_notes.append(tx(
+            "Pin 3D: {count} contatti a solo mezzo foro ({numbers}) restano senza pin "
+            "maschio, perche' uno strip si salda solo in un foro passante.",
+            count=len(header_skipped), numbers=", ".join(header_skipped)))
 
     # Il corpo e' il PCB del modulo; l'altezza totale di `body` resta il
     # riferimento per il blocco componenti quando non c'e' la foto.
@@ -718,7 +771,7 @@ def generate_castellated_3d_model(
     from ..services.model_choices import save_candidate_report
     candidate_report = save_candidate_report(output_dir, components)
     result = _run_freecad(
-        params.name, [], pcb, output_dir,
+        params.name, header_pins, pcb, output_dir,
         freecadcmd_path=freecadcmd_path, fillets=fillets, face_texts=face_texts,
         font_file=font_file, notches=notches, extra_boxes=extra_boxes,
         edge_contacts=contacts,
@@ -730,6 +783,7 @@ def generate_castellated_3d_model(
             "silk_outline": silk_outline,
             "silk_color_hex": params.silk_color_hex,
             "components": components,
+            **header_payload,
         },
     )
     result["warnings"] = overlap_warnings + result["warnings"]
@@ -741,7 +795,7 @@ def generate_castellated_3d_model(
     result["notes"] = ([] if progress else model_notes) + list(result.get("notes", []))
     # La provenienza della distanza dal bordo dei fori passanti non e' un
     # dettaglio: quando e' una stima deve arrivare all'utente, sempre.
-    result["notes"] = inset_notes + placement_notes + result["notes"]
+    result["notes"] = inset_notes + header_notes + placement_notes + result["notes"]
     return result
 
 
@@ -861,7 +915,11 @@ def _generate_populated_tht(params, body, pins, output_dir, **options):
     result = _run_freecad(params.name, pins, pcb, output_dir,
         notches=holes, edge_contacts=contacts,
         extra_payload={"components": components,
-                       "substrate": {"color_hex": "#2f3f1f", "mask_thickness_mm": .02}},
+                       "substrate": {"color_hex": "#2f3f1f", "mask_thickness_mm": .02},
+                       # Una scheda popolata si collega con strip maschi saldati
+                       # sotto (utente, 2026-09-26): pin quadrati e distanziale
+                       # nero, non cilindri (vedi header_geometry).
+                       "pin_style": "male_header"},
         **options)
     result["warnings"] = (find_overlapping_components(_rendered(components))
                           + result.get("warnings", []))
@@ -985,6 +1043,7 @@ def _run_freecad(
         # abbina i modelli di libreria e a chi rilegge il JSON), ma lo
         # script FreeCAD le stampa solo se il corpo lo chiede esplicitamente.
         "show_markings_3d": bool(body.show_markings_3d),
+        "show_pins_3d": bool(getattr(body, "show_pins_3d", True)),
     }
     payload.update(extra_payload or {})
 
@@ -1023,6 +1082,20 @@ def _run_freecad(
             raise Cad3DError(CAD_ABORT_MESSAGE)
         if progress:
             from .process_log import ProcessCancelled, run_logged
+            # freecadcmd, finito lo script, prova ad aprire come documento ogni
+            # argomento in piu' -- cioe' il NOSTRO file di parametri -- e scrive
+            # «File format not supported: <quel file>». E' atteso per
+            # costruzione e innocuo: resta in freecad.log, ma non arriva alla
+            # finestra, dove sembrava un errore (utente, 2026-09-26). Il
+            # criterio e' il percorso esatto del file che passiamo noi, non il
+            # testo di FreeCAD: una riga che nomina altri file passa sempre.
+            params_names = {json_path, json_path.replace("\\", "/"), Path(json_path).name}
+            user_progress = progress
+
+            def progress(line, _forward=user_progress):  # noqa: F811 - filtro dichiarato sopra
+                if "not supported" in str(line) and any(n in str(line) for n in params_names):
+                    return
+                _forward(line)
             # Secondi di SILENZIO, non di lavoro: il conto riparte a ogni riga
             # che FreeCAD stampa, e ogni passo lungo batte (vedi
             # heartbeat_interval_s nel payload qui sopra). Un limite sulla

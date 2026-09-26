@@ -216,7 +216,7 @@ def test_reopening_in_pretest_mode_saves_into_the_pretest_bundle(window, review_
     window._reopen_detector_review()
     assert review_dialog.opened == [1]
     assert not (window._project_dir() / "photo-review").exists()
-    assert "Revisione del pretest YOLO salvata offline" in window.log_text.toPlainText()
+    assert "Revisione del pretest YOLO salvata offline" in window._log_plain_text()
 
 
 # ── B3: the real abort label ──────────────────────────────────────────────
@@ -232,7 +232,7 @@ def test_the_abort_names_the_pretest_through_the_real_path(window, monkeypatch):
     _start_pretest(window)
     window._request_abort()
     assert asked[0].splitlines()[0].startswith("Pretest YOLO locale")
-    assert "Analisi AI dei documenti" not in window.log_text.toPlainText()
+    assert "Analisi AI dei documenti" not in window._log_plain_text()
     # Negativo: nello stesso slot l'estrazione vera resta «Analisi AI dei documenti».
     window._extract_worker = gui.ExtractWorker([])
     assert window._abortable_operation()[2] == "Analisi AI dei documenti"
@@ -368,12 +368,12 @@ def test_one_bad_yolo_setting_does_not_reset_the_others(window):
     chosen = window._chosen_yolo_settings()
     assert chosen["confidence"] == pytest.approx(0.46) and chosen["tile_sizes"] == [640]
     assert chosen["nms_iou"] == gui.validate_yolo_settings({})["nms_iou"]
-    log = window.log_text.toPlainText()
+    log = window._log_plain_text()
     assert "yolo_settings.nms_iou" in log and "yolo_settings.bogus" in log
     assert "yolo_settings.confidence" not in log
     # Negativo: un valore che non e' un oggetto non passa piu' in silenzio.
     window._apply_project_state({"yolo_settings": [0.3]})
-    assert "yolo_settings (list)" in window.log_text.toPlainText()
+    assert "yolo_settings (list)" in window._log_plain_text()
     assert window._chosen_yolo_settings() == gui.validate_yolo_settings({})
 
 

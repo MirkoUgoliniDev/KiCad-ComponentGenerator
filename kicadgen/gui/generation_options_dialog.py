@@ -8,7 +8,7 @@ from .profile_dialog import icon_button, show_info
 
 class GenerationOptionsDialog(QDialog):
     """@brief Edit generation options before a component is produced."""
-    def __init__(self, include_nc_pins=True, parent=None, *, advanced_user=False,
+    def __init__(self, include_nc_pins=True, parent=None, *,
                  silk_pin_labels=False, pause_after_inventory=True):
         super().__init__(parent)
         self.setWindowTitle("Opzioni di generazione")
@@ -46,22 +46,6 @@ class GenerationOptionsDialog(QDialog):
             "L'opzione vale dalla prossima generazione: non modifica i file gia' prodotti.",
             text_key='help.generation.silk_labels')))
         page_layout.addWidget(silk)
-        mode = QGroupBox('Modalità di utilizzo')
-        mode_layout = QHBoxLayout(mode)
-        self.advanced_user_checkbox = QCheckBox('Advanced user')
-        self.advanced_user_checkbox.setChecked(advanced_user)
-        mode_layout.addWidget(self.advanced_user_checkbox, 1)
-        mode_layout.addWidget(icon_button('Info', 'info.svg', lambda: show_info(self, 'Advanced user',
-            'Disattivato: Footprint 2D e Genera sono nascosti. Dopo un’analisi valida vengono '
-            'generati automaticamente footprint e modello 3D, con avanzamento e anteprime. '
-            'I file esistenti richiedono conferma prima della sovrascrittura.\n\n'
-            'Attivato: i due tab sono visibili e la generazione rimane manuale. '
-            'Cambiare modalità non genera file e non cancella i parametri già acquisiti. '
-            'La scelta viene salvata e vale dal prossimo avvio dell’analisi.\n\n'
-            'Se mancano dati necessari o la geometria non supporta il 3D, la generazione '
-            'automatica si ferma. Attiva Advanced user per rivedere i dati e generare manualmente.',
-            text_key='help.generation.advanced_user')))
-        page_layout.addWidget(mode)
         # La pausa dopo l'inventario AI: un'impostazione, quindi qui e non nel
         # tab Progetto (utente, 2026-09-24). Stessa chiave di config.json.
         analysis = QGroupBox("Analisi AI")
@@ -96,10 +80,6 @@ class GenerationOptionsDialog(QDialog):
     def include_nc_pins(self):
         """@brief Return whether not-connected pins are included in the generated component."""
         return self.include_nc_checkbox.isChecked()
-
-    def advanced_user(self):
-        """@brief Return whether advanced-user mode (manual generation, 2D and Generate tabs visible) is checked."""
-        return self.advanced_user_checkbox.isChecked()
 
     def silk_pin_labels(self):
         """@brief Tell whether pin names must be engraved on the 3D silkscreen."""

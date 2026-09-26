@@ -21,6 +21,16 @@ def _unexpected(*args, **kwargs):
     pytest.fail("Unexpected extraction, network request or preference write")
 
 
+
+def _rebuild_from_boxes(window):
+    """@brief Rebuild the stored photo components from their CAD boxes only.
+
+    The photo dictionaries are dropped: what survives is what `ComponentBox`
+    carries. (It used to be the rebuild of the removed components table.)
+    """
+    window._photo_rows = [window._photo_row(box, None)
+                          for box in window._components_from_table()]
+
 @pytest.fixture(autouse=True)
 def offline(monkeypatch):
     """@brief Block network requests even if a regression starts extraction."""
@@ -277,10 +287,8 @@ def test_pin_count_evidence_survives_photo_and_table_roundtrip(window, evidence)
 
     # Name/position edits and rebuilding without the original photo dictionary
     # must preserve the observed-count evidence carried by ComponentBox.
-    window.table_components.cellWidget(0, 0).setText("Edited body")
-    window.table_components.cellWidget(0, 2).setValue(5)
-    window.castellated_components = window._components_from_table()
-    window._refresh_components_table()
+    window._photo_rows[0].update(name="Edited body", x_mm=5)
+    _rebuild_from_boxes(window)
     component, = window._components_from_table()
     photo, = window._photo_components_from_table()
     assert component.name == "Edited body" and component.x == 5
@@ -294,27 +302,6 @@ def test_pin_count_evidence_survives_photo_and_table_roundtrip(window, evidence)
         assert getattr(reviewed, key) == value
     assert source == before
     assert window._photo_detector_options() == ("yolo", None)
-
-
-def test_pin_count_evidence_stays_with_surviving_row_and_new_rows_are_empty(window):
-    """@brief Keep count evidence attached to its row through deletion and addition."""
-    window.table_components.setRowCount(0)
-    for count, confidence, source in ((2, "low", "estimate"), (8, "high", "photo_observation")):
-        window._add_component_row(gui.ComponentBox(
-            x=0, y=0, length=4, width=2, height=1, pin_count=count,
-            pin_count_confidence=confidence, pin_count_source=source,
-        ))
-    window.table_components.setCurrentCell(0, 0)
-    window._remove_component_row()
-    window._add_component_row()
-    survivor, added = window._components_from_table()
-    photos = window._photo_components_from_table()
-    assert survivor.pin_count == 8
-    assert survivor.pin_count_confidence == photos[0]["pin_count_confidence"] == "high"
-    assert survivor.pin_count_source == photos[0]["pin_count_source"] == "photo_observation"
-    assert added.pin_count is None
-    assert added.pin_count_confidence == photos[1]["pin_count_confidence"] == ""
-    assert added.pin_count_source == photos[1]["pin_count_source"] == ""
 
 
 @pytest.mark.parametrize("override", [None, 0.0, 90.0, -90.0, 37.5])
@@ -332,14 +319,12 @@ def test_local_model_overrides_survive_gui_roundtrip_independently_of_photo_rota
     assert window.castellated_components[0].model_rotation_deg == override
     assert window.castellated_components[0].model_z_offset_mm == z_offset
 
-    rotation = window.table_components.cellWidget(0, 7)
-    rotation.setCurrentIndex(rotation.findData(90.0))
+    window._photo_rows[0]["rotation_deg"] = 90.0
     component, = window._components_from_table()
     assert component.rotation == 90
     assert component.model_rotation_deg == override
     assert component.model_z_offset_mm == z_offset
-    window.castellated_components = [component]
-    window._refresh_components_table()
+    _rebuild_from_boxes(window)
     photo, = window._photo_components_from_table()
     assert photo["rotation_deg"] == 90
     assert photo.get("model_rotation_deg") == override
@@ -354,27 +339,6 @@ def test_local_model_overrides_survive_gui_roundtrip_independently_of_photo_rota
     assert result.model_rotation_deg == override
     assert result.model_z_offset_mm == z_offset
     assert source == before
-
-
-def test_direct_model_overrides_stay_with_their_row(window):
-    """@brief Preserve dataclass-only overrides and prevent inheritance by new rows."""
-    window.table_components.setRowCount(0)
-    for override, z_offset in ((90.0, 1.25), (-90.0, -0.7)):
-        window._add_component_row(gui.ComponentBox(
-            x=0, y=0, length=4, width=2, height=1,
-            model_rotation_deg=override, model_z_offset_mm=z_offset,
-        ))
-    window.table_components.setCurrentCell(0, 0)
-    window._remove_component_row()
-    window._add_component_row()
-    survivor, added = window._components_from_table()
-    photos = window._photo_components_from_table()
-    assert survivor.model_rotation_deg == photos[0]["model_rotation_deg"] == -90.0
-    assert survivor.model_z_offset_mm == photos[0]["model_z_offset_mm"] == -0.7
-    assert added.model_rotation_deg is None
-    assert added.model_z_offset_mm == 0.0
-    assert "model_rotation_deg" not in photos[1]
-    assert "model_z_offset_mm" not in photos[1]
 
 
 @pytest.mark.parametrize("kind", ["usb_connector", "generic"])
@@ -392,8 +356,7 @@ def test_gui_preserves_full_component_body_overhang_at_each_board_edge(window, k
     left, top, right, bottom = photo["_box"]
     assert left < 0 or top < 0 or right > 1 or bottom > 1
     window._apply_photo_review([photo])
-    window.castellated_components = window._components_from_table()
-    window._refresh_components_table()
+    _rebuild_from_boxes(window)
     result, = window._current_castellated_params().components
     assert (result.x, result.y) == (x, y)
     assert (result.length, result.width, result.height) == (4, 2, 1)

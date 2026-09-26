@@ -112,6 +112,12 @@ class ProfileStore:
                 # user edited never matches and is left alone.
                 db.executemany('UPDATE translations SET text=? WHERE key=? AND language=? AND text=?',
                                _superseded_translations())
+                # Same rule for the labels of the built-in types.
+                from .component_types import SUPERSEDED_LABELS, get as _builtin_type
+                db.executemany(
+                    'UPDATE component_types SET label=? WHERE key=? AND builtin=1 AND label=?',
+                    [(_builtin_type(key).label, key, old)
+                     for key, olds in SUPERSEDED_LABELS.items() for old in olds])
                 defaults = dict(db.execute('SELECT name,value FROM ai_defaults'))
                 if set(defaults) != set(PROFILE_FIELDS):
                     raise ProfileError(tx("Default del database incompleti: ripristinare un backup."))

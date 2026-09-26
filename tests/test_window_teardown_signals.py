@@ -32,8 +32,7 @@ for text in ("C1", "R1", "U1"):
 w.close()
 # L'ordine che all'uscita dell'interprete puo' capitare a caso: prima i
 # dialoghi figli, poi la finestra.
-for dialog in (w.ai_log_dialog, w.project_info_dialog, w.component_prompt_dialog,
-               w.generate_info_dialog):
+for dialog in (w.ai_log_dialog, w.project_info_dialog, w.component_prompt_dialog):
     dialog.deleteLater()
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
 w.deleteLater()

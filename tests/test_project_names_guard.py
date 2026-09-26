@@ -50,7 +50,7 @@ def test_the_application_refuses_another_project_name_even_if_accepted(window, t
     window._rename_project()
     assert window._component_name() == "A"
     assert (tmp_path / "A").is_dir() and load_project_costs(other).total_usd == 1.0
-    assert "Rinomina non applicata" in window.log_text.toPlainText()
+    assert "Rinomina non applicata" in window._log_plain_text()
 
 
 def test_the_dialog_itself_refuses_enter_on_a_taken_name(window, tmp_path):  # noqa: F811

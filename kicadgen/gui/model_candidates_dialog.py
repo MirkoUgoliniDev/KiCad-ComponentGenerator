@@ -216,15 +216,193 @@ def _image_auto_angle(image):
     return value if math.isfinite(value) else None
 
 
-def _thumbnail(path, rotation, dimensions=None, color=None, view=VIEW_ISOMETRIC):
+#: Child-side tessellation: ``parts`` is a list of (shape, face colours or
+#: None). Faces sharing one colour are tessellated together, the technique
+#: `freecad_build_body` uses for the preview mesh of the generated model, and
+#: every group records one ``[hex or None, triangle count]`` run. None means
+#: "no native colour": the parent paints those triangles with the caller tint.
+#: A part whose colours cannot be grouped (count mismatch, bad value, failed
+#: group tessellation) is tessellated whole, uncoloured, never dropped.
+_CHILD_TESSELLATION = '''
+def _hex(rgba):
+    return "#" + "".join("%02x" % int(round(max(0.0, min(1.0, float(c))) * 255))
+                         for c in list(rgba)[:3])
+vertices, triangles, runs = [], [], []
+def _add(chunks):
+    for color, (points, faces) in chunks:
+        base = len(vertices)
+        vertices.extend([v.x, v.y, v.z] for v in points)
+        triangles.extend([base + i for i in face] for face in faces)
+        if faces:
+            runs.append([color, len(faces)])
+for shape, face_colors in parts:
+    chunks = None
+    try:
+        faces = shape.Faces if face_colors else []
+        if faces and len(face_colors) == len(faces):
+            groups = {}
+            for face, rgba in zip(faces, face_colors):
+                groups.setdefault(_hex(rgba), []).append(face)
+            chunks = [(color, Part.makeCompound(group).tessellate(0.15))
+                      for color, group in groups.items()]
+    except Exception:
+        chunks = None
+    _add(chunks or [(None, shape.tessellate(0.15))])
+'''
+
+
+#: Longest projected triangle edge, in canvas pixels, the painter's sort takes
+#: as one unit; longer triangles are bisected. See _split_large_triangles().
+_SORT_EDGE_PX = 16.0
+
+#: Upper bound of the triangles the split may add, so a pathological mesh made
+#: of many large faces costs a bounded amount of painting.
+_SORT_SPLIT_BUDGET = 60_000
+
+
+def _split_large_triangles(points, triangles, colors, limit):
+    """@brief Bisect triangles whose projection is large, for a local depth sort.
+
+    @param points Eye-space vertices (screen x, screen y, depth); midpoints are
+        appended to this list in place.
+    @param triangles Index triples.
+    @param colors Per-triangle colour list parallel to @p triangles, or None.
+    @param limit Longest accepted projected edge, in eye-space units (mm).
+    @return (triangles, colors) with every projected edge at most @p limit,
+        until _SORT_SPLIT_BUDGET extra triangles have been spent; the rest is
+        kept whole. Pieces keep the colour of their parent triangle.
+    @note Why: the painter sorts by centroid depth, and a large face has its
+        centroid far from most of its area. With native colours the small
+        bodies under the shield of an RF module were painted over the shield
+        top in diagonal stripes, an error the single tint used to hide.
+        Cutting an orthographic projection at edge midpoints is exact (same
+        plane, same shade) and turns the centroid into a local depth, so the
+        nearer face wins where it covers a farther one. It is not a depth
+        buffer: interpenetrating faces can still be misordered along their
+        intersection, within one piece.
+    @note The longest edge is bisected, not the triangle cut in four: STEP
+        tessellations are full of slivers, and a four-way split multiplies the
+        pieces of a sliver by the square of its aspect ratio. Measured on the
+        ESP32-S3-WROOM-1U isometric view (66 510 triangles): four-way at 4 px
+        gave about 2 million pieces and 32 s.
+    @note HEURISTIC, declared as such: _SORT_EDGE_PX is not derived from the
+        geometry. It was chosen on the ESP32-S3-WROOM-1U and SOT-223 models
+        (FreeCAD 1.1.3); with bisection the ESP32 top was clean at 8, 12 and
+        16 px and showed small misordered patches again at 32 px, so the
+        margin is a factor of two, on one model. 16 px added about 41 000
+        pieces there, inside _SORT_SPLIT_BUDGET; a model that exhausts the
+        budget keeps its remaining large triangles whole. The piece size that is always enough depends on the depth gap
+        between a covering face and what lies under it, which the thumbnail
+        does not know; a depth buffer would make the split unnecessary.
+    """
+    limit_sq = limit * limit
+    out_triangles, out_colors = [], [] if colors is not None else None
+    budget = _SORT_SPLIT_BUDGET
+    for index, face in enumerate(triangles):
+        color = colors[index] if colors is not None else None
+        stack = [list(face)]
+        while stack:
+            tri = stack.pop()
+            if len(tri) == 3 and budget > 0:
+                i, j, k = tri
+                a, b, c = points[i], points[j], points[k]
+                longest, p, q, r = max((
+                    ((a[0]-b[0])**2 + (a[1]-b[1])**2, i, j, k),
+                    ((b[0]-c[0])**2 + (b[1]-c[1])**2, j, k, i),
+                    ((c[0]-a[0])**2 + (c[1]-a[1])**2, k, i, j)))
+                if longest > limit_sq:
+                    points.append(tuple((points[p][n] + points[q][n]) / 2 for n in range(3)))
+                    middle = len(points) - 1
+                    stack.extend(([p, middle, r], [middle, q, r]))
+                    budget -= 1
+                    continue
+            out_triangles.append(tri)
+            if out_colors is not None:
+                out_colors.append(color)
+    return out_triangles, out_colors
+
+
+def _triangle_colors(runs, count):
+    """@brief Expand the child's colour runs into one colour per triangle.
+
+    @param runs ``color_runs`` of the preview mesh: ``[hex or None, n]`` pairs
+        in triangle order, or None when the child emitted none (older script,
+        mocked child).
+    @param count Number of triangles in the mesh.
+    @return List of ``count`` entries, each a ``#rrggbb`` string or None
+        (paint with the caller tint), or None when no triangle carries a
+        native colour or the runs are unusable. None means exactly the single
+        tint of the historical preview.
+    @note Validation is all-or-nothing: a run with a malformed colour or a
+        count that does not add up to the mesh would attach colours to the
+        wrong triangles, which is worse than no colour at all.
+    """
+    if not isinstance(runs, list):
+        return None
+    colors, native = [], False
+    for run in runs:
+        if not isinstance(run, (list, tuple)) or len(run) != 2:
+            return None
+        color, amount = run
+        if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
+            return None
+        if color is not None:
+            if not isinstance(color, str) or not re.fullmatch(r'#[0-9a-fA-F]{6}', color):
+                return None
+            native = True
+        colors.extend([color] * amount)
+        if len(colors) > count:
+            return None
+    return colors if native and len(colors) == count else None
+
+
+#: Chiave di config.json con la scelta «Colori» dell'anteprima (predefinito si').
+PREVIEW_COLORS_KEY = "step_preview_colors"
+
+
+def _preview_colors_enabled() -> bool:
+    """@brief The remembered «Colori» choice of the STEP preview; True when never set or unreadable."""
+    try:
+        from .app_config import load_config
+        return load_config().get(PREVIEW_COLORS_KEY, True) is not False
+    except Exception:  # noqa: BLE001 - una preferenza illeggibile non ferma la finestra
+        return True
+
+
+def _remember_preview_colors(enabled: bool) -> None:
+    """@brief Store the «Colori» choice in config.json; a failed write is ignored.
+
+    @param enabled New choice.
+    """
+    try:
+        from .app_config import load_config, save_config
+        config = load_config()
+        config[PREVIEW_COLORS_KEY] = bool(enabled)
+        save_config(config)
+    except Exception:  # noqa: BLE001 - la scelta resta per questa finestra
+        pass
+
+
+def _thumbnail(path, rotation, dimensions=None, color=None, view=VIEW_ISOMETRIC,
+               board_rotation=0.0, colors=True):
     """Tessellate STEP; automatic orientation uses the production CAD importer.
 
     @param path STEP file to preview.
     @param rotation Local Z override in degrees, or None for CAD axis inference.
     @param dimensions (length_mm, width_mm), required only when rotation is None.
+    @param colors False paints the single tint and skips reading the file's
+        colours, which is what makes a large model slower (user choice in the
+        dialog, 2026-09-26: ESP32 module 7.0 s with colours, 4.2 s without).
+    @param board_rotation Rotation of the component on the board, in the CAD
+        frame (degrees, added after the local one). The dialog shows the
+        model as it will sit on the board, next to a photo crop that is in the
+        board frame: without it a rotated photo rectangle made the preview and
+        the generated 3D disagree (user, 2026-09-26: SOT-223 at 270 degrees in
+        the preview, turned in the 3D).
     @param color Body colour of the component, typically the ``color_hex`` the
     photo pipeline sampled. When the caller knows no colour, DEFAULT_BODY_COLOR
-    is used, so the preview still renders a coherent material.
+    is used, so the preview still renders a coherent material. It paints only
+    the triangles that carry no colour of their own in the STEP file.
     @param view VIEW_PLAN (top view, the dialog default) or VIEW_ISOMETRIC. The
     parameter default stays isometric so direct callers keep the historical
     camera; the dialog always passes the view explicitly.
@@ -235,6 +413,17 @@ def _thumbnail(path, rotation, dimensions=None, color=None, view=VIEW_ISOMETRIC)
         manual rotation from it without a second CAD run.
     @throws ValueError When dimensions, mesh size or mesh coordinates are
     unusable, or when @p view is not a known camera.
+    @note Native colours: the child reads the file with the production
+    importer (`freecad_parts._read_library_parts`, i.e. ``Import.insert``,
+    per-face colours) in both branches — the automatic one gets them from
+    `_library_model`, which uses the same reader. The mesh then carries one
+    colour per triangle and the per-face shading is applied on top of it. A
+    file without colours (``Import.insert`` returns nothing), a failed import
+    or unusable colour data fall back to ``Part.read`` / the single tint,
+    exactly the historical preview: missing colours never fail a preview.
+    Cost: see the timings recorded in the tests' module docstring
+    (tests/test_model_preview_colors.py); the colour read is dominated by
+    ``Import.insert`` on large assemblies.
     @note The rotation is applied about the model's own Z axis *before* the
     camera, then the result is fitted to the canvas. In the isometric view the
     camera looks down a 45-degree diagonal, so a 90-degree turn of a part that
@@ -260,6 +449,10 @@ def _thumbnail(path, rotation, dimensions=None, color=None, view=VIEW_ISOMETRIC)
     3.1% but makes nested boxes worse, 8.2% to 10.2% — so the sort is left as
     it is and the limit recorded here. Removing it needs a depth buffer or a
     BSP split, neither of which belongs in a thumbnail.
+    @note Those percentages were measured before large projected triangles
+    were bisected ahead of the sort (_split_large_triangles, added with the
+    native colours, 2026-09-26) and have not been re-measured since: the split
+    makes the centroid a local depth, so it should lower them, not remove them.
     """
     from ..cad3d.step_generator import find_freecadcmd
 
@@ -267,7 +460,9 @@ def _thumbnail(path, rotation, dimensions=None, color=None, view=VIEW_ISOMETRIC)
     if camera is None:
         raise ValueError(f'Unknown preview view: {view!r}')
     executable = find_freecadcmd()
-    if rotation is None:
+    cad_directory = str(Path(__file__).resolve().parents[1] / 'cad3d')
+    automatic = rotation is None
+    if automatic:
         length, width = dimensions or (None, None)
         length, width = _number(length, None), _number(width, None)
         if length is None or width is None or min(length, width) <= 0:
@@ -280,40 +475,58 @@ def _thumbnail(path, rotation, dimensions=None, color=None, view=VIEW_ISOMETRIC)
         component.update(_PREVIEW_PLACEMENT.get() or {})
         # Use the actual placement helper so body-section / total-envelope
         # comparisons and tie-breaking cannot diverge from generated CAD.
-        cad_directory = str(Path(__file__).resolve().parents[1] / 'cad3d')
         geometry_source = (
             f'sys.path.insert(0, {cad_directory!r})\n'
             'from freecad_parts import _library_model\n'
             f'parts = _library_model({component!r}, 0, 0, 0, "#b0c7db")\n'
             'if not parts:\n'
             '    raise ValueError("Automatic model placement unavailable")\n'
-            'shape = Part.makeCompound([shape for shape, _ in parts])\n')
+            # The colour is a str; imported ones also carry `face_colors`.
+            'parts = [(shape, getattr(color, "face_colors", None)) for shape, color in parts]\n'
+            + ('' if colors else 'parts = [(shape, None) for shape, _ in parts]\n'))
         rotation = 0.0  # _library_model already applied inferred native rotation.
+    elif not colors:
+        # Tinta unica chiesta: niente lettura dei colori, che e' la parte lenta.
+        geometry_source = f'parts = [(Part.read({str(path)!r}), None)]\n'
     else:
-        geometry_source = f'shape = Part.read({str(path)!r})\n'
+        # Same reader as the production import, so the colours are the ones
+        # the generated model will carry; any failure (no colours in the file,
+        # importer unavailable) falls back to the historical geometry-only read.
+        geometry_source = (
+            'parts = None\n'
+            'try:\n'
+            f'    sys.path.insert(0, {cad_directory!r})\n'
+            '    from freecad_parts import _read_library_parts\n'
+            '    parts = [(shape, getattr(color, "face_colors", None)) for shape, color\n'
+            f'             in _read_library_parts({str(path)!r}, "#b0c7db")]\n'
+            'except Exception:\n'
+            '    parts = None\n'
+            'if not parts:\n'
+            f'    parts = [(Part.read({str(path)!r}), None)]\n')
     with tempfile.TemporaryDirectory(prefix='kicad-candidate-') as directory:
         output = Path(directory) / 'mesh.json'
         script = Path(directory) / 'preview.py'
         # Paths are encoded as Python literals, never interpolated into shell code.
         script.write_text(
-            'import Part, json, sys\n' + geometry_source +
-            'vertices, triangles = shape.tessellate(0.15)\n'
+            'import Part, json, sys\n' + geometry_source + _CHILD_TESSELLATION +
             f'with open({str(output)!r}, "w") as stream:\n'
-            '    json.dump({"vertices": [[v.x,v.y,v.z] for v in vertices], '
-            '"triangles": triangles}, stream)\n', encoding='utf-8')
+            '    json.dump({"vertices": vertices, "triangles": triangles, '
+            '"color_runs": runs}, stream)\n', encoding='utf-8')
         completed = subprocess.run([executable, str(script)], stdout=subprocess.PIPE,
                                    stderr=subprocess.DEVNULL, timeout=25, check=True,
                                    text=True, errors='replace',
                                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         auto_angle = (_reported_auto_angle(getattr(completed, 'stdout', '') or '')
-                      if geometry_source.startswith('sys.path') else None)
+                      if automatic else None)
         if output.stat().st_size > 20_000_000:
             raise ValueError('Preview mesh too large')
         mesh = json.loads(output.read_text(encoding='utf-8'))
     vertices, triangles = mesh['vertices'], mesh['triangles']
     if not vertices or not triangles or len(triangles) > 100_000:
         raise ValueError('Preview geometry unavailable or too complex')
-    angle = math.radians(rotation)
+    # None: no native colour anywhere, the historical single tint.
+    native_colors = _triangle_colors(mesh.get('color_runs'), len(triangles))
+    angle = math.radians(rotation + float(board_rotation or 0.0))
     c, s = math.cos(angle), math.sin(angle)
     (rx, ry, rz), (dx, dy, dz), (tx, ty, tz) = camera
     points = []
@@ -333,6 +546,14 @@ def _thumbnail(path, rotation, dimensions=None, color=None, view=VIEW_ISOMETRIC)
     depth_min = min(p[2] for p in points)
     depth_span = max(p[2] for p in points) - depth_min
     scale = 280 / max(xmax-xmin, ymax-ymin, 0.001)
+    # Solo con i colori del modello: serve a far vincere la faccia vicina fra
+    # colori diversi. Senza colori non cambia nulla di visibile e, con
+    # l'antialiasing, i tanti bordi interni in piu' spargerebbero errori di
+    # arrotondamento di un'unita' sulle tinte (test_model_preview_view_mode):
+    # il disegno a tinta unica resta quello di prima.
+    if native_colors is not None:
+        triangles, native_colors = _split_large_triangles(
+            points, triangles, native_colors, _SORT_EDGE_PX / scale)
     # Stripped here too, so the guarantee does not depend on which caller
     # sampled the colour.
     base = QColor(str(color).strip()) if color else QColor()
@@ -350,9 +571,13 @@ def _thumbnail(path, rotation, dimensions=None, color=None, view=VIEW_ISOMETRIC)
         # order of the tessellation is not guaranteed, so a wrong cull would erase
         # the object entirely, which is worse than drawing hidden faces first.
         # The sort below is approximate; see the @note on the sort in _thumbnail.
-        for face in sorted(triangles, key=lambda f: sum(points[i][2] for i in f)):
+        order = sorted(range(len(triangles)),
+                       key=lambda k: sum(points[i][2] for i in triangles[k]))
+        for index in order:
+            face = triangles[index]
             if len(face) != 3:
                 raise ValueError('Invalid mesh triangle')
+            own = native_colors[index] if native_colors else None
             intensity = _face_intensity(*(points[i] for i in face))
             if height_cue:
                 # A flat mesh has no height to encode: it keeps the full term.
@@ -361,15 +586,18 @@ def _thumbnail(path, rotation, dimensions=None, color=None, view=VIEW_ISOMETRIC)
                 intensity = _AMBIENT + (intensity - _AMBIENT) * (
                     _PLAN_HEIGHT_FLOOR + (1.0 - _PLAN_HEIGHT_FLOOR) * height)
             step = int(intensity * _SHADE_STEPS)
-            pair = shades.get(step)
+            # The cache is keyed by material too: a coloured model has a
+            # handful of distinct face colours, so it stays small.
+            pair = shades.get((own, step))
             if pair is None:
-                shade = _shaded_color(base, (step + 0.5) / _SHADE_STEPS)
+                shade = _shaded_color(QColor(own) if own else base,
+                                      (step + 0.5) / _SHADE_STEPS)
                 # Interior edges must vanish, but with antialiasing two coplanar
                 # triangles leave a sub-pixel gap along their shared edge. The
                 # outline is therefore drawn in the *same* colour as the fill: it
                 # covers the seam without any wireframe, and unlike a geometric
                 # overdraw it cannot distort the silhouette of thin features.
-                pair = shades[step] = (QPen(shade), QBrush(shade))
+                pair = shades[(own, step)] = (QPen(shade), QBrush(shade))
             painter.setPen(pair[0])
             painter.setBrush(pair[1])
             painter.drawPolygon(QPolygonF([
@@ -425,7 +653,8 @@ _PREVIEW_PLACEMENT = contextvars.ContextVar('preview_placement', default=None)
 
 class _Preview(QRunnable):
     def __init__(self, token, path, rotation, dimensions=None, color=None,
-                 view=DEFAULT_PREVIEW_VIEW, placement=None):
+                 view=DEFAULT_PREVIEW_VIEW, placement=None, board_rotation=0.0,
+                 colors=True):
         super().__init__()
         self.signals = _Signals()
         self.token, self.path, self.rotation = token, path, rotation
@@ -433,14 +662,22 @@ class _Preview(QRunnable):
         self.color = color
         self.view = view
         self.placement = dict(placement or {})
+        self.board_rotation = float(board_rotation or 0.0)
+        self.colors = bool(colors)
 
     def run(self):
         """@brief Generate an optional thumbnail without blocking the Qt event loop."""
         _PREVIEW_PLACEMENT.set(self.placement)
         try:
-            result = (_thumbnail(self.path, None, self.dimensions, self.color, self.view)
+            # Solo quando serve: senza rotazione la chiamata resta quella di
+            # prima (e le sue sostituzioni nei test non la vedono arrivare).
+            extra = {"board_rotation": self.board_rotation} if self.board_rotation else {}
+            if not self.colors:
+                extra["colors"] = False
+            result = (_thumbnail(self.path, None, self.dimensions, self.color, self.view, **extra)
                       if self.rotation is None
-                      else _thumbnail(self.path, self.rotation, None, self.color, self.view))
+                      else _thumbnail(self.path, self.rotation, None, self.color, self.view,
+                                      **extra))
         except Exception:
             result = None
         self.signals.ready.emit(self.token, result)
@@ -512,8 +749,18 @@ class ModelCandidatesDialog(QDialog):
         self._closed = False
         self._workers = {}
         self._dimensions = (component.get('length_mm'), component.get('width_mm'))
+        # Rotazione del rettangolo sulla foto, nel verso del CAD: il generatore
+        # ribalta Y e con essa il segno dell'angolo (freecad_build_body._flip_y),
+        # poi ruota il componente DOPO l'angolo locale scelto qui.
+        self._board_rotation = -float(component.get('rotation_deg') or 0.0)
         self._placement = {key: component[key] for key in PREVIEW_PLACEMENT_KEYS
                            if component.get(key) not in (None, '')}
+        # La correzione di verso del CAD usa la stessa rotazione, gia' nel verso
+        # del CAD (freecad_parts._verse_correction dopo _flip_y): l'anteprima
+        # automatica la riceve uguale, altrimenti poteva mostrare il modello
+        # girato di 180 gradi rispetto al 3D generato.
+        if self._board_rotation:
+            self._placement['rotation_deg'] = self._board_rotation
         # The photo pipeline samples the body colour into color_hex; shading the
         # preview with it beats a fixed constant, and an unusable value falls back
         # to DEFAULT_BODY_COLOR instead of painting an invalid colour.
@@ -627,6 +874,16 @@ class ModelCandidatesDialog(QDialog):
         self.rotation_angle_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.rotation_angle_label.setProperty('i18n_skip', True)
         tools_column.addWidget(self.rotation_angle_label)
+        # Colori del file STEP nell'anteprima (utente, 2026-09-26): piu'
+        # realistica ma piu' lenta sui modelli grandi. Ricordata in config.json.
+        self.colors_checkbox = QCheckBox("Colori")
+        self.colors_checkbox.setObjectName("preview_colors_toggle")
+        self.colors_checkbox.setToolTip(
+            "Anteprima con i colori del modello KiCad. Spenta: tinta unica, piu' "
+            "veloce sui modelli grandi.")
+        self.colors_checkbox.setChecked(_preview_colors_enabled())
+        self.colors_checkbox.toggled.connect(self._colors_toggled)
+        tools_column.addWidget(self.colors_checkbox, 0, Qt.AlignmentFlag.AlignRight)
         tools_column.addStretch()
         preview_grid.addWidget(preview_tools, 0, 0,
                                Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
@@ -1063,6 +1320,15 @@ class ModelCandidatesDialog(QDialog):
                                    Qt.TransformationMode.SmoothTransformation)
         self.preview_label.setPixmap(pixmap)
 
+    def _colors_toggled(self, checked):
+        """@brief Remember the colour choice and re-render the preview with it.
+
+        @param checked True for the model's own colours, False for the single tint.
+        """
+        _remember_preview_colors(checked)
+        if getattr(self, '_path', ''):
+            self._start_preview()
+
     def _view_toggled(self, isometric):
         """Switch the preview camera and re-render with the rotation in force.
 
@@ -1109,7 +1375,8 @@ class ModelCandidatesDialog(QDialog):
                           None if self.auto_rotation.isChecked()
                           else self.rotation.value() + delta,
                           self._dimensions, self._body_color, self._view,
-                          placement=self._placement)
+                          placement=self._placement, board_rotation=self._board_rotation,
+                          colors=self.colors_checkbox.isChecked())
         self._workers[self._token] = worker
         worker.signals.ready.connect(self._preview_ready)
         QThreadPool.globalInstance().start(worker)

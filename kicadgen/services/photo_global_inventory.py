@@ -267,18 +267,51 @@ def _number(value, low, high):
     return type(value) in (int, float) and low <= value <= high
 
 
+#: Required schema fields that only QUALIFY data carried by other fields of the
+#: same row, mapped to the data fields they qualify. They carry no geometry, no
+#: identity, no count and no accounting of their own, so their absence cannot
+#: corrupt anything that is kept: it only removes a qualification, and every
+#: consumer must then read the qualification as "not declared" (see
+#: LEAD_COUNT_CONFIDENCE_UNDECLARED). Omitting one of them is therefore NOT
+#: blocking: it neither invalidates the row, nor blocks the cache, nor triggers
+#: the second paid request of review_global_inventory.
+#: @note presence_confidence and class_confidence are also confidences, but they
+#:     qualify the body as a whole and drive retention and model matching; the
+#:     user decision of 2026-09-26 covers lead_count_confidence only, so they
+#:     stay blocking.
+NON_BLOCKING_QUALIFIERS = {'lead_count_confidence': ('lead_count', 'lead_count_complete')}
+
+#: Explicit value recorded on a normalized component when the model did not
+#: declare lead_count_confidence. It is not a confidence level and must never be
+#: mistaken for one: every decision that depends on the confidence reads it as
+#: the weakest possible level (an exact pin count is promoted only from
+#: 'medium'/'high'), and informative consumers carry it through unchanged.
+LEAD_COUNT_CONFIDENCE_UNDECLARED = 'not_declared'
+
+_CONFIDENCE_LEVELS = ('high', 'medium', 'low')
+
+
 def _lead_observation_valid(row):
-    """Accept legacy absence, but require a well-typed coherent observation group."""
-    fields = ('lead_count', 'lead_count_complete', 'lead_count_confidence')
-    if not any(key in row for key in fields):
-        return True
-    if not all(key in row for key in fields):
+    """Accept legacy absence, but require a well-typed coherent observation group.
+
+    The DATA fields (lead_count, lead_count_complete) must be present together
+    and coherent. Their qualifier lead_count_confidence may be absent or null
+    (not declared, see NON_BLOCKING_QUALIFIERS); when declared it must be one of
+    the enumerated levels, and a declared qualifier with no data is incoherent.
+    """
+    data = NON_BLOCKING_QUALIFIERS['lead_count_confidence']
+    qualifier = row.get('lead_count_confidence')
+    if not any(key in row for key in data):
+        return qualifier is None
+    if not all(key in row for key in data):
         return False
     count = row['lead_count']
     complete = row['lead_count_complete']
     if (count is not None and (type(count) is not int or not 0 <= count <= 512)):
         return False
-    if type(complete) is not bool or row['lead_count_confidence'] not in ('high', 'medium', 'low'):
+    if type(complete) is not bool:
+        return False
+    if qualifier is not None and qualifier not in _CONFIDENCE_LEVELS:
         return False
     if complete and count is None:
         return False
@@ -287,30 +320,18 @@ def _lead_observation_valid(row):
     return not (type(terminals) is int and count is not None and count > terminals)
 
 
-def _repair_nullable_lead_observation(row):
-    """Normalize a provider's nullable confidence for an explicitly incomplete count.
+def lead_count_confidence(row):
+    """@brief Declared lead-count confidence of a model row, or the explicit «not declared».
 
-    Some providers return the semantically valid observation with
-    ``lead_count_confidence`` omitted or null, even though the prompt and tool
-    schema describe the confidence as a string. The count may be unknown, or it
-    may be complete but only weakly supported; retaining the component's package,
-    class and geometry is safer than converting the entire body to ``unknown``.
-    Keep this repair local to validation so the raw provider response remains
-    unchanged in the audit file.
+    @param row Raw model row (dict).
+    @return 'high', 'medium' or 'low' when the model declared it, otherwise
+        LEAD_COUNT_CONFIDENCE_UNDECLARED.
+    @note Never guesses a level: an omitted or null qualifier stays undeclared.
+        Decisions that depend on it treat the undeclared value as the weakest
+        level, because it is not in ('medium', 'high').
     """
-    if not isinstance(row, dict):
-        return row
-    if (isinstance(row.get('lead_count_complete'), bool)
-            and (row.get('lead_count') is None
-                 or (type(row.get('lead_count')) is int
-                     and 0 <= row.get('lead_count') <= 512))
-            and row.get('lead_count_confidence') is None
-            and ('lead_count_confidence' not in row
-                 or row.get('lead_count_confidence') is None)):
-        repaired = deepcopy(row)
-        repaired['lead_count_confidence'] = 'low'
-        return repaired
-    return row
+    value = row.get('lead_count_confidence')
+    return value if value in _CONFIDENCE_LEVELS else LEAD_COUNT_CONFIDENCE_UNDECLARED
 
 
 #: Convenzioni di coordinate che un modello di grounding puo' consegnare al
@@ -410,6 +431,11 @@ def omitted_required_fields(data):
         class_confidence e lead_count_confidence su 43 righe su 43, e la
         presenza collassava a 'low' ovunque, spegnendo a valle ogni
         abbinamento ai modelli KiCad.
+    @note Only BLOCKING fields are returned. A field in NON_BLOCKING_QUALIFIERS
+        only qualifies other data: its omission is recorded as «not declared»
+        and never justifies a second paid request (user decision 2026-09-26,
+        after a real run paid a full second call only for
+        lead_count_confidence). See undeclared_lead_count_confidence.
     """
     if not isinstance(data, dict) or not isinstance(data.get('components'), list):
         return []
@@ -417,7 +443,22 @@ def omitted_required_fields(data):
     if not rows:
         return []
     required = inventory_tool()['function']['parameters']['properties']['components']['items']['required']
-    return [name for name in required if all(name not in row for row in rows)]
+    return [name for name in required if name not in NON_BLOCKING_QUALIFIERS
+            and all(name not in row for row in rows)]
+
+
+def undeclared_lead_count_confidence(data):
+    """@brief Count the component rows that did not declare lead_count_confidence.
+
+    @param data Decoded model response (any type).
+    @return (rows without a declared level, component rows judged); (0, 0) for a
+        malformed response. Absent and null values both count as not declared.
+    """
+    if not isinstance(data, dict) or not isinstance(data.get('components'), list):
+        return 0, 0
+    rows = [row for row in data['components'] if isinstance(row, dict)]
+    missing = sum(1 for row in rows if row.get('lead_count_confidence') is None)
+    return missing, len(rows)
 
 
 #: Coda aggiunta al prompt per il secondo tentativo, quando il primo ha omesso
@@ -545,8 +586,7 @@ def _validate(data, known, boxes=None):
                 if type(identity) is int and identity in known:
                     claims.setdefault(identity, []).append(row.get('component_id'))
     valid = []
-    for raw_row in rows:
-        row = _repair_nullable_lead_observation(raw_row)
+    for row in rows:
         if _component_valid(row, known) and counts[row['component_id']] == 1:
             valid.append(row)
         else:
@@ -866,7 +906,8 @@ def _normalize(row, identity, length, width, issues, manual_ids=frozenset()):
         terminal_count=row['terminal_count'], terminal_layout=row['terminal_layout'],
         terminal_count_basis='visible_including_tabs',
         lead_count=row.get('lead_count'), lead_count_complete=row.get('lead_count_complete', False),
-        lead_count_confidence=row.get('lead_count_confidence', 'low'),
+        # Omitted/null is recorded as explicitly undeclared, never as a guessed level.
+        lead_count_confidence=lead_count_confidence(row),
         confidence=row['confidence'], color_hex='#303030', _uncertain=True,
         # Stessa lettura della presenza usata dai controlli geometrici: un
         # campo assente non e' una dichiarazione di assenza (vedi _presence).
@@ -879,6 +920,7 @@ def _normalize(row, identity, length, width, issues, manual_ids=frozenset()):
         result['_yolo_manual_box'] = True
     # Visible surfaces may be a minimum and include tabs: only an explicit
     # complete ordinary-lead observation supports an exact package lead count.
+    # An undeclared confidence is read as the weakest level: never promoted.
     if (row.get('lead_count_complete') is True and type(row.get('lead_count')) is int
             and row.get('lead_count_confidence') in ('medium', 'high')):
         result.update(pin_count=row['lead_count'], pin_count_confidence=row['lead_count_confidence'],
@@ -919,6 +961,10 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         is ``partial`` only then. Errors no retained row can claim (malformed
         response, failed call) belong to the inventory and reach every row.
         The cache still requires a response with no error at all.
+    @note A missing or null ``lead_count_confidence`` is not blocking: the row,
+        the cache and the call count are unaffected, the value is recorded as
+        LEAD_COUNT_CONFIDENCE_UNDECLARED and one log line counts the rows
+        concerned. Only blocking omissions trigger the single paid retry.
     @note A missing ``presence_confidence`` is read as the overall confidence,
         its lower bound; see ``_presence``.
     """
@@ -1055,6 +1101,16 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     # rettangolo giusto consegnato in pixel non e' una risposta sbagliata.
     checked, box_scale = _in_contract_units(data, w, h, log)
     rows, safe, errors = _validate(checked, known, boxes)
+    # A qualifier-only omission is accepted as «not declared» and never paid for
+    # twice (NON_BLOCKING_QUALIFIERS); say so, with the count, so the log does
+    # not suggest a guessed confidence.
+    undeclared, judged = undeclared_lead_count_confidence(checked)
+    if undeclared:
+        log(tx("Inventario globale: {count} componenti su {total} senza confidenza "
+               "dichiarata sul conteggio dei terminali; registrata come «non "
+               "dichiarata», mai usata per fissare il numero di pin. Nessuna nuova "
+               "richiesta a pagamento per questo campo.",
+               count=undeclared, total=judged))
     if isinstance(data, dict) and data.get('error'):
         errors.append(_Issue(str(data['error'])))
     if omission_issue is not None:

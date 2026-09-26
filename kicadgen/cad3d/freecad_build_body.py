@@ -1161,7 +1161,27 @@ def main():
         ), box.get("color_hex", "#1a1a1a"))
 
     pin_radius = pin_diameter / 2.0
-    for pin_num, x, y in pins:
+    # Spenti su richiesta (Body3DParams.show_pins_3d): restano i fori.
+    shown_pins = pins if data.get("show_pins_3d", True) else []
+    if shown_pins and data.get("pin_style") == "male_header":
+        # Strip maschio sotto una scheda popolata: pin quadrati e distanziale
+        # di plastica, quote di catalogo (vedi header_geometry).
+        # `os` va importato qui: piu' sotto la funzione lo importa di nuovo
+        # (componenti), quindi per Python e' una variabile locale e senza
+        # questa riga non esisterebbe ancora.
+        import os
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import header_geometry
+        # `header_pitches` (moduli castellated) da' il passo dichiarato di
+        # ogni pin, allineato a `pins`: senza, il passo si ricava dai pin.
+        for box in header_geometry.male_header_boxes_by_row(
+                shown_pins, board_top_z=z1, pitches=data.get("header_pitches")):
+            add(box["name"], Part.makeBox(
+                box["dx"], box["dy"], box["dz"],
+                FreeCAD.Vector(box["x"], box["y"], box["z"]),
+            ), pin_color if box["role"] == "pin" else "#151515")
+        shown_pins = []
+    for pin_num, x, y in shown_pins:
         add(f"Pin{pin_num}", Part.makeCylinder(
             pin_radius, pin_length,
             FreeCAD.Vector(x, y, -pin_length),

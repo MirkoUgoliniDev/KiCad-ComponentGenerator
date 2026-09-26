@@ -74,7 +74,7 @@ def test_yolo_only_inventory_makes_no_call(pipeline, tmp_path):  # noqa: F811
     assert [c["_id"] for c in report.components] == [1, 2]
     assert report.overlay_png
     # Nessuna fase a pagamento; la fase del rilevatore viene chiusa.
-    assert "llm" not in phases and phases[-1] == ""
+    assert not {"llm", "llm_inventory"} & set(phases) and phases[-1] == ""
 
 
 def test_the_ai_extraction_does_not_accept_the_pretest(pipeline):  # noqa: F811

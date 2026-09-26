@@ -95,12 +95,12 @@ def test_deleting_first_row_keeps_survivor_metadata_through_step(
     ]
     before = deepcopy(entries)
     window._set_photo_components(entries)
-    window.table_components.setCurrentCell(0, 0)
-    window._remove_component_row()
-    window._add_component_row()
-    window.table_components.cellWidget(0, 0).setText("Edited survivor")
-    rotation = window.table_components.cellWidget(0, 7)
-    rotation.setCurrentIndex(rotation.findData(90.0))
+    # Il primo corpo tolto, uno nuovo aggiunto senza dati della foto, il
+    # superstite rinominato e ruotato: i metadati restano col loro corpo.
+    del window._photo_rows[0]
+    window._photo_rows.append(window._photo_row(
+        ComponentBox(x=0.0, y=0.0, length=2.0, width=1.2, height=0.6), None))
+    window._photo_rows[0].update(name="Edited survivor", rotation_deg=90.0)
 
     survivor, added = window._components_from_table()
     assert survivor.name == "Edited survivor"
@@ -131,8 +131,7 @@ def test_direct_row_addition_preserves_metadata_without_photo_dict(window, geome
         pin_count=2, pins_by_side={"left": 1, "right": 1},
         detected_kind="ic_soic", terminal_geometry=deepcopy(geometry),
     )
-    window.table_components.setRowCount(0)
-    window._add_component_row(component)
+    window._photo_rows = [window._photo_row(component, None)]
     actual, = window._components_from_table()
     assert actual.pin_count == component.pin_count
     assert actual.pins_by_side == component.pins_by_side
@@ -191,7 +190,7 @@ def test_obsolete_terminal_result_does_not_overwrite_table_or_mesh(
     if change == "revision":
         window._model_revision += 1
     elif change == "row":
-        window.table_components.cellWidget(0, 2).setValue(-7)
+        window._photo_rows[0]["x_mm"] = -7
         # Exercise the row-snapshot guard independently of the revision guard.
         terminal_snapshot._model_revision = window._model_revision
     else:
@@ -208,7 +207,7 @@ def test_obsolete_terminal_result_does_not_overwrite_table_or_mesh(
     assert window._last_mesh_path == previous_mesh
     assert window._model_revision == previous_revision
     assert not cleared
-    assert "scartato" in window.log_text.toPlainText()
+    assert "scartato" in window._log_plain_text()
 
 
 def test_valid_terminal_result_preserves_geometry_then_invalidates_mesh(

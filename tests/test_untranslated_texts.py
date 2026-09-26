@@ -33,14 +33,12 @@ def test_the_gate_reason_follows_the_language(window):  # noqa: F811
 def test_list_tooltip_group_tooltip_and_form_labels_are_translated(window):  # noqa: F811
     _switch(window, "en")
     assert window.ai_elements_list.toolTip() == "Items and outlines found during photo analysis"
-    assert window.group_3d.toolTip() in (
-        "FreeCAD found: the 3D model is generated together with the footprint.",
-        "freecadcmd not found: install FreeCAD or set FREECAD_CMD_PATH.")
+    # Il gruppo «Modello 3D» e le etichette dei fori stavano nel tab Footprint
+    # 2D, tolto il 2026-09-26: nessuna etichetta italiana resta a vista.
     labels = {label.text() for label in window.findChildren(QLabel)}
-    assert "Half-hole inside the edge (0 = auto):" in labels
-    assert "Through hole from the edge (0 = auto):" in labels
     assert not any("(0 = auto)" in text and ("bordo" in text) for text in labels)
     _switch(window, "it")
     assert window.ai_elements_list.toolTip() == \
         "Elementi e ingombri individuati durante l'analisi fotografica"
-    assert isinstance(window.group_3d, QGroupBox)
+    # Il 3D non e' piu' un gruppo di widget: e' un dato (component_state).
+    assert not isinstance(window.group_3d, QGroupBox)

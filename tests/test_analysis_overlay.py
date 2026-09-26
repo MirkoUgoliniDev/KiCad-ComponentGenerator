@@ -874,3 +874,67 @@ def test_overlay_animation_resize_literal_status_and_cleanup():
     finally:
         overlay.stop()
         parent.close()
+
+
+# --- Dati locali -> nuvola AI (utente, 2026-09-26) ---------------------------
+
+from kicadgen.gui.analysis_overlay import TOOL_ALIASES, TRANSFER_SOURCES, TransferAnimation
+
+
+def test_a_remote_call_shows_the_local_data_leaving_for_the_cloud(overlay):
+    """Positivo: la chiamata remota sui documenti mostra i documenti a sinistra
+    della nuvola; quella sulla foto mostra la scheda. Stesso nome e stesso
+    anello: cambia solo cio' che parte."""
+    overlay.set_tool("llm", "vendor/model")
+    assert overlay.transfer.isVisibleTo(overlay)
+    assert overlay.transfer.source == "documents"
+    overlay.set_tool("llm_inventory", "vendor/model")
+    assert overlay.transfer.isVisibleTo(overlay)
+    assert overlay.transfer.source == "board"
+    assert overlay.tool.text() == f"{TOOLS['llm'][0]} · vendor/model"
+    assert overlay.spinner.glyph == TOOLS["llm"][2]
+
+
+@pytest.mark.parametrize("tool", ["yolo", "freecad", "kicad", None, "strumento-mai-visto"])
+def test_local_tools_send_nothing_and_show_only_the_ring(overlay, tool):
+    """Negativo: il lavoro locale non spedisce dati, quindi niente pacchetti
+    verso una nuvola che non c'e'."""
+    overlay.set_tool("llm")
+    overlay.set_tool(tool)
+    assert not overlay.transfer.isVisibleTo(overlay)
+
+
+def test_every_transfer_phase_is_a_known_remote_tool():
+    """Contratto: una sorgente di trasferimento esiste solo per chiamate remote."""
+    for key in TRANSFER_SOURCES:
+        assert TOOLS[TOOL_ALIASES.get(key, key)][2] == "cloud"
+
+
+def test_the_two_sources_draw_different_pictures(overlay):
+    """Positivo: documenti e scheda si distinguono dai pixel, non solo dal nome;
+    i pacchetti si muovono a ogni passo dell'animazione."""
+    widget = TransferAnimation()
+
+    def picture():
+        image = QImage(widget.size(), QImage.Format.Format_ARGB32)
+        image.fill(0)
+        widget.render(image)
+        return image
+
+    widget.set_source("documents", "#f9e2af")
+    documents = picture()
+    widget.set_source("board", "#f9e2af")
+    board = picture()
+    assert documents != board
+    widget.advance(0.1)
+    assert picture() != board
+
+
+def test_the_header_keeps_the_ring_height(overlay):
+    """Negativo: mostrare i dati in partenza non deve far sobbalzare la scheda."""
+    overlay.set_tool("yolo")
+    QApplication.processEvents()
+    before = overlay.card.height()
+    overlay.set_tool("llm")
+    QApplication.processEvents()
+    assert overlay.card.height() == before
