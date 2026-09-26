@@ -1,5 +1,6 @@
 """Keep configuration and SQLite tests away from the user's live preferences."""
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -128,3 +129,38 @@ def no_leftover_usage_listener():
     set_usage_listener(None)
     reset_usage()
 
+
+
+#: Tempo massimo di un singolo test, in secondi. Il piu' lento della suite
+#: (FreeCAD reale) resta sotto il minuto: il margine e' ampio di proposito.
+TEST_WATCHDOG_S = 300
+#: Dove finisce lo stack di un test bloccato (vedi `hang_watchdog`).
+HANG_REPORT = Path(tempfile.gettempdir()) / "kicadgen-test-hang.txt"
+
+
+@pytest.fixture(autouse=True)
+def hang_watchdog():
+    """@brief Un test bloccato stampa dove si e' fermato e chiude la suite.
+
+    `no_unattended_modal_dialog` copre le modali statiche di Qt, non le
+    finestre del programma aperte con `exec()`: il 26/09 una di queste (la
+    nuova «Scegli il modello YOLO», aperta da un test scritto per il vecchio
+    selettore di file) ha tenuto ferma la suite completa senza nessun
+    messaggio. Con `faulthandler` (libreria standard, nessuna dipendenza) un
+    blocco oltre TEST_WATCHDOG_S scrive lo stack di tutti i thread in
+    HANG_REPORT e termina il processo: la causa si legge subito invece di
+    aspettare. Su file e non su stderr perche' pytest cattura stderr e, con
+    l'uscita immediata, quel testo andrebbe perso.
+    """
+    import faulthandler
+    import os
+    HANG_REPORT.parent.mkdir(parents=True, exist_ok=True)
+    with open(HANG_REPORT, "w", encoding="utf-8") as report:
+        # Riscritto a ogni test: lo stack segue questa riga SOLO se il test
+        # si e' bloccato; altrimenti il file dice soltanto l'ultimo avviato.
+        report.write(f"Ultimo test avviato (limite {TEST_WATCHDOG_S} s): "
+                     f"{os.environ.get('PYTEST_CURRENT_TEST', '?')}\n")
+        report.flush()
+        faulthandler.dump_traceback_later(TEST_WATCHDOG_S, exit=True, file=report)
+        yield
+        faulthandler.cancel_dump_traceback_later()

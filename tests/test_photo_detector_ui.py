@@ -6,6 +6,7 @@ import sys
 from types import ModuleType
 
 import pytest
+from PyQt6.QtWidgets import QDialog
 
 from test_photo_inventory_gui import window
 from kicadgen.gui import main_window as gui
@@ -89,17 +90,23 @@ def test_selection_is_session_only_and_picker_can_cancel(window, monkeypatch, tm
     assert window._photo_detector_options() == ("yolo", None)
     assert window.field_yolo_model.isEnabled()
     path = tmp_path / "custom weights.onnx"
+    # Dal 2026-09-26 il pulsante apre «Scegli il modello YOLO» al posto del
+    # selettore di file: stesso contratto, scelta di sessione e annullabile.
+    from kicadgen.gui import yolo_model_dialog
     dialogs = []
 
-    def pick(*args):
-        dialogs.append(args)
-        return str(path), ""
+    def choose(self):
+        dialogs.append(self)
+        return QDialog.DialogCode.Accepted
 
-    monkeypatch.setattr(gui.QFileDialog, "getOpenFileName", pick)
+    monkeypatch.setattr(yolo_model_dialog.YoloModelDialog, "exec", choose)
+    monkeypatch.setattr(yolo_model_dialog.YoloModelDialog, "selected_path",
+                        lambda self: str(path))
     window.btn_pick_yolo_model.click()
-    assert "*.onnx" in dialogs[0][3]
+    assert len(dialogs) == 1
     assert window._photo_detector_options() == ("yolo", path)
-    monkeypatch.setattr(gui.QFileDialog, "getOpenFileName", lambda *args: ("", ""))
+    monkeypatch.setattr(yolo_model_dialog.YoloModelDialog, "exec",
+                        lambda self: QDialog.DialogCode.Rejected)
     window.btn_pick_yolo_model.click()
     assert window._photo_detector_options() == ("yolo", path)
 

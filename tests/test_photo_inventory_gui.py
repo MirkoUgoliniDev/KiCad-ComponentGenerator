@@ -92,6 +92,13 @@ def window(monkeypatch, tmp_path):
             raise ValueError('Nessun documento nel test.')
         return paths, None
     monkeypatch.setattr(w, '_selected_documents', selected_documents)
+    # Dal 26/09 l'analisi non parte senza tipologia (_extract_block_reason).
+    # Questi test riguardano altro e girano con la tipologia «(non
+    # specificata)» di sempre: qui conta solo il nome. La regola ha i suoi
+    # test in test_type_required.py, che rimettono il metodo vero.
+    monkeypatch.setattr(w, '_extract_block_reason',
+                        lambda: "" if w._component_name() else
+                        "Crea o apri prima un progetto (menu File).")
     # Il campo del nome nasce vuoto e senza nome non si carica ne' si estrae
     # nulla: questi test riguardano altro, quindi partono come chi ha gia'
     # scritto il nome. Il blocco ha i suoi test dedicati.

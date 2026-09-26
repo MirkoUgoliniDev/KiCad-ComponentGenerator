@@ -1101,11 +1101,12 @@ class AnalysisOverlay(QWidget):
         # l'elenco finisce e' lo stesso sobbalzo di una che si alza).
         self.status.setMinimumHeight(self._status_base_height + self._status_extra)
         self.tool.setMinimumHeight(self.tool.fontMetrics().lineSpacing())
-        # Due righe per i passi, ma solo quando ci sono: con i motivi dei passi
-        # non disponibili la riga puo' andare a capo. Le operazioni di una fase
-        # sola non pagano quello spazio (una finestra bassa non lo ha).
+        # Una riga per passo (uno sotto l'altro, utente 2026-09-26), ma solo
+        # quando ci sono: le operazioni di una fase sola non pagano quello
+        # spazio (una finestra bassa non lo ha).
         self.steps.setMinimumHeight(
-            2 * self.steps.fontMetrics().lineSpacing() if self._step_labels else 0)
+            len(self._step_labels) * self.steps.fontMetrics().lineSpacing()
+            + self.steps.fontMetrics().lineSpacing() // 2 if self._step_labels else 0)
         self.cost.setMinimumHeight(self.cost.fontMetrics().lineSpacing())
         # Anche il tempo trascorso: nasce vuoto e riceve il primo testo in
         # `start`, DOPO questo calcolo. Una label vuota e una con testo non
@@ -1342,7 +1343,12 @@ class AnalysisOverlay(QWidget):
                 parts.append(f'<span style="color:#f5e0dc; font-weight:600">&#9679; {text}</span>')
             else:
                 parts.append(f'<span style="color:#a6adc8">&#9675; {text}</span>')
-        self.steps.setText('&nbsp;&nbsp;&#8250;&nbsp;&nbsp;'.join(parts))
+        # Uno sotto l'altro (utente, 2026-09-26): in fila andavano a capo a
+        # meta' di un passo. Una colonna centrata come blocco, righe allineate
+        # a sinistra, cosi' i segni ✓ ● ○ stanno in colonna.
+        rows = "".join(f"<tr><td style='padding:1px 0'>{part}</td></tr>" for part in parts)
+        self.steps.setText(f"<table align='center' cellspacing='0'>{rows}</table>"
+                           if parts else "")
         self.steps.setVisible(bool(parts))
 
     def set_progress(self, done=None, total=None, unit=""):

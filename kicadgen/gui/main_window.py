@@ -989,6 +989,15 @@ class Cad3DWorker(QThread):
             self.error.emit(tx("Errore inatteso: {exc}", exc=exc))
 
 
+def _positive_frame(length, width):
+    """(length, width) in mm when both are finite and positive, else None."""
+    try:
+        values = (float(length), float(width))
+    except (TypeError, ValueError):
+        return None
+    return values if all(math.isfinite(v) and v > 0 for v in values) else None
+
+
 class UpdateCheckWorker(QThread):
     """@brief Ask GitHub for the latest release off the GUI thread."""
     done = pyqtSignal(object)
@@ -1443,6 +1452,15 @@ class MainWindow(QMainWindow):
         #: toccano (audit 25/09, B6). Un flag esplicito e non
         #: QThread.isRunning, che puo' restare vero dopo `finished`.
         self._extraction_busy = False
+        # La rotellina scorre la pagina e non cambia tendine o numeri non
+        # cliccati (2026-09-26: la tipologia cambiata scorrendo la scheda).
+        from .wheel_guard import install as install_wheel_guard
+        install_wheel_guard()
+        #: Quale insieme di campi del corpo descrive la scheda della foto in
+        #: `_photo_png`: "cast" (castellated) o "matrix". Se ne leggono i
+        #: valori attuali, cosi' una correzione delle quote vale e un cambio di
+        #: tipologia non sposta la scala. None = ignoto.
+        self._photo_body_fields = None
         self._config = load_config()
         self.profile_store = profile_store or ProfileStore(legacy_config=self._config, legacy_path=config_path())
         self.i18n = I18n(self.profile_store, self._config.get("language", "it"))
@@ -2044,14 +2062,22 @@ class MainWindow(QMainWindow):
         label.setToolTip(self._photo_detector_text("settings_help"))
 
     def _pick_session_yolo_model(self) -> None:
-        """Select optional ONNX weights without reading or saving preferences."""
-        selected, _ = QFileDialog.getOpenFileName(
-            self, self._photo_detector_text("picker"),
-            self.field_yolo_model.text().strip() or str(resource_path("models")),
-            self._photo_detector_text("filter"),
-        )
-        if selected:
-            self.field_yolo_model.setText(selected)
+        """@brief Choose the YOLO weights for this session in «Scegli il modello YOLO».
+
+        @note The window lists the files of the models folder with their
+            format, origin, license, training data and compatibility (user's
+            request, 2026-09-26: information about the model, not a bare file
+            dialog). Nothing is saved as a preference, as before.
+        """
+        import os
+        from .yolo_model_dialog import YoloModelDialog
+        default = os.environ.get("KICADGEN_YOLO_MODEL",
+                                 str(resource_path("models", "pcb_yolov8s.onnx")))
+        dialog = YoloModelDialog(self.field_yolo_model.text().strip(), resource_path("models"),
+                                 default=default, tr=self.i18n.text, parent=self)
+        self._yolo_model_dialog = dialog
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_path():
+            self.field_yolo_model.setText(dialog.selected_path())
 
     def _pick_session_vlm_model(self) -> None:
         """@brief Sceglie il modello che guarda la fotografia, solo per questa sessione.
@@ -2684,6 +2710,8 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             self._append_log(tx("Foto calibrata del progetto non leggibile: {exc}", exc=exc))
             return
+        self._photo_body_fields = self._body_fields_matching(bundle.body_length_mm,
+                                                             bundle.body_width_mm)
         self._photo_source = Path(path).name
         self._refresh_edit_review_buttons()
 
@@ -3018,6 +3046,7 @@ class MainWindow(QMainWindow):
         # fotografico puntano al comando vero e non a un doppione nascosto.
         self.btn_photo_comparison = self.btn_edit_component_review
         self._photo_png = None
+        self._photo_body_fields = None
         self._photo_overlay_png = None
         self._photo_source = ""
         # Icona nella barra in alto della scheda (utente, 2026-09-24): nome e
@@ -3209,6 +3238,9 @@ class MainWindow(QMainWindow):
         key = self.combo_component_type.currentData() or ""
         row = self.profile_store.get_type(key)
         component_type = component_types.ComponentType(key, row['label'], row['instructions']) if row else None
+        # La tipologia sblocca (o blocca) l'analisi: vedi _extract_block_reason.
+        if hasattr(self, "btn_extract_ai") and not self._background_work_running():
+            self._apply_component_name_gate()
 
         self.field_component_prompt.setPlainText(
             component_types.apply_block(
@@ -3635,7 +3667,8 @@ class MainWindow(QMainWindow):
             if widget is None:
                 continue
             if attr == "btn_extract_ai":
-                widget.setEnabled(named and not busy)
+                blocked = self._extract_block_reason()
+                widget.setEnabled(not blocked and not busy)
                 # Stesso testo del costruttore, letterale in entrambi i posti:
                 # e' cosi' che il controllo del catalogo (tests/test_i18n.py)
                 # lo vede. Se cambia qui deve cambiare la' -- il costo
@@ -3644,7 +3677,7 @@ class MainWindow(QMainWindow):
                 # restavano tali in en/fr/de fino al cambio di lingua
                 # successivo (revisore 3, difetto 10).
                 self._set_translated_tooltip(
-                    widget, reason or self._extract_button_sources()[1])
+                    widget, blocked or self._extract_button_sources()[1])
             else:
                 widget.setEnabled(named)
                 self._set_translated_tooltip(widget, reason)
@@ -3657,6 +3690,30 @@ class MainWindow(QMainWindow):
         # apribile e' un altro (o non c'e').
         if hasattr(self, "btn_ai_log"):
             self._refresh_ai_log_button()
+
+    def _extract_block_reason(self) -> str:
+        """@brief Why the analysis cannot start now, or "" when it can.
+
+        @return Italian catalogue source of the reason.
+        @note Without a component type nothing starts (user's decision,
+            2026-09-26): the type decides whether the photograph is inventoried
+            as a populated board or the documents are read as a single part,
+            and which body fields the footprint and the 3D use. Left
+            «(non specificata)», the model guessed (a board read as a pin
+            header, no calibrated photo, no body review). A custom type
+            (non-empty key) is a real choice and is accepted.
+        """
+        if not self._component_name():
+            return "Crea o apri prima un progetto (menu File)."
+        combo = getattr(self, "combo_component_type", None)
+        if combo is not None and not (combo.currentData() or ""):
+            return ("Scegli prima la tipologia del componente: decide come vengono "
+                    "analizzati documenti e foto.")
+        return ""
+
+    def _refresh_extract_enabled(self) -> None:
+        """@brief Re-enable the analysis button only when nothing blocks it."""
+        self.btn_extract_ai.setEnabled(not self._extract_block_reason())
 
     def _browse_library_root(self) -> None:
         path = QFileDialog.getExistingDirectory(
@@ -3750,6 +3807,11 @@ class MainWindow(QMainWindow):
 
     def _extract_with_ai(self) -> None:
         if self._background_work_running() or self._automatic_generation_active:
+            return
+        blocked = self._extract_block_reason()
+        if blocked and self._component_name():
+            QMessageBox.information(self, self.i18n.text("Tipologia componente"),
+                                    self.i18n.text(blocked))
             return
         if not self._component_name():
             # I pulsanti sono gia' spenti; questo vale per le scorciatoie e per
@@ -3870,6 +3932,7 @@ class MainWindow(QMainWindow):
         # vecchia foto e' ancora li' la lascerebbe accesa su dati appena
         # invalidati.
         self._photo_png = None
+        self._photo_body_fields = None
         self._photo_overlay_png = None
         self._photo_source = ""
         self._set_review_buttons_enabled(False)
@@ -4111,7 +4174,7 @@ class MainWindow(QMainWindow):
             self._refresh_reopen_review_button()
             return
         self._hide_analysis_overlay()
-        self.btn_extract_ai.setEnabled(True)
+        self._refresh_extract_enabled()
         self._end_extraction_busy()
         self._apply_component_name_gate()
         self._refresh_reopen_review_button()
@@ -5296,7 +5359,7 @@ class MainWindow(QMainWindow):
         if self._automatic_generation_active:
             return
         self._hide_analysis_overlay()
-        self.btn_extract_ai.setEnabled(True)
+        self._refresh_extract_enabled()
         self._end_extraction_busy()
         params = self._auto_generation_params
         self._auto_generation_params = None
@@ -5720,10 +5783,7 @@ class MainWindow(QMainWindow):
                                "modificano comunque con «Modifica componenti…»."))
             return
         if self._photo_png:
-            length = (self.field_cast_body_length.value() if self._is_castellated()
-                      else self.field_body_length.value())
-            width = (self.field_cast_body_width.value() if self._is_castellated()
-                     else self.field_body_width.value())
+            length, width = self._photo_review_frame()
             try:
                 dialog = PhotoReviewDialog(
                     self._photo_png, self._photo_components_from_table(), length, width, self,
@@ -5766,6 +5826,49 @@ class MainWindow(QMainWindow):
         layout.addWidget(area)
         self.i18n.retranslate_widgets(dialog)
         dialog.exec()
+
+    def _body_sizes(self) -> dict:
+        """Current body size (mm) of each set of body fields."""
+        return {"cast": (self.field_cast_body_length.value(), self.field_cast_body_width.value()),
+                "matrix": (self.field_body_length.value(), self.field_body_width.value())}
+
+    def _body_fields_matching(self, length, width):
+        """The set of body fields holding `length` x `width` (within 0.01 mm), or None."""
+        frame = _positive_frame(length, width)
+        if frame is None:
+            return None
+        current = "cast" if self._is_castellated() else "matrix"
+        sizes = self._body_sizes()
+        for key in (current, "cast", "matrix"):
+            if all(abs(a - b) <= 0.01 for a, b in zip(sizes[key], frame)):
+                return key
+        return None
+
+    def _photo_review_frame(self) -> tuple[float, float]:
+        """@brief Board size (mm) that gives the photo its scale in the review.
+
+        @return The CURRENT values of the body fields that describe the
+            photographed board: those of the type used by the extraction, or,
+            for a reopened project, those that match the saved review bundle.
+            Without that knowledge, the fields of the current type.
+        @note Two different situations must not be confused (2026-09-26): a
+            correction of the body size after the extraction must change the
+            scale (the photo shows the real board, now measured better), a
+            change of component type must not (its fields describe another
+            body; reading them put the boxes six times off the photo). When
+            the two sets disagree, the log says which one the review uses.
+        """
+        sizes = self._body_sizes()
+        current = "cast" if self._is_castellated() else "matrix"
+        key = getattr(self, "_photo_body_fields", None) or current
+        if key != current and any(abs(a - b) > 0.01 for a, b in zip(sizes[key], sizes[current])):
+            self._append_log(tx(
+                "Revisione foto: la foto mostra la scheda di {length:.2f} x {width:.2f} mm "
+                "dell'analisi; la tipologia attuale usa un corpo di {current_length:.2f} x "
+                "{current_width:.2f} mm, controlla la tipologia.",
+                length=sizes[key][0], width=sizes[key][1],
+                current_length=sizes[current][0], current_width=sizes[current][1]))
+        return sizes[key]
 
     def _photo_components_from_table(self) -> list[dict]:
         """Current photo components: geometry plus the detection metadata of each one."""
@@ -6103,6 +6206,7 @@ class MainWindow(QMainWindow):
         self._relaunch_base_synthesized = False
         self._last_extracted = None
         self._photo_png = None
+        self._photo_body_fields = None
         self._photo_overlay_png = None
         self._photo_source = ""
         self.package_geometry = None
@@ -6582,6 +6686,11 @@ class MainWindow(QMainWindow):
         self._set_acquisition_tabs_enabled(True)
         self._invalidate_generated_mesh()
         self._photo_png = getattr(params, "photo_png", None)
+        # Stesso criterio con cui l'estrazione sceglie i campi da riempire (piu'
+        # sotto): qui i campi non sono ancora stati applicati.
+        is_castellated = getattr(params, "is_castellated", None)
+        self._photo_body_fields = ("cast" if callable(is_castellated) and is_castellated()
+                                   else "matrix")
         self._photo_overlay_png = params.photo_overlay_png
         self._photo_source = params.photo_source
         self._refresh_edit_review_buttons()
@@ -8024,7 +8133,7 @@ class MainWindow(QMainWindow):
         if not succeeded:
             self._hide_analysis_overlay()
         self.menuBar().setEnabled(self._generation_menu_enabled)
-        self.btn_extract_ai.setEnabled(True)
+        self._refresh_extract_enabled()
         if self._extraction_busy:
             # L'estrazione e' finita con la generazione automatica gia'
             # attiva (_on_extract_finished esce prima): il pulsante torna a

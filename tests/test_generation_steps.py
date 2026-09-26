@@ -129,3 +129,18 @@ def test_a_single_phase_operation_is_not_held(window):  # noqa: F811
     overlay.start("Analisi AI in corso")
     window._hold_completed_overlay("Completato: footprint generato.")
     assert overlay.isHidden()
+
+
+def test_the_steps_are_listed_one_under_the_other(window):  # noqa: F811
+    """@brief Utente 26/09: un passo per riga, nell'ordine, senza frecce fra l'uno e l'altro."""
+    overlay = window.analysis_overlay
+    overlay.start("Generazione footprint e modello 3D")
+    overlay.set_steps(["Footprint 2D (KiCadGen)", "Modelli 3D dalla libreria KiCad",
+                       "Solido 3D con FreeCAD"])
+    overlay.set_current_step(1)
+    lines = [line for line in overlay.steps_plain_text().splitlines() if line.strip()]
+    assert len(lines) == 3
+    assert lines[0].startswith("✓ 1") and lines[1].startswith("● 2") and lines[2].startswith("○ 3")
+    assert "›" not in overlay.steps_plain_text()
+    assert overlay.steps.minimumHeight() >= 3 * overlay.steps.fontMetrics().lineSpacing()
+    overlay.stop()

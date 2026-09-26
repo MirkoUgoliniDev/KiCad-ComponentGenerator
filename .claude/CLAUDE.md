@@ -208,7 +208,8 @@ project library, or install a global library. The current full-suite baseline
 (2026-09-26 evening, branch `FIX` merged into `main`: PIANO-FIX start page and
 recent projects, «Account AI...» with the Windows Credential Manager, workflow and
 status bars, help/log/update/crash-report menu, «Strumenti» menu, STEP preview
-mesh cache, no board silkscreen frame, see HANDOFF.md points 71-74) is 5022 passed,
+mesh cache, no board silkscreen frame, YOLO model picker, wheel guard, analysis
+blocked without a component type, see HANDOFF.md points 71-80) is 5048 passed,
 4 skipped, 2 expected failures and 19 subtests. The last packaging integration was merge
 commit `692ca95` on `main`. Keep these values aligned with HANDOFF.md.
 

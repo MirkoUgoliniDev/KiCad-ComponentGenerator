@@ -116,6 +116,28 @@ def _text_width(font: QFont, painter: QPainter, text: str) -> int:
     return math.ceil(QFontMetricsF(font, painter.device()).horizontalAdvance(text)) + 1
 
 
+def split_first_line(total: int, name_needed: int, kind_needed: int, gap: int):
+    """@brief Share the first line of a card between the name and the type.
+
+    @param total Width of the line, px.
+    @param name_needed Width the whole name needs, px.
+    @param kind_needed Width the whole type label needs, px (0 = no type).
+    @param gap Space between the two when both are shown, px.
+    @return (name_width, kind_width).
+    @note Each text gets all it needs when both fit. Otherwise the type takes
+        what the name leaves free, but never less than half the line: a short
+        name must not cut the type (seen with «frrr» and «Scheda con
+        componenti · connettori castellated (mezzo foro)», cut at half the
+        card although the card was almost empty), and a long name must not
+        push the type out.
+    """
+    if kind_needed <= 0:
+        return max(0, total), 0
+    room = max(0, total - gap)
+    kind = min(kind_needed, max(room // 2, room - name_needed))
+    return max(0, room - kind), kind
+
+
 class RecentProjectDelegate(QStyledItemDelegate):
     """@brief Draws one recent project as a card of two lines.
 
@@ -223,7 +245,8 @@ class RecentProjectDelegate(QStyledItemDelegate):
         painter.setPen(QColor(SUBTEXT))
         kind_width = _text_width(detail_font, painter, kind)
         stamp_width = _text_width(detail_font, painter, stamp)
-        kind_width = min(kind_width, first.width() // 2)
+        name_width, kind_width = split_first_line(
+            first.width(), _text_width(name_font, painter, summary.name), kind_width, gap)
         if kind:
             painter.drawText(QRect(first.right() - kind_width, first.top(), kind_width,
                                    first.height()),
@@ -242,7 +265,6 @@ class RecentProjectDelegate(QStyledItemDelegate):
 
         painter.setFont(name_font)
         painter.setPen(QColor(TEXT))
-        name_width = max(0, first.width() - (kind_width + gap if kind else 0))
         painter.drawText(QRect(first.left(), first.top(), name_width, first.height()),
                          Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                          name_metrics.elidedText(summary.name, Qt.TextElideMode.ElideRight,
