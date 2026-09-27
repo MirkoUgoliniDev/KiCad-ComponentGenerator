@@ -81,12 +81,20 @@ def test_a_pdf_cannot_be_ticked_as_photo(window, tmp_path):
     pytest.importorskip('PyQt6.QtPdf')
     source = tmp_path / 'diagram.pdf'
     Image.new('RGB', (120, 80), 'blue').save(source, 'PDF')
-    window.guided_docs.store().import_file(['pinout'], source)
+    window.guided_docs.store().import_file([], source)
     window.guided_docs.refresh()
     card = window.guided_docs.cards['diagram.pdf']
     assert not card['preview'].pixmap().isNull()
-    assert not card['roles']['hires'].isEnabled()
-    assert card['roles']['top'].isEnabled()
+    # Dal 27/09 un PDF e' solo Datasheet: ogni altra casella e' spenta.
+    assert card['roles']['datasheet'].isEnabled() and card['roles']['datasheet'].isChecked()
+    for role in ('pinout', 'top', 'hires', 'land_pattern', 'side_view'):
+        assert not card['roles'][role].isEnabled(), role
+    # Negativo: su un'immagine le caselle restano spuntabili.
+    image = tmp_path / 'page.png'
+    Image.new('RGB', (120, 80), 'white').save(image)
+    window.guided_docs.store().import_file([], image)
+    window.guided_docs.refresh()
+    assert all(box.isEnabled() for box in window.guided_docs.cards['page.png']['roles'].values())
 
 
 def test_cancel_replace_and_remove_keep_originals(window, monkeypatch, tmp_path):
@@ -251,3 +259,18 @@ def test_cancelling_the_replace_dialog_leaves_the_cursor_alone(window, monkeypat
     assert panel._busy_role is None
     assert card['replace'].isEnabled()
     assert ADD_KEY != 'v.png'
+
+
+def test_every_role_has_its_own_cell_on_the_card():
+    """@brief Each role check box is placed, and no two share a grid cell.
+
+    The photograph role spans the whole row because its label («Foto alta
+    risoluzione», «Photo haute résolution») does not fit half a card.
+    """
+    from kicadgen.gui.guided_documents import ROLE_GRID
+    from kicadgen.services.document_roles import ROLES
+    assert set(ROLE_GRID) == set(ROLES)
+    cells = [(row, col + offset) for row, col, span in ROLE_GRID.values()
+             for offset in range(span)]
+    assert len(cells) == len(set(cells))
+    assert all(col + span <= 2 for _, col, span in ROLE_GRID.values())

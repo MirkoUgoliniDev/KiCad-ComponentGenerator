@@ -3,7 +3,9 @@
 The cube sits in the top-right corner of the viewport and turns with the model.
 Clicking a face looks at that face; clicking near an edge or a corner looks
 along the diagonal of that edge or corner; the house under the cube restores
-the initial isometric view. It replaces the row of «Vista: Iso, Sopra, …»
+the initial isometric view, and the two circular arrows beside it turn the
+view by 90 degrees clockwise or anticlockwise about the viewing axis (user,
+2026-09-27). It replaces the row of «Vista: Iso, Sopra, …»
 buttons (user request, 2026-09-23).
 
 @note The cube is drawn by its own VTK renderer on an overlay layer, so it
@@ -41,6 +43,13 @@ MARGIN_PX = 10
 #: cube, 4 px apart), so it scales with the cube instead of being re-tuned.
 HOME_PX = round(CUBE_PX * 26 / 96)
 HOME_GAP_PX = round(CUBE_PX * 4 / 96)
+#: The rotation arrows have the size of the house and sit on its row, one on
+#: each side, two gaps away so that the three targets read as separate.
+ROLL_PX = HOME_PX
+ROLL_GAP_PX = 2 * HOME_GAP_PX
+#: Hit results of the two rotation arrows (see ViewCube.hit).
+ROLL_CW = "roll_cw"
+ROLL_CCW = "roll_ccw"
 
 #: Largest fraction of the face side a label may cover, in both directions.
 #: 0.84 leaves an 8% border on each side, so the text never touches the edge
@@ -336,6 +345,73 @@ def interpolate_pose(start: CameraPose, end: CameraPose, s: float) -> CameraPose
                       (1 - s) * float(start.view_angle) + s * float(end.view_angle))
 
 
+def rolled_up(position, focal, up, clockwise: bool) -> tuple:
+    """@brief View-up vector after turning the view by 90 degrees about the viewing axis.
+
+    @param position Camera position.
+    @param focal Camera focal point.
+    @param up Current view-up vector.
+    @param clockwise True to turn the image clockwise on screen.
+    @return The new view-up, unit length, orthogonal to the viewing direction.
+    @note Turning the image clockwise brings what was on the left to the top,
+        so the new up is the old screen-left (minus the screen-right vector);
+        anticlockwise, the new up is the old screen-right.
+    """
+    forward = _unit(np.asarray(focal, dtype=float) - np.asarray(position, dtype=float))
+    upv = _unit(up)
+    if forward is None or upv is None:
+        return tuple(up)
+    right = _unit(np.cross(forward, upv))
+    if right is None:
+        return tuple(up)
+    new_up = -right if clockwise else right
+    return tuple(float(c) for c in new_up)
+
+
+def _roll_arrow_polydata(clockwise: bool):
+    """Circular arrow in normalised viewport coordinates, as convex cells.
+
+    A 270 degree arc (quads, each convex: the 2D mapper does not triangulate
+    concave polygons) with a triangular head at its end. The clockwise arrow
+    is the mirror image of the anticlockwise one.
+    """
+    from vtkmodules.vtkCommonCore import vtkPoints
+    from vtkmodules.vtkCommonDataModel import vtkCellArray, vtkPolyData
+    centre, outer, inner = 0.5, 0.36, 0.22
+    start, sweep, steps = math.radians(-45), math.radians(270), 24
+    points, cells = vtkPoints(), vtkCellArray()
+
+    def add(x, y):
+        if clockwise:
+            x = 1.0 - x
+        return points.InsertNextPoint(x, y, 0.0)
+
+    ring = []
+    for i in range(steps + 1):
+        a = start + sweep * i / steps
+        ring.append((add(centre + outer * math.cos(a), centre + outer * math.sin(a)),
+                     add(centre + inner * math.cos(a), centre + inner * math.sin(a))))
+    for (o0, i0), (o1, i1) in zip(ring, ring[1:]):
+        cells.InsertNextCell(4)
+        for index in (o0, o1, i1, i0):
+            cells.InsertCellPoint(index)
+    # Punta: triangolo tangente all'arco nel suo punto finale.
+    end = start + sweep
+    mid = (outer + inner) / 2
+    half = (outer - inner) * 1.25
+    tip_a = end + math.radians(40)
+    head = (add(centre + (mid + half) * math.cos(end), centre + (mid + half) * math.sin(end)),
+            add(centre + (mid - half) * math.cos(end), centre + (mid - half) * math.sin(end)),
+            add(centre + mid * math.cos(tip_a), centre + mid * math.sin(tip_a)))
+    cells.InsertNextCell(3)
+    for index in head:
+        cells.InsertCellPoint(index)
+    data = vtkPolyData()
+    data.SetPoints(points)
+    data.SetPolys(cells)
+    return data
+
+
 def _house_polydata():
     """House outline in normalised viewport coordinates (roof, walls, door)."""
     from vtkmodules.vtkCommonCore import vtkPoints
@@ -414,6 +490,24 @@ class ViewCube:
         self.home_renderer.AddViewProp(self.home_actor)
         render_window.AddRenderer(self.home_renderer)
 
+        # Frecce di rotazione ai lati della casetta, disegnate come lei.
+        self.roll_renderers = {}
+        for key, clockwise in ((ROLL_CCW, False), (ROLL_CW, True)):
+            arrow_mapper = vtkPolyDataMapper2D()
+            arrow_mapper.SetInputData(_roll_arrow_polydata(clockwise))
+            arrow_coordinate = vtkCoordinate()
+            arrow_coordinate.SetCoordinateSystemToNormalizedViewport()
+            arrow_mapper.SetTransformCoordinate(arrow_coordinate)
+            arrow = vtkActor2D()
+            arrow.SetMapper(arrow_mapper)
+            arrow.GetProperty().SetColor(*_HOME_COLOR)
+            renderer = vtkRenderer()
+            renderer.SetLayer(1)
+            renderer.InteractiveOff()
+            renderer.AddViewProp(arrow)
+            render_window.AddRenderer(renderer)
+            self.roll_renderers[key] = renderer
+
         self.set_labels(labels or DEFAULT_LABELS)
         main_renderer.AddObserver("StartEvent", self._sync)
 
@@ -451,9 +545,10 @@ class ViewCube:
         """
         width, height = max(float(width), 1.0), max(float(height), 1.0)
         self._size = (width, height)
-        cube = self.cube_rect()
-        home = self.home_rect()
-        for renderer, (x, y, w, h) in ((self.renderer, cube), (self.home_renderer, home)):
+        placed = [(self.renderer, self.cube_rect()), (self.home_renderer, self.home_rect())]
+        placed += [(renderer, self.roll_rect(key))
+                   for key, renderer in getattr(self, "roll_renderers", {}).items()]
+        for renderer, (x, y, w, h) in placed:
             # VTK counts Y from the bottom, Qt from the top.
             renderer.SetViewport(max(0.0, x / width), max(0.0, 1 - (y + h) / height),
                                  min(1.0, (x + w) / width), min(1.0, 1 - y / height))
@@ -468,25 +563,39 @@ class ViewCube:
         x, y, w, h = self.cube_rect()
         return (x + (w - HOME_PX) / 2, y + h + HOME_GAP_PX, HOME_PX, HOME_PX)
 
+    def roll_rect(self, key: str) -> tuple:
+        """@brief (x, y, w, h) of a rotation arrow in logical widget pixels.
+
+        @param key ROLL_CCW (left of the house) or ROLL_CW (right of it).
+        """
+        x, y, w, h = self.home_rect()
+        offset = -(ROLL_GAP_PX + ROLL_PX) if key == ROLL_CCW else w + ROLL_GAP_PX
+        return (x + offset, y + (h - ROLL_PX) / 2, ROLL_PX, ROLL_PX)
+
     @staticmethod
     def _inside(rect, x, y) -> bool:
         left, top, w, h = rect
         return left <= x <= left + w and top <= y <= top + h
 
     def contains(self, x: float, y: float) -> bool:
-        """@brief Whether a logical widget point lies on the cube square or the house."""
-        return self._inside(self.cube_rect(), x, y) or self._inside(self.home_rect(), x, y)
+        """@brief Whether a logical widget point lies on the cube, the house or an arrow."""
+        return (self._inside(self.cube_rect(), x, y) or self._inside(self.home_rect(), x, y)
+                or any(self._inside(self.roll_rect(key), x, y) for key in (ROLL_CW, ROLL_CCW)))
 
     # ── Clic ────────────────────────────────────────────────────────
 
     def hit(self, x: float, y: float):
         """@brief What a click at a logical widget point selects.
 
-        @return "home", a direction tuple (see classify_cube_point), or None
-            when the click is outside the cube and the house.
+        @return "home", ROLL_CW, ROLL_CCW, a direction tuple (see
+            classify_cube_point), or None when the click is outside the cube,
+            the house and the arrows.
         """
         if self._inside(self.home_rect(), x, y):
             return "home"
+        for key in (ROLL_CW, ROLL_CCW):
+            if self._inside(self.roll_rect(key), x, y):
+                return key
         left, top, w, h = self.cube_rect()
         if not self._inside((left, top, w, h), x, y):
             return None

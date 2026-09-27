@@ -216,7 +216,6 @@ class Preview3DVtk(QtInteractor):
         self.setToolTip('Doppio clic su un componente: scegli modello KiCad e ruota il modello.\n'
                         'Tasto destro: elimina, ruota o cambia il modello.')
         self._configure_component_picking()
-        self._configure_component_double_click()
         self.set_background(_BG_COLOR)
         self.show_pin_numbers = True
         try:
@@ -255,20 +254,6 @@ class Preview3DVtk(QtInteractor):
                                      left_clicking=False, show=False, show_message=False)
         except (AttributeError, RuntimeError, ImportError):
             pass  # Optional interaction must not prevent rendering a model.
-
-    def _configure_component_double_click(self):
-        """Register a real VTK double-click without disabling camera rotation."""
-        try:
-            self.iren.add_observer("LeftButtonDoubleClickEvent",
-                                   self._component_double_clicked)
-        except (AttributeError, RuntimeError, ImportError):
-            pass
-
-    def _component_actor_at_cursor(self):
-        try:
-            return self._component_actor_at(*self.iren.GetEventPosition())
-        except (AttributeError, RuntimeError, ImportError):
-            return None
 
     def _component_actor_at(self, x, y):
         """@brief Attore sotto un punto gia' espresso in coordinate VTK."""
@@ -341,15 +326,40 @@ class Preview3DVtk(QtInteractor):
 
     def _cube_clicked(self, target) -> None:
         """Apply what a click on the cube selected: home, a face or a diagonal."""
-        from .view_cube import view_for_direction
+        from .view_cube import ROLL_CCW, ROLL_CW, view_for_direction
         if target == "home":
             self.animate_to_view("iso")
+            return
+        if target in (ROLL_CW, ROLL_CCW):
+            self.roll_view(clockwise=target == ROLL_CW)
             return
         view = view_for_direction(target)
         if view is not None:
             self.animate_to_view(view)
         else:
             self.animate_to_direction(target)
+
+    def roll_view(self, clockwise: bool) -> None:
+        """@brief Turn the view by 90 degrees about the viewing axis, animated.
+
+        @param clockwise True to turn the image clockwise on screen.
+        @note The target view-up is computed once, at the click: the last
+            animation frame applies that absolute value, so it never rolls a
+            second time from a camera that is already turned.
+        """
+        from .view_cube import rolled_up
+        camera = self.camera
+        position, focal = tuple(camera.GetPosition()), tuple(camera.GetFocalPoint())
+        target = rolled_up(position, focal, tuple(camera.GetViewUp()), clockwise)
+
+        def apply():
+            camera.SetPosition(*position)
+            camera.SetFocalPoint(*focal)
+            camera.SetViewUp(*target)
+            self.renderer.ResetCameraClippingRange()
+            self._update_label_visibility()
+            self.render()
+        self._animate_camera(apply)
 
     # ── Animazione della camera ─────────────────────────────────────
 
@@ -496,11 +506,35 @@ class Preview3DVtk(QtInteractor):
         super().mouseMoveEvent(event)
 
     def mouseDoubleClickEvent(self, event):  # noqa: N802 - firma Qt
-        """@brief A double click on the cube is two clicks on the cube, not a component pick."""
+        """@brief Open the component under the cursor; on the cube, nothing more.
+
+        @note Served here, from the Qt event, not by a VTK observer: the Qt
+            interactor of VTK forwards a double click as a second
+            LeftButtonPressEvent with repeat count 1 and never fires
+            LeftButtonDoubleClickEvent (checked on VTK 9.7), so the observer
+            used before was never called. Outside components the double click
+            keeps its VTK meaning.
+        """
         if self._on_cube(event):
             event.accept()
             return
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self._serve_double_click(event.position())):
+            event.accept()
+            return
         super().mouseDoubleClickEvent(event)
+
+    def _serve_double_click(self, point) -> bool:
+        """@brief Emit component_requested for the component under a Qt point.
+
+        @param point Cursor position in widget coordinates (QPointF).
+        @return True when a component was under the point and was requested.
+        """
+        index = self._component_row_at_widget_point(point.x(), point.y())
+        if index is None:
+            return False
+        self.component_requested.emit(index)
+        return True
 
     def mousePressEvent(self, event):  # noqa: N802 - firma Qt
         """@brief Serve clicks on the cube; remember where a right press starts.
@@ -569,10 +603,6 @@ class Preview3DVtk(QtInteractor):
             return
         # Fuori dai componenti il tasto destro resta quello di VTK.
         super().contextMenuEvent(event)
-
-    def _component_double_clicked(self, *_args):
-        actor = self._component_actor_at_cursor()
-        self._component_picked(actor)
 
     def _component_picked(self, actor):
         if actor is None:

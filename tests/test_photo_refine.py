@@ -19,7 +19,7 @@ import pytest
 cv2 = pytest.importorskip("cv2", reason="opencv-python non installato")
 
 from kicadgen.services.photo_refine import (
-    find_board, refine_component_edges, refine_components,
+    aspect_deformation, find_board, refine_component_edges, refine_components,
 )
 
 # Scala fissa per tutte le immagini sintetiche: 20 px/mm.
@@ -71,12 +71,19 @@ def test_find_board_matches_module_aspect_ratio():
     assert frame.scale == pytest.approx(SCALE, rel=0.05)
 
 
-def test_find_board_rejects_wrong_aspect_ratio():
+def test_find_board_calibrates_other_proportions_axis_by_axis():
+    """Contratto cambiato il 27/09 (utente: «devi accettare la foto anche in
+    questo formato»). Prima un modulo dichiarato quadrato rifiutava la scheda
+    allungata della foto. Ora, se e' l'unico oggetto separato dallo sfondo,
+    la scala si misura per asse e la deformazione viene dichiarata: o la foto
+    e' deformata o le quote sono sbagliate, e la sola foto non lo dice."""
     img = _synthetic_photo((0, 0), (2, 2), rotated=False)
-    # Un modulo dichiarato quasi quadrato non corrisponde al rettangolo
-    # allungato nella foto: la vista non e' utilizzabile per QUESTO modulo.
     frame = find_board(img, body_length=BODY_WIDTH_MM, body_width=BODY_WIDTH_MM)
-    assert frame is None
+    assert frame is not None
+    assert frame.width_px == pytest.approx(BODY_LENGTH_MM * SCALE, abs=2)
+    assert frame.height_px == pytest.approx(BODY_WIDTH_MM * SCALE, abs=2)
+    assert aspect_deformation(frame, BODY_WIDTH_MM, BODY_WIDTH_MM) == pytest.approx(
+        BODY_LENGTH_MM / BODY_WIDTH_MM - 1, abs=0.02)
 
 
 # ── refine_component_edges ───────────────────────────────────────────

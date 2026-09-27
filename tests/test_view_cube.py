@@ -529,3 +529,58 @@ def test_the_real_timer_completes_the_animation(scene):
         time.sleep(0.005)
     assert not view.is_camera_animating()
     assert _same_pose(view._camera_pose(), target)
+
+
+# ── Rotazione di 90 gradi attorno all'asse di vista (utente, 27/09) ──
+
+@pytest.mark.parametrize("position,up", [
+    ((0, 0, 10), (0, 1, 0)),        # dall'alto
+    ((0, -10, 0), (0, 0, 1)),       # di fronte
+    ((7, -7, 7), (0, 0, 1)),        # isometrica: l'alto non e' ortogonale
+])
+def test_a_roll_turns_the_image_by_a_quarter_in_the_asked_direction(position, up):
+    """Clockwise: what was on the screen-left comes to the top; anticlockwise the
+    opposite; four quarters bring the view back. Any viewing direction."""
+    forward = -np.asarray(position, float) / np.linalg.norm(position)
+    right = np.cross(forward, up)
+    right /= np.linalg.norm(right)
+    cw = np.array(vc.rolled_up(position, (0, 0, 0), up, clockwise=True))
+    ccw = np.array(vc.rolled_up(position, (0, 0, 0), up, clockwise=False))
+    assert cw == pytest.approx(-right) and ccw == pytest.approx(right)
+    assert np.dot(cw, forward) == pytest.approx(0.0, abs=1e-12)
+    turned = up
+    for _ in range(4):
+        turned = vc.rolled_up(position, (0, 0, 0), turned, clockwise=True)
+    screen_up = np.cross(right, forward)
+    assert np.array(turned) == pytest.approx(screen_up)
+
+
+def test_the_rotation_arrows_flank_the_house_inside_the_cube_column(viewer):
+    view, _ = viewer
+    cube = view.view_cube
+    cx, _, cw, _ = cube.cube_rect()
+    hx, hy, hw, hh = cube.home_rect()
+    left, right = cube.roll_rect(vc.ROLL_CCW), cube.roll_rect(vc.ROLL_CW)
+    assert left[0] + left[2] < hx and right[0] > hx + hw        # ai lati, non sopra
+    assert left[0] >= cx and right[0] + right[2] <= cx + cw     # nella colonna del cubo
+    assert left[1] + left[3] / 2 == pytest.approx(hy + hh / 2)  # stessa riga
+    assert cube.hit(left[0] + left[2] / 2, left[1] + left[3] / 2) == vc.ROLL_CCW
+    assert cube.hit(right[0] + right[2] / 2, right[1] + right[3] / 2) == vc.ROLL_CW
+    assert cube.hit(hx + hw / 2, hy + hh / 2) == "home"
+    # Negativo: lo spazio fra freccia e casetta non e' un bersaglio.
+    assert cube.hit((left[0] + left[2] + hx) / 2, hy + hh / 2) is None
+
+
+@pytest.mark.parametrize("key,clockwise", [(vc.ROLL_CW, True), (vc.ROLL_CCW, False)])
+def test_clicking_an_arrow_rolls_the_view_and_lands_on_the_quarter_turn(scene, key, clockwise):
+    view, app, clock = scene
+    camera = view.camera
+    position, focal = tuple(camera.GetPosition()), tuple(camera.GetFocalPoint())
+    expected = vc.rolled_up(position, focal, tuple(camera.GetViewUp()), clockwise)
+    x, y, w, h = view.view_cube.roll_rect(key)
+    _click(app, view, x + w / 2, y + h / 2)
+    assert view.is_camera_animating()
+    _tick(view, clock, 1.0)
+    assert not view.is_camera_animating()
+    assert tuple(camera.GetViewUp()) == pytest.approx(expected)
+    assert tuple(camera.GetPosition()) == pytest.approx(position)   # solo rotazione

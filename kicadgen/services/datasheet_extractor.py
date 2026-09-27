@@ -1466,7 +1466,12 @@ def _log_name(name: str) -> str:
 #: Roles a document may carry (document manifest version 2). One file may
 #: carry several at once: a datasheet page is often pinout, dimensioned top
 #: view and land pattern together.
-DOCUMENT_ROLE_KEYS = ("pinout", "top", "hires", "land_pattern", "side_view")
+DOCUMENT_ROLE_KEYS = ("pinout", "top", "hires", "land_pattern", "side_view", "datasheet")
+#: Views a complete manufacturer datasheet may contain. When a file is
+#: declared `datasheet`, these views, if not declared on another file, are
+#: not "missing": the model looks for them in the datasheet and reports the
+#: sections it does not find. The photograph is never one of them.
+DATASHEET_VIEWS = ("pinout", "top", "land_pattern", "side_view")
 #: The role of the photographs of the real part: only files carrying it go to
 #: the photo inventory (component recognition).
 PHOTO_ROLE = "hires"
@@ -1489,8 +1494,9 @@ _ROLE_PROMPTS = {
               "tipo di contatto sul bordo, colori, sigle serigrafate, spigoli arrotondati, "
               "componenti montati. Non e' un disegno quotato: una misura ricavata da qui e' "
               "una stima (\"estimated\" in value_sources)."),
-    "land_pattern": ("Land pattern consigliato",
-                     "piazzole consigliate sulla scheda che ospita il componente: usalo per "
+    "land_pattern": ("Piazzole consigliate",
+                     "piazzole consigliate (land pattern) sulla scheda che ospita il "
+                     "componente: usalo per "
                      "dimensioni e posizioni di piazzole e fori (pad_diameter_mm, drill_mm, "
                      "pad_length_mm, pad_width_mm, package_geometry). Le piazzole non sono il "
                      "corpo: non ricavarne le quote body_*."),
@@ -1498,6 +1504,13 @@ _ROLE_PROMPTS = {
                   "vista di profilo: usala per le quote in altezza -- body_height_mm, "
                   "pcb_thickness_mm, pin_length_3d_mm e altezze dei componenti. Lunghezze, "
                   "larghezze e passi in pianta non si leggono da questa vista."),
+    "datasheet": ("Datasheet del costruttore",
+                  "documento completo del costruttore: puo' contenere tabella dei pin e pinout, "
+                  "disegni quotati visti dall'alto e di profilo, piazzole consigliate (land "
+                  "pattern). Cerca ciascuna di queste sezioni e usala per il suo scopo, come se "
+                  "fosse dichiarata a parte; dichiara in contacts_view la vista del disegno dei "
+                  "contatti. Una sezione che non c'e' va segnalata in notes, non ricostruita. "
+                  "Non e' una foto del pezzo: non ricavarne components_3d ne' colori."),
 }
 
 
@@ -1593,7 +1606,7 @@ def _role_description(keys) -> str:
     if len(keys) > 1:
         lines.append("Lo stesso file vale per tutti questi ruoli: leggi da ogni parte del "
                      "documento le informazioni del ruolo corrispondente.")
-    if "pinout" in keys and "top" not in keys:
+    if "pinout" in keys and "top" not in keys and "datasheet" not in keys:
         # Only when the SAME file is not also the dimensioned top view: a
         # datasheet page that is both must be read for both.
         lines.append("Questo file non e' dichiarato disegno quotato dall'alto: non usarlo "
@@ -1833,12 +1846,21 @@ def extract_pin_header_params(
                "strumento.")
     if document_roles is not None:
         declared = {key for keys in document_roles.values() for key in keys}
-        missing = [_ROLE_PROMPTS[key][0] for key in DOCUMENT_ROLE_KEYS if key not in declared]
+        # A datasheet is a container: the views it may hold are looked for in
+        # it, not declared missing. The datasheet role itself is optional.
+        in_datasheet = set(DATASHEET_VIEWS) if "datasheet" in declared else set()
+        missing = [_ROLE_PROMPTS[key][0] for key in DOCUMENT_ROLE_KEYS
+                   if key not in declared and key not in in_datasheet and key != "datasheet"]
+        to_search = [_ROLE_PROMPTS[key][0] for key in DATASHEET_VIEWS
+                     if key in in_datasheet and key not in declared]
         request += ('\nI ruoli dei file sono espliciti: rispettali, non dedurli dai nomi originali. '
                     'Un file con piu\' ruoli vale per ciascuno di essi. '
                     'Segnala dati mancanti e incongruenze, senza inventare quote per completare le viste assenti.')
         if missing:
             request += '\nViste non fornite: ' + ', '.join(missing) + '.'
+        if to_search:
+            request += ('\nViste da cercare nel datasheet (non dichiarate in altri file): '
+                        + ', '.join(to_search) + '.')
     if include_nc_pins:
         request += (
             "\n\nPin NC: i pin marcati NC (Not Connected) nella tabella pinout sono "

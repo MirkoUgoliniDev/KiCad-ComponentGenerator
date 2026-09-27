@@ -51,10 +51,13 @@ def test_document_roles_survive_a_transient_refusal(tmp_path, monkeypatch):
     from kicadgen.services.document_roles import DocumentSet
     monkeypatch.setattr(fsutil, "REPLACE_FIRST_PAUSE_S", 0.0)
     store = DocumentSet(tmp_path / "docs")
-    source = tmp_path / "a.pdf"
-    source.write_bytes(b"%PDF-1.4\nfixture")
+    # Un'immagine, non un PDF: dal 27/09 un PDF ha solo il ruolo Datasheet
+    # e qui serve un cambio di ruoli, cioe' una seconda scrittura del manifest.
+    from PIL import Image
+    source = tmp_path / "a.png"
+    Image.new("RGB", (32, 20), "red").save(source)
     store.import_file("pinout", source)
     calls = _flaky(monkeypatch, 1)
-    store.set_roles("a.pdf", ["pinout", "top"])
+    store.set_roles("a.png", ["pinout", "top"])
     assert len(calls) == 2
     assert DocumentSet(tmp_path / "docs").selected is not None
