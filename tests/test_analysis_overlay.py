@@ -938,3 +938,16 @@ def test_the_header_keeps_the_ring_height(overlay):
     overlay.set_tool("llm")
     QApplication.processEvents()
     assert overlay.card.height() == before
+
+
+def test_opencv_is_a_local_tool_of_its_own(overlay):
+    """User, 27/09: the OpenCV steps are shown as such, local and free, with their own mark."""
+    from kicadgen.gui.analysis_overlay import TOOLS, TRANSFER_SOURCES
+    name, color, glyph = TOOLS["opencv"]
+    assert "OpenCV" in name and "locale" in name
+    assert "opencv" not in TRANSFER_SOURCES                  # nulla lascia la macchina
+    others = [spec for key, spec in TOOLS.items() if key != "opencv"]
+    assert glyph not in {g for _, _, g in others}
+    assert color not in {c for _, c, _ in others if c != "#cba6f7"}
+    overlay.set_tool("opencv", "ricerca e calibrazione della scheda")
+    assert overlay.tool.text().startswith("OpenCV")

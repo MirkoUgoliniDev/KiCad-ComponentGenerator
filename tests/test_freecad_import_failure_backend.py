@@ -80,16 +80,9 @@ def test_real_freecad_corrupt_step_exports_failure_metadata(tmp_path):
     assert failed
     related = [p for p in preview['parts'] if p['name'].startswith('Cmp1_')]
     assert related and all(p['source_row'] == 7 for p in related)
-    # Contratto della cornice dal 2026-09-20 (3ae0f9e): va solo dove il corpo
-    # si confonderebbe col fondo. Il segnaposto magenta dell'import fallito
-    # contrasta col PCB scuro, quindi non ne ha; il corpo scuro «After», sullo
-    # stesso PCB e nella stessa corsa, si'. Prima il test chiedeva la cornice
-    # su ogni componente (regola del 09ac162) ed era sempre saltato senza
-    # FreeCAD, per questo il cambio non si era visto.
-    assert not any('_silk' in p['name'] for p in related)
-    after_silk = [p for p in preview['parts']
-                  if p['name'].startswith('Cmp2_') and '_silk' in p['name']]
-    assert len(after_silk) == 1 and after_silk[0]['source_row'] == 2
+    # Dal 2026-09-27 (utente) nessun componente ha piu' un contorno serigrafico:
+    # prima lo aveva il corpo scuro «After» (regola del contrasto del 20/09).
+    assert not any('_silk' in p['name'] for p in preview['parts'])
     for part in failed:
         assert part["source"] == "approximation" and part["model_path"] is None
         assert part["source_row"] == 7 and part["model_import_failed"] is True

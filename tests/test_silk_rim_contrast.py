@@ -1,75 +1,29 @@
-"""@brief La cornice serigrafica va dove il corpo sparirebbe nel fondo."""
+"""@brief No silkscreen outline around the components of the 3D model.
+
+User, 2026-09-27: «non mettere la serigrafia ingombro attorno ai componenti».
+Until then a white rectangle was drawn around every dark approximated body so
+that it would stand out from a dark board; it came from no document and no
+photograph and read as real silkscreen. The board frame went the same way on
+2026-09-26. The module's own pin labels (`silk_texts`) are footprint
+silkscreen, requested by an explicit option, and stay.
+"""
 import ast
 from pathlib import Path
-
-import pytest
 
 SRC = Path(__file__).resolve().parents[1] / "kicadgen" / "cad3d" / "freecad_build_body.py"
 
 
-@pytest.fixture(scope="module")
-def rim():
-    """Estrae le sole funzioni del contrasto: il modulo intero pretende FreeCAD."""
-    tree = ast.parse(SRC.read_text(encoding="utf-8"))
-    wanted = {"_relative_luminance", "_needs_silk_rim", "_needs_component_rim"}
-    body = [n for n in tree.body
-            if (isinstance(n, ast.FunctionDef) and n.name in wanted)
-            or (isinstance(n, ast.Assign)
-                and any(getattr(t, "id", "") == "SILK_RIM_MIN_CONTRAST" for t in n.targets))]
-    assert len(body) == 4, [getattr(n, "name", n) for n in body]
-    namespace = {}
-    exec(compile(ast.Module(body=body, type_ignores=[]), "<rim>", "exec"), namespace)
-    return namespace
+def _tree():
+    return ast.parse(SRC.read_text(encoding="utf-8"))
 
 
-#: Colore del substrato usato dal generatore per i moduli su PCB.
-PCB = "#2f3f1f"
+def test_the_outline_builders_are_gone():
+    names = {n.name for n in _tree().body if isinstance(n, ast.FunctionDef)}
+    assert not names & {"_rim", "_needs_component_rim", "_needs_silk_rim"}
 
 
-@pytest.mark.parametrize("color", [
-    "#1a1a1a",   # case nero: e' il caso per cui la cornice esiste
-    "#303030",   # grigio scurissimo, il default dei corpi dalla foto
-    "#2f3f1f",   # identico al substrato
-    "#243018",   # verde scuro appena diverso
-])
-def test_a_body_that_would_vanish_into_the_board_gets_its_frame(rim, color):
-    assert rim["_needs_silk_rim"](color, PCB) is True
-
-
-@pytest.mark.parametrize("color", [
-    "#ffffff",   # il modulo schermato e il guscio USB
-    "#c8c8c8",   # metallo
-    "#e8e8e0",   # ceramica chiara
-    "#FF00FF",   # il magenta dei componenti senza modello
-])
-def test_a_body_that_stands_out_on_its_own_does_not(rim, color):
-    assert rim["_needs_silk_rim"](color, PCB) is False
-
-
-def test_the_threshold_is_the_published_one_not_one_chosen_here(rim):
-    assert rim["SILK_RIM_MIN_CONTRAST"] == 3.0
-
-
-def test_the_relation_is_symmetric_and_survives_a_broken_colour(rim):
-    assert rim["_needs_silk_rim"]("#ffffff", PCB) == rim["_needs_silk_rim"](PCB, "#ffffff")
-    # Un colore illeggibile non deve far cadere la generazione: vale nero, e
-    # nero su PCB scuro la cornice se la merita.
-    assert rim["_needs_silk_rim"]("non-un-colore", PCB) is True
-
-
-class _Library(str):
-    """Colore di una parte importata: una stringa che porta `model_path`."""
-    model_path = "C:/KiCad/3dmodels/modulo.step"
-
-
-def test_a_dark_body_from_the_kicad_library_gets_no_frame(rim):
-    """@brief Il modello KiCad ha i suoi colori: niente cornice anche se la foto e' scura."""
-    built = [(object(), _Library("#b0c7db"))]
-    assert rim["_needs_component_rim"]("#1a1a1a", PCB, built) is False
-
-
-def test_a_dark_approximated_body_keeps_its_frame(rim):
-    """@brief Negativo: forma approssimata scura (anche il ripiego di un import fallito)."""
-    built = [(object(), "#1a1a1a"), (object(), "#c8c8c8")]
-    assert rim["_needs_component_rim"]("#1a1a1a", PCB, built) is True
-    assert rim["_needs_component_rim"]("#ffffff", PCB, built) is False
+def test_no_part_named_after_a_component_outline_is_added():
+    """No `add(f"{base}_silk", ...)`: the only silkscreen objects are the pin labels."""
+    source = SRC.read_text(encoding="utf-8")
+    assert '_silk"' not in source and "_silk'" not in source
+    assert 'f"Silk_{i}"' in source            # le sigle dei contatti restano
