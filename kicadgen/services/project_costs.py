@@ -2,9 +2,11 @@
 
 The total lives in ``ai-costs.json`` inside the project folder, so it follows
 the project when it is renamed or copied. It grows by one entry for every
-paid call, as OpenRouter reports it (``usage.cost``, USD): the aborted runs
-and the unusable answers count too, because they were paid. Answers served
-from the local cache never reach OpenRouter and never reach this file.
+paid call, with the cost the provider reports (OpenRouter ``usage.cost``,
+USD) or, for DeepSeek, which reports none, tokens x official price
+(deepseek_pricing): the aborted runs and the unusable answers count too,
+because they were paid. Answers served from the local cache never reach a
+provider and never reach this file.
 
 @note A file that cannot be read or does not validate is never overwritten:
     the caller gets ProjectCostsError and the file stays as it is, for a
@@ -60,14 +62,22 @@ class ProjectCostsError(ValueError):
 class ProjectCosts:
     """@brief Totals of the paid AI calls of one project.
 
-    @note `calls_without_cost` counts calls OpenRouter answered without a
-        cost: when it is not zero, `total_usd` is a lower bound.
+    @note `calls_without_cost` counts calls recorded without a cost: when it
+        is not zero, `total_usd` is a lower bound. `estimated_calls` counts
+        DeepSeek calls costed later from tokens without the cache split:
+        each of those is an upper bound.
     """
 
     total_usd: float = 0.0
     calls: int = 0
     calls_without_cost: int = 0
     since: str = ""
+    #: provider -> (total_usd, calls, calls_without_cost), from the entries
+    #: (providers.provider_of on each entry's model).
+    by_provider: dict = None
+    #: DeepSeek calls priced from their recorded tokens without the cache
+    #: split (cost_source "token_price_estimate"): upper bounds.
+    estimated_calls: int = 0
 
     @property
     def complete(self) -> bool:
@@ -112,7 +122,72 @@ def _read(path: Path) -> Optional[dict]:
             or missing > calls or not isinstance(entries, list)
             or not isinstance(data.get("since", ""), str)):
         raise ProjectCostsError(f"{path.name}: invalid totals")
+    _price_deepseek_calls(data)
     return data
+
+
+def _price_deepseek_calls(data: dict) -> None:
+    """Give DeepSeek calls recorded without a price the cost DeepSeek bills them.
+
+    DeepSeek's API reports no cost; the bill is tokens x the official price
+    (deepseek_pricing). Calls recorded before the price was computed at call
+    time -- without a cost, or with a share of a balance difference
+    (cost_source "balance_delta", unreliable: the balance updates late, it
+    gave 0.0 on real runs) -- are costed here from their recorded tokens and
+    time. Their tokens carry no cache split, so every input token counts as a
+    cache miss: an upper bound (cost_source "token_price_estimate").
+    Entries recorded with the bare model name («deepseek-flash», before the
+    provider prefix existed) go back to the DeepSeek provider: an OpenRouter
+    identifier always has a vendor and a slash, a bare name never.
+    Done in memory on every read; the file follows at the next write.
+    """
+    from .deepseek_pricing import call_cost, price_of
+    from .providers import DEEPSEEK_PREFIX, PROVIDER_DEEPSEEK, provider_model_name, provider_of
+    for entry in data["entries"]:
+        if not isinstance(entry, dict):
+            continue
+        model = str(entry.get("model") or "")
+        if "/" not in model and price_of(model) is not None:
+            model = entry["model"] = DEEPSEEK_PREFIX + model
+        if provider_of(model) != PROVIDER_DEEPSEEK:
+            continue
+        old = _number(entry.get("cost_usd"))
+        if old is not None and entry.get("cost_source") != "balance_delta":
+            continue
+        prompt = _count(entry.get("prompt_tokens")) or 0
+        output = _count(entry.get("completion_tokens")) or 0
+        cost = None
+        if prompt or output:
+            # Zero tokens means the usage was not reported, not a free call:
+            # pricing it would turn an unknown cost into a known zero.
+            try:
+                moment = datetime.fromisoformat(str(entry.get("time")))
+                cost = call_cost(provider_model_name(model),
+                                 {"prompt_tokens": prompt, "completion_tokens": output}, moment)
+            except (ValueError, OverflowError):
+                cost = None   # damaged time or count: left without cost, never fatal
+        if cost is None:
+            if old is not None:
+                # Unreliable balance difference and no price: back to «without cost».
+                entry["cost_usd"] = None
+                entry.pop("cost_source", None)
+                data["total_usd"] = max(0.0, float(data["total_usd"]) - old)
+                data["calls_without_cost"] = min(data["calls"], data["calls_without_cost"] + 1)
+            continue
+        if old is None:
+            data["calls_without_cost"] = max(0, data["calls_without_cost"] - 1)
+        data["total_usd"] = max(0.0, float(data["total_usd"]) - (old or 0.0) + cost)
+        entry["cost_usd"], entry["cost_source"] = cost, "token_price_estimate"
+
+
+def _totals(data: dict) -> ProjectCosts:
+    """Totals of a validated file content."""
+    return ProjectCosts(total_usd=float(data["total_usd"]), calls=data["calls"],
+                        calls_without_cost=data["calls_without_cost"],
+                        since=data.get("since", ""), by_provider=_by_provider(data),
+                        estimated_calls=sum(1 for entry in data["entries"]
+                                            if isinstance(entry, dict) and entry.get(
+                                                "cost_source") == "token_price_estimate"))
 
 
 def load_project_costs(project_dir: Path) -> ProjectCosts:
@@ -125,10 +200,22 @@ def load_project_costs(project_dir: Path) -> ProjectCosts:
     """
     data = _read(Path(project_dir) / COSTS_FILE)
     if data is None:
-        return ProjectCosts()
-    return ProjectCosts(total_usd=float(data["total_usd"]), calls=data["calls"],
-                        calls_without_cost=data["calls_without_cost"],
-                        since=data.get("since", ""))
+        return ProjectCosts(by_provider={})
+    return _totals(data)
+
+
+def _by_provider(data: dict) -> dict:
+    """Totals per provider from the entries (a damaged entry is skipped)."""
+    from .providers import provider_of
+    totals = {}
+    for entry in data.get("entries") or ():
+        if not isinstance(entry, dict):
+            continue
+        provider = provider_of(str(entry.get("model") or ""))
+        total, calls, missing = totals.get(provider, (0.0, 0, 0))
+        cost = _number(entry.get("cost_usd"))
+        totals[provider] = (total + (cost or 0.0), calls + 1, missing + (cost is None))
+    return totals
 
 
 def add_call(project_dir: Path, record: dict, now: Optional[datetime] = None) -> ProjectCosts:
@@ -137,7 +224,9 @@ def add_call(project_dir: Path, record: dict, now: Optional[datetime] = None) ->
     @param project_dir Project folder; created if missing.
     @param record Call as reported by `openrouter.set_usage_listener`:
         ``cost_usd`` (None when not reported), ``prompt_tokens``,
-        ``completion_tokens``, ``model``.
+        ``completion_tokens``, ``model``, optional ``cost_source`` (how the
+        cost was obtained when the provider did not report it, e.g.
+        "token_price" for DeepSeek).
     @param now Timestamp of the call (UTC now by default).
     @return The new totals.
     @throws ProjectCostsError When the existing file is not usable: it is
@@ -221,11 +310,19 @@ def _add_call_once(folder: Path, record: dict, now: Optional[datetime]) -> Proje
         data["calls_without_cost"] += 1
     else:
         data["total_usd"] = float(data["total_usd"]) + cost
-    data["entries"].append({
+    entry = {
         "time": stamp, "model": str(record.get("model") or ""), "cost_usd": cost,
         "prompt_tokens": _count(record.get("prompt_tokens")) or 0,
         "completion_tokens": _count(record.get("completion_tokens")) or 0,
-    })
+    }
+    if cost is not None and isinstance(record.get("cost_source"), str):
+        entry["cost_source"] = record["cost_source"]
+    data["entries"].append(entry)
+    return _save(folder, path, data)
+
+
+def _save(folder: Path, path: Path, data: dict) -> ProjectCosts:
+    """Write the cost file atomically and return its totals."""
     folder.mkdir(parents=True, exist_ok=True)
     handle, temporary = tempfile.mkstemp(prefix=".ai-costs-", suffix=".json", dir=folder)
     try:
@@ -238,6 +335,4 @@ def _add_call_once(folder: Path, record: dict, now: Optional[datetime]) -> Proje
         except OSError:
             pass
         raise
-    return ProjectCosts(total_usd=float(data["total_usd"]), calls=data["calls"],
-                        calls_without_cost=data["calls_without_cost"],
-                        since=data.get("since", ""))
+    return _totals(data)

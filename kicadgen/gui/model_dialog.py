@@ -20,13 +20,15 @@ from typing import Optional
 from PyQt6 import sip
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QDialog, QDialogButtonBox,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
     QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
 from ..services.openrouter import (DATASHEET_CAPABILITIES, ModelInfo, OpenRouterError,
                                    list_models)
+from ..services.providers import (PROVIDER_DEEPSEEK, PROVIDER_LABELS, PROVIDERS,
+                                  deepseek_models, provider_of)
 from ..services.messages import tx
 
 #: Come si chiama, per chi guarda, ogni capacita' richiesta.
@@ -67,15 +69,17 @@ class _ModelsWorker(QThread):
     done = pyqtSignal(object)
     error = pyqtSignal(str)
 
-    def __init__(self, force_refresh: bool = False, parent=None):
+    def __init__(self, force_refresh: bool = False, parent=None, provider="openrouter"):
         """@brief Prepare one model-list download owned by @p parent.
 
         @param force_refresh True to ignore the local models cache.
+        @param provider Which provider's list to read (providers.PROVIDERS).
         @param parent Owner of the thread; pass QApplication.instance() so that
             no dialog can destroy the download while it is still running.
         """
         super().__init__(parent)
         self.force_refresh = force_refresh
+        self.provider = provider
         application = QApplication.instance()
         if application is not None:
             # Uscire dall'applicazione mentre il download e' in volo
@@ -88,7 +92,10 @@ class _ModelsWorker(QThread):
     def run(self) -> None:
         """@brief Provide the run operation for this workflow."""
         try:
-            self.done.emit(list_models(force_refresh=self.force_refresh))
+            if self.provider == PROVIDER_DEEPSEEK:
+                self.done.emit(deepseek_models())
+            else:
+                self.done.emit(list_models(force_refresh=self.force_refresh))
         except OpenRouterError as exc:
             self.error.emit(str(exc))
         except Exception as exc:  # noqa: BLE001 - riportato nel dialogo
@@ -123,7 +130,9 @@ class _NumericItem(QTableWidgetItem):
 
     def __init__(self, text: str, value: float):
         super().__init__(text)
-        self._value = value
+        # Un prezzo non dichiarato (NaN, API di DeepSeek) va in fondo: NaN non
+        # e' ordinabile e un confronto incoerente fa crollare l'ordinamento Qt.
+        self._value = value if value == value else float("inf")
         self.setTextAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
@@ -167,6 +176,23 @@ class ModelPickerDialog(QDialog):
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
+
+        # Fornitore dell'API (utente, 2026-09-27): OpenRouter oppure l'API
+        # diretta di DeepSeek (chiave DEEPSEEK_API_KEY). Parte da quello del
+        # modello gia' scelto.
+        provider_row = QHBoxLayout()
+        provider_row.addWidget(QLabel("Fornitore:"))
+        self.combo_provider = QComboBox()
+        for provider in PROVIDERS:
+            self.combo_provider.addItem(PROVIDER_LABELS[provider], provider)
+        self.combo_provider.setCurrentIndex(
+            max(0, self.combo_provider.findData(provider_of(current_model))))
+        self.combo_provider.currentIndexChanged.connect(self._on_provider_changed)
+        provider_row.addWidget(self.combo_provider)
+        self.label_provider_note = QLabel()
+        self.label_provider_note.setWordWrap(True)
+        provider_row.addWidget(self.label_provider_note, 1)
+        layout.addLayout(provider_row)
 
         filter_row = QHBoxLayout()
         filter_row.addWidget(QLabel("Cerca:"))
@@ -277,11 +303,34 @@ class ModelPickerDialog(QDialog):
         self.btn_refresh.setEnabled(False)
 
         # Proprieta' a QApplication, non a questa finestra: vedi _ModelsWorker.
-        self._worker = _ModelsWorker(force_refresh, parent=QApplication.instance())
+        self._update_provider_note()
+        self._worker = _ModelsWorker(force_refresh, parent=QApplication.instance(),
+                                     provider=self.provider())
         self._worker.done.connect(self._on_models_loaded)
         self._worker.error.connect(self._on_models_error)
         self._worker.finished.connect(self._worker_finished)
         self._worker.start()
+
+    def provider(self) -> str:
+        """@brief Provider chosen in the dialog (providers.PROVIDERS)."""
+        return self.combo_provider.currentData() or PROVIDERS[0]
+
+    def _on_provider_changed(self, _index) -> None:
+        """Another provider: its list replaces the current one."""
+        self._models = []
+        self._apply_filters()
+        if self._worker is not None and self._worker.isRunning():
+            self._detach_worker()
+        self._load_models()
+
+    def _update_provider_note(self) -> None:
+        """What the chosen provider does not declare, said once above the table."""
+        note = ("L'API di DeepSeek non dichiara prezzi ne' capacita' dei modelli: la spesa "
+                "non viene riportata e le capacita' vanno verificate sulla sua "
+                "documentazione (le immagini le legge deepseek-flash, non la versione Pro)."
+                if self.provider() == PROVIDER_DEEPSEEK else "")
+        self.label_provider_note.setText(self.i18n.text(note) if (note and self.i18n is not None)
+                                         else note)
 
     def _worker_finished(self) -> None:
         """Riabilita l'aggiornamento, se c'e' ancora una finestra da riabilitare.
@@ -358,7 +407,10 @@ class ModelPickerDialog(QDialog):
 
         result = []
         for model in self._models:
-            if only_compatible and not model.usable_for(self.capabilities):
+            # Capacita' non dichiarate (API di DeepSeek): ne' compatibile ne'
+            # incompatibile noto, quindi il filtro non lo nasconde.
+            if (only_compatible and getattr(model, "capabilities_declared", True)
+                    and not model.usable_for(self.capabilities)):
                 continue
             if max_cost > 0 and model.prompt_usd_per_mtok > max_cost:
                 continue
@@ -441,7 +493,9 @@ class ModelPickerDialog(QDialog):
 
 
 def _price_text(value: float, i18n=None) -> str:
-    """Prezzo leggibile: 'gratis' a costo zero, altrimenti in dollari."""
+    """Prezzo leggibile: 'gratis' a costo zero, 'n.d.' se il fornitore non lo dichiara."""
+    if value != value:  # NaN: prezzo non dichiarato (API di DeepSeek)
+        return i18n.text("n.d.") if i18n is not None else "n.d."
     if value <= 0:
         return i18n.text("gratis") if i18n is not None else "gratis"
     if value < 1:

@@ -23,6 +23,7 @@ from PyQt6.QtCore import QObject, QRunnable, Qt, QThreadPool, pyqtSignal
 from PyQt6.QtWidgets import QLabel
 
 from ..services import openrouter
+from ..services import providers
 from ..services.messages import tx
 from ..services.project_costs import ProjectCostsError, add_call, load_project_costs
 
@@ -61,15 +62,17 @@ class _BalanceSignals(QObject):
 class _BalanceTask(QRunnable):
     """Reads the balance off the GUI thread: it is a network request."""
 
-    def __init__(self, token: int):
+    def __init__(self, token: int, provider: str = providers.PROVIDER_OPENROUTER):
         super().__init__()
         self.token = token
+        self.provider = provider
         self.signals = _BalanceSignals()
 
     def run(self):
-        """@brief Query OpenRouter and report the status or the error text."""
+        """@brief Query the provider and report the status or the error text."""
         try:
-            status = openrouter.credit_status(force_refresh=True)
+            status = (providers.deepseek_balance() if self.provider == providers.PROVIDER_DEEPSEEK
+                      else openrouter.credit_status(force_refresh=True))
         except Exception as exc:  # noqa: BLE001 - riportato sulla riga, mai fatale
             self.signals.ready.emit(self.token, None, str(exc))
             return
@@ -99,6 +102,14 @@ class AiAccountLine(QLabel):
         self.setProperty("i18n_skip", True)
         self.setStyleSheet("color: #a6adc8;")
         self.balance_enabled = False
+        #: Provider whose balance is shown: the one of the model in use
+        #: (user, 2026-09-27). See set_provider and provider_source.
+        self.provider = providers.PROVIDER_OPENROUTER
+        #: Optional callable returning the provider of the model in use NOW.
+        #: Read at every refresh: the model can change through many paths
+        #: (combo, picker, project restore) and waiting for one event missed
+        #: the others (the line kept showing OpenRouter after a DeepSeek run).
+        self.provider_source = None
         self._project_dir = project_dir
         self._log = log
         self._status = None
@@ -163,18 +174,47 @@ class AiAccountLine(QLabel):
         if openrouter._usage_listener == self._listener:
             openrouter.set_usage_listener(None)
 
+    def set_provider(self, provider: str) -> None:
+        """@brief Show the balance of `provider` from now on, reading it again if it changed.
+
+        @param provider providers.PROVIDER_* of the model in use.
+        """
+        if provider not in providers.PROVIDERS or provider == self.provider:
+            return
+        self.provider = provider
+        self._status, self._balance_state, self._balance_error = None, "idle", ""
+        self.refresh_balance()
+        self.refresh()
+
+    def _follow_provider(self) -> None:
+        """Adopt the provider of the model in use, forgetting the other provider's balance."""
+        source = self.provider_source
+        if source is None:
+            return
+        try:
+            provider = source()
+        except Exception:  # noqa: BLE001 - la riga non deve mai far cadere l'app
+            return
+        if provider in providers.PROVIDERS and provider != self.provider:
+            self.provider = provider
+            self._status, self._balance_state, self._balance_error = None, "idle", ""
+
     def refresh_balance(self) -> None:
         """@brief Read the balance again in the background (free, no tokens)."""
+        self._follow_provider()
         if not self.balance_enabled:
             return
         try:
-            openrouter.api_key()
+            if self.provider == providers.PROVIDER_DEEPSEEK:
+                providers.deepseek_api_key()
+            else:
+                openrouter.api_key()
         except Exception as exc:  # noqa: BLE001 - chiave assente: si dice e basta
             self._balance_state, self._balance_error = "error", str(exc)
             self.refresh()
             return
         self._token += 1
-        task = _BalanceTask(self._token)
+        task = _BalanceTask(self._token, self.provider)
         task.setAutoDelete(False)
         task.signals.ready.connect(self._balance_ready)
         self._tasks[self._token] = task
@@ -257,11 +297,44 @@ class AiAccountLine(QLabel):
             self._reported_errors.add(message)
             self._log(message)
 
+    def _deepseek_parts(self, parts, details) -> None:
+        """Balance text of DeepSeek's own API (providers.ProviderBalance)."""
+        status = self._status
+        if self._balance_state == "ok" and status is not None and status.amount is not None:
+            parts.append(tx("Saldo DeepSeek: {amount} {currency}",
+                            amount=format_usd(status.amount), currency=status.currency))
+            details.append(tx("Saldo DeepSeek letto alle {time}.", time=self._balance_time))
+            if not status.available:
+                details.append(tx("DeepSeek dichiara il conto non utilizzabile."))
+        elif self._balance_state == "ok" and status is not None:
+            parts.append(tx("Saldo DeepSeek: {state}", state=tx("disponibile") if status.available
+                            else tx("esaurito")))
+        elif self._balance_state == "loading":
+            parts.append(tx("Saldo DeepSeek: lettura…"))
+        elif self._balance_state == "error":
+            parts.append(tx("Saldo DeepSeek: non disponibile"))
+            details.append(tx("Saldo non letto: {error}", error=self._balance_error))
+        details.append(tx("L'API di DeepSeek non riporta il costo delle chiamate: il costo "
+                          "del progetto le conta senza importo."))
+
     def refresh(self) -> None:
         """@brief Recompose text and tooltip from the balance and the project file."""
+        previous = self.provider
+        self._follow_provider()
+        if self.provider != previous and self.balance_enabled:
+            # Il fornitore e' cambiato: si legge il saldo giusto (in background).
+            self.refresh_balance()
+            return
         parts, details = [], []
-        remaining = self._status.remaining if self._status is not None else None
-        if self._balance_state == "ok" and remaining is not None:
+        if self.provider == providers.PROVIDER_DEEPSEEK:
+            self._deepseek_parts(parts, details)
+            remaining, state = None, "provider"
+        else:
+            remaining = self._status.remaining if self._status is not None else None
+            state = self._balance_state
+        if state == "provider":
+            pass
+        elif self._balance_state == "ok" and remaining is not None:
             parts.append(tx("Saldo OpenRouter: {amount} USD", amount=format_usd(remaining)))
             details.append(tx("Saldo: credito residuo ({limit}), letto alle {time}.",
                               limit=self._status.limiting_factor, time=self._balance_time))
@@ -297,6 +370,15 @@ class AiAccountLine(QLabel):
                 else:
                     parts.append(tx("Costo del progetto: almeno {amount} USD",
                                     amount=format_usd(costs.total_usd)))
+                # Diviso per fornitore sulla riga stessa (utente, 27/09: il
+                # totale accanto al saldo DeepSeek sembrava la spesa DeepSeek).
+                split = sorted((provider, total) for provider, (total, _calls, _missing)
+                               in (costs.by_provider or {}).items())
+                if len(split) > 1:
+                    parts[-1] += " (" + " · ".join(
+                        f"{providers.PROVIDER_SHORT_LABELS.get(provider, provider)} "
+                        f"{format_usd(total)}"
+                        for provider, total in split) + ")"
                 since = _local_date(costs.since)
                 if costs.calls == 1:
                     details.append(tx("Costo del progetto: 1 chiamata a pagamento dal "
@@ -308,6 +390,18 @@ class AiAccountLine(QLabel):
                 if not costs.complete:
                     details.append(tx("{missing} chiamate senza costo riportato: il totale "
                                       "è sottostimato.", missing=costs.calls_without_cost))
+                if costs.estimated_calls:
+                    details.append(tx("{count} chiamate DeepSeek calcolate dai token senza la "
+                                      "parte letta dalla cache: il loro costo è un limite "
+                                      "superiore.", count=costs.estimated_calls))
+                # Diviso per fornitore (utente, 27/09): un totale unico accanto a
+                # un modello DeepSeek sembrava la spesa DeepSeek.
+                for provider, (total, calls, missing) in sorted((costs.by_provider or {}).items()):
+                    label = providers.PROVIDER_LABELS.get(provider, provider)
+                    details.append(tx("{label}: {amount} USD, {calls} chiamate", label=tx(label),
+                                      amount=format_usd(total), calls=calls)
+                                   + (tx(" ({missing} senza costo)", missing=missing)
+                                      if missing else ""))
         details.append(tx("Le risposte servite dalla cache locale non costano e non "
                           "sono contate."))
         # Riga di un modulo: resta al suo posto anche senza dati.

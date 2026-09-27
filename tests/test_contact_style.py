@@ -667,7 +667,9 @@ def test_the_through_hole_strip_covers_ring_and_label_and_nothing_inside():
     ring = _proposal(x, edge + 1.27, 1.7, 1.7)
     label = _proposal(x, edge + 2.9, 1.0, 0.7)
     inside = _proposal(x, edge + depth + 0.9, 1.6, 0.8)   # un 0603 appena oltre la striscia
-    assert contact_proposals([ring, label, inside], positions, *BOARD) == {0, 1}
+    # 27/09: la corona e' il contatto; la sigla accanto non si toglie piu' per
+    # posizione (regola generale, vedi contact_zones.contact_proposals).
+    assert contact_proposals([ring, label, inside], positions, *BOARD) == {0}
     rect = contact_rects_mm(positions, *BOARD)[0]
     assert rect[3] - rect[1] == pytest.approx(depth)
 

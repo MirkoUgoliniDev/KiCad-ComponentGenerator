@@ -85,6 +85,9 @@ def _match_evidence(component):
               # Riferimento asimmetrico osservato: il costruttore lo confronta
               # col baricentro del modello nativo per ricavare il verso.
               "landmark_feature", "landmark_side", "landmark_confidence",
+              # Affidabilita' della lettura della sigla: una sigla «low» non
+              # diventa una chiave di ricerca dei modelli (kicad_models).
+              "marking_confidence",
               # Incertezza della misura fotografica (mm per bordo) o scala
               # della foto (px/mm): decidono se due ingombri sono la stessa
               # taglia (archivio degli abbinamenti, kicad_models).

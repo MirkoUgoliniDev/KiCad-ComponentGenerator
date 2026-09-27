@@ -1805,12 +1805,18 @@ def extract_pin_header_params(
 
     check_cancel()
     try:
-        api_key()
         # Il credito va verificato qui, prima del primo blocco di contenuto:
         # l'estrazione e' una catena di decine di chiamate (analisi principale,
         # crop, verifica, terminali) e restare a secco a meta' strada significa
-        # aver speso senza ottenere un componente.
-        check_credit(progress=progress)
+        # aver speso senza ottenere un componente. Si verifica ogni fornitore
+        # dei modelli usati (OpenRouter e/o DeepSeek diretto, 27/09).
+        from .providers import ensure_providers_ready, provider_of
+        if {provider_of(m) for m in (model, vision_model, verification_model) if m} <= {"openrouter"}:
+            api_key()
+            check_credit(progress=progress)
+        else:
+            ensure_providers_ready([model, vision_model, verification_model],
+                                   progress)
     except OpenRouterError as exc:
         raise ExtractionError(str(exc)) from exc
 
@@ -1943,6 +1949,11 @@ def _side_contradictions(raw, body_length, body_width) -> list[str]:
     from the same answer, in its own drawing unit. Sides the normalization
     would discard are left to it.
     """
+    return [problem for _edge, problem in _edge_contradictions(raw, body_length, body_width)]
+
+
+def _edge_contradictions(raw, body_length, body_width) -> list[tuple[str, str]]:
+    """Same checks as _side_contradictions, each problem paired with its edge."""
     try:
         sides = _normalized_castellated_sides(raw)
     except ExtractionError:
@@ -1956,14 +1967,37 @@ def _side_contradictions(raw, body_length, body_width) -> list[str]:
     for side in sides:
         edge, count = side["edge"], side["count"]
         if names.get(edge, count) != count:
-            problems.append(f"lato {edge}: count={count} ma pin_names ha {names[edge]} voci")
+            problems.append((edge, f"lato {edge}: count={count} ma pin_names ha "
+                                   f"{names[edge]} voci"))
         edge_length = body_width if edge in ("left", "right") else body_length
         span = (count - 1) * side["pitch_mm"]
         if edge_length is not None and span > edge_length + _PIN_FIELD_TOLERANCE_MM:
-            problems.append(f"lato {edge}: (count-1) x pitch_mm = ({count}-1) x "
-                            f"{side['pitch_mm']:g} = {span:.2f}, piu' del bordo lungo "
-                            f"{edge_length:g}")
+            problems.append((edge, f"lato {edge}: (count-1) x pitch_mm = ({count}-1) x "
+                                   f"{side['pitch_mm']:g} = {span:.2f}, piu' del bordo lungo "
+                                   f"{edge_length:g}"))
     return problems
+
+
+def _numbering_is_contiguous(raw) -> bool:
+    """True when the sides, numbered exactly as the extraction will number them, leave no gap.
+
+    Judged on the output of _castellated_sides (discarded entries dropped,
+    missing first_pin assigned), so what is checked is what will be drawn.
+    A list that numbering refuses (overlap, repeated edge, nothing usable) is
+    not contiguous. Ranges are compared as intervals, never materialized.
+    """
+    try:
+        sides = _castellated_sides(raw)
+    except ExtractionError:
+        return False
+    ranges = sorted((int(side["first_pin"]), int(side["first_pin"]) + side["count"])
+                    for side in sides)
+    return all(stop == start for (_a, stop), (start, _b) in zip(ranges, ranges[1:]))
+
+
+def _side_edge(entry) -> str:
+    """Edge name of one raw castellated side, as _side_contradictions keys it."""
+    return str(entry.get("edge") or "").strip().lower() if isinstance(entry, dict) else ""
 
 
 def _recount_contradictory_sides(data, content_blocks, diagnostic_call, model, system_prompt,
@@ -1978,10 +2012,23 @@ def _recount_contradictory_sides(data, content_blocks, diagnostic_call, model, s
     replace the old ones, provenance included. Whatever is still wrong is
     handled as before: contacts that do not fit are an error, names of the
     wrong length are dropped with a note. At most one extra call.
+
+    Only the CONTRADICTED edges are replaced. The recount returns every side,
+    and a side that was coherent is not made more reliable by being answered
+    twice: on a real run one edge failed by 0.04 mm and the recount also
+    changed the coherent opposite edge from 6 to 5 contacts, unchecked.
+    Changes the recount proposes for coherent edges are reported, not adopted
+    -- unless the merged pad numbering would have a gap or an overlap
+    (first_pin of one edge depends on the counts of the others): then the
+    recount is adopted whole, as before, and the warning says so. A recount
+    that lists an edge twice is also passed whole, so the normalization
+    refuses it as it always did.
     """
-    problems = _side_contradictions(data.get("castellated_sides"), **dims)
-    if not problems:
+    contradicted = _edge_contradictions(data.get("castellated_sides"), **dims)
+    if not contradicted:
         return
+    problems = [problem for _edge, problem in contradicted]
+    wrong_edges = {edge for edge, _problem in contradicted}
     summary = "; ".join(problems)
     if progress:
         progress(tx("Risposta AI incoerente sui contatti ({summary}). Richiesta di ricontarli "
@@ -2013,9 +2060,40 @@ def _recount_contradictory_sides(data, content_blocks, diagnostic_call, model, s
         # passo della risposta principale, che restano quelli.
         raise ExtractionError(tx("Il ricontrollo dei contatti non ha restituito lati "
                                  "utilizzabili; analisi foto non avviata."))
-    data["castellated_sides"] = sides
+    recounted_edges = [_side_edge(entry) for entry in sides if _side_edge(entry)]
+    recounted = {_side_edge(entry): entry for entry in sides if _side_edge(entry)}
+    previous = data.get("castellated_sides")
+    previous = list(previous) if isinstance(previous, list) else []
+    before = {_side_edge(entry): entry for entry in previous if _side_edge(entry)}
+    # Coherent edges the recount would change: normally said, not adopted.
+    changed = sorted(edge for edge, entry in recounted.items()
+                     if edge not in wrong_edges and (edge not in before or any(
+                         entry.get(key) != before[edge].get(key)
+                         for key in ("count", "pitch_mm", "first_pin", "reverse"))))
+    merged = [recounted.get(_side_edge(entry), entry) if _side_edge(entry) in wrong_edges
+              else entry for entry in previous]
+    # A contradicted edge missing from the first answer can only come from the recount.
+    merged.extend(entry for edge, entry in recounted.items()
+                  if edge in wrong_edges and edge not in before)
+    whole = (len(recounted_edges) != len(set(recounted_edges))
+             or not _numbering_is_contiguous(merged))
+    # The recount as a whole, as before this rule, in two cases: it lists an
+    # edge twice (the normalization then refuses it with its own message,
+    # instead of a silent «last one wins»), or the pad numbering of the merged
+    # sides has a gap or an overlap -- first_pin of one edge depends on the
+    # counts of the others, so mixing two answers can silently lose a pad.
+    data["castellated_sides"] = sides if whole else merged
     warning = tx("Contatti dei lati ricontati dopo una risposta AI incoerente ({summary}); "
                  "verificare conteggi e nomi prima dell'utilizzo.", summary=summary)
+    if changed and whole:
+        warning += " " + tx("Il ricontrollo cambiava anche lati che erano coerenti ({edges}) e la "
+                            "numerazione dei contatti dipende da tutti i lati: adottato il "
+                            "riconteggio intero, verificare anche quei lati.",
+                            edges=", ".join(changed))
+    elif changed:
+        warning += " " + tx("Il ricontrollo cambiava anche lati che erano coerenti ({edges}): "
+                            "modifica non adottata, restano quelli della prima risposta.",
+                            edges=", ".join(changed))
     data["notes"] = (str(data.get("notes") or "") + "\n" + warning).strip()
     if progress:
         progress(warning)

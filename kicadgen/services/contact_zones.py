@@ -8,8 +8,18 @@ sbagliata -- e nemmeno per dimensione, perche' una piazzola e un condensatore
 
 Ma la posizione dei contatti non e' un'incognita: l'estrazione la dichiara
 (lati, numero, passo, offset) ed e' la stessa geometria con cui il footprint
-disegna le piazzole. Un riquadro che cade su un contatto dichiarato, e che e'
-piccolo quanto il passo, e' quel contatto.
+disegna le piazzole. Un riquadro che copre il RAME di un contatto dichiarato, e
+che e' piccolo quanto il passo, e' quel contatto (contact_proposals).
+
+Dal 2026-09-27 (utente: «regola generale, non una pezza») il criterio del
+filtro e' strutturale e non dipende piu' dalla profondita' della striscia: il
+rame di un contatto di bordo arriva al bordo della scheda, quindi un riquadro
+su quella piazzola TOCCA il bordo; un corpo montato accanto al contatto non lo
+tocca. Prima bastava che il centro cadesse nella striscia, e quando la piazzola
+non era quotata la striscia prendeva il PASSO come lunghezza: su un lato a
+passo 5,08 mm era profonda 6,7 mm e cancellava i corpi montati vicino ai
+contatti prima di qualunque revisione. Il passo non e' piu' una lunghezza di
+ripiego (_pad_length).
 
 EURISTICA DICHIARATA (non una regola fisica). Posizione, passo e lunghezza
 della piazzola sono quote dichiarate; non lo sono i margini con cui la
@@ -22,9 +32,10 @@ vicino. Sono state osservate, non misurate, sulla scheda di prova (moduli
 castellated a passo 2,54 mm), dove il rilevatore annotava piazzola e sigla
 insieme. Le renderebbe superflue una misura della serigrafia reale (per
 esempio la maschera delle piazzole ricavata dalla foto, o le quote della
-serigrafia nel disegno meccanico). Fragilita' nota: un corpo montato a meno
-di mezzo foro + 0,55 mm dalla fine della piazzola, piccolo quanto il passo,
-cade nella striscia e viene tolto come se fosse un contatto.
+serigrafia nel disegno meccanico). Dal 27/09 la striscia (depth_mm) serve solo
+alla maschera della misura dei bordi (contact_rects_mm): il filtro delle
+proposte usa il contatto fisico con il rame, e una sigla serigrafata accanto al
+contatto non viene piu' tolta per posizione -- la scarta l'AI come serigrafia.
 """
 from __future__ import annotations
 
@@ -193,9 +204,14 @@ def _geometry(module, built):
 
 
 def _pad_length(side, data, pitch):
-    """Declared land length of a side: the side's, the module's, else the pitch."""
+    """Declared land length of a side: the side's, the module's, else 0 (not known).
+
+    The pitch is NOT a land length: using it as the fallback made the strip of
+    a wide-pitch side (5.08 mm) reach 6.7 mm into the board (user, 2026-09-27).
+    `pitch` stays in the signature for the callers.
+    """
     return (_side_value(side, 'pad_length_mm', 'pad_length')
-            or _number(data.get('pad_length_mm')) or pitch)
+            or _number(data.get('pad_length_mm')) or 0.0)
 
 
 def _continuous_pad_depth(side, data, pitch, geometry):
@@ -259,14 +275,19 @@ def _band_depth(side, data, pitch):
         dalla misura i corpi montati vicino al bordo. Il semi-foro dichiarato
         del lato viene prima di ogni altra quota trasversale.
     """
-    pad_length = _pad_length(side, data, pitch)
-    # Nei castellated il foro non e' quotato e drill_mm vale 0 per convenzione:
-    # in quel caso la larghezza della piazzola e' la misura trasversale nota.
-    hole = (_side_value(side, 'half_hole_diameter_mm', 'hole_diameter_mm')
+    return _pad_length(side, data, pitch) + _declared_hole(side, data) / 2 + _LABEL_GAP_MM
+
+
+def _declared_hole(side, data):
+    """Declared transverse size of a contact of unobserved style (0 when none is declared).
+
+    Nei castellated il foro non e' quotato e drill_mm vale 0 per convenzione:
+    in quel caso la larghezza della piazzola e' la misura trasversale nota.
+    """
+    return (_side_value(side, 'half_hole_diameter_mm', 'hole_diameter_mm')
             or _number(data.get('drill_mm'))
             or _side_value(side, 'pad_width_mm', 'pad_width')
             or _number(data.get('pad_diameter_mm')) or 0.0)
-    return pad_length + hole / 2 + _LABEL_GAP_MM
 
 
 def _through_hole_depth(geometry):
@@ -317,19 +338,30 @@ def contact_positions(data, length_mm, width_mm):
         # striscia della piazzola di bordo dichiarata, come prima.
         style = _read(side, 'contact_style')
         geometry = _geometry(module, built) if style in CONTACT_STYLES else None
+        # Fatti del rame usati dal filtro (contact_proposals): se il contatto
+        # arriva al bordo, il raggio noto del suo semiforo e, per un foro
+        # arretrato, dove sta l'anello.
+        at_edge, edge_radius, ring_inset, ring_radius = True, 0.0, None, None
         if (geometry is not None and style == CONTACT_THROUGH_HOLE
                 and geometry.thru_inset is not None):
             depth = _through_hole_depth(geometry)
+            at_edge, ring_inset, ring_radius = False, geometry.thru_inset, geometry.ring / 2
         elif geometry is not None and style == CONTACT_HALF_AND_THROUGH:
             depth = _continuous_pad_depth(side, data, pitch, geometry)
+            edge_radius = geometry.half_hole / 2
         elif geometry is not None and style == CONTACT_HALF_HOLE:
             depth = _half_hole_depth(side, data, pitch, geometry)
+            edge_radius = geometry.half_hole / 2
         else:
             depth = _band_depth(side, data, pitch)
+            edge_radius = _declared_hole(side, data) / 2
         start = -(count - 1) * pitch / 2 + offset
         for index in range(count):
             along = start + index * pitch
-            common = dict(pitch_mm=pitch, edge=edge, depth_mm=depth)
+            common = dict(pitch_mm=pitch, edge=edge, depth_mm=depth,
+                          copper_mm=max(0.0, depth - _LABEL_GAP_MM), at_edge=at_edge,
+                          edge_radius_mm=edge_radius, ring_inset_mm=ring_inset,
+                          ring_radius_mm=ring_radius)
             if edge == 'left':
                 positions.append(dict(common, x_mm=-half_x, y_mm=along))
             elif edge == 'right':
@@ -442,30 +474,41 @@ def contact_rects_mm(positions, length_mm, width_mm):
     return rects
 
 
-def contact_proposals(proposals, positions, length_mm, width_mm):
-    """@brief Indici delle proposte che cadono su un contatto dichiarato.
+def contact_proposals(proposals, positions, length_mm, width_mm, edge_tolerance_mm=None):
+    """@brief Indici delle proposte che coprono il rame di un contatto dichiarato.
 
     @param proposals Proposte del rilevatore, con `_box` normalizzato.
     @param positions Uscita di contact_positions.
     @param length_mm Estensione della scheda lungo X.
     @param width_mm Estensione lungo Y.
+    @param edge_tolerance_mm Incertezza di misura di un bordo della foto, in mm
+        (measurement_uncertainty.edge_uncertainty_mm); None vale 0.
     @return Insieme degli indici da scartare.
-    @note Tre modi di essere un contatto, tutti su quote dichiarate:
-        1. il riquadro sta nella STRISCIA del contatto -- entro mezzo passo
-           lungo il bordo e dentro la profondita' che il contatto occupa con la
-           sua sigla -- ed e' piccolo quanto il passo. La striscia serve perche'
-           il rilevatore annota la piazzola e la sigla, non il centro del
-           semi-foro: senza profondita' le file di piazzole passavano quasi
-           tutte.
-        2. sui contatti di BORDO, un riquadro che ne copre due o piu' e resta
-           dentro la striscia e' un pezzo di fila, non un corpo: su un modulo
-           castellated non c'e' nulla montato sopra i contatti. Non vale per le
-           matrici, dove un connettore sta proprio sopra i suoi pin.
-        3. restano fuori i corpi piu' lunghi del passo che sporgono dalla
-           striscia: quelli si giudicano guardandoli, non qui.
+    @note Regola strutturale (utente, 2026-09-27: «regola generale»), la stessa
+        per ogni scheda, senza profondita' di striscia:
+        1. contatto di BORDO (semiforo, contatto doppio, tipo non osservato):
+           il rame arriva al bordo della scheda, quindi il riquadro falso
+           TOCCA il bordo -- entro l'incertezza di misura piu' il raggio noto
+           del semiforo -- sta entro mezzo passo lungo il bordo ed e' piccolo
+           quanto il passo. Un corpo montato accanto al contatto non tocca il
+           bordo li', e resta per la revisione;
+        2. contatto PASSANTE arretrato: il riquadro contiene (entro
+           l'incertezza) il centro dell'anello ed e' piccolo quanto il passo;
+        3. PEZZO DI FILA: tocca il bordo (o contiene gli anelli), copre due o
+           piu' contatti e non entra nella scheda oltre il rame noto
+           (`copper_mm`, dalle quote dichiarate): un connettore montato sul
+           bordo entra molto di piu' e resta;
+        4. MATRICE passante: invariata, il riquadro piccolo sul pin.
+    @note Le sigle serigrafate accanto ai contatti non si tolgono piu' qui:
+        per posizione non si distinguono da un corpo piccolo montato li'
+        accanto, mentre l'inventario AI le scarta come serigrafia.
     """
     if not positions:
         return set()
+    tolerance = float(edge_tolerance_mm) if (
+        isinstance(edge_tolerance_mm, (int, float)) and not isinstance(edge_tolerance_mm, bool)
+        and math.isfinite(edge_tolerance_mm) and edge_tolerance_mm > 0) else 0.0
+    inward_of = {'left': (1, 0), 'right': (-1, 0), 'top': (0, 1), 'bottom': (0, -1)}
     found = set()
     for index, proposal in enumerate(proposals):
         box = proposal.get('_box')
@@ -478,43 +521,97 @@ def contact_proposals(proposals, positions, length_mm, width_mm):
         long_side = max(right - left, bottom - top)
         for contact in positions:
             pitch = contact['pitch_mm']
-            depth = contact.get('depth_mm') or pitch
             edge = contact['edge']
             reach = pitch * _BAND_TOLERANCE
-            # Distanza lungo il bordo e profondita' dentro la scheda: su una
-            # matrice non c'e' un bordo, e la striscia diventa un quadrato.
-            if edge in ('left', 'right'):
-                along = centre_y - contact['y_mm']
-                deep = abs(centre_x - contact['x_mm'])
-                # Quanto il riquadro entra nella scheda, misurato dal bordo:
-                # e' la quota che distingue un pezzo di fila da un corpo
-                # montato sul bordo, che nella striscia non ci sta.
-                reach_in = max(abs(left - contact['x_mm']), abs(right - contact['x_mm']))
-                span = (top, bottom)
-                along_key = 'y_mm'
-            elif edge in ('top', 'bottom'):
-                along = centre_x - contact['x_mm']
-                deep = abs(centre_y - contact['y_mm'])
-                reach_in = max(abs(top - contact['y_mm']), abs(bottom - contact['y_mm']))
-                span = (left, right)
-                along_key = 'x_mm'
-            else:
+            if edge not in inward_of:
                 along = max(abs(centre_x - contact['x_mm']), abs(centre_y - contact['y_mm']))
-                deep, reach_in, span, along_key = 0.0, 0.0, None, None
-            if deep > depth:
+                if long_side <= pitch and along <= reach:
+                    found.add(index)
+                    break
+                continue
+            vertical = edge in ('left', 'right')
+            along_key = 'y_mm' if vertical else 'x_mm'
+            along = (centre_y if vertical else centre_x) - contact[along_key]
+            span = (top, bottom) if vertical else (left, right)
+            # Distanza del lato del riquadro verso il bordo dal bordo stesso, e
+            # quanto il riquadro entra nella scheda.
+            outer = {'left': left - contact['x_mm'], 'right': contact['x_mm'] - right,
+                     'top': top - contact['y_mm'], 'bottom': contact['y_mm'] - bottom}[edge]
+            reach_in = {'left': right - contact['x_mm'], 'right': contact['x_mm'] - left,
+                        'top': bottom - contact['y_mm'], 'bottom': contact['y_mm'] - top}[edge]
+            if contact.get('at_edge', True):
+                on_copper = outer <= tolerance + (contact.get('edge_radius_mm') or 0.0)
+            else:
+                dx, dy = inward_of[edge]
+                inset = contact.get('ring_inset_mm') or 0.0
+                ring_x, ring_y = contact['x_mm'] + dx * inset, contact['y_mm'] + dy * inset
+                gap_x = max(left - ring_x, ring_x - right, 0.0)
+                gap_y = max(top - ring_y, ring_y - bottom, 0.0)
+                on_copper = math.hypot(gap_x, gap_y) <= tolerance
+            if not on_copper:
                 continue
             if long_side <= pitch and abs(along) <= reach:
                 found.add(index)
                 break
-            # Un riquadro CONTENUTO nella striscia che copre due o piu'
-            # contatti e' un pezzo della fila. La contenzione e' il criterio
-            # che salva un connettore montato sul bordo: quello entra nella
-            # scheda molto piu' della striscia.
-            if span is not None and reach_in <= depth:
+            copper = contact.get('copper_mm') or 0.0
+            if reach_in <= copper + tolerance:
                 covered = sum(1 for other in positions
                               if other['edge'] == edge
                               and span[0] <= other[along_key] <= span[1])
                 if covered >= 2:
                     found.add(index)
                     break
+    return found
+
+
+def rows_over_edge_contacts(boxes, positions, length_mm, width_mm, edge_tolerance_mm=None):
+    """@brief Indexes of boxes that lie along a row of declared EDGE contacts.
+
+    @param boxes Normalized boxes (x0, y0, x1, y1), 0..1 over the board.
+    @param positions Output of contact_positions.
+    @param length_mm Board extent along X.
+    @param width_mm Board extent along Y.
+    @param edge_tolerance_mm Edge measurement uncertainty of the photo, in mm.
+    @return Set of indexes whose box touches the board edge at a declared edge
+        contact (within the uncertainty plus the known half-hole radius) and
+        spans two or more contacts of that edge.
+    @note No depth limit, on purpose. contact_proposals removes a detector box
+        only when it stays within the known copper; beyond it the box may be a
+        connector mounted on the edge. For a body the model added WITHOUT any
+        detector box, the depth is the model's own guess and cannot separate a
+        real edge connector from the row of pads it was told not to count
+        (HANDOFF 126, G4: two «connectors» 4.5 and 3 mm deep over bare
+        castellations). The caller turns this into a doubt, never a deletion.
+    @note Through-hole contacts are exempt: a header soldered in them is a
+        legitimate body over the contacts.
+    """
+    tolerance = float(edge_tolerance_mm) if (
+        isinstance(edge_tolerance_mm, (int, float)) and not isinstance(edge_tolerance_mm, bool)
+        and math.isfinite(edge_tolerance_mm) and edge_tolerance_mm > 0) else 0.0
+    edge_contacts = [c for c in positions or ()
+                     if c.get('edge') in ('left', 'right', 'top', 'bottom')
+                     and c.get('at_edge', True)]
+    found = set()
+    for index, box in enumerate(boxes):
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            continue
+        x0, y0, x1, y1 = (float(v) for v in box)
+        left, right = (x0 - 0.5) * length_mm, (x1 - 0.5) * length_mm
+        top, bottom = (y0 - 0.5) * width_mm, (y1 - 0.5) * width_mm
+        for edge in ('left', 'right', 'top', 'bottom'):
+            row = [c for c in edge_contacts if c['edge'] == edge]
+            if len(row) < 2:
+                continue
+            vertical = edge in ('left', 'right')
+            span = (top, bottom) if vertical else (left, right)
+            covered = [c for c in row if span[0] <= c['y_mm' if vertical else 'x_mm'] <= span[1]]
+            if len(covered) < 2:
+                continue
+            reach = max(c.get('edge_radius_mm') or 0.0 for c in covered) + tolerance
+            line = covered[0]['x_mm' if vertical else 'y_mm']
+            outer = {'left': left - line, 'right': line - right,
+                     'top': top - line, 'bottom': line - bottom}[edge]
+            if outer <= reach:
+                found.add(index)
+                break
     return found

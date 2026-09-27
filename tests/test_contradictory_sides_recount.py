@@ -126,3 +126,85 @@ def test_a_failed_recount_call_is_an_extraction_error():
     data = answer([side("top", 28, 1)])
     with pytest.raises(ExtractionError, match="Ricontrollo dei contatti non riuscito"):
         validate(data, Mock(side_effect=OpenRouterError("rete")))
+
+
+# ── Solo i lati contraddittori vengono sostituiti (HANDOFF 126, G5) ─────
+
+
+def test_the_recount_replaces_only_the_contradicted_edge():
+    """Il lato sinistro si contraddice sui nomi (3 contatti, 4 nomi); il
+    riconteggio cambia anche il destro, che era coerente (6 -> 5). La
+    numerazione resta contigua (1-3, 4-9), quindi il destro resta com'era."""
+    data = answer([side("left", 3, 1, names=4) | dict(pitch_mm=5.08),
+                   side("right", 6, 4, names=6)], length=40.0, width=15.2)
+    call = Mock(return_value=dict(drawing_unit="mm", castellated_sides=[
+        side("left", 3, 1, names=3) | dict(pitch_mm=5.08),
+        side("right", 5, 4, names=5)]))
+    validate(data, call)
+    by_edge = {s["edge"]: s for s in data["castellated_sides"]}
+    assert len(by_edge["left"]["pin_names"]) == 3
+    assert by_edge["right"]["count"] == 6
+    assert "right" in data["notes"] and "non adottata" in data["notes"]
+
+
+def test_a_merge_that_would_lose_a_pad_number_takes_the_whole_recount():
+    """Caso reale RS485: il sinistro sforava il bordo (4 x 5.08 su 15.2 mm) e
+    il destro era numerato DOPO quei 4 (first_pin 5). Tenere il destro della
+    prima risposta avrebbe lasciato un buco (1-3, 5-10): la numerazione lega
+    i lati, quindi si adotta il riconteggio intero e lo si dice."""
+    data = answer([side("left", 4, 1, names=4) | dict(pitch_mm=5.08),
+                   side("right", 6, 5, names=6)], length=40.0, width=15.2)
+    call = Mock(return_value=dict(drawing_unit="mm", castellated_sides=[
+        side("left", 3, 1, names=3) | dict(pitch_mm=5.08),
+        side("right", 5, 4, names=5)]))
+    validate(data, call)
+    by_edge = {s["edge"]: s for s in data["castellated_sides"]}
+    assert (by_edge["left"]["count"], by_edge["right"]["count"]) == (3, 5)
+    assert by_edge["right"]["first_pin"] == 4
+    assert "riconteggio intero" in data["notes"]
+    assert call.call_count == 1
+
+
+def test_a_recount_listing_an_edge_twice_is_refused_as_before():
+    """La numerazione fusa sarebbe contigua: e' il lato ripetuto, da solo, a
+    far passare il riconteggio intero alla normalizzazione, che lo rifiuta."""
+    data = answer([side("left", 3, 1, names=4) | dict(pitch_mm=5.08),
+                   side("right", 4, 4, names=4)], length=40.0, width=15.2)
+    call = Mock(return_value=dict(drawing_unit="mm", castellated_sides=[
+        side("left", 3, 1, names=3) | dict(pitch_mm=5.08),
+        side("LEFT", 3, 1, names=3) | dict(pitch_mm=5.08),
+        side("right", 4, 4, names=4)]))
+    with pytest.raises(ExtractionError):
+        validate(data, call)
+
+
+def test_every_contradicted_edge_takes_its_recount():
+    """Negativo del precedente: due lati entrambi contraddittori -> entrambi ricontati,
+    nessuna modifica ignorata da segnalare."""
+    data = answer([side("top", 28, 1, names=22), side("bottom", 28, 29, names=23)])
+    call = Mock(return_value=dict(drawing_unit="mm", castellated_sides=[
+        side("top", 22, 1, names=22), side("bottom", 22, 23, names=22)]))
+    validate(data, call)
+    assert [s["count"] for s in data["castellated_sides"]] == [22, 22]
+    assert "non adottata" not in data["notes"]
+
+
+def test_a_gap_is_seen_also_when_the_recount_omits_first_pin():
+    """Seconda revisione: il lato ricontato senza first_pin viene numerato 1-3
+    dall'estrazione, il destro della prima risposta parte da 5 -> buco sul 4.
+    Il controllo guarda la numerazione che verra' davvero disegnata."""
+    left = side("left", 3, 1, names=3) | dict(pitch_mm=5.08)
+    left.pop("first_pin")
+    data = answer([side("left", 4, 1, names=4) | dict(pitch_mm=5.08),
+                   side("right", 4, 5, names=4)], length=40.0, width=15.2)
+    call = Mock(return_value=dict(drawing_unit="mm", castellated_sides=[
+        left, side("right", 4, 4, names=4)]))
+    validate(data, call)
+    by_edge = {s["edge"]: s for s in data["castellated_sides"]}
+    assert by_edge["right"]["first_pin"] == 4
+
+
+def test_a_huge_recounted_count_is_judged_without_materializing_pads():
+    from kicadgen.services.datasheet_extractor import _numbering_is_contiguous
+    assert _numbering_is_contiguous([side("top", 30_000_000, 1), side("bottom", 2, 30_000_001)])
+    assert not _numbering_is_contiguous([side("top", 30_000_000, 1), side("bottom", 2, 30_000_003)])

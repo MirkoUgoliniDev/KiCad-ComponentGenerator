@@ -31,10 +31,11 @@ def test_versioned_schema_and_prompt_distinguish_complete_leads_and_visible_tabs
     # Il prompt ora chiede anche il riferimento asimmetrico, quindi la versione
     # sale: un prompt diverso sotto la stessa versione renderebbe impossibile
     # dire, rileggendo una cache, che cosa era stato davvero chiesto.
-    # 27/09: versione 8/5 per leads_by_side e package_confidence (forma separata
+    # 27/09: versione 8/5 per leads_by_side e package_confidence, poi 9/6 per le
+    # regole di lettura delle sigle e marking_confidence (forma separata
     # dalla funzione), vedi i test in fondo al file.
-    assert inventory.PROMPT_VERSION == 'global-yolo-inventory-8'
-    assert inventory.SCHEMA_VERSION == 'global-inventory-5'
+    assert inventory.PROMPT_VERSION == 'global-yolo-inventory-9'
+    assert inventory.SCHEMA_VERSION == 'global-inventory-6'
     item = inventory.inventory_tool()['function']['parameters']['properties']['components']['items']
     fields = item['properties']
     assert fields['lead_count']['type'] == ['integer', 'null']
@@ -205,3 +206,22 @@ def test_without_the_new_fields_nothing_blocks_or_asks_again():
     rows = [_sot(), _body(lead_count=None, lead_count_complete=False)]
     assert inventory.omitted_required_fields({'components': rows}) == []
     assert all(inventory._component_valid(row, set()) for row in rows)
+
+
+def test_sides_declared_not_observed_are_not_an_error():
+    """«null = lato non visto» e' la dichiarazione che il prompt chiede (ogni
+    passivo la da'): non si disegna e non marca il corpo come parziale.
+    Prima 32 corpi su 40 di una risposta pulita risultavano «partial»."""
+    row = _sot(package_confidence='high',
+               leads_by_side=dict(left=None, right=None, top=None, bottom=None))
+    result = inventory._normalize(row, 1, 40, 20, [])
+    assert 'pins_by_side' not in result
+    assert result['_global_inventory_errors'] == []
+
+
+def test_sides_that_contradict_the_complete_count_are_an_error():
+    """Negativo: tutti i lati osservati, ma la somma smentisce il conteggio completo."""
+    row = _sot(package_confidence='high', leads_by_side=dict(left=2, right=2, top=0, bottom=0))
+    result = inventory._normalize(row, 1, 40, 20, [])
+    assert 'pins_by_side' not in result
+    assert any('leads_by_side ignored' in e for e in result['_global_inventory_errors'])
