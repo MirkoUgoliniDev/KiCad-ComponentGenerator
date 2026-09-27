@@ -31,6 +31,8 @@ from .messages import tx
 #: Target name of the OpenRouter key in the Credential Manager, as shown in
 #: «Gestione credenziali» -> «Credenziali generiche».
 OPENROUTER_TARGET = "KiCadGen/OpenRouter"
+#: Target name of the DeepSeek (direct API) key, same conventions.
+DEEPSEEK_TARGET = "KiCadGen/DeepSeek"
 
 #: User name recorded with the credential: only a label, Windows shows it
 #: under the target name. It is not a secret.

@@ -66,31 +66,74 @@ def provider_model_name(model: str) -> str:
     return model[len(DEEPSEEK_PREFIX):] if provider_of(model) == PROVIDER_DEEPSEEK else model
 
 
-def deepseek_api_key() -> str:
-    """@brief DeepSeek key from the environment, else from the `.env` files.
-
-    @return The key, stripped.
-    @throws ProviderKeyMissing When no source sets DEEPSEEK_API_KEY. The
-        message names the variable, never a value.
-    """
-    value = os.environ.get(DEEPSEEK_KEY_ENV, "").strip()
-    if value:
-        return value
+def _deepseek_dotenv_key() -> tuple[str, Optional[str]]:
+    """DEEPSEEK_API_KEY of the first `.env` file that sets it, and that file."""
     try:
         from dotenv import dotenv_values
     except ImportError:
-        dotenv_values = None
-    if dotenv_values is not None:
-        for path in env_files():
-            try:
-                if path.is_file():
-                    found = (dotenv_values(path).get(DEEPSEEK_KEY_ENV) or "").strip()
-                    if found:
-                        return found
-            except (OSError, ValueError):
-                continue
-    raise ProviderKeyMissing(tx("Chiave DeepSeek non configurata: imposta {name} nel file "
-                                ".env o nell'ambiente.", name=DEEPSEEK_KEY_ENV))
+        return "", None
+    for path in env_files():
+        try:
+            if path.is_file():
+                found = (dotenv_values(path).get(DEEPSEEK_KEY_ENV) or "").strip()
+                if found:
+                    return found, str(path)
+        except (OSError, ValueError):
+            continue
+    return "", None
+
+
+def _resolve_deepseek_key():
+    """The DeepSeek key in use (empty when none) and its source, in api-key order.
+
+    Same order as OpenRouter (openrouter._resolve_api_key): the environment
+    variable, then the Windows Credential Manager entry written by «Account
+    AI», then the `.env` files. Never raises: a Credential Manager that
+    cannot be read must not hide a `.env` key.
+    """
+    from . import credentials
+    from .openrouter import (ApiKeySource, KEY_SOURCE_CREDENTIAL_MANAGER, KEY_SOURCE_DOTENV,
+                             KEY_SOURCE_ENVIRONMENT, KEY_SOURCE_NONE)
+    stored, credential_error = "", ""
+    if credentials.is_supported():
+        try:
+            stored = (credentials.read_secret(credentials.DEEPSEEK_TARGET) or "").strip()
+        except credentials.CredentialError as exc:
+            credential_error = str(exc)
+    environment = os.environ.get(DEEPSEEK_KEY_ENV, "").strip()
+    if environment:
+        return environment, ApiKeySource(KEY_SOURCE_ENVIRONMENT, DEEPSEEK_KEY_ENV, bool(stored),
+                                         credential_error)
+    if stored:
+        return stored, ApiKeySource(KEY_SOURCE_CREDENTIAL_MANAGER, credentials.DEEPSEEK_TARGET,
+                                    True)
+    from_file, path = _deepseek_dotenv_key()
+    if from_file:
+        return from_file, ApiKeySource(KEY_SOURCE_DOTENV, path, False, credential_error)
+    return "", ApiKeySource(KEY_SOURCE_NONE, "", False, credential_error)
+
+
+def deepseek_key_source():
+    """@brief Tell where the DeepSeek key in use comes from, never the key itself.
+
+    @return An openrouter.ApiKeySource (same kinds as for OpenRouter).
+    """
+    return _resolve_deepseek_key()[1]
+
+
+def deepseek_api_key() -> str:
+    """@brief The DeepSeek key: environment, then Windows Credential Manager, then `.env`.
+
+    @return The key, stripped.
+    @throws ProviderKeyMissing When no source sets it. The message names the
+        variable and the «Account AI» window, never a value.
+    """
+    key, _source = _resolve_deepseek_key()
+    if key:
+        return key
+    raise ProviderKeyMissing(tx("Chiave DeepSeek non configurata: inseriscila da "
+                                "Configurazione → «Account AI...», oppure imposta {name} nel "
+                                "file .env o nell'ambiente.", name=DEEPSEEK_KEY_ENV))
 
 
 class ProviderError(OpenRouterError):
@@ -105,25 +148,57 @@ class ProviderKeyMissing(ProviderError):
     """@brief The provider's key is not configured."""
 
 
-def _redact(text: str) -> str:
-    """Remove the key from a text that might echo it."""
-    try:
-        key = deepseek_api_key()
-    except ProviderError:
+def _redact(text: str, key: Optional[str] = None) -> str:
+    """Remove the key (the one in use, or `key`) from a text that might echo it.
+
+    Also its escaped form: a library that reports a bad header shows the
+    key's repr, where a line break is the two characters backslash-n.
+    """
+    if key is None:
+        try:
+            key = deepseek_api_key()
+        except ProviderError:
+            return text
+    if not key:
         return text
-    return text.replace(key, "***") if key else text
+    for form in {key, repr(key)[1:-1], ascii(key)[1:-1]}:
+        if form:
+            text = text.replace(form, "***")
+    return text
 
 
-def deepseek_request(url: str, body: Optional[dict] = None, timeout: int = _HTTP_TIMEOUT_S) -> Any:
+def key_text_problem(key: str) -> Optional[str]:
+    """@brief Tell why a pasted key cannot be a key, before it reaches any request.
+
+    @param key The text as pasted (ends already stripped by the caller or not).
+    @return A translated reason, or None when the text can be a key.
+    @note API keys are printable ASCII without blanks. A line break or a
+        space in the middle comes from a bad copy; sent as a header it makes
+        the HTTP library echo the whole key in its error text.
+    """
+    text = (key or "").strip()
+    if not text:
+        return tx("La chiave è vuota.")
+    if not text.isascii() or not text.isprintable() or any(c.isspace() for c in text):
+        return tx("La chiave contiene spazi, a capo o caratteri non validi: ricopiala dal "
+                  "sito del fornitore.")
+    return None
+
+
+def deepseek_request(url: str, body: Optional[dict] = None, timeout: int = _HTTP_TIMEOUT_S,
+                     *, key: Optional[str] = None) -> Any:
     """@brief One authenticated request to DeepSeek's API.
 
     @param url Endpoint URL.
     @param body JSON body for a POST; None for a GET.
     @param timeout Seconds.
+    @param key Key to use instead of the configured one (verifying a key
+        pasted in «Account AI» before it is saved).
     @return Decoded JSON response.
     @throws ProviderError On missing key, HTTP error or unreadable answer.
     """
-    headers = {"Authorization": f"Bearer {deepseek_api_key()}", "Accept": "application/json"}
+    key = key if key else deepseek_api_key()
+    headers = {"Authorization": f"Bearer {key}", "Accept": "application/json"}
     data = None
     if body is not None:
         data = json.dumps(body).encode("utf-8")
@@ -137,14 +212,19 @@ def deepseek_request(url: str, body: Optional[dict] = None, timeout: int = _HTTP
         detail = ""
         try:
             payload = json.loads(exc.read().decode("utf-8", "replace"))
-            detail = str((payload.get("error") or {}).get("message") or "")[:300]
+            # Redact BEFORE truncating: a cut could leave part of an echoed key.
+            detail = _redact(str((payload.get("error") or {}).get("message") or ""), key)[:300]
         except (ValueError, OSError, AttributeError):
             pass
-        raise ProviderError(_redact(tx("DeepSeek ha risposto con un errore: HTTP {code} {detail}",
-                                       code=exc.code, detail=detail).strip())) from None
+        error = ProviderError(_redact(tx("DeepSeek ha risposto con un errore: HTTP {code} {detail}",
+                                         code=exc.code, detail=detail).strip(), key),
+                              http_status=exc.code)
+        error.status = exc.code
+        raise error from None
     except (urllib.error.URLError, OSError, ValueError) as exc:
         raise ProviderError(_redact(tx("Connessione a DeepSeek fallita: {reason}",
-                                       reason=getattr(exc, "reason", exc)))) from None
+                                       reason=getattr(exc, "reason", exc)), key),
+                            unreachable=not isinstance(exc, ValueError)) from None
 
 
 def deepseek_models() -> list:
@@ -188,13 +268,14 @@ class ProviderBalance:
                   amount=self.amount, currency=self.currency)
 
 
-def deepseek_balance() -> ProviderBalance:
+def deepseek_balance(key: Optional[str] = None) -> ProviderBalance:
     """@brief DeepSeek account balance (free endpoint, no tokens).
 
+    @param key Key to check instead of the configured one (see deepseek_request).
     @return ProviderBalance; the amount is the first currency the API reports.
     @throws ProviderError When it cannot be read.
     """
-    payload = deepseek_request(DEEPSEEK_BALANCE_URL)
+    payload = deepseek_request(DEEPSEEK_BALANCE_URL, key=key)
     infos = payload.get("balance_infos") if isinstance(payload, dict) else None
     amount, currency = None, ""
     for info in infos or ():
@@ -237,3 +318,26 @@ def ensure_providers_ready(models, progress=None) -> None:
         if not balance.available:
             raise ProviderError(tx("Credito DeepSeek esaurito: ricarica il conto su "
                                    "platform.deepseek.com."))
+
+
+def verify_deepseek_key(key: str) -> ProviderBalance:
+    """@brief Check a DeepSeek key by reading its balance (free: no model call).
+
+    @param key The key to check, as pasted.
+    @return The balance the key sees.
+    @throws ProviderError When DeepSeek refuses the key (`status` 401/403,
+        see deepseek_key_rejected) or cannot be reached.
+    """
+    problem = key_text_problem(key if isinstance(key, str) else "")
+    if problem:
+        raise ProviderError(problem)
+    return deepseek_balance(key.strip())
+
+
+def deepseek_key_rejected(error: BaseException) -> bool:
+    """@brief Tell whether DeepSeek refused a key (HTTP 401/403), not merely failed to answer.
+
+    @param error The ProviderError raised by a request.
+    @return True for an authentication refusal.
+    """
+    return (getattr(error, "http_status", None) or getattr(error, "status", None)) in (401, 403)

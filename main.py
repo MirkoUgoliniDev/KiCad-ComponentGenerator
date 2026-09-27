@@ -148,16 +148,19 @@ def main():
         from kicadgen.app_paths import env_files
         # Da sorgente il .env del repository; installato, quello nella
         # cartella dati dell'utente (Program Files e' in sola lettura).
-        key_preset = "OPENROUTER_API_KEY" in os.environ
+        key_names = ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY")
+        preset = {name for name in key_names if name in os.environ}
         for env_file in env_files():
             load_dotenv(env_file)
-        # The OpenRouter key of a .env file must not stay in the process
-        # environment: there it would outrank the key saved with «Account AI…»
-        # in the Windows Credential Manager. openrouter.api_key() reads the
-        # .env file itself, after the Credential Manager. A key that was
-        # already in the real environment is left alone.
-        if not key_preset:
-            os.environ.pop("OPENROUTER_API_KEY", None)
+        # The provider keys of a .env file must not stay in the process
+        # environment: there they would outrank the keys saved with «Account
+        # AI…» in the Windows Credential Manager. openrouter.api_key() and
+        # providers.deepseek_api_key() read the .env files themselves, after
+        # the Credential Manager. A key already in the real environment is
+        # left alone.
+        for name in key_names:
+            if name not in preset:
+                os.environ.pop(name, None)
     except ImportError:
         pass
     # Before the GUI import, so that a failing import is reported too.
