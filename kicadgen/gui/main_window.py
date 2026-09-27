@@ -2049,6 +2049,11 @@ class MainWindow(QMainWindow):
         else:
             self.combo_model.setCurrentIndex(0)
         self.combo_model.blockSignals(blocked)
+        # Ogni strada che cambia il modello passa di qui (ripristino del
+        # progetto, finestra dei modelli, profilo): il saldo mostrato segue il
+        # fornitore del modello in uso (utente, 27/09: restava OpenRouter dopo
+        # aver riaperto un progetto con un modello DeepSeek).
+        self._sync_balance_provider()
 
         if hasattr(self, "combo_photo_detector"):
             self._refresh_photo_detector_controls()
@@ -2216,8 +2221,20 @@ class MainWindow(QMainWindow):
         path = self.field_yolo_model.text().strip()
         return detector, Path(path) if detector in ("yolo", "yolo_only") and path else None
 
+    def _balance_provider(self) -> str:
+        """@brief Provider of the model the next analysis will use (for the balance line)."""
+        from ..services.providers import provider_of
+        return provider_of(self._effective_model())
+
+    def _sync_balance_provider(self) -> None:
+        """@brief The balance line shows the credit of the provider of the model in use."""
+        account = getattr(self, "ai_account", None)
+        if account is not None:
+            account.set_provider(self._balance_provider())
+
     def _on_model_combo_changed(self) -> None:
         self._session_model = self.combo_model.currentData()
+        self._sync_balance_provider()
         if self._session_model:
             self._append_log(
                 tx("Modello per questa sessione: {session_model} (il default globale non "
@@ -3076,6 +3093,9 @@ class MainWindow(QMainWindow):
         # nella modale e nel Log AI (`_show_ai_cost`).
         from .ai_account import AiAccountLine
         self.ai_account = AiAccountLine(self._project_dir_or_none, self._append_log)
+        # Il saldo mostrato e' quello del fornitore del modello in uso, letto
+        # a ogni aggiornamento (utente, 27/09).
+        self.ai_account.provider_source = self._balance_provider
         self.label_ai_account = QLabel("Credito AI:")
         models_form.addRow(self.label_ai_account, self.ai_account)
         self._row_ai_account = models_form.rowCount() - 1
@@ -4048,6 +4068,17 @@ class MainWindow(QMainWindow):
             network (environment, Credential Manager, `.env`).
         """
         from ..services import openrouter
+        from ..services.providers import (PROVIDER_DEEPSEEK, ProviderKeyMissing,
+                                          deepseek_api_key, provider_of)
+        models = (self._effective_model(), self._vision_model())
+        if any(provider_of(model) == PROVIDER_DEEPSEEK for model in models):
+            try:
+                deepseek_api_key()
+            except ProviderKeyMissing as exc:
+                QMessageBox.warning(self, self.i18n.text("Account AI"), str(exc))
+                return False
+            if all(provider_of(model) == PROVIDER_DEEPSEEK for model in models):
+                return True
         try:
             openrouter.api_key()
         except openrouter.MissingApiKeyError:
@@ -9656,7 +9687,7 @@ class MainWindow(QMainWindow):
         'terminal_layout', 'terminal_count_basis', '_global_inventory_status', 'class',
         '_yolo_proposal_id', '_presence_reviewed_by_user',
         'lead_count', 'lead_count_complete',
-        'landmark_feature', 'landmark_side', 'landmark_confidence',
+        'landmark_feature', 'landmark_side', 'landmark_confidence', 'marking_confidence',
         # Scala della foto (o incertezza dichiarata): il 3D ne ricava in mm
         # l'incertezza di misura per sporgenze e archivio degli abbinamenti.
         'measurement_uncertainty_mm', 'photo_scale_px_per_mm')
@@ -10662,6 +10693,7 @@ def main() -> None:
     # Solo l'applicazione vera legge il saldo: i test e le finestre costruite
     # altrove non toccano la rete.
     window.ai_account.balance_enabled = True
+    window._sync_balance_provider()
     window.ai_account.refresh_balance()
     sys.exit(app.exec())
 

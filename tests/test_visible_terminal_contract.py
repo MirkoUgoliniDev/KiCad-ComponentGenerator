@@ -31,10 +31,11 @@ def test_versioned_schema_and_prompt_distinguish_complete_leads_and_visible_tabs
     # Il prompt ora chiede anche il riferimento asimmetrico, quindi la versione
     # sale: un prompt diverso sotto la stessa versione renderebbe impossibile
     # dire, rileggendo una cache, che cosa era stato davvero chiesto.
-    # 27/09: versione 8/5 per leads_by_side e package_confidence (forma separata
+    # 27/09: versione 8/5 per leads_by_side e package_confidence, poi 9/6 per le
+    # regole di lettura delle sigle e marking_confidence (forma separata
     # dalla funzione), vedi i test in fondo al file.
-    assert inventory.PROMPT_VERSION == 'global-yolo-inventory-8'
-    assert inventory.SCHEMA_VERSION == 'global-inventory-5'
+    assert inventory.PROMPT_VERSION == 'global-yolo-inventory-9'
+    assert inventory.SCHEMA_VERSION == 'global-inventory-6'
     item = inventory.inventory_tool()['function']['parameters']['properties']['components']['items']
     fields = item['properties']
     assert fields['lead_count']['type'] == ['integer', 'null']

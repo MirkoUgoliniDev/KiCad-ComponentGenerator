@@ -15,20 +15,21 @@ from pathlib import Path
 
 from .openrouter import OpenRouterError
 from .photo_inventory import draw_inventory, image_block
+from .photo_markings import MARKING_RULES
 from .photo_grounding import detail_grid
 from .photo_heights import estimate_body_height
 from .photo_yolo import split_ai_candidates
 from .messages import CACHE_HIT, marked, tx
 
-PROMPT_VERSION = 'global-yolo-inventory-8'
+PROMPT_VERSION = 'global-yolo-inventory-9'
 #: Versione del prompt usato quando NESSUN rilevatore locale ha girato e
 #: l'enumerazione dei corpi la fa il modello di visione.
-ENUMERATION_PROMPT_VERSION = 'global-vlm-inventory-3'
+ENUMERATION_PROMPT_VERSION = 'global-vlm-inventory-4'
 #: Prima riga della parte di prompt che non parla di candidati: da qui in poi
 #: valgono le stesse regole fisiche e di misura nei due percorsi, e vanno
 #: tenute identiche invece di essere riscritte due volte.
 _COMMON_FROM = 'Do not count markings/QR codes,'
-SCHEMA_VERSION = 'global-inventory-5'
+SCHEMA_VERSION = 'global-inventory-6'
 PHYSICAL_REJECTIONS = ('bare_pad_or_contact', 'silkscreen_or_marking',
                        'hole_or_via', 'solder_joint', 'background')
 CLASSES = ('resistor', 'capacitor', 'inductor', 'diode', 'transistor',
@@ -130,9 +131,7 @@ the left side and one on the right is {left:2,right:1,top:0,bottom:0}.
 For each non-passive describe estimated plastic-body LxW mm, overall lead-inclusive
 LxW mm, observed leads/tab per side, literal marking and why the package fits. These
 are photo estimates, not datasheet specifications. evidence is never empty.
-Marking is literal: read it in whichever of the four orientations it is printed
-(it is often rotated by 90 or 180 degrees on the body) and copy the characters in
-reading order; write '?' for each character you cannot read, never a guess.
+""" + MARKING_RULES + """
 terminal_count counts only observed terminals INCLUDING visible tab; state ordinary
 leads and tabs separately and their image sides in terminal_layout. Unknown counts
 are null; never infer hidden pins or electrical pin count from metal surfaces.
@@ -240,6 +239,9 @@ def inventory_tool():
         'height_mm': {'type': ['number', 'null'], 'exclusiveMinimum': 0, 'maximum': 100},
         'height_source': {'type': 'string', 'enum': ['unknown', 'nominal_package', 'visual_estimate']},
         'confidence': {'type': 'string', 'enum': ['high', 'medium', 'low']}, 'evidence': string,
+        'marking_confidence': {
+            'type': 'string', 'enum': ['high', 'medium', 'low'],
+            'description': 'Certainty of the marking reading alone (see MARKING).'},
         'package_confidence': {
             'type': 'string', 'enum': ['high', 'medium', 'low'],
             'description': 'Certainty of the package from shape evidence only; '
@@ -327,7 +329,7 @@ NON_BLOCKING_QUALIFIERS = {'lead_count_confidence': ('lead_count', 'lead_count_c
 #: (the package falls back to the overall confidence, the 3D to the lead
 #: count), so their omission never blocks the row, the cache or triggers a
 #: second paid request -- the same policy as NON_BLOCKING_QUALIFIERS.
-OPTIONAL_REFINEMENTS = ('package_confidence', 'leads_by_side')
+OPTIONAL_REFINEMENTS = ('package_confidence', 'leads_by_side', 'marking_confidence')
 
 #: Explicit value recorded on a normalized component when the model did not
 #: declare lead_count_confidence. It is not a confidence level and must never be
@@ -1091,6 +1093,10 @@ def _normalize(row, identity, length, width, issues, manual_ids=frozenset(), mea
         package=row['package'] if _package_kept(row) else '',
         package_confidence=(row['package_confidence']
                             if row.get('package_confidence') in _CONFIDENCE_LEVELS else None),
+        # Affidabilita' della sola lettura della sigla (schema 6): None se il
+        # modello non l'ha data o se non c'e' nessuna sigla.
+        marking_confidence=(row['marking_confidence'] if marking
+                            and row.get('marking_confidence') in _CONFIDENCE_LEVELS else None),
         _package_verified=False, package_evidence=row['evidence'], marking=marking,
         bbox_basis='leads' if row['bbox_basis'] == 'body_and_leads' else row['bbox_basis'],
         terminal_count=row['terminal_count'], terminal_layout=row['terminal_layout'],

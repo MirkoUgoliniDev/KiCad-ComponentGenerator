@@ -642,7 +642,9 @@ def test_the_photo_mask_of_a_double_contact_covers_its_continuous_pad():
     beyond_ring = _proposal(x, -12.7 + ring_end + 0.4, 1.0, 0.7)   # sigla oltre il rame
     positions = contact_positions(_declared(CONTACT_HALF_AND_THROUGH), *BOARD)
     assert positions[0]["depth_mm"] == pytest.approx(ring_end + geometry.half_hole / 2 + 0.55)
-    assert contact_proposals([beyond_ring], positions, *BOARD) == {0}
+    # 27/09: la sigla oltre il rame non tocca il bordo: resta per l'AI, che la
+    # scarta come serigrafia (prima si toglieva per posizione).
+    assert contact_proposals([beyond_ring], positions, *BOARD) == set()
     half_module, half_pairs = declared_module(_declared(CONTACT_HALF_HOLE), *BOARD)
     half_hole = half_module.side_geometry(half_pairs[0][1]).half_hole
     for style, depth in ((CONTACT_HALF_HOLE, 1.0 + half_hole / 2 + 0.55),

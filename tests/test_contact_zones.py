@@ -58,7 +58,11 @@ def test_a_pad_sized_box_on_a_contact_goes_and_a_component_elsewhere_stays():
     elsewhere = _proposal(0, 0, 1.6, .8)         # stesso ingombro, in mezzo alla scheda
     deep = _proposal(0, 12.7 - 6.0, 1.6, .8)     # vicino alla fila ma fuori dalla striscia
     dropped = contact_proposals([pad, label, elsewhere, deep], positions, *BOARD)
-    assert dropped == {0, 1}
+    # Contratto cambiato il 27/09 (utente: regola generale): solo cio' che
+    # tocca il rame del contatto al bordo e' il contatto. La sigla, che non
+    # tocca il bordo, per posizione non si distingue da un corpo montato li'
+    # accanto: resta e la scarta l'inventario AI come serigrafia.
+    assert dropped == {0}
 
 
 def test_a_stretch_of_the_row_goes_and_an_edge_connector_stays():
@@ -70,10 +74,10 @@ def test_a_stretch_of_the_row_goes_and_an_edge_connector_stays():
     entra nella scheda molto piu' della striscia -- ed e' quella differenza a
     salvarlo, non la sua dimensione.
     """
-    positions = contact_positions(_declared(), *BOARD)
-    depth = positions[0]['depth_mm']
-    strip = _proposal(0, 12.7 - depth / 2, 19.0, depth * .8)
-    connector = _proposal(0, 12.7 - 4.0, 19.0, 9.0)
+    # La piazzola dichiarata (1.5 mm) e' il rame noto: la fila ci sta dentro.
+    positions = contact_positions(_declared(pad_length_mm=1.5), *BOARD)
+    strip = _proposal(0, 12.7 - 0.6, 19.0, 1.2)       # tocca il bordo, entra 1.2 mm
+    connector = _proposal(0, 12.7 - 4.5, 19.0, 9.0)   # tocca il bordo, entra 9 mm
     dropped = contact_proposals([strip, connector], positions, *BOARD)
     assert dropped == {0}
 
@@ -146,3 +150,39 @@ def test_only_the_pins_that_exist_are_contacts_and_a_bottom_view_is_mirrored():
     assert [p['x_mm'] for p in top] == pytest.approx([-BOARD[0] / 2 + 1.27])
     assert [p['x_mm'] for p in bottom] == pytest.approx([BOARD[0] / 2 - 1.27])
     assert contact_positions(dict(one_side, pin_map=[{'pin': 1}]), *BOARD) == []
+
+
+# ── Passo largo senza land pattern (utente, 27/09: «regola generale») ────────
+
+def _wide_pitch():
+    """Lato a passo 5.08 senza piazzola quotata: il caso in cui il passo faceva
+    da lunghezza di ripiego e la striscia entrava 6.7 mm nella scheda."""
+    return dict(layout='castellated', castellated_sides=[
+        dict(edge='left', count=3, pitch_mm=5.08, contact_style='half_hole',
+             half_hole_diameter_mm=2.2)])
+
+
+def test_bodies_mounted_next_to_wide_pitch_contacts_are_kept():
+    """Negative: small bodies 3-6 mm from the edge, beside the contacts, stay."""
+    positions = contact_positions(_wide_pitch(), *BOARD)
+    left = -BOARD[0] / 2
+    bodies = [_proposal(left + 4.5, y, 1.6, 2.9) for y in (-5.08, 0.0, 5.08)]
+    bodies.append(_proposal(left + 3.2, 0.0, 1.2, 1.2))
+    assert contact_proposals(bodies, positions, *BOARD, edge_tolerance_mm=0.09) == set()
+
+
+def test_pads_touching_the_edge_are_still_the_contacts():
+    """Positive: the gold pad the detector boxes starts at the board edge."""
+    positions = contact_positions(_wide_pitch(), *BOARD)
+    left = -BOARD[0] / 2
+    pads = [_proposal(left + 1.1, y, 2.2, 2.4) for y in (-5.08, 0.0, 5.08)]
+    # Un riquadro appena staccato dal bordo per la sfocatura resta un contatto.
+    pads.append(_proposal(left + 0.05 + 1.1, 0.0, 2.2, 2.4))
+    assert contact_proposals(pads, positions, *BOARD, edge_tolerance_mm=0.09) == {0, 1, 2, 3}
+
+
+def test_the_pitch_is_never_a_land_length():
+    """Structural: without a declared land the strip depth knows only the copper."""
+    depth = contact_positions(_wide_pitch(), *BOARD)[0]['depth_mm']
+    assert depth < 5.08
+    assert depth == pytest.approx(1.1 + 0.55)          # meta' semiforo + sigla

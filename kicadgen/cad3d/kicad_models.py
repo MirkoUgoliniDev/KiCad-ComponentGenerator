@@ -304,6 +304,10 @@ def _marking_model_tokens(component: dict) -> tuple[str, ...]:
     requires the exact filename (_marked_model_is_named) and compatible
     dimensions. No brand or vendor list is involved.
     """
+    # Una sigla letta con affidabilita' bassa e' in gran parte indovinata: come
+    # chiave di ricerca porterebbe a un file sbagliato con l'aria di un'identita'.
+    if str(component.get("marking_confidence") or "").lower() == "low":
+        return ()
     marking = str(component.get("marking") or "")
     matches = re.findall(r"[A-Z0-9]+(?:[-_.][A-Z0-9]+)*", marking.upper())
     unique = {}

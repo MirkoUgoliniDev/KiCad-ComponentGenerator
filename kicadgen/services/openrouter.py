@@ -137,6 +137,11 @@ class ModelInfo:
     context_length: int
     input_modalities: tuple[str, ...]
     supports_tools: bool
+    #: Provider that serves the model (providers.PROVIDER_*); OpenRouter by default.
+    provider: str = "openrouter"
+    #: False when the provider does not declare capabilities (DeepSeek's own
+    #: API): the model is neither known to fit nor known not to.
+    capabilities_declared: bool = True
 
     @property
     def supports_images(self) -> bool:
@@ -1035,8 +1040,10 @@ def call_tool(
     nel PDF sono immagini), mentre gli altri motori di OpenRouter ne
     estrarrebbero solo il testo.
     """
+    from .providers import (DEEPSEEK_CHAT_URL, PROVIDER_DEEPSEEK, ProviderError,
+                            deepseek_request, provider_model_name, provider_of)
     body: dict[str, Any] = {
-        "model": model,
+        "model": provider_model_name(model),
         "max_tokens": max_tokens,
         "messages": [
             {"role": "system", "content": system_prompt},
@@ -1046,6 +1053,22 @@ def call_tool(
         "tool_choice": "required" if compatibility_retry else {
             "type": "function", "function": {"name": tool["function"]["name"]}},
     }
+    if provider_of(model) == PROVIDER_DEEPSEEK:
+        # API diretta di DeepSeek (compatibile OpenAI): niente plugin PDF ne'
+        # costo nella risposta, che si registra quindi senza costo.
+        if has_pdf:
+            raise ProviderError(tx("L'API diretta di DeepSeek non legge i PDF: per un "
+                                   "datasheet PDF scegli un modello OpenRouter che li legga."))
+        # Il ragionamento e' attivo di default e rifiuta tool_choice con una
+        # funzione nominata (HTTP 400 «Thinking mode does not support this
+        # tool_choice», 27/09): la risposta strutturata conta piu' del
+        # ragionamento, quindi lo si spegne (scelta dell'utente).
+        body["thinking"] = {"type": "disabled"}
+        payload = deepseek_request(DEEPSEEK_CHAT_URL, body, timeout=_HTTP_TIMEOUT_CHAT_S)
+        if isinstance(payload, dict):
+            payload.setdefault("model", model)
+        _record_usage(payload)
+        return tool_arguments(payload, tool["function"]["name"])
     if has_pdf:
         body["plugins"] = [{"id": "file-parser", "pdf": {"engine": pdf_engine}}]
     # Senza questo flag la risposta porta i token ma non il costo, e il

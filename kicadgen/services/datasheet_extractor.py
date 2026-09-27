@@ -1805,12 +1805,18 @@ def extract_pin_header_params(
 
     check_cancel()
     try:
-        api_key()
         # Il credito va verificato qui, prima del primo blocco di contenuto:
         # l'estrazione e' una catena di decine di chiamate (analisi principale,
         # crop, verifica, terminali) e restare a secco a meta' strada significa
-        # aver speso senza ottenere un componente.
-        check_credit(progress=progress)
+        # aver speso senza ottenere un componente. Si verifica ogni fornitore
+        # dei modelli usati (OpenRouter e/o DeepSeek diretto, 27/09).
+        from .providers import ensure_providers_ready, provider_of
+        if {provider_of(m) for m in (model, vision_model, verification_model) if m} <= {"openrouter"}:
+            api_key()
+            check_credit(progress=progress)
+        else:
+            ensure_providers_ready([model, vision_model, verification_model],
+                                   progress)
     except OpenRouterError as exc:
         raise ExtractionError(str(exc)) from exc
 

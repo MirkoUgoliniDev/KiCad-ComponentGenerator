@@ -43,6 +43,7 @@ TOOLS = {
 #: che viene spedito, non chi lavora.
 TOOL_ALIASES = {
     "llm_inventory": "llm",
+    "llm_markings": "llm",
 }
 
 #: Cosa parte dalla macchina verso il modello remoto, per le fasi che spediscono
@@ -52,6 +53,7 @@ TOOL_ALIASES = {
 TRANSFER_SOURCES = {
     "llm": "documents",
     "llm_inventory": "board",
+    "llm_markings": "board",
 }
 
 #: Righe che il programma scrive per se' stesso: marcatori delle chiamate AI,

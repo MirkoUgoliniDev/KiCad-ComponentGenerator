@@ -1056,8 +1056,14 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                    "in una sola richiesta."))
         if proposals:
             from .contact_zones import contact_positions, contact_proposals
+            from ..cad3d.measurement_uncertainty import edge_uncertainty_mm
             positions = contact_positions(declared, length, width)
-            dropped = contact_proposals(proposals, positions, length, width)
+            # Incertezza di un bordo misurato sulla foto: la tolleranza con cui
+            # un riquadro «tocca» il bordo della scheda al contatto.
+            tolerance, _source = edge_uncertainty_mm(
+                scale_px_per_mm=min(photo.shape[1] / length, photo.shape[0] / width))
+            dropped = contact_proposals(proposals, positions, length, width,
+                                        edge_tolerance_mm=tolerance)
             before_filter = list(proposals)
             if dropped:
                 # Non e' un filtro per classe: il rilevatore chiama le file di
@@ -1154,6 +1160,11 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         # grigio, mentre il percorso di grounding (mechanical_envelopes)
         # campionava gia' la foto. Nessuna chiamata AI: solo pixel del ritaglio.
         sample_body_colors(photo, report.components, log)
+        # Sigle rilette su ritagli ingranditi, solo per i corpi che ne hanno
+        # una e solo se la foto ha piu' pixel di quelli visti dal modello.
+        from .photo_markings import read_markings
+        read_markings(photo, report.components, length, width, classifier_model or model,
+                      call, log, cache_dir, announce)
         report.calibration['detector'] = detector
         report.calibration['proposal_count'] = len(proposals)
         report.calibration['coverage_added_count'] = sum(
@@ -1684,6 +1695,9 @@ def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
     # Stesso ordine del percorso normale: il colore si misura dopo la
     # riconciliazione, che sposta e fonde i riquadri.
     sample_body_colors(photo, report.components, log)
+    # E le sigle si rileggono come nel percorso normale (stesse condizioni).
+    from .photo_markings import read_markings
+    read_markings(photo, report.components, length, width, model, call, log, cache_dir)
     report.calibration.update(detector=detector, proposal_count=len(proposals),
                               coverage_added_count=sum(
                                   not c.get('source_candidate_ids', [True]) for c in report.components),
