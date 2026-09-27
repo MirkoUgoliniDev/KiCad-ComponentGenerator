@@ -136,7 +136,8 @@ def test_gui_family_keeps_pcb_mode_after_last_component_removed(window, photo_co
     assert index >= 0
     window.combo_component_type.setCurrentIndex(index)
     window.group_3d.setChecked(True)
-    window._extracted_pcb_thickness = 1.2
+    # The board's 3D uses the thickness shown on the Component page (point 132).
+    window.field_cast_pcb.setValue(1.2)
     window._set_photo_components(photo_components[:1])
     populated = window._current_body_params()
     window._set_photo_components([])  # l'ultimo corpo tolto dalla revisione

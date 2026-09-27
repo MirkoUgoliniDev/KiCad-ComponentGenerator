@@ -64,7 +64,8 @@ def test_a_board_without_thickness_uses_1_6_mm_and_says_so(window, logs):
 
 def test_a_declared_thickness_is_used_and_not_called_an_estimate(window, logs):
     """Negativo: una quota dei documenti vince e non e' chiamata stima."""
-    window._on_extracted(castellated(pcb_thickness_mm=0.8))
+    window._on_extracted(castellated(pcb_thickness_mm=0.8,
+                                     value_sources={'pcb_thickness_mm': 'read'}))
     assert window.field_cast_pcb.value() == pytest.approx(0.8)
     assert any('dai documenti: 0.80 mm' in line for line in logs)
     assert not any('usato 1.60' in line for line in logs)

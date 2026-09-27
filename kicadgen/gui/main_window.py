@@ -26,7 +26,7 @@ from PyQt6.QtCore import QEvent, QObject, QPointF, QRectF, QThread, QTimer, Qt, 
 from PyQt6.QtGui import (QBrush, QColor, QIcon, QKeySequence, QPainterPath, QPen, QPixmap,
                          QPolygonF, QShortcut, QTextCursor)
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog,
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QGraphicsEllipseItem, QGraphicsRectItem, QGraphicsScene,
     QGraphicsView, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
     QDialog, QListWidget, QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea,
@@ -215,6 +215,21 @@ CONTACT_STYLE_UNKNOWN_LABEL = "Da scegliere"
 #: generatore 3D usa per una scheda a fori passanti senza spessore
 #: (`step_generator`, ramo `pcb_thickness_mm is None`).
 STANDARD_PCB_THICKNESS_MM = 1.6
+#: Where the PCB thickness shown on the Component page comes from (HANDOFF
+#: point 132), as the Italian text of its label. "read"/"derived"/"estimated"
+#: and "undeclared" are the extractor's provenances of `pcb_thickness_mm`;
+#: "standard" is STANDARD_PCB_THICKNESS_MM because nothing declared one;
+#: "user" is a value typed on the page, which a new analysis never replaces;
+#: "project" is a project saved before the provenance was recorded.
+PCB_THICKNESS_SOURCE_LABELS = {
+    "read": "letto dai documenti",
+    "derived": "ricavato dai documenti",
+    "estimated": "stimato dall'AI, da verificare",
+    "undeclared": "dall'AI senza provenienza, da verificare",
+    "standard": "standard FR-4, non quotato",
+    "user": "impostato da te",
+    "project": "salvato nel progetto",
+}
 #: Colore di una scheda quando l'analisi non lo dichiara e la foto non si puo'
 #: campionare: il solder mask verde standard, il preset «Green» dello stackup
 #: di KiCad (RGB 20, 51, 36). Dichiarato nel log ogni volta che si usa.
@@ -654,6 +669,31 @@ def _step_older_than_footprint(footprint: Path, step: Path) -> bool:
         return False
 
 
+def _saved_pcb_thickness(saved) -> tuple[str, tuple[float, str] | None]:
+    """@brief The PCB thickness provenance and last analysis proposal of a project file.
+
+    @param saved The "pcb_thickness" object of a project state, or anything
+        else for a file written before it existed.
+    @return (provenance key of PCB_THICKNESS_SOURCE_LABELS, (value mm,
+        provenance) of the last analysis or None). An older file says
+        "project": its value is the project's, its origin was not recorded.
+    """
+    if not isinstance(saved, dict):
+        return "project", None
+    source = saved.get("source")
+    if source not in PCB_THICKNESS_SOURCE_LABELS:
+        source = "project"
+    analysis = saved.get("analysis")
+    proposal = None
+    if (isinstance(analysis, (list, tuple)) and len(analysis) == 2
+            and analysis[1] in PCB_THICKNESS_SOURCE_LABELS):
+        value = analysis[0]
+        if (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(value) and value > 0):
+            proposal = (float(value), analysis[1])
+    return source, proposal
+
+
 class MainWindow(QMainWindow):
     """@brief Coordinate the six-tab component generation workflow."""
 
@@ -702,6 +742,11 @@ class MainWindow(QMainWindow):
         #: rilevamento): la fonte di verita' dei corpi, vedi `_photo_row`.
         self._photo_rows: list[dict] = []
         self._extracted_pcb_thickness = None
+        #: Provenance of the PCB thickness in use (PCB_THICKNESS_SOURCE_LABELS).
+        self._pcb_thickness_source = "standard"
+        #: (value mm, provenance) proposed by the last analysis, or None:
+        #: what «Ripristina» goes back to.
+        self._analysis_pcb_thickness = None
         self.pin_map: dict | None = None
         self._last_mesh_path: Path | None = None
         self._model_revision = 0
@@ -2012,6 +2057,9 @@ class MainWindow(QMainWindow):
         # tipo di contatto, tooltip composti delle icone della barra 3D e
         # quote disegnate nell'anteprima 2D (nota 8 dell'utente).
         self._retranslate_contact_style_combos()
+        # Etichetta della provenienza dello spessore: testo composto, escluso
+        # dalla ripassata generica (i18n_skip).
+        self._refresh_pcb_thickness_row()
         self._refresh_workflow_tooltips()
         # Icone della modale di avanzamento: tooltip composti, non chiavi.
         self.analysis_overlay.refresh_command_texts()
@@ -2240,6 +2288,38 @@ class MainWindow(QMainWindow):
             "foro passante. Non cambia l'analisi ne' il footprint: basta rigenerare il 3D.")
         self.chk_header_pins.toggled.connect(self._on_header_pins_toggled)
         ai_form.addRow("", self.chk_header_pins)
+        # Spessore della scheda (utente, 27/09, punto 132): per le sole schede,
+        # accanto ai pin quadrati perche' anche lui cambia soltanto il 3D.
+        self.spin_pcb_thickness = QDoubleSpinBox()
+        # Una lastra di spessore nullo non esiste; 10 mm e' il limite del campo.
+        self.spin_pcb_thickness.setRange(0.1, 10.0)
+        self.spin_pcb_thickness.setDecimals(2)
+        self.spin_pcb_thickness.setSingleStep(0.1)
+        self.spin_pcb_thickness.setSuffix(" mm")
+        # Il valore vale quando si conferma, non a ogni cifra digitata.
+        self.spin_pcb_thickness.setKeyboardTracking(False)
+        self.spin_pcb_thickness.setToolTip(
+            "Spessore della sola scheda, senza componenti. Un valore scritto qui vale per "
+            "il progetto e una nuova analisi non lo cambia. Basta rigenerare il 3D.")
+        self.spin_pcb_thickness.valueChanged.connect(self._on_pcb_thickness_edited)
+        self.label_pcb_thickness_source = QLabel()
+        # Testo gia' tradotto da _refresh_pcb_thickness_row: la ripassata
+        # generica lo userebbe come chiave.
+        self.label_pcb_thickness_source.setProperty("i18n_skip", True)
+        self.btn_pcb_thickness_reset = QPushButton("Ripristina")
+        self.btn_pcb_thickness_reset.setAutoDefault(False)
+        self.btn_pcb_thickness_reset.setToolTip(
+            "Torna allo spessore dell'ultima analisi, o allo standard di 1,6 mm se "
+            "l'analisi non ne ha dato uno.")
+        self.btn_pcb_thickness_reset.clicked.connect(self._reset_pcb_thickness)
+        pcb_row = QHBoxLayout()
+        pcb_row.setContentsMargins(0, 0, 0, 0)
+        pcb_row.addWidget(self.spin_pcb_thickness)
+        pcb_row.addWidget(self.label_pcb_thickness_source, 1)
+        pcb_row.addWidget(self.btn_pcb_thickness_reset)
+        ai_form.addRow("Spessore PCB:", pcb_row)
+        self._ai_form = ai_form
+        self._row_pcb_thickness = ai_form.rowCount() - 1
         _align_form_labels(ai_form)
         models_form = QFormLayout()
 
@@ -2663,6 +2743,9 @@ class MainWindow(QMainWindow):
         self.chk_header_pins.setChecked(self._show_pins_3d())
         self.chk_header_pins.blockSignals(blocked)
         self.chk_header_pins.setVisible(board is True)
+        if getattr(self, "_ai_form", None) is not None:
+            self._ai_form.setRowVisible(self._row_pcb_thickness, board is True)
+        self._refresh_pcb_thickness_row()
 
     def _on_header_pins_toggled(self, checked: bool) -> None:
         """@brief Record the pins choice for the project; the solid on screen is stale.
@@ -2671,6 +2754,50 @@ class MainWindow(QMainWindow):
         """
         self._set_project_option("show_pins_3d", checked)
         self._save_config_safely()
+        self._invalidate_generated_mesh()
+
+    def _refresh_pcb_thickness_row(self) -> None:
+        """@brief Show the PCB thickness in use and where it comes from.
+
+        @note Signals are blocked: showing a value is not the user typing it.
+        """
+        spin = getattr(self, "spin_pcb_thickness", None)
+        field = getattr(self, "field_cast_pcb", None)
+        if spin is None or field is None:
+            return
+        blocked = spin.blockSignals(True)
+        spin.setValue(max(field.value(), spin.minimum()))
+        spin.blockSignals(blocked)
+        label = PCB_THICKNESS_SOURCE_LABELS.get(self._pcb_thickness_source,
+                                                PCB_THICKNESS_SOURCE_LABELS["project"])
+        self.label_pcb_thickness_source.setText(self.i18n.text(label))
+        self.btn_pcb_thickness_reset.setEnabled(self._pcb_thickness_source == "user")
+
+    def _on_pcb_thickness_edited(self, value: float) -> None:
+        """@brief The user typed a PCB thickness: it wins over every later analysis.
+
+        @param value New thickness in mm.
+        @note The 3D on screen no longer matches: it is invalidated, like the
+            header pins choice; the footprint does not depend on the thickness.
+        """
+        if abs(value - self.field_cast_pcb.value()) < 1e-9 and self._pcb_thickness_source == "user":
+            return
+        self._pcb_thickness_source = "user"
+        self.field_cast_pcb.setValue(value)
+        self._refresh_pcb_thickness_row()
+        self._append_log(tx("Spessore PCB impostato da te: {value} mm (una nuova analisi non "
+                            "lo cambia).", value=f"{self.field_cast_pcb.value():.2f}"))
+        self._invalidate_generated_mesh()
+
+    def _reset_pcb_thickness(self) -> None:
+        """@brief Drop the user's PCB thickness: back to the last analysis, or the standard."""
+        value, source = self._analysis_pcb_thickness or (STANDARD_PCB_THICKNESS_MM, "standard")
+        self._pcb_thickness_source = source
+        self.field_cast_pcb.setValue(value)
+        self._refresh_pcb_thickness_row()
+        self._append_log(tx("Spessore PCB ripristinato: {value} mm ({source}).",
+                            value=f"{self.field_cast_pcb.value():.2f}",
+                            source=self.i18n.text(PCB_THICKNESS_SOURCE_LABELS[source])))
         self._invalidate_generated_mesh()
 
     def _component_name(self) -> str:
@@ -5458,6 +5585,10 @@ class MainWindow(QMainWindow):
             "declared_row_spacing": getattr(self, "_declared_row_spacing", None),
             "board_size_known": bool(getattr(self, "_board_size_known", False)),
             "yolo_settings": self._chosen_yolo_settings(),
+            "pcb_thickness": {
+                "source": getattr(self, "_pcb_thickness_source", "standard"),
+                "analysis": (list(self._analysis_pcb_thickness)
+                             if getattr(self, "_analysis_pcb_thickness", None) else None)},
             "options": {"include_nc_pins": self._include_nc_pins(),
                         "silk_pin_labels": self._silk_pin_labels(),
                         "show_pins_3d": self._show_pins_3d(),
@@ -5569,6 +5700,8 @@ class MainWindow(QMainWindow):
         options = state.get("options") if isinstance(state.get("options"), dict) else {}
         self._project_options = {key: options[key] for key in PROJECT_OPTIONS
                                  if isinstance(options.get(key), bool)}
+        self._pcb_thickness_source, self._analysis_pcb_thickness = _saved_pcb_thickness(
+            state.get("pcb_thickness"))
         self._refresh_type_effect()
         if skipped:
             self._append_log(tx("Impostazioni del progetto non applicate (valori non validi): ")
@@ -5650,6 +5783,10 @@ class MainWindow(QMainWindow):
         self._photo_source = ""
         self.package_geometry = None
         self._extracted_pcb_thickness = None
+        # La provenienza dello spessore torna dal file del progetto aperto
+        # (_apply_project_state); qui non resta quella del progetto chiuso.
+        self._pcb_thickness_source = "standard"
+        self._analysis_pcb_thickness = None
         # Una rigenerazione chiesta nel progetto chiuso non riguarda il nuovo.
         self._regen_3d_pending = False
         # L'estrazione fatta nella sessione era del progetto chiuso.
@@ -6316,16 +6453,49 @@ class MainWindow(QMainWindow):
         declared = (float(value) if isinstance(value, (int, float)) and not isinstance(value, bool)
                     and math.isfinite(float(value)) and float(value) > 0 else None)
         self._extracted_pcb_thickness = declared
-        self.field_cast_pcb.setValue(declared if declared is not None else STANDARD_PCB_THICKNESS_MM)
-        if not self._extraction_has_board(params):
+        # The provenance is the one the model declared (value_sources): a
+        # value it estimated is not «from the documents» (HANDOFF point 132).
+        if declared is None:
+            source = "standard"
+        else:
+            source = (getattr(params, "value_sources", None) or {}).get("pcb_thickness_mm")
+            if source not in ("read", "derived", "estimated"):
+                source = "undeclared"
+        proposed = declared if declared is not None else STANDARD_PCB_THICKNESS_MM
+        self._analysis_pcb_thickness = (proposed, source)
+        board = self._extraction_has_board(params)
+        if self._pcb_thickness_source == "user":
+            # The user's value wins over any analysis; the proposal is kept
+            # for «Ripristina» and said in the log.
+            self._refresh_pcb_thickness_row()
+            if board:
+                self._append_log(tx(
+                    "Spessore PCB: resta {value} mm impostato da te; l'analisi proponeva "
+                    "{proposed} mm ({source}), non usato.",
+                    value=f"{self.field_cast_pcb.value():.2f}", proposed=f"{proposed:.2f}",
+                    source=self.i18n.text(PCB_THICKNESS_SOURCE_LABELS[source])))
+            return
+        self._pcb_thickness_source = source
+        self.field_cast_pcb.setValue(proposed)
+        self._refresh_pcb_thickness_row()
+        if not board:
             return
         used = self.field_cast_pcb.value()
-        if declared is None:
+        if source == "standard":
             self._append_log(tx("Spessore PCB non quotato nei documenti: usato {value} mm, lo "
                                 "spessore standard delle schede FR-4 (stima, da verificare con "
                                 "una misura diretta).", value=f"{used:.2f}"))
-        else:
+        elif source == "read":
             self._append_log(tx("Spessore PCB dai documenti: {value} mm.", value=f"{used:.2f}"))
+        elif source == "derived":
+            self._append_log(tx("Spessore PCB ricavato dai documenti: {value} mm.",
+                                value=f"{used:.2f}"))
+        elif source == "estimated":
+            self._append_log(tx("Spessore PCB stimato dall'AI, non letto dai documenti: {value} "
+                                "mm (da verificare con una misura diretta).", value=f"{used:.2f}"))
+        else:
+            self._append_log(tx("Spessore PCB dall'AI senza provenienza dichiarata: {value} mm, "
+                                "trattato come stima da verificare.", value=f"{used:.2f}"))
 
     def _sample_board_color(self, photo_png):
         """@brief The board colour sampled from the calibrated photo, or why it could not be.
@@ -6710,6 +6880,7 @@ class MainWindow(QMainWindow):
         #: Spessore della scheda; senza quota, lo standard dichiarato (vedi
         #: `_apply_extracted_pcb_thickness`).
         self.field_cast_pcb = BoundedValue(STANDARD_PCB_THICKNESS_MM, 0.0, 10.0)
+        self.field_cast_pcb.on_change(lambda _value: self._refresh_pcb_thickness_row())
         #: Rientro del blocco componenti dal bordo del PCB.
         self.field_cast_inset = BoundedValue(1.0, 0.0, 20.0)
         #: Foro passante chiuso accanto al semi-foro (0 = nessuno): ci si
@@ -7707,7 +7878,12 @@ class MainWindow(QMainWindow):
             pin_length_mm=self.field_pin_length_3d.value(),
             color_hex=self.field_body_color.text().strip(),
             pin_color_hex=self.field_pin_color.text().strip(),
-            pcb_thickness_mm=self._extracted_pcb_thickness,
+            # A board shows its thickness on the Component page and the 3D
+            # uses that one (point 132); a single component keeps the value
+            # of its documents, None when they give none.
+            pcb_thickness_mm=(self.field_cast_pcb.value()
+                              if self._photo_inventory_family() is True
+                              else self._extracted_pcb_thickness),
             components=self._components_from_table(),
             populated_board=self._selected_family() == "aggregate_tht",
             **self._pins_3d_kwargs(),
