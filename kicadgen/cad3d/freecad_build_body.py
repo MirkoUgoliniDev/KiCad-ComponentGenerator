@@ -522,68 +522,6 @@ def _place_text(text, size, x, y, z, angle, font_file, thickness=0.012,
     return shape
 
 
-#: Rapporto di contrasto sotto il quale un corpo si confonde con cio' su cui
-#: appoggia. E' la soglia WCAG per gli elementi grafici di grandi dimensioni
-#: (3:1): non e' un numero scelto qui, ed e' esattamente la domanda che conta --
-#: "questa forma si distingue dal fondo?".
-SILK_RIM_MIN_CONTRAST = 3.0
-
-
-def _relative_luminance(color):
-    """@brief Luminanza relativa di un colore esadecimale, secondo WCAG.
-
-    @param color Colore nella forma "#rrggbb".
-    @return Luminanza in [0, 1]; 0 per un colore illeggibile.
-    """
-    try:
-        raw = str(color).lstrip("#")
-        channels = [int(raw[i:i + 2], 16) / 255.0 for i in (0, 2, 4)]
-    except (ValueError, IndexError, TypeError):
-        return 0.0
-    linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
-              for c in channels]
-    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
-
-
-def _needs_silk_rim(component_color, substrate_color):
-    """@brief Serve una cornice chiara perche' il corpo non sparisca nel fondo?
-
-    @param component_color Colore del corpo, letto dalla fotografia.
-    @param substrate_color Colore su cui il corpo appoggia.
-    @return True quando i due colori non si distinguono abbastanza.
-    @note La cornice non e' decorazione: esiste perche' molti case reali sono
-        neri quanto il PCB e senza un contorno chiaro sparirebbero nel modello
-        anche con la geometria giusta. Disegnarla su TUTTI i componenti la
-        metteva pero' anche attorno a un modulo bianco o a un connettore
-        metallico, dove non aggiunge nulla e sporca la vista. La domanda giusta
-        e' quella che la cornice risolve -- si distingue dal fondo? -- e la
-        misura e' il contrasto, non il tipo di componente.
-    """
-    lighter = max(_relative_luminance(component_color), _relative_luminance(substrate_color))
-    darker = min(_relative_luminance(component_color), _relative_luminance(substrate_color))
-    return (lighter + 0.05) / (darker + 0.05) < SILK_RIM_MIN_CONTRAST
-
-
-def _needs_component_rim(component_color, substrate_color, built):
-    """@brief Cornice di contrasto per UN componente gia' costruito?
-
-    @param component_color Colore del corpo letto dalla fotografia.
-    @param substrate_color Colore su cui il corpo appoggia.
-    @param built Parti costruite, (forma, colore); il colore delle parti
-        importate dalla libreria KiCad porta `model_path`.
-    @return True solo per un corpo costruito come forma approssimata che
-        sparirebbe nel fondo (`_needs_silk_rim`).
-    @note Un modello della libreria KiCad porta i propri colori e la propria
-        forma: la cornice, decisa sul colore della FOTO, gli girava attorno
-        anche quando il modello era bianco o metallico (utente, 2026-09-26).
-        Conta l'esito vero dell'import: se fallisce, il ripiego e' una forma
-        approssimata e la regola del contrasto torna a valere.
-    """
-    if any(getattr(color, "model_path", None) for _shape, color in built):
-        return False
-    return _needs_silk_rim(component_color, substrate_color)
-
-
 def _marking_to_print(component, data):
     """@brief Testo da stampare sopra un componente, o stringa vuota.
 
@@ -602,15 +540,6 @@ def _marking_to_print(component, data):
     if data.get("show_markings_3d", False) is not True:
         return ""
     return str(component.get("marking") or "").strip()
-
-
-def _rim(cx, cy, length, width, z, line=0.12, thickness=0.008):
-    """Cornice serigrafica rettangolare (contorno di un componente o del modulo)."""
-    outer = Part.makeBox(length, width, thickness,
-                         FreeCAD.Vector(cx - length / 2, cy - width / 2, z))
-    inner = Part.makeBox(length - 2 * line, width - 2 * line, thickness + 0.02,
-                         FreeCAD.Vector(cx - length / 2 + line, cy - width / 2 + line, z - 0.01))
-    return outer.cut(inner)
 
 
 def _safe(name, index):
@@ -1131,22 +1060,10 @@ def main():
                             "_model_import_error", "Model import failed")
                 print(f"KICADGEN_COMPONENT_OK:{base}; parts={len(built)}", flush=True)
 
-                # Contorno serigrafico solo dove risolve il problema per cui
-                # esiste: molti case reali sono neri quanto il PCB (colore
-                # corretto, letto dalla foto) e senza una cornice chiara
-                # sparirebbero nel modello anche con la geometria giusta. Un
-                # modulo bianco o un guscio metallico si distinguono da soli,
-                # e li' la cornice e' solo disturbo.
-                if _needs_component_rim(component.get("color_hex", body_color),
-                                        (substrate or {}).get("color_hex", body_color),
-                                        built):
-                    rim = _rim(component["x"], component["y"],
-                               component["length_mm"] + 0.36, component["width_mm"] + 0.32,
-                               silk_z, line=0.08)
-                    if rotation:
-                        rim.rotate(centre, FreeCAD.Vector(0, 0, 1), rotation)
-                    silk_obj = add(f"{base}_silk", rim, silk_color)
-                    metadata[silk_obj.Name] = {"source_row": component.get("source_row", index)}
+                # Nessun contorno serigrafico attorno ai componenti (utente,
+                # 2026-09-27, come la cornice della scheda il 26/09): era un
+                # rettangolo che nessun documento ne' foto descrive, e nel
+                # modello si leggeva come serigrafia vera della scheda.
 
                 # Solo su richiesta esplicita del payload: vedi _marking_to_print.
                 marking = _marking_to_print(component, data)

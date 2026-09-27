@@ -970,6 +970,9 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
               if Path(p).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}]
     if allowed is not None:
         photos = [(i,p) for i,p in photos if i in allowed]
+    if photos:
+        # OpenCV lavora qui, in locale: cerca la scheda nella foto e la calibra.
+        announce('opencv', tx("ricerca e calibrazione della scheda"))
     try:
         candidates = []
         failures = []
@@ -983,6 +986,10 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         for failure in failures:
             warn(failure)
         if not candidates:
+            if photos:
+                # Nessuno strumento lavora piu' sulla foto: la modale non deve
+                # restare sulla calibrazione fallita.
+                announce('', '')
             warn(tx("Nessuna vista dall'alto calibrabile con le quote {length:.2f} x "
                     "{width:.2f} mm.", length=length, width=width)
                  if detector == 'yolo_only' else
@@ -996,6 +1003,10 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         return report
     _, path, photo, report.calibration = max(candidates, key=lambda c:c[0])
     report.photo = path.name
+    height_px, width_px = photo.shape[:2]
+    log(tx("OpenCV (locale): scheda trovata in {name}, {w} x {h} px; scala X {sx:.2f} px/mm, "
+           "Y {sy:.2f} px/mm.", name=path.name, w=width_px, h=height_px,
+           sx=width_px / length, sy=height_px / width))
     if report.calibration.get("board_warning"):
         warn(report.calibration["board_warning"])
     if top_photo_index is None:
@@ -1065,6 +1076,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             # gradiente, che non ha bisogno di addestramento. Si fa qui, prima
             # dell'anteprima e della revisione, perche' e' la geometria che
             # l'utente deve poter contestare guardandola.
+            announce('opencv', tx("misura dei bordi dei corpi proposti"))
             proposals = measure_proposal_edges(photo, proposals, positions,
                                                length, width, log)
             # L'anteprima di cio' che ha proposto il rilevatore, prima della

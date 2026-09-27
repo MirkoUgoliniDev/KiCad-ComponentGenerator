@@ -22,6 +22,11 @@ from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QProgressBar, QPushBut
 #: scelta dei modelli legge i FILE della libreria 3D di KiCad e, per i
 #: candidati non ancora misurati, avvia FreeCAD (`freecad_measure`, stesso
 #: colore di FreeCAD, segno del calibro); il solido lo costruisce FreeCAD.
+#:
+#: OpenCV (utente, 2026-09-27: «hai evidenziato lo step OpenCV?») lavora in
+#: locale sulla fotografia: trova e calibra la scheda, poi misura i bordi dei
+#: corpi proposti. Prima questi passi non erano annunciati e la modale restava
+#: sulla fase precedente mentre giravano.
 TOOLS = {
     "llm": ("Modello AI (remoto, a consumo)", "#f9e2af", "cloud"),
     "yolo": ("YOLO (rilevamento locale)", "#a6e3a1", "frame"),
@@ -29,6 +34,7 @@ TOOLS = {
     "kicad": ("Libreria modelli 3D di KiCad", "#94e2d5", "library"),
     "freecad_measure": ("FreeCAD (misura dei modelli)", "#cba6f7", "caliper"),
     "freecad": ("FreeCAD (modellazione locale)", "#cba6f7", "cube"),
+    "opencv": ("OpenCV (analisi immagine locale)", "#fab387", "lens"),
 }
 
 #: Fasi che sono la *stessa* chiamata remota di una voce di TOOLS (stesso nome,
@@ -611,6 +617,13 @@ class AnalysisSpinner(QWidget):
                 painter.drawRoundedRect(QRectF(x, top, 4, 38 - top), 1, 1)
             painter.drawLine(QPointF(33, 21), QPointF(38, 37))
             painter.drawLine(QPointF(15, 38), QPointF(41, 38))
+        elif self.glyph == "lens":
+            # Lente d'ingrandimento con una griglia di pixel dentro: OpenCV
+            # guarda la fotografia e la misura, non rileva ne' costruisce.
+            painter.drawEllipse(QRectF(17, 17, 16, 16))
+            painter.drawLine(QPointF(31, 31), QPointF(39, 39))
+            painter.drawLine(QPointF(25, 20), QPointF(25, 30))
+            painter.drawLine(QPointF(20, 25), QPointF(30, 25))
         elif self.glyph == "caliper":
             # Calibro: asta con due becchi, uno fisso e uno scorrevole. FreeCAD
             # qui MISURA dei modelli esistenti, non costruisce il solido.

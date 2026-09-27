@@ -72,7 +72,10 @@ def test_no_local_phase_is_claimed_when_no_view_can_be_calibrated(extraction, mo
 
     assert not detect.called, 'nessuna foto calibrabile: il rilevatore non gira'
     assert not any(tool == 'yolo' for tool, _ in phases), phases
-    assert phases == [('llm', extractor.DEFAULT_MODEL)]
+    # Dal 27/09 la calibrazione e' la fase di OpenCV: parte davvero, e quando
+    # fallisce la fase si chiude invece di restare sullo schermo.
+    assert phases == [('llm', extractor.DEFAULT_MODEL),
+                      ('opencv', 'ricerca e calibrazione della scheda'), ('', '')]
     assert any("Nessuna vista dall'alto calibrabile" in line for line in logs)
 
 

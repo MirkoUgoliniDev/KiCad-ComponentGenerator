@@ -306,7 +306,10 @@ def test_local_detection_is_announced_before_it_starts_then_the_paid_call(invent
     calls, _ = inventory['execute']()
     # Contratto aggiornato (utente, 2026-09-25): il modello vero, file e formato.
     # 'llm_inventory' (26/09): la chiamata pagata spedisce la foto della scheda.
-    assert calls == [('yolo', 'fixture.onnx (ONNX)'), ('llm_inventory', 'paid/global-model')]  # il modello del test
+    # 27/09: i passi locali di OpenCV (calibrazione, misura dei bordi) sono fasi
+    # annunciate come le altre, nel loro ordine reale.
+    assert calls == [('opencv', 'ricerca e calibrazione della scheda'), ('yolo', 'fixture.onnx (ONNX)'),
+                     ('opencv', 'misura dei bordi dei corpi proposti'), ('llm_inventory', 'paid/global-model')]  # il modello del test
     assert inventory['detect'].called and inventory['reconcile'].called
 
 
@@ -317,7 +320,9 @@ def test_the_vision_only_detector_never_claims_a_local_phase(inventory):
     annunciare 'yolo' descriverebbe un lavoro che non sta avvenendo.
     """
     calls, _ = inventory['execute'](detector='vlm')
-    assert calls == [('llm_inventory', 'paid/global-model')]
+    # La calibrazione con OpenCV avviene anche senza rilevatore; i bordi no,
+    # perche' non ci sono proposte da misurare.
+    assert calls == [('opencv', 'ricerca e calibrazione della scheda'), ('llm_inventory', 'paid/global-model')]
     assert not inventory['detect'].called
     assert not any(tool == 'yolo' for tool, _ in calls)
 
@@ -335,7 +340,8 @@ def test_the_local_phase_is_announced_before_the_detector_runs(inventory, monkey
                         Mock(side_effect=lambda *a, **k: order.append('paid call') or []))
     calls, _ = inventory['execute'](
         phase=lambda tool, detail: order.append(f'phase:{tool}'))
-    assert order == ['phase:yolo', 'detect', 'phase:llm_inventory', 'paid call']
+    assert order == ['phase:opencv', 'phase:yolo', 'detect', 'phase:opencv',
+                     'phase:llm_inventory', 'paid call']
     assert calls == []
 
 
@@ -359,7 +365,8 @@ def test_a_failing_phase_callback_never_breaks_the_extraction(inventory):
     calls, logs = inventory['execute'](phase=broken)
     assert calls == []
     assert inventory['detect'].called and inventory['reconcile'].called
-    assert sum('Segnalazione della fase non riuscita' in line for line in logs) == 2
+    # Quattro fasi annunciate (27/09: calibrazione e bordi con OpenCV, YOLO, AI).
+    assert sum('Segnalazione della fase non riuscita' in line for line in logs) == 4
     assert any('modale chiusa' in line for line in logs)
 
 
