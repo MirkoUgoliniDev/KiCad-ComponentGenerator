@@ -275,3 +275,53 @@ def test_the_keyboard_menu_key_still_works_on_its_own(right_click_view):
     app.sendEvent(view, QContextMenuEvent(QContextMenuEvent.Reason.Keyboard, QPoint(50, 40),
                                           view.mapToGlobal(QPoint(50, 40))))
     assert rows == [3]
+
+
+# ── Copia formato: the still left click (user, 27/09) ───────────────────
+
+@pytest.fixture
+def live_view():
+    from PyQt6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    view = Preview3DVtk()
+    view.resize(400, 300)
+    view.show()
+    app.processEvents()
+    yield view, app
+    view.close()
+    app.processEvents()
+
+
+def _left_click(app, view, start, end, double=False):
+    from PyQt6.QtCore import QPointF, Qt
+    from PyQt6.QtGui import QMouseEvent
+    button = Qt.MouseButton.LeftButton
+    kinds = [(QMouseEvent.Type.MouseButtonPress, start), (QMouseEvent.Type.MouseButtonRelease, end)]
+    if double:
+        kinds.append((QMouseEvent.Type.MouseButtonDblClick, end))
+    for kind, point in kinds:
+        point = QPointF(*point)
+        app.sendEvent(view, QMouseEvent(kind, point, QPointF(view.mapToGlobal(point.toPoint())),
+                                        button, button, Qt.KeyboardModifier.NoModifier))
+
+
+def test_a_still_click_in_format_mode_names_the_component(live_view):
+    view, app = live_view
+    view._component_row_at_widget_point = lambda x, y: 4
+    clicked, opened = QSignalSpy(view.component_clicked), QSignalSpy(view.component_requested)
+    view.format_painter_active = True
+    _left_click(app, view, (100, 100), (101, 100))
+    assert list(clicked) == [[4]]
+    _left_click(app, view, (100, 100), (160, 100))            # a drag is a rotation
+    assert list(clicked) == [[4]]
+    _left_click(app, view, (100, 100), (100, 100), double=True)
+    assert len(opened) == 0                                    # no review while copying
+
+
+def test_outside_format_mode_a_click_stays_a_rotation(live_view):
+    """Negative: with the mode off nothing new happens on a left click."""
+    view, app = live_view
+    view._component_row_at_widget_point = lambda x, y: 4
+    clicked = QSignalSpy(view.component_clicked)
+    _left_click(app, view, (100, 100), (100, 100))
+    assert len(clicked) == 0
