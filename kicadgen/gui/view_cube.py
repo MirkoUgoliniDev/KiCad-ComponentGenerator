@@ -2,10 +2,12 @@
 
 The cube sits in the top-right corner of the viewport and turns with the model.
 Clicking a face looks at that face; clicking near an edge or a corner looks
-along the diagonal of that edge or corner; the house under the cube restores
-the initial isometric view, and the two circular arrows beside it turn the
-view by 90 degrees clockwise or anticlockwise about the viewing axis (user,
-2026-09-27). It replaces the row of «Vista: Iso, Sopra, …»
+along the diagonal of that edge or corner. Under the cube, the isometric-cube
+button restores the initial isometric view and the frame button fits the
+whole model; left of the cube, two circular arrows one above the other turn
+the view by 90 degrees anticlockwise or clockwise about the viewing axis
+(user, 2026-09-27: the fit command moved here from the toolbar, the house
+icon replaced because it did not say which view it restores). It replaces the row of «Vista: Iso, Sopra, …»
 buttons (user request, 2026-09-23).
 
 @note The cube is drawn by its own VTK renderer on an overlay layer, so it
@@ -43,13 +45,22 @@ MARGIN_PX = 10
 #: cube, 4 px apart), so it scales with the cube instead of being re-tuned.
 HOME_PX = round(CUBE_PX * 26 / 96)
 HOME_GAP_PX = round(CUBE_PX * 4 / 96)
-#: The rotation arrows have the size of the house and sit on its row, one on
-#: each side, two gaps away so that the three targets read as separate.
+#: Every command button next to the cube has the size of the first house
+#: button and they are two gaps apart, so that each reads as a separate target.
 ROLL_PX = HOME_PX
 ROLL_GAP_PX = 2 * HOME_GAP_PX
-#: Hit results of the two rotation arrows (see ViewCube.hit).
+#: Hit results of the command buttons (see ViewCube.hit).
 ROLL_CW = "roll_cw"
 ROLL_CCW = "roll_ccw"
+FIT = "fit"
+#: Default tooltips of the command buttons (Italian source; the window passes
+#: translated ones through set_tooltips).
+DEFAULT_TOOLTIPS = {
+    "home": "Vista isometrica iniziale",
+    FIT: "Inquadra tutto il modello senza cambiare l'angolo di vista",
+    ROLL_CCW: "Ruota la vista di 90° in senso antiorario",
+    ROLL_CW: "Ruota la vista di 90° in senso orario",
+}
 
 #: Largest fraction of the face side a label may cover, in both directions.
 #: 0.84 leaves an 8% border on each side, so the text never touches the edge
@@ -368,68 +379,104 @@ def rolled_up(position, focal, up, clockwise: bool) -> tuple:
     return tuple(float(c) for c in new_up)
 
 
-def _roll_arrow_polydata(clockwise: bool):
-    """Circular arrow in normalised viewport coordinates, as convex cells.
-
-    A 270 degree arc (quads, each convex: the 2D mapper does not triangulate
-    concave polygons) with a triangular head at its end. The clockwise arrow
-    is the mirror image of the anticlockwise one.
-    """
-    from vtkmodules.vtkCommonCore import vtkPoints
+def _polydata(points, cells, colors=None):
+    """Polygons in normalised viewport coordinates; optional RGB per cell."""
+    from vtkmodules.vtkCommonCore import vtkPoints, vtkUnsignedCharArray
     from vtkmodules.vtkCommonDataModel import vtkCellArray, vtkPolyData
-    centre, outer, inner = 0.5, 0.36, 0.22
-    start, sweep, steps = math.radians(-45), math.radians(270), 24
-    points, cells = vtkPoints(), vtkCellArray()
+    vtk_points, vtk_cells = vtkPoints(), vtkCellArray()
+    for x, y in points:
+        vtk_points.InsertNextPoint(x, y, 0.0)
+    for cell in cells:
+        vtk_cells.InsertNextCell(len(cell))
+        for index in cell:
+            vtk_cells.InsertCellPoint(index)
+    data = vtkPolyData()
+    data.SetPoints(vtk_points)
+    data.SetPolys(vtk_cells)
+    if colors is not None:
+        array = vtkUnsignedCharArray()
+        array.SetNumberOfComponents(3)
+        for rgb in colors:
+            array.InsertNextTuple3(*(round(255 * c) for c in rgb))
+        data.GetCellData().SetScalars(array)
+    return data
+
+
+def _roll_arrow_polydata(clockwise: bool):
+    """Circular arrow: a thin 280 degree ring of convex quads and a wide head.
+
+    The 2D mapper does not triangulate concave polygons, so the ring is made of
+    many small quads (smooth at icon size) and the head is one triangle whose
+    base is wider than the ring, as in the usual rotate icons. The clockwise
+    arrow is the mirror image of the anticlockwise one.
+    """
+    centre, radius, half = 0.5, 0.29, 0.055
+    start, sweep, steps = math.radians(-40), math.radians(280), 64
+    points, cells = [], []
 
     def add(x, y):
-        if clockwise:
-            x = 1.0 - x
-        return points.InsertNextPoint(x, y, 0.0)
+        points.append((1.0 - x if clockwise else x, y))
+        return len(points) - 1
 
     ring = []
     for i in range(steps + 1):
         a = start + sweep * i / steps
-        ring.append((add(centre + outer * math.cos(a), centre + outer * math.sin(a)),
-                     add(centre + inner * math.cos(a), centre + inner * math.sin(a))))
+        ring.append((add(centre + (radius + half) * math.cos(a), centre + (radius + half) * math.sin(a)),
+                     add(centre + (radius - half) * math.cos(a), centre + (radius - half) * math.sin(a))))
     for (o0, i0), (o1, i1) in zip(ring, ring[1:]):
-        cells.InsertNextCell(4)
-        for index in (o0, o1, i1, i0):
-            cells.InsertCellPoint(index)
-    # Punta: triangolo tangente all'arco nel suo punto finale.
+        cells.append((o0, o1, i1, i0) if not clockwise else (o0, i0, i1, o1))
     end = start + sweep
-    mid = (outer + inner) / 2
-    half = (outer - inner) * 1.25
-    tip_a = end + math.radians(40)
-    head = (add(centre + (mid + half) * math.cos(end), centre + (mid + half) * math.sin(end)),
-            add(centre + (mid - half) * math.cos(end), centre + (mid - half) * math.sin(end)),
-            add(centre + mid * math.cos(tip_a), centre + mid * math.sin(tip_a)))
-    cells.InsertNextCell(3)
-    for index in head:
-        cells.InsertCellPoint(index)
-    data = vtkPolyData()
-    data.SetPoints(points)
-    data.SetPolys(cells)
-    return data
+    wing = 0.15
+    tip = end + math.radians(30)
+    head = (add(centre + (radius + wing) * math.cos(end), centre + (radius + wing) * math.sin(end)),
+            add(centre + (radius - wing) * math.cos(end), centre + (radius - wing) * math.sin(end)),
+            add(centre + radius * math.cos(tip), centre + radius * math.sin(tip)))
+    cells.append(head if not clockwise else head[::-1])
+    return _polydata(points, cells)
 
 
-def _house_polydata():
-    """House outline in normalised viewport coordinates (roof, walls, door)."""
-    from vtkmodules.vtkCommonCore import vtkPoints
-    from vtkmodules.vtkCommonDataModel import vtkCellArray, vtkPolyData
-    outline = [(0.12, 0.50), (0.50, 0.88), (0.88, 0.50), (0.76, 0.50), (0.76, 0.12),
-               (0.58, 0.12), (0.58, 0.36), (0.42, 0.36), (0.42, 0.12), (0.24, 0.12),
-               (0.24, 0.50)]
-    points = vtkPoints()
-    for x, y in outline:
-        points.InsertNextPoint(x, y, 0.0)
-    polygon = vtkCellArray()
-    polygon.InsertNextCell(len(outline))
-    for index in range(len(outline)):
-        polygon.InsertCellPoint(index)
-    data = vtkPolyData()
-    data.SetPoints(points)
-    data.SetPolys(polygon)
-    return data
+def _iso_cube_polydata():
+    """Isometric cube: three shaded faces, slightly apart so the edges read.
+
+    It says "isometric view" the way the cube itself does, where the old house
+    only said "home" and left the user guessing which view it restores.
+    """
+    centre, radius, gap = (0.5, 0.5), 0.40, 0.05
+    corner = {deg: (centre[0] + radius * math.cos(math.radians(deg)),
+                    centre[1] + radius * math.sin(math.radians(deg)))
+              for deg in (30, 90, 150, 210, 270, 330)}
+    faces = (((centre, corner[30], corner[90], corner[150]), (0.93, 0.94, 0.98)),
+             ((centre, corner[150], corner[210], corner[270]), (0.70, 0.73, 0.83)),
+             ((centre, corner[270], corner[330], corner[30]), (0.52, 0.55, 0.66)))
+    points, cells, colors = [], [], []
+    for quad, color in faces:
+        cx = sum(x for x, _ in quad) / 4
+        cy = sum(y for _, y in quad) / 4
+        first = len(points)
+        points += [(cx + (x - cx) * (1 - gap), cy + (y - cy) * (1 - gap)) for x, y in quad]
+        cells.append(tuple(range(first, first + 4)))
+        colors.append(color)
+    return _polydata(points, cells, colors)
+
+
+def _fit_polydata():
+    """Frame icon: four corner brackets around a small square, as the old toolbar icon."""
+    low, high, arm, thick = 0.12, 0.88, 0.30, 0.085
+    points, cells = [], []
+
+    def rect(x0, y0, x1, y1):
+        first = len(points)
+        points.extend(((x0, y0), (x1, y0), (x1, y1), (x0, y1)))
+        cells.append((first, first + 1, first + 2, first + 3))
+
+    for x, dx in ((low, 1), (high, -1)):
+        for y, dy in ((low, 1), (high, -1)):
+            xs, ys = sorted((x, x + dx * arm)), sorted((y, y + dy * thick))
+            rect(xs[0], ys[0], xs[1], ys[1])
+            xs, ys = sorted((x, x + dx * thick)), sorted((y + dy * thick, y + dy * arm))
+            rect(xs[0], ys[0], xs[1], ys[1])
+    rect(0.40, 0.40, 0.60, 0.60)
+    return _polydata(points, cells)
 
 
 class ViewCube:
@@ -476,37 +523,32 @@ class ViewCube:
         self.renderer.GetActiveCamera().ParallelProjectionOn()
         render_window.AddRenderer(self.renderer)
 
-        mapper = vtkPolyDataMapper2D()
-        mapper.SetInputData(_house_polydata())
-        coordinate = vtkCoordinate()
-        coordinate.SetCoordinateSystemToNormalizedViewport()
-        mapper.SetTransformCoordinate(coordinate)
-        self.home_actor = vtkActor2D()
-        self.home_actor.SetMapper(mapper)
-        self.home_actor.GetProperty().SetColor(*_HOME_COLOR)
-        self.home_renderer = vtkRenderer()
-        self.home_renderer.SetLayer(1)
-        self.home_renderer.InteractiveOff()
-        self.home_renderer.AddViewProp(self.home_actor)
-        render_window.AddRenderer(self.home_renderer)
-
-        # Frecce di rotazione ai lati della casetta, disegnate come lei.
-        self.roll_renderers = {}
-        for key, clockwise in ((ROLL_CCW, False), (ROLL_CW, True)):
-            arrow_mapper = vtkPolyDataMapper2D()
-            arrow_mapper.SetInputData(_roll_arrow_polydata(clockwise))
-            arrow_coordinate = vtkCoordinate()
-            arrow_coordinate.SetCoordinateSystemToNormalizedViewport()
-            arrow_mapper.SetTransformCoordinate(arrow_coordinate)
-            arrow = vtkActor2D()
-            arrow.SetMapper(arrow_mapper)
-            arrow.GetProperty().SetColor(*_HOME_COLOR)
+        def overlay(polydata, colored=False):
+            mapper = vtkPolyDataMapper2D()
+            mapper.SetInputData(polydata)
+            coordinate = vtkCoordinate()
+            coordinate.SetCoordinateSystemToNormalizedViewport()
+            mapper.SetTransformCoordinate(coordinate)
+            if not colored:
+                mapper.ScalarVisibilityOff()
+            actor = vtkActor2D()
+            actor.SetMapper(mapper)
+            actor.GetProperty().SetColor(*_HOME_COLOR)
             renderer = vtkRenderer()
             renderer.SetLayer(1)
             renderer.InteractiveOff()
-            renderer.AddViewProp(arrow)
+            renderer.AddViewProp(actor)
             render_window.AddRenderer(renderer)
-            self.roll_renderers[key] = renderer
+            return actor, renderer
+
+        # Vista isometrica iniziale: un cubetto isometrico, non una casetta.
+        self.home_actor, self.home_renderer = overlay(_iso_cube_polydata(), colored=True)
+        # Comandi accanto al cubo: inquadra sotto, frecce di rotazione a sinistra.
+        self.roll_renderers = {}
+        _, self.roll_renderers[FIT] = overlay(_fit_polydata())
+        for key, clockwise in ((ROLL_CCW, False), (ROLL_CW, True)):
+            _, self.roll_renderers[key] = overlay(_roll_arrow_polydata(clockwise))
+        self.tooltips = dict(DEFAULT_TOOLTIPS)
 
         self.set_labels(labels or DEFAULT_LABELS)
         main_renderer.AddObserver("StartEvent", self._sync)
@@ -559,18 +601,53 @@ class ViewCube:
         return (width - MARGIN_PX - CUBE_PX, MARGIN_PX, CUBE_PX, CUBE_PX)
 
     def home_rect(self) -> tuple:
-        """@brief (x, y, w, h) of the home button in logical widget pixels."""
+        """@brief (x, y, w, h) of the isometric-view button in logical widget pixels.
+
+        @note It shares the row under the cube with the fit button: the pair is
+            centred on the cube.
+        """
         x, y, w, h = self.cube_rect()
-        return (x + (w - HOME_PX) / 2, y + h + HOME_GAP_PX, HOME_PX, HOME_PX)
+        pair = HOME_PX + ROLL_GAP_PX + ROLL_PX
+        return (x + (w - pair) / 2, y + h + HOME_GAP_PX, HOME_PX, HOME_PX)
 
     def roll_rect(self, key: str) -> tuple:
-        """@brief (x, y, w, h) of a rotation arrow in logical widget pixels.
+        """@brief (x, y, w, h) of a command button in logical widget pixels.
 
-        @param key ROLL_CCW (left of the house) or ROLL_CW (right of it).
+        @param key FIT (under the cube, right of the isometric button), ROLL_CCW
+            (left of the cube, upper) or ROLL_CW (left of the cube, lower).
         """
-        x, y, w, h = self.home_rect()
-        offset = -(ROLL_GAP_PX + ROLL_PX) if key == ROLL_CCW else w + ROLL_GAP_PX
-        return (x + offset, y + (h - ROLL_PX) / 2, ROLL_PX, ROLL_PX)
+        cx, cy, cw, ch = self.cube_rect()
+        if key == FIT:
+            x, y, w, h = self.home_rect()
+            return (x + w + ROLL_GAP_PX, y, ROLL_PX, ROLL_PX)
+        x = cx - ROLL_GAP_PX - ROLL_PX
+        middle = cy + ch / 2
+        y = middle - ROLL_GAP_PX / 2 - ROLL_PX if key == ROLL_CCW else middle + ROLL_GAP_PX / 2
+        return (x, y, ROLL_PX, ROLL_PX)
+
+    def set_tooltips(self, tooltips: dict) -> None:
+        """@brief Translated tooltips of the command buttons.
+
+        @param tooltips Mapping "home", FIT, ROLL_CW, ROLL_CCW -> text; missing
+            keys keep the Italian default.
+        """
+        self.tooltips = {key: str(tooltips.get(key) or text)
+                         for key, text in DEFAULT_TOOLTIPS.items()}
+
+    def tooltip_at(self, x: float, y: float) -> str:
+        """@brief Tooltip of the command button under a logical widget point, or "".
+
+        @param x Logical widget X.
+        @param y Logical widget Y.
+        @return The text for the isometric, fit and rotation buttons; "" on the
+            cube itself (its faces are labelled) and outside.
+        """
+        if self._inside(self.home_rect(), x, y):
+            return self.tooltips["home"]
+        for key in (FIT, ROLL_CW, ROLL_CCW):
+            if self._inside(self.roll_rect(key), x, y):
+                return self.tooltips[key]
+        return ""
 
     @staticmethod
     def _inside(rect, x, y) -> bool:
@@ -580,20 +657,21 @@ class ViewCube:
     def contains(self, x: float, y: float) -> bool:
         """@brief Whether a logical widget point lies on the cube, the house or an arrow."""
         return (self._inside(self.cube_rect(), x, y) or self._inside(self.home_rect(), x, y)
-                or any(self._inside(self.roll_rect(key), x, y) for key in (ROLL_CW, ROLL_CCW)))
+                or any(self._inside(self.roll_rect(key), x, y)
+                       for key in (FIT, ROLL_CW, ROLL_CCW)))
 
     # ── Clic ────────────────────────────────────────────────────────
 
     def hit(self, x: float, y: float):
         """@brief What a click at a logical widget point selects.
 
-        @return "home", ROLL_CW, ROLL_CCW, a direction tuple (see
-            classify_cube_point), or None when the click is outside the cube,
-            the house and the arrows.
+        @return "home", FIT, ROLL_CW, ROLL_CCW, a direction tuple (see
+            classify_cube_point), or None when the click is outside the cube
+            and its buttons.
         """
         if self._inside(self.home_rect(), x, y):
             return "home"
-        for key in (ROLL_CW, ROLL_CCW):
+        for key in (FIT, ROLL_CW, ROLL_CCW):
             if self._inside(self.roll_rect(key), x, y):
                 return key
         left, top, w, h = self.cube_rect()

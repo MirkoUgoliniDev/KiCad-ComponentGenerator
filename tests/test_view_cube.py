@@ -272,16 +272,49 @@ def test_a_pathological_label_is_shortened_instead_of_shrinking_every_face(viewe
     assert scale * tallest * vc.CUBE_PX >= vc.MIN_TEXT_PX - 1e-6
 
 
-def test_the_house_is_proportional_and_does_not_overlap_the_cube(viewer):
+def test_the_isometric_and_fit_buttons_sit_under_the_cube(viewer):
+    """The initial-view button (an isometric cube since 27/09, no longer a house)
+    and the fit button, moved here from the toolbar, share the row under the cube."""
     view, _ = viewer
-    cx, cy, cw, ch = view.view_cube.cube_rect()
-    hx, hy, hw, hh = view.view_cube.home_rect()
+    cube = view.view_cube
+    cx, cy, cw, ch = cube.cube_rect()
+    hx, hy, hw, hh = cube.home_rect()
+    fx, fy, fw, fh = cube.roll_rect(vc.FIT)
     assert cw == vc.CUBE_PX and vc.CUBE_PX >= 120
-    assert hw == hh == round(vc.CUBE_PX * 26 / 96)
-    assert hy >= cy + ch                                   # sotto il cubo
-    assert hx + hw / 2 == pytest.approx(cx + cw / 2)       # centrata
-    assert view.view_cube.hit(hx + hw / 2, hy + hh / 2) == "home"
-    assert view.view_cube.hit(hx + hw / 2, hy - 1) != "home"
+    assert hw == hh == round(vc.CUBE_PX * 26 / 96) == fw == fh
+    assert hy >= cy + ch and fy == hy                        # sotto il cubo, stessa riga
+    assert fx >= hx + hw                                     # affiancati, non sovrapposti
+    assert (hx + fx + fw) / 2 == pytest.approx(cx + cw / 2)  # la coppia e' centrata
+    assert cube.hit(hx + hw / 2, hy + hh / 2) == "home"
+    assert cube.hit(fx + fw / 2, fy + fh / 2) == vc.FIT
+    assert cube.hit(hx + hw / 2, hy - 1) != "home"
+
+
+def test_the_fit_button_frames_the_model_without_turning_it(viewer, monkeypatch):
+    view, app = viewer
+    calls = []
+    monkeypatch.setattr(view, "fit_view", lambda: calls.append("fit"))
+    x, y, w, h = view.view_cube.roll_rect(vc.FIT)
+    before = tuple(view.camera.GetViewUp()), tuple(view.camera.GetPosition())
+    _click(app, view, x + w / 2, y + h / 2)
+    assert calls == ["fit"]
+    assert (tuple(view.camera.GetViewUp()), tuple(view.camera.GetPosition())) == before
+
+
+def test_every_button_next_to_the_cube_has_a_translatable_tooltip(viewer):
+    from kicadgen.services.i18n import DEFAULT_TRANSLATIONS, LANGUAGES
+    view, _ = viewer
+    cube = view.view_cube
+    rects = [cube.home_rect()] + [cube.roll_rect(k) for k in (vc.FIT, vc.ROLL_CW, vc.ROLL_CCW)]
+    texts = [cube.tooltip_at(x + w / 2, y + h / 2) for x, y, w, h in rects]
+    assert texts == [vc.DEFAULT_TOOLTIPS[k] for k in ("home", vc.FIT, vc.ROLL_CW, vc.ROLL_CCW)]
+    for text in texts:
+        entry = DEFAULT_TRANSLATIONS["ui:" + text]
+        assert all(entry.get(language) for language in LANGUAGES), text
+    x, y, w, h = cube.cube_rect()
+    assert cube.tooltip_at(x + w / 2, y + h / 2) == ""       # le facce hanno le scritte
+    view.set_view_cube_tooltips({vc.FIT: "Fit"})
+    assert cube.tooltip_at(*[c + 2 for c in cube.roll_rect(vc.FIT)[:2]]) == "Fit"
 
 
 # ── Animazione della camera (nota 5), matematica senza VTK ──────────
@@ -555,20 +588,19 @@ def test_a_roll_turns_the_image_by_a_quarter_in_the_asked_direction(position, up
     assert np.array(turned) == pytest.approx(screen_up)
 
 
-def test_the_rotation_arrows_flank_the_house_inside_the_cube_column(viewer):
+def test_the_rotation_arrows_stand_one_above_the_other_left_of_the_cube(viewer):
+    """User, 27/09: the two circles one under the other, beside the cube."""
     view, _ = viewer
     cube = view.view_cube
-    cx, _, cw, _ = cube.cube_rect()
-    hx, hy, hw, hh = cube.home_rect()
-    left, right = cube.roll_rect(vc.ROLL_CCW), cube.roll_rect(vc.ROLL_CW)
-    assert left[0] + left[2] < hx and right[0] > hx + hw        # ai lati, non sopra
-    assert left[0] >= cx and right[0] + right[2] <= cx + cw     # nella colonna del cubo
-    assert left[1] + left[3] / 2 == pytest.approx(hy + hh / 2)  # stessa riga
-    assert cube.hit(left[0] + left[2] / 2, left[1] + left[3] / 2) == vc.ROLL_CCW
-    assert cube.hit(right[0] + right[2] / 2, right[1] + right[3] / 2) == vc.ROLL_CW
-    assert cube.hit(hx + hw / 2, hy + hh / 2) == "home"
-    # Negativo: lo spazio fra freccia e casetta non e' un bersaglio.
-    assert cube.hit((left[0] + left[2] + hx) / 2, hy + hh / 2) is None
+    cx, cy, cw, ch = cube.cube_rect()
+    upper, lower = cube.roll_rect(vc.ROLL_CCW), cube.roll_rect(vc.ROLL_CW)
+    assert upper[0] == lower[0] and upper[0] + upper[2] < cx      # stessa colonna, a sinistra
+    assert upper[1] + upper[3] < lower[1]                         # una sotto l'altra
+    assert (upper[1] + lower[1] + lower[3]) / 2 == pytest.approx(cy + ch / 2)
+    assert cube.hit(upper[0] + upper[2] / 2, upper[1] + upper[3] / 2) == vc.ROLL_CCW
+    assert cube.hit(lower[0] + lower[2] / 2, lower[1] + lower[3] / 2) == vc.ROLL_CW
+    # Negativo: lo spazio fra le due frecce non e' un bersaglio.
+    assert cube.hit(upper[0] + upper[2] / 2, (upper[1] + upper[3] + lower[1]) / 2) is None
 
 
 @pytest.mark.parametrize("key,clockwise", [(vc.ROLL_CW, True), (vc.ROLL_CCW, False)])

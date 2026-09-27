@@ -20,15 +20,15 @@ from .photo_heights import estimate_body_height
 from .photo_yolo import split_ai_candidates
 from .messages import CACHE_HIT, marked, tx
 
-PROMPT_VERSION = 'global-yolo-inventory-7'
+PROMPT_VERSION = 'global-yolo-inventory-8'
 #: Versione del prompt usato quando NESSUN rilevatore locale ha girato e
 #: l'enumerazione dei corpi la fa il modello di visione.
-ENUMERATION_PROMPT_VERSION = 'global-vlm-inventory-2'
+ENUMERATION_PROMPT_VERSION = 'global-vlm-inventory-3'
 #: Prima riga della parte di prompt che non parla di candidati: da qui in poi
 #: valgono le stesse regole fisiche e di misura nei due percorsi, e vanno
 #: tenute identiche invece di essere riscritte due volte.
 _COMMON_FROM = 'Do not count markings/QR codes,'
-SCHEMA_VERSION = 'global-inventory-4'
+SCHEMA_VERSION = 'global-inventory-5'
 PHYSICAL_REJECTIONS = ('bare_pad_or_contact', 'silkscreen_or_marking',
                        'hole_or_via', 'solder_joint', 'background')
 CLASSES = ('resistor', 'capacitor', 'inductor', 'diode', 'transistor',
@@ -106,12 +106,33 @@ last. Use body proportions, lead arrangement and size jointly to assess standard
 families (e.g. SOT-23, SOT-89, SOIC, QFN, TO-252), without forcing any family.
 0402 imperial is 1.0x0.5mm; 0603 is 1.6x0.8mm: not metric codes or pad envelopes.
 Single resistors are not arrays, capacitors are not fuses or mounting hardware.
-A three-lead-plus-tab device could be a regulator or transistor; morphology does
-not prove function. Use semiconductor_unknown when unresolved. Empty package is
-correct when uncertain. Keep package alternatives and ambiguity in evidence.
+FUNCTION AND PACKAGE ARE SEPARATE QUESTIONS. class answers the function; it may
+stay semiconductor_unknown (or unknown) when the function is unresolved: a
+three-lead body can be a transistor, a diode pair or a regulator, and a
+three-lead-plus-tab body a regulator or a power transistor -- morphology does not
+prove function. package answers the SHAPE: fill it from the observed outline, the
+lead arrangement per side and the calibrated size whenever together they fit ONE
+standard family, even when class is semiconductor_unknown or unknown. An unresolved
+function NEVER empties package. Leave package empty only when the shape itself is
+ambiguous between families, and then name the competing families in evidence.
+package_confidence rates the package alone, from shape evidence only (high: outline,
+lead arrangement and size all agree with one family; medium: one element is
+uncertain; low: shape ambiguous); it never reflects doubt about the function.
+confidence remains the overall rating of the row.
+leads_by_side counts the observed ordinary leads on each side of THIS component's
+own box in the first image frame (X right, Y down): an integer per side, 0 for a
+side you can see and that carries no lead, null for a side you cannot see or
+count. Tabs and exposed pads are not ordinary leads. Bodies without ordinary
+leads -- chip passives with metal end caps, leadless packages, modules -- use
+null on every side. When lead_count_complete is true, the four integers add up to
+lead_count. Example of the shape of an answer, not of any board: two leads on
+the left side and one on the right is {left:2,right:1,top:0,bottom:0}.
 For each non-passive describe estimated plastic-body LxW mm, overall lead-inclusive
-LxW mm, observed leads/tab, literal marking and why the package fits. These are
-photo estimates, not datasheet specifications. Marking is literal, '?' if illegible.
+LxW mm, observed leads/tab per side, literal marking and why the package fits. These
+are photo estimates, not datasheet specifications. evidence is never empty.
+Marking is literal: read it in whichever of the four orientations it is printed
+(it is often rotated by 90 or 180 degrees on the body) and copy the characters in
+reading order; write '?' for each character you cannot read, never a guess.
 terminal_count counts only observed terminals INCLUDING visible tab; state ordinary
 leads and tabs separately and their image sides in terminal_layout. Unknown counts
 are null; never infer hidden pins or electrical pin count from metal surfaces.
@@ -219,6 +240,17 @@ def inventory_tool():
         'height_mm': {'type': ['number', 'null'], 'exclusiveMinimum': 0, 'maximum': 100},
         'height_source': {'type': 'string', 'enum': ['unknown', 'nominal_package', 'visual_estimate']},
         'confidence': {'type': 'string', 'enum': ['high', 'medium', 'low']}, 'evidence': string,
+        'package_confidence': {
+            'type': 'string', 'enum': ['high', 'medium', 'low'],
+            'description': 'Certainty of the package from shape evidence only; '
+                           'independent of the function (class).'},
+        'leads_by_side': {
+            'type': 'object',
+            'description': 'Observed ordinary leads per side of this component box, '
+                           'first image frame; null = side not visible or not countable.',
+            'properties': {side: {'type': ['integer', 'null'], 'minimum': 0, 'maximum': 128}
+                           for side in LANDMARK_SIDES},
+            'required': list(LANDMARK_SIDES), 'additionalProperties': False},
         'presence_confidence': {'type': 'string', 'enum': ['high', 'medium', 'low']},
         'class_confidence': {'type': 'string', 'enum': ['high', 'medium', 'low']},
         'asymmetry_landmark': {
@@ -287,6 +319,15 @@ def _number(value, low, high):
 #:     user decision of 2026-09-26 covers lead_count_confidence only, so they
 #:     stay blocking.
 NON_BLOCKING_QUALIFIERS = {'lead_count_confidence': ('lead_count', 'lead_count_complete')}
+
+#: Required schema fields added with schema global-inventory-5 (2026-09-27)
+#: that refine what other fields already carry: package_confidence qualifies
+#: package, leads_by_side splits lead_count by side. A row without them, or with
+#: a malformed value, keeps every other datum and simply lacks the refinement
+#: (the package falls back to the overall confidence, the 3D to the lead
+#: count), so their omission never blocks the row, the cache or triggers a
+#: second paid request -- the same policy as NON_BLOCKING_QUALIFIERS.
+OPTIONAL_REFINEMENTS = ('package_confidence', 'leads_by_side')
 
 #: Explicit value recorded on a normalized component when the model did not
 #: declare lead_count_confidence. It is not a confidence level and must never be
@@ -451,7 +492,52 @@ def omitted_required_fields(data):
         return []
     required = inventory_tool()['function']['parameters']['properties']['components']['items']['required']
     return [name for name in required if name not in NON_BLOCKING_QUALIFIERS
+            and name not in OPTIONAL_REFINEMENTS
             and all(name not in row for row in rows)]
+
+
+def leads_by_side(row):
+    """@brief Observed ordinary leads per side, when the observation is whole and coherent.
+
+    @param row Raw component row of the model response.
+    @return {side: count} over left/right/top/bottom with at least one lead,
+        or None when the field is absent, malformed, has a side not observed
+        (null), or contradicts a complete lead_count.
+    @note All four sides must be known: a null side may carry leads, and
+        drawing the others alone would present a partial observation as a
+        complete body. The counts are in the first image frame, like
+        asymmetry_landmark and the pins_by_side of the photo inventory.
+    """
+    sides = row.get('leads_by_side')
+    if not isinstance(sides, dict) or set(sides) != set(LANDMARK_SIDES):
+        return None
+    counts = [sides[side] for side in LANDMARK_SIDES]
+    if not all(type(count) is int and 0 <= count <= 128 for count in counts):
+        return None
+    if sum(counts) == 0:
+        return None
+    if (row.get('lead_count_complete') is True and type(row.get('lead_count')) is int
+            and sum(counts) != row['lead_count']):
+        return None
+    return {side: count for side, count in zip(LANDMARK_SIDES, counts) if count}
+
+
+def _package_kept(row):
+    """Whether the model's package survives normalization.
+
+    The package is a mechanical statement: it is kept when its own confidence
+    (package_confidence, shape evidence only) is high or medium and the outline
+    is resolved. Rows of schema global-inventory-4, without package_confidence,
+    keep the previous rule on the overall confidence -- which also carried the
+    doubt about the FUNCTION and emptied the package of every
+    semiconductor_unknown body (RS485 run of 2026-09-27).
+    """
+    if row.get('bbox_basis') == 'unknown':
+        return False
+    declared = row.get('package_confidence')
+    if declared in _CONFIDENCE_LEVELS:
+        return declared != 'low'
+    return row.get('confidence') != 'low'
 
 
 def undeclared_lead_count_confidence(data):
@@ -1002,8 +1088,9 @@ def _normalize(row, identity, length, width, issues, manual_ids=frozenset(), mea
         # rigetti, ricerca troncata e nessun modello agganciato. La prosa
         # (package_evidence, riga sotto) veniva invece conservata: si teneva la
         # descrizione e si buttava il dato strutturato.
-        package=row['package'] if row['confidence'] != 'low'
-            and row['bbox_basis'] != 'unknown' else '',
+        package=row['package'] if _package_kept(row) else '',
+        package_confidence=(row['package_confidence']
+                            if row.get('package_confidence') in _CONFIDENCE_LEVELS else None),
         _package_verified=False, package_evidence=row['evidence'], marking=marking,
         bbox_basis='leads' if row['bbox_basis'] == 'body_and_leads' else row['bbox_basis'],
         terminal_count=row['terminal_count'], terminal_layout=row['terminal_layout'],
@@ -1032,6 +1119,14 @@ def _normalize(row, identity, length, width, issues, manual_ids=frozenset(), mea
             and row.get('lead_count_confidence') in ('medium', 'high')):
         result.update(pin_count=row['lead_count'], pin_count_confidence=row['lead_count_confidence'],
                       pin_count_source='complete_lead_observation')
+    # La disposizione per lato e' un'osservazione morfologica: la forma del
+    # corpo non deve dipendere dalla funzione (class), che puo' restare ignota.
+    sides = leads_by_side(row)
+    if sides is not None:
+        result['pins_by_side'] = sides
+    elif 'leads_by_side' in row and row['leads_by_side'] is not None:
+        result['_global_inventory_errors'].append('leads_by_side ignored: a side not observed, malformed, or '
+                      'not adding up to a complete lead_count')
     return result
 
 

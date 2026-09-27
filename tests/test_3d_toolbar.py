@@ -16,8 +16,8 @@ from tests.test_photo_inventory_gui import window  # noqa: F401 - fixture condiv
 
 
 def _toolbar(window):
-    return [window.chk_pin_numbers, window.btn_pinout_3d, window.btn_fit_3d,
-            window.btn_open_3dshapes]
+    # «Inquadra» e' passato accanto al cubo di navigazione (utente, 27/09).
+    return [window.chk_pin_numbers, window.btn_pinout_3d, window.btn_open_3dshapes]
 
 
 def test_view_tools_are_icons_with_translated_tooltips(window):

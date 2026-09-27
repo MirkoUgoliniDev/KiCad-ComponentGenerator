@@ -326,9 +326,13 @@ class Preview3DVtk(QtInteractor):
 
     def _cube_clicked(self, target) -> None:
         """Apply what a click on the cube selected: home, a face or a diagonal."""
-        from .view_cube import ROLL_CCW, ROLL_CW, view_for_direction
+        from .view_cube import FIT, ROLL_CCW, ROLL_CW, view_for_direction
         if target == "home":
             self.animate_to_view("iso")
+            return
+        if target == FIT:
+            self.stop_camera_animation()
+            self.fit_view()
             return
         if target in (ROLL_CW, ROLL_CCW):
             self.roll_view(clockwise=target == ROLL_CW)
@@ -498,12 +502,28 @@ class Preview3DVtk(QtInteractor):
         super().wheelEvent(event)
 
     def mouseMoveEvent(self, event):  # noqa: N802 - firma Qt
-        """@brief Pointing-hand cursor over the cube, so it reads as clickable."""
+        """@brief Pointing-hand cursor over the cube and its buttons, with their tooltip."""
+        from PyQt6.QtWidgets import QToolTip
         if self._on_cube(event):
             self.setCursor(Qt.CursorShape.PointingHandCursor)
+            point = event.position()
+            text = self.view_cube.tooltip_at(point.x(), point.y())
+            if text:
+                QToolTip.showText(event.globalPosition().toPoint(), text, self)
+            else:
+                QToolTip.hideText()
         else:
             self.unsetCursor()
+            QToolTip.hideText()
         super().mouseMoveEvent(event)
+
+    def set_view_cube_tooltips(self, tooltips: dict) -> None:
+        """@brief Translate the tooltips of the buttons next to the navigation cube.
+
+        @param tooltips Mapping "home", "fit", "roll_cw", "roll_ccw" -> text.
+        """
+        if self.view_cube is not None:
+            self.view_cube.set_tooltips(tooltips)
 
     def mouseDoubleClickEvent(self, event):  # noqa: N802 - firma Qt
         """@brief Open the component under the cursor; on the cube, nothing more.

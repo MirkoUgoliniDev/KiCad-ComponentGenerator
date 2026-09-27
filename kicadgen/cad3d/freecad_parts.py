@@ -1934,6 +1934,15 @@ _POLARITY_FEATURES = ("polarity_marker", "pin1_marker")
 _MARKED_KINDS = ("ic_soic", "ic_qfn", "ic_qfp", "ic_bga", "capacitor_tantalum", "diode",
                  "diode_melf")
 
+#: Kinds whose body can carry ORDINARY leads counted on the photograph
+#: (`lead_sides_local`). The shape follows the observed leads whatever the
+#: function of the part (user, 2026-09-27: SOT transistors of unknown function
+#: rendered as bare blocks). Excluded on purpose: ic_qfn/ic_bga (leadless,
+#: they keep their own pad rendering), passives and diodes (end caps, not
+#: leads), connectors and modules (their own builders), power_tab (the tab is
+#: not an ordinary lead and would be lost).
+OBSERVED_LEAD_KINDS = ("ic", "ic_sot", "ic_soic", "ic_qfp", "generic")
+
 
 def _observed_marker(component):
     """@brief Local direction of an OBSERVED polarity/pin-1 mark, or None.
@@ -2045,6 +2054,16 @@ def build_component(component, z0):
         if component.get("terminal_geometry") is not None:
             return _observed_terminals(cx, cy, z0, length, width, height, color,
                                        component["terminal_geometry"])
+        observed = component.get("lead_sides_local")
+        connector_hint = kind == "generic" and (
+            component.get("_detected_kind") == "connector"
+            or component.get("mating") in ("edge", "top"))
+        if observed and kind in OBSERVED_LEAD_KINDS and not connector_hint:
+            # Reofori contati sulla foto, gia' portati nel riferimento locale:
+            # la forma viene dall'osservazione, non dal nome del package.
+            marker = _observed_marker(component) if kind in _MARKED_KINDS else None
+            return _ic_observed_pins(cx, cy, z0, length, width, height, color, kind,
+                                     pins_by_side=observed, marker=marker)
         if kind == "ic":
             _warn("componente {get} (ic): package sconosciuto, geometria generica senza "
                "terminali",
