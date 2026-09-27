@@ -219,9 +219,10 @@ def _run_launcher(monkeypatch, tmp_path, dotenv_text):
     # setenv first, so teardown removes whatever load_dotenv puts there.
     monkeypatch.setenv("KICADGEN_TEST_OTHER", "segnaposto")
     monkeypatch.delenv("KICADGEN_TEST_OTHER")
-    if openrouter.API_KEY_ENV not in os.environ:
-        monkeypatch.setenv(openrouter.API_KEY_ENV, "segnaposto")
-        monkeypatch.delenv(openrouter.API_KEY_ENV)
+    for name in (openrouter.API_KEY_ENV, "DEEPSEEK_API_KEY"):
+        if name not in os.environ:
+            monkeypatch.setenv(name, "segnaposto")
+            monkeypatch.delenv(name)
     assert launcher.main() == 0
 
 
@@ -240,3 +241,21 @@ def test_the_launcher_keeps_a_key_that_was_already_in_the_environment(monkeypatc
     monkeypatch.setenv(openrouter.API_KEY_ENV, ENV_KEY)
     _run_launcher(monkeypatch, tmp_path, f"{openrouter.API_KEY_ENV}={FILE_KEY}\n")
     assert os.environ.get(openrouter.API_KEY_ENV) == ENV_KEY
+
+
+def test_the_launcher_does_not_leave_the_dotenv_deepseek_key_in_the_environment(
+        monkeypatch, tmp_path):
+    """@brief HANDOFF 129: la chiave DeepSeek del .env, lasciata nell'ambiente,
+    sembrerebbe «variabile d'ambiente» e scavalcherebbe quella salvata con
+    «Account AI»; providers.deepseek_api_key la legge dal .env da sola."""
+    pytest.importorskip("dotenv")
+    _run_launcher(monkeypatch, tmp_path, "DEEPSEEK_API_KEY=sk-deepseek-dal-file\n")
+    assert "DEEPSEEK_API_KEY" not in os.environ
+
+
+def test_the_launcher_keeps_a_deepseek_key_already_in_the_environment(monkeypatch, tmp_path):
+    """@brief Negativo: una chiave DeepSeek gia' nell'ambiente vero resta."""
+    pytest.importorskip("dotenv")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek-ambiente")
+    _run_launcher(monkeypatch, tmp_path, "DEEPSEEK_API_KEY=sk-deepseek-dal-file\n")
+    assert os.environ.get("DEEPSEEK_API_KEY") == "sk-deepseek-ambiente"

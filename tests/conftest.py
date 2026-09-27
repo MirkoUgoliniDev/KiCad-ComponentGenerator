@@ -90,10 +90,12 @@ def no_real_api_key_sources(monkeypatch, tmp_path):
     set it themselves, as they already did with `monkeypatch.setenv`.
     """
     from fake_credman import FakeAdvapi32
-    from kicadgen.services import credentials, openrouter
+    from kicadgen.services import credentials, openrouter, providers
     monkeypatch.delenv(openrouter.API_KEY_ENV, raising=False)
+    monkeypatch.delenv(providers.DEEPSEEK_KEY_ENV, raising=False)
     monkeypatch.setattr(credentials, "_advapi32", FakeAdvapi32())
     monkeypatch.setattr(openrouter, "env_files", lambda: [tmp_path / "dotenv" / ".env"])
+    monkeypatch.setattr(providers, "env_files", lambda: [tmp_path / "dotenv" / ".env"])
     openrouter.invalidate_credit_cache()
     yield
     openrouter.invalidate_credit_cache()

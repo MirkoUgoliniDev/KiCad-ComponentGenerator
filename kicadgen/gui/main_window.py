@@ -4095,13 +4095,16 @@ class MainWindow(QMainWindow):
         return True
 
     def _open_ai_account(self) -> None:
-        """@brief «Account AI...»: paste, verify, save or remove the OpenRouter key.
+        """@brief «Account AI...»: every provider's key and balance; paste, verify, save or remove.
 
-        @note The dialog translates itself through this window's `i18n`; a
-            saved or removed key refreshes the balance line at once.
+        @note The dialog translates itself through this window's `i18n`; it
+            opens on the provider of the model in use and reads the balances
+            in the background (free). A saved or removed key refreshes the
+            balance line at once.
         """
         from .ai_account_dialog import AiAccountDialog
-        dialog = AiAccountDialog(self)
+        dialog = AiAccountDialog(self, read_balances=True)
+        dialog.select_provider(self._balance_provider())
         dialog.key_changed.connect(self.ai_account.refresh_balance)
         self._ai_account_dialog = dialog
         dialog.exec()

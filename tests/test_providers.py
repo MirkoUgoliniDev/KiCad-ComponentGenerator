@@ -379,3 +379,62 @@ def test_estimated_calls_are_counted_for_the_tooltip(tmp_path):
          "cost_usd": 0.001, "cost_source": "token_price",
          "prompt_tokens": 1000, "completion_tokens": 1000}], total=0.001)
     assert pc.load_project_costs(tmp_path).estimated_calls == 1
+
+
+# ── Chiave DeepSeek: ambiente, Gestore credenziali, .env (HANDOFF 129) ───
+
+def test_the_deepseek_key_is_looked_up_like_the_openrouter_one(monkeypatch):
+    import sys
+    from kicadgen.services import credentials
+    monkeypatch.setattr(sys, "platform", "win32")
+    path = providers.env_files()[0]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{providers.DEEPSEEK_KEY_ENV}=sk-dal-file\n", encoding="utf-8")
+    assert providers.deepseek_api_key() == "sk-dal-file"
+    assert providers.deepseek_key_source().kind == openrouter.KEY_SOURCE_DOTENV
+    credentials.write_secret(credentials.DEEPSEEK_TARGET, "sk-dal-gestore")
+    assert providers.deepseek_api_key() == "sk-dal-gestore"          # outranks .env
+    assert providers.deepseek_key_source().kind == openrouter.KEY_SOURCE_CREDENTIAL_MANAGER
+    monkeypatch.setenv(providers.DEEPSEEK_KEY_ENV, "sk-da-ambiente")
+    assert providers.deepseek_api_key() == "sk-da-ambiente"          # outranks both
+    source = providers.deepseek_key_source()
+    assert source.kind == openrouter.KEY_SOURCE_ENVIRONMENT and source.stored
+
+
+def test_a_missing_deepseek_key_points_to_the_account_window():
+    with pytest.raises(providers.ProviderKeyMissing, match="Account AI"):
+        providers.deepseek_api_key()
+
+
+def test_a_pasted_key_is_verified_with_itself_and_a_refusal_is_recognised(monkeypatch):
+    import io
+    import urllib.error
+    seen = []
+
+    def refuse(request, timeout):
+        seen.append(request.get_header("Authorization"))
+        raise urllib.error.HTTPError(request.full_url, 401, "Unauthorized", {},
+                                     io.BytesIO(b'{"error": {"message": "bad key sk-x"}}'))
+    monkeypatch.setattr(providers.urllib.request, "urlopen", refuse)
+    with pytest.raises(providers.ProviderError) as caught:
+        providers.verify_deepseek_key("sk-x")
+    assert seen == ["Bearer sk-x"]
+    assert providers.deepseek_key_rejected(caught.value)
+    assert "sk-x" not in str(caught.value)                          # redacted
+    assert not providers.deepseek_key_rejected(providers.ProviderError("timeout"))
+
+
+
+def test_the_escaped_form_of_the_key_is_redacted_too():
+    key = "sk-SECRET1\nSECRET2"
+    text = f"Invalid header value b'Bearer {key!r}'"
+    assert "SECRET" not in providers._redact(text, key)
+
+
+def test_a_key_with_blanks_is_refused_before_any_request(monkeypatch):
+    monkeypatch.setattr(providers.urllib.request, "urlopen",
+                        lambda *a, **k: pytest.fail("request sent"))
+    for bad in ("sk-a\nb", "sk-a b", "sk-\u00e8", ""):
+        with pytest.raises(providers.ProviderError):
+            providers.verify_deepseek_key(bad)
+    assert providers.key_text_problem("sk-abc123") is None
