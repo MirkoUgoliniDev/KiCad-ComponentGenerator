@@ -212,7 +212,9 @@ mesh cache, no board silkscreen frame, YOLO model picker, wheel guard, analysis
 blocked without a component type, fixes of the adversarial generality audit, see
 HANDOFF.md points 71-83; then points 84-91: medium/low audit fixes, STEP preview
 loader, per-side hole provenance, AI recount of self-contradictory sides, Qt buttons
-in the chosen language) is 5488 passed,
+in the chosen language; 2026-09-27, points 93-105: Piazzole label, photos with other
+proportions calibrated axis by axis, Datasheet role and PDF-only-Datasheet, 3D double
+click, view roll arrows, centred window) is 5509 passed,
 6 skipped, 2 expected failures and 19 subtests. The last packaging integration was merge
 commit `692ca95` on `main`. Keep these values aligned with HANDOFF.md.
 

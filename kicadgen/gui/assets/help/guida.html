@@ -132,7 +132,8 @@ modello 3D.</p>
 <h2 id="documenti">4. Caricare i documenti</h2>
 <p>Nella scheda <span class="ui">Progetto</span>, il riquadro della documentazione ha
 una scheda per ogni file caricato. Per ogni file spunti <strong>tutti</strong> i ruoli che
-contiene: un datasheet PDF, per esempio, è spesso pinout, quote e land pattern insieme.
+contiene: un datasheet PDF, per esempio, è spesso pinout, quote e piazzole consigliate insieme: per questo un PDF è sempre un
+«Datasheet», riceve quel ruolo da solo e le altre caselle non si possono spuntare.
 Dichiarare i ruoli dice al modello come usare ogni file:</p>
 <table>
   <tr><th>Ruolo</th><th>Che cosa contiene</th></tr>
@@ -143,14 +144,19 @@ Dichiarare i ruoli dice al modello come usare ogni file:</p>
   <tr><td class="ui">Quote</td>
       <td>Il disegno quotato visto dall'alto: lunghezza e larghezza del corpo,
       posizione dei fori, distanze fra le file di contatti.</td></tr>
-  <tr><td class="ui">Foto</td>
+  <tr><td class="ui">Foto alta risoluzione</td>
       <td>Una fotografia vera del pezzo, dall'alto: serve a individuare i componenti
       montati. Solo i file spuntati come foto vanno al riconoscimento dei componenti
       e alla calibrazione; devono essere immagini, non PDF.</td></tr>
-  <tr><td class="ui">Land pattern</td>
-      <td>L'impronta consigliata dal costruttore: forma e posizione delle piazzole.</td></tr>
+  <tr><td class="ui">Piazzole</td>
+      <td>Le piazzole consigliate dal costruttore (nei datasheet «land pattern»):
+      forma e posizione delle piazzole e dei fori.</td></tr>
   <tr><td class="ui">Vista laterale</td>
       <td>Le altezze: del corpo, dei componenti, lo spessore della scheda.</td></tr>
+  <tr><td class="ui">Datasheet</td>
+      <td>Il datasheet completo del costruttore, PDF o immagini: l'AI vi cerca pinout,
+      quote, piazzole e vista laterale e segnala le sezioni che mancano. Non è una foto:
+      non serve a riconoscere i componenti montati.</td></tr>
 </table>
 <ul>
   <li><span class="ui">Aggiungi…</span>, nella scheda <span class="ui">Nuovo documento</span>,
@@ -178,7 +184,7 @@ cercare.</p>
   <tr><td class="ui">Componente singolo a fori passanti (THT)</td>
       <td>Pad con foro, quote dal layout consigliato del datasheet.</td></tr>
   <tr><td class="ui">Componente singolo SMD</td>
-      <td>Nessun foro, dimensioni dal land pattern consigliato.</td></tr>
+      <td>Nessun foro, dimensioni dalle piazzole consigliate.</td></tr>
   <tr><td class="ui">Scheda con componenti · connettori passanti</td>
       <td rowspan="2">Oltre al footprint, parte l'<strong>inventario
       fotografico</strong>: i corpi montati sulla scheda vengono cercati sulla foto,

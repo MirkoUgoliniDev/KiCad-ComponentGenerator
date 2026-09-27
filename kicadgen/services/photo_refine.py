@@ -262,6 +262,14 @@ BOUNDARY_MAJORITY_SHARE = 0.5
 BOARD_FOUND = "found"
 BOARD_NOT_FOUND = "not_found"
 BOARD_ROTATED_90 = "rotated_90"
+#: Nessuna scheda con le proporzioni dichiarate e PIU' di un oggetto separato
+#: dallo sfondo con proporzioni diverse: quale sia la scheda non si decide.
+BOARD_AMBIGUOUS = "ambiguous"
+#: Pixel di quantizzazione per lato del riquadro (la stessa ipotesi della
+#: tolleranza di scala dei test: un pixel di bordo per lato): sotto 2 px di
+#: differenza fra le due estensioni il verso di un contorno quasi quadrato
+#: non e' misurato, e' rumore di bordo.
+ORIENTATION_QUANTIZATION_PX = 2.0
 
 
 @dataclass(frozen=True)
@@ -626,6 +634,11 @@ class BoardSearch:
         """
         if self.reason == BOARD_FOUND:
             return ""
+        if self.reason == BOARD_AMBIGUOUS:
+            return tx("Scheda non riconosciuta nella foto: nessun oggetto ha le proporzioni "
+                      "{length:.2f} x {width:.2f} mm e ce n'e' piu' di uno separato dallo "
+                      "sfondo. Ritagliare la foto lasciando solo la scheda.",
+                      length=body_length, width=body_width)
         if self.reason == BOARD_ROTATED_90:
             return tx("La scheda nella foto e' ruotata di 90 gradi rispetto alle quote "
                       "dichiarate: la lunghezza ({length:.2f} mm) corre lungo X, cioe' in "
@@ -648,6 +661,65 @@ def _search(image, body_length, body_width, background, distance) -> Optional[Bo
         if candidates:
             return _frame_from(candidates, body_length, body_width)
     return None
+
+
+def _orientation_mismatch(width_px, height_px, body_length, body_width) -> bool:
+    """Il lato lungo misurato sta sull'asse opposto a quello dichiarato.
+
+    Solo se entrambi i versi sono determinati: quote uguali non ne dichiarano
+    uno, e un contorno le cui estensioni differiscono di non piu' di
+    ORIENTATION_QUANTIZATION_PX non ne misura uno.
+    """
+    if body_length == body_width or abs(width_px - height_px) <= ORIENTATION_QUANTIZATION_PX:
+        return False
+    return (width_px > height_px) != (body_length > body_width)
+
+
+def _search_any_aspect(image, body_length, body_width, background, distance):
+    """Seconda passata: la scheda con proporzioni diverse da quelle dichiarate.
+
+    Una vista dall'alto ridimensionata in modo non proporzionale (o fotografata
+    con pixel non quadrati) resta una vista dall'alto: la scala si misura per
+    asse, X sulla lunghezza e Y sulla larghezza, e i consumatori leggono gia'
+    le coordinate asse per asse (`isotropic_board` ricampiona dove serve una
+    scala unica). Qui il rapporto d'aspetto smette di identificare la scheda;
+    la identificano i criteri strutturali, tutti ancora applicati da
+    `_board_candidates` (circondata dallo sfondo, al piu' un lato di cornice,
+    non inclinata, scala e area minime), piu' l'unicita': senza il rapporto
+    nulla distingue due oggetti sul tavolo, quindi se ce n'e' piu' di uno la
+    risposta e' BOARD_AMBIGUOUS, non il piu' grande.
+
+    @return (reason, frame or None) with reason one of the BOARD_* codes.
+    @note La deformazione non e' limitata: ogni soglia sarebbe tarata sulle
+        foto viste finora. Viene dichiarata nel log (`aspect_deformation`),
+        perche' o la foto e' deformata o le quote dichiarate sono sbagliate, e
+        dalla sola foto le due cause non si distinguono.
+    """
+    for mask, mid_step in _segmentations(image, background, distance):
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        candidates = _board_candidates(contours, image, body_length, body_width,
+                                       distance, background, mid_step, check_aspect=False)
+        if not candidates:
+            continue
+        if len(candidates) > 1:
+            return BOARD_AMBIGUOUS, None
+        _, _, _, _, w, h = candidates[0]
+        if _orientation_mismatch(w, h, body_length, body_width):
+            return BOARD_ROTATED_90, None
+        return BOARD_FOUND, _frame_from(candidates, body_length, body_width)
+    return BOARD_NOT_FOUND, None
+
+
+def aspect_deformation(frame: BoardFrame, body_length: float, body_width: float) -> float:
+    """@brief Relative gap between the X and Y scales of a board frame.
+
+    @param frame Board found by `locate_board`.
+    @param body_length Declared board extent along X, in mm.
+    @param body_width Declared board extent along Y, in mm.
+    @return (px/mm on X) / (px/mm on Y) - 1: 0 for an undistorted view,
+        negative when the photo is squeezed along X.
+    """
+    return (frame.width_px / body_length) / (frame.height_px / body_width) - 1.0
 
 
 def locate_board(image, body_length: float, body_width: float) -> BoardSearch:
@@ -683,7 +755,8 @@ def locate_board(image, body_length: float, body_width: float) -> BoardSearch:
     if body_length != body_width and _search(image, body_width, body_length,
                                              background, distance) is not None:
         return BoardSearch(None, BOARD_ROTATED_90)
-    return BoardSearch(None, BOARD_NOT_FOUND)
+    reason, frame = _search_any_aspect(image, body_length, body_width, background, distance)
+    return BoardSearch(frame, reason)
 
 
 def find_board(image, body_length: float, body_width: float) -> Optional[BoardFrame]:
@@ -701,8 +774,12 @@ def find_board(image, body_length: float, body_width: float) -> Optional[BoardFr
 
 
 def _board_candidates(contours, image, body_length, body_width, distance, background,
-                      mid_step=False):
-    """Rettangoli compatibili col modulo, filtrati come da contratto."""
+                      mid_step=False, check_aspect=True):
+    """Rettangoli compatibili col modulo, filtrati come da contratto.
+
+    Con `check_aspect` False il rapporto d'aspetto non filtra (seconda
+    passata, `_search_any_aspect`): tutti gli altri criteri restano.
+    """
     # Le foto dei moduli sono spesso corredate da quote: linee e frecce possono
     # formare il contorno più grande, ma con un rapporto molto diverso da quello
     # reale della scheda. Scegliamo quindi il candidato più grande tra quelli
@@ -730,7 +807,7 @@ def _board_candidates(contours, image, body_length, body_width, distance, backgr
         # I consumatori usano X = lunghezza dichiarata. Il verso si confronta
         # con quello delle quote: nessuno scambio implicito di assi.
         error = _aspect_error(w, h, body_length, body_width)
-        if error > MAX_BOARD_ASPECT_ERROR:
+        if check_aspect and error > MAX_BOARD_ASPECT_ERROR:
             continue
         # Il solo rapporto d'aspetto non identifica la scheda: su una foto
         # reale un connettore o un'etichetta scura possono avere lo stesso

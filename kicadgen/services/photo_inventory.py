@@ -523,7 +523,9 @@ def prepare_photo(path, length, width, metadata=None):
     @param length Board length in mm.
     @param width Board width in mm.
     @param metadata Optional dictionary updated with source hash, crop box and crop size;
-        when the board is not found, `board_failure` holds the reason for the user.
+        when the board is not found, `board_failure` holds the reason for the user;
+        when it is found with proportions other than the declared ones,
+        `board_warning` states the two axis scales (see `aspect_deformation`).
     @return BGR crop of the board, or None when the photo cannot be read or calibrated.
     """
     from .photo_refine import find_board, locate_board
@@ -561,6 +563,18 @@ def prepare_photo(path, length, width, metadata=None):
     if x0 < 0 or y0 < 0 or x1 > image.shape[1] or y1 > image.shape[0]:
         return None
     if metadata is not None:
+        from .photo_refine import MAX_BOARD_ASPECT_ERROR, _aspect_error, aspect_deformation
+        if _aspect_error(frame.width_px, frame.height_px, length, width) > MAX_BOARD_ASPECT_ERROR:
+            # Accettata dalla seconda passata di locate_board: la scala vale per
+            # asse, e l'utente deve sapere che foto e quote non concordano.
+            metadata["board_warning"] = tx(
+                "{name}: la scheda nella foto ha proporzioni diverse dalle quote "
+                "{length:.2f} x {width:.2f} mm (scala X {sx:.2f} px/mm, Y {sy:.2f} px/mm, "
+                "deformazione {deform:+.1f}%). Calibrata asse per asse: la foto e' "
+                "ridimensionata in modo non proporzionale oppure le quote sono da verificare.",
+                name=Path(path).name, length=length, width=width,
+                sx=frame.width_px / length, sy=frame.height_px / width,
+                deform=100.0 * aspect_deformation(frame, length, width))
         import hashlib
         # Stessi byte che `read_photo` decodifica: l'impronta non cambia.
         with open(path, 'rb') as stream:
@@ -982,6 +996,8 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         return report
     _, path, photo, report.calibration = max(candidates, key=lambda c:c[0])
     report.photo = path.name
+    if report.calibration.get("board_warning"):
+        warn(report.calibration["board_warning"])
     if top_photo_index is None:
         warn(tx("Vista dall'alto non specificata: scelta euristica {name}, verificare "
                 "la foto nel confronto.",

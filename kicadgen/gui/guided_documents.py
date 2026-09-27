@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox,
     QVBoxLayout, QWidget)
 
 from ..services.document_roles import (DocumentSet, PHOTO_ROLE, ROLES, ROLE_HELP, ROLE_SHORT,
+                                       allowed_roles,
                                        SUFFIXES, role_list)
 from .profile_dialog import icon_button, show_info
 from ..services.messages import tx
@@ -113,6 +114,13 @@ def document_pixmap(path, size, upscale=True):
 #: Width of a document card, in pixels: a thumbnail plus two columns of role
 #: check boxes with their short labels, in the 10 pt interface font.
 CARD_WIDTH = 236
+#: Position (row, column, column span) of each role check box on a card.
+#: «Foto alta risoluzione» and its translations (up to «Photo haute
+#: résolution») do not fit half of CARD_WIDTH, so the photograph role has a
+#: row of its own; the other pairs are the ones that already fitted in all
+#: four languages.
+ROLE_GRID = {'pinout': (0, 0, 1), 'top': (0, 1, 1), 'hires': (1, 0, 2),
+             'land_pattern': (2, 0, 1), 'side_view': (2, 1, 1), 'datasheet': (3, 0, 1)}
 #: Height of the thumbnail on a card, in pixels.
 PREVIEW_HEIGHT = 76
 #: Key of the «new document» card in `set_busy`.
@@ -248,10 +256,11 @@ class GuidedDocuments(QWidget):
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(2)
         boxes = {}
-        for index, role in enumerate(ROLES):
+        for role in ROLES:
             box = QCheckBox(ROLE_SHORT[role])
             box.toggled.connect(lambda checked, n=name, r=role: self._toggle_role(n, r, checked))
-            grid.addWidget(box, index // 2, index % 2)
+            row, col, span = ROLE_GRID[role]
+            grid.addWidget(box, row, col, 1, span)
             boxes[role] = box
         column.addLayout(grid)
         actions = QHBoxLayout()
@@ -469,6 +478,7 @@ class GuidedDocuments(QWidget):
         group.setToolTip(self.i18n.tr('tooltip.original_name', name=original or name)
                          if self.i18n is not None else 'Originale: ' + (original or name))
         is_pdf = Path(name).suffix.lower() == '.pdf'
+        allowed = allowed_roles(name)
         for role, box in widgets['roles'].items():
             box.blockSignals(True)
             box.setChecked(role in roles)
@@ -477,7 +487,12 @@ class GuidedDocuments(QWidget):
             if role == PHOTO_ROLE and is_pdf:
                 # Il rilevamento dei componenti decodifica immagini, non PDF.
                 tip = self._tr('Una foto deve essere un’immagine, non un PDF.')
-                box.setEnabled(False)
+            elif role not in allowed:
+                # Utente, 27/09: un PDF e' solo un datasheet.
+                tip = self._tr('Un PDF può avere solo il ruolo Datasheet: le viste che '
+                               'contiene le cerca l’AI.')
+            # Esplicito in entrambi i versi: set_busy riaccende tutte le caselle.
+            box.setEnabled(role in allowed)
             box.setToolTip(tip)
         verdict = self._calibration_verdict(roles, path)
         if verdict is None:
@@ -656,8 +671,9 @@ class GuidedDocuments(QWidget):
     def _info(self):
         show_info(self, 'Documenti per l’AI', '\n\n'.join(
             f'{ROLES[role]} ({role}): {ROLE_HELP[role]}' for role in ROLES) + '\n\n'
-            'Un file può avere più ruoli: un datasheet PDF è spesso pinout, disegno quotato '
-            '(top) e land pattern (land_pattern) insieme. Spunta tutti quelli che contiene; '
+            'Un PDF è sempre un datasheet (datasheet): riceve quel ruolo da solo e l’AI vi '
+            'cerca pinout, quote, piazzole e vista laterale. Un’immagine può avere più ruoli: '
+            'spunta tutti quelli che contiene; '
             'un file senza ruoli blocca l’analisi finché non ne scegli uno o lo rimuovi. '
             'Solo i file spuntati come foto (hires) vanno al riconoscimento dei componenti e '
             'alla calibrazione: devono essere immagini PNG/JPEG/WEBP, non PDF. '

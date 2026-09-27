@@ -29,9 +29,9 @@ import pytest
 cv2 = pytest.importorskip("cv2", reason="opencv-python non installato")
 
 from kicadgen.services.photo_refine import (
-    BOARD_FOUND, BOARD_NOT_FOUND, BOARD_ROTATED_90, MAX_BOARD_ASPECT_ERROR,
-    _aspect_error, deskew_board, estimate_background, find_board, isotropic_crop_frame,
-    locate_board,
+    BOARD_AMBIGUOUS, BOARD_FOUND, BOARD_NOT_FOUND, BOARD_ROTATED_90, MAX_BOARD_ASPECT_ERROR,
+    _aspect_error, aspect_deformation, deskew_board, estimate_background, find_board,
+    isotropic_crop_frame, locate_board,
 )
 
 SCALE = 10.0
@@ -177,14 +177,21 @@ def test_an_interior_patch_with_the_declared_aspect_is_not_the_board():
 
     The black part is darker than 70 and has the declared proportions, 6.25
     px/mm and enough area, so the old detector calibrated on it. It is
-    surrounded by green board, not by the table: rejected. The square board
-    does not have the declared proportions either, so there is no frame at all.
+    surrounded by green board, not by the table: rejected. Until 26/09 the
+    square board was rejected too, for its proportions; since 27/09 (user:
+    any photo format must be accepted) it is the only object on the table and
+    is calibrated axis by axis, with its deformation declared. Either way the
+    frame is never the interior patch.
     """
     image = np.full((500, 600, 3), 235, dtype="uint8")
     image[100:400, 150:450] = (40, 110, 30)
     image[200:300, 175:425] = 22            # 250 x 100 px: aspect 2.5
     search = locate_board(_noisy(image), LENGTH_MM, WIDTH_MM)
-    assert search.frame is None and search.reason == BOARD_NOT_FOUND
+    assert search.reason == BOARD_FOUND
+    assert (search.frame.width_px, search.frame.height_px) == pytest.approx((300, 300), abs=1)
+    assert (search.frame.cx, search.frame.cy) == pytest.approx((300, 250), abs=1)
+    assert aspect_deformation(search.frame, LENGTH_MM, WIDTH_MM) == pytest.approx(
+        (300 / LENGTH_MM) / (300 / WIDTH_MM) - 1, abs=0.01)
 
 
 def test_a_smaller_textured_patch_on_the_background_does_not_replace_the_board():
@@ -248,6 +255,85 @@ def test_prepare_photo_crops_a_portrait_board_with_the_declared_scale(tmp_path):
     assert crop.shape[1] == pytest.approx(bw, abs=1) and crop.shape[0] == pytest.approx(bh, abs=1)
     _, frame = isotropic_crop_frame(crop, WIDTH_MM, LENGTH_MM)
     assert frame.scale == pytest.approx(SCALE, abs=_scale_tolerance(WIDTH_MM, LENGTH_MM))
+
+
+# -- a photo resized non-proportionally is still a top view (27/09) ------------
+#
+# User, 27/09: «devi accettare la foto anche in questo formato». A top view
+# squeezed along one axis (resized without keeping the aspect ratio) keeps
+# every position along each axis: the scale is measured per axis. The aspect
+# ratio then no longer identifies the board; the structural criteria do, plus
+# uniqueness, because nothing else tells two objects on the table apart.
+
+def _squeezed(background=(235, 235, 235), board=(40, 110, 30), factor=0.82, **kwargs):
+    """The standard scene resized along X only, as an image editor would."""
+    image, (mx, my, bw, bh) = _scene(background, board, **kwargs)
+    width = int(round(image.shape[1] * factor))
+    image = cv2.resize(image, (width, image.shape[0]), interpolation=cv2.INTER_AREA)
+    return image, (mx * factor, my, bw * factor, bh)
+
+
+def test_a_board_squeezed_along_x_is_calibrated_axis_by_axis():
+    """Positive: 18% squeeze (the RS485 photo of 27/09 was 17.7%), beyond the 12% pass."""
+    image, (mx, my, bw, bh) = _squeezed()
+    assert _aspect_error(bw, bh, LENGTH_MM, WIDTH_MM) > MAX_BOARD_ASPECT_ERROR
+    search = locate_board(image, LENGTH_MM, WIDTH_MM)
+    assert search.reason == BOARD_FOUND
+    frame = search.frame
+    # One pixel per edge, as in _scale_tolerance, plus one for the resampling.
+    assert frame.width_px == pytest.approx(bw, abs=2)
+    assert frame.height_px == pytest.approx(bh, abs=2)
+    assert frame.width_px / LENGTH_MM == pytest.approx(SCALE * 0.82, abs=2 / LENGTH_MM)
+    assert frame.height_px / WIDTH_MM == pytest.approx(SCALE, abs=2 / WIDTH_MM)
+    assert aspect_deformation(frame, LENGTH_MM, WIDTH_MM) == pytest.approx(-0.18, abs=0.02)
+
+
+def test_prepare_photo_declares_the_deformation_it_accepted(tmp_path):
+    """The user is told that photo and dimensions disagree; an undistorted photo is silent."""
+    from kicadgen.services.photo_inventory import prepare_photo
+    squeezed, _ = _squeezed()
+    straight, _ = _scene((235, 235, 235), (40, 110, 30))
+    for name, image in (("squeezed.png", squeezed), ("straight.png", straight)):
+        assert cv2.imwrite(str(tmp_path / name), image)
+    metadata = {}
+    assert prepare_photo(tmp_path / "squeezed.png", LENGTH_MM, WIDTH_MM, metadata) is not None
+    assert "squeezed.png" in metadata["board_warning"] and "%" in metadata["board_warning"]
+    metadata = {}
+    assert prepare_photo(tmp_path / "straight.png", LENGTH_MM, WIDTH_MM, metadata) is not None
+    assert "board_warning" not in metadata
+
+
+def test_two_objects_of_the_wrong_proportions_are_ambiguous():
+    """Negative: without the aspect ratio nothing says which object is the board."""
+    image = np.full((500, 900, 3), 235, dtype="uint8")
+    image[100:400, 80:380] = (40, 110, 30)      # 300 x 300
+    image[100:400, 520:820] = (40, 110, 30)     # same, separate
+    search = locate_board(_noisy(image), LENGTH_MM, WIDTH_MM)
+    assert search.frame is None and search.reason == BOARD_AMBIGUOUS
+    assert "piu' di uno" in search.message(LENGTH_MM, WIDTH_MM)
+
+
+def test_a_board_with_the_declared_proportions_is_not_made_ambiguous_by_a_second_object():
+    """The first pass is unchanged: the declared aspect still identifies the board."""
+    image, box = _scene((235, 235, 235), (40, 110, 30), margin_px=(80, 200))
+    image[10:150, 20:160] = (40, 110, 30)       # square object, other proportions
+    _assert_frame_matches(find_board(image, LENGTH_MM, WIDTH_MM), box)
+
+
+def test_a_squeezed_board_seen_rotated_by_90_degrees_is_still_rotated():
+    """Negative: a deformation never swaps the axes behind the user's back."""
+    image, _ = _scene((235, 235, 235), (40, 110, 30), size_mm=(WIDTH_MM, LENGTH_MM),
+                      margin_px=(60, 80))
+    image = cv2.resize(image, (image.shape[1], int(image.shape[0] * 0.82)),
+                       interpolation=cv2.INTER_AREA)
+    search = locate_board(image, LENGTH_MM, WIDTH_MM)
+    assert search.frame is None and search.reason == BOARD_ROTATED_90
+
+
+def test_the_board_still_has_to_stand_out_from_the_background():
+    """Negative: accepting any proportions does not accept the photo frame itself."""
+    image, _ = _squeezed(background=(22, 22, 22), board=(22, 22, 22), components=False)
+    assert locate_board(image, LENGTH_MM, WIDTH_MM).reason == BOARD_NOT_FOUND
 
 
 # -- deskew on a dark background -----------------------------------------------

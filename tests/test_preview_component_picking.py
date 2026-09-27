@@ -77,14 +77,48 @@ def test_picking_configuration_preserves_left_rotation_and_existing_mesh():
                           show=False, show_message=False)]
 
 
-def test_double_click_configuration_registers_component_callback():
-    calls = []
-    callback = object()
-    viewer = SimpleNamespace(iren=SimpleNamespace(
-        add_observer=lambda event, handler: calls.append((event, handler))),
-        _component_double_clicked=callback)
-    Preview3DVtk._configure_component_double_click(viewer)
-    assert calls == [("LeftButtonDoubleClickEvent", callback)]
+def test_the_qt_interactor_never_fires_the_vtk_double_click_event():
+    """Why the double click is served from the Qt event (user, 27/09: «il doppio
+    click non funziona»). The Qt interactor turns a double click into a press with
+    repeat count 1; VTK does not turn that into LeftButtonDoubleClickEvent, so an
+    observer on that event -- the previous wiring -- is never called."""
+    # No render window: an OpenGL window next to Qt crashes the test process,
+    # and event dispatch only needs an enabled interactor.
+    from vtkmodules.vtkRenderingUI import vtkGenericRenderWindowInteractor
+    interactor = vtkGenericRenderWindowInteractor()
+    interactor.Enable()
+    seen = []
+    interactor.AddObserver('LeftButtonDoubleClickEvent', lambda *a: seen.append('double'))
+    interactor.AddObserver('LeftButtonPressEvent', lambda *a: seen.append('press'))
+    interactor.SetEventInformation(10, 10, 0, 0, chr(0), 1)
+    interactor.LeftButtonPressEvent()
+    assert seen == ['press']
+
+
+def _double_click_viewer(row):
+    class Signals(QObject):
+        component_requested = pyqtSignal(int)
+
+    signals = Signals()
+    # The QObject must outlive the call: a bound signal does not keep it alive.
+    viewer = SimpleNamespace(component_requested=signals.component_requested,
+                             _component_row_at_widget_point=lambda x, y: row,
+                             _signals=signals)
+    return viewer, QSignalSpy(signals.component_requested)
+
+
+def test_a_double_click_on_a_component_requests_it():
+    from PyQt6.QtCore import QPointF
+    viewer, spy = _double_click_viewer(5)
+    assert Preview3DVtk._serve_double_click(viewer, QPointF(120, 80)) is True
+    assert list(spy) == [[5]]
+
+
+def test_a_double_click_on_the_board_or_background_requests_nothing():
+    from PyQt6.QtCore import QPointF
+    viewer, spy = _double_click_viewer(None)
+    assert Preview3DVtk._serve_double_click(viewer, QPointF(120, 80)) is False
+    assert list(spy) == []
 
 
 def test_clear_and_reset_invalidate_mapping(monkeypatch):

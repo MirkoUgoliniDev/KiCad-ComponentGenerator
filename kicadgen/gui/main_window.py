@@ -1874,6 +1874,33 @@ class MainWindow(QMainWindow):
                    (self._worker, self._extract_worker, self._cad3d_worker, self._terminal_worker,
                     self._reconcile_worker))
 
+    def showEvent(self, event):  # noqa: N802 - firma Qt
+        """@brief Centre the window on its screen the first time it is shown.
+
+        @param event Qt show event.
+        @note Only the first time (user, 2026-09-27): later shows -- restore
+            from minimised, a move by the user -- keep the position chosen.
+            It is done here and not in __init__ because the frame (title bar
+            and borders) is known only once the window exists on screen.
+        """
+        super().showEvent(event)
+        if getattr(self, "_centred_once", False):
+            return
+        self._centred_once = True
+        self._centre_on_screen()
+
+    def _centre_on_screen(self) -> None:
+        """Place the window frame in the middle of its screen's available area."""
+        screen = self.screen()
+        if screen is None:
+            return
+        area = screen.availableGeometry()
+        frame = self.frameGeometry()
+        frame.moveCenter(area.center())
+        # Mai oltre l'angolo in alto a sinistra: una finestra piu' grande
+        # dell'area resterebbe con la barra del titolo fuori schermo.
+        self.move(max(frame.left(), area.left()), max(frame.top(), area.top()))
+
     def closeEvent(self, event):
         """@brief Refuse to close while any QThread worker is still running.
 
@@ -2934,7 +2961,7 @@ class MainWindow(QMainWindow):
                 component_type['key'])
         self.combo_component_type.setToolTip(
             "Dice al modello che cosa sta leggendo: da questo dipende quali quote "
-            "cercare nel datasheet (fori e drill per un THT, land pattern per un "
+            "cercare nel datasheet (fori e drill per un THT, piazzole consigliate per un "
             "SMD, semi-fori sul bordo per un modulo castellated)."
         )
         self.combo_component_type.currentIndexChanged.connect(

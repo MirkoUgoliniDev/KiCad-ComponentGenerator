@@ -285,7 +285,7 @@ def test_a_file_with_several_roles_is_described_for_each(monkeypatch, tmp_path):
     blocks = call.call_args.kwargs["content_blocks"]
     sheet = blocks[0]["text"]
     assert "RUOLI DICHIARATI" in sheet
-    for name in ("Pinout / disposizione contatti", "Immagine con quote", "Land pattern"):
+    for name in ("Pinout / disposizione contatti", "Immagine con quote", "Piazzole consigliate"):
         assert name in sheet
     # The same file IS the dimensioned top view: it must not be excluded from it.
     assert "non usarlo per gli ingombri" not in sheet

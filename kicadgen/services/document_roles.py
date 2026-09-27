@@ -33,14 +33,23 @@ from ..fsutil import replace_file
 #: the AI. The order is the display order.
 ROLES = {'pinout': 'Pinout / disposizione contatti', 'top': 'Immagine con quote',
          'hires': 'Foto ad alta risoluzione',
-         'land_pattern': 'Land pattern consigliato',
-         'side_view': 'Vista laterale / altezze'}
+         'land_pattern': 'Piazzole consigliate',
+         'side_view': 'Vista laterale / altezze',
+         'datasheet': 'Datasheet del costruttore'}
 #: Short labels for the role check boxes of a document card; the full label
 #: and the help stay in the tooltip.
-ROLE_SHORT = {'pinout': 'Pinout', 'top': 'Quote', 'hires': 'Foto',
-              'land_pattern': 'Land pattern', 'side_view': 'Vista laterale'}
+ROLE_SHORT = {'pinout': 'Pinout', 'top': 'Quote', 'hires': 'Foto alta risoluzione',
+              'land_pattern': 'Piazzole', 'side_view': 'Vista laterale',
+              'datasheet': 'Datasheet'}
 #: The role that sends a file to the photo inventory (detector, calibration).
 PHOTO_ROLE = 'hires'
+#: The complete manufacturer datasheet: the extraction looks in it for the
+#: pinout, dimensioned views and land pattern (datasheet_extractor.DATASHEET_VIEWS).
+DATASHEET_ROLE = 'datasheet'
+#: Roles a PDF may carry (user, 2026-09-27: «se PDF puo' essere solo
+#: Datasheet, altri ruoli non spuntabili»). A PDF is treated as a whole
+#: datasheet; the views it holds are found by the extraction, not ticked.
+PDF_ROLES = (DATASHEET_ROLE,)
 #: Roles whose files the photo inventory examines. Kept as a tuple for the
 #: callers written for version 1; since version 2 it is the photograph only.
 INVENTORY_ROLES = (PHOTO_ROLE,)
@@ -54,10 +63,15 @@ ROLE_HELP = {
              'immagine per individuare i componenti piccoli, che in una vista a bassa '
              'risoluzione non sono distinguibili. Deve essere una fotografia del pezzo '
              'reale, non un disegno tecnico a tratto.',
-    'land_pattern': 'Land pattern (impronta) consigliato dal costruttore, dichiarato '
-                    'dall’utente: usalo per forma, misure e posizione delle piazzole e dei fori.',
+    'land_pattern': 'Disegno delle piazzole consigliate dal costruttore (land pattern), '
+                    'dichiarato dall’utente: usalo per forma, misure e posizione delle '
+                    'piazzole e dei fori.',
     'side_view': 'Vista laterale dichiarata dall’utente: usala per le altezze (corpo, '
                  'componenti, spessore della scheda); le quote in pianta vengono dalle altre viste.',
+    'datasheet': 'Datasheet completo del costruttore (PDF o immagini), dichiarato dall’utente: '
+                 'può contenere pinout, disegni quotati dall’alto e laterali e piazzole '
+                 'consigliate. L’AI cerca ogni sezione e la usa per il suo scopo, e segnala '
+                 'quelle che mancano. Non è una foto: non serve a riconoscere i componenti montati.',
 }
 SUFFIXES = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.pdf'}
 #: Suffixes a photograph can have: the inventory decodes images, not PDFs.
@@ -89,6 +103,40 @@ def role_list(value) -> list:
     if not isinstance(value, (list, tuple)):
         return []
     return [role for role in ROLES if role in value]
+
+
+def allowed_roles(name) -> tuple:
+    """@brief The roles the document `name` may carry, in `ROLES` order.
+
+    @param name Document file name.
+    @return `PDF_ROLES` for a PDF, every role otherwise.
+    """
+    if Path(str(name)).suffix.lower() == '.pdf':
+        return tuple(role for role in ROLES if role in PDF_ROLES)
+    return tuple(ROLES)
+
+
+def _pdf_roles(name, roles) -> list:
+    """Roles of a manifest entry once the PDF rule is applied (migration on read).
+
+    A PDF declared with content roles (pinout, dimensions, land pattern, side
+    view) before 2026-09-27 becomes a datasheet: the datasheet covers exactly
+    those views. An empty list stays empty -- the user unticked it on purpose.
+    """
+    if Path(name).suffix.lower() != '.pdf' or not roles:
+        return roles
+    return [DATASHEET_ROLE]
+
+
+def _check_allowed(name, wanted):
+    """Refuse roles the document cannot carry, with the reason for the user."""
+    if Path(name).suffix.lower() != '.pdf':
+        return
+    if PHOTO_ROLE in wanted:
+        raise DocumentError(tx("Una foto deve essere un’immagine, non un PDF."))
+    if any(role not in PDF_ROLES for role in wanted):
+        raise DocumentError(tx("Un PDF può avere solo il ruolo Datasheet: le viste che "
+                               "contiene le cerca l’AI."))
 
 
 def photo_paths(doc_paths, document_roles) -> list:
@@ -181,7 +229,10 @@ class DocumentSet:
             if not isinstance(data, dict) or not isinstance(data.get('roles'), dict):
                 raise ValueError(tx("versione non riconosciuta"))
             if data.get('version') == 1:
-                return _migrate_v1(self._validated_v1(data))
+                data = _migrate_v1(self._validated_v1(data))
+                data['roles'] = {name: _pdf_roles(name, roles)
+                                 for name, roles in data['roles'].items()}
+                return data
             if data.get('version') != MANIFEST_VERSION:
                 raise ValueError(tx("versione non riconosciuta"))
             for name, roles in data['roles'].items():
@@ -193,7 +244,8 @@ class DocumentSet:
             if not isinstance(originals, dict):
                 raise ValueError(tx("nome file non valido"))
             return {'version': MANIFEST_VERSION,
-                    'roles': {name: role_list(roles) for name, roles in data['roles'].items()},
+                    'roles': {name: _pdf_roles(name, role_list(roles))
+                              for name, roles in data['roles'].items()},
                     'original_names': {k: v for k, v in originals.items()
                                        if k in data['roles'] and isinstance(v, str)}}
         except (ValueError, AttributeError, TypeError) as exc:
@@ -305,7 +357,9 @@ class DocumentSet:
             very same bytes is already in the project, no copy is made: the
             roles are added to that document and its path is returned.
         @throws DocumentError On unknown role, unsupported or unreadable file,
-            unknown document to replace, or a photograph role on a PDF.
+            unknown document to replace, or a role other than Datasheet on a PDF.
+        @note A PDF always gets the Datasheet role, its only allowed one
+            (`allowed_roles`).
         @note The previous files are archived first and restored if the update fails.
         """
         wanted = role_list(roles)
@@ -317,6 +371,7 @@ class DocumentSet:
         suffix = source.suffix.lower()
         if PHOTO_ROLE in wanted and suffix not in PHOTO_SUFFIXES:
             raise DocumentError(tx("Una foto deve essere un’immagine, non un PDF."))
+        _check_allowed(source.name, wanted)
         data = self.read()
         if replace is not None and replace not in data['roles']:
             raise DocumentError(tx("Documento da sostituire non trovato: {name}.", name=replace))
@@ -331,6 +386,11 @@ class DocumentSet:
         new_roles = role_list(keep_roles + wanted)
         if PHOTO_ROLE in new_roles and suffix not in PHOTO_SUFFIXES:
             raise DocumentError(tx("Una foto deve essere un’immagine, non un PDF."))
+        if suffix == '.pdf':
+            # Un PDF ha un solo ruolo possibile: lo riceve subito, invece di
+            # bloccare l'analisi finche' l'utente non spunta l'unica casella.
+            # Un'immagine sostituita da un PDF perde i ruoli di contenuto.
+            new_roles = [DATASHEET_ROLE]
         target_name = self._free_name(_local_name(source.name), data, keep=replace)
         target = self.directory / target_name
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -377,7 +437,8 @@ class DocumentSet:
         @param name Document file name in the manifest.
         @param roles Role keys; an empty list is allowed and blocks the
             analysis until the user ticks a role or removes the file.
-        @throws DocumentError For an unknown document or role, or a photograph role on a PDF.
+        @throws DocumentError For an unknown document or role, or a role other
+            than Datasheet on a PDF (`allowed_roles`).
         """
         data = self.read()
         if name not in data['roles']:
@@ -388,6 +449,7 @@ class DocumentSet:
             raise DocumentError(tx("Ruolo non riconosciuto."))
         if PHOTO_ROLE in wanted and Path(name).suffix.lower() not in PHOTO_SUFFIXES:
             raise DocumentError(tx("Una foto deve essere un’immagine, non un PDF."))
+        _check_allowed(name, wanted)
         data['roles'][name] = wanted
         self._write(data)
 

@@ -21,7 +21,8 @@ def pdf(path, text=b'fixture'):
 
 
 def test_every_role_has_a_label_and_a_help():
-    assert set(ROLES) == set(ROLE_HELP) == {'pinout', 'top', 'hires', 'land_pattern', 'side_view'}
+    assert set(ROLES) == set(ROLE_HELP) == {'pinout', 'top', 'hires', 'land_pattern', 'side_view',
+                                            'datasheet'}
     assert INVENTORY_ROLES == (PHOTO_ROLE,) == ('hires',)
 
 
@@ -40,13 +41,15 @@ def test_copy_keeps_original_name_and_persists_the_role_list(tmp_path):
 
 
 def test_one_file_carries_several_roles_and_only_a_photo_goes_to_the_inventory(tmp_path):
-    """Positivo: un datasheet e' pinout, quote e land pattern; negativo: non e' una foto."""
+    """Positivo: una pagina di datasheet in immagine e' pinout, quote e land pattern;
+    negativo: non e' una foto. Dal 27/09 un PDF e' solo Datasheet (test sotto)."""
     store = DocumentSet(tmp_path / 'docs')
-    sheet = store.import_file(['pinout', 'top', 'land_pattern'], pdf(tmp_path / 'datasheet.pdf'))
+    sheet = store.import_file(['pinout', 'top', 'land_pattern'],
+                              picture(tmp_path / 'datasheet.png', 'white'))
     photo = store.import_file([], picture(tmp_path / 'board.png'))
     store.set_roles(photo.name, ['hires', 'top'])
     paths, roles = store.selected()
-    assert roles == {'datasheet.pdf': ['pinout', 'top', 'land_pattern'],
+    assert roles == {'datasheet.png': ['pinout', 'top', 'land_pattern'],
                      'board.png': ['top', 'hires']}
     assert photo_paths(paths, roles) == [photo]
     assert sheet not in photo_paths(paths, roles)
@@ -54,26 +57,66 @@ def test_one_file_carries_several_roles_and_only_a_photo_goes_to_the_inventory(t
 
 def test_the_same_bytes_add_a_role_instead_of_a_copy(tmp_path):
     store = DocumentSet(tmp_path / 'docs')
-    first = store.import_file('pinout', pdf(tmp_path / 'a.pdf'))
-    again = store.import_file('top', pdf(tmp_path / 'renamed.pdf'))
+    first = store.import_file('pinout', picture(tmp_path / 'a.png'))
+    again = store.import_file('top', picture(tmp_path / 'renamed.png'))
     assert again == first
-    assert store.selected()[1] == {'a.pdf': ['pinout', 'top']}
+    assert store.selected()[1] == {'a.png': ['pinout', 'top']}
     # Negativo: stesso nome, contenuto diverso -> un altro documento, non una fusione.
     other_dir = tmp_path / 'other'
     other_dir.mkdir()
-    different = store.import_file('side_view', pdf(other_dir / 'a.pdf', b'another drawing'))
-    assert different.name == 'a-2.pdf'
-    assert store.selected()[1] == {'a.pdf': ['pinout', 'top'], 'a-2.pdf': ['side_view']}
+    different = store.import_file('side_view', picture(other_dir / 'a.png', 'blue'))
+    assert different.name == 'a-2.png'
+    assert store.selected()[1] == {'a.png': ['pinout', 'top'], 'a-2.png': ['side_view']}
 
 
 def test_a_pdf_cannot_be_declared_a_photograph(tmp_path):
     store = DocumentSet(tmp_path / 'docs')
     with pytest.raises(DocumentError, match='foto'):
         store.import_file(['hires'], pdf(tmp_path / 'scan.pdf'))
-    drawing = store.import_file(['top'], pdf(tmp_path / 'scan.pdf'))
+    drawing = store.import_file([], pdf(tmp_path / 'scan.pdf'))
     with pytest.raises(DocumentError, match='foto'):
-        store.set_roles(drawing.name, ['top', 'hires'])
-    assert store.selected()[1] == {'scan.pdf': ['top']}
+        store.set_roles(drawing.name, ['datasheet', 'hires'])
+    assert store.selected()[1] == {'scan.pdf': ['datasheet']}
+
+
+def test_a_pdf_is_only_a_datasheet_and_gets_the_role_by_itself(tmp_path):
+    """Utente, 27/09: «se PDF puo' essere solo Datasheet, altri ruoli non spuntabili»."""
+    from kicadgen.services.document_roles import allowed_roles
+    store = DocumentSet(tmp_path / 'docs')
+    sheet = store.import_file([], pdf(tmp_path / 'sheet.pdf'))
+    assert store.selected()[1] == {'sheet.pdf': ['datasheet']}
+    for content in (['pinout'], ['top'], ['land_pattern'], ['side_view'], ['datasheet', 'top']):
+        with pytest.raises(DocumentError, match='Datasheet'):
+            store.set_roles(sheet.name, content)
+    with pytest.raises(DocumentError, match='Datasheet'):
+        store.import_file(['pinout'], pdf(tmp_path / 'other.pdf', b'other'))
+    assert allowed_roles('sheet.pdf') == ('datasheet',)
+    # Negativo: un'immagine puo' avere ogni ruolo, anche datasheet.
+    page = store.import_file(['pinout', 'datasheet'], picture(tmp_path / 'page.png'))
+    assert store.selected()[1][page.name] == ['pinout', 'datasheet']
+    assert allowed_roles('page.png') == tuple(ROLES)
+
+
+def test_an_image_replaced_by_a_pdf_becomes_a_datasheet(tmp_path):
+    store = DocumentSet(tmp_path / 'docs')
+    old = store.import_file(['pinout', 'top'], picture(tmp_path / 'one.png'))
+    target = store.import_file([], pdf(tmp_path / 'sheet.pdf'), replace=old.name)
+    assert store.selected()[1] == {target.name: ['datasheet']}
+
+
+def test_a_pdf_saved_with_view_roles_is_read_as_a_datasheet(tmp_path):
+    """Manifest scritto prima del 27/09: le viste di un PDF diventano il datasheet,
+    le immagini restano come sono; un PDF senza ruoli resta senza (scelta dell'utente)."""
+    store = DocumentSet(tmp_path / 'docs')
+    store.directory.mkdir()
+    pdf(store.directory / 'sheet.pdf')
+    pdf(store.directory / 'empty.pdf', b'x')
+    picture(store.directory / 'page.png')
+    store.path.write_text(json.dumps({'version': 2, 'roles': {
+        'sheet.pdf': ['pinout', 'top', 'land_pattern'], 'empty.pdf': [],
+        'page.png': ['pinout', 'top']}, 'original_names': {}}), encoding='utf-8')
+    assert store.read()['roles'] == {'sheet.pdf': ['datasheet'], 'empty.pdf': [],
+                                     'page.png': ['pinout', 'top']}
 
 
 def test_unknown_roles_are_refused(tmp_path):
@@ -206,7 +249,8 @@ def test_v1_top_view_doubles_as_photo_when_no_photo_was_loaded(tmp_path):
                                    'unavailable': False},
                            'hires': {'unavailable': True}}, ['pinout.pdf', 'top.png'])
     paths, roles = store.selected()
-    assert roles == {'pinout.pdf': ['pinout'], 'top.png': ['top', 'hires']}
+    # Dal 27/09 un PDF e' letto come datasheet anche da un manifest v1.
+    assert roles == {'pinout.pdf': ['datasheet'], 'top.png': ['top', 'hires']}
     assert photo_paths(paths, roles) == [store.directory / 'top.png']
     assert store.documents()[1][2] == 'x.png'
 
@@ -222,7 +266,7 @@ def test_v1_top_view_is_not_a_photo_when_a_photo_exists(tmp_path):
 def test_v1_pdf_top_view_never_becomes_a_photo(tmp_path):
     """Negativo strutturale: un PDF non e' mai stato una foto per l'inventario."""
     store = _v1(tmp_path, {'top': {'filename': 'top.pdf', 'unavailable': False}}, ['top.pdf'])
-    assert store.selected()[1] == {'top.pdf': ['top']}
+    assert store.selected()[1] == {'top.pdf': ['datasheet']}
 
 
 def test_a_change_writes_the_migrated_manifest(tmp_path):
