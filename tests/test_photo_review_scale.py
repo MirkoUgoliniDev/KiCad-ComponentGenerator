@@ -9,7 +9,7 @@ from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
 from PyQt6.QtGui import QColor, QImage
 
 from kicadgen.services.photo_inventory import save_review_bundle
-from tests.test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from tests.test_photo_inventory_gui import gui
 
 
 def _png(width=633, height=254):

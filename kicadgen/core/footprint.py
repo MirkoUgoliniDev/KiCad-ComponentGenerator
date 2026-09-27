@@ -30,6 +30,15 @@ from ..services.messages import tx
 KICAD_VERSION = 20260206
 GENERATOR_VERSION = "10.0"
 
+#: Language of the text the generators write INTO KiCad files (footprint
+#: `descr`, fixed notes). Deliberately fixed and independent of the interface
+#: language: a library is shared and versioned, so its content must not change
+#: with the GUI language of whoever regenerated it, and the pinned footprint
+#: digests of the regression tests stay reproducible. Italian because every
+#: default description and note of the generators was written in it. These
+#: strings never go through `tx()`; messages shown to the user do.
+FOOTPRINT_TEXT_LANGUAGE = "it"
+
 Point = Tuple[float, float]
 
 PAD_TYPES = {"thru_hole", "smd", "np_thru_hole", "connect"}
@@ -275,12 +284,33 @@ class Footprint:
         return self.to_sexpr().render(0) + "\n"
 
     def save(self, path: str) -> None:
-        """@brief Write the .kicad_mod file to `path`, creating missing folders.
+        """@brief Write the .kicad_mod file to `path` atomically, creating missing folders.
 
-        Scrive il file .kicad_mod. Crea le cartelle mancanti (incluso il .pretty).
+        @param path Destination .kicad_mod path.
+        @throws OSError When the folder cannot be created or the file cannot
+            be written or replaced; the previous file, if any, is left intact.
+        @note The text is written to a temporary sibling and moved onto
+            `path` with fsutil.replace_file: an interrupted write (full disk,
+            killed process) never leaves a truncated footprint that KiCad or
+            the library installer would pick up.
         """
         import os
+        import tempfile
 
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w", encoding="utf-8", newline="\n") as f:
-            f.write(self.render())
+        from ..fsutil import replace_file
+
+        folder = os.path.dirname(path) or "."
+        os.makedirs(folder, exist_ok=True)
+        data = self.render().encode("utf-8")
+        handle, temporary = tempfile.mkstemp(
+            prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=folder)
+        try:
+            with os.fdopen(handle, "wb") as stream:
+                stream.write(data)
+            replace_file(temporary, path)
+        except BaseException:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise

@@ -1,5 +1,5 @@
 """@brief Un globo al posto della scritta «Lingua:» (utente, 2026-09-24)."""
-from test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from test_photo_inventory_gui import gui
 
 
 def test_the_language_is_an_icon_named_in_its_tooltip(window):  # noqa: F811

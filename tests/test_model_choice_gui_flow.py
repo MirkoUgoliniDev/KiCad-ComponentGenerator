@@ -4,7 +4,6 @@ os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
 from copy import deepcopy
 from PyQt6.QtCore import QBuffer, QIODevice
 from PyQt6.QtGui import QPixmap
-from PyQt6.QtWidgets import QApplication
 from kicadgen.gui.photo_review_dialog import PhotoReviewDialog
 from kicadgen.generators.castellated_module import ComponentBox, CastellatedModuleParams, CastellatedSide
 from kicadgen.cad3d.body_params import Body3DParams
@@ -17,8 +16,8 @@ def photo():
     return bytes(buffer.data())
 
 
-def test_geometry_edit_invalidates_choice_cancel_keeps_original():
-    app=QApplication.instance() or QApplication([])
+def test_geometry_edit_invalidates_choice_cancel_keeps_original(qapp):
+    app = qapp
     source=[dict(name='R',kind='generic',x_mm=0,y_mm=0,length_mm=2,width_mm=1,height_mm=1,
                  model_selection=dict(status='confirmed',path='R.step',rotation_deg=90),
                  model_match={'candidates':[]})]
@@ -77,10 +76,10 @@ def test_failed_import_downgrades_report_not_user_choice(tmp_path):
     assert json.loads((tmp_path/'kicad-model-candidates.json').read_text())['components'][0]['model_match']['status']=='import_failed'
 
 
-def test_cancel_candidate_dialog_keeps_import_failure(monkeypatch):
+def test_cancel_candidate_dialog_keeps_import_failure(qapp, monkeypatch):
     from kicadgen.gui import model_candidates_dialog as module
     from PyQt6.QtWidgets import QDialog
-    app=QApplication.instance() or QApplication([])
+    app = qapp
     source=[dict(name='Q',kind='generic',x_mm=0,y_mm=0,length_mm=2,width_mm=1,height_mm=1,
                  model_selection=dict(status='confirmed',path='broken.step',rotation_deg=0),
                  model_match={'status':'import_failed','error':'broken'})]

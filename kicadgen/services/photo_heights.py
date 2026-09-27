@@ -50,12 +50,16 @@ FAMILY_HEIGHT_MM = {
 #: block roughly as tall as wide; buzzer 9-12 mm transducers 0.45-0.8 of the
 #: diameter; inductor_power shielded power inductors (4x4x2 ... 12x12x6),
 #: "height comparable to the side"; power_tab DPAK 6.1 -> 2.3, D2PAK 9 -> 4.4;
-#: potentiometer trimmers (3 mm -> 1.6, 6 mm -> 4.5). The names cover the
-#: detector classes (photo_yolo) too; a name no producer emits is harmless.
+#: potentiometer trimmers (3 mm -> 1.6, 6 mm -> 4.5); heatsink board-mounted
+#: finned or pin heatsinks (stick-on 14x14x6 ... 20x20x10, clip-on TO-220
+#: types taller than their short side): 0.5 is a LOW estimate of a family
+#: whose height varies widely, added 2026-09-27 so a heatsink no longer falls
+#: to the 1 mm placeholder. The names cover the detector classes (photo_yolo)
+#: too; a name no producer emits is harmless.
 PLAN_SCALED_RATIO = {
     "capacitor_electrolytic": 1.0, "electrolytic_capacitor": 1.0,
     "relay": 1.0, "buzzer": .75, "inductor_power": .5, "power_tab": .4,
-    "potentiometer": .6,
+    "potentiometer": .6, "heatsink": .5,
 }
 
 #: Batteries: an elongated plan is a cylinder lying on the board (as tall as

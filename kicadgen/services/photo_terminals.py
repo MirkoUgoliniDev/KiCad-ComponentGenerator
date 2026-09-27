@@ -26,6 +26,31 @@ PROMPT = (
 )
 
 
+#: Largest gap, as a fraction of the target envelope side (normalized
+#: target-frame units), between an observed terminal box and the body box for
+#: the terminal to count as ATTACHED. Declared heuristic: a vision model draws
+#: the tight body box on blurred, anti-aliased edges a few pixels inside the
+#: real outline, so a truly attached lead can appear slightly detached; an
+#: island much further away is a neighbour, a pad or a reflection. The value
+#: was chosen by hand when photo terminal observation was introduced
+#: (2026-09-13) and has NOT been calibrated on a measured set of crops. What
+#: would make it unnecessary: a tolerance in pixels derived from the crop
+#: resolution (blur radius / crop side), or a model answer that states the
+#: attachment explicitly per terminal.
+TERMINAL_ATTACH_GAP_MAX = .06
+
+#: Kinds whose visible leads are worth observing: every package family with
+#: three or more terminals on the body outline, plus the generic, module and
+#: transformer blocks whose leads are otherwise unknown. They are the kinds the
+#: verification enum (datasheet_extractor.COMPONENT_KINDS) can return for a
+#: multi-lead body; the CAD builder draws terminal_geometry for any kind.
+#: ic_bga and ic_qfn usually hide their contacts: the prompt then requires
+#: resolved=false and the envelope is kept unchanged.
+TERMINAL_OBSERVATION_KINDS = frozenset({
+    "ic", "ic_soic", "ic_sot", "ic_qfn", "ic_qfp", "ic_bga", "power_tab",
+    "generic", "module", "transformer"})
+
+
 def terminal_tool():
     """@brief Return the observe_package_terminals tool schema: body box and terminal boxes per fixed target."""
     # Use the portable tool-schema subset; all geometric constraints are
@@ -50,7 +75,7 @@ def _box(value):
         raise ValueError(tx("coordinate terminale non valide"))
     l,t,r,b = value
     if l >= r or t >= b:
-        raise ValueError("rettangolo terminale vuoto")
+        raise ValueError(tx("rettangolo terminale vuoto"))
     return list(value)
 
 
@@ -76,10 +101,10 @@ def target_crop(photo, box):
         raise ValueError(tx("ritaglio terminali non valido"))
     left, top, right, bottom = box
     if left >= right or top >= bottom or getattr(photo, 'ndim', 0) < 2:
-        raise ValueError("ritaglio terminali vuoto")
+        raise ValueError(tx("ritaglio terminali vuoto"))
     h, w = photo.shape[:2]
     if h <= 0 or w <= 0:
-        raise ValueError("foto terminali vuota")
+        raise ValueError(tx("foto terminali vuota"))
     x0, y0 = max(0, min(w, math.floor(left*w))), max(0, min(h, math.floor(top*h)))
     x1, y1 = max(0, min(w, math.ceil(right*w))), max(0, min(h, math.ceil(bottom*h)))
     if x0 >= x1 or y0 >= y1:
@@ -137,7 +162,7 @@ def decode_terminal_geometry(entry, rotation):
         # Reject islands far from the body; tolerate small image gaps at blurred edges.
         gap_x = max(body[0]-box[2], box[0]-body[2], 0)
         gap_y = max(body[1]-box[3], box[1]-body[3], 0)
-        if gap_x > .06 or gap_y > .06:
+        if gap_x > TERMINAL_ATTACH_GAP_MAX or gap_y > TERMINAL_ATTACH_GAP_MAX:
             raise ValueError(tx("terminale separato dal corpo"))
         for other in terminals:
             q = other["bbox"]
@@ -162,13 +187,13 @@ def observe_terminals(photo_png, components, model, call, log, cache_dir=None, s
     candidates = []
     for index,c in enumerate(result):
         hint = c.get("_detected_kind") or c.get("kind", "generic")
-        if hint in {"ic", "ic_soic", "ic_qfn", "generic", "module", "transformer"} and "_box" in c:
+        if hint in TERMINAL_OBSERVATION_KINDS and "_box" in c:
             target = dict(c, _id=index+1)
             candidates.append(target)
     accepted = 0
     for start in range(len(candidates)):
         batch = candidates[start:start+1]
-        label = f"Dettaglio terminali {start+1}/{len(candidates)}"
+        label = tx("Dettaglio terminali {index}/{total}", index=start + 1, total=len(candidates))
         log(label + tx(": corpo e reofori osservati nella foto."))
         try:
             crop, image_box = target_crop(image, batch[0]['_box'])
@@ -179,7 +204,7 @@ def observe_terminals(photo_png, components, model, call, log, cache_dir=None, s
                 expected_ids=[c['_id'] for c in batch])
             entries = data.get("components")
             if not isinstance(entries,list):
-                raise ValueError("elenco terminali mancante")
+                raise ValueError(tx("elenco terminali mancante"))
             for c in batch:
                 votes = [e for e in entries if isinstance(e,dict) and type(e.get('id')) is int and e['id']==c['_id']]
                 if len(votes) != 1:

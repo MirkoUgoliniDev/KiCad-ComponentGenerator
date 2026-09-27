@@ -10,10 +10,10 @@ Ogni regola ha il suo negativo.
 import json
 
 import pytest
-from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
+from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
                              QGroupBox, QLineEdit, QSpinBox, QTextEdit)
 
-from test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from test_photo_inventory_gui import gui
 from kicadgen.gui.project_dialogs import OpenProjectDialog, ProjectNameDialog
 from kicadgen.gui.project_state import (PROJECT_CONFIG_NAME, PROJECT_CONFIG_VERSION,
                                         ProjectConfigError, read_project_config,
@@ -22,11 +22,6 @@ from kicadgen.gui.project_state import (PROJECT_CONFIG_NAME, PROJECT_CONFIG_VERS
 
 
 # ── Modulo: valori dei widget e file ─────────────────────────────────────
-
-@pytest.fixture
-def app():
-    return QApplication.instance() or QApplication([])
-
 
 def test_every_widget_kind_goes_round_trip(app):
     line, text, spin, dspin, check = QLineEdit("a"), QTextEdit(), QSpinBox(), QDoubleSpinBox(), QCheckBox()

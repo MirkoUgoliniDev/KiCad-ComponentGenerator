@@ -9,11 +9,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 pytest.importorskip("PyQt6")
-from PyQt6.QtWidgets import QApplication, QDialog
+from PyQt6.QtWidgets import QDialog
 
 from kicadgen.gui import main_window as mw
 from kicadgen.gui.main_window import ExtractWorker, MainWindow
 import kicadgen.gui.yolo_review_dialog as review_module
+from qt_window_teardown import dispose_window, stub_3d_preview
 
 
 def _proposals(count=3):
@@ -23,8 +24,15 @@ def _proposals(count=3):
 
 
 @pytest.fixture
-def window():
-    app = QApplication.instance() or QApplication([])
+def window(qapp, monkeypatch):
+    """@brief Shown MainWindow with a stubbed 3D preview, destroyed at teardown.
+
+    The wiring under test never touches the VTK preview, so the real render
+    window is replaced and the window is destroyed explicitly instead of being
+    left to the garbage collector.
+    """
+    app = qapp
+    stub_3d_preview(monkeypatch)
     widget = MainWindow()
     widget.show()
     app.processEvents()
@@ -32,8 +40,7 @@ def window():
     widget.analysis_overlay.start()
     app.processEvents()
     yield widget, widget._extract_worker, app
-    widget.close()
-    app.processEvents()
+    dispose_window(widget)
 
 
 def _answer_with(monkeypatch, outcome, kept=None):

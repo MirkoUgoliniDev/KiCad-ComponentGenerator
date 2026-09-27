@@ -11,7 +11,12 @@ from kicadgen.services.datasheet_extractor import COMPONENT_KINDS
 
 
 @pytest.fixture(autouse=True)
-def no_network(monkeypatch):
+def no_paid_api_calls(monkeypatch):
+    """@brief Fail any call to the AI client, even one that would never reach the socket.
+
+    @note Named apart from conftest's autouse `no_network` guard: a fixture
+        with the same name used to override it in this module.
+    """
     def forbidden(*args, **kwargs):
         pytest.fail("Family tests must not use paid APIs")
     monkeypatch.setattr(openrouter, "call_tool", forbidden)
@@ -102,3 +107,31 @@ def test_previous_no_marking_prompt_is_migrated_in_memory():
     _, request, _ = run({}, prompt="Keep custom. " + old)
     assert old not in request["system_prompt"]
     assert request["system_prompt"].startswith("Keep custom. Do NOT invent")
+
+
+# ── generic kind with its own height family (fuse, heatsink) ────────────────
+
+@pytest.mark.parametrize("declared", ["heatsink", "fuse"])
+def test_a_generic_body_of_a_class_with_its_own_family_keeps_that_height(declared):
+    """Positivo: il dissipatore/fusibile (kind generico) non scende al segnaposto 1.5 mm."""
+    from kicadgen.services.photo_heights import estimate_body_height
+    original = dict(_id=7, kind="generic", _detected_kind="generic", name="prior",
+                    _box=(.2, .2, .4, .4), length_mm=10.0, width_mm=10.0, **{"class": declared})
+    result, _, _ = run({}, original=original)
+    expected, basis = estimate_body_height(declared, 10.0, 10.0)
+    assert result["height_mm"] == expected != grounding.UNKNOWN_FAMILY_HEIGHT_MM
+    assert result["_height_basis"] == basis and result["_height_estimated"] is True
+
+
+def test_a_verified_family_vote_wins_over_the_class_height_family():
+    """Negativo: se la verifica vota una famiglia specifica, l'altezza segue il voto."""
+    from kicadgen.services.photo_heights import estimate_body_height
+    original = dict(_id=7, kind="generic", _detected_kind="generic", name="prior",
+                    _box=(.2, .2, .4, .4), length_mm=10.0, width_mm=10.0, **{"class": "heatsink"})
+    result, _, _ = run(dict(kind="resistor"), original=original)
+    assert result["height_mm"] == estimate_body_height("resistor", 10.0, 10.0)[0]
+    # And a body with no class keeps the declared placeholder.
+    plain = dict(original)
+    plain.pop("class")
+    result, _, _ = run({}, original=plain)
+    assert result["height_mm"] == grounding.UNKNOWN_FAMILY_HEIGHT_MM

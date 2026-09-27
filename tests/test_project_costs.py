@@ -17,11 +17,6 @@ from kicadgen.services.project_costs import (COSTS_FILE, ProjectCostsError, add_
                                              load_project_costs)
 
 
-@pytest.fixture
-def app():
-    return QApplication.instance() or QApplication([])
-
-
 @pytest.fixture(autouse=True)
 def no_listener():
     openrouter.set_usage_listener(None)
@@ -198,11 +193,11 @@ def test_detach_only_removes_its_own_listener(app):
     assert openrouter._usage_listener is None
 
 
-def test_the_project_tab_shows_the_line_in_the_ai_tools_box(tmp_path, monkeypatch):
+def test_the_project_tab_shows_the_line_in_the_ai_tools_box(qapp, tmp_path, monkeypatch):
     """La riga segue il progetto: nome cambiato -> costo dell'altra cartella."""
     from kicadgen.gui import main_window as gui
-    from tests.test_photo_inventory_gui import PreviewStub
-    app = QApplication.instance() or QApplication([])
+    from qt_fixtures import PreviewStub
+    app = qapp
     monkeypatch.setattr(gui, "Preview3DVtk", PreviewStub)
     monkeypatch.setattr(gui, "load_config", lambda: {"component_type": "", "system_prompt": ""})
     monkeypatch.setattr(gui, "save_config", lambda config: None)
@@ -347,3 +342,82 @@ def test_the_limiting_factor_is_translated():
     from kicadgen.services.i18n import DEFAULT_TRANSLATIONS
     entry = DEFAULT_TRANSLATIONS["ui:saldo dell'account"]
     assert entry["en"] and entry["en"] != "saldo dell'account"
+
+
+# ── lock file (finding S9) ─────────────────────────────────────────────────
+
+def _old_lock(tmp_path, content=b"999999"):
+    """Write a lock file older than LOCK_STALE_S and return its path."""
+    import os
+    from kicadgen.services import project_costs
+    lock = tmp_path / project_costs.LOCK_FILE
+    lock.write_bytes(content)
+    old = time.time() - project_costs.LOCK_STALE_S - 60
+    os.utime(lock, (old, old))
+    return lock
+
+
+def test_a_stale_lock_is_removed_and_a_fresh_one_is_kept(tmp_path):
+    """@brief Positive: an abandoned lock is removed. Negative: a fresh lock is not."""
+    from kicadgen.services import project_costs
+    lock = _old_lock(tmp_path)
+    assert project_costs._remove_stale_lock(lock) is True
+    assert not lock.exists()
+    lock.write_bytes(b"123")
+    assert project_costs._remove_stale_lock(lock) is False
+    assert lock.read_bytes() == b"123"
+
+
+def test_a_lock_replaced_after_the_stale_judgement_is_not_removed(tmp_path, monkeypatch):
+    """@brief Two writers judging the same stale lock: the second must not remove the first's new lock.
+
+    Between the judgement and the removal another writer removes the stale
+    lock and takes a fresh one with other content; the check before unlink
+    sees the change and leaves it alone.
+    """
+    from pathlib import Path
+    from kicadgen.services import project_costs
+    lock = _old_lock(tmp_path)
+    real_read = Path.read_bytes
+    reads = []
+
+    def read_and_replace(self):
+        data = real_read(self)
+        reads.append(data)
+        if len(reads) == 1:
+            # The other writer, right after our judgement.
+            self.unlink()
+            self.write_bytes(b"4242")
+        return data
+    monkeypatch.setattr(Path, "read_bytes", read_and_replace)
+    assert project_costs._remove_stale_lock(lock) is False
+    monkeypatch.undo()
+    assert lock.read_bytes() == b"4242"
+
+
+def test_a_failed_lock_write_closes_the_handle_and_removes_the_lock(tmp_path, monkeypatch):
+    """@brief Negative path of the lock: os.write fails.
+
+    The error reaches the caller, the handle is closed (not leaked) and no
+    empty lock stays behind to block the next writer. Positive control: the
+    next add_call takes the lock and records the call.
+    """
+    import os
+    from kicadgen.services import project_costs
+    closed = []
+    real_close = os.close
+
+    def failing_write(handle, data):
+        raise OSError(28, "No space left on device")
+
+    def tracking_close(handle):
+        closed.append(handle)
+        real_close(handle)
+    monkeypatch.setattr(project_costs.os, "write", failing_write)
+    monkeypatch.setattr(project_costs.os, "close", tracking_close)
+    with pytest.raises(OSError):
+        add_call(tmp_path, {"cost_usd": 0.01, "model": "m"})
+    assert len(closed) == 1
+    assert not (tmp_path / project_costs.LOCK_FILE).exists()
+    monkeypatch.undo()
+    assert add_call(tmp_path, {"cost_usd": 0.01, "model": "m"}).calls == 1

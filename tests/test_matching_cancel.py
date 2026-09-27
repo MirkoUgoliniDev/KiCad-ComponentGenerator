@@ -21,6 +21,7 @@ out.json) e la cui durata per modello e' decisa dal test.
 """
 
 import json
+import subprocess
 import sys
 import threading
 import time
@@ -113,6 +114,35 @@ def _cancel_after(fake, count, cancel, timeout=20.0):
     return thread
 
 
+def _record_children(monkeypatch):
+    """Record every child process started from now on, as its Popen handle.
+
+    The handle is what proves a child is gone: waiting on it returns only once
+    the operating system has reaped the process, so a check made afterwards
+    cannot be beaten by a child that is merely slow.
+    """
+    children = []
+
+    class _Recording(subprocess.Popen):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            children.append(self)
+
+    monkeypatch.setattr(subprocess, "Popen", _Recording)
+    return children
+
+
+def _assert_all_killed(children, timeout=10.0):
+    """Every recorded child has exited, and not by finishing its work (exit 0)."""
+    assert children, "no child process was started"
+    for child in children:
+        try:
+            child.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            pytest.fail(f"child {child.pid} still alive {timeout} s after the cancellation")
+        assert child.returncode != 0, "the child ran to completion instead of being killed"
+
+
 def _models(tmp_path, count, prefix="R"):
     """@brief Crea modelli STEP finti in una libreria KiCad di prova."""
     folder = tmp_path / "lib" / "Resistor_SMD.3dshapes"
@@ -167,13 +197,14 @@ def test_the_child_of_an_in_flight_measurement_is_killed_not_abandoned(
     models = _models(tmp_path, 3)
     cancel = threading.Event()
     _cancel_after(fake, 1, cancel)
+    children = _record_children(monkeypatch)
 
     with pytest.raises(km.MatchingCancelled):
         km.measure_models(models, cancel=cancel)
 
-    # 1.5 s era il lavoro totale del lotto: dopo due secondi un figlio vivo
-    # avrebbe gia' scritto il suo file di fine.
-    time.sleep(2.0)
+    # Proven on the process handle, not by sleeping: once the child is reaped
+    # (killed, non-zero exit) nothing can write the end-of-batch file later.
+    _assert_all_killed(children)
     assert not fake.flag.exists(), "il figlio ha continuato a lavorare dopo l'uccisione"
     assert _attempted(fake) == [str(models[0])]
 

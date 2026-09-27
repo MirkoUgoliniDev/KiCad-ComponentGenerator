@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 from pathlib import Path
 
 from ..services.datasheet_extractor import DEFAULT_SYSTEM_PROMPT
@@ -141,18 +142,59 @@ def remember_browse_dir(config, selected) -> None:
     if config.get("last_document_dir") == directory:
         return
     config["last_document_dir"] = directory
-    try:
-        save_config(config)
-    except OSError:
-        # Preferenza di comodita': se il file non e' scrivibile, la sessione
-        # corrente la usa comunque e non si interrompe il caricamento.
-        pass
+    # Preferenza di comodita': se il file non e' scrivibile, save_config
+    # restituisce False, la sessione corrente la usa comunque e il
+    # caricamento non si interrompe.
+    save_config(config)
 
 
-def save_config(config: dict) -> None:
-    """@brief Write the interface preferences to config.json, leaving out the AI profile fields."""
+def save_config(config: dict) -> bool:
+    """@brief Atomically write the interface preferences to config.json, leaving out the AI profile fields.
+
+    The JSON is first serialised in memory, then written to a temporary file in
+    the same folder and moved onto config.json with `fsutil.replace_file`.
+    A failure at any step (locked file, read-only folder, full disk, value
+    that is not JSON-serialisable) leaves the previous config.json untouched
+    and removes the temporary file.
+
+    @param config Live configuration dictionary of the window.
+    @return True when config.json now holds `config`; False when it could not
+        be written (the previous file, if any, is intact).
+    @note Never raises for I/O or serialisation errors: it is called from Qt
+        slots, where an escaping exception ends the process through the crash
+        report hook. The caller decides whether to log the failure.
+    """
     # AI profiles are persisted only in SQLite after startup migration.
     from ..services.analysis_profiles import PROFILE_FIELDS
+    from ..fsutil import replace_file
     preferences = {k: v for k, v in config.items() if k not in PROFILE_FIELDS}
-    with open(config_path(), "w", encoding="utf-8") as fh:
-        json.dump(preferences, fh, indent=2, ensure_ascii=False)
+    try:
+        # Serialising before touching the disk means an unserialisable value
+        # can never leave a half-written file behind.
+        # Encoded here too: a lone surrogate (a Windows file name that is not
+        # valid UTF-16) raises UnicodeEncodeError, a ValueError, at encoding
+        # time -- inside this try, not later in the write.
+        payload = json.dumps(preferences, indent=2, ensure_ascii=False).encode("utf-8")
+    except (TypeError, ValueError):
+        return False
+    target = config_path()
+    temporary = None
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+        temporary = Path(name)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        replace_file(temporary, target)
+        temporary = None
+        return True
+    except OSError:
+        return False
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass

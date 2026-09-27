@@ -13,7 +13,9 @@ import math
 import re
 from pathlib import Path
 
+from ..core.validation import covered_fraction, iou
 from .openrouter import OpenRouterError
+from .photo_audit import valid_fraction_box as _valid_box, write_stage_audit as _write_audit
 from .photo_inventory import draw_inventory, image_block
 from .photo_markings import MARKING_RULES
 from .photo_grounding import detail_grid
@@ -21,20 +23,59 @@ from .photo_heights import estimate_body_height
 from .photo_yolo import split_ai_candidates
 from .messages import CACHE_HIT, marked, tx
 
-PROMPT_VERSION = 'global-yolo-inventory-9'
+PROMPT_VERSION = 'global-yolo-inventory-10'
 #: Versione del prompt usato quando NESSUN rilevatore locale ha girato e
 #: l'enumerazione dei corpi la fa il modello di visione.
-ENUMERATION_PROMPT_VERSION = 'global-vlm-inventory-4'
+ENUMERATION_PROMPT_VERSION = 'global-vlm-inventory-5'
 #: Prima riga della parte di prompt che non parla di candidati: da qui in poi
 #: valgono le stesse regole fisiche e di misura nei due percorsi, e vanno
 #: tenute identiche invece di essere riscritte due volte.
 _COMMON_FROM = 'Do not count markings/QR codes,'
-SCHEMA_VERSION = 'global-inventory-6'
+SCHEMA_VERSION = 'global-inventory-7'
 PHYSICAL_REJECTIONS = ('bare_pad_or_contact', 'silkscreen_or_marking',
                        'hole_or_via', 'solder_joint', 'background')
+#: Body classes the model may declare. The first sixteen are the vocabulary of
+#: schema 6 and stay valid, so recorded responses still validate. The body
+#: families after 'module' were added in schema 7: without them a relay, a
+#: battery or a display could only come back as 'other', i.e. kind generic and
+#: the 1 mm height placeholder, although the 3D generator
+#: (datasheet_extractor.COMPONENT_KINDS) and photo_heights know them.
 CLASSES = ('resistor', 'capacitor', 'inductor', 'diode', 'transistor',
            'regulator', 'semiconductor_unknown', 'ic', 'connector', 'switch',
-           'led', 'crystal', 'rf_module', 'module', 'other', 'unknown')
+           'led', 'crystal', 'rf_module', 'module',
+           'relay', 'transformer', 'battery', 'display', 'buzzer',
+           'potentiometer', 'fuse', 'heatsink', 'shield_can',
+           'other', 'unknown')
+#: Declared class -> component kind (datasheet_extractor.COMPONENT_KINDS).
+#: Classes not listed keep their own name, which is already a kind. fuse and
+#: heatsink have no dedicated 3D shape: they are drawn as the generic block,
+#: but keep their own height family (CLASS_HEIGHT_FAMILIES).
+CLASS_KINDS = {'rf_module': 'module', 'transistor': 'ic', 'regulator': 'ic',
+               'semiconductor_unknown': 'ic', 'fuse': 'generic', 'heatsink': 'generic',
+               'other': 'generic', 'unknown': 'generic'}
+#: Classes whose height is estimated from the class itself rather than from
+#: the kind, because their kind is the generic block (see CLASS_KINDS).
+CLASS_HEIGHT_FAMILIES = {'fuse': 'fuse', 'heatsink': 'heatsink'}
+#: Component kinds that no class names directly because they are a PACKAGE or
+#: shape variant of a class: the prompt asks function and package separately,
+#: and the package field carries them. Declared so a new kind in
+#: COMPONENT_KINDS cannot be silently left out of the vocabulary (the tests
+#: require every kind to be either a class kind or listed here).
+KIND_PACKAGE_VARIANTS = {
+    'ic_soic': 'ic', 'ic_sot': 'ic', 'ic_qfn': 'ic', 'ic_qfp': 'ic', 'ic_bga': 'ic',
+    'power_tab': 'ic', 'capacitor_tantalum': 'capacitor',
+    'capacitor_electrolytic': 'capacitor', 'inductor_power': 'inductor',
+    'diode_melf': 'diode', 'crystal_can': 'crystal', 'pin_header': 'connector',
+    'socket_header': 'connector',
+}
+
+
+def class_kind(name):
+    """@brief Map a declared inventory class to its component kind.
+    @param name A value of CLASSES.
+    @return The kind used for the 3D shape (a COMPONENT_KINDS key).
+    """
+    return CLASS_KINDS.get(name, name)
 #: Feature che distinguono un corpo da un capo all'altro. Sono morfologie, non
 #: funzioni: quello che serve e' che si vedano e che stiano da una parte sola.
 LANDMARK_FEATURES = ('coaxial_jack', 'connector_opening', 'cable_exit',
@@ -85,6 +126,9 @@ Scan systematically from top to bottom and left to right in each contextual tile
 then check tile boundaries and board edges against the full photo for missing bodies.
 Every physically separate mounted body matters even when its type/package is unknown:
 use class unknown and empty package. Never reject due to uncertain identity or size.
+Use a body-family class (relay, transformer, battery, display, buzzer, potentiometer,
+fuse, heatsink, shield_can) only when the visible body shows that family; other is
+for a recognised body outside every listed class, never a shortcut for those families.
 Add a missed body only with visible physical evidence and a distinct global envelope;
 check existing bodies and source links first, never add a speculative duplicate.
 For reject, rejection_category must be bare_pad_or_contact, silkscreen_or_marking,
@@ -385,12 +429,51 @@ def lead_count_confidence(row):
 
 
 #: Convenzioni di coordinate che un modello di grounding puo' consegnare al
-#: posto delle frazioni chieste. Non si indovina: si sceglie quella che rende
-#: TUTTI i rettangoli validi, e se nessuna lo fa non si tocca nulla.
-_BOX_SCALES = (('normalized_1000', 1000.0, 1000.0), ('pixels', None, None))
+#: posto delle frazioni chieste: (nome, divisore X, divisore Y), None = lato
+#: della foto in pixel. Ognuna si prova anche nell'ordine [y0,x0,y1,x1]
+#: (suffisso «_yx»). La prima riga e' il contratto del prompt.
+_BOX_SCALES = (('fraction', 1.0, 1.0), ('normalized_1000', 1000.0, 1000.0),
+               ('pixels', None, None))
+#: Lato minimo, in pixel della foto, di un rettangolo convertito. Criterio
+#: fisico, non tarato: un corpo piu' piccolo di un pixel non si vede ne' si
+#: delimita, quindi una convenzione che lo produrrebbe non e' quella usata
+#: (e' cio' che distingue frazioni vere da pixel o griglia 0-1000).
+_MIN_BOX_SIDE_PX = 1.0
 
 
-def _rescale_boxes(rows, width, height, log):
+def _convention_boxes(boxes, sx, sy, swapped, width, height):
+    """Boxes converted to fractions under one convention, or None if any is invalid."""
+    dx, dy = (sx or float(width)), (sy or float(height))
+    converted = []
+    for box in boxes:
+        x0, y0, x1, y1 = (box[1], box[0], box[3], box[2]) if swapped else box
+        b = [x0/dx, y0/dy, x1/dx, y1/dy]
+        if not (0 <= b[0] < b[2] <= 1 and 0 <= b[1] < b[3] <= 1):
+            return None
+        if ((b[2]-b[0]) * width < _MIN_BOX_SIDE_PX
+                or (b[3]-b[1]) * height < _MIN_BOX_SIDE_PX):
+            return None
+        converted.append(b)
+    return converted
+
+
+def _same_body_majority(rows, converted, candidate_boxes):
+    """True when most single-source rows are the same body as their candidate.
+
+    Returns None when no row has exactly one known source (no evidence).
+    """
+    votes = []
+    for row, box in zip(rows, converted):
+        sources = row.get('source_candidate_ids')
+        if (isinstance(sources, list) and len(sources) == 1 and type(sources[0]) is int
+                and sources[0] in candidate_boxes):
+            votes.append(iou(box, candidate_boxes[sources[0]]) >= SAME_BODY_IOU)
+    if not votes:
+        return None
+    return sum(votes) * 2 > len(votes)
+
+
+def _rescale_boxes(rows, width, height, log, candidate_boxes=None, issues=None):
     """@brief Riporta a frazioni 0..1 i rettangoli consegnati in un'altra unita'.
 
     @param rows Componenti della risposta, modificati sul posto: chi deve
@@ -398,16 +481,33 @@ def _rescale_boxes(rows, width, height, log):
     @param width Larghezza della fotografia in pixel.
     @param height Altezza della fotografia in pixel.
     @param log Callback di avanzamento: dice quale convenzione e' stata usata.
-    @return Il nome della convenzione applicata, o None se non serviva.
+    @param candidate_boxes {id proposta: rettangolo in frazioni} del
+        rilevatore locale, prova per decidere fra convenzioni ambigue.
+    @param issues Lista che riceve un errore della risposta quando la
+        convenzione e' ambigua e le prove non decidono.
+    @return Il nome della convenzione applicata, o None se non serviva o non
+        si e' potuta decidere.
     @note Un modello di grounding spesso risponde in pixel o su griglia 0-1000
         anche quando il contratto chiede frazioni. Scartare tutto sarebbe
         buttare una risposta corretta per un'unita' di misura: qui la si
         converte, ma solo quando la conversione rende validi TUTTI i
         rettangoli, perche' una conversione che ne salva una parte e' un
         indizio che il problema e' un altro.
-    @note Separazione fragile quando l'immagine e' larga circa 1000 px: le due
-        convenzioni coincidono e la scelta ricade sulla prima. Per questo la
-        convenzione usata finisce nel log e nell'audit.
+    @note Ambiguita' (HANDOFF 130 F1): su una foto di al piu' 1000 px per
+        lato un rettangolo in pixel e' valido anche letto su griglia 0-1000,
+        e l'ordine [y,x] rende validi quasi tutti i rettangoli. Quando piu'
+        convenzioni (con risultati diversi) rendono validi tutti i
+        rettangoli, decide la prova del rilevatore: vince l'unica convenzione
+        sotto cui la maggioranza delle righe con UNA sola proposta coincide
+        con il suo riquadro (IoU >= SAME_BODY_IOU, lo stesso criterio «stesso
+        corpo» della NMS). Se nessuna o piu' d'una lo fanno: con il contratto
+        (frazioni, [x,y]) fra le valide si tiene il contratto, che e' cio' che
+        il prompt chiede e non un'ipotesi; altrimenti non si indovina, si
+        registra un errore della risposta e non si converte nulla.
+    @note Separazione fragile dichiarata: la maggioranza e' su righe a
+        sorgente singola; con una o due righe decide un solo riquadro. Senza
+        proposte del rilevatore (enumerazione) una risposta non in frazioni e
+        ambigua resta sempre un errore.
     """
     def numbers(box):
         # Un intero enorme o un non-numero non descrive un'unita' di misura
@@ -418,43 +518,80 @@ def _rescale_boxes(rows, width, height, log):
             return None
         return values if all(math.isfinite(v) for v in values) else None
 
-    boxes = [values for row in rows
-             if isinstance(row, dict) and isinstance(row.get('bbox'), list)
+    dict_rows = [row for row in rows if isinstance(row, dict)]
+    boxes = [values for row in dict_rows
+             if isinstance(row.get('bbox'), list)
              and len(row['bbox']) == 4
              and not any(isinstance(v, bool) for v in row['bbox'])
              and (values := numbers(row['bbox'])) is not None]
-    if not boxes or len(boxes) != sum(1 for row in rows if isinstance(row, dict)):
+    if not boxes or len(boxes) != len(dict_rows):
         return None
-    if max(max(box) for box in boxes) <= 1.0:
+    _name, sx, sy = _BOX_SCALES[0]
+    contract = _convention_boxes(boxes, sx, sy, False, width, height)
+    if contract is None and max(max(box) for box in boxes) <= 1.0:
+        # Numeri gia' nell'intervallo delle frazioni ma non tutti validi: e'
+        # una risposta da giudicare cosi' com'e', non un'altra unita'.
         return None
+    valid = []
     for name, sx, sy in _BOX_SCALES:
-        dx, dy = (sx or float(width)), (sy or float(height))
-        converted = [[box[0]/dx, box[1]/dy, box[2]/dx, box[3]/dy] for box in boxes]
-        if all(0 <= b[0] < b[2] <= 1 and 0 <= b[1] < b[3] <= 1 for b in converted):
-            # Solo le righe-dizionario hanno un rettangolo, e `boxes` e' stato
-            # costruito da loro nello stesso ordine. Accoppiarlo a TUTTE le
-            # righe spostava i rettangoli e, con una riga non-dizionario,
-            # sollevava TypeError dopo la chiamata pagata. Le righe malformate
-            # restano come sono: le segnala _validate come righe non valide.
-            for row, box in zip((row for row in rows if isinstance(row, dict)), boxes):
-                row['bbox'] = [box[0]/dx, box[1]/dy, box[2]/dx, box[3]/dy]
-            log(tx("Inventario globale: coordinate ricevute in {name}; convertite in "
-                   "frazioni.",
-                   name=name))
-            return name
-    log(tx("Inventario globale: coordinate fuori 0..1 e nessuna convenzione "
-           "coerente; lasciate invariate."))
-    return None
+        for swapped in (False, True):
+            converted = _convention_boxes(boxes, sx, sy, swapped, width, height)
+            # Due convenzioni che danno gli stessi rettangoli (es. riquadri
+            # quadrati letti [x,y] o [y,x]) sono una sola lettura.
+            if converted is not None and all(converted != other for _, other in valid):
+                valid.append((name + ('_yx' if swapped else ''), converted))
+    chosen = None
+    if len(valid) == 1:
+        chosen = valid[0]
+    elif len(valid) > 1:
+        evidence = {name: _same_body_majority(dict_rows, converted, candidate_boxes or {})
+                    for name, converted in valid}
+        winners = [entry for entry in valid if evidence[entry[0]]]
+        if len(winners) == 1:
+            chosen = winners[0]
+        elif contract is not None:
+            chosen = ('fraction', contract)
+        else:
+            names = ', '.join(name for name, _ in valid)
+            log(tx("Inventario globale: coordinate compatibili con piu' convenzioni "
+                   "({names}) e le proposte del rilevatore non decidono; lasciate "
+                   "invariate.", names=names))
+            if issues is not None:
+                issues.append(_Issue('ambiguous box convention (' + names
+                                     + '): detector evidence does not decide'))
+            return None
+    if chosen is None:
+        log(tx("Inventario globale: coordinate fuori 0..1 e nessuna convenzione "
+               "coerente; lasciate invariate."))
+        return None
+    name, converted = chosen
+    if name == 'fraction':
+        return None
+    # Solo le righe-dizionario hanno un rettangolo, e `boxes` e' stato
+    # costruito da loro nello stesso ordine. Accoppiarlo a TUTTE le righe
+    # spostava i rettangoli e, con una riga non-dizionario, sollevava
+    # TypeError dopo la chiamata pagata. Le righe malformate restano come
+    # sono: le segnala _validate come righe non valide.
+    for row, box in zip(dict_rows, converted):
+        row['bbox'] = box
+    log(tx("Inventario globale: coordinate ricevute in {name}; convertite in "
+           "frazioni.",
+           name=name))
+    return name
 
 
-def _in_contract_units(data, width, height, log):
+def _in_contract_units(data, width, height, log, candidate_boxes=None):
     """@brief Copy of a provider response with its boxes in the contract's unit.
 
     @param data Decoded provider response (any type).
     @param width Photograph width in pixels.
     @param height Photograph height in pixels.
     @param log Progress callback receiving the conversion line, if any.
-    @return (response to validate, name of the conversion applied or None).
+    @param candidate_boxes Optional {candidate id: fraction box} of the local
+        detector, the evidence that settles an ambiguous convention.
+    @return (response to validate, name of the conversion applied or None,
+        response issue or None). The issue is set when several conventions
+        fit every box and the evidence does not decide (_rescale_boxes).
     @note The provider response itself is never modified: the cache and the
         audit store what the provider said, so a replay converts it again and
         carries the same _global_inventory_box_scale as the live run. Before,
@@ -463,9 +600,12 @@ def _in_contract_units(data, width, height, log):
         provider had actually used).
     """
     if not (isinstance(data, dict) and isinstance(data.get('components'), list)):
-        return data, None
+        return data, None, None
     converted = deepcopy(data)
-    return converted, _rescale_boxes(converted['components'], width, height, log)
+    issues = []
+    scale = _rescale_boxes(converted['components'], width, height, log,
+                           candidate_boxes, issues)
+    return converted, scale, (issues[0] if issues else None)
 
 
 def omitted_required_fields(data):
@@ -615,16 +755,7 @@ def _presence(row):
     return row.get('presence_confidence', row['confidence'])
 
 
-def _covered(inner, outer):
-    """@brief Frazione del primo rettangolo che sta dentro il secondo."""
-    wide = max(0.0, min(inner[2], outer[2]) - max(inner[0], outer[0]))
-    high = max(0.0, min(inner[3], outer[3]) - max(inner[1], outer[1]))
-    area = (inner[2] - inner[0]) * (inner[3] - inner[1])
-    return (wide * high / area) if area > 0 else 0.0
-
-
 def _component_valid(row, known):
-    from .photo_yolo_review import _valid_box
     if not isinstance(row, dict):
         return False
     try:
@@ -692,7 +823,6 @@ def _validate(data, known, boxes=None):
             # is not reduced back to its detector fragments by a bad metadata field.
             if (isinstance(row, dict) and isinstance(row.get('component_id'), str)
                     and row['component_id'].strip() and counts[row['component_id']] == 1):
-                from .photo_yolo_review import _valid_box
                 try:
                     box = _valid_box(row.get('bbox'))
                 except ValueError:
@@ -791,7 +921,7 @@ def _validate_geometry(rows, safe, boxes):
         # poi ne esclude piu' di meta'. Non si corregge la bbox -- allargarla
         # all'unione importerebbe gli errori dei frammenti -- ma non deve
         # passare in silenzio.
-        dropped = [i for i in backed if _covered(boxes[i], row['bbox']) < .5]
+        dropped = [i for i in backed if covered_fraction(boxes[i], row['bbox']) < .5]
         if dropped:
             errors.append(_Issue(f"component {row['component_id']}: merged box excludes most of "
                                  f"sources {sorted(dropped)}",
@@ -922,7 +1052,7 @@ def contradicted_by_detections(rows, safe, boxes, margin=(0.0, 0.0), enumerating
             outline = [x0 + mx, y0 + my, x1 - mx, y1 - my]
             swallowed = sorted(i for i, box in boxes.items()
                                if i not in sources and i not in rejected
-                               and _covered(box, outline) >= _INSIDE_FRACTION)
+                               and covered_fraction(box, outline) >= _INSIDE_FRACTION)
             if swallowed:
                 note = (f"component {row['component_id']}: outline covers detected bodies "
                         f"{swallowed} that it does not account for; group of {sorted(sources)} "
@@ -950,7 +1080,7 @@ def contradicted_by_detections(rows, safe, boxes, margin=(0.0, 0.0), enumerating
     for row in kept:
         if not row['source_candidate_ids']:
             host = next((name for name, box in hosts
-                         if _covered(row['bbox'], box) >= _INSIDE_FRACTION), None)
+                         if covered_fraction(row['bbox'], box) >= _INSIDE_FRACTION), None)
             if host is not None:
                 note = (f"component {row['component_id']}: no detector proposal and at least "
                         f'half inside {host}; probably the same body counted twice, kept as a '
@@ -1048,8 +1178,7 @@ def _inventory_context(text):
 #: IoU minima fra il rettangolo restituito dal modello e l'ingombro allineato
 #: agli assi del corpo misurato perche' descrivano lo STESSO corpo. E' il
 #: criterio «stesso corpo» gia' usato dalla NMS del rilevatore
-#: (photo_yolo._NMS_IOU) e dal controllo di copertura
-#: (photo_yolo_review.recover_coverage), non una soglia nuova: sotto, il
+#: (photo_yolo._NMS_IOU), non una soglia nuova: sotto, il
 #: modello ha ridisegnato l'ingombro e la sua lettura prevale.
 SAME_BODY_IOU = 0.5
 
@@ -1085,16 +1214,6 @@ def measured_body(component):
     return values
 
 
-def _iou(first, second):
-    """Intersection over union of two normalized (x0, y0, x1, y1) rectangles."""
-    wide = max(0.0, min(first[2], second[2]) - max(first[0], second[0]))
-    high = max(0.0, min(first[3], second[3]) - max(first[1], second[1]))
-    inter = wide * high
-    union = ((first[2]-first[0])*(first[3]-first[1])
-             + (second[2]-second[0])*(second[3]-second[1]) - inter)
-    return inter / union if union > 0 else 0.0
-
-
 def _measured_geometry(row, measured, length, width):
     """Measured body that this model row describes unchanged, or None.
 
@@ -1110,7 +1229,7 @@ def _measured_geometry(row, measured, length, width):
         return None
     body = measured[sources[0]]
     box = _normalized_box(body, length, width)
-    if _iou(box, row['bbox']) < SAME_BODY_IOU:
+    if iou(box, row['bbox']) < SAME_BODY_IOU:
         return None
     long_side, short_side = body['length_mm'], body['width_mm']
     rotation = body['rotation_deg']
@@ -1153,13 +1272,13 @@ def _normalize(row, identity, length, width, issues, manual_ids=frozenset(), mea
     body = _measured_geometry(row, measured or {}, length, width)
     if body is not None:
         geometry = body
-    kind = {'rf_module': 'module', 'transistor': 'ic', 'regulator': 'ic',
-            'semiconductor_unknown': 'ic', 'other': 'generic', 'unknown': 'generic'}.get(row['class'], row['class'])
+    kind = class_kind(row['class'])
     if row['height_mm'] is not None:
         height, height_source, height_basis = (row['height_mm'], row['height_source'] + '_not_measured',
                                                'model_' + row['height_source'])
     else:
-        estimate = estimate_body_height(kind, geometry['length_mm'], geometry['width_mm'])
+        estimate = estimate_body_height(CLASS_HEIGHT_FAMILIES.get(row['class'], kind),
+                                        geometry['length_mm'], geometry['width_mm'])
         if estimate is not None:
             height, height_basis = estimate
             height_source = height_basis
@@ -1302,7 +1421,6 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     @note A missing ``presence_confidence`` is read as the overall confidence,
         its lower bound; see ``_presence``.
     """
-    from .photo_yolo_review import _valid_box, _write_audit
     if photo is None or len(photo.shape) < 2 or min(photo.shape[:2]) < 1:
         raise ValueError('Global inventory requires a nonempty photograph')
     if not all(_number(v, 0, 1e6) and v > 0 for v in (length, width)):
@@ -1397,8 +1515,10 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
             record = json.loads(path.read_text(encoding='utf-8'))
             # La cache conserva la risposta del fornitore com'era: si valida
             # nella stessa unita' in cui la valida la corsa dal vivo.
-            replay, _ = _in_contract_units(record.get('response'), w, h, lambda _m: None)
-            if record.get('key') == key and not _validate(replay, known, boxes)[2]:
+            replay, _, scale_issue = _in_contract_units(record.get('response'), w, h,
+                                                        lambda _m: None, boxes)
+            if (record.get('key') == key and scale_issue is None
+                    and not _validate(replay, known, boxes)[2]):
                 data = record['response']; log(marked(CACHE_HIT, "Inventario globale: risposta valida ripresa dalla "
                                                   "cache, nessuna nuova chiamata a pagamento "
                                                   "(validated cache hit)."))
@@ -1452,8 +1572,8 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
                 # (`_inline_detail`) e i pezzi della riga si separano con
                 # `_DETAIL_SEPARATOR`: cosi' la visibilita' in modale non dipende
                 # da come e' punteggiato un errore altrui.
-                log('Inventario globale: nuovo tentativo '
-                    + (f'fallito ({_inline_detail(failure)})' if failure else
+                log(tx("Inventario globale: nuovo tentativo ")
+                    + (tx("fallito ({detail})", detail=_inline_detail(failure)) if failure else
                        (tx("che omette ancora ") + ', '.join(still)) if still else
                        tx("senza righe da giudicare"))
                     + _DETAIL_SEPARATOR
@@ -1463,8 +1583,12 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
                                         + ', '.join(omitted))
     # Prima di giudicare la risposta, portarla nell'unita' del contratto: un
     # rettangolo giusto consegnato in pixel non e' una risposta sbagliata.
-    checked, box_scale = _in_contract_units(data, w, h, log)
+    checked, box_scale, scale_issue = _in_contract_units(data, w, h, log, boxes)
     rows, safe, errors = _validate(checked, known, boxes)
+    if scale_issue is not None:
+        # Boxes left in an undecided unit: the response is not cached as good
+        # and the rows it invalidated are reported, never silently guessed.
+        errors.append(scale_issue)
     # Controlli contro cio' che il rilevatore ha visto (HANDOFF 126): un
     # gruppo che inghiotte corpi rilevati che non dichiara non si applica, un
     # corpo solo-AI dentro un corpo rilevato non si aggiunge. Esiti come note,
@@ -1500,8 +1624,11 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         # riuscita una chiamata pagata e parziale. Gli errori si elencano con
         # `_DETAIL_SEPARATOR` e restano subito dopo «FAILED/PARTIAL: », dove i
         # test della pipeline li cercano; il conteggio va in coda.
-        total = f'{len(errors)} problemi' if len(errors) != 1 else '1 problema'
-        log('Inventario globale FAILED/PARTIAL: '
+        total = (tx("{count} problemi", count=len(errors)) if len(errors) != 1
+                 else tx("1 problema"))
+        # «FAILED/PARTIAL» is a machine-readable marker searched by tests and
+        # readers of the log: every translation keeps it verbatim.
+        log(tx("Inventario globale FAILED/PARTIAL: ")
             + _DETAIL_SEPARATOR.join(_inline_detail(error) for error in errors)
             + _DETAIL_SEPARATOR + total
             + _DETAIL_SEPARATOR + tx("proposte irrisolte conservate."))
@@ -1546,7 +1673,7 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
             # contava lo stesso corpo due volte (HANDOFF 126, G2). L'incoerenza
             # della decisione resta come errore su quella riga.
             if any(original['_id'] in r['source_candidate_ids']
-                   and _covered(boxes[original['_id']], r['bbox']) >= _INSIDE_FRACTION
+                   and covered_fraction(boxes[original['_id']], r['bbox']) >= _INSIDE_FRACTION
                    for r in rows):
                 continue
             retained = deepcopy(original)

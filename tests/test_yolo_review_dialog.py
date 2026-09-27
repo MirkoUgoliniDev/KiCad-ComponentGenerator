@@ -48,8 +48,8 @@ def _proposal(identity, box, **changes):
 
 
 @pytest.fixture
-def dialog():
-    app = QApplication.instance() or QApplication([])
+def dialog(qapp):
+    app = qapp
     # Entrambe le proposte portano le marcature che una misura automatica
     # lascia dietro di se': la revisione manuale deve toglierle solo a chi
     # viene toccato.
@@ -287,7 +287,7 @@ def test_moving_beyond_the_frame_keeps_the_size_and_stays_inside(dialog):
     assert x1 - x0 == pytest.approx(FIRST_BOX[2] - FIRST_BOX[0])
 
 
-def test_the_window_can_take_the_size_it_asks_for():
+def test_the_window_can_take_the_size_it_asks_for(qapp):
     """@brief La finestra puo' avere la misura che chiede, qualunque sia il carattere.
 
     Su Windows l'etichetta delle istruzioni, su una riga sola, fissava la
@@ -295,7 +295,7 @@ def test_the_window_can_take_the_size_it_asks_for():
     dell'icona «i» (scelta dell'utente); il contratto resta: nessun testo
     della finestra decide la sua larghezza minima.
     """
-    app = QApplication.instance() or QApplication([])
+    app = qapp
     widget = YoloReviewDialog(b"", [_proposal(1, (.2, .2, .4, .4))], LENGTH_MM, WIDTH_MM,
                               detector_classes())
     requested = widget.size()
@@ -316,8 +316,8 @@ SMALL_BOX = (.500, .500, .505, .510)
 
 
 @pytest.fixture
-def small_dialog():
-    app = QApplication.instance() or QApplication([])
+def small_dialog(qapp):
+    app = qapp
     proposals = [_proposal(1, SMALL_BOX, _source='YOLO local', _edges_measured=True,
                            _yolo_clipped_sides=['right'], _yolo_clipped_recovery=True)]
     widget = YoloReviewDialog(b"", proposals, LENGTH_MM, WIDTH_MM, detector_classes())
@@ -559,9 +559,12 @@ def _photo_png(color=PHOTO_COLOR):
     return bytes(data)
 
 
-def _make_dialog(photo_png):
-    """@brief La stessa coppia di proposte della fixture, ma sopra una foto vera."""
-    app = QApplication.instance() or QApplication([])
+def _make_dialog(photo_png, app):
+    """@brief La stessa coppia di proposte della fixture, ma sopra una foto vera.
+
+    @param app The session QApplication (qapp fixture): a local one would be
+        destroyed at the end of the test and rebuilt later (qt_fixtures).
+    """
     proposals = [_proposal(1, FIRST_BOX, _source='YOLO local'),
                  _proposal(2, (.60, .10, .80, .30), _yolo_class='capacitor',
                            _yolo_confidence=.06, _yolo_review_only=True,
@@ -574,8 +577,8 @@ def _make_dialog(photo_png):
 
 
 @pytest.fixture
-def photo_dialog():
-    app, widget, proposals = _make_dialog(_photo_png())
+def photo_dialog(qapp):
+    app, widget, proposals = _make_dialog(_photo_png(), qapp)
     yield app, widget, proposals
     widget.close()
 
@@ -873,7 +876,7 @@ def test_a_new_review_opens_on_the_photograph(photo_dialog):
     _app, first, _ = photo_dialog
     first.set_photo_state(PHOTO_HIDDEN)
     assert first.photo_state() == PHOTO_HIDDEN
-    _app2, second, _ = _make_dialog(_photo_png())
+    _app2, second, _ = _make_dialog(_photo_png(), _app)
     try:
         assert second.photo_state() == PHOTO_FULL
         assert second.photo_button.property("photo_asset") == "photo-full.svg"
@@ -1120,9 +1123,8 @@ def test_the_instructions_open_in_a_popup_inside_the_window(dialog):
 # ── Scegliere le proposte spurie (utente, 2026-09-24 notte) ──────────────
 
 
-def _nested_dialog():
-    """Un riquadro piccolo DENTRO uno grande, con il grande DOPO nell'elenco."""
-    app = QApplication.instance() or QApplication([])
+def _nested_dialog(app):
+    """Un riquadro piccolo DENTRO uno grande, con il grande DOPO nell'elenco (app = qapp)."""
     proposals = [_proposal(1, (.20, .20, .26, .26), _yolo_review_only=True, _yolo_confidence=.1),
                  _proposal(2, (.10, .10, .60, .60), _yolo_class='ic')]
     widget = YoloReviewDialog(b"", proposals, LENGTH_MM, WIDTH_MM, detector_classes())
@@ -1132,12 +1134,12 @@ def _nested_dialog():
     return app, widget
 
 
-def test_a_small_box_inside_a_large_one_can_be_chosen():
+def test_a_small_box_inside_a_large_one_can_be_chosen(qapp):
     """@brief Positivo: vince il piu' piccolo che contiene il punto, non l'ultimo dell'elenco.
 
     Negativo: dove c'e' solo il grande, vince il grande.
     """
-    _app, widget = _nested_dialog()
+    _app, widget = _nested_dialog(qapp)
     view = widget.view
     try:
         _drag(view, view.to_widget((.20, .20, .26, .26)).center(), (0, 0))
@@ -1170,12 +1172,12 @@ def test_with_the_draw_tool_a_still_click_chooses_and_a_drag_still_draws(dialog)
     assert view.tool == TOOL_DRAW
 
 
-def test_hand_drawn_boxes_have_their_own_filter_entry():
+def test_hand_drawn_boxes_have_their_own_filter_entry(qapp):
     """@brief Audit 2026-09-25: un riquadro a mano non ha categoria e, con un filtro
     attivo, spariva appena deselezionato. Positivo: voce «senza categoria» che
     lo mostra. Negativo: filtrando una categoria vera resta nascosto."""
     from kicadgen.gui import yolo_review_dialog as yolo
-    app = QApplication.instance() or QApplication([])
+    app = qapp
     proposals = [_proposal(1, FIRST_BOX), _proposal(2, (.60, .10, .80, .30), _yolo_class='')]
     widget = YoloReviewDialog(b"", proposals, LENGTH_MM, WIDTH_MM, detector_classes())
     choices = [widget.category_filter.itemData(i) for i in range(widget.category_filter.count())]

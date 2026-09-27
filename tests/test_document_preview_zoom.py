@@ -13,12 +13,7 @@ from PyQt6.QtWidgets import QApplication, QDialog, QFileDialog
 
 from kicadgen.gui.guided_documents import document_pixmap
 from kicadgen.gui.zoom_image import MAX_ZOOM, MIN_ZOOM, ZoomImagePanel
-from tests.test_photo_inventory_gui import window, gui  # noqa: F401
-
-
-@pytest.fixture
-def app():
-    return QApplication.instance() or QApplication([])
+from tests.test_photo_inventory_gui import gui
 
 
 def _panel(app, size=(800, 400)):

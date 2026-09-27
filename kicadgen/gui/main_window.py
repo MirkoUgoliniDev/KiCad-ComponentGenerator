@@ -15,7 +15,6 @@ import json
 from functools import partial
 import math
 import re
-import threading
 import shutil
 import sqlite3
 import sys
@@ -23,12 +22,12 @@ import time
 import webbrowser
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, QObject, QRectF, QThread, QTimer, pyqtSignal, Qt, QSize
+from PyQt6.QtCore import QEvent, QObject, QPointF, QRectF, QThread, QTimer, Qt, QSize
 from PyQt6.QtGui import (QBrush, QColor, QIcon, QKeySequence, QPainterPath, QPen, QPixmap,
-                         QShortcut, QTextCursor)
+                         QPolygonF, QShortcut, QTextCursor)
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog,
-    QFormLayout, QFrame, QGraphicsEllipseItem, QGraphicsRectItem, QGraphicsScene,
+    QFormLayout, QGraphicsEllipseItem, QGraphicsRectItem, QGraphicsScene,
     QGraphicsView, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
     QDialog, QListWidget, QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea,
     QSplitter, QListWidgetItem, QStackedWidget, QTabWidget, QTextEdit, QVBoxLayout,
@@ -38,7 +37,6 @@ from PyQt6.QtWidgets import (
 from ..cad3d.annotations import (ANNOTATION_CONVENTION, EdgeFilletAnnotation,
                                   FaceTextAnnotation, swap_front_back)
 from ..cad3d.body_params import Body3DParams
-from ..cad3d.kicad_models import measuring_listener
 from ..cad3d.step_generator import (
     CAD_ABORT_MESSAGE, Cad3DError, find_freecadcmd, generate_3d_model,
     generate_castellated_3d_model,
@@ -56,10 +54,9 @@ from ..services.analysis_profiles import ProfileStore, ProfileError
 from ..services.i18n import DEFAULT_TRANSLATIONS, I18n, LANGUAGES
 from ..services.document_roles import DocumentSet, MANIFEST, SUFFIXES
 from ..services.datasheet_extractor import (
-    DEFAULT_SYSTEM_PROMPT, ExtractedParams, ExtractionError,
+    DEFAULT_SYSTEM_PROMPT, ExtractedParams,
     extract_pin_header_params,
 )
-from ..services.openrouter import DEFAULT_MODEL
 from ..services.system_dependencies import detect_external_applications
 from ..services.kicad_library import (
     KiCadLibraryError,
@@ -69,8 +66,7 @@ from ..services.kicad_library import (
     install_component_library,
     launch_preview,
 )
-from .app_config import (CONFIG_PATH, DEFAULTS, browse_start_dir, config_path, load_config,
-                         remember_browse_dir, save_config)
+from .app_config import config_path, load_config, save_config
 from .accepted_models_dialog import AcceptedModelsDialog, ConsolidateDialog
 from ..app_paths import default_projects_dir, install_dir, logs_dir, resource_path, user_data_dir
 # Solo la validazione dei parametri (libreria standard): onnxruntime e PyTorch
@@ -94,6 +90,14 @@ from .settings_dialog import LlmSettingsDialog
 from .profile_dialog import ProfilesDialog, icon_button
 from .theme import BASE, BLUE, RED, SURFACE1, SURFACE2, TEXT, YELLOW, APP_QSS
 from .tooltips import install_tooltip_filter
+# Worker e aiutanti del contratto di chiamata: spostati in gui/workers.py
+# (HANDOFF 130, T6/G5) e ri-esportati qui, dove chiamanti e test li cercano.
+from .workers import (
+    Cad3DWorker, ExtractWorker, GenerateWorker, ReconcileWorker, TerminalDetailWorker,
+    UpdateCheckWorker, YoloPretestWorker, _announce_freecad_measuring, _photo_scale_kwargs,
+    accepted_kwargs, accepts_keyword, cancel_kwargs, freecad_progress, matching_cancel_kwargs,
+    phase_kwargs,
+)
 from ..services.messages import tx
 
 #: Icona di ogni scheda, nell'ordine delle schede: SVG a linea nello stile
@@ -452,25 +456,6 @@ def _generation_target(params):
             if isinstance(params, CastellatedModuleParams) else generate_3d_model)
 
 
-def matching_cancel_kwargs(function, cancel) -> dict:
-    """@brief `{'model_cancel': evento}` solo se il generatore dichiara quel canale.
-
-    @param function Generatore 3D che si sta per chiamare.
-    @param cancel Evento con cui la modale chiede di fermare il lavoro.
-    @return Dizionario da espandere nella chiamata, vuoto quasi sempre.
-    @note L'abbinamento dei modelli KiCad (`kicad_models.attach_models`, che
-        per misurare un candidato non ancora in cache avvia `freecadcmd`) puo'
-        durare minuti da solo, e la sua interruzione sta nascendo in
-        `cad3d/`: il canale ordinario e' lo stesso `cancel` che gia' arriva al
-        figlio FreeCAD (vedi `cancel_kwargs`), ma se l'abbinamento ricevesse un
-        canale PROPRIO questa e' la porta per passarglielo. Finche' la firma
-        non lo dichiara non si passa nulla: mai un TypeError per una
-        funzionalita' accessoria, e le due modifiche possono atterrare in
-        qualunque ordine.
-    """
-    return {"model_cancel": cancel} if accepts_keyword(function, "model_cancel") else {}
-
-
 def generation_accepts_cancel(generator, params) -> bool:
     """@brief Dice se l'ordine di fermarsi arriva al lavoro vero, non solo all'involucro.
 
@@ -487,17 +472,6 @@ def generation_accepts_cancel(generator, params) -> bool:
     if generator is _generate_3d:
         return accepts_keyword(_generation_target(params), "cancel")
     return True
-
-
-def _photo_scale_kwargs(generator, scale) -> dict:
-    """@brief `{'photo_scale_px_per_mm': scala}` solo se il generatore chiamato la accetta.
-
-    @param generator Funzione 3D che il worker sta per chiamare (l'involucro o
-        un sostituto di prova con la firma di prima).
-    @param scale Scala della foto calibrata in px/mm, o None.
-    """
-    return ({"photo_scale_px_per_mm": scale}
-            if accepts_keyword(generator, "photo_scale_px_per_mm") else {})
 
 
 def _generate_3d(params, body: Body3DParams, project_dir: Path, fillets, face_texts,
@@ -533,36 +507,27 @@ def _generate_3d(params, body: Body3DParams, project_dir: Path, fillets, face_te
     )
 
 
+#: Names that must stay importable from this module after the worker move
+#: (HANDOFF 130, T6). The re-exports of `gui.workers` keep old imports and
+#: `gui.<name>` lookups working; the collaborators are the patch points the
+#: workers resolve HERE at call time (`workers._patch_point`), so a test or a
+#: tool that replaces one of them on this module still reaches the running
+#: worker. Referencing them keeps pyflakes from calling them unused.
+_WORKER_COMPATIBILITY = (
+    QThread, Cad3DWorker, ExtractWorker, GenerateWorker, ReconcileWorker,
+    TerminalDetailWorker, UpdateCheckWorker, YoloPretestWorker,
+    _announce_freecad_measuring, _photo_scale_kwargs, accepted_kwargs, freecad_progress,
+    phase_kwargs,
+    extract_pin_header_params, build_pin_header, build_castellated_module, build_package,
+    _generate_3d, generation_accepts_cancel,
+)
+
+
 #: Livelli della riga di stato del 3D (`MainWindow._set_3d_status`): solo gli
 #: ultimi due vengono mostrati sotto il modello.
 STATUS_INFO = "info"
 STATUS_WARNING = "warning"
 STATUS_ERROR = "error"
-
-
-#: Riga con cui lo script FreeCAD annuncia il componente su cui lavora.
-_FREECAD_COMPONENT = re.compile(r"KICADGEN_COMPONENT_START:(\d+)/(\d+)")
-
-
-def freecad_progress(message: str):
-    """@brief Avanzamento del 3D letto dalle righe di FreeCAD.
-
-    @param message Riga di log, gia' prefissata con «FreeCAD: ».
-    @return (completati, totale) quando la riga annuncia un componente,
-        altrimenti None.
-    @note Il conteggio in modale si fermava a «100% · 50/50» mentre FreeCAD
-        era ancora al primo componente: quel numero era l'abbinamento dei
-        modelli, finito prima che FreeCAD partisse, e nessuno lo aggiornava
-        dopo. FreeCAD pero' annuncia ogni componente che comincia: i
-        completati sono quelli prima di lui. Su un lavoro da cinque minuti la
-        differenza fra «finito» e «al primo di cinquanta» e' tutto cio' che
-        chi aspetta ha bisogno di sapere.
-    """
-    match = _FREECAD_COMPONENT.search(message or "")
-    if not match:
-        return None
-    current, total = int(match.group(1)), int(match.group(2))
-    return max(0, current - 1), total
 
 
 #: Campo macchina scritto in minuscolo_con_underscore (review_required,
@@ -645,400 +610,6 @@ def per_item_detail(message: str) -> bool:
     return any(_item_field_clause(clause) for clause in clauses)
 
 
-def accepts_keyword(function, name: str) -> bool:
-    """@brief Dice se si puo' passare `name=` a questa funzione senza TypeError.
-
-    @param function Funzione che si sta per chiamare.
-    @param name Nome del parametro facoltativo da passare.
-    @return True quando la firma lo dichiara, oppure quando ha un `**kwargs`
-        insieme ad almeno un parametro con un nome.
-    @note Regole e motivazioni sono quelle di `phase_kwargs`, di cui questa e'
-        la parte generale: un `**kwargs` DA SOLO e' l'impronta di un wrapper
-        scritto senza `functools.wraps`, quindi non dimostra nulla.
-    """
-    try:
-        import inspect
-        parameters = list(inspect.signature(function).parameters.values())
-    except (TypeError, ValueError):  # builtin o oggetto non introspezionabile
-        return False
-    named = [p for p in parameters if p.kind not in (
-        inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)]
-    for parameter in parameters:
-        if parameter.kind is inspect.Parameter.VAR_KEYWORD and named:
-            return True
-        if parameter.name == name and parameter.kind in (
-                inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
-            return True
-    return False
-
-
-def cancel_kwargs(function, cancel) -> dict:
-    """@brief `{'cancel': evento}` solo se il generatore 3D accetta il canale.
-
-    @param function Generatore 3D che si sta per chiamare.
-    @param cancel Evento con cui la modale chiede di fermare il figlio FreeCAD.
-    @return Dizionario da espandere nella chiamata, vuoto se il canale non e'
-        accettato.
-    @note Stessa ragione di `phase_kwargs`: la funzione chiamata puo' essere
-        sostituita (prove, strumenti) da una che non conosce questo parametro,
-        e un TypeError li' farebbe fallire una generazione buona per colpa di
-        una funzionalita' accessoria.
-    @note A differenza dell'annuncio della fase, qui la rinuncia NON si perde
-        in silenzio: chi chiama deve dirlo nel log (vedi
-        `GenerateWorker._generation_kwargs`), perche' una modale che offre
-        «Interrompi» su un lavoro non interrompibile prometterebbe il falso.
-    """
-    return {"cancel": cancel} if accepts_keyword(function, "cancel") else {}
-
-
-def phase_kwargs(function, callback) -> dict:
-    """@brief `{'phase': callback}` solo se la funzione di servizio lo accetta.
-
-    @param function Funzione di servizio che si sta per chiamare.
-    @param callback Callable(tool, detail) da inoltrare alla modale.
-    @return Dizionario da espandere nella chiamata: vuoto se il parametro non
-        esiste ancora o se la firma non dice nulla di utile.
-    @note I servizi e l'interfaccia evolvono separatamente: passare `phase=` a
-        una firma che non lo prevede fa fallire l'analisi con un TypeError, e
-        non passarlo quando c'e' fa perdere l'annuncio della fase. Si guarda
-        la firma installata invece di scommettere sull'ordine di arrivo delle
-        modifiche.
-    @note `**kwargs` conta come consenso solo se la firma dichiara anche
-        almeno un parametro con un nome. Una firma fatta di soli `*args,
-        **kwargs` e' l'impronta di un decoratore scritto SENZA
-        `functools.wraps`: `inspect.signature` vede il wrapper, non la
-        funzione vera, quindi `**kwargs` non dimostra nulla e passare `phase=`
-        ricrea esattamente il TypeError che questo aiutante esiste per
-        evitare. In quel caso si rinuncia all'annuncio: perdere una riga in
-        modale e' meno grave che far cadere l'analisi. Un decoratore con
-        `functools.wraps` espone `__wrapped__`, `inspect.signature` lo segue e
-        la firma vera torna visibile: e' quella la soluzione, non una regola
-        piu' furba qui.
-    """
-    return accepted_kwargs(function, phase=callback)
-
-
-def accepted_kwargs(function, **values) -> dict:
-    """@brief Keep only the keyword arguments the service function accepts.
-
-    @param function Service function about to be called.
-    @param values Candidate keyword arguments.
-    @return The subset of `values` whose names the signature declares; all of
-        them when the signature has `**kwargs` next to at least one named
-        parameter; none when the signature cannot be inspected.
-    @note Same rule and same reasons as `phase_kwargs` (see its notes): the
-        interface and the services change separately, and an argument the
-        installed service does not know must not turn into a TypeError.
-    """
-    try:
-        import inspect
-        parameters = list(inspect.signature(function).parameters.values())
-    except (TypeError, ValueError):  # builtin o oggetto non introspezionabile
-        return {}
-    named = [p for p in parameters if p.kind not in (
-        inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)]
-    if named and any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters):
-        return dict(values)
-    keyword = {p.name for p in parameters if p.kind in (
-        inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)}
-    return {name: value for name, value in values.items() if name in keyword}
-
-
-class GenerateWorker(QThread):
-    """@brief Worker thread that builds and saves the footprint and, when requested, the 3D model.
-
-    QThread che costruisce/salva un Footprint e, se richiesto, il modello 3D.
-
-    Il footprint 2D e il modello 3D sono riportati separatamente: un
-    fallimento della generazione 3D (es. freecadcmd non trovato) non deve
-    invalidare un footprint 2D generato correttamente.
-
-    Segnali:
-        done(str)       -- percorso assoluto del file .kicad_mod scritto
-        error(str)      -- errore nella generazione del footprint 2D
-        cad3d_done(str) -- percorso assoluto del file .step scritto
-        cad3d_error(str) -- errore nella generazione del modello 3D
-    """
-
-    done = pyqtSignal(str)
-    error = pyqtSignal(str)
-    cad3d_done = pyqtSignal(str)
-    cad3d_error = pyqtSignal(str)
-    warning = pyqtSignal(str)
-    progress = pyqtSignal(str)
-    #: True/False all'inizio del 3D: dice alla finestra se «Interrompi» ha
-    #: davvero un lavoro da fermare. Falso = il generatore in uso non conosce
-    #: il canale, e la modale deve togliere il comando invece di prometterlo.
-    cancellable = pyqtSignal(bool)
-    #: (strumento, dettaglio, fatti, totale). Dice alla modale CHI sta
-    #: lavorando, che dai messaggi di avanzamento non si capiva. Un totale non
-    #: positivo significa "nessun conteggio": la modale resta animata invece di
-    #: mostrare una percentuale inventata.
-    phase = pyqtSignal(str, str, int, int)
-
-    def __init__(
-        self, params: PinHeaderParams | CastellatedModuleParams | PackageGeometry, project_dir: Path,
-        body: Body3DParams | None = None,
-        fillets: list | None = None, face_texts: list | None = None,
-    ):
-        super().__init__()
-        self.params = params
-        self.project_dir = project_dir
-        self.body = body
-        self.fillets = fillets or []
-        self.face_texts = face_texts or []
-        #: Canale di rinuncia condiviso col processo FreeCAD figlio. Vive sul
-        #: worker e non sulla finestra: e' la corsa a poter essere fermata, e
-        #: una corsa successiva deve nascere con un canale pulito.
-        self.cancel = threading.Event()
-        #: Scala della foto calibrata (px/mm) o None: la imposta la finestra
-        #: dopo la costruzione, vedi `MainWindow._photo_scale_px_per_mm`.
-        self.photo_scale_px_per_mm = None
-
-    def _cancel_kwargs(self, generator) -> dict:
-        """@brief Il canale di rinuncia da passare al generatore, se lo accetta.
-
-        @param generator La funzione di generazione 3D che si sta per chiamare.
-        @return `{'cancel': evento}` oppure `{}`.
-        @note Quando il canale non viene accettato la corsa NON e' fermabile, e
-            la cosa si dice invece di scoprirla premendo un pulsante che non fa
-            niente. La riga finisce nel log e sulla modale come ogni altro
-            avviso di questo worker, e `cancellable(False)` fa TOGLIERE il
-            comando dalla modale: un pulsante che non ferma niente e' peggio
-            di nessun pulsante.
-        @note La domanda si fa a `generation_accepts_cancel`, non alla sola
-            firma dell'involucro `_generate_3d`: e' il generatore reale a
-            dover conoscere il canale.
-        """
-        kwargs = (cancel_kwargs(generator, self.cancel)
-                  if generation_accepts_cancel(generator, self.params) else {})
-        if not kwargs:
-            self.progress.emit(
-                tx("ATTENZIONE: il generatore 3D in uso non accetta il canale di "
-                   "interruzione; questa generazione non potrà essere fermata."))
-        self.cancellable.emit(bool(kwargs))
-        return kwargs
-
-    def request_abort(self) -> None:
-        """@brief Ask the FreeCAD child of this run to die.
-
-        @note Non uccide il QThread: l'ordine viaggia sul canale e il figlio
-            viene ucciso da `process_log.run_logged`, cioe' dalla stessa
-            macchina del watchdog. Il worker esce poi dalla sua via d'errore
-            normale (`cad3d_error` e `finished`), che e' cio' che riporta la
-            finestra in quiete: terminare il thread di forza lascerebbe invece
-            un processo figlio orfano e la GUI senza segnale di fine.
-        """
-        self.cancel.set()
-
-    def _model_progress(self, done: int, total: int) -> None:
-        """@brief Porta in modale l'unico conteggio vero della generazione.
-
-        @param done Componenti gia' esaminati.
-        @param total Componenti da esaminare.
-        @note Ogni componente puo' costare una misura CAD, quindi il conto
-            avanza al ritmo del lavoro vero e non di un timer.
-        @note Lo strumento dichiarato e' `kicad` perche' la fase e' la scelta
-            del file da usare nella libreria dei modelli di KiCad: e' quello
-            che avanza componente per componente ed e' quello che spiega
-            l'attesa. Non si dice che FreeCAD sia fermo -- `attach_models`
-            avvia `freecadcmd` per misurare i candidati che non sono ancora in
-            cache -- ma quelle misure servono all'abbinamento, non alla
-            costruzione del solido: mostrare il solido di FreeCAD qui faceva
-            credere che il modello finale fosse gia' in lavorazione.
-        """
-        self.phase.emit('kicad', tx("scelta del modello per ogni componente"), done, total)
-
-    def _cad_progress(self, message: str) -> None:
-        """@brief Inoltra la riga al log e, se annuncia un componente, al conteggio."""
-        self.progress.emit(message)
-        step = freecad_progress(message)
-        if step is not None:
-            done, total = step
-            self.phase.emit('freecad', tx("costruzione del solido 3D"), done, total)
-
-    def run(self) -> None:
-        """@brief QThread override: save the footprint, then generate the 3D model, reporting each through its own signals."""
-        try:
-            # Il file lo scrive questo programma: KiCad non e' in esecuzione.
-            self.phase.emit('footprint', tx("scrittura del file .kicad_mod"), 0, 0)
-            self.progress.emit(tx("Generazione del footprint KiCad…"))
-            footprint = (
-                build_castellated_module(self.params)
-                if isinstance(self.params, CastellatedModuleParams)
-                else build_package(self.params)
-                if isinstance(self.params, PackageGeometry)
-                else build_pin_header(self.params)
-            )
-            pretty_dir = self.project_dir / f"{self.params.name}.pretty"
-            out_path = pretty_dir / f"{self.params.name}.kicad_mod"
-            footprint.save(str(out_path))
-            self.done.emit(str(out_path))
-        except Exception as exc:  # noqa: BLE001 - riportato in UI, non e' fatale
-            self.error.emit(str(exc))
-            return
-
-        if self.body is not None:
-            try:
-                # La prima cosa che fa `_generate_3d` e' l'abbinamento dei
-                # modelli di KiCad, non la costruzione del solido: annunciare
-                # qui `freecad` accendeva il cubo di FreeCAD per tutta la fase
-                # che la correzione vuole attribuita a KiCad, per poi tornare
-                # indietro. Da `freecad` ci passa `_cad_progress`, quando il
-                # solido comincia davvero.
-                self.phase.emit('kicad', tx("scelta del modello per ogni componente"), 0, 0)
-                self.progress.emit(tx("Generazione del modello 3D tramite FreeCAD…"))
-                # Risolto una volta sola: introspezione e chiamata devono
-                # riguardare lo stesso oggetto, anche quando e' stato sostituito.
-                generator = _generate_3d
-                with measuring_listener(partial(_announce_freecad_measuring, self)):
-                    result = generator(
-                        self.params, self.body, self.project_dir,
-                        self.fillets, self.face_texts,
-                        progress=self._cad_progress,
-                        model_progress=self._model_progress,
-                        **self._cancel_kwargs(generator),
-                        **_photo_scale_kwargs(generator, self.photo_scale_px_per_mm),
-                    )
-                for warning in result.get('warnings', []):
-                    self.warning.emit(warning)
-                # Le note della risoluzione modelli vanno nel log anche nella
-                # generazione completa, non solo nella rigenerazione 3D.
-                for note in result.get('notes', []):
-                    self.progress.emit(note)
-                self.cad3d_done.emit(str(result["step_path"]))
-            except Cad3DError as exc:
-                self.cad3d_error.emit(str(exc))
-            except Exception as exc:  # noqa: BLE001 - riportato in UI, non e' fatale
-                self.cad3d_error.emit(tx("Errore inatteso: {exc}", exc=exc))
-
-
-def _announce_freecad_measuring(worker, started: bool, count: int) -> None:
-    """@brief Switch the modal to FreeCAD while it measures candidate models, then back.
-
-    @param worker CAD worker whose `phase` signal reaches the modal.
-    @param started True when a `freecadcmd` child is about to measure.
-    @param count Models in that batch.
-    @note Called by `kicad_models.measuring_listener` only when FreeCAD is
-        really launched: models already in the measurement cache launch
-        nothing, and the modal then keeps showing the KiCad library.
-    """
-    if started:
-        worker.phase.emit('freecad_measure',
-                          tx("misura di {count} modelli candidati", count=count), 0, 0)
-    else:
-        worker.phase.emit('kicad', tx("scelta del modello per ogni componente"), 0, 0)
-
-
-class Cad3DWorker(QThread):
-    """@brief Worker thread that regenerates only the 3D model (STEP/VRML), not the footprint.
-
-    QThread che rigenera solo il modello 3D (STEP/VRML), senza rifare il footprint.
-
-    Serve al pulsante "Rigenera modello 3D" del tab Modello 3D: dopo aver
-    aggiunto/tolto annotazioni non ha senso riscrivere anche il .kicad_mod.
-
-    Segnali:
-        done(str)    -- percorso assoluto del file .step scritto
-        error(str)   -- messaggio di errore leggibile
-        warning(str) -- annotazione non applicata (es. fillet impossibile)
-    """
-
-    done = pyqtSignal(str)
-    error = pyqtSignal(str)
-    warning = pyqtSignal(str)
-    #: Annotazioni informative (es. quanti modelli reali di KiCad sono stati
-    #: usati): vanno nel log senza il prefisso di avviso, perche' non c'e'
-    #: nulla che richieda attenzione.
-    progress = pyqtSignal(str)
-    #: Vedi GenerateWorker.cancellable.
-    cancellable = pyqtSignal(bool)
-    #: Vedi GenerateWorker.phase.
-    phase = pyqtSignal(str, str, int, int)
-
-    def __init__(
-        self, params: PinHeaderParams | CastellatedModuleParams, body: Body3DParams,
-        project_dir: Path, fillets: list, face_texts: list,
-    ):
-        super().__init__()
-        self.params = params
-        self.body = body
-        self.project_dir = project_dir
-        self.fillets = fillets
-        self.face_texts = face_texts
-        #: Vedi GenerateWorker.cancel.
-        self.cancel = threading.Event()
-        #: Vedi GenerateWorker.photo_scale_px_per_mm.
-        self.photo_scale_px_per_mm = None
-
-    def _cancel_kwargs(self, generator) -> dict:
-        """@brief Vedi GenerateWorker._cancel_kwargs: stesso canale, stesso avviso."""
-        kwargs = (cancel_kwargs(generator, self.cancel)
-                  if generation_accepts_cancel(generator, self.params) else {})
-        if not kwargs:
-            self.progress.emit(
-                tx("ATTENZIONE: il generatore 3D in uso non accetta il canale di "
-                   "interruzione; questa generazione non potrà essere fermata."))
-        self.cancellable.emit(bool(kwargs))
-        return kwargs
-
-    def request_abort(self) -> None:
-        """@brief Ask the FreeCAD child of this regeneration to die.
-
-        @note Vedi GenerateWorker.request_abort: stesso canale, stessa uscita
-            dalla via d'errore esistente (`error` e `finished`).
-        """
-        self.cancel.set()
-
-    def _model_progress(self, done: int, total: int) -> None:
-        """@brief Porta in modale l'unico conteggio vero della generazione.
-
-        @param done Componenti gia' esaminati.
-        @param total Componenti da esaminare.
-        @note Strumento `kicad`: si sta scegliendo nella libreria di KiCad il
-            modello da abbinare, non si sta costruendo il solido -- anche se
-            per misurare un candidato non ancora in cache `attach_models` puo'
-            avviare `freecadcmd`. Vedi GenerateWorker._model_progress.
-        """
-        self.phase.emit('kicad', tx("scelta del modello per ogni componente"), done, total)
-
-    def _cad_progress(self, message: str) -> None:
-        """@brief Inoltra la riga al log e, se annuncia un componente, al conteggio."""
-        self.progress.emit(message)
-        step = freecad_progress(message)
-        if step is not None:
-            done, total = step
-            self.phase.emit('freecad', tx("costruzione del solido 3D"), done, total)
-
-    def run(self) -> None:
-        """@brief QThread override: regenerate the 3D model and emit done, warning or error."""
-        try:
-            # Stessa ragione di GenerateWorker.run: `_generate_3d` comincia
-            # dall'abbinamento dei modelli di KiCad. `_cad_progress` passa a
-            # `freecad` quando il solido comincia davvero.
-            self.phase.emit('kicad', tx("scelta del modello per ogni componente"), 0, 0)
-            # Vedi GenerateWorker.run: un solo oggetto per introspezione e chiamata.
-            generator = _generate_3d
-            with measuring_listener(partial(_announce_freecad_measuring, self)):
-                result = generator(
-                    self.params, self.body, self.project_dir,
-                    self.fillets, self.face_texts,
-                    progress=self._cad_progress,
-                    model_progress=self._model_progress,
-                    **self._cancel_kwargs(generator),
-                    **_photo_scale_kwargs(generator, self.photo_scale_px_per_mm),
-                )
-            for note in result.get("notes", []):
-                self.progress.emit(note)
-            for warning in result.get("warnings", []):
-                self.warning.emit(warning)
-            self.done.emit(str(result["step_path"]))
-        except Cad3DError as exc:
-            self.error.emit(str(exc))
-        except Exception as exc:  # noqa: BLE001 - riportato in UI, non e' fatale
-            self.error.emit(tx("Errore inatteso: {exc}", exc=exc))
-
-
 def _side_size(side: dict, name: str):
     """A side's hole size for the generator: declared as is, estimated as AssumedSize, or None."""
     value = side.get(f"{name}_mm")
@@ -1062,372 +633,6 @@ def _positive_frame(length, width):
     except (TypeError, ValueError):
         return None
     return values if all(math.isfinite(v) and v > 0 for v in values) else None
-
-
-class UpdateCheckWorker(QThread):
-    """@brief Ask GitHub for the latest release off the GUI thread."""
-    done = pyqtSignal(object)
-
-    def run(self):
-        """@brief QThread override: emit the `UpdateCheckResult` (the check never raises)."""
-        from ..services import update_check
-        self.done.emit(update_check.check_latest_release())
-
-
-class TerminalDetailWorker(QThread):
-    """@brief Optional photo detail pass; never regenerates the footprint."""
-    done = pyqtSignal(object)
-    error = pyqtSignal(str)
-    progress = pyqtSignal(str)
-
-    def __init__(self, photo, components, model, only_leads=False, system_prompt=None,
-                 cache_dir=None):
-        super().__init__()
-        self.photo, self.components, self.model = photo, deepcopy(components), model
-        self.only_leads = only_leads
-        self.system_prompt = system_prompt
-        # Cache del PROGETTO (vedi photo_inventory.PHOTO_CACHE_SUBDIR); None =
-        # nessuna cache, mai una cartella comune.
-        self.cache_dir = cache_dir
-
-    def run(self):
-        """@brief QThread override: observe terminals (or refine leads only) and emit the updated components."""
-        from ..services.photo_terminals import observe_terminals
-        from ..services.photo_leads import refine_leads
-        from ..services.openrouter import call_tool
-        from ..services.ai_diagnostics import make_logged_call
-        try:
-            operation = refine_leads if self.only_leads else observe_terminals
-            self.done.emit(operation(self.photo, self.components, self.model,
-                make_logged_call(call_tool, self.progress.emit, log_prompt=True), self.progress.emit,
-                self.cache_dir,
-                **({'system_prompt': self.system_prompt} if self.system_prompt else {})))
-        except Exception as exc:
-            self.error.emit(f"Dettaglio terminali fallito: {exc}")
-
-
-class ExtractWorker(QThread):
-    """@brief Extract datasheet parameters with session-selected photo detection.
-
-    `model` e' l'id OpenRouter da usare per questa estrazione: puo' essere
-    il default del profilo SQLite oppure un modello diverso scelto solo per
-    la sessione corrente.
-
-    Segnali:
-        done(ExtractedParams) -- parametri estratti con successo
-        error(str)            -- messaggio di errore leggibile
-        progress(str)        -- avanzamento dell'analisi AI, incluso ogni crop
-    """
-
-    done = pyqtSignal(object)
-    error = pyqtSignal(str)
-    progress = pyqtSignal(str)
-    #: Vedi GenerateWorker.phase.
-    phase = pyqtSignal(str, str, int, int)
-    #: (foto PNG, proposte del rilevatore, lunghezza mm, larghezza mm). Emesso
-    #: fra il rilevamento locale e la riconciliazione a pagamento: il worker si
-    #: ferma qui finche' l'interfaccia non risponde con deliver_review, perche'
-    #: una proposta tolta adesso non viene ne' inviata ne' pagata. Le quote
-    #: sono quelle con cui la foto e' stata calibrata, non quelle dei campi:
-    #: durante l'estrazione i campi non sono ancora stati compilati.
-    review_requested = pyqtSignal(object, object, float, float)
-
-    def __init__(
-        self, doc_paths: list[Path], system_prompt: str | None = None,
-        extra_instructions: str | None = None, include_nc_pins: bool = True,
-        model: str | None = None, vision_model: str | None = None,
-        grounding_prompt: str | None = None, verification_prompt: str | None = None,
-        verification_model: str | None = None, terminal_prompt: str | None = None,
-        document_roles: dict | None = None,
-        component_family: str | None = None,
-        *, photo_detector: str = "ai", yolo_model_path: Path | None = None,
-        yolo_confidence: float | None = None, yolo_settings: dict | None = None,
-    ):
-        """@brief Snapshot extraction settings before starting background work.
-
-        @param doc_paths Documents selected for extraction.
-        @param system_prompt Optional datasheet system prompt.
-        @param extra_instructions Optional component instructions.
-        @param include_nc_pins Whether to include physically present NC pins.
-        @param model Datasheet AI model identifier.
-        @param vision_model Photo AI model identifier.
-        @param grounding_prompt Optional photo localization prompt.
-        @param verification_prompt Optional photo verification prompt.
-        @param verification_model Configured AI verifier model identifier.
-        @param terminal_prompt Optional terminal observation prompt.
-        @param document_roles Selected document roles, copied for this request.
-        @param component_family Selected component geometry family.
-        @param photo_detector Photo proposal backend, ai by default or yolo.
-        @param yolo_model_path Optional session ONNX path; None uses the service default.
-        @param yolo_confidence YOLO operating threshold; None uses the service default.
-        @param yolo_settings Other YOLO detector settings; None uses the defaults.
-        @note YOLO changes photo proposals only; AI verification remains configured.
-        """
-        super().__init__()
-        self.doc_paths = doc_paths
-        self.system_prompt = system_prompt
-        self.extra_instructions = extra_instructions
-        self.include_nc_pins = include_nc_pins
-        self.model = model
-        self.vision_model = vision_model
-        self.grounding_prompt = grounding_prompt
-        self.verification_prompt = verification_prompt
-        self.verification_model = verification_model
-        self.terminal_prompt = terminal_prompt
-        # Copia anche delle liste: dal 26/09 ogni file porta una lista di ruoli.
-        self.document_roles = ({name: (list(roles) if isinstance(roles, (list, tuple)) else roles)
-                                for name, roles in document_roles.items()}
-                               if document_roles is not None else None)
-        self.component_family = component_family
-        self.photo_detector = photo_detector
-        self.yolo_model_path = yolo_model_path
-        self.yolo_confidence = yolo_confidence
-        self.yolo_settings = dict(yolo_settings) if yolo_settings is not None else None
-        # «Interrompi» lo alza: il servizio lo controlla prima di ogni chiamata
-        # a pagamento, cosi' dopo l'interruzione non ne parte nessun'altra
-        # (verifica del 25/09, D8). Quella gia' in volo non si puo' richiamare.
-        self.cancel_event = threading.Event()
-        self._review_answered = threading.Event()
-        self._review_result = None
-
-    def _review_proposals(self, photo_png, proposals, length_mm, width_mm):
-        """@brief Chiede all'interfaccia quali corpi tenere, e aspetta.
-
-        @param photo_png Fotografia calibrata, gia' codificata in PNG.
-        @param proposals Proposte del rilevatore locale.
-        @param length_mm Estensione della scheda lungo X, in mm.
-        @param width_mm Estensione lungo Y, in mm.
-        @return Le proposte da tenere, oppure None se la revisione e' annullata.
-        @note Gira nel thread del worker: il segnale attraversa i thread e la
-            risposta torna da deliver_review. L'attesa e' voluta -- la chiamata
-            a pagamento non deve partire prima che qualcuno abbia guardato.
-        """
-        self._review_result = None
-        self._review_answered.clear()
-        self.review_requested.emit(photo_png or b"", [dict(p) for p in proposals],
-                                   float(length_mm), float(width_mm))
-        self._review_answered.wait()
-        return self._review_result
-
-    def deliver_review(self, kept) -> None:
-        """@brief Consegna al worker l'esito della revisione e lo sblocca.
-
-        @param kept Proposte da tenere, o None per annullare l'estrazione.
-        @note Va chiamata SEMPRE, anche quando qualcosa va storto: un worker
-            lasciato in attesa non finisce piu'.
-        """
-        self._review_result = kept
-        self._review_answered.set()
-
-    def _forward_phase(self, tool: str, detail: str = "") -> None:
-        """@brief Porta in modale lo strumento che il servizio dichiara al lavoro.
-
-        @param tool Chiave in analysis_overlay.TOOLS, es. yolo o llm.
-        @param detail Testo libero: l'etichetta del rilevatore o il modello.
-        @note Contratto del servizio: `phase(tool, detail)`. Senza conteggio
-            (0, 0) la modale resta animata invece di mostrare una percentuale
-            inventata. Serve soprattutto al rilevatore locale ONNX, che prima
-            girava senza che nulla lo annunciasse: chi guardava vedeva la nuvola
-            del modello a pagamento anche mentre non si spendeva niente.
-        """
-        self.phase.emit(str(tool or ""), str(detail or ""), 0, 0)
-
-    def run(self) -> None:
-        """@brief Forward the captured settings and emit extracted data or an error."""
-        try:
-            params = extract_pin_header_params(
-                self.doc_paths,
-                model=self.model,
-                vision_model=self.vision_model,
-                grounding_prompt=self.grounding_prompt, verification_prompt=self.verification_prompt,
-                verification_model=self.verification_model, terminal_prompt=self.terminal_prompt,
-                document_roles=self.document_roles,
-                component_family=self.component_family,
-                photo_detector=self.photo_detector,
-                yolo_model_path=self.yolo_model_path,
-                system_prompt=self.system_prompt,
-                extra_instructions=self.extra_instructions,
-                include_nc_pins=self.include_nc_pins,
-                progress=self.progress.emit,
-                review_proposals=self._review_proposals,
-                # Cartella del PROGETTO assegnata da chi avvia; None = nessuna cache.
-                **accepted_kwargs(extract_pin_header_params,
-                                  photo_cache_dir=getattr(self, "photo_cache_dir", None),
-                                  yolo_confidence=self.yolo_confidence,
-                                  yolo_settings=self.yolo_settings,
-                                  cancel=self.cancel_event),
-                **phase_kwargs(extract_pin_header_params, self._forward_phase),
-            )
-            self.done.emit(params)
-        except ExtractionError as exc:
-            self.error.emit(str(exc))
-        except Exception as exc:  # noqa: BLE001 - errori rete/API riportati in UI
-            self.error.emit(tx("Errore API: {exc}", exc=exc))
-
-
-class YoloPretestWorker(ExtractWorker):
-    """@brief Local YOLO detection on the top view only: the «Solo YOLO locale» pretest.
-
-    Reuses ExtractWorker's review hand-off (review_requested /
-    deliver_review) and its signals; nothing else of the extraction runs.
-    """
-
-    def __init__(self, doc_paths, document_roles, length_mm, width_mm,
-                 yolo_model_path, cache_dir, yolo_confidence=None, yolo_settings=None):
-        """@brief Snapshot the pretest inputs.
-
-        @param doc_paths Selected documents.
-        @param document_roles Document roles by file name, or None.
-        @param length_mm Board X extent used to calibrate the photo, in mm.
-        @param width_mm Board Y extent, in mm.
-        @param yolo_model_path Weights path, or None for the default model.
-        @param cache_dir Folder for the detector evidence: the window passes
-            the pretest's own `yolo-pretest/photo-cache`, never the
-            extraction's, so this evidence is never read as an extraction's.
-        @param yolo_confidence YOLO operating threshold; None uses the default.
-        @param yolo_settings Other YOLO detector settings; None uses the defaults.
-        """
-        super().__init__(list(doc_paths), document_roles=document_roles,
-                         photo_detector="yolo_only", yolo_model_path=yolo_model_path,
-                         yolo_confidence=yolo_confidence, yolo_settings=yolo_settings)
-        self.length_mm, self.width_mm = float(length_mm), float(width_mm)
-        self.photo_cache_dir = cache_dir
-
-    def _top_views(self):
-        """Indexes of the documents declared as a photograph, or [-1] when none is.
-
-        Only a file ticked «Foto» (`document_roles.PHOTO_ROLE`) is a photograph
-        of the board: a dimensioned drawing is never searched for bodies.
-        """
-        if self.document_roles is None:
-            return None
-        # Stessa scelta dell'estrattore quando c'e' il suo helper: il pretest
-        # deve provare esattamente le foto che l'analisi proverebbe.
-        from ..services import datasheet_extractor
-        indices = getattr(datasheet_extractor, "photo_document_indices", None)
-        if callable(indices):
-            return indices(self.doc_paths, self.document_roles)
-        from ..services.document_roles import PHOTO_ROLE, role_list
-        return [i for i, path in enumerate(self.doc_paths)
-                if PHOTO_ROLE in role_list(self.document_roles.get(path.name))] or [-1]
-
-    def run(self) -> None:
-        """@brief Detect, let the user review, emit the report (None if cancelled)."""
-        from ..services.datasheet_extractor import COMPONENT_KINDS
-        from ..services.photo_inventory import ReviewCancelled, extract_inventory
-
-        def no_ai(**_kwargs):
-            # Il ramo yolo_only non chiama mai il modello: se succedesse sarebbe
-            # un difetto, e deve fermarsi invece di spendere.
-            raise RuntimeError("the YOLO pretest must not call any AI model")
-
-        try:
-            report = extract_inventory(
-                self.doc_paths, "", self.length_mm, self.width_mm, COMPONENT_KINDS, no_ai,
-                progress=self.progress.emit, phase=self._forward_phase,
-                top_photo_index=self._top_views(), top_photo_source="utente",
-                cache_dir=self.photo_cache_dir, detector="yolo_only",
-                yolo_model_path=self.yolo_model_path,
-                yolo_confidence=self.yolo_confidence,
-                yolo_settings=self.yolo_settings,
-                review_proposals=self._review_proposals)
-            self.done.emit(report)
-        except ReviewCancelled:
-            self.done.emit(None)
-        except Exception as exc:  # noqa: BLE001 - riportato in UI come ogni errore del worker
-            self.error.emit(str(exc))
-
-
-class ReconcileWorker(QThread):
-    """@brief Rilancia la sola riconciliazione a pagamento su proposte gia' riviste.
-
-    E' la coda di ExtractWorker senza la testa: niente documenti, niente
-    rilevatore locale, niente filtro dei contatti ne' misura dei bordi. Riceve
-    le proposte tenute nella finestra «Corpi rilevati», riaperta sull'ultimo
-    salvataggio, e fa UNA richiesta al modello che guarda la fotografia, poi
-    campiona i colori e salva l'evidenza come farebbe l'estrazione normale.
-
-    Segnali:
-        done(InventoryResult) -- inventario riconciliato
-        error(str)            -- messaggio di errore leggibile
-        progress(str)         -- avanzamento, compresa la riga della chiamata
-        phase(str, str, int, int) -- vedi GenerateWorker.phase
-    """
-
-    done = pyqtSignal(object)
-    error = pyqtSignal(str)
-    progress = pyqtSignal(str)
-    phase = pyqtSignal(str, str, int, int)
-
-    def __init__(self, photo_png, proposals, length_mm, width_mm, model, cache_dir,
-                 *, declared=None, verification_prompt=None, extra_instructions=None,
-                 detector='yolo'):
-        """@brief Fotografa le proposte approvate prima di lasciare il thread GUI.
-
-        @param photo_png Fotografia calibrata su cui le proposte furono misurate.
-        @param proposals Proposte tenute dalla revisione, inoltrate cosi' come sono.
-        @param length_mm Estensione della scheda lungo X, in mm (calibrazione).
-        @param width_mm Estensione lungo Y, in mm.
-        @param model Modello a pagamento della riconciliazione.
-        @param cache_dir Cartella della cache delle risposte e dell'evidenza.
-        @param declared Quote dichiarate della scheda, solo per la nota di coerenza.
-        @param verification_prompt Note del profilo, come nel percorso normale.
-        @param extra_instructions Note dell'utente, come nel percorso normale.
-        @param detector Nome del rilevatore da registrare nella calibrazione.
-        """
-        super().__init__()
-        self.photo_png = photo_png
-        self.proposals = deepcopy(proposals)
-        self.length_mm, self.width_mm = float(length_mm), float(width_mm)
-        self.model = model
-        self.cache_dir = cache_dir
-        self.declared = deepcopy(declared) if declared else None
-        self.verification_prompt = verification_prompt
-        self.extra_instructions = extra_instructions
-        self.detector = detector
-        # Come ExtractWorker.cancel_event: alzato da «Interrompi».
-        self.cancel_event = threading.Event()
-
-    def _forward_phase(self, tool: str, detail: str = "") -> None:
-        """@brief Inoltra alla modale la fase dichiarata dal servizio.
-
-        @param tool Chiave in analysis_overlay.TOOLS.
-        @param detail Testo libero accanto al nome dello strumento.
-        @note Vedi ExtractWorker._forward_phase: stesso contratto
-            `phase(tool, detail)`, cosi' il rilancio annuncia le sue fasi
-            esattamente come l'estrazione completa.
-        """
-        self.phase.emit(str(tool or ""), str(detail or ""), 0, 0)
-
-    def _raise_if_cancelled(self) -> None:
-        """Checker for make_logged_call: stop before a paid call once «Interrompi» was pressed."""
-        if self.cancel_event.is_set():
-            from ..services.ai_diagnostics import CallCancelled
-            raise CallCancelled(tx("Rilancio dell'inventario interrotto dall'utente: nessuna "
-                                   "nuova richiesta."))
-
-    def run(self) -> None:
-        """@brief Esegue la riconciliazione con la stessa chiamata registrata dell'estrazione."""
-        from ..services.photo_inventory import reconcile_saved_proposals
-        from ..services.openrouter import call_tool
-        from ..services.ai_diagnostics import make_logged_call
-        from ..services import providers
-        try:
-            if providers.provider_of(self.model) == providers.PROVIDER_DEEPSEEK:
-                providers.ensure_providers_ready([self.model], self.progress.emit)
-            self.phase.emit('llm_inventory', self.model, 0, 0)
-            report = reconcile_saved_proposals(
-                self.photo_png, self.proposals, self.length_mm, self.width_mm, self.model,
-                make_logged_call(call_tool, self.progress.emit, log_prompt=True,
-                                 **accepted_kwargs(make_logged_call,
-                                                   cancel=self._raise_if_cancelled)),
-                self.progress.emit, self.cache_dir, declared=self.declared,
-                verification_prompt=self.verification_prompt,
-                extra_instructions=self.extra_instructions, detector=self.detector,
-                **phase_kwargs(reconcile_saved_proposals, self._forward_phase))
-            self.done.emit(report)
-        except Exception as exc:  # noqa: BLE001 - errori rete/API riportati in UI
-            self.error.emit(f"Rilancio dell'inventario fallito: {exc}")
 
 
 def _step_older_than_footprint(footprint: Path, step: Path) -> bool:
@@ -1507,10 +712,15 @@ class MainWindow(QMainWindow):
         #: riconosciuto come scaduto e buttato. Il worker viene marchiato con
         #: il valore corrente alla partenza; l'interruzione lo incrementa.
         self._analysis_revision = 0
-        #: Worker abbandonati che stanno ancora girando: restano referenziati
-        #: (un QThread vivo raccolto dal garbage collector abbatte il
-        #: processo) e continuano a contare per la guardia di chiusura, ma non
-        #: sono piu' candidati a essere interrotti una seconda volta.
+        #: Workers abandoned with «Interrompi» that are still running. The
+        #: list keeps a reference of its own (a live QThread collected by the
+        #: garbage collector aborts the process) and removes them from the
+        #: candidates of a second abort (`_abortable_operation`). It is NOT
+        #: what the close guard reads: `closeEvent` sees an abandoned worker
+        #: through its slot (`_extract_worker`, `_reconcile_worker`), which
+        #: nothing reassigns while it runs because every paid start checks
+        #: `_background_work_running()` first; `_forget_abandoned_worker`
+        #: frees the slot when the worker finally emits `finished`.
         self._abandoned_workers: list = []
         #: Vero fra la conferma dell'interruzione e la fine effettiva del
         #: lavoro che si sta fermando: impedisce che un secondo clic riapra la
@@ -1531,8 +741,14 @@ class MainWindow(QMainWindow):
         #: Vero dall'avvio di un'estrazione, di un rilancio o di un pretest
         #: fino alla loro fine (o all'abbandono): finche' e' vero, testo e
         #: suggerimento del pulsante di estrazione e i comandi YOLO non si
-        #: toccano (audit 25/09, B6). Un flag esplicito e non
-        #: QThread.isRunning, che puo' restare vero dopo `finished`.
+        #: toccano (audit 25/09, B6). An explicit flag and not
+        #: QThread.isRunning, because the run's lifetime is not the lifetime
+        #: of any one thread: it goes on after the extraction thread into the
+        #: automatic generation (cleared in `_on_generation_finished`), and
+        #: it ends BEFORE the thread on «Interrompi», whose
+        #: abandoned worker keeps running until its HTTP call returns. (The
+        #: older justification -- isRunning still true inside a queued
+        #: `finished` slot -- was wrong: measured, it is already False there.)
         self._extraction_busy = False
         # La rotellina scorre la pagina e non cambia tendine o numeri non
         # cliccati (2026-09-26: la tipologia cambiata scorrendo la scheda).
@@ -1603,6 +819,11 @@ class MainWindow(QMainWindow):
         #: True mentre `render_mesh` sta lavorando: un secondo ingresso nella
         #: scheda in quel momento non deve accodare un altro rendering.
         self._rendering_3d = False
+        #: Preparazione della mesh in corso fuori dal thread GUI
+        #: (`Preview3DVtk.prepare_mesh`): (token, revisione del modello, cosa
+        #: fare a mesh pronta, cosa fare in errore), None altrimenti. Solo la
+        #: richiesta piu' recente viene servita. Vedi `_prepare_mesh_then`.
+        self._mesh_request = None
         #: True finche' il cursore di attesa messo dall'indicatore e' attivo:
         #: `restoreOverrideCursor` va chiamato una volta per ogni `set`.
         self._loading_cursor_set = False
@@ -1733,7 +954,7 @@ class MainWindow(QMainWindow):
         pause_changed = pause != self._inventory_pause_enabled()
         self._set_project_option("include_nc_pins", checked)
         self._set_project_option("silk_pin_labels", dialog.silk_pin_labels())
-        save_config(self._config)
+        self._save_config_safely()
         if pause_changed:
             self._on_inventory_pause_toggled(pause)
         self._append_log(
@@ -1837,7 +1058,7 @@ class MainWindow(QMainWindow):
             vale per le corse successive, non solo per questa sessione.
         """
         self._set_project_option('pause_after_inventory', enabled)
-        save_config(self._config)
+        self._save_config_safely()
 
     def _photo_inventory_family(self) -> bool | None:
         """@brief Prevede se l'analisi passera' dall'inventario fotografico.
@@ -1912,6 +1133,9 @@ class MainWindow(QMainWindow):
         @note A running QThread destroyed with its window aborts the process,
             so the guard covers every worker slot (extract, reconcile,
             generate, CAD 3D, terminals), not just one of them.
+        @note Once the close is accepted the project log handle is closed and
+            the 3D viewer is closed explicitly (VTK render window finalized);
+            a refused close touches neither.
         """
         # Il worker terminali segnala l'attesa nella barra di stato 3D, senza
         # dialogo modale: comportamento su cui si appoggiano i test esistenti.
@@ -1926,6 +1150,7 @@ class MainWindow(QMainWindow):
                 self.i18n.text('Attendi la conclusione dell’operazione prima di chiudere.'))
             event.ignore()
         else:
+            self._window_closed = True
             # Le ultime modifiche non aspettano il prossimo giro del salvataggio.
             self._flush_project_config()
             self.ai_account.detach()
@@ -1941,6 +1166,16 @@ class MainWindow(QMainWindow):
             for child in self.findChildren(QObject):
                 try:
                     child.blockSignals(True)
+                except RuntimeError:
+                    pass  # oggetto C++ gia' distrutto
+            self._close_log_handle()
+            # G9 (HANDOFF 130): pyvistaqt finalizza la render window VTK in
+            # close(); lasciarla al distruttore della finestra e' una fonte nota
+            # di crash nativi all'uscita su Windows. Solo a chiusura accettata.
+            preview = getattr(self, "preview_3d", None)
+            if preview is not None:
+                try:
+                    preview.close()
                 except RuntimeError:
                     pass  # oggetto C++ gia' distrutto
             super().closeEvent(event)
@@ -2009,9 +1244,6 @@ class MainWindow(QMainWindow):
     def _vision_model(self) -> str:
         """@brief Return the single AI model also used for photo analysis."""
         return self._effective_model()
-
-    def _default_vision_model(self) -> str:
-        return self._profile_values()['vision_model']
 
     def _photo_detector_model(self) -> str:
         """@brief Modello che guarda la fotografia nella prossima estrazione.
@@ -2198,9 +1430,15 @@ class MainWindow(QMainWindow):
                                  str(resource_path("models", "pcb_yolov8s.onnx")))
         dialog = YoloModelDialog(self.field_yolo_model.text().strip(), resource_path("models"),
                                  default=default, tr=self.i18n.text, parent=self)
-        self._yolo_model_dialog = dialog
-        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_path():
-            self.field_yolo_model.setText(dialog.selected_path())
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        selected = dialog.selected_path()
+        # Chiusa per davvero e rilasciata subito: tenuta in vita dalla finestra
+        # avviava controlli del modello quando il garbage collector la
+        # distruggeva, in un momento qualsiasi (HANDOFF 131).
+        dialog.shutdown()
+        dialog.deleteLater()
+        if accepted and selected:
+            self.field_yolo_model.setText(selected)
 
     def _pick_session_vlm_model(self) -> None:
         """@brief Sceglie il modello che guarda la fotografia, solo per questa sessione.
@@ -2267,8 +1505,8 @@ class MainWindow(QMainWindow):
         self._on_model_combo_changed()
 
     def _open_config_file(self) -> None:
-        if not config_path().is_file():
-            save_config(self._config)
+        if not config_path().is_file() and not self._save_config_safely():
+            return
         webbrowser.open(config_path().as_uri())
 
     def _about_html(self) -> str:
@@ -2490,6 +1728,10 @@ class MainWindow(QMainWindow):
         worker, self._update_worker = self._update_worker, None
         if worker is not None:
             worker.wait()
+        if getattr(self, "_window_closed", False):
+            # The worker outlives the window (it belongs to QApplication):
+            # an answer arriving after the close has nowhere to be shown.
+            return
         self.action_check_updates.setEnabled(True)
         if not self.analysis_overlay.isVisible():
             self.statusBar().showMessage(self.i18n.text("Pronto"))
@@ -2714,7 +1956,7 @@ class MainWindow(QMainWindow):
         from .qt_translations import install_qt_translations
         install_qt_translations(language)
         self._config["language"] = language
-        save_config(self._config)
+        self._save_config_safely()
         self._refresh_language_texts()
         self.tabs.setTabText(TAB_PROJECT, self.i18n.tr("tab.project.name"))
         self.tabs.setTabText(TAB_PREVIEW, self.i18n.tr("tab.preview.name"))
@@ -3398,7 +2640,7 @@ class MainWindow(QMainWindow):
         # nuovi dall'ultimo aperto (revisore 2, difetto 8).
         if not getattr(self, "_restoring_project", False):
             self._config["component_type"] = key
-            save_config(self._config)
+            self._save_config_safely()
         self._refresh_model_combo()
         self._refresh_type_effect()
         if component_type is not None:
@@ -3428,7 +2670,7 @@ class MainWindow(QMainWindow):
         @param checked New state of the checkbox.
         """
         self._set_project_option("show_pins_3d", checked)
-        save_config(self._config)
+        self._save_config_safely()
         self._invalidate_generated_mesh()
 
     def _component_name(self) -> str:
@@ -3958,41 +3200,6 @@ class MainWindow(QMainWindow):
     def _selected_documents(self):
         return DocumentSet(self._docs_dir()).selected()
 
-    def _add_docs(self) -> None:
-        files, _ = QFileDialog.getOpenFileNames(
-            self, self.i18n.text("Seleziona documentazione (datasheet, PDF, immagini...)"),
-            browse_start_dir(self._config),
-            self.i18n.text(
-                "Documenti (*.pdf *.png *.jpg *.jpeg *.txt *.md *.xlsx *.csv);;Tutti i file (*)")
-        )
-        if not files:
-            return
-        remember_browse_dir(self._config, files[0])
-        docs_dir = self._docs_dir()
-        docs_dir.mkdir(parents=True, exist_ok=True)
-        for f in files:
-            shutil.copy2(f, docs_dir / Path(f).name)
-        self._refresh_docs_list()
-
-    def _remove_doc(self) -> None:
-        item = self.docs_list.currentItem()
-        if item is None:
-            return
-        target = self._docs_dir() / item.text()
-        confirm = QMessageBox.question(
-            self, self.i18n.text("Rimuovi file"),
-            self.i18n.tr(
-                "document.delete_permanently", name=item.text(), directory=self._docs_dir()),
-        )
-        if confirm == QMessageBox.StandardButton.Yes:
-            target.unlink(missing_ok=True)
-            self._refresh_docs_list()
-
-    def _open_docs_folder(self) -> None:
-        docs_dir = self._docs_dir()
-        docs_dir.mkdir(parents=True, exist_ok=True)
-        webbrowser.open(docs_dir.as_uri())
-
     def _extract_with_ai(self) -> None:
         if self._background_work_running() or self._automatic_generation_active:
             return
@@ -4397,8 +3604,9 @@ class MainWindow(QMainWindow):
         """@brief Clear the run flag and bring the detector controls and the button back to rest.
 
         @note The flag, not QThread.isRunning, tells `_on_photo_detector_changed`
-            that a run owns the button (B6): a queued `finished` may arrive
-            while the thread still reports itself running.
+            that a run owns the button (B6): the run outlives the extraction
+            thread (automatic generation) and ends before an abandoned one,
+            see `_extraction_busy` in `__init__`.
         """
         self._extraction_busy = False
         if hasattr(self, "combo_photo_detector"):
@@ -4449,9 +3657,11 @@ class MainWindow(QMainWindow):
             `_on_photo_detector_changed` in the middle of a run, and used to
             put the idle text back over «Analisi in corso...» (audit 25/09,
             B6). The run's end clears the flag and calls this again through
-            `_end_extraction_busy`. It does not ask `_background_work_running`,
-            because a queued `finished` may arrive while the QThread still
-            reports itself running, and the button would keep its busy text.
+            `_end_extraction_busy`. It does not ask `_background_work_running`:
+            after «Interrompi» the abandoned thread keeps running while the
+            button must already be back at rest, and during the automatic
+            generation the busy text must stay although the extraction thread
+            has ended.
             Both properties are recorded as catalogue sources, so a later
             language switch translates them instead of freezing the rendered text.
         """
@@ -6174,6 +5384,7 @@ class MainWindow(QMainWindow):
         # Running CAD workers still describe the previous input revision.
         self._model_revision += 1
         self._last_mesh_path = None
+        self._drop_mesh_request()
         # Il solido che si stava per accettare non corrisponde piu' ai dati.
         self._set_accept_models_ready(False)
         self.preview_3d.clear_preview()
@@ -6646,7 +5857,7 @@ class MainWindow(QMainWindow):
             # Progetto nato prima di project_config.json: il file nasce subito,
             # non alla prima modifica, cosi' ogni progetto aperto ha il suo.
             self._save_project_config(force=True)
-        self._append_log(f"Progetto aperto: {self._project_dir()}"
+        self._append_log(tx("Progetto aperto: {folder}", folder=self._project_dir())
                          + ("" if saved is None else tx(" (impostazioni del progetto applicate).")))
 
     def _rename_project(self) -> None:
@@ -6756,6 +5967,8 @@ class MainWindow(QMainWindow):
         """
         if not old_project.is_dir():
             return new_name
+        # Su Windows una cartella con un file aperto non si rinomina.
+        self._close_log_handle()
         import uuid
         temporary = old_project.parent / f".{old_project.name}-rinomina-{uuid.uuid4().hex[:8]}"
         try:
@@ -6966,6 +6179,10 @@ class MainWindow(QMainWindow):
                     f"Geometria package acquisita: {self.package_geometry.family}, "
                     f"{len(self.package_geometry.pins)} pad espliciti."
                 )
+                # Un'origine diversa dal centro del corpo viene stimata dal
+                # campo dei pad: la stima va detta, mai silenziosa.
+                for note in self.package_geometry.frame_notes():
+                    self._append_log(tx("ATTENZIONE: {note}", note=note))
             except (KeyError, TypeError, ValueError) as exc:
                 self._append_log(tx("ATTENZIONE geometria package ignorata: {exc}", exc=exc))
 
@@ -8032,6 +7249,12 @@ class MainWindow(QMainWindow):
         self._current_kicad_artifacts()
         self._refresh_output_actions()
 
+    def _step_still_on_disk(self) -> bool:
+        """@brief Return whether the current component's STEP file exists."""
+        name = self._component_name()
+        return bool(name) and (
+            self._project_dir() / f"{name}.3dshapes" / f"{name}.step").is_file()
+
     def _kicad_output_complete(self) -> bool:
         """@brief Return whether the current footprint and STEP both exist."""
         name = self._component_name()
@@ -8199,10 +7422,6 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self, self.i18n.text("Installazione KiCad completata"), message)
 
-    def _export_component(self) -> None:
-        """@brief Preserve the previous handler as a project-install alias."""
-        self._install_project_library()
-
     #: Nome del diario scritto nella cartella del componente. Sta li' e non in
     #: una cartella di sistema perche' appartiene al componente: chi apre quella
     #: cartella trova accanto ai file generati il racconto di come sono stati
@@ -8238,18 +7457,20 @@ class MainWindow(QMainWindow):
             return
         try:
             from datetime import datetime
-            path = self._log_file()
-            path.parent.mkdir(parents=True, exist_ok=True)
+            handle = self._project_log_handle(self._log_file())
             pending = getattr(self, "_pending_log_lines", None)
-            with open(path, "a", encoding="utf-8") as handle:
-                stamp = datetime.now().astimezone().isoformat(timespec="seconds")
-                for line in (pending or ()):
-                    handle.write(f"[{stamp}] {line}\n")
-                if pending:
-                    self._pending_log_lines = []
-                handle.write(f"[{stamp}] {str(message).rstrip()}\n")
-                handle.flush()
-        except (OSError, AttributeError) as exc:
+            stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+            for line in (pending or ()):
+                handle.write(f"[{stamp}] {line}\n")
+            if pending:
+                self._pending_log_lines = []
+            handle.write(f"[{stamp}] {str(message).rstrip()}\n")
+            handle.flush()
+            self._release_log_handle_when_idle()
+        except (OSError, AttributeError, ValueError) as exc:
+            # Un file rimasto aperto su un errore non va riusato: la riga dopo
+            # riapre da capo (anche la cartella, se e' sparita).
+            self._close_log_handle()
             # Startup can emit messages before project widgets exist.
             if not getattr(self, "_log_write_failed", False):
                 self._log_write_failed = True
@@ -8259,6 +7480,81 @@ class MainWindow(QMainWindow):
                 # (test_ai_log_button_counts_the_elements_list_too).
                 self._log_lines.append(
                     tx("Log file non disponibile: {exc}\n", exc=exc).rstrip("\n"))
+
+    #: How long the project log stays open after the last line while a worker
+    #: runs, in ms. Resource policy, not a data threshold: long enough to
+    #: cover a burst of progress lines (FreeCAD writes several per second),
+    #: short enough that the file does not stay locked once the burst is over.
+    LOG_HANDLE_IDLE_MS = 2000
+
+    def _project_log_handle(self, path: Path):
+        """@brief The open append handle of the project log @p path, opened when needed.
+
+        @param path Log file of the current project (`_log_file()`).
+        @return A text file object in append mode.
+        @throws OSError when the folder cannot be created or the file opened.
+        @note G8 (HANDOFF 130): the log used to be opened and closed for every
+            line on the GUI thread, including each FreeCAD progress line. The
+            handle is now reused; another project (change or rename) gives
+            another path and reopens, and a file whose folder disappeared is
+            reopened -- folder included -- instead of writing into the void.
+        """
+        handle = getattr(self, "_log_handle", None)
+        if handle is not None and (getattr(self, "_log_handle_path", None) != path
+                                   or not path.exists()):
+            self._close_log_handle()
+            handle = None
+        if handle is None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            handle = open(path, "a", encoding="utf-8")
+            self._log_handle, self._log_handle_path = handle, path
+        return handle
+
+    def _release_log_handle_when_idle(self) -> None:
+        """@brief Keep the log open only while a worker streams lines, then close it.
+
+        @note On Windows an open file locks its folder: the project could not
+            be renamed or deleted, from Explorer or from this window, while the
+            log were open. So the handle outlives the line only while background
+            work runs (the case with many lines per second), and is closed
+            `LOG_HANDLE_IDLE_MS` after the last one; with nothing running it is
+            closed at once, which is the previous behaviour.
+        """
+        try:
+            busy = bool(self._background_work_running())
+        except Exception:  # noqa: BLE001 - early in __init__ the worker slots do not exist yet
+            busy = False
+        if not busy:
+            self._close_log_handle()
+            return
+        timer = getattr(self, "_log_idle_timer", None)
+        if timer is None:
+            timer = self._log_idle_timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(self.LOG_HANDLE_IDLE_MS)
+            timer.timeout.connect(self._close_log_handle)
+        timer.start()
+
+    def _close_log_handle(self) -> None:
+        """@brief Close the project log handle, if open; never raises.
+
+        @note Called before the log or the project folder moves (rename), when
+            the window closes and after an idle interval.
+        """
+        handle = getattr(self, "_log_handle", None)
+        self._log_handle = None
+        self._log_handle_path = None
+        timer = getattr(self, "_log_idle_timer", None)
+        if timer is not None:
+            try:
+                timer.stop()
+            except RuntimeError:
+                pass  # oggetto C++ gia' distrutto
+        if handle is not None:
+            try:
+                handle.close()
+            except OSError:
+                pass  # il contenuto e' gia' stato scritto con flush a ogni riga
 
     def _start_log_session(self, title: str) -> None:
         """@brief Open a dated section so separate runs stay distinguishable."""
@@ -8276,6 +7572,8 @@ class MainWindow(QMainWindow):
         cartella vecchia e quella nuova.
         """
         import shutil
+        # Un file aperto non si sposta su Windows.
+        self._close_log_handle()
         try:
             source = self._log_file()
             if not source.is_file():
@@ -8294,6 +7592,26 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             self._append_log(tx("Rinomina annullata: impossibile trasferire il log ({exc}).", exc=exc))
             return False
+
+    def _save_config_safely(self) -> bool:
+        """@brief Save config.json from a Qt slot without letting a failure escape.
+
+        @return True when the preferences were written, False otherwise.
+        @note A slot that raises ends the process through the crash report
+            hook; a preference that cannot be written (locked, read-only or
+            full disk) must only cost one log line, and the choice still holds
+            for the current session.
+        """
+        # Only an explicit False is a failure: substitutes that return None
+        # (older callers and test doubles) keep meaning "saved".
+        if save_config(self._config) is not False:
+            return True
+        if not hasattr(self, "_log_lines"):
+            # Called before the log exists (early in __init__): nothing to show yet.
+            return False
+        self._append_log(tx("Preferenze non salvate in {path}: la modifica vale solo per questa sessione.",
+                            path=config_path()))
+        return False
 
     def _append_log(self, msg: str) -> None:
         self._write_log_line(msg)
@@ -8595,7 +7913,7 @@ class MainWindow(QMainWindow):
             # Vedi `_current_body_params` e `_start_automatic_generation`.
             if (automatic and body is None and self.group_3d.isChecked()
                     and not isinstance(params, PackageGeometry)):
-                raise ValueError('Mancano i parametri 3D.')
+                raise ValueError(tx('Mancano i parametri 3D.'))
         except ValueError as exc:
             self._append_log(tx("ERRORE: {exc}", exc=exc))
             if automatic:
@@ -8802,7 +8120,12 @@ class MainWindow(QMainWindow):
             self._automatic_generation_errors.append(message)
 
     def _on_cad3d_generated(self, path: str) -> None:
+        """@brief Show a finished 3D model, or say why a stale one is not shown.
+
+        @param path STEP file written by the worker.
+        """
         if not self._cad_result_is_current():
+            self._log_stale_cad_result(path)
             return
         if self._automatic_generation_active:
             self._automatic_3d_done = True
@@ -8822,14 +8145,41 @@ class MainWindow(QMainWindow):
             guasto e' avvenuto, e non entra nell'elenco dei guasti da
             riportare a fine corsa.
         """
+        self._realign_after_3d_failure()
         if not self._cad_result_is_current():
             return
         if CAD_ABORT_MESSAGE in message:
-            self._append_log(f"INTERROTTO 3D: {message}")
+            self._append_log(tx("INTERROTTO 3D: {message}", message=message))
             return
         self._append_log(tx("ERRORE 3D: {message}", message=message))
         if self._automatic_generation_active:
             self._automatic_generation_errors.append(message)
+
+    def _log_stale_cad_result(self, path: str) -> None:
+        """Say that a finished 3D model was discarded because the data changed.
+
+        The worker still wrote its STEP (and WRL/preview) to disk: without this
+        line the user would find files on disk that no longer match the data
+        in the window and nothing explaining why the preview did not update.
+        """
+        self._append_log(tx("Modello 3D scartato: i dati sono cambiati durante la generazione. "
+                            "I file su disco ({path}) non corrispondono ai dati attuali: "
+                            "rigenera il modello 3D.", path=path))
+
+    def _realign_after_3d_failure(self) -> None:
+        """@brief After a failed or cancelled 3D run, show what is really on disk.
+
+        @note A run that got as far as starting FreeCAD deletes the previous
+            STEP, WRL and preview (step_generator._run_freecad, HANDOFF 131:
+            an old model must never pass for the new one). The KiCad actions,
+            «Accetto, mi piace» and the preview path must follow the disk, also
+            when the result itself is stale and otherwise ignored.
+        """
+        mesh = getattr(self, "_last_mesh_path", None)
+        if mesh is not None and not Path(mesh).exists():
+            self._last_mesh_path = None
+        self._set_accept_models_ready(False)
+        self._refresh_output_actions()
 
     def _on_cad3d_warning(self, message: str) -> None:
         """Annotazione non applicata: il modello c'e' comunque, ma va detto."""
@@ -9116,6 +8466,9 @@ class MainWindow(QMainWindow):
             self.preview_3d.component_menu_requested.connect(self._show_component_menu)
         if hasattr(self.preview_3d, 'component_clicked'):
             self.preview_3d.component_clicked.connect(self._on_format_painter_click)
+        if hasattr(self.preview_3d, 'mesh_prepared'):
+            self.preview_3d.mesh_prepared.connect(self._on_mesh_prepared)
+            self.preview_3d.mesh_prepare_failed.connect(self._on_mesh_prepare_failed)
         self.preview_3d.show_pin_numbers = self.chk_pin_numbers.isChecked()
         self.preview_3d.setMinimumHeight(120)
         outer.addWidget(self.preview_3d, 1)
@@ -9322,7 +8675,7 @@ class MainWindow(QMainWindow):
 
     def _on_pin_numbers_toggled(self, checked: bool) -> None:
         self._config["show_pin_numbers_3d"] = checked
-        save_config(self._config)
+        self._save_config_safely()
         self.preview_3d.set_pin_numbers(checked)
         # Ridisegna la vista corrente: mesh generata se c'e', altrimenti
         # l'approssimazione dai parametri.
@@ -9336,7 +8689,12 @@ class MainWindow(QMainWindow):
 
     def _open_3dshapes_dir(self) -> None:
         shapes_dir = self._project_dir() / f"{self._component_name()}.3dshapes"
-        shapes_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            shapes_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            # Slot: an escaping exception would end the process (crash hook).
+            self._append_log(tx("Impossibile creare la cartella {path}: {exc}", path=shapes_dir, exc=exc))
+            return
         webbrowser.open(shapes_dir.as_uri())
 
     def _refine_photo_terminals(self) -> None:
@@ -9346,9 +8704,21 @@ class MainWindow(QMainWindow):
         self._start_terminal_refinement(only_leads=True)
 
     def _start_terminal_refinement(self, only_leads=False) -> None:
-        if self._terminal_worker is not None and self._terminal_worker.isRunning():
-            return
-        if self._extract_worker is not None and self._extract_worker.isRunning():
+        """@brief Start the paid photo terminal (or lead) pass on the current components.
+
+        @param only_leads True to refine the leads of terminals already observed.
+        @note The pass is charged to the project open when it starts, like
+            every other paid run (`ai_account.bind_run_project`). Only one
+            bound run can exist at a time, so the pass does not start while
+            any other worker -- or an abandoned analysis still waiting for its
+            paid answer -- is running.
+        """
+        if self._background_work_running() or any(
+                worker.isRunning() for worker in getattr(self, "_abandoned_workers", ())):
+            # Una sola corsa alla volta puo' essere legata a un progetto per i
+            # costi: si dice perche' il passo non parte, invece di tacere.
+            self._append_log(tx("Dettaglio terminali non avviato: un altro lavoro e' ancora "
+                                "in corso; riprova quando e' finito."))
             return
         if not self._photo_png:
             QMessageBox.information(
@@ -9390,9 +8760,19 @@ class MainWindow(QMainWindow):
         worker.progress.connect(self._on_ai_progress)
         worker.done.connect(self._on_terminal_detail_done)
         worker.error.connect(self._on_terminal_detail_error)
-        worker.finished.connect(lambda: self.btn_terminal_detail.setEnabled(True))
-        worker.finished.connect(lambda: self.btn_lead_refinement.setEnabled(True))
+        worker.finished.connect(self._on_terminal_detail_finished)
+        # Every call of this pass is charged to the project open now, even if
+        # another one is opened meanwhile; released in _on_terminal_detail_finished.
+        if hasattr(self, "ai_account"):
+            self.ai_account.bind_run_project(self._project_dir_or_none())
         worker.start()
+
+    def _on_terminal_detail_finished(self) -> None:
+        """Release the run project of the terminal pass and re-enable its commands."""
+        if hasattr(self, "ai_account"):
+            self.ai_account.release_run_project()
+        self.btn_terminal_detail.setEnabled(True)
+        self.btn_lead_refinement.setEnabled(True)
 
     def _on_terminal_detail_error(self, message):
         self._append_log(message)
@@ -9530,7 +8910,12 @@ class MainWindow(QMainWindow):
         self._set_regen_busy(False)
 
     def _on_regen_3d_done(self, path: str) -> None:
+        """@brief Show a regenerated 3D model, or say why a stale one is not shown.
+
+        @param path STEP file written by the worker.
+        """
         if not self._cad_result_is_current():
+            self._log_stale_cad_result(path)
             return
         self._regen_3d_succeeded = True
         self._append_log(f"OK (3D) -> {path}")
@@ -9589,7 +8974,7 @@ class MainWindow(QMainWindow):
                confirmed=result.confirmed,
                n_skipped=len(result.skipped)))
         for name, reason in result.skipped:
-            self._append_log(f"  escluso {name}: {reason}")
+            self._append_log(tx("  escluso {name}: {reason}", name=name, reason=reason))
         self._set_3d_status(self.i18n.tr(
             "status.accepted_models_saved", stored=result.stored,
             created=result.created, confirmed=result.confirmed), STATUS_INFO)
@@ -9649,6 +9034,22 @@ class MainWindow(QMainWindow):
             mesh_path = step_path.parent / f"{step_path.stem}.preview.json"
         if not mesh_path.is_file():
             return
+        previous = self._last_mesh_path
+        if self._prepare_mesh_then(mesh_path, partial(self._apply_generated_mesh, mesh_path),
+                                   partial(self._generated_mesh_unavailable, mesh_path, previous)):
+            # Il solido e' scritto e si sta preparando: per il resto della
+            # finestra (rigenerazione automatica, ingresso nella scheda) c'e'.
+            self._last_mesh_path = mesh_path
+            return
+        self._apply_generated_mesh(mesh_path)
+
+    def _apply_generated_mesh(self, mesh_path: Path) -> None:
+        """@brief Draw the generated mesh and say so on the 3D status line.
+
+        @param mesh_path Preview JSON written next to the STEP.
+        @note Synchronous tail of `_show_generated_mesh`; after `prepare_mesh`
+            the viewer finds the scene in its cache and only builds actors.
+        """
         try:
             self.preview_3d.render_mesh(mesh_path)
             self._last_mesh_path = mesh_path
@@ -9659,6 +9060,17 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001 - anteprima non critica
             self._append_log(tx("Anteprima mesh non disponibile: {exc}", exc=exc))
 
+    def _generated_mesh_unavailable(self, mesh_path: Path, previous, error: str) -> None:
+        """@brief Off-thread preparation of a generated mesh failed: log it, as the render did.
+
+        @param mesh_path Mesh that could not be prepared.
+        @param previous Mesh path before the request, restored when still ours.
+        @param error Error text from the viewer.
+        """
+        if self._last_mesh_path == mesh_path:
+            self._last_mesh_path = previous
+        self._append_log(tx("Anteprima mesh non disponibile: {exc}", exc=error))
+
     def _on_regen_3d_error(self, message: str) -> None:
         """@brief Scrive nel log e sulla barra 3D perche' lo STEP non c'e'.
 
@@ -9667,13 +9079,18 @@ class MainWindow(QMainWindow):
             un guasto, quindi non viene annunciata come tale ne' nel log ne'
             sulla barra di stato.
         """
+        self._realign_after_3d_failure()
         if not self._cad_result_is_current():
             return
         if CAD_ABORT_MESSAGE in message:
-            self._append_log(f"INTERROTTO 3D: {message}")
+            self._append_log(tx("INTERROTTO 3D: {message}", message=message))
+            # Interrotta dopo l'avvio di FreeCAD, la corsa ha tolto il modello
+            # precedente: dirlo, invece di lasciar credere che sia ancora li'.
             self._set_3d_status(self.i18n.text(
                 "Generazione interrotta dall'utente: il modello 3D non è stato "
-                "aggiornato."), STATUS_INFO)
+                "aggiornato.") if self._step_still_on_disk() else self.i18n.text(
+                "Generazione interrotta dall'utente: il modello 3D precedente è "
+                "stato rimosso, rigeneralo prima di usarlo in KiCad."), STATUS_INFO)
             return
         self._append_log(tx("ERRORE 3D: {message}", message=message))
         self._set_3d_status(self.i18n.tr(
@@ -10036,16 +9453,9 @@ class MainWindow(QMainWindow):
             return None
         return width_px / float(length_mm)
 
-    def _current_system_prompt(self) -> str | None:
-        """Prompt globale da usare per l'estrazione: None se e' quello di default."""
-        text = self._profile_values()['system_prompt'].strip()
-        if not text or text == DEFAULT_SYSTEM_PROMPT.strip():
-            return None
-        return text
-
     def _on_grid_toggled(self, checked: bool) -> None:
         self._config["show_grid"] = checked
-        save_config(self._config)
+        self._save_config_safely()
         self.combo_grid_unit.setEnabled(checked)
         # Grid visibility is not a request to redraw/refit the footprint.
         for item in self.preview_scene.items():
@@ -10054,7 +9464,7 @@ class MainWindow(QMainWindow):
 
     def _on_grid_unit_changed(self) -> None:
         self._config["grid_unit"] = self.combo_grid_unit.currentData()
-        save_config(self._config)
+        self._save_config_safely()
         spec = getattr(self, '_preview_grid_spec', None)
         if spec is not None:
             for item in self.preview_scene.items():
@@ -10423,15 +9833,25 @@ class MainWindow(QMainWindow):
         self.preview_scene.clear()
         mm_to_px = 20.0
         pins = package.pins_seen_from_top()
-        body_l = package.body_length_mm or max((abs(p.x_mm) for p in pins), default=2.0) * 2 + 2
-        body_w = package.body_width_mm or max((abs(p.y_mm) for p in pins), default=2.0) * 2 + 2
         margin = 1.0
         silk_pen = QPen(QColor(TEXT))
         silk_pen.setWidthF(1.5)
-        self.preview_scene.addRect(
-            -body_l / 2 * mm_to_px, -body_w / 2 * mm_to_px,
-            body_l * mm_to_px, body_w * mm_to_px, silk_pen,
-        )
+        if package.body_length_mm and package.body_width_mm:
+            # Same outline as build_package: the body turns with the package.
+            from ..core.package_geometry import pad_outline
+            corners = pad_outline(0.0, 0.0, package.body_length_mm, package.body_width_mm,
+                                  package.orientation_deg)
+            self.preview_scene.addPolygon(
+                QPolygonF([QPointF(x * mm_to_px, y * mm_to_px) for x, y in corners]), silk_pen)
+            body_l = 2 * max(abs(x) for x, _ in corners)
+            body_w = 2 * max(abs(y) for _, y in corners)
+        else:
+            body_l = max((abs(p.x_mm) for p in pins), default=2.0) * 2 + 2
+            body_w = max((abs(p.y_mm) for p in pins), default=2.0) * 2 + 2
+            self.preview_scene.addRect(
+                -body_l / 2 * mm_to_px, -body_w / 2 * mm_to_px,
+                body_l * mm_to_px, body_w * mm_to_px, silk_pen,
+            )
         pad_pen = QPen(QColor(SURFACE1))
         pad_brush = QBrush(QColor(BLUE))
         xs, ys = [], []
@@ -10519,10 +9939,15 @@ class MainWindow(QMainWindow):
         rect = label.boundingRect()
         label.setPos(x + 6, (y1 + y2) / 2 + rect.width() / 2)
 
-    def _draw_preview_3d(self) -> None:
+    def _draw_preview_3d(self, mesh_failed: bool = False) -> None:
+        """@brief Draw the generated mesh when there is one, else the cheap preview.
+
+        @param mesh_failed True when the mesh was just found unreadable (off-thread
+            preparation failed and was logged): it is not tried again here.
+        """
         # Never replace a generated model with a synthetic matrix preview
         # simply because the user revisits the 3D tab.
-        if self._last_mesh_path and Path(self._last_mesh_path).is_file():
+        if not mesh_failed and self._last_mesh_path and Path(self._last_mesh_path).is_file():
             try:
                 self.preview_3d.render_mesh(self._last_mesh_path)
                 return
@@ -10532,7 +9957,8 @@ class MainWindow(QMainWindow):
             # Per i moduli non esiste un'approssimazione parametrica da
             # disegnare al volo (il solido nasce dal taglio dei semi-fori):
             # si mostra la geometria reale appena generata, se c'e'.
-            if self._last_mesh_path and Path(self._last_mesh_path).is_file():
+            if (not mesh_failed and self._last_mesh_path
+                    and Path(self._last_mesh_path).is_file()):
                 try:
                     self.preview_3d.render_mesh(self._last_mesh_path)
                     self._set_3d_status(self.i18n.text(
@@ -10624,7 +10050,8 @@ class MainWindow(QMainWindow):
             return
         if self._mesh_already_showing(path):
             return
-        if self._rendering_3d or self._pending_3d_render is not None:
+        if (self._rendering_3d or self._pending_3d_render is not None
+                or self._mesh_request is not None):
             # Gia' in corso o gia' accodato: un secondo rendering della stessa
             # scena non aggiunge nulla, e accodarlo lo farebbe partire due volte.
             return
@@ -10651,11 +10078,116 @@ class MainWindow(QMainWindow):
                     or current is None or Path(current) != path
                     or self.tabs.currentWidget() is not getattr(self, "model_3d_page", None)):
                 return
+            if self._prepare_mesh_then(path, partial(self._finish_prepared_3d_render, path),
+                                       partial(self._prepared_3d_render_failed, path)):
+                return  # l'indicatore resta finche' la mesh non e' pronta
             self._rendering_3d = True
             self._draw_preview_3d()
         finally:
             self._rendering_3d = False
+            if self._mesh_request is None:
+                self._show_3d_loading(False)
+
+    def _still_showing_3d_tab_for(self, path: Path) -> bool:
+        """True when @p path is still the current mesh and the 3D tab is still in front."""
+        current = self._last_mesh_path
+        return (current is not None and Path(current) == path
+                and self.tabs.currentWidget() is getattr(self, "model_3d_page", None))
+
+    def _finish_prepared_3d_render(self, path: Path) -> None:
+        """@brief Tab-entry render once the viewer has prepared @p path off the GUI thread.
+
+        @param path Mesh requested by `_run_pending_3d_render`.
+        @note Same guards as the deferred render: a replaced mesh or a tab the
+            user has left is not drawn (the prepared scene stays cached, so the
+            next visit is quick).
+        """
+        if not self._still_showing_3d_tab_for(path):
+            return
+        self._rendering_3d = True
+        try:
+            self._draw_preview_3d()
+        finally:
+            self._rendering_3d = False
+
+    def _prepared_3d_render_failed(self, path: Path, error: str) -> None:
+        """@brief The mesh of the tab entry is unreadable: log once, show the fallback preview.
+
+        @param path Mesh requested by `_run_pending_3d_render`.
+        @param error Error text from the viewer.
+        """
+        self._append_log(tx("Anteprima mesh non disponibile: {exc}", exc=error))
+        if self._still_showing_3d_tab_for(path):
+            self._draw_preview_3d(mesh_failed=True)
+
+    def _prepare_mesh_then(self, path: Path, on_ready, on_failed) -> bool:
+        """@brief Prepare @p path off the GUI thread, then run @p on_ready (or @p on_failed).
+
+        @param path Preview JSON to prepare.
+        @param on_ready Callable run on the GUI thread once the scene is prepared.
+        @param on_failed Callable(error text) run on the GUI thread on failure.
+        @return False when the viewer has no off-thread preparation (older
+            viewers, test stubs): the caller then renders synchronously, as before.
+        @note G8 (HANDOFF 130): parsing a 13 MB preview and computing its
+            normals took seconds on the GUI thread. The loading indicator stays
+            on until the answer arrives. Only the latest request is served, and
+            not at all when the model data changed meanwhile (model revision).
+        """
+        prepare = getattr(self.preview_3d, "prepare_mesh", None)
+        if not callable(prepare) or not hasattr(self.preview_3d, "mesh_prepared"):
+            return False
+        self._show_3d_loading(True)
+        self._mesh_request = None
+        token = prepare(path)
+        self._mesh_request = (token, self._model_revision, on_ready, on_failed)
+        return True
+
+    def _take_mesh_request(self, token: int):
+        """The pending mesh request if @p token is its token (it is then consumed), else None."""
+        request = self._mesh_request
+        if request is None or request[0] != token:
+            return None
+        self._mesh_request = None
+        return request
+
+    def _drop_mesh_request(self) -> None:
+        """Forget an in-flight mesh preparation: its answer will be ignored."""
+        if getattr(self, "_mesh_request", None) is None:
+            return
+        self._mesh_request = None
+        if self._pending_3d_render is None and not self._rendering_3d:
             self._show_3d_loading(False)
+
+    def _on_mesh_prepared(self, token: int) -> None:
+        """@brief Slot of `Preview3DVtk.mesh_prepared`: serve the matching request, if current.
+
+        @param token Request token of the prepared mesh.
+        """
+        request = self._take_mesh_request(token)
+        if request is None:
+            return
+        try:
+            if request[1] == self._model_revision:
+                request[2]()
+        finally:
+            if self._mesh_request is None:
+                self._show_3d_loading(False)
+
+    def _on_mesh_prepare_failed(self, token: int, error: str) -> None:
+        """@brief Slot of `Preview3DVtk.mesh_prepare_failed`: report it for the matching request.
+
+        @param token Request token of the failed preparation.
+        @param error Error text from the viewer.
+        """
+        request = self._take_mesh_request(token)
+        if request is None:
+            return
+        try:
+            if request[1] == self._model_revision:
+                request[3](error)
+        finally:
+            if self._mesh_request is None:
+                self._show_3d_loading(False)
 
     def _show_3d_loading(self, visible: bool) -> None:
         """@brief Show or hide the 3D loading indicator and the wait cursor together.

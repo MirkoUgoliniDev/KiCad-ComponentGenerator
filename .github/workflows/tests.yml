@@ -1,0 +1,70 @@
+name: Tests
+
+# Runs the test suite on every push and pull request, with the same Python and
+# the same pinned dependencies as the release build (release.yml), on the same
+# Windows runner. FreeCAD and KiCad are not installed: the tests that need them
+# skip themselves. Read-only token, no persisted Git credentials, no secrets.
+# The suite runs in two processes (tools/run_test_halves.py, HANDOFF point 113)
+# and every step has a timeout.
+#
+# TODO(maintainer): pin every action below to a full commit SHA, as for
+# release.yml.
+on:
+  push:
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: windows-latest
+    # Larger than the sum of the step limits (20 + 45 + 45), so a step limit,
+    # never the job limit, is what stops a slow step.
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install the test dependencies
+        id: install
+        shell: pwsh
+        timeout-minutes: 20
+        run: |
+          python -m pip install --disable-pip-version-check -q -r requirements.txt -r requirements-yolo.txt `
+            -c requirements-release-constraints.txt
+          if ($LASTEXITCODE -ne 0) { throw "pip install failed ($LASTEXITCODE)." }
+          # PyYAML: tests/test_ci_workflows.py reads these workflow files.
+          python -m pip install --disable-pip-version-check -q pyyaml
+          if ($LASTEXITCODE -ne 0) { throw "pip install failed ($LASTEXITCODE)." }
+
+      - name: Run the test suite (first half)
+        shell: pwsh
+        timeout-minutes: 45
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python tools/run_test_halves.py first
+          if ($LASTEXITCODE -ne 0) { throw "Tests failed, first half ($LASTEXITCODE)." }
+
+      # Runs even when the first half failed, so one run shows the whole suite,
+      # but never after a failed install (nothing to test with).
+      - name: Run the test suite (second half)
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        shell: pwsh
+        timeout-minutes: 45
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python tools/run_test_halves.py second
+          if ($LASTEXITCODE -ne 0) { throw "Tests failed, second half ($LASTEXITCODE)." }

@@ -20,6 +20,7 @@ import re
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 from .footprint import FpCircle, FpLine, FpRect
+from ..services.messages import tx
 
 #: Minimum distance between silkscreen and exposed copper, mm. KiCad
 #: Library Convention F5.1 asks for 0.2 mm between silk and pads; the
@@ -157,33 +158,47 @@ def push_marker_clear(center, direction, radius: float, keepouts: Sequence[Box],
 
     @param center Preferred marker centre (x, y), mm.
     @param direction Unit-less (dx, dy) to move along when it is on copper.
-    @param radius Marker radius, mm.
+    @param radius Radius of the marker INK (stroke included), mm.
     @param keepouts Boxes from keepout_box().
     @param step Search step, mm.
     @param limit Maximum displacement, mm.
     @return The first clear centre, rounded to 1 um; the preferred one when
         it is already clear (so existing footprints keep their marker).
+    @throws ValueError When no clear position exists within `limit`: ink
+        on exposed copper is never returned silently.
     """
     norm = math.hypot(*direction) or 1.0
     ux, uy = direction[0] / norm, direction[1] / norm
     moved = 0.0
     x, y = center
-    while not marker_clear_of((x, y), radius, keepouts) and moved < limit:
+    while not marker_clear_of((x, y), radius, keepouts):
+        if moved >= limit:
+            raise ValueError(tx(
+                "Segno del pin 1: nessuna posizione libera dal rame entro {limit:.0f} mm "
+                "dal punto previsto.", limit=limit))
         moved += step
         x, y = center[0] + ux * moved, center[1] + uy * moved
     return (round(x, 6) + 0.0, round(y, 6) + 0.0)
 
 
 def pin_one_marker(center, keepouts: Sequence[Box], direction,
-                   radius: float = 0.25, layer: str = "F.SilkS") -> FpCircle:
+                   radius: float = 0.25, layer: str = "F.SilkS",
+                   width: float = 0.12) -> FpCircle:
     """@brief Filled silk dot for pin 1, pushed off the copper if needed.
 
     @param center Preferred centre, mm.
-    @param keepouts Boxes from keepout_box() for every pad.
+    @param keepouts Boxes from keepout_box(..., line_width=0) for every pad:
+        copper grown by the silk clearance only.
     @param direction Direction to move along when the preferred centre is on copper.
-    @param radius Dot radius, mm.
+    @param radius Dot radius (geometry of the circle), mm.
     @param layer Silk layer.
+    @param width Stroke width of the circle outline, mm.
     @return The FpCircle to add to the footprint.
+    @throws ValueError When the dot cannot be placed off the copper.
+    @note The ink of a stroked circle reaches radius + width / 2: that is the
+        radius kept clear, so the ink stays SILK_PAD_CLEARANCE_MM from the
+        copper as promised (counting only `radius` left 0.14 mm).
     """
-    return FpCircle(center=push_marker_clear(center, direction, radius, keepouts),
-                    radius=radius, layer=layer, fill=True)
+    ink_radius = radius + width / 2
+    return FpCircle(center=push_marker_clear(center, direction, ink_radius, keepouts),
+                    radius=radius, layer=layer, width=width, fill=True)

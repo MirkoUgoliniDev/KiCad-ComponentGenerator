@@ -17,7 +17,6 @@ from kicadgen.generators.castellated_module import (
     pad_positions,
 )
 from test_contact_style import dev_kit
-from tests.test_photo_inventory_gui import window  # noqa: F401 - fixture condivisa
 
 
 def _shapes(window, params):

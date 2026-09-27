@@ -1,5 +1,6 @@
 """Verifica Qt del confronto e del log; il renderer VTK non e' coinvolto."""
 from copy import deepcopy
+import gc
 import os
 from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -35,88 +36,10 @@ def layout_contains(layout, widget):
     return False
 
 
-class PreviewStub(QWidget):
-    def fit_view(self): pass
-    def clear_preview(self): pass
-    def render_params(self, *args): pass
-    def render_mesh(self, path): pass
-    def set_pin_numbers(self, checked): pass
-
-
-#: Una sola QApplication per processo, tenuta viva qui.
-#:
-#: `QApplication.instance() or QApplication([])` dentro la fixture non basta:
-#: l'oggetto C++ e' di proprieta' di Python, quindi alla fine del test il
-#: riferimento locale sparisce, la QApplication viene DISTRUTTA e il test dopo
-#: ne costruisce un'altra. Distruggerla fa invalidare a sip tutti i wrapper
-#: esistenti mentre i filtri di evento Python (AnalysisOverlay ne installa uno)
-#: ne creano di nuovi: la tabella interna di sip viene riallocata durante la
-#: propria visita e resta un puntatore liberato. Da li' in poi `findChildren`
-#: puo' restituire oggetti gia' distrutti, e il primo che li tocca in massa --
-#: la ripassata delle traduzioni in `MainWindow.__init__` -- muore di
-#: segmentation fault a caso durante la sessione. Misurato in questo
-#: contenitore: circa 1 esecuzione su 2 del file falliva cosi', 0 su 12 dopo.
-#:
-#: E' il legame di modulo a risolvere il problema: e' lui che tiene viva la
-#: QApplication fra un test e l'altro. Riusare `_APP` come RIPIEGO quando
-#: `QApplication.instance()` e' None sarebbe invece il contrario di una rete di
-#: sicurezza: quel caso si presenta esattamente quando l'oggetto C++ e' stato
-#: distrutto sotto un riferimento Python ancora vivo, e un wrapper sip morto
-#: resta vero in un `or` (i wrapper non definiscono `__bool__`). Si
-#: restituirebbe una QApplication DISTRUTTA e ogni test successivo morirebbe
-#: con «wrapped C/C++ object ... has been deleted» invece di ricostruirla.
-_APP = None
-
-
-@pytest.fixture
-def window(monkeypatch, tmp_path):
-    global _APP
-    app = _APP = QApplication.instance() or QApplication([])
-    monkeypatch.setattr(gui, "Preview3DVtk", PreviewStub)
-    monkeypatch.setattr(gui, "load_config", lambda: {"component_type": "", "system_prompt": ""})
-    monkeypatch.setattr(gui, "save_config", lambda config: None)
-    monkeypatch.setattr(QMessageBox, "information", lambda *args: None)
-    monkeypatch.setattr(gui, "DEFAULT_LIBRARY_ROOT", tmp_path)
-    # Questi test simulano chi ha gia' configurato l'AI: dal 26/09 i comandi a
-    # pagamento chiedono la chiave prima di partire (`_ensure_api_key`). Una
-    # chiave finta, mai usata in rete (i lavori AI sono sostituiti nei test);
-    # il caso senza chiave ha i suoi test in test_ai_account_menu.py.
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test-fixture")
-    w = gui.MainWindow()
-    # Geometry/lifecycle tests inject their document selection independently of
-    # the guided uploader; uploader integration has dedicated tests.
-    def selected_documents():
-        paths = [w._docs_dir() / w.docs_list.item(i).text() for i in range(w.docs_list.count())
-                 if w.docs_list.item(i).checkState() == Qt.CheckState.Checked]
-        if not paths:
-            raise ValueError('Nessun documento nel test.')
-        return paths, None
-    monkeypatch.setattr(w, '_selected_documents', selected_documents)
-    # Dal 26/09 l'analisi non parte senza tipologia (_extract_block_reason).
-    # Questi test riguardano altro e girano con la tipologia «(non
-    # specificata)» di sempre: qui conta solo il nome. La regola ha i suoi
-    # test in test_type_required.py, che rimettono il metodo vero.
-    # Anche le quote della scheda: dal 26/09 sono «ignote» finche' un'analisi o
-    # l'utente non le dichiarano, e il pretest le chiederebbe con una modale.
-    # Questi test partono con le quote dei campi, come prima; il caso delle
-    # quote ignote ha i suoi test in test_board_size_known.py.
-    w._board_size_known = True
-    # Dal 26/09 lo stile dei contatti castellated che la foto non mostra si
-    # CHIEDE all'utente con una piccola finestra modale. Questi test simulano
-    # chi risponde «Mezzo foro + foro passante», lo stile che prima veniva
-    # messo da solo: i loro contratti restano quelli di prima. La domanda, la
-    # rinuncia e il blocco hanno i loro test in test_contact_style_gui.py.
-    monkeypatch.setattr(w, '_ask_contact_style', lambda sides: gui.default_contact_style())
-    monkeypatch.setattr(w, '_extract_block_reason',
-                        lambda: "" if w._component_name() else
-                        "Crea o apri prima un progetto (menu File).")
-    # Il campo del nome nasce vuoto e senza nome non si carica ne' si estrae
-    # nulla: questi test riguardano altro, quindi partono come chi ha gia'
-    # scritto il nome. Il blocco ha i suoi test dedicati.
-    w.field_name.setText("Componente_di_prova")
-    yield w
-    w.close()
-    app.processEvents()
+# The `window` fixture, the `PreviewStub` viewer and `shutdown_main_window`
+# live in tests/qt_fixtures.py (registered by conftest.py); the names stay
+# importable from here for the modules that already do so.
+from qt_fixtures import PreviewStub, shutdown_main_window  # noqa: E402,F401 - re-exported
 
 
 def test_progress_is_visible_on_project_tab_and_literal(window):
@@ -368,7 +291,7 @@ def test_output_handlers_do_not_open_or_export_without_footprint(window, monkeyp
     warnings = []
     monkeypatch.setattr(gui.QMessageBox, "warning", lambda *args: warnings.append(args))
     window._open_project_dir()
-    window._export_component()
+    window._install_project_library()
     assert calls == []
     assert len(warnings) == 1
 
@@ -385,7 +308,8 @@ def _write_complete_kicad_output(window):
         '\t(generator "test")\n\t(layer "F.Cu")\n)\n',
         encoding="utf-8",
     )
-    step.write_bytes(b"STEP")
+    # A complete STEP: the KiCad tab refuses one without the ISO trailer.
+    step.write_bytes(b"ISO-10303-21;\nEND-ISO-10303-21;\n")
     window._refresh_output_actions()
     return footprint, step
 

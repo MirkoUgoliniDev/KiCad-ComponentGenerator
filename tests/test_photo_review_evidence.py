@@ -16,8 +16,8 @@ from kicadgen.gui.photo_review_dialog import PhotoReviewDialog
 
 
 @pytest.fixture
-def editor():
-    app = QApplication.instance() or QApplication([])
+def editor(qapp):
+    app = qapp
     image = QImage(400, 100, QImage.Format.Format_RGB32)
     image.fill(0)
     data = QByteArray()

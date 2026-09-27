@@ -42,6 +42,8 @@ from __future__ import annotations
 import dataclasses
 import math
 
+from ..core.validation import finite_number, positive_number
+
 from ..generators.castellated_module import (
     CONTACT_HALF_AND_THROUGH, CONTACT_HALF_HOLE, CONTACT_STYLES, CONTACT_THROUGH_HOLE,
     AssumedSize, CastellatedModuleParams, CastellatedSide,
@@ -63,13 +65,6 @@ _BAND_TOLERANCE = 0.5
 _LABEL_GAP_MM = 0.55
 
 
-def _number(value, minimum=0.0):
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    value = float(value)
-    return value if math.isfinite(value) and value > minimum else None
-
-
 def _read(side, *names):
     """First non-None value among `names`, read from a dict or an object's attributes."""
     for name in names:
@@ -82,7 +77,7 @@ def _read(side, *names):
 def _side_value(side, *names):
     """First positive finite value among `names`, read from a dict or an object."""
     for name in names:
-        number = _number(_read(side, name))
+        number = positive_number(_read(side, name))
         if number is not None:
             return number
     return None
@@ -126,7 +121,7 @@ def _module_size(data, key):
     value was read or derived; otherwise an AssumedSize, so that a per-side
     estimate still outranks it and a read row spacing can reduce it.
     """
-    value = _number(data.get(key))
+    value = positive_number(data.get(key))
     if value is None:
         return None
     sources = data.get('value_sources')
@@ -188,7 +183,7 @@ def declared_module(data, length_mm, width_mm):
         # Stima o valore senza provenienza = AssumedSize (vedi _module_size).
         thru_hole_drill=_module_size(declared, 'drill_mm'),
         thru_pad_diameter=_module_size(declared, 'pad_diameter_mm'),
-        row_spacing=_number(declared.get('row_spacing_mm')))
+        row_spacing=positive_number(declared.get('row_spacing_mm')))
     return module, pairs
 
 
@@ -211,7 +206,7 @@ def _pad_length(side, data, pitch):
     `pitch` stays in the signature for the callers.
     """
     return (_side_value(side, 'pad_length_mm', 'pad_length')
-            or _number(data.get('pad_length_mm')) or 0.0)
+            or positive_number(data.get('pad_length_mm')) or 0.0)
 
 
 def _continuous_pad_depth(side, data, pitch, geometry):
@@ -285,9 +280,9 @@ def _declared_hole(side, data):
     in quel caso la larghezza della piazzola e' la misura trasversale nota.
     """
     return (_side_value(side, 'half_hole_diameter_mm', 'hole_diameter_mm')
-            or _number(data.get('drill_mm'))
+            or positive_number(data.get('drill_mm'))
             or _side_value(side, 'pad_width_mm', 'pad_width')
-            or _number(data.get('pad_diameter_mm')) or 0.0)
+            or positive_number(data.get('pad_diameter_mm')) or 0.0)
 
 
 def _through_hole_depth(geometry):
@@ -327,7 +322,7 @@ def contact_positions(data, length_mm, width_mm):
     module, pairs = declared_module(data, length_mm, width_mm)
     for side, built in pairs:
         edge, count, pitch = built.edge, built.count, float(built.pitch)
-        offset = _number(_read(side, 'offset_mm', 'offset'), minimum=-math.inf) or 0.0
+        offset = finite_number(_read(side, 'offset_mm', 'offset')) or 0.0
         # La striscia descrive il contatto che il lato offre davvero: la
         # piazzola di bordo (default, e tipi con semi-foro) oppure la corona
         # arretrata di un foro passante.
@@ -399,10 +394,10 @@ def _matrix_positions(data, length_mm, width_mm):
         exactly as they will be drawn, and an empty grid position is not a pin.
     """
     rows, cols = data.get('rows'), data.get('cols')
-    pitch = _number(data.get('pitch_mm'))
-    spacing = _number(data.get('row_spacing_mm'))
-    offset_x = _number(data.get('body_offset_x_mm'), minimum=-math.inf)
-    offset_y = _number(data.get('body_offset_y_mm'), minimum=-math.inf)
+    pitch = positive_number(data.get('pitch_mm'))
+    spacing = positive_number(data.get('row_spacing_mm'))
+    offset_x = finite_number(data.get('body_offset_x_mm'))
+    offset_y = finite_number(data.get('body_offset_y_mm'))
     if not (isinstance(rows, int) and not isinstance(rows, bool) and rows >= 1
             and isinstance(cols, int) and not isinstance(cols, bool) and cols >= 1
             and pitch is not None and (spacing is not None or rows == 1)
@@ -457,8 +452,8 @@ def contact_rects_mm(positions, length_mm, width_mm):
     rects = []
     for contact in positions or ():
         edge = contact.get('edge')
-        pitch = _number(contact.get('pitch_mm'))
-        depth = _number(contact.get('depth_mm')) or pitch
+        pitch = positive_number(contact.get('pitch_mm'))
+        depth = positive_number(contact.get('depth_mm')) or pitch
         if edge not in ('left', 'right', 'top', 'bottom') or pitch is None:
             continue
         reach = pitch * _BAND_TOLERANCE

@@ -13,7 +13,7 @@ pytest.importorskip("PyQt6")
 
 from kicadgen.services.analysis_profiles import ProfileStore
 from kicadgen.services.i18n import DEFAULT_TRANSLATIONS
-from tests.test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from tests.test_photo_inventory_gui import gui
 
 
 def _choose(window, key):  # noqa: F811

@@ -215,6 +215,11 @@ def _run_launcher(monkeypatch, tmp_path, dotenv_text):
     launcher = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(launcher)
     monkeypatch.setattr(launcher, "_project_python", lambda root: None)
+    # main() installs the application's crash hooks; registered here so the
+    # test restores them (the test harness keeps its own hook, HANDOFF 131).
+    import threading
+    monkeypatch.setattr(sys, "excepthook", sys.excepthook)
+    monkeypatch.setattr(threading, "excepthook", threading.excepthook)
     monkeypatch.setattr(launcher.sys, "argv", ["main.py"])
     # setenv first, so teardown removes whatever load_dotenv puts there.
     monkeypatch.setenv("KICADGEN_TEST_OTHER", "segnaposto")
@@ -223,7 +228,13 @@ def _run_launcher(monkeypatch, tmp_path, dotenv_text):
         if name not in os.environ:
             monkeypatch.setenv(name, "segnaposto")
             monkeypatch.delenv(name)
-    assert launcher.main() == 0
+    from kicadgen import crash_report
+    try:
+        assert launcher.main() == 0
+    finally:
+        # main() installed the crash reports for this test's data folder: a
+        # later test must not inherit them (their report folder is gone).
+        crash_report.uninstall()
 
 
 def test_the_launcher_loads_other_variables_but_not_the_dotenv_key(monkeypatch, tmp_path):

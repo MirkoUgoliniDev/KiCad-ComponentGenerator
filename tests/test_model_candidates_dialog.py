@@ -13,14 +13,9 @@ import pytest
 pytest.importorskip('PyQt6')
 from PyQt6.QtCore import QThreadPool
 from PyQt6.QtGui import QColor, QImage, QPixmap
-from PyQt6.QtWidgets import QApplication, QDialog, QDialogButtonBox
+from PyQt6.QtWidgets import QDialog, QDialogButtonBox
 
 from kicadgen.gui import model_candidates_dialog as gui
-
-
-@pytest.fixture(scope='module')
-def app():
-    return QApplication.instance() or QApplication([])
 
 
 @pytest.fixture

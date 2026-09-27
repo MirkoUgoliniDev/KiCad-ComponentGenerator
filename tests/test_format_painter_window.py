@@ -1,5 +1,5 @@
 """@brief The «Copia formato» toggle of the 3D toolbar (user, 2026-09-27)."""
-from tests.test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from tests.test_photo_inventory_gui import gui
 
 
 def _rows():

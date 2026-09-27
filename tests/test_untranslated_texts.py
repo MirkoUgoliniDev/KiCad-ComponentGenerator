@@ -7,7 +7,7 @@ avevano voce di catalogo. Negativo: in italiano restano quelli di sempre.
 """
 from PyQt6.QtWidgets import QGroupBox, QLabel
 
-from test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from test_photo_inventory_gui import gui
 
 
 def _switch(window, language):  # noqa: F811

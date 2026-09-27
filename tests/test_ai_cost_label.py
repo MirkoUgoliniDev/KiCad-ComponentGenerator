@@ -7,7 +7,7 @@ resta scritto nel Log AI, che e' lo storico; `_cost_line` lo legge da li'.
 
 import pytest
 
-from test_photo_inventory_gui import window, gui
+from test_photo_inventory_gui import gui
 from kicadgen.services import openrouter
 
 

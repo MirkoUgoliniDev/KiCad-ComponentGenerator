@@ -97,6 +97,12 @@ class ProfileStore:
             path = data_file('analysis_profiles.sqlite3', seed=True)
         self.path = Path(path or os.environ['KICADGEN_PROFILE_DB'])
         self.path.parent.mkdir(parents=True,exist_ok=True)
+        # In-memory translation catalog, one dict per language loaded with a
+        # single query (see translation). Tagged with the database file
+        # signature it was read from, so a write by another store or process
+        # drops it on the next lookup.
+        self._translations = {}
+        self._translations_signature = None
         self._initialize(legacy_config,Path(legacy_path) if legacy_path else None)
 
     @contextmanager
@@ -162,13 +168,33 @@ class ProfileStore:
             if db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchone():
                 raise ProfileError(tx("Database esistente senza versione riconosciuta: migrazione interrotta."))
             backup = None
+            legacy_problem = ''
+            raw = None
             if legacy_path and legacy_path.is_file():
-                raw = legacy_path.read_bytes()
-                # A corrupt source must not silently become a new empty configuration.
-                parsed = json.loads(raw)
-                if not isinstance(parsed,dict):
-                    raise ProfileError(tx("La configurazione precedente non è un oggetto JSON."))
-                if legacy is None:
+                try:
+                    raw = legacy_path.read_bytes()
+                except OSError as exc:
+                    # Unreadable legacy file: nothing to import or back up.
+                    # Only the error class is recorded: the message carries
+                    # the absolute path (user name), and the database is
+                    # committed to the repository.
+                    legacy_problem = f'unreadable: {type(exc).__name__}'
+            if raw is not None:
+                # A corrupt or truncated legacy config (e.g. a crash during an
+                # old non-atomic save) must not block the first start. Its
+                # bytes are still backed up below, so any custom prompt it
+                # contained stays recoverable, and the metadata records why
+                # nothing was imported: the replacement is never silent.
+                try:
+                    parsed = json.loads(raw)
+                except ValueError as exc:  # JSONDecodeError and UnicodeDecodeError
+                    parsed, legacy_problem = None, f'corrupt: {type(exc).__name__}'
+                if parsed is not None and not isinstance(parsed, dict):
+                    parsed, legacy_problem = None, 'corrupt: not a JSON object'
+                # With a broken file the caller's in-memory config (if any) is
+                # used as is: it is what load_config fell back to, exactly as
+                # on a first start without any config.json.
+                if parsed is not None and legacy is None:
                     legacy = parsed
                 digest = hashlib.sha256(raw).hexdigest()[:16]
                 backup = self.path.parent/f'config-before-sqlite-{digest}.json'
@@ -201,28 +227,82 @@ class ProfileStore:
             for index,t in enumerate(COMPONENT_TYPES):
                 db.execute('INSERT INTO component_types VALUES (?,?,?,?,1,1,?)',
                            (t.key,t.label,t.key,t.prompt,index))
-            db.execute('INSERT INTO metadata VALUES (?,?)',('legacy_backup',str(backup or '')))
+            # File name only: the backup always sits next to the database, and
+            # an absolute path would put the user name in a committed file.
+            db.execute('INSERT INTO metadata VALUES (?,?)',('legacy_backup',backup.name if backup else ''))
+            if legacy_problem:
+                db.execute('INSERT INTO metadata VALUES (?,?)',('legacy_import_skipped',legacy_problem))
             db.executemany('INSERT INTO translations VALUES (?,?,?)', _default_translations())
             db.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
 
+    def _database_signature(self):
+        """Modification time and size of the database file; None when it cannot be read."""
+        try:
+            stat = self.path.stat()
+        except OSError:
+            return None
+        return (stat.st_mtime_ns, stat.st_size)
+
+    def _language_catalog(self, language):
+        """All translations of `language` as a dict, read with one query and cached."""
+        signature = self._database_signature()
+        if signature is None or signature != self._translations_signature:
+            self._translations = {}
+            self._translations_signature = signature
+        catalog = self._translations.get(language)
+        if catalog is None:
+            with self._connect() as db:
+                catalog = dict(db.execute('SELECT key,text FROM translations WHERE language=?',
+                                          (language,)).fetchall())
+            # Tagged with the signature seen BEFORE the read: a write that
+            # lands during the read changes the file, and the next lookup
+            # reloads instead of keeping a catalog older than its tag.
+            self._translations[language] = catalog
+        return catalog
+
+    def invalidate_translations(self):
+        """@brief Drop the in-memory translation cache; the next lookup reads the database.
+
+        @note Lookups already drop it when the database file changes (another
+            store or process wrote it); call this after writing the file by
+            other means within the same timestamp resolution.
+        """
+        self._translations = {}
+        self._translations_signature = None
+
     def translation(self, key, language, fallback=None):
-        """@brief Resolve one translation with an English fallback."""
+        """@brief Resolve one translation with an English fallback.
+
+        @param key Translation key.
+        @param language Language code; an unsupported one reads English.
+        @param fallback Text returned when the key has no row in `language`;
+            None falls back to the English row, then to the key itself.
+        @return The translated text.
+        @note Served from an in-memory catalog: one database query per
+            language, not one connection per string (about 300 strings per
+            main window). save_translation updates the cache at once, and a
+            change of the database file (size or modification time) made
+            elsewhere drops it on the next lookup.
+        """
         from .i18n import LANGUAGES
         if language not in LANGUAGES:
             language = 'en'
-        with self._connect() as db:
-            row = db.execute('SELECT text FROM translations WHERE key=? AND language=?',
-                             (key, language)).fetchone()
-            if row:
-                return row['text']
-            if fallback is not None:
-                return fallback
-            row = db.execute('SELECT text FROM translations WHERE key=? AND language=?',
-                             (key, 'en')).fetchone()
-            return row['text'] if row else key
+        text = self._language_catalog(language).get(key)
+        if text is not None:
+            return text
+        if fallback is not None:
+            return fallback
+        return self._language_catalog('en').get(key, key)
 
     def save_translation(self, key, language, text):
-        """@brief Create or update one translation in the catalog."""
+        """@brief Create or update one translation in the catalog.
+
+        @param key Translation key.
+        @param language Supported language code.
+        @param text New non-blank text.
+        @throws ProfileError When key, language or text is invalid.
+        @note The new text is visible to the next `translation` call at once.
+        """
         from .i18n import LANGUAGES
         if not key or language not in LANGUAGES or not isinstance(text, str) or not text.strip():
             raise ProfileError('Translation key, language and text are required.')
@@ -230,6 +310,7 @@ class ProfileStore:
             db.execute('INSERT INTO translations(key,language,text) VALUES (?,?,?) '
                        'ON CONFLICT(key,language) DO UPDATE SET text=excluded.text',
                        (key, language, text))
+        self.invalidate_translations()
 
     def list_translations(self, language=None):
         """@brief List translation rows, optionally filtered by language."""

@@ -20,7 +20,6 @@ from PyQt6.QtWidgets import QDialog, QMessageBox
 from kicadgen.gui import main_window as gui
 from kicadgen.services import photo_inventory as inv
 from kicadgen.services.datasheet_extractor import ExtractedParams
-from tests.test_photo_inventory_gui import window  # noqa: F401 - fixture condivisa
 
 import kicadgen.gui.yolo_review_dialog as review_module
 

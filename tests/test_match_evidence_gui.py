@@ -1,5 +1,4 @@
 """@brief Keep photographic matching evidence across the stored photo components."""
-from test_photo_inventory_gui import window
 
 
 def test_matching_evidence_roundtrip(window):

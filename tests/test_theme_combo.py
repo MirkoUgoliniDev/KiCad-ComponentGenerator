@@ -8,14 +8,14 @@ import pytest
 pytest.importorskip("PyQt6")
 from PyQt6.QtCore import Qt
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QComboBox, QStyle, QStyleOptionComboBox
+from PyQt6.QtWidgets import QComboBox, QStyle, QStyleOptionComboBox
 
 from kicadgen.gui.theme import APP_QSS
 
 
 @pytest.mark.parametrize("editable", [False, True])
-def test_arrow_is_rendered_and_opens_popup(editable):
-    app = QApplication.instance() or QApplication([])
+def test_arrow_is_rendered_and_opens_popup(qapp, editable):
+    app = qapp
     combo = QComboBox()
     combo.setStyleSheet(APP_QSS)
     combo.setEditable(editable)

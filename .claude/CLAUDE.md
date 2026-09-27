@@ -222,7 +222,10 @@ view with a non-modal popup; points 118-123: marking reading, structural contact
 DeepSeek direct API as second provider; points 124-128: AI bodies checked against the
 local detector, recount of contradicted sides only, DeepSeek cost as tokens x official
 price, project cost split by provider; point 129: «Account AI» lists every provider's
-key with its balance, DeepSeek key in the Credential Manager) is 5677 passed,
+key with its balance, DeepSeek key in the Credential Manager; point 131: all review-130
+findings in blocks A-D — atomic preferences, DeepSeek retries, 3D output staging, test
+infrastructure with network guard and Qt message handler, dead code removed, shared
+validation helpers, workers module, mesh preparation off the GUI thread) is 5684 passed,
 6 skipped, 2 expected failures and 19 subtests, run in two halves (HANDOFF point 113:
 the single-process run can die at random with a native Qt/VTK crash). The last packaging integration was merge
 commit `692ca95` on `main`. Keep these values aligned with HANDOFF.md.

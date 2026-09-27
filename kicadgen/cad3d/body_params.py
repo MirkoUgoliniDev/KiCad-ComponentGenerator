@@ -16,22 +16,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+
+from ..core.validation import is_finite_number, positive_number
 from ..services.messages import tx
-
-
-def _finite(value) -> bool:
-    """True for a finite real number (bool excluded)."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return False
-    try:
-        return math.isfinite(value)
-    except OverflowError:
-        return False
 
 
 def _positive(value) -> bool:
     """True for a finite number > 0: `value <= 0` alone lets NaN through."""
-    return _finite(value) and value > 0
+    return positive_number(value) is not None
 
 
 @dataclass
@@ -81,7 +73,7 @@ class Body3DParams:
                 tx("Le dimensioni del corpo (lunghezza/larghezza/altezza) devono essere > "
                    "0.")
             )
-        if not all(_finite(v) for v in (self.offset_x_mm, self.offset_y_mm)):
+        if not all(is_finite_number(v) for v in (self.offset_x_mm, self.offset_y_mm)):
             raise ValueError(tx("Lo scostamento del corpo (offset X/Y) deve essere un numero "
                                 "finito."))
         if not _positive(self.pin_diameter_mm):

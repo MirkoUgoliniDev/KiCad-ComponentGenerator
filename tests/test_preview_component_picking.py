@@ -208,10 +208,9 @@ def test_empty_space_and_unknown_actors_open_no_component_menu():
 # ── tasto destro: click contro zoom a trascinamento ──────────────────
 
 @pytest.fixture
-def right_click_view():
+def right_click_view(qapp):
     """Widget vero: l'evento del tasto destro va provato sul suo percorso Qt."""
-    from PyQt6.QtWidgets import QApplication
-    app = QApplication.instance() or QApplication([])
+    app = qapp
     view = Preview3DVtk()
     view.resize(400, 300)
     view.show()
@@ -280,9 +279,8 @@ def test_the_keyboard_menu_key_still_works_on_its_own(right_click_view):
 # ── Copia formato: the still left click (user, 27/09) ───────────────────
 
 @pytest.fixture
-def live_view():
-    from PyQt6.QtWidgets import QApplication
-    app = QApplication.instance() or QApplication([])
+def live_view(qapp):
+    app = qapp
     view = Preview3DVtk()
     view.resize(400, 300)
     view.show()

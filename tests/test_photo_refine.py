@@ -19,7 +19,7 @@ import pytest
 cv2 = pytest.importorskip("cv2", reason="opencv-python non installato")
 
 from kicadgen.services.photo_refine import (
-    aspect_deformation, find_board, refine_component_edges, refine_components,
+    aspect_deformation, find_board, isotropic_board, refine_component_edges, refine_on_frame,
 )
 
 # Scala fissa per tutte le immagini sintetiche: 20 px/mm.
@@ -140,46 +140,50 @@ def test_edges_reject_a_match_too_far_from_the_guess():
     assert measured is None
 
 
-# ── refine_components (integrazione, con file su disco) ──────────────
+# ── refine_on_frame (integrazione: scheda trovata, poi misura) ───────
 
-def test_refine_components_end_to_end(tmp_path):
+def _refine_photo(img, components):
+    """@brief Locate the board, square the pixels and measure, as the live path does."""
+    frame = find_board(img, BODY_LENGTH_MM, BODY_WIDTH_MM)
+    if frame is None:
+        return refine_on_frame(img, None, components)
+    image, frame = isotropic_board(img, frame, BODY_LENGTH_MM, BODY_WIDTH_MM)
+    return refine_on_frame(image, frame, components)
+
+
+def test_refine_on_frame_end_to_end():
     img = _synthetic_photo((-6.0, 4.0), (2.5, 1.2), rotated=True)
-    photo = tmp_path / "top.png"
-    cv2.imwrite(str(photo), img)
 
     components = [
         {"name": "D1", "kind": "diode_melf", "x_mm": -6.0, "y_mm": 4.0,
          "length_mm": 2.5, "width_mm": 1.2, "height_mm": 1.0, "rotation_deg": 0.0},
     ]
-    refined, report = refine_components([photo], BODY_LENGTH_MM, BODY_WIDTH_MM, components)
-    assert report.photo == str(photo)
-    assert report.measured == 1
+    refined, report = _refine_photo(img, components)
+    assert report.measured == 1 and not report.failed
     assert refined[0]["rotation_deg"] == 90.0
-    # Il componente originale non viene mutato: refine_components lavora su copie.
+    # Il componente originale non viene mutato: refine_on_frame lavora su copie.
     assert components[0]["rotation_deg"] == 0.0
 
 
-def test_refine_components_skips_when_no_photo_matches(tmp_path):
+def test_refine_on_frame_keeps_estimates_without_a_board_frame():
     components = [
         {"name": "D1", "x_mm": 0.0, "y_mm": 0.0, "length_mm": 2.0, "width_mm": 1.0,
          "height_mm": 1.0, "rotation_deg": 0.0},
     ]
-    refined, report = refine_components([], BODY_LENGTH_MM, BODY_WIDTH_MM, components)
-    assert report.photo is None
+    refined, report = refine_on_frame(np.zeros((50, 100, 3), np.uint8), None, components)
+    assert report.measured == 0 and not report.skipped and not report.failed
     assert refined == components
 
 
-def test_refine_components_preserves_name_kind_and_marking(tmp_path):
+def test_refine_on_frame_preserves_name_kind_and_marking():
     """Solo la geometria si corregge: identita' e aspetto del componente restano."""
     img = _synthetic_photo((0.0, 0.0), (2.0, 2.0), rotated=False, board_gray=20, component_gray=60)
-    photo = tmp_path / "top.png"
-    cv2.imwrite(str(photo), img)
     components = [{
         "name": "SP3485E", "kind": "ic_soic", "marking": "SP3485E", "color_hex": "#1a1a1a",
         "x_mm": 0.0, "y_mm": 0.0, "length_mm": 2.0, "width_mm": 2.0,
         "height_mm": 1.2, "rotation_deg": 0.0,
     }]
-    refined, _ = refine_components([photo], BODY_LENGTH_MM, BODY_WIDTH_MM, components)
+    refined, _ = _refine_photo(img, components)
     assert refined[0]["name"] == "SP3485E"
     assert refined[0]["kind"] == "ic_soic"
     assert refined[0]["marking"] == "SP3485E"
@@ -346,3 +350,76 @@ def test_a_body_laid_straight_keeps_a_cardinal_angle():
         "x_mm": 0.0, "y_mm": 0.0, "length_mm": 6.0, "width_mm": 2.0, "rotation_deg": 0.0})
     assert measured is not None
     assert measured["rotation_deg"] == 0.0
+
+
+# ── F6: an unexpected error is a defect, not an unclear contour ─────────────
+
+def _frame_and_components():
+    from unittest.mock import Mock
+    frame = Mock(width_px=200, scale=10.0)
+    components = [dict(name="A", x_mm=0.0, y_mm=0.0, length_mm=2.0, width_mm=1.0),
+                  dict(name="B", x_mm=5.0, y_mm=0.0, length_mm=2.0, width_mm=1.0)]
+    return frame, components
+
+
+def test_an_unexpected_measurement_error_is_counted_as_a_failure(monkeypatch):
+    """Positivo: un AttributeError (difetto del codice) non diventa «bordi non chiari»."""
+    from kicadgen.services import photo_refine as refine
+    frame, components = _frame_and_components()
+    monkeypatch.setattr(refine, "_forbidden_mask", lambda *args: None)
+
+    def edges(image, frame, component, *args):
+        if component["name"] == "A":
+            raise AttributeError("bug in the measurement")
+        return dict(x_mm=5.1)
+    monkeypatch.setattr(refine, "refine_component_edges", edges)
+    result, report = refine_on_frame(np.zeros((100, 200, 3), np.uint8), frame, components)
+    assert report.failed == ["A: AttributeError: bug in the measurement"]
+    assert report.skipped == [] and report.measured == 1
+    # The estimate of the failed one is kept, the other one is still measured.
+    assert result[0] == components[0] and result[1]["x_mm"] == 5.1
+
+
+@pytest.mark.parametrize("error", [ValueError("degenerate"), KeyError("length_mm"),
+                                   OverflowError("inf"), TypeError("None")])
+def test_an_expected_measurement_error_only_skips_the_component(monkeypatch, error):
+    """Negativo: geometria non misurabile o finestra degenere resta «lasciato stimato»."""
+    from kicadgen.services import photo_refine as refine
+    frame, components = _frame_and_components()
+    monkeypatch.setattr(refine, "_forbidden_mask", lambda *args: None)
+
+    def edges(*args):
+        raise error
+    monkeypatch.setattr(refine, "refine_component_edges", edges)
+    result, report = refine_on_frame(np.zeros((100, 200, 3), np.uint8), frame, components)
+    assert report.failed == [] and report.skipped == ["A", "B"] and result == components
+
+
+def test_the_opencv_error_is_an_expected_one():
+    from kicadgen.services import photo_refine as refine
+    assert cv2.error in refine._expected_measure_errors()
+    assert AttributeError not in refine._expected_measure_errors()
+
+
+def test_the_inventory_log_names_an_unexpected_failure(monkeypatch):
+    """La riga del log dice «errore inatteso» solo quando c'e' davvero."""
+    from kicadgen.services import photo_inventory as inventory
+    from kicadgen.services import photo_refine as refine
+    from kicadgen.services.messages import WARNING, kind_of
+    from unittest.mock import Mock
+    frame = Mock(width_px=200, scale=10.0)
+    monkeypatch.setattr(refine, "isotropic_crop_frame", lambda image, *a: (image, frame))
+    monkeypatch.setattr(refine, "_forbidden_mask", lambda *args: None)
+    proposals = [dict(name="A", x_mm=0.0, y_mm=0.0, length_mm=2.0, width_mm=1.0, rotation_deg=0)]
+    for failing, expected in ((True, 1), (False, 0)):
+        def edges(*args):
+            if failing:
+                raise AttributeError("bug")
+            return None
+        monkeypatch.setattr(refine, "refine_component_edges", edges)
+        logs = []
+        inventory.measure_proposal_edges(np.zeros((100, 200, 3), np.uint8), proposals, [],
+                                         40.0, 16.0, logs.append)
+        failures = [line for line in logs if "errore inatteso" in str(line)]
+        assert len(failures) == expected
+        assert all(kind_of(line) == WARNING for line in failures)

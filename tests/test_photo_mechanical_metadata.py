@@ -235,19 +235,18 @@ def test_terminal_unresolved_and_refine_skip_preserve_metadata():
                             body_bbox=[0, 0, 1, 1], terminals=[])]})
     result = terminals.observe_terminals(png.tobytes(), [c], "offline", call, lambda _: None)
     assert result == [c] and result[0] is not c
-    assert refine.refine_components([], 40, 20, result)[0] == [c]
+    # Without a board frame the live measurement keeps every estimate as is.
+    assert refine.refine_on_frame(None, None, result)[0] == [c]
 
 
 def test_refined_box_invalidates_only_box_evidence(monkeypatch):
     # La finestra di ricerca si ricava dalla scala della foto, quindi il
     # riferimento finto deve averla come quello vero.
     frame = Mock(width_px=200, scale=10.0)
-    monkeypatch.setattr(refine.cv2, "imread", lambda _: np.zeros((100, 200, 3), np.uint8))
-    monkeypatch.setattr(refine, "find_board", lambda *args: frame)
     monkeypatch.setattr(refine, "_forbidden_mask", lambda *args: None)
     monkeypatch.setattr(refine, "refine_component_edges", lambda *args: dict(length_mm=7.5))
     c = component(**META)
-    result, report = refine.refine_components(["offline.png"], 40, 20, [c])
+    result, report = refine.refine_on_frame(np.zeros((100, 200, 3), np.uint8), frame, [c])
     assert report.measured == 1 and result[0]["bbox_basis"] == "unknown"
     assert "package_evidence" not in result[0]
     assert result[0]["package"] == META["package"] and result[0]["mating"] == "top"

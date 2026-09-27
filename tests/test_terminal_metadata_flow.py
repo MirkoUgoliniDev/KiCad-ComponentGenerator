@@ -30,11 +30,11 @@ def geometry():
 
 
 @pytest.fixture
-def window(monkeypatch, tmp_path):
+def window(qapp, monkeypatch, tmp_path):
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     pytest.importorskip("PyQt6")
     pytest.importorskip("pyvistaqt")
-    from PyQt6.QtWidgets import QApplication, QMessageBox, QWidget
+    from PyQt6.QtWidgets import QMessageBox, QWidget
     from kicadgen.gui import main_window as gui
 
     class PreviewStub(QWidget):
@@ -44,7 +44,7 @@ def window(monkeypatch, tmp_path):
         def render_mesh(self, path): pass
         def set_pin_numbers(self, checked): pass
 
-    app = QApplication.instance() or QApplication([])
+    app = qapp
     monkeypatch.setattr(gui, "Preview3DVtk", PreviewStub)
     monkeypatch.setattr(gui, "load_config", lambda: {"component_type": "", "system_prompt": ""})
     monkeypatch.setattr(gui, "save_config", lambda config: None)

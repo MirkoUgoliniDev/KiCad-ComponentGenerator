@@ -15,7 +15,7 @@ import sqlite3
 import pytest
 from PIL import Image
 
-from test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from test_photo_inventory_gui import gui
 from kicadgen.services import datasheet_extractor as ext
 from kicadgen.services.analysis_profiles import ProfileStore
 from kicadgen.services.document_roles import DocumentSet

@@ -781,17 +781,6 @@ def test_absent_or_invalid_top_photo_never_calls_grounding(monkeypatch, source):
     assert not result.components and result.warnings and call.call_count == 0
 
 
-def audit_vote(identifier=1, duplicate_of=0, **updates):
-    return vote(identifier, duplicate_of=duplicate_of, **updates)
-
-
-def run_reconciliation(photo, components, entries, *, log=None, cache_dir=None):
-    call = Mock(return_value={"components": entries})
-    result = grounding.reconcile_packages(photo, components, "context-model", 40, 20,
-                                          KINDS, call, log or (lambda message: None), cache_dir)
-    return result, call
-
-
 @pytest.mark.parametrize("initial,reviewed,conflict", [
     ("resistor", "capacitor", True), ("resistor", "generic", True),
     ("generic", "capacitor", False), ("resistor", "resistor", False),
@@ -811,171 +800,7 @@ def test_kind_disagreement_is_flagged_without_changing_grounded_geometry(initial
         assert result["name"] == original["name"] and result["confidence"] == "low"
 
 
-def test_reconciliation_skips_confident_nonoverlapping_components(photo):
-    items = [dict(component(1), _uncertain=False),
-             dict(component(2, [600, 600, 800, 800]), _uncertain=False)]
-    result, call = run_reconciliation(photo, items, [])
-    assert result is items and call.call_count == 0
-    result, call = run_reconciliation(photo, [], [])
-    assert result == [] and call.call_count == 0
-
-
-def test_reconciliation_valid_overlap_duplicate_keeps_target_extent_and_metadata(photo):
-    items = [component(11), component(42, [210, 110, 390, 290])]
-    before = deepcopy(items)
-    result, call = run_reconciliation(photo, items, [
-        audit_vote(11, duplicate_of=42, marking="ignored", _box=(0, 0, 1, 1)),
-        audit_vote(42, name="Complete target", marking="ignored")])
-    assert call.call_count == 1 and [c["_id"] for c in result] == [42]
-    for key in ("_box", "x_mm", "y_mm", "length_mm", "width_mm"):
-        assert result[0][key] == before[1][key]
-    assert result[0]["name"] == "Complete target" and result[0]["marking"] == ""
-    assert items == before
-
-
-@pytest.mark.parametrize("left,right,removed", [
-    (500, 600, False),  # separate body
-    (200, 300, False),  # touching is zero intersection
-    (175, 275, False),  # 25% of smaller box is below threshold
-    (125, 225, True),   # 75% overlap permits a duplicate vote
-])
-def test_reconciliation_duplicate_requires_physical_overlap(photo, left, right, removed):
-    items = [component(1, [200, 100, 400, 200]), component(2, [200, left, 400, right])]
-    result, _ = run_reconciliation(photo, items, [audit_vote(1, 2, rotation_deg=90),
-                                                audit_vote(2, rotation_deg=90)])
-    assert [c["_id"] for c in result] == ([2] if removed else [1, 2])
-
-
-@pytest.mark.parametrize("target", [999, -1, 0, 1, True, False, "2", 2.25, None, [], {}])
-def test_reconciliation_invalid_unknown_or_self_target_cannot_delete(photo, target):
-    result, _ = run_reconciliation(photo, [component(1), component(2)],
-                                   [audit_vote(1, target), audit_vote(2)])
-    assert [c["_id"] for c in result] == [1, 2]
-
-
-@pytest.mark.parametrize("source", [999, -1, True, "1", 1.25, None])
-def test_reconciliation_unknown_source_cannot_create_or_delete_components(photo, source):
-    result, _ = run_reconciliation(photo, [component(1), component(2)],
-                                   [audit_vote(source, 2), audit_vote(2)])
-    assert [c["_id"] for c in result] == [1, 2]
-    assert result[0]["_uncertain"]
-
-
-@pytest.mark.parametrize("entries", [
-    [audit_vote(1, 2), audit_vote(2, 1)],
-    [audit_vote(1, 2), audit_vote(2, 3), audit_vote(3, 1)],
-])
-def test_reconciliation_cycles_never_delete_packages(photo, entries):
-    items = [component(i+1) for i in range(len(entries))]
-    result, _ = run_reconciliation(photo, items, entries)
-    assert [c["_id"] for c in result] == [c["_id"] for c in items]
-
-
-def test_reconciliation_never_follows_a_chain_through_a_removed_target(photo):
-    # A->B->C: A must remain because its target B is not retained. Only the
-    # direct B->C link to a uniquely declared retained target can be honored.
-    messages = []
-    result, _ = run_reconciliation(photo, [component(i) for i in (1, 2, 3)],
-                                   [audit_vote(1, 2), audit_vote(2, 3), audit_vote(3)],
-                                   log=messages.append)
-    assert [c["_id"] for c in result] == [1, 3]
-    assert any("catena/ciclo" in message for message in messages)
-
-
-@pytest.mark.parametrize("entries", [
-    [audit_vote(1, 2), audit_vote(1), audit_vote(2)],  # ambiguous source
-    [audit_vote(1, 2), audit_vote(2), audit_vote(2)],  # ambiguous target
-    [audit_vote(1, 2)],  # no explicit retained-target vote
-])
-def test_reconciliation_duplicate_or_missing_votes_prevent_merging(photo, entries):
-    result, _ = run_reconciliation(photo, [component(1), component(2)], entries)
-    assert [c["_id"] for c in result] == [1, 2]
-
-
-def test_reconciliation_target_rejected_as_pad_cannot_absorb_source(photo):
-    result, _ = run_reconciliation(photo, [component(1), component(2)],
-                                   [audit_vote(1, 2), audit_vote(2, is_component=False)])
-    assert [c["_id"] for c in result] == [1]
-
-
-def test_reconciliation_many_duplicates_may_point_to_one_explicit_retained_target(photo):
-    result, _ = run_reconciliation(photo, [component(i) for i in (1, 2, 3)],
-                                   [audit_vote(3, 2), audit_vote(2), audit_vote(1, 2)])
-    assert [c["_id"] for c in result] == [2]
-
-
-def test_reconciliation_is_bounded_to_24_known_candidates_and_one_call(photo):
-    items = [component(i) for i in range(1, 27)]
-    snapshot = deepcopy(items)
-    entries = [audit_vote(i, 25 if i == 1 else 0) for i in range(1, 25)]
-    entries.append(audit_vote(25, is_component=False))  # real ID outside supplied batch
-    result, call = run_reconciliation(photo, items, entries)
-    assert call.call_count == 1 and len(result) == 26
-    hints = json.loads(call.call_args.kwargs["content_blocks"][0]["text"])
-    assert [entry["id"] for entry in hints] == list(range(1, 25))
-    assert result[-2:] == snapshot[-2:] and items == snapshot
-
-
-def test_reconciliation_requests_context_and_only_immutable_ids_without_markings(monkeypatch, photo):
-    items = [dict(component(11), _kind_conflict=True, _grounding_kind="capacitor")]
-    draw = Mock(wraps=inventory.draw_inventory)
-    monkeypatch.setattr(inventory, "draw_inventory", draw)
-    _, call = run_reconciliation(photo, items, [audit_vote(11)])
-    kwargs = call.call_args.kwargs
-    assert kwargs["model"] == "context-model"
-    assert kwargs["tool"]["function"]["name"] == "reconcile_fixed_packages"
-    schema = kwargs["tool"]["function"]["parameters"]["properties"]["components"]["items"]
-    assert "duplicate_of" in schema["required"]
-    assert "marking" not in schema["properties"]
-    assert not ({"_box", "box_2d", "x_mm", "y_mm"} & schema["properties"].keys())
-    assert "Record legible markings only as supporting package_evidence" in kwargs["system_prompt"]
-    blocks = kwargs["content_blocks"]
-    assert [b["type"] for b in blocks] == ["text", "image_url", "image_url"]
-    assert json.loads(blocks[0]["text"]) == [{"id": 11, "initial_type": "capacitor", "reviewed_type": "resistor"}]
-    assert draw.call_args.kwargs == {"use_ids": True}
-
-
-@pytest.mark.parametrize("failure", [openrouter.OpenRouterError("context offline"), ValueError("bad JSON"),
-                                     None, {}, {"components": None}])
-def test_reconciliation_api_or_response_failure_keeps_every_candidate(photo, failure):
-    items = [dict(component(1), _kind_conflict=True), component(2)]
-    snapshot = deepcopy(items)
-    call, calls = api_script(failure)
-    messages = []
-    result = grounding.reconcile_packages(photo, items, "context-model", 40, 20, KINDS,
-                                          call, messages.append, None)
-    assert result == snapshot and items == snapshot and len(calls) == 1
-    assert all(c["_uncertain"] and c["marking"] == "" for c in result)
-    assert any("fallita" in message for message in messages)
-
-
-def test_reconciliation_api_error_is_not_cached_and_retries(photo, tmp_path):
-    items = [component()]
-    call, calls = api_script(openrouter.OpenRouterError("offline"), {"components": [audit_vote()]})
-    args = (photo, items, "context-model", 40, 20, KINDS, call, lambda message: None, tmp_path)
-    assert grounding.reconcile_packages(*args) == items
-    assert not list(tmp_path.iterdir())
-    second = grounding.reconcile_packages(*args)
-    assert not second[0]["_uncertain"] and len(calls) == 2
-    assert grounding.reconcile_packages(*args) == second and len(calls) == 2
-
-
-def test_reconciliation_empty_objects_preserve_boxes_uncertain(photo):
-    items = [component(1), component(2)]
-    result, call = run_reconciliation(photo, items, [{}, {}])
-    assert call.call_count == 1
-    assert result == items and all(c["_uncertain"] for c in result)
-
-
-def test_reconciliation_incomplete_vote_cannot_delete_a_package(photo):
-    items = [component(1), component(2)]
-    result, _ = run_reconciliation(photo, items, [{"id": 1, "duplicate_of": 2}, audit_vote(2)])
-    assert [c["_id"] for c in result] == [1, 2]
-    assert result[0]["_uncertain"]
-
-
 def test_grounded_default_classifier_uses_claude_without_contextual_self_review(monkeypatch, photo):
-    monkeypatch.setattr(grounding, "reconcile_packages", Mock(side_effect=AssertionError("Experimental context must not run in production")))
     call, calls = api_script({"components": [native()]}, *([{"components": []}]*3),
                             {"components": [vote(kind="capacitor")]})
     result = run_grounding(photo, call)
@@ -1010,7 +835,6 @@ def test_grounded_same_source_overlap_is_not_merged_by_contextual_self_review(ph
 
 def test_extract_inventory_kind_conflict_is_reported_without_context_call(monkeypatch, photo):
     monkeypatch.setattr(inventory, "prepare_photo", lambda *args: photo)
-    monkeypatch.setattr(grounding, "reconcile_packages", Mock(side_effect=AssertionError("Experimental context must not run")))
     call, calls = api_script({"components": [native()]}, *([{"components": []}]*3),
                             {"components": [vote(kind="capacitor")]})
     result = inventory.extract_inventory(["top.png"], "photo-model", 40, 20, KINDS, call,
@@ -1237,7 +1061,6 @@ def test_mechanical_cache_reuses_success_and_retries_incomplete_verdicts(photo, 
 
 def test_grounded_default_mechanical_path_never_requests_exact_recognition(monkeypatch, photo):
     monkeypatch.setattr(grounding, "classification_tool", Mock(side_effect=AssertionError("Exact recognition is disabled")))
-    monkeypatch.setattr(grounding, "reconcile_packages", Mock(side_effect=AssertionError("Context classification is disabled")))
     call, calls = api_script({"components": [native(), native([600, 600, 800, 800])]},
                             *([{"components": []}]*3),
                             {"components": [occupancy(1, False), occupancy(2)]})

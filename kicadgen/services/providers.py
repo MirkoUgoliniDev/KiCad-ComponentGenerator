@@ -10,9 +10,12 @@ model's name: DeepSeek's own models carry the prefix DEEPSEEK_PREFIX
 reached through OpenRouter. Everything else is OpenRouter.
 
 DeepSeek's API is OpenAI-compatible (chat/completions with tools). It does not
-report the cost of a call nor the capabilities of its models: calls are
-recorded without cost (the project total says «at least») and the models are
-listed with capabilities «not declared». The key is never printed or logged.
+report the cost of a call nor the capabilities of its models: the cost of a
+call is computed from its tokens and DeepSeek's published prices
+(`deepseek_pricing`, cost_source "token_price"; a model missing from the price
+list is recorded without cost) and the models are listed with capabilities
+«not declared». The key is never printed or logged, and provider error texts
+are reduced to the fixed categories of `openrouter._safe_error_text`.
 """
 from __future__ import annotations
 
@@ -26,7 +29,8 @@ from typing import Any, Optional
 
 from ..app_paths import env_files
 from .messages import tx
-from .openrouter import OpenRouterError
+from .openrouter import (TRANSIENT_HTTP_STATUSES, OpenRouterError, _diagnostic_context,
+                         _retry_after, _safe_error_text)
 
 PROVIDER_OPENROUTER = "openrouter"
 PROVIDER_DEEPSEEK = "deepseek"
@@ -45,6 +49,10 @@ DEEPSEEK_MODELS_URL = f"{DEEPSEEK_API_BASE}/models"
 DEEPSEEK_BALANCE_URL = f"{DEEPSEEK_API_BASE}/user/balance"
 DEEPSEEK_KEY_ENV = "DEEPSEEK_API_KEY"
 _HTTP_TIMEOUT_S = 30
+#: Largest error body read from DeepSeek (bytes), the same bound as OpenRouter
+#: (`openrouter._error_message`): a hostile or broken server cannot make the
+#: application buffer an unbounded answer just to build an error message.
+_MAX_ERROR_BODY_BYTES = 65536
 
 
 def provider_of(model: Optional[str]) -> str:
@@ -185,6 +193,24 @@ def key_text_problem(key: str) -> Optional[str]:
     return None
 
 
+def _error_detail(exc: urllib.error.HTTPError, key: Optional[str]) -> str:
+    """Fixed category and provider code of a DeepSeek HTTP error, never its free text.
+
+    The body is read up to _MAX_ERROR_BODY_BYTES. The server message goes
+    through `openrouter._safe_error_text`, which keeps only known categories
+    («rate limit», «invalid api key», ...): an echoed prompt or key can never
+    reach the log. The key is still redacted, as a last guard.
+    """
+    status = exc.code if type(exc.code) is int and 100 <= exc.code <= 599 else None
+    try:
+        payload = json.loads(exc.read(_MAX_ERROR_BODY_BYTES).decode("utf-8", "replace"))
+    except (ValueError, OSError, AttributeError):
+        payload = None
+    error = payload.get("error") if isinstance(payload, dict) else None
+    message = error.get("message") if isinstance(error, dict) else error
+    return _redact(_safe_error_text(message) + _diagnostic_context(payload, status), key)
+
+
 def deepseek_request(url: str, body: Optional[dict] = None, timeout: int = _HTTP_TIMEOUT_S,
                      *, key: Optional[str] = None) -> Any:
     """@brief One authenticated request to DeepSeek's API.
@@ -196,6 +222,9 @@ def deepseek_request(url: str, body: Optional[dict] = None, timeout: int = _HTTP
         pasted in «Account AI» before it is saved).
     @return Decoded JSON response.
     @throws ProviderError On missing key, HTTP error or unreadable answer.
+        A transient HTTP status (TRANSIENT_HTTP_STATUSES) is marked
+        `retryable`, with `retry_after` from the Retry-After header; a network
+        failure is `unreachable` and, as for OpenRouter, not retried.
     """
     key = key if key else deepseek_api_key()
     headers = {"Authorization": f"Bearer {key}", "Accept": "application/json"}
@@ -209,16 +238,16 @@ def deepseek_request(url: str, body: Optional[dict] = None, timeout: int = _HTTP
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.load(response)
     except urllib.error.HTTPError as exc:
-        detail = ""
-        try:
-            payload = json.loads(exc.read().decode("utf-8", "replace"))
-            # Redact BEFORE truncating: a cut could leave part of an echoed key.
-            detail = _redact(str((payload.get("error") or {}).get("message") or ""), key)[:300]
-        except (ValueError, OSError, AttributeError):
-            pass
+        transient = type(exc.code) is int and exc.code in TRANSIENT_HTTP_STATUSES
+        detail = _error_detail(exc, key)
         error = ProviderError(_redact(tx("DeepSeek ha risposto con un errore: HTTP {code} {detail}",
                                          code=exc.code, detail=detail).strip(), key),
-                              http_status=exc.code)
+                              http_status=exc.code,
+                              # Same transient classification as OpenRouter, so a
+                              # 429/5xx is retried by make_logged_call with the
+                              # provider-requested wait; 400/401 are final.
+                              retryable=transient,
+                              retry_after=_retry_after(exc) if transient else None)
         error.status = exc.code
         raise error from None
     except (urllib.error.URLError, OSError, ValueError) as exc:
@@ -286,25 +315,37 @@ def deepseek_balance(key: Optional[str] = None) -> ProviderBalance:
         if math.isfinite(value):
             amount, currency = value, str(info.get("currency") or "")
             break
-    available = bool(payload.get("is_available")) if isinstance(payload, dict) else False
+    # Only a JSON true is availability: a string "false" or a number is a
+    # malformed answer, and a malformed answer never unlocks a paid run.
+    available = isinstance(payload, dict) and payload.get("is_available") is True
     return ProviderBalance(PROVIDER_DEEPSEEK, available, amount, currency)
 
 
-def ensure_providers_ready(models, progress=None) -> None:
+def ensure_providers_ready(models, progress=None, *, openrouter_check=None) -> None:
     """@brief Before a paid run: every provider used has a key and some credit.
 
     @param models Model identifiers the run will call (duplicates allowed).
+        Pass the EFFECTIVE identifiers (defaults already applied): an empty
+        entry is skipped, and a list with no model at all checks OpenRouter.
     @param progress Optional log callback.
+    @param openrouter_check Optional callable taking `progress` that performs
+        the OpenRouter key and credit check; None uses `openrouter.api_key`
+        followed by `openrouter.check_credit`. Lets a caller keep its own
+        module-level references to those functions.
     @throws ProviderError (DeepSeek) or OpenRouterError (OpenRouter) when a key
         is missing or the credit is known to be exhausted. A credit that cannot
         be read is logged and does not stop the run, as for OpenRouter.
     """
-    from .openrouter import api_key, check_credit
     log = progress or (lambda message: None)
     used = {provider_of(model) for model in models if model} or {PROVIDER_OPENROUTER}
     if PROVIDER_OPENROUTER in used:
-        api_key()
-        check_credit(progress=progress)
+        if openrouter_check is None:
+            from .openrouter import api_key, check_credit
+
+            def openrouter_check(report):
+                api_key()
+                check_credit(progress=report)
+        openrouter_check(progress)
     if PROVIDER_DEEPSEEK in used:
         deepseek_api_key()
         try:

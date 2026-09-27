@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import tempfile
 
+from ..fsutil import replace_file
+
 FILENAME = 'kicad-model-choices.json'
 
 
@@ -55,7 +57,7 @@ def save_choices(directory, photo_png, components):
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as output:
             json.dump(data, output, indent=2, ensure_ascii=False, allow_nan=False)
-        os.replace(temporary, target)
+        replace_file(temporary, target)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -141,7 +143,7 @@ def save_candidate_report(directory, components):
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as output:
             json.dump(data, output, indent=2, ensure_ascii=False, allow_nan=False)
-        os.replace(temporary, target)
+        replace_file(temporary, target)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)

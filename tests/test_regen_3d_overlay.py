@@ -2,7 +2,7 @@
 
 import pytest
 
-from test_photo_inventory_gui import window, gui
+from test_photo_inventory_gui import gui
 
 
 def test_the_overlay_opens_when_the_regeneration_starts(window, monkeypatch):

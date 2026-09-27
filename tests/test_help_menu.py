@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from kicadgen.services import update_check
 from kicadgen.services.update_check import UpdateCheckResult
-from tests.test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from tests.test_photo_inventory_gui import gui
 
 
 @pytest.fixture
@@ -166,3 +166,40 @@ def test_every_update_outcome_is_explained_and_nothing_is_opened(
     _check(window, monkeypatch, result)
     assert boxes[0][0] == kind and fragment in boxes[0][1]
     assert opened == []
+
+
+def test_the_update_worker_belongs_to_the_application_not_the_window(
+        window, opened, boxes, monkeypatch):  # noqa: F811
+    """@brief G2: the check survives a window close and its late answer shows nothing.
+
+    Closing the window while GitHub is still being asked must not destroy the
+    running QThread (the process would abort): the worker is owned by
+    QApplication, and the answer that arrives after the close is dropped.
+    """
+    import threading
+    release = threading.Event()
+
+    def slow_check(*args, **kwargs):
+        release.wait(5)
+        return UpdateCheckResult(current_version="1.0.0", latest_version="1.1.0",
+                                 update_available=True)
+
+    monkeypatch.setattr(update_check, "check_latest_release", slow_check)
+    window._check_for_updates()
+    worker = window._update_worker
+    assert worker.parent() is QApplication.instance()
+    assert worker.isRunning()
+    window.close()
+    release.set()
+    assert worker.wait(5000)
+    for _ in range(20):
+        QApplication.processEvents()
+    assert boxes == [] and opened == []
+
+
+def test_an_update_answer_before_the_close_is_still_shown(
+        window, opened, boxes, monkeypatch):  # noqa: F811
+    """@brief G2 negative: with the window open the same late answer is shown."""
+    _check(window, monkeypatch, UpdateCheckResult(current_version="1.0.0",
+                                                  latest_version="1.0.0"))
+    assert boxes and boxes[0][0] == "information"

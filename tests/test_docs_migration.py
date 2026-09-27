@@ -18,23 +18,26 @@ pytest.importorskip("PyQt6")
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtWidgets import QMessageBox
 
 from kicadgen.gui.main_window import MainWindow
 from kicadgen.services.datasheet_extractor import ExtractedParams
-
-
-@pytest.fixture(scope="module")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
+from qt_window_teardown import dispose_window, stub_3d_preview
 
 
 @pytest.fixture
 def window(qapp, monkeypatch):
+    """@brief MainWindow with the 3D preview stubbed and destroyed at teardown.
+
+    These tests are about documents and names, not the VTK preview: the real
+    render window would only add a native object left to the garbage collector.
+    """
     monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
     monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
-    return MainWindow()
+    stub_3d_preview(monkeypatch)
+    widget = MainWindow()
+    yield widget
+    dispose_window(widget)
 
 
 def _extracted(name: str, **kwargs) -> ExtractedParams:

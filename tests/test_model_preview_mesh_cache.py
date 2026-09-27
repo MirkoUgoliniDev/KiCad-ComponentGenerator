@@ -11,14 +11,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from PyQt6.QtWidgets import QApplication
 
 from kicadgen.gui import model_candidates_dialog as gui
 
 
 @pytest.fixture(autouse=True)
-def app():
-    return QApplication.instance() or QApplication([])
+def app(qapp):
+    """@brief Every test builds widgets: the session QApplication must exist first."""
+    return qapp
 
 
 @pytest.fixture

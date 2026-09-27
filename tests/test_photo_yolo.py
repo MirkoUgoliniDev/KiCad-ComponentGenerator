@@ -4,7 +4,6 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
-import socket
 import sys
 from types import SimpleNamespace
 
@@ -27,16 +26,6 @@ def _raw(*entries):
         result[0, :4, index] = xywh
         result[0, 4 + class_id, index] = confidence
     return result
-
-
-@pytest.fixture(autouse=True)
-def no_network(monkeypatch):
-    """@brief Fail accidental network access in every detector test."""
-    def forbidden(*args, **kwargs):
-        pytest.fail("Local YOLO must not access the network")
-    monkeypatch.setattr(socket.socket, "connect", forbidden)
-    monkeypatch.setattr(socket.socket, "connect_ex", forbidden)
-    monkeypatch.setattr(socket, "create_connection", forbidden)
 
 
 @pytest.fixture

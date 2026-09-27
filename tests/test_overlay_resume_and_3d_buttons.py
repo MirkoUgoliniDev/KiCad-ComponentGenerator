@@ -11,7 +11,6 @@ pytest.importorskip("PyQt6")
 pytest.importorskip("pyvistaqt")
 
 from kicadgen.gui import analysis_overlay as overlay_module
-from tests.test_photo_inventory_gui import window  # noqa: F401 - fixture condivisa
 
 
 class _Clock:

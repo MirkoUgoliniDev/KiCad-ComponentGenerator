@@ -8,7 +8,6 @@ from types import ModuleType
 import pytest
 from PyQt6.QtWidgets import QDialog
 
-from test_photo_inventory_gui import window
 from kicadgen.gui import main_window as gui
 
 

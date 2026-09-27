@@ -13,7 +13,7 @@ import time
 import pytest
 from PyQt6.QtWidgets import QDialog, QDialogButtonBox
 
-from test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from test_photo_inventory_gui import gui
 from kicadgen.gui import project_dialogs
 from kicadgen.gui.project_dialogs import (OpenProjectDialog, ProjectNameDialog, is_project_folder,
                                           list_projects, name_problem)

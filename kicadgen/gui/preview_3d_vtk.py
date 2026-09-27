@@ -27,7 +27,7 @@ from ..services.messages import tx
 os.environ.setdefault("QT_API", "pyqt6")
 
 import numpy as np
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, pyqtSignal
 from pyvistaqt import QtInteractor
 
 from ..cad3d.body_params import Body3DParams
@@ -167,6 +167,43 @@ def _prepare_mesh_scene(mesh_path) -> _PreparedScene:
     return _PreparedScene(tuple(prepared), tuple(anchors))
 
 
+class _MeshJobSignals(QObject):
+    """@brief Carrier of a mesh preparation result from the pool thread to the viewer.
+
+    @note Created on the GUI thread, so the viewer's bound slot receives the
+        emission queued on the GUI thread: the pool thread never touches the
+        widget.
+    """
+    #: (token, file key, prepared scene or None, error text or "").
+    finished = pyqtSignal(int, object, object, str)
+
+
+class _MeshPrepareJob(QRunnable):
+    """@brief Parse a preview JSON and compute normals off the GUI thread."""
+
+    def __init__(self, token: int, key: tuple, mesh_path):
+        """@brief Snapshot one preparation request.
+
+        @param token Request number; the viewer applies only its latest one.
+        @param key File identity (`_mesh_file_key`) taken when the request was made.
+        @param mesh_path Path of the preview JSON.
+        """
+        super().__init__()
+        self.signals = _MeshJobSignals()
+        self.token, self.key, self.mesh_path = token, key, mesh_path
+
+    def run(self) -> None:
+        """@brief QRunnable override: prepare the scene and report it, or the error, once."""
+        try:
+            scene, error = _prepare_mesh_scene(self.mesh_path), ""
+        except BaseException as exc:  # noqa: BLE001 - see below
+            # Riportato al visore come ogni errore di lettura. BaseException:
+            # un'eccezione che esce da un QRunnable termina il processo, e
+            # senza risposta l'indicatore di caricamento resterebbe acceso.
+            scene, error = None, str(exc) or type(exc).__name__
+        self.signals.finished.emit(self.token, self.key, scene, error)
+
+
 def _spaced_label(label, vertices):
     """Keep legacy mesh labels away from the contact, without changing CAD."""
     point = np.asarray(label, dtype=float).copy()
@@ -189,6 +226,16 @@ class Preview3DVtk(QtInteractor):
     #: aprire il menu. La vista non sa cosa si possa fare su un componente --
     #: le voci le costruisce la finestra, che ha la tabella e i modelli.
     component_menu_requested = pyqtSignal(int, object)
+    #: Request token of `prepare_mesh`: the scene of that file is ready, and
+    #: `render_mesh` on it now only builds actors (no parsing, no normals).
+    mesh_prepared = pyqtSignal(int)
+    #: Request token of `prepare_mesh` and the error text: the file could not
+    #: be read or holds nothing drawable. The scene on screen is untouched.
+    mesh_prepare_failed = pyqtSignal(int, str)
+    #: Internal: immediate answers of `prepare_mesh` (file already prepared
+    #: or not inspectable) take the same queued path as the pool results, so
+    #: the caller always hears back after `prepare_mesh` has returned.
+    _mesh_answer = pyqtSignal(int, object, object, str)
 
     #: Duration of the animated view change asked by the navigation cube, in
     #: ms; 0 or less jumps at once. 250 ms is the usual slicer/CAD feel.
@@ -213,6 +260,20 @@ class Preview3DVtk(QtInteractor):
         self._mesh_cache = OrderedDict()
         self._shown_mesh_key = None
         self._mesh_anchors = ()
+        # Preparazione fuori dal thread GUI (`prepare_mesh`): numero
+        # dell'ultima richiesta, lavori in volo (tengono vivi i loro segnali
+        # finche' la risposta non e' consegnata), visore chiuso.
+        self._prepare_token = 0
+        self._prepare_jobs = {}
+        #: Preparations in flight by file identity: a second request for the
+        #: same file waits for the running job instead of parsing it again.
+        self._prepare_in_flight = {}
+        #: File identity of the latest request (see prepare_mesh).
+        self._latest_mesh_key = None
+        #: Set by closeEvent. NOT pyvista's `_closed`: pyvistaqt's close()
+        #: returns early when that flag is already set, and the render window
+        #: would never be released (block D review, 131).
+        self._viewer_closed = False
         # Animazione della camera (cubo di navigazione).
         self._camera_animation = None
         self._camera_timer = None
@@ -221,6 +282,7 @@ class Preview3DVtk(QtInteractor):
         self._camera_timer = QTimer(self)
         self._camera_timer.setInterval(self.CAMERA_FRAME_MS)
         self._camera_timer.timeout.connect(self._on_camera_tick)
+        self._mesh_answer.connect(self._on_mesh_job_finished, Qt.ConnectionType.QueuedConnection)
         self.setToolTip('Doppio clic su un componente: scegli modello KiCad e ruota il modello.\n'
                         'Tasto destro: elimina, ruota o cambia il modello.')
         self._configure_component_picking()
@@ -472,7 +534,7 @@ class Preview3DVtk(QtInteractor):
         """One animation frame; the last one applies the exact target view."""
         from .view_cube import ease_in_out, interpolate_pose
         animation = self._camera_animation
-        if animation is None or getattr(self, "_closed", False):
+        if animation is None or getattr(self, "_viewer_closed", False):
             self.stop_camera_animation()
             return
         start, end, apply, started, duration = animation
@@ -500,7 +562,13 @@ class Preview3DVtk(QtInteractor):
             self.view_cube.layout(self.width(), self.height())
 
     def closeEvent(self, event):  # noqa: N802 - firma Qt
-        """@brief Stop the camera animation before the render window goes away."""
+        """@brief Stop the camera animation before the render window goes away.
+
+        @note Mesh preparations still running in the pool finish on their own;
+            their results are dropped (`_on_mesh_job_finished`), never drawn
+            on a finalized render window.
+        """
+        self._viewer_closed = True
         self.stop_camera_animation()
         super().closeEvent(event)
 
@@ -832,6 +900,64 @@ class Preview3DVtk(QtInteractor):
         self._add_pin_labels(anchors)
         self._finish()
 
+    def prepare_mesh(self, mesh_path) -> int:
+        """@brief Prepare a preview JSON off the GUI thread, so `render_mesh` is cheap afterwards.
+
+        @param mesh_path Path of the preview JSON.
+        @return Token of this request; `mesh_prepared(token)` or
+            `mesh_prepare_failed(token, error)` follows, always after this call
+            has returned and always on the GUI thread.
+        @note Latest request wins: a request made later supersedes this one,
+            whose result is then dropped without any signal. Parsing and
+            normals run in the global QThreadPool; the scene is stored in the
+            prepared-mesh cache only when its request is still the latest.
+        @note A file already shown or already prepared answers at once (queued),
+            without starting a job.
+        """
+        self._prepare_token += 1
+        token = self._prepare_token
+        try:
+            key = _mesh_file_key(mesh_path)
+        except (OSError, TypeError, ValueError) as exc:
+            self._latest_mesh_key = None
+            self._mesh_answer.emit(token, None, None, str(exc) or type(exc).__name__)
+            return token
+        self._latest_mesh_key = key
+        if key == self._shown_mesh_key or key in self._mesh_cache:
+            self._mesh_answer.emit(token, key, None, "")
+            return token
+        if key in self._prepare_in_flight:
+            # Same unchanged file already being parsed: its result answers
+            # this (latest) request too, instead of a second parse.
+            return token
+        job = _MeshPrepareJob(token, key, mesh_path)
+        self._prepare_jobs[token] = job
+        self._prepare_in_flight[key] = job
+        job.signals.finished.connect(self._on_mesh_job_finished)
+        QThreadPool.globalInstance().start(job)
+        return token
+
+    def _on_mesh_job_finished(self, token: int, key, scene, error: str) -> None:
+        """GUI-thread end of `prepare_mesh`: keep only the latest request's result."""
+        job = self._prepare_jobs.pop(token, None)
+        if job is not None and self._prepare_in_flight.get(key) is job:
+            del self._prepare_in_flight[key]
+        # The job answers the latest request when it was started for it, or
+        # when the latest request asked for the same unchanged file.
+        current = token == self._prepare_token or key == self._latest_mesh_key
+        if getattr(self, "_viewer_closed", False) or not current:
+            return  # superata da una richiesta piu' recente, o visore chiuso
+        token = self._prepare_token
+        if error:
+            self.mesh_prepare_failed.emit(token, error)
+            return
+        if scene is not None:
+            self._mesh_cache[key] = scene
+            self._mesh_cache.move_to_end(key)
+            while len(self._mesh_cache) > _MESH_CACHE_SIZE:
+                self._mesh_cache.popitem(last=False)
+        self.mesh_prepared.emit(token)
+
     def render_mesh(self, mesh_path) -> None:
         """@brief Show the tessellated mesh written by FreeCAD, one colour per part.
 
@@ -844,6 +970,9 @@ class Preview3DVtk(QtInteractor):
             scene and camera stay, only the pin labels follow the current
             setting. Otherwise the prepared meshes come from a small cache keyed
             by the file identity, so only a new or changed file is parsed.
+        @note Synchronous: an uncached file is parsed here, on the calling
+            thread. Callers that must not block the GUI call `prepare_mesh`
+            first and render when `mesh_prepared` arrives.
         @note The scene is built with rendering suppressed and drawn once: a
             render per added part used to redraw the growing scene ~170 times
             for a real module.

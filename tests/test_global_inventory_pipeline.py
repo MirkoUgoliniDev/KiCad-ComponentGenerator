@@ -14,7 +14,7 @@ import pytest
 
 from kicadgen.services import datasheet_extractor as extractor
 from kicadgen.services import photo_global_inventory as global_inventory
-from kicadgen.services import photo_grounding, photo_inventory, photo_terminals, photo_yolo, photo_yolo_review
+from kicadgen.services import photo_grounding, photo_inventory, photo_terminals, photo_yolo
 
 
 def _proposal(identity):
@@ -78,10 +78,7 @@ def pipeline(monkeypatch, tmp_path):
         pytest.fail('Legacy review, terminal inference or network must not run')
     monkeypatch.setattr(socket.socket, 'connect', forbidden)
     monkeypatch.setattr(socket, 'create_connection', forbidden)
-    for owner, name in ((photo_yolo_review, 'recover_coverage'),
-                        (photo_yolo_review, 'review_yolo_components'),
-                        (photo_yolo_review, 'crop_context'),
-                        (photo_grounding, 'grounded_components'),
+    for owner, name in ((photo_grounding, 'grounded_components'),
                         (photo_terminals, 'observe_terminals')):
         monkeypatch.setattr(owner, name, forbidden)
     monkeypatch.setattr(extractor, 'api_key', lambda: 'offline-fixture')
@@ -434,3 +431,22 @@ def test_a_review_that_removed_every_proposal_stops_without_paying(pipeline):
     pipeline['global_review'].assert_not_called()
     assert any('tutte le 2 proposte sono state tolte' in message for message in pipeline['logs'])
     assert not params.components_3d
+
+
+def test_the_inventory_traceback_in_the_ai_log_is_scrubbed(pipeline, monkeypatch):
+    """@brief S8: the traceback line of a failed inventory hides the home folder.
+
+    Positive: the line is still written (the fault stays diagnosable).
+    Negative: the home folder of the user does not appear in it.
+    """
+    from pathlib import Path
+    home = str(Path.home())
+
+    def broken(*args, **kwargs):
+        raise RuntimeError(f"cannot open {Path(home, 'Pictures', 'board.png')}")
+    monkeypatch.setattr(photo_inventory, 'extract_inventory', broken)
+    pipeline['execute']()
+    lines = [line for line in pipeline['logs'] if line.startswith('AI_PHOTO_INVENTORY_TRACEBACK')]
+    assert len(lines) == 1
+    assert 'RuntimeError' in lines[0] and 'board.png' in lines[0]
+    assert home.lower() not in lines[0].lower()

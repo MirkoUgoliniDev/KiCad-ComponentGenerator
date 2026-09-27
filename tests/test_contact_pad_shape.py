@@ -36,7 +36,7 @@ from kicadgen.generators.castellated_module import (
     continuous_pad, continuous_pads, pad_positions,
 )
 from kicadgen.cad3d import step_generator
-from test_contact_style import _uuidless, dev_kit, four_sided, rs485
+from test_contact_style import _uuidless, dev_kit, four_sided, rs485, use_legacy_marker
 
 SCRIPT = Path(__file__).resolve().parents[1] / "kicadgen" / "cad3d" / "freecad_build_body.py"
 PLATING, PAD_T, Z1 = 0.06, 0.025, 1.0
@@ -241,10 +241,13 @@ def test_pin_one_marker_and_courtyard_follow_the_copper():
     marker = next(g for g in fp.graphics if getattr(g, "fill", False) and g.layer == "F.SilkS")
     pad = next(p for p in fp.pads if p.number == "1")
     (a, b), r = _stadium_of(pad)
-    # Centro del marcatore a 0.5 mm dal bordo del RAME (non della vecchia
-    # piazzola di bordo, 0.25 mm piu' stretta per lato): resta 0.25 mm d'aria.
-    assert _distance_to_segment(marker.center, a, b) - r == pytest.approx(0.5)
-    assert _distance_to_segment(marker.center, a, b) - r - marker.radius == pytest.approx(0.25)
+    # Measured from the COPPER (not the old, 0.25 mm narrower edge land). The
+    # INK of the dot reaches radius + half stroke: it must keep the 0.2 mm silk
+    # clearance (HANDOFF 130 C3; before, 0.5 mm to the centre left 0.19 mm of
+    # air to the ink). The dot is pushed out by at most one 0.1 mm search step.
+    ink = marker.radius + marker.width / 2
+    air = _distance_to_segment(marker.center, a, b) - r - ink
+    assert 0.2 - 1e-9 <= air <= 0.2 + 0.1 + 1e-9
     court = next(g for g in fp.graphics if getattr(g, "layer", "") == "F.CrtYd")
     for p in fp.pads:
         cx, cy = _copper_centre(p)
@@ -461,7 +464,12 @@ def _bounds(params):
 
 
 @pytest.mark.parametrize("name", sorted(UNCHANGED))
-def test_half_hole_and_through_hole_outputs_are_byte_identical(name, script):
+def test_half_hole_and_through_hole_outputs_are_byte_identical(name, script, monkeypatch):
+    """@brief Unchanged apart from the silk clipping and the C3 pin-1 dot clearance.
+
+    Both are folded back (legacy silk, legacy marker placement) before hashing.
+    """
+    use_legacy_marker(monkeypatch)
     params = _unchanged_case(name)
     footprint, payload, features = UNCHANGED[name]
     rendered = _uuidless(_with_legacy_silk(build_castellated_module(params)))

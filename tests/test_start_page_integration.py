@@ -3,7 +3,7 @@ import pytest
 from PyQt6.QtWidgets import QMessageBox
 
 from kicadgen.services import recent_projects
-from tests.test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from tests.test_photo_inventory_gui import gui
 
 
 @pytest.fixture

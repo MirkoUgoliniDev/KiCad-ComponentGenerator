@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from test_photo_inventory_gui import gui
 from kicadgen.services import messages  # noqa: F401
 from kicadgen.services.i18n import DEFAULT_TRANSLATIONS, LANGUAGES
 from kicadgen.services.messages import (CACHE_HIT, WARNING, child_warning_text, kind_of, marked,

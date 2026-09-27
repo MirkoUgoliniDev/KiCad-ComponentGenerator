@@ -267,10 +267,3 @@ class InfoPopup(AnchoredPopup):
         self.label.setWordWrap(True)
         self.label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
         super().__init__([self.label], parent)
-
-    def set_text(self, html_text: str) -> None:
-        """@brief Replace the popup text (e.g. after a language change).
-
-        @param html_text Rich text.
-        """
-        self.label.setText(html_text)

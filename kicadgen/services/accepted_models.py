@@ -28,12 +28,12 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-import math
 import os
 from pathlib import Path
 import sqlite3
 from typing import Iterable, Optional
 from .messages import tx
+from ..core.validation import finite_number, positive_number
 
 #: Nome del file dentro `data/` quando non c'e' la variabile d'ambiente.
 DEFAULT_FILENAME = "accepted_components.sqlite3"
@@ -103,22 +103,6 @@ def default_path() -> Path:
     return data_file(DEFAULT_FILENAME)
 
 
-def _finite_positive(value) -> Optional[float]:
-    """Finite positive number, else None (booleans are not measurements)."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    value = float(value)
-    return value if math.isfinite(value) and value > 0 else None
-
-
-def _finite(value) -> Optional[float]:
-    """Any finite number, else None."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    value = float(value)
-    return value if math.isfinite(value) else None
-
-
 def category_of(component: dict) -> str:
     """@brief Declared body category, lower-case.
 
@@ -157,8 +141,8 @@ def signature(component: dict) -> Optional[dict]:
     """
     if not isinstance(component, dict):
         return None
-    length = _finite_positive(component.get("length_mm"))
-    width = _finite_positive(component.get("width_mm"))
+    length = positive_number(component.get("length_mm"))
+    width = positive_number(component.get("width_mm"))
     if length is None or width is None:
         return None
     # Import pigro: kicad_models importa questo modulo durante il matching.
@@ -192,7 +176,7 @@ def match_tolerance_mm(component: dict, stored_side_uncertainty=None) -> tuple[f
         component_edge_uncertainty, side_uncertainty_mm)
     edge, source = component_edge_uncertainty(component)
     new_side = side_uncertainty_mm(edge)
-    stored = _finite_positive(stored_side_uncertainty)
+    stored = positive_number(stored_side_uncertainty)
     return new_side + (stored if stored is not None else new_side), source
 
 
@@ -281,12 +265,12 @@ def _explicit_rotation(component: dict) -> Optional[float]:
     """
     selection = component.get("model_selection")
     if isinstance(selection, dict) and selection.get("status") == "confirmed":
-        return _finite(selection.get("rotation_deg"))
+        return finite_number(selection.get("rotation_deg"))
     report = component.get("model_match")
     if isinstance(report, dict) and report.get("status") == "library_matched":
         entry = report.get("accepted_entry")
         if isinstance(entry, dict):
-            return _finite(entry.get("rotation_deg"))
+            return finite_number(entry.get("rotation_deg"))
     return None
 
 
@@ -539,7 +523,7 @@ class AcceptedModelStore:
                     elif height is None:
                         height = row["height_mm"]
                     known = [value for value in (row.get("side_uncertainty_mm"), uncertainty)
-                             if _finite_positive(value) is not None]
+                             if positive_number(value) is not None]
                     db.execute(
                         "UPDATE accepted_models SET long_mm=?, short_mm=?, height_mm=?,"
                         " rotation_deg=?, samples=?, last_accepted=?, source=?, example_name=?,"

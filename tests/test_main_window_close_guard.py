@@ -15,7 +15,6 @@ pytest.importorskip("pyvistaqt")
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import QMessageBox
 
-from tests.test_photo_inventory_gui import window  # noqa: F401 - fixture condivisa
 
 
 def _running():

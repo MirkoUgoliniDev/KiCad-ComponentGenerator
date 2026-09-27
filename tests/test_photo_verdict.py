@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from test_photo_inventory_gui import window, gui
+from test_photo_inventory_gui import gui
 from kicadgen.services.document_roles import DocumentSet, INVENTORY_ROLES, ROLES
 from kicadgen.services.i18n import DEFAULT_TRANSLATIONS
 

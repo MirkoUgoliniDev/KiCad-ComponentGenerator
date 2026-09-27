@@ -3,14 +3,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 pytest.importorskip("PyQt6")
 from PyQt6.QtCore import QTimer
-from PyQt6.QtWidgets import QApplication, QDialogButtonBox, QLabel, QTextEdit
+from PyQt6.QtWidgets import QDialogButtonBox, QLabel, QTextEdit
 from kicadgen.gui.settings_dialog import LlmSettingsDialog
 from kicadgen.services.photo_grounding import GROUNDING_PROMPT, VERIFICATION_PROMPT
 from kicadgen.services.datasheet_extractor import DEFAULT_SYSTEM_PROMPT
 
 
-def test_stage_defaults_are_independent_and_empty_uses_fallback():
-    app = QApplication.instance() or QApplication([])
+def test_stage_defaults_are_independent_and_empty_uses_fallback(qapp):
+    app = qapp
     d = LlmSettingsDialog("custom datasheet", current_grounding_prompt="custom photo",
                           current_verification_prompt="custom verify")
     try:
@@ -35,9 +35,9 @@ def test_stage_defaults_are_independent_and_empty_uses_fallback():
         d.close()
 
 
-def test_verification_model_picker_is_independent(monkeypatch):
+def test_verification_model_picker_is_independent(qapp, monkeypatch):
     from kicadgen.gui import settings_dialog
-    app = QApplication.instance() or QApplication([])
+    app = qapp
     d = LlmSettingsDialog('prompt', 'vendor/data', current_vision_model='vendor/photo',
                           current_verification_model='vendor/verify')
     try:
@@ -61,8 +61,8 @@ def test_verification_model_picker_is_independent(monkeypatch):
     (1, "photo-cache del progetto"),
     (2, "Non modifica coordinate"),
 ])
-def test_stage_explanations_are_only_in_info_modal(index, expected):
-    app = QApplication.instance() or QApplication([])
+def test_stage_explanations_are_only_in_info_modal(qapp, index, expected):
+    app = qapp
     d = LlmSettingsDialog("custom datasheet", "vendor/datasheet",
                           current_vision_model="vendor/photo",
                           current_grounding_prompt="custom photo",

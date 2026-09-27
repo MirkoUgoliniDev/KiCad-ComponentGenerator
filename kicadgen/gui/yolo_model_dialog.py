@@ -104,6 +104,12 @@ class _Job(QRunnable):
                           "order": info.get("class_order", "")}
         except Exception as exc:  # noqa: BLE001 - mostrato nella finestra
             result = ({"ok": False, "error": str(exc)} if self.kind == "check" else None)
+        except BaseException as exc:  # noqa: BLE001 - see below
+            # Un'eccezione che esce da un QRunnable fa terminare il processo
+            # (Qt, senza traceback): nemmeno una BaseException deve uscire da
+            # qui. Il risultato e' un errore visibile, come per Exception.
+            result = ({"ok": False, "error": type(exc).__name__} if self.kind == "check"
+                      else None)
         self.signals.ready.emit(self.kind, self.path, result)
 
 
@@ -126,6 +132,8 @@ class YoloModelDialog(QDialog):
         self._current = str(current or self._default)
         self._extra = [p for p in (self._current, self._default) if p]
         self._jobs = []
+        #: Set by shutdown(): a closed window starts no more jobs.
+        self._closed = False
         self.setWindowTitle(self._tr("Scegli il modello YOLO"))
         self.setMinimumSize(760, 440)
 
@@ -243,6 +251,8 @@ class YoloModelDialog(QDialog):
     # ── dettagli ──────────────────────────────────────────────────────
 
     def _start(self, kind: str, path: str) -> None:
+        if self._closed:
+            return
         job = _Job(kind, path)
         job.signals.ready.connect(self._job_ready)
         self._jobs.append(job)
@@ -266,6 +276,8 @@ class YoloModelDialog(QDialog):
 
     def _show_selected(self, *_):
         """Draw the details of the selected file, starting what is still unknown."""
+        if self._closed:
+            return
         path = self.selected_path()
         ok_button = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
         if not path:
@@ -342,17 +354,30 @@ class YoloModelDialog(QDialog):
         row(self._tr("Percorso"), path)
         return "<table>" + "".join(rows) + "</table>"
 
-    def done(self, result) -> None:  # noqa: D401 - Qt override
-        """@brief Qt override: stop listening to jobs still running, then close.
+    def shutdown(self) -> None:
+        """@brief Stop this window for good: no new jobs, no more job results.
 
-        @param result Dialog result code.
-        @note The jobs finish in the pool and their results are kept for the
-            session; only this window stops waiting for them.
+        @note Called by done() and by the owner after exec() returns. Without
+            it the list, emptied when the window is destroyed later (by the
+            garbage collector, at an arbitrary moment), reselected an item and
+            started a model check in the pool long after the window was gone
+            (HANDOFF 131: a test crash, and a pointless load of the weights).
+            The jobs already running finish in the pool and their results are
+            kept for the session.
         """
+        self._closed = True
+        self.model_list.blockSignals(True)
         for job in self._jobs:
             try:
                 job.signals.ready.disconnect(self._job_ready)
             except TypeError:
                 pass
         self._jobs = []
+
+    def done(self, result) -> None:  # noqa: D401 - Qt override
+        """@brief Qt override: shut the window down (see shutdown), then close.
+
+        @param result Dialog result code.
+        """
+        self.shutdown()
         super().done(result)

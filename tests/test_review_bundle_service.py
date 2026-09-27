@@ -17,7 +17,7 @@ import pytest
 from kicadgen.services import photo_inventory as inv
 from kicadgen.services import photo_global_inventory as inventory
 from kicadgen.services.datasheet_extractor import _components_3d
-from kicadgen.services.photo_yolo_review import review_yolo_components
+from kicadgen.services.photo_global_inventory import review_global_inventory
 from tests.test_reopen_detector_review import (_answer_call as _fake_call, _photo_png, _proposal,
                                                _save_evidence)
 
@@ -174,14 +174,13 @@ def test_a_merge_of_a_manual_and_a_machine_candidate_is_manual():
     def fake(**request):
         calls.append(request)
         return deepcopy(response())
-    result = review_yolo_components(np.zeros((60, 120, 3), np.uint8), items, 40, 20,
-                                    'unchanged/model', fake, lambda _: None, None, strategy='global')
+    result = review_global_inventory(np.zeros((60, 120, 3), np.uint8), items, 40, 20,
+                                    'unchanged/model', fake, lambda _: None, None)
     assert len(result) == 1 and result[0]['source_candidate_ids'] == [1, 2]
     assert result[0]['_yolo_manual_box'] is True
     # Senza candidati ritoccati la chiave non compare.
-    plain = review_yolo_components(np.zeros((60, 120, 3), np.uint8), [candidate(1), candidate(2)],
-                                   40, 20, 'unchanged/model', fake, lambda _: None, None,
-                                   strategy='global')
+    plain = review_global_inventory(np.zeros((60, 120, 3), np.uint8), [candidate(1), candidate(2)],
+                                   40, 20, 'unchanged/model', fake, lambda _: None, None)
     assert '_yolo_manual_box' not in plain[0]
 
 
@@ -192,7 +191,8 @@ def test_the_extractor_forwards_the_manual_flag_and_does_not_invent_it(manual):
                   _global_inventory_status='validated_hypotheses')
     if manual:
         source['_yolo_manual_box'] = True
-    component = _components_3d([source])[0]
+    # The manual flag is set by the review dialog: trusted (program) path.
+    component = _components_3d([source], trusted=True)[0]
     if manual:
         assert component['_yolo_manual_box'] is True
     else:

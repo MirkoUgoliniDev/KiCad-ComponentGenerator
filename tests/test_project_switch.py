@@ -9,7 +9,7 @@ import json
 
 from PyQt6.QtWidgets import QDialog
 
-from test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from test_photo_inventory_gui import gui
 from kicadgen.gui.generation_options_dialog import GenerationOptionsDialog
 from kicadgen.gui.project_dialogs import OpenProjectDialog, ProjectNameDialog
 from kicadgen.gui.project_state import (PROJECT_CONFIG_NAME, read_project_config,

@@ -14,7 +14,6 @@ from kicadgen.services import photo_inventory
 from kicadgen.services.photo_inventory import YOLO_CLASS_KINDS, yolo_only_components
 
 from test_global_inventory_pipeline import pipeline  # noqa: F401 - fixture
-from test_photo_inventory_gui import window  # noqa: F401 - fixture
 from kicadgen.gui import main_window as gui
 
 
@@ -31,9 +30,9 @@ def test_kinds_come_from_the_declared_class_table():
     rows = [_row(1, "capacitor"), _row(2, "transistor"), _row(3, "clock"),
             _row(4, "buzzer"), _row(5, "ic", ambiguous=True)]
     kinds = [c["kind"] for c in yolo_only_components(rows, reviewed=True)]
-    # Omonimi restano tali, transistor -> ic come la riconciliazione, clock ->
-    # crystal; senza tipo dedicato o con classe ambigua: generic.
-    assert kinds == ["capacitor", "ic", "crystal", "generic", "generic"]
+    # Omonimi restano tali (buzzer ha un tipo dedicato dal 27/09), transistor ->
+    # ic come la riconciliazione, clock -> crystal; classe ambigua: generic.
+    assert kinds == ["capacitor", "ic", "crystal", "buzzer", "generic"]
     assert set(YOLO_CLASS_KINDS.values()) <= set(
         __import__("kicadgen.services.datasheet_extractor", fromlist=["x"]).COMPONENT_KINDS)
 

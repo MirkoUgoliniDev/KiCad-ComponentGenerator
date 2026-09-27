@@ -734,6 +734,11 @@ _EXTRACTION_TOOL = {
                         },
                     },
                     "required": ["x_mm", "y_mm", "length_mm", "width_mm", "height_mm"],
+                    # The model may describe only these fields: internal
+                    # provenance and verification flags (`_`-prefixed keys)
+                    # are set by the program, never by an answer. The
+                    # decoder enforces the same rule (_components_3d).
+                    "additionalProperties": False,
                 },
             },
             "value_sources": _value_sources_schema(
@@ -1426,9 +1431,13 @@ def _canonicalize_answer(data: dict) -> None:
 
 
 def _merge_photo_components(groups):
-    """Compatibilita' per chiamanti che usano l'inventario in millimetri."""
+    """Compatibilita' per chiamanti che usano l'inventario in millimetri.
+
+    The groups are inventories built by the program, so their internal flags
+    are kept (trusted).
+    """
     from .photo_inventory import merge_components
-    return merge_components([_components_3d(g) or [] for g in groups])
+    return merge_components([_components_3d(g, trusted=True) or [] for g in groups])
 
 
 #: Massimo numero di caratteri con cui un nome file viene mostrato nella riga
@@ -1810,13 +1819,21 @@ def extract_pin_header_params(
         # crop, verifica, terminali) e restare a secco a meta' strada significa
         # aver speso senza ottenere un componente. Si verifica ogni fornitore
         # dei modelli usati (OpenRouter e/o DeepSeek diretto, 27/09).
-        from .providers import ensure_providers_ready, provider_of
-        if {provider_of(m) for m in (model, vision_model, verification_model) if m} <= {"openrouter"}:
+        # The EFFECTIVE models, defaults applied exactly as the run applies
+        # them below: a DeepSeek main model with no explicit vision model
+        # still calls the default vision model, whose provider must be ready.
+        from .photo_grounding import DEFAULT_VISION_MODEL
+        from .providers import ensure_providers_ready
+
+        def openrouter_ready(report):
+            """OpenRouter key and credit, through this module's references."""
             api_key()
-            check_credit(progress=progress)
-        else:
-            ensure_providers_ready([model, vision_model, verification_model],
-                                   progress)
+            check_credit(progress=report)
+
+        ensure_providers_ready(
+            [model or DEFAULT_MODEL, vision_model or DEFAULT_VISION_MODEL,
+             verification_model or model or DEFAULT_MODEL],
+            progress, openrouter_check=openrouter_ready)
     except OpenRouterError as exc:
         raise ExtractionError(str(exc)) from exc
 
@@ -2279,8 +2296,11 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
             announce("", "")
             if progress:
                 import traceback
-                progress("AI_PHOTO_INVENTORY_TRACEBACK " + "".join(
-                    traceback.format_exception(type(exc), exc, exc.__traceback__)).strip())
+                from ..crash_report import scrub
+                # The AI log may be attached to a public issue: home folder,
+                # user name and keys are masked as in a crash report.
+                progress("AI_PHOTO_INVENTORY_TRACEBACK " + scrub("".join(
+                    traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()))
             data["notes"] = (str(data.get("notes") or "") + "\n"
                              + tx("Inventario fotografico fallito: {exc}", exc=exc)).strip()
         if photo_report and photo_report.components:
@@ -2318,7 +2338,10 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
         progress(tx("Secondo passaggio fotografico non avviato: mancano "
                     "body_length/body_width."))
 
-    params = _params_from_tool_arguments(data)
+    # Only the inventory built by the program is trusted with internal flags;
+    # without it, data["components_3d"] is still the raw AI answer.
+    params = _params_from_tool_arguments(
+        data, trusted_components=bool(photo_report and photo_report.components))
     if populated_board and not (photo_report and photo_report.components):
         for index, component in enumerate(params.components_3d or [], 1):
             component.update(kind="generic", name=f"Ingombro {index}", marking="",
@@ -2760,14 +2783,44 @@ def _review_notes(sides, value_sources) -> list[str]:
     return lines
 
 
+#: Verification and provenance fields of a component that only the program's
+#: own photo pipeline may set: confidences, counts declared complete, the
+#: inventory's identifiers and class, and `object_type` (whose presence lets a
+#: body named like a PCB feature through). A raw AI answer loses them, together
+#: with every `_`-prefixed internal flag (`_yolo_manual_box`,
+#: `_height_estimated`, `_global_inventory_status`, ...). Descriptive fields
+#: (name, kind, package, mating, colour, ...) are kept.
+_TRUSTED_ONLY_FIELDS = frozenset({
+    "object_type", "confidence", "presence_confidence", "class_confidence", "class",
+    "component_id", "source_candidate_ids", "pin_count_confidence", "pin_count_source",
+    "terminal_count_basis", "lead_count_complete", "lead_count_confidence",
+    "landmark_confidence",
+})
+#: `_height_source` of a height taken from a raw AI answer: the schema asks for
+#: a visual estimate from a top photo, never a measurement.
+AI_ANSWER_HEIGHT_SOURCE = "ai_answer_visual_estimate_not_measured"
+
+
 def _components_3d(raw: Optional[Sequence[dict]],
-                   notes: Optional[list] = None) -> Optional[list[dict]]:
-    """Componenti letti dalla foto, scartando quelli senza un ingombro reale.
+                   notes: Optional[list] = None, *,
+                   trusted: bool = False) -> Optional[list[dict]]:
+    """@brief Components read from the photo, dropping those without a real footprint.
 
     Sono stime visive: un blocco con una dimensione nulla o negativa non e'
     un componente mal misurato, e' rumore, e nel solido 3D darebbe errore.
     A `kind` outside COMPONENT_KINDS becomes "generic", with a line in
     `notes` when given.
+
+    @param raw Entries of components_3d.
+    @param notes Optional list that receives the review lines.
+    @param trusted True only for components built by the program (photo
+        inventory, saved projects): their internal flags are kept. False
+        (default) for a raw AI answer: every `_`-prefixed key and every field
+        of _TRUSTED_ONLY_FIELDS is dropped first, so a text in a document can
+        never mark a body as drawn by hand, verified or measured, and every
+        height is marked as an estimate (`_height_estimated` True,
+        AI_ANSWER_HEIGHT_SOURCE).
+    @return The valid components, or None when there is none.
     """
     if not isinstance(raw, (list, tuple)) or not raw:
         return None
@@ -2779,6 +2832,10 @@ def _components_3d(raw: Optional[Sequence[dict]],
             # invece che come oggetto: si scarta quella voce, non l'intera
             # estrazione -- gli altri componenti restano validi.
             continue
+        if not trusted:
+            entry = {key: value for key, value in entry.items()
+                     if not (isinstance(key, str) and key.startswith("_"))
+                     and key not in _TRUSTED_ONLY_FIELDS}
         try:
             if any(isinstance(entry.get(k), bool) for k in
                    ("x_mm", "y_mm", "length_mm", "width_mm", "height_mm")):
@@ -2883,6 +2940,9 @@ def _components_3d(raw: Optional[Sequence[dict]],
                      and isinstance(v, int) and not isinstance(v, bool) and v >= 0}
             if sides and sum(sides.values()) > 0:
                 component["pins_by_side"] = sides
+        if not trusted:
+            component["_height_estimated"] = True
+            component["_height_source"] = AI_ANSWER_HEIGHT_SOURCE
         components.append(component)
     return components or None
 
@@ -3017,7 +3077,7 @@ def _footprint_matrix(data: dict, notes: list) -> dict:
     return matrix
 
 
-def _params_from_tool_arguments(data: dict) -> ExtractedParams:
+def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False) -> ExtractedParams:
     """@brief Build ExtractedParams from the tool arguments, without any network access.
 
     Costruisce ExtractedParams dagli argomenti dello strumento. Separato
@@ -3028,6 +3088,9 @@ def _params_from_tool_arguments(data: dict) -> ExtractedParams:
         modified: a raw answer is canonicalized on a copy
         (`_canonicalize_answer`: lengths to millimetres from `drawing_unit`,
         contacts to the view from above from `contacts_view`).
+    @param trusted_components True only when `data["components_3d"]` is the
+        photo inventory built by the program; False (default) treats it as the
+        raw AI answer, whose internal flags are dropped (see `_components_3d`).
     @return The validated parameters, with every conversion, doubt and
         dropped optional value written in `notes`.
     @note What is required depends on what the answer structurally is. Valid
@@ -3134,7 +3197,8 @@ def _params_from_tool_arguments(data: dict) -> ExtractedParams:
         pad_diameter_mm=matrix["pad_diameter_mm"],
         drill_mm=matrix["drill_mm"],
         castellated_sides=sides,
-        components_3d=_components_3d(data.get("components_3d"), notes),
+        components_3d=_components_3d(data.get("components_3d"), notes,
+                                     trusted=trusted_components),
         confidence=confidence,
         notes=base_notes,
         populated_pins=populated,

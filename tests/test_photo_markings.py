@@ -38,8 +38,8 @@ def test_the_marking_confidence_is_recorded_and_never_blocks():
     item = inventory.inventory_tool()['function']['parameters']['properties']['components']['items']
     assert item['properties']['marking_confidence']['enum'] == ['high', 'medium', 'low']
     assert 'marking_confidence' in inventory.OPTIONAL_REFINEMENTS
-    assert inventory.PROMPT_VERSION == 'global-yolo-inventory-9'
-    assert inventory.SCHEMA_VERSION == 'global-inventory-6'
+    assert inventory.PROMPT_VERSION == 'global-yolo-inventory-10'
+    assert inventory.SCHEMA_VERSION == 'global-inventory-7'
 
 
 # ── a guessed marking is not a model search key ──────────────────────────
@@ -117,3 +117,34 @@ def test_crops_have_square_pixels_and_the_long_axis_horizontal():
     height, width = crop.shape[:2]
     assert width > height
     assert width / height == pytest.approx(3.0, rel=0.1)
+
+
+# ── F8: the prompt version travels with the reading and into its audit ──────
+
+def test_a_dedicated_reading_records_its_prompt_version_and_audit(tmp_path):
+    """Positivo: ogni sigla impostata dalla lettura dice con quali regole e' nata."""
+    import json
+    components = _components()
+    call = _answer_ids({1: ("SP3452 / 25221", "high"), 3: ("472", "high")})
+    markings.read_markings(_photo(4000), components, LENGTH, WIDTH, "m", call, lambda _l: None,
+                           tmp_path)
+    for index in (0, 2):
+        assert components[index]["_marking_prompt_version"] == markings.PROMPT_VERSION
+        assert components[index]["_marking_source"] == "dedicated_crop_reading"
+    [audit] = (tmp_path / "yolo-audit").glob("marking-reading-*.json")
+    record = json.loads(audit.read_text(encoding="utf-8"))
+    assert record["version"] == markings.PROMPT_VERSION and record["expected_ids"] == [1, 3]
+
+
+def test_a_marking_the_reading_did_not_set_carries_no_version(tmp_path):
+    """Negativo: le sigle dell'inventario lasciate com'erano non si attribuiscono alla lettura."""
+    components = _components()
+    call = _answer_ids({1: ("5P3452", "low"), 3: ("", "high")})
+    markings.read_markings(_photo(4000), components, LENGTH, WIDTH, "m", call, lambda _l: None,
+                           tmp_path)
+    assert not any("_marking_prompt_version" in c for c in components)
+    # Nothing is audited when the reading is skipped before any request.
+    skipped = tmp_path / "skipped"
+    markings.read_markings(_photo(1024), _components(), LENGTH, WIDTH, "m", call,
+                           lambda _l: None, skipped)
+    assert not (skipped / "yolo-audit").exists()

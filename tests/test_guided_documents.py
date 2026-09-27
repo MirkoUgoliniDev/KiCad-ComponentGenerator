@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 from PyQt6.QtWidgets import QFileDialog, QGroupBox, QMessageBox
-from test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from test_photo_inventory_gui import gui
 
 from kicadgen.gui.guided_documents import ADD_KEY
 from kicadgen.services.document_roles import ROLE_SHORT, ROLES, DocumentSet

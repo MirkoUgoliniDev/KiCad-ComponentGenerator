@@ -18,6 +18,7 @@ from __future__ import annotations
 import math
 
 from .messages import tx
+from .photo_audit import write_stage_audit
 from .photo_grounding import cached_call, detail_grid, model_px_per_mm
 from .photo_inventory import image_block
 
@@ -36,6 +37,10 @@ reading alone: high = every character clear; medium = legible but at least one
 character doubtful; low = mostly guessed or partly hidden. Use an empty marking
 when no text is printed on the body."""
 
+#: Version of PROMPT and reading_tool. It is recorded on every marking the
+#: dedicated reading sets (`_marking_prompt_version`) and in its audit, so a
+#: marking can be traced to the rules that produced it. Bump it whenever the
+#: prompt or the schema changes.
 PROMPT_VERSION = 'marking-reading-1'
 CONFIDENCES = ('high', 'medium', 'low')
 _RANK = {'low': 0, 'medium': 1, 'high': 2}
@@ -147,7 +152,11 @@ def read_markings(photo, components, length_mm, width_mm, model, call, log,
     @note Only bodies whose inventory marking is not empty are sent: a body
         with no printed text costs nothing. A new reading replaces the old one
         only when it is not empty and at least as confident; the previous text
-        is kept in `_marking_inventory` for audit.
+        is kept in `_marking_inventory` for audit, and every marking the reading
+        sets carries `_marking_source` and `_marking_prompt_version`
+        (PROMPT_VERSION). The request and response are written to a
+        ``marking-reading`` audit under ``<cache_dir>/yolo-audit`` (pruned like
+        the other audits, photo_audit.AUDIT_RETENTION_PER_KIND).
     @note Errors of this optional step never fail the inventory: they are
         logged and the inventory markings stay.
     """
@@ -210,6 +219,11 @@ def read_markings(photo, components, length_mm, width_mm, model, call, log,
         component['marking'] = text
         component['marking_confidence'] = confidence
         component['_marking_source'] = 'dedicated_crop_reading'
+        component['_marking_prompt_version'] = PROMPT_VERSION
+    write_stage_audit(cache_dir, 'marking-reading', dict(
+        version=PROMPT_VERSION, model=model, expected_ids=expected, response=data,
+        replaced=replaced,
+        notice='Literal markings read by a vision model: evidence, not verified identity'), log)
     log(tx("Lettura delle sigle: {replaced} sigle migliorate su {n} corpi con una scritta.",
            replaced=replaced, n=len(expected)))
     return replaced

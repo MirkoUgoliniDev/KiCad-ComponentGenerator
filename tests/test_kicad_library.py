@@ -25,6 +25,11 @@ FOOTPRINT = """(footprint "Demo"
 """
 
 
+#: Smallest STEP that discover_component_artifacts accepts: it must end with
+#: the ISO 10303-21 trailer (a truncated export is refused).
+STEP_BYTES = b"ISO-10303-21;\nEND-ISO-10303-21;\n"
+
+
 def _artifacts(tmp_path: Path):
     component = tmp_path / "Demo"
     pretty = component / "Demo.pretty"
@@ -32,7 +37,7 @@ def _artifacts(tmp_path: Path):
     pretty.mkdir(parents=True)
     shapes.mkdir()
     (pretty / "Demo.kicad_mod").write_text(FOOTPRINT, encoding="utf-8")
-    (shapes / "Demo.step").write_bytes(b"STEP")
+    (shapes / "Demo.step").write_bytes(STEP_BYTES)
     (shapes / "Demo.wrl").write_bytes(b"WRL")
     return discover_component_artifacts(component)
 
@@ -61,7 +66,7 @@ def test_preview_project_is_isolated_and_embeds_model_reference(tmp_path):
     board = preview.board_path.read_text(encoding="utf-8")
     assert preview.directory == artifacts.component_dir / ".kicad-preview"
     assert preview.project_path.is_file()
-    assert (preview.directory / "Demo.step").read_bytes() == b"STEP"
+    assert (preview.directory / "Demo.step").read_bytes() == STEP_BYTES
     assert "(kicad_pcb" in board
     assert '(model "${KIPRJMOD}/Demo.step"' in board
     assert "(at 100 100)" in board
@@ -76,7 +81,7 @@ def test_project_install_creates_portable_library_and_table(tmp_path):
     table = result.table_path.read_text(encoding="utf-8")
     assert result.identifier == "KiCadGen:Demo"
     assert '${KIPRJMOD}/KiCadGen.3dshapes/Demo.step' in footprint
-    assert result.step_path.read_bytes() == b"STEP"
+    assert result.step_path.read_bytes() == STEP_BYTES
     assert result.wrl_path.read_bytes() == b"WRL"
     assert '(name "KiCadGen")' in table
     assert '(uri "${KIPRJMOD}/KiCadGen.pretty")' in table

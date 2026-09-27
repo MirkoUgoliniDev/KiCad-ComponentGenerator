@@ -10,18 +10,12 @@ import pytest
 pytest.importorskip("PyQt6")
 from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
 from PyQt6.QtGui import QColor, QImage
-from PyQt6.QtWidgets import QApplication
 
 from kicadgen.gui.component_editor_dialog import ComponentEditorDialog
 from kicadgen.gui.component_state import (height_is_estimated, mark_height_measured,
                                           mark_height_placeholder)
 from kicadgen.gui.photo_review_dialog import PhotoReviewDialog
 from kicadgen.services.datasheet_extractor import COMPONENT_KINDS
-
-
-@pytest.fixture(scope="module")
-def app():
-    return QApplication.instance() or QApplication([])
 
 
 @pytest.fixture

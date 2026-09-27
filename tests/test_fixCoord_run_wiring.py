@@ -5,7 +5,6 @@ import pytest
 
 from kicadgen.gui import main_window as gui
 
-from test_photo_inventory_gui import window  # noqa: F401 - fixture
 
 
 def test_the_extraction_worker_hands_its_cancel_event_to_the_service(monkeypatch):

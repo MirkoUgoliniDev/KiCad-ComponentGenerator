@@ -2,25 +2,16 @@
 import pytest
 from PyQt6.QtCore import QPoint, QPointF, Qt
 from PyQt6.QtGui import QWheelEvent
-from PyQt6.QtWidgets import (QApplication, QComboBox, QDoubleSpinBox, QScrollArea, QVBoxLayout,
+from PyQt6.QtWidgets import (QComboBox, QDoubleSpinBox, QScrollArea, QVBoxLayout,
                              QWidget)
 
 from kicadgen.gui import wheel_guard
 
-#: Tiene viva la QApplication fra un test e l'altro (vedi test_photo_inventory_gui).
-_APP = None
-
-
-def _app():
-    global _APP
-    _APP = QApplication.instance() or QApplication([])
-    return _APP
-
 
 @pytest.fixture
-def page():
+def page(qapp):
     """A scrolling page with a drop-down and a number field near the top."""
-    app = _app()
+    app = qapp
     wheel_guard.install(app)
     area = QScrollArea()
     content = QWidget()
@@ -69,9 +60,9 @@ def test_a_clicked_drop_down_in_a_scrolling_page_still_scrolls_the_page(page):
     assert combo.currentIndex() == 0 and area.verticalScrollBar().value() > before
 
 
-def test_outside_a_scrolling_page_only_the_focused_field_takes_the_wheel():
+def test_outside_a_scrolling_page_only_the_focused_field_takes_the_wheel(qapp):
     """@brief Negativo: in una finestra piccola la rotellina resta utile sul campo attivo."""
-    app = _app()
+    app = qapp
     wheel_guard.install(app)
     window = QWidget()
     layout = QVBoxLayout(window)

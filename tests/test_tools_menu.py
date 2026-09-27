@@ -1,7 +1,7 @@
 """@brief «Strumenti» menu: the six entries removed on 25/09, back in one place (user, 2026-09-26)."""
 from PyQt6.QtWidgets import QMessageBox
 
-from tests.test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from tests.test_photo_inventory_gui import gui
 
 KICAD_ACTIONS = ("action_test_kicad", "action_export", "action_install_global")
 

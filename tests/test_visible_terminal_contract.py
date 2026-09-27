@@ -33,9 +33,11 @@ def test_versioned_schema_and_prompt_distinguish_complete_leads_and_visible_tabs
     # dire, rileggendo una cache, che cosa era stato davvero chiesto.
     # 27/09: versione 8/5 per leads_by_side e package_confidence, poi 9/6 per le
     # regole di lettura delle sigle e marking_confidence (forma separata
-    # dalla funzione), vedi i test in fondo al file.
-    assert inventory.PROMPT_VERSION == 'global-yolo-inventory-9'
-    assert inventory.SCHEMA_VERSION == 'global-inventory-6'
+    # dalla funzione), vedi i test in fondo al file. Poi 10/7: le classi
+    # relay, transformer, battery, display, buzzer, potentiometer, fuse,
+    # heatsink e shield_can (test_inventory_class_vocabulary.py).
+    assert inventory.PROMPT_VERSION == 'global-yolo-inventory-10'
+    assert inventory.SCHEMA_VERSION == 'global-inventory-7'
     item = inventory.inventory_tool()['function']['parameters']['properties']['components']['items']
     fields = item['properties']
     assert fields['lead_count']['type'] == ['integer', 'null']
@@ -57,7 +59,7 @@ def test_only_complete_confident_ordinary_leads_become_exact_pin_count(complete,
     before = deepcopy(raw)
     assert inventory._component_valid(raw, set())
     normalized = inventory._normalize(raw, 1, 40, 20, [])
-    parsed = _components_3d([normalized])[0]
+    parsed = _components_3d([normalized], trusted=True)[0]
     assert raw == before
     for result in (normalized, parsed):
         assert result['terminal_count'] == 4
@@ -76,7 +78,7 @@ def test_only_complete_confident_ordinary_leads_become_exact_pin_count(complete,
 def test_legacy_visible_count_is_preserved_but_never_promoted():
     raw = _body(confidence='high')
     assert inventory._component_valid(raw, set())
-    result = _components_3d([inventory._normalize(raw, 1, 40, 20, [])])[0]
+    result = _components_3d([inventory._normalize(raw, 1, 40, 20, [])], trusted=True)[0]
     assert result['terminal_count'] == 4 and result['terminal_count_basis'] == 'visible_including_tabs'
     assert result['lead_count'] is None and result['lead_count_complete'] is False
     assert 'pin_count' not in result
@@ -87,7 +89,7 @@ def test_nullable_and_boundary_observations_remain_incomplete(count):
     raw = _body(terminal_count=None, lead_count=count, lead_count_complete=False,
                 lead_count_confidence='low')
     assert inventory._component_valid(raw, set())
-    result = _components_3d([inventory._normalize(raw, 1, 40, 20, [])])[0]
+    result = _components_3d([inventory._normalize(raw, 1, 40, 20, [])], trusted=True)[0]
     assert result['lead_count'] == count and 'pin_count' not in result
 
 

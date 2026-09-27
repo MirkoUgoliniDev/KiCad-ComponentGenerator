@@ -1,5 +1,4 @@
 """@brief Icone «Nuovo progetto» e «Apri progetto» nella barra della scheda Progetto (utente, 2026-09-25)."""
-from test_photo_inventory_gui import window  # noqa: F401 - fixture
 
 
 def test_the_icons_lead_the_project_bar(window):  # noqa: F811

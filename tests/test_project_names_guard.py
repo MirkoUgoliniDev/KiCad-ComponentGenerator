@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import QDialog, QMessageBox
 
 from kicadgen.gui.project_dialogs import ProjectNameDialog
 from kicadgen.services.project_costs import COSTS_FILE, add_call, load_project_costs
-from tests.test_photo_inventory_gui import window, gui  # noqa: F401
+from tests.test_photo_inventory_gui import gui
 
 
 def _project(root, name):

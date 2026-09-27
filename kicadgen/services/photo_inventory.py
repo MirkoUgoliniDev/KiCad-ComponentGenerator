@@ -20,6 +20,7 @@ from pathlib import Path
 from .openrouter import OpenRouterError
 from .messages import CACHE_HIT, WARNING, kind_of, tx, warning
 # Solo costanti: photo_refine regge l'assenza di OpenCV da se'.
+from ..core.validation import positive_number
 from .photo_refine import MIN_PACKAGE_PIXELS_HINT, SMALLEST_EXPECTED_PART_MM
 
 
@@ -438,12 +439,12 @@ def merge_components(groups, log=lambda message: None, containment=False, summar
             index = assignments[current]
             duplicates += 1
             existing = merged[index]
-            for field in ("package", "mating"):
-                if existing.get(field) and item.get(field) and existing[field] != item[field]:
+            for key in ("package", "mating"):
+                if existing.get(key) and item.get(key) and existing[key] != item[key]:
                     log(warning("Da verificare: {field} discordante tra viste: {existing} / {item}.",
-                           field=field,
-                           existing=existing[field],
-                           item=item[field]))
+                           field=key,
+                           existing=existing[key],
+                           item=item[key]))
                     existing["_uncertain"] = True
                     item = dict(item, _uncertain=True)
             if existing.get("kind") != item.get("kind"):
@@ -763,7 +764,13 @@ def measure_proposal_edges(photo, proposals, positions, length_mm, width_mm, log
         return proposals
     measured, report = refine_on_frame(image, frame, proposals,
                                        contact_rects_mm(positions, length_mm, width_mm))
-    keys = ('x_mm', 'y_mm', 'length_mm', 'width_mm', 'rotation_deg')
+    if report.failed:
+        # Un errore inatteso non e' un contorno poco chiaro: e' un difetto,
+        # e il log lo deve dire con il suo nome invece di confonderlo.
+        log(warning("Bordi con OpenCV: {n_failed} proposte non misurate per un errore "
+                    "inatteso (difetto del programma, stima conservata): {detail}",
+                    n_failed=len(report.failed), detail='; '.join(report.failed)))
+    keys =('x_mm', 'y_mm', 'length_mm', 'width_mm', 'rotation_deg')
     changed = 0
     for before, after in zip(proposals, measured):
         if all(float(after.get(key) or 0.0) == float(before.get(key) or 0.0) for key in keys):
@@ -1229,7 +1236,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         issues = sorted({str(issue) for c in report.components
                          for issue in c.get('_global_inventory_errors', [])})
         if issues:
-            warn('Inventario globale parziale: ' + '; '.join(issues)
+            warn(tx("Inventario globale parziale: ") + '; '.join(issues)
                  + tx(". Componenti irrisolti conservati per revisione manuale."))
         report.overlay_png = draw_inventory(photo, report.components)
         save_inventory_evidence(cache_dir, report.photo_png, report.overlay_png,
@@ -1254,8 +1261,10 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                                                report_progress,cache_dir,extra_instructions,classifier_model,mechanical,
                                                grounding_prompt=grounding_prompt, verification_prompt=verification_prompt)
         for i,c in enumerate(report.components,1):
-            log(f"#{i} {c['name']} [{c['kind']}] centro ({c['x_mm']:.2f}, {c['y_mm']:.2f}) mm; "
-                f"{c['length_mm']:.2f} x {c['width_mm']:.2f} mm; "
+            log(tx("#{i} {name} [{kind}] centro ({x:.2f}, {y:.2f}) mm; "
+                   "{length:.2f} x {width:.2f} mm; ",
+                   i=i, name=c['name'], kind=c['kind'], x=c['x_mm'], y=c['y_mm'],
+                   length=c['length_mm'], width=c['width_mm'])
                 + (tx("DA VERIFICARE") if c.get('_uncertain') else tx("verificato dall'AI, non certificato")))
         report.overlay_png = draw_inventory(photo, report.components)
         log(tx("Inventario concluso: {n_components} package; {sum} dubbi sulla "
@@ -1305,8 +1314,10 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     report.components = merge_components(
         groups, warn, summary=log)
     for i,c in enumerate(report.components,1):
-        log(f"#{i} {c.get('name')} [{c.get('kind')}] centro ({c['x_mm']:.2f}, {c['y_mm']:.2f}) mm, "
-            f"{c['length_mm']:.2f} x {c['width_mm']:.2f} mm, {c['rotation_deg']:g} gradi.")
+        log(tx("#{i} {name} [{kind}] centro ({x:.2f}, {y:.2f}) mm, "
+               "{length:.2f} x {width:.2f} mm, {rotation:g} gradi.",
+               i=i, name=c.get('name'), kind=c.get('kind'), x=c['x_mm'], y=c['y_mm'],
+               length=c['length_mm'], width=c['width_mm'], rotation=c['rotation_deg']))
     report.overlay_png = draw_inventory(photo, report.components)
     log(tx("Confronto fotografico pronto: verde = rilevato; arancione = da "
            "verificare."))
@@ -1324,13 +1335,18 @@ LOCAL_DETECTORS = ('yolo', 'yolo_only')
 #: tipo omonimo restano tali; transistor -> ic come fa gia' la riconciliazione
 #: (photo_global_inventory._normalize); clock (oscillatori e quarzi) ->
 #: crystal; button (pulsanti tattili) -> switch. Batterie, buzzer, display,
-#: fusibili, dissipatori, trimmer, rele': nessun tipo dedicato, restano
-#: generic. Il tipo sceglie solo la forma generica del volume, non un package.
+#: trimmer (potentiometer) e rele' hanno un tipo omonimo in
+#: datasheet_extractor.COMPONENT_KINDS e lo usano. Fusibili e dissipatori non
+#: hanno una forma 3D dedicata: restano generic (l'altezza la stima comunque
+#: photo_yolo dalla classe). pads e pins non sono corpi: generic. Il tipo
+#: sceglie solo la forma generica del volume, non un package.
 YOLO_CLASS_KINDS = {
     'capacitor': 'capacitor', 'resistor': 'resistor', 'inductor': 'inductor',
     'diode': 'diode', 'led': 'led', 'connector': 'connector', 'switch': 'switch',
     'ic': 'ic', 'transformer': 'transformer', 'transistor': 'ic',
-    'clock': 'crystal', 'button': 'switch',
+    'clock': 'crystal', 'button': 'switch', 'battery': 'battery',
+    'buzzer': 'buzzer', 'display': 'display', 'potentiometer': 'potentiometer',
+    'relay': 'relay',
 }
 
 
@@ -1501,12 +1517,6 @@ class ReviewBundle:
     photo_path: Path | None = None
 
 
-def _positive_extent(value):
-    """@brief True for a finite, positive, non-boolean number (a usable mm extent)."""
-    return (isinstance(value, (int, float)) and not isinstance(value, bool)
-            and math.isfinite(value) and value > 0)
-
-
 def _valid_proposal_row(row):
     """@brief True when a row is a dict carrying an integer id and a usable box.
 
@@ -1598,7 +1608,7 @@ def save_review_bundle(project_dir, proposals, photo_png, length_mm, width_mm, *
         duplicate ids are dropped before writing, so what is on disk is what
         the reconciliation will accept.
     """
-    if not all(_positive_extent(v) for v in (length_mm, width_mm)):
+    if not all(positive_number(v) is not None for v in (length_mm, width_mm)):
         raise ValueError(tx("Quote PCB non valide: proposte non salvate."))
     rows = _valid_proposal_rows(proposals)
     if not rows:
@@ -1642,7 +1652,7 @@ def load_review_bundle(project_dir):
     if not isinstance(document, dict) or document.get('format') != REVIEW_BUNDLE_FORMAT:
         return None
     length, width = document.get('body_length_mm'), document.get('body_width_mm')
-    if not all(_positive_extent(v) for v in (length, width)):
+    if not all(positive_number(v) is not None for v in (length, width)):
         return None
     rows = document.get('proposals')
     if not isinstance(rows, list):
@@ -1728,7 +1738,8 @@ def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
                        value=value))
                 log(report.warnings[-1])
     manual = sum(1 for row in proposals if row.get('_yolo_manual_box') is True)
-    log(f'Rilancio dell\'inventario: {len(proposals)} proposte riviste'
+    log(tx("Rilancio dell'inventario: {n_proposals} proposte riviste",
+           n_proposals=len(proposals))
         + (tx(", di cui {manual} disegnate a mano e inoltrate senza misura ne' filtro",
               manual=manual) if manual else '')
         + tx("; nessun rilevatore locale e nessun documento vengono rieseguiti."))
@@ -1764,7 +1775,7 @@ def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
     issues = sorted({str(issue) for c in report.components
                      for issue in c.get('_global_inventory_errors', [])})
     if issues:
-        report.warnings.append('Inventario globale parziale: ' + '; '.join(issues)
+        report.warnings.append(tx("Inventario globale parziale: ") + '; '.join(issues)
                                + tx(". Componenti irrisolti conservati per revisione manuale."))
         log(report.warnings[-1])
     report.overlay_png = draw_inventory(photo, report.components)

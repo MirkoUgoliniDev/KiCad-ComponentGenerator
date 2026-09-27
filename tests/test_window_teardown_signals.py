@@ -14,7 +14,6 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject
 
-from test_photo_inventory_gui import window  # noqa: F401 - fixture
 
 ROOT = Path(__file__).resolve().parents[1]
 

@@ -24,12 +24,17 @@ import math
 import os
 from numbers import Real
 from pathlib import Path
+import re
 import tempfile
 try:
+    from ..core.validation import covered_fraction
     from .messages import tx
+    from .photo_audit import AUDIT_RETENTION_PER_KIND, prune_audits
     from .photo_heights import estimate_body_height
 except ImportError:  # caricato come file a se' (test di isolamento degli import)
+    from kicadgen.core.validation import covered_fraction
     from kicadgen.services.messages import tx
+    from kicadgen.services.photo_audit import AUDIT_RETENTION_PER_KIND, prune_audits
     from kicadgen.services.photo_heights import estimate_body_height
 
 
@@ -412,6 +417,13 @@ def _force_one_to_one(head, probe) -> bool:
 def _setup_torch(path):
     """Load a .pt checkpoint with Ultralytics, checked like the ONNX model."""
     np, cv2 = _image_dependencies()
+    # Il rilevatore e' locale: Ultralytics all'import verifica la connessione
+    # (ricerche DNS verso Cloudflare e Google) e puo' sincronizzare
+    # impostazioni. YOLO_OFFLINE lo spegne; un valore gia' scelto
+    # dall'utente resta com'e' (HANDOFF 131, blocco B: trovato dalla guardia
+    # di rete dei test).
+    import os
+    os.environ.setdefault("YOLO_OFFLINE", "1")
     try:
         import torch
         import ultralytics
@@ -583,15 +595,24 @@ def _prefer_complete_views(rows, complete, overlap=_TILE_OVERLAP_FRACTION):
         gets `attests_presence` True, `presence_attested_by` (fragment ids)
         and `presence_confidence`. detect_yolo_components then emits it as an
         operating-threshold body whose geometry comes from a weaker view.
+    @note Performance only: the covering views are searched just for the rows
+        the rule can drop (clipped and larger than the overlap), with a
+        vectorised prefilter confirmed by the scalar `_cover`; the kept rows,
+        their order and the side effects are identical to testing every pair.
     """
-    keep = []
-    for row in rows:
-        sides = row.get("clipped_sides")
+    rows, complete = list(rows), list(complete)
+    measurable = []
+    for index, row in enumerate(rows):
         box = row["box"]
         size = max(box[2] - box[0], box[3] - box[1])
-        covering = [other for other in complete if other is not row
-                    and _cover(box, other["box"]) >= _FRAGMENT_COVERED]
-        if sides and size > view_overlap_px(row.get("view"), overlap) and covering:
+        if row.get("clipped_sides") and size > view_overlap_px(row.get("view"), overlap):
+            measurable.append(index)
+    covering_of = _covering_views([rows[i] for i in measurable], complete)
+    covering_of = dict(zip(measurable, covering_of))
+    keep = []
+    for index, row in enumerate(rows):
+        covering = covering_of.get(index)
+        if covering:
             # Presenza ed ingombro sono due fatti distinti. Se il frammento che
             # cede il posto era sopra la soglia operativa, la PRESENZA del corpo
             # e' attestata da un rilevamento sicuro: a cedere e' solo la misura
@@ -611,6 +632,52 @@ def _prefer_complete_views(rows, complete, overlap=_TILE_OVERLAP_FRACTION):
             continue
         keep.append(row)
     return keep
+
+
+#: Rows compared at once by the vectorised cover prefilter (bounds memory to
+#: a few MB per chunk, whatever the number of complete views).
+_COVER_CHUNK = 256
+
+
+def _covering_views(rows, complete):
+    """For each row, the complete views covering at least _FRAGMENT_COVERED of its box.
+
+    Same result, in the same order of `complete`, as testing every pair with
+    `_cover`. NumPy only prefilters: its margin of 1e-9 below the threshold,
+    and any NaN, send a pair to the scalar `_cover`, which alone decides, so
+    rounding or NaN ordering differences between the two can never change a
+    verdict. Boxes that NumPy cannot read as numbers use the scalar path.
+    """
+    if not rows or not complete:
+        return [[] for _ in rows]
+    def scalar(row):
+        return [other for other in complete if other is not row
+                and _cover(row["box"], other["box"]) >= _FRAGMENT_COVERED]
+    try:
+        import numpy as np
+        views = np.asarray([other["box"][:4] for other in complete], dtype=np.float64)
+        boxes = np.asarray([row["box"][:4] for row in rows], dtype=np.float64)
+        if views.shape != (len(complete), 4) or boxes.shape != (len(rows), 4):
+            raise ValueError("box shape")
+    except (ImportError, TypeError, ValueError, KeyError, IndexError):
+        return [scalar(row) for row in rows]
+    result = []
+    with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
+        for start in range(0, len(rows), _COVER_CHUNK):
+            first = boxes[start:start + _COVER_CHUNK, None, :]
+            wide = np.maximum(0.0, np.minimum(first[..., 2], views[None, :, 2])
+                              - np.maximum(first[..., 0], views[None, :, 0]))
+            high = np.maximum(0.0, np.minimum(first[..., 3], views[None, :, 3])
+                              - np.maximum(first[..., 1], views[None, :, 1]))
+            area = (first[..., 2] - first[..., 0]) * (first[..., 3] - first[..., 1])
+            cover = wide * high / area
+            maybe = (cover >= _FRAGMENT_COVERED - 1e-9) | np.isnan(cover)
+            for offset, columns in enumerate(maybe):
+                row = rows[start + offset]
+                result.append([complete[j] for j in np.flatnonzero(columns)
+                               if complete[j] is not row
+                               and _cover(row["box"], complete[j]["box"]) >= _FRAGMENT_COVERED])
+    return result
 
 
 def _views(width, height, sizes=_TILE_SIZES, overlap=_TILE_OVERLAP_FRACTION):
@@ -681,12 +748,9 @@ def _nms(rows, np, trace=None, stage=None, iou=_NMS_IOU):
 _FRAGMENT_COVERED = 0.5
 
 
-def _cover(first, second):
-    """@brief Frazione del primo rettangolo che sta dentro il secondo."""
-    wide = max(0.0, min(first[2], second[2]) - max(first[0], second[0]))
-    high = max(0.0, min(first[3], second[3]) - max(first[1], second[1]))
-    area = (first[2] - first[0]) * (first[3] - first[1])
-    return (wide * high / area) if area > 0 else 0.0
+#: Fraction of the first rectangle inside the second (shared implementation;
+#: the private name stays because callers and tests refer to it).
+_cover = covered_fraction
 
 
 def _recover_clipped(retained, fragments, confidence=_CONFIDENCE):
@@ -873,7 +937,21 @@ def _dimension(value, name):
     return number
 
 
-def _write_audit(audit_dir, document):
+#: File names written by _write_audit (tempfile adds 8 random characters).
+_AUDIT_NAME = re.compile(r"yolo-[A-Za-z0-9_]+\.json")
+
+
+def _write_audit(audit_dir, document, keep=AUDIT_RETENTION_PER_KIND):
+    """@brief Write one local-detector audit and prune older ``yolo-*`` audits.
+
+    @param audit_dir Directory receiving a unique ``yolo-*.json`` file.
+    @param document JSON-serializable audit content.
+    @param keep Retention limit for detector audits (AUDIT_RETENTION_PER_KIND).
+    @return Path of the written audit, as a string.
+    @throws ValueError If the audit cannot be written.
+    @note Only files named like detector audits are pruned, never the one just
+        written; other audit kinds in the same directory are untouched.
+    """
     try:
         directory = Path(audit_dir)
         directory.mkdir(parents=True, exist_ok=True)
@@ -883,9 +961,11 @@ def _write_audit(audit_dir, document):
             dir=directory, delete=False,
         ) as handle:
             json.dump(document, handle, indent=2, allow_nan=False)
-            return handle.name
+            written = handle.name
     except (OSError, TypeError, ValueError) as exc:
         raise ValueError(f"Cannot write YOLO audit under {audit_dir!r}: {exc}") from exc
+    prune_audits(directory, _AUDIT_NAME, keep, protect=written)
+    return written
 
 
 def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None,

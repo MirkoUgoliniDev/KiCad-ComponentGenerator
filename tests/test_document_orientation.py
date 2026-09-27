@@ -9,7 +9,6 @@ import pytest
 pytest.importorskip("PyQt6")
 from PIL import Image
 from PyQt6.QtCore import QSize
-from PyQt6.QtWidgets import QApplication
 
 from kicadgen.gui.guided_documents import document_pixmap
 
@@ -24,9 +23,9 @@ def _photo(path, orientation=None):
     return path
 
 
-def test_the_preview_applies_the_exif_orientation(tmp_path):
+def test_the_preview_applies_the_exif_orientation(qapp, tmp_path):
     """@brief Positivo: tag 6 -> anteprima orizzontale. Negativo: senza tag resta verticale."""
-    app = QApplication.instance() or QApplication([])
+    app = qapp
     rotated = document_pixmap(_photo(tmp_path / "rotated.jpg", 6), QSize(240, 76))
     plain = document_pixmap(_photo(tmp_path / "plain.jpg"), QSize(240, 76))
     assert rotated.width() > rotated.height()

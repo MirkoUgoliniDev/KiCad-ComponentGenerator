@@ -17,7 +17,6 @@ from PyQt6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QMessageBox
 from kicadgen.gui import main_window as gui
 from kicadgen.services.photo_inventory import InventoryResult
 
-from test_photo_inventory_gui import window  # noqa: F401 - fixture
 
 
 def _pump(condition, timeout=5.0):

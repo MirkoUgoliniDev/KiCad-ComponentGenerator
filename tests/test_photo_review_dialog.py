@@ -30,12 +30,6 @@ from kicadgen.gui.photo_review_dialog import (
 )
 
 
-@pytest.fixture(scope="module")
-def app():
-    application = QApplication.instance() or QApplication([])
-    yield application
-
-
 @pytest.fixture
 def png(app):
     # Deliberately anisotropic: 10 px/mm X, 5 px/mm Y for a 40 x 20 mm PCB.

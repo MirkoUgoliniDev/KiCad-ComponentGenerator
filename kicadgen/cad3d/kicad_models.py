@@ -48,6 +48,7 @@ from .model_measurement import normalize_model_measurement
 from .process_log import CANCEL_POLL_INTERVAL_S, ProcessCancelled
 from . import model_size_cache
 from ..services.messages import tx
+from ..kicad_versions import newest_version_first
 
 #: Variabile d'ambiente per indicare una libreria diversa da quella trovata.
 LIBRARY_ENV = "KICAD_3DMODEL_DIR"
@@ -198,16 +199,20 @@ def _package_name(package: str) -> str:
     return _normalize("_".join(words))
 
 
+#: Windows folders holding one sub-folder per installed KiCad version.
+_INSTALL_BASES = (r"C:\Program Files\KiCad", r"C:\Program Files (x86)\KiCad")
+
+
 def _candidate_roots() -> Iterable[Path]:
     """Percorsi in cui cercare la libreria, dal piu' esplicito al piu' generico."""
     override = os.environ.get(LIBRARY_ENV)
     if override:
         yield Path(override)
-    for base in (r"C:\Program Files\KiCad", r"C:\Program Files (x86)\KiCad"):
+    for base in _INSTALL_BASES:
         root = Path(base)
         if root.is_dir():
-            # Versioni piu' recenti per prime: 10.0 prima di 9.0.
-            for version in sorted(root.iterdir(), reverse=True):
+            # Newest version first by numeric value: as text, 9.0 > 10.0.
+            for version in newest_version_first(root.iterdir(), lambda p: p.name):
                 yield version / "share" / "kicad" / "3dmodels"
     # KiCad mantiene le librerie 3rd-party installate dall'utente fuori da
     # Program Files. Ogni repository puo' avere una propria cartella
@@ -215,7 +220,7 @@ def _candidate_roots() -> Iterable[Path]:
     # repository come radici indipendenti e si evita di assumere un vendor.
     user_kicad = Path.home() / "Documents" / "KiCad"
     if user_kicad.is_dir():
-        for version in sorted(user_kicad.iterdir(), reverse=True):
+        for version in newest_version_first(user_kicad.iterdir(), lambda p: p.name):
             models = version / "3rdparty" / "3dmodels"
             if not models.is_dir():
                 continue
@@ -608,6 +613,123 @@ def _footprint_record(path: Path, stamp: str):
         return None, None, str(exc)
 
 
+def _footprint_listing(root: Path) -> list:
+    """Cheap change detector: (path, size, mtime_ns) of every *.kicad_mod under root.
+
+    `os.scandir` returns size and mtime with the directory entries (no extra
+    system call per file on Windows), so the whole KiCad library (~15k files)
+    is listed in well under a tenth of the time the per-file `stat` of the
+    original scan took. Directory mtimes alone are NOT enough: NTFS updates
+    them at timer-tick granularity (two additions within ~15 ms keep the same
+    value) and never on an in-place edit of a file.
+    Symlinked directories are not descended, as `Path.rglob` does not.
+    """
+    listing, pending = [], [str(root)]
+    while pending:
+        folder = pending.pop()
+        try:
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(entry.path)
+                    elif entry.name.casefold().endswith(".kicad_mod"):
+                        try:
+                            stat = entry.stat()
+                            listing.append((entry.path, stat.st_size, stat.st_mtime_ns))
+                        except OSError:
+                            listing.append((entry.path, -1, -1))
+        except OSError:
+            # An unreadable folder is skipped by rglob too; keep it in the
+            # snapshot so that it becoming readable triggers a re-index.
+            listing.append((folder, -1, -1))
+    listing.sort()
+    return listing
+
+
+class _FootprintIndex:
+    """One scan of a footprint root: sorted footprints, their stamps and link basenames.
+
+    Positions refer to `entries`, which keeps the `sorted(root.rglob(...))`
+    order of the original per-call scan, so lookups visit footprints in the
+    very same order and produce identical results.
+    """
+
+    __slots__ = ("listing", "entries", "by_name", "variable")
+
+    def __init__(self, root: Path, listing: list):
+        """Scan `root` once; `listing` is the detector snapshot taken BEFORE the scan."""
+        self.listing = listing
+        self.entries = []
+        self.by_name = {}
+        self.variable = []
+        for position, footprint in enumerate(sorted(root.rglob("*.kicad_mod"))):
+            stamp = index_key(footprint)
+            hints, variable = _link_hints(footprint, stamp)
+            self.entries.append((footprint, stamp))
+            if variable:
+                self.variable.append(position)
+            for name in hints:
+                self.by_name.setdefault(name, []).append(position)
+
+
+#: Footprint indexes of this session, keyed by the footprint root as given.
+_FOOTPRINT_INDEXES: dict = {}
+_FOOTPRINT_INDEX_LOCK = threading.Lock()
+
+
+def clear_footprint_index() -> None:
+    """@brief Forget every cached KiCad footprint index of this session.
+
+    @note Never needed for correctness: each lookup already re-indexes a root
+        whose footprint files were added, removed, renamed or rewritten. It
+        exists for tests and for callers that want to release the memory.
+    """
+    with _FOOTPRINT_INDEX_LOCK:
+        _FOOTPRINT_INDEXES.clear()
+
+
+def _footprint_index(root: Path) -> _FootprintIndex:
+    """Session index of `root`, rebuilt whenever any footprint's size/mtime changed.
+
+    @throws OSError when the library cannot be listed, like the original rglob.
+    """
+    listing = _footprint_listing(root)
+    key = str(root)
+    with _FOOTPRINT_INDEX_LOCK:
+        index = _FOOTPRINT_INDEXES.get(key)
+        if index is not None and index.listing == listing:
+            return index
+    index = _FootprintIndex(root, listing)
+    with _FOOTPRINT_INDEX_LOCK:
+        _FOOTPRINT_INDEXES[key] = index
+    return index
+
+
+def _linked_footprints(root: Path, names) -> list:
+    """(footprint, stamp) whose link hints mention one of `names`, or are variable.
+
+    Same selection and order as filtering `sorted(root.rglob("*.kicad_mod"))`
+    with `_link_hints`, but through the session index. Each candidate is
+    re-stamped here, so the stamp handed to the parsing caches is exactly the
+    one the per-call scan would have computed.
+    @throws OSError when the library cannot be listed.
+    """
+    index = _footprint_index(root)
+    positions = set(index.variable)
+    for name in names:
+        positions.update(index.by_name.get(name, ()))
+    selected = []
+    for position in sorted(positions):
+        footprint, indexed = index.entries[position]
+        stamp = index_key(footprint)
+        if stamp != indexed:
+            hints, variable = _link_hints(footprint, stamp)
+            if not variable and not set(names).intersection(hints):
+                continue
+        selected.append((footprint, stamp))
+    return selected
+
+
 def footprint_sizes(paths, library: Optional[Path] = None, log=None) -> dict:
     """@brief Read copper land-pattern envelopes linked to candidate solids.
 
@@ -631,11 +753,7 @@ def footprint_sizes(paths, library: Optional[Path] = None, log=None) -> dict:
     names = {p.name.casefold() for p in wanted}
     rejected = 0
     try:
-        for footprint in sorted(root.rglob("*.kicad_mod")):
-            stamp = index_key(footprint)
-            hints, variable = _link_hints(footprint, stamp)
-            if not variable and not names.intersection(hints):
-                continue
+        for footprint, stamp in _linked_footprints(root, names):
             size, model, error = _footprint_record(footprint, stamp)
             if error:
                 rejected += 1
@@ -1110,6 +1228,15 @@ KIND_FAMILY_ALIASES = {
     "semiconductor_unknown": "semiconductor", "transistor": "semiconductor",
 }
 
+#: Kinds treated as a board module by the library search: "module" itself and
+#: every kind that KIND_FAMILY_ALIASES maps onto it. A shield can is the
+#: visible body of a shielded module (radio, MCU module), so it follows the
+#: same envelope checks, marking lookup and acceptance rules as a module;
+#: deriving the set from the aliases keeps a new module kind from being
+#: forgotten in one of the lists below.
+MODULE_KINDS = ("module",) + tuple(sorted(
+    kind for kind, family in KIND_FAMILY_ALIASES.items() if family == "module"))
+
 
 def _candidate_family(path):
     """Recognize explicit KiCad taxonomy; never assign unknown packages by size."""
@@ -1160,7 +1287,7 @@ def _candidate_family_for_component(path: Path, component: dict) -> Optional[str
         return family
     kind = str(component.get("kind") or component.get("detected_kind") or
                 component.get("_detected_kind") or "").lower()
-    if kind in ("module", "rf_module", "pcb_module") and _marked_model_matches(path, component):
+    if kind in MODULE_KINDS and _marked_model_matches(path, component):
         return "module"
     return None
 
@@ -1335,7 +1462,7 @@ def _module_total_fits(path, size, component, length_mm, width_mm, tolerance, no
     # DECLARED CONVENTION: the KiCad library keeps board modules in the
     # RF_Module.3dshapes folder; the component side uses declared kinds.
     is_module = path.parent.name.lower() == "rf_module.3dshapes" or any(
-        str(component.get(key) or "").lower() in ("module", "rf_module", "pcb_module")
+        str(component.get(key) or "").lower() in MODULE_KINDS
         for key in ("kind", "detected_kind", "_detected_kind"))
     if not is_module:
         return True
@@ -1784,7 +1911,7 @@ def _automatic_mechanical(component, choices, complete, basis, discovery_scope=N
             or str(component.get("kind") or "").lower() not in (
                 "resistor", "capacitor", "tantalum", "diode", "diode_melf", "led",
                 "inductor", "ic", "ic_soic", "ic_qfn", "ic_qfp", "ic_bga",
-                "connector", "switch", "module", "rf_module", "pcb_module", "crystal", "transistor")
+                "connector", "switch", *MODULE_KINDS, "crystal", "transistor")
             or component.get("_global_inventory_status") in ("invalid", "rejected")):
         return False
     counts = _observed_count(component)
@@ -1871,7 +1998,7 @@ def _provisional_geometry_choice(component, choices, complete, basis):
         return None
     kind = str(component.get("kind") or "").lower()
     if kind not in ("ic", "ic_soic", "ic_qfn", "ic_qfp", "ic_bga",
-                    "connector", "switch", "module", "rf_module", "pcb_module"):
+                    "connector", "switch", *MODULE_KINDS):
         return None
     # Multiple explicitly named alternatives are a semantic ambiguity, even
     # when their measured outlines happen to tie.  Keep those in the picker;
@@ -1959,11 +2086,7 @@ def _declared_land_pattern(path: Path, library: Optional[Path] = None):
     target = Path(path).resolve()
     found = set()
     try:
-        for footprint in sorted(root.rglob("*.kicad_mod")):
-            stamp = index_key(footprint)
-            hints, variable = _link_hints(footprint, stamp)
-            if not variable and target.name.casefold() not in hints:
-                continue
+        for footprint, _stamp in _linked_footprints(root, {target.name.casefold()}):
             try:
                 tree = _sexpr(footprint.read_text(encoding="utf-8-sig"))
                 models = _children(tree, "model")
@@ -2531,8 +2654,7 @@ def _library_search(component: dict, result: dict, *, limit, roots, root, note, 
             path for search_root in roots
             for path in _marked_model_paths(component, search_root)))
         if marking_paths and str(component.get("kind") or component.get("detected_kind") or
-                                 component.get("_detected_kind") or "").lower() in (
-                                     "module", "rf_module", "pcb_module"):
+                                 component.get("_detected_kind") or "").lower() in MODULE_KINDS:
             # An exact literal model identifier is a stronger discovery key
             # than a library-wide module-family scan. Keep only those models;
             # dimensions and the existing module envelope checks still apply.

@@ -19,11 +19,6 @@ from kicadgen.gui.start_page import StartPage
 from kicadgen.services import recent_projects as rp
 
 
-@pytest.fixture
-def app():
-    return QApplication.instance() or QApplication([])
-
-
 def _project(root, name, key="", text=""):
     folder = root / name
     folder.mkdir(parents=True)

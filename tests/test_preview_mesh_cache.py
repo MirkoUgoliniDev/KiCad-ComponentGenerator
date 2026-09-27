@@ -35,9 +35,8 @@ def _write(path, names, shift=0.0, **extra):
 
 
 @pytest.fixture
-def view():
-    from PyQt6.QtWidgets import QApplication
-    app = QApplication.instance() or QApplication([])
+def view(qapp):
+    app = qapp
     widget = Preview3DVtk()
     widget.resize(400, 300)
     widget.show()

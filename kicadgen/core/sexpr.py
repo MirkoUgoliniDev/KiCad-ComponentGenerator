@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Iterable, Union
+from typing import Union
 
 class Symbol(str):
     """@brief Bare (unquoted) KiCad keyword token such as yes, no or thru_hole.

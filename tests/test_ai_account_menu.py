@@ -5,7 +5,7 @@ import pytest
 from PyQt6.QtWidgets import QMessageBox
 
 from kicadgen.gui import ai_account_dialog
-from tests.test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from tests.test_photo_inventory_gui import gui
 
 
 @pytest.fixture
@@ -42,11 +42,17 @@ def test_the_configuration_menu_opens_the_ai_account_window(window, monkeypatch)
     refreshed = []
     monkeypatch.setattr(window.ai_account, "refresh_balance", lambda: refreshed.append(True))
     monkeypatch.setattr(ai_account_dialog.AiAccountDialog, "exec", lambda self: 0)
+    # La finestra vera legge i saldi in background: nel test nessuna rete
+    # (prima chiamava davvero openrouter.ai con la chiave finta).
+    read = []
+    monkeypatch.setattr(ai_account_dialog.AiAccountDialog, "refresh_balances",
+                        lambda self: read.append(True))
     window.action_ai_account.trigger()
     dialog = window._ai_account_dialog
     assert isinstance(dialog, ai_account_dialog.AiAccountDialog)
     dialog.key_changed.emit()
     assert refreshed == [True]
+    assert read == [True]           # the application asks for the balances
 
 
 def test_with_a_key_the_extraction_starts_without_questions(window, monkeypatch,

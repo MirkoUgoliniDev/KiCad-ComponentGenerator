@@ -6,15 +6,15 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtGui import QGuiApplication
-from PyQt6.QtWidgets import QApplication, QWidget
+from PyQt6.QtWidgets import QWidget
 
 from kicadgen.gui import toast as toast_module
 from kicadgen.gui.toast import Toast
 
 
 @pytest.fixture
-def card():
-    app = QApplication.instance() or QApplication([])
+def card(qapp):
+    app = qapp
     owner = QWidget()
     owner.show()
     widget = Toast(owner, "format-painter.svg")
