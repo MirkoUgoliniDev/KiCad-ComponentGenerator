@@ -265,6 +265,16 @@ def body(identity='assembly', sources=None, **changes):
     return row
 
 
+def represented_once(result, identity):
+    """@brief La proposta resta nell'inventario UNA volta: ripristinata da sola,
+    oppure rappresentata da una riga trattenuta che la reclama fra le sue
+    sorgenti (HANDOFF 126, G2: prima compariva in entrambi i modi, lo stesso
+    corpo contato due volte)."""
+    alone = sum(1 for r in result if r['_id'] == identity and 'component_id' not in r)
+    claimed = sum(1 for r in result if identity in r.get('source_candidate_ids', ()))
+    return alone + claimed == 1
+
+
 def response():
     return dict(components=[body()], candidate_decisions=[
         dict(candidate_id=i, status='merge', component_id='assembly', reason='Part of retained assembly')
@@ -417,18 +427,21 @@ def test_accounting_errors_are_uncached_and_preserve_uncertain_input(change, tmp
     if change == 'source_mismatch': data['components'][0]['source_candidate_ids'] = [2]
     if change == 'boolean_id': data['candidate_decisions'][0]['candidate_id'] = True
     result, _, _ = run(data, cache=tmp_path)
-    assert any(r['_id'] == 1 for r in result)
+    assert represented_once(result, 1)
     assert all(r['_global_inventory_status'] == 'partial' for r in result)
     assert len({r['_id'] for r in result}) == len(result)
     assert not list(tmp_path.glob('*.json'))
 
 
 def test_valid_missing_body_survives_partial_response():
-    data = response(); data['components'].append(body('missed', [], **{'class': 'connector'}))
+    # Il corpo mancato sta FUORI dall'assieme: dentro sarebbe lo stesso
+    # corpo contato due volte (G3, test dedicati sotto).
+    data = response(); data['components'].append(body('missed', [], **{'class': 'connector'},
+                                                      bbox=[.85, .1, .95, .3]))
     data['candidate_decisions'] = []
     result, _, _ = run(data)
     assert any(r.get('component_id') == 'missed' for r in result)
-    assert {1, 2}.issubset({r['_id'] for r in result})
+    assert represented_once(result, 1) and represented_once(result, 2)
 
 
 def test_malformed_metadata_preserves_whole_assembly_geometry(tmp_path):
@@ -511,7 +524,7 @@ def test_malformed_component_cannot_authorize_rejection_of_its_sources(damage, t
                                            component_id=None, reason='Empty solder lands',
                                            rejection_category='bare_pad_or_contact'))
     result, _, logs = run(data, [candidate(1), candidate(2), candidate(3)], cache=tmp_path)
-    assert any(r['_id'] == 1 for r in result)
+    assert represented_once(result, 1)
     assert not any(r['_id'] == 3 for r in result)
     assert all(r['_global_inventory_status'] == 'partial' for r in result)
     assert any('candidate 1:' in s for s in logs)
@@ -536,7 +549,7 @@ def test_invalid_competing_parent_keeps_conflicted_candidate_original():
     data = response()
     data['components'].append(body('bad-parent', [1], bbox=[0, 0, 0, 1]))
     result, _, _ = run(data)
-    assert any(r['_id'] == 1 for r in result)
+    assert represented_once(result, 1)
     assert any(r.get('component_id') == 'assembly' for r in result)
 
 

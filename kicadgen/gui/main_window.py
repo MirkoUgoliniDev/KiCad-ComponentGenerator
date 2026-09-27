@@ -1411,7 +1411,10 @@ class ReconcileWorker(QThread):
         from ..services.photo_inventory import reconcile_saved_proposals
         from ..services.openrouter import call_tool
         from ..services.ai_diagnostics import make_logged_call
+        from ..services import providers
         try:
+            if providers.provider_of(self.model) == providers.PROVIDER_DEEPSEEK:
+                providers.ensure_providers_ready([self.model], self.progress.emit)
             self.phase.emit('llm_inventory', self.model, 0, 0)
             report = reconcile_saved_proposals(
                 self.photo_png, self.proposals, self.length_mm, self.width_mm, self.model,

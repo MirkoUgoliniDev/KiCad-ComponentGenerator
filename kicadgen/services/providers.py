@@ -35,6 +35,8 @@ PROVIDERS = (PROVIDER_OPENROUTER, PROVIDER_DEEPSEEK)
 #: Italian source labels of the providers (translated by the GUI).
 PROVIDER_LABELS = {PROVIDER_OPENROUTER: "OpenRouter",
                    PROVIDER_DEEPSEEK: "DeepSeek (API diretta)"}
+#: Short names, for places where the label sits inside other text.
+PROVIDER_SHORT_LABELS = {PROVIDER_OPENROUTER: "OpenRouter", PROVIDER_DEEPSEEK: "DeepSeek"}
 
 DEEPSEEK_PREFIX = "deepseek-api/"
 DEEPSEEK_API_BASE = "https://api.deepseek.com"

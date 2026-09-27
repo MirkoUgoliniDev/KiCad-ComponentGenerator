@@ -839,6 +839,60 @@ def draw_detector_proposals(image, kept, dropped=()):
 COLOR_SAMPLE_HALF_FRACTION = 0.2
 
 
+def _sent_to_ai(proposals):
+    """Proposals the global inventory actually received (unkept low-confidence ones stay out)."""
+    from .photo_yolo import split_ai_candidates
+    return split_ai_candidates(list(proposals or ()))[0]
+
+
+def flag_ai_bodies_on_edge_contacts(photo, components, declared, length, width,
+                                    log=lambda message: None, *, enumerated=False) -> int:
+    """@brief Mark as doubts the bodies the model added over a row of declared edge contacts.
+
+    @param photo Calibrated photograph (only its scale is used).
+    @param components Output of review_global_inventory, changed in place.
+    @param declared Extracted board parameters (declared contacts), or None.
+    @param length Board X dimension in mm.
+    @param width Board Y dimension in mm.
+    @param log Progress callback.
+    @param enumerated True when no detector proposal was sent and the model
+        listed every body itself: then every body lacks a proposal, «without
+        detector support» says nothing, and nothing is marked.
+    @return Number of bodies marked.
+    @note Only bodies with NO detector proposal behind them
+        (source_candidate_ids == []) are judged. Whether such a box is a real
+        edge connector or the row of bare pads the prompt forbids counting is
+        not decidable from the outline (contact_zones.rows_over_edge_contacts),
+        so nothing is deleted: presence and class drop to low, the body shows
+        among the unclassified ones in the review, with the reason (HANDOFF
+        126, G4).
+    """
+    from .contact_zones import contact_positions, rows_over_edge_contacts
+    from ..cad3d.measurement_uncertainty import edge_uncertainty_mm
+    if enumerated:
+        return 0
+    positions = contact_positions(declared, length, width) if declared else []
+    ai_only = [c for c in components if isinstance(c, dict) and 'component_id' in c
+               and c.get('source_candidate_ids') == [] and isinstance(c.get('bbox'), list)]
+    if not positions or not ai_only:
+        return 0
+    tolerance, _source = edge_uncertainty_mm(
+        scale_px_per_mm=min(photo.shape[1] / length, photo.shape[0] / width))
+    hits = rows_over_edge_contacts([c['bbox'] for c in ai_only], positions, length, width,
+                                   edge_tolerance_mm=tolerance)
+    for index in sorted(hits):
+        body = ai_only[index]
+        body.update(_uncertain=True, presence_confidence='low', class_confidence='low',
+                    _review_reason=tx("Aggiunto dal modello senza proposte del rilevatore, lungo "
+                                      "una fila di contatti di bordo dichiarati: puo' essere un "
+                                      "connettore vero o le piazzole stesse. Verificare nella "
+                                      "foto."))
+        log(tx("Contatti dichiarati: {name} aggiunto dal modello sopra una fila di contatti di "
+               "bordo, senza proposte del rilevatore; resta come dubbio da verificare.",
+               name=body.get('name') or body.get('component_id')))
+    return len(hits)
+
+
 def sample_body_colors(photo, components, log=lambda message: None):
     """@brief Measure each body's colour from the calibrated photograph.
 
@@ -1152,6 +1206,8 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             cache_dir, verification_prompt=verification_prompt,
             extra_instructions=extra_instructions,
             **({'detector_ran': True} if detector in LOCAL_DETECTORS else {}))
+        flag_ai_bodies_on_edge_contacts(photo, report.components, declared, length, width, log,
+                                        enumerated=not _sent_to_ai(proposals))
         # Il colore si misura QUI e non prima: la riconciliazione fonde e
         # sposta i riquadri, e un colore campionato sulle proposte grezze
         # descriverebbe un rettangolo che non esiste piu'. Il rilevatore e il
@@ -1688,6 +1744,8 @@ def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
         photo, proposals, length, width, model, call, observe, cache_dir,
         verification_prompt=verification_prompt, extra_instructions=extra_instructions,
         detector_ran=detector in LOCAL_DETECTORS)
+    flag_ai_bodies_on_edge_contacts(photo, report.components, declared, length, width, log,
+                                    enumerated=not _sent_to_ai(proposals))
     replayed = any(kind_of(message) == CACHE_HIT for message in seen)
     if replayed:
         log(tx("Rilancio dell'inventario: proposte e foto identiche a una richiesta "

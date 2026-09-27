@@ -525,6 +525,8 @@ def _record_usage(payload: Any) -> None:
                                               else "") or ""),
                   "prompt_tokens": _usage_int(usage, "prompt_tokens"),
                   "completion_tokens": _usage_int(usage, "completion_tokens")}
+        if isinstance(usage, dict) and isinstance(usage.get("cost_source"), str):
+            record["cost_source"] = usage["cost_source"]
         try:
             listener(record)
         except Exception:  # noqa: BLE001 - la chiamata e' pagata e resta valida
@@ -1055,7 +1057,7 @@ def call_tool(
     }
     if provider_of(model) == PROVIDER_DEEPSEEK:
         # API diretta di DeepSeek (compatibile OpenAI): niente plugin PDF ne'
-        # costo nella risposta, che si registra quindi senza costo.
+        # costo nella risposta; il costo si calcola dai token (sotto).
         if has_pdf:
             raise ProviderError(tx("L'API diretta di DeepSeek non legge i PDF: per un "
                                    "datasheet PDF scegli un modello OpenRouter che li legga."))
@@ -1066,7 +1068,16 @@ def call_tool(
         body["thinking"] = {"type": "disabled"}
         payload = deepseek_request(DEEPSEEK_CHAT_URL, body, timeout=_HTTP_TIMEOUT_CHAT_S)
         if isinstance(payload, dict):
-            payload.setdefault("model", model)
+            # L'identificativo completo, non il nome che risponde DeepSeek: il
+            # file dei costi riconosce cosi' il fornitore di ogni chiamata.
+            payload["model"] = model
+            # DeepSeek non riporta il costo: si calcola come fa la sua
+            # fatturazione, token x prezzo del listino ufficiale (HANDOFF 128).
+            from .deepseek_pricing import call_cost
+            usage = payload.get("usage")
+            cost = call_cost(provider_model_name(model), usage)
+            if isinstance(usage, dict) and cost is not None:
+                usage["cost"], usage["cost_source"] = cost, "token_price"
         _record_usage(payload)
         return tool_arguments(payload, tool["function"]["name"])
     if has_pdf:

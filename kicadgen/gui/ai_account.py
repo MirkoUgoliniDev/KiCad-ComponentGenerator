@@ -370,6 +370,15 @@ class AiAccountLine(QLabel):
                 else:
                     parts.append(tx("Costo del progetto: almeno {amount} USD",
                                     amount=format_usd(costs.total_usd)))
+                # Diviso per fornitore sulla riga stessa (utente, 27/09: il
+                # totale accanto al saldo DeepSeek sembrava la spesa DeepSeek).
+                split = sorted((provider, total) for provider, (total, _calls, _missing)
+                               in (costs.by_provider or {}).items())
+                if len(split) > 1:
+                    parts[-1] += " (" + " · ".join(
+                        f"{providers.PROVIDER_SHORT_LABELS.get(provider, provider)} "
+                        f"{format_usd(total)}"
+                        for provider, total in split) + ")"
                 since = _local_date(costs.since)
                 if costs.calls == 1:
                     details.append(tx("Costo del progetto: 1 chiamata a pagamento dal "
@@ -381,6 +390,18 @@ class AiAccountLine(QLabel):
                 if not costs.complete:
                     details.append(tx("{missing} chiamate senza costo riportato: il totale "
                                       "è sottostimato.", missing=costs.calls_without_cost))
+                if costs.estimated_calls:
+                    details.append(tx("{count} chiamate DeepSeek calcolate dai token senza la "
+                                      "parte letta dalla cache: il loro costo è un limite "
+                                      "superiore.", count=costs.estimated_calls))
+                # Diviso per fornitore (utente, 27/09): un totale unico accanto a
+                # un modello DeepSeek sembrava la spesa DeepSeek.
+                for provider, (total, calls, missing) in sorted((costs.by_provider or {}).items()):
+                    label = providers.PROVIDER_LABELS.get(provider, provider)
+                    details.append(tx("{label}: {amount} USD, {calls} chiamate", label=tx(label),
+                                      amount=format_usd(total), calls=calls)
+                                   + (tx(" ({missing} senza costo)", missing=missing)
+                                      if missing else ""))
         details.append(tx("Le risposte servite dalla cache locale non costano e non "
                           "sono contate."))
         # Riga di un modulo: resta al suo posto anche senza dati.

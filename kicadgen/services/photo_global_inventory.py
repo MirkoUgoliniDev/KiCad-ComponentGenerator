@@ -861,6 +861,105 @@ def _validate_geometry(rows, safe, boxes):
     return retained, safe, errors
 
 
+#: Fraction of a detected box that must lie inside another box for the first
+#: to count as «inside» it (compared with >=). Not a new number: it is the
+#: detector's own fragment contract (photo_yolo._FRAGMENT_COVERED, >= 0.5),
+#: the complement of the bar the merge check above uses for «excludes most of
+#: a source» (< 0.5). photo_yolo declares that value fragile, and so is it
+#: here: it was not measured for this purpose.
+_INSIDE_FRACTION = .5
+
+
+def contradicted_by_detections(rows, safe, boxes, margin=(0.0, 0.0), enumerating=False):
+    """@brief Undo or flag AI rows that the local detections contradict, never the detections.
+
+    Two structural checks, both about what the photo's detector saw, not about
+    names, classes or sizes (HANDOFF 126, rules G1 and G3):
+
+    - Envelope exclusivity (groups). A row that merges several proposals
+      claims to be ONE physical outline. If that outline swallows another
+      detected body it does not account for -- more than half of the other
+      box inside it, after eroding the outline by the edge uncertainty -- the
+      claim contradicts the photo: either that body sits on the assembly and
+      should have been counted, or the outline is too large. The row is not
+      applied and its proposals return as individual bodies. A real module
+      that accounts for everything it carries is unaffected.
+    - Nested AI-only body. A row with no source proposal that lies at least
+      half inside ONE body backed by the detector is most likely the same body
+      counted twice -- but it may also be a part the detector missed on a
+      module whose box it sits in. It is therefore KEPT as a doubt (low
+      presence and class, with the reason), never deleted: a duplicate inside
+      another body adds no footprint, a lost part may collide. The opposite
+      direction (an AI row containing detected bodies: heatsink, shield,
+      display) is left alone, because stacking and duplication cannot be told
+      apart from the outline alone. Never applied between two AI-only rows,
+      never when the model enumerated the bodies itself.
+
+    @param rows Rows retained by _validate (normalized boxes).
+    @param safe Candidate decisions retained by _validate.
+    @param boxes {candidate id: normalized box} of every proposal sent.
+    @param margin (x, y) edge uncertainty in normalized units, used to erode
+        a group outline so that a neighbour it merely grazes is not «inside».
+    @param enumerating True when no proposals were sent.
+    @return (rows, safe, notes, reasons, doubts): kept rows; decisions without
+        those of dropped groups (so their proposals are restored as
+        originals); human-readable notes for the log and the audit;
+        {candidate id: reason} for the restored proposals; {component_id:
+        reason} for the rows kept as doubts.
+    @note The outcomes are notes, not _Issue errors on purpose: an error blocks
+        the response cache, and a verdict of these checks must not make every
+        later run pay again for the same answer.
+    """
+    notes, reasons = [], {}
+    rejected = {i for i, d in safe.items() if d.get('status') == 'reject'}
+    kept = []
+    for row in rows:
+        sources = row['source_candidate_ids']
+        if len(sources) > 1:
+            x0, y0, x1, y1 = row['bbox']
+            mx = margin[0] if x1 - x0 > 2 * margin[0] else 0.0
+            my = margin[1] if y1 - y0 > 2 * margin[1] else 0.0
+            outline = [x0 + mx, y0 + my, x1 - mx, y1 - my]
+            swallowed = sorted(i for i, box in boxes.items()
+                               if i not in sources and i not in rejected
+                               and _covered(box, outline) >= _INSIDE_FRACTION)
+            if swallowed:
+                note = (f"component {row['component_id']}: outline covers detected bodies "
+                        f"{swallowed} that it does not account for; group of {sorted(sources)} "
+                        'not applied, proposals kept as separate bodies')
+                notes.append(note)
+                for identity in sources:
+                    reasons[identity] = note
+                safe = {i: d for i, d in safe.items()
+                        if i not in sources and d.get('component_id') != row['component_id']}
+                continue
+        kept.append(row)
+    doubts = {}
+    if enumerating:
+        return kept, safe, notes, reasons, doubts
+    # Hosts: rows that stand on a detection, and proposals that will come back
+    # as originals (no retained decision). Rejected proposals are not bodies.
+    # A malformed row kept as a generic envelope has no sources and is judged
+    # like any AI-only row; its fragments still come back beside it (known,
+    # conservative duplicate: suppressing them let a single invalid ID hide
+    # real bodies inside an unchecked envelope, HANDOFF 126).
+    hosts = [(r['component_id'], r['bbox']) for r in kept if r['source_candidate_ids']]
+    hosts += [(f'proposal {i}', box) for i, box in boxes.items()
+              if i not in rejected and (i not in safe or (
+                  safe[i].get('status') == 'uncertain' and safe[i].get('component_id') is None))]
+    for row in kept:
+        if not row['source_candidate_ids']:
+            host = next((name for name, box in hosts
+                         if _covered(row['bbox'], box) >= _INSIDE_FRACTION), None)
+            if host is not None:
+                note = (f"component {row['component_id']}: no detector proposal and at least "
+                        f'half inside {host}; probably the same body counted twice, kept as a '
+                        'doubt')
+                notes.append(note)
+                doubts[row['component_id']] = note
+    return kept, safe, notes, reasons, doubts
+
+
 #: Separatore fra piu' motivi dentro UNA sola riga di avanzamento. Il filtro
 #: della modale (`per_item_detail` in gui/main_window.py) riconosce il
 #: rendiconto per-elemento dalla forma «intestazione: campo; campo; campo»:
@@ -1130,10 +1229,30 @@ def _normalize(row, identity, length, width, issues, manual_ids=frozenset(), mea
     sides = leads_by_side(row)
     if sides is not None:
         result['pins_by_side'] = sides
-    elif 'leads_by_side' in row and row['leads_by_side'] is not None:
-        result['_global_inventory_errors'].append('leads_by_side ignored: a side not observed, malformed, or '
+    elif _leads_by_side_inconsistent(row):
+        result['_global_inventory_errors'].append('leads_by_side ignored: malformed, or '
                       'not adding up to a complete lead_count')
     return result
+
+
+def _leads_by_side_inconsistent(row):
+    """True only for an observation that contradicts itself or the schema.
+
+    A null side is the declaration the prompt asks for when a side is not seen
+    (every passive declares all four null): it is not drawn, and it is not an
+    error either. Counting it as one marked 32 of 40 bodies of a clean answer
+    «partial» and buried the errors that matter (HANDOFF 126).
+    """
+    sides = row.get('leads_by_side')
+    if sides is None:
+        return False
+    if not isinstance(sides, dict) or set(sides) != set(LANDMARK_SIDES):
+        return True
+    counts = [sides[side] for side in LANDMARK_SIDES]
+    if not all(count is None or (type(count) is int and 0 <= count <= 128) for count in counts):
+        return True
+    return (None not in counts and row.get('lead_count_complete') is True
+            and type(row.get('lead_count')) is int and sum(counts) != row['lead_count'])
 
 
 def review_global_inventory(photo, components, length, width, model, call, log, cache_dir=None,
@@ -1346,6 +1465,16 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     # rettangolo giusto consegnato in pixel non e' una risposta sbagliata.
     checked, box_scale = _in_contract_units(data, w, h, log)
     rows, safe, errors = _validate(checked, known, boxes)
+    # Controlli contro cio' che il rilevatore ha visto (HANDOFF 126): un
+    # gruppo che inghiotte corpi rilevati che non dichiara non si applica, un
+    # corpo solo-AI dentro un corpo rilevato non si aggiunge. Esiti come note,
+    # non come errori: la cache della risposta non ne dipende.
+    from ..cad3d.measurement_uncertainty import edge_uncertainty_mm
+    tolerance_mm, _source = edge_uncertainty_mm(scale_px_per_mm=min(w / length, h / width))
+    rows, safe, evidence_notes, evidence_reasons, evidence_doubts = contradicted_by_detections(
+        rows, safe, boxes, (tolerance_mm / length, tolerance_mm / width), enumerating)
+    for note in evidence_notes:
+        log(tx("Inventario globale, contraddetto dal rilevatore locale: ") + note)
     # A qualifier-only omission is accepted as «not declared» and never paid for
     # twice (NON_BLOCKING_QUALIFIERS); say so, with the count, so the log does
     # not suggest a guessed confidence.
@@ -1405,24 +1534,50 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     result = [_normalize(r, next_id+i, length, width,
                          own(r['component_id'], r['source_candidate_ids']), manual_ids, measured)
               for i, r in enumerate(rows)]
+    for body in result:
+        if body['component_id'] in evidence_doubts:
+            body.update(_uncertain=True, presence_confidence='low', class_confidence='low',
+                        _review_reason=evidence_doubts[body['component_id']])
     for original in components:
         decision = safe.get(original['_id'])
         if decision is None or (decision['status'] == 'uncertain' and decision['component_id'] is None):
+            # Una riga trattenuta che RECLAMA questa proposta e la contiene per
+            # piu' di meta' la rappresenta gia': ripristinarla anche da sola
+            # contava lo stesso corpo due volte (HANDOFF 126, G2). L'incoerenza
+            # della decisione resta come errore su quella riga.
+            if any(original['_id'] in r['source_candidate_ids']
+                   and _covered(boxes[original['_id']], r['bbox']) >= _INSIDE_FRACTION
+                   for r in rows):
+                continue
             retained = deepcopy(original)
             retained.update(_uncertain=True, confidence='low', package='', _package_verified=False,
                             _orientation_verified=False,
                             _global_inventory_errors=own(candidates=(original['_id'],)),
                             presence_confidence='low', class_confidence='low',
-                            _review_reason=(decision['reason'] if decision else
-                                'Global inventory accounting unresolved; original retained'))
+                            _review_reason=(evidence_reasons.get(original['_id'])
+                                or (decision['reason'] if decision else
+                                'Global inventory accounting unresolved; original retained')))
             result.append(retained)
     # Un errore che nessuna riga trattenuta puo' reclamare -- risposta
     # malformata, chiamata fallita, riga caduta senza proposte superstiti --
     # e' un errore dell'inventario, e allora vale davvero per tutti.
+    # Un errore che nomina SOLO un componente che la risposta non contiene
+    # (una decisione su un ID inventato che rimanda a un genitore inventato)
+    # non riguarda nessun corpo: copiarlo su tutti li marcava tutti
+    # «parziali» e annegava gli errori che contano (HANDOFF 126, G6). Resta
+    # nel log, nell'audit e su ogni corpo come segnale della risposta.
+    answered = ({r['component_id'] for r in checked['components']
+                 if isinstance(r, dict) and isinstance(r.get('component_id'), str)}
+                if isinstance(checked, dict) and isinstance(checked.get('components'), list)
+                else set())
+    phantom = [e for e in errors if e.component is not None and not e.candidates
+               and e.component not in answered]
     claimed = {e for c in result for e in c['_global_inventory_errors']}
-    unclaimed = [str(e) for e in errors if str(e) not in claimed]
+    unclaimed = [str(e) for e in errors
+                 if str(e) not in claimed and not any(e is p for p in phantom)]
     for c in result:
         c['_global_inventory_errors'].extend(unclaimed)
+        c['_global_inventory_response_issues'] = [str(e) for e in phantom]
         c['_global_inventory_uncertainties'] = list(uncertainties)
         c['_global_inventory_status'] = ('partial' if c['_global_inventory_errors']
                                          else 'validated_hypotheses')
@@ -1432,7 +1587,8 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         c['_global_inventory_prompt_hash'] = prompt_hash
     _write_audit(cache_dir, 'global-inventory', dict(version=version, schema_version=SCHEMA_VERSION,
         box_scale=box_scale,
-        model=model, prompt=prompt, prompt_hash=prompt_hash, inputs=inputs, response=data, errors=errors, components=result), log)
+        model=model, prompt=prompt, prompt_hash=prompt_hash, inputs=inputs, response=data, errors=errors,
+        local_evidence=evidence_notes, components=result), log)
     if errors and not result:
         raise ValueError('Global inventory failed with no recoverable bodies: ' + '; '.join(errors))
     if enumerating and not result:

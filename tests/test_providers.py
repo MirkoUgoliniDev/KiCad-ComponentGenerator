@@ -9,8 +9,6 @@ import pytest
 from kicadgen.services import openrouter, providers
 
 
-# ── provider written in the identifier, never guessed from the name ─────
-
 @pytest.mark.parametrize("model,provider,name", [
     ("deepseek-api/deepseek-flash", "deepseek", "deepseek-flash"),
     ("deepseek/deepseek-v4-pro", "openrouter", "deepseek/deepseek-v4-pro"),   # via OpenRouter
@@ -181,3 +179,203 @@ def test_restoring_a_project_model_moves_the_balance_to_its_provider(window):
     window._session_model = None
     window._refresh_model_combo()
     assert window.ai_account.provider == providers.provider_of(window._default_model())
+
+
+# ── DeepSeek cost from the balance (user, 27/09: «il costo non e' 1.05 USD») ──
+
+def _records(tmp_path, *records):
+    from kicadgen.services import project_costs as pc
+    for record in records:
+        pc.add_call(tmp_path, record)
+    return pc
+
+
+# ── DeepSeek cost = tokens x official price (HANDOFF 128) ───────────────
+
+from datetime import datetime, timezone  # noqa: E402
+
+from kicadgen.services import deepseek_pricing  # noqa: E402
+
+SUNDAY = datetime(2026, 9, 27, 12, 30, tzinfo=timezone.utc)      # off-peak all day
+MONDAY_PEAK = datetime(2026, 9, 28, 7, 0, tzinfo=timezone.utc)   # 06-10 UTC
+MONDAY_OFF = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
+
+
+def test_the_cost_is_tokens_times_the_official_price():
+    usage = {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000}
+    assert deepseek_pricing.call_cost("deepseek-flash", usage, SUNDAY) == pytest.approx(0.75)
+    assert deepseek_pricing.call_cost("deepseek-v4-pro", usage, SUNDAY) == pytest.approx(2.64)
+
+
+def test_peak_hours_cost_twice_and_only_on_weekdays():
+    usage = {"prompt_tokens": 1_000_000, "completion_tokens": 0}
+    assert deepseek_pricing.call_cost("deepseek-flash", usage, MONDAY_PEAK) == pytest.approx(0.30)
+    assert deepseek_pricing.call_cost("deepseek-flash", usage, MONDAY_OFF) == pytest.approx(0.15)
+    assert not deepseek_pricing.is_peak(datetime(2026, 9, 27, 7, 0, tzinfo=timezone.utc))
+
+
+@pytest.mark.parametrize("usage", [
+    {"prompt_tokens": 1_000_000, "completion_tokens": 0, "prompt_cache_hit_tokens": 400_000},
+    {"prompt_tokens": 1_000_000, "completion_tokens": 0,
+     "prompt_tokens_details": {"prompt_cache_hit_tokens": 400_000}},
+    {"prompt_tokens": 1_000_000, "completion_tokens": 0,
+     "prompt_tokens_details": {"cached_tokens": 400_000}},
+])
+def test_cache_hits_are_read_wherever_deepseek_puts_them(usage):
+    """Le docs mostrano i token in cache in cima a usage o sotto prompt_tokens_details."""
+    expected = (400_000 * 0.003 + 600_000 * 0.15) / 1e6
+    assert deepseek_pricing.call_cost("deepseek-flash", usage, SUNDAY) == pytest.approx(expected)
+
+
+def test_an_unknown_model_gets_no_cost_and_an_alias_gets_its_price():
+    usage = {"prompt_tokens": 1000, "completion_tokens": 1000}
+    assert deepseek_pricing.call_cost("deepseek-something-new", usage, SUNDAY) is None
+    assert deepseek_pricing.call_cost("deepseek-v4-flash", usage, SUNDAY) == \
+        deepseek_pricing.call_cost("deepseek-flash", usage, SUNDAY)
+    assert deepseek_pricing.call_cost("deepseek-flash", {}, SUNDAY) is None
+
+
+def test_a_deepseek_call_is_recorded_with_its_computed_cost(monkeypatch):
+    sent = []
+    monkeypatch.setattr(openrouter, "_usage_listener", sent.append)
+    monkeypatch.setattr(providers, "deepseek_request", lambda *a, **k: {
+        "model": "deepseek-flash",
+        "usage": {"prompt_tokens": 10_000, "completion_tokens": 1_000},
+        "choices": [{"message": {"tool_calls": [{"function": {
+            "name": "report", "arguments": "{}"}}]}}]})
+    openrouter.call_tool("deepseek-api/deepseek-flash", "s", [], _TOOL)
+    expected = deepseek_pricing.call_cost(
+        "deepseek-flash", {"prompt_tokens": 10_000, "completion_tokens": 1_000})
+    assert sent[0]["cost_usd"] == pytest.approx(expected) and sent[0]["cost_usd"] > 0
+    assert sent[0]["cost_source"] == "token_price"
+
+
+def _cost_file(tmp_path, entries, total=0.0, missing=None):
+    import json
+    from kicadgen.services import project_costs as pc
+    (tmp_path / pc.COSTS_FILE).write_text(json.dumps({
+        "format": pc.FORMAT, "version": 1, "since": "2026-09-27T08:00:00+00:00",
+        "total_usd": total, "calls": len(entries),
+        "calls_without_cost": sum(e.get("cost_usd") is None for e in entries)
+        if missing is None else missing, "entries": entries}), encoding="utf-8")
+    return pc
+
+
+def test_calls_recorded_without_a_cost_are_costed_from_their_tokens(tmp_path):
+    """Il caso RS485: chiamate DeepSeek registrate senza costo (o a 0.0 dal
+    saldo) prendono il costo dai loro token e dall'ora; nessuna resta senza."""
+    pc = _cost_file(tmp_path, [
+        {"time": "2026-09-27T08:26:46+00:00", "model": "anthropic/claude-opus-5",
+         "cost_usd": 0.25, "prompt_tokens": 1, "completion_tokens": 1},
+        {"time": "2026-09-27T12:29:41+00:00", "model": "deepseek-flash", "cost_usd": None,
+         "prompt_tokens": 11522, "completion_tokens": 2344},
+        {"time": "2026-09-27T12:58:03+00:00", "model": "deepseek-api/deepseek-flash",
+         "cost_usd": 0.0, "cost_source": "balance_delta",
+         "prompt_tokens": 11522, "completion_tokens": 4737}], total=0.25)
+    costs = pc.load_project_costs(tmp_path)
+    expected = ((11522 + 11522) * 0.15 + (2344 + 4737) * 0.60) / 1e6
+    assert costs.complete
+    assert costs.by_provider["deepseek"] == pytest.approx((expected, 2, 0))
+    assert costs.by_provider["openrouter"] == (0.25, 1, 0)
+    assert costs.total_usd == pytest.approx(0.25 + expected)
+
+
+def test_costed_calls_are_left_as_they_are(tmp_path):
+    """Negativo: una chiamata DeepSeek con il costo gia' calcolato non si ricalcola,
+    e una chiamata OpenRouter senza costo resta senza costo."""
+    pc = _cost_file(tmp_path, [
+        {"time": "2026-09-28T07:00:00+00:00", "model": "deepseek-api/deepseek-flash",
+         "cost_usd": 0.123, "cost_source": "token_price",
+         "prompt_tokens": 10, "completion_tokens": 10},
+        {"time": "2026-09-27T12:00:00+00:00", "model": "anthropic/claude-opus-5",
+         "cost_usd": None, "prompt_tokens": 10, "completion_tokens": 10}], total=0.123)
+    costs = pc.load_project_costs(tmp_path)
+    assert costs.total_usd == pytest.approx(0.123) and costs.calls_without_cost == 1
+
+
+def test_pricing_old_calls_is_stable_across_reads_and_writes(tmp_path):
+    pc = _cost_file(tmp_path, [
+        {"time": "2026-09-27T12:29:41+00:00", "model": "deepseek-flash", "cost_usd": None,
+         "prompt_tokens": 1000, "completion_tokens": 1000}])
+    first = pc.load_project_costs(tmp_path)
+    after_write = pc.add_call(tmp_path, {"model": "anthropic/claude-opus-5", "cost_usd": 0.1})
+    again = pc.load_project_costs(tmp_path)
+    assert after_write.total_usd == pytest.approx(first.total_usd + 0.1) == again.total_usd
+    assert again.calls_without_cost == 0
+
+
+def test_a_deepseek_call_is_recorded_with_its_full_identifier(monkeypatch):
+    sent = []
+    monkeypatch.setattr(openrouter, "_usage_listener", sent.append)
+    monkeypatch.setattr(providers, "deepseek_request", lambda *a, **k: {
+        "model": "deepseek-flash",
+        "choices": [{"message": {"tool_calls": [{"function": {
+            "name": "report", "arguments": "{}"}}]}}]})
+    openrouter.call_tool("deepseek-api/deepseek-flash", "s", [], _TOOL)
+    assert sent[0]["model"] == "deepseek-api/deepseek-flash"
+
+
+def test_the_credit_line_splits_the_project_cost_by_provider(tmp_path):
+    """Utente, 27/09: «Costo del progetto: almeno 1.05 USD» accanto al saldo
+    DeepSeek sembrava la spesa DeepSeek. La riga dice il totale e la parte di
+    ciascun fornitore; con un solo fornitore resta il solo totale."""
+    from PyQt6.QtWidgets import QApplication
+    from kicadgen.gui.ai_account import AiAccountLine
+    app = QApplication.instance() or QApplication([])  # noqa: F841 - must stay alive
+    _cost_file(tmp_path, [
+        {"time": "2026-09-27T08:26:46+00:00", "model": "anthropic/claude-opus-5",
+         "cost_usd": 1.05, "prompt_tokens": 1, "completion_tokens": 1},
+        {"time": "2026-09-27T12:29:41+00:00", "model": "deepseek-api/deepseek-flash",
+         "cost_usd": 0.05, "cost_source": "token_price",
+         "prompt_tokens": 1, "completion_tokens": 1}], total=1.10)
+    line = AiAccountLine(lambda: tmp_path, lambda _m: None)
+    try:
+        line.refresh()
+        text = line.text()
+        assert "Costo del progetto: 1.10 USD" in text and "almeno" not in text
+        assert "DeepSeek" in text and "OpenRouter" in text and "0.05" in text
+    finally:
+        line.detach()
+    only = tmp_path / "solo"
+    only.mkdir()
+    _cost_file(only, [{"time": "2026-09-27T08:26:46+00:00", "model": "anthropic/claude-opus-5",
+                       "cost_usd": 1.05, "prompt_tokens": 1, "completion_tokens": 1}], total=1.05)
+    line = AiAccountLine(lambda: only, lambda _m: None)
+    try:
+        line.refresh()
+        assert "(" not in line.text().split("Costo del progetto:")[1]
+    finally:
+        line.detach()
+
+
+def test_a_call_with_no_reported_tokens_stays_without_cost(tmp_path):
+    """Revisione 128: zero token = consumo non riportato, non una chiamata
+    gratuita; prezzarla trasformava un costo ignoto in uno zero noto."""
+    pc = _cost_file(tmp_path, [
+        {"time": "2026-09-27T12:00:00+00:00", "model": "deepseek-api/deepseek-flash",
+         "cost_usd": None, "prompt_tokens": 0, "completion_tokens": 0}])
+    costs = pc.load_project_costs(tmp_path)
+    assert costs.calls_without_cost == 1 and not costs.complete
+
+
+@pytest.mark.parametrize("damage", [
+    {"prompt_tokens": 10 ** 400},
+    {"time": "0001-01-01T00:30:00+01:00"},
+    {"time": "not a time"},
+])
+def test_a_damaged_entry_is_left_without_cost_never_fatal(tmp_path, damage):
+    entry = {"time": "2026-09-27T12:00:00+00:00", "model": "deepseek-api/deepseek-flash",
+             "cost_usd": None, "prompt_tokens": 100, "completion_tokens": 100}
+    entry.update(damage)
+    pc = _cost_file(tmp_path, [entry])
+    assert pc.load_project_costs(tmp_path).calls_without_cost == 1
+
+
+def test_estimated_calls_are_counted_for_the_tooltip(tmp_path):
+    pc = _cost_file(tmp_path, [
+        {"time": "2026-09-27T12:29:41+00:00", "model": "deepseek-flash", "cost_usd": None,
+         "prompt_tokens": 1000, "completion_tokens": 1000},
+        {"time": "2026-09-27T12:30:00+00:00", "model": "deepseek-api/deepseek-flash",
+         "cost_usd": 0.001, "cost_source": "token_price",
+         "prompt_tokens": 1000, "completion_tokens": 1000}], total=0.001)
+    assert pc.load_project_costs(tmp_path).estimated_calls == 1

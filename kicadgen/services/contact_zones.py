@@ -562,3 +562,56 @@ def contact_proposals(proposals, positions, length_mm, width_mm, edge_tolerance_
                     found.add(index)
                     break
     return found
+
+
+def rows_over_edge_contacts(boxes, positions, length_mm, width_mm, edge_tolerance_mm=None):
+    """@brief Indexes of boxes that lie along a row of declared EDGE contacts.
+
+    @param boxes Normalized boxes (x0, y0, x1, y1), 0..1 over the board.
+    @param positions Output of contact_positions.
+    @param length_mm Board extent along X.
+    @param width_mm Board extent along Y.
+    @param edge_tolerance_mm Edge measurement uncertainty of the photo, in mm.
+    @return Set of indexes whose box touches the board edge at a declared edge
+        contact (within the uncertainty plus the known half-hole radius) and
+        spans two or more contacts of that edge.
+    @note No depth limit, on purpose. contact_proposals removes a detector box
+        only when it stays within the known copper; beyond it the box may be a
+        connector mounted on the edge. For a body the model added WITHOUT any
+        detector box, the depth is the model's own guess and cannot separate a
+        real edge connector from the row of pads it was told not to count
+        (HANDOFF 126, G4: two «connectors» 4.5 and 3 mm deep over bare
+        castellations). The caller turns this into a doubt, never a deletion.
+    @note Through-hole contacts are exempt: a header soldered in them is a
+        legitimate body over the contacts.
+    """
+    tolerance = float(edge_tolerance_mm) if (
+        isinstance(edge_tolerance_mm, (int, float)) and not isinstance(edge_tolerance_mm, bool)
+        and math.isfinite(edge_tolerance_mm) and edge_tolerance_mm > 0) else 0.0
+    edge_contacts = [c for c in positions or ()
+                     if c.get('edge') in ('left', 'right', 'top', 'bottom')
+                     and c.get('at_edge', True)]
+    found = set()
+    for index, box in enumerate(boxes):
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            continue
+        x0, y0, x1, y1 = (float(v) for v in box)
+        left, right = (x0 - 0.5) * length_mm, (x1 - 0.5) * length_mm
+        top, bottom = (y0 - 0.5) * width_mm, (y1 - 0.5) * width_mm
+        for edge in ('left', 'right', 'top', 'bottom'):
+            row = [c for c in edge_contacts if c['edge'] == edge]
+            if len(row) < 2:
+                continue
+            vertical = edge in ('left', 'right')
+            span = (top, bottom) if vertical else (left, right)
+            covered = [c for c in row if span[0] <= c['y_mm' if vertical else 'x_mm'] <= span[1]]
+            if len(covered) < 2:
+                continue
+            reach = max(c.get('edge_radius_mm') or 0.0 for c in covered) + tolerance
+            line = covered[0]['x_mm' if vertical else 'y_mm']
+            outer = {'left': left - line, 'right': line - right,
+                     'top': top - line, 'bottom': line - bottom}[edge]
+            if outer <= reach:
+                found.add(index)
+                break
+    return found
