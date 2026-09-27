@@ -48,9 +48,6 @@ Desktop.ini
 .vscode/
 .idea/
 
-# Immagini di lavoro dei componenti: input locali, non sorgenti del progetto.
-docs/ESP32/
-
 # Local detector weights (large binaries; review upstream licences before redistribution).
 models/*.onnx
 # Pesi PyTorch dei modelli addestrati (Colab, Roboflow): licenza da decidere.
