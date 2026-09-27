@@ -30,6 +30,9 @@ FOOTPRINT = """(footprint "Demo"
 )
 """
 PROJECT_URI = "${KIPRJMOD}/KiCadGen.pretty"
+#: Smallest STEP that discover_component_artifacts accepts: it must end with
+#: the ISO 10303-21 trailer (a truncated export is refused).
+STEP_BYTES = b"ISO-10303-21;\nEND-ISO-10303-21;\n"
 
 
 def _artifacts(tmp_path: Path, footprint: str = FOOTPRINT):
@@ -39,7 +42,7 @@ def _artifacts(tmp_path: Path, footprint: str = FOOTPRINT):
     (component / "Demo.3dshapes").mkdir()
     (component / "Demo.pretty" / "Demo.kicad_mod").write_text(
         footprint, encoding="utf-8")
-    (component / "Demo.3dshapes" / "Demo.step").write_bytes(b"STEP")
+    (component / "Demo.3dshapes" / "Demo.step").write_bytes(STEP_BYTES)
     (component / "Demo.3dshapes" / "Demo.wrl").write_bytes(b"WRL")
     return discover_component_artifacts(component)
 
@@ -361,7 +364,7 @@ def test_preview_refuses_a_board_open_in_kicad(tmp_path):
     assert caught.value.code == "preview_locked"
     assert Path(caught.value.context["path"]) == lock
     assert preview.board_path.read_text(encoding="utf-8") == board_before
-    assert (preview.directory / "Demo.step").read_bytes() == b"STEP"
+    assert (preview.directory / "Demo.step").read_bytes() == STEP_BYTES
     lock.unlink()
     create_preview_project(artifacts)
     assert (preview.directory / "Demo.step").read_bytes() == b"NEW STEP"

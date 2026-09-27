@@ -80,11 +80,9 @@ def test_the_powershell_scripts_parse(script):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_the_application_icon_renders(tmp_path):
+def test_the_application_icon_renders(qapp, tmp_path):
     pytest.importorskip("PyQt6.QtSvg")
     from PyQt6.QtSvg import QSvgRenderer
-    from PyQt6.QtWidgets import QApplication
-    QApplication.instance() or QApplication([])
     assert QSvgRenderer(str(ROOT / "kicadgen" / "gui" / "assets" / "app-icon.svg")).isValid()
     result = subprocess.run([sys.executable, str(ROOT / "tools" / "make_app_icon.py"),
                              str(tmp_path / "icon.ico")], capture_output=True, text=True, timeout=120)

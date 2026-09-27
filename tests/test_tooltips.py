@@ -31,19 +31,14 @@ LONG = ("Rilancia inventario AI (a pagamento)...\n"
         "riga che spende.")
 
 
-_APP = None
-
-
 @pytest.fixture(autouse=True)
-def app():
-    """Una sola QApplication viva per tutto il modulo: misurare un testo con
-    QTextDocument senza applicazione fa cadere il processo."""
-    global _APP
-    _APP = QApplication.instance() or QApplication([])
-    install_tooltip_filter(_APP)
-    yield _APP
+def app(qapp):
+    """Una sola QApplication viva per tutta la sessione (`qapp`): misurare un
+    testo con QTextDocument senza applicazione fa cadere il processo."""
+    install_tooltip_filter(qapp)
+    yield qapp
     QToolTip.hideText()
-    _APP.processEvents()
+    qapp.processEvents()
 
 
 def _tip_label():

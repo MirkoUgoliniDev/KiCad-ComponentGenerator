@@ -20,7 +20,6 @@ pytest.importorskip("PyQt6")
 pytest.importorskip("pyvistaqt")
 from PyQt6.QtWidgets import QApplication
 
-from tests.test_photo_inventory_gui import window  # noqa: F401 - fixture condivisa
 
 
 from kicadgen.gui import main_window as gui  # noqa: E402

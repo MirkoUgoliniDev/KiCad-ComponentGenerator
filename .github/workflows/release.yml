@@ -3,7 +3,7 @@ name: Windows MSI release
 # Started by scripts/publish-release.ps1, which pushes a tag vX.Y.Z.
 # Two jobs, so that the code under test never runs with write access:
 #   build   - read-only token, no persisted Git credentials: checks the tag,
-#             runs the tests, builds the executable and the MSI, uploads it
+#             runs the tests (two processes), builds the executable and the MSI, uploads it
 #             as a workflow artifact;
 #   publish - write access, runs no project code: downloads the artifact and
 #             creates the GitHub Release of the tag.
@@ -24,6 +24,7 @@ permissions: {}
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 150
     permissions:
       contents: read
     env:
@@ -46,16 +47,35 @@ jobs:
             throw "Tag $env:TAG does not match kicadgen.__version__ $version."
           }
 
-      - name: Run the test suite
+      - name: Install the test dependencies
         shell: pwsh
-        env:
-          QT_QPA_PLATFORM: offscreen
+        timeout-minutes: 20
         run: |
           python -m pip install --disable-pip-version-check -q -r requirements.txt -r requirements-yolo.txt `
             -c requirements-release-constraints.txt
           if ($LASTEXITCODE -ne 0) { throw "pip install failed ($LASTEXITCODE)." }
-          python -m pytest -q -p no:cacheprovider
-          if ($LASTEXITCODE -ne 0) { throw "Tests failed ($LASTEXITCODE)." }
+
+      # The suite runs in two processes, split at tests/test_photo_detector_ui.py
+      # by tools/run_test_halves.py: in a single process it can die at random
+      # with a native Qt/VTK fail-fast (HANDOFF point 113). Each half has its
+      # own timeout so a hang cannot hold the runner for hours.
+      - name: Run the test suite (first half)
+        shell: pwsh
+        timeout-minutes: 45
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python tools/run_test_halves.py first
+          if ($LASTEXITCODE -ne 0) { throw "Tests failed, first half ($LASTEXITCODE)." }
+
+      - name: Run the test suite (second half)
+        shell: pwsh
+        timeout-minutes: 45
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python tools/run_test_halves.py second
+          if ($LASTEXITCODE -ne 0) { throw "Tests failed, second half ($LASTEXITCODE)." }
 
       - name: Build the executable and the MSI
         shell: pwsh
@@ -75,6 +95,7 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     env:

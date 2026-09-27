@@ -26,7 +26,7 @@ import pytest
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QListWidgetItem, QMessageBox
 
-from test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from test_photo_inventory_gui import gui
 
 from kicadgen.cad3d import step_generator
 from kicadgen.cad3d.process_log import ProcessCancelled, run_logged
@@ -124,6 +124,35 @@ def _finish_cad_worker(window):  # noqa: F811
 
 # ── run_logged: la rinuncia e il silenzio sono due cose diverse ───────────
 
+def _record_children(monkeypatch):
+    """Record every child process started from now on, as its Popen handle.
+
+    The handle is what proves a child is gone: waiting on it returns only once
+    the operating system has reaped the process, so a check made afterwards
+    cannot be beaten by a child that is merely slow.
+    """
+    children = []
+
+    class _Recording(subprocess.Popen):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            children.append(self)
+
+    monkeypatch.setattr(subprocess, "Popen", _Recording)
+    return children
+
+
+def _assert_all_killed(children, timeout=10.0):
+    """Every recorded child has exited, and not by finishing its work (exit 0)."""
+    assert children, "no child process was started"
+    for child in children:
+        try:
+            child.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            pytest.fail(f"child {child.pid} still alive {timeout} s after the cancellation")
+        assert child.returncode != 0, "the child ran to completion instead of being killed"
+
+
 def _python_child(script):
     return [sys.executable, "-c", textwrap.dedent(script)]
 
@@ -179,7 +208,7 @@ def test_run_logged_without_cancellation_still_runs_to_completion(tmp_path):
     assert "(nessun output per" not in text
 
 
-def test_run_logged_cancelled_before_the_first_line_never_lets_it_work(tmp_path):
+def test_run_logged_cancelled_before_the_first_line_never_lets_it_work(tmp_path, monkeypatch):
     """@brief Positivo: rinuncia gia' chiesta = figlio ucciso al primo respiro."""
     import threading
 
@@ -187,6 +216,7 @@ def test_run_logged_cancelled_before_the_first_line_never_lets_it_work(tmp_path)
     cancel.set()
     flag = tmp_path / "done.flag"
     log = tmp_path / "freecad.log"
+    children = _record_children(monkeypatch)
     with pytest.raises(ProcessCancelled):
         run_logged(_python_child(f"""
             import time
@@ -194,10 +224,9 @@ def test_run_logged_cancelled_before_the_first_line_never_lets_it_work(tmp_path)
             time.sleep(0.5)
             Path(r'{flag}').write_text('x', encoding='utf-8')
         """), log, progress=lambda line: None, timeout=30, cancel=cancel)
-    # Si guarda DOPO il momento in cui un figlio sopravvissuto avrebbe scritto
-    # il file (0.5 s), con margine: controllare subito, con un figlio da 3 s,
-    # passava anche se l'uccisione non fosse avvenuta.
-    time.sleep(1.5)
+    # Proven on the process handle, not by sleeping: once the child is reaped
+    # (killed, non-zero exit) it can no longer write the flag.
+    _assert_all_killed(children)
     assert not flag.exists(), "il figlio ha continuato a lavorare dopo la rinuncia"
 
 

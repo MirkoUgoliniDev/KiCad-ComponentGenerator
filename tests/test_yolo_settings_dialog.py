@@ -7,7 +7,6 @@ from kicadgen.gui import main_window as gui
 from kicadgen.gui.yolo_settings_dialog import YoloSettingsDialog
 from kicadgen.services.photo_yolo import YOLO_SETTING_DEFAULTS
 
-from test_photo_inventory_gui import window  # noqa: F401 - fixture
 
 
 def test_the_dialog_opens_with_the_given_values_and_restores_the_defaults(window):  # noqa: F811

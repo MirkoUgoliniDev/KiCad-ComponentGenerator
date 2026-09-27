@@ -66,11 +66,12 @@ from PyQt6.QtWidgets import (
     QGraphicsItem, QGraphicsPolygonItem, QGraphicsRectItem, QGraphicsScene,
     QGraphicsSimpleTextItem,
     QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QPlainTextEdit, QPushButton,
-    QVBoxLayout, QWidget, QApplication, QMessageBox,
+    QPlainTextEdit,
+    QVBoxLayout, QWidget, QApplication,
 )
 
 
+from ..services.messages import tx
 from .component_state import (height_is_estimated, mark_height_measured,
                               mark_height_placeholder)
 from .review_tools import (ZOOM_STEP, AnchoredPopup, InfoPopup, asset_icon,
@@ -2146,7 +2147,8 @@ class PhotoReviewDialog(QDialog):
         worker = _MatchWorker(snapshot)
         self._match_worker = worker
         self.model_button.setEnabled(False)
-        self.model_status.setText("Ricerca candidati KiCad e misure STEP…")
+        # Set after the one-time retranslation of the dialog: translated here.
+        self.model_status.setText(tx("Ricerca candidati KiCad e misure STEP…"))
         worker.done.connect(lambda report: self._show_model_candidates(item, snapshot, report))
         worker.failed.connect(self._match_failed)
         worker.finished.connect(self._match_finished)
@@ -2164,7 +2166,7 @@ class PhotoReviewDialog(QDialog):
 
     def _match_failed(self, message):
         if not self._closing:
-            self.model_status.setText("Ricerca KiCad fallita: " + message)
+            self.model_status.setText(tx("Ricerca KiCad fallita: {message}", message=message))
 
     def _match_finished(self):
         self._match_worker = None
@@ -2189,7 +2191,7 @@ class PhotoReviewDialog(QDialog):
             if not same_failure:
                 item.component['model_match'] = deepcopy(report)
             item.component['model_selection'] = selection
-        self.model_status.setText("Candidati pronti. Premi Applica correzioni per salvare le scelte.")
+        self.model_status.setText(tx("Candidati pronti. Premi Applica correzioni per salvare le scelte."))
         self._refresh_item(item)
 
     def reject(self):

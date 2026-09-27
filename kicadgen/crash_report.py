@@ -14,8 +14,8 @@ any other handler) still happens.
 @note Privacy: the report never dumps the environment and never includes
     local variables. The user's home folder in paths is replaced by "~", any
     other ``Users\\<name>`` / ``/home/<name>`` segment by ``<user>``, and
-    OpenRouter-style API keys (plus the value of ``OPENROUTER_API_KEY``, read
-    alone, never listed) are masked, because the user is invited to attach
+    OpenRouter-style API keys (plus the values of the variables in
+    SECRET_ENV_VARS, each read alone, never listed) are masked, because the user is invited to attach
     the file to a public GitHub issue.
 @note The hooks never raise: a failure while writing the report is
     swallowed, and the previous hook is always called.
@@ -55,6 +55,11 @@ _state: dict = {
     "busy": False,
 }
 
+#: Environment variables whose VALUE is masked wherever it appears, whatever
+#: its shape: the ``sk-`` pattern below covers today's keys, but a provider
+#: may change its key format without notice.
+SECRET_ENV_VARS = ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY")
+
 _KEY_PATTERN = re.compile(r"sk-or-[A-Za-z0-9_-]{8,}|sk-[A-Za-z0-9_-]{20,}")
 _USER_SEGMENT = re.compile(r"(?i)([A-Z]:[\\/]+Users[\\/]+|/home/|/Users/)[^\\/\s\"':]+")
 
@@ -76,9 +81,10 @@ def scrub(text: str) -> str:
         names by "<user>" and API keys by "<redacted>".
     """
     result = str(text)
-    secret = os.environ.get("OPENROUTER_API_KEY", "").strip()
-    if len(secret) >= 8:
-        result = result.replace(secret, "<redacted>")
+    for name in SECRET_ENV_VARS:
+        secret = os.environ.get(name, "").strip()
+        if len(secret) >= 8:
+            result = result.replace(secret, "<redacted>")
     result = _KEY_PATTERN.sub("<redacted>", result)
     try:
         home = str(Path.home())

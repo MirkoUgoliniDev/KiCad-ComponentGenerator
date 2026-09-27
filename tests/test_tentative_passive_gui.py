@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from PyQt6.QtTest import QTest
 
-from test_photo_inventory_gui import window, gui, QApplication
+from test_photo_inventory_gui import gui, QApplication
 from kicadgen.cad3d import kicad_models as km
 from kicadgen.cad3d.step_generator import Cad3DError, find_freecadcmd
 from kicadgen.services.datasheet_extractor import ExtractedParams

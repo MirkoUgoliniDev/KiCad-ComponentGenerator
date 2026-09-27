@@ -17,19 +17,13 @@ pytest.importorskip("PyQt6")
 from PyQt6.QtCore import QBuffer, QByteArray, QIODevice, QPoint, Qt
 from PyQt6.QtGui import QColor, QImage
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QDialogButtonBox
+from PyQt6.QtWidgets import QDialogButtonBox
 
 from kicadgen.gui.photo_review_dialog import (
     PHOTO_DIMMED, PHOTO_HIDDEN, PhotoReviewDialog, SELECTED_PEN_WIDTH_PX,
     SELECTION_HALO_COLOR, SELECTION_HALO_WIDTH_PX, UNDETERMINED_LIST_MARKER,
     UNDETERMINED_TYPE_COLOR, UNSELECTED_PEN_WIDTH_PX,
 )
-
-
-@pytest.fixture(scope="module")
-def app():
-    application = QApplication.instance() or QApplication([])
-    yield application
 
 
 @pytest.fixture

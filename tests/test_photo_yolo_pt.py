@@ -5,6 +5,7 @@ cambia solo l'oggetto che esegue la rete. I test di base usano un finto
 Ultralytics (girano senza PyTorch); quelli d'integrazione usano i checkpoint
 veri in models/, ignorati da git, e si saltano quando mancano.
 """
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -215,3 +216,19 @@ def test_the_default_model_is_named_as_onnx(monkeypatch):
 def test_the_label_follows_the_environment_like_the_detector(monkeypatch, tmp_path):
     monkeypatch.setenv("KICADGEN_YOLO_MODEL", str(tmp_path / "altro.pt"))
     assert yolo.model_label(None) == "altro.pt (PyTorch)"
+
+
+def test_loading_a_pt_model_keeps_ultralytics_offline(monkeypatch, tmp_path):
+    """Il rilevatore e' locale: prima di importare Ultralytics si imposta
+    YOLO_OFFLINE, che spegne le sue ricerche DNS; un valore scelto dall'utente
+    resta (negativo)."""
+    monkeypatch.setenv("YOLO_OFFLINE", "x")      # recorded, so teardown restores it
+    monkeypatch.delenv("YOLO_OFFLINE")
+    monkeypatch.setitem(sys.modules, "ultralytics", None)      # import fails right after
+    with pytest.raises(ValueError):
+        yolo._setup_torch(_weights(tmp_path, "model.pt"))
+    assert os.environ["YOLO_OFFLINE"] == "1"
+    monkeypatch.setenv("YOLO_OFFLINE", "0")
+    with pytest.raises(ValueError):
+        yolo._setup_torch(_weights(tmp_path, "model.pt"))
+    assert os.environ["YOLO_OFFLINE"] == "0"

@@ -8,7 +8,7 @@ measured on, so it is reloaded from there.
 from PyQt6.QtWidgets import QMessageBox
 
 from kicadgen.services import photo_inventory as inv
-from tests.test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from tests.test_photo_inventory_gui import gui
 from tests.test_reopen_detector_review import LENGTH, WIDTH, _photo_png, _proposal
 
 

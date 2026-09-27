@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 
 from ..cad3d.step_generator import Cad3DError, find_freecadcmd
+from ..kicad_versions import newest_version_first
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,42 @@ def _existing_file(path: str | os.PathLike[str] | None) -> str | None:
         return None
 
 
+def _find_installed(program: str) -> str | None:
+    """@brief Find a KiCad program in the usual installation folders.
+
+    @param program Executable name without extension (``kicad-cli``, ``pcbnew``).
+    @return The program of the highest installed KiCad version, or None.
+    @note Windows installs one folder per version (``KiCad/10.0/bin``); the
+        newest is chosen by numeric version, not by text (``9.0`` sorts after
+        ``10.0`` as text). Unversioned locations are kept as a fallback.
+    """
+    patterns = []
+    for root in filter(None, (
+            os.environ.get("ProgramFiles"),
+            os.environ.get("ProgramFiles(x86)"),
+            r"C:\Program Files",
+            r"C:\Program Files (x86)",
+    )):
+        patterns.extend((
+            str(Path(root) / "KiCad" / "*" / "bin" / f"{program}.exe"),
+            str(Path(root) / "KiCad" / "bin" / f"{program}.exe"),
+        ))
+    patterns.extend((
+        f"/usr/bin/{program}",
+        f"/usr/local/bin/{program}",
+        f"/Applications/KiCad/KiCad.app/Contents/MacOS/{program}",
+    ))
+    candidates = {
+        resolved_path
+        for pattern in patterns
+        for match in glob.glob(pattern)
+        if (resolved_path := _existing_file(match)) is not None
+    }
+    # The version folder is the parent of ``bin``.
+    ordered = newest_version_first(candidates, lambda path: Path(path).parent.parent.name)
+    return ordered[0] if ordered else None
+
+
 def find_kicad_cli() -> str | None:
     """@brief Find kicad-cli using an override, PATH and common installations."""
     override = _existing_file(os.environ.get("KICAD_CLI_PATH"))
@@ -52,30 +89,7 @@ def find_kicad_cli() -> str | None:
     if resolved:
         return resolved
 
-    patterns = []
-    for root in filter(None, (
-            os.environ.get("ProgramFiles"),
-            os.environ.get("ProgramFiles(x86)"),
-            r"C:\Program Files",
-            r"C:\Program Files (x86)",
-    )):
-        patterns.extend((
-            str(Path(root) / "KiCad" / "*" / "bin" / "kicad-cli.exe"),
-            str(Path(root) / "KiCad" / "bin" / "kicad-cli.exe"),
-        ))
-    patterns.extend((
-        "/usr/bin/kicad-cli",
-        "/usr/local/bin/kicad-cli",
-        "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
-    ))
-
-    candidates = {
-        resolved_path
-        for pattern in patterns
-        for match in glob.glob(pattern)
-        if (resolved_path := _existing_file(match)) is not None
-    }
-    return sorted(candidates, reverse=True)[0] if candidates else None
+    return _find_installed("kicad-cli")
 
 
 def find_pcbnew(kicad_cli: str | None = None) -> str | None:
@@ -95,29 +109,7 @@ def find_pcbnew(kicad_cli: str | None = None) -> str | None:
     if resolved:
         return resolved
 
-    patterns = []
-    for root in filter(None, (
-            os.environ.get("ProgramFiles"),
-            os.environ.get("ProgramFiles(x86)"),
-            r"C:\Program Files",
-            r"C:\Program Files (x86)",
-    )):
-        patterns.extend((
-            str(Path(root) / "KiCad" / "*" / "bin" / "pcbnew.exe"),
-            str(Path(root) / "KiCad" / "bin" / "pcbnew.exe"),
-        ))
-    patterns.extend((
-        "/usr/bin/pcbnew",
-        "/usr/local/bin/pcbnew",
-        "/Applications/KiCad/KiCad.app/Contents/MacOS/pcbnew",
-    ))
-    candidates = {
-        resolved_path
-        for pattern in patterns
-        for match in glob.glob(pattern)
-        if (resolved_path := _existing_file(match)) is not None
-    }
-    return sorted(candidates, reverse=True)[0] if candidates else None
+    return _find_installed("pcbnew")
 
 
 def detect_external_applications() -> ExternalApplications:

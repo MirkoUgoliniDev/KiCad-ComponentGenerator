@@ -27,7 +27,6 @@ from kicadgen.gui import theme
 from kicadgen.gui.analysis_overlay import is_machine_line
 from kicadgen.generators.pin_header import PinHeaderParams
 from kicadgen.services.i18n import DEFAULT_TRANSLATIONS, LANGUAGES
-from tests.test_photo_inventory_gui import window  # noqa: F401 - fixture condivisa
 
 
 def _workflow(window):

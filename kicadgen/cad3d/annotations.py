@@ -23,9 +23,9 @@ stessa logica di FACE_NAMES/EDGE_NAMES qui sotto.
 
 from __future__ import annotations
 
-import math
 import re
 from dataclasses import dataclass
+from ..core.validation import positive_number
 from ..services.messages import tx
 
 FACE_NAMES = ("top", "bottom", "left", "right", "front", "back")
@@ -56,12 +56,7 @@ EDGE_NAMES = (
 
 def _positive(value) -> bool:
     """True for a finite number > 0; NaN and infinity are rejected explicitly."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return False
-    try:
-        return math.isfinite(value) and value > 0
-    except OverflowError:
-        return False
+    return positive_number(value) is not None
 
 
 def validate_hex_color(value: str, what: str) -> None:

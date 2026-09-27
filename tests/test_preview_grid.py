@@ -1,6 +1,6 @@
 """Grid controls must not change the scale or pan of the footprint preview."""
 import pytest
-from test_photo_inventory_gui import window, gui, QApplication
+from test_photo_inventory_gui import gui, QApplication
 from kicadgen.core.package_geometry import PackageGeometry, PinSpec
 
 

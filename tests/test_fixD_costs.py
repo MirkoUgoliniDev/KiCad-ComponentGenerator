@@ -7,15 +7,9 @@ import threading
 import time
 
 import pytest
-from PyQt6.QtWidgets import QApplication
 
 from kicadgen.services import openrouter, project_costs
 from kicadgen.services.project_costs import COSTS_FILE, add_call, load_project_costs
-
-
-@pytest.fixture
-def app():
-    return QApplication.instance() or QApplication([])
 
 
 @pytest.fixture(autouse=True)

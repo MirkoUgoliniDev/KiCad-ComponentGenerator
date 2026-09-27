@@ -17,7 +17,6 @@ from kicadgen.cad3d import kicad_models as km
 from kicadgen.gui import main_window as gui
 from kicadgen.gui.accepted_models_dialog import AcceptedModelsDialog, ConsolidateDialog
 from kicadgen.services import accepted_models as am
-from tests.test_photo_inventory_gui import window  # noqa: F401 - fixture condivisa
 
 
 R0603 = "Resistor_SMD.3dshapes/R_0603_1608Metric.step"

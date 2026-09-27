@@ -255,14 +255,21 @@ def test_existing_database_receives_new_bundled_translation_keys(tmp_path):
          "Modell (ID)", "keine Begrenzung", "Ausgewähltes Modell: anthropic/claude-sonnet-5", "Abbrechen"),
     ),
 )
-def test_model_picker_uses_parent_language_without_touching_model_data(
+def test_model_picker_uses_parent_language_without_touching_model_data(qapp,
         tmp_path, monkeypatch, language, title, compatible, header, no_limit,
         selected, cancel):
     """@brief Translate the nested model picker that executes inside its helper."""
-    from PyQt6.QtWidgets import QApplication, QDialogButtonBox, QWidget
+    from PyQt6.QtWidgets import QDialogButtonBox, QWidget
     from kicadgen.gui.model_dialog import ModelPickerDialog
 
-    app = QApplication.instance() or QApplication([])
+    app = qapp
+    # Qt's own button texts follow the Qt translator the application installs
+    # for its language (MainWindow does it at start and on every change): the
+    # test installs it too, instead of relying on whatever an earlier test
+    # left installed (it failed at random depending on the order, 131).
+    from kicadgen.gui import qt_translations
+    qt_translations.install_qt_translations(language)
+    request_cleanup = lambda: qt_translations.install_qt_translations("none")  # noqa: E731
     parent = QWidget()
     parent.i18n = I18n(ProfileStore(tmp_path / "models.sqlite3"), language)
     monkeypatch.setattr(ModelPickerDialog, "_load_models", lambda self, force_refresh=False: None)
@@ -275,10 +282,13 @@ def test_model_picker_uses_parent_language_without_touching_model_data(
     assert dialog.table.horizontalHeaderItem(0).text() == header
     assert dialog.spin_max_cost.specialValueText() == no_limit
     assert dialog.label_selected.text() == selected
-    assert dialog.buttons.button(QDialogButtonBox.StandardButton.Cancel).text() == cancel
-    dialog.close()
-    parent.close()
-    app.processEvents()
+    try:
+        assert dialog.buttons.button(QDialogButtonBox.StandardButton.Cancel).text() == cancel
+    finally:
+        dialog.close()
+        parent.close()
+        app.processEvents()
+        request_cleanup()
 
 
 # ── Copertura del catalogo: nessuna lingua mescolata nell'interfaccia ─

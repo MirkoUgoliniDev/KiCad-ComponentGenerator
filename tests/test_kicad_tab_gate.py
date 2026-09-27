@@ -4,7 +4,7 @@ Completato = nella cartella del progetto corrente ci sono footprint E modello
 STEP: cio' che serve a tutte le operazioni della scheda. Positivo e negativi
 distinti per i file presenti, non per il nome del progetto.
 """
-from tests.test_photo_inventory_gui import window, gui  # noqa: F401
+from tests.test_photo_inventory_gui import gui
 
 KICAD = gui.MainWindow.KICAD_TAB_INDEX
 

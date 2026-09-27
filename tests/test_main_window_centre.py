@@ -3,7 +3,7 @@ import pytest
 from PyQt6.QtCore import QPoint
 from PyQt6.QtWidgets import QApplication
 
-from test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from test_photo_inventory_gui import gui
 
 
 def _centre_offset(window):

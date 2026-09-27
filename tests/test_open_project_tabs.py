@@ -7,7 +7,7 @@ footprint generato, o se e' stato estratto in questa sessione.
 """
 import pytest
 
-from tests.test_photo_inventory_gui import window, raw_params, gui  # noqa: F401
+from tests.test_photo_inventory_gui import raw_params, gui
 
 PREVIEW, MODEL_3D = gui.TAB_PREVIEW, gui.TAB_MODEL_3D
 

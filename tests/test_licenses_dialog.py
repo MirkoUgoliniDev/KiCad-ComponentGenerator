@@ -1,7 +1,6 @@
 """@brief Menu «?» > «Licenze»: licenza del programma e avvisi di terze parti (utente, 2026-09-25)."""
 from kicadgen.gui import main_window as gui
 
-from test_photo_inventory_gui import window  # noqa: F401 - fixture
 
 
 def test_the_help_menu_has_the_licenses_entry(window):  # noqa: F811

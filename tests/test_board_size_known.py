@@ -6,7 +6,7 @@ them and the document cards judged photos against them.
 """
 from PyQt6.QtWidgets import QDialog, QDoubleSpinBox
 
-from tests.test_photo_inventory_gui import window, gui, raw_params  # noqa: F401 - fixture condivise
+from tests.test_photo_inventory_gui import gui, raw_params
 
 
 def test_a_new_project_does_not_pretend_to_know_the_board_size(window):  # noqa: F811

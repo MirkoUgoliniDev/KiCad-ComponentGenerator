@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 import pytest
 
-from test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from test_photo_inventory_gui import gui
 from kicadgen.cad3d import step_generator as step
 
 

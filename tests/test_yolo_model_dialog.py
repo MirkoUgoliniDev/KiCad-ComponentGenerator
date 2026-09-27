@@ -3,16 +3,11 @@ import os
 
 import pytest
 from PyQt6.QtCore import QThreadPool
-from PyQt6.QtWidgets import QApplication, QDialog, QDialogButtonBox
+from PyQt6.QtWidgets import QDialog, QDialogButtonBox
 
 from kicadgen.gui import yolo_model_dialog as dlg
 from kicadgen.services import photo_yolo, yolo_models
-from tests.test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
-
-
-@pytest.fixture
-def app():
-    return QApplication.instance() or QApplication([])
+from tests.test_photo_inventory_gui import gui
 
 
 @pytest.fixture
@@ -143,3 +138,60 @@ def test_the_main_window_uses_the_choice_only_when_confirmed(window, monkeypatch
     monkeypatch.setattr(dlg.YoloModelDialog, "selected_path", lambda self: "C:/modelli/scelto.onnx")
     window._pick_session_yolo_model()
     assert window.field_yolo_model.text() == "C:/modelli/scelto.onnx"
+
+
+def test_a_shut_down_window_starts_no_more_model_checks(app, models):
+    """HANDOFF 131: tenuta in vita dopo l'uso, la finestra ripartiva a caricare i
+    pesi quando la sua lista cambiava (anche durante la distruzione, in un
+    momento qualsiasi). Chiusa con shutdown(), non avvia piu' nulla."""
+    folder, loaded = models
+    dialog = dlg.YoloModelDialog(str(folder / "base.onnx"), folder)
+    _settle(app)
+    before = list(loaded)
+    dialog.shutdown()
+    dlg._RESULTS.clear()                       # nothing remembered: a live window would check
+    _select(dialog, "grande.pt")
+    _select(dialog, "base.onnx")
+    dialog._show_selected()
+    _settle(app)
+    assert loaded == before and not dialog._jobs
+    dialog.deleteLater()
+
+
+def test_a_live_window_still_checks_the_selected_model(app, models):
+    """Negativo del precedente: senza shutdown la scelta avvia il controllo."""
+    folder, loaded = models
+    dialog = dlg.YoloModelDialog(str(folder / "base.onnx"), folder)
+    _settle(app)
+    dlg._RESULTS.clear()
+    loaded.clear()
+    dialog._show_selected()
+    _settle(app)
+    assert loaded == ["base.onnx"]
+    dialog.shutdown()
+    dialog.deleteLater()
+
+
+def test_even_a_base_exception_in_a_check_never_leaves_the_pool_thread():
+    """Un'eccezione che esce da un QRunnable fa terminare il processo senza
+    traceback: il lavoro la trasforma in un risultato d'errore."""
+    import sys
+    from types import ModuleType
+    module = ModuleType("kicadgen.services.photo_yolo")
+
+    def boom(path):
+        raise KeyboardInterrupt
+    module.validate_yolo_setup = boom
+    saved = sys.modules.get(module.__name__)
+    sys.modules[module.__name__] = module
+    try:
+        job = dlg._Job("check", "x.onnx")
+        seen = []
+        job.signals.ready.connect(lambda kind, path, result: seen.append(result))
+        job.run()                                # same code the pool thread runs
+    finally:
+        if saved is not None:
+            sys.modules[module.__name__] = saved
+        else:
+            sys.modules.pop(module.__name__, None)
+    assert seen == [{"ok": False, "error": "KeyboardInterrupt"}]

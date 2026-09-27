@@ -19,7 +19,7 @@ from pathlib import Path
 import tempfile
 from ..fsutil import replace_file
 
-from PyQt6.QtWidgets import (QAbstractSpinBox, QCheckBox, QComboBox, QDoubleSpinBox,
+from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox,
                              QGroupBox, QLineEdit, QPlainTextEdit, QSpinBox, QTextEdit)
 from ..services.messages import tx
 from .component_state import BoundedValue, FlagValue, TextValue
@@ -100,21 +100,6 @@ def set_widget_value(widget, value) -> bool:
         widget.setCurrentIndex(index)
         return True
     return False
-
-
-def change_signal(widget):
-    """@brief The signal a widget emits when the user changes its value, or None."""
-    if isinstance(widget, QLineEdit):
-        return widget.textChanged
-    if isinstance(widget, (QTextEdit, QPlainTextEdit)):
-        return widget.textChanged
-    if isinstance(widget, QAbstractSpinBox) and hasattr(widget, "valueChanged"):
-        return widget.valueChanged
-    if isinstance(widget, (QCheckBox, QGroupBox)):
-        return widget.toggled
-    if isinstance(widget, QComboBox):
-        return widget.currentIndexChanged
-    return None
 
 
 def project_config_path(project_dir) -> Path:

@@ -10,7 +10,12 @@ from kicadgen.services import photo_grounding as grounding, openrouter
 
 
 @pytest.fixture(autouse=True)
-def no_network(monkeypatch):
+def no_paid_api_calls(monkeypatch):
+    """@brief Fail any call to the AI client, even one that would never reach the socket.
+
+    @note Named apart from conftest's autouse `no_network` guard: a fixture
+        with the same name used to override it in this module.
+    """
     def forbidden(*args, **kwargs):
         pytest.fail("Contact-sheet tests must not call an API")
     monkeypatch.setattr(openrouter, "call_tool", forbidden)

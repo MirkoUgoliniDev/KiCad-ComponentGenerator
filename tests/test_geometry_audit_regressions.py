@@ -104,7 +104,6 @@ def test_a_moderately_tilted_photo_is_rectified_instead_of_rejected(tmp_path):
 def test_tilt_rejection_uses_existing_calibration_warning_without_api(tmp_path):
     cv2 = pytest.importorskip("cv2")
     from kicadgen.services.photo_inventory import extract_inventory, prepare_photo
-    from kicadgen.services.photo_refine import refine_components
     # Oltre il limite di raddrizzamento non e' una vista dall'alto storta ma
     # un'inquadratura prospettica, che una rotazione rigida non correggerebbe.
     path = tmp_path / "tilted.png"
@@ -122,10 +121,6 @@ def test_tilt_rejection_uses_existing_calibration_warning_without_api(tmp_path):
     assert report.calibration == {}
     assert report.warnings == [f"tilted.png: {metadata['board_failure']}",
                                "Nessuna vista dall'alto calibrabile: resta l'inventario principale."]
-    components = [dict(name="R1", x_mm=2, y_mm=1, length_mm=2, width_mm=1)]
-    refined, refinement = refine_components([path], 40, 16, components)
-    assert refined == components
-    assert refinement.photo is None and refinement.measured == 0
 
 
 def test_provided_screenshot_crop_unchanged():

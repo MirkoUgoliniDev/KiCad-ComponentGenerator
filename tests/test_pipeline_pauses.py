@@ -34,7 +34,6 @@ from kicadgen.gui import main_window as gui
 from kicadgen.services import photo_inventory as inv
 from kicadgen.services.datasheet_extractor import ExtractedParams
 
-from tests.test_photo_inventory_gui import window  # noqa: F401 - fixture condivisa
 from tests.test_global_inventory_pipeline import pipeline  # noqa: F401 - fixture condivisa
 from tests.test_reopen_detector_review import _photo_png, _proposal, LENGTH, WIDTH
 

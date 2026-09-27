@@ -17,7 +17,6 @@ provider and never reach this file.
 from __future__ import annotations
 
 import json
-import math
 import os
 import tempfile
 import time
@@ -25,6 +24,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+from ..core.validation import finite_number
 
 #: File name inside the project folder.
 COSTS_FILE = "ai-costs.json"
@@ -85,13 +86,6 @@ class ProjectCosts:
         return self.calls_without_cost == 0
 
 
-def _number(value: Any) -> Optional[float]:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    number = float(value)
-    return number if math.isfinite(number) else None
-
-
 def _count(value: Any) -> Optional[int]:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
@@ -114,7 +108,7 @@ def _read(path: Path) -> Optional[dict]:
     version = data.get("version")
     if _count(version) is None or version > VERSION:
         raise ProjectCostsError(f"{path.name}: unsupported version {version!r}")
-    total = _number(data.get("total_usd"))
+    total = finite_number(data.get("total_usd"))
     calls = _count(data.get("calls"))
     missing = _count(data.get("calls_without_cost"))
     entries = data.get("entries")
@@ -151,7 +145,7 @@ def _price_deepseek_calls(data: dict) -> None:
             model = entry["model"] = DEEPSEEK_PREFIX + model
         if provider_of(model) != PROVIDER_DEEPSEEK:
             continue
-        old = _number(entry.get("cost_usd"))
+        old = finite_number(entry.get("cost_usd"))
         if old is not None and entry.get("cost_source") != "balance_delta":
             continue
         prompt = _count(entry.get("prompt_tokens")) or 0
@@ -213,7 +207,7 @@ def _by_provider(data: dict) -> dict:
             continue
         provider = provider_of(str(entry.get("model") or ""))
         total, calls, missing = totals.get(provider, (0.0, 0, 0))
-        cost = _number(entry.get("cost_usd"))
+        cost = finite_number(entry.get("cost_usd"))
         totals[provider] = (total + (cost or 0.0), calls + 1, missing + (cost is None))
     return totals
 
@@ -252,6 +246,42 @@ def add_call(project_dir: Path, record: dict, now: Optional[datetime] = None) ->
     raise AssertionError("unreachable")
 
 
+def _lock_identity(stat_result: os.stat_result) -> tuple:
+    """What tells one lock file from another created later under the same name."""
+    return (stat_result.st_mtime_ns, stat_result.st_size, stat_result.st_ino)
+
+
+def _remove_stale_lock(path: Path) -> bool:
+    """Remove the lock at `path` if it is stale and still the one judged stale.
+
+    Two writers may judge the same abandoned lock stale at once: the first
+    removes it and takes a fresh lock, and the second must not then remove
+    that fresh lock. So the lock is re-read just before the removal, and
+    removed only when its identity (modification time, size, file id) and
+    its content (the holder's pid) are still those that were judged stale.
+
+    @return True when the caller should try to take the lock again at once
+        (stale lock removed, or already gone); False to wait and poll.
+    @note The re-check narrows the race to the instant between the second
+        stat and the unlink; Windows offers no compare-and-delete. A holder
+        would have to create, write and keep a lock with the same timestamp,
+        size and file id within that instant.
+    """
+    try:
+        judged = path.stat()
+        if time.time() - judged.st_mtime <= LOCK_STALE_S:
+            return False
+        content = path.read_bytes()
+        if _lock_identity(path.stat()) != _lock_identity(judged) or path.read_bytes() != content:
+            return False   # replaced meanwhile: another writer's live lock
+        os.unlink(path)
+        return True
+    except FileNotFoundError:
+        return True        # released between the calls: try again at once
+    except OSError:
+        return False
+
+
 class _exclusive_lock:
     """Exclusive lock file created with O_CREAT | O_EXCL (atomic on local disks)."""
 
@@ -264,21 +294,27 @@ class _exclusive_lock:
         deadline = time.monotonic() + LOCK_TIMEOUT_S
         while True:
             try:
-                self.handle = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(self.handle, str(os.getpid()).encode("ascii"))
-                return self
+                handle = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             except FileExistsError:
-                try:
-                    if time.time() - self.path.stat().st_mtime > LOCK_STALE_S:
-                        os.unlink(self.path)
-                        continue
-                except FileNotFoundError:
-                    continue  # released between the two calls: try again at once
-                except OSError:
-                    pass
+                if _remove_stale_lock(self.path):
+                    continue
             except PermissionError:
                 # Windows reports a file being deleted by its holder this way.
                 pass
+            else:
+                try:
+                    os.write(handle, str(os.getpid()).encode("ascii"))
+                except BaseException:
+                    # The lock was created but not written: close and remove
+                    # it, so neither the handle nor an empty lock is leaked.
+                    os.close(handle)
+                    try:
+                        os.unlink(self.path)
+                    except OSError:
+                        pass
+                    raise
+                self.handle = handle
+                return self
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"{COSTS_FILE}: locked by another writer")
             time.sleep(LOCK_POLL_S)
@@ -301,7 +337,7 @@ def _add_call_once(folder: Path, record: dict, now: Optional[datetime]) -> Proje
     data = _read(path) or {"format": FORMAT, "version": VERSION, "since": stamp,
                            "total_usd": 0.0, "calls": 0, "calls_without_cost": 0,
                            "entries": []}
-    cost = _number(record.get("cost_usd"))
+    cost = finite_number(record.get("cost_usd"))
     if cost is not None and cost < 0:
         cost = None
     data["version"] = VERSION

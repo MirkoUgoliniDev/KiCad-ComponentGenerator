@@ -1,5 +1,4 @@
 """@brief Automatic mechanical estimates remain distinct from manual confirmation."""
-from test_model_candidates_dialog import app
 from kicadgen.gui import model_candidates_dialog as gui
 
 

@@ -11,14 +11,13 @@ pytest.importorskip("PyQt6")
 
 from kicadgen.gui.component_editor_dialog import ComponentEditorDialog
 from kicadgen.services.datasheet_extractor import COMPONENT_KINDS
-from tests.test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from tests.test_photo_inventory_gui import gui
 
 
 @pytest.fixture(autouse=True)
-def qt_app():
+def qt_app(qapp):
     """@brief Un'applicazione Qt anche per i test che non aprono la finestra principale."""
-    from PyQt6.QtWidgets import QApplication
-    return QApplication.instance() or QApplication([])
+    return qapp
 
 
 def _body(**extra):

@@ -6,6 +6,7 @@ to build the FreeCAD payload offline (tests/test_regeneration_is_offline.py).
 from __future__ import annotations
 
 import math
+import numbers
 
 
 def _quarter_turns(box, angle):
@@ -30,6 +31,16 @@ _SIDE_PROBES = {'left': (0.0, 0.4, 0.1, 0.6), 'right': (0.9, 0.4, 1.0, 0.6),
                 'top': (0.4, 0.0, 0.6, 0.1), 'bottom': (0.4, 0.9, 0.6, 1.0)}
 
 
+def _real(value) -> bool:
+    """True for any real number (Python, numpy...), False for bool: True is not an angle."""
+    return isinstance(value, numbers.Real) and not isinstance(value, bool)
+
+
+def _integral(value) -> bool:
+    """True for any integral number (int, numpy.int64...), False for bool and floats."""
+    return isinstance(value, numbers.Integral) and not isinstance(value, bool)
+
+
 def local_lead_sides(sides, rotation):
     """@brief Observed lead counts per image side of a component, moved to its local frame.
 
@@ -49,8 +60,12 @@ def local_lead_sides(sides, rotation):
         quarter turn: the model counted leads per side of the component box,
         and each box side stays nearest to one body side up to 45 degrees.
         Exactly 45 degrees has no nearest side and returns None.
+    @note Numbers are recognised by their abstract type (numbers.Real,
+        numbers.Integral), so numpy scalars coming from the photo pipeline are
+        accepted; booleans are refused, and a float count (2.0) is not a
+        count of leads.
     """
-    if (not isinstance(sides, dict) or not sides or type(rotation) not in (int, float)
+    if (not isinstance(sides, dict) or not sides or not _real(rotation)
             or not math.isfinite(rotation)):
         return None
     quarter = rotation / 90.0
@@ -59,12 +74,12 @@ def local_lead_sides(sides, rotation):
     angle = (int(round(quarter)) % 4) * 90
     result = {}
     for side, count in sides.items():
-        if side not in _SIDE_PROBES or type(count) is not int or count < 0:
+        if side not in _SIDE_PROBES or not _integral(count) or count < 0:
             return None
         left, top, right, bottom = _quarter_turns(_SIDE_PROBES[side], angle)
         x, y = (left + right) / 2, (top + bottom) / 2
         local = ('left' if x < 0.25 else 'right' if x > 0.75 else
                  'top' if y < 0.25 else 'bottom')
         if count:
-            result[local] = result.get(local, 0) + count
+            result[local] = result.get(local, 0) + int(count)
     return result or None

@@ -3,7 +3,7 @@ from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtTest import QSignalSpy, QTest
 
 from kicadgen.gui.workflow_bar import WORKFLOW_STEPS, WorkflowBar
-from tests.test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from tests.test_photo_inventory_gui import gui
 
 
 def test_the_bar_ticks_done_steps_and_highlights_the_current_one(window):  # noqa: F811

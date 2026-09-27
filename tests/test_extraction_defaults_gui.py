@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 import pytest
 
-from test_photo_inventory_gui import window, gui, ExtractedParams  # noqa: F401 - fixture condivisa
+from test_photo_inventory_gui import gui, ExtractedParams
 from kicadgen.services import photo_refine
 
 

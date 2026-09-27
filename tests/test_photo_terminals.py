@@ -129,3 +129,41 @@ def test_active_datasheet_extraction_invokes_terminal_pass_and_retains_geometry(
     assert result.components_3d[0]['_detected_kind'] == 'ic'
     assert '1 con terminali osservati' in result.notes
     assert result.photo_png == png
+
+
+# ── F7: declared attachment tolerance and complete multi-lead target list ──
+
+@pytest.mark.parametrize('kind', ['ic_sot', 'ic_qfp', 'power_tab', 'ic_bga', 'ic_soic', 'ic_qfn'])
+def test_every_multi_lead_package_kind_is_observed(png, kind):
+    """Positivo: le famiglie a tre o piu' terminali che la verifica puo' restituire."""
+    call = Mock(return_value={'components': [observation()]})
+    result = observe_terminals(png, [dict(component(), _detected_kind=kind)], 'test', call,
+                               lambda _: None)
+    assert call.call_count == 1 and 'terminal_geometry' in result[0]
+
+
+@pytest.mark.parametrize('kind', ['resistor', 'capacitor', 'led', 'diode'])
+def test_two_terminal_passives_are_not_sent(png, kind):
+    """Negativo: un passivo a due capi non ha reofori da osservare, nessuna spesa."""
+    call = Mock(side_effect=AssertionError('no paid call for a two-terminal body'))
+    result = observe_terminals(png, [dict(component(), _detected_kind=kind, kind=kind)], 'test',
+                               call, lambda _: None)
+    assert call.call_count == 0 and 'terminal_geometry' not in result[0]
+
+
+def test_the_observation_kinds_are_real_component_kinds():
+    from kicadgen.services.datasheet_extractor import COMPONENT_KINDS
+    from kicadgen.services.photo_terminals import TERMINAL_OBSERVATION_KINDS
+    assert TERMINAL_OBSERVATION_KINDS <= set(COMPONENT_KINDS)
+
+
+def test_the_attachment_gap_is_the_declared_constant():
+    """Un terminale appena staccato passa, uno oltre la tolleranza dichiarata no."""
+    from kicadgen.services.photo_terminals import TERMINAL_ATTACH_GAP_MAX as gap
+    near = observation()
+    near['terminals'][0]['bbox'] = [0, .3, .2 - gap / 2, .4]
+    assert decode_terminal_geometry(near, 0) is not None
+    far = observation()
+    far['terminals'][0]['bbox'] = [0, .3, .2 - 2 * gap, .4]
+    with pytest.raises(ValueError):
+        decode_terminal_geometry(far, 0)

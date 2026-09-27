@@ -148,3 +148,16 @@ def test_latest_reports_without_folder_or_provider(tmp_path):
     """@brief Listing never fails: no provider or no folder gives an empty list."""
     assert cr.latest_reports() == []
     assert cr.latest_reports(base=tmp_path / "missing") == []
+
+
+@pytest.mark.parametrize("name", ["OPENROUTER_API_KEY", "DEEPSEEK_API_KEY"])
+def test_every_provider_key_is_masked_by_value_whatever_its_shape(monkeypatch, name):
+    """@brief S8: a key without the ``sk-`` shape is still masked by its value.
+
+    Positive: the value of each provider variable disappears. Negative: an
+    unrelated text of the same length is left as it is.
+    """
+    secret = "zz" + "Q7" * 12
+    monkeypatch.setenv(name, secret)
+    assert cr.scrub(f"header Bearer {secret} end") == "header Bearer <redacted> end"
+    assert cr.scrub("zz" + "A1" * 12) == "zz" + "A1" * 12

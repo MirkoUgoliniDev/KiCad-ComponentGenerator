@@ -107,7 +107,8 @@ def test_extractor_preserves_detector_metadata_and_independent_confidence(review
                     _yolo_origin='low_confidence_review' if review_only else 'operating_threshold')
     source = dict(x_mm=0, y_mm=0, length_mm=1.6, width_mm=.8,
                   height_mm=.4, confidence='medium', **metadata)
-    component = _components_3d([source])[0]
+    # Detector metadata is set by the program's photo pipeline: trusted path.
+    component = _components_3d([source], trusted=True)[0]
     assert {key: component[key] for key in metadata} == metadata
     assert component['confidence'] == 'medium'
     assert 'package' not in component
@@ -144,9 +145,12 @@ def test_mechanical_metadata_copy_preserves_long_package_through_extractor():
 def test_physical_hypotheses_do_not_depend_on_display_names(provenance, name):
     source = dict(name=name, component_id='pad', kind='generic', x_mm=0, y_mm=0,
                   length_mm=1, width_mm=.5, height_mm=.3, **provenance)
-    assert _components_3d([source])[0]['name'] == name
-    assert _components_3d([dict(source, object_type='pcb_feature')]) is None
-    assert _components_3d([dict(source, width_mm=0)]) is None
+    # The provenance flags come from the program's inventory: trusted path.
+    assert _components_3d([source], trusted=True)[0]['name'] == name
+    assert _components_3d([dict(source, object_type='pcb_feature')], trusted=True) is None
+    assert _components_3d([dict(source, width_mm=0)], trusted=True) is None
+    # The same flags in a raw AI answer do not let a PCB feature name through.
+    assert _components_3d([source]) is None
 
 
 @pytest.mark.parametrize('provenance', [{}, {'_global_inventory_status': 'invalid'},

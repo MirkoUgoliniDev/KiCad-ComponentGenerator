@@ -24,7 +24,7 @@ import pytest
 pytest.importorskip("PyQt6")
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QTextDocument
-from PyQt6.QtWidgets import QApplication, QLabel, QWidget
+from PyQt6.QtWidgets import QLabel, QWidget
 
 from kicadgen.gui.analysis_overlay import (_CARD_PADDING, _OVERLAY_MARGIN,
                                           AnalysisOverlay, enumeration_lines,
@@ -33,12 +33,12 @@ from kicadgen.services.datasheet_extractor import _files_sent_message
 
 
 @pytest.fixture
-def make_overlay():
+def make_overlay(qapp):
     """@brief Build a shown overlay on a parent of the given size and font size.
 
     @return Callable(width, height, point_size=None) -> (overlay, parent, app).
     """
-    app = QApplication.instance() or QApplication([])
+    app = qapp
     built = []
 
     def build(width=900, height=650, point_size=None):
@@ -356,7 +356,7 @@ def test_the_plain_reader_of_the_status_sees_what_is_shown(make_overlay):
     assert overlay.card.minimumHeight() + 2 * _OVERLAY_MARGIN <= 650
 
 
-def test_a_long_term_with_a_description_over_half_the_row_keeps_the_head():
+def test_a_long_term_with_a_description_over_half_the_row_keeps_the_head(qapp):
     """@brief Ramo di `_elide_row` rimasto senza test (revisore 4, difetto 14).
 
     Positivo: termine piu' largo della riga E descrizione oltre meta' riga ->
@@ -366,7 +366,7 @@ def test_a_long_term_with_a_description_over_half_the_row_keeps_the_head():
     """
     from PyQt6.QtGui import QFontMetrics
     from kicadgen.gui.analysis_overlay import _elide_row
-    app = QApplication.instance() or QApplication([])
+    app = qapp
     regular_font = app.font()
     bold_font = QFont(regular_font)
     bold_font.setBold(True)

@@ -16,7 +16,7 @@ diversa.
 
 import pytest
 
-from test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from test_photo_inventory_gui import gui
 from kicadgen.generators.castellated_module import (
     CONTACT_HALF_AND_THROUGH, AssumedSize, MIN_HOLE_WALL_MM, is_declared_size,
 )

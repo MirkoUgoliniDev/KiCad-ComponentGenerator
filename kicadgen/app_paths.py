@@ -210,13 +210,16 @@ def data_file(name: str, *, seed: bool = False) -> Path:
         database and the user's file is definitely not one (see
         ``is_damaged_sqlite``, e.g. a copy truncated by a crash).
     @return The path in the user's data folder.
-    @throws OSError When the seed cannot be copied or a damaged file cannot
-        be set aside; the user's file is then left as it was.
+    @throws OSError When a damaged file cannot be set aside (the user's file
+        is then left as it was) or the seed cannot be copied. In the second
+        case a damaged file may ALREADY have been set aside: it stays under
+        its ``.corrupt-`` name, nothing exists under `name`, and the next call
+        with `seed` True copies the seed again.
     @note The shipped copy is never modified: it only seeds a new user. The
         copy is atomic (temporary file in the same folder, then
-        ``os.replace``): an interrupted copy never leaves a truncated file
-        under the final name. A damaged file is never deleted: it is renamed
-        ``<name>.corrupt-<YYYYmmdd-HHMMSS>`` next to the new seed.
+        ``fsutil.replace_file``): an interrupted copy never leaves a truncated
+        file under the final name. A damaged file is never deleted: it is
+        renamed ``<name>.corrupt-<YYYYmmdd-HHMMSS>`` next to the new seed.
     """
     target = user_data_dir() / "data" / name
     if not seed:

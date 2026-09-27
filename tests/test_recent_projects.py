@@ -231,3 +231,12 @@ def test_remember_of_a_relative_path_writes_nothing():
     calls = []
     assert rp.remember({}, "relativo", save=calls.append) is False
     assert calls == []
+
+
+def test_a_save_that_reports_failure_is_not_counted_as_saved():
+    """Revisione 130: save_config ora segnala il fallimento con False invece di
+    sollevare; l'elenco dei recenti non deve dirlo salvato (negativo: None = salvato)."""
+    from kicadgen.services import recent_projects
+    assert recent_projects._save({}, lambda config: False) is False
+    assert recent_projects._save({}, lambda config: None) is True
+    assert recent_projects._save({}, lambda config: True) is True

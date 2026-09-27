@@ -62,7 +62,6 @@ from __future__ import annotations
 import functools
 import math
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional, Sequence
 from .messages import tx
 
@@ -216,28 +215,33 @@ class BoardFrame:
         return (x_px - self.cx) / self.scale, (y_px - self.cy) / self.scale
 
 
+#: Errors a single edge measurement is expected to raise on legitimate input:
+#: OpenCV rejecting a degenerate window (cv2.error), and geometry that is
+#: missing, non-numeric or non-finite (KeyError, TypeError, ValueError,
+#: OverflowError from int() of an infinite span). They leave the estimate in
+#: place like an unclear contour. Anything else is a defect of this module and
+#: is counted separately in RefineReport.failed, never reported as «unclear».
+def _expected_measure_errors():
+    """Exception classes treated as an unmeasurable component, not as a bug."""
+    errors = (KeyError, TypeError, ValueError, OverflowError)
+    if cv2 is not None and isinstance(getattr(cv2, "error", None), type):
+        errors += (cv2.error,)
+    return errors
+
+
 @dataclass
 class RefineReport:
-    """@brief Report terminal-refinement changes and unresolved items."""
-    photo: Optional[str] = None
+    """@brief Outcome of one edge-measurement pass over a list of components.
+
+    @note ``skipped`` lists components whose contour was unclear or whose
+        geometry could not be measured (the estimate is kept); ``failed``
+        lists components where the measurement raised an UNEXPECTED error,
+        as ``"<name>: <ExceptionType>: <message>"``. The estimate is kept in
+        both cases, but only ``failed`` points at a defect to investigate.
+    """
     measured: int = 0
     skipped: list = field(default_factory=list)
-
-    def summary(self) -> str:
-        """@brief Return a translated log line summarizing measured and skipped components."""
-        if not self.photo:
-            return tx("nessuna foto dall'alto utilizzabile per rifinire i componenti (bordi "
-                      "misurati dalla vista dall'alto: nessuna trovata)")
-        text = (
-            tx("bordi rifiniti dalla foto {name}: {measured} componenti corretti sui "
-               "bordi reali",
-               name=Path(self.photo).name,
-               measured=self.measured)
-        )
-        if self.skipped:
-            text += tx(", {n_skipped} lasciati come stimati (bordi non chiari)",
-                       n_skipped=len(self.skipped))
-        return text
+    failed: list = field(default_factory=list)
 
 
 #: Inclinazione massima che si prova a raddrizzare. Oltre, la foto non e'
@@ -1252,50 +1256,6 @@ def refine_component_edges(image, frame: BoardFrame, component: dict, forbidden=
     }
 
 
-def refine_components(
-    photo_paths: Sequence[Path],
-    body_length: float,
-    body_width: float,
-    components: Sequence[dict],
-    exclude_rects_mm: Sequence[tuple] = (),
-) -> tuple[list[dict], RefineReport]:
-    """@brief Refine position, size and orientation of each component from the first usable top photo.
-
-    Rifinisce posizione, ingombro e orientamento di ogni componente
-    misurandone i bordi nella prima foto dall'alto utilizzabile.
-
-    Non tocca nome, tipo, colore, marcatura: solo la geometria, e solo
-    quando la misura e' abbastanza affidabile da fidarsene (vedi
-    `refine_component_edges`). Ritorna la lista (copia) corretta e un
-    resoconto testuale per il log.
-    """
-    report = RefineReport()
-    refined = [dict(c) for c in components]
-    if cv2 is None or not components or body_length <= 0 or body_width <= 0:
-        return refined, report
-
-    image, frame = None, None
-    for path in photo_paths:
-        if Path(path).suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
-            continue
-        candidate = cv2.imread(str(path))
-        if candidate is None:
-            continue
-        found = find_board(candidate, body_length, body_width)
-        if found is not None and (frame is None or found.width_px > frame.width_px):
-            image, frame, report.photo = candidate, found, str(path)
-    if frame is None:
-        return refined, report
-
-    # Stessa scala su X e Y prima di misurare: find_board accetta un ritaglio
-    # il cui rapporto differisce da quello dichiarato fino a
-    # MAX_BOARD_ASPECT_ERROR, e una scala unica sposterebbe le misure su Y.
-    image, frame = isotropic_board(image, frame, body_length, body_width)
-    measured_components, loop_report = refine_on_frame(image, frame, refined, exclude_rects_mm)
-    loop_report.photo = report.photo
-    return measured_components, loop_report
-
-
 #: Lato delle classi di colore (Delta E CIE76) dell'istogramma con cui
 #: `sample_board_color` cerca il colore piu' esteso della scheda. Ripiego
 #: dichiarato: circa due soglie di percettibilita' (MIN_BACKGROUND_DELTA_E),
@@ -1470,7 +1430,9 @@ def refine_on_frame(image, frame: BoardFrame, components: Sequence[dict],
         vanno guardati: tipicamente le strisce dei contatti dichiarati, i cui
         bordi metallici lucidi si confondono con quelli di un componente.
     @return Copia della lista con la geometria misurata dove e' stato possibile,
-        e il resoconto di quanti sono stati misurati e quanti lasciati stimati.
+        e il resoconto di quanti sono stati misurati, quanti lasciati stimati
+        (contorno non chiaro o geometria non misurabile) e quanti non misurati
+        per un errore inatteso (RefineReport.failed).
     @note Non tocca nome, tipo, colore, marcatura: solo la geometria, e solo
         quando la misura e' abbastanza affidabile (vedi `refine_component_edges`).
         Quando non misura tiene la stima, quindi non puo' fare peggio che non
@@ -1489,11 +1451,17 @@ def refine_on_frame(image, frame: BoardFrame, components: Sequence[dict],
         min((_rect_gap_mm(rect, other) for index, other in enumerate(rects) if index != position),
             default=SEARCH_MARGIN_MM), frame.scale)
         for position, rect in enumerate(rects)]
+    expected_errors = _expected_measure_errors()
     for component, margin in zip(refined, margins):
         try:
             measured = refine_component_edges(image, frame, component, forbidden, margin)
-        except Exception:  # noqa: BLE001 - una misura fallita non ferma le altre
+        except expected_errors:
             measured = None
+        except Exception as exc:  # noqa: BLE001 - un difetto su un pezzo non ferma gli altri
+            # Not an unclear contour: a defect. It is kept apart so the log
+            # does not present a bug as «contorno non chiaro».
+            report.failed.append(f"{component.get('name', '?')}: {type(exc).__name__}: {exc}")
+            continue
         if measured is None:
             report.skipped.append(component.get("name", "?"))
             continue

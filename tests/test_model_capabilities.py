@@ -55,13 +55,12 @@ def test_an_unknown_capability_is_an_error_and_not_a_silent_pass():
         FULL.usable_for(("tools", "telepatia"))
 
 
-def test_the_picker_filters_by_the_job_it_was_opened_for(monkeypatch):
+def test_the_picker_filters_by_the_job_it_was_opened_for(qapp, monkeypatch):
     pytest.importorskip("PyQt6")
-    from PyQt6.QtWidgets import QApplication
     from kicadgen.gui import model_dialog
     from kicadgen.gui.model_dialog import ModelPickerDialog
 
-    app = QApplication.instance() or QApplication([])
+    app = qapp
     # Il filtro si verifica sui modelli sintetici sopra: l'elenco vero non
     # serve, e scaricarlo qui aprirebbe un socket verso OpenRouter dentro un
     # test unitario. Sostituito il caricamento, come in test_i18n; in piu' la

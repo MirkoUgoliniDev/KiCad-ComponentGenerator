@@ -12,7 +12,6 @@ from PyQt6.QtWidgets import QLabel, QPushButton, QToolButton
 
 from kicadgen.gui import main_window as gui
 from kicadgen.services.i18n import DEFAULT_TRANSLATIONS, LANGUAGES
-from tests.test_photo_inventory_gui import window  # noqa: F401 - fixture condivisa
 
 
 def _toolbar(window):
@@ -98,3 +97,30 @@ def test_cube_labels_are_translated_with_the_language(window):
     window._on_language_changed(window.language_combo.findData("de"))
     assert seen[-1]["top"] == "Oben"
     assert seen[-1]["front"] == DEFAULT_TRANSLATIONS["ui:Fronte"]["de"]
+
+
+def test_a_failed_or_stale_3d_run_realigns_the_kicad_actions_with_the_disk(window, monkeypatch):
+    """Revisione del blocco A (131): una corsa 3D fallita o annullata dopo
+    l'avvio di FreeCAD cancella il modello precedente; la scheda KiCad, «Accetto»
+    e il percorso dell'anteprima devono seguire il disco, anche se l'esito e'
+    superato e altrimenti ignorato."""
+    refreshed, ready = [], []
+    monkeypatch.setattr(window, "_refresh_output_actions", lambda: refreshed.append(1) or True)
+    monkeypatch.setattr(window, "_set_accept_models_ready", ready.append)
+    window._last_mesh_path = window._project_dir() / "sparito.preview.json"
+    monkeypatch.setattr(window, "_cad_result_is_current", lambda: False)   # stale result
+    window._on_regen_3d_error("FreeCAD terminato")
+    window._on_cad3d_error("FreeCAD terminato")
+    assert refreshed == [1, 1] and ready == [False, False]
+    assert window._last_mesh_path is None
+
+
+def test_a_cancel_says_whether_the_previous_model_is_still_there(window, monkeypatch):
+    monkeypatch.setattr(window, "_cad_result_is_current", lambda: True)
+    monkeypatch.setattr(window, "_refresh_output_actions", lambda: True)
+    monkeypatch.setattr(window, "_step_still_on_disk", lambda: False)
+    window._on_regen_3d_error(gui.CAD_ABORT_MESSAGE)
+    assert "rimosso" in window.label_3d_status.text()
+    monkeypatch.setattr(window, "_step_still_on_disk", lambda: True)   # cancelled before launch
+    window._on_regen_3d_error(gui.CAD_ABORT_MESSAGE)
+    assert "non è stato aggiornato" in window.label_3d_status.text()

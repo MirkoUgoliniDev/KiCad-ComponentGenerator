@@ -74,6 +74,26 @@ def _uuidless(fp):
     return re.sub(r'\(uuid "[^"]*"\)', "(uuid)", fp.render())
 
 
+def legacy_pin_one_marker(center, keepouts, direction, radius=0.25, layer="F.SilkS"):
+    """Pin-1 dot placed as before HANDOFF 130 C3 (2026-09-27): stroke not counted.
+
+    CONTRACT CHANGED 2026-09-27: the dot is pushed until its INK (radius +
+    half stroke) keeps the 0.2 mm silk clearance; before, only the radius was
+    kept clear and the ink came 0.14 mm from the copper. Building with this
+    legacy placement must reproduce every earlier pinned output byte for
+    byte: that proves the marker position is the only change of C3.
+    """
+    from kicadgen.core.silk import push_marker_clear
+    return FpCircle(center=push_marker_clear(center, direction, radius, keepouts),
+                    radius=radius, layer=layer, fill=True)
+
+
+def use_legacy_marker(monkeypatch):
+    """Make the castellated generator place the pin-1 dot the pre-C3 way."""
+    from kicadgen.generators import castellated_module
+    monkeypatch.setattr(castellated_module, "pin_one_marker", legacy_pin_one_marker)
+
+
 def _payload(params, monkeypatch, tmp_path, pin_color="#d4af37"):
     """What generate_castellated_3d_model hands to FreeCAD, without FreeCAD."""
     from kicadgen.cad3d import step_generator
@@ -141,7 +161,18 @@ def test_the_contract_names_and_default_are_the_agreed_ones():
 #: del 24/09 (rs485 701474f9..., four cb4ba41d...), come prova
 #: tests/test_fixG_generators.py::
 #: test_undoing_the_offset_fix_and_the_silk_clipping_gives_the_pinned_output.
+#: CAMBIATO DI NUOVO il 2026-09-27 (HANDOFF 130 C3): il segno del pin 1 si
+#: sposta finche' il suo INCHIOSTRO (raggio + meta' tratto) resta a 0.2 mm dal
+#: rame. Con il posizionamento vecchio (legacy_pin_one_marker) l'uscita torna
+#: identica ai valori precedenti, PINNED_FOOTPRINT_BEFORE_C3, come prova
+#: test_undoing_the_marker_clearance_fix_gives_the_previous_pinned_output.
 PINNED_FOOTPRINT = {
+    "rs485": "05baf86feea71685eb02c9fa03a28d5a95c832bfd3bc4588c2ff327641c63b09",
+    "four": "040190545a3ce9d2a9ccdc0eb1ddeeb01e7b87b5537ca889c4671b64bd13508e",
+}
+#: Impronte prima di C3 (2026-09-27): stesso file con il segno del pin 1
+#: posizionato senza contare lo spessore del tratto.
+PINNED_FOOTPRINT_BEFORE_C3 = {
     "rs485": "7eaa34e7cf07d35d9d60b50b3812a1200cd3adcc0e1a76101ba0967d85159576",
     "four": "82bc177fcf3c5b7b0c2052fe546c446ce34def025b952cc5d617bf883684525c",
 }
@@ -183,8 +214,26 @@ def test_default_footprint_is_byte_identical_to_the_pinned_output(name):
 
 
 @pytest.mark.parametrize("name", sorted(BUILDERS))
-def test_the_only_change_of_2026_09_24_is_the_smd_sentence(name):
-    """@brief Tolta la frase sul tipo SMD, l'impronta e' quella del 2026-09-23."""
+def test_undoing_the_marker_clearance_fix_gives_the_previous_pinned_output(name, monkeypatch):
+    """@brief C3 changed ONLY the pin-1 dot: the legacy placement gives the old bytes."""
+    current = _uuidless(build_castellated_module(BUILDERS[name]()))
+    use_legacy_marker(monkeypatch)
+    rendered = _uuidless(build_castellated_module(BUILDERS[name]()))
+    assert hashlib.sha256(rendered.encode()).hexdigest() == PINNED_FOOTPRINT_BEFORE_C3[name]
+    changed = [(a, b) for a, b in zip(current.splitlines(), rendered.splitlines()) if a != b]
+    assert len(current.splitlines()) == len(rendered.splitlines())
+    # Only the centre of the fp_circle and its `end` point (centre + radius).
+    assert len(changed) == 2
+    assert [a.split()[0] for a, _ in changed] == ["(center", "(end"]
+
+
+@pytest.mark.parametrize("name", sorted(BUILDERS))
+def test_the_only_change_of_2026_09_24_is_the_smd_sentence(name, monkeypatch):
+    """@brief Tolta la frase sul tipo SMD, l'impronta e' quella del 2026-09-23.
+
+    Built with the pre-C3 marker placement (see legacy_pin_one_marker).
+    """
+    use_legacy_marker(monkeypatch)
     rendered = _uuidless(build_castellated_module(BUILDERS[name]()))
     assert rendered.count(SMD_WITH_DRILLED_PADS_NOTE) == 1
     stripped = rendered.replace(" " + SMD_WITH_DRILLED_PADS_NOTE, "")

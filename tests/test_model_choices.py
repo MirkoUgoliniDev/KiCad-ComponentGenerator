@@ -117,3 +117,28 @@ def test_the_match_report_of_an_explicit_choice_is_restored(tmp_path):
     fresh = deepcopy(chosen); fresh.pop('model_selection'); fresh.pop('model_match')
     restored = restore_choices(tmp_path, b'photo', [fresh])[0]
     assert restored['model_match'] == chosen['model_match']
+
+
+def test_both_files_are_published_through_the_retrying_replace(tmp_path, monkeypatch):
+    """@brief S10: a transient Windows refusal on publish is retried, not fatal.
+
+    Positive: the first PermissionError of each publish is absorbed by
+    fsutil.replace_file and both files are written. Negative: no temporary
+    file is left behind.
+    """
+    from kicadgen import fsutil
+    import os
+    real_replace = os.replace
+    refusals = []
+
+    def refuse_once(source, target):
+        if len(refusals) < 2 and str(target) not in refusals:
+            refusals.append(str(target))
+            raise PermissionError(32, 'busy')
+        real_replace(source, target)
+    monkeypatch.setattr(fsutil.os, 'replace', refuse_once)
+    choices = save_choices(tmp_path, b'photo', [component()])
+    report = save_candidate_report(tmp_path, [component()])
+    assert len(refusals) == 2
+    assert choices.is_file() and report.is_file()
+    assert not list(tmp_path.glob('.model-*'))

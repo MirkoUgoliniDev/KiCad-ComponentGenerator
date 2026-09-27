@@ -28,7 +28,7 @@ from kicadgen.generators.package import build_package, footprint_attr
 from kicadgen.generators.pin_header import PinHeaderParams, build_pin_header
 from test_contact_pad_shape import _with_legacy_silk
 from test_contact_style import (
-    PINNED_FOOTPRINT_2026_09_24, _uuidless, dev_kit, four_sided, rs485,
+    PINNED_FOOTPRINT_2026_09_24, _uuidless, dev_kit, four_sided, rs485, use_legacy_marker,
 )
 
 
@@ -42,14 +42,17 @@ def _module(sides, **changes):
 # -- G1: the only changes to the pinned default output ------------------------
 
 @pytest.mark.parametrize("name,builder", [("rs485", rs485), ("four", four_sided)])
-def test_undoing_the_offset_fix_and_the_silk_clipping_gives_the_pinned_output(name, builder):
+def test_undoing_the_offset_fix_and_the_silk_clipping_gives_the_pinned_output(name, builder,
+                                                                              monkeypatch):
     """@brief The half_and_through output changed ONLY in the drill model and the silk.
 
     Rewriting each drilled pad the old way (copper centre in `at`, offset =
     drill - copper) and folding the clipped silk back into one rectangle must
     reproduce the 2026-09-24 pinned footprint byte for byte. The new pinned
     hashes of test_contact_style.py therefore encode exactly these two fixes.
+    The pin-1 dot is placed the pre-C3 way (see legacy_pin_one_marker).
     """
+    use_legacy_marker(monkeypatch)
     fp = build_castellated_module(builder())
     assert any(isinstance(p, OffsetDrillPad) for p in fp.pads)
     legacy = copy.deepcopy(_with_legacy_silk(fp))
@@ -468,12 +471,11 @@ def test_pinout_sort_is_natural_and_accepts_mixed_types():
     assert ordered == [1, "2", "3", 10, "A2", "A10", None]
 
 
-def test_pinout_dialog_builds_with_mixed_pin_types():
+def test_pinout_dialog_builds_with_mixed_pin_types(qapp):
     pytest.importorskip("PyQt6")
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PyQt6.QtWidgets import QApplication
     from kicadgen.gui.pinout_dialog import PinoutDialog
-    app = QApplication.instance() or QApplication([])
+    app = qapp
     dialog = PinoutDialog([{"pin": 10, "name": "VOUT"}, {"pin": "2", "name": "GND"},
                            {"pin": 1, "name": "VIN"}], "X")
     column = [dialog.table.item(i, 0).text() for i in range(dialog.table.rowCount())]

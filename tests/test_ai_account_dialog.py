@@ -19,17 +19,12 @@ from kicadgen.services import credentials, openrouter
 
 KEY = "sk-or-v1-incollata-dallutente"
 
-#: One QApplication for the module (see test_photo_inventory_gui for why a
-#: local reference is not enough).
-_APP = None
-
 
 @pytest.fixture
-def app(monkeypatch):
-    global _APP
-    _APP = QApplication.instance() or QApplication([])
+def app(qapp, monkeypatch):
+    """@brief The session QApplication, on a platform that has the Credential Manager."""
     monkeypatch.setattr(sys, "platform", "win32")
-    return _APP
+    return qapp
 
 
 def _status(**values):

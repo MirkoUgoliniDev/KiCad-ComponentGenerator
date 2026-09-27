@@ -19,8 +19,8 @@ from kicadgen.services.datasheet_extractor import _files_sent_message
 
 
 @pytest.fixture
-def overlay():
-    app = QApplication.instance() or QApplication([])
+def overlay(qapp):
+    app = qapp
     parent = QWidget()
     parent.resize(900, 650)
     widget = AnalysisOverlay(parent)
@@ -373,12 +373,12 @@ def test_the_documents_are_listed_one_per_line_with_name_and_role(overlay):
     assert overlay.status.alignment() & Qt.AlignmentFlag.AlignLeft
 
 
-def test_the_card_makes_room_for_eight_documents_without_clipping():
+def test_the_card_makes_room_for_eight_documents_without_clipping(qapp):
     """Positivo al limite: otto documenti sono nove righe, cioe' molte piu'
     delle tre riservate d'ufficio. La scheda deve SEGUIRE il contenuto (e
     restare dentro la finestra), non tagliarlo: il numero di documenti lo
     sceglie l'utente, non la scheda."""
-    app = QApplication.instance() or QApplication([])
+    app = qapp
     parent = QWidget()
     parent.resize(900, 650)
     overlay = AnalysisOverlay(parent)
@@ -403,13 +403,13 @@ def test_the_card_makes_room_for_eight_documents_without_clipping():
         parent.close()
 
 
-def test_a_window_too_short_cuts_the_list_instead_of_overflowing():
+def test_a_window_too_short_cuts_the_list_instead_of_overflowing(qapp):
     """Negativo dell'altezza: quando le righe non ci stanno, l'elenco si
     accorcia e il taglio si DICHIARA con un'ellissi su una riga propria -- lo
     stesso segno con cui questa scheda dichiara ogni altro accorciamento.
     Lasciarlo debordare manderebbe i pulsanti fuori dallo schermo, e tagliarlo
     in silenzio farebbe credere che i documenti fossero meno."""
-    app = QApplication.instance() or QApplication([])
+    app = qapp
     parent = QWidget()
     parent.resize(900, 480)
     overlay = AnalysisOverlay(parent)
@@ -655,7 +655,7 @@ assert len(WORST_CASE_STATUS) == _STATUS_CHAR_LIMIT, len(WORST_CASE_STATUS)
 
 @pytest.mark.parametrize("parent_width,parent_height", ((900, 650), (640, 480)))
 @pytest.mark.parametrize("point_size", (7, 16, 24))
-def test_the_card_is_sized_on_its_content_and_does_not_jump(parent_width,
+def test_the_card_is_sized_on_its_content_and_does_not_jump(qapp, parent_width,
                                                             parent_height,
                                                             point_size):
     """La larghezza deve essere quella derivata dal font, con un tetto dedotto
@@ -666,7 +666,7 @@ def test_the_card_is_sized_on_its_content_and_does_not_jump(parent_width,
     peggiore viene tagliata a meta' di una riga. E le righe che compaiono a
     operazione avviata non devono cambiare l'ingombro della scheda, altrimenti
     la modale cresce e rimpicciolisce sotto gli occhi."""
-    app = QApplication.instance() or QApplication([])
+    app = qapp
     font = QFont(app.font())
     font.setPointSize(point_size)
     parent = QWidget()
@@ -722,14 +722,14 @@ def test_the_card_is_sized_on_its_content_and_does_not_jump(parent_width,
         parent.close()
 
 
-def test_the_card_follows_a_font_change_after_startup():
+def test_the_card_follows_a_font_change_after_startup(qapp):
     """Il calcolo stava solo in __init__: un cambio di tema o del font di
     accessibilita' a programma avviato lasciava la scheda sulle metriche
     vecchie, cioe' col testo tagliato. Il font nuovo arriva SULLA label dello
     stato -- il foglio di stile della scheda fissa il font dei figli, quindi non
     passa dall'overlay -- ed e' li' che va intercettato. Positivo: la larghezza
     derivata cresce col font; negativo: resta dentro la finestra."""
-    app = QApplication.instance() or QApplication([])
+    app = qapp
     parent = QWidget()
     parent.resize(1600, 900)
     overlay = AnalysisOverlay(parent)
@@ -764,13 +764,13 @@ HEADER_TEXT = ("Modello AI (remoto, a consumo) · anthropic/claude-opus-5"
                " (da impostazioni, verifica dimensioni)")
 
 
-def test_the_tool_header_shortens_itself_instead_of_being_clipped():
+def test_the_tool_header_shortens_itself_instead_of_being_clipped(qapp):
     """Positivo e negativo sulla stessa frase: una QLabel normale, centrata e
     senza a capo, viene tagliata sui DUE lati (si perde la prima parola,
     'Modello', e l'ultima), quindi l'intestazione diventa illeggibile proprio
     mentre altre righe vengono scartate 'perche' l'intestazione lo dice gia''.
     La label che si accorcia da sola resta tutta dentro il proprio rettangolo."""
-    app = QApplication.instance() or QApplication([])
+    app = qapp
     assert app is not None
     elided, plain = ElidedLabel(), QLabel()
     for label in (elided, plain):
@@ -795,7 +795,7 @@ def test_the_header_keeps_its_full_text_for_main_window(overlay):
     assert overlay.tool.text().endswith(detail)
 
 
-def test_the_abort_action_exists_only_while_something_can_be_stopped():
+def test_the_abort_action_exists_only_while_something_can_be_stopped(qapp):
     """Positivo: dichiarata l'interruzione, il comando c'e' ed emette il segnale.
 
     Negativo doppio: una scheda ferma, e una scheda avviata da un percorso che
@@ -803,7 +803,7 @@ def test_the_abort_action_exists_only_while_something_can_be_stopped():
     decide nulla da sola -- chiede e basta -- quindi il contratto che conta e'
     esattamente questo: quando si vede, e che cosa emette.
     """
-    app = QApplication.instance() or QApplication([])
+    app = qapp
     parent = QWidget()
     parent.resize(900, 650)
     overlay = AnalysisOverlay(parent)
@@ -837,8 +837,8 @@ def test_the_abort_action_exists_only_while_something_can_be_stopped():
         parent.close()
 
 
-def test_overlay_animation_resize_literal_status_and_cleanup():
-    app = QApplication.instance() or QApplication([])
+def test_overlay_animation_resize_literal_status_and_cleanup(qapp):
+    app = qapp
     parent = QWidget()
     parent.resize(900, 650)
     overlay = AnalysisOverlay(parent)

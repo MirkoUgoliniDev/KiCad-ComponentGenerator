@@ -3,7 +3,6 @@ from pathlib import Path
 import sys
 
 import pytest
-from test_photo_inventory_gui import window
 from kicadgen.gui import main_window as gui
 from kicadgen.services import datasheet_extractor as ext
 from kicadgen.cad3d import step_generator as cad, kicad_models
@@ -118,7 +117,10 @@ def test_verified_photo_family_cannot_invent_terminals(window, monkeypatch, tmp_
         pad_diameter_mm=1.7, drill_mm=1,
         castellated_sides=[dict(edge="left", count=2, pitch_mm=2.54)],
         components_3d=[dict(name="U", kind="ic_qfn", _detected_kind="ic_qfn",
-            package="QFN", x_mm=0, y_mm=0, length_mm=5, width_mm=5, height_mm=1)]))
+            package="QFN", x_mm=0, y_mm=0, length_mm=5, width_mm=5, height_mm=1)]),
+        # The verified family comes from the program's photo inventory, the
+        # only source trusted with internal flags such as `_detected_kind`.
+        trusted_components=True)
     # Vedi sopra: il gruppo «Modello 3D» serve acceso per avere un corpo.
     window._freecad_available = True
     window._on_extracted(params)

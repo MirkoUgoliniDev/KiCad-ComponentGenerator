@@ -30,8 +30,13 @@ def test_explicit_package_generates_smd_pads_and_body():
 
 
 def test_duplicate_pin_and_invalid_side_are_rejected():
+    # CONTRACT CHANGED 2026-09-27 (HANDOFF 130 C10): KiCad lets several pads
+    # share a number (one electrical pin); only a shared number with
+    # conflicting names is the sign of a misread and is refused.
+    PackageGeometry(pins=[PinSpec("1", 0, 0, 1, 1), PinSpec("1", 2, 0, 1, 1)]).validate()
     with pytest.raises(ValueError, match="pin duplicato"):
-        PackageGeometry(pins=[PinSpec("1", 0, 0, 1, 1), PinSpec("1", 2, 0, 1, 1)]).validate()
+        PackageGeometry(pins=[PinSpec("1", 0, 0, 1, 1, name="VCC"),
+                              PinSpec("1", 2, 0, 1, 1, name="GND")]).validate()
     with pytest.raises(ValueError, match="lato non valido"):
         PinSpec("1", 0, 0, 1, 1, side="diagonal").validate()
 

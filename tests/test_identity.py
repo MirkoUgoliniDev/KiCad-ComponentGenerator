@@ -1,6 +1,6 @@
 """@brief Coherent product identity (PIANO-FIX item 3, 2026-09-26)."""
 from kicadgen import __version__
-from tests.test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from tests.test_photo_inventory_gui import gui
 
 
 def test_the_title_shows_project_and_version(window):  # noqa: F811

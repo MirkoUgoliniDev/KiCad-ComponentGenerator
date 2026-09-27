@@ -15,14 +15,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 pytest.importorskip("PyQt6")
 from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import QApplication
 
 from kicadgen.gui import model_candidates_dialog as gui
 
 
 @pytest.fixture(autouse=True)
-def app():
-    return QApplication.instance() or QApplication([])
+def app(qapp):
+    """@brief Every test builds widgets: the session QApplication must exist first."""
+    return qapp
 
 
 # ── Parsing of the colour runs, no FreeCAD ───────────────────────────────

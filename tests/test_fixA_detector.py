@@ -4,7 +4,6 @@ Fake runtimes only: no real inference, no network, no paid call.
 """
 from copy import deepcopy
 import json
-import socket
 import sys
 from types import SimpleNamespace
 
@@ -23,15 +22,6 @@ def _raw(*entries):
         result[0, :4, index] = xywh
         result[0, 4 + class_id, index] = confidence
     return result
-
-
-@pytest.fixture(autouse=True)
-def no_network(monkeypatch):
-    """@brief Fail accidental network access in every test of this file."""
-    def forbidden(*args, **kwargs):
-        pytest.fail("these tests must not access the network")
-    monkeypatch.setattr(socket.socket, "connect", forbidden)
-    monkeypatch.setattr(socket, "create_connection", forbidden)
 
 
 @pytest.fixture
@@ -339,9 +329,11 @@ def _review(reply, cache=None, logs=None):
 
 def test_rescaling_skips_non_dict_rows_instead_of_crashing():
     """A4 unit: the dict row is converted, the junk row is left for validation."""
-    rows = ['junk', dict(bbox=[250, 100, 500, 400])]
-    assert inventory._rescale_boxes(rows, 2000, 1000, lambda _m: None) == 'normalized_1000'
-    assert rows[0] == 'junk' and rows[1]['bbox'] == pytest.approx([.25, .1, .5, .4])
+    # A square box on a photo narrower than 1000 px: only the 0-1000 grid fits
+    # (pixels overflow, [y,x] reads the same box), so no evidence is needed.
+    rows = ['junk', dict(bbox=[100, 100, 800, 800])]
+    assert inventory._rescale_boxes(rows, 400, 300, lambda _m: None) == 'normalized_1000'
+    assert rows[0] == 'junk' and rows[1]['bbox'] == pytest.approx([.1, .1, .8, .8])
 
 
 def test_a_non_dict_row_after_the_paid_call_is_an_invalid_row_not_a_crash():

@@ -68,6 +68,32 @@ class LibraryInstallResult:
 
 _SAFE_LIBRARY_NAME = re.compile(r"^[A-Za-z0-9_.+-]+$")
 
+#: Closing keyword of every ISO 10303-21 (STEP physical file) exchange file.
+STEP_TRAILER = b"END-ISO-10303-21;"
+
+#: Bytes read from the end of a STEP file to look for its trailer. Writers may
+#: append blank lines or comments after it, never kilobytes of data.
+_STEP_TAIL_BYTES = 4096
+
+
+def step_file_is_complete(path: str | os.PathLike[str]) -> bool:
+    """@brief Tell whether a STEP file ends with the ISO 10303-21 trailer.
+
+    @param path STEP file to inspect; only its last few kilobytes are read.
+    @return True when the last non-blank content is ``END-ISO-10303-21;``.
+    @throws OSError If the file cannot be opened or read.
+    @note A FreeCAD process killed during the export (cancel, watchdog) leaves
+        a syntactically truncated file that KiCad would load as an empty or
+        partial model. The trailer is the last thing a writer emits, so its
+        absence is a structural proof of truncation, whatever the file size.
+    """
+    with open(path, "rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        handle.seek(max(0, size - _STEP_TAIL_BYTES))
+        tail = handle.read()
+    return tail.rstrip(b" \t\r\n\x00").endswith(STEP_TRAILER)
+
 
 def discover_component_artifacts(
         component_dir: str | os.PathLike[str], name: str | None = None,
@@ -78,7 +104,10 @@ def discover_component_artifacts(
     @param name Expected component name; defaults to the directory name.
     @param require_3d Require a STEP model in addition to the footprint.
     @return Validated artifact paths.
-    @throws KiCadLibraryError If required files are missing or ambiguous.
+    @throws KiCadLibraryError If required files are missing or ambiguous, or
+        if the STEP file lacks the ISO 10303-21 trailer (code
+        ``step_incomplete``), even when ``require_3d`` is False.
+    @throws OSError If the STEP file exists but cannot be read.
     """
     root = Path(component_dir).expanduser().resolve()
     component_name = (name or root.name).strip()
@@ -101,10 +130,24 @@ def discover_component_artifacts(
             f"STEP model not found: {step}",
             code="step_missing", path=step,
         )
+    if step.is_file() and not step_file_is_complete(step):
+        # Never ship a truncated model: it is newer than the footprint, so the
+        # "older STEP" warning cannot catch it, and KiCad would show it broken.
+        raise KiCadLibraryError(
+            f"STEP model is incomplete (no END-ISO-10303-21; trailer, the "
+            f"export was probably interrupted): {step}",
+            code="step_incomplete", path=step,
+        )
     return ComponentArtifacts(
         component_name, root, footprint, step,
         wrl if wrl.is_file() else None,
     )
+
+
+#: Name of the S-expression node opening at a given index. Matched in place
+#: with ``pattern.match(text, index)``: slicing ``text[index:]`` copied the
+#: rest of the file for every node, quadratic on large library tables.
+_NODE_NAME = re.compile(r"\(\s*([^\s()]+)")
 
 
 def _direct_child_ranges(text: str, node_name: str) -> list[tuple[int, int]]:
@@ -128,7 +171,7 @@ def _direct_child_ranges(text: str, node_name: str) -> list[tuple[int, int]]:
             continue
         if character == "(":
             if depth == 1:
-                match = re.match(r"\(\s*([^\s()]+)", text[index:])
+                match = _NODE_NAME.match(text, index)
                 if match and match.group(1) == node_name:
                     start = index
             depth += 1
@@ -187,7 +230,100 @@ def _board_footprint(footprint_text: str, model_reference: str) -> str:
     """@brief Convert a library footprint into a positioned board footprint."""
     result = attach_3d_model(footprint_text, model_reference)
     result = _remove_direct_children(result, "at")
-    return _append_root_child(result, "\t(at 100 100)")
+    return _append_root_child(
+        result, f"\t(at {_mm(_PREVIEW_ORIGIN[0])} {_mm(_PREVIEW_ORIGIN[1])})")
+
+
+def _mm(value: float) -> str:
+    """Board coordinate in mm as KiCad writes it: 1 um resolution, no trailing zeros."""
+    text = f"{round(float(value), 4):.4f}".rstrip("0").rstrip(".")
+    return "0" if text in ("-0", "") else text
+
+
+#: Position of the footprint on the preview board, mm.
+_PREVIEW_ORIGIN = (100.0, 100.0)
+
+#: Smallest preview outline, as (min x, min y, max x, max y) in board mm: the
+#: historical 70 x 50 mm frame around the footprint, kept for small parts.
+_PREVIEW_MIN_OUTLINE = (65.0, 75.0, 135.0, 125.0)
+
+#: Free board around the footprint courtyard, mm.
+PREVIEW_OUTLINE_MARGIN_MM = 5.0
+
+_COURTYARD_LAYERS = ("F.CrtYd", "B.CrtYd")
+_GRAPHIC_NODES = ("fp_rect", "fp_line", "fp_poly", "fp_circle", "fp_arc")
+_NUMBER = r"(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)"
+_POINT = re.compile(r"\((start|end|mid|center|xy)\s+" + _NUMBER + r"\s+" + _NUMBER)
+_LAYER = re.compile(r"\(layer\s+\"?([^\s\")]+)")
+_PAD_AT = re.compile(r"\(at\s+" + _NUMBER + r"\s+" + _NUMBER)
+_PAD_SIZE = re.compile(r"\(size\s+" + _NUMBER + r"\s+" + _NUMBER)
+
+
+def footprint_extent(footprint_text: str) -> tuple[float, float, float, float] | None:
+    """@brief Bounding box of a footprint in its own coordinates, mm.
+
+    @param footprint_text Content of a .kicad_mod file.
+    @return (min x, min y, max x, max y) of the courtyard graphics; without a
+        courtyard, of the pads (each grown by its half diagonal, so rotated
+        pads are covered); None when neither exists.
+    @throws KiCadLibraryError ``malformed_file`` for an unbalanced file.
+    @note The courtyard is the KiCad-defined keep-out of a part, so it is the
+        right envelope for sizing a board around it. Circles use their radius;
+        arcs are bounded by their three points (a slight underestimate that
+        the board margin covers).
+    """
+    xs: list[float] = []
+    ys: list[float] = []
+    for name in _GRAPHIC_NODES:
+        for start, end in _direct_child_ranges(footprint_text, name):
+            block = footprint_text[start:end]
+            layer = _LAYER.search(block)
+            if not layer or layer.group(1) not in _COURTYARD_LAYERS:
+                continue
+            points = {}
+            for key, x, y in _POINT.findall(block):
+                points.setdefault(key, []).append((float(x), float(y)))
+                xs.append(float(x))
+                ys.append(float(y))
+            if name == "fp_circle" and "center" in points and "end" in points:
+                (cx, cy), (ex, ey) = points["center"][0], points["end"][0]
+                radius = ((ex - cx) ** 2 + (ey - cy) ** 2) ** 0.5
+                xs.extend((cx - radius, cx + radius))
+                ys.extend((cy - radius, cy + radius))
+    if not xs:
+        for start, end in _direct_child_ranges(footprint_text, "pad"):
+            block = footprint_text[start:end]
+            at, size = _PAD_AT.search(block), _PAD_SIZE.search(block)
+            if not at or not size:
+                continue
+            x, y = float(at.group(1)), float(at.group(2))
+            reach = (float(size.group(1)) ** 2 + float(size.group(2)) ** 2) ** 0.5 / 2
+            xs.extend((x - reach, x + reach))
+            ys.extend((y - reach, y + reach))
+    if not xs:
+        return None
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def preview_board_outline(footprint_text: str) -> tuple[float, float, float, float]:
+    """@brief Edge.Cuts rectangle of the preview board, in board mm.
+
+    @param footprint_text Content of the library footprint (before placement).
+    @return (min x, min y, max x, max y): the historical 70 x 50 mm frame,
+        grown where the footprint courtyard plus PREVIEW_OUTLINE_MARGIN_MM
+        would reach beyond it. The footprint sits at _PREVIEW_ORIGIN.
+    @throws KiCadLibraryError ``malformed_file`` for an unbalanced file.
+    """
+    outline = _PREVIEW_MIN_OUTLINE
+    extent = footprint_extent(footprint_text)
+    if extent is None:
+        return outline
+    ox, oy = _PREVIEW_ORIGIN
+    margin = PREVIEW_OUTLINE_MARGIN_MM
+    grown = (ox + extent[0] - margin, oy + extent[1] - margin,
+             ox + extent[2] + margin, oy + extent[3] + margin)
+    return (round(min(outline[0], grown[0]), 4), round(min(outline[1], grown[1]), 4),
+            round(max(outline[2], grown[2]), 4), round(max(outline[3], grown[3]), 4))
 
 
 def create_preview_project(
@@ -197,6 +333,8 @@ def create_preview_project(
 
     @details The generated board embeds the footprint and references a local copy
     of the STEP model through ``${KIPRJMOD}``. No KiCad library table is changed.
+    The board outline is at least 70 x 50 mm and grows to keep the footprint
+    courtyard plus a margin inside (see preview_board_outline).
     The footprint is parsed before anything is written, the board and model
     copies are written through a temporary file and an atomic replace, and a
     board that KiCad currently holds open is never rewritten.
@@ -216,10 +354,11 @@ def create_preview_project(
     project_path = preview_dir / f"{artifacts.name}-preview.kicad_pro"
     # Parse and convert the footprint first: a malformed file must not leave a
     # half-refreshed preview directory behind.
+    footprint_text = artifacts.footprint_path.read_text(encoding="utf-8")
     footprint = _board_footprint(
-        artifacts.footprint_path.read_text(encoding="utf-8"),
-        f"${{KIPRJMOD}}/{artifacts.name}.step",
+        footprint_text, f"${{KIPRJMOD}}/{artifacts.name}.step",
     )
+    x0, y0, x1, y1 = preview_board_outline(footprint_text)
     lock_path = kicad_lock_file(board_path)
     if lock_path.exists():
         raise KiCadLibraryError(
@@ -251,7 +390,7 @@ def create_preview_project(
         "\t)\n"
         "\t(setup (pad_to_mask_clearance 0))\n"
         f"{footprint.rstrip()}\n"
-        "\t(gr_rect (start 65 75) (end 135 125)\n"
+        f"\t(gr_rect (start {_mm(x0)} {_mm(y0)}) (end {_mm(x1)} {_mm(y1)})\n"
         "\t\t(stroke (width 0.05) (type default)) (fill none)\n"
         f"\t\t(layer \"Edge.Cuts\") (uuid \"{outline_uuid}\"))\n"
         ")\n"

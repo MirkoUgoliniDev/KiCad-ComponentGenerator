@@ -236,7 +236,8 @@ def _save(config: dict, save) -> bool:
     if save is None:
         from ..gui.app_config import save_config as save
     try:
-        save(config)
+        # app_config.save_config reports a failed write by returning False
+        # instead of raising; a test double that returns None means «saved».
+        return save(config) is not False
     except OSError:
         return False
-    return True

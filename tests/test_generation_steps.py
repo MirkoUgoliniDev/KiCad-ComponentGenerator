@@ -14,7 +14,7 @@ from PyQt6.QtTest import QSignalSpy
 
 from kicadgen.cad3d import kicad_models
 from kicadgen.gui.analysis_overlay import TOOLS
-from tests.test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from tests.test_photo_inventory_gui import gui
 
 
 def test_freecad_measuring_is_announced_only_when_freecad_really_runs(monkeypatch, tmp_path):

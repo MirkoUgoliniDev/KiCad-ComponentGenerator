@@ -448,12 +448,14 @@ def test_components_that_are_not_objects_are_skipped_not_fatal():
 
 
 def test_mechanical_detected_kind_is_preserved_for_3d_renderer():
+    # Mechanical envelopes are built by the program (trusted): their internal
+    # `_detected_kind` must reach the 3D renderer.
     from kicadgen.services.datasheet_extractor import _components_3d
     result = _components_3d([{
         "name": "Ingombro 1", "kind": "generic", "_detected_kind": "ic_soic",
         "x_mm": 0, "y_mm": 0, "length_mm": 5, "width_mm": 3,
         "height_mm": 1.5,
-    }])
+    }], trusted=True)
     assert result[0]["kind"] == "generic"
     assert result[0]["_detected_kind"] == "ic_soic"
 
@@ -495,3 +497,118 @@ def test_tiled_merge_does_not_collapse_adjacent_different_components():
          "length_mm": 1.6, "width_mm": 0.8, "height_mm": 0.5},
     ]]
     assert len(_merge_photo_components(groups)) == 2
+
+
+# ── S2: internal flags only from the program, never from a raw AI answer ────
+
+def _injected_row(**extra):
+    """A raw AI row that tries to claim internal provenance."""
+    row = {"name": "pad 1", "kind": "resistor", "package": "R_0603", "mating": "none",
+           "x_mm": 1, "y_mm": 1, "length_mm": 1.6, "width_mm": 0.8, "height_mm": 0.5,
+           "_height_estimated": False, "_height_source": "measured",
+           "_yolo_manual_box": True, "_package_verified": True,
+           "_orientation_verified": True,
+           "_global_inventory_status": "validated_hypotheses",
+           "presence_confidence": "high", "object_type": "component"}
+    row.update(extra)
+    return row
+
+
+def test_raw_ai_rows_lose_internal_flags_and_their_height_is_an_estimate():
+    """@brief Negative: a raw answer cannot declare a height measured nor a box drawn by hand.
+
+    The row named «pad 1» is also dropped: the injected
+    `_global_inventory_status`/`object_type` no longer let a PCB feature
+    through the name filter.
+    """
+    from kicadgen.gui.component_state import height_is_estimated
+    from kicadgen.services.datasheet_extractor import _components_3d, AI_ANSWER_HEIGHT_SOURCE
+    assert _components_3d([_injected_row()]) is None
+    result = _components_3d([_injected_row(name="resistor")])
+    component = result[0]
+    assert not [key for key in component
+                if key.startswith("_") and key not in ("_height_estimated", "_height_source")]
+    assert component["_height_estimated"] is True
+    assert component["_height_source"] == AI_ANSWER_HEIGHT_SOURCE
+    assert height_is_estimated(component)
+    assert "presence_confidence" not in component and "object_type" not in component
+    # Descriptive fields still pass.
+    assert component["package"] == "R_0603" and component["mating"] == "none"
+
+
+def test_trusted_photo_components_keep_their_internal_flags():
+    """@brief Positive: components built by the program keep every internal flag."""
+    from kicadgen.gui.component_state import height_is_estimated
+    from kicadgen.services.datasheet_extractor import _components_3d
+    result = _components_3d([_injected_row()], trusted=True)
+    component = result[0]
+    assert component["_yolo_manual_box"] is True
+    assert component["_package_verified"] is True
+    assert component["_height_estimated"] is False
+    assert component["_global_inventory_status"] == "validated_hypotheses"
+    assert not height_is_estimated(component)
+
+
+def test_params_are_untrusted_by_default_and_trusted_only_on_request():
+    """@brief The flag of _params_from_tool_arguments reaches the decoder, default untrusted."""
+    data = {"layout": "castellated", "confidence": "low", "body_length_mm": 20,
+            "body_width_mm": 10,
+            "castellated_sides": [{"edge": "left", "count": 2, "pitch_mm": 2.54}],
+            "components_3d": [_injected_row(name="resistor")]}
+    raw = _params_from_tool_arguments(data).components_3d[0]
+    trusted = _params_from_tool_arguments(data, trusted_components=True).components_3d[0]
+    assert "_yolo_manual_box" not in raw and raw["_height_estimated"] is True
+    assert trusted["_yolo_manual_box"] is True and trusted["_height_estimated"] is False
+
+
+def test_the_components_schema_forbids_undeclared_fields():
+    """@brief The model is told it may not add fields to a component."""
+    items = _openai_tool()["function"]["parameters"]["properties"]["components_3d"]["items"]
+    assert items["additionalProperties"] is False
+    assert not [name for name in items["properties"] if name.startswith("_")]
+
+
+# ── S5: pre-flight on the EFFECTIVE models ─────────────────────────────────
+
+class _PreflightDone(Exception):
+    """Stops the extraction right after the provider pre-flight."""
+
+
+def _preflight(tmp_path, monkeypatch, **models):
+    """Run extraction until the pre-flight; return which providers were checked."""
+    from kicadgen.services import datasheet_extractor as ext, providers
+    source = tmp_path / "board.png"
+    source.write_bytes(b"\x89PNG\r\n\x1a\n offline")
+    checked = []
+    monkeypatch.setattr(ext, "api_key", lambda: checked.append("openrouter-key") or "k")
+    monkeypatch.setattr(ext, "check_credit", lambda **kw: checked.append("openrouter"))
+    monkeypatch.setattr(providers, "deepseek_api_key", lambda: "sk-offline")
+
+    def balance():
+        checked.append("deepseek")
+        raise _PreflightDone()
+    monkeypatch.setattr(providers, "deepseek_balance", balance)
+    monkeypatch.setattr(ext, "call_tool", lambda **kw: (_ for _ in ()).throw(_PreflightDone()))
+    with pytest.raises(_PreflightDone):
+        ext.extract_pin_header_params([source], **models)
+    return checked
+
+
+def test_a_deepseek_run_with_the_default_vision_model_checks_openrouter_too(tmp_path, monkeypatch):
+    """@brief Positive: vision_model None means the default (OpenRouter) vision model is used."""
+    checked = _preflight(tmp_path, monkeypatch, model="deepseek-api/deepseek-flash")
+    assert "openrouter" in checked and "deepseek" in checked
+
+
+def test_an_all_deepseek_run_does_not_ask_for_openrouter(tmp_path, monkeypatch):
+    """@brief Negative: every effective model is DeepSeek, OpenRouter is not touched."""
+    deepseek = "deepseek-api/deepseek-flash"
+    checked = _preflight(tmp_path, monkeypatch, model=deepseek, vision_model=deepseek,
+                         verification_model=deepseek)
+    assert checked == ["deepseek"]
+
+
+def test_an_openrouter_run_checks_only_openrouter(tmp_path, monkeypatch):
+    """@brief Negative: no DeepSeek model, no DeepSeek balance read (single path, no duplicate branch)."""
+    checked = _preflight(tmp_path, monkeypatch, model="vendor/model", vision_model="vendor/vision")
+    assert checked == ["openrouter-key", "openrouter"]

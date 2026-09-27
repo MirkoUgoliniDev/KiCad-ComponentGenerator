@@ -7,7 +7,7 @@ un si'.
 """
 from kicadgen.gui import main_window as gui
 
-from test_photo_inventory_gui import _write_complete_kicad_output, window  # noqa: F401
+from test_photo_inventory_gui import _write_complete_kicad_output
 
 
 def _project_with_other_kicadgen(tmp_path):

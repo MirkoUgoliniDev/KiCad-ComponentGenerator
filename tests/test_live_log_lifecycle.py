@@ -5,7 +5,6 @@ import shutil
 
 import pytest
 
-from test_photo_inventory_gui import window
 from kicadgen.services.datasheet_extractor import ExtractedParams
 
 

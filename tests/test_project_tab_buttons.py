@@ -25,7 +25,6 @@ from PyQt6.QtTest import QSignalSpy
 from PyQt6.QtWidgets import QLayout, QScrollArea
 
 from kicadgen.gui import main_window as gui
-from tests.test_photo_inventory_gui import window  # noqa: F401 - fixture condivisa
 
 
 #: Riga di rendiconto per-elemento come la scrive l'abbinamento dei modelli:

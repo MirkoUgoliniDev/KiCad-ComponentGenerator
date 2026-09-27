@@ -87,13 +87,13 @@ class PinHeaderParams:
             if value is None and name in ("row_spacing", "body_length", "body_width"):
                 continue
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value):
-                raise ValueError(f"{name} must be a finite number in mm.")
+                raise ValueError(tx("{name} deve essere un numero finito (mm).", name=name))
         if (self.body_length is None) != (self.body_width is None):
-            raise ValueError("body_length and body_width must be supplied together.")
+            raise ValueError(tx("Lunghezza e larghezza del corpo vanno indicate insieme."))
         if self.body_length is not None and (self.body_length <= 0 or self.body_width <= 0):
-            raise ValueError("body_length and body_width must be > 0.")
+            raise ValueError(tx("Le dimensioni del corpo devono essere > 0."))
         if self.margin < 0:
-            raise ValueError("margin must be >= 0.")
+            raise ValueError(tx("Il margine del courtyard deve essere >= 0."))
         if not self.name.strip():
             raise ValueError(tx("Il nome del footprint non puo' essere vuoto."))
         if self.rows < 1 or self.cols < 1:
@@ -111,7 +111,8 @@ class PinHeaderParams:
             for p in self.populated_pins:
                 if p < 1 or p > max_pin:
                     raise ValueError(
-                        f"Pin {p} in populated_pins fuori range (1..{max_pin})."
+                        tx("Pin {pin} in populated_pins fuori range (1..{max_pin}).",
+                           pin=p, max_pin=max_pin)
                     )
             # Con una mappa esplicita un pin popolato senza posizione verrebbe
             # scartato in silenzio (pin_positions itera solo la mappa): il
@@ -268,7 +269,7 @@ def build_pin_header(params: PinHeaderParams) -> Footprint:
         end = (start[0] + params.body_length, start[1] + params.body_width)
         fp.add_graphic(FpRect(start=start, end=end, layer="F.Fab", width=0.1))
     if not all(isfinite(v) for v in (*start, *end)):
-        raise ValueError("Computed footprint bounds must be finite.")
+        raise ValueError(tx("I limiti calcolati del footprint non sono numeri finiti."))
 
     positions = list(pin_positions(params))
     # La serigrafia non copre il rame: con margin minore del raggio del pad
@@ -304,7 +305,7 @@ def build_pin_header(params: PinHeaderParams) -> Footprint:
     courtyard_start = (min_x - m, min_y - m)
     courtyard_end = (max_x + m, max_y + m)
     if not all(isfinite(v) for v in (*start, *end, *courtyard_start, *courtyard_end)):
-        raise ValueError("Computed footprint bounds must be finite.")
+        raise ValueError(tx("I limiti calcolati del footprint non sono numeri finiti."))
     fp.add_graphic(FpRect(
         start=courtyard_start, end=courtyard_end, layer="F.CrtYd", width=0.05,
     ))

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
-from typing import Iterable, Optional, Sequence
+from typing import Optional, Sequence
 from ..services.messages import tx
 
 
@@ -21,6 +21,10 @@ PACKAGE_FAMILIES = {
 }
 PAD_TYPES = {"smd", "thru_hole", "np_thru_hole", "connect"}
 PAD_SHAPES = {"circle", "rect", "oval", "roundrect", "trapezoid", "custom"}
+
+#: Declared pad-coordinate origins. Only "body_center" says where the body is;
+#: for the others the body centre is estimated (see PackageGeometry.body_frame_offset).
+ORIGINS = {"body_center", "pin1", "custom"}
 
 
 def _finite(value: float, name: str, positive: bool = False) -> float:
@@ -53,8 +57,14 @@ class PinSpec:
     drill_mm: Optional[float] = None
 
     def validate(self) -> None:
-        """@brief Validate the object against its supported contract."""
-        if not str(self.number).strip():
+        """@brief Validate the object against its supported contract.
+
+        @throws ValueError When a value is out of contract.
+        @note An empty number is accepted only for a non-plated hole: KiCad
+            writes mechanical holes with number "" (no net), while every
+            electrical pad needs a number to be connected.
+        """
+        if not str(self.number).strip() and self.pad_type != "np_thru_hole":
             raise ValueError(tx("il numero del pin non puo' essere vuoto"))
         _finite(self.x_mm, "x_mm")
         _finite(self.y_mm, "y_mm")
@@ -90,13 +100,25 @@ class PackageGeometry:
     pins: list[PinSpec] = field(default_factory=list)
 
     def validate(self) -> None:
-        """@brief Validate the object against its supported contract."""
+        """@brief Validate the object against its supported contract.
+
+        @throws ValueError When a field is out of contract, two pads overlap,
+            or pads sharing a number declare different pin names.
+        @note Several pads may share one number, as KiCad allows (a thermal
+            pad split into several lands, several GND pads): they are the same
+            electrical pin. What is refused is a shared number with
+            CONFLICTING non-empty names, the structural sign of a misread
+            number rather than of a multi-pad pin.
+        """
         if self.family not in PACKAGE_FAMILIES:
             raise ValueError(tx("famiglia package non supportata: {family}", family=self.family))
         if self.source_view not in {"top", "bottom"}:
             raise ValueError(tx("source_view deve essere top o bottom"))
-        if self.origin not in {"body_center", "pin1", "custom"}:
+        if self.origin not in ORIGINS:
             raise ValueError(tx("origin non supportata"))
+        # bool("false") is True: only a real boolean may decide a mirror.
+        if not isinstance(self.mirrored, bool):
+            raise ValueError(tx("mirrored deve essere true o false"))
         _finite(self.orientation_deg, "orientation_deg")
         if self.confidence not in {"high", "medium", "low"}:
             raise ValueError(tx("confidence non valida"))
@@ -108,13 +130,15 @@ class PackageGeometry:
         # footprint da scrivere, e un .kicad_mod vuoto passerebbe per buono.
         if not self.pins:
             raise ValueError(tx("la geometria package non ha pad"))
-        numbers = set()
+        names: dict = {}
         outlines = []
         for pin in self.pins:
             pin.validate()
-            if pin.number in numbers:
+            name = str(pin.name or "").strip()
+            known = names.get(pin.number)
+            if known and name and known.casefold() != name.casefold():
                 raise ValueError(tx("pin duplicato: {number}", number=pin.number))
-            numbers.add(pin.number)
+            names[pin.number] = known or name
             # Rettangolo ruotato del pad (convenzione KiCad): un controllo su
             # rettangoli allineati agli assi rifiuterebbe pad di QFN ruotati
             # che non si toccano e accetterebbe pad ruotati che si toccano.
@@ -128,6 +152,42 @@ class PackageGeometry:
                            number=pin.number)
                     )
             outlines.append((pin.number, outline))
+
+    def body_frame_offset(self) -> tuple:
+        """@brief Point of the pad coordinates taken as the body centre, mm.
+
+        @return (x, y) in the source-view pad coordinates; (0, 0) when the
+            origin is declared "body_center".
+        @note DECLARED HEURISTIC. With origin "pin1" or "custom" the pads are
+            given relative to a point that is not the body centre, and nothing
+            in the geometry says where the body is relative to that point. The
+            body is then assumed to be centred on the bounding box of the pad
+            centres, which holds for the symmetric families (DIP, SOIC, TSSOP,
+            QFN, QFP) and is only an estimate for asymmetric parts (connectors,
+            parts with an offset tab). What would make it unnecessary: a
+            declared body offset from the pad origin in the extraction schema.
+            `frame_notes` states the estimate so it is never silent.
+        """
+        if self.origin == "body_center" or not self.pins:
+            return (0.0, 0.0)
+        # Mounting holes are not part of the pin field: an asymmetric hole
+        # would drag the estimated body centre (all pads count only when the
+        # geometry has nothing but holes).
+        field = [pin for pin in self.pins if pin.pad_type != "np_thru_hole"] or self.pins
+        xs = [float(pin.x_mm) for pin in field]
+        ys = [float(pin.y_mm) for pin in field]
+        return ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
+
+    def frame_notes(self) -> list:
+        """@brief Notes about estimated placement of the body relative to the pads.
+
+        @return Localized notes; empty when the origin is the body centre.
+        """
+        if self.origin == "body_center":
+            return []
+        return [tx("Geometria package con origine «{origin}»: il centro del corpo e' "
+                   "stimato al centro del campo dei pad (stima, da verificare sul "
+                   "disegno quotato).", origin=self.origin)]
 
     def pins_seen_from_top(self) -> list[PinSpec]:
         """@brief Return the pins normalized from the source view to KiCad's top view.
@@ -144,14 +204,21 @@ class PackageGeometry:
         @note A bottom view (and an explicit mirror) is a reflection across
             the Y axis: it negates X and, with it, every pad angle; the package
             orientation is applied after the reflection.
+        @note The footprint origin is always the (possibly estimated) body
+            centre: pads declared from pin 1 or a custom origin are first
+            moved by `body_frame_offset`, so body outline, courtyard and 3D
+            model, all drawn around (0, 0), line up with the pads.
         """
         self.validate()
         result = []
         angle = math.radians(self.orientation_deg % 360)
         cos_a, sin_a = math.cos(angle), math.sin(angle)
-        flips = int(self.source_view == "bottom") + int(bool(self.mirrored))
+        flips = int(self.source_view == "bottom") + int(self.mirrored)
+        shift_x, shift_y = self.body_frame_offset()
         for pin in self.pins:
             x, y = pin.x_mm, pin.y_mm
+            if self.origin != "body_center":
+                x, y = round(x - shift_x, 9), round(y - shift_y, 9)
             pad_angle = pin.rotation_deg
             if flips % 2:
                 x, pad_angle = -x, -pad_angle
@@ -244,7 +311,10 @@ def package_from_mapping(data: dict) -> PackageGeometry:
         family=data.get("family", "unknown"), body_length_mm=data.get("body_length_mm"),
         body_width_mm=data.get("body_width_mm"), body_height_mm=data.get("body_height_mm"),
         origin=data.get("origin", "body_center"), source_view=data.get("source_view", "top"),
-        orientation_deg=data.get("orientation_deg", 0), mirrored=data.get("mirrored", False),
+        orientation_deg=data.get("orientation_deg", 0),
+        # Optional in the schema: an explicit null means «not mirrored», as
+        # before; only a non-boolean value is refused (validate).
+        mirrored=False if data.get("mirrored") is None else data.get("mirrored"),
         confidence=data.get("confidence", "low"), needs_review=data.get("needs_review", True), pins=pins,
     )
     geometry.validate()

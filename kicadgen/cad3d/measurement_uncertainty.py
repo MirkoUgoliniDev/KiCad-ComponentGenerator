@@ -20,8 +20,7 @@ I due consumatori sono:
 """
 from __future__ import annotations
 
-import math
-from typing import Optional
+from ..core.validation import positive_number
 
 #: Incertezza di posizione di UN bordo misurato sulla foto, in pixel.
 #:
@@ -61,17 +60,6 @@ UNCERTAINTY_KEY = "measurement_uncertainty_mm"
 SCALE_KEY = "photo_scale_px_per_mm"
 
 
-def _positive(value) -> Optional[float]:
-    """Finite positive number, else None (booleans are not measurements)."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    try:
-        value = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    return value if math.isfinite(value) and value > 0 else None
-
-
 def edge_uncertainty_mm(*, declared_mm=None, scale_px_per_mm=None) -> tuple[float, str]:
     """@brief Uncertainty of the position of one measured edge, in mm.
 
@@ -84,10 +72,10 @@ def edge_uncertainty_mm(*, declared_mm=None, scale_px_per_mm=None) -> tuple[floa
     @note Invalid values (NaN, infinite, zero, negative, booleans) are treated
         as missing, never as a measurement.
     """
-    declared = _positive(declared_mm)
+    declared = positive_number(declared_mm)
     if declared is not None:
         return declared, SOURCE_DECLARED
-    scale = _positive(scale_px_per_mm)
+    scale = positive_number(scale_px_per_mm)
     if scale is not None:
         return EDGE_UNCERTAINTY_PX / scale, SOURCE_PHOTO_SCALE
     return EDGE_UNCERTAINTY_PX / ASSUMED_SCALE_PX_PER_MM, SOURCE_ASSUMED
@@ -113,9 +101,9 @@ def component_edge_uncertainty(component, default_scale_px_per_mm=None) -> tuple
             value = evidence.get(key)
         return value
 
-    scale = _positive(read(SCALE_KEY))
+    scale = positive_number(read(SCALE_KEY))
     if scale is None:
-        scale = _positive(default_scale_px_per_mm)
+        scale = positive_number(default_scale_px_per_mm)
     return edge_uncertainty_mm(declared_mm=read(UNCERTAINTY_KEY), scale_px_per_mm=scale)
 
 

@@ -51,7 +51,7 @@ import math
 from dataclasses import dataclass, field, replace
 from typing import Dict, Iterator, List, NamedTuple, Optional, Sequence
 
-from ..core.footprint import Footprint, FpCircle, FpRect, FpText, Pad
+from ..core.footprint import Footprint, FpRect, FpText, Pad
 from ..core.silk import keepout_box, pin_one, pin_one_marker, silk_rectangle
 from ..core.sexpr import SExpr, sx
 from ..services.messages import tx
@@ -1983,8 +1983,8 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
                 center, direction = (placement.x, placement.y + offset), (0.0, sign)
             else:
                 center, direction = (placement.x + offset, placement.y), (sign, 0.0)
-            # Il disco e' pieno: la distanza si misura dal suo bordo, senza la
-            # mezza larghezza del tratto usata per il contorno.
+            # Keepouts of the copper plus the silk clearance only: the dot's
+            # own ink radius (radius + half stroke) is added by pin_one_marker.
             marker_keepouts = [keepout_box(*_copper_outline_bbox(params, p), line_width=0.0)
                                for p in placements]
             fp.add_graphic(pin_one_marker(center, marker_keepouts, direction))

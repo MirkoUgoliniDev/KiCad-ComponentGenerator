@@ -9,7 +9,7 @@ una finestra in particolare: la correzione vale per tutte.
 import pytest
 from PyQt6.QtWidgets import QMessageBox
 
-from test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from test_photo_inventory_gui import gui
 from kicadgen.gui.qt_translations import install_qt_translations
 
 
@@ -39,7 +39,7 @@ def test_the_buttons_of_a_message_box_are_in_the_window_language(window, monkeyp
     assert yes_text() == "Yes"
 
 
-def test_a_language_without_a_qt_catalogue_falls_back_to_english_not_the_previous_one():
+def test_a_language_without_a_qt_catalogue_falls_back_to_english_not_the_previous_one(qapp):
     assert install_qt_translations("fr")
     assert yes_text() == "Oui"
     assert not install_qt_translations("none")

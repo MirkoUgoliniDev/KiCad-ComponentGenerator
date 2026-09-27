@@ -19,7 +19,7 @@ pytest.importorskip("pyvistaqt")
 
 from kicadgen.services import openrouter
 from test_automatic_generation import acquired, begin
-from test_photo_inventory_gui import window, gui  # noqa: F401 - fixture condivisa
+from test_photo_inventory_gui import gui
 
 
 @pytest.fixture(autouse=True)

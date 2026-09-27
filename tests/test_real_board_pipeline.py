@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from test_photo_inventory_gui import window, gui, QApplication
+from test_photo_inventory_gui import gui, QApplication
 from PyQt6.QtTest import QTest
 
 from kicadgen.cad3d import kicad_models as km

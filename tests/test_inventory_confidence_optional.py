@@ -147,7 +147,7 @@ def test_undeclared_is_never_promoted_to_an_exact_pin_count(confidence, promoted
     row = dict(_clean_row('U1', 1, [.2, .2, .4, .4]), terminal_count=4, lead_count=3,
                lead_count_complete=True, lead_count_confidence=confidence)
     assert inventory._component_valid(row, {1})
-    parsed = _components_3d([inventory._normalize(row, 5, 40, 20, [])])[0]
+    parsed = _components_3d([inventory._normalize(row, 5, 40, 20, [])], trusted=True)[0]
     assert parsed['lead_count_confidence'] == (confidence or UNDECLARED)
     assert ('pin_count' in parsed) is promoted
 

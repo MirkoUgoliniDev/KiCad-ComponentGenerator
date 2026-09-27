@@ -159,7 +159,8 @@ def test_nonfinite_geometry_rejected(field, value):
     dict(body_length=5.0, body_width=-3.0),
 ])
 def test_incomplete_or_nonpositive_body_rejected(body):
-    with pytest.raises(ValueError, match="body_length"):
+    # Localized since HANDOFF 130 C8: the Italian source names the body, not the field.
+    with pytest.raises(ValueError, match="corpo"):
         build_pin_header(PinHeaderParams(**body))
 
 
@@ -169,7 +170,7 @@ def test_negative_margin_rejected():
 
 
 def test_overflowing_body_bounds_rejected():
-    with pytest.raises(ValueError, match="finite"):
+    with pytest.raises(ValueError, match="finiti"):
         build_pin_header(PinHeaderParams(
             body_length=1e308, body_width=3.0, body_offset_x=1e308,
         ))

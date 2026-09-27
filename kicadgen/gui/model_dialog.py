@@ -27,7 +27,8 @@ from PyQt6.QtWidgets import (
 
 from ..services.openrouter import (DATASHEET_CAPABILITIES, ModelInfo, OpenRouterError,
                                    list_models)
-from ..services.providers import (PROVIDER_DEEPSEEK, PROVIDER_LABELS, PROVIDERS,
+from ..services.providers import (PROVIDER_DEEPSEEK, PROVIDER_LABELS, PROVIDER_SHORT_LABELS,
+                                  PROVIDERS,
                                   deepseek_models, provider_of)
 from ..services.messages import tx
 
@@ -296,9 +297,13 @@ class ModelPickerDialog(QDialog):
             return
         if self._worker is not None and self._worker.isRunning():
             return
+        # The list comes from the provider chosen in the dialog, not always
+        # from OpenRouter: the message names it.
+        template = "Caricamento elenco modelli da {provider}..."
+        provider = PROVIDER_SHORT_LABELS.get(self.provider(), self.provider())
         self.label_selected.setText(
-            self.i18n.text("Caricamento elenco modelli da OpenRouter...")
-            if self.i18n is not None else "Caricamento elenco modelli da OpenRouter..."
+            self.i18n.tr("ui:" + template, default=template, provider=provider)
+            if self.i18n is not None else template.format(provider=provider)
         )
         self.btn_refresh.setEnabled(False)
 

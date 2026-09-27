@@ -1,4 +1,4 @@
-"""@brief Offline checks of photo cache and enum validation (audit D5, D6, D9 for the top inventory).
+"""@brief Offline checks of photo cache and enum validation (audit D5, D6).
 
 All model calls are injected fakes; nothing reaches OpenRouter.
 """
@@ -10,8 +10,6 @@ import pytest
 pytest.importorskip("cv2")
 
 from kicadgen.services import photo_grounding as grounding
-from kicadgen.services import photo_top_inventory as top
-from kicadgen.services.ai_diagnostics import CallCancelled
 
 KINDS = ("generic", "resistor", "capacitor")
 
@@ -93,35 +91,3 @@ def test_mechanical_verdict_confidence_is_enum_checked(confidence, expected, unc
     [result] = grounding.mechanical_envelopes(photo, [_component()], "offline", call,
                                               log.append, None)
     assert result["confidence"] == expected and result["_uncertain"] is uncertain
-
-
-@pytest.mark.parametrize("confidence,expected", [("sure", "low"), (7, "low"), ("high", "high")])
-def test_top_inventory_decode_checks_the_confidence_enum(confidence, expected):
-    response = {"components": [dict(box=[10, 10, 20, 20], complete=True, confidence=confidence,
-                                    evidence="body")]}
-    [row] = top._decode(response, (0, 0, 100, 50), (100, 50), (100, 50), "t", lambda m: None)
-    assert row["confidence"] == expected
-
-
-# ── D9: the top inventory never swallows a cancellation ────────────────────
-
-def test_top_inventory_propagates_a_cancellation():
-    class Stop(CallCancelled):
-        pass
-
-    def call(**kw):
-        raise Stop("user")
-    with pytest.raises(Stop):
-        top.detect_top_bodies(np.zeros((50, 100, 3), np.uint8), "offline", call, lambda m: None)
-
-
-def test_top_inventory_still_downgrades_an_ordinary_failure():
-    """Negative: an ordinary error keeps the region unaudited, as before."""
-    log = []
-
-    def call(**kw):
-        raise ValueError("offline failure")
-    result = top.detect_top_bodies(np.zeros((50, 100, 3), np.uint8), "offline", call,
-                                   log.append, residual=False)
-    assert result["failed_stages"] >= 1 and result["components"] == []
-    assert any("ValueError" in line for line in log)

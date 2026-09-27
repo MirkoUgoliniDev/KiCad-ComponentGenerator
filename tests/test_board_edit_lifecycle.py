@@ -12,7 +12,7 @@ import pytest
 pytest.importorskip("PyQt6")
 pytest.importorskip("pyvistaqt")
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication, QWidget
+from PyQt6.QtWidgets import QWidget
 
 from kicadgen.gui import main_window as gui
 from kicadgen.cad3d import step_generator as step, kicad_models
@@ -50,17 +50,12 @@ def offline(monkeypatch):
     monkeypatch.setattr(kicad_models, "attach_models", Mock(return_value=0))
 
 
-#: Una sola QApplication per processo, tenuta viva dal legame di modulo. Con il
-#: solo riferimento locale la QApplication veniva distrutta a fine test e
-#: ricostruita al successivo, e il file moriva ogni tanto di segmentation fault
-#: a meta' corsa: causa e misure in `test_photo_inventory_gui._APP`.
-_APP = None
-
-
 @pytest.fixture
-def window(monkeypatch, tmp_path):
-    global _APP
-    app = _APP = QApplication.instance() or QApplication([])
+def window(qapp, monkeypatch, tmp_path):
+    # Una sola QApplication per processo (`qapp`, tests/qt_fixtures.py): con il
+    # solo riferimento locale veniva distrutta a fine test e il file moriva
+    # ogni tanto di segmentation fault a meta' corsa.
+    app = qapp
     monkeypatch.setattr(gui, "Preview3DVtk", PreviewStub)
     monkeypatch.setattr(gui, "load_config", lambda: {"component_type": "", "language": "en"})
     monkeypatch.setattr(gui, "save_config", lambda *args: None)

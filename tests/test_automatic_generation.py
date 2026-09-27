@@ -4,7 +4,8 @@ from unittest.mock import Mock
 
 from kicadgen.services.document_roles import MANIFEST, ROLES
 import pytest
-from test_photo_inventory_gui import window, gui, ExtractedParams, QApplication
+from test_photo_inventory_gui import gui, ExtractedParams, QApplication
+from qt_window_teardown import dispose_window
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QListWidgetItem, QMessageBox
 
@@ -291,7 +292,8 @@ def test_an_old_advanced_preference_is_ignored(window, monkeypatch):
     try:
         assert restored.tabs.count() == 4
     finally:
-        restored.close()
+        # Destroyed now, not by a later GC pass inside another test.
+        dispose_window(restored)
 
 
 def test_extract_finish_inside_a_nested_event_loop_does_not_drop_autogeneration(window, monkeypatch):

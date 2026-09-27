@@ -1,7 +1,6 @@
 """@brief Candidate-report corruption must not block real mesh preview loading."""
 import json
 from unittest.mock import Mock
-from test_photo_inventory_gui import window
 
 
 def test_corrupt_candidate_record_does_not_hide_mesh(window,tmp_path):

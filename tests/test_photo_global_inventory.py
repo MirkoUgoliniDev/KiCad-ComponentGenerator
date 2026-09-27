@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from kicadgen.services import photo_global_inventory as inventory
-from kicadgen.services.photo_yolo_review import review_yolo_components
+from kicadgen.services.photo_global_inventory import review_global_inventory
 from kicadgen.services.photo_grounding import detail_grid
 
 
@@ -298,9 +298,9 @@ def run_replies(replies, items=None, cache=None, **kwargs):
     def fake(**request):
         calls.append(request)
         return deepcopy(replies[min(len(calls), len(replies)) - 1])
-    result = review_yolo_components(np.zeros((60, 120, 3), np.uint8),
+    result = review_global_inventory(np.zeros((60, 120, 3), np.uint8),
         [candidate(1), candidate(2)] if items is None else items,
-        40, 20, 'unchanged/model', fake, logs.append, cache, strategy='global', **kwargs)
+        40, 20, 'unchanged/model', fake, logs.append, cache, **kwargs)
     return result, calls, logs
 
 
@@ -323,9 +323,9 @@ def run_failing_second(first, items, error, cache=None, **kwargs):
             raise OpenRouterError(error)
         return deepcopy(first)
 
-    result = review_yolo_components(np.zeros((60, 120, 3), np.uint8), items,
+    result = review_global_inventory(np.zeros((60, 120, 3), np.uint8), items,
                                     40, 20, 'unchanged/model', fake, logs.append,
-                                    cache, strategy='global', **kwargs)
+                                    cache, **kwargs)
     return result, calls, logs
 
 
@@ -831,8 +831,12 @@ def test_boxes_delivered_in_pixels_or_on_a_thousand_grid_are_converted():
     una risposta corretta per un'unita' di misura.
     """
     messages = []
-    rows = _boxed([250, 100, 500, 400])
-    assert inventory._rescale_boxes(rows, 2000, 1000, messages.append) == 'normalized_1000'
+    # Su 2000x1000 un rettangolo con numeri <= 1000 e' valido sia su griglia
+    # 0-1000 sia in pixel (HANDOFF 130 F1): decide la proposta del rilevatore
+    # che la riga dichiara come sua unica sorgente.
+    rows = [dict(bbox=[250, 100, 500, 400], source_candidate_ids=[7])]
+    assert inventory._rescale_boxes(rows, 2000, 1000, messages.append,
+                                    {7: [.25, .1, .5, .4]}) == 'normalized_1000'
     assert rows[0]['bbox'] == pytest.approx([.25, .1, .5, .4])
     assert 'normalized_1000' in messages[0]
 
@@ -840,6 +844,117 @@ def test_boxes_delivered_in_pixels_or_on_a_thousand_grid_are_converted():
     rows = _boxed([500, 200, 1500, 800])
     assert inventory._rescale_boxes(rows, 2000, 1000, messages.append) == 'pixels'
     assert rows[0]['bbox'] == pytest.approx([.25, .2, .75, .8])
+
+
+#: Foto piu' piccola di 1000 px su entrambi i lati (la RS485 ritagliata): i
+#: pixel sono validi anche letti su griglia 0-1000, e viceversa.
+SMALL_W, SMALL_H = 987, 426
+#: Tre corpi in frazioni, lontani dalla diagonale: nessuna lettura [y,x]
+#: coincide per caso con la [x,y].
+SMALL_FRACTIONS = {1: [.10, .20, .30, .60], 2: [.55, .15, .70, .45], 3: [.75, .55, .95, .90]}
+
+
+def _small_rows(transform, sources=True):
+    return [dict(bbox=transform(box), **({'source_candidate_ids': [i]} if sources else {}))
+            for i, box in SMALL_FRACTIONS.items()]
+
+
+def _to_pixels(box):
+    return [round(box[0] * SMALL_W), round(box[1] * SMALL_H),
+            round(box[2] * SMALL_W), round(box[3] * SMALL_H)]
+
+
+def _to_grid(box):
+    return [round(v * 1000) for v in box]
+
+
+@pytest.mark.parametrize('transform,expected', [(_to_pixels, 'pixels'), (_to_grid, 'normalized_1000')])
+def test_an_ambiguous_unit_is_settled_by_the_detector_boxes(transform, expected):
+    """@brief Positivo (F1): pixel e griglia 0-1000 sono entrambi validi su 987x426.
+
+    Prima vinceva sempre la griglia (primo in elenco) e una risposta in pixel
+    veniva schiacciata su Y di 0.43. Ora vince la convenzione sotto cui le
+    righe a sorgente singola coincidono con il riquadro della loro proposta.
+    """
+    rows, issues = _small_rows(transform), []
+    assert inventory._rescale_boxes(rows, SMALL_W, SMALL_H, lambda _m: None,
+                                    SMALL_FRACTIONS, issues) == expected
+    assert not issues
+    for row, box in zip(rows, SMALL_FRACTIONS.values()):
+        assert row['bbox'] == pytest.approx(box, abs=2e-3)
+
+
+def test_an_ambiguous_unit_without_evidence_is_an_issue_not_a_guess():
+    """@brief Negativo (F1): stessi pixel, ma nessuna proposta a decidere.
+
+    Senza sorgenti (enumerazione) o con proposte che non coincidono con
+    nessuna lettura, la convenzione non si indovina: la risposta riceve un
+    errore e i rettangoli restano come sono (quindi invalidi, e segnalati).
+    """
+    for rows, evidence in ((_small_rows(_to_pixels, sources=False), SMALL_FRACTIONS),
+                           (_small_rows(_to_pixels), {i: [.0, .0, .01, .01]
+                                                      for i in SMALL_FRACTIONS})):
+        issues, messages = [], []
+        original = deepcopy(rows)
+        assert inventory._rescale_boxes(rows, SMALL_W, SMALL_H, messages.append,
+                                        evidence, issues) is None
+        assert rows == original
+        assert len(issues) == 1 and 'ambiguous box convention' in issues[0]
+        assert 'pixels' in issues[0] and 'normalized_1000' in issues[0]
+        assert "piu' convenzioni" in messages[-1]
+
+
+def test_an_unambiguous_unit_needs_no_evidence():
+    """@brief Negativo di generalita': con una sola lettura valida non serve prova.
+
+    Su 2000x1000 un valore oltre 1000 esclude la griglia e l'ordine [y,x]:
+    restano solo i pixel, anche senza proposte del rilevatore.
+    """
+    rows, issues = _boxed([500, 200, 1500, 800]), []
+    assert inventory._rescale_boxes(rows, 2000, 1000, lambda _m: None, None, issues) == 'pixels'
+    assert not issues
+
+
+def test_contract_fractions_stay_even_when_the_yx_reading_is_also_valid():
+    """@brief Le frazioni del contratto non diventano ambigue per l'ordine [y,x].
+
+    Letto [y,x] quasi ogni rettangolo in frazioni resta valido. Senza prova
+    contraria si tiene cio' che il prompt chiede; con le proposte che lo
+    confermano, a maggior ragione. Nessun errore, nessuna conversione: le
+    risposte registrate (tutte in frazioni) si rigiocano identiche.
+    """
+    for evidence in (None, SMALL_FRACTIONS):
+        rows, issues = _small_rows(lambda box: list(box)), []
+        assert inventory._rescale_boxes(rows, SMALL_W, SMALL_H, lambda _m: None,
+                                        evidence, issues) is None
+        assert not issues and [r['bbox'] for r in rows] == list(SMALL_FRACTIONS.values())
+
+
+def test_an_ambiguous_response_is_reported_and_never_cached(tmp_path):
+    """@brief Integrazione: l'errore di convenzione arriva alle righe e blocca la cache."""
+    items = [dict(candidate(i), _box=box) for i, box in SMALL_FRACTIONS.items()]
+    rows = [body(f'B{i}', [i], bbox=_to_pixels(box), grouping_basis='single_body',
+                 **{'class': 'resistor'}) for i, box in SMALL_FRACTIONS.items()]
+    data = dict(components=rows, candidate_decisions=[
+        dict(candidate_id=i, status='keep', component_id=f'B{i}', reason='body')
+        for i in SMALL_FRACTIONS], uncertainties=[])
+    calls, logs = [], []
+
+    def fake(**request):
+        calls.append(request)
+        return deepcopy(data)
+    photo = np.zeros((SMALL_H, SMALL_W, 3), np.uint8)
+    decided = review_global_inventory(photo, items, 40, 17, 'offline/model', fake,
+                                      logs.append, tmp_path)
+    assert {row.get('_global_inventory_box_scale') for row in decided} == {'pixels'}
+    # Stessa risposta, ma le proposte non coincidono con nessuna lettura.
+    far = [dict(candidate(i), _box=[.0, .0, .01, .01]) for i in SMALL_FRACTIONS]
+    undecided = review_global_inventory(photo, far, 40, 17, 'offline/model', fake,
+                                        logs.append, tmp_path / 'other')
+    assert any('ambiguous box convention' in error
+               for row in undecided for error in row['_global_inventory_errors'])
+    assert not list((tmp_path / 'other').glob('global-inventory-*.json'))
+    assert any('FAILED/PARTIAL' in str(line) for line in logs)
 
 
 def test_fractions_are_left_alone_and_a_broken_answer_stays_broken():

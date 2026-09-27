@@ -13,7 +13,7 @@ import pytest
 
 from kicadgen.cad3d.annotations import (ANNOTATION_CONVENTION, EdgeFilletAnnotation,
                                         FaceTextAnnotation, swap_front_back)
-from tests.test_photo_inventory_gui import window, gui  # noqa: F401
+from tests.test_photo_inventory_gui import gui
 
 SRC = Path(__file__).resolve().parents[1] / "kicadgen" / "cad3d" / "freecad_build_body.py"
 

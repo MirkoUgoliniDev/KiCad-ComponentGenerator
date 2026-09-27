@@ -19,7 +19,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import QBrush, QColor, QImage, QPainter, QPen, QPixmap, QPolygonF
 from PyQt6.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QGridLayout,
-    QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton, QVBoxLayout,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QVBoxLayout,
     QWidget,
 )
 
@@ -439,21 +439,54 @@ def _store_mesh(key, mesh, auto_angle):
 PREVIEW_COLORS_KEY = "step_preview_colors"
 
 
-def _preview_colors_enabled() -> bool:
-    """@brief The remembered «Colori» choice of the STEP preview; True when never set or unreadable."""
+def _config_owner(widget):
+    """Return the nearest ancestor that owns the in-memory preferences, or None.
+
+    The main window keeps config.json in memory (`_config`) and rewrites the
+    whole file from it: a dialog that loaded, changed and saved its own copy
+    would be overwritten by the window's next save, and the window would keep
+    showing a value that differs from the disk. The owner is recognised by the
+    two members it exposes, not by its class, so the dialog imports nothing
+    from main_window.
+    """
+    while widget is not None:
+        if (isinstance(getattr(widget, "_config", None), dict)
+                and callable(getattr(widget, "_save_config_safely", None))):
+            return widget
+        widget = widget.parent()
+    return None
+
+
+def _preview_colors_enabled(owner=None) -> bool:
+    """@brief The remembered «Colori» choice of the STEP preview; True when never set or unreadable.
+
+    @param owner Window returned by `_config_owner`, or None to read config.json.
+    """
     try:
-        from .app_config import load_config
-        return load_config().get(PREVIEW_COLORS_KEY, True) is not False
+        if owner is not None:
+            config = owner._config
+        else:
+            from .app_config import load_config
+            config = load_config()
+        return config.get(PREVIEW_COLORS_KEY, True) is not False
     except Exception:  # noqa: BLE001 - una preferenza illeggibile non ferma la finestra
         return True
 
 
-def _remember_preview_colors(enabled: bool) -> None:
+def _remember_preview_colors(enabled: bool, owner=None) -> None:
     """@brief Store the «Colori» choice in config.json; a failed write is ignored.
 
     @param enabled New choice.
+    @param owner Window returned by `_config_owner`: its in-memory preferences
+        are updated and saved through its own `_save_config_safely`, so memory
+        and disk never diverge. None (dialog opened without the main window)
+        updates config.json directly.
     """
     try:
+        if owner is not None:
+            owner._config[PREVIEW_COLORS_KEY] = bool(enabled)
+            owner._save_config_safely()
+            return
         from .app_config import load_config, save_config
         config = load_config()
         config[PREVIEW_COLORS_KEY] = bool(enabled)
@@ -974,7 +1007,7 @@ class ModelCandidatesDialog(QDialog):
         self.colors_checkbox.setToolTip(
             "Anteprima con i colori del modello KiCad. Spenta: tinta unica, piu' "
             "veloce sui modelli grandi.")
-        self.colors_checkbox.setChecked(_preview_colors_enabled())
+        self.colors_checkbox.setChecked(_preview_colors_enabled(_config_owner(self)))
         self.colors_checkbox.toggled.connect(self._colors_toggled)
         tools_column.addWidget(self.colors_checkbox, 0, Qt.AlignmentFlag.AlignRight)
         tools_column.addStretch()
@@ -1439,7 +1472,7 @@ class ModelCandidatesDialog(QDialog):
 
         @param checked True for the model's own colours, False for the single tint.
         """
-        _remember_preview_colors(checked)
+        _remember_preview_colors(checked, _config_owner(self))
         if getattr(self, '_path', ''):
             self._start_preview()
 

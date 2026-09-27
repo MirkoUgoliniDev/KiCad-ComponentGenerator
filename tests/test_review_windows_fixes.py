@@ -4,7 +4,6 @@ Ogni regola ha un caso positivo e uno negativo che la distinguono per ragioni
 strutturali: visibile o nascosto dal filtro, dentro o fuori dal riquadro
 scelto, gesto in corso o no, fuoco su un combo o su un'altra parte.
 """
-import pytest
 from PyQt6.QtCore import QBuffer, QByteArray, QIODevice, QPointF, Qt
 from PyQt6.QtGui import QColor, QImage
 from PyQt6.QtTest import QTest
@@ -16,11 +15,6 @@ from kicadgen.gui.review_tools import INFO_POPUP_MARGIN_PX, InfoPopup
 from kicadgen.gui.yolo_review_dialog import (PHOTO_FULL, TOOL_DRAW, TOOL_SELECT,
                                              YoloReviewDialog)
 from kicadgen.services.photo_yolo import detector_classes
-
-
-@pytest.fixture
-def app():
-    return QApplication.instance() or QApplication([])
 
 
 def _yolo(app, proposals):

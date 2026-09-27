@@ -57,10 +57,9 @@ pytest.importorskip("pyvistaqt")
 
 
 @pytest.fixture
-def viewer():
-    from PyQt6.QtWidgets import QApplication
+def viewer(qapp):
     from kicadgen.gui.preview_3d_vtk import Preview3DVtk
-    app = QApplication.instance() or QApplication([])
+    app = qapp
     view = Preview3DVtk()
     view.resize(500, 360)
     view.show()

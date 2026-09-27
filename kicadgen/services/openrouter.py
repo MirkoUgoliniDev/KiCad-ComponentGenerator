@@ -26,6 +26,7 @@ import re
 import threading
 import time
 import urllib.error
+import uuid
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,7 @@ from typing import Any, Optional, Sequence
 from . import credentials
 from .messages import tx
 from ..app_paths import env_files, is_frozen, user_data_dir
+from ..fsutil import replace_file
 
 API_BASE = "https://openrouter.ai/api/v1"
 MODELS_URL = f"{API_BASE}/models"
@@ -475,6 +477,21 @@ def _usage_int(container: Any, key: str) -> int:
     return int(value) if math.isfinite(value) and value > 0 else 0
 
 
+def _cached_prompt_tokens(usage: dict) -> int:
+    """Input tokens served from the model's cache, wherever the provider reports them.
+
+    OpenRouter uses ``prompt_tokens_details.cached_tokens``; DeepSeek's own
+    API reports ``prompt_cache_hit_tokens`` at the top of `usage` (its docs
+    also show it under ``prompt_tokens_details``). Same reading order as
+    `deepseek_pricing.call_cost`; the first source that reports a positive
+    count wins, so one call is never counted twice.
+    """
+    details = usage.get("prompt_tokens_details")
+    return (_usage_int(usage, "prompt_cache_hit_tokens")
+            or _usage_int(details, "prompt_cache_hit_tokens")
+            or _usage_int(details, "cached_tokens"))
+
+
 #: Called once per paid call, from the thread that made it (see
 #: `set_usage_listener`). None when nobody listens.
 _usage_listener = None
@@ -515,8 +532,7 @@ def _record_usage(payload: Any) -> None:
         if isinstance(usage, dict):
             _usage_totals.prompt_tokens += _usage_int(usage, "prompt_tokens")
             _usage_totals.completion_tokens += _usage_int(usage, "completion_tokens")
-            _usage_totals.cached_tokens += _usage_int(
-                usage.get("prompt_tokens_details"), "cached_tokens")
+            _usage_totals.cached_tokens += _cached_prompt_tokens(usage)
             _usage_totals.reasoning_tokens += _usage_int(
                 usage.get("completion_tokens_details"), "reasoning_tokens")
     listener = _usage_listener
@@ -739,13 +755,26 @@ def check_credit(minimum_usd: float = MIN_CREDIT_USD, progress=None,
 
 
 def _parse_price(value: Any) -> float:
-    """Prezzo per token (stringa dall'API) -> dollari per milione di token."""
+    """Prezzo per token (stringa dall'API) -> dollari per milione di token.
+
+    A non-finite price ("nan", "inf") is not a price: it is unknown (NaN, the
+    same marker DeepSeek's models carry) and never free, so the model is not
+    offered as a free one. An absent or unparsable price keeps the historical
+    0.0; the negative sentinels of the "auto" models are 0 as well.
+    """
     try:
         price = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0.0
+    if not math.isfinite(price):
+        return math.nan
     # I modelli "auto" espongono prezzi sentinella negativi: valgono 0.
     return price * 1_000_000 if price > 0 else 0.0
+
+
+def _price_sort_key(price: float) -> tuple:
+    """Sort key for a price: known prices first in ascending order, unknown (NaN) last."""
+    return (0, price) if math.isfinite(price) else (1, 0.0)
 
 
 def _model_from_payload(raw: Any) -> Optional[ModelInfo]:
@@ -823,18 +852,20 @@ def _load_models_cache(ignore_ttl: bool = False) -> Optional[list[dict]]:
 
 
 def _write_models_cache(payload: list[dict]) -> None:
-    """Atomic cache write: a temporary file in the same directory, then os.replace.
+    """Atomic cache write: a temporary file in the same directory, then fsutil.replace_file.
 
     An interrupted write can never leave a truncated cache behind; the parent
-    directory is created when missing.
+    directory is created when missing. The temporary name is unique per write
+    (process id plus a random suffix), so two threads of the same process
+    refreshing the list at once never write into the same temporary file.
     """
     path = _models_cache_path()
-    temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(temporary, "w", encoding="utf-8") as fh:
             json.dump(payload, fh)
-        os.replace(temporary, path)
+        replace_file(temporary, path)
     except OSError:
         # La cache e' un'ottimizzazione: se non si puo' scrivere, pazienza.
         try:
@@ -876,7 +907,8 @@ def list_models(force_refresh: bool = False) -> list[ModelInfo]:
             _write_models_cache(payload)
 
     models = [m for m in (_model_from_payload(raw) for raw in payload) if m is not None]
-    models.sort(key=lambda m: (m.prompt_usd_per_mtok, m.completion_usd_per_mtok, m.id))
+    models.sort(key=lambda m: (_price_sort_key(m.prompt_usd_per_mtok),
+                               _price_sort_key(m.completion_usd_per_mtok), m.id))
     return models
 
 
@@ -1079,7 +1111,7 @@ def call_tool(
             if isinstance(usage, dict) and cost is not None:
                 usage["cost"], usage["cost_source"] = cost, "token_price"
         _record_usage(payload)
-        return tool_arguments(payload, tool["function"]["name"])
+        return tool_arguments(payload, tool["function"]["name"], provider="DeepSeek")
     if has_pdf:
         body["plugins"] = [{"id": "file-parser", "pdf": {"engine": pdf_engine}}]
     # Senza questo flag la risposta porta i token ma non il costo, e il
@@ -1123,7 +1155,7 @@ def call_tool(
         raise OpenRouterError(tx("Connessione a OpenRouter fallita: {reason}",
                                  reason=_safe_error_text(exc.reason))
                               + _diagnostic_context()) from None
-    except ValueError as exc:
+    except ValueError:
         raise OpenRouterError(tx("Risposta non decodificabile da OpenRouter.")
                               + _diagnostic_context()) from None
     except OSError as exc:
@@ -1138,11 +1170,13 @@ def call_tool(
     return tool_arguments(payload, tool["function"]["name"])
 
 
-def tool_arguments(payload: dict, tool_name: str) -> dict:
+def tool_arguments(payload: dict, tool_name: str, provider: str = "OpenRouter") -> dict:
     """@brief Extract explicit object arguments with safe provider diagnostics.
 
     @param payload Decoded provider response; message/prompt bodies are never logged.
     @param tool_name Expected function name.
+    @param provider Display name of the provider that answered, used in the
+        error texts (e.g. "DeepSeek" for its own API).
     @return Parsed argument object, including an explicitly supplied empty object.
     @throws OpenRouterError Missing/empty arguments, invalid JSON/envelope, truncation
         without a usable tool call, or provider error.
@@ -1150,7 +1184,8 @@ def tool_arguments(payload: dict, tool_name: str) -> dict:
     """
     context = _diagnostic_context(payload)
     if not isinstance(payload, dict):
-        raise OpenRouterError(tx("La risposta di OpenRouter non contiene alcun risultato.") + context)
+        raise OpenRouterError(tx("La risposta di {provider} non contiene alcun risultato.",
+                                 provider=provider) + context)
     if payload.get("error"):
         error = payload["error"]
         message = error.get("message") if isinstance(error, dict) else error
@@ -1158,7 +1193,8 @@ def tool_arguments(payload: dict, tool_name: str) -> dict:
 
     choices = payload.get("choices") or []
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-        raise OpenRouterError(tx("La risposta di OpenRouter non contiene alcun risultato.") + context)
+        raise OpenRouterError(tx("La risposta di {provider} non contiene alcun risultato.",
+                                 provider=provider) + context)
 
     message = choices[0].get("message") or {}
     message = message if isinstance(message, dict) else {}
@@ -1178,7 +1214,7 @@ def tool_arguments(payload: dict, tool_name: str) -> dict:
             raise OpenRouterError(tx("Gli argomenti dello strumento non sono JSON valido (atteso oggetto).") + context)
         try:
             decoded = json.loads(arguments)
-        except ValueError as exc:
+        except ValueError:
             raise OpenRouterError(
                 tx("Gli argomenti dello strumento non sono JSON valido.") + context
             ) from None

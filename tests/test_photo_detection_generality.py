@@ -20,7 +20,7 @@ import pytest
 
 from kicadgen.services import photo_global_inventory as inventory
 from kicadgen.services import photo_grounding as grounding
-from kicadgen.services import photo_yolo, photo_yolo_review
+from kicadgen.services import photo_yolo
 from kicadgen.services.photo_heights import (CAN_MIN_DIAMETER_MM, PLAN_SOURCE,
                                               FAMILY_SOURCE, estimate_body_height)
 from kicadgen.services.photo_inventory import _normalized_box
@@ -120,24 +120,6 @@ def test_an_assembly_of_several_proposals_keeps_the_model_envelope():
     [body], _, _ = _global([first, second],
                            [_row('M1', [1, 2], bbox, grouping_basis='assembly', **{'class': 'module'})])
     assert body['rotation_deg'] in (0, 90) and '_edges_measured' not in body
-
-
-def test_crop_review_keeps_the_measured_oblique_geometry_unless_refined():
-    """@brief Stesso contratto nel percorso a ritagli: positivo e negativo."""
-    qfn = _measured(1, 4.0, -2.0, 5.0, 5.0, 45.0)
-    vote = dict(id=1, present=True, confidence='high', kind='ic_qfn', package='QFN-32',
-                package_evidence='leadless square body', rotation_deg=0)
-    kinds = ['generic', 'ic_qfn']
-    kept = photo_yolo_review.apply_review(qfn, vote, [0, 0, 400, 200], (200, 400, 3),
-                                          LENGTH_MM, WIDTH_MM, kinds, lambda _m: None)
-    assert (kept['length_mm'], kept['width_mm'], kept['rotation_deg']) == pytest.approx((5, 5, 45))
-    assert kept['_reported_rotation_deg'] == 0
-    refined = photo_yolo_review.apply_review(
-        qfn, dict(vote, refined_bbox=[qfn['_box'][0], qfn['_box'][1],
-                                      qfn['_box'][0] + .05, qfn['_box'][1] + .05],
-                  bbox_basis='body'),
-        [0, 0, 400, 200], (200, 400, 3), LENGTH_MM, WIDTH_MM, kinds, lambda _m: None)
-    assert refined['rotation_deg'] in (0, 90, 180, 270) and '_edges_measured' not in refined
 
 
 # ── 7: detail grid on both axes, sized in millimetres ────────────────────
@@ -270,15 +252,6 @@ def test_a_seam_rebuilt_weak_body_is_not_opt_in():
     assert photo_yolo.split_ai_candidates([rebuilt]) == ([rebuilt], [])
 
 
-def test_the_crop_review_withholds_unkept_low_confidence_proposals_too():
-    """@brief Anche il percorso a ritagli non paga per le deboli non tenute."""
-    calls = []
-    result = photo_yolo_review.review_yolo_components(
-        np.zeros((100, 200, 3), np.uint8), [_low(1, (.2, .2, .4, .4))], LENGTH_MM, WIDTH_MM,
-        'offline/model', lambda **kw: calls.append(kw), lambda _m: None)
-    assert result == [] and calls == []
-
-
 # ── 1: no sample-specific examples in the photo prompts ──────────────────
 
 #: Tokens that came from the sample board (ESP32-S3 module with RF shield,
@@ -307,8 +280,6 @@ def _photo_prompt_texts():
         json.dumps(grounding.classification_tool(kinds)), captured[0]['system_prompt'],
         json.dumps(captured[0]['tool']), inventory.PROMPT, inventory.PROMPT_ENUMERATE,
         inventory.PROMPT_ENUMERATE_AFTER_EMPTY_DETECTOR, json.dumps(inventory.inventory_tool()),
-        photo_yolo_review.COVERAGE_PROMPT, photo_yolo_review.REVIEW_PROMPT,
-        json.dumps(photo_yolo_review.review_tool(kinds)),
     ]
 
 
@@ -379,13 +350,11 @@ def test_the_global_inventory_estimates_a_missing_height_from_the_plan():
 # ── minor: hand-drawn boxes have a floor in millimetres, not a photo fraction ─
 
 
-def test_a_0402_short_side_can_be_drawn_on_a_large_board():
+def test_a_0402_short_side_can_be_drawn_on_a_large_board(qapp):
     """@brief Positivo e negativo: il minimo e' in mm sulla scheda, qualunque sia la scheda."""
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     pytest.importorskip('PyQt6')
-    from PyQt6.QtWidgets import QApplication
     from kicadgen.gui.yolo_review_dialog import MIN_NEW_BOX_MM, YoloReviewDialog
-    app = QApplication.instance() or QApplication([])  # noqa: F841 - must stay alive
     dialog = YoloReviewDialog(b'', [], 300.0, 200.0, photo_yolo.detector_classes())
     try:
         view = dialog.view
@@ -417,13 +386,12 @@ def test_a_battery_height_follows_the_plan_shape_not_its_size():
 
 
 @pytest.fixture
-def low_dialog():
+def low_dialog(qapp):
     """A review window with one strong proposal and one low-confidence proposal."""
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     pytest.importorskip('PyQt6')
-    from PyQt6.QtWidgets import QApplication
     from kicadgen.gui.yolo_review_dialog import YoloReviewDialog
-    app = QApplication.instance() or QApplication([])
+    app = qapp
     strong = _low(1, (.1, .1, .2, .2), _yolo_confidence=.8, _yolo_review_only=False,
                   _yolo_origin='operating_threshold', _yolo_low_confidence=False)
     weak = _low(2, (.6, .6, .7, .7))

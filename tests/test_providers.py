@@ -102,10 +102,8 @@ def test_a_pdf_is_refused_before_any_deepseek_request(monkeypatch):
 
 # ── GUI: picker filter and balance line ───────────────────────────────────
 
-def test_the_picker_starts_on_the_provider_of_the_current_model(monkeypatch):
-    from PyQt6.QtWidgets import QApplication
+def test_the_picker_starts_on_the_provider_of_the_current_model(qapp, monkeypatch):
     from kicadgen.gui import model_dialog
-    app = QApplication.instance() or QApplication([])  # noqa: F841 - must stay alive
     monkeypatch.setattr(model_dialog.ModelPickerDialog, "_load_models", lambda self, **k: None)
     dialog = model_dialog.ModelPickerDialog("deepseek-api/deepseek-flash")
     try:
@@ -127,10 +125,8 @@ def test_the_picker_starts_on_the_provider_of_the_current_model(monkeypatch):
         dialog.close()
 
 
-def test_the_balance_line_follows_the_provider(monkeypatch):
-    from PyQt6.QtWidgets import QApplication
+def test_the_balance_line_follows_the_provider(qapp, monkeypatch):
     from kicadgen.gui.ai_account import AiAccountLine
-    app = QApplication.instance() or QApplication([])  # noqa: F841 - must stay alive
     line = AiAccountLine(lambda: None, lambda _m: None)
     try:
         line.set_provider("deepseek")
@@ -144,15 +140,13 @@ def test_the_balance_line_follows_the_provider(monkeypatch):
         line.detach()
 
 
-def test_the_balance_line_asks_for_the_provider_at_every_refresh():
+def test_the_balance_line_asks_for_the_provider_at_every_refresh(qapp):
     """User, 27/09: after a DeepSeek run the line still said «Saldo OpenRouter».
 
     The model can change through paths that emit no event (project restore):
     the line reads the provider of the model in use at every refresh.
     """
-    from PyQt6.QtWidgets import QApplication
     from kicadgen.gui.ai_account import AiAccountLine
-    app = QApplication.instance() or QApplication([])  # noqa: F841 - must stay alive
     line = AiAccountLine(lambda: None, lambda _m: None)
     try:
         in_use = ["openrouter"]
@@ -167,7 +161,6 @@ def test_the_balance_line_asks_for_the_provider_at_every_refresh():
         line.detach()
 
 
-from tests.test_photo_inventory_gui import window  # noqa: E402,F401 - fixture condivisa
 
 
 def test_restoring_a_project_model_moves_the_balance_to_its_provider(window):
@@ -315,13 +308,11 @@ def test_a_deepseek_call_is_recorded_with_its_full_identifier(monkeypatch):
     assert sent[0]["model"] == "deepseek-api/deepseek-flash"
 
 
-def test_the_credit_line_splits_the_project_cost_by_provider(tmp_path):
+def test_the_credit_line_splits_the_project_cost_by_provider(qapp, tmp_path):
     """Utente, 27/09: «Costo del progetto: almeno 1.05 USD» accanto al saldo
     DeepSeek sembrava la spesa DeepSeek. La riga dice il totale e la parte di
     ciascun fornitore; con un solo fornitore resta il solo totale."""
-    from PyQt6.QtWidgets import QApplication
     from kicadgen.gui.ai_account import AiAccountLine
-    app = QApplication.instance() or QApplication([])  # noqa: F841 - must stay alive
     _cost_file(tmp_path, [
         {"time": "2026-09-27T08:26:46+00:00", "model": "anthropic/claude-opus-5",
          "cost_usd": 1.05, "prompt_tokens": 1, "completion_tokens": 1},
@@ -438,3 +429,212 @@ def test_a_key_with_blanks_is_refused_before_any_request(monkeypatch):
         with pytest.raises(providers.ProviderError):
             providers.verify_deepseek_key(bad)
     assert providers.key_text_problem("sk-abc123") is None
+
+
+# ── transient DeepSeek failures are retried like OpenRouter's ──────────────
+
+def _deepseek_http_failures(monkeypatch, status, headers=None):
+    """Make every DeepSeek request fail with `status`; return the attempt counter."""
+    import email.message
+    import io
+    import urllib.error
+
+    from kicadgen.services import ai_diagnostics
+    attempts = []
+
+    def fake_urlopen(request, timeout=None):
+        attempts.append(request.full_url)
+        message = email.message.Message()
+        for name, value in (headers or {}).items():
+            message[name] = value
+        raise urllib.error.HTTPError(request.full_url, status, "err", message,
+                                     io.BytesIO(b'{"error": {"message": "x"}}'))
+
+    monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
+    waits = []
+    monkeypatch.setattr(ai_diagnostics, "_sleep", waits.append)
+    call = ai_diagnostics.make_logged_call(
+        lambda: providers.deepseek_request("https://deepseek.invalid/x", {"a": 1}, key="sk-t"),
+        lambda *_a, **_k: None)
+    with pytest.raises(providers.ProviderError) as info:
+        call()
+    return attempts, waits, info.value
+
+
+def test_a_deepseek_rate_limit_is_retried_with_the_requested_wait(monkeypatch):
+    attempts, waits, error = _deepseek_http_failures(monkeypatch, 429, {"Retry-After": "7"})
+    assert len(attempts) == 3
+    assert error.retryable is True and error.retry_after == 7.0
+    assert sum(waits) == pytest.approx(14.0)
+
+
+def test_a_deepseek_server_error_without_retry_after_is_retried(monkeypatch):
+    attempts, _waits, error = _deepseek_http_failures(monkeypatch, 503)
+    assert len(attempts) == 3
+    assert error.retryable is True and error.retry_after is None
+
+
+@pytest.mark.parametrize("status", [400, 401])
+def test_a_deepseek_request_error_is_not_retried(monkeypatch, status):
+    attempts, _waits, error = _deepseek_http_failures(monkeypatch, status, {"Retry-After": "7"})
+    assert len(attempts) == 1
+    assert error.retryable is False and error.retry_after is None
+    assert error.http_status == status
+
+
+def test_an_unreachable_deepseek_is_not_retried_like_openrouter(monkeypatch):
+    import urllib.error
+
+    from kicadgen.services import ai_diagnostics
+    attempts = []
+
+    def fake_urlopen(request, timeout=None):
+        attempts.append(1)
+        raise urllib.error.URLError("down")
+
+    monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(ai_diagnostics, "_sleep", lambda s: None)
+    call = ai_diagnostics.make_logged_call(
+        lambda: providers.deepseek_request("https://deepseek.invalid/x", key="sk-t"),
+        lambda *_a, **_k: None)
+    with pytest.raises(providers.ProviderError) as info:
+        call()
+    assert len(attempts) == 1
+    assert info.value.unreachable is True and info.value.retryable is False
+
+
+# ── block C: S4, S6, S7, S10 ───────────────────────────────────────────────
+
+def _http_error(body: bytes, status=400):
+    """An HTTPError whose body records how many bytes were asked for."""
+    import email.message
+    import io
+    import urllib.error
+
+    class Body(io.BytesIO):
+        asked = []
+
+        def read(self, size=-1):
+            Body.asked.append(size)
+            return super().read(size)
+    stream = Body(body)
+    return urllib.error.HTTPError("https://deepseek.invalid", status, "err",
+                                  email.message.Message(), stream), Body.asked
+
+
+def _deepseek_failing_with(monkeypatch, error):
+    def fake_urlopen(request, timeout=None):
+        raise error
+    monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(providers.ProviderError) as info:
+        providers.deepseek_request("https://deepseek.invalid/x", {"a": 1}, key="sk-test-key-1")
+    return str(info.value)
+
+
+def test_a_deepseek_error_shows_a_fixed_category_never_the_server_text(monkeypatch):
+    """@brief S4: an echoed prompt never reaches the error; a known category does.
+
+    Positive: «rate limit» in the server message becomes that category.
+    Negative: the free text around it (a private prompt echo) is dropped, and
+    the body is read with the 64 KB bound, not whole.
+    """
+    import json
+    body = json.dumps({"error": {"message": "Rate limit reached for PRIVATE PROMPT text"}}).encode()
+    error, asked = _http_error(body, 429)
+    text = _deepseek_failing_with(monkeypatch, error)
+    assert "rate limit" in text and "PRIVATE PROMPT" not in text
+    assert asked == [providers._MAX_ERROR_BODY_BYTES]
+
+    error, _asked = _http_error(json.dumps({"error": {"message": "secret echo"}}).encode())
+    text = _deepseek_failing_with(monkeypatch, error)
+    assert "secret echo" not in text and "HTTP 400" in text
+
+
+def test_a_non_finite_price_is_unknown_never_free():
+    """@brief S6: "nan"/"inf" prices are unknown; ordinary prices are unchanged."""
+    import math
+    assert math.isnan(openrouter._parse_price("nan"))
+    assert math.isnan(openrouter._parse_price("inf"))
+    assert openrouter._parse_price("0") == 0.0
+    model = openrouter._model_from_payload({"id": "v/m", "pricing": {"prompt": "nan",
+                                                                     "completion": "nan"}})
+    assert not model.is_free
+
+
+def test_models_with_unknown_prices_are_listed_after_the_priced_ones(monkeypatch, tmp_path):
+    """@brief S6: NaN prices do not scramble the sort by cost."""
+    import io
+    import json
+
+    class Response(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+    rows = [{"id": "v/unknown", "pricing": {"prompt": "nan", "completion": "nan"}},
+            {"id": "v/dear", "pricing": {"prompt": "0.00001", "completion": "0.00001"}},
+            {"id": "v/cheap", "pricing": {"prompt": "0.000001", "completion": "0.000001"}}]
+    monkeypatch.setattr(openrouter, "MODELS_CACHE_PATH", tmp_path / "models.json")
+    monkeypatch.setattr(openrouter.urllib.request, "urlopen",
+                        lambda *a, **k: Response(json.dumps({"data": rows}).encode()))
+    assert [m.id for m in openrouter.list_models(force_refresh=True)] == [
+        "v/cheap", "v/dear", "v/unknown"]
+
+
+@pytest.mark.parametrize("value, expected", [(True, True), (False, False), ("false", False),
+                                             ("true", False), (1, False), (None, False)])
+def test_the_deepseek_account_is_available_only_on_a_json_true(monkeypatch, value, expected):
+    """@brief S6: a malformed availability never unlocks a paid run."""
+    monkeypatch.setattr(providers, "deepseek_request", lambda url, *a, **k: {
+        "is_available": value, "balance_infos": []})
+    assert providers.deepseek_balance().available is expected
+
+
+@pytest.mark.parametrize("usage, cached", [
+    ({"prompt_tokens": 100, "prompt_cache_hit_tokens": 40}, 40),                  # DeepSeek
+    ({"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 30}}, 30),  # OpenRouter
+    ({"prompt_tokens": 100, "prompt_cache_hit_tokens": 40,
+      "prompt_tokens_details": {"cached_tokens": 40}}, 40),                        # both: once
+    ({"prompt_tokens": 100}, 0),
+])
+def test_cached_tokens_are_counted_once_wherever_they_are_reported(usage, cached):
+    """@brief S7: DeepSeek's top-level cache hits reach the run total, never twice."""
+    openrouter.reset_usage()
+    openrouter._record_usage({"usage": usage})
+    assert openrouter.usage_totals().cached_tokens == cached
+    openrouter.reset_usage()
+
+
+def test_a_deepseek_answer_without_result_names_deepseek(monkeypatch):
+    """@brief S7: the error of an empty DeepSeek answer names DeepSeek, not OpenRouter."""
+    monkeypatch.setattr(providers, "deepseek_request", lambda *a, **k: {"choices": []})
+    with pytest.raises(openrouter.OpenRouterError) as info:
+        openrouter.call_tool("deepseek-api/deepseek-flash", "sys", [], _TOOL)
+    assert "DeepSeek" in str(info.value) and "OpenRouter" not in str(info.value)
+    with pytest.raises(openrouter.OpenRouterError) as info:
+        openrouter.tool_arguments({"choices": []}, "report")
+    assert "OpenRouter" in str(info.value)
+    openrouter.reset_usage()
+
+
+def test_every_models_cache_write_uses_its_own_temporary_and_the_retrying_replace(
+        monkeypatch, tmp_path):
+    """@brief S10: two writes never share a temporary; publishing goes through replace_file.
+
+    Negative: no temporary file is left behind.
+    """
+    import os
+    target = tmp_path / "models.json"
+    monkeypatch.setattr(openrouter, "MODELS_CACHE_PATH", target)
+    sources = []
+
+    def recording_replace(source, destination):
+        sources.append(str(source))
+        os.replace(source, destination)
+    monkeypatch.setattr(openrouter, "replace_file", recording_replace)
+    openrouter._write_models_cache([{"id": "a"}])
+    openrouter._write_models_cache([{"id": "b"}])
+    assert len(sources) == 2 and sources[0] != sources[1]
+    assert openrouter._load_models_cache() == [{"id": "b"}]
+    assert [p.name for p in tmp_path.iterdir()] == ["models.json"]

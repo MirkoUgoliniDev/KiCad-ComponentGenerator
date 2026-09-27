@@ -10,6 +10,10 @@ facce -- vedi kicadgen.cad3d.annotations per i nomi ammessi), costruisce
 il documento ed esporta STEP (sempre) e VRML (best-effort, non fatale se
 fallisce).
 
+Every shipped export (STEP, WRL, preview JSON) is written under a staging
+name and renamed onto its final name only after that export completed, so
+a killed or failed run never leaves a truncated file under a final name.
+
 Classificazione geometrica di facce/spigoli: il corpo e' sempre un
 parallelepipedo assi-allineato (offset_x/y, length/width/height), quindi
 si classificano confrontando le coordinate del centro di massa (facce) o
@@ -840,6 +844,50 @@ def _long_path(path):
     return "\\\\?\\" + path
 
 
+def _staging_path(data, key, final):
+    """@brief Path where one export is written before being published.
+
+    @param data Job JSON; ``staging_paths[key]`` is set by step_generator.
+    @param key ``"step"``, ``"wrl"`` or ``"mesh"``.
+    @param final Final path of that export.
+    @return The parent's staging path, or a sibling with ``.kicadgen-partial``
+        before the extension (kept: FreeCAD picks the STEP exporter from it).
+    """
+    staged = (data.get("staging_paths") or {}).get(key)
+    if staged:
+        return staged
+    root, ext = os.path.splitext(str(final))
+    return root + ".kicadgen-partial" + ext
+
+
+def _publish(staged, final):
+    """@brief Atomically rename a finished export onto its final name.
+
+    @note The rename is the only way an export reaches its final name, so a
+        kill during the write leaves at most a staging file, never a
+        truncated file that looks current. Transient Windows refusals
+        (antivirus, indexer) are retried briefly, as kicadgen.fsutil does.
+    """
+    pause = 0.05
+    for attempt in range(5):
+        try:
+            os.replace(staged, final)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(pause)
+            pause *= 2
+
+
+def _discard(path):
+    """Remove a staging file after a failed export; cleanup never raises."""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 def _save_fcstd(doc, fcstd_path):
     """@brief Salva il documento FreeCAD aggirando MAX_PATH su Windows.
 
@@ -1122,18 +1170,24 @@ def main():
     objects = [obj for obj, _ in colored]
 
     step_colors_exported = False
+    step_staged = _staging_path(data, "step", step_path)
     print(f"KICADGEN_EXPORT_START:{step_path}", flush=True)
     with _StepHeartbeat("step_export"):
         try:
             import Import
             styled = [(obj, getattr(color, "face_colors", None)
                        or [_hex_to_rgb(color)] * len(obj.Shape.Faces)) for obj, color in colored]
-            Import.export(styled, step_path)
+            Import.export(styled, step_staged)
             step_colors_exported = True
-            print(f"KICADGEN_STEP_COLORS_OK:{step_path}", flush=True)
         except Exception as exc:
             _warn("export colori STEP fallito ({exc}); solo geometria", exc=exc)
-            Part.export(objects, step_path)
+            _discard(step_staged)
+            Part.export(objects, step_staged)
+    # Published only now that the export returned: a kill during the write
+    # leaves the staging file, which the parent deletes.
+    _publish(step_staged, step_path)
+    if step_colors_exported:
+        print(f"KICADGEN_STEP_COLORS_OK:{step_path}", flush=True)
     print(f"KICADGEN_STEP_OK:{step_path}", flush=True)
 
     if fcstd_path:
@@ -1188,18 +1242,27 @@ def main():
                         "triangles": [list(f) for f in facets],
                     })
                     counted.add(obj.Name)
-                with open(mesh_path, "w", encoding="utf-8") as fh:
+                mesh_staged = _staging_path(data, "mesh", mesh_path)
+                with open(mesh_staged, "w", encoding="utf-8") as fh:
                     json.dump({"parts": parts, "step_colors_exported": step_colors_exported}, fh)
+                _publish(mesh_staged, mesh_path)
             print(f"KICADGEN_MESH_OK:{mesh_path}")
         except Exception as exc:  # noqa: BLE001 - anteprima e' best-effort
+            _discard(_staging_path(data, "mesh", mesh_path))
             print(f"KICADGEN_MESH_FAILED:{exc}")
 
     if wrl_path:
+        wrl_staged = _staging_path(data, "wrl", wrl_path)
         try:
             with _StepHeartbeat("vrml_export"):
-                _write_vrml(wrl_path, tessellated)
+                _write_vrml(wrl_staged, tessellated)
+                _publish(wrl_staged, wrl_path)
             print(f"KICADGEN_WRL_OK:{wrl_path}")
         except Exception as exc:  # noqa: BLE001 - export VRML e' best-effort
+            # No WRL at all rather than a partial one: the parent removed the
+            # previous WRL before the run, and the footprint references the
+            # STEP, so the library simply ships without a WRL.
+            _discard(wrl_staged)
             print(f"KICADGEN_WRL_FAILED:{exc}")
 
 

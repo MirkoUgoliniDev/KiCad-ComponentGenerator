@@ -5,16 +5,10 @@ tutte le modali successive». Le conferme in fondo alle finestre (Applica,
 Usa il modello selezionato, Annulla, OK) restano scritte: sono la decisione
 della finestra, e il negativo di ogni test lo verifica.
 """
-import pytest
-from PyQt6.QtWidgets import QApplication, QDialogButtonBox, QToolButton
+from PyQt6.QtWidgets import QDialogButtonBox, QToolButton
 
-from tests.test_photo_inventory_gui import window, gui  # noqa: F401
+from tests.test_photo_inventory_gui import gui
 from tests.test_review_windows_fixes import _component, _photo
-
-
-@pytest.fixture
-def app():
-    return QApplication.instance() or QApplication([])
 
 
 def _is_icon_command(button, name):
