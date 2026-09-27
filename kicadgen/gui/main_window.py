@@ -8975,6 +8975,21 @@ class MainWindow(QMainWindow):
             "il modello 3D si rigenera con FreeCAD.")
         self.btn_edit_components_3d.clicked.connect(lambda: self._edit_components())
         toolbar.addWidget(self.btn_edit_components_3d)
+        # «Copia formato» (utente, 2026-09-27): accanto al tipo di contatto,
+        # dove l'utente l'ha indicata. Interruttore: acceso copia e incolla,
+        # spento rigenera una volta sola.
+        self.btn_format_painter_3d = self._workflow_tool_button(
+            "format-painter.svg", "Copia formato",
+            "Accendi, poi clic sul componente giusto per copiarne misure, altezza, "
+            "tipologia, package e modello KiCad; clic sugli altri componenti per "
+            "incollarli. Posizione, orientamento, nome, sigla e colore restano quelli "
+            "di ciascuno. Spegni per rigenerare il modello 3D: FreeCAD, nessuna "
+            "richiesta AI.")
+        self.btn_format_painter_3d.setCheckable(True)
+        self.btn_format_painter_3d.toggled.connect(self._on_format_painter_toggled)
+        toolbar.addWidget(self.btn_format_painter_3d)
+        self._format_source = None
+        self._format_targets = []
         self._refresh_components_editor_button()
 
         # Il tipo di contatto va correggibile da qui: e' guardando il solido
@@ -9062,6 +9077,8 @@ class MainWindow(QMainWindow):
                 lambda row: QTimer.singleShot(0, lambda: self._show_photo_comparison(component_row=row)))
         if hasattr(self.preview_3d, 'component_menu_requested'):
             self.preview_3d.component_menu_requested.connect(self._show_component_menu)
+        if hasattr(self.preview_3d, 'component_clicked'):
+            self.preview_3d.component_clicked.connect(self._on_format_painter_click)
         self.preview_3d.show_pin_numbers = self.chk_pin_numbers.isChecked()
         self.preview_3d.setMinimumHeight(120)
         outer.addWidget(self.preview_3d, 1)
@@ -9743,9 +9760,10 @@ class MainWindow(QMainWindow):
 
     def _refresh_components_editor_button(self) -> None:
         """@brief Offer the hand editor only when there are bodies to edit."""
-        button = getattr(self, "btn_edit_components_3d", None)
-        if button is not None:
-            button.setVisible(bool(self._photo_rows))
+        for name in ("btn_edit_components_3d", "btn_format_painter_3d"):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.setVisible(bool(self._photo_rows))
 
     def _edit_components(self, select_row=None) -> None:
         """@brief Open the hand editor of the mounted bodies.
@@ -9762,6 +9780,87 @@ class MainWindow(QMainWindow):
         self.i18n.retranslate_widgets(dialog)
         dialog.exec()
         dialog.deleteLater()
+
+    def _on_format_painter_toggled(self, checked: bool) -> None:
+        """@brief Start or end the «copia formato» mode of the 3D view.
+
+        @param checked True when the button is switched on.
+        @note Ending the mode applies every paste at once through
+            `_apply_photo_review` (saved choices, FreeCAD only, no AI): one
+            regeneration for all the targets instead of one per click.
+        """
+        preview = getattr(self, "preview_3d", None)
+        if preview is not None:
+            preview.format_painter_active = bool(checked)
+        if checked:
+            self._format_source, self._format_targets = None, []
+            self.statusBar().showMessage(self.i18n.text(
+                "Copia formato: clic sul componente da copiare."))
+            self._format_toast_message(self.i18n.text("Copia formato attiva"),
+                                       self.i18n.text("Clic sul componente da copiare."))
+            return
+        targets, self._format_source, self._format_targets = self._format_targets, None, []
+        if targets:
+            self._format_toast_message(
+                tx("Formato applicato a {n} componenti", n=len(targets)),
+                ", ".join(targets),
+                self.i18n.text("Rigenerazione del modello 3D: FreeCAD, nessuna richiesta AI."))
+            self._apply_photo_review(self._photo_components_from_table())
+            self.statusBar().showMessage(tx("Formato incollato su {n} componenti: modello 3D "
+                                            "rigenerato.", n=len(targets)))
+        else:
+            self.statusBar().clearMessage()
+
+    def _format_toast_message(self, title: str, body: str = "", hint: str = "") -> None:
+        """@brief Show the «copia formato» popup next to the cursor (non-modal, fades away).
+
+        @param title Translated first line.
+        @param body Translated main text.
+        @param hint Translated next-step line.
+        @note User, 2026-09-27: the status bar alone was too discreet. The card
+            is created once and reused: a new message replaces the previous one.
+        """
+        from .toast import Toast
+        toast = getattr(self, "_format_toast", None)
+        if toast is None:
+            toast = self._format_toast = Toast(self, "format-painter.svg")
+        toast.show_message(title, body, hint)
+
+    def _on_format_painter_click(self, row: int) -> None:
+        """@brief Copy the format of the first component clicked, paste it on the next ones.
+
+        @param row Index in `_photo_rows` of the component under the click.
+        """
+        from ..services.component_format import copy_format, paste_format
+        button = getattr(self, "btn_format_painter_3d", None)
+        if button is None or not button.isChecked() or not 0 <= row < len(self._photo_rows):
+            return
+        name = str(self._photo_rows[row].get("name") or "").strip() or str(row + 1)
+        if self._format_source is None:
+            self._format_source = copy_format(self._photo_rows[row])
+            self.statusBar().showMessage(tx(
+                "Formato di {name} copiato: clic sui componenti su cui incollarlo, poi "
+                "spegni l'icona per rigenerare il 3D.", name=name))
+            self._format_toast_message(
+                tx("Formato di {name} copiato", name=name),
+                self.i18n.text("Misure, altezza, tipologia, package e modello KiCad."),
+                self.i18n.text("Clic sui componenti da correggere; ripremi il pennello per "
+                               "applicare."))
+            return
+        self._photo_rows[row] = paste_format(self._photo_rows[row], self._format_source)
+        if name not in self._format_targets:
+            self._format_targets.append(name)
+        self._append_log(tx("Copia formato: {source} -> {name}.",
+                            source=self._format_source.get("source_name") or "?", name=name))
+        self.statusBar().showMessage(tx(
+            "Formato di {source} incollato su: {targets}. Spegni l'icona per rigenerare il 3D.",
+            source=self._format_source.get("source_name") or "?",
+            targets=", ".join(self._format_targets)))
+        self._format_toast_message(
+            tx("Incollato su {name}", name=name),
+            tx("{n} componenti finora: {targets}", n=len(self._format_targets),
+               targets=", ".join(self._format_targets)),
+            self.i18n.text("Ripremi il pennello per applicare."))
 
     #: Correzioni di orientamento offerte dal menu contestuale. Solo multipli
     #: di un quarto di giro: i modelli della libreria KiCad seguono la

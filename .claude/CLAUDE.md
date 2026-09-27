@@ -217,7 +217,8 @@ proportions calibrated axis by axis, Datasheet role and PDF-only-Datasheet, 3D d
 click, view roll arrows, centred window; then points 107-112: inventory prompt with
 package shape separate from function and leads per side, observed leads drawn in 3D,
 cube buttons, pad tooltips, unclassified filter; points 114-115: no silkscreen outline
-around 3D components, OpenCV phases announced) is 5565 passed,
+around 3D components, OpenCV phases announced; points 116-117: «Copia formato» in the 3D
+view with a non-modal popup) is 5582 passed,
 6 skipped, 2 expected failures and 19 subtests, run in two halves (HANDOFF point 113:
 the single-process run can die at random with a native Qt/VTK crash). The last packaging integration was merge
 commit `692ca95` on `main`. Keep these values aligned with HANDOFF.md.

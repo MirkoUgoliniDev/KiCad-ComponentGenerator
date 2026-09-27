@@ -182,6 +182,9 @@ class Preview3DVtk(QtInteractor):
     """@brief Interactive 3D view: the real generated mesh or the parametric approximation."""
 
     component_requested = pyqtSignal(int)
+    #: Clic sinistro fermo su un componente mentre la «copia formato» e' accesa
+    #: (`format_painter_active`): la riga del componente.
+    component_clicked = pyqtSignal(int)
     #: Tasto destro su un componente: indice di riga e punto globale dove
     #: aprire il menu. La vista non sa cosa si possa fare su un componente --
     #: le voci le costruisce la finestra, che ha la tabella e i modelli.
@@ -200,6 +203,11 @@ class Preview3DVtk(QtInteractor):
         """
         self._component_actors = {}
         self._right_press = None
+        #: Modalita' «copia formato» (utente, 2026-09-27): un clic sinistro fermo
+        #: su un componente emette `component_clicked`; spenta, il clic resta
+        #: solo l'inizio di una rotazione, come sempre.
+        self.format_painter_active = False
+        self._left_press = None
         self._menu_served = False
         # Scena mostrata e scene gia' preparate, per chiave d'identita' del file.
         self._mesh_cache = OrderedDict()
@@ -513,7 +521,10 @@ class Preview3DVtk(QtInteractor):
             else:
                 QToolTip.hideText()
         else:
-            self.unsetCursor()
+            if self.format_painter_active:
+                self.setCursor(Qt.CursorShape.CrossCursor)
+            else:
+                self.unsetCursor()
             QToolTip.hideText()
         super().mouseMoveEvent(event)
 
@@ -538,7 +549,7 @@ class Preview3DVtk(QtInteractor):
         if self._on_cube(event):
             event.accept()
             return
-        if (event.button() == Qt.MouseButton.LeftButton
+        if (event.button() == Qt.MouseButton.LeftButton and not self.format_painter_active
                 and self._serve_double_click(event.position())):
             event.accept()
             return
@@ -579,6 +590,8 @@ class Preview3DVtk(QtInteractor):
         if event.button() == Qt.MouseButton.RightButton:
             self._right_press = event.pos()
             self._menu_served = False
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._left_press = event.pos() if self.format_painter_active else None
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):  # noqa: N802 - firma Qt
@@ -600,9 +613,18 @@ class Preview3DVtk(QtInteractor):
             self._cube_press = False
             event.accept()
             return
+        left_start = getattr(self, "_left_press", None)
+        self._left_press = None
         start = getattr(self, "_right_press", None)
         self._right_press = None
         super().mouseReleaseEvent(event)
+        if (event.button() == Qt.MouseButton.LeftButton and left_start is not None
+                and (event.pos() - left_start).manhattanLength() <= _CLICK_TOLERANCE_PX):
+            # Un clic fermo, non una rotazione: la stessa tolleranza del menu.
+            index = self._component_row_at_widget_point(event.pos().x(), event.pos().y())
+            if index is not None:
+                self.component_clicked.emit(index)
+            return
         if event.button() != Qt.MouseButton.RightButton or start is None:
             return
         if (event.pos() - start).manhattanLength() > _CLICK_TOLERANCE_PX:
