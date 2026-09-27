@@ -31,8 +31,10 @@ def test_versioned_schema_and_prompt_distinguish_complete_leads_and_visible_tabs
     # Il prompt ora chiede anche il riferimento asimmetrico, quindi la versione
     # sale: un prompt diverso sotto la stessa versione renderebbe impossibile
     # dire, rileggendo una cache, che cosa era stato davvero chiesto.
-    assert inventory.PROMPT_VERSION == 'global-yolo-inventory-7'
-    assert inventory.SCHEMA_VERSION == 'global-inventory-4'
+    # 27/09: versione 8/5 per leads_by_side e package_confidence (forma separata
+    # dalla funzione), vedi i test in fondo al file.
+    assert inventory.PROMPT_VERSION == 'global-yolo-inventory-8'
+    assert inventory.SCHEMA_VERSION == 'global-inventory-5'
     item = inventory.inventory_tool()['function']['parameters']['properties']['components']['items']
     fields = item['properties']
     assert fields['lead_count']['type'] == ['integer', 'null']
@@ -135,3 +137,71 @@ def test_complete_leads_conversion_preserves_raw_response_and_audit(tmp_path):
     audit = json.loads(paths[0].read_text(encoding='utf-8'))
     assert audit['response'] == before
     assert audit['components'][0]['pin_count_source'] == 'complete_lead_observation'
+
+
+# ── Forma separata dalla funzione (utente, 27/09: i SOT-23 uscivano blocchi) ──
+
+def test_the_prompt_separates_package_shape_from_function():
+    for prompt in (inventory.PROMPT, inventory.PROMPT_ENUMERATE):
+        assert 'NEVER empties package' in prompt
+        assert 'leads_by_side counts the observed ordinary leads' in prompt
+        assert 'package_confidence rates the package alone' in prompt
+        assert 'four orientations' in prompt
+    item = inventory.inventory_tool()['function']['parameters']['properties']['components']['items']
+    assert {'package_confidence', 'leads_by_side'} <= set(item['required'])
+    sides = item['properties']['leads_by_side']
+    assert set(sides['required']) == {'left', 'right', 'top', 'bottom'}
+    assert sides['properties']['left']['type'] == ['integer', 'null']
+
+
+def _sot(**changes):
+    return _body(terminal_count=3, lead_count=3, lead_count_complete=True,
+                 lead_count_confidence='high', package='SOT-23',
+                 terminal_layout='two leads on one long side, one on the opposite',
+                 **changes)
+
+
+def test_an_unknown_function_keeps_a_package_the_shape_supports():
+    """Positive: class unresolved, overall confidence low, package shape certain."""
+    row = _sot(package_confidence='high', leads_by_side=dict(left=2, right=1, top=0, bottom=0))
+    assert inventory._component_valid(row, set())
+    result = inventory._normalize(row, 1, 40, 20, [])
+    assert result['class'] == 'semiconductor_unknown' and result['confidence'] == 'low'
+    assert result['package'] == 'SOT-23' and result['package_confidence'] == 'high'
+    assert result['pins_by_side'] == {'left': 2, 'right': 1}
+
+
+def test_an_ambiguous_shape_still_empties_the_package():
+    """Negative: the package goes when the SHAPE is doubtful, whatever the function."""
+    row = _sot(package_confidence='low', confidence='high')
+    assert inventory._normalize(row, 1, 40, 20, [])['package'] == ''
+
+
+def test_a_row_of_the_previous_schema_keeps_the_previous_rule():
+    legacy = _sot()                                    # no package_confidence, confidence low
+    assert inventory._normalize(legacy, 1, 40, 20, [])['package'] == ''
+    assert inventory._normalize(_sot(confidence='medium'), 1, 40, 20, [])['package'] == 'SOT-23'
+
+
+@pytest.mark.parametrize('sides,why', [
+    (dict(left=2, right=None, top=0, bottom=0), 'a side not observed may carry leads'),
+    (dict(left=2, right=2, top=0, bottom=0), 'does not add up to the complete lead_count'),
+    (dict(left=0, right=0, top=0, bottom=0), 'no lead at all'),
+    (dict(left=2, right=1, top=0), 'a side missing'),
+    (dict(left=2, right=1, top=0, bottom=0, centre=1), 'unknown side'),
+    (dict(left=2.0, right=1, top=0, bottom=0), 'not an integer'),
+    ('2+1', 'not an object'),
+])
+def test_an_incomplete_or_incoherent_side_count_is_not_drawn(sides, why):
+    row = _sot(package_confidence='high', leads_by_side=sides)
+    assert inventory._component_valid(row, set()), why
+    result = inventory._normalize(row, 1, 40, 20, [])
+    assert 'pins_by_side' not in result, why
+    assert result['package'] == 'SOT-23'               # the rest of the row survives
+
+
+def test_without_the_new_fields_nothing_blocks_or_asks_again():
+    """Omitting the refinements never makes a second paid request necessary."""
+    rows = [_sot(), _body(lead_count=None, lead_count_complete=False)]
+    assert inventory.omitted_required_fields({'components': rows}) == []
+    assert all(inventory._component_valid(row, set()) for row in rows)

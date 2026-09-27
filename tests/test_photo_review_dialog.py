@@ -2201,3 +2201,40 @@ def test_choosing_a_row_from_the_list_still_centres_on_it(dialog, app):
     dialog._select_row(1)
     app.processEvents()
     assert view.horizontalScrollBar().value() != before
+
+
+# ── Filtro «Non classificati» (utente, 27/09) ─────────────────────────────
+
+def _undetermined_components(components):
+    return components + [
+        dict(name="Q1", kind="ic", **{"class": "semiconductor_unknown"}, x_mm=0.0, y_mm=0.0,
+             length_mm=3.0, width_mm=2.4, height_mm=1.1, rotation_deg=0.0),
+        dict(name="X1", kind="generic", **{"class": "unknown"}, x_mm=10.0, y_mm=5.0,
+             length_mm=2.0, width_mm=1.0, height_mm=1.0, rotation_deg=0.0),
+        dict(name="C9", kind="capacitor", class_confidence="low", x_mm=-12.0, y_mm=5.0,
+             length_mm=2.0, width_mm=1.2, height_mm=0.8, rotation_deg=0.0)]
+
+
+def test_unclassified_bodies_get_their_own_filter_entry(app, png, components):
+    """Positive: the entry gathers exactly the [?] rows, whatever their kind."""
+    from kicadgen.gui.photo_review_dialog import UNDETERMINED_FILTER
+    widget = PhotoReviewDialog(png, _undetermined_components(components), 40, 20)
+    try:
+        combo = widget.category_filter
+        index = combo.findData(UNDETERMINED_FILTER)
+        assert index == 1                                   # subito dopo «Tutte»
+        assert "(3)" in combo.itemText(index) and UNDETERMINED_LIST_MARKER in combo.itemText(index)
+        combo.setCurrentIndex(index)
+        visible = [widget.component_list.item(i).text() for i in range(widget.component_list.count())
+                   if not widget.component_list.item(i).isHidden()]
+        assert len(visible) == 3
+        assert all(UNDETERMINED_LIST_MARKER in text for text in visible)
+        assert not any("U1" in text or "R1" in text for text in visible)
+    finally:
+        widget.close()
+
+
+def test_without_unclassified_bodies_there_is_no_empty_entry(dialog):
+    """Negative: an entry that would show nothing is not offered."""
+    from kicadgen.gui.photo_review_dialog import UNDETERMINED_FILTER
+    assert dialog.category_filter.findData(UNDETERMINED_FILTER) == -1

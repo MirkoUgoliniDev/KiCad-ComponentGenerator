@@ -36,8 +36,8 @@ def _workflow(window):
 
 
 def _view_tools(window):
-    return [window.chk_pin_numbers, window.btn_pinout_3d, window.btn_fit_3d,
-            window.btn_open_3dshapes]
+    # «Inquadra» e' passato accanto al cubo di navigazione (utente, 27/09).
+    return [window.chk_pin_numbers, window.btn_pinout_3d, window.btn_open_3dshapes]
 
 
 def _bar_widgets(window):

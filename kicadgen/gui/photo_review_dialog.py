@@ -648,6 +648,14 @@ _INFO_ORIGIN = "Origine: centro PCB, X destra, Y basso; rotazione oraria."
 ## out. A body that is both keeps both markers.
 UNDETERMINED_LIST_MARKER = "[?]"
 
+## Data of the category-filter entry that gathers the bodies whose type is
+## undetermined (``type_undetermined``), shown only when there are any (user,
+## 2026-09-27: «se ci sono componenti non classificati deve esserci una voce»).
+## Not a ``kind``: those bodies carry kinds such as "ic" or "generic", so no
+## ordinary category entry could collect them. The angle brackets keep it
+## apart from any spelling a detector can produce.
+UNDETERMINED_FILTER = "<type undetermined>"
+
 
 class _BoardBackdrop(QGraphicsRectItem):
     """@brief Neutral board rectangle shown when the photograph steps back.
@@ -1625,7 +1633,13 @@ class PhotoReviewDialog(QDialog):
         return kind.strip() if isinstance(kind, str) else ""
 
     def _matches_category(self, item, category):
-        """Whether an outline belongs to a category, comparing case-insensitively."""
+        """Whether an outline belongs to a category, comparing case-insensitively.
+
+        UNDETERMINED_FILTER matches the bodies flagged by ``type_undetermined``,
+        the same ones marked UNDETERMINED_LIST_MARKER in the list.
+        """
+        if category == UNDETERMINED_FILTER:
+            return self.type_undetermined(item.component)
         return self._component_category(item.component).casefold() == category.casefold()
 
     def _categories(self):
@@ -1657,9 +1671,16 @@ class PhotoReviewDialog(QDialog):
         """
         previous = self.active_category()
         categories = self._categories()
+        undetermined = sum(1 for component in self._components
+                           if self.type_undetermined(component))
         with QSignalBlocker(self.category_filter):
             self.category_filter.clear()
             self.category_filter.addItem(self._tr("Tutte le categorie"), None)
+            if undetermined:
+                # Subito dopo «tutte»: e' la voce che dice cosa resta da fare.
+                self.category_filter.addItem(
+                    self._tr("Non classificati") + f" {UNDETERMINED_LIST_MARKER} ({undetermined})",
+                    UNDETERMINED_FILTER)
             for category in categories:
                 self.category_filter.addItem(category, category)
             index = self.category_filter.findData(previous) if previous else 0

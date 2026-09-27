@@ -34,6 +34,7 @@ from .measurement_uncertainty import (
 )
 from .process_log import ProcessCancelled, heartbeat_interval
 from ..services.messages import CHILD_WARNING, child_warning_text, tx
+from .lead_sides import local_lead_sides
 
 DEFAULT_FONT_FILE = r"C:\Windows\Fonts\arial.ttf"
 
@@ -790,6 +791,9 @@ def generate_castellated_3d_model(
             "pin_count_confidence": component.pin_count_confidence,
             "pin_count_source": component.pin_count_source,
             "pins_by_side": component.pins_by_side,
+            # Stessi lati nel riferimento locale del costruttore (asse lungo su
+            # X, prima della rotazione): e' da qui che si disegnano i reofori.
+            "lead_sides_local": local_lead_sides(component.pins_by_side, component.rotation),
             "terminal_geometry": component.terminal_geometry,
             "package": component.package,
             "detected_kind": component.detected_kind,
@@ -987,6 +991,7 @@ def _generate_populated_tht(params, body, pins, output_dir, **options):
             "length_mm": c.length, "width_mm": c.width, "height_mm": c.height,
             "rotation_deg": c.rotation, "color_hex": c.color_hex, "marking": c.marking,
             "pin_count": c.pin_count, "pins_by_side": c.pins_by_side,
+            "lead_sides_local": local_lead_sides(c.pins_by_side, c.rotation),
             "pin_count_confidence": c.pin_count_confidence,
             "pin_count_source": c.pin_count_source,
             "terminal_geometry": c.terminal_geometry,

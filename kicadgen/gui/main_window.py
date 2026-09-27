@@ -8892,9 +8892,8 @@ class MainWindow(QMainWindow):
             "pinout-table.svg", "Tabella pinout: numero, nome e funzione di ogni piedino.")
         self.btn_pinout_3d.clicked.connect(self._show_pinout_dialog)
         toolbar.addWidget(self.btn_pinout_3d)
-        self.btn_fit_3d = self._view_tool_button(
-            "view-fit.svg", "Inquadra tutto il modello senza cambiare l'angolo di vista.")
-        toolbar.addWidget(self.btn_fit_3d)
+        # «Inquadra» sta accanto al cubo di navigazione, con gli altri comandi
+        # di vista (utente, 27/09), non piu' nella barra.
         self.btn_open_3dshapes = self._view_tool_button(
             "folder-3d.svg", "Apri la cartella 3dshapes con i file STEP generati.")
         self.btn_open_3dshapes.clicked.connect(self._open_3dshapes_dir)
@@ -9068,7 +9067,6 @@ class MainWindow(QMainWindow):
         outer.addWidget(self.preview_3d, 1)
         # Le viste standard si scelgono dal cubo dentro l'anteprima, che ha
         # preso il posto della riga «Vista: Iso, Sopra, …».
-        self.btn_fit_3d.clicked.connect(self.preview_3d.fit_view)
         self._apply_view_cube_labels()
 
         # Riga di stato del 3D: visibile SOLO per errori e avvisi (scelta
@@ -9245,6 +9243,12 @@ class MainWindow(QMainWindow):
             "top": self.i18n.text("Sopra"), "bottom": self.i18n.text("Sotto"),
             "front": self.i18n.text("Fronte"), "back": self.i18n.text("Retro"),
             "right": self.i18n.text("Destra"), "left": self.i18n.text("Sinistra")})
+        if hasattr(preview, "set_view_cube_tooltips"):
+            preview.set_view_cube_tooltips({
+                "home": self.i18n.text("Vista isometrica iniziale"),
+                "fit": self.i18n.text("Inquadra tutto il modello senza cambiare l'angolo di vista"),
+                "roll_ccw": self.i18n.text("Ruota la vista di 90° in senso antiorario"),
+                "roll_cw": self.i18n.text("Ruota la vista di 90° in senso orario")})
 
     def _set_3d_status(self, text: str, level: str = "info") -> None:
         """@brief Update the 3D status line; show it only for warnings and errors.
@@ -9992,6 +9996,23 @@ class MainWindow(QMainWindow):
             line.setData(_GRID_ITEM, True)
             line.setVisible(self.chk_grid.isChecked())
 
+    def _pad_tooltip(self, number) -> str:
+        """@brief Popup text of one pad of the 2D preview, from the pinout table.
+
+        @param number Pad number as drawn (int or str).
+        @return «Pin N: function» when the pinout table has that pin, «Pin N»
+            otherwise; the same rows the Pinout dialog shows (user, 2026-09-27).
+        @note Pins are matched on their text, so 3 and "3" are the same pin and
+            alphanumeric pins ("A2") work as well.
+        """
+        key = str(number).strip()
+        for entry in self.pinout or ():
+            if isinstance(entry, dict) and str(entry.get("pin", "")).strip() == key:
+                name = str(entry.get("name") or "").strip()
+                if name:
+                    return tx("Pin {number}: {name}", number=key, name=name)
+        return tx("Pin {number}", number=key)
+
     def _draw_preview_castellated(self, p: CastellatedModuleParams) -> None:
         """Anteprima del modulo castellated: corpo, piazzole e quote d'ingombro.
 
@@ -10027,10 +10048,14 @@ class MainWindow(QMainWindow):
             x = placement.x * mm_to_px
             y = placement.y * mm_to_px
 
-            self._add_castellated_pad_shape(p, placement, mm_to_px, pad_pen, pad_brush,
-                                            xs_px, ys_px)
+            copper = self._add_castellated_pad_shape(p, placement, mm_to_px, pad_pen,
+                                                     pad_brush, xs_px, ys_px)
+            tip = self._pad_tooltip(placement.number)
+            if copper is not None:
+                copper.setToolTip(tip)
 
             number = self.preview_scene.addSimpleText(placement.number)
+            number.setToolTip(tip)
             number.setBrush(QBrush(QColor(BASE)))
             font = number.font()
             font.setPointSizeF(max(6.0, min(w, h) * 0.45))
@@ -10092,7 +10117,7 @@ class MainWindow(QMainWindow):
                 hole.setZValue(2)
             xs_px.extend([x - w / 2, x + w / 2])
             ys_px.extend([y - h / 2, y + h / 2])
-            return
+            return copper
         w, h = placement.width * mm_to_px, placement.height * mm_to_px
         x, y = placement.x * mm_to_px, placement.y * mm_to_px
         if placement.style == CONTACT_THROUGH_HOLE:
@@ -10105,14 +10130,17 @@ class MainWindow(QMainWindow):
             if d > 0:
                 hole = self.preview_scene.addEllipse(x - d / 2, y - d / 2, d, d, hole_pen, hole_brush)
                 hole.setZValue(2)
+            copper = ring
         else:
             item = QGraphicsRectItem(x - w / 2, y - h / 2, w, h)
             item.setPen(pen)
             item.setBrush(brush)
             item.setZValue(1)
             self.preview_scene.addItem(item)
+            copper = item
         xs_px.extend([x - w / 2, x + w / 2])
         ys_px.extend([y - h / 2, y + h / 2])
+        return copper
 
     def _preview_params(self):
         """@brief Parameters the 2D preview draws, or None when there are none.
@@ -10197,12 +10225,14 @@ class MainWindow(QMainWindow):
                 item = QGraphicsEllipseItem(x - r, y - r, 2 * r, 2 * r)
             item.setPen(pad_pen)
             item.setBrush(pad_brush)
+            item.setToolTip(self._pad_tooltip(pin))
             self.preview_scene.addItem(item)
 
             # Numero del pin sul pad: scuro sul blu del pad, e insieme alla
             # tabella pinout rende verificabile la corrispondenza con il
             # datasheet senza aprire KiCad.
             number = self.preview_scene.addSimpleText(str(pin))
+            number.setToolTip(item.toolTip())
             number.setBrush(QBrush(QColor(BASE)))
             font = number.font()
             font.setPointSizeF(max(6.0, r * 0.55))
@@ -10277,9 +10307,11 @@ class MainWindow(QMainWindow):
             item.setRotation(pin.rotation_deg)
             item.setPen(pad_pen)
             item.setBrush(pad_brush)
+            item.setToolTip(self._pad_tooltip(pin.number))
             self.preview_scene.addItem(item)
             xs.append(x); ys.append(y)
             number = self.preview_scene.addSimpleText(str(pin.number))
+            number.setToolTip(item.toolTip())
             number.setBrush(QBrush(QColor(BASE)))
             font = number.font(); font.setPointSizeF(max(6.0, min(w, h) * .45)); font.setBold(True)
             number.setFont(font)

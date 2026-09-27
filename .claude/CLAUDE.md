@@ -214,8 +214,11 @@ HANDOFF.md points 71-83; then points 84-91: medium/low audit fixes, STEP preview
 loader, per-side hole provenance, AI recount of self-contradictory sides, Qt buttons
 in the chosen language; 2026-09-27, points 93-105: Piazzole label, photos with other
 proportions calibrated axis by axis, Datasheet role and PDF-only-Datasheet, 3D double
-click, view roll arrows, centred window) is 5509 passed,
-6 skipped, 2 expected failures and 19 subtests. The last packaging integration was merge
+click, view roll arrows, centred window; then points 107-112: inventory prompt with
+package shape separate from function and leads per side, observed leads drawn in 3D,
+cube buttons, pad tooltips, unclassified filter) is 5572 passed,
+6 skipped, 2 expected failures and 19 subtests, run in two halves (HANDOFF point 113:
+the single-process run can die at random with a native Qt/VTK crash). The last packaging integration was merge
 commit `692ca95` on `main`. Keep these values aligned with HANDOFF.md.
 
 Eseguire la suite dalla radice del repository:
