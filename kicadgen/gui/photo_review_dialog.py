@@ -44,6 +44,15 @@ The inventory's global ``uncertainties``, carried on every component as
 ``model_uncertainties()`` and the ``uncertainties_button``; they are the
 model's prose and are displayed as plain text, as data, never as
 instructions.
+
+Bodies the vision model added with no detector proposal behind them carry
+``_ai_only_excluded`` (HANDOFF 141): True means "proposed but not selected".
+They are drawn weak and dashed (AI_ONLY_EXCLUDED_COLOR, the tint of the weak
+proposals of «Corpi rilevati»), can be kept with ``keep_button`` / key T
+(``toggle_keep``), and any edit the user makes to one keeps it, as a touched
+proposal is kept in the detector review. Apply emits only the kept bodies
+(``kept_components``); the ones left out stay readable through
+``left_out_components`` so the caller can offer them again.
 """
 
 from __future__ import annotations
@@ -657,6 +666,45 @@ UNDETERMINED_LIST_MARKER = "[?]"
 ## apart from any spelling a detector can produce.
 UNDETERMINED_FILTER = "<type undetermined>"
 
+## Outline of a body the vision model added with no detector proposal and that
+## nobody has kept yet (``_ai_only_excluded`` True, HANDOFF 141). Same tint as
+## the weak proposals of «Corpi rilevati» (yolo_review_dialog.WEAK_COLOR) and
+## dashed like them: the two windows speak one visual language for «shown,
+## but not chosen». Copied rather than imported, so this dialog keeps
+## depending on PyQt6 only. Light enough for the 3:1 floor against
+## BOARD_BACKDROP_COLOR, and the dash keeps it distinct for anyone who does not
+## tell the tints apart.
+AI_ONLY_EXCLUDED_COLOR = "#f9e2af"
+
+## Fill alpha of such an outline: lower than an ordinary one, it is not part
+## of the inventory until kept.
+AI_ONLY_EXCLUDED_FILL_ALPHA = 6
+
+## Second paragraph of the «Come si usa» popup: AI-only bodies are opt-in.
+_INFO_AI_ONLY = (
+    "I contorni gialli tratteggiati sono corpi aggiunti dal solo modello, senza una "
+    "proposta del rilevatore: li vedi, ma restano fuori dalla tabella e dal 3D finché "
+    "non li tieni (T). Spostarne, ridimensionarne o modificarne uno vale come tenerlo.")
+
+
+def ai_only_proposal(component) -> bool:
+    """@brief Whether a body was added by the vision model alone (no detector proposal).
+
+    @param component Photo component dict.
+    @return True when the inventory marked it with ``_ai_only_excluded``,
+        whatever the current decision: the key exists only on those bodies.
+    """
+    return isinstance(component, dict) and "_ai_only_excluded" in component
+
+
+def ai_only_excluded(component) -> bool:
+    """@brief Whether an AI-only body is still left out (proposed, not selected).
+
+    @param component Photo component dict.
+    @return True while nobody has kept it: it must not reach the table nor the 3D.
+    """
+    return isinstance(component, dict) and component.get("_ai_only_excluded") is True
+
 
 class _BoardBackdrop(QGraphicsRectItem):
     """@brief Neutral board rectangle shown when the photograph steps back.
@@ -1052,6 +1100,15 @@ class PhotoReviewDialog(QDialog):
         self.delete_button = tool_button(
             "delete.svg", "Elimina selezionato", "Canc",
             "Toglie il componente scelto dall'inventario.", tr=tr)
+        # Tieni (HANDOFF 141): solo per i corpi aggiunti dal solo modello, che
+        # partono esclusi. Stessa icona, tasto e ruolo del «Tieni» di «Corpi
+        # rilevati»: una scelta, non un disegno.
+        self.keep_button = tool_button(
+            "tool-select.svg", "Tieni o lascia il corpo aggiunto dal solo modello", "T",
+            "I corpi aggiunti dal solo modello (gialli tratteggiati) partono esclusi: "
+            "tenuti, vanno nella tabella e nel 3D.", checkable=True, tr=tr)
+        self.keep_button.setEnabled(False)
+        self.keep_button.clicked.connect(lambda _checked=False: self.toggle_keep())
         self.zoom_out_button = tool_button("zoom-out.svg", "Zoom indietro", "-", tr=tr)
         self.zoom_label = QLabel()
         self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1088,7 +1145,7 @@ class PhotoReviewDialog(QDialog):
         self.info_button.clicked.connect(lambda: self.info_popup.toggle_under(self.info_button))
         toolbar = QHBoxLayout()
         toolbar.setSpacing(4)
-        for widget in (self.add_button, self.delete_button, toolbar_divider(),
+        for widget in (self.add_button, self.delete_button, self.keep_button, toolbar_divider(),
                        self.zoom_out_button, self.zoom_label, self.zoom_in_button,
                        self.fit_button, toolbar_divider(), self.photo_button,
                        self.details_button, self.uncertainties_button):
@@ -1124,6 +1181,12 @@ class PhotoReviewDialog(QDialog):
         count_font.setBold(True)
         self.count_label.setFont(count_font)
         sidebar.addWidget(self.count_label)
+        # Quanti corpi solo-AI restano fuori (HANDOFF 141): visibile solo se
+        # ce ne sono, come il riepilogo di «Corpi rilevati».
+        self.ai_only_label = QLabel()
+        self.ai_only_label.setWordWrap(True)
+        self.ai_only_label.hide()
+        sidebar.addWidget(self.ai_only_label)
         # Category filter directly above the list: on an inventory of dozens
         # of bodies, looking for "the capacitors" must not mean reading every
         # row. The vocabulary is taken from the components themselves, never
@@ -1310,8 +1373,83 @@ class PhotoReviewDialog(QDialog):
         """@brief Return an independent snapshot of the current working inventory.
 
         @return Deep copy of the components; edits to it never reach the dialog.
+        @note Includes the AI-only bodies still left out (``ai_only_excluded``):
+              this is the working copy, not what Apply emits
+              (``kept_components``).
         """
         return deepcopy(self._components)
+
+    def kept_components(self) -> list[dict]:
+        """@brief The bodies Apply hands over: every body except the AI-only ones left out.
+
+        @return Detached list, working-copy order.
+        """
+        return [deepcopy(c) for c in self._components if not ai_only_excluded(c)]
+
+    def left_out_components(self) -> list[dict]:
+        """@brief AI-only bodies nobody kept: proposed, not selected.
+
+        @return Detached list, working-copy order. The caller keeps them aside
+            (not in the table nor in the 3D) so that a later review can offer
+            them again instead of losing them silently.
+        """
+        return [deepcopy(c) for c in self._components if ai_only_excluded(c)]
+
+    def toggle_keep(self, index=None):
+        """@brief Keep, or leave out again, a body the vision model added alone.
+
+        @param index Row of the body; None for the selected one.
+        @return True when the body is now kept, False when left out, None when
+            it is not an AI-only body (nothing changes).
+        @note Same contract as «Tieni» in «Corpi rilevati»: keeping is the
+              reviewer's decision of presence. ``_ai_only_excluded`` becomes
+              False (kept) or True (left out); the key stays, so the choice
+              can be reversed in this and in any later review.
+        """
+        if index is None:
+            item = self._selected_item()
+        else:
+            item = self._items[index] if 0 <= index < len(self._items) else None
+        if item is None or not ai_only_proposal(item.component):
+            return None
+        keep = ai_only_excluded(item.component)
+        item.component["_ai_only_excluded"] = not keep
+        self._ai_only_changed(item)
+        return keep
+
+    def _keep_touched(self, item):
+        """An edit is a look: an AI-only body the user moves, resizes or edits is kept.
+
+        Same rule as `yolo_review_dialog.mark_manual`: whoever changed it has
+        looked at it, so it no longer waits for a decision.
+        """
+        if ai_only_excluded(item.component):
+            item.component["_ai_only_excluded"] = False
+            self._ai_only_changed(item)
+
+    def _ai_only_changed(self, item):
+        self._refresh_item(item)
+        self._refresh_ai_only_summary()
+        self._sync_keep_button()
+
+    def _sync_keep_button(self):
+        """«Tieni» only for an AI-only body; pressed when that body is kept."""
+        selected = self._selected_item()
+        proposal = selected is not None and ai_only_proposal(selected.component)
+        with QSignalBlocker(self.keep_button):
+            self.keep_button.setEnabled(proposal)
+            self.keep_button.setChecked(proposal and not ai_only_excluded(selected.component))
+
+    def _refresh_ai_only_summary(self):
+        """Say how many AI-only bodies there are and how many stay out of the table and 3D."""
+        total = sum(1 for c in self._components if ai_only_proposal(c))
+        left_out = sum(1 for c in self._components if ai_only_excluded(c))
+        self.ai_only_label.setVisible(total > 0)
+        if total:
+            self.ai_only_label.setText(self._tr(
+                "Aggiunti dal solo modello: {total}. Ne tieni {kept}; {left_out} restano fuori "
+                "dalla tabella e dal 3D (T per tenerli).").format(
+                    total=total, kept=total - left_out, left_out=left_out))
 
     def showEvent(self, event):
         """@brief Fit the whole photo the first time the editor is shown."""
@@ -1482,6 +1620,7 @@ class PhotoReviewDialog(QDialog):
             ("=", lambda: self.view.zoom(ZOOM_STEP)),
             ("-", lambda: self.view.zoom(1 / ZOOM_STEP)),
             ("P", self.cycle_photo_state),
+            ("T", self.toggle_keep),
         )
         self._shortcuts = []
         for key, slot in bindings:
@@ -1503,6 +1642,7 @@ class PhotoReviewDialog(QDialog):
             (tr("Tasto centrale"), tr("Sposta la vista")),
             ("+  -  F", tr("Zoom avanti, indietro, foto intera")),
             ("P", tr("Foto intera, attenuata, nascosta")),
+            ("T", tr("Tieni o lascia il corpo aggiunto dal solo modello")),
             (tr("Doppio clic"), tr("Confronta i modelli 3D KiCad del componente")),
         ]
         table = "".join(
@@ -1510,6 +1650,7 @@ class PhotoReviewDialog(QDialog):
             "<td style='padding:2px 0'>" + escape(text) + "</td></tr>" for key, text in rows)
         return ("<p style='margin:0 0 8px 0'><b>" + escape(tr("Come si usa")) + "</b></p>"
                 "<p style='margin:0 0 8px 0'>" + escape(tr(_INFO_INTRO)) + "</p>"
+                "<p style='margin:0 0 8px 0'>" + escape(tr(_INFO_AI_ONLY)) + "</p>"
                 "<table>" + table + "</table>"
                 "<p style='margin:8px 0 0 0'>" + escape(tr(_INFO_ORIGIN)) + "</p>")
 
@@ -1525,6 +1666,13 @@ class PhotoReviewDialog(QDialog):
                    (UNDETERMINED_TYPE_COLOR, tr("Viola") + f" {UNDETERMINED_LIST_MARKER}: "
                     + tr("tipo non stabilito")),
                    ("#ef5350", tr("Rosso: fuori PCB (prevale)")))
+        # Only when the inventory carries AI-only bodies: the legend explains
+        # what is on screen, and a review cannot create one (a drawn body is
+        # the user's, not the model's).
+        if any(ai_only_proposal(c) for c in self._components):
+            entries += ((AI_ONLY_EXCLUDED_COLOR,
+                         tr("Giallo tratteggiato: aggiunto dal solo modello, escluso finché "
+                            "non lo tieni")),)
         dots = " &nbsp; ".join(
             f"<span style='white-space:nowrap'><span style='color:{color}'>&#9679;</span>"
             f"&nbsp;{escape(text)}</span>"
@@ -1551,6 +1699,7 @@ class PhotoReviewDialog(QDialog):
         category (see ``_apply_filter``): the label answers "how many are of
         this category", not "how many rows are on screen".
         """
+        self._refresh_ai_only_summary()
         total = len(self._items)
         category = self.active_category()
         if category is None:
@@ -1783,6 +1932,7 @@ class PhotoReviewDialog(QDialog):
         self.form_widget.setEnabled(selected is not None)
         self.parameters_button.setEnabled(selected is not None)
         self.delete_button.setEnabled(selected is not None)
+        self._sync_keep_button()
         self.model_button.setEnabled(selected is not None and self._match_worker is None)
         if selected:
             self._reload_fields()
@@ -1914,6 +2064,10 @@ class PhotoReviewDialog(QDialog):
 
     def _warnings(self, item):
         warnings = []
+        if ai_only_excluded(item.component):
+            warnings.append(self._tr(
+                "Aggiunto dal solo modello, senza una proposta del rilevatore: escluso dalla "
+                "tabella e dal 3D finché non lo tieni (T)."))
         if not self.photo_rect.adjusted(-1e-7, -1e-7, 1e-7, 1e-7).contains(item.photo_bounds()):
             warnings.append(self._tr("Fuori dai bordi PCB: verificare posizione e dimensioni."))
         if self.type_undetermined(item.component):
@@ -1968,16 +2122,23 @@ class PhotoReviewDialog(QDialog):
         # verificare»; poi gli altri avvisi. Il testo invece non ha questo
         # limite: warning_label e tooltip elencano TUTTE le righe che valgono,
         # quindi un corpo fuori PCB e senza tipo le mostra entrambe.
-        color = QColor("#ef5350" if outside else UNDETERMINED_TYPE_COLOR if undetermined
+        # Un corpo solo-AI escluso non fa parte dell'inventario finche' non lo
+        # si tiene: il suo contorno dice prima di tutto questo (tenue e
+        # tratteggiato), gli altri avvisi restano nel testo.
+        excluded = ai_only_excluded(item.component)
+        color = QColor(AI_ONLY_EXCLUDED_COLOR if excluded else "#ef5350" if outside
+                       else UNDETERMINED_TYPE_COLOR if undetermined
                        else "#ffad33" if warnings else "#40dc80")
         # The status pen keeps its colour when selected: the selection is
         # shown by the wide halo behind it, the thicker line and the fill.
         pen = QPen(color, SELECTED_PEN_WIDTH_PX if item.isSelected() else UNSELECTED_PEN_WIDTH_PX)
         pen.setCosmetic(True)
+        if excluded:
+            pen.setStyle(Qt.PenStyle.DashLine)
         item.setPen(pen)
         item.halo.setVisible(item.isSelected())
         fill = QColor(color)
-        fill.setAlpha(60 if item.isSelected() else 15)
+        fill.setAlpha(60 if item.isSelected() else AI_ONLY_EXCLUDED_FILL_ALPHA if excluded else 15)
         item.setBrush(QBrush(fill))
         # Fra rettangoli sovrapposti il clic va al PIU' PICCOLO: sopra i piu'
         # piccoli, a qualunque posto dell'elenco (utente, 2026-09-24: una
@@ -1992,6 +2153,7 @@ class PhotoReviewDialog(QDialog):
         item.number.setText(str(index + 1))
         name = item.component.get("name") or item.component.get("kind") or self._tr("Componente")
         text = (f"{index + 1}. {name}"
+                + (" [" + self._tr("escluso") + "]" if excluded else "")
                 + (f" {UNDETERMINED_LIST_MARKER}" if undetermined else "")
                 + (" [!]" if warnings else ""))
         self.component_list.item(index).setText(text)
@@ -2045,6 +2207,7 @@ class PhotoReviewDialog(QDialog):
         item.component.pop("terminal_geometry", None)
         item.component.pop("model_match", None)
         item.component.pop("model_selection", None)
+        self._keep_touched(item)
         if "_box" in item.component:
             bounds = item.photo_bounds()
             item.component["_box"] = (
@@ -2115,6 +2278,7 @@ class PhotoReviewDialog(QDialog):
         if value == float(item.component.get(key, 0 if key == "rotation_deg" else 1)):
             return
         item.component[key] = value
+        self._keep_touched(item)
         if key == "height_mm":
             # Scritta a mano: da qui e' una lettura dell'utente, non una stima.
             mark_height_measured(item.component)
@@ -2130,6 +2294,7 @@ class PhotoReviewDialog(QDialog):
             value = self.text_fields[key].text()
             if value != str(item.component.get(key, "")):
                 item.component[key] = value
+                self._keep_touched(item)
                 if key == 'kind':
                     item.component.pop('model_match', None)
                     item.component.pop('model_selection', None)
@@ -2191,6 +2356,7 @@ class PhotoReviewDialog(QDialog):
             if not same_failure:
                 item.component['model_match'] = deepcopy(report)
             item.component['model_selection'] = selection
+            self._keep_touched(item)
         self.model_status.setText(tx("Candidati pronti. Premi Applica correzioni per salvare le scelte."))
         self._refresh_item(item)
 
@@ -2394,6 +2560,9 @@ class PhotoReviewDialog(QDialog):
 
         @note Text still being typed is committed first, so an Apply
               without a focus change loses nothing; a second call is a no-op.
+        @note Only the kept bodies are emitted (``kept_components``): an
+              AI-only body left out never reaches the table nor the 3D. The
+              caller reads ``left_out_components`` to keep them aside.
         """
         if self._applied:
             return
@@ -2401,5 +2570,5 @@ class PhotoReviewDialog(QDialog):
         self._commit_pending_text()
         self._applied = True
         self._closing = True
-        self.components_applied.emit(self.get_components())
+        self.components_applied.emit(self.kept_components())
         super().accept()

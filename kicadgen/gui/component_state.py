@@ -40,7 +40,8 @@ MEASURED_HEIGHT_SOURCES = ("user", "datasheet", "measured")
 #: Keys of a castellated side as stored in `MainWindow._sides`.
 SIDE_KEYS = ("edge", "count", "pitch_mm", "offset_mm", "first_pin", "reverse", "contact_style",
              "half_hole_diameter_mm", "through_hole_drill_mm",
-             "half_hole_diameter_declared", "through_hole_drill_declared")
+             "half_hole_diameter_declared", "through_hole_drill_declared",
+             "pad_length_mm", "pad_width_mm", "pad_length_declared", "pad_width_declared")
 
 
 class _Observable:
@@ -178,7 +179,9 @@ def normalised_side(side: dict | None, default_style: str | None = None) -> dict
     @param side Extracted or serialised side; missing keys take the table's
         defaults (left edge, 2 contacts, 2.54 mm pitch, first pin 1). The
         per-side hole sizes (`half_hole_diameter_mm`, `through_hole_drill_mm`)
-        stay None when the side does not declare them (2026-09-26).
+        stay None when the side does not declare them (2026-09-26), and so do
+        the per-side pad sizes (`pad_length_mm`, `pad_width_mm`, 2026-09-28):
+        a side without them uses the module-wide pad fields, as before.
     @param default_style Contact style used when the side declares none.
         None (the default) keeps the style UNKNOWN: since 2026-09-26 a style
         that nobody observed is asked to the user, never filled in.
@@ -205,11 +208,19 @@ def normalised_side(side: dict | None, default_style: str | None = None) -> dict
                 # o un progetto salvato prima di questa chiave restano stime,
                 # che il generatore puo' ridurre dichiarandolo (26/09).
                 half_hole_diameter_declared=side.get("half_hole_diameter_declared") is True,
-                through_hole_drill_declared=side.get("through_hole_drill_declared") is True)
+                through_hole_drill_declared=side.get("through_hole_drill_declared") is True,
+                # Piazzole del lato (28/09): stessa regola dei fori. Dichiarate
+                # solo se lette o ricavate dai documenti (o scritte
+                # dall'utente); una stima il generatore la riduce se fa
+                # toccare due contatti, e lo scrive nelle note.
+                pad_length_mm=_optional_size(side.get("pad_length_mm")),
+                pad_width_mm=_optional_size(side.get("pad_width_mm")),
+                pad_length_declared=side.get("pad_length_declared") is True,
+                pad_width_declared=side.get("pad_width_declared") is True)
 
 
 def _optional_size(value):
-    """A declared hole size in mm (0.01 mm steps), or None when not declared or invalid."""
+    """A per-side hole or pad size in mm (0.01 mm steps), or None when absent or invalid."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     number = round(float(value), 2)

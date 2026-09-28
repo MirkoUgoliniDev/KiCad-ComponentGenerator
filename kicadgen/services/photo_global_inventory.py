@@ -1003,8 +1003,8 @@ _INSIDE_FRACTION = .5
 def contradicted_by_detections(rows, safe, boxes, margin=(0.0, 0.0), enumerating=False):
     """@brief Undo or flag AI rows that the local detections contradict, never the detections.
 
-    Two structural checks, both about what the photo's detector saw, not about
-    names, classes or sizes (HANDOFF 126, rules G1 and G3):
+    Three structural checks, all about what the photo's detector saw, not about
+    names, classes or sizes (HANDOFF 126, rules G1 and G3; HANDOFF 141):
 
     - Envelope exclusivity (groups). A row that merges several proposals
       claims to be ONE physical outline. If that outline swallows another
@@ -1015,15 +1015,19 @@ def contradicted_by_detections(rows, safe, boxes, margin=(0.0, 0.0), enumerating
       applied and its proposals return as individual bodies. A real module
       that accounts for everything it carries is unaffected.
     - Nested AI-only body. A row with no source proposal that lies at least
-      half inside ONE body backed by the detector is most likely the same body
-      counted twice -- but it may also be a part the detector missed on a
-      module whose box it sits in. It is therefore KEPT as a doubt (low
-      presence and class, with the reason), never deleted: a duplicate inside
-      another body adds no footprint, a lost part may collide. The opposite
-      direction (an AI row containing detected bodies: heatsink, shield,
-      display) is left alone, because stacking and duplication cannot be told
-      apart from the outline alone. Never applied between two AI-only rows,
-      never when the model enumerated the bodies itself.
+      half inside ONE body backed by the detector is DISCARDED (user decision
+      2026-09-28, HANDOFF 141: «scartati se dentro un altro corpo»): it is not
+      returned, and a note says which body it sat in. Decisions that named it
+      are dropped, so a proposal they claimed comes back as an original. The
+      opposite direction (an AI row containing detected bodies: heatsink,
+      shield, display) is not a nesting and is judged by the next rule.
+    - Every other AI-only row is PROPOSED BUT NOT SELECTED: it is returned
+      and listed in ``excluded``; the caller marks it ``_ai_only_excluded``
+      and it stays out of the table and the 3D until a person keeps it in the
+      photo review. The detector did not see it, so only an eye can tell a
+      body it missed (a real inductor) from a phantom.
+      Neither rule is applied between two AI-only rows, nor when the model
+      enumerated the bodies itself (no proposals: nothing is AI-only).
 
     @param rows Rows retained by _validate (normalized boxes).
     @param safe Candidate decisions retained by _validate.
@@ -1031,11 +1035,12 @@ def contradicted_by_detections(rows, safe, boxes, margin=(0.0, 0.0), enumerating
     @param margin (x, y) edge uncertainty in normalized units, used to erode
         a group outline so that a neighbour it merely grazes is not «inside».
     @param enumerating True when no proposals were sent.
-    @return (rows, safe, notes, reasons, doubts): kept rows; decisions without
-        those of dropped groups (so their proposals are restored as
+    @return (rows, safe, notes, reasons, excluded): kept rows (without the
+        discarded nested AI-only rows); decisions without those of dropped
+        groups and discarded rows (so their proposals are restored as
         originals); human-readable notes for the log and the audit;
         {candidate id: reason} for the restored proposals; {component_id:
-        reason} for the rows kept as doubts.
+        reason} for the AI-only rows proposed but not selected.
     @note The outcomes are notes, not _Issue errors on purpose: an error blocks
         the response cache, and a verdict of these checks must not make every
         later run pay again for the same answer.
@@ -1064,9 +1069,9 @@ def contradicted_by_detections(rows, safe, boxes, margin=(0.0, 0.0), enumerating
                         if i not in sources and d.get('component_id') != row['component_id']}
                 continue
         kept.append(row)
-    doubts = {}
+    excluded = {}
     if enumerating:
-        return kept, safe, notes, reasons, doubts
+        return kept, safe, notes, reasons, excluded
     # Hosts: rows that stand on a detection, and proposals that will come back
     # as originals (no retained decision). Rejected proposals are not bodies.
     # A malformed row kept as a generic envelope has no sources and is judged
@@ -1077,17 +1082,27 @@ def contradicted_by_detections(rows, safe, boxes, margin=(0.0, 0.0), enumerating
     hosts += [(f'proposal {i}', box) for i, box in boxes.items()
               if i not in rejected and (i not in safe or (
                   safe[i].get('status') == 'uncertain' and safe[i].get('component_id') is None))]
+    retained = []
     for row in kept:
         if not row['source_candidate_ids']:
             host = next((name for name, box in hosts
                          if covered_fraction(row['bbox'], box) >= _INSIDE_FRACTION), None)
             if host is not None:
+                # Scartato, non piu' dubbio (utente, 28/09, HANDOFF 141): un
+                # corpo dentro un corpo rilevato non aggiunge ingombro, e nella
+                # corsa reale erano quasi tutti fantasmi (tre dentro un SOIC).
                 note = (f"component {row['component_id']}: no detector proposal and at least "
-                        f'half inside {host}; probably the same body counted twice, kept as a '
-                        'doubt')
+                        f'half inside {host}; discarded as the same body counted twice')
                 notes.append(note)
-                doubts[row['component_id']] = note
-    return kept, safe, notes, reasons, doubts
+                safe = {i: d for i, d in safe.items()
+                        if d.get('component_id') != row['component_id']}
+                continue
+            excluded[row['component_id']] = (
+                f"component {row['component_id']}: added by the model with no detector "
+                'proposal; proposed but not selected, kept out of the table and the 3D '
+                'until kept in the photo review')
+        retained.append(row)
+    return retained, safe, notes, reasons, excluded
 
 
 #: Separatore fra piu' motivi dentro UNA sola riga di avanzamento. Il filtro
@@ -1646,10 +1661,16 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     # non come errori: la cache della risposta non ne dipende.
     from ..cad3d.measurement_uncertainty import edge_uncertainty_mm
     tolerance_mm, _source = edge_uncertainty_mm(scale_px_per_mm=min(w / length, h / width))
-    rows, safe, evidence_notes, evidence_reasons, evidence_doubts = contradicted_by_detections(
+    rows, safe, evidence_notes, evidence_reasons, ai_only_excluded = contradicted_by_detections(
         rows, safe, boxes, (tolerance_mm / length, tolerance_mm / width), enumerating)
     for note in evidence_notes:
         log(tx("Inventario globale, contraddetto dal rilevatore locale: ") + note)
+    if ai_only_excluded:
+        # Proposti ma non scelti (HANDOFF 141): nota, non _Issue, cosi' la
+        # risposta resta in cache e un rilancio non ripaga.
+        log(tx("Inventario globale: {count} corpi aggiunti dal solo modello, senza proposte "
+               "del rilevatore: proposti ma esclusi dalla tabella e dal 3D finché non li "
+               "tieni nella revisione fotografica.", count=len(ai_only_excluded)))
     # A qualifier-only omission is accepted as «not declared» and never paid for
     # twice (NON_BLOCKING_QUALIFIERS); say so, with the count, so the log does
     # not suggest a guessed confidence.
@@ -1713,9 +1734,12 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
                          own(r['component_id'], r['source_candidate_ids']), manual_ids, measured)
               for i, r in enumerate(rows)]
     for body in result:
-        if body['component_id'] in evidence_doubts:
-            body.update(_uncertain=True, presence_confidence='low', class_confidence='low',
-                        _review_reason=evidence_doubts[body['component_id']])
+        if body['component_id'] in ai_only_excluded:
+            # Proposto ma non scelto: resta fuori da tabella e 3D finche'
+            # l'utente non lo tiene (gui/photo_review_dialog). La chiave c'e'
+            # SOLO sui corpi solo-AI: False vuol dire «tenuto dall'utente».
+            body.update(_ai_only_excluded=True,
+                        _review_reason=ai_only_excluded[body['component_id']])
     for original in components:
         decision = safe.get(original['_id'])
         if decision is None or (decision['status'] == 'uncertain' and decision['component_id'] is None):

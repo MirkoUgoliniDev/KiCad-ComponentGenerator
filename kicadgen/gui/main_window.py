@@ -84,7 +84,7 @@ from .guided_documents import GuidedDocuments
 from .model_dialog import pick_model
 from ..services.openrouter import PHOTO_CAPABILITIES
 from .pinout_dialog import PinoutDialog
-from .photo_review_dialog import PhotoReviewDialog, PhotoTransform
+from .photo_review_dialog import PhotoReviewDialog, PhotoTransform, ai_only_excluded
 from .preview_3d_vtk import Preview3DVtk
 from .settings_dialog import LlmSettingsDialog
 from .profile_dialog import ProfilesDialog, icon_button
@@ -626,7 +626,7 @@ def per_item_detail(message: str) -> bool:
 
 
 def _side_size(side: dict, name: str):
-    """A side's hole size for the generator: declared as is, estimated as AssumedSize, or None."""
+    """A side's hole or pad size for the generator: declared as is, estimated as AssumedSize, or None."""
     value = side.get(f"{name}_mm")
     if value is None:
         return None
@@ -634,6 +634,11 @@ def _side_size(side: dict, name: str):
         return float(value)
     from ..generators.castellated_module import AssumedSize
     return AssumedSize(float(value))
+
+
+def _reference_pad(name: str) -> float:
+    """The generator's reference pad size (dataclass default of CastellatedModuleParams), mm."""
+    return float(getattr(CastellatedModuleParams, name))
 
 
 def _declared_size(value, reference):
@@ -741,6 +746,11 @@ class MainWindow(QMainWindow):
         #: Componenti della foto come dict (geometria + metadati del
         #: rilevamento): la fonte di verita' dei corpi, vedi `_photo_row`.
         self._photo_rows: list[dict] = []
+        #: Corpi aggiunti dal solo modello e non (ancora) tenuti
+        #: (`_ai_only_excluded` True, HANDOFF 141): fuori dalla tabella e dal
+        #: 3D, ma conservati qui -- e nel progetto salvato -- perche' la
+        #: revisione fotografica li possa riproporre.
+        self._photo_excluded_rows: list[dict] = []
         self._extracted_pcb_thickness = None
         #: Provenance of the PCB thickness in use (PCB_THICKNESS_SOURCE_LABELS).
         self._pcb_thickness_source = "standard"
@@ -5094,7 +5104,9 @@ class MainWindow(QMainWindow):
                    "prosegue con i corpi come li ha proposti l'AI."))
             return False
         components = self._photo_components_from_table()
-        if not components:
+        # Anche con i soli corpi esclusi c'e' qualcosa da rivedere: sono
+        # proprio quelli che solo la revisione puo' tenere (HANDOFF 141).
+        if not components and not self._photo_excluded_rows:
             return False
         if not (self._photo_png or self._photo_overlay_png):
             # Senza immagine la revisione non ha su cosa disegnare: fermare la
@@ -5396,9 +5408,15 @@ class MainWindow(QMainWindow):
             return
         if self._photo_png:
             length, width = self._photo_review_frame()
+            # I corpi solo-AI esclusi tornano in coda, dopo quelli della
+            # tabella: le righe della tabella restano gli stessi indici
+            # (`component_row`), e la revisione e' l'unico posto dove si
+            # possono tenere (HANDOFF 141).
             try:
                 dialog = PhotoReviewDialog(
-                    self._photo_png, self._photo_components_from_table(), length, width, self,
+                    self._photo_png,
+                    self._photo_components_from_table() + deepcopy(self._photo_excluded_rows),
+                    length, width, self,
                 )
             except ValueError as exc:
                 QMessageBox.warning(
@@ -5407,7 +5425,11 @@ class MainWindow(QMainWindow):
             dialog.setWindowTitle(
                 self.i18n.tr("photo_review.title", source=self._photo_source)
             )
-            dialog.components_applied.connect(self._apply_photo_review)
+            # «Applica» emette solo i corpi tenuti; quelli lasciati fuori si
+            # leggono dalla finestra nello stesso istante e restano da parte.
+            dialog.components_applied.connect(
+                lambda components: self._apply_photo_review(
+                    components, left_out=dialog.left_out_components()))
             self.i18n.retranslate_widgets(dialog)
             if component_row is not None and 0 <= component_row < len(dialog._items):
                 dialog._select_row(component_row)
@@ -5503,10 +5525,14 @@ class MainWindow(QMainWindow):
             result.append(entry)
         return result
 
-    def _apply_photo_review(self, components: list[dict]) -> None:
+    def _apply_photo_review(self, components: list[dict], left_out=None) -> None:
         """@brief Apply reviewed components and bring the 3D model up to date.
 
         @param components Corrected component list (review dialog or 3D menu).
+        @param left_out AI-only bodies the photo review left out
+            (`PhotoReviewDialog.left_out_components`), or None when the caller
+            is not the photo review (hand editor, format painter): the bodies
+            already set aside are then kept as they are.
         @note The old solid no longer matches the data and is cleared (rule 7
             of the project strategy). When a solid WAS on screen, the 3D is
             regenerated automatically (user, 2026-09-24: otherwise the 3D tab
@@ -5515,6 +5541,10 @@ class MainWindow(QMainWindow):
         """
         had_solid = self._last_mesh_path is not None
         self._set_photo_components(components)
+        if left_out is not None:
+            self._photo_excluded_rows = [deepcopy(c) for c in left_out]
+            if self._photo_excluded_rows:
+                self._log_excluded_ai_only()
         if self._photo_png:
             from ..services.model_choices import save_choices
             try:
@@ -5636,7 +5666,10 @@ class MainWindow(QMainWindow):
             "models": {"session_model": getattr(self, "_session_model", None),
                        "vlm_model": getattr(self, "_vlm_model", None)},
             "sides": self._serialised_sides(),
-            "components": self._photo_components_from_table(),
+            # Con i corpi solo-AI esclusi in coda, marcati: riaprendo il
+            # progetto tornano da parte, non in tabella (HANDOFF 141).
+            "components": (self._photo_components_from_table()
+                           + deepcopy(getattr(self, "_photo_excluded_rows", []))),
             "annotations": {"convention": ANNOTATION_CONVENTION,
                             "fillets": [asdict(a) for a in self.fillet_annotations],
                             "texts": [asdict(a) for a in self.face_text_annotations]},
@@ -5711,10 +5744,10 @@ class MainWindow(QMainWindow):
         self._sync_contact_style_bar()
         components = [c for c in state.get("components") or () if isinstance(c, dict)]
         try:
-            self._set_photo_components(components)
+            self._set_photo_components(components, replace_excluded=True)
         except (KeyError, TypeError, ValueError) as exc:
             skipped.append(f"componenti ({exc})")
-            self._set_photo_components([])
+            self._set_photo_components([], replace_excluded=True)
         annotations = state.get("annotations") if isinstance(state.get("annotations"), dict) else {}
         self.fillet_annotations.clear()
         self.face_text_annotations.clear()
@@ -6389,7 +6422,7 @@ class MainWindow(QMainWindow):
         if params.is_castellated():
             self._apply_extracted_castellated(params)
         else:
-            self._set_photo_components(params.components_3d or [])
+            self._set_photo_components(params.components_3d or [], replace_excluded=True)
             self.group_castellated.setChecked(False)
             # Dal 26/09 l'estrazione lascia None cio' che la risposta non ha:
             # il passo per una sola colonna, l'interasse per una sola fila, la
@@ -6789,9 +6822,15 @@ class MainWindow(QMainWindow):
         """Riempie il gruppo "Modulo castellated" con i lati estratti.
 
         Le quote del corpo arrivano dagli stessi campi body_* della matrice
-        (li' descrivono l'ingombro del case, qui il contorno del modulo), e
-        le dimensioni dei pad dal primo lato che le riporta: il datasheet di
-        norma da' un solo land pattern valido per tutti i contatti.
+        (li' descrivono l'ingombro del case, qui il contorno del modulo).
+        Le misure delle piazzole restano LATO PER LATO, con la loro
+        provenienza (28/09): lette o ricavate dai documenti sono dichiarate,
+        stimate o senza provenienza restano stime che il generatore riduce
+        se fanno toccare due contatti (e lo scrive nelle note). Prima
+        venivano copiate nei campi unici del modulo: vinceva l'ultimo lato,
+        per tutti i lati, e come misura dichiarata. I campi del modulo
+        tornano al land pattern di riferimento a ogni estrazione e valgono
+        solo per i lati senza misura propria.
         """
         self.group_castellated.setChecked(True)
         # Distanza fra le file dichiarata dall'estrazione: e' la quota da cui
@@ -6808,11 +6847,12 @@ class MainWindow(QMainWindow):
             self.field_cast_body_length.setValue(params.body_length_mm)
         if params.body_width_mm:
             self.field_cast_body_width.setValue(params.body_width_mm)
-        for side in params.castellated_sides or ():
-            if side.get("pad_length_mm"):
-                self.field_cast_pad_length.setValue(float(side["pad_length_mm"]))
-            if side.get("pad_width_mm"):
-                self.field_cast_pad_width.setValue(float(side["pad_width_mm"]))
+        # Come la distanza fra le file: una misura di un'altra scheda (o
+        # quella che un progetto salvato prima del 28/09 vi aveva copiato da
+        # un solo lato) non vale per questa. Il riferimento arriva al
+        # generatore come stima (vedi `_current_castellated_params`).
+        self.field_cast_pad_length.setValue(_reference_pad("pad_length"))
+        self.field_cast_pad_width.setValue(_reference_pad("pad_width"))
 
         self._sides.clear()
         names = []
@@ -6825,6 +6865,15 @@ class MainWindow(QMainWindow):
             for field in ("half_hole_diameter_mm", "through_hole_drill_mm"):
                 source = sources.get(f"castellated_sides.{side.get('edge')}.{field}")
                 side[field.replace("_mm", "_declared")] = source in ("read", "derived")
+            # Piazzole del lato, stessa regola (28/09). Senza la voce di
+            # provenienza (lati rientrati da `_serialised_sides`, che la
+            # portano gia' nel lato) vale quella del lato; se manca anche
+            # quella, la misura resta una stima.
+            for field in ("pad_length_mm", "pad_width_mm"):
+                key = f"castellated_sides.{side.get('edge')}.{field}"
+                flag = field.replace("_mm", "_declared")
+                side[flag] = (sources[key] in ("read", "derived") if key in sources
+                              else side.get(flag) is True)
             self._add_side_row(side)
             label = EDGE_LABELS.get(side["edge"], side["edge"])
             if side.get("pin_names"):
@@ -6836,7 +6885,7 @@ class MainWindow(QMainWindow):
         if pinout:
             self.pinout = pinout
 
-        self._set_photo_components(params.components_3d or [])
+        self._set_photo_components(params.components_3d or [], replace_excluded=True)
         if not self.castellated_components:
             self._append_log(
                 tx("ATTENZIONE: il modello non ha restituito alcun componente dalla foto "
@@ -7170,7 +7219,11 @@ class MainWindow(QMainWindow):
             sides.append(CastellatedSide(
                 edge=side["edge"], count=side["count"], pitch=side["pitch_mm"],
                 offset=side["offset_mm"], first_pin=side["first_pin"],
-                reverse=side["reverse"], **extra,
+                reverse=side["reverse"],
+                # Piazzole del lato (28/09), stessa regola dei fori: None = si
+                # usa il campo del modulo; stima = AssumedSize.
+                pad_length=_side_size(side, "pad_length"),
+                pad_width=_side_size(side, "pad_width"), **extra,
             ))
         return sides
 
@@ -7187,7 +7240,11 @@ class MainWindow(QMainWindow):
                      half_hole_diameter_mm=raw.get("half_hole_diameter_mm"),
                      through_hole_drill_mm=raw.get("through_hole_drill_mm"),
                      half_hole_diameter_declared=bool(raw.get("half_hole_diameter_declared")),
-                     through_hole_drill_declared=bool(raw.get("through_hole_drill_declared")))
+                     through_hole_drill_declared=bool(raw.get("through_hole_drill_declared")),
+                     pad_length_mm=raw.get("pad_length_mm"),
+                     pad_width_mm=raw.get("pad_width_mm"),
+                     pad_length_declared=bool(raw.get("pad_length_declared")),
+                     pad_width_declared=bool(raw.get("pad_width_declared")))
                 for s, style, raw in zip(self._sides_from_table(), self._table_contact_styles(),
                                          self._sides)]
 
@@ -7260,8 +7317,13 @@ class MainWindow(QMainWindow):
             tags=self.field_tags.text().strip(),
             body_length=self.field_cast_body_length.value(),
             body_width=self.field_cast_body_width.value(),
-            pad_length=self.field_cast_pad_length.value(),
-            pad_width=self.field_cast_pad_width.value(),
+            # Default dei lati senza misura propria: il land pattern di
+            # riferimento arriva come stima (None -> AssumedSize), un valore
+            # diverso (progetto salvato, utente) come misura dichiarata.
+            pad_length=_declared_size(self.field_cast_pad_length.value(),
+                                      _reference_pad("pad_length")),
+            pad_width=_declared_size(self.field_cast_pad_width.value(),
+                                     _reference_pad("pad_width")),
             pad_overhang=self.field_cast_overhang.value(),
             # Un valore di riferimento non e' una misura: passato come None il
             # generatore lo usa come stima e, se non sta nel passo di un lato,
@@ -9440,16 +9502,52 @@ class MainWindow(QMainWindow):
                    color_hex=component.color_hex, marking=component.marking)
         return row
 
-    def _set_photo_components(self, components: list[dict]) -> None:
+    def _set_photo_components(self, components: list[dict], *,
+                              replace_excluded: bool = False) -> None:
         """@brief Replace the photo components, keeping unknown metadata beside each one.
 
         @param components Photo component dicts.
+        @param replace_excluded True when `components` is a whole new
+            inventory (extraction, relaunch, project restore): the AI-only
+            bodies set aside before are dropped and replaced by those in
+            `components`. False (default) for an edit of the current table:
+            the bodies already set aside stay.
         @throws KeyError When a component misses a geometry key; nothing is replaced then.
+        @note Bodies marked `_ai_only_excluded` True (added by the vision model
+            alone and not kept, HANDOFF 141) never enter the table nor the 3D:
+            they go to `_photo_excluded_rows`, from which the photo review
+            offers them again. A whole new inventory that sets some aside says
+            so in the log, because nothing on screen would show them.
         """
-        boxes = [self._component_from_photo(c) for c in components]
+        kept = [c for c in components if not ai_only_excluded(c)]
+        excluded = [deepcopy(c) for c in components if ai_only_excluded(c)]
+        boxes = [self._component_from_photo(c) for c in kept]
+        for component in excluded:
+            # Stessa validazione della geometria dei corpi tenuti: un corpo
+            # escluso malformato non deve far fallire dopo la revisione.
+            self._component_from_photo(component)
         self.castellated_components = boxes
-        self._photo_rows = [self._photo_row(box, c) for box, c in zip(boxes, components)]
+        self._photo_rows = [self._photo_row(box, c) for box, c in zip(boxes, kept)]
+        if replace_excluded:
+            self._photo_excluded_rows = excluded
+            if excluded:
+                self._log_excluded_ai_only()
+        else:
+            self._photo_excluded_rows = list(getattr(self, "_photo_excluded_rows", [])) + excluded
         self._refresh_components_editor_button()
+
+    def _log_excluded_ai_only(self) -> None:
+        """@brief One log line: how many AI-only bodies are set aside, and how to keep them.
+
+        @note Written whenever such bodies are set aside without the user
+            having chosen it on screen (new inventory, restored project) or
+            after a review that left some out: the table and the 3D do not
+            show them, so the log is the only trace until the review reopens.
+        """
+        self._append_log(tx(
+            "{count} corpi aggiunti dal solo modello, senza proposta del rilevatore, restano "
+            "fuori dalla tabella e dal 3D: per tenerli riapri «Modifica la revisione dei "
+            "componenti…» e premi T su ciascuno.", count=len(self._photo_excluded_rows)))
 
     def _refresh_components_editor_button(self) -> None:
         """@brief Offer the hand editor only when there are bodies to edit."""

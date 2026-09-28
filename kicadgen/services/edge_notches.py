@@ -77,12 +77,14 @@ MAX_NOTCH_DEPTH_MM = 1.5
 MIN_NOTCH_WIDTH_MM = 0.2
 #: Narrowest notch counted, in pixels: fewer pixels are noise on any photo.
 MIN_NOTCH_WIDTH_PX = 3
-#: Smallest plated half-hole diameter assumed when a side declares none, in
-#: mm. Used ONLY to decide whether a straight outline can be called «no
-#: notch»: the photo must be able to show a half-hole this small, otherwise
-#: the edge is «not countable». A manufacturing lower bound (the smallest
-#: castellated holes offered are about 0.4-0.5 mm), not a value measured on
-#: a sample board; a declared half_hole_diameter_mm replaces it.
+#: Smallest plated half-hole diameter assumed, in mm. Used ONLY to decide
+#: whether a straight outline can be called «no notch»: the photo must be able
+#: to show a notch this deep (half of it), otherwise the edge is «not
+#: countable». A manufacturing lower bound (the smallest castellated holes
+#: offered are about 0.4-0.5 mm), not a value measured on a sample board. A
+#: declared diameter does NOT replace it: how deep a notch is depends on how
+#: far the hole centre sits inside the board, not on the hole size (HANDOFF
+#: point 140: the RS485 half-holes are cut less than halfway).
 MIN_HALF_HOLE_DIAMETER_MM = 0.4
 #: Width of the outline noise band, in standard deviations of the outline
 #: residual. HEURISTIC, declared: the usual 3-sigma convention (a straight
@@ -98,12 +100,12 @@ NOISE_BAND_SIGMAS = 3.0
 #: the smallest ratio at which «notch» and «outline wobble» are not a coin
 #: toss; it is not tuned on a board (the sample notches are 4-5 bands deep).
 NOTCH_SEPARATION = 2.0
-#: Structural lower bound on the depth of a declared half-hole, as a fraction
-#: of its radius: a half-hole cut through its centre is one radius deep, and
-#: the cut may run up to half a radius off the centre. HEURISTIC, declared
-#: (manufacturers' routing tolerance is about 0.1-0.2 mm on holes of 0.5-1.2
-#: mm); applies only when the side declares half_hole_diameter_mm.
-HALF_HOLE_DEPTH_FRACTION = 0.5
+#: A notch is the chord of its hole at the board edge, so it is never wider
+#: than the hole: with a diameter READ from the documents, a notch wider than
+#: it by more than this many times EDGE_UNCERTAINTY_PX (blur on both sides of
+#: the chord) is not one of the declared half-holes. Structural, not tuned.
+#: A diameter the model only ESTIMATED is never used (HANDOFF point 140).
+HOLE_WIDTH_SLACK_PX = 2
 #: Share of the profile used for the first, rough fit of the outline: the
 #: lowest residuals. Structural: a row of half-holes whose diameter stays
 #: below 0.75 x pitch (see MERGE_GAP_PITCH_FRACTION) leaves at least a quarter
@@ -382,10 +384,11 @@ def count_notches(profile: Sequence, px_per_mm: float, pitch_mm: Optional[float]
         similar width, evenly spaced among themselves, are required).
     @param across_px_per_mm Scale ACROSS this edge (depths); None = the same
         as along (an isotropic photo).
-    @param hole_diameter_mm Declared half-hole diameter of the side, or None.
-        Sets a structural minimum depth (HALF_HOLE_DEPTH_FRACTION of the
-        radius) and the smallest notch the photo must be able to show before
-        a straight outline is called «no notch».
+    @param hole_diameter_mm Half-hole diameter of the side MEASURED in the
+        documents, or None (an estimate must not be passed: see
+        `_measured_diameter`). It only bounds the WIDTH of a notch (a chord of
+        the hole cannot be wider than the hole); it sets no minimum depth,
+        because the depth depends on where the hole centre sits (point 140).
     @param declared_count Number of contacts the side declares, or None. With
         a declared pitch, a single notch is a row only when this is 1.
     @return EdgeCount with `edge` left empty: `found` and the notch centres in
@@ -432,8 +435,11 @@ def count_notches(profile: Sequence, px_per_mm: float, pitch_mm: Optional[float]
     residual = np.where(known, filled - baseline, 0.0)
     band = max(EDGE_UNCERTAINTY_PX, NOISE_BAND_SIGMAS * sigma)
     required = NOTCH_SEPARATION * band
-    if diameter is not None:
-        required = max(required, HALF_HOLE_DEPTH_FRACTION * diameter / 2 * across)
+    # Nessuna profondita' minima ricavata dal diametro (punto 140): la tacca e'
+    # profonda quanto il foro sporge dal bordo, che dipende da dove cade il suo
+    # centro, non dalla sua misura. Il diametro letto limita solo la LARGHEZZA.
+    widest = (diameter * scale + HOLE_WIDTH_SLACK_PX * EDGE_UNCERTAINTY_PX
+              if diameter is not None else None)
     flags = (residual >= band) & known
     # Corse sopra la banda che toccano un'estremita' del bordo o un tratto
     # non visto (l'arco di un angolo arrotondato, le colonne di sfondo di un
@@ -449,7 +455,7 @@ def count_notches(profile: Sequence, px_per_mm: float, pitch_mm: Optional[float]
     runs = _merge(inner, max_gap)
     # A notch is one half-hole: never wider than the pitch between two of them.
     max_width = pitch * scale if pitch is not None else None
-    notches, ambiguous = [], []
+    notches, ambiguous, too_wide = [], [], []
     for start, stop in runs:
         width = stop - start
         if max_width is not None and width > max_width:
@@ -459,12 +465,20 @@ def count_notches(profile: Sequence, px_per_mm: float, pitch_mm: Optional[float]
         if width < min_width:
             continue
         peak = float(residual[start:stop].max())
+        if widest is not None and width > widest and peak >= required:
+            # Troppo larga per essere il semiforo dichiarato: non si conta
+            # come tale, e non prova nemmeno che non ci sia.
+            too_wide.append((start, stop))
+            continue
         (notches if peak >= required else ambiguous).append((start, stop))
     if ambiguous:
         return EdgeCount("", None, tolerance_mm=tolerance_mm, reason=tx(
             "tacche poco distinte dal rumore del contorno"))
+    if too_wide:
+        return EdgeCount("", None, tolerance_mm=tolerance_mm, reason=tx(
+            "tacche piu' larghe del semiforo dichiarato nei documenti"))
     if not notches:
-        smallest = (diameter if diameter is not None else MIN_HALF_HOLE_DIAMETER_MM) / 2 * across
+        smallest = MIN_HALF_HOLE_DIAMETER_MM / 2 * across
         if smallest < NOTCH_SEPARATION * band:
             # Un semiforo cosi' piccolo non si distinguerebbe dal rumore: il
             # bordo dritto non prova che le tacche non ci sono.
@@ -624,6 +638,26 @@ def _numeric(value):
     return value
 
 
+def _measured_diameter(entry) -> Optional[float]:
+    """Half-hole diameter of a side only when it was measured, never an estimate.
+
+    The model marks each length in the side's `value_sources`; the window marks
+    a side value with `half_hole_diameter_declared`. An ESTIMATED diameter (the
+    model guessed 1.7-2.4 mm on the RS485, whose notches are 0.3-0.4 mm deep)
+    made every real notch «not countable» (HANDOFF point 140): it is ignored.
+    """
+    value = _positive(entry.get("half_hole_diameter_mm")
+                      if entry.get("half_hole_diameter_mm") is not None
+                      else entry.get("hole_diameter_mm"))
+    if value is None:
+        return None
+    sources = entry.get("value_sources")
+    source = sources.get("half_hole_diameter_mm") if isinstance(sources, dict) else None
+    if source in ("read", "derived") or entry.get("half_hole_diameter_declared") is True:
+        return value
+    return None
+
+
 def normalized_sides(sides) -> dict:
     """@brief Declared castellated sides, keyed by edge, in comparable form.
 
@@ -657,9 +691,7 @@ def normalized_sides(sides) -> dict:
             "pitch_mm": _positive(entry.get("pitch_mm")),
             "offset_mm": finite_number(_numeric(offset)) or 0.0,
             "contact_style": str(style).strip().lower() if isinstance(style, str) else None,
-            "hole_diameter_mm": _positive(entry.get("half_hole_diameter_mm")
-                                          if entry.get("half_hole_diameter_mm") is not None
-                                          else entry.get("hole_diameter_mm")),
+            "hole_diameter_mm": _measured_diameter(entry),
         }
     for edge in repeated:
         result.pop(edge, None)

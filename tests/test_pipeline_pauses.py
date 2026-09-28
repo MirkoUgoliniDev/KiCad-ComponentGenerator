@@ -144,6 +144,12 @@ def _install_review_dialog(monkeypatch, correction=None):
             self.components_applied.emit(correction(deepcopy(self.received)))
             return QDialog.DialogCode.Accepted
 
+        def left_out_components(self):
+            """@brief API aggiunta al dialogo vero (HANDOFF 141): i corpi solo-AI
+            lasciati fuori, che la finestra principale tiene da parte. Qui
+            nessuno: i corpi di questi test hanno tutti una proposta dietro."""
+            return []
+
     monkeypatch.setattr(gui, "PhotoReviewDialog", FakeReview)
     return opened
 
