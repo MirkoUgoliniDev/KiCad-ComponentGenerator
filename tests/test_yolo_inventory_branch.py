@@ -34,11 +34,19 @@ def test_inventory_yolo_branch_bypasses_ai_localizer(monkeypatch,tmp_path):
         presence_confidence='high',class_confidence='high',lead_count=2,lead_count_complete=True,
         lead_count_confidence='high',grouping_basis='single_body',asymmetry_landmark=None)],
         candidate_decisions=[dict(candidate_id=1,status='keep',component_id='R1',reason='body')],uncertainties=[])
-    result=inv.extract_inventory([tmp_path/'image.png'],'photo/model',40,20,['generic','resistor'],lambda **kw: seen.append(kw) or response,detector='yolo',classifier_model='verify/model',top_photo_index=0)
+    # Contratto aggiornato (HANDOFF 144): dopo l'UNICA chiamata d'inventario
+    # ogni corpo tenuto si rilegge due volte dal suo ritaglio ('report_body').
+    # Qui le letture non dicono nulla, cosi' la riga resta quella dell'inventario.
+    blank=dict(**{'class':'unknown'},package='',tab=False,marking='',
+               leads_by_side=dict(left=None,right=None,top=None,bottom=None))
+    def call(**kw):
+        seen.append(kw)
+        return blank if kw['tool']['function']['name']=='report_body' else response
+    result=inv.extract_inventory([tmp_path/'image.png'],'photo/model',40,20,['generic','resistor'],call,detector='yolo',classifier_model='verify/model',top_photo_index=0)
     assert result.components[0]['package']=='R_0603'
-    assert seen[0]['model']=='verify/model'
-    assert len(seen)==1
-    assert seen[0]['tool']['function']['name']=='report_global_inventory'
+    assert {kw['model'] for kw in seen}=={'verify/model'}
+    names=[kw['tool']['function']['name'] for kw in seen]
+    assert names==['report_global_inventory','report_body','report_body']
     assert result.photo_png and result.overlay_png
     assert result.calibration['detector']=='yolo'
 

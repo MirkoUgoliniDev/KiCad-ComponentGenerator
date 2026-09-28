@@ -20,14 +20,27 @@ STAGES = (
     ('Localizzazione foto', 'vision_model', 'grounding_prompt'),
     ('Verifica foto', 'verification_model', 'verification_prompt'),
 )
+#: Note above the «Lettura ritagli» editor (HANDOFF 146 V4, user decision): the
+#: tab sits on the «Localizzazione foto» page, whose «Modello LLM» the crop
+#: reading does NOT use. It is sent with the model of the paid call on the
+#: photograph: the session choice for the photo in the Project tab, otherwise
+#: the extraction model (main_window._photo_detector_model, forwarded as
+#: classifier_model by datasheet_extractor).
+CROP_MODEL_NOTE = ('Questa lettura usa il modello della chiamata sulla foto (scelto nel tab '
+                   'Progetto, altrimenti il modello dell\'estrazione), non il Modello LLM di '
+                   'questa pagina.')
 HELP = (
     'Legge quote e parametri dai documenti. Il prompt base definisce il comportamento '
     'dell’analisi; le istruzioni specifiche della tipologia vengono aggiunte al prompt '
     'del componente nel tab Progetto, dove puoi aggiungere note per la singola estrazione.',
     'Localizza gli ingombri nelle foto calibrate. Lo stesso modello è usato per i dettagli '
-    'dei terminali. Le istruzioni foto sono aggiunte ai prompt fotografici, inclusa la verifica. '
+    'dei terminali. Le istruzioni foto sono aggiunte ai prompt fotografici, inclusa la verifica, '
+    'ma non al prompt Lettura ritagli: descrivono la scheda intera, non il singolo corpo. '
     'I prompt tecnici Terminali e Reofori sono avanzati: modificarli non riattiva i pulsanti '
-    'manuali nascosti. XY sono stime calibrate e le altezze richiedono conferma. '
+    'manuali nascosti. Il prompt Lettura ritagli guida la rilettura di ogni corpo dal suo '
+    'ritaglio ingrandito (rilevatori «YOLO locale + verifica AI» e «Solo modello di visione»), '
+    'con lo stesso modello della chiamata sulla fotografia. '
+    'XY sono stime calibrate e le altezze richiedono conferma. '
     'La cache nella cartella photo-cache del progetto distingue input, modello e prompt.',
     'Verifica la presenza dei corpi nei rettangoli proposti, senza spostare coordinate '
     'o aggiungere ID. Il modello è indipendente da Datasheet e Localizzazione foto.',
@@ -140,10 +153,20 @@ class ProfileEditor(QDialog):
                 sub = QTabWidget()
                 column.addWidget(sub, 1)
                 for field, caption in ((prompt, 'Prompt base'), ('image_instructions', 'Istruzioni foto'),
-                                       ('terminal_prompt', 'Terminali'), ('lead_prompt', 'Reofori')):
+                                       ('terminal_prompt', 'Terminali'), ('lead_prompt', 'Reofori'),
+                                       ('crop_prompt', 'Lettura ritagli')):
                     child = QWidget()
                     inner = QVBoxLayout(child)
                     sub.addTab(child, caption)
+                    if field == 'crop_prompt':
+                        # HANDOFF 146 V4: the tab sits under this page's model,
+                        # but the crop reading is sent with the model of the
+                        # paid call on the photograph (datasheet_extractor
+                        # classifier_model <- main_window._photo_detector_model).
+                        note = QLabel(CROP_MODEL_NOTE)
+                        note.setObjectName('crop_model_note')
+                        note.setWordWrap(True)
+                        inner.addWidget(note)
                     self._add_field(inner, field, overrides)
             elif index == 0 and self.is_type:
                 sub = QTabWidget()

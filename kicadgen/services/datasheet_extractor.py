@@ -1762,6 +1762,7 @@ def extract_pin_header_params(
     verification_prompt: Optional[str] = None,
     verification_model: Optional[str] = None,
     terminal_prompt: Optional[str] = None,
+    crop_prompt: Optional[str] = None,
     document_roles: Optional[dict] = None,
     component_family: Optional[str] = None,
     photo_detector: str = "ai",
@@ -1787,6 +1788,10 @@ def extract_pin_header_params(
         before any paid call (see `normalize_document_roles`); only the files
         carrying 'hires' go to the photo inventory (`photo_document_indices`).
 
+    @param crop_prompt Instructions of the per-body crop reading (profile
+        field 'crop_prompt'). Used only with photo_detector 'yolo' or 'vlm',
+        the paths that run photo_crop_reading.read_bodies; None or blank sends
+        its factory default.
     @param photo_detector Photo localization backend: ai (legacy), yolo (local
         proposals plus one AI reconciliation) or vlm (no local detector: the
         vision model enumerates the bodies in that same single request).
@@ -2014,7 +2019,8 @@ def extract_pin_header_params(
         verification_model=verification_model, diagnostic_call=diagnostic_call,
         extra_instructions=extra_instructions, photo_cache_dir=photo_cache_dir,
         grounding_prompt=grounding_prompt, verification_prompt=verification_prompt,
-        terminal_prompt=terminal_prompt, yolo_model_path=yolo_model_path,
+        terminal_prompt=terminal_prompt, crop_prompt=crop_prompt,
+        yolo_model_path=yolo_model_path,
         review_proposals=review_proposals, yolo_confidence=yolo_confidence,
         yolo_settings=yolo_settings,
         recount_contacts=lambda disagreements: _recount_sides_from_photo(
@@ -2550,7 +2556,7 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
                          photo_cache_dir, grounding_prompt, verification_prompt,
                          terminal_prompt, yolo_model_path, review_proposals,
                          yolo_confidence, yolo_settings,
-                         recount_contacts=None) -> ExtractedParams:
+                         recount_contacts=None, crop_prompt=None) -> ExtractedParams:
     """Optional photo inventory and final assembly of a validated main answer."""
     # La foto richiede un passaggio separato: nell'estrazione globale il modello
     # deve anche leggere quote, pinout e layout, e tende a sacrificare i passivi
@@ -2601,7 +2607,7 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
                 **({'detector': photo_detector, 'yolo_model_path': yolo_model_path,
                     'review_proposals': review_proposals, 'declared': data,
                     'yolo_confidence': yolo_confidence, 'yolo_settings': yolo_settings,
-                    'recount_contacts': recount_contacts}
+                    'recount_contacts': recount_contacts, 'crop_prompt': crop_prompt}
                    if photo_detector in ('yolo', 'vlm') else {}),
             )
         except ReviewCancelled as exc:
@@ -3262,7 +3268,15 @@ def _components_3d(raw: Optional[Sequence[dict]],
                     # veniva scartato qui, e ogni componente arrivava al
                     # matching dichiarando "nessun riferimento osservato" anche
                     # quando il modello ne aveva visto uno ad alta confidenza.
-                    'landmark_feature', 'landmark_side', 'landmark_confidence'):
+                    'landmark_feature', 'landmark_side', 'landmark_confidence',
+                    # Rilettura per ritaglio (HANDOFF 144): esito, le due
+                    # letture e i valori dell'inventario sostituiti devono
+                    # arrivare alla revisione, altrimenti una riga «da
+                    # rivedere» non direbbe piu' perche'.
+                    'package_confidence', '_crop_reading', '_crop_readings',
+                    '_crop_reading_version', '_crop_reading_prompt_digest',
+                    '_package_inventory', '_class_inventory',
+                    '_lead_count_inventory'):
             if key in entry:
                 component[key] = entry[key]
         if isinstance(entry.get("pin_count"), int) and not isinstance(entry.get("pin_count"), bool) and entry["pin_count"] > 0:

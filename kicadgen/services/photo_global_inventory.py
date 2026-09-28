@@ -18,7 +18,7 @@ from .openrouter import OpenRouterError, ToolArgumentsError
 from .photo_audit import valid_fraction_box as _valid_box, write_stage_audit as _write_audit
 from .photo_inventory import draw_inventory, image_block
 from .photo_markings import MARKING_RULES
-from .photo_grounding import detail_grid
+from .photo_grounding import detail_grid, fit_to_model, model_image_limits
 from .photo_heights import estimate_body_height
 from .photo_yolo import split_ai_candidates
 from .messages import CACHE_HIT, marked, tx
@@ -1434,7 +1434,9 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     @note Low-confidence proposals nobody kept in the review
         (photo_yolo.awaiting_user_keep) are withheld: not sent, not returned,
         counted in the log. The images are the full photo, the overlay and the
-        mm-sized detail tiles of photo_grounding.detail_grid.
+        mm-sized detail tiles of photo_grounding.detail_grid, sized for the
+        model's image limits (model_image_limits) and enlarged for a model
+        that gains from enlargement (fit_to_model).
     @note Only structured physical rejection categories authorize deletion. Legacy
         keep/merge payloads remain valid; unstructured rejects retain originals.
         An uncertain decision without a parent retains the original envelope.
@@ -1500,7 +1502,11 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
                 'basis': 'photo edge measurement; rotation clockwise, X right, Y down'}}
                if body is not None else {})))
     h, w = photo.shape[:2]
-    tiles = detail_grid(length, width, (w, h))
+    # Griglia e ingrandimento dei dettagli secondo il modello che li riceve
+    # (HANDOFF 144): con un modello a token grossi i dettagli servono anche
+    # quando la foto intera ha gia' tutti i pixel che l'avrebbero bastata a Claude.
+    limits = model_image_limits(model)
+    tiles = detail_grid(length, width, (w, h), limits)
     # Senza candidati non c'e' nulla da riconciliare: cambia il prompt e cade
     # la sovrapposizione numerata, che sarebbe una copia vuota della foto.
     enumerating = not candidates
@@ -1525,7 +1531,7 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         bounds = [left/w, top/h, right/w, bottom/h]
         content.extend([{'type': 'text',
                          'text': f'Context tile {i}/{len(tiles)}; GLOBAL bounds {bounds}'},
-                        image_block(photo[top:bottom, left:right])])
+                        image_block(fit_to_model(photo[top:bottom, left:right], limits))])
     prompt = (PROMPT_ENUMERATE_AFTER_EMPTY_DETECTOR if empty_detector
               else PROMPT_ENUMERATE if enumerating else PROMPT)
     supplements = [clean for s in (verification_prompt or '', extra_instructions or '')

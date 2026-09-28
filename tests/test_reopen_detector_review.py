@@ -57,9 +57,24 @@ def _response(candidates=({'id': 1, 'bbox': [.2, .2, .4, .4]},)):
         uncertainties=[])
 
 
-def _answer_call(calls):
-    """@brief Finta chiamata: registra la richiesta e risponde per i candidati ricevuti."""
+def _answer_call(calls, crop_calls=None):
+    """@brief Finta chiamata: registra la richiesta e risponde per i candidati ricevuti.
+
+    Contratto aggiornato (HANDOFF 146 V2): il rilancio, come l'estrazione,
+    rilegge ogni corpo tenuto dal suo ritaglio ('report_body'). Quelle
+    richieste non entrano in `calls`, che resta l'elenco delle richieste
+    sull'inventario globale (le «una volta sola» di questi test), ma in
+    `crop_calls` quando e' dato; la risposta e' una lettura che non afferma
+    nulla, cosi' le righe restano quelle dell'inventario che i test verificano.
+    La lettura per ritaglio e' provata in tests/test_photo_crop_reading.py.
+    """
     def call(**kwargs):
+        if kwargs['tool']['function']['name'] == 'report_body':
+            if crop_calls is not None:
+                crop_calls.append(kwargs)
+            return {'class': 'unknown', 'package': '', 'tab': False, 'marking': '',
+                    'leads_by_side': {'left': None, 'right': None, 'top': None,
+                                      'bottom': None}}
         calls.append(kwargs)
         return _response(_candidates(kwargs))
     return call
@@ -356,6 +371,37 @@ def test_relaunch_pays_once_for_the_saved_proposals_and_restarts_matching(prepar
     assert [r['_id'] for r in inv.load_review_bundle(window._project_dir()).proposals] == [1]
 
 
+@pytest.mark.parametrize('stored', ['Relaunch crop instructions', None])
+def test_relaunch_reads_every_body_with_the_crop_prompt_of_the_profile(prepared, monkeypatch,
+                                                                       stored):
+    """@brief HANDOFF 146 V2: the relaunch runs the crop reading with the profile text.
+
+    The worker receives the crop prompt from the same profile snapshot as the
+    ExtractWorker, and every 'report_body' request carries it; with the
+    factory default stored, the factory text is sent.
+    """
+    import kicadgen.services.openrouter as openrouter
+    from kicadgen.services.photo_crop_reading import SYSTEM_PROMPT
+    window, _cache, calls, _started, warnings = prepared
+    if stored:
+        window.profile_store.save_defaults({'crop_prompt': stored})
+    crop_calls = []
+    monkeypatch.setattr(openrouter, 'call_tool', _answer_call(calls, crop_calls))
+    _save_evidence(_cache, [_proposal(1)])
+    window._on_extracted(_params())
+    _answer(monkeypatch, QDialog.DialogCode.Accepted, [_proposal(1)])
+    window.btn_reopen_review.click()
+    window.btn_relaunch_inventory.click()
+    worker = _run_worker(window)
+    expected = stored or SYSTEM_PROMPT
+    assert worker.crop_prompt == window.profile_store.snapshot(window._profile_key())['crop_prompt']
+    assert warnings == [] and len(calls) == 1
+    assert len(crop_calls) == 2
+    assert {c['system_prompt'] for c in crop_calls} == {expected}
+    assert {c['model'] for c in crop_calls} == {window._photo_detector_model()}
+    assert window._last_extracted.components_3d[0]['_crop_reading'] == 'agreed'
+
+
 def test_relaunch_after_restart_updates_components_without_auto_generation(prepared, monkeypatch):
     """@brief Senza estrazione in sessione il rilancio aggiorna i componenti e non avvia footprint/3D."""
     window, _cache, calls, started, warnings = prepared
@@ -480,7 +526,7 @@ def test_new_extraction_resets_the_reviewed_and_synthesized_flags(prepared, monk
 
     monkeypatch.setattr(gui, 'ExtractWorker', _NeverStarts)
     profile = dict(model='m', grounding_prompt='', verification_prompt='',
-                   terminal_prompt='', system_prompt='')
+                   terminal_prompt='', crop_prompt='', system_prompt='')
     with pytest.raises(RuntimeError, match='worker di prova'):
         window._start_extract_worker([], None, profile, 'vlm', None)
     assert window._reviewed_this_extraction is False

@@ -232,7 +232,10 @@ card, one retry on unreadable inventory JSON, spin box arrows; points 138-139: a
 audit and fixes — data-derived half-hole count, relative-centre recount check, cost queue and
 status bar, CI hang report; points 140-141: estimated sizes never used as measures, estimated
 pads reduced to fit, AI-only bodies discarded or left out until kept; point 142: the AI
-counts castellated contacts in its first call, with enlarged edge strips) is 6031 passed,
+counts castellated contacts in its first call, with enlarged edge strips; points 144-146,
+committed on `FIX` only, not merged: per-body enlarged crop reading read twice, image
+limits per provider, crop prompt chosen on a bench and editable in the profile dialog,
+failed readings kept apart from disagreements) is 6115 passed,
 6 skipped, 2 expected failures and 19 subtests, run in two halves (HANDOFF point 113:
 the single-process run can die at random with a native Qt/VTK crash). The last packaging integration was merge
 commit `692ca95` on `main`. Keep these values aligned with HANDOFF.md.

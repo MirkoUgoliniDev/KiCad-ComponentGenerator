@@ -71,6 +71,17 @@ def _main_response():
                     dict(edge='left', count=2, pitch_mm=2.54, first_pin=1)])
 
 
+def _uninformative_crop_reading():
+    """A crop reading that states nothing (unknown class, no package, no side counted).
+
+    Two such readings agree but change no field of the row, so these tests
+    keep checking the global inventory's own output; the crop reading itself
+    is tested in tests/test_photo_crop_reading.py.
+    """
+    return {'class': 'unknown', 'package': '', 'tab': False, 'marking': '',
+            'leads_by_side': {'left': None, 'right': None, 'top': None, 'bottom': None}}
+
+
 @pytest.fixture
 def pipeline(monkeypatch, tmp_path):
     """@brief Keep IO boundaries local while exercising the application entrypoint."""
@@ -95,11 +106,19 @@ def pipeline(monkeypatch, tmp_path):
     global_review = Mock(wraps=global_inventory.review_global_inventory)
     monkeypatch.setattr(global_inventory, 'review_global_inventory', global_review)
     state = dict(main=_main_response(), inventory=_inventory_response(), requests=[],
+                 crop_requests=[], crop_reading=_uninformative_crop_reading(),
                  logs=[], detection=detection, setup=setup, credit=credit, global_review=global_review)
 
     def fake_api(**kwargs):
-        state['requests'].append(deepcopy(kwargs))
         name = kwargs['tool']['function']['name']
+        if name == 'report_body':
+            # Contratto aggiornato (HANDOFF 144): dopo l'inventario globale ogni
+            # corpo tenuto si rilegge due volte dal suo ritaglio. Quelle
+            # chiamate si contano a parte: `requests` resta l'elenco delle
+            # chiamate sulla scheda (estrazione + UN inventario globale).
+            state['crop_requests'].append(deepcopy(kwargs))
+            return deepcopy(state['crop_reading'])
+        state['requests'].append(deepcopy(kwargs))
         if name == extractor._openai_tool()['function']['name']:
             return deepcopy(state['main'])
         assert name == 'report_global_inventory', f'Unexpected extra semantic call: {name}'
@@ -142,6 +161,9 @@ def test_extractor_yolo_calls_global_once_without_legacy_or_terminals(pipeline, 
         options['component_family'] = family
     params = pipeline['execute'](**options)
     assert len(pipeline['requests']) == 2  # Board extraction plus ONE global inventory.
+    # ...then the retained body re-read twice from its own crop (HANDOFF 144).
+    assert len(pipeline['crop_requests']) == 2
+    assert {r['model'] for r in pipeline['crop_requests']} == {'offline/global'}
     request = pipeline['requests'][1]
     assert request['tool']['function']['name'] == 'report_global_inventory'
     assert request['model'] == 'offline/global'
@@ -168,6 +190,8 @@ def test_extractor_yolo_calls_global_once_without_legacy_or_terminals(pipeline, 
     assert row['_reported_rotation_deg'] == 25 and row['rotation_deg'] == 0
     assert row['_height_estimated'] and not row['_orientation_verified']
     assert row['_global_inventory_status'] == 'validated_hypotheses'
+    # The crop reading's outcome reaches the delivered row (HANDOFF 144).
+    assert row['_crop_reading'] == 'agreed' and len(row['_crop_readings']) == 2
     assert row['_global_inventory_errors'] == []
     assert row['_global_inventory_uncertainties'] == ['Pin1 and actual height unresolved']
     assert row['_global_inventory_prompt_version'] == global_inventory.PROMPT_VERSION
@@ -450,3 +474,30 @@ def test_the_inventory_traceback_in_the_ai_log_is_scrubbed(pipeline, monkeypatch
     assert len(lines) == 1
     assert 'RuntimeError' in lines[0] and 'board.png' in lines[0]
     assert home.lower() not in lines[0].lower()
+
+
+@pytest.mark.parametrize('detector', ['yolo', 'vlm'])
+@pytest.mark.parametrize('given,expected', [
+    ('Profile crop instructions', 'Profile crop instructions'),
+    (None, 'factory'),
+    ('   ', 'factory'),
+])
+def test_extractor_sends_the_profile_crop_prompt_to_every_crop_reading(pipeline, given, expected,
+                                                                       detector):
+    """@brief The profile field crop_prompt reaches read_bodies; none or blank sends the factory text.
+
+    Both detectors that go through the global inventory ('yolo' and 'vlm')
+    run the crop reading. The delivered row records the digest of the text
+    actually sent (HANDOFF 146 V5): the whitelist of _components_3d keeps it.
+    """
+    from kicadgen.services.component_types import text_digest
+    from kicadgen.services.photo_crop_reading import SYSTEM_PROMPT
+    params = pipeline['execute'](crop_prompt=given, photo_detector=detector)
+    sent = {request['system_prompt'] for request in pipeline['crop_requests']}
+    assert len(pipeline['crop_requests']) == 2
+    effective = SYSTEM_PROMPT if expected == 'factory' else expected
+    assert sent == {effective}
+    [row] = params.components_3d
+    assert row['_crop_reading_prompt_digest'] == text_digest(effective)
+    if detector == 'vlm':
+        pipeline['detection'].assert_not_called()   # really the vision-only route

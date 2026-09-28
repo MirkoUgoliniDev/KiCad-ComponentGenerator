@@ -3597,6 +3597,7 @@ class MainWindow(QMainWindow):
             grounding_prompt=profile['grounding_prompt'],
             verification_prompt=profile['verification_prompt'],
             terminal_prompt=profile['terminal_prompt'],
+            crop_prompt=profile['crop_prompt'],
             document_roles=document_roles,
             component_family=self._selected_family(),
             photo_detector=photo_detector,
@@ -4561,7 +4562,8 @@ class MainWindow(QMainWindow):
         @param photo_png Calibrated photograph the proposals refer to.
         @param params Base ExtractedParams the inventory is grafted on.
         @param model Model that receives the single paid request.
-        @param profile AI profile snapshot (verification prompt).
+        @param profile AI profile snapshot (verification and crop prompts),
+            the same ProfileStore.snapshot source as the ExtractWorker.
         @param synthesized True when `params` was built from the fields rather
             than extracted: automatic generation is then withheld.
         @throws Exception Anything raised by the worker set-up or start; the
@@ -4576,10 +4578,14 @@ class MainWindow(QMainWindow):
             self._append_log(tx("Nessuna estrazione in questa sessione: l'inventario rilanciato "
                                 "aggiorna i componenti senza avviare la generazione automatica."))
         self._set_review_buttons_enabled(False)
-        # Dichiarata PRIMA di partire, nel log e nella modale: e' l'unica
-        # spesa di questo percorso e chi preme deve saperlo prima, non dopo.
+        # Dichiarata PRIMA di partire, nel log e nella modale: chi preme deve
+        # sapere prima, non dopo, che cosa si paga. Oltre alla richiesta
+        # sull'inventario il rilancio rilegge ogni corpo dal suo ritaglio e le
+        # sigle, come l'estrazione (HANDOFF 146 V2).
         announcement = (tx("Rilancio dell'inventario su {n_proposals} proposte da {name}: una "
-                           "richiesta a pagamento al modello {model}.",
+                           "richiesta a pagamento al modello {model} per l'inventario, poi le "
+                           "letture a pagamento dei singoli corpi e delle sigle (riprese dalla "
+                           "cache se gia' pagate).",
                            n_proposals=len(bundle.proposals),
                            name=bundle.json_path.name,
                            model=model))
@@ -4591,6 +4597,7 @@ class MainWindow(QMainWindow):
             photo_png, bundle.proposals, bundle.body_length_mm, bundle.body_width_mm, model,
             self._photo_cache_dir(),
             declared=declared, verification_prompt=profile['verification_prompt'],
+            crop_prompt=profile['crop_prompt'],
             extra_instructions=self.field_component_prompt.toPlainText().strip() or None,
             # Il nome del rilevatore e' quello con cui i riquadri sono nati,
             # registrato nel pacchetto, qualunque cosa dica ora la tendina.
