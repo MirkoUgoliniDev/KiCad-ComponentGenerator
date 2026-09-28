@@ -79,6 +79,23 @@ class ProjectCosts:
     #: DeepSeek calls priced from their recorded tokens without the cache
     #: split (cost_source "token_price_estimate"): upper bounds.
     estimated_calls: int = 0
+    #: Number of the current analysis (start_run), 0 when none was started
+    #: since the file records analyses (HANDOFF point 135).
+    run: int = 0
+    #: When the current analysis started (ISO, UTC), "" without one.
+    run_started: str = ""
+    #: Paid calls of the current analysis: every call recorded after its
+    #: start, reruns included, until the next start_run.
+    run_usd: float = 0.0
+    run_calls: int = 0
+    run_calls_without_cost: int = 0
+    #: provider -> (total_usd, calls, calls_without_cost) of the current analysis.
+    run_by_provider: dict = None
+
+    @property
+    def run_complete(self) -> bool:
+        """@brief Tell whether every call of the current analysis reported its cost."""
+        return self.run_calls_without_cost == 0
 
     @property
     def complete(self) -> bool:
@@ -112,6 +129,9 @@ def _read(path: Path) -> Optional[dict]:
     calls = _count(data.get("calls"))
     missing = _count(data.get("calls_without_cost"))
     entries = data.get("entries")
+    run = data.get("run", 0)
+    if _count(run) is None or not isinstance(data.get("runs", []), list):
+        raise ProjectCostsError(f"{path.name}: invalid analyses")
     if (total is None or total < 0 or calls is None or missing is None
             or missing > calls or not isinstance(entries, list)
             or not isinstance(data.get("since", ""), str)):
@@ -176,12 +196,24 @@ def _price_deepseek_calls(data: dict) -> None:
 
 def _totals(data: dict) -> ProjectCosts:
     """Totals of a validated file content."""
+    run = data.get("run", 0)
+    started = ""
+    for entry in data.get("runs", ()):
+        if isinstance(entry, dict) and entry.get("run") == run:
+            started = str(entry.get("started") or "")
+    current = _by_provider(data, run=run) if run else {}
     return ProjectCosts(total_usd=float(data["total_usd"]), calls=data["calls"],
                         calls_without_cost=data["calls_without_cost"],
                         since=data.get("since", ""), by_provider=_by_provider(data),
                         estimated_calls=sum(1 for entry in data["entries"]
                                             if isinstance(entry, dict) and entry.get(
-                                                "cost_source") == "token_price_estimate"))
+                                                "cost_source") == "token_price_estimate"),
+                        run=run, run_started=started,
+                        run_usd=sum(total for total, _calls, _missing in current.values()),
+                        run_calls=sum(calls for _total, calls, _missing in current.values()),
+                        run_calls_without_cost=sum(
+                            missing for _total, _calls, missing in current.values()),
+                        run_by_provider=current)
 
 
 def load_project_costs(project_dir: Path) -> ProjectCosts:
@@ -198,12 +230,17 @@ def load_project_costs(project_dir: Path) -> ProjectCosts:
     return _totals(data)
 
 
-def _by_provider(data: dict) -> dict:
-    """Totals per provider from the entries (a damaged entry is skipped)."""
+def _by_provider(data: dict, run: Optional[int] = None) -> dict:
+    """Totals per provider from the entries (a damaged entry is skipped).
+
+    With `run`, only the entries recorded during that analysis.
+    """
     from .providers import provider_of
     totals = {}
     for entry in data.get("entries") or ():
         if not isinstance(entry, dict):
+            continue
+        if run is not None and entry.get("run") != run:
             continue
         provider = provider_of(str(entry.get("model") or ""))
         total, calls, missing = totals.get(provider, (0.0, 0, 0))
@@ -232,18 +269,52 @@ def add_call(project_dir: Path, record: dict, now: Optional[datetime] = None) ->
         (LOCK_FILE), so two instances writing the same project never lose a
         call to each other.
     """
+    return _locked_update(Path(project_dir), lambda folder: _add_call_once(folder, record, now))
+
+
+def start_run(project_dir: Path, now: Optional[datetime] = None) -> ProjectCosts:
+    """@brief Start a new analysis: calls recorded from now on belong to it.
+
+    @param project_dir Project folder; created if missing.
+    @param now Start time (UTC now by default).
+    @return The totals, with the new analysis empty.
+    @throws ProjectCostsError, OSError As `add_call`, with the same guarantees.
+    @note The GUI shows the cost of the current analysis, not the project
+        total (user decision 2026-09-28): one analysis runs from one «Estrai
+        parametri con AI» to the next, the paid reruns in between included.
+    """
+    return _locked_update(Path(project_dir), lambda folder: _start_run_once(folder, now))
+
+
+def _locked_update(folder: Path, update) -> ProjectCosts:
+    """Run one read-modify-write under the lock, retrying a busy file."""
     pause = RETRY_FIRST_PAUSE_S
-    folder = Path(project_dir)
     for attempt in range(RETRY_ATTEMPTS):
         try:
             with _exclusive_lock(folder):
-                return _add_call_once(folder, record, now)
+                return update(folder)
         except PermissionError:
             if attempt == RETRY_ATTEMPTS - 1:
                 raise
             time.sleep(pause)
             pause *= 2
     raise AssertionError("unreachable")
+
+
+def _empty(stamp: str) -> dict:
+    """Content of a cost file with nothing recorded yet."""
+    return {"format": FORMAT, "version": VERSION, "since": stamp, "total_usd": 0.0,
+            "calls": 0, "calls_without_cost": 0, "entries": []}
+
+
+def _start_run_once(folder: Path, now: Optional[datetime]) -> ProjectCosts:
+    """One read-modify-write that opens a new analysis (see `start_run`)."""
+    path = folder / COSTS_FILE
+    stamp = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
+    data = _read(path) or _empty(stamp)
+    data["run"] = data.get("run", 0) + 1
+    data.setdefault("runs", []).append({"run": data["run"], "started": stamp})
+    return _save(folder, path, data)
 
 
 def _lock_identity(stat_result: os.stat_result) -> tuple:
@@ -334,9 +405,7 @@ def _add_call_once(folder: Path, record: dict, now: Optional[datetime]) -> Proje
     """One read-modify-write of the cost file (see `add_call`)."""
     path = folder / COSTS_FILE
     stamp = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
-    data = _read(path) or {"format": FORMAT, "version": VERSION, "since": stamp,
-                           "total_usd": 0.0, "calls": 0, "calls_without_cost": 0,
-                           "entries": []}
+    data = _read(path) or _empty(stamp)
     cost = finite_number(record.get("cost_usd"))
     if cost is not None and cost < 0:
         cost = None
@@ -353,6 +422,8 @@ def _add_call_once(folder: Path, record: dict, now: Optional[datetime]) -> Proje
     }
     if cost is not None and isinstance(record.get("cost_source"), str):
         entry["cost_source"] = record["cost_source"]
+    if data.get("run"):
+        entry["run"] = data["run"]
     data["entries"].append(entry)
     return _save(folder, path, data)
 

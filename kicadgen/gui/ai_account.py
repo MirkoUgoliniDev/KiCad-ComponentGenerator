@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import QLabel
 from ..services import openrouter
 from ..services import providers
 from ..services.messages import tx
-from ..services.project_costs import ProjectCostsError, add_call, load_project_costs
+from ..services.project_costs import ProjectCostsError, add_call, load_project_costs, start_run
 
 
 def format_usd(amount: float) -> str:
@@ -39,6 +39,24 @@ def format_usd(amount: float) -> str:
     if 0 < amount < 0.00005:
         return "< 0.0001"
     return f"{amount:.2f}" if abs(amount) >= 1 else f"{amount:.4f}"
+
+
+def _analysis_cost_text(costs) -> str:
+    """@brief Text of the current analysis cost for the account line and the status bar.
+
+    @param costs ProjectCosts of the project.
+    @return «Costo dell'analisi: …» in the active language.
+    @note A project whose calls predate the analyses records (no analysis
+        started yet) says so instead of showing a zero it does not know.
+    """
+    if not costs.run:
+        return (tx("Costo dell'analisi: nessuna analisi registrata") if costs.calls
+                else tx("Costo dell'analisi: nessuna chiamata a pagamento"))
+    if not costs.run_calls:
+        return tx("Costo dell'analisi: nessuna chiamata a pagamento")
+    if costs.run_complete:
+        return tx("Costo dell'analisi: {amount} USD", amount=format_usd(costs.run_usd))
+    return tx("Costo dell'analisi: almeno {amount} USD", amount=format_usd(costs.run_usd))
 
 
 def _local_date(stamp: str) -> str:
@@ -148,6 +166,21 @@ class AiAccountLine(QLabel):
         with self._run_lock:
             self._run_bound = True
             self._run_project = Path(folder) if folder is not None else None
+
+    def start_analysis(self, folder) -> None:
+        """@brief Open a new analysis in the project's cost file (HANDOFF point 135).
+
+        @param folder Project folder of the analysis starting now, or None
+            (no name yet: nothing is recorded, as for its calls).
+        @note Queued with the paid calls and written in the same order, so a
+            late call of the previous analysis, still waiting for a busy file,
+            is never counted in the new one.
+        """
+        if folder is None:
+            return
+        self._pending.append((Path(folder), {"_start_run": True}))
+        self._flush_pending()
+        self.refresh()
 
     def release_run_project(self) -> None:
         """@brief Stop charging calls to the bound run; later calls go to the project in use.
@@ -276,7 +309,10 @@ class AiAccountLine(QLabel):
         while self._pending:
             folder, record = self._pending[0]
             try:
-                add_call(folder, record)
+                if record.get("_start_run"):
+                    start_run(folder)
+                else:
+                    add_call(folder, record)
             except ProjectCostsError as exc:
                 # File damaged: never overwritten, so the call cannot go in.
                 # One line per dropped call, never de-duplicated.
@@ -356,29 +392,33 @@ class AiAccountLine(QLabel):
             try:
                 costs = load_project_costs(folder)
             except OSError:
-                parts.append(tx("Costo del progetto: lettura…"))
+                parts.append(tx("Costo dell'analisi: lettura…"))
             except ProjectCostsError as exc:
-                parts.append(tx("Costo del progetto: non leggibile"))
+                parts.append(tx("Costo dell'analisi: non leggibile"))
                 details.append(tx("File dei costi non leggibile, lasciato com’è: {exc}",
                                   exc=exc))
             else:
-                if not costs.calls:
-                    parts.append(tx("Costo del progetto: nessuna chiamata a pagamento"))
-                elif costs.complete:
-                    parts.append(tx("Costo del progetto: {amount} USD",
-                                    amount=format_usd(costs.total_usd)))
-                else:
-                    parts.append(tx("Costo del progetto: almeno {amount} USD",
-                                    amount=format_usd(costs.total_usd)))
-                # Diviso per fornitore sulla riga stessa (utente, 27/09: il
-                # totale accanto al saldo DeepSeek sembrava la spesa DeepSeek).
+                # Solo l'analisi corrente sulla riga (utente, 28/09); il totale
+                # del progetto resta nel suggerimento.
+                parts.append(_analysis_cost_text(costs))
                 split = sorted((provider, total) for provider, (total, _calls, _missing)
-                               in (costs.by_provider or {}).items())
+                               in (costs.run_by_provider or {}).items())
                 if len(split) > 1:
+                    # Diviso per fornitore (utente, 27/09: un totale unico accanto
+                    # al saldo DeepSeek sembrava la spesa DeepSeek).
                     parts[-1] += " (" + " · ".join(
                         f"{providers.PROVIDER_SHORT_LABELS.get(provider, provider)} "
                         f"{format_usd(total)}"
                         for provider, total in split) + ")"
+                if costs.run:
+                    details.append(tx("Analisi corrente iniziata il {since}: {calls} chiamate a "
+                                      "pagamento, rilanci compresi.",
+                                      since=_local_date(costs.run_started),
+                                      calls=costs.run_calls))
+                if costs.calls:
+                    details.append(tx("Costo totale del progetto: {amount} USD",
+                                      amount=format_usd(costs.total_usd))
+                                   + ("" if costs.complete else " (+?)"))
                 since = _local_date(costs.since)
                 if costs.calls == 1:
                     details.append(tx("Costo del progetto: 1 chiamata a pagamento dal "

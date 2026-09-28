@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 
 from ..core.validation import covered_fraction, iou
-from .openrouter import OpenRouterError
+from .openrouter import OpenRouterError, ToolArgumentsError
 from .photo_audit import valid_fraction_box as _valid_box, write_stage_audit as _write_audit
 from .photo_inventory import draw_inventory, image_block
 from .photo_markings import MARKING_RULES
@@ -1374,6 +1374,21 @@ def _leads_by_side_inconsistent(row):
             and type(row.get('lead_count')) is int and sum(counts) != row['lead_count'])
 
 
+def _call_once(call, kwargs) -> dict:
+    """One paid inventory call; a failure becomes {'error': text} as before.
+
+    An answer whose tool arguments are not a JSON object also carries
+    `raw_arguments` (what the model sent, kept for the stage audit) and
+    `_unreadable`, the only failure worth paying once more for.
+    """
+    try:
+        return call(**kwargs)
+    except ToolArgumentsError as exc:
+        return {'error': str(exc), 'raw_arguments': exc.raw, '_unreadable': True}
+    except (OpenRouterError, ValueError, OSError) as exc:
+        return {'error': str(exc)}
+
+
 def review_global_inventory(photo, components, length, width, model, call, log, cache_dir=None,
                             *, verification_prompt=None, extra_instructions=None,
                             detector_ran=False):
@@ -1527,10 +1542,27 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     if data is None:
         images = sum(1 for block in content if block.get('type') == 'image_url')
         log(paid_request_message(images, len(candidates), enumerating, empty_detector))
-        try:
-            data = call(**kwargs)
-        except (OpenRouterError, ValueError, OSError) as exc:
-            data = {'error': str(exc)}
+        data = _call_once(call, kwargs)
+        if data.get('_unreadable') if isinstance(data, dict) else False:
+            # Il modello ha risposto con lo strumento giusto ma con argomenti
+            # illeggibili: la STESSA richiesta puo' tornare leggibile, quindi
+            # un solo nuovo tentativo a pagamento (utente, 28/09, punto 137).
+            # Rifiuti, errori di rete e di credito non passano di qui.
+            log(tx("Inventario globale: la risposta del modello non era un JSON leggibile; un "
+                   "solo nuovo tentativo a pagamento con la stessa richiesta."))
+            second = _call_once(call, kwargs)
+            if isinstance(second, dict) and not second.get('error'):
+                data = second
+                log(tx("Inventario globale: il nuovo tentativo e' leggibile; si usa quello."))
+            else:
+                # Si tiene il primo fallimento, con il testo ricevuto per l'audit,
+                # e si dice che anche la seconda chiamata pagata non e' servita.
+                data['retry_error'] = second.get('error') if isinstance(second, dict) else None
+                data['retry_raw_arguments'] = (second.get('raw_arguments')
+                                               if isinstance(second, dict) else None)
+                log(tx("Inventario globale: anche il nuovo tentativo e' fallito ({detail}); "
+                       "restano le proposte del rilevatore come ipotesi generiche.",
+                       detail=_inline_detail(data['retry_error'] or '?')))
         # Una risposta che omette un campo obbligatorio su ogni riga non e'
         # incompleta per caso: il modello ha ignorato lo schema. Si ritenta
         # UNA volta, a pagamento, dicendo quali campi mancavano -- e' l'unica

@@ -4,6 +4,8 @@ import math
 import re
 from time import monotonic
 
+from ..services.messages import WARNING, kind_of
+
 from PyQt6.QtCore import QEvent, QPointF, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPalette,
                          QPen, QTextDocument)
@@ -257,6 +259,9 @@ _TERM_SEPARATOR = " — "
 #: numero, non sulla frase che passa in quel momento: una scheda che cambia
 #: altezza a ogni messaggio e' piu' fastidiosa di una scheda un po' piu' alta.
 _STATUS_LINES = 3
+#: Completed phases listed on the card (HANDOFF point 135): the most recent
+#: ones, one row each. Bounded so the card cannot outgrow a small window.
+PHASE_HISTORY_ROWS = 4
 
 #: Margine interno orizzontale della scheda (per lato), usato sia dal layout sia
 #: dal calcolo della larghezza: vanno d'accordo per costruzione.
@@ -844,6 +849,29 @@ class AnalysisOverlay(QWidget):
         self.steps.setProperty("i18n_skip", True)
         self.steps.hide()
         content.addWidget(self.steps)
+        # Le fasi gia' concluse di questa operazione, con il loro esito
+        # (utente, 2026-09-28): una fase locale come OpenCV dura meno di un
+        # secondo e senza questo elenco non si vedeva nemmeno passare.
+        self.phases = QLabel()
+        self.phases.setObjectName("analysisPhases")
+        self.phases.setTextFormat(Qt.TextFormat.RichText)
+        self.phases.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.phases.setProperty("i18n_skip", True)
+        self.phases.hide()
+        content.addWidget(self.phases)
+        #: Fasi concluse: (nome dello strumento, esito, e' un avviso), gia' tradotti.
+        self._phase_history: list[tuple[str, str, bool]] = []
+        #: Vero dall'avvio di un'operazione finche' non dichiara dei passi:
+        #: le righe dell'elenco sono riservate da subito (`_size_the_card`),
+        #: come le altre righe facoltative, cosi' la scheda non cresce quando
+        #: la prima fase finisce.
+        self._phases_reserved = False
+        #: Fase in corso: chiave, nome tradotto, primo stato mostrato (il suo
+        #: esito) e ultimo avviso, che lo sostituisce.
+        self._phase_key = ""
+        self._phase_name = ""
+        self._phase_last_status = ""
+        self._phase_warning = ""
         #: Testi (gia' tradotti) dei passi, passo corrente, motivi di chi non c'e'.
         self._step_labels: list[str] = []
         self._step_current = -1
@@ -1123,6 +1151,7 @@ class AnalysisOverlay(QWidget):
             len(self._step_labels) * self.steps.fontMetrics().lineSpacing()
             + self.steps.fontMetrics().lineSpacing() // 2 if self._step_labels else 0)
         self.cost.setMinimumHeight(self.cost.fontMetrics().lineSpacing())
+        self.phases.setMinimumHeight(0)
         # Anche il tempo trascorso: nasce vuoto e riceve il primo testo in
         # `start`, DOPO questo calcolo. Una label vuota e una con testo non
         # chiedono la stessa altezza (14 e 12 px su una piattaforma di prova),
@@ -1132,10 +1161,23 @@ class AnalysisOverlay(QWidget):
         # Spazio riservato anche quando la riga e' nascosta: evita che la scheda
         # salti quando lo strumento, la barra o il costo compaiono a operazione
         # avviata. La visibilita' logica non cambia (isVisibleTo resta falso).
-        for row in (self.tool, self.progress_row, self.cost):
+        for row in (self.tool, self.progress_row, self.cost, self.phases):
             policy = row.sizePolicy()
             policy.setRetainSizeWhenHidden(True)
             row.setSizePolicy(policy)
+        # Le righe delle fasi concluse prendono solo lo spazio che la finestra
+        # avanza DOPO tutto il resto, fino a PHASE_HISTORY_ROWS: una finestra
+        # bassa ne mostra meno (o nessuna) invece di far uscire la scheda.
+        spare = self._available_card_height() - self.card.sizeHint().height()
+        rows = 0
+        if getattr(self, "_phases_reserved", False):
+            # Altezza misurata sul testo vero (righe della tabella comprese),
+            # non stimata: una stima corta faceva crescere la scheda di qualche
+            # pixel a ogni fase.
+            while rows < PHASE_HISTORY_ROWS and self._phase_rows_height(rows + 1) <= spare:
+                rows += 1
+        self._phase_rows = rows
+        self.phases.setMinimumHeight(self._phase_rows_height(rows) if rows else 0)
         self.card.setMinimumHeight(self.card.sizeHint().height())
 
     def changeEvent(self, event):
@@ -1224,6 +1266,8 @@ class AnalysisOverlay(QWidget):
         self.started_at = monotonic()
         self._hidden_at = None
         self.spinner.angle = 0
+        self.clear_phases()
+        self._phases_reserved = True
         self.set_tool(None)
         self.clear_steps()
         self.close_button.hide()
@@ -1263,6 +1307,12 @@ class AnalysisOverlay(QWidget):
         # il nome dello strumento si traduce qui, prima di comporla.
         if name and self.i18n is not None:
             name = self.i18n.text(name)
+        if key != self._phase_key:
+            # Un altro strumento: la fase di prima e' conclusa (vedi _end_phase).
+            self._end_phase()
+            self._phase_key, self._phase_name = (key, name) if name else ("", "")
+            self._phase_last_status = self._phase_warning = ""
+            self._render_phases()
         self.spinner.set_tool(glyph, color)
         source = TRANSFER_SOURCES.get(key)
         if source is not None:
@@ -1285,6 +1335,10 @@ class AnalysisOverlay(QWidget):
             (e.g. FreeCAD missing), drawn struck through with the reason.
         """
         translate = self.i18n.text if self.i18n is not None else (lambda text: text)
+        # Un lavoro a passi spunta i suoi passi: l'elenco delle fasi non serve
+        # e il suo spazio torna allo stato (il ridimensionamento e' qui sotto).
+        self._phases_reserved = False
+        self.clear_phases()
         self._step_labels = [translate(str(label)) for label in labels]
         self._step_unavailable = {int(index): translate(str(reason))
                                   for index, reason in (unavailable or {}).items()}
@@ -1314,6 +1368,7 @@ class AnalysisOverlay(QWidget):
             «Chiudi», which emits `closed`.
         """
         self.timer.stop()
+        self._end_phase()
         if self._step_labels:
             self._step_current = len(self._step_labels)
             self._render_steps()
@@ -1332,6 +1387,84 @@ class AnalysisOverlay(QWidget):
         self.close_button.hide()
         self.stop()
         self.closed.emit()
+
+    def clear_phases(self):
+        """@brief Forget the completed phases (a new operation starts)."""
+        self._phase_history = []
+        self._phase_key = self._phase_name = self._phase_last_status = self._phase_warning = ""
+        self.phases.clear()
+        self.phases.setToolTip("")
+        self.phases.hide()
+
+    def phases_plain_text(self):
+        """@brief The completed phases as plain text, marks included (for logs and tests)."""
+        document = QTextDocument()
+        document.setHtml(self.phases.text())
+        return document.toPlainText()
+
+    def _end_phase(self):
+        """Move the running phase, if any, into the completed list with its outcome.
+
+        The outcome is the FIRST status the phase showed -- what the tool says
+        about its own work right after it is announced; the last one is often
+        the preparation of the next phase -- or, when the phase issued a
+        warning (messages.WARNING), that warning. No phase-specific wording,
+        so a new phase is listed without code here. A job with steps
+        (`set_steps`) already ticks its steps: nothing listed.
+        """
+        if not self._phase_name or self._step_labels:
+            self._phase_key = self._phase_name = self._phase_last_status = ""
+            self._phase_warning = ""
+            return
+        warned = bool(self._phase_warning)
+        self._phase_history.append((self._phase_name,
+                                    self._phase_warning or self._phase_last_status, warned))
+        self._phase_key = self._phase_name = self._phase_last_status = self._phase_warning = ""
+        self._render_phases()
+
+    #: Colours of the phase rows: done, done with a warning, running.
+    _PHASE_COLORS = {"done": "#a6e3a1", "warning": "#f9e2af", "running": "#f5e0dc"}
+
+    @classmethod
+    def _phase_rows_html(cls, lines):
+        """Rich text of the phase list: one table row per (text, state) line."""
+        rows = "".join(f"<tr><td style='padding:1px 0; color:{cls._PHASE_COLORS[state]}'>"
+                       f"{html.escape(text)}</td></tr>" for text, state in lines)
+        return f"<table align='center' cellspacing='0'>{rows}</table>" if rows else ""
+
+    def _phase_rows_height(self, count):
+        """Height in px that `count` rows of the list really take in the label."""
+        probe = QLabel()
+        probe.setTextFormat(Qt.TextFormat.RichText)
+        probe.setFont(self.phases.font())
+        probe.setText(self._phase_rows_html([("✓ M", "done")] * count))
+        return probe.sizeHint().height()
+
+    def _render_phases(self):
+        rows_room = getattr(self, "_phase_rows", PHASE_HISTORY_ROWS)
+        metrics = self.phases.fontMetrics()
+        width = self._status_text_width()
+        running = self._phase_name and not self._step_labels
+        # The running phase is the last row, marked «●» (user, 2026-09-28:
+        # with ticks only, every phase looked finished); the completed ones
+        # fill the rows above it, the most recent first to stay.
+        room = max(0, rows_room - (1 if running else 0))
+        shown = self._phase_history[-room:] if room else []
+        lines = []
+        for name, outcome, warned in shown:
+            text = f"{'⚠' if warned else '✓'} " + (f"{name} — {outcome}" if outcome else name)
+            lines.append((metrics.elidedText(text, Qt.TextElideMode.ElideRight, width),
+                          "warning" if warned else "done"))
+        if running and rows_room:
+            text = "● " + self._phase_name + " — " + (
+                self.i18n.text("in corso") if self.i18n is not None else "in corso")
+            lines.append((metrics.elidedText(text, Qt.TextElideMode.ElideRight, width),
+                          "running"))
+        self.phases.setText(self._phase_rows_html(lines))
+        self.phases.setToolTip("\n".join(
+            f"{'⚠' if warned else '✓'} {name}" + (f" — {outcome}" if outcome else "")
+            for name, outcome, warned in self._phase_history))
+        self.phases.setVisible(bool(lines))
 
     def clear_steps(self):
         """@brief Hide the step row (single-phase operations have none)."""
@@ -1449,11 +1582,20 @@ class AnalysisOverlay(QWidget):
             `PlainText`, letterale com'era.
         """
         # Full messages stay in the log; keep the card stable for long replies.
+        warned = kind_of(message) == WARNING
         source = " ".join(str(message).split())
         if is_machine_line(source):
             return
         text = self.i18n.text(source) if self.i18n is not None else source
         self._status_source = elide_paths(text)
+        if self._phase_name:
+            shown = " ".join(self._status_source.split())
+            # Esito della fase: il PRIMO stato dopo il suo annuncio; un avviso
+            # (l'ultimo) lo sostituisce, perche' e' cio' che va guardato.
+            if not self._phase_last_status:
+                self._phase_last_status = shown
+            if warned:
+                self._phase_warning = shown
         self._render_status()
 
     def status_plain_text(self):

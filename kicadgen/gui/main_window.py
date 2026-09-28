@@ -2924,7 +2924,13 @@ class MainWindow(QMainWindow):
         self._refresh_status_bar(facts["name"])
 
     def _refresh_status_bar(self, named: bool) -> None:
-        """@brief Show the open project and its AI cost in the status bar."""
+        """@brief Show the open project and the AI cost of its current analysis in the status bar.
+
+        @param named True when a project is open.
+        @note Only the current analysis (user, 2026-09-28): from the last
+            «Estrai parametri con AI», reruns included. The project total is
+            in the tooltip.
+        """
         label = getattr(self, "status_project", None)
         if label is None:
             return
@@ -2943,8 +2949,16 @@ class MainWindow(QMainWindow):
             self.status_cost.setText("")
             self.status_cost.setVisible(False)
             return
-        text = self.i18n.tr("status.project_cost", total=f"{costs.total_usd:.2f}", calls=costs.calls)
-        self.status_cost.setText(text + ("" if costs.complete else " (+?)"))
+        if costs.run:
+            text = self.i18n.tr("status.analysis_cost", total=f"{costs.run_usd:.2f}",
+                                calls=costs.run_calls)
+            self.status_cost.setText(text + ("" if costs.run_complete else " (+?)"))
+        else:
+            # Calls recorded before analyses were recorded: no current analysis.
+            self.status_cost.setText(self.i18n.tr("status.analysis_cost_unknown"))
+        self.status_cost.setToolTip(
+            self.i18n.tr("status.project_cost", total=f"{costs.total_usd:.2f}", calls=costs.calls)
+            + ("" if costs.complete else " (+?)"))
         self.status_cost.setVisible(True)
 
     def _on_workflow_step_clicked(self, step: str) -> None:
@@ -3835,6 +3849,8 @@ class MainWindow(QMainWindow):
         # se nel frattempo se ne apre un altro (verifica del 25/09, D7). Si
         # rilascia quando il worker finisce davvero (_on_extract_finished).
         if hasattr(self, "ai_account"):
+            # Una nuova analisi: il costo mostrato riparte da qui (utente, 28/09).
+            self.ai_account.start_analysis(self._project_dir_or_none())
             self.ai_account.bind_run_project(self._project_dir_or_none())
         self._set_extract_button_text("Analisi in corso...")
         # Dopo il testo: da qui fino alla fine della corsa il pulsante e i

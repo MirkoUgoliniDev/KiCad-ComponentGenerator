@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .openrouter import OpenRouterError
-from .messages import CACHE_HIT, WARNING, kind_of, tx, warning
+from .messages import CACHE_HIT, WARNING, as_warning, kind_of, tx, warning
 # Solo costanti: photo_refine regge l'assenza di OpenCV da se'.
 from ..core.validation import positive_number
 from .photo_refine import MIN_PACKAGE_PIXELS_HINT, SMALLEST_EXPECTED_PART_MM
@@ -583,6 +583,17 @@ def prepare_photo(path, length, width, metadata=None):
         metadata.update(source_sha256=hashlib.sha256(source_bytes).hexdigest(),
                         crop_bbox_original_px=[x0,y0,x1,y1],
                         image_width=x1-x0,image_height=y1-y0)
+        # Profili dello sfondo lungo i bordi, per contare i semi-fori
+        # (edge_notches): servono l'immagine intera e il suo sfondo, che dopo
+        # il ritaglio non ci sono piu'. Chiave privata: chi la usa la toglie.
+        from .edge_notches import MAX_NOTCH_DEPTH_MM, depth_profiles
+        from .photo_refine import _background_distance, estimate_background
+        background = estimate_background(image)
+        if background is not None:
+            scale = min((x1 - x0) / length, (y1 - y0) / width)
+            metadata["_edge_depth_px"] = depth_profiles(
+                _background_distance(image, background) <= background.tolerance,
+                (x0, y0, x1, y1), max(1, round(MAX_NOTCH_DEPTH_MM * scale)))
     return image[y0:y1, x0:x1].copy()
 
 
@@ -957,7 +968,8 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                       grounding=True, cache_dir=None, classifier_model=None, mechanical=True,
                       grounding_prompt=None, verification_prompt=None, top_photo_source='AI',
                       detector='ai', yolo_model_path=None, review_proposals=None,
-                      declared=None, phase=None, yolo_confidence=None, yolo_settings=None):
+                      declared=None, phase=None, yolo_confidence=None, yolo_settings=None,
+                      recount_contacts=None):
     """@brief Calibrate the photo and extract reviewed component envelopes.
 
     @param detector ai preserves the existing localization; yolo uses local
@@ -974,6 +986,11 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         own declared contacts among the local detector's proposals. Without
         them nothing is filtered: guessing where the contacts are would delete
         real components.
+    @param recount_contacts Optional callable(disagreements) called when the
+        half-holes counted on the calibrated photo disagree with the declared
+        castellated sides (edge_notches.count_disagreements). It may ask the
+        model to recount and update `declared` in place; the comparison is
+        then repeated and reported on the sides in force. None: report only.
     @param review_proposals Optional callable(photo_png, proposals, length_mm,
         width_mm) -> proposals kept. Runs between the local detector and the
         paid reconciliation, so a body removed here is never sent nor paid for.
@@ -1013,7 +1030,9 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     report = InventoryResult()
     def warn(message):
         report.warnings.append(message)
-        log(message)
+        # Marcato come avviso: chi mostra l'avanzamento lo distingue senza
+        # leggerne le parole (la modale lo mette in evidenza, punto 136).
+        log(as_warning(message))
     if not all(math.isfinite(v) and v > 0 for v in (length,width)):
         warn(tx("Quote PCB non valide: inventario fotografico saltato."))
         return report
@@ -1070,6 +1089,20 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
            sx=width_px / length, sy=height_px / width))
     if report.calibration.get("board_warning"):
         warn(report.calibration["board_warning"])
+    edge_profiles = report.calibration.pop("_edge_depth_px", None)
+    if isinstance(declared, dict) and declared.get("layout") == "castellated":
+        # Un conteggio dei contatti diverso da quello dichiarato va verificato:
+        # qui si segnala; il ricontrollo, se c'e', lo fa chi ha i documenti.
+        from .edge_notches import check_declared_contacts, count_disagreements
+        disagreements = count_disagreements(edge_profiles, photo.shape, length, width,
+                                            declared.get("castellated_sides"))
+        if disagreements and recount_contacts is not None:
+            # Ricontrollo AI dei soli lati in disaccordo (utente, 28/09, punto
+            # 137); poi il confronto si ripete sui lati in vigore.
+            recount_contacts(disagreements)
+        for kind, message in check_declared_contacts(
+                edge_profiles, photo.shape, length, width, declared.get("castellated_sides")):
+            (warn if kind == "warning" else log)(message)
     if top_photo_index is None:
         warn(tx("Vista dall'alto non specificata: scelta euristica {name}, verificare "
                 "la foto nel confronto.",

@@ -28,12 +28,12 @@ import re
 import tempfile
 try:
     from ..core.validation import covered_fraction
-    from .messages import tx
+    from .messages import end_sentence, tx
     from .photo_audit import AUDIT_RETENTION_PER_KIND, prune_audits
     from .photo_heights import estimate_body_height
 except ImportError:  # caricato come file a se' (test di isolamento degli import)
     from kicadgen.core.validation import covered_fraction
-    from kicadgen.services.messages import tx
+    from kicadgen.services.messages import end_sentence, tx
     from kicadgen.services.photo_audit import AUDIT_RETENTION_PER_KIND, prune_audits
     from kicadgen.services.photo_heights import estimate_body_height
 
@@ -181,7 +181,7 @@ def resolve_yolo_model(model_path=None) -> Path:
         return path
     except (OSError, TypeError, ValueError, RuntimeError) as exc:
         raise ValueError(
-            f"Cannot read local YOLO weights {selected!r}: {exc}. Supply model_path "
+            f"Cannot read local YOLO weights {selected!r}: {end_sentence(exc)} Supply model_path "
             "or set KICADGEN_YOLO_MODEL to an existing PCB .onnx or .pt detection model."
         ) from exc
 
@@ -462,7 +462,7 @@ def _setup_torch(path):
             raise ValueError(f"expected raw output [1, {4 + len(_CLASSES)}, rows], got {list(probe.shape)}")
     except Exception as exc:
         raise ValueError(
-            f"Cannot load compatible local YOLO model {path}: {exc}. Use a PCB YOLO "
+            f"Cannot load compatible local YOLO model {path}: {end_sentence(exc)} Use a PCB YOLO "
             "detection checkpoint trained at 640 px whose classes are among: "
             + ", ".join(_CLASSES) + ".") from exc
     info = {
@@ -514,7 +514,7 @@ def _setup(model_path):
             raise ValueError("CPUExecutionProvider is unavailable")
     except Exception as exc:
         raise ValueError(
-            f"Cannot load compatible local YOLO model {path}: {exc}. Use a "
+            f"Cannot load compatible local YOLO model {path}: {end_sentence(exc)} Use a "
             "self-contained PCB YOLOv8 ONNX export with fixed 640 input, raw "
             "[1, 4 + classes, 8400] output and classes among: " + ", ".join(_CLASSES)
             + "; check the CPU onnxruntime installation."

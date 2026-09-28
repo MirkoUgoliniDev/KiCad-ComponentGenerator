@@ -121,6 +121,23 @@ class MissingApiKeyError(OpenRouterError):
     """
 
 
+class ToolArgumentsError(OpenRouterError):
+    """@brief The model answered with the requested tool, but its arguments are not a JSON object.
+
+    @param message Privacy-safe diagnostic text.
+    @param raw The arguments as the model sent them, for the stage audit
+        (never logged: it is model output, possibly long); None when absent.
+    @note A subclass, so every caller that catches OpenRouterError keeps
+        working. It tells a broken answer apart from a refused or unreachable
+        request: the same request can be answered well the next time, which
+        a caller may decide to pay for once (HANDOFF point 137).
+    """
+
+    def __init__(self, message: str, *, raw=None):
+        super().__init__(message)
+        self.raw = raw
+
+
 @dataclass(frozen=True)
 class ModelInfo:
     """@brief OpenRouter catalogue model with prices in USD per million tokens and capabilities.
@@ -1209,17 +1226,23 @@ def tool_arguments(payload: dict, tool_name: str, provider: str = "OpenRouter") 
         if isinstance(arguments, dict):
             return arguments
         if arguments is None or (isinstance(arguments, str) and not arguments.strip()):
-            raise OpenRouterError(tx("Gli argomenti dello strumento sono assenti o vuoti.") + context)
+            raise ToolArgumentsError(
+                tx("Gli argomenti dello strumento sono assenti o vuoti.") + context, raw=arguments)
         if not isinstance(arguments, str):
-            raise OpenRouterError(tx("Gli argomenti dello strumento non sono JSON valido (atteso oggetto).") + context)
+            raise ToolArgumentsError(
+                tx("Gli argomenti dello strumento non sono JSON valido (atteso oggetto).") + context,
+                raw=repr(arguments))
         try:
             decoded = json.loads(arguments)
-        except ValueError:
-            raise OpenRouterError(
+        except ValueError as exc:
+            raise ToolArgumentsError(
                 tx("Gli argomenti dello strumento non sono JSON valido.") + context
+                + f" [{type(exc).__name__}: {exc}]", raw=arguments
             ) from None
         if not isinstance(decoded, dict):
-            raise OpenRouterError(tx("Gli argomenti dello strumento non sono JSON valido (atteso oggetto).") + context)
+            raise ToolArgumentsError(
+                tx("Gli argomenti dello strumento non sono JSON valido (atteso oggetto).") + context,
+                raw=arguments)
         return decoded
 
     if choices[0].get("finish_reason") == "length":

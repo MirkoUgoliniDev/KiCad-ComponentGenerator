@@ -10,6 +10,8 @@ qualche pixel per il grassetto: e' il prezzo accettato della scelta grafica.
 from pathlib import Path
 
 _COMBO_ARROW = (Path(__file__).resolve().parent / "assets" / "combo-arrow.svg").as_posix()
+_SPIN_UP = (Path(__file__).resolve().parent / "assets" / "spin-arrow-up.svg").as_posix()
+_SPIN_DOWN = (Path(__file__).resolve().parent / "assets" / "spin-arrow-down.svg").as_posix()
 #: Segno di spunta delle caselle accese: senza, una casella accesa era solo
 #: un quadrato pieno di blu, che non si legge come «acceso» (utente, 2026-09-24).
 _CHECK_MARK = (Path(__file__).resolve().parent / "assets" / "check-mark.svg").as_posix()
@@ -123,6 +125,44 @@ APP_QSS = f"""
     }}
     QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus, QTextEdit:focus {{
         border: 1px solid {BLUE};
+    }}
+    /* Spin box buttons placed by this sheet, one above the other on the
+       right (HANDOFF point 135). Left to the native style, Qt's «windows11»
+       style puts them side by side while the style sheet still lays the text
+       field out for stacked buttons: the field covered most of the up arrow
+       and swallowed its clicks. With explicit geometry every style gets the
+       same, non-overlapping layout (tests/test_spin_box_buttons.py). */
+    QSpinBox, QDoubleSpinBox {{
+        padding-right: 24px;
+    }}
+    QSpinBox::up-button, QDoubleSpinBox::up-button {{
+        subcontrol-origin: border;
+        subcontrol-position: top right;
+        width: 22px;
+        border-left: 1px solid {SURFACE1};
+        border-top-right-radius: 4px;
+    }}
+    QSpinBox::down-button, QDoubleSpinBox::down-button {{
+        subcontrol-origin: border;
+        subcontrol-position: bottom right;
+        width: 22px;
+        border-left: 1px solid {SURFACE1};
+        border-top: 1px solid {SURFACE1};
+        border-bottom-right-radius: 4px;
+    }}
+    QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+    QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
+        background: {SURFACE1};
+    }}
+    QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+        image: url("{_SPIN_UP}");
+        width: 10px;
+        height: 6px;
+    }}
+    QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+        image: url("{_SPIN_DOWN}");
+        width: 10px;
+        height: 6px;
     }}
     QComboBox {{
         padding-right: 30px;
