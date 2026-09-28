@@ -243,14 +243,21 @@ def test_a_deepseek_call_is_recorded_with_its_computed_cost(monkeypatch):
     assert sent[0]["cost_source"] == "token_price"
 
 
-def _cost_file(tmp_path, entries, total=0.0, missing=None):
+def _cost_file(tmp_path, entries, total=0.0, missing=None, run=None):
+    """Write a cost file; with `run`, every entry belongs to that current analysis."""
     import json
     from kicadgen.services import project_costs as pc
-    (tmp_path / pc.COSTS_FILE).write_text(json.dumps({
+    content = {
         "format": pc.FORMAT, "version": 1, "since": "2026-09-27T08:00:00+00:00",
         "total_usd": total, "calls": len(entries),
         "calls_without_cost": sum(e.get("cost_usd") is None for e in entries)
-        if missing is None else missing, "entries": entries}), encoding="utf-8")
+        if missing is None else missing, "entries": entries}
+    if run:
+        content["run"] = run
+        content["runs"] = [{"run": run, "started": "2026-09-27T08:00:00+00:00"}]
+        for entry in entries:
+            entry["run"] = run
+    (tmp_path / pc.COSTS_FILE).write_text(json.dumps(content), encoding="utf-8")
     return pc
 
 
@@ -308,33 +315,35 @@ def test_a_deepseek_call_is_recorded_with_its_full_identifier(monkeypatch):
     assert sent[0]["model"] == "deepseek-api/deepseek-flash"
 
 
-def test_the_credit_line_splits_the_project_cost_by_provider(qapp, tmp_path):
+def test_the_credit_line_splits_the_analysis_cost_by_provider(qapp, tmp_path):
     """Utente, 27/09: «Costo del progetto: almeno 1.05 USD» accanto al saldo
     DeepSeek sembrava la spesa DeepSeek. La riga dice il totale e la parte di
-    ciascun fornitore; con un solo fornitore resta il solo totale."""
+    ciascun fornitore; con un solo fornitore resta il solo totale. Dal 28/09
+    (punto 135) la riga riguarda l'analisi corrente, non il progetto."""
     from kicadgen.gui.ai_account import AiAccountLine
     _cost_file(tmp_path, [
         {"time": "2026-09-27T08:26:46+00:00", "model": "anthropic/claude-opus-5",
          "cost_usd": 1.05, "prompt_tokens": 1, "completion_tokens": 1},
         {"time": "2026-09-27T12:29:41+00:00", "model": "deepseek-api/deepseek-flash",
          "cost_usd": 0.05, "cost_source": "token_price",
-         "prompt_tokens": 1, "completion_tokens": 1}], total=1.10)
+         "prompt_tokens": 1, "completion_tokens": 1}], total=1.10, run=1)
     line = AiAccountLine(lambda: tmp_path, lambda _m: None)
     try:
         line.refresh()
         text = line.text()
-        assert "Costo del progetto: 1.10 USD" in text and "almeno" not in text
+        assert "Costo dell'analisi: 1.10 USD" in text and "almeno" not in text
         assert "DeepSeek" in text and "OpenRouter" in text and "0.05" in text
     finally:
         line.detach()
     only = tmp_path / "solo"
     only.mkdir()
     _cost_file(only, [{"time": "2026-09-27T08:26:46+00:00", "model": "anthropic/claude-opus-5",
-                       "cost_usd": 1.05, "prompt_tokens": 1, "completion_tokens": 1}], total=1.05)
+                       "cost_usd": 1.05, "prompt_tokens": 1, "completion_tokens": 1}], total=1.05,
+               run=1)
     line = AiAccountLine(lambda: only, lambda _m: None)
     try:
         line.refresh()
-        assert "(" not in line.text().split("Costo del progetto:")[1]
+        assert "(" not in line.text().split("Costo dell'analisi:")[1]
     finally:
         line.detach()
 

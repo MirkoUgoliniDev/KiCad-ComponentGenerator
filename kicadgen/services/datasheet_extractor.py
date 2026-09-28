@@ -36,7 +36,7 @@ from ..generators.castellated_module import (
 from .ai_diagnostics import CallCancelled
 from .openrouter import (DEFAULT_MODEL, OpenRouterError, api_key, call_tool, check_credit,
                          reset_usage, usage_totals)
-from .messages import tx
+from .messages import end_sentence, tx
 
 MAX_FILES = 5
 
@@ -1954,7 +1954,93 @@ def extract_pin_header_params(
         grounding_prompt=grounding_prompt, verification_prompt=verification_prompt,
         terminal_prompt=terminal_prompt, yolo_model_path=yolo_model_path,
         review_proposals=review_proposals, yolo_confidence=yolo_confidence,
-        yolo_settings=yolo_settings)
+        yolo_settings=yolo_settings,
+        recount_contacts=lambda disagreements: _recount_sides_from_photo(
+            data, disagreements, content_blocks, diagnostic_call, model, system_prompt,
+            has_pdf, progress))
+
+
+def _recount_sides_from_photo(data, disagreements, content_blocks, diagnostic_call, model,
+                              system_prompt, has_pdf, progress) -> bool:
+    """One paid recount of the sides whose half-holes the photo counts differently.
+
+    User decision of 2026-09-28 (HANDOFF point 137): when the calibrated top
+    photo shows another number of half-holes than a declared side, the model
+    is asked once, with the same documents, to recount THOSE sides, and is
+    told what the photo measured (count and notch centres). The recounted
+    side replaces the declared one only when it now agrees with the photo and
+    the pad numbering of all sides stays coherent; otherwise the answer stays
+    as it was and the photo check reports the disagreement as a warning.
+
+    @param data Validated main answer, in millimetres and seen from above
+        (after `_canonicalize_answer`); updated in place.
+    @param disagreements edge_notches.EdgeCount list (edge, found, declared,
+        centres_mm).
+    @return True when at least one side was replaced.
+    @note The recount answer is canonicalized like the main one, so a model
+        that answers in another unit or view is converted, not misread.
+    """
+    say = progress or (lambda _message: None)
+    facts = "; ".join(
+        f"lato {item.edge}: la foto calibrata vista dall'alto mostra {item.found} semi-fori "
+        f"aperti sul bordo, con i centri a {', '.join(f'{c:.2f}' for c in item.centres_mm)} mm "
+        f"dall'inizio del bordo (da sinistra per top/bottom, dall'alto per left/right); "
+        f"la risposta ne dichiarava {item.declared}"
+        for item in disagreements)
+    summary = ", ".join(f"{EDGE_LABELS.get(item.edge, item.edge)} {item.declared} -> "
+                        f"{item.found}" for item in disagreements)
+    say(tx("Contatti: la foto non conferma l'analisi ({summary}). Richiesta di ricontarli sugli "
+           "stessi documenti: una chiamata in piu'.", summary=summary))
+    blocks = list(content_blocks) + [{"type": "text", "text": (
+        "Confronto con la fotografia: " + facts + ". Riconta sui documenti (pinout, disegno "
+        "quotato, foto) i contatti FISICI di questi lati: count e' il loro numero, pin_names "
+        "ne elenca esattamente uno per contatto nell'ordine lungo il bordo; le sigle dei LED "
+        "o di altri componenti non sono contatti. La foto puo' sbagliare solo se un semi-foro "
+        "e' coperto: se i documenti mostrano un altro numero, tienilo e spiegalo in notes. "
+        "Restituisci la risposta completa con i lati visti dall'alto (contacts_view=\"top\") "
+        "e le quote in millimetri (drawing_unit=\"mm\"). Lati attuali, visti dall'alto e in "
+        f"mm: {data.get('castellated_sides')!r}")}]
+    try:
+        repaired = diagnostic_call(model=model or DEFAULT_MODEL,
+                                   system_prompt=system_prompt or _SYSTEM_PROMPT,
+                                   content_blocks=blocks, tool=_openai_tool(),
+                                   max_tokens=16384, has_pdf=has_pdf)
+    except OpenRouterError as exc:
+        say(tx("Ricontrollo dei contatti non riuscito ({exc}): restano quelli dell'analisi.",
+               exc=exc))
+        return False
+    if not isinstance(repaired, dict) or not isinstance(repaired.get("castellated_sides"), list):
+        say(tx("Il ricontrollo dei contatti non ha restituito lati utilizzabili: restano "
+               "quelli dell'analisi."))
+        return False
+    repaired = copy.deepcopy(repaired)
+    repaired["layout"] = "castellated"
+    _canonicalize_answer(repaired)
+    recounted = {_side_edge(entry): entry for entry in repaired["castellated_sides"]
+                 if _side_edge(entry)}
+    adopted = [item.edge for item in disagreements
+               if isinstance(recounted.get(item.edge), dict)
+               and recounted[item.edge].get("count") == item.found]
+    if not adopted:
+        say(tx("Ricontrollo dei contatti: l'AI conferma i contatti dichiarati; il disaccordo "
+               "con la foto resta da verificare."))
+        return False
+    merged = [recounted[_side_edge(entry)] if _side_edge(entry) in adopted else entry
+              for entry in data.get("castellated_sides") or ()]
+    try:
+        _castellated_sides(copy.deepcopy(merged), body_length=data.get("body_length_mm"),
+                           body_width=data.get("body_width_mm"))
+    except ExtractionError as exc:
+        say(tx("Ricontrollo dei contatti non adottato: numerazione dei pad incoerente ({exc}); "
+               "restano quelli dell'analisi.", exc=exc))
+        return False
+    data["castellated_sides"] = merged
+    note = tx("Contatti ricontati dopo il confronto con la foto: {edges}. Verificare la "
+              "tabella pinout prima dell'uso.",
+              edges=", ".join(EDGE_LABELS.get(edge, edge) for edge in adopted))
+    data["notes"] = (str(data.get("notes") or "") + "\n" + note).strip()
+    say(note)
+    return True
 
 
 def _side_contradictions(raw, body_length, body_width) -> list[str]:
@@ -2165,7 +2251,7 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
                 "Non cambiare lati, conteggi, geometria o ordine delle sigle. "
                 "Se i documenti non stabiliscono la numerazione, ometti first_pin su TUTTI i lati "
                 "per adottare una convenzione progressiva esplicitamente da verificare. "
-                f"Conflitto: {exc}. Lati precedenti: {data.get('castellated_sides')!r}"
+                f"Conflitto: {end_sentence(exc)} Lati precedenti: {data.get('castellated_sides')!r}"
             )}]
             try:
                 repaired = diagnostic_call(model=model or DEFAULT_MODEL,
@@ -2223,7 +2309,8 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
                          verification_model, diagnostic_call, extra_instructions,
                          photo_cache_dir, grounding_prompt, verification_prompt,
                          terminal_prompt, yolo_model_path, review_proposals,
-                         yolo_confidence, yolo_settings) -> ExtractedParams:
+                         yolo_confidence, yolo_settings,
+                         recount_contacts=None) -> ExtractedParams:
     """Optional photo inventory and final assembly of a validated main answer."""
     # La foto richiede un passaggio separato: nell'estrazione globale il modello
     # deve anche leggere quote, pinout e layout, e tende a sacrificare i passivi
@@ -2272,7 +2359,8 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
                 grounding_prompt=grounding_prompt, verification_prompt=verification_prompt,
                 **({'detector': photo_detector, 'yolo_model_path': yolo_model_path,
                     'review_proposals': review_proposals, 'declared': data,
-                    'yolo_confidence': yolo_confidence, 'yolo_settings': yolo_settings}
+                    'yolo_confidence': yolo_confidence, 'yolo_settings': yolo_settings,
+                    'recount_contacts': recount_contacts}
                    if photo_detector in ('yolo', 'vlm') else {}),
             )
         except ReviewCancelled as exc:

@@ -225,7 +225,10 @@ price, project cost split by provider; point 129: «Account AI» lists every pro
 key with its balance, DeepSeek key in the Credential Manager; point 131: all review-130
 findings in blocks A-D — atomic preferences, DeepSeek retries, 3D output staging, test
 infrastructure with network guard and Qt message handler, dead code removed, shared
-validation helpers, workers module, mesh preparation off the GUI thread) is 5684 passed,
+validation helpers, workers module, mesh preparation off the GUI thread; point 132:
+visible PCB thickness with its provenance; points 133-137: half-hole count on the photo
+with an AI recount of disagreeing sides, current-analysis cost, phase list in the progress
+card, one retry on unreadable inventory JSON, spin box arrows) is 5774 passed,
 6 skipped, 2 expected failures and 19 subtests, run in two halves (HANDOFF point 113:
 the single-process run can die at random with a native Qt/VTK crash). The last packaging integration was merge
 commit `692ca95` on `main`. Keep these values aligned with HANDOFF.md.

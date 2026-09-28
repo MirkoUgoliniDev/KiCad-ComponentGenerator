@@ -596,7 +596,10 @@ class ExtractWorker(QThread):
 
     done = pyqtSignal(object)
     error = pyqtSignal(str)
-    progress = pyqtSignal(str)
+    #: Righe di avanzamento. `object`, non `str`: una riga puo' essere una
+    #: messages.Message con il suo tipo (avviso), e un segnale `str` la
+    #: ridurrebbe a testo semplice perdendolo (punto 136).
+    progress = pyqtSignal(object)
     #: Vedi GenerateWorker.phase.
     phase = pyqtSignal(str, str, int, int)
     #: (foto PNG, proposte del rilevatore, lunghezza mm, larghezza mm). Emesso
@@ -834,7 +837,7 @@ class ReconcileWorker(QThread):
 
     done = pyqtSignal(object)
     error = pyqtSignal(str)
-    progress = pyqtSignal(str)
+    progress = pyqtSignal(object)   # see ExtractWorker.progress
     phase = pyqtSignal(str, str, int, int)
 
     def __init__(self, photo_png, proposals, length_mm, width_mm, model, cache_dir,

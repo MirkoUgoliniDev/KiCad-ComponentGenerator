@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import QApplication
 
 from kicadgen.services import openrouter
 from kicadgen.services.project_costs import (COSTS_FILE, ProjectCostsError, add_call,
-                                             load_project_costs)
+                                             load_project_costs, start_run)
 
 
 @pytest.fixture(autouse=True)
@@ -110,16 +110,19 @@ def test_a_call_from_a_worker_thread_is_written_into_the_project(app, tmp_path):
     from kicadgen.gui.ai_account import AiAccountLine
     log = []
     line = AiAccountLine(lambda: tmp_path, log.append)
+    # The line shows the current analysis (point 135): one is started first.
+    line.start_analysis(tmp_path)
     thread = threading.Thread(target=openrouter._record_usage,
                               args=({"model": "m", "usage": {"cost": 1.5}},))
     thread.start()
     thread.join()
-    _wait(app, lambda: (tmp_path / COSTS_FILE).exists())
+    _wait(app, lambda: load_project_costs(tmp_path).calls == 1)
     app.processEvents()
     assert load_project_costs(tmp_path).total_usd == pytest.approx(1.5)
-    assert "Costo del progetto: 1.50 USD" in line.text()
+    assert "Costo dell'analisi: 1.50 USD" in line.text()
     first, _, rest = line.toolTip().partition("\n")
     assert first and "1 chiamata a pagamento" in rest  # singolare corretto (audit 25/09)
+    assert "Costo totale del progetto: 1.50 USD" in rest
     line.detach()
     _dispose(line)
 
@@ -204,11 +207,12 @@ def test_the_project_tab_shows_the_line_in_the_ai_tools_box(qapp, tmp_path, monk
     monkeypatch.setattr(gui, "DEFAULT_LIBRARY_ROOT", tmp_path)
     window = gui.MainWindow()
     try:
+        start_run(tmp_path / "SCHEDA_A")
         add_call(tmp_path / "SCHEDA_A", {"cost_usd": 2.14})
         window.field_name.setText("SCHEDA_A")
-        assert window.ai_account.text() == "Costo del progetto: 2.14 USD"
+        assert window.ai_account.text() == "Costo dell'analisi: 2.14 USD"
         window.field_name.setText("SCHEDA_B")
-        assert window.ai_account.text() == "Costo del progetto: nessuna chiamata a pagamento"
+        assert window.ai_account.text() == "Costo dell'analisi: nessuna chiamata a pagamento"
         # Contratto cambiato di proposito (utente, 2026-09-24): la riga e'
         # l'ultima del modulo dentro «Strumenti AI», non sotto il pulsante.
         from PyQt6.QtWidgets import QFormLayout

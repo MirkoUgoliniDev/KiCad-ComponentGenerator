@@ -17,6 +17,7 @@ registered and the Italian source is used as it is.
 """
 from __future__ import annotations
 
+import re
 from typing import Callable
 
 #: Lookup registered by the application: (key, default) -> unformatted text,
@@ -58,12 +59,51 @@ def tx(source: str, /, **values: object) -> str:
         text = source
     for candidate in (text, source):
         try:
-            return candidate.format(**values)
+            return _no_double_period(candidate, values).format(**values)
         # TypeError: a value that does not accept the format spec, e.g.
         # «{a:.2f}» with a=None -- same fallback as the other errors.
         except (KeyError, IndexError, ValueError, AttributeError, TypeError):
             continue
     return source
+
+
+#: Characters that already close a sentence: a template period right after a
+#: value ending with one of them would print «..» (HANDOFF point 133).
+_SENTENCE_END = (".", "!", "?", "…")
+#: A plain placeholder followed by a period, «{name}.», not a literal «{{name}}.».
+_PLACEHOLDER_PERIOD = re.compile(r"(?<!\{)\{(\w+)\}\.")
+
+
+def ends_sentence(value: object) -> bool:
+    """@brief Tell whether a value's text already ends a sentence.
+
+    @param value Any value; its str() is examined, trailing blanks ignored.
+    @return True when it ends with a period, «!», «?» or an ellipsis.
+    """
+    return str(value).rstrip().endswith(_SENTENCE_END)
+
+
+def end_sentence(value: object) -> str:
+    """@brief A value's text closed by exactly one sentence end.
+
+    @param value Usually an exception, to be followed by more text.
+    @return The text with a period appended only when it has no sentence end
+        yet: for messages built without `tx` (f-strings, AI prompts).
+    """
+    text = str(value).rstrip()
+    return text if ends_sentence(text) else text + "."
+
+
+def _no_double_period(template: str, values: dict) -> str:
+    """Drop a template period that follows a value already ending a sentence.
+
+    Structural, for every template and language: an exception text often
+    ends with its own period, and «{exc}.» then printed «..».
+    """
+    return _PLACEHOLDER_PERIOD.sub(
+        lambda match: ("{%s}" % match[1] if match[1] in values
+                       and ends_sentence(values[match[1]]) else match[0]),
+        template)
 
 
 class Message(str):
@@ -101,6 +141,20 @@ def marked(kind: str, source: str, /, **values: object) -> Message:
 def warning(source: str, /, **values: object) -> Message:
     """@brief A translated message that is also a warning of the report (`marked(WARNING, …)`)."""
     return marked(WARNING, source, **values)
+
+
+def as_warning(text: object) -> Message:
+    """@brief An already built message marked as a warning of the report.
+
+    @param text Message text, already translated.
+    @return The same text as a `Message` of kind WARNING (unchanged when it
+        already is one).
+    """
+    if kind_of(text) == WARNING:
+        return text
+    message = Message(str(text))
+    message.kind = WARNING
+    return message
 
 
 def kind_of(message: object) -> str:

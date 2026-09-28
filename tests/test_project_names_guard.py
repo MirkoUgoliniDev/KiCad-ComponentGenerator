@@ -7,7 +7,7 @@ progetto era rifiutato solo dal pulsante OK spento della finestra, quindi un
 from PyQt6.QtWidgets import QDialog, QMessageBox
 
 from kicadgen.gui.project_dialogs import ProjectNameDialog
-from kicadgen.services.project_costs import COSTS_FILE, add_call, load_project_costs
+from kicadgen.services.project_costs import COSTS_FILE, add_call, load_project_costs, start_run
 from tests.test_photo_inventory_gui import gui
 
 
@@ -28,14 +28,16 @@ def _accept_with(monkeypatch, name, *, respect_ok):
 
 def test_renaming_moves_the_ai_cost_with_the_project(window, tmp_path, monkeypatch):  # noqa: F811
     window.field_library_root.setText(str(tmp_path))
-    add_call(_project(tmp_path, "VECCHIO"), {"cost_usd": 3.0})
+    old = _project(tmp_path, "VECCHIO")
+    start_run(old)
+    add_call(old, {"cost_usd": 3.0})
     window._switch_project("VECCHIO", window._general_project_state)
     _accept_with(monkeypatch, "NUOVO", respect_ok=True)
     window._rename_project()
     assert window._component_name() == "NUOVO"
     assert load_project_costs(tmp_path / "NUOVO").total_usd == 3.0
     assert not (tmp_path / "VECCHIO" / COSTS_FILE).exists()
-    assert window.ai_account.text().endswith("Costo del progetto: 3.00 USD")
+    assert window.ai_account.text().endswith("Costo dell'analisi: 3.00 USD")
 
 
 def test_the_application_refuses_another_project_name_even_if_accepted(window, tmp_path,  # noqa: F811
