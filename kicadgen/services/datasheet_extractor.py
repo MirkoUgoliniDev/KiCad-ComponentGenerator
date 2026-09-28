@@ -520,7 +520,16 @@ _EXTRACTION_TOOL = {
                         },
                         "count": {
                             "type": "integer",
-                            "description": "Numero di contatti su questo lato.",
+                            "description": (
+                                "Numero di contatti FISICI su questo lato: i fori "
+                                "metallizzati tagliati dal bordo (semi-fori) o i fori "
+                                "interi del bordo, contati uno per uno sulla foto e sugli "
+                                "ingrandimenti dei bordi quando ci sono. Le sigle "
+                                "serigrafate, le etichette dei LED o dei componenti e il "
+                                "testo vicino al bordo NON sono contatti: conta i fori, "
+                                "non le scritte. Verifica che (count-1) x pitch_mm stia "
+                                "nel bordo quotato."
+                            ),
                         },
                         "pitch_mm": {
                             "type": "number",
@@ -622,8 +631,13 @@ _EXTRACTION_TOOL = {
                                 "Sigle serigrafate accanto ai contatti di questo lato, "
                                 "nell'ordine in cui si incontrano lungo il bordo nella "
                                 "vista letta (dall'alto in basso sui lati verticali, da "
-                                "sinistra a destra su quelli orizzontali). Servono a "
-                                "documentare il pinout, non a numerare i pad."
+                                "sinistra a destra su quelli orizzontali). Esattamente "
+                                "un nome per contatto contato in count: una sigla "
+                                "stampata a cavallo di due fori (es. due lettere "
+                                "vicine) va divisa fra i due contatti, non unita in un "
+                                "nome solo; le etichette di LED o componenti vicini non "
+                                "sono nomi di contatti. Servono a documentare il "
+                                "pinout, non a numerare i pad."
                             ),
                         },
                     },
@@ -1074,6 +1088,45 @@ def _upright_image_bytes(data: bytes) -> bytes:
             return out.getvalue()
     except Exception:  # noqa: BLE001 - si ripiega sul file originale
         return data
+
+
+#: Component family whose contacts are the holes cut by the board edge.
+CASTELLATED_FAMILY = "aggregate_castellated"
+
+
+def _edge_strip_blocks(doc_paths, document_roles) -> list:
+    """Enlarged strips of the board edges of each declared photograph, as content blocks.
+
+    The model counts the physical contacts of a castellated module in its
+    first answer (user decision 2026-09-28, HANDOFF point 142): each strip
+    shows one edge from close up, with the labels printed beside the holes,
+    so that holes and labels can be told apart. Cut without the board
+    dimensions (edge_strips.board_box); a photo where the board cannot be
+    found adds nothing. Never fatal: the strips are help, not a measure.
+    """
+    import cv2
+    import numpy as np
+    from .edge_strips import edge_strips
+    blocks = []
+    for index, path in enumerate(doc_paths):
+        if PHOTO_ROLE not in _declared_role_keys(document_roles.get(path.name) or ()):
+            continue
+        try:
+            payload = _upright_image_bytes(Path(path).read_bytes())
+            image = cv2.imdecode(np.frombuffer(payload, np.uint8), cv2.IMREAD_COLOR)
+            strips = edge_strips(image) if image is not None else []
+        except (OSError, ValueError, cv2.error):
+            strips = []
+        for edge, png in strips:
+            blocks.append({"type": "text", "text": (
+                f"FILE {index}, ingrandimento del bordo {edge} della scheda (stessa vista "
+                "della foto, bordo scheda verso l'esterno dell'immagine): conta qui i fori "
+                "metallizzati tagliati dal bordo, uno per contatto; le scritte accanto sono "
+                "sigle, non contatti.")})
+            data_b64 = base64.b64encode(png).decode("ascii")
+            blocks.append({"type": "image_url",
+                           "image_url": {"url": f"data:image/png;base64,{data_b64}"}})
+    return blocks
 
 
 def _file_to_content_block(path: Path) -> dict:
@@ -1865,6 +1918,15 @@ def extract_pin_header_params(
             description += "\n" + _role_description(document_roles[path.name])
         content_blocks.append({"type": "text", "text": description})
         content_blocks.append(_file_to_content_block(path))
+    if component_family == CASTELLATED_FAMILY and document_roles is not None:
+        # Il numero dei contatti lo riconosce l'AI in QUESTA chiamata (utente,
+        # 28/09, punto 142): i bordi della foto ingranditi, non una correzione dopo.
+        strips = _edge_strip_blocks(doc_paths, document_roles)
+        content_blocks.extend(strips)
+        if strips and progress:
+            progress(tx("Allegati all'AI gli ingrandimenti dei bordi della foto, per contare i "
+                        "contatti fisici: {count} immagini.",
+                        count=sum(1 for block in strips if block.get("type") == "image_url")))
     request = ("Estrai i parametri meccanici del componente da questi documenti e chiama lo "
                "strumento.")
     if document_roles is not None:

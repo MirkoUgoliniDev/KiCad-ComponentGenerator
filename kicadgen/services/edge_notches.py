@@ -566,7 +566,8 @@ def _row_may_continue(notches, centres_px, multiples, unit_px, clean) -> bool:
     @note Structural, no tuned value: slot, core and guard come from the
         notches measured and from EDGE_UNCERTAINTY_PX. A notch fully covered
         by dust or an arrow on PLAIN outline is not seen by this rule: that
-        case needs the declared row (see _declared_row_explains).
+        case is not guessed (HANDOFF point 142): it becomes a disagreement
+        with the declared count, i.e. one recount and at most a warning.
     """
     n = len(clean)
     if len(centres_px) >= 2 and sum(multiples) > 0:
@@ -758,68 +759,18 @@ def row_offset_from(declared_mm: Sequence[float], measured_mm: Sequence[float],
     return shift
 
 
-def declared_centres_mm(side, edge_length_mm: float, count: Optional[int] = None) -> list:
-    """@brief Centres of a declared row along its edge, mm from the start of the edge.
-
-    @param side Normalized side (normalized_sides): pitch_mm, offset_mm, count.
-    @param edge_length_mm Length of the edge.
-    @param count Number of contacts to place instead of the declared one.
-    @return The centres, left to right (top/bottom) or top to bottom
-        (left/right), as contact_zones.contact_positions places them: centred
-        on the edge, then moved by the declared offset. Empty without a pitch.
-    """
-    count = side.get("count") if count is None else count
-    pitch = side.get("pitch_mm")
-    if not count or pitch is None:
-        return []
-    start = edge_length_mm / 2 - (count - 1) * pitch / 2 + (side.get("offset_mm") or 0.0)
-    return [start + index * pitch for index in range(count)]
-
-
-def _declared_row_explains(counted: EdgeCount, side, edge_length_mm, shift_bound_mm) -> bool:
-    """True when the notches seen are the declared row with contacts missing at its ends.
-
-    A notch covered by dust or a dimension arrow on plain outline leaves no
-    trace in the profile; at the end of the row nothing else reveals it (a
-    missing notch INSIDE the row is a gap). The declared row does: if the
-    notches counted fall, within the calibration shift and the centre
-    tolerance, on a run of consecutive declared contacts, the photo cannot
-    tell «fewer contacts» from «end contacts hidden», and the count is only a
-    lower bound. A true miscount (a label counted as a contact) puts the
-    notches off those positions by about half a pitch per contact of
-    difference on a centred row, which is how the two are told apart.
-    @note The residual tolerance adds to the centre tolerance the stretch the
-        same calibration drift can cause over the span of the row, since here
-        a looser match only turns a count into a lower bound.
-    """
-    count = side.get("count")
-    if counted.found is None or count is None or counted.found >= count \
-            or shift_bound_mm is None or not edge_length_mm:
-        return False
-    declared = declared_centres_mm(side, edge_length_mm)
-    measured = counted.centres_mm
-    if not declared or len(measured) != counted.found:
-        return False
-    span = measured[-1] - measured[0] if len(measured) > 1 else 0.0
-    tolerance = (counted.tolerance_mm or 0.0) + shift_bound_mm * span / edge_length_mm
-    return any(row_offset_from(declared[first:first + len(measured)], measured, tolerance,
-                               shift_bound_mm) is not None
-               for first in range(len(declared) - len(measured) + 1))
-
-
 def _count_side(profile, scales, side, edge_length_mm=None, shift_bound_mm=None) -> EdgeCount:
     """Count one declared side, a lower bound when the declared row explains a shortfall."""
     along, across = scales
     counted = count_notches(profile, along, side.get("pitch_mm"), across_px_per_mm=across,
                             hole_diameter_mm=side.get("hole_diameter_mm"),
                             declared_count=side.get("count"))
-    if _declared_row_explains(counted, side, edge_length_mm, shift_bound_mm):
-        return EdgeCount("", None, centres_mm=counted.centres_mm, at_least=counted.found,
-                         tolerance_mm=counted.tolerance_mm, reason=tx(
-                             "le {found} tacche viste cadono su {found} dei {declared} contatti "
-                             "dichiarati: gli altri, in fondo alla fila, possono essere "
-                             "nascosti; sulla foto se ne contano almeno {found}",
-                             found=counted.found, declared=side.get("count")))
+    # Nessuna ipotesi di semifori nascosti su contorno misurato liscio (punto
+    # 142): count_notches da' un numero valido solo dopo aver visto liscio il
+    # posto successivo al primo e all'ultimo semiforo, e presumerli coperti
+    # impediva di smentire un modello che contava troppo (6 dichiarati per 4
+    # semifori veri). Un semiforo davvero coperto diventa un disaccordo: un
+    # ricontrollo e, se il modello conferma, un avviso; mai un dato sbagliato.
     return counted
 
 
