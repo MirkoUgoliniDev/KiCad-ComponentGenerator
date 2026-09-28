@@ -88,6 +88,11 @@ def test_every_paid_answer_reaches_the_listener_with_its_cost():
     openrouter.set_usage_listener(seen.append)
     openrouter._record_usage({"model": "x/y", "usage": {"cost": 0.25, "prompt_tokens": 7,
                                                         "completion_tokens": 3}})
+    # Contract extended (audit 138, B10): every record carries the time of
+    # its call, so a late write keeps the call's date and price hour.
+    from datetime import datetime
+    stamp = seen[0].pop("time")
+    assert datetime.fromisoformat(stamp).tzinfo is not None
     assert seen == [{"cost_usd": 0.25, "model": "x/y", "prompt_tokens": 7,
                      "completion_tokens": 3}]
 

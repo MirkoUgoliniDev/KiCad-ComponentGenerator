@@ -1398,7 +1398,11 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     @param length Board X dimension in mm.
     @param width Board Y dimension in mm.
     @param model Caller-selected model, unchanged.
-    @param call Application API callable; invoked at most once, without local retries.
+    @param call Application API callable, invoked without local retries: once,
+        plus at most ONE more paid call per run in total -- either for an
+        unreadable answer (tool arguments not JSON) or for an answer omitting a
+        blocking field on every row, never both (HANDOFF 137-138, A6). A
+        truncated answer is not retried (openrouter.tool_arguments).
     @param log Persistent progress callback, including partial/failure diagnostics.
     @param cache_dir Optional response cache and audit directory.
     @param verification_prompt Custom notes; recognized legacy defaults are excluded.
@@ -1432,7 +1436,8 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     @note A missing or null ``lead_count_confidence`` is not blocking: the row,
         the cache and the call count are unaffected, the value is recorded as
         LEAD_COUNT_CONFIDENCE_UNDECLARED and one log line counts the rows
-        concerned. Only blocking omissions trigger the single paid retry.
+        concerned. Only blocking omissions trigger the single paid retry, and
+        only when the unreadable-answer retry has not already been spent.
     @note A missing ``presence_confidence`` is read as the overall confidence,
         its lower bound; see ``_presence``.
     """
@@ -1543,6 +1548,9 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         images = sum(1 for block in content if block.get('type') == 'image_url')
         log(paid_request_message(images, len(candidates), enumerating, empty_detector))
         data = _call_once(call, kwargs)
+        # Al massimo UNA chiamata a pagamento in piu' per corsa (utente, 28/09:
+        # «un solo nuovo tentativo»; audit 138, A6): chi la spende la segna.
+        extra_call_spent = False
         if data.get('_unreadable') if isinstance(data, dict) else False:
             # Il modello ha risposto con lo strumento giusto ma con argomenti
             # illeggibili: la STESSA richiesta puo' tornare leggibile, quindi
@@ -1550,6 +1558,7 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
             # Rifiuti, errori di rete e di credito non passano di qui.
             log(tx("Inventario globale: la risposta del modello non era un JSON leggibile; un "
                    "solo nuovo tentativo a pagamento con la stessa richiesta."))
+            extra_call_spent = True
             second = _call_once(call, kwargs)
             if isinstance(second, dict) and not second.get('error'):
                 data = second
@@ -1570,7 +1579,17 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         # secondo li omette, si tiene e si dichiara: a valle la presenza
         # ripiega sulla confidenza complessiva (vedi _presence).
         omitted = omitted_required_fields(data)
-        if omitted:
+        if omitted and extra_call_spent:
+            # La chiamata in piu' e' gia' stata pagata per la risposta
+            # illeggibile: una terza non si fa. L'omissione resta dichiarata
+            # e la presenza ripiega sulla confidenza complessiva.
+            log(tx("Inventario globale: il modello ha omesso campi obbligatori su OGNI "
+                   "componente ({join}); nessun altro tentativo: l'unico nuovo tentativo a "
+                   "pagamento di questa corsa è già stato usato per la risposta illeggibile.",
+                   join=', '.join(omitted)))
+            omission_issue = _Issue('model omitted required fields on every component: '
+                                    + ', '.join(omitted))
+        elif omitted:
             log(tx("Inventario globale: il modello ha omesso campi obbligatori su OGNI "
                    "componente ({join}); un solo nuovo tentativo a pagamento che nomina "
                    "l’omissione.",

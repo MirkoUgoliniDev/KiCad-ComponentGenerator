@@ -859,15 +859,18 @@ class AnalysisOverlay(QWidget):
         self.phases.setProperty("i18n_skip", True)
         self.phases.hide()
         content.addWidget(self.phases)
-        #: Fasi concluse: (nome dello strumento, esito, e' un avviso), gia' tradotti.
+        #: Fasi concluse: (nome dello strumento, esito, e' un avviso), come
+        #: SORGENTI italiane. Si traducono quando si disegnano, cosi' un cambio
+        #: di lingua a meta' corsa ridisegna l'elenco nella lingua nuova
+        #: (HANDOFF 138, C7; vedi `refresh_command_texts`).
         self._phase_history: list[tuple[str, str, bool]] = []
         #: Vero dall'avvio di un'operazione finche' non dichiara dei passi:
         #: le righe dell'elenco sono riservate da subito (`_size_the_card`),
         #: come le altre righe facoltative, cosi' la scheda non cresce quando
         #: la prima fase finisce.
         self._phases_reserved = False
-        #: Fase in corso: chiave, nome tradotto, primo stato mostrato (il suo
-        #: esito) e ultimo avviso, che lo sostituisce.
+        #: Fase in corso: chiave, nome sorgente, primo stato mostrato (il suo
+        #: esito) e ultimo avviso, che lo sostituisce; testi sorgente anche qui.
         self._phase_key = ""
         self._phase_name = ""
         self._phase_last_status = ""
@@ -999,6 +1002,9 @@ class AnalysisOverlay(QWidget):
         """@brief Put name and explanation of the two commands in their tooltips.
 
         @note Called at construction and by the window on a language change.
+            It also redraws the list of phases: the list is `i18n_skip` (it is
+            composed, not a catalogue key) and keeps Italian sources, so a
+            language switch in the middle of a run reaches it only through here.
         """
         from .review_tools import set_tool_texts
         tr = self.i18n.text if self.i18n is not None else None
@@ -1006,6 +1012,8 @@ class AnalysisOverlay(QWidget):
                        "Apri il log completo dell'analisi AI, aggiornato in tempo reale", tr)
         set_tool_texts(self.abort_button, "Interrompi", "",
                        "Interrompi l'operazione in corso: verrà chiesta conferma.", tr)
+        if getattr(self, "phases", None) is not None:
+            self._render_phases()
 
     def _available_card_width(self):
         """@brief Widest card the hosting window can show without clipping.
@@ -1168,7 +1176,14 @@ class AnalysisOverlay(QWidget):
         # Le righe delle fasi concluse prendono solo lo spazio che la finestra
         # avanza DOPO tutto il resto, fino a PHASE_HISTORY_ROWS: una finestra
         # bassa ne mostra meno (o nessuna) invece di far uscire la scheda.
-        spare = self._available_card_height() - self.card.sizeHint().height()
+        # Il resto si misura SENZA l'elenco: a corsa avviata la label contiene
+        # gia' le sue righe e `card.sizeHint` le conta, quindi sottrarle di
+        # nuovo le toglieva due volte e ogni ridimensionamento a meta' corsa
+        # riduceva l'elenco (HANDOFF 138, C2: 4 righe -> 1). La sua altezza
+        # minima e' appena tornata a zero, quindi il suo contributo e' il suo
+        # `sizeHint`, che si toglie.
+        spare = (self._available_card_height() - self.card.sizeHint().height()
+                 + self.phases.sizeHint().height())
         rows = 0
         if getattr(self, "_phases_reserved", False):
             # Altezza misurata sul testo vero (righe della tabella comprese),
@@ -1178,6 +1193,11 @@ class AnalysisOverlay(QWidget):
                 rows += 1
         self._phase_rows = rows
         self.phases.setMinimumHeight(self._phase_rows_height(rows) if rows else 0)
+        # Le righe riservate possono essere cambiate (finestra ridimensionata,
+        # elenco dello stato piu' alto): l'elenco si ridisegna PRIMA di fissare
+        # l'altezza della scheda, cosi' mostra quante righe ci stanno adesso e
+        # un testo rimasto dalla misura vecchia non entra nel `sizeHint`.
+        self._render_phases()
         self.card.setMinimumHeight(self.card.sizeHint().height())
 
     def changeEvent(self, event):
@@ -1208,6 +1228,9 @@ class AnalysisOverlay(QWidget):
             esiste piu', e tenerlo farebbe restare la scheda piu' alta della
             finestra appena rimpicciolita. Il sobbalzo che la monotonia evita e'
             quello fra due messaggi; un ridimensionamento cambia gia' la scheda.
+        @note Anche le righe delle fasi si riderivano qui (`_size_the_card` le
+            ridisegna): una finestra ingrandita a meta' corsa mostra righe che
+            all'avvio non ci stavano, una rimpicciolita ne toglie.
         """
         self._status_extra = 0
         self._size_the_card()
@@ -1302,15 +1325,15 @@ class AnalysisOverlay(QWidget):
             already carries.
         """
         key = str(tool or "")
-        name, color, glyph = TOOLS.get(TOOL_ALIASES.get(key, key), ("", "#89b4fa", ""))
+        source_name, color, glyph = TOOLS.get(TOOL_ALIASES.get(key, key), ("", "#89b4fa", ""))
         # La label e' `i18n_skip` (porta un dettaglio che non e' testo nostro):
-        # il nome dello strumento si traduce qui, prima di comporla.
-        if name and self.i18n is not None:
-            name = self.i18n.text(name)
+        # il nome dello strumento si traduce qui, prima di comporla. L'elenco
+        # delle fasi conserva invece la sorgente (vedi `_phase_history`).
+        name = self._translate(source_name) if source_name else ""
         if key != self._phase_key:
             # Un altro strumento: la fase di prima e' conclusa (vedi _end_phase).
             self._end_phase()
-            self._phase_key, self._phase_name = (key, name) if name else ("", "")
+            self._phase_key, self._phase_name = (key, source_name) if source_name else ("", "")
             self._phase_last_status = self._phase_warning = ""
             self._render_phases()
         self.spinner.set_tool(glyph, color)
@@ -1397,7 +1420,14 @@ class AnalysisOverlay(QWidget):
         self.phases.hide()
 
     def phases_plain_text(self):
-        """@brief The completed phases as plain text, marks included (for logs and tests)."""
+        """@brief The phase list exactly as the reader sees it, as plain text.
+
+        @return One line per shown row, marks («✓», «⚠», «●») included, in the
+            language active when the list was last drawn.
+        @note Used by the tests and kept for diagnostics: `phases.text()` is
+            the table markup, not the words on screen. The full history, rows
+            beyond the reserved room included, is the label's tooltip.
+        """
         document = QTextDocument()
         document.setHtml(self.phases.text())
         return document.toPlainText()
@@ -1440,7 +1470,22 @@ class AnalysisOverlay(QWidget):
         probe.setText(self._phase_rows_html([("✓ M", "done")] * count))
         return probe.sizeHint().height()
 
+    def _translate(self, source):
+        """Catalogue text of an Italian source, or the source itself without i18n."""
+        return self.i18n.text(source) if self.i18n is not None else source
+
+    def _phase_outcome_text(self, source):
+        """Outcome of a phase as shown: translated now, paths shortened, one line.
+
+        A source that is not a catalogue key (a sentence its sender already
+        formatted through `messages.tx`, in the language of that moment) comes
+        back unchanged: `I18n.text` falls back to the source. Only catalogued
+        outcomes follow a later language switch.
+        """
+        return " ".join(elide_paths(self._translate(source)).split())
+
     def _render_phases(self):
+        """Draw the phase list in the current language, within the reserved rows."""
         rows_room = getattr(self, "_phase_rows", PHASE_HISTORY_ROWS)
         metrics = self.phases.fontMetrics()
         width = self._status_text_width()
@@ -1450,20 +1495,22 @@ class AnalysisOverlay(QWidget):
         # fill the rows above it, the most recent first to stay.
         room = max(0, rows_room - (1 if running else 0))
         shown = self._phase_history[-room:] if room else []
+        def entry(name, outcome, warned):
+            outcome = self._phase_outcome_text(outcome) if outcome else ""
+            name = self._translate(name)
+            return f"{'⚠' if warned else '✓'} " + (f"{name} — {outcome}" if outcome else name)
+
         lines = []
         for name, outcome, warned in shown:
-            text = f"{'⚠' if warned else '✓'} " + (f"{name} — {outcome}" if outcome else name)
-            lines.append((metrics.elidedText(text, Qt.TextElideMode.ElideRight, width),
+            lines.append((metrics.elidedText(entry(name, outcome, warned),
+                                             Qt.TextElideMode.ElideRight, width),
                           "warning" if warned else "done"))
         if running and rows_room:
-            text = "● " + self._phase_name + " — " + (
-                self.i18n.text("in corso") if self.i18n is not None else "in corso")
+            text = "● " + self._translate(self._phase_name) + " — " + self._translate("in corso")
             lines.append((metrics.elidedText(text, Qt.TextElideMode.ElideRight, width),
                           "running"))
         self.phases.setText(self._phase_rows_html(lines))
-        self.phases.setToolTip("\n".join(
-            f"{'⚠' if warned else '✓'} {name}" + (f" — {outcome}" if outcome else "")
-            for name, outcome, warned in self._phase_history))
+        self.phases.setToolTip("\n".join(entry(*phase) for phase in self._phase_history))
         self.phases.setVisible(bool(lines))
 
     def clear_steps(self):
@@ -1589,13 +1636,14 @@ class AnalysisOverlay(QWidget):
         text = self.i18n.text(source) if self.i18n is not None else source
         self._status_source = elide_paths(text)
         if self._phase_name:
-            shown = " ".join(self._status_source.split())
             # Esito della fase: il PRIMO stato dopo il suo annuncio; un avviso
-            # (l'ultimo) lo sostituisce, perche' e' cio' che va guardato.
+            # (l'ultimo) lo sostituisce, perche' e' cio' che va guardato. Si
+            # conserva la SORGENTE: la traduzione si fa quando l'elenco si
+            # disegna (`_phase_outcome_text`), anche dopo un cambio di lingua.
             if not self._phase_last_status:
-                self._phase_last_status = shown
+                self._phase_last_status = source
             if warned:
-                self._phase_warning = shown
+                self._phase_warning = source
         self._render_status()
 
     def status_plain_text(self):

@@ -44,10 +44,13 @@ LOCK_FILE = COSTS_FILE + ".lock"
 #: the GUI thread writes the file.
 LOCK_TIMEOUT_S = 0.5
 LOCK_POLL_S = 0.01
-#: A lock older than this (s) is left over by a crashed process and removed.
-#: Heuristic bound, not a measurement: one read-modify-write of this small
-#: file takes milliseconds, so a holder alive for this long does not exist in
-#: practice; a lock-aware file API would make the bound unnecessary.
+#: A lock whose modification time is farther than this (s) from now, in
+#: EITHER direction, is left over by a crashed process and removed: a time in
+#: the future (clock skew with a network share, a project folder copied with
+#: its lock) would otherwise never age and block the file for ever (audit
+#: 138, B2). Heuristic bound, not a measurement: one read-modify-write of this
+#: small file takes milliseconds, so a holder alive for this long does not
+#: exist in practice; a lock-aware file API would make the bound unnecessary.
 LOCK_STALE_S = 30.0
 
 #: Format marker and version; a newer version is refused, not rewritten.
@@ -79,10 +82,12 @@ class ProjectCosts:
     #: DeepSeek calls priced from their recorded tokens without the cache
     #: split (cost_source "token_price_estimate"): upper bounds.
     estimated_calls: int = 0
-    #: Number of the current analysis (start_run), 0 when none was started
-    #: since the file records analyses (HANDOFF point 135).
+    #: Number of the analysis these run_* figures describe: the current one
+    #: (start_run), or the one asked to `load_project_costs`; 0 when none was
+    #: started since the file records analyses (HANDOFF point 135).
     run: int = 0
-    #: When the current analysis started (ISO, UTC), "" without one.
+    #: When that analysis started (ISO, UTC); "" without one, or when the
+    #: file has no start record for it (hand-edited file).
     run_started: str = ""
     #: Paid calls of the current analysis: every call recorded after its
     #: start, reruns included, until the next start_run.
@@ -107,6 +112,16 @@ def _count(value: Any) -> Optional[int]:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return value
+
+
+def _entry_cost(entry: dict) -> Optional[float]:
+    """Cost of an entry, None when missing, damaged or negative (audit 138, B6).
+
+    A negative cost is not a refund: it is a damaged (hand-edited) entry, and
+    counting it would lower a total that must never be understated.
+    """
+    cost = finite_number(entry.get("cost_usd"))
+    return None if cost is None or cost < 0 else cost
 
 
 def _read(path: Path) -> Optional[dict]:
@@ -165,20 +180,22 @@ def _price_deepseek_calls(data: dict) -> None:
             model = entry["model"] = DEEPSEEK_PREFIX + model
         if provider_of(model) != PROVIDER_DEEPSEEK:
             continue
-        old = finite_number(entry.get("cost_usd"))
+        old = _entry_cost(entry)
         if old is not None and entry.get("cost_source") != "balance_delta":
             continue
-        prompt = _count(entry.get("prompt_tokens")) or 0
-        output = _count(entry.get("completion_tokens")) or 0
+        prompt = _count(entry.get("prompt_tokens"))
+        output = _count(entry.get("completion_tokens"))
         cost = None
-        if prompt or output:
-            # Zero tokens means the usage was not reported, not a free call:
-            # pricing it would turn an unknown cost into a known zero.
+        # Both counts must be recorded and valid (audit 138, B5): None is a
+        # count that was not reported, and zero on both is how such calls
+        # were recorded before None existed. Pricing either would turn an
+        # unknown cost into a known, lower one.
+        if prompt is not None and output is not None and (prompt or output):
             try:
                 moment = datetime.fromisoformat(str(entry.get("time")))
                 cost = call_cost(provider_model_name(model),
                                  {"prompt_tokens": prompt, "completion_tokens": output}, moment)
-            except (ValueError, OverflowError):
+            except (ValueError, OverflowError, OSError, TypeError):
                 cost = None   # damaged time or count: left without cost, never fatal
         if cost is None:
             if old is not None:
@@ -194,9 +211,10 @@ def _price_deepseek_calls(data: dict) -> None:
         entry["cost_usd"], entry["cost_source"] = cost, "token_price_estimate"
 
 
-def _totals(data: dict) -> ProjectCosts:
-    """Totals of a validated file content."""
-    run = data.get("run", 0)
+def _totals(data: dict, run: Optional[int] = None) -> ProjectCosts:
+    """Totals of a validated file content; run_* of `run` (default: the current one)."""
+    if run is None or _count(run) is None or run == 0 or run > data.get("run", 0):
+        run = data.get("run", 0)
     started = ""
     for entry in data.get("runs", ()):
         if isinstance(entry, dict) and entry.get("run") == run:
@@ -216,10 +234,15 @@ def _totals(data: dict) -> ProjectCosts:
                         run_by_provider=current)
 
 
-def load_project_costs(project_dir: Path) -> ProjectCosts:
+def load_project_costs(project_dir: Path, run: Optional[int] = None) -> ProjectCosts:
     """@brief Read the totals of a project; zero when nothing was paid yet.
 
     @param project_dir Project folder.
+    @param run Analysis whose run_* figures are wanted (the one this
+        application instance started, see `start_run`); None, or a number the
+        file does not know, gives the file's current analysis. Lets an
+        instance keep showing its own analysis while a second instance
+        starts another one on the same project (audit 138, B8).
     @return The totals (all zero and empty `since` when the file is absent).
     @throws ProjectCostsError When the file exists but is not usable.
     @throws OSError When the file exists but cannot be read right now.
@@ -227,7 +250,7 @@ def load_project_costs(project_dir: Path) -> ProjectCosts:
     data = _read(Path(project_dir) / COSTS_FILE)
     if data is None:
         return ProjectCosts(by_provider={})
-    return _totals(data)
+    return _totals(data, run)
 
 
 def _by_provider(data: dict, run: Optional[int] = None) -> dict:
@@ -244,7 +267,7 @@ def _by_provider(data: dict, run: Optional[int] = None) -> dict:
             continue
         provider = provider_of(str(entry.get("model") or ""))
         total, calls, missing = totals.get(provider, (0.0, 0, 0))
-        cost = finite_number(entry.get("cost_usd"))
+        cost = _entry_cost(entry)
         totals[provider] = (total + (cost or 0.0), calls + 1, missing + (cost is None))
     return totals
 
@@ -255,10 +278,15 @@ def add_call(project_dir: Path, record: dict, now: Optional[datetime] = None) ->
     @param project_dir Project folder; created if missing.
     @param record Call as reported by `openrouter.set_usage_listener`:
         ``cost_usd`` (None when not reported), ``prompt_tokens``,
-        ``completion_tokens``, ``model``, optional ``cost_source`` (how the
-        cost was obtained when the provider did not report it, e.g.
-        "token_price" for DeepSeek).
-    @param now Timestamp of the call (UTC now by default).
+        ``completion_tokens`` (None when not reported: stored as None, never
+        as 0), ``model``, optional ``cost_source`` (how the cost was obtained
+        when the provider did not report it, e.g. "token_price" for
+        DeepSeek), optional ``run``: the analysis the call belonged to WHEN
+        IT WAS MADE (see `start_run`). Without ``run`` the call goes to the
+        file's current analysis, as before; a ``run`` the file does not know
+        is ignored the same way.
+    @param now Time of the call -- the request, not the write, which may
+        come later when the file was busy (UTC now by default).
     @return The new totals.
     @throws ProjectCostsError When the existing file is not usable: it is
         left untouched and the call is not recorded.
@@ -277,7 +305,10 @@ def start_run(project_dir: Path, now: Optional[datetime] = None) -> ProjectCosts
 
     @param project_dir Project folder; created if missing.
     @param now Start time (UTC now by default).
-    @return The totals, with the new analysis empty.
+    @return The totals, with the new analysis empty: ``.run`` is its number,
+        to stamp on every call of this analysis (``record["run"]`` of
+        `add_call`), so a call written late -- or after another instance
+        started a newer analysis -- still lands in its own (audit 138, B8).
     @throws ProjectCostsError, OSError As `add_call`, with the same guarantees.
     @note The GUI shows the cost of the current analysis, not the project
         total (user decision 2026-09-28): one analysis runs from one «Estrai
@@ -340,7 +371,7 @@ def _remove_stale_lock(path: Path) -> bool:
     """
     try:
         judged = path.stat()
-        if time.time() - judged.st_mtime <= LOCK_STALE_S:
+        if abs(time.time() - judged.st_mtime) <= LOCK_STALE_S:
             return False
         content = path.read_bytes()
         if _lock_identity(path.stat()) != _lock_identity(judged) or path.read_bytes() != content:
@@ -406,9 +437,7 @@ def _add_call_once(folder: Path, record: dict, now: Optional[datetime]) -> Proje
     path = folder / COSTS_FILE
     stamp = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
     data = _read(path) or _empty(stamp)
-    cost = finite_number(record.get("cost_usd"))
-    if cost is not None and cost < 0:
-        cost = None
+    cost = _entry_cost(record)
     data["version"] = VERSION
     data["calls"] += 1
     if cost is None:
@@ -417,12 +446,16 @@ def _add_call_once(folder: Path, record: dict, now: Optional[datetime]) -> Proje
         data["total_usd"] = float(data["total_usd"]) + cost
     entry = {
         "time": stamp, "model": str(record.get("model") or ""), "cost_usd": cost,
-        "prompt_tokens": _count(record.get("prompt_tokens")) or 0,
-        "completion_tokens": _count(record.get("completion_tokens")) or 0,
+        # None when not reported or unusable (audit 138, B5).
+        "prompt_tokens": _count(record.get("prompt_tokens")),
+        "completion_tokens": _count(record.get("completion_tokens")),
     }
     if cost is not None and isinstance(record.get("cost_source"), str):
         entry["cost_source"] = record["cost_source"]
-    if data.get("run"):
+    run = _count(record.get("run"))
+    if run and run <= data.get("run", 0):
+        entry["run"] = run          # the analysis of the call, stamped when it was made
+    elif data.get("run"):
         entry["run"] = data["run"]
     data["entries"].append(entry)
     return _save(folder, path, data)

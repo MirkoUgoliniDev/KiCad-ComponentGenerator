@@ -126,10 +126,18 @@ def test_rounded_board_corners_are_not_contacts(tmp_path):
 
 
 def test_a_side_the_analysis_left_out_but_the_photo_shows_is_a_warning(tmp_path):
+    """Three evenly spaced notches of one width are a contact row (point 139, G1 e)."""
+    profiles, shape = profiles_of(board_photo(left=(4.0, 6.54, 9.08), right=ROW_4), tmp_path)
+    lines = check_declared_contacts(profiles, shape, LENGTH, WIDTH, [side("right", 4, 2.54)])
+    assert ("warning", "Lato sinistro: sulla foto si contano 3 semi-fori, ma l'analisi non "
+                       "dichiara contatti su questo lato: da verificare.") in lines
+
+
+def test_two_notches_on_an_undeclared_side_are_not_a_contact_row(tmp_path):
+    """Negative: two notches are as well two mounting holes or mouse bites."""
     profiles, shape = profiles_of(board_photo(left=(4.0, 9.08), right=ROW_4), tmp_path)
     lines = check_declared_contacts(profiles, shape, LENGTH, WIDTH, [side("right", 4, 2.54)])
-    assert ("warning", "Lato sinistro: sulla foto si contano 2 semi-fori, ma l'analisi non "
-                       "dichiara contatti su questo lato: da verificare.") in lines
+    assert not [line for line in lines if "sinistro" in line[1]]
 
 
 def test_full_hole_sides_are_not_counted(tmp_path):
@@ -162,16 +170,25 @@ def test_notches_at_spacings_incompatible_with_the_pitch_are_not_counted():
     assert result.found is None and "passo" in result.reason
 
 
-def test_gaps_at_a_multiple_of_the_pitch_are_regular():
-    values = _profile([(40, 60), (140, 160)])                 # two pitches apart
+def test_a_missing_notch_inside_the_row_makes_the_count_a_lower_bound():
+    """Two pitches apart: a notch between them is missing or hidden (point 139, G1 d)."""
+    values = _profile([(40, 60), (140, 160)])
+    result = count_notches(values, 20.0, 2.5)
+    assert result.found is None and result.at_least == 2 and not result.no_notch
+    assert "almeno 2" in result.reason
+
+
+def test_a_notch_too_shallow_for_the_noise_band_is_not_counted():
+    """Negative: above the noise band (2 px here) but not twice as deep: not countable."""
+    values = _profile([(40, 60), (90, 110)], depth=3)
+    result = count_notches(values, 20.0, 2.5)
+    assert result.found is None and not result.no_notch
+
+
+def test_a_notch_twice_as_deep_as_the_noise_band_is_counted():
+    """Positive twin of the previous test: the same profile, one pixel deeper than the bound."""
+    values = _profile([(40, 60), (90, 110)], depth=5)
     assert count_notches(values, 20.0, 2.5).found == 2
-
-
-def test_a_shallow_dip_is_not_a_half_hole():
-    """Negative: below MIN_NOTCH_DEPTH_MM the outline only wobbles."""
-    shallow = int(edge_notches.MIN_NOTCH_DEPTH_MM * 20.0) - 1
-    values = _profile([(40, 60), (90, 110)], depth=shallow)
-    assert count_notches(values, 20.0, 2.5).found is None
 
 
 def test_a_run_wider_than_the_pitch_is_not_one_notch():
@@ -191,11 +208,31 @@ def test_nothing_to_compare_without_profiles_or_sides():
 
 def test_depth_profiles_follow_the_background_into_the_board():
     mask = np.zeros((20, 30), bool)
-    mask[:, :2] = True           # background beside the box
+    mask[:, :2] = True           # background 3 px left of the box: the board overhangs it
     mask[8:12, 5:8] = True       # a notch 3 px deep on the left edge of the box
-    profiles = depth_profiles(mask, (5, 2, 25, 18), 10)
+    profiles = depth_profiles(mask, (5, 2, 25, 18), 10, outside_px=5)
     assert profiles["left"][6:10] == [3, 3, 3, 3]
-    assert profiles["left"][0] == 0 and len(profiles["top"]) == 20
+    # Where the board reaches past the box edge the outline is followed outward.
+    assert profiles["left"][0] == -3 and len(profiles["top"]) == 20
+    # Without an outward follow the old reading is kept: outline at the box edge.
+    assert depth_profiles(mask, (5, 2, 25, 18), 10)["left"][0] == 0
+
+
+def test_depth_profiles_mark_an_outline_beyond_the_outward_follow_as_unknown():
+    mask = np.zeros((20, 30), bool)
+    mask[:, :1] = True           # background 4 px out, but only 2 px are followed
+    profiles = depth_profiles(mask, (5, 2, 25, 18), 10, outside_px=2)
+    assert profiles["left"][0] is None
+
+
+def test_depth_profiles_follow_each_edge_to_its_own_depth():
+    """A crop wider than the board: the outline 8 px in, a notch 12 px deeper."""
+    mask = np.zeros((40, 60), bool)
+    mask[:, :13] = True          # the board starts 8 px inside the box (x0 = 5)
+    mask[18:22, 13:25] = True    # a notch 12 px past the outline
+    profiles = depth_profiles(mask, (5, 2, 55, 38), {"left": 25, "right": 3, "top": 3,
+                                                      "bottom": 3})
+    assert profiles["left"][2] == 8 and profiles["left"][18] == 20
 
 
 def test_the_profiles_do_not_reach_the_saved_calibration():

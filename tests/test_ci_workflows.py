@@ -85,3 +85,28 @@ def test_the_push_workflow_is_read_only_and_uses_the_release_dependencies():
     assert "-c requirements-release-constraints.txt" in text
     checkout = [s for s in workflow["jobs"]["test"]["steps"] if str(s.get("uses", "")).startswith("actions/checkout")]
     assert checkout and checkout[0]["with"]["persist-credentials"] is False
+
+
+@pytest.mark.parametrize("name, job", [("release.yml", "build"), ("tests.yml", "test")])
+def test_a_failed_run_uploads_the_watchdog_report(name, job):
+    """A hang or native crash must leave the stacks the watchdog wrote (audit 138, D6).
+
+    The watchdog writes to %TEMP%; the test steps pin TEMP to the runner's temp
+    folder and a step that runs only on failure uploads the report from there.
+    """
+    yaml = pytest.importorskip("yaml")
+    from conftest import HANG_REPORT
+    workflow = yaml.safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))
+    steps = workflow["jobs"][job]["steps"]
+    for step in steps:
+        if "run_test_halves.py" in str(step.get("run", "")):
+            assert step["env"]["TEMP"] == step["env"]["TMP"] == "${{ runner.temp }}"
+    uploads = [step for step in steps
+               if str(step.get("uses", "")).startswith("actions/upload-artifact")
+               and "failure()" in str(step.get("if", ""))]
+    assert len(uploads) == 1
+    pattern = uploads[0]["with"]["path"]
+    assert pattern.startswith("${{ runner.temp }}/")
+    # The uploaded pattern is the file name the watchdog really uses.
+    import fnmatch
+    assert fnmatch.fnmatch(HANG_REPORT.name, pattern.rsplit("/", 1)[1])

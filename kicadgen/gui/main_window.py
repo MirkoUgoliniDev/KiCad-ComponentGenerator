@@ -2317,7 +2317,13 @@ class MainWindow(QMainWindow):
         pcb_row.addWidget(self.spin_pcb_thickness)
         pcb_row.addWidget(self.label_pcb_thickness_source, 1)
         pcb_row.addWidget(self.btn_pcb_thickness_reset)
-        ai_form.addRow("Spessore PCB:", pcb_row)
+        # Etichetta collegata al campo (audit 138, C6): con un layout come
+        # campo QFormLayout non imposta il «buddy», e un lettore di schermo non
+        # annunciava lo spessore con il suo nome.
+        self.label_pcb_thickness = QLabel("Spessore PCB:")
+        self.label_pcb_thickness.setBuddy(self.spin_pcb_thickness)
+        self.spin_pcb_thickness.setAccessibleName("Spessore PCB")
+        ai_form.addRow(self.label_pcb_thickness, pcb_row)
         self._ai_form = ai_form
         self._row_pcb_thickness = ai_form.rowCount() - 1
         _align_form_labels(ai_form)
@@ -2574,6 +2580,9 @@ class MainWindow(QMainWindow):
         # Nessun consuntivo sotto il pulsante (utente, 2026-09-24): saldo e
         # costo del progetto stanno nel riquadro «Strumenti AI».
         self.field_name.textChanged.connect(self.ai_account.refresh)
+        # La barra di stato segue ogni scrittura del file dei costi, non solo
+        # i cambi di progetto: prima restava indietro durante un'analisi (B4).
+        self.ai_account.costs_changed.connect(self._on_costs_changed)
         self.field_library_root.textChanged.connect(self.ai_account.refresh)
         self.component_prompt_dialog = QDialog(self)
         self.component_prompt_dialog.setWindowTitle("Prompt specifico del componente")
@@ -2923,6 +2932,16 @@ class MainWindow(QMainWindow):
         bar.set_state(done, current, skipped)
         self._refresh_status_bar(facts["name"])
 
+    def _on_costs_changed(self) -> None:
+        """@brief Refresh the status bar cost after the cost file changed (Qt slot).
+
+        @note Never raises: an exception leaving a slot aborts the application.
+        """
+        try:
+            self._refresh_status_bar(bool(self._component_name()))
+        except Exception as exc:  # noqa: BLE001 - informativo, mai fatale
+            self._append_log(tx("Barra di stato non aggiornata: {exc}", exc=exc))
+
     def _refresh_status_bar(self, named: bool) -> None:
         """@brief Show the open project and the AI cost of its current analysis in the status bar.
 
@@ -2942,22 +2961,45 @@ class MainWindow(QMainWindow):
         label.setText(self.i18n.tr("status.project", name=self._component_name()))
         try:
             from ..services.project_costs import load_project_costs
-            costs = load_project_costs(self._project_dir())
+            folder = self._project_dir()
+            # La stessa analisi che mostra la riga «Credito AI» (audit 138, B4).
+            account = getattr(self, "ai_account", None)
+            costs = load_project_costs(folder, account.shown_run(folder) if account else None)
         except Exception:  # noqa: BLE001 - il costo e' informativo
             costs = None
+        start_queued, waiting = (account.queued_for(folder) if costs is not None and account
+                                 else (False, 0))
+        if costs is not None and (start_queued or waiting):
+            # Come la riga del credito (audit 139, revisione finale): con
+            # chiamate ancora da scrivere il numero del file e' solo un minimo,
+            # e con l'inizio dell'analisi in coda l'analisi mostrata dal file e'
+            # ancora la precedente.
+            from .ai_account import format_usd
+            shown = 0.0 if start_queued else costs.run_usd
+            self.status_cost.setText(self.i18n.tr(
+                "status.analysis_cost_pending", total=format_usd(shown), waiting=waiting))
+            self.status_cost.setToolTip(self.i18n.tr(
+                "status.project_cost", total=format_usd(costs.total_usd), calls=costs.calls)
+                + " (+?)")
+            self.status_cost.setVisible(True)
+            return
         if costs is None or not costs.calls:
             self.status_cost.setText("")
             self.status_cost.setVisible(False)
             return
         if costs.run:
-            text = self.i18n.tr("status.analysis_cost", total=f"{costs.run_usd:.2f}",
+            # Stesso formato della riga del credito: sotto 1 USD quattro
+            # decimali, non «0.00» per un'analisi che costa millesimi (B4).
+            from .ai_account import format_usd
+            text = self.i18n.tr("status.analysis_cost", total=format_usd(costs.run_usd),
                                 calls=costs.run_calls)
             self.status_cost.setText(text + ("" if costs.run_complete else " (+?)"))
         else:
             # Calls recorded before analyses were recorded: no current analysis.
             self.status_cost.setText(self.i18n.tr("status.analysis_cost_unknown"))
+        from .ai_account import format_usd
         self.status_cost.setToolTip(
-            self.i18n.tr("status.project_cost", total=f"{costs.total_usd:.2f}", calls=costs.calls)
+            self.i18n.tr("status.project_cost", total=format_usd(costs.total_usd), calls=costs.calls)
             + ("" if costs.complete else " (+?)"))
         self.status_cost.setVisible(True)
 
@@ -3396,6 +3438,11 @@ class MainWindow(QMainWindow):
                 self, self.i18n.text('Profilo AI non disponibile'), str(exc))
             return
 
+        # Solo «Estrai parametri con AI» apre un'analisi nuova per il costo
+        # mostrato (utente, 28/09): _begin_ai_run serve anche al «Rilancio
+        # inventario», che si somma all'analisi in corso (audit 138, B1).
+        if hasattr(self, "ai_account"):
+            self.ai_account.start_analysis(self._project_dir_or_none())
         self._begin_ai_run("Analisi AI")
         # Da qui in poi lo stato "analisi in corso" e' gia' esposto all'utente:
         # qualunque eccezione prima di worker.start() deve ripristinarlo, non
@@ -3849,8 +3896,6 @@ class MainWindow(QMainWindow):
         # se nel frattempo se ne apre un altro (verifica del 25/09, D7). Si
         # rilascia quando il worker finisce davvero (_on_extract_finished).
         if hasattr(self, "ai_account"):
-            # Una nuova analisi: il costo mostrato riparte da qui (utente, 28/09).
-            self.ai_account.start_analysis(self._project_dir_or_none())
             self.ai_account.bind_run_project(self._project_dir_or_none())
         self._set_extract_button_text("Analisi in corso...")
         # Dopo il testo: da qui fino alla fine della corsa il pulsante e i
@@ -6895,7 +6940,9 @@ class MainWindow(QMainWindow):
         self.field_cast_hole = BoundedValue(1.7, 0.0, 10.0)
         #: Spessore della scheda; senza quota, lo standard dichiarato (vedi
         #: `_apply_extracted_pcb_thickness`).
-        self.field_cast_pcb = BoundedValue(STANDARD_PCB_THICKNESS_MM, 0.0, 10.0)
+        # Stesso minimo del campo visibile (0.1 mm): prima 0.0 era accettato qui
+        # e mostrato come 0.10, mentre il 3D usava 0.0 (audit 138, C5).
+        self.field_cast_pcb = BoundedValue(STANDARD_PCB_THICKNESS_MM, 0.1, 10.0)
         self.field_cast_pcb.on_change(lambda _value: self._refresh_pcb_thickness_row())
         #: Rientro del blocco componenti dal bordo del PCB.
         self.field_cast_inset = BoundedValue(1.0, 0.0, 20.0)

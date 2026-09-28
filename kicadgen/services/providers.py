@@ -224,7 +224,10 @@ def deepseek_request(url: str, body: Optional[dict] = None, timeout: int = _HTTP
     @throws ProviderError On missing key, HTTP error or unreadable answer.
         A transient HTTP status (TRANSIENT_HTTP_STATUSES) is marked
         `retryable`, with `retry_after` from the Retry-After header; a network
-        failure is `unreachable` and, as for OpenRouter, not retried.
+        failure is `unreachable` and, as for OpenRouter, not retried; its
+        text carries only a fixed category (`_network_reason`). A POST whose
+        answer timed out or could not be decoded after it was sent is marked
+        `possibly_billed` (the caller records it as a call without cost).
     """
     key = key if key else deepseek_api_key()
     headers = {"Authorization": f"Bearer {key}", "Accept": "application/json"}
@@ -251,9 +254,31 @@ def deepseek_request(url: str, body: Optional[dict] = None, timeout: int = _HTTP
         error.status = exc.code
         raise error from None
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        raise ProviderError(_redact(tx("Connessione a DeepSeek fallita: {reason}",
-                                       reason=getattr(exc, "reason", exc)), key),
-                            unreachable=not isinstance(exc, ValueError)) from None
+        # URLError: nothing was sent (urllib wraps every failure while
+        # sending). A bare TimeoutError / OSError while waiting for or reading
+        # the answer, or an undecodable body, come AFTER the request was sent:
+        # a chat request may have been billed (audit 138, B10).
+        sent = not isinstance(exc, urllib.error.URLError)
+        error = ProviderError(_redact(tx("Connessione a DeepSeek fallita: {reason}",
+                                         reason=_network_reason(exc)), key),
+                              unreachable=not isinstance(exc, ValueError))
+        error.possibly_billed = sent and body is not None and (
+            isinstance(exc, (TimeoutError, ValueError)))
+        raise error from None
+
+
+def _network_reason(exc: BaseException) -> str:
+    """Fixed category of a network failure, never its free text (audit 138, B11).
+
+    A proxy error can echo the proxy URL with its credentials, a socket error
+    a host name: like OpenRouter's, the text is reduced to known categories
+    by `openrouter._safe_error_text` («timed out», ...); anything else becomes
+    «provider details omitted».
+    """
+    reason = getattr(exc, "reason", exc)
+    if isinstance(reason, TimeoutError) or isinstance(exc, TimeoutError):
+        return _safe_error_text("timed out")
+    return _safe_error_text(reason if isinstance(reason, str) else None)
 
 
 def deepseek_models() -> list:
