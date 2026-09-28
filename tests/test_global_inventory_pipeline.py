@@ -72,14 +72,22 @@ def _main_response():
 
 
 def _uninformative_crop_reading():
-    """A crop reading that states nothing (unknown class, no package, no side counted).
+    """An observation (tool observe_body, HANDOFF 148) that derives «unknown» on these rows.
+
+    An opaque two-terminal body of no recognisable shape: with a row whose
+    class is neither two-terminal nor leaded (rf_module, unknown) the
+    derivation is 'unknown' and changes no field of the row.
 
     Two such readings agree but change no field of the row, so these tests
     keep checking the global inventory's own output; the crop reading itself
     is tested in tests/test_photo_crop_reading.py.
     """
-    return {'class': 'unknown', 'package': '', 'tab': False, 'marking': '',
-            'leads_by_side': {'left': None, 'right': None, 'top': None, 'bottom': None}}
+    return {'bodies_in_frame': 1, 'metal_contacts_total': 2, 'two_end_terminals_only': True,
+            'body_shape': 'other', 'top_translucent': False,
+            'something_visible_inside': False, 'coloured_patch_at_end': False,
+            'band_at_end': False, 'printed_text': 'none', 'marking': '', 'tab': False,
+            'size_family': '', 'leads_by_side': {'left': None, 'right': None,
+                                                 'top': None, 'bottom': None}}
 
 
 @pytest.fixture
@@ -111,8 +119,8 @@ def pipeline(monkeypatch, tmp_path):
 
     def fake_api(**kwargs):
         name = kwargs['tool']['function']['name']
-        if name == 'report_body':
-            # Contratto aggiornato (HANDOFF 144): dopo l'inventario globale ogni
+        if name == 'observe_body':
+            # Contratto aggiornato (HANDOFF 144, 148): dopo l'inventario globale ogni
             # corpo tenuto si rilegge due volte dal suo ritaglio. Quelle
             # chiamate si contano a parte: `requests` resta l'elenco delle
             # chiamate sulla scheda (estrazione + UN inventario globale).

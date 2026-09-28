@@ -3274,6 +3274,7 @@ def _components_3d(raw: Optional[Sequence[dict]],
                     # arrivare alla revisione, altrimenti una riga «da
                     # rivedere» non direbbe piu' perche'.
                     'package_confidence', '_crop_reading', '_crop_readings',
+                    '_crop_observations',
                     '_crop_reading_version', '_crop_reading_prompt_digest',
                     '_package_inventory', '_class_inventory',
                     '_lead_count_inventory'):

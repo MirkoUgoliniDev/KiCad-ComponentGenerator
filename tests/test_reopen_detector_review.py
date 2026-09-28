@@ -61,7 +61,7 @@ def _answer_call(calls, crop_calls=None):
     """@brief Finta chiamata: registra la richiesta e risponde per i candidati ricevuti.
 
     Contratto aggiornato (HANDOFF 146 V2): il rilancio, come l'estrazione,
-    rilegge ogni corpo tenuto dal suo ritaglio ('report_body'). Quelle
+    rilegge ogni corpo tenuto dal suo ritaglio ('observe_body'). Quelle
     richieste non entrano in `calls`, che resta l'elenco delle richieste
     sull'inventario globale (le «una volta sola» di questi test), ma in
     `crop_calls` quando e' dato; la risposta e' una lettura che non afferma
@@ -69,12 +69,18 @@ def _answer_call(calls, crop_calls=None):
     La lettura per ritaglio e' provata in tests/test_photo_crop_reading.py.
     """
     def call(**kwargs):
-        if kwargs['tool']['function']['name'] == 'report_body':
+        if kwargs['tool']['function']['name'] == 'observe_body':
             if crop_calls is not None:
                 crop_calls.append(kwargs)
-            return {'class': 'unknown', 'package': '', 'tab': False, 'marking': '',
-                    'leads_by_side': {'left': None, 'right': None, 'top': None,
-                                      'bottom': None}}
+            # Osservazione (HANDOFF 148) di un corpo opaco a due terminali senza
+            # forma riconoscibile: su una riga «resistor» a due terminali la
+            # derivazione ridà la classe dell'inventario e non cambia nulla.
+            return {'bodies_in_frame': 1, 'metal_contacts_total': 2, 'two_end_terminals_only': True,
+                    'body_shape': 'other', 'top_translucent': False,
+                    'something_visible_inside': False, 'coloured_patch_at_end': False,
+                    'band_at_end': False, 'printed_text': 'none', 'marking': '', 'tab': False,
+                    'size_family': '', 'leads_by_side': {'left': None, 'right': None,
+                                                         'top': None, 'bottom': None}}
         calls.append(kwargs)
         return _response(_candidates(kwargs))
     return call
@@ -377,7 +383,7 @@ def test_relaunch_reads_every_body_with_the_crop_prompt_of_the_profile(prepared,
     """@brief HANDOFF 146 V2: the relaunch runs the crop reading with the profile text.
 
     The worker receives the crop prompt from the same profile snapshot as the
-    ExtractWorker, and every 'report_body' request carries it; with the
+    ExtractWorker, and every 'observe_body' request carries it; with the
     factory default stored, the factory text is sent.
     """
     import kicadgen.services.openrouter as openrouter

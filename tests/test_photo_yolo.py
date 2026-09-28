@@ -697,10 +697,14 @@ def test_production_inventory_sends_weak_bodies_to_global_review(setup, monkeypa
                         lambda *args: np.zeros((640, 640, 3), np.uint8))
     requests = []
     def review(**kwargs):
-        if kwargs['tool']['function']['name'] == 'report_body':
-            # Contratto aggiornato (HANDOFF 144): i corpi tenuti si rileggono
+        if kwargs['tool']['function']['name'] == 'observe_body':
+            # Contratto aggiornato (HANDOFF 144, 148): i corpi tenuti si rileggono
             # dal loro ritaglio dopo l'inventario; qui conta solo l'inventario.
-            return {'class': 'unknown', 'package': '', 'tab': False, 'marking': '',
+            return {'bodies_in_frame': 1, 'metal_contacts_total': 2,
+                    'two_end_terminals_only': True, 'body_shape': 'other',
+                    'top_translucent': False, 'something_visible_inside': False,
+                    'coloured_patch_at_end': False, 'band_at_end': False,
+                    'printed_text': 'none', 'marking': '', 'tab': False, 'size_family': '',
                     'leads_by_side': dict.fromkeys(('left', 'right', 'top', 'bottom'))}
         requests.append(kwargs)
         payload = json.loads(kwargs['content_blocks'][4]['text'])

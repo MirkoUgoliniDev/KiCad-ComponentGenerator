@@ -235,7 +235,9 @@ pads reduced to fit, AI-only bodies discarded or left out until kept; point 142:
 counts castellated contacts in its first call, with enlarged edge strips; points 144-146,
 committed on `FIX` only, not merged: per-body enlarged crop reading read twice, image
 limits per provider, crop prompt chosen on a bench and editable in the profile dialog,
-failed readings kept apart from disagreements) is 6115 passed,
+failed readings kept apart from disagreements; points 147-148, `FIX` only: crop reading as a visual
+questionnaire with the class derived by the program, contradictions with the inventory flagged for
+review, JEDEC bounds for SOIC families) is 6093 passed,
 6 skipped, 2 expected failures and 19 subtests, run in two halves (HANDOFF point 113:
 the single-process run can die at random with a native Qt/VTK crash). The last packaging integration was merge
 commit `692ca95` on `main`. Keep these values aligned with HANDOFF.md.
