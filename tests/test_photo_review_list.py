@@ -110,12 +110,17 @@ def test_list_takes_the_sidebar_vertical_space(dialog, app):
     The parameter form is not in the sidebar at all, and the list is taller
     than every other sidebar row put together, so a long inventory is
     readable without scrolling through a few entries at a time.
+
+    Only rows that are not hidden count (changed on purpose, HANDOFF 141):
+    the AI-only summary label exists only to be shown when the inventory has
+    such bodies, and a hidden row takes no vertical space.
     """
     sidebar = dialog.component_list.parentWidget()
     assert dialog.form_widget.parentWidget() is not sidebar
     assert not sidebar.isAncestorOf(dialog.form_widget)
     others = [child for child in sidebar.findChildren(type(dialog.count_label))
-              if child.parentWidget() is sidebar and child is not dialog.component_list]
+              if child.parentWidget() is sidebar and child is not dialog.component_list
+              and not child.isHidden()]
     others += [dialog.parameters_button, dialog.model_button, dialog.category_filter]
     assert dialog.component_list.height() > sum(child.height() for child in others)
 

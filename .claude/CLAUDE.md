@@ -230,7 +230,8 @@ visible PCB thickness with its provenance; points 133-137: half-hole count on th
 with an AI recount of disagreeing sides, current-analysis cost, phase list in the progress
 card, one retry on unreadable inventory JSON, spin box arrows; points 138-139: adversarial
 audit and fixes — data-derived half-hole count, relative-centre recount check, cost queue and
-status bar, CI hang report) is 5957 passed,
+status bar, CI hang report; points 140-141: estimated sizes never used as measures, estimated
+pads reduced to fit, AI-only bodies discarded or left out until kept) is 6019 passed,
 6 skipped, 2 expected failures and 19 subtests, run in two halves (HANDOFF point 113:
 the single-process run can die at random with a native Qt/VTK crash). The last packaging integration was merge
 commit `692ca95` on `main`. Keep these values aligned with HANDOFF.md.

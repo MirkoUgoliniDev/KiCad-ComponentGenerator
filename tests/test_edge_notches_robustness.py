@@ -209,19 +209,23 @@ def test_the_noise_band_follows_the_photo_not_a_constant():
     assert count_notches(_noisy(4.5, sigma=0.0), 20.0, 2.5).found == 5
 
 
-def test_a_declared_diameter_sets_a_structural_minimum_depth():
-    """Diameter 2 mm at 20 px/mm: radius 20 px, a notch must reach 10 px."""
-    deep = count_notches(_noisy(12.0, sigma=0.0), 20.0, 2.5, hole_diameter_mm=2.0)
+def test_a_declared_diameter_sets_no_minimum_depth():
+    """Contract changed on purpose (HANDOFF point 140): the depth of a notch is how
+    far the hole sticks out of the board, set by where its centre sits, not by
+    its size. A 2 mm hole cut less than halfway leaves a shallow notch that is
+    still a half-hole; before, «half the radius» made it «not countable»."""
     shallow = count_notches(_noisy(8.0, sigma=0.0), 20.0, 2.5, hole_diameter_mm=2.0)
-    assert deep.found == 5
-    assert shallow.found is None and not shallow.no_notch
+    assert shallow.found == 5
 
 
-def test_the_depth_bound_uses_the_scale_across_the_edge():
-    """Across 10 px/mm: radius 10 px, bound 5 px; the along scale (20) would ask 10 px."""
-    result = count_notches(_noisy(8.0, sigma=0.0), 20.0, 2.5, across_px_per_mm=10.0,
-                           hole_diameter_mm=2.0)
-    assert result.found == 5
+def test_a_notch_wider_than_the_measured_hole_is_not_that_half_hole():
+    """Positive and negative on WIDTH: the notch is a chord of its hole, never wider.
+    Notches are 20 px wide at 20 px/mm (1 mm)."""
+    fits = count_notches(_noisy(8.0, sigma=0.0), 20.0, 2.5, hole_diameter_mm=1.2)
+    too_narrow_hole = count_notches(_noisy(8.0, sigma=0.0), 20.0, 2.5, hole_diameter_mm=0.5)
+    assert fits.found == 5
+    assert too_narrow_hole.found is None and not too_narrow_hole.no_notch
+    assert "larghe" in too_narrow_hole.reason
 
 
 def test_a_straight_edge_is_no_notch_only_when_the_photo_could_show_one():
@@ -232,9 +236,10 @@ def test_a_straight_edge_is_no_notch_only_when_the_photo_could_show_one():
     fine = count_notches(straight, 20.0, 2.5, across_px_per_mm=40.0)
     assert coarse.found is None and not coarse.no_notch
     assert fine.no_notch
-    # A declared diameter replaces the assumed one: 1 mm is 10 px deep at 20 px/mm.
-    assert count_notches(straight, 20.0, 2.5, across_px_per_mm=20.0,
-                         hole_diameter_mm=1.0).no_notch
+    # A declared diameter does NOT make «no notch» easier to claim (point 140):
+    # the notch of a large hole can be shallow, so the smallest one assumed stays.
+    assert not count_notches(straight, 20.0, 2.5, across_px_per_mm=20.0,
+                             hole_diameter_mm=1.0).no_notch
 
 
 def test_a_tilted_dense_profile_is_measured_from_its_lower_envelope():

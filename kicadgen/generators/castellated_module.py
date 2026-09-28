@@ -42,7 +42,14 @@ Convenzioni geometriche:
   (AssumedSize) che, se non sta nel passo del lato o dietro ai fori passanti
   collocati dalla distanza fra le file, viene ridotto e dichiarato come stima
   (CastellatedModuleParams.side_geometry / geometry_notes). Una quota
-  dichiarata che non sta viene rifiutata, mai ridotta.
+  dichiarata che non sta viene rifiutata, mai ridotta;
+* lo stesso vale per le misure delle piazzole (decisione dell'utente del
+  2026-09-28, «Riduci e segnala»): una larghezza o lunghezza STIMATA
+  (AssumedSize, lato per lato o di riferimento del modulo) che farebbe
+  arrivare il rame di due contatti diversi a meno di MIN_COPPER_GAP_MM viene
+  ridotta quanto basta e scritta nelle note
+  (CastellatedModuleParams.pad_sizes / geometry_notes); una misura letta dai
+  documenti o scritta dall'utente che non sta viene rifiutata come prima.
 """
 
 from __future__ import annotations
@@ -71,6 +78,18 @@ from ..services.messages import tx
 #: distinti e fabbricabili, non una distanza consigliata.
 MIN_HOLE_WALL_MM = 0.2
 
+#: Distanza minima fra il rame di due contatti DIVERSI che il generatore
+#: lascia quando RIDUCE una misura di piazzola stimata (pad_sizes). E' la
+#: distanza di isolamento predefinita di un progetto KiCad (net class
+#: «Default», clearance 0,2 mm) e sta sopra il minimo di spaziatura rame-rame
+#: dei produttori di PCB standard (tipicamente 0,1-0,15 mm): una stima ridotta
+#: fin qui non fa scattare il DRC della scheda madre e resta fabbricabile.
+#: Stesso valore e stessa giustificazione di pin_header.MIN_PAD_GAP_MM. E' un
+#: LIMITE INFERIORE di fabbricazione, non tarato su nessun modulo; si applica
+#: SOLO alle stime: una misura dichiarata viene solo controllata da validate()
+#: (rame che si tocca = rifiuto), mai ridotta.
+MIN_COPPER_GAP_MM = 0.2
+
 #: Centro del semi-foro rispetto al bordo, in frazioni del raggio, quando non e'
 #: dichiarato (convenzione storica: un castellated e' un foro forato vicino al
 #: bordo e poi tagliato, il centro sta DENTRO la scheda).
@@ -78,7 +97,7 @@ HALF_HOLE_INSET_RATIO = 0.76
 
 
 class AssumedSize(float):
-    """@brief A hole size, in mm, that the generator ASSUMED because nobody declared it.
+    """@brief A size (hole or pad), in mm, that was ASSUMED or estimated rather than declared.
 
     Behaves exactly like the float it wraps (arithmetic, comparisons,
     formatting, JSON, copy and pickle); only its type records the provenance.
@@ -104,6 +123,18 @@ class AssumedSize(float):
 REFERENCE_HALF_HOLE_MM = AssumedSize(1.7)
 REFERENCE_THRU_DRILL_MM = AssumedSize(1.0)
 REFERENCE_THRU_RING_MM = AssumedSize(1.7)
+#: Piazzola di bordo di riferimento (lunghezza x larghezza, mm): lo stesso land
+#: pattern storico del campione RS485/TTL. E' il ripiego quando ne' il lato ne'
+#: il modulo dichiarano una misura: come i fori, se non lascia il rame dei
+#: contatti vicini a MIN_COPPER_GAP_MM viene ridotta e scritta nelle note.
+REFERENCE_PAD_LENGTH_MM = AssumedSize(3.6)
+REFERENCE_PAD_WIDTH_MM = AssumedSize(1.8)
+
+#: Provenienza di una misura di piazzola risolta per un lato (PadSize).
+PAD_DECLARED = "declared"             # letta dai documenti o scritta dall'utente
+PAD_ASSUMED = "assumed"               # stima o riferimento, rispettata cosi' com'e'
+PAD_ESTIMATE_PITCH = "estimate_pitch"          # stima ridotta per il passo del lato
+PAD_ESTIMATE_CLEARANCE = "estimate_clearance"  # stima ridotta per il rame di un altro lato
 
 #: Provenienza di una quota di foro risolta per un lato (SideGeometry).
 SIZE_SIDE = "side"                    # dichiarata sul lato
@@ -128,9 +159,34 @@ def is_declared_size(value) -> bool:
     return value is not None and not isinstance(value, AssumedSize)
 
 
+class PadSize(NamedTuple):
+    """@brief Edge-land size resolved for one side, in mm, with its provenance.
+
+    @note `length` is perpendicular to the edge, `width` along it; the
+        `*_source` fields are PAD_* values and `*_estimate` the assumed value
+        before any reduction (equal to the resolved value when nothing was
+        reduced). `clearance_edge` is the edge of the other side whose copper
+        forced a length reduction, else None.
+    """
+
+    length: float
+    length_source: str
+    length_estimate: float
+    width: float
+    width_source: str
+    width_estimate: float
+    clearance_edge: Optional[str] = None
+
+
 def _floor_hundredth(value: float) -> float:
     """Round DOWN to 0.01 mm, so an estimate that must fit never grows past its bound."""
     return math.floor(value * 100 + 1e-9) / 100
+
+
+def _finite_positive(value) -> bool:
+    """True for a finite number > 0 (bools excluded)."""
+    return (not isinstance(value, bool) and isinstance(value, (int, float))
+            and math.isfinite(value) and value > 0)
 
 #: Lati del modulo su cui possono stare i contatti.
 EDGES = ("left", "right", "top", "bottom")
@@ -598,8 +654,12 @@ class CastellatedModuleParams:
     # Land pattern di default: 3.6 x 1.8 mm con 1.4 mm fuori dal bordo, cioe'
     # il pad centrato 0.4 mm fuori dal modulo -- e' il pattern gia' verificato
     # sul convertitore RS485/TTL, un buon punto di partenza per moduli simili.
-    pad_length: float = 3.6
-    pad_width: float = 1.8
+    # Il default e' un AssumedSize (riferimento, non una misura): vale solo per
+    # i lati che non hanno una misura propria e, se non lascia il rame dei
+    # contatti vicini a MIN_COPPER_GAP_MM, viene ridotto e annotato (pad_sizes).
+    # Un numero passato dal chiamante e' dichiarato. None = non dichiarato.
+    pad_length: float = REFERENCE_PAD_LENGTH_MM
+    pad_width: float = REFERENCE_PAD_WIDTH_MM
     pad_overhang: float = 1.4
     # Diametro del semi-foro metallizzato sul bordo: non serve al footprint
     # (i pad sono rettangolari) ma al modello 3D, dove i semi-fori vanno
@@ -649,7 +709,7 @@ class CastellatedModuleParams:
     margin: float = 0.25
 
     def __post_init__(self) -> None:
-        """@brief Turn an explicit None hole size into the assumed reference size.
+        """@brief Turn an explicit None hole or pad size into the assumed reference size.
 
         @note None is how a caller says "not declared" (e.g. the extraction
             did not measure it); the reference value then applies, as an
@@ -657,7 +717,9 @@ class CastellatedModuleParams:
         """
         for name, reference in (("hole_diameter", REFERENCE_HALF_HOLE_MM),
                                 ("thru_hole_drill", REFERENCE_THRU_DRILL_MM),
-                                ("thru_pad_diameter", REFERENCE_THRU_RING_MM)):
+                                ("thru_pad_diameter", REFERENCE_THRU_RING_MM),
+                                ("pad_length", REFERENCE_PAD_LENGTH_MM),
+                                ("pad_width", REFERENCE_PAD_WIDTH_MM)):
             if getattr(self, name) is None:
                 setattr(self, name, reference)
 
@@ -887,6 +949,32 @@ class CastellatedModuleParams:
                         pitch=side.pitch, ring=geometry.ring, wall=MIN_HOLE_WALL_MM,
                         value=geometry.drill))
             notes.extend(self._inset_notes(side, geometry, label))
+            notes.extend(self._pad_notes(side, label))
+        return notes
+
+    def _pad_notes(self, side: CastellatedSide, label: str) -> List[str]:
+        """Notes on the estimated pad sizes of one side that were reduced (pad_sizes)."""
+        size = self._pad_size_of(side)
+        notes = []
+        if size is None:
+            return notes
+        if size.width_source == PAD_ESTIMATE_PITCH:
+            notes.append(tx(
+                "Lato {label}: larghezza delle piazzole stimata {estimate}mm, non letta dai "
+                "documenti; con il passo {pitch}mm il rame di due contatti vicini resterebbe a "
+                "meno di {gap}mm, quindi e' ridotta a {value:.2f}mm. Indica la larghezza letta "
+                "dal disegno per averla esatta.",
+                label=label, estimate=float(size.width_estimate), pitch=side.pitch,
+                gap=MIN_COPPER_GAP_MM, value=size.width))
+        if size.length_source == PAD_ESTIMATE_CLEARANCE:
+            notes.append(tx(
+                "Lato {label}: lunghezza delle piazzole stimata {estimate}mm, non letta dai "
+                "documenti; il rame arriverebbe a meno di {gap}mm da quello dei contatti del "
+                "lato {other}, quindi e' ridotta a {value:.2f}mm. Indica la lunghezza letta dal "
+                "disegno per averla esatta.",
+                label=label, estimate=float(size.length_estimate), gap=MIN_COPPER_GAP_MM,
+                other=EDGE_LABELS.get(size.clearance_edge, size.clearance_edge),
+                value=size.length))
         return notes
 
     def _reference(self, name: str, side: Optional[CastellatedSide] = None) -> float:
@@ -1073,12 +1161,197 @@ class CastellatedModuleParams:
         return (placement.x, self.body_width / 2 - offset)
 
     def side_pad_length(self, side: CastellatedSide) -> float:
-        """@brief Return the pad length in mm for `side`, falling back to the module default."""
-        return side.pad_length if side.pad_length is not None else self.pad_length
+        """@brief Return the resolved pad length in mm for `side` (see pad_sizes).
+
+        @param side One of self.sides; any other side object gets its own
+            value, else the module default, unresolved.
+        """
+        size = self._pad_size_of(side)
+        return size.length if size is not None else float(self._raw_pad(side, "pad_length")[0])
 
     def side_pad_width(self, side: CastellatedSide) -> float:
-        """@brief Return the pad width in mm for `side`, falling back to the module default."""
-        return side.pad_width if side.pad_width is not None else self.pad_width
+        """@brief Return the resolved pad width in mm for `side` (see pad_sizes).
+
+        @param side One of self.sides; any other side object gets its own
+            value, else the module default, unresolved.
+        """
+        size = self._pad_size_of(side)
+        return size.width if size is not None else float(self._raw_pad(side, "pad_width")[0])
+
+    def _raw_pad(self, side, name: str) -> tuple:
+        """(value, declared) of a pad size before any reduction.
+
+        Precedence: the side's own value (declared or estimated), else the
+        module's. Unlike the hole sizes, a module-wide DECLARED pad size does
+        not outrank a side's estimate: the module value is only the default
+        of the sides without a land pattern of their own, and letting it win
+        is exactly how one side's size used to reach every side (2026-09-28).
+        """
+        own = getattr(side, name, None)
+        value = own if own is not None else getattr(self, name)
+        if value is None:
+            value = REFERENCE_PAD_LENGTH_MM if name == "pad_length" else REFERENCE_PAD_WIDTH_MM
+        return value, is_declared_size(value)
+
+    def _pad_size_of(self, side) -> Optional[PadSize]:
+        """The resolved PadSize of `side` when it is one of self.sides (identity), else None."""
+        for index, candidate in enumerate(self.sides):
+            if candidate is side:
+                return self.pad_sizes()[index]
+        return None
+
+    def _pad_cache_key(self) -> str:
+        """Snapshot of every input of pad_sizes, provenance (type) included."""
+        def tagged(value):
+            if isinstance(value, (list, tuple)):
+                return tuple(tagged(v) for v in value)
+            return (type(value).__name__, value)
+        module = tuple(tagged(getattr(self, name, None)) for name in (
+            "body_length", "body_width", "pad_length", "pad_width", "pad_overhang",
+            "hole_diameter", "hole_inset", "thru_hole_drill", "thru_pad_diameter",
+            "thru_hole_offset", "row_spacing"))
+        sides = tuple(tuple(tagged(getattr(side, name, None)) for name in (
+            "edge", "count", "pitch", "first_pin", "reverse", "offset", "pad_length",
+            "pad_width", "pin_numbers", "contact_style", "hole_diameter",
+            "thru_hole_drill", "thru_pad_diameter")) for side in self.sides)
+        return repr((module, sides))
+
+    def pad_sizes(self) -> List[PadSize]:
+        """@brief Edge-land size of every side, estimates reduced to keep the copper apart.
+
+        @return One PadSize per entry of self.sides, same order, mm.
+        @note Rule (decision of the user, 2026-09-28, «Riduci e segnala», the
+            same as for estimated holes since 2026-09-26): a DECLARED size (a
+            plain float: read from the documents or typed by the user) is
+            returned as is, and validate() refuses it when two contacts'
+            copper touches. An ASSUMED size (AssumedSize: an AI estimate or
+            the reference land pattern) that brings two different contacts'
+            copper closer than MIN_COPPER_GAP_MM is reduced just enough:
+            * width, along the edge: at most pitch - MIN_COPPER_GAP_MM on a
+              side with more than one contact (floor to 0.01 mm);
+            * length, across the edge: when the copper of two different sides
+              (facing rows of a narrow body, contacts near a corner) is closer
+              than the gap, the assumed lengths of the two sides are shortened
+              together in 0.01 mm steps -- the outer end stays at the
+              overhang, the inner end retreats -- by the smallest step that
+              leaves the gap, never below pad_overhang + 0.01 mm (the land
+              must stay under the module). When even that is not enough
+              nothing is reduced, and validate() reports the conflict.
+            Through-hole sides are left alone: their land is the ring
+            (side_geometry), which has its own rule.
+        @note Every reduction is reported by geometry_notes(). The result is
+            cached on a snapshot of its inputs (types included, so a change
+            of provenance alone invalidates it).
+        """
+        key = self._pad_cache_key()
+        cached = self.__dict__.get("_pad_sizes_cache")
+        if cached is not None and cached[0] == key:
+            return list(cached[1])
+        sizes = self._resolve_pad_sizes()
+        self.__dict__["_pad_sizes_cache"] = (key, tuple(sizes))
+        return list(sizes)
+
+    def _resolve_pad_sizes(self) -> List[PadSize]:
+        """Compute pad_sizes() (uncached)."""
+        entries = []
+        for side in self.sides:
+            length, length_declared = self._raw_pad(side, "pad_length")
+            width, width_declared = self._raw_pad(side, "pad_width")
+            entries.append(PadSize(
+                length, PAD_DECLARED if length_declared else PAD_ASSUMED, length,
+                width, PAD_DECLARED if width_declared else PAD_ASSUMED, width))
+        if not all(_finite_positive(e.length) and _finite_positive(e.width) for e in entries):
+            return entries  # validate() rifiuta queste quote con il suo messaggio
+        for index, side in enumerate(self.sides):
+            entry = entries[index]
+            count, pitch = getattr(side, "count", 0), getattr(side, "pitch", 0)
+            if (entry.width_source != PAD_ASSUMED or side.contact_style == CONTACT_THROUGH_HOLE
+                    or isinstance(count, bool) or not isinstance(count, int) or count < 2
+                    or not _finite_positive(pitch)):
+                continue
+            bound = pitch - MIN_COPPER_GAP_MM
+            if entry.width > bound + 1e-9:
+                best = _floor_hundredth(bound)
+                if best > 0:
+                    entries[index] = entry._replace(width=best, width_source=PAD_ESTIMATE_PITCH)
+        adjustable = [e.length_source == PAD_ASSUMED and side.contact_style != CONTACT_THROUGH_HOLE
+                      for e, side in zip(entries, self.sides)]
+        overhang = self.pad_overhang
+        overhang_ok = (not isinstance(overhang, bool) and isinstance(overhang, (int, float))
+                       and math.isfinite(overhang) and overhang >= 0)
+        if any(adjustable) and len(self.sides) > 1 and overhang_ok:
+            try:
+                self._shorten_assumed_lengths(entries, adjustable)
+            except (ArithmeticError, KeyError, TypeError, ValueError):
+                # Parametri che validate() rifiutera' comunque (lato o stile
+                # sconosciuto, quote non valide): nessuna riduzione, il
+                # messaggio giusto e' il suo.
+                pass
+        return entries
+
+    def _probe(self, entries: List[PadSize]) -> "CastellatedModuleParams":
+        """A copy whose sides carry `entries` as DECLARED sizes, so it reduces nothing."""
+        sides = [replace(side, pad_length=float(e.length), pad_width=float(e.width))
+                 for side, e in zip(self.sides, entries)]
+        return replace(self, sides=sides, pad_length=float(self.pad_length),
+                       pad_width=float(self.pad_width))
+
+    def _side_gap(self, entries: List[PadSize], first: int, second: int) -> float:
+        """Smallest copper gap between contacts of two sides with different numbers, mm."""
+        probe = self._probe(entries)
+        outlines = {first: [], second: []}
+        for placement in pad_positions(probe):
+            owner = probe.side_of(placement)
+            for index in (first, second):
+                if owner is probe.sides[index]:
+                    outlines[index].append((placement.number, _copper_outline(probe, placement)))
+        gap = math.inf
+        for number_a, a in outlines[first]:
+            for number_b, b in outlines[second]:
+                if number_a != number_b:
+                    gap = min(gap, _box_distance(a, b) - a[4] - b[4])
+        return gap
+
+    def _shorten_assumed_lengths(self, entries: List[PadSize], adjustable: List[bool]) -> None:
+        """Shorten, in place, the assumed lengths of side pairs whose copper is closer than the gap."""
+        floor = round(self.pad_overhang + 0.01, 2)
+        count = len(self.sides)
+        for first in range(count):
+            for second in range(first + 1, count):
+                movable = [i for i in (first, second) if adjustable[i]]
+                if not movable or self._side_gap(entries, first, second) >= MIN_COPPER_GAP_MM - 1e-9:
+                    continue
+                starts = {i: _floor_hundredth(entries[i].length) for i in movable}
+                steps = max(int(round((starts[i] - floor) * 100)) for i in movable)
+                if steps <= 0:
+                    continue
+                base = list(entries)
+
+                def shortened(step):
+                    trial = list(base)
+                    for i in movable:
+                        trial[i] = trial[i]._replace(
+                            length=max(floor, round(starts[i] - step / 100, 2)))
+                    return trial
+
+                def clear(step):
+                    return self._side_gap(shortened(step), first, second) >= MIN_COPPER_GAP_MM - 1e-9
+
+                if not clear(steps):
+                    continue  # nemmeno la piazzola minima basta: lo dice validate()
+                low, high = -1, steps  # high: la distanza basta; low: non basta
+                while high - low > 1:
+                    middle = (low + high) // 2
+                    if clear(middle):
+                        high = middle
+                    else:
+                        low = middle
+                result = shortened(high)
+                for i in movable:
+                    if result[i].length < entries[i].length - 1e-9:
+                        other = self.sides[second if i == first else first].edge
+                        entries[i] = result[i]._replace(length_source=PAD_ESTIMATE_CLEARANCE,
+                                                        clearance_edge=other)
 
     def edge_length(self, edge: str) -> float:
         """@brief Return the body edge length in mm along which the pads of `edge` are spread.

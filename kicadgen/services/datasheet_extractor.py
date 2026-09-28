@@ -3182,6 +3182,10 @@ def _components_3d(raw: Optional[Sequence[dict]],
                     # decisione di presenza del revisore e deve arrivare al
                     # componente finale, non fermarsi ai candidati inviati.
                     '_yolo_manual_box',
+                    # Corpo aggiunto dal solo modello, escluso finche' l'utente
+                    # non lo tiene (punto 141): senza, la prima estrazione lo
+                    # consegnava come un corpo qualunque, dentro il 3D.
+                    '_ai_only_excluded',
                     '_package_verified', '_orientation_verified', 'pin_count_confidence', 'pin_count_source',
                     'class', 'component_id', 'source_candidate_ids', 'terminal_count', 'terminal_layout',
                     'terminal_count_basis', 'lead_count', 'lead_count_complete', 'lead_count_confidence',

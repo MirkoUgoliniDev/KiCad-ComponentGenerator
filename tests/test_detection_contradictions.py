@@ -8,6 +8,7 @@ ogni corpo. Ogni regola ha un caso che deve scattare e uno, strutturalmente
 diverso, che non deve.
 """
 from copy import deepcopy
+import json
 
 from test_photo_global_inventory import body, candidate, run
 
@@ -105,51 +106,99 @@ def test_a_conflicted_proposal_nobody_claims_is_still_restored():
 # ── G3: corpo solo-AI annidato in un corpo rilevato ─────────────────────
 
 
-def test_an_ai_only_body_inside_a_detected_body_becomes_a_doubt():
-    """Probabile doppione (il LED dentro il diodo della corsa DeepSeek), ma puo'
-    anche essere un corpo mancato dal rilevatore sopra un modulo: resta, come
-    dubbio, e non conta come corpo sicuro."""
+def test_an_ai_only_body_inside_a_detected_body_is_discarded(tmp_path):
+    """Contratto cambiato di proposito (utente, 28/09, HANDOFF 141: «scartati se
+    dentro un altro corpo»). Prima il LED dentro il diodo della corsa DeepSeek
+    restava come dubbio e finiva nel 3D; ora non viene restituito, la nota dice
+    dove stava e resta nell'audit, e la risposta resta in cache (nota, non
+    errore)."""
     items = [box(1, [.6, .1, .9, .4])]
     data = answer([body('D1', [1], bbox=[.6, .1, .9, .4]),
                    body('LD1', [], bbox=[.7, .15, .75, .35], **{'class': 'led'})],
                   [decision(1, 'D1', 'keep')])
-    result, _, logs = run(data, items)
+    result, _, logs = run(data, items, cache=tmp_path)
+    rows = {r['component_id']: r for r in result}
+    assert set(rows) == {'D1'}
+    assert '_ai_only_excluded' not in rows['D1']
+    assert rows['D1']['presence_confidence'] != 'low'
+    assert any('LD1' in line and 'discarded' in line and 'D1' in line for line in logs)
+    assert list(tmp_path.glob('global-inventory-*.json'))
+    audit = [json.loads(p.read_text(encoding='utf-8'))
+             for p in tmp_path.rglob('*.json') if 'global-inventory' in p.name]
+    assert any('LD1' in note for a in audit for note in a.get('local_evidence') or ())
+
+
+def test_a_detector_backed_body_at_the_same_place_is_kept():
+    """Negativo strutturale: stesso riquadro del LED, ma con una proposta del
+    rilevatore dietro. Un corpo visto dal rilevatore non e' «solo-AI»: la regola
+    dello scarto non lo riguarda, anche se sta dentro un altro corpo."""
+    items = [box(1, [.6, .1, .9, .4]), box(2, [.7, .15, .75, .35])]
+    data = answer([body('D1', [1], bbox=[.6, .1, .9, .4]),
+                   body('LD1', [2], bbox=[.7, .15, .75, .35], **{'class': 'led'})],
+                  [decision(1, 'D1', 'keep'), decision(2, 'LD1', 'keep')])
+    result, _, _ = run(data, items)
     rows = {r['component_id']: r for r in result}
     assert set(rows) == {'D1', 'LD1'}
-    assert rows['LD1']['presence_confidence'] == 'low' and rows['LD1']['_uncertain']
-    assert 'D1' in rows['LD1']['_review_reason']
-    assert rows['D1']['presence_confidence'] != 'low'
-    assert any('LD1' in line for line in logs)
+    assert not any('_ai_only_excluded' in r for r in result)
 
 
-def test_an_ai_only_body_that_contains_a_detected_body_is_kept():
-    """Negativo: un dissipatore (o schermo) sopra un corpo rilevato: impilamento,
-    non doppione; il verso opposto non si tocca."""
+def test_an_ai_only_body_that_contains_a_detected_body_is_returned_excluded():
+    """Un dissipatore (o schermo) sopra un corpo rilevato: impilamento, non
+    annidamento, quindi non si scarta. Contratto cambiato (HANDOFF 141): come
+    ogni corpo solo-AI torna proposto ma non scelto."""
     items = [box(1, [.4, .4, .5, .5])]
     data = answer([body('U1', [1], bbox=[.4, .4, .5, .5]),
                    body('HS1', [], bbox=[.3, .3, .6, .6], **{'class': 'other'})],
                   [decision(1, 'U1', 'keep')])
     result, _, _ = run(data, items)
-    assert {r.get('component_id') for r in result} == {'U1', 'HS1'}
+    rows = {r.get('component_id'): r for r in result}
+    assert set(rows) == {'U1', 'HS1'}
+    assert rows['HS1']['_ai_only_excluded'] is True
+    assert '_ai_only_excluded' not in rows['U1']
 
 
-def test_an_ai_only_body_beside_detected_bodies_is_kept():
-    """Negativo: un corpo che il rilevatore ha mancato, in una zona libera."""
+def test_an_ai_only_body_far_from_any_body_is_returned_excluded(tmp_path):
+    """Un corpo che il rilevatore ha mancato, in una zona libera (l'induttore
+    della corsa reale): restituito, ma escluso finche' l'utente non lo tiene,
+    con il motivo. Esito come nota: la risposta resta in cache."""
     items = [box(1, [.1, .1, .2, .2])]
     data = answer([body('U1', [1], bbox=[.1, .1, .2, .2]),
                    body('missed', [], bbox=[.6, .6, .8, .8])],
                   [decision(1, 'U1', 'keep')])
-    result, _, _ = run(data, items)
-    assert {r.get('component_id') for r in result} == {'U1', 'missed'}
+    result, _, logs = run(data, items, cache=tmp_path)
+    rows = {r.get('component_id'): r for r in result}
+    assert set(rows) == {'U1', 'missed'}
+    assert rows['missed']['_ai_only_excluded'] is True
+    assert 'photo review' in rows['missed']['_review_reason']
+    assert '_ai_only_excluded' not in rows['U1']
+    assert rows['missed']['_global_inventory_status'] == 'validated_hypotheses'
+    assert any('solo modello' in line for line in logs)
+    assert list(tmp_path.glob('global-inventory-*.json'))
 
 
 def test_nested_rows_are_kept_when_the_model_enumerated_the_bodies_itself():
     """Negativo: senza rilevatore non c'e' nessun corpo rilevato su cui
-    appoggiare il giudizio; due righe del modello non si annullano fra loro."""
+    appoggiare il giudizio; due righe del modello non si annullano fra loro, e
+    nessun corpo e' «solo-AI», quindi nessuno e' escluso."""
     data = answer([body('M1', [], bbox=[.2, .2, .8, .8]),
                    body('C1', [], bbox=[.3, .3, .4, .4], **{'class': 'capacitor'})], [])
     result, _, _ = run(data, [])
     assert {r.get('component_id') for r in result} == {'M1', 'C1'}
+    assert not any('_ai_only_excluded' in r for r in result)
+
+
+def test_two_ai_only_rows_never_discard_each_other():
+    """Negativo: un corpo solo-AI dentro un altro corpo solo-AI non e' dentro
+    un corpo rilevato; entrambi restano, esclusi."""
+    items = [box(1, [.1, .1, .2, .2])]
+    data = answer([body('U1', [1], bbox=[.1, .1, .2, .2]),
+                   body('M1', [], bbox=[.5, .5, .9, .9]),
+                   body('C1', [], bbox=[.6, .6, .7, .7])],
+                  [decision(1, 'U1', 'keep')])
+    result, _, _ = run(data, items)
+    rows = {r.get('component_id'): r for r in result}
+    assert set(rows) == {'U1', 'M1', 'C1'}
+    assert rows['M1']['_ai_only_excluded'] is True and rows['C1']['_ai_only_excluded'] is True
 
 
 # ── G6: errori su componenti inesistenti ────────────────────────────────

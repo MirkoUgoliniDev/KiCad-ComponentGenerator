@@ -398,6 +398,12 @@ class GenerateWorker(_Cad3DRunWorker):
             pretty_dir = self.project_dir / f"{self.params.name}.pretty"
             out_path = pretty_dir / f"{self.params.name}.kicad_mod"
             footprint.save(str(out_path))
+            if self.body is None and isinstance(self.params, CastellatedModuleParams):
+                # Solo footprint: le note delle stime ridotte (fori, piazzole)
+                # altrimenti le porta al log solo il passo 3D (punto 140,
+                # «riduci e segnala»: una riduzione non resta mai muta).
+                for note in self.params.geometry_notes():
+                    self.progress.emit(note)
             self.done.emit(str(out_path))
         except Exception as exc:  # noqa: BLE001 - riportato in UI, non e' fatale
             self.error.emit(str(exc))

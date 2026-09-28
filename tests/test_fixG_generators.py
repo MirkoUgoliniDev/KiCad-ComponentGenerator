@@ -93,11 +93,17 @@ def test_through_hole_rings_of_two_sides_meeting_at_a_corner_are_refused():
 
 
 def test_edge_pads_of_two_sides_overlapping_at_a_corner_are_refused():
+    """@brief Negative: DECLARED pads of two sides overlap at a corner; positive: moved away.
+
+    @note Since 2026-09-28 only a declared size is refused: the same overlap
+        with the assumed reference pads is reduced and noted instead
+        (test_castellated_estimated_pads.py).
+    """
     sides = [CastellatedSide(edge="left", count=1, pitch=0, offset=-3.5,
                              contact_style=CONTACT_HALF_HOLE),
              CastellatedSide(edge="top", count=1, pitch=0, offset=-3.5, first_pin=2,
                              contact_style=CONTACT_HALF_HOLE)]
-    params = _module(sides, body_length=10, body_width=10)
+    params = _module(sides, body_length=10, body_width=10, pad_length=3.6, pad_width=1.8)
     with pytest.raises(ValueError, match="in corto"):
         params.validate()
     for side in params.sides:
@@ -119,9 +125,14 @@ def test_a_side_offset_that_pushes_the_pads_past_the_edge_is_refused():
 
 
 def test_a_pitch_equal_to_the_pad_width_is_a_short():
-    """@brief Negative: touching copper is a short (was accepted); positive: 0.1 mm gap."""
+    """@brief Negative: touching DECLARED copper is a short (was accepted); positive: 0.1 mm gap.
+
+    @note The pad size is declared (plain float): an assumed one would be
+        reduced instead since 2026-09-28 (test_castellated_estimated_pads.py).
+    """
     params = _module([CastellatedSide(edge="left", count=2, pitch=1.8,
-                                      contact_style=CONTACT_HALF_HOLE)])
+                                      contact_style=CONTACT_HALF_HOLE)],
+                     pad_length=3.6, pad_width=1.8)
     with pytest.raises(ValueError, match="in corto"):
         params.validate()
     params.sides[0].pitch = 1.9
