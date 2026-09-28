@@ -7,6 +7,8 @@ spin box and the value never went up. QTest clicks sent to the spin box itself
 did not see it, so the checks here click the widget that is REALLY under the
 point (childAt), as the mouse does.
 """
+import sys
+
 import pytest
 from PyQt6.QtCore import Qt
 from PyQt6.QtTest import QTest
@@ -57,6 +59,19 @@ def test_the_text_field_never_covers_the_arrows(styled_spins):
             assert not field.intersects(_rect(spin, control)), (spin.style().name(), control)
 
 
+def test_the_button_column_is_reserved_once(styled_spins):
+    """The text field reaches the buttons: no padding reserves their column again.
+
+    HANDOFF 138, C3: a right padding as wide as the buttons, on top of the
+    geometry the sheet already gives them, left a gap as wide as a button
+    between field and arrows, and cut values in narrow table cells.
+    """
+    for spin in styled_spins:
+        field = spin.lineEdit().geometry()
+        up = _rect(spin, _UP)
+        assert up.left() - field.right() < up.width(), (spin.style().name(), field, up)
+
+
 def test_both_arrows_change_the_value_when_clicked(styled_spins):
     for spin in styled_spins:
         spin.setValue(50)
@@ -72,3 +87,15 @@ def test_the_arrows_are_drawn_by_the_theme():
     for selector in ("QDoubleSpinBox::up-button", "QDoubleSpinBox::down-button",
                      "QSpinBox::up-arrow", "QSpinBox::down-arrow"):
         assert selector in APP_QSS
+
+
+def test_the_windows11_style_is_really_among_the_checked_ones():
+    """The parametrized checks cover «windows11» on Windows; they must not lose it silently.
+
+    The fixture runs over `QStyleFactory.keys()`: if the style plugin went
+    missing (a Qt update, a packaging change) the defective case would just
+    disappear from the run and every check would still pass.
+    """
+    if sys.platform != "win32":
+        pytest.skip("the «windows11» Qt style exists only on Windows")
+    assert "windows11" in [key.lower() for key in QStyleFactory.keys()], QStyleFactory.keys()

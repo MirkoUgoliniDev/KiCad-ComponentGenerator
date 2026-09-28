@@ -26,6 +26,7 @@ from copy import deepcopy
 from PyQt6.QtCore import pyqtSignal
 
 from .component_state import height_is_estimated, mark_height_measured, mark_height_placeholder
+from .theme import spin_box_width_for_values
 from PyQt6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QDialogButtonBox,
                              QDoubleSpinBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
                              QPushButton, QTableWidget, QVBoxLayout)
@@ -132,6 +133,7 @@ class ComponentEditorDialog(QDialog):
                 spin.setToolTip(i18n.text(tip) if i18n is not None else tip)
                 spin.setStyleSheet("color: #f9e2af;")
             self.table.setCellWidget(row, column, spin)
+            self._fit_column_to(column, spin)
         rotation = QComboBox()
         for degrees in (0, 90, 180, 270):
             rotation.addItem(f"{degrees}°", float(degrees))
@@ -146,6 +148,22 @@ class ComponentEditorDialog(QDialog):
         self.table.setCellWidget(row, 9, QLineEdit(str(component.get("marking") or "")))
         # I dati non mostrati (metadati del rilevamento) viaggiano con la riga.
         self._rows_data.append(component)
+
+    def _fit_column_to(self, column: int, spin: QDoubleSpinBox) -> None:
+        """Widen a numeric column so the cell shows its widest value whole.
+
+        The default section width (about 100 px) left the six-decimal values
+        clipped once the style sheet's button column was drawn («1,600000»
+        read «1,6000», HANDOFF 138, C3). The width is measured on the spin box
+        itself (`spin_box_width_for_values`: range, decimals, suffix and the
+        chrome of the current style), so another font, style or range needs no
+        change here. The column only grows: a later row with a narrower range
+        must not clip an earlier one, and a column the user widened stays so.
+        """
+        # The grid line is drawn inside the section: the cell is 1 px narrower.
+        needed = spin_box_width_for_values(spin) + (1 if self.table.showGrid() else 0)
+        if self.table.columnWidth(column) < needed:
+            self.table.setColumnWidth(column, needed)
 
     def _add_new_row(self) -> None:
         """Add a body by hand; its height is a placeholder until typed."""

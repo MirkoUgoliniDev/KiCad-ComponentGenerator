@@ -29,6 +29,7 @@ import urllib.error
 import uuid
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Sequence
 from . import credentials
@@ -111,6 +112,11 @@ class OpenRouterError(Exception):
         #: True when OpenRouter could not be reached at all (DNS, connection,
         #: timeout): the request, and so the key, were never judged.
         self.unreachable = unreachable
+        #: True when the request was SENT and its answer was lost afterwards
+        #: (read timeout, undecodable body): the provider may have billed it.
+        #: Such a call is recorded as a paid call without cost
+        #: (`_record_usage`), so every total says «at least» (audit 138, B10).
+        self.possibly_billed = False
 
 
 class MissingApiKeyError(OpenRouterError):
@@ -518,7 +524,9 @@ def set_usage_listener(listener) -> None:
     """@brief Be told about every paid call as soon as its answer arrives.
 
     @param listener Callable taking one dict (``cost_usd`` float or None,
-        ``prompt_tokens``, ``completion_tokens``, ``model``), or None to stop.
+        ``prompt_tokens`` and ``completion_tokens`` int or None when not
+        reported, ``model``, ``time`` ISO UTC of the request, optional
+        ``cost_source``), or None to stop.
     @note Called from the worker thread that made the call: a GUI must hop to
         its own thread (e.g. with a Qt signal). A listener that raises never
         breaks the call it is told about: the answer was paid and is used.
@@ -527,13 +535,61 @@ def set_usage_listener(listener) -> None:
     _usage_listener = listener
 
 
-def _record_usage(payload: Any) -> None:
+def _token_count(usage: Any, key: str) -> Optional[int]:
+    """A token count as reported, or None when absent or unusable.
+
+    Unlike `_usage_int` (0, for the run totals), a missing or damaged count
+    stays unknown: a recorded 0 would later be priced as a known cheap call
+    (audit 138, B5).
+    """
+    value = usage.get(key) if isinstance(usage, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        if not math.isfinite(value) or value < 0 or value != int(value):
+            return None
+    except OverflowError:
+        return None
+    return int(value)
+
+
+#: Request in flight on this thread (call_tool): when it was sent and to
+#: which model, read by `_record_usage` for the record of the call.
+_request_context = threading.local()
+
+
+def _begin_request(model: str) -> datetime:
+    """Remember, for this thread, that a request to `model` is being sent now."""
+    _request_context.sent_at = datetime.now(timezone.utc)
+    _request_context.model = model
+    return _request_context.sent_at
+
+
+def _end_request() -> None:
+    """Forget the request of this thread (see `_begin_request`)."""
+    _request_context.sent_at = None
+    _request_context.model = ""
+
+
+def _record_usage(payload: Any, *, sent_at: Optional[datetime] = None,
+                  model: str = "") -> None:
     """Somma al consuntivo l'uso dichiarato da una risposta dell'API.
 
     Va chiamata per ogni risposta ricevuta, anche quando poi risultera'
     inutilizzabile: una chiamata che non ha prodotto la tool call e' stata
     comunque pagata, e tacerla renderebbe il consuntivo piu' basso del vero.
+    Anche con `payload` None: richiesta inviata e risposta persa (timeout in
+    lettura), forse fatturata, contata come chiamata senza costo.
+
+    `sent_at` e' l'ora in cui la richiesta e' partita (UTC) e va nel record
+    come ``time``: una scrittura rimandata (file dei costi occupato) resta
+    datata alla chiamata, non alla scrittura (audit 138, B10). Assente, vale
+    quella registrata da `_begin_request` nello stesso thread (call_tool),
+    poi adesso. `model` vale quando la risposta non lo porta, con lo stesso
+    ripiego. Il ripiego tiene la forma a un argomento di questo aggancio.
     """
+    sent_at = sent_at or getattr(_request_context, "sent_at", None)
+    model = model or getattr(_request_context, "model", "") or ""
     usage = payload.get("usage") if isinstance(payload, dict) else None
     cost = _credit_number((usage or {}).get("cost")) if isinstance(usage, dict) else None
     # A negative cost is not a refund to subtract from the run: it is a
@@ -554,10 +610,16 @@ def _record_usage(payload: Any) -> None:
                 usage.get("completion_tokens_details"), "reasoning_tokens")
     listener = _usage_listener
     if listener is not None:
+        moment = sent_at or datetime.now(timezone.utc)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
         record = {"cost_usd": cost, "model": str((payload.get("model") if isinstance(payload, dict)
-                                              else "") or ""),
-                  "prompt_tokens": _usage_int(usage, "prompt_tokens"),
-                  "completion_tokens": _usage_int(usage, "completion_tokens")}
+                                              else "") or model or ""),
+                  # None, not 0, when not reported or unusable (B5).
+                  "prompt_tokens": _token_count(usage, "prompt_tokens"),
+                  "completion_tokens": _token_count(usage, "completion_tokens"),
+                  # ISO text: the record crosses a queued Qt signal.
+                  "time": moment.astimezone(timezone.utc).isoformat(timespec="seconds")}
         if isinstance(usage, dict) and isinstance(usage.get("cost_source"), str):
             record["cost_source"] = usage["cost_source"]
         try:
@@ -1056,7 +1118,20 @@ def _retry_after(exc: urllib.error.HTTPError) -> Optional[float]:
     return max(0.0, seconds) if math.isfinite(seconds) else None
 
 
-def call_tool(
+def call_tool(*args, **kwargs) -> dict:
+    """@brief Call the model once and decode explicit structured tool arguments.
+
+    Same parameters, result and errors as `_call_tool`, which does the work;
+    this wrapper only guarantees that the request context read by
+    `_record_usage` (time and model of the call) never outlives the call.
+    """
+    try:
+        return _call_tool(*args, **kwargs)
+    finally:
+        _end_request()
+
+
+def _call_tool(
     model: str,
     system_prompt: str,
     content_blocks: Sequence[dict],
@@ -1115,7 +1190,14 @@ def call_tool(
         # tool_choice», 27/09): la risposta strutturata conta piu' del
         # ragionamento, quindi lo si spegne (scelta dell'utente).
         body["thinking"] = {"type": "disabled"}
-        payload = deepseek_request(DEEPSEEK_CHAT_URL, body, timeout=_HTTP_TIMEOUT_CHAT_S)
+        sent_at = _begin_request(model)
+        try:
+            payload = deepseek_request(DEEPSEEK_CHAT_URL, body, timeout=_HTTP_TIMEOUT_CHAT_S)
+        except ProviderError as exc:
+            if exc.possibly_billed:
+                # Sent, answer lost: maybe billed, never silently free (B10).
+                _record_usage(None)
+            raise
         if isinstance(payload, dict):
             # L'identificativo completo, non il nome che risponde DeepSeek: il
             # file dei costi riconosce cosi' il fornitore di ogni chiamata.
@@ -1124,7 +1206,8 @@ def call_tool(
             # fatturazione, token x prezzo del listino ufficiale (HANDOFF 128).
             from .deepseek_pricing import call_cost
             usage = payload.get("usage")
-            cost = call_cost(provider_model_name(model), usage)
+            # Priced at the time the request was sent (peak / off-peak hours).
+            cost = call_cost(provider_model_name(model), usage, sent_at)
             if isinstance(usage, dict) and cost is not None:
                 usage["cost"], usage["cost_source"] = cost, "token_price"
         _record_usage(payload)
@@ -1145,6 +1228,7 @@ def call_tool(
         },
         method="POST",
     )
+    _begin_request(model)
     try:
         with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_CHAT_S) as response:
             payload = json.load(response)
@@ -1173,18 +1257,35 @@ def call_tool(
                                  reason=_safe_error_text(exc.reason))
                               + _diagnostic_context()) from None
     except ValueError:
-        raise OpenRouterError(tx("Risposta non decodificabile da OpenRouter.")
-                              + _diagnostic_context()) from None
+        # The answer arrived (so it was billed) but cannot be read: a paid
+        # call without cost, never a free one (audit 138, B10).
+        _record_usage(None)
+        error = OpenRouterError(tx("Risposta non decodificabile da OpenRouter.")
+                                + _diagnostic_context())
+        error.possibly_billed = True
+        raise error from None
     except OSError as exc:
-        raise OpenRouterError(tx("Connessione a OpenRouter fallita: {reason}",
-                                 reason=_safe_error_text(str(exc) if isinstance(exc, TimeoutError)
-                                                         else None))
-                              + _diagnostic_context()) from None
+        # urllib wraps every failure while SENDING in URLError (caught above);
+        # a bare TimeoutError comes from waiting for, or reading, the answer
+        # of a request already sent, which the provider may bill (B10).
+        billed = isinstance(exc, TimeoutError)
+        if billed:
+            _record_usage(None)
+        error = OpenRouterError(tx("Connessione a OpenRouter fallita: {reason}",
+                                   reason=_safe_error_text(str(exc) if billed else None))
+                                + _diagnostic_context())
+        error.possibly_billed = billed
+        raise error from None
 
     # Prima di tool_arguments, che puo' sollevare: la chiamata e' stata pagata
     # comunque, e un consuntivo che ignora i tentativi falliti e' falso.
     _record_usage(payload)
     return tool_arguments(payload, tool["function"]["name"])
+
+
+# inspect.signature(call_tool) shows the real parameters (ai_diagnostics
+# looks for `compatibility_retry` there).
+call_tool.__wrapped__ = _call_tool
 
 
 def tool_arguments(payload: dict, tool_name: str, provider: str = "OpenRouter") -> dict:
@@ -1197,6 +1298,11 @@ def tool_arguments(payload: dict, tool_name: str, provider: str = "OpenRouter") 
     @return Parsed argument object, including an explicitly supplied empty object.
     @throws OpenRouterError Missing/empty arguments, invalid JSON/envelope, truncation
         without a usable tool call, or provider error.
+    @throws ToolArgumentsError Only for a COMPLETE answer whose arguments are
+        not a JSON object, which a caller may pay once more for. An answer cut
+        by the token budget (finish_reason length / max_tokens) with missing
+        or partial arguments raises a plain OpenRouterError that states the
+        truncation first, never retried (audit 138, A5).
     @note No fallback empty object and no automatic retry on incomplete responses.
     """
     context = _diagnostic_context(payload)
@@ -1216,46 +1322,78 @@ def tool_arguments(payload: dict, tool_name: str, provider: str = "OpenRouter") 
     message = choices[0].get("message") or {}
     message = message if isinstance(message, dict) else {}
     calls = message.get("tool_calls")
+    truncated = _truncated(choices[0])
     for call in calls if isinstance(calls, list) else ():
         if not isinstance(call, dict):
             continue
         function = call.get("function") or {}
         if not isinstance(function, dict) or function.get("name") != tool_name:
             continue
-        arguments = function.get("arguments")
-        if isinstance(arguments, dict):
-            return arguments
-        if arguments is None or (isinstance(arguments, str) and not arguments.strip()):
-            raise ToolArgumentsError(
-                tx("Gli argomenti dello strumento sono assenti o vuoti.") + context, raw=arguments)
-        if not isinstance(arguments, str):
-            raise ToolArgumentsError(
-                tx("Gli argomenti dello strumento non sono JSON valido (atteso oggetto).") + context,
-                raw=repr(arguments))
         try:
-            decoded = json.loads(arguments)
-        except ValueError as exc:
-            raise ToolArgumentsError(
-                tx("Gli argomenti dello strumento non sono JSON valido.") + context
-                + f" [{type(exc).__name__}: {exc}]", raw=arguments
-            ) from None
-        if not isinstance(decoded, dict):
-            raise ToolArgumentsError(
-                tx("Gli argomenti dello strumento non sono JSON valido (atteso oggetto).") + context,
-                raw=arguments)
-        return decoded
+            return _decoded_arguments(function.get("arguments"), context)
+        except ToolArgumentsError as exc:
+            if truncated:
+                # Partial arguments because the budget ran out, not a broken
+                # answer: the same request would be cut the same way, so the
+                # retryable error must never reach the caller (audit 138, A5).
+                raise _truncation_error(str(exc)) from None
+            raise
 
-    if choices[0].get("finish_reason") == "length":
+    if truncated:
         # A reasoning model can spend its entire completion budget before
         # emitting a tool call. This does not establish lack of tool support.
-        raise OpenRouterError(
-            tx("Risposta troncata: budget di token di completamento esaurito prima di "
-               "restituire la chiamata allo strumento richiesto. Nessun tentativo "
-               "automatico aggiuntivo.") + context
-        )
+        raise _truncation_error(context)
 
     raise OpenRouterError(
         tx("Il modello non ha chiamato lo strumento richiesto (potrebbe non "
            "supportare il tool calling con immagini/PDF): scegline un altro "
            "dall'elenco, filtrando per costo se serve.") + context
     )
+
+
+#: Normalized completion reasons meaning the token budget ran out (OpenAI
+#: style «length»; «max_tokens» from providers that pass their own through).
+#: Only `finish_reason` counts: it is the reason the gateway normalized.
+_TRUNCATION_REASONS = frozenset({"length", "max_tokens"})
+
+
+def _truncated(choice: dict) -> bool:
+    """Whether the provider declares the answer cut by the completion budget."""
+    return choice.get("finish_reason") in _TRUNCATION_REASONS
+
+
+def _truncation_error(detail: str) -> OpenRouterError:
+    """The non-retryable error of an answer cut by the completion budget.
+
+    `detail` is the diagnostic context, or the argument error (which already
+    ends with it) when the cut left missing or partial arguments.
+    """
+    return OpenRouterError(
+        tx("Risposta troncata: budget di token di completamento esaurito prima di "
+           "restituire la chiamata allo strumento richiesto. Nessun tentativo "
+           "automatico aggiuntivo.") + (" " + detail if not detail.startswith(" ") else detail))
+
+
+def _decoded_arguments(arguments: Any, context: str) -> dict:
+    """Tool arguments as a dict, or ToolArgumentsError carrying what was sent."""
+    if isinstance(arguments, dict):
+        return arguments
+    if arguments is None or (isinstance(arguments, str) and not arguments.strip()):
+        raise ToolArgumentsError(
+            tx("Gli argomenti dello strumento sono assenti o vuoti.") + context, raw=arguments)
+    if not isinstance(arguments, str):
+        raise ToolArgumentsError(
+            tx("Gli argomenti dello strumento non sono JSON valido (atteso oggetto).") + context,
+            raw=repr(arguments))
+    try:
+        decoded = json.loads(arguments)
+    except ValueError as exc:
+        raise ToolArgumentsError(
+            tx("Gli argomenti dello strumento non sono JSON valido.") + context
+            + f" [{type(exc).__name__}: {exc}]", raw=arguments
+        ) from None
+    if not isinstance(decoded, dict):
+        raise ToolArgumentsError(
+            tx("Gli argomenti dello strumento non sono JSON valido (atteso oggetto).") + context,
+            raw=arguments)
+    return decoded

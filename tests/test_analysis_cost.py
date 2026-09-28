@@ -68,11 +68,11 @@ def test_a_late_call_of_the_previous_analysis_is_not_counted_in_the_new_one(
     real_add = account_module.add_call
     busy = {"left": 1}
 
-    def add_once_busy(folder, record):
+    def add_once_busy(folder, record, now=None):
         if busy["left"]:
             busy["left"] -= 1
             raise OSError("busy")
-        return real_add(folder, record)
+        return real_add(folder, record, now)
 
     monkeypatch.setattr(account_module, "add_call", add_once_busy)
     try:
@@ -102,7 +102,8 @@ def test_the_status_bar_shows_the_analysis_and_the_tooltip_the_total(window, tmp
     start_run(folder)
     add_call(folder, {"cost_usd": 0.05, "model": "m"})
     window._refresh_status_bar(True)
-    assert window.status_cost.text() == "Costo AI dell'analisi: 0.05 USD (1 chiamate)"
+    # Same format as the «Credito AI» line (audit 138, B4): four decimals below 1 USD.
+    assert window.status_cost.text() == "Costo AI dell'analisi: 0.0500 USD (1 chiamate)"
     assert "1.05" in window.status_cost.toolTip()
 
 
@@ -113,3 +114,25 @@ def test_the_extraction_opens_a_new_analysis_before_its_first_call():
     start = source.index("self.ai_account.start_analysis(self._project_dir_or_none())")
     assert source.index("self.ai_account.bind_run_project(self._project_dir_or_none())",
                         start) > start
+
+
+def test_a_cheap_analysis_is_never_shown_as_zero(window, tmp_path):
+    """Negative of the old «0.00 USD»: a DeepSeek analysis costs thousandths (B4)."""
+    window.field_library_root.setText(str(tmp_path))
+    window.field_name.setText("SCHEDA")
+    folder = window._project_dir()
+    start_run(folder)
+    add_call(folder, {"cost_usd": 0.0042, "model": "m"})
+    window._refresh_status_bar(True)
+    assert "0.0042 USD" in window.status_cost.text()
+
+
+def test_the_status_bar_follows_every_cost_write(window, tmp_path):
+    """The status bar refreshes when the account line writes the cost file (B4)."""
+    window.field_library_root.setText(str(tmp_path))
+    window.field_name.setText("SCHEDA")
+    folder = window._project_dir()
+    window.ai_account.start_analysis(folder)
+    add_call(folder, {"cost_usd": 0.25, "model": "m"})
+    window.ai_account.costs_changed.emit()
+    assert "0.2500 USD" in window.status_cost.text()

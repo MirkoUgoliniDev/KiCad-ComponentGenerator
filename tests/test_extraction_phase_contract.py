@@ -122,13 +122,17 @@ def test_a_successful_inventory_is_not_followed_by_a_closing_phase(extraction, m
 
 
 @pytest.mark.parametrize('detector', ['ai', 'vlm'])
-def test_the_paid_vision_call_is_still_announced_for_the_detectors_that_make_it(
+def test_the_paid_vision_call_is_announced_by_the_inventory_not_before_it(
         extraction, monkeypatch, detector):
-    """@brief Positivo: per 'ai' e 'vlm' il passo successivo e' davvero una spesa.
+    """@brief Per 'ai' e 'vlm' la spesa si annuncia quando la foto parte davvero.
 
-    Senza rilevatore locale non c'e' nessuna fase locale da annunciare, ma la
-    chiamata al modello di visione parte subito dopo: quella si paga, e va
-    detta prima che parta.
+    @note Contratto cambiato di proposito (audit 138, C1; punto 139): prima
+        l'estrattore annunciava 'llm_inventory' PRIMA della calibrazione, e la
+        modale mostrava una fase pagata subito «conclusa» senza lavoro, seguita
+        dalle chiamate pagate sotto l'etichetta OpenCV. Ora l'annuncio lo fa
+        extract_inventory nel momento in cui spedisce la foto (caso positivo in
+        tests/test_photo_recount_end_to_end.py); qui, con l'inventario
+        sostituito, l'estrattore non deve rivendicare quella fase.
     """
     inventory_call = Mock(return_value=photo_inventory.InventoryResult())
     monkeypatch.setattr(photo_inventory, 'extract_inventory', inventory_call)
@@ -136,7 +140,5 @@ def test_the_paid_vision_call_is_still_announced_for_the_detectors_that_make_it(
     phases, _, _ = extraction(photo_detector=detector, vision_model='vision/paid-model')
 
     assert inventory_call.called
-    # La chiamata spedisce la foto della scheda, non i documenti: fase
-    # 'llm_inventory' (stessa chiamata remota, sorgente diversa nella modale).
-    assert ('llm_inventory', 'vision/paid-model') in phases
+    assert not any(tool == 'llm_inventory' for tool, _ in phases), phases
     assert not any(tool == 'yolo' for tool, _ in phases), phases

@@ -72,11 +72,11 @@ def _count(container: Any, key: str) -> Optional[int]:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     try:
-        if not math.isfinite(value):
-            return None
+        if not math.isfinite(value) or value < 0 or value != int(value):
+            return None   # negative or fractional: a damaged count, not a count
     except OverflowError:   # an int too large for a float: not a real count
         return None
-    return max(0, int(value))
+    return int(value)
 
 
 def call_cost(model: str, usage: Any, moment: Optional[datetime] = None) -> Optional[float]:
@@ -85,9 +85,10 @@ def call_cost(model: str, usage: Any, moment: Optional[datetime] = None) -> Opti
     @param model DeepSeek model name.
     @param usage The `usage` object of the response (or of a recorded call:
         prompt_tokens and completion_tokens are enough).
-    @param moment Time of the call (default: now).
-    @return The cost, or None when the model is not in the price list or the
-        usage carries no token count.
+    @param moment Time the request was sent (default: now).
+    @return The cost, or None when the model is not in the price list or
+        either token count is missing or unusable (negative, fractional,
+        non-finite, boolean).
     @note Cache-hit input tokens are read where DeepSeek puts them (at the
         top of `usage` or under `prompt_tokens_details`, the docs show both);
         when the split is missing every input token counts as a cache miss,
@@ -99,12 +100,11 @@ def call_cost(model: str, usage: Any, moment: Optional[datetime] = None) -> Opti
         return None
     prompt = _count(usage, "prompt_tokens")
     output = _count(usage, "completion_tokens")
-    if prompt is None and output is None:
+    if prompt is None or output is None:
+        # Both counts are needed: a missing or unusable one makes the cost
+        # unknown, not partial -- pricing the other alone would understate
+        # the bill as a known amount (audit 138, B5).
         return None
-    if any(usage.get(key) is not None and count is None
-           for key, count in (("prompt_tokens", prompt), ("completion_tokens", output))):
-        return None   # a count present but unusable: the cost is unknown, not partial
-    prompt, output = prompt or 0, output or 0
     details = usage.get("prompt_tokens_details")
     hit = _count(usage, "prompt_cache_hit_tokens")
     if hit is None:

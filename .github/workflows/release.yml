@@ -54,6 +54,10 @@ jobs:
           python -m pip install --disable-pip-version-check -q -r requirements.txt -r requirements-yolo.txt `
             -c requirements-release-constraints.txt
           if ($LASTEXITCODE -ne 0) { throw "pip install failed ($LASTEXITCODE)." }
+          # PyYAML: tests/test_ci_workflows.py reads these workflow files; without
+          # it those checks were skipped in the release build (audit 138, D10).
+          python -m pip install --disable-pip-version-check -q pyyaml
+          if ($LASTEXITCODE -ne 0) { throw "pip install failed ($LASTEXITCODE)." }
 
       # The suite runs in two processes, split at tests/test_photo_detector_ui.py
       # by tools/run_test_halves.py: in a single process it can die at random
@@ -64,6 +68,11 @@ jobs:
         timeout-minutes: 45
         env:
           QT_QPA_PLATFORM: offscreen
+          # The test watchdog writes the stacks of a hang or native crash to
+          # %TEMP%\kicadgen-test-hang-<pid>.txt (tests/conftest.py): TEMP is
+          # pinned to the runner's temp folder so the step below can upload it.
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
         run: |
           python tools/run_test_halves.py first
           if ($LASTEXITCODE -ne 0) { throw "Tests failed, first half ($LASTEXITCODE)." }
@@ -73,9 +82,22 @@ jobs:
         timeout-minutes: 45
         env:
           QT_QPA_PLATFORM: offscreen
+          # The test watchdog writes the stacks of a hang or native crash to
+          # %TEMP%\kicadgen-test-hang-<pid>.txt (tests/conftest.py): TEMP is
+          # pinned to the runner's temp folder so the step below can upload it.
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
         run: |
           python tools/run_test_halves.py second
           if ($LASTEXITCODE -ne 0) { throw "Tests failed, second half ($LASTEXITCODE)." }
+
+      - name: Upload the test hang report
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-hang-report
+          path: ${{ runner.temp }}/kicadgen-test-hang-*.txt
+          if-no-files-found: ignore
 
       - name: Build the executable and the MSI
         shell: pwsh

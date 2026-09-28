@@ -1960,6 +1960,116 @@ def extract_pin_header_params(
             has_pdf, progress))
 
 
+#: Fields of a castellated side a photo recount may change: the number of its
+#: contacts and how they are named and numbered. Pitch, offset, contact style
+#: and pad sizes stay those of the main answer: the recount is asked about the
+#: COUNT (HANDOFF point 139, G2 a), and a geometry changed on the way would be
+#: adopted unchecked. (value_sources cover only lengths, so the provenance of
+#: the side stays valid.)
+_RECOUNT_FIELDS = ("count", "pin_names", "first_pin", "reverse")
+
+
+#: Private mark set on each side of a recount reply before canonicalization:
+#: True when the model wrote `reverse` itself (a boolean). The mirror of a
+#: bottom view writes `reverse` on every horizontal side, so after
+#: canonicalization its presence no longer says whether the model stated it.
+_REVERSE_STATED = "_reverse_stated"
+
+
+def _recounted_side(old: dict, reply: dict, count: int) -> dict:
+    """The declared side with only the _RECOUNT_FIELDS taken from the reply.
+
+    `first_pin` stays the old one when the reply gives none; `reverse` is the
+    reply's only when the model stated it (_REVERSE_STATED), otherwise the
+    declared one is kept: a reply that omits it says nothing about the
+    numbering direction (HANDOFF point 139, R-M1); `pin_names` are the
+    reply's, or none.
+    """
+    side = copy.deepcopy(old)
+    side["count"] = count
+    names = reply.get("pin_names")
+    if isinstance(names, (list, tuple)) and names:
+        side["pin_names"] = [str(name) for name in names]
+    else:
+        side.pop("pin_names", None)
+    first = _optional_number(reply.get("first_pin"), positive=True, integer=True)
+    if first is not None:
+        side["first_pin"] = first
+    if reply.get(_REVERSE_STATED) and isinstance(reply.get("reverse"), bool):
+        if reply["reverse"]:
+            side["reverse"] = True
+        else:
+            side.pop("reverse", None)
+    return side
+
+
+def _recount_refusal(side: dict, old: dict, reply: dict, item, data: dict) -> Optional[str]:
+    """Why a recounted side cannot replace the declared one, or None when it can.
+
+    Structural checks, each for a failure reproduced in the audit (HANDOFF
+    points 138-139): names of another length than the count (they would be
+    dropped in silence later), a side whose names the recount dropped, a side
+    contradicting itself (_edge_contradictions), and -- the check that breaks
+    the circle «the model now says what the photo said» -- contact centres
+    that do not fall on the notch centres measured on the photo.
+
+    The centres come from the geometry the footprint uses
+    (contact_zones.contact_positions: the new count with the DECLARED pitch
+    and offset). They are compared RELATIVELY (HANDOFF point 139, R-G2): the
+    photo measures from the crop box, whose edge may sit off the board corner
+    by the tilt find_board accepts, so the whole row may be shifted by the
+    calibration alone. One common shift is allowed, up to
+    EdgeCount.shift_bound_mm (edge_notches.row_shift_bound_mm, derived from
+    the calibration contract; None = no shift allowed); after removing it,
+    every centre must match within the photo's own tolerance
+    (EdgeCount.tolerance_mm), so a row of another spacing is refused. A count
+    that equals the photo's but whose row sits a notch off (half a pitch or
+    more, e.g. the model dropped a contact hidden at an end of the row) is
+    refused because its shift exceeds the bound.
+    """
+    count = side["count"]
+    names = reply.get("pin_names")
+    if isinstance(names, (list, tuple)) and names and len(names) != count:
+        return tx("{n_names} nomi per {count} contatti", n_names=len(names), count=count)
+    if old.get("pin_names") and not side.get("pin_names"):
+        return tx("il ricontrollo non elenca i nomi dei contatti")
+    length = _optional_number(data.get("body_length_mm"), positive=True)
+    width = _optional_number(data.get("body_width_mm"), positive=True)
+    edge = _side_edge(side)
+    if any(problem_edge == edge for problem_edge, _ in _edge_contradictions([side], length, width)):
+        return tx("il lato ricontato si contraddice")
+    if length is None or width is None:
+        return tx("quote della scheda mancanti")
+    from .contact_zones import contact_positions
+    from .edge_notches import row_offset_from
+    along = "y_mm" if edge in ("left", "right") else "x_mm"
+    start = width / 2 if edge in ("left", "right") else length / 2
+    centres = sorted(row[along] + start
+                     for row in contact_positions({"castellated_sides": [side]}, length, width)
+                     if row.get("edge") == edge)
+    measured = sorted(float(c) for c in (getattr(item, "centres_mm", None) or ()))
+
+    def positive(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float))                 or not math.isfinite(value) or not value > 0:
+            return 0.0
+        return float(value)
+
+    tolerance = positive(getattr(item, "tolerance_mm", None))
+    bound = positive(getattr(item, "shift_bound_mm", None))
+    if len(centres) != len(measured) or row_offset_from(centres, measured, tolerance,
+                                                        float("inf")) is None:
+        return tx("i contatti ricontati non cadono sui semi-fori misurati sulla foto "
+                  "(centri {declared} mm contro {measured} mm)",
+                  declared=", ".join(f"{c:.2f}" for c in centres),
+                  measured=", ".join(f"{c:.2f}" for c in measured))
+    shift = row_offset_from(centres, measured, tolerance, float("inf"))
+    if abs(shift) > bound:
+        return tx("la fila ricontata e' spostata di {shift:.2f} mm rispetto ai semi-fori "
+                  "misurati, piu' di quanto la calibrazione della foto possa spostarla "
+                  "({bound:.2f} mm)", shift=shift, bound=bound)
+    return None
+
+
 def _recount_sides_from_photo(data, disagreements, content_blocks, diagnostic_call, model,
                               system_prompt, has_pdf, progress) -> bool:
     """One paid recount of the sides whose half-holes the photo counts differently.
@@ -1967,20 +2077,55 @@ def _recount_sides_from_photo(data, disagreements, content_blocks, diagnostic_ca
     User decision of 2026-09-28 (HANDOFF point 137): when the calibrated top
     photo shows another number of half-holes than a declared side, the model
     is asked once, with the same documents, to recount THOSE sides, and is
-    told what the photo measured (count and notch centres). The recounted
-    side replaces the declared one only when it now agrees with the photo and
-    the pad numbering of all sides stays coherent; otherwise the answer stays
-    as it was and the photo check reports the disagreement as a warning.
+    told what the photo measured (count and notch centres).
+
+    Adoption (HANDOFF point 139, G2), per disagreeing side:
+    - only the recount fields change (_RECOUNT_FIELDS): count, pin_names,
+      first_pin, reverse; pitch, offset, contact style, pad sizes and their
+      provenance stay those of the main answer;
+    - the recounted count must equal the photo's and the recounted contacts
+      must sit on the measured notch centres (see _recount_refusal);
+    - with that side replaced, the pad numbering of ALL sides must stay valid
+      and contiguous (_castellated_sides, _numbering_is_contiguous);
+    - sides the photo did not dispute are never changed, whatever the reply
+      says about them.
+    A side that fails keeps its declared contacts, the photo check keeps
+    reporting the disagreement, and the log says why.
 
     @param data Validated main answer, in millimetres and seen from above
         (after `_canonicalize_answer`); updated in place.
     @param disagreements edge_notches.EdgeCount list (edge, found, declared,
-        centres_mm).
+        centres_mm, tolerance_mm).
     @return True when at least one side was replaced.
     @note The recount answer is canonicalized like the main one, so a model
-        that answers in another unit or view is converted, not misread.
+        that answers in another unit or view is converted, not misread; the
+        notes of that conversion are logged and, when a side is adopted, kept
+        with the answer's own (`_canonical_notes`). A reply that does not say
+        its view is read as the top view the request asks for, so no «DUBBIO
+        vista» note is made up for it; a view it states but that is not
+        recognized still gives that note.
+    @note Failures are contained (HANDOFF point 139, minors): any exception of
+        the call or of reading the reply (OpenRouterError, a malformed reply
+        raising KeyError/ValueError, a truncated transfer...) is logged and
+        the answer is kept unchanged -- the photo inventory goes on. Only a
+        cancellation (CallCancelled, hence ExtractionCancelled) propagates.
     """
     say = progress or (lambda _message: None)
+    try:
+        return _recount_sides_attempt(data, disagreements, content_blocks, diagnostic_call,
+                                      model, system_prompt, has_pdf, say)
+    except CallCancelled:
+        raise
+    except Exception as exc:  # contenuto: vedi la @note sopra
+        detail = str(exc) if isinstance(exc, OpenRouterError) else f"{type(exc).__name__}: {exc}"
+        say(tx("Ricontrollo dei contatti non riuscito ({exc}): restano quelli dell'analisi.",
+               exc=detail))
+        return False
+
+
+def _recount_sides_attempt(data, disagreements, content_blocks, diagnostic_call, model,
+                           system_prompt, has_pdf, say) -> bool:
+    """Body of _recount_sides_from_photo; `data` is changed only at the very end."""
     facts = "; ".join(
         f"lato {item.edge}: la foto calibrata vista dall'alto mostra {item.found} semi-fori "
         f"aperti sul bordo, con i centri a {', '.join(f'{c:.2f}' for c in item.centres_mm)} mm "
@@ -2000,41 +2145,74 @@ def _recount_sides_from_photo(data, disagreements, content_blocks, diagnostic_ca
         "Restituisci la risposta completa con i lati visti dall'alto (contacts_view=\"top\") "
         "e le quote in millimetri (drawing_unit=\"mm\"). Lati attuali, visti dall'alto e in "
         f"mm: {data.get('castellated_sides')!r}")}]
-    try:
-        repaired = diagnostic_call(model=model or DEFAULT_MODEL,
-                                   system_prompt=system_prompt or _SYSTEM_PROMPT,
-                                   content_blocks=blocks, tool=_openai_tool(),
-                                   max_tokens=16384, has_pdf=has_pdf)
-    except OpenRouterError as exc:
-        say(tx("Ricontrollo dei contatti non riuscito ({exc}): restano quelli dell'analisi.",
-               exc=exc))
-        return False
+    repaired = diagnostic_call(model=model or DEFAULT_MODEL,
+                               system_prompt=system_prompt or _SYSTEM_PROMPT,
+                               content_blocks=blocks, tool=_openai_tool(),
+                               max_tokens=16384, has_pdf=has_pdf)
     if not isinstance(repaired, dict) or not isinstance(repaired.get("castellated_sides"), list):
         say(tx("Il ricontrollo dei contatti non ha restituito lati utilizzabili: restano "
                "quelli dell'analisi."))
         return False
     repaired = copy.deepcopy(repaired)
     repaired["layout"] = "castellated"
+    # Chiavi private: una risposta del modello non e' mai gia' convertita.
+    repaired.pop("_canonical", None)
+    repaired.pop("_canonical_notes", None)
+    if repaired.get("contacts_view") is None and repaired.get("pin_map_view") is None:
+        # La richiesta chiede la vista dall'alto: una risposta che non dice la
+        # vista si legge cosi', senza il DUBBIO della risposta principale.
+        repaired["contacts_view"] = "top"
+    for entry in repaired["castellated_sides"]:
+        if isinstance(entry, dict):
+            entry[_REVERSE_STATED] = isinstance(entry.get("reverse"), bool)
     _canonicalize_answer(repaired)
+    conversion = [str(note) for note in repaired.get("_canonical_notes") or ()]
+    for note in conversion:
+        say(tx("Ricontrollo dei contatti: {note}", note=note))
+    edges = [_side_edge(entry) for entry in repaired["castellated_sides"] if _side_edge(entry)]
+    # Un lato elencato due volte non dice quale conteggio valga: non si adotta.
     recounted = {_side_edge(entry): entry for entry in repaired["castellated_sides"]
-                 if _side_edge(entry)}
-    adopted = [item.edge for item in disagreements
-               if isinstance(recounted.get(item.edge), dict)
-               and recounted[item.edge].get("count") == item.found]
-    if not adopted:
+                 if _side_edge(entry) and edges.count(_side_edge(entry)) == 1}
+    merged = list(data.get("castellated_sides") or ())
+    index = {_side_edge(entry): i for i, entry in enumerate(merged) if _side_edge(entry)}
+    length = _optional_number(data.get("body_length_mm"), positive=True)
+    width = _optional_number(data.get("body_width_mm"), positive=True)
+    adopted, confirmed = [], []
+    for item in disagreements:
+        reply, position = recounted.get(item.edge), index.get(item.edge)
+        count = (_optional_number(reply.get("count"), positive=True, integer=True)
+                 if isinstance(reply, dict) else None)
+        if position is None or count != item.found:
+            confirmed.append(item.edge)
+            continue
+        old = merged[position]
+        side = _recounted_side(old, reply, count)
+        reason = _recount_refusal(side, old, reply, item, data)
+        if reason is None:
+            trial = merged[:position] + [side] + merged[position + 1:]
+            try:
+                _castellated_sides(copy.deepcopy(trial), body_length=length, body_width=width)
+            except ExtractionError as exc:
+                reason = tx("numerazione dei pad incoerente ({exc})", exc=exc)
+            else:
+                if not _numbering_is_contiguous(copy.deepcopy(trial)):
+                    reason = tx("la numerazione dei pad di tutti i lati avrebbe un buco")
+        if reason is not None:
+            say(tx("Ricontrollo dei contatti non adottato per il lato {label}: {reason}; "
+                   "restano quelli dell'analisi.",
+                   label=EDGE_LABELS.get(item.edge, item.edge), reason=reason))
+            continue
+        merged[position] = side
+        adopted.append(item.edge)
+    if confirmed and not adopted:
         say(tx("Ricontrollo dei contatti: l'AI conferma i contatti dichiarati; il disaccordo "
                "con la foto resta da verificare."))
-        return False
-    merged = [recounted[_side_edge(entry)] if _side_edge(entry) in adopted else entry
-              for entry in data.get("castellated_sides") or ()]
-    try:
-        _castellated_sides(copy.deepcopy(merged), body_length=data.get("body_length_mm"),
-                           body_width=data.get("body_width_mm"))
-    except ExtractionError as exc:
-        say(tx("Ricontrollo dei contatti non adottato: numerazione dei pad incoerente ({exc}); "
-               "restano quelli dell'analisi.", exc=exc))
+    if not adopted:
         return False
     data["castellated_sides"] = merged
+    if conversion:
+        data["_canonical_notes"] = list(data.get("_canonical_notes") or ()) + [
+            tx("Ricontrollo dei contatti: {note}", note=note) for note in conversion]
     note = tx("Contatti ricontati dopo il confronto con la foto: {edges}. Verificare la "
               "tabella pinout prima dell'uso.",
               edges=", ".join(EDGE_LABELS.get(edge, edge) for edge in adopted))
@@ -2341,11 +2519,12 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
         # qui siamo prima della calibrazione. Annunciarlo adesso mostrava una
         # fase che poteva non partire mai -- senza vista calibrabile
         # l'inventario esce prima di caricare l'ONNX -- e la modale restava sul
-        # rilevatore locale per il resto della corsa. Con 'ai' e 'vlm' invece
-        # il prossimo passo e' davvero la chiamata a pagamento al modello di
-        # visione, e va detto perche' e' cio' che si paga.
-        if photo_detector != "yolo":
-            announce("llm_inventory", vision_model or DEFAULT_VISION_MODEL)
+        # rilevatore locale per il resto della corsa.
+        # Nemmeno la chiamata a pagamento al modello di visione ('ai', 'vlm')
+        # si annuncia qui (punto 139, C1): prima viene la calibrazione con
+        # OpenCV, che `extract_inventory` annuncia da se', e l'annuncio
+        # anticipato restava una fase «✓» vuota subito coperta da OpenCV.
+        # 'llm_inventory' lo annuncia `extract_inventory` quando la foto parte.
         check_cancel()
         try:
             photo_report = extract_inventory(

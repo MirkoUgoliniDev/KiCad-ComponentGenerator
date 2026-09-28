@@ -587,13 +587,30 @@ def prepare_photo(path, length, width, metadata=None):
         # (edge_notches): servono l'immagine intera e il suo sfondo, che dopo
         # il ritaglio non ci sono piu'. Chiave privata: chi la usa la toglie.
         from .edge_notches import MAX_NOTCH_DEPTH_MM, depth_profiles
-        from .photo_refine import _background_distance, estimate_background
+        from .photo_refine import (MAX_BOARD_EDGE_DRIFT_PX, MAX_BOARD_EDGE_DRIFT_RATIO,
+                                   _background_distance, estimate_background)
         background = estimate_background(image)
         if background is not None:
-            scale = min((x1 - x0) / length, (y1 - y0) / width)
+            # La profondita' di una tacca si misura ATTRAVERSO il bordo: scala
+            # X per i bordi sinistro/destro, Y per superiore/inferiore (la foto
+            # e' calibrata asse per asse, punto 139 G1 b).
+            across = {"left": (x1 - x0) / length, "right": (x1 - x0) / length,
+                      "top": (y1 - y0) / width, "bottom": (y1 - y0) / width}
+            # Il contorno vero puo' stare dentro o fuori dal riquadro: di quanto
+            # l'inclinazione residua che find_board accetta (la sua deriva
+            # massima sul lato lungo), e ancora altrettanto perche' il riquadro
+            # e' preso a meta' del salto sfondo -> scheda mentre la maschera
+            # dello sfondo ne prende il piede (la sfocatura). Il raddoppio e'
+            # un'EURISTICA dichiarata: la sfocatura non e' misurata; la
+            # renderebbe superflua una stima del raggio di sfocatura del bordo.
+            slack = 2 * max(MAX_BOARD_EDGE_DRIFT_PX,
+                            MAX_BOARD_EDGE_DRIFT_RATIO * max(x1 - x0, y1 - y0))
             metadata["_edge_depth_px"] = depth_profiles(
                 _background_distance(image, background) <= background.tolerance,
-                (x0, y0, x1, y1), max(1, round(MAX_NOTCH_DEPTH_MM * scale)))
+                (x0, y0, x1, y1),
+                {edge: max(1, round(MAX_NOTCH_DEPTH_MM * scale + slack))
+                 for edge, scale in across.items()},
+                outside_px=max(1, round(slack)))
     return image[y0:y1, x0:x1].copy()
 
 
@@ -990,7 +1007,10 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         half-holes counted on the calibrated photo disagree with the declared
         castellated sides (edge_notches.count_disagreements). It may ask the
         model to recount and update `declared` in place; the comparison is
-        then repeated and reported on the sides in force. None: report only.
+        then repeated and reported on the sides in force, read back from
+        `declared` after the call. The paid call is announced as
+        phase('llm', ...) right before it and phase('opencv', ...) right
+        after it. None: report only.
     @param review_proposals Optional callable(photo_png, proposals, length_mm,
         width_mm) -> proposals kept. Runs between the local detector and the
         paid reconciliation, so a body removed here is never sent nor paid for.
@@ -1004,7 +1024,9 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         phase('yolo', <short label of the local detector>) right before the
         local ONNX detection starts, and as phase('llm_inventory', <model identifier>)
         immediately before the paid reconciliation (the paid call on the board
-        photo, drawn by the modal as board -> cloud). The 'yolo' announcement is
+        photo, drawn by the modal as board -> cloud) or, with detector 'ai',
+        immediately before the paid grounding calls; phase('opencv', ...)
+        before the calibration. The 'yolo' announcement is
         never emitted for detector 'ai' or 'vlm': with a vision-only detector
         no local detection runs, and the modal must not claim a phase that is
         not running. With 'yolo_only' the 'llm_inventory' announcement is never
@@ -1098,8 +1120,13 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                                             declared.get("castellated_sides"))
         if disagreements and recount_contacts is not None:
             # Ricontrollo AI dei soli lati in disaccordo (utente, 28/09, punto
-            # 137); poi il confronto si ripete sui lati in vigore.
+            # 137); poi il confronto si ripete sui lati in vigore, riletti da
+            # `declared` DOPO la chiamata (il ricontrollo li aggiorna li').
+            # La chiamata si paga e spedisce i documenti: la modale deve dirlo
+            # mentre parte, non mostrarla sotto OpenCV (punto 139, C1).
+            announce('llm', tx("ricontrollo dei contatti"))
             recount_contacts(disagreements)
+            announce('opencv', tx("confronto dei contatti con la foto"))
         for kind, message in check_declared_contacts(
                 edge_profiles, photo.shape, length, width, declared.get("castellated_sides")):
             (warn if kind == "warning" else log)(message)
@@ -1290,6 +1317,11 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             # 2026-09-24 il testo e' nella lingua dell'utente.
             if kind_of(message) == WARNING:
                 report.warnings.append(message)
+        # Da qui la foto va al modello di visione, a pagamento: la fase si
+        # annuncia ora, dopo la calibrazione, non prima (punto 139, C1: con
+        # 'ai' l'annuncio anticipato era subito coperto da OpenCV e le chiamate
+        # di localizzazione comparivano sotto OpenCV).
+        announce('llm_inventory', model)
         report.components = grounded_components(photo,model,length,width,kinds,call,
                                                report_progress,cache_dir,extra_instructions,classifier_model,mechanical,
                                                grounding_prompt=grounding_prompt, verification_prompt=verification_prompt)

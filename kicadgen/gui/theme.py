@@ -1,13 +1,18 @@
 """@brief Shared Catppuccin Mocha theme: palette and style sheets of the application.
 
 Espone la QSS applicata all'intera applicazione (`APP_QSS`) e quella delle
-schede (`TAB_QSS`). La palette e' la stessa di Pm3ToWav; le schede non sono
+schede (`TAB_QSS`), e la misura della larghezza che una casella numerica
+con quei pulsanti richiede per mostrare intero il suo valore piu' largo
+(`spin_box_width_for_values`). La palette e' la stessa di Pm3ToWav; le schede non sono
 piu' identiche alle sue (2026-09-24: scelta in grassetto e piu' chiara, le
 altre scure, le disabilitate quasi nere). La scheda scelta si allarga di
 qualche pixel per il grassetto: e' il prezzo accettato della scelta grafica.
 """
 
 from pathlib import Path
+
+from PyQt6.QtCore import QRect
+from PyQt6.QtWidgets import QStyle, QStyleOptionSpinBox
 
 _COMBO_ARROW = (Path(__file__).resolve().parent / "assets" / "combo-arrow.svg").as_posix()
 _SPIN_UP = (Path(__file__).resolve().parent / "assets" / "spin-arrow-up.svg").as_posix()
@@ -131,10 +136,10 @@ APP_QSS = f"""
        style puts them side by side while the style sheet still lays the text
        field out for stacked buttons: the field covered most of the up arrow
        and swallowed its clicks. With explicit geometry every style gets the
-       same, non-overlapping layout (tests/test_spin_box_buttons.py). */
-    QSpinBox, QDoubleSpinBox {{
-        padding-right: 24px;
-    }}
+       same, non-overlapping layout (tests/test_spin_box_buttons.py).
+       No extra right padding: the style sheet already ends the text field at
+       the button column, so a padding as wide as the buttons reserved that
+       column twice and clipped values in narrow cells (HANDOFF 138, C3). */
     QSpinBox::up-button, QDoubleSpinBox::up-button {{
         subcontrol-origin: border;
         subcontrol-position: top right;
@@ -304,3 +309,52 @@ APP_QSS = f"""
     }}
 {TAB_QSS}
 """
+
+
+#: Width of the box used to measure a spin box's chrome: any width well above
+#: the chrome itself gives the same difference, it only has to leave a field.
+_SPIN_PROBE_WIDTH = 1000
+
+#: Horizontal margin QLineEdit keeps on each side of its text (Qt's internal
+#: `QLineEditPrivate::horizontalMargin`) plus one pixel for the text cursor.
+#: Not exposed by the API; without it the last digit ends under the cursor.
+_LINE_EDIT_TEXT_MARGIN = 2 * 2 + 1
+
+
+def spin_box_width_for_values(spin):
+    """@brief Width a spin box needs to show its widest value whole.
+
+    @param spin QSpinBox or QDoubleSpinBox, already configured (range,
+        decimals, prefix, suffix, special value text) and, when it lives in a
+        container with its own style sheet, already placed in it.
+    @return Width in pixels: the text of the widest value it can hold, as its
+        own text field draws it, plus the chrome (frame, padding, button
+        column) that its CURRENT style and style sheet put around the field.
+    @note The chrome is measured, not assumed: the edit-field sub-control
+        is asked of the style for a wide probe rectangle, so the same number
+        is right for every Qt style and for any change of this sheet. The
+        spin box's own `sizeHint` is not used because the «windows11» style
+        sizes it for two buttons side by side, which the sheet does not draw
+        (about 190 px for «-300,000000» against the ~110 px really needed).
+    @note The widest value is taken among minimum and maximum (and the
+        special value text): with the tabular digits of UI fonts, the value
+        with the most characters is one of the two ends of the range.
+    """
+    spin.ensurePolished()
+    option = QStyleOptionSpinBox()
+    spin.initStyleOption(option)
+    option.rect = QRect(0, 0, _SPIN_PROBE_WIDTH, max(spin.height(), spin.minimumSizeHint().height()))
+    field = spin.style().subControlRect(QStyle.ComplexControl.CC_SpinBox, option,
+                                        QStyle.SubControl.SC_SpinBoxEditField, spin)
+    chrome = _SPIN_PROBE_WIDTH - field.width()
+    edit = spin.lineEdit()
+    texts = [spin.prefix() + spin.textFromValue(value) + spin.suffix()
+             for value in (spin.minimum(), spin.maximum())]
+    if spin.specialValueText():
+        texts.append(spin.specialValueText())
+    metrics = edit.fontMetrics()
+    text = max(metrics.horizontalAdvance(candidate) for candidate in texts)
+    margins = edit.textMargins()
+    contents = edit.contentsMargins()
+    return (chrome + text + _LINE_EDIT_TEXT_MARGIN + margins.left() + margins.right()
+            + contents.left() + contents.right())

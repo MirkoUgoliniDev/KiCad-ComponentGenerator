@@ -53,6 +53,11 @@ jobs:
         timeout-minutes: 45
         env:
           QT_QPA_PLATFORM: offscreen
+          # The test watchdog writes the stacks of a hang or native crash to
+          # %TEMP%\kicadgen-test-hang-<pid>.txt (tests/conftest.py): TEMP is
+          # pinned to the runner's temp folder so the step below can upload it.
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
         run: |
           python tools/run_test_halves.py first
           if ($LASTEXITCODE -ne 0) { throw "Tests failed, first half ($LASTEXITCODE)." }
@@ -65,6 +70,21 @@ jobs:
         timeout-minutes: 45
         env:
           QT_QPA_PLATFORM: offscreen
+          # The test watchdog writes the stacks of a hang or native crash to
+          # %TEMP%\kicadgen-test-hang-<pid>.txt (tests/conftest.py): TEMP is
+          # pinned to the runner's temp folder so the step below can upload it.
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
         run: |
           python tools/run_test_halves.py second
           if ($LASTEXITCODE -ne 0) { throw "Tests failed, second half ($LASTEXITCODE)." }
+
+      # A hang or a native crash ends the run with a bare exit code; the
+      # watchdog's stack report says which test was running (audit 138, D6).
+      - name: Upload the test hang report
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-hang-report
+          path: ${{ runner.temp }}/kicadgen-test-hang-*.txt
+          if-no-files-found: ignore
