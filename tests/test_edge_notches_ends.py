@@ -131,21 +131,33 @@ def test_a_first_notch_clear_of_the_rounded_corner_is_counted(tmp_path):
 
 
 @pytest.mark.parametrize("which", [0, -1])
-def test_a_hidden_end_notch_of_the_declared_row_is_a_lower_bound(tmp_path, which):
-    """Dust over the first (last) of 15 declared half-holes: the outline is plain there.
+def test_a_notch_hidden_on_plain_outline_is_a_disagreement_not_a_lower_bound(tmp_path, which):
+    """Dust over the first (last) of 15 declared half-holes, on PLAIN outline.
 
-    The 14 notches seen sit on 14 consecutive declared contacts: the photo
-    cannot tell «14» from «15, one hidden». Before the fix: 14 against 15 and
-    a paid recount.
+    Contract changed on purpose (HANDOFF point 142): the count is valid only
+    after the photo has proven the next slot is plain measured outline, so the
+    photo says 14. Treating the 15th as «maybe hidden» (the rule removed) let a
+    model that counted too many never be contradicted: on a real run 6 declared
+    against 4 half-holes stayed 6. Now it is a disagreement: one paid recount,
+    and if the model keeps 15 only a warning -- never silently wrong data.
     """
     positions = row(15, 2.54, 40)
     image = tilted_board(40, 16, 20, angle_deg=0.3, notches={"top": positions},
                          radius_mm=0.35, hidden=[("top", positions[which])])
     profiles, shape = calibrated_profiles(image, 40, 16, tmp_path)
     sides = [dict(edge="top", count=15, pitch_mm=2.54, contact_style="half_hole")]
-    assert count_disagreements(profiles, shape, 40, 16, sides) == []
-    [(kind, message)] = check_declared_contacts(profiles, shape, 40, 16, sides)
-    assert kind == "log" and "almeno 14" in message
+    [item] = count_disagreements(profiles, shape, 40, 16, sides)
+    assert (item.found, item.declared) == (14, 15)
+
+
+def test_six_declared_against_four_half_holes_is_a_disagreement(tmp_path):
+    """The real run of 2026-09-28 18:25: labels counted as contacts (6 for 4)."""
+    image = tilted_board(40, 16, 20, angle_deg=0.2, notches={"right": row(4, 2.54, 16)},
+                         radius_mm=0.45)
+    profiles, shape = calibrated_profiles(image, 40, 16, tmp_path)
+    sides = [dict(edge="right", count=6, pitch_mm=2.54, contact_style="half_hole")]
+    [item] = count_disagreements(profiles, shape, 40, 16, sides)
+    assert (item.found, item.declared) == (4, 6)
 
 
 def test_a_shorter_centred_row_is_a_real_disagreement(tmp_path):
