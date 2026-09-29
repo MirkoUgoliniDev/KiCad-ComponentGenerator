@@ -2133,6 +2133,10 @@ class PhotoReviewDialog(QDialog):
             return
         self._refresh_parameters_title()
         self.parameters_dialog.open()
+        # The AI lines wrap: the height of the modal follows the text at the
+        # width the modal really has, not the one-line guess of the first
+        # show (user, 2026-09-29: the last line was cut).
+        self._fit_parameters_dialog()
         field = self.text_fields.get(focus if isinstance(focus, str) else "", None)
         if field is None:
             field = self.text_fields["name"]
@@ -2326,6 +2330,15 @@ class PhotoReviewDialog(QDialog):
         self.attributes_label.setText("".join(
             f"<p style='margin:0 0 5px 0'><b>{escape(label)}:</b> {escape(value)}</p>"
             for label, value in component_attribute_lines(component, self._tr)))
+        if self.parameters_dialog.isVisible():
+            self._fit_parameters_dialog()
+
+    def _fit_parameters_dialog(self):
+        """Give the modal the height its wrapped AI lines need at its width."""
+        label = self.attributes_label
+        width = label.width() if label.width() > 0 else self.parameters_dialog.width() - 40
+        label.setMinimumHeight(label.heightForWidth(max(120, width)))
+        self.parameters_dialog.adjustSize()
 
     def attributes_plain_text(self) -> str:
         """@brief The AI lines exactly as shown, one per line, without markup.

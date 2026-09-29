@@ -199,3 +199,18 @@ def test_the_outline_tooltip_is_rich_text_that_wraps(dialog, app):
     assert "<script>" not in tooltip and "&lt;script&gt;" in tooltip and "&amp; altro" in tooltip
     assert "\n" not in tooltip
     assert dialog.component_list.item(1).toolTip() == tooltip
+
+
+def test_the_modal_grows_to_show_every_wrapped_line(dialog, app):
+    """@brief User, 2026-09-29: the last AI line («non ancora cercato: la ricerca…») was cut."""
+    dialog.component_list.setCurrentRow(2)      # a bare row: the longest model line
+    app.processEvents()
+    dialog.open_parameters()
+    app.processEvents()
+    label = dialog.attributes_label
+    assert "non ancora cercato" in dialog.attributes_plain_text()
+    assert label.height() >= label.heightForWidth(label.width())
+    bottom = label.mapTo(dialog.parameters_dialog, label.rect().bottomLeft()).y()
+    assert bottom <= dialog.parameters_dialog.height()
+    # Switching to a row with shorter lines while the modal is open keeps it fitted.
+    dialog.parameters_dialog.close()

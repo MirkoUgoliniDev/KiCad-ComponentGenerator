@@ -142,6 +142,7 @@ SIZE_MODULE = "module"                # dichiarata per tutto il modulo
 SIZE_REFERENCE = "reference"          # di riferimento, non dichiarata, ci sta
 SIZE_ESTIMATE_PITCH = "estimate_pitch"  # stimata: il riferimento non stava nel passo
 SIZE_ESTIMATE_ROWS = "estimate_rows"    # stimata: il riferimento non stava dietro ai fori passanti
+SIZE_ESTIMATE_DRILL = "estimate_drill"  # stimata: la corona assunta non avvolgeva il foro
 
 #: Provenienza della distanza dal bordo del foro passante di un lato.
 INSET_EXPLICIT = "explicit"           # thru_hole_offset dichiarato
@@ -176,6 +177,11 @@ class PadSize(NamedTuple):
     width_source: str
     width_estimate: float
     clearance_edge: Optional[str] = None
+
+
+def _ceil_hundredth(value: float) -> float:
+    """Smallest 0.01 mm step not below ``value``."""
+    return math.ceil(value * 100 - 1e-9) / 100
 
 
 def _floor_hundredth(value: float) -> float:
@@ -851,6 +857,17 @@ class CastellatedModuleParams:
             drill_bounds.append(ring - 2 * MIN_HOLE_WALL_MM)
         drill, drill_source = self._sized(getattr(side, "thru_hole_drill", None), self.thru_hole_drill,
                                           REFERENCE_THRU_DRILL_MM, drill_bounds)
+        if (through and drill > 0 and ring_source not in (SIZE_SIDE, SIZE_MODULE)
+                and ring < drill + 2 * MIN_HOLE_WALL_MM - 1e-9):
+            # La corona ASSUNTA (riferimento storico 1.7, o ridotta al passo)
+            # non e' una misura: non puo' rifiutare un foro dichiarato o
+            # stimato piu' largo di lei (HANDOFF 159: foro stimato dall'AI
+            # 1.7 contro corona di riferimento 1.7 fermava footprint e 3D).
+            # Cresce attorno al foro con l'anello minimo, se il passo lo
+            # consente; altrimenti resta e validate() rifiuta, dicendo perche'.
+            wanted = _ceil_hundredth(drill + 2 * MIN_HOLE_WALL_MM)
+            if pitch_bound is None or wanted <= pitch_bound + 1e-9:
+                ring, ring_source = wanted, SIZE_ESTIMATE_DRILL
         half, half_source = self._sized(getattr(side, "hole_diameter", None), self.hole_diameter,
                                         REFERENCE_HALF_HOLE_MM, [pitch_bound] if half_style else [])
         has_thru = through and drill > 0 and ring > 0
@@ -938,6 +955,14 @@ class CastellatedModuleParams:
                         "sta). Indica il diametro misurato per averlo esatto.",
                         label=label, reference=float(self._reference("thru_pad_diameter", side)),
                         pitch=side.pitch, wall=MIN_HOLE_WALL_MM, value=geometry.ring))
+                if geometry.ring_source == SIZE_ESTIMATE_DRILL:
+                    notes.append(tx(
+                        "Lato {label}: corona del foro passante non dichiarata; il valore di "
+                        "riferimento {reference}mm non avvolge il foro di {drill:.2f}mm con "
+                        "l'anello minimo di {wall}mm, quindi e' stimata {value:.2f}mm. Indica "
+                        "il diametro misurato per averlo esatto.",
+                        label=label, reference=float(self._reference("thru_pad_diameter", side)),
+                        drill=geometry.drill, wall=MIN_HOLE_WALL_MM, value=geometry.ring))
                 if geometry.drill_source == SIZE_ESTIMATE_PITCH:
                     notes.append(tx(
                         "Lato {label}: diametro del foro passante non dichiarato; il valore di "
