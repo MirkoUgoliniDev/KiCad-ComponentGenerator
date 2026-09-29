@@ -408,6 +408,33 @@ def test_relaunch_reads_every_body_with_the_crop_prompt_of_the_profile(prepared,
     assert window._last_extracted.components_3d[0]['_crop_reading'] == 'agreed'
 
 
+@pytest.mark.parametrize('stored', ['vendor/crop-reader', ''])
+def test_relaunch_reads_the_crops_with_the_crop_model_of_the_profile(prepared, monkeypatch,
+                                                                     stored):
+    """@brief HANDOFF 150: the relaunch reads the crops with the profile's crop model.
+
+    Set, every 'observe_body' request carries it while the single inventory
+    request keeps the photo model; blank (the factory value), the crops go to
+    the photo model as before.
+    """
+    import kicadgen.services.openrouter as openrouter
+    window, _cache, calls, _started, warnings = prepared
+    window.profile_store.save_defaults({'crop_model': stored})
+    crop_calls = []
+    monkeypatch.setattr(openrouter, 'call_tool', _answer_call(calls, crop_calls))
+    _save_evidence(_cache, [_proposal(1)])
+    window._on_extracted(_params())
+    _answer(monkeypatch, QDialog.DialogCode.Accepted, [_proposal(1)])
+    window.btn_reopen_review.click()
+    window.btn_relaunch_inventory.click()
+    worker = _run_worker(window)
+    assert worker.crop_model == window.profile_store.snapshot(window._profile_key())['crop_model'] == stored
+    assert warnings == [] and len(calls) == 1
+    assert calls[0]['model'] == window._photo_detector_model()
+    assert len(crop_calls) == 2
+    assert {c['model'] for c in crop_calls} == {stored or window._photo_detector_model()}
+
+
 def test_relaunch_after_restart_updates_components_without_auto_generation(prepared, monkeypatch):
     """@brief Senza estrazione in sessione il rilancio aggiorna i componenti e non avvia footprint/3D."""
     window, _cache, calls, started, warnings = prepared
@@ -532,7 +559,7 @@ def test_new_extraction_resets_the_reviewed_and_synthesized_flags(prepared, monk
 
     monkeypatch.setattr(gui, 'ExtractWorker', _NeverStarts)
     profile = dict(model='m', grounding_prompt='', verification_prompt='',
-                   terminal_prompt='', crop_prompt='', system_prompt='')
+                   terminal_prompt='', crop_prompt='', crop_model='', system_prompt='')
     with pytest.raises(RuntimeError, match='worker di prova'):
         window._start_extract_worker([], None, profile, 'vlm', None)
     assert window._reviewed_this_extraction is False

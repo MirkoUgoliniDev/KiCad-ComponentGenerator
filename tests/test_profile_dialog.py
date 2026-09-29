@@ -17,7 +17,7 @@ def test_new_profile_save_inheritance_and_cancel(app, store):
     dialog = gui.ProfileEditor(store, new=True)
     try:
         assert dialog.tabs.count() == 3
-        assert len(dialog.fields) == 10
+        assert len(dialog.fields) == 11
         assert all(check.isChecked() for check in dialog.inherit.values())
         dialog.name.setText('My module')
         dialog.family.setCurrentIndex(dialog.family.findData('aggregate_castellated'))
@@ -210,6 +210,108 @@ def test_the_crop_model_note_is_translated(app, store):
     try:
         [note] = _note_labels(editor)
         assert note.text() == entry['en']
+    finally:
+        editor.close()
+        parent.close()
+
+
+# ── crop_model: «Modello lettura ritagli» line above the crop prompt (HANDOFF 150) ──
+
+def _crop_pages(editor):
+    from PyQt6.QtWidgets import QTabWidget
+    [sub] = editor.tabs.widget(1).findChildren(QTabWidget)
+    return {sub.tabText(i): sub.widget(i) for i in range(sub.count())}
+
+
+@pytest.mark.parametrize('new', [False, True])
+def test_the_crop_model_line_sits_in_the_crop_tab_only_with_its_picker(app, store, new):
+    from PyQt6.QtWidgets import QLabel, QLineEdit, QPushButton
+    editor = gui.ProfileEditor(store, new=new)
+    try:
+        pages = _crop_pages(editor)
+        page = pages['Lettura ritagli']
+        [field] = [w for w in page.findChildren(QLineEdit) if w.objectName() == 'crop_model']
+        assert field is editor.fields['crop_model'] and field.text() == ''
+        [caption] = [w for w in page.findChildren(QLabel) if w.objectName() == 'crop_model_caption']
+        assert caption.text() == gui.CROP_MODEL_CAPTION
+        assert [b.text() for b in page.findChildren(QPushButton)] == ['Scegli modello…']
+        # The line comes before the prompt editor, the note between them.
+        layout = page.layout()
+        order = [layout.itemAt(i).widget() or layout.itemAt(i).layout() for i in range(layout.count())]
+        assert order.index(caption) < order.index(editor.fields['crop_prompt'])
+        assert order.index(caption) < order.index(_note_labels(page)[0]) < order.index(editor.fields['crop_prompt'])
+        for other in ('Terminali', 'Reofori', 'Prompt base', 'Istruzioni foto'):
+            assert not [w for w in pages[other].findChildren(QLineEdit) if w.objectName() == 'crop_model']
+            assert not pages[other].findChildren(QPushButton)
+        assert len([w for w in editor.findChildren(QLineEdit) if w.objectName() == 'crop_model']) == 1
+    finally:
+        editor.close()
+
+
+@pytest.mark.parametrize('typed,stored', [('vendor/crop-reader', 'vendor/crop-reader'), ('', ''),
+                                          ('  vendor/crop-reader  ', 'vendor/crop-reader')])
+def test_the_global_crop_model_saves_blank_or_stripped(app, store, typed, stored):
+    store.save_defaults({'crop_model': 'vendor/previous'})
+    editor = gui.ProfileEditor(store)
+    try:
+        assert editor.fields['crop_model'].text() == 'vendor/previous'
+        editor.fields['crop_model'].setText(typed)
+        editor._save()
+        assert editor.result() == QDialog.DialogCode.Accepted
+        assert store.defaults()['crop_model'] == stored
+    finally:
+        editor.close()
+
+
+def test_crop_model_inherits_read_only_in_a_type_until_unticked(app, store):
+    store.save_defaults({'crop_model': 'vendor/global-crop'})
+    editor = gui.ProfileEditor(store, new=True)
+    try:
+        field = editor.fields['crop_model']
+        assert editor.inherit['crop_model'].isChecked() and field.isReadOnly()
+        assert field.text() == 'vendor/global-crop'
+        editor.name.setText('T')
+        editor._save()
+        assert 'crop_model' not in store.overrides(editor.key)
+    finally:
+        editor.close()
+    edit = gui.ProfileEditor(store, editor.key)
+    try:
+        edit.inherit['crop_model'].setChecked(False)
+        assert not edit.fields['crop_model'].isReadOnly()
+        edit.fields['crop_model'].setText('vendor/type-crop')
+        edit._save()
+        assert store.overrides(editor.key) == {'crop_model': 'vendor/type-crop'}
+        assert store.defaults()['crop_model'] == 'vendor/global-crop'
+    finally:
+        edit.close()
+    # A type may also say «the photo model» while the global default names one.
+    blank = gui.ProfileEditor(store, editor.key)
+    try:
+        blank.fields['crop_model'].setText('')
+        blank._save()
+        assert blank.result() == QDialog.DialogCode.Accepted
+        assert store.overrides(editor.key) == {'crop_model': ''}
+        assert store.resolve(editor.key)['crop_model'] == ''
+    finally:
+        blank.close()
+
+
+def test_the_crop_model_caption_and_note_are_translated(app, store):
+    from PyQt6.QtWidgets import QLabel, QWidget
+    from kicadgen.services.i18n import DEFAULT_TRANSLATIONS, I18n
+    for source in (gui.CROP_MODEL_CAPTION, gui.CROP_MODEL_NOTE):
+        entry = DEFAULT_TRANSLATIONS['ui:' + source]
+        assert set(entry) == {'it', 'en', 'fr', 'de'} and entry['it'] == source
+        assert len({entry[lang] for lang in entry}) == 4
+    parent = QWidget()
+    parent.i18n = I18n(store, 'de')
+    editor = gui.ProfileEditor(store, parent=parent)
+    try:
+        [caption] = [w for w in editor.findChildren(QLabel) if w.objectName() == 'crop_model_caption']
+        assert caption.text() == DEFAULT_TRANSLATIONS['ui:' + gui.CROP_MODEL_CAPTION]['de']
+        [note] = _note_labels(editor)
+        assert note.text() == DEFAULT_TRANSLATIONS['ui:' + gui.CROP_MODEL_NOTE]['de']
     finally:
         editor.close()
         parent.close()

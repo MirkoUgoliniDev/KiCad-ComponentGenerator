@@ -1673,7 +1673,14 @@ class MainWindow(QMainWindow):
         self._click_if_available(getattr(self, "btn_regen_3d", None))
 
     def _shortcut_edit_components(self) -> None:
-        self._click_if_available(getattr(self, "btn_edit_components_3d", None))
+        """@brief Ctrl+E: open the hand editor of the bodies, when there are any.
+
+        The editor has no toolbar button any more (HANDOFF 152), so the
+        shortcut opens it directly under the same condition the button had:
+        bodies to edit. Without them there is nothing to open.
+        """
+        if getattr(self, "_photo_rows", None):
+            self._edit_components()
 
     def _shortcut_ai_log(self) -> None:
         self._click_if_available(getattr(self, "btn_ai_log", None))
@@ -3598,6 +3605,7 @@ class MainWindow(QMainWindow):
             verification_prompt=profile['verification_prompt'],
             terminal_prompt=profile['terminal_prompt'],
             crop_prompt=profile['crop_prompt'],
+            crop_model=profile['crop_model'],
             document_roles=document_roles,
             component_family=self._selected_family(),
             photo_detector=photo_detector,
@@ -4562,8 +4570,9 @@ class MainWindow(QMainWindow):
         @param photo_png Calibrated photograph the proposals refer to.
         @param params Base ExtractedParams the inventory is grafted on.
         @param model Model that receives the single paid request.
-        @param profile AI profile snapshot (verification and crop prompts),
-            the same ProfileStore.snapshot source as the ExtractWorker.
+        @param profile AI profile snapshot (verification and crop prompts,
+            crop model), the same ProfileStore.snapshot source as the
+            ExtractWorker.
         @param synthesized True when `params` was built from the fields rather
             than extracted: automatic generation is then withheld.
         @throws Exception Anything raised by the worker set-up or start; the
@@ -4598,6 +4607,7 @@ class MainWindow(QMainWindow):
             self._photo_cache_dir(),
             declared=declared, verification_prompt=profile['verification_prompt'],
             crop_prompt=profile['crop_prompt'],
+            crop_model=profile['crop_model'],
             extra_instructions=self.field_component_prompt.toPlainText().strip() or None,
             # Il nome del rilevatore e' quello con cui i riquadri sono nati,
             # registrato nel pacchetto, qualunque cosa dica ora la tendina.
@@ -5430,7 +5440,7 @@ class MainWindow(QMainWindow):
                     self, self.i18n.text("Revisione foto non disponibile"), str(exc))
                 return
             dialog.setWindowTitle(
-                self.i18n.tr("photo_review.title", source=self._photo_source)
+                self.i18n.tr("photo_review.title")
             )
             # «Applica» emette solo i corpi tenuti; quelli lasciati fuori si
             # leggono dalla finestra nello stesso istante e restano da parte.
@@ -8661,15 +8671,10 @@ class MainWindow(QMainWindow):
             "wf-edit-review.svg")
         # Modifica a mano dei corpi (utente, 2026-09-26): la tabella sotto il
         # 3D e' stata tolta, i dati no. Serve anche senza la foto in memoria,
-        # che la revisione fotografica invece richiede.
-        self.btn_edit_components_3d = self._workflow_tool_button(
-            "wf-components-edit.svg",
-            "Modifica componenti…",
-            "Nome, tipo, posizione, quote, rotazione, colore e marcatura di ogni corpo, "
-            "a mano. Funziona anche senza la foto. Nessuna richiesta AI: dopo «Applica» "
-            "il modello 3D si rigenera con FreeCAD.")
-        self.btn_edit_components_3d.clicked.connect(lambda: self._edit_components())
-        toolbar.addWidget(self.btn_edit_components_3d)
+        # che la revisione fotografica invece richiede. Il suo pulsante nella
+        # barra e' stato tolto (utente, 2026-09-29, HANDOFF 152): l'editor si
+        # apre con Ctrl+E (`_shortcut_edit_components`) o dal menu del tasto
+        # destro sul corpo nella vista 3D («Modifica componente...»).
         # «Copia formato» (utente, 2026-09-27): accanto al tipo di contatto,
         # dove l'utente l'ha indicata. Interruttore: acceso copia e incolla,
         # spento rigenera una volta sola.
@@ -8684,6 +8689,10 @@ class MainWindow(QMainWindow):
         self.btn_format_painter_3d.toggled.connect(self._on_format_painter_toggled)
         toolbar.addWidget(self.btn_format_painter_3d)
         self._format_source = None
+        #: Table rows of the copied body and of the pasted ones, for the
+        #: outlines in the 3D view (HANDOFF 158).
+        self._format_source_row = None
+        self._format_target_rows = []
         self._format_targets = []
         self._refresh_components_editor_button()
 
@@ -9557,11 +9566,14 @@ class MainWindow(QMainWindow):
             "componenti…» e premi T su ciascuno.", count=len(self._photo_excluded_rows)))
 
     def _refresh_components_editor_button(self) -> None:
-        """@brief Offer the hand editor only when there are bodies to edit."""
-        for name in ("btn_edit_components_3d", "btn_format_painter_3d"):
-            button = getattr(self, name, None)
-            if button is not None:
-                button.setVisible(bool(self._photo_rows))
+        """@brief Offer «Copia formato» only when there are bodies to edit.
+
+        The hand editor's own button was removed from the toolbar (HANDOFF
+        152); Ctrl+E applies the same condition by itself.
+        """
+        button = getattr(self, "btn_format_painter_3d", None)
+        if button is not None:
+            button.setVisible(bool(self._photo_rows))
 
     def _edit_components(self, select_row=None) -> None:
         """@brief Open the hand editor of the mounted bodies.
@@ -9592,12 +9604,18 @@ class MainWindow(QMainWindow):
             preview.format_painter_active = bool(checked)
         if checked:
             self._format_source, self._format_targets = None, []
+            self._format_source_row, self._format_target_rows = None, []
             self.statusBar().showMessage(self.i18n.text(
                 "Copia formato: clic sul componente da copiare."))
             self._format_toast_message(self.i18n.text("Copia formato attiva"),
                                        self.i18n.text("Clic sul componente da copiare."))
             return
         targets, self._format_source, self._format_targets = self._format_targets, None, []
+        self._format_source_row, self._format_target_rows = None, []
+        # The outlines say what is still being chosen: the mode is over.
+        clear_outlines = getattr(preview, "clear_format_outlines", None)
+        if callable(clear_outlines):
+            clear_outlines()
         if targets:
             self._format_toast_message(
                 tx("Formato applicato a {n} componenti", n=len(targets)),
@@ -9636,18 +9654,23 @@ class MainWindow(QMainWindow):
         name = str(self._photo_rows[row].get("name") or "").strip() or str(row + 1)
         if self._format_source is None:
             self._format_source = copy_format(self._photo_rows[row])
+            self._format_source_row = row
+            self._show_format_outlines()
             self.statusBar().showMessage(tx(
                 "Formato di {name} copiato: clic sui componenti su cui incollarlo, poi "
                 "spegni l'icona per rigenerare il 3D.", name=name))
             self._format_toast_message(
                 tx("Formato di {name} copiato", name=name),
                 self.i18n.text("Misure, altezza, tipologia, package e modello KiCad."),
-                self.i18n.text("Clic sui componenti da correggere; ripremi il pennello per "
-                               "applicare."))
+                self.i18n.text("Contorno giallo sul copiato, verde sugli incollati. Clic sui "
+                               "componenti da correggere; ripremi il pennello per applicare."))
             return
         self._photo_rows[row] = paste_format(self._photo_rows[row], self._format_source)
         if name not in self._format_targets:
             self._format_targets.append(name)
+        if row not in self._format_target_rows and row != self._format_source_row:
+            self._format_target_rows.append(row)
+        self._show_format_outlines()
         self._append_log(tx("Copia formato: {source} -> {name}.",
                             source=self._format_source.get("source_name") or "?", name=name))
         self.statusBar().showMessage(tx(
@@ -9659,6 +9682,17 @@ class MainWindow(QMainWindow):
             tx("{n} componenti finora: {targets}", n=len(self._format_targets),
                targets=", ".join(self._format_targets)),
             self.i18n.text("Ripremi il pennello per applicare."))
+
+    def _show_format_outlines(self) -> None:
+        """@brief Draw the «copia formato» outlines for the current source and targets.
+
+        @note The 3D view may be a stub without outlines (tests, or a view
+            that failed to start): then nothing is drawn and nothing breaks.
+        """
+        preview = getattr(self, "preview_3d", None)
+        highlight = getattr(preview, "highlight_format_rows", None)
+        if callable(highlight):
+            highlight(self._format_source_row, list(self._format_target_rows))
 
     #: Correzioni di orientamento offerte dal menu contestuale. Solo multipli
     #: di un quarto di giro: i modelli della libreria KiCad seguono la

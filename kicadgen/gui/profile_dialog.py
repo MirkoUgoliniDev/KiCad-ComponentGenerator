@@ -20,15 +20,22 @@ STAGES = (
     ('Localizzazione foto', 'vision_model', 'grounding_prompt'),
     ('Verifica foto', 'verification_model', 'verification_prompt'),
 )
-#: Note above the «Lettura ritagli» editor (HANDOFF 146 V4, user decision): the
-#: tab sits on the «Localizzazione foto» page, whose «Modello LLM» the crop
-#: reading does NOT use. It is sent with the model of the paid call on the
-#: photograph: the session choice for the photo in the Project tab, otherwise
-#: the extraction model (main_window._photo_detector_model, forwarded as
-#: classifier_model by datasheet_extractor).
-CROP_MODEL_NOTE = ('Questa lettura usa il modello della chiamata sulla foto (scelto nel tab '
-                   'Progetto, altrimenti il modello dell\'estrazione), non il Modello LLM di '
-                   'questa pagina.')
+#: Caption of the «Modello lettura ritagli» line in the «Lettura ritagli» tab
+#: (HANDOFF 150): the profile field 'crop_model', blank by default.
+CROP_MODEL_CAPTION = 'Modello lettura ritagli (vuoto = modello della foto)'
+#: Note under that line (HANDOFF 146 V4 and 150, user decisions): the tab sits
+#: on the «Localizzazione foto» page, whose «Modello LLM» the crop reading
+#: does NOT use. With the field blank the reading is sent with the model of
+#: the paid call on the photograph: the session choice in the Project tab,
+#: otherwise the extraction model (main_window._photo_detector_model,
+#: forwarded as classifier_model by datasheet_extractor). With a model set,
+#: that model serves the crop readings only, and their cost goes to its
+#: provider.
+CROP_MODEL_NOTE = ('Con il campo vuoto questa lettura usa il modello della chiamata a pagamento '
+                   'sulla foto (scelto nel tab Progetto, altrimenti il modello dell\'estrazione), '
+                   'non il Modello LLM di questa pagina. Con un modello impostato, quel modello '
+                   'viene usato solo per le letture dei ritagli e il loro costo va al suo '
+                   'fornitore.')
 HELP = (
     'Legge quote e parametri dai documenti. Il prompt base definisce il comportamento '
     'dell’analisi; le istruzioni specifiche della tipologia vengono aggiunte al prompt '
@@ -38,8 +45,9 @@ HELP = (
     'ma non al prompt Lettura ritagli: descrivono la scheda intera, non il singolo corpo. '
     'I prompt tecnici Terminali e Reofori sono avanzati: modificarli non riattiva i pulsanti '
     'manuali nascosti. Il prompt Lettura ritagli guida la rilettura di ogni corpo dal suo '
-    'ritaglio ingrandito (rilevatori «YOLO locale + verifica AI» e «Solo modello di visione»), '
-    'con lo stesso modello della chiamata sulla fotografia. '
+    'ritaglio ingrandito (rilevatori «YOLO locale + verifica AI» e «Solo modello di visione»); '
+    'il Modello lettura ritagli, se impostato, sostituisce per quelle sole letture il modello '
+    'della chiamata sulla fotografia, altrimenti vale quest\'ultimo. '
     'XY sono stime calibrate e le altezze richiedono conferma. '
     'La cache nella cartella photo-cache del progetto distingue input, modello e prompt.',
     'Verifica la presenza dei corpi nei rettangoli proposti, senza spostare coordinate '
@@ -159,10 +167,16 @@ class ProfileEditor(QDialog):
                     inner = QVBoxLayout(child)
                     sub.addTab(child, caption)
                     if field == 'crop_prompt':
-                        # HANDOFF 146 V4: the tab sits under this page's model,
-                        # but the crop reading is sent with the model of the
-                        # paid call on the photograph (datasheet_extractor
-                        # classifier_model <- main_window._photo_detector_model).
+                        # HANDOFF 150: the crop reading has its own optional
+                        # model, above its prompt, with the same picker and
+                        # inheritance rules as the stage models. Blank = the
+                        # model of the paid call on the photograph
+                        # (datasheet_extractor classifier_model <-
+                        # main_window._photo_detector_model), see the note.
+                        caption = QLabel(CROP_MODEL_CAPTION)
+                        caption.setObjectName('crop_model_caption')
+                        inner.addWidget(caption)
+                        self._add_field(inner, 'crop_model', overrides, model=True)
                         note = QLabel(CROP_MODEL_NOTE)
                         note.setObjectName('crop_model_note')
                         note.setWordWrap(True)

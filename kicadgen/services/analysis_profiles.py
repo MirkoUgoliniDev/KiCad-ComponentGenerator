@@ -16,7 +16,15 @@ from .messages import tx
 
 PROFILE_FIELDS = ('model','vision_model','verification_model','system_prompt','grounding_prompt',
                   'verification_prompt','terminal_prompt','lead_prompt','crop_prompt',
-                  'image_instructions')
+                  'crop_model','image_instructions')
+#: Model identifier fields: stored stripped, never composed with instructions.
+#: 'crop_model' (HANDOFF 150) is the model of the per-body crop reading; its
+#: factory value is EMPTY and means «the model of the paid call on the
+#: photograph», so it is the one model field a blank value is valid for.
+MODEL_FIELDS = ('model', 'vision_model', 'verification_model', 'crop_model')
+#: Fields whose value may legitimately be blank: no type notes, or a crop
+#: reading that follows the photo model. Every prompt must carry a text.
+BLANK_ALLOWED_FIELDS = ('image_instructions', 'crop_model')
 #: Prompt fields sent with a photograph of the whole board: the type's image
 #: instructions are appended to each of them by ProfileStore.snapshot.
 #: 'crop_prompt' is deliberately absent (user decision 2026-09-28, HANDOFF 146
@@ -26,8 +34,9 @@ PROFILE_FIELDS = ('model','vision_model','verification_model','system_prompt','g
 PHOTO_PROMPT_FIELDS = ('grounding_prompt','verification_prompt','terminal_prompt','lead_prompt')
 FAMILIES = {t.key:t.label for t in COMPONENT_TYPES}
 #: Database schema version. 2: verification_model; 3: translations table;
-#: 4: crop_prompt (per-body crop reading prompt, HANDOFF 146).
-SCHEMA_VERSION = 4
+#: 4: crop_prompt (per-body crop reading prompt, HANDOFF 146); 5: crop_model
+#: (model of that reading, blank = photo model, HANDOFF 150).
+SCHEMA_VERSION = 5
 
 
 def _default_translations():
@@ -96,7 +105,7 @@ def factory_defaults():
     return dict(model=DEFAULT_MODEL,vision_model=DEFAULT_VISION_MODEL,verification_model=DEFAULT_MODEL,
         system_prompt=DEFAULT_SYSTEM_PROMPT,grounding_prompt=GROUNDING_PROMPT,
         verification_prompt=VERIFICATION_PROMPT,terminal_prompt=TERMINAL_PROMPT,
-        lead_prompt=LEAD_PROMPT,crop_prompt=CROP_PROMPT,image_instructions='')
+        lead_prompt=LEAD_PROMPT,crop_prompt=CROP_PROMPT,crop_model='',image_instructions='')
 
 
 class ProfileError(ValueError):
@@ -159,6 +168,15 @@ class ProfileStore:
                            ('crop_prompt', factory_defaults()['crop_prompt']))
                 db.execute('PRAGMA user_version=4')
                 version = 4
+            if version == 4:
+                # Model of the crop reading (HANDOFF 150): the factory value is
+                # blank («same model as the photo call»), so an upgraded
+                # database behaves exactly as before. Same rules as step 3->4:
+                # a row already there is never replaced, no override is added.
+                db.execute('INSERT OR IGNORE INTO ai_defaults VALUES (?,?)',
+                           ('crop_model', factory_defaults()['crop_model']))
+                db.execute('PRAGMA user_version=5')
+                version = 5
             if version == SCHEMA_VERSION:
                 # Fail explicitly on a damaged schema; never silently reset user profiles.
                 db.execute('SELECT key,label,family,instructions,active,builtin,position FROM component_types LIMIT 1')
@@ -233,11 +251,11 @@ class ProfileStore:
                 raise ProfileError(tx("Configurazione precedente non valida."))
             defaults = factory_defaults()
             for key in PROFILE_FIELDS:
-                if isinstance(legacy.get(key),str) and (legacy[key].strip() or key=='image_instructions'):
+                if isinstance(legacy.get(key),str) and (legacy[key].strip() or key in BLANK_ALLOWED_FIELDS):
                     defaults[key] = legacy[key]
             if not isinstance(legacy.get('verification_model'), str) or not legacy['verification_model'].strip():
                 defaults['verification_model'] = defaults['model']
-            for key in ('model', 'vision_model', 'verification_model'):
+            for key in MODEL_FIELDS:
                 defaults[key] = defaults[key].strip()
             db.execute('CREATE TABLE ai_defaults (name TEXT PRIMARY KEY, value TEXT NOT NULL)')
             db.execute('CREATE TABLE component_types (key TEXT PRIMARY KEY, label TEXT NOT NULL, '
@@ -354,12 +372,18 @@ class ProfileStore:
 
     @staticmethod
     def _validate_values(values,allow_inherit=False):
+        """Reject unknown fields and blank texts; None inherits only when allowed.
+
+        A blank value is valid only for BLANK_ALLOWED_FIELDS: no image
+        instructions, or a crop_model that follows the photo model. Every
+        other field, the other three models included, must carry a text.
+        """
         if set(values)-set(PROFILE_FIELDS):
             raise ProfileError(tx("Campo profilo non riconosciuto."))
         for key,value in values.items():
             if value is None and allow_inherit:
                 continue
-            if not isinstance(value,str) or (not value.strip() and key!='image_instructions'):
+            if not isinstance(value,str) or (not value.strip() and key not in BLANK_ALLOWED_FIELDS):
                 raise ProfileError(tx("{key}: specificare un valore oppure ereditare il default.", key=key))
 
     def save_defaults(self,values):

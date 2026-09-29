@@ -31,6 +31,11 @@ from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QProgressBar, QPushBut
 #: sulla fase precedente mentre giravano.
 TOOLS = {
     "llm": ("Modello AI (remoto, a consumo)", "#f9e2af", "cloud"),
+    # Le due fasi a pagamento che seguono l'inventario globale, con un nome
+    # proprio (utente, 2026-09-29, HANDOFF 156): «Modello AI — in corso» per
+    # due minuti non diceva che cosa si stava pagando.
+    "llm_crops": ("Lettura ritagli (remoto, a consumo)", "#f9e2af", "crop"),
+    "llm_markings": ("Lettura sigle (remoto, a consumo)", "#f9e2af", "tag"),
     "yolo": ("YOLO (rilevamento locale)", "#a6e3a1", "frame"),
     "footprint": ("KiCadGen (footprint 2D, calcolo locale)", "#89b4fa", "pads"),
     "kicad": ("Libreria modelli 3D di KiCad", "#94e2d5", "library"),
@@ -39,13 +44,18 @@ TOOLS = {
     "opencv": ("OpenCV (analisi immagine locale)", "#fab387", "lens"),
 }
 
+#: Glifi delle fasi che chiamano un modello remoto a pagamento: la nuvola e
+#: le sue due specializzazioni (ritaglio, sigla). Sono le sole fasi che
+#: spediscono dati (TRANSFER_SOURCES) e che si interrompono con la conferma
+#: della spesa.
+REMOTE_GLYPHS = frozenset({"cloud", "crop", "tag"})
+
 #: Fasi che sono la *stessa* chiamata remota di una voce di TOOLS (stesso nome,
 #: colore e segno) ma partono da dati diversi. Restano fuori da TOOLS perche'
 #: la', per contratto, ogni strumento ha una forma sua: qui cambia solo cio'
 #: che viene spedito, non chi lavora.
 TOOL_ALIASES = {
     "llm_inventory": "llm",
-    "llm_markings": "llm",
 }
 
 #: Cosa parte dalla macchina verso il modello remoto, per le fasi che spediscono
@@ -55,6 +65,7 @@ TOOL_ALIASES = {
 TRANSFER_SOURCES = {
     "llm": "documents",
     "llm_inventory": "board",
+    "llm_crops": "board",
     "llm_markings": "board",
 }
 
@@ -590,6 +601,25 @@ class AnalysisSpinner(QWidget):
                 blob.addEllipse(box)
                 path = path.united(blob)
             painter.drawPath(path.simplified())
+        elif self.glyph == "crop":
+            # Ritaglio: il riquadro ritagliato dalla foto, con dentro il corpo
+            # pieno che il modello guarda da vicino. Stesso colore della
+            # nuvola (si paga), forma diversa (test: due strumenti non si
+            # disegnano mai uguali).
+            painter.drawRect(QRectF(17, 17, 22, 22))
+            painter.setBrush(QColor(self.color))
+            painter.drawRoundedRect(QRectF(24, 24, 8, 8), 1.5, 1.5)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            for x in (20.0, 36.0):
+                painter.drawLine(QPointF(x, 28), QPointF(x + 2, 28))
+            for y in (20.0, 36.0):
+                painter.drawLine(QPointF(28, y), QPointF(28, y + 2))
+        elif self.glyph == "tag":
+            # Sigla: un'etichetta con due righe di testo, cio' che e' stampato
+            # sul corpo e che il modello rilegge dal ritaglio ingrandito.
+            painter.drawRoundedRect(QRectF(16, 20, 24, 16), 2, 2)
+            painter.drawLine(QPointF(20, 26), QPointF(36, 26))
+            painter.drawLine(QPointF(20, 31), QPointF(30, 31))
         elif self.glyph == "frame":
             # Mirino: quattro squadrette d'angolo piu' il bersaglio al centro.
             # Un riquadro chiuso si confondeva col footprint e col cubo alla
@@ -875,6 +905,9 @@ class AnalysisOverlay(QWidget):
         self._phase_name = ""
         self._phase_last_status = ""
         self._phase_warning = ""
+        #: Conteggio della fase in corso (fatti, totale, unita' tradotta), o
+        #: None: lo mostra la riga «●» dell'elenco e lo stato centrale.
+        self._phase_progress = None
         #: Testi (gia' tradotti) dei passi, passo corrente, motivi di chi non c'e'.
         self._step_labels: list[str] = []
         self._step_current = -1
@@ -1335,6 +1368,7 @@ class AnalysisOverlay(QWidget):
             self._end_phase()
             self._phase_key, self._phase_name = (key, source_name) if source_name else ("", "")
             self._phase_last_status = self._phase_warning = ""
+            self._phase_progress = None
             self._render_phases()
         self.spinner.set_tool(glyph, color)
         source = TRANSFER_SOURCES.get(key)
@@ -1415,6 +1449,7 @@ class AnalysisOverlay(QWidget):
         """@brief Forget the completed phases (a new operation starts)."""
         self._phase_history = []
         self._phase_key = self._phase_name = self._phase_last_status = self._phase_warning = ""
+        self._phase_progress = None
         self.phases.clear()
         self.phases.setToolTip("")
         self.phases.hide()
@@ -1506,7 +1541,10 @@ class AnalysisOverlay(QWidget):
                                              Qt.TextElideMode.ElideRight, width),
                           "warning" if warned else "done"))
         if running and rows_room:
-            text = "● " + self._translate(self._phase_name) + " — " + self._translate("in corso")
+            # Con un conteggio vero la riga dice a che punto e' (HANDOFF 156):
+            # «17 di 42 componenti» invece di un «in corso» che dura minuti.
+            text = "● " + self._translate(self._phase_name) + " — " + (
+                self._progress_text() if self._phase_progress else self._translate("in corso"))
             lines.append((metrics.elidedText(text, Qt.TextElideMode.ElideRight, width),
                           "running"))
         self.phases.setText(self._phase_rows_html(lines))
@@ -1554,11 +1592,18 @@ class AnalysisOverlay(QWidget):
         @param unit Word for the items, e.g. "componenti".
         @note Deliberately no time-based estimate: a bar that stops at 90%
             because a call is slower than usual reports a guess as a fact.
+        @note While a listed phase runs (no steps), the count also goes to its
+            «●» row and to the central status (HANDOFF 156), WITHOUT becoming
+            the phase's outcome: the outcome stays the first status the phase
+            itself reported (see `set_status`).
         """
         countable = (type(done) is int and type(total) is int
                      and total > 0 and 0 <= done <= total)
         self.progress_row.setVisible(countable)
         if not countable:
+            if self._phase_progress is not None:
+                self._phase_progress = None
+                self._render_phases()
             return
         self.progress.setRange(0, total)
         self.progress.setValue(done)
@@ -1568,6 +1613,21 @@ class AnalysisOverlay(QWidget):
         self.progress_label.setText(
             f"{percent}% · {done}/{total} {unit}".rstrip() if unit
             else f"{percent}% · {done}/{total}")
+        if self._phase_name and not self._step_labels:
+            self._phase_progress = (done, total, unit)
+            self._render_phases()
+            self._status_source = elide_paths(
+                self._translate(self._phase_name) + " — " + self._progress_text())
+            self._render_status()
+
+    def _progress_text(self):
+        """«17 di 42 componenti» for the running phase, in the current language."""
+        done, total, unit = self._phase_progress
+        template = self._translate("{done} di {total} {unit}")
+        try:
+            return template.format(done=done, total=total, unit=unit).rstrip()
+        except (KeyError, IndexError, ValueError):
+            return f"{done} di {total} {unit}".rstrip()
 
     def clear_cost(self):
         """@brief Clear and hide the AI cost summary at the start of a new AI analysis.

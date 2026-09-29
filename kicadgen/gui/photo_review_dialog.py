@@ -68,7 +68,7 @@ from PyQt6.QtCore import (
     pyqtSignal,
 )
 from PyQt6.QtGui import (QBrush, QColor, QKeySequence, QPainter, QPen, QPixmap,
-                         QPolygonF, QShortcut)
+                         QPolygonF, QShortcut, QTextDocument)
 from PyQt6.QtWidgets import (
     QAbstractItemView, QComboBox, QCompleter, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFormLayout,
@@ -647,7 +647,7 @@ _PHOTO_BUTTON_EXPLANATION = (
 ## First paragraph of the «Come si usa» popup.
 _INFO_INTRO = (
     "Correggi l'inventario: sposta, ridimensiona, aggiungi o elimina i rettangoli, "
-    "poi «Applica correzioni». «Parametri…» apre quote e testi del componente scelto.")
+    "poi «Applica correzioni». «Parametri…» apre nome, tipo, altezza e cosa ha letto l'AI.")
 
 ## Coordinate convention, the last line of the popup.
 _INFO_ORIGIN = "Origine: centro PCB, X destra, Y basso; rotazione oraria."
@@ -705,6 +705,105 @@ def ai_only_excluded(component) -> bool:
     """
     return isinstance(component, dict) and component.get("_ai_only_excluded") is True
 
+
+## Value shown for an attribute the component dict does not carry. The
+## drill-down never invents: a missing reading is said to be missing.
+ATTRIBUTE_UNAVAILABLE = "non disponibile"
+
+## ``_crop_reading`` outcomes written by the crop reading stage, as the
+## drill-down names them. Any other value is shown as it is: it is data.
+_CROP_READING_OUTCOMES = {
+    "agreed": "concordi (adottate)",
+    "disagreed": "discordi (da rivedere)",
+    "inconclusive": "inconcludenti (da rivedere)",
+    "outvoted": "in minoranza contro rilevatore e inventario (riga tenuta)",
+    "failed": "fallite",
+}
+
+## AI confidence grades as the drill-down names them.
+_CONFIDENCE_GRADES = {"high": "alta", "medium": "media", "low": "bassa"}
+
+
+def _text(value):
+    """Stripped text of ``value`` when it is a non-empty string, else None."""
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def component_attribute_lines(component, _tr) -> list[tuple[str, str]]:
+    """@brief The few attributes of one body worth a glance, for the drill-down.
+
+    Five lines (user, 2026-09-29, HANDOFF 151-bis: «troppe informazioni»):
+    type, package and marking as the AI read them, each with its declared
+    confidence; the outcome of the two crop readings; the state of the KiCad
+    model. Reading only: nothing is computed from the photo and nothing is
+    guessed. A missing type or crop outcome is reported as
+    ATTRIBUTE_UNAVAILABLE; a missing package or marking is said so in words.
+    Dimensions stay in «Parametri…», warnings in the details popup.
+
+    @param component Photo component dict (the review's own row).
+    @param _tr Translator of the Italian labels (``self._tr`` of the dialog).
+    @return Ordered ``(label, value)`` pairs; labels translated, values shown
+        as data (the AI writes them in English).
+    """
+    if not isinstance(component, dict):
+        return []
+    missing = _tr(ATTRIBUTE_UNAVAILABLE)
+
+    def grade(key):
+        value = _text(component.get(key))
+        if value is None:
+            return ""
+        return " · " + _tr("confidenza") + " " + _tr(_CONFIDENCE_GRADES.get(value.lower(), value))
+
+    lines = []
+    declared = _text(component.get("class")) or _text(component.get("kind"))
+    lines.append((_tr("Tipo"), (declared + grade("class_confidence")) if declared else missing))
+    package = _text(component.get("package"))
+    lines.append((_tr("Package"), (package + grade("package_confidence")) if package
+                  else _tr("non dichiarato")))
+    marking = _text(component.get("marking"))
+    lines.append((_tr("Sigla letta"),
+                  (marking + grade("marking_confidence")) if marking else _tr("nessuna")))
+    outcome = _text(component.get("_crop_reading"))
+    lines.append((_tr("Letture del ritaglio"),
+                  _tr(_CROP_READING_OUTCOMES.get(outcome.lower(), outcome)) if outcome else missing))
+    lines.append((_tr("Modello KiCad"), _kicad_model_state(component, _tr)))
+    return lines
+
+
+def _kicad_model_state(component, _tr) -> str:
+    """State of the KiCad model as the user will meet it in the solid.
+
+    The review opened at the pipeline pause runs BEFORE the library search
+    (step 2 of the generation, after «Applica correzioni»): then no
+    ``model_match`` exists yet and the line says so, instead of a «not
+    chosen» that reads as a failure (user, 2026-09-29: the solid showed a
+    SOT-23-6 the review had called unchosen). Afterwards the line names the
+    matcher's own status and the file it hooked, if any.
+    """
+    selection = component.get("model_selection") or {}
+    if isinstance(selection, dict) and selection.get("status") == "confirmed":
+        path = _text(selection.get("path"))
+        return _tr("confermato") + (": " + Path(path).name if path else "")
+    match = component.get("model_match")
+    if not isinstance(match, dict) or not _text(match.get("status")):
+        return _tr("non ancora cercato: la ricerca in libreria parte dopo «Applica correzioni»")
+    status = match["status"].strip()
+    hooked = _text(match.get("selected_path"))
+    file_name = (": " + Path(hooked).name) if hooked else ""
+    if status in ("provisional_matched", "auto_matched"):
+        return _tr("agganciato dalla sola geometria, da confermare") + file_name
+    if status == "library_matched":
+        return _tr("dall'archivio dei tuoi abbinamenti, da confermare") + file_name
+    if status == "review_required":
+        candidates = match.get("candidates")
+        count = len(candidates) if isinstance(candidates, list) else 0
+        return _tr("candidati da scegliere") + f": {count}"
+    if status == "unresolved":
+        return _tr("nessun candidato compatibile in libreria")
+    if status == "import_failed":
+        return _tr("importazione STEP fallita") + file_name
+    return _tr("non confermato") + " · " + status
 
 class _BoardBackdrop(QGraphicsRectItem):
     """@brief Neutral board rectangle shown when the photograph steps back.
@@ -1083,7 +1182,7 @@ class PhotoReviewDialog(QDialog):
         self._applied = False
         self._closing = False
         self._match_worker = None
-        self.setWindowTitle("Revisione componenti da foto")
+        self.setWindowTitle("Revisione AI")
         self.resize(1120, 740)
         layout = QVBoxLayout(self)
         tr = self._tr
@@ -1221,6 +1320,20 @@ class PhotoReviewDialog(QDialog):
             field.editingFinished.connect(self._text_field_finished)
             form.addRow(label, field)
             self.text_fields[key] = field
+        # Cosa ha letto l'AI per il corpo scelto (utente, 2026-09-29, HANDOFF
+        # 157): tipo, package e sigla con le confidenze, esito delle letture
+        # del ritaglio, stato del modello KiCad. Sola lettura, testo
+        # selezionabile; le righe vengono da `component_attribute_lines`.
+        self.attributes_label = QLabel()
+        self.attributes_label.setObjectName("component_attributes")
+        self.attributes_label.setWordWrap(True)
+        # Testo ricco: un paragrafo per riga, con aria fra le righe (utente,
+        # 2026-09-29: «distanzia meglio le voci»); i valori sono escapati.
+        self.attributes_label.setTextFormat(Qt.TextFormat.RichText)
+        self.attributes_label.setContentsMargins(0, 6, 0, 2)
+        self.attributes_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.attributes_label.setProperty("i18n_skip", True)
+        form.addRow(self.attributes_label)
         # The type of a body the user has just drawn is asked, not guessed, and
         # the categories already present in the inventory are offered as a
         # convenience. A completer on the line edit, not a closed combo box:
@@ -1245,6 +1358,15 @@ class PhotoReviewDialog(QDialog):
             field.valueChanged.connect(self._number_field_changed)
             form.addRow(label, field)
             self.fields[key] = field
+            # Nessuna quota si mostra piu' qui (utente, 2026-09-29, HANDOFF
+            # 157/157-bis): centro, lati e rotazione si correggono trascinando
+            # il rettangolo sulla foto, altezza e tutto il resto in «Modifica
+            # componenti…» (Ctrl+E). Le caselle restano, nascoste: sono il
+            # contratto con cui il trascinamento e i test scrivono la geometria.
+            field.hide()
+            row_label = form.labelForField(field)
+            if row_label is not None:
+                row_label.hide()
         self.parameters_dialog = QDialog(self)
         self.parameters_dialog.setWindowTitle("Parametri componente")
         parameters_layout = QVBoxLayout(self.parameters_dialog)
@@ -1260,7 +1382,8 @@ class PhotoReviewDialog(QDialog):
         # successive»), nella stessa riga sotto la lista.
         self.parameters_button = tool_button(
             "sliders.svg", "Parametri…", "",
-            "Quote, rotazione, altezza e nome del componente scelto.", tr=tr)
+            "Nome, tipo e marcatura del componente scelto, e cosa ha letto l'AI: "
+            "tipo, package, sigla, letture del ritaglio, modello KiCad.", tr=tr)
         self.parameters_button.clicked.connect(self.open_parameters)
         self.model_button = tool_button(
             "step-view-iso.svg", "Scegli modello KiCad…", "",
@@ -1955,6 +2078,7 @@ class PhotoReviewDialog(QDialog):
         for key, field in self.text_fields.items():
             field.setText(str(selected.component.get(key, "")))
         self._refresh_height_label(selected.component)
+        self._show_attributes(selected.component)
 
     def _refresh_height_label(self, component):
         """Label of the height field: «Altezza (stimata)» while the height is not a reading.
@@ -2009,6 +2133,10 @@ class PhotoReviewDialog(QDialog):
             return
         self._refresh_parameters_title()
         self.parameters_dialog.open()
+        # The AI lines wrap: the height of the modal follows the text at the
+        # width the modal really has, not the one-line guess of the first
+        # show (user, 2026-09-29: the last line was cut).
+        self._fit_parameters_dialog()
         field = self.text_fields.get(focus if isinstance(focus, str) else "", None)
         if field is None:
             field = self.text_fields["name"]
@@ -2158,8 +2286,12 @@ class PhotoReviewDialog(QDialog):
                 + (" [!]" if warnings else ""))
         self.component_list.item(index).setText(text)
         self.component_list.item(index).setForeground(color)
-        # QGraphicsItem tooltips interpret HTML, so escape supplied metadata.
-        tooltip = escape(text + ("\n" + "\n".join(warnings) if warnings else ""))
+        # Tooltip in HTML (HANDOFF 154): Qt lays rich text out at a fixed
+        # width and wraps it, while plain text stays on one line however long
+        # it is, and three warnings ran past the screen edge. Everything that
+        # comes from the data is escaped: the tooltip interprets HTML.
+        tooltip = "<b>" + escape(text) + "</b>" + "".join(
+            "<br>" + escape(warning) for warning in warnings)
         item.setToolTip(tooltip)
         # Stessa spiegazione sulla riga della lista: il marcatore e' corto per
         # forza, la frase che dice cosa fare deve restare raggiungibile anche
@@ -2167,9 +2299,11 @@ class PhotoReviewDialog(QDialog):
         # da sola -- il colore e il marcatore si vedono senza puntare nulla.
         self.component_list.item(index).setToolTip(tooltip)
         if item.isSelected():
+            # A model chosen or a type typed changes what the AI lines say.
+            self._show_attributes(item.component)
             if height_is_estimated(item.component):
                 warnings.append(self._tr("Altezza stimata, non misurata: correggila in "
-                                         "Parametri se la conosci."))
+                                         "«Modifica componenti…» (Ctrl+E) se la conosci."))
             self.warning_label.setText(
                 "\n".join(warnings)
                 if warnings else self._tr("Nessun avviso per questo componente.")
@@ -2180,6 +2314,40 @@ class PhotoReviewDialog(QDialog):
     def _tr(self, source):
         """@brief Translate runtime status text without modifying component data."""
         return self.i18n.text(source) if self.i18n is not None else source
+
+    def attribute_text(self, component) -> str:
+        """@brief What the AI read for ``component``, as «Label: value» lines.
+
+        @param component Photo component dict.
+        @return One line per attribute of `component_attribute_lines`; shown
+            read-only in «Parametri componente» (HANDOFF 157).
+        """
+        return "\n".join(f"{label}: {value}"
+                         for label, value in component_attribute_lines(component, self._tr))
+
+    def _show_attributes(self, component):
+        """Lay the AI lines out in `attributes_label`, one spaced paragraph each."""
+        self.attributes_label.setText("".join(
+            f"<p style='margin:0 0 5px 0'><b>{escape(label)}:</b> {escape(value)}</p>"
+            for label, value in component_attribute_lines(component, self._tr)))
+        if self.parameters_dialog.isVisible():
+            self._fit_parameters_dialog()
+
+    def _fit_parameters_dialog(self):
+        """Give the modal the height its wrapped AI lines need at its width."""
+        label = self.attributes_label
+        width = label.width() if label.width() > 0 else self.parameters_dialog.width() - 40
+        label.setMinimumHeight(label.heightForWidth(max(120, width)))
+        self.parameters_dialog.adjustSize()
+
+    def attributes_plain_text(self) -> str:
+        """@brief The AI lines exactly as shown, one per line, without markup.
+
+        @return «Label: value» lines of the selected component; empty when none.
+        """
+        document = QTextDocument()
+        document.setHtml(self.attributes_label.text())
+        return document.toPlainText().strip()
 
     def _update_scene_rect(self):
         rect = QRectF(self.photo_rect)

@@ -987,9 +987,12 @@ def test_extract_inventory_reads_every_retained_body_after_the_global_inventory(
     [row] = report.components
     assert row['package'] == 'SOIC-8' and row['_crop_reading'] == 'agreed'
     tools = [tool for tool, _ in phases]
-    start = tools.index('llm')
-    assert tools[start - 1] == 'llm_inventory' and tools[start + 1] == 'llm_inventory'
-    assert phases[start][1] == 'lettura dei singoli componenti'
+    # HANDOFF 156: the crop reading has its own phase, named after its model,
+    # and the local colour sampling that follows is no longer a «Modello AI».
+    start = tools.index('llm_crops')
+    assert tools[start - 1] == 'llm_inventory'
+    assert phases[start][1] == DEEPSEEK
+    assert tools[max(i for i, t in enumerate(tools) if t == 'llm_crops') + 1] == 'opencv'
 
 
 def test_extract_inventory_lets_a_cancellation_through(monkeypatch, tmp_path):
@@ -1257,7 +1260,8 @@ def test_the_relaunch_reads_every_retained_body_with_the_profile_prompt():
     [row] = report.components
     assert row['package'] == 'SOIC-8' and row['_crop_reading'] == 'agreed'
     tools = [tool for tool, _ in phases]
-    assert tools[tools.index('llm') + 1] == 'llm_inventory'
+    assert 'llm_crops' in tools
+    assert tools[max(i for i, t in enumerate(tools) if t == 'llm_crops') + 1] == 'opencv'
 
 
 def test_the_relaunch_shares_the_tail_of_extract_inventory(monkeypatch, tmp_path):
@@ -1266,17 +1270,46 @@ def test_the_relaunch_shares_the_tail_of_extract_inventory(monkeypatch, tmp_path
     seen = []
     real = inv.read_retained_bodies
 
-    def spy(photo, report, *args):
-        seen.append(args[-2])                 # crop_prompt
-        return real(photo, report, *args)
+    def spy(photo, report, *args, **kwargs):
+        seen.append((args[-2], kwargs.get('crop_model')))   # crop_prompt, crop_model
+        return real(photo, report, *args, **kwargs)
     monkeypatch.setattr(inv, 'read_retained_bodies', spy)
 
     def call(**kwargs):
         name = kwargs['tool']['function']['name']
         return _inventory_response() if name == 'report_global_inventory' else _obs(marking='')
-    _reconcile(call, crop_prompt=CUSTOM_PROMPT)
-    _extract(monkeypatch, tmp_path, call, [])      # extract_inventory, no profile prompt
-    assert seen == [CUSTOM_PROMPT, None]
+    _reconcile(call, crop_prompt=CUSTOM_PROMPT, crop_model='vendor/crop-reader')
+    _extract(monkeypatch, tmp_path, call, [])      # extract_inventory, no profile values
+    assert seen == [(CUSTOM_PROMPT, 'vendor/crop-reader'), (None, None)]
+
+
+@pytest.mark.parametrize('crop_model,expected', [
+    ('vendor/crop-reader', 'vendor/crop-reader'), (' vendor/crop-reader ', 'vendor/crop-reader'),
+    ('', DEEPSEEK), (None, DEEPSEEK)])
+def test_the_relaunch_reads_the_crops_with_the_profile_model_and_the_inventory_with_its_own(
+        crop_model, expected):
+    """@brief HANDOFF 150: crop_model set = crop readings only; blank = the photo model."""
+    sent = []
+
+    def call(**kwargs):
+        name = kwargs['tool']['function']['name']
+        sent.append((name, kwargs['model']))
+        return _inventory_response() if name == 'report_global_inventory' else _obs(marking='')
+    phases = []
+    report, logs = _reconcile(call, phases, crop_model=crop_model)
+    assert [m for name, m in sent if name == 'report_global_inventory'] == [DEEPSEEK]
+    assert [m for name, m in sent if name == 'observe_body'] == [expected] * 2
+    [row] = report.components
+    assert row['package'] == 'SOIC-8' and row['_crop_reading'] == 'agreed'
+    named = [line for line in logs
+             if str(line).startswith('Lettura dei singoli componenti affidata al modello')]
+    details = [d for t, d in phases if t == 'llm_crops']
+    # First the bare model, then «model · N richieste» body after body (156).
+    assert details[0] == expected and all(d.startswith(expected) for d in details)
+    if expected == DEEPSEEK:
+        assert named == []
+    else:
+        assert len(named) == 1 and expected in named[0] and DEEPSEEK in named[0]
 
 
 def test_the_relaunch_keeps_rows_and_warns_when_the_provider_fails():
@@ -1296,5 +1329,351 @@ def test_the_crop_observations_reach_the_final_components(monkeypatch, tmp_path)
     from kicadgen.services import datasheet_extractor as extractor
     source = Path(extractor.__file__).read_text(encoding='utf-8')
     for key in ('_crop_observations', '_crop_reading', '_crop_readings', '_package_inventory',
-                '_class_inventory'):
+                '_class_inventory', '_detector_evidence', 'package_source'):
         assert f"'{key}'" in source
+
+
+# ── leaded families from lead count and measurement (HANDOFF 149) ─────────
+
+def _sot_row(**extra):
+    """C6 of the recorded run (HANDOFF 149): a SOT-23 the global inventory called «SOT-223».
+
+    The detector fields are the ones photo_yolo wrote on proposal 27:
+    transistor at 0.90, not ambiguous, at the operating threshold.
+    """
+    row = {'_id': 49, 'component_id': 'C6', 'name': 'C6 (semiconductor_unknown)',
+           'class': 'semiconductor_unknown', 'kind': 'ic', '_detected_kind': 'ic',
+           'x_mm': 13.69, 'y_mm': 1.49, 'length_mm': 3.09016, 'width_mm': 2.2898,
+           'rotation_deg': 90, 'package': 'SOT-223', 'package_confidence': 'medium',
+           '_package_verified': False, 'bbox_basis': 'leads',
+           'lead_count': 3, 'lead_count_complete': True, 'lead_count_confidence': 'medium',
+           'terminal_count': 4, 'terminal_layout': '3 leads on one long side, tab opposite',
+           'terminal_count_basis': 'visible_including_tabs',
+           'pin_count': 3, 'pin_count_confidence': 'medium',
+           'pin_count_source': 'complete_lead_observation',
+           'marking': 'A15HG', 'marking_confidence': 'medium', 'class_confidence': 'low',
+           'presence_confidence': 'high', 'confidence': 'medium',
+           '_review_reason': 'Tall narrow black plastic body, SOT-223-like power device.',
+           '_yolo_class': 'transistor', '_yolo_confidence': 0.9006, '_yolo_class_ambiguous': False,
+           '_yolo_origin': 'operating_threshold', '_yolo_low_confidence': False}
+    row.update(extra)
+    return row
+
+
+def _recorded_two_terminal(**over):
+    """One of the four identical crop answers of the recorded run on C6/C7."""
+    answer = dict(bodies_in_frame=1, metal_contacts_total=2, two_end_terminals_only=True,
+                  top_translucent=False, something_visible_inside=False,
+                  coloured_patch_at_end=False, band_at_end=False, tab=False,
+                  body_shape='thick_moulded_block', printed_text='mixed', marking='A15HB',
+                  size_family='SOD-323', leads_by_side=dict(NO_LEADS))
+    answer.update(over)
+    return answer
+
+
+@pytest.mark.parametrize('envelope,leads,tab,expected', [
+    ((3.09016, 2.2898, 0.17), 3, None, 'SOT-23'),   # C6 of the recorded run
+    ((3.0, 2.4, 0.17), 3, False, 'SOT-23'),
+    ((7.0, 6.5, 0.17), 3, True, 'SOT-223'),
+    ((6.5, 7.0, 0.17), 3, None, 'SOT-223'),         # the envelope has no orientation
+    ((4.5, 4.25, 0.17), 3, True, 'SOT-89'),
+    ((4.5, 4.25, 0.17), 3, None, 'SOT-89'),         # tab not observed: the size decides
+    ((2.1, 2.0, 0.17), 3, None, 'SOT-323'),
+    ((3.1, 2.3, 0.17), 6, None, 'SOT-23-6'),
+    ((3.1, 2.3, 0.17), 5, None, 'SOT-23-5'),
+    ((3.0, 2.4, 0.17), 4, None, 'SOT-143'),
+    ((6.0, 4.9, 0.17), 8, None, 'SOIC-8'),
+    ((9.9, 6.0, 0.17), 16, False, 'SOIC-16'),
+    # A tab observed on a SOT-23 sized body: no registered 3-lead family with a
+    # tab is that small, and a wrong observation gives no name, not a wrong one.
+    ((3.09016, 2.2898, 0.17), 3, True, None),
+    ((3.1, 2.3, 0.17), 2, None, None),              # two leads are not a leaded family
+    ((3.1, 2.3, 0.17), 7, None, None),              # no family has seven leads
+    ((8.22, 6.75, 0.17), 8, None, None),            # the module: no SOIC-8 (soic_fits)
+    ((6.0, 4.9, 0.17), 8, True, None),              # a SOIC has no tab
+    ((3.1, 2.3, 0.17), 3, None, 'SOT-23'),
+    # C7 of the recorded run: 3.28 mm exceeds the SOT-23 maximum body length
+    # (JEDEC 3.04) by more than the photo tolerance. Declared limit of a
+    # rule on the registered outline: the box, not the rule, is loose.
+    ((3.27712, 2.44816, 0.17), 3, None, None),
+    (None, 3, None, None),
+])
+def test_the_leaded_family_comes_from_lead_count_and_measurement(envelope, leads, tab, expected):
+    assert crop.leaded_family_from_evidence(leads, tab, envelope) == expected
+
+
+def test_a_strict_fit_outranks_a_fit_that_needs_the_solder_allowance():
+    """The recorded C6 (3.09 x 2.29 mm, 3 leads): the solder heuristic alone leaves two families."""
+    envelope = (3.09016, 2.2898, 0.17)
+    assert crop._leaded_families(3, None, envelope, strict=False) == ['SOT-23', 'SOT-323']
+    assert crop._leaded_families(3, None, envelope, strict=True) == ['SOT-23']
+    assert crop.leaded_family_from_evidence(3, None, envelope) == 'SOT-23'
+    # Negative: with a coarse photo tolerance both families fit STRICTLY the
+    # same 2.5 x 2.5 mm box, and the ambiguity is declared, not guessed.
+    coarse = (2.5, 2.5, 0.35)
+    assert crop._leaded_families(3, None, coarse, strict=True) == ['SOT-23', 'SOT-323']
+    assert crop.leaded_family_from_evidence(3, None, coarse) is None
+    # The same box with the tolerance of the recorded photo fits no family.
+    assert crop.leaded_family_from_evidence(3, None, (2.5, 2.5, 0.17)) is None
+
+
+def test_leaded_family_fits_takes_the_registered_ranges_not_one_nominal():
+    """A SOT-23 may be 3.04 mm long (JEDEC TO-236AB): the nominal 2.9 + 0.17 rejected a real one."""
+    assert crop.leaded_family_fits('SOT-23', (3.09016, 2.2898, 0.17))
+    assert crop.leaded_family_fits('SOT-23', (3.09016, 2.2898, 0.17), strict=True)
+    assert crop.LEADED_SIZES_MM['SOT-23']['length'] == (2.80, 3.04)
+    # A body-only box (width 1.3 mm) fits too: the lower bound is the body.
+    assert crop.leaded_family_fits('SOT-23', (2.9, 1.3, 0.17))
+    # Negatives: too long, too narrow, unknown family, no envelope.
+    assert not crop.leaded_family_fits('SOT-23', (3.5, 2.4, 0.17))
+    assert not crop.leaded_family_fits('SOT-23', (2.9, 0.9, 0.17))
+    assert not crop.leaded_family_fits('SOT-999', (2.9, 2.4, 0.17))
+    assert not crop.leaded_family_fits('SOT-23', None)
+    for name, spec in crop.LEADED_SIZES_MM.items():
+        assert spec['standard'].startswith('JEDEC'), name
+        assert spec['length'][0] < spec['length'][1] and spec['span'][0] < spec['span'][1], name
+
+
+@pytest.mark.parametrize('package,envelope,expected', [
+    ('SOT-223', (3.09016, 2.2898, 0.17), True),     # the recorded defect
+    ('SOT223', (3.09016, 2.2898, 0.17), True),      # any spelling of the family
+    ('SOT-23', (7.0, 6.5, 0.17), True),
+    ('SOIC-8', (8.22, 6.75, 0.17), True),
+    ('SMA', (3.75, 1.86, 0.17), True),
+    ('SOT-223', (7.0, 6.5, 0.17), False),
+    ('SOT-223', (6.5, 7.0, 0.17), False),
+    ('SOT-23', (3.09016, 2.2898, 0.17), False),
+    ('SOIC-8', (6.0, 4.9, 0.17), False),
+    ('SOD-123F', (3.75, 1.86, 0.17), False),
+    ('SMF', (3.75, 1.86, 0.17), False),             # spelling of SOD-123F
+    ('SC-70', (3.09016, 2.2898, 0.17), False),      # unknown here: no standards equivalence
+    ('SOT-23-3', (7.0, 6.5, 0.17), False),          # unknown here
+    ('QFN-16', (3.09016, 2.2898, 0.17), False),
+    ('', (3.09016, 2.2898, 0.17), False),
+    (None, (3.09016, 2.2898, 0.17), False),
+    ('SOT-223', None, False),
+])
+def test_a_declared_package_contradicts_the_measure_only_for_a_known_family_that_cannot_fit(
+        package, envelope, expected):
+    assert crop.declared_package_contradicts_measure(package, envelope) is expected
+
+
+def test_detector_leaded_reads_the_detector_fields_or_the_copied_evidence():
+    assert crop.detector_leaded(_sot_row()) is True
+    assert crop.detector_leaded(_sot_row(_yolo_class='ic')) is True
+    nested = {key: value for key, value in _sot_row().items() if not key.startswith('_yolo')}
+    nested['_detector_evidence'] = {'class': 'transistor', 'confidence': 0.9,
+                                    'class_ambiguous': False, 'origin': 'operating_threshold',
+                                    'low_confidence': False, 'proposal_id': 'tile:1'}
+    assert crop.detector_leaded(nested) is True
+    assert crop.detector_evidence(nested)['class'] == 'transistor'
+    # Negatives: ambiguous, below the detector's threshold, a two-terminal
+    # class, no class, a box a person drew, no evidence at all.
+    assert crop.detector_leaded(_sot_row(_yolo_class_ambiguous=True)) is False
+    assert crop.detector_leaded(_sot_row(_yolo_low_confidence=True)) is False
+    assert crop.detector_leaded(_sot_row(_yolo_origin='low_confidence_review')) is False
+    assert crop.detector_leaded(_sot_row(_yolo_class='diode')) is False
+    assert crop.detector_leaded(_sot_row(_yolo_class=None)) is False
+    assert crop.detector_leaded(_sot_row(_yolo_class=None, _yolo_origin='user_added')) is False
+    assert crop.detector_leaded(nested | {'_detector_evidence': None}) is False
+    assert crop.detector_evidence({'class': 'ic'}) is None
+    assert crop.detector_leaded('not a row') is False
+
+
+def test_a_two_terminal_crop_is_outvoted_only_by_inventory_and_detector_together():
+    two = _recorded_two_terminal()
+    observation = crop.parse_observation(two)
+    envelope = (3.09016, 2.2898, 0.17)
+    outvoted = crop.derive_reading(observation, envelope, 'semiconductor_unknown', 3, 'SOT-223',
+                                   detector_leaded=True)
+    assert outvoted['outvoted'] is True and outvoted['inconclusive'] == []
+    assert outvoted['class'] == 'unknown' and outvoted['class_decided'] is False
+    assert 'outvoted=by_detector_and_inventory' in crop._summary(outvoted)
+    # The inventory count alone (class not leaded) with the detector is enough.
+    assert crop.derive_reading(observation, envelope, 'other', 3, '', detector_leaded=True)[
+        'outvoted'] is True
+    # Negatives: without the detector it is today's contradiction; the
+    # detector alone against a two-terminal inventory row is nothing; a crop
+    # that counted leads is not a two-terminal observation.
+    alone = crop.derive_reading(observation, envelope, 'semiconductor_unknown', 3, 'SOT-223')
+    assert alone['outvoted'] is False and alone['inconclusive'] == ['terminals_contradict_inventory']
+    passive = crop.derive_reading(observation, envelope, 'resistor', 2, '0805', detector_leaded=True)
+    assert passive['outvoted'] is False and passive['inconclusive'] == []
+    assert passive['class'] == 'resistor'
+    counted = crop.derive_reading(crop.parse_observation(_obs(2, 1, 0, 0)), envelope,
+                                  'semiconductor_unknown', 3, 'SOT-223', detector_leaded=True)
+    assert counted['outvoted'] is False and counted['package'] == 'SOT-23'
+    hidden = crop.derive_reading(crop.parse_observation(_recorded_two_terminal(
+        metal_contacts_total=0, two_end_terminals_only=False)), envelope,
+        'semiconductor_unknown', 3, 'SOT-223', detector_leaded=True)
+    assert hidden['outvoted'] is False and hidden['inconclusive'] == []
+
+
+def test_the_recorded_sot23_called_sot223_gets_its_family_from_count_and_measure():
+    """HANDOFF 149, C6: detector transistor 0.90 + 3 leads + 3.09 x 2.29 mm against two «two terminals»."""
+    from kicadgen.services.messages import tx
+    component = _sot_row()
+    summary, logs = _read([component], Script(_recorded_two_terminal(), _recorded_two_terminal()))
+    assert component['_crop_reading'] == 'outvoted'
+    assert summary.outvoted == 1 and summary.bodies_read == 1
+    assert summary.agreed == summary.disagreed == summary.inconclusive == 0
+    assert component['package'] == 'SOT-23' and component['_package_inventory'] == 'SOT-223'
+    assert component['package_confidence'] == 'medium'
+    assert component['package_source'] == crop.PACKAGE_SOURCE_COUNT_AND_MEASURE
+    # Nothing of the crop is adopted and the row is not demoted: class, lead
+    # count and the exact pin count of the inventory stay.
+    assert component['class'] == 'semiconductor_unknown' and component['lead_count'] == 3
+    assert component['pin_count'] == 3 and component['pin_count_source'] == 'complete_lead_observation'
+    assert component['lead_count_confidence'] == 'medium' and '_class_inventory' not in component
+    reason = component['_review_reason']
+    assert reason.startswith(tx(
+        "Package «{declared}» incompatibile con la misura {long:.2f} x {short:.2f} mm: famiglia "
+        "«{family}» derivata da {n} piedini e misura; da verificare.", declared='SOT-223',
+        long=3.09016, short=2.2898, family='SOT-23', n=3))
+    assert 'transistor' in reason and '0.90' in reason and 'piedini 3' in reason
+    assert component['_uncertain'] is True
+    assert 'Numero di terminali del ritaglio in contraddizione' not in reason
+    assert component['_crop_readings'][0].endswith('outvoted=by_detector_and_inventory')
+    assert any('crop_reading=outvoted' in line for line in logs)
+    assert any('1 in minoranza' in line for line in logs)
+    # The same row with the evidence copied by the global inventory (nested key).
+    nested = {key: value for key, value in _sot_row().items() if not key.startswith('_yolo')}
+    nested['_detector_evidence'] = {'class': 'transistor', 'confidence': 0.9006,
+                                    'class_ambiguous': False, 'origin': 'operating_threshold',
+                                    'low_confidence': False, 'proposal_id': 27}
+    _read([nested], Script(_recorded_two_terminal(), _recorded_two_terminal()))
+    assert nested['_crop_reading'] == 'outvoted' and nested['package'] == 'SOT-23'
+
+
+@pytest.mark.parametrize('twin', [
+    dict(_yolo_class_ambiguous=True),
+    dict(_yolo_low_confidence=True, _yolo_origin='low_confidence_review'),
+    dict(_yolo_class=None, _yolo_confidence=None, lead_count=None, lead_count_complete=False),
+    dict(_yolo_class='diode'),
+])
+def test_without_the_detector_the_two_terminal_crop_is_still_a_contradiction(twin):
+    """Negative twins of the recorded case: one source against one keeps today's review path."""
+    component = _sot_row(**twin)
+    summary, _ = _read([component], Script(_recorded_two_terminal(), _recorded_two_terminal()))
+    assert component['_crop_reading'] == 'inconclusive' and summary.inconclusive == 1
+    assert summary.outvoted == 0
+    assert component['package'] == 'SOT-223' and '_package_inventory' not in component
+    assert component['package_confidence'] == 'low'
+    assert component['_review_reason'].startswith('Numero di terminali del ritaglio in contraddizione')
+
+
+def test_a_true_sot223_outvoted_by_the_crop_keeps_its_name_and_only_records_the_outvote():
+    component = _sot_row(length_mm=6.5, width_mm=7.0, terminal_count=4)
+    _read([component], Script(_recorded_two_terminal(), _recorded_two_terminal()))
+    assert component['_crop_reading'] == 'outvoted'
+    assert component['package'] == 'SOT-223' and '_package_inventory' not in component
+    assert component['package_confidence'] == 'medium' and 'package_source' not in component
+    assert component['_review_reason'].startswith('Il ritaglio mostra due terminali')
+    assert 'incompatibile con la misura' not in component['_review_reason']
+
+
+def test_an_outvoted_row_whose_name_fits_no_unique_family_is_emptied_with_the_reason():
+    from kicadgen.services.messages import tx
+    # Count unknown: the name decays, no family can replace it.
+    component = _sot_row(lead_count=None, lead_count_complete=False)
+    for key in ('pin_count', 'pin_count_source', 'pin_count_confidence'):
+        component.pop(key)
+    _read([component], Script(_recorded_two_terminal(), _recorded_two_terminal()))
+    assert component['_crop_reading'] == 'outvoted'
+    assert component['package'] == '' and component['_package_inventory'] == 'SOT-223'
+    assert component['package_confidence'] == 'low'
+    assert component['package_source'] == crop.PACKAGE_SOURCE_NAME_REJECTED
+    assert component['_review_reason'].startswith(tx(
+        "Package «{declared}» incompatibile con la misura {long:.2f} x {short:.2f} mm e numero "
+        "di piedini dell'inventario sconosciuto: package lasciato vuoto, da verificare.",
+        declared='SOT-223', long=3.09016, short=2.2898))
+    # No family with that count and size (seven leads): the text lists none.
+    seven = _sot_row(lead_count=7, pin_count=7)
+    _read([seven], Script(_recorded_two_terminal(), _recorded_two_terminal()))
+    assert seven['package'] == '' and 'nessuna famiglia univoca da 7 piedini' in seven['_review_reason']
+    assert '(-)' in seven['_review_reason']
+
+
+def test_a_two_terminal_inventory_row_with_a_two_terminal_crop_is_untouched_by_the_rule():
+    """The passive path of HANDOFF 148 is unchanged, detector evidence or not."""
+    for evidence in ({}, {'_yolo_class': 'resistor', '_yolo_confidence': 0.8,
+                          '_yolo_class_ambiguous': False, '_yolo_origin': 'operating_threshold',
+                          '_yolo_low_confidence': False}):
+        component = _chip_row(**{'class': 'resistor', 'kind': 'resistor'}, package='0805',
+                              lead_count=2, **evidence)
+        before = dict(component)
+        summary, _ = _read([component], Script(_chip(), _chip()))
+        assert component['_crop_reading'] == 'agreed' and summary.outvoted == 0
+        assert component['class'] == 'resistor' and component['package'] == '0805'
+        assert 'package_source' not in component and '_package_inventory' not in component
+        assert component['package_confidence'] == before['package_confidence']
+        assert component.get('_review_reason') == before.get('_review_reason')
+
+
+def test_an_agreed_leaded_reading_without_a_family_still_lets_the_measure_reject_the_name():
+    """Three contacts counted on two sides only: no family from the crop, the inventory name decays."""
+    from kicadgen.services.messages import tx
+    partial = _obs(2, 1, None, None, metal_contacts_total=3, marking='A15HB')
+    component = _sot_row()
+    _read([component], Script(partial, dict(partial)))
+    assert component['_crop_reading'] == 'agreed'
+    assert component['package'] == 'SOT-23' and component['_package_inventory'] == 'SOT-223'
+    assert component['package_source'] == crop.PACKAGE_SOURCE_COUNT_AND_MEASURE
+    assert component['package_confidence'] == 'medium'
+    # The crop's partial count (2 + 1 + ? + ?) is adopted as before; the family
+    # came from the INVENTORY count of three, saved in _lead_count_inventory.
+    assert component['lead_count'] == 3 and component['lead_count_complete'] is False
+    assert component['_lead_count_inventory'] == 3
+    assert component['_review_reason'].startswith(tx(
+        "Package «{declared}» incompatibile con la misura {long:.2f} x {short:.2f} mm: famiglia "
+        "«{family}» derivata da {n} piedini e misura; da verificare.", declared='SOT-223',
+        long=3.09016, short=2.2898, family='SOT-23', n=3))
+    # Negatives: a name the measure allows stays; a tab the two readings agree on
+    # excludes the tab-less families; a class without a package is not touched.
+    fine = _sot_row(package='SOT-23')
+    _read([fine], Script(partial, dict(partial)))
+    assert fine['package'] == 'SOT-23' and '_package_inventory' not in fine
+    assert 'incompatibile' not in fine.get('_review_reason', '')
+    tabbed = _sot_row()
+    with_tab = dict(partial, tab=True)
+    _read([tabbed], Script(with_tab, dict(with_tab)))
+    assert tabbed['package'] == '' and 'nessuna famiglia univoca da 3 piedini' in tabbed['_review_reason']
+    module = _sot_row(**{'class': 'module', 'kind': 'module'}, package='SOT-223')
+    _read([module], Script(partial, dict(partial)))
+    assert module['package'] == 'SOT-223' and 'package_source' not in module
+
+
+def test_the_global_inventory_copies_the_detector_evidence_of_a_single_source_row():
+    """photo_global_inventory._normalize: the detector class reaches the reconciled row (HANDOFF 149)."""
+    from kicadgen.services import photo_global_inventory as inventory
+    proposal = {'_id': 27, '_yolo_class': 'transistor', '_yolo_confidence': 0.9006,
+                '_yolo_class_ambiguous': False, '_yolo_origin': 'operating_threshold',
+                '_yolo_low_confidence': False, '_yolo_proposal_id': 'tile640-347-0:7307',
+                '_yolo_review_only': False}
+    proposals = {27: proposal, 28: dict(proposal, _id=28, _yolo_class='diode')}
+
+    def row(sources):
+        return dict(component_id='C6', grouping_basis='single_body', source_candidate_ids=sources,
+                    **{'class': 'semiconductor_unknown'}, bbox=[0.793, 0.4964, 0.8465, 0.6997],
+                    bbox_basis='leads', rotation_deg=90, package='SOT-223', marking='A15HG',
+                    terminal_count=4, terminal_layout='3 leads, tab', lead_count=3,
+                    lead_count_complete=True, lead_count_confidence='medium', height_mm=None,
+                    height_source='unknown', confidence='medium', evidence='black body',
+                    presence_confidence='high', class_confidence='low', asymmetry_landmark=None)
+
+    single = inventory._normalize(row([27]), 49, 42.8, 15.2, [], proposals=proposals)
+    assert single['_detector_evidence'] == {
+        'class': 'transistor', 'confidence': 0.9006, 'class_ambiguous': False,
+        'origin': 'operating_threshold', 'low_confidence': False,
+        'proposal_id': 'tile640-347-0:7307'}
+    assert '_yolo_class' not in single and '_yolo_origin' not in single  # not a hypothesis row
+    assert crop.detector_leaded(single) is True
+    # Negatives: a merge of two proposals, no proposal, an unknown id, no map.
+    for sources in ([27, 28], [], [99]):
+        assert '_detector_evidence' not in inventory._normalize(
+            row(sources), 49, 42.8, 15.2, [], proposals=proposals), sources
+    assert '_detector_evidence' not in inventory._normalize(row([27]), 49, 42.8, 15.2, [])
+    # A proposal without a detector class (a box a person drew) gives nothing.
+    drawn = {27: {'_id': 27, '_yolo_origin': 'user_added', '_yolo_manual_box': True}}
+    assert '_detector_evidence' not in inventory._normalize(
+        row([27]), 49, 42.8, 15.2, [], proposals=drawn)

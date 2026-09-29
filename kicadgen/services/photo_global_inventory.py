@@ -385,33 +385,82 @@ LEAD_COUNT_CONFIDENCE_UNDECLARED = 'not_declared'
 _CONFIDENCE_LEVELS = ('high', 'medium', 'low')
 
 
-def _lead_observation_valid(row):
-    """Accept legacy absence, but require a well-typed coherent observation group.
+def _lead_observation_issue(row):
+    """@brief Why the lead observation group of ``row`` is not usable, or None.
 
     The DATA fields (lead_count, lead_count_complete) must be present together
     and coherent. Their qualifier lead_count_confidence may be absent or null
     (not declared, see NON_BLOCKING_QUALIFIERS); when declared it must be one of
     the enumerated levels, and a declared qualifier with no data is incoherent.
+    Legacy absence of the whole group is accepted.
+
+    @param row Raw component row of the model's response.
+    @return English reason, as data for the log and the row, or None when the
+        group is coherent.
     """
     data = NON_BLOCKING_QUALIFIERS['lead_count_confidence']
     qualifier = row.get('lead_count_confidence')
     if not any(key in row for key in data):
-        return qualifier is None
+        return None if qualifier is None else 'lead_count_confidence declared without lead data'
     if not all(key in row for key in data):
-        return False
+        return 'lead_count and lead_count_complete must be declared together'
     count = row['lead_count']
     complete = row['lead_count_complete']
-    if (count is not None and (type(count) is not int or not 0 <= count <= 512)):
-        return False
+    if count is not None and (type(count) is not int or not 0 <= count <= 512):
+        return 'lead_count is not an integer in 0..512'
     if type(complete) is not bool:
-        return False
+        return 'lead_count_complete is not a boolean'
     if qualifier is not None and qualifier not in _CONFIDENCE_LEVELS:
-        return False
+        return 'lead_count_confidence is not high/medium/low'
     if complete and count is None:
-        return False
+        return 'lead_count null but declared complete'
     # Ordinary leads are a subset of the observed lead-plus-tab surfaces.
     terminals = row.get('terminal_count')
-    return not (type(terminals) is int and count is not None and count > terminals)
+    if type(terminals) is int and count is not None and count > terminals:
+        return 'lead_count exceeds terminal_count'
+    return None
+
+
+def _lead_observation_valid(row):
+    """Accept legacy absence, but require a well-typed coherent observation group."""
+    return _lead_observation_issue(row) is None
+
+
+#: Private key set on a component row whose lead observation group was
+#: discarded by `_without_lead_observation`: the English reason. It travels
+#: through `_normalize` into the component (same key) and its review reason.
+LEAD_OBSERVATION_DISCARDED = '_lead_observation_discarded'
+
+
+def _without_lead_observation(row, known):
+    """@brief Copy of ``row`` with an incoherent lead group discarded, if that is its only fault.
+
+    HANDOFF 155: a real run answered ``lead_count: null`` with
+    ``lead_count_complete: true`` on 36 chip passives (the prompt tells the
+    model to use null where there are no ordinary leads) and the whole rows,
+    class and package included, were replaced by generic hypotheses. The lead
+    group refines the row; it must not decide it. The three lead fields become
+    «not observed» (None / False / not declared), the reason is recorded under
+    LEAD_OBSERVATION_DISCARDED, and every other check of `_component_valid`
+    must still pass on the copy: a row with a bad box, class or ID is not
+    repaired here. Nothing is inferred: null plus complete is not read as
+    «zero leads».
+
+    @param row Raw component row of the model's response.
+    @param known Detector proposal IDs the response may reference.
+    @return The repaired copy, or None when the lead group is coherent or when
+        the row has other faults.
+    """
+    if not isinstance(row, dict):
+        return None
+    reason = _lead_observation_issue(row)
+    if reason is None:
+        return None
+    repaired = dict(row, lead_count=None, lead_count_complete=False, lead_count_confidence=None)
+    if not _component_valid(repaired, known):
+        return None
+    repaired[LEAD_OBSERVATION_DISCARDED] = reason
+    return repaired
 
 
 def lead_count_confidence(row):
@@ -815,6 +864,14 @@ def _validate(data, known, boxes=None):
     for row in rows:
         if _component_valid(row, known) and counts[row['component_id']] == 1:
             valid.append(row)
+            continue
+        repaired = _without_lead_observation(row, known)
+        if repaired is not None and counts[repaired['component_id']] == 1:
+            # Only the lead group was incoherent: the row stays, without it
+            # (HANDOFF 155). A note on the row, not an _Issue: the response
+            # is still cached and no second paid request follows, as for the
+            # OPTIONAL_REFINEMENTS.
+            valid.append(repaired)
         else:
             errors.append(_Issue('invalid or duplicate component',
                                  component=row.get('component_id') if isinstance(row, dict) else None))
@@ -1254,9 +1311,43 @@ def _measured_geometry(row, measured, length, width):
                 width_mm=short_side, rotation_deg=rotation % 180, _box=list(box))
 
 
-def _normalize(row, identity, length, width, issues, manual_ids=frozenset(), measured=None):
+#: Detector fields copied into `_detector_evidence` of a row that stands on
+#: exactly one proposal (see _normalize): the class, its confidence, the
+#: ambiguity flag and the threshold provenance, as photo_yolo writes them.
+_DETECTOR_EVIDENCE_KEYS = {'_yolo_class': 'class', '_yolo_confidence': 'confidence',
+                           '_yolo_class_ambiguous': 'class_ambiguous', '_yolo_origin': 'origin',
+                           '_yolo_low_confidence': 'low_confidence',
+                           '_yolo_proposal_id': 'proposal_id'}
+
+
+def _detector_evidence(row, proposals):
+    """Detector evidence of the single proposal this row stands on, or None.
+
+    Only a row built from exactly ONE source proposal inherits it (the same
+    structural condition as _measured_geometry): a merge of several
+    proposals has no single detector class. It is stored under its own key,
+    not as the row's `_yolo_*` fields, because those mark a detector
+    HYPOTHESIS (kicad_models._is_yolo_only_hypothesis, the low-confidence
+    gates of the 3D matching) and a reconciled row is not one.
+    """
+    sources = row.get('source_candidate_ids') or []
+    if len(sources) != 1 or sources[0] not in proposals:
+        return None
+    proposal = proposals[sources[0]]
+    if not isinstance(proposal, dict) or '_yolo_class' not in proposal:
+        return None
+    return {field: proposal.get(key) for key, field in _DETECTOR_EVIDENCE_KEYS.items()}
+
+
+def _normalize(row, identity, length, width, issues, manual_ids=frozenset(), measured=None,
+               proposals=None):
     """@brief Convert AI observations without modifying the raw audit response.
     @param issues Errori di validazione che riguardano QUESTA riga, non l'inventario.
+    @param proposals Proposte del rilevatore per `_id`: una riga che poggia su
+        UNA sola proposta ne riceve classe, confidenza e provenienza di
+        soglia in `_detector_evidence` (HANDOFF 149): senza, l'evidenza del
+        rilevatore locale («transistor 0.90») non arrivava mai alla lettura
+        per ritaglio ne' alla revisione. None: nessuna evidenza copiata.
     @param manual_ids ID dei candidati che una persona ha tracciato o ritoccato
         (`_yolo_manual_box`). Se questa riga ne assorbe almeno uno, la
         marcatura passa al componente finale: senza, la mano dell'utente si
@@ -1345,8 +1436,18 @@ def _normalize(row, identity, length, width, issues, manual_ids=frozenset(), mea
         component_id=row['component_id'], source_candidate_ids=list(row['source_candidate_ids']),
         _source='AI global inventory', _geometry_source='global photographic envelope; not nominal package',
         _review_reason=row['evidence'], _global_inventory_errors=list(issues))
+    discarded = row.get(LEAD_OBSERVATION_DISCARDED)
+    if isinstance(discarded, str) and discarded:
+        # The repair is visible on the row: whoever reviews it knows the lead
+        # data of the response was not used, and why.
+        result[LEAD_OBSERVATION_DISCARDED] = discarded
+        result['_review_reason'] = ('Lead observation of the response discarded (' + discarded
+                                    + '); class, package and marking kept. | ' + row['evidence'])
     if any(source in manual_ids for source in row['source_candidate_ids']):
         result['_yolo_manual_box'] = True
+    evidence = _detector_evidence(row, proposals or {})
+    if evidence is not None:
+        result['_detector_evidence'] = evidence
     if body is not None:
         result['_edges_measured'] = True
         result['_geometry_source'] = ('photo edge measurement of the single source proposal '
@@ -1657,6 +1758,17 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     # rettangolo giusto consegnato in pixel non e' una risposta sbagliata.
     checked, box_scale, scale_issue = _in_contract_units(data, w, h, log, boxes)
     rows, safe, errors = _validate(checked, known, boxes)
+    repaired_reasons = Counter(r[LEAD_OBSERVATION_DISCARDED] for r in rows
+                               if isinstance(r, dict) and r.get(LEAD_OBSERVATION_DISCARDED))
+    if repaired_reasons:
+        # Rows kept without their lead data (HANDOFF 155): said once, with the
+        # count and the reasons, so the log tells what the response did wrong
+        # without hiding the classes it got right.
+        log(tx("Inventario globale: {count} righe con osservazione dei piedini incoerente "
+               "({reasons}): piedini registrati come non osservati; classe, package e sigla "
+               "tenuti. Nessuna nuova richiesta a pagamento.",
+               count=sum(repaired_reasons.values()),
+               reasons='; '.join(f'{reason} x{n}' for reason, n in repaired_reasons.most_common())))
     if scale_issue is not None:
         # Boxes left in an undecided unit: the response is not cached as good
         # and the rows it invalidated are reported, never silently guessed.
@@ -1736,8 +1848,10 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     next_id = max(known | {c.get('_id') for c in withheld if type(c.get('_id')) is int},
                   default=0)+1
     manual_ids = frozenset(c['_id'] for c in components if c.get('_yolo_manual_box') is True)
+    proposals = {c['_id']: c for c in components if type(c.get('_id')) is int}
     result = [_normalize(r, next_id+i, length, width,
-                         own(r['component_id'], r['source_candidate_ids']), manual_ids, measured)
+                         own(r['component_id'], r['source_candidate_ids']), manual_ids, measured,
+                         proposals)
               for i, r in enumerate(rows)]
     for body in result:
         if body['component_id'] in ai_only_excluded:
