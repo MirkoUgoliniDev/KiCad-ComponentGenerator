@@ -68,7 +68,6 @@ def test_cancel_changes_nothing_and_apply_writes_the_stored_data(window, monkeyp
     """@brief Funziona senza foto: i dati stanno nella struttura della finestra."""
     window._photo_png = None
     window._set_photo_components([_body()])
-    assert not window.btn_edit_components_3d.isHidden()
 
     def cancel(self):
         self.table.cellWidget(0, 0).setText("CAMBIATO")
@@ -87,9 +86,25 @@ def test_cancel_changes_nothing_and_apply_writes_the_stored_data(window, monkeyp
     assert window._components_from_table()[0].name == "U1-corretto"
 
 
-def test_the_editor_is_offered_only_with_bodies(window):  # noqa: F811
+def test_the_editor_has_no_toolbar_button_and_opens_with_ctrl_e(window, monkeypatch):  # noqa: F811
+    """@brief HANDOFF 152 (user: «togli icona»): no button, Ctrl+E only with bodies.
+
+    Positive: with bodies the shortcut opens the editor. Negative: without
+    bodies it opens nothing, the condition the removed button used to carry.
+    """
+    from PyQt6.QtWidgets import QToolButton
+    assert not hasattr(window, "btn_edit_components_3d")
+    toolbar = window.btn_format_painter_3d.parentWidget()
+    assert not any(button.toolTip().startswith("Modifica componenti")
+                   for button in toolbar.findChildren(QToolButton))
+    opened = []
+    monkeypatch.setattr(ComponentEditorDialog, "exec", lambda self: opened.append(self) or 0)
     window._set_photo_components([])
-    assert window.btn_edit_components_3d.isHidden()
+    window._shortcut_edit_components()
+    assert opened == []
+    window._set_photo_components([_body()])
+    window._shortcut_edit_components()
+    assert len(opened) == 1
 
 
 def test_a_new_rotation_forgets_the_model_choice_like_the_old_table():

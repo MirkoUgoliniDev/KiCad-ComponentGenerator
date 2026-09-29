@@ -714,18 +714,20 @@ class ExtractWorker(QThread):
         self._review_result = kept
         self._review_answered.set()
 
-    def _forward_phase(self, tool: str, detail: str = "") -> None:
+    def _forward_phase(self, tool: str, detail: str = "", done: int = 0, total: int = 0) -> None:
         """@brief Porta in modale lo strumento che il servizio dichiara al lavoro.
 
         @param tool Chiave in analysis_overlay.TOOLS, es. yolo o llm.
         @param detail Testo libero: l'etichetta del rilevatore o il modello.
-        @note Contratto del servizio: `phase(tool, detail)`. Senza conteggio
-            (0, 0) la modale resta animata invece di mostrare una percentuale
-            inventata. Serve soprattutto al rilevatore locale ONNX, che prima
+        @param done Elementi fatti della fase (HANDOFF 156: corpi letti).
+        @param total Elementi previsti; 0 = nessun conteggio.
+        @note Contratto del servizio: `phase(tool, detail, done=0, total=0)`.
+            Senza conteggio (0, 0) la modale resta animata invece di mostrare
+            una percentuale inventata. Serve soprattutto al rilevatore locale ONNX, che prima
             girava senza che nulla lo annunciasse: chi guardava vedeva la nuvola
             del modello a pagamento anche mentre non si spendeva niente.
         """
-        self.phase.emit(str(tool or ""), str(detail or ""), 0, 0)
+        self.phase.emit(str(tool or ""), str(detail or ""), int(done or 0), int(total or 0))
 
     def run(self) -> None:
         """@brief Forward the captured settings and emit extracted data or an error."""
@@ -898,7 +900,7 @@ class ReconcileWorker(QThread):
         # Come ExtractWorker.cancel_event: alzato da «Interrompi».
         self.cancel_event = threading.Event()
 
-    def _forward_phase(self, tool: str, detail: str = "") -> None:
+    def _forward_phase(self, tool: str, detail: str = "", done: int = 0, total: int = 0) -> None:
         """@brief Inoltra alla modale la fase dichiarata dal servizio.
 
         @param tool Chiave in analysis_overlay.TOOLS.
@@ -907,7 +909,7 @@ class ReconcileWorker(QThread):
             `phase(tool, detail)`, cosi' il rilancio annuncia le sue fasi
             esattamente come l'estrazione completa.
         """
-        self.phase.emit(str(tool or ""), str(detail or ""), 0, 0)
+        self.phase.emit(str(tool or ""), str(detail or ""), int(done or 0), int(total or 0))
 
     def _raise_if_cancelled(self) -> None:
         """Checker for make_logged_call: stop before a paid call once «Interrompi» was pressed."""

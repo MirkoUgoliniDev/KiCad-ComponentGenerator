@@ -987,9 +987,12 @@ def test_extract_inventory_reads_every_retained_body_after_the_global_inventory(
     [row] = report.components
     assert row['package'] == 'SOIC-8' and row['_crop_reading'] == 'agreed'
     tools = [tool for tool, _ in phases]
-    start = tools.index('llm')
-    assert tools[start - 1] == 'llm_inventory' and tools[start + 1] == 'llm_inventory'
-    assert phases[start][1] == 'lettura dei singoli componenti'
+    # HANDOFF 156: the crop reading has its own phase, named after its model,
+    # and the local colour sampling that follows is no longer a «Modello AI».
+    start = tools.index('llm_crops')
+    assert tools[start - 1] == 'llm_inventory'
+    assert phases[start][1] == DEEPSEEK
+    assert tools[max(i for i, t in enumerate(tools) if t == 'llm_crops') + 1] == 'opencv'
 
 
 def test_extract_inventory_lets_a_cancellation_through(monkeypatch, tmp_path):
@@ -1257,7 +1260,8 @@ def test_the_relaunch_reads_every_retained_body_with_the_profile_prompt():
     [row] = report.components
     assert row['package'] == 'SOIC-8' and row['_crop_reading'] == 'agreed'
     tools = [tool for tool, _ in phases]
-    assert tools[tools.index('llm') + 1] == 'llm_inventory'
+    assert 'llm_crops' in tools
+    assert tools[max(i for i, t in enumerate(tools) if t == 'llm_crops') + 1] == 'opencv'
 
 
 def test_the_relaunch_shares_the_tail_of_extract_inventory(monkeypatch, tmp_path):
@@ -1299,12 +1303,13 @@ def test_the_relaunch_reads_the_crops_with_the_profile_model_and_the_inventory_w
     assert row['package'] == 'SOIC-8' and row['_crop_reading'] == 'agreed'
     named = [line for line in logs
              if str(line).startswith('Lettura dei singoli componenti affidata al modello')]
-    [(tool, detail)] = [(t, d) for t, d in phases if t == 'llm']
+    details = [d for t, d in phases if t == 'llm_crops']
+    # First the bare model, then «model · N richieste» body after body (156).
+    assert details[0] == expected and all(d.startswith(expected) for d in details)
     if expected == DEEPSEEK:
-        assert named == [] and detail == 'lettura dei singoli componenti'
+        assert named == []
     else:
         assert len(named) == 1 and expected in named[0] and DEEPSEEK in named[0]
-        assert detail == f'lettura dei singoli componenti con {expected}'
 
 
 def test_the_relaunch_keeps_rows_and_warns_when_the_provider_fails():

@@ -215,6 +215,18 @@ def _spaced_label(label, vertices):
     return point
 
 
+#: Colours of the «copia formato» outlines (HANDOFF 158): the body whose
+#: format was copied, and the bodies it was pasted on. The bodies keep their
+#: own colours: a wire box around them says which is which without hiding
+#: the colour the format carries.
+FORMAT_SOURCE_COLOR = "#f9e2af"
+FORMAT_TARGET_COLOR = "#a6e3a1"
+#: Gap between a body and its outline, as a fraction of its largest extent,
+#: with a floor so a tiny chip still shows a box and not a smear.
+FORMAT_OUTLINE_GAP = 0.06
+FORMAT_OUTLINE_MIN_GAP_MM = 0.2
+
+
 class Preview3DVtk(QtInteractor):
     """@brief Interactive 3D view: the real generated mesh or the parametric approximation."""
 
@@ -249,6 +261,11 @@ class Preview3DVtk(QtInteractor):
         @param parent Optional Qt parent widget.
         """
         self._component_actors = {}
+        #: Actors of every part of a component, by table row: the reverse of
+        #: `_component_actors`, for the «copia formato» outlines (HANDOFF 158).
+        self._row_actors = {}
+        #: Outline actors of the «copia formato» mode now on screen.
+        self._format_outlines = []
         self._right_press = None
         #: Modalita' «copia formato» (utente, 2026-09-27): un clic sinistro fermo
         #: su un componente emette `component_clicked`; spenta, il clic resta
@@ -729,10 +746,76 @@ class Preview3DVtk(QtInteractor):
             showing the same file again does not re-read it.
         """
         self._component_actors.clear()
+        self._row_actors = {}
+        # The outline actors go with every other actor of the old mesh.
+        self._format_outlines = []
         self._shown_mesh_key = None
         self._mesh_anchors = ()
         self.stop_camera_animation()
         super().clear()
+
+    # -- «Copia formato»: which body was copied, which ones were pasted -----
+
+    def highlight_format_rows(self, source_row, target_rows=()) -> int:
+        """@brief Outline the copied body in yellow and the pasted ones in green.
+
+        @param source_row Table row of the body whose format was copied, or
+            None for none.
+        @param target_rows Table rows the format was pasted on, in order.
+        @return Number of outlines drawn; a row with no actor on screen (not
+            in this mesh) draws nothing and is not an error.
+        @note Replaces the outlines of the previous call: the set on screen is
+            always exactly the current source and targets. Bodies keep their
+            colours; the outline is a wire box slightly larger than the body
+            (FORMAT_OUTLINE_GAP), so it reads around any colour, the magenta
+            of a generic box included.
+        """
+        import pyvista as pv
+        self.clear_format_outlines(render=False)
+        wanted = [(source_row, FORMAT_SOURCE_COLOR)] if source_row is not None else []
+        wanted += [(row, FORMAT_TARGET_COLOR) for row in target_rows]
+        drawn = 0
+        for row, color in wanted:
+            bounds = self._row_bounds(row)
+            if bounds is None:
+                continue
+            x0, x1, y0, y1, z0, z1 = bounds
+            gap = max(FORMAT_OUTLINE_MIN_GAP_MM,
+                      FORMAT_OUTLINE_GAP * max(x1 - x0, y1 - y0, z1 - z0))
+            box = pv.Box((x0 - gap, x1 + gap, y0 - gap, y1 + gap, z0 - gap, z1 + gap)).outline()
+            actor = self.add_mesh(box, color=color, line_width=3, reset_camera=False,
+                                  render=False, pickable=False)
+            self._format_outlines.append(actor)
+            drawn += 1
+        self.render()
+        return drawn
+
+    def clear_format_outlines(self, render=True) -> None:
+        """@brief Remove every «copia formato» outline; the bodies are untouched.
+
+        @param render Repaint now; False when the caller repaints itself.
+        """
+        for actor in getattr(self, "_format_outlines", None) or []:
+            self.remove_actor(actor, render=False)
+        self._format_outlines = []
+        if render:
+            self.render()
+
+    def _row_bounds(self, row):
+        """World bounds (x0, x1, y0, y1, z0, z1) of every part of ``row``, or None."""
+        actors = (getattr(self, "_row_actors", None) or {}).get(row) or []
+        merged = None
+        for actor in actors:
+            bounds = actor.GetBounds()
+            if bounds is None or len(bounds) != 6:
+                continue
+            if merged is None:
+                merged = list(bounds)
+            else:
+                for axis in range(3):
+                    merged[2 * axis] = min(merged[2 * axis], bounds[2 * axis])
+                    merged[2 * axis + 1] = max(merged[2 * axis + 1], bounds[2 * axis + 1])
+        return tuple(merged) if merged else None
 
     def set_pin_numbers(self, enabled: bool) -> None:
         """@brief Enable or disable the pin number labels (still shown only from the pin side).
@@ -1003,6 +1086,12 @@ class Preview3DVtk(QtInteractor):
                 )
                 if part.row is not None:
                     self._component_actors[actor.GetAddressAsString('')] = part.row
+                    # Tolerant of a view built without __init__ (the picking
+                    # tests): the map is created on first use.
+                    row_actors = getattr(self, "_row_actors", None)
+                    if row_actors is None:
+                        row_actors = self._row_actors = {}
+                    row_actors.setdefault(part.row, []).append(actor)
             self._mesh_anchors = scene.anchors
             self._add_pin_labels(list(scene.anchors))
             self._finish()

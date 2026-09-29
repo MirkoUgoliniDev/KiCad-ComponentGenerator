@@ -586,7 +586,7 @@ def test_raw_photo_opens_with_current_table_dimensions_and_cancel_is_unchanged(w
 
     def inspect(dialog):
         assert isinstance(dialog, gui.PhotoReviewDialog)
-        assert "raw-top.png" in dialog.windowTitle()
+        assert dialog.windowTitle() == "Revisione AI"  # HANDOFF 153: nessun nome di file
         assert dialog.photo_transform.body_length_mm == 50
         assert dialog.photo_transform.body_width_mm == 20
         assert dialog.get_components() == before

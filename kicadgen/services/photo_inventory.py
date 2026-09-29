@@ -9,6 +9,7 @@ i componenti grandi che nei dettagli attraversano i confini dei crop.
 from __future__ import annotations
 
 import base64
+import inspect
 import json
 import math
 import re
@@ -988,16 +989,41 @@ def _phase_announcer(phase, log):
     @return Callable(tool, detail): a no-op when `phase` is None; otherwise it
         forwards the call and logs, never raises, an exception of the callback.
     """
-    def announce(tool, detail):
-        """Announcing the phase is informative, never part of the result."""
+    accepts_counts = _accepts_counts(phase)
+
+    def announce(tool, detail, done=0, total=0):
+        """Announcing the phase is informative, never part of the result.
+
+        A count (done, total) reaches the callback only when it declares the
+        two extra parameters (HANDOFF 156): the GUI workers do, a two-argument
+        callback of the old contract keeps receiving (tool, detail).
+        """
         if phase is None:
             return
         try:
-            phase(tool, detail)
+            if accepts_counts:
+                phase(tool, detail, done, total)
+            else:
+                phase(tool, detail)
         except Exception as exc:  # noqa: BLE001 - la GUI non deve poter abortire l'estrazione
             log(tx("Segnalazione della fase non riuscita ({exc}); elaborazione proseguita.",
                    exc=exc))
     return announce
+
+
+def _accepts_counts(phase):
+    """Whether ``phase`` takes (tool, detail, done, total), not just (tool, detail)."""
+    if phase is None:
+        return False
+    try:
+        params = list(inspect.signature(phase).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    if any(param.kind is param.VAR_POSITIONAL for param in params):
+        return True
+    positional = [param for param in params
+                  if param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD)]
+    return len(positional) >= 4
 
 
 def read_retained_bodies(photo, report, length, width, model, call, log, cache_dir,
@@ -1028,8 +1054,9 @@ def read_retained_bodies(photo, report, length, width, model, call, log, cache_d
         the same position, so the two routes cannot drift again (HANDOFF 146
         V2: the relaunch used to skip the crop reading). Order: the crop
         reading (photo_crop_reading.read_bodies, only when there are rows,
-        announced as phase 'llm' and followed by 'llm_inventory' again), then
-        sample_body_colors, then photo_markings.read_markings -- colours and
+        announced as phase 'llm_crops' with the crop model as detail and a
+        per-body count), then sample_body_colors (announced as 'opencv'),
+        then photo_markings.read_markings ('llm_markings') -- colours and
         markings read the class the crop reading may have corrected.
     @throws CallCancelled (or subclass) when the user cancels a paid call.
     """
@@ -1045,18 +1072,25 @@ def read_retained_bodies(photo, report, length, width, model, call, log, cache_d
             log(tx("Lettura dei singoli componenti affidata al modello {model} (Modello "
                    "lettura ritagli del profilo) invece del modello della foto {photo_model}: "
                    "il costo va al suo fornitore.", model=reader, photo_model=model))
-            announce('llm', tx("lettura dei singoli componenti con {model}", model=reader))
-        else:
-            announce('llm', tx("lettura dei singoli componenti"))
+        # Fase con il suo nome (HANDOFF 156): il dettaglio e' il modello che
+        # legge i ritagli e, corpo dopo corpo, le richieste pagate finora; il
+        # conteggio (corpi letti, corpi da leggere) va alla barra e alla riga
+        # della fase.
+        announce('llm_crops', reader)
+
+        def progress(done, total, calls):
+            announce('llm_crops', tx("{model} · {calls} richieste", model=reader, calls=calls),
+                     done, total)
         summary = read_bodies(photo, report.components, length, width, reader, call, log,
-                              cache_dir, system_prompt=crop_prompt)
+                              cache_dir, system_prompt=crop_prompt, progress=progress)
         if summary.warning:
             # Gia' registrato nel log da read_bodies come avviso: qui entra
             # solo fra gli avvisi del risultato, che la revisione mostra.
             report.warnings.append(summary.warning)
-        # Torna la fase di prima: cio' che segue lavora ancora sulla foto
-        # della scheda (colori, poi lettura delle sigle).
-        announce('llm_inventory', model)
+        # Cio' che segue e' locale (pixel del ritaglio): annunciarlo come
+        # «Modello AI» metteva in elenco una seconda fase a pagamento
+        # fittizia. Solo con dei corpi: senza lavoro, nessuna fase.
+        announce('opencv', tx("campionamento dei colori dalla foto"))
     # Il colore si misura QUI e non prima: la riconciliazione fonde e
     # sposta i riquadri, e un colore campionato sulle proposte grezze
     # descriverebbe un rettangolo che non esiste piu'. Il rilevatore e il
@@ -1133,8 +1167,9 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         local phase once the inventory is built. With 'yolo' and 'vlm', when the
         inventory has bodies, the per-body crop reading
         (photo_crop_reading.read_bodies) follows the reconciliation, announced
-        as phase('llm', «lettura dei singoli componenti») and followed by
-        phase('llm_inventory', <model identifier>) again.
+        as phase('llm_crops', <crop model>, done, total) body by body, then
+        phase('opencv', ...) for the colour sampling and phase('llm_markings',
+        <model identifier>) for the marking reading (HANDOFF 156).
         None (the default) is a no-op, and an exception raised by
         the callback is logged and swallowed, exactly like for `progress`: the
         notification is informative and must never abort a paid extraction.
@@ -1849,10 +1884,11 @@ def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
         factory default.
     @param crop_model Model of that crop reading (profile field 'crop_model'),
         as in extract_inventory; None or blank reads the crops with `model`.
-    @param phase Optional callable(tool, detail) announcing the working tool,
-        with extract_inventory's contract (the crop reading as 'llm', then
-        'llm_inventory'; the marking reading as 'llm_markings'); an exception
-        of the callback is logged and swallowed.
+    @param phase Optional callable(tool, detail[, done, total]) announcing the
+        working tool, with extract_inventory's contract (the crop reading as
+        'llm_crops' with a per-body count, then 'opencv' for the colours and
+        'llm_markings' for the marking reading); an exception of the callback
+        is logged and swallowed.
     @return An InventoryResult shaped like the one extract_inventory returns
         on the detector path: components, overlay, photo PNG, calibration.
     @throws ValueError When the photograph cannot be decoded, the extents are

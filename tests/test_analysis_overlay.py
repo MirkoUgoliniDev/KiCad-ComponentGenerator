@@ -906,8 +906,11 @@ def test_local_tools_send_nothing_and_show_only_the_ring(overlay, tool):
 
 def test_every_transfer_phase_is_a_known_remote_tool():
     """Contratto: una sorgente di trasferimento esiste solo per chiamate remote."""
+    from kicadgen.gui.analysis_overlay import REMOTE_GLYPHS
     for key in TRANSFER_SOURCES:
-        assert TOOLS[TOOL_ALIASES.get(key, key)][2] == "cloud"
+        assert TOOLS[TOOL_ALIASES.get(key, key)][2] in REMOTE_GLYPHS
+    # And the other way round: every remote glyph belongs to a paid phase.
+    assert {glyph for _, _, glyph in TOOLS.values() if glyph in REMOTE_GLYPHS} == set(REMOTE_GLYPHS)
 
 
 def test_the_two_sources_draw_different_pictures(overlay):

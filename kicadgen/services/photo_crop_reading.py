@@ -1501,7 +1501,7 @@ def _choose_marking(component, first, second):
 
 
 def read_bodies(photo, components, length_mm, width_mm, model, call, log, cache_dir=None,
-                system_prompt=None):
+                system_prompt=None, progress=None):
     """@brief Observe every retained body twice from its enlarged crop and adopt agreeing derivations.
 
     @param photo Calibrated BGR photograph of the board.
@@ -1523,6 +1523,9 @@ def read_bodies(photo, components, length_mm, width_mm, model, call, log, cache_
     @param system_prompt Instructions of the reading: the profile field
         'crop_prompt'. None or a blank text sends the factory default
         SYSTEM_PROMPT (see effective_prompt).
+    @param progress Optional callable(done, total, calls) told after every
+        eligible body: bodies attempted so far, bodies to attempt, paid calls
+        so far (HANDOFF 156). Never part of the result.
     @return CropReadingSummary.
     @throws CallCancelled (or subclass) when the user cancels: never caught.
     @note Bodies excluded by default (`_ai_only_excluded`) are not read.
@@ -1600,6 +1603,14 @@ def read_bodies(photo, components, length_mm, width_mm, model, call, log, cache_
     from .photo_grounding import model_image_limits
     from .photo_inventory import image_block
     summary = CropReadingSummary()
+    # Avanzamento per corpo (HANDOFF 156): i corpi leggibili contati una volta
+    # all'inizio, cosi' il totale non cambia mentre la barra avanza.
+    eligible_total = sum(1 for component in components if _eligible(component))
+    eligible_done = 0
+
+    def report_progress():
+        if progress is not None:
+            progress(eligible_done, eligible_total, summary.calls)
     limits = model_image_limits(model)
     long_side = min(CROP_LONG_SIDE_PX, limits.long_side_px)
     directory = Path(cache_dir)/'crop-reading' if cache_dir else None
@@ -1617,14 +1628,17 @@ def read_bodies(photo, components, length_mm, width_mm, model, call, log, cache_
         if not _eligible(component):
             summary.skipped += 1
             continue
+        eligible_done += 1
         prepared = body_crop(photo, component, length_mm, width_mm, long_side)
         if prepared is None:
             summary.skipped += 1
+            report_progress()
             continue
         image, envelope_text = prepared
         ok, encoded = cv2.imencode('.png', image)
         if not ok:
             summary.skipped += 1
+            report_progress()
             continue
         png = encoded.tobytes()
         envelope = _envelope(component, photo, length_mm, width_mm)
@@ -1779,6 +1793,7 @@ def read_bodies(photo, components, length_mm, width_mm, model, call, log, cache_
         audit.append(dict(id=component.get('_id'), name=name, status=status, reasons=reasons,
                           observations=component['_crop_observations'],
                           readings=[first, second]))
+        report_progress()
     if audit:
         write_stage_audit(cache_dir, 'crop-reading', dict(
             version=PROMPT_VERSION, model=model, prompt=instructions, prompt_digest=digest,

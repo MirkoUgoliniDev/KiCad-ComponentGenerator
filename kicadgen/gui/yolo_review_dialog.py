@@ -816,7 +816,9 @@ class YoloReviewDialog(QDialog):
         # Traduzione dei testi dalla finestra che la apre, come la revisione
         # fotografica: una finestra aperta da sola resta in italiano.
         self.i18n = getattr(parent, "i18n", None)
-        self.setWindowTitle(self._tr("Corpi rilevati: togli quelli che non sono componenti"))
+        # Titolo voluto dall'utente (2026-09-29, HANDOFF 153): dice CHI ha
+        # classificato, non cosa fare; l'istruzione sta nel popup «i».
+        self.setWindowTitle(self._tr("Classificazione YOLO"))
         self.setModal(True)
         self.length_mm, self.width_mm = float(length_mm), float(width_mm)
         self.classes = list(classes)

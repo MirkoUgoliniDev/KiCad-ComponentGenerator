@@ -239,9 +239,9 @@ del 3D sono gratuiti.</div>
 
 <h2 id="revisione">7. Rivedere i corpi trovati sulla foto</h2>
 <p>Solo per le due tipologie <span class="ui">Scheda con componenti</span>.</p>
-<h3>Corpi rilevati</h3>
+<h3>Classificazione YOLO</h3>
 <p>Con il rilevatore YOLO, prima della verifica a pagamento si apre la finestra
-<span class="ui">Corpi rilevati: togli quelli che non sono componenti</span>. Togli i
+<span class="ui">Classificazione YOLO</span>, con i corpi rilevati. Togli i
 riquadri che cadono su scritte, fori o piazzole vuote, aggiungi quelli mancanti,
 poi <span class="ui">OK</span>. Annullando, l'analisi si ferma senza pagare la
 verifica.</p>
@@ -252,7 +252,7 @@ revisione è gratuita. Rispondendo <span class="ui">No</span> si prosegue con i 
 come li ha proposti l'AI. La pausa si attiva o si disattiva da
 <span class="ui">Configurazione → Opzioni di generazione...</span>
 (<span class="ui">Fermati dopo l'inventario AI per rivedere i corpi</span>).</p>
-<h3>Revisione componenti da foto</h3>
+<h3>Revisione AI</h3>
 <p>La finestra mostra la foto con un rettangolo per ogni corpo:</p>
 <ul>
   <li><span class="ui">Aggiungi componente</span> (<kbd>R</kbd>): traccia un
@@ -264,6 +264,15 @@ come li ha proposti l'AI. La pausa si attiva o si disattiva da
   <li><span class="ui">Parametri…</span>: quote, rotazione, altezza e nome del
   componente scelto. <span class="ui">Scegli modello KiCad…</span> (anche con doppio
   clic nella lista): vedi il <a href="#step">capitolo 10</a>.</li>
+  <li>Scelto un corpo nell'elenco o sulla foto, <span class="ui">Parametri…</span>
+  mostra nome, tipo e marcatura, modificabili, e sotto cosa ha letto
+  l'AI per quel corpo: tipo, package e sigla con le loro confidenze, l'esito
+  delle due letture del ritaglio e lo stato del modello KiCad. Centro, lati e
+  rotazione si correggono trascinando il rettangolo sulla foto; l'altezza e
+  ogni altra quota in <span class="ui">Modifica componenti…</span> (<kbd>Ctrl+E</kbd>). Nessuna richiesta AI. Il
+  marcatore <code>[!]</code> dice solo che la riga ha almeno un avviso (di
+  solito «modello KiCad non confermato»), <code>[?]</code> che il tipo non è
+  stato stabilito.</li>
   <li><span class="ui">Applica correzioni</span> salva; <span class="ui">Annulla</span>
   lascia tutto com'era.</li>
 </ul>
@@ -306,7 +315,9 @@ standard. Nella barra in alto:</p>
   datasheet: è un controllo pratico della specchiatura.</li>
   <li><strong>Tabella pinout</strong>, <strong>Inquadra</strong>, e l'apertura della
   cartella <code>3dshapes</code> con i file STEP.</li>
-  <li><span class="ui">Modifica componenti…</span>: nome, tipo, posizione, quote,
+  <li><span class="ui">Modifica componenti…</span> (con <kbd>Ctrl+E</kbd>, oppure
+  tasto destro sul corpo nella vista 3D e <span class="ui">Modifica componente...</span>;
+  non ha più un'icona nella barra): nome, tipo, posizione, quote,
   rotazione, colore e marcatura di ogni corpo, a mano. Funziona anche senza la foto.
   Dopo <span class="ui">Applica</span> il modello 3D si rigenera con FreeCAD.
   Nessuna richiesta AI.</li>
