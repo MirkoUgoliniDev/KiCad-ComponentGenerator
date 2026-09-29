@@ -1,9 +1,9 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
 - **DA DOVE RIPRENDERE (29/09 mattina).** Branch `FIX`. Punti 147-148
-  committati su `FIX` (commit successivo a `87c60e0`, hash in git log), NON
-  pushati e NON uniti in main (istruzione dell'utente del 28/09: «non mergiare
-  in main»). Suite in due meta' al commit: 6093 passati, 6 saltati, 2 xfail, 0
+  committati su `FIX` (`77082c8`), pushati e uniti in `main` (utente 29/09
+  mattina: «committa, pusha, poi mergia in main e ritorna qui»; hash del merge
+  in git log). Suite in due meta' al commit: 6093 passati, 6 saltati, 2 xfail, 0
   falliti, uscita 0. Dettagli: punti 147-148 in fondo al file.
   - COSA C'E' DI NUOVO (carta bianca della notte, richiesta dell'utente: «una
     soluzione che risolva il problema» del riconoscimento dei ritagli): la
