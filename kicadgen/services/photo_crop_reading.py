@@ -45,6 +45,14 @@ inventory and the crop goes to review, never adopted. So:
 - on disagreement, inconclusive answers or a failed reading the global row
   stays as it was but is marked for review (`_crop_reading`, package and
   lead counts demoted to low confidence, `_review_reason`);
+- the local detector's class is a THIRD source (HANDOFF 149): when it saw a
+  leaded package (detector_leaded) and the inventory agrees (leaded class or
+  three or more leads), two crop readings of «two terminals» are the
+  minority and do not block the row ('outvoted'); a declared package name
+  that the measured envelope excludes (a SOT-223 on a 3.1 x 2.3 mm body)
+  decays to the family the lead count and the registered outlines allow
+  (LEADED_SIZES_MM, leaded_family_from_evidence), always with a review
+  reason;
 - every paid call goes through the caller's `call`, so costs and the AI log
   are recorded exactly like the other calls; a cancellation (CallCancelled)
   always propagates;
@@ -513,6 +521,201 @@ def soic_fits(leads_per_row, envelope):
     return False
 
 
+#: Small leaded semiconductor package families, name -> dict(leads, tab,
+#: length, width, span, standard): STANDARD outline ranges (min, max) in mm
+#: from the JEDEC registered outlines named in `standard` (HANDOFF 149), not a
+#: measurement of any board. `length` is the body along the lead rows (no
+#: lead protrudes on that axis), `width` the body across the rows and `span`
+#: the lead-tip-to-lead-tip (or lead-tip-to-tab-tip) extent across the rows,
+#: terminals included: the extent the photo measures when the box holds the
+#: leads. Ranges rather than one nominal value because the standards
+#: register ranges: a real body may sit at the maximum (a SOT-23 is up to
+#: 3.04 mm long, its nominal 2.9), and a rule on the nominal alone rejected
+#: a real SOT-23 measured 3.09 mm by 0.02 mm beyond the photo tolerance.
+#: `tab` says whether the family has a large heat tab opposite the leads.
+#: Every count that appears here has families whose sizes do not overlap
+#: between a tabbed and a tab-less family; SOT-23 and SOT-323 (both 3 leads,
+#: no tab) are separated by the body length (2.80-3.04 against 1.80-2.20
+#: mm). SOIC-n is not listed: it lives in soic_fits (JEDEC MS-012/MS-013).
+LEADED_SIZES_MM = {
+    'SOT-23': dict(leads=3, tab=False, length=(2.80, 3.04), width=(1.20, 1.40),
+                   span=(2.10, 2.64), standard='JEDEC TO-236AB'),
+    'SOT-23-5': dict(leads=5, tab=False, length=(2.80, 3.00), width=(1.50, 1.75),
+                     span=(2.60, 3.00), standard='JEDEC MO-178AA'),
+    'SOT-23-6': dict(leads=6, tab=False, length=(2.80, 3.00), width=(1.50, 1.75),
+                     span=(2.60, 3.00), standard='JEDEC MO-178AB'),
+    'SOT-323': dict(leads=3, tab=False, length=(1.80, 2.20), width=(1.15, 1.35),
+                    span=(1.80, 2.40), standard='JEDEC MO-203AA (EIAJ SC-70)'),
+    'SOT-143': dict(leads=4, tab=False, length=(2.80, 3.04), width=(1.20, 1.40),
+                    span=(2.10, 2.64), standard='JEDEC TO-253AA'),
+    'SOT-89': dict(leads=3, tab=True, length=(4.40, 4.60), width=(2.40, 2.60),
+                   span=(3.94, 4.40), standard='JEDEC TO-243AA'),
+    'SOT-223': dict(leads=3, tab=True, length=(6.30, 6.70), width=(3.30, 3.70),
+                    span=(6.70, 7.30), standard='JEDEC TO-261AA'),
+}
+#: Provenance value written in `package_source` when the package name comes
+#: from the inventory lead count and the measured envelope (HANDOFF 149).
+PACKAGE_SOURCE_COUNT_AND_MEASURE = 'lead_count_and_measure'
+#: Provenance value when a declared name was rejected by the measurement and
+#: no family could replace it.
+PACKAGE_SOURCE_NAME_REJECTED = 'declared_name_rejected_by_measure'
+
+
+def leaded_family_fits(family, envelope, strict=False):
+    """@brief Whether a leaded family of LEADED_SIZES_MM fits the measured envelope.
+
+    @param family LEADED_SIZES_MM key.
+    @param envelope (long_mm, short_mm, side_uncertainty_mm) of the body, or None.
+    @param strict True to allow no solder beyond the standard ranges: the
+        box then has to lie within the registered outline plus the photo
+        tolerance alone (the STRICT tier of leaded_family_from_evidence).
+    @return True when one side of the envelope lies along the lead rows
+        within the body length range +- the tolerance, and the other side
+        across the rows between the body width minimum (a body-only
+        inventory box) and the lead span maximum plus, unless `strict`,
+        SOIC_SOLDER_ALLOWANCE_MM (a leads-included box with fillets), +-
+        the tolerance; both assignments of the sides are tried because the
+        envelope carries no orientation. False without an envelope or for a
+        name outside the table.
+    @note Same shape of rule as soic_fits (lower bounds of the body, upper
+        bounds of the span with the declared solder heuristic), on the
+        registered ranges of LEADED_SIZES_MM instead of a nominal.
+    """
+    spec = LEADED_SIZES_MM.get(family)
+    if spec is None or envelope is None:
+        return False
+    long_mm, short_mm, tolerance = envelope
+    along_min, along_max = spec['length']
+    across_min = spec['width'][0]
+    across_max = spec['span'][1] + (0.0 if strict else SOIC_SOLDER_ALLOWANCE_MM)
+    for along, across in ((long_mm, short_mm), (short_mm, long_mm)):
+        if along_min - tolerance <= along <= along_max + tolerance \
+                and across_min - tolerance <= across <= across_max + tolerance:
+            return True
+    return False
+
+
+def _leaded_families(lead_count, tab, envelope, strict):
+    """Families of LEADED_SIZES_MM (and SOIC-n via soic_fits) with this count, tab and fit."""
+    names = [name for name, spec in LEADED_SIZES_MM.items()
+             if spec['leads'] == lead_count and (tab is None or spec['tab'] is tab)
+             and leaded_family_fits(name, envelope, strict)]
+    # SOIC has no strict tier of its own: soic_fits already includes the
+    # solder allowance across the rows, so it belongs to the loose tier.
+    if not strict and lead_count >= 8 and lead_count % 2 == 0 and tab is not True \
+            and soic_fits(lead_count // 2, envelope):
+        names.append(f'SOIC-{lead_count}')
+    return names
+
+
+def leaded_family_from_evidence(lead_count, tab, envelope):
+    """@brief The one leaded package family a lead count and a measured envelope allow.
+
+    @param lead_count Ordinary leads of the body (tab excluded), as the
+        inventory counted them; anything but an int of three or more gives None.
+    @param tab True/False when a heat tab was observed present/absent, None
+        when not observed: a family whose tab presence contradicts an
+        observed value is excluded.
+    @param envelope (long_mm, short_mm, side_uncertainty_mm) of the body, or None.
+    @return The family name («SOT-23», «SOT-223», «SOIC-8», ...) when
+        exactly one family of LEADED_SIZES_MM (or a SOIC-n through
+        soic_fits) has that lead count, a compatible tab and fits the
+        envelope; None when none fits or when more than one fits.
+    @note Two tiers, structural and not tuned on any body: a family that
+        fits STRICTLY (registered outline ranges plus the photo tolerance,
+        no solder) explains the measurement without the solder heuristic and
+        outranks a family that fits only thanks to SOIC_SOLDER_ALLOWANCE_MM.
+        With one strict family the answer is that family; with several
+        strict families, or none strict and several loose, the ambiguity is
+        declared (None), never guessed: with a coarse photo tolerance a
+        SOT-23 and a SOT-323 both fit a 2.5 x 2.5 mm box strictly and the
+        function refuses to choose.
+    @note A tab observed True on a body of SOT-23 size gives None: no
+        registered 3-lead family with a tab is that small, and a wrong tab
+        observation must produce no name rather than a wrong one.
+    """
+    if type(lead_count) is not int or lead_count < 3 or envelope is None:
+        return None
+    strict = _leaded_families(lead_count, tab, envelope, strict=True)
+    if strict:
+        return strict[0] if len(strict) == 1 else None
+    loose = _leaded_families(lead_count, tab, envelope, strict=False)
+    return loose[0] if len(loose) == 1 else None
+
+
+def declared_package_contradicts_measure(package, envelope):
+    """@brief Whether a declared package name belongs to a family the measured envelope excludes.
+
+    @param package Package text as the inventory or a model wrote it.
+    @param envelope (long_mm, short_mm, side_uncertainty_mm) of the body, or None.
+    @return True when package_family(package) names a family of
+        LEADED_SIZES_MM, DIODE_SIZES_MM (any spelling of
+        _SIZE_FAMILY_SPELLINGS) or a SOIC-n, and that family does not fit
+        the envelope even with the solder allowance (leaded_family_fits,
+        size_family_fits, soic_fits); False for an empty text, a name
+        outside those tables (no standards knowledge is assumed: «SOT-23-3»
+        or «SC-70» are unknown here) or no envelope.
+    @note The measurement outranks a name (HANDOFF 147, 149): a SOT-223
+        (6.3-6.7 x 6.7-7.3 mm with leads) declared on a 3.1 x 2.3 mm body
+        is a name the body cannot have. The check is deliberately loose (the
+        allowance is granted), so a True is a contradiction beyond every
+        declared margin.
+    """
+    family = package_family(package)
+    if not family or envelope is None:
+        return False
+    if family in LEADED_SIZES_MM:
+        return not leaded_family_fits(family, envelope)
+    diode = _SIZE_FAMILY_SPELLINGS.get(family)
+    if diode is not None:
+        return not size_family_fits(diode, envelope)
+    soic = re.fullmatch(r'SOIC-(\d+)', family)
+    if soic and int(soic.group(1)) >= 8 and int(soic.group(1)) % 2 == 0:
+        return not soic_fits(int(soic.group(1)) // 2, envelope)
+    return False
+
+
+def detector_evidence(component):
+    """@brief The local detector's class evidence carried by an inventory row.
+
+    @param component Inventory row (any dict).
+    @return dict(class, confidence, class_ambiguous, origin, low_confidence)
+        read from the row's own `_yolo_*` keys (a detector proposal or a
+        yolo-only component) or from `_detector_evidence` (the provenance
+        photo_global_inventory._normalize copies from the single source
+        proposal of a reconciled row); None when the row carries neither.
+    """
+    if not isinstance(component, dict):
+        return None
+    if '_yolo_class' in component:
+        return dict(**{'class': component.get('_yolo_class')},
+                    confidence=component.get('_yolo_confidence'),
+                    class_ambiguous=component.get('_yolo_class_ambiguous'),
+                    origin=component.get('_yolo_origin'),
+                    low_confidence=component.get('_yolo_low_confidence'))
+    nested = component.get('_detector_evidence')
+    return dict(nested) if isinstance(nested, dict) else None
+
+
+def detector_leaded(component):
+    """@brief Whether the local detector saw this body as a leaded semiconductor package.
+
+    @param component Inventory row.
+    @return True when detector_evidence gives a class whose kind
+        (photo_inventory.YOLO_CLASS_KINDS) is 'ic' (transistor, ic), not
+        ambiguous, from the detector's own operating threshold (`origin`
+        'operating_threshold' and `low_confidence` not True): the threshold is
+        the detector's, no new number is chosen here. False otherwise.
+    """
+    from .photo_inventory import YOLO_CLASS_KINDS
+    evidence = detector_evidence(component)
+    return bool(evidence
+                and YOLO_CLASS_KINDS.get(evidence.get('class')) == 'ic'
+                and evidence.get('class_ambiguous') is not True
+                and evidence.get('origin') == 'operating_threshold'
+                and evidence.get('low_confidence') is not True)
+
+
 def _same_side(a, b):
     """0 and null are the same observation on a side without ordinary leads (user, 28/09)."""
     return (a or 0) == (b or 0)
@@ -642,7 +845,7 @@ def reclassable_class(name):
 
 
 def derive_reading(observation, envelope=None, inventory_class=None, inventory_lead_count=None,
-                   inventory_package=None):
+                   inventory_package=None, detector_leaded=False):
     """@brief Derive class, package family and leads from one observation and the inventory row.
 
     @param observation Parsed answer (parse_observation).
@@ -651,12 +854,18 @@ def derive_reading(observation, envelope=None, inventory_class=None, inventory_l
     @param inventory_class Class of the global-inventory row, or None.
     @param inventory_lead_count Lead count of the global-inventory row, or None.
     @param inventory_package Package text of the global-inventory row, or None.
+    @param detector_leaded True when the local detector saw the body as a
+        leaded semiconductor package at its own operating threshold
+        (detector_leaded(row)): an evidence independent of the inventory.
     @return dict(class, package, family, leads, tab, marking, contacts,
-        class_decided, inconclusive, suspicions, notes): `class_decided` is
-        True when the crop itself decided the class (LED, leaded family,
-        banded cylinder) and False when it echoes the inventory class or is
-        unknown; `inconclusive` lists why the
-        observation cannot be adopted (empty when it can); `suspicions` lists
+        class_decided, inconclusive, outvoted, suspicions, notes):
+        `class_decided` is True when the crop itself decided the class
+        (LED, leaded family, banded cylinder) and False when it echoes the
+        inventory class or is unknown; `inconclusive` lists why the
+        observation cannot be adopted (empty when it can); `outvoted` is
+        True when the crop's explicit two-terminal observation is the
+        minority against the inventory AND the detector (see below);
+        `suspicions` lists
         contradictions that hold only when BOTH readings of the body raise
         them (read_bodies intersects them: 'print_contradicts_capacitor',
         'band_contradicts_unpolarised'); `notes` lists rejected names
@@ -685,6 +894,19 @@ def derive_reading(observation, envelope=None, inventory_class=None, inventory_l
           (coordinator's decision, HANDOFF 148): in the recorded run such
           changes were right (C11, C18) and wrong (C39, C41) in equal
           measure, so they become review proposals with both readings;
+        - EXCEPTION, `outvoted` (HANDOFF 149): the crop's explicit
+          two-terminal observation against a leaded inventory row is not a
+          contradiction but the minority when the local detector, an
+          evidence independent of the inventory model, ALSO saw a leaded
+          package (`detector_leaded`): two independent sources against one.
+          The reading is not adopted (it decides nothing) and read_bodies
+          keeps the row, records the outvote and checks the declared package
+          against the measurement. In the recorded run (HANDOFF 149) the
+          detector said transistor 0.90, the inventory 3 leads, the
+          measurement 3.1 x 2.3 mm and both crops «two terminals»: the crop
+          was wrong. With the inventory alone against the crop (no
+          detector class, an ambiguous or sub-threshold one) the
+          contradiction stands as before: one source against one;
         - suspicion 'print_contradicts_capacitor' (raised only when both
           readings see it): inventory class capacitor with a chip size code
           or no package, and the crop shows printed text. A ceramic chip
@@ -754,7 +976,11 @@ def derive_reading(observation, envelope=None, inventory_class=None, inventory_l
     explicit_two = observation['two_end_terminals_only'] and contacts == 2 and counted < 3
     inventory_leaded = leaded_class(inventory_class) or (
         type(inventory_lead_count) is int and inventory_lead_count >= 3)
-    if (explicit_two and inventory_leaded) or (leaded and inventory_class in TWO_TERMINAL_CLASSES):
+    # Two independent sources (inventory model and local detector) against
+    # the crop: the crop is the minority, not a contradiction (HANDOFF 149).
+    outvoted = bool(explicit_two and inventory_leaded and detector_leaded)
+    if (explicit_two and inventory_leaded and not outvoted) \
+            or (leaded and inventory_class in TWO_TERMINAL_CLASSES):
         reasons.append('terminals_contradict_inventory')
     notes = []
     shape = observation['body_shape']
@@ -791,7 +1017,7 @@ def derive_reading(observation, envelope=None, inventory_class=None, inventory_l
     return {'class': cls, 'package': package, 'family': package, 'leads': leads,
             'tab': observation['tab'], 'marking': observation['marking'],
             'contacts': contacts, 'class_decided': decided, 'inconclusive': reasons,
-            'suspicions': suspicions, 'notes': notes}
+            'outvoted': outvoted, 'suspicions': suspicions, 'notes': notes}
 
 
 def disagreements(first, second):
@@ -838,6 +1064,8 @@ def _summary(reading):
             f"tab={'yes' if reading['tab'] else 'no'}")
     if reading['inconclusive']:
         text += ' inconclusive=' + ','.join(reading['inconclusive'])
+    if reading.get('outvoted'):
+        text += ' outvoted=by_detector_and_inventory'
     return text
 
 
@@ -938,10 +1166,13 @@ class CropReadingSummary:
 
     @note `readings_cached` counts readings (two per body), not bodies;
         `calls` counts paid calls, retries included.
-    @note `bodies_read` = `agreed` + `disagreed`: bodies with two valid
-        readings. `disagreed` includes the `inconclusive` bodies (two valid
-        observations that cannot be adopted: several bodies in the frame or
-        contradictory contact counts). `failed` counts bodies left without
+    @note `bodies_read` = `agreed` + `disagreed` + `outvoted`: bodies with
+        two valid readings. `disagreed` includes the `inconclusive` bodies
+        (two valid observations that cannot be adopted: several bodies in
+        the frame or contradictory contact counts). `outvoted` counts bodies
+        whose two crop readings showed two terminals against a leaded
+        inventory row AND a leaded detector class (HANDOFF 149): the row is
+        kept, nothing of the crop is adopted. `failed` counts bodies left without
         two valid readings (row kept as the inventory wrote it); `not_read`
         counts eligible bodies never attempted because the pass was
         `interrupted` by PROVIDER_ERRORS_BEFORE_STOP consecutive provider
@@ -953,6 +1184,7 @@ class CropReadingSummary:
     agreed: int = 0
     disagreed: int = 0
     inconclusive: int = 0
+    outvoted: int = 0
     readings_cached: int = 0
     calls: int = 0
     skipped: int = 0
@@ -1165,6 +1397,61 @@ def _note_text(note, envelope, kept_package):
               "da verificare.", family=family, detail=detail)
 
 
+def _inventory_lead_count(component):
+    """The lead count the inventory declared: the value _adopt saved, else the row's."""
+    count = (component['_lead_count_inventory'] if '_lead_count_inventory' in component
+             else component.get('lead_count'))
+    return count if type(count) is int else None
+
+
+def _reconcile_declared_package(component, envelope, tab):
+    """Replace a declared leaded package the measurement excludes by the family the evidence allows.
+
+    Applies only to rows of a leaded class (leaded_class). When the row's
+    package names a family that cannot have the measured envelope
+    (declared_package_contradicts_measure) the name decays: the family
+    leaded_family_from_evidence derives from the INVENTORY lead count, the
+    tab observation `tab` (None when not trusted) and the envelope replaces
+    it (package_confidence 'medium', `package_source`
+    PACKAGE_SOURCE_COUNT_AND_MEASURE); without a unique family the package
+    becomes empty at low confidence (PACKAGE_SOURCE_NAME_REJECTED). The
+    declared name goes to `_package_inventory` and a translated review
+    reason names both: never silent (HANDOFF 149). Returns True when the
+    package changed.
+    """
+    package = str(component.get('package') or '')
+    if not package or not leaded_class(component.get('class')) \
+            or not declared_package_contradicts_measure(package, envelope):
+        return False
+    count = _inventory_lead_count(component)
+    family = leaded_family_from_evidence(count, tab, envelope)
+    component['_package_inventory'] = package
+    component['package'] = family or ''
+    if family:
+        component['package_confidence'] = 'medium'
+        component['package_source'] = PACKAGE_SOURCE_COUNT_AND_MEASURE
+        _add_review_reason(component, tx(
+            "Package «{declared}» incompatibile con la misura {long:.2f} x {short:.2f} mm: "
+            "famiglia «{family}» derivata da {n} piedini e misura; da verificare.",
+            declared=package, long=envelope[0], short=envelope[1], family=family, n=count))
+    else:
+        component['package_confidence'] = 'low'
+        component['package_source'] = PACKAGE_SOURCE_NAME_REJECTED
+        if count is None:
+            _add_review_reason(component, tx(
+                "Package «{declared}» incompatibile con la misura {long:.2f} x {short:.2f} mm "
+                "e numero di piedini dell'inventario sconosciuto: package lasciato vuoto, "
+                "da verificare.", declared=package, long=envelope[0], short=envelope[1]))
+        else:
+            fitting = _leaded_families(count, tab, envelope, strict=False)
+            _add_review_reason(component, tx(
+                "Package «{declared}» incompatibile con la misura {long:.2f} x {short:.2f} mm: "
+                "nessuna famiglia univoca da {n} piedini e misura ({families}); package "
+                "lasciato vuoto, da verificare.", declared=package, long=envelope[0],
+                short=envelope[1], n=count, families=', '.join(fitting) or '-'))
+    return True
+
+
 def _flag(component, first, second, reasons, reason=None):
     """Keep the global row but mark its package and leads as not trusted.
 
@@ -1257,8 +1544,19 @@ def read_bodies(photo, components, length_mm, width_mm, model, call, log, cache_
         capacitor) or a failed reading keeps the global row. A class that
         names no package (reclassable_class False) keeps class and package:
         only its leads are adopted. Such a row keeps
-        the global row and marks it (see _flag). Every attempted row records
-        `_crop_reading` ('agreed'/'disagreed'/'inconclusive'/'failed'),
+        the global row and marks it (see _flag). A body whose two readings
+        show two terminals against a leaded inventory row AND a leaded
+        detector class (derive_reading `outvoted`, HANDOFF 149) is
+        'outvoted': the row is kept with a review reason naming the
+        detector class and the inventory count, nothing of the crop is
+        adopted, and its declared package is checked against the
+        measurement (_reconcile_declared_package: a name the body cannot
+        have decays to the family derived from the inventory lead count
+        and the envelope, `_package_inventory`, `package_source`). The
+        same check runs on an agreed reading of a leaded class that gave
+        no family (incomplete per-side count), so an inventory name the
+        measurement excludes never survives unnoticed. Every attempted row records
+        `_crop_reading` ('agreed'/'disagreed'/'inconclusive'/'outvoted'/'failed'),
         `_crop_observations` (both parsed answers), `_crop_readings` (both
         derivations), `_crop_reading_version` and
         `_crop_reading_prompt_digest` (SHA-256 of the effective instructions,
@@ -1366,9 +1664,11 @@ def read_bodies(photo, components, length_mm, width_mm, model, call, log, cache_
                     break
                 retries -= 1
             observations.append(observation)
+        leaded_by_detector = detector_leaded(component)
         readings = [None if observation is None else
                     derive_reading(observation, envelope, component.get('class'),
-                                   component.get('lead_count'), component.get('package'))
+                                   component.get('lead_count'), component.get('package'),
+                                   leaded_by_detector)
                     for observation in observations]
         first, second = readings
         name = component.get('name') or component.get('component_id') or component.get('_id')
@@ -1414,6 +1714,29 @@ def read_bodies(photo, components, length_mm, width_mm, model, call, log, cache_
                         aspects=', '.join(reasons), first=_summary(first), second=_summary(second))
                 _flag(component, first, second, reasons, reason)
                 status = 'inconclusive'
+            elif first['outvoted'] and second['outvoted']:
+                # Il ritaglio dice «due terminali» ma inventario E rilevatore
+                # locale dicono package a piedini (HANDOFF 149): il ritaglio
+                # e' in minoranza, la riga resta e la nota lo dice; il nome
+                # dichiarato viene confrontato con la misura.
+                summary.outvoted += 1
+                evidence = detector_evidence(component) or {}
+                try:
+                    confidence = float(evidence.get('confidence'))
+                except (TypeError, ValueError):
+                    confidence = float('nan')
+                _add_review_reason(component, tx(
+                    "Il ritaglio mostra due terminali ma il rilevatore locale («{yolo}», "
+                    "confidenza {conf:.2f}) e l'inventario (classe «{cls}», piedini {leads}) "
+                    "concordano su un package a piedini: letture del ritaglio in minoranza, "
+                    "riga tenuta; da verificare.",
+                    yolo=evidence.get('class') or '-', conf=confidence,
+                    cls=component.get('class') or '-',
+                    leads='-' if component.get('lead_count') is None else component['lead_count']))
+                # La linguetta del ritaglio non viene usata: e' la stessa
+                # osservazione dei terminali appena messa in minoranza.
+                _reconcile_declared_package(component, envelope, None)
+                status = 'outvoted'
             elif reasons:
                 summary.disagreed += 1
                 _flag(component, first, second, reasons)
@@ -1431,6 +1754,14 @@ def read_bodies(photo, components, length_mm, width_mm, model, call, log, cache_
                     component['package_confidence'] = 'low'
                     _add_review_reason(component, _note_text(note, envelope,
                                                              component.get('package') or ''))
+                # Nessuna famiglia dal ritaglio (conteggio per lato incompleto):
+                # il nome dell'inventario resta, ma se la misura lo esclude
+                # decade a favore della famiglia da conteggio + misura
+                # (HANDOFF 149). La linguetta solo se le due letture concordano.
+                if not agreed['family']:
+                    _reconcile_declared_package(
+                        component, envelope,
+                        first['tab'] if first['tab'] == second['tab'] else None)
                 status = 'agreed'
             _choose_marking(component, first, second)
         component['_crop_reading'] = status
@@ -1452,10 +1783,11 @@ def read_bodies(photo, components, length_mm, width_mm, model, call, log, cache_
                    'program: hypotheses, not verified identity'),
             log)
     log(tx("Lettura dei singoli componenti: {read} corpi letti due volte su ritagli ingranditi; "
-           "{agreed} con letture concordi (adottate), {disagreed} discordi (da rivedere); "
+           "{agreed} con letture concordi (adottate), {disagreed} discordi (da rivedere), "
+           "{outvoted} in minoranza contro rilevatore e inventario (riga tenuta); "
            "{cached} letture riprese dalla cache, {calls} richieste a pagamento.",
            read=summary.bodies_read, agreed=summary.agreed, disagreed=summary.disagreed,
-           cached=summary.readings_cached, calls=summary.calls))
+           outvoted=summary.outvoted, cached=summary.readings_cached, calls=summary.calls))
     if summary.interrupted:
         summary.warning = tx(
             "Lettura dei singoli componenti interrotta dopo {errors} richieste consecutive "

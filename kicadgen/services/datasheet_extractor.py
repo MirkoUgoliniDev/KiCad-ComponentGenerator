@@ -3275,6 +3275,9 @@ def _components_3d(raw: Optional[Sequence[dict]],
                     # rivedere» non direbbe piu' perche'.
                     'package_confidence', '_crop_reading', '_crop_readings',
                     '_crop_observations',
+                    # Evidenza del rilevatore locale della proposta sorgente e
+                    # provenienza di un package derivato (HANDOFF 149).
+                    '_detector_evidence', 'package_source',
                     '_crop_reading_version', '_crop_reading_prompt_digest',
                     '_package_inventory', '_class_inventory',
                     '_lead_count_inventory'):

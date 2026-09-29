@@ -1254,9 +1254,43 @@ def _measured_geometry(row, measured, length, width):
                 width_mm=short_side, rotation_deg=rotation % 180, _box=list(box))
 
 
-def _normalize(row, identity, length, width, issues, manual_ids=frozenset(), measured=None):
+#: Detector fields copied into `_detector_evidence` of a row that stands on
+#: exactly one proposal (see _normalize): the class, its confidence, the
+#: ambiguity flag and the threshold provenance, as photo_yolo writes them.
+_DETECTOR_EVIDENCE_KEYS = {'_yolo_class': 'class', '_yolo_confidence': 'confidence',
+                           '_yolo_class_ambiguous': 'class_ambiguous', '_yolo_origin': 'origin',
+                           '_yolo_low_confidence': 'low_confidence',
+                           '_yolo_proposal_id': 'proposal_id'}
+
+
+def _detector_evidence(row, proposals):
+    """Detector evidence of the single proposal this row stands on, or None.
+
+    Only a row built from exactly ONE source proposal inherits it (the same
+    structural condition as _measured_geometry): a merge of several
+    proposals has no single detector class. It is stored under its own key,
+    not as the row's `_yolo_*` fields, because those mark a detector
+    HYPOTHESIS (kicad_models._is_yolo_only_hypothesis, the low-confidence
+    gates of the 3D matching) and a reconciled row is not one.
+    """
+    sources = row.get('source_candidate_ids') or []
+    if len(sources) != 1 or sources[0] not in proposals:
+        return None
+    proposal = proposals[sources[0]]
+    if not isinstance(proposal, dict) or '_yolo_class' not in proposal:
+        return None
+    return {field: proposal.get(key) for key, field in _DETECTOR_EVIDENCE_KEYS.items()}
+
+
+def _normalize(row, identity, length, width, issues, manual_ids=frozenset(), measured=None,
+               proposals=None):
     """@brief Convert AI observations without modifying the raw audit response.
     @param issues Errori di validazione che riguardano QUESTA riga, non l'inventario.
+    @param proposals Proposte del rilevatore per `_id`: una riga che poggia su
+        UNA sola proposta ne riceve classe, confidenza e provenienza di
+        soglia in `_detector_evidence` (HANDOFF 149): senza, l'evidenza del
+        rilevatore locale («transistor 0.90») non arrivava mai alla lettura
+        per ritaglio ne' alla revisione. None: nessuna evidenza copiata.
     @param manual_ids ID dei candidati che una persona ha tracciato o ritoccato
         (`_yolo_manual_box`). Se questa riga ne assorbe almeno uno, la
         marcatura passa al componente finale: senza, la mano dell'utente si
@@ -1347,6 +1381,9 @@ def _normalize(row, identity, length, width, issues, manual_ids=frozenset(), mea
         _review_reason=row['evidence'], _global_inventory_errors=list(issues))
     if any(source in manual_ids for source in row['source_candidate_ids']):
         result['_yolo_manual_box'] = True
+    evidence = _detector_evidence(row, proposals or {})
+    if evidence is not None:
+        result['_detector_evidence'] = evidence
     if body is not None:
         result['_edges_measured'] = True
         result['_geometry_source'] = ('photo edge measurement of the single source proposal '
@@ -1736,8 +1773,10 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     next_id = max(known | {c.get('_id') for c in withheld if type(c.get('_id')) is int},
                   default=0)+1
     manual_ids = frozenset(c['_id'] for c in components if c.get('_yolo_manual_box') is True)
+    proposals = {c['_id']: c for c in components if type(c.get('_id')) is int}
     result = [_normalize(r, next_id+i, length, width,
-                         own(r['component_id'], r['source_candidate_ids']), manual_ids, measured)
+                         own(r['component_id'], r['source_candidate_ids']), manual_ids, measured,
+                         proposals)
               for i, r in enumerate(rows)]
     for body in result:
         if body['component_id'] in ai_only_excluded:
