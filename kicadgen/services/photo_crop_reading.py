@@ -1508,7 +1508,11 @@ def read_bodies(photo, components, length_mm, width_mm, model, call, log, cache_
     @param components Inventory rows of review_global_inventory (modified in place).
     @param length_mm Board extent along X, in mm.
     @param width_mm Board extent along Y, in mm.
-    @param model Vision model identifier (the one of the global inventory).
+    @param model Vision model identifier that receives every crop: the
+        profile's crop model when set, otherwise the one of the global
+        inventory (photo_inventory.read_retained_bodies decides). It keys the
+        cache, sizes the crops (model_image_limits) and is what the logged
+        call routes and charges by.
     @param call Logged paid call of extract_inventory: every request goes
         through it, so costs, cancellation and the AI log behave like every
         other call.

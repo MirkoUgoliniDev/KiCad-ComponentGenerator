@@ -1266,17 +1266,45 @@ def test_the_relaunch_shares_the_tail_of_extract_inventory(monkeypatch, tmp_path
     seen = []
     real = inv.read_retained_bodies
 
-    def spy(photo, report, *args):
-        seen.append(args[-2])                 # crop_prompt
-        return real(photo, report, *args)
+    def spy(photo, report, *args, **kwargs):
+        seen.append((args[-2], kwargs.get('crop_model')))   # crop_prompt, crop_model
+        return real(photo, report, *args, **kwargs)
     monkeypatch.setattr(inv, 'read_retained_bodies', spy)
 
     def call(**kwargs):
         name = kwargs['tool']['function']['name']
         return _inventory_response() if name == 'report_global_inventory' else _obs(marking='')
-    _reconcile(call, crop_prompt=CUSTOM_PROMPT)
-    _extract(monkeypatch, tmp_path, call, [])      # extract_inventory, no profile prompt
-    assert seen == [CUSTOM_PROMPT, None]
+    _reconcile(call, crop_prompt=CUSTOM_PROMPT, crop_model='vendor/crop-reader')
+    _extract(monkeypatch, tmp_path, call, [])      # extract_inventory, no profile values
+    assert seen == [(CUSTOM_PROMPT, 'vendor/crop-reader'), (None, None)]
+
+
+@pytest.mark.parametrize('crop_model,expected', [
+    ('vendor/crop-reader', 'vendor/crop-reader'), (' vendor/crop-reader ', 'vendor/crop-reader'),
+    ('', DEEPSEEK), (None, DEEPSEEK)])
+def test_the_relaunch_reads_the_crops_with_the_profile_model_and_the_inventory_with_its_own(
+        crop_model, expected):
+    """@brief HANDOFF 150: crop_model set = crop readings only; blank = the photo model."""
+    sent = []
+
+    def call(**kwargs):
+        name = kwargs['tool']['function']['name']
+        sent.append((name, kwargs['model']))
+        return _inventory_response() if name == 'report_global_inventory' else _obs(marking='')
+    phases = []
+    report, logs = _reconcile(call, phases, crop_model=crop_model)
+    assert [m for name, m in sent if name == 'report_global_inventory'] == [DEEPSEEK]
+    assert [m for name, m in sent if name == 'observe_body'] == [expected] * 2
+    [row] = report.components
+    assert row['package'] == 'SOIC-8' and row['_crop_reading'] == 'agreed'
+    named = [line for line in logs
+             if str(line).startswith('Lettura dei singoli componenti affidata al modello')]
+    [(tool, detail)] = [(t, d) for t, d in phases if t == 'llm']
+    if expected == DEEPSEEK:
+        assert named == [] and detail == 'lettura dei singoli componenti'
+    else:
+        assert len(named) == 1 and expected in named[0] and DEEPSEEK in named[0]
+        assert detail == f'lettura dei singoli componenti con {expected}'
 
 
 def test_the_relaunch_keeps_rows_and_warns_when_the_provider_fails():

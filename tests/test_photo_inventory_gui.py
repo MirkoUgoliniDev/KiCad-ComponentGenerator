@@ -683,7 +683,7 @@ def test_worker_forwards_separate_photo_and_datasheet_models(monkeypatch):
     worker = gui.ExtractWorker([Path("board.png")], model="vendor/datasheet", vision_model="vendor/photo",
                                grounding_prompt="localize", verification_prompt="verify",
                                verification_model="vendor/verifier", terminal_prompt="terminals",
-                               crop_prompt="crops")
+                               crop_prompt="crops", crop_model="vendor/crop-reader")
     spy = QSignalSpy(worker.done)
     worker.run()
     assert spy[0][0] is expected
@@ -694,6 +694,7 @@ def test_worker_forwards_separate_photo_and_datasheet_models(monkeypatch):
     assert calls[0][1]["verification_model"] == "vendor/verifier"
     assert calls[0][1]["terminal_prompt"] == "terminals"
     assert calls[0][1]["crop_prompt"] == "crops"
+    assert calls[0][1]["crop_model"] == "vendor/crop-reader"
 
 
 def test_settings_preserve_legacy_defaults_but_runtime_uses_one_model(window, monkeypatch):
@@ -763,7 +764,7 @@ def test_custom_profile_drives_geometry_family_and_worker_snapshot(window, monke
                              'verification_model': 'type/verify', 'system_prompt': 'type prompt',
                              'grounding_prompt': 'ground', 'verification_prompt': 'verify',
                              'terminal_prompt': 'terminals', 'crop_prompt': 'crops',
-                             'image_instructions': 'extra foto'})
+                             'crop_model': 'type/crop-reader', 'image_instructions': 'extra foto'})
     window._reload_profile_types()
     window.field_component_prompt.setPlainText('note libere')
     window.combo_component_type.setCurrentIndex(window.combo_component_type.findData(key))
@@ -791,6 +792,7 @@ def test_custom_profile_drives_geometry_family_and_worker_snapshot(window, monke
     # The per-body crop prompt never receives the whole-board image
     # instructions (HANDOFF 146 V3).
     assert worker.crop_prompt == 'crops'
+    assert worker.crop_model == 'type/crop-reader'
     assert 'istruzioni specifiche' in worker.extra_instructions
     store.save_type(key, label='changed', family='single_smd', overrides={'model': 'next'})
     assert worker.model == 'type/data'  # Running request is isolated from later edits.
@@ -1200,3 +1202,40 @@ def test_a_project_change_drops_the_pending_regeneration(shown_solid, monkeypatc
     window._apply_photo_review(window._photo_components_from_table())
     window._reset_project_runtime_state()
     assert not window._regen_3d_pending
+
+
+def test_the_extract_worker_forwards_a_blank_crop_model_as_is(monkeypatch):
+    """Negative: blank means «photo model» downstream; the worker does not decide it."""
+    calls = []
+    monkeypatch.setattr(gui, "extract_pin_header_params", lambda paths, **kw: calls.append(kw))
+    gui.ExtractWorker([Path("board.png")], crop_model="").run()
+    gui.ExtractWorker([Path("board.png")]).run()
+    assert [c["crop_model"] for c in calls] == ["", None]
+
+
+@pytest.mark.parametrize('model,crop_model,expected', [
+    ('vendor/photo', 'deepseek-api/deepseek-flash', ['deepseek-api/deepseek-flash']),
+    ('deepseek-api/deepseek-flash', '', ['deepseek-api/deepseek-flash', 'deepseek-api/deepseek-flash']),
+    ('vendor/photo', 'vendor/crop', None),
+    ('vendor/photo', None, None),
+])
+def test_the_relaunch_checks_the_direct_provider_of_the_crop_model_too(monkeypatch, model,
+                                                                        crop_model, expected):
+    """@brief A DeepSeek crop model needs its key before the relaunch pays; OpenRouter is not re-checked."""
+    from kicadgen.services import photo_inventory, providers
+    checked = []
+    monkeypatch.setattr(providers, 'ensure_providers_ready',
+                        lambda models, *a, **k: checked.append(list(models)))
+    forwarded = {}
+
+    # Named parameters like the real service: accepted_kwargs forwards crop_model
+    # only to a signature that declares it (or **kwargs next to named ones).
+    def fake_reconcile(photo, proposals, length, width, model, call, log, cache_dir=None,
+                       **kwargs):
+        forwarded.update(kwargs)
+        return object()
+    monkeypatch.setattr(photo_inventory, 'reconcile_saved_proposals', fake_reconcile)
+    worker = gui.ReconcileWorker(b"", [], 10, 10, model, None, crop_model=crop_model)
+    worker.run()
+    assert checked == ([expected] if expected else [])
+    assert forwarded['crop_model'] == crop_model

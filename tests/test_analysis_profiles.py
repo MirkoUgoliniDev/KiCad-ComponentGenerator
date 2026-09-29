@@ -261,10 +261,10 @@ def test_crop_prompt_factory_default_is_the_hardcoded_crop_reading_prompt(tmp_pa
 
 
 def _downgrade_to_v3(path):
-    """Turn a current database back into the schema 3 layout: no crop_prompt row."""
+    """Turn a current database back into the schema 3 layout: no crop_prompt/crop_model rows."""
     with sqlite3.connect(path) as db:
-        db.execute("DELETE FROM ai_defaults WHERE name='crop_prompt'")
-        db.execute("DELETE FROM ai_overrides WHERE name='crop_prompt'")
+        db.execute("DELETE FROM ai_defaults WHERE name IN ('crop_prompt','crop_model')")
+        db.execute("DELETE FROM ai_overrides WHERE name IN ('crop_prompt','crop_model')")
         db.execute('PRAGMA user_version=3')
 
 
@@ -274,16 +274,17 @@ def test_v3_database_receives_the_crop_prompt_and_keeps_every_user_text(tmp_path
                          'image_instructions': 'my photo notes'})
     key = store.save_type(None, label='custom', family='single_smd',
                           overrides={'terminal_prompt': 'type terminals'})
-    before = {k: v for k, v in store.defaults().items() if k != 'crop_prompt'}
+    added = {'crop_prompt', 'crop_model'}          # the rows steps 3->4 and 4->5 add
+    before = {k: v for k, v in store.defaults().items() if k not in added}
     _downgrade_to_v3(store.path)
     upgraded = ProfileStore(store.path)
     defaults = upgraded.defaults()
     assert defaults['crop_prompt'] == factory_defaults()['crop_prompt']
-    assert {k: v for k, v in defaults.items() if k != 'crop_prompt'} == before
+    assert {k: v for k, v in defaults.items() if k not in added} == before
     assert upgraded.overrides(key) == {'terminal_prompt': 'type terminals'}
     assert upgraded.resolve(key)['crop_prompt'] == factory_defaults()['crop_prompt']
     with sqlite3.connect(store.path) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION == 4
+        assert db.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
 
 
 def test_a_crop_prompt_the_user_already_edited_is_never_replaced(tmp_path):
@@ -299,11 +300,13 @@ def test_a_crop_prompt_the_user_already_edited_is_never_replaced(tmp_path):
 def test_v1_database_climbs_every_step_up_to_the_crop_prompt(tmp_path):
     store = ProfileStore(tmp_path / 'ai.sqlite3')
     with sqlite3.connect(store.path) as db:
-        db.execute("DELETE FROM ai_defaults WHERE name IN ('verification_model','crop_prompt')")
+        db.execute("DELETE FROM ai_defaults WHERE name IN ('verification_model','crop_prompt',"
+                   "'crop_model')")
         db.execute('DROP TABLE translations')
         db.execute('PRAGMA user_version=1')
     upgraded = ProfileStore(store.path)
     assert upgraded.defaults()['crop_prompt'] == factory_defaults()['crop_prompt']
+    assert upgraded.defaults()['crop_model'] == ''          # step 4->5 climbed as well
     assert upgraded.translation('ui:Lettura ritagli', 'en') == 'Crop reading'
 
 
@@ -414,3 +417,107 @@ def test_repository_database_holds_the_factory_crop_prompt():
     finally:
         db.close()
     assert row is not None and row[0] == SYSTEM_PROMPT
+
+
+# ── crop_model: model of the crop reading, blank = photo model (HANDOFF 150) ──
+
+def _dump(path):
+    """Every row of every user table, for a before/after comparison."""
+    with sqlite3.connect(path) as db:
+        return {table: sorted(db.execute(f'SELECT * FROM {table}').fetchall())
+                for table in ('ai_defaults', 'ai_overrides', 'component_types', 'metadata',
+                              'translations')}
+
+
+def test_crop_model_factory_default_is_blank_and_it_is_not_a_photo_prompt(tmp_path):
+    from kicadgen.services.analysis_profiles import PHOTO_PROMPT_FIELDS, PROFILE_FIELDS
+    assert factory_defaults()['crop_model'] == ''
+    assert ProfileStore(tmp_path / 'ai.sqlite3').defaults()['crop_model'] == ''
+    assert 'crop_model' in PROFILE_FIELDS and 'crop_model' not in PHOTO_PROMPT_FIELDS
+
+
+def _downgrade_to_v4(path):
+    """Turn a current database back into the schema 4 layout: no crop_model row."""
+    with sqlite3.connect(path) as db:
+        db.execute("DELETE FROM ai_defaults WHERE name='crop_model'")
+        db.execute("DELETE FROM ai_overrides WHERE name='crop_model'")
+        db.execute('PRAGMA user_version=4')
+
+
+def test_v4_database_receives_a_blank_crop_model_and_keeps_every_user_text(tmp_path):
+    store = ProfileStore(tmp_path / 'ai.sqlite3')
+    store.save_defaults({'system_prompt': 'my datasheet prompt', 'crop_prompt': 'my crop prompt',
+                         'verification_model': 'vendor/mine', 'image_instructions': 'my notes'})
+    key = store.save_type(None, label='custom', family='single_smd',
+                          overrides={'crop_prompt': 'type crop', 'vision_model': 'type/photo'})
+    before = {k: v for k, v in store.defaults().items() if k != 'crop_model'}
+    _downgrade_to_v4(store.path)
+    upgraded = ProfileStore(store.path)
+    defaults = upgraded.defaults()
+    assert defaults['crop_model'] == ''
+    assert {k: v for k, v in defaults.items() if k != 'crop_model'} == before
+    assert upgraded.overrides(key) == {'crop_prompt': 'type crop', 'vision_model': 'type/photo'}
+    assert upgraded.resolve(key)['crop_model'] == ''
+    with sqlite3.connect(store.path) as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION == 5
+
+
+def test_a_crop_model_the_user_already_set_is_never_replaced(tmp_path):
+    """Negative of the migration: an existing row, even at schema 4, keeps its value."""
+    store = ProfileStore(tmp_path / 'ai.sqlite3')
+    store.save_defaults({'crop_model': 'vendor/my-crop-reader'})
+    with sqlite3.connect(store.path) as db:
+        db.execute('PRAGMA user_version=4')
+    assert ProfileStore(store.path).defaults()['crop_model'] == 'vendor/my-crop-reader'
+
+
+def test_a_current_database_reopened_changes_no_row(tmp_path):
+    store = ProfileStore(tmp_path / 'ai.sqlite3')
+    store.save_defaults({'crop_model': 'vendor/crop'})
+    store.save_type(None, label='t', family='single_smd', overrides={'crop_model': ''})
+    before = _dump(store.path)
+    ProfileStore(store.path)
+    assert _dump(store.path) == before
+
+
+@pytest.mark.parametrize('value', ['', '   '])
+def test_a_blank_crop_model_is_accepted_and_means_the_photo_model(tmp_path, value):
+    store = ProfileStore(tmp_path / 'ai.sqlite3')
+    store.save_defaults({'crop_model': 'vendor/crop'})
+    store.save_defaults({'crop_model': value})
+    assert store.defaults()['crop_model'] == ''            # stripped, stored blank
+
+
+@pytest.mark.parametrize('field', ['model', 'vision_model', 'verification_model'])
+@pytest.mark.parametrize('value', ['', '   '])
+def test_the_other_model_fields_still_reject_a_blank(tmp_path, field, value):
+    """Negative: the blank exception is for crop_model alone; None is inherit, not blank."""
+    store = ProfileStore(tmp_path / 'ai.sqlite3')
+    original = store.defaults()
+    with pytest.raises(ProfileError):
+        store.save_defaults({field: value})
+    with pytest.raises(ProfileError):
+        store.save_defaults({'crop_model': None})
+    assert store.defaults() == original
+
+
+def test_crop_model_is_stripped_inherited_or_overridden_even_with_a_blank(tmp_path):
+    store = ProfileStore(tmp_path / 'ai.sqlite3')
+    store.save_defaults({'crop_model': '  vendor/global-crop  '})
+    assert store.defaults()['crop_model'] == 'vendor/global-crop'
+    inherit = store.save_type(None, label='inherits', family='single_smd',
+                              overrides={'image_instructions': 'extra photo'})
+    own = store.save_type(None, label='own', family='single_smd',
+                          overrides={'crop_model': ' vendor/type-crop '})
+    # An EXPLICIT blank override is a choice («the photo model for this
+    # type»), distinct from inheriting the global model.
+    photo = store.save_type(None, label='photo', family='single_smd',
+                            overrides={'crop_model': ''})
+    assert store.resolve(inherit)['crop_model'] == 'vendor/global-crop'
+    assert store.resolve(own)['crop_model'] == 'vendor/type-crop'
+    assert store.resolve(photo)['crop_model'] == ''
+    assert store.overrides(photo) == {'crop_model': ''}
+    assert 'crop_model' not in store.overrides(inherit)
+    for key in (inherit, own, photo):
+        # A model identifier never receives the image instructions.
+        assert store.snapshot(key)['crop_model'] == store.resolve(key)['crop_model']

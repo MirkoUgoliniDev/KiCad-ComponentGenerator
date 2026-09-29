@@ -239,7 +239,8 @@ failed readings kept apart from disagreements; points 147-148, `FIX` only: crop 
 questionnaire with the class derived by the program, contradictions with the inventory flagged for
 review, JEDEC bounds for SOIC families; point 149, `FIX` only: detector class carried into the
 reconciled rows, leaded family from lead count + measured envelope when the declared name
-contradicts the measure) is 6201 passed,
+contradicts the measure; point 150, `FIX` only: profile field «Modello lettura ritagli», schema v5)
+is 6240 passed,
 6 skipped, 2 expected failures and 19 subtests, run in two halves (HANDOFF point 113:
 the single-process run can die at random with a native Qt/VTK crash). The last packaging integration was merge
 commit `692ca95` on `main`. Keep these values aligned with HANDOFF.md.

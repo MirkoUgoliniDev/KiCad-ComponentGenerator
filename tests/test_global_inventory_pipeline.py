@@ -509,3 +509,40 @@ def test_extractor_sends_the_profile_crop_prompt_to_every_crop_reading(pipeline,
     assert row['_crop_reading_prompt_digest'] == text_digest(effective)
     if detector == 'vlm':
         pipeline['detection'].assert_not_called()   # really the vision-only route
+
+
+@pytest.mark.parametrize('detector', ['yolo', 'vlm'])
+@pytest.mark.parametrize('given,expected', [
+    ('offline/crop-reader', 'offline/crop-reader'),
+    ('  offline/crop-reader  ', 'offline/crop-reader'),
+    (None, 'offline/global'),
+    ('   ', 'offline/global'),
+])
+def test_extractor_reads_the_crops_with_the_profile_crop_model_or_the_photo_model(
+        pipeline, monkeypatch, given, expected, detector):
+    """@brief The profile field crop_model drives the crop readings only (HANDOFF 150).
+
+    Set, it is the model of every 'observe_body' request and is announced in
+    the log; None or blank, the crops go to the model of the paid call on the
+    photograph. The global inventory request never uses it.
+    """
+    from kicadgen.services import providers
+    monkeypatch_ready = []
+    real_ready = providers.ensure_providers_ready
+    monkeypatch.setattr(providers, 'ensure_providers_ready',
+                        lambda models, *a, **k: (monkeypatch_ready.append(list(models)),
+                                                 real_ready(models, *a, **k)))
+    pipeline['execute'](crop_model=given, photo_detector=detector)
+    assert len(pipeline['crop_requests']) == 2
+    assert {r['model'] for r in pipeline['crop_requests']} == {expected}
+    assert [r['model'] for r in pipeline['requests']] == ['offline/board', 'offline/global']
+    named = [line for line in pipeline['logs']
+             if line.startswith('Lettura dei singoli componenti affidata al modello')]
+    if expected == 'offline/global':
+        assert named == []
+    else:
+        assert len(named) == 1 and 'offline/crop-reader' in named[0] and 'offline/global' in named[0]
+    # The provider of the crop model is checked before the run, like the others.
+    [checked] = monkeypatch_ready
+    assert [m for m in checked if m] == ['offline/board', 'offline/localizer', 'offline/global'] + (
+        ['offline/crop-reader'] if expected != 'offline/global' else [])

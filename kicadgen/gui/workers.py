@@ -627,6 +627,7 @@ class ExtractWorker(QThread):
         *, photo_detector: str = "ai", yolo_model_path: Path | None = None,
         yolo_confidence: float | None = None, yolo_settings: dict | None = None,
         crop_prompt: str | None = None,
+        crop_model: str | None = None,
     ):
         """@brief Snapshot extraction settings before starting background work.
 
@@ -649,6 +650,10 @@ class ExtractWorker(QThread):
         @param crop_prompt Optional per-body crop reading prompt (profile field
             'crop_prompt'); None uses the service's factory default. Forwarded
             only when the extraction function accepts it.
+        @param crop_model Optional model of the per-body crop reading (profile
+            field 'crop_model', HANDOFF 150); None or blank reads the crops
+            with the model of the paid call on the photograph
+            (`verification_model`). Forwarded like `crop_prompt`.
         @note YOLO changes photo proposals only; AI verification remains configured.
         """
         super().__init__()
@@ -672,6 +677,7 @@ class ExtractWorker(QThread):
         self.yolo_confidence = yolo_confidence
         self.yolo_settings = dict(yolo_settings) if yolo_settings is not None else None
         self.crop_prompt = crop_prompt
+        self.crop_model = crop_model
         # «Interrompi» lo alza: il servizio lo controlla prima di ogni chiamata
         # a pagamento, cosi' dopo l'interruzione non ne parte nessun'altra
         # (verifica del 25/09, D8). Quella gia' in volo non si puo' richiamare.
@@ -748,6 +754,7 @@ class ExtractWorker(QThread):
                                   yolo_confidence=self.yolo_confidence,
                                   yolo_settings=self.yolo_settings,
                                   crop_prompt=self.crop_prompt,
+                                  crop_model=self.crop_model,
                                   cancel=self.cancel_event),
                 **phase_kwargs(extract, self._forward_phase),
             )
@@ -855,7 +862,7 @@ class ReconcileWorker(QThread):
 
     def __init__(self, photo_png, proposals, length_mm, width_mm, model, cache_dir,
                  *, declared=None, verification_prompt=None, extra_instructions=None,
-                 detector='yolo', crop_prompt=None):
+                 detector='yolo', crop_prompt=None, crop_model=None):
         """@brief Fotografa le proposte approvate prima di lasciare il thread GUI.
 
         @param photo_png Fotografia calibrata su cui le proposte furono misurate.
@@ -872,6 +879,9 @@ class ReconcileWorker(QThread):
             'crop_prompt'), come per ExtractWorker: il rilancio esegue la stessa
             lettura dei singoli corpi (HANDOFF 146 V2). None o vuoto: testo di
             fabbrica.
+        @param crop_model Modello della lettura per ritaglio (campo del profilo
+            'crop_model', HANDOFF 150); None o vuoto: lo stesso `model` della
+            richiesta sulla fotografia.
         """
         super().__init__()
         self.photo_png = photo_png
@@ -884,6 +894,7 @@ class ReconcileWorker(QThread):
         self.extra_instructions = extra_instructions
         self.detector = detector
         self.crop_prompt = crop_prompt
+        self.crop_model = crop_model
         # Come ExtractWorker.cancel_event: alzato da «Interrompi».
         self.cancel_event = threading.Event()
 
@@ -912,8 +923,13 @@ class ReconcileWorker(QThread):
         from ..services.ai_diagnostics import make_logged_call
         from ..services import providers
         try:
-            if providers.provider_of(self.model) == providers.PROVIDER_DEEPSEEK:
-                providers.ensure_providers_ready([self.model], self.progress.emit)
+            # Chiave e credito di ogni fornitore DIRETTO che il rilancio usa:
+            # il modello dell'inventario e quello, se diverso, delle letture
+            # dei ritagli (OpenRouter e' gia' verificato da _ensure_api_key).
+            direct = [m for m in (self.model, (self.crop_model or '').strip() or self.model)
+                      if providers.provider_of(m) == providers.PROVIDER_DEEPSEEK]
+            if direct:
+                providers.ensure_providers_ready(direct, self.progress.emit)
             self.phase.emit('llm_inventory', self.model, 0, 0)
             report = reconcile_saved_proposals(
                 self.photo_png, self.proposals, self.length_mm, self.width_mm, self.model,
@@ -924,6 +940,7 @@ class ReconcileWorker(QThread):
                 verification_prompt=self.verification_prompt,
                 extra_instructions=self.extra_instructions, detector=self.detector,
                 crop_prompt=self.crop_prompt,
+                **accepted_kwargs(reconcile_saved_proposals, crop_model=self.crop_model),
                 **phase_kwargs(reconcile_saved_proposals, self._forward_phase))
             self.done.emit(report)
         except Exception as exc:  # noqa: BLE001 - errori rete/API riportati in UI

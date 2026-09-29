@@ -3598,6 +3598,7 @@ class MainWindow(QMainWindow):
             verification_prompt=profile['verification_prompt'],
             terminal_prompt=profile['terminal_prompt'],
             crop_prompt=profile['crop_prompt'],
+            crop_model=profile['crop_model'],
             document_roles=document_roles,
             component_family=self._selected_family(),
             photo_detector=photo_detector,
@@ -4562,8 +4563,9 @@ class MainWindow(QMainWindow):
         @param photo_png Calibrated photograph the proposals refer to.
         @param params Base ExtractedParams the inventory is grafted on.
         @param model Model that receives the single paid request.
-        @param profile AI profile snapshot (verification and crop prompts),
-            the same ProfileStore.snapshot source as the ExtractWorker.
+        @param profile AI profile snapshot (verification and crop prompts,
+            crop model), the same ProfileStore.snapshot source as the
+            ExtractWorker.
         @param synthesized True when `params` was built from the fields rather
             than extracted: automatic generation is then withheld.
         @throws Exception Anything raised by the worker set-up or start; the
@@ -4598,6 +4600,7 @@ class MainWindow(QMainWindow):
             self._photo_cache_dir(),
             declared=declared, verification_prompt=profile['verification_prompt'],
             crop_prompt=profile['crop_prompt'],
+            crop_model=profile['crop_model'],
             extra_instructions=self.field_component_prompt.toPlainText().strip() or None,
             # Il nome del rilevatore e' quello con cui i riquadri sono nati,
             # registrato nel pacchetto, qualunque cosa dica ora la tendina.

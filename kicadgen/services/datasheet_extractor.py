@@ -1763,6 +1763,7 @@ def extract_pin_header_params(
     verification_model: Optional[str] = None,
     terminal_prompt: Optional[str] = None,
     crop_prompt: Optional[str] = None,
+    crop_model: Optional[str] = None,
     document_roles: Optional[dict] = None,
     component_family: Optional[str] = None,
     photo_detector: str = "ai",
@@ -1792,6 +1793,12 @@ def extract_pin_header_params(
         field 'crop_prompt'). Used only with photo_detector 'yolo' or 'vlm',
         the paths that run photo_crop_reading.read_bodies; None or blank sends
         its factory default.
+    @param crop_model Model of that per-body crop reading (profile field
+        'crop_model', HANDOFF 150), same paths as `crop_prompt`. None or
+        blank reads the crops with the model of the paid call on the
+        photograph (`verification_model`, else `model`); a model set here is
+        used for the crop readings only, and its provider is checked for a
+        key and credit before the run like the others.
     @param photo_detector Photo localization backend: ai (legacy), yolo (local
         proposals plus one AI reconciliation) or vlm (no local detector: the
         vision model enumerates the bodies in that same single request).
@@ -1890,7 +1897,9 @@ def extract_pin_header_params(
 
         ensure_providers_ready(
             [model or DEFAULT_MODEL, vision_model or DEFAULT_VISION_MODEL,
-             verification_model or model or DEFAULT_MODEL],
+             verification_model or model or DEFAULT_MODEL,
+             # Blank = the photo model above; an empty entry is skipped.
+             (crop_model or '').strip()],
             progress, openrouter_check=openrouter_ready)
     except OpenRouterError as exc:
         raise ExtractionError(str(exc)) from exc
@@ -2019,7 +2028,7 @@ def extract_pin_header_params(
         verification_model=verification_model, diagnostic_call=diagnostic_call,
         extra_instructions=extra_instructions, photo_cache_dir=photo_cache_dir,
         grounding_prompt=grounding_prompt, verification_prompt=verification_prompt,
-        terminal_prompt=terminal_prompt, crop_prompt=crop_prompt,
+        terminal_prompt=terminal_prompt, crop_prompt=crop_prompt, crop_model=crop_model,
         yolo_model_path=yolo_model_path,
         review_proposals=review_proposals, yolo_confidence=yolo_confidence,
         yolo_settings=yolo_settings,
@@ -2556,7 +2565,8 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
                          photo_cache_dir, grounding_prompt, verification_prompt,
                          terminal_prompt, yolo_model_path, review_proposals,
                          yolo_confidence, yolo_settings,
-                         recount_contacts=None, crop_prompt=None) -> ExtractedParams:
+                         recount_contacts=None, crop_prompt=None,
+                         crop_model=None) -> ExtractedParams:
     """Optional photo inventory and final assembly of a validated main answer."""
     # La foto richiede un passaggio separato: nell'estrazione globale il modello
     # deve anche leggere quote, pinout e layout, e tende a sacrificare i passivi
@@ -2607,7 +2617,8 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
                 **({'detector': photo_detector, 'yolo_model_path': yolo_model_path,
                     'review_proposals': review_proposals, 'declared': data,
                     'yolo_confidence': yolo_confidence, 'yolo_settings': yolo_settings,
-                    'recount_contacts': recount_contacts, 'crop_prompt': crop_prompt}
+                    'recount_contacts': recount_contacts, 'crop_prompt': crop_prompt,
+                    'crop_model': crop_model}
                    if photo_detector in ('yolo', 'vlm') else {}),
             )
         except ReviewCancelled as exc:

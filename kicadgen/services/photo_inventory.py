@@ -1001,7 +1001,7 @@ def _phase_announcer(phase, log):
 
 
 def read_retained_bodies(photo, report, length, width, model, call, log, cache_dir,
-                         crop_prompt, announce):
+                         crop_prompt, announce, *, crop_model=None):
     """@brief Common tail of the global-inventory paths: crop reading, colours, markings.
 
     @param photo Calibrated BGR photograph the rows were measured on.
@@ -1017,6 +1017,12 @@ def read_retained_bodies(photo, report, length, width, model, call, log, cache_d
     @param cache_dir Photo cache folder, or None.
     @param crop_prompt Profile field 'crop_prompt' (None/blank: factory text).
     @param announce Callable(tool, detail) from _phase_announcer.
+    @param crop_model Profile field 'crop_model' (HANDOFF 150): the model of
+        the crop reading only. None or blank: `model`, the one of the paid
+        call on the photograph. A different model is named in the phase
+        announcement and in one log line, because its cost goes to its own
+        provider (openrouter.call_tool routes and records every call by the
+        model it carries). Colours and markings keep using `model`.
     @note extract_inventory (detectors 'yolo' and 'vlm') and
         reconcile_saved_proposals («Rilancio inventario») both call this, in
         the same position, so the two routes cannot drift again (HANDOFF 146
@@ -1034,8 +1040,15 @@ def read_retained_bodies(photo, report, length, width, model, call, log, cache_d
         # package e piedini a caso. Si adotta solo cio' su cui le due letture
         # concordano. Prima di colori, altezze e sigle, che leggono la classe.
         from .photo_crop_reading import read_bodies
-        announce('llm', tx("lettura dei singoli componenti"))
-        summary = read_bodies(photo, report.components, length, width, model, call, log,
+        reader = (crop_model or '').strip() or model
+        if reader != model:
+            log(tx("Lettura dei singoli componenti affidata al modello {model} (Modello "
+                   "lettura ritagli del profilo) invece del modello della foto {photo_model}: "
+                   "il costo va al suo fornitore.", model=reader, photo_model=model))
+            announce('llm', tx("lettura dei singoli componenti con {model}", model=reader))
+        else:
+            announce('llm', tx("lettura dei singoli componenti"))
+        summary = read_bodies(photo, report.components, length, width, reader, call, log,
                               cache_dir, system_prompt=crop_prompt)
         if summary.warning:
             # Gia' registrato nel log da read_bodies come avviso: qui entra
@@ -1064,12 +1077,16 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                       grounding_prompt=None, verification_prompt=None, top_photo_source='AI',
                       detector='ai', yolo_model_path=None, review_proposals=None,
                       declared=None, phase=None, yolo_confidence=None, yolo_settings=None,
-                      recount_contacts=None, crop_prompt=None):
+                      recount_contacts=None, crop_prompt=None, crop_model=None):
     """@brief Calibrate the photo and extract reviewed component envelopes.
 
     @param crop_prompt Instructions of the per-body crop reading (profile
         field 'crop_prompt'), forwarded to photo_crop_reading.read_bodies as
         its system_prompt. None or blank sends the factory default.
+    @param crop_model Model of that crop reading (profile field 'crop_model',
+        HANDOFF 150). None or blank: the model of the paid call on the
+        photograph (`classifier_model`, else `model`). Never used for the
+        global inventory request itself.
 
     @param detector ai preserves the existing localization; yolo uses local
         proposals plus one paid reconciliation; yolo_only stops after the local
@@ -1358,7 +1375,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         # entrambi dall'inventario globale; 'ai' ha la sua verifica per
         # ritagli (grounded_components).
         read_retained_bodies(photo, report, length, width, classifier_model or model, call,
-                             log, cache_dir, crop_prompt, announce)
+                             log, cache_dir, crop_prompt, announce, crop_model=crop_model)
         report.calibration['detector'] = detector
         report.calibration['proposal_count'] = len(proposals)
         report.calibration['coverage_added_count'] = sum(
@@ -1808,7 +1825,7 @@ def load_review_bundle(project_dir):
 def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
                               cache_dir=None, *, declared=None, verification_prompt=None,
                               extra_instructions=None, detector='yolo', crop_prompt=None,
-                              phase=None):
+                              phase=None, crop_model=None):
     """@brief Re-run the paid reconciliation on already reviewed detector proposals.
 
     @param photo Calibrated BGR crop (numpy array) or its PNG bytes: the same
@@ -1830,6 +1847,8 @@ def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
     @param crop_prompt Instructions of the per-body crop reading (profile
         field 'crop_prompt'), as in extract_inventory; None or blank sends the
         factory default.
+    @param crop_model Model of that crop reading (profile field 'crop_model'),
+        as in extract_inventory; None or blank reads the crops with `model`.
     @param phase Optional callable(tool, detail) announcing the working tool,
         with extract_inventory's contract (the crop reading as 'llm', then
         'llm_inventory'; the marking reading as 'llm_markings'); an exception
@@ -1910,7 +1929,7 @@ def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
     # senza la lettura per ritaglio il rilancio perdeva le correzioni delle
     # letture concordi.
     read_retained_bodies(photo, report, length, width, model, call, log, cache_dir,
-                         crop_prompt, _phase_announcer(phase, log))
+                         crop_prompt, _phase_announcer(phase, log), crop_model=crop_model)
     report.calibration.update(detector=detector, proposal_count=len(proposals),
                               coverage_added_count=sum(
                                   not c.get('source_candidate_ids', [True]) for c in report.components),
