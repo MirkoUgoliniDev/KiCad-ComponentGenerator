@@ -15,9 +15,19 @@ from .component_types import COMPONENT_TYPES
 from .messages import tx
 
 PROFILE_FIELDS = ('model','vision_model','verification_model','system_prompt','grounding_prompt',
-                  'verification_prompt','terminal_prompt','lead_prompt','image_instructions')
+                  'verification_prompt','terminal_prompt','lead_prompt','crop_prompt',
+                  'image_instructions')
+#: Prompt fields sent with a photograph of the whole board: the type's image
+#: instructions are appended to each of them by ProfileStore.snapshot.
+#: 'crop_prompt' is deliberately absent (user decision 2026-09-28, HANDOFF 146
+#: V3): it reads ONE body from its own crop, and the image instructions
+#: describe the whole board; the per-body text is customised per type in its
+#: own profile tab instead.
+PHOTO_PROMPT_FIELDS = ('grounding_prompt','verification_prompt','terminal_prompt','lead_prompt')
 FAMILIES = {t.key:t.label for t in COMPONENT_TYPES}
-SCHEMA_VERSION = 3
+#: Database schema version. 2: verification_model; 3: translations table;
+#: 4: crop_prompt (per-body crop reading prompt, HANDOFF 146).
+SCHEMA_VERSION = 4
 
 
 def _default_translations():
@@ -41,14 +51,16 @@ def _superseded_translations():
 
 
 def _replace_superseded_texts(db):
-    """@brief Replace outdated built-in instructions and system prompt still stored verbatim.
+    """@brief Replace outdated built-in instructions and global prompts still stored verbatim.
 
     @param db Open connection inside the initialization transaction.
     @note A stored text is replaced only when its SHA-256 digest is one of the
         known former defaults (component_types.SUPERSEDED_INSTRUCTION_DIGESTS,
-        datasheet_extractor.SUPERSEDED_SYSTEM_PROMPT_DIGESTS): a text the user
+        datasheet_extractor.SUPERSEDED_SYSTEM_PROMPT_DIGESTS,
+        photo_crop_reading.SUPERSEDED_CROP_PROMPT_DIGESTS): a text the user
         edited, even by one character, never matches and is kept. Only the
-        global system prompt and the built-in types are touched; a per-type
+        global system prompt, the global crop prompt and the built-in types
+        are touched; a per-type
         override or a custom type copied from a built-in one is a deliberate
         choice of the user and stays as it is. The UPDATE repeats the old text
         in its condition, so a concurrent edit is never overwritten.
@@ -63,10 +75,14 @@ def _replace_superseded_texts(db):
             db.execute('UPDATE component_types SET instructions=? '
                        'WHERE key=? AND builtin=1 AND instructions=?',
                        (current.prompt, key, instructions))
-    row = db.execute("SELECT value FROM ai_defaults WHERE name='system_prompt'").fetchone()
-    if row is not None and text_digest(row[0]) in SUPERSEDED_SYSTEM_PROMPT_DIGESTS:
-        db.execute("UPDATE ai_defaults SET value=? WHERE name='system_prompt' AND value=?",
-                   (DEFAULT_SYSTEM_PROMPT, row[0]))
+    from .photo_crop_reading import SUPERSEDED_CROP_PROMPT_DIGESTS, SYSTEM_PROMPT as CROP_PROMPT
+    for name, current, superseded in (
+            ('system_prompt', DEFAULT_SYSTEM_PROMPT, SUPERSEDED_SYSTEM_PROMPT_DIGESTS),
+            ('crop_prompt', CROP_PROMPT, SUPERSEDED_CROP_PROMPT_DIGESTS)):
+        row = db.execute('SELECT value FROM ai_defaults WHERE name=?', (name,)).fetchone()
+        if row is not None and row[0] != current and text_digest(row[0]) in superseded:
+            db.execute('UPDATE ai_defaults SET value=? WHERE name=? AND value=?',
+                       (current, name, row[0]))
 
 
 def factory_defaults():
@@ -76,10 +92,11 @@ def factory_defaults():
     from .photo_grounding import DEFAULT_VISION_MODEL, GROUNDING_PROMPT, VERIFICATION_PROMPT
     from .photo_terminals import PROMPT as TERMINAL_PROMPT
     from .photo_leads import PROMPT as LEAD_PROMPT
+    from .photo_crop_reading import SYSTEM_PROMPT as CROP_PROMPT
     return dict(model=DEFAULT_MODEL,vision_model=DEFAULT_VISION_MODEL,verification_model=DEFAULT_MODEL,
         system_prompt=DEFAULT_SYSTEM_PROMPT,grounding_prompt=GROUNDING_PROMPT,
         verification_prompt=VERIFICATION_PROMPT,terminal_prompt=TERMINAL_PROMPT,
-        lead_prompt=LEAD_PROMPT,image_instructions='')
+        lead_prompt=LEAD_PROMPT,crop_prompt=CROP_PROMPT,image_instructions='')
 
 
 class ProfileError(ValueError):
@@ -132,8 +149,16 @@ class ProfileStore:
                            '(key TEXT NOT NULL, language TEXT NOT NULL, text TEXT NOT NULL, '
                            'PRIMARY KEY(key,language))')
                 db.executemany('INSERT OR IGNORE INTO translations VALUES (?,?,?)', _default_translations())
-                db.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
-                version = SCHEMA_VERSION
+                db.execute('PRAGMA user_version=3')
+                version = 3
+            if version == 3:
+                # New editable prompt: the factory text becomes the global
+                # default. INSERT OR IGNORE never replaces a row already there,
+                # and no per-type override is created, so every type inherits it.
+                db.execute('INSERT OR IGNORE INTO ai_defaults VALUES (?,?)',
+                           ('crop_prompt', factory_defaults()['crop_prompt']))
+                db.execute('PRAGMA user_version=4')
+                version = 4
             if version == SCHEMA_VERSION:
                 # Fail explicitly on a damaged schema; never silently reset user profiles.
                 db.execute('SELECT key,label,family,instructions,active,builtin,position FROM component_types LIMIT 1')
@@ -384,11 +409,23 @@ class ProfileStore:
             return values
 
     def snapshot(self,key=''):
-        """@brief Return resolved values with the type image instructions appended to every photo prompt."""
+        """@brief Return resolved values with the type image instructions appended to the whole-board photo prompts.
+
+        @param key Component type key; empty for the global defaults only.
+        @return Resolved values; each field of PHOTO_PROMPT_FIELDS carries the
+            image instructions when they are not blank.
+        @throws ProfileError When `key` is not in the catalogue.
+        @note 'crop_prompt' is returned as resolved, WITHOUT the image
+            instructions (HANDOFF 146 V3): they describe the whole board,
+            while the crop reading looks at one body; a type customises the
+            per-body text in its own 'crop_prompt' override. Consequence: a
+            type that inherits the global crop prompt sends the same text as
+            the global default, and shares its crop-reading cache entries.
+        """
         values = self.resolve(key)
         extra = values['image_instructions'].strip()
         if extra:
-            for field in ('grounding_prompt','verification_prompt','terminal_prompt','lead_prompt'):
+            for field in PHOTO_PROMPT_FIELDS:
                 values[field] += '\n\nIstruzioni specifiche per le immagini:\n'+extra
         return values
 

@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from .openrouter import OpenRouterError, DEFAULT_MODEL
@@ -163,8 +164,110 @@ DETAIL_TARGET_PX = 20
 #: documentati del modello di verifica predefinito (Anthropic: 1568 px sul
 #: lato lungo, ~1.15 megapixel), il piu' restrittivo fra i predefiniti: un
 #: modello che conserva piu' pixel riceve piu' dell'obiettivo, mai meno.
+#: Correzione (HANDOFF 144): valgono per i modelli Claude/OpenRouter, NON per
+#: ogni fornitore; i limiti per fornitore li da' model_image_limits.
 MODEL_IMAGE_LONG_SIDE_PX = 1568
 MODEL_IMAGE_MAX_PIXELS = 1_150_000
+#: Side, in pixels, of one visual token of the reference model: Anthropic
+#: documents tokens = width x height / 750, i.e. one token per ~27.4 x 27.4 px.
+#: It is the unit in which DETAIL_TARGET_PX was chosen, so every other model's
+#: resolution is expressed in these reference pixels (model_px_per_mm).
+REFERENCE_TOKEN_PX = math.sqrt(750)
+
+
+@dataclass(frozen=True)
+class ModelImageLimits:
+    """@brief How a vision model receives an image: downscaling limits and token density.
+
+    @note `long_side_px` / `max_pixels`: above them the provider shrinks the
+        image before looking at it. `token_px`: side, in the provider's pixels,
+        of one visual token; a coarser token resolves less detail from the same
+        pixels. `enlarges`: True when sending an image ENLARGED up to the limits
+        makes the provider spend more tokens on it (patch models billed by area
+        with an upsampling floor), so an enlarged crop does show more detail;
+        False keeps the historical assumption that a crop adds no pixel the
+        photograph does not have. `source` says where the numbers come from:
+        'documented', 'measured' or 'assumed'.
+    """
+    long_side_px: int
+    max_pixels: int
+    token_px: float
+    enlarges: bool
+    source: str
+
+
+#: Limits of the reference model (Anthropic documentation), unchanged since the
+#: detail grid was introduced. Also used when no model is given at all, so the
+#: callers that do not know the model keep today's behaviour.
+REFERENCE_IMAGE_LIMITS = ModelImageLimits(MODEL_IMAGE_LONG_SIDE_PX, MODEL_IMAGE_MAX_PIXELS,
+                                          REFERENCE_TOKEN_PX, False, 'documented')
+#: DeepSeek's own API, MEASURED on 2026-09-28 (HANDOFF 144) from the image
+#: tokens it bills for the same photograph at several sizes: <=768 px long side
+#: -> 191 tokens (floor: smaller images are upsampled), 1024 -> 314, 1536 ->
+#: 648, 2048 -> 989, 3072 -> 989 (cap at ~2048 px). One token covers ~34.5 px
+#: at 1024 and ~38.8 px at 2048; the coarser value is used. The largest area
+#: measured is 2048 x 727 px (a 2.8:1 photograph): a squarer image may be
+#: allowed more, so the measured area is the conservative bound.
+DEEPSEEK_IMAGE_LIMITS = ModelImageLimits(2048, 2048 * 727, 38.8, True, 'measured')
+#: Declared ASSUMPTION for a model whose provider is not recognized: it sees
+#: little (the DeepSeek floor, 768 px, with DeepSeek's coarse token) and gains
+#: from enlargement, so detail views and crops are sent rather than skipped.
+#: Over-assuming would silently hide detail; under-assuming only costs a few
+#: extra images. A real measurement for the provider makes this superfluous.
+UNKNOWN_IMAGE_LIMITS = ModelImageLimits(768, 768 * 768, 38.8, True, 'assumed')
+
+
+def model_image_limits(model):
+    """@brief Image limits of the vision model `model`, from its provider.
+
+    @param model Model identifier as stored in the settings, or None.
+    @return DEEPSEEK_IMAGE_LIMITS for DeepSeek's own API (identifier prefix,
+        see providers.provider_of); REFERENCE_IMAGE_LIMITS for OpenRouter
+        identifiers («vendor/name», the historical behaviour, Claude
+        included); UNKNOWN_IMAGE_LIMITS for anything else (None, empty text,
+        an identifier with no provider form).
+    @note The provider is read from the declared identifier, never guessed
+        from a brand in the model name. OpenRouter serves many vendors whose
+        real limits differ; they keep the constants used so far because no
+        measurement says otherwise (see MODEL_IMAGE_LONG_SIDE_PX).
+    """
+    from .providers import PROVIDER_DEEPSEEK, provider_of
+    if not isinstance(model, str) or not model.strip():
+        return UNKNOWN_IMAGE_LIMITS
+    if provider_of(model) == PROVIDER_DEEPSEEK:
+        return DEEPSEEK_IMAGE_LIMITS
+    vendor, slash, name = model.strip().partition('/')
+    if slash and vendor and name:
+        return REFERENCE_IMAGE_LIMITS
+    return UNKNOWN_IMAGE_LIMITS
+
+
+def fit_to_model(image, limits):
+    """@brief Enlarge an image up to the provider's limits when that shows the model more.
+
+    @param image BGR array.
+    @param limits ModelImageLimits of the receiving model, or None (reference).
+    @return The same array when the model does not gain from enlargement or the
+        image already reaches its limits; otherwise a cubic enlargement to the
+        largest size within `long_side_px` and `max_pixels`.
+    @note Enlarging adds no information to the photograph: it only makes a
+        patch-based provider spend more tokens on the same pixels, which is
+        exactly what a coarse-token model lacks (HANDOFF 144). Never shrinks:
+        shrinking is the provider's own job.
+    """
+    limits = limits or REFERENCE_IMAGE_LIMITS
+    if not limits.enlarges:
+        return image
+    height, width = image.shape[:2]
+    if height < 1 or width < 1:
+        return image
+    scale = min(limits.long_side_px / max(height, width),
+                math.sqrt(limits.max_pixels / (height * width)))
+    if scale <= 1.0:
+        return image
+    import cv2
+    return cv2.resize(image, (max(1, int(width * scale)), max(1, int(height * scale))),
+                      interpolation=cv2.INTER_CUBIC)
 #: Frazione di cella condivisa da due dettagli adiacenti (mezza per lato
 #: interno): la stessa sovrapposizione del rilevatore locale
 #: (photo_yolo._TILE_OVERLAP_FRACTION). Un corpo a cavallo di un confine di
@@ -177,20 +280,26 @@ DETAIL_OVERLAP_FRACTION = 0.25
 _MAX_CELLS_PER_AXIS = 64
 
 
-def model_px_per_mm(tile_length_mm, tile_width_mm):
+def model_px_per_mm(tile_length_mm, tile_width_mm, limits=None):
     """@brief Scala, in px/mm, a cui il modello vede una zona della scheda.
 
     @param tile_length_mm Estensione della zona lungo X, in mm.
     @param tile_width_mm Estensione lungo Y, in mm.
+    @param limits ModelImageLimits del modello (model_image_limits), o None
+        per i limiti di riferimento (comportamento storico).
     @return I pixel per millimetro dopo la riduzione del fornitore, se la foto
-        ne ha abbastanza (vedi MODEL_IMAGE_LONG_SIDE_PX e MODEL_IMAGE_MAX_PIXELS).
+        ne ha abbastanza, espressi in pixel del modello di riferimento: un
+        modello a token piu' grossi (token_px) risolve meno dagli stessi
+        pixel, e la scala si riduce nella stessa proporzione.
     """
+    limits = limits or REFERENCE_IMAGE_LIMITS
     long_side = max(tile_length_mm, tile_width_mm)
-    return min(MODEL_IMAGE_LONG_SIDE_PX / long_side,
-               math.sqrt(MODEL_IMAGE_MAX_PIXELS / (tile_length_mm * tile_width_mm)))
+    scale = min(limits.long_side_px / long_side,
+                math.sqrt(limits.max_pixels / (tile_length_mm * tile_width_mm)))
+    return scale * REFERENCE_TOKEN_PX / limits.token_px
 
 
-def detail_grid(length_mm, width_mm, image_size_px=None):
+def detail_grid(length_mm, width_mm, image_size_px=None, limits=None):
     """@brief Griglia delle viste di dettaglio, su entrambi gli assi, dalle quote reali della scheda.
 
     @param length_mm Estensione della scheda lungo X, in mm.
@@ -210,17 +319,29 @@ def detail_grid(length_mm, width_mm, image_size_px=None):
         quella con meno celle (ogni dettaglio e' una chiamata), a parita' la
         piu' quadrata. Si misura sul dettaglio peggiore: quello interno, che
         ha sovrapposizione su entrambi i lati.
+    @param limits ModelImageLimits del modello che ricevera' le viste, o None
+        (limiti di riferimento, comportamento storico). Con un modello che
+        guadagna dall'ingrandimento (limits.enlarges) la vista completa parte
+        ai pixel della foto, mentre i dettagli vengono ingranditi fino ai
+        limiti (fit_to_model): lo decide chi li spedisce.
     """
+    limits = limits or REFERENCE_IMAGE_LIMITS
     for value in (length_mm, width_mm):
         if isinstance(value, bool) or not isinstance(value, (int, float)) \
                 or not math.isfinite(value) or value <= 0:
             raise ValueError("board dimensions must be finite positive millimetres")
     target = DETAIL_TARGET_PX / SMALLEST_PACKAGE_SHORT_SIDE_MM
+    full_view = model_px_per_mm(length_mm, width_mm, limits)
     if image_size_px is not None:
         photo_scale = min(image_size_px[0] / length_mm, image_size_px[1] / width_mm)
         if photo_scale > 0:
             target = min(target, photo_scale)
-    if model_px_per_mm(length_mm, width_mm) >= target:
+            if limits.enlarges:
+                # La foto intera parte com'e', non ingrandita: il modello la
+                # vede ai suoi pixel, con i suoi token (HANDOFF 144).
+                full_view = min(full_view,
+                                photo_scale * REFERENCE_TOKEN_PX / limits.token_px)
+    if full_view >= target:
         return []
 
     def worst_span(total, cells):
@@ -234,7 +355,7 @@ def detail_grid(length_mm, width_mm, image_size_px=None):
             if nx * ny == 1:
                 continue
             span_x, span_y = worst_span(length_mm, nx), worst_span(width_mm, ny)
-            if model_px_per_mm(span_x, span_y) < target:
+            if model_px_per_mm(span_x, span_y, limits) < target:
                 continue
             rank = (nx * ny, max(span_x, span_y) / min(span_x, span_y))
             if best is None or rank < best[0]:
@@ -255,12 +376,15 @@ def detail_grid(length_mm, width_mm, image_size_px=None):
     return tiles
 
 
-def grounding_regions(photo, length_mm, width_mm):
+def grounding_regions(photo, length_mm, width_mm, model=None):
     """@brief Full image retains large packages; a grid of overlapping details sized in mm.
 
     @param photo Calibrated board crop (H x W x 3).
     @param length_mm Board extent along X, in mm.
     @param width_mm Board extent along Y, in mm.
+    @param model Vision model that receives the views, or None (reference
+        limits). Its limits (model_image_limits) size the grid, and for a model
+        that gains from enlargement each detail is enlarged (fit_to_model).
     @return Iterator of (label, region, ownership, crop): region and ownership
         are normalized (x0, y0, x1, y1); region matches the crop's pixels.
     @note The details follow detail_grid on BOTH axes: a tall or large board
@@ -270,14 +394,15 @@ def grounding_regions(photo, length_mm, width_mm):
     """
     height, width = photo.shape[:2]
     yield "Scheda completa", (0., 0., 1., 1.), (0., 0., 1., 1.), photo
-    tiles = detail_grid(length_mm, width_mm, (width, height))
+    limits = model_image_limits(model) if model is not None else REFERENCE_IMAGE_LIMITS
+    tiles = detail_grid(length_mm, width_mm, (width, height), limits)
     for index, (region, cell) in enumerate(tiles, 1):
         left, right = max(0, round(region[0]*width)), min(width, round(region[2]*width))
         top, bottom = max(0, round(region[1]*height)), min(height, round(region[3]*height))
         right, bottom = max(right, left + 1), max(bottom, top + 1)
         yield (f"Dettaglio {index}/{len(tiles)}",
                (left/width, top/height, right/width, bottom/height), cell,
-               photo[top:bottom, left:right])
+               fit_to_model(photo[top:bottom, left:right], limits))
 
 
 def cached_call(call, kwargs, cache_dir, stage, log, expected_ids=None):
@@ -826,7 +951,7 @@ def grounded_components(photo, model, length, width, kinds, call, log, cache_dir
     log(tx("Localizzazione fotografica dedicata: {model}. Geometria e "
            "classificazione separate.",
            model=model))
-    regions = list(grounding_regions(photo, length, width))
+    regions = list(grounding_regions(photo, length, width, model))
     log(tx("Viste per la localizzazione: la scheda intera più {n_details} dettagli "
            "ingranditi (una chiamata ciascuno), calcolati dalle quote {length:g} x "
            "{width:g} mm.", n_details=len(regions) - 1, length=length, width=width))

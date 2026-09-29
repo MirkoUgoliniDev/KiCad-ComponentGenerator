@@ -682,7 +682,8 @@ def test_worker_forwards_separate_photo_and_datasheet_models(monkeypatch):
     monkeypatch.setattr(gui, "extract_pin_header_params", extract)
     worker = gui.ExtractWorker([Path("board.png")], model="vendor/datasheet", vision_model="vendor/photo",
                                grounding_prompt="localize", verification_prompt="verify",
-                               verification_model="vendor/verifier", terminal_prompt="terminals")
+                               verification_model="vendor/verifier", terminal_prompt="terminals",
+                               crop_prompt="crops")
     spy = QSignalSpy(worker.done)
     worker.run()
     assert spy[0][0] is expected
@@ -692,6 +693,7 @@ def test_worker_forwards_separate_photo_and_datasheet_models(monkeypatch):
     assert calls[0][1]["verification_prompt"] == "verify"
     assert calls[0][1]["verification_model"] == "vendor/verifier"
     assert calls[0][1]["terminal_prompt"] == "terminals"
+    assert calls[0][1]["crop_prompt"] == "crops"
 
 
 def test_settings_preserve_legacy_defaults_but_runtime_uses_one_model(window, monkeypatch):
@@ -760,7 +762,8 @@ def test_custom_profile_drives_geometry_family_and_worker_snapshot(window, monke
                              'model': 'type/data', 'vision_model': 'type/photo',
                              'verification_model': 'type/verify', 'system_prompt': 'type prompt',
                              'grounding_prompt': 'ground', 'verification_prompt': 'verify',
-                             'terminal_prompt': 'terminals', 'image_instructions': 'extra foto'})
+                             'terminal_prompt': 'terminals', 'crop_prompt': 'crops',
+                             'image_instructions': 'extra foto'})
     window._reload_profile_types()
     window.field_component_prompt.setPlainText('note libere')
     window.combo_component_type.setCurrentIndex(window.combo_component_type.findData(key))
@@ -785,6 +788,9 @@ def test_custom_profile_drives_geometry_family_and_worker_snapshot(window, monke
     assert worker.grounding_prompt.startswith('ground') and 'extra foto' in worker.grounding_prompt
     assert worker.verification_prompt.startswith('verify') and 'extra foto' in worker.verification_prompt
     assert worker.terminal_prompt.startswith('terminals') and 'extra foto' in worker.terminal_prompt
+    # The per-body crop prompt never receives the whole-board image
+    # instructions (HANDOFF 146 V3).
+    assert worker.crop_prompt == 'crops'
     assert 'istruzioni specifiche' in worker.extra_instructions
     store.save_type(key, label='changed', family='single_smd', overrides={'model': 'next'})
     assert worker.model == 'type/data'  # Running request is isolated from later edits.

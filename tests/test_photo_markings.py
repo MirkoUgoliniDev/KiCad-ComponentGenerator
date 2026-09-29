@@ -9,6 +9,11 @@ from kicadgen.services import photo_global_inventory as inventory
 from kicadgen.services import photo_markings as markings
 
 LENGTH, WIDTH = 42.8, 15.2
+#: Contract updated (HANDOFF 144): the resolution a model sees is per provider
+#: (photo_grounding.model_image_limits). These tests are about the reference
+#: (Claude/OpenRouter) limits, so they name an OpenRouter model; the former
+#: placeholder "m" is now an unknown model, assumed to see little.
+MODEL = "anthropic/claude-opus-5"
 
 
 def _photo(width_px):
@@ -59,7 +64,7 @@ def test_a_photo_the_model_already_saw_whole_is_not_read_again():
     assert markings.inventory_px_per_mm(LENGTH, WIDTH, photo.shape[1::-1]) == pytest.approx(
         1024 / LENGTH, rel=0.01)
     calls, logs = [], []
-    replaced = markings.read_markings(photo, _components(), LENGTH, WIDTH, "m",
+    replaced = markings.read_markings(photo, _components(), LENGTH, WIDTH, MODEL,
                                       lambda **kw: calls.append(kw), logs.append)
     assert replaced == 0 and calls == []
     assert any("saltata" in line for line in logs)
@@ -70,7 +75,7 @@ def test_a_sharper_photo_sends_only_the_bodies_with_a_marking():
     assert markings.inventory_px_per_mm(LENGTH, WIDTH, photo.shape[1::-1]) < 4000 / LENGTH
     components = _components()
     call = _answer_ids({1: ("SP3452 / 25221", "high"), 3: ("472", "high")})
-    replaced = markings.read_markings(photo, components, LENGTH, WIDTH, "m", call, lambda _l: None)
+    replaced = markings.read_markings(photo, components, LENGTH, WIDTH, MODEL, call, lambda _l: None)
     sent_ids = [block["text"] for block in call.kwargs["content_blocks"] if block["type"] == "text"]
     assert sent_ids == ["id=1", "id=3"]                        # C1 has no text: not sent
     assert replaced == 1
@@ -92,7 +97,7 @@ def test_a_weaker_or_empty_reading_never_replaces_a_better_one():
     """Negative: the dedicated reading can only improve the inventory's."""
     components = _components()
     call = _answer_ids({1: ("5P3452", "low"), 3: ("", "high")})
-    markings.read_markings(_photo(4000), components, LENGTH, WIDTH, "m", call, lambda _l: None)
+    markings.read_markings(_photo(4000), components, LENGTH, WIDTH, MODEL, call, lambda _l: None)
     assert components[0]["marking"] == "SP3?52"                # low < medium: kept
     assert components[2]["marking"] == "472"                   # empty: kept
 
@@ -103,7 +108,7 @@ def test_a_failed_reading_keeps_the_inventory_markings():
     def broken(**kwargs):
         raise ValueError("provider down")
     logs = []
-    assert markings.read_markings(_photo(4000), components, LENGTH, WIDTH, "m",
+    assert markings.read_markings(_photo(4000), components, LENGTH, WIDTH, MODEL,
                                   broken, logs.append) == 0
     assert components[0]["marking"] == "SP3?52"
     assert any("non riuscita" in line for line in logs)
@@ -126,7 +131,7 @@ def test_a_dedicated_reading_records_its_prompt_version_and_audit(tmp_path):
     import json
     components = _components()
     call = _answer_ids({1: ("SP3452 / 25221", "high"), 3: ("472", "high")})
-    markings.read_markings(_photo(4000), components, LENGTH, WIDTH, "m", call, lambda _l: None,
+    markings.read_markings(_photo(4000), components, LENGTH, WIDTH, MODEL, call, lambda _l: None,
                            tmp_path)
     for index in (0, 2):
         assert components[index]["_marking_prompt_version"] == markings.PROMPT_VERSION
@@ -140,11 +145,11 @@ def test_a_marking_the_reading_did_not_set_carries_no_version(tmp_path):
     """Negativo: le sigle dell'inventario lasciate com'erano non si attribuiscono alla lettura."""
     components = _components()
     call = _answer_ids({1: ("5P3452", "low"), 3: ("", "high")})
-    markings.read_markings(_photo(4000), components, LENGTH, WIDTH, "m", call, lambda _l: None,
+    markings.read_markings(_photo(4000), components, LENGTH, WIDTH, MODEL, call, lambda _l: None,
                            tmp_path)
     assert not any("_marking_prompt_version" in c for c in components)
     # Nothing is audited when the reading is skipped before any request.
     skipped = tmp_path / "skipped"
-    markings.read_markings(_photo(1024), _components(), LENGTH, WIDTH, "m", call,
+    markings.read_markings(_photo(1024), _components(), LENGTH, WIDTH, MODEL, call,
                            lambda _l: None, skipped)
     assert not (skipped / "yolo-audit").exists()

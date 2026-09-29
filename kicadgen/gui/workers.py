@@ -626,6 +626,7 @@ class ExtractWorker(QThread):
         component_family: str | None = None,
         *, photo_detector: str = "ai", yolo_model_path: Path | None = None,
         yolo_confidence: float | None = None, yolo_settings: dict | None = None,
+        crop_prompt: str | None = None,
     ):
         """@brief Snapshot extraction settings before starting background work.
 
@@ -645,6 +646,9 @@ class ExtractWorker(QThread):
         @param yolo_model_path Optional session ONNX path; None uses the service default.
         @param yolo_confidence YOLO operating threshold; None uses the service default.
         @param yolo_settings Other YOLO detector settings; None uses the defaults.
+        @param crop_prompt Optional per-body crop reading prompt (profile field
+            'crop_prompt'); None uses the service's factory default. Forwarded
+            only when the extraction function accepts it.
         @note YOLO changes photo proposals only; AI verification remains configured.
         """
         super().__init__()
@@ -667,6 +671,7 @@ class ExtractWorker(QThread):
         self.yolo_model_path = yolo_model_path
         self.yolo_confidence = yolo_confidence
         self.yolo_settings = dict(yolo_settings) if yolo_settings is not None else None
+        self.crop_prompt = crop_prompt
         # «Interrompi» lo alza: il servizio lo controlla prima di ogni chiamata
         # a pagamento, cosi' dopo l'interruzione non ne parte nessun'altra
         # (verifica del 25/09, D8). Quella gia' in volo non si puo' richiamare.
@@ -742,6 +747,7 @@ class ExtractWorker(QThread):
                                   photo_cache_dir=getattr(self, "photo_cache_dir", None),
                                   yolo_confidence=self.yolo_confidence,
                                   yolo_settings=self.yolo_settings,
+                                  crop_prompt=self.crop_prompt,
                                   cancel=self.cancel_event),
                 **phase_kwargs(extract, self._forward_phase),
             )
@@ -832,7 +838,8 @@ class ReconcileWorker(QThread):
     rilevatore locale, niente filtro dei contatti ne' misura dei bordi. Riceve
     le proposte tenute nella finestra «Corpi rilevati», riaperta sull'ultimo
     salvataggio, e fa UNA richiesta al modello che guarda la fotografia, poi
-    campiona i colori e salva l'evidenza come farebbe l'estrazione normale.
+    rilegge ogni corpo dal suo ritaglio, campiona i colori, rilegge le sigle e
+    salva l'evidenza come farebbe l'estrazione normale.
 
     Segnali:
         done(InventoryResult) -- inventario riconciliato
@@ -848,7 +855,7 @@ class ReconcileWorker(QThread):
 
     def __init__(self, photo_png, proposals, length_mm, width_mm, model, cache_dir,
                  *, declared=None, verification_prompt=None, extra_instructions=None,
-                 detector='yolo'):
+                 detector='yolo', crop_prompt=None):
         """@brief Fotografa le proposte approvate prima di lasciare il thread GUI.
 
         @param photo_png Fotografia calibrata su cui le proposte furono misurate.
@@ -861,6 +868,10 @@ class ReconcileWorker(QThread):
         @param verification_prompt Note del profilo, come nel percorso normale.
         @param extra_instructions Note dell'utente, come nel percorso normale.
         @param detector Nome del rilevatore da registrare nella calibrazione.
+        @param crop_prompt Prompt della lettura per ritaglio (campo del profilo
+            'crop_prompt'), come per ExtractWorker: il rilancio esegue la stessa
+            lettura dei singoli corpi (HANDOFF 146 V2). None o vuoto: testo di
+            fabbrica.
         """
         super().__init__()
         self.photo_png = photo_png
@@ -872,6 +883,7 @@ class ReconcileWorker(QThread):
         self.verification_prompt = verification_prompt
         self.extra_instructions = extra_instructions
         self.detector = detector
+        self.crop_prompt = crop_prompt
         # Come ExtractWorker.cancel_event: alzato da «Interrompi».
         self.cancel_event = threading.Event()
 
@@ -911,6 +923,7 @@ class ReconcileWorker(QThread):
                 self.progress.emit, self.cache_dir, declared=self.declared,
                 verification_prompt=self.verification_prompt,
                 extra_instructions=self.extra_instructions, detector=self.detector,
+                crop_prompt=self.crop_prompt,
                 **phase_kwargs(reconcile_saved_proposals, self._forward_phase))
             self.done.emit(report)
         except Exception as exc:  # noqa: BLE001 - errori rete/API riportati in UI

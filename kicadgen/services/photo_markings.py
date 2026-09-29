@@ -8,7 +8,10 @@ has more pixels per millimetre than the model saw, one extra paid request
 sends ONLY the bodies that carry a marking, each cropped at native resolution,
 made square-pixelled and turned with its long axis horizontal, with the single
 task of reading the text. When the model already saw every pixel the request
-would add nothing and is skipped, with the reason in the log.
+would add nothing and is skipped, with the reason in the log -- but only for a
+model that does not gain from enlargement: the limits are per provider
+(photo_grounding.model_image_limits, HANDOFF 144), and a coarse-token model
+billed by area always reads an enlarged crop with more detail.
 
 No marking, brand or part number is known to this module: the rules are the
 same shape rules as the inventory (MARKING_RULES).
@@ -19,7 +22,8 @@ import math
 
 from .messages import tx
 from .photo_audit import write_stage_audit
-from .photo_grounding import cached_call, detail_grid, model_px_per_mm
+from .photo_grounding import (REFERENCE_TOKEN_PX, cached_call, detail_grid,
+                              model_image_limits, model_px_per_mm)
 from .photo_inventory import image_block
 
 #: Reading rules shared, word for word, by the inventory prompt and by the
@@ -79,21 +83,28 @@ def reading_tool():
             'required': ['components']}}}
 
 
-def inventory_px_per_mm(length_mm, width_mm, image_size_px):
+def inventory_px_per_mm(length_mm, width_mm, image_size_px, limits=None):
     """@brief Best resolution, in px/mm, at which the inventory showed the board to the model.
 
     @param length_mm Board extent along X, in mm.
     @param width_mm Board extent along Y, in mm.
     @param image_size_px (width, height) of the calibrated photograph.
+    @param limits ModelImageLimits of the model (photo_grounding.model_image_limits),
+        or None for the reference limits (historical behaviour).
     @return The finest scale among the full view and the detail tiles, after
-        the provider's downscaling and never above the photograph's own scale.
+        the provider's downscaling and never above the photograph's own scale,
+        in reference-model pixels (photo_grounding.model_px_per_mm).
     """
     width_px, height_px = image_size_px
     native = min(width_px / length_mm, height_px / width_mm)
-    views = [model_px_per_mm(length_mm, width_mm)]
-    for region, _cell in detail_grid(length_mm, width_mm, image_size_px):
+    full_view = model_px_per_mm(length_mm, width_mm, limits)
+    if limits is not None and limits.enlarges:
+        # The full photograph is sent as it is, not enlarged (detail_grid).
+        full_view = min(full_view, native * REFERENCE_TOKEN_PX / limits.token_px)
+    views = [full_view]
+    for region, _cell in detail_grid(length_mm, width_mm, image_size_px, limits):
         views.append(model_px_per_mm((region[2] - region[0]) * length_mm,
-                                     (region[3] - region[1]) * width_mm))
+                                     (region[3] - region[1]) * width_mm, limits))
     return min(native, max(views))
 
 
@@ -162,13 +173,18 @@ def read_markings(photo, components, length_mm, width_mm, model, call, log,
     """
     height_px, width_px = photo.shape[:2]
     native = min(width_px / length_mm, height_px / width_mm)
-    seen = inventory_px_per_mm(length_mm, width_mm, (width_px, height_px))
+    limits = model_image_limits(model)
+    seen = inventory_px_per_mm(length_mm, width_mm, (width_px, height_px), limits)
     marked = [(index, c) for index, c in enumerate(components)
               if str(c.get('marking') or '').strip()]
     if not marked:
         log(tx("Lettura delle sigle: nessun corpo con una scritta, nessuna richiesta."))
         return 0
-    if native <= seen * (1 + RESOLUTION_EPSILON):
+    # Il salto vale solo per un modello che non guadagna dall'ingrandimento
+    # (HANDOFF 144): uno a token grossi, fatturato per area, spende su un
+    # ritaglio ingrandito piu' token di quanti ne dedichi allo stesso corpo
+    # nella vista della scheda, anche quando ha gia' «visto» ogni pixel.
+    if not limits.enlarges and native <= seen * (1 + RESOLUTION_EPSILON):
         log(tx("Lettura delle sigle saltata: il modello ha gia' visto la foto alla sua "
                "risoluzione piena ({native:.1f} px/mm); ritagli ingranditi non "
                "aggiungerebbero dettagli. Per sigle piu' leggibili serve una foto piu' "
@@ -188,9 +204,14 @@ def read_markings(photo, components, length_mm, width_mm, model, call, log,
         return 0
     if announce is not None:
         announce('llm_markings', model)
-    log(tx("Lettura delle sigle: una richiesta a pagamento con {n} ritagli dei soli corpi "
-           "con una scritta, a {native:.1f} px/mm invece dei {seen:.1f} visti "
-           "dall'inventario.", n=len(expected), native=native, seen=seen))
+    if limits.enlarges:
+        log(tx("Lettura delle sigle: una richiesta a pagamento con {n} ritagli ingranditi dei "
+               "soli corpi con una scritta; il modello legge le immagini a blocchi grossi e "
+               "sul ritaglio dedica piu' dettaglio a ogni corpo.", n=len(expected)))
+    else:
+        log(tx("Lettura delle sigle: una richiesta a pagamento con {n} ritagli dei soli corpi "
+               "con una scritta, a {native:.1f} px/mm invece dei {seen:.1f} visti "
+               "dall'inventario.", n=len(expected), native=native, seen=seen))
     kwargs = dict(model=model, system_prompt=PROMPT, content_blocks=content,
                   tool=reading_tool(), max_tokens=4000, has_pdf=False)
     try:

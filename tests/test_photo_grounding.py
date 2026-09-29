@@ -30,8 +30,12 @@ def forbid_network(monkeypatch):
     monkeypatch.setattr(openrouter.urllib.request, "urlopen", forbidden)
 
 
-def _legacy_three_strips(length_mm, width_mm, image_size_px=None):
-    """The three overlapping vertical strips these pipeline tests were scripted for."""
+def _legacy_three_strips(length_mm, width_mm, image_size_px=None, limits=None):
+    """The three overlapping vertical strips these pipeline tests were scripted for.
+
+    `limits` (the model's image limits, HANDOFF 144) is accepted and ignored:
+    the grid is pinned here on purpose.
+    """
     return [((max(0., col/3 - .08), 0., min(1., (col+1)/3 + .08), 1.),
              (col/3, 0., (col+1)/3, 1.)) for col in range(3)]
 

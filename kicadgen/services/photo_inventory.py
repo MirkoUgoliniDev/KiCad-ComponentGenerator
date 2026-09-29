@@ -980,14 +980,96 @@ def sample_body_colors(photo, components, log=lambda message: None):
     return measured
 
 
+def _phase_announcer(phase, log):
+    """@brief Wrap an optional phase callback so it can never abort a paid run.
+
+    @param phase Optional callable(tool, detail), or None.
+    @param log Progress callback receiving the failure note.
+    @return Callable(tool, detail): a no-op when `phase` is None; otherwise it
+        forwards the call and logs, never raises, an exception of the callback.
+    """
+    def announce(tool, detail):
+        """Announcing the phase is informative, never part of the result."""
+        if phase is None:
+            return
+        try:
+            phase(tool, detail)
+        except Exception as exc:  # noqa: BLE001 - la GUI non deve poter abortire l'estrazione
+            log(tx("Segnalazione della fase non riuscita ({exc}); elaborazione proseguita.",
+                   exc=exc))
+    return announce
+
+
+def read_retained_bodies(photo, report, length, width, model, call, log, cache_dir,
+                         crop_prompt, announce):
+    """@brief Common tail of the global-inventory paths: crop reading, colours, markings.
+
+    @param photo Calibrated BGR photograph the rows were measured on.
+    @param report InventoryResult whose `components` (the reconciled rows,
+        after flag_ai_bodies_on_edge_contacts) are updated in place; a warning
+        of the crop reading is appended to `report.warnings`.
+    @param length Board extent along X, in mm.
+    @param width Board extent along Y, in mm.
+    @param model Model of the paid call on the photograph.
+    @param call Logged paid call: every request of the three steps goes
+        through it, so costs, cancellation and the AI log are recorded.
+    @param log Progress callback.
+    @param cache_dir Photo cache folder, or None.
+    @param crop_prompt Profile field 'crop_prompt' (None/blank: factory text).
+    @param announce Callable(tool, detail) from _phase_announcer.
+    @note extract_inventory (detectors 'yolo' and 'vlm') and
+        reconcile_saved_proposals («Rilancio inventario») both call this, in
+        the same position, so the two routes cannot drift again (HANDOFF 146
+        V2: the relaunch used to skip the crop reading). Order: the crop
+        reading (photo_crop_reading.read_bodies, only when there are rows,
+        announced as phase 'llm' and followed by 'llm_inventory' again), then
+        sample_body_colors, then photo_markings.read_markings -- colours and
+        markings read the class the crop reading may have corrected.
+    @throws CallCancelled (or subclass) when the user cancels a paid call.
+    """
+    if report.components:
+        # Rilettura di ogni corpo tenuto dal SUO ritaglio ingrandito, due volte
+        # (utente, 28/09, HANDOFF 144): l'inventario globale decide QUALI corpi
+        # ci sono, ma su una foto intera un modello a token grossi legge
+        # package e piedini a caso. Si adotta solo cio' su cui le due letture
+        # concordano. Prima di colori, altezze e sigle, che leggono la classe.
+        from .photo_crop_reading import read_bodies
+        announce('llm', tx("lettura dei singoli componenti"))
+        summary = read_bodies(photo, report.components, length, width, model, call, log,
+                              cache_dir, system_prompt=crop_prompt)
+        if summary.warning:
+            # Gia' registrato nel log da read_bodies come avviso: qui entra
+            # solo fra gli avvisi del risultato, che la revisione mostra.
+            report.warnings.append(summary.warning)
+        # Torna la fase di prima: cio' che segue lavora ancora sulla foto
+        # della scheda (colori, poi lettura delle sigle).
+        announce('llm_inventory', model)
+    # Il colore si misura QUI e non prima: la riconciliazione fonde e
+    # sposta i riquadri, e un colore campionato sulle proposte grezze
+    # descriverebbe un rettangolo che non esiste piu'. Il rilevatore e il
+    # parser globale scrivono solo un segnaposto (#303030): senza questo
+    # passo ogni corpo, chiaro o scuro, arrivava a FreeCAD dello stesso
+    # grigio. Nessuna chiamata AI: solo pixel del ritaglio.
+    sample_body_colors(photo, report.components, log)
+    # Sigle rilette su ritagli ingranditi, solo per i corpi che ne hanno
+    # una e solo se la foto ha piu' pixel di quelli visti dal modello.
+    from .photo_markings import read_markings
+    read_markings(photo, report.components, length, width, model, call, log, cache_dir,
+                  announce)
+
+
 def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                       top_photo_index=None, extra_instructions=None,
                       grounding=True, cache_dir=None, classifier_model=None, mechanical=True,
                       grounding_prompt=None, verification_prompt=None, top_photo_source='AI',
                       detector='ai', yolo_model_path=None, review_proposals=None,
                       declared=None, phase=None, yolo_confidence=None, yolo_settings=None,
-                      recount_contacts=None):
+                      recount_contacts=None, crop_prompt=None):
     """@brief Calibrate the photo and extract reviewed component envelopes.
+
+    @param crop_prompt Instructions of the per-body crop reading (profile
+        field 'crop_prompt'), forwarded to photo_crop_reading.read_bodies as
+        its system_prompt. None or blank sends the factory default.
 
     @param detector ai preserves the existing localization; yolo uses local
         proposals plus one paid reconciliation; yolo_only stops after the local
@@ -1031,22 +1113,18 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         no local detection runs, and the modal must not claim a phase that is
         not running. With 'yolo_only' the 'llm_inventory' announcement is never
         emitted (nothing is paid on the photograph); phase('', '') closes the
-        local phase once the inventory is built. None (the default) is a no-op, and an exception raised by
+        local phase once the inventory is built. With 'yolo' and 'vlm', when the
+        inventory has bodies, the per-body crop reading
+        (photo_crop_reading.read_bodies) follows the reconciliation, announced
+        as phase('llm', «lettura dei singoli componenti») and followed by
+        phase('llm_inventory', <model identifier>) again.
+        None (the default) is a no-op, and an exception raised by
         the callback is logged and swallowed, exactly like for `progress`: the
         notification is informative and must never abort a paid extraction.
     @note Local detections are hypotheses, not package identities; AI review may cost credit.
     """
     log = progress or (lambda message: None)
-
-    def announce(tool, detail):
-        """Segnalare la fase e' informativo, non una parte del risultato."""
-        if phase is None:
-            return
-        try:
-            phase(tool, detail)
-        except Exception as exc:  # noqa: BLE001 - la GUI non deve poter abortire l'estrazione
-            log(tx("Segnalazione della fase non riuscita ({exc}); elaborazione proseguita.",
-                   exc=exc))
+    announce = _phase_announcer(phase, log)
     if detector not in PHOTO_DETECTORS:
         raise ValueError(tx("Rilevatore fotografico non supportato."))
     report = InventoryResult()
@@ -1275,19 +1353,12 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             **({'detector_ran': True} if detector in LOCAL_DETECTORS else {}))
         flag_ai_bodies_on_edge_contacts(photo, report.components, declared, length, width, log,
                                         enumerated=not _sent_to_ai(proposals))
-        # Il colore si misura QUI e non prima: la riconciliazione fonde e
-        # sposta i riquadri, e un colore campionato sulle proposte grezze
-        # descriverebbe un rettangolo che non esiste piu'. Il rilevatore e il
-        # parser globale scrivono solo un segnaposto (#303030): senza questo
-        # passo ogni corpo, chiaro o scuro, arrivava a FreeCAD dello stesso
-        # grigio, mentre il percorso di grounding (mechanical_envelopes)
-        # campionava gia' la foto. Nessuna chiamata AI: solo pixel del ritaglio.
-        sample_body_colors(photo, report.components, log)
-        # Sigle rilette su ritagli ingranditi, solo per i corpi che ne hanno
-        # una e solo se la foto ha piu' pixel di quelli visti dal modello.
-        from .photo_markings import read_markings
-        read_markings(photo, report.components, length, width, classifier_model or model,
-                      call, log, cache_dir, announce)
+        # Lettura per ritaglio, colori e sigle: la stessa coda del rilancio
+        # (reconcile_saved_proposals). Vale per 'yolo' e 'vlm', che passano
+        # entrambi dall'inventario globale; 'ai' ha la sua verifica per
+        # ritagli (grounded_components).
+        read_retained_bodies(photo, report, length, width, classifier_model or model, call,
+                             log, cache_dir, crop_prompt, announce)
         report.calibration['detector'] = detector
         report.calibration['proposal_count'] = len(proposals)
         report.calibration['coverage_added_count'] = sum(
@@ -1736,7 +1807,8 @@ def load_review_bundle(project_dir):
 
 def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
                               cache_dir=None, *, declared=None, verification_prompt=None,
-                              extra_instructions=None, detector='yolo'):
+                              extra_instructions=None, detector='yolo', crop_prompt=None,
+                              phase=None):
     """@brief Re-run the paid reconciliation on already reviewed detector proposals.
 
     @param photo Calibrated BGR crop (numpy array) or its PNG bytes: the same
@@ -1755,14 +1827,22 @@ def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
     @param verification_prompt Custom notes, as in the normal path.
     @param extra_instructions User notes, as in the normal path.
     @param detector Detector name recorded in the calibration, for the report.
+    @param crop_prompt Instructions of the per-body crop reading (profile
+        field 'crop_prompt'), as in extract_inventory; None or blank sends the
+        factory default.
+    @param phase Optional callable(tool, detail) announcing the working tool,
+        with extract_inventory's contract (the crop reading as 'llm', then
+        'llm_inventory'; the marking reading as 'llm_markings'); an exception
+        of the callback is logged and swallowed.
     @return An InventoryResult shaped like the one extract_inventory returns
         on the detector path: components, overlay, photo PNG, calibration.
     @throws ValueError When the photograph cannot be decoded, the extents are
         not positive, or review_global_inventory rejects the proposals.
     @note This is the tail of extract_inventory's detector path, nothing more:
-        the same review_global_inventory, the same sample_body_colors, the same
-        save_inventory_evidence. There is deliberately no second route that
-        could drift from the normal one. What is skipped -- documents, the
+        the same review_global_inventory, the same flag_ai_bodies_on_edge_contacts,
+        the same read_retained_bodies (crop reading, colours, markings: one
+        helper both paths call), the same save_inventory_evidence. There is
+        deliberately no second route that could drift from the normal one. What is skipped -- documents, the
         local detector, the contact filter and the edge measurement -- ran
         when the proposals were saved, and rows are forwarded untouched:
         a hand-drawn box (`_yolo_manual_box`) is neither re-measured nor
@@ -1826,12 +1906,11 @@ def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
     if replayed:
         log(tx("Rilancio dell'inventario: proposte e foto identiche a una richiesta "
                "gia' pagata; risposta rigiocata dalla cache, nessun nuovo addebito."))
-    # Stesso ordine del percorso normale: il colore si misura dopo la
-    # riconciliazione, che sposta e fonde i riquadri.
-    sample_body_colors(photo, report.components, log)
-    # E le sigle si rileggono come nel percorso normale (stesse condizioni).
-    from .photo_markings import read_markings
-    read_markings(photo, report.components, length, width, model, call, log, cache_dir)
+    # Stessa coda del percorso normale, nello stesso punto (HANDOFF 146 V2):
+    # senza la lettura per ritaglio il rilancio perdeva le correzioni delle
+    # letture concordi.
+    read_retained_bodies(photo, report, length, width, model, call, log, cache_dir,
+                         crop_prompt, _phase_announcer(phase, log))
     report.calibration.update(detector=detector, proposal_count=len(proposals),
                               coverage_added_count=sum(
                                   not c.get('source_candidate_ids', [True]) for c in report.components),

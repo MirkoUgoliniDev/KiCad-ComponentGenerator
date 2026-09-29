@@ -250,3 +250,167 @@ def test_unknown_key_falls_back_to_english_then_to_the_key(tmp_path):
     store.save_translation('only.en', 'en', 'English only')
     assert store.translation('only.en', 'it') == 'English only'
     assert store.translation('missing.everywhere', 'it') == 'missing.everywhere'
+
+
+# ── crop_prompt: per-body crop reading prompt in the profile (HANDOFF 146) ──
+
+def test_crop_prompt_factory_default_is_the_hardcoded_crop_reading_prompt(tmp_path):
+    from kicadgen.services.photo_crop_reading import SYSTEM_PROMPT
+    assert factory_defaults()['crop_prompt'] == SYSTEM_PROMPT
+    assert ProfileStore(tmp_path / 'ai.sqlite3').defaults()['crop_prompt'] == SYSTEM_PROMPT
+
+
+def _downgrade_to_v3(path):
+    """Turn a current database back into the schema 3 layout: no crop_prompt row."""
+    with sqlite3.connect(path) as db:
+        db.execute("DELETE FROM ai_defaults WHERE name='crop_prompt'")
+        db.execute("DELETE FROM ai_overrides WHERE name='crop_prompt'")
+        db.execute('PRAGMA user_version=3')
+
+
+def test_v3_database_receives_the_crop_prompt_and_keeps_every_user_text(tmp_path):
+    store = ProfileStore(tmp_path / 'ai.sqlite3')
+    store.save_defaults({'system_prompt': 'my datasheet prompt', 'lead_prompt': 'my leads',
+                         'image_instructions': 'my photo notes'})
+    key = store.save_type(None, label='custom', family='single_smd',
+                          overrides={'terminal_prompt': 'type terminals'})
+    before = {k: v for k, v in store.defaults().items() if k != 'crop_prompt'}
+    _downgrade_to_v3(store.path)
+    upgraded = ProfileStore(store.path)
+    defaults = upgraded.defaults()
+    assert defaults['crop_prompt'] == factory_defaults()['crop_prompt']
+    assert {k: v for k, v in defaults.items() if k != 'crop_prompt'} == before
+    assert upgraded.overrides(key) == {'terminal_prompt': 'type terminals'}
+    assert upgraded.resolve(key)['crop_prompt'] == factory_defaults()['crop_prompt']
+    with sqlite3.connect(store.path) as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION == 4
+
+
+def test_a_crop_prompt_the_user_already_edited_is_never_replaced(tmp_path):
+    """Negative of the migration: an existing row, even at schema 3, keeps its text."""
+    store = ProfileStore(tmp_path / 'ai.sqlite3')
+    store.save_defaults({'crop_prompt': 'my crop prompt'})
+    assert ProfileStore(store.path).defaults()['crop_prompt'] == 'my crop prompt'
+    with sqlite3.connect(store.path) as db:
+        db.execute('PRAGMA user_version=3')
+    assert ProfileStore(store.path).defaults()['crop_prompt'] == 'my crop prompt'
+
+
+def test_v1_database_climbs_every_step_up_to_the_crop_prompt(tmp_path):
+    store = ProfileStore(tmp_path / 'ai.sqlite3')
+    with sqlite3.connect(store.path) as db:
+        db.execute("DELETE FROM ai_defaults WHERE name IN ('verification_model','crop_prompt')")
+        db.execute('DROP TABLE translations')
+        db.execute('PRAGMA user_version=1')
+    upgraded = ProfileStore(store.path)
+    assert upgraded.defaults()['crop_prompt'] == factory_defaults()['crop_prompt']
+    assert upgraded.translation('ui:Lettura ritagli', 'en') == 'Crop reading'
+
+
+def test_crop_prompt_is_inherited_overridden_and_never_gets_the_image_instructions(tmp_path):
+    """HANDOFF 146 V3: image instructions describe the whole board, not one body's crop."""
+    store = ProfileStore(tmp_path / 'ai.sqlite3')
+    store.save_defaults({'crop_prompt': 'global crop'})
+    inherit = store.save_type(None, label='inherits', family='single_smd',
+                              overrides={'image_instructions': 'extra photo'})
+    own = store.save_type(None, label='own', family='single_smd',
+                          overrides={'crop_prompt': 'type crop', 'image_instructions': 'extra photo'})
+    assert store.resolve(inherit)['crop_prompt'] == 'global crop'
+    assert store.resolve(own)['crop_prompt'] == 'type crop'
+    for key in (inherit, own):
+        snapshot = store.snapshot(key)
+        # Positive: every whole-board photo prompt still receives them.
+        for field in ('grounding_prompt', 'verification_prompt', 'terminal_prompt', 'lead_prompt'):
+            assert snapshot[field].startswith(store.resolve(key)[field])
+            assert snapshot[field].endswith('extra photo')
+        # Negative: the per-body crop prompt goes out exactly as resolved.
+        assert snapshot['crop_prompt'] == store.resolve(key)['crop_prompt']
+        assert 'extra photo' not in snapshot['crop_prompt']
+
+
+@pytest.mark.parametrize('value', ['', '   ', None])
+def test_a_blank_crop_prompt_is_rejected_like_every_other_prompt(tmp_path, value):
+    store = ProfileStore(tmp_path / 'ai.sqlite3')
+    original = store.defaults()
+    with pytest.raises(ProfileError):
+        store.save_defaults({'crop_prompt': value})
+    assert store.defaults() == original
+
+
+# ── crop_prompt: former factory texts reach existing databases (HANDOFF 146, V1) ──
+
+def _store_with_global_crop_prompt(path, text):
+    """Create a current database and write `text` verbatim as the global crop prompt."""
+    store = ProfileStore(path)
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE ai_defaults SET value=? WHERE name='crop_prompt'", (text,))
+    db.close()
+    return store
+
+
+def test_a_former_factory_crop_prompt_is_replaced_on_open(tmp_path, monkeypatch):
+    from kicadgen.services import photo_crop_reading
+    from kicadgen.services.component_types import text_digest
+    old = 'crop reading instructions of a former release'
+    monkeypatch.setattr(photo_crop_reading, 'SUPERSEDED_CROP_PROMPT_DIGESTS',
+                        frozenset({text_digest(old)}))
+    path = tmp_path / 'ai.sqlite3'
+    _store_with_global_crop_prompt(path, old)
+    assert ProfileStore(path).defaults()['crop_prompt'] == photo_crop_reading.SYSTEM_PROMPT
+
+
+def test_an_edited_former_crop_prompt_is_kept(tmp_path, monkeypatch):
+    """Negative case: one character more than the former default is a user edit."""
+    from kicadgen.services import photo_crop_reading
+    from kicadgen.services.component_types import text_digest
+    old = 'crop reading instructions of a former release'
+    monkeypatch.setattr(photo_crop_reading, 'SUPERSEDED_CROP_PROMPT_DIGESTS',
+                        frozenset({text_digest(old)}))
+    path = tmp_path / 'ai.sqlite3'
+    _store_with_global_crop_prompt(path, old + '.')
+    assert ProfileStore(path).defaults()['crop_prompt'] == old + '.'
+
+
+def test_a_per_type_crop_prompt_override_holding_a_former_default_is_untouched(tmp_path, monkeypatch):
+    """Only the global default follows the factory text: an override is a user choice."""
+    from kicadgen.services import photo_crop_reading
+    from kicadgen.services.component_types import text_digest
+    old = 'crop reading instructions of a former release'
+    monkeypatch.setattr(photo_crop_reading, 'SUPERSEDED_CROP_PROMPT_DIGESTS',
+                        frozenset({text_digest(old)}))
+    path = tmp_path / 'ai.sqlite3'
+    store = _store_with_global_crop_prompt(path, old)
+    key = store.save_type(None, label='own', family='single_smd', overrides={'crop_prompt': old})
+    reopened = ProfileStore(path)
+    assert reopened.defaults()['crop_prompt'] == photo_crop_reading.SYSTEM_PROMPT
+    assert reopened.overrides(key) == {'crop_prompt': old}
+
+
+def test_the_current_crop_prompt_is_not_listed_as_superseded():
+    """A current text listed as superseded would be a copy-paste error in the digests."""
+    from kicadgen.services.component_types import text_digest
+    from kicadgen.services.photo_crop_reading import SUPERSEDED_CROP_PROMPT_DIGESTS, SYSTEM_PROMPT
+    assert text_digest(SYSTEM_PROMPT) not in SUPERSEDED_CROP_PROMPT_DIGESTS
+
+
+def test_repository_database_holds_the_factory_crop_prompt():
+    """The tracked database (read-only here) carries the current factory crop prompt.
+
+    It is the source-run database and the reference users compare against: a
+    stale text there would make rows report a PROMPT_VERSION whose text was
+    never sent. tools/make_seed_db.verify_seed is not reused: it demands a
+    fresh seed (no developer metadata, every default equal to the code), which
+    the tracked database is documented not to be. When SYSTEM_PROMPT changes,
+    opening the database with ProfileStore applies SUPERSEDED_CROP_PROMPT_DIGESTS.
+    """
+    from pathlib import Path
+    from kicadgen.services.photo_crop_reading import SYSTEM_PROMPT
+    path = Path(__file__).resolve().parents[1] / 'data' / 'analysis_profiles.sqlite3'
+    if not path.is_file():
+        pytest.skip('no repository profile database in this checkout')
+    db = sqlite3.connect(f'{path.as_uri()}?mode=ro', uri=True)
+    try:
+        row = db.execute("SELECT value FROM ai_defaults WHERE name='crop_prompt'").fetchone()
+    finally:
+        db.close()
+    assert row is not None and row[0] == SYSTEM_PROMPT
