@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import QApplication, QLabel, QWidget
 from kicadgen.gui.analysis_overlay import (TOOLS, AnalysisOverlay, AnalysisSpinner,
                                           ElidedLabel, _CARD_MIN_WIDTH,
                                           _CARD_PADDING, _OVERLAY_MARGIN,
-                                          _STATUS_CHAR_LIMIT, _STATUS_LINES,
+                                          _STATUS_CHAR_LIMIT, _STATUS_LINES, _STATUS_WRAP_LINES,
                                           elide_paths, enumeration_lines,
                                           is_machine_line)
 from kicadgen.services.datasheet_extractor import _files_sent_message
@@ -678,7 +678,7 @@ def test_the_card_is_sized_on_its_content_and_does_not_jump(qapp, parent_width,
         overlay.start()
         app.processEvents()
         metrics = overlay.status.fontMetrics()
-        chars_per_line = math.ceil(_STATUS_CHAR_LIMIT / (_STATUS_LINES - 0.5))
+        chars_per_line = math.ceil(_STATUS_CHAR_LIMIT / _STATUS_WRAP_LINES)
         wanted = 2 * _CARD_PADDING + metrics.averageCharWidth() * chars_per_line
         cap = parent_width - 2 * _OVERLAY_MARGIN
         expected = min(cap, max(_CARD_MIN_WIDTH, wanted))
