@@ -240,8 +240,12 @@ questionnaire with the class derived by the program, contradictions with the inv
 review, JEDEC bounds for SOIC families; point 149, `FIX` only: detector class carried into the
 reconciled rows, leaded family from lead count + measured envelope when the declared name
 contradicts the measure; point 150, `FIX` only: profile field «Modello lettura ritagli», schema v5)
-is 6240 passed,
-6 skipped, 2 expected failures and 19 subtests, run in two halves (HANDOFF point 113:
+; points 161-169, committed on `FIX` as `ab0591e` and merged into `main`: DeepSeek reasoning
+checkbox, one review window in two stages with the detector's reading kept beside the AI's,
+three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
+unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
+is 6330 passed,
+7 skipped, 2 expected failures and 19 subtests, run in two halves (HANDOFF point 113:
 the single-process run can die at random with a native Qt/VTK crash). The last packaging integration was merge
 commit `692ca95` on `main`. Keep these values aligned with HANDOFF.md.
 

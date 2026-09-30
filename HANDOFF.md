@@ -8,9 +8,10 @@
   a tre sezioni YOLO/AI/KiCad + Correzioni; 164 lati dichiarati su bordo pulito
   esclusi, bordo illeggibile ricontrollato; 166 pallino pulsante (fasi e passi);
   167 distanza fra le file solo se letta; 168 larghezza piazzola >= passo non e'
-  una misura; 169 piazzole MISURATE sulla foto (edge_lands). Suite in due meta'
-  al momento del commit: IN CORSO (.venv/point169-suite-a/b.log), esito da
-  riportare qui prima del merge. APERTI (segnalati, non autorizzati):
+  una misura; 169 piazzole MISURATE sulla foto (edge_lands). Commit `ab0591e`
+  su FIX. Suite in due meta' sullo stesso stato (.venv/point169-suite-a/b.log):
+  3963 + 2367 = 6330 passati, 7 saltati, 2 xfail, 19 sottotest, 0 falliti,
+  uscita 0. Poi FIX unito in main (merge commit in git log) e pushato. APERTI (segnalati, non autorizzati):
   sample_board_color sceglie la classe scura su RS485; yolo_review_dialog.py
   superato ma nel repo; wf-edit-review.svg orfano; il pacchetto del rilevatore
   non si riapre da solo dopo un'analisi completata (vince l'inventario).
