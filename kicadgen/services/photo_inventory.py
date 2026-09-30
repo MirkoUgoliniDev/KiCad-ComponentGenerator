@@ -568,12 +568,15 @@ def prepare_photo(path, length, width, metadata=None):
         from .photo_refine import MAX_BOARD_ASPECT_ERROR, _aspect_error, aspect_deformation
         if _aspect_error(frame.width_px, frame.height_px, length, width) > MAX_BOARD_ASPECT_ERROR:
             # Accettata dalla seconda passata di locate_board: la scala vale per
-            # asse, e l'utente deve sapere che foto e quote non concordano.
+            # asse. Le quote dei documenti COMANDANO (utente, 2026-09-30, HANDOFF
+            # 171: nessuna misura a mano): la foto viene corretta su di esse, e
+            # l'avviso dice questo, non che le quote siano in dubbio. Resta un
+            # avviso perche' i ritagli inviati all'AI portano la deformazione.
             metadata["board_warning"] = tx(
-                "{name}: la scheda nella foto ha proporzioni diverse dalle quote "
-                "{length:.2f} x {width:.2f} mm (scala X {sx:.2f} px/mm, Y {sy:.2f} px/mm, "
-                "deformazione {deform:+.1f}%). Calibrata asse per asse: la foto e' "
-                "ridimensionata in modo non proporzionale oppure le quote sono da verificare.",
+                "{name}: quote dei documenti applicate ({length:.2f} x {width:.2f} mm); la scheda "
+                "nella foto ha proporzioni diverse (deformazione {deform:+.1f}%), quindi la foto e' "
+                "corretta asse per asse (scala X {sx:.2f} px/mm, Y {sy:.2f} px/mm): misure e "
+                "posizioni seguono le quote, i ritagli inviati all'AI restano deformati.",
                 name=Path(path).name, length=length, width=width,
                 sx=frame.width_px / length, sy=frame.height_px / width,
                 deform=100.0 * aspect_deformation(frame, length, width))

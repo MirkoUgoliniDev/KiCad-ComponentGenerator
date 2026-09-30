@@ -374,3 +374,19 @@ def test_the_removed_entries_are_not_referenced_by_any_source():
              if key.startswith("ui:Seleziona un rettangolo")
              and "Modifica le quote per ridimensionare" in key]
     assert not stale, "la vecchia formulazione del paragrafo non deve restare in catalogo"
+
+
+def test_the_old_review_titles_are_replaced_in_an_existing_database(tmp_path):
+    """@brief HANDOFF 172: a database seeded with «Revisione AI» shows the unified title on reopen;
+    a title the user edited is left alone."""
+    database = tmp_path / "profiles.sqlite3"
+    store = ProfileStore(database)
+    for language, old in (("it", "Revisione AI"), ("en", "AI review"),
+                          ("fr", "Révision IA"), ("de", "KI-Prüfung")):
+        store.save_translation("photo_review.title", language, old)
+    reopened = ProfileStore(database)
+    assert reopened.translation("photo_review.title", "it") == "Revisione componenti — inventario AI"
+    assert reopened.translation("photo_review.title", "en") == "Component review — AI inventory"
+    edited = tmp_path / "edited.sqlite3"
+    ProfileStore(edited).save_translation("photo_review.title", "it", "Mio titolo")
+    assert ProfileStore(edited).translation("photo_review.title", "it") == "Mio titolo"

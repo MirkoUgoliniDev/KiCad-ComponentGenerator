@@ -95,6 +95,7 @@ from PyQt6.QtWidgets import (
 )
 
 
+from ..services.component_format import copy_format, paste_format
 from ..services.messages import tx
 from ..services.photo_yolo import (MOVE_HANDLE, awaiting_user_keep, box_geometry_mm,
                                    manual_proposal, mark_manual_box)
@@ -703,6 +704,11 @@ _INFO_AI_ONLY = (
     "proposta del rilevatore: li vedi, ma restano fuori dalla tabella e dal 3D finché "
     "non li tieni (T). Spostarne, ridimensionarne o modificarne uno vale come tenerlo.")
 
+
+## List markers of the «Copia formato» session (HANDOFF 172): the body the
+## format was copied from and the bodies it was pasted on.
+FORMAT_SOURCE_MARKER = "[sorgente]"
+FORMAT_TARGET_MARKER = "[incollato]"
 
 ## Stages of the one review window (HANDOFF 162). STAGE_DETECTOR reviews the
 ## local detector's proposals before the paid AI call; STAGE_INVENTORY the
@@ -1592,6 +1598,21 @@ class PhotoReviewDialog(QDialog):
             "tenuti, vanno nella tabella e nel 3D.", checkable=True, tr=tr)
         self.keep_button.setEnabled(False)
         self.keep_button.clicked.connect(lambda _checked=False: self.toggle_keep())
+        # «Copia formato» (user, 2026-09-30, HANDOFF 172): the same brush as
+        # the 3D tab, here before the generation. A switch: on, the selected
+        # (or first clicked) body is the source, every body clicked next
+        # receives its format; the edits go out with «Applica correzioni».
+        self.format_button = tool_button(
+            "format-painter.svg", "Copia formato", "",
+            "Accendi, poi clic sul componente da copiare; clic sugli altri componenti per "
+            "incollare misure, altezza, tipologia, package e modello KiCad. Posizione, "
+            "orientamento, nome, sigla e colore restano quelli di ciascuno. Esc o l'icona "
+            "chiudono la copia; le modifiche entrano con «Applica correzioni».",
+            checkable=True, tr=tr)
+        self.format_button.toggled.connect(self._on_format_toggled)
+        self._format_source = None
+        self._format_source_row = -1
+        self._format_target_rows = []
         self.zoom_out_button = tool_button("zoom-out.svg", "Zoom indietro", "-", tr=tr)
         self.zoom_label = QLabel()
         self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1628,7 +1649,8 @@ class PhotoReviewDialog(QDialog):
         self.info_button.clicked.connect(lambda: self.info_popup.toggle_under(self.info_button))
         toolbar = QHBoxLayout()
         toolbar.setSpacing(4)
-        for widget in (self.add_button, self.delete_button, self.keep_button, toolbar_divider(),
+        for widget in (self.add_button, self.delete_button, self.keep_button, self.format_button,
+                       toolbar_divider(),
                        self.zoom_out_button, self.zoom_label, self.zoom_in_button,
                        self.fit_button, toolbar_divider(), self.photo_button,
                        self.details_button, self.uncertainties_button):
@@ -1891,6 +1913,8 @@ class PhotoReviewDialog(QDialog):
             apply_button.setToolTip(self._tr(
                 "Le proposte tenute vanno al modello AI; annulla per non avviare la richiesta."))
             self.model_button.hide()
+            # Nothing to copy before the AI inventory: no type, package or model.
+            self.format_button.hide()
             self.model_status.setText(self._tr(
                 "I modelli KiCad si scelgono dopo l'inventario AI, nella stessa finestra."))
 
@@ -1993,6 +2017,86 @@ class PhotoReviewDialog(QDialog):
             item.component["_yolo_review_only"] = not keep
         self._ai_only_changed(item)
         return keep
+
+    def _on_format_toggled(self, checked):
+        """@brief Start or end the «Copia formato» session.
+
+        @param checked True when the brush is switched on.
+        @note On: the body already selected becomes the source at once (the
+            natural gesture is «select, press the brush, click the others»);
+            without a selection the first body clicked is the source. Off:
+            source and markers are forgotten; the pasted bodies keep their
+            new format, which «Applica correzioni» emits like any edit.
+        """
+        self._format_source, self._format_source_row = None, -1
+        self._format_target_rows = []
+        if checked:
+            selected = self._selected_item()
+            if selected is not None:
+                self._format_click(self._items.index(selected))
+            else:
+                self._show_format_hint(self._tr("Copia formato: clic sul componente da copiare."))
+        else:
+            self.draw_hint.setVisible(self.draw_mode())
+            for item in self._items:
+                self._refresh_item(item)
+
+    def format_source_row(self) -> int:
+        """@brief Row of the body the format was copied from, or -1."""
+        return self._format_source_row
+
+    def format_target_rows(self) -> list:
+        """@brief Rows the format was pasted on, in paste order."""
+        return list(self._format_target_rows)
+
+    def _show_format_hint(self, text):
+        """The hint line under the toolbar carries the brush's next step while it is on."""
+        self.draw_hint.setText(text)
+        self.draw_hint.setVisible(True)
+
+    def _format_click(self, row):
+        """Copy from the first body, paste on the next ones (the brush is on).
+
+        Pasting replaces the FORMAT_FIELDS and the KiCad model of the target
+        with the source's (component_format.paste_format) and leaves its
+        position, rotation, name, marking and colour; the outline is rebuilt
+        around the same centre and the normalised box refreshed. The paste is
+        an edit: an AI-only body left out becomes kept (`_keep_touched`).
+        """
+        if not 0 <= row < len(self._items):
+            return
+        item = self._items[row]
+        if self._format_source is None:
+            self._format_source = copy_format(item.component)
+            self._format_source_row = row
+            name = item.component.get("name") or str(row + 1)
+            self._show_format_hint(self._tr(
+                "Formato di {name} copiato: clic sui componenti su cui incollarlo; Esc o "
+                "l'icona per finire.").format(name=name))
+            self._refresh_item(item)
+            return
+        if row == self._format_source_row:
+            return
+        pasted = paste_format(item.component, self._format_source)
+        item.component.clear()
+        item.component.update(pasted)
+        item.sync_geometry()
+        if "_box" in item.component:
+            bounds = item.photo_bounds()
+            item.component["_box"] = (
+                bounds.left() / self.photo_rect.width(), bounds.top() / self.photo_rect.height(),
+                bounds.right() / self.photo_rect.width(), bounds.bottom() / self.photo_rect.height())
+        if row not in self._format_target_rows:
+            self._format_target_rows.append(row)
+        self._keep_touched(item)
+        self._refresh_categories()
+        self._reload_fields()
+        self._refresh_item(item)
+        self._update_scene_rect()
+        self._show_format_hint(self._tr(
+            "Formato di {source} incollato su {count} componenti; Esc o l'icona per finire."
+        ).format(source=self._format_source.get("source_name") or "?",
+                 count=len(self._format_target_rows)))
 
     def _keep_touched(self, item):
         """An edit is a look: a pending body the user moves, resizes or edits is kept.
@@ -2580,6 +2684,8 @@ class PhotoReviewDialog(QDialog):
         self.parameters_button.setEnabled(selected is not None)
         self.delete_button.setEnabled(selected is not None)
         self._sync_keep_button()
+        if selected is not None and self.format_button.isChecked():
+            self._format_click(self._items.index(selected))
         self.model_button.setEnabled(selected is not None and self._match_worker is None)
         self.modal_model_button.setEnabled(self.model_button.isEnabled())
         if selected:
@@ -2865,7 +2971,10 @@ class PhotoReviewDialog(QDialog):
                     + (" [" + self._tr("escluso") + "]" if excluded else "")
                     + (f" {UNDETERMINED_LIST_MARKER}" if undetermined else "")
                     + (f" {DETECTOR_DISAGREES_MARKER}" if detector_disagrees(item.component)
-                       else ""))
+                       else "")
+                    + (" " + self._tr(FORMAT_SOURCE_MARKER) if index == self._format_source_row
+                       else " " + self._tr(FORMAT_TARGET_MARKER)
+                       if index in self._format_target_rows else ""))
         text += " [!]" if warnings else ""
         self.component_list.item(index).setText(text)
         self.component_list.item(index).setForeground(color)
@@ -3154,7 +3263,13 @@ class PhotoReviewDialog(QDialog):
             with QSignalBlocker(self.add_button):
                 self.add_button.setChecked(enabled)
         self.view.set_draw_mode(enabled)
-        self.draw_hint.setVisible(enabled)
+        if enabled:
+            self.draw_hint.setText(self._tr(
+                "Modalità disegno attiva: trascina sulla foto per tracciare il nuovo "
+                "componente, poi indicane la tipologia. Esc o «Aggiungi componente» annulla."))
+            self.draw_hint.setVisible(True)
+        else:
+            self.draw_hint.setVisible(self.format_button.isChecked())
 
     def draw_mode(self) -> bool:
         """@brief Whether the next drag on the photo would create a component.
@@ -3181,6 +3296,11 @@ class PhotoReviewDialog(QDialog):
         """
         if event.key() == Qt.Key.Key_Escape and self.draw_mode():
             self.set_draw_mode(False)
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Escape and self.format_button.isChecked():
+            # The brush is the innermost thing Escape can put down.
+            self.format_button.setChecked(False)
             event.accept()
             return
         modifiers = event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier

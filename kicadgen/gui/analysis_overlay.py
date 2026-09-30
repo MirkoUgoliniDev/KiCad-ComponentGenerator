@@ -270,6 +270,13 @@ _TERM_SEPARATOR = " — "
 #: numero, non sulla frase che passa in quel momento: una scheda che cambia
 #: altezza a ogni messaggio e' piu' fastidiosa di una scheda un po' piu' alta.
 _STATUS_LINES = 3
+#: Righe su cui lo stato troncato viene DISTRIBUITO per ricavare la larghezza
+#: della scheda: meno righe = scheda piu' larga. Erano 2,5 (tre righe con
+#: mezza riga di margine); l'utente (2026-09-30, HANDOFF 173) la voleva piu'
+#: larga, cosi' le righe delle fasi si troncano piu' tardi: due righe, quindi
+#: circa un quarto in piu', sempre entro la larghezza che la finestra concede.
+#: Le tre righe riservate restano: una intera di margine per le lettere larghe.
+_STATUS_WRAP_LINES = 2.0
 #: Completed phases listed on the card (HANDOFF point 135): the most recent
 #: ones, one row each. Bounded so the card cannot outgrow a small window.
 PHASE_HISTORY_ROWS = 4
@@ -1164,11 +1171,11 @@ class AnalysisOverlay(QWidget):
         # darebbe righe e larghezze di un altro testo.
         self.card.ensurePolished()
         metrics = self.status.fontMetrics()
-        # Mezza riga di margine: `averageCharWidth` e' una media, e con una frase
-        # di lettere larghe il testo troncato sborderebbe sulla quarta riga
-        # facendo crescere la scheda. Dimensionando la larghezza su due righe e
-        # mezza, tre righe bastano anche nel caso peggiore.
-        chars_per_line = math.ceil(_STATUS_CHAR_LIMIT / (_STATUS_LINES - 0.5))
+        # Una riga di margine: `averageCharWidth` e' una media, e con una frase
+        # di lettere larghe il testo troncato sborderebbe sulla riga dopo
+        # facendo crescere la scheda. Dimensionando la larghezza su due righe
+        # (_STATUS_WRAP_LINES), le tre riservate bastano anche nel caso peggiore.
+        chars_per_line = math.ceil(_STATUS_CHAR_LIMIT / _STATUS_WRAP_LINES)
         wanted = 2 * _CARD_PADDING + metrics.averageCharWidth() * chars_per_line
         width = min(self._available_card_width(), max(_CARD_MIN_WIDTH, wanted))
         self.card.setMinimumWidth(width)

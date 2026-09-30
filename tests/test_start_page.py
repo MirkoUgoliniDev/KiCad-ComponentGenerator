@@ -316,3 +316,14 @@ def test_a_long_name_does_not_cut_a_short_type_and_no_type_gives_the_name_everyt
     from kicadgen.gui.start_page import split_first_line
     assert split_first_line(560, 900, 90, 16) == (560 - 16 - 90, 90)
     assert split_first_line(560, 900, 0, 16) == (560, 0)
+
+
+def test_open_is_disabled_and_explains_itself_without_projects(page):
+    """@brief HANDOFF 170: «Apri» off with the reason in its tooltip; on again with a project."""
+    page.set_projects_available(False)
+    assert not page.btn_open.isEnabled()
+    assert "Nessun progetto" in page.btn_open.toolTip() and "Nuovo progetto" in page.btn_open.toolTip()
+    assert page.btn_new.isEnabled(), "«Nuovo» is the way out"
+    page.set_projects_available(True)
+    assert page.btn_open.isEnabled()
+    assert page.btn_open.toolTip() == "Apre un componente esistente della cartella di lavoro (Ctrl+O)"
