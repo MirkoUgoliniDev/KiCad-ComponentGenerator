@@ -44,6 +44,26 @@ PROVIDER_SHORT_LABELS = {PROVIDER_OPENROUTER: "OpenRouter", PROVIDER_DEEPSEEK: "
 
 DEEPSEEK_PREFIX = "deepseek-api/"
 DEEPSEEK_API_BASE = "https://api.deepseek.com"
+
+#: «Ragionamento DeepSeek» (HANDOFF 161): a session switch set by the GUI
+#: checkbox on the «Modello AI» row and read by `openrouter.call_tool` for
+#: every request to the direct DeepSeek API. Off by default: thinking costs
+#: reasoning tokens and time, and refuses a named tool_choice.
+_deepseek_reasoning = False
+
+
+def set_deepseek_reasoning(enabled: bool) -> None:
+    """@brief Switch DeepSeek's thinking mode on or off for the next requests.
+
+    @param enabled True to send ``thinking: enabled`` to the direct API.
+    """
+    global _deepseek_reasoning
+    _deepseek_reasoning = bool(enabled)
+
+
+def deepseek_reasoning_enabled() -> bool:
+    """@brief Whether the direct DeepSeek requests ask for thinking mode."""
+    return _deepseek_reasoning
 DEEPSEEK_CHAT_URL = f"{DEEPSEEK_API_BASE}/chat/completions"
 DEEPSEEK_MODELS_URL = f"{DEEPSEEK_API_BASE}/models"
 DEEPSEEK_BALANCE_URL = f"{DEEPSEEK_API_BASE}/user/balance"

@@ -1267,7 +1267,7 @@ def measured_body(component):
         clockwise with X right and Y down), or None when the edges were not
         measured or the values are not finite and positive.
     @note Only `_edges_measured` True counts: the review drops that mark when
-        a person moves or resizes the box (yolo_review_dialog.mark_manual),
+        a person moves or resizes the box (photo_yolo.mark_manual_box),
         because the edge is then where the eye put it, not the measurement.
     """
     if not isinstance(component, dict) or component.get('_edges_measured') is not True:
@@ -1318,6 +1318,13 @@ _DETECTOR_EVIDENCE_KEYS = {'_yolo_class': 'class', '_yolo_confidence': 'confiden
                            '_yolo_class_ambiguous': 'class_ambiguous', '_yolo_origin': 'origin',
                            '_yolo_low_confidence': 'low_confidence',
                            '_yolo_proposal_id': 'proposal_id'}
+#: Geometry of the source proposal, kept beside the class so the review can
+#: COMPARE the detector's box with the one the AI (or the reviewer) settled
+#: on (user, 2026-09-30, HANDOFF 162: the detector's reading is never
+#: overwritten). Copied only when the proposal carries them, never invented.
+_DETECTOR_GEOMETRY_KEYS = {'_box': 'box', 'x_mm': 'x_mm', 'y_mm': 'y_mm',
+                           'length_mm': 'length_mm', 'width_mm': 'width_mm',
+                           '_yolo_manual_box': 'manual_box'}
 
 
 def _detector_evidence(row, proposals):
@@ -1328,7 +1335,10 @@ def _detector_evidence(row, proposals):
     proposals has no single detector class. It is stored under its own key,
     not as the row's `_yolo_*` fields, because those mark a detector
     HYPOTHESIS (kicad_models._is_yolo_only_hypothesis, the low-confidence
-    gates of the 3D matching) and a reconciled row is not one.
+    gates of the 3D matching) and a reconciled row is not one. The
+    proposal's geometry (_DETECTOR_GEOMETRY_KEYS) travels with it when the
+    proposal has it, so the review can show the detector's box next to the
+    reconciled one.
     """
     sources = row.get('source_candidate_ids') or []
     if len(sources) != 1 or sources[0] not in proposals:
@@ -1336,7 +1346,12 @@ def _detector_evidence(row, proposals):
     proposal = proposals[sources[0]]
     if not isinstance(proposal, dict) or '_yolo_class' not in proposal:
         return None
-    return {field: proposal.get(key) for key, field in _DETECTOR_EVIDENCE_KEYS.items()}
+    evidence = {field: proposal.get(key) for key, field in _DETECTOR_EVIDENCE_KEYS.items()}
+    for key, field in _DETECTOR_GEOMETRY_KEYS.items():
+        if key in proposal:
+            value = proposal[key]
+            evidence[field] = list(value) if isinstance(value, (list, tuple)) else value
+    return evidence
 
 
 def _normalize(row, identity, length, width, issues, manual_ids=frozenset(), measured=None,

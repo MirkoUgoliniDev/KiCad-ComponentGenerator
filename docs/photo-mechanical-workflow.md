@@ -55,6 +55,19 @@ relative chiamate e può quindi comportare nuove inferenze a pagamento.
   coordinate. In caso di errore la geometria disponibile resta come dubbia.
 - Conversione pixel → mm deterministica, origine al centro, X destra e Y basso.
   I volumi comprendono l'ingombro visibile delle terminazioni.
+- Contatti castellated confrontati con la foto (`edge_notches`): le tacche del
+  contorno contano i semi-fori di ogni lato; un lato dichiarato dal modello su
+  un bordo senza tacche viene escluso, un lato su un bordo non leggibile viene
+  ricontrollato dal modello sull'ingrandimento di quel bordo, un numero diverso
+  viene ricontato. Sui lati confermati le piazzole vengono **misurate**
+  (`edge_lands`): colore del soldermask campionato fra due contatti, «non
+  maschera» separato con Otsu, serigrafie e piste tolte con un'apertura
+  morfologica grande quanto l'anello minimo, larghezza lungo il bordo come
+  quartile superiore delle righe della piazzola, con l'incertezza della scala.
+  La misura sostituisce le stime del modello (`value_sources` «measured»), mai
+  una quota letta nei documenti; una distanza fra le file non letta non
+  posiziona i fori passanti, e una larghezza di piazzola pari al passo non è
+  una misura.
 
 Il modello fotografico predefinito è `google/gemini-3.1-pro-preview`, modificabile
 nelle impostazioni LLM. Il modello datasheet scelto dall'utente viene usato anche

@@ -21,7 +21,7 @@ from kicadgen.gui import main_window as gui
 from kicadgen.services import photo_inventory as inv
 from kicadgen.services.datasheet_extractor import ExtractedParams
 
-import kicadgen.gui.yolo_review_dialog as review_module
+import kicadgen.gui.photo_review_dialog as review_module
 
 LENGTH, WIDTH = 40.0, 20.0
 
@@ -146,8 +146,9 @@ def prepared(window, monkeypatch, tmp_path):  # noqa: F811 - fixture importata
 
 def _answer(monkeypatch, outcome, kept):
     """@brief La vista risponde senza aprirsi: cio' che si prova sta fuori di essa."""
-    monkeypatch.setattr(review_module.YoloReviewDialog, 'exec', lambda self: outcome)
-    monkeypatch.setattr(review_module.YoloReviewDialog, 'kept', lambda self: list(kept))
+    monkeypatch.setattr(review_module.PhotoReviewDialog, 'exec', lambda self: outcome)
+    monkeypatch.setattr(review_module.PhotoReviewDialog, 'kept_components',
+                        lambda self: list(kept))
 
 
 def _run_worker(window):
@@ -272,16 +273,14 @@ def test_buttons_follow_the_bundle_in_the_component_folder(prepared):
     """
     window, _cache, _calls, _started, _warnings = prepared
     assert window._last_extracted is None
-    assert not window.btn_reopen_review.isEnabled()
     assert not window.btn_relaunch_inventory.isEnabled()
     inv.save_review_bundle(window._project_dir(), [_proposal(1)], _photo_png(), LENGTH, WIDTH)
     window.field_name.setText('AltroNome')
-    assert not window.btn_reopen_review.isEnabled(), 'altra cartella, nessun pacchetto'
+    assert not window.btn_relaunch_inventory.isEnabled(), 'altra cartella, nessun pacchetto'
     window.field_name.setText('Componente_di_prova')
-    assert window.btn_reopen_review.isEnabled()
     assert window.btn_relaunch_inventory.isEnabled()
     window.field_name.setText('')
-    assert not window.btn_reopen_review.isEnabled(), 'senza nome non c\'e\' cartella'
+    assert not window.btn_relaunch_inventory.isEnabled(), 'senza nome non c\'e\' cartella'
     assert not window.btn_relaunch_inventory.isEnabled()
 
 
@@ -290,14 +289,14 @@ def test_extraction_writes_the_bundle_into_the_component_folder(prepared):
     window, cache, *_ = prepared
     window._on_extracted(_params())
     assert not (_bundle_dir(window) / 'proposals.json').exists(), 'nulla in cache: nulla da salvare'
-    assert not window.btn_reopen_review.isEnabled()
+    assert not window.btn_relaunch_inventory.isEnabled()
     _save_evidence(cache, [_proposal(1), _proposal(2, box=(.5, .5, .7, .7))])
     window._on_extracted(_params())
     bundle = inv.load_review_bundle(window._project_dir())
     assert bundle is not None and [r['_id'] for r in bundle.proposals] == [1, 2]
     assert (bundle.body_length_mm, bundle.body_width_mm) == (LENGTH, WIDTH)
     assert bundle.photo_path is not None
-    assert window.btn_reopen_review.isEnabled()
+    assert window.btn_relaunch_inventory.isEnabled()
     assert 'senza chiamate AI' in window.ai_progress_text.toPlainText()
 
 
@@ -307,7 +306,7 @@ def test_proposals_older_than_the_current_extraction_are_ignored(prepared):
     _save_evidence(cache, [_proposal(1)], stamp='20200101-000000', photo_stamp='20200101-000001')
     window._extraction_started_stamp = '20260101-000000'
     window._on_extracted(_params())
-    assert not window.btn_reopen_review.isEnabled()
+    assert not window.btn_relaunch_inventory.isEnabled()
     assert not (_bundle_dir(window) / 'proposals.json').exists()
 
 
@@ -323,7 +322,7 @@ def test_accepting_saves_offline_and_pays_nothing(prepared, monkeypatch):
     _retype_name(window)
     kept = _proposal(1, box=(.21, .2, .41, .4), _yolo_manual_box=True)
     _answer(monkeypatch, QDialog.DialogCode.Accepted, [kept])
-    window.btn_reopen_review.click()
+    window._reopen_detector_review()
     assert window._reconcile_worker is None, 'nessun worker: la revisione e\' gratuita'
     assert calls == [] and started == [] and warnings == []
     bundle = inv.load_review_bundle(window._project_dir())
@@ -331,7 +330,7 @@ def test_accepting_saves_offline_and_pays_nothing(prepared, monkeypatch):
     assert (bundle.body_length_mm, bundle.body_width_mm) == (LENGTH, WIDTH)
     log = window.ai_progress_text.toPlainText()
     assert 'nessuna richiesta AI' in log and 'gratuito' in log
-    assert window.btn_reopen_review.isEnabled() and window.btn_relaunch_inventory.isEnabled()
+    assert window.btn_relaunch_inventory.isEnabled()
 
 
 def test_cancelling_starts_nothing_and_leaves_the_file(prepared, monkeypatch):
@@ -341,12 +340,12 @@ def test_cancelling_starts_nothing_and_leaves_the_file(prepared, monkeypatch):
     _retype_name(window)
     before = (_bundle_dir(window) / 'proposals.json').read_bytes()
     _answer(monkeypatch, QDialog.DialogCode.Rejected, [])
-    window.btn_reopen_review.click()
+    window._reopen_detector_review()
     assert window._reconcile_worker is None
     assert calls == [] and started == []
     assert 'annullata' in window.ai_progress_text.toPlainText()
     assert (_bundle_dir(window) / 'proposals.json').read_bytes() == before
-    assert window.btn_reopen_review.isEnabled()
+    assert window.btn_relaunch_inventory.isEnabled()
 
 
 def test_relaunch_pays_once_for_the_saved_proposals_and_restarts_matching(prepared, monkeypatch):
@@ -355,7 +354,7 @@ def test_relaunch_pays_once_for_the_saved_proposals_and_restarts_matching(prepar
     _save_evidence(_cache, [_proposal(1), _proposal(2, box=(.5, .5, .7, .7))])
     window._on_extracted(_params())
     _answer(monkeypatch, QDialog.DialogCode.Accepted, [_proposal(1)])
-    window.btn_reopen_review.click()
+    window._reopen_detector_review()
     assert calls == [], 'la revisione non paga'
     window.btn_relaunch_inventory.click()
     log_before = window.ai_progress_text.toPlainText()
@@ -372,7 +371,7 @@ def test_relaunch_pays_once_for_the_saved_proposals_and_restarts_matching(prepar
     assert 'Inventario rilanciato: 1 ingombri' in window._last_extracted.notes
     assert len(started) == 1 and started[0].components_3d[0]['package'] == 'R_0603'
     assert window.btn_extract_ai.isEnabled()
-    assert window.btn_reopen_review.isEnabled()
+    assert window.btn_relaunch_inventory.isEnabled()
     # Il pacchetto conserva le proposte tenute, non quelle originali della cache.
     assert [r['_id'] for r in inv.load_review_bundle(window._project_dir()).proposals] == [1]
 
@@ -396,7 +395,7 @@ def test_relaunch_reads_every_body_with_the_crop_prompt_of_the_profile(prepared,
     _save_evidence(_cache, [_proposal(1)])
     window._on_extracted(_params())
     _answer(monkeypatch, QDialog.DialogCode.Accepted, [_proposal(1)])
-    window.btn_reopen_review.click()
+    window._reopen_detector_review()
     window.btn_relaunch_inventory.click()
     worker = _run_worker(window)
     expected = stored or SYSTEM_PROMPT
@@ -425,7 +424,7 @@ def test_relaunch_reads_the_crops_with_the_crop_model_of_the_profile(prepared, m
     _save_evidence(_cache, [_proposal(1)])
     window._on_extracted(_params())
     _answer(monkeypatch, QDialog.DialogCode.Accepted, [_proposal(1)])
-    window.btn_reopen_review.click()
+    window._reopen_detector_review()
     window.btn_relaunch_inventory.click()
     worker = _run_worker(window)
     assert worker.crop_model == window.profile_store.snapshot(window._profile_key())['crop_model'] == stored
@@ -454,7 +453,7 @@ def test_identical_proposals_replay_the_cache_without_a_new_call(prepared, monke
     _save_evidence(cache, [_proposal(1), _proposal(2, box=(.5, .5, .7, .7))])
     window._on_extracted(_params())
     _answer(monkeypatch, QDialog.DialogCode.Accepted, [_proposal(1)])
-    window.btn_reopen_review.click()
+    window._reopen_detector_review()
     window.btn_relaunch_inventory.click()
     _run_worker(window)
     assert len(calls) == 1
@@ -503,7 +502,7 @@ def test_in_extraction_review_writes_the_kept_proposals_not_the_cache_rows(prepa
     window._on_extracted(_params())
     assert inv.load_review_bundle(window._project_dir()).proposals == [edited]
     assert calls == []
-    assert window.btn_reopen_review.isEnabled()
+    assert window.btn_relaunch_inventory.isEnabled()
 
 
 def test_extraction_without_review_dialog_still_copies_the_cache_rows(prepared):
@@ -698,23 +697,21 @@ def test_name_change_during_a_run_keeps_the_analysis_buttons_disabled(prepared, 
     window, *_ = prepared
     inv.save_review_bundle(window._project_dir(), [_proposal(1)], _photo_png(), LENGTH, WIDTH)
     _retype_name(window)
-    assert window.btn_extract_ai.isEnabled() and window.btn_reopen_review.isEnabled()
+    assert window.btn_extract_ai.isEnabled() and window.btn_relaunch_inventory.isEnabled()
     window.btn_extract_ai.setEnabled(False)
-    window.btn_reopen_review.setEnabled(False)
     window.btn_relaunch_inventory.setEnabled(False)
     window._extract_worker = SimpleNamespace(isRunning=lambda: True)
     try:
         window.field_name.setText('Componente_di_prova_2')
         window.field_name.setText('Componente_di_prova')
         assert not window.btn_extract_ai.isEnabled()
-        assert not window.btn_reopen_review.isEnabled()
         assert not window.btn_relaunch_inventory.isEnabled()
     finally:
         window._extract_worker = None
     # Negativo: a worker fermo il cambio nome riabilita come prima.
     window.field_name.setText('Componente_di_prova_2')
     window.field_name.setText('Componente_di_prova')
-    assert window.btn_extract_ai.isEnabled() and window.btn_reopen_review.isEnabled()
+    assert window.btn_extract_ai.isEnabled() and window.btn_relaunch_inventory.isEnabled()
 
 
 def test_bundle_without_photo_disables_both_buttons_and_warns_neutrally(prepared):
@@ -725,7 +722,6 @@ def test_bundle_without_photo_disables_both_buttons_and_warns_neutrally(prepared
     assert not list(_bundle_dir(window).glob('*.png'))
     window._photo_png = None
     _retype_name(window)
-    assert not window.btn_reopen_review.isEnabled()
     assert not window.btn_relaunch_inventory.isEnabled()
     # L'avviso, se raggiunto direttamente, non parla di «rilancio».
     bundle = inv.load_review_bundle(window._project_dir())
@@ -735,7 +731,7 @@ def test_bundle_without_photo_disables_both_buttons_and_warns_neutrally(prepared
     # Positivo: con la foto in memoria i pulsanti si riaccendono.
     window._photo_png = _photo_png()
     _retype_name(window)
-    assert window.btn_reopen_review.isEnabled() and window.btn_relaunch_inventory.isEnabled()
+    assert window.btn_relaunch_inventory.isEnabled()
 
 
 def test_reopen_button_sits_at_the_bottom_of_the_project_tab(window):  # noqa: F811
@@ -755,8 +751,8 @@ def test_reopen_button_sits_at_the_bottom_of_the_project_tab(window):  # noqa: F
     assert outer.itemAt(0).layout() is window.project_action_bar
     bar = window.project_action_bar
     widgets = [bar.itemAt(i).widget() for i in range(bar.count())]
-    assert window.btn_reopen_review_top in widgets
-    assert window.btn_reopen_review_top.accessibleName() == window.btn_reopen_review.text()
+    assert window.btn_component_review_top in widgets
+    assert window.btn_component_review_top.accessibleName() == window.btn_component_review.text()
     # Negativo: non sta nella riga degli strumenti dell'analisi. Il riferimento
     # e' il gruppo, non piu' il padre di «Rivedi foto…»: quel comando e' stato
     # spostato nella riga in fondo (richiesta dell'utente sui pulsanti
@@ -775,5 +771,4 @@ def test_reopen_button_sits_at_the_bottom_of_the_project_tab(window):  # noqa: F
     # Negativo: nessuno dei comandi sta fra gli strumenti AI (dal 2026-09-24
     # anche «Modifica prompt» e' salito nella barra in alto).
     assert not _contains(tools_row, window.btn_component_prompt)
-    assert not _contains(tools_row, window.btn_reopen_review)
-    assert not _contains(tools_row, window.btn_edit_component_review)
+    assert not _contains(tools_row, window.btn_component_review)

@@ -124,10 +124,19 @@ def test_the_parameter_modal_shows_the_ai_lines_and_hides_the_geometry(dialog, a
     app.processEvents()
     assert dialog.parameters_button.isEnabled()
     text = dialog.attributes_plain_text()
-    assert text.splitlines()[0] == "Tipo: ic · confidenza bassa"
+    # HANDOFF 163: two headed sections, the detector's (empty here: no
+    # reading on this row) before the AI's five lines.
+    # Blank lines: QTextDocument separates a table band from the paragraphs.
+    lines = [line for line in text.splitlines() if line.strip()]
+    assert lines[0] == "Rilevatore locale (YOLO)"
+    assert lines[1] == "Lettura: nessuna proposta singola del rilevatore"
+    assert lines[2] == "Lettura AI"
+    assert lines[3] == "Tipo: ic · confidenza bassa"
     assert "Package: SOT-223 · confidenza bassa" in text
-    assert "Modello KiCad: agganciato dalla sola geometria, da confermare: SOT-223.step" in text
-    assert text.count("\n") == 4
+    # HANDOFF 165: the KiCad model has its own section, the third.
+    assert lines[7] == "Modello KiCad"
+    assert lines[8] == "Modello KiCad: agganciato dalla sola geometria, da confermare: SOT-223.step"
+    assert len(lines) == 9
     dialog.open_parameters()
     app.processEvents()
     form = dialog._form
@@ -135,8 +144,10 @@ def test_the_parameter_modal_shows_the_ai_lines_and_hides_the_geometry(dialog, a
     for key in ("x_mm", "y_mm", "length_mm", "width_mm", "rotation_deg", "height_mm"):
         assert dialog.fields[key].isHidden()
         assert form.labelForField(dialog.fields[key]).isHidden()
-    # Rich text: one paragraph per line, values escaped, never interpreted.
-    assert dialog.attributes_label.text().count("<p") == 5
+    # Rich text: one paragraph per line (headings are table bands), values
+    # escaped, never interpreted.
+    assert dialog.attributes_label.text().count("<p") == 6
+    assert dialog.attributes_label.text().count("<table") == 3
     assert dialog.attributes_label.isVisibleTo(dialog.parameters_dialog)
     for key in ("name", "kind", "marking"):
         assert not dialog.text_fields[key].isHidden()
@@ -147,7 +158,7 @@ def test_the_lines_follow_the_selection_and_the_edits(dialog, app):
     """@brief Another body, another text; typing a type resets the model line."""
     dialog.component_list.setCurrentRow(2)
     app.processEvents()
-    assert dialog.attributes_plain_text().splitlines()[0] == "Tipo: capacitor"
+    assert "Tipo: capacitor" in dialog.attributes_plain_text().splitlines()
     assert "Letture del ritaglio: non disponibile" in dialog.attributes_plain_text()
     dialog.component_list.setCurrentRow(0)
     app.processEvents()
@@ -156,8 +167,9 @@ def test_the_lines_follow_the_selection_and_the_edits(dialog, app):
     dialog.text_fields["kind"].setText("resistor")
     dialog._text_edited("kind")
     app.processEvents()
-    assert dialog.attributes_plain_text().splitlines()[0] == "Tipo: ic · confidenza bassa" \
-        or dialog.attributes_plain_text().splitlines()[0].startswith("Tipo: resistor")
+    typed = [line for line in dialog.attributes_plain_text().splitlines()
+             if line.startswith("Tipo:")]
+    assert typed == ["Tipo: ic · confidenza bassa"] or typed[0].startswith("Tipo: resistor")
     assert "non ancora cercato" in dialog.attributes_plain_text()
 
 

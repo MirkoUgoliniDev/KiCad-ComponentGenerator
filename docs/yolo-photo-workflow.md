@@ -48,9 +48,11 @@ documents nor on the photograph.
   fields**, since without the document analysis there is no other source of
   the board dimensions. If the photo cannot be calibrated, check those two
   fields.
-- The detector's boxes open in the «Corpi rilevati» review. On OK the kept
-  boxes are saved in `photo-review/` exactly as after an extraction: they can
-  be reopened for free, or sent to the paid «Rilancia inventario AI» later.
+- The detector's boxes open in the component review («Revisione componenti»,
+  detector stage: the same window that later shows the AI inventory). On OK
+  the kept boxes are saved in `photo-review/` exactly as after an extraction:
+  they can be reopened for free, or sent to the paid «Rilancia inventario AI»
+  later.
 - Fields, component table and 3D are not touched.
 - «Interrompi» abandons the local detection; nothing is charged.
 

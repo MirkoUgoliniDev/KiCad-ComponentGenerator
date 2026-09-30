@@ -26,7 +26,7 @@ from kicadgen.gui.photo_review_dialog import (
     PHOTO_DIMMED_OPACITY, PHOTO_FULL, PHOTO_HIDDEN, PHOTO_STATES,
     PhotoReviewDialog, PhotoTransform, SELECTION_HALO_COLOR,
     UNDETERMINED_LIST_MARKER, UNDETERMINED_TYPE_CLASSES, UNDETERMINED_TYPE_COLOR,
-    _BoardBackdrop, _ResizeHandle,
+    _BoardBackdrop, _DetectorGhost, _ResizeHandle,
 )
 
 
@@ -362,7 +362,7 @@ def _bands(dialog):
     """
     return [item for item in dialog.scene.items()
             if isinstance(item, QGraphicsRectItem)
-            and not isinstance(item, (_ResizeHandle, _BoardBackdrop))]
+            and not isinstance(item, (_ResizeHandle, _BoardBackdrop, _DetectorGhost))]
 
 
 def _move_event(dialog, point, buttons):

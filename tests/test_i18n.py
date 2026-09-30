@@ -326,7 +326,7 @@ def test_the_scan_sees_the_strings_the_user_actually_reads():
     literals = ui_source_literals()
     assert len(literals) > 100, "il raccoglitore non vede piu' la GUI"
     assert "Componenti: {count} di {total}" in literals, "manca la strada di `self._tr`"
-    assert "Modifica la revisione dei componenti…" in literals, \
+    assert "Revisione componenti…" in literals, \
         "manca il testo scritto nel costruttore del widget"
     # Testo del tooltip del filtro aggiornato il 2026-09-24 (il filtro ora
     # filtra anche la foto): stessa strada, setToolTip su un letterale.

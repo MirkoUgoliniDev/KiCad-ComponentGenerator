@@ -51,14 +51,14 @@ def test_opening_another_project_forgets_the_photo_and_the_extraction(window, mo
     window._photo_png = window._photo_overlay_png = _png()
     window._last_extracted = object()
     window._reviewed_this_extraction = True
-    window._refresh_edit_review_buttons()
-    assert window.btn_edit_component_review_top.isVisibleTo(window)
+    window._refresh_component_review_button()
+    assert window.btn_component_review_top.isVisibleTo(window)
 
     _open(window, monkeypatch, "B")
     assert window._photo_png is None and window._photo_overlay_png is None
     assert window._last_extracted is None and window._reviewed_this_extraction is False
     assert window._last_mesh_path is None and window.package_geometry is None
-    assert not window.btn_edit_component_review_top.isVisibleTo(window)
+    assert not window.btn_component_review_top.isVisibleTo(window)
     assert window.field_description.text() == "modulo B"
 
 

@@ -19,7 +19,7 @@ def test_the_bundle_photo_comes_back_and_the_review_is_offered(window):  # noqa:
     window._photo_png = None
     window._restore_saved_photo()
     assert window._photo_png == png
-    assert window.btn_edit_component_review.isEnabled()
+    assert window.btn_component_review.isEnabled()
 
 
 def test_a_photo_already_in_memory_is_not_replaced(window):  # noqa: F811

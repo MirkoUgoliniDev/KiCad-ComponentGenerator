@@ -30,8 +30,9 @@ from kicadgen.services.i18n import DEFAULT_TRANSLATIONS, LANGUAGES
 
 
 def _workflow(window):
-    return [window.btn_regen_3d, window.btn_accept_models, window.btn_reopen_review_3d,
-            window.btn_relaunch_inventory_3d, window.btn_edit_component_review_3d]
+    # Una sola icona per la revisione (utente, 2026-09-30, HANDOFF 162).
+    return [window.btn_regen_3d, window.btn_accept_models, window.btn_component_review_3d,
+            window.btn_relaunch_inventory_3d]
 
 
 def _view_tools(window):
@@ -48,7 +49,7 @@ def _bar_widgets(window):
 
 
 def test_workflow_commands_are_icons_after_the_divider(window):  # noqa: F811
-    """@brief Positivo: cinque icone senza testo, tutte DOPO il divisore verticale.
+    """@brief Positivo: quattro icone senza testo, tutte DOPO il divisore verticale.
 
     Negativo: gli strumenti di vista restano PRIMA del divisore; le due
     famiglie non si mescolano.
@@ -177,7 +178,7 @@ def test_the_paid_command_stays_recognisable_as_paid(window):  # noqa: F811
     assert "(a pagamento)" in paid.accessibleName()
     keys = {button.icon().cacheKey() for button in _workflow(window)}
     assert len(keys) == len(_workflow(window)), "ogni comando ha la sua icona"
-    for free in (window.btn_reopen_review_3d, window.btn_edit_component_review_3d,
+    for free in (window.btn_component_review_3d,
                  window.btn_regen_3d, window.btn_accept_models):
         assert "pagamento" not in free.toolTip().lower()
 
