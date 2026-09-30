@@ -72,12 +72,12 @@ def test_extraction_action_is_centered_below_separate_tools(window):
     # Resta un comando solo, in fondo alla scheda Progetto: qui si verifica che
     # non sia rimasto fra gli strumenti e che quello in fondo si presenti con
     # un'etichetta leggibile e col tooltip che promette di non generare nulla.
-    assert not window.group_ai_tools.isAncestorOf(window.btn_edit_component_review)
-    review = window.btn_edit_component_review
+    assert not window.group_ai_tools.isAncestorOf(window.btn_component_review)
+    review = window.btn_component_review
     assert window.btn_photo_comparison is review, 'un comando solo, non due widget'
     # Dal 2026-09-24 il comando e' un'icona nella barra in alto (utente):
     # l'originale resta la fonte di nome e tooltip.
-    assert layout_contains(window.project_action_bar, window.btn_edit_component_review_top)
+    assert layout_contains(window.project_action_bar, window.btn_component_review_top)
     assert review.text().strip()
     assert 'Non avvia la generazione' in review.toolTip()
     tools_layout = window.group_ai_tools.layout()
@@ -586,7 +586,8 @@ def test_raw_photo_opens_with_current_table_dimensions_and_cancel_is_unchanged(w
 
     def inspect(dialog):
         assert isinstance(dialog, gui.PhotoReviewDialog)
-        assert dialog.windowTitle() == "Revisione AI"  # HANDOFF 153: nessun nome di file
+        # HANDOFF 153: nessun nome di file; HANDOFF 162: una finestra, il titolo dice lo stadio.
+        assert dialog.windowTitle() == "Revisione componenti — inventario AI"
         assert dialog.photo_transform.body_length_mm == 50
         assert dialog.photo_transform.body_width_mm == 20
         assert dialog.get_components() == before

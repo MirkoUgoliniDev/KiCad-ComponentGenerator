@@ -779,9 +779,15 @@ def _edge_lengths(length_mm, width_mm) -> dict:
     return {"left": width_mm, "right": width_mm, "top": length_mm, "bottom": length_mm}
 
 
+#: Contact styles whose half-holes cut the board outline: the photo can count
+#: them on the edge. A half_and_through contact is a half-hole plus a closed
+#: hole behind it, so its castellation is as visible as a plain half-hole's.
+HALF_HOLE_STYLES = ("half_hole", "half_and_through")
+
+
 def count_disagreements(profiles, crop_shape, length_mm: float, width_mm: float,
                         sides) -> list[EdgeCount]:
-    """@brief Declared sides whose half-holes the photo counts differently.
+    """@brief Declared sides the photo counts differently, contradicts, or cannot verify.
 
     @param profiles depth_profiles of the calibrated crop, or None.
     @param crop_shape Shape of the calibrated crop, in px.
@@ -789,16 +795,25 @@ def count_disagreements(profiles, crop_shape, length_mm: float, width_mm: float,
     @param width_mm Board width along Y, in mm.
     @param sides Declared castellated sides, seen from above, in mm (raw:
         normalized here, see normalized_sides).
-    @return One EdgeCount per disagreeing side (`found`, `declared`, notch
-        centres in mm from the start of the edge: left to right for top and
-        bottom, top to bottom for left and right, their tolerance, and the
-        common shift the calibration allows, `shift_bound_mm`). Only sides
-        declared with half-holes (contact_style "half_hole") are compared:
-        full holes do not cut the outline, and a side whose style is not
-        declared may be full holes whose pads make small bumps on it (the
-        ESP32 sample), so it is only reported by check_declared_contacts,
-        never sent to a paid recount. Sides not countable on the photo
-        (including a row that is only a lower bound) never disagree.
+    @return One EdgeCount per side the photo does not confirm:
+        * another number of notches: `found` and `declared`, the notch
+          centres in mm from the start of the edge (left to right for top
+          and bottom, top to bottom for left and right), their tolerance and
+          the common shift the calibration allows (`shift_bound_mm`);
+        * a CLEAN edge (`no_notch` True, `found` 0): the outline is straight
+          on a photo able to show a notch, so the declared half-holes are not
+          there (HANDOFF point 164: such a side is excluded by the caller);
+        * an edge the photo cannot read at all (`found` None and no centre
+          measured; `reason` says why: notches lost in the outline noise,
+          too wide, a photo too coarse): the caller may ask the model to
+          look at that edge again. A single notch on the edge is a measured
+          centre, not an unreadable edge: it stays a log line only.
+        Only sides declared with a style that cuts the outline
+        (HALF_HOLE_STYLES) are compared: full holes do not cut it, and a
+        side whose style is not declared may be full holes whose pads make
+        small bumps on it (the ESP32 sample), so it is only reported by
+        check_declared_contacts, never sent to a paid recount. A row that is
+        only a lower bound (`at_least`) never disagrees.
     @note Used to ask the model to recount those sides (user decision
         2026-09-28, HANDOFF point 137); the count is the same as the warning
         of `check_declared_contacts`.
@@ -809,16 +824,60 @@ def count_disagreements(profiles, crop_shape, length_mm: float, width_mm: float,
     lengths = _edge_lengths(length_mm, width_mm)
     result = []
     for edge, side in normalized_sides(sides).items():
-        if side["contact_style"] != "half_hole" or edge not in profiles:
+        if side["contact_style"] not in HALF_HOLE_STYLES or edge not in profiles:
             continue
         if side["count"] is None:
             continue
         bound = row_shift_bound_mm(crop_shape, scales[edge][0])
         counted = _count_side(profiles[edge], scales[edge], side, lengths[edge], bound)
-        if counted.found is not None and counted.found != side["count"]:
+        if counted.no_notch:
+            result.append(EdgeCount(edge, 0, side["count"], [], reason=counted.reason,
+                                    no_notch=True, tolerance_mm=counted.tolerance_mm,
+                                    shift_bound_mm=bound))
+        elif counted.found is None:
+            # Solo un bordo di cui la foto non ha letto NULLA (nessun centro
+            # misurato) va rivisto dal modello; una fila che e' un limite
+            # inferiore, o una tacca sola (centro misurato, non una fila:
+            # resta il solo log), non chiede una chiamata a pagamento.
+            if counted.at_least is None and not counted.centres_mm:
+                result.append(EdgeCount(edge, None, side["count"], [], reason=counted.reason,
+                                        tolerance_mm=counted.tolerance_mm, shift_bound_mm=bound))
+        elif counted.found != side["count"]:
             result.append(EdgeCount(edge, counted.found, side["count"], counted.centres_mm,
                                     tolerance_mm=counted.tolerance_mm, shift_bound_mm=bound))
     return result
+
+
+def confirmed_rows(profiles, crop_shape, length_mm: float, width_mm: float, sides) -> dict:
+    """@brief Notch centres of the sides the photo CONFIRMS, for measuring their lands.
+
+    @param profiles depth_profiles of the calibrated crop, or None.
+    @param crop_shape Shape of the calibrated crop, in px.
+    @param length_mm Board length along X, in mm.
+    @param width_mm Board width along Y, in mm.
+    @param sides Declared castellated sides (normalized here).
+    @return {edge: dict(centres_mm, pitch_mm, tolerance_mm)} for every side
+        with a style that cuts the outline (HALF_HOLE_STYLES) whose counted
+        notches equal the declared contacts: only then each notch is one
+        declared contact and its land can be attributed to it. Disagreeing,
+        uncountable and other sides are left out.
+    """
+    if not profiles or not isinstance(sides, (list, tuple)):
+        return {}
+    scales = _scales(crop_shape, length_mm, width_mm)
+    lengths = _edge_lengths(length_mm, width_mm)
+    rows = {}
+    for edge, side in normalized_sides(sides).items():
+        if side["contact_style"] not in HALF_HOLE_STYLES or edge not in profiles:
+            continue
+        if side["count"] is None:
+            continue
+        counted = _count_side(profiles[edge], scales[edge], side, lengths[edge],
+                              row_shift_bound_mm(crop_shape, scales[edge][0]))
+        if counted.found is not None and counted.found == side["count"]:
+            rows[edge] = dict(centres_mm=list(counted.centres_mm), pitch_mm=side["pitch_mm"],
+                              tolerance_mm=counted.tolerance_mm)
+    return rows
 
 
 def check_declared_contacts(profiles, crop_shape, length_mm: float, width_mm: float,
@@ -877,7 +936,7 @@ def check_declared_contacts(profiles, crop_shape, length_mm: float, width_mm: fl
             continue
         result = _count_side(profile, scales[edge], side, _edge_lengths(length_mm, width_mm)[edge],
                              row_shift_bound_mm(crop_shape, scales[edge][0]))
-        if result.no_notch and side["contact_style"] == "half_hole":
+        if result.no_notch and side["contact_style"] in HALF_HOLE_STYLES:
             # Declared half-holes cut the outline; a straight edge, on a photo
             # able to show them, contradicts the side (user decision
             # 2026-09-28: a warning, nothing changed).

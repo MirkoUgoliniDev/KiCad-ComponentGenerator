@@ -1260,6 +1260,20 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         for kind, message in check_declared_contacts(
                 edge_profiles, photo.shape, length, width, declared.get("castellated_sides")):
             (warn if kind == "warning" else log)(message)
+        # Piazzole misurate sulla foto (HANDOFF 169): sui lati che la foto
+        # conferma, il rame di ogni contatto viene misurato lungo il bordo e
+        # verso l'interno; il risultato va nella risposta come `_measured_lands`
+        # e l'estrazione lo adotta al posto delle stime (mai di una quota letta).
+        from .edge_lands import land_lines, measure_lands
+        from .edge_notches import confirmed_rows
+        rows = confirmed_rows(edge_profiles, photo.shape, length, width,
+                              declared.get("castellated_sides"))
+        if rows:
+            lands = measure_lands(photo, length, width, rows, edge_profiles)
+            declared["_measured_lands"] = {edge: land.as_dict() for edge, land in lands.items()
+                                           if land.width_mm is not None}
+            for kind, message in land_lines(lands):
+                (warn if kind == "warning" else log)(message)
     if top_photo_index is None:
         warn(tx("Vista dall'alto non specificata: scelta euristica {name}, verificare "
                 "la foto nel confronto.",

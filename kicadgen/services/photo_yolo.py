@@ -925,6 +925,117 @@ def split_ai_candidates(proposals):
     return sent, withheld
 
 
+#: Provenienza dichiarata di un riquadro che l'utente ha spostato,
+#: ridimensionato o tracciato: la stessa stringa per tutti e tre i casi,
+#: perche' per chi sta a valle sono la stessa cosa -- l'occhio di chi guarda.
+MANUAL_SOURCE = "revisione manuale"
+
+#: Maniglia «interno» di mark_manual_box: uno spostamento, nessun lato guardato.
+MOVE_HANDLE = (0, 0)
+
+
+def box_geometry_mm(box, length_mm, width_mm):
+    """@brief Board-millimetre geometry of a normalised full-board box.
+
+    @param box Normalised rectangle (x0, y0, x1, y1) on the calibrated crop.
+    @param length_mm Board extent along X, in mm.
+    @param width_mm Board extent along Y, in mm.
+    @return dict(x_mm, y_mm, length_mm, width_mm, rotation_deg), the
+        detector's own convention: origin at the board centre, X right, Y
+        down, length = long side, rotation 90 when the long side lies along Y.
+    @note The one conversion shared by the detector rows, the review windows
+        and the hand-drawn boxes, so no box can land on a different scale.
+    """
+    x0, y0, x1, y1 = box
+    sx, sy = (x1 - x0) * float(length_mm), (y1 - y0) * float(width_mm)
+    return {
+        "x_mm": ((x0 + x1) / 2 - 0.5) * float(length_mm),
+        "y_mm": ((y0 + y1) / 2 - 0.5) * float(width_mm),
+        "length_mm": max(sx, sy), "width_mm": min(sx, sy),
+        "rotation_deg": 0 if sx >= sy else 90,
+    }
+
+
+def mark_manual_box(proposal, handle=MOVE_HANDLE):
+    """@brief Declare that the geometry of `proposal` is the one the reviewer saw.
+
+    @param proposal Detector proposal, modified in place.
+    @param handle Handle the box was edited with, as photo-frame signs
+        (hx, hy) in {-1, 0, 1}: -1 the left/top side, +1 the right/bottom
+        side, MOVE_HANDLE for a move. It decides which sides were looked at.
+    @note `_yolo_manual_box` carries the `_yolo_` prefix on purpose: it is
+        forwarded in the `detector_metadata` of the request, and the model
+        must know that box was not measured by a machine. Marks that lapse:
+        `_edges_measured` (OpenCV edge measurement) goes, the edge is now
+        where the eye put it; of `_yolo_clipped_sides` (sides resting on a
+        tile seam, not measurements) ONLY the side the handle dragged lapses,
+        a move keeps the list as it is so the model keeps knowing that edge
+        is an artefact; `_yolo_clipped_recovery` stays declared while at
+        least one clipped side remains. The previous provenance is kept in
+        `_yolo_source_before_manual`.
+    @note Reviewer's decision: the hand of whoever looks IS the decision of
+        presence. A weak proposal (`_yolo_review_only`) that was moved or
+        resized is no longer a low-confidence hypothesis -- the eye verified
+        it -- so `_yolo_review_only` becomes False, the previous origin kept
+        in `_yolo_origin_before_manual`. Same rule for the sub-threshold ones:
+        touching one is keeping it (`_yolo_user_kept`, awaiting_user_keep).
+    """
+    if not proposal.get("_yolo_manual_box"):
+        proposal["_yolo_source_before_manual"] = proposal.get("_source")
+    proposal["_yolo_manual_box"] = True
+    proposal["_source"] = MANUAL_SOURCE
+    proposal.pop("_edges_measured", None)
+    hx, hy = handle
+    looked_at = set()
+    if hx < 0:
+        looked_at.add("left")
+    elif hx > 0:
+        looked_at.add("right")
+    if hy < 0:
+        looked_at.add("top")
+    elif hy > 0:
+        looked_at.add("bottom")
+    clipped = [side for side in (proposal.get("_yolo_clipped_sides") or ())
+               if side not in looked_at]
+    proposal["_yolo_clipped_sides"] = clipped
+    if not clipped:
+        proposal["_yolo_clipped_recovery"] = False
+    if proposal.get("_yolo_review_only"):
+        if "_yolo_origin" in proposal and "_yolo_origin_before_manual" not in proposal:
+            proposal["_yolo_origin_before_manual"] = proposal["_yolo_origin"]
+        proposal["_yolo_review_only"] = False
+    if proposal.get("_yolo_low_confidence"):
+        proposal["_yolo_user_kept"] = True
+
+
+def manual_proposal(box, identifier, length_mm, width_mm):
+    """@brief A proposal for a body the detector did not see, drawn by the reviewer.
+
+    @param box Normalised rectangle (x0, y0, x1, y1) on the calibrated crop.
+    @param identifier `_id` not used by any other proposal of the review.
+    @param length_mm Board extent along X, in mm.
+    @param width_mm Board extent along Y, in mm.
+    @return A new proposal row in the detector's format: `generic` kind,
+        placeholder height, no class (the model decides it from the photo),
+        origin `user_added`, `_yolo_manual_box` True and MANUAL_SOURCE, so
+        downstream it is indistinguishable from a retouched box.
+    """
+    x0, y0, x1, y1 = box
+    return {
+        "name": f"Corpo aggiunto {identifier}", "kind": "generic",
+        **box_geometry_mm(box, length_mm, width_mm), "height_mm": 1.0,
+        "_height_source": "estimated_placeholder_not_measured", "_height_estimated": True,
+        "color_hex": "#303030", "marking": "", "confidence": "low",
+        "_box": (x0, y0, x1, y1), "_source": MANUAL_SOURCE,
+        "_uncertain": True, "_id": identifier,
+        "_yolo_class": "",
+        "_yolo_confidence": None, "_yolo_proposal_id": None,
+        "_yolo_class_ambiguous": False,
+        "_yolo_origin": "user_added", "_yolo_review_only": False,
+        "_yolo_manual_box": True,
+    }
+
+
 def _dimension(value, name):
     if isinstance(value, bool) or not isinstance(value, Real):
         raise ValueError(f"{name} must be a finite positive number in mm (not a boolean).")

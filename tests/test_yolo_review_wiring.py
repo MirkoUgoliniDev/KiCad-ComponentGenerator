@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import QDialog
 
 from kicadgen.gui import main_window as mw
 from kicadgen.gui.main_window import ExtractWorker, MainWindow
-import kicadgen.gui.yolo_review_dialog as review_module
+import kicadgen.gui.photo_review_dialog as review_module
 from qt_window_teardown import dispose_window, stub_3d_preview
 
 
@@ -49,14 +49,16 @@ def _answer_with(monkeypatch, outcome, kept=None):
         def __init__(self, *args, **kwargs):
             super().__init__()
             self.given = args
+            # Stadio «rilevatore» della revisione unificata (HANDOFF 162).
+            assert kwargs.get('stage') == review_module.STAGE_DETECTOR
 
         def exec(self):
             return outcome
 
-        def kept(self):
+        def kept_components(self):
             return list(kept or [])
 
-    monkeypatch.setattr(review_module, 'YoloReviewDialog', _Fixed)
+    monkeypatch.setattr(review_module, 'PhotoReviewDialog', _Fixed)
 
 
 def test_the_worker_hands_over_the_photo_and_the_calibration_and_waits(window):
@@ -110,7 +112,7 @@ def test_a_broken_review_lets_the_analysis_finish_instead_of_hanging(window, mon
         def __init__(self, *args, **kwargs):
             raise RuntimeError('vista rotta')
 
-    monkeypatch.setattr(review_module, 'YoloReviewDialog', _Broken)
+    monkeypatch.setattr(review_module, 'PhotoReviewDialog', _Broken)
     proposals = _proposals()
     widget._on_review_requested(b'', proposals, 63.3, 25.4)
     app.processEvents()

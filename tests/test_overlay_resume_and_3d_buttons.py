@@ -74,7 +74,7 @@ def test_3d_tab_has_the_same_review_buttons_with_the_same_state(window):  # noqa
     NOME ACCESSIBILE della copia e la prima riga del suo tooltip, ed e' li'
     che si verifica che si tratti dello stesso comando.
     """
-    for mirror, source in ((window.btn_reopen_review_3d, window.btn_reopen_review),
+    for mirror, source in ((window.btn_component_review_3d, window.btn_component_review),
                            (window.btn_relaunch_inventory_3d, window.btn_relaunch_inventory)):
         assert mirror.text() == "", "copia a sola icona"
         assert not mirror.icon().isNull()
@@ -84,12 +84,13 @@ def test_3d_tab_has_the_same_review_buttons_with_the_same_state(window):  # noqa
     # stato proprio del pulsante, non quello ereditato dal tab.
     def own(button):
         return button.isEnabledTo(button.parentWidget())
+    window._photo_png = None  # senza foto la revisione apre il pacchetto salvato
     window._set_review_buttons_enabled(True)
-    assert own(window.btn_reopen_review_3d) and own(window.btn_relaunch_inventory_3d)
+    assert own(window.btn_component_review_3d) and own(window.btn_relaunch_inventory_3d)
     window._set_review_buttons_enabled(False)
-    assert not own(window.btn_reopen_review_3d)
+    assert not own(window.btn_component_review_3d)
     assert not own(window.btn_relaunch_inventory_3d)
-    assert not own(window.btn_reopen_review), "le copie hanno sempre lo stesso stato"
+    assert not own(window.btn_component_review), "le copie hanno sempre lo stesso stato"
 
 
 def test_3d_tab_buttons_trigger_the_same_handlers(window, monkeypatch):  # noqa: F811
@@ -113,20 +114,21 @@ def test_3d_tab_buttons_trigger_the_same_handlers(window, monkeypatch):  # noqa:
         return True
 
     monkeypatch.setattr(window, "_background_work_running", busy)
+    window._photo_png = None  # stadio «rilevatore»: il gestore e' la riapertura del pacchetto
     window._set_review_buttons_enabled(True)
-    page = window.btn_reopen_review_3d
+    page = window.btn_component_review_3d
     while page.parentWidget() is not None and page.parentWidget() is not window.tabs:
         page = page.parentWidget()
         page.setEnabled(True)  # come dopo una generazione: il tab 3D e' attivo
-    for button in (window.btn_reopen_review_3d, window.btn_relaunch_inventory_3d):
+    for button in (window.btn_component_review_3d, window.btn_relaunch_inventory_3d):
         assert button.receivers(button.clicked) == 1, "un comando, un collegamento"
-    window.btn_reopen_review_3d.click()
+    window.btn_component_review_3d.click()
     window.btn_relaunch_inventory_3d.click()
     assert calls == ["_reopen_detector_review", "_relaunch_inventory"]
     # Negativo: le copie dello stesso comando nella scheda Progetto arrivano
     # agli stessi gestori, non ad altri (i due comandi non sono scambiati).
     calls.clear()
-    window.btn_reopen_review.click()
+    window.btn_component_review.click()
     window.btn_relaunch_inventory.click()
     assert calls == ["_reopen_detector_review", "_relaunch_inventory"]
 
@@ -152,7 +154,7 @@ def test_the_buttons_sit_in_the_top_bar_of_the_3d_tab(window):  # noqa: F811
                 return True
         return False
 
-    assert _contains(row, window.btn_reopen_review_3d)
+    assert _contains(row, window.btn_component_review_3d)
     assert _contains(row, window.btn_relaunch_inventory_3d)
     page = window.model_3d_page.layout()
     widgets = [page.itemAt(i).widget() for i in range(page.count())]

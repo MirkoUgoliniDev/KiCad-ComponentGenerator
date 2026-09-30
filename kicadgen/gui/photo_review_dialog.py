@@ -45,6 +45,21 @@ The inventory's global ``uncertainties``, carried on every component as
 model's prose and are displayed as plain text, as data, never as
 instructions.
 
+One window, two stages (user decision 2026-09-30, HANDOFF 162): the same
+dialog reviews the LOCAL DETECTOR's proposals before the paid AI call
+(``stage=STAGE_DETECTOR``: OK sends the kept proposals, the rows are the
+detector's, edits are marked with ``photo_yolo.mark_manual_box`` and a drawn
+body is a ``photo_yolo.manual_proposal``) and the reconciled inventory after
+it (``stage=STAGE_INVENTORY``, the default). In the inventory stage the
+detector's own reading of each body -- class, confidence, box and size, kept
+by the reconciliation in ``_detector_evidence`` and never overwritten by the
+AI -- is shown beside the AI's (``component_attribute_lines``), a row whose
+detector class maps to another kind than the AI's carries
+DETECTOR_DISAGREES_MARKER, and the detector's original box is drawn as a
+dotted grey ghost under the selected body when it differs from the current
+outline (``detector_ghost``). Nothing of the detector's reading is edited
+here: it is evidence to compare against, not a field.
+
 Bodies the vision model added with no detector proposal behind them carry
 ``_ai_only_excluded`` (HANDOFF 141): True means "proposed but not selected".
 They are drawn weak and dashed (AI_ONLY_EXCLUDED_COLOR, the tint of the weak
@@ -71,7 +86,7 @@ from PyQt6.QtGui import (QBrush, QColor, QKeySequence, QPainter, QPen, QPixmap,
                          QPolygonF, QShortcut, QTextDocument)
 from PyQt6.QtWidgets import (
     QAbstractItemView, QComboBox, QCompleter, QDialog, QDialogButtonBox,
-    QDoubleSpinBox, QFormLayout,
+    QDoubleSpinBox, QFormLayout, QPushButton,
     QGraphicsItem, QGraphicsPolygonItem, QGraphicsRectItem, QGraphicsScene,
     QGraphicsSimpleTextItem,
     QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
@@ -81,6 +96,8 @@ from PyQt6.QtWidgets import (
 
 
 from ..services.messages import tx
+from ..services.photo_yolo import (MOVE_HANDLE, awaiting_user_keep, box_geometry_mm,
+                                   manual_proposal, mark_manual_box)
 from .component_state import (height_is_estimated, mark_height_measured,
                               mark_height_placeholder)
 from .review_tools import (ZOOM_STEP, AnchoredPopup, InfoPopup, asset_icon,
@@ -668,7 +685,7 @@ UNDETERMINED_FILTER = "<type undetermined>"
 
 ## Outline of a body the vision model added with no detector proposal and that
 ## nobody has kept yet (``_ai_only_excluded`` True, HANDOFF 141). Same tint as
-## the weak proposals of «Corpi rilevati» (yolo_review_dialog.WEAK_COLOR) and
+## the weak proposals of the detector review (yolo_review_dialog.WEAK_COLOR) and
 ## dashed like them: the two windows speak one visual language for «shown,
 ## but not chosen». Copied rather than imported, so this dialog keeps
 ## depending on PyQt6 only. Light enough for the 3:1 floor against
@@ -685,6 +702,168 @@ _INFO_AI_ONLY = (
     "I contorni gialli tratteggiati sono corpi aggiunti dal solo modello, senza una "
     "proposta del rilevatore: li vedi, ma restano fuori dalla tabella e dal 3D finché "
     "non li tieni (T). Spostarne, ridimensionarne o modificarne uno vale come tenerlo.")
+
+
+## Stages of the one review window (HANDOFF 162). STAGE_DETECTOR reviews the
+## local detector's proposals before the paid AI call; STAGE_INVENTORY the
+## reconciled inventory after it. Same canvas, list, filter, zoom and photo
+## control; what differs is what a row IS and what OK/Apply means.
+STAGE_DETECTOR = "detector"
+STAGE_INVENTORY = "inventory"
+STAGES = (STAGE_DETECTOR, STAGE_INVENTORY)
+
+## Marker on the list row of a body whose detector class maps (through
+## photo_inventory.YOLO_CLASS_KINDS) to a kind other than the one the AI
+## declared: the two readings disagree and the row is worth a second look.
+## Only when the detector's class HAS a kind: an unmapped or ambiguous class
+## is not a disagreement, it is an absence of opinion.
+DETECTOR_DISAGREES_MARKER = "[≠]"
+
+## Ghost outline of the detector's original box under the selected body
+## (inventory stage): grey and dotted, so it can be mistaken neither for a
+## status colour nor for the selection halo. Drawn only when it differs from
+## the current outline by more than one crop pixel on some side.
+DETECTOR_GHOST_COLOR = BOARD_BORDER_COLOR
+DETECTOR_GHOST_WIDTH_PX = 1
+DETECTOR_GHOST_TOLERANCE_PX = 1.0
+
+## First paragraph of «Come si usa» in the detector stage (the same words the
+## detector review always used).
+_INFO_DETECTOR_INTRO = (
+    "I riquadri sono le proposte del rilevatore. Tieni quelli che sono componenti, "
+    "elimina gli altri, aggiungi quelli che mancano. I tratteggiati sono le proposte "
+    "su cui non si e' fidato: ci sono perche' una confidenza bassa non e' prova di "
+    "assenza.")
+
+## Second paragraph of the detector stage: sub-threshold proposals are opt-in.
+_INFO_DETECTOR_LOW = (
+    "Le proposte puntinate sono sotto la soglia di confidenza del rilevatore: le vedi, "
+    "ma restano escluse e non vanno al modello a pagamento finché non le tieni (T). "
+    "Spostarne o ridimensionarne una vale come tenerla.")
+
+## Third paragraph of the inventory stage: the detector's reading is kept.
+_INFO_DETECTOR_COMPARISON = (
+    "Ogni corpo conserva la lettura del rilevatore locale (classe, confidenza, riquadro): "
+    "la vedi in «Parametri…», il marcatore [≠] segnala una classe diversa da quella "
+    "dell'AI e, sul corpo scelto, il riquadro originale del rilevatore è disegnato in "
+    "grigio punteggiato quando differisce da quello attuale.")
+
+
+def left_out(component) -> bool:
+    """@brief Whether a body is shown but not selected: it must not reach the next step.
+
+    @param component Row of either stage.
+    @return True for an AI-only body nobody kept (``ai_only_excluded``) and for
+        a sub-threshold detector proposal nobody kept
+        (``photo_yolo.awaiting_user_keep``): one visual language, dashed and
+        pale, for «proposed, not chosen» in both stages.
+    """
+    return ai_only_excluded(component) or awaiting_user_keep(component)
+
+
+def pending_proposal(component) -> bool:
+    """@brief Whether «Tieni» (T) applies to this body.
+
+    @param component Row of either stage.
+    @return True for an AI-only body (whatever its decision) and for a
+        sub-threshold detector proposal (``_yolo_low_confidence``).
+    """
+    return ai_only_proposal(component) or (
+        isinstance(component, dict) and component.get("_yolo_low_confidence") is True)
+
+
+def detector_reading(component):
+    """@brief The local detector's reading of a body, from whichever key carries it.
+
+    @param component Row of either stage.
+    @return ``photo_crop_reading.detector_evidence``: the row's own ``_yolo_*``
+        keys (a proposal, a yolo-only component) or the ``_detector_evidence``
+        the reconciliation copied from the single source proposal; None when
+        the row carries neither (a merge of proposals, a body drawn in the
+        inventory stage, an AI-only body). A proposal row adds its own box,
+        size and manual mark to the reading: its geometry IS the detector's
+        (or, once ``manual_box`` says so, the reviewer's).
+    """
+    from ..services.photo_crop_reading import detector_evidence
+    reading = detector_evidence(component)
+    if reading is not None and "_yolo_class" in component:
+        for key, field in (("length_mm", "length_mm"), ("width_mm", "width_mm"),
+                           ("_box", "box"), ("_yolo_manual_box", "manual_box")):
+            if key in component and field not in reading:
+                value = component[key]
+                reading[field] = list(value) if isinstance(value, (list, tuple)) else value
+    return reading
+
+
+def detector_kind(reading):
+    """@brief The kind the detector's class maps to, or None when it maps to nothing.
+
+    @param reading A ``detector_reading``.
+    @return The ``photo_inventory.YOLO_CLASS_KINDS`` kind of the reading's
+        class; None for an ambiguous class, an empty one or one the table
+        does not know. None means «no opinion», never «generic».
+    """
+    if not isinstance(reading, dict) or reading.get("class_ambiguous") is True:
+        return None
+    name = reading.get("class")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    from ..services.photo_inventory import YOLO_CLASS_KINDS
+    return YOLO_CLASS_KINDS.get(name.strip())
+
+
+def detector_disagrees(component) -> bool:
+    """@brief Whether the detector's class and the row's kind name different families.
+
+    @param component Inventory row.
+    @return True when ``detector_kind`` gives a kind and it differs
+        (case-insensitively) from the row's ``kind``. False when the detector
+        has no opinion, when the row has no kind, or when they agree.
+    """
+    kind = detector_kind(detector_reading(component))
+    declared = component.get("kind") if isinstance(component, dict) else None
+    if kind is None or not isinstance(declared, str) or not declared.strip():
+        return False
+    return kind.casefold() != declared.strip().casefold()
+
+
+def _size_text(reading):
+    """«L×W mm» of a detector reading, or '' when it carries no size."""
+    length, width = reading.get("length_mm"), reading.get("width_mm")
+    if all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (length, width)):
+        return f"{length:.1f}×{width:.1f} mm"
+    return ""
+
+
+def detector_row_label(proposal, _tr) -> str:
+    """@brief List row of a detector proposal: class, confidence, state and size.
+
+    @param proposal Detector proposal row.
+    @param _tr Translator.
+    @return e.g. «resistor · 0.83 · 2.4×1.3 mm», «led · 0.31 · bassa
+        confidenza · non tenuta · 4.0×1.9 mm», «generico · aggiunto a mano ·
+        ritoccato · 1.0×0.5 mm». The state is there because whoever moves or
+        resizes a box must see at once what changed, and a hand-touched body
+        must be recognisable as such.
+    """
+    origin = proposal.get("_yolo_origin")
+    confidence = proposal.get("_yolo_confidence")
+    if origin == "user_added":
+        state = _tr("aggiunto a mano")
+    else:
+        state = f"{confidence:.2f}" if isinstance(confidence, (int, float)) else "?"
+        if proposal.get("_yolo_low_confidence"):
+            state += " · " + _tr("bassa confidenza") + " · " + (
+                _tr("non tenuta") if awaiting_user_keep(proposal) else _tr("tenuta"))
+        elif proposal.get("_yolo_review_only"):
+            state += " · " + _tr("debole")
+        if proposal.get("_yolo_manual_box"):
+            state += " · " + _tr("ritoccato")
+    text = f"{proposal.get('_yolo_class') or _tr('generico')} · {state}"
+    length, width = proposal.get("length_mm"), proposal.get("width_mm")
+    if isinstance(length, (int, float)) and isinstance(width, (int, float)):
+        text += f" · {length:.1f}×{width:.1f} mm"
+    return text
 
 
 def ai_only_proposal(component) -> bool:
@@ -729,24 +908,83 @@ def _text(value):
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
-def component_attribute_lines(component, _tr) -> list[tuple[str, str]]:
-    """@brief The few attributes of one body worth a glance, for the drill-down.
+## Heading and band colour of the two sections of «Parametri componente»
+## (user, 2026-09-30, HANDOFF 163): the detector's section wears the green of
+## its outlines on the photo, the AI's a neutral band, so the eye tells them
+## apart before reading. Dark tints, as the whole application is dark.
+DETECTOR_SECTION_TITLE = "Rilevatore locale (YOLO)"
+DETECTOR_SECTION_COLOR = "#1f4d33"
+AI_SECTION_TITLE = "Lettura AI"
+AI_SECTION_COLOR = "#3a3f47"
+KICAD_SECTION_TITLE = "Modello KiCad"
+KICAD_SECTION_COLOR = "#3d3a5c"
+CORRECTIONS_TITLE = "Correzioni"
 
-    Five lines (user, 2026-09-29, HANDOFF 151-bis: «troppe informazioni»):
+## Provenance of a detector proposal, by its ``origin``.
+_DETECTOR_ORIGINS = {"operating_threshold": "sopra la soglia operativa del rilevatore",
+                     "low_confidence_review": "sotto la soglia: da tenere a mano",
+                     "user_added": "tracciato a mano in revisione"}
+
+
+def detector_section_lines(component, _tr, stage=STAGE_INVENTORY) -> list[tuple[str, str]]:
+    """@brief The detector's section: class, confidence, measured box, provenance.
+
+    @param component Row of either stage.
+    @param _tr Translator of the Italian labels.
+    @param stage STAGE_INVENTORY (default) or STAGE_DETECTOR: only the
+        inventory stage has an AI type to compare the class with.
+    @return ``(label, value)`` pairs read from ``detector_reading``; empty
+        when the row carries no reading (a merge of proposals, a body drawn
+        in the inventory stage, an AI-only body): nothing is invented. The
+        box size is the one the DETECTOR measured, not the body's current
+        dimensions, which the user edits by dragging.
+    """
+    reading = detector_reading(component)
+    if not reading:
+        return []
+    lines = []
+    if reading.get("origin") == "user_added":
+        lines.append((_tr("Classe"), _tr("aggiunto a mano") + " · " + _tr("generico")))
+    else:
+        name = reading.get("class")
+        text = name.strip() if isinstance(name, str) and name.strip() else _tr("generico")
+        if reading.get("class_ambiguous") is True:
+            text += " · " + _tr("classe ambigua")
+        if stage == STAGE_INVENTORY and detector_disagrees(component):
+            text += " · " + _tr("diverso dal tipo AI")
+        lines.append((_tr("Classe"), text))
+        confidence = reading.get("confidence")
+        if isinstance(confidence, (int, float)) and not isinstance(confidence, bool):
+            text = f"{confidence:.2f}"
+            if reading.get("low_confidence") is True:
+                text += " · " + _tr("bassa confidenza")
+            lines.append((_tr("Confidenza"), text))
+    size = _size_text(reading)
+    if size:
+        lines.append((_tr("Riquadro"), size))
+    origin = _DETECTOR_ORIGINS.get(reading.get("origin"))
+    provenance = _tr(origin) if origin else _tr(ATTRIBUTE_UNAVAILABLE)
+    if reading.get("manual_box") is True and reading.get("origin") != "user_added":
+        provenance += " · " + _tr("riquadro ritoccato a mano")
+    lines.append((_tr("Provenienza"), provenance))
+    return lines
+
+
+def ai_section_lines(component, _tr) -> list[tuple[str, str]]:
+    """@brief The AI's section: type, package, marking, crop readings, KiCad model.
+
+    Four lines (user, 2026-09-29, HANDOFF 151-bis: «troppe informazioni»):
     type, package and marking as the AI read them, each with its declared
-    confidence; the outcome of the two crop readings; the state of the KiCad
-    model. Reading only: nothing is computed from the photo and nothing is
+    confidence; the outcome of the two crop readings. The KiCad model has
+    its own section (kicad_section_lines, HANDOFF 165). Reading only: nothing is computed from the photo and nothing is
     guessed. A missing type or crop outcome is reported as
     ATTRIBUTE_UNAVAILABLE; a missing package or marking is said so in words.
-    Dimensions stay in «Parametri…», warnings in the details popup.
+    Dimensions are edited on the photo, warnings live in the details popup.
 
-    @param component Photo component dict (the review's own row).
-    @param _tr Translator of the Italian labels (``self._tr`` of the dialog).
-    @return Ordered ``(label, value)`` pairs; labels translated, values shown
-        as data (the AI writes them in English).
+    @param component Inventory row.
+    @param _tr Translator of the Italian labels.
+    @return Ordered ``(label, value)`` pairs; values shown as data.
     """
-    if not isinstance(component, dict):
-        return []
     missing = _tr(ATTRIBUTE_UNAVAILABLE)
 
     def grade(key):
@@ -767,7 +1005,63 @@ def component_attribute_lines(component, _tr) -> list[tuple[str, str]]:
     outcome = _text(component.get("_crop_reading"))
     lines.append((_tr("Letture del ritaglio"),
                   _tr(_CROP_READING_OUTCOMES.get(outcome.lower(), outcome)) if outcome else missing))
-    lines.append((_tr("Modello KiCad"), _kicad_model_state(component, _tr)))
+    return lines
+
+
+def kicad_section_lines(component, _tr) -> list[tuple[str, str]]:
+    """@brief The KiCad section: the state of the model as the user will meet it in the solid.
+
+    @param component Inventory row.
+    @param _tr Translator of the Italian labels.
+    @return One ``(label, value)`` pair, from `_kicad_model_state`.
+    """
+    return [(_tr("Modello KiCad"), _kicad_model_state(component, _tr))]
+
+
+def component_attribute_sections(component, _tr, stage=STAGE_INVENTORY):
+    """@brief The three sections of «Parametri componente»: detector, AI, KiCad (HANDOFF 165).
+
+    @param component Photo component dict (the review's own row).
+    @param _tr Translator of the Italian labels (``self._tr`` of the dialog).
+    @param stage STAGE_INVENTORY (default) or STAGE_DETECTOR.
+    @return ``[(title, colour, lines)]`` in display order: the detector's
+        reading (or «nessuna proposta singola del rilevatore»), the AI's
+        reading (type, package, marking, crop readings), the KiCad model.
+        In the detector stage the last two say only that they become
+        available after the AI inventory: nothing has been read yet, so
+        nothing is shown as if it had.
+    """
+    if not isinstance(component, dict):
+        return []
+    detector = detector_section_lines(component, _tr, stage) or [
+        (_tr("Lettura"), _tr("nessuna proposta singola del rilevatore"))]
+    if stage == STAGE_DETECTOR:
+        later = [(_tr("Lettura"), _tr("disponibile dopo l'inventario AI"))]
+        ai, kicad = later, list(later)
+    else:
+        ai = ai_section_lines(component, _tr)
+        kicad = kicad_section_lines(component, _tr)
+    return [(_tr(DETECTOR_SECTION_TITLE), DETECTOR_SECTION_COLOR, detector),
+            (_tr(AI_SECTION_TITLE), AI_SECTION_COLOR, ai),
+            (_tr(KICAD_SECTION_TITLE), KICAD_SECTION_COLOR, kicad)]
+
+
+def component_attribute_lines(component, _tr, stage=STAGE_INVENTORY) -> list[tuple[str, str]]:
+    """@brief The readings of one body as a flat list: the detector's first, then the AI's.
+
+    @param component Photo component dict (the review's own row).
+    @param _tr Translator of the Italian labels.
+    @param stage STAGE_INVENTORY (default) or STAGE_DETECTOR.
+    @return ``detector_section_lines`` (empty when the row carries no
+        reading: nothing invented) followed, in the inventory stage, by
+        ``ai_section_lines``. The sectioned form for the modal is
+        ``component_attribute_sections``.
+    """
+    if not isinstance(component, dict):
+        return []
+    lines = detector_section_lines(component, _tr, stage)
+    if stage == STAGE_INVENTORY:
+        lines += ai_section_lines(component, _tr) + kicad_section_lines(component, _tr)
     return lines
 
 
@@ -804,6 +1098,71 @@ def _kicad_model_state(component, _tr) -> str:
     if status == "import_failed":
         return _tr("importazione STEP fallita") + file_name
     return _tr("non confermato") + " · " + status
+
+def _section_band(title, colour) -> str:
+    """One heading band of the modal: a one-cell table with ``bgcolor`` (Qt paints those)."""
+    return ("<table width='100%' cellpadding='3' cellspacing='0' style='margin:6px 0 4px 0'>"
+            f"<tr><td bgcolor='{colour}'><b>{escape(title)}</b></td></tr></table>")
+
+
+def _photo_handle(rotation_deg, edge):
+    """Photo-frame signs (hx, hy) of a local resize edge, for ``mark_manual_box``.
+
+    The local edge ``(eu, ev)`` is expressed on the body's own axes; the
+    detector's clipped sides are named in the photo frame. At 0 degrees the
+    two coincide; at 90 the local u axis points down the photo and v points
+    left; at 180 and 270 the signs flip accordingly. Any other angle names no
+    photo side (MOVE_HANDLE): a rotated body's edge is not one side of the
+    photo, and no clipped side is dropped for it. Declared heuristic: the
+    detector's own proposals are axis aligned (0 or 90), so the exact cases
+    are the ones that occur.
+    """
+    eu, ev = edge
+    turns = int(round(float(rotation_deg) / 90.0)) % 4
+    if abs(float(rotation_deg) - round(float(rotation_deg) / 90.0) * 90.0) > 1e-6:
+        return MOVE_HANDLE
+    if turns == 0:
+        return (eu, ev)
+    if turns == 1:
+        return (-ev, eu)
+    if turns == 2:
+        return (-eu, -ev)
+    return (ev, -eu)
+
+
+def _normalized_box_rect(box, photo_rect):
+    """Scene rectangle of a normalised (x0, y0, x1, y1) box, or None when it is not one."""
+    if not isinstance(box, (list, tuple)) or len(box) != 4:
+        return None
+    try:
+        x0, y0, x1, y1 = (float(v) for v in box)
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(v) for v in (x0, y0, x1, y1)) or x1 <= x0 or y1 <= y0:
+        return None
+    return QRectF(x0 * photo_rect.width(), y0 * photo_rect.height(),
+                  (x1 - x0) * photo_rect.width(), (y1 - y0) * photo_rect.height())
+
+
+class _DetectorGhost(QGraphicsRectItem):
+    """@brief Dotted grey outline of the detector's original box under the selected body.
+
+    Permanent furniture of the canvas (like the board backdrop), shown and
+    placed by ``PhotoReviewDialog._refresh_detector_ghost``; it takes no mouse
+    button and is never part of what the review returns.
+    """
+
+    def __init__(self):
+        super().__init__()
+        pen = QPen(QColor(DETECTOR_GHOST_COLOR), DETECTOR_GHOST_WIDTH_PX)
+        pen.setCosmetic(True)
+        pen.setStyle(Qt.PenStyle.DotLine)
+        self.setPen(pen)
+        self.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self.setZValue(50)
+        self.hide()
+
 
 class _BoardBackdrop(QGraphicsRectItem):
     """@brief Neutral board rectangle shown when the photograph steps back.
@@ -1155,8 +1514,28 @@ class PhotoReviewDialog(QDialog):
     )
 
     def __init__(self, photo_png: bytes, components: list[dict],
-                 body_length_mm: float, body_width_mm: float, parent=None):
+                 body_length_mm: float, body_width_mm: float, parent=None, *,
+                 stage: str = STAGE_INVENTORY):
+        """@brief Build the review of ``components`` on the calibrated crop.
+
+        @param photo_png Raw PNG bytes of the full board crop.
+        @param components Rows to review: the reconciled inventory
+            (STAGE_INVENTORY) or the detector's proposals (STAGE_DETECTOR).
+        @param body_length_mm Board extent along X, in mm.
+        @param body_width_mm Board extent along Y, in mm.
+        @param parent Parent widget; its ``i18n`` translates the texts.
+        @param stage STAGE_INVENTORY (default) or STAGE_DETECTOR.
+        @throws ValueError For an invalid image, calibration, geometry or stage.
+        @note In the detector stage a proposal that carries a normalised
+            ``_box`` but no millimetre geometry (a saved bundle row) gets it
+            from the box through ``photo_yolo.box_geometry_mm``, the
+            detector's own conversion: the same box must never land on two
+            scales.
+        """
         super().__init__(parent)
+        if stage not in STAGES:
+            raise ValueError(f"Unknown review stage: {stage!r}")
+        self._stage = stage
         self.i18n = getattr(parent, "i18n", None)
         pixmap = QPixmap()
         if not isinstance(photo_png, bytes) or not pixmap.loadFromData(photo_png, "PNG"):
@@ -1170,6 +1549,10 @@ class PhotoReviewDialog(QDialog):
             for component in self._components:
                 if not isinstance(component, dict):
                     raise ValueError("Components must be dictionaries")
+                if stage == STAGE_DETECTOR and "_box" in component and not all(
+                        key in component for key in self._GEOMETRY_FIELDS[:4]):
+                    component.update(box_geometry_mm(
+                        component["_box"], float(body_length_mm), float(body_width_mm)))
                 for key, _ in self._NUMERIC_FIELDS:
                     default = 0 if key == "rotation_deg" else 1
                     value = float(component.get(key, default) if key in ("height_mm", "rotation_deg")
@@ -1182,7 +1565,8 @@ class PhotoReviewDialog(QDialog):
         self._applied = False
         self._closing = False
         self._match_worker = None
-        self.setWindowTitle("Revisione AI")
+        # One window, and the title says which stage it is in (HANDOFF 162).
+        self.setWindowTitle(self._tr(self.stage_title(stage)))
         self.resize(1120, 740)
         layout = QVBoxLayout(self)
         tr = self._tr
@@ -1269,6 +1653,10 @@ class PhotoReviewDialog(QDialog):
         # board must never become an invisible region of empty canvas.
         self.board_backdrop = _BoardBackdrop(self.photo_rect)
         self.scene.addItem(self.board_backdrop)
+        # The detector's original box under the selected body (inventory
+        # stage, HANDOFF 162): evidence to compare against, never a field.
+        self.detector_ghost = _DetectorGhost()
+        self.scene.addItem(self.detector_ghost)
         self.view = _PhotoView(self.scene, self)
         content = QHBoxLayout()
         content.addWidget(self.view, 1)
@@ -1333,7 +1721,8 @@ class PhotoReviewDialog(QDialog):
         self.attributes_label.setContentsMargins(0, 6, 0, 2)
         self.attributes_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.attributes_label.setProperty("i18n_skip", True)
-        form.addRow(self.attributes_label)
+        # Not a row of the form: the sections come FIRST in the modal, the
+        # editable fields last (see `parameters_body`, HANDOFF 165).
         # The type of a body the user has just drawn is asked, not guessed, and
         # the categories already present in the inventory are offered as a
         # convenience. A completer on the line edit, not a closed combo box:
@@ -1370,7 +1759,35 @@ class PhotoReviewDialog(QDialog):
         self.parameters_dialog = QDialog(self)
         self.parameters_dialog.setWindowTitle("Parametri componente")
         parameters_layout = QVBoxLayout(self.parameters_dialog)
-        parameters_layout.addWidget(self.form_widget)
+        # Order decided by the user (2026-09-30, HANDOFF 165): the three
+        # read-only sections (detector, AI, KiCad), the KiCad model command
+        # under its section, then the corrections -- the only editable
+        # fields -- at the bottom, and only once the AI inventory exists:
+        # before it, a name, a type or a marking typed here would be
+        # overwritten by the AI's own reading.
+        self.parameters_body = QWidget()
+        body = QVBoxLayout(self.parameters_body)
+        body.setContentsMargins(0, 0, 0, 0)
+        body.addWidget(self.attributes_label)
+        self.modal_model_button = QPushButton("Scegli modello KiCad…")
+        self.modal_model_button.setToolTip(
+            "Confronta i modelli 3D di KiCad per il componente scelto "
+            "(anche con doppio clic sulla lista).")
+        self.modal_model_button.clicked.connect(self.choose_model)
+        model_row = QHBoxLayout()
+        model_row.addWidget(self.modal_model_button)
+        model_row.addStretch()
+        body.addLayout(model_row)
+        self.corrections_label = QLabel()
+        self.corrections_label.setTextFormat(Qt.TextFormat.RichText)
+        self.corrections_label.setProperty("i18n_skip", True)
+        body.addWidget(self.corrections_label)
+        body.addWidget(self.form_widget)
+        parameters_layout.addWidget(self.parameters_body)
+        if stage == STAGE_DETECTOR:
+            self.modal_model_button.hide()
+            self.corrections_label.hide()
+            self.form_widget.hide()
         self.parameters_buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
         self.parameters_buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Applica")
         self.parameters_buttons.accepted.connect(self.parameters_dialog.accept)
@@ -1466,6 +1883,16 @@ class PhotoReviewDialog(QDialog):
         self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setAutoDefault(False)
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
+        if stage == STAGE_DETECTOR:
+            # Before the AI: OK hands the kept proposals to the paid call,
+            # Cancel means «do not start it». No KiCad model exists yet.
+            apply_button = self.buttons.button(QDialogButtonBox.StandardButton.Apply)
+            apply_button.setText(self._tr("OK"))
+            apply_button.setToolTip(self._tr(
+                "Le proposte tenute vanno al modello AI; annulla per non avviare la richiesta."))
+            self.model_button.hide()
+            self.model_status.setText(self._tr(
+                "I modelli KiCad si scelgono dopo l'inventario AI, nella stessa finestra."))
 
         self.add_button.toggled.connect(self.set_draw_mode)
         self.view.draw_bounds = self.photo_rect
@@ -1502,21 +1929,41 @@ class PhotoReviewDialog(QDialog):
         """
         return deepcopy(self._components)
 
-    def kept_components(self) -> list[dict]:
-        """@brief The bodies Apply hands over: every body except the AI-only ones left out.
+    def stage(self) -> str:
+        """@brief Which stage this window reviews.
 
-        @return Detached list, working-copy order.
+        @return STAGE_DETECTOR or STAGE_INVENTORY.
         """
-        return [deepcopy(c) for c in self._components if not ai_only_excluded(c)]
+        return self._stage
+
+    @staticmethod
+    def stage_title(stage) -> str:
+        """@brief Italian source of the window title of ``stage``.
+
+        @param stage STAGE_DETECTOR or STAGE_INVENTORY.
+        @return The title, to be passed through the translator.
+        """
+        if stage == STAGE_DETECTOR:
+            return "Revisione componenti — proposte del rilevatore"
+        return "Revisione componenti — inventario AI"
+
+    def kept_components(self) -> list[dict]:
+        """@brief The bodies Apply/OK hands over: every body except the ones left out.
+
+        @return Detached list, working-copy order. Left out (``left_out``): an
+            AI-only body nobody kept, a sub-threshold detector proposal nobody
+            kept. In the detector stage this is what goes to the paid call.
+        """
+        return [deepcopy(c) for c in self._components if not left_out(c)]
 
     def left_out_components(self) -> list[dict]:
-        """@brief AI-only bodies nobody kept: proposed, not selected.
+        """@brief Bodies nobody kept: proposed, not selected.
 
         @return Detached list, working-copy order. The caller keeps them aside
             (not in the table nor in the 3D) so that a later review can offer
             them again instead of losing them silently.
         """
-        return [deepcopy(c) for c in self._components if ai_only_excluded(c)]
+        return [deepcopy(c) for c in self._components if left_out(c)]
 
     def toggle_keep(self, index=None):
         """@brief Keep, or leave out again, a body the vision model added alone.
@@ -1533,22 +1980,34 @@ class PhotoReviewDialog(QDialog):
             item = self._selected_item()
         else:
             item = self._items[index] if 0 <= index < len(self._items) else None
-        if item is None or not ai_only_proposal(item.component):
+        if item is None or not pending_proposal(item.component):
             return None
-        keep = ai_only_excluded(item.component)
-        item.component["_ai_only_excluded"] = not keep
+        keep = left_out(item.component)
+        if ai_only_proposal(item.component):
+            item.component["_ai_only_excluded"] = not keep
+        else:
+            # Sub-threshold detector proposal: keeping is the reviewer's
+            # decision of presence (photo_yolo.awaiting_user_keep); leaving
+            # it again puts both marks back as the detector wrote them.
+            item.component["_yolo_user_kept"] = keep
+            item.component["_yolo_review_only"] = not keep
         self._ai_only_changed(item)
         return keep
 
     def _keep_touched(self, item):
-        """An edit is a look: an AI-only body the user moves, resizes or edits is kept.
+        """An edit is a look: a pending body the user moves, resizes or edits is kept.
 
-        Same rule as `yolo_review_dialog.mark_manual`: whoever changed it has
+        Same rule as `photo_yolo.mark_manual_box`: whoever changed it has
         looked at it, so it no longer waits for a decision.
         """
-        if ai_only_excluded(item.component):
+        if not left_out(item.component):
+            return
+        if ai_only_proposal(item.component):
             item.component["_ai_only_excluded"] = False
-            self._ai_only_changed(item)
+        else:
+            item.component["_yolo_user_kept"] = True
+            item.component["_yolo_review_only"] = False
+        self._ai_only_changed(item)
 
     def _ai_only_changed(self, item):
         self._refresh_item(item)
@@ -1558,13 +2017,21 @@ class PhotoReviewDialog(QDialog):
     def _sync_keep_button(self):
         """«Tieni» only for an AI-only body; pressed when that body is kept."""
         selected = self._selected_item()
-        proposal = selected is not None and ai_only_proposal(selected.component)
+        proposal = selected is not None and pending_proposal(selected.component)
         with QSignalBlocker(self.keep_button):
             self.keep_button.setEnabled(proposal)
-            self.keep_button.setChecked(proposal and not ai_only_excluded(selected.component))
+            self.keep_button.setChecked(proposal and not left_out(selected.component))
 
     def _refresh_ai_only_summary(self):
-        """Say how many AI-only bodies there are and how many stay out of the table and 3D."""
+        """Say how many pending bodies there are and how many stay out.
+
+        Inventory stage: the AI-only bodies and how many are left out of the
+        table and the 3D. Detector stage: the detector's own count -- strong,
+        weak, kept, added by hand, and the sub-threshold ones kept.
+        """
+        if self._stage == STAGE_DETECTOR:
+            self._refresh_detector_summary()
+            return
         total = sum(1 for c in self._components if ai_only_proposal(c))
         left_out = sum(1 for c in self._components if ai_only_excluded(c))
         self.ai_only_label.setVisible(total > 0)
@@ -1573,6 +2040,27 @@ class PhotoReviewDialog(QDialog):
                 "Aggiunti dal solo modello: {total}. Ne tieni {kept}; {left_out} restano fuori "
                 "dalla tabella e dal 3D (T per tenerli).").format(
                     total=total, kept=total - left_out, left_out=left_out))
+
+    def _refresh_detector_summary(self):
+        """The detector-stage summary: the same sentence the detector review always showed."""
+        rows = self._components
+        added = sum(1 for p in rows if p.get("_yolo_origin") == "user_added")
+        proposed = [p for p in rows if p.get("_yolo_origin") != "user_added"]
+        strong = sum(1 for p in proposed if not p.get("_yolo_review_only"))
+        weak = len(proposed) - strong
+        kept = sum(1 for p in rows if not left_out(p)) - added
+        text = self._tr(
+            "Il rilevatore ne ha proposte {total} ({strong} sicure, {weak} deboli). "
+            "Ne tieni {kept}, più {added} aggiunte a mano.").format(
+                total=len(proposed), strong=strong, weak=weak, kept=kept, added=added)
+        low = sum(1 for p in rows if p.get("_yolo_low_confidence"))
+        if low:
+            waiting = sum(1 for p in rows if awaiting_user_keep(p))
+            text += " " + self._tr(
+                "Di {low} a bassa confidenza ne tieni {low_kept}: le altre non vanno "
+                "al modello.").format(low=low, low_kept=low - waiting)
+        self.ai_only_label.setVisible(True)
+        self.ai_only_label.setText(text)
 
     def showEvent(self, event):
         """@brief Fit the whole photo the first time the editor is shown."""
@@ -1756,25 +2244,33 @@ class PhotoReviewDialog(QDialog):
     def _info_html(self):
         """@brief Instructions of the «Come si usa» popup, translated, as rich text."""
         tr = self._tr
+        detector = self._stage == STAGE_DETECTOR
         rows = [
             (tr("Clic"), tr("Sceglie un rettangolo; anche dalla lista a destra")),
             (tr("Trascina"), tr("Sposta il rettangolo; le maniglie lo ridimensionano")),
-            ("R", tr("Aggiungi componente: traccia il rettangolo, poi assegna la tipologia")),
+            ("R", tr("Disegna: trascina sulla foto per aggiungere un corpo") if detector
+             else tr("Aggiungi componente: traccia il rettangolo, poi assegna la tipologia")),
             (tr("Canc"), tr("Elimina il componente scelto")),
             (tr("Rotella"), tr("Zoom attorno al puntatore")),
             (tr("Tasto centrale"), tr("Sposta la vista")),
             ("+  -  F", tr("Zoom avanti, indietro, foto intera")),
             ("P", tr("Foto intera, attenuata, nascosta")),
-            ("T", tr("Tieni o lascia il corpo aggiunto dal solo modello")),
-            (tr("Doppio clic"), tr("Confronta i modelli 3D KiCad del componente")),
+            ("T", tr("Tieni o lascia la proposta a bassa confidenza scelta") if detector
+             else tr("Tieni o lascia il corpo aggiunto dal solo modello")),
         ]
+        if not detector:
+            rows.append((tr("Doppio clic"), tr("Confronta i modelli 3D KiCad del componente")))
         table = "".join(
             "<tr><td style='padding:2px 12px 2px 0'><b>" + escape(key) + "</b></td>"
             "<td style='padding:2px 0'>" + escape(text) + "</td></tr>" for key, text in rows)
+        if detector:
+            paragraphs = (_INFO_DETECTOR_INTRO, _INFO_DETECTOR_LOW)
+        else:
+            paragraphs = (_INFO_INTRO, _INFO_AI_ONLY, _INFO_DETECTOR_COMPARISON)
         return ("<p style='margin:0 0 8px 0'><b>" + escape(tr("Come si usa")) + "</b></p>"
-                "<p style='margin:0 0 8px 0'>" + escape(tr(_INFO_INTRO)) + "</p>"
-                "<p style='margin:0 0 8px 0'>" + escape(tr(_INFO_AI_ONLY)) + "</p>"
-                "<table>" + table + "</table>"
+                + "".join("<p style='margin:0 0 8px 0'>" + escape(tr(text)) + "</p>"
+                          for text in paragraphs)
+                + "<table>" + table + "</table>"
                 "<p style='margin:8px 0 0 0'>" + escape(tr(_INFO_ORIGIN)) + "</p>")
 
     def _legend_html(self):
@@ -1784,18 +2280,30 @@ class PhotoReviewDialog(QDialog):
               colour, so a body off the board and without a type shows red.
         """
         tr = self._tr
-        entries = (("#40dc80", tr("Verde: rilevato")),
-                   ("#ffad33", tr("Arancione: da verificare")),
-                   (UNDETERMINED_TYPE_COLOR, tr("Viola") + f" {UNDETERMINED_LIST_MARKER}: "
-                    + tr("tipo non stabilito")),
-                   ("#ef5350", tr("Rosso: fuori PCB (prevale)")))
-        # Only when the inventory carries AI-only bodies: the legend explains
-        # what is on screen, and a review cannot create one (a drawn body is
-        # the user's, not the model's).
-        if any(ai_only_proposal(c) for c in self._components):
-            entries += ((AI_ONLY_EXCLUDED_COLOR,
-                         tr("Giallo tratteggiato: aggiunto dal solo modello, escluso finché "
-                            "non lo tieni")),)
+        if self._stage == STAGE_DETECTOR:
+            entries = (("#40dc80", tr("Verde: proposta del rilevatore")),
+                       ("#ffad33", tr("Arancione: debole o con avvisi")),
+                       ("#ef5350", tr("Rosso: fuori PCB (prevale)")),
+                       (AI_ONLY_EXCLUDED_COLOR,
+                        tr("Giallo tratteggiato: bassa confidenza, esclusa finché non la tieni")))
+        else:
+            entries = (("#40dc80", tr("Verde: rilevato")),
+                       ("#ffad33", tr("Arancione: da verificare")),
+                       (UNDETERMINED_TYPE_COLOR, tr("Viola") + f" {UNDETERMINED_LIST_MARKER}: "
+                        + tr("tipo non stabilito")),
+                       ("#ef5350", tr("Rosso: fuori PCB (prevale)")))
+            # Only when the inventory carries AI-only bodies: the legend explains
+            # what is on screen, and a review cannot create one (a drawn body is
+            # the user's, not the model's).
+            if any(ai_only_proposal(c) for c in self._components):
+                entries += ((AI_ONLY_EXCLUDED_COLOR,
+                             tr("Giallo tratteggiato: aggiunto dal solo modello, escluso finché "
+                                "non lo tieni")),)
+            if any(detector_reading(c) for c in self._components):
+                entries += ((DETECTOR_GHOST_COLOR,
+                             tr("Grigio punteggiato: riquadro originale del rilevatore locale "
+                                "(sul corpo scelto)") + f" · {DETECTOR_DISAGREES_MARKER} "
+                             + tr("il rilevatore locale ha visto un'altra classe")),)
         dots = " &nbsp; ".join(
             f"<span style='white-space:nowrap'><span style='color:{color}'>&#9679;</span>"
             f"&nbsp;{escape(text)}</span>"
@@ -1825,12 +2333,20 @@ class PhotoReviewDialog(QDialog):
         self._refresh_ai_only_summary()
         total = len(self._items)
         category = self.active_category()
+        detector = self._stage == STAGE_DETECTOR
         if category is None:
-            self.count_label.setText(self._tr("Componenti: {count}").format(count=total))
+            if detector:
+                text = self._tr("Proposte del rilevatore: {count}")
+            else:
+                text = self._tr("Componenti: {count}")
+            self.count_label.setText(text.format(count=total))
             return
         matching = sum(1 for item in self._items if self._matches_category(item, category))
-        self.count_label.setText(self._tr("Componenti: {count} di {total}").format(
-            count=matching, total=total))
+        if detector:
+            text = self._tr("Proposte del rilevatore: {count} di {total}")
+        else:
+            text = self._tr("Componenti: {count} di {total}")
+        self.count_label.setText(text.format(count=matching, total=total))
 
     def model_uncertainties(self) -> list[str]:
         """@brief The inventory's global doubts, in the model's own words.
@@ -1889,9 +2405,13 @@ class PhotoReviewDialog(QDialog):
         """
         return self.category_filter.currentData()
 
-    @staticmethod
-    def _component_category(component):
+    def _component_category(self, component):
         """Normalized ``kind`` of a component; empty when it declares none.
+
+        Detector stage: the detector's class (``_yolo_class``) is the
+        category, because every proposal's ``kind`` is the same «generic»
+        placeholder and a filter on it would tell nothing; a hand-drawn
+        proposal has no class and falls back to its ``kind``.
 
         Only a string is a category. ``kind`` is free text written by the
         detection, so a list, a number or a boolean is not a spelling any
@@ -1902,6 +2422,10 @@ class PhotoReviewDialog(QDialog):
         therefore matches no filter. The stored value is left exactly as it
         is: this editor reports what the data says, it does not repair it.
         """
+        if self._stage == STAGE_DETECTOR:
+            name = component.get("_yolo_class")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
         kind = component.get("kind")
         return kind.strip() if isinstance(kind, str) else ""
 
@@ -2057,6 +2581,7 @@ class PhotoReviewDialog(QDialog):
         self.delete_button.setEnabled(selected is not None)
         self._sync_keep_button()
         self.model_button.setEnabled(selected is not None and self._match_worker is None)
+        self.modal_model_button.setEnabled(self.model_button.isEnabled())
         if selected:
             self._reload_fields()
         else:
@@ -2066,6 +2591,32 @@ class PhotoReviewDialog(QDialog):
         self._refresh_parameters_title()
         for item in self._items:
             self._refresh_item(item)
+        self._refresh_detector_ghost()
+
+    def _refresh_detector_ghost(self):
+        """Draw the detector's original box under the selected body when it differs.
+
+        Inventory stage only: the box comes from the row's detector reading
+        (``_detector_evidence.box``, normalised on the full crop). Hidden when
+        nothing is selected, when the row carries no box, or when the box and
+        the current outline agree within DETECTOR_GHOST_TOLERANCE_PX on every
+        side: a ghost identical to the outline would only thicken it.
+        """
+        selected = self._selected_item()
+        reading = detector_reading(selected.component) if selected is not None else None
+        box = reading.get("box") if (self._stage == STAGE_INVENTORY and reading) else None
+        rect = _normalized_box_rect(box, self.photo_rect)
+        if rect is None:
+            self.detector_ghost.hide()
+            return
+        bounds = selected.photo_bounds()
+        if all(abs(a - b) <= DETECTOR_GHOST_TOLERANCE_PX for a, b in (
+                (rect.left(), bounds.left()), (rect.top(), bounds.top()),
+                (rect.right(), bounds.right()), (rect.bottom(), bounds.bottom()))):
+            self.detector_ghost.hide()
+            return
+        self.detector_ghost.setRect(rect)
+        self.detector_ghost.show()
 
     def _reload_fields(self):
         """Show the selected component's values in the form without editing it."""
@@ -2137,6 +2688,9 @@ class PhotoReviewDialog(QDialog):
         # width the modal really has, not the one-line guess of the first
         # show (user, 2026-09-29: the last line was cut).
         self._fit_parameters_dialog()
+        if self._stage == STAGE_DETECTOR:
+            # No editable field before the AI inventory: nothing to focus.
+            return
         field = self.text_fields.get(focus if isinstance(focus, str) else "", None)
         if field is None:
             field = self.text_fields["name"]
@@ -2190,7 +2744,29 @@ class PhotoReviewDialog(QDialog):
         return (isinstance(class_confidence, str)
                 and class_confidence.strip().casefold() in UNDETERMINED_TYPE_CONFIDENCES)
 
+    def _detector_warnings(self, item):
+        """Warnings of a detector proposal: presence questions only, no model, no height."""
+        warnings = []
+        component = item.component
+        if awaiting_user_keep(component):
+            warnings.append(self._tr(
+                "Bassa confidenza: esclusa e non inviata al modello finché non la tieni (T)."))
+        elif component.get("_yolo_review_only"):
+            warnings.append(self._tr(
+                "Proposta debole: sotto la soglia operativa del rilevatore, il modello la "
+                "rilegge."))
+        if not self.photo_rect.adjusted(-1e-7, -1e-7, 1e-7, 1e-7).contains(item.photo_bounds()):
+            warnings.append(self._tr("Fuori dai bordi PCB: verificare posizione e dimensioni."))
+        clipped = component.get("_yolo_clipped_sides") or ()
+        if clipped:
+            warnings.append(self._tr(
+                "Lati sul confine di una tessera del rilevatore, non misurati: {sides}."
+            ).format(sides=", ".join(str(side) for side in clipped)))
+        return warnings
+
     def _warnings(self, item):
+        if self._stage == STAGE_DETECTOR:
+            return self._detector_warnings(item)
         warnings = []
         if ai_only_excluded(item.component):
             warnings.append(self._tr(
@@ -2242,7 +2818,8 @@ class PhotoReviewDialog(QDialog):
         index = self._items.index(item)
         warnings = self._warnings(item)
         outside = not self.photo_rect.adjusted(-1e-7, -1e-7, 1e-7, 1e-7).contains(item.photo_bounds())
-        undetermined = self.type_undetermined(item.component)
+        detector = self._stage == STAGE_DETECTOR
+        undetermined = not detector and self.type_undetermined(item.component)
         # Una sola linea porta un solo colore, quindi la precedenza va
         # dichiarata: fuori PCB prima di tutto, perche' un corpo che non e'
         # sulla scheda rende accademica ogni altra domanda; poi il tipo non
@@ -2253,7 +2830,7 @@ class PhotoReviewDialog(QDialog):
         # Un corpo solo-AI escluso non fa parte dell'inventario finche' non lo
         # si tiene: il suo contorno dice prima di tutto questo (tenue e
         # tratteggiato), gli altri avvisi restano nel testo.
-        excluded = ai_only_excluded(item.component)
+        excluded = left_out(item.component)
         color = QColor(AI_ONLY_EXCLUDED_COLOR if excluded else "#ef5350" if outside
                        else UNDETERMINED_TYPE_COLOR if undetermined
                        else "#ffad33" if warnings else "#40dc80")
@@ -2279,11 +2856,17 @@ class PhotoReviewDialog(QDialog):
         smallness = 1.0 / (1.0 + max(0.0, bounds.width() * bounds.height()))
         item.setZValue(1 + smallness)
         item.number.setText(str(index + 1))
-        name = item.component.get("name") or item.component.get("kind") or self._tr("Componente")
-        text = (f"{index + 1}. {name}"
-                + (" [" + self._tr("escluso") + "]" if excluded else "")
-                + (f" {UNDETERMINED_LIST_MARKER}" if undetermined else "")
-                + (" [!]" if warnings else ""))
+        if detector:
+            # The detector's row: class, confidence, state, size.
+            text = f"{index + 1}. " + detector_row_label(item.component, self._tr)
+        else:
+            name = item.component.get("name") or item.component.get("kind") or self._tr("Componente")
+            text = (f"{index + 1}. {name}"
+                    + (" [" + self._tr("escluso") + "]" if excluded else "")
+                    + (f" {UNDETERMINED_LIST_MARKER}" if undetermined else "")
+                    + (f" {DETECTOR_DISAGREES_MARKER}" if detector_disagrees(item.component)
+                       else ""))
+        text += " [!]" if warnings else ""
         self.component_list.item(index).setText(text)
         self.component_list.item(index).setForeground(color)
         # Tooltip in HTML (HANDOFF 154): Qt lays rich text out at a fixed
@@ -2301,7 +2884,7 @@ class PhotoReviewDialog(QDialog):
         if item.isSelected():
             # A model chosen or a type typed changes what the AI lines say.
             self._show_attributes(item.component)
-            if height_is_estimated(item.component):
+            if not detector and height_is_estimated(item.component):
                 warnings.append(self._tr("Altezza stimata, non misurata: correggila in "
                                          "«Modifica componenti…» (Ctrl+E) se la conosci."))
             self.warning_label.setText(
@@ -2316,20 +2899,31 @@ class PhotoReviewDialog(QDialog):
         return self.i18n.text(source) if self.i18n is not None else source
 
     def attribute_text(self, component) -> str:
-        """@brief What the AI read for ``component``, as «Label: value» lines.
+        """@brief The readings of ``component``, as «Label: value» lines.
 
         @param component Photo component dict.
-        @return One line per attribute of `component_attribute_lines`; shown
-            read-only in «Parametri componente» (HANDOFF 157).
+        @return One line per attribute of `component_attribute_lines`
+            (detector first, then AI); the modal shows them in two headed
+            sections (HANDOFF 157, 163).
         """
-        return "\n".join(f"{label}: {value}"
-                         for label, value in component_attribute_lines(component, self._tr))
+        return "\n".join(f"{label}: {value}" for label, value in
+                         component_attribute_lines(component, self._tr, self._stage))
 
     def _show_attributes(self, component):
-        """Lay the AI lines out in `attributes_label`, one spaced paragraph each."""
-        self.attributes_label.setText("".join(
-            f"<p style='margin:0 0 5px 0'><b>{escape(label)}:</b> {escape(value)}</p>"
-            for label, value in component_attribute_lines(component, self._tr)))
+        """Lay the two sections out in `attributes_label`: a coloured heading band, then one paragraph per line.
+
+        The band is a one-cell table with ``bgcolor`` (HANDOFF 163): Qt's
+        rich text paints cell backgrounds reliably, paragraph backgrounds
+        not. Every value is escaped: the label interprets HTML.
+        """
+        html = []
+        for title, colour, lines in component_attribute_sections(component, self._tr, self._stage):
+            html.append(_section_band(title, colour))
+            html.extend(
+                f"<p style='margin:0 0 5px 0'><b>{escape(label)}:</b> {escape(value)}</p>"
+                for label, value in lines)
+        self.attributes_label.setText("".join(html))
+        self.corrections_label.setText(_section_band(self._tr(CORRECTIONS_TITLE), AI_SECTION_COLOR))
         if self.parameters_dialog.isVisible():
             self._fit_parameters_dialog()
 
@@ -2356,7 +2950,7 @@ class PhotoReviewDialog(QDialog):
         margin = max(self.photo_rect.width(), self.photo_rect.height()) * .1
         self.scene.setSceneRect(rect.adjusted(-margin, -margin, margin, margin))
 
-    def _geometry_changed(self, item, rotation_only=False):
+    def _geometry_changed(self, item, rotation_only=False, handle=MOVE_HANDLE):
         # The original pixel region no longer supports its boundary evidence or
         # normalized terminal boxes. Keep package/mating identity, but do not
         # stretch or relocate observed metal as if it had been measured again.
@@ -2375,6 +2969,10 @@ class PhotoReviewDialog(QDialog):
         item.component.pop("terminal_geometry", None)
         item.component.pop("model_match", None)
         item.component.pop("model_selection", None)
+        if self._stage == STAGE_DETECTOR:
+            # The reviewer's hand is the decision of presence, and the model
+            # must know the box was not measured by a machine.
+            mark_manual_box(item.component, tuple(handle))
         self._keep_touched(item)
         if "_box" in item.component:
             bounds = item.photo_bounds()
@@ -2383,6 +2981,7 @@ class PhotoReviewDialog(QDialog):
                 bounds.right() / self.photo_rect.width(), bounds.bottom() / self.photo_rect.height(),
             )
         self._refresh_item(item)
+        self._refresh_detector_ghost()
         self._update_scene_rect()
 
     def _item_moved(self, item):
@@ -2407,7 +3006,9 @@ class PhotoReviewDialog(QDialog):
             for key, value in values.items():
                 with QSignalBlocker(self.fields[key]):
                     self.fields[key].setValue(value)
-        self._geometry_changed(item)
+        edge = (item._resize or {}).get("edge", MOVE_HANDLE)
+        self._geometry_changed(item, handle=_photo_handle(
+            float(item.component.get("rotation_deg", 0)), edge))
 
     def _field_key(self, fields):
         """Return the sender's key among ``fields``; None for a direct call or a foreign sender."""
@@ -2474,12 +3075,15 @@ class PhotoReviewDialog(QDialog):
     def choose_model(self):
         """@brief Resolve plausible local CAD models for the selected component asynchronously."""
         item = self._selected_item()
-        if item is None or self._match_worker is not None:
+        if item is None or self._match_worker is not None or self._stage == STAGE_DETECTOR:
+            # No KiCad model before the AI inventory: the double click and the
+            # button do nothing in the detector stage.
             return
         snapshot = deepcopy(item.component)
         worker = _MatchWorker(snapshot)
         self._match_worker = worker
         self.model_button.setEnabled(False)
+        self.modal_model_button.setEnabled(False)
         # Set after the one-time retranslation of the dialog: translated here.
         self.model_status.setText(tx("Ricerca candidati KiCad e misure STEP…"))
         worker.done.connect(lambda report: self._show_model_candidates(item, snapshot, report))
@@ -2505,6 +3109,7 @@ class PhotoReviewDialog(QDialog):
         self._match_worker = None
         if not self._closing:
             self.model_button.setEnabled(self._selected_item() is not None)
+            self.modal_model_button.setEnabled(self.model_button.isEnabled())
 
     def _show_model_candidates(self, item, snapshot, report):
         if self._closing or item not in self._items or item.component != snapshot:
@@ -2660,6 +3265,21 @@ class PhotoReviewDialog(QDialog):
             width = min(1.0, self.photo_transform.body_width_mm / 10)
             center = self._clamped_center(center.x(), center.y(), length, width)
             x_mm, y_mm = center.x(), center.y()
+        if self._stage == STAGE_DETECTOR:
+            # A proposal in the detector's own format (photo_yolo.manual_proposal):
+            # no category, the model decides it from the photo; nothing to ask.
+            identifiers = [c.get("_id") for c in self._components
+                           if isinstance(c.get("_id"), int) and not isinstance(c.get("_id"), bool)]
+            box = self._normalized_box(x_mm, y_mm, length, width)
+            component = manual_proposal(box, max(identifiers, default=0) + 1,
+                                        self.photo_transform.body_length_mm,
+                                        self.photo_transform.body_width_mm)
+            self._components.append(component)
+            self._append_item(component)
+            self._update_scene_rect()
+            self._refresh_categories()
+            self._select_row(len(self._items) - 1)
+            return
         # "generic" is the project's generic-volume path, not an identity claim:
         # the type is what the modal asks for right below.
         component = dict(name=self._tr("Nuovo componente"), kind="generic", x_mm=x_mm, y_mm=y_mm,
@@ -2681,6 +3301,13 @@ class PhotoReviewDialog(QDialog):
         else:
             self.text_fields[focus].setFocus()
             self.text_fields[focus].selectAll()
+
+    def _normalized_box(self, x_mm, y_mm, length, width):
+        """Normalised full-crop box (x0, y0, x1, y1) of an unrotated body in board mm."""
+        half_length = self.photo_transform.body_length_mm
+        half_width = self.photo_transform.body_width_mm
+        return ((x_mm - length / 2) / half_length + 0.5, (y_mm - width / 2) / half_width + 0.5,
+                (x_mm + length / 2) / half_length + 0.5, (y_mm + width / 2) / half_width + 0.5)
 
     def delete_selected(self):
         """@brief Remove the selected outline and renumber; selection moves to its neighbour.

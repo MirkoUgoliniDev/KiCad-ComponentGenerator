@@ -903,6 +903,8 @@ class AnalysisOverlay(QWidget):
         #: esito) e ultimo avviso, che lo sostituisce; testi sorgente anche qui.
         self._phase_key = ""
         self._phase_name = ""
+        #: Tick counter of the pulse of the running phase's «●» (before any render).
+        self._pulse_tick = 0
         self._phase_last_status = ""
         self._phase_warning = ""
         #: Conteggio della fase in corso (fatti, totale, unita' tradotta), o
@@ -1489,13 +1491,39 @@ class AnalysisOverlay(QWidget):
 
     #: Colours of the phase rows: done, done with a warning, running.
     _PHASE_COLORS = {"done": "#a6e3a1", "warning": "#f9e2af", "running": "#f5e0dc"}
+    #: The «●» of the running phase pulses between these two (user, 2026-09-30):
+    #: a still dot read as one more finished item. Dim = the colour of the
+    #: steps not yet reached, bright = the running row's own colour.
+    _PULSE_DIM = (0x6c, 0x70, 0x86)
+    _PULSE_BRIGHT = (0xf5, 0xe0, 0xdc)
+    #: One full pulse every this many timer ticks (40 ms each): ~1.3 s, slow
+    #: enough not to distract, fast enough to read as «alive».
+    _PULSE_TICKS = 32
 
     @classmethod
-    def _phase_rows_html(cls, lines):
-        """Rich text of the phase list: one table row per (text, state) line."""
-        rows = "".join(f"<tr><td style='padding:1px 0; color:{cls._PHASE_COLORS[state]}'>"
-                       f"{html.escape(text)}</td></tr>" for text, state in lines)
-        return f"<table align='center' cellspacing='0'>{rows}</table>" if rows else ""
+    def _phase_rows_html(cls, lines, pulse_color=None):
+        """Rich text of the phase list: one table row per (text, state) line.
+
+        @param pulse_color Colour of the «●» of a running row, or None to
+            leave the mark in the row's colour.
+        """
+        rows = []
+        for text, state in lines:
+            body = html.escape(text)
+            if state == "running" and pulse_color and text.startswith("● "):
+                body = f"<span style='color:{pulse_color}'>●</span>" + html.escape(text[1:])
+            rows.append(f"<tr><td style='padding:1px 0; color:{cls._PHASE_COLORS[state]}'>"
+                        f"{body}</td></tr>")
+        return f"<table align='center' cellspacing='0'>{''.join(rows)}</table>" if rows else ""
+
+    def _pulse_color(self):
+        """Colour of the running mark at this instant of the pulse (cosine between dim and bright)."""
+        import math
+        phase = (self._pulse_tick % self._PULSE_TICKS) / self._PULSE_TICKS
+        mix = (1 - math.cos(2 * math.pi * phase)) / 2
+        return "#%02x%02x%02x" % tuple(
+            round(dim + (bright - dim) * mix)
+            for dim, bright in zip(self._PULSE_DIM, self._PULSE_BRIGHT))
 
     def _phase_rows_height(self, count):
         """Height in px that `count` rows of the list really take in the label."""
@@ -1547,7 +1575,7 @@ class AnalysisOverlay(QWidget):
                 self._progress_text() if self._phase_progress else self._translate("in corso"))
             lines.append((metrics.elidedText(text, Qt.TextElideMode.ElideRight, width),
                           "running"))
-        self.phases.setText(self._phase_rows_html(lines))
+        self.phases.setText(self._phase_rows_html(lines, self._pulse_color()))
         self.phases.setToolTip("\n".join(entry(*phase) for phase in self._phase_history))
         self.phases.setVisible(bool(lines))
 
@@ -1573,7 +1601,10 @@ class AnalysisOverlay(QWidget):
             elif index < self._step_current:
                 parts.append(f'<span style="color:#a6e3a1">&#10003; {text}</span>')
             elif index == self._step_current:
-                parts.append(f'<span style="color:#f5e0dc; font-weight:600">&#9679; {text}</span>')
+                # The running step's mark pulses like the running phase's «●»
+                # (user, 2026-09-30): only the colour of the mark moves.
+                parts.append(f'<span style="color:#f5e0dc; font-weight:600">'
+                             f'<span style="color:{self._pulse_color()}">&#9679;</span> {text}</span>')
             else:
                 parts.append(f'<span style="color:#a6adc8">&#9675; {text}</span>')
         # Uno sotto l'altro (utente, 2026-09-26): in fila andavano a capo a
@@ -1809,6 +1840,13 @@ class AnalysisOverlay(QWidget):
         self.spinner.update()
         if self.transfer.isVisible():
             self.transfer.advance()
+        # The running phase's «●» pulses with the same clock; only the mark's
+        # colour changes, the rows and their text stay as they are.
+        self._pulse_tick += 1
+        if self._step_labels and 0 <= self._step_current < len(self._step_labels):
+            self._render_steps()
+        elif self._phase_name and self.phases.isVisible():
+            self._render_phases()
 
     def stop(self):
         """@brief Hide the overlay and stop the animation.

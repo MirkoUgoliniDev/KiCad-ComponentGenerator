@@ -165,13 +165,12 @@ def test_the_pipeline_commands_are_icons_in_the_top_bar_of_the_project_tab(windo
     bar = outer.itemAt(0).layout()
     assert bar is window.project_action_bar
     widgets = [bar.itemAt(i).widget() for i in range(bar.count())]
+    # Una sola icona per la revisione (utente, 2026-09-30, HANDOFF 162).
     expected = [window.btn_ai_log, window.btn_component_prompt,
-                window.btn_reopen_review_top, window.btn_relaunch_inventory_top,
-                window.btn_edit_component_review_top]
+                window.btn_component_review_top, window.btn_relaunch_inventory_top]
     assert [w for w in widgets if w in expected] == expected
     assert all(w.text() == "" for w in expected), "icone senza testo"
-    for original in (window.btn_reopen_review, window.btn_relaunch_inventory,
-                     window.btn_edit_component_review):
+    for original in (window.btn_component_review, window.btn_relaunch_inventory):
         assert not _contains(outer, original)
         assert original.text().strip(), "l'originale resta la fonte del nome"
     last = outer.itemAt(outer.count() - 1)
@@ -188,11 +187,11 @@ def test_edit_review_command_is_mirrored_in_the_3d_toolbar(window):  # noqa: F81
     prima riga del suo tooltip.
     """
     row = window.btn_regen_3d.parentWidget().layout()
-    assert _contains(row, window.btn_edit_component_review_3d)
-    mirror = window.btn_edit_component_review_3d
+    assert _contains(row, window.btn_component_review_3d)
+    mirror = window.btn_component_review_3d
     assert mirror.text() == ""
-    assert mirror.accessibleName() == window.btn_edit_component_review.text()
-    assert mirror.toolTip().splitlines()[0] == window.btn_edit_component_review.text()
+    assert mirror.accessibleName() == window.btn_component_review.text()
+    assert mirror.toolTip().splitlines()[0] == window.btn_component_review.text()
 
 
 def test_both_edit_review_copies_open_the_component_review(window, monkeypatch):  # noqa: F811
@@ -217,10 +216,12 @@ def test_both_edit_review_copies_open_the_component_review(window, monkeypatch):
     class _RecordingReview(QDialog):
         components_applied = pyqtSignal(list)
 
-        def __init__(self, png, components, length, width, parent=None):
+        def __init__(self, png, components, length, width, parent=None, **kwargs):
             super().__init__(parent)
             self._items = []
             self.png = png
+            # Con la foto in memoria la finestra unificata apre l'inventario.
+            assert kwargs.get("stage", "inventory") == "inventory"
 
         def exec(self):
             calls.append(self.png == b"photo")
@@ -231,11 +232,11 @@ def test_both_edit_review_copies_open_the_component_review(window, monkeypatch):
     window._set_review_buttons_enabled(True)
     # Il tab Modello 3D e' spento finche' non c'e' un modello: si riaccende
     # come dopo una generazione, altrimenti il clic non parte per quel motivo.
-    page = window.btn_edit_component_review_3d
+    page = window.btn_component_review_3d
     while page.parentWidget() is not None and page.parentWidget() is not window.tabs:
         page = page.parentWidget()
         page.setEnabled(True)
-    for button in (window.btn_edit_component_review, window.btn_edit_component_review_3d):
+    for button in (window.btn_component_review, window.btn_component_review_3d):
         # Si CONTANO i collegamenti PRIMA di toccarli: `disconnect()` senza
         # argomenti li toglie tutti, quindi contare dopo non direbbe nulla e la
         # versione precedente di questa prova non poteva accorgersi di un
@@ -246,32 +247,42 @@ def test_both_edit_review_copies_open_the_component_review(window, monkeypatch):
     assert calls == [True, True]
 
 
-def test_edit_review_is_hidden_without_the_calibrated_photo(window):  # noqa: F811
-    """@brief Negativo: senza foto in memoria il comando non puo' aprire nulla, quindi non si vede.
+def test_component_review_is_hidden_without_a_photo_and_without_a_bundle(window):  # noqa: F811
+    """@brief Negativo: senza foto in memoria e senza pacchetto il comando non puo' aprire nulla.
 
-    Positivo: con la foto compare in entrambe le copie, che restano allineate.
+    Positivo: con la foto compare in entrambe le copie, che restano allineate
+    (stadio inventario); senza foto ma con un pacchetto compare lo stesso
+    (stadio rilevatore): una finestra sola, due stadi (HANDOFF 162).
     """
     window._photo_png = None
-    window._set_review_buttons_enabled(True)
-    assert not _own_visible(window.btn_edit_component_review)
-    assert not _own_visible(window.btn_edit_component_review_3d)
+    window._photo_overlay_png = None
+    window._set_review_buttons_enabled(False)
+    assert not _own_visible(window.btn_component_review)
+    assert not _own_visible(window.btn_component_review_3d)
+    assert window._component_review_stage() is None
     window._photo_png = b"photo"
+    window._set_review_buttons_enabled(False)
+    assert _own_visible(window.btn_component_review)
+    assert _own_visible(window.btn_component_review_3d)
+    assert window.btn_component_review.isEnabled()
+    assert window._component_review_stage() == "inventory"
+    window._photo_png = None
     window._set_review_buttons_enabled(True)
-    assert _own_visible(window.btn_edit_component_review)
-    assert _own_visible(window.btn_edit_component_review_3d)
-    assert window.btn_edit_component_review.isEnabled()
+    assert _own_visible(window.btn_component_review)
+    assert window._component_review_stage() == "detector"
 
 
 def test_saved_proposal_buttons_are_hidden_when_nothing_can_be_reopened(window):  # noqa: F811
     """@brief Negativo: revisione e rilancio spenti sono anche invisibili, in entrambe le schede."""
+    window._photo_png = None
     window._set_review_buttons_enabled(False)
-    for name in ("btn_reopen_review", "btn_relaunch_inventory",
-                 "btn_reopen_review_3d", "btn_relaunch_inventory_3d"):
+    for name in ("btn_component_review", "btn_relaunch_inventory",
+                 "btn_component_review_3d", "btn_relaunch_inventory_3d"):
         button = getattr(window, name)
         assert not _own_visible(button) and not button.isEnabled()
     window._set_review_buttons_enabled(True)
-    for name in ("btn_reopen_review", "btn_relaunch_inventory",
-                 "btn_reopen_review_3d", "btn_relaunch_inventory_3d"):
+    for name in ("btn_component_review", "btn_relaunch_inventory",
+                 "btn_component_review_3d", "btn_relaunch_inventory_3d"):
         assert _own_visible(getattr(window, name))
 
 
@@ -722,7 +733,9 @@ def test_changing_the_library_root_refreshes_the_reopen_review_button(window, tm
     dipende dalla radice: cambiandola il comando deve accendersi o spegnersi
     subito, non al primo clic.
     """
-    window._photo_png = b"photo"
+    # Il pacchetto salvato si legge sul rilancio (stessa condizione) e sullo
+    # stadio della revisione: senza foto in memoria, quella apre il pacchetto.
+    window._photo_png = None
     with_bundle = tmp_path / "con-pacchetto"
     empty = tmp_path / "senza-pacchetto"
     empty.mkdir()
@@ -731,12 +744,13 @@ def test_changing_the_library_root_refreshes_the_reopen_review_button(window, tm
         [{"_id": 1, "_box": [0.1, 0.1, 0.4, 0.4]}], b"photo", 10.0, 5.0)
     assert written is not None, "presupposto: il pacchetto e' stato scritto in questa radice"
     _move_root(window, empty)
-    window._photo_png = b"photo"
-    assert not _own_visible(window.btn_reopen_review), "in questa radice non c'e' nulla da riaprire"
+    assert not _own_visible(window.btn_relaunch_inventory), "in questa radice non c'e' nulla da riaprire"
+    assert window._component_review_stage() is None
     _move_root(window, with_bundle)
-    window._photo_png = b"photo"
     window._refresh_reopen_review_button()
-    assert _own_visible(window.btn_reopen_review), "il pacchetto e' qui: il comando si riaccende"
+    assert _own_visible(window.btn_relaunch_inventory), "il pacchetto e' qui: il comando si riaccende"
+    assert _own_visible(window.btn_component_review)
+    assert window._component_review_stage() == "detector"
 
 
 # ── «Log AI» guarda tutto il log, non solo meta' ──────────────────────────
@@ -782,13 +796,12 @@ def test_the_three_3d_mirrors_are_built_from_the_same_helper(window):  # noqa: F
     il resto -- nulla di cio' che l'originale dice va perso.
     """
     # Dal 2026-09-24 le stesse copie stanno anche nella barra in alto della
-    # scheda Progetto (utente): sei copie, tre per barra, dallo stesso helper.
-    pairs = [(window.btn_reopen_review_top, window.btn_reopen_review),
+    # scheda Progetto (utente); dal 2026-09-30 (HANDOFF 162) la revisione e'
+    # un comando solo: quattro copie, due per barra, dallo stesso helper.
+    pairs = [(window.btn_component_review_top, window.btn_component_review),
              (window.btn_relaunch_inventory_top, window.btn_relaunch_inventory),
-             (window.btn_edit_component_review_top, window.btn_edit_component_review),
-             (window.btn_reopen_review_3d, window.btn_reopen_review),
-             (window.btn_relaunch_inventory_3d, window.btn_relaunch_inventory),
-             (window.btn_edit_component_review_3d, window.btn_edit_component_review)]
+             (window.btn_component_review_3d, window.btn_component_review),
+             (window.btn_relaunch_inventory_3d, window.btn_relaunch_inventory)]
     assert [pair for pair in window._project_action_mirrors] == pairs
     window._photo_png = b"photo"
     for enabled in (True, False):
@@ -808,10 +821,10 @@ def test_a_mirror_tooltip_follows_its_original_when_that_changes(window):  # noq
     La copia compone il proprio tooltip dall'originale, quindi senza un
     aggancio al cambiamento resterebbe ferma al testo della costruzione.
     """
-    before = window.btn_reopen_review_3d.toolTip()
+    before = window.btn_component_review_3d.toolTip()
     window.btn_relaunch_inventory.setToolTip("Spiegazione riscritta a runtime.")
     assert window.btn_relaunch_inventory_3d.toolTip().endswith("Spiegazione riscritta a runtime.")
-    assert window.btn_reopen_review_3d.toolTip() == before
+    assert window.btn_component_review_3d.toolTip() == before
 
 
 def test_mirrors_follow_the_originals_through_a_language_switch(window):  # noqa: F811
@@ -840,20 +853,18 @@ def test_a_mirror_is_enabled_state_is_also_gated_by_its_tab(window):  # noqa: F8
     # Si riaccende tutta la catena, come dopo una generazione, e poi si spegne
     # SOLO la scheda: e' quello il gate di cui parla il `@note`.
     ancestors = []
-    widget = window.btn_reopen_review_3d
+    widget = window.btn_component_review_3d
     while widget.parentWidget() is not None:
         widget = widget.parentWidget()
         widget.setEnabled(True)
         ancestors.append(widget)
     page = next(w for w in ancestors if window.tabs.indexOf(w) >= 0)
     page.setEnabled(False)
-    for mirror in (window.btn_reopen_review_3d, window.btn_relaunch_inventory_3d,
-                   window.btn_edit_component_review_3d):
+    for mirror in (window.btn_component_review_3d, window.btn_relaunch_inventory_3d):
         assert _own_visible(mirror), "visibile: il comando e' disponibile"
         assert not mirror.isEnabled(), "spento perche' la scheda lo e'"
     page.setEnabled(True)
-    for mirror in (window.btn_reopen_review_3d, window.btn_relaunch_inventory_3d,
-                   window.btn_edit_component_review_3d):
+    for mirror in (window.btn_component_review_3d, window.btn_relaunch_inventory_3d):
         assert mirror.isEnabled()
 
 
@@ -906,7 +917,7 @@ def test_the_top_bar_divider_shows_only_between_two_groups(window):  # noqa: F81
     window._set_review_buttons_enabled(False)
     window._photo_png = None
     window._photo_overlay_png = None
-    window._refresh_edit_review_buttons()
+    window._refresh_component_review_button()
     divider = window._project_bar_divider
     assert not divider.isVisibleTo(divider.parentWidget())
     window._set_review_buttons_enabled(True)

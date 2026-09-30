@@ -1,5 +1,12 @@
 """@brief Revisione delle proposte del rilevatore locale, prima di pagare l'AI.
 
+@note SUPERATA dalla revisione unificata (utente, 2026-09-30, HANDOFF 162):
+la GUI apre `photo_review_dialog.PhotoReviewDialog(stage=STAGE_DETECTOR)`,
+che riusa le regole di questa finestra spostate in `services.photo_yolo`
+(`mark_manual_box`, `manual_proposal`, `box_geometry_mm`). Questa classe non
+e' piu' aperta da `main_window`; resta nel repository con i suoi test finche'
+la sua rimozione non viene autorizzata.
+
 Il rilevatore propone molto piu' di quanto ci sia: su una scheda da 45
 componenti ha prodotto 2265 rilevamenti grezzi su 30 viste, 1238 soppressi
 come doppioni, e ne ha consegnati 111 -- 63 sopra la soglia operativa e 48
@@ -21,7 +28,8 @@ from PyQt6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QDialog,
 
 from .review_tools import (ZOOM_STEP, InfoPopup, asset_icon, give_combos_their_keys,
                            set_tool_texts, tool_button, toolbar_divider)
-from ..services.photo_yolo import awaiting_user_keep
+from ..services.photo_yolo import (MANUAL_SOURCE, awaiting_user_keep, box_geometry_mm,
+                                   manual_proposal, mark_manual_box)
 
 #: Lato minimo, in mm SULLA SCHEDA, di un riquadro tracciato a mano: sotto
 #: non c'e' un corpo montato possibile (il chip piu' piccolo in commercio,
@@ -82,10 +90,9 @@ HANDLE_CURSORS = {
     MOVE_HANDLE: Qt.CursorShape.SizeAllCursor,
 }
 
-#: Provenienza dichiarata di un riquadro che l'utente ha spostato,
-#: ridimensionato o tracciato: la stessa stringa per tutti e tre i casi,
-#: perche' per chi sta a valle sono la stessa cosa -- l'occhio di chi guarda.
-MANUAL_SOURCE = "revisione manuale"
+#: `MANUAL_SOURCE` ora sta in photo_yolo (HANDOFF 162): la finestra unificata
+#: e questa condividono la stessa marcatura, importata qui per chi la legge
+#: da questo modulo.
 
 #: Colore delle proposte sopra la soglia operativa e di quelle sotto. La
 #: differenza non e' estetica: sulle deboli la decisione di chi guarda conta
@@ -1305,21 +1312,10 @@ class YoloReviewDialog(QDialog):
         """@brief Quote in millimetri di un riquadro normalizzato.
 
         @param box Rettangolo normalizzato (x0, y0, x1, y1) sul ritaglio.
-        @return Dizionario con x_mm, y_mm, length_mm, width_mm, rotation_deg.
-        @note Stessa convenzione del rilevatore: origine al centro della
-            scheda, X a destra, Y in basso, lunghezza = lato lungo, rotazione
-            90 quando il lato lungo sta lungo Y. E' l'unica conversione della
-            finestra, cosi' un riquadro aggiunto e uno ritoccato non possono
-            finire su scale diverse.
+        @return Dizionario con x_mm, y_mm, length_mm, width_mm, rotation_deg
+            (photo_yolo.box_geometry_mm: la stessa conversione del rilevatore).
         """
-        x0, y0, x1, y1 = box
-        sx, sy = (x1 - x0) * self.length_mm, (y1 - y0) * self.width_mm
-        return {
-            "x_mm": ((x0 + x1) / 2 - 0.5) * self.length_mm,
-            "y_mm": ((y0 + y1) / 2 - 0.5) * self.width_mm,
-            "length_mm": max(sx, sy), "width_mm": min(sx, sy),
-            "rotation_deg": 0 if sx >= sy else 90,
-        }
+        return box_geometry_mm(box, self.length_mm, self.width_mm)
 
     @staticmethod
     def mark_manual(proposal, handle=MOVE_HANDLE):
@@ -1328,59 +1324,13 @@ class YoloReviewDialog(QDialog):
         @param proposal Proposta modificata sul posto.
         @param handle Maniglia con cui e' stata modificata: una di HANDLES per
             un ridimensionamento, MOVE_HANDLE (predefinito) per uno
-            spostamento. Decide quali lati sono stati guardati.
-        @note `_yolo_manual_box` ha il prefisso `_yolo_` apposta: e' cio' che
-            viene inoltrato nei `detector_metadata` della richiesta al modello,
-            che deve sapere che quel riquadro non l'ha misurato una macchina.
-            Le marcature che decadono: `_edges_measured` era la misura dei
-            bordi con OpenCV, e ora il bordo e' dove lo ha messo l'occhio.
-            `_yolo_clipped_sides` e `_yolo_clipped_recovery` dicevano che
-            alcuni lati poggiavano sul confine di una tessera del rilevatore
-            e non erano misure: decade SOLO il lato che la maniglia ha
-            trascinato, perche' quello e' stato guardato; uno spostamento
-            non cambia l'estensione e lascia la lista com'e', e cosi' il
-            modello continua a sapere che quel bordo e' un artefatto. La
-            ricomposizione (`_yolo_clipped_recovery`) resta dichiarata
-            finche' resta almeno un lato tagliato. La provenienza precedente
-            resta in `_yolo_source_before_manual`, cosi' si sa se sotto
-            c'era una proposta forte, debole o ricomposta.
-        @note Decisione del revisore: la mano di chi guarda E' la decisione
-            di presenza. Una proposta debole (`_yolo_review_only`) che
-            l'utente ha spostato o ridimensionato non e' piu' un'ipotesi a
-            bassa confidenza da verificare -- l'ha verificata l'occhio --
-            percio' `_yolo_review_only` diventa False, e a valle nessuno la
-            tratta piu' da dubbio. L'origine di prima resta in
-            `_yolo_origin_before_manual` (solo se c'era), per la
-            tracciabilita'.
+            spostamento.
+        @note Delega a photo_yolo.mark_manual_box (HANDOFF 162): la regola --
+            la mano di chi guarda e' la decisione di presenza, decade solo il
+            lato trascinato -- e' una sola per questa finestra e per quella
+            unificata, e sta nei servizi.
         """
-        if not proposal.get("_yolo_manual_box"):
-            proposal["_yolo_source_before_manual"] = proposal.get("_source")
-        proposal["_yolo_manual_box"] = True
-        proposal["_source"] = MANUAL_SOURCE
-        proposal.pop("_edges_measured", None)
-        hx, hy = handle
-        looked_at = set()
-        if hx < 0:
-            looked_at.add("left")
-        elif hx > 0:
-            looked_at.add("right")
-        if hy < 0:
-            looked_at.add("top")
-        elif hy > 0:
-            looked_at.add("bottom")
-        clipped = [side for side in (proposal.get("_yolo_clipped_sides") or ())
-                   if side not in looked_at]
-        proposal["_yolo_clipped_sides"] = clipped
-        if not clipped:
-            proposal["_yolo_clipped_recovery"] = False
-        if proposal.get("_yolo_review_only"):
-            if "_yolo_origin" in proposal and "_yolo_origin_before_manual" not in proposal:
-                proposal["_yolo_origin_before_manual"] = proposal["_yolo_origin"]
-            proposal["_yolo_review_only"] = False
-        # Stessa regola per le proposte a bassa confidenza: ritoccarla e'
-        # guardarla, quindi e' tenuta (photo_yolo.awaiting_user_keep).
-        if proposal.get("_yolo_low_confidence"):
-            proposal["_yolo_user_kept"] = True
+        mark_manual_box(proposal, tuple(handle))
 
     def _box_edited(self, index, handle):
         """@brief Un riquadro esistente e' stato spostato o ridimensionato.
@@ -1406,22 +1356,9 @@ class YoloReviewDialog(QDialog):
         x0, y0, x1, y1 = box
         identifiers = [p.get("_id") for p in self.proposals if isinstance(p.get("_id"), int)]
         identifier = max(identifiers, default=0) + 1
-        self.proposals.append({
-            "name": f"Corpo aggiunto {identifier}", "kind": "generic",
-            **self.geometry_mm(box), "height_mm": 1.0,
-            "_height_source": "estimated_placeholder_not_measured", "_height_estimated": True,
-            "color_hex": "#303030", "marking": "", "confidence": "low",
-            "_box": (x0, y0, x1, y1), "_source": MANUAL_SOURCE,
-            "_uncertain": True, "_id": identifier,
-            # Nessuna categoria: la decide il modello guardando la foto. Prima
-            # si ereditava quella dell'ultimo riquadro scelto nel menu tolto.
-            "_yolo_class": "",
-            "_yolo_confidence": None, "_yolo_proposal_id": None,
-            "_yolo_class_ambiguous": False,
-            "_yolo_origin": "user_added", "_yolo_review_only": False,
-            # Tracciato a mano: per il modello a valle vale quanto un
-            # riquadro ritoccato, e lo dichiara con la stessa chiave.
-            "_yolo_manual_box": True,
-        })
+        # Stesso modello di riga della finestra unificata (photo_yolo.
+        # manual_proposal): nessuna categoria, la decide il modello.
+        self.proposals.append(manual_proposal((x0, y0, x1, y1), identifier,
+                                              self.length_mm, self.width_mm))
         self.view.selected = len(self.proposals) - 1
         self._select_row(self.view.selected)

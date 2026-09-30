@@ -152,6 +152,7 @@ PROJECT_WIDGETS = (
     "field_cast_pad_length", "field_cast_pad_width", "field_cast_overhang",
     "field_cast_inset", "field_cast_hole", "field_cast_hole_inset",
     "field_cast_thru_drill", "field_cast_thru_pad", "field_cast_thru_offset",
+    "chk_deepseek_reasoning",
 )
 #: Margine, in pixel, fra il bordo della finestra e il contenuto delle schede:
 #: la riga della lingua sopra le schede usa lo stesso, cosi' i bordi combaciano.
@@ -623,6 +624,13 @@ def per_item_detail(message: str) -> bool:
         return False
     clauses = [clause.strip().rstrip(".") for clause in body.split(";")]
     return any(_item_field_clause(clause) for clause in clauses)
+
+
+#: Provenances that make a per-side size a DECLARED measure for the
+#: generator: read or derived from the documents, or measured by the program
+#: on the calibrated photo (HANDOFF 169). Estimated and undeclared stay
+#: estimates the generator may reduce.
+DECLARED_SOURCES = ("read", "derived", "measured")
 
 
 def _side_size(side: dict, name: str):
@@ -1407,7 +1415,7 @@ class MainWindow(QMainWindow):
             self.btn_yolo_settings.setEnabled(local)
             # La riga della revisione dipende dal rilevatore: con «Solo YOLO
             # locale» riapre il pretest (vedi _refresh_reopen_review_button).
-            if hasattr(self, "btn_reopen_review") and not self._background_work_running():
+            if hasattr(self, "btn_component_review") and not self._background_work_running():
                 self._refresh_reopen_review_button()
         if hasattr(self, "_models_form"):
             self._models_form.setRowVisible(self._row_yolo_model, local)
@@ -1540,6 +1548,14 @@ class MainWindow(QMainWindow):
         else:
             self._append_log(tx("Modello: default globale ({default_model}).",
                                 default_model=self._default_model()))
+
+    def _on_deepseek_reasoning_toggled(self, checked: bool) -> None:
+        """@brief Mirror the «Ragionamento DeepSeek» checkbox into the provider switch.
+
+        @param checked New state of the checkbox (also when restored from a project).
+        """
+        from ..services import providers
+        providers.set_deepseek_reasoning(bool(checked))
 
     def _pick_session_model(self) -> None:
         """Sceglie un modello valido solo per le estrazioni di questa sessione.
@@ -2157,7 +2173,7 @@ class MainWindow(QMainWindow):
         self._photo_body_fields = self._body_fields_matching(bundle.body_length_mm,
                                                              bundle.body_width_mm)
         self._photo_source = Path(path).name
-        self._refresh_edit_review_buttons()
+        self._refresh_component_review_button()
 
     # ── Tab 1: Progetto ────────────────────────────────────────────
 
@@ -2365,6 +2381,16 @@ class MainWindow(QMainWindow):
         )
         self.btn_pick_model.clicked.connect(self._pick_session_model)
         model_row = QHBoxLayout()
+        # «Ragionamento DeepSeek» (utente, 2026-09-29, HANDOFF 161): thinking
+        # mode dell'API diretta DeepSeek, spento di default; salvato nel
+        # progetto. Per gli altri fornitori non cambia nulla.
+        self.chk_deepseek_reasoning = QCheckBox("Ragionamento DeepSeek")
+        self.chk_deepseek_reasoning.setToolTip(
+            "Accende il ragionamento (thinking) nelle richieste all'API diretta di DeepSeek: "
+            "risposte più meditate, ma più lente e con token di ragionamento a pagamento, "
+            "contati nel consuntivo. Non ha effetto sugli altri fornitori.")
+        self.chk_deepseek_reasoning.toggled.connect(self._on_deepseek_reasoning_toggled)
+        model_row.addWidget(self.chk_deepseek_reasoning)
         model_row.addWidget(self.combo_model, 1)
         model_row.addWidget(self.btn_pick_model)
         self.label_photo_detector = QLabel()
@@ -2484,18 +2510,27 @@ class MainWindow(QMainWindow):
         # Testo e suggerimento seguono il rilevatore: con «Solo YOLO locale» il
         # comando e' un pretest gratuito, non un'analisi a pagamento.
         self._refresh_extract_button()
-        # Riapre «Corpi rilevati» sulle proposte salvate nella cartella del
-        # componente e, all'OK, le RISALVA li': gratuito, nessuna chiamata AI.
-        # Decisione dell'utente: «se il file json esiste nella cartella deve
-        # essere possibile aprire la revisione bypassando interrogazione AI».
-        self.btn_reopen_review = QPushButton("Rivedi proposte salvate…")
-        self.btn_reopen_review.setToolTip(
-            "Passo 1 della pipeline — Riapre i corpi rilevati salvati in photo-review/ "
-            "nella cartella del componente e, alla conferma, salva le proposte tenute "
-            "nello stesso file. Nessuna richiesta AI: gratuito."
+        # UNA revisione dei componenti (utente, 2026-09-30, HANDOFF 162): la
+        # stessa finestra mostra le proposte del rilevatore locale salvate in
+        # photo-review/ (prima dell'inventario AI: all'OK le risalva li') e,
+        # dopo l'inventario, i corpi riconciliati con la lettura del
+        # rilevatore accanto. Lo stadio lo sceglie `_open_component_review`.
+        # Decisione dell'utente (2026-09-24): «se il file json esiste nella
+        # cartella deve essere possibile aprire la revisione bypassando
+        # interrogazione AI»; e (2026-09-30): «non ha senso che ci siano due
+        # viste separate».
+        self.btn_component_review = QPushButton("Revisione componenti…")
+        self.btn_component_review.setToolTip(
+            "Passi 1 e 3 della pipeline — Apre la revisione dei componenti: prima "
+            "dell'inventario AI mostra le proposte del rilevatore locale salvate in "
+            "photo-review/ e, alla conferma, le risalva; dopo l'inventario mostra i corpi "
+            "riconciliati con accanto la lettura del rilevatore (mai sovrascritta), le "
+            "quote e la scelta dei modelli KiCad. Non avvia la generazione e non fa "
+            "richieste AI: gratuito. Dopo averla applicata, «Rigenera modello 3D» nella "
+            "scheda Modello 3D ricostruisce lo STEP."
         )
-        self.btn_reopen_review.setEnabled(False)
-        self.btn_reopen_review.clicked.connect(self._reopen_detector_review)
+        self.btn_component_review.setEnabled(False)
+        self.btn_component_review.clicked.connect(self._open_component_review)
         # La spesa sta in un pulsante a parte: chi vuole solo rivedere non
         # deve poter pagare per sbaglio con lo stesso OK.
         self.btn_relaunch_inventory = QPushButton("Rilancia inventario AI (a pagamento)…")
@@ -2507,29 +2542,14 @@ class MainWindow(QMainWindow):
         )
         self.btn_relaunch_inventory.setEnabled(False)
         self.btn_relaunch_inventory.clicked.connect(self._relaunch_inventory)
-        # Richiesta dell'utente: «se questa fase è stata completata, dovrebbe
-        # essere possibile poterla sempre editare, inserire un pulsante in
-        # basso chiaro». E' lo stesso comando della riga degli strumenti, ma
-        # qui sta accanto agli altri ritorni sulla revisione, dove si cerca
-        # quando l'analisi e' finita e ci si accorge che qualcosa va corretto.
-        self.btn_edit_component_review = QPushButton("Modifica la revisione dei componenti…")
-        self.btn_edit_component_review.setToolTip(
-            "Passo 3 della pipeline — Riapre la revisione della fase completata: "
-            "ingombri sulla foto, quote e scelta dei modelli KiCad. Non avvia la "
-            "generazione e non fa richieste AI: gratuito. Dopo averla applicata, "
-            "«Rigenera modello 3D» nella scheda Modello 3D ricostruisce lo STEP."
-        )
-        self.btn_edit_component_review.setEnabled(False)
-        self.btn_edit_component_review.clicked.connect(self._show_photo_comparison)
-        # Richiesta dell'utente: «qui c'è troppa confusione con i pulsanti
-        # sotto». Il comando di revisione esisteva due volte -- nella riga
-        # degli strumenti come «Rivedi foto / scegli modelli KiCad…» e qui in
-        # fondo -- avviando esattamente la stessa finestra. Ne resta uno solo,
-        # quello in fondo alla scheda, dove si cerca a fase finita.
-        # `btn_photo_comparison` non e' piu' un secondo widget: e' l'altro nome
-        # dello stesso pulsante, cosi' i percorsi che aprivano il confronto
+        # `btn_photo_comparison` non e' un secondo widget: e' l'altro nome
+        # dello stesso comando, cosi' i percorsi che aprivano il confronto
         # fotografico puntano al comando vero e non a un doppione nascosto.
-        self.btn_photo_comparison = self.btn_edit_component_review
+        self.btn_photo_comparison = self.btn_component_review
+        # Vero quando c'e' un pacchetto di proposte del rilevatore da riaprire
+        # (cartella del componente o cache di sessione): lo stadio «rilevatore»
+        # della revisione. Scritto da `_set_review_buttons_available`.
+        self._review_bundle_available = False
         self._photo_png = None
         self._photo_body_fields = None
         self._photo_overlay_png = None
@@ -2656,8 +2676,7 @@ class MainWindow(QMainWindow):
         # puo' aprire una finestra a se' perche' hanno un genitore.
         self._project_action_sources = QWidget(tab)
         sources_layout = QHBoxLayout(self._project_action_sources)
-        for source in (self.btn_reopen_review, self.btn_relaunch_inventory,
-                       self.btn_edit_component_review):
+        for source in (self.btn_component_review, self.btn_relaunch_inventory):
             sources_layout.addWidget(source)
         self._project_action_sources.hide()
         bar = self.project_action_bar
@@ -2680,14 +2699,12 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.btn_component_prompt)
         self._project_bar_divider = toolbar_divider()
         bar.addWidget(self._project_bar_divider)
-        # Stesso ordine della pipeline e stesse icone della scheda Modello 3D.
-        self.btn_reopen_review_top = self._mirror_project_action(
-            self.btn_reopen_review, self._reopen_detector_review, bar, "wf-review.svg")
+        # Stesso ordine della pipeline e stesse icone della scheda Modello 3D:
+        # UNA revisione (gratuita), poi il rilancio (a pagamento).
+        self.btn_component_review_top = self._mirror_project_action(
+            self.btn_component_review, self._open_component_review, bar, "wf-review.svg")
         self.btn_relaunch_inventory_top = self._mirror_project_action(
             self.btn_relaunch_inventory, self._relaunch_inventory, bar, "wf-relaunch-ai.svg")
-        self.btn_edit_component_review_top = self._mirror_project_action(
-            self.btn_edit_component_review, self._show_photo_comparison, bar,
-            "wf-edit-review.svg")
         bar.addStretch()
         # Stato iniziale coerente con la disciplina della riga: cio' che non
         # puo' agire non si vede, invece di stare acceso a vuoto.
@@ -2884,7 +2901,7 @@ class MainWindow(QMainWindow):
         # Come in `_apply_component_name_gate`: durante un'analisi i comandi di
         # revisione restano spenti fino alla fine del worker, e ricalcolarli
         # qui li riaccenderebbe a meta' corsa.
-        if hasattr(self, "btn_reopen_review") and not self._background_work_running():
+        if hasattr(self, "btn_component_review") and not self._background_work_running():
             self._refresh_reopen_review_button()
 
     def _named(self) -> bool:
@@ -3266,7 +3283,7 @@ class MainWindow(QMainWindow):
         # Il nome decide anche la cartella in cui cercare le proposte salvate:
         # cambiato il nome, i pulsanti della revisione vanno ricalcolati --
         # ma non durante un'analisi, dove restano spenti fino alla fine.
-        if hasattr(self, "btn_reopen_review") and not busy:
+        if hasattr(self, "btn_component_review") and not busy:
             self._refresh_reopen_review_button()
         # Il nome decide anche la cartella del diario: cambiandolo, il log
         # apribile e' un altro (o non c'e').
@@ -3568,6 +3585,17 @@ class MainWindow(QMainWindow):
         self._on_ai_progress(tx("Profilo AI: {currentText}.",
                                 currentText=self.combo_component_type.currentText()))
         self._on_ai_progress(tx("Modello AI unico: {model}.", model=model))
+        if getattr(self, "chk_deepseek_reasoning", None) is not None \
+                and self.chk_deepseek_reasoning.isChecked():
+            from ..services import providers as _providers
+            if _providers.provider_of(model) == _providers.PROVIDER_DEEPSEEK:
+                self._on_ai_progress(tx(
+                    "Ragionamento DeepSeek attivo: risposte più lente e token di ragionamento "
+                    "a pagamento, contati nel consuntivo."))
+            else:
+                self._on_ai_progress(tx(
+                    "Ragionamento DeepSeek acceso ma il modello {model} non è dell'API diretta "
+                    "DeepSeek: nessun effetto.", model=model))
         if photo_detector in ('yolo', 'vlm') and self._photo_inventory_family() is False:
             # Difetto visto dall'utente: con «YOLO locale + verifica AI» e una
             # tipologia da COMPONENTE SINGOLO il rilevatore non parte, la
@@ -4190,8 +4218,8 @@ class MainWindow(QMainWindow):
             controlli che lo leggono (e i test) vedano una cosa sola.
         @note L'allineamento vale per cio' che questo metodo imposta, non per
             cio' che Qt calcola. Su una COPIA nella scheda Modello 3D --
-            `btn_reopen_review_3d`, `btn_relaunch_inventory_3d`,
-            `btn_edit_component_review_3d` -- `isEnabled()` e' in AND con lo
+            `btn_component_review_3d`, `btn_relaunch_inventory_3d` --
+            `isEnabled()` e' in AND con lo
             stato della scheda, che resta spenta fino alla prima acquisizione:
             li' `isEnabled()` puo' essere falso mentre
             `isVisibleTo(parentWidget())` e' vero, e non e' un difetto. Un
@@ -4216,8 +4244,7 @@ class MainWindow(QMainWindow):
         if divider is None:
             return
         pipeline = [getattr(self, name, None) for name in (
-            "btn_reopen_review_top", "btn_relaunch_inventory_top",
-            "btn_edit_component_review_top")]
+            "btn_component_review_top", "btn_relaunch_inventory_top")]
         divider.setVisible(any(b is not None and b.isVisibleTo(b.parentWidget())
                                for b in pipeline))
 
@@ -4303,32 +4330,69 @@ class MainWindow(QMainWindow):
             is the pretest's and nothing may be paid (audit 25/09, B2). The
             copies of each command still move together.
         """
-        for name in ("btn_reopen_review", "btn_reopen_review_top", "btn_reopen_review_3d"):
-            self._set_action_available(name, bool(reopen))
+        self._review_bundle_available = bool(reopen)
         for name in ("btn_relaunch_inventory", "btn_relaunch_inventory_top",
                      "btn_relaunch_inventory_3d"):
             self._set_action_available(name, bool(relaunch))
-        self._refresh_edit_review_buttons()
+        self._refresh_component_review_button()
 
-    def _refresh_edit_review_buttons(self) -> None:
-        """@brief Allinea le copie di «Modifica la revisione…» a cio' che il comando puo' aprire.
+    def _component_review_stage(self):
+        """@brief Which stage «Revisione componenti…» would open right now.
 
-        @note La condizione e' la stessa che `_show_photo_comparison` verifica:
-            la fotografia calibrata, oppure -- quando quella manca -- la sola
-            sovrapposizione degli ingombri, che apre il confronto in sola
-            lettura. Legare il pulsante al solo `_photo_png` nascondeva un
-            comando che invece funzionava, quindi qui si guardano entrambe le
-            immagini. Senza nessuna delle due il comando non puo' fare nulla e
-            sparisce, secondo la disciplina di `_set_action_available`.
+        @return `photo_review_dialog.STAGE_INVENTORY` when the calibrated
+            photograph is in memory (the reconciled bodies, or an empty
+            inventory to draw into); `STAGE_DETECTOR` when, without it, a
+            bundle of detector proposals can be reopened (component folder or
+            session cache); the string "overlay" when only the read-only
+            overlay of the last extraction exists; None when nothing can be
+            opened.
+        @note The photograph decides, not the bundle: after an analysis both
+            exist, and what the user corrects then is the inventory. The
+            bundle saved at the mid-run pause stays what the paid relaunch
+            reconciles.
+        """
+        from .photo_review_dialog import STAGE_DETECTOR, STAGE_INVENTORY
+        if getattr(self, "_photo_png", None):
+            return STAGE_INVENTORY
+        if getattr(self, "_review_bundle_available", False):
+            return STAGE_DETECTOR
+        if getattr(self, "_photo_overlay_png", None):
+            return "overlay"
+        return None
+
+    def _refresh_component_review_button(self) -> None:
+        """@brief Allinea le copie di «Revisione componenti…» a cio' che il comando puo' aprire.
+
+        @note Il comando apre uno stadio o l'altro della stessa finestra
+            (`_component_review_stage`): senza fotografia, senza pacchetto e
+            senza sovrapposizione non puo' fare nulla e sparisce, secondo la
+            disciplina di `_set_action_available`.
         @note Metodo unico perche' le copie (scheda Progetto e scheda Modello
             3D) sono lo stesso comando: devono restare per costruzione nello
             stesso stato, da qualunque percorso si arrivi.
         """
-        editable = bool(getattr(self, "_photo_png", None)
-                        or getattr(self, "_photo_overlay_png", None))
-        for name in ("btn_edit_component_review", "btn_edit_component_review_top",
-                     "btn_edit_component_review_3d"):
-            self._set_action_available(name, editable)
+        available = self._component_review_stage() is not None
+        for name in ("btn_component_review", "btn_component_review_top",
+                     "btn_component_review_3d"):
+            self._set_action_available(name, available)
+
+    def _open_component_review(self) -> None:
+        """@brief «Revisione componenti…»: the one review window, in the stage that applies.
+
+        @note Free in every branch. With the photograph in memory it is the
+            inventory review (`_show_photo_comparison`); otherwise the saved
+            detector proposals (`_reopen_detector_review`), whose OK rewrites
+            `photo-review/proposals.json`; otherwise the read-only overlay.
+        """
+        from .photo_review_dialog import STAGE_DETECTOR
+        stage = self._component_review_stage()
+        if stage is None:
+            self._refresh_component_review_button()
+            return
+        if stage == STAGE_DETECTOR:
+            self._reopen_detector_review()
+            return
+        self._show_photo_comparison()
 
     def _on_inventory_pause_toggled(self, checked: bool) -> None:
         """@brief Ricorda la scelta sulla pausa e la scrive nel diario.
@@ -4421,7 +4485,7 @@ class MainWindow(QMainWindow):
         return photo_png
 
     def _reopen_detector_review(self) -> None:
-        """@brief Riapre «Corpi rilevati» sul pacchetto salvato e, all'OK, lo risalva. Gratis.
+        """@brief Riapre la revisione (stadio rilevatore) sul pacchetto salvato e, all'OK, lo risalva. Gratis.
 
         @note Nessuna chiamata AI in nessun ramo: la revisione e' sul thread
             GUI e l'OK scrive soltanto `photo-review/proposals.json` con le
@@ -4450,13 +4514,16 @@ class MainWindow(QMainWindow):
                             json_path=bundle.json_path,
                             n_proposals=len(bundle.proposals)))
         try:
-            from .yolo_review_dialog import YoloReviewDialog
-            from ..services.photo_yolo import detector_classes
-            dialog = YoloReviewDialog(photo_png, [dict(p) for p in bundle.proposals],
-                                      bundle.body_length_mm, bundle.body_width_mm,
-                                      detector_classes(), self)
+            # Letto dal modulo a ogni chiamata, cosi' una prova puo' sostituire
+            # la finestra; stadio «rilevatore» della revisione unificata.
+            from . import photo_review_dialog as review_module
+            dialog = review_module.PhotoReviewDialog(
+                photo_png, [dict(p) for p in bundle.proposals],
+                bundle.body_length_mm, bundle.body_width_mm, self,
+                stage=review_module.STAGE_DETECTOR)
+            self.i18n.retranslate_widgets(dialog)
             accepted = dialog.exec() == QDialog.DialogCode.Accepted
-            kept = list(dialog.kept()) if accepted else None
+            kept = list(dialog.kept_components()) if accepted else None
         except Exception as exc:  # noqa: BLE001 - la vista non deve far cadere la finestra
             self._append_log(tx("ATTENZIONE revisione dei corpi non disponibile: {exc}", exc=exc))
             return
@@ -5128,7 +5195,7 @@ class MainWindow(QMainWindow):
         if not (self._photo_png or self._photo_overlay_png):
             # Senza immagine la revisione non ha su cosa disegnare: fermare la
             # corsa per una finestra che non si aprirebbe sarebbe una pausa a
-            # vuoto (stessa disciplina di `_refresh_edit_review_buttons`).
+            # vuoto (stessa disciplina di `_refresh_component_review_button`).
             self._append_log(tx("Pausa dopo l'inventario AI non offerta: manca la fotografia calibrata "
                                 "su cui mostrare i corpi."))
             return False
@@ -5174,7 +5241,7 @@ class MainWindow(QMainWindow):
         return True
 
     def _on_review_requested(self, photo_png, proposals, length_mm, width_mm) -> None:
-        """@brief Mostra i corpi rilevati e restituisce al worker quelli da tenere.
+        """@brief Mostra le proposte del rilevatore (revisione unificata, stadio rilevatore) e restituisce al worker quelle da tenere.
 
         @param photo_png Fotografia calibrata, codificata in PNG.
         @param proposals Proposte del rilevatore locale.
@@ -5211,13 +5278,16 @@ class MainWindow(QMainWindow):
         pretest = isinstance(worker, YoloPretestWorker)
         kept = list(proposals)
         try:
-            from .yolo_review_dialog import YoloReviewDialog
-            from ..services.photo_yolo import detector_classes
+            from . import photo_review_dialog as review_module
             self.analysis_overlay.hide()
-            dialog = YoloReviewDialog(photo_png, proposals, length_mm, width_mm,
-                                      detector_classes(), self)
+            # Stadio «rilevatore» della revisione unificata (HANDOFF 162): le
+            # proposte tenute all'OK sono quelle che vanno alla chiamata.
+            dialog = review_module.PhotoReviewDialog(
+                photo_png, proposals, length_mm, width_mm, self,
+                stage=review_module.STAGE_DETECTOR)
+            self.i18n.retranslate_widgets(dialog)
             accepted = dialog.exec() == QDialog.DialogCode.Accepted
-            kept = dialog.kept() if accepted else None
+            kept = dialog.kept_components() if accepted else None
             self._append_log(
                 tx("Revisione dei corpi rilevati: {n_kept} tenute su {n_proposals}.",
                    n_kept=len(kept),
@@ -5868,7 +5938,7 @@ class MainWindow(QMainWindow):
         self._last_saved_project_state = self._project_state_text()
         # Dopo il nome e dopo lo stato: i pulsanti di revisione guardano la
         # cartella del progetto appena aperto, non piu' la foto del precedente.
-        if hasattr(self, "btn_reopen_review") and not self._background_work_running():
+        if hasattr(self, "btn_component_review") and not self._background_work_running():
             self._refresh_reopen_review_button()
 
     def _reset_project_runtime_state(self) -> None:
@@ -6386,7 +6456,7 @@ class MainWindow(QMainWindow):
                                    else "matrix")
         self._photo_overlay_png = params.photo_overlay_png
         self._photo_source = params.photo_source
-        self._refresh_edit_review_buttons()
+        self._refresh_component_review_button()
         self._last_extracted = params
         # Il nome lo decide chi lavora, non l'estrazione: la proposta va solo
         # nel log, e si adotta con File > Rinomina progetto, che e' anche il
@@ -6855,6 +6925,8 @@ class MainWindow(QMainWindow):
         # (larghezza - distanza) / 2. Senza, per i contatti a foro passante
         # restano solo una stima per difetto e una riga di log che lo dice.
         # Si azzera a ogni estrazione: una quota di un'altra scheda non vale.
+        # L'estrazione la consegna solo se LETTA in un documento (HANDOFF
+        # 167): una derivata o stimata arriva qui gia' a None, con la nota.
         spacing = getattr(params, "row_spacing_mm", None)
         self._declared_row_spacing = (
             float(spacing) if isinstance(spacing, (int, float)) and not isinstance(spacing, bool)
@@ -6881,7 +6953,7 @@ class MainWindow(QMainWindow):
             # documenti; stimati o senza provenienza restano stime (26/09).
             for field in ("half_hole_diameter_mm", "through_hole_drill_mm"):
                 source = sources.get(f"castellated_sides.{side.get('edge')}.{field}")
-                side[field.replace("_mm", "_declared")] = source in ("read", "derived")
+                side[field.replace("_mm", "_declared")] = source in DECLARED_SOURCES
             # Piazzole del lato, stessa regola (28/09). Senza la voce di
             # provenienza (lati rientrati da `_serialised_sides`, che la
             # portano gia' nel lato) vale quella del lato; se manca anche
@@ -6889,7 +6961,7 @@ class MainWindow(QMainWindow):
             for field in ("pad_length_mm", "pad_width_mm"):
                 key = f"castellated_sides.{side.get('edge')}.{field}"
                 flag = field.replace("_mm", "_declared")
-                side[flag] = (sources[key] in ("read", "derived") if key in sources
+                side[flag] = (sources[key] in DECLARED_SOURCES if key in sources
                               else side.get(flag) is True)
             self._add_side_row(side)
             label = EDGE_LABELS.get(side["edge"], side["edge"])
@@ -8657,18 +8729,16 @@ class MainWindow(QMainWindow):
         # alle proposte annotate e ripartire (revisione gratuita; rilancio a
         # pagamento, dichiarato -- anche dall'icona, che porta una moneta).
         # Stesso stato delle copie in Progetto.
-        self.btn_reopen_review_3d = self._mirror_project_action(
-            self.btn_reopen_review, self._reopen_detector_review, toolbar,
+        # UNA icona per la revisione (utente, 2026-09-30, HANDOFF 162): e'
+        # guardando il solido che si scopre un corpo sbagliato, e la stessa
+        # finestra mostra proposte del rilevatore o inventario AI a seconda
+        # dello stadio raggiunto.
+        self.btn_component_review_3d = self._mirror_project_action(
+            self.btn_component_review, self._open_component_review, toolbar,
             "wf-review.svg")
         self.btn_relaunch_inventory_3d = self._mirror_project_action(
             self.btn_relaunch_inventory, self._relaunch_inventory, toolbar,
             "wf-relaunch-ai.svg")
-        # Anche la modifica della revisione va specchiata qui: e' guardando il
-        # solido che si scopre un corpo sbagliato, e tornare alla scheda
-        # Progetto per correggerlo era lavoro in piu' senza motivo.
-        self.btn_edit_component_review_3d = self._mirror_project_action(
-            self.btn_edit_component_review, self._show_photo_comparison, toolbar,
-            "wf-edit-review.svg")
         # Modifica a mano dei corpi (utente, 2026-09-26): la tabella sotto il
         # 3D e' stata tolta, i dati no. Serve anche senza la foto in memoria,
         # che la revisione fotografica invece richiede. Il suo pulsante nella

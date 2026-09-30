@@ -36,6 +36,7 @@ from ..generators.castellated_module import (
 from .ai_diagnostics import CallCancelled
 from .openrouter import (DEFAULT_MODEL, OpenRouterError, api_key, call_tool, check_credit,
                          reset_usage, usage_totals)
+from .edge_notches import EdgeCount
 from .messages import end_sentence, tx
 
 MAX_FILES = 5
@@ -122,6 +123,11 @@ VALUE_SOURCES = ("read", "derived", "estimated")
 UNDECLARED_SOURCE = "undeclared"
 #: Provenances that ask for a review before the value is used.
 REVIEW_SOURCES = ("estimated", UNDECLARED_SOURCE)
+#: Provenance the PROGRAM gives a value it measured on the calibrated photo
+#: (edge_lands, HANDOFF 169). Never accepted from the model's own
+#: `value_sources` (see _declared_sources): the model reads documents, it
+#: does not measure pixels.
+MEASURED_SOURCE = "measured"
 
 
 def _value_sources_schema(keys, where: str) -> dict:
@@ -1411,6 +1417,10 @@ def _canonicalize_answer(data: dict) -> None:
     """
     if data.get("_canonical"):
         return
+    # A raw answer never carries the program's own measurement block: the
+    # photo stage writes it AFTER this conversion (HANDOFF 169), and an
+    # answer already converted keeps it (the early return above).
+    data.pop("_measured_lands", None)
     notes: list[str] = []
     layout = data.get("layout") or "matrix"
 
@@ -2200,21 +2210,104 @@ def _recount_sides_from_photo(data, disagreements, content_blocks, diagnostic_ca
         return False
 
 
+def _exclude_declared_sides(data, items, say) -> bool:
+    """Drop declared castellated sides the photo says are not there (HANDOFF point 164).
+
+    @param data Validated main answer, updated in place.
+    @param items EdgeCount list of the sides to drop; `reason` says why.
+    @param say Progress callback; the exclusion is reported as a WARNING.
+    @return True when at least one side was dropped.
+    @note The remaining sides keep their own numbering when it stays
+        contiguous; otherwise they are renumbered in order of their first
+        pin, and the note says so, because a footprint with a gap in the pad
+        numbers is refused downstream. The excluded sides are named in
+        `notes`, so whoever reads the result can put one back by hand when
+        the photo, not the model, is wrong.
+    """
+    from .messages import as_warning
+    edges = {item.edge: item for item in items}
+    remaining = [entry for entry in (data.get("castellated_sides") or ())
+                 if _side_edge(entry) not in edges]
+    dropped = [entry for entry in (data.get("castellated_sides") or ())
+               if _side_edge(entry) in edges]
+    if not dropped:
+        return False
+    for entry in dropped:
+        item = edges[_side_edge(entry)]
+        say(as_warning(tx(
+            "Lato {label}: l'analisi dichiarava {declared} contatti, ma sulla foto il bordo "
+            "non ha nessuna tacca ({reason}): lato escluso. Se la foto inganna, "
+            "aggiungilo a mano nella tabella dei lati.",
+            label=EDGE_LABELS.get(item.edge, item.edge), declared=entry.get("count"),
+            reason=item.reason or tx("nessuna tacca visibile sul bordo"))))
+    renumbered = False
+    if remaining and not _numbering_is_contiguous(copy.deepcopy(remaining)):
+        ordered = sorted(remaining, key=lambda entry: (
+            _optional_number(entry.get("first_pin"), positive=True, integer=True) or 0))
+        next_pin = 1
+        for entry in ordered:
+            count = _optional_number(entry.get("count"), positive=True, integer=True)
+            if count is None:
+                continue
+            entry["first_pin"] = next_pin
+            next_pin += int(count)
+        renumbered = True
+    data["castellated_sides"] = remaining
+    note = tx("Lati esclusi dopo il confronto con la foto (bordo senza tacche): {edges}.",
+              edges=", ".join(EDGE_LABELS.get(edge, edge) for edge in edges))
+    if renumbered:
+        note += " " + tx("I pad dei lati rimasti sono stati rinumerati di seguito: verificare "
+                         "la tabella pinout.")
+    data["notes"] = (str(data.get("notes") or "") + "\n" + note).strip()
+    say(note)
+    return True
+
+
 def _recount_sides_attempt(data, disagreements, content_blocks, diagnostic_call, model,
                            system_prompt, has_pdf, say) -> bool:
-    """Body of _recount_sides_from_photo; `data` is changed only at the very end."""
+    """Body of _recount_sides_from_photo; `data` is changed only at the very end.
+
+    Three kinds of EdgeCount arrive (edge_notches.count_disagreements):
+    * a CLEAN edge (`no_notch`): the declared side is excluded here, with no
+      paid call -- the photo is the geometric reference of the project, and
+      a straight outline on a photo able to show a notch is a measurement;
+    * an edge the photo cannot count (`found` None): the model is asked to
+      look at the enlargement of THAT edge and to answer count 0 (or leave
+      the side out) when it sees no plated hole cut by the edge; 0 excludes
+      the side, any other count keeps the declared side with a warning that
+      the photo could not verify it (the recount never adopts a number the
+      photo cannot check);
+    * another number of notches: the recount of HANDOFF point 137.
+    """
+    clean = [item for item in disagreements if item.no_notch]
+    unverifiable = [item for item in disagreements if item.found is None and not item.no_notch]
+    disagreements = [item for item in disagreements
+                     if item.found is not None and not item.no_notch]
+    changed = _exclude_declared_sides(data, clean, say) if clean else False
+    if not disagreements and not unverifiable:
+        return changed
     facts = "; ".join(
         f"lato {item.edge}: la foto calibrata vista dall'alto mostra {item.found} semi-fori "
         f"aperti sul bordo, con i centri a {', '.join(f'{c:.2f}' for c in item.centres_mm)} mm "
         f"dall'inizio del bordo (da sinistra per top/bottom, dall'alto per left/right); "
         f"la risposta ne dichiarava {item.declared}"
         for item in disagreements)
-    summary = ", ".join(f"{EDGE_LABELS.get(item.edge, item.edge)} {item.declared} -> "
-                        f"{item.found}" for item in disagreements)
+    doubts = "; ".join(
+        f"lato {item.edge}: la foto calibrata non permette di contare i semi-fori "
+        f"({item.reason}); la risposta ne dichiarava {item.declared}. Guarda l'ingrandimento "
+        f"del bordo {item.edge}: se NON vedi fori metallizzati tagliati dal bordo, rispondi "
+        f"count 0 per questo lato (o non elencarlo)"
+        for item in unverifiable)
+    summary = ", ".join(
+        [f"{EDGE_LABELS.get(item.edge, item.edge)} {item.declared} -> {item.found}"
+         for item in disagreements]
+        + [f"{EDGE_LABELS.get(item.edge, item.edge)} {item.declared} -> ?"
+           for item in unverifiable])
     say(tx("Contatti: la foto non conferma l'analisi ({summary}). Richiesta di ricontarli sugli "
            "stessi documenti: una chiamata in piu'.", summary=summary))
+    comparison = "Confronto con la fotografia: " + "; ".join(part for part in (facts, doubts) if part)
     blocks = list(content_blocks) + [{"type": "text", "text": (
-        "Confronto con la fotografia: " + facts + ". Riconta sui documenti (pinout, disegno "
+        comparison + ". Riconta sui documenti (pinout, disegno "
         "quotato, foto) i contatti FISICI di questi lati: count e' il loro numero, pin_names "
         "ne elenca esattamente uno per contatto nell'ordine lungo il bordo; le sigle dei LED "
         "o di altri componenti non sono contatti. La foto puo' sbagliare solo se un semi-foro "
@@ -2229,7 +2322,7 @@ def _recount_sides_attempt(data, disagreements, content_blocks, diagnostic_call,
     if not isinstance(repaired, dict) or not isinstance(repaired.get("castellated_sides"), list):
         say(tx("Il ricontrollo dei contatti non ha restituito lati utilizzabili: restano "
                "quelli dell'analisi."))
-        return False
+        return changed
     repaired = copy.deepcopy(repaired)
     repaired["layout"] = "castellated"
     # Chiavi private: una risposta del modello non e' mai gia' convertita.
@@ -2254,6 +2347,27 @@ def _recount_sides_attempt(data, disagreements, content_blocks, diagnostic_call,
     index = {_side_edge(entry): i for i, entry in enumerate(merged) if _side_edge(entry)}
     length = _optional_number(data.get("body_length_mm"), positive=True)
     width = _optional_number(data.get("body_width_mm"), positive=True)
+    # Lati non verificabili sulla foto: zero (o lato assente) li esclude, un
+    # numero li lascia dichiarati con l'avviso. Mai adottato un numero nuovo.
+    from .messages import as_warning
+    not_there = []
+    for item in unverifiable:
+        reply = recounted.get(item.edge)
+        count = (_optional_number(reply.get("count"), integer=True)
+                 if isinstance(reply, dict) else None)
+        if reply is None or count == 0:
+            not_there.append(EdgeCount(item.edge, 0, item.declared, [], reason=tx(
+                "ricontrollo AI sull'ingrandimento del bordo: nessun foro tagliato dal bordo")))
+        else:
+            say(as_warning(tx(
+                "Lato {label}: {declared} contatti dichiarati; la foto non permette di "
+                "contarli ({reason}) e il ricontrollo AI li conferma: lato da verificare a "
+                "mano.", label=EDGE_LABELS.get(item.edge, item.edge), declared=item.declared,
+                reason=item.reason)))
+    if not_there:
+        changed = _exclude_declared_sides(data, not_there, say) or changed
+        merged = list(data.get("castellated_sides") or ())
+        index = {_side_edge(entry): i for i, entry in enumerate(merged) if _side_edge(entry)}
     adopted, confirmed = [], []
     for item in disagreements:
         reply, position = recounted.get(item.edge), index.get(item.edge)
@@ -2285,7 +2399,7 @@ def _recount_sides_attempt(data, disagreements, content_blocks, diagnostic_call,
         say(tx("Ricontrollo dei contatti: l'AI conferma i contatti dichiarati; il disaccordo "
                "con la foto resta da verificare."))
     if not adopted:
-        return False
+        return changed
     data["castellated_sides"] = merged
     if conversion:
         data["_canonical_notes"] = list(data.get("_canonical_notes") or ()) + [
@@ -3579,7 +3693,179 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         package_geometry=package_geometry,
     )
     params.value_sources = _value_sources(data, params, sides, notes)
+    if layout == "castellated":
+        _drop_unread_row_spacing(params, notes)
+        _apply_measured_lands(data, params, notes)
+        _downgrade_sizes_wider_than_the_pitch(params, notes)
     notes.extend(_review_notes(sides, params.value_sources))
     if notes:
         params.notes = (params.notes + "\n" + "\n".join(notes)).strip()
     return params
+
+
+def _drop_unread_row_spacing(params: "ExtractedParams", notes: list) -> None:
+    """Keep a castellated row spacing only when the model READ it in a document.
+
+    The row spacing is the one number that moves the through-holes of a
+    castellated module across the board: the generator places them at
+    (extent - spacing) / 2 from the edge. A value the model derived or
+    estimated is not that measurement -- on the RS485 run of 2026-09-30 it
+    reported the pitch of one side as `row_spacing_mm` («derivato,
+    coincidente col passo, non e' una distanza fra file») and the holes
+    landed 18.86 mm in, with copper lands across half the board (HANDOFF
+    point 167). Provenance is a declared attribute of the answer, not a
+    threshold: only "read" keeps the value; derived, estimated and
+    undeclared drop it, with a note that says the value, its provenance and
+    where it would have put the holes. The generator then falls back to the
+    minimum inset behind the half-hole (or to an offset typed by hand).
+
+    @param params Result under construction; `row_spacing_mm` and its
+        provenance are removed when not read.
+    @param notes Notes of the result.
+    """
+    spacing = params.row_spacing_mm
+    if spacing is None:
+        return
+    sources = dict(params.value_sources or {})
+    source = sources.get("row_spacing_mm", UNDECLARED_SOURCE)
+    if source == "read":
+        return
+    from ..generators.castellated_module import opposite_row_edges, through_hole_inset_from_rows
+    edges = [side["edge"] for side in (params.castellated_sides or ()) if isinstance(side, dict)]
+    pair = opposite_row_edges(edges)
+    extent = None
+    if pair == ("left", "right"):
+        extent = params.body_length_mm
+    elif pair == ("top", "bottom"):
+        extent = params.body_width_mm
+    inset = through_hole_inset_from_rows(extent, spacing) if extent else None
+    where = (tx(" (avrebbe messo i fori passanti a {inset:.2f} mm dal bordo)", inset=inset)
+             if inset is not None else "")
+    notes.append(tx(
+        "Distanza fra le file {spacing} mm riportata dal modello come «{source}», non letta in "
+        "un documento: non usata per posizionare i fori passanti dei contatti castellated{where}. "
+        "Restano la stima minima dietro al semi-foro o la distanza dal bordo indicata a mano.",
+        spacing=spacing, source=_SOURCE_LABELS.get(source, source), where=where))
+    params.row_spacing_mm = None
+    sources.pop("row_spacing_mm", None)
+    params.value_sources = sources
+
+
+def _apply_measured_lands(data: dict, params: "ExtractedParams", notes: list) -> None:
+    """Adopt the land widths the photo measured (`data["_measured_lands"]`, edge_lands).
+
+    Per edge with a measured width: a `pad_width_mm` the model READ in a
+    document is kept (a document measure outranks a photo measure) and the
+    two are compared in a note; any other provenance -- derived, estimated,
+    undeclared, or no value at all -- is replaced by the measured width with
+    provenance MEASURED_SOURCE, which the GUI treats as declared. The inward
+    extent is recorded on the side as `land_inward_mm` (informative: the
+    footprint's pad length includes the overhang beyond the edge, which no
+    photo of the module shows). The measurement block is a private key the
+    photo stage writes; a raw answer never carries it (_canonicalize_answer
+    drops it).
+
+    @param data Answer the photo stage annotated.
+    @param params Result under construction; sides and value_sources updated.
+    @param notes Notes of the result.
+    """
+    lands = data.get("_measured_lands")
+    if not isinstance(lands, dict) or not lands:
+        return
+    sources = dict(params.value_sources or {})
+    for side in params.castellated_sides or ():
+        if not isinstance(side, dict):
+            continue
+        edge = side.get("edge")
+        land = lands.get(edge)
+        if not isinstance(land, dict):
+            continue
+        width = _optional_number(land.get("width_mm"), positive=True)
+        if width is None:
+            continue
+        label = EDGE_LABELS.get(edge, edge)
+        tolerance = _optional_number(land.get("tolerance_mm")) or 0.0
+        inward = _optional_number(land.get("inward_mm"), positive=True)
+        if inward is not None:
+            side["land_inward_mm"] = round(float(inward), 3)
+        key = f"castellated_sides.{edge}.pad_width_mm"
+        declared = _optional_number(side.get("pad_width_mm"), positive=True)
+        if sources.get(key) == "read" and declared is not None:
+            agreement = (tx("coerente") if abs(declared - width) <= tolerance + 1e-9
+                         else tx("DIVERSA: verificare il disegno"))
+            notes.append(tx(
+                "Lato {label}: larghezza delle piazzole letta nei documenti {declared} mm, "
+                "misurata sulla foto {width:.2f} mm (±{tolerance:.2f}): si tiene la lettura, "
+                "{agreement}.", label=label, declared=declared, width=width,
+                tolerance=tolerance, agreement=agreement))
+            continue
+        previous = (tx("stima del modello {value} mm", value=declared) if declared is not None
+                    else tx("nessun valore del modello"))
+        side["pad_width_mm"] = round(float(width), 3)
+        sources[key] = MEASURED_SOURCE
+        notes.append(tx(
+            "Lato {label}: larghezza delle piazzole misurata sulla foto: {width:.2f} mm "
+            "(±{tolerance:.2f}), al posto di: {previous}.",
+            label=label, width=width, tolerance=tolerance, previous=previous))
+    params.value_sources = sources
+
+
+#: Per-side sizes measured ALONG the edge, across the pitch: two adjacent
+#: contacts cannot share copper, so the pad width (the along-edge size on
+#: every edge, see castellated_module.pad_positions) cannot reach the pitch.
+#: The hole diameters have the same physical bound and are already DROPPED
+#: by _add_hole_sizes when they reach it; the pad width is kept as an
+#: estimate instead, because the generator knows how to shrink a land.
+_ACROSS_PITCH_KEYS = ("pad_width_mm",)
+
+
+def _downgrade_sizes_wider_than_the_pitch(params: "ExtractedParams", notes: list) -> None:
+    """A side size that reaches the pitch is not a measurement: keep it, as an estimate.
+
+    Structural, not a threshold: on a side with more than one contact, a pad
+    width equal to or wider than the pitch means two adjacent contacts
+    sharing copper -- no drawing shows that (the hole diameters, with the
+    same bound, are dropped earlier by _add_hole_sizes). When
+    the model still declares such a value «read» or «derived» (the RS485 run
+    of 2026-09-30: «larghezza piazzola 2.54 mm derivata dal foro stimato»,
+    on a 2.54 mm pitch, HANDOFF point 168), the value stays for the
+    generator to reduce (an AssumedSize shrinks to the largest that fits,
+    and says so), but its provenance becomes «estimated»: a measure is never
+    touched, an impossible «measure» is not one. A value that fits the pitch
+    keeps whatever provenance it has, including one the generator will
+    refuse for the fabrication gap: that is a real disagreement to show.
+
+    @param params Result under construction; `value_sources` is updated.
+    @param notes Notes of the result.
+    """
+    sources = dict(params.value_sources or {})
+    changed = False
+    for side in params.castellated_sides or ():
+        if not isinstance(side, dict):
+            continue
+        edge, count, pitch = side.get("edge"), side.get("count"), side.get("pitch_mm")
+        if not (isinstance(count, int) and count > 1) or not isinstance(pitch, (int, float)):
+            continue
+        for key in _ACROSS_PITCH_KEYS:
+            value = side.get(key)
+            source_key = f"castellated_sides.{edge}.{key}"
+            if (isinstance(value, (int, float)) and not isinstance(value, bool)
+                    and value >= float(pitch) - 1e-9
+                    and sources.get(source_key) in ("read", "derived")):
+                notes.append(tx(
+                    "Lato {label}: {field} = {value} mm dichiarato «{source}» ma pari o superiore "
+                    "al passo di {pitch} mm dello stesso lato: due contatti adiacenti si "
+                    "sovrapporrebbero, quindi non e' una misura. Trattato come stima, che il "
+                    "generatore riduce e annota.",
+                    label=EDGE_LABELS.get(edge, edge), field=key, value=value,
+                    source=_SOURCE_LABELS.get(sources[source_key], sources[source_key]),
+                    pitch=pitch))
+                sources[source_key] = "estimated"
+                changed = True
+    if changed:
+        params.value_sources = sources
+
+
+#: Italian words for the provenances, for the notes.
+_SOURCE_LABELS = {"read": "letta", "derived": "derivata", "estimated": "stimata",
+                  UNDECLARED_SOURCE: "senza provenienza"}

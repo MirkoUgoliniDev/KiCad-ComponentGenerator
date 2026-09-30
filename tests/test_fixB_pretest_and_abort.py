@@ -42,7 +42,7 @@ _ROW = {"_id": 1, "_box": [0.1, 0.1, 0.4, 0.4], "name": "YOLO candidate 1", "kin
 
 
 class _FakeReviewDialog:
-    """Stand-in for YoloReviewDialog: records the opening and accepts everything."""
+    """Stand-in for the unified review (detector stage): records the opening and accepts everything."""
 
     opened = []
 
@@ -53,17 +53,15 @@ class _FakeReviewDialog:
     def exec(self):
         return QDialog.DialogCode.Accepted
 
-    def kept(self):
+    def kept_components(self):
         return [dict(p) for p in self.proposals]
 
 
 @pytest.fixture
 def review_dialog(monkeypatch):
-    import kicadgen.gui.yolo_review_dialog as review_module
-    import kicadgen.services.photo_yolo as photo_yolo
+    import kicadgen.gui.photo_review_dialog as review_module
     _FakeReviewDialog.opened = []
-    monkeypatch.setattr(review_module, "YoloReviewDialog", _FakeReviewDialog)
-    monkeypatch.setattr(photo_yolo, "detector_classes", lambda: ())
+    monkeypatch.setattr(review_module, "PhotoReviewDialog", _FakeReviewDialog)
     return _FakeReviewDialog
 
 
@@ -183,14 +181,14 @@ def test_reopen_and_relaunch_follow_the_detector(window):
     combo = window.combo_photo_detector
     combo.setCurrentIndex(combo.findData("yolo_only"))
     window._refresh_reopen_review_button()
-    parent = window.btn_reopen_review.parentWidget()
-    assert window.btn_reopen_review.isVisibleTo(parent)
+    parent = window.btn_component_review.parentWidget()
+    assert window.btn_component_review.isVisibleTo(parent)
     assert not window.btn_relaunch_inventory.isVisibleTo(parent)
     # Negativo: con «YOLO locale + verifica AI» il pacchetto del pretest non
     # esiste per il rilancio ne' per la revisione dell'estrazione.
     combo.setCurrentIndex(combo.findData("yolo"))
     window._refresh_reopen_review_button()
-    assert not window.btn_reopen_review.isVisibleTo(parent)
+    assert not window.btn_component_review.isVisibleTo(parent)
     assert not window.btn_relaunch_inventory.isVisibleTo(parent)
     window._write_review_bundle([dict(_ROW)], _png(), 20, 10, detector="yolo")
     window._refresh_reopen_review_button()

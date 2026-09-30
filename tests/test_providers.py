@@ -647,3 +647,35 @@ def test_every_models_cache_write_uses_its_own_temporary_and_the_retrying_replac
     assert len(sources) == 2 and sources[0] != sources[1]
     assert openrouter._load_models_cache() == [{"id": "b"}]
     assert [p.name for p in tmp_path.iterdir()] == ["models.json"]
+
+
+def test_the_reasoning_switch_turns_thinking_on_and_drops_the_named_tool_choice(monkeypatch):
+    """@brief HANDOFF 161: on -> thinking enabled + tool_choice required; off -> as before."""
+    sent = {}
+
+    def fake(url, body=None, timeout=None):
+        sent.update(url=url, body=body)
+        return {"choices": [{"message": {"tool_calls": [{"function": {
+            "name": "report", "arguments": '{"ok": true}'}}]}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2,
+                      "completion_tokens_details": {"reasoning_tokens": 7}}}
+    monkeypatch.setattr(providers, "deepseek_request", fake)
+    monkeypatch.setattr(providers, "_deepseek_reasoning", False)
+    providers.set_deepseek_reasoning(True)
+    assert providers.deepseek_reasoning_enabled() is True
+    result = openrouter.call_tool("deepseek-api/deepseek-flash", "sys",
+                                  [{"type": "text", "text": "hi"}], _TOOL)
+    assert result == {"ok": True}
+    assert sent["body"]["thinking"] == {"type": "enabled"}
+    # Thinking mode refuses every tool_choice (HTTP 400 with the named function
+    # on 27/09 and with «required» on 29/09 22:37): the key is left out, the
+    # tool stays offered.
+    assert "tool_choice" not in sent["body"]
+    assert sent["body"]["tools"] == [_TOOL]
+    # Reasoning and answer share the budget: floor raised, effort kept low.
+    assert sent["body"]["max_tokens"] == openrouter.DEEPSEEK_THINKING_MIN_MAX_TOKENS
+    assert sent["body"]["reasoning_effort"] == "low"
+    providers.set_deepseek_reasoning(False)
+    openrouter.call_tool("deepseek-api/deepseek-flash", "sys", [{"type": "text", "text": "hi"}], _TOOL)
+    assert sent["body"]["thinking"] == {"type": "disabled"}
+    assert sent["body"]["tool_choice"]["function"]["name"] == "report"

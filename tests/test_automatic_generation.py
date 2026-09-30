@@ -91,7 +91,7 @@ def test_photo_model_review_is_available_and_preserves_photo(window):
     degli strumenti e' stata eliminata: il widget verificato e' quello della
     riga in fondo alla scheda Progetto.
     """
-    review = window.btn_edit_component_review
+    review = window.btn_component_review
     assert review.isHidden() or not review.isVisibleTo(review.parentWidget())
     assert not review.isEnabled()
     params = acquired('castellated')

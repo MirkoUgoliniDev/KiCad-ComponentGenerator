@@ -126,3 +126,35 @@ def test_the_card_does_not_grow_as_phases_end(overlay):
     assert len(lines) == PHASE_HISTORY_ROWS                     # completed ones + the running one
     assert lines[-1].startswith("● ")
     assert overlay.phases.toolTip().count("✓") == 5             # the tooltip keeps them all
+
+
+def test_the_running_mark_pulses_without_changing_the_rows(overlay):
+    """@brief Positive: two ticks apart the «●» has another colour; negative: the text of the
+    rows is the same, and a finished row never pulses (user, 2026-09-30)."""
+    import re
+    overlay.set_tool("opencv")
+    overlay.set_status("OpenCV: scheda trovata.")
+    overlay.set_tool("yolo")
+    before_html, before_text = overlay.phases.text(), overlay.phases_plain_text()
+    for _ in range(overlay._PULSE_TICKS // 4):
+        overlay._tick()
+    after_html, after_text = overlay.phases.text(), overlay.phases_plain_text()
+    marks = lambda page: re.findall(r"<span style='color:(#[0-9a-f]{6})'>●</span>", page)
+    assert len(marks(before_html)) == 1 and len(marks(after_html)) == 1
+    assert marks(before_html) != marks(after_html), "the mark changed colour"
+    assert before_text == after_text, "only the colour of the mark moves"
+    assert "✓ OpenCV" in after_text and after_html.count("<span style='color:#") == 1
+
+
+def test_the_running_step_of_a_generation_pulses_too(overlay):
+    """@brief The generation modal lists steps instead of phases: its «●» pulses the same way."""
+    import re
+    overlay.set_steps(["Footprint 2D", "Modelli 3D", "Solido 3D"])
+    overlay.set_current_step(1)
+    before_html, before_text = overlay.steps.text(), overlay.steps_plain_text()
+    for _ in range(overlay._PULSE_TICKS // 4):
+        overlay._tick()
+    after_html, after_text = overlay.steps.text(), overlay.steps_plain_text()
+    marks = lambda page: re.findall(r"<span style=\"color:(#[0-9a-f]{6})\">&#9679;</span>", page)
+    assert len(marks(before_html)) == 1 and marks(before_html) != marks(after_html)
+    assert before_text == after_text

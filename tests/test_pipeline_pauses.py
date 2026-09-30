@@ -131,7 +131,7 @@ def _install_review_dialog(monkeypatch, correction=None):
 
         components_applied = pyqtSignal(object)
 
-        def __init__(self, photo_png, components, length, width, parent=None):
+        def __init__(self, photo_png, components, length, width, parent=None, **kwargs):
             super().__init__(parent)
             self._items = []
             self.received = deepcopy(components)
@@ -405,8 +405,8 @@ def test_the_late_free_path_reaches_freecad_with_the_corrections_and_no_ai_call(
 
     monkeypatch.setattr(gui, "_generate_3d", fake_generate_3d)
 
-    assert window.btn_edit_component_review.isEnabled()
-    window.btn_edit_component_review.click()
+    assert window.btn_component_review.isEnabled()
+    window.btn_component_review.click()
     assert len(opened) == 1
     assert [(c.x, c.length, c.width) for c in window._components_from_table()] == [(5.5, 7.5, 3.5)]
 
@@ -431,7 +431,7 @@ def test_cancelling_the_late_review_changes_nothing_and_still_costs_nothing(
     opened = _install_review_dialog(monkeypatch, None)
     window._on_extracted(_extracted())
 
-    window.btn_edit_component_review.click()
+    window.btn_component_review.click()
 
     assert len(opened) == 1
     assert [(c.x, c.length) for c in window._components_from_table()] == [(1.0, 4.0)]
@@ -750,22 +750,20 @@ def test_the_bottom_row_reads_as_one_pipeline_with_the_price_of_each_step(window
     # alla scheda, non piu' una riga in fondo: l'ordine si legge li'.
     outer = tab_outer_layout(window)
     bar = outer.itemAt(0).layout()
+    # Una revisione sola (utente, 2026-09-30, HANDOFF 162): passi 1 e 3 della
+    # pipeline nella stessa finestra, poi il rilancio a pagamento (passo 2).
     order = [bar.itemAt(i).widget() for i in range(bar.count())
-             if bar.itemAt(i).widget() in (window.btn_reopen_review_top,
-                                           window.btn_relaunch_inventory_top,
-                                           window.btn_edit_component_review_top)]
-    assert order == [window.btn_reopen_review_top, window.btn_relaunch_inventory_top,
-                     window.btn_edit_component_review_top]
-    assert "gratuito" in window.btn_reopen_review.toolTip()
-    assert "a pagamento" not in window.btn_reopen_review.toolTip().lower()
+             if bar.itemAt(i).widget() in (window.btn_component_review_top,
+                                           window.btn_relaunch_inventory_top)]
+    assert order == [window.btn_component_review_top, window.btn_relaunch_inventory_top]
+    assert "gratuito" in window.btn_component_review.toolTip()
+    assert "a pagamento" not in window.btn_component_review.toolTip().lower()
     assert "A PAGAMENTO" in window.btn_relaunch_inventory.toolTip()
-    assert "gratuito" in window.btn_edit_component_review.toolTip()
-    assert "Non avvia la generazione" in window.btn_edit_component_review.toolTip()
+    assert "Non avvia la generazione" in window.btn_component_review.toolTip()
     assert "gratuito" in window.btn_regen_3d.toolTip()
     assert "A PAGAMENTO" in window.btn_extract_ai.toolTip()
-    for step, button in enumerate((window.btn_reopen_review, window.btn_relaunch_inventory,
-                                   window.btn_edit_component_review), start=1):
-        assert f"Passo {step}" in button.toolTip()
+    assert "Passi 1 e 3" in window.btn_component_review.toolTip()
+    assert "Passo 2" in window.btn_relaunch_inventory.toolTip()
 
 
 def test_the_pipeline_caption_is_gone_and_the_pause_lives_in_the_options(window):  # noqa: F811
@@ -784,8 +782,7 @@ def test_the_pipeline_caption_is_gone_and_the_pause_lives_in_the_options(window)
     assert not any("inventario AI" in box.text() for box in project.findChildren(QCheckBox))
     dialog = GenerationOptionsDialog(pause_after_inventory=window._inventory_pause_enabled())
     assert dialog.pause_after_inventory() is True
-    for step, button in enumerate((window.btn_reopen_review, window.btn_relaunch_inventory,
-                                   window.btn_edit_component_review), start=1):
-        assert f"Passo {step}" in button.toolTip()
+    assert "Passi 1 e 3" in window.btn_component_review.toolTip()
+    assert "Passo 2" in window.btn_relaunch_inventory.toolTip()
 
 
