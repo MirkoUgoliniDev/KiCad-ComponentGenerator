@@ -1420,13 +1420,15 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_models_form"):
             self._models_form.setRowVisible(self._row_yolo_model, local)
             self._models_form.setRowVisible(self._row_yolo_params, local)
-            # Il modello di visione serve in entrambi i percorsi fotografici:
-            # con vlm rileva ed elenca, con yolo riconcilia le proposte locali.
-            # E' sempre «il modello che guarda la fotografia». Con yolo_only
-            # nessun modello AI lavora (pretest locale, utente 2026-09-25):
-            # ne' quello dei documenti ne' quello della foto, e le due righe
-            # spariscono.
-            self._models_form.setRowVisible(self._row_vlm_model, detector in ("yolo", "vlm"))
+            # Il modello di visione serve nei due percorsi fotografici, ma di
+            # norma coincide con «Modello AI». Mostra la riga solo quando e'
+            # stato scelto un override diverso, evitando di ripetere lo stesso
+            # nome due volte. Con yolo_only nessun modello AI lavora.
+            vision_override = bool(
+                self._vlm_model and self._vlm_model != self._effective_model())
+            self._models_form.setRowVisible(
+                self._row_vlm_model,
+                detector in ("yolo", "vlm") and vision_override)
             self._models_form.setRowVisible(self._row_ai_model, detector != "yolo_only")
             # Anche il credito (utente, 2026-09-25): il pretest non spende nulla.
             if hasattr(self, "_row_ai_account"):
@@ -1517,6 +1519,7 @@ class MainWindow(QMainWindow):
         if chosen:
             self._vlm_model = chosen
             self.field_vlm_model.setText(chosen)
+            self._on_photo_detector_changed()
             self._append_log(tx("Modello di visione per questa sessione: {chosen}.", chosen=chosen))
 
     def _photo_detector_options(self) -> tuple[str, Path | None]:
@@ -2005,14 +2008,13 @@ class MainWindow(QMainWindow):
         self.analysis_overlay.log_requested.connect(self.ai_log_dialog.exec)
         self.analysis_overlay.abort_requested.connect(self._request_abort)
         self.analysis_overlay.closed.connect(self._on_completed_overlay_closed)
-        # Barra di stato (PIANO-FIX 4): cosa sta facendo il programma, il
-        # progetto aperto e quanto e' costato finora in chiamate AI.
+        # Barra di stato: progetto aperto. Il costo dell'analisi compare nella
+        # modale AI, accanto allo stato del lavoro.
         self.status_project = QLabel()
         self.status_project.setProperty("i18n_skip", True)
         self.status_cost = QLabel()
         self.status_cost.setProperty("i18n_skip", True)
         self.statusBar().addPermanentWidget(self.status_project)
-        self.statusBar().addPermanentWidget(self.status_cost)
         self.statusBar().showMessage(self.i18n.text("Pronto"))
         self.analysis_overlay.operation_started.connect(
             lambda title: self.statusBar().showMessage(title + "\u2026"))
@@ -2978,8 +2980,14 @@ class MainWindow(QMainWindow):
         """
         try:
             self._refresh_status_bar(bool(self._component_name()))
+            overlay = getattr(self, "analysis_overlay", None)
+            if (overlay is not None and overlay.isVisible()
+                    and not self._generation_phase_active()):
+                overlay.set_cost(self.status_cost.text())
+                if self.status_cost.toolTip():
+                    overlay.cost.setToolTip(self.status_cost.toolTip())
         except Exception as exc:  # noqa: BLE001 - informativo, mai fatale
-            self._append_log(tx("Barra di stato non aggiornata: {exc}", exc=exc))
+            self._append_log(tx("Costo dell'analisi non aggiornato: {exc}", exc=exc))
 
     def _refresh_status_bar(self, named: bool) -> None:
         """@brief Show the open project and the AI cost of its current analysis in the status bar.

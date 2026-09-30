@@ -30,18 +30,18 @@ from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QProgressBar, QPushBut
 #: corpi proposti. Prima questi passi non erano annunciati e la modale restava
 #: sulla fase precedente mentre giravano.
 TOOLS = {
-    "llm": ("Modello AI (remoto, a consumo)", "#f9e2af", "cloud"),
+    "llm": ("Modello AI", "#f9e2af", "cloud"),
     # Le due fasi a pagamento che seguono l'inventario globale, con un nome
     # proprio (utente, 2026-09-29, HANDOFF 156): «Modello AI — in corso» per
     # due minuti non diceva che cosa si stava pagando.
-    "llm_crops": ("Lettura ritagli (remoto, a consumo)", "#f9e2af", "crop"),
-    "llm_markings": ("Lettura sigle (remoto, a consumo)", "#f9e2af", "tag"),
-    "yolo": ("YOLO (rilevamento locale)", "#a6e3a1", "frame"),
+    "llm_crops": ("Lettura ritagli", "#f9e2af", "crop"),
+    "llm_markings": ("Lettura sigle", "#f9e2af", "tag"),
+    "yolo": ("YOLO", "#a6e3a1", "frame"),
     "footprint": ("KiCadGen (footprint 2D, calcolo locale)", "#89b4fa", "pads"),
     "kicad": ("Libreria modelli 3D di KiCad", "#94e2d5", "library"),
     "freecad_measure": ("FreeCAD (misura dei modelli)", "#cba6f7", "caliper"),
     "freecad": ("FreeCAD (modellazione locale)", "#cba6f7", "cube"),
-    "opencv": ("OpenCV (analisi immagine locale)", "#fab387", "lens"),
+    "opencv": ("OpenCV", "#fab387", "lens"),
 }
 
 #: Glifi delle fasi che chiamano un modello remoto a pagamento: la nuvola e
@@ -964,7 +964,9 @@ class AnalysisOverlay(QWidget):
         self.cost.setStyleSheet("color: #a6e3a1;")
         self.cost.setProperty('i18n_skip', True)
         self.cost.hide()
-        content.addWidget(self.cost)
+        # Il costo resta vicino allo stato dell'inventario, dove c'e' spazio,
+        # invece di finire sotto il tempo trascorso.
+        content.insertWidget(content.indexOf(self.elapsed), self.cost)
         # I due comandi stanno sulla stessa riga, nell'ordine in cui l'utente
         # li ha chiesti: il log a sinistra, l'interruzione subito alla sua
         # destra. La riga resta centrata come lo era il solo pulsante del log.
