@@ -310,7 +310,7 @@ class _Cad3DRunWorker(QThread):
             costruzione del solido: mostrare il solido di FreeCAD qui faceva
             credere che il modello finale fosse gia' in lavorazione.
         """
-        self.phase.emit('kicad', tx("scelta del modello per ogni componente"), done, total)
+        self.phase.emit('kicad', tx("confronto ritagli consolidati con OpenCV e scelta del modello KiCad"), done, total)
 
     def _cad_progress(self, message: str) -> None:
         """@brief Inoltra la riga al log e, se annuncia un componente, al conteggio."""
@@ -417,7 +417,7 @@ class GenerateWorker(_Cad3DRunWorker):
                 # che la correzione vuole attribuita a KiCad, per poi tornare
                 # indietro. Da `freecad` ci passa `_cad_progress`, quando il
                 # solido comincia davvero.
-                self.phase.emit('kicad', tx("scelta del modello per ogni componente"), 0, 0)
+                self.phase.emit('kicad', tx("confronto ritagli consolidati con OpenCV e scelta del modello KiCad"), 0, 0)
                 self.progress.emit(tx("Generazione del modello 3D tramite FreeCAD…"))
                 result = self._generate_model()
                 for warning in result.get('warnings', []):
@@ -447,7 +447,7 @@ def _announce_freecad_measuring(worker, started: bool, count: int) -> None:
         worker.phase.emit('freecad_measure',
                           tx("misura di {count} modelli candidati", count=count), 0, 0)
     else:
-        worker.phase.emit('kicad', tx("scelta del modello per ogni componente"), 0, 0)
+        worker.phase.emit('kicad', tx("confronto ritagli consolidati con OpenCV e scelta del modello KiCad"), 0, 0)
 
 
 class Cad3DWorker(_Cad3DRunWorker):
@@ -486,7 +486,7 @@ class Cad3DWorker(_Cad3DRunWorker):
             # Stessa ragione di GenerateWorker.run: `_generate_3d` comincia
             # dall'abbinamento dei modelli di KiCad. `_cad_progress` passa a
             # `freecad` quando il solido comincia davvero.
-            self.phase.emit('kicad', tx("scelta del modello per ogni componente"), 0, 0)
+            self.phase.emit('kicad', tx("confronto ritagli consolidati con OpenCV e scelta del modello KiCad"), 0, 0)
             result = self._generate_model()
             for note in result.get("notes", []):
                 self.progress.emit(note)

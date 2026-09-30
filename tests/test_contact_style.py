@@ -661,7 +661,7 @@ def test_extraction_leaves_an_unobserved_style_to_the_user(monkeypatch, tmp_path
     ext, call, log, run = _run_extraction(monkeypatch, tmp_path,
                                           [dict(edge="top", count=2, pitch_mm=2.54)])
     result = run()
-    assert call.call_count == 1
+    assert call.call_count == 2  # One bounded style check; unclear reply stays manual.
     assert any("tipo di contatto non osservato" in line for line in log)
     assert "tipo di contatto non osservato" in result.notes
     assert result.castellated_sides[0]["contact_style"] is None

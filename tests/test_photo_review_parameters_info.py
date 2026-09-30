@@ -41,11 +41,11 @@ FULL_ROW = dict(
 )
 
 
-def test_the_five_lines_of_a_full_row():
+def test_the_lines_of_a_full_row_include_model_origin():
     """@brief Positive: type, package, marking, crop outcome, KiCad model; nothing else."""
     lines = component_attribute_lines(FULL_ROW, _identity)
     assert [label for label, _ in lines] == [
-        "Tipo", "Package", "Sigla letta", "Letture del ritaglio", "Modello KiCad"]
+        "Tipo", "Package", "Sigla letta", "Letture del ritaglio", "Modello KiCad", "Provenienza modello KiCad"]
     as_dict = dict(lines)
     assert as_dict["Tipo"] == "ic · confidenza bassa"
     assert as_dict["Package"] == "SOT-223 · confidenza bassa"
@@ -62,7 +62,20 @@ def test_a_bare_row_reports_what_is_missing_and_invents_nothing():
     assert as_dict["Sigla letta"] == "nessuna"
     assert as_dict["Letture del ritaglio"] == ATTRIBUTE_UNAVAILABLE
     assert as_dict["Modello KiCad"].startswith("non ancora cercato")
-    assert len(as_dict) == 5
+    assert len(as_dict) == 6
+
+
+def test_model_origin_and_individual_orientation_are_explicit():
+    from kicadgen.gui.photo_review_dialog import kicad_section_lines
+    row = {"model_path": "part.step", "model_match": {"attachment": "accepted_library"}}
+    lines = dict(kicad_section_lines(row, _identity))
+    assert lines["Provenienza modello KiCad"] == "Archivio consolidati"
+    assert "Da verificare" in lines["Orientamento da consolidati"]
+    row["model_match"]["accepted_orientation"] = {
+        "status": "matched", "rotation_deg": 90, "image_id": 7}
+    assert "90°" in dict(kicad_section_lines(row, _identity))["Orientamento da consolidati"]
+    row["model_selection"] = {"status": "confirmed"}
+    assert dict(kicad_section_lines(row, _identity))["Provenienza modello KiCad"] == "Scelta manuale"
     assert component_attribute_lines(None, _identity) == []
 
 
@@ -136,7 +149,7 @@ def test_the_parameter_modal_shows_the_ai_lines_and_hides_the_geometry(dialog, a
     # HANDOFF 165: the KiCad model has its own section, the third.
     assert lines[7] == "Modello KiCad"
     assert lines[8] == "Modello KiCad: agganciato dalla sola geometria, da confermare: SOT-223.step"
-    assert len(lines) == 9
+    assert len(lines) == 10
     dialog.open_parameters()
     app.processEvents()
     form = dialog._form
@@ -146,7 +159,7 @@ def test_the_parameter_modal_shows_the_ai_lines_and_hides_the_geometry(dialog, a
         assert form.labelForField(dialog.fields[key]).isHidden()
     # Rich text: one paragraph per line (headings are table bands), values
     # escaped, never interpreted.
-    assert dialog.attributes_label.text().count("<p") == 6
+    assert dialog.attributes_label.text().count("<p") == 7
     assert dialog.attributes_label.text().count("<table") == 3
     assert dialog.attributes_label.isVisibleTo(dialog.parameters_dialog)
     for key in ("name", "kind", "marking"):
@@ -226,3 +239,12 @@ def test_the_modal_grows_to_show_every_wrapped_line(dialog, app):
     assert bottom <= dialog.parameters_dialog.height()
     # Switching to a row with shorter lines while the modal is open keeps it fitted.
     dialog.parameters_dialog.close()
+
+
+def test_model_path_without_report_does_not_invent_origin():
+    from kicadgen.gui.photo_review_dialog import kicad_section_lines
+    lines = dict(kicad_section_lines({"model_path": "old.step"}, _identity))
+    assert lines["Provenienza modello KiCad"] == "Provenienza non disponibile"
+    for attachment in ("automatic", "provisional"):
+        lines = dict(kicad_section_lines({"model_match": {"attachment": attachment}}, _identity))
+        assert lines["Provenienza modello KiCad"] == "Ricerca nella libreria KiCad"

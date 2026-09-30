@@ -43,11 +43,11 @@ def _board(library):
 
 def test_consolidate_dialog_checks_only_rows_with_a_model(window, library):
     dialog = ConsolidateDialog(_board(library))
-    remembered = dialog.table.item(0, 0)
-    placeholder = dialog.table.item(1, 0)
+    remembered = dialog.table.item(0, 1)
+    placeholder = dialog.table.item(1, 1)
     assert remembered.checkState() == Qt.CheckState.Checked
     assert not placeholder.flags() & Qt.ItemFlag.ItemIsUserCheckable
-    assert "nessun modello KiCad" in dialog.table.item(1, 4).text()
+    assert "nessun modello KiCad" in dialog.table.item(1, 5).text()
     assert [c["name"] for c in dialog.selected_components()] == ["R1"]
     # L'utente toglie la spunta: niente da ricordare, il pulsante si spegne.
     remembered.setCheckState(Qt.CheckState.Unchecked)
@@ -138,6 +138,71 @@ def test_accepting_stores_the_board_and_says_so(window, library, monkeypatch):
     assert "1" in window.label_3d_status.text()
 
 
+def test_accepting_a_verified_component_saves_its_calibrated_photo_crop(
+        window, library, monkeypatch):
+    import cv2
+    import numpy as np
+
+    component = dict(_board(library)[0], x_mm=0.0, y_mm=0.0, rotation_deg=0.0)
+    monkeypatch.setattr(window, "_photo_components_from_table", lambda: [component])
+    monkeypatch.setattr(window, "_decoded_component_photo",
+                        lambda: np.full((400, 400, 3), 40, dtype=np.uint8))
+    monkeypatch.setattr(window, "_component_photo_board_size", lambda: (10.0, 10.0))
+    monkeypatch.setattr(gui, "ConsolidateDialog", _AcceptingDialog)
+    monkeypatch.setattr(km, "_search_roots", lambda library_root=None: [library])
+
+    window._accept_models()
+
+    [entry] = am.AcceptedModelStore().entries()
+    assert entry["image_count"] == 1
+    [example] = am.AcceptedModelStore().images(entry["id"])
+    decoded = cv2.imdecode(np.frombuffer(example["image_png"], np.uint8), cv2.IMREAD_COLOR)
+    assert decoded.shape == (96, 96, 3)
+    archive = AcceptedModelsDialog(am.AcceptedModelStore())
+    assert archive.table.item(0, 7).text() == "1"
+    archive.table.selectRow(0)
+    assert archive.btn_preview.isEnabled()
+    archive.close()
+
+
+def test_crop_preview_can_browse_all_examples_and_shows_component_id(
+        window, library, monkeypatch):
+    import numpy as np
+
+    store = am.AcceptedModelStore()
+    crop1 = np.zeros((96, 96, 3), dtype=np.uint8)
+    crop1[:, :40] = 80
+    crop2 = np.zeros((96, 96, 3), dtype=np.uint8)
+    crop2[:, 50:] = 180
+    first = dict(_board(library)[0], name="C-10", _accepted_image_png=b"", _accepted_image_descriptor=b"")
+    second = dict(first, name="C-11")
+    for component, crop in ((first, crop1), (second, crop2)):
+        import cv2
+        from kicadgen.services.component_image_match import describe_crop, descriptor_bytes
+        ok, encoded = cv2.imencode(".png", crop)
+        assert ok
+        component["_accepted_image_png"] = encoded.tobytes()
+        component["_accepted_image_descriptor"] = descriptor_bytes(describe_crop(crop))
+    store.consolidate([first, second], [library])
+    [entry] = store.entries()
+    archive = AcceptedModelsDialog(store)
+    seen = {}
+
+    def inspect_preview(dialog):
+        from PyQt6.QtWidgets import QLabel, QPushButton
+        legend = dialog.findChild(QLabel, "cropLegend")
+        assert "C-10" in legend.text() and "ritaglio 1 di 2" in legend.text()
+        dialog.findChild(QPushButton, "cropNext").click()
+        assert "C-11" in legend.text() and "ritaglio 2 di 2" in legend.text()
+        seen["navigated"] = True
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(QDialog, "exec", inspect_preview)
+    archive._show_entry_crop(entry["id"])
+    assert seen["navigated"]
+    archive.close()
+
+
 def test_cancelling_the_dialog_stores_nothing(window, library, monkeypatch):
     class Cancelled(_AcceptingDialog):
         def exec(self):
@@ -183,7 +248,7 @@ def _two_entries(library):
 
 
 def test_the_entries_this_board_uses_come_first_and_are_highlighted(window, library):
-    """Positivo: R7 riceverebbe la voce 0603 -> in cima, evidenziata, nome nel tooltip.
+    """Positivo: il report finale di R7 usa la voce 0603: in cima, con nome nel tooltip.
 
     Negativo: la voce 0805 viene da un'altra scheda e nessun corpo di questa la
     riceverebbe (categoria diversa): resta sotto, senza evidenziazione.
@@ -192,6 +257,9 @@ def test_the_entries_this_board_uses_come_first_and_are_highlighted(window, libr
     board = [{"name": "R7", "kind": "resistor", "length_mm": 1.62, "width_mm": 0.82,
               "bbox_basis": "body"},
              {"name": "U1", "kind": "ic", "length_mm": 5, "width_mm": 4}]
+    entry = next(e for e in store.entries() if e["model_name"] == "R_0603_1608Metric")
+    board[0]["model_match"] = {"status": "library_matched", "attachment": "accepted_library",
+                               "accepted_entry": {"id": entry["id"]}}
     dialog = AcceptedModelsDialog(store, components=board, roots=[library])
     assert dialog.table.rowCount() == 2
     first, second = dialog.table.item(0, 4), dialog.table.item(1, 4)
@@ -270,6 +338,9 @@ def test_the_model_path_tooltip_survives_the_highlight(window, library):
     store = _two_entries(library)
     board = [{"name": "R7", "kind": "resistor", "length_mm": 1.62, "width_mm": 0.82,
               "bbox_basis": "body"}]
+    entry = next(e for e in store.entries() if e["model_name"] == "R_0603_1608Metric")
+    board[0]["model_match"] = {"status": "library_matched", "attachment": "accepted_library",
+                               "accepted_entry": {"id": entry["id"]}}
     dialog = AcceptedModelsDialog(store, components=board, roots=[library])
     tip = dialog.table.item(0, 4).toolTip()
     assert R0603 in tip.replace("\\", "/") and "R7" in tip
@@ -286,8 +357,60 @@ def test_the_whole_reason_of_an_excluded_row_can_be_read(window, library):
     dialog.show()
     QApplication.processEvents()
     table = dialog.table
-    excluded = table.item(1, 4)
+    excluded = table.item(1, 5)
     assert excluded.toolTip() == excluded.text() and "nessun modello KiCad" in excluded.text()
     assert table.textElideMode() == Qt.TextElideMode.ElideNone and table.wordWrap()
     assert table.rowHeight(1) > table.rowHeight(0)
     _dispose(dialog)
+
+
+def test_geometric_compatibility_alone_does_not_claim_archive_use(window, library):
+    store = _two_entries(library)
+    board = [{"name": "R7", "kind": "resistor", "length_mm": 1.62, "width_mm": .82,
+              "bbox_basis": "body"}]
+    dialog = AcceptedModelsDialog(store, components=board, roots=[library])
+    assert "Usate da questa scheda: 0" in dialog.status_label.text()
+    _dispose(dialog)
+
+
+def test_failed_import_does_not_claim_archive_use(window, library):
+    store = _two_entries(library)
+    entry = store.entries()[0]
+    board = [{"name": "R7", "model_match": {"status": "import_failed",
+              "attachment": "accepted_library", "accepted_entry": {"id": entry["id"]}}}]
+    dialog = AcceptedModelsDialog(store, components=board, roots=[library])
+    assert "Usate da questa scheda: 0" in dialog.status_label.text()
+    _dispose(dialog)
+
+
+def test_corrupt_crop_clears_previous_image_and_navigation_still_works(window, library, monkeypatch):
+    import cv2
+    import numpy as np
+    from PyQt6.QtWidgets import QLabel, QPushButton
+    from kicadgen.services.accepted_models import IMAGE_CROP_VERSION
+    store = _two_entries(library)
+    entry = store.entries()[0]
+    ok, png = cv2.imencode(".png", np.zeros((24, 24, 3), dtype=np.uint8))
+    assert ok
+    examples = [dict(id=1, image_png=png.tobytes(), crop_version=IMAGE_CROP_VERSION),
+                dict(id=2, image_png=b"invalid", crop_version=IMAGE_CROP_VERSION)]
+    monkeypatch.setattr(store, "images", lambda _: examples)
+    archive = AcceptedModelsDialog(store)
+
+    def inspect(dialog):
+        previous = dialog.findChild(QPushButton, "cropPrevious")
+        next_image = dialog.findChild(QPushButton, "cropNext")
+        labels = [label for label in dialog.findChildren(QLabel)
+                  if label.objectName() != "cropLegend"]
+        assert any(label.pixmap() is not None and not label.pixmap().isNull() for label in labels)
+        next_image.click()
+        assert previous.isEnabled() and not next_image.isEnabled()
+        assert all(label.pixmap() is None or label.pixmap().isNull() for label in labels)
+        assert "non leggibile" in dialog.findChild(QLabel, "cropLegend").text()
+        previous.click()
+        assert next_image.isEnabled() and not previous.isEnabled()
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(QDialog, "exec", inspect)
+    archive._show_entry_crop(entry["id"])
+    _dispose(archive)

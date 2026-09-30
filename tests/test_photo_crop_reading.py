@@ -83,11 +83,56 @@ def _read(components, call, cache_dir=None, model=DEEPSEEK, photo=None, **kwargs
     return summary, logs
 
 
+def test_human_progress_updates_for_each_reading_and_keeps_audit_in_log():
+    from kicadgen.gui.main_window import per_item_detail
+    _, logs = _read([_row()], Script(_obs(), _obs()))
+    assert any('lettura 1/2' in s and '1 di 1' in s for s in logs)
+    assert any('lettura 2/2' in s for s in logs)
+    assert any('letture concordi' in s for s in logs)
+    technical = [s for s in logs if 'crop_reading=' in s]
+    assert technical and all(per_item_detail(s) for s in technical)
+    assert all(not per_item_detail(s) for s in logs if 'lettura 1/2' in s)
+
+
 def _derive(answer, envelope=(3.0, 1.5, 0.2), inventory_class=None, lead_count=None,
             package=None):
     observation = crop.parse_observation(answer)
     assert observation is not None, answer
     return crop.derive_reading(observation, envelope, inventory_class, lead_count, package)
+
+
+@pytest.mark.parametrize('category', ['resistor', 'capacitor'])
+def test_missing_passive_category_recovered_only_by_two_grounded_readings(category):
+    component = _row(**{'class': 'unknown', 'kind': 'generic'}, lead_count=None, package='')
+    answer = _chip(printed_text='none', marking='', visual_class=category,
+                   visual_class_confidence='high', visual_class_evidence='Opaque body, two end caps, visible surface.')
+    summary, _ = _read([component], Script(answer, answer))
+    assert summary.calls == 2 and summary.agreed == 1
+    assert component['class'] == category and component['class_confidence'] == 'medium'
+    assert component['_crop_observations'][0]['visual_class_evidence']
+
+
+@pytest.mark.parametrize('override', [
+    {'visual_class_confidence': 'medium'}, {'visual_class_evidence': ''},
+    {'metal_contacts_total': 1}, {'tab': True}, {'band_at_end': True},
+    {'visual_class': 'capacitor', 'printed_text': 'digits_only'},
+])
+def test_weak_or_inconsistent_visual_class_does_not_resolve_unknown(override):
+    fields = dict(visual_class='resistor', visual_class_confidence='high',
+                  visual_class_evidence='Visible body and end caps', printed_text='none')
+    fields.update(override)
+    assert _derive(_chip(**fields), inventory_class='unknown')['class'] == 'unknown'
+
+
+def test_visual_class_disagreement_and_known_inventory_are_not_silently_overwritten():
+    resistor = _chip(visual_class='resistor', visual_class_confidence='high',
+                     visual_class_evidence='Opaque body and end caps', printed_text='none')
+    capacitor = dict(resistor, visual_class='capacitor')
+    component = _row(**{'class': 'unknown'}, lead_count=None, package='')
+    summary, _ = _read([component], Script(resistor, capacitor))
+    assert summary.disagreed == 1 and component['class'] == 'unknown'
+    assert _derive(resistor, inventory_class='capacitor')['class'] == 'capacitor'
+    assert 'terminals_contradict_inventory' in _derive(resistor, inventory_class='ic')['inconclusive']
 
 
 # ── agreement ─────────────────────────────────────────────────────────────
@@ -1031,15 +1076,17 @@ def test_the_class_word_scan_sees_class_names():
     assert _class_words('misled bodies') == set()                  # not a whole word
 
 
-def test_prompt_and_questionnaire_name_no_class_no_example_and_no_board():
+def test_prompt_requests_grounded_classification_without_board_specific_examples():
     """The model observes; the program classifies. Nothing of the reference board leaks in."""
     import json
     from kicadgen.services.photo_global_inventory import CLASSES
     prompt = crop.SYSTEM_PROMPT
-    assert crop.PROMPT_VERSION == 'crop-reading-3'
+    assert crop.PROMPT_VERSION == 'crop-reading-4'
     questionnaire = json.dumps(crop.observation_tool()).lower()
     texts = prompt.lower() + ' ' + questionnaire + ' ' + crop.SIZE_TABLE_TEXT.lower()
-    assert _class_words(texts) == set()
+    assert {'resistor', 'capacitor'} <= _class_words(texts)
+    assert 'do not identify' not in prompt
+    assert 'visual_class_evidence' in questionnaire
     for word in ('example', 'e.g.', 'such as', 'usually', 'sot-23', 'soic'):
         assert word not in texts, word
     for token in ('A15HB', '2A', '712', 'VPT', '858B', 'RS485', 'CBE', '3457', 'L3NE'):
@@ -1086,7 +1133,7 @@ def test_a_reading_cached_with_other_instructions_is_not_reused(tmp_path):
 #: observation_tool and SYSTEM_PROMPT together: any change to them invalidates
 #: the readings already cached on users' disks, and must be deliberate.
 #: Recomputed for 'crop-reading-3' (HANDOFF 148).
-FROZEN_FACTORY_KEY = '103a0e40c2cf302c27ae75503cca806601ec14dc44d85b3683cf127edbdde7c8'
+FROZEN_FACTORY_KEY = '785edecf95b3a1120f6afd866c0dfe091925e573dc53b33e39f8b26283f9ace0'
 
 
 def test_the_factory_text_keeps_a_frozen_cache_key():

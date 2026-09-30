@@ -2024,6 +2024,10 @@ def extract_pin_header_params(
         _log_rejected_response(raw_main, error, progress)
         raise error from exc
 
+    check_cancel()
+    _recheck_missing_contact_styles(data, content_blocks, diagnostic_call, model,
+                                   has_pdf, progress)
+    check_cancel()
     if progress:
         progress(
             tx("Analisi principale completata: layout={get}, componenti "
@@ -2045,6 +2049,92 @@ def extract_pin_header_params(
         recount_contacts=lambda disagreements: _recount_sides_from_photo(
             data, disagreements, content_blocks, diagnostic_call, model, system_prompt,
             has_pdf, progress))
+
+
+def _recheck_missing_contact_styles(data, content_blocks, diagnostic_call, model,
+                                   has_pdf=False, progress=None):
+    """One optional visual check; uncertain edges still require manual choice.
+
+    Only missing styles can change. Counts, geometry, numbering and already
+    observed styles are preserved. Replies use canonical top-view edge names.
+    """
+    if data.get("layout") != "castellated":
+        return
+    sides = data.get("castellated_sides") or []
+    missing = {_side_edge(side): side for side in sides
+               if isinstance(side, dict) and side.get("contact_style") is None
+               and _side_edge(side) in ("top", "bottom", "left", "right")}
+    if not missing:
+        return
+    # A text-only request cannot provide new visual evidence.
+    if not has_pdf and not any(block.get("type") == "image_url" for block in content_blocks):
+        return
+    message = "Ricontrollo AI del tipo di contatto sui lati non riconosciuti: " + ", ".join(missing)
+    if progress:
+        progress(message)
+    properties = {
+        "edge": {"type": "string", "enum": list(missing)},
+        "half_hole_visible": {"type": ["boolean", "null"]},
+        "through_hole_visible": {"type": ["boolean", "null"]},
+        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+        "evidence": {"type": "string"},
+    }
+    tool = {"type": "function", "function": {
+        "name": "observe_contact_styles",
+        "description": "Observe physical board contact construction, without changing geometry.",
+        "parameters": {"type": "object", "properties": {
+            "sides": {"type": "array", "items": {"type": "object",
+                "properties": properties, "required": list(properties),
+                "additionalProperties": False}}}, "required": ["sides"],
+            "additionalProperties": False}}}
+    prompt = (
+        "Inspect only physical contact construction in the supplied photographs or drawings. "
+        "Return edge names in canonical TOP VIEW (not the underside), matching the supplied sides. "
+        "A half hole is a metallized opening cut by the board edge. A through hole is a "
+        "complete enclosed plated hole with board material between it and the edge. "
+        "Both can exist at the same contact. For each feature use true only if clearly visible; "
+        "false only if its absence is clearly visible; otherwise null. If the edge is obscured, "
+        "orientation uncertain, or contacts on that side differ, use null and low confidence. "
+        "Do not infer style from component family, pin count, pad colour or previous defaults. "
+        "Give high confidence only for clear evidence; cite the document and visible feature. "
+        "Do not change counts, pitch, numbering or dimensions."
+    )
+    blocks = list(content_blocks) + [{"type": "text", "text":
+        "Target sides in top view: " + repr(list(missing.values())) +
+        ". Only return observe_contact_styles observations for these sides."}]
+    try:
+        reply = diagnostic_call(model=model or DEFAULT_MODEL, system_prompt=prompt,
+                                content_blocks=blocks, tool=tool, max_tokens=1800,
+                                has_pdf=has_pdf)
+    except OpenRouterError:
+        if progress:
+            progress("Ricontrollo tipo di contatto non riuscito: resta la scelta manuale.")
+        return
+    observations = reply.get("sides") if isinstance(reply, dict) else None
+    if not isinstance(observations, list):
+        return
+    grouped = {}
+    for row in observations:
+        if isinstance(row, dict):
+            grouped.setdefault(_side_edge(row), []).append(row)
+    for edge, side in missing.items():
+        rows = grouped.get(edge, [])
+        if len(rows) != 1:
+            continue
+        row = rows[0]
+        half, through = row.get("half_hole_visible"), row.get("through_hole_visible")
+        evidence = row.get("evidence")
+        if (row.get("confidence") != "high" or not isinstance(evidence, str)
+                or not evidence.strip() or type(half) is not bool or type(through) is not bool
+                or not (half or through)):
+            continue
+        style = "half_and_through" if half and through else "half_hole" if half else "through_hole"
+        side["contact_style"] = style
+        side["_contact_style_evidence"] = evidence.strip()
+        note = f"Tipo di contatto ricontrollato: {edge} = {style}. {evidence.strip()}"
+        data["notes"] = (str(data.get("notes") or "") + "\n" + note).strip()
+        if progress:
+            progress(note)
 
 
 #: Fields of a castellated side a photo recount may change: the number of its

@@ -1570,6 +1570,12 @@ class AnalysisOverlay(QWidget):
         def entry(name, outcome, warned):
             outcome = self._phase_outcome_text(outcome) if outcome else ""
             name = self._translate(name)
+            # Phase labels already identify the tool. Keep the complete source
+            # in the log, but avoid e.g. "YOLO — YOLO locale: ..." in the card.
+            if name.startswith("YOLO"):
+                outcome = re.sub(r"^(?:(?:Local|Lokales)\s+)?YOLO(?:\s+(?:locale|local))?\s*:\s*", "", outcome, flags=re.I)
+            elif name.startswith("OpenCV"):
+                outcome = re.sub(r"^(?:Bordi con OpenCV|Edges with OpenCV|Bords avec OpenCV|OpenCV-Kanten)\s*:\s*", "", outcome)
             return f"{'⚠' if warned else '✓'} " + (f"{name} — {outcome}" if outcome else name)
 
         lines = []
@@ -1740,7 +1746,10 @@ class AnalysisOverlay(QWidget):
             # (l'ultimo) lo sostituisce, perche' e' cio' che va guardato. Si
             # conserva la SORGENTE: la traduzione si fa quando l'elenco si
             # disegna (`_phase_outcome_text`), anche dopo un cambio di lingua.
-            if not self._phase_last_status:
+            transient_crop_progress = re.match(
+                r"^(?:Analisi componente|Componente|Analysing component|Component|"
+                r"Analyse du composant|Composant|Bauteil) \d+ (?:di|of|sur|von) \d+", source)
+            if not self._phase_last_status and not transient_crop_progress:
                 self._phase_last_status = source
             if warned:
                 self._phase_warning = source

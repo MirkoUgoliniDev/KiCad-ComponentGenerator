@@ -76,6 +76,22 @@ def test_failed_import_downgrades_report_not_user_choice(tmp_path):
     assert json.loads((tmp_path/'kicad-model-candidates.json').read_text())['components'][0]['model_match']['status']=='import_failed'
 
 
+def test_successful_import_reports_effective_local_angle_for_consolidation(tmp_path):
+    import json
+    mesh = tmp_path / 'mesh.json'
+    mesh.write_text(json.dumps({'parts': [{
+        'source_row': 3, 'source': 'kicad_library', 'model_path': 'part.step',
+        'model_local_rotation_deg': 180}]}))
+    component = {'source_row': 3, 'name': 'Q1', 'model_path': 'part.step',
+                 'model_rotation_delta_deg': 90, 'model_match': {'status': 'auto_matched'}}
+    step._reconcile_model_imports({'mesh_path': mesh}, [component], tmp_path)
+    report = component['model_match']
+    assert report['rendered_local_rotation_deg'] == 180
+    assert report['rendered_manual_delta_deg'] == 90
+    saved = json.loads((tmp_path/'kicad-model-candidates.json').read_text())['components'][0]
+    assert saved['model_match'] == report
+
+
 def test_cancel_candidate_dialog_keeps_import_failure(qapp, monkeypatch):
     from kicadgen.gui import model_candidates_dialog as module
     from PyQt6.QtWidgets import QDialog

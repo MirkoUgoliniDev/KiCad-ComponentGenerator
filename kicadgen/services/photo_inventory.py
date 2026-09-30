@@ -300,21 +300,18 @@ def same_body(first, second, tolerance):
     return inside(a, b) or inside(b, a)
 
 
-#: Pixel minimi sul lato corto di un package perche' l'AI possa distinguerlo
-#: dal soldermask (stesso valore di photo_refine.MIN_PACKAGE_PIXELS_HINT, che
-#: la GUI usa senza importare l'inventario). Sotto, il pezzo e' qualche pixel
-#: scuro: non lo riconosce un modello e non lo riconoscerebbe una persona.
+#: Soglia indicativa sul lato corto, condivisa con photo_refine e la GUI.
+#: E' un avviso sulla leggibilita', non una prova di rilevamento impossibile.
 MIN_PACKAGE_PIXELS = MIN_PACKAGE_PIXELS_HINT
 
 
 def _warn_if_too_coarse(crop_px, body_length, warn, smallest_part_mm=None):
-    """Segnala quando la foto usata non puo' contenere i pezzi piccoli.
+    """Segnala una risoluzione sotto la soglia indicativa per i pezzi piccoli.
 
     L'inventario non e' limitato dall'algoritmo ma dai pixel disponibili: a
     12 px/mm un corpo con il lato corto di 0.5 mm occupa 6 px. Senza questo
-    avviso un inventario necessariamente incompleto sembra completo, ed e'
-    l'errore piu' costoso -- si finisce a cercare il difetto nel codice invece
-    che nella fotografia.
+    avviso il rischio di perdere dettagli non sarebbe visibile. La soglia
+    non certifica ne' esclude la completezza dell'inventario.
 
     @param smallest_part_mm Lato corto del corpo piu' piccolo che ci si aspetta
         sulla scheda, in mm; None = photo_refine.SMALLEST_EXPECTED_PART_MM, che
@@ -330,13 +327,13 @@ def _warn_if_too_coarse(crop_px, body_length, warn, smallest_part_mm=None):
     readable = scale * smallest_part_mm
     if readable >= MIN_PACKAGE_PIXELS:
         return
-    needed = MIN_PACKAGE_PIXELS / smallest_part_mm * body_length
+    needed = math.ceil(MIN_PACKAGE_PIXELS / smallest_part_mm * body_length)
     warn(tx("Risoluzione della foto usata per l'inventario: {scale:.1f} px/mm. Un "
             "corpo con il lato corto di {smallest:.2f} mm (il piu' piccolo che si "
-            "assume presente, non una misura di questa scheda) misura {readable:.0f} px, "
-            "meno dei {MIN_PACKAGE_PIXELS} necessari per distinguerlo: i componenti "
-            "piu' piccoli non verranno rilevati e l'inventario resta incompleto. "
-            "Servirebbe una foto con la scheda larga almeno {needed:.0f} px "
+            "assume presente, non una misura di questa scheda) occupa {readable:.2f} px, "
+            "sotto la soglia indicativa di {MIN_PACKAGE_PIXELS} px. Alcuni dettagli "
+            "potrebbero non essere distinguibili; questo non dimostra che manchino componenti. "
+            "Per raggiungere la soglia servirebbe una foto originale con la scheda larga almeno {needed:.0f} px "
             "(questa ne ha {crop_px}).",
             scale=scale,
             smallest=smallest_part_mm,

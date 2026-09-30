@@ -112,7 +112,7 @@ TAB_PROJECT, TAB_PREVIEW, TAB_MODEL_3D, TAB_KICAD = range(4)
 #: I tre passi di una generazione, come li mostra la modale (utente,
 #: 2026-09-26). Chi lavora in ciascuno lo dice l'intestazione: vedi
 #: `analysis_overlay.TOOLS`.
-GENERATION_STEPS = ("Footprint 2D (KiCadGen)", "Modelli 3D dalla libreria KiCad",
+GENERATION_STEPS = ("Footprint 2D (KiCadGen)", "Consolidati (OpenCV) e libreria KiCad",
                     "Solido 3D con FreeCAD")
 #: Passo di ogni fase annunciata dai worker. Le misure di FreeCAD appartengono
 #: alla scelta dei modelli: servono a confrontare i candidati.
@@ -614,6 +614,8 @@ def per_item_detail(message: str) -> bool:
         dove si decide cosa e' diagnostica, non qui.
     """
     text = " ".join(str(message or "").split())
+    if "crop_reading=" in text:
+        return True
     head, separator, body = text.rpartition(": ")
     if not separator or ";" not in body:
         return False
@@ -6871,7 +6873,7 @@ class MainWindow(QMainWindow):
         dialog.setWindowTitle(self.i18n.text("Tipo di contatto dei lati"))
         layout = QVBoxLayout(dialog)
         intro = QLabel(self.i18n.text(
-            "La foto non mostra il tipo di contatto di questi lati e non viene indovinato. "
+            "L'analisi non ha determinato il tipo di contatto di questi lati. "
             "Guarda la scheda e scegli:"))
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -6929,7 +6931,7 @@ class MainWindow(QMainWindow):
             for side in unknown:
                 side["contact_style"] = choice
             self._append_log(tx("Tipo di contatto dei lati {sides} scelto dall'utente: «{style}» "
-                                "(la foto non lo mostrava).", sides=names,
+                                "(non determinato dall'analisi).", sides=names,
                                 style=self.i18n.text(CONTACT_STYLE_LABELS.get(choice, choice))))
         else:
             self._append_log(tx("ATTENZIONE: ") + self._missing_contact_style_message())
@@ -6943,7 +6945,7 @@ class MainWindow(QMainWindow):
         missing = [side for side in self._sides if side["contact_style"] not in contact_styles()]
         if not missing:
             return ""
-        return tx("tipo di contatto non indicato per i lati {sides}: la foto non lo mostrava e "
+        return tx("tipo di contatto non indicato per i lati {sides}: l'analisi non lo ha determinato e "
                   "non viene indovinato. Sceglilo nel tab Modello 3D (Tipo contatto) e rigenera.",
                   sides=", ".join(str(EDGE_LABELS.get(side["edge"], side["edge"]))
                                   for side in missing))
@@ -8323,6 +8325,82 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
         return answer == QMessageBox.StandardButton.Yes
 
+    def _correct_invalid_through_holes(self, params) -> bool:
+        """Edit measured drill sizes and the common copper diameter; never rerun AI."""
+        from PyQt6.QtWidgets import QDialogButtonBox
+        from ..generators.castellated_module import CONTACT_THROUGH_HOLE, CONTACT_HALF_AND_THROUGH
+        if not isinstance(params, CastellatedModuleParams):
+            return False
+        affected = []
+        for index, side in enumerate(params.sides):
+            if (side.contact_style not in (CONTACT_THROUGH_HOLE, CONTACT_HALF_AND_THROUGH)
+                    or side.edge not in CASTELLATED_EDGES):
+                continue
+            geometry = params.side_geometry(side)
+            if geometry.drill <= 0 or geometry.ring <= geometry.drill:
+                affected.append((index, side, geometry))
+        if not affected:
+            return False
+        self._hide_analysis_overlay()
+        dialog = QDialog(self)
+        dialog.setWindowTitle(self.i18n.text("Correggi fori e piazzole"))
+        form = QFormLayout(dialog)
+        intro = QLabel(self.i18n.text(
+            "Inserisci le misure verificate. La piazzola deve essere più larga del foro. "
+            "Il diametro piazzola è comune ai lati. Verrà ripresa la generazione senza una nuova analisi AI."))
+        intro.setWordWrap(True)
+        form.addRow(intro)
+        pad = QDoubleSpinBox(dialog)
+        pad.setObjectName("recoveryThroughPad")
+        pad.setRange(0, MAX_LENGTH_MM)
+        pad.setDecimals(2)
+        pad.setSuffix(" mm")
+        pad.setValue(float(params.thru_pad_diameter if params.thru_pad_diameter is not None
+                           else affected[0][2].ring))
+        form.addRow(self.i18n.text("Diametro piazzola comune"), pad)
+        drills = []
+        for index, side, geometry in affected:
+            field = QDoubleSpinBox(dialog)
+            field.setObjectName(f"recoveryDrill_{side.edge}")
+            field.setRange(0, MAX_LENGTH_MM)
+            field.setDecimals(2)
+            field.setSuffix(" mm")
+            field.setValue(float(geometry.drill))
+            form.addRow(self.i18n.text("Diametro foro") + " · " + str(EDGE_LABELS.get(side.edge, side.edge)), field)
+            drills.append((index, field))
+        error = QLabel()
+        error.setObjectName("recoveryValidation")
+        error.setWordWrap(True)
+        form.addRow(error)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText(self.i18n.text("Applica e riprendi"))
+        def accept():
+            candidate = deepcopy(params)
+            candidate.thru_pad_diameter = pad.value()
+            for index, field in drills:
+                candidate.sides[index].thru_hole_drill = field.value()
+            try:
+                candidate.validate()
+            except ValueError as exc:
+                error.setText(str(exc))
+                return
+            dialog.accept()
+        buttons.accepted.connect(accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return False
+            self.field_cast_thru_pad.setValue(pad.value())
+            for index, field in drills:
+                self._sides[index]["through_hole_drill_mm"] = field.value()
+                self._sides[index]["through_hole_drill_declared"] = True
+            self._on_sides_changed()
+            self._append_log(tx("Fori e piazzole corretti dall'utente: ripresa della generazione senza analisi AI."))
+            return True
+        finally:
+            dialog.deleteLater()
+
     def _generate(self, automatic=False) -> None:
         if self._background_work_running() or self._automatic_generation_active:
             return
@@ -8349,6 +8427,9 @@ class MainWindow(QMainWindow):
                 raise ValueError(tx('Mancano i parametri 3D.'))
         except ValueError as exc:
             self._append_log(tx("ERRORE: {exc}", exc=exc))
+            if self._correct_invalid_through_holes(locals().get("params")):
+                self._generate(automatic=automatic)
+                return
             if automatic:
                 self._automatic_generation_blocked(str(exc))
             return
@@ -9378,6 +9459,7 @@ class MainWindow(QMainWindow):
             self._set_3d_status(self.i18n.text(
                 "Nessun componente in tabella: non ci sono modelli KiCad da ricordare."), STATUS_WARNING)
             return
+        components, _ = self._attach_accepted_component_images(components, include_png=True)
         dialog = ConsolidateDialog(components, self, i18n=self.i18n)
         self.i18n.retranslate_widgets(dialog)
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -9403,6 +9485,13 @@ class MainWindow(QMainWindow):
                created=result.created,
                confirmed=result.confirmed,
                n_skipped=len(result.skipped)))
+        if result.images_saved:
+            self._append_log(tx("Ritagli dei componenti verificati salvati: {count}.",
+                                count=result.images_saved))
+        without_crop = max(0, len(chosen) - result.images_saved)
+        if without_crop:
+            self._append_log(tx("Ritaglio immagine non disponibile per {count} componenti; "
+                                "gli abbinamenti restano salvati.", count=without_crop))
         for name, reason in result.skipped:
             self._append_log(tx("  escluso {name}: {reason}", name=name, reason=reason))
         self._set_3d_status(self.i18n.tr(
@@ -9541,6 +9630,7 @@ class MainWindow(QMainWindow):
         '_yolo_proposal_id', '_presence_reviewed_by_user',
         'lead_count', 'lead_count_complete',
         'landmark_feature', 'landmark_side', 'landmark_confidence', 'marking_confidence',
+        '_accepted_image_descriptor',
         # Scala della foto (o incertezza dichiarata): il 3D ne ricava in mm
         # l'incertezza di misura per sporgenze e archivio degli abbinamenti.
         'measurement_uncertainty_mm', 'photo_scale_px_per_mm')
@@ -9920,7 +10010,76 @@ class MainWindow(QMainWindow):
             if scale is not None and "photo_scale_px_per_mm" not in row:
                 row = dict(row, photo_scale_px_per_mm=scale)
             rows.append(row)
-        return [self._component_from_photo(row) for row in rows]
+        components = [self._component_from_photo(row) for row in rows]
+        image = self._decoded_component_photo()
+        if image is not None:
+            import cv2
+            from ..services.component_image_match import (
+                describe_crop, descriptor_bytes, extract_component_crop,
+            )
+            board_length, board_width = self._component_photo_board_size()
+            if board_length and board_width:
+                for box, row in zip(components, rows):
+                    try:
+                        crop = extract_component_crop(
+                            image, row, board_length, board_width)
+                        evidence = dict(box.match_evidence or {})
+                        evidence["_accepted_image_descriptor"] = descriptor_bytes(
+                            describe_crop(crop))
+                        box.match_evidence = evidence
+                    except (KeyError, TypeError, ValueError, cv2.error):
+                        # Una foto/box non utilizzabile non blocca la generazione 3D.
+                        continue
+        return components
+
+    def _component_photo_board_size(self):
+        """Calibrated board dimensions corresponding to the current photo crop."""
+        current = "cast" if self._is_castellated() else "matrix"
+        key = getattr(self, "_photo_body_fields", None) or current
+        return self._body_sizes().get(key, (None, None))
+
+    def _decoded_component_photo(self):
+        """Decode the calibrated board photo once for component image work."""
+        png = getattr(self, "_photo_png", None)
+        if not isinstance(png, (bytes, bytearray)) or not png:
+            return None
+        try:
+            import cv2
+            import numpy as np
+            return cv2.imdecode(np.frombuffer(bytes(png), np.uint8), cv2.IMREAD_COLOR)
+        except (ImportError, ValueError):
+            return None
+
+    def _attach_accepted_component_images(self, components, *, include_png=False):
+        """Attach transient crops/descriptors to chosen accepted components."""
+        image = self._decoded_component_photo()
+        if image is None:
+            return [dict(component) for component in components], 0
+        board_length, board_width = self._component_photo_board_size()
+        if not board_length or not board_width:
+            return [dict(component) for component in components], 0
+        import cv2
+        from ..services.component_image_match import (
+            describe_crop, descriptor_bytes, extract_component_crop,
+        )
+        attached = []
+        count = 0
+        for component in components:
+            item = dict(component)
+            try:
+                crop = extract_component_crop(image, item, board_length, board_width)
+                descriptor = descriptor_bytes(describe_crop(crop))
+                if include_png:
+                    ok, encoded = cv2.imencode(".png", crop)
+                    if not ok:
+                        raise ValueError("PNG encoding failed")
+                    item["_accepted_image_png"] = encoded.tobytes()
+                item["_accepted_image_descriptor"] = descriptor
+                count += 1
+            except (KeyError, TypeError, ValueError, cv2.error):
+                pass
+            attached.append(item)
+        return attached, count
 
     def _photo_scale_px_per_mm(self) -> float | None:
         """@brief Pixels per millimetre of the calibrated photo, along the board length.

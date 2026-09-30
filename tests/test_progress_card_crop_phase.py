@@ -1,8 +1,8 @@
 """@brief HANDOFF 156: the crop and marking readings are phases of their own on the card.
 
 User, 2026-09-29: «la fase di lettura dei ritagli non la vedo censita qui».
-The list showed «Modello AI (remoto, a consumo) — in corso» for the longest
-paid stage. Now: «Lettura ritagli (remoto, a consumo)» with a per-body count
+The list showed «Modello AI — in corso» for the longest
+paid stage. Now: «Lettura ritagli» with a per-body count
 on its row, on the bar and in the central status, «Lettura sigle (remoto, a
 consumo)» for the marking reading, and the local colour sampling announced
 as OpenCV instead of a second «Modello AI» row. The count never becomes the
@@ -33,8 +33,8 @@ def overlay(qapp):
 
 
 def test_the_two_readings_have_their_own_names():
-    assert TOOLS["llm_crops"][0] == "Lettura ritagli (remoto, a consumo)"
-    assert TOOLS["llm_markings"][0] == "Lettura sigle (remoto, a consumo)"
+    assert TOOLS["llm_crops"][0] == "Lettura ritagli"
+    assert TOOLS["llm_markings"][0] == "Lettura sigle"
     assert "llm_markings" not in TOOL_ALIASES
 
 
@@ -44,22 +44,22 @@ def test_the_running_row_and_the_status_show_the_count_without_touching_the_outc
     overlay.set_tool("llm_crops", DEEPSEEK)
     overlay.set_progress(17, 42, "componenti")
     lines = [line for line in overlay.phases_plain_text().splitlines() if line]
-    assert lines[0].startswith("✓ Modello AI (remoto, a consumo) — Inventario globale: 41 ipotesi")
-    assert lines[-1] == "● Lettura ritagli (remoto, a consumo) — 17 di 42 componenti"
-    assert overlay.status_plain_text() == "Lettura ritagli (remoto, a consumo) — 17 di 42 componenti"
+    assert lines[0].startswith("✓ Modello AI — Inventario globale: 41 ipotesi")
+    assert lines[-1] == "● Lettura ritagli — 17 di 42 componenti"
+    assert overlay.status_plain_text() == "Lettura ritagli — 17 di 42 componenti"
     # The first status the stage reports is its outcome, not the count.
     overlay.set_status("Lettura dei singoli componenti: 42 corpi letti due volte; "
                        "28 con letture concordi, 13 discordi, 1 in minoranza.")
     overlay.set_progress(42, 42, "componenti")
     overlay.set_tool("opencv", "campionamento dei colori dalla foto")
     lines = [line for line in overlay.phases_plain_text().splitlines() if line]
-    assert any(line.startswith("✓ Lettura ritagli (remoto, a consumo) — Lettura dei singoli "
+    assert any(line.startswith("✓ Lettura ritagli — Lettura dei singoli "
                                "componenti: 42 corpi") for line in lines)
-    assert lines[-1] == "● OpenCV (analisi immagine locale) — in corso"
+    assert lines[-1] == "● OpenCV — in corso"
     # A new phase starts without the old count.
     overlay.set_tool("llm_markings", DEEPSEEK)
     assert overlay.phases_plain_text().splitlines()[-1] == \
-        "● Lettura sigle (remoto, a consumo) — in corso"
+        "● Lettura sigle — in corso"
 
 
 def test_a_countless_progress_clears_the_count_of_the_row(overlay):
