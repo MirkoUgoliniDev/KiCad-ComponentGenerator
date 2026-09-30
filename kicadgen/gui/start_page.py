@@ -28,6 +28,16 @@ from ..services import recent_projects
 from .review_tools import asset_icon
 from .theme import BLUE, SUBTEXT, SURFACE0, SURFACE1, SURFACE2, TEXT
 
+#: Tooltip of «Apri progetto…» while the working folder holds no project
+#: (HANDOFF 170): the command is disabled and this says why.
+NO_PROJECTS_TOOLTIP = ("Nessun progetto nell'area di lavoro: crea prima un progetto con «Nuovo "
+                       "progetto…» oppure scegli un'altra cartella.")
+
+#: Tooltip of «Apri progetto…» while the working folder holds no project
+#: (HANDOFF 170): the command is disabled and this says why.
+NO_PROJECTS_TOOLTIP = ("Nessun progetto nell'area di lavoro: crea prima un progetto con «Nuovo "
+                       "progetto…» oppure scegli un'altra cartella.")
+
 #: Item data role that holds the `recent_projects.RecentProject` of a row.
 SUMMARY_ROLE = Qt.ItemDataRole.UserRole + 1
 
@@ -333,6 +343,10 @@ class StartPage(QWidget):
             "project-open.svg", "Apri progetto...",
             "Apre un componente esistente della cartella di lavoro (Ctrl+O)")
         self.btn_open.clicked.connect(self.open_requested)
+        #: Tooltip of «Apri» while there is something to open (catalogue source).
+        self._open_tooltip = "Apre un componente esistente della cartella di lavoro (Ctrl+O)"
+        #: Tooltip of «Apri» while there is something to open (catalogue source).
+        self._open_tooltip = "Apre un componente esistente della cartella di lavoro (Ctrl+O)"
 
         # «Nuovo» e «Apri» lavorano nella cartella di lavoro, il cui campo sta
         # nella scheda Progetto, nascosta finche' non c'e' un progetto: senza
@@ -474,6 +488,38 @@ class StartPage(QWidget):
     def library_root_text(self) -> str:
         """@brief Return the full working folder last given to `set_library_root`."""
         return self._root_text
+
+    def set_projects_available(self, available: bool) -> None:
+        """@brief Enable «Apri progetto…» only while the working folder holds a project.
+
+        @param available True when at least one project exists in the folder.
+        @note User decision (2026-09-30, HANDOFF 170): a command that would
+            open an empty list is disabled, and its tooltip says why and what
+            to do (create a project, or choose another folder). «Nuovo» stays
+            enabled: it is the way out.
+        """
+        available = bool(available)
+        self.btn_open.setEnabled(available)
+        self.btn_open.setToolTip(self._tr(self._open_tooltip) if available else self._tr(
+            NO_PROJECTS_TOOLTIP))
+        self.btn_open.setCursor(Qt.CursorShape.PointingHandCursor if available
+                                else Qt.CursorShape.ArrowCursor)
+
+    def set_projects_available(self, available: bool) -> None:
+        """@brief Enable «Apri progetto…» only while the working folder holds a project.
+
+        @param available True when at least one project exists in the folder.
+        @note User decision (2026-09-30, HANDOFF 170): a command that would
+            open an empty list is disabled, and its tooltip says why and what
+            to do (create a project, or choose another folder). «Nuovo» stays
+            enabled: it is the way out.
+        """
+        available = bool(available)
+        self.btn_open.setEnabled(available)
+        self.btn_open.setToolTip(self._tr(self._open_tooltip) if available else self._tr(
+            NO_PROJECTS_TOOLTIP))
+        self.btn_open.setCursor(Qt.CursorShape.PointingHandCursor if available
+                                else Qt.CursorShape.ArrowCursor)
 
     def _elide_root(self) -> None:
         width = max(self.root_path.width(), self.fontMetrics().averageCharWidth() * 20)

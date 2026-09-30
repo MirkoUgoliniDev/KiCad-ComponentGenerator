@@ -136,3 +136,27 @@ def test_the_start_page_shows_and_changes_the_working_folder(bare, tmp_path, mon
     window.start_page.btn_root.click()
     assert window._library_root() == target
     assert window.start_page.library_root_text() == str(target)
+
+
+def test_open_project_follows_the_projects_of_the_working_folder(bare, tmp_path):  # noqa: F811
+    """@brief Negative: an empty working folder disables every «Apri progetto…»;
+    positive: a project folder in it enables them, on the folder change and on refresh."""
+    window = bare
+    empty = tmp_path / "vuota"
+    empty.mkdir()
+    window.field_library_root.setText(str(empty))
+    for command in (window.start_page.btn_open, window.action_open_project,
+                    window.btn_open_project_top):
+        assert not command.isEnabled()
+    assert "Nessun progetto" in window.start_page.btn_open.toolTip()
+    _project(empty, "Primo")
+    window._refresh_start_page()
+    for command in (window.start_page.btn_open, window.action_open_project,
+                    window.btn_open_project_top):
+        assert command.isEnabled()
+    populated = tmp_path / "piena"
+    _project(populated, "Altro")
+    window.field_library_root.setText(str(populated))
+    assert window.start_page.btn_open.isEnabled()
+    window.field_library_root.setText(str(tmp_path / "inesistente"))
+    assert not window.start_page.btn_open.isEnabled()

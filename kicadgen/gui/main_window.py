@@ -75,7 +75,7 @@ from ..app_paths import default_projects_dir, install_dir, logs_dir, resource_pa
 from ..services.photo_yolo import yolo_settings as validate_yolo_settings
 from .component_editor_dialog import ComponentEditorDialog
 from .workflow_bar import WorkflowBar
-from .start_page import StartPage
+from .start_page import NO_PROJECTS_TOOLTIP, StartPage
 from .component_state import (BoundedValue, FlagValue, MAX_LENGTH_MM, MIN_HEIGHT_MM,
                               MIN_LENGTH_MM, TextValue, normalised_side)
 from .analysis_overlay import AnalysisOverlay
@@ -1990,6 +1990,11 @@ class MainWindow(QMainWindow):
         self.start_page.set_library_root(self._library_root())
         self.field_library_root.textChanged.connect(
             lambda _text: self.start_page.set_library_root(self._library_root()))
+        # «Apri progetto…» solo se c'e' qualcosa da aprire (HANDOFF 170): la
+        # cartella di lavoro decide, e viene riletta a ogni suo cambio.
+        self.field_library_root.textChanged.connect(
+            lambda _text: self._refresh_open_project_commands())
+        self._refresh_open_project_commands()
         self.central_stack = QStackedWidget()
         self.central_stack.addWidget(self.start_page)
         self.central_stack.addWidget(self.tabs)
@@ -3172,11 +3177,41 @@ class MainWindow(QMainWindow):
         stack = getattr(self, "central_stack", None)
         if stack is None:
             return
+        self._refresh_open_project_commands()
         if self._component_name():
             stack.setCurrentWidget(self.tabs)
             return
         self.start_page.set_recent(recent_projects.load(self._config))
         stack.setCurrentWidget(self.start_page)
+
+    def _projects_available(self) -> bool:
+        """@brief True when the working folder holds at least one project folder."""
+        from .project_dialogs import list_projects
+        try:
+            return bool(list_projects(self._library_root()))
+        except OSError:
+            return False
+
+    def _refresh_open_project_commands(self) -> None:
+        """@brief Enable every «Apri progetto…» only while the working folder holds a project.
+
+        @note One condition for the three copies of the command (start page,
+            File menu, icon at the top of the Progetto tab), so they never
+            disagree (user, 2026-09-30, HANDOFF 170). Called when the working
+            folder changes, when the start page is shown again and after a
+            project is created or opened.
+        """
+        available = self._projects_available()
+        start_page = getattr(self, "start_page", None)
+        if start_page is not None:
+            start_page.set_projects_available(available)
+        action = getattr(self, "action_open_project", None)
+        if action is not None:
+            action.setEnabled(available)
+            action.setStatusTip("" if available else self.i18n.text(NO_PROJECTS_TOOLTIP))
+        button = getattr(self, "btn_open_project_top", None)
+        if button is not None:
+            button.setEnabled(available)
 
     def _forget_recent_project(self, path: str) -> None:
         """@brief «Rimuovi dall'elenco»: drop a recent project; its folder is not touched.
