@@ -1915,6 +1915,7 @@ def _library_model(component, cx, cy, z0, color):
                 shape.translate(V(cx, cy, z0 + dz))
         print(f"KICADGEN_IMPORT_OK:{path}; parts={len(parts)}; "
               f"local_rotation_deg={angle:g}", flush=True)
+        component["_rendered_local_rotation_deg"] = angle
         return parts
     except Exception as exc:  # noqa: BLE001 - si ripiega sulla forma sintetica
         component["_model_import_error"] = _safe_import_error(exc)

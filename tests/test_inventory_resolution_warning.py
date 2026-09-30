@@ -24,6 +24,15 @@ def test_the_warning_names_the_assumed_size():
     assert messages and f"{SMALLEST_EXPECTED_PART_MM:.2f} mm" in messages[0]
 
 
+def test_borderline_resolution_uses_precise_pixels_and_conditional_wording():
+    [message] = _warnings(987, 42.8)
+    assert '11.53 px' in message
+    assert '1028 px' in message
+    assert 'potrebbero' in message
+    assert 'non verranno rilevati' not in message
+    assert '12 px, meno dei 12' not in message
+
+
 def test_the_verdict_follows_the_declared_smallest_part():
     """@brief Same photo, two boards: fine enough for 0805 bodies, too coarse for 0201.
 

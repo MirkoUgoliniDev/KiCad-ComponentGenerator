@@ -57,9 +57,93 @@ SOT5 = "Package_TO_SOT_SMD.3dshapes/SOT-23-5.step"
 SOT6 = "Package_TO_SOT_SMD.3dshapes/SOT-23-6.step"
 
 
+@pytest.mark.parametrize('relative,kind,length,width,count', [
+    (R0603, 'resistor', 1.6, .8, None),
+    (SOT6, 'ic', 2.9, 1.6, 6),
+])
+def test_attach_uses_individual_crop_angle_not_shared_row_angle(
+        library, no_measurement, relative, kind, length, width, count):
+    import cv2
+    import numpy as np
+    from kicadgen.services.component_image_match import describe_crop, descriptor_bytes
+    crop = np.zeros((96, 96, 3), np.uint8)
+    cv2.rectangle(crop, (15, 25), (70, 65), (100, 100, 100), -1)
+    cv2.rectangle(crop, (10, 5), (24, 35), (255, 255, 255), -1)
+    cv2.circle(crop, (65, 60), 8, (230, 230, 230), -1)
+    evidence = dict(kind=kind, length=length, width=width,
+                    pin_count=count, pin_count_confidence='high')
+    saved = _accepted(library, relative, **evidence, model_selection={
+        "status": "confirmed", "path": str(library / relative), "rotation_deg": 270})
+    saved["_accepted_image_png"] = cv2.imencode('.png', crop)[1].tobytes()
+    saved["_accepted_image_descriptor"] = descriptor_bytes(describe_crop(crop))
+    am.AcceptedModelStore().consolidate([saved], [library])
+    query = _body(rotation_deg=90, **evidence)
+    query["_accepted_image_descriptor"] = descriptor_bytes(describe_crop(np.rot90(crop, 2).copy()))
+    logs = []
+    assert km.attach_models([query], library=library, log=logs.append) == 1
+    assert any('Consolidati: 1 modelli scelti su 1' in line
+               and '1 orientamenti ricavati' in line for line in logs)
+    assert query["model_rotation_deg"] == 90
+    assert query["rotation_deg"] == 90
+    assert query["model_match"]["accepted_orientation"]["relative_rotation_deg"] == 180
+
+
 def _counted(count):
     """Numero di terminali osservato con fiducia (contratto di `_observed_count`)."""
     return {"pin_count": count, "pin_count_confidence": "high"}
+
+
+@pytest.mark.parametrize('archived_angle', [270, 0])
+def test_regeneration_preserves_manual_delta_without_applying_it_twice(
+        library, monkeypatch, archived_angle):
+    """The archive may be from before or after the user consolidated a turn."""
+    path = str(library / R0603)
+    monkeypatch.setattr(km, 'model_candidates', lambda *args, **kwargs: {
+        'status': 'library_matched', 'selected_path': path,
+        'discovery': 'accepted_library',
+        'accepted_orientation': {'status': 'matched', 'rotation_deg': archived_angle}})
+    component = _body(model_path=path, model_rotation_deg=270,
+                      model_rotation_delta_deg=90)
+    for _ in range(2):
+        assert km.attach_models([component], library=library) == 1
+        assert component['model_rotation_deg'] == 270
+        assert component['model_rotation_delta_deg'] == 90
+        assert (component['model_rotation_deg'] + component['model_rotation_delta_deg']) % 360 == 0
+        assert component['model_match']['orientation_manual_delta_preserved']
+
+
+@pytest.mark.parametrize('previous_path,delta', [(R0805, 90), (R0603, 0)])
+def test_new_model_or_unadjusted_model_uses_new_archive_orientation(
+        library, monkeypatch, previous_path, delta):
+    path = str(library / R0603)
+    monkeypatch.setattr(km, 'model_candidates', lambda *args, **kwargs: {
+        'status': 'library_matched', 'selected_path': path,
+        'discovery': 'accepted_library',
+        'accepted_orientation': {'status': 'matched', 'rotation_deg': 180}})
+    component = _body(model_path=str(library / previous_path), model_rotation_deg=270,
+                      model_rotation_delta_deg=delta)
+    assert km.attach_models([component], library=library) == 1
+    assert component['model_rotation_deg'] == 180
+    assert component['model_rotation_delta_deg'] == delta
+    assert not component['model_match'].get('orientation_manual_delta_preserved')
+
+
+@pytest.mark.parametrize('rendered_angle,rendered_delta', [(270, 0), (360, 90)])
+def test_menu_adjusted_automatic_model_preserves_rendered_base(
+        library, monkeypatch, rendered_angle, rendered_delta):
+    path = str(library / R0603)
+    monkeypatch.setattr(km, 'model_candidates', lambda *args, **kwargs: {
+        'status': 'library_matched', 'selected_path': path,
+        'discovery': 'accepted_library',
+        'accepted_orientation': {'status': 'matched', 'rotation_deg': 0}})
+    component = _body(model_path=path, model_rotation_delta_deg=90,
+                      model_match={'status': 'auto_matched',
+                                   'rendered_local_rotation_deg': rendered_angle,
+                                   'rendered_manual_delta_deg': rendered_delta})
+    assert km.attach_models([component], library=library) == 1
+    assert component['model_rotation_deg'] == 270
+    assert component['model_rotation_delta_deg'] == 90
+    assert component['model_match']['orientation_manual_delta_preserved']
 
 
 # ── Lettura e scrittura dell'archivio ───────────────────────────────
@@ -333,7 +417,8 @@ def test_attach_models_applies_the_archive_model_as_a_declared_proposal(library,
     assert component["model_path"] == str(library / R0603)
     assert component["model_review"] == "library_matched"
     assert component["model_match"]["attachment"] == "accepted_library"
-    assert component["model_rotation_deg"] == 90.0
+    assert "model_rotation_deg" not in component
+    assert component["model_match"]["accepted_orientation"]["status"] == "unverified"
     assert component["render_placeholder"] is False
 
 

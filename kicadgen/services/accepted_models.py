@@ -44,7 +44,8 @@ DB_ENV = "KICADGEN_MATCH_DB"
 #: 2: colonna `side_uncertainty_mm` (incertezza della misura archiviata).
 #: Un archivio della versione 1 resta leggibile (la colonna manca = incertezza
 #: non nota) e viene aggiornato alla prima scrittura.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 5
+IMAGE_CROP_VERSION = 2
 
 #: CORREZIONE (audit 26/09, punto 82 medio 8): la vecchia tolleranza relativa
 #: fissa del 15% si giustificava con «le taglie adiacenti distano almeno
@@ -83,6 +84,8 @@ class ConsolidationResult:
     """@brief Outcome of a consolidation: new entries, confirmations, skipped rows with reasons."""
     created: int = 0
     confirmed: int = 0
+    images_saved: int = 0
+    images_skipped: int = 0
     skipped: list = field(default_factory=list)
 
     @property
@@ -259,18 +262,26 @@ def resolve_reference(reference: str, roots: Iterable[Path]) -> Optional[Path]:
 def _explicit_rotation(component: dict) -> Optional[float]:
     """Local model angle explicitly chosen by the user, if any.
 
-    The picker's explicit angle is local to the model, so it transfers. A
-    reused, untouched entry keeps its own angle. 3D context-menu deltas and the
-    landmark verse are NOT stored: they depend on how the part sits on THAT board.
+    The angle belongs to this example's deskewed crop, never to the entire
+    archive row. Reused angles must come from an individually matched example.
+    The caller includes any explicit context-menu delta when storing the crop.
     """
     selection = component.get("model_selection")
     if isinstance(selection, dict) and selection.get("status") == "confirmed":
         return finite_number(selection.get("rotation_deg"))
     report = component.get("model_match")
+    if isinstance(report, dict):
+        base = finite_number(component.get("model_rotation_deg"))
+        if base is not None:
+            return base
+        rendered = finite_number(report.get("rendered_local_rotation_deg"))
+        if rendered is not None:
+            return rendered - (finite_number(report.get("rendered_manual_delta_deg")) or 0.0)
     if isinstance(report, dict) and report.get("status") == "library_matched":
         entry = report.get("accepted_entry")
         if isinstance(entry, dict):
-            return finite_number(entry.get("rotation_deg"))
+            orientation = report.get("accepted_orientation") or {}
+            return finite_number(orientation.get("rotation_deg"))
     return None
 
 
@@ -337,6 +348,7 @@ class AcceptedModelStore:
             raise AcceptedModelsError(tx("Archivio abbinamenti non apribile: {exc}", exc=exc)) from exc
         connection.row_factory = sqlite3.Row
         try:
+            connection.execute("PRAGMA foreign_keys=ON")
             with connection:
                 self._ensure_schema(connection, create)
                 yield connection
@@ -360,7 +372,42 @@ class AcceptedModelStore:
             # aggiunge, senza toccare le voci esistenti.
             if create:
                 db.execute("ALTER TABLE accepted_models ADD COLUMN side_uncertainty_mm REAL")
-                db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                db.execute("PRAGMA user_version=2")
+                version = 2
+            else:
+                return
+        if version == 2:
+            if not create:
+                return
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS accepted_model_images ("
+                " id INTEGER PRIMARY KEY,"
+                " accepted_model_id INTEGER NOT NULL REFERENCES accepted_models(id) ON DELETE CASCADE,"
+                " image_png BLOB NOT NULL,"
+                " descriptor BLOB NOT NULL,"
+                " crop_version INTEGER NOT NULL,"
+                " created_at TEXT NOT NULL,"
+                " component_name TEXT NOT NULL DEFAULT '')")
+            db.execute("CREATE INDEX IF NOT EXISTS accepted_model_images_parent "
+                       "ON accepted_model_images(accepted_model_id)")
+            db.execute("PRAGMA user_version=4")
+            AcceptedModelStore._ensure_schema(db, create)
+            return
+        if version == 3:
+            if not create:
+                return
+            db.execute("ALTER TABLE accepted_model_images ADD COLUMN component_name "
+                       "TEXT NOT NULL DEFAULT ''")
+            db.execute("PRAGMA user_version=4")
+            AcceptedModelStore._ensure_schema(db, create)
+            return
+        if version == 4:
+            if not create:
+                return
+            columns = {row[1] for row in db.execute("PRAGMA table_info(accepted_model_images)")}
+            if "model_rotation_deg" not in columns:
+                db.execute("ALTER TABLE accepted_model_images ADD COLUMN model_rotation_deg REAL")
+            db.execute("PRAGMA user_version=5")
             return
         if not create:
             # Un file vuoto o estraneo in sola lettura: nessuna voce, nessuna scrittura.
@@ -385,7 +432,9 @@ class AcceptedModelStore:
             " side_uncertainty_mm REAL)")
         db.execute("CREATE INDEX IF NOT EXISTS accepted_models_key "
                    "ON accepted_models(category, basis)")
-        db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        db.execute("PRAGMA user_version=2")
+        # Continue through the same migration used for existing schema v2.
+        AcceptedModelStore._ensure_schema(db, create)
 
     # ── Lettura ─────────────────────────────────────────────────────
 
@@ -398,8 +447,31 @@ class AcceptedModelStore:
         with self._connect(create=False) as db:
             if db is None:
                 return []
+            has_images = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='accepted_model_images'").fetchone()
+            image_count = ("(SELECT count(*) FROM accepted_model_images i "
+                           "WHERE i.accepted_model_id=a.id)" if has_images else "0")
             return [dict(row) for row in db.execute(
-                "SELECT * FROM accepted_models ORDER BY last_accepted DESC, id DESC")]
+                f"SELECT a.*, {image_count} AS image_count "
+                "FROM accepted_models a ORDER BY last_accepted DESC, id DESC")]
+
+    def images(self, entry_id: int) -> list[dict]:
+        """@brief Return verified crop examples stored for one accepted model entry."""
+        with self._connect(create=False) as db:
+            if db is None:
+                return []
+            exists = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='accepted_model_images'").fetchone()
+            if not exists:
+                return []
+            columns = {row[1] for row in db.execute("PRAGMA table_info(accepted_model_images)")}
+            name_column = "component_name" if "component_name" in columns else "'' AS component_name"
+            rotation_column = "model_rotation_deg" if "model_rotation_deg" in columns else "NULL AS model_rotation_deg"
+            return [dict(row) for row in db.execute(
+                "SELECT id, accepted_model_id, image_png, descriptor, crop_version, created_at, "
+                f"{name_column}, {rotation_column} "
+                "FROM accepted_model_images WHERE accepted_model_id=? ORDER BY id",
+                (int(entry_id),))]
 
     def find(self, component: dict, roots: Iterable[Path]) -> Optional[dict]:
         """@brief Accepted entry compatible with the body, or None.
@@ -413,7 +485,9 @@ class AcceptedModelStore:
         @return The mapping also carries `tolerance_mm` and
             `tolerance_source` (where the new measurement's uncertainty
             comes from).
-        @note Rules: same category and basis; when both terminal counts are
+        @note Rules: same category; a body/total basis change requires a visual score
+            of at least .92 and a .08 margin over competing models. Both bases
+            still require compatible measured sizes. When both terminal counts are
             known they must be equal, and for TERMINAL_COUNT_CATEGORIES both
             must be known; each side within `match_tolerance_mm`. The closest
             entry (worst-axis relative error) wins; within RECENCY_TIE_MARGIN
@@ -427,9 +501,14 @@ class AcceptedModelStore:
         with self._connect(create=False) as db:
             if db is None:
                 return None
+            has_images = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='accepted_model_images'").fetchone()
+            image_count = ("(SELECT count(*) FROM accepted_model_images i "
+                           "WHERE i.accepted_model_id=accepted_models.id)" if has_images else "0")
             rows = [dict(row) for row in db.execute(
-                "SELECT * FROM accepted_models WHERE category=? AND basis=?",
-                (sig["category"], sig["basis"]))]
+                f"SELECT accepted_models.*, {image_count} AS image_count "
+                "FROM accepted_models WHERE category=?",
+                (sig["category"],))]
         needs_count = sig["category"] in TERMINAL_COUNT_CATEGORIES
         if needs_count and sig["terminal_count"] is None:
             # Stesso ingombro, piedinature diverse: senza il conteggio su
@@ -451,18 +530,79 @@ class AcceptedModelStore:
             if path is None:
                 continue
             error = xy_error(row["long_mm"], row["short_mm"], sig["long_mm"], sig["short_mm"])
-            compatible.append((error, row, path, tolerance, source))
+            compatible.append((error, row, path, tolerance, source, 0.0))
+        if not compatible:
+            return None
+        orientation_examples = {}
+        query_descriptor = component.get("_accepted_image_descriptor")
+        if query_descriptor:
+            try:
+                from .component_image_match import descriptor_from_bytes, similarity, rotated_image_similarity
+                query_descriptor = descriptor_from_bytes(query_descriptor)
+                with self._connect(create=False) as db:
+                    has_images = (db is not None and db.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' "
+                        "AND name='accepted_model_images'").fetchone())
+                    if has_images:
+                        ids = [item[1]["id"] for item in compatible]
+                        placeholders = ",".join("?" * len(ids))
+                        scores = {}
+                        columns = {r[1] for r in db.execute("PRAGMA table_info(accepted_model_images)")}
+                        angle_column = "model_rotation_deg" if "model_rotation_deg" in columns else "NULL AS model_rotation_deg"
+                        rows_images = db.execute(
+                            f"SELECT id, accepted_model_id, descriptor, image_png, {angle_column} FROM accepted_model_images "
+                            f"WHERE accepted_model_id IN ({placeholders}) "
+                            "AND crop_version=?",
+                            (*ids, IMAGE_CROP_VERSION))
+                        for image in rows_images:
+                            score = similarity(query_descriptor,
+                                               descriptor_from_bytes(image["descriptor"]))
+                            score = max(score, rotated_image_similarity(query_descriptor, image["image_png"]))
+                            key = image["accepted_model_id"]
+                            scores[key] = max(scores.get(key, 0.0), score)
+                            if image["model_rotation_deg"] is not None:
+                                orientation_examples.setdefault(key, []).append(dict(image))
+                        compatible = [(*item[:5], scores.get(item[1]["id"], 0.0))
+                                      for item in compatible]
+            except (TypeError, ValueError, sqlite3.Error, AcceptedModelsError):
+                # Immagine/descriptor non valido: il match meccanico resta valido.
+                pass
+        # A basis label can change between AI runs. Recover only with strong,
+        # unambiguous visual evidence, compatible dimensions AND terminal count.
+        strict = [item for item in compatible if item[1]["basis"] == sig["basis"]]
+        recovered = []
+        for item in compatible:
+            if (item in strict or item[5] < .92
+                    or {item[1]["basis"], sig["basis"]} != {"body", "total"}):
+                continue
+            competitors = [other[5] for other in compatible
+                           if other[1]["model_ref"] != item[1]["model_ref"]]
+            if item[5] - max(competitors, default=0.0) >= .08:
+                recovered.append(item)
+        compatible = strict + recovered
         if not compatible:
             return None
         closest = min(item[0] for item in compatible)
         band = [item for item in compatible if item[0] <= closest + RECENCY_TIE_MARGIN]
+        best_visual = max((item[5] for item in band), default=0.0)
+        visual_tie = [item for item in band if item[5] >= best_visual - 0.04]
+        # Let images break a geometric/recency tie only when a reference is
+        # recognizably similar. Weak visual scores leave the established rule.
+        if best_visual >= 0.45 and len(visual_tie) < len(band):
+            band = visual_tie
         band.sort(key=lambda item: (item[1]["last_accepted"], item[1]["id"]), reverse=True)
-        error, row, path, tolerance, source = band[0]
+        error, row, path, tolerance, source, visual_score = band[0]
+        from .component_image_match import match_orientation
+        orientation = match_orientation(query_descriptor, orientation_examples.get(row["id"], []))
         return {"entry": row, "path": path, "relative_xy_error": error,
+                "basis_recovered_visually": row["basis"] != sig["basis"],
+                "orientation": orientation,
                 "terminal_count_checked": (sig["terminal_count"] is not None
                                            and row.get("terminal_count") is not None),
                 "tolerance_mm": tolerance, "tolerance_source": source,
-                "alternatives": len(compatible) - 1}
+                "alternatives": len(compatible) - 1,
+                "visual_score": visual_score,
+                "image_examples": row.get("image_count", 0)}
 
     # ── Scrittura ───────────────────────────────────────────────────
 
@@ -516,6 +656,7 @@ class AcceptedModelStore:
                                                 component, r.get("side_uncertainty_mm"))[0])]
                 if near:
                     _, row = min(near, key=lambda item: item[0])
+                    accepted_id = int(row["id"])
                     n = int(row["samples"])
                     height = sig["height_mm"]
                     if row["height_mm"] is not None and height is not None:
@@ -550,7 +691,36 @@ class AcceptedModelStore:
                          sig["height_mm"], sig["terminal_count"], reference,
                          Path(component["model_path"]).stem, rotation, now, now,
                          source, name, uncertainty))
+                    accepted_id = int(db.execute("SELECT last_insert_rowid()").fetchone()[0])
                     result.created += 1
+                image_png = component.get("_accepted_image_png")
+                descriptor = component.get("_accepted_image_descriptor")
+                if image_png is not None or descriptor is not None:
+                    valid_png = (isinstance(image_png, (bytes, bytearray))
+                                 and bytes(image_png).startswith(b"\x89PNG\r\n\x1a\n"))
+                    valid_descriptor = (isinstance(descriptor, (bytes, bytearray))
+                                        and len(descriptor) == 4 * 4 * 9 * 4)
+                    if valid_png and valid_descriptor:
+                        # Old crops used a wider contextual window. Once a
+                        # fresh verified crop is available for this entry,
+                        # discard stale derived examples so matching and the
+                        # viewer only see the corrected crop geometry.
+                        db.execute(
+                            "DELETE FROM accepted_model_images WHERE accepted_model_id=? "
+                            "AND crop_version<>?",
+                            (accepted_id, IMAGE_CROP_VERSION))
+                        db.execute(
+                            "INSERT INTO accepted_model_images (accepted_model_id, image_png, "
+                            "descriptor, crop_version, created_at, component_name, model_rotation_deg) "
+                            "VALUES (?,?,?,?,?,?,?)",
+                            (accepted_id, bytes(image_png), bytes(descriptor),
+                             IMAGE_CROP_VERSION, now,
+                             str(component.get("name") or "").strip(),
+                             ((rotation + (finite_number(component.get("model_rotation_delta_deg")) or 0.0)) % 360
+                              if rotation is not None else None)))
+                        result.images_saved += 1
+                    else:
+                        result.images_skipped += 1
         return result
 
     def delete(self, ids: Iterable[int]) -> int:

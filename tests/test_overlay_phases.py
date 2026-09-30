@@ -38,8 +38,8 @@ def test_a_finished_phase_shows_its_first_status(overlay):
     overlay.set_status("Risoluzione della foto usata per l'inventario: 23.1 px/mm.")
     overlay.set_tool("yolo", "pcb_yolov8s.onnx")
     text = overlay.phases_plain_text()
-    assert "✓ Modello AI (remoto, a consumo) — Analisi principale completata" in text
-    assert "✓ OpenCV (analisi immagine locale) — OpenCV (locale): scheda trovata" in text
+    assert "✓ Modello AI — Analisi principale completata" in text
+    assert "✓ OpenCV — OpenCV (locale): scheda trovata" in text
     assert "Viste dall'alto" not in text and "Risoluzione della foto" not in text
 
 
@@ -49,7 +49,29 @@ def test_the_running_phase_is_the_last_row(overlay):
     overlay.set_tool("yolo")
     lines = [line for line in overlay.phases_plain_text().splitlines() if line]
     assert lines[0].startswith("✓ OpenCV")
-    assert lines[-1] == "● YOLO (rilevamento locale) — in corso"
+    assert lines[-1] == "● YOLO — in corso"
+
+
+def test_finished_yolo_phase_does_not_repeat_the_tool(overlay):
+    overlay.set_tool('yolo')
+    overlay.set_status('YOLO locale: localizzazione senza invio della foto; verifica AI successiva.')
+    overlay.set_tool('llm')
+    text = overlay.phases_plain_text()
+    assert text.count('YOLO') == 1
+    assert 'localizzazione senza invio della foto' in text
+
+
+def test_reading_progress_changes_but_finished_phase_keeps_summary(overlay):
+    overlay.set_tool('llm_crops')
+    overlay.set_status('Analisi componente 1 di 2 — C01: lettura 1/2.')
+    assert 'lettura 1/2' in overlay.status_plain_text()
+    overlay.set_status('Analisi componente 2 di 2 — C02: lettura 2/2.')
+    assert 'C02' in overlay.status_plain_text()
+    overlay.set_status('Componente 2 di 2 — C02: letture concordi, risultato applicato.')
+    overlay.set_status('Lettura dei singoli componenti: 2 corpi letti due volte.')
+    overlay.set_tool('opencv')
+    assert '2 corpi letti due volte' in overlay.phases_plain_text()
+    assert 'C01' not in overlay.phases_plain_text()
 
 
 def test_a_warning_of_the_phase_replaces_its_outcome(overlay):
@@ -59,7 +81,7 @@ def test_a_warning_of_the_phase_replaces_its_outcome(overlay):
                                   "l'analisi dichiara 3 contatti."))
     overlay.set_status("Lato sinistro: 3 semi-fori, come i contatti dichiarati.")
     overlay.set_tool("yolo")
-    assert "⚠ OpenCV (analisi immagine locale) — Lato destro: sulla foto si contano 4" \
+    assert "⚠ OpenCV — Lato destro: sulla foto si contano 4" \
         in overlay.phases_plain_text()
     assert "#f9e2af" in overlay.phases.text()                    # drawn in the warning colour
 
@@ -111,7 +133,7 @@ def test_the_completed_job_closes_its_last_phase(overlay):
     overlay.set_status("Revisione dei corpi: 42 proposte tenute su 43.")
     overlay.show_completed("Fatto.")
     text = overlay.phases_plain_text()
-    assert "✓ YOLO (rilevamento locale) — Revisione dei corpi" in text
+    assert "✓ YOLO — Revisione dei corpi" in text
     assert "in corso" not in text
 
 

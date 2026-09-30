@@ -1102,6 +1102,8 @@ def main():
                         "component_index": index,
                         "source_row": component.get("source_row", index),
                     }
+                    if path and component.get("_rendered_local_rotation_deg") is not None:
+                        metadata[obj.Name]["model_local_rotation_deg"] = component["_rendered_local_rotation_deg"]
                     if component.get("_model_import_failed"):
                         metadata[obj.Name]["model_import_failed"] = True
                         metadata[obj.Name]["model_import_error"] = component.get(

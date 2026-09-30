@@ -9,6 +9,7 @@ che i file di output siano stati effettivamente scritti.
 
 from __future__ import annotations
 
+import base64
 import glob
 import json
 import math
@@ -92,8 +93,16 @@ def _match_evidence(component):
               # Incertezza della misura fotografica (mm per bordo) o scala
               # della foto (px/mm): decidono se due ingombri sono la stessa
               # taglia (archivio degli abbinamenti, kicad_models).
-              UNCERTAINTY_KEY, SCALE_KEY)
-    return {key: evidence[key] for key in fields if key in evidence}
+              UNCERTAINTY_KEY, SCALE_KEY,
+              # Compact, transient OpenCV descriptor from the calibrated PCB
+              # crop; never the source photo or a persisted project field.
+              "_accepted_image_descriptor")
+    result = {key: evidence[key] for key in fields if key in evidence}
+    descriptor = result.get("_accepted_image_descriptor")
+    if isinstance(descriptor, (bytes, bytearray, memoryview)):
+        # This evidence is written into the FreeCAD job JSON.
+        result["_accepted_image_descriptor"] = "base64:" + base64.b64encode(bytes(descriptor)).decode("ascii")
+    return result
 
 
 def _model_placement(component):
@@ -1052,7 +1061,23 @@ def _reconcile_model_imports(result, components, output_dir):
         failed = {part.get('source_row', part.get('component_index'))
                   for part in mesh.get('parts', []) if isinstance(part, dict)
                   and part.get('model_import_failed')}
+        rendered = {}
+        for part in mesh.get('parts', []):
+            if not isinstance(part, dict) or part.get('source') != 'kicad_library':
+                continue
+            angle = part.get('model_local_rotation_deg')
+            if isinstance(angle, (int, float)) and not isinstance(angle, bool) and math.isfinite(angle):
+                rendered[part.get('source_row', part.get('component_index'))] = part
+        updated = False
         for index, component in enumerate(components):
+            part = rendered.get(component.get('source_row', index))
+            if (part and component.get('source_row', index) not in failed
+                    and part.get('model_path') == component.get('model_path')):
+                report = dict(component.get('model_match') or {})
+                report['rendered_local_rotation_deg'] = part['model_local_rotation_deg']
+                report['rendered_manual_delta_deg'] = float(component.get('model_rotation_delta_deg') or 0)
+                component['model_match'] = report
+                updated = True
             if component.get('source_row', index) not in failed:
                 continue
             report = dict(component.get('model_match') or {})
@@ -1061,7 +1086,7 @@ def _reconcile_model_imports(result, components, output_dir):
                                    "segnaposto."))
             component['model_match'] = report
             result.setdefault('warnings', []).append(f"{component.get('name')}: {report['error']}")
-        if failed:
+        if failed or updated:
             from ..services.model_choices import save_candidate_report
             save_candidate_report(output_dir, components)
     except (OSError, ValueError, TypeError, AttributeError) as exc:

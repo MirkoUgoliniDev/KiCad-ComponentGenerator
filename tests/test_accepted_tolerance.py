@@ -186,14 +186,31 @@ def test_the_library_search_always_runs_and_the_archive_keeps_an_equal_model(lib
     assert report["candidates"][0]["status"] == "library_matched"
 
 
-def test_a_clearly_closer_library_model_beats_the_archive(library):
-    """Voce accettata su un ingombro misurato largo: la libreria ha un modello piu' vicino."""
+def test_nominal_library_dimensions_do_not_override_accepted_photo_envelope(library):
+    """Keep a compatible user correction even when another nominal body is closer."""
     library, _ = library
     am.AcceptedModelStore().consolidate(
         [_accepted(library, R0805, length=1.8, width=1.0)], [library])
     notes = []
     report = km.model_candidates(_body(length=1.6, width=0.8), library=library,
                                  log=notes.append)
-    assert report["status"] != "library_matched"
-    assert report["candidates"][0]["path"] == str(library / R0603)
-    assert any("piu' vicino alla misura" in note for note in notes)
+    assert report["status"] == "library_matched"
+    assert report["selected_path"] == str(library / R0805)
+    assert report["candidates"][0]["path"] == str(library / R0805)
+    assert any(c["path"] == str(library / R0603) for c in report["candidates"][1:])
+
+
+def test_c01_keeps_photo_error_separate_from_nominal_soic_error():
+    archived = {'path': 'accepted.step', 'package': 'SOIC-8-1EP',
+                'relative_xy_error': 0.0, 'status': 'library_matched'}
+    accepted = {'status': 'library_matched', 'selected_path': 'accepted.step',
+                'candidates': [archived], 'discovery': 'accepted_library'}
+    searched = {'status': 'review_required', 'selected_path': None, 'candidates': [
+        dict(archived, relative_xy_error=.1956, dimensions_mm=[4.9, 3.9, 1.75]),
+        {'path': 'alternative.step', 'package': 'SOIC-8_5.3x6.2',
+         'relative_xy_error': .1253, 'status': 'review_required'}]}
+    result = km._prefer_closer(accepted, searched, 5, lambda message: None)
+    assert result['selected_path'] == 'accepted.step'
+    assert result['candidates'][0]['relative_xy_error'] == 0.0
+    assert result['candidates'][0]['library_relative_xy_error'] == .1956
+    assert 'library_relative_xy_error' not in archived

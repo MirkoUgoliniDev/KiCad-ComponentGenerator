@@ -9,6 +9,7 @@ exclusion, three-leads-plus-tab by counts), C10 (PYTHONDONTWRITEBYTECODE in
 every freecadcmd child) and C12 (user cache folders honour KICADGEN_DATA_DIR).
 """
 import ast
+import base64
 import json
 import math
 import subprocess
@@ -332,10 +333,13 @@ def test_the_structural_fields_reach_the_3d_payload():
     """@brief The evidence copied into the payload carries the new fields."""
     box = ComponentBox(0, 0, 1, 1, 1, match_evidence={
         "_yolo_proposal_id": "t:1", "_presence_reviewed_by_user": True,
-        "lead_count": 3, "lead_count_complete": True, "unrelated": 1})
+        "lead_count": 3, "lead_count_complete": True,
+        "_accepted_image_descriptor": b"descriptor", "unrelated": 1})
     evidence = cad._match_evidence(box)
     assert evidence == {"_yolo_proposal_id": "t:1", "_presence_reviewed_by_user": True,
-                        "lead_count": 3, "lead_count_complete": True}
+                        "lead_count": 3, "lead_count_complete": True,
+                        "_accepted_image_descriptor": "base64:" + base64.b64encode(b"descriptor").decode("ascii")}
+    json.dumps(evidence)
 
 
 @pytest.mark.parametrize("row,expected", [

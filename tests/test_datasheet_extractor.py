@@ -47,7 +47,8 @@ def test_duplicate_pin_repair_preserves_geometry_and_labels(tmp_path, monkeypatc
     sides = [dict(edge="top", count=2, pitch_mm=2.54, first_pin=1, pin_names=["G", "1"]),
              dict(edge="bottom", count=2, pitch_mm=2.54, first_pin=1, pin_names=["G", "TX"])]
     call = Mock(side_effect=[dict(layout="castellated", castellated_sides=sides),
-        dict(castellated_sides=[sides[0], dict(sides[1], first_pin=corrected_start, pitch_mm=99)])])
+        dict(castellated_sides=[sides[0], dict(sides[1], first_pin=corrected_start, pitch_mm=99)]),
+        {"sides": []}])
     monkeypatch.setattr(ext, "api_key", lambda: "offline")
     monkeypatch.setattr(ext, "check_credit", lambda **kw: None)
     monkeypatch.setattr(ext, "call_tool", call)
@@ -57,7 +58,7 @@ def test_duplicate_pin_repair_preserves_geometry_and_labels(tmp_path, monkeypatc
         assert call.call_count == 2
         return
     result = ext.extract_pin_header_params([source])
-    assert call.call_count == 2
+    assert call.call_count == 3  # Main, numbering repair, missing-style check.
     assert result.castellated_sides[1]["first_pin"] == 3
     assert result.castellated_sides[1]["pitch_mm"] == 2.54
     assert result.castellated_sides[1]["pin_names"] == ["G", "TX"]
@@ -302,7 +303,7 @@ def test_castellated_fallback_is_uncertain_generic_without_markings(monkeypatch,
         photo.side_effect = ext.OpenRouterError("offline failure")
     monkeypatch.setattr(inv, "extract_inventory", photo)
     result = ext.extract_pin_header_params([path], photo_cache_dir=tmp_path / "cache")
-    call.assert_called_once()
+    assert call.call_count == 2  # Main extraction plus missing-style check.
     assert photo.call_count == (1 if photo_state in ("absent", "failed") else 0)
     c = result.components_3d[0]
     assert (c["name"], c["kind"], c["marking"]) == ("Ingombro 1", "generic", "")
@@ -347,7 +348,7 @@ def test_three_stage_models_and_custom_prompts_reach_services(monkeypatch, tmp_p
         verification_model=verification_model, system_prompt='datasheet prompt', grounding_prompt='ground prompt',
         verification_prompt='verify prompt', terminal_prompt='terminal prompt', photo_cache_dir=tmp_path / 'cache')
     assert main_call.call_args.kwargs['model'] == 'vendor/data'
-    assert main_call.call_args.kwargs['system_prompt'] == 'datasheet prompt'
+    assert main_call.call_args_list[0].kwargs['system_prompt'] == 'datasheet prompt'
     assert photo.call_args.args[1] == 'vendor/photo'
     assert photo.call_args.kwargs['classifier_model'] == (verification_model or 'vendor/data')
     assert photo.call_args.kwargs['grounding_prompt'] == 'ground prompt'
@@ -382,7 +383,7 @@ def test_explicit_document_roles_override_ai_top_selection(monkeypatch, tmp_path
     # sceglie la piu' dettagliata fra quelle che riesce a calibrare.
     assert photo.call_args.kwargs['top_photo_index'] == ([1] if with_top else [-1])
     assert photo.call_args.kwargs['top_photo_source'] == 'utente'
-    blocks = call.call_args.kwargs['content_blocks']
+    blocks = call.call_args_list[0].kwargs['content_blocks']
     assert 'Pinout / disposizione contatti' in blocks[0]['text']
     if with_top:
         assert 'Immagine con quote' in blocks[2]['text']

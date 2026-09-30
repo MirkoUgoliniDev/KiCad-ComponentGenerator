@@ -2467,7 +2467,7 @@ def _accepted_match(component: dict, roots, note) -> Optional[dict]:
     @param note Diagnostic callback.
     @return A `library_matched` report with a single candidate, or None.
         The ordinary search runs in both cases; `_prefer_closer` decides
-        whether this proposal or a closer library model wins.
+        keeps this proposal and lists library alternatives for review.
     @note The archive helps, it is not required: an unreadable or newer file
         is logged and ignored, and matching proceeds as without it. Nothing is
         written: reading neither creates the archive nor changes its entries.
@@ -2509,6 +2509,11 @@ def _accepted_match(component: dict, roots, note) -> Optional[dict]:
         tx("Proposta da confermare: il verso (polarita') va verificato su questa "
            "scheda"),
     ]
+    if found.get("visual_score", 0.0) >= 0.45:
+        reasons.append(tx("Ritaglio simile a un esempio verificato (OpenCV: {score:.0%})",
+                          score=found["visual_score"]))
+    if found.get("basis_recovered_visually"):
+        reasons[1] = tx("Base di misura diversa: abbinamento recuperato dal ritaglio OpenCV, con misure e terminali compatibili")
     if found["alternatives"]:
         reasons.append(tx("Altre {alternatives} voci compatibili nell'archivio: vince la piu' "
                           "vicina e, a parita', la piu' recente",
@@ -2524,6 +2529,9 @@ def _accepted_match(component: dict, roots, note) -> Optional[dict]:
             stem=path.stem))
     return {"status": "library_matched", "candidates": [candidate],
             "selected_path": str(path), "discovery": "accepted_library",
+            "accepted_orientation": found.get("orientation", {}),
+            "accepted_visual_score": found.get("visual_score", 0.0),
+            "accepted_basis_recovered_visually": found.get("basis_recovered_visually", False),
             "accepted_entry": {key: entry.get(key) for key in (
                 "id", "category", "basis", "long_mm", "short_mm", "height_mm",
                 "terminal_count", "model_ref", "rotation_deg", "samples",
@@ -2555,8 +2563,8 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None,
         geometric signature matches an entry of the accepted-matches archive
         (`services.accepted_models`) gets that entry as a proposal, but the
         library search ALWAYS runs as well (user decision, 2026-09-26): the
-        archive entry wins (status library_matched) unless the search found a
-        model clearly closer to the measurement (see _prefer_closer).
+        archive entry wins (status library_matched); nominal library geometry
+        does not override a compatible accepted photographic envelope.
         Missing/descriptive packages use family discovery.
         Unknown basis compares independent readings; body/total/pads are strict.
         leads and body_and_leads mean total. At most 64 structurally compatible
@@ -2602,30 +2610,20 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None,
 def _prefer_closer(accepted: dict, searched: dict, limit: int, note) -> dict:
     """Choose between the archive proposal and the library search result.
 
-    The archived model keeps its place unless the search found a candidate
-    whose worst-axis error is smaller than the archived model's by more than
-    NAME_TIEBREAK_MARGIN (the margin within which the photograph cannot
-    separate two solids; there the user's earlier acceptance decides). The
-    archived model's error is the one measured by the search when the search
-    measured that same file, otherwise the error against the archived
-    photographic envelope -- the same quantity against a different reference,
-    a declared approximation.
+    The archive signature has already passed category, measured-size and
+    terminal checks. Preserve its photographic error separately from nominal
+    library geometry, which is useful context but cannot revoke acceptance.
     """
     archived = accepted["candidates"][0]
     same = next((item for item in searched.get("candidates", ())
                  if item["path"] == archived["path"]), None)
-    archived_error = (same or archived)["relative_xy_error"]
     others = [item for item in searched.get("candidates", ()) if item["path"] != archived["path"]]
-    best = min(others, key=lambda item: item["relative_xy_error"], default=None)
-    if best is not None and best["relative_xy_error"] + NAME_TIEBREAK_MARGIN < archived_error:
-        note(tx("Archivio abbinamenti: {archived} non proposto, la libreria ha {best} "
-                "piu' vicino alla misura ({best_error:.0%} contro {archived_error:.0%}).",
-                archived=Path(archived["path"]).stem, best=best["package"],
-                best_error=best["relative_xy_error"], archived_error=archived_error))
-        return searched
+    # A nominal library body and a previously accepted photographic envelope
+    # are different references. A smaller nominal error cannot revoke the
+    # user's accepted association, already checked against the new evidence.
     merged = dict(accepted)
     if same is not None:
-        archived["relative_xy_error"] = same["relative_xy_error"]
+        archived = dict(archived, library_relative_xy_error=same["relative_xy_error"])
         if "dimensions_mm" in same:
             archived["dimensions_mm"] = same["dimensions_mm"]
     # The search's own verdict on the alternatives (auto/provisional) is
@@ -2924,6 +2922,16 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
         # restare come l'ho trovato, non a meta'.
         restore = {key: component[key] for key in ("render_3d", "model_path")
                    if key in component}
+        previous_model_rotation = component.get("model_rotation_deg")
+        if previous_model_rotation is None:
+            previous_report = component.get("model_match")
+            if not isinstance(previous_report, dict):
+                previous_report = {}
+            rendered_angle = previous_report.get("rendered_local_rotation_deg")
+            rendered_delta = previous_report.get("rendered_manual_delta_deg")
+            if all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                   and math.isfinite(value) for value in (rendered_angle, rendered_delta)):
+                previous_model_rotation = rendered_angle - rendered_delta
         component["render_3d"] = True if override is None else bool(override)
         component.pop("model_path", None)
         try:
@@ -2999,25 +3007,47 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
             # un altro modello e va comunque tolto.
             component.pop("model_rotation_deg", None)
             component.pop("model_rotation_native_delta_deg", None)
-            # L'angolo scelto a mano nel selettore e' locale al modello, quindi
-            # la voce dell'archivio lo porta con se'. Come ogni scelta
-            # esplicita e' ASSOLUTO: sostituisce la deduzione dell'asse e
-            # quindi anche la correzione del verso dal riferimento osservato
-            # (vedi `freecad_parts._placement_angle`). Per questo il report lo
-            # dice fra i motivi: il verso su questa scheda va verificato.
-            # Senza angolo salvato si torna alla deduzione automatica.
-            accepted_rotation = (report.get("accepted_entry") or {}).get("rotation_deg")
+            # A row-wide angle may mix different physical instances. Only an
+            # individually verified crop with an unambiguous relative angle transfers.
+            orientation = report.get("accepted_orientation") or {}
+            accepted_rotation = orientation.get("rotation_deg")
             if (report["status"] == "library_matched"
+                    and orientation.get("status") == "matched"
                     and isinstance(accepted_rotation, (int, float))
                     and not isinstance(accepted_rotation, bool)
                     and math.isfinite(accepted_rotation)):
-                component["model_rotation_deg"] = float(accepted_rotation)
+                manual_delta = component.get("model_rotation_delta_deg")
+                preserve_manual_base = (
+                    restore.get("model_path") == report["selected_path"]
+                    and isinstance(previous_model_rotation, (int, float))
+                    and not isinstance(previous_model_rotation, bool)
+                    and math.isfinite(previous_model_rotation)
+                    and isinstance(manual_delta, (int, float))
+                    and not isinstance(manual_delta, bool)
+                    and math.isfinite(manual_delta) and manual_delta != 0)
+                # An archived example can already include this component's
+                # context-menu correction. Replacing its base while retaining
+                # the correction would apply that delta a second time. Keep
+                # the existing base for a manually adjusted, unchanged model.
+                component["model_rotation_deg"] = float(
+                    previous_model_rotation if preserve_manual_base else accepted_rotation)
+                if preserve_manual_base:
+                    report["orientation_manual_delta_preserved"] = True
+                    note(f"{component.get('name', '')}: orientamento manuale mantenuto "
+                         f"sullo stesso modello: base {previous_model_rotation:g} gradi, "
+                         f"correzione {manual_delta:g} gradi.")
+                else:
+                    note(f"{component.get('name', '')}: orientamento da ritaglio consolidato "
+                         f"#{orientation.get('image_id')}: {accepted_rotation:g} gradi; "
+                         f"rotazione relativa {orientation.get('relative_rotation_deg', 0):g} gradi.")
+            elif report.get("discovery") == "accepted_library":
+                report["orientation_unverified"] = "Orientamento da verificare: nessun ritaglio con angolo individuale e confronto univoco."
             if component.get("landmark_side"):
                 report["orientation_landmark"] = {
                     "feature": component.get("landmark_feature"),
                     "side": component["landmark_side"],
                     "confidence": component.get("landmark_confidence")}
-            else:
+            elif orientation.get("status") != "matched" and not report.get("orientation_unverified"):
                 report["orientation_unverified"] = (
                     "No asymmetric landmark observed: an outline alone cannot tell "
                     "one end from the other, so the model keeps its inferred axis.")
@@ -3038,6 +3068,14 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
     _synchronize_preview_variants(components, note)
     if progress is not None:
         progress(total, total)
+    archived = [c for c in pending if isinstance(c, dict)
+                and (c.get("model_match") or {}).get("attachment") == "accepted_library"]
+    orientations = sum((c["model_match"].get("accepted_orientation") or {}).get("status") == "matched"
+                       and not c["model_match"].get("orientation_manual_delta_preserved") for c in archived)
+    note(tx("Consolidati: {count} modelli scelti su {total} componenti; "
+            "{orientations} orientamenti ricavati dai ritagli con OpenCV. "
+            "Gli altri orientamenti restano automatici, manuali o da verificare.",
+            count=len(archived), total=total, orientations=orientations))
     note(tx("Modelli KiCad agganciati (scelte esplicite o compatibilita' "
             "meccanica): {resolved}.",
             resolved=resolved))

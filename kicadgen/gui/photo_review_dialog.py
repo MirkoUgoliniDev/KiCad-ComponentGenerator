@@ -1021,7 +1021,29 @@ def kicad_section_lines(component, _tr) -> list[tuple[str, str]]:
     @param _tr Translator of the Italian labels.
     @return One ``(label, value)`` pair, from `_kicad_model_state`.
     """
-    return [(_tr("Modello KiCad"), _kicad_model_state(component, _tr))]
+    report = component.get("model_match") or {}
+    selection = component.get("model_selection") or {}
+    attachment = report.get("attachment")
+    if selection.get("status") == "confirmed":
+        origin = "Scelta manuale"
+    elif attachment == "accepted_library":
+        origin = "Archivio consolidati"
+    elif attachment in ("automatic", "provisional"):
+        origin = "Ricerca nella libreria KiCad"
+    elif component.get("model_path") or report.get("selected_path"):
+        origin = "Provenienza non disponibile"
+    else:
+        origin = "Nessun modello assegnato"
+    lines = [(_tr("Modello KiCad"), _kicad_model_state(component, _tr)),
+             (_tr("Provenienza modello KiCad"), _tr(origin))]
+    if attachment == "accepted_library" and selection.get("status") != "confirmed":
+        orientation = report.get("accepted_orientation") or {}
+        if orientation.get("status") == "matched":
+            value = f"{orientation['rotation_deg']:g}° · " + _tr("da ritaglio verificato") + f" #{orientation['image_id']}"
+        else:
+            value = _tr("Da verificare: orientamento del ritaglio non disponibile o ambiguo")
+        lines.append((_tr("Orientamento da consolidati"), value))
+    return lines
 
 
 def component_attribute_sections(component, _tr, stage=STAGE_INVENTORY):

@@ -555,3 +555,68 @@ def test_contact_style_tooltip_is_retranslated_both_ways(window):
     assert window.combo_contact_style_3d.toolTip() == english
     window._on_language_changed(window.language_combo.findData("it"))
     assert "materiale della scheda" in window.combo_contact_style_3d.toolTip()
+
+
+def _invalid_through_params(window):
+    window._apply_extracted_castellated(extracted([
+        side("left", 1, contact_style="through_hole", through_hole_drill_mm=2.0)]))
+    window._sides[0]["through_hole_drill_declared"] = True
+    return window._current_castellated_params()
+
+
+def test_recovery_edits_invalid_drill_without_ai(window, monkeypatch, no_ai_no_freecad):
+    from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QDoubleSpinBox, QLabel
+    params = _invalid_through_params(window)
+    # The default GUI value enters the constructor as None; __post_init__
+    # resolves it to an AssumedSize of 1.7 mm, which the editor must preserve.
+    assert gui._declared_size(window.field_cast_thru_pad.value(), 1.7) is None
+    def edit(dialog):
+        drill = dialog.findChild(QDoubleSpinBox, "recoveryDrill_left")
+        assert drill.value() == 2.0
+        pad = dialog.findChild(QDoubleSpinBox, "recoveryThroughPad")
+        assert pad.value() == 1.7
+        buttons = dialog.findChild(QDialogButtonBox)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).click()
+        assert dialog.findChild(QLabel, "recoveryValidation").text()
+        drill.setValue(1.0)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).click()
+        assert dialog.result() == QDialog.DialogCode.Accepted
+        return dialog.result()
+    monkeypatch.setattr(QDialog, "exec", edit)
+    assert window._correct_invalid_through_holes(params)
+    assert window._sides[0]["through_hole_drill_mm"] == 1.0
+    assert window._sides[0]["through_hole_drill_declared"] is True
+    window._current_castellated_params().validate()
+    assert no_ai_no_freecad == []
+
+
+def test_recovery_cancel_preserves_parameters(window, monkeypatch):
+    from copy import deepcopy
+    from PyQt6.QtWidgets import QDialog, QDoubleSpinBox
+    params = _invalid_through_params(window)
+    before = deepcopy(window._sides)
+    def cancel(dialog):
+        dialog.findChild(QDoubleSpinBox, "recoveryDrill_left").setValue(.5)
+        return QDialog.DialogCode.Rejected
+    monkeypatch.setattr(QDialog, "exec", cancel)
+    assert not window._correct_invalid_through_holes(params)
+    assert window._sides == before
+    assert window.field_cast_thru_pad.value() == 1.7
+
+
+def test_invalid_hole_recovery_retries_generation_with_same_mode(window, monkeypatch):
+    params = _invalid_through_params(window)
+    monkeypatch.setattr(window, "_background_work_running", lambda: False)
+    monkeypatch.setattr(window, "_is_castellated", lambda: True)
+    window._automatic_generation_active = False
+    window.package_geometry = None
+    called = []
+    original_generate = window._generate
+    def recover(candidate):
+        assert candidate.sides[0].thru_hole_drill == 2.0
+        monkeypatch.setattr(window, "_generate", lambda automatic=False: called.append(automatic))
+        return True
+    monkeypatch.setattr(window, "_correct_invalid_through_holes", recover)
+    original_generate(automatic=True)
+    assert called == [True]
+    assert not window._automatic_generation_active
