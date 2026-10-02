@@ -123,3 +123,36 @@ def test_an_untouched_row_keeps_every_evidence():
     edited, = ComponentEditorDialog([original], COMPONENT_KINDS).components()
     for key in ("model_match", "model_selection", "package_evidence", "bbox_basis"):
         assert edited[key] == original[key]
+
+
+def _network_body(**extra):
+    return _body(_smd_class="SOIC-8", _smd_accepted=True, _smd_body=None, _smd_rotation_deg=180,
+                 _smd_rotation_kind="full", _smd_views_agree=True, _smd_terminal_count=8,
+                 _smd_prediction={"class": "SOIC-8"}, **extra)
+
+
+@pytest.mark.parametrize("edit", ["rotate", "move", "kind", "resize"])
+def test_a_hand_edit_withdraws_the_network_identity(edit):
+    """@brief Audit 2026-10-02: the network's pose must not undo the person's correction."""
+    dialog = ComponentEditorDialog([_network_body()], COMPONENT_KINDS)
+    if edit == "rotate":
+        rotation = dialog.table.cellWidget(0, 7)
+        rotation.setCurrentIndex(rotation.findData(90.0))
+    elif edit == "move":
+        dialog.table.cellWidget(0, 2).setValue(5.0)
+    elif edit == "kind":
+        combo = dialog.table.cellWidget(0, 1)
+        combo.setCurrentIndex(combo.findData("resistor"))
+    else:
+        dialog.table.cellWidget(0, 4).setValue(8.0)
+    edited, = dialog.components()
+    assert "_smd_accepted" not in edited and "_smd_rotation_deg" not in edited
+    assert edited["_smd_superseded"] is True
+    assert edited["_smd_prediction"] == {"class": "SOIC-8"}, "la lettura resta come storia"
+
+
+def test_an_untouched_row_keeps_the_network_identity():
+    """@brief Negative: applying without changes keeps what the network saw."""
+    edited, = ComponentEditorDialog([_network_body()], COMPONENT_KINDS).components()
+    assert edited["_smd_accepted"] is True and edited["_smd_rotation_deg"] == 180
+    assert "_smd_superseded" not in edited

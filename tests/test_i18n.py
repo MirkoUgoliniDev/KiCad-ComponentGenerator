@@ -390,3 +390,16 @@ def test_the_old_review_titles_are_replaced_in_an_existing_database(tmp_path):
     edited = tmp_path / "edited.sqlite3"
     ProfileStore(edited).save_translation("photo_review.title", "it", "Mio titolo")
     assert ProfileStore(edited).translation("photo_review.title", "it") == "Mio titolo"
+
+
+def test_lossy_bundled_translations_are_repaired_without_overwriting_user_text(tmp_path):
+    """Restore known damaged defaults while preserving independently edited translations."""
+    database = tmp_path / "profiles.sqlite3"
+    store = ProfileStore(database)
+    store.save_translation("ui:Categoria sconosciuta", "fr", "Cat?gorie inconnue")
+    store.save_translation("ui:Classificazioni in conflitto", "de", "Widerspr?chliche Klassifizierungen")
+    store.save_translation("ui:Categoria sconosciuta", "de", "Meine Kategorie")
+    store = ProfileStore(database)
+    assert store.translation("ui:Categoria sconosciuta", "fr") == "Catégorie inconnue"
+    assert store.translation("ui:Classificazioni in conflitto", "de") == "Widersprüchliche Klassifizierungen"
+    assert store.translation("ui:Categoria sconosciuta", "de") == "Meine Kategorie"

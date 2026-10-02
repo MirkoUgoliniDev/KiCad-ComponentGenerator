@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .openrouter import OpenRouterError
+from .ai_diagnostics import CallCancelled
 from .messages import CACHE_HIT, WARNING, as_warning, kind_of, tx, warning
 # Solo costanti: photo_refine regge l'assenza di OpenCV da se'.
 from ..core.validation import positive_number
@@ -332,7 +333,7 @@ def _warn_if_too_coarse(crop_px, body_length, warn, smallest_part_mm=None):
             "corpo con il lato corto di {smallest:.2f} mm (il piu' piccolo che si "
             "assume presente, non una misura di questa scheda) occupa {readable:.2f} px, "
             "sotto la soglia indicativa di {MIN_PACKAGE_PIXELS} px. Alcuni dettagli "
-            "potrebbero non essere distinguibili; questo non dimostra che manchino componenti. "
+            "potrebbero non essere distinguibili; l'inventario potrebbe essere incompleto, ma questo non dimostra che manchino componenti. "
             "Per raggiungere la soglia servirebbe una foto originale con la scheda larga almeno {needed:.0f} px "
             "(questa ne ha {crop_px}).",
             scale=scale,
@@ -515,7 +516,7 @@ def read_photo(path):
     return cv2.imdecode(encoded, cv2.IMREAD_COLOR)
 
 
-def prepare_photo(path, length, width, metadata=None):
+def prepare_photo(path, length, width, metadata=None, *, frame_callback=None):
     """@brief Read a photo, locate the board (deskewing if needed) and return the calibrated crop.
 
     @param path Photo file.
@@ -525,6 +526,9 @@ def prepare_photo(path, length, width, metadata=None):
         when the board is not found, `board_failure` holds the reason for the user;
         when it is found with proportions other than the declared ones,
         `board_warning` states the two axis scales (see `aspect_deformation`).
+    @param frame_callback Optional callback(full_bgr, box_px) receiving the
+        complete, possibly deskewed frame and its board ROI. A crop classifier
+        can retain component margins beyond the board edge in that frame.
     @return BGR crop of the board, or None when the photo cannot be read or calibrated.
     """
     from .photo_refine import find_board, locate_board
@@ -612,6 +616,8 @@ def prepare_photo(path, length, width, metadata=None):
                 {edge: max(1, round(MAX_NOTCH_DEPTH_MM * scale + slack))
                  for edge, scale in across.items()},
                 outside_px=max(1, round(slack)))
+    if frame_callback is not None:
+        frame_callback(image, (x0, y0, x1, y1))
     return image[y0:y1, x0:x1].copy()
 
 
@@ -1105,13 +1111,207 @@ def read_retained_bodies(photo, report, length, width, model, call, log, cache_d
                   announce)
 
 
+def _outside_prediction():
+    """Placeholder prediction of a box with no area left inside the photo: never accepted."""
+    return {'class': '_outside', 'kind': 'generic', 'package': '', 'class_confidence': 0.0,
+            'accepted': False, 'rotation_deg': None, 'rotation_confidence': 0.0,
+            'rotation_kind': 'none', 'rotation_views_agree': False, 'terminal_count': None,
+            'size_mm': None, 'model_match': {}, 'footprint': None,
+            'footprint_candidates': []}
+
+
+def _clamped_box(box):
+    """A normalised [l, t, r, b] box clipped to the photo, or None when nothing is left."""
+    left, top, right, bottom = (min(1.0, max(0.0, float(v))) for v in box)
+    return [left, top, right, bottom] if right > left and bottom > top else None
+
+
+def classify_smd_rows(rows, photo, frame_px, mm_per_pixel, log, cancel, announce):
+    """@brief Classify inventory rows with the local SMD network and write its verdict in them.
+
+    @param rows Rows of yolo_only_components (modified in place); `_box` is
+        normalised to the calibrated board.
+    @param photo Photograph the crops are cut from: the full frame when
+        `frame_px` is given, otherwise the calibrated board itself.
+    @param frame_px Board rectangle inside `photo` in pixels, or None.
+    @param mm_per_pixel (x, y) scale of the calibrated board.
+    @param log Progress callback.
+    @param cancel Cancellation channel (event, predicate or None).
+    @param announce Phase announcer of the caller.
+    @return The predictions, one per row.
+    @throws CallCancelled When the user cancelled during the classification
+        or the KiCad matching: the network signals it with its own exceptions,
+        which a caller would otherwise downgrade to a failed inventory and
+        continue with estimated envelopes.
+    @note A box dragged past the photo edge in the review is clipped to the
+        photo; one with no area left gets a placeholder prediction (not
+        accepted) instead of aborting the whole batch (audit 2026-10-02, D2).
+    """
+    from .smd_component_classifier import classify_photo_boxes
+    announce('smd', 'smd_classifier.pt (v3)')
+    boxes = [_clamped_box(row['_box']) for row in rows]
+    inside = [index for index, box in enumerate(boxes) if box is not None]
+    try:
+        found = classify_photo_boxes(
+            photo, [boxes[index] for index in inside], box_format='normalized',
+            box_frame_px=frame_px, mm_per_pixel=mm_per_pixel,
+            log=log, cancel=cancel, phase=announce) if inside else []
+    except Exception as exc:
+        # Si decide dal canale di annullamento, non dal tipo o dal testo.
+        if _cancel_requested(cancel):
+            raise CallCancelled(tx("Classificazione SMD annullata")) from exc
+        raise
+    predictions = [_outside_prediction() for _ in rows]
+    for index, prediction in zip(inside, found):
+        predictions[index] = prediction
+    for row, prediction in zip(rows, predictions):
+        row['_smd_prediction'] = prediction
+        row['_source'] = 'YOLO + SMD local'
+        row['_smd_class'] = prediction['class']
+        # Verdetto della rete in un campo suo: arriva fino all'abbinatore KiCad,
+        # che non vede `_smd_prediction` (kicad_models._local_classifier_identity).
+        row['_smd_accepted'] = bool(prediction['accepted'])
+        row['_smd_body'] = prediction.get('body')
+        row['_smd_rotation_kind'] = prediction.get('rotation_kind')
+        row['_smd_views_agree'] = prediction.get('rotation_views_agree') is True
+        row['_smd_terminal_count'] = prediction.get('terminal_count')
+        row['_smd_rotation_deg'] = prediction['rotation_deg']
+        row['_smd_rotation_confidence'] = prediction['rotation_confidence']
+        # A parole come in ogni altro percorso: la rete e' un solo modello non
+        # calibrato, quindi mai 'high'; la probabilita' resta in _smd_prediction.
+        row['class_confidence'] = 'medium' if prediction['accepted'] else 'low'
+        row['_category_source'] = 'smd_classifier.pt v3'
+        row['_category_status'] = 'proposed' if prediction['accepted'] else 'undetermined'
+        row['kind'] = prediction['kind'] if prediction['accepted'] else 'generic'
+        row['class'] = row['kind']
+        row['_detected_kind'] = row['kind']
+        row['package'] = prediction['package'] if prediction['accepted'] else ''
+        row['package_source'] = 'smd_classifier.pt v3'
+        row['name'] = f"{prediction['class'] if prediction['accepted'] else 'generic'} {row['_id']}"
+        row['model_match'] = prediction['model_match']
+        row['footprint'] = prediction['footprint']
+        row['footprint_candidates'] = prediction['footprint_candidates']
+        # Keep the measured body's angle: KiCad pose is separate evidence.
+        row['_orientation_verified'] = False
+        row['_review_reason'] = ('Tipo e orientamento proposti dalla rete locale; '
+            'altezza stimata e abbinamento KiCad da verificare.' if prediction['accepted']
+            else 'Rete locale: tipo non riconosciuto o confidenza insufficiente.')
+    log(tx("Rete SMD locale: {n} corpi classificati; {accepted} sopra soglia.",
+           n=len(rows), accepted=sum(p['accepted'] for p in predictions)))
+    return predictions
+
+
+def _cancel_requested(cancel):
+    """Whether the cancellation channel of extract_inventory (event, predicate or None) is set."""
+    if cancel is None:
+        return False
+    try:
+        return bool(cancel.is_set() if hasattr(cancel, 'is_set') else cancel())
+    except Exception:  # noqa: BLE001 - un canale guasto non e' una richiesta di annullo
+        return False
+
+
+def recheck_unresolved_smd_rows(photo, report, rows, length, width, model, call, log,
+                                cache_dir, crop_prompt, announce, *, crop_model=None):
+    """@brief Send to the AI crop reading only the bodies the local SMD network left unresolved.
+
+    @param photo Calibrated BGR photograph the rows were measured on.
+    @param report InventoryResult; a crop-reading warning is appended to
+        `report.warnings` and the counts go to `report.calibration`
+        (`smd_resolved_count`, `smd_ai_recheck_count`).
+    @param rows Inventory rows carrying `_smd_prediction` (modified in place).
+    @param length Board extent along X, in mm.
+    @param width Board extent along Y, in mm.
+    @param model Model of the paid calls on the photograph: extract_inventory
+        passes `classifier_model or model`, as on the 'yolo' path.
+    @param call Logged paid call, or None: without it nothing is sent and the
+        unresolved bodies stay generic for the review.
+    @param log Progress callback.
+    @param cache_dir Photo cache folder, or None.
+    @param crop_prompt Profile field 'crop_prompt' (None/blank: factory text).
+    @param announce Phase announcer of extract_inventory.
+    @param crop_model Profile field 'crop_model'; None or blank uses `model`.
+    @return The rows sent to the AI, in their original order.
+    @note "Unresolved" is the network's own verdict (`accepted` False: class
+        `_other` or probability under the checkpoint threshold), not a
+        threshold chosen here. A network error with high confidence is NOT
+        re-checked: the reading is a fallback for what the network declines,
+        not a second opinion on what it decides (user request 2026-10-02).
+    @note The class of a re-checked row becomes 'unknown' before the reading:
+        'generic' is not a class the crop reading may replace
+        (photo_crop_reading.reclassable_class), so an agreed reading would
+        otherwise never be adopted.
+    @throws CallCancelled (or subclass) when the user cancels a paid call.
+    """
+    pending = [row for row in rows
+               if isinstance(row.get('_smd_prediction'), dict)
+               and not row['_smd_prediction'].get('accepted')]
+    report.calibration['smd_resolved_count'] = len(rows) - len(pending)
+    report.calibration['smd_ai_recheck_count'] = len(pending) if call is not None else 0
+    if not pending:
+        log(tx("Rete SMD locale: tutti i {n} corpi risolti in locale, nessuna riverifica AI.",
+               n=len(rows)))
+        return []
+    if call is None:
+        log(tx("Rete SMD locale: {pending} corpi non risolti restano generici da rivedere "
+               "(nessun modello AI disponibile per la riverifica).", pending=len(pending)))
+        return []
+    log(tx("Rete SMD locale: {resolved} corpi risolti in locale, {pending} non risolti "
+           "mandati alla riverifica AI dei ritagli.",
+           resolved=len(rows) - len(pending), pending=len(pending)))
+    network_reasons = {}
+    for row in pending:
+        row['_smd_ai_recheck'] = True
+        row['_smd_accepted'] = False
+        row['class'] = 'unknown'
+        row['class_confidence'] = 'low'
+        # Il motivo «tipo non riconosciuto» della rete si mette da parte: se la
+        # riverifica trova il tipo, ripeterlo contraddirebbe la riga.
+        network_reasons[id(row)] = row.pop('_review_reason', None)
+    from .photo_crop_reading import read_bodies
+    reader = (crop_model or '').strip() or model
+    announce('llm_crops', reader)
+
+    def progress(done, total, calls):
+        announce('llm_crops', tx("{model} · {calls} richieste", model=reader, calls=calls),
+                 done, total)
+    summary = read_bodies(photo, pending, length, width, reader, call, log, cache_dir,
+                          system_prompt=crop_prompt, progress=progress)
+    if summary.warning:
+        report.warnings.append(summary.warning)
+    from .photo_crop_reading import _NONSPECIFIC_INVENTORY_CLASSES
+    for row in pending:
+        cls = row.get('class')
+        if cls and cls not in _NONSPECIFIC_INVENTORY_CLASSES:
+            row['_source'] = 'YOLO + SMD local + AI crop recheck'
+            row['name'] = f"{cls} {row.get('_id')}"
+            # In testa, non al posto: read_bodies puo' avervi gia' scritto perche'
+            # ha svuotato un package (taglia, SOIC) o cambiato classe.
+            reason = tx("Rete locale: tipo non riconosciuto; tipo letto dalla riverifica AI "
+                        "del ritaglio, da verificare.")
+            previous = row.get('_review_reason')
+            row['_review_reason'] = reason + (f' | {previous}' if previous else '')
+            row['_uncertain'] = True
+        else:
+            if not cls or cls in ('unknown', 'other'):
+                # Nessuna lettura concorde: il corpo resta generico, come prima.
+                row['class'] = 'generic'
+            network = network_reasons.get(id(row))
+            if network:
+                previous = row.get('_review_reason')
+                row['_review_reason'] = f'{previous} | {network}' if previous else network
+        # 'semiconductor_unknown' resta: e' piu' di 'generic' (piedini visti),
+        # ma non e' un tipo, quindi non si dice «tipo letto dall'AI».
+    return pending
+
+
 def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                       top_photo_index=None, extra_instructions=None,
                       grounding=True, cache_dir=None, classifier_model=None, mechanical=True,
                       grounding_prompt=None, verification_prompt=None, top_photo_source='AI',
                       detector='ai', yolo_model_path=None, review_proposals=None,
                       declared=None, phase=None, yolo_confidence=None, yolo_settings=None,
-                      recount_contacts=None, crop_prompt=None, crop_model=None):
+                      recount_contacts=None, crop_prompt=None, crop_model=None, cancel=None):
     """@brief Calibrate the photo and extract reviewed component envelopes.
 
     @param crop_prompt Instructions of the per-body crop reading (profile
@@ -1179,6 +1379,9 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     announce = _phase_announcer(phase, log)
     if detector not in PHOTO_DETECTORS:
         raise ValueError(tx("Rilevatore fotografico non supportato."))
+    if detector == 'yolo_smd' and yolo_model_path is None:
+        from ..app_paths import resource_path
+        yolo_model_path = resource_path('models', 'pcb_component_detector_yolov8m_best.pt')
     report = InventoryResult()
     def warn(message):
         report.warnings.append(message)
@@ -1210,9 +1413,13 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         failures = []
         for i,path in photos:
             calibration = {}
-            photo = prepare_photo(path,length,width,calibration)
+            frames = []
+            photo = prepare_photo(path,length,width,calibration,
+                **({'frame_callback': lambda full, roi: frames.append((full, roi))}
+                   if detector == 'yolo_smd' else {}))
             if photo is not None:
-                candidates.append((photo.shape[0]*photo.shape[1],path,photo,calibration))
+                candidates.append((photo.shape[0]*photo.shape[1],path,photo,calibration,
+                                   frames[0] if frames else None))
             elif calibration.get("board_failure"):
                 failures.append(f"{Path(path).name}: {calibration['board_failure']}")
         for failure in failures:
@@ -1233,7 +1440,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     except (OSError, ValueError) as exc:
         warn(tx("Foto non leggibile: {exc}", exc=exc))
         return report
-    _, path, photo, report.calibration = max(candidates, key=lambda c:c[0])
+    _, path, photo, report.calibration, source_frame = max(candidates, key=lambda c:c[0])
     report.photo = path.name
     height_px, width_px = photo.shape[:2]
     log(tx("OpenCV (locale): scheda trovata in {name}, {w} x {h} px; scala X {sx:.2f} px/mm, "
@@ -1286,7 +1493,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     import cv2
     ok, encoded = cv2.imencode(".png", photo)
     report.photo_png = encoded.tobytes() if ok else None
-    if detector in ('yolo', 'yolo_only', 'vlm'):
+    if detector in ('yolo', 'yolo_only', 'yolo_smd', 'vlm'):
         from .photo_global_inventory import review_global_inventory
         proposals = []
         if detector in LOCAL_DETECTORS:
@@ -1300,6 +1507,8 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             announce('yolo', model_label(yolo_model_path))
             log(tx("YOLO locale: localizzazione senza invio della foto; verifica package "
                    "AI successiva.") if detector == 'yolo' else
+                tx("YOLO e rete SMD: classificazione locale dei ritagli.")
+                if detector == 'yolo_smd' else
                 tx("Solo YOLO locale: la foto non viene inviata a nessun modello; i "
                    "riquadri tenuti nella revisione saranno il risultato."))
             proposals = detect_yolo_components(photo, length, width, model_path=yolo_model_path,
@@ -1383,6 +1592,27 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                 announce('', '')
                 return report
             proposals = list(kept)
+        if detector == 'yolo_smd':
+            rows = yolo_only_components(proposals, reviewed=review_proposals is not None, log=log)
+            if rows:
+                if source_frame is None:
+                    raise ValueError(tx("Foto completa non disponibile per i ritagli SMD"))
+                full_photo, board_roi = source_frame
+                classify_smd_rows(rows, full_photo, board_roi,
+                                  (length / width_px, width / height_px), log, cancel, announce)
+                recheck_unresolved_smd_rows(photo, report, rows, length, width,
+                                            classifier_model or model, call, log,
+                                            cache_dir, crop_prompt, announce,
+                                            crop_model=crop_model)
+            report.components = rows
+            announce('opencv', tx("campionamento dei colori dalla foto"))
+            sample_body_colors(photo, rows, log)
+            report.calibration.update(detector=detector, proposal_count=len(proposals),
+                                      inventory_strategy='local-detector-smd')
+            report.overlay_png = draw_inventory(photo, rows)
+            save_inventory_evidence(cache_dir, report.photo_png, report.overlay_png, rows, log)
+            announce('', '')
+            return report
         if detector == 'yolo_only':
             # Scelta dell'utente (25/09): «si fermi li' e basta, fa vedere solo
             # i rettangoli individuati». Nessuna riconciliazione a pagamento:
@@ -1528,9 +1758,9 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
 
 #: Rilevatori fotografici accettati da extract_inventory. `yolo_only` e'
 #: `yolo` senza la riconciliazione a pagamento (utente, 2026-09-25).
-PHOTO_DETECTORS = ('ai', 'yolo', 'yolo_only', 'vlm')
+PHOTO_DETECTORS = ('ai', 'yolo', 'yolo_only', 'vlm', 'yolo_smd')
 #: Rilevatori che fanno girare il modello YOLO locale.
-LOCAL_DETECTORS = ('yolo', 'yolo_only')
+LOCAL_DETECTORS = ('yolo', 'yolo_only', 'yolo_smd')
 
 #: Classe del rilevatore -> tipo del componente, per il percorso senza
 #: riconciliazione. Tabella DICHIARATA, non dedotta: le classi che hanno un
@@ -1717,6 +1947,10 @@ class ReviewBundle:
     detector: str = 'yolo'
     source_json: str = ''
     photo_path: Path | None = None
+    #: False for a bundle copied from the cache without a person's review (the
+    #: fallback of the main window): its rows are detector proposals, weak
+    #: ones included, and must not count as kept by a person.
+    reviewed: bool = True
 
 
 def _valid_proposal_row(row):
@@ -1781,7 +2015,7 @@ def _atomic_write_bytes(path, payload):
 
 
 def save_review_bundle(project_dir, proposals, photo_png, length_mm, width_mm, *,
-                       detector='yolo', source_json='', stamp=None):
+                       detector='yolo', source_json='', stamp=None, reviewed=True):
     """@brief Store reviewed proposals, their calibration and photograph in the component folder.
 
     @param project_dir Component folder; `photo-review/` is created inside it.
@@ -1792,6 +2026,8 @@ def save_review_bundle(project_dir, proposals, photo_png, length_mm, width_mm, *
     @param length_mm Board X extent in mm the boxes were calibrated with.
     @param width_mm Board Y extent in mm.
     @param detector Name of the detector the proposals came from.
+    @param reviewed False when no person reviewed the proposals (copied from
+        the cache): stored, and read back as ReviewBundle.reviewed.
     @param source_json Name of the cache file the proposals were first read
         from, kept for traceability only.
     @param stamp Timestamp in the evidence format; now when omitted.
@@ -1820,6 +2056,7 @@ def save_review_bundle(project_dir, proposals, photo_png, length_mm, width_mm, *
     document = dict(format=REVIEW_BUNDLE_FORMAT,
                     stamp=stamp or time.strftime('%Y%m%d-%H%M%S'),
                     detector=str(detector), source_json=str(source_json or ''),
+                    reviewed=bool(reviewed),
                     body_length_mm=float(length_mm), body_width_mm=float(width_mm),
                     photo=REVIEW_BUNDLE_PHOTO if (photo_png or (folder / REVIEW_BUNDLE_PHOTO).is_file()) else None,
                     count=len(rows), proposals=rows)
@@ -1868,13 +2105,46 @@ def load_review_bundle(project_dir):
                         stamp=str(document.get('stamp') or ''),
                         detector=str(document.get('detector') or 'yolo'),
                         source_json=str(document.get('source_json') or ''),
+                        # Assente nei pacchetti scritti prima del campo: quelli
+                        # venivano tutti dalla finestra di revisione.
+                        reviewed=document.get('reviewed') is not False,
                         photo_path=photo_path if photo_path.is_file() else None)
+
+
+def _reconcile_with_smd_network(photo, report, proposals, length, width, model, call, log,
+                                cache_dir, crop_prompt, phase, crop_model, cancel=None,
+                                reviewed=True):
+    """Relaunch of a 'yolo_smd' bundle: network on the calibrated photo, AI only for the unresolved.
+
+    The bundle keeps only the calibrated board, so the crops are cut from it
+    (frame_px None): a body on the board edge loses the margin outside the
+    board, which the full-frame path of extract_inventory keeps.
+    """
+    announce = _phase_announcer(phase, log)
+    rows = yolo_only_components(proposals, reviewed=reviewed, log=log)
+    if rows:
+        height_px, width_px = photo.shape[:2]
+        classify_smd_rows(rows, photo, None, (length / width_px, width / height_px), log,
+                          cancel, announce)
+        recheck_unresolved_smd_rows(photo, report, rows, length, width, model, call, log,
+                                    cache_dir, crop_prompt, announce, crop_model=crop_model)
+    report.components = rows
+    announce('opencv', tx("campionamento dei colori dalla foto"))
+    sample_body_colors(photo, rows, log)
+    report.calibration.update(detector='yolo_smd', proposal_count=len(proposals),
+                              inventory_strategy='local-detector-smd',
+                              reconciled_from_saved=True)
+    report.overlay_png = draw_inventory(photo, rows)
+    save_inventory_evidence(cache_dir, report.photo_png, report.overlay_png, rows, log,
+                            label=INVENTORY_EVIDENCE_LABEL)
+    announce('', '')
+    return report
 
 
 def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
                               cache_dir=None, *, declared=None, verification_prompt=None,
                               extra_instructions=None, detector='yolo', crop_prompt=None,
-                              phase=None, crop_model=None):
+                              phase=None, crop_model=None, cancel=None, reviewed=True):
     """@brief Re-run the paid reconciliation on already reviewed detector proposals.
 
     @param photo Calibrated BGR crop (numpy array) or its PNG bytes: the same
@@ -1893,6 +2163,15 @@ def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
     @param verification_prompt Custom notes, as in the normal path.
     @param extra_instructions User notes, as in the normal path.
     @param detector Detector name recorded in the calibration, for the report.
+        'yolo_smd' takes its own route (_reconcile_with_smd_network): the local
+        network classifies the bodies and only the unresolved ones go to the
+        paid crop reading; no global inventory request.
+    @param reviewed False when the proposals were never reviewed by a person
+        (ReviewBundle.reviewed): on the 'yolo_smd' route weak proposals are
+        then left out and no body counts as kept by a person.
+    @param cancel Cancellation channel (event, predicate or None) checked by
+        the local SMD network and its KiCad matching, which make no paid call
+        and are therefore not stopped by the logged call's own check.
     @param crop_prompt Instructions of the per-body crop reading (profile
         field 'crop_prompt'), as in extract_inventory; None or blank sends the
         factory default.
@@ -1957,6 +2236,13 @@ def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
         + (tx(", di cui {manual} disegnate a mano e inoltrate senza misura ne' filtro",
               manual=manual) if manual else '')
         + tx("; nessun rilevatore locale e nessun documento vengono rieseguiti."))
+    if detector == 'yolo_smd':
+        # Il pacchetto e' nato con la rete SMD (utente, 2026-10-02: solo cio'
+        # che la rete non risolve va all'AI): il rilancio rifa' la stessa
+        # strada invece dell'inventario globale a pagamento su tutti i corpi.
+        return _reconcile_with_smd_network(photo, report, proposals, length, width, model,
+                                           call, log, cache_dir, crop_prompt, phase,
+                                           crop_model, cancel, reviewed)
     seen = []
     def observe(message):
         seen.append(message)

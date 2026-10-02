@@ -94,6 +94,173 @@ def test_human_progress_updates_for_each_reading_and_keeps_audit_in_log():
     assert all(not per_item_detail(s) for s in logs if 'lettura 1/2' in s)
 
 
+def test_v5_observations_precede_classification_and_count_visible_contacts():
+    schema = crop.observation_tool()['function']['parameters']
+    names = list(schema['properties'])
+    assert names.index('leads_by_side') < names.index('visual_class_evidence') < names.index('visual_class')
+    assert 'contacts_complete' in schema['required']
+    assert 'hidden' in schema['properties']['metal_contacts_total']['description']
+    assert 'SAME target' in crop.SYSTEM_PROMPT
+
+
+@pytest.mark.parametrize('basis,expected', [
+    ('body', 'body estimate; leads may extend beyond it'),
+    ('total', 'estimated total envelope including terminals'),
+    ('unknown', 'measurement extent uncertain')])
+def test_crop_envelope_does_not_invent_a_measurement_basis(basis, expected):
+    _, text = crop.body_crop(_photo(), _row(bbox_basis=basis), LENGTH, WIDTH)
+    assert expected in text
+
+
+def test_visible_lower_bound_is_not_adopted_as_complete_terminal_count():
+    row = _row()
+    summary, _ = _read([row], Script(_obs(3, 3, contacts_complete=False),
+                                     _obs(3, 3, contacts_complete=False)))
+    assert summary.inconclusive == 1
+    assert row['lead_count'] == 16  # Keep previous evidence, explicitly demoted for review.
+    assert row['lead_count_confidence'] == 'low'
+    assert 'contacts_incomplete' in row['_review_reason']
+
+
+def test_complete_per_side_counts_cannot_disagree_with_the_total():
+    row = _row()
+    summary, _ = _read([row], Script(_obs(3, 0, 0, 3, metal_contacts_total=8),
+                                     _obs(3, 0, 0, 3, metal_contacts_total=8)))
+    assert summary.inconclusive == 1
+    assert 'contact_total_disagrees_with_sides' in row['_review_reason']
+
+
+@pytest.mark.parametrize('inventory,observed', [('resistor', 'capacitor'),
+                                              ('capacitor', 'resistor'),
+                                              ('resistor', 'diode')])
+def test_agreeing_visual_category_conflict_is_visible_without_blind_reclassification(inventory, observed):
+    row = _row(**{'class': inventory, 'kind': inventory, 'package': '0805', 'lead_count': 2})
+    observation = _chip(printed_text='none', marking='', visual_class=observed,
+                        visual_class_confidence='medium',
+                        visual_class_evidence='Visible body construction and end terminations differ.')
+    summary, _ = _read([row], Script(observation, observation))
+    assert summary.inconclusive == 1 and summary.agreed == 0
+    assert row['class'] == inventory
+    assert 'categoria da verificare' in row['_review_reason']
+
+
+def test_v4_default_prompt_is_marked_for_upgrade():
+    assert '0e782adcad3bafdc2aa4f777567d6cce28c4c3fa468715e114715d14c3dbaafa' in crop.SUPERSEDED_CROP_PROMPT_DIGESTS
+
+
+def test_tab_is_a_separate_contact_but_not_an_extra_ordinary_lead():
+    reading = _derive(_obs(0, 3, 0, 0, tab=True, metal_contacts_total=4), inventory_class='ic')
+    assert 'contact_total_disagrees_with_sides' not in reading['inconclusive']
+    bad = _derive(_obs(0, 3, 0, 0, tab=True, metal_contacts_total=5), inventory_class='ic')
+    assert 'contact_total_disagrees_with_sides' in bad['inconclusive']
+
+
+def test_explicit_complete_leaded_observation_cannot_have_an_unseen_side():
+    reading = _derive(_obs(4, 4, None, 0, contacts_complete=True))
+    assert 'contacts_incomplete' in reading['inconclusive']
+    # Raw input cannot forge the private marker used to distinguish historical data.
+    forged = _derive(_obs(4, 4, None, 0, contacts_complete=True,
+                         _contacts_complete_explicit=False))
+    assert 'contacts_incomplete' in forged['inconclusive']
+
+
+def test_legacy_null_sides_and_two_end_caps_keep_their_semantics():
+    legacy = _derive(_obs(4, 4, None, 0))
+    assert 'contacts_incomplete' not in legacy['inconclusive']
+    two_caps = _derive(_chip(contacts_complete=True), inventory_class='resistor')
+    assert 'contacts_incomplete' not in two_caps['inconclusive']
+
+
+def test_generic_semiconductor_geometry_is_not_a_confirmed_class():
+    reading = _derive(_obs(1, 2, 0, 0), inventory_class='ic')
+    assert reading['class'] == 'semiconductor_unknown'
+    assert not crop.class_supported_by_readings(reading, reading)
+    precise = _derive(_obs(4, 4, 0, 0), inventory_class='ic')
+    assert crop.class_supported_by_readings(precise, precise)
+
+
+def test_category_support_helper_rejects_conflicting_confident_visual_labels():
+    first = _derive(_obs(4, 4, 0, 0, visual_class='diode',
+                        visual_class_confidence='high',
+                        visual_class_evidence='Visible diode body.'))
+    second = _derive(_obs(4, 4, 0, 0, visual_class='capacitor',
+                         visual_class_confidence='high',
+                         visual_class_evidence='Visible capacitor body.'))
+    assert first['class'] == second['class'] == 'ic'
+    assert first['class_decided'] and second['class_decided']
+    assert not crop.class_supported_by_readings(first, second)
+    assert not crop.class_supported_by_readings(second, first)
+    assert crop.class_supported_by_readings(first, dict(first))
+
+
+def test_agreed_inventory_category_is_not_reported_as_visually_confirmed():
+    row = _row(**{'class': 'resistor', 'package': '0805', 'lead_count': 2})
+    summary, _ = _read([row], Script(_chip(), _chip()))
+    assert summary.agreed == 1
+    assert row['_crop_class_status'] == 'inventory_retained'
+    assert row['_crop_class_decided'] is False
+
+
+def test_agreeing_confident_visual_labels_support_the_derived_category():
+    row = _row(**{'class': 'ic', 'kind': 'ic', 'package': 'SOIC-16', 'lead_count': 16})
+    first = _obs(4, 4, 0, 0, visual_class='ic', visual_class_confidence='high',
+                 visual_class_evidence='Two opposing rows of visible leads.')
+    second = dict(first)
+
+    summary, _ = _read([row], Script(first, second))
+
+    assert summary.agreed == 1
+    assert row['_crop_reading'] == 'agreed'
+    assert row['_crop_class_status'] == 'supported'
+    assert row['_crop_class_decided'] is True
+
+
+def test_conflicting_confident_visual_labels_require_review_but_keep_terminal_geometry(
+    monkeypatch, tmp_path,
+):
+    row = _row(**{'class': 'ic', 'kind': 'ic', 'package': 'SOIC-16', 'lead_count': 16})
+    first = _obs(4, 4, 0, 0, visual_class='diode', visual_class_confidence='high',
+                 visual_class_evidence='First reading sees a diode body.')
+    second = _obs(4, 4, 0, 0, visual_class='capacitor', visual_class_confidence='high',
+                  visual_class_evidence='Second reading sees a capacitor body.')
+
+    summary, _ = _read([row], Script(first, second))
+
+    assert summary.inconclusive == 1
+    assert row['_crop_class_status'] == 'conflict'
+    assert row['_category_status'] == 'conflict'
+    assert row['_crop_class_decided'] is False
+    assert row['class'] == 'ic'
+    assert row['class_confidence'] == 'low'
+    assert row['_terminal_status'] == 'supported'
+    assert row['lead_count'] == 8 and row['lead_count_confidence'] == 'medium'
+    assert 'categorie visive diverse' in row['_review_reason']
+    assert 'diode' in row['_review_reason'] and 'capacitor' in row['_review_reason']
+
+    # The existing model gate must leave alternatives review-only even when
+    # the independently agreed lead geometry supports a precise package.
+    from kicadgen.cad3d import kicad_models
+    monkeypatch.setattr(kicad_models, '_search_roots', lambda library: [tmp_path])
+
+    def candidates(_component, result, **kwargs):
+        result.update(status='matched', selected_path=str(tmp_path / 'candidate.step'),
+                      candidates=[{'path': str(tmp_path / 'candidate.step'), 'status': 'matched'}])
+        return result
+
+    monkeypatch.setattr(kicad_models, '_library_search', candidates)
+    match = kicad_models.model_candidates(row, library=tmp_path)
+    assert match['status'] == 'review_required'
+    assert match['selected_path'] is None
+    assert match['candidates'][0]['status'] == 'review_required'
+
+
+def test_class_support_requires_both_readings_to_decide():
+    first = _derive(_chip(), inventory_class='resistor')
+    second = dict(first, class_decided=True)
+    assert crop.agreed_reading(first, second)['class_decided'] is False
+    assert crop.agreed_reading(second, first)['class_decided'] is False
+
+
 def _derive(answer, envelope=(3.0, 1.5, 0.2), inventory_class=None, lead_count=None,
             package=None):
     observation = crop.parse_observation(answer)
@@ -157,7 +324,7 @@ def test_two_agreeing_observations_are_adopted_through_the_paid_call():
     for request in call.requests:
         assert request['model'] == DEEPSEEK and request['max_tokens'] == crop.MAX_TOKENS
         assert request['tool']['function']['name'] == 'observe_body'
-        assert [b['type'] for b in request['content_blocks']] == ['text', 'image_url']
+        assert [b['type'] for b in request['content_blocks']] == ['text', 'image_url', 'image_url']
         text = request['content_blocks'][0]['text']
         assert 'Measured envelope' in text and 'Long side 6.00 mm, short side 5.00 mm' in text
         assert crop.SIZE_TABLE_TEXT in text
@@ -406,7 +573,8 @@ def test_a_terminal_count_contradicting_the_inventory_is_inconclusive_in_both_di
     assert _derive(_obs(None, None, None, None, metal_contacts_total=1, two_end_terminals_only=True),
                    inventory_class='ic')['inconclusive'] == []
     counted = _derive(_obs(4, 4, 0, 0, metal_contacts_total=0), inventory_class='ic')
-    assert counted['inconclusive'] == [] and counted['leads'] == (4, 4, 0, 0)
+    assert counted['inconclusive'] == ['contact_total_disagrees_with_sides']
+    assert counted['leads'] == (4, 4, 0, 0)
     assert _derive(_obs(None, None, None, None, metal_contacts_total=2, two_end_terminals_only=True),
                    inventory_class='ic')['inconclusive'] == ['terminals_contradict_inventory']
     led = _chip(printed_text='none', marking='', top_translucent=True, coloured_patch_at_end=True)
@@ -1081,7 +1249,7 @@ def test_prompt_requests_grounded_classification_without_board_specific_examples
     import json
     from kicadgen.services.photo_global_inventory import CLASSES
     prompt = crop.SYSTEM_PROMPT
-    assert crop.PROMPT_VERSION == 'crop-reading-4'
+    assert crop.PROMPT_VERSION == 'crop-reading-5'
     questionnaire = json.dumps(crop.observation_tool()).lower()
     texts = prompt.lower() + ' ' + questionnaire + ' ' + crop.SIZE_TABLE_TEXT.lower()
     assert {'resistor', 'capacitor'} <= _class_words(texts)
@@ -1133,7 +1301,7 @@ def test_a_reading_cached_with_other_instructions_is_not_reused(tmp_path):
 #: observation_tool and SYSTEM_PROMPT together: any change to them invalidates
 #: the readings already cached on users' disks, and must be deliberate.
 #: Recomputed for 'crop-reading-3' (HANDOFF 148).
-FROZEN_FACTORY_KEY = '785edecf95b3a1120f6afd866c0dfe091925e573dc53b33e39f8b26283f9ace0'
+FROZEN_FACTORY_KEY = '6bc512e1b0295072e536f0906cba0b0210bdbc36a5d63d528e39028924a6dc64'
 
 
 def test_the_factory_text_keeps_a_frozen_cache_key():

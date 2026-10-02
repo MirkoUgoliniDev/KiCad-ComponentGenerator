@@ -19,6 +19,10 @@ def test_the_icons_run_the_same_commands_as_the_file_menu(window, monkeypatch): 
     clic arriva al comando senza aprire nessuna finestra.
     """
     asked = []
+    # The open-project icon is disabled while there are no project folders.
+    # Seed one so this test exercises its command wiring, not availability.
+    (window._library_root() / "Existing" / "docs").mkdir(parents=True)
+    window._refresh_open_project_commands()
     monkeypatch.setattr(window, "_project_change_blocked", lambda: asked.append(True) or True)
     window.btn_new_project_top.click()
     window.btn_open_project_top.click()

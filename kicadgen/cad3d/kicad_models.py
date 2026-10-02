@@ -58,6 +58,89 @@ LIBRARY_ENV = "KICAD_3DMODEL_DIR"
 #: fase alla libreria di KiCad (utente, 2026-09-26). Per thread perche' ogni
 #: generazione gira nel proprio QThread e non deve sentire le misure altrui.
 _measuring_listener = threading.local()
+_archive_state = threading.local()
+
+
+@contextmanager
+def archive_progress_listener(callback):
+    """@brief Report the separate archive pass as (done, total, records)."""
+    previous = getattr(_archive_state, 'callback', None)
+    _archive_state.callback = callback
+    try:
+        yield
+    finally:
+        _archive_state.callback = previous
+
+
+@contextmanager
+def _cached_archive_results(results):
+    previous = getattr(_archive_state, 'results', None)
+    _archive_state.results = results
+    try:
+        yield
+    finally:
+        _archive_state.results = previous
+
+
+def _archive_prepass(components, library, note, cancel):
+    roots = _search_roots(library)
+    results, records = {}, []
+    callback = getattr(_archive_state, 'callback', None)
+    def notify():
+        if callback:
+            try:
+                callback(len(records), len(components), list(records))
+            except Exception as exc:
+                note(tx("Consolidati: errore nel resoconto: {exc}", exc=exc))
+    notify()
+    for component in components:
+        if cancel is not None and cancel.is_set():
+            raise MatchingCancelled(measured={})
+        if not isinstance(component, dict):
+            records.append({'name': '?', 'status': 'skipped',
+                            'reason': tx('Componente non idoneo al confronto con i consolidati.')})
+            notify()
+            continue
+        selection = component.get('model_selection')
+        selection = selection if isinstance(selection, dict) else {}
+        record = {'name': component.get('name', '?'), 'status': 'not_found',
+                  'reason': tx('Nessuna voce compatibile con categoria, misure, terminali e ritaglio.')}
+        found = None
+        if selection.get('status') in ('confirmed', 'rejected'):
+            record.update(status='skipped', reason=tx('Scelta manuale presente: confronto non applicato.'))
+        elif not archive_can_match(component):
+            record.update(status='skipped', reason=tx('Componente non idoneo al confronto con i consolidati.'))
+        elif not roots:
+            record.update(status='unavailable', reason=tx('Libreria 3D di KiCad non trovata.'))
+        else:
+            diagnostic = {}
+            found = _accepted_match(component, roots, note, diagnostic=diagnostic)
+            record['diagnostic'] = diagnostic
+            if diagnostic.get('error'):
+                record.update(status='unavailable', reason=diagnostic['error'])
+            elif found:
+                review = (found.get('status') == 'review_required'
+                          or component.get('_crop_class_status') == 'conflict'
+                          or component.get('_category_status') == 'conflict'
+                          or _crop_terminal_review_blocks(component))
+                record.update(status='review_required' if review else 'matched',
+                              reason=tx('Corrispondenza trovata, ma osservazioni in conflitto: da verificare.')
+                              if review else tx('Corrispondenza trovata nei consolidati.'),
+                              model=Path(found['candidates'][0]['path']).stem,
+                              conflicts=found.get('accepted_visual_conflicts', []),
+                              entry_id=found['accepted_entry']['id'],
+                              visual_score=found.get('accepted_visual_score', 0),
+                              orientation=found.get('accepted_orientation', {}))
+            elif diagnostic.get('reason'):
+                record['reason'] = diagnostic['reason']
+        results[id(component)] = found
+        component['consolidated_match'] = record
+        records.append(record)
+        note(f"Consolidati — {record['name']}: {record['reason']}"
+             + (f" Modello: {record['model']}." if record.get('model') else '')
+             + (' ' + ' '.join(record.get('conflicts', []))))
+        notify()
+    return results
 
 
 @contextmanager
@@ -1292,9 +1375,20 @@ def _candidate_family_for_component(path: Path, component: dict) -> Optional[str
     return None
 
 
+def _crop_terminal_review_blocks(component):
+    """A disputed automatic count stays disputed; a supported manual count wins."""
+    count = component.get('pin_count')
+    manual = (component.get('pin_count_source') == 'manual'
+              and component.get('pin_count_confidence') in ('medium', 'high')
+              and type(count) is int and 0 < count <= 128)
+    return component.get('_crop_terminal_review_required') is True and not manual
+
+
 def _observed_count(component):
     """Use confident explicit observations only, never a count guessed from kind."""
     counts = set()
+    if _crop_terminal_review_blocks(component):
+        return counts
     confidence = component.get("pin_count_confidence")
     if confidence is None and component.get("pin_count_source") in ("photo_observation", "observed", "manual"):
         confidence = component.get("confidence")
@@ -1307,6 +1401,8 @@ def _observed_count(component):
         count = None
     if confidence in ("high", "medium") and type(count) is int and 0 < count <= 128:
         counts.add(count)
+    if component.get('_crop_terminal_review_required') is True:
+        return counts  # only the explicitly supported manual count passed the gate
     geometry = component.get("terminal_geometry")
     if (isinstance(geometry, dict) and geometry.get("confidence") in ("high", "medium")
             and geometry.get("resolved") is not False):
@@ -1333,7 +1429,7 @@ def _declared_count(path):
     """
     # SOT's first number identifies the package; only a separate variant suffix
     # declares terminals. Bare SOT packages deliberately remain uncounted.
-    sot = re.match(r"(?:SOT|SC)[-_]?\d+[-_]([1-9]\d*)(?=[_]|$)", path.stem, re.IGNORECASE)
+    sot = re.match(r"(?:T?SOT|SC)[-_]?\d+[-_]([1-9]\d*)(?=[_]|$)", path.stem, re.IGNORECASE)
     if sot:
         return int(sot.group(1))
     # Vendor-prefixed filenames can carry an explicit count-bearing package
@@ -1354,6 +1450,8 @@ def _provisional_terminal_count(component):
     low. Do not invent hidden terminals, infer a count from prose, or promote this
     weaker evidence into the confident _observed_count contract.
     """
+    if component.get('_crop_terminal_review_required') is True:
+        return None
     if component.get("terminal_count_basis") == "visible_including_tabs":
         return None
     count = component.get("terminal_count")
@@ -1944,6 +2042,141 @@ def _automatic_mechanical(component, choices, complete, basis, discovery_scope=N
     return declared is not None and counts == {declared} and choices[0]["family"] is not None
 
 
+def _is_endcap_chip_model(path: Path, kind: str) -> bool:
+    """Whether a model belongs to the standard chip catalogue of `kind` (_ENDCAP_CHIP_CATALOG).
+
+    Membership is structural: the catalogue folder plus KiCad's naming scheme
+    for it, ``<prefix>_<imperial code>_<metric code>Metric`` with nothing
+    after it. It is NOT the list of size codes _CHIP_SIZE_CODES, which misses
+    real catalogue sizes (1808, 2220, 0612...): filtering by that list
+    removed the true size and promoted a wrong one (audit 2026-10-02).
+    Variants with a suffix (_Castellated, _SideView, _Pad..._HandSolder)
+    are other bodies or share the plain model's STEP file. The imperial code
+    states length then width (4 digits: LLWW, 5 digits: LLLWW, hundredths of
+    an inch); a "reverse geometry" part (0612, 0815, 1020, 1218) has its
+    terminals on the LONG sides, so its length is smaller than its width.
+    The classifier's chip classes have end caps on the short sides: only
+    codes with length >= width belong to their catalogue (the same outline
+    as a 1206 must not become an 0612).
+    """
+    prefix, folder = _ENDCAP_CHIP_CATALOG[kind]
+    match = re.fullmatch(rf"{prefix}_(\d{{4,5}})_\d{{4,5}}Metric", path.stem)
+    if path.parent.name != folder or match is None:
+        return False
+    code = match.group(1)
+    split = 2 if len(code) == 4 else 3
+    return int(code[:split]) >= int(code[split:])
+
+
+def _classifier_admits(path: Path, component) -> bool:
+    """Whether a model fits the package the local classifier declared for the body.
+
+    A chip body (`_smd_body` endcap_chip) admits only its kind's chip
+    catalogue; a class with a declared terminal count admits only models that
+    declare that same count: in their KiCad name (_declared_count), or, when
+    the name carries none (D_SOD-123F, D_MiniMELF, SOT-23), in the ordinary
+    copper pads of the footprints that link the model (_declared_land_pattern:
+    pads minus tabs, only when every linking footprint agrees). A model whose
+    count cannot be read from either is not admitted: a count nobody can read
+    cannot confirm the classifier's.
+    """
+    kind = str(component.get("kind") or "").lower()
+    if component.get("_smd_body") == "endcap_chip" and kind in _ENDCAP_CHIP_CATALOG:
+        return _is_endcap_chip_model(path, kind)
+    count = component.get("_smd_terminal_count")
+    if type(count) is int and count > 0:
+        declared = _declared_count(path)
+        if declared is None:
+            lands = _declared_land_pattern(path)
+            declared = lands[0] - lands[1] if lands else None
+        return declared == count
+    return False
+
+
+def _local_classifier_identity(component):
+    """@brief Whether a local package classifier identified this body on a box a person kept.
+
+    @param component Component evidence dictionary.
+    @return True when the local SMD network accepted the body's class
+        (`_smd_accepted`: not `_other`, at or above max(0.5, the checkpoint's
+        suggested threshold)), the detector review was done
+        (`_presence_reviewed_by_user`), and the class narrows the package
+        structurally: a chip body (`_smd_body`) or a declared terminal count
+        (`_smd_terminal_count`). Classes that name only a kind (arrays, RGB
+        LEDs, electrolytics, inductors, crystals, switches, QFN/DFN/MSOP...)
+        keep the ordinary gates: the audit of 2026-10-02 found them promoted
+        to arbitrary vendor models.
+    @note This is independent package-family evidence, like a literal
+        marking: the network looked at the body's pixels and named a package
+        family (chip resistor, SOT-23, SOIC-8...). It does not replace the
+        measurement, which still has to single out one size within that
+        family (_provisional_geometry_choice). User request 2026-10-02:
+        «l'importante come primo passo che venga riconosciuto package ed
+        orientamento».
+    """
+    narrows = (component.get("_smd_body") == "endcap_chip"
+               or (type(component.get("_smd_terminal_count")) is int
+                   and component["_smd_terminal_count"] > 0))
+    return (component.get("_smd_accepted") is True
+            and component.get("_presence_reviewed_by_user") is True
+            and bool(component.get("_smd_class")) and narrows)
+
+
+def _classifier_geometry_choice(component, choices, complete):
+    """Provisional preview for a body whose package family the local classifier named.
+
+    The family comes from the classifier; the size from the measurement. The
+    candidates are already restricted to that family by discovery and to the
+    measurement tolerance, so a lone in-tolerance candidate of a complete
+    search is the only size of the family the photograph allows -- the
+    comparison happened against the family members the tolerance excluded.
+    A tie band must still be homogeneous: two sizes the photograph cannot
+    separate stay in the picker. What the classifier does NOT supply is the
+    basis of the box (body or total), so this path compares with whichever
+    envelope fits (`_basis_readings` with an unknown basis), and stays
+    provisional for that reason too.
+    """
+    if (not choices or component.get("_yolo_review_only") is True
+            or component.get("_yolo_origin") == "low_confidence_review"
+            or component.get("_global_inventory_status") in ("invalid", "rejected")
+            or component.get("topology_incomplete")):
+        return None
+    # Solo i modelli che il package dichiarato dalla rete ammette: catalogo
+    # chip per un corpo a due cappucci, stesso numero di terminali per un
+    # package che lo dichiara. Gli altri restano nel selettore.
+    choices = [item for item in choices if _classifier_admits(Path(item["path"]), component)]
+    if not choices:
+        return None
+    # Una sola base di misura nella banda: il corpo di un package non si
+    # confronta con l'ingombro totale o con le piazzole di un altro (audit
+    # 2026-10-02: LQFP 7x7 letto come LQFP-32 5x5). Le piazzole restano una
+    # base valida: il riquadro del rilevatore comprende le saldature, e per
+    # una chip 0805 misurata 2.46 x 1.40 mm sono la lettura piu' vicina.
+    def basis_kind(item):
+        label = str(item.get("measurement_basis") or "")
+        return "pads" if label.startswith("piazzole") else label
+    kind_of_basis = basis_kind(choices[0])
+    if kind_of_basis not in ("body", "total", "pads"):
+        return None
+    choices = [item for item in choices if basis_kind(item) == kind_of_basis]
+    first = choices[0]
+    if first.get("family") is None:
+        return None
+    try:
+        best_error = float(first.get("relative_xy_error"))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(best_error) or best_error > DEFAULT_SIZE_TOLERANCE:
+        return None
+    band = _tie_band(choices)
+    if band is None or not any(item is first for item in band):
+        return None
+    if len(band) == 1:
+        return first if complete else None
+    return first if _band_is_homogeneous(
+        band, component.get("length_mm"), component.get("width_mm")) else None
+
+
 def _provisional_geometry_choice(component, choices, complete, basis):
     """Return a safe preview candidate without claiming package identity.
 
@@ -1980,7 +2213,12 @@ def _provisional_geometry_choice(component, choices, complete, basis):
     @param complete True when every structurally compatible model was measured.
     @param basis Normalised bbox basis; only body/total readings qualify.
     @return The ranked head candidate to preview, or None.
+    @note A body identified by the local SMD classifier takes its own exit
+        (_classifier_geometry_choice): the classifier's package family stands
+        in for the class confidence, the presence and the kind gates below.
     """
+    if _local_classifier_identity(component):
+        return _classifier_geometry_choice(component, choices, complete)
     if (not choices or basis not in ("body", "total")
             or component.get("presence_confidence") != "high"
             or component.get("_yolo_review_only") is True
@@ -2459,7 +2697,7 @@ def archive_can_match(component) -> bool:
     return _matching_basis(component) in ("unknown", "body", "total", "pads")
 
 
-def _accepted_match(component: dict, roots, note) -> Optional[dict]:
+def _accepted_match(component: dict, roots, note, diagnostic=None) -> Optional[dict]:
     """@brief Proposal from the accepted-matches archive, or None.
 
     @param component Body to match, without an explicit choice.
@@ -2479,8 +2717,10 @@ def _accepted_match(component: dict, roots, note) -> Optional[dict]:
     from ..services.accepted_models import AcceptedModelStore, AcceptedModelsError
     from .measurement_uncertainty import SOURCE_ASSUMED, SOURCE_DECLARED
     try:
-        found = AcceptedModelStore().find(component, roots)
+        found = AcceptedModelStore().find(component, roots, diagnostic=diagnostic)
     except (AcceptedModelsError, sqlite3.Error, OSError) as exc:
+        if diagnostic is not None:
+            diagnostic['error'] = str(exc)
         note(tx("Archivio abbinamenti accettati ignorato: {exc}", exc=exc))
         return None
     if found is None:
@@ -2518,17 +2758,23 @@ def _accepted_match(component: dict, roots, note) -> Optional[dict]:
         reasons.append(tx("Altre {alternatives} voci compatibili nell'archivio: vince la piu' "
                           "vicina e, a parita', la piu' recente",
                           alternatives=found['alternatives']))
+    review = found.get("review_required", False)
+    if review:
+        reasons = [tx("Ritaglio simile a un esempio verificato (OpenCV: {score:.0%})", score=found['visual_score'])] + found.get('visual_conflicts', [])
+    status = "review_required" if review else "library_matched"
     candidate = {"path": str(path), "package": path.stem,
                  "relative_xy_error": found["relative_xy_error"],
                  "measurement_basis": "accepted_library",
                  "family": _candidate_family_for_component(path, component),
-                 "status": "library_matched", "reasons": reasons}
+                 "status": status, "reasons": reasons}
     note(tx("{value}: modello dall'archivio degli abbinamenti accettati ({stem}); "
             "si confronta comunque con la ricerca in libreria.",
             value=component.get('name') or path.stem,
             stem=path.stem))
-    return {"status": "library_matched", "candidates": [candidate],
-            "selected_path": str(path), "discovery": "accepted_library",
+    return {"status": status, "candidates": [candidate],
+            "accepted_visual_conflicts": found.get("visual_conflicts", []),
+            "accepted_visual_first": found.get("visual_first", False),
+            "selected_path": None if review else str(path), "discovery": "accepted_library",
             "accepted_orientation": found.get("orientation", {}),
             "accepted_visual_score": found.get("visual_score", 0.0),
             "accepted_basis_recovered_visually": found.get("basis_recovered_visually", False),
@@ -2600,19 +2846,53 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None,
         return result
     # Un corpo con la stessa firma geometrica di uno che l'utente ha gia'
     # accettato riceve quel modello come proposta da confermare; la ricerca in
-    # libreria gira comunque, e vince il modello piu' vicino alla misura.
-    accepted = _accepted_match(component, roots, note)
+    # libreria gira comunque per offrire alternative alla scelta accettata.
+    cached = getattr(_archive_state, 'results', None)
+    accepted = cached[id(component)] if cached is not None and id(component) in cached else _accepted_match(component, roots, note)
     result = _library_search(component, result, limit=limit, roots=roots, root=root,
                              note=note, cancel=cancel)
-    return _prefer_closer(accepted, result, limit, note) if accepted else result
+    result = _prefer_closer(accepted, result, limit, note) if accepted else result
+    if (accepted and _local_classifier_identity(component) and result.get("candidates")
+            and not _classifier_admits(Path(result["candidates"][0]["path"]), component)):
+        # Una scelta d'archivio fuori dal package che la rete ha visto (una
+        # resistenza MELF su un corpo chip, un SOT-23-5 su un SOT-23) non vince
+        # in silenzio: resta proposta, da confermare (audit 2026-10-02, A-D5).
+        reason = tx("L'archivio propone un modello fuori dal package riconosciuto dalla "
+                    "rete locale: da verificare prima di usarlo.")
+        result["classifier_archive_conflict"] = True
+        result["selected_path"] = None
+        result["status"] = "review_required"
+        result["candidates"] = [dict(candidate, status="review_required",
+                                     reasons=list(candidate.get("reasons", [])) + [reason])
+                                for candidate in result["candidates"]]
+        note(reason)
+    if component.get('_crop_class_status') == 'conflict' or component.get('_category_status') == 'conflict':
+        reason = tx("Categoria in conflitto tra inventario e ritagli: scegli il modello dopo la verifica del componente.")
+        result['classification_conflict'] = True
+        result['selected_path'] = None
+        result['status'] = 'review_required' if result.get('candidates') else 'unresolved'
+        result['candidates'] = [dict(candidate, status='review_required',
+                                     reasons=list(candidate.get('reasons', [])) + [reason])
+                                for candidate in result.get('candidates', [])]
+        note(reason)
+    if _crop_terminal_review_blocks(component):
+        reason = tx("Conteggio dei terminali in conflitto o incompleto nei ritagli: verifica il componente prima di assegnare il modello.")
+        result['terminal_observation_conflict'] = True
+        result['selected_path'] = None
+        result['status'] = 'review_required' if result.get('candidates') else 'unresolved'
+        result['candidates'] = [dict(candidate, status='review_required',
+                                     reasons=list(candidate.get('reasons', [])) + [reason])
+                                for candidate in result.get('candidates', [])]
+        note(reason)
+    return result
 
 
 def _prefer_closer(accepted: dict, searched: dict, limit: int, note) -> dict:
     """Choose between the archive proposal and the library search result.
 
-    The archive signature has already passed category, measured-size and
-    terminal checks. Preserve its photographic error separately from nominal
-    library geometry, which is useful context but cannot revoke acceptance.
+    Preserve the archive proposal and its review-only verdict on conflicting
+    visual evidence. Keep photographic error separate from nominal geometry;
+    a library estimate cannot silently promote a conflicting crop to attachment.
     """
     archived = accepted["candidates"][0]
     same = next((item for item in searched.get("candidates", ())
@@ -2897,6 +3177,7 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
     resolved = 0
     pending = list(components or [])
     total = len(pending)
+    archive_results = _archive_prepass(pending, library, note, cancel)
     for done, component in enumerate(pending, 1):
         if progress is not None:
             progress(done - 1, total)
@@ -2935,8 +3216,9 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
         component["render_3d"] = True if override is None else bool(override)
         component.pop("model_path", None)
         try:
-            report = model_candidates(component, library=library, log=note,
-                                      **({"cancel": cancel} if cancel is not None else {}))
+            with _cached_archive_results(archive_results):
+                report = model_candidates(component, library=library, log=note,
+                                          **({"cancel": cancel} if cancel is not None else {}))
         except MatchingCancelled:
             component.pop("render_3d", None)
             component.pop("model_path", None)
@@ -2947,6 +3229,7 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
                     total=total))
             raise
         component["model_match"] = report
+        report['consolidated_match'] = component.get('consolidated_match', {})
         # Lo stato di revisione si dice con un campo, non con un colore: il
         # magenta resta solo per chi non ha alcun candidato, perche' di quel
         # corpo non si sa nulla oltre al riquadro. Un corpo in revisione o

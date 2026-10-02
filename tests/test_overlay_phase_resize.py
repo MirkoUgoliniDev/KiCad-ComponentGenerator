@@ -154,7 +154,7 @@ def test_a_language_switch_redraws_the_phase_list(translated):
     card.refresh_command_texts()                   # what the window calls on a switch
     after = card.phases_plain_text()
     assert "in corso" not in after and "in progress" in after
-    assert "YOLO (local detection)" in after
+    assert "YOLO" in after
     assert "Pronto" not in after and "Ready" in after
     assert _rows(card)[0].startswith("✓ ")
     assert "in progress" not in card.phases.toolTip() and "Ready" in card.phases.toolTip()
@@ -169,4 +169,4 @@ def test_text_that_is_not_in_the_catalog_is_left_as_it_came(translated):
     i18n.set_language("en")
     card.refresh_command_texts()
     # The name follows the new language; the sentence stays as its sender wrote it.
-    assert "✓ OpenCV (local image analysis) — Scheda trovata: 987 x 426 px."         in card.phases_plain_text()
+    assert "✓ OpenCV — Scheda trovata: 987 x 426 px."         in card.phases_plain_text()

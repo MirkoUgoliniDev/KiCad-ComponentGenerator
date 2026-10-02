@@ -1787,6 +1787,86 @@ def _verse_correction(native_direction, inferred, observed_side, component_rotat
     return None
 
 
+#: Entro questo scarto relativo due letture dell'ingombro sono sostenute dalla
+#: misura allo stesso modo. E' lo stesso margine di kicad_models
+#: (NAME_TIEBREAK_MARGIN, un test li tiene uguali): questo modulo gira dentro
+#: FreeCAD e non importa l'abbinatore.
+AXIS_TIE_MARGIN = 0.05
+
+
+def _axis_undetermined(reference, length, width):
+    """@brief Whether the measured envelope cannot tell the model's two axes apart.
+
+    @param reference Bounding box of the model chosen by _native_axis_angle.
+    @param length Photographed envelope along X, in mm.
+    @param width Photographed envelope along Y, in mm.
+    @return True when the model laid along either axis fits the measurement
+        with worst-side errors within AXIS_TIE_MARGIN of each other: the
+        "which side is longer" choice of _native_axis_angle is then noise
+        (a near-square SOT-23-5 measured 3.43 x 3.17 mm fits at 15.5% one way
+        and 18.4% the other).
+    """
+    try:
+        sides = (float(reference.XLength), float(reference.YLength))
+        length, width = float(length), float(width)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if not all(math.isfinite(v) and v > 0 for v in (*sides, length, width)):
+        return False
+
+    def error(along_x, along_y):
+        return max(abs(along_x - length) / length, abs(along_y - width) / width)
+    straight, turned = error(*sides), error(sides[1], sides[0])
+    return abs(straight - turned) <= AXIS_TIE_MARGIN
+
+
+def _classifier_verse(component, inferred, axis_free=False):
+    """@brief Degrees that bring a library model to the pose the SMD network read.
+
+    @param component Component payload in the model frame (after _flip_y):
+        `rotation_deg` is already negated there, while `_smd_rotation_deg`
+        keeps the network's KiCad convention (counter-clockwise as seen from
+        above), which is also counter-clockwise in the Y-up model frame.
+    @param inferred Axis angle already chosen by comparing the model with the
+        measured envelope, in degrees.
+    @param axis_free True when the measurement could not decide the axis
+        (_axis_undetermined): the network's pose may then also turn the
+        model by 90 or 270 degrees.
+    @return 0 or 180 (also 90 or 270 with `axis_free`) to add to `inferred`,
+        or None when the network did not accept the body, its class has no
+        verse (`_smd_rotation_kind` other than "full"), its four rotated views
+        disagreed on the pose (`_smd_views_agree`), it gave no pose, or its
+        pose disagrees with an axis the measurement did decide.
+    @note Only the VERSE is taken from the network, as for an observed
+        landmark (_verse_correction): the axis stays the measurement's. A pose
+        that contradicts the measured axis is not applied -- an unverified
+        verse is better than an invented one. The pose assumes the library
+        model is native to its footprint (KiCad's standard libraries are);
+        it was checked on photographs of SOIC-8, SOT-23, SOT-23-5, MiniMELF
+        and chip LEDs (HANDOFF, 2026-10-02).
+    """
+    # Solo una posa vera ("full": la classe ha un verso) e solo se le quattro
+    # viste ruotate della rete l'hanno scelta tutte: una media di viste
+    # discordi e' un sorteggio, non un verso (audit 2026-10-02, SOD-123F
+    # 0.54/0.46). Per le classi "axis" la rete da' solo l'asse.
+    if (component.get("_smd_accepted") is not True
+            or component.get("_smd_rotation_kind") != "full"
+            or component.get("_smd_views_agree") is not True):
+        return None
+    pose = component.get("_smd_rotation_deg")
+    if isinstance(pose, bool) or not isinstance(pose, (int, float)) or not math.isfinite(pose):
+        return None
+    try:
+        body = float(component.get("rotation_deg") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    for extra in ((0, 180, 90, 270) if axis_free else (0, 180)):
+        difference = (body + inferred + extra - float(pose)) % 360.0
+        if min(difference, 360.0 - difference) < 1e-6:
+            return extra
+    return None
+
+
 def _rotated(direction, angle):
     """Ruota una direzione cardinale di un multiplo di 90 gradi."""
     dx, dy = direction
@@ -1895,6 +1975,17 @@ def _library_model(component, cx, cy, z0, color):
                       f"{component.get('landmark_feature')} on "
                       f"{component.get('landmark_side')}; "
                       f"rotated {verse:g} deg over the inferred axis", flush=True)
+            if verse is None:
+                # Nessun riferimento osservato: il verso lo da' la posa KiCad
+                # della rete SMD locale, se ha riconosciuto il corpo (utente,
+                # 2026-10-02: «riconosciuto package ed orientamento»).
+                verse = _classifier_verse(
+                    component, inferred,
+                    axis_free=_axis_undetermined(reference, length, width))
+                if verse is not None and component.get("model_rotation_deg") is None:
+                    print(f"KICADGEN_SMD_VERSE:{path}; pose="
+                          f"{component.get('_smd_rotation_deg')}; "
+                          f"rotated {verse:g} deg over the inferred axis", flush=True)
             inferred += verse or 0
             # La correzione manuale e' un DELTA, non un angolo assoluto:
             # l'angolo di partenza lo deduce qui FreeCAD confrontando il

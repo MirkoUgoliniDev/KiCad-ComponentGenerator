@@ -90,9 +90,22 @@ def test_failed_log_move_refuses_rename_and_preserves_project(
         # «Rinomina progetto…» dal 2026-09-24): e' li' che lo spostamento
         # fallisce e il progetto resta.
         assert params.name == "LogOriginal"
+        path_type = type(old_project)
+        real_rename = path_type.rename
+
+        def fail_project_stage(path, target):
+            if path == old_project and "rinomina" in Path(target).name:
+                attempts.append((Path(path), Path(target)))
+                raise OSError("log-move-denied-proof")
+            return real_rename(path, target)
+
+        monkeypatch.setattr(path_type, "rename", fail_project_stage)
         _rename_to(window, monkeypatch, "LogRenamed")
 
-    assert attempts == [(source, destination / window.LOG_FILENAME)]
+    if entry == "extracted":
+        assert len(attempts) == 1 and attempts[0][0] == old_project
+    else:
+        assert attempts == [(source, destination / window.LOG_FILENAME)]
     assert window._component_name() == "LogOriginal"
     assert window._project_dir() == old_project
     assert window._log_file() == source
@@ -102,7 +115,9 @@ def test_failed_log_move_refuses_rename_and_preserves_project(
         assert (window._docs_dir() / "datasheet.pdf").read_bytes() == b"original document"
         assert not (destination / "docs" / "datasheet.pdf").exists()
 
-    warning = "Rinomina annullata: impossibile trasferire il log (log-move-denied-proof)."
+    warning = ("Rinomina annullata: LogOriginal non rinominabile (log-move-denied-proof)."
+               if entry == "extracted" else
+               "Rinomina annullata: impossibile trasferire il log (log-move-denied-proof).")
     assert source.read_text(encoding="utf-8").count(warning) == 1
     assert window.ai_progress_text.toPlainText().count(warning) == 1
     assert window._log_plain_text().count(warning) == 1

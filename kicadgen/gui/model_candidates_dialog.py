@@ -770,7 +770,12 @@ class _Signals(QObject):
 
 #: Keys of the component that move the model in the final CAD besides the
 #: axis inference: they reach the automatic preview too.
-PREVIEW_PLACEMENT_KEYS = ('landmark_side', 'landmark_feature', 'model_rotation_delta_deg')
+#: Fields the 3D builder reads to place a library model. The SMD network's pose
+#: is among them: without it the preview turned the model differently from the
+#: generated 3D (audit 2026-10-02).
+PREVIEW_PLACEMENT_KEYS = ('landmark_side', 'landmark_feature', 'model_rotation_delta_deg',
+                          '_smd_accepted', '_smd_rotation_deg', '_smd_rotation_kind',
+                          '_smd_views_agree')
 
 #: Placement keys of the preview running in THIS thread (a worker sets it for
 #: its own run): `_thumbnail` keeps its signature, which tests replace.

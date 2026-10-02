@@ -98,8 +98,10 @@ def test_unknown_detector_is_still_rejected():
 def test_detector_row_comes_first_and_the_pretest_hides_both_ai_models(window):  # noqa: F811
     combo = window.combo_photo_detector
     form = window._models_form
-    # In coda: le tre voci esistenti non si spostano (il progetto salva il valore).
-    assert [combo.itemData(i) for i in range(combo.count())] == ["ai", "yolo", "vlm", "yolo_only"]
+    # Le scelte esistenti restano nello stesso ordine e la modalità SMD si
+    # aggiunge in coda, così i progetti salvati mantengono i propri valori.
+    assert [combo.itemData(i) for i in range(combo.count())] == [
+        "ai", "yolo", "vlm", "yolo_only", "yolo_smd"]
     # «Rilevamento foto» e' la prima riga di «Strumenti AI», prima di «Modello AI».
     assert form.itemAt(0, form.ItemRole.FieldRole).widget() is combo
     assert window._row_ai_model == 1
@@ -111,9 +113,17 @@ def test_detector_row_comes_first_and_the_pretest_hides_both_ai_models(window): 
     assert not form.isRowVisible(window._row_ai_model)
     assert not form.isRowVisible(window._row_vlm_model)
     assert not form.isRowVisible(window._row_ai_account)  # niente credito: non si spende
-    # Negativo: con la verifica AI modelli e credito tornano visibili.
+    # La verifica AI riattiva il modello AI; la riga VLM compare solo quando
+    # è configurato un override distinto dal modello AI.
     combo.setCurrentIndex(combo.findData("yolo"))
-    assert form.isRowVisible(window._row_ai_model) and form.isRowVisible(window._row_vlm_model)
+    assert form.isRowVisible(window._row_ai_model)
+    assert not form.isRowVisible(window._row_vlm_model)
+    previous_vlm = window._vlm_model
+    window._vlm_model = "different/vision-model"
+    window._on_photo_detector_changed()
+    assert form.isRowVisible(window._row_vlm_model)
+    window._vlm_model = previous_vlm
+    window._on_photo_detector_changed()
     assert form.isRowVisible(window._row_ai_account)
 
 

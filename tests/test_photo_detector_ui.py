@@ -11,6 +11,10 @@ from PyQt6.QtWidgets import QDialog
 from kicadgen.gui import main_window as gui
 
 
+
+#: Rilevatore scelto all'avvio dai sorgenti (utente, 2026-10-02).
+STARTUP_DETECTOR = "yolo_smd"
+
 def _fake_yolo(monkeypatch, validate):
     module = ModuleType("kicadgen.services.photo_yolo")
     module.validate_yolo_setup = validate
@@ -45,6 +49,7 @@ def offline(monkeypatch):
     ({"photo_detector": "yolo", "yolo_model_path": Path("custom.onnx")},
      "yolo", Path("custom.onnx")),
     ({"photo_detector": "yolo"}, "yolo", None),
+    ({"photo_detector": "yolo_smd"}, "yolo_smd", None),
 ])
 def test_worker_forwards_detector_and_preserves_ai_defaults(window, monkeypatch, options, detector, path):
     calls, results, errors = [], [], []
@@ -80,7 +85,7 @@ def test_selection_is_session_only_and_picker_can_cancel(window, monkeypatch, tm
     before = deepcopy(window._config)
     profile = window.profile_store.defaults()
     monkeypatch.setattr(gui, "save_config", _unexpected)
-    assert window._photo_detector_options() == ("yolo", None)
+    assert window._photo_detector_options()[0] == STARTUP_DETECTOR
     assert window.field_yolo_model.isEnabled()
     assert window.btn_pick_yolo_model.isEnabled()
     assert window.group_ai_tools.isAncestorOf(window.combo_photo_detector)
@@ -121,24 +126,94 @@ def test_selection_is_session_only_and_picker_can_cancel(window, monkeypatch, tm
     assert window.profile_store.defaults() == profile
 
 
-def test_new_window_defaults_to_yolo_without_restoring_custom_session_path(window, monkeypatch, tmp_path):
-    default_path = tmp_path / "models" / "pcb_yolov8s.onnx"
+def test_new_window_defaults_to_smd_network_without_restoring_custom_session_path(
+        window, monkeypatch, tmp_path):
+    """@brief Dai sorgenti si parte dalla rete SMD locale (utente, 2026-10-02).
+
+    @note Il percorso scelto nella sessione precedente non torna: la finestra
+        nuova usa i pesi YOLO verificati per la rete SMD.
+    """
+    default_path = tmp_path / "models" / "pcb_component_detector_yolov8m_best.pt"
     default_path.parent.mkdir()
     default_path.touch()
-    # Contratto invariato, meccanismo cambiato (2026-09-25): la cartella del
-    # programma arriva da `app_paths.resource_path` (repository da sorgente,
-    # pacchetto installato nell'eseguibile), non piu' da APP_DIR.
     monkeypatch.setattr(gui, "resource_path", lambda *parts: tmp_path.joinpath(*parts))
     window.combo_photo_detector.setCurrentIndex(0)
     window.field_yolo_model.setText("session.onnx")
 
     fresh = gui.MainWindow()
     try:
-        assert fresh._photo_detector_options() == ("yolo", None)
+        assert fresh._photo_detector_options() == ("yolo_smd", default_path)
         assert fresh.field_yolo_model.text() == ""
         assert str(default_path) in fresh.field_yolo_model.placeholderText()
     finally:
         fresh.close()
+
+
+def test_frozen_window_defaults_to_yolo_because_the_smd_runtime_is_absent(monkeypatch):
+    """@brief Caso negativo: nel binario frozen PyTorch e i pesi SMD non ci sono."""
+    monkeypatch.setattr(gui, "is_frozen", lambda: True)
+    fresh = gui.MainWindow()
+    try:
+        assert fresh._photo_detector_options() == ("yolo", None)
+    finally:
+        fresh.close()
+
+
+def test_smd_mode_selects_the_verified_yolo_and_preserves_manual_override(window, tmp_path):
+    window.combo_photo_detector.setCurrentIndex(window.combo_photo_detector.findData('yolo_smd'))
+    detector, path = window._photo_detector_options()
+    assert detector == 'yolo_smd'
+    assert path.name == 'pcb_component_detector_yolov8m_best.pt'
+    assert path.name in window.field_yolo_model.placeholderText()
+    assert window.btn_pick_yolo_model.isEnabled()
+    assert 'SMD' in window.combo_photo_detector.currentText()
+    custom = tmp_path / 'custom.pt'
+    window.field_yolo_model.setText(str(custom))
+    assert window._photo_detector_options() == ('yolo_smd', custom)
+
+
+def test_frozen_build_keeps_saved_smd_mode_visible_but_unavailable_before_ai(
+    window, monkeypatch,
+):
+    monkeypatch.setattr(gui, "is_frozen", lambda: True)
+    index = window.combo_photo_detector.findData("yolo_smd")
+    window.combo_photo_detector.setCurrentIndex(index)
+    window._refresh_photo_detector_controls()
+
+    assert window.combo_photo_detector.currentData() == "yolo_smd"
+    assert not window.combo_photo_detector.model().item(index).isEnabled()
+    assert window.combo_photo_detector.itemData(index, gui.Qt.ItemDataRole.ToolTipRole) == \
+        window._photo_detector_text("smd_unavailable")
+    assert window._photo_detector_options()[0] == "yolo_smd"
+
+    warnings = []
+    monkeypatch.setattr(gui.QMessageBox, "warning", lambda *args: warnings.append(args))
+    _fake_yolo(monkeypatch, lambda path: pytest.fail("frozen SMD gate ran too late"))
+    monkeypatch.setattr(window, "_selected_documents", _unexpected)
+    monkeypatch.setattr(window, "_ensure_api_key", _unexpected)
+    window._extract_with_ai()
+    assert len(warnings) == 1
+    assert warnings[0][2] == window._photo_detector_text("smd_unavailable")
+    assert window.combo_photo_detector.currentData() == "yolo_smd"
+
+
+def test_missing_smd_network_stops_before_paid_extraction(window, monkeypatch):
+    from kicadgen.services import smd_component_classifier as smd
+    events, warnings = [], []
+    window.combo_photo_detector.setCurrentIndex(window.combo_photo_detector.findData('yolo_smd'))
+    _fake_yolo(monkeypatch, lambda path: events.append('yolo'))
+    def missing():
+        events.append('smd')
+        raise FileNotFoundError('smd_classifier.pt non trovato')
+    monkeypatch.setattr(smd, 'validate_smd_setup', missing)
+    monkeypatch.setattr(gui.QMessageBox, 'warning', lambda *args: warnings.append(args))
+    monkeypatch.setattr(window, '_selected_documents', _unexpected)
+    monkeypatch.setattr(window, '_ensure_api_key', _unexpected)
+    window._extract_with_ai()
+    assert events == ['yolo', 'smd']
+    assert len(warnings) == 1
+    assert 'smd_classifier.pt' in warnings[0][2]
+    assert window._extract_worker is None
 
 
 @pytest.mark.parametrize("language,label,yolo,credit", [
@@ -307,7 +382,7 @@ def test_pin_count_evidence_survives_photo_and_table_roundtrip(window, evidence)
     for key, value in expected.items():
         assert getattr(reviewed, key) == value
     assert source == before
-    assert window._photo_detector_options() == ("yolo", None)
+    assert window._photo_detector_options()[0] == STARTUP_DETECTOR
 
 
 @pytest.mark.parametrize("override", [None, 0.0, 90.0, -90.0, 37.5])
@@ -369,7 +444,7 @@ def test_gui_preserves_full_component_body_overhang_at_each_board_edge(window, k
     assert result.rotation == 37
     assert result.mating == "edge"
     assert result.bbox_basis == "body"
-    assert window._photo_detector_options() == ("yolo", None)
+    assert window._photo_detector_options()[0] == STARTUP_DETECTOR
 
 
 def test_without_a_vision_model_the_photo_call_falls_back_to_the_configured_one(window, monkeypatch):

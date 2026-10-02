@@ -138,10 +138,10 @@ def test_c05_basis_change_recovers_only_with_strong_crop_and_matching_pins(tmp_p
     assert found is not None
     assert found['basis_recovered_visually'] is True
     assert found['visual_score'] > .99
-    assert store.find(dict(query, pin_count=5), [root]) is None
-    assert store.find(dict(query, pin_count=None), [root]) is None
-    assert store.find(dict(query, kind='capacitor'), [root]) is None
-    assert store.find(dict(query, length_mm=8), [root]) is None
+    # Visual discovery preserves these candidates, but none may attach automatically.
+    for changes in (dict(pin_count=5), dict(pin_count=None), dict(kind='capacitor'), dict(length_mm=8)):
+        review = store.find(dict(query, **changes), [root])
+        assert review['review_required'] and review['visual_conflicts']
     assert store.find(dict(query, _accepted_image_descriptor=None), [root]) is None
 
 
@@ -152,7 +152,9 @@ def test_cross_basis_identical_images_for_different_models_are_ambiguous(tmp_pat
         store.consolidate([_component(root, path, image=_asymmetric_crop())], [root])
     query = _component(root, paths[0], image=_asymmetric_crop())
     query['bbox_basis'] = 'total'
-    assert store.find(query, [root]) is None
+    found = store.find(query, [root])
+    assert found['review_required']
+    assert any('ambigua' in reason for reason in found['visual_conflicts'])
 
 
 def test_verified_component_crop_is_stored_and_deleted_with_its_entry(tmp_path):

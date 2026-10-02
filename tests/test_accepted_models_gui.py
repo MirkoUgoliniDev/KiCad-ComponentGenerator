@@ -44,10 +44,9 @@ def _board(library):
 def test_consolidate_dialog_checks_only_rows_with_a_model(window, library):
     dialog = ConsolidateDialog(_board(library))
     remembered = dialog.table.item(0, 1)
-    placeholder = dialog.table.item(1, 1)
+    assert dialog.table.rowCount() == 1
     assert remembered.checkState() == Qt.CheckState.Checked
-    assert not placeholder.flags() & Qt.ItemFlag.ItemIsUserCheckable
-    assert "nessun modello KiCad" in dialog.table.item(1, 5).text()
+    assert "Senza modello da ricordare: 1" in dialog.summary.text()
     assert [c["name"] for c in dialog.selected_components()] == ["R1"]
     # L'utente toglie la spunta: niente da ricordare, il pulsante si spegne.
     remembered.setCheckState(Qt.CheckState.Unchecked)
@@ -347,20 +346,10 @@ def test_the_model_path_tooltip_survives_the_highlight(window, library):
     _dispose(dialog)
 
 
-def test_the_whole_reason_of_an_excluded_row_can_be_read(window, library):
-    """Utente, 2026-09-25: «nessun modello KiCad …» troncato nella colonna Stato.
-    Positivo: la riga va a capo (altezza sul contenuto), niente puntini, testo
-    completo nel tooltip. Negativo: la riga «da ricordare» resta su una riga."""
-    from PyQt6.QtWidgets import QApplication
+def test_excluded_rows_are_counted_but_not_listed(window, library):
     dialog = ConsolidateDialog(_board(library))
-    dialog.resize(700, 400)
-    dialog.show()
-    QApplication.processEvents()
-    table = dialog.table
-    excluded = table.item(1, 5)
-    assert excluded.toolTip() == excluded.text() and "nessun modello KiCad" in excluded.text()
-    assert table.textElideMode() == Qt.TextElideMode.ElideNone and table.wordWrap()
-    assert table.rowHeight(1) > table.rowHeight(0)
+    assert dialog.table.rowCount() == 1
+    assert 'Senza modello da ricordare: 1' in dialog.summary.text()
     _dispose(dialog)
 
 
@@ -414,3 +403,35 @@ def test_corrupt_crop_clears_previous_image_and_navigation_still_works(window, l
     monkeypatch.setattr(QDialog, "exec", inspect)
     archive._show_entry_crop(entry["id"])
     _dispose(archive)
+
+
+def test_single_crop_hides_navigation(window, library, monkeypatch):
+    import cv2
+    import numpy as np
+    from PyQt6.QtWidgets import QPushButton
+    from kicadgen.services.accepted_models import IMAGE_CROP_VERSION
+    store = _two_entries(library)
+    entry = store.entries()[0]
+    png = cv2.imencode('.png', np.zeros((24, 24, 3), dtype=np.uint8))[1].tobytes()
+    monkeypatch.setattr(store, 'images', lambda _: [dict(id=1, image_png=png, crop_version=IMAGE_CROP_VERSION)])
+    archive = AcceptedModelsDialog(store)
+    def inspect(dialog):
+        assert dialog.findChild(QPushButton, 'cropPrevious').isHidden()
+        assert dialog.findChild(QPushButton, 'cropNext').isHidden()
+        return QDialog.DialogCode.Accepted
+    monkeypatch.setattr(QDialog, 'exec', inspect)
+    archive._show_entry_crop(entry['id'])
+    _dispose(archive)
+
+
+@pytest.mark.parametrize('status', ['unresolved', 'import_failed', 'review_required'])
+def test_unattached_candidates_cannot_be_consolidated_even_with_stale_path(window, library, status):
+    board = _board(library)
+    board[0]['model_match']['status'] = status
+    dialog = ConsolidateDialog(board)
+    assert dialog.table.rowCount() == 0
+    assert dialog.selected_components() == []
+    assert not dialog.buttons.button(dialog.buttons.StandardButton.Ok).isEnabled()
+    store = am.AcceptedModelStore()
+    assert store.consolidate(board, [library]).stored == 0
+    _dispose(dialog)

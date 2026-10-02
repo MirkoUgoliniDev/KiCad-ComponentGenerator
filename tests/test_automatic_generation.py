@@ -146,7 +146,7 @@ def test_standard_starts_exactly_once_after_extract_thread_finished(window, monk
     # aperta con tutti i passi spuntati e si chiude solo con «Chiudi».
     overlay = window.analysis_overlay
     assert overlay.is_holding_completed()
-    assert overlay._step_current == len(overlay._step_labels) == 3
+    assert overlay._step_current == len(overlay._step_labels) == 4
     assert "✓ 3" in overlay.steps_plain_text()
     assert not overlay.is_abortable()
     overlay.close_button.click()

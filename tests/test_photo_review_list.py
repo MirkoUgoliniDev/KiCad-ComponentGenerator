@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import QDialogButtonBox
 from kicadgen.gui.photo_review_dialog import (
     PHOTO_DIMMED, PHOTO_HIDDEN, PhotoReviewDialog, SELECTED_PEN_WIDTH_PX,
     SELECTION_HALO_COLOR, SELECTION_HALO_WIDTH_PX, UNDETERMINED_LIST_MARKER,
-    UNDETERMINED_TYPE_COLOR, UNSELECTED_PEN_WIDTH_PX,
+    UNDETERMINED_TYPE_COLOR, UNSELECTED_PEN_WIDTH_PX, UNDETERMINED_FILTER,
 )
 
 
@@ -507,7 +507,7 @@ def test_a_component_without_a_kind_adds_no_category_and_matches_none(app, png):
     try:
         assert [widget.category_filter.itemText(i)
                 for i in range(widget.category_filter.count())] == [
-            "Tutte le categorie", "resistor"]
+            "Tutte le categorie", "Categoria sconosciuta (1)", "resistor"]
         widget.component_list.setCurrentRow(0)
         _select_category(widget, "resistor")
         assert _visible_rows(widget) == [0]
@@ -535,7 +535,7 @@ def test_a_kind_that_is_not_a_string_declares_no_category(app, png):
     try:
         assert [widget.category_filter.itemText(i)
                 for i in range(widget.category_filter.count())] == [
-            "Tutte le categorie", "resistor"]
+            "Tutte le categorie", "Categoria sconosciuta (3)", "resistor"]
         assert widget.kind_completer.model().stringList() == ["resistor"]
         # Nothing was rewritten: the inventory still holds what arrived.
         assert [entry["kind"] for entry in widget.get_components()] == [
@@ -543,6 +543,10 @@ def test_a_kind_that_is_not_a_string_declares_no_category(app, png):
         _select_category(widget, "resistor")
         assert _visible_rows(widget) == [0], "no non-string kind matches a category"
         assert widget.count_label.text() == "Componenti: 1 di 4"
+        unknown = widget.category_filter.findData(UNDETERMINED_FILTER)
+        assert unknown >= 0
+        widget.category_filter.setCurrentIndex(unknown)
+        assert _visible_rows(widget) == [1, 2, 3]
     finally:
         widget.close()
 

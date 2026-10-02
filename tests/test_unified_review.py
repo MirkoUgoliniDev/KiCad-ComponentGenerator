@@ -18,7 +18,7 @@ from PyQt6.QtGui import QImage
 from PyQt6.QtWidgets import QDialog, QDialogButtonBox
 
 from kicadgen.gui.photo_review_dialog import (
-    DETECTOR_DISAGREES_MARKER, PhotoReviewDialog, STAGE_DETECTOR, STAGE_INVENTORY,
+    DETECTOR_DISAGREES_MARKER, PROPOSED_FILTER, PhotoReviewDialog, STAGE_DETECTOR, STAGE_INVENTORY,
     component_attribute_lines, detector_disagrees, left_out)
 from kicadgen.services import photo_yolo
 from kicadgen.services.photo_yolo import MANUAL_SOURCE
@@ -169,7 +169,7 @@ def test_the_detector_rows_read_as_class_confidence_state_and_size(detector):
     assert detector.warning_label.text() == "Nessun avviso per questo componente."
     # The filter vocabulary is the detector's classes, not the «generic» kind.
     data = [detector.category_filter.itemData(i) for i in range(detector.category_filter.count())]
-    assert data == [None, "capacitor", "led", "resistor"]
+    assert data == [None, PROPOSED_FILTER, "capacitor", "led", "resistor"]
     lines = dict(component_attribute_lines(detector.get_components()[1], _identity, STAGE_DETECTOR))
     assert lines == {"Classe": "led", "Confidenza": "0.30", "Riquadro": "4.0×4.0 mm",
                      "Provenienza": "sotto la soglia: da tenere a mano"}
@@ -289,7 +289,8 @@ def test_the_inventory_stage_shows_the_detector_reading_and_flags_a_different_cl
     assert DETECTOR_DISAGREES_MARKER not in inventory.component_list.item(1).text()
     # A merged row carries no single reading: no line is invented for it.
     merged = component_attribute_lines(rows[2], _identity)
-    assert "Classe" not in dict(merged) and len(merged) == 5
+    assert "Classe" not in dict(merged) and len(merged) == 6
+    assert dict(merged)["Letture del ritaglio"] == "non disponibile"
     # The modal shows the two headed sections, the detector's first.
     inventory._select_row(2)
     text = inventory.attributes_plain_text()

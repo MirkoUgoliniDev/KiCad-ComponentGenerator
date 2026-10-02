@@ -65,6 +65,17 @@ def test_a_bare_row_reports_what_is_missing_and_invents_nothing():
     assert len(as_dict) == 6
 
 
+@pytest.mark.parametrize('status,expected', [
+    ('supported', 'categoria sostenuta dalle due letture'),
+    ('inventory_retained', 'categoria mantenuta dall\'inventario, non confermata dai ritagli'),
+    ('conflict', 'categoria in conflitto, da verificare'),
+    ('unknown', 'categoria non determinata dai ritagli'),
+])
+def test_crop_agreement_does_not_imply_category_confirmation(status, expected):
+    row = dict(kind='resistor', _crop_reading='agreed', _crop_class_status=status)
+    assert expected in dict(component_attribute_lines(row, _identity))['Letture del ritaglio']
+
+
 def test_model_origin_and_individual_orientation_are_explicit():
     from kicadgen.gui.photo_review_dialog import kicad_section_lines
     row = {"model_path": "part.step", "model_match": {"attachment": "accepted_library"}}

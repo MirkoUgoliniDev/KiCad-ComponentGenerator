@@ -1,5 +1,310 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+- **COMPLETATO E COMMITTATO (02/10 pomeriggio, branch `ADVANCED`, hash in git
+  log; utente: «committa, pusha, mergia in main e torna qui»). Suite completa
+  in due meta' sul codice committato (.venv/claude-suite4-a/b.log, uscita 0):
+  2990 + 3592 = 6582 passati, 8 saltati, 2 xfail, 19 sottotest, 0 falliti.
+  Prova reale dell'utente (progetto TEST, 12:32, «non male»): 42 corpi, tutti
+  risolti dalla rete, 0 riverifiche AI, costo 0.0044 USD (sole chiamate sui
+  documenti), 34 modelli KiCad provvisori, 13 versi della rete; restano 6 da
+  rivedere (SOIC-8 2, chip_LED 6 solo SideView, chip_R 10/14/16 a meta'
+  0603/0805, SOT-23 36) e 2 magenta (fuse 24, module 27). PROSSIMI PASSI da
+  proporre all'utente uno alla volta: misure YOLO gonfie, varianti SOT-23/
+  SOIC-8, fuse/module, domanda archivio-vs-rete (vedi sotto).
+- **STORIA DELLA GIORNATA (02/10). Rete SMD locale come percorso
+  principale, AI solo sui corpi irrisolti.** Diagnosi di partenza: nella corsa
+  RS485 delle 09:57 il selettore era su «YOLO» (pcb_yolov8s.onnx + DeepSeek):
+  88 chiamate AI (2 documenti, 1 inventario globale, 84 lettura ritagli, 1
+  sigle), smd_classifier.pt mai caricato. In modalita' `yolo_smd` invece la
+  funzione usciva prima di ogni AI e senza ripiego (scelta precedente, ora
+  superata dalla richiesta dell'utente). Il runtime (torch 2.14 cpu,
+  torchvision 0.29, ultralytics 8.4) e' gia' nel .venv; checkpoint validato.
+  Piano concordato:
+  1. `yolo_smd` diventa la modalita' predefinita del selettore (le altre
+     restano scegliibili; nel binario frozen resta disabilitata col motivo).
+  2. I corpi che la rete non risolve (`accepted` falso: `_other` o sotto la
+     soglia del checkpoint) passano alla lettura dei ritagli AI esistente
+     (`read_bodies`), SOLO loro; quelli risolti non generano chiamate.
+     Nessun inventario globale AI in questa modalita'.
+  3. Modale di avanzamento: fase propria «Rete SMD locale» (oggi alias di
+     `yolo`, quindi invisibile), riepilogo «N risolti dalla rete, M all'AI».
+  4. Parametri componente: provenienza (rete con confidenza / riverifica AI).
+  Dubbio dichiarato: la soglia 0.5 e' del checkpoint; errori della rete ad alta
+  confidenza NON vanno all'AI.
+  **FATTO (non committato):** punti 1-4 implementati.
+  - `photo_inventory.recheck_unresolved_smd_rows`: righe con `accepted` falso
+    -> `class='unknown'` (`generic` non e' riclassificabile per
+    `reclassable_class`, una lettura concorde non sarebbe mai stata adottata),
+    `_smd_ai_recheck=True`, `read_bodies` sulle sole quelle; senza lettura
+    concorde tornano `generic`. Contatori in calibration
+    (`smd_resolved_count`, `smd_ai_recheck_count`). `_smd_ai_recheck` aggiunto
+    alla lista dei campi conservati da `_components_3d`.
+  - Modale: `TOOLS["smd"]` («Rete SMD locale», rosa, glifo `network`), alias
+    `smd -> yolo` tolto. Colori campionati annunciati come fase OpenCV.
+  - Default del selettore `yolo_smd` dai sorgenti, `yolo` nel frozen. I
+    progetti salvati ricordano la voce per valore: un progetto gia' salvato
+    con «YOLO» (es. RS485) riapre su «YOLO».
+  - «Parametri componente»: riga «Esito rete SMD». Traduzioni nelle 4 lingue.
+  - Test: contratto del vecchio `[True]` (nessuna chiamata) aggiornato al
+    nuovo (solo il corpo irrisolto va alla lettura, stub); test del default
+    riscritti + caso negativo frozen; test della fase propria nella modale.
+  Suite completa in due meta' (.venv/claude-suite-a/b.log, uscita 0):
+  2974 + 3562 = 6536 passati, 8 saltati, 2 xfail, 19 sottotest, 0 falliti.
+  **DIFETTO TROVATO AL PRIMO TEST DELL'UTENTE (10:32) E CORRETTO:** la
+  modalita' `yolo_smd` non arrivava MAI all'inventario: `_extract_photo_stage`
+  (codice non committato della sessione precedente, separato da
+  extract_pin_header_params) usava `cancel`, non in scope -> NameError,
+  «Inventario fotografico fallito», e il 3D prendeva i 30 ingombri a occhio
+  della chiamata sui documenti (tutto magenta, sovrapposti). I test non lo
+  vedevano perche' sostituiscono la fase. Correzione: parametro `cancelled`
+  (predicato di extract_params) passato alla fase. Regressione in
+  test_global_inventory_pipeline (con/senza annullamento; fallisce col difetto
+  reintrodotto). Prova reale offline sulla foto RS485 di extract_inventory
+  `yolo_smd`: 42 corpi, 42 risolti, 0 chiamate AI, fasi opencv/yolo/smd/kicad.
+  **VERIFICA AVVERSARIALE (richiesta dall'utente, 3 agenti read-only):**
+  agente C (riverifica + modale) — corretti: A1 il motivo della riverifica
+  sovrascriveva quelli di read_bodies (ora in testa); A2 la riverifica usava
+  `model` invece di `classifier_model or model` come il ramo yolo; A3 dettaglio
+  fase 'kicad' non tradotto; S2 annullo durante la rete (RuntimeError /
+  MatchingCancelled) degradato a «inventario fallito» con ripiego sugli
+  ingombri a occhio -> ora CallCancelled se il canale e' attivo (deciso dal
+  canale, non dal testo); S3 'semiconductor_unknown' non dichiarato «tipo
+  letto dall'AI». Test positivi/negativi in test_smd_component_classifier.
+  Aperto da C (sospetto 1): class_confidence float sulle righe accettate vs
+  soglie 'medium'/'high' in kicad_models (1810, 2005, 2094).
+  Agente A (catena estrazione, esecuzione reale end-to-end) — corretti:
+  D1 «Rilancia inventario» su pacchetto yolo_smd pagava l'inventario globale
+  su tutti i corpi -> ora `_reconcile_with_smd_network` (rete sulla foto
+  calibrata, AI solo sugli irrisolti); D2 un riquadro trascinato oltre il
+  bordo foto faceva fallire TUTTO l'inventario (ValueError inghiottito) ->
+  riquadri ritagliati alla foto, quelli senza area restano non accettati;
+  D3 l'annullo usciva come CallCancelled nudo -> ExtractionCancelled;
+  S3 motivo contraddittorio sui riverificati. Classificazione estratta in
+  `classify_smd_rows`, condivisa fra estrazione e rilancio. D4 (kind 'fuse',
+  CP_Elec->capacitor invece di capacitor_electrolytic, SOT/SOIC/QFN->ic invece
+  di ic_sot/ic_soic/ic_qfn) NON corretto: legato alla decisione sui modelli.
+  Aperti da A: conteggi della lettura ritagli non arrivano alla modale (il
+  wrapper announce dell'estrattore accetta 2 argomenti; vale per tutti i
+  rilevatori); markings non letti in yolo_smd (intenzionale, non fissato).
+  Agente B (a valle, esecuzione reale su RS485, librerie KiCad 10): nessun
+  crash, campi conservati da _components_3d e dal salvataggio, ma **0 modelli
+  KiCad su 42** (40 review_required = forme approssimate col colore della foto,
+  2 magenta: fuse 24, module 27). NON CORRETTO, serve decisione dell'utente:
+  1. il riconoscimento della rete non diventa mai modello/footprint:
+     _attach_kicad_results (smd_component_classifier 226-287) e poi
+     attach_models (kicad_models 3066, ricalcola da zero) richiedono
+     presence_confidence 'high', bbox_basis body/total e un conteggio di
+     terminali osservato pari a quello del modello; le righe SMD non hanno
+     nessuno dei tre; _provisional_geometry_choice accetta solo
+     ic/connector/switch/module. Stamattina col percorso YOLO+AI i modelli
+     KiCad venivano agganciati (log 10:05: R_1206, R_0805, SOT-23-6...).
+  2. class_confidence float (confermato: fallisce ogni soglia stringa; il
+     dialogo lo omette dalla riga Tipo).
+  3. kind 'fuse' fuori da COMPONENT_KINDS -> generic + magenta.
+  4. _smd_rotation_deg (posa KiCad della rete) mai usato; discorda dal
+     rotation_deg misurato su alcune righe.
+  Sospetti B: confidenza di rotazione forzata a 0.99 dall'aspetto del box;
+  aspetto calcolato in pixel grezzi su foto deformata (-17.7%); package con
+  " / " (SOT-23 / SC-70) senza token; footprint del dialogo preso dalla
+  previsione d'inventario, non aggiornato dalla generazione.
+  **IN CORSO (autorizzato 02/10: «ok proviamo, l'importante come primo passo
+  che venga riconosciuto package ed orientamento»).** Piano:
+  a. la classe della rete + la misura sulla foto propongono il modello KiCad
+     (stato «da rivedere», non scelta automatica definitiva): oggi 0 su 42;
+  b. la rotazione KiCad della rete (`_smd_rotation_deg`, oggi ignorata)
+     orienta il modello; dove discorda dall'asse misurato va detto;
+  c. nomi delle classi della rete allineati ai kind del programma (fuse,
+     elettrolitici, tantalio, ic_sot/ic_soic/ic_qfn) solo se servono ad a/b.
+  Criterio: nessuna soglia nuova tarata sulla RS485; si usano le quote
+  nominali dei package KiCad e la confidenza dichiarata dal checkpoint.
+  **FATTO a+b (non committato), banco RS485 offline + FreeCAD reale:**
+  - `_smd_accepted` e `_smd_body` (topologia dichiarata dal vocabolario fisso
+    del checkpoint: chip_R/chip_C/chip_LED = endcap_chip) portati da
+    photo_inventory fino a kicad_models e FreeCAD (whitelist in
+    datasheet_extractor, step_generator._match_evidence,
+    main_window._MATCH_EVIDENCE_KEYS).
+  - kicad_models: `_local_classifier_identity` (rete accettata + box tenuto
+    da una persona) -> `_classifier_geometry_choice`: la famiglia la da' la
+    rete, la taglia la misura; candidato unico di ricerca completa o banda
+    omogenea; un corpo endcap_chip resta nel catalogo `_ENDCAP_CHIP_CATALOG`
+    (`_is_endcap_chip_model`), mai MELF/shunt/tantalio. Esito provvisorio.
+  - freecad_parts: `_classifier_verse` (senza landmark, la posa KiCad della
+    rete da' il VERSO 0/180 sull'asse misurato) + `_axis_undetermined`
+    (se i due versi dell'asse sono in pareggio entro AXIS_TIE_MARGIN =
+    NAME_TIEBREAK_MARGIN, la rete decide anche 90/270: SOT-23-5 quasi
+    quadrato). Log KICADGEN_SMD_VERSE.
+  - Esito RS485: modelli agganciati 0 -> 34/42 (6 da rivedere: due chip_R a
+    meta' 0603/0805, due SOT-23 con 3 varianti, un SOIC, un LED con solo
+    candidato SideView; 2 magenta: fuse, module). 34/34 orientati con la
+    posa della rete. Verso verificato a occhio sulla foto per SOIC-8 (pin 1
+    in basso a destra = 180), SOT-23 (180, 0, 270), SOT-23-5 (180),
+    MiniMELF (banda catodo = 90), LED (catodo verde = 180); SOT-23-6, SOD
+    non leggibili dal ritaglio.
+  - Test: tests/test_smd_kicad_identity.py (identita', esclusione MELF,
+    rifiuti senza rete/persona, pareggio di taglia, verso, asse, margine).
+  Suite completa sul codice finale, due meta' (.venv/claude-suite3-a/b.log,
+  uscita 0): 2984 + 3578 = 6562 passati, 8 saltati, 2 xfail, 19 sottotest,
+  0 falliti.
+  **Prova dell'utente (RS4851, 11:23): «buono, ma non ottimo».** Agganciati
+  24 modelli, non 34 come sul banco: l'archivio degli abbinamenti accettati
+  (_accepted_match / _prefer_closer) mette in testa scelte di altre schede
+  (SOIC-8-1EP sui SOIC, R_1206 sul condensatore 7, SOT-353 sul SOT-23-5,
+  SOT-23...) e, quando sono in conflitto (review_required), il corpo resta
+  senza modello: la proposta della rete non viene valutata. DOMANDA APERTA
+  all'utente: con archivio in conflitto e package riconosciuto dalla rete,
+  agganciare il modello della rete lasciando l'archivio fra le alternative?
+  **Decisione dell'utente (02/10, 11:49): «ripulisci la tabella dei
+  consolidati, partiamo da zero»** (la domanda sopra resta aperta per il
+  futuro). Svuotato data/accepted_components.sqlite3 con
+  AcceptedModelStore.delete: 9 voci, 11 immagini (cascata). Copia in
+  .venv/backup-consolidati/accepted_components-20261002-114904.sqlite3.
+  Poi verifica avversariale approfondita con agenti, richiesta dall'utente
+  («prenditi il tempo che ti serve») prima del suo nuovo test.
+  **Verifica avversariale 2 — agente C (stato e modifiche utente), DA
+  CORREGGERE:** D1 `_classifier_verse` annulla la rotazione impostata
+  dall'utente (impone sempre la posa della rete); D2 nessuna modifica utente
+  (editor componente, revisione foto sposta/ridimensiona/ruota/tipo, Copia
+  formato) invalida `_smd_*`: identita' e posa stantie guidano modello e
+  verso; D3 classi «axis» del checkpoint (chip_R, chip_C, R_Array, crystal,
+  fuse) danno 0/90 = solo asse, usate come verso 180 inventato; D4 scelte
+  provvisorie e angoli della rete entrano nell'archivio consolidati come
+  scelte dell'utente (ConsolidateDialog le pre-spunta, _explicit_rotation
+  legge l'angolo renderizzato); D5 «Rilancia inventario» yolo_smd non
+  interrompibile e annuncio «richiesta a pagamento» falso; D6 pacchetti di
+  revisione di ripiego senza detector (-> percorso yolo a pagamento) e
+  reviewed=True forzato anche su proposte deboli; D7 rilancio salta
+  _components_3d (kind 'fuse' grezzo); D8 class_confidence float.
+  **Agente A (scelta modello, libreria KiCad 10 reale, tutte le classi del
+  checkpoint), DA CORREGGERE:** A-D1 `_CHIP_SIZE_CODES` incompleto (1808,
+  2220, 0612...): il filtro catalogo toglie la taglia vera e promuove una
+  sbagliata; A-D2 numero di terminali della classe buttato (SOT-23 ->
+  SOT-23-5; SOT-223 -> SOT-223-8; `_declared_count` non legge «TSOT»);
+  A-D3 l'uscita della rete vale per OGNI classe: R_Array, LED_RGB, CP_Elec,
+  induttori, quarzi, switch ricevono modelli di fornitori a caso; A-D4 basi
+  miste nella banda (body di A contro total/piazzole di B: LQFP 7x7 ->
+  LQFP-32 5x5, SOIC-16 -> SOIC-16W), QFN/DFN/MSOP senza conteggio;
+  A-D5 archivio che contraddice la topologia dichiarata dalla rete vince
+  senza segnalazione. Test: «complete» e le guardie review-only/invalid non
+  sono coperti. Funziona: chip R/C/LED 0402-2512 quasi sempre.
+  **Agente B (orientamento, 96 corpi FreeCAD reali):** catena dei segni
+  CORRETTA (pin 1 sul pad 1 ogni volta che il verso della rete si applica;
+  KiCad 10: 0 rotazioni di modello nelle famiglie usate). DA CORREGGERE:
+  B-D1 anteprima del selettore senza `_smd_*` (PREVIEW_PLACEMENT_KEYS) ->
+  180 di differenza dal 3D; B-D2 verso applicato anche quando la rete tira a
+  sorte (SOD-123F 0.54/0.46, le 4 viste ruotate discordi); B-D3 confidenza
+  0.99 forzata dall'aspetto del box; B-D4 log KICADGEN_SMD_VERSE anche se poi
+  vince un angolo esplicito.
+  **PIANO DI CORREZIONE (in corso, 02/10 pomeriggio):**
+  - rete -> dichiara per classe: topologia (endcap_chip), conteggio
+    terminali (SOT-23=3, -5, -6, SOIC-n, SOD/MiniMELF/SMA=2, chip=2), tipo
+    di rotazione dal checkpoint (none/axis/full), accordo delle 4 viste TTA;
+  - uscita della rete in kicad_models SOLO per endcap_chip o conteggio
+    dichiarato; candidati filtrati per conteggio (`_declared_count` letto
+    anche con prefisso T), banda con conteggio illeggibile = rifiuto; una
+    sola base di misura nella banda, mai piazzole; catalogo chip strutturale
+    (`<prefisso>_NNNN(N)_NNNN(N)Metric`); archivio che contraddice la
+    topologia dichiarata -> review_required;
+  - verso solo per rotazione «full» con le 4 viste concordi; anteprima del
+    selettore con gli stessi campi; log solo se il verso resta;
+  - modifiche utente (editor, revisione foto, Copia formato) tolgono
+    identita'/posa della rete e marcano la previsione come superata;
+  - archivio: provvisori non pre-spuntati, angolo renderizzato non e' una
+    scelta esplicita; rilancio yolo_smd interrompibile e annuncio onesto,
+    detector nei pacchetti di ripiego, normalizzazione _components_3d;
+    class_confidence a parole (medium se accettata, low altrimenti; la
+    probabilita' resta in `_smd_prediction`); fuse -> kind generic.
+  **CORREZIONI APPLICATE (non committate) — esito del banco RS4851 offline
+  con archivio vuoto: 35/42 modelli provvisori, 5 da rivedere, 2 magenta
+  (fuse, module); 13 versi della rete applicati in FreeCAD, solo su classi
+  «full» con le 4 viste concordi (chip R/C non piu' girate a caso, SOD-123F
+  #15/#33 incerti lasciati senza verso).**
+  - smd_component_classifier: CLASS_TERMINAL_COUNTS, rotation_kind,
+    rotation_views_agree, terminal_count nel risultato; confidenza d'asse non
+    piu' forzata a 0.99; fuse -> kind generic; SMD_IDENTITY_KEYS +
+    drop_classifier_identity (storia in _smd_prediction, _smd_superseded).
+  - photo_inventory: _smd_rotation_kind/_smd_views_agree/_smd_terminal_count;
+    class_confidence 'medium'/'low' (la probabilita' resta nella previsione);
+    rilancio yolo_smd con cancel e reviewed; ReviewBundle.reviewed.
+  - kicad_models: identita' solo per endcap_chip o conteggio dichiarato;
+    _classifier_admits (catalogo chip strutturale con lunghezza >= larghezza:
+    niente 0612/0815 «a terminali lunghi»; conteggio dal nome KiCad o, se il
+    nome non lo dice, dalle piazzole ordinarie del footprint); _declared_count
+    legge TSOT; banda con un solo tipo di base (body/total/piazzole: le
+    piazzole restano ammesse perche' il riquadro YOLO comprende le saldature,
+    0805 misurata 2.46x1.40); archivio fuori dal package della rete ->
+    review_required (classifier_archive_conflict).
+  - freecad_parts: verso solo con _smd_rotation_kind 'full' e viste
+    concordi; log solo se non vince un angolo esplicito.
+  - GUI: editor componenti, revisione foto (sposta/ridimensiona/ruota,
+    tipo/package) e Copia formato chiamano drop_classifier_identity;
+    «Parametri»: «superato da una modifica manuale»; anteprima del selettore
+    con i campi della rete; consolidati: provvisori NON pre-spuntati;
+    rilancio: annuncio onesto, interrompibile, _components_3d applicato,
+    pacchetti di ripiego con detector dell'estrazione e reviewed=False.
+  - Non fatto (dichiarato): _explicit_rotation usa ancora l'angolo
+    renderizzato quando l'utente consolida (ora solo se spunta lui un
+    provvisorio); SOIC-8 sceglie fra varianti -1EP/JEITA a pari ingombro;
+    misure YOLO gonfie (2 chip_R a meta' 0603/0805); fuse/module magenta.
+  - Test nuovi/aggiornati: test_smd_kicad_identity (24), editor e Copia
+    formato, bundle reviewed, rilancio non rivisto.
+  Sospetto: soglia di accettazione = 0.5 del codice (suggested_threshold del
+  checkpoint 0.0), non «del checkpoint» come dice il docstring.
+  In coda (una domanda alla volta): misure YOLO gonfie (chip_R a meta'
+  0603/0805), varianti SOT-23 in pareggio, fuse/module magenta.
+  Restano: classe 'fuse' fuori vocabolario; CP_Elec/CP_Tantalum/SOT->ic
+  (D4 agente A); confidenza float in class_confidence (ora irrilevante per
+  questa strada, che non la legge).
+  **SCOPERTA (replay locale RS485, nessuna chiamata AI):** YOLOv8m trova 42
+  corpi; la rete li accetta TUTTI con confidenza 0.89-0.97, quindi la
+  riverifica AI su questa scheda non scatta mai. Ma tre classi contraddicono
+  YOLO in modo grossolano: capacitor->fuse, capacitor->chip_LED,
+  inductor->module. La confidenza softmax della rete non separa gli errori.
+  Proposta all'utente (IN ATTESA DI RISPOSTA): rimandare all'AI anche i corpi
+  su cui YOLO e rete SMD danno famiglie diverse (due modelli indipendenti in
+  disaccordo: criterio strutturale, non soglia).
+
+- **COMPLETATO (02/10, revisione e correzioni autorizzate).** Branch `ADVANCED`,
+  HEAD `1d6fdb697145aa3ae7d02521c356ff774869da36`. Correzioni locali, nessun
+  commit/push richiesto. Modifiche preesistenti preservate. Baseline:
+  6442 passati, 59 falliti, 7 saltati, 2 xfail, 19 sottotest.
+  - Rinomina esplicita dell'intero progetto: output .pretty/.3dshapes, nomi
+    dei file, Value e riferimenti locali ai modelli aggiornati; riferimenti
+    esterni preservati; rollback su errore, supporto al solo cambio di case.
+    Rifiuto di collisioni, link/junction/reparse di radice, output e file;
+    ricontrolli dopo staging. Su radice sostituita da link, il rollback non
+    scrive il log attraverso il collegamento. Regressioni con snapshot dei
+    file locali/esterni e verifica strutturale del footprint.
+  - Classificatore SMD distinto dai rilevatori YOLO nel selettore; checkpoint
+    validato prima di chiamate a consumo (dimensione, metadati, classi,
+    orientamenti, soglia, chiavi/shape/dtype/layout e finitezza dei tensori).
+    Verificato anche models/smd_classifier.pt reale. Nel binario frozen SMD
+    e' disabilitato con motivo, poiche' spec esclude runtime/pesi; nessun
+    ripiego automatico su AI. Documentazione/API aggiornate.
+  - Ritagli con categorie visive esplicite incompatibili: conflitto mantenuto,
+    assegnazione automatica bloccata, misure indipendenti concordi preservate.
+    Anche class_supported_by_readings rifiuta il conflitto direttamente.
+    Categorie non stringa restano ignote; filtri e fonte grezza coerenti.
+  - Traduzioni IT/EN/FR/DE corrette e completate; migrazione selettiva dei
+    vecchi default danneggiati, traduzioni personalizzate preservate. Backup
+    read-only del SQLite reale verificato: integrity/foreign keys OK e
+    configurazioni AI identiche. Database sorgente non modificato dal fix.
+  - Glifi overlay distinti, azioni GitHub fissate a SHA ufficiali verificati;
+    mock/asserzioni aggiornati ai contratti reali mantenendo i controlli.
+  Tre agenti rilanciati in revisione avversaria incrociata; i rilievi
+  riproducibili sono corretti e ricontrollati da peer indipendenti.
+  Suite finale sullo stesso stato, due processi nuovi con uscita 0:
+  first 4114 passati/6 skip/19 sottotest (346.31s); second 2418 passati/2 skip/
+  2 xfail (416.12s). TOTALE 6532 passati, 0 falliti, 8 skip, 2 xfail,
+  19 sottotest. Log .venv/surgical-suite-first.log e second.log (prefisso
+  surgical-suite-). Esecuzioni interrotte precedenti escluse dal conteggio.
+  Limiti: installer Windows non ricompilato/provato; comportamento frozen
+  verificato con test GUI e controllo spec. Questo host non concede creazione
+  symlink Windows: regressioni link simulate; caso con due directory distinte
+  solo per case saltato su Windows. I controlli link sono ai confini delle
+  operazioni; non garantiscono atomicita' rispetto a modifiche filesystem
+  arbitrarie concorrenti. Su POSIX resta la stretta finestra tra ultimo
+  controllo della destinazione e rename, senza API Python portabile no-replace.
+
 - **DA DOVE RIPRENDERE (30/09).** Branch `FIX`. Punti 161-169 committati su
   `FIX` in un solo commit (hash in git log), poi da unire in `main` su richiesta
   dell'utente («committa tutto, pusha, mergia in main e torna qui»): 161

@@ -7,9 +7,10 @@ and chosen model. On a later board a body with the same geometric signature
 receives that model at once, without measuring candidates in FreeCAD, as a
 PROPOSAL to confirm (user decision: "preselect, you confirm").
 
-@note The key is mechanical only, never the component name or marking: the 3D
-    model depends on the package, not on the marking, and the project forbids
-    name-based rules. Signatures are compared within a declared tolerance,
+@note Current crop examples are compared visually before mechanical filtering.
+    Strong visual matches with conflicting physical evidence remain review-only
+    proposals. Entries without usable crops retain mechanical matching, never
+    rules based on component names or markings. Signatures are compared within a declared tolerance,
     never for equality, because two photographs never yield identical sizes.
     The tolerance is the measurement uncertainty of the two photographs
     (`cad3d.measurement_uncertainty`), in millimetres per side: neighbouring
@@ -18,7 +19,7 @@ PROPOSAL to confirm (user decision: "preselect, you confirm").
 @note Families whose same outline exists with several terminal counts
     (TERMINAL_COUNT_CATEGORIES: SOT-23-3/5/6, QFN-40/48 in 6x6 and 7x7...) are
     reused only when the terminal count was observed on BOTH boards and is
-    equal.
+    equal for automatic reuse; a conflicting visual candidate requires review.
 @note The archive is a separate SQLite file (`data/accepted_components.sqlite3`
     or `KICADGEN_MATCH_DB`) so it can be copied, backed up or shared without
     touching AI profiles and translations. Reading never creates the file.
@@ -300,7 +301,8 @@ def eligibility(component: dict) -> tuple[bool, str]:
         return False, "hai scelto il segnaposto generico, nessun modello da ricordare"
     report = component.get("model_match")
     status = report.get("status") if isinstance(report, dict) else None
-    if status in ("unresolved", "import_failed"):
+    if status in ("unresolved", "import_failed", "review_required") or (
+            isinstance(report, dict) and report.get('render_placeholder') is True):
         return False, "nessun modello KiCad importato"
     path = component.get("model_path")
     if not isinstance(path, str) or not path.strip():
@@ -473,7 +475,120 @@ class AcceptedModelStore:
                 "FROM accepted_model_images WHERE accepted_model_id=? ORDER BY id",
                 (int(entry_id),))]
 
-    def find(self, component: dict, roots: Iterable[Path]) -> Optional[dict]:
+    def find(self, component: dict, roots: Iterable[Path], diagnostic=None) -> Optional[dict]:
+        """@brief Compare all current crop examples first, then validate physical evidence.
+
+        Strong visual candidates survive conflicting AI observations as review-only
+        proposals. A visual score is similarity, not a probability of correctness.
+        Legacy entries without usable images retain the mechanical fallback.
+        """
+        roots = list(roots or ())
+        visual = self._find_visual(component, roots, diagnostic)
+        if visual is not None:
+            return visual
+        return self._find_mechanical(component, roots, diagnostic)
+
+    def _find_visual(self, component, roots, diagnostic):
+        """@brief Rank crops before category/terminal gates; never auto-attach conflicts."""
+        from .component_image_match import (descriptor_from_bytes, similarity,
+                                             rotated_image_similarity, match_orientation)
+        payload = component.get('_accepted_image_descriptor')
+        if not payload:
+            return None
+        try:
+            query = descriptor_from_bytes(payload)
+        except (TypeError, ValueError):
+            return None
+        with self._connect(create=False) as db:
+            if db is None or not db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='accepted_model_images'").fetchone():
+                return None
+            entries = {r['id']: dict(r) for r in db.execute('SELECT * FROM accepted_models')}
+            columns = {r[1] for r in db.execute('PRAGMA table_info(accepted_model_images)')}
+            angle = 'model_rotation_deg' if 'model_rotation_deg' in columns else 'NULL AS model_rotation_deg'
+            images = [dict(r) for r in db.execute(
+                f'SELECT id, accepted_model_id, descriptor, image_png, {angle} FROM accepted_model_images WHERE crop_version=?',
+                (IMAGE_CROP_VERSION,))]
+        scores, examples = {}, {}
+        for image in images:
+            key = image['accepted_model_id']
+            if key not in entries:
+                continue
+            try:
+                score = max(similarity(query, descriptor_from_bytes(image['descriptor'])),
+                            rotated_image_similarity(query, image['image_png']))
+            except (TypeError, ValueError):
+                continue
+            scores[key] = max(scores.get(key, 0.0), score)
+            examples.setdefault(key, []).append(image)
+        if diagnostic is not None:
+            diagnostic['visual_examples_compared'] = sum(map(len, examples.values()))
+        ranked = sorted(scores, key=lambda key: scores[key], reverse=True)
+        if not ranked or scores[ranked[0]] < .92:
+            return None
+        key = ranked[0]
+        sig = signature(component)
+        reference = entries[key]['model_ref']
+        best_score = scores[key]
+        # Several verified examples can share one model. Prefer complete,
+        # compatible evidence within its visual tie band, not a row missing pins.
+        def evidence_rank(k):
+            row = entries[k]
+            if sig is None:
+                return (1, 1, 1, 1, -scores[k])
+            tolerance, _ = match_tolerance_mm(component, row.get('side_uncertainty_mm'))
+            a, b = sig['terminal_count'], row.get('terminal_count')
+            count_penalty = 0 if a is not None and b == a else 1 if b is not None else 2
+            return (sig['category'] != row['category'],
+                    not within_tolerance(row['long_mm'], row['short_mm'], sig['long_mm'], sig['short_mm'], tolerance),
+                    count_penalty, sig['basis'] != row['basis'], -scores[k])
+        same_model = [k for k in ranked if entries[k]['model_ref'] == reference
+                      and scores[k] >= max(.92, best_score - .04)]
+        key = min(same_model, key=evidence_rank)
+        entry, score = entries[key], scores[key]
+        conflicts = []
+        rival = max((scores[k] for k in ranked if entries[k]['model_ref'] != entry['model_ref']), default=0.0)
+        if best_score - rival < .08:
+            conflicts.append(tx('Ritagli simili associati a modelli diversi: scelta ambigua.'))
+        sig = signature(component)
+        tolerance, source = match_tolerance_mm(component, entry.get('side_uncertainty_mm'))
+        error = None
+        count_checked = False
+        if sig is None:
+            conflicts.append(tx('Categoria o misure insufficienti.'))
+        else:
+            if sig['category'] != entry['category']:
+                conflicts.append(tx('Categoria diversa da quella del ritaglio consolidato.'))
+            if not within_tolerance(entry['long_mm'], entry['short_mm'], sig['long_mm'], sig['short_mm'], tolerance):
+                conflicts.append(tx('Misure fuori dalla tolleranza dei consolidati.'))
+            error = xy_error(entry['long_mm'], entry['short_mm'], sig['long_mm'], sig['short_mm'])
+            a, b = sig['terminal_count'], entry.get('terminal_count')
+            count_checked = a is not None and b is not None and a == b
+            if a is not None and b is not None and a != b:
+                conflicts.append(tx('Numero di terminali diverso dal consolidato.'))
+            elif (sig['category'] in TERMINAL_COUNT_CATEGORIES or entry['category'] in TERMINAL_COUNT_CATEGORIES) and not count_checked:
+                conflicts.append(tx('Conteggio dei terminali mancante o da verificare.'))
+            if sig['basis'] != entry['basis'] and {sig['basis'], entry['basis']} != {'body', 'total'}:
+                conflicts.append(tx('Base di misura non confrontabile con il consolidato.'))
+        path = resolve_reference(entry['model_ref'], roots)
+        if path is None:
+            # Preserve the candidate in the diagnostic report, without a usable attachment.
+            if diagnostic is not None:
+                diagnostic['visual_unavailable_model'] = entry['model_ref']
+            return None
+        entry['image_count'] = len(examples[key])
+        if diagnostic is not None:
+            diagnostic['visual_conflicts'] = conflicts
+        return dict(entry=entry, path=path, relative_xy_error=error,
+                    tolerance_mm=tolerance, tolerance_source=source,
+                    terminal_count_checked=count_checked, alternatives=len(ranked)-1,
+                    visual_score=score, image_examples=len(examples[key]),
+                    basis_recovered_visually=bool(sig and sig['basis'] != entry['basis']),
+                    orientation=match_orientation(query, examples[key]),
+                    review_required=bool(conflicts), visual_conflicts=conflicts,
+                    visual_first=True)
+
+    def _find_mechanical(self, component: dict, roots: Iterable[Path], diagnostic=None) -> Optional[dict]:
         """@brief Accepted entry compatible with the body, or None.
 
         @param component Body of the new board.
@@ -494,12 +609,17 @@ class AcceptedModelStore:
             the most recent acceptance wins (the user's latest correction).
             Entries whose file vanished are skipped.
         """
+        def explain(reason):
+            if diagnostic is not None:
+                diagnostic['reason'] = reason
         sig = signature(component)
         if sig is None:
+            explain(tx('Categoria o misure insufficienti.'))
             return None
         roots = list(roots or ())
         with self._connect(create=False) as db:
             if db is None:
+                explain(tx('Archivio consolidati non presente.'))
                 return None
             has_images = db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='accepted_model_images'").fetchone()
@@ -509,12 +629,17 @@ class AcceptedModelStore:
                 f"SELECT accepted_models.*, {image_count} AS image_count "
                 "FROM accepted_models WHERE category=?",
                 (sig["category"],))]
+        if not rows:
+            explain(tx('Nessuna voce consolidata per questa categoria.'))
+            return None
         needs_count = sig["category"] in TERMINAL_COUNT_CATEGORIES
         if needs_count and sig["terminal_count"] is None:
+            explain(tx('Conteggio dei terminali mancante o da verificare.'))
             # Stesso ingombro, piedinature diverse: senza il conteggio su
             # questa scheda l'archivio non sa quale modello proporre.
             return None
         compatible = []
+        passed_count, passed_size = 0, 0
         for row in rows:
             stored_count = row.get("terminal_count")
             if needs_count and stored_count is None:
@@ -522,16 +647,21 @@ class AcceptedModelStore:
             if (sig["terminal_count"] is not None and stored_count is not None
                     and int(stored_count) != sig["terminal_count"]):
                 continue
+            passed_count += 1
             tolerance, source = match_tolerance_mm(component, row.get("side_uncertainty_mm"))
             if not within_tolerance(row["long_mm"], row["short_mm"],
                                     sig["long_mm"], sig["short_mm"], tolerance):
                 continue
+            passed_size += 1
             path = resolve_reference(row["model_ref"], roots)
             if path is None:
                 continue
             error = xy_error(row["long_mm"], row["short_mm"], sig["long_mm"], sig["short_mm"])
             compatible.append((error, row, path, tolerance, source, 0.0))
         if not compatible:
+            explain(tx('Terminali incompatibili o non documentati nei consolidati.') if not passed_count
+                    else tx('Misure fuori dalla tolleranza dei consolidati.') if not passed_size
+                    else tx('File dei modelli consolidati non trovato nella libreria.'))
             return None
         orientation_examples = {}
         query_descriptor = component.get("_accepted_image_descriptor")
@@ -581,6 +711,7 @@ class AcceptedModelStore:
                 recovered.append(item)
         compatible = strict + recovered
         if not compatible:
+            explain(tx('Base di misura diversa e confronto visivo insufficiente o ambiguo.'))
             return None
         closest = min(item[0] for item in compatible)
         band = [item for item in compatible if item[0] <= closest + RECENCY_TIE_MARGIN]

@@ -1856,9 +1856,12 @@ def extract_pin_header_params(
     reset_usage()
     if not doc_paths:
         raise ExtractionError(tx("Nessun file selezionato."))
-    if photo_detector not in ("ai", "yolo", "vlm"):
+    if photo_detector not in ("ai", "yolo", "vlm", "yolo_smd"):
         raise ExtractionError(tx("Rilevatore fotografico non supportato."))
-    if photo_detector == "yolo":
+    if photo_detector in ("yolo", "yolo_smd"):
+        if photo_detector == "yolo_smd" and yolo_model_path is None:
+            from ..app_paths import resource_path
+            yolo_model_path = resource_path("models", "pcb_component_detector_yolov8m_best.pt")
         from .photo_yolo import operating_confidence, validate_yolo_setup
         from .photo_yolo import yolo_settings as check_yolo_settings
         try:
@@ -1866,7 +1869,10 @@ def extract_pin_header_params(
             operating_confidence(yolo_confidence)
             check_yolo_settings(yolo_settings)
             validate_yolo_setup(yolo_model_path)
-        except (ValueError, OSError, ImportError) as exc:
+            if photo_detector == "yolo_smd":
+                from .smd_component_classifier import validate_smd_setup
+                validate_smd_setup()
+        except (ValueError, OSError, ImportError, RuntimeError) as exc:
             raise ExtractionError(tx("YOLO locale non disponibile: {exc}", exc=exc)) from exc
     from .ai_diagnostics import make_logged_call
     # L'analisi applicativa deve essere auditabile: il log persistente conserva
@@ -2037,6 +2043,7 @@ def extract_pin_header_params(
         )
     return _extract_photo_stage(
         data, doc_paths, progress=progress, announce=announce, check_cancel=check_cancel,
+        cancelled=cancelled,
         document_roles=document_roles, component_family=component_family,
         photo_detector=photo_detector, vision_model=vision_model, model=model,
         verification_model=verification_model, diagnostic_call=diagnostic_call,
@@ -2071,7 +2078,8 @@ def _recheck_missing_contact_styles(data, content_blocks, diagnostic_call, model
         return
     message = "Ricontrollo AI del tipo di contatto sui lati non riconosciuti: " + ", ".join(missing)
     if progress:
-        progress(message)
+        progress(tx("Ricontrollo AI del tipo di contatto sui lati non riconosciuti: {sides}",
+                    sides=", ".join(missing)))
     properties = {
         "edge": {"type": "string", "enum": list(missing)},
         "half_hole_visible": {"type": ["boolean", "null"]},
@@ -2108,7 +2116,7 @@ def _recheck_missing_contact_styles(data, content_blocks, diagnostic_call, model
                                 has_pdf=has_pdf)
     except OpenRouterError:
         if progress:
-            progress("Ricontrollo tipo di contatto non riuscito: resta la scelta manuale.")
+            progress(tx("Ricontrollo tipo di contatto non riuscito: resta la scelta manuale."))
         return
     observations = reply.get("sides") if isinstance(reply, dict) else None
     if not isinstance(observations, list):
@@ -2770,8 +2778,12 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
                          terminal_prompt, yolo_model_path, review_proposals,
                          yolo_confidence, yolo_settings,
                          recount_contacts=None, crop_prompt=None,
-                         crop_model=None) -> ExtractedParams:
-    """Optional photo inventory and final assembly of a validated main answer."""
+                         crop_model=None, cancelled=None) -> ExtractedParams:
+    """Optional photo inventory and final assembly of a validated main answer.
+
+    `cancelled` is the zero-argument cancellation predicate of extract_params
+    (None: no cancellation channel); the SMD network polls it between crops.
+    """
     # La foto richiede un passaggio separato: nell'estrazione globale il modello
     # deve anche leggere quote, pinout e layout, e tende a sacrificare i passivi
     # piccoli. I crop sono best-effort: se falliscono, resta il risultato globale.
@@ -2823,14 +2835,20 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
                     'yolo_confidence': yolo_confidence, 'yolo_settings': yolo_settings,
                     'recount_contacts': recount_contacts, 'crop_prompt': crop_prompt,
                     'crop_model': crop_model}
-                   if photo_detector in ('yolo', 'vlm') else {}),
+                   if photo_detector in ('yolo', 'vlm', 'yolo_smd') else {}),
+                **({'cancel': cancelled} if photo_detector == 'yolo_smd' and cancelled is not None
+                   else {}),
             )
         except ReviewCancelled as exc:
             # Un annullo non e' un guasto dell'inventario: proseguire qui
             # vorrebbe dire pagare la riconciliazione sulle proposte rifiutate.
             raise ExtractionError(str(exc)) from exc
-        except CallCancelled:
+        except ExtractionCancelled:
             raise
+        except CallCancelled as exc:
+            # Annullo nato fuori da una chiamata a pagamento (rete SMD,
+            # abbinamento KiCad): stesso tipo documentato di ogni altro annullo.
+            raise ExtractionCancelled(str(exc)) from exc
         except Exception as exc:  # noqa: BLE001 - l'inventario e' facoltativo
             # Qualunque guasto dell'inventario (anche KeyError/TypeError di
             # una risposta malformata) non deve far perdere la risposta
@@ -2856,7 +2874,7 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
         if photo_report and photo_report.components:
             # The global YOLO reconciliation already reports terminal evidence.
             # Further paid crop calls are an explicit optional UI action only.
-            if photo_detector not in ('yolo', 'vlm') and isinstance(getattr(photo_report, "photo_png", None), bytes):
+            if photo_detector not in ('yolo', 'vlm', 'yolo_smd') and isinstance(getattr(photo_report, "photo_png", None), bytes):
                 from .photo_terminals import observe_terminals
                 check_cancel()
                 try:
@@ -3341,6 +3359,7 @@ def _review_notes(sides, value_sources) -> list[str]:
 #: `_height_estimated`, `_global_inventory_status`, ...). Descriptive fields
 #: (name, kind, package, mating, colour, ...) are kept.
 _TRUSTED_ONLY_FIELDS = frozenset({
+    "model_match", "footprint", "footprint_candidates",
     "object_type", "confidence", "presence_confidence", "class_confidence", "class",
     "component_id", "source_candidate_ids", "pin_count_confidence", "pin_count_source",
     "terminal_count_basis", "lead_count_complete", "lead_count_confidence",
@@ -3459,6 +3478,10 @@ def _components_3d(raw: Optional[Sequence[dict]],
             if key in entry:
                 component[key] = entry[key]
         for key in ('_yolo_class', '_yolo_confidence', '_yolo_original_box', '_geometry_source',
+                    '_smd_prediction', '_smd_class', '_smd_rotation_deg', '_smd_rotation_confidence',
+                    '_smd_ai_recheck', '_smd_accepted', '_smd_body', '_smd_rotation_kind',
+                    '_smd_views_agree', '_smd_terminal_count', '_smd_superseded',
+                    'model_match', 'footprint', 'footprint_candidates', '_presence_reviewed_by_user',
                     'presence_confidence', 'class_confidence', '_yolo_proposal_id',
                     '_yolo_class_ambiguous', '_yolo_review_only', '_yolo_origin',
                     # Riquadro tracciato o ritoccato da una persona: e' la
@@ -3489,7 +3512,10 @@ def _components_3d(raw: Optional[Sequence[dict]],
                     # arrivare alla revisione, altrimenti una riga «da
                     # rivedere» non direbbe piu' perche'.
                     'package_confidence', '_crop_reading', '_crop_readings',
-                    '_crop_observations',
+                    '_crop_observations', '_crop_class_status', '_crop_class_decided',
+                    '_crop_terminal_review_required', '_crop_image_evidence',
+                    '_category_source', '_category_status', '_ai_class_proposal',
+                    '_ai_class_confidence', '_terminal_status',
                     # Evidenza del rilevatore locale della proposta sorgente e
                     # provenienza di un package derivato (HANDOFF 149).
                     '_detector_evidence', 'package_source',
