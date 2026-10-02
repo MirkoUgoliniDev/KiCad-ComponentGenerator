@@ -280,27 +280,76 @@ def test_a_name_without_a_count_is_admitted_through_its_footprint_pads(monkeypat
     assert not km._classifier_admits(path, row)
 
 
-def _tied_sizes():
+def _tied_sizes(length=1.91, width=1.0):
+    """0805 and 0603 chip envelopes with the worst-axis error model_candidates computes."""
     base = Path("Resistor_SMD.3dshapes")
-    return [dict(path=str(base / "R_0805_2012Metric.step"), relative_xy_error=0.17,
-                 measurement_basis="total", family="resistor", dimensions_mm=[2.0, 1.25]),
-            dict(path=str(base / "R_0603_1608Metric.step"), relative_xy_error=0.15,
-                 measurement_basis="total", family="resistor", dimensions_mm=[1.6, 0.8])]
+    measured = sorted((length, width))
+    choices = []
+    for name, dims in (("R_0805_2012Metric", [2.0, 1.25]), ("R_0603_1608Metric", [1.6, 0.8])):
+        error = max(abs(m - side) / side for m, side in zip(sorted(dims), measured))
+        choices.append(dict(path=str(base / f"{name}.step"), relative_xy_error=error,
+                            measurement_basis="total", family="resistor", dimensions_mm=dims))
+    return sorted(choices, key=lambda item: item["relative_xy_error"])
 
 
-def test_nearly_tied_sizes_propose_the_closest_and_name_the_others():
-    """@brief User decision 2026-10-02: between 0603 and 0805 propose the closer one.
+def test_nearly_tied_sizes_propose_the_closest_on_both_axes():
+    """@brief User decision 2026-10-02 «proporre la piu' vicina», closeness on BOTH axes.
 
-    @note The head of the ranked list is the 0805; the closest is the 0603.
+    @note Contract changed on purpose (adversarial review A1, 2026-10-02):
+        the worst axis alone picked the 0603, 18 % off on the length, over the
+        0805, 2.6 % off, for a 1.95 x 1.02 mm reading. Here the 0603 heads
+        the ranked list (smaller worst-axis error) and the 0805 is the closer
+        size overall.
     """
-    row = _network_row(length_mm=1.91, width_mm=1.0)
-    choices = _tied_sizes()
+    row = _network_row(length_mm=1.95, width_mm=1.02)
+    choices = _tied_sizes(1.95, 1.02)
+    assert Path(choices[0]["path"]).stem == "R_0603_1608Metric"
     chosen = km._classifier_geometry_choice(row, choices, True)
+    assert Path(chosen["path"]).stem == "R_0805_2012Metric"
+    assert chosen["tie_alternatives"] == ["R_0603_1608Metric"]
+
+
+def test_the_smaller_size_wins_when_it_is_closer_on_both_axes():
+    """@brief Negative of the previous: the rule is closeness, not «the larger one»."""
+    row = _network_row(length_mm=1.78, width_mm=1.02)
+    chosen = km._classifier_geometry_choice(row, _tied_sizes(1.78, 1.02), True)
     assert Path(chosen["path"]).stem == "R_0603_1608Metric"
     assert chosen["tie_alternatives"] == ["R_0805_2012Metric"]
+
+
+def test_a_tie_on_another_basis_is_named_and_the_pick_is_not_unique():
+    """@brief Review A3: the band is formed before the basis filter."""
+    row = _network_row(length_mm=1.95, width_mm=1.02)
+    body, pads = _tied_sizes(1.95, 1.02)
+    pads = dict(pads, measurement_basis="piazzole")
+    chosen = km._classifier_geometry_choice(row, [body, pads], True)
+    assert chosen is body
+    assert chosen["tie_alternatives"] == [Path(pads["path"]).stem]
+
+
+def test_a_lone_size_with_no_rival_on_any_basis_has_no_alternatives():
+    """@brief Negative of the previous: nothing within the margin, nothing to name."""
+    row = _network_row(length_mm=1.6, width_mm=0.8)
+    body, = [item for item in _tied_sizes(1.6, 0.8) if "0603" in item["path"]]
+    far = dict(_tied_sizes(1.6, 0.8)[1], measurement_basis="piazzole")
+    chosen = km._classifier_geometry_choice(row, [body, far], True)
+    assert chosen is body and "tie_alternatives" not in chosen
 
 
 def test_no_closest_pick_on_an_incomplete_search():
     """@brief Negative: «closest» among sizes never measured means nothing."""
     row = _network_row(length_mm=1.91, width_mm=1.0)
     assert km._classifier_geometry_choice(row, _tied_sizes(), False) is None
+
+
+def test_a_name_count_contradicted_by_the_copper_is_not_admitted(monkeypatch):
+    """@brief Review A2: SOIC-8-N7 names 8 positions but solders 7 pads.
+
+    @note Negative: the plain SOIC-8, whose copper agrees with its name, stays admitted.
+    """
+    row = dict(kind="ic_soic", _smd_terminal_count=8)
+    base = Path("Package_SO.3dshapes")
+    monkeypatch.setattr(km, "_declared_land_pattern", lambda p, library=None: (7, 0))
+    assert not km._classifier_admits(base / "SOIC-8-N7_3.9x4.9mm_P1.27mm.step", row)
+    monkeypatch.setattr(km, "_declared_land_pattern", lambda p, library=None: (8, 0))
+    assert km._classifier_admits(base / "SOIC-8_3.9x4.9mm_P1.27mm.step", row)

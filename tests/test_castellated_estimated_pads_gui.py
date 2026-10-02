@@ -139,3 +139,28 @@ def test_an_old_project_with_the_reference_pad_keeps_the_reference_as_an_estimat
     params.validate()
     assert [s.width_source for s in params.pad_sizes()] == [PAD_ASSUMED, PAD_ASSUMED]
     assert [s.width for s in params.pad_sizes()] == [pytest.approx(1.8)] * 2
+
+
+def test_a_declared_hole_survives_a_relaunch_without_sources(window):
+    """@brief Finding C-M3 (2026-10-02): the hole flag travels in the side, like the pads.
+
+    @note Before, the hole flags were recomputed from value_sources only: on a
+        relaunch without them a hole read from the documents became an
+        estimate, which the land rule then reduced.
+    """
+    params = extraction("read")
+    params.castellated_sides[1]["half_hole_diameter_mm"] = 1.1
+    params.castellated_sides[0]["half_hole_diameter_mm"] = 1.0
+    params.value_sources["castellated_sides.right.half_hole_diameter_mm"] = "read"
+    params.value_sources["castellated_sides.left.half_hole_diameter_mm"] = "estimated"
+    window.group_castellated.setChecked(True)
+    window._apply_extracted_castellated(params)
+    sides = window._serialised_sides()
+    window._sides.clear()
+    window._apply_extracted_castellated(ExtractedParams(
+        name="RS485", description="", tags="", confidence="low", notes="",
+        layout="castellated", castellated_sides=sides, body_length_mm=30.0, body_width_mm=15.2,
+        photo_source="", components_3d=[]))
+    left, right = window._current_castellated_params().sides
+    assert is_declared_size(right.hole_diameter)
+    assert isinstance(left.hole_diameter, AssumedSize)     # negative: an estimate stays one

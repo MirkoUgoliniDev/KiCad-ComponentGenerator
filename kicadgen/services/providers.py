@@ -315,7 +315,7 @@ class ProviderBalance:
 
     def describe(self) -> str:
         """@brief One log line."""
-        label = PROVIDER_LABELS.get(self.provider, self.provider)
+        label = tx(PROVIDER_LABELS.get(self.provider, self.provider))
         if self.amount is None:
             return tx("Credito {label}: {state}.", label=label,
                       state=tx("disponibile") if self.available else tx("esaurito"))

@@ -76,3 +76,20 @@ def test_the_button_is_brought_back_into_view_when_the_page_moved(window, monkey
     assert moved > 0
     window._keep_extract_button_visible()
     assert bar.value() == moved
+
+
+def test_a_click_stopped_by_the_checks_keeps_the_previous_run_detector(window, monkeypatch):
+    """@brief Review B6 (2026-10-02): the detector of the last RUN, not of the last click.
+
+    @note A relaunch reads _extraction_detector to know whether the global
+        inventory is paid: a click that never started must not change it.
+    """
+    _prepare(window, monkeypatch, lambda path: None)
+    window._extraction_detector = "yolo_smd"
+    window.combo_photo_detector.setCurrentIndex(window.combo_photo_detector.findData("ai"))
+    monkeypatch.setattr(window, "_selected_documents",
+                        lambda: (_ for _ in ()).throw(ValueError("nessun documento")))
+    monkeypatch.setattr(gui.QMessageBox, "information", lambda *a: None)
+    monkeypatch.setattr(gui.QMessageBox, "warning", lambda *a: None)
+    window._extract_with_ai()
+    assert window._extraction_detector == "yolo_smd"

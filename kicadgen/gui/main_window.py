@@ -157,6 +157,9 @@ PROJECT_WIDGETS = (
     "field_cast_inset", "field_cast_hole", "field_cast_hole_inset",
     "field_cast_thru_drill", "field_cast_thru_pad", "field_cast_thru_offset",
 )
+#: Campi dei file di pesi locali: vuoto = il predefinito. Un progetto che non
+#: li dichiara li riporta vuoti invece di ereditare quelli del precedente.
+MODEL_FILE_WIDGETS = ("field_yolo_model", "field_smd_model")
 #: Pausa prima di riattivare «Estrai parametri con AI» dopo una preparazione
 #: interrotta (documenti mancanti, rilevatore non disponibile...): i clic
 #: arrivati mentre l'interfaccia era ferma vengono consegnati prima e trovano il
@@ -1431,7 +1434,7 @@ class MainWindow(QMainWindow):
         self.btn_pick_yolo_model.setAccessibleName(self._photo_detector_text("picker"))
         self.btn_pick_yolo_model.setToolTip(
             self._photo_detector_text("browse") + "\n" + self._photo_detector_text("picker"))
-        default_path = yolo_weights_path(DEFAULT_YOLO_ONNX)
+        default_path = self._default_yolo_weights(self.combo_photo_detector.currentData())
         self.field_yolo_model.setPlaceholderText(
             self._photo_detector_text("default", path=default_path))
         self.field_yolo_model.setToolTip(
@@ -1455,7 +1458,7 @@ class MainWindow(QMainWindow):
         local = detector in ("yolo", "yolo_only", "yolo_smd") and not (
             detector == "yolo_smd" and is_frozen())
         smd = detector == "yolo_smd" and not is_frozen()
-        default_path = yolo_weights_path(DEFAULT_YOLO_PT if detector == "yolo_smd" else DEFAULT_YOLO_ONNX)
+        default_path = self._default_yolo_weights(detector)
         self.field_yolo_model.setPlaceholderText(self._photo_detector_text("default", path=default_path))
         self.field_yolo_model.setToolTip(self._photo_detector_text("path_help", path=default_path))
         # Durante una corsa (audit 25/09, B6) non si riaccendono i comandi
@@ -1545,10 +1548,8 @@ class MainWindow(QMainWindow):
             request, 2026-09-26: information about the model, not a bare file
             dialog). Nothing is saved as a preference, as before.
         """
-        import os
         from .yolo_model_dialog import YoloModelDialog
-        default = os.environ.get("KICADGEN_YOLO_MODEL",
-                                 str(yolo_weights_path(DEFAULT_YOLO_ONNX)))
+        default = str(self._default_yolo_weights(self.combo_photo_detector.currentData()))
         dialog = YoloModelDialog(self.field_yolo_model.text().strip(), resource_path(*YOLO_MODELS_DIR),
                                  default=default, tr=self.i18n.text, parent=self)
         accepted = dialog.exec() == QDialog.DialogCode.Accepted
@@ -1559,7 +1560,29 @@ class MainWindow(QMainWindow):
         dialog.shutdown()
         dialog.deleteLater()
         if accepted and selected:
-            self.field_yolo_model.setText(selected)
+            # Il predefinito del rilevatore resta il campo vuoto, come per la
+            # rete SMD: cambiando rilevatore cambia anche il predefinito.
+            self.field_yolo_model.setText(
+                "" if os.path.normcase(os.path.abspath(selected))
+                == os.path.normcase(os.path.abspath(default)) else selected)
+
+    @staticmethod
+    def _default_yolo_weights(detector) -> Path:
+        """@brief The YOLO weights used when the session field is empty.
+
+        @param detector Photo detector key of the combo.
+        @return KICADGEN_YOLO_MODEL when set, else the default of the
+            detector: the PyTorch weights for 'yolo_smd' (the SMD route runs
+            ultralytics), the ONNX file for the other local detectors.
+        @note Before, the picker always proposed the ONNX file as «in uso»,
+            also in 'yolo_smd', and OK replaced the weights actually used
+            (adversarial review B2, 2026-10-02); 'yolo_smd' also ignored the
+            environment variable (C-L3).
+        """
+        override = os.environ.get("KICADGEN_YOLO_MODEL", "").strip()
+        if override:
+            return Path(override)
+        return yolo_weights_path(DEFAULT_YOLO_PT if detector == "yolo_smd" else DEFAULT_YOLO_ONNX)
 
     def _pick_session_vlm_model(self) -> None:
         """@brief Sceglie il modello che guarda la fotografia, solo per questa sessione.
@@ -1610,7 +1633,7 @@ class MainWindow(QMainWindow):
         detector = self.combo_photo_detector.currentData() or "ai"
         path = self.field_yolo_model.text().strip()
         if detector == "yolo_smd" and not path:
-            return detector, yolo_weights_path(DEFAULT_YOLO_PT)
+            return detector, self._default_yolo_weights(detector)
         return detector, Path(path) if detector in ("yolo", "yolo_only", "yolo_smd") and path else None
 
     def _balance_provider(self) -> str:
@@ -3630,10 +3653,6 @@ class MainWindow(QMainWindow):
 
         self._show_extract_preparing()
         photo_detector, yolo_model_path = self._photo_detector_options()
-        # Il rilevatore di QUESTA estrazione: i pacchetti di ripiego scritti
-        # dopo lo devono ricordare (audit 2026-10-02: tornava 'yolo' e il
-        # rilancio pagava l'inventario globale).
-        self._extraction_detector = photo_detector
         if photo_detector == "yolo_smd" and is_frozen():
             QMessageBox.warning(
                 self, self._photo_detector_text("error_title"),
@@ -3873,6 +3892,12 @@ class MainWindow(QMainWindow):
         self._analysis_tabs_enabled = self.tabs.isEnabled()
         self.tabs.setEnabled(False)
         self.analysis_overlay.start(abortable=True)
+        # Il rilevatore di QUESTA estrazione: i pacchetti di ripiego scritti
+        # dopo lo devono ricordare (audit 2026-10-02: tornava 'yolo' e il
+        # rilancio pagava l'inventario globale). Solo quando la corsa parte
+        # davvero: un clic fermato dai controlli non deve cambiare quello
+        # della corsa precedente (verifica avversariale B6).
+        self._extraction_detector = photo_detector
         self._extract_worker.start()
 
     #: Estensioni delle foto che l'inventario prova come vista dall'alto
@@ -6040,7 +6065,9 @@ class MainWindow(QMainWindow):
 
         @param state Oggetto prodotto da `_project_state` (letto dal file o
             fotografato all'avvio). Chiavi mancanti o valori che non entrano in
-            un campo lasciano il campo com'e', con una riga di log.
+            un campo lasciano il campo com'e', con una riga di log; fanno
+            eccezione i file di pesi (MODEL_FILE_WIDGETS), che tornano al
+            predefinito.
         @note Le opzioni vanno in `_project_options`, mai in `self._config`:
             config.json resta il default dei progetti nuovi finche' l'utente
             non le cambia dalle Opzioni di generazione. Un'opzione che lo
@@ -6054,6 +6081,11 @@ class MainWindow(QMainWindow):
             values = state.get("widgets") if isinstance(state.get("widgets"), dict) else {}
             if widget is not None and name in values and not set_widget_value(widget, values[name]):
                 skipped.append(name)
+            elif widget is not None and name not in values and name in MODEL_FILE_WIDGETS:
+                # Un file di pesi non dichiarato dal progetto (salvato prima del
+                # campo) e' il predefinito, non quello del progetto aperto prima
+                # (verifica avversariale B3, 2026-10-02).
+                widget.clear()
         # Parametri YOLO del progetto; assenti (progetti precedenti) = predefiniti.
         raw_yolo = state.get("yolo_settings")
         if raw_yolo is None:
@@ -7460,16 +7492,16 @@ class MainWindow(QMainWindow):
         sources = getattr(params, "value_sources", None) or {}
         for side in params.castellated_sides or ():
             side = dict(side)
-            # Diametri dei fori: dichiarati solo se letti o ricavati dai
-            # documenti; stimati o senza provenienza restano stime (26/09).
-            for field in ("half_hole_diameter_mm", "through_hole_drill_mm"):
-                source = sources.get(f"castellated_sides.{side.get('edge')}.{field}")
-                side[field.replace("_mm", "_declared")] = source in DECLARED_SOURCES
-            # Piazzole del lato, stessa regola (28/09). Senza la voce di
-            # provenienza (lati rientrati da `_serialised_sides`, che la
-            # portano gia' nel lato) vale quella del lato; se manca anche
-            # quella, la misura resta una stima.
-            for field in ("pad_length_mm", "pad_width_mm"):
+            # Diametri dei fori (26/09) e piazzole del lato (28/09): dichiarati
+            # solo se letti, ricavati o misurati; stimati o senza provenienza
+            # restano stime. Senza la voce di provenienza (lati rientrati da
+            # `_serialised_sides`, che la portano gia' nel lato, es. il
+            # rilancio dopo un riavvio) vale quella del lato; se manca anche
+            # quella, la misura resta una stima. Prima i fori non avevano il
+            # ripiego: un foro dichiarato tornava stima e veniva ridotto
+            # (verifica avversariale del 2026-10-02, C-M3).
+            for field in ("half_hole_diameter_mm", "through_hole_drill_mm",
+                          "pad_length_mm", "pad_width_mm"):
                 key = f"castellated_sides.{side.get('edge')}.{field}"
                 flag = field.replace("_mm", "_declared")
                 side[flag] = (sources[key] in DECLARED_SOURCES if key in sources

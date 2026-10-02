@@ -599,8 +599,8 @@ I pesi dei modelli YOLO e il dataset di addestramento **hanno licenze proprie,
 che possono essere diverse da quella del codice**. Sono elencati uno per uno in
 `THIRD_PARTY_NOTICES.md`, insieme alle dipendenze Python:
 
-- nel repository non ci sono pesi (`models/*.pt` e `models/*.onnx` sono
-  esclusi da Git). I checkpoint usati nello sviluppo dichiarano AGPL-3.0 nei
+- nel repository non ci sono pesi (`models/yolo/` per i rilevatori e
+  `models/smd/` per la rete SMD, entrambe escluse da Git). I checkpoint usati nello sviluppo dichiarano AGPL-3.0 nei
   metadati. La licenza del modello ONNX di base non è ancora chiarita (MIT
   nella model card, AGPL-3.0 nei metadati);
 - i modelli YOLO26 di Roboflow sono addestrati sul

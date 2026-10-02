@@ -119,12 +119,21 @@ def _archive_prepass(components, library, note, cancel):
             if diagnostic.get('error'):
                 record.update(status='unavailable', reason=diagnostic['error'])
             elif found:
+                # Stesso controllo di model_candidates: un modello d'archivio
+                # fuori dal package visto dalla rete non e' «trovato», e il
+                # resoconto non deve dirlo (verifica avversariale A4, 2026-10-02).
+                outside_network = (_local_classifier_identity(component)
+                                   and not _classifier_admits(
+                                       Path(found['candidates'][0]['path']), component))
                 review = (found.get('status') == 'review_required'
                           or component.get('_crop_class_status') == 'conflict'
                           or component.get('_category_status') == 'conflict'
                           or _crop_terminal_review_blocks(component))
-                record.update(status='review_required' if review else 'matched',
-                              reason=tx('Corrispondenza trovata, ma osservazioni in conflitto: da verificare.')
+                record.update(status='review_required' if review or outside_network else 'matched',
+                              reason=tx("L'archivio propone un modello fuori dal package riconosciuto "
+                                        "dalla rete locale: da verificare prima di usarlo.")
+                              if outside_network else
+                              tx('Corrispondenza trovata, ma osservazioni in conflitto: da verificare.')
                               if review else tx('Corrispondenza trovata nei consolidati.'),
                               model=Path(found['candidates'][0]['path']).stem,
                               conflicts=found.get('accepted_visual_conflicts', []),
@@ -2078,18 +2087,21 @@ def _classifier_admits(path: Path, component) -> bool:
     copper pads of the footprints that link the model (_declared_land_pattern:
     pads minus tabs, only when every linking footprint agrees). A model whose
     count cannot be read from either is not admitted: a count nobody can read
-    cannot confirm the classifier's.
+    cannot confirm the classifier's. When BOTH are readable both must agree
+    with the class: the name gives the package family, the copper gives what
+    the footprint actually solders (SOIC-8-N7 names 8 positions and has 7
+    pads; adversarial review of 2026-10-02, A2).
     """
     kind = str(component.get("kind") or "").lower()
     if component.get("_smd_body") == "endcap_chip" and kind in _ENDCAP_CHIP_CATALOG:
         return _is_endcap_chip_model(path, kind)
     count = component.get("_smd_terminal_count")
     if type(count) is int and count > 0:
-        declared = _declared_count(path)
-        if declared is None:
-            lands = _declared_land_pattern(path)
-            declared = lands[0] - lands[1] if lands else None
-        return declared == count
+        lands = _declared_land_pattern(path)
+        readable = [value for value in (_declared_count(path),
+                                        lands[0] - lands[1] if lands else None)
+                    if value is not None]
+        return bool(readable) and all(value == count for value in readable)
     return False
 
 
@@ -2136,9 +2148,18 @@ def _classifier_geometry_choice(component, choices, complete):
     member, only on a complete search, and records the others in
     `tie_alternatives` (user decision 2026-10-02: «proporre la piu' vicina»;
     a chip measured 1.9 x 1.0 mm between 0603 and 0805 used to get no model).
+    «Closest» weighs BOTH axes: the sum of the absolute per-axis relative
+    deviations from the measured sides, worst-axis error as tie-break
+    (_axis_deviation_sum). The worst axis alone picked a 0603 (21 % off on the
+    length) over an 0805 (2.5 % off) for a 1.95 x 1.00 mm reading, because the
+    short side of a tiny chip is the noisier one (adversarial review A1).
     That closest pick is a declared preference, not a measurement verdict:
     an inflated box can favour the larger size, so it stays provisional and
-    the alternatives stay in the picker. What the classifier does NOT supply is the
+    the alternatives stay in the picker. The band is formed BEFORE the basis
+    filter: a model that ties on another basis (body vs pads) is not compared
+    with the chosen one, but it is still a size the photograph cannot rule
+    out, so it is named among the alternatives and the pick is never presented
+    as unique (review A3). What the classifier does NOT supply is the
     basis of the box (body or total), so this path compares with whichever
     envelope fits (`_basis_readings` with an unknown basis), and stays
     provisional for that reason too.
@@ -2154,6 +2175,7 @@ def _classifier_geometry_choice(component, choices, complete):
     choices = [item for item in choices if _classifier_admits(Path(item["path"]), component)]
     if not choices:
         return None
+    full_band = _tie_band(choices) or []
     # Una sola base di misura nella banda: il corpo di un package non si
     # confronta con l'ingombro totale o con le piazzole di un altro (audit
     # 2026-10-02: LQFP 7x7 letto come LQFP-32 5x5). Le piazzole restano una
@@ -2178,18 +2200,45 @@ def _classifier_geometry_choice(component, choices, complete):
     band = _tie_band(choices)
     if band is None or not any(item is first for item in band):
         return None
+    # Concorrenti alla pari su un'altra base: non confrontabili, ma la foto
+    # non li esclude, quindi vanno nominati (A3).
+    other_bases = [item for item in full_band if basis_kind(item) != kind_of_basis]
+
+    def with_alternatives(chosen, peers):
+        names = [Path(item["path"]).stem for item in (*peers, *other_bases)
+                 if item is not chosen]
+        if names:
+            chosen["tie_alternatives"] = names
+        return chosen
     if len(band) == 1:
-        return first if complete else None
+        return with_alternatives(first, ()) if complete else None
     if _band_is_homogeneous(band, component.get("length_mm"), component.get("width_mm")):
-        return first
+        return with_alternatives(first, ()) if other_bases else first
     if not complete:
         # La piu' vicina fra taglie misurate: con candidati mai misurati
         # «piu' vicina» non vuol dire nulla.
         return None
-    closest = min(band, key=lambda item: float(item["relative_xy_error"]))
-    closest["tie_alternatives"] = [Path(item["path"]).stem for item in band
-                                   if item is not closest]
-    return closest
+    length, width = component.get("length_mm"), component.get("width_mm")
+    closest = min(band, key=lambda item: (_axis_deviation_sum(item, length, width),
+                                          float(item["relative_xy_error"])))
+    return with_alternatives(closest, band)
+
+
+def _axis_deviation_sum(item, length_mm, width_mm) -> float:
+    """Sum over both axes of |model - measured| / measured (long to long, short to short).
+
+    The «closest size» measure of _classifier_geometry_choice. Infinite when
+    a dimension cannot be read, so such a candidate is never preferred.
+    """
+    try:
+        measured = sorted(float(v) for v in (length_mm, width_mm))
+        model = sorted(float(v) for v in (item.get("dimensions_mm") or ())[:2])
+    except (TypeError, ValueError):
+        return math.inf
+    if (len(model) != 2 or any(isinstance(v, bool) for v in (length_mm, width_mm))
+            or not all(math.isfinite(v) and v > 0 for v in (*measured, *model))):
+        return math.inf
+    return sum(abs(m - side) / side for m, side in zip(model, measured))
 
 
 def _provisional_geometry_choice(component, choices, complete, basis):

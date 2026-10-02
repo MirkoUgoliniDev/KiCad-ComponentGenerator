@@ -1,5 +1,137 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+- **COMMITTATO (02/10 sera, branch `ADVANCED`, unito in `main`; hash in git log;
+  utente: «committa pusha mergia in main»). Suite: 3008 + 3622 = 6630 passati,
+  8 saltati, 2 xfail, 19 sottotest + il test notices corretto (vedi sotto).**
+  Verifica profonda con agenti in
+  modalita' avversariale, precisa e chirurgica»).** Tre agenti read-only sul
+  lavoro di oggi (1d6fdb6..HEAD + 2 frasi della modale non committate:
+  riga YOLO «ricerca dei corpi sulla foto, senza inviarla», riga rete SMD
+  «classifica i corpi trovati da YOLO (tipo, package e verso), senza inviare
+  la foto», file della rete solo nel log): (A) pipeline SMD, scelta modello
+  KiCad, verso FreeCAD; (B) GUI e impostazioni (tab Modello, profili,
+  ragionamento tolto, pulsante Preparazione, status_cost, Modello rete SMD,
+  Copia formato nelle proposte, finestra rete SMD); (C) cartelle dei modelli,
+  packaging, regole dei fori stimati in castellated_module. Esiti da
+  correggere dopo i rapporti, poi suite completa.
+  RAPPORTO C (cartelle/packaging/fori) — DA CORREGGERE:
+  H1 corona limitata alla piazzola anche con foro DICHIARATO -> anelli quasi
+  nulli validati (validate controlla solo ring > drill); H2 nessun minimo di
+  foratura: piazzola 0.45 -> fori 0.05 mm; H3 la regola scatta solo se
+  l'AI ha stimato un foro su quel lato (side_estimates), non per un criterio
+  fisico: lato con piazzola misurata ma senza stima resta col foro 1.7 in
+  piazzola 1.53 senza nota -> regola ad hoc; M1 hole_inset dichiarato +
+  riduzione -> rifiuto; M2 campi modulo uguali al riferimento letti come non
+  dichiarati (preesistente, ora cambia geometria); M3 rilancio dopo riavvio
+  perde i flag dichiarati dei fori (manca il ripiego che hanno le piazzole,
+  main_window ~7463); M4 test_photo_yolo_pt REAL e test_yolo_models:95
+  ancora su models/ piatto -> test inerti; L1 corona cresciuta oltre la
+  piazzola dichiarata senza nota; L2 percorsi models/ vecchi in
+  docs/yolo-photo-workflow.md, README.it.md, THIRD_PARTY_NOTICES.md (manca
+  voce smd_classifier.pt), docstring app_paths:59, «packaged» nel
+  classificatore; L3 KICADGEN_YOLO_MODEL ignorata in yolo_smd; L4 gitignore
+  senza .pth/.ckpt/.safetensors. OK: layout frozen coerente, piazzola
+  misurata trattata come dichiarata fino al salvataggio/riapertura.
+  FATTO (C-H1/H2/H3/M1/M3/L1): criterio = foro NON dichiarato + piazzola
+  DEL LATO misurata o dichiarata (la piazzola del modulo e' un default, nel
+  contatto con foro passante non e' nemmeno disegnata: le prove fissate
+  restano identiche); corona mai sotto quella di un foro dichiarato;
+  MIN_ESTIMATED_DRILL_MM 0.3 (euristica dichiarata): sotto non si riduce e
+  _copper_fit_notes lo dice; corona cresciuta oltre la piazzola annotata;
+  riduzione mai sotto 2*hole_inset dichiarato; rilancio senza provenienze
+  conserva il flag dei fori come per le piazzole. Test in
+  test_estimated_holes_fit_copper (+8) e test_castellated_estimated_pads_gui
+  (+1, fallisce sul codice vecchio). M2 (campo modulo uguale al riferimento
+  = non dichiarato) RESTA APERTO, preesistente: la nota lo rende visibile.
+  RAPPORTO B (GUI) — DA CORREGGERE: B1 Copia formato incolla su corpi mai
+  cliccati: _selection_changed chiama _format_click a ogni cambio di
+  selezione (cancella -> il vicino riceve il formato; disegna -> il nuovo
+  riquadro prende il formato) e sorgente/bersagli tenuti per indice di riga
+  (diventano stantii); B2 con yolo_smd «Scegli il modello YOLO» mostra
+  l'ONNX come in uso e OK lo sostituisce (default sbagliato, main_window
+  ~1550); B3 field_smd_model passa da un progetto all'altro (chiave assente
+  nei progetti vecchi: il widget non si azzera); B4 Copia formato nella fase
+  detector sovrascrive _yolo_origin/_yolo_low_confidence/_yolo_review_only/
+  _source/_yolo_source_before_manual del bersaglio; B5 testi di aiuto ancora
+  sui modelli per fase (help.settings.stage.1 nel DB, HELP[1]/[2] e
+  help.profile.stage.1/2 del profilo); B6 _extraction_detector assegnato
+  prima dei controlli: un clic fallito lo sovrascrive (rilancio a
+  pagamento); B7 «DeepSeek (API diretta)» non tradotto in combo e frase della
+  chiave; B8 due messaggi con caratteri rovinati (fr/de) mancanti in
+  SUPERSEDED_DEFAULTS. Nota: DB traduzioni da rigenerare prima del commit.
+  RAPPORTO A (rete SMD/KiCad) — DA CORREGGERE: A1 «taglia piu' vicina»
+  sceglie per errore sull'asse peggiore soltanto: 1.95x1.00 -> 0603 (21%
+  sulla lunghezza) invece di 0805 (2.5%); il test fissa 0603 con errori
+  sintetici; A2 SOIC-8-N7 (7 piazzole) ammesso per SOIC-8: il conteggio del
+  nome vince sulle piazzole; A3 la banda si forma DOPO il filtro per base:
+  un concorrente su altra base entro il margine sparisce e il candidato
+  sembra unico; A4 il resoconto dei consolidati dice «trovato» quando poi
+  model_candidates rifiuta la voce per conflitto con la rete; A5 docstring
+  di classify_smd_rows sul nome del file nella fase (non piu' vero); A6 un
+  riquadro fuori foto conta come «mandato alla riverifica AI».
+  FATTO A1-A6: «piu' vicina» = somma delle deviazioni relative sui due assi
+  (_axis_deviation_sum), asse peggiore come spareggio; banda formata prima
+  del filtro per base, concorrenti di altra base nominati in
+  tie_alternatives; nome E piazzole devono confermare il conteggio quando
+  entrambi leggibili; resoconto consolidati «da verificare» quando la rete
+  contraddice; riquadri '_outside' esclusi dalla riverifica e dai conteggi;
+  docstring. Test: test_smd_kicad_identity (contratto 0603->0805 cambiato di
+  proposito, + negativo), test_accepted_visual_first, test_smd_component_classifier.
+  FATTO B1-B8 + C-M4/L2/L3/L4: Copia formato tiene sorgente e incollati
+  per OGGETTO e non incolla sulle selezioni fatte dal programma
+  (_select_row_quietly in cancella/aggiungi; cancellata la sorgente il
+  pennello si spegne); DETECTOR_TARGET_FIELDS + provenienza YOLO;
+  _default_yolo_weights(detector) (.pt per yolo_smd, KICADGEN_YOLO_MODEL
+  anche li'; scegliere il predefinito lascia il campo vuoto);
+  MODEL_FILE_WIDGETS tornano vuoti se il progetto non li dichiara;
+  _extraction_detector assegnato solo a worker avviato; aiuti
+  help.settings.stage.1 / help.profile.stage.1-2 / HELP del profilo sul
+  modello unico; etichette dei fornitori tradotte con tx nei combo;
+  _LATER_SUPERSEDED in i18n unisce a SUPERSEDED_DEFAULTS tutti i testi del
+  DB spedito uguali a vecchi predefiniti (34 righe: aiuti, etichette, due
+  frasi con «?»); test REAL su models/yolo; documenti e
+  THIRD_PARTY_NOTICES (voce smd_classifier.pt: dati e licenza DA
+  CONFERMARE, non inventati); gitignore .pth/.ckpt/.safetensors/...
+  SUITE (.venv/claude-suite11-a/b.log): 3008 + 3622 passati, 8 saltati,
+  2 xfail, 19 sottotest; 1 fallito (test_yolo_models notices: la voce
+  smd_classifier.pt stava sotto «YOLO model weights») -> voce spostata in
+  una sezione «SMD package classifier weights», parser del test limitato
+  alla sezione YOLO; rilanciati verdi (27). La ripetizione dei documenti e'
+  arrivata a suite avviata: rilanciati i 1815 test che toccano
+  datasheet_extractor, verdi.
+  DA FARE AL COMMIT: rigenerare le traduzioni del DB data/ (le migrazioni
+  girano all'avvio) e committarlo dopo il controllo dei segreti.
+  NON FATTI (sospetti, mai confermati): tabelle per etichetta legate al
+  checkpoint scelto; kind YOLO perso quando la rete declina; asse da pixel
+  anisotropi; riga «Footprint KiCad» non aggiornata; pretest YOLO su
+  «Preparazione…»; riattivazione che ignora _extract_block_reason; modello
+  DeepSeek perso cambiando sorgente avanti e indietro. Anche C-M2 aperto.
+  Sospetti A: tabelle per etichetta legate al checkpoint (ora sceglibile);
+  rete che declina scarta il kind YOLO; asse 'axis' da pixel anisotropi;
+  riga Footprint KiCad della revisione non aggiornata.
+  Sospetti: pretest YOLO resta su «Preparazione…»; riattivazione ignora
+  _extract_block_reason; cambio sorgente andata/ritorno perde il modello
+  DeepSeek scelto.
+
+- **DIFETTO APERTO (02/10 18:20, prova utente progetto TEST4): «Estrazione
+  fallita: Gli argomenti dello strumento non sono JSON valido».** Prima
+  chiamata (documenti, deepseek-api/deepseek-flash, 15 blocchi con 4
+  ingrandimenti dei bordi), finish_reason=tool_calls (NON troncata),
+  JSONDecodeError a char 1874. Costo 0.0014 USD. Catena: la chiamata dei
+  documenti non ha il ripiego che ha l'inventario globale (una sola
+  ripetizione pagata per una risposta illeggibile, HANDOFF 137) e gli
+  argomenti grezzi non vengono salvati (ToolArgumentsError.raw si perde):
+  impossibile dire cosa c'era al carattere 1874. Proposta all'utente, in
+  attesa di OK: salvare il grezzo nell'audit del progetto + UNA ripetizione
+  pagata solo per risposta illeggibile non troncata, come l'inventario.
+  AUTORIZZATO dall'utente («ok procedi», 02/10 sera): FATTO (non
+  committato). datasheet_extractor: main_call ripetuta UNA volta su
+  ToolArgumentsError (solo risposta completa: le troncate e gli altri errori
+  non si ripetono); _log_unreadable_arguments scrive
+  «AI_RESPONSE_UNREADABLE attempt=N <testo>» nel log AI del progetto; due
+  illeggibili -> ExtractionError che rimanda alle righe. Test in
+  test_fixD_extractor (+3: ripetizione leggibile, due illeggibili = 2
+  chiamate e mai una terza, troncata non ripetuta).
 - **COMPLETATO E COMMITTATO (02/10 pomeriggio, branch `ADVANCED`, hash in git
   log; utente: «committa, pusha, mergia in main e torna qui»). Suite completa
   in due meta' sul codice committato (.venv/claude-suite4-a/b.log, uscita 0):
