@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from ..app_paths import resource_path
+
 #: Weights formats the detector loads (see photo_yolo._MODEL_SUFFIXES).
 MODEL_SUFFIXES = (".onnx", ".pt")
 
@@ -126,7 +128,7 @@ def list_models(folder, extra=()) -> list[ModelFile]:
     found = {}
     try:
         for entry in Path(folder).iterdir():
-            if entry.is_file() and entry.suffix.lower() in MODEL_SUFFIXES:
+            if entry.is_file() and model_role(entry) == "yolo_detector":
                 found[os.path.normcase(str(entry.resolve()))] = entry
     except OSError:
         pass
@@ -134,10 +136,32 @@ def list_models(folder, extra=()) -> list[ModelFile]:
         if not path:
             continue
         path = Path(path)
-        if path.suffix.lower() in MODEL_SUFFIXES:
+        if model_role(path) == "yolo_detector":
             found.setdefault(os.path.normcase(str(path.resolve())), path)
     return sorted((describe_file(path) for path in found.values()),
                   key=lambda item: item.path.name.casefold())
+
+
+def model_role(path) -> str | None:
+    """@brief Return the role of a local model file without loading it.
+
+    @param path Candidate weights path.
+    @return ``smd_classifier`` for the packaged SMD classifier, ``yolo_detector``
+        for other supported weights, or None for an unsupported extension.
+    @note The classifier is recognized by its canonical resource path, not its
+        basename. A custom YOLO checkpoint with the same name elsewhere stays
+        selectable, and arbitrary custom ``.pt``/``.onnx`` files remain valid.
+    """
+    candidate = Path(path)
+    if candidate.suffix.lower() not in MODEL_SUFFIXES:
+        return None
+    try:
+        classifier = resource_path("models", "smd_classifier.pt").resolve()
+        if candidate.resolve() == classifier:
+            return "smd_classifier"
+    except OSError:
+        pass
+    return "yolo_detector"
 
 
 def sha256_of(path, chunk=1 << 20) -> str:

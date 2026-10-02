@@ -37,11 +37,16 @@ TOOLS = {
     "llm_crops": ("Lettura ritagli", "#f9e2af", "crop"),
     "llm_markings": ("Lettura sigle", "#f9e2af", "tag"),
     "yolo": ("YOLO", "#a6e3a1", "frame"),
+    # La rete neurale che classifica i corpi tenuti (utente, 2026-10-02: «devi
+    # anche darne contezza nella modale»). Era un alias di YOLO, quindi la
+    # classificazione locale si presentava come un secondo rilevamento.
+    "smd": ("Rete SMD locale", "#f5c2e7", "network"),
     "footprint": ("KiCadGen (footprint 2D, calcolo locale)", "#89b4fa", "pads"),
     "kicad": ("Libreria modelli 3D di KiCad", "#94e2d5", "library"),
+    "consolidated": ("Consolidati — OpenCV", "#94e2d5", "lens"),
     "freecad_measure": ("FreeCAD (misura dei modelli)", "#cba6f7", "caliper"),
     "freecad": ("FreeCAD (modellazione locale)", "#cba6f7", "cube"),
-    "opencv": ("OpenCV", "#fab387", "lens"),
+    "opencv": ("OpenCV", "#fab387", "aperture"),
 }
 
 #: Glifi delle fasi che chiamano un modello remoto a pagamento: la nuvola e
@@ -668,6 +673,21 @@ class AnalysisSpinner(QWidget):
             painter.drawLine(QPointF(31, 31), QPointF(39, 39))
             painter.drawLine(QPointF(25, 20), QPointF(25, 30))
             painter.drawLine(QPointF(20, 25), QPointF(30, 25))
+        elif self.glyph == "aperture":
+            # OpenCV: a camera iris, distinct from the KiCad library's pixel
+            # magnifier. This phase measures pixels locally; it does not
+            # search a library or send the photo away.
+            points = [QPointF(28, 16), QPointF(38, 22), QPointF(38, 34),
+                      QPointF(28, 40), QPointF(18, 34), QPointF(18, 22)]
+            path = QPainterPath(points[0])
+            for point in points[1:]:
+                path.lineTo(point)
+            path.closeSubpath()
+            painter.drawPath(path)
+            painter.drawEllipse(QRectF(24, 24, 8, 8))
+            for end in (QPointF(28, 20), QPointF(34, 28), QPointF(28, 36),
+                        QPointF(22, 28)):
+                painter.drawLine(QPointF(28, 28), end)
         elif self.glyph == "caliper":
             # Calibro: asta con due becchi, uno fisso e uno scorrevole. FreeCAD
             # qui MISURA dei modelli esistenti, non costruisce il solido.
@@ -677,6 +697,19 @@ class AnalysisSpinner(QWidget):
             painter.drawRect(QRectF(28, 19, 5, 6))
             painter.drawLine(QPointF(30.5, 25), QPointF(30.5, 36))
             painter.drawLine(QPointF(30.5, 36), QPointF(27.5, 33))
+        elif self.glyph == "network":
+            # Rete neurale: tre strati di nodi pieni collegati. Classifica in
+            # locale cio' che il rilevatore ha trovato, senza spedire nulla.
+            layers = ((19.0, (22.0, 34.0)), (28.0, (19.0, 28.0, 37.0)), (37.0, (24.0, 32.0)))
+            for (x0, ys0), (x1, ys1) in zip(layers, layers[1:]):
+                for y0 in ys0:
+                    for y1 in ys1:
+                        painter.drawLine(QPointF(x0, y0), QPointF(x1, y1))
+            painter.setBrush(QColor(self.color))
+            for x, ys in layers:
+                for y in ys:
+                    painter.drawEllipse(QRectF(x - 2.2, y - 2.2, 4.4, 4.4))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
         elif self.glyph == "pads":
             # Footprint: due file di piazzole *piene* attorno al contorno del
             # corpo. Le piazzole vuote si leggevano come un altro riquadro; il
@@ -1200,7 +1233,7 @@ class AnalysisOverlay(QWidget):
         # quando ci sono: le operazioni di una fase sola non pagano quello
         # spazio (una finestra bassa non lo ha).
         self.steps.setMinimumHeight(
-            len(self._step_labels) * self.steps.fontMetrics().lineSpacing()
+            (len(self._step_labels) + len(getattr(self, '_step_results', {}))) * self.steps.fontMetrics().lineSpacing()
             + self.steps.fontMetrics().lineSpacing() // 2 if self._step_labels else 0)
         self.cost.setMinimumHeight(self.cost.fontMetrics().lineSpacing())
         self.phases.setMinimumHeight(0)
@@ -1408,12 +1441,21 @@ class AnalysisOverlay(QWidget):
         self._phases_reserved = False
         self.clear_phases()
         self._step_labels = [translate(str(label)) for label in labels]
+        self._step_results = {}
         self._step_unavailable = {int(index): translate(str(reason))
                                   for index, reason in (unavailable or {}).items()}
         self._step_current = -1
         self._render_steps()
         # Chiamata subito dopo `start`, prima del primo disegno: la scheda
         # prende adesso l'altezza che terra' per tutta la generazione.
+        self._size_the_card()
+
+    def set_step_result(self, index, result):
+        """@brief Keep a phase result visible while subsequent steps run."""
+        if not self._step_labels or not 0 <= int(index) < len(self._step_labels):
+            return
+        self._step_results[int(index)] = str(result)
+        self._render_steps()
         self._size_the_card()
 
     def set_current_step(self, index):
@@ -1610,6 +1652,9 @@ class AnalysisOverlay(QWidget):
         parts = []
         for index, label in enumerate(self._step_labels):
             text = html.escape(f"{index + 1} · {label}")
+            result = getattr(self, '_step_results', {}).get(index)
+            if result:
+                text += '<br/>' + html.escape(result)
             if index in self._step_unavailable:
                 reason = html.escape(self._step_unavailable[index])
                 parts.append(f'<span style="color:#6c7086"><s>{text}</s> ({reason})</span>')

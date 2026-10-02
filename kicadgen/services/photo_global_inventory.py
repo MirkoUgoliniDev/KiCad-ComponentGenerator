@@ -1354,6 +1354,41 @@ def _detector_evidence(row, proposals):
     return evidence
 
 
+def retain_detector_category(component):
+    """@brief Preserve the detector proposal until independent crop evidence confirms a change."""
+    evidence = component.get('_detector_evidence') or {}
+    if (evidence.get('class_ambiguous') or evidence.get('low_confidence')
+            or component.get('_yolo_class_ambiguous') or component.get('_yolo_low_confidence')
+            or component.get('_presence_reviewed_by_user') or component.get('model_selection')):
+        return
+    detected = evidence.get('class') or component.get('_yolo_class')
+    if not detected or detected in ('unknown', 'other', 'generic'):
+        return
+    if component.get('_category_source') == 'crop_pair':
+        return
+    proposed = component.get('class')
+    different = proposed not in (None, '', 'unknown', 'other', 'generic') and class_kind(proposed) != class_kind(detected)
+    missing = proposed in (None, '', 'unknown', 'other', 'generic')
+    if different or missing:
+        component['_ai_class_proposal'] = proposed
+        component['_ai_class_confidence'] = component.get('class_confidence')
+        component['class'] = detected
+        component['kind'] = class_kind(detected)
+        component['_category_source'] = 'yolo_proposal'
+        component['_category_status'] = 'conflict' if different else 'proposed'
+        # Detector confidence stays in its original field; it is not AI confidence.
+        component['class_confidence'] = 'low'
+        if different and component.get('package'):
+            component['_package_inventory'] = component['package']
+            component['package'] = ''
+            component['package_confidence'] = 'low'
+        if component.get('component_id'):
+            component['name'] = f"{component['component_id']} ({detected})"
+    elif component.get('class_confidence') in (None, '', 'low', 'unknown'):
+        component['_category_source'] = 'yolo_proposal'
+        component['_category_status'] = 'proposed'
+
+
 def _normalize(row, identity, length, width, issues, manual_ids=frozenset(), measured=None,
                proposals=None):
     """@brief Convert AI observations without modifying the raw audit response.
@@ -1482,6 +1517,7 @@ def _normalize(row, identity, length, width, issues, manual_ids=frozenset(), mea
     elif _leads_by_side_inconsistent(row):
         result['_global_inventory_errors'].append('leads_by_side ignored: malformed, or '
                       'not adding up to a complete lead_count')
+    retain_detector_category(result)
     return result
 
 
@@ -1894,6 +1930,7 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
                             _review_reason=(evidence_reasons.get(original['_id'])
                                 or (decision['reason'] if decision else
                                 'Global inventory accounting unresolved; original retained')))
+            retain_detector_category(retained)
             result.append(retained)
     # Un errore che nessuna riga trattenuta puo' reclamare -- risposta
     # malformata, chiamata fallita, riga caduta senza proposte superstiti --

@@ -96,6 +96,7 @@ from PyQt6.QtWidgets import (
 
 
 from ..services.component_format import copy_format, paste_format
+from ..services.smd_component_classifier import drop_classifier_identity
 from ..services.messages import tx
 from ..services.photo_yolo import (MOVE_HANDLE, awaiting_user_keep, box_geometry_mm,
                                    manual_proposal, mark_manual_box)
@@ -683,6 +684,8 @@ UNDETERMINED_LIST_MARKER = "[?]"
 ## ordinary category entry could collect them. The angle brackets keep it
 ## apart from any spelling a detector can produce.
 UNDETERMINED_FILTER = "<type undetermined>"
+PROPOSED_FILTER = "<category proposed>"
+CONFLICT_FILTER = "<category conflict>"
 
 ## Outline of a body the vision model added with no detector proposal and that
 ## nobody has kept yet (``_ai_only_excluded`` True, HANDOFF 141). Same tint as
@@ -1002,6 +1005,30 @@ def ai_section_lines(component, _tr) -> list[tuple[str, str]]:
     lines = []
     declared = _text(component.get("class")) or _text(component.get("kind"))
     lines.append((_tr("Tipo"), (declared + grade("class_confidence")) if declared else missing))
+    if component.get('_smd_prediction'):
+        prediction = component['_smd_prediction']
+        lines.append((_tr("Rete SMD locale"),
+                      f"{prediction['class']} · {prediction['class_confidence']:.1%}"))
+        angle = prediction.get('rotation_deg')
+        lines.append((_tr("Rotazione KiCad proposta"),
+                      f"{angle:g}° · {prediction['rotation_confidence']:.1%}"
+                      if angle is not None else _tr("non disponibile")))
+        # Chi ha deciso il tipo (utente, 2026-10-02): la rete, o la riverifica
+        # AI dei ritagli per i soli corpi che la rete non ha riconosciuto.
+        if component.get('_smd_superseded'):
+            # Modificato a mano dopo la lettura: la rete non decide piu' nulla.
+            verdict = _tr("superato da una modifica manuale")
+        elif prediction.get('accepted'):
+            verdict = _tr("risolto in locale, nessuna chiamata AI")
+        elif component.get('_smd_ai_recheck'):
+            verdict = _tr("non riconosciuto: riverifica AI del ritaglio")
+        else:
+            verdict = _tr("non riconosciuto: resta generico")
+        lines.append((_tr("Esito rete SMD"), verdict))
+    if component.get('_category_source') == 'yolo_proposal':
+        lines.append((_tr("Origine categoria"), _tr("YOLO: proposta non confermata")))
+    if component.get('_ai_class_proposal'):
+        lines.append((_tr("Categoria proposta dall'AI"), str(component['_ai_class_proposal'])))
     package = _text(component.get("package"))
     lines.append((_tr("Package"), (package + grade("package_confidence")) if package
                   else _tr("non dichiarato")))
@@ -1009,8 +1036,18 @@ def ai_section_lines(component, _tr) -> list[tuple[str, str]]:
     lines.append((_tr("Sigla letta"),
                   (marking + grade("marking_confidence")) if marking else _tr("nessuna")))
     outcome = _text(component.get("_crop_reading"))
+    outcome_text = _tr(_CROP_READING_OUTCOMES.get(outcome.lower(), outcome)) if outcome else missing
+    class_status = component.get("_crop_class_status")
+    class_messages = {
+        "supported": "categoria sostenuta dalle due letture",
+        "inventory_retained": "categoria mantenuta dall'inventario, non confermata dai ritagli",
+        "conflict": "categoria in conflitto, da verificare",
+        "unknown": "categoria non determinata dai ritagli",
+    }
+    if class_status in class_messages:
+        outcome_text += " · " + _tr(class_messages[class_status])
     lines.append((_tr("Letture del ritaglio"),
-                  _tr(_CROP_READING_OUTCOMES.get(outcome.lower(), outcome)) if outcome else missing))
+                  outcome_text))
     return lines
 
 
@@ -1036,6 +1073,10 @@ def kicad_section_lines(component, _tr) -> list[tuple[str, str]]:
         origin = "Nessun modello assegnato"
     lines = [(_tr("Modello KiCad"), _kicad_model_state(component, _tr)),
              (_tr("Provenienza modello KiCad"), _tr(origin))]
+    prediction = component.get('_smd_prediction') or {}
+    if prediction:
+        lines.append((_tr("Footprint KiCad"), prediction.get('footprint') or
+                      _tr("Da verificare") + f" ({len(prediction.get('footprint_candidates', []))})"))
     if attachment == "accepted_library" and selection.get("status") != "confirmed":
         orientation = report.get("accepted_orientation") or {}
         if orientation.get("status") == "matched":
@@ -1070,7 +1111,7 @@ def component_attribute_sections(component, _tr, stage=STAGE_INVENTORY):
         ai = ai_section_lines(component, _tr)
         kicad = kicad_section_lines(component, _tr)
     return [(_tr(DETECTOR_SECTION_TITLE), DETECTOR_SECTION_COLOR, detector),
-            (_tr(AI_SECTION_TITLE), AI_SECTION_COLOR, ai),
+            (_tr("Rete SMD locale" if component.get('_smd_prediction') else AI_SECTION_TITLE), AI_SECTION_COLOR, ai),
             (_tr(KICAD_SECTION_TITLE), KICAD_SECTION_COLOR, kicad)]
 
 
@@ -2561,8 +2602,9 @@ class PhotoReviewDialog(QDialog):
         UNDETERMINED_FILTER matches the bodies flagged by ``type_undetermined``,
         the same ones marked UNDETERMINED_LIST_MARKER in the list.
         """
-        if category == UNDETERMINED_FILTER:
-            return self.type_undetermined(item.component)
+        states = {UNDETERMINED_FILTER: 'unknown', PROPOSED_FILTER: 'proposed', CONFLICT_FILTER: 'conflict'}
+        if category in states:
+            return self.classification_state(item.component) == states[category]
         return self._component_category(item.component).casefold() == category.casefold()
 
     def _categories(self):
@@ -2594,16 +2636,16 @@ class PhotoReviewDialog(QDialog):
         """
         previous = self.active_category()
         categories = self._categories()
-        undetermined = sum(1 for component in self._components
-                           if self.type_undetermined(component))
         with QSignalBlocker(self.category_filter):
             self.category_filter.clear()
             self.category_filter.addItem(self._tr("Tutte le categorie"), None)
-            if undetermined:
-                # Subito dopo «tutte»: e' la voce che dice cosa resta da fare.
-                self.category_filter.addItem(
-                    self._tr("Non classificati") + f" {UNDETERMINED_LIST_MARKER} ({undetermined})",
-                    UNDETERMINED_FILTER)
+            for state, label, value in (
+                    ('unknown', 'Categoria sconosciuta', UNDETERMINED_FILTER),
+                    ('proposed', 'Categoria proposta, non confermata', PROPOSED_FILTER),
+                    ('conflict', 'Classificazioni in conflitto', CONFLICT_FILTER)):
+                count = sum(self.classification_state(c) == state for c in self._components)
+                if count:
+                    self.category_filter.addItem(self._tr(label) + f" ({count})", value)
             for category in categories:
                 self.category_filter.addItem(category, category)
             index = self.category_filter.findData(previous) if previous else 0
@@ -2824,6 +2866,25 @@ class PhotoReviewDialog(QDialog):
             field = self.text_fields["name"]
         field.setFocus()
         field.selectAll()
+
+    @staticmethod
+    def classification_state(component):
+        """@brief Distinguish unknown category, retained proposal and conflicting evidence."""
+        if component.get('_crop_class_status') == 'conflict' or component.get('_category_status') == 'conflict':
+            return 'conflict'
+        # Non-string values are missing category evidence, never support.
+        # Normalize only the display lookup; retain the raw inventory data.
+        declared = _text(component.get('class')) or _text(component.get('kind'))
+        if not declared or declared in ('unknown', 'other', 'generic', 'semiconductor_unknown'):
+            # Detector proposals intentionally keep a generic CAD kind until review.
+            # Their observed category is stored separately, not missing.
+            detected = component.get('_yolo_class')
+            if isinstance(detected, str) and detected.strip() not in ('', 'unknown', 'other', 'generic'):
+                return 'proposed'
+            return 'unknown'
+        if component.get('_category_status') == 'proposed' or component.get('class_confidence') in ('low', 'unknown'):
+            return 'proposed'
+        return 'supported'
 
     @staticmethod
     def type_undetermined(component) -> bool:
@@ -3100,6 +3161,9 @@ class PhotoReviewDialog(QDialog):
         item.component.pop("terminal_geometry", None)
         item.component.pop("model_match", None)
         item.component.pop("model_selection", None)
+        # Spostato, ridimensionato o ruotato a mano: la lettura della rete SMD
+        # descrive il riquadro di prima, non questo (audit 2026-10-02).
+        drop_classifier_identity(item.component)
         if self._stage == STAGE_DETECTOR:
             # The reviewer's hand is the decision of presence, and the model
             # must know the box was not measured by a machine.
@@ -3195,6 +3259,10 @@ class PhotoReviewDialog(QDialog):
             if value != str(item.component.get(key, "")):
                 item.component[key] = value
                 self._keep_touched(item)
+                if key in ('kind', 'package'):
+                    # Un tipo o un package scritti a mano sostituiscono quelli
+                    # della rete SMD: la sua identita' non vale piu'.
+                    drop_classifier_identity(item.component)
                 if key == 'kind':
                     item.component.pop('model_match', None)
                     item.component.pop('model_selection', None)

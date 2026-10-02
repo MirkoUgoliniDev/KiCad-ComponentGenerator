@@ -26,6 +26,7 @@ from copy import deepcopy
 from PyQt6.QtCore import pyqtSignal
 
 from .component_state import height_is_estimated, mark_height_measured, mark_height_placeholder
+from ..services.smd_component_classifier import drop_classifier_identity
 from .theme import spin_box_width_for_values
 from PyQt6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QDialogButtonBox,
                              QDoubleSpinBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
@@ -212,6 +213,16 @@ class ComponentEditorDialog(QDialog):
                       or entry["rotation_deg"] != float(original.get("rotation_deg") or 0.0) % 360):
                     for key in _MODEL_EVIDENCE:
                         entry.pop(key, None)
+                # Il corpo che la rete SMD ha visto non e' piu' questo: tipo,
+                # misura, posizione o rotazione cambiati a mano tolgono la sua
+                # identita' e la sua posa, che altrimenti sceglierebbero
+                # modello e verso al posto della correzione (audit 2026-10-02).
+                if resized or any(
+                        entry[key] != original.get(key, entry[key])
+                        for key in ("x_mm", "y_mm")) or (
+                        entry["kind"] != (original.get("kind") or "generic")) or (
+                        entry["rotation_deg"] != float(original.get("rotation_deg") or 0.0) % 360):
+                    drop_classifier_identity(entry)
             result.append(entry)
         return result
 

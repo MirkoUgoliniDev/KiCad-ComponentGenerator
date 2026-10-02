@@ -69,11 +69,14 @@ def test_each_phase_moves_the_step_row(window):  # noqa: F811
     assert "1 · Footprint 2D (KiCadGen)" in overlay.steps_plain_text()
     window._on_phase("footprint", "scrittura del file .kicad_mod", 0, 0)
     assert overlay._step_current == 0
-    window._on_phase("freecad_measure", "misura di 2 modelli candidati", 0, 0)
+    window._on_phase("consolidated", "4 trovati ? 2 da verificare", 6, 6)
     assert overlay._step_current == 1
+    window._on_phase("freecad_measure", "misura di 2 modelli candidati", 0, 0)
+    assert overlay._step_current == 2
     assert overlay.tool.text().startswith("FreeCAD (misura dei modelli)")
     window._on_phase("freecad", "costruzione del solido 3D", 1, 4)
-    assert overlay._step_current == 2
+    assert overlay._step_current == 3
+    assert "4 trovati ? 2 da verificare" in overlay.steps_plain_text()
     assert "\u2713 1" in overlay.steps_plain_text() and "\u2713 2" in overlay.steps_plain_text()
     overlay.stop()
 
@@ -85,7 +88,7 @@ def test_without_freecad_steps_two_and_three_say_why(window):  # noqa: F811
     window._freecad_available = False
     window._show_generation_steps(object(), body=None)
     text = overlay.steps_plain_text()
-    assert text.count("FreeCAD non installato") == 2
+    assert text.count("FreeCAD non installato") == 3
     assert "1 · Footprint 2D (KiCadGen)" in text
     overlay.stop()
 
@@ -144,3 +147,19 @@ def test_the_steps_are_listed_one_under_the_other(window):  # noqa: F811
     assert "›" not in overlay.steps_plain_text()
     assert overlay.steps.minimumHeight() >= 3 * overlay.steps.fontMetrics().lineSpacing()
     overlay.stop()
+
+
+def test_archive_worker_report_counts_and_persists_components(tmp_path):
+    import json
+    worker = gui.GenerateWorker.__new__(gui.GenerateWorker)
+    gui.QThread.__init__(worker)
+    worker.project_dir = tmp_path
+    spy = QSignalSpy(worker.phase)
+    records = [dict(name='R1', status='matched'), dict(name='Q1', status='review_required', conflicts=['pins']),
+               dict(name='U1', status='not_found')]
+    worker._archive_progress(3, 3, records)
+    assert spy[0][0] == 'consolidated'
+    report = json.loads((tmp_path / 'consolidated-matches.json').read_text(encoding='utf-8'))
+    assert report['complete'] and report['total'] == 3
+    assert report['counts']['matched'] == report['counts']['review_required'] == report['counts']['not_found'] == 1
+    assert report['components'] == records

@@ -214,3 +214,31 @@ def test_c01_keeps_photo_error_separate_from_nominal_soic_error():
     assert result['candidates'][0]['relative_xy_error'] == 0.0
     assert result['candidates'][0]['library_relative_xy_error'] == .1956
     assert 'library_relative_xy_error' not in archived
+
+
+def test_crop_category_conflict_requires_review_even_with_matching_archive(library):
+    root, _ = library
+    am.AcceptedModelStore().consolidate([_accepted(root, R0603)], [root])
+    row = _body(_crop_class_status='conflict')
+    report = km.model_candidates(row, library=root)
+    assert report['status'] == 'review_required'
+    assert report['selected_path'] is None
+    assert report['classification_conflict'] is True
+    assert report['accepted_entry']
+    assert all(c['status'] == 'review_required' for c in report['candidates'])
+    row['model_selection'] = {'status': 'confirmed', 'path': str(root / R0603)}
+    report = km.model_candidates(row, library=root)
+    assert report['status'] == 'confirmed'
+    assert report['selected_path'] == str(root / R0603)
+
+
+def test_disputed_terminals_prevent_automatic_archive_attachment(library):
+    root, _ = library
+    am.AcceptedModelStore().consolidate([_accepted(root, R0603)], [root])
+    row = _body(_crop_terminal_review_required=True)
+    report = km.model_candidates(row, library=root)
+    assert report['status'] == 'review_required'
+    assert report['selected_path'] is None
+    assert report['terminal_observation_conflict'] is True
+    row['model_selection'] = {'status': 'confirmed', 'path': str(root / R0603)}
+    assert km.model_candidates(row, library=root)['status'] == 'confirmed'

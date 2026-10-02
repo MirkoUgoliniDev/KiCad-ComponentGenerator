@@ -68,7 +68,7 @@ from ..services.kicad_library import (
 )
 from .app_config import config_path, load_config, save_config
 from .accepted_models_dialog import AcceptedModelsDialog, ConsolidateDialog
-from ..app_paths import default_projects_dir, install_dir, logs_dir, resource_path, user_data_dir
+from ..app_paths import default_projects_dir, install_dir, is_frozen, logs_dir, resource_path, user_data_dir
 # Solo la validazione dei parametri (libreria standard): onnxruntime e PyTorch
 # restano caricati al bisogno. Legata qui, all'import, e non al clic: i test
 # che sostituiscono il modulo con un finto non devono cambiarne il contratto.
@@ -112,11 +112,11 @@ TAB_PROJECT, TAB_PREVIEW, TAB_MODEL_3D, TAB_KICAD = range(4)
 #: I tre passi di una generazione, come li mostra la modale (utente,
 #: 2026-09-26). Chi lavora in ciascuno lo dice l'intestazione: vedi
 #: `analysis_overlay.TOOLS`.
-GENERATION_STEPS = ("Footprint 2D (KiCadGen)", "Consolidati (OpenCV) e libreria KiCad",
+GENERATION_STEPS = ("Footprint 2D (KiCadGen)", "Confronto con i consolidati", "Modelli dalla libreria KiCad",
                     "Solido 3D con FreeCAD")
 #: Passo di ogni fase annunciata dai worker. Le misure di FreeCAD appartengono
 #: alla scelta dei modelli: servono a confrontare i candidati.
-GENERATION_STEP_OF = {"footprint": 0, "kicad": 1, "freecad_measure": 1, "freecad": 2}
+GENERATION_STEP_OF = {"footprint": 0, "consolidated": 1, "kicad": 2, "freecad_measure": 2, "freecad": 3}
 
 #: Cartella del programma (sola lettura una volta installato) e cartella di
 #: lavoro predefinita dei progetti: vedi `kicadgen.app_paths`.
@@ -315,6 +315,14 @@ _PHOTO_DETECTOR_TRANSLATIONS = {
            "fr": "IA (actuelle)", "de": "KI (bisherig)"},
     "yolo": {"it": "YOLO locale + verifica AI", "en": "Local YOLO + AI verification",
              "fr": "YOLO local + vérification IA", "de": "Lokales YOLO + KI-Prüfung"},
+    "yolo_smd": {"it": "YOLO + rete SMD locale (v3)", "en": "YOLO + local SMD network (v3)",
+                 "fr": "YOLO + réseau SMD local (v3)", "de": "YOLO + lokales SMD-Netz (v3)"},
+    "smd_unavailable": {
+        "it": "Non disponibile nell'app Windows installata: rete SMD e runtime PyTorch non inclusi.",
+        "en": "Unavailable in the installed Windows app: the SMD network and PyTorch runtime are not included.",
+        "fr": "Indisponible dans l’application Windows installée : le réseau SMD et le runtime PyTorch ne sont pas inclus.",
+        "de": "In der installierten Windows-App nicht verfügbar: SMD-Netz und PyTorch-Laufzeit sind nicht enthalten.",
+    },
     "yolo_only": {"it": "Solo YOLO locale (pretest, nessuna AI)",
                   "en": "Local YOLO only (pretest, no AI)",
                   "fr": "YOLO local seul (prétest, aucune IA)",
@@ -742,6 +750,8 @@ class MainWindow(QMainWindow):
         #: photo-review per l'estrazione in corso: allora _on_extracted non
         #: deve sovrascriverlo con le righe pre-revisione della cache.
         self._reviewed_this_extraction = False
+        # Rilevatore dell'ultima estrazione (vedi _start: pacchetti di ripiego).
+        self._extraction_detector = 'yolo'
         #: Vero quando la base dell'ultimo rilancio inventario e' stata
         #: sintetizzata dai campi (dopo un riavvio) e non estratta davvero:
         #: su quella base non si genera automaticamente.
@@ -1370,8 +1380,20 @@ class MainWindow(QMainWindow):
     def _refresh_photo_detector_controls(self) -> None:
         """Translate session controls without changing selected data or paths."""
         self.label_photo_detector.setText(self._photo_detector_text("label"))
-        for index, key in enumerate(("ai", "yolo", "vlm", "yolo_only")):
+        for index, key in enumerate(("ai", "yolo", "vlm", "yolo_only", "yolo_smd")):
             self.combo_photo_detector.setItemText(index, self._photo_detector_text(key))
+        smd_index = self.combo_photo_detector.findData("yolo_smd")
+        if smd_index >= 0:
+            smd_item = self.combo_photo_detector.model().item(smd_index)
+            if is_frozen():
+                reason = self._photo_detector_text("smd_unavailable")
+                smd_item.setEnabled(False)
+                self.combo_photo_detector.setItemData(
+                    smd_index, reason, Qt.ItemDataRole.ToolTipRole)
+            else:
+                smd_item.setEnabled(True)
+                self.combo_photo_detector.setItemData(
+                    smd_index, None, Qt.ItemDataRole.ToolTipRole)
         self.combo_photo_detector.setToolTip(self._photo_detector_text("help"))
         self.label_yolo_model.setText(self._photo_detector_text("model"))
         self.label_yolo_params.setText(self._photo_detector_text("params"))
@@ -1406,7 +1428,12 @@ class MainWindow(QMainWindow):
             riga che resta e' quella su cui si puo' davvero intervenire.
         """
         detector = self.combo_photo_detector.currentData()
-        local = detector in ("yolo", "yolo_only")
+        local = detector in ("yolo", "yolo_only", "yolo_smd") and not (
+            detector == "yolo_smd" and is_frozen())
+        default_path = resource_path("models", "pcb_component_detector_yolov8m_best.pt"
+                                     if detector == "yolo_smd" else "pcb_yolov8s.onnx")
+        self.field_yolo_model.setPlaceholderText(self._photo_detector_text("default", path=default_path))
+        self.field_yolo_model.setToolTip(self._photo_detector_text("path_help", path=default_path))
         # Durante una corsa (audit 25/09, B6) non si riaccendono i comandi
         # YOLO e non si riscrive il pulsante: ci pensa la fine della corsa.
         busy = getattr(self, "_extraction_busy", False)
@@ -1528,7 +1555,9 @@ class MainWindow(QMainWindow):
         """Snapshot the selected backend; AI ignores any remembered ONNX path."""
         detector = self.combo_photo_detector.currentData() or "ai"
         path = self.field_yolo_model.text().strip()
-        return detector, Path(path) if detector in ("yolo", "yolo_only") and path else None
+        if detector == "yolo_smd" and not path:
+            return detector, resource_path("models", "pcb_component_detector_yolov8m_best.pt")
+        return detector, Path(path) if detector in ("yolo", "yolo_only", "yolo_smd") and path else None
 
     def _balance_provider(self) -> str:
         """@brief Provider of the model the next analysis will use (for the balance line)."""
@@ -2411,8 +2440,12 @@ class MainWindow(QMainWindow):
         # restano nella loro posizione. I progetti salvati ricordano la voce
         # per valore (project_state.widget_value), non per posizione.
         self.combo_photo_detector.addItem("", "yolo_only")
-        # User-selected startup default; explicit AI fallback remains available.
-        self.combo_photo_detector.setCurrentIndex(self.combo_photo_detector.findData("yolo"))
+        self.combo_photo_detector.addItem("", "yolo_smd")
+        # Default dell'utente (2026-10-02): la rete SMD locale classifica e solo
+        # cio' che non risolve va all'AI. Nel binario frozen la rete non c'e'
+        # (niente PyTorch ne' pesi): li' resta YOLO con la riconciliazione AI.
+        self.combo_photo_detector.setCurrentIndex(
+            self.combo_photo_detector.findData("yolo" if is_frozen() else "yolo_smd"))
         self.combo_photo_detector.currentIndexChanged.connect(self._on_photo_detector_changed)
         # Prima riga del riquadro (utente, 2026-09-25): la scelta del
         # rilevatore decide quali delle righe sotto servono.
@@ -3481,12 +3514,25 @@ class MainWindow(QMainWindow):
             return
 
         photo_detector, yolo_model_path = self._photo_detector_options()
-        if photo_detector in ("yolo", "yolo_only"):
+        # Il rilevatore di QUESTA estrazione: i pacchetti di ripiego scritti
+        # dopo lo devono ricordare (audit 2026-10-02: tornava 'yolo' e il
+        # rilancio pagava l'inventario globale).
+        self._extraction_detector = photo_detector
+        if photo_detector == "yolo_smd" and is_frozen():
+            QMessageBox.warning(
+                self, self._photo_detector_text("error_title"),
+                self._photo_detector_text("smd_unavailable"),
+            )
+            return
+        if photo_detector in ("yolo", "yolo_only", "yolo_smd"):
             try:
                 # Optional runtime stays lazy: AI-only sessions do not require it.
                 # Validate before paid requests or clearing any previous results.
                 from ..services.photo_yolo import validate_yolo_setup
                 validate_yolo_setup(yolo_model_path)
+                if photo_detector == "yolo_smd":
+                    from ..services.smd_component_classifier import validate_smd_setup
+                    validate_smd_setup()
             except Exception as exc:
                 QMessageBox.warning(
                     self, self._photo_detector_text("error_title"),
@@ -3641,7 +3687,7 @@ class MainWindow(QMainWindow):
                 self._on_ai_progress(tx(
                     "Ragionamento DeepSeek acceso ma il modello {model} non è dell'API diretta "
                     "DeepSeek: nessun effetto.", model=model))
-        if photo_detector in ('yolo', 'vlm') and self._photo_inventory_family() is False:
+        if photo_detector in ('yolo', 'vlm', 'yolo_smd') and self._photo_inventory_family() is False:
             # Difetto visto dall'utente: con «YOLO locale + verifica AI» e una
             # tipologia da COMPONENTE SINGOLO il rilevatore non parte, la
             # revisione dei corpi rilevati non si apre e nessun corpo entra
@@ -3659,6 +3705,11 @@ class MainWindow(QMainWindow):
                    "fotografia. I corpi dalla foto si ottengono con le tipologie di "
                    "scheda popolata (aggregato a fori passanti o modulo castellated).",
                    currentText=self.combo_component_type.currentText()))
+        elif photo_detector == 'yolo_smd':
+            self._on_ai_progress(tx("Inventario fotografico con YOLO e rete SMD v3 locali; "
+                                    "solo i corpi che la rete non riconosce passano alla "
+                                    "riverifica AI dei ritagli. L'estrazione dai documenti "
+                                    "usa il modello AI configurato."))
         elif photo_detector in ('yolo', 'vlm'):
             # Detto sempre, non solo quando differisce dal modello principale:
             # e' la chiamata a pagamento che guarda la fotografia, e va scritta
@@ -3685,7 +3736,7 @@ class MainWindow(QMainWindow):
             yolo_model_path=yolo_model_path,
             # Stessi parametri del pretest (utente, 2026-09-25: «la scelta dei
             # parametri rimane quando scelgo la modalità YOLO + AI»).
-            yolo_settings=(self._chosen_yolo_settings() if photo_detector == "yolo" else None),
+            yolo_settings=(self._chosen_yolo_settings() if photo_detector in ("yolo", "yolo_smd") else None),
             system_prompt=profile['system_prompt'],
             extra_instructions=self.field_component_prompt.toPlainText().strip() or None,
             include_nc_pins=self._include_nc_pins(),
@@ -4116,7 +4167,7 @@ class MainWindow(QMainWindow):
             return None
 
     def _write_review_bundle(self, proposals, photo_png, length, width, *,
-                             source_json='', detector='yolo', root=None):
+                             source_json='', detector='yolo', root=None, reviewed=True):
         """@brief Scrive il pacchetto di revisione nella cartella del componente.
 
         @param root Cartella che fa da cartella del componente: None per il
@@ -4131,7 +4182,8 @@ class MainWindow(QMainWindow):
         try:
             return save_review_bundle(root if root is not None else self._project_dir(),
                                       proposals, photo_png, length, width,
-                                      detector=detector, source_json=source_json)
+                                      detector=detector, source_json=source_json,
+                                      reviewed=reviewed)
         except (OSError, ValueError) as exc:
             self._append_log(tx("ATTENZIONE proposte non salvate nella cartella del componente: {exc}", exc=exc))
             return None
@@ -4175,7 +4227,8 @@ class MainWindow(QMainWindow):
                                     exc=exc))
         if self._write_review_bundle(saved.proposals, photo_png or self._photo_png,
                                      params.body_length_mm, params.body_width_mm,
-                                     source_json=saved.json_path.name) is None:
+                                     source_json=saved.json_path.name,
+                                     detector=self._extraction_detector, reviewed=False) is None:
             return None
         return self._review_bundle()
 
@@ -4211,7 +4264,8 @@ class MainWindow(QMainWindow):
                 photo_png = None
         path = self._write_review_bundle(saved.proposals, photo_png or self._photo_png,
                                          params.body_length_mm, params.body_width_mm,
-                                         source_json=saved.json_path.name)
+                                         source_json=saved.json_path.name,
+                                         detector=self._extraction_detector, reviewed=False)
         if path is not None:
             self._append_log(tx("Proposte del rilevatore salvate in {path} ({n_proposals} corpi): la "
                                 "revisione si puo' riaprire senza chiamate AI.",
@@ -4703,7 +4757,15 @@ class MainWindow(QMainWindow):
         # sapere prima, non dopo, che cosa si paga. Oltre alla richiesta
         # sull'inventario il rilancio rilegge ogni corpo dal suo ritaglio e le
         # sigle, come l'estrazione (HANDOFF 146 V2).
-        announcement = (tx("Rilancio dell'inventario su {n_proposals} proposte da {name}: una "
+        announcement = (tx("Rilancio dell'inventario su {n_proposals} proposte da {name}: rete "
+                           "SMD locale, gratuita; solo i corpi che non riconosce passano alle "
+                           "letture a pagamento dei ritagli con il modello {model} (riprese "
+                           "dalla cache se gia' pagate).",
+                           n_proposals=len(bundle.proposals),
+                           name=bundle.json_path.name,
+                           model=model)
+                        if bundle.detector == 'yolo_smd' else
+                        tx("Rilancio dell'inventario su {n_proposals} proposte da {name}: una "
                            "richiesta a pagamento al modello {model} per l'inventario, poi le "
                            "letture a pagamento dei singoli corpi e delle sigle (riprese dalla "
                            "cache se gia' pagate).",
@@ -4723,7 +4785,7 @@ class MainWindow(QMainWindow):
             extra_instructions=self.field_component_prompt.toPlainText().strip() or None,
             # Il nome del rilevatore e' quello con cui i riquadri sono nati,
             # registrato nel pacchetto, qualunque cosa dica ora la tendina.
-            detector=bundle.detector)
+            detector=bundle.detector, reviewed=bundle.reviewed)
         self._reconcile_worker.done.connect(self._on_reconciled)
         self._reconcile_worker.error.connect(self._on_extract_error)
         self._reconcile_worker.progress.connect(self._on_ai_progress)
@@ -4767,7 +4829,16 @@ class MainWindow(QMainWindow):
             suffix += "\n" + "\n".join(report.warnings[:6])
         # Il rilancio ripaga l'inventario, non la lettura dei contatti: un tipo
         # di contatto corretto a mano dopo l'estrazione deve sopravvivergli.
-        params = replace(base, components_3d=[dict(c) for c in report.components],
+        # Stessa normalizzazione dell'estrazione (tipi fuori elenco -> generico,
+        # corpi senza ingombro scartati): prima il rilancio la saltava e un
+        # tipo grezzo come 'fuse' arrivava al 3D (audit 2026-10-02, D7).
+        from ..services.datasheet_extractor import _components_3d
+        normalized_notes = []
+        normalized = _components_3d([dict(c) for c in report.components], normalized_notes,
+                                    trusted=True) or []
+        if normalized_notes:
+            suffix += "\n" + "\n".join(normalized_notes[:6])
+        params = replace(base, components_3d=normalized,
                          castellated_sides=self._sides_with_table_styles(base.castellated_sides),
                          photo_overlay_png=report.overlay_png,
                          photo_png=report.photo_png or base.photo_png,
@@ -5331,6 +5402,11 @@ class MainWindow(QMainWindow):
                 photo_png, proposals, length_mm, width_mm, self,
                 stage=review_module.STAGE_DETECTOR)
             self.i18n.retranslate_widgets(dialog)
+            if getattr(worker, 'photo_detector', None) == 'yolo_smd':
+                from PyQt6.QtWidgets import QDialogButtonBox
+                dialog.buttons.button(QDialogButtonBox.StandardButton.Apply).setToolTip(
+                    tx("I riquadri tenuti vengono classificati dalla rete SMD locale."))
+                dialog.model_status.setText(tx("Footprint e STEP si cercano dopo la classificazione locale."))
             accepted = dialog.exec() == QDialog.DialogCode.Accepted
             kept = dialog.kept_components() if accepted else None
             self._append_log(
@@ -5424,6 +5500,8 @@ class MainWindow(QMainWindow):
         # Fuori da una generazione la mappa non c'e' (o la modale non ha passi):
         # `set_current_step` allora non fa nulla.
         step = (getattr(self, "_generation_step_of", None) or {}).get(tool)
+        if tool == 'consolidated' and step is not None:
+            self.analysis_overlay.set_step_result(step, detail)
         if step is not None and step != self.analysis_overlay._step_current:
             self.analysis_overlay.set_current_step(step)
             # Nel log con l'ora: dice quando la finestra e' passata al passo,
@@ -6250,8 +6328,26 @@ class MainWindow(QMainWindow):
             self._append_log(tx("Rinomina non applicata: {problem}",
                                 problem=self.i18n.text(problem)))
             return
-        applied = self._migrate_docs_to_new_name(dialog.project_name())
-        self.field_name.setText(applied)
+        docs_dir = self._project_dir() / DOCS_SUBDIR
+        try:
+            moved_documents = sum(1 for path in docs_dir.iterdir() if path.is_file()) \
+                if docs_dir.is_dir() else 0
+        except OSError:
+            moved_documents = 0
+        applied = self._rename_project_folder(dialog.project_name())
+        if applied != current:
+            self.field_name.setText(applied)
+            self._last_mesh_path = None
+            self._restore_saved_mesh()
+            self._append_log(tx("Progetto rinominato: {old_name} diventa {new_name}.",
+                                old_name=current, new_name=applied))
+            if moved_documents:
+                self._on_ai_progress(tx(
+                    "Rinomina automatica: il progetto {old_name} diventa {new_name}; "
+                    "{n_files} documenti spostati nella nuova cartella.",
+                    old_name=current, new_name=applied, n_files=moved_documents))
+            if self.tabs.currentIndex() == TAB_MODEL_3D:
+                self._enter_3d_tab()
 
     def _migrate_docs_to_new_name(self, new_name: str) -> str:
         """Sposta i documenti nella cartella del nuovo nome componente.
@@ -6318,47 +6414,281 @@ class MainWindow(QMainWindow):
         self._move_analysis_folders_to(old_docs.parent, new_docs.parent)
         return new_name
 
-    def _rename_folder_case(self, old_project: Path, new_project: Path,
-                            old_name: str, new_name: str) -> str:
-        """Rinomina la cartella del progetto cambiando solo le maiuscole, in due passi.
+    def _rename_project_folder(self, new_name: str) -> str:
+        """@brief Rename the whole project and keep generated KiCad outputs usable.
 
-        Si passa da un nome temporaneo accanto, che su un disco senza
-        distinzione di maiuscole e' l'unico modo sicuro. Se il secondo passo
-        fallisce si torna al nome vecchio: la cartella non resta col nome
-        temporaneo. Tutto il contenuto segue, perche' si sposta la cartella
-        intera. Restituisce il nome effettivo.
+        @param new_name New, already validated project name.
+        @return The applied name, or the old name when the rename fails.
+        @note The project folder is staged beside itself so case-only renames
+            work on Windows. Footprint/model directories and filenames follow
+            the project name, and the footprint's embedded model path is
+            updated. Every completed move is reversed if a later step fails.
         """
-        if not old_project.is_dir():
-            return new_name
-        # Su Windows una cartella con un file aperto non si rinomina.
-        self._close_log_handle()
-        import uuid
-        temporary = old_project.parent / f".{old_project.name}-rinomina-{uuid.uuid4().hex[:8]}"
-        try:
-            old_project.rename(temporary)
-        except OSError as exc:
-            self._append_log(tx("Rinomina annullata: {old_name} non rinominabile ({exc}).",
-                                old_name=old_name,
-                                exc=exc))
-            return old_name
-        try:
-            temporary.rename(new_project)
-        except OSError as exc:
+        old_name = self._component_name()
+        old_project = self._project_dir()
+        new_project = old_project.with_name(new_name)
+
+        def linked_or_reparse(path: Path) -> bool:
+            """Recognize symbolic links, junctions and other reparse points."""
+            import stat
+            if path.is_symlink():
+                return True
+            is_junction = getattr(path, "is_junction", None)
+            if callable(is_junction) and is_junction():
+                return True
             try:
-                temporary.rename(old_project)
+                info = path.lstat()
             except OSError:
-                self._append_log(tx("ATTENZIONE: la cartella del progetto e' rimasta {temporary}.",
-                                    temporary=temporary))
-            self._append_log(tx("Rinomina annullata: {old_name} non rinominabile ({exc}).",
-                                old_name=old_name,
-                                exc=exc))
+                return False
+            reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            return bool(getattr(info, "st_file_attributes", 0) & reparse)
+
+        def refuse_link(path: Path) -> str:
+            # Persisting this message through a linked project root would
+            # itself write to the external target we are refusing to touch.
+            self._append_log(tx("Rinomina annullata: {path} è un collegamento simbolico o una "
+                                "giunzione; non è stato modificato.", path=path),
+                             persist=path != old_project)
             return old_name
+
+        # Renaming through a linked project root would change the target
+        # project outside the selected workspace.
+        if linked_or_reparse(old_project):
+            return refuse_link(old_project)
+        if not old_project.is_dir():
+            # A name can be assigned before any project files have been made.
+            import os
+            if os.path.lexists(new_project):
+                self._append_log(tx("Rinomina annullata: esiste gia' {new_name}.", new_name=new_name))
+                return old_name
+            return new_name
+        if old_name == new_name:
+            return old_name
+        import os
+        if os.path.lexists(new_project):
+            if linked_or_reparse(new_project):
+                return refuse_link(new_project)
+            try:
+                same_directory = old_project.samefile(new_project)
+            except OSError:
+                same_directory = False
+            if not same_directory:
+                self._append_log(tx("Rinomina annullata: esiste gia' {new_name}.", new_name=new_name))
+                return old_name
+
+        # These directories are the only generated outputs whose contents
+        # are rewritten below. Refuse linked/reparse directories before the
+        # project is staged, so no shared external library can be changed.
+        for output_dir in (old_project / f"{old_name}.pretty",
+                           old_project / f"{old_name}.3dshapes"):
+            if linked_or_reparse(output_dir):
+                return refuse_link(output_dir)
+        # The footprint is atomically rewritten and the named model files are
+        # moved. Refuse file links too, preserving external and relative-link
+        # targets exactly as they are.
+        for output_file in (
+                old_project / f"{old_name}.pretty" / f"{old_name}.kicad_mod",
+                *(old_project / f"{old_name}.3dshapes" / f"{old_name}{suffix}"
+                  for suffix in (".step", ".stp", ".wrl", ".preview.json", ".FCStd"))):
+            if linked_or_reparse(output_file):
+                return refuse_link(output_file)
+
+        self._flush_project_config()
+        import uuid
+        stage = old_project.with_name(f".{old_project.name}-rinomina-{uuid.uuid4().hex[:8]}")
+        moves: list[tuple[Path, Path]] = []
+        original_footprint: bytes | None = None
+        footprint_path: Path | None = None
+        staged_project_link_rejected = False
+
+        def write_bytes_atomically(path: Path, payload: bytes) -> None:
+            """Replace one footprint file atomically in its own directory."""
+            import os
+            import tempfile
+            from ..fsutil import replace_file
+            handle, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp",
+                                                 dir=path.parent)
+            try:
+                with os.fdopen(handle, "wb") as stream:
+                    stream.write(payload)
+                replace_file(temporary, path)
+            except BaseException:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+                raise
+
+        def move_case_safe(source: Path, target: Path) -> None:
+            """Move one path, using an intermediate name for case-only changes."""
+            import os
+            if not source.exists():
+                return
+            case_only = (source.name.casefold() == target.name.casefold()
+                         and source.name != target.name)
+            if os.path.lexists(target):
+                # On a case-insensitive filesystem both spellings resolve to
+                # the same entry; on a case-sensitive filesystem they may be
+                # distinct files. Never let Path.rename replace a real or
+                # dangling destination (POSIX permits replacing an empty dir
+                # and regular files).
+                same_entry = False
+                if case_only:
+                    try:
+                        same_entry = source.samefile(target)
+                    except OSError:
+                        pass
+                if not same_entry:
+                    raise FileExistsError(tx("Rinomina annullata: esiste gia' {new_name}.",
+                                             new_name=target))
+            if source.name.casefold() == target.name.casefold():
+                intermediate = source.with_name(f".{source.name}-rinomina-{uuid.uuid4().hex[:8]}")
+                source.rename(intermediate)
+                try:
+                    intermediate.rename(target)
+                except OSError:
+                    intermediate.rename(source)
+                    raise
+            else:
+                source.rename(target)
+            moves.append((source, target))
+
+        def reject_staged_links() -> None:
+            """Recheck mutable outputs after staging, before following any paths."""
+            nonlocal staged_project_link_rejected
+            if linked_or_reparse(stage):
+                staged_project_link_rejected = True
+                raise OSError(tx(
+                    "Rinomina annullata: {path} è diventato un collegamento simbolico o "
+                    "una giunzione durante la rinomina.", path=stage))
+            staged_pretty = stage / f"{old_name}.pretty"
+            staged_shapes = stage / f"{old_name}.3dshapes"
+            for output in (staged_pretty, staged_shapes):
+                if linked_or_reparse(output):
+                    raise OSError(tx(
+                        "Rinomina annullata: {path} è diventato un collegamento simbolico o "
+                        "una giunzione durante la rinomina.", path=output))
+            for output in (
+                    staged_pretty / f"{old_name}.kicad_mod",
+                    *(staged_shapes / f"{old_name}{suffix}"
+                      for suffix in (".step", ".stp", ".wrl", ".preview.json", ".FCStd"))):
+                if linked_or_reparse(output):
+                    raise OSError(tx(
+                        "Rinomina annullata: {path} è diventato un collegamento simbolico o "
+                        "una giunzione durante la rinomina.", path=output))
+
+        try:
+            self._close_log_handle()
+            old_project.rename(stage)
+            moves.append((old_project, stage))
+
+            # The initial lstat checks prevent ordinary link traversal. Check
+            # again at the staged paths before moving or reading any generated
+            # output, so a link introduced during the root move is rolled back
+            # without touching its target.
+            reject_staged_links()
+
+            old_pretty = stage / f"{old_name}.pretty"
+            new_pretty = stage / f"{new_name}.pretty"
+            move_case_safe(old_pretty, new_pretty)
+            old_shapes = stage / f"{old_name}.3dshapes"
+            new_shapes = stage / f"{new_name}.3dshapes"
+            move_case_safe(old_shapes, new_shapes)
+
+            # Recheck under their final staged names before footprint reads,
+            # atomic writes, or model moves follow them.
+            for output in (new_pretty, new_shapes):
+                if linked_or_reparse(output):
+                    raise OSError(tx(
+                        "Rinomina annullata: {path} è diventato un collegamento simbolico o "
+                        "una giunzione durante la rinomina.", path=output))
+            for output in (
+                    new_pretty / f"{old_name}.kicad_mod",
+                    *(new_shapes / f"{old_name}{suffix}"
+                      for suffix in (".step", ".stp", ".wrl", ".preview.json", ".FCStd"))):
+                if linked_or_reparse(output):
+                    raise OSError(tx(
+                        "Rinomina annullata: {path} è diventato un collegamento simbolico o "
+                        "una giunzione durante la rinomina.", path=output))
+
+            footprint_path = new_pretty / f"{old_name}.kicad_mod"
+            renamed_footprint = new_pretty / f"{new_name}.kicad_mod"
+            if footprint_path.is_file():
+                original_footprint = footprint_path.read_bytes()
+                move_case_safe(footprint_path, renamed_footprint)
+                footprint_path = renamed_footprint
+                source_text = original_footprint.decode("utf-8")
+                source_text = re.sub(
+                    r'(\(footprint\s+)"' + re.escape(old_name) + r'"',
+                    lambda match: match.group(1) + '"' + new_name + '"',
+                    source_text, count=1)
+                source_text = re.sub(
+                    r'(\(property\s+"Value"\s+)"' + re.escape(old_name) + r'"',
+                    lambda match: match.group(1) + '"' + new_name + '"',
+                    source_text, count=1)
+
+                def renamed_model_reference(match):
+                    path = match.group(2)
+                    for extension in (".step", ".wrl"):
+                        old_reference = f"${{KIPRJMOD}}/{old_name}.3dshapes/{old_name}{extension}"
+                        if path == old_reference:
+                            path = f"${{KIPRJMOD}}/{new_name}.3dshapes/{new_name}{extension}"
+                            break
+                    return match.group(1) + '"' + path + match.group(3)
+
+                source_text = re.sub(
+                    r'(\(model\s+)"([^"\r\n]+)(")', renamed_model_reference, source_text)
+                write_bytes_atomically(footprint_path, source_text.encode("utf-8"))
+
+            if new_shapes.is_dir():
+                for suffix in (".step", ".stp", ".wrl", ".preview.json", ".FCStd"):
+                    move_case_safe(new_shapes / f"{old_name}{suffix}",
+                                   new_shapes / f"{new_name}{suffix}")
+            if os.path.lexists(new_project):
+                if linked_or_reparse(new_project):
+                    raise FileExistsError(tx(
+                        "Rinomina annullata: {path} è un collegamento simbolico o una giunzione; "
+                        "non è stato modificato.", path=new_project))
+                try:
+                    same_directory = stage.samefile(new_project)
+                except OSError:
+                    same_directory = False
+                if not same_directory:
+                    raise FileExistsError(f"Destination project appeared during rename: {new_project}")
+            stage.rename(new_project)
+        except (OSError, UnicodeError) as exc:
+            # Restore the footprint before reversing its filename and folders.
+            if original_footprint is not None and footprint_path is not None:
+                try:
+                    write_bytes_atomically(footprint_path, original_footprint)
+                except OSError:
+                    pass
+            for source, target in reversed(moves):
+                current = target
+                if current == new_project and not current.exists():
+                    current = stage
+                if current.exists():
+                    try:
+                        current.rename(source)
+                    except OSError:
+                        self._append_log(tx("ATTENZIONE: ripristino rinomina incompleto; file conservati in {path}.",
+                                            path=current),
+                                         persist=not staged_project_link_rejected)
+            self._append_log(tx("Rinomina annullata: {old_name} non rinominabile ({exc}).",
+                                old_name=old_name, exc=exc),
+                             persist=not staged_project_link_rejected)
+            return old_name
+
         if self._project_config_refused is not None and self._project_config_refused == old_project:
             self._project_config_refused = new_project
-        self._append_log(tx("Progetto rinominato: {old_name} diventa {new_name}.",
-                            old_name=old_name,
-                            new_name=new_name))
         return new_name
+
+    def _rename_folder_case(self, old_project: Path, new_project: Path,
+                            old_name: str, new_name: str) -> str:
+        """@brief Compatibility wrapper for a case-only whole-project rename."""
+        if old_project != self._project_dir() or new_project.name != new_name:
+            return old_name
+        return self._rename_project_folder(new_name)
 
     def _move_analysis_folders_to(self, old_project: Path, new_project: Path) -> None:
         """@brief Porta nella cartella rinominata tutto cio' che l'analisi ha prodotto.
@@ -8043,8 +8373,15 @@ class MainWindow(QMainWindow):
                             path=config_path()))
         return False
 
-    def _append_log(self, msg: str) -> None:
-        self._write_log_line(msg)
+    def _append_log(self, msg: str, *, persist: bool = True) -> None:
+        """@brief Add a message to the session log and, by default, the project log.
+
+        @param msg Message to show.
+        @param persist False to keep a safety refusal in the UI/session log
+            without writing through a linked project path to an external target.
+        """
+        if persist:
+            self._write_log_line(msg)
         if hasattr(self, "ai_progress_text") and not re.match(r"^#\d+", msg.strip()):
             self.ai_progress_text.moveCursor(QTextCursor.MoveOperation.End)
             self.ai_progress_text.insertPlainText(msg + "\n")
@@ -8550,7 +8887,7 @@ class MainWindow(QMainWindow):
                       if isinstance(params, PackageGeometry)
                       else "FreeCAD non installato" if self._freecad_available is False
                       else "modello 3D non richiesto")
-            unavailable = {1: reason, 2: reason}
+            unavailable = {1: reason, 2: reason, 3: reason}
         self.analysis_overlay.set_steps(GENERATION_STEPS, unavailable)
         self._generation_step_of = dict(GENERATION_STEP_OF)
 
@@ -9624,6 +9961,8 @@ class MainWindow(QMainWindow):
     #: linguetta», e il riferimento asimmetrico che il costruttore confronta col
     #: baricentro del modello nativo per stabilire il verso.
     _MATCH_EVIDENCE_KEYS = (
+        '_smd_class', '_smd_rotation_deg', '_smd_rotation_confidence', '_smd_accepted',
+        '_smd_body', '_smd_rotation_kind', '_smd_views_agree', '_smd_terminal_count',
         'presence_confidence', 'class_confidence', 'confidence',
         '_yolo_review_only', '_yolo_origin', 'terminal_count',
         'terminal_layout', 'terminal_count_basis', '_global_inventory_status', 'class',
@@ -9631,6 +9970,9 @@ class MainWindow(QMainWindow):
         'lead_count', 'lead_count_complete',
         'landmark_feature', 'landmark_side', 'landmark_confidence', 'marking_confidence',
         '_accepted_image_descriptor',
+        '_crop_class_status', '_category_source', '_category_status',
+        '_ai_class_proposal', '_ai_class_confidence', '_terminal_status',
+        '_crop_terminal_review_required',
         # Scala della foto (o incertezza dichiarata): il 3D ne ricava in mm
         # l'incertezza di misura per sporgenze e archivio degli abbinamenti.
         'measurement_uncertainty_mm', 'photo_scale_px_per_mm')

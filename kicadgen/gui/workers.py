@@ -20,6 +20,7 @@ from __future__ import annotations
 from copy import deepcopy
 from functools import partial
 import re
+import json
 import threading
 from pathlib import Path
 
@@ -27,7 +28,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 
 from ..cad3d.body_params import Body3DParams
-from ..cad3d.kicad_models import measuring_listener
+from ..cad3d.kicad_models import measuring_listener, archive_progress_listener
 from ..cad3d.step_generator import Cad3DError
 from ..core.package_geometry import PackageGeometry
 from ..generators.castellated_module import CastellatedModuleParams
@@ -310,7 +311,32 @@ class _Cad3DRunWorker(QThread):
             costruzione del solido: mostrare il solido di FreeCAD qui faceva
             credere che il modello finale fosse gia' in lavorazione.
         """
-        self.phase.emit('kicad', tx("confronto ritagli consolidati con OpenCV e scelta del modello KiCad"), done, total)
+        self.phase.emit('kicad', tx("scelta del modello per ogni componente"), done, total)
+
+    def _archive_progress(self, done, total, records):
+        """@brief Show archive outcomes and persist the per-component report."""
+        counts = {key: sum(row['status'] == key for row in records)
+                  for key in ('matched', 'not_found', 'review_required', 'skipped', 'unavailable')}
+        detail = tx("{matched} trovati · {not_found} non trovati · {review} da verificare",
+                    matched=counts['matched'], not_found=counts['not_found'],
+                    review=counts['review_required'])
+        if counts['skipped']:
+            detail += tx(" · {count} esclusi", count=counts['skipped'])
+        if counts['unavailable']:
+            detail += tx(" · {count} non disponibili", count=counts['unavailable'])
+        self.phase.emit('consolidated', detail, done, total)
+        if done == total:
+            self.progress.emit(tx("Confronto consolidati completato: {summary}", summary=detail))
+            path = Path(self.project_dir) / 'consolidated-matches.json'
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                temporary = path.with_suffix('.json.tmp')
+                temporary.write_text(json.dumps({'complete': True, 'total': total,
+                                     'counts': counts, 'components': records}, ensure_ascii=False, indent=2), encoding='utf-8')
+                temporary.replace(path)
+                self.progress.emit(tx("Resoconto consolidati: {path}", path=str(path)))
+            except OSError as exc:
+                self.progress.emit(tx("Resoconto consolidati non salvato: {error}", error=str(exc)))
 
     def _cad_progress(self, message: str) -> None:
         """@brief Inoltra la riga al log e, se annuncia un componente, al conteggio."""
@@ -335,7 +361,7 @@ class _Cad3DRunWorker(QThread):
             comincia davvero.
         """
         generator = _patch_point("_generate_3d")
-        with measuring_listener(partial(_announce_freecad_measuring, self)):
+        with measuring_listener(partial(_announce_freecad_measuring, self)), archive_progress_listener(self._archive_progress):
             return generator(
                 self.params, self.body, self.project_dir,
                 self.fillets, self.face_texts,
@@ -417,7 +443,7 @@ class GenerateWorker(_Cad3DRunWorker):
                 # che la correzione vuole attribuita a KiCad, per poi tornare
                 # indietro. Da `freecad` ci passa `_cad_progress`, quando il
                 # solido comincia davvero.
-                self.phase.emit('kicad', tx("confronto ritagli consolidati con OpenCV e scelta del modello KiCad"), 0, 0)
+                self.phase.emit('consolidated', tx("confronto con l'archivio condiviso"), 0, 0)
                 self.progress.emit(tx("Generazione del modello 3D tramite FreeCAD…"))
                 result = self._generate_model()
                 for warning in result.get('warnings', []):
@@ -447,7 +473,7 @@ def _announce_freecad_measuring(worker, started: bool, count: int) -> None:
         worker.phase.emit('freecad_measure',
                           tx("misura di {count} modelli candidati", count=count), 0, 0)
     else:
-        worker.phase.emit('kicad', tx("confronto ritagli consolidati con OpenCV e scelta del modello KiCad"), 0, 0)
+        worker.phase.emit('kicad', tx("scelta del modello per ogni componente"), 0, 0)
 
 
 class Cad3DWorker(_Cad3DRunWorker):
@@ -486,7 +512,7 @@ class Cad3DWorker(_Cad3DRunWorker):
             # Stessa ragione di GenerateWorker.run: `_generate_3d` comincia
             # dall'abbinamento dei modelli di KiCad. `_cad_progress` passa a
             # `freecad` quando il solido comincia davvero.
-            self.phase.emit('kicad', tx("confronto ritagli consolidati con OpenCV e scelta del modello KiCad"), 0, 0)
+            self.phase.emit('consolidated', tx("confronto con l'archivio condiviso"), 0, 0)
             result = self._generate_model()
             for note in result.get("notes", []):
                 self.progress.emit(note)
@@ -864,7 +890,7 @@ class ReconcileWorker(QThread):
 
     def __init__(self, photo_png, proposals, length_mm, width_mm, model, cache_dir,
                  *, declared=None, verification_prompt=None, extra_instructions=None,
-                 detector='yolo', crop_prompt=None, crop_model=None):
+                 detector='yolo', crop_prompt=None, crop_model=None, reviewed=True):
         """@brief Fotografa le proposte approvate prima di lasciare il thread GUI.
 
         @param photo_png Fotografia calibrata su cui le proposte furono misurate.
@@ -895,6 +921,9 @@ class ReconcileWorker(QThread):
         self.verification_prompt = verification_prompt
         self.extra_instructions = extra_instructions
         self.detector = detector
+        # Le proposte vengono da una revisione fatta da una persona?
+        # (ReviewBundle.reviewed: False per il pacchetto di ripiego dalla cache).
+        self.reviewed = bool(reviewed)
         self.crop_prompt = crop_prompt
         self.crop_model = crop_model
         # Come ExtractWorker.cancel_event: alzato da «Interrompi».
@@ -932,7 +961,10 @@ class ReconcileWorker(QThread):
                       if providers.provider_of(m) == providers.PROVIDER_DEEPSEEK]
             if direct:
                 providers.ensure_providers_ready(direct, self.progress.emit)
-            self.phase.emit('llm_inventory', self.model, 0, 0)
+            if self.detector != 'yolo_smd':
+                # Con la rete SMD non c'e' inventario a pagamento: la fase la
+                # annuncia il servizio quando parte davvero.
+                self.phase.emit('llm_inventory', self.model, 0, 0)
             report = reconcile_saved_proposals(
                 self.photo_png, self.proposals, self.length_mm, self.width_mm, self.model,
                 make_logged_call(call_tool, self.progress.emit, log_prompt=True,
@@ -942,7 +974,8 @@ class ReconcileWorker(QThread):
                 verification_prompt=self.verification_prompt,
                 extra_instructions=self.extra_instructions, detector=self.detector,
                 crop_prompt=self.crop_prompt,
-                **accepted_kwargs(reconcile_saved_proposals, crop_model=self.crop_model),
+                **accepted_kwargs(reconcile_saved_proposals, crop_model=self.crop_model,
+                                  cancel=self.cancel_event, reviewed=self.reviewed),
                 **phase_kwargs(reconcile_saved_proposals, self._forward_phase))
             self.done.emit(report)
         except Exception as exc:  # noqa: BLE001 - errori rete/API riportati in UI

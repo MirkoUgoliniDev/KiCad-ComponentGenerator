@@ -1,0 +1,5 @@
+# Optional SMD crop classifier runtime (TorchObjectDetection checkpoints).
+numpy
+Pillow
+torch
+torchvision

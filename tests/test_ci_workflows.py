@@ -1,5 +1,6 @@
 """@brief The CI runs the suite in two processes, with timeouts (HANDOFF point 113)."""
 import subprocess
+import re
 import sys
 from pathlib import Path
 
@@ -21,6 +22,18 @@ def _load_halves():
 halves = _load_halves()
 
 WORKFLOWS = ROOT / ".github" / "workflows"
+
+
+def test_external_actions_are_pinned_to_immutable_commits():
+    """Every external action must use a full commit, including publish steps."""
+    yaml = pytest.importorskip("yaml")
+    for path in WORKFLOWS.glob("*.yml"):
+        workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+        for job in workflow["jobs"].values():
+            for step in job.get("steps", []):
+                action = step.get("uses", "")
+                if action and not action.startswith("./"):
+                    assert re.fullmatch(r"[^@]+@[0-9a-f]{40}", action), (path.name, action)
 
 
 def _touch(directory, *names):

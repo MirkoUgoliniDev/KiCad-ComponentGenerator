@@ -168,20 +168,23 @@ def test_pipeline_passes_source_selection_and_retains_overlay(monkeypatch,tmp_pa
     requests = []
     def call(**kw):
         requests.append(kw)
+        tool_name = kw["tool"]["function"]["name"]
+        if tool_name == "observe_contact_styles":
+            return {"sides": []}
         if len(requests)==1:
             assert kw["content_blocks"][0]["text"] == "FILE 0: top.png"
             return dict(layout="castellated",body_length_mm=40,body_width_mm=20,
                         top_photo_index=0,castellated_sides=[dict(edge="left",count=2,pitch_mm=2.54)])
-        if kw['tool']['function']['name'] == 'classify_fixed_packages':
+        if tool_name == 'classify_fixed_packages':
             return {'components': []}  # A missing verification must retain the box as uncertain.
-        return {"components":[dict(label='R',kind='resistor',box_2d=[200,100,400,300])] if len(requests)==2 else []}
+        return {"components":[dict(label='R',kind='resistor',box_2d=[200,100,400,300])] if len(requests)==3 else []}
     monkeypatch.setattr(ext,"call_tool",call)
     result = ext.extract_pin_header_params([photo],photo_cache_dir=tmp_path/'cache')
     # Contratto aggiornato (26/09, griglia di dettaglio in mm): la foto finta e'
     # a 10 px/mm, sotto l'obiettivo dei dettagli, quindi nessun dettaglio
     # ingrandito (un ritaglio non aggiunge pixel): estrazione, vista completa,
     # classificazione.
-    assert len(requests)==3
+    assert len(requests)==4
     assert len(result.components_3d)==1
     assert result.photo_source=="top.png"
     assert result.photo_overlay_png.startswith(b"\x89PNG")

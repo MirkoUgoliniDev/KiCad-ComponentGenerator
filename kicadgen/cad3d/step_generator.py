@@ -76,6 +76,9 @@ def _match_evidence(component):
     if not isinstance(evidence, dict):
         return {}
     fields = ("presence_confidence", "class_confidence", "confidence",
+              "_smd_class", "_smd_rotation_deg", "_smd_rotation_confidence",
+              "_smd_accepted", "_smd_body", "_smd_rotation_kind", "_smd_views_agree",
+              "_smd_terminal_count",
               "_yolo_review_only", "_yolo_origin", "terminal_count",
               # Identita' della proposta e decisione di presenza: servono a
               # kicad_models._is_yolo_only_hypothesis per riconoscere per
@@ -96,7 +99,8 @@ def _match_evidence(component):
               UNCERTAINTY_KEY, SCALE_KEY,
               # Compact, transient OpenCV descriptor from the calibrated PCB
               # crop; never the source photo or a persisted project field.
-              "_accepted_image_descriptor")
+              "_accepted_image_descriptor", "_category_source", "_category_status",
+              "_ai_class_proposal", "_ai_class_confidence", "_terminal_status", "_crop_class_status", "_crop_terminal_review_required")
     result = {key: evidence[key] for key in fields if key in evidence}
     descriptor = result.get("_accepted_image_descriptor")
     if isinstance(descriptor, (bytes, bytearray, memoryview)):

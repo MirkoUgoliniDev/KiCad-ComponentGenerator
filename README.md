@@ -107,6 +107,13 @@ The API key is kept in the Windows Credential Manager (Configuration →
 «AI account...») or in a local .env file, and is never stored in the profile
 database. Cached AI responses and generated output are local data.
 
+For local SMD crop classification with the trained TorchObjectDetection v3
+network, `kicadgen.services.smd_component_classifier.classify_photo_boxes`
+accepts a photo and detected boxes and returns the predicted class, rotation,
+footprint candidates and KiCad STEP paths. See
+[docs/CLASSIFICATORE_SMD.md](docs/CLASSIFICATORE_SMD.md) for setup and a
+PowerShell example.
+
 ## Workflow
 
 ~~~mermaid

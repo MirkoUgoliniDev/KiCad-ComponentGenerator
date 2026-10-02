@@ -114,11 +114,17 @@ def pipeline(monkeypatch, tmp_path):
     global_review = Mock(wraps=global_inventory.review_global_inventory)
     monkeypatch.setattr(global_inventory, 'review_global_inventory', global_review)
     state = dict(main=_main_response(), inventory=_inventory_response(), requests=[],
+                 style_requests=[],
                  crop_requests=[], crop_reading=_uninformative_crop_reading(),
                  logs=[], detection=detection, setup=setup, credit=credit, global_review=global_review)
 
     def fake_api(**kwargs):
         name = kwargs['tool']['function']['name']
+        if name == 'observe_contact_styles':
+            state['style_requests'].append(deepcopy(kwargs))
+            # Explicitly uncertain: fixture photographs do not encode a
+            # confident hole style, so production must preserve the manual state.
+            return {'sides': []}
         if name == 'observe_body':
             # Contratto aggiornato (HANDOFF 144, 148): dopo l'inventario globale ogni
             # corpo tenuto si rilegge due volte dal suo ritaglio. Quelle
@@ -169,6 +175,11 @@ def test_extractor_yolo_calls_global_once_without_legacy_or_terminals(pipeline, 
         options['component_family'] = family
     params = pipeline['execute'](**options)
     assert len(pipeline['requests']) == 2  # Board extraction plus ONE global inventory.
+    if family == 'castellated':
+        assert len(pipeline['style_requests']) == 1
+        assert pipeline['style_requests'][0]['tool']['function']['name'] == 'observe_contact_styles'
+    else:
+        assert pipeline['style_requests'] == []
     # ...then the retained body re-read twice from its own crop (HANDOFF 144).
     assert len(pipeline['crop_requests']) == 2
     assert {r['model'] for r in pipeline['crop_requests']} == {'offline/global'}
@@ -546,3 +557,63 @@ def test_extractor_reads_the_crops_with_the_profile_crop_model_or_the_photo_mode
     [checked] = monkeypatch_ready
     assert [m for m in checked if m] == ['offline/board', 'offline/localizer', 'offline/global'] + (
         ['offline/crop-reader'] if expected != 'offline/global' else [])
+
+
+@pytest.mark.parametrize('with_cancel', [False, True])
+def test_smd_detector_reaches_the_photo_inventory_through_the_real_extractor(
+        pipeline, monkeypatch, with_cancel):
+    """@brief Regressione 2026-10-02: in modalita' SMD l'inventario non partiva mai.
+
+    @note `_extract_photo_stage` usava un `cancel` che non aveva in scope: ogni
+        corsa SMD finiva in «Inventario fotografico fallito» e il 3D usava gli
+        ingombri a occhio dell'estrazione dai documenti. Qui si passa dalla
+        funzione vera, con e senza canale di annullamento; solo l'inventario e'
+        sostituito, per non dipendere da PyTorch.
+    """
+    import threading
+    from kicadgen.services import smd_component_classifier
+    monkeypatch.setattr(smd_component_classifier, 'validate_smd_setup', lambda *args: None)
+    received = []
+
+    def inventory(*args, **kwargs):
+        received.append(kwargs)
+        return photo_inventory.InventoryResult()
+    monkeypatch.setattr(photo_inventory, 'extract_inventory', inventory)
+    event = threading.Event()
+    options = dict(photo_detector='yolo_smd')
+    if with_cancel:
+        options['cancel'] = event
+    pipeline['execute'](**options)
+    assert len(received) == 1 and received[0]['detector'] == 'yolo_smd'
+    assert not any('Inventario fotografico fallito' in str(line) for line in pipeline['logs'])
+    if with_cancel:
+        # Il predicato segue l'evento: la rete lo interroga fra un ritaglio e l'altro.
+        assert received[0]['cancel']() is False
+        event.set()
+        assert received[0]['cancel']() is True
+    else:
+        assert 'cancel' not in received[0]
+
+
+@pytest.mark.parametrize('raised', ['call', 'failure'])
+def test_a_cancellation_inside_the_photo_stage_surfaces_as_extraction_cancelled(
+        pipeline, monkeypatch, raised):
+    """@brief Annullo dalla rete SMD = ExtractionCancelled, come il contratto (audit D3).
+
+    @note Caso negativo: un guasto qualunque dell'inventario resta una nota e
+        l'estrazione dai documenti prosegue.
+    """
+    from kicadgen.services import smd_component_classifier
+    from kicadgen.services.ai_diagnostics import CallCancelled
+    monkeypatch.setattr(smd_component_classifier, 'validate_smd_setup', lambda *args: None)
+
+    def inventory(*args, **kwargs):
+        raise (CallCancelled('Classificazione SMD annullata') if raised == 'call'
+               else RuntimeError('guasto'))
+    monkeypatch.setattr(photo_inventory, 'extract_inventory', inventory)
+    if raised == 'call':
+        with pytest.raises(extractor.ExtractionCancelled):
+            pipeline['execute'](photo_detector='yolo_smd')
+    else:
+        result = pipeline['execute'](photo_detector='yolo_smd')
+        assert 'Inventario fotografico fallito' in (result.notes or '')

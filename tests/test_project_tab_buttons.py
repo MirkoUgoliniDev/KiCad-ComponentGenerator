@@ -666,14 +666,17 @@ def test_generate_worker_never_shows_freecad_during_the_kicad_matching(monkeypat
     )
     phases = _run_worker_phases(monkeypatch, worker)
     tools = [tool for tool, _ in phases]
-    # Contratto del 2026-09-26: il footprint lo scrive questo programma, non
-    # KiCad; poi la libreria di KiCad; poi il solido di FreeCAD.
+    # Il footprint lo scrive KiCadGen, la fase di consolidamento analizza i
+    # risultati con OpenCV, poi si scelgono i modelli KiCad e si costruisce il solido.
     assert phases[0] == ("footprint", "scrittura del file .kicad_mod")
+    assert phases[1] == ("consolidated", "confronto con l'archivio condiviso")
+    assert phases[2] == ("kicad", "scelta del modello per ogni componente")
     first_freecad = tools.index("freecad")
-    assert all(tool in ("footprint", "kicad") for tool in tools[:first_freecad]), (
+    assert all(tool in ("footprint", "consolidated", "kicad") for tool in tools[:first_freecad]), (
         "nessun annuncio di FreeCAD prima che il solido cominci: " + repr(phases))
     assert phases[first_freecad] == ("freecad", "costruzione del solido 3D")
-    assert ("kicad", "scelta del modello per ogni componente") in phases[:first_freecad]
+    assert phases.index(("consolidated", "confronto con l'archivio condiviso")) < first_freecad
+    assert phases.index(("kicad", "scelta del modello per ogni componente")) < first_freecad
 
 
 def test_cad3d_worker_announces_the_matching_before_the_solid(monkeypatch, tmp_path):
@@ -692,7 +695,8 @@ def test_cad3d_worker_announces_the_matching_before_the_solid(monkeypatch, tmp_p
                      pin_diameter_mm=1, pin_length_mm=3),
         tmp_path, [], [])
     phases = _run_worker_phases(monkeypatch, worker)
-    assert phases[0] == ("kicad", "scelta del modello per ogni componente")
+    assert phases[:2] == [("consolidated", "confronto con l'archivio condiviso"),
+                          ("kicad", "scelta del modello per ogni componente")]
     assert ("freecad", "costruzione del solido 3D") in phases
     assert phases.index(("freecad", "costruzione del solido 3D")) > 0
 

@@ -2211,18 +2211,23 @@ def _undetermined_components(components):
 
 def test_unclassified_bodies_get_their_own_filter_entry(app, png, components):
     """Positive: the entry gathers exactly the [?] rows, whatever their kind."""
-    from kicadgen.gui.photo_review_dialog import UNDETERMINED_FILTER
+    from kicadgen.gui.photo_review_dialog import UNDETERMINED_FILTER, PROPOSED_FILTER
     widget = PhotoReviewDialog(png, _undetermined_components(components), 40, 20)
     try:
         combo = widget.category_filter
         index = combo.findData(UNDETERMINED_FILTER)
         assert index == 1                                   # subito dopo «Tutte»
-        assert "(3)" in combo.itemText(index) and UNDETERMINED_LIST_MARKER in combo.itemText(index)
+        assert "Categoria sconosciuta (2)" == combo.itemText(index)
+        assert '(1)' in combo.itemText(combo.findData(PROPOSED_FILTER))
         combo.setCurrentIndex(index)
         visible = [widget.component_list.item(i).text() for i in range(widget.component_list.count())
                    if not widget.component_list.item(i).isHidden()]
-        assert len(visible) == 3
+        assert len(visible) == 2
         assert all(UNDETERMINED_LIST_MARKER in text for text in visible)
+        combo.setCurrentIndex(combo.findData(PROPOSED_FILTER))
+        proposed = [widget.component_list.item(i).text() for i in range(widget.component_list.count())
+                    if not widget.component_list.item(i).isHidden()]
+        assert len(proposed) == 1 and 'C9' in proposed[0]
         assert not any("U1" in text or "R1" in text for text in visible)
     finally:
         widget.close()

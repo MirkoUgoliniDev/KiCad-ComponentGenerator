@@ -7,8 +7,7 @@ name: Tests
 # The suite runs in two processes (tools/run_test_halves.py, HANDOFF point 113)
 # and every step has a timeout.
 #
-# TODO(maintainer): pin every action below to a full commit SHA, as for
-# release.yml.
+# Actions use the same immutable commits as release.yml.
 on:
   push:
   pull_request:
@@ -28,11 +27,11 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.13'
 
@@ -83,7 +82,7 @@ jobs:
       # watchdog's stack report says which test was running (audit 138, D6).
       - name: Upload the test hang report
         if: ${{ failure() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: test-hang-report
           path: ${{ runner.temp }}/kicadgen-test-hang-*.txt

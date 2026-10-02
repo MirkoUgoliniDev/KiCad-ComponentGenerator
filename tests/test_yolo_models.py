@@ -58,6 +58,26 @@ def test_listing_finds_weights_only_sorted_and_adds_files_elsewhere(tmp_path):
     assert names == ["A.onnx", "altrove.onnx", "b.pt", "c.PT"]
 
 
+def test_classifier_resource_has_its_own_role_but_custom_checkpoints_stay_selectable(
+        tmp_path, monkeypatch):
+    folder = tmp_path / "models"
+    folder.mkdir()
+    classifier = folder / "smd_classifier.pt"
+    custom = folder / "custom_smd_classifier.pt"
+    for path in (classifier, custom):
+        path.write_bytes(b"checkpoint")
+    elsewhere = tmp_path / "outside" / "smd_classifier.pt"
+    elsewhere.parent.mkdir()
+    elsewhere.write_bytes(b"custom checkpoint")
+    monkeypatch.setattr(ym, "resource_path", lambda *parts: classifier)
+
+    assert ym.model_role(classifier) == "smd_classifier"
+    assert ym.model_role(custom) == "yolo_detector"
+    assert ym.model_role(elsewhere) == "yolo_detector"
+    names = [item.path for item in ym.list_models(folder, extra=[classifier, elsewhere])]
+    assert names == [custom, elsewhere]
+
+
 def test_a_missing_folder_or_file_is_not_an_error(tmp_path):
     assert ym.list_models(tmp_path / "manca") == []
     missing = ym.describe_file(tmp_path / "manca.pt")

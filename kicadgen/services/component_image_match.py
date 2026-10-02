@@ -180,7 +180,7 @@ def rank_references(query_descriptor: np.ndarray, references, category: str) -> 
 
 
 def rotated_image_similarity(query_descriptor, image_png):
-    """Compare crop appearance independently of the local quarter-turn angle."""
+    """@brief Compare crop appearance independently of the local quarter-turn angle."""
     try:
         crop = cv2.imdecode(np.frombuffer(image_png, np.uint8), cv2.IMREAD_COLOR)
         if crop is None:
@@ -192,7 +192,7 @@ def rotated_image_similarity(query_descriptor, image_png):
 
 
 def match_orientation(query_descriptor, examples):
-    """Transfer a verified local model angle only from an unambiguous crop match.
+    """@brief Transfer a verified local model angle only from an unambiguous crop match.
 
     Crops are already deskewed by the PCB component rotation. Rotating the
     reference counterclockwise by k quarter turns therefore adds k*90 to the

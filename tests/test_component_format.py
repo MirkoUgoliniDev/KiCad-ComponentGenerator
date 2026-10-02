@@ -73,3 +73,23 @@ def test_the_copied_fields_are_the_declared_ones():
     fmt = copy_format(_sot())
     assert set(fmt) <= set(FORMAT_FIELDS) | {"model_selection", "lead_sides_local", "source_name"}
     assert not set(fmt) & {"x_mm", "y_mm", "rotation_deg", "name", "marking", "color_hex"}
+
+
+def test_pasting_a_format_withdraws_the_target_network_identity():
+    """@brief Audit 2026-10-02: a SOIC pasted on a body read as chip_R kept the chip's pose.
+
+    @note Negative: the source keeps its own identity, the target's other
+        fields (position, rotation) stay untouched.
+    """
+    from kicadgen.services.component_format import copy_format, paste_format
+    source = dict(kind="ic", package="SOIC-8", length_mm=6.0, width_mm=4.9, x_mm=0, y_mm=0,
+                  rotation_deg=0, _smd_accepted=True, _smd_rotation_deg=180,
+                  _smd_rotation_kind="full", _smd_views_agree=True)
+    target = dict(kind="resistor", package="SMD chip resistor", length_mm=2.0, width_mm=1.2,
+                  x_mm=3.0, y_mm=1.0, rotation_deg=90, _smd_accepted=True, _smd_body="endcap_chip",
+                  _smd_rotation_deg=90, _smd_rotation_kind="axis", _smd_prediction={"class": "chip_R"})
+    pasted = paste_format(target, copy_format(source))
+    assert "_smd_accepted" not in pasted and "_smd_body" not in pasted
+    assert "_smd_rotation_deg" not in pasted and pasted["_smd_superseded"] is True
+    assert (pasted["x_mm"], pasted["rotation_deg"]) == (3.0, 90)
+    assert source["_smd_accepted"] is True and target["_smd_accepted"] is True

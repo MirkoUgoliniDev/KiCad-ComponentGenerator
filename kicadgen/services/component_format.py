@@ -64,7 +64,8 @@ def paste_format(row: dict, fmt: dict) -> dict:
         same body and not a mix of the two); the observed leads are turned
         from the source's local frame into the target's photo frame. Position,
         rotation, name, marking and colour are untouched; the input is not
-        modified.
+        modified. The target's SMD network identity and pose are withdrawn
+        (smd_component_classifier.drop_classifier_identity).
     """
     result = deepcopy(row)
     for key in FORMAT_FIELDS:
@@ -76,6 +77,12 @@ def paste_format(row: dict, fmt: dict) -> dict:
         result["model_selection"] = deepcopy(fmt["model_selection"])
     else:
         result.pop("model_selection", None)
+    # La rete SMD aveva letto il corpo di DESTINAZIONE come un'altra cosa: il
+    # formato incollato la smentisce, quindi identita' e posa della rete non
+    # valgono piu' (audit 2026-10-02: un SOIC prendeva il verso da una
+    # lettura «chip_R»).
+    from .smd_component_classifier import drop_classifier_identity
+    drop_classifier_identity(result)
     local = fmt.get("lead_sides_local")
     # Il verso inverso di local_lead_sides: dal riferimento del corpo alla
     # foto, con la rotazione del BERSAGLIO.

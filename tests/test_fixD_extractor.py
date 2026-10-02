@@ -196,10 +196,12 @@ def test_d2_repair_compares_normalized_sides(offline, monkeypatch):
     corrected = [dict(edge="top", count=2, pitch_mm=2.54, first_pin=1),
                  dict(edge="bottom", count=2, pitch_mm=2.54, first_pin=3)]
     call = Mock(side_effect=[dict(layout="castellated", castellated_sides=sides),
-                             dict(castellated_sides=corrected)])
+                             dict(castellated_sides=corrected),
+                             {"sides": []}])
     monkeypatch.setattr(ext, "call_tool", call)
     result = ext.extract_pin_header_params([offline])
-    assert call.call_count == 2
+    assert call.call_count == 3
+    assert call.call_args_list[2].kwargs["tool"]["function"]["name"] == "observe_contact_styles"
     assert [(s["edge"], s["first_pin"]) for s in result.castellated_sides] == [("top", 1), ("bottom", 3)]
 
 

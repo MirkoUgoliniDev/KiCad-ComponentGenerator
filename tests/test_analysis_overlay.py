@@ -948,9 +948,27 @@ def test_opencv_is_a_local_tool_of_its_own(overlay):
     from kicadgen.gui.analysis_overlay import TOOLS, TRANSFER_SOURCES
     name, color, glyph = TOOLS["opencv"]
     assert name == "OpenCV"
+    assert glyph == "aperture"
+    assert glyph != TOOLS["consolidated"][2]
     assert "opencv" not in TRANSFER_SOURCES                  # nulla lascia la macchina
     others = [spec for key, spec in TOOLS.items() if key != "opencv"]
     assert glyph not in {g for _, _, g in others}
     assert color not in {c for _, c, _ in others if c != "#cba6f7"}
     overlay.set_tool("opencv", "ricerca e calibrazione della scheda")
     assert overlay.tool.text().startswith("OpenCV")
+
+
+def test_the_smd_network_has_its_own_phase_not_the_detector_one(overlay):
+    """@brief La rete SMD si vede nella modale come tale (utente, 2026-10-02).
+
+    @note Era un alias di YOLO: la classificazione locale si presentava come un
+        secondo rilevamento. Caso negativo: YOLO resta il suo segno.
+    """
+    from kicadgen.gui.analysis_overlay import REMOTE_GLYPHS, TOOL_ALIASES
+    assert "smd" not in TOOL_ALIASES
+    name, color, glyph = TOOLS["smd"]
+    assert name == "Rete SMD locale" and glyph == "network"
+    assert glyph not in REMOTE_GLYPHS
+    assert TOOLS["yolo"][2] == "frame" != glyph
+    overlay.set_tool("smd", "smd_classifier.pt (v3)")
+    assert (overlay.spinner.glyph, overlay.spinner.color) == (glyph, color)

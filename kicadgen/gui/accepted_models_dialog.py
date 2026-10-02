@@ -1,9 +1,8 @@
 """@brief Dialogs for the archive of accepted KiCad model matches.
 
 - `ConsolidateDialog` opens from «Accetto, mi piace» after the solid is
-  generated. It lists every board component, pre-checked when it has a model
-  worth remembering; the others stay listed, not checkable, with the reason
-  (user decision: the whole board in one click, with opt-out per row).
+  generated. Only components with an attached usable model are listed,
+  pre-checked with opt-out per row; excluded components are counted below.
 - `AcceptedModelsDialog` lists the archive entries and deletes wrong ones: a
   match accepted by mistake propagates to later boards, so removing it must be
   easy.
@@ -68,12 +67,13 @@ class ConsolidateDialog(QDialog):
         self.i18n = i18n
         self.setWindowTitle("Ricorda questi modelli KiCad")
         self.resize(1180, 620)
-        self._components = list(components or [])
+        supplied = list(components or [])
+        self._components = [component for component in supplied if eligibility(component)[0]]
+        self._excluded_count = len(supplied) - len(self._components)
         layout = QVBoxLayout(self)
         intro = QLabel(
-            "I componenti spuntati entrano nell'archivio degli abbinamenti accettati: "
-            "in una scheda futura un corpo con la stessa categoria e le stesse misure "
-            "(entro il 15%) ricevera' subito questo modello, come proposta da confermare. "
+            "Sono mostrati solo i componenti con un modello KiCad associato. "
+            "Conferma quelli verificati: modello e ritaglio saranno disponibili anche negli altri progetti. "
             "Togli la spunta a quelli che non ti convincono.")
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -107,7 +107,12 @@ class ConsolidateDialog(QDialog):
             name = _item(component.get("name") or "?")
             if ok:
                 name.setFlags(name.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                name.setCheckState(Qt.CheckState.Checked)
+                # Una proposta provvisoria (rete SMD o geometria) non e' una
+                # scelta di nessuno: entra nell'archivio solo se la spunti tu
+                # (audit 2026-10-02: altrimenti l'archivio si riempiva da solo).
+                provisional = (component.get("model_match") or {}).get("attachment") == "provisional"
+                name.setCheckState(Qt.CheckState.Unchecked if provisional
+                                   else Qt.CheckState.Checked)
             else:
                 # Non spuntabile: non c'e' niente da ricordare, e il motivo lo dice.
                 name.setFlags(name.flags() & ~Qt.ItemFlag.ItemIsUserCheckable
@@ -150,7 +155,7 @@ class ConsolidateDialog(QDialog):
 
     def _refresh_summary(self, *_):
         chosen = len(self.selected_components())
-        excluded = self._eligible.count(False)
+        excluded = self._excluded_count
         self.summary.setText(self._tr("Da ricordare: {chosen}. Senza modello da ricordare: {excluded}.")
                              .format(chosen=chosen, excluded=excluded))
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(chosen > 0)
@@ -183,7 +188,7 @@ class ConsolidateDialog(QDialog):
         chosen = []
         for row, component in enumerate(self._components):
             item = self.table.item(row, self.COLUMN_NAME)
-            if (self._eligible[row] and item is not None
+            if (self._eligible[row] and eligibility(component)[0] and item is not None
                     and item.checkState() == Qt.CheckState.Checked):
                 chosen.append(component)
         return chosen
@@ -395,6 +400,8 @@ class AcceptedModelsDialog(QDialog):
         next_image = QPushButton(self._tr("Successivo ›"))
         previous.setObjectName("cropPrevious")
         next_image.setObjectName("cropNext")
+        previous.setVisible(len(examples) > 1)
+        next_image.setVisible(len(examples) > 1)
         controls.addStretch()
         controls.addWidget(previous)
         controls.addWidget(next_image)
