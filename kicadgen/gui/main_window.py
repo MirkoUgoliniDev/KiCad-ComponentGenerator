@@ -14,6 +14,7 @@ from html import escape
 import json
 from functools import partial
 import math
+import os
 import re
 import shutil
 import sqlite3
@@ -1578,17 +1579,26 @@ class MainWindow(QMainWindow):
             self._append_log(tx("Modello di visione per questa sessione: {chosen}.", chosen=chosen))
 
     def _pick_session_smd_model(self) -> None:
-        """@brief Choose the SMD network's .pt file for this session, starting from models/smd.
+        """@brief «Scegli la rete SMD»: the checkpoints of models/smd with what each declares.
 
-        @note The file is only named here; it is checked (validate_smd_setup)
-            when the analysis starts, before any paid request.
+        @note User request (2026-10-02): a window with the model's
+            information, like «Scegli il modello YOLO», not a bare file
+            dialog. The choice is checked again (validate_smd_setup) when the
+            analysis starts, before any paid request.
         """
-        current = self.field_smd_model.text().strip()
-        start = current or str(resource_path(*SMD_MODELS_DIR))
-        chosen, _ = QFileDialog.getOpenFileName(
-            self, self._photo_detector_text("smd_picker"), start, "PyTorch (*.pt)")
-        if chosen:
-            self.field_smd_model.setText(chosen)
+        from .smd_model_dialog import SmdModelDialog
+        dialog = SmdModelDialog(self.field_smd_model.text().strip(),
+                                resource_path(*SMD_MODELS_DIR),
+                                default=str(smd_weights_path()), tr=self.i18n.text, parent=self)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        selected = dialog.selected_path()
+        dialog.shutdown()
+        dialog.deleteLater()
+        if accepted and selected:
+            # Il predefinito resta «campo vuoto»: cosi' segue la cartella.
+            self.field_smd_model.setText(
+                "" if os.path.normcase(os.path.abspath(selected))
+                == os.path.normcase(os.path.abspath(str(smd_weights_path()))) else selected)
 
     def _smd_model_option(self) -> Path | None:
         """@brief The SMD network file chosen for this session, or None for the default."""
@@ -2079,8 +2089,13 @@ class MainWindow(QMainWindow):
         # modale AI, accanto allo stato del lavoro.
         self.status_project = QLabel()
         self.status_project.setProperty("i18n_skip", True)
-        self.status_cost = QLabel()
+        # Solo il testo del costo, che la modale AI copia (set_cost): non sta in
+        # nessuna barra e non si mostra mai. Un QLabel senza genitore reso
+        # visibile diventava una finestrella «python» a se' (utente,
+        # 2026-10-02): ha la finestra come genitore e resta nascosto.
+        self.status_cost = QLabel(self)
         self.status_cost.setProperty("i18n_skip", True)
+        self.status_cost.hide()
         self.statusBar().addPermanentWidget(self.status_project)
         self.statusBar().showMessage(self.i18n.text("Pronto"))
         self.analysis_overlay.operation_started.connect(
@@ -3086,7 +3101,6 @@ class MainWindow(QMainWindow):
         if not named:
             label.setText(self.i18n.text("Nessun progetto aperto"))
             self.status_cost.setText("")
-            self.status_cost.setVisible(False)
             return
         label.setText(self.i18n.tr("status.project", name=self._component_name()))
         try:
@@ -3111,11 +3125,9 @@ class MainWindow(QMainWindow):
             self.status_cost.setToolTip(self.i18n.tr(
                 "status.project_cost", total=format_usd(costs.total_usd), calls=costs.calls)
                 + " (+?)")
-            self.status_cost.setVisible(True)
             return
         if costs is None or not costs.calls:
             self.status_cost.setText("")
-            self.status_cost.setVisible(False)
             return
         if costs.run:
             # Stesso formato della riga del credito: sotto 1 USD quattro
@@ -3131,7 +3143,6 @@ class MainWindow(QMainWindow):
         self.status_cost.setToolTip(
             self.i18n.tr("status.project_cost", total=format_usd(costs.total_usd), calls=costs.calls)
             + ("" if costs.complete else " (+?)"))
-        self.status_cost.setVisible(True)
 
     def _on_workflow_step_clicked(self, step: str) -> None:
         """@brief Open the tab where a step is done, when the tab is available."""

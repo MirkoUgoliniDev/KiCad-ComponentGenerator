@@ -109,6 +109,45 @@ def validate_smd_setup(model_path=None):
     return path
 
 
+#: Below this many validation samples the declared accuracy says little about
+#: other boards: the model window says so next to the figure. Interface
+#: threshold for an honest note, not a property of any checkpoint.
+FEW_VALIDATION_SAMPLES = 200
+
+
+def describe_smd_checkpoint(model_path=None) -> dict:
+    """@brief Validate a checkpoint of the SMD network and return what it declares about itself.
+
+    @param model_path Checkpoint path; None for the default in models/smd.
+    @return Dictionary: path, format, arch, img_size, trained (as stored),
+        epochs, classes (list), orientations (class -> none/axis/full),
+        threshold (the effective acceptance threshold, max(0.5, suggested)),
+        catalog_sha256, and validation (samples, accuracy, balanced_accuracy)
+        when the checkpoint carries metrics, else None.
+    @throws The same exceptions as validate_smd_setup.
+    @note Loads with ``weights_only=True`` (_load_checkpoint): no code from
+        the file runs, so the model window may call this on its own.
+    """
+    path = validate_smd_setup(model_path)
+    torch, _, _ = _runtime()
+    checkpoint = _load_checkpoint(path, torch)
+    metrics = checkpoint.get("metrics") if isinstance(checkpoint.get("metrics"), Mapping) else {}
+    val = metrics.get("val") if isinstance(metrics.get("val"), Mapping) else None
+    validation = None
+    if val is not None:
+        validation = {key: val.get(key) for key in ("samples", "accuracy", "balanced_accuracy")}
+    classes = [name for name in checkpoint["classes"]]
+    return {
+        "path": str(path), "format": str(checkpoint.get("format") or ""),
+        "arch": str(checkpoint.get("arch") or ""), "img_size": checkpoint.get("img_size"),
+        "trained": str(checkpoint.get("trained") or ""), "epochs": checkpoint.get("epoch"),
+        "classes": classes, "orientations": dict(checkpoint["orientations"]),
+        "threshold": max(0.5, float(checkpoint.get("suggested_threshold") or 0)),
+        "catalog_sha256": str(checkpoint.get("catalog_sha256") or ""),
+        "validation": validation,
+    }
+
+
 def _load_checkpoint(path, torch):
     """Load a bounded, weights-only checkpoint from a user-controlled path."""
     size = Path(path).stat().st_size

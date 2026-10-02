@@ -575,14 +575,35 @@ def test_the_chosen_smd_network_is_checked_and_forwarded(window, monkeypatch, tm
     window._on_extract_finished()
 
 
-def test_the_smd_picker_opens_in_the_smd_folder(window, monkeypatch):
+@pytest.mark.parametrize("picked, expected", [("default", ""), ("other", "other")])
+def test_the_smd_button_opens_the_model_window_on_the_smd_folder(window, monkeypatch, tmp_path,
+                                                                 picked, expected):
+    """@brief A window with the model's information (2026-10-02), not a bare file dialog.
+
+    @note Picking the default leaves the field empty (it follows models/smd);
+        another file is written in the field.
+    """
+    from kicadgen.gui import smd_model_dialog
+    other = tmp_path / "other.pt"
     seen = {}
 
-    def dialog(parent, title, start, filters):
-        seen.update(start=start, filters=filters)
-        return "", ""
-    monkeypatch.setattr(gui.QFileDialog, "getOpenFileName", dialog)
+    class Stub:
+        def __init__(self, current, models_dir, default="", tr=None, parent=None):
+            seen.update(current=current, folder=models_dir, default=default)
+
+        def exec(self):
+            return gui.QDialog.DialogCode.Accepted
+
+        def selected_path(self):
+            return seen["default"] if picked == "default" else str(other)
+
+        def shutdown(self):
+            pass
+
+        def deleteLater(self):
+            pass
+    monkeypatch.setattr(smd_model_dialog, "SmdModelDialog", Stub)
     window._pick_session_smd_model()
-    assert seen["start"] == str(gui.resource_path(*gui.SMD_MODELS_DIR))
-    assert "*.pt" in seen["filters"]
-    assert window.field_smd_model.text() == ""
+    assert seen["folder"] == gui.resource_path(*gui.SMD_MODELS_DIR)
+    assert seen["default"] == str(gui.smd_weights_path())
+    assert window.field_smd_model.text() == ("" if expected == "" else str(other))

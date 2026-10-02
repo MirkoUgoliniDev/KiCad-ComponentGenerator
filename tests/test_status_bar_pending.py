@@ -60,3 +60,19 @@ def test_the_retry_timer_does_not_restart_after_detach(qapp, tmp_path, monkeypat
     line.detach()
     line._on_paid_call({"cost_usd": 0.1, "model": "m"})     # delivered late
     assert not line._retry_timer.isActive()
+
+
+def test_the_cost_text_never_becomes_a_window_of_its_own(window, tmp_path):
+    """@brief Regression 2026-10-02: a parentless label shown became a «python» window.
+
+    @note The label only carries the text the AI modal copies; it is never
+        shown, also when there is a cost to report (the branch that showed it).
+    """
+    folder = _project(window, tmp_path)
+    start_run(folder)
+    add_call(folder, {"cost_usd": 0.25, "model": "m"})
+    window._refresh_status_bar(True)
+    assert "0.2500 USD" in window.status_cost.text()
+    assert window.status_cost.parent() is window
+    assert not window.status_cost.isWindow()
+    assert not window.status_cost.isVisible()

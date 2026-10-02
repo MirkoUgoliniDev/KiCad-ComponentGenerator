@@ -27,6 +27,48 @@
   (ridisegno forzato), secondo clic ignorato; ripristino su ogni uscita
   anticipata. Verifiche ancora sul thread GUI (icona ferma; in background =
   lavoro piu' grosso, da proporre dopo).
+- **FATTO (non committato) (02/10 sera, richiesta utente: «anche per questo non deve aprire
+  cartella ma modale con info del modello»): finestra «Scegli la rete SMD»**
+  (kicadgen/gui/smd_model_dialog.py, describe_smd_checkpoint nel
+  classificatore; il checkpoint si carica con weights_only=True, quindi i
+  dettagli si leggono da soli in background; scegliere il predefinito lascia
+  il campo vuoto; un file rifiutato non si conferma; nota «Pochi campioni»
+  sotto FEW_VALIDATION_SAMPLES = 200, soglia d'interfaccia dichiarata). Anche
+  corrette due frasi della modale di avanzamento (fase YOLO che diceva
+  «classificazione dei ritagli»; «Rete SMD locale — Rete SMD locale: ...»).
+  Archivio consolidati svuotato di nuovo su richiesta (14 voci, 33 immagini;
+  copia .venv/backup-consolidati/accepted_components-20261002-154119.sqlite3).
+  Corretta anche la finestrella «python» col costo (screenshot utente):
+  status_cost era un QLabel SENZA genitore, tolto dalla barra di stato
+  quando il costo e' passato nella modale ma ancora reso visibile da
+  _refresh_status_bar -> finestra di primo livello. Ora QLabel(self),
+  nascosto, mai mostrato (solo testo copiato dalla modale); test di
+  regressione in test_status_bar_pending.
+  Suite (.venv/claude-suite10-a/b.log, uscita 0): 2993 + 3599 = 6592
+  passati, 10 saltati, 2 xfail, 19 sottotest, 0 falliti (la correzione
+  di status_cost e' arrivata a suite avviata: test_status_bar_pending e
+  test_analysis_cost verdi a parte). COMMITTATO, pushato e unito in main
+  (utente: «prima committa pusha mergia in main e torna qui»).
+  PROPOSTA IN ATTESA DI OK: fori STIMATI (mezzo foro e foro passante)
+  ridotti per stare nella piazzola (misurata sulla foto o dichiarata) con
+  anello di rame 0.25 mm per lato (euristica dichiarata, guide castellati);
+  fori LETTI dai documenti mai toccati, errore se incoerenti. Dati TEST2:
+  destro piazzola misurata 1.53 mm, mezzo foro stimato 2.0; sinistro 2.00
+  contro 2.2; foro passante stimato 1.7. Effetto visibile: contatti destri
+  enormi che toccano il MiniMELF.
+  DETTAGLI DEL PIANO ORIGINALE:
+  sul modello di YoloModelDialog: elenco dei .pt di models/smd (+ in uso,
+  + «Altro file...»), dettagli: formato, dimensione, data, SHA-256; con
+  «Verifica» (carica il pickle: solo su richiesta) i metadati del
+  checkpoint: architettura, data e epoche di addestramento, classi e tipi di
+  rotazione, soglia effettiva, metriche di validazione con nota onesta se i
+  campioni sono pochi (il checkpoint attuale: 42 campioni, accuratezza 1.0).
+  IN CODA (domanda all'utente senza risposta): generazione fermata alle 15:43
+  da «piazzola foro passante 1.7 mm < foro 2.0 mm»; il foro e' una STIMA
+  dell'AI (through_hole_drill_declared False) e il tipo di contatto e'
+  cambiato fra le corse (half_and_through contro mezzo foro). Proposta:
+  foro stimato ridotto per lasciare la corona, foro dichiarato blocca come
+  oggi; poi verifica sulla foto dei fori passanti.
 - **FATTO (non committato) (02/10 sera, autorizzato «si facciamo 2 cartelle»): modelli in
   due cartelle + riga «Modello rete SMD».** app_paths: YOLO_MODELS_DIR,
   SMD_MODELS_DIR, DEFAULT_YOLO_ONNX/PT, DEFAULT_SMD_MODEL, yolo_model_path(),
