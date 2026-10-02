@@ -722,9 +722,13 @@ FORMAT_SOURCE_TEXT_COLOR = "#1e1e2e"
 ## Fields a detector-stage paste leaves to the target (user, 2026-10-02:
 ## «a parte il posizionamento deve copiare ed incollare tutto»): its place on
 ## the photo and its identity -- every proposal keeps its own id, name and
-## original detector box. Everything else comes from the source.
+## original detector box -- and its PROVENANCE: how the detector found it
+## (origin, low confidence, left out for review, source line), which is a fact
+## about that box, not a format (adversarial review B4, 2026-10-02).
+## Everything else comes from the source.
 DETECTOR_TARGET_FIELDS = ("_id", "name", "_yolo_proposal_id", "x_mm", "y_mm", "_box",
-                          "_yolo_original_box")
+                          "_yolo_original_box", "_yolo_origin", "_yolo_low_confidence",
+                          "_yolo_review_only", "_source", "_yolo_source_before_manual")
 
 ## Stages of the one review window (HANDOFF 162). STAGE_DETECTOR reviews the
 ## local detector's proposals before the paid AI call; STAGE_INVENTORY the
@@ -1688,8 +1692,14 @@ class PhotoReviewDialog(QDialog):
         self.format_button.toggled.connect(self._on_format_toggled)
         self._format_source = None
         self._format_source_component = None
-        self._format_source_row = -1
-        self._format_target_rows = []
+        # Sorgente e incollati si tengono per OGGETTO, non per riga: cancellare
+        # o aggiungere un corpo rinumera le righe e un indice diventava di un
+        # altro corpo (verifica avversariale B1, 2026-10-02).
+        self._format_source_item = None
+        self._format_target_items = []
+        # Vero mentre il programma sposta la selezione (cancella, aggiungi):
+        # il pennello incolla solo sui corpi che l'utente sceglie.
+        self._format_paste_blocked = False
         self.zoom_out_button = tool_button("zoom-out.svg", "Zoom indietro", "-", tr=tr)
         self.zoom_label = QLabel()
         self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2106,8 +2116,8 @@ class PhotoReviewDialog(QDialog):
             source and markers are forgotten; the pasted bodies keep their
             new format, which «Applica correzioni» emits like any edit.
         """
-        self._format_source, self._format_source_row = None, -1
-        self._format_target_rows = []
+        self._format_source, self._format_source_item = None, None
+        self._format_target_items = []
         if checked:
             selected = self._selected_item()
             if selected is not None:
@@ -2120,12 +2130,17 @@ class PhotoReviewDialog(QDialog):
                 self._refresh_item(item)
 
     def format_source_row(self) -> int:
-        """@brief Row of the body the format was copied from, or -1."""
-        return self._format_source_row
+        """@brief Current row of the body the format was copied from, or -1."""
+        return next((index for index, item in enumerate(self._items)
+                     if item is self._format_source_item), -1)
 
     def format_target_rows(self) -> list:
-        """@brief Rows the format was pasted on, in paste order."""
-        return list(self._format_target_rows)
+        """@brief Current rows of the bodies the format was pasted on, in paste order."""
+        rows = {id(item): index for index, item in enumerate(self._items)}
+        return [rows[id(item)] for item in self._format_target_items if id(item) in rows]
+
+    def _is_format_target(self, item) -> bool:
+        return any(item is target for target in self._format_target_items)
 
     def _show_format_hint(self, text):
         """The hint line under the toolbar carries the brush's next step while it is on."""
@@ -2152,14 +2167,14 @@ class PhotoReviewDialog(QDialog):
             # Nella revisione delle proposte si copia TUTTO tranne posizione
             # e identita' (DETECTOR_TARGET_FIELDS): serve la riga intera.
             self._format_source_component = deepcopy(item.component)
-            self._format_source_row = row
+            self._format_source_item = item
             name = item.component.get("name") or str(row + 1)
             self._show_format_hint(self._tr(
                 "Formato di {name} copiato: clic sui componenti su cui incollarlo; Esc o "
                 "l'icona per finire.").format(name=name))
             self._refresh_item(item)
             return
-        if row == self._format_source_row:
+        if item is self._format_source_item:
             return
         if self._stage == STAGE_DETECTOR:
             pasted = deepcopy(self._format_source_component)
@@ -2184,8 +2199,8 @@ class PhotoReviewDialog(QDialog):
             item.component["_box"] = (
                 bounds.left() / self.photo_rect.width(), bounds.top() / self.photo_rect.height(),
                 bounds.right() / self.photo_rect.width(), bounds.bottom() / self.photo_rect.height())
-        if row not in self._format_target_rows:
-            self._format_target_rows.append(row)
+        if not self._is_format_target(item):
+            self._format_target_items.append(item)
         self._keep_touched(item)
         self._refresh_categories()
         self._reload_fields()
@@ -2194,7 +2209,7 @@ class PhotoReviewDialog(QDialog):
         self._show_format_hint(self._tr(
             "Formato di {source} incollato su {count} componenti; Esc o l'icona per finire."
         ).format(source=self._format_source.get("source_name") or "?",
-                 count=len(self._format_target_rows)))
+                 count=len(self._format_target_items)))
 
     def _keep_touched(self, item):
         """An edit is a look: a pending body the user moves, resizes or edits is kept.
@@ -2742,6 +2757,14 @@ class PhotoReviewDialog(QDialog):
     def _selected_item(self):
         return next((item for item in self._items if item.isSelected()), None)
 
+    def _select_row_quietly(self, row, center=True):
+        """Select a row as the PROGRAM's choice: the «Copia formato» brush does not paste on it."""
+        self._format_paste_blocked = True
+        try:
+            self._select_row(row, center=center)
+        finally:
+            self._format_paste_blocked = False
+
     def _select_row(self, row, center=True):
         """Select one outline by list row and bring it into view.
 
@@ -2783,7 +2806,8 @@ class PhotoReviewDialog(QDialog):
         self.parameters_button.setEnabled(selected is not None)
         self.delete_button.setEnabled(selected is not None)
         self._sync_keep_button()
-        if selected is not None and self.format_button.isChecked():
+        if (selected is not None and self.format_button.isChecked()
+                and not self._format_paste_blocked):
             self._format_click(self._items.index(selected))
         self.model_button.setEnabled(selected is not None and self._match_worker is None)
         self.modal_model_button.setEnabled(self.model_button.isEnabled())
@@ -3062,8 +3086,8 @@ class PhotoReviewDialog(QDialog):
         # colori del pennello nel tab 3D (utente, 2026-10-02: «l'elemento usato
         # per copiare deve risultare evidenziato»). Vale solo finche' il
         # pennello e' acceso: spento, ogni corpo torna al colore del suo stato.
-        format_role = (FORMAT_SOURCE_COLOR if index == self._format_source_row
-                       else FORMAT_TARGET_COLOR if index in self._format_target_rows else None)
+        format_role = (FORMAT_SOURCE_COLOR if item is self._format_source_item
+                       else FORMAT_TARGET_COLOR if self._is_format_target(item) else None)
         if format_role is not None:
             color = QColor(format_role)
         # The status pen keeps its colour when selected: the selection is
@@ -3094,9 +3118,9 @@ class PhotoReviewDialog(QDialog):
         if detector:
             # The detector's row: class, confidence, state, size.
             text = (f"{index + 1}. " + detector_row_label(item.component, self._tr)
-                    + (" " + self._tr(FORMAT_SOURCE_MARKER) if index == self._format_source_row
+                    + (" " + self._tr(FORMAT_SOURCE_MARKER) if item is self._format_source_item
                        else " " + self._tr(FORMAT_TARGET_MARKER)
-                       if index in self._format_target_rows else ""))
+                       if self._is_format_target(item) else ""))
         else:
             name = item.component.get("name") or item.component.get("kind") or self._tr("Componente")
             text = (f"{index + 1}. {name}"
@@ -3104,9 +3128,9 @@ class PhotoReviewDialog(QDialog):
                     + (f" {UNDETERMINED_LIST_MARKER}" if undetermined else "")
                     + (f" {DETECTOR_DISAGREES_MARKER}" if detector_disagrees(item.component)
                        else "")
-                    + (" " + self._tr(FORMAT_SOURCE_MARKER) if index == self._format_source_row
+                    + (" " + self._tr(FORMAT_SOURCE_MARKER) if item is self._format_source_item
                        else " " + self._tr(FORMAT_TARGET_MARKER)
-                       if index in self._format_target_rows else ""))
+                       if self._is_format_target(item) else ""))
         text += " [!]" if warnings else ""
         self.component_list.item(index).setText(text)
         row_item = self.component_list.item(index)
@@ -3546,7 +3570,7 @@ class PhotoReviewDialog(QDialog):
             self._append_item(component)
             self._update_scene_rect()
             self._refresh_categories()
-            self._select_row(len(self._items) - 1)
+            self._select_row_quietly(len(self._items) - 1)
             return
         # "generic" is the project's generic-volume path, not an identity claim:
         # the type is what the modal asks for right below.
@@ -3559,7 +3583,7 @@ class PhotoReviewDialog(QDialog):
         self._append_item(component)
         self._update_scene_rect()
         self._refresh_categories()
-        self._select_row(len(self._items) - 1)
+        self._select_row_quietly(len(self._items) - 1)
         # The parameter modal follows automatically so the user can type
         # straight away. A modal over an editor that is not on screen would be
         # orphaned, so a hidden editor (headless callers) only prepares the field.
@@ -3596,9 +3620,13 @@ class PhotoReviewDialog(QDialog):
             self._items.pop(index)
             self._components.pop(index)
             self.component_list.takeItem(index)
+        self._format_target_items = [t for t in self._format_target_items if t is not item]
+        if item is self._format_source_item:
+            # Cancellata la sorgente non c'e' piu' nulla da incollare.
+            self.format_button.setChecked(False)
         # A category can disappear with its last component.
         self._refresh_categories()
-        self._select_row(self._nearest_shown(index), center=False)
+        self._select_row_quietly(self._nearest_shown(index), center=False)
         self._update_scene_rect()
         self.view.horizontalScrollBar().setValue(horizontal)
         self.view.verticalScrollBar().setValue(vertical)

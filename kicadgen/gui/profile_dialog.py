@@ -22,18 +22,18 @@ HELP = (
     'Legge quote e parametri dai documenti. Il prompt base definisce il comportamento '
     'dell’analisi; le istruzioni specifiche della tipologia vengono aggiunte al prompt '
     'del componente nel tab Progetto, dove puoi aggiungere note per la singola estrazione.',
-    'Localizza gli ingombri nelle foto calibrate. Lo stesso modello è usato per i dettagli '
-    'dei terminali. Le istruzioni foto sono aggiunte ai prompt fotografici, inclusa la verifica, '
+    'Localizza gli ingombri nelle foto calibrate. Tutte le chiamate usano il modello unico '
+    'del tab «Modello» delle Impostazioni; il profilo sceglie solo i prompt. Le istruzioni foto '
+    'sono aggiunte ai prompt fotografici, inclusa la verifica, '
     'ma non al prompt Lettura ritagli: descrivono la scheda intera, non il singolo corpo. '
     'I prompt tecnici Terminali e Reofori sono avanzati: modificarli non riattiva i pulsanti '
     'manuali nascosti. Il prompt Lettura ritagli guida la rilettura di ogni corpo dal suo '
-    'ritaglio ingrandito (rilevatori «YOLO locale + verifica AI» e «Solo modello di visione»); '
-    'il Modello lettura ritagli, se impostato, sostituisce per quelle sole letture il modello '
-    'della chiamata sulla fotografia, altrimenti vale quest\'ultimo. '
+    'ritaglio ingrandito (corpi che la rete SMD locale non risolve; rilevatori «YOLO locale + '
+    'verifica AI» e «Solo modello di visione»). '
     'XY sono stime calibrate e le altezze richiedono conferma. '
     'La cache nella cartella photo-cache del progetto distingue input, modello e prompt.',
     'Verifica la presenza dei corpi nei rettangoli proposti, senza spostare coordinate '
-    'o aggiungere ID. Il modello è indipendente da Datasheet e Localizzazione foto.',
+    'o aggiungere ID. Usa il modello unico del tab «Modello» delle Impostazioni.',
 )
 
 

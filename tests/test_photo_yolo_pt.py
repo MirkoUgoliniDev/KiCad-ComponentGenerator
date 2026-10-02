@@ -181,8 +181,10 @@ def test_an_onnx_file_still_goes_through_onnxruntime(tmp_path, monkeypatch):
 
 # ── Integrazione con i checkpoint veri (saltata se mancano) ─────────────────
 
-REAL = [ROOT / "models" / "pcb_component_detector_yolov8m_best.pt",
-        ROOT / "models" / "pcb_component_detector_yolo26_roboflow_m.pt"]
+# models/yolo dal 2026-10-02 (cartelle separate per YOLO e rete SMD): con il
+# vecchio percorso piatto questi test si saltavano sempre (verifica C-M4).
+REAL = [ROOT / "models" / "yolo" / "pcb_component_detector_yolov8m_best.pt",
+        ROOT / "models" / "yolo" / "pcb_component_detector_yolo26_roboflow_m.pt"]
 
 
 @pytest.mark.parametrize("path", REAL, ids=["yolov8m", "yolo26m"])

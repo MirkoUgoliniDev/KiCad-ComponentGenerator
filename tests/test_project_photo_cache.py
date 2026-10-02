@@ -122,3 +122,28 @@ def test_a_corrected_default_text_reaches_an_existing_database(tmp_path):
     assert I18n(store, "it").tr(key) == DEFAULT_TRANSLATIONS[key]["it"]
     assert "photo-cache del progetto" in I18n(store, "it").tr(key)
     assert I18n(store, "en").tr(key) == "Testo mio"
+
+
+@pytest.mark.parametrize("key, language, stored", [
+    ("ui:Libreria 3D di KiCad non trovata.", "fr", "Biblioth?que 3D KiCad introuvable."),
+    ("help.profile.stage.2", "it",
+     "Conferma la presenza dei corpi montati nei rettangoli proposti senza spostare coordinate "
+     "né aggiungere ID. Il modello è indipendente da Datasheet e Localizzazione foto. Default "
+     "generali ed ereditarietà seguono le stesse regole degli altri stadi. Schemi JSON e "
+     "controlli geometrici restano gestiti dal codice."),
+])
+def test_later_superseded_texts_are_replaced_and_earlier_lists_kept(tmp_path, key, language, stored):
+    """@brief Review B5/B8 (2026-10-02): garbled and per-stage-model texts already seeded go.
+
+    @note The later list is merged, not substituted: the earlier old texts of
+        the same key stay superseded (negative: the 2026-09 Italian help of
+        help.settings.stage.1, from the test above, is still listed).
+    """
+    path = tmp_path / "profiles.sqlite3"
+    ProfileStore(path)
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE translations SET text=? WHERE key=? AND language=?",
+                   (stored, key, language))
+    assert I18n(ProfileStore(path), language).tr(key) == DEFAULT_TRANSLATIONS[key][language]
+    assert any("generated/photo-cache" in old
+               for old in SUPERSEDED_DEFAULTS["help.settings.stage.1"]["it"])

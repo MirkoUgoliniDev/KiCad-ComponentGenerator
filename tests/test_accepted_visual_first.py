@@ -108,3 +108,27 @@ def test_archive_prepass_caches_result_before_library_search(library, monkeypatc
     monkeypatch.setattr(km, '_library_search', search)
     assert km.attach_models([query], library=library) == 1
     assert calls == ['archive', 'library']
+
+
+def _network_identity(row, terminals):
+    """Mark `row` as identified by the local SMD network with a declared terminal count."""
+    row.update(_smd_accepted=True, _presence_reviewed_by_user=True, _smd_class='SOT-23',
+               _smd_terminal_count=terminals)
+    return row
+
+
+@pytest.mark.parametrize('terminals, status', [(3, 'review_required'), (2, 'matched')])
+def test_the_archive_report_does_not_claim_a_match_the_network_contradicts(
+        library, monkeypatch, terminals, status):
+    """@brief Review A4 (2026-10-02): the report agrees with model_candidates.
+
+    @note Positive: the network saw 3 terminals, the archived R_0603 has 2,
+        model_candidates refuses it -- the report must not say «trovata».
+        Negative: a 2-terminal class keeps the plain match.
+    """
+    save(library)
+    query = _network_identity(
+        _body(_accepted_image_descriptor=descriptor_bytes(describe_crop(picture()))), terminals)
+    monkeypatch.setattr(km, '_declared_land_pattern', lambda p, library=None: (2, 0))
+    km._archive_prepass([query], library, lambda _: None, None)
+    assert query['consolidated_match']['status'] == status

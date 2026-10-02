@@ -312,3 +312,47 @@ def test_d13_usage_is_reset_before_any_validation(monkeypatch):
     with pytest.raises(ExtractionError):
         ext.extract_pin_header_params([], photo_detector="ai")
     assert openrouter.usage_totals().calls == 0
+
+
+def _unreadable(raw):
+    from kicadgen.services.openrouter import ToolArgumentsError
+    return ToolArgumentsError("Gli argomenti dello strumento non sono JSON valido.", raw=raw)
+
+
+def test_an_unreadable_main_answer_is_logged_and_paid_once_more(offline, monkeypatch):
+    """@brief User's run of 2026-10-02 18:20: JSONDecodeError on the documents call.
+
+    @note The text the model sent goes to the AI log; the same request is
+        paid once more, and a readable second answer is used.
+    """
+    call = Mock(side_effect=[_unreadable('{"layout": "castellated", "x": ,}'), matrix()])
+    monkeypatch.setattr(ext, "call_tool", call)
+    lines = []
+    result = ext.extract_pin_header_params([offline], progress=lines.append)
+    assert call.call_count == 2
+    assert call.call_args_list[0].kwargs == call.call_args_list[1].kwargs
+    assert any(line.startswith('AI_RESPONSE_UNREADABLE attempt=1 {"layout": "castellated", "x": ,}')
+               for line in lines)
+    assert result is not None
+
+
+def test_two_unreadable_answers_stop_with_both_texts_logged(offline, monkeypatch):
+    """@brief Negative: never a third paid call."""
+    call = Mock(side_effect=[_unreadable("primo"), _unreadable("secondo"), matrix()])
+    monkeypatch.setattr(ext, "call_tool", call)
+    lines = []
+    with pytest.raises(ExtractionError, match="Anche il nuovo tentativo"):
+        ext.extract_pin_header_params([offline], progress=lines.append)
+    assert call.call_count == 2
+    assert [l for l in lines if l.startswith("AI_RESPONSE_UNREADABLE")] == [
+        "AI_RESPONSE_UNREADABLE attempt=1 primo", "AI_RESPONSE_UNREADABLE attempt=2 secondo"]
+
+
+def test_other_provider_errors_are_not_retried(offline, monkeypatch):
+    """@brief Negative: a refused or truncated request is not paid again."""
+    from kicadgen.services.openrouter import OpenRouterError
+    call = Mock(side_effect=[OpenRouterError("Risposta troncata"), matrix()])
+    monkeypatch.setattr(ext, "call_tool", call)
+    with pytest.raises(ExtractionError, match="troncata"):
+        ext.extract_pin_header_params([offline])
+    assert call.call_count == 1

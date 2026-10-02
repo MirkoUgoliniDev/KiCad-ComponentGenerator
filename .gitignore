@@ -56,6 +56,13 @@ models/**/*.onnx
 # (rete che classifica i corpi).
 models/*.pt
 models/**/*.pt
+# Altri formati di pesi (verifica C-L4, 2026-10-02): nessun checkpoint nel repository.
+models/**/*.pth
+models/**/*.ckpt
+models/**/*.safetensors
+models/**/*.bin
+models/**/*.engine
+models/**/*.tflite
 
 # .claude/ va su GitHub (istruzioni, agenti, skill: utente, 2026-09-24);
 # restano fuori solo gli alberi di lavoro temporanei dei sottoagenti, che sono

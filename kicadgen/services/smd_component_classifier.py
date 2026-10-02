@@ -1,6 +1,6 @@
 """@brief Classify SMD components locally and match them to installed KiCad models.
 
-@details The packaged ``models/smd/smd_classifier.pt`` checkpoint predicts visual
+@details The ``models/smd/smd_classifier.pt`` checkpoint (local, not in the installer) predicts visual
 component class and orientation from detector boxes. With photo calibration,
 the results are passed to KiCadGen's existing STEP and footprint matcher.
 Only the checkpoint is needed at runtime; the training project, YAML catalog,
@@ -91,7 +91,7 @@ def _crop(image, box, margin):
 def validate_smd_setup(model_path=None):
     """@brief Validate the optional local SMD classifier checkpoint.
 
-    @param model_path Optional checkpoint path; defaults to the packaged SMD
+    @param model_path Optional checkpoint path; defaults to the SMD
         classifier resource.
     @return The validated checkpoint path.
     @throws FileNotFoundError When the checkpoint is missing.
@@ -406,7 +406,7 @@ def classify_photo_boxes(
     @param photo Image path, PIL RGB image or OpenCV uint8 BGR array.
     @param boxes Bounding boxes as ``[x1, y1, x2, y2]`` in pixels, or 0..1
         coordinates when ``box_format='normalized'``.
-    @param model_path Optional SMD checkpoint; defaults to the packaged model.
+    @param model_path Optional SMD checkpoint; defaults to models/smd/smd_classifier.pt.
     @param mm_per_pixel Optional positive ``(scale_x, scale_y)`` calibration.
     @param model_root Optional KiCad library root used by the existing matcher.
     @param box_format Coordinate convention: ``pixels`` or ``normalized``.

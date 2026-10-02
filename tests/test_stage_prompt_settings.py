@@ -171,3 +171,23 @@ def test_the_picker_locks_the_source_only_when_the_caller_fixes_it(qapp, monkeyp
     finally:
         dialog._closed = True
         dialog.close()
+
+
+def test_the_provider_names_follow_the_language(qapp, tmp_path):
+    """@brief Review B7 (2026-10-02): combo items are not retranslated by Qt, so they are built translated.
+
+    @note Negative: OpenRouter is a name and stays as it is.
+    """
+    from kicadgen.services.analysis_profiles import ProfileStore
+    from kicadgen.services.i18n import I18n
+    from kicadgen.services.messages import set_translator
+    set_translator(I18n(ProfileStore(tmp_path / "p.sqlite3"), "en").raw)
+    try:
+        d = LlmSettingsDialog('prompt', 'vendor/data')
+        labels = {d.combo_source.itemData(i): d.combo_source.itemText(i)
+                  for i in range(d.combo_source.count())}
+        assert labels[PROVIDER_DEEPSEEK] == "DeepSeek (direct API)"
+        assert labels[PROVIDER_OPENROUTER] == "OpenRouter"
+        d.close()
+    finally:
+        set_translator(None)

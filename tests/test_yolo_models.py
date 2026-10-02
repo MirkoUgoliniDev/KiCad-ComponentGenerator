@@ -8,8 +8,13 @@ NOTICES = Path(__file__).resolve().parents[1] / "THIRD_PARTY_NOTICES.md"
 
 
 def _sections():
-    """{sha256: text of its THIRD_PARTY_NOTICES section}."""
+    """{sha256: text of its THIRD_PARTY_NOTICES section}, «YOLO model weights» only.
+
+    The SMD package classifier has its own section (2026-10-02): it is not a
+    detector and the YOLO model window does not describe it.
+    """
     text = NOTICES.read_text(encoding="utf-8")
+    text = text.split("\n## YOLO model weights", 1)[1].split("\n## ", 1)[0]
     sections = {}
     for block in re.split(r"\n### ", text):
         match = re.search(r"SHA-256: `([0-9a-f]{64})`", block)
@@ -91,8 +96,16 @@ def test_a_missing_folder_or_file_is_not_an_error(tmp_path):
 
 
 def test_the_real_files_in_models_are_recognised_when_present():
-    """@brief I file del repository, se ci sono, hanno la loro provenienza."""
-    folder = Path(__file__).resolve().parents[1] / "models"
-    for item in ym.list_models(folder):
+    """@brief I file del repository, se ci sono, hanno la loro provenienza.
+
+    @note models/yolo dal 2026-10-02: la cartella piatta e' vuota e il ciclo
+        non controllava piu' nulla (verifica C-M4); quando i pesi ci sono, la
+        cartella deve elencarne almeno uno.
+    """
+    folder = Path(__file__).resolve().parents[1] / "models" / "yolo"
+    items = ym.list_models(folder)
+    if any(folder.glob("*.onnx")) or any(folder.glob("*.pt")):
+        assert items
+    for item in items:
         info = ym.provenance_of(ym.sha256_of(item.path))
         assert info is not None, item.path.name

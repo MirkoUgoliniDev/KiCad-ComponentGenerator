@@ -1140,7 +1140,8 @@ def classify_smd_rows(rows, photo, frame_px, mm_per_pixel, log, cancel, announce
     @param cancel Cancellation channel (event, predicate or None).
     @param announce Phase announcer of the caller.
     @param model_path Checkpoint of the network, or None for the default in
-        models/smd; its file name is the detail of the «Rete SMD locale» phase.
+        models/smd; its file name goes to the log, while the phase row says
+        what the step does (user, 2026-10-02).
     @return The predictions, one per row.
     @throws CallCancelled When the user cancelled during the classification
         or the KiCad matching: the network signals it with its own exceptions,
@@ -1153,9 +1154,12 @@ def classify_smd_rows(rows, photo, frame_px, mm_per_pixel, log, cancel, announce
     from .smd_component_classifier import classify_photo_boxes
     from ..app_paths import smd_model_path as default_smd_path
     network = Path(model_path) if model_path is not None else default_smd_path()
-    announce('smd', network.name)
-    # Il nome della fase dice gia' «Rete SMD locale»: qui solo quale file.
+    # La modale dice COSA fa il passaggio (utente, 2026-10-02), non con quale
+    # file: il file resta nel log, prima della frase che la riga della fase mostra.
     log(tx("File della rete: {name}.", name=network))
+    what = tx("classifica i corpi trovati da YOLO (tipo, package e verso), senza inviare la foto.")
+    announce('smd', what)
+    log(what)
     boxes = [_clamped_box(row['_box']) for row in rows]
     inside = [index for index, box in enumerate(boxes) if box is not None]
     try:
@@ -1250,14 +1254,26 @@ def recheck_unresolved_smd_rows(photo, report, rows, length, width, model, call,
         otherwise never be adopted.
     @throws CallCancelled (or subclass) when the user cancels a paid call.
     """
+    # Un riquadro senza area dentro la foto non ha un ritaglio da leggere:
+    # contarlo fra quelli «mandati alla riverifica AI» era falso (verifica
+    # avversariale A6, 2026-10-02). Resta generico, da rivedere.
+    outside = [row for row in rows
+               if isinstance(row.get('_smd_prediction'), dict)
+               and row['_smd_prediction'].get('class') == '_outside']
     pending = [row for row in rows
                if isinstance(row.get('_smd_prediction'), dict)
-               and not row['_smd_prediction'].get('accepted')]
-    report.calibration['smd_resolved_count'] = len(rows) - len(pending)
+               and not row['_smd_prediction'].get('accepted')
+               and row['_smd_prediction'].get('class') != '_outside']
+    resolved = len(rows) - len(pending) - len(outside)
+    report.calibration['smd_resolved_count'] = resolved
     report.calibration['smd_ai_recheck_count'] = len(pending) if call is not None else 0
+    if outside:
+        log(tx("Rete SMD locale: {n} riquadri fuori dalla foto, senza ritaglio da leggere: "
+               "restano generici da rivedere.", n=len(outside)))
     if not pending:
-        log(tx("Rete SMD locale: tutti i {n} corpi risolti in locale, nessuna riverifica AI.",
-               n=len(rows)))
+        if not outside:
+            log(tx("Rete SMD locale: tutti i {n} corpi risolti in locale, nessuna riverifica AI.",
+                   n=len(rows)))
         return []
     if call is None:
         log(tx("Rete SMD locale: {pending} corpi non risolti restano generici da rivedere "
@@ -1265,7 +1281,7 @@ def recheck_unresolved_smd_rows(photo, report, rows, length, width, model, call,
         return []
     log(tx("Rete SMD locale: {resolved} corpi risolti in locale, {pending} non risolti "
            "mandati alla riverifica AI dei ritagli.",
-           resolved=len(rows) - len(pending), pending=len(pending)))
+           resolved=resolved, pending=len(pending)))
     network_reasons = {}
     for row in pending:
         row['_smd_ai_recheck'] = True
@@ -1517,7 +1533,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             announce('yolo', model_label(yolo_model_path))
             log(tx("YOLO locale: localizzazione senza invio della foto; verifica package "
                    "AI successiva.") if detector == 'yolo' else
-                tx("YOLO locale: ricerca dei corpi sulla foto, senza invio; li classifica poi la rete SMD.")
+                tx("YOLO locale: ricerca dei corpi sulla foto, senza inviarla.")
                 if detector == 'yolo_smd' else
                 tx("Solo YOLO locale: la foto non viene inviata a nessun modello; i "
                    "riquadri tenuti nella revisione saranno il risultato."))

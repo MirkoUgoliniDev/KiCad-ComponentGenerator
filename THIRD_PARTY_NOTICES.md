@@ -22,7 +22,7 @@ metadata (`license` field of the checkpoint, read on 2026-09-25).
 
 ### Roboflow YOLO26 Medium
 
-- Local file: `models/pcb_component_detector_yolo26_roboflow_m.pt`
+- Local file: `models/yolo/pcb_component_detector_yolo26_roboflow_m.pt`
 - SHA-256: `4acc9608fcac382a5c0eabe747aed32af9bd48482ce29117243651d1209ec613`
 - Model family: YOLO26 (Ultralytics 8.4.55), trained on Roboflow
 - Roboflow model id: `compdetect-dnwth-1-yolo26m-t1`
@@ -33,7 +33,7 @@ metadata (`license` field of the checkpoint, read on 2026-09-25).
 
 ### Roboflow YOLO26 Large
 
-- Local file: `models/pcb_component_detector_yolo26_roboflow_l.pt`
+- Local file: `models/yolo/pcb_component_detector_yolo26_roboflow_l.pt`
 - SHA-256: `e354ea0db881d2e96a630b74591b6356f656c9cdaa0413b3d657e125ccab923a`
 - Model family: YOLO26 (Ultralytics 8.4.55), trained on Roboflow
 - Roboflow model id: `compdetect-dnwth-2-yolo26l-t1` (read from the
@@ -47,7 +47,7 @@ metadata (`license` field of the checkpoint, read on 2026-09-25).
 
 ### YOLOv8m trained in Colab
 
-- Local file: `models/pcb_component_detector_yolov8m_best.pt`
+- Local file: `models/yolo/pcb_component_detector_yolov8m_best.pt`
 - SHA-256: `27af3b3d1e17251b124c9de860b024833a46f77db04ab8767fc2554a3b3a4607`
 - Base model: Ultralytics `yolov8m.pt`; trained with Ultralytics 8.4.37
 - License declared in the checkpoint: AGPL-3.0 (https://ultralytics.com/license)
@@ -58,12 +58,31 @@ metadata (`license` field of the checkpoint, read on 2026-09-25).
 
 ### Base ONNX model
 
-- Local file: `models/pcb_yolov8s.onnx`
+- Local file: `models/yolo/pcb_yolov8s.onnx`
 - SHA-256: `bfc398bb93ce61d9d7d00389db51b651bd90c4e2141163a0ae6dad79a247ae29`
 - Source: `Arshia82sbn/pcb-yolov8s-detection`
 - License: **unresolved**. The model card says MIT; the embedded ONNX metadata
   says AGPL-3.0. Treat it as AGPL-3.0 until clarified. Details are in
   `docs/yolo-photo-workflow.md`.
+
+## SMD package classifier weights
+
+Not a YOLO detector: a separate network that classifies the bodies the
+detector found. Its folder is ignored by Git like the detectors'.
+
+### Local SMD package classifier
+
+- Local file: `models/smd/smd_classifier.pt` (folder `models/smd` since
+  2026-10-02, separate from the detectors)
+- SHA-256: `3ceeeadc9b03c2cc04e0f59ff04fae6adad9ef11ba021cbfa0dbae89d0fe1a4b`
+- Architecture: ResNet18 classifier (torchvision; torchvision's own code is
+  BSD-3-Clause), trained by the maintainer outside this repository
+- Use: package class and orientation of the bodies the detector found
+  (`kicadgen/services/smd_component_classifier.py`, detector «YOLO + rete SMD»)
+- Training data and license of the weights: **to be confirmed before any
+  redistribution**
+- Distribution: not included in the Windows installer (the SMD route is not
+  available in the packaged program)
 
 ## CompDetect dataset
 

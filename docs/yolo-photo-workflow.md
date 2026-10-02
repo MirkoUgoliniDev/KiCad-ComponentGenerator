@@ -18,7 +18,9 @@ packages are installed. With no local environment it keeps the current Python.
 1. Select the populated-board component type and provide mechanical dimensions,
    pinout and a high-resolution top-side photograph in their appropriate roles.
 2. Select **YOLO locale + verifica AI**. The optional model picker overrides the
-   default `models/pcb_yolov8s.onnx` or `KICADGEN_YOLO_MODEL` environment setting.
+   default `models/yolo/pcb_yolov8s.onnx` or `KICADGEN_YOLO_MODEL` environment setting
+   (the «YOLO + rete SMD» route uses the `.pt` default of the same folder; the SMD
+   network itself lives in `models/smd`).
    It accepts `.onnx` models (onnxruntime) and `.pt` checkpoints (PyTorch through
    Ultralytics; install `requirements-yolo-pt.txt`). See «ONNX and PyTorch models».
 3. Check **Verifica foto**: this configured visual AI model reviews coverage

@@ -34,8 +34,8 @@ from ..generators.castellated_module import (
     CONTACT_STYLES, EDGE_LABELS, EDGES,
 )
 from .ai_diagnostics import CallCancelled
-from .openrouter import (DEFAULT_MODEL, OpenRouterError, api_key, call_tool, check_credit,
-                         reset_usage, usage_totals)
+from .openrouter import (DEFAULT_MODEL, OpenRouterError, ToolArgumentsError, api_key, call_tool,
+                         check_credit, reset_usage, usage_totals)
 from .edge_notches import EdgeCount
 from .messages import end_sentence, tx
 
@@ -1055,6 +1055,25 @@ def _log_rejected_response(data, exc: ExtractionError, progress) -> None:
         pass
 
 
+def _log_unreadable_arguments(exc: ToolArgumentsError, progress, attempt: int) -> None:
+    """Write what the model sent when its tool arguments did not parse.
+
+    One machine line in the AI log of the project (AI_RESPONSE_UNREADABLE
+    attempt=N ...), next to AI_RESPONSE_REJECTED: before, the text was lost
+    with the exception and a JSONDecodeError at «char 1874» could not be
+    explained (user's run of 2026-10-02 18:20). Never cached.
+    """
+    if not progress:
+        return
+    raw = exc.raw if isinstance(exc.raw, str) else repr(exc.raw)
+    if len(raw) > _REJECTED_RESPONSE_MAX_CHARS:
+        raw = raw[:_REJECTED_RESPONSE_MAX_CHARS] + " …[truncated]"
+    try:
+        progress(f"AI_RESPONSE_UNREADABLE attempt={attempt} {raw}")
+    except Exception:  # noqa: BLE001 - il log non deve nascondere l'errore vero
+        pass
+
+
 def _guess_media_type(path: Path) -> str:
     media_type, _ = mimetypes.guess_type(path.name)
     if media_type:
@@ -2002,8 +2021,10 @@ def extract_pin_header_params(
     content_blocks.append({"type": "text", "text": request})
 
     has_pdf = any(p.suffix.lower() == ".pdf" for p in doc_paths)
-    try:
-        data = diagnostic_call(
+
+    def main_call():
+        """The paid reading of the documents (same request on a retry)."""
+        return diagnostic_call(
             model=model or DEFAULT_MODEL,
             system_prompt=system_prompt or _SYSTEM_PROMPT,
             content_blocks=content_blocks,
@@ -2011,6 +2032,31 @@ def extract_pin_header_params(
             max_tokens=16384,
             has_pdf=has_pdf,
         )
+    try:
+        try:
+            data = main_call()
+        except ToolArgumentsError as exc:
+            # Il modello ha risposto con lo strumento giusto, risposta completa
+            # (una troncata non arriva qui), ma argomenti illeggibili: la STESSA
+            # richiesta puo' tornare leggibile. Un solo nuovo tentativo a
+            # pagamento, come l'inventario globale (HANDOFF 137; utente,
+            # 2026-10-02: «ok procedi»). Rifiuti, rete e credito non passano di qui.
+            _log_unreadable_arguments(exc, progress, 1)
+            check_cancel()
+            if progress:
+                progress(tx("Analisi dei documenti: la risposta del modello non era un JSON "
+                            "leggibile (testo nel log AI, riga AI_RESPONSE_UNREADABLE); un solo "
+                            "nuovo tentativo a pagamento con la stessa richiesta."))
+            try:
+                data = main_call()
+            except ToolArgumentsError as second:
+                _log_unreadable_arguments(second, progress, 2)
+                raise ExtractionError(
+                    tx("Anche il nuovo tentativo ha restituito argomenti illeggibili; il testo "
+                       "delle due risposte e' nel log AI (righe AI_RESPONSE_UNREADABLE). {exc}",
+                       exc=second)) from second
+            if progress:
+                progress(tx("Analisi dei documenti: il nuovo tentativo e' leggibile; si usa quello."))
     except OpenRouterError as exc:
         raise ExtractionError(str(exc)) from exc
 

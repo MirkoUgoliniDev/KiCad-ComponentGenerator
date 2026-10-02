@@ -607,3 +607,60 @@ def test_the_smd_button_opens_the_model_window_on_the_smd_folder(window, monkeyp
     assert seen["folder"] == gui.resource_path(*gui.SMD_MODELS_DIR)
     assert seen["default"] == str(gui.smd_weights_path())
     assert window.field_smd_model.text() == ("" if expected == "" else str(other))
+
+
+@pytest.mark.parametrize("detector, default_name", [
+    ("yolo_smd", Path(gui.DEFAULT_YOLO_PT).name),
+    ("yolo", Path(gui.DEFAULT_YOLO_ONNX).name),
+])
+def test_the_yolo_picker_proposes_the_default_of_the_chosen_detector(
+        window, monkeypatch, detector, default_name):
+    """@brief Review B2 (2026-10-02): the SMD route runs the .pt weights, not the ONNX file.
+
+    @note Confirming the default leaves the field empty, so the detector's
+        own default keeps applying; the other detector is the negative case.
+    """
+    from kicadgen.gui import yolo_model_dialog
+    monkeypatch.delenv("KICADGEN_YOLO_MODEL", raising=False)
+    window.combo_photo_detector.setCurrentIndex(window.combo_photo_detector.findData(detector))
+    seen = {}
+
+    def init(self, current, folder, default="", **kwargs):
+        seen["default"] = default
+    monkeypatch.setattr(yolo_model_dialog.YoloModelDialog, "__init__", init)
+    monkeypatch.setattr(yolo_model_dialog.YoloModelDialog, "exec",
+                        lambda self: QDialog.DialogCode.Accepted)
+    monkeypatch.setattr(yolo_model_dialog.YoloModelDialog, "selected_path",
+                        lambda self: seen["default"])
+    monkeypatch.setattr(yolo_model_dialog.YoloModelDialog, "shutdown", lambda self: None)
+    monkeypatch.setattr(yolo_model_dialog.YoloModelDialog, "deleteLater", lambda self: None)
+    window._pick_session_yolo_model()
+    assert Path(seen["default"]).name == default_name
+    assert window.field_yolo_model.text() == ""
+
+
+def test_the_environment_override_applies_to_the_smd_route_too(window, monkeypatch, tmp_path):
+    """@brief Review C-L3: KICADGEN_YOLO_MODEL was ignored by 'yolo_smd'."""
+    weights = tmp_path / "mine.pt"
+    monkeypatch.setenv("KICADGEN_YOLO_MODEL", str(weights))
+    window.combo_photo_detector.setCurrentIndex(window.combo_photo_detector.findData("yolo_smd"))
+    window.field_yolo_model.clear()
+    assert window._photo_detector_options() == ("yolo_smd", weights)
+    monkeypatch.delenv("KICADGEN_YOLO_MODEL")
+    assert window._photo_detector_options()[1].name == Path(gui.DEFAULT_YOLO_PT).name
+
+
+def test_a_project_without_the_smd_field_does_not_inherit_the_previous_one(window, tmp_path):
+    """@brief Review B3 (2026-10-02): an older project means the default network.
+
+    @note Negative: a project that declares its own file keeps it.
+    """
+    chosen = str(tmp_path / "mine.pt")
+    window.field_smd_model.setText(chosen)
+    state = window._project_state()
+    window.field_smd_model.setText(str(tmp_path / "other.pt"))
+    window._apply_project_state(state)
+    assert window.field_smd_model.text() == chosen
+    del state["widgets"]["field_smd_model"]
+    window._apply_project_state(state)
+    assert window.field_smd_model.text() == ""

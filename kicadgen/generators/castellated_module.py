@@ -95,6 +95,17 @@ MIN_HOLE_WALL_MM = 0.2
 #: (rame che si tocca = rifiuto), mai ridotta.
 MIN_COPPER_GAP_MM = 0.2
 
+#: Foro piu' piccolo a cui il generatore RIDUCE un foro STIMATO perche' stia
+#: nel rame che lo circonda. EURISTICA dichiarata, dalla pratica di
+#: fabbricazione e non da un modulo: 0,3 mm e' il minimo di foratura
+#: meccanica dei capitolati standard dei produttori di PCB (0,2 mm solo nei
+#: servizi avanzati). Sotto questo valore la stima non si riduce: o la
+#: piazzola misurata o la stima del foro e' sbagliata, e la nota lo dice
+#: invece di disegnare un foro che nessuno forerebbe (verifica avversariale
+#: del 2026-10-02: piazzola 0,45 -> foro 0,05). Una misura dichiarata del
+#: foro la renderebbe superflua.
+MIN_ESTIMATED_DRILL_MM = 0.3
+
 #: Centro del semi-foro rispetto al bordo, in frazioni del raggio, quando non e'
 #: dichiarato (convenzione storica: un castellated e' un foro forato vicino al
 #: bordo e poi tagliato, il centro sta DENTRO la scheda).
@@ -772,6 +783,34 @@ class CastellatedModuleParams:
         return (self.hole_inset if self.hole_inset is not None
                 else round(diameter / 2 * HALF_HOLE_INSET_RATIO, 3))
 
+    def _smallest_estimated_half_hole(self) -> float:
+        """Smallest diameter an estimated half-hole may be reduced to, mm.
+
+        The fabrication minimum MIN_ESTIMATED_DRILL_MM, and with a declared
+        hole_inset just above twice it: a smaller half-hole would not reach
+        the edge (_validate_half_hole_insets refuses it).
+        """
+        smallest = MIN_ESTIMATED_DRILL_MM
+        if self.hole_inset is not None:
+            smallest = max(smallest, _floor_hundredth(2 * float(self.hole_inset)) + 0.01)
+        return smallest
+
+    @staticmethod
+    def _side_land_width(side) -> Optional[float]:
+        """Width (along the edge) of the side's own measured or declared land, mm, or None."""
+        value = getattr(side, "pad_width", None)
+        if value is None or not is_declared_size(value) or not _finite_positive(value):
+            return None
+        return float(value)
+
+    def _declared_hole(self, side, name: str) -> Optional[float]:
+        """The declared value of hole size `name` for `side` (side first, then module), or None."""
+        value = getattr(side, name, None)
+        if value is not None and is_declared_size(value):
+            return float(value)
+        value = getattr(self, name, None)
+        return float(value) if value is not None and is_declared_size(value) else None
+
     def _largest_half_hole_before(self, limit: float) -> float:
         """Largest half-hole (0.01 mm steps) whose far side stays within `limit` of the edge, mm."""
         if self.hole_inset is not None:
@@ -869,78 +908,82 @@ class CastellatedModuleParams:
                        if count > 1 and side.pitch > 0 else None)
         through = style_has_through_hole(style)
         half_style = style_has_half_hole(style)
-        # Le regole «il foro sta nel suo rame» valgono per le STIME del lato
-        # (AssumedSize passate sul lato: lette dall'AI o dalla foto), non per la
-        # coppia storica di riferimento, coerente per costruzione e fissata dai
-        # footprint predefiniti (utente, 2026-10-02).
-        side_estimates = any(
-            getattr(side, name, None) is not None and not is_declared_size(getattr(side, name))
-            for name in ("hole_diameter", "thru_hole_drill", "thru_pad_diameter"))
+        # «Il foro sta nel suo rame» (utente, 2026-10-02): vale per ogni foro
+        # NON dichiarato (stima dell'AI o riferimento storico) di un lato la cui
+        # piazzola e' una prova del rame che c'e' -- misurata sulla foto o
+        # dichiarata PER QUEL LATO. Il criterio e' la provenienza delle due
+        # quote, non il fatto che l'AI abbia stimato qualcosa su quel lato. La
+        # larghezza di piazzola del modulo non conta: e' il default del modulo
+        # (l'interfaccia la riporta al riferimento a ogni estrazione) e nel
+        # contatto con foro passante non e' nemmeno disegnata (la piazzola e'
+        # la corona); solo la misura del lato descrive il rame di quei contatti.
+        pad_width = self._side_land_width(side)
+        declared_drill = (self._declared_hole(side, "thru_hole_drill") if through else None)
 
         ring, ring_source = self._sized(getattr(side, "thru_pad_diameter", None), self.thru_pad_diameter,
                                         REFERENCE_THRU_RING_MM, [pitch_bound] if through else [])
         # Contatto «mezzo foro + foro passante»: la corona e' rame della stessa
         # piazzola continua, quindi una corona STIMATA non e' piu' larga della
-        # piazzola del lato (misurata sulla foto o dichiarata). Utente,
-        # 2026-10-02: contatti disegnati molto piu' grandi che nella foto.
-        pad = self._pad_size_of(side)
-        # Solo una piazzola MISURATA (foto) o dichiarata e' una prova del rame
-        # che c'e': ridurre una stima per farla stare in una piazzola a sua
-        # volta di riferimento non avrebbe base fisica.
-        if pad is not None and pad.width_source != PAD_DECLARED:
-            pad = None
-        if (side_estimates and style == CONTACT_HALF_AND_THROUGH and ring > 0
-                and pad is not None and pad.width > 0
+        # piazzola del lato. Mai pero' sotto la corona minima di un foro
+        # DICHIARATO: la misura del foro vince sulla stima della corona, e la
+        # nota segnala la contraddizione con la piazzola.
+        if (style == CONTACT_HALF_AND_THROUGH and ring > 0 and pad_width is not None
                 and ring_source not in (SIZE_SIDE, SIZE_MODULE)
-                and ring > pad.width + 1e-9):
-            ring, ring_source = _floor_hundredth(pad.width), SIZE_ESTIMATE_PAD
+                and ring > pad_width + 1e-9):
+            cap = _floor_hundredth(pad_width)
+            if declared_drill is not None:
+                cap = max(cap, _ceil_hundredth(declared_drill + 2 * MIN_HOLE_WALL_MM))
+            if cap < ring - 1e-9:
+                ring, ring_source = cap, SIZE_ESTIMATE_PAD
         drill_bounds = [pitch_bound] if through else []
         if through and ring_source == SIZE_ESTIMATE_PITCH:
             drill_bounds.append(ring - 2 * MIN_HOLE_WALL_MM)
         drill, drill_source = self._sized(getattr(side, "thru_hole_drill", None), self.thru_hole_drill,
                                           REFERENCE_THRU_DRILL_MM, drill_bounds)
-        if (side_estimates and through and drill > 0
+        if (through and drill > 0 and pad_width is not None
                 and drill_source not in (SIZE_SIDE, SIZE_MODULE)):
-            # Un foro STIMATO deve lasciare posto alla sua corona: dentro quella
-            # dichiarata, oppure dentro il passo, dove la corona assunta potra'
-            # poi crescergli attorno (sotto). Senza, una stima larga dell'AI
-            # (2.0 mm a passo 2.54) fermava footprint e 3D (utente, 2026-10-02).
+            # Un foro NON dichiarato deve lasciare posto alla sua corona: dentro
+            # quella dichiarata o limitata dalla piazzola, oppure dentro il passo
+            # (e la piazzola continua), dove la corona assunta potra' poi
+            # crescergli attorno (sotto). Senza, una stima larga dell'AI (2.0 mm
+            # a passo 2.54) fermava footprint e 3D (utente, 2026-10-02). Mai
+            # sotto il minimo di foratura: allora resta, e la corona cresce.
             if ring_source in (SIZE_SIDE, SIZE_MODULE, SIZE_ESTIMATE_PAD):
                 room = ring
             else:
-                # La corona assunta potra' crescere fino al passo e, in un
-                # contatto a piazzola continua, fino alla larghezza della piazzola.
-                caps = [pitch_bound] + ([pad.width] if style == CONTACT_HALF_AND_THROUGH
-                                        and pad is not None and pad.width > 0 else [])
-                caps = [cap for cap in caps if cap is not None]
+                caps = [cap for cap in (pitch_bound, pad_width if style == CONTACT_HALF_AND_THROUGH
+                                        else None) if cap is not None]
                 room = min(caps) if caps else None
             if room is not None:
                 limit = _floor_hundredth(room - 2 * MIN_HOLE_WALL_MM)
-                if 0 < limit < drill - 1e-9:
+                if MIN_ESTIMATED_DRILL_MM - 1e-9 <= limit < drill - 1e-9:
                     drill, drill_source = limit, SIZE_ESTIMATE_RING
         if (through and drill > 0
-                and ring_source not in (SIZE_SIDE, SIZE_MODULE, SIZE_ESTIMATE_PAD)
+                and ring_source not in (SIZE_SIDE, SIZE_MODULE)
                 and ring < drill + 2 * MIN_HOLE_WALL_MM - 1e-9):
-            # La corona ASSUNTA (riferimento storico 1.7, o ridotta al passo)
-            # non e' una misura: non puo' rifiutare un foro dichiarato o
-            # stimato piu' largo di lei (HANDOFF 159: foro stimato dall'AI
-            # 1.7 contro corona di riferimento 1.7 fermava footprint e 3D).
-            # Cresce attorno al foro con l'anello minimo, se il passo lo
+            # La corona ASSUNTA (riferimento storico 1.7, ridotta al passo o
+            # alla piazzola) non e' una misura: non puo' rifiutare un foro
+            # dichiarato o stimato piu' largo di lei (HANDOFF 159: foro stimato
+            # dall'AI 1.7 contro corona di riferimento 1.7 fermava footprint e
+            # 3D). Cresce attorno al foro con l'anello minimo, se il passo lo
             # consente; altrimenti resta e validate() rifiuta, dicendo perche'.
+            # Se cosi' supera la piazzola misurata, geometry_notes lo segnala.
             wanted = _ceil_hundredth(drill + 2 * MIN_HOLE_WALL_MM)
             if pitch_bound is None or wanted <= pitch_bound + 1e-9:
                 ring, ring_source = wanted, SIZE_ESTIMATE_DRILL
         half, half_source = self._sized(getattr(side, "hole_diameter", None), self.hole_diameter,
                                         REFERENCE_HALF_HOLE_MM, [pitch_bound] if half_style else [])
-        if (side_estimates and half_style and half > 0
+        if (half_style and half > 0 and pad_width is not None
                 and half_source not in (SIZE_SIDE, SIZE_MODULE)):
-            # Un semi-foro STIMATO sta dentro la piazzola che lo circonda, con
-            # la parete di rame minima per parte: sulla foto la piazzola si
-            # misura, il foro l'AI lo stima soltanto.
-            if pad is not None and pad.width > 0:
-                limit = _floor_hundredth(pad.width - 2 * MIN_HOLE_WALL_MM)
-                if 0 < limit < half - 1e-9:
-                    half, half_source = limit, SIZE_ESTIMATE_PAD
+            # Un semi-foro NON dichiarato sta dentro la piazzola che lo
+            # circonda, con la parete di rame minima per parte: sulla foto la
+            # piazzola si misura, il foro l'AI lo stima soltanto. Non sotto il
+            # minimo di foratura, ne' cosi' piccolo che una distanza dal bordo
+            # DICHIARATA lo lascerebbe intero dentro la scheda: allora la
+            # stima resta e la nota chiede la misura.
+            limit = _floor_hundredth(pad_width - 2 * MIN_HOLE_WALL_MM)
+            if limit < half - 1e-9 and limit >= self._smallest_estimated_half_hole() - 1e-9:
+                half, half_source = limit, SIZE_ESTIMATE_PAD
         has_thru = through and drill > 0 and ring > 0
 
         rows_inset = None
@@ -1009,12 +1052,11 @@ class CastellatedModuleParams:
                         label=label, reference=float(self._reference("hole_diameter", side)),
                         pitch=side.pitch, wall=MIN_HOLE_WALL_MM, value=geometry.half_hole))
                 elif geometry.half_hole_source == SIZE_ESTIMATE_PAD:
-                    pad = self._pad_size_of(side)
                     notes.append(tx(
                         "Lato {label}: diametro del semi-foro non dichiarato; la stima non stava "
                         "nella piazzola larga {pad:.2f}mm con {wall}mm di rame per parte, quindi "
                         "e' ridotto a {value:.2f}mm. Indica il diametro misurato per averlo esatto.",
-                        label=label, pad=pad.width if pad is not None else 0.0,
+                        label=label, pad=self._side_land_width(side) or 0.0,
                         wall=MIN_HOLE_WALL_MM, value=geometry.half_hole))
                 elif geometry.half_hole_source == SIZE_ESTIMATE_ROWS:
                     notes.append(tx(
@@ -1066,6 +1108,7 @@ class CastellatedModuleParams:
                         label=label, reference=float(self._reference("thru_hole_drill", side)),
                         pitch=side.pitch, ring=geometry.ring, wall=MIN_HOLE_WALL_MM,
                         value=geometry.drill))
+            notes.extend(self._copper_fit_notes(side, geometry, label))
             notes.extend(self._inset_notes(side, geometry, label))
             notes.extend(self._pad_notes(side, label))
         return notes
@@ -1310,6 +1353,38 @@ class CastellatedModuleParams:
         if value is None:
             value = REFERENCE_PAD_LENGTH_MM if name == "pad_length" else REFERENCE_PAD_WIDTH_MM
         return value, is_declared_size(value)
+
+    def _copper_fit_notes(self, side, geometry: "SideGeometry", label: str) -> List[str]:
+        """Notes on holes that still do not fit the measured or declared pad of `side`.
+
+        side_geometry reduces an undeclared hole to fit its land, but not
+        below the fabrication minimum, and an undeclared ring grows around a
+        hole wider than the land: in both cases the drawing contradicts the
+        measured pad, and the note says so instead of leaving it silent.
+        """
+        pad_width = self._side_land_width(side)
+        if pad_width is None:
+            return []
+        notes = []
+        if (style_has_half_hole(side.contact_style)
+                and geometry.half_hole_source not in (SIZE_SIDE, SIZE_MODULE)
+                and geometry.half_hole > pad_width - 2 * MIN_HOLE_WALL_MM + 1e-9):
+            notes.append(tx(
+                "Lato {label}: il semi-foro stimato di {value:.2f}mm non sta nella piazzola "
+                "larga {pad:.2f}mm con {wall}mm di rame per parte, e ridurlo lo porterebbe "
+                "sotto {smallest:.2f}mm: la piazzola misurata o la stima del foro e' "
+                "sbagliata. Indica il diametro misurato.",
+                label=label, value=geometry.half_hole, pad=pad_width, wall=MIN_HOLE_WALL_MM,
+                smallest=self._smallest_estimated_half_hole()))
+        if (geometry.has_thru_holes and side.contact_style == CONTACT_HALF_AND_THROUGH
+                and geometry.ring_source not in (SIZE_SIDE, SIZE_MODULE)
+                and geometry.ring > pad_width + 1e-9):
+            notes.append(tx(
+                "Lato {label}: la corona del foro passante ({value:.2f}mm) e' piu' larga "
+                "della piazzola ({pad:.2f}mm) di cui fa parte, perche' deve avvolgere il "
+                "foro di {drill:.2f}mm: la piazzola o il foro va verificato.",
+                label=label, value=geometry.ring, pad=pad_width, drill=geometry.drill))
+        return notes
 
     def _pad_size_of(self, side) -> Optional[PadSize]:
         """The resolved PadSize of `side` when it is one of self.sides (identity), else None."""

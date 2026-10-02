@@ -163,3 +163,69 @@ def test_the_detector_stage_copies_everything_but_the_place(qapp):
         assert rows[0].background().style() == Qt.BrushStyle.NoBrush
     finally:
         dialog.close()
+
+
+def test_deleting_a_body_does_not_paste_on_the_neighbour(dialog):
+    """@brief Review B1 (2026-10-02): a selection the PROGRAM makes is not a click.
+
+    @note Before, deleting U2 moved the selection to R1 and the brush pasted
+        on it. The markers follow the bodies, not the row numbers.
+    """
+    dialog._select_row(0)
+    dialog.format_button.setChecked(True)
+    dialog._select_row(1)
+    dialog.delete_selected()
+    components = dialog.get_components()
+    assert [c["name"] for c in components] == ["U1", "R1"]
+    assert components[1] == _components()[2]
+    assert dialog.format_source_row() == 0 and dialog.format_target_rows() == []
+    # Negative: a click by the user after the deletion still pastes.
+    dialog._select_row(1)
+    assert dialog.get_components()[1]["kind"] == "ic"
+    assert dialog.format_target_rows() == [1]
+
+
+def test_the_markers_follow_the_bodies_when_rows_shift(dialog):
+    """@brief Deleting a row before the source keeps the source marker on the source."""
+    dialog._select_row(2)
+    dialog.format_button.setChecked(True)
+    dialog._select_row(1)                      # U2 takes R1's format
+    dialog._select_row(0)                      # U1 too
+    assert dialog.format_target_rows() == [1, 0]
+    dialog._select_row_quietly(0)
+    dialog.delete_selected()                   # U1 goes, rows shift up by one
+    assert dialog.format_source_row() == 1
+    assert dialog.format_target_rows() == [0]
+    assert FORMAT_SOURCE_MARKER in dialog.component_list.item(1).text()
+
+
+def test_adding_a_body_does_not_paste_on_it(dialog):
+    """@brief The new outline is selected by the program: it keeps its own placeholder."""
+    dialog._select_row(0)
+    dialog.format_button.setChecked(True)
+    dialog.add_component()
+    assert dialog.get_components()[-1]["kind"] == "generic"
+    assert dialog.format_target_rows() == []
+
+
+def test_the_detector_paste_keeps_the_target_provenance(qapp):
+    """@brief Review B4: how the detector found the target is not a format."""
+    rows = [dict(_id=1, _box=(.2, .2, .3, .3), name="led 1", kind="led", x_mm=-10.0, y_mm=0.0,
+                 length_mm=4.0, width_mm=2.0, _yolo_class="led", _yolo_origin="tile",
+                 _source="YOLO"),
+            dict(_id=2, _box=(.6, .2, .65, .25), name="r 2", kind="resistor", x_mm=5.0, y_mm=2.0,
+                 length_mm=3.0, width_mm=1.0, _yolo_class="resistor",
+                 _yolo_origin="low_confidence_review", _yolo_low_confidence=True,
+                 _source="YOLO low")]
+    dialog = PhotoReviewDialog(_png(), [dict(r) for r in rows], 40, 20, stage=STAGE_DETECTOR)
+    try:
+        dialog._select_row(0)
+        dialog.format_button.setChecked(True)
+        dialog._select_row(1)
+        target = dialog.get_components()[1]
+        assert target["_yolo_class"] == "led" and target["length_mm"] == 4.0
+        assert target["_yolo_origin"] == "low_confidence_review"
+        assert target["_yolo_low_confidence"] is True
+        assert "_yolo_low_confidence" not in dialog.get_components()[0]
+    finally:
+        dialog.close()

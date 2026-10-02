@@ -469,7 +469,11 @@ def test_an_unreviewed_relaunch_gives_no_body_a_person_kept(monkeypatch, reviewe
 @pytest.mark.parametrize('chosen', [None, 'other_network.pt'])
 def test_the_chosen_network_reaches_the_classification_and_names_the_phase(monkeypatch, tmp_path,
                                                                            chosen):
-    """@brief «Modello rete SMD» (2026-10-02): the file is used and shown, default from models/smd."""
+    """@brief «Modello rete SMD» (2026-10-02): the file is used and written in the log.
+
+    @note The phase row says WHAT the step does, not which file (user, same
+        day): the file name goes to the log only.
+    """
     from kicadgen.services import photo_inventory as inv
     from kicadgen.app_paths import smd_model_path
     seen, phases = {}, []
@@ -480,10 +484,39 @@ def test_the_chosen_network_reaches_the_classification_and_names_the_phase(monke
                 for _ in boxes]
     monkeypatch.setattr(smd, 'classify_photo_boxes', classify)
     path = tmp_path / chosen if chosen else None
+    logs = []
     inv.classify_smd_rows([dict(_id=1, _box=[.1, .1, .3, .3])], np.zeros((20, 20, 3), np.uint8),
-                          None, (1, 1), lambda m: None, None, lambda *a: phases.append(a),
+                          None, (1, 1), logs.append, None, lambda *a: phases.append(a),
                           model_path=path)
     expected = path if path is not None else smd_model_path()
     assert seen['model_path'] == expected
-    assert ('smd', expected.name) in phases
+    smd_phase = [detail for tool, detail, *rest in phases if tool == 'smd']
+    assert smd_phase and 'classifica i corpi' in smd_phase[0]
+    assert expected.name not in smd_phase[0]
+    assert any(str(expected) in str(line) for line in logs)
     assert expected.parent.name in ('smd', tmp_path.name)
+
+
+def test_a_box_outside_the_photo_is_not_sent_to_the_ai_recheck(monkeypatch):
+    """@brief Review A6 (2026-10-02): no crop, no recheck, not counted as one.
+
+    @note Negative: the unresolved box inside the photo is still sent.
+    """
+    from kicadgen.services import photo_inventory as inv, photo_crop_reading
+    read = []
+
+    def read_bodies(photo, rows, *args, **kwargs):
+        read.extend(rows)
+        return SimpleNamespace(warning=None)
+    monkeypatch.setattr(photo_crop_reading, 'read_bodies', read_bodies)
+    outside = dict(_id=3, _smd_prediction=_outside_like(), kind='generic',
+                   **{'class': 'generic'})
+    pending = _pending_row()
+    report = inv.InventoryResult()
+    sent = inv.recheck_unresolved_smd_rows(None, report, [outside, pending], 10, 10, 'm',
+                                           lambda **kw: None, lambda m: None, None, None,
+                                           lambda *a: None)
+    assert sent == [pending] and read == [pending]
+    assert report.calibration['smd_ai_recheck_count'] == 1
+    assert report.calibration['smd_resolved_count'] == 0
+    assert '_smd_ai_recheck' not in outside

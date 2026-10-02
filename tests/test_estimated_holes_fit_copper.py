@@ -5,13 +5,16 @@ photo, was 1.53 mm wide: the 3D drew holes wider than their lands, touching
 the next component. The rule is general, not for one board: an estimated hole
 of a side fits its MEASURED (or declared) pad with MIN_HOLE_WALL_MM of copper
 on each part, an estimated drill leaves room for a ring. Declared holes are
-never reduced, and nothing changes where the pad is only the reference guess.
+never reduced, and nothing changes where the pad is only the reference guess
+or the module-wide default: only the side's own measured or declared land is
+evidence of copper (adversarial review of the same evening).
 """
 import pytest
 
 from kicadgen.generators.castellated_module import (
     AssumedSize, CONTACT_HALF_AND_THROUGH, CONTACT_HALF_HOLE, CastellatedModuleParams,
-    CastellatedSide, MIN_HOLE_WALL_MM, SIZE_ESTIMATE_PAD, SIZE_ESTIMATE_RING)
+    CastellatedSide, MIN_ESTIMATED_DRILL_MM, MIN_HOLE_WALL_MM, SIZE_ESTIMATE_PAD,
+    SIZE_ESTIMATE_RING)
 
 
 def _side(edge, count, pitch, *, half=None, drill=None, pad_width=None, declared=False,
@@ -87,3 +90,84 @@ def test_the_default_reference_pair_is_untouched():
     plain = _params(_side("left", 4, 2.54))
     geometry = plain.side_geometry(plain.sides[0])
     assert geometry.half_hole == pytest.approx(1.7)
+
+
+# --- Adversarial review of 2026-10-02 evening ---------------------------------
+
+def test_the_rule_follows_provenance_not_whether_the_ai_estimated_the_side():
+    """@brief A reference hole in a measured land is reduced too (finding C-H3).
+
+    @note The side carries no AI estimate at all: the 1.7 mm reference half-hole
+        would sit in a 1.53 mm land. The criterion is «hole not declared, land
+        measured», not «the AI said something about this side».
+    """
+    params = _params(_side("left", 4, 2.54, pad_width=1.53))
+    geometry = params.side_geometry(params.sides[0])
+    assert geometry.half_hole_source == SIZE_ESTIMATE_PAD
+    assert geometry.half_hole <= 1.53 - 2 * MIN_HOLE_WALL_MM + 1e-9
+    assert any("piazzola larga" in note for note in params.geometry_notes())
+
+
+def test_a_module_wide_pad_width_is_not_evidence_of_the_side_copper():
+    """@brief Negative: the module default (reset to the reference by the GUI) changes nothing."""
+    params = CastellatedModuleParams(name="T", body_length=30.0, body_width=20.0, pad_width=1.2,
+                                     sides=[_side("left", 4, 2.54)])
+    geometry = params.side_geometry(params.sides[0])
+    assert geometry.half_hole == pytest.approx(1.7)
+    assert geometry.half_hole_source != SIZE_ESTIMATE_PAD
+
+
+def test_a_declared_drill_keeps_its_minimum_ring_and_the_contradiction_is_noted():
+    """@brief Finding C-H1: the land cap never leaves a declared drill without its ring."""
+    side = CastellatedSide(edge="right", count=4, pitch=2.54, first_pin=1,
+                           contact_style=CONTACT_HALF_AND_THROUGH, thru_hole_drill=1.0,
+                           pad_width=1.1)
+    params = _params(side)
+    geometry = params.side_geometry(side)
+    assert geometry.drill == pytest.approx(1.0)
+    assert geometry.ring >= 1.0 + 2 * MIN_HOLE_WALL_MM - 1e-9
+    params.validate()
+    assert any("piu' larga della piazzola" in note for note in params.geometry_notes())
+
+
+def test_an_estimated_drill_is_capped_to_the_land_without_a_contradiction_note():
+    """@brief Negative of the previous: an undeclared drill shrinks, the ring stays in the land."""
+    params = _params(_side("right", 4, 2.54, drill=1.0, pad_width=1.1,
+                           style=CONTACT_HALF_AND_THROUGH))
+    geometry = params.side_geometry(params.sides[0])
+    assert geometry.ring <= 1.1 + 1e-9
+    assert geometry.ring >= geometry.drill + 2 * MIN_HOLE_WALL_MM - 1e-9
+    assert not any("piu' larga della piazzola" in note for note in params.geometry_notes())
+
+
+def test_an_estimate_is_never_reduced_below_the_fabrication_minimum():
+    """@brief Finding C-H2: a 0.45 mm land does not turn a hole into 0.05 mm."""
+    params = _params(_side("left", 4, 2.54, half=1.0, pad_width=0.45))
+    geometry = params.side_geometry(params.sides[0])
+    assert geometry.half_hole == pytest.approx(1.0)
+    assert geometry.half_hole_source != SIZE_ESTIMATE_PAD
+    assert any("piazzola misurata o la stima del foro" in note
+               for note in params.geometry_notes())
+
+
+def test_a_reduction_above_the_minimum_is_still_made():
+    """@brief Negative of the previous: the limit 0.30 mm is reachable, so it is used."""
+    params = _params(_side("left", 4, 2.54, half=1.0, pad_width=0.7))
+    geometry = params.side_geometry(params.sides[0])
+    assert geometry.half_hole == pytest.approx(MIN_ESTIMATED_DRILL_MM)
+    assert geometry.half_hole_source == SIZE_ESTIMATE_PAD
+
+
+def test_a_declared_hole_inset_bounds_the_reduction():
+    """@brief Finding C-M1: a reduced half-hole must still reach the edge at the declared inset."""
+    params = CastellatedModuleParams(name="T", body_length=30.0, body_width=20.0, hole_inset=0.5,
+                                     sides=[_side("left", 4, 2.54, half=2.0, pad_width=1.2)])
+    geometry = params.side_geometry(params.sides[0])
+    assert geometry.half_hole > 2 * 0.5
+    params.validate()
+
+
+def test_without_a_declared_inset_the_same_land_reduces_fully():
+    """@brief Negative of the previous: no declared inset, the land limit 0.80 mm applies."""
+    params = _params(_side("left", 4, 2.54, half=2.0, pad_width=1.2))
+    assert params.side_geometry(params.sides[0]).half_hole == pytest.approx(0.8)

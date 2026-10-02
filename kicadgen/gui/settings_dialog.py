@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..services.datasheet_extractor import DEFAULT_SYSTEM_PROMPT
+from ..services.messages import tx
 from ..services.openrouter import DEFAULT_MODEL
 from ..services.photo_grounding import GROUNDING_PROMPT, VERIFICATION_PROMPT
 from ..services.providers import (PROVIDER_DEEPSEEK, PROVIDER_LABELS, PROVIDERS,
@@ -70,7 +71,8 @@ class LlmSettingsDialog(QDialog):
         form = QFormLayout()
         self.combo_source = QComboBox()
         for provider in PROVIDERS:
-            self.combo_source.addItem(PROVIDER_LABELS[provider], provider)
+            # Tradotta qui: retranslate_widgets non tocca le voci dei combo (B7).
+            self.combo_source.addItem(tx(PROVIDER_LABELS[provider]), provider)
         self.combo_source.setCurrentIndex(
             max(0, self.combo_source.findData(provider_of(self._model))))
         self.combo_source.currentIndexChanged.connect(self._source_changed)
@@ -234,7 +236,7 @@ class LlmSettingsDialog(QDialog):
                 kind = api_key_source().kind
         except Exception:  # noqa: BLE001 - uno stato illeggibile non blocca la finestra
             kind = "none"
-        source = PROVIDER_LABELS.get(self.source(), self.source())
+        source = tx(PROVIDER_LABELS.get(self.source(), self.source()))
         text = ("Chiave {source} presente." if kind != "none" else
                 "Chiave {source} mancante: inseriscila da Configurazione → «Account AI...».")
         text = (self.i18n.tr("ui:" + text, default=text, source=source) if self.i18n is not None

@@ -197,7 +197,8 @@ class ModelPickerDialog(QDialog):
         fixed_provider = provider
         self.combo_provider = QComboBox()
         for source in PROVIDERS:
-            self.combo_provider.addItem(PROVIDER_LABELS[source], source)
+            # Tradotta qui: retranslate_widgets non tocca le voci dei combo (B7).
+            self.combo_provider.addItem(tx(PROVIDER_LABELS[source]), source)
         self.combo_provider.setCurrentIndex(
             max(0, self.combo_provider.findData(fixed_provider or provider_of(current_model))))
         # La sorgente scelta nel tab «Modello» non si cambia qui: l'elenco e'

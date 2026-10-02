@@ -56,7 +56,7 @@ def resource_path(*parts: str) -> Path:
     """@brief Path of a read-only file shipped with the program.
 
     @param parts Path components relative to the program root, e.g.
-        ``("models", "pcb_yolov8s.onnx")``.
+        ``("models", "yolo", "pcb_yolov8s.onnx")``.
     @return The absolute path (it may not exist; callers check).
     """
     return install_dir().joinpath(*parts)
