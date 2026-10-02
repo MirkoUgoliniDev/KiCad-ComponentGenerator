@@ -1154,7 +1154,8 @@ def classify_smd_rows(rows, photo, frame_px, mm_per_pixel, log, cancel, announce
     from ..app_paths import smd_model_path as default_smd_path
     network = Path(model_path) if model_path is not None else default_smd_path()
     announce('smd', network.name)
-    log(tx("Rete SMD locale: {name}.", name=network))
+    # Il nome della fase dice gia' «Rete SMD locale»: qui solo quale file.
+    log(tx("File della rete: {name}.", name=network))
     boxes = [_clamped_box(row['_box']) for row in rows]
     inside = [index for index, box in enumerate(boxes) if box is not None]
     try:
@@ -1516,7 +1517,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             announce('yolo', model_label(yolo_model_path))
             log(tx("YOLO locale: localizzazione senza invio della foto; verifica package "
                    "AI successiva.") if detector == 'yolo' else
-                tx("YOLO e rete SMD: classificazione locale dei ritagli.")
+                tx("YOLO locale: ricerca dei corpi sulla foto, senza invio; li classifica poi la rete SMD.")
                 if detector == 'yolo_smd' else
                 tx("Solo YOLO locale: la foto non viene inviata a nessun modello; i "
                    "riquadri tenuti nella revisione saranno il risultato."))
