@@ -45,7 +45,8 @@ datas = [
 # scripts/build-windows.ps1 -IncludeYoloModel, quando la licenza e' chiarita.
 # Senza pesi il programma funziona; il rilevatore locale chiede un file .onnx.
 if os.environ.get("KICADGEN_BUNDLE_YOLO_MODEL") == "1":
-    datas.append((str(ROOT / "models" / "pcb_yolov8s.onnx"), "models"))
+    # Dal 2026-10-02 i rilevatori stanno in models/yolo (app_paths.YOLO_MODELS_DIR).
+    datas.append((str(ROOT / "models" / "yolo" / "pcb_yolov8s.onnx"), "models/yolo"))
 binaries = []
 hiddenimports = []
 for package in ("pyvista", "pyvistaqt", "vtkmodules", "onnxruntime"):

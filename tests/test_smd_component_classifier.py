@@ -464,3 +464,26 @@ def test_an_unreviewed_relaunch_gives_no_body_a_person_kept(monkeypatch, reviewe
                                            lambda m: None, None, detector='yolo_smd',
                                            reviewed=reviewed)
     assert report.components[0]['_presence_reviewed_by_user'] is reviewed
+
+
+@pytest.mark.parametrize('chosen', [None, 'other_network.pt'])
+def test_the_chosen_network_reaches_the_classification_and_names_the_phase(monkeypatch, tmp_path,
+                                                                           chosen):
+    """@brief «Modello rete SMD» (2026-10-02): the file is used and shown, default from models/smd."""
+    from kicadgen.services import photo_inventory as inv
+    from kicadgen.app_paths import smd_model_path
+    seen, phases = {}, []
+
+    def classify(photo, boxes, **kwargs):
+        seen['model_path'] = kwargs.get('model_path')
+        return [dict(_outside_like(), accepted=True, **{'class': 'chip_R'}, kind='resistor')
+                for _ in boxes]
+    monkeypatch.setattr(smd, 'classify_photo_boxes', classify)
+    path = tmp_path / chosen if chosen else None
+    inv.classify_smd_rows([dict(_id=1, _box=[.1, .1, .3, .3])], np.zeros((20, 20, 3), np.uint8),
+                          None, (1, 1), lambda m: None, None, lambda *a: phases.append(a),
+                          model_path=path)
+    expected = path if path is not None else smd_model_path()
+    assert seen['model_path'] == expected
+    assert ('smd', expected.name) in phases
+    assert expected.parent.name in ('smd', tmp_path.name)

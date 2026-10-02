@@ -60,16 +60,20 @@ def test_listing_finds_weights_only_sorted_and_adds_files_elsewhere(tmp_path):
 
 def test_classifier_resource_has_its_own_role_but_custom_checkpoints_stay_selectable(
         tmp_path, monkeypatch):
-    folder = tmp_path / "models"
-    folder.mkdir()
-    classifier = folder / "smd_classifier.pt"
+    # Since 2026-10-02 the SMD network has its own folder, models/smd: a file
+    # there is the classifier, a file anywhere else stays a detector.
+    folder = tmp_path / "models" / "yolo"
+    folder.mkdir(parents=True)
+    smd_folder = tmp_path / "models" / "smd"
+    smd_folder.mkdir()
+    classifier = smd_folder / "smd_classifier.pt"
     custom = folder / "custom_smd_classifier.pt"
     for path in (classifier, custom):
         path.write_bytes(b"checkpoint")
     elsewhere = tmp_path / "outside" / "smd_classifier.pt"
     elsewhere.parent.mkdir()
     elsewhere.write_bytes(b"custom checkpoint")
-    monkeypatch.setattr(ym, "resource_path", lambda *parts: classifier)
+    monkeypatch.setattr(ym, "resource_path", lambda *parts: tmp_path.joinpath(*parts))
 
     assert ym.model_role(classifier) == "smd_classifier"
     assert ym.model_role(custom) == "yolo_detector"

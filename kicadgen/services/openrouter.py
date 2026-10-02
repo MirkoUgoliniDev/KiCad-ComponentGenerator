@@ -1118,12 +1118,6 @@ def _retry_after(exc: urllib.error.HTTPError) -> Optional[float]:
     return max(0.0, seconds) if math.isfinite(seconds) else None
 
 
-#: Completion budget floor for DeepSeek thinking mode (HANDOFF 161): the
-#: reasoning trace and the tool call share max_tokens, and the caller's usual
-#: 4000-24000 tokens were consumed by the reasoning alone.
-DEEPSEEK_THINKING_MIN_MAX_TOKENS = 32768
-
-
 def call_tool(*args, **kwargs) -> dict:
     """@brief Call the model once and decode explicit structured tool arguments.
 
@@ -1191,29 +1185,11 @@ def _call_tool(
         if has_pdf:
             raise ProviderError(tx("L'API diretta di DeepSeek non legge i PDF: per un "
                                    "datasheet PDF scegli un modello OpenRouter che li legga."))
-        # Il ragionamento rifiuta tool_choice con una funzione nominata (HTTP
-        # 400 «Thinking mode does not support this tool_choice», 27/09): la
-        # risposta strutturata conta piu' del ragionamento, quindi di default
-        # lo si spegne (scelta dell'utente). Con la casella «Ragionamento
-        # DeepSeek» accesa (HANDOFF 161) si accende e tool_choice diventa
-        # 'required': con un solo strumento offerto e' la stessa risposta.
-        from .providers import deepseek_reasoning_enabled
-        if deepseek_reasoning_enabled():
-            # Thinking mode rejects EVERY tool_choice (HTTP 400 also with
-            # 'required', seen live 29/09 22:37; DeepSeek docs: omit it). The
-            # tool is still offered and the prompt asks for it; if the model
-            # answers in prose instead, tool_arguments reports it as today.
-            body["thinking"] = {"type": "enabled"}
-            body.pop("tool_choice", None)
-            # Reasoning and answer share max_tokens (DeepSeek docs; live 29/09
-            # 22:40: 16384 exhausted by the reasoning, finish_reason=length,
-            # no tool call). The budget is raised to the thinking floor and
-            # the effort kept low: a structured answer is the goal, not an
-            # essay, and every reasoning token is paid.
-            body["max_tokens"] = max(int(max_tokens), DEEPSEEK_THINKING_MIN_MAX_TOKENS)
-            body["reasoning_effort"] = "low"
-        else:
-            body["thinking"] = {"type": "disabled"}
+        # Il ragionamento rifiuta ogni tool_choice (HTTP 400, 27/09 e 29/09) e
+        # consuma token a pagamento: la risposta strutturata conta di piu'.
+        # Sempre spento (utente, 2026-10-02: tolta la casella «Ragionamento
+        # DeepSeek» del punto 161).
+        body["thinking"] = {"type": "disabled"}
         sent_at = _begin_request(model)
         try:
             payload = deepseek_request(DEEPSEEK_CHAT_URL, body, timeout=_HTTP_TIMEOUT_CHAT_S)

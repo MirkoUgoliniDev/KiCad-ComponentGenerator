@@ -2130,8 +2130,15 @@ def _classifier_geometry_choice(component, choices, complete):
     measurement tolerance, so a lone in-tolerance candidate of a complete
     search is the only size of the family the photograph allows -- the
     comparison happened against the family members the tolerance excluded.
-    A tie band must still be homogeneous: two sizes the photograph cannot
-    separate stay in the picker. What the classifier does NOT supply is the
+    A homogeneous tie band (variants the photograph cannot tell apart) gives
+    its head. A band of sizes the photograph barely separates (within
+    NAME_TIEBREAK_MARGIN of the best, not homogeneous) gives its CLOSEST
+    member, only on a complete search, and records the others in
+    `tie_alternatives` (user decision 2026-10-02: «proporre la piu' vicina»;
+    a chip measured 1.9 x 1.0 mm between 0603 and 0805 used to get no model).
+    That closest pick is a declared preference, not a measurement verdict:
+    an inflated box can favour the larger size, so it stays provisional and
+    the alternatives stay in the picker. What the classifier does NOT supply is the
     basis of the box (body or total), so this path compares with whichever
     envelope fits (`_basis_readings` with an unknown basis), and stays
     provisional for that reason too.
@@ -2173,8 +2180,16 @@ def _classifier_geometry_choice(component, choices, complete):
         return None
     if len(band) == 1:
         return first if complete else None
-    return first if _band_is_homogeneous(
-        band, component.get("length_mm"), component.get("width_mm")) else None
+    if _band_is_homogeneous(band, component.get("length_mm"), component.get("width_mm")):
+        return first
+    if not complete:
+        # La piu' vicina fra taglie misurate: con candidati mai misurati
+        # «piu' vicina» non vuol dire nulla.
+        return None
+    closest = min(band, key=lambda item: float(item["relative_xy_error"]))
+    closest["tie_alternatives"] = [Path(item["path"]).stem for item in band
+                                   if item is not closest]
+    return closest
 
 
 def _provisional_geometry_choice(component, choices, complete, basis):
@@ -3108,6 +3123,13 @@ def _library_search(component: dict, result: dict, *, limit, roots, root, note, 
                 choice["reasons"][-1] = (
                     "Applied provisionally: identity not verified; package variant and "
                     "orientation require user review and the picker can replace it")
+                if provisional.get("tie_alternatives"):
+                    # Scelta per vicinanza fra taglie quasi alla pari: va detto.
+                    result["size_tie_alternatives"] = list(provisional["tie_alternatives"])
+                    choice["reasons"].append(
+                        tx("Taglia piu' vicina alla misura fra taglie quasi alla pari "
+                           "({alternatives}): verificala.",
+                           alternatives=", ".join(provisional["tie_alternatives"])))
                 result.update(status="provisional_matched", selected_path=choice["path"])
         note(f"{package}: {len(result['candidates'])} dimensional candidates; {result['status']}; identity not verified.")
     return result

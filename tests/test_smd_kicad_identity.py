@@ -85,17 +85,24 @@ def test_without_both_network_and_person_nothing_is_proposed(library, missing):
     assert report["status"] == "review_required" and not report.get("selected_path")
 
 
-def test_two_sizes_the_photo_cannot_separate_stay_in_the_picker(library):
-    """@brief Negative: a measurement halfway between two chip sizes proposes neither."""
+def test_two_sizes_the_photo_barely_separates_give_the_closest_provisionally(library):
+    """@brief Halfway between two chip sizes: the closer one, the other named (2026-10-02).
+
+    @note Contract changed by the user («proporre la piu' vicina»): it used to
+        leave both in the picker. The other size stays a candidate.
+    """
     root, add = library
     _resistors(add, with_0603=True)
     row = _network_row(length_mm=1.8, width_mm=1.02)
     report = km.model_candidates(row, library=root)
-    # Refused for the tie, not for an incomplete search.
+    # Decided on a complete search, not on a truncated one.
     assert not report.get("search_truncated")
-    assert {Path(c["path"]).stem for c in report["candidates"]} >= {
-        "R_0603_1608Metric", "R_0805_2012Metric"}
-    assert report["status"] == "review_required"
+    stems = {Path(c["path"]).stem for c in report["candidates"]}
+    assert stems >= {"R_0603_1608Metric", "R_0805_2012Metric"}
+    assert report["status"] == "provisional_matched"
+    chosen = Path(report["selected_path"]).stem
+    assert chosen in ("R_0603_1608Metric", "R_0805_2012Metric")
+    assert report["size_tie_alternatives"] and chosen not in report["size_tie_alternatives"]
 
 
 @pytest.fixture
@@ -271,3 +278,29 @@ def test_a_name_without_a_count_is_admitted_through_its_footprint_pads(monkeypat
     assert not km._classifier_admits(path, row)
     monkeypatch.setattr(km, "_declared_land_pattern", lambda p, library=None: None)
     assert not km._classifier_admits(path, row)
+
+
+def _tied_sizes():
+    base = Path("Resistor_SMD.3dshapes")
+    return [dict(path=str(base / "R_0805_2012Metric.step"), relative_xy_error=0.17,
+                 measurement_basis="total", family="resistor", dimensions_mm=[2.0, 1.25]),
+            dict(path=str(base / "R_0603_1608Metric.step"), relative_xy_error=0.15,
+                 measurement_basis="total", family="resistor", dimensions_mm=[1.6, 0.8])]
+
+
+def test_nearly_tied_sizes_propose_the_closest_and_name_the_others():
+    """@brief User decision 2026-10-02: between 0603 and 0805 propose the closer one.
+
+    @note The head of the ranked list is the 0805; the closest is the 0603.
+    """
+    row = _network_row(length_mm=1.91, width_mm=1.0)
+    choices = _tied_sizes()
+    chosen = km._classifier_geometry_choice(row, choices, True)
+    assert Path(chosen["path"]).stem == "R_0603_1608Metric"
+    assert chosen["tie_alternatives"] == ["R_0805_2012Metric"]
+
+
+def test_no_closest_pick_on_an_incomplete_search():
+    """@brief Negative: «closest» among sizes never measured means nothing."""
+    row = _network_row(length_mm=1.91, width_mm=1.0)
+    assert km._classifier_geometry_choice(row, _tied_sizes(), False) is None

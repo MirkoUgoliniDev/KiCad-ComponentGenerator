@@ -1,6 +1,6 @@
 """@brief Classify SMD components locally and match them to installed KiCad models.
 
-@details The packaged ``models/smd_classifier.pt`` checkpoint predicts visual
+@details The packaged ``models/smd/smd_classifier.pt`` checkpoint predicts visual
 component class and orientation from detector boxes. With photo calibration,
 the results are passed to KiCadGen's existing STEP and footprint matcher.
 Only the checkpoint is needed at runtime; the training project, YAML catalog,
@@ -22,7 +22,7 @@ from typing import Sequence
 
 from PIL import Image, ImageOps
 
-from ..app_paths import resource_path
+from ..app_paths import smd_model_path
 from .messages import tx
 
 _FORMAT = "smdmap-classifier-2"
@@ -100,7 +100,7 @@ def validate_smd_setup(model_path=None):
     @note Call before paid extraction so a missing or incompatible local model
         fails before any remote work begins.
     """
-    path = Path(model_path) if model_path is not None else resource_path("models", "smd_classifier.pt")
+    path = Path(model_path) if model_path is not None else smd_model_path()
     if not path.is_file():
         raise FileNotFoundError(tx("Rete SMD non trovata: {path}", path=path))
     torch, _, PackageNet = _runtime()
@@ -450,7 +450,7 @@ def classify_photo_boxes(
         return []
 
     torch, transforms, PackageNet = _runtime()
-    path = Path(model_path) if model_path is not None else resource_path("models", "smd_classifier.pt")
+    path = Path(model_path) if model_path is not None else smd_model_path()
     checkpoint = _load_checkpoint(path, torch)
     _validate_checkpoint(checkpoint, path, torch, PackageNet)
     classes, orientations = list(checkpoint["classes"]), checkpoint["orientations"]

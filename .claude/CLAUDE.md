@@ -244,10 +244,11 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 6582 passed,
-8 skipped, 2 expected failures and 19 subtests (2026-10-02, branch `ADVANCED`: local SMD
-network as default detector, AI only for unresolved bodies, network package and pose
-driving provisional KiCad models), run in two halves (HANDOFF point 113:
+is 6586 passed,
+11 skipped, 2 expected failures and 19 subtests (2026-10-02 evening, branch `ADVANCED`: local
+SMD network as default detector, AI only for unresolved bodies, network package and pose
+driving provisional KiCad models; single AI model in a «Modello» tab with DeepSeek/OpenRouter
+source; models in models/yolo and models/smd), run in two halves (HANDOFF point 113:
 the single-process run can die at random with a native Qt/VTK crash). The last packaging integration was merge
 commit `692ca95` on `main`. Keep these values aligned with HANDOFF.md.
 

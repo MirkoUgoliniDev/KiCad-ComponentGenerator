@@ -1126,7 +1126,8 @@ def _clamped_box(box):
     return [left, top, right, bottom] if right > left and bottom > top else None
 
 
-def classify_smd_rows(rows, photo, frame_px, mm_per_pixel, log, cancel, announce):
+def classify_smd_rows(rows, photo, frame_px, mm_per_pixel, log, cancel, announce,
+                      model_path=None):
     """@brief Classify inventory rows with the local SMD network and write its verdict in them.
 
     @param rows Rows of yolo_only_components (modified in place); `_box` is
@@ -1138,6 +1139,8 @@ def classify_smd_rows(rows, photo, frame_px, mm_per_pixel, log, cancel, announce
     @param log Progress callback.
     @param cancel Cancellation channel (event, predicate or None).
     @param announce Phase announcer of the caller.
+    @param model_path Checkpoint of the network, or None for the default in
+        models/smd; its file name is the detail of the «Rete SMD locale» phase.
     @return The predictions, one per row.
     @throws CallCancelled When the user cancelled during the classification
         or the KiCad matching: the network signals it with its own exceptions,
@@ -1148,13 +1151,16 @@ def classify_smd_rows(rows, photo, frame_px, mm_per_pixel, log, cancel, announce
         accepted) instead of aborting the whole batch (audit 2026-10-02, D2).
     """
     from .smd_component_classifier import classify_photo_boxes
-    announce('smd', 'smd_classifier.pt (v3)')
+    from ..app_paths import smd_model_path as default_smd_path
+    network = Path(model_path) if model_path is not None else default_smd_path()
+    announce('smd', network.name)
+    log(tx("Rete SMD locale: {name}.", name=network))
     boxes = [_clamped_box(row['_box']) for row in rows]
     inside = [index for index, box in enumerate(boxes) if box is not None]
     try:
         found = classify_photo_boxes(
             photo, [boxes[index] for index in inside], box_format='normalized',
-            box_frame_px=frame_px, mm_per_pixel=mm_per_pixel,
+            box_frame_px=frame_px, mm_per_pixel=mm_per_pixel, model_path=network,
             log=log, cancel=cancel, phase=announce) if inside else []
     except Exception as exc:
         # Si decide dal canale di annullamento, non dal tipo o dal testo.
@@ -1311,12 +1317,15 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                       grounding_prompt=None, verification_prompt=None, top_photo_source='AI',
                       detector='ai', yolo_model_path=None, review_proposals=None,
                       declared=None, phase=None, yolo_confidence=None, yolo_settings=None,
-                      recount_contacts=None, crop_prompt=None, crop_model=None, cancel=None):
+                      recount_contacts=None, crop_prompt=None, crop_model=None, cancel=None,
+                      smd_model_path=None):
     """@brief Calibrate the photo and extract reviewed component envelopes.
 
     @param crop_prompt Instructions of the per-body crop reading (profile
         field 'crop_prompt'), forwarded to photo_crop_reading.read_bodies as
         its system_prompt. None or blank sends the factory default.
+    @param smd_model_path Checkpoint of the local SMD network ('yolo_smd'),
+        or None for models/smd/smd_classifier.pt (app_paths.smd_model_path).
     @param crop_model Model of that crop reading (profile field 'crop_model',
         HANDOFF 150). None or blank: the model of the paid call on the
         photograph (`classifier_model`, else `model`). Never used for the
@@ -1380,8 +1389,8 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     if detector not in PHOTO_DETECTORS:
         raise ValueError(tx("Rilevatore fotografico non supportato."))
     if detector == 'yolo_smd' and yolo_model_path is None:
-        from ..app_paths import resource_path
-        yolo_model_path = resource_path('models', 'pcb_component_detector_yolov8m_best.pt')
+        from ..app_paths import DEFAULT_YOLO_PT, yolo_model_path as _yolo_path
+        yolo_model_path = _yolo_path(DEFAULT_YOLO_PT)
     report = InventoryResult()
     def warn(message):
         report.warnings.append(message)
@@ -1599,7 +1608,8 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                     raise ValueError(tx("Foto completa non disponibile per i ritagli SMD"))
                 full_photo, board_roi = source_frame
                 classify_smd_rows(rows, full_photo, board_roi,
-                                  (length / width_px, width / height_px), log, cancel, announce)
+                                  (length / width_px, width / height_px), log, cancel, announce,
+                                  model_path=smd_model_path)
                 recheck_unresolved_smd_rows(photo, report, rows, length, width,
                                             classifier_model or model, call, log,
                                             cache_dir, crop_prompt, announce,
@@ -2113,7 +2123,7 @@ def load_review_bundle(project_dir):
 
 def _reconcile_with_smd_network(photo, report, proposals, length, width, model, call, log,
                                 cache_dir, crop_prompt, phase, crop_model, cancel=None,
-                                reviewed=True):
+                                reviewed=True, smd_model_path=None):
     """Relaunch of a 'yolo_smd' bundle: network on the calibrated photo, AI only for the unresolved.
 
     The bundle keeps only the calibrated board, so the crops are cut from it
@@ -2125,7 +2135,7 @@ def _reconcile_with_smd_network(photo, report, proposals, length, width, model, 
     if rows:
         height_px, width_px = photo.shape[:2]
         classify_smd_rows(rows, photo, None, (length / width_px, width / height_px), log,
-                          cancel, announce)
+                          cancel, announce, model_path=smd_model_path)
         recheck_unresolved_smd_rows(photo, report, rows, length, width, model, call, log,
                                     cache_dir, crop_prompt, announce, crop_model=crop_model)
     report.components = rows
@@ -2144,7 +2154,8 @@ def _reconcile_with_smd_network(photo, report, proposals, length, width, model, 
 def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
                               cache_dir=None, *, declared=None, verification_prompt=None,
                               extra_instructions=None, detector='yolo', crop_prompt=None,
-                              phase=None, crop_model=None, cancel=None, reviewed=True):
+                              phase=None, crop_model=None, cancel=None, reviewed=True,
+                              smd_model_path=None):
     """@brief Re-run the paid reconciliation on already reviewed detector proposals.
 
     @param photo Calibrated BGR crop (numpy array) or its PNG bytes: the same
@@ -2166,6 +2177,8 @@ def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
         'yolo_smd' takes its own route (_reconcile_with_smd_network): the local
         network classifies the bodies and only the unresolved ones go to the
         paid crop reading; no global inventory request.
+    @param smd_model_path Checkpoint of the local SMD network for the
+        'yolo_smd' route, or None for the default in models/smd.
     @param reviewed False when the proposals were never reviewed by a person
         (ReviewBundle.reviewed): on the 'yolo_smd' route weak proposals are
         then left out and no body counts as kept by a person.
@@ -2242,7 +2255,7 @@ def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
         # strada invece dell'inventario globale a pagamento su tutti i corpi.
         return _reconcile_with_smd_network(photo, report, proposals, length, width, model,
                                            call, log, cache_dir, crop_prompt, phase,
-                                           crop_model, cancel, reviewed)
+                                           crop_model, cancel, reviewed, smd_model_path)
     seen = []
     def observe(message):
         seen.append(message)

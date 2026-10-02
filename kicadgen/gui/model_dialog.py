@@ -155,7 +155,18 @@ class ModelPickerDialog(QDialog):
     """
 
     def __init__(self, current_model: Optional[str] = None, parent=None,
-                 title: str = "Scegli il modello LLM", capabilities=DATASHEET_CAPABILITIES):
+                 title: str = "Scegli il modello LLM", capabilities=DATASHEET_CAPABILITIES,
+                 provider: Optional[str] = None):
+        """@brief Build the picker.
+
+        @param current_model Model selected when the dialog opens.
+        @param title Window title.
+        @param capabilities Capabilities the model must have (ModelInfo.usable_for).
+        @param provider Source fixed by the caller (the «Modello» tab of the
+            LLM settings): only its models are listed and the source cannot be
+            changed here. None lets the user choose, starting from the
+            provider of `current_model`.
+        """
         super().__init__(parent)
         self.capabilities = tuple(capabilities)
         self.i18n = _find_i18n(parent)
@@ -183,11 +194,15 @@ class ModelPickerDialog(QDialog):
         # modello gia' scelto.
         provider_row = QHBoxLayout()
         provider_row.addWidget(QLabel("Fornitore:"))
+        fixed_provider = provider
         self.combo_provider = QComboBox()
-        for provider in PROVIDERS:
-            self.combo_provider.addItem(PROVIDER_LABELS[provider], provider)
+        for source in PROVIDERS:
+            self.combo_provider.addItem(PROVIDER_LABELS[source], source)
         self.combo_provider.setCurrentIndex(
-            max(0, self.combo_provider.findData(provider_of(current_model))))
+            max(0, self.combo_provider.findData(fixed_provider or provider_of(current_model))))
+        # La sorgente scelta nel tab «Modello» non si cambia qui: l'elenco e'
+        # solo il suo.
+        self.combo_provider.setEnabled(fixed_provider is None)
         self.combo_provider.currentIndexChanged.connect(self._on_provider_changed)
         provider_row.addWidget(self.combo_provider)
         self.label_provider_note = QLabel()
@@ -509,7 +524,7 @@ def _price_text(value: float, i18n=None) -> str:
 
 
 def pick_model(current_model: Optional[str], parent=None, title: str = "Scegli il modello LLM",
-               capabilities=DATASHEET_CAPABILITIES) -> Optional[str]:
+               capabilities=DATASHEET_CAPABILITIES, provider: Optional[str] = None) -> Optional[str]:
     """@brief Open the model picker and return the chosen model id, or None when cancelled.
 
     Apre il dialogo e ritorna l'id scelto, o None se si annulla.
@@ -517,8 +532,10 @@ def pick_model(current_model: Optional[str], parent=None, title: str = "Scegli i
     @param capabilities Capacita' che il modello dovra' avere per il lavoro a
         cui e' destinato: vedi ModelInfo.usable_for. Chiederne piu' del
         necessario nasconde modelli validi.
+    @param provider Source fixed by the caller, or None (see ModelPickerDialog).
     """
-    dialog = ModelPickerDialog(current_model, parent, title=title, capabilities=capabilities)
+    dialog = ModelPickerDialog(current_model, parent, title=title, capabilities=capabilities,
+                               provider=provider)
     if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_model():
         return dialog.selected_model()
     return None

@@ -62,6 +62,36 @@ def resource_path(*parts: str) -> Path:
     return install_dir().joinpath(*parts)
 
 
+#: Folder of the detectors (YOLO weights, .onnx or .pt), relative to the
+#: program root. User decision 2026-10-02: the detectors and the SMD network
+#: live in two separate folders, so the YOLO picker lists only detectors.
+YOLO_MODELS_DIR = ("models", "yolo")
+#: Folder of the local SMD network that classifies the detected bodies.
+SMD_MODELS_DIR = ("models", "smd")
+#: Default weights of each folder.
+DEFAULT_YOLO_ONNX = "pcb_yolov8s.onnx"
+DEFAULT_YOLO_PT = "pcb_component_detector_yolov8m_best.pt"
+DEFAULT_SMD_MODEL = "smd_classifier.pt"
+
+
+def yolo_model_path(name: str = DEFAULT_YOLO_ONNX) -> Path:
+    """@brief Path of a detector's weights in the YOLO folder (it may not exist).
+
+    @param name File name inside YOLO_MODELS_DIR.
+    @return The absolute path.
+    """
+    return resource_path(*YOLO_MODELS_DIR, name)
+
+
+def smd_model_path(name: str = DEFAULT_SMD_MODEL) -> Path:
+    """@brief Path of the SMD network's checkpoint in its folder (it may not exist).
+
+    @param name File name inside SMD_MODELS_DIR.
+    @return The absolute path.
+    """
+    return resource_path(*SMD_MODELS_DIR, name)
+
+
 def _local_app_data() -> Path:
     base = os.environ.get("LOCALAPPDATA")
     return Path(base) if base else Path.home() / "AppData" / "Local"

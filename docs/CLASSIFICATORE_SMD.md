@@ -1,6 +1,6 @@
 # Classificatore SMD locale
 
-L'unico file trasferito da TorchObjectDetection e' `models\smd_classifier.pt`
+L'unico file trasferito da TorchObjectDetection e' `models\smd\smd_classifier.pt`
 (v3). La funzione `classify_photo_boxes` ricostruisce la rete ResNet18 dalle
 informazioni e dai pesi contenuti in questo checkpoint. Classi e orientamenti
 sono gia' nel file; non serve il progetto di addestramento o il suo catalogo.
@@ -21,7 +21,7 @@ Nella cartella KiCad-ComponentGenerator:
 Il runtime PyTorch e il checkpoint SMD non sono inclusi nell'attuale pacchetto
 Windows della GUI: in quel pacchetto la modalita' SMD e' disabilitata e ne
 viene indicato il motivo. Per usarla, avvia il programma dai sorgenti con il
-checkpoint in `models/smd_classifier.pt` e il runtime indicato sopra.
+checkpoint in `models/smd/smd_classifier.pt` e il runtime indicato sopra.
 
 ## Uso con la foto RS485 di questo progetto
 
@@ -52,7 +52,7 @@ if board is None:
     raise SystemExit('Foto non calibrabile')
 detections = detect_yolo_components(
     board, length_mm, width_mm,
-    model_path=Path('models/pcb_component_detector_yolov8m_best.pt'),
+    model_path=Path('models/yolo/pcb_component_detector_yolov8m_best.pt'),
 )
 results = classify_photo_boxes(
     frame['photo'],
@@ -101,7 +101,7 @@ un modello STEP condiviso da piu' footprint lascia i footprint come alternative.
 Dai sorgenti, **YOLO + rete SMD locale (v3)** e' la modalita' predefinita di
 **Rilevamento foto** (nel binario frozen resta YOLO, perche' manca PyTorch). Se il campo
 del modello YOLO e' vuoto, questa modalita' usa
-`models/pcb_component_detector_yolov8m_best.pt`, lo stesso verificato nel
+`models/yolo/pcb_component_detector_yolov8m_best.pt`, lo stesso verificato nel
 progetto TorchObjectDetection. Un modello scelto esplicitamente ha precedenza.
 Le altre modalita' restano disponibili.
 
@@ -135,7 +135,7 @@ I due pesi YOLO `pcb_component_detector_yolov8m_best.pt` sono identici:
 Per ripetere il controllo:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 -LiteralPath 'C:\Lavori\Python\KiCad-ComponentGenerator\models\smd_classifier.pt', 'C:\Lavori\Python\TorchObjectDetection\models\smd_classifier.pt', 'C:\Lavori\Python\KiCad-ComponentGenerator\models\pcb_component_detector_yolov8m_best.pt', 'C:\Lavori\Python\TorchObjectDetection\models\pcb_component_detector_yolov8m_best.pt' | Format-List Path, Hash
+Get-FileHash -Algorithm SHA256 -LiteralPath 'C:\Lavori\Python\KiCad-ComponentGenerator\models\smd\smd_classifier.pt', 'C:\Lavori\Python\TorchObjectDetection\models\smd_classifier.pt', 'C:\Lavori\Python\KiCad-ComponentGenerator\models\yolo\pcb_component_detector_yolov8m_best.pt', 'C:\Lavori\Python\TorchObjectDetection\models\pcb_component_detector_yolov8m_best.pt' | Format-List Path, Hash
 ```
 
 Confronto effettuato su 65 riquadri delle schede di prova originali: pixel dei

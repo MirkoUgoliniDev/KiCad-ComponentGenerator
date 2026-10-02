@@ -1778,6 +1778,7 @@ def extract_pin_header_params(
     component_family: Optional[str] = None,
     photo_detector: str = "ai",
     yolo_model_path: Optional[Path] = None,
+    smd_model_path: Optional[Path] = None,
     yolo_confidence: Optional[float] = None,
     yolo_settings: Optional[dict] = None,
     phase: Optional[Callable[..., None]] = None,
@@ -1813,6 +1814,9 @@ def extract_pin_header_params(
         proposals plus one AI reconciliation) or vlm (no local detector: the
         vision model enumerates the bodies in that same single request).
     @param yolo_model_path Optional compatible ONNX file; validated before paid calls.
+    @param smd_model_path Optional checkpoint of the local SMD network
+        (photo_detector 'yolo_smd'); None uses models/smd/smd_classifier.pt.
+        Validated before paid calls.
     @param yolo_confidence Operating confidence threshold of the local YOLO
         detector; None keeps its default (photo_yolo.operating_confidence).
     @param yolo_settings Other local-detector settings (photo_yolo.yolo_settings);
@@ -1860,8 +1864,8 @@ def extract_pin_header_params(
         raise ExtractionError(tx("Rilevatore fotografico non supportato."))
     if photo_detector in ("yolo", "yolo_smd"):
         if photo_detector == "yolo_smd" and yolo_model_path is None:
-            from ..app_paths import resource_path
-            yolo_model_path = resource_path("models", "pcb_component_detector_yolov8m_best.pt")
+            from ..app_paths import DEFAULT_YOLO_PT, yolo_model_path as _yolo_path
+            yolo_model_path = _yolo_path(DEFAULT_YOLO_PT)
         from .photo_yolo import operating_confidence, validate_yolo_setup
         from .photo_yolo import yolo_settings as check_yolo_settings
         try:
@@ -1871,7 +1875,7 @@ def extract_pin_header_params(
             validate_yolo_setup(yolo_model_path)
             if photo_detector == "yolo_smd":
                 from .smd_component_classifier import validate_smd_setup
-                validate_smd_setup()
+                validate_smd_setup(smd_model_path)
         except (ValueError, OSError, ImportError, RuntimeError) as exc:
             raise ExtractionError(tx("YOLO locale non disponibile: {exc}", exc=exc)) from exc
     from .ai_diagnostics import make_logged_call
@@ -2050,7 +2054,7 @@ def extract_pin_header_params(
         extra_instructions=extra_instructions, photo_cache_dir=photo_cache_dir,
         grounding_prompt=grounding_prompt, verification_prompt=verification_prompt,
         terminal_prompt=terminal_prompt, crop_prompt=crop_prompt, crop_model=crop_model,
-        yolo_model_path=yolo_model_path,
+        yolo_model_path=yolo_model_path, smd_model_path=smd_model_path,
         review_proposals=review_proposals, yolo_confidence=yolo_confidence,
         yolo_settings=yolo_settings,
         recount_contacts=lambda disagreements: _recount_sides_from_photo(
@@ -2778,7 +2782,8 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
                          terminal_prompt, yolo_model_path, review_proposals,
                          yolo_confidence, yolo_settings,
                          recount_contacts=None, crop_prompt=None,
-                         crop_model=None, cancelled=None) -> ExtractedParams:
+                         crop_model=None, cancelled=None,
+                         smd_model_path=None) -> ExtractedParams:
     """Optional photo inventory and final assembly of a validated main answer.
 
     `cancelled` is the zero-argument cancellation predicate of extract_params
@@ -2838,6 +2843,8 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
                    if photo_detector in ('yolo', 'vlm', 'yolo_smd') else {}),
                 **({'cancel': cancelled} if photo_detector == 'yolo_smd' and cancelled is not None
                    else {}),
+                **({'smd_model_path': smd_model_path}
+                   if photo_detector == 'yolo_smd' and smd_model_path is not None else {}),
             )
         except ReviewCancelled as exc:
             # Un annullo non e' un guasto dell'inventario: proseguire qui

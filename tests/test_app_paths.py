@@ -28,8 +28,9 @@ def frozen(monkeypatch, tmp_path, clean_env):
     bundle = tmp_path / "Program Files" / "KiCadGen" / "_internal"
     (bundle / "data").mkdir(parents=True)
     (bundle / "data" / "analysis_profiles.sqlite3").write_bytes(b"iniziale")
-    (bundle / "models").mkdir()
-    (bundle / "models" / "pcb_yolov8s.onnx").write_bytes(b"onnx")
+    # Dal 2026-10-02 i rilevatori stanno in models/yolo (app_paths.YOLO_MODELS_DIR).
+    (bundle / "models" / "yolo").mkdir(parents=True)
+    (bundle / "models" / "yolo" / "pcb_yolov8s.onnx").write_bytes(b"onnx")
     local = tmp_path / "AppData" / "Local"
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "_MEIPASS", str(bundle), raising=False)
@@ -54,7 +55,7 @@ def test_installed_writes_to_the_users_folders(frozen):
     assert app_paths.install_dir() == bundle
     assert app_paths.user_data_dir() == local / "KiCadGen"
     assert app_paths.default_projects_dir() == documents / "KiCadGen"
-    assert app_paths.resource_path("models", "pcb_yolov8s.onnx").read_bytes() == b"onnx"
+    assert app_paths.yolo_model_path().read_bytes() == b"onnx"
     assert app_paths.env_files()[0] == local / "KiCadGen" / ".env"
 
 
@@ -88,7 +89,7 @@ def test_the_services_follow_the_installed_layout(frozen, monkeypatch):
     from kicadgen.services import accepted_models, photo_yolo
     from kicadgen.services.analysis_profiles import ProfileStore
     assert accepted_models.default_path() == local / "KiCadGen" / "data" / "accepted_components.sqlite3"
-    assert photo_yolo.resolve_yolo_model() == bundle / "models" / "pcb_yolov8s.onnx"
+    assert photo_yolo.resolve_yolo_model() == bundle / "models" / "yolo" / "pcb_yolov8s.onnx"
     monkeypatch.setattr(ProfileStore, "_initialize", lambda self, *a: None)
     store = ProfileStore()
     assert store.path == local / "KiCadGen" / "data" / "analysis_profiles.sqlite3"

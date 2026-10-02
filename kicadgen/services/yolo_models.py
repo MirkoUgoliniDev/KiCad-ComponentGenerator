@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from ..app_paths import resource_path
+from ..app_paths import SMD_MODELS_DIR, resource_path
 
 #: Weights formats the detector loads (see photo_yolo._MODEL_SUFFIXES).
 MODEL_SUFFIXES = (".onnx", ".pt")
@@ -146,18 +146,20 @@ def model_role(path) -> str | None:
     """@brief Return the role of a local model file without loading it.
 
     @param path Candidate weights path.
-    @return ``smd_classifier`` for the packaged SMD classifier, ``yolo_detector``
-        for other supported weights, or None for an unsupported extension.
-    @note The classifier is recognized by its canonical resource path, not its
-        basename. A custom YOLO checkpoint with the same name elsewhere stays
+    @return ``smd_classifier`` for a file in the SMD network folder
+        (app_paths.SMD_MODELS_DIR), ``yolo_detector`` for other supported
+        weights, or None for an unsupported extension.
+    @note The classifier is recognized by its folder, not its basename
+        (user decision 2026-10-02: detectors and SMD network in two folders).
+        A custom YOLO checkpoint with the same name elsewhere stays
         selectable, and arbitrary custom ``.pt``/``.onnx`` files remain valid.
     """
     candidate = Path(path)
     if candidate.suffix.lower() not in MODEL_SUFFIXES:
         return None
     try:
-        classifier = resource_path("models", "smd_classifier.pt").resolve()
-        if candidate.resolve() == classifier:
+        folder = resource_path(*SMD_MODELS_DIR).resolve()
+        if candidate.resolve().parent == folder:
             return "smd_classifier"
     except OSError:
         pass

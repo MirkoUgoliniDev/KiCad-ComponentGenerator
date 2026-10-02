@@ -15,6 +15,12 @@ from copy import deepcopy
 
 from ..cad3d.lead_sides import local_lead_sides
 
+#: Colours of a «Copia formato» session, the same in every view that offers
+#: the brush (3D tab, review window): the source body yellow, the bodies the
+#: format was pasted on green.
+FORMAT_SOURCE_COLOR = "#f9e2af"
+FORMAT_TARGET_COLOR = "#a6e3a1"
+
 #: Fields copied as they are. Lengths are in the component's own frame
 #: (length along its local X, width along its local Y, before the rotation),
 #: so a body pasted on a rotated target keeps the target's orientation.

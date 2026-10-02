@@ -130,7 +130,7 @@ def yolo_settings(values=None) -> dict:
 
 
 try:
-    from ..app_paths import resource_path
+    from ..app_paths import DEFAULT_YOLO_ONNX, resource_path, yolo_model_path
 except ImportError:  # modulo caricato da solo (test): stessa regola del sorgente
     def resource_path(*parts):
         """@brief Resolve a resource path inside the source repository when app_paths is unavailable.
@@ -159,7 +159,7 @@ def resolve_yolo_model(model_path=None) -> Path:
     """@brief Resolve and check a readable, nonempty local weights file.
 
     @param model_path Optional local path overriding KICADGEN_YOLO_MODEL.
-    @return Absolute Path, defaulting to repository models/pcb_yolov8s.onnx.
+    @return Absolute Path, defaulting to models/yolo/pcb_yolov8s.onnx (app_paths).
     @throws ValueError If the path is invalid, missing, unreadable, or neither
         .onnx nor .pt.
     @note No downloads, deserialization or optional imports occur here. A .pt
@@ -167,7 +167,7 @@ def resolve_yolo_model(model_path=None) -> Path:
         file, so only files the user chose themselves are ever loaded.
     """
     selected = model_path if model_path is not None else os.environ.get(
-        "KICADGEN_YOLO_MODEL", resource_path("models", "pcb_yolov8s.onnx")
+        "KICADGEN_YOLO_MODEL", yolo_model_path(DEFAULT_YOLO_ONNX)
     )
     try:
         if not os.fspath(selected).strip():
@@ -216,7 +216,7 @@ def model_label(model_path=None) -> str:
         loaded: it only names what the progress window is about to run.
     """
     selected = model_path if model_path is not None else os.environ.get(
-        "KICADGEN_YOLO_MODEL", resource_path("models", "pcb_yolov8s.onnx"))
+        "KICADGEN_YOLO_MODEL", yolo_model_path(DEFAULT_YOLO_ONNX))
     path = Path(os.fspath(selected))
     return f"{path.name} ({_FORMAT_NAMES.get(path.suffix.lower(), path.suffix or '?')})"
 

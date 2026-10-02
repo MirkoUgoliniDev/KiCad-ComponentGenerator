@@ -654,6 +654,7 @@ class ExtractWorker(QThread):
         yolo_confidence: float | None = None, yolo_settings: dict | None = None,
         crop_prompt: str | None = None,
         crop_model: str | None = None,
+        smd_model_path: Path | None = None,
     ):
         """@brief Snapshot extraction settings before starting background work.
 
@@ -700,6 +701,9 @@ class ExtractWorker(QThread):
         self.component_family = component_family
         self.photo_detector = photo_detector
         self.yolo_model_path = yolo_model_path
+        # File della rete SMD scelto nella riga «Modello rete SMD» (None: il
+        # predefinito in models/smd).
+        self.smd_model_path = smd_model_path
         self.yolo_confidence = yolo_confidence
         self.yolo_settings = dict(yolo_settings) if yolo_settings is not None else None
         self.crop_prompt = crop_prompt
@@ -771,6 +775,7 @@ class ExtractWorker(QThread):
                 component_family=self.component_family,
                 photo_detector=self.photo_detector,
                 yolo_model_path=self.yolo_model_path,
+                **accepted_kwargs(extract, smd_model_path=self.smd_model_path),
                 system_prompt=self.system_prompt,
                 extra_instructions=self.extra_instructions,
                 include_nc_pins=self.include_nc_pins,
@@ -890,7 +895,8 @@ class ReconcileWorker(QThread):
 
     def __init__(self, photo_png, proposals, length_mm, width_mm, model, cache_dir,
                  *, declared=None, verification_prompt=None, extra_instructions=None,
-                 detector='yolo', crop_prompt=None, crop_model=None, reviewed=True):
+                 detector='yolo', crop_prompt=None, crop_model=None, reviewed=True,
+                 smd_model_path=None):
         """@brief Fotografa le proposte approvate prima di lasciare il thread GUI.
 
         @param photo_png Fotografia calibrata su cui le proposte furono misurate.
@@ -924,6 +930,7 @@ class ReconcileWorker(QThread):
         # Le proposte vengono da una revisione fatta da una persona?
         # (ReviewBundle.reviewed: False per il pacchetto di ripiego dalla cache).
         self.reviewed = bool(reviewed)
+        self.smd_model_path = smd_model_path
         self.crop_prompt = crop_prompt
         self.crop_model = crop_model
         # Come ExtractWorker.cancel_event: alzato da «Interrompi».
@@ -975,7 +982,8 @@ class ReconcileWorker(QThread):
                 extra_instructions=self.extra_instructions, detector=self.detector,
                 crop_prompt=self.crop_prompt,
                 **accepted_kwargs(reconcile_saved_proposals, crop_model=self.crop_model,
-                                  cancel=self.cancel_event, reviewed=self.reviewed),
+                                  cancel=self.cancel_event, reviewed=self.reviewed,
+                                  smd_model_path=self.smd_model_path),
                 **phase_kwargs(reconcile_saved_proposals, self._forward_phase))
             self.done.emit(report)
         except Exception as exc:  # noqa: BLE001 - errori rete/API riportati in UI

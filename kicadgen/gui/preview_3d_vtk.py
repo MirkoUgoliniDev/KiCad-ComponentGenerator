@@ -219,8 +219,7 @@ def _spaced_label(label, vertices):
 #: format was copied, and the bodies it was pasted on. The bodies keep their
 #: own colours: a wire box around them says which is which without hiding
 #: the colour the format carries.
-FORMAT_SOURCE_COLOR = "#f9e2af"
-FORMAT_TARGET_COLOR = "#a6e3a1"
+from ..services.component_format import FORMAT_SOURCE_COLOR, FORMAT_TARGET_COLOR  # noqa: E402
 #: Gap between a body and its outline, as a fraction of its largest extent,
 #: with a floor so a tiny chip still shows a box and not a smear.
 FORMAT_OUTLINE_GAP = 0.06
