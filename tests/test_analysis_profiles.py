@@ -31,7 +31,8 @@ def test_migration_preserves_custom_config_once_and_secrets_are_not_imported(tmp
     assert len(list(tmp_path.glob('config-before-sqlite-*.json'))) == 1
 
 
-def test_crud_inheritance_independent_models_and_snapshot(tmp_path):
+def test_crud_inheritance_single_model_and_snapshot(tmp_path):
+    """@brief One model for every analysis (user, 2026-10-02): type model overrides are ignored."""
     store = ProfileStore(tmp_path / 'ai.sqlite3')
     key = store.save_type(None, label='Personalizzata', family='aggregate_castellated',
                          instructions='specific', overrides={'model': 'custom-data', 'vision_model': None,
@@ -40,7 +41,11 @@ def test_crud_inheritance_independent_models_and_snapshot(tmp_path):
                          'verification_model': 'global-verify', 'image_instructions': 'extra photo'})
     effective = store.resolve(key)
     assert (effective['model'], effective['vision_model'], effective['verification_model']) == (
-        'custom-data', 'global-photo', 'custom-verify')
+        'global-data', 'global-data', 'global-data')
+    # The stored overrides are left as they were, and reported as ignored.
+    assert store.ignored_model_overrides(key) == {'model': 'custom-data',
+                                                   'verification_model': 'custom-verify'}
+    assert store.ignored_model_overrides('') == {}
     snapshot = store.snapshot(key)
     assert 'extra photo' in snapshot['grounding_prompt']
     assert 'extra photo' in snapshot['verification_prompt']
@@ -55,7 +60,7 @@ def test_crud_inheritance_independent_models_and_snapshot(tmp_path):
     assert store.get_type(key) is None
     assert store.overrides(key) == {}
     assert store.get_type(copy) is not None
-    assert snapshot['model'] == 'custom-data'  # Independent of subsequent edits/deletes.
+    assert snapshot['model'] == 'global-data'  # Independent of subsequent edits/deletes.
     assert ProfileStore(store.path).get_type(key) is None
     with pytest.raises(ProfileError):
         store.resolve(key)
@@ -106,7 +111,9 @@ def test_v1_upgrade_copies_existing_datasheet_defaults_and_overrides(tmp_path):
         db.execute('PRAGMA user_version=1')
     upgraded = ProfileStore(store.path)
     assert upgraded.defaults()['verification_model'] == 'old-data'
-    assert upgraded.resolve(key)['verification_model'] == 'override'
+    # One model (2026-10-02): the type's override no longer wins over the global one.
+    assert upgraded.resolve(key)['verification_model'] == 'old-data'
+    assert upgraded.overrides(key) == {'model': 'override', 'verification_model': 'override'}
     with sqlite3.connect(store.path) as db:
         assert db.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
 
@@ -149,7 +156,7 @@ def test_partial_type_update_keeps_overrides_and_deleted_editor_cannot_recreate_
     store = ProfileStore(tmp_path / 'ai.sqlite3')
     key = store.save_type(None, label='type', family='single_smd', overrides={'model': 'custom'})
     store.save_type(key, label='renamed', family='single_smd', active=False)
-    assert store.resolve(key)['model'] == 'custom'
+    assert store.overrides(key) == {'model': 'custom'}
     store.delete_type(key)
     with pytest.raises(ProfileError):
         store.save_type(key, label='stale editor', family='single_smd')
@@ -501,23 +508,16 @@ def test_the_other_model_fields_still_reject_a_blank(tmp_path, field, value):
     assert store.defaults() == original
 
 
-def test_crop_model_is_stripped_inherited_or_overridden_even_with_a_blank(tmp_path):
+def test_the_crop_model_always_resolves_to_the_single_model(tmp_path):
+    """@brief A crop-reading model of a type or of the defaults is no longer used (2026-10-02).
+
+    @note Blank means «the same model», so it resolves blank whatever was stored.
+    """
     store = ProfileStore(tmp_path / 'ai.sqlite3')
     store.save_defaults({'crop_model': '  vendor/global-crop  '})
     assert store.defaults()['crop_model'] == 'vendor/global-crop'
-    inherit = store.save_type(None, label='inherits', family='single_smd',
-                              overrides={'image_instructions': 'extra photo'})
     own = store.save_type(None, label='own', family='single_smd',
                           overrides={'crop_model': ' vendor/type-crop '})
-    # An EXPLICIT blank override is a choice («the photo model for this
-    # type»), distinct from inheriting the global model.
-    photo = store.save_type(None, label='photo', family='single_smd',
-                            overrides={'crop_model': ''})
-    assert store.resolve(inherit)['crop_model'] == 'vendor/global-crop'
-    assert store.resolve(own)['crop_model'] == 'vendor/type-crop'
-    assert store.resolve(photo)['crop_model'] == ''
-    assert store.overrides(photo) == {'crop_model': ''}
-    assert 'crop_model' not in store.overrides(inherit)
-    for key in (inherit, own, photo):
-        # A model identifier never receives the image instructions.
-        assert store.snapshot(key)['crop_model'] == store.resolve(key)['crop_model']
+    assert store.resolve('')['crop_model'] == ''
+    assert store.resolve(own)['crop_model'] == ''
+    assert store.ignored_model_overrides(own) == {'crop_model': 'vendor/type-crop'}

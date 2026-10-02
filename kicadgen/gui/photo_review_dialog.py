@@ -95,7 +95,8 @@ from PyQt6.QtWidgets import (
 )
 
 
-from ..services.component_format import copy_format, paste_format
+from ..services.component_format import (FORMAT_SOURCE_COLOR, FORMAT_TARGET_COLOR,
+                                         copy_format, paste_format)
 from ..services.smd_component_classifier import drop_classifier_identity
 from ..services.messages import tx
 from ..services.photo_yolo import (MOVE_HANDLE, awaiting_user_keep, box_geometry_mm,
@@ -712,6 +713,18 @@ _INFO_AI_ONLY = (
 ## format was copied from and the bodies it was pasted on.
 FORMAT_SOURCE_MARKER = "[sorgente]"
 FORMAT_TARGET_MARKER = "[incollato]"
+
+## The «Copia formato» source must stand out (user, 2026-10-02): a filled
+## yellow box on the photo and a filled yellow list row with dark text.
+FORMAT_SOURCE_FILL_ALPHA = 110
+FORMAT_SOURCE_TEXT_COLOR = "#1e1e2e"
+
+## Fields a detector-stage paste leaves to the target (user, 2026-10-02:
+## «a parte il posizionamento deve copiare ed incollare tutto»): its place on
+## the photo and its identity -- every proposal keeps its own id, name and
+## original detector box. Everything else comes from the source.
+DETECTOR_TARGET_FIELDS = ("_id", "name", "_yolo_proposal_id", "x_mm", "y_mm", "_box",
+                          "_yolo_original_box")
 
 ## Stages of the one review window (HANDOFF 162). STAGE_DETECTOR reviews the
 ## local detector's proposals before the paid AI call; STAGE_INVENTORY the
@@ -1674,6 +1687,7 @@ class PhotoReviewDialog(QDialog):
             checkable=True, tr=tr)
         self.format_button.toggled.connect(self._on_format_toggled)
         self._format_source = None
+        self._format_source_component = None
         self._format_source_row = -1
         self._format_target_rows = []
         self.zoom_out_button = tool_button("zoom-out.svg", "Zoom indietro", "-", tr=tr)
@@ -1976,8 +1990,9 @@ class PhotoReviewDialog(QDialog):
             apply_button.setToolTip(self._tr(
                 "Le proposte tenute vanno al modello AI; annulla per non avviare la richiesta."))
             self.model_button.hide()
-            # Nothing to copy before the AI inventory: no type, package or model.
-            self.format_button.hide()
+            # «Copia formato» c'e' anche qui (utente, 2026-10-02, «copia tutto»):
+            # con la rete SMD questa e' l'ultima occasione per correggere un
+            # riquadro prima che la rete lo legga. Copia misura e classe YOLO.
             self.model_status.setText(self._tr(
                 "I modelli KiCad si scelgono dopo l'inventario AI, nella stessa finestra."))
 
@@ -2122,7 +2137,10 @@ class PhotoReviewDialog(QDialog):
 
         Pasting replaces the FORMAT_FIELDS and the KiCad model of the target
         with the source's (component_format.paste_format) and leaves its
-        position, rotation, name, marking and colour; the outline is rebuilt
+        position, rotation, name, marking and colour. In the detector stage
+        it copies EVERYTHING but the target's place and identity
+        (DETECTOR_TARGET_FIELDS: user, 2026-10-02) and marks the box as set
+        by hand (photo_yolo.mark_manual_box); the outline is rebuilt
         around the same centre and the normalised box refreshed. The paste is
         an edit: an AI-only body left out becomes kept (`_keep_touched`).
         """
@@ -2131,6 +2149,9 @@ class PhotoReviewDialog(QDialog):
         item = self._items[row]
         if self._format_source is None:
             self._format_source = copy_format(item.component)
+            # Nella revisione delle proposte si copia TUTTO tranne posizione
+            # e identita' (DETECTOR_TARGET_FIELDS): serve la riga intera.
+            self._format_source_component = deepcopy(item.component)
             self._format_source_row = row
             name = item.component.get("name") or str(row + 1)
             self._show_format_hint(self._tr(
@@ -2140,7 +2161,21 @@ class PhotoReviewDialog(QDialog):
             return
         if row == self._format_source_row:
             return
-        pasted = paste_format(item.component, self._format_source)
+        if self._stage == STAGE_DETECTOR:
+            pasted = deepcopy(self._format_source_component)
+            for key in DETECTOR_TARGET_FIELDS:
+                if key in item.component:
+                    pasted[key] = deepcopy(item.component[key])
+                else:
+                    pasted.pop(key, None)
+            # Il riquadro ora e' quello deciso da chi guarda, come dopo un
+            # trascinamento; tutti i lati sono cambiati, quindi nessuno resta
+            # «appoggiato alla cucitura di una tessera».
+            mark_manual_box(pasted)
+            pasted.pop("_yolo_clipped_sides", None)
+            pasted.pop("_yolo_clipped_recovery", None)
+        else:
+            pasted = paste_format(item.component, self._format_source)
         item.component.clear()
         item.component.update(pasted)
         item.sync_geometry()
@@ -3023,16 +3058,27 @@ class PhotoReviewDialog(QDialog):
         color = QColor(AI_ONLY_EXCLUDED_COLOR if excluded else "#ef5350" if outside
                        else UNDETERMINED_TYPE_COLOR if undetermined
                        else "#ffad33" if warnings else "#40dc80")
+        # «Copia formato» acceso: sorgente gialla e incollati verdi, gli stessi
+        # colori del pennello nel tab 3D (utente, 2026-10-02: «l'elemento usato
+        # per copiare deve risultare evidenziato»). Vale solo finche' il
+        # pennello e' acceso: spento, ogni corpo torna al colore del suo stato.
+        format_role = (FORMAT_SOURCE_COLOR if index == self._format_source_row
+                       else FORMAT_TARGET_COLOR if index in self._format_target_rows else None)
+        if format_role is not None:
+            color = QColor(format_role)
         # The status pen keeps its colour when selected: the selection is
         # shown by the wide halo behind it, the thicker line and the fill.
-        pen = QPen(color, SELECTED_PEN_WIDTH_PX if item.isSelected() else UNSELECTED_PEN_WIDTH_PX)
+        pen = QPen(color, SELECTED_PEN_WIDTH_PX if item.isSelected() or format_role is not None
+                   else UNSELECTED_PEN_WIDTH_PX)
         pen.setCosmetic(True)
         if excluded:
             pen.setStyle(Qt.PenStyle.DashLine)
         item.setPen(pen)
         item.halo.setVisible(item.isSelected())
         fill = QColor(color)
-        fill.setAlpha(60 if item.isSelected() else AI_ONLY_EXCLUDED_FILL_ALPHA if excluded else 15)
+        fill.setAlpha(FORMAT_SOURCE_FILL_ALPHA if format_role == FORMAT_SOURCE_COLOR
+                      else 60 if item.isSelected() else AI_ONLY_EXCLUDED_FILL_ALPHA if excluded
+                      else 15)
         item.setBrush(QBrush(fill))
         # Fra rettangoli sovrapposti il clic va al PIU' PICCOLO: sopra i piu'
         # piccoli, a qualunque posto dell'elenco (utente, 2026-09-24: una
@@ -3047,7 +3093,10 @@ class PhotoReviewDialog(QDialog):
         item.number.setText(str(index + 1))
         if detector:
             # The detector's row: class, confidence, state, size.
-            text = f"{index + 1}. " + detector_row_label(item.component, self._tr)
+            text = (f"{index + 1}. " + detector_row_label(item.component, self._tr)
+                    + (" " + self._tr(FORMAT_SOURCE_MARKER) if index == self._format_source_row
+                       else " " + self._tr(FORMAT_TARGET_MARKER)
+                       if index in self._format_target_rows else ""))
         else:
             name = item.component.get("name") or item.component.get("kind") or self._tr("Componente")
             text = (f"{index + 1}. {name}"
@@ -3060,7 +3109,16 @@ class PhotoReviewDialog(QDialog):
                        if index in self._format_target_rows else ""))
         text += " [!]" if warnings else ""
         self.component_list.item(index).setText(text)
-        self.component_list.item(index).setForeground(color)
+        row_item = self.component_list.item(index)
+        if format_role == FORMAT_SOURCE_COLOR:
+            # La sorgente della copia si riconosce a colpo d'occhio: riga piena
+            # gialla con testo scuro (utente, 2026-10-02: «deve essere piu'
+            # evidente quando lo seleziono per fare copie»).
+            row_item.setBackground(QBrush(QColor(FORMAT_SOURCE_COLOR)))
+            row_item.setForeground(QColor(FORMAT_SOURCE_TEXT_COLOR))
+        else:
+            row_item.setBackground(QBrush())
+            row_item.setForeground(color)
         # Tooltip in HTML (HANDOFF 154): Qt lays rich text out at a fixed
         # width and wraps it, while plain text stays on one line however long
         # it is, and three warnings ran past the screen edge. Everything that

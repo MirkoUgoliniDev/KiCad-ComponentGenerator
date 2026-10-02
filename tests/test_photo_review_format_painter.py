@@ -3,8 +3,9 @@
 The brush of the 3D tab, before the generation: select a body, switch the
 brush on, click the others. Each rule has its positive and its negative
 case: the source keeps its own data, the targets take the format and keep
-their position, a body never clicked is untouched, the detector stage has no
-brush at all.
+their position, a body never clicked is untouched. Since 2026-10-02 («copia
+tutto») the detector stage has the brush too, and it also carries the
+detector's class.
 """
 import os
 
@@ -109,9 +110,56 @@ def test_switching_off_or_escape_ends_the_session_and_keeps_the_pastes(dialog):
     assert dialog.isVisible() or True  # Escape put the brush down, it did not close the dialog
 
 
-def test_the_detector_stage_has_no_brush(qapp):
-    rows = [dict(_id=1, _box=(.2, .2, .4, .4), name="YOLO candidate 1", kind="generic",
+def test_the_detector_stage_copies_everything_but_the_place(qapp):
+    """@brief A box YOLO drew too tight takes everything of a right one (LED 6 case).
+
+    @note User, 2026-10-02: «a parte il posizionamento deve copiare ed
+        incollare tutto». Negative: the target keeps its centre, id and name;
+        the source and a body never clicked are unchanged.
+    """
+    rows = [dict(_id=15, _box=(.2, .2, .3, .3), name="led 15", kind="led", x_mm=-10.0, y_mm=0.0,
+                 length_mm=4.1, width_mm=1.9, height_mm=0.6, rotation_deg=90.0,
+                 _yolo_class="led", _yolo_confidence=.77, package="LED 1206"),
+            dict(_id=6, _box=(.6, .2, .65, .25), name="resistor 6", kind="resistor", x_mm=5.0,
+                 y_mm=2.0, length_mm=3.1, width_mm=1.2, height_mm=0.5, rotation_deg=0.0,
+                 _yolo_class="resistor", _yolo_confidence=.41, _yolo_clipped_sides=["right"]),
+            dict(_id=7, _box=(.8, .2, .85, .25), name="ic 7", kind="ic", x_mm=12.0, y_mm=2.0,
+                 length_mm=2.0, width_mm=2.0, height_mm=1.0, rotation_deg=0.0,
                  _yolo_class="ic", _yolo_confidence=.9)]
-    dialog = PhotoReviewDialog(_png(), rows, 40, 20, stage=STAGE_DETECTOR)
-    assert dialog.format_button.isHidden()
-    dialog.close()
+    dialog = PhotoReviewDialog(_png(), [dict(r) for r in rows], 40, 20, stage=STAGE_DETECTOR)
+    try:
+        assert not dialog.format_button.isHidden()
+        dialog._select_row(0)
+        dialog.format_button.setChecked(True)
+        dialog._select_row(1)
+        source, target, other = dialog.get_components()
+        assert (target["length_mm"], target["width_mm"]) == (4.1, 1.9)
+        assert target["_yolo_class"] == "led" and target["kind"] == "led"
+        assert (target["x_mm"], target["y_mm"]) == (5.0, 2.0)
+        assert (target["_id"], target["name"]) == (6, "resistor 6")
+        assert target["_yolo_confidence"] == .77 and target["rotation_deg"] == 90.0
+        assert target["height_mm"] == 0.6 and target["package"] == "LED 1206"
+        assert target["_yolo_manual_box"] is True
+        assert "_yolo_clipped_sides" not in target
+        assert target["_box"] == pytest.approx(dialog.photo_transform.normalized_box(target))
+        assert source["_yolo_class"] == "led" and source["_id"] == 15 and source["x_mm"] == -10.0
+        assert other["_yolo_class"] == "ic" and other["length_mm"] == 2.0
+        # The list on the right says it, with the 3D brush colours.
+        from kicadgen.services.component_format import FORMAT_SOURCE_COLOR, FORMAT_TARGET_COLOR
+        rows = [dialog.component_list.item(i) for i in range(3)]
+        assert FORMAT_SOURCE_MARKER in rows[0].text()
+        assert FORMAT_TARGET_MARKER in rows[1].text() and "4.1" in rows[1].text()
+        assert FORMAT_SOURCE_MARKER not in rows[2].text() and FORMAT_TARGET_MARKER not in rows[2].text()
+        # The source stands out: filled yellow row, filled yellow box.
+        assert rows[0].background().color().name() == FORMAT_SOURCE_COLOR
+        assert rows[1].foreground().color().name() == FORMAT_TARGET_COLOR
+        assert dialog._items[0].pen().color().name() == FORMAT_SOURCE_COLOR
+        assert dialog._items[0].brush().color().alpha() > dialog._items[1].brush().color().alpha()
+        # Negative: the brush off, every body back to its own state colour.
+        dialog.format_button.setChecked(False)
+        assert all(FORMAT_SOURCE_MARKER not in r.text() and FORMAT_TARGET_MARKER not in r.text()
+                   for r in rows)
+        assert dialog._items[0].pen().color().name() != FORMAT_SOURCE_COLOR
+        assert rows[0].background().style() == Qt.BrushStyle.NoBrush
+    finally:
+        dialog.close()

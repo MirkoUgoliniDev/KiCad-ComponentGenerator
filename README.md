@@ -309,8 +309,9 @@ The YOLO model weights and the training dataset **have their own licenses,
 which may differ from the code's**. They are listed one by one in
 `THIRD_PARTY_NOTICES.md`, together with the Python dependencies. In short:
 
-- No weights are stored in this repository (`models/*.pt` and `models/*.onnx`
-  are ignored by Git). The checkpoints used during development declare
+- No weights are stored in this repository (`.pt` and `.onnx` files under
+  `models/` are ignored by Git; detectors go in `models/yolo/`, the SMD
+  network in `models/smd/`). The checkpoints used during development declare
   AGPL-3.0 in their metadata. The license of the base ONNX model is still
   unresolved (MIT model card, AGPL-3.0 metadata).
 - The Roboflow YOLO26 models were trained on the

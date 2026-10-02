@@ -76,7 +76,7 @@ The script returns to the caller's folder when it ends, also on failure.
 
 ### YOLO weights: not shipped
 
-`models\pcb_yolov8s.onnx` is **not** in the package by default: its license
+`models\yolo\pcb_yolov8s.onnx` is **not** in the package by default: its license
 is ambiguous (MIT model card, AGPL metadata; see `docs\yolo-photo-workflow.md`).
 `-IncludeYoloModel` ships it; use it only once redistribution is allowed.
 Without the weights the program works; the local detector asks for an

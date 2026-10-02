@@ -29,12 +29,12 @@ use a virtual machine or Windows Sandbox.
 app-image: only the executable folder. msi: executable and installer.
 
 .PARAMETER IncludeYoloModel
-Ship models\pcb_yolov8s.onnx; off by default (license to be clarified).
+Ship models\yolo\pcb_yolov8s.onnx; off by default (license to be clarified).
 #>
 param(
     [ValidateSet('app-image', 'msi')]
     [string]$Package = 'msi',
-    # Include models\pcb_yolov8s.onnx. OFF by default: the license of those
+    # Include models\yolo\pcb_yolov8s.onnx. OFF by default: the license of those
     # weights is ambiguous (MIT model card, AGPL metadata) and they must not be
     # redistributed until it is clarified.
     [switch]$IncludeYoloModel
@@ -120,7 +120,7 @@ Assert-LastCommand 'Rendering the application icon'
 
 # -- 5. PyInstaller ---------------------------------------------------------------
 if ($IncludeYoloModel) {
-    if (-not (Test-Path (Join-Path $Root 'models\pcb_yolov8s.onnx'))) { throw 'models\pcb_yolov8s.onnx not found.' }
+    if (-not (Test-Path (Join-Path $Root 'models\yolo\pcb_yolov8s.onnx'))) { throw 'models\yolo\pcb_yolov8s.onnx not found.' }
     Write-Host 'Including the YOLO weights (license must allow redistribution).' -ForegroundColor Yellow
     $env:KICADGEN_BUNDLE_YOLO_MODEL = '1'
 } else {

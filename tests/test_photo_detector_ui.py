@@ -133,10 +133,12 @@ def test_new_window_defaults_to_smd_network_without_restoring_custom_session_pat
     @note Il percorso scelto nella sessione precedente non torna: la finestra
         nuova usa i pesi YOLO verificati per la rete SMD.
     """
-    default_path = tmp_path / "models" / "pcb_component_detector_yolov8m_best.pt"
-    default_path.parent.mkdir()
+    default_path = tmp_path / "models" / "yolo" / "pcb_component_detector_yolov8m_best.pt"
+    default_path.parent.mkdir(parents=True)
     default_path.touch()
-    monkeypatch.setattr(gui, "resource_path", lambda *parts: tmp_path.joinpath(*parts))
+    # Since 2026-10-02 the detectors live in models/yolo (app_paths.yolo_model_path).
+    monkeypatch.setattr(gui, "yolo_weights_path",
+                        lambda name: tmp_path.joinpath("models", "yolo", name))
     window.combo_photo_detector.setCurrentIndex(0)
     window.field_yolo_model.setText("session.onnx")
 
@@ -202,7 +204,7 @@ def test_missing_smd_network_stops_before_paid_extraction(window, monkeypatch):
     events, warnings = [], []
     window.combo_photo_detector.setCurrentIndex(window.combo_photo_detector.findData('yolo_smd'))
     _fake_yolo(monkeypatch, lambda path: events.append('yolo'))
-    def missing():
+    def missing(path=None):
         events.append('smd')
         raise FileNotFoundError('smd_classifier.pt non trovato')
     monkeypatch.setattr(smd, 'validate_smd_setup', missing)
@@ -342,6 +344,10 @@ def test_preflight_error_preserves_results_and_never_starts_api(window, monkeypa
     assert window.ai_progress_text.toPlainText() == "previous log"
     assert window.ai_elements_list.item(0).text() == "previous detection"
     assert window.btn_photo_comparison.isEnabled()
+    # Back in use after the short pause that lets queued clicks find it
+    # disabled (2026-10-02, «Preparazione…»).
+    from PyQt6.QtTest import QTest
+    QTest.qWait(gui.EXTRACT_REENABLE_DELAY_MS + 100)
     assert window.btn_extract_ai.isEnabled()
     assert window.tabs.isEnabled()
 
@@ -529,3 +535,54 @@ def test_the_yolo_browse_command_is_an_icon_with_a_tooltip(window):  # noqa: F81
     assert lines[0] == window._photo_detector_text("browse")
     assert lines[1] == window._photo_detector_text("picker")
     assert button.accessibleName() == window._photo_detector_text("picker")
+
+
+@pytest.mark.parametrize("detector, visible", [("yolo_smd", True), ("yolo", False), ("ai", False)])
+def test_the_smd_model_row_shows_only_with_the_smd_network(window, detector, visible):
+    """@brief «Modello rete SMD» (user, 2026-10-02) appears like «Modello YOLO», only for its mode."""
+    window.show()
+    window.combo_photo_detector.setCurrentIndex(window.combo_photo_detector.findData(detector))
+    window._on_photo_detector_changed()
+    assert window.field_smd_model.isVisibleTo(window) is visible
+    assert window.btn_pick_smd_model.isVisibleTo(window) is visible
+    assert str(gui.smd_weights_path()) in window.field_smd_model.placeholderText()
+    assert "smd" in str(gui.smd_weights_path().parent).lower()
+
+
+def test_the_chosen_smd_network_is_checked_and_forwarded(window, monkeypatch, tmp_path):
+    """@brief The session file goes to the check before paying and to the worker.
+
+    @note Negative: an empty field means the default (None is forwarded).
+    """
+    from kicadgen.services import smd_component_classifier as smd
+    checked = []
+    monkeypatch.setattr(smd, "validate_smd_setup", lambda path=None: checked.append(path))
+    _fake_yolo(monkeypatch, lambda path: None)
+    monkeypatch.setattr(window, "_selected_documents", lambda: ([Path("board.png")], None))
+    monkeypatch.setattr(window, "_ensure_api_key", lambda: True)
+    monkeypatch.setattr(gui.ExtractWorker, "start", lambda self: None)
+    window.combo_photo_detector.setCurrentIndex(window.combo_photo_detector.findData("yolo_smd"))
+    chosen = tmp_path / "other_network.pt"
+    window.field_smd_model.setText(str(chosen))
+    window._extract_with_ai()
+    assert checked == [chosen]
+    assert window._extract_worker.smd_model_path == chosen
+    window._on_extract_finished()
+    window.field_smd_model.clear()
+    checked.clear()
+    window._extract_with_ai()
+    assert checked == [None] and window._extract_worker.smd_model_path is None
+    window._on_extract_finished()
+
+
+def test_the_smd_picker_opens_in_the_smd_folder(window, monkeypatch):
+    seen = {}
+
+    def dialog(parent, title, start, filters):
+        seen.update(start=start, filters=filters)
+        return "", ""
+    monkeypatch.setattr(gui.QFileDialog, "getOpenFileName", dialog)
+    window._pick_session_smd_model()
+    assert seen["start"] == str(gui.resource_path(*gui.SMD_MODELS_DIR))
+    assert "*.pt" in seen["filters"]
+    assert window.field_smd_model.text() == ""

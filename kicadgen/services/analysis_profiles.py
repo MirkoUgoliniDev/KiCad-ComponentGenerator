@@ -417,11 +417,15 @@ class ProfileStore:
             return dict(db.execute('SELECT name,value FROM ai_overrides WHERE type_key=?',(key,)))
 
     def resolve(self,key=''):
-        """@brief Return the effective AI values: global defaults updated with the overrides of `key`.
+        """@brief Return the effective AI values: global defaults updated with the prompt overrides of `key`.
 
         No instructions are composed and no persisted text is changed.
         @param key Component type key; empty for the global defaults only.
         @throws ProfileError When `key` is not in the catalogue.
+        @note One model for every analysis (user, 2026-10-02): a type's
+            override of a MODEL_FIELDS entry is ignored (see
+            ignored_model_overrides), every model field resolves to the global
+            'model', and 'crop_model' to blank (= that same model).
         """
         with self._connect() as db:
             db.execute('BEGIN')
@@ -429,8 +433,28 @@ class ProfileStore:
             if key:
                 if not db.execute('SELECT 1 FROM component_types WHERE key=?',(key,)).fetchone():
                     raise ProfileError(tx("Tipologia non trovata nel database."))
-                values.update(dict(db.execute('SELECT name,value FROM ai_overrides WHERE type_key=?',(key,))))
+                values.update({name: value for name, value in db.execute(
+                    'SELECT name,value FROM ai_overrides WHERE type_key=?',(key,))
+                    if name not in MODEL_FIELDS})
+            model = values.get('model')
+            for name in ('vision_model', 'verification_model'):
+                if name in values:
+                    values[name] = model
+            if 'crop_model' in values:
+                values['crop_model'] = ''
             return values
+
+    def ignored_model_overrides(self,key):
+        """@brief Model overrides stored for the type `key` that resolve() now ignores.
+
+        @param key Component type key (empty: none).
+        @return {field: model} of the non-blank model overrides, so the caller
+            can say they are no longer used.
+        """
+        if not key:
+            return {}
+        return {name: value for name, value in self.overrides(key).items()
+                if name in MODEL_FIELDS and isinstance(value, str) and value.strip()}
 
     def snapshot(self,key=''):
         """@brief Return resolved values with the type image instructions appended to the whole-board photo prompts.

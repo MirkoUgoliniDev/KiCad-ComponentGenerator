@@ -752,7 +752,8 @@ def test_single_default_model_is_used_for_vision(window):
     settings = gui.LlmSettingsDialog("prompt", "vendor/datasheet", window,
                                      current_vision_model=window._vision_model())
     try:
-        assert settings.vision_model() == window._default_model()
+        # One model (2026-10-02): the dialog's photo model is its single model.
+        assert settings.vision_model() == settings.model() == "vendor/datasheet"
     finally:
         settings.close()
 
@@ -772,7 +773,9 @@ def test_custom_profile_drives_geometry_family_and_worker_snapshot(window, monke
     assert window.group_castellated.isChecked()
     assert 'istruzioni specifiche' in window.field_component_prompt.toPlainText()
     assert 'note libere' in window.field_component_prompt.toPlainText()
-    assert window.combo_model.currentText() == 'Predefinito: type/data'
+    # One model (2026-10-02): the type's own model is ignored, the global one shows.
+    global_model = store.defaults()['model']
+    assert window.combo_model.currentText() == 'Predefinito: ' + global_model
     monkeypatch.setattr(gui.ExtractWorker, 'start', lambda self: None)
     item = QListWidgetItem('board.png')
     item.setCheckState(Qt.CheckState.Checked)
@@ -785,7 +788,8 @@ def test_custom_profile_drives_geometry_family_and_worker_snapshot(window, monke
         window.combo_photo_detector.findData('ai'))
     window._extract_with_ai()
     worker = window._extract_worker
-    assert (worker.model, worker.vision_model, worker.verification_model) == ('type/data', 'type/data', 'type/data')
+    assert (worker.model, worker.vision_model, worker.verification_model) == (
+        global_model, global_model, global_model)
     assert worker.system_prompt == 'type prompt'
     assert worker.grounding_prompt.startswith('ground') and 'extra foto' in worker.grounding_prompt
     assert worker.verification_prompt.startswith('verify') and 'extra foto' in worker.verification_prompt
@@ -793,10 +797,10 @@ def test_custom_profile_drives_geometry_family_and_worker_snapshot(window, monke
     # The per-body crop prompt never receives the whole-board image
     # instructions (HANDOFF 146 V3).
     assert worker.crop_prompt == 'crops'
-    assert worker.crop_model == 'type/crop-reader'
+    assert worker.crop_model == ''  # Blank: the crops are read with the same single model.
     assert 'istruzioni specifiche' in worker.extra_instructions
     store.save_type(key, label='changed', family='single_smd', overrides={'model': 'next'})
-    assert worker.model == 'type/data'  # Running request is isolated from later edits.
+    assert worker.model == global_model  # Running request is isolated from later edits.
     window._on_extract_finished()
 
 

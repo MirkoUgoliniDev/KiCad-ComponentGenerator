@@ -408,13 +408,12 @@ def test_relaunch_reads_every_body_with_the_crop_prompt_of_the_profile(prepared,
 
 
 @pytest.mark.parametrize('stored', ['vendor/crop-reader', ''])
-def test_relaunch_reads_the_crops_with_the_crop_model_of_the_profile(prepared, monkeypatch,
-                                                                     stored):
-    """@brief HANDOFF 150: the relaunch reads the crops with the profile's crop model.
+def test_relaunch_reads_the_crops_with_the_single_model(prepared, monkeypatch, stored):
+    """@brief One model for every request (user, 2026-10-02): a stored crop model is ignored.
 
-    Set, every 'observe_body' request carries it while the single inventory
-    request keeps the photo model; blank (the factory value), the crops go to
-    the photo model as before.
+    Before, HANDOFF 150 sent the crops to the profile's crop model. Now a value
+    left in the database (old profiles) changes nothing: the crops go to the
+    same model as the inventory request.
     """
     import kicadgen.services.openrouter as openrouter
     window, _cache, calls, _started, warnings = prepared
@@ -427,11 +426,11 @@ def test_relaunch_reads_the_crops_with_the_crop_model_of_the_profile(prepared, m
     window._reopen_detector_review()
     window.btn_relaunch_inventory.click()
     worker = _run_worker(window)
-    assert worker.crop_model == window.profile_store.snapshot(window._profile_key())['crop_model'] == stored
+    assert worker.crop_model == window.profile_store.snapshot(window._profile_key())['crop_model'] == ''
     assert warnings == [] and len(calls) == 1
     assert calls[0]['model'] == window._photo_detector_model()
     assert len(crop_calls) == 2
-    assert {c['model'] for c in crop_calls} == {stored or window._photo_detector_model()}
+    assert {c['model'] for c in crop_calls} == {window._photo_detector_model()}
 
 
 def test_relaunch_after_restart_updates_components_without_auto_generation(prepared, monkeypatch):

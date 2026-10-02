@@ -11,6 +11,142 @@
   0603/0805, SOT-23 36) e 2 magenta (fuse 24, module 27). PROSSIMI PASSI da
   proporre all'utente uno alla volta: misure YOLO gonfie, varianti SOT-23/
   SOIC-8, fuse/module, domanda archivio-vs-rete (vedi sotto).
+- **FATTO (non committato) (02/10 pomeriggio, autorizzato «ok procedi»): pulsante
+  «Estrai parametri con AI» che reagisce subito.** _extract_with_ai ->
+  _show_extract_preparing (disabilitato, wf-loading.svg, «Preparazione…»,
+  processEvents senza input utente) -> _extract_with_ai_prepared;
+  _finish_extract_preparation ripristina icona e testo se la corsa non e'
+  partita e riabilita dopo EXTRACT_REENABLE_DELAY_MS (300 ms, tempo
+  d'interfaccia: i clic accodati trovano il pulsante spento); la clessidra
+  resta durante «Analisi in corso...», _end_extraction_busy rimette
+  l'icona. Test: test_extract_button_feedback.py; preflight di
+  test_photo_detector_ui aspetta la pausa. Misurato: ~7 s di
+  interfaccia ferma prima della modale (validate_yolo_setup 4.6 s +
+  validate_smd_setup 2.7 s sul thread GUI) -> clic ripetuti. Piano: al clic,
+  subito pulsante disabilitato, icona clessidra, scritta «Preparazione…»
+  (ridisegno forzato), secondo clic ignorato; ripristino su ogni uscita
+  anticipata. Verifiche ancora sul thread GUI (icona ferma; in background =
+  lavoro piu' grosso, da proporre dopo).
+- **FATTO (non committato) (02/10 sera, autorizzato «si facciamo 2 cartelle»): modelli in
+  due cartelle + riga «Modello rete SMD».** app_paths: YOLO_MODELS_DIR,
+  SMD_MODELS_DIR, DEFAULT_YOLO_ONNX/PT, DEFAULT_SMD_MODEL, yolo_model_path(),
+  smd_model_path(); file SPOSTATI sul disco in models/yolo e models/smd;
+  .gitignore esteso a models/**/*.pt|onnx (verificato: git non li vede);
+  yolo_models.model_role riconosce la rete dalla CARTELLA models/smd;
+  packaging/KiCadGen.spec copia models/yolo/pcb_yolov8s.onnx in models/yolo,
+  build-windows.ps1 aggiornato (parsing PowerShell: 0 errori),
+  PACKAGING-WINDOWS-MSI.md, README, CLASSIFICATORE_SMD.md. Installer NON
+  ricompilato ne' provato (procedura installer-change: VM/Sandbox).
+  Riga GUI: label/field/btn_pick_smd_model sotto «Modello YOLO», visibile
+  solo con yolo_smd (non frozen), salvata col progetto come il campo YOLO
+  (PROJECT_WIDGETS), QFileDialog su models/smd con filtro *.pt;
+  validate_smd_setup(file scelto) prima di pagare; smd_model_path passato
+  da ExtractWorker / ReconcileWorker fino a classify_smd_rows ->
+  classify_photo_boxes(model_path); fase «Rete SMD locale» col nome del
+  file e riga di log col percorso. Test aggiunti e path-test aggiornati.
+  Suite completa sul codice di fine giornata (.venv/claude-suite9-a/b.log,
+  uscita 0): 2987 + 3599 = 6586 passati, 11 saltati, 2 xfail, 19
+  sottotest, 0 falliti. COMMITTATO su ADVANCED, pushato e unito in main
+  (utente: «committa, pusha, mergia in main e torna qui»; hash in git log). Suite prima di iniziare
+  (.venv/claude-suite8-a/b.log): 2986 + 3595 = 6581 passati, 0 falliti.
+  Piano: models/yolo/ (pcb_yolov8s.onnx, pcb_component_detector_*.pt) e
+  models/smd/ (smd_classifier.pt); file spostati sul disco (sono esclusi da
+  git); percorsi predefiniti, selettore YOLO (solo models/yolo), validazione,
+  packaging/KiCadGen.spec (skill installer-change) e documentazione
+  aggiornati; nuova riga «Modello rete SMD» sotto «Modello YOLO», visibile
+  solo con yolo_smd, scelta di sessione, validata prima di partire, portata
+  fino a classify_photo_boxes (estrazione e rilancio) e scritta nel log.
+- **FATTO (non committato) (02/10, richiesta utente con screenshot: «quando clicco il
+  pulsante deve rimanere visibile con il cambio di icona e testo, sembra
+  sparire, si sposta la scheda; prima cambia l'icona con un loader poi fai
+  partire l'analisi; l'elemento selezionato nelle proposte YOLO deve essere
+  piu' evidente quando lo seleziono per fare copie»).** Piano: riferimento
+  all'area scorrevole del tab Progetto; ensureWidgetVisible del pulsante al
+  clic, a fine _begin_ai_run e al giro successivo del ciclo eventi; sorgente
+  del pennello con sfondo giallo pieno nella lista e riempimento giallo sulla
+  foto. Implementato: self._project_scroll, _keep_extract_button_visible
+  (ensureWidgetVisible) in _show_extract_preparing e a fine _begin_ai_run
+  (subito e con QTimer 0); FORMAT_SOURCE_FILL_ALPHA 110 e
+  FORMAT_SOURCE_TEXT_COLOR per la riga sorgente. Test aggiornati/aggiunti.
+  NOTA: la scheda «Analisi AI in corso» (overlay) puo' comunque coprire il
+  pulsante una volta partita la corsa: e' la modale di avanzamento.
+- **FATTO (non committato) (02/10, autorizzato «copia tutto» + «e chiaramente
+  incolla»): «Copia formato» anche nella
+  revisione delle proposte del rilevatore** (nascosto dal punto 172 perche'
+  «prima dell'inventario non c'e' niente da copiare»; con la rete SMD e'
+  l'ultimo momento per correggere un riquadro, es. LED 6). Copia la misura
+  del riquadro (centro del bersaglio invariato) E la classe YOLO; il
+  riquadro diventa «ritoccato a mano» come per un trascinamento.
+  photo_review_dialog: pulsante non piu' nascosto nella fase detector.
+  CORRETTO dopo la prova dell'utente («a parte il posizionamento deve copiare
+  ed incollare tutto»): nella fase detector si copia la riga INTERA della
+  sorgente tranne DETECTOR_TARGET_FIELDS (_id, name, _yolo_proposal_id,
+  x_mm, y_mm, _box, _yolo_original_box: posto e identita' del bersaglio),
+  confidenza e rotazione comprese; dopo l'incolla mark_manual_box e tolti
+  _yolo_clipped_sides/_yolo_clipped_recovery (tutti i lati cambiati).
+  FATTO (richiesta utente: «deve aggiornare a DX il contenuto ... e
+  l'elemento usato per copiare deve risultare evidenziato, guarda come hai
+  fatto in altri contesti»): stessi colori del 3D (preview_3d_vtk
+  FORMAT_SOURCE_COLOR giallo #f9e2af, FORMAT_TARGET_COLOR verde #a6e3a1) per
+  contorno e riga della lista, marcatori [sorgente]/[incollato] anche nella
+  fase detector. Colori spostati in services/component_format (unica
+  definizione, importata da preview_3d_vtk e photo_review_dialog); valgono
+  solo a pennello acceso, poi torna il colore dello stato. Test: il vecchio «la fase
+  detector non ha pennello» sostituito dal contratto nuovo (positivo +
+  negativi: centro, confidenza, sorgente e corpo non toccato invariati).
+- **FATTO (02/10 pomeriggio, autorizzato «ok»): tab «Modello» unico.**
+  Scoperta: i campi «Modello foto» (vision_model) e verification_model della
+  finestra «Modello e prompt di sistema LLM» vengono salvati ma NON letti
+  (_vision_model/_verification_model tornano il modello effettivo; log
+  «Modello AI unico»). Piano: nuovo primo tab «Modello» con sorgente
+  DeepSeek / OpenRouter, elenco modelli della sorgente, chiave e saldo; un
+  solo modello per tutte le interrogazioni; tolti i campi modello dai tab
+  Datasheet/Localizzazione/Verifica e il campo di profilo «Modello lettura
+  ritagli» (crop_model) -- conseguenza dichiarata all'utente. La tendina di
+  sessione «Modello AI» della finestra principale RESTA (scelta utente).
+  Seconda risposta dell'utente: «Si', tolgo tutto» -- anche i campi modello
+  PER TIPOLOGIA di «Gestione tipologie e profili AI» (model, vision_model,
+  verification_model, crop_model) spariscono; override gia' salvati ignorati
+  con una riga di log.
+  FATTO (non committato): settings_dialog con tab «Modello» (sorgente
+  DeepSeek/OpenRouter, modello unico, stato della chiave senza mostrarla;
+  il saldo resta nella riga «Credito AI» della finestra principale, non
+  nella finestra: niente rete in un dialogo modale) + tab dei soli prompt;
+  pick_model(provider=...) blocca la sorgente; profile_dialog senza campi
+  modello ne' «Modello lettura ritagli»; ProfileStore.resolve ignora gli
+  override di MODEL_FIELDS (modelli = 'model' globale, crop_model vuoto) e
+  ignored_model_overrides li segnala al log dell'estrazione; aiuti
+  help.settings.model / stage.0 / stage.2 riscritti nelle 4 lingue con i
+  vecchi testi in SUPERSEDED_DEFAULTS. Test riscritti sul contratto nuovo
+  (stage_prompt_settings, profile_dialog, analysis_profiles,
+  photo_inventory_gui). Il test ha trovato un mio difetto (variabile
+  `provider` coperta dal ciclo del selettore), corretto.
+- **FATTO (02/10 pomeriggio, richiesta dell'utente: «rimuovi questo» +
+  risposta «Sempre spento»).** Togliere la casella «Ragionamento DeepSeek»
+  (punto 161) e la funzione: le richieste DeepSeek non chiedono mai il
+  ragionamento. Suite prima della modifica: 2990 + 3593 = 6583 passati,
+  9 saltati, 2 xfail, 19 sottotest, 0 falliti (.venv/claude-suite5-a/b.log).
+- **FATTO (02/10 dopo pranzo, autorizzato: risposta «Proporre la piu'
+  vicina» + «ok»).** Nell'uscita della rete (`_classifier_geometry_choice`),
+  quando la banda di pareggio (entro NAME_TIEBREAK_MARGIN, una sola base)
+  ha piu' taglie NON omogenee, si propone come provvisoria la piu' vicina
+  alla misura, solo con ricerca completa; le altre restano nel selettore e il
+  candidato scelto dice fra quali taglie era il pareggio. Vale anche per
+  SOT-23/SOT-23W e varianti SOIC-8 (detto all'utente). Rischio dichiarato:
+  con riquadri gonfi puo' scegliere la taglia piu' grande.
+  FATTO (non committato): `tie_alternatives` sul candidato,
+  `size_tie_alternatives` nel report, motivo tradotto nelle 4 lingue. Banco
+  RS4851: 39/42 provvisori (chip_R 10/14 -> 0603, 16 -> 0805; SOIC-8 2 e
+  SOT-23 36 ora agganciati), 1 da rivedere (chip_LED 6, solo SideView), 2
+  magenta. Confine sottile: chip_R 14 (1.91x1.00) -> 0603, chip_R 12
+  (1.91x1.05) -> 0805. Test: contratto del vecchio test «restano nel
+  selettore» aggiornato alla decisione; positivo e negativo (ricerca
+  incompleta) aggiunti.
+  LED 6 (chip_LED, riquadro YOLO troppo stretto: taglia il cappuccio destro,
+  3.14x1.22 contro ~3.6x2.0 degli altri LED 1206): l'UTENTE NON VUOLE
+  personalizzazioni ad hoc (02/10). Resta da correggere a mano nella
+  revisione o nel selettore. Verificato che TorchObjectDetection fa lo
+  stesso (ritaglio = box + 10%, misura = box YOLO senza margine).
 - **STORIA DELLA GIORNATA (02/10). Rete SMD locale come percorso
   principale, AI solo sui corpi irrisolti.** Diagnosi di partenza: nella corsa
   RS485 delle 09:57 il selettore era su «YOLO» (pcb_yolov8s.onnx + DeepSeek):

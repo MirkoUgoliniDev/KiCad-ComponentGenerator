@@ -11,8 +11,6 @@ from PyQt6.QtWidgets import (
 )
 
 from ..services.analysis_profiles import FAMILIES, ProfileError
-from ..services.openrouter import DATASHEET_CAPABILITIES, PHOTO_CAPABILITIES
-from .model_dialog import pick_model
 
 ASSETS = Path(__file__).parent / 'assets'
 STAGES = (
@@ -20,22 +18,6 @@ STAGES = (
     ('Localizzazione foto', 'vision_model', 'grounding_prompt'),
     ('Verifica foto', 'verification_model', 'verification_prompt'),
 )
-#: Caption of the «Modello lettura ritagli» line in the «Lettura ritagli» tab
-#: (HANDOFF 150): the profile field 'crop_model', blank by default.
-CROP_MODEL_CAPTION = 'Modello lettura ritagli (vuoto = modello della foto)'
-#: Note under that line (HANDOFF 146 V4 and 150, user decisions): the tab sits
-#: on the «Localizzazione foto» page, whose «Modello LLM» the crop reading
-#: does NOT use. With the field blank the reading is sent with the model of
-#: the paid call on the photograph: the session choice in the Project tab,
-#: otherwise the extraction model (main_window._photo_detector_model,
-#: forwarded as classifier_model by datasheet_extractor). With a model set,
-#: that model serves the crop readings only, and their cost goes to its
-#: provider.
-CROP_MODEL_NOTE = ('Con il campo vuoto questa lettura usa il modello della chiamata a pagamento '
-                   'sulla foto (scelto nel tab Progetto, altrimenti il modello dell\'estrazione), '
-                   'non il Modello LLM di questa pagina. Con un modello impostato, quel modello '
-                   'viene usato solo per le letture dei ritagli e il loro costo va al suo '
-                   'fornitore.')
 HELP = (
     'Legge quote e parametri dai documenti. Il prompt base definisce il comportamento '
     'dell’analisi; le istruzioni specifiche della tipologia vengono aggiunte al prompt '
@@ -144,7 +126,9 @@ class ProfileEditor(QDialog):
             column = QVBoxLayout(page)
             self.tabs.addTab(page, title)
             header = QHBoxLayout()
-            header.addWidget(QLabel('Modello LLM:'), 1)
+            # Nessun modello per tipologia (utente, 2026-10-02): il modello e'
+            # unico, si sceglie nel tab «Modello» delle impostazioni LLM.
+            header.addStretch(1)
             info = icon_button('', 'info.svg', lambda checked=False, i=index: self._info(i))
             info_label = (
                 self.i18n.tr("tooltip.info_section", section=self.i18n.text(title))
@@ -156,7 +140,6 @@ class ProfileEditor(QDialog):
             self.info_buttons.append(info)
             header.addWidget(info)
             column.addLayout(header)
-            self._add_field(column, model, overrides, model=True)
             if index == 1:
                 sub = QTabWidget()
                 column.addWidget(sub, 1)
@@ -166,21 +149,6 @@ class ProfileEditor(QDialog):
                     child = QWidget()
                     inner = QVBoxLayout(child)
                     sub.addTab(child, caption)
-                    if field == 'crop_prompt':
-                        # HANDOFF 150: the crop reading has its own optional
-                        # model, above its prompt, with the same picker and
-                        # inheritance rules as the stage models. Blank = the
-                        # model of the paid call on the photograph
-                        # (datasheet_extractor classifier_model <-
-                        # main_window._photo_detector_model), see the note.
-                        caption = QLabel(CROP_MODEL_CAPTION)
-                        caption.setObjectName('crop_model_caption')
-                        inner.addWidget(caption)
-                        self._add_field(inner, 'crop_model', overrides, model=True)
-                        note = QLabel(CROP_MODEL_NOTE)
-                        note.setObjectName('crop_model_note')
-                        note.setWordWrap(True)
-                        inner.addWidget(note)
                     self._add_field(inner, field, overrides)
             elif index == 0 and self.is_type:
                 sub = QTabWidget()
@@ -205,15 +173,18 @@ class ProfileEditor(QDialog):
         if self.i18n is not None:
             self.i18n.retranslate_widgets(self)
 
-    def _add_field(self, layout, key, overrides, model=False):
+    def _add_field(self, layout, key, overrides):
+        """Prompt editor of `key`, with «Eredita default generale» on a type profile.
+
+        Only prompts are edited here: the model is one for every analysis and
+        is chosen in the «Modello» tab of the LLM settings (user, 2026-10-02).
+        """
         value = overrides.get(key, self.defaults[key])
-        editor = QLineEdit(value) if model else QTextEdit()
-        if not model:
-            editor.setAcceptRichText(False)
-            editor.setPlainText(value)
+        editor = QTextEdit()
+        editor.setAcceptRichText(False)
+        editor.setPlainText(value)
         editor.setObjectName(key)
         self.fields[key] = editor
-        picker = None
         if self.is_type:
             inherit = QCheckBox('Eredita default generale')
             inherit.setChecked(key not in overrides)
@@ -221,40 +192,15 @@ class ProfileEditor(QDialog):
             layout.addWidget(inherit)
             # Read-only rather than disabled: inherited prompts remain scrollable/copyable.
             editor.setReadOnly(inherit.isChecked())
-        if model:
-            line = QHBoxLayout()
-            line.addWidget(editor, 1)
-            picker = QPushButton('Scegli modello…')
-            picker.setAutoDefault(False)
-            picker.clicked.connect(lambda checked=False, field=editor, name=key: self._pick(field, name))
-            line.addWidget(picker)
-            layout.addLayout(line)
-        else:
-            layout.addWidget(editor, 1)
+        layout.addWidget(editor, 1)
         if self.is_type:
-            if picker:
-                picker.setEnabled(not inherit.isChecked())
-            inherit.toggled.connect(lambda checked, field=editor, pick=picker, name=key:
-                                    self._inherit_changed(name, checked, field, pick))
+            inherit.toggled.connect(lambda checked, field=editor, name=key:
+                                    self._inherit_changed(name, checked, field))
 
-    def _inherit_changed(self, name, checked, editor, picker):
+    def _inherit_changed(self, name, checked, editor):
         editor.setReadOnly(checked)
-        if picker:
-            picker.setEnabled(not checked)
         if checked:
-            if isinstance(editor, QLineEdit):
-                editor.setText(self.defaults[name])
-            else:
-                editor.setPlainText(self.defaults[name])
-
-    def _pick(self, field, key='model'):
-        # Il requisito segue il lavoro: i due stadi fotografici non vedono mai
-        # un PDF, quindi pretenderne la lettura nasconderebbe modelli validi.
-        capabilities = DATASHEET_CAPABILITIES if key == 'model' else PHOTO_CAPABILITIES
-        chosen = pick_model(field.text(), self, title='Modello di questa analisi',
-                            capabilities=capabilities)
-        if chosen:
-            field.setText(chosen)
+            editor.setPlainText(self.defaults[name])
 
     def _info(self, index):
         show_info(self, STAGES[index][0], HELP[index] + '\n\n'

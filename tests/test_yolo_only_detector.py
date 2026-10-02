@@ -200,6 +200,10 @@ def test_without_body_dimensions_the_pretest_does_not_start(window, monkeypatch)
     window.combo_photo_detector.setCurrentIndex(window.combo_photo_detector.findData("yolo_only"))
     window._extract_with_ai()
     assert asked == [True]
+    # Back in use after the short pause that lets queued clicks find it
+    # disabled (2026-10-02, «Preparazione…»).
+    from PyQt6.QtTest import QTest
+    QTest.qWait(gui.EXTRACT_REENABLE_DELAY_MS + 100)
     assert window.btn_extract_ai.isEnabled()
 
 

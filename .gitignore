@@ -50,8 +50,12 @@ Desktop.ini
 
 # Local detector weights (large binaries; review upstream licences before redistribution).
 models/*.onnx
+models/**/*.onnx
 # Pesi PyTorch dei modelli addestrati (Colab, Roboflow): licenza da decidere.
+# Dal 2026-10-02 in due cartelle: models/yolo/ (rilevatori) e models/smd/
+# (rete che classifica i corpi).
 models/*.pt
+models/**/*.pt
 
 # .claude/ va su GitHub (istruzioni, agenti, skill: utente, 2026-09-24);
 # restano fuori solo gli alberi di lavoro temporanei dei sottoagenti, che sono

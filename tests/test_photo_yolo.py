@@ -93,9 +93,11 @@ def test_model_resolution_priority_and_default(setup, monkeypatch, tmp_path):
     # Contratto invariato, meccanismo cambiato (2026-09-25): il default e' la
     # risorsa del programma (`app_paths.resource_path`), che da sorgente e' il
     # repository e nell'eseguibile e' il pacchetto installato.
-    monkeypatch.setattr(yolo, "resource_path", lambda *parts: tmp_path.joinpath(*parts))
-    default = tmp_path / "models" / "pcb_yolov8s.onnx"
-    default.parent.mkdir()
+    # Dal 2026-10-02 il predefinito sta in models/yolo (app_paths.yolo_model_path).
+    monkeypatch.setattr(yolo, "yolo_model_path",
+                        lambda name: tmp_path.joinpath("models", "yolo", name))
+    default = tmp_path / "models" / "yolo" / "pcb_yolov8s.onnx"
+    default.parent.mkdir(parents=True)
     default.write_bytes(b"default")
     assert yolo.resolve_yolo_model() == default.resolve()
 

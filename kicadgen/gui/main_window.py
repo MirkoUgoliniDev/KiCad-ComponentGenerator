@@ -22,7 +22,7 @@ import time
 import webbrowser
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, QObject, QPointF, QRectF, QThread, QTimer, Qt, QSize
+from PyQt6.QtCore import QEvent, QEventLoop, QObject, QPointF, QRectF, QThread, QTimer, Qt, QSize
 from PyQt6.QtGui import (QBrush, QColor, QIcon, QKeySequence, QPainterPath, QPen, QPixmap,
                          QPolygonF, QShortcut, QTextCursor)
 from PyQt6.QtWidgets import (
@@ -69,6 +69,9 @@ from ..services.kicad_library import (
 from .app_config import config_path, load_config, save_config
 from .accepted_models_dialog import AcceptedModelsDialog, ConsolidateDialog
 from ..app_paths import default_projects_dir, install_dir, is_frozen, logs_dir, resource_path, user_data_dir
+from ..app_paths import (DEFAULT_YOLO_ONNX, DEFAULT_YOLO_PT, SMD_MODELS_DIR, YOLO_MODELS_DIR,
+                         smd_model_path as smd_weights_path,
+                         yolo_model_path as yolo_weights_path)
 # Solo la validazione dei parametri (libreria standard): onnxruntime e PyTorch
 # restano caricati al bisogno. Legata qui, all'import, e non al clic: i test
 # che sostituiscono il modulo con un finto non devono cambiarne il contratto.
@@ -141,7 +144,7 @@ DEVELOPER_NAME = "Mirko Ugolini"
 #: only, and an old file with it off would silently disable every 3D model.
 PROJECT_WIDGETS = (
     "combo_component_type", "field_component_prompt", "combo_photo_detector",
-    "field_yolo_model", "group_castellated",
+    "field_yolo_model", "field_smd_model", "group_castellated",
     "field_description", "field_tags",
     "field_rows", "field_cols", "field_pitch", "field_row_spacing", "field_pad",
     "field_drill", "field_populated_pins",
@@ -152,8 +155,12 @@ PROJECT_WIDGETS = (
     "field_cast_pad_length", "field_cast_pad_width", "field_cast_overhang",
     "field_cast_inset", "field_cast_hole", "field_cast_hole_inset",
     "field_cast_thru_drill", "field_cast_thru_pad", "field_cast_thru_offset",
-    "chk_deepseek_reasoning",
 )
+#: Pausa prima di riattivare «Estrai parametri con AI» dopo una preparazione
+#: interrotta (documenti mancanti, rilevatore non disponibile...): i clic
+#: arrivati mentre l'interfaccia era ferma vengono consegnati prima e trovano il
+#: pulsante ancora spento. Tempo d'interfaccia, non una misura di nulla.
+EXTRACT_REENABLE_DELAY_MS = 300
 #: Margine, in pixel, fra il bordo della finestra e il contenuto delle schede:
 #: la riga della lingua sopra le schede usa lo stesso, cosi' i bordi combaciano.
 CONTENT_MARGIN_PX = 10
@@ -333,6 +340,17 @@ _PHOTO_DETECTOR_TRANSLATIONS = {
             "de": "Nur Sehmodell (kein lokaler Detektor)"},
     "model": {"it": "Modello YOLO:", "en": "YOLO model:",
               "fr": "Modèle YOLO :", "de": "YOLO-Modell:"},
+    "smd_model": {"it": "Modello rete SMD:", "en": "SMD network model:",
+                  "fr": "Modèle réseau SMD :", "de": "SMD-Netzmodell:"},
+    "smd_picker": {"it": "Seleziona la rete SMD (.pt) per questa sessione",
+                   "en": "Select the SMD network (.pt) for this session",
+                   "fr": "Choisir le réseau SMD (.pt) pour cette session",
+                   "de": "SMD-Netz (.pt) für diese Sitzung auswählen"},
+    "smd_help": {
+        "it": "File .pt della rete che classifica i corpi, facoltativo, solo per questa sessione. Lascia vuoto per usare {path}. Viene controllato prima di partire.",
+        "en": "Optional .pt file of the network that classifies the bodies, for this session only. Leave empty to use {path}. It is checked before starting.",
+        "fr": "Fichier .pt facultatif du réseau qui classe les corps, pour cette session uniquement. Laisser vide pour utiliser {path}. Il est vérifié avant le démarrage.",
+        "de": "Optionale .pt-Datei des Netzes, das die Körper klassifiziert, nur für diese Sitzung. Leer lassen, um {path} zu verwenden. Sie wird vor dem Start geprüft."},
     "params": {"it": "Parametri YOLO:", "en": "YOLO settings:",
                "fr": "Paramètres YOLO :", "de": "YOLO-Parameter:"},
     "summary": {"it": "soglia {confidence:.2f} · doppioni {nms_iou:.2f} · tessere {tiles}",
@@ -1065,11 +1083,8 @@ class MainWindow(QMainWindow):
             return
         self._refresh_model_combo()
         self._append_log(
-            tx("Impostazioni LLM aggiornate (SQLite). Modello datasheet: "
-               "{default_model}. Modello foto: {value}.",
-               default_model=self._default_model(),
-               value=self._vision_model() or 'default del servizio foto')
-        )
+            tx("Impostazioni LLM aggiornate (SQLite). Modello unico: {default_model}.",
+               default_model=self._default_model()))
 
     def _project_option(self, key: str, default):
         """@brief Valore di un'opzione che segue il progetto (`PROJECT_OPTIONS`).
@@ -1396,6 +1411,14 @@ class MainWindow(QMainWindow):
                     smd_index, None, Qt.ItemDataRole.ToolTipRole)
         self.combo_photo_detector.setToolTip(self._photo_detector_text("help"))
         self.label_yolo_model.setText(self._photo_detector_text("model"))
+        self.label_smd_model.setText(self._photo_detector_text("smd_model"))
+        smd_default = smd_weights_path()
+        self.btn_pick_smd_model.setAccessibleName(self._photo_detector_text("smd_picker"))
+        self.btn_pick_smd_model.setToolTip(
+            self._photo_detector_text("browse") + "\n" + self._photo_detector_text("smd_picker"))
+        self.field_smd_model.setPlaceholderText(
+            self._photo_detector_text("default", path=smd_default))
+        self.field_smd_model.setToolTip(self._photo_detector_text("smd_help", path=smd_default))
         self.label_yolo_params.setText(self._photo_detector_text("params"))
         self._refresh_yolo_summary()
         self.btn_yolo_settings.setAccessibleName(self._photo_detector_text("settings"))
@@ -1407,7 +1430,7 @@ class MainWindow(QMainWindow):
         self.btn_pick_yolo_model.setAccessibleName(self._photo_detector_text("picker"))
         self.btn_pick_yolo_model.setToolTip(
             self._photo_detector_text("browse") + "\n" + self._photo_detector_text("picker"))
-        default_path = resource_path("models", "pcb_yolov8s.onnx")
+        default_path = yolo_weights_path(DEFAULT_YOLO_ONNX)
         self.field_yolo_model.setPlaceholderText(
             self._photo_detector_text("default", path=default_path))
         self.field_yolo_model.setToolTip(
@@ -1430,8 +1453,8 @@ class MainWindow(QMainWindow):
         detector = self.combo_photo_detector.currentData()
         local = detector in ("yolo", "yolo_only", "yolo_smd") and not (
             detector == "yolo_smd" and is_frozen())
-        default_path = resource_path("models", "pcb_component_detector_yolov8m_best.pt"
-                                     if detector == "yolo_smd" else "pcb_yolov8s.onnx")
+        smd = detector == "yolo_smd" and not is_frozen()
+        default_path = yolo_weights_path(DEFAULT_YOLO_PT if detector == "yolo_smd" else DEFAULT_YOLO_ONNX)
         self.field_yolo_model.setPlaceholderText(self._photo_detector_text("default", path=default_path))
         self.field_yolo_model.setToolTip(self._photo_detector_text("path_help", path=default_path))
         # Durante una corsa (audit 25/09, B6) non si riaccendono i comandi
@@ -1441,6 +1464,8 @@ class MainWindow(QMainWindow):
             self._refresh_extract_button()
             self.field_yolo_model.setEnabled(local)
             self.btn_pick_yolo_model.setEnabled(local)
+            self.field_smd_model.setEnabled(smd)
+            self.btn_pick_smd_model.setEnabled(smd)
             self.btn_yolo_settings.setEnabled(local)
             # La riga della revisione dipende dal rilevatore: con «Solo YOLO
             # locale» riapre il pretest (vedi _refresh_reopen_review_button).
@@ -1448,6 +1473,7 @@ class MainWindow(QMainWindow):
                 self._refresh_reopen_review_button()
         if hasattr(self, "_models_form"):
             self._models_form.setRowVisible(self._row_yolo_model, local)
+            self._models_form.setRowVisible(self._row_smd_model, smd)
             self._models_form.setRowVisible(self._row_yolo_params, local)
             # Il modello di visione serve nei due percorsi fotografici, ma di
             # norma coincide con «Modello AI». Mostra la riga solo quando e'
@@ -1521,8 +1547,8 @@ class MainWindow(QMainWindow):
         import os
         from .yolo_model_dialog import YoloModelDialog
         default = os.environ.get("KICADGEN_YOLO_MODEL",
-                                 str(resource_path("models", "pcb_yolov8s.onnx")))
-        dialog = YoloModelDialog(self.field_yolo_model.text().strip(), resource_path("models"),
+                                 str(yolo_weights_path(DEFAULT_YOLO_ONNX)))
+        dialog = YoloModelDialog(self.field_yolo_model.text().strip(), resource_path(*YOLO_MODELS_DIR),
                                  default=default, tr=self.i18n.text, parent=self)
         accepted = dialog.exec() == QDialog.DialogCode.Accepted
         selected = dialog.selected_path()
@@ -1551,12 +1577,30 @@ class MainWindow(QMainWindow):
             self._on_photo_detector_changed()
             self._append_log(tx("Modello di visione per questa sessione: {chosen}.", chosen=chosen))
 
+    def _pick_session_smd_model(self) -> None:
+        """@brief Choose the SMD network's .pt file for this session, starting from models/smd.
+
+        @note The file is only named here; it is checked (validate_smd_setup)
+            when the analysis starts, before any paid request.
+        """
+        current = self.field_smd_model.text().strip()
+        start = current or str(resource_path(*SMD_MODELS_DIR))
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, self._photo_detector_text("smd_picker"), start, "PyTorch (*.pt)")
+        if chosen:
+            self.field_smd_model.setText(chosen)
+
+    def _smd_model_option(self) -> Path | None:
+        """@brief The SMD network file chosen for this session, or None for the default."""
+        path = self.field_smd_model.text().strip()
+        return Path(path) if path else None
+
     def _photo_detector_options(self) -> tuple[str, Path | None]:
         """Snapshot the selected backend; AI ignores any remembered ONNX path."""
         detector = self.combo_photo_detector.currentData() or "ai"
         path = self.field_yolo_model.text().strip()
         if detector == "yolo_smd" and not path:
-            return detector, resource_path("models", "pcb_component_detector_yolov8m_best.pt")
+            return detector, yolo_weights_path(DEFAULT_YOLO_PT)
         return detector, Path(path) if detector in ("yolo", "yolo_only", "yolo_smd") and path else None
 
     def _balance_provider(self) -> str:
@@ -1582,14 +1626,6 @@ class MainWindow(QMainWindow):
         else:
             self._append_log(tx("Modello: default globale ({default_model}).",
                                 default_model=self._default_model()))
-
-    def _on_deepseek_reasoning_toggled(self, checked: bool) -> None:
-        """@brief Mirror the «Ragionamento DeepSeek» checkbox into the provider switch.
-
-        @param checked New state of the checkbox (also when restored from a project).
-        """
-        from ..services import providers
-        providers.set_deepseek_reasoning(bool(checked))
 
     def _pick_session_model(self) -> None:
         """Sceglie un modello valido solo per le estrazioni di questa sessione.
@@ -2419,16 +2455,8 @@ class MainWindow(QMainWindow):
         )
         self.btn_pick_model.clicked.connect(self._pick_session_model)
         model_row = QHBoxLayout()
-        # «Ragionamento DeepSeek» (utente, 2026-09-29, HANDOFF 161): thinking
-        # mode dell'API diretta DeepSeek, spento di default; salvato nel
-        # progetto. Per gli altri fornitori non cambia nulla.
-        self.chk_deepseek_reasoning = QCheckBox("Ragionamento DeepSeek")
-        self.chk_deepseek_reasoning.setToolTip(
-            "Accende il ragionamento (thinking) nelle richieste all'API diretta di DeepSeek: "
-            "risposte più meditate, ma più lente e con token di ragionamento a pagamento, "
-            "contati nel consuntivo. Non ha effetto sugli altri fornitori.")
-        self.chk_deepseek_reasoning.toggled.connect(self._on_deepseek_reasoning_toggled)
-        model_row.addWidget(self.chk_deepseek_reasoning)
+        # La casella «Ragionamento DeepSeek» (HANDOFF 161) e' stata tolta
+        # dall'utente il 2026-10-02: il ragionamento resta sempre spento.
         model_row.addWidget(self.combo_model, 1)
         model_row.addWidget(self.btn_pick_model)
         self.label_photo_detector = QLabel()
@@ -2468,6 +2496,22 @@ class MainWindow(QMainWindow):
         yolo_row.addWidget(self.btn_pick_yolo_model)
         models_form.addRow(self.label_yolo_model, yolo_row)
         self._row_yolo_model = models_form.rowCount() - 1
+        # «Modello rete SMD» (utente, 2026-10-02): come «Modello YOLO», per
+        # la rete che classifica i corpi; si vede solo con la rete SMD.
+        self.label_smd_model = QLabel()
+        self.field_smd_model = QLineEdit()
+        self.field_smd_model.setClearButtonEnabled(True)
+        self.btn_pick_smd_model = QPushButton()
+        self.btn_pick_smd_model.setAutoDefault(False)
+        self.btn_pick_smd_model.setIcon(self._asset_icon("docs-open.svg"))
+        self.btn_pick_smd_model.setIconSize(QSize(20, 20))
+        self.btn_pick_smd_model.setFixedSize(40, 32)
+        self.btn_pick_smd_model.clicked.connect(self._pick_session_smd_model)
+        smd_row = QHBoxLayout()
+        smd_row.addWidget(self.field_smd_model, 1)
+        smd_row.addWidget(self.btn_pick_smd_model)
+        models_form.addRow(self.label_smd_model, smd_row)
+        self._row_smd_model = models_form.rowCount() - 1
         # Parametri del rilevatore (utente, 2026-09-25): soglia, doppioni e
         # tessere si scelgono SOLO nella modale «Parametri YOLO»; qui un
         # riepilogo in sola lettura e il pulsante, stessa misura e stile di
@@ -2519,6 +2563,7 @@ class MainWindow(QMainWindow):
         # These data-bearing widgets use explicit keys and local I18n fallbacks.
         for widget in (self.label_photo_detector, self.combo_photo_detector,
                        self.label_yolo_model, self.field_yolo_model, self.btn_pick_yolo_model,
+                       self.label_smd_model, self.field_smd_model, self.btn_pick_smd_model,
                        self.label_yolo_params, self.label_yolo_summary,
                        self.btn_yolo_settings,
                        self.label_vlm_model, self.field_vlm_model, self.btn_pick_vlm_model):
@@ -2759,6 +2804,9 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidget(tab)
         scroll.setWidgetResizable(True)
+        # Tenuta per riportare in vista «Estrai parametri con AI» quando la
+        # pagina cambia altezza all'avvio di un'analisi (utente, 2026-10-02).
+        self._project_scroll = scroll
         return scroll
 
     # ── Tipologia componente ────────────────────────────────────────
@@ -3496,8 +3544,64 @@ class MainWindow(QMainWindow):
         return DocumentSet(self._docs_dir()).selected()
 
     def _extract_with_ai(self) -> None:
-        if self._background_work_running() or self._automatic_generation_active:
+        """@brief «Estrai parametri con AI»: show at once that the click was taken, then start.
+
+        @note The checks before the progress modal (YOLO and SMD network
+            loaded on this thread) take several seconds (~7 s measured on
+            2026-10-02), and an unchanged button invited a second click. The
+            button is switched to «Preparazione…» with an hourglass and
+            disabled before them; if the run does not start, it goes back
+            to rest (see _finish_extract_preparation).
+        """
+        if (getattr(self, "_extract_preparing", False) or self._background_work_running()
+                or self._automatic_generation_active):
             return
+        self._extract_preparing = True
+        try:
+            self._extract_with_ai_prepared()
+        finally:
+            self._finish_extract_preparation()
+
+    def _show_extract_preparing(self) -> None:
+        """@brief Disable the extraction button and show «Preparazione…» with an hourglass, painted now."""
+        button = self.btn_extract_ai
+        button.setEnabled(False)
+        button.setIcon(QIcon(str(Path(__file__).resolve().parent / "assets" / "wf-loading.svg")))
+        self._set_extract_button_text("Preparazione…")
+        self._keep_extract_button_visible()
+        button.repaint()
+        # Ridisegno subito, senza consegnare clic o tasti: quelli arrivati
+        # durante la preparazione non devono far ripartire nulla.
+        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+
+    def _restore_extract_button_icon(self) -> None:
+        """@brief Put the idle icon back on the extraction button."""
+        button = getattr(self, "btn_extract_ai", None)
+        if button is not None:
+            button.setIcon(QIcon(str(Path(__file__).resolve().parent / "assets" / "extract-ai.svg")))
+
+    def _finish_extract_preparation(self) -> None:
+        """@brief End the preparation: a started run keeps the button, an early exit restores it.
+
+        @note Re-enabled a moment later, not at once: clicks queued while the
+            interface was busy are delivered first and find it still disabled.
+        """
+        self._extract_preparing = False
+        if getattr(self, "_extraction_busy", False) or self._background_work_running():
+            return
+        self._restore_extract_button_icon()
+        self._refresh_extract_button()
+        QTimer.singleShot(EXTRACT_REENABLE_DELAY_MS, self._reenable_extract_button)
+
+    def _reenable_extract_button(self) -> None:
+        """Re-enable the button after an early exit, unless a run has started meanwhile."""
+        if (getattr(self, "_extraction_busy", False) or self._background_work_running()
+                or getattr(self, "_extract_preparing", False)):
+            return
+        self.btn_extract_ai.setEnabled(bool(self._component_name()))
+
+    def _extract_with_ai_prepared(self) -> None:
+        """Body of «Estrai parametri con AI» once the button shows the preparation."""
         blocked = self._extract_block_reason()
         if blocked and self._component_name():
             QMessageBox.information(self, self.i18n.text("Tipologia componente"),
@@ -3513,6 +3617,7 @@ class MainWindow(QMainWindow):
                                "quello della cartella dei documenti, del footprint e del modello 3D."))
             return
 
+        self._show_extract_preparing()
         photo_detector, yolo_model_path = self._photo_detector_options()
         # Il rilevatore di QUESTA estrazione: i pacchetti di ripiego scritti
         # dopo lo devono ricordare (audit 2026-10-02: tornava 'yolo' e il
@@ -3532,7 +3637,7 @@ class MainWindow(QMainWindow):
                 validate_yolo_setup(yolo_model_path)
                 if photo_detector == "yolo_smd":
                     from ..services.smd_component_classifier import validate_smd_setup
-                    validate_smd_setup()
+                    validate_smd_setup(self._smd_model_option())
             except Exception as exc:
                 QMessageBox.warning(
                     self, self._photo_detector_text("error_title"),
@@ -3676,17 +3781,17 @@ class MainWindow(QMainWindow):
         self._on_ai_progress(tx("Profilo AI: {currentText}.",
                                 currentText=self.combo_component_type.currentText()))
         self._on_ai_progress(tx("Modello AI unico: {model}.", model=model))
-        if getattr(self, "chk_deepseek_reasoning", None) is not None \
-                and self.chk_deepseek_reasoning.isChecked():
-            from ..services import providers as _providers
-            if _providers.provider_of(model) == _providers.PROVIDER_DEEPSEEK:
-                self._on_ai_progress(tx(
-                    "Ragionamento DeepSeek attivo: risposte più lente e token di ragionamento "
-                    "a pagamento, contati nel consuntivo."))
-            else:
-                self._on_ai_progress(tx(
-                    "Ragionamento DeepSeek acceso ma il modello {model} non è dell'API diretta "
-                    "DeepSeek: nessun effetto.", model=model))
+        try:
+            ignored = self.profile_store.ignored_model_overrides(self._profile_key())
+        except (ProfileError, sqlite3.Error, OSError):
+            ignored = {}
+        if ignored:
+            # Modello unico (utente, 2026-10-02): un modello salvato su questa
+            # tipologia prima della modifica non vale piu', e va detto.
+            self._on_ai_progress(tx(
+                "La tipologia aveva un modello suo ({models}): ignorato, il modello e' unico "
+                "e si sceglie nel tab «Modello» delle impostazioni LLM.",
+                models=", ".join(sorted(set(ignored.values())))))
         if photo_detector in ('yolo', 'vlm', 'yolo_smd') and self._photo_inventory_family() is False:
             # Difetto visto dall'utente: con «YOLO locale + verifica AI» e una
             # tipologia da COMPONENTE SINGOLO il rilevatore non parte, la
@@ -3734,6 +3839,7 @@ class MainWindow(QMainWindow):
             component_family=self._selected_family(),
             photo_detector=photo_detector,
             yolo_model_path=yolo_model_path,
+            smd_model_path=self._smd_model_option() if photo_detector == "yolo_smd" else None,
             # Stessi parametri del pretest (utente, 2026-09-25: «la scelta dei
             # parametri rimane quando scelgo la modalità YOLO + AI»).
             yolo_settings=(self._chosen_yolo_settings() if photo_detector in ("yolo", "yolo_smd") else None),
@@ -3940,6 +4046,7 @@ class MainWindow(QMainWindow):
             see `_extraction_busy` in `__init__`.
         """
         self._extraction_busy = False
+        self._restore_extract_button_icon()
         if hasattr(self, "combo_photo_detector"):
             self._on_photo_detector_changed()
         else:
@@ -4047,6 +4154,23 @@ class MainWindow(QMainWindow):
         self._start_log_session(title)
         self.ai_progress_text.clear()
         self.ai_elements_list.clear()
+        # Log e contatori svuotati cambiano l'altezza della pagina: il
+        # pulsante con la clessidra resta in vista, ora e al prossimo giro.
+        self._keep_extract_button_visible()
+        QTimer.singleShot(0, self._keep_extract_button_visible)
+
+    def _keep_extract_button_visible(self) -> None:
+        """@brief Scroll the Project tab so that «Estrai parametri con AI» stays in view.
+
+        @note User, 2026-10-02: on click the page moved and the button with
+            its hourglass went out of view, so the click looked lost. The
+            page can change height while a run starts (log and lists
+            cleared, labels updated); this brings the button back each time.
+        """
+        scroll = getattr(self, "_project_scroll", None)
+        button = getattr(self, "btn_extract_ai", None)
+        if scroll is not None and button is not None and button.isVisible():
+            scroll.ensureWidgetVisible(button, 0, 24)
 
     def _photo_cache_dir(self) -> Path:
         """@brief Cartella in cui l'inventario fotografico salva cache ed evidenza.
@@ -4785,7 +4909,8 @@ class MainWindow(QMainWindow):
             extra_instructions=self.field_component_prompt.toPlainText().strip() or None,
             # Il nome del rilevatore e' quello con cui i riquadri sono nati,
             # registrato nel pacchetto, qualunque cosa dica ora la tendina.
-            detector=bundle.detector, reviewed=bundle.reviewed)
+            detector=bundle.detector, reviewed=bundle.reviewed,
+            smd_model_path=self._smd_model_option())
         self._reconcile_worker.done.connect(self._on_reconciled)
         self._reconcile_worker.error.connect(self._on_extract_error)
         self._reconcile_worker.progress.connect(self._on_ai_progress)
