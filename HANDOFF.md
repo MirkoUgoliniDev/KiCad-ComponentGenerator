@@ -49,7 +49,31 @@
   di status_cost e' arrivata a suite avviata: test_status_bar_pending e
   test_analysis_cost verdi a parte). COMMITTATO, pushato e unito in main
   (utente: «prima committa pusha mergia in main e torna qui»).
-  PROPOSTA IN ATTESA DI OK: fori STIMATI (mezzo foro e foro passante)
+  FATTO (non committato, autorizzato «ok ma devi verificare, regola generale»):
+  castellated_module.side_geometry, solo per i lati con STIME proprie
+  (AssumedSize sul lato) e solo contro una piazzola MISURATA o dichiarata
+  (PAD_DECLARED): semi-foro <= larghezza piazzola - 2*MIN_HOLE_WALL_MM
+  (SIZE_ESTIMATE_PAD); half_and_through: corona <= larghezza piazzola
+  (SIZE_ESTIMATE_PAD); foro passante stimato <= spazio per la corona (corona
+  dichiarata/limitata dalla piazzola, altrimenti min(passo-parete,
+  piazzola)) - 2*parete (SIZE_ESTIMATE_RING); note in geometry_notes.
+  Margine = MIN_HOLE_WALL_MM gia' esistente (0.2), NON lo 0.25 proposto.
+  VERIFICA: prima versione (regola su ogni foro assunto) rompeva 22 test:
+  cambiava la coppia storica di riferimento (semi-foro 1.7 in piazzola 1.8)
+  e quindi i footprint predefiniti fissati, e un vecchio contratto (corona
+  dichiarata < foro di riferimento = errore). Limitata alle stime per lato e
+  alle piazzole misurate: 438/438 test di contatti/footprint verdi. Nuovo
+  tests/test_estimated_holes_fit_copper.py (passi 1.27/2.54/5.08, negativi:
+  stima che sta, foro dichiarato, piazzola di riferimento, foro dichiarato
+  troppo grande rifiutato, coppia di riferimento intatta); mutazione (regola
+  spenta): 4 positivi falliscono, 5 negativi passano. Esito RS485/TEST2:
+  sinistra semi-foro 1.6, foro 1.6, corona 2.0; destra 1.13/1.13/1.53;
+  payload 3D coerente; validate() passa (alle 15:43 falliva).
+  Suite (.venv/claude-suite11-a/b.log): 2996 + 3604 passati, 1 fallito:
+  test_message_localization (le 3 note nuove senza traduzione) -> tradotte
+  in en/fr/de, test_message_localization e test_i18n verdi (34).
+  COMMITTATO, pushato e unito in main (utente: «ok committa pusha e mergia»).
+  PROPOSTA ORIGINALE: fori STIMATI (mezzo foro e foro passante)
   ridotti per stare nella piazzola (misurata sulla foto o dichiarata) con
   anello di rame 0.25 mm per lato (euristica dichiarata, guide castellati);
   fori LETTI dai documenti mai toccati, errore se incoerenti. Dati TEST2:
