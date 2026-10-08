@@ -1,5 +1,14 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+- **Checkpoint revisione 08/10/2026, prima delle correzioni:** revisione con tre
+  agenti completata; dieci difetti riprodotti in geometria/export, stato GUI,
+  pipeline fotografica e contabilizzazione delle risposte HTTP interrotte.
+  Suite completa in due processi: 4184 + 2534 = 6718 passati, 10 saltati,
+  2 xfail, 19 sottotest passati. Nessuna correzione ancora applicata.
+  Il codice di ADVANCED era già incluso in main. Questo checkpoint registra
+  la verifica e la regola permanente in AGENTS.md: dopo il commit/push/merge
+  richiesto ora, lasciare i fix successivi non committati fino a una nuova
+  istruzione esplicita dell'utente.
 - **COMMITTATO (08/10 sera, branch `ADVANCED`, UNITO in `main` con merge
   --no-ff; hash in git log; utente: «ok committa pusha e mergia in main»).
   Punti 189-192: consolidati applicati PRIMA della revisione (modello + verso
