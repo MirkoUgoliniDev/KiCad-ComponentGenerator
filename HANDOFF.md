@@ -1,7 +1,7 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-- **COMMITTATO (08/10 sera, branch `ADVANCED`, NON unito in `main`; hash in git
-  log; utente: «ok committa e pusha»). Punti 182-188 e revisioni G/H: «Solo
+- **COMMITTATO (08/10 sera, branch `ADVANCED`, commit 016b475, UNITO in `main`
+  con merge --no-ff; utente: «committa tutto, pusha, poi mergia in main»). Punti 182-188 e revisioni G/H: «Solo
   YOLO» puro, casella «Mostra le proposte non tenute», lazo, selezione dopo
   Elimina, etichetta «Alta risoluzione», ricontrollo che sposta le file,
   fila di rame sul bordo (nessuna cancellazione dei lati castellati con
