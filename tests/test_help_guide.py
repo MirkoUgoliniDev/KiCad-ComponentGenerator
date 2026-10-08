@@ -104,7 +104,7 @@ def test_guide_follows_light_and_dark_theme(guide_text):
 @pytest.mark.parametrize("label", [
     # Dal 26/09 i documenti hanno piu' ruoli per file: le caselle usano le
     # etichette brevi dei ruoli (document_roles.ROLE_SHORT).
-    "Nuovo progetto...", "Pinout", "Quote", "Foto alta risoluzione", "Piazzole", "Vista laterale",
+    "Nuovo progetto...", "Pinout", "Quote", "Alta risoluzione", "Piazzole", "Vista laterale",
     "Nuovo documento", "Aggiungi…", "Scheda con componenti · connettori passanti",
     "Scheda con componenti · connettori castellated (mezzo foro)",
     "Estrai parametri con AI", "Credito AI", "Footprint 2D (KiCadGen)",

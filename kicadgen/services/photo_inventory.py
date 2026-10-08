@@ -1481,6 +1481,23 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         from .edge_notches import check_declared_contacts, count_disagreements
         disagreements = count_disagreements(edge_profiles, photo.shape, length, width,
                                             declared.get("castellated_sides"))
+        # Un bordo LISCIO smentisce lo stile a semi-foro, non la fila: la
+        # presenza dei contatti e' un fatto del rame lungo il bordo.
+        if any(item.no_notch for item in disagreements):
+            from .edge_lands import count_edge_copper
+            from .edge_notches import normalized_sides
+            pitches = {edge: side.get("pitch_mm") for edge, side in
+                       normalized_sides(declared.get("castellated_sides")).items()}
+            for item in disagreements:
+                if item.no_notch:
+                    copper = count_edge_copper(photo, item.edge, pitches.get(item.edge),
+                                               length, width)
+                    item.copper_found = copper.found
+                    item.copper_centres_mm = list(copper.centres_mm)
+                    item.copper_reason = copper.reason
+                    log(tx("Rame sul bordo {edge}: {found} elementi in fila al passo dichiarato{reason}.",
+                           edge=item.edge, found=copper.found if copper.found is not None else "?",
+                           reason=f" ({copper.reason})" if copper.reason else ""))
         if disagreements and recount_contacts is not None:
             # Ricontrollo AI dei soli lati in disaccordo (utente, 28/09, punto
             # 137); poi il confronto si ripete sui lati in vigore, riletti da
@@ -1554,7 +1571,18 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             # conversione in millimetri: cambia solo chi propone i rettangoli.
             log(tx("Nessun rilevatore locale: i corpi li enumera il modello di visione, "
                    "in una sola richiesta."))
-        if proposals:
+        if proposals and detector == 'yolo_only':
+            # «Solo YOLO» e' solo YOLO (utente, 2026-10-08): i riquadri escono
+            # dal rilevatore cosi' come sono. Niente filtro sui contatti
+            # dichiarati e niente misura dei bordi col gradiente, che li
+            # modificano: la GUI non coincideva piu' con il rilevatore. Resta
+            # la calibrazione (serve per i millimetri) e il colore dei corpi.
+            log(tx("Solo YOLO: riquadri del rilevatore senza filtro dei contatti ne' misura "
+                   "dei bordi."))
+            detector_png = draw_detector_proposals(photo, proposals, [])
+            save_inventory_evidence(cache_dir, None, detector_png, proposals, log,
+                                    label='detector')
+        elif proposals:
             from .contact_zones import contact_positions, contact_proposals
             from ..cad3d.measurement_uncertainty import edge_uncertainty_mm
             positions = contact_positions(declared, length, width)

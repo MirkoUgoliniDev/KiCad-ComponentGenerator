@@ -38,7 +38,7 @@ ROLES = {'pinout': 'Pinout / disposizione contatti', 'top': 'Immagine con quote'
          'datasheet': 'Datasheet del costruttore'}
 #: Short labels for the role check boxes of a document card; the full label
 #: and the help stay in the tooltip.
-ROLE_SHORT = {'pinout': 'Pinout', 'top': 'Quote', 'hires': 'Foto alta risoluzione',
+ROLE_SHORT = {'pinout': 'Pinout', 'top': 'Quote', 'hires': 'Alta risoluzione',
               'land_pattern': 'Piazzole', 'side_view': 'Vista laterale',
               'datasheet': 'Datasheet'}
 #: The role that sends a file to the photo inventory (detector, calibration).

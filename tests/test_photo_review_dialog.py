@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
 
 from kicadgen.gui.photo_review_dialog import (
     BOARD_BACKDROP_COLOR, BOARD_BORDER_COLOR, DRAW_CLICK_PX,
-    MIN_HANDLE_SIZE_MM, NUMBER_LABEL_BACKING_COLOR, PHOTO_DIMMED,
+    HANDLE_HALF_PX, MIN_GRAB_PX, MIN_HANDLE_SIZE_MM, NUMBER_LABEL_BACKING_COLOR, PHOTO_DIMMED,
     PHOTO_DIMMED_OPACITY, PHOTO_FULL, PHOTO_HIDDEN, PHOTO_STATES,
     PhotoReviewDialog, PhotoTransform, SELECTION_HALO_COLOR,
     UNDETERMINED_LIST_MARKER, UNDETERMINED_TYPE_CLASSES, UNDETERMINED_TYPE_COLOR,
@@ -2237,3 +2237,172 @@ def test_without_unclassified_bodies_there_is_no_empty_entry(dialog):
     """Negative: an entry that would show nothing is not offered."""
     from kicadgen.gui.photo_review_dialog import UNDETERMINED_FILTER
     assert dialog.category_filter.findData(UNDETERMINED_FILTER) == -1
+
+
+def test_the_view_repaints_the_whole_viewport_so_no_trail_is_left(dialog):
+    """@brief Screen-sized halo, pens and labels stick out of scene-unit rectangles.
+
+    With the minimal dirty region those pixels stayed behind as a trail
+    while an outline was dragged on a shrunk photo (user, 2026-10-09).
+    """
+    from PyQt6.QtWidgets import QGraphicsView
+    assert dialog.view.viewportUpdateMode() == QGraphicsView.ViewportUpdateMode.FullViewportUpdate
+
+
+def test_a_body_smaller_than_a_grip_on_screen_can_still_be_grabbed(dialog, app):
+    """@brief Positivo: l'area di presa non scende sotto una maniglia di schermo.
+
+    Un corpo 0.4 x 0.2 mm (01005) a 10 x 5 px/mm e zoom 0.25 e' 1 x 0.25 px
+    sullo schermo: imprendibile. Un punto a un terzo di maniglia dal centro
+    deve cadere nella sua area di presa; il contorno disegnato non cambia.
+    """
+    item = dialog._append_item(dict(name="C9", kind="capacitor", x_mm=0.0, y_mm=0.0,
+                                    length_mm=0.4, width_mm=0.2, height_mm=.2, rotation_deg=0.0))
+    app.processEvents()                                     # let the deferred fit run first
+    dialog.view.zoom(0.25 / dialog.view.transform().m11())   # a manual zoom: fit is over
+    app.processEvents()
+    scale = dialog.view.transform().m11()
+    assert scale == pytest.approx(0.25, rel=0.3), "the clamp keeps it near the requested scale"
+    half_scene = MIN_GRAB_PX / 2 / scale
+    probe = QPointF(half_scene / 3, half_scene / 3)        # item coordinates
+    assert item.shape().contains(probe), "a third of a grip away from the centre is still the body"
+    assert not item.polygon().containsPoint(probe, Qt.FillRule.OddEvenFill), "the outline itself is unchanged"
+    assert item.boundingRect().contains(item.shape().boundingRect())
+
+
+def test_a_body_larger_than_a_grip_keeps_its_own_outline_as_grab_area(dialog, app):
+    """@brief Negativo: un corpo grande sullo schermo non riceve nessun allargamento."""
+    item = dialog._items[0]                                 # U1: 8 x 2 mm
+    app.processEvents()
+    dialog.view.zoom(4.0 / dialog.view.transform().m11())
+    app.processEvents()
+    rect = item.polygon().boundingRect()
+    outside = QPointF(rect.right() + item.pen().widthF() + 0.5, rect.center().y())
+    assert not item.shape().contains(outside)
+    assert item.shape().boundingRect().width() <= rect.width() + item.pen().widthF() + 1e-6
+
+
+def test_resize_grips_sit_outside_the_outline_so_its_inside_stays_free(dialog, app):
+    """@brief Ogni maniglia tocca il bordo dall'esterno: il suo centro e' fuori dal poligono."""
+    item = dialog._items[1]                                 # R1, rotation 0
+    dialog._select_row(1, center=False)
+    app.processEvents()
+    polygon = item.polygon()
+    for edge, handle in item.handles.items():
+        assert handle.isVisible()
+        centre_item = handle.pos() + handle.rect().center()  # rect is in screen px; at scale 1 it is item px
+        assert not polygon.containsPoint(centre_item, Qt.FillRule.OddEvenFill), edge
+        # and it touches the outline: the grip's inner edge coincides with the body edge
+        rect = handle.rect()
+        assert (abs(rect.left()) < 1e-9 or abs(rect.right()) < 1e-9
+                or abs(rect.top()) < 1e-9 or abs(rect.bottom()) < 1e-9), edge
+
+
+# ── Lazo (utente, 2026-10-08) ─────────────────────────────────────────────
+
+
+def _lasso_rect_around(dialog, items, margin=2.0):
+    """Scene rectangle enclosing the envelopes of the given outlines, plus a margin."""
+    rect = items[0].photo_bounds()
+    for item in items[1:]:
+        rect = rect.united(item.photo_bounds())
+    return rect.adjusted(-margin, -margin, margin, margin)
+
+
+def test_the_lasso_chooses_only_the_outlines_lying_whole_inside(dialog, app):
+    """@brief Positivo e negativo insieme: R1 intero dentro e' scelto, U1 a meta' no."""
+    u1, r1 = dialog._items
+    dialog.lasso_button.setChecked(True)
+    assert dialog.view.lasso_mode() and not dialog.draw_mode()
+    rect = _lasso_rect_around(dialog, [r1])
+    rect = rect.united(u1.photo_bounds().adjusted(0, 0, 0, -u1.photo_bounds().height() / 2))
+    dialog.view.lasso_drawn.emit(rect)
+    app.processEvents()
+    assert dialog.lasso_items() == [r1]
+    assert r1.halo.isVisible() and not u1.halo.isVisible()
+    # Scelta di gruppo: nessun corpo e' «selezionato» da solo, i campi non
+    # modificano nessuno, il cestino agisce sul gruppo.
+    assert dialog._selected_item() is None
+    assert not dialog.form_widget.isEnabled() and dialog.delete_button.isEnabled()
+    assert "1 componenti" in dialog.draw_hint.text()
+
+
+def test_delete_removes_every_lassoed_outline_at_once(dialog, app):
+    dialog.lasso_button.setChecked(True)
+    dialog.view.lasso_drawn.emit(_lasso_rect_around(dialog, dialog._items))
+    app.processEvents()
+    assert len(dialog.lasso_items()) == 2
+    dialog.delete_selected()
+    assert dialog.get_components() == [] and dialog.lasso_items() == []
+    assert dialog.component_list.count() == 0
+
+
+def test_escape_clears_the_lasso_choice_first_and_the_mode_second(dialog, app):
+    dialog.lasso_button.setChecked(True)
+    dialog.view.lasso_drawn.emit(_lasso_rect_around(dialog, dialog._items))
+    app.processEvents()
+    QTest.keyClick(dialog, Qt.Key.Key_Escape)
+    assert dialog.lasso_items() == [] and dialog.lasso_button.isChecked()
+    assert all(not item.halo.isVisible() for item in dialog._items)
+    QTest.keyClick(dialog, Qt.Key.Key_Escape)
+    assert not dialog.lasso_button.isChecked() and not dialog.view.lasso_mode()
+    assert dialog.isVisible(), "two Escapes put the lasso away, they do not close the review"
+
+
+def test_choosing_one_outline_ends_the_lasso_group(dialog, app):
+    dialog.lasso_button.setChecked(True)
+    dialog.view.lasso_drawn.emit(_lasso_rect_around(dialog, dialog._items))
+    app.processEvents()
+    dialog._select_row(0, center=False)
+    assert dialog.lasso_items() == [] and dialog._items[0].isSelected()
+    assert not dialog._items[1].halo.isVisible()
+
+
+def test_the_lasso_and_the_drawing_mode_are_exclusive(dialog, app):
+    dialog.lasso_button.setChecked(True)
+    dialog.set_draw_mode(True)
+    assert dialog.draw_mode() and not dialog.lasso_button.isChecked() and not dialog.view.lasso_mode()
+    dialog.lasso_button.setChecked(True)
+    assert not dialog.draw_mode() and dialog.view.lasso_mode()
+
+
+def test_a_real_drag_in_lasso_mode_may_start_outside_the_photo(dialog, app):
+    """@brief La banda del lazo parte anche dal margine scuro: si circonda da fuori."""
+    dialog.lasso_button.setChecked(True)
+    r1 = dialog._items[1]
+    bounds = r1.photo_bounds().adjusted(-3, -3, 3, 3)
+    start_scene = QPointF(dialog.photo_rect.right() + 10, bounds.top())
+    start = dialog.view.mapFromScene(start_scene)
+    end = dialog.view.mapFromScene(QPointF(bounds.left(), bounds.bottom()))
+    chosen = []
+    dialog.view.lasso_drawn.connect(lambda rect: chosen.append(rect))
+    _drag(app, dialog.view, start, end, Qt.MouseButton.LeftButton)
+    assert len(chosen) == 1 and dialog.lasso_items() == [r1]
+    assert dialog.get_components()[1]["x_mm"] == pytest.approx(8.0), "a lasso drag moves nothing"
+
+
+def test_the_format_brush_puts_the_lasso_down(dialog, app):
+    """@brief Revisione H: una sola gesto possiede il tasto sinistro."""
+    dialog.lasso_button.setChecked(True)
+    dialog.format_button.setChecked(True)
+    assert not dialog.lasso_button.isChecked() and not dialog.view.lasso_mode()
+
+
+def test_the_lasso_hint_goes_away_when_the_group_ends(dialog, app):
+    dialog.lasso_button.setChecked(True)
+    dialog.view.lasso_drawn.emit(_lasso_rect_around(dialog, dialog._items))
+    app.processEvents()
+    assert "2 componenti" in dialog.draw_hint.text()
+    dialog._select_row(0, center=False)
+    assert "componenti scelti" not in dialog.draw_hint.text()
+    dialog.view.lasso_drawn.emit(_lasso_rect_around(dialog, dialog._items))
+    app.processEvents()
+    dialog.delete_selected()
+    assert "componenti scelti" not in dialog.draw_hint.text()
+
+
+def test_the_l_key_arms_the_lasso(dialog, app):
+    QTest.keyClick(dialog, Qt.Key.Key_L)
+    assert dialog.lasso_button.isChecked()
+    QTest.keyClick(dialog, Qt.Key.Key_L)
+    assert not dialog.lasso_button.isChecked()

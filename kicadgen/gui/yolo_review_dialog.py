@@ -1222,7 +1222,9 @@ class YoloReviewDialog(QDialog):
         else:
             state = f"{confidence:.2f}" if isinstance(confidence, (int, float)) else "?"
             if proposal.get("_yolo_low_confidence"):
-                state += " · " + self._tr("bassa confidenza") + " · " + (
+                # Sopra un corpo gia' trovato: sicura, ma non un corpo a se'.
+                state += " · " + (self._tr("sopra un altro corpo") if proposal.get("_yolo_on_body_of")
+                                            else self._tr("bassa confidenza")) + " · " + (
                     self._tr("non tenuta") if awaiting_user_keep(proposal)
                     else self._tr("tenuta"))
             elif proposal.get("_yolo_review_only"):

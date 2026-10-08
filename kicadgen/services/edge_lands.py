@@ -49,7 +49,8 @@ except ImportError:  # pragma: no cover - optional dependency
 
 from ..generators.castellated_module import MIN_HOLE_WALL_MM
 from .messages import tx
-from .photo_refine import _lab, _otsu_level
+from .photo_refine import (MAX_BOARD_EDGE_DRIFT_PX, MAX_BOARD_EDGE_DRIFT_RATIO, _lab,
+                           _otsu_level)
 
 #: Rows of the land patch narrower than this fraction of its widest row are
 #: not the land (a trace wider than the opening, the tail of a shadow): the
@@ -324,6 +325,245 @@ def measure_lands(crop, length_mm: float, width_mm: float, rows: dict, profiles)
             round(float(np.median(inwards)), 3) if inwards else None,
             round(tolerance, 3), measured, rejected)
     return result
+
+
+@dataclass
+class CopperRow:
+    """@brief Periodic row of elements found along one edge whose outline is straight.
+
+    @note `found` is the number of consecutive elements of the chain (None
+        when the strip could not be read, 0 when no row was found);
+        `centres_mm` their centres from the start of the edge (left to right
+        for top/bottom, top to bottom for left/right); `reason` why nothing
+        could be counted. The elements are the LANDS or the GAPS between
+        them, whichever class forms the longer chain: the two alternate with
+        the same period, and the photo does not say which colour is copper.
+        A presence signal, not a count of contacts.
+    """
+
+    edge: str
+    found: Optional[int]
+    centres_mm: list = field(default_factory=list)
+    reason: str = ""
+
+
+#: Rows of the edge strip read for lands, in annular rings (MIN_HOLE_WALL_MM)
+#: from the edge: from one ring in, past the bright line of the cut edge, to
+#: four rings, where every land of an edge row still shows -- an edge contact
+#: touches the edge by definition (half-hole or pad reaching it), while
+#: silkscreen labels, traces and mounted bodies sit further in.
+COPPER_STRIP_RINGS = (1, 4)
+#: Fewest consecutive elements on the lattice that make a row. HEURISTIC,
+#: declared as such: with the alignment window set by the measurement bounds
+#: and a straight-line fit of the chain, chance chains on crowded edges stayed
+#: below this on the sample boards (RS485 long edges, which carry no contacts,
+#: at every pitch tried), while a real row gave 18-22 (ESP32 devkit). Declared
+#: limit: a real row of fewer than this many edge contacts is not confirmable
+#: from copper and falls back to the clean-edge rule.
+MIN_ROW_LANDS = 5
+
+
+def _two_colour_classes(colours, iterations: int = 20):
+    """Boolean class of each colour row of `colours` (N x 3) by two-centre clustering."""
+    first = int(np.argmin(colours[:, 0]))
+    second = int(np.argmax(np.linalg.norm(colours - colours[first], axis=1)))
+    centres = np.stack([colours[first], colours[second]])
+    labels = np.zeros(len(colours), dtype=bool)
+    for _ in range(iterations):
+        distances = np.stack([np.linalg.norm(colours - centre, axis=1) for centre in centres], axis=1)
+        new_labels = distances[:, 1] < distances[:, 0]
+        if np.array_equal(new_labels, labels) and _ > 0:
+            break
+        labels = new_labels
+        for index, member in enumerate((~labels, labels)):
+            if member.any():
+                centres[index] = colours[member].mean(axis=0)
+    return labels
+
+
+def count_edge_copper(crop, edge: str, pitch_mm, length_mm: float, width_mm: float) -> CopperRow:
+    """@brief Count the copper lands lying ON an edge, at the declared pitch, on the calibrated crop.
+
+    @param crop Calibrated BGR crop, the board filling the frame.
+    @param edge "top", "bottom", "left" or "right".
+    @param pitch_mm Declared pitch of the row, in mm (None: nothing to count).
+    @param length_mm Board extent along X, in mm.
+    @param width_mm Board extent along Y, in mm.
+    @return CopperRow with the lands found on the lattice, or `found` None
+        and a reason.
+    @note A straight outline says the contacts are NOT half-holes; it says
+        nothing about whether a row of contacts is there (ESP32 devkit,
+        2026-10-08: through-holes with the pad reaching a straight edge were
+        declared half-holes, the edge was «clean» and 22 contacts were
+        dropped). Presence is a copper fact with three structural marks: an
+        edge contact TOUCHES the edge, so only the first rings of the strip
+        are read (COPPER_STRIP_RINGS); the lands of one row are IDENTICAL,
+        so only runs of the median width count; and a row is PERIODIC at the
+        declared pitch, so only the longest chain of CONSECUTIVE lattice
+        points occupied (best phase, pitch re-measured on the chain) counts,
+        and only when it is at least MIN_ROW_LANDS long.
+        The strip's columns are split in two classes by a two-centre
+        clustering of their mean Lab colour, whichever colour the mask is
+        (a third colour, a label, joins the nearer class); runs of either
+        class at least two hole walls wide (MIN_HOLE_WALL_MM,
+        the declared fabrication minimum) are the candidate elements, and
+        the class with the longer regular chain is the row (lands or gaps,
+        see CopperRow). The alignment window is the measurement bound of a
+        run's extent (one hole wall plus two boundary pixels), the chain must
+        fit a straight line within it and its pitch must agree with the
+        declared one within the calibration scale error (the board-edge
+        drift find_board accepts at both ends of the edge) plus the window.
+    @note Declared limit: a copper feature that touches the edge on a lattice
+        point (a mounting-hole ring at the corner) adds one; the caller treats
+        a count different from the declared one as «copper present, number to
+        verify», never as proof of absence.
+    """
+    if cv2 is None or crop is None or getattr(crop, "ndim", 0) != 3:
+        return CopperRow(edge, None, reason=tx("foto non leggibile"))
+    if edge not in EDGES or not pitch_mm or not math.isfinite(float(pitch_mm)) or pitch_mm <= 0:
+        return CopperRow(edge, None, reason=tx("passo dei contatti non dichiarato"))
+    height, width = crop.shape[:2]
+    scale_x, scale_y = width / float(length_mm), height / float(width_mm)
+    along_scale, across_scale = (scale_x, scale_y) if edge in ("top", "bottom") else (scale_y, scale_x)
+    along_extent = width if edge in ("top", "bottom") else height
+    across_extent = height if edge in ("top", "bottom") else width
+    band_px = max(2, int(round(MIN_HOLE_WALL_MM * across_scale)))
+    r0, r1 = COPPER_STRIP_RINGS[0] * band_px, COPPER_STRIP_RINGS[1] * band_px
+    depth = min(r1, across_extent // 2)
+    if depth - r0 < 2 or along_extent < 3:
+        return CopperRow(edge, None, reason=tx("finestra troppo stretta"))
+    strip = _edge_window(crop, edge, 0, along_extent, depth)[r0:depth]
+    lab = _lab(np.ascontiguousarray(strip))
+    # Each column of the strip has a mean colour; the columns fall in two
+    # classes by a two-centre clustering of those colours (Lloyd iterations
+    # from the two most distant columns). No colour is assumed: whichever
+    # two colours dominate the strip (mask and copper, usually) become the
+    # classes, and a third one (a white label) joins the nearer of them.
+    columns = lab.mean(axis=0)
+    if float(np.linalg.norm(columns.max(axis=0) - columns.min(axis=0))) <= 0:
+        return CopperRow(edge, 0, reason=tx("nessuna alternanza di colore sul bordo"))
+    column_class = _two_colour_classes(columns)
+    min_run = max(2, int(round(2 * MIN_HOLE_WALL_MM * along_scale)))
+    pitch_px = float(pitch_mm) * along_scale
+    # How far a measured centre may sit from the straight line of its row:
+    # the uncertainty of a run's extent, i.e. one hole wall (the opening and
+    # closing of the morphology) plus the pixel uncertainty of two
+    # boundaries -- the same tolerance that tells alike widths apart. A
+    # measurement bound, never a fraction of the pitch (a quarter pitch made
+    # half of every period «on the lattice» and chains formed by chance). The
+    # common shift of the calibration is absorbed by the fitted intercept.
+    window = MIN_HOLE_WALL_MM * along_scale + 2 * EDGE_UNCERTAINTY_PX
+
+    def runs(mask):
+        found, start = [], None
+        for index, value in enumerate(mask):
+            if value and start is None:
+                start = index
+            elif not value and start is not None:
+                found.append((start, index))
+                start = None
+        if start is not None:
+            found.append((start, len(mask)))
+        return [(a, b) for a, b in found if b - a >= min_run]
+
+    def lattice_chain(centres, pitch):
+        """Longest consecutive chain of centres on one lattice of `pitch`, as [(k, c)]."""
+        best = []
+        # Candidate phases are the centres' own residues: every chain the
+        # window admits contains a centre, so its phase is within the window
+        # of that centre's residue. Independent of the pitch in pixels.
+        for phase in sorted({c % pitch for c in centres}):
+            indices = {}
+            for c in centres:
+                k = round((c - phase) / pitch)
+                if abs((c - phase) - k * pitch) <= window:
+                    indices.setdefault(int(k), c)
+            chain, current = [], []
+            for k in sorted(indices):
+                if current and k == current[-1][0] + 1:
+                    current.append((k, indices[k]))
+                else:
+                    current = [(k, indices[k])]
+                if len(current) > len(chain):
+                    chain = list(current)
+            if len(chain) > len(best):
+                best = chain
+        return best
+
+    def regular(chain, pitch):
+        """The chain's centres, if a straight line of the declared pitch fits them.
+
+        Least squares of position against lattice index: every residual
+        within the window, and the drift between the fitted and the declared
+        pitch over the whole chain within the window too -- the calibration
+        scale error accumulated along the row, not a percentage.
+        """
+        while len(chain) >= MIN_ROW_LANDS:
+            ks = np.array([k for k, _c in chain], dtype=float)
+            cs = np.array([c for _k, c in chain], dtype=float)
+            slope, intercept = np.polyfit(ks, cs, 1)
+            residuals = np.abs(cs - (slope * ks + intercept))
+            if residuals.max() <= window:
+                # The fitted pitch may differ from the declared one by the
+                # scale error of the calibration -- the crop box ends are
+                # each within the board-edge drift find_board accepts, so
+                # the scale is known to 2 x drift over the edge length --
+                # plus the window spread over the chain. No percentage.
+                drift = max(MAX_BOARD_EDGE_DRIFT_PX, MAX_BOARD_EDGE_DRIFT_RATIO * max(crop.shape[:2]))
+                allowed = pitch * (2 * drift / along_extent) + window / (len(chain) - 1)
+                return list(cs) if abs(slope - pitch) <= allowed else []
+            # The element farthest from the line is not of the row (a corner
+            # ring, a label on a lattice point): drop it and keep the longer
+            # of the two consecutive pieces it leaves.
+            worst = int(residuals.argmax())
+            left, right = chain[:worst], chain[worst + 1:]
+            chain = left if len(left) >= len(right) else right
+        return []
+
+    def row_of(spans):
+        # Lands of one row are identical by design: runs whose width differs
+        # from the median by more than one hole wall (plus the pixel
+        # uncertainty of two boundaries) are not its lands -- a label, a
+        # mounting-hole ring, a trace end.
+        if not spans:
+            return []
+        widths = np.array([b - a for a, b in spans], dtype=float)
+        # Two families of widths may share the strip (lands, and labels or
+        # rings of another width): each family is tried on its own, so the
+        # row is not lost when the other family outnumbers it. The families
+        # are the two sides of the Otsu split of the widths; alike means
+        # within the window of the family's median.
+        families = [widths]
+        if len(widths) >= 2 and widths.max() > widths.min():
+            level = _otsu_level(widths)
+            families = [widths[widths <= level], widths[widths > level]]
+        rows = []
+        for family in families:
+            if family.size == 0:
+                continue
+            alike = [(a, b) for (a, b), w in zip(spans, widths) if abs(w - np.median(family)) <= window]
+            rows.append(_row_from([(a + b) / 2 for a, b in alike]))
+        return max(rows, key=len) if rows else []
+
+    def _row_from(centres):
+        # The declared pitch is in millimetres and the photo scale carries
+        # its own error (0.3 % on the sample board): the chain found measures
+        # the pitch in pixels and a second pass on that pitch collects the
+        # ends -- accepted only if `regular` still holds against the DECLARED
+        # pitch, so a chain of some other period never passes.
+        chain = lattice_chain(centres, pitch_px)
+        row = regular(chain, pitch_px)
+        if row:
+            measured = (chain[-1][1] - chain[0][1]) / (chain[-1][0] - chain[0][0])
+            refined = regular(lattice_chain(centres, measured), pitch_px)
+            if len(refined) > len(row):
+                row = refined
+        return row
+
+    best = max((row_of(runs(column_class)), row_of(runs(~column_class))), key=len)
+    if len(best) < MIN_ROW_LANDS:
+        return CopperRow(edge, 0, reason=tx("nessuna fila di piazzole al passo dichiarato sul bordo"))
+    return CopperRow(edge, len(best), [round(c / along_scale, 3) for c in best])
 
 
 def land_lines(lands: dict) -> list:

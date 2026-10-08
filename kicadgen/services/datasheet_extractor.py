@@ -110,7 +110,8 @@ _TOP_LENGTH_KEYS = ("pitch_mm", "row_spacing_mm", "pad_diameter_mm", "drill_mm",
                     "body_length_mm", "body_width_mm", "body_height_mm", "pcb_thickness_mm",
                     "body_offset_x_mm", "body_offset_y_mm", "pin_length_3d_mm")
 _SIDE_LENGTH_KEYS = ("pitch_mm", "offset_mm", "pad_length_mm", "pad_width_mm",
-                     "half_hole_diameter_mm", "through_hole_drill_mm")
+                     "half_hole_diameter_mm", "through_hole_drill_mm",
+                     "first_contact_from_edge_mm", "last_contact_from_edge_mm")
 
 #: Provenance the model may declare for a value (`value_sources`): "read"
 #: written in a document (a dimension, a table), "derived" computed from read
@@ -571,6 +572,25 @@ _EXTRACTION_TOOL = {
                                 "drawing_unit "
                                 "(positivo verso il basso o verso destra). Ometti o 0 "
                                 "se i contatti sono centrati sul lato."
+                            ),
+                        },
+                        "first_contact_from_edge_mm": {
+                            "type": "number",
+                            "description": (
+                                "Distanza, lungo il bordo, dall'inizio del bordo (da "
+                                "sinistra per top/bottom, dall'alto per left/right) al "
+                                "centro del PRIMO contatto, nell'unita' di drawing_unit. "
+                                "SOLO se e' una quota scritta nel disegno quotato; ometti "
+                                "altrimenti, non derivarla."
+                            ),
+                        },
+                        "last_contact_from_edge_mm": {
+                            "type": "number",
+                            "description": (
+                                "Distanza, lungo il bordo, dalla fine del bordo al centro "
+                                "dell'ULTIMO contatto, nell'unita' di drawing_unit. SOLO se "
+                                "e' una quota scritta nel disegno quotato; ometti "
+                                "altrimenti, non derivarla."
                             ),
                         },
                         "pad_length_mm": {
@@ -1407,6 +1427,11 @@ def _mirror_castellated_sides(sides) -> None:
             side["offset_mm"] = -offset + 0.0
         if isinstance(side.get("pin_names"), list):
             side["pin_names"] = list(reversed(side["pin_names"]))
+        # The first contact met along the edge becomes the last: the two
+        # end quotes swap with the direction.
+        first, last = side.get("first_contact_from_edge_mm"), side.get("last_contact_from_edge_mm")
+        if first is not None or last is not None:
+            side["first_contact_from_edge_mm"], side["last_contact_from_edge_mm"] = last, first
 
 
 def _mirrored_column_order(rows: int, cols: int) -> list:
@@ -2411,6 +2436,39 @@ def _exclude_declared_sides(data, items, say) -> bool:
     return True
 
 
+def _keep_clean_sides_with_copper(data, items, say) -> bool:
+    """Keep the declared sides of a clean edge along which the photo shows a row of lands.
+
+    @param data Validated main answer, updated in place (notes only).
+    @param items EdgeCount list of clean edges with `copper_found` > 0.
+    @param say Progress callback; reported as a WARNING to verify.
+    @return True when a note was added.
+    @note The outline count has a blind spot: a shallow half-hole whose
+        plated barrel hides the background shows no notch (ESP32 devkit,
+        2026-10-08: 22 contacts per edge dropped as «no notch» all day). A
+        periodic row of identical lands on the edge (edge_lands.
+        count_edge_copper) is the presence of contacts, so the side stays as
+        declared; style and count are left to a person, because the photo
+        could not read the holes. Nothing is adopted from the copper count.
+    """
+    from .messages import as_warning
+    changed = False
+    for item in items:
+        for entry in data.get("castellated_sides") or ():
+            if _side_edge(entry) != item.edge:
+                continue
+            message = tx("Lato {label}: la foto non mostra tacche sul bordo, ma una fila "
+                         "periodica di {found} elementi (piazzole e spazi) al passo dichiarato "
+                         "({declared} contatti dichiarati): lato tenuto, tipo di contatto e "
+                         "conteggio da verificare a mano.",
+                         label=EDGE_LABELS.get(item.edge, item.edge), found=item.copper_found,
+                         declared=entry.get("count"))
+            say(as_warning(message))
+            data["notes"] = (str(data.get("notes") or "") + "\n" + message).strip()
+            changed = True
+    return changed
+
+
 def _recount_sides_attempt(data, disagreements, content_blocks, diagnostic_call, model,
                            system_prompt, has_pdf, say) -> bool:
     """Body of _recount_sides_from_photo; `data` is changed only at the very end.
@@ -2431,7 +2489,20 @@ def _recount_sides_attempt(data, disagreements, content_blocks, diagnostic_call,
     unverifiable = [item for item in disagreements if item.found is None and not item.no_notch]
     disagreements = [item for item in disagreements
                      if item.found is not None and not item.no_notch]
-    changed = _exclude_declared_sides(data, clean, say) if clean else False
+    # A straight outline is not proof of absence: a shallow half-hole whose
+    # barrel hides the background shows no notch (ESP32 devkit, 2026-10-08:
+    # 22 contacts per edge dropped as «no notch»). A periodic row of lands
+    # on the edge is presence: such a side stays, flagged; the others go.
+    # copper_found None (strip not measurable) is not «no copper»: the side
+    # goes as before, and the reason is said with the exclusion.
+    absent = [item for item in clean if not item.copper_found]
+    for item in absent:
+        if item.copper_reason:
+            say(tx("Lato {label}: rame sul bordo: {reason}.",
+                   label=EDGE_LABELS.get(item.edge, item.edge), reason=item.copper_reason))
+    changed = _exclude_declared_sides(data, absent, say) if absent else False
+    changed = _keep_clean_sides_with_copper(
+        data, [item for item in clean if item.copper_found], say) or changed
     if not disagreements and not unverifiable:
         return changed
     facts = "; ".join(
@@ -2578,11 +2649,17 @@ def _edge_contradictions(raw, body_length, body_width) -> list[tuple[str, str]]:
         sides = _normalized_castellated_sides(raw)
     except ExtractionError:
         return []
-    names = {}
+    names, ends = {}, {}
     for entry in raw:
-        if (isinstance(entry, dict) and isinstance(entry.get("pin_names"), (list, tuple))
-                and entry["pin_names"]):
-            names[str(entry.get("edge") or "").strip().lower()] = len(entry["pin_names"])
+        if not isinstance(entry, dict):
+            continue
+        edge = str(entry.get("edge") or "").strip().lower()
+        if isinstance(entry.get("pin_names"), (list, tuple)) and entry["pin_names"]:
+            names[edge] = len(entry["pin_names"])
+        first = _optional_number(entry.get("first_contact_from_edge_mm"), positive=False)
+        last = _optional_number(entry.get("last_contact_from_edge_mm"), positive=False)
+        if first is not None and last is not None and first >= 0 and last >= 0:
+            ends[edge] = (first, last)
     problems = []
     for side in sides:
         edge, count = side["edge"], side["count"]
@@ -2595,6 +2672,26 @@ def _edge_contradictions(raw, body_length, body_width) -> list[tuple[str, str]]:
             problems.append((edge, f"lato {edge}: (count-1) x pitch_mm = ({count}-1) x "
                                    f"{side['pitch_mm']:g} = {span:.2f}, piu' del bordo lungo "
                                    f"{edge_length:g}"))
+        # A row of N contacts at pitch P spans (N-1)*P from centre to centre;
+        # a drawing that quotes the first and the last contact from the two
+        # ends of the edge (a, b) fixes that span to L-a-b. When the nearest
+        # integer N to that span is not the declared count, the answer
+        # contradicts its own quotes (ESP32 devkit, 2026-10-08: 21 declared
+        # against 63.3-5.05-4.91 = 21 x 2.54, i.e. 22). Rounding boundary,
+        # not a threshold: beyond half a pitch another integer is nearer.
+        # Without both quotes nothing is checked, nothing is inferred.
+        if edge in ends and edge_length is not None and side["pitch_mm"] > 0:
+            first, last = ends[edge]
+            quoted = edge_length - first - last
+            if quoted < 0:
+                problems.append((edge, f"lato {edge}: le quote del primo e dell'ultimo contatto "
+                                       f"dai bordi ({first:g} + {last:g}) superano il bordo lungo "
+                                       f"{edge_length:g}"))
+            elif abs(quoted - span) > side["pitch_mm"] / 2:
+                expected = round(quoted / side["pitch_mm"]) + 1
+                problems.append((edge, f"lato {edge}: le quote del disegno danno "
+                                       f"({edge_length:g} - {first:g} - {last:g}) / {side['pitch_mm']:g} "
+                                       f"+ 1 = {expected} contatti, ma count={count}"))
     return problems
 
 
@@ -2660,7 +2757,10 @@ def _recount_contradictory_sides(data, content_blocks, diagnostic_call, model, s
         "ogni lato: count e' il loro numero, pin_names ne elenca esattamente uno per "
         "contatto nell'ordine lungo il bordo, e (count-1) x pitch_mm deve stare nel bordo "
         f"(body_length_mm={dims['body_length']} per i lati top e bottom, "
-        f"body_width_mm={dims['body_width']} per left e right). Usa la stessa unita' della "
+        f"body_width_mm={dims['body_width']} per left e right). Se il disegno quota le "
+        "distanze del primo e dell'ultimo contatto dai bordi (first_contact_from_edge_mm, "
+        "last_contact_from_edge_mm), allora count = (bordo - prima - ultima) / pitch_mm + 1: "
+        "riportale e rispettale. Usa la stessa unita' della "
         f"risposta precedente (drawing_unit={unit}). Non inventare valori che i documenti "
         "non danno: se non puoi stabilirli, ometti i nomi e spiegalo in notes. Restituisci "
         f"la risposta completa. Lati precedenti: {data.get('castellated_sides')!r}"
@@ -2686,15 +2786,24 @@ def _recount_contradictory_sides(data, content_blocks, diagnostic_call, model, s
     previous = list(previous) if isinstance(previous, list) else []
     before = {_side_edge(entry): entry for entry in previous if _side_edge(entry)}
     # Coherent edges the recount would change: normally said, not adopted.
+    # A coherent edge is one the first answer DESCRIBED without contradiction.
+    # An edge the recount adds was not described at all: it is part of the
+    # repair, not a change to something coherent (ESP32 devkit, 2026-10-08:
+    # the first answer put the two 22-contact rows on left/right, where
+    # 53.34 mm cannot fit in 25.4; the recount moved them to top/bottom and
+    # was refused as «changing coherent sides», so the extraction failed).
     changed = sorted(edge for edge, entry in recounted.items()
-                     if edge not in wrong_edges and (edge not in before or any(
+                     if edge not in wrong_edges and edge in before and any(
                          entry.get(key) != before[edge].get(key)
-                         for key in ("count", "pitch_mm", "first_pin", "reverse"))))
-    merged = [recounted.get(_side_edge(entry), entry) if _side_edge(entry) in wrong_edges
-              else entry for entry in previous]
-    # A contradicted edge missing from the first answer can only come from the recount.
-    merged.extend(entry for edge, entry in recounted.items()
-                  if edge in wrong_edges and edge not in before)
+                         for key in ("count", "pitch_mm", "first_pin", "reverse")))
+    # A contradicted edge the recount no longer lists does not exist: the
+    # recount is the answer to that contradiction, and keeping the impossible
+    # row would only fail validation again.
+    merged = [recounted[_side_edge(entry)] if _side_edge(entry) in wrong_edges
+              else entry for entry in previous
+              if _side_edge(entry) not in wrong_edges or _side_edge(entry) in recounted]
+    # Edges absent from the first answer can only come from the recount.
+    merged.extend(entry for edge, entry in recounted.items() if edge not in before)
     whole = (len(recounted_edges) != len(set(recounted_edges))
              or not _numbering_is_contiguous(merged))
     # The recount as a whole, as before this rule, in two cases: it lists an

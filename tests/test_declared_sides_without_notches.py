@@ -199,3 +199,28 @@ def test_a_clean_edge_and_a_miscounted_side_are_handled_in_the_same_run():
     assert [side["edge"] for side in data["castellated_sides"]] == ["left", "right"]
     assert _side(data, "right")["count"] == 4
     assert extractor._numbering_is_contiguous(copy.deepcopy(data["castellated_sides"]))
+
+
+# ── A clean edge that carries a row of lands: the side stays (2026-10-08) ─
+
+def test_a_side_on_a_clean_edge_with_a_row_of_lands_is_kept_and_flagged():
+    """@brief Positivo (ESP32 devkit): nessuna tacca vista, ma 18 piazzole al passo -> lato tenuto."""
+    data = _with_sides(_answer(4), _top())
+    clean = EdgeCount("top", 0, 2, [], reason="nessuna tacca visibile sul bordo", no_notch=True,
+                      copper_found=18, copper_centres_mm=[5.0 + 2.54 * k for k in range(18)])
+    changed, calls, logs = _run(data, [clean])
+    assert calls == []
+    assert sorted(side["edge"] for side in data["castellated_sides"]) == ["left", "right", "top"]
+    [warning] = [line for line in logs if kind_of(line) == WARNING]
+    assert "lato tenuto" in warning and "18 elementi" in warning and "da verificare" in warning
+    assert "Lati esclusi" not in data["notes"] and "lato tenuto" in data["notes"]
+
+
+def test_a_side_on_a_clean_edge_without_lands_is_still_excluded():
+    """@brief Negativo (RS485): nessuna tacca e nessuna fila di rame -> escluso come prima."""
+    data = _with_sides(_answer(4), _top())
+    clean = EdgeCount("top", 0, 2, [], reason="nessuna tacca visibile sul bordo", no_notch=True,
+                      copper_found=0, copper_reason="nessuna fila di piazzole")
+    changed, calls, logs = _run(data, [clean])
+    assert changed and calls == []
+    assert [side["edge"] for side in data["castellated_sides"]] == ["left", "right"]
