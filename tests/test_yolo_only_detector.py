@@ -8,6 +8,7 @@ twin on the `yolo` path, which must still reconcile with one paid request.
 from pathlib import Path
 
 import pytest
+from unittest.mock import Mock
 
 from kicadgen.cad3d.kicad_models import _is_yolo_only_hypothesis
 from kicadgen.services import photo_inventory
@@ -309,3 +310,33 @@ def test_the_pretest_button_follows_the_language(window):  # noqa: F811
     assert "FREE" in window.btn_extract_ai.toolTip()
     window.language_combo.setCurrentIndex(window.language_combo.findData("it"))
     assert window.btn_extract_ai.text() == "Rileva componenti con YOLO"
+
+
+def test_yolo_only_leaves_the_detector_boxes_untouched(pipeline, monkeypatch, tmp_path):  # noqa: F811
+    """@brief Positivo (utente 2026-10-08: «solo YOLO deve farmi solo YOLO»).
+
+    Con «Solo YOLO» ne' il filtro sui contatti dichiarati ne' la misura dei
+    bordi con OpenCV toccano i riquadri: escono come li ha proposti il
+    rilevatore. Entrambi i passi sono sostituiti da sentinelle che fallirebbero.
+    """
+    def must_not_run(*_args, **_kwargs):
+        pytest.fail("yolo_only must run nothing but the detector on the boxes")
+    monkeypatch.setattr(photo_inventory, "measure_proposal_edges", must_not_run)
+    from kicadgen.services import contact_zones
+    monkeypatch.setattr(contact_zones, "contact_proposals", must_not_run)
+    photo = tmp_path / "top.png"
+    import cv2, numpy as np
+    assert cv2.imwrite(str(photo), np.zeros((100, 200, 3), np.uint8))
+    report = photo_inventory.extract_inventory(
+        [photo], "", 40, 20, (), lambda **_k: pytest.fail("no AI"), top_photo_index=0,
+        detector="yolo_only", yolo_model_path=tmp_path / "fixture.onnx")
+    proposed = pipeline["detection"].return_value
+    assert [tuple(c["_box"]) for c in report.components] == [tuple(p["_box"]) for p in proposed]
+
+
+def test_yolo_with_ai_still_measures_the_edges(pipeline, monkeypatch, tmp_path):  # noqa: F811
+    """@brief Negativo: con il rilevatore YOLO + AI la misura dei bordi gira come prima."""
+    measured = Mock(side_effect=lambda photo, proposals, *a, **k: proposals)
+    monkeypatch.setattr(photo_inventory, "measure_proposal_edges", measured)
+    pipeline["execute"](photo_detector="yolo")
+    measured.assert_called_once()

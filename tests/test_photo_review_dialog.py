@@ -2296,3 +2296,113 @@ def test_resize_grips_sit_outside_the_outline_so_its_inside_stays_free(dialog, a
         rect = handle.rect()
         assert (abs(rect.left()) < 1e-9 or abs(rect.right()) < 1e-9
                 or abs(rect.top()) < 1e-9 or abs(rect.bottom()) < 1e-9), edge
+
+
+# ── Lazo (utente, 2026-10-08) ─────────────────────────────────────────────
+
+
+def _lasso_rect_around(dialog, items, margin=2.0):
+    """Scene rectangle enclosing the envelopes of the given outlines, plus a margin."""
+    rect = items[0].photo_bounds()
+    for item in items[1:]:
+        rect = rect.united(item.photo_bounds())
+    return rect.adjusted(-margin, -margin, margin, margin)
+
+
+def test_the_lasso_chooses_only_the_outlines_lying_whole_inside(dialog, app):
+    """@brief Positivo e negativo insieme: R1 intero dentro e' scelto, U1 a meta' no."""
+    u1, r1 = dialog._items
+    dialog.lasso_button.setChecked(True)
+    assert dialog.view.lasso_mode() and not dialog.draw_mode()
+    rect = _lasso_rect_around(dialog, [r1])
+    rect = rect.united(u1.photo_bounds().adjusted(0, 0, 0, -u1.photo_bounds().height() / 2))
+    dialog.view.lasso_drawn.emit(rect)
+    app.processEvents()
+    assert dialog.lasso_items() == [r1]
+    assert r1.halo.isVisible() and not u1.halo.isVisible()
+    # Scelta di gruppo: nessun corpo e' «selezionato» da solo, i campi non
+    # modificano nessuno, il cestino agisce sul gruppo.
+    assert dialog._selected_item() is None
+    assert not dialog.form_widget.isEnabled() and dialog.delete_button.isEnabled()
+    assert "1 componenti" in dialog.draw_hint.text()
+
+
+def test_delete_removes_every_lassoed_outline_at_once(dialog, app):
+    dialog.lasso_button.setChecked(True)
+    dialog.view.lasso_drawn.emit(_lasso_rect_around(dialog, dialog._items))
+    app.processEvents()
+    assert len(dialog.lasso_items()) == 2
+    dialog.delete_selected()
+    assert dialog.get_components() == [] and dialog.lasso_items() == []
+    assert dialog.component_list.count() == 0
+
+
+def test_escape_clears_the_lasso_choice_first_and_the_mode_second(dialog, app):
+    dialog.lasso_button.setChecked(True)
+    dialog.view.lasso_drawn.emit(_lasso_rect_around(dialog, dialog._items))
+    app.processEvents()
+    QTest.keyClick(dialog, Qt.Key.Key_Escape)
+    assert dialog.lasso_items() == [] and dialog.lasso_button.isChecked()
+    assert all(not item.halo.isVisible() for item in dialog._items)
+    QTest.keyClick(dialog, Qt.Key.Key_Escape)
+    assert not dialog.lasso_button.isChecked() and not dialog.view.lasso_mode()
+    assert dialog.isVisible(), "two Escapes put the lasso away, they do not close the review"
+
+
+def test_choosing_one_outline_ends_the_lasso_group(dialog, app):
+    dialog.lasso_button.setChecked(True)
+    dialog.view.lasso_drawn.emit(_lasso_rect_around(dialog, dialog._items))
+    app.processEvents()
+    dialog._select_row(0, center=False)
+    assert dialog.lasso_items() == [] and dialog._items[0].isSelected()
+    assert not dialog._items[1].halo.isVisible()
+
+
+def test_the_lasso_and_the_drawing_mode_are_exclusive(dialog, app):
+    dialog.lasso_button.setChecked(True)
+    dialog.set_draw_mode(True)
+    assert dialog.draw_mode() and not dialog.lasso_button.isChecked() and not dialog.view.lasso_mode()
+    dialog.lasso_button.setChecked(True)
+    assert not dialog.draw_mode() and dialog.view.lasso_mode()
+
+
+def test_a_real_drag_in_lasso_mode_may_start_outside_the_photo(dialog, app):
+    """@brief La banda del lazo parte anche dal margine scuro: si circonda da fuori."""
+    dialog.lasso_button.setChecked(True)
+    r1 = dialog._items[1]
+    bounds = r1.photo_bounds().adjusted(-3, -3, 3, 3)
+    start_scene = QPointF(dialog.photo_rect.right() + 10, bounds.top())
+    start = dialog.view.mapFromScene(start_scene)
+    end = dialog.view.mapFromScene(QPointF(bounds.left(), bounds.bottom()))
+    chosen = []
+    dialog.view.lasso_drawn.connect(lambda rect: chosen.append(rect))
+    _drag(app, dialog.view, start, end, Qt.MouseButton.LeftButton)
+    assert len(chosen) == 1 and dialog.lasso_items() == [r1]
+    assert dialog.get_components()[1]["x_mm"] == pytest.approx(8.0), "a lasso drag moves nothing"
+
+
+def test_the_format_brush_puts_the_lasso_down(dialog, app):
+    """@brief Revisione H: una sola gesto possiede il tasto sinistro."""
+    dialog.lasso_button.setChecked(True)
+    dialog.format_button.setChecked(True)
+    assert not dialog.lasso_button.isChecked() and not dialog.view.lasso_mode()
+
+
+def test_the_lasso_hint_goes_away_when_the_group_ends(dialog, app):
+    dialog.lasso_button.setChecked(True)
+    dialog.view.lasso_drawn.emit(_lasso_rect_around(dialog, dialog._items))
+    app.processEvents()
+    assert "2 componenti" in dialog.draw_hint.text()
+    dialog._select_row(0, center=False)
+    assert "componenti scelti" not in dialog.draw_hint.text()
+    dialog.view.lasso_drawn.emit(_lasso_rect_around(dialog, dialog._items))
+    app.processEvents()
+    dialog.delete_selected()
+    assert "componenti scelti" not in dialog.draw_hint.text()
+
+
+def test_the_l_key_arms_the_lasso(dialog, app):
+    QTest.keyClick(dialog, Qt.Key.Key_L)
+    assert dialog.lasso_button.isChecked()
+    QTest.keyClick(dialog, Qt.Key.Key_L)
+    assert not dialog.lasso_button.isChecked()

@@ -166,6 +166,11 @@ class EdgeCount:
     at_least: Optional[int] = None
     tolerance_mm: Optional[float] = None
     shift_bound_mm: Optional[float] = None
+    #: Copper lands counted along a CLEAN edge (edge_lands.count_edge_copper),
+    #: filled by the photo inventory: None when not measured.
+    copper_found: Optional[int] = None
+    copper_centres_mm: list = field(default_factory=list)
+    copper_reason: str = ""
 
 
 def _per_edge(value, edge, default):

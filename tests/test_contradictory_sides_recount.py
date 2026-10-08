@@ -237,3 +237,70 @@ def test_a_coherent_edge_the_recount_alters_is_still_not_adopted_when_rows_move(
     assert sorted(by_edge) == ["bottom", "top"]
     assert by_edge["top"]["count"] == 4
     assert "top" in data["notes"] and "non adottata" in data["notes"]
+
+
+# ── Le quote del disegno fissano il conteggio (2026-10-08) ─────────────────
+
+
+def test_end_quotes_that_give_another_count_are_a_contradiction():
+    """@brief Positivo (ESP32 devkit): 63.3 - 5.05 - 4.91 = 21 x 2.54 -> 22 contatti, dichiarati 21."""
+    problems = _side_contradictions(
+        [side("top", 21, 1, names=21, first_contact_from_edge_mm=5.05,
+              last_contact_from_edge_mm=4.91)], 63.3, 25.4)
+    assert len(problems) == 1 and "= 22 contatti" in problems[0] and "count=21" in problems[0]
+
+
+def test_end_quotes_consistent_with_the_count_are_silent():
+    """@brief Negativo: 22 dichiarati con le stesse quote -> nessuna contraddizione."""
+    assert _side_contradictions(
+        [side("top", 22, 1, names=22, first_contact_from_edge_mm=5.05,
+              last_contact_from_edge_mm=4.91)], 63.3, 25.4) == []
+
+
+@pytest.mark.parametrize("extra", [dict(first_contact_from_edge_mm=5.05),
+                                   dict(last_contact_from_edge_mm=4.91),
+                                   dict(first_contact_from_edge_mm="n/a", last_contact_from_edge_mm=4.91)])
+def test_one_end_quote_alone_checks_nothing(extra):
+    """@brief Negativo: senza entrambe le quote non si inferisce nulla, nemmeno per simmetria."""
+    assert _side_contradictions([side("top", 21, 1, names=21, **extra)], 63.3, 25.4) == []
+
+
+def test_end_quotes_on_a_short_edge_use_the_width():
+    """@brief Lati left/right: il bordo e' la larghezza, non la lunghezza."""
+    problems = _side_contradictions(
+        [side("left", 4, 1, names=4, first_contact_from_edge_mm=2.0,
+              last_contact_from_edge_mm=2.0) | dict(pitch_mm=5.08)], 63.3, 25.4)
+    assert len(problems) == 1 and "= 5 contatti" in problems[0]
+
+
+def test_a_count_contradicted_by_the_quotes_is_recounted_and_the_recount_is_used():
+    """@brief Il flusso: la contraddizione delle quote paga un ricontrollo e adotta 22."""
+    data = answer([side("top", 21, 1, names=21, first_contact_from_edge_mm=5.05,
+                        last_contact_from_edge_mm=4.91)])
+    call = Mock(return_value=dict(drawing_unit="mm", castellated_sides=[
+        side("top", 22, 1, names=22, first_contact_from_edge_mm=5.05,
+             last_contact_from_edge_mm=4.91)]))
+    messages = []
+    validate(data, call, messages)
+    assert call.call_count == 1
+    assert data["castellated_sides"][0]["count"] == 22
+    assert any("= 22 contatti" in str(m) for m in messages)
+
+
+def test_end_quotes_longer_than_the_edge_are_said_as_such():
+    """@brief Negativo (revisione G): a + b > L non produce un conteggio negativo."""
+    [problem] = _side_contradictions(
+        [side("top", 3, 1, names=3, first_contact_from_edge_mm=40, last_contact_from_edge_mm=40)],
+        63.3, 25.4)
+    assert "superano il bordo" in problem and "-" not in problem.split("superano")[0][-4:]
+
+
+def test_a_bottom_view_swaps_the_end_quotes_with_the_direction():
+    """@brief Vista dal basso: il primo contatto incontrato diventa l'ultimo, e le quote con lui."""
+    from kicadgen.services.datasheet_extractor import _mirror_castellated_sides
+    sides = [dict(edge="top", count=22, pitch_mm=2.54, first_contact_from_edge_mm=5.05,
+                  last_contact_from_edge_mm=4.91, pin_names=["a", "b"])]
+    _mirror_castellated_sides(sides)
+    assert sides[0]["first_contact_from_edge_mm"] == 4.91
+    assert sides[0]["last_contact_from_edge_mm"] == 5.05
+    assert sides[0]["pin_names"] == ["b", "a"]

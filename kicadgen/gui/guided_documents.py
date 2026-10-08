@@ -115,9 +115,9 @@ def document_pixmap(path, size, upscale=True):
 #: check boxes with their short labels, in the 10 pt interface font.
 CARD_WIDTH = 236
 #: Position (row, column, column span) of each role check box on a card.
-#: «Foto alta risoluzione» and its translations (up to «Photo haute
-#: résolution») do not fit half of CARD_WIDTH, so the photograph role has a
-#: row of its own; the other pairs are the ones that already fitted in all
+#: «Alta risoluzione» and its translations (up to «Haute résolution», with
+#: the check box) do not fit half of CARD_WIDTH, so the photograph role keeps
+#: a row of its own; the other pairs are the ones that already fitted in all
 #: four languages.
 ROLE_GRID = {'pinout': (0, 0, 1), 'top': (0, 1, 1), 'hires': (1, 0, 2),
              'land_pattern': (2, 0, 1), 'side_view': (2, 1, 1), 'datasheet': (3, 0, 1)}

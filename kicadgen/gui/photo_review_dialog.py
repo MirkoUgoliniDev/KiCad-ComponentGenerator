@@ -85,7 +85,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (QBrush, QColor, QKeySequence, QPainter, QPainterPath, QPen,
                          QPixmap, QPolygonF, QShortcut, QTextDocument)
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QComboBox, QCompleter, QDialog, QDialogButtonBox,
+    QAbstractItemView, QCheckBox, QComboBox, QCompleter, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFormLayout, QPushButton,
     QGraphicsItem, QGraphicsPolygonItem, QGraphicsRectItem, QGraphicsScene,
     QGraphicsSimpleTextItem,
@@ -255,6 +255,10 @@ class _PhotoView(QGraphicsView):
     ## already clipped to ``draw_bounds``.
     rectangle_drawn = pyqtSignal(QRectF)
 
+    ## Emitted on a completed lasso gesture with the scene rectangle traced:
+    ## the editor selects the outlines lying whole inside it.
+    lasso_drawn = pyqtSignal(QRectF)
+
     ## Emitted after every change of scale (zoom, fit): the toolbar shows the
     ## percentage of the fitted photo.
     zoom_changed = pyqtSignal()
@@ -262,6 +266,7 @@ class _PhotoView(QGraphicsView):
     def __init__(self, scene, parent=None):
         super().__init__(scene, parent)
         self._draw_mode = False
+        self._lasso_mode = False
         self._draw_origin = None
         self._draw_scene_origin = None
         self._draw_band = None
@@ -348,6 +353,28 @@ class _PhotoView(QGraphicsView):
         self._cancel_band()
         self._apply_draw_cursor()
 
+    def set_lasso_mode(self, enabled):
+        """@brief Arm or disarm the lasso: a left drag traces a rectangle that selects.
+
+        @param enabled True to take the left button away from the outlines and
+               trace a selection rectangle instead (reported by `lasso_drawn`).
+        @note Same rubber band and same click threshold as the drawing gesture;
+              unlike it, the lasso may start outside the photo (on the dark
+              margin), because surrounding a group from outside is the
+              natural gesture.
+        """
+        self._lasso_mode = bool(enabled)
+        self._cancel_band()
+        self._apply_draw_cursor()
+
+    def lasso_mode(self) -> bool:
+        """@brief Whether the next left drag on the photo selects outlines."""
+        return self._lasso_mode
+
+    def _armed(self) -> bool:
+        """Either gesture owns the left button."""
+        return self._draw_mode or self._lasso_mode
+
     def _apply_draw_cursor(self):
         """Show the crosshair while armed; restore the normal pointer otherwise.
 
@@ -355,7 +382,7 @@ class _PhotoView(QGraphicsView):
         this, panning while armed would silently leave the pointer looking
         like the mode was off.
         """
-        if self._draw_mode:
+        if self._armed():
             self.viewport().setCursor(Qt.CursorShape.CrossCursor)
         else:
             self.viewport().unsetCursor()
@@ -432,9 +459,10 @@ class _PhotoView(QGraphicsView):
               there is nothing to measure, so the press is swallowed and the
               mode stays armed for the next attempt.
         """
-        if self._draw_mode and event.button() == Qt.MouseButton.LeftButton:
+        if self._armed() and event.button() == Qt.MouseButton.LeftButton:
             scene_pos = self.mapToScene(event.position().toPoint())
-            if self.draw_bounds is None or self.draw_bounds.contains(scene_pos):
+            if (self._lasso_mode or self.draw_bounds is None
+                    or self.draw_bounds.contains(scene_pos)):
                 self._draw_origin = event.position()
                 self._draw_scene_origin = scene_pos
             event.accept()
@@ -460,7 +488,7 @@ class _PhotoView(QGraphicsView):
               gesture, so the doubled press starts one like a single press
               does: swallowing it outright would make the retry silently inert.
         """
-        if self._draw_mode and event.button() == Qt.MouseButton.LeftButton:
+        if self._armed() and event.button() == Qt.MouseButton.LeftButton:
             self.mousePressEvent(event)
             return
         super().mouseDoubleClickEvent(event)
@@ -504,7 +532,7 @@ class _PhotoView(QGraphicsView):
               clipped to the photo, so a stroke that ends past the board edge
               still describes a body on the board.
         """
-        if (self._draw_mode and event.button() == Qt.MouseButton.LeftButton
+        if (self._armed() and event.button() == Qt.MouseButton.LeftButton
                 and self._draw_scene_origin is not None):
             origin = self._draw_origin
             rect = QRectF(self._draw_scene_origin,
@@ -512,8 +540,10 @@ class _PhotoView(QGraphicsView):
             self._cancel_band()
             travel = event.position() - origin
             if abs(travel.x()) >= DRAW_CLICK_PX or abs(travel.y()) >= DRAW_CLICK_PX:
-                rect = self._clipped_to_bounds(rect)
-                self.rectangle_drawn.emit(rect)
+                if self._lasso_mode:
+                    self.lasso_drawn.emit(rect)
+                else:
+                    self.rectangle_drawn.emit(self._clipped_to_bounds(rect))
             event.accept()
             return
         if event.button() == Qt.MouseButton.MiddleButton and self._pan_position is not None:
@@ -1740,6 +1770,18 @@ class PhotoReviewDialog(QDialog):
         self.delete_button = tool_button(
             "delete.svg", "Elimina selezionato", "Canc",
             "Toglie il componente scelto dall'inventario.", tr=tr)
+        # Lazo (utente, 2026-10-08): un rettangolo tracciato sulla foto
+        # sceglie insieme tutti i riquadri che vi stanno dentro per intero;
+        # Elimina e Tieni agiscono su tutti. Serve a svuotare in un gesto un
+        # corpo grande pieno di proposte spurie (56 dentro un modulo).
+        self.lasso_button = tool_button(
+            "tool-lasso.svg", "Lazo", "L",
+            "Accendi, poi trascina sulla foto: i riquadri interamente dentro al rettangolo "
+            "vengono scelti insieme. Canc o il cestino li elimina, «Tieni» li tiene o li "
+            "lascia tutti; Esc toglie la scelta.",
+            checkable=True, tr=tr)
+        self.lasso_button.toggled.connect(self.set_lasso_mode)
+        self._lasso_items = []
         # Tieni (HANDOFF 141): solo per i corpi aggiunti dal solo modello, che
         # partono esclusi. Stessa icona, tasto e ruolo del «Tieni» di «Corpi
         # rilevati»: una scelta, non un disegno.
@@ -1807,7 +1849,8 @@ class PhotoReviewDialog(QDialog):
         self.info_button.clicked.connect(lambda: self.info_popup.toggle_under(self.info_button))
         toolbar = QHBoxLayout()
         toolbar.setSpacing(4)
-        for widget in (self.add_button, self.delete_button, self.keep_button, self.format_button,
+        for widget in (self.add_button, self.lasso_button, self.delete_button, self.keep_button,
+                       self.format_button,
                        toolbar_divider(),
                        self.zoom_out_button, self.zoom_label, self.zoom_in_button,
                        self.fit_button, toolbar_divider(), self.photo_button,
@@ -1865,6 +1908,20 @@ class PhotoReviewDialog(QDialog):
             "Filtra per categoria la lista e i rettangoli sulla foto.")
         self.category_filter.currentIndexChanged.connect(self._category_filter_changed)
         sidebar.addWidget(self.category_filter)
+        # Le proposte NON tenute (sotto soglia, sopra un altro corpo, solo-AI)
+        # restano nei dati ma per default non si vedono (utente, 2026-10-08:
+        # su un modulo schermato il rilevatore ne proponeva 56 dentro il
+        # corpo, tutte gia' retrocesse, e la revisione era illeggibile).
+        # L'interruttore le riporta in vista; una proposta tenuta a mano e'
+        # visibile comunque.
+        self.show_unkept = QCheckBox(self._tr("Mostra le proposte non tenute"))
+        self.show_unkept.setObjectName("show_unkept")
+        self.show_unkept.setChecked(False)
+        self.show_unkept.setToolTip(self._tr(
+            "Spento: foto ed elenco mostrano solo i corpi tenuti. Acceso: anche le proposte "
+            "non tenute (tratteggiate), per recuperarne qualcuna."))
+        self.show_unkept.toggled.connect(lambda _checked: self._unkept_visibility_changed())
+        sidebar.addWidget(self.show_unkept)
         self.component_list = QListWidget()
         self.component_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         sidebar.addWidget(self.component_list, 1)
@@ -2080,6 +2137,7 @@ class PhotoReviewDialog(QDialog):
         self.add_button.toggled.connect(self.set_draw_mode)
         self.view.draw_bounds = self.photo_rect
         self.view.rectangle_drawn.connect(self._component_from_rectangle)
+        self.view.lasso_drawn.connect(self._lasso_drawn)
         self.delete_button.clicked.connect(self.delete_selected)
         self.fit_button.clicked.connect(self.fit_photo)
         self.zoom_in_button.clicked.connect(lambda: self.view.zoom(ZOOM_STEP))
@@ -2163,6 +2221,17 @@ class PhotoReviewDialog(QDialog):
               False (kept) or True (left out); the key stays, so the choice
               can be reversed in this and in any later review.
         """
+        if index is None and self._lasso_items and self._selected_item() is None:
+            # Gruppo del lazo: se anche una sola e' lasciata, si tengono tutte;
+            # altrimenti si lasciano tutte. Una scelta sola per il gesto.
+            group = [item for item in self._lasso_items if pending_proposal(item.component)]
+            if not group:
+                return None
+            keep = any(left_out(item.component) for item in group)
+            for item in group:
+                self._set_kept(item, keep)
+            self._sync_lasso_ui()
+            return keep
         if index is None:
             item = self._selected_item()
         else:
@@ -2170,6 +2239,11 @@ class PhotoReviewDialog(QDialog):
         if item is None or not pending_proposal(item.component):
             return None
         keep = left_out(item.component)
+        self._set_kept(item, keep)
+        return keep
+
+    def _set_kept(self, item, keep):
+        """Write the reviewer's decision of presence on one pending body and refresh it."""
         if ai_only_proposal(item.component):
             item.component["_ai_only_excluded"] = not keep
         else:
@@ -2179,7 +2253,6 @@ class PhotoReviewDialog(QDialog):
             item.component["_yolo_user_kept"] = keep
             item.component["_yolo_review_only"] = not keep
         self._ai_only_changed(item)
-        return keep
 
     def _on_format_toggled(self, checked):
         """@brief Start or end the «Copia formato» session.
@@ -2193,6 +2266,10 @@ class PhotoReviewDialog(QDialog):
         """
         self._format_source, self._format_source_item = None, None
         self._format_target_items = []
+        if checked and self.lasso_button.isChecked():
+            # One gesture owns the left button: with the lasso armed no click
+            # would ever reach a body to paste on.
+            self.set_lasso_mode(False)
         if checked:
             selected = self._selected_item()
             if selected is not None:
@@ -2305,14 +2382,19 @@ class PhotoReviewDialog(QDialog):
         self._refresh_item(item)
         self._refresh_ai_only_summary()
         self._sync_keep_button()
+        # Tenuta o lasciata: cambia se la vede chi tiene spento l'interruttore.
+        self._apply_filter()
 
     def _sync_keep_button(self):
         """«Tieni» only for an AI-only body; pressed when that body is kept."""
         selected = self._selected_item()
         proposal = selected is not None and pending_proposal(selected.component)
+        group = [item for item in self._lasso_items if pending_proposal(item.component)]
         with QSignalBlocker(self.keep_button):
-            self.keep_button.setEnabled(proposal)
-            self.keep_button.setChecked(proposal and not left_out(selected.component))
+            self.keep_button.setEnabled(proposal or bool(group))
+            self.keep_button.setChecked(
+                (proposal and not left_out(selected.component))
+                or (bool(group) and not any(left_out(item.component) for item in group)))
 
     def _refresh_ai_only_summary(self):
         """Say how many pending bodies there are and how many stay out.
@@ -2524,6 +2606,7 @@ class PhotoReviewDialog(QDialog):
             ("-", lambda: self.view.zoom(1 / ZOOM_STEP)),
             ("P", self.cycle_photo_state),
             ("T", self.toggle_keep),
+            ("L", lambda: self.lasso_button.setChecked(not self.lasso_button.isChecked())),
         )
         self._shortcuts = []
         for key, slot in bindings:
@@ -2542,7 +2625,9 @@ class PhotoReviewDialog(QDialog):
             (tr("Trascina"), tr("Sposta il rettangolo; le maniglie lo ridimensionano")),
             ("R", tr("Disegna: trascina sulla foto per aggiungere un corpo") if detector
              else tr("Aggiungi componente: traccia il rettangolo, poi assegna la tipologia")),
-            (tr("Canc"), tr("Elimina il componente scelto")),
+            (tr("Canc"), tr("Elimina il componente scelto, o tutti quelli scelti col lazo")),
+            (tr("L"), tr("Lazo: trascina un rettangolo per scegliere insieme i componenti che vi "
+                         "stanno dentro per intero; Esc toglie la scelta")),
             (tr("Rotella"), tr("Zoom attorno al puntatore")),
             (tr("Tasto centrale"), tr("Sposta la vista")),
             ("+  -  F", tr("Zoom avanti, indietro, foto intera")),
@@ -2782,6 +2867,18 @@ class PhotoReviewDialog(QDialog):
         self._refresh_uncertainties()
         self._apply_filter()
 
+    def _unkept_visibility_changed(self):
+        """@brief Apply the «show the proposals not kept» switch to list and photo.
+
+        @note Like a category change, hiding deselects a selected body that
+              would otherwise stay as one odd visible row.
+        """
+        selected = self._selected_item()
+        if (not self.show_unkept.isChecked() and selected is not None
+                and left_out(selected.component)):
+            self.scene.clearSelection()
+        self._apply_filter()
+
     def _category_filter_changed(self, _index):
         """@brief Apply the category chosen in the combo to the list and the photo.
 
@@ -2797,7 +2894,8 @@ class PhotoReviewDialog(QDialog):
         self._apply_filter()
 
     def _apply_filter(self):
-        """Hide the list rows AND the rectangles outside the active category.
+        """Hide the list rows AND the rectangles outside the active category,
+        and the proposals not kept unless ``show_unkept`` is on.
 
         Rows and rectangles are hidden, never removed: ``_components``,
         ``_items`` and the list rows stay index-aligned, so every existing
@@ -2823,11 +2921,30 @@ class PhotoReviewDialog(QDialog):
             assert row is not None, (
                 f"list row {index} missing for {len(self._items)} outlines: "
                 "rows and outlines are no longer index-aligned")
-            visible = (category is None or self._matches_category(item, category)
-                       or item is selected)
+            visible = self._passes_filters(item, category) or item is selected
             row.setHidden(not visible)
             item.setVisible(visible)
+        # The lasso group follows the filters: a member that is no longer
+        # shown leaves the group, so Delete and «Tieni» never act on what the
+        # user cannot see.
+        if self._lasso_items:
+            shown = [item for item in self._lasso_items if item.isVisible()]
+            if len(shown) != len(self._lasso_items):
+                self._lasso_items = shown
+                self._sync_lasso_ui()
         self._update_count()
+
+    def _passes_filters(self, item, category=None):
+        """Whether an outline is shown by BOTH filters: the category and the «not kept» switch.
+
+        The one predicate for everything that decides visibility, so that a
+        selection moved by the program (after a Delete) can never land on a
+        hidden outline and drag it into view (user, 2026-10-08).
+        """
+        if category is None:
+            category = self.active_category()
+        return ((category is None or self._matches_category(item, category))
+                and (self.show_unkept.isChecked() or not left_out(item.component)))
 
     def _selected_item(self):
         return next((item for item in self._items if item.isSelected()), None)
@@ -2872,6 +2989,10 @@ class PhotoReviewDialog(QDialog):
             with QSignalBlocker(self.scene):
                 for item in self._items:
                     item.setSelected(item is selected)
+            # Un corpo scelto da solo chiude il gruppo del lazo.
+            if self._lasso_items:
+                self._lasso_items = []
+                self._sync_lasso_ui()
         # Before the row becomes current: a hidden row cannot be shown as the
         # current one, and the selected component is always kept visible.
         self._apply_filter()
@@ -2879,7 +3000,7 @@ class PhotoReviewDialog(QDialog):
             self.component_list.setCurrentRow(self._items.index(selected) if selected else -1)
         self.form_widget.setEnabled(selected is not None)
         self.parameters_button.setEnabled(selected is not None)
-        self.delete_button.setEnabled(selected is not None)
+        self.delete_button.setEnabled(selected is not None or bool(self._lasso_items))
         self._sync_keep_button()
         if (selected is not None and self.format_button.isChecked()
                 and not self._format_paste_blocked):
@@ -3167,13 +3288,14 @@ class PhotoReviewDialog(QDialog):
             color = QColor(format_role)
         # The status pen keeps its colour when selected: the selection is
         # shown by the wide halo behind it, the thicker line and the fill.
-        pen = QPen(color, SELECTED_PEN_WIDTH_PX if item.isSelected() or format_role is not None
+        chosen = item.isSelected() or item in self._lasso_items
+        pen = QPen(color, SELECTED_PEN_WIDTH_PX if chosen or format_role is not None
                    else UNSELECTED_PEN_WIDTH_PX)
         pen.setCosmetic(True)
         if excluded:
             pen.setStyle(Qt.PenStyle.DashLine)
         item.setPen(pen)
-        item.halo.setVisible(item.isSelected())
+        item.halo.setVisible(chosen)
         fill = QColor(color)
         fill.setAlpha(FORMAT_SOURCE_FILL_ALPHA if format_role == FORMAT_SOURCE_COLOR
                       else 60 if item.isSelected() else AI_ONLY_EXCLUDED_FILL_ALPHA if excluded
@@ -3510,6 +3632,8 @@ class PhotoReviewDialog(QDialog):
             with QSignalBlocker(self.add_button):
                 self.add_button.setChecked(enabled)
         self.view.set_draw_mode(enabled)
+        if enabled and self.lasso_button.isChecked():
+            self.set_lasso_mode(False)
         if enabled:
             self.draw_hint.setText(self._tr(
                 "Modalità disegno attiva: trascina sulla foto per tracciare il nuovo "
@@ -3524,6 +3648,72 @@ class PhotoReviewDialog(QDialog):
         @return True while the drawing mode is armed.
         """
         return self.view.draw_mode()
+
+    def set_lasso_mode(self, enabled):
+        """@brief Arm or disarm the lasso; disarming also drops the group it chose.
+
+        @param enabled True to arm: the next drag on the photo selects every
+               visible outline lying whole inside the traced rectangle.
+        @note Exclusive with the drawing mode and the «Copia formato» brush:
+              one gesture owns the left button at a time.
+        """
+        enabled = bool(enabled)
+        if self.lasso_button.isChecked() != enabled:
+            with QSignalBlocker(self.lasso_button):
+                self.lasso_button.setChecked(enabled)
+        if enabled:
+            self.set_draw_mode(False)
+            self.format_button.setChecked(False)
+        self.view.set_lasso_mode(enabled)
+        if not enabled:
+            self._lasso_items = []
+        self._sync_lasso_ui()
+
+    def lasso_items(self):
+        """@brief Outlines currently chosen by the lasso, in list order.
+
+        @return A new list of _ComponentItem; empty without a lasso choice.
+        """
+        return list(self._lasso_items)
+
+    def _lasso_drawn(self, scene_rect):
+        """Choose every VISIBLE outline whose envelope lies whole inside the rectangle.
+
+        Hidden outlines (category filter, proposals not kept with the switch
+        off) are not chosen: a gesture must not act on what the user cannot
+        see. The single selection is cleared, so the fields edit nothing and
+        the group is the only thing the next Delete or «Tieni» acts on.
+        """
+        chosen = [item for item in self._items
+                  if self._passes_filters(item) and scene_rect.contains(item.photo_bounds())]
+        with QSignalBlocker(self.scene):
+            for item in self._items:
+                item.setSelected(False)
+        self._lasso_items = chosen
+        self._selection_changed()
+        self._lasso_items = chosen
+        self._sync_lasso_ui()
+
+    def _sync_lasso_ui(self):
+        """Hint, buttons and outlines after the lasso group changed."""
+        self._lasso_items = [item for item in self._lasso_items if item in self._items]
+        count = len(self._lasso_items)
+        if count:
+            self.draw_hint.setText(self._tr(
+                "{count} componenti scelti col lazo: Canc o il cestino li elimina, «Tieni» "
+                "li tiene o li lascia tutti, Esc toglie la scelta.").format(count=count))
+            self.draw_hint.setVisible(True)
+        elif self.lasso_button.isChecked():
+            self.draw_hint.setText(self._tr(
+                "Lazo attivo: trascina sulla foto per scegliere insieme i componenti dentro "
+                "al rettangolo. Esc o «Lazo» annulla."))
+            self.draw_hint.setVisible(True)
+        elif not self.draw_mode():
+            self.draw_hint.setVisible(self.format_button.isChecked())
+        self.delete_button.setEnabled(self._selected_item() is not None or count > 0)
+        self._sync_keep_button()
+        for item in self._items:
+            self._refresh_item(item)
 
     def keyPressEvent(self, event):
         """@brief Let Escape disarm the drawing mode, and make Return apply.
@@ -3543,6 +3733,15 @@ class PhotoReviewDialog(QDialog):
         """
         if event.key() == Qt.Key.Key_Escape and self.draw_mode():
             self.set_draw_mode(False)
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Escape and (self._lasso_items or self.lasso_button.isChecked()):
+            # First the group, then the mode: two Escapes to put the lasso away.
+            if self._lasso_items:
+                self._lasso_items = []
+                self._sync_lasso_ui()
+            else:
+                self.set_lasso_mode(False)
             event.accept()
             return
         if event.key() == Qt.Key.Key_Escape and self.format_button.isChecked():
@@ -3685,18 +3884,24 @@ class PhotoReviewDialog(QDialog):
             disappear. Zoom and scroll position are kept exactly as they were.
         """
         item = self._selected_item()
-        if item is None:
+        doomed = [item] if item is not None else list(self._lasso_items)
+        if not doomed:
             return
-        index = self._items.index(item)
+        index = min(self._items.index(victim) for victim in doomed)
         horizontal = self.view.horizontalScrollBar().value()
         vertical = self.view.verticalScrollBar().value()
         with QSignalBlocker(self.scene), QSignalBlocker(self.component_list):
-            self.scene.removeItem(item)
-            self._items.pop(index)
-            self._components.pop(index)
-            self.component_list.takeItem(index)
-        self._format_target_items = [t for t in self._format_target_items if t is not item]
-        if item is self._format_source_item:
+            # Dall'ultimo al primo: gli indici piu' bassi restano validi.
+            for victim in sorted(doomed, key=self._items.index, reverse=True):
+                position = self._items.index(victim)
+                self.scene.removeItem(victim)
+                self._items.pop(position)
+                self._components.pop(position)
+                self.component_list.takeItem(position)
+        self._lasso_items = []
+        self._sync_lasso_ui()
+        self._format_target_items = [t for t in self._format_target_items if t not in doomed]
+        if self._format_source_item in doomed:
             # Cancellata la sorgente non c'e' piu' nulla da incollare.
             self.format_button.setChecked(False)
         # A category can disappear with its last component.
@@ -3707,7 +3912,7 @@ class PhotoReviewDialog(QDialog):
         self.view.verticalScrollBar().setValue(vertical)
 
     def _nearest_shown(self, index):
-        """Row of the outline nearest to `index` that the category filter shows; -1 if none.
+        """Row of the outline nearest to `index` that both filters show; -1 if none.
 
         Forward first, as before. Before, the next row was selected even when
         the filter hid it, and `_select_row` made it visible: a second Delete
@@ -3716,8 +3921,8 @@ class PhotoReviewDialog(QDialog):
         category = self.active_category()
         for distance in range(len(self._items)):
             for candidate in (index + distance, index - distance - 1):
-                if 0 <= candidate < len(self._items) and (
-                        category is None or self._matches_category(self._items[candidate], category)):
+                if (0 <= candidate < len(self._items)
+                        and self._passes_filters(self._items[candidate], category)):
                     return candidate
         return -1
 

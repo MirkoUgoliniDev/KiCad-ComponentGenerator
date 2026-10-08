@@ -891,3 +891,169 @@ def test_the_undetermined_row_survives_the_category_filter(app, png):
         assert widget.component_list.item(0).foreground().color() == QColor(UNDETERMINED_TYPE_COLOR)
     finally:
         widget.close()
+
+
+# ── Proposte non tenute nascoste per default (utente, 2026-10-08) ─────────
+
+
+@pytest.fixture
+def dialog_with_unkept(app, png, components):
+    """Three bodies plus two sub-threshold detector proposals nobody kept."""
+    # Stadio inventario: la categoria e' `kind`, quindi le deboli sono condensatori.
+    weak = [dict(name=f"YOLO candidate {n}", kind="capacitor", x_mm=x, y_mm=0.0,
+                 length_mm=1.0, width_mm=0.5, height_mm=.5, rotation_deg=0.0,
+                 _yolo_class="capacitor", _yolo_confidence=.1, _yolo_proposal_id=f"p{n}",
+                 _yolo_origin="low_confidence_review", _yolo_review_only=True,
+                 _yolo_low_confidence=True) for n, x in ((4, 2.0), (5, 5.0))]
+    widget = PhotoReviewDialog(png, components + weak, 40, 20)
+    widget.show()
+    app.processEvents()
+    yield widget
+    widget.close()
+    app.processEvents()
+
+
+def test_proposals_not_kept_are_hidden_by_default_on_list_and_photo(dialog_with_unkept):
+    """@brief Positivo: spento per default, l'interruttore nasconde le proposte non tenute."""
+    dialog = dialog_with_unkept
+    assert not dialog.show_unkept.isChecked()
+    assert _visible_rows(dialog) == [0, 1, 2]
+    assert [item.isVisible() for item in dialog._items] == [True, True, True, False, False]
+    # I dati non cambiano: la revisione restituisce tutto, nascosto o no.
+    assert len(dialog.get_components()) == 5
+
+
+def test_the_switch_shows_them_again_and_keeping_one_shows_it_with_the_switch_off(
+        dialog_with_unkept, app):
+    dialog = dialog_with_unkept
+    dialog.show_unkept.setChecked(True)
+    app.processEvents()
+    assert _visible_rows(dialog) == [0, 1, 2, 3, 4]
+    assert all(item.isVisible() for item in dialog._items)
+    # Tenuta a mano, resta visibile anche a interruttore spento: e' un corpo.
+    assert dialog.toggle_keep(3) is True
+    dialog.show_unkept.setChecked(False)
+    app.processEvents()
+    assert _visible_rows(dialog) == [0, 1, 2, 3]
+    assert [item.isVisible() for item in dialog._items] == [True, True, True, True, False]
+
+
+def test_kept_bodies_and_the_category_filter_are_unaffected_by_the_switch(dialog_with_unkept, app):
+    """@brief Negativo: i corpi tenuti non spariscono mai; i due filtri si sommano."""
+    dialog = dialog_with_unkept
+    _select_category(dialog, "resistor")
+    assert _visible_rows(dialog) == [1]
+    dialog.show_unkept.setChecked(True)
+    app.processEvents()
+    assert _visible_rows(dialog) == [1], "le deboli sono condensatori: fuori categoria restano nascoste"
+    _select_category(dialog, "capacitor")
+    assert _visible_rows(dialog) == [2, 3, 4]
+
+
+def test_switching_off_deselects_a_selected_proposal_not_kept(dialog_with_unkept, app):
+    dialog = dialog_with_unkept
+    dialog.show_unkept.setChecked(True)
+    app.processEvents()
+    dialog._select_row(4, center=False)
+    assert dialog._items[4].isSelected()
+    dialog.show_unkept.setChecked(False)
+    app.processEvents()
+    assert not dialog._items[4].isSelected() and not dialog._items[4].isVisible()
+
+
+def test_the_lasso_ignores_proposals_hidden_by_the_switch(dialog_with_unkept, app):
+    """@brief Negativo: cio' che non si vede non si sceglie."""
+    dialog = dialog_with_unkept
+    dialog.lasso_button.setChecked(True)
+    everything = dialog.photo_rect.adjusted(-5, -5, 5, 5)
+    dialog.view.lasso_drawn.emit(everything)
+    app.processEvents()
+    assert dialog.lasso_items() == dialog._items[:3]
+
+
+def test_keep_acts_on_every_lassoed_proposal(dialog_with_unkept, app):
+    """@brief Positivo: col lazo sulle deboli, «Tieni» le tiene tutte, poi le lascia tutte."""
+    dialog = dialog_with_unkept
+    dialog.show_unkept.setChecked(True)
+    dialog.lasso_button.setChecked(True)
+    dialog.view.lasso_drawn.emit(dialog.photo_rect.adjusted(-5, -5, 5, 5))
+    app.processEvents()
+    assert len(dialog.lasso_items()) == 5 and dialog.keep_button.isEnabled()
+    assert dialog.toggle_keep() is True
+    assert all(not dialog._items[i].component.get("_yolo_review_only") for i in (3, 4))
+    assert dialog.lasso_items() == dialog._items[:5], "the group survives the decision"
+    assert dialog.toggle_keep() is False
+    assert all(dialog._items[i].component.get("_yolo_review_only") for i in (3, 4))
+
+
+def test_deleting_never_brings_a_hidden_proposal_into_view(dialog_with_unkept, app):
+    """@brief Positivo (utente 2026-10-08): dopo Elimina la selezione va a un corpo VISIBILE."""
+    dialog = dialog_with_unkept
+    dialog._select_row(2, center=False)          # C1, l'ultimo corpo tenuto: i vicini sono deboli
+    dialog.delete_selected()
+    assert [item.isVisible() for item in dialog._items] == [True, True, False, False]
+    selected = dialog._selected_item()
+    assert selected is not None and selected is dialog._items[1], "il vicino visibile precedente"
+    assert _visible_rows(dialog) == [0, 1]
+
+
+def test_deleting_with_the_switch_on_moves_to_the_next_proposal(dialog_with_unkept, app):
+    """@brief Negativo: con la casella accesa le deboli sono visibili e la selezione puo' andarci."""
+    dialog = dialog_with_unkept
+    dialog.show_unkept.setChecked(True)
+    dialog._select_row(2, center=False)
+    dialog.delete_selected()
+    assert dialog._selected_item() is dialog._items[2]
+    assert all(item.isVisible() for item in dialog._items)
+
+
+# ── Il gruppo del lazo segue i filtri (revisione H, 2026-10-08) ─────────
+
+
+def test_a_lassoed_outline_hidden_by_the_category_filter_leaves_the_group(dialog_with_unkept, app):
+    """@brief Negativo: cio' che il filtro nasconde non puo' piu' essere eliminato col gruppo."""
+    dialog = dialog_with_unkept
+    dialog.lasso_button.setChecked(True)
+    dialog.view.lasso_drawn.emit(dialog.photo_rect.adjusted(-5, -5, 5, 5))
+    app.processEvents()
+    assert len(dialog.lasso_items()) == 3
+    _select_category(dialog, "resistor")
+    assert [item.component["name"] for item in dialog.lasso_items()] == ["R1"]
+    dialog.delete_selected()
+    assert [c["name"] for c in dialog.get_components()] == ["U1", "C1", "YOLO candidate 4",
+                                                             "YOLO candidate 5"]
+
+
+def test_lassoed_proposals_hidden_by_the_switch_leave_the_group(dialog_with_unkept, app):
+    dialog = dialog_with_unkept
+    dialog.show_unkept.setChecked(True)
+    dialog.lasso_button.setChecked(True)
+    dialog.view.lasso_drawn.emit(dialog.photo_rect.adjusted(-5, -5, 5, 5))
+    app.processEvents()
+    assert len(dialog.lasso_items()) == 5
+    dialog.show_unkept.setChecked(False)
+    assert len(dialog.lasso_items()) == 3 and "3 componenti" in dialog.draw_hint.text()
+    # Lasciarle con «Tieni» le nasconde: escono dal gruppo anche cosi'.
+    dialog.show_unkept.setChecked(True)
+    dialog.view.lasso_drawn.emit(dialog.photo_rect.adjusted(-5, -5, 5, 5))
+    app.processEvents()
+    assert dialog.toggle_keep() is True and len(dialog.lasso_items()) == 5
+    dialog.show_unkept.setChecked(False)
+    assert len(dialog.lasso_items()) == 5, "tenute: visibili anche a casella spenta"
+    assert dialog.toggle_keep() is False
+    assert len(dialog.lasso_items()) == 3, "lasciate: nascoste, fuori dal gruppo"
+
+
+def test_the_lasso_does_not_choose_a_proposal_visible_only_because_selected(dialog_with_unkept, app):
+    dialog = dialog_with_unkept
+    dialog._select_row(3, center=False)          # a hidden proposal, shown only while selected
+    assert dialog._items[3].isVisible()
+    dialog.lasso_button.setChecked(True)
+    dialog.view.lasso_drawn.emit(dialog.photo_rect.adjusted(-5, -5, 5, 5))
+    app.processEvents()
+    assert all(not left_out_item(item) for item in dialog.lasso_items())
+
+
+def left_out_item(item):
+    from kicadgen.gui.photo_review_dialog import left_out
+    return left_out(item.component)
