@@ -1465,6 +1465,7 @@ def _canonicalize_answer(data: dict) -> None:
     # photo stage writes it AFTER this conversion (HANDOFF 169), and an
     # answer already converted keeps it (the early return above).
     data.pop("_measured_lands", None)
+    data.pop("_measured_holes", None)
     notes: list[str] = []
     layout = data.get("layout") or "matrix"
 
@@ -3974,6 +3975,7 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
     if layout == "castellated":
         _drop_unread_row_spacing(params, notes)
         _apply_measured_lands(data, params, notes)
+        _apply_measured_holes(data, params, notes)
         _downgrade_sizes_wider_than_the_pitch(params, notes)
     notes.extend(_review_notes(sides, params.value_sources))
     if notes:
@@ -4086,6 +4088,49 @@ def _apply_measured_lands(data: dict, params: "ExtractedParams", notes: list) ->
             "(±{tolerance:.2f}), al posto di: {previous}.",
             label=label, width=width, tolerance=tolerance, previous=previous))
     params.value_sources = sources
+
+
+def _apply_measured_holes(data: dict, params: "ExtractedParams", notes: list) -> None:
+    """Adopt the contact style the photo read (`data["_measured_holes"]`, edge_lands).
+
+    Per edge with a verdict: when the style the photo read differs from the
+    declared one, the side takes the photo's style, with a note that says
+    the evidence (how many lands agreed, the opening and the hole widths);
+    an equal style is confirmed silently. Only the STYLE is adopted: the hole
+    width read on the photo is the visible barrel, not the drill, and is
+    reported in the note for a person, never written as a size. The
+    measurement block is a private key the photo stage writes; a raw answer
+    never carries it (_canonicalize_answer drops it).
+
+    @param data Answer the photo stage annotated.
+    @param params Result under construction; sides updated.
+    @param notes Notes of the result.
+    """
+    holes = data.get("_measured_holes")
+    if not isinstance(holes, dict) or not holes:
+        return
+    for side in params.castellated_sides or ():
+        if not isinstance(side, dict):
+            continue
+        edge = side.get("edge")
+        reading = holes.get(edge)
+        if not isinstance(reading, dict) or reading.get("style") not in CONTACT_STYLES:
+            continue
+        declared = side.get("contact_style")
+        if declared == reading["style"]:
+            continue
+        label = EDGE_LABELS.get(edge, edge)
+        side["contact_style"] = reading["style"]
+        side["_contact_style_evidence"] = tx(
+            "letto sulla foto: {agreeing} piazzole su {contacts} concordi, foro {drill:.2f} mm, "
+            "apertura sul bordo {chord:.2f} mm",
+            agreeing=reading.get("agreeing", 0), contacts=reading.get("contacts", 0),
+            drill=float(reading.get("drill_mm") or 0.0), chord=float(reading.get("chord_mm") or 0.0))
+        notes.append(tx(
+            "Lato {label}: tipo di contatto {measured} letto sulla foto ({evidence}), al posto di "
+            "«{declared}» dichiarato dal modello.",
+            label=label, measured=reading["style"], evidence=side["_contact_style_evidence"],
+            declared=declared or "?"))
 
 
 #: Per-side sizes measured ALONG the edge, across the pitch: two adjacent

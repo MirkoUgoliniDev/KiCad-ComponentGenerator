@@ -928,6 +928,12 @@ class ModelCandidatesDialog(QDialog):
                             dict(path=saved_path, package=tx('Modello attuale: {name}',
                                                              name=Path(saved_path).name)))
             self._candidates = [existing] + self._candidates[:4]
+        # An archive proposal still to be confirmed (review_required) is
+        # highlighted, not chosen: the user's earlier choice is one click
+        # away instead of one more search (user, 2026-10-08).
+        if (not saved_path and self._candidates
+                and self._candidates[0].get('measurement_basis') == 'accepted_library'):
+            saved_path = self._candidates[0]['path']
         layout = QVBoxLayout(self)
         title = QLabel(tx("{name} — dimensioni stimate L × W × H (mm): {dimensions}",
                           name=component.get('name') or tx('Componente'),
