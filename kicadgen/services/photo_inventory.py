@@ -1524,6 +1524,26 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                                            if land.width_mm is not None}
             for kind, message in land_lines(lands):
                 (warn if kind == "warning" else log)(message)
+        # Tipo di contatto letto dalla foto (utente, 2026-10-08): il modello
+        # dichiara a volte «half_hole», a volte «half_and_through» sugli
+        # stessi documenti, e dal tipo dipendono i pin del 3D. La geometria
+        # delle piazzole sul bordo (apertura sul bordo, foro chiuso dietro)
+        # decide; l'estrazione sostituisce lo stile dichiarato solo quando la
+        # foto lo contraddice, con nota (_apply_measured_holes).
+        from .edge_lands import measure_edge_holes
+        from .edge_notches import normalized_sides
+        holes = {}
+        for edge, side in normalized_sides(declared.get("castellated_sides")).items():
+            reading = measure_edge_holes(photo, edge, side.get("pitch_mm"), length, width)
+            if reading.style:
+                holes[edge] = reading.as_dict()
+                log(tx("Fori sul bordo {edge}: {style} su {agreeing} piazzole di {contacts} "
+                       "(foro {drill:.2f} mm, apertura {chord:.2f} mm).",
+                       edge=edge, style=reading.style, agreeing=reading.agreeing,
+                       contacts=reading.contacts, drill=reading.drill_mm or 0.0,
+                       chord=reading.chord_mm or 0.0))
+        if holes:
+            declared["_measured_holes"] = holes
     if top_photo_index is None:
         warn(tx("Vista dall'alto non specificata: scelta euristica {name}, verificare "
                 "la foto nel confronto.",

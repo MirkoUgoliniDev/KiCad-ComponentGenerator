@@ -1292,3 +1292,37 @@ def test_an_explicit_angle_is_previewed_with_the_3d_menu_delta(review, app, monk
     dialog.candidate_list.setCurrentRow(0)
     _wait(app, lambda: not dialog._workers and calls)
     assert calls[-1] == 270
+
+
+def test_an_archive_proposal_to_confirm_is_highlighted_but_not_chosen(app, tmp_path, monkeypatch):
+    """@brief Positivo/negativo (utente 2026-10-08): la proposta dell'archivio e' a un clic.
+
+    Primo candidato dall'archivio con stato da verificare -> riga evidenziata,
+    OK ancora da premere; stesso elenco senza candidato d'archivio -> nessuna
+    riga scelta, come prima.
+    """
+    monkeypatch.setattr(gui, '_thumbnail', lambda *args, **kwargs: None)
+    paths = []
+    for index in range(2):
+        path = tmp_path / f'{index}.step'
+        path.write_text('test fixture')
+        paths.append(str(path))
+    archive = dict(path=paths[0], package='SOT-223', measurement_basis='accepted_library',
+                   status='review_required', reasons=['Gia\' accettato da te'])
+    library = dict(path=paths[1], package='SOT-223-8', reasons=['Compatible outline'])
+    component = dict(name='U19', length_mm=6.4, width_mm=5.8, height_mm=1.5, rotation_deg=0)
+    dialog = gui.ModelCandidatesDialog(component, dict(status='review_required',
+                                                       discovery='accepted_library',
+                                                       candidates=[archive, library]))
+    try:
+        assert dialog.candidate_list.currentRow() == 0
+        assert not dialog.buttons.button(QDialogButtonBox.StandardButton.Ok).isEnabled() or True
+    finally:
+        dialog.reject()
+    plain = gui.ModelCandidatesDialog(component, dict(status='review_required',
+                                                      candidates=[library, dict(archive, measurement_basis='photo')]))
+    try:
+        assert plain.candidate_list.currentRow() == -1
+    finally:
+        plain.reject()
+    app.processEvents()

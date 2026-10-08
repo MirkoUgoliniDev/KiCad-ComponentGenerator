@@ -786,3 +786,83 @@ def test_the_pipeline_caption_is_gone_and_the_pause_lives_in_the_options(window)
     assert "Passo 2" in window.btn_relaunch_inventory.toolTip()
 
 
+
+
+# ── 1b. I consolidati entrano nella revisione, prima della generazione ────
+
+def _install_archive(monkeypatch, verdicts):
+    """@brief Finto confronto con l'archivio: `verdicts` = {name: ("matched"|"review_required", path)}.
+
+    Scrive `consolidated_match` come fa `_archive_prepass` e restituisce i
+    rapporti trovati per identita' del componente, come l'originale.
+    """
+    from kicadgen.cad3d import kicad_models
+    seen = []
+
+    def prepass(components, library, note, cancel):
+        results = {}
+        for component in components:
+            seen.append(component.get("name"))
+            verdict = verdicts.get(component.get("name"))
+            if verdict is None:
+                component["consolidated_match"] = dict(name=component.get("name"), status="not_found")
+                continue
+            status, path = verdict
+            component["consolidated_match"] = dict(name=component.get("name"), status=status, model=path)
+            results[id(component)] = {"status": "library_matched" if status == "matched" else "review_required",
+                                      "candidates": [{"path": path, "package": path}],
+                                      "selected_path": path if status == "matched" else None,
+                                      "discovery": "accepted_library",
+                                      "accepted_orientation": ({"status": "matched", "rotation_deg": 270.0}
+                                                               if status == "matched" else {})}
+        return results
+
+    monkeypatch.setattr(kicad_models, "_archive_prepass", prepass)
+    return seen
+
+
+def test_the_review_opens_with_the_accepted_matches_applied_and_the_doubtful_ones_proposed(
+        window, monkeypatch):  # noqa: F811
+    """@brief Positivo e negativo (utente 2026-10-08): il consolidato si vede e si modifica nella revisione.
+
+    R1 trovato nell'archivio -> modello applicato (attachment «accepted_library»,
+    model_path); C1 trovato ma da verificare -> proposta senza modello
+    applicato; L1 con scelta manuale confermata -> l'archivio non lo tocca.
+    """
+    _ready(window, monkeypatch)
+    _answer_pause(monkeypatch, QMessageBox.StandardButton.Yes)
+    opened = _install_review_dialog(monkeypatch, None)
+    seen = _install_archive(monkeypatch, {"R1": ("matched", "lib/R_0603.step"),
+                                          "C1": ("review_required", "lib/C_0603.step")})
+    manual = _component("L1", model_selection=dict(status="confirmed", path="lib/L.step"))
+    _run_extraction(window, monkeypatch)
+    window._on_extracted(_extracted(components=[_component("R1"), _component("C1"), manual]))
+    window._on_extract_finished()
+    assert seen == ["R1", "C1", "L1"], "ogni corpo e' stato confrontato prima della revisione"
+    received = {c["name"]: c for c in opened[0]}
+    assert received["R1"]["model_match"]["attachment"] == "accepted_library"
+    assert received["R1"]["model_path"] == "lib/R_0603.step"
+    assert received["R1"]["model_rotation_deg"] == 270.0, "the verse of the verified crop comes with the model"
+    assert "model_rotation_deg" not in received["C1"]
+    assert received["C1"]["model_match"]["status"] == "review_required"
+    assert received["C1"].get("model_path") is None
+    assert received["C1"]["model_match"]["candidates"][0]["path"] == "lib/C_0603.step"
+    # L1 arriva con il `model_match` vuoto dell'estrazione: l'archivio non lo ha toccato.
+    assert not (received["L1"].get("model_match") or {}).get("attachment")
+    assert received["L1"]["model_selection"]["status"] == "confirmed"
+
+
+def test_an_unreadable_archive_does_not_stop_the_review(window, monkeypatch):  # noqa: F811
+    from kicadgen.cad3d import kicad_models
+
+    def broken(*_args, **_kwargs):
+        raise OSError("archivio non leggibile")
+
+    monkeypatch.setattr(kicad_models, "_archive_prepass", broken)
+    _ready(window, monkeypatch)
+    _answer_pause(monkeypatch, QMessageBox.StandardButton.Yes)
+    opened = _install_review_dialog(monkeypatch, None)
+    _run_extraction(window, monkeypatch)
+    window._on_extracted(_extracted())
+    window._on_extract_finished()
+    assert len(opened) == 1 and not (opened[0][0].get("model_match") or {}).get("attachment")

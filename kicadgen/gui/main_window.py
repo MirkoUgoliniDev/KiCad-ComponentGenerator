@@ -5504,6 +5504,7 @@ class MainWindow(QMainWindow):
         try:
             if overlay_was_visible:
                 self.analysis_overlay.hide()
+            self._consult_consolidated_before_review()
             self._show_photo_comparison()
         except Exception as exc:  # noqa: BLE001 - vedi _on_review_requested
             # Un guasto della revisione non deve buttare via l'analisi appena
@@ -5516,6 +5517,71 @@ class MainWindow(QMainWindow):
                 self.analysis_overlay.show()
                 self.analysis_overlay.raise_()
         return True
+
+    def _consult_consolidated_before_review(self) -> None:
+        """@brief Bring the accepted-matches archive into the review, before the build.
+
+        @note User, 2026-10-08: «vedo l'applicazione del consolidato e ho la
+            possibilita' di editare». The archive used to be consulted only
+            inside the generation (step «Confronto con i consolidati»), so the
+            review opened on bare bodies and the user's own earlier choices
+            appeared only in the finished solid. Here the same comparison
+            (`kicad_models._archive_prepass`: SQLite and crop descriptors, no
+            FreeCAD, no AI) runs on the photo rows first: a body the archive
+            MATCHES gets the model applied (`model_match` with attachment
+            «accepted_library» and `model_path`), visible and editable in the
+            review like any choice; a body «da verificare» carries the report
+            with its single archive candidate, which the picker lists first,
+            and no model is applied. Bodies with a confirmed manual choice are
+            left alone by the archive itself. The generation repeats the
+            comparison for whatever has no choice, so declining the pause
+            changes nothing.
+        @note Never fatal: an unreadable archive or library is logged and the
+            review opens as before.
+        """
+        rows = self._photo_rows
+        if not rows:
+            return
+        from ..cad3d import kicad_models
+        try:
+            attached, _count = self._attach_accepted_component_images(rows)
+            results = kicad_models._archive_prepass(attached, None, self._append_log, None)
+        except Exception as exc:  # noqa: BLE001 - l'archivio aiuta, non blocca
+            self._append_log(tx("Consolidati prima della revisione non disponibili: {exc}", exc=exc))
+            return
+        applied = proposed = 0
+        for row, item in zip(rows, attached):
+            record = item.get('consolidated_match')
+            if isinstance(record, dict):
+                row['consolidated_match'] = record
+            found = results.get(id(item)) if isinstance(results, dict) else None
+            if not isinstance(found, dict) or not isinstance(record, dict):
+                continue
+            report = dict(found)
+            if record.get('status') == 'matched' and report.get('selected_path'):
+                report['attachment'] = 'accepted_library'
+                report['attachment_reason'] = tx(
+                    "Modello dall'archivio degli abbinamenti accettati, applicato prima della "
+                    "revisione: modificabile nel selettore.")
+                row['model_path'] = report['selected_path']
+                # The verse comes with the model, as in the generation
+                # (kicad_models.attach_models): only an individually verified
+                # crop with an unambiguous angle transfers it; otherwise the
+                # verse stays automatic and the report says it is unverified.
+                orientation = report.get('accepted_orientation') or {}
+                angle = orientation.get('rotation_deg')
+                if (orientation.get('status') == 'matched' and isinstance(angle, (int, float))
+                        and not isinstance(angle, bool) and math.isfinite(angle)):
+                    row['model_rotation_deg'] = float(angle)
+                applied += 1
+            else:
+                report['status'] = 'review_required'
+                report['selected_path'] = None
+                proposed += 1
+            row['model_match'] = report
+        self._append_log(tx("Consolidati prima della revisione: {applied} modelli applicati, "
+                            "{proposed} proposti da confermare, su {total} corpi.",
+                            applied=applied, proposed=proposed, total=len(rows)))
 
     def _on_review_requested(self, photo_png, proposals, length_mm, width_mm) -> None:
         """@brief Mostra le proposte del rilevatore (revisione unificata, stadio rilevatore) e restituisce al worker quelle da tenere.
