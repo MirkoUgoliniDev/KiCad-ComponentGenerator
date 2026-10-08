@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
 
 from kicadgen.gui.photo_review_dialog import (
     BOARD_BACKDROP_COLOR, BOARD_BORDER_COLOR, DRAW_CLICK_PX,
-    MIN_HANDLE_SIZE_MM, NUMBER_LABEL_BACKING_COLOR, PHOTO_DIMMED,
+    HANDLE_HALF_PX, MIN_GRAB_PX, MIN_HANDLE_SIZE_MM, NUMBER_LABEL_BACKING_COLOR, PHOTO_DIMMED,
     PHOTO_DIMMED_OPACITY, PHOTO_FULL, PHOTO_HIDDEN, PHOTO_STATES,
     PhotoReviewDialog, PhotoTransform, SELECTION_HALO_COLOR,
     UNDETERMINED_LIST_MARKER, UNDETERMINED_TYPE_CLASSES, UNDETERMINED_TYPE_COLOR,
@@ -2237,3 +2237,62 @@ def test_without_unclassified_bodies_there_is_no_empty_entry(dialog):
     """Negative: an entry that would show nothing is not offered."""
     from kicadgen.gui.photo_review_dialog import UNDETERMINED_FILTER
     assert dialog.category_filter.findData(UNDETERMINED_FILTER) == -1
+
+
+def test_the_view_repaints_the_whole_viewport_so_no_trail_is_left(dialog):
+    """@brief Screen-sized halo, pens and labels stick out of scene-unit rectangles.
+
+    With the minimal dirty region those pixels stayed behind as a trail
+    while an outline was dragged on a shrunk photo (user, 2026-10-09).
+    """
+    from PyQt6.QtWidgets import QGraphicsView
+    assert dialog.view.viewportUpdateMode() == QGraphicsView.ViewportUpdateMode.FullViewportUpdate
+
+
+def test_a_body_smaller_than_a_grip_on_screen_can_still_be_grabbed(dialog, app):
+    """@brief Positivo: l'area di presa non scende sotto una maniglia di schermo.
+
+    Un corpo 0.4 x 0.2 mm (01005) a 10 x 5 px/mm e zoom 0.25 e' 1 x 0.25 px
+    sullo schermo: imprendibile. Un punto a un terzo di maniglia dal centro
+    deve cadere nella sua area di presa; il contorno disegnato non cambia.
+    """
+    item = dialog._append_item(dict(name="C9", kind="capacitor", x_mm=0.0, y_mm=0.0,
+                                    length_mm=0.4, width_mm=0.2, height_mm=.2, rotation_deg=0.0))
+    app.processEvents()                                     # let the deferred fit run first
+    dialog.view.zoom(0.25 / dialog.view.transform().m11())   # a manual zoom: fit is over
+    app.processEvents()
+    scale = dialog.view.transform().m11()
+    assert scale == pytest.approx(0.25, rel=0.3), "the clamp keeps it near the requested scale"
+    half_scene = MIN_GRAB_PX / 2 / scale
+    probe = QPointF(half_scene / 3, half_scene / 3)        # item coordinates
+    assert item.shape().contains(probe), "a third of a grip away from the centre is still the body"
+    assert not item.polygon().containsPoint(probe, Qt.FillRule.OddEvenFill), "the outline itself is unchanged"
+    assert item.boundingRect().contains(item.shape().boundingRect())
+
+
+def test_a_body_larger_than_a_grip_keeps_its_own_outline_as_grab_area(dialog, app):
+    """@brief Negativo: un corpo grande sullo schermo non riceve nessun allargamento."""
+    item = dialog._items[0]                                 # U1: 8 x 2 mm
+    app.processEvents()
+    dialog.view.zoom(4.0 / dialog.view.transform().m11())
+    app.processEvents()
+    rect = item.polygon().boundingRect()
+    outside = QPointF(rect.right() + item.pen().widthF() + 0.5, rect.center().y())
+    assert not item.shape().contains(outside)
+    assert item.shape().boundingRect().width() <= rect.width() + item.pen().widthF() + 1e-6
+
+
+def test_resize_grips_sit_outside_the_outline_so_its_inside_stays_free(dialog, app):
+    """@brief Ogni maniglia tocca il bordo dall'esterno: il suo centro e' fuori dal poligono."""
+    item = dialog._items[1]                                 # R1, rotation 0
+    dialog._select_row(1, center=False)
+    app.processEvents()
+    polygon = item.polygon()
+    for edge, handle in item.handles.items():
+        assert handle.isVisible()
+        centre_item = handle.pos() + handle.rect().center()  # rect is in screen px; at scale 1 it is item px
+        assert not polygon.containsPoint(centre_item, Qt.FillRule.OddEvenFill), edge
+        # and it touches the outline: the grip's inner edge coincides with the body edge
+        rect = handle.rect()
+        assert (abs(rect.left()) < 1e-9 or abs(rect.right()) < 1e-9
+                or abs(rect.top()) < 1e-9 or abs(rect.bottom()) < 1e-9), edge

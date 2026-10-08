@@ -82,8 +82,8 @@ from PyQt6.QtCore import (
     QPointF, QRectF, QSignalBlocker, QStringListModel, Qt, QTimer, QThread,
     pyqtSignal,
 )
-from PyQt6.QtGui import (QBrush, QColor, QKeySequence, QPainter, QPen, QPixmap,
-                         QPolygonF, QShortcut, QTextDocument)
+from PyQt6.QtGui import (QBrush, QColor, QKeySequence, QPainter, QPainterPath, QPen,
+                         QPixmap, QPolygonF, QShortcut, QTextDocument)
 from PyQt6.QtWidgets import (
     QAbstractItemView, QComboBox, QCompleter, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFormLayout, QPushButton,
@@ -270,6 +270,14 @@ class _PhotoView(QGraphicsView):
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.setBackgroundBrush(QColor("#20242a"))
+        # Repaint the whole viewport on every change: the selection halo, the
+        # outline pens and the number labels are SCREEN-sized (cosmetic pens,
+        # ItemIgnoresTransformations), so when the photo is shrunk they stick
+        # out of the items' scene-unit bounding rectangles and the minimal
+        # dirty region left their pixels behind as a trail while an outline
+        # was dragged (user, 2026-10-09). The scene is one pixmap plus thin
+        # outlines: a full repaint per move is cheap.
+        self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
         self._pan_position = None
         self._fit_scale = 1.0
         self._fit_rect = None
@@ -552,6 +560,10 @@ MIN_HANDLE_SIZE_MM = 0.2
 ## Half side of a resize handle in device pixels: the handle ignores the view
 ## transform so it stays grabbable at every zoom level.
 HANDLE_HALF_PX = 4.0
+
+## Smallest clickable side of a body outline, in SCREEN pixels: one whole
+## grip. Smaller targets could not be grabbed at fit zoom (user, 2026-10-09).
+MIN_GRAB_PX = 2 * HANDLE_HALF_PX
 
 ## Minimum pointer travel, in viewport pixels, that makes a stroke on the
 ## photo a drawn rectangle instead of a click gone wrong. Derived from the
@@ -879,7 +891,9 @@ def detector_row_label(proposal, _tr) -> str:
     else:
         state = f"{confidence:.2f}" if isinstance(confidence, (int, float)) else "?"
         if proposal.get("_yolo_low_confidence"):
-            state += " · " + _tr("bassa confidenza") + " · " + (
+            # Sopra un corpo gia' trovato: sicura, ma non un corpo a se'.
+            state += " · " + (_tr("sopra un altro corpo") if proposal.get("_yolo_on_body_of")
+                                        else _tr("bassa confidenza")) + " · " + (
                 _tr("non tenuta") if awaiting_user_keep(proposal) else _tr("tenuta"))
         elif proposal.get("_yolo_review_only"):
             state += " · " + _tr("debole")
@@ -1290,6 +1304,12 @@ class _ResizeHandle(QGraphicsRectItem):
         super().__init__(-HANDLE_HALF_PX, -HANDLE_HALF_PX, 2*HANDLE_HALF_PX, 2*HANDLE_HALF_PX, item)
         self.item = item
         self.edge = edge
+        # The grip sits OUTSIDE the outline, touching its edge: a grip centred
+        # on the edge covers the inside of a small body (a 0402 at fit zoom
+        # is about 12 x 6 screen px, less than two grips), so the body could
+        # no longer be grabbed to move it and neighbours were hit instead
+        # (user, 2026-10-09). The inside of every outline stays free.
+        self._outward = (0.0, 0.0)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
         self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
         # Above the number label so the top-left grip is always visible.
@@ -1311,6 +1331,17 @@ class _ResizeHandle(QGraphicsRectItem):
         rotation = float(self.item.component.get("rotation_deg", 0))
         direction = self.item.editor.photo_transform.local_to_item_pixel(
             rotation, self.edge[0], self.edge[1])
+        # Shift the square outward along the on-screen edge normal, sign by
+        # sign, so it touches the outline from outside on edges and corners.
+        # The view zoom is uniform, so an item-pixel direction keeps its
+        # signs on the screen.
+        outward = (math.copysign(1.0, direction.x()) if abs(direction.x()) > 1e-9 else 0.0,
+                   math.copysign(1.0, direction.y()) if abs(direction.y()) > 1e-9 else 0.0)
+        if outward != self._outward:
+            self._outward = outward
+            self.setRect(-HANDLE_HALF_PX + outward[0]*HANDLE_HALF_PX,
+                         -HANDLE_HALF_PX + outward[1]*HANDLE_HALF_PX,
+                         2*HANDLE_HALF_PX, 2*HANDLE_HALF_PX)
         angle = math.degrees(math.atan2(direction.y(), direction.x())) % 180
         sector = int(round(angle / _CURSOR_SECTOR_DEG)) % 4
         # Screen Y grows downward: 45 degrees is the "\" diagonal (SizeFDiag).
@@ -1465,6 +1496,46 @@ class _ComponentItem(QGraphicsPolygonItem):
     def end_resize(self):
         """@brief Drop the stroke state; the component already holds the result."""
         self._resize = None
+
+    def _grab_margin_px(self):
+        """Half side, in SCENE pixels, of the smallest area a pointer can grab."""
+        try:
+            scale = self.editor.view.transform().m11()
+        except (AttributeError, RuntimeError):
+            scale = 1.0
+        return MIN_GRAB_PX / 2 / (scale if scale > 0 else 1.0)
+
+    def shape(self):
+        """@brief Clickable area: the outline, never smaller than one grip on screen.
+
+        @return Painter path of the polygon united with a centred square of
+            MIN_GRAB_PX screen pixels, mapped to scene units at the current
+            zoom.
+        @note A body smaller than a grip on the screen could not be grabbed
+            at fit zoom (a 0402 is about 12 x 6 px): the same reasoning that
+            sets DRAW_CLICK_PX. The enlargement is on the SCREEN, so it is
+            independent of the photo calibration, and the outline itself is
+            unchanged: only the hit area grows.
+        """
+        path = super().shape()
+        half = self._grab_margin_px()
+        rect = self.polygon().boundingRect()
+        if rect.width() < 2*half or rect.height() < 2*half:
+            centre = rect.center()
+            square = QPainterPath()
+            square.addRect(QRectF(centre.x() - max(half, rect.width()/2),
+                                  centre.y() - max(half, rect.height()/2),
+                                  max(2*half, rect.width()), max(2*half, rect.height())))
+            path = path.united(square)
+        return path
+
+    def boundingRect(self):
+        """@brief Envelope covering the enlarged grab area as well as the outline."""
+        return super().boundingRect().united(self.shape().boundingRect())
+
+    def refresh_grab_area(self):
+        """@brief Tell the scene the hit area changed (after a zoom): keeps the index valid."""
+        self.prepareGeometryChange()
 
     def photo_bounds(self):
         """@brief Axis-aligned scene envelope of the physical package outline.
@@ -2014,6 +2085,10 @@ class PhotoReviewDialog(QDialog):
         self.zoom_in_button.clicked.connect(lambda: self.view.zoom(ZOOM_STEP))
         self.zoom_out_button.clicked.connect(lambda: self.view.zoom(1 / ZOOM_STEP))
         self.view.zoom_changed.connect(self._update_zoom_label)
+        # The minimum grab area is in screen pixels: its scene size changes
+        # with the zoom, and the scene index must learn it.
+        self.view.zoom_changed.connect(
+            lambda: [item.refresh_grab_area() for item in self._items])
         self.photo_button.clicked.connect(self._photo_button_clicked)
         self._bind_shortcuts()
         # Un combo con il fuoco tiene le sue lettere (revisore 1, difetto 4).

@@ -13,14 +13,15 @@ from kicadgen.services import photo_yolo as py
 
 
 def _reference(rows, complete, overlap=py._TILE_OVERLAP_FRACTION):
-    """The original all-pairs implementation, copied verbatim as the oracle."""
+    """The all-pairs implementation, kept as the oracle (same-body check since 08/10)."""
     keep = []
     for row in rows:
         sides = row.get("clipped_sides")
         box = row["box"]
         size = max(box[2] - box[0], box[3] - box[1])
         covering = [other for other in complete if other is not row
-                    and py._cover(box, other["box"]) >= py._FRAGMENT_COVERED]
+                    and py._cover(box, other["box"]) >= py._FRAGMENT_COVERED
+                    and py._same_body_as_fragment(row, other)]
         if sides and size > py.view_overlap_px(row.get("view"), overlap) and covering:
             if (row.get("rejection") is None
                     and not any(other.get("rejection") is None for other in covering)):

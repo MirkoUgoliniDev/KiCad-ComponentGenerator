@@ -349,18 +349,42 @@ def test_a_body_no_view_saw_whole_is_rebuilt_instead_of_lost(setup):
     ingombro resta troncato.
     """
     session, _ = setup
+    # Un corpo da 350 a 650 px: la tessera 0-640 ne vede 350..640 (tagliato a
+    # destra), la tessera 360-1000 ne vede 360..650 (tagliato a sinistra).
+    # Dove entrambe vedono, 360..640, i due pezzi coincidono. (Prima la
+    # seconda meta' finiva a 400 px con un bordo VISTO: non poteva essere lo
+    # stesso corpo, e la si univa solo perche' stava dentro la prima.)
     outputs = [_raw(), _raw(([500, 50, 300, 40], 10, 0.9)),
-               _raw(([20, 50, 40, 40], 10, 0.7)), _raw()]
+               _raw(([145, 50, 290, 40], 10, 0.7)), _raw()]
     session.raw = lambda index: outputs[index]
     results = yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64)
     assert len(results) == 1
     row = results[0]
     assert row["_yolo_clipped_recovery"] and "cucitura" in row["_source"]
     assert not row["_yolo_review_only"]
-    # Unione dei due frammenti: 350..640 dalla prima tessera, 360..400 dalla
+    # Unione dei due frammenti: 350..640 dalla prima tessera, 360..650 dalla
     # seconda. Restano i bordi esterni, cioe' l'ingombro piu' ampio visto.
-    assert row["_box"] == pytest.approx((0.35, 30 / 640, 0.64, 70 / 640))
+    assert row["_box"] == pytest.approx((0.35, 30 / 640, 0.65, 70 / 640))
     assert row["_yolo_confidence"] == pytest.approx(0.9)
+
+
+def test_a_seam_fragment_is_not_fused_with_a_weak_box_that_only_contains_it(setup):
+    """@brief Caso negativo: contenere un frammento non ne fa la meta' dello stesso corpo.
+
+    Un frammento piccolo e sicuro tagliato da una tessera sta per intero dentro
+    un riquadro debole e grande tagliato dalla tessera accanto. Dove entrambe
+    vedono i due riquadri non coincidono: sono corpi diversi, e l'unione non
+    deve nascere ne' ereditare la confidenza del piccolo (ESP32-S3, 08/10: una
+    striscia 7.3x23 mm a 0,10 diventata un corpo a 0,56).
+    """
+    session, _ = setup
+    outputs = [_raw(), _raw(([615, 50, 50, 40], 10, 0.9)),
+               _raw(([270, 305, 540, 590], 10, 0.1)), _raw()]
+    session.raw = lambda index: outputs[index]
+    results = yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64)
+    assert len(results) == 1, "solo il frammento sicuro e' un corpo"
+    x0, _, x1, _ = results[0]["_box"]
+    assert (x0, x1) == pytest.approx((0.59, 0.64)), 'il suo ingombro, non quello del riquadro grande'
 
 
 @pytest.mark.parametrize("xywh", [[0, 320, 20, 40], [640, 320, 20, 40],
@@ -381,6 +405,132 @@ def test_all_interior_tile_edges_rejected(xywh):
     rows, invalid = yolo._proposals(_raw((xywh, 10, 0.9)), (100, 100, 740, 740),
                                     (1000, 1000), (1, 0, 0), "tile", np)
     assert invalid == 0 and rows[0]["rejection"] == "clipped_by_tile"
+
+
+def test_the_tile_edge_margin_is_the_detector_uncertainty_scaled_to_the_view():
+    """@brief Il margine di taglio viene dall'incertezza del rilevatore, non da 1 px.
+
+    Regola: 8 px nello spazio del modello (passo piu' fine della testa, P3),
+    riportati ai pixel della foto con la scala della vista, piu' 1 px di
+    arrotondamento del letterbox. Tessera 640 (scala 1): 9 px; tessera 1280
+    (scala 0.5): 17 px. Una scala piu' fine (foto piu' piccola della tessera,
+    scala 2) stringe il margine a 5 px.
+    """
+    assert yolo._BOX_UNCERTAINTY_INPUT_PX == 8
+    assert yolo._tile_edge_margin_px(1.0) == 9
+    assert yolo._tile_edge_margin_px(0.5) == 17
+    assert yolo._tile_edge_margin_px(2.0) == 5
+
+
+@pytest.mark.parametrize("ratio,xywh,sides", [
+    # Scala 1 (tessera 640): un lato a 5 px dal bordo interno e' un taglio...
+    (1.0, [605, 320, 60, 40], ["right"]),
+    (1.0, [35, 320, 60, 40], ["left"]),
+    (1.0, [320, 605, 40, 60], ["bottom"]),
+    (1.0, [320, 35, 40, 60], ["top"]),
+    # ...e un lato a 12 px dal bordo non lo e': oltre l'incertezza il bordo
+    # e' misurato (caso negativo, invariato rispetto a prima).
+    (1.0, [598, 320, 60, 40], []),
+    (1.0, [42, 320, 60, 40], []),
+    # Scala 0.5 (tessera 1280 letterboxata a 640): il margine vale 17 px
+    # della foto = 8.5 px del modello. Un lato a 7 px del modello dal bordo
+    # (14 px foto) e' un taglio; a 10 px del modello (20 px foto) non lo e'.
+    (0.5, [603, 320, 60, 40], ["right"]),
+    (0.5, [600, 320, 60, 40], []),
+])
+def test_a_side_within_the_detector_uncertainty_of_a_tile_edge_is_a_cut(ratio, xywh, sides):
+    """@brief Entro l'incertezza del rilevatore un lato sul bordo interno e' tagliato.
+
+    E' il difetto del lamierino dell'ESP32-S3 (08/10): la tessera 0..640 lo
+    tagliava e i riquadri finivano a 636-638 px, dentro la tolleranza di 1 px
+    no, ma dentro l'incertezza del bordo si'. Passavano per interi e un pezzo
+    del lamierino usciva come corpo completo («inductor 11.6x11.3 @0.75»).
+    """
+    # Tessera interna (640/ratio px di lato): nessun bordo coincide con il
+    # bordo dell'immagine.
+    size = int(640 / ratio)
+    rows, invalid = yolo._proposals(_raw((xywh, 10, 0.9)), (100, 100, 100 + size, 100 + size),
+                                    (3000, 3000), (ratio, 0, 0), "tile", np)
+    assert invalid == 0 and len(rows) == 1
+    assert rows[0]["clipped_sides"] == sides
+    assert rows[0]["rejection"] == ("clipped_by_tile" if sides else None)
+
+
+@pytest.mark.parametrize("xywh", [[35, 320, 60, 40], [605, 320, 60, 40],
+                                   [320, 35, 40, 60], [320, 605, 40, 60]])
+def test_a_side_within_the_margin_of_an_image_border_is_a_real_edge(xywh):
+    """@brief Caso negativo: il bordo dell'immagine non taglia, anche dentro il margine.
+
+    Lo stesso riquadro a 5 px dal bordo, ma la vista e' l'immagine intera:
+    il suo bordo e' un bordo reale della scheda, non una cucitura.
+    """
+    rows, invalid = yolo._proposals(_raw((xywh, 10, 0.9)), (0, 0, 640, 640),
+                                    (640, 640), (1.0, 0, 0), "overview", np)
+    assert invalid == 0 and rows[0]["clipped_sides"] == [] and rows[0]["rejection"] is None
+
+
+def test_a_body_near_a_seam_is_measured_by_the_tile_that_holds_it_clear_of_the_seam(setup):
+    """@brief Caso positivo end-to-end: chi sfiora la cucitura non misura, il vicino si'.
+
+    Il corpo finisce 5 px prima del bordo destro della tessera 0..640 (dentro
+    il margine di 9 px) e la tessera accanto lo contiene con 65 px di aria.
+    Prima la prima tessera lo dava per intero e, piu' sicura, vinceva la NMS
+    col SUO riquadro; ora quel riquadro e' un frammento, coperto dal corpo
+    intero della tessera accanto, e ne resta UNO con l'ingombro misurato da
+    chi lo contiene. Nessun corpo si perde, nessuno e' ricomposto.
+    """
+    session, _ = setup
+    # Tessera 0..640: x 570..635, conf 0.9 (lato destro a 5 px dal taglio).
+    # Tessera 360..1000: x 575..636 nella foto, conf 0.8, lontano dai bordi.
+    outputs = [_raw(), _raw(([602.5, 320, 65, 40], 10, 0.9)),
+               _raw(([245.5, 320, 61, 40], 10, 0.8)), _raw()]
+    session.raw = lambda index: outputs[index]
+    rows = yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64,
+                                       include_review_candidates=True)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["_box"][0] == pytest.approx(0.575) and row["_box"][2] == pytest.approx(0.636)
+    assert row["_yolo_confidence"] == pytest.approx(0.8)
+    assert not row["_yolo_clipped_recovery"] and row["_yolo_clipped_sides"] == []
+    assert row["_yolo_origin"] == "operating_threshold" and not yolo.awaiting_user_keep(row)
+
+
+def test_a_body_clear_of_every_seam_is_unchanged_by_the_margin(setup):
+    """@brief Caso negativo: lontano dai bordi la regola non interviene.
+
+    Stesso corpo visto da due tessere, entrambe con piu' di 9 px di aria dal
+    bordo: entrambe lo misurano, la NMS tiene la piu' sicura, come prima.
+    """
+    session, _ = setup
+    # Tessera 0..640: x 560..620 (20 px dal taglio), conf 0.9.
+    # Tessera 360..1000: x 561..621 nella foto, conf 0.8.
+    outputs = [_raw(), _raw(([590, 320, 60, 40], 10, 0.9)),
+               _raw(([231, 320, 60, 40], 10, 0.8)), _raw()]
+    session.raw = lambda index: outputs[index]
+    rows = yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64,
+                                       include_review_candidates=True)
+    assert len(rows) == 1
+    assert rows[0]["_box"][0] == pytest.approx(0.56) and rows[0]["_box"][2] == pytest.approx(0.62)
+    assert rows[0]["_yolo_confidence"] == pytest.approx(0.9)
+    assert rows[0]["_yolo_clipped_sides"] == []
+
+
+def test_the_audit_recipe_reports_the_tile_edge_margin_per_view(setup, tmp_path):
+    """@brief L'audit dichiara la regola del margine e il suo valore per ogni vista."""
+    session, _ = setup
+    session.raw = _raw(([320, 320, 60, 40], 10, 0.9))
+    yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64,
+                                audit_dir=tmp_path)
+    audit = json.loads(next(tmp_path.glob("yolo-*.json")).read_text())
+    margin = audit["recipe"]["tile_edge_margin_px"]
+    assert margin["box_uncertainty_input_px"] == 8
+    assert "view_scale" in margin["rule"]
+    views = {view["name"]: view for view in audit["views"]}
+    assert set(margin["per_view"]) == set(views)
+    for name, view in views.items():
+        assert margin["per_view"][name] == view["tile_edge_margin_px"] == 8 / view["scale"] + 1
+    assert views["tile640-0-0"]["tile_edge_margin_px"] == 9
+    assert views["overview"]["tile_edge_margin_px"] == pytest.approx(8 / 0.64 + 1)
 
 
 def test_full_view_keeps_large_module_and_small_contained_body(setup):
@@ -782,9 +932,13 @@ def test_a_body_bigger_than_the_overlap_is_measured_by_the_view_that_contains_it
     session, _ = setup
     # Vista d'insieme: il corpo intero, ma con poca confidenza. Una tessera lo
     # taglia e lo vede meglio: e' il caso reale, all'incontrario di come si
-    # potrebbe pensare.
+    # potrebbe pensare. Vista d'insieme -> [187.5, 164, 812.5, 477] px; la
+    # tessera 0-640 ne vede [190, 166, 640, 474], tagliato a destra: i lati
+    # NON tagliati coincidono con quelli della vista intera, come per uno
+    # stesso corpo (prima la prova usava un frammento col bordo sinistro a
+    # 480 px, che con quel corpo non poteva essere: vedi il caso negativo).
     outputs = [_raw(([320, 320, 400, 200], 10, .18)),
-               _raw(([560, 320, 160, 200], 10, .80)), _raw(), _raw()]
+               _raw(([415, 320, 450, 308], 10, .80)), _raw(), _raw()]
     session.raw = lambda index: outputs[index]
     rows = yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64,
                                        include_review_candidates=True)
@@ -792,6 +946,29 @@ def test_a_body_bigger_than_the_overlap_is_measured_by_the_view_that_contains_it
     assert not tagliati, 'il frammento non poteva misurare quel corpo'
     assert any(row['_yolo_confidence'] == pytest.approx(.18) for row in rows), \
         'la vista che lo contiene resta, anche se meno sicura'
+
+
+def test_a_view_that_only_contains_a_fragment_does_not_measure_it(setup):
+    """@brief Caso negativo: contenere un frammento non vuol dire essere lo stesso corpo.
+
+    Stesso frammento sicuro del caso positivo, ma la vista d'insieme vede un
+    riquadro debole grande quasi quanto la foto. Lo contiene per intero, pero'
+    i bordi che il frammento ha visto davvero (sinistro, alto, basso) non sono
+    i suoi: non e' la misura di quel corpo, e non va promosso a corpo vero
+    grazie alla confidenza del frammento (ESP32-S3-DEV-KIT, 08/10: un riquadro
+    61x15 mm a 0,055 era diventato un corpo a soglia operativa).
+    """
+    session, _ = setup
+    outputs = [_raw(([320, 320, 634, 403], 10, .06)),
+               _raw(([415, 320, 450, 308], 10, .80)), _raw(), _raw()]
+    session.raw = lambda index: outputs[index]
+    rows = yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64,
+                                       include_review_candidates=True)
+    weak = [row for row in rows if row['_yolo_confidence'] == pytest.approx(.06)]
+    assert all(row['_yolo_origin'] != 'operating_threshold' for row in weak),         'un riquadro che contiene soltanto non eredita la presenza del frammento'
+    assert all(not row.get('_yolo_presence_attested_by') for row in rows)
+    assert any(row['_yolo_confidence'] == pytest.approx(.80) and row['_yolo_clipped_sides']
+               for row in rows), 'il frammento sicuro resta, marcato come troncato'
 
 
 def test_a_small_body_touching_a_seam_is_still_an_observed_body(setup):
@@ -822,17 +999,16 @@ def test_the_overlap_of_a_view_comes_from_its_own_tile_size():
     assert yolo.view_overlap_px(None) == float('inf')
 
 
-def test_only_the_weak_bodies_rebuilt_from_seams_reach_the_review(setup):
-    """@brief Caso positivo e negativo nella stessa corsa, sulla stessa soglia.
+def test_weak_bodies_rebuilt_from_seams_reach_the_review_as_opt_in(setup):
+    """@brief Ricomposta o isolata, una proposta sotto soglia e' visibile ma da tenere a mano.
 
-    Due corpi sotto la soglia operativa. Uno lo e' perche' il rilevatore non
-    era sicuro che ci fosse qualcosa: quello resta nell'audit e non arriva ne'
-    all'anteprima ne' al modello. L'altro lo e' per un motivo geometrico --
-    nessuna vista ne ha visto piu' di un pezzo, e i pezzi sono stati
-    ricomposti: quello arriva, perche' e' proprio il corpo che a occhio non si
-    nota e che il rilevatore vede male per come e' fatta la scansione.
-
-    La distinzione non e' una soglia: e' la PROVENIENZA della debolezza.
+    Contratto cambiato il 2026-10-08 (utente, ESP32-S3-DEV-KIT): prima la
+    ricomposta sotto soglia restava tenuta per default, perche' la debolezza
+    era attribuita al taglio delle tessere. Ma la confidenza di una ricomposta
+    e' quella del suo pezzo MIGLIORE: nessun pezzo ha raggiunto la soglia, e il
+    taglio non spiega un punteggio basso su ogni pezzo. Sulla scheda reale una
+    striscia di serigrafia a 0,10 entrava cosi' fra i corpi. Il corpo non si
+    perde: arriva alla revisione, marcato, e lo si tiene con un clic.
     """
     session, _ = setup
     # Tessera 2 e tessera 3 vedono due pezzi dello stesso corpo a cavallo della
@@ -845,13 +1021,22 @@ def test_only_the_weak_bodies_rebuilt_from_seams_reach_the_review(setup):
                                        include_review_candidates=True)
     rebuilt = [row for row in rows if row['_yolo_clipped_recovery']]
     assert rebuilt, 'il corpo ricomposto dalla cucitura deve arrivare alla revisione'
-    # Contratto aggiornato (26/09): la debole isolata esce, ma marcata come
-    # «bassa confidenza» e da tenere a mano; la ricomposta no.
-    assert not any(row['_yolo_low_confidence'] for row in rebuilt)
     isolated = [row for row in rows if not row['_yolo_clipped_recovery']]
-    assert isolated and all(row['_yolo_low_confidence'] and yolo.awaiting_user_keep(row)
-                            for row in isolated), \
-        'una debole non ricomposta esce solo come proposta da tenere a mano'
+    assert isolated
+    assert all(row['_yolo_low_confidence'] and yolo.awaiting_user_keep(row)
+               for row in rebuilt + isolated),         'sotto soglia, ricomposta o no, esce solo come proposta da tenere a mano'
+
+
+def test_a_rebuilt_body_with_a_confident_piece_is_kept_by_default(setup):
+    """@brief Caso positivo: se un pezzo ha raggiunto la soglia, il corpo ricomposto e' tenuto."""
+    session, _ = setup
+    outputs = [_raw(), _raw(([500, 50, 300, 40], 10, 0.9)),
+               _raw(([145, 50, 290, 40], 10, 0.2)), _raw()]
+    session.raw = lambda index: outputs[index]
+    rows = yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64,
+                                       include_review_candidates=True)
+    rebuilt = [row for row in rows if row['_yolo_clipped_recovery']]
+    assert len(rebuilt) == 1 and not yolo.awaiting_user_keep(rebuilt[0])
 
 
 def test_a_chosen_threshold_turns_a_weak_proposal_into_audit_only(setup):
@@ -922,3 +1107,114 @@ def test_a_stricter_overlap_merges_boxes_the_default_keeps_apart(setup):
     apart = yolo.detect_yolo_components(photo, 20, 20, settings={"tile_sizes": []})
     merged = yolo.detect_yolo_components(photo, 20, 20, settings={"tile_sizes": [], "nms_iou": 0.4})
     assert len(apart) == 2 and len(merged) == 1
+
+
+def test_a_box_on_the_surface_of_a_confident_body_is_demoted_not_deleted(setup):
+    """@brief Positivo: cio' che sta sopra un corpo gia' trovato non e' un altro corpo.
+
+    Vista d'insieme: un modulo intero e sicuro, un riquadro piu' piccolo (il
+    lamierino) col centro sopra di lui, e un corpo vicino col centro FUORI.
+    Il lamierino resta visibile ma da tenere a mano; il vicino resta un corpo.
+    """
+    session, _ = setup
+    outputs = [_raw(([320, 320, 400, 200], 10, .9), ([330, 320, 100, 100], 11, .8),
+                    ([560, 320, 40, 40], 3, .7)), _raw(), _raw(), _raw()]
+    session.raw = lambda index: outputs[index]
+    rows = yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64,
+                                       include_review_candidates=True)
+    by_conf = {round(row['_yolo_confidence'], 2): row for row in rows}
+    module, can, neighbour = by_conf[.9], by_conf[.8], by_conf[.7]
+    assert not module['_yolo_low_confidence'] and not neighbour['_yolo_low_confidence']
+    assert can['_yolo_on_body_of'] == module['_yolo_proposal_id']
+    assert can['_yolo_low_confidence'] and yolo.awaiting_user_keep(can)
+    from kicadgen.gui import photo_review_dialog as prd
+    assert 'sopra un altro corpo' in prd.detector_row_label(can, lambda text: text)
+
+
+@pytest.mark.parametrize("container_confidence, operating", [(.2, .15), (.08, .06)])
+def test_a_weak_container_demotes_nothing_even_with_a_lowered_threshold(
+        setup, container_confidence, operating):
+    """@brief Negativo: un riquadro grande poco sicuro non fa da contenitore.
+
+    Con la soglia operativa abbassata a mano il riquadro grande e' «tenuto»,
+    ma la sua confidenza resta sotto quella di fabbrica: potrebbe essere un
+    riquadro spurio grande come la scheda, e i corpi dentro restano corpi.
+    """
+    session, _ = setup
+    outputs = [_raw(([320, 320, 400, 200], 10, container_confidence),
+                    ([330, 320, 100, 100], 11, .8)), _raw(), _raw(), _raw()]
+    session.raw = lambda index: outputs[index]
+    rows = yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64,
+                                       include_review_candidates=True, confidence=operating)
+    assert not any(row.get('_yolo_on_body_of') for row in rows)
+    inner = [row for row in rows if row['_yolo_confidence'] == pytest.approx(.8)]
+    assert inner and not inner[0]['_yolo_low_confidence']
+
+
+def test_a_body_cut_by_two_seams_is_rebuilt_as_one(setup):
+    """@brief Positivo: tre tessere vedono tre pezzi dello stesso corpo, nessuna intero.
+
+    Corpo da 300 a 1300 px: la tessera 0-640 lo vede tagliato a destra, la
+    480-1120 tagliato su entrambi i lati, la 960-1600 tagliato a sinistra. Il
+    primo e l'ultimo pezzo non hanno strisce comuni: si legano attraverso quello
+    centrale, che coincide con ciascuno dove le tessere vedono insieme.
+    """
+    session, _ = setup
+    outputs = [_raw(), _raw(([470, 320, 340, 100], 10, .9)),
+               _raw(([320, 320, 640, 100], 10, .8)),
+               _raw(([170, 320, 340, 100], 10, .7)), _raw(), _raw()]
+    session.raw = lambda index: outputs[index]
+    rows = yolo.detect_yolo_components(np.zeros((640, 1600, 3), np.uint8), 160, 64)
+    assert len(rows) == 1
+    assert rows[0]['_box'] == pytest.approx((300 / 1600, 270 / 640, 1300 / 1600, 370 / 640))
+
+
+def test_two_offset_pieces_in_a_seam_strip_stay_two_bodies(setup):
+    """@brief Negativo: due pezzi sfalsati nella striscia comune non sono lo stesso corpo.
+
+    La tessera 0-640 vede un pezzo a y 270-370 tagliato a destra, la 360-1000
+    uno a y 330-430 tagliato a sinistra. Nella striscia 360-640, vista da
+    entrambe, i due riquadri si sovrappongono solo per 40 px su 160 di altezza:
+    corpi diversi, che non vanno uniti in uno solo.
+    """
+    session, _ = setup
+    outputs = [_raw(), _raw(([470, 320, 340, 100], 10, .9)),
+               _raw(([220, 380, 440, 100], 10, .8)), _raw()]
+    session.raw = lambda index: outputs[index]
+    rows = yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64)
+    assert len(rows) == 2
+
+
+def test_a_box_overlapping_the_edge_of_a_confident_body_is_its_pad(setup):
+    """@brief Positivo: centro fuori ma riquadro sovrapposto al corpo = piazzola di quel corpo.
+
+    Due corpi distinti tengono un gap di courtyard fra loro: i riquadri non
+    si sovrappongono. Un riquadro piccolo a cavallo del bordo di un corpo
+    sicuro e' un suo contatto, retrocesso e mai cancellato.
+    """
+    session, _ = setup
+    # Modulo 120..520 x 220..420 (input px); piazzola 100..130 con centro a
+    # 115 (fuori) ma 10 px dentro il bordo sinistro; passivo a 60..100,
+    # separato da 20 px di gap: resta un corpo.
+    outputs = [_raw(([320, 320, 400, 200], 10, .9), ([115, 320, 30, 20], 3, .8),
+                    ([80, 320, 40, 20], 3, .7)), _raw(), _raw(), _raw()]
+    session.raw = lambda index: outputs[index]
+    rows = yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64,
+                                       include_review_candidates=True)
+    by_conf = {round(row['_yolo_confidence'], 2): row for row in rows}
+    pad, neighbour = by_conf[.8], by_conf[.7]
+    assert pad['_yolo_on_body_of'] == by_conf[.9]['_yolo_proposal_id'] and pad['_yolo_abuts_body']
+    assert yolo.awaiting_user_keep(pad)
+    assert not neighbour['_yolo_low_confidence'] and not neighbour.get('_yolo_on_body_of')
+
+
+def test_a_box_merely_touching_a_body_box_is_not_its_pad(setup):
+    """@brief Negativo: contatto a zero sovrapposizione non basta: serve un'area in comune."""
+    session, _ = setup
+    outputs = [_raw(([320, 320, 400, 200], 10, .9), ([100, 320, 40, 20], 3, .8)),
+               _raw(), _raw(), _raw()]
+    session.raw = lambda index: outputs[index]
+    rows = yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64,
+                                       include_review_candidates=True)
+    small = [row for row in rows if row['_yolo_confidence'] == pytest.approx(.8)][0]
+    assert not small.get('_yolo_on_body_of') and not small['_yolo_low_confidence']

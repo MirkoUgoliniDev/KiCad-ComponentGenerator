@@ -208,3 +208,32 @@ def test_a_huge_recounted_count_is_judged_without_materializing_pads():
     from kicadgen.services.datasheet_extractor import _numbering_is_contiguous
     assert _numbering_is_contiguous([side("top", 30_000_000, 1), side("bottom", 2, 30_000_001)])
     assert not _numbering_is_contiguous([side("top", 30_000_000, 1), side("bottom", 2, 30_000_003)])
+
+
+def test_rows_the_recount_moves_to_the_edges_where_they_fit_are_adopted():
+    """Positivo (ESP32 devkit, 2026-10-08): la prima risposta mette due file da
+    22 contatti a 2.54 su left/right (53.34 mm su un bordo di 25.4); il
+    ricontrollo le sposta su top/bottom, dove stanno, e non rilista left/right.
+    Top e bottom non erano descritti prima: non sono «lati coerenti cambiati»
+    ma la riparazione stessa, e i lati impossibili spariscono."""
+    data = answer([side("left", 22, 1, names=22), side("right", 22, 23, names=22)])
+    call = Mock(return_value=dict(drawing_unit="mm", castellated_sides=[
+        side("top", 22, 1, names=22), side("bottom", 22, 23, names=22)]))
+    validate(data, call)
+    assert sorted(s["edge"] for s in data["castellated_sides"]) == ["bottom", "top"]
+    assert "non adottata" not in data["notes"]
+    assert _side_contradictions(data["castellated_sides"], 63.3, 25.4) == []
+
+
+def test_a_coherent_edge_the_recount_alters_is_still_not_adopted_when_rows_move():
+    """Negativo: stessa riparazione, ma il ricontrollo tocca anche un lato che
+    era coerente e descritto (top 4 -> 3 con numerazione ancora contigua): quel
+    lato resta com'era, il resto della riparazione entra."""
+    data = answer([side("left", 22, 1, names=22), side("top", 4, 23, names=4)])
+    call = Mock(return_value=dict(drawing_unit="mm", castellated_sides=[
+        side("bottom", 22, 1, names=22), side("top", 3, 23, names=3)]))
+    validate(data, call)
+    by_edge = {s["edge"]: s for s in data["castellated_sides"]}
+    assert sorted(by_edge) == ["bottom", "top"]
+    assert by_edge["top"]["count"] == 4
+    assert "top" in data["notes"] and "non adottata" in data["notes"]

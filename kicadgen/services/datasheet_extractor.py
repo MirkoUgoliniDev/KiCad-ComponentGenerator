@@ -2686,15 +2686,24 @@ def _recount_contradictory_sides(data, content_blocks, diagnostic_call, model, s
     previous = list(previous) if isinstance(previous, list) else []
     before = {_side_edge(entry): entry for entry in previous if _side_edge(entry)}
     # Coherent edges the recount would change: normally said, not adopted.
+    # A coherent edge is one the first answer DESCRIBED without contradiction.
+    # An edge the recount adds was not described at all: it is part of the
+    # repair, not a change to something coherent (ESP32 devkit, 2026-10-08:
+    # the first answer put the two 22-contact rows on left/right, where
+    # 53.34 mm cannot fit in 25.4; the recount moved them to top/bottom and
+    # was refused as «changing coherent sides», so the extraction failed).
     changed = sorted(edge for edge, entry in recounted.items()
-                     if edge not in wrong_edges and (edge not in before or any(
+                     if edge not in wrong_edges and edge in before and any(
                          entry.get(key) != before[edge].get(key)
-                         for key in ("count", "pitch_mm", "first_pin", "reverse"))))
-    merged = [recounted.get(_side_edge(entry), entry) if _side_edge(entry) in wrong_edges
-              else entry for entry in previous]
-    # A contradicted edge missing from the first answer can only come from the recount.
-    merged.extend(entry for edge, entry in recounted.items()
-                  if edge in wrong_edges and edge not in before)
+                         for key in ("count", "pitch_mm", "first_pin", "reverse")))
+    # A contradicted edge the recount no longer lists does not exist: the
+    # recount is the answer to that contradiction, and keeping the impossible
+    # row would only fail validation again.
+    merged = [recounted[_side_edge(entry)] if _side_edge(entry) in wrong_edges
+              else entry for entry in previous
+              if _side_edge(entry) not in wrong_edges or _side_edge(entry) in recounted]
+    # Edges absent from the first answer can only come from the recount.
+    merged.extend(entry for edge, entry in recounted.items() if edge not in before)
     whole = (len(recounted_edges) != len(set(recounted_edges))
              or not _numbering_is_contiguous(merged))
     # The recount as a whole, as before this rule, in two cases: it lists an
