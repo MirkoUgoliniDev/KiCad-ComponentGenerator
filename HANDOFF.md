@@ -1,5 +1,16 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+- **09/10 — Pubblicazione griglia autorizzata:** commit/push e merge main,
+  poi ritorno ADVANCED. Include griglia visibile e pin allineati 100 mil;
+  dati locali esclusi. Hash/esito nel log Git; voci sotto antecedenti.
+
+- **09/10 — Allineamento pin NON COMMITTATO:** eliminato mezzo passo per
+  file pari; connessioni anteprima/export sui nodi 0.1 in (2.54 mm).
+  25 test passati, compresa CLI KiCad. Riesportare i simboli precedenti.
+
+- **09/10 — Griglia simbolo NON COMMITTATO:** sfondo 0.1 in (2.54 mm),
+  visibile di default e disattivabile. Coordinate solidali al simbolo.
+
 - **09/10 — Simbolo elettrico: pubblicazione autorizzata.** Commit/push,
   merge in main e ritorno su ADVANCED richiesti dall'utente. Inclusi codice,
   test, icona, traduzioni e guida; dati locali e work/ esclusi e preservati.

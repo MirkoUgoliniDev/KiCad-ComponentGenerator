@@ -77,6 +77,7 @@ DEFAULT_TRANSLATIONS = {
     "ui:Non connesso": {"it":"Non connesso","en":"Not connected","fr":"Non connecté","de":"Nicht verbunden"},
     "ui:Il tipo elettrico viene usato da KiCad per il controllo ERC.": {"it":"Il tipo elettrico viene usato da KiCad per il controllo ERC.","en":"KiCad uses the electrical type for ERC checks.","fr":"KiCad utilise le type électrique pour les contrôles ERC.","de":"KiCad verwendet den elektrischen Typ für ERC-Prüfungen."},
     "tab.symbol.name": {"it": "Simbolo elettrico", "en": "Electrical symbol", "fr": "Symbole électrique", "de": "Schaltplansymbol"},
+    "ui:0.1 in (2.54 mm)": {"it": "0.1 in (2.54 mm)", "en": "0.1 in (2.54 mm)", "fr": "0.1 in (2.54 mm)", "de": "0.1 in (2.54 mm)"},
     "ui:Montaggio e analisi": {"it": "Montaggio e analisi", "en": "Mounting and analysis", "fr": "Montage et analyse", "de": "Montage und Analyse"},
     "ui:Indietro": {"it": "Indietro", "en": "Back", "fr": "Retour", "de": "Zurück"},
     "ui:Montaggio sulla scheda principale": {"it": "Montaggio sulla scheda principale", "en": "Mounting on the host board", "fr": "Montage sur la carte principale", "de": "Montage auf der Trägerplatine"},
