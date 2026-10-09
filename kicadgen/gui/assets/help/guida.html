@@ -358,6 +358,29 @@ spostare liberamente i pin nell'editor.</p>
   Shift+R in senso antiorario, con il fuoco sulla vista. Il comando
   <strong>Posizione e orientamento del pin</strong>, nella barra, permette di inserire X, Y e angolo. Le coordinate si agganciano
   alla griglia; un punto di connessione gia' occupato viene rifiutato.</p>
+<p><strong>Selezione multipla:</strong> Ctrl+clic aggiunge o toglie un pin;
+  Maiusc+trascinamento seleziona i terminali racchiusi nel rettangolo.
+  Ctrl+Maiusc aggiunge l'area alla selezione corrente. L'icona di selezione
+  consente di usare il rettangolo senza tenere premuto Maiusc; disattivala
+  per tornare al trascinamento dei pin. Trascina un pin selezionato per muovere
+  il gruppo. Le rotazioni di gruppo avvengono attorno al pin attivo.
+  Una collisione con altri terminali annulla tutta l'operazione.</p>
+<p><strong>Allinea e distribuisci</strong> allinea X o Y al pin attivo.
+  La distribuzione richiede almeno tre pin, mantiene il primo e usa un passo
+  regolare multiplo della griglia: l'ultimo puo' spostarsi per rispettarlo.
+  Il lucchetto blocca le maniglie del rettangolo senza bloccare i pin.
+  Sotto la vista sono visibili coordinate del cursore, zoom e pin attivo.</p>
+<p><strong>Controlla simbolo</strong> segnala nomi mancanti, testi sovrapposti
+  nell'anteprima e tipi passivi/non specificati ancora da verificare. Lo stesso
+  controllo precede l'esportazione; puoi annullare o scegliere Esporta comunque.
+  Cambiare un tipo nella tabella lo registra come verificato.</p>
+<p><strong>Recupera bozza:</strong> le modifiche concluse vengono salvate in un
+  file di recupero separato nella cartella del progetto. Dopo una chiusura
+  imprevista, riaprendo lo stesso progetto compare l'indicazione di bozza
+  disponibile: premi l'icona Recupera bozza. Il recupero non sostituisce il
+  progetto salvato finche' non premi Applica. Una bozza di un'altra revisione
+  del progetto non viene ripristinata automaticamente. Annulla scarta la bozza
+  ripresa; Applica riuscito elimina il file di recupero.</p>
 <p><strong>Annulla modifica / Ripeti modifica</strong> gestiscono la cronologia
   delle modifiche. Con il fuoco sull'editor funzionano anche Ctrl+Z,
   Ctrl+Shift+Z e Ctrl+Y. Esc annulla il trascinamento in corso.

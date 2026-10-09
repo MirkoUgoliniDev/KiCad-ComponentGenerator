@@ -4,16 +4,17 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 import math
-from PyQt6.QtCore import Qt, pyqtSignal, QLineF, QSize
+from PyQt6.QtCore import Qt, pyqtSignal, QLineF, QSize, QRect, QItemSelectionModel
 from PyQt6.QtGui import QAction, QColor, QFont, QPainter, QPen, QShortcut, QKeySequence, QIcon
 from PyQt6.QtWidgets import (
     QAbstractItemView, QComboBox, QGraphicsScene, QGraphicsView,
-    QHeaderView, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QLabel, QMenu, QToolButton, QSplitter, QTableWidget,
-    QTableWidgetItem, QToolBar, QSizePolicy, QVBoxLayout, QWidget,
+    QHeaderView, QDialog, QDialogButtonBox, QPushButton, QDoubleSpinBox, QFormLayout, QLabel, QMenu, QToolButton, QSplitter, QTableWidget,
+    QTableWidgetItem, QListWidget, QRubberBand, QToolBar, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from ..generators.symbol import ELECTRICAL_TYPES, PIN_GRID_MM, symbol_inputs, layout_symbol
 from .pinout_dialog import pin_sort_key
+from ..generators.symbol_edit import transform_selection
 
 SCENE_UNITS_PER_MM = 10.0
 GRID_MM = PIN_GRID_MM
@@ -28,6 +29,10 @@ _TYPE_LABELS = {
 
 
 class _SymbolView(QGraphicsView):
+    selection_toggled = pyqtSignal(str)
+    region_selected = pyqtSignal(object, bool)
+    pointer_changed = pyqtSignal(object)
+    camera_changed = pyqtSignal()
     gesture_started = pyqtSignal(object, object)
     pin_context_requested = pyqtSignal(str, object)
     gesture_moved = pyqtSignal(object, object)
@@ -44,6 +49,9 @@ class _SymbolView(QGraphicsView):
         # Navigation space is independent from the symbol bounds used by Fit.
         self.setSceneRect(-1000000, -1000000, 2000000, 2000000)
         self._pan_last = None
+        self.selection_mode = False
+        self._rubber_start = None
+        self._rubber = QRubberBand(QRubberBand.Shape.Rectangle, self.viewport())
         self.setBackgroundBrush(QColor('#181825'))
         self.auto_fit = True
         self.show_grid = True
@@ -52,6 +60,24 @@ class _SymbolView(QGraphicsView):
         self.viewport().setMouseTracking(True)
 
     def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.gesture is None:
+            if self.selection_mode or event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                self._rubber_start = event.pos()
+                self._rubber_add = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                self._rubber.setGeometry(QRect(event.pos(), event.pos()))
+                self._rubber.show()
+                self.setFocus()
+                self.viewport().grabMouse()
+                event.accept()
+                return
+            if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                for item in self.items(event.pos()):
+                    target = item.data(0)
+                    if target and target[0] == 'pin':
+                        self.selection_toggled.emit(target[1])
+                        self.setFocus()
+                        event.accept()
+                        return
         background_drag = event.button() == Qt.MouseButton.LeftButton and not self.items(event.pos())
         if (event.button() == Qt.MouseButton.MiddleButton or background_drag) and self.gesture is None:
             self._pan_button = event.button()
@@ -97,6 +123,11 @@ class _SymbolView(QGraphicsView):
         self._pan_last = point
 
     def mouseMoveEvent(self, event):
+        self.pointer_changed.emit(self.mapToScene(event.pos()))
+        if self._rubber_start is not None:
+            self._rubber.setGeometry(QRect(self._rubber_start, event.pos()).normalized())
+            event.accept()
+            return
         if self._pan_last is not None:
             self._pan_to(event.pos())
             event.accept()
@@ -108,6 +139,14 @@ class _SymbolView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._rubber_start is not None and event.button() == Qt.MouseButton.LeftButton:
+            rect = QRect(self._rubber_start, event.pos()).normalized()
+            self._rubber_start = None
+            self._rubber.hide()
+            self.viewport().releaseMouse()
+            self.region_selected.emit(self.mapToScene(rect).boundingRect(), self._rubber_add)
+            event.accept()
+            return
         if self._pan_last is not None and event.button() == self._pan_button:
             self._pan_to(event.pos())
             self._pan_last = None
@@ -126,7 +165,7 @@ class _SymbolView(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Escape and (self.gesture is not None or self._pan_last is not None):
+        if event.key() == Qt.Key.Key_Escape and (self.gesture is not None or self._pan_last is not None or self._rubber_start is not None):
             self.cancel_interaction()
             event.accept()
             return
@@ -135,7 +174,9 @@ class _SymbolView(QGraphicsView):
     def cancel_interaction(self):
         """Release capture and roll back unfinished edits before leaving the view."""
         editing = self.gesture is not None
-        active = editing or self._pan_last is not None
+        active = editing or self._pan_last is not None or self._rubber_start is not None
+        self._rubber_start = None
+        self._rubber.hide()
         self.gesture = None
         self._pan_last = None
         if active:
@@ -174,6 +215,7 @@ class _SymbolView(QGraphicsView):
         bounds = self.scene().sceneRect()
         if not bounds.isEmpty():
             self.fitInView(bounds, Qt.AspectRatioMode.KeepAspectRatio)
+            self.camera_changed.emit()
 
     def zoom(self, factor, position=None):
         if 0.15 <= self.transform().m11() * factor <= 20:
@@ -183,6 +225,7 @@ class _SymbolView(QGraphicsView):
             self.scale(factor, factor)
             after = self.mapToScene(position)
             self.centerOn(self.mapToScene(self.viewport().rect().center()) + before - after)
+            self.camera_changed.emit()
 
     def wheelEvent(self, event):
         delta = event.angleDelta().y()
@@ -227,6 +270,14 @@ class SymbolTab(QWidget):
         self._replaying = False
         self._gesture_before = None
         self._selected_pin = None
+        self._selected_pins = set()
+        self._syncing_selection = False
+        self._cursor_position = None
+        self._body_locked = False
+        self._recovery_path = None
+        self._recoverable = None
+        self._applying = False
+        self._text_bounds = []
         self._symbol = None
         layout = QVBoxLayout(self)
         self.title = QLabel(self.tx('Simbolo elettrico'))
@@ -281,6 +332,10 @@ class SymbolTab(QWidget):
             toolbar.addSeparator()
 
         self.view = _SymbolView()
+        self.view.selection_toggled.connect(self._toggle_selection)
+        self.view.region_selected.connect(self._select_region)
+        self.view.pointer_changed.connect(self._update_readout)
+        self.view.camera_changed.connect(self._update_readout)
         self.view.gesture_started.connect(self._begin_gesture)
         self.view.pin_context_requested.connect(self._pin_context_menu)
         self.view.gesture_moved.connect(self._move_gesture)
@@ -310,6 +365,24 @@ class SymbolTab(QWidget):
         self.apply_button = icon_button('confirm-use.svg', 'Applica', self.apply)
         self.export_button = icon_button('install-project.svg', 'Esporta simbolo KiCad…', lambda: self.export_requested.emit())
         separator()
+        self.selection_button = icon_button('tool-select.svg', 'Selezione multipla (Maiusc + trascina)')
+        self.selection_button.defaultAction().setCheckable(True)
+        self.selection_button.defaultAction().toggled.connect(lambda value: setattr(self.view, 'selection_mode', value))
+        self.align_button = icon_button('symbol-align.svg', 'Allinea e distribuisci')
+        align_menu = QMenu(self.align_button)
+        for text, operation in [('Allinea X al pin attivo', 'align_x'), ('Allinea Y al pin attivo', 'align_y'),
+                                ('Distribuisci orizzontalmente', 'distribute_x'), ('Distribuisci verticalmente', 'distribute_y')]:
+            action = align_menu.addAction(self.tx(text))
+            action.setData(text)
+            action.triggered.connect(lambda checked=False, op=operation: self._transform_selected(op))
+        self.align_button.defaultAction().setMenu(align_menu)
+        self.align_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.lock_button = icon_button('symbol-lock.svg', 'Blocca/sblocca rettangolo')
+        self.lock_button.defaultAction().setCheckable(True)
+        self.lock_button.defaultAction().toggled.connect(self._set_body_locked)
+        self.review_button = icon_button('wf-review.svg', 'Controlla simbolo', self.show_review)
+        self.recovery_button = icon_button('project-open.svg', 'Recupera bozza', self.recover_draft)
+        self.recovery_button.defaultAction().setEnabled(False)
         self.properties_button = icon_button('sliders.svg', 'Posizione e orientamento del pin', self._edit_selected_pin)
         icon_button('info.svg', 'Trascina i pin sulla griglia. Tasto destro per ruotare. Maniglie per ridimensionare; Esc annulla.')
         spacer = QWidget()
@@ -336,6 +409,9 @@ class SymbolTab(QWidget):
         splitter.setStretchFactor(1, 1)
         self.table.hide()
         layout.addWidget(splitter, 1)
+        self.readout = QLabel()
+        self.readout.setProperty('i18n_skip', True)
+        layout.addWidget(self.readout)
         self.status = QLabel()
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
@@ -355,6 +431,9 @@ class SymbolTab(QWidget):
         if not force and key == self._source_key:
             return
         self.view.cancel_interaction()
+        self._recovery_path = None
+        self._recoverable = None
+        self.recovery_button.defaultAction().setEnabled(False)
         self._source_key = key
         self._error = ''
         self._name, self._footprint = str(name), str(footprint)
@@ -379,6 +458,7 @@ class SymbolTab(QWidget):
         self._history = []
         self._history_index = -1
         self._selected_pin = None
+        self._selected_pins = set()
         self._baseline = deepcopy(source)
         self._original = deepcopy(source)
         self.title.setText(f"{self.tx('Simbolo elettrico')} · {self._name}" if name else self.tx('Simbolo elettrico'))
@@ -398,10 +478,98 @@ class SymbolTab(QWidget):
                 types.addItem(self.tx(_TYPE_LABELS[kind]), kind)
             types.setToolTip(self.tx('Il tipo elettrico viene usato da KiCad per il controllo ERC.'))
             types.setCurrentIndex(max(0, types.findData(row.get('electrical_type', 'passive'))))
-            types.currentIndexChanged.connect(self._changed)
+            types.currentIndexChanged.connect(lambda value, i=index: self._type_changed(i))
             self.table.setCellWidget(index, 2, types)
         self._loading = False
         self._changed()
+
+    def _type_changed(self, index):
+        if not self._loading:
+            self._draft[index]['electrical_type_reviewed'] = True
+            self._changed()
+
+    def set_recovery_path(self, path):
+        path = Path(path) if path else None
+        if path == self._recovery_path:
+            return
+        self._recovery_path = path
+        self._recoverable = None
+        if path is not None:
+            from ..services.symbol_draft import load_draft
+            try:
+                self._recoverable = load_draft(path, self._baseline)
+            except OSError:
+                self.set_status(self.tx('Impossibile leggere la bozza di recupero.'))
+        self.recovery_button.defaultAction().setEnabled(self._recoverable is not None)
+        if self._recoverable is not None:
+            self.set_status(self.tx('Bozza disponibile: usa Recupera bozza per riprenderla.'))
+
+    def recover_draft(self):
+        if self._recoverable is not None:
+            rows = deepcopy(self._recoverable)
+            self._recoverable = None
+            self.recovery_button.defaultAction().setEnabled(False)
+            self._populate(rows)
+
+    def _checkpoint_draft(self):
+        if self._recovery_path is None or self._applying or self._gesture_before is not None:
+            return
+        from ..services.symbol_draft import save_draft
+        try:
+            if self.has_pending_edits():
+                save_draft(self._recovery_path, self._baseline, self.draft_rows())
+                self._recoverable = None
+                self.recovery_button.defaultAction().setEnabled(False)
+            elif self._recoverable is None:
+                self._recovery_path.unlink(missing_ok=True)
+        except OSError:
+            self.set_status(self.tx('Bozza non salvata: verifica lo spazio e i permessi della cartella.'))
+
+    def review_issues(self):
+        issues = []
+        rows = self.draft_rows()
+        if not rows or self._symbol is None or self._error:
+            issues.append(self.tx('Geometria o corrispondenza pin non valida.'))
+        for row in rows:
+            number = str(row.get('pin', ''))
+            if not str(row.get('name') or '').strip():
+                issues.append(f"{self.tx('Nome mancante')}: {number}")
+            if row.get('electrical_type', 'passive') in ('passive', 'unspecified') and not row.get('electrical_type_reviewed'):
+                issues.append(f"{self.tx('Tipo elettrico da verificare')}: {number}")
+        overlaps = set()
+        for index, (number, rect) in enumerate(self._text_bounds):
+            for other, other_rect in self._text_bounds[index + 1:]:
+                if number != other and rect.intersects(other_rect):
+                    overlaps.add(tuple(sorted((number, other))))
+        for first, second in sorted(overlaps):
+            issues.append(f"{self.tx('Testi sovrapposti')}: {first}, {second}")
+        return issues
+
+    def show_review(self, exporting=False):
+        issues = self.review_issues()
+        if exporting and not issues:
+            return True
+        dialog = QDialog(self)
+        dialog.setWindowTitle(self.tx('Controlla simbolo'))
+        dialog.resize(520, 380)
+        layout = QVBoxLayout(dialog)
+        entries = QListWidget()
+        entries.addItems(issues or [self.tx('Nessun problema rilevato.')])
+        layout.addWidget(entries)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel if exporting else QDialogButtonBox.StandardButton.Close)
+        if exporting:
+            proceed = buttons.addButton(self.tx('Esporta comunque'), QDialogButtonBox.ButtonRole.AcceptRole)
+            proceed.clicked.connect(dialog.accept)
+            buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(self.tx('Annulla'))
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        try:
+            return dialog.exec() == QDialog.DialogCode.Accepted
+        finally:
+            dialog.deleteLater()
+
+    def confirm_export_review(self):
+        return self.show_review(exporting=True)
 
     def rows(self):
         """Return independent applied rows for persistence/export."""
@@ -419,6 +587,8 @@ class SymbolTab(QWidget):
             button.setToolTip(tooltip)
             button.setAccessibleName(self.tx(source))
         self.view.setToolTip(self.tx('Sinistro sullo spazio vuoto: sposta la vista. Rotella: zoom sul cursore. Adatta: mostra tutto.'))
+        for action in self.align_button.defaultAction().menu().actions():
+            action.setText(self.tx(action.data()))
         self.table.setHorizontalHeaderLabels([self.tx('Pin'), self.tx('Funzione'), self.tx('Tipo elettrico')])
         for row in range(self.table.rowCount()):
             combo = self.table.cellWidget(row, 2)
@@ -450,13 +620,17 @@ class SymbolTab(QWidget):
     def apply(self):
         if not self.apply_button.isEnabled():
             return
+        self._applying = True
         self._apply_previous_baseline = deepcopy(self._baseline)
         self._baseline = self.draft_rows()
         self._changed()
         self.edits_applied.emit(self.rows())
+        self._applying = False
+        self._checkpoint_draft()
 
     def reject_apply(self, message):
         """Keep the editable draft and its history when persistence fails."""
+        self._applying = False
         self._baseline = deepcopy(self._apply_previous_baseline)
         self._changed()
         self.set_status(message)
@@ -495,6 +669,7 @@ class SymbolTab(QWidget):
         self.redo_button.defaultAction().setEnabled(self._history_index + 1 < len(self._history))
         self.layout_reset_button.defaultAction().setEnabled(bool(rows))
         self._draw(symbol)
+        self._checkpoint_draft()
 
     def _record(self, rows):
         if self._history_index >= 0 and self._history[self._history_index] == rows:
@@ -530,13 +705,87 @@ class SymbolTab(QWidget):
             row['symbol_side'] = 'left' if index < (len(rows) + 1) // 2 else 'right'
         self._populate(rows)
 
-    def _table_selection(self):
-        if self._loading or self._gesture_before is not None:
+    def _selection_ids(self):
+        if self._selected_pin in self._selected_pins:
+            return self._selected_pins.copy()
+        return {self._selected_pin} if self._selected_pin is not None else set()
+
+    def _select_pins(self, numbers, primary=None):
+        if self._symbol is None:
             return
-        index = self.table.currentRow()
-        if index >= 0 and self.table.item(index, 0):
-            self._selected_pin = self.table.item(index, 0).text()
-            self._draw(self._symbol)
+        valid = {p.pin.number for p in self._symbol.pins}
+        self._selected_pins = set(numbers) & valid
+        self._selected_pin = primary if primary in self._selected_pins else next(
+            (p.pin.number for p in self._symbol.pins if p.pin.number in self._selected_pins), None)
+        self._syncing_selection = True
+        try:
+            self.table.clearSelection()
+            for index, row in enumerate(self._draft):
+                if str(row['pin']) in self._selected_pins:
+                    self.table.selectionModel().select(self.table.model().index(index, 0),
+                        QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
+        finally:
+            self._syncing_selection = False
+        self._draw(self._symbol)
+
+    def _toggle_selection(self, number):
+        chosen = self._selection_ids()
+        chosen.symmetric_difference_update({number})
+        self._select_pins(chosen, number)
+
+    def _select_region(self, rect, additive):
+        if self._symbol is None:
+            return
+        chosen = self._selection_ids() if additive else set()
+        chosen.update(p.pin.number for p in self._symbol.pins if rect.contains(
+            p.x * SCENE_UNITS_PER_MM, -p.y * SCENE_UNITS_PER_MM))
+        self._select_pins(chosen)
+
+    def _table_selection(self):
+        if self._loading or self._gesture_before is not None or self._syncing_selection:
+            return
+        numbers = {self.table.item(item.row(), 0).text() for item in self.table.selectedItems()}
+        current = self.table.currentRow()
+        self._selected_pins = numbers
+        candidate = self.table.item(current, 0).text() if current >= 0 else None
+        self._selected_pin = candidate if candidate in numbers else next(iter(sorted(numbers)), None)
+        self._draw(self._symbol)
+
+    def _set_body_locked(self, locked):
+        self.view.cancel_interaction()
+        self._body_locked = bool(locked)
+        self._draw(self._symbol)
+
+    def _update_readout(self, point=None):
+        if point is not None:
+            self._cursor_position = point
+        cursor = self._cursor_position
+        value = '' if cursor is None else f'X {cursor.x()/10:.2f}  Y {-cursor.y()/10:.2f} mm  |  '
+        value += f'{self.view.transform().m11()*100:.0f}%'
+        chosen = self._selection_ids()
+        if self._symbol is not None:
+            pin = next((p for p in self._symbol.pins if p.pin.number == self._selected_pin), None)
+            if pin:
+                value += f'  |  Pin {pin.pin.number}: X {pin.x:.2f}  Y {pin.y:.2f} mm  {pin.angle}\u00b0'
+            value += f'  |  {len(chosen)} pin'
+        self.readout.setText(value)
+
+    def _transform_selected(self, operation, values=()):
+        if self._symbol is None:
+            return False
+        source = self._gesture_before if self._gesture_before is not None else self.draft_rows()
+        symbol = self._gesture_layout if self._gesture_before is not None else self._symbol
+        try:
+            rows = transform_selection(self._free_rows(source, symbol), self._selection_ids(),
+                                       self._selected_pin, operation, values)
+        except ValueError:
+            self.set_status(self.tx('Operazione annullata: pin sovrapposti o selezione insufficiente.'))
+            return False
+        if rows == self._free_rows(source, symbol):
+            self._draft = deepcopy(source)
+            self._changed()
+            return True
+        return self._accept_geometry(rows)
 
     def _begin_gesture(self, target, point):
         if self._symbol is None:
@@ -546,12 +795,10 @@ class SymbolTab(QWidget):
         self._gesture_start = point
         self._gesture_scene_rect = self.view.scene().sceneRect()
         if target[0] == 'pin':
-            self._selected_pin = target[1]
-            for i, row in enumerate(self._draft):
-                if str(row.get('pin')) == target[1]:
-                    self.table.selectRow(i)
-                    break
-            self._draw(self._symbol)
+            chosen = self._selection_ids()
+            if target[1] not in chosen:
+                chosen = {target[1]}
+            self._select_pins(chosen, target[1])
 
     def _editable_rows(self, rows, symbol):
         rows = deepcopy(rows)
@@ -631,6 +878,8 @@ class SymbolTab(QWidget):
     def rotate_pin(self, number, degrees):
         if self._symbol is None or self._gesture_before is not None:
             return False
+        if number in self._selection_ids() and len(self._selection_ids()) > 1:
+            return self._transform_selected('rotate', (degrees,))
         rows = self._free_rows(self.draft_rows(), self._symbol)
         row = next((r for r in rows if str(r['pin']) == str(number)), None)
         if row is None:
@@ -642,7 +891,9 @@ class SymbolTab(QWidget):
         if self._symbol is None or self._gesture_before is not None:
             return
         pin = next((p for p in self._symbol.pins if p.pin.number == self._selected_pin), None)
-        if pin is not None:
+        if pin is not None and len(self._selection_ids()) > 1:
+            self._transform_selected('move', (dx * GRID_MM, dy * GRID_MM))
+        elif pin is not None:
             self.place_pin(pin.pin.number, pin.x + dx * GRID_MM, pin.y + dy * GRID_MM)
 
     def set_pin_geometry(self, number, x, y, angle):
@@ -701,12 +952,8 @@ class SymbolTab(QWidget):
             dialog.deleteLater()
 
     def _pin_context_menu(self, number, global_pos):
-        self._selected_pin = number
-        for i, row in enumerate(self._draft):
-            if str(row['pin']) == number:
-                self.table.selectRow(i)
-                break
-        self._draw(self._symbol)
+        chosen = self._selection_ids()
+        self._select_pins(chosen if number in chosen else {number}, number)
         menu = QMenu(self)
         title = menu.addAction(f"{self.tx('Pin')} {number}")
         title.setEnabled(False)
@@ -728,7 +975,7 @@ class SymbolTab(QWidget):
             menu.deleteLater()
 
     def resize_body(self, width, height):
-        if self._symbol is None:
+        if self._symbol is None or self._body_locked:
             return False
         source = self._gesture_before if self._gesture_before is not None else self.draft_rows()
         symbol = self._gesture_layout if self._gesture_before is not None else self._symbol
@@ -751,8 +998,11 @@ class SymbolTab(QWidget):
         if target[0] == 'pin':
             placed = next(p for p in symbol.pins if p.pin.number == target[1])
             delta = point - self._gesture_start
-            self.place_pin(target[1], placed.x + delta.x() / SCENE_UNITS_PER_MM,
-                           placed.y - delta.y() / SCENE_UNITS_PER_MM)
+            if len(self._selection_ids()) > 1:
+                self._transform_selected('move', (delta.x()/SCENE_UNITS_PER_MM, -delta.y()/SCENE_UNITS_PER_MM))
+            else:
+                self.place_pin(target[1], placed.x + delta.x() / SCENE_UNITS_PER_MM,
+                               placed.y - delta.y() / SCENE_UNITS_PER_MM)
         else:
             horizontal, vertical = target[1], target[2]
             x, y = point.x() / SCENE_UNITS_PER_MM, -point.y() / SCENE_UNITS_PER_MM
@@ -772,8 +1022,11 @@ class SymbolTab(QWidget):
     def _draw(self, symbol):
         self.properties_button.defaultAction().setEnabled(symbol is not None and any(
             p.pin.number == self._selected_pin for p in symbol.pins))
+        self.align_button.defaultAction().setEnabled(len(self._selection_ids()) >= 2)
+        self._update_readout()
         scene = self.view.scene()
         scene.clear()
+        self._text_bounds = []
         self.dimensions.setText('' if symbol is None else f'{symbol.width:.2f} \u00d7 {symbol.height:.2f} mm')
         if symbol is None:
             return
@@ -806,6 +1059,7 @@ class SymbolTab(QWidget):
                 item.setPos(x - dx, y - bounds.height() / 2)
             if target:
                 tag(item, target)
+                self._text_bounds.append((target[1], item.sceneBoundingRect()))
             return item
 
         label(self._name, 0, -height / 2 - symbol.pin_length * scale - 28, 'center')
@@ -815,7 +1069,7 @@ class SymbolTab(QWidget):
             vx, vy = {0: (1, 0), 180: (-1, 0), 270: (0, 1), 90: (0, -1)}[placed.angle]
             end_x, end_y = x + vx * symbol.pin_length * scale, y + vy * symbol.pin_length * scale
             target = ('pin', pin.number)
-            selected = pin.number == self._selected_pin
+            selected = pin.number in self._selection_ids()
             pin_pen = QPen(QColor('#f9e2af') if selected else QColor('#89b4fa'), 2.8 if selected else 1.3)
             tag(scene.addLine(x, y, end_x, end_y, pin_pen), target)
             tag(scene.addEllipse(x - 3, y - 3, 6, 6, pin_pen), target)
@@ -828,7 +1082,8 @@ class SymbolTab(QWidget):
             else:
                 label(pin.number, x - 9, (y + end_y) / 2, 'center', True, target, True)
                 label(pin.name or '~', x, end_y + vy * 5, 'right' if vy > 0 else 'left', target=target, rotate=True)
-        for hx, hy in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)]:
+        handles = [] if self._body_locked else [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)]
+        for hx, hy in handles:
             x, y = hx * width / 2, hy * height / 2
             item = tag(scene.addRect(x - 4, y - 4, 8, 8, pen, QColor('#a6e3a1')), ('resize', hx, hy))
             item.setZValue(10)

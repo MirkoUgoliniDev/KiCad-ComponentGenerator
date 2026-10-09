@@ -9558,8 +9558,16 @@ class MainWindow(QMainWindow):
         outer.setSpacing(8)
 
         header = QHBoxLayout()
-        header.addWidget(QLabel("Anteprima 2D (silkscreen + pad, scala fissa, con quote):"))
+        header.addWidget(QLabel("Anteprima 2D (silkscreen + pad, con quote):"))
         header.addStretch()
+        for asset, tooltip, callback in (
+            ('zoom-in.svg', 'Ingrandisci', lambda: self.preview_view.zoom(1.2)),
+            ('zoom-out.svg', 'Riduci', lambda: self.preview_view.zoom(1 / 1.2)),
+            ('view-fit.svg', 'Adatta alla vista', self._fit_preview),
+        ):
+            button = self._view_tool_button(asset, tooltip)
+            button.clicked.connect(callback)
+            header.addWidget(button)
         # Stessa icona e stesso tooltip della barra 3D (utente, 2026-09-24):
         # e' lo stesso comando, deve riconoscersi uguale nelle due schede.
         self.btn_pinout_2d = self._view_tool_button(
@@ -9584,7 +9592,8 @@ class MainWindow(QMainWindow):
         outer.addLayout(header)
 
         self.preview_scene = QGraphicsScene()
-        self.preview_view = QGraphicsView(self.preview_scene)
+        from .footprint_view import FootprintView
+        self.preview_view = FootprintView(self.preview_scene)
         self.preview_view.setMinimumHeight(500)
         self.preview_view.setRenderHints(self.preview_view.renderHints())
         self.preview_mounting_group = QGroupBox("Footprint sulla scheda ospitante")
@@ -9669,6 +9678,7 @@ class MainWindow(QMainWindow):
         rows.extend({'pin': number, 'name': ''} for number in ids if number not in existing)
         self.symbol_tab.set_data(self._component_name(), rows,
             footprint=f'KiCadGen:{self._component_name()}', pad_ids=ids, force=force)
+        self.symbol_tab.set_recovery_path(self._project_dir() / '.symbol-draft.json')
 
     def _apply_symbol_pinout(self, rows):
         previous = self.pinout
@@ -9697,6 +9707,8 @@ class MainWindow(QMainWindow):
                 raise ValueError(self.i18n.text(
                     "I numeri del simbolo devono corrispondere ai pad elettrici del footprint."))
             pins, body = symbol_inputs(rows)
+            if not self.symbol_tab.confirm_export_review():
+                return
             path, _ = QFileDialog.getSaveFileName(self,
                 self.i18n.text("Esporta simbolo KiCad"),
                 str(self._project_dir() / f'{self._component_name()}.kicad_sym'),
@@ -11156,6 +11168,7 @@ class MainWindow(QMainWindow):
     def _draw_grid(
         self, mm_to_px: float, width: float, height: float, margin: float,
         x0: float = 0.0, y0: float = 0.0,
+        origin: tuple = (0.0, 0.0),
     ) -> None:
         """Griglia di riferimento, con passo in mm o in decimi di pollice.
 
@@ -11167,7 +11180,7 @@ class MainWindow(QMainWindow):
         moduli castellated, centrati sull'origine.
         """
         self._preview_grid_spec = dict(mm_to_px=mm_to_px, width=width, height=height,
-                                       margin=margin, x0=x0, y0=y0)
+                                       margin=margin, x0=x0, y0=y0, origin=origin)
         step = 2.54 if self.combo_grid_unit.currentData() == "inch" else 1.0
 
         minor = QPen(QColor(SURFACE1))
@@ -11175,24 +11188,25 @@ class MainWindow(QMainWindow):
         major = QPen(QColor(SURFACE2))
         major.setWidthF(1.0)
 
+        ox, oy = origin
         pad = margin + 2.0
-        i_min, i_max = math.floor((x0 - pad) / step), math.ceil((x0 + width + pad) / step)
-        j_min, j_max = math.floor((y0 - pad) / step), math.ceil((y0 + height + pad) / step)
+        i_min, i_max = math.floor((x0 - pad - ox) / step), math.ceil((x0 + width + pad - ox) / step)
+        j_min, j_max = math.floor((y0 - pad - oy) / step), math.ceil((y0 + height + pad - oy) / step)
 
         for i in range(i_min, i_max + 1):
             pen = major if i % 5 == 0 else minor
-            x = i * step * mm_to_px
+            x = (ox + i * step) * mm_to_px
             line = self.preview_scene.addLine(
-                x, j_min * step * mm_to_px, x, j_max * step * mm_to_px, pen
+                x, (oy + j_min * step) * mm_to_px, x, (oy + j_max * step) * mm_to_px, pen
             )
             line.setZValue(-10)  # dietro pad, silkscreen e quote
             line.setData(_GRID_ITEM, True)
             line.setVisible(self.chk_grid.isChecked())
         for j in range(j_min, j_max + 1):
             pen = major if j % 5 == 0 else minor
-            y = j * step * mm_to_px
+            y = (oy + j * step) * mm_to_px
             line = self.preview_scene.addLine(
-                i_min * step * mm_to_px, y, i_max * step * mm_to_px, y, pen
+                (ox + i_min * step) * mm_to_px, y, (ox + i_max * step) * mm_to_px, y, pen
             )
             line.setZValue(-10)
             line.setData(_GRID_ITEM, True)
@@ -11268,6 +11282,7 @@ class MainWindow(QMainWindow):
         self._draw_grid(
             mm_to_px, p.body_length, p.body_width, p.pad_overhang + p.pad_length,
             x0=-p.body_length / 2, y0=-p.body_width / 2,
+            origin=next(((pad.x, pad.y) for pad in pad_positions(p)), (0., 0.)),
         )
 
         silk_pen = QPen(QColor(TEXT))
@@ -11455,7 +11470,8 @@ class MainWindow(QMainWindow):
         # Remove its clearance to dimension the actual component envelope.
         x0, y0 = courtyard.start[0] + margin, courtyard.start[1] + margin
         x1, y1 = courtyard.end[0] - margin, courtyard.end[1] - margin
-        self._draw_grid(mm_to_px, x1 - x0, y1 - y0, max(margin, 1), x0=x0, y0=y0)
+        self._draw_grid(mm_to_px, x1 - x0, y1 - y0, max(margin, 1), x0=x0, y0=y0,
+                        origin=next((pad.at for pad in footprint.pads if pad.number), (0., 0.)))
         silk_pen = QPen(QColor(TEXT))
         silk_pen.setWidthF(1.5)
         for graphic in footprint.graphics:
@@ -11659,7 +11675,8 @@ class MainWindow(QMainWindow):
                     max_length=(body_w if pin.side in ("top", "bottom") else body_l) * mm_to_px * .3)
         left, top, right, bottom = [value * mm_to_px for value in extent]
         self._draw_grid(mm_to_px, body_l, body_w, margin,
-                        x0=-body_l / 2, y0=-body_w / 2)
+                        x0=-body_l / 2, y0=-body_w / 2,
+                        origin=next(((pin.x_mm, pin.y_mm) for pin in pins if str(pin.number).strip()), (0., 0.)))
         self._add_dim_h(left, right, bottom + 40, self._dim_label("dim.total", extent[2] - extent[0]))
         self._add_dim_v(top, bottom, right + 40, self._dim_label("dim.total", extent[3] - extent[1]))
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))

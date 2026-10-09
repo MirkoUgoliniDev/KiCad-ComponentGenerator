@@ -6,6 +6,7 @@ from tests.test_host_mounting import module
 
 
 def setup_board(window, monkeypatch):
+    monkeypatch.setattr(window.symbol_tab, "confirm_export_review", lambda: True)
     params = module()
     monkeypatch.setattr(window, '_is_castellated', lambda: True)
     monkeypatch.setattr(window, '_current_castellated_params', lambda: params)

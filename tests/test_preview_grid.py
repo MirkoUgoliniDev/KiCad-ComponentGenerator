@@ -57,3 +57,49 @@ def test_grid_controls_work_before_any_footprint_exists(window):
     window.combo_grid_unit.setCurrentIndex(1)
     window.chk_grid.setChecked(True)
     assert window.preview_scene.items() == []
+
+@pytest.mark.parametrize('spacing, aligned', [(5.08, True), (5.0, False)])
+def test_pad_reference_grid_preserves_incompatible_geometry(window, spacing, aligned):
+    package = PackageGeometry(family='soic', body_length_mm=15, body_width_mm=10,
+        pins=[PinSpec('1', -3.17, -2.11, 1.2, .6),
+              PinSpec('2', -3.17 + spacing, -2.11, 1.2, .6)])
+    original = [(p.x_mm, p.y_mm) for p in package.pins]
+    window.combo_grid_unit.setCurrentIndex(1)
+    window._draw_preview_package(package)
+    lines = [item.line() for item in window.preview_scene.items() if item.data(gui._GRID_ITEM)]
+    xs = [line.x1() / 20 for line in lines if line.x1() == line.x2()]
+    ys = [line.y1() / 20 for line in lines if line.y1() == line.y2()]
+    assert any(abs(x + 3.17) < 1e-8 for x in xs)
+    assert any(abs(y + 2.11) < 1e-8 for y in ys)
+    assert any(abs(x - (-3.17 + spacing)) < 1e-8 for x in xs) == aligned
+    assert [(p.x_mm, p.y_mm) for p in package.pins] == original
+    window.combo_grid_unit.setCurrentIndex(0)
+    assert window._preview_grid_spec['origin'] == (-3.17, -2.11)
+
+
+def test_footprint_zoom_anchor_pan_and_fit(window):
+    from PyQt6.QtCore import QPoint, Qt
+    from PyQt6.QtTest import QTest
+    window.show()
+    window._acquisition_completed = True
+    window._set_acquisition_tabs_enabled(True)
+    window.tabs.setCurrentIndex(gui.TAB_PREVIEW)
+    window._draw_preview_package(PackageGeometry(family='soic', body_length_mm=15,
+        body_width_mm=10, pins=[PinSpec('1', -3, -2, 1.2, .6)]))
+    QApplication.processEvents()
+    view = window.preview_view
+    initial = view.transform().m11()
+    point = view.viewport().rect().center() + QPoint(80, 30)
+    anchored = view.mapToScene(point)
+    view.zoom(2, point)
+    assert view.transform().m11() == pytest.approx(initial * 2)
+    assert (view.mapFromScene(anchored) - point).manhattanLength() <= 2
+    before = view.mapToScene(view.viewport().rect().center())
+    QTest.mousePress(view.viewport(), Qt.MouseButton.LeftButton, pos=point)
+    QTest.mouseMove(view.viewport(), point + QPoint(100, 40))
+    QTest.mouseRelease(view.viewport(), Qt.MouseButton.LeftButton, pos=point + QPoint(100, 40))
+    after = view.mapToScene(view.viewport().rect().center())
+    assert after.x() < before.x()
+    assert view._pan is None
+    window._fit_preview()
+    assert view.transform().m11() == pytest.approx(initial)

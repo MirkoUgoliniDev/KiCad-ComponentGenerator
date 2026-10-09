@@ -1,5 +1,25 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 2026-10-09 - Checkpoint editor avanzato e navigazione footprint
+
+- Utente autorizza commit di tutto il lavoro, push, merge in main e ritorno
+  su ADVANCED. Include funzioni avanzate del simbolo e griglia/zoom/pan footprint.
+- Esclusi dati locali: data/analysis_profiles.sqlite3, rows_none_rev.pkl, work/.
+- Le sezioni NON COMMITTATO sottostanti descrivono il lavoro incluso in questo
+  checkpoint; non rappresentano nuove modifiche successive alla pubblicazione.
+
+- **09/10 - Footprint (NON COMMITTATO):** griglia ancorata al primo pad,
+  senza modificare coordinate o interassi; coincidenza degli altri pad solo
+  quando compatibili con il passo. FootprintView con zoom al cursore,
+  pan sinistro/centrale e icone zoom/Adatta. Test geometrie compatibili e
+  incompatibili, navigazione Qt e conservazione vista al cambio griglia.
+
+- **09/10 — Avanzamenti editor NON COMMITTATO:** multiselezione Ctrl/Shift,
+  operazioni gruppo atomiche/allinea/distribuisci, readout, blocco corpo,
+  report pre-export e recupero .symbol-draft.json con baseline fingerprint.
+  210 test passati/1 skipped, work/editor-advanced.png. Ultima pubblicazione
+  1b03cc6 ADVANCED / c6ead84 main; nessuna autorizzazione a nuovo commit.
+
 - **09/10 — Pubblicazione editor autorizzata:** commit/push, merge main e
   ritorno ADVANCED. Include editor grafico completo, menu rotazioni e tabella
   collassabile. DB locale/pickle/work esclusi; hash/esito nel log Git.
