@@ -1,10 +1,8 @@
 """@brief Provide the main KiCadGen-Tool desktop window.
 
 @details The window uses the shared dark Qt theme and runs long generation and
-AI operations in worker threads. Its six stable tabs cover project input,
-advanced footprint parameters, generation, 2D review, 3D review and the final
-KiCad validation/installation workflow. Standard-user mode hides only the two
-advanced parameter tabs while preserving their indexes for existing handlers.
+AI operations in worker threads. Its five tabs cover project input, footprint
+preview, electrical symbol editing, 3D review and KiCad installation.
 """
 
 from __future__ import annotations
@@ -108,12 +106,12 @@ from ..services.messages import tx
 
 #: Icona di ogni scheda, nell'ordine delle schede: SVG a linea nello stile
 #: delle barre di icone.
-TAB_ICONS = ("tab-project.svg", "tab-preview.svg", "tab-model3d.svg", "tab-kicad.svg")
+TAB_ICONS = ("tab-project.svg", "tab-preview.svg", "tab-symbol.svg", "tab-model3d.svg", "tab-kicad.svg")
 
 #: Positions of the tabs in `MainWindow.tabs`. Footprint 2D and Genera were
 #: removed on 2026-09-26 with the «Utente avanzato» mode; their parameters
 #: live in `component_state` values, not in widgets.
-TAB_PROJECT, TAB_PREVIEW, TAB_MODEL_3D, TAB_KICAD = range(4)
+TAB_PROJECT, TAB_PREVIEW, TAB_SYMBOL, TAB_MODEL_3D, TAB_KICAD = range(5)
 
 #: I tre passi di una generazione, come li mostra la modale (utente,
 #: 2026-09-26). Chi lavora in ciascuno lo dice l'intestazione: vedi
@@ -1743,8 +1741,9 @@ class MainWindow(QMainWindow):
         ("F2", "Rinomina progetto", "_rename_project"),
         ("Ctrl+1", "Scheda Progetto", "_shortcut_tab_project"),
         ("Ctrl+2", "Scheda Anteprima footprint", "_shortcut_tab_preview"),
-        ("Ctrl+3", "Scheda Modello 3D", "_shortcut_tab_model_3d"),
-        ("Ctrl+4", "Scheda KiCad", "_shortcut_tab_kicad"),
+        ("Ctrl+3", "Scheda Simbolo elettrico", "_shortcut_tab_symbol"),
+        ("Ctrl+4", "Scheda Modello 3D", "_shortcut_tab_model_3d"),
+        ("Ctrl+5", "Scheda KiCad", "_shortcut_tab_kicad"),
         ("F5", "Rigenera il modello 3D (FreeCAD, gratuito)", "_shortcut_regenerate_3d"),
         ("Ctrl+E", "Modifica componenti", "_shortcut_edit_components"),
         ("Ctrl+L", "Apri il log AI", "_shortcut_ai_log"),
@@ -1783,6 +1782,9 @@ class MainWindow(QMainWindow):
 
     def _shortcut_tab_model_3d(self) -> None:
         self._shortcut_tab(TAB_MODEL_3D)
+
+    def _shortcut_tab_symbol(self) -> None:
+        self._shortcut_tab(TAB_SYMBOL)
 
     def _shortcut_tab_kicad(self) -> None:
         self._shortcut_tab(TAB_KICAD)
@@ -2038,6 +2040,7 @@ class MainWindow(QMainWindow):
         self._init_parameters()
         project_tab = self._build_project_tab()
         preview_tab = self._build_preview_tab()
+        symbol_tab = self._build_symbol_tab()
         model_3d_tab = self._build_3d_tab()
         kicad_tab = self._build_kicad_tab()
 
@@ -2077,6 +2080,7 @@ class MainWindow(QMainWindow):
         self.tabs.setProperty("i18n_skip_tabs", True)
         self.tabs.addTab(project_tab, self.i18n.tr("tab.project.name"))
         self.tabs.addTab(preview_tab, self.i18n.tr("tab.preview.name"))
+        self.tabs.addTab(symbol_tab, self.i18n.tr("tab.symbol.name"))
         self.tabs.addTab(model_3d_tab, self.i18n.tr("tab.model3d.name"))
         self.tabs.addTab(kicad_tab, self.i18n.tr("tab.kicad.name"))
         # Icone a linea nello stile delle barre, al posto delle emoji a colori
@@ -2156,6 +2160,8 @@ class MainWindow(QMainWindow):
         self._refresh_language_texts()
         self.tabs.setTabText(TAB_PROJECT, self.i18n.tr("tab.project.name"))
         self.tabs.setTabText(TAB_PREVIEW, self.i18n.tr("tab.preview.name"))
+        self.tabs.setTabText(TAB_SYMBOL, self.i18n.tr("tab.symbol.name"))
+        self.symbol_tab.retranslate()
         self.tabs.setTabText(TAB_MODEL_3D, self.i18n.tr("tab.model3d.name"))
         self.tabs.setTabText(TAB_KICAD, self.i18n.tr("tab.kicad.name"))
         self.i18n.retranslate_widgets(self)
@@ -2233,7 +2239,7 @@ class MainWindow(QMainWindow):
 
     def _set_acquisition_tabs_enabled(self, enabled: bool) -> None:
         """Enable previews only after the first successful parameter acquisition."""
-        for index in (TAB_PREVIEW, TAB_MODEL_3D):
+        for index in (TAB_PREVIEW, TAB_SYMBOL, TAB_MODEL_3D):
             self.tabs.setTabEnabled(index, enabled)
 
     def _refresh_preview_tabs(self, footprint_available: bool) -> None:
@@ -6509,6 +6515,8 @@ class MainWindow(QMainWindow):
         index = self.tabs.currentIndex()
         if index == TAB_PREVIEW:
             self._draw_preview()
+        elif index == TAB_SYMBOL:
+            self._refresh_symbol_tab(force=True)
         elif index == TAB_MODEL_3D:
             self._enter_3d_tab()
         # Lo stato appena applicato e' quello salvato: non va riscritto.
@@ -9622,6 +9630,82 @@ class MainWindow(QMainWindow):
 
         return tab
 
+    def _build_symbol_tab(self):
+        from .symbol_tab import SymbolTab
+        self.symbol_tab = SymbolTab(tx=self.i18n.text)
+        self.symbol_tab.edits_applied.connect(self._apply_symbol_pinout)
+        self.symbol_tab.export_requested.connect(self._export_electrical_symbol)
+        return self.symbol_tab
+
+    def _symbol_pad_ids(self):
+        """Electrical identities come from the actual footprint, never row indices."""
+        params = (self.package_geometry if self.package_geometry is not None else
+                  self._current_castellated_params() if self._is_castellated()
+                  else self._current_params())
+        params = self._host_footprint_params(params)
+        footprint = (build_package(params) if isinstance(params, PackageGeometry) else
+                     build_castellated_module(params) if isinstance(params, CastellatedModuleParams)
+                     else build_pin_header(params))
+        return list(dict.fromkeys(str(p.number) for p in footprint.pads
+                                 if p.pad_type != 'np_thru_hole' and str(p.number).strip()))
+
+    def _refresh_symbol_tab(self, force=False):
+        if not hasattr(self, 'symbol_tab'):
+            return
+        try:
+            ids = self._symbol_pad_ids()
+        except (ValueError, TypeError) as exc:
+            self.symbol_tab.set_data(self._component_name(), self.pinout, pad_ids=[], force=force)
+            self.symbol_tab.set_error(str(exc))
+            return
+        rows = deepcopy(self.pinout)
+        existing = {str(row.get('pin', '')).strip() for row in rows}
+        rows.extend({'pin': number, 'name': ''} for number in ids if number not in existing)
+        self.symbol_tab.set_data(self._component_name(), rows,
+            footprint=f'KiCadGen:{self._component_name()}', pad_ids=ids, force=force)
+
+    def _apply_symbol_pinout(self, rows):
+        previous = self.pinout
+        self.pinout = deepcopy(rows)
+        if not self._save_project_config(force=True):
+            self.pinout = previous
+            self._refresh_symbol_tab(force=True)
+            self.symbol_tab.set_status(self.i18n.text(
+                "Pinout non salvato. Le modifiche non sono state applicate."))
+            return
+        self._draw_preview()
+        self._sync_3d_pin_functions()
+        self._refresh_symbol_tab(force=True)
+
+    def _export_electrical_symbol(self):
+        from ..generators.symbol import SymbolPin, export_symbol
+        try:
+            rows = self.symbol_tab.rows()
+            ids = self._symbol_pad_ids()
+            numbers = [str(row.get('pin', '')).strip() for row in rows]
+            if len(set(numbers)) != len(numbers) or set(numbers) != set(ids) or not ids:
+                raise ValueError(self.i18n.text(
+                    "I numeri del simbolo devono corrispondere ai pad elettrici del footprint."))
+            pins = [SymbolPin(number=str(row['pin']), name=str(row.get('name') or ''),
+                       electrical_type=row.get('electrical_type', 'passive'),
+                       side=row.get('symbol_side', 'left')) for row in rows]
+            path, _ = QFileDialog.getSaveFileName(self,
+                self.i18n.text("Esporta simbolo KiCad"),
+                str(self._project_dir() / f'{self._component_name()}.kicad_sym'),
+                'KiCad (*.kicad_sym)')
+            if not path:
+                return
+            if not path.lower().endswith('.kicad_sym'):
+                path += '.kicad_sym'
+            footprint = self.symbol_tab.footprint()
+            export_symbol(Path(path), self._component_name(), pins, footprint=footprint)
+        except (OSError, ValueError, TypeError) as exc:
+            self.symbol_tab.set_status(str(exc))
+            return
+        message = self.i18n.text("Simbolo esportato: {path}").format(path=path)
+        self.symbol_tab.set_status(message)
+        self._append_log(message)
+
     def _show_pinout_dialog(self) -> None:
         dialog = PinoutDialog(self.pinout, self._component_name(), self)
         self.i18n.retranslate_widgets(dialog)
@@ -9639,6 +9723,7 @@ class MainWindow(QMainWindow):
             return
         self._draw_preview()
         self._sync_3d_pin_functions()
+        self._refresh_symbol_tab()
 
     # ── Tab 5: Modello 3D ──────────────────────────────────────────
 
@@ -11709,6 +11794,8 @@ class MainWindow(QMainWindow):
             self._refresh_docs_list()
         elif index == TAB_PREVIEW:
             self._draw_preview()
+        elif index == TAB_SYMBOL:
+            self._refresh_symbol_tab()
         elif index == TAB_MODEL_3D:
             self._enter_3d_tab()
 

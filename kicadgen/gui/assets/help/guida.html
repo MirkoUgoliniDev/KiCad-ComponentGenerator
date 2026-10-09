@@ -70,6 +70,7 @@ passo per passo.</p>
     <li><a href="#analisi">Avviare l'analisi e controllare i costi</a></li>
     <li><a href="#revisione">Rivedere i corpi trovati sulla foto</a></li>
     <li><a href="#generazione">Generazione: footprint e modello 3D</a></li>
+    <li><a href="#simbolo">La scheda «Simbolo elettrico»</a></li>
     <li><a href="#modello3d">La scheda «Modello 3D»</a></li>
     <li><a href="#step">Scegliere il modello STEP di un componente</a></li>
     <li><a href="#pin">Pin maschi sotto la scheda</a></li>
@@ -335,6 +336,27 @@ e non rigenera il modello 3D. Le scelte sono sincronizzate con quelle del passo
 <p>Il montaggio riguarda il footprint sulla scheda ospitante: la geometria fisica
 del modulo 3D, ricavata dalla foto, resta invariata. Un contatto castellated
 che possiede soltanto un mezzo foro non viene trasformato in un foro passante.</p>
+
+<h2 id="simbolo">Simbolo elettrico</h2>
+<p>Tra «Anteprima footprint» e «Modello 3D» trovi il simbolo da usare nello
+schema. I numeri sono quelli dei pad elettrici del footprint e non si modificano
+in questa tabella. Puoi correggere la funzione, scegliere il tipo elettrico e
+disporre ogni pin a sinistra o a destra; l'anteprima si aggiorna mentre lavori.</p>
+<p><strong>Applica</strong> salva nomi, tipi e lati nel progetto. I nomi aggiornano
+anche le etichette 2D e 3D. <strong>Annulla</strong> scarta le modifiche non
+applicate. Nessuna nuova analisi AI o generazione FreeCAD è necessaria.</p>
+<p>I tipi iniziali sono <strong>passive</strong>: non attestano il comportamento
+elettrico del circuito. Verifica sul datasheet se servono input, output,
+bidirectional, power_in o altri tipi prima di usare i controlli elettrici di
+KiCad. Nomi uguali come GND possono appartenere a numeri diversi; numeri
+duplicati o assenti dal footprint impediscono l'esportazione.</p>
+<p><strong>Esporta simbolo KiCad</strong> salva una libreria <code>.kicad_sym</code>.
+Aggiungila in KiCad alle librerie di simboli. Il riferimento al footprint è
+<code>KiCadGen:nome_componente</code>: usa lo stesso nome di libreria quando
+installi il footprint, oppure modifica l'associazione in KiCad. L'installazione
+della scheda «KiCad» continua a gestire footprint e modello 3D; la libreria di
+simboli si esporta separatamente.</p>
+<p>Scorciatoie: Ctrl+3 apre il simbolo, Ctrl+4 il modello 3D, Ctrl+5 KiCad.</p>
 
 <h2 id="modello3d">9. La scheda «Modello 3D»</h2>
 <p>Il modello si ruota con il mouse; il cubo di navigazione porta sulle viste

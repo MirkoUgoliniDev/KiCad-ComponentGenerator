@@ -1,5 +1,35 @@
 # Memoria delle decisioni del progetto
 
+## 2026-10-09 — Pubblicazione autorizzata del simbolo elettrico
+
+- L'utente richiede commit di tutto il lavoro sul simbolo, push, merge main
+  e ritorno su ADVANCED. Inclusi generatori, UI, traduzioni, guida e test.
+  Esclusi/preservati database locale, rows_none_rev.pkl e work/ come prima.
+- I riepiloghi NON COMMITTATO sotto precedono questo checkpoint. Hash e
+  risultato effettivo della pubblicazione sono nel log Git.
+
+## 2026-10-09 — Nuova scheda Simbolo elettrico (NON COMMITTATO)
+
+- Utente richiede tab dopo footprint/prima 3D e agenti esperti. Core, UI e
+  audit sviluppati/verificati separatamente, integrati in MainWindow.
+- Cinque tab: Progetto, Anteprima footprint, Simbolo elettrico, Modello 3D,
+  KiCad; Ctrl+3 simbolo, Ctrl+4 3D, Ctrl+5 KiCad. Nuova icona vettoriale.
+- generators/symbol.py: layout mm condiviso, pin su griglia, tipi elettrici,
+  serializzazione .kicad_sym e export atomico. ID mai rinumerati, stringhe
+  escaped/validate. Validato con CLI KiCad 10 tramite sym export svg.
+- symbol_tab.py: tabella nomi/tipi/lato sinistra-destra, preview zoom/pan,
+  Applica/Annulla/Ripristina, export esplicito. Default passive dichiarato:
+  non si deduce ruolo elettrico dal solo nome. Numeri da pad elettrici reali,
+  NPTH esclusi, numeri ripetuti nei pad deduplicati, pinout incoerente bloccato.
+- Pinout salva nomi/electrical_type/symbol_side nel project_config. Errore
+  salvataggio ripristina dati; bozza preservata rientrando nello stesso tab,
+  cambio progetto la sostituisce. Aggiornamento nomi nelle viste 2D/3D.
+- Simbolo esportato separatamente, footprint associato KiCadGen:nome.
+  Installazione esistente non registra ancora sym-lib-table: spiegato in guida.
+- 155 test passati/1 saltato sull'integrazione, 39 finali dopo affinamenti;
+  controllo visivo work/symbol-tab-review.png e CLI reale riusciti. Nessun
+  commit/push, nessuna modifica ai documenti/progetti generati dell'utente.
+
 ## 2026-10-09 — Checkpoint autorizzato: pinout, preview e revisione
 
 - L'utente autorizza commit, push, merge in main e ritorno su ADVANCED.
