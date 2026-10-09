@@ -6621,6 +6621,12 @@ class MainWindow(QMainWindow):
 
     def _can_leave_project(self, folder: Path | None = None) -> bool:
         """Save pending edits before navigation; a failed write retains the open project."""
+        symbol = getattr(self, 'symbol_tab', None)
+        if symbol is not None and symbol.has_pending_edits():
+            self.tabs.setCurrentIndex(TAB_SYMBOL)
+            symbol.set_status(self.i18n.text(
+                "Il simbolo contiene modifiche non applicate. Usa Applica oppure Annulla prima di cambiare progetto o chiudere."))
+            return False
         if not self._named():
             return True
         if folder is None:
@@ -9669,16 +9675,20 @@ class MainWindow(QMainWindow):
         self.pinout = deepcopy(rows)
         if not self._save_project_config(force=True):
             self.pinout = previous
-            self._refresh_symbol_tab(force=True)
-            self.symbol_tab.set_status(self.i18n.text(
+            self.symbol_tab.reject_apply(self.i18n.text(
                 "Pinout non salvato. Le modifiche non sono state applicate."))
             return
         self._draw_preview()
         self._sync_3d_pin_functions()
-        self._refresh_symbol_tab(force=True)
+        self.symbol_tab.accept_apply()
 
     def _export_electrical_symbol(self):
-        from ..generators.symbol import SymbolPin, export_symbol
+        from ..generators.symbol import symbol_inputs, export_symbol
+        # Keep direct invocations as safe as the disabled toolbar button: an
+        # export must never silently use older geometry than the visible draft.
+        if self.symbol_tab.has_pending_edits():
+            self.symbol_tab.set_status(self.i18n.text("Modifiche non applicate."))
+            return
         try:
             rows = self.symbol_tab.rows()
             ids = self._symbol_pad_ids()
@@ -9686,9 +9696,7 @@ class MainWindow(QMainWindow):
             if len(set(numbers)) != len(numbers) or set(numbers) != set(ids) or not ids:
                 raise ValueError(self.i18n.text(
                     "I numeri del simbolo devono corrispondere ai pad elettrici del footprint."))
-            pins = [SymbolPin(number=str(row['pin']), name=str(row.get('name') or ''),
-                       electrical_type=row.get('electrical_type', 'passive'),
-                       side=row.get('symbol_side', 'left')) for row in rows]
+            pins, body = symbol_inputs(rows)
             path, _ = QFileDialog.getSaveFileName(self,
                 self.i18n.text("Esporta simbolo KiCad"),
                 str(self._project_dir() / f'{self._component_name()}.kicad_sym'),
@@ -9698,7 +9706,7 @@ class MainWindow(QMainWindow):
             if not path.lower().endswith('.kicad_sym'):
                 path += '.kicad_sym'
             footprint = self.symbol_tab.footprint()
-            export_symbol(Path(path), self._component_name(), pins, footprint=footprint)
+            export_symbol(Path(path), self._component_name(), pins, footprint=footprint, body=body)
         except (OSError, ValueError, TypeError) as exc:
             self.symbol_tab.set_status(str(exc))
             return

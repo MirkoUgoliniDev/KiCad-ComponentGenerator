@@ -50,7 +50,10 @@ def test_save_failure_restores_pinout_and_export_rechecks_physical_mapping(windo
     window.symbol_tab.apply()
     assert window.pinout == before
     assert window.symbol_tab.rows()[0]['name'] == 'GND'
+    assert window.symbol_tab.draft_rows()[0]['name'] == 'Changed'
+    assert window.symbol_tab.has_pending_edits()
     assert 'non salvato' in window.symbol_tab.status.text()
+    window.symbol_tab.cancel_button.click()
     monkeypatch.setattr(window, '_symbol_pad_ids', lambda: ['unexpected'])
     monkeypatch.setattr(QFileDialog, 'getSaveFileName', lambda *a: (_ for _ in ()).throw(AssertionError('invalid export')))
     window._export_electrical_symbol()
@@ -68,3 +71,84 @@ def test_symbol_identity_uses_electrical_pads_excluding_mechanical_holes(window)
             PinSpec(number='', x_mm=0, y_mm=2, pad_length_mm=1,
                     pad_width_mm=1, drill_mm=1, pad_type='np_thru_hole', shape='circle')])
     assert window._symbol_pad_ids() == ['A2']
+
+
+def test_custom_layout_persists_and_export_uses_applied_geometry(window, monkeypatch, tmp_path):
+    setup_board(window, monkeypatch)
+    tab = window.symbol_tab
+    assert tab.place_pin('1', 50.8, 25.4)
+    assert tab.rotate_pin('1', -90)
+    assert tab.resize_body(60.96, 40.64)
+    tab.apply()
+    persisted = read_project_config(window._project_dir())['pinout']
+    assert persisted[0]['symbol_body'] == [60.96, 40.64]
+    assert persisted[0]['symbol_position'] == [50.8, 25.4]
+    assert persisted[0]['symbol_angle'] == 270
+    target = tmp_path / 'custom.kicad_sym'
+    monkeypatch.setattr(QFileDialog, 'getSaveFileName', lambda *a: (str(target), ''))
+    window._export_electrical_symbol()
+    text = target.read_text()
+    assert '(start -30.48 20.32) (end 30.48 -20.32)' in text
+    assert '(at 50.8 25.4 270)' in text
+    tab.set_data('Reloaded', persisted, force=True)
+    assert tab._symbol.pins[0].angle == 270
+    assert (tab._symbol.width, tab._symbol.height) == (60.96, 40.64)
+
+
+def test_failed_geometry_save_keeps_retryable_draft_and_history(window, monkeypatch):
+    setup_board(window, monkeypatch)
+    tab = window.symbol_tab
+    baseline = tab.rows()
+    assert tab.place_pin('1', 50.8, 25.4)
+    assert tab.rotate_pin('1', 90)
+    draft = tab.draft_rows()
+    save = window._save_project_config
+    monkeypatch.setattr(window, '_save_project_config', lambda **kw: False)
+    tab.apply()
+    assert tab.rows() == baseline
+    assert tab.draft_rows() == draft
+    assert tab.apply_button.isEnabled()
+    assert not tab.export_button.isEnabled()
+    tab.undo()
+    assert tab.draft_rows() != draft
+    tab.redo()
+    assert tab.draft_rows() == draft
+    monkeypatch.setattr(window, '_save_project_config', save)
+    tab.apply()
+    assert not tab.has_pending_edits()
+    assert read_project_config(window._project_dir())['pinout'] == draft
+
+
+def test_export_rejects_unapplied_geometry_even_when_called_directly(window, monkeypatch):
+    setup_board(window, monkeypatch)
+    tab = window.symbol_tab
+    assert tab.place_pin('1', 50.8, 25.4)
+    monkeypatch.setattr(QFileDialog, 'getSaveFileName', lambda *a: (
+        _ for _ in ()).throw(AssertionError('must apply before exporting')))
+    window._export_electrical_symbol()
+    assert 'non applicate' in tab.status.text()
+
+
+def test_saved_geometry_can_be_undone_and_saved_again(window, monkeypatch):
+    setup_board(window, monkeypatch)
+    tab = window.symbol_tab
+    initial = tab.draft_rows()
+    assert tab.place_pin('1', 50.8, 25.4)
+    edited = tab.draft_rows()
+    tab.apply()
+    assert not tab.has_pending_edits()
+    assert tab.undo_button.isEnabled()
+    window._refresh_symbol_tab()
+    assert tab.undo_button.isEnabled()
+    tab.undo()
+    assert tab.draft_rows() == initial
+    assert tab.has_pending_edits()
+    assert not tab.export_button.isEnabled()
+    assert window.pinout == edited
+    tab.apply()
+    assert window.pinout == initial
+    assert read_project_config(window._project_dir())['pinout'] == initial
+    assert tab.export_button.isEnabled()
+    tab.redo()
+    assert tab.draft_rows() == edited
+    assert tab.has_pending_edits()

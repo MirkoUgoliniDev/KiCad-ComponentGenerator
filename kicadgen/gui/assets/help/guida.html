@@ -341,10 +341,35 @@ che possiede soltanto un mezzo foro non viene trasformato in un foro passante.</
 <p>Tra «Anteprima footprint» e «Modello 3D» trovi il simbolo da usare nello
 schema. I numeri sono quelli dei pad elettrici del footprint e non si modificano
 in questa tabella. Puoi correggere la funzione, scegliere il tipo elettrico e
-disporre ogni pin a sinistra o a destra; l'anteprima si aggiorna mentre lavori.</p>
-<p><strong>Applica</strong> salva nomi, tipi e lati nel progetto. I nomi aggiornano
+spostare liberamente i pin nell'editor.</p>
+<p>Trascina il terminale, il numero o il nome di un pin per spostarlo
+  liberamente, anche lontano dal rettangolo. Il punto di connessione resta
+  agganciato alla griglia da 0.1 in (2.54 mm), anche se nascosta. Lo spostamento
+  mantiene l'orientamento. Su una posizione occupata, i due pin si scambiano
+  di posto conservando numero, nome, tipo e orientamento.</p>
+<p>Con il <strong>tasto destro sul pin</strong> puoi ruotarlo di 90 gradi
+  in senso orario o antiorario, oppure di 180 gradi. Il punto di connessione
+  resta fermo. Le otto maniglie verdi ridimensionano il rettangolo rispetto
+  al centro senza spostare i pin.</p>
+<p>La barra unica sopra l'editor usa icone con tooltip. Nelle finestre strette,
+  i comandi che non entrano sono disponibili nel menu di espansione della barra.
+  Seleziona un pin:
+  le frecce lo spostano di un passo di griglia, R ruota in senso orario e
+  Shift+R in senso antiorario, con il fuoco sulla vista. Il comando
+  <strong>Posizione e orientamento del pin</strong>, nella barra, permette di inserire X, Y e angolo. Le coordinate si agganciano
+  alla griglia; un punto di connessione gia' occupato viene rifiutato.</p>
+<p><strong>Annulla modifica / Ripeti modifica</strong> gestiscono la cronologia
+  delle modifiche. Con il fuoco sull'editor funzionano anche Ctrl+Z,
+  Ctrl+Shift+Z e Ctrl+Y. Esc annulla il trascinamento in corso.
+  <strong>Ripristina disposizione</strong> torna alle due colonne iniziali
+  preservando nomi e tipi elettrici. Tieni premuto il tasto sinistro sullo spazio vuoto e trascina per spostare la vista senza modificare
+  il simbolo. La rotella esegue lo zoom attorno al cursore; usa <strong>Adatta</strong> per vedere tutto.</p>
+<p><strong>Applica</strong> salva nomi, tipi, posizioni e dimensioni nel progetto. I nomi aggiornano
 anche le etichette 2D e 3D. <strong>Annulla</strong> scarta le modifiche non
-applicate. Nessuna nuova analisi AI o generazione FreeCAD è necessaria.</p>
+applicate. La cronologia Annulla/Ripeti rimane disponibile dopo Applica.
+Se il salvataggio fallisce, la bozza resta disponibile per riprovare.
+Prima di chiudere o cambiare progetto, applica oppure annulla le modifiche
+del simbolo. Nessuna nuova analisi AI o generazione FreeCAD è necessaria.</p>
 <p>I tipi iniziali sono <strong>passive</strong>: non attestano il comportamento
 elettrico del circuito. Verifica sul datasheet se servono input, output,
 bidirectional, power_in o altri tipi prima di usare i controlli elettrici di
