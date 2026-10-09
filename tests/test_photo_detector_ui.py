@@ -541,6 +541,8 @@ def test_the_yolo_browse_command_is_an_icon_with_a_tooltip(window):  # noqa: F81
 def test_the_smd_model_row_shows_only_with_the_smd_network(window, detector, visible):
     """@brief «Modello rete SMD» (user, 2026-10-02) appears like «Modello YOLO», only for its mode."""
     window.show()
+    window.project_wizard.set_page(1)
+    window.group_ai_tools.setExpanded(True)
     window.combo_photo_detector.setCurrentIndex(window.combo_photo_detector.findData(detector))
     window._on_photo_detector_changed()
     assert window.field_smd_model.isVisibleTo(window) is visible

@@ -407,6 +407,9 @@ class GenerateWorker(_Cad3DRunWorker):
         @param face_texts Face text annotations; None means none.
         """
         super().__init__(params, project_dir, body, fillets or [], face_texts or [])
+        # Only the host footprint may differ: self.params remains the physical
+        # module passed to FreeCAD, matching and all 3D regenerations.
+        self.footprint_params = None
 
     def run(self) -> None:
         """@brief QThread override: save the footprint, then generate the 3D model, reporting each through its own signals."""
@@ -414,12 +417,13 @@ class GenerateWorker(_Cad3DRunWorker):
             # Il file lo scrive questo programma: KiCad non e' in esecuzione.
             self.phase.emit('footprint', tx("scrittura del file .kicad_mod"), 0, 0)
             self.progress.emit(tx("Generazione del footprint KiCad…"))
+            host = self.footprint_params if self.footprint_params is not None else self.params
             footprint = (
-                _patch_point("build_castellated_module")(self.params)
-                if isinstance(self.params, CastellatedModuleParams)
-                else _patch_point("build_package")(self.params)
-                if isinstance(self.params, PackageGeometry)
-                else _patch_point("build_pin_header")(self.params)
+                _patch_point("build_castellated_module")(host)
+                if isinstance(host, CastellatedModuleParams)
+                else _patch_point("build_package")(host)
+                if isinstance(host, PackageGeometry)
+                else _patch_point("build_pin_header")(host)
             )
             pretty_dir = self.project_dir / f"{self.params.name}.pretty"
             out_path = pretty_dir / f"{self.params.name}.kicad_mod"

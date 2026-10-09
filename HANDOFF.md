@@ -1,5 +1,45 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+- **09/10 — Checkpoint wizard autorizzato:** commit/push delle modifiche UI,
+  generatori e regressioni, merge in main e ritorno su ADVANCED richiesti
+  dall'utente. Include icona con tooltip nell'anteprima. I riepiloghi "non
+  committato" sotto sono cronologia precedente a questo checkpoint.
+  Database locale modificato, rows_none_rev.pkl e work/ esclusi e conservati.
+  Controllare log e tracking Git per l'esito; nessuna autorizzazione implicita
+  a committare eventuali modifiche successive.
+
+- **09/10, non committato:** montaggio diretto/header e diametri pad/foro
+  modificabili anche nel tab Anteprima footprint, sincronizzati con il wizard.
+  Pulsante Aggiorna solo il footprint: nessuna nuova analisi o rigenerazione
+  3D. Errori diametri mostrati nel tab. Schermata iniziale allargata del 25%
+  per il tedesco. 91 test mirati passati, compileall e diff --check puliti.
+
+- **Navigazione corretta (09/10, non committato):** dall'ultima pagina si
+  torna a Documenti; da li' "Torna ai progetti" salva/chiude e mostra
+  Nuovo/Apri/Recenti, come richiesto. Eliminata la pagina isolata Progetto:
+  nome/cartella sono nei Dati del progetto richiudibili sopra i documenti.
+  Salvataggio fallito e lavoro in corso impediscono l'uscita.
+
+- **Fix anteprima header (09/10, non committato):** il renderer generico
+  ignorava shape/drill, mostrando quadrati pieni. Ora corona circolare e
+  foro visibile, numerazione esterna, ovali/roundrect rispettati. Esportazione
+  ESP32 gia' corretta (44 pad circolari con 44 fori); 3D invariato. 61 test
+  mirati passati, cattura Qt controllata. Vedi test_package_preview_drills.py.
+
+- **09/10/2026 — NON COMMITTATO: wizard B e montaggio della board.**
+  Scelta approvata e implementazione richiesta dall'utente. Due pagine di
+  preparazione, strumenti AI collassabili chiusi di default, montaggio
+  diretto oppure header con pad THT circolari sulla SCHEDA OSPITANTE.
+  Il 3D del modulo resta fedele alla foto e indipendente dal montaggio;
+  checkbox header 3D separata. Aggiornamento del solo footprint senza AI/CAD.
+  Persistenza `host_mounting`, compatibilita' legacy e test di regressione.
+  Dettagli nel riepilogo iniziale di MEMORY.md. Commit precedente `18561b6`
+  pubblicato su ADVANCED e unito/pubblicato in main (`5762554`). Non fare
+  nuovi commit/push/merge senza un'altra richiesta esplicita.
+  Verifiche: 339 test passati, 2 saltati; compilazione/diff puliti, cattura
+  della GUI con tema reale. Database profili modificato a fine sessione,
+  origine non verificata: lasciato intatto.
+
 - **09/10/2026 ? COMMIT DELLE CORREZIONI autorizzato dall'utente**, insieme
   a push e merge in main; confermato il funzionamento. Questo aggiornamento
   supera lo stato di pausa/non committato riportato sotto, conservato come

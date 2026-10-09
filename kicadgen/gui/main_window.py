@@ -79,6 +79,8 @@ from ..app_paths import (DEFAULT_YOLO_ONNX, DEFAULT_YOLO_PT, SMD_MODELS_DIR, YOL
 from ..services.photo_yolo import yolo_settings as validate_yolo_settings
 from .component_editor_dialog import ComponentEditorDialog
 from .workflow_bar import WorkflowBar
+from .project_wizard import CollapsibleTools, ProjectWizard
+from ..generators.host_mounting import header_footprint_params
 from .start_page import NO_PROJECTS_TOOLTIP, StartPage
 from .component_state import (BoundedValue, FlagValue, MAX_LENGTH_MM, MIN_HEIGHT_MM,
                               MIN_LENGTH_MM, TextValue, normalised_side)
@@ -2128,6 +2130,8 @@ class MainWindow(QMainWindow):
         self._analysis_tabs_enabled = None
         # Apply the persisted language to all catalogued widgets on first render.
         self.i18n.retranslate_widgets(self)
+        if hasattr(self, "project_wizard"):
+            self.project_wizard.retranslate()
 
     def _refresh_language_texts(self) -> None:
         """@brief Nome dell'icona e della tendina della lingua, nella lingua in uso."""
@@ -2153,6 +2157,8 @@ class MainWindow(QMainWindow):
         self.tabs.setTabText(TAB_MODEL_3D, self.i18n.tr("tab.model3d.name"))
         self.tabs.setTabText(TAB_KICAD, self.i18n.tr("tab.kicad.name"))
         self.i18n.retranslate_widgets(self)
+        self.project_wizard.retranslate()
+        self._refresh_ai_tools_summary()
         if hasattr(self, "workflow_bar"):
             self.workflow_bar.retranslate()
             self._refresh_workflow_state()
@@ -2425,14 +2431,52 @@ class MainWindow(QMainWindow):
         ai_form.addRow("Tipologia componente:", self.combo_component_type)
         # Solo modello 3D: gli strip non cambiano ne' l'analisi ne' il
         # footprint (utente, 2026-09-26). Spenti di default.
-        self.chk_header_pins = QCheckBox(
-            "Pin quadrati per il collegamento alla scheda principale (solo modello 3D)")
+        self.chk_header_pins = QCheckBox("Mostra gli header nel modello 3D")
         self.chk_header_pins.setToolTip(
             "Aggiunge sotto la scheda gli strip maschi a pin quadrati, come una scheda "
             "con gli strip gia' saldati. Sulle schede castellated solo sui contatti con "
             "foro passante. Non cambia l'analisi ne' il footprint: basta rigenerare il 3D.")
         self.chk_header_pins.toggled.connect(self._on_header_pins_toggled)
-        ai_form.addRow("", self.chk_header_pins)
+        self.group_mounting = QGroupBox("Montaggio sulla scheda principale")
+        mounting_layout = QVBoxLayout(self.group_mounting)
+        self.combo_mounting = QComboBox()
+        self.combo_mounting.addItem("Saldatura diretta / piazzole del modulo", "direct")
+        self.combo_mounting.addItem("Strip header / pad circolari con foro", "headers")
+        mounting_layout.addWidget(self.combo_mounting)
+        mounting_note = QLabel(
+            "La scelta cambia solo il footprint della scheda ospitante. "
+            "Il modello 3D della board resta fedele alla foto.")
+        mounting_note.setWordWrap(True)
+        mounting_layout.addWidget(mounting_note)
+        mounting_layout.addWidget(self.chk_header_pins)
+        self.header_dimensions = QWidget()
+        dimensions_form = QFormLayout(self.header_dimensions)
+        self.spin_header_pad = QDoubleSpinBox()
+        self.spin_header_drill = QDoubleSpinBox()
+        for spin, value in ((self.spin_header_pad, 1.7), (self.spin_header_drill, 1.0)):
+            spin.setRange(0.1, 10.0)
+            spin.setDecimals(2)
+            spin.setSingleStep(0.1)
+            spin.setSuffix(" mm")
+            spin.setKeyboardTracking(False)
+            spin.setValue(value)
+            spin.valueChanged.connect(self._on_mounting_changed)
+        dimensions_form.addRow("Diametro pad sulla scheda ospitante:", self.spin_header_pad)
+        dimensions_form.addRow("Diametro foro per il pin:", self.spin_header_drill)
+        dimensions_note = QLabel("Valori iniziali da verificare con gli header utilizzati.")
+        dimensions_note.setWordWrap(True)
+        dimensions_form.addRow(dimensions_note)
+        mounting_layout.addWidget(self.header_dimensions)
+        self.header_dimensions.hide()
+        self.label_mounting_error = QLabel()
+        self.label_mounting_error.setWordWrap(True)
+        self.label_mounting_error.setProperty("i18n_skip", True)
+        mounting_layout.addWidget(self.label_mounting_error)
+        self.btn_update_host_footprint = QPushButton("Aggiorna solo il footprint")
+        self.btn_update_host_footprint.setEnabled(False)
+        self.btn_update_host_footprint.clicked.connect(lambda: self._generate(footprint_only=True))
+        mounting_layout.addWidget(self.btn_update_host_footprint)
+        self.combo_mounting.currentIndexChanged.connect(self._on_mounting_changed)
         # Spessore della scheda (utente, 27/09, punto 132): per le sole schede,
         # accanto ai pin quadrati perche' anche lui cambia soltanto il 3D.
         self.spin_pcb_thickness = QDoubleSpinBox()
@@ -2610,9 +2654,10 @@ class MainWindow(QMainWindow):
         _align_form_labels(models_form)
 
         analysis_layout.addLayout(ai_form)
+        analysis_layout.addWidget(self.group_mounting)
 
-        self.group_ai_tools = QGroupBox("Strumenti AI")
-        tools_layout = QVBoxLayout(self.group_ai_tools)
+        self.group_ai_tools = CollapsibleTools("Strumenti AI")
+        tools_layout = QVBoxLayout(self.group_ai_tools.content)
         tools_layout.setContentsMargins(12, 16, 12, 12)
         tools_layout.setSpacing(12)
         tools_layout.addLayout(models_form)
@@ -2839,13 +2884,137 @@ class MainWindow(QMainWindow):
         self._refresh_model_combo()
         self._restore_component_type()
         self._update_project_path_label()
-        scroll = QScrollArea()
-        scroll.setWidget(tab)
-        scroll.setWidgetResizable(True)
-        # Tenuta per riportare in vista «Estrai parametri con AI» quando la
-        # pagina cambia altezza all'avvio di un'analisi (utente, 2026-10-02).
-        self._project_scroll = scroll
-        return scroll
+        # Keep the editors and their existing signals; only their navigation
+        # changes. The primary action lives outside the scrolling page.
+        for group in (folder_group, docs_group, self.group_component_analysis):
+            outer.removeWidget(group)
+        outer.takeAt(outer.count() - 1)  # the old bottom stretch
+        analysis_layout.removeWidget(self.btn_extract_ai)
+        documents_page = QWidget()
+        documents_layout = QVBoxLayout(documents_page)
+        documents_layout.setContentsMargins(0, 0, 0, 0)
+        self.project_details = CollapsibleTools("Dati del progetto")
+        self.project_details.summary.setText(self._component_name())
+        self.field_name.textChanged.connect(self.project_details.summary.setText)
+        details_layout = QVBoxLayout(self.project_details.content)
+        details_layout.addWidget(folder_group)
+        documents_layout.addWidget(self.project_details)
+        documents_layout.addWidget(docs_group)
+        self.project_wizard = ProjectWizard(
+            (documents_page, self.group_component_analysis),
+            self.btn_extract_ai, self.i18n.text, tab)
+        self.project_wizard.page_changed.connect(self._on_project_wizard_page)
+        self.project_wizard.projects_requested.connect(self._return_to_projects)
+        outer.addWidget(self.project_wizard, 1)
+        self._project_scroll = self.project_wizard.scrolls[0]
+        for combo in (self.combo_model, self.combo_photo_detector):
+            combo.currentIndexChanged.connect(self._refresh_ai_tools_summary)
+        self._refresh_ai_tools_summary()
+        return tab
+
+    def _on_project_wizard_page(self, index: int) -> None:
+        """@brief Track the current scroll area without changing project data."""
+        self._project_scroll = self.project_wizard.scrolls[index]
+
+    def _return_to_projects(self) -> None:
+        """@brief Save the current project and return to New/Open/Recent projects."""
+        if self._project_change_blocked():
+            return
+        self._flush_project_config()
+        state = self._project_state_text()
+        if self._named() and (state is None or state != self._last_saved_project_state):
+            QMessageBox.warning(self, self.i18n.text("Progetto"), self.i18n.text(
+                "Impossibile salvare le impostazioni: il progetto resta aperto."))
+            return
+        self._switch_project("", self._general_project_state)
+
+    def _refresh_ai_tools_summary(self) -> None:
+        """@brief Keep active detector and provider visible while settings are closed."""
+        self.group_ai_tools.summary.setText(
+            f"{self.combo_photo_detector.currentText()} · {self.combo_model.currentText()}")
+
+    def _mounting_state(self) -> dict:
+        """@brief Serialize the host mounting independently from the physical board."""
+        return {"mode": self.combo_mounting.currentData(),
+                "pad_diameter": self.spin_header_pad.value(),
+                "drill": self.spin_header_drill.value()}
+
+    def _host_footprint_params(self, params):
+        """@brief Derive host pads only; callers retain params for the photo-faithful 3D."""
+        if (self.combo_mounting.currentData() != "headers"
+                or self._photo_inventory_family() is not True):
+            return params
+        return header_footprint_params(params, self.spin_header_pad.value(),
+                                      self.spin_header_drill.value())
+
+    def _on_mounting_changed(self, *_args) -> None:
+        """@brief Refresh the footprint preview without invalidating the board mesh."""
+        self.header_dimensions.setVisible(self.combo_mounting.currentData() == "headers")
+        self._set_mounting_error("")
+        self._sync_preview_mounting()
+        if getattr(self, "_restoring_project", False):
+            return
+        self._last_params = None
+        self._draw_preview()
+
+    def _refresh_mounting_actions(self) -> None:
+        """@brief Allow footprint-only updates once real component data is available."""
+        button = getattr(self, "btn_update_host_footprint", None)
+        enabled = (bool(getattr(self, "_acquisition_completed", False)
+                        or self._project_has_footprint())
+                   and not self._background_work_running())
+        if button is not None:
+            button.setEnabled(enabled)
+        if hasattr(self, "btn_update_host_footprint_preview"):
+            self.btn_update_host_footprint_preview.setEnabled(enabled)
+
+    def _set_mounting_error(self, message: str) -> None:
+        """@brief Show validation feedback beside both editors of the same host footprint."""
+        self.label_mounting_error.setText(message)
+        label = getattr(self, "label_preview_mounting_error", None)
+        if label is not None:
+            label.setText(message)
+            label.setVisible(bool(message))
+
+    def _sync_preview_mounting(self) -> None:
+        """@brief Mirror project mounting values without triggering another edit or CAD work."""
+        if not hasattr(self, "preview_mounting_group"):
+            return
+        board = self._photo_inventory_family() if self._selected_family() else None
+        self.preview_mounting_group.setVisible(board is True)
+        pairs = ((self.combo_preview_mounting, self.combo_mounting),
+                 (self.spin_preview_header_pad, self.spin_header_pad),
+                 (self.spin_preview_header_drill, self.spin_header_drill))
+        for target, source in pairs:
+            blocked = target.blockSignals(True)
+            if isinstance(source, QComboBox):
+                target.setCurrentIndex(target.findData(source.currentData()))
+            else:
+                target.setValue(source.value())
+            target.blockSignals(blocked)
+        self.preview_header_dimensions.setVisible(self.combo_mounting.currentData() == "headers")
+
+    def _restore_mounting_state(self, state) -> None:
+        """@brief Restore host settings, defaulting legacy projects to their original lands."""
+        state = state if isinstance(state, dict) else {}
+        mode = state.get("mode", "direct")
+        index = self.combo_mounting.findData(mode)
+        controls = ((self.combo_mounting, max(0, index)),
+                    (self.spin_header_pad, state.get("pad_diameter", 1.7)),
+                    (self.spin_header_drill, state.get("drill", 1.0)))
+        for widget, value in controls:
+            blocked = widget.blockSignals(True)
+            if isinstance(widget, QComboBox):
+                widget.setCurrentIndex(value)
+            else:
+                fallback = 1.7 if widget is self.spin_header_pad else 1.0
+                valid = (isinstance(value, (int, float)) and not isinstance(value, bool)
+                         and math.isfinite(value) and widget.minimum() <= value <= widget.maximum())
+                widget.setValue(value if valid else fallback)
+            widget.blockSignals(blocked)
+        self.header_dimensions.setVisible(self.combo_mounting.currentData() == "headers")
+        self._set_mounting_error("")
+        self._sync_preview_mounting()
 
     # ── Tipologia componente ────────────────────────────────────────
 
@@ -2914,6 +3083,8 @@ class MainWindow(QMainWindow):
         self.chk_header_pins.setChecked(self._show_pins_3d())
         self.chk_header_pins.blockSignals(blocked)
         self.chk_header_pins.setVisible(board is True)
+        self.group_mounting.setVisible(board is True)
+        self._sync_preview_mounting()
         if getattr(self, "_ai_form", None) is not None:
             self._ai_form.setRowVisible(self._row_pcb_thickness, board is True)
         self._refresh_pcb_thickness_row()
@@ -3047,6 +3218,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_output_actions(self) -> bool:
         footprint_available = self._refresh_output_actions_inner()
+        self._refresh_mounting_actions()
         self._refresh_workflow_state()
         return footprint_available
 
@@ -3172,6 +3344,10 @@ class MainWindow(QMainWindow):
         target = {"model3d": TAB_MODEL_3D, "kicad": TAB_KICAD}.get(step, TAB_PROJECT)
         if self.tabs.isEnabled() and self.tabs.isTabEnabled(target):
             self.tabs.setCurrentIndex(target)
+            if target == TAB_PROJECT and hasattr(self, "project_wizard"):
+                self.project_wizard.set_page(0 if step == "documents" else 1)
+                if step == "review" and self.btn_component_review.isEnabled():
+                    self._open_component_review()
 
     def _refresh_output_actions_inner(self) -> bool:
         name = self._component_name()
@@ -3654,6 +3830,7 @@ class MainWindow(QMainWindow):
         self._show_extract_preparing()
         photo_detector, yolo_model_path = self._photo_detector_options()
         if photo_detector == "yolo_smd" and is_frozen():
+            self.group_ai_tools.setExpanded(True)
             QMessageBox.warning(
                 self, self._photo_detector_text("error_title"),
                 self._photo_detector_text("smd_unavailable"),
@@ -3669,6 +3846,7 @@ class MainWindow(QMainWindow):
                     from ..services.smd_component_classifier import validate_smd_setup
                     validate_smd_setup(self._smd_model_option())
             except Exception as exc:
+                self.group_ai_tools.setExpanded(True)
                 QMessageBox.warning(
                     self, self._photo_detector_text("error_title"),
                     self._photo_detector_text("error", error=str(exc)),
@@ -3678,6 +3856,7 @@ class MainWindow(QMainWindow):
         try:
             doc_paths, document_roles = self._selected_documents()
         except (OSError, ValueError) as exc:
+            self.project_wizard.set_page(0)
             QMessageBox.information(
                 self, self.i18n.text("Completa la documentazione"), str(exc)
             )
@@ -3689,11 +3868,13 @@ class MainWindow(QMainWindow):
             self._start_yolo_pretest(doc_paths, document_roles, yolo_model_path)
             return
         if not self._ensure_api_key():
+            self.group_ai_tools.setExpanded(True)
             return
 
         try:
             profile = self.profile_store.snapshot(self._profile_key())
         except (ProfileError, sqlite3.Error, OSError) as exc:
+            self.group_ai_tools.setExpanded(True)
             QMessageBox.warning(
                 self, self.i18n.text('Profilo AI non disponibile'), str(exc))
             return
@@ -4205,7 +4386,8 @@ class MainWindow(QMainWindow):
         """
         scroll = getattr(self, "_project_scroll", None)
         button = getattr(self, "btn_extract_ai", None)
-        if scroll is not None and button is not None and button.isVisible():
+        if (scroll is not None and button is not None and button.isVisible()
+                and scroll.widget().isAncestorOf(button)):
             scroll.ensureWidgetVisible(button, 0, 24)
 
     def _photo_cache_dir(self) -> Path:
@@ -6102,6 +6284,7 @@ class MainWindow(QMainWindow):
             "package_geometry": ({**asdict(self.package_geometry),
                                   "name": self._component_name()}
                                  if self.package_geometry is not None else None),
+            "host_mounting": self._mounting_state(),
             "models": {"session_model": getattr(self, "_session_model", None),
                        "vlm_model": getattr(self, "_vlm_model", None)},
             "sides": self._serialised_sides(),
@@ -6248,6 +6431,7 @@ class MainWindow(QMainWindow):
                                  if isinstance(options.get(key), bool)}
         self._pcb_thickness_source, self._analysis_pcb_thickness = _saved_pcb_thickness(
             state.get("pcb_thickness"))
+        self._restore_mounting_state(state.get("host_mounting"))
         self._refresh_type_effect()
         self.package_geometry = package_geometry
         self._set_regen_busy(False)
@@ -6296,6 +6480,9 @@ class MainWindow(QMainWindow):
         # La scheda aperta mostra il progetto nuovo, non quello chiuso: senza,
         # restava il disegno del precedente e il 3D non si ridisegnava (audit
         # 25/09). Le altre schede si ridisegnano all'ingresso, come sempre.
+        self.project_wizard.set_page(1 if self._project_has_footprint() else 0)
+        self.project_details.setExpanded(False)
+        self.group_ai_tools.setExpanded(False)
         index = self.tabs.currentIndex()
         if index == TAB_PREVIEW:
             self._draw_preview()
@@ -8983,8 +9170,11 @@ class MainWindow(QMainWindow):
         finally:
             dialog.deleteLater()
 
-    def _generate(self, automatic=False) -> None:
+    def _generate(self, automatic=False, footprint_only=False) -> None:
         if self._background_work_running() or self._automatic_generation_active:
+            return
+        if footprint_only and not (self._acquisition_completed or self._project_has_footprint()):
+            self._set_mounting_error(self.i18n.text("Analizza prima i documenti del componente."))
             return
 
         try:
@@ -8996,8 +9186,10 @@ class MainWindow(QMainWindow):
             if isinstance(params, CastellatedModuleParams) and self._missing_contact_style_message():
                 raise ValueError(self._missing_contact_style_message())
             params.validate()
+            host_params = self._host_footprint_params(params)
             self._validate_output_name(params.name)
-            body = None if isinstance(params, PackageGeometry) else self._current_body_params()
+            body = (None if footprint_only or isinstance(params, PackageGeometry)
+                    else self._current_body_params())
             if body is not None:
                 body.validate()
             # Il corpo si pretende solo se il 3D e' stato chiesto. Un gruppo
@@ -9009,7 +9201,8 @@ class MainWindow(QMainWindow):
                 raise ValueError(tx('Mancano i parametri 3D.'))
         except ValueError as exc:
             self._append_log(tx("ERRORE: {exc}", exc=exc))
-            if self._correct_invalid_through_holes(locals().get("params")):
+            self._set_mounting_error(str(exc))
+            if not footprint_only and self._correct_invalid_through_holes(locals().get("params")):
                 self._generate(automatic=automatic)
                 return
             if automatic:
@@ -9066,6 +9259,7 @@ class MainWindow(QMainWindow):
             params, project_dir, body,
             fillets=list(self.fillet_annotations), face_texts=list(self.face_text_annotations),
         )
+        self._worker.footprint_params = host_params
         self._worker._model_revision = self._model_revision
         self._worker.photo_scale_px_per_mm = self._photo_scale_px_per_mm()
         self._worker.done.connect(self._on_generated)
@@ -9145,6 +9339,7 @@ class MainWindow(QMainWindow):
             `_abort_pending`, che viene azzerato qui perche' qui finisce
             davvero il lavoro che si stava fermando.
         """
+        QTimer.singleShot(0, self._refresh_mounting_actions)
         aborted = self._abort_pending
         self._abort_pending = False
         if self._manual_cad_overlay:
@@ -9321,6 +9516,51 @@ class MainWindow(QMainWindow):
         self.preview_view = QGraphicsView(self.preview_scene)
         self.preview_view.setMinimumHeight(500)
         self.preview_view.setRenderHints(self.preview_view.renderHints())
+        self.preview_mounting_group = QGroupBox("Footprint sulla scheda ospitante")
+        mounting_layout = QVBoxLayout(self.preview_mounting_group)
+        mounting_row = QHBoxLayout()
+        self.combo_preview_mounting = QComboBox()
+        for index in range(self.combo_mounting.count()):
+            self.combo_preview_mounting.addItem(self.combo_mounting.itemText(index),
+                                               self.combo_mounting.itemData(index))
+        self.combo_preview_mounting.currentIndexChanged.connect(
+            lambda: self.combo_mounting.setCurrentIndex(self.combo_mounting.findData(
+                self.combo_preview_mounting.currentData())))
+        mounting_row.addWidget(self.combo_preview_mounting, 1)
+        self.btn_update_host_footprint_preview = icon_button(
+            '', 'wf-regenerate.svg', lambda: self._generate(footprint_only=True))
+        self.btn_update_host_footprint_preview.setToolTip("Aggiorna solo il footprint")
+        self.btn_update_host_footprint_preview.setAccessibleName("Aggiorna solo il footprint")
+        self.btn_update_host_footprint_preview.setEnabled(self.btn_update_host_footprint.isEnabled())
+        mounting_row.addWidget(self.btn_update_host_footprint_preview)
+        mounting_layout.addLayout(mounting_row)
+        self.preview_header_dimensions = QWidget()
+        dimensions = QHBoxLayout(self.preview_header_dimensions)
+        dimensions.setContentsMargins(0, 0, 0, 0)
+        self.spin_preview_header_pad = QDoubleSpinBox()
+        self.spin_preview_header_drill = QDoubleSpinBox()
+        for spin, source, text in ((self.spin_preview_header_pad, self.spin_header_pad, "Pad Ø:"),
+                                   (self.spin_preview_header_drill, self.spin_header_drill, "Foro Ø:")):
+            spin.setRange(source.minimum(), source.maximum())
+            spin.setDecimals(source.decimals())
+            spin.setSingleStep(source.singleStep())
+            spin.setSuffix(" mm")
+            spin.setKeyboardTracking(False)
+            spin.setValue(source.value())
+            spin.valueChanged.connect(source.setValue)
+            label = QLabel(text)
+            label.setBuddy(spin)
+            dimensions.addWidget(label)
+            dimensions.addWidget(spin)
+        dimensions.addStretch()
+        mounting_layout.addWidget(self.preview_header_dimensions)
+        self.label_preview_mounting_error = QLabel()
+        self.label_preview_mounting_error.setWordWrap(True)
+        self.label_preview_mounting_error.setProperty("i18n_skip", True)
+        self.label_preview_mounting_error.hide()
+        mounting_layout.addWidget(self.label_preview_mounting_error)
+        outer.addWidget(self.preview_mounting_group)
+        self._sync_preview_mounting()
         outer.addWidget(self.preview_view)
 
         return tab
@@ -10946,16 +11186,19 @@ class MainWindow(QMainWindow):
             `_last_params`. The fields restored with the project are the ones
             its footprint was generated from.
         """
-        if self._last_params is not None:
-            return self._last_params
         try:
             params = (
+                self._last_params if self._last_params is not None else
                 self.package_geometry if self.package_geometry is not None else
                 self._current_castellated_params() if self._is_castellated()
                 else self._current_params()
             )
             params.validate()
-        except (ValueError, TypeError):
+            params = self._host_footprint_params(params)
+            self._set_mounting_error("")
+        except (ValueError, TypeError) as exc:
+            if self.combo_mounting.currentData() == "headers":
+                self._set_mounting_error(str(exc))
             # Campi incompleti o stato di progetto non coerente: nessun
             # disegno, mai un'eccezione fuori da un gestore Qt.
             return None
@@ -11075,7 +11318,7 @@ class MainWindow(QMainWindow):
         self._fit_preview()
 
     def _draw_preview_package(self, package: PackageGeometry) -> None:
-        """Disegna il package generico con la stessa geometria del builder."""
+        """@brief Draw package copper shapes and drill openings as exported to KiCad."""
         self.preview_scene.clear()
         mm_to_px = 20.0
         pins = package.pins_seen_from_top()
@@ -11104,20 +11347,49 @@ class MainWindow(QMainWindow):
         for pin in pins:
             x, y = pin.x_mm * mm_to_px, pin.y_mm * mm_to_px
             w, h = pin.pad_length_mm * mm_to_px, pin.pad_width_mm * mm_to_px
-            item = QGraphicsRectItem(x - w / 2, y - h / 2, w, h)
+            if pin.shape == "circle":
+                item = self.preview_scene.addEllipse(x - w / 2, y - h / 2, w, h)
+            elif pin.shape in ("oval", "roundrect"):
+                path = QPainterPath()
+                radius = min(w, h) * (0.5 if pin.shape == "oval" else 0.25)
+                path.addRoundedRect(QRectF(x - w / 2, y - h / 2, w, h), radius, radius)
+                item = self.preview_scene.addPath(path)
+            else:
+                item = self.preview_scene.addRect(x - w / 2, y - h / 2, w, h)
             item.setTransformOriginPoint(x, y)
-            item.setRotation(pin.rotation_deg)
+            item.setRotation(-pin.rotation_deg)  # KiCad is counter-clockwise, Qt clockwise.
             item.setPen(pad_pen)
             item.setBrush(pad_brush)
             item.setToolTip(self._pad_tooltip(pin.number))
-            self.preview_scene.addItem(item)
+            drilled = pin.pad_type in ("thru_hole", "np_thru_hole") and pin.drill_mm
+            if drilled:
+                diameter = pin.drill_mm * mm_to_px
+                hole = self.preview_scene.addEllipse(
+                    x - diameter / 2, y - diameter / 2, diameter, diameter,
+                    QPen(QColor(SURFACE1)), QBrush(QColor(BASE)))
+                hole.setZValue(1)
             xs.append(x); ys.append(y)
             number = self.preview_scene.addSimpleText(str(pin.number))
             number.setToolTip(item.toolTip())
-            number.setBrush(QBrush(QColor(BASE)))
+            number.setBrush(QBrush(QColor(TEXT if drilled else BASE)))
             font = number.font(); font.setPointSizeF(max(6.0, min(w, h) * .45)); font.setBold(True)
             number.setFont(font)
-            rect = number.boundingRect(); number.setPos(x - rect.width() / 2, y - rect.height() / 2); number.setZValue(5)
+            rect = number.boundingRect()
+            label_x, label_y = x - rect.width() / 2, y - rect.height() / 2
+            if drilled:
+                bounds = item.sceneBoundingRect()
+                # Keep the drill visible. Put edge-contact labels inward so
+                # they also remain clear of the outer dimension lines.
+                if pin.side == "top":
+                    label_y = bounds.bottom() + 3
+                elif pin.side == "left":
+                    label_x = bounds.right() + 3
+                elif pin.side == "right":
+                    label_x = bounds.left() - rect.width() - 3
+                else:
+                    label_y = bounds.top() - rect.height() - 3
+            number.setPos(label_x, label_y)
+            number.setZValue(5)
         left = (-body_l / 2 - margin) * mm_to_px
         top = (-body_w / 2 - margin) * mm_to_px
         right = (body_l / 2 + margin) * mm_to_px
