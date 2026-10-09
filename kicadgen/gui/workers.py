@@ -340,6 +340,10 @@ class _Cad3DRunWorker(QThread):
 
     def _cad_progress(self, message: str) -> None:
         """@brief Inoltra la riga al log e, se annuncia un componente, al conteggio."""
+        from ..cad3d.header_reuse import REUSE_PROGRESS
+        if message == REUSE_PROGRESS:
+            self.phase.emit('headers', tx("Modelli già scelti riutilizzati: aggiornamento degli header."), 0, 0)
+            return
         self.progress.emit(message)
         step = freecad_progress(message)
         if step is not None:

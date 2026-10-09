@@ -93,6 +93,8 @@ def test_a_refused_file_stays_untouched_after_a_rename(window, monkeypatch):  # 
     assert (root / "Nuovo2" / PROJECT_CONFIG_NAME).read_text(encoding="utf-8") == newer
 
     _name_dialog_returns(monkeypatch, "Leggibile")
+    from PyQt6.QtWidgets import QMessageBox
+    monkeypatch.setattr(QMessageBox, 'question', lambda *args: QMessageBox.StandardButton.Yes)
     window._new_project()
     _name_dialog_returns(monkeypatch, "Leggibile2")
     window._rename_project()

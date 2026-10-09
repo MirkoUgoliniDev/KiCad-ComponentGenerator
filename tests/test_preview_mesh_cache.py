@@ -59,7 +59,8 @@ def counters(monkeypatch):
     real_add = Preview3DVtk.add_mesh
 
     def add_mesh(self, *args, **kwargs):
-        counts["add_mesh"] += 1
+        if kwargs.get('name') != 'pin-labels':
+            counts["add_mesh"] += 1
         return real_add(self, *args, **kwargs)
 
     monkeypatch.setattr(module, "_prepare_mesh_scene", prepare)
@@ -69,6 +70,31 @@ def counters(monkeypatch):
 
 def _rows_of_actors(view):
     return sorted(view._component_actors.values())
+
+
+def test_pin_functions_update_existing_mesh_without_rebuild(view, counters, tmp_path, monkeypatch):
+    captured = []
+    original = module._pin_text_mesh
+    def labels(points, texts):
+        captured.append(list(texts))
+        return original(points, texts)
+    monkeypatch.setattr(module, '_pin_text_mesh', labels)
+    path = _write(tmp_path / 'pins.json', ['Pin1', 'Pin2', 'Body'])
+    view.set_pin_functions([{'pin': 1, 'name': 'GND'}])
+    view.render_mesh(path)
+    assert captured[-1] == ['1 (GND)', '2']
+    camera = view.camera_position
+    counts = dict(counters)
+    view.set_pin_functions([{'pin': '1', 'name': 'GPIO43 / U0TXD'}])
+    assert captured[-1] == ['1 (GPIO43 / U0TXD)', '2']
+    assert view.camera_position == camera
+    assert counters == counts
+    view.set_pin_functions([])
+    assert captured[-1] == ['1', '2']
+    view.clear_preview()
+    previous = len(captured)
+    view.set_pin_functions([{'pin': 1, 'name': 'VCC'}])
+    assert len(captured) == previous
 
 
 def test_the_same_unchanged_file_is_not_rebuilt(view, counters, tmp_path):

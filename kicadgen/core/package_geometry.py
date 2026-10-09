@@ -149,14 +149,27 @@ class PackageGeometry:
             # che non si toccano e accetterebbe pad ruotati che si toccano.
             outline = pad_outline(pin.x_mm, pin.y_mm, pin.pad_length_mm,
                                   pin.pad_width_mm, pin.rotation_deg)
-            for other_number, other in outlines:
-                if polygon_separation(outline, other) <= 1e-6:
+            for other_pin, other in outlines:
+                # Circular host-header lands can sit diagonally at a board
+                # corner: their bounding squares may overlap while the copper
+                # rings remain separated. Use the actual circles for this pair.
+                # Keep the conservative polygon check for all other shapes.
+                circles = all(p.shape == "circle" and
+                              float(p.pad_length_mm) == float(p.pad_width_mm)
+                              for p in (pin, other_pin))
+                separation = (
+                    math.hypot(float(pin.x_mm) - float(other_pin.x_mm),
+                               float(pin.y_mm) - float(other_pin.y_mm))
+                    - (float(pin.pad_length_mm) + float(other_pin.pad_length_mm)) / 2
+                    if circles else polygon_separation(outline, other)
+                )
+                if separation <= 1e-6:
                     raise ValueError(
                         tx("pad sovrapposti tra i pin {other_number} e {number}",
-                           other_number=other_number,
+                           other_number=other_pin.number,
                            number=pin.number)
                     )
-            outlines.append((pin.number, outline))
+            outlines.append((pin, outline))
 
     def body_frame_offset(self) -> tuple:
         """@brief Point of the pad coordinates taken as the body centre, mm.

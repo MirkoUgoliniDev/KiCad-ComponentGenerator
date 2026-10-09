@@ -1,5 +1,173 @@
 # Memoria delle decisioni del progetto
 
+## 2026-10-09 — Checkpoint autorizzato: pinout, preview e revisione
+
+- L'utente autorizza commit, push, merge in main e ritorno su ADVANCED.
+  Include tutte le modifiche codice/test/guida documentate qui sotto:
+  revisione geometria/navigazione, header e riuso modelli, stime pad,
+  pinout editabile e annotazioni 2D/3D con posizione finale approvata.
+- Database locale, rows_none_rev.pkl e work/ restano esclusi e preservati.
+  I titoli "non committato" sottostanti descrivono la cronologia precedente
+  a questo checkpoint. Per hash ed esito pubblicazione consultare Git.
+
+## 2026-10-09 — Ulteriore avvicinamento testi ai terminali (non committato)
+
+- Su richiesta, spostamento verso gli strip aumentato da 2 a 3 mm,
+  con limite proporzionale per schede strette. Font, scala e verso invariati.
+
+## 2026-10-09 — Ridotto rientro etichette 3D (non committato)
+
+- Screenshot utente: etichette troppo centrali, font e dimensione approvati.
+  Spostate 2 mm verso gli strip (riduzione proporzionale su schede strette),
+  senza cambiare scala del testo, orientamento o ancoraggi della mesh.
+
+## 2026-10-09 — Margine etichette rispetto ai connettori (non committato)
+
+- Testi planari ora allineati interamente verso l'interno rispetto al proprio
+  ancoraggio, con ulteriore margine fino a 0.8 mm. Prima erano centrati:
+  meta' della lunghezza poteva tornare sotto lo strip. Larghezza massima
+  adattata allo spazio fra file, orientamento invariato. 38 test passati.
+
+## 2026-10-09 — Etichette solidali alla scheda (non committato)
+
+- Chiarimento screenshot utente: stessa disposizione rispetto alla scheda.
+  Sostituiti billboard add_point_labels con testo planare nella sola scena
+  VTK, direzione comune alle due file, leggibile dal basso. Ruota con il
+  modello e non viene nascosto dal filtro collisioni delle etichette 2D.
+  Lunghezza limitata rispetto alla distanza fra le file; altezza 0.65 mm.
+- Restano solo annotazioni preview: niente scritte nei file CAD. Aggiornamento
+  pinout senza ricostruire la mesh o spostare camera. 38 test passati.
+
+## 2026-10-09 — Leggibilita' etichette 3D (non committato)
+
+- Richiesta: niente scritte oblique, piu' distanti dai pin. Impostato
+  italic=False esplicitamente (default PyVista corsivo); offset aggiuntivo
+  etichette mesh da 1.2 a 3.2 mm nella direzione gia' indicata dall'ancoraggio,
+  verso l'interno nei contatti del modulo. Nessuna modifica CAD.
+- 38 test cache/vista passati, diff --check pulito. Riavvio per applicare.
+
+## 2026-10-09 — Pinout editabile e nomi nella vista 3D (non committato)
+
+- Preview3DVtk mostra numero (funzione) usando la tabella del progetto, solo
+  dal lato pin come prima. set_pin_functions aggiorna solo attori etichette;
+  camera/mesh/CAD intatti. clear cancella ancoraggi per evitare etichette
+  del progetto precedente. Copertura aggiornamento nomi senza ricostruzione.
+- PinoutDialog: Funzione editabile, numero bloccato, Applica/Annulla. Copie
+  indipendenti preservano ordine originale, tipi dei numeri e metadati.
+  MainWindow salva prima di aggiornare preview 2D/3D; su errore ripristina
+  tabella precedente e avvisa. Nessuna chiamata AI/FreeCAD per modificare nomi.
+- 47 test passati per integrazione vista 3D; 38 finali per editor, cache mesh,
+  etichette 2D e i18n. Nessun commit, nessun file generato modificato.
+
+## 2026-10-09 — Funzioni pin visibili nell'anteprima (non committato)
+
+- Verificato docs/Pinout.png rispetto ai 44 nomi del project_config: sequenze
+  coerenti; G abbrevia GND, U0TXD/U0RXD hanno alias GPIO43/GPIO44. La fonte
+  non numera i pin: 1-44 sono assegnati dal progetto. Nessun dato utente cambiato.
+- Anteprima castellated e package/header: funzione completa tra parentesi
+  verso l'interno, verticale su top/bottom, numero distinto. Testo lungo
+  ridimensionato e tooltip completo. Solo annotazione GUI, non export.
+- App genera footprint/3D, non simboli schematici. Package/header non esporta
+  i nomi come testi; castellated ha sigle serigrafate opzionali e abbreviate.
+  Non presentare l'annotazione GUI come nome elettrico nel simbolo KiCad.
+- 23 test passati su etichette, tooltip, geometria preview. Nessun commit.
+
+## 2026-10-09 — Stima pad incompatibile con sbalzo (non committato)
+
+- Errore reale 17:27:02: lato inferiore stimato 1.0 mm, sbalzo modulo
+  1.4 mm. La validazione bloccava la generazione; non era un errore FreeCAD.
+- Il resolver usa il riferimento di lunghezza del modulo solo quando una
+  lunghezza NON dichiarata del lato non supera lo sbalzo e il riferimento
+  lo supera. Rimane stimata, passa dai controlli di clearance e viene
+  segnalata nelle note (IT/EN/DE/FR). Input originali preservati; quote lette
+  incompatibili e riferimenti inutilizzabili restano errori.
+- 83 test passati (stime, GUI, host, castellated, i18n); dopo traduzioni
+  ricontrollati 37 test. Diff --check pulito. Nessun commit/push o modifica
+  ai file del progetto generato; riavvio necessario per caricare il fix.
+
+## 2026-10-09 — Fix riuso con foto caricata (non committato)
+
+- Segnalazione reale: due generazioni riuscite ma nessuna cache locale.
+  I ComponentBox con foto caricata contengono descrittori OpenCV binari;
+  la serializzazione dell'impronta li rifiutava silenziosamente. Ora bytes
+  e bytearray sono codificati in base64 con tag, mantenendoli nel confronto.
+- Regressione per entrambi i tipi: cambio soli header ammesso, descrittore
+  modificato invalida il riuso. 124 test integrati passati, compileall e
+  diff --check puliti. Riproduzione isolata
+  anche con stato/foto reali letti dal progetto e output in cartella temporanea:
+  cache creata. Nessun file del progetto generato modificato.
+- Riavviare l'app e completare una generazione per creare la cache mancante;
+  dai successivi cambi dei soli header rimane solo FreeCAD. Nessun commit.
+
+## 2026-10-09 — Riuso abbinamenti per cambio dei soli strip (non committato)
+
+- L'utente segnala che togliere/mettere strip ripete consolidati e ricerca
+  KiCad. Aggiunto cad3d/header_reuse.py: snapshot locale dopo generazione
+  riuscita, con impronta dei parametri completa tranne show_pins_3d.
+  Se cambia solo quel flag, i generatori castellated e populated THT saltano
+  attach_library_models e riutilizzano i payload componenti gia' scelti.
+- RESTA la costruzione/esportazione FreeCAD: non e' un toggle istantaneo della
+  mesh e non riutilizza il solido FCStd. Modale ridotta al solo passo FreeCAD
+  quando il riuso viene confermato. Nessuna modifica al footprint o chiamata AI.
+- Prima generazione completa con questa versione necessaria per preparare
+  .header-model-reuse.json nel progetto. Cache assente/alterata, stesso flag,
+  cambi a geometria/annotazioni/selezioni o file modello/output modificati
+  riportano alla pipeline normale. Cache best effort, scrittura atomica;
+  un errore CAD non pubblica nuovi dati di riuso.
+- L'impronta ammette anche l'esatto feedback model_match/rotazioni copiato dal
+  report alla GUI dopo una generazione; delta rotazione e scelte manuali
+  rimangono nel confronto. Test di integrazione col caricamento report reale.
+- 122 test passati (riuso, GUI, pipeline, CAD, progress, abort, header, i18n).
+  Compileall e diff --check puliti; guida aggiornata. Nessun commit/push.
+
+## 2026-10-09 — Strip selezionabili anche nel tab 3D (non committato)
+
+- Richiesta utente: scegliere se montare gli strip direttamente guardando il
+  modello. Aggiunta spunta Mostra gli header nel modello 3D nella toolbar,
+  accanto all'icona di rigenerazione esistente. Stessa opzione show_pins_3d
+  del wizard, sincronizzata nei due sensi e al ripristino del progetto.
+- La spunta invalida solo il 3D; l'icona rigenera STEP/anteprima senza AI.
+  Footprint/host_mounting e contatti fisici del modulo non vengono modificati.
+  Nascosta per componenti singoli, disabilitata durante rigenerazione e per
+  geometria 3D non supportata. Guida aggiornata.
+- Verifica: 153 test passati (nuove regressioni controllo, header geometrici,
+  toolbar/rigenerazione offline, traduzioni e guida); compileall/diff puliti.
+  Nessun commit o push, restano anche le correzioni della revisione precedente.
+
+## 2026-10-09 — Revisione approfondita con tre agenti (correzioni NON committate)
+
+- Baseline pubblicata: ADVANCED a0942d7, merge main 7d91f75. Tornati su
+  ADVANCED. L'utente ha chiesto revisione con agenti esperti; nessuna nuova
+  autorizzazione a commit/push/merge per queste correzioni.
+- Navigazione: salvataggio verificato prima di Nuovo/Apri/Recenti, cambio
+  area lavoro e chiusura, oltre al ritorno ai progetti. In caso di errore
+  il progetto resta aperto. Config rifiutata invariata puo' essere chiusa;
+  modifiche non salvabili richiedono conferma di abbandono. Gestiti recenti
+  omonimi in root diverse e ripristino del percorso mostrato.
+- Geometria: la collisione circle-circle usa le distanze reali, non i
+  rettangoli circoscritti (falso overlap diagonale eliminato). Header anche
+  per board PackageGeometry THT esplicite: coordinate/frame/numeri e NPTH
+  preservati; nessun foro inventato su SMD/connect. Distanze minime validate.
+- Anteprima: fori visibili anche nel percorso PinHeaderParams; contorni
+  matrix dal builder, body offset/margin/pad sporgenti rispettati. Quote
+  reali senza margine griglia; numeri e quote non sovrapposti, quote catena
+  omesse quando troppo strette. Eccezioni builder assorbite nello slot Qt.
+- 3D fisico invariato rispetto alle scelte host. Test di errori export
+  verificano conservazione footprint precedente, STEP/WRL/mesh.
+- Guida HTML aggiornata al wizard e alle nuove opzioni. Test obsoleti
+  allineati; i due test rilancio AI ora usano ReviewBundle valido, controllano
+  blocco senza chiave e somma costi reale sul ledger temporaneo.
+- Suite completa iniziale: 6790 passati, 5 falliti, 11 skipped, 2 xfailed,
+  19 subtest passati (960 s). Quattro segnalazioni erano fixture/guida/layout
+  precedenti; la quinta catalogo i18n gia' importato mentre gli agenti
+  modificavano il sorgente. Tutte risolte e ricontrollate in processo nuovo.
+  Verifica finale integrata: 309 passati, 1 skipped; gruppo account/costi/
+  rilancio/interruzioni: 240 passati. Nuove regressioni in tre file review
+  (57 casi). Compilazione e diff --check puliti. Non rieseguita l'intera
+  suite dopo le correzioni: verifiche mirate sopra sullo stato finale.
+- QA visiva con Segoe UI e tema reale in work/qa/review-preview-verified-*.png.
+  Database locale e rows_none_rev.pkl conservati, hash SHA256 invariati.
+
 ## 2026-10-09 — Checkpoint wizard autorizzato per commit, push e merge
 
 - L'utente ha richiesto commit e push, merge in main e ritorno su ADVANCED.

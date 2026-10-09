@@ -5,6 +5,7 @@ import pytest
 from PyQt6.QtWidgets import QMessageBox
 
 from kicadgen.gui import ai_account_dialog
+from kicadgen.services.photo_inventory import ReviewBundle
 from tests.test_photo_inventory_gui import gui
 
 
@@ -34,6 +35,15 @@ def _ready_for_extraction(window, monkeypatch):  # noqa: F811
     monkeypatch.setattr(window, "_begin_ai_run", lambda title: started.append(title))
     monkeypatch.setattr(window, "_start_extract_worker", lambda *args, **kwargs: None)
     return started
+
+
+def _saved_review_bundle(tmp_path):
+    """A nonempty reviewed extraction bundle eligible for paid reconciliation."""
+    return ReviewBundle(
+        json_path=tmp_path / "review.json", body_length_mm=40, body_width_mm=20,
+        proposals=[{"_id": 1, "_box": [.2, .2, .4, .4], "name": "R1",
+                    "kind": "resistor", "x_mm": -8, "y_mm": -4,
+                    "length_mm": 8, "width_mm": 4, "height_mm": 1}])
 
 
 def test_the_configuration_menu_opens_the_ai_account_window(window, monkeypatch):  # noqa: F811
@@ -89,19 +99,23 @@ def test_the_yolo_only_pretest_needs_no_key(no_key, monkeypatch, questions):  # 
 
 
 def test_the_inventory_relaunch_checks_the_key_before_paying(no_key, monkeypatch,
-                                                              questions):  # noqa: F811
+                                                              questions, tmp_path):  # noqa: F811
     window = no_key
     started = []
-    monkeypatch.setattr(window, "_ensure_review_bundle", lambda: object())
+    bundle = _saved_review_bundle(tmp_path)
+    monkeypatch.setattr(window, "_ensure_review_bundle", lambda: bundle)
     monkeypatch.setattr(window, "_review_photo", lambda bundle: b"png")
-    monkeypatch.setattr(window, "_relaunch_base_params", lambda bundle: None)
     monkeypatch.setattr(window, "_begin_ai_run", lambda title: started.append(title))
-    monkeypatch.setattr(window, "_start_reconcile_worker", lambda *args: None)
+    workers = []
+    monkeypatch.setattr(window, "_start_reconcile_worker", lambda *args: workers.append(args))
     window._relaunch_inventory()
-    assert started == [] and len(questions) == 1
+    assert started == [] and workers == [] and len(questions) == 1
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     window._relaunch_inventory()
     assert started == ["Rilancio inventario"]
+    assert len(workers) == 1 and workers[0][0] is bundle
+    assert workers[0][2].body_length_mm == 40
+    assert len(questions) == 1
 
 
 def test_the_terminal_detail_checks_the_key_before_paying(no_key, monkeypatch,

@@ -1119,6 +1119,16 @@ class CastellatedModuleParams:
         notes = []
         if size is None:
             return notes
+        raw_length, declared = self._raw_pad(side, "pad_length")
+        if (not declared and side.contact_style != CONTACT_THROUGH_HOLE
+                and _finite_positive(raw_length) and raw_length <= self.pad_overhang
+                and size.length > self.pad_overhang):
+            notes.append(tx(
+                "Lato {label}: lunghezza pad stimata {estimate}mm incompatibile con lo "
+                "sbalzo {overhang}mm; usato il riferimento del modulo, con lunghezza "
+                "finale {value:.2f}mm. Quota da verificare.",
+                label=label, estimate=float(raw_length), overhang=self.pad_overhang,
+                value=size.length))
         if size.width_source == PAD_ESTIMATE_PITCH:
             notes.append(tx(
                 "Lato {label}: larghezza delle piazzole stimata {estimate}mm, non letta dai "
@@ -1450,6 +1460,17 @@ class CastellatedModuleParams:
         for side in self.sides:
             length, length_declared = self._raw_pad(side, "pad_length")
             width, width_declared = self._raw_pad(side, "pad_width")
+            # A photo estimate shorter than the existing overhang cannot be
+            # a usable land. Fall back to the module reference, still as an
+            # estimate subject to clearance fitting. Never alter read sizes.
+            if (not length_declared and side.contact_style != CONTACT_THROUGH_HOLE
+                    and _finite_positive(length)
+                    and isinstance(self.pad_overhang, (int, float))
+                    and math.isfinite(self.pad_overhang)
+                    and 0 <= length <= self.pad_overhang
+                    and _finite_positive(self.pad_length)
+                    and self.pad_length > self.pad_overhang):
+                length = float(self.pad_length)
             entries.append(PadSize(
                 length, PAD_DECLARED if length_declared else PAD_ASSUMED, length,
                 width, PAD_DECLARED if width_declared else PAD_ASSUMED, width))

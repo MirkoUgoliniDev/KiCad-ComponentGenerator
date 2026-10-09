@@ -116,7 +116,9 @@ def test_invalid_saved_package_is_refused_before_application(tmp_path, invalid):
         read_project_config(tmp_path)
 
 
-def test_invalid_package_file_is_not_rewritten_by_autosave(window):
+def test_invalid_package_file_is_not_rewritten_by_autosave(window, monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+    monkeypatch.setattr(QMessageBox, 'question', lambda *args: QMessageBox.StandardButton.Yes)
     folder = window._library_root() / "InvalidPackage"
     path = write_project_config(folder, {"package_geometry": {"pins": []}})
     original = path.read_bytes()

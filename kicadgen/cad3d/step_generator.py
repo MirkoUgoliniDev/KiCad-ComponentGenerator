@@ -28,6 +28,7 @@ from ..generators.castellated_module import (
 )
 from ..generators.pin_header import PinHeaderParams, pin_positions
 from .body_params import Body3DParams
+from .header_reuse import HeaderModelReuse, REUSE_PROGRESS
 from .measurement_uncertainty import (
     ASSUMED_SCALE_PX_PER_MM, SCALE_KEY, SOURCE_ASSUMED, SOURCE_DECLARED, UNCERTAINTY_KEY,
     component_edge_uncertainty, side_uncertainty_mm,
@@ -909,8 +910,16 @@ def generate_castellated_3d_model(
         model_notes.append(message)
         if progress:
             progress(message)
-    attach_library_models(components, height_notes, placement_notes, report_model,
-                          model_progress=model_progress, cancel=cancel)
+    reuse = HeaderModelReuse(output_dir, params, body,
+        [fillets, face_texts, font_file, photo_scale_px_per_mm])
+    previous = reuse.load()
+    if previous is None:
+        attach_library_models(components, height_notes, placement_notes, report_model,
+                              model_progress=model_progress, cancel=cancel)
+    else:
+        components = previous
+        if progress:
+            progress(REUSE_PROGRESS)
 
     # Rilevato PRIMA di chiamare FreeCAD: e' un controllo geometrico sui dati
     # gia' pronti, non serve costruire il solido per accorgersene, e cosi'
@@ -948,6 +957,7 @@ def generate_castellated_3d_model(
     # La provenienza della distanza dal bordo dei fori passanti non e' un
     # dettaglio: quando e' una stima deve arrivare all'utente, sempre.
     result["notes"] = inset_notes + header_notes + placement_notes + result["notes"]
+    reuse.save(components, result)
     return result
 
 
@@ -1029,8 +1039,16 @@ def _generate_populated_tht(params, body, pins, output_dir, **options):
     # `options` viaggia intatto fino a `_run_freecad`, che vuole ancora il
     # canale: qui si LEGGE soltanto. Stessa regola del sito castellated --
     # una sola richiesta copre misura dei candidati e costruzione del solido.
-    attach_library_models(components, height_notes, placement_notes, report,
-                          model_progress=model_progress, cancel=options.get("cancel"))
+    reuse = HeaderModelReuse(output_dir, params, body,
+        [options.get('fillets'), options.get('face_texts'), options.get('font_file')])
+    previous = reuse.load()
+    if previous is None:
+        attach_library_models(components, height_notes, placement_notes, report,
+                              model_progress=model_progress, cancel=options.get("cancel"))
+    else:
+        components = previous
+        if progress:
+            progress(REUSE_PROGRESS)
     overlap_warnings = find_overlapping_components(_rendered(components))
     from ..services.model_choices import save_candidate_report
     candidate_report = save_candidate_report(output_dir, components)
@@ -1054,6 +1072,7 @@ def _generate_populated_tht(params, body, pins, output_dir, **options):
     result["notes"] = ([] if progress else notes) + placement_notes + list(result.get("notes", []))
     result["candidate_report_path"] = candidate_report
     _reconcile_model_imports(result, components, output_dir)
+    reuse.save(components, result)
     return result
 
 

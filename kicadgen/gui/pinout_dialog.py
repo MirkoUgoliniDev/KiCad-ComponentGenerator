@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
+from PyQt6.QtCore import Qt
 
 from PyQt6.QtWidgets import (
     QAbstractItemView, QDialog, QDialogButtonBox, QHeaderView, QLabel,
@@ -45,6 +47,8 @@ class PinoutDialog(QDialog):
         @param parent Optional parent widget.
         """
         super().__init__(parent)
+        self._entries = deepcopy(pinout)
+        self._row_indices = sorted(range(len(pinout)), key=lambda i: pin_sort_key(pinout[i]))
         self.setWindowTitle(f"Pinout {component_name}".strip())
         self.resize(480, 420)
 
@@ -62,14 +66,30 @@ class PinoutDialog(QDialog):
             table.setHorizontalHeaderLabels(["Pin", "Funzione"])
             table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
             table.verticalHeader().setVisible(False)
-            table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-            for i, entry in enumerate(sorted(pinout, key=pin_sort_key)):
-                table.setItem(i, 0, QTableWidgetItem(str(entry.get("pin", ""))))
+            table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked
+                                  | QAbstractItemView.EditTrigger.EditKeyPressed
+                                  | QAbstractItemView.EditTrigger.SelectedClicked)
+            for i, source_index in enumerate(self._row_indices):
+                entry = self._entries[source_index]
+                pin = QTableWidgetItem(str(entry.get("pin", "")))
+                pin.setFlags(pin.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                table.setItem(i, 0, pin)
                 table.setItem(i, 1, QTableWidgetItem(str(entry.get("name", ""))))
             layout.addWidget(table)
             ## @brief The pinout table, exposed for tests and callers.
             self.table = table
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Apply | QDialogButtonBox.StandardButton.Cancel
+            if pinout else QDialogButtonBox.StandardButton.Close)
+        if pinout:
+            buttons.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def edited_pinout(self) -> list[dict]:
+        """Copy edited functions, preserving original pin IDs, order and metadata."""
+        result = deepcopy(self._entries)
+        for row, index in enumerate(self._row_indices):
+            result[index]['name'] = self.table.item(row, 1).text().strip()
+        return result
