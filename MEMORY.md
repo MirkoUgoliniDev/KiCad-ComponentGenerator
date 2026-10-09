@@ -1,5 +1,57 @@
 # Memoria delle decisioni del progetto
 
+## 2026-10-09 ? Pubblicazione delle correzioni
+
+L'utente ha confermato il funzionamento e richiesto esplicitamente commit,
+push e merge in main del lavoro attuale. Questo commit raccoglie i fix
+e i test descritti nel riepilogo precedente, insieme alle regole e alla
+memoria di collaborazione. Include lo stato corrente del database profili
+`data/analysis_profiles.sqlite3`, senza attribuirne la modifica ai fix.
+Il diagnostico preesistente `rows_none_rev.pkl` resta escluso.
+Verifiche dei fix: vedere il riepilogo 08/10; diff --check pulito al commit.
+Procedura richiesta: pubblicare ADVANCED, unire in main e pubblicare main,
+quindi tornare su ADVANCED. Verificare gli hash effettivi nel log Git.
+Nessuna autorizzazione a commit di modifiche successive.
+
+## 2026-10-08 — Ripresa domani mattina, 09/10/2026
+
+L'utente ha chiesto di fermarsi e salvare la memoria per riprendere domani.
+Le correzioni sono gia' applicate: ripartire da questo stato, senza rifarle.
+
+- Branch attivo: `ADVANCED`, HEAD e origin/ADVANCED `3270158`.
+  Il checkpoint e' stato committato e pubblicato PRIMA dei fix; merge gia'
+  pubblicato su main: `8c45366`.
+- **Regola permanente dell'utente (AGENTS.md): nessun nuovo commit, push o
+  merge senza una nuova istruzione esplicita.** I fix restano non committati;
+  la richiesta di salvare memoria non autorizza un commit.
+- Revisione con tre agenti completata; dieci difetti corretti: pad custom
+  non rappresentabili rifiutati, package salvati/ripristinati, 3D improprio
+  bloccato per package, passo corretto per pin THT sparsi, controllo foro/rame,
+  offset rame rispettato, rifiuto totale YOLO autorevole, bundle fotografico
+  atomico, risposte HTTP incomplete contabilizzate, GIF supportate.
+- Completamento collegato: la revisione vuota viene salvata esplicitamente,
+  non ripopolata dalla cache; si possono disegnare nuovi riquadri, ma il
+  rilancio AI e' bloccato finche' la selezione e' vuota. Nome package coerente
+  anche dopo rinomina e riapertura; traduzioni aggiornate.
+- Verifiche: suite completa in due processi (4202 passati + 8 saltati + 19
+  sottotest nella prima meta', 2555 passati + 2 saltati + 2 xfail nella seconda).
+  L'unico fallimento era il formato @brief di una docstring nuova: corretto,
+  2 test documentazione ripassati. Dopo gli ultimi aggiustamenti, batteria
+  finale di 211 test tutti passati. Nessun fallimento residuo noto.
+- Nuovi test ancora non tracciati: `test_incomplete_provider_response.py`,
+  `test_package_project_gui.py`, `test_review_bundle_atomic.py`,
+  `test_review_geometry_regressions.py`, tutti sotto `tests/`.
+- `rows_none_rev.pkl` e' un file diagnostico preesistente non tracciato,
+  lasciato intatto: non includerlo automaticamente in futuri commit.
+- Al salvataggio di questa memoria risulta modificato anche
+  `data/analysis_profiles.sqlite3`, che non compariva nello stato alla fine
+  dei fix. Origine non verificata: preservarlo, senza ripristinarlo o attribuirlo
+  automaticamente alle correzioni.
+- Alla ripresa: leggere questo riepilogo e l'inizio di `HANDOFF.md`, controllare
+  `git status` per eventuali cambiamenti successivi e seguire la prossima
+  indicazione dell'utente. Nessun lavoro/test/processo di questa sessione
+  lasciato in esecuzione; nessuna ripresa automatica o promemoria programmato.
+
 ## 2026-09-19 — Modelli 3D reali dalla libreria KiCad
 
 Idea dell'utente: smettere di approssimare i package dal bounding box e usare

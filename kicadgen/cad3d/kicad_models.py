@@ -611,6 +611,16 @@ def _pad_bounds(pad):
         raise ValueError("Unsupported pad type")
     at = _field(pad, "at")
     x, y, angle = _numbers(at if len(at) == 3 else [*at, 0], 3)
+    # KiCad stores the hole at `at`; a drill offset moves the copper in
+    # the pad's local axes (positive angle is counter-clockwise, Y down).
+    drill = _field(pad, "drill")
+    offset = _field(drill, "offset")
+    if offset:
+        ox, oy = _numbers(offset, 2)
+        radians = math.radians(angle)
+        cosine, sine = math.cos(radians), math.sin(radians)
+        x += ox * cosine + oy * sine
+        y += -ox * sine + oy * cosine
     width, height = _numbers(_field(pad, "size"), 2)
     if min(width, height) <= 0:
         raise ValueError("Nonpositive pad")

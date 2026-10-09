@@ -458,7 +458,10 @@ def test_a_detector_that_found_nothing_is_not_described_as_absent(pipeline):
     assert len(params.components_3d) == 1
 
 
-def test_a_review_that_removed_every_proposal_stops_without_paying(pipeline):
+@pytest.mark.parametrize('main_has_bodies', [False, True])
+@pytest.mark.parametrize('detector', ['yolo', 'yolo_smd'])
+def test_a_review_that_removed_every_proposal_stops_without_paying(
+        pipeline, main_has_bodies, detector, monkeypatch):
     """@brief Chi rivede ha tolto tutto di proposito: nessuna enumerazione a pagamento.
 
     Negativo strutturale del test precedente: li' il rilevatore non aveva
@@ -466,14 +469,39 @@ def test_a_review_that_removed_every_proposal_stops_without_paying(pipeline):
     l'utente le ha rifiutate tutte, quindi rifarle pagando contraddice la sua
     scelta. La richiesta dell'inventario globale non deve partire.
     """
+    if main_has_bodies:
+        pipeline['main']['components_3d'] = [dict(name='Initial AI body', kind='resistor',
+            x_mm=0, y_mm=0, length_mm=2, width_mm=1, height_mm=.5)]
+    if detector == 'yolo_smd':
+        from kicadgen.services import smd_component_classifier
+        monkeypatch.setattr(smd_component_classifier, 'validate_smd_setup', lambda *args: None)
+        monkeypatch.setattr(photo_inventory, 'prepare_photo',
+                            lambda *args, **kwargs: np.zeros((100, 200, 3), np.uint8))
     before = len(pipeline['requests'])
-    params = pipeline['execute'](review_proposals=lambda *args: [])
+    params = pipeline['execute'](review_proposals=lambda *args: [], photo_detector=detector)
     assert len(pipeline['requests']) == before + 1  # solo l'estrazione della scheda
     assert all(request['tool']['function']['name'] != 'report_global_inventory'
                for request in pipeline['requests'])
     pipeline['global_review'].assert_not_called()
     assert any('tutte le 2 proposte sono state tolte' in message for message in pipeline['logs'])
     assert not params.components_3d
+
+
+def test_imported_gif_photograph_reaches_detector_and_inventory(pipeline, tmp_path):
+    from PIL import Image
+    from kicadgen.services.document_roles import DocumentSet
+
+    image = tmp_path / 'board.gif'
+    Image.new('RGB', (200, 100), 'green').save(image)
+    documents = DocumentSet(tmp_path / 'docs')
+    documents.import_file(['hires'], image)
+    paths, roles = documents.selected()
+    params = extractor.extract_pin_header_params(paths, model='offline/board',
+        vision_model='offline/localizer', verification_model='offline/global',
+        photo_detector='yolo', document_roles=roles, progress=pipeline['logs'].append)
+    pipeline['detection'].assert_called_once()
+    pipeline['global_review'].assert_called_once()
+    assert params.components_3d
 
 
 def test_the_inventory_traceback_in_the_ai_log_is_scrubbed(pipeline, monkeypatch):

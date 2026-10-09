@@ -20,6 +20,7 @@ dipendenza esterna per due chiamate non si giustifica.
 from __future__ import annotations
 
 import json
+from http.client import IncompleteRead
 import math
 import os
 import re
@@ -1256,9 +1257,9 @@ def _call_tool(
         raise OpenRouterError(tx("Connessione a OpenRouter fallita: {reason}",
                                  reason=_safe_error_text(exc.reason))
                               + _diagnostic_context()) from None
-    except ValueError:
-        # The answer arrived (so it was billed) but cannot be read: a paid
-        # call without cost, never a free one (audit 138, B10).
+    except (ValueError, IncompleteRead):
+        # The answer arrived but is incomplete or cannot be decoded: a
+        # potentially paid call without cost, never a silently free one.
         _record_usage(None)
         error = OpenRouterError(tx("Risposta non decodificabile da OpenRouter.")
                                 + _diagnostic_context())

@@ -42,7 +42,8 @@ FOOTPRINT_TEXT_LANGUAGE = "it"
 Point = Tuple[float, float]
 
 PAD_TYPES = {"thru_hole", "smd", "np_thru_hole", "connect"}
-PAD_SHAPES = {"circle", "rect", "oval", "roundrect", "trapezoid", "custom"}
+# This writer has no custom-pad anchor/primitives representation.
+PAD_SHAPES = {"circle", "rect", "oval", "roundrect", "trapezoid"}
 
 
 def _uuid() -> str:

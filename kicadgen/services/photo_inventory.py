@@ -14,12 +14,14 @@ import json
 import math
 import re
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .openrouter import OpenRouterError
 from .ai_diagnostics import CallCancelled
+from .document_roles import PHOTO_SUFFIXES
 from .messages import CACHE_HIT, WARNING, as_warning, kind_of, tx, warning
 # Solo costanti: photo_refine regge l'assenza di OpenCV da se'.
 from ..core.validation import positive_number
@@ -510,6 +512,12 @@ def read_photo(path):
     """
     import cv2
     import numpy as np
+    if Path(path).suffix.lower() == '.gif':
+        # GIF is accepted by the document importer; consistently use its
+        # first frame, including on OpenCV builds without a GIF decoder.
+        from PIL import Image
+        with Image.open(path) as image:
+            return np.asarray(image.convert('RGB'))[:, :, ::-1].copy()
     # imdecode supporta anche percorsi Unicode su Windows; IMREAD_COLOR
     # applica il tag di orientamento.
     encoded = np.fromfile(str(path), dtype=np.uint8)
@@ -1428,7 +1436,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                 "saltati."))
         return report
     photos = [(i,Path(p)) for i,p in enumerate(paths)
-              if Path(p).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}]
+              if Path(p).suffix.lower() in PHOTO_SUFFIXES]
     if allowed is not None:
         photos = [(i,p) for i,p in photos if i in allowed]
     if photos:
@@ -1652,7 +1660,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                    n_kept=len(kept),
                    n_proposals=len(proposals)))
             report.calibration['reviewed_proposal_count'] = len(kept)
-            if not kept and detector == 'yolo':
+            if not kept and detector in ('yolo', 'yolo_smd'):
                 # Chi ha rivisto ha tolto TUTTO, di proposito: non e' «nessun
                 # rilevatore», e pagare un'enumerazione da zero rifarebbe il
                 # lavoro appena rifiutato. Ci si ferma qui, senza chiamate, e lo
@@ -2084,13 +2092,22 @@ def _atomic_write_bytes(path, payload):
         relies on.
     """
     import os
-    tmp = path.with_name(path.name + '.tmp')
-    tmp.write_bytes(payload)
-    os.replace(tmp, path)
+    import tempfile
+    from ..fsutil import replace_file
+    handle, temporary = tempfile.mkstemp(prefix=f'.{path.name}.', suffix='.tmp', dir=path.parent)
+    try:
+        with os.fdopen(handle, 'wb') as output:
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+        replace_file(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def save_review_bundle(project_dir, proposals, photo_png, length_mm, width_mm, *,
-                       detector='yolo', source_json='', stamp=None, reviewed=True):
+                       detector='yolo', source_json='', stamp=None, reviewed=True,
+                       allow_empty=False):
     """@brief Store reviewed proposals, their calibration and photograph in the component folder.
 
     @param project_dir Component folder; `photo-review/` is created inside it.
@@ -2103,20 +2120,21 @@ def save_review_bundle(project_dir, proposals, photo_png, length_mm, width_mm, *
     @param detector Name of the detector the proposals came from.
     @param reviewed False when no person reviewed the proposals (copied from
         the cache): stored, and read back as ReviewBundle.reviewed.
+    @param allow_empty Permit an explicitly empty list only when reviewed is
+        True. Stores the user's rejection of every proposal, so an old bundle
+        or the pre-review cache cannot resurrect the rejected bodies.
     @param source_json Name of the cache file the proposals were first read
         from, kept for traceability only.
     @param stamp Timestamp in the evidence format; now when omitted.
     @return Path of the written `proposals.json`.
     @throws ValueError When the extents are not positive finite numbers or
-        no valid proposal row is given: a bundle without scale or without
-        rows could not be reopened, so it is not written at all.
+        no valid proposal row is given, except for an explicit empty review
+        allowed by allow_empty. Invalid rows filtered to zero are rejected.
     @throws OSError When the folder cannot be written.
-    @note Offline by construction: nothing here talks to a model. Both files
-        are written atomically (temporary file + replace), and in this order:
-        the photograph first, `proposals.json` last. The JSON is the commit
-        point: load_review_bundle reads only the JSON and looks for the
-        photo beside it, so a crash between the two leaves the previous
-        bundle (or none) fully consistent, never new boxes on an old photo.
+    @note Offline by construction. Each new photograph has a unique name;
+        the JSON atomically commits its reference together with the boxes
+        and scale. A failed write leaves the previous bundle consistent.
+        Old bundles referring to `photo.png` remain readable.
     @note Rows that fail the structural check (see _valid_proposal_row) and
         duplicate ids are dropped before writing, so what is on disk is what
         the reconciliation will accept.
@@ -2124,21 +2142,43 @@ def save_review_bundle(project_dir, proposals, photo_png, length_mm, width_mm, *
     if not all(positive_number(v) is not None for v in (length_mm, width_mm)):
         raise ValueError(tx("Quote PCB non valide: proposte non salvate."))
     rows = _valid_proposal_rows(proposals)
-    if not rows:
+    review_empty = (allow_empty is True and reviewed is True
+                    and isinstance(proposals, list) and not proposals)
+    if not rows and not review_empty:
         raise ValueError(tx("Nessuna proposta valida (serve almeno un riquadro con _id e _box)."))
     folder = review_bundle_dir(project_dir)
     folder.mkdir(parents=True, exist_ok=True)
+    previous = load_review_bundle(project_dir)
+    old_photo = previous.photo_path if previous else None
+    new_photo = folder / f'photo-{uuid.uuid4().hex}.png' if photo_png else None
+    photo = new_photo or old_photo
     document = dict(format=REVIEW_BUNDLE_FORMAT,
                     stamp=stamp or time.strftime('%Y%m%d-%H%M%S'),
                     detector=str(detector), source_json=str(source_json or ''),
                     reviewed=bool(reviewed),
                     body_length_mm=float(length_mm), body_width_mm=float(width_mm),
-                    photo=REVIEW_BUNDLE_PHOTO if (photo_png or (folder / REVIEW_BUNDLE_PHOTO).is_file()) else None,
+                    photo=photo.name if photo else None,
                     count=len(rows), proposals=rows)
-    if photo_png:
-        _atomic_write_bytes(folder / REVIEW_BUNDLE_PHOTO, bytes(photo_png))
+    if review_empty:
+        document['review_empty'] = True
+    payload = json.dumps(document, indent=1, ensure_ascii=False).encode('utf-8')
     path = folder / REVIEW_BUNDLE_JSON
-    _atomic_write_bytes(path, json.dumps(document, indent=1, ensure_ascii=False).encode('utf-8'))
+    try:
+        if new_photo:
+            _atomic_write_bytes(new_photo, bytes(photo_png))
+        _atomic_write_bytes(path, payload)
+    except BaseException:
+        if new_photo:
+            try:
+                new_photo.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    if new_photo and old_photo:
+        try:
+            old_photo.unlink(missing_ok=True)
+        except OSError:
+            pass  # The new bundle is committed; a stale image is harmless.
     return path
 
 
@@ -2148,7 +2188,9 @@ def load_review_bundle(project_dir):
     @param project_dir Component folder.
     @return A ReviewBundle, or None when there is nothing to reopen: no
         folder, no `proposals.json`, unreadable or corrupt JSON, an unknown
-        format, non-positive extents, or no valid proposal row.
+        format, non-positive extents, or no valid proposal row. An explicitly
+        empty review is returned as ReviewBundle(proposals=[]), never None:
+        its presence blocks fallback to older, unreviewed cache proposals.
     @note Never raises on bad content: a broken bundle is the same as no
         bundle, and the buttons that depend on it simply stay disabled. Rows
         that fail the structural check or repeat an id are dropped, the valid
@@ -2171,10 +2213,17 @@ def load_review_bundle(project_dir):
     rows = document.get('proposals')
     if not isinstance(rows, list):
         return None
+    review_empty = (not rows and document.get('review_empty') is True
+                    and document.get('reviewed') is True
+                    and type(document.get('count')) is int and document['count'] == 0)
     rows = _valid_proposal_rows(rows)
-    if not rows:
+    if not rows and not review_empty:
         return None
-    photo_path = path.with_name(REVIEW_BUNDLE_PHOTO)
+    photo_name = document.get('photo', REVIEW_BUNDLE_PHOTO)
+    # The manifest is editable: a photograph must stay inside this bundle.
+    photo_path = (path.with_name(photo_name)
+                  if isinstance(photo_name, str)
+                  and re.fullmatch(r'photo(?:-[0-9a-f]{32})?\.png', photo_name) else None)
     return ReviewBundle(json_path=path, proposals=rows,
                         body_length_mm=float(length), body_width_mm=float(width),
                         stamp=str(document.get('stamp') or ''),
@@ -2183,7 +2232,7 @@ def load_review_bundle(project_dir):
                         # Assente nei pacchetti scritti prima del campo: quelli
                         # venivano tutti dalla finestra di revisione.
                         reviewed=document.get('reviewed') is not False,
-                        photo_path=photo_path if photo_path.is_file() else None)
+                        photo_path=photo_path if photo_path and photo_path.is_file() else None)
 
 
 def _reconcile_with_smd_network(photo, report, proposals, length, width, model, call, log,
@@ -2293,6 +2342,10 @@ def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
     ok, encoded = cv2.imencode('.png', photo)
     report.photo_png = encoded.tobytes() if ok else None
     proposals = [dict(row) for row in proposals]
+    if not proposals:
+        # An empty saved review is a decision, not a request to enumerate
+        # the board again. Reject before any model or SMD classifier runs.
+        raise ValueError(tx("Nessuna proposta valida (serve almeno un riquadro con _id e _box)."))
     if declared:
         # Solo una nota di coerenza: le quote con cui le proposte furono
         # misurate devono essere quelle della scheda estratta, altrimenti i
@@ -2325,10 +2378,7 @@ def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
     def observe(message):
         seen.append(message)
         log(message)
-    # Un pacchetto venuto dal rilevatore locale dice che il rilevatore HA
-    # girato: con zero proposte il prompt non deve dire il contrario
-    # (verifica del 25/09, A5; il pacchetto vuoto oggi non viene scritto,
-    # ma la frase deve restare vera anche se un giorno lo fosse).
+    # Preserve the provenance of proposals from a local detector.
     report.components = review_global_inventory(
         photo, proposals, length, width, model, call, observe, cache_dir,
         verification_prompt=verification_prompt, extra_instructions=extra_instructions,

@@ -110,7 +110,7 @@ def test_a_bundle_with_a_byte_order_mark_still_loads(tmp_path):
 def test_saving_without_a_photo_keeps_the_existing_one(tmp_path):
     """@brief `photo_png=None` aggiorna le proposte e lascia la foto che c'era."""
     inv.save_review_bundle(tmp_path, [_proposal(1)], _photo_png(), LENGTH, WIDTH)
-    photo = tmp_path / 'photo-review' / 'photo.png'
+    photo = inv.load_review_bundle(tmp_path).photo_path
     before = photo.read_bytes()
     inv.save_review_bundle(tmp_path, [_proposal(1), _proposal(2, box=(.5, .5, .7, .7))],
                            None, LENGTH, WIDTH)
@@ -118,7 +118,7 @@ def test_saving_without_a_photo_keeps_the_existing_one(tmp_path):
     assert [row['_id'] for row in bundle.proposals] == [1, 2]
     assert bundle.photo_path == photo and photo.read_bytes() == before
     document = json.loads(bundle.json_path.read_text(encoding='utf-8'))
-    assert document['photo'] == 'photo.png'
+    assert document['photo'] == photo.name
 
 
 def test_saving_without_a_photo_into_an_empty_folder_declares_no_photo(tmp_path):

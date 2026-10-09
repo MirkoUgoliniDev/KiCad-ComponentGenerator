@@ -23,6 +23,13 @@ def test_extract_requires_at_least_one_file():
         extract_pin_header_params([])
 
 
+def test_tool_only_requests_pad_shapes_the_generator_can_represent():
+    properties = _openai_tool()['function']['parameters']['properties']
+    shapes = properties['package_geometry']['properties']['pins']['items']['properties']['shape']['enum']
+    assert 'custom' not in shapes
+    assert 'trapezoid' in shapes
+
+
 def test_overlapping_explicit_pad_ranges_are_rejected():
     from kicadgen.services.datasheet_extractor import _castellated_sides
     with pytest.raises(ExtractionError, match="pad duplicato"):

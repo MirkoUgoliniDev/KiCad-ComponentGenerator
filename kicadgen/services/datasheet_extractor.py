@@ -239,7 +239,7 @@ _EXTRACTION_TOOL = {
                         "pad_width_mm": {"type": "number", "exclusiveMinimum": 0},
                         "side": {"type": "string", "enum": ["left", "right", "top", "bottom", "center"]},
                         "pad_type": {"type": "string", "enum": ["smd", "thru_hole", "np_thru_hole", "connect"]},
-                        "shape": {"type": "string", "enum": ["circle", "rect", "oval", "roundrect", "trapezoid", "custom"]},
+                        "shape": {"type": "string", "enum": ["circle", "rect", "oval", "roundrect", "trapezoid"]},
                         "rotation_deg": {"type": "number"}, "drill_mm": {"type": "number", "exclusiveMinimum": 0},
                     }, "required": ["number", "x_mm", "y_mm", "pad_length_mm", "pad_width_mm"]}},
                 },
@@ -3034,6 +3034,10 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
                     traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()))
             data["notes"] = (str(data.get("notes") or "") + "\n"
                              + tx("Inventario fotografico fallito: {exc}", exc=exc)).strip()
+        if photo_report and photo_report.calibration.get('inventory_strategy') == 'review-kept-none':
+            # An explicit empty review is authoritative, unlike a failed or
+            # unavailable inventory: do not resurrect the initial AI bodies.
+            data["components_3d"] = []
         if photo_report and photo_report.components:
             # The global YOLO reconciliation already reports terminal evidence.
             # Further paid crop calls are an explicit optional UI action only.
