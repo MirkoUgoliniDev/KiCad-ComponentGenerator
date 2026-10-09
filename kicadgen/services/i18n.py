@@ -36,6 +36,7 @@ LANGUAGES = {
 }
 
 DEFAULT_TRANSLATIONS = {
+    "ui:Il file di progetto non e' modificabile. Abbandonare le modifiche non salvate?": {"it": "Il file di progetto non e' modificabile. Abbandonare le modifiche non salvate?", "en": "The project file cannot be modified. Discard unsaved changes?", "fr": "Le fichier du projet ne peut pas être modifié. Abandonner les modifications non enregistrées ?", "de": "Die Projektdatei kann nicht geändert werden. Ungespeicherte Änderungen verwerfen?"},
     "ui:Footprint sulla scheda ospitante": {"it": "Footprint sulla scheda ospitante", "en": "Host-board footprint", "fr": "Empreinte sur la carte principale", "de": "Footprint auf der Trägerplatine"},
     "ui:Pad Ø:": {"it": "Pad Ø:", "en": "Pad Ø:", "fr": "Pastille Ø :", "de": "Pad-Ø:"},
     "ui:Foro Ø:": {"it": "Foro Ø:", "en": "Drill Ø:", "fr": "Perçage Ø :", "de": "Bohrungs-Ø:"},
@@ -47,6 +48,15 @@ DEFAULT_TRANSLATIONS = {
     "ui:Indietro": {"it": "Indietro", "en": "Back", "fr": "Retour", "de": "Zurück"},
     "ui:Montaggio sulla scheda principale": {"it": "Montaggio sulla scheda principale", "en": "Mounting on the host board", "fr": "Montage sur la carte principale", "de": "Montage auf der Trägerplatine"},
     "ui:Mostra gli header nel modello 3D": {"it": "Mostra gli header nel modello 3D", "en": "Show headers in the 3D model", "fr": "Afficher les connecteurs dans le modèle 3D", "de": "Stiftleisten im 3D-Modell anzeigen"},
+    "ui:Lato {label}: lunghezza pad stimata {estimate}mm incompatibile con lo sbalzo {overhang}mm; usato il riferimento del modulo, con lunghezza finale {value:.2f}mm. Quota da verificare.": {
+        "it": "Lato {label}: lunghezza pad stimata {estimate}mm incompatibile con lo sbalzo {overhang}mm; usato il riferimento del modulo, con lunghezza finale {value:.2f}mm. Quota da verificare.",
+        "en": "{label} side: estimated pad length {estimate}mm is incompatible with the {overhang}mm overhang; the module reference was used, with final length {value:.2f}mm. Dimension requires verification.",
+        "de": "Seite {label}: Geschätzte Padlänge {estimate}mm ist mit dem Überstand {overhang}mm unvereinbar; Modulreferenz verwendet, endgültige Länge {value:.2f}mm. Maß überprüfen.",
+        "fr": "Côté {label} : longueur estimée de pastille {estimate}mm incompatible avec le débord {overhang}mm ; référence du module utilisée, longueur finale {value:.2f}mm. Cote à vérifier."
+    },
+    "ui:Errore": {"it": "Errore", "en": "Error", "fr": "Erreur", "de": "Fehler"},
+    "ui:Pinout non salvato. Le modifiche non sono state applicate.": {"it": "Pinout non salvato. Le modifiche non sono state applicate.", "en": "Pinout not saved. Changes were not applied.", "fr": "Brochage non enregistré. Les modifications n'ont pas été appliquées.", "de": "Pinbelegung nicht gespeichert. Änderungen wurden nicht übernommen."},
+    "ui:Modelli già scelti riutilizzati: aggiornamento degli header.": {"it": "Modelli già scelti riutilizzati: aggiornamento degli header.", "en": "Reusing selected models: updating headers.", "fr": "Réutilisation des modèles sélectionnés : mise à jour des connecteurs.", "de": "Gewählte Modelle werden wiederverwendet: Stiftleisten werden aktualisiert."},
     "ui:Saldatura diretta / piazzole del modulo": {"it": "Saldatura diretta / piazzole del modulo", "en": "Direct soldering / module lands", "fr": "Soudure directe / pastilles du module", "de": "Direkt verlöten / Modul-Landeflächen"},
     "ui:Strip header / pad circolari con foro": {"it": "Strip header / pad circolari con foro", "en": "Pin headers / circular through-hole pads", "fr": "Connecteurs à broches / pastilles circulaires percées", "de": "Stiftleisten / runde durchkontaktierte Pads"},
     "ui:La scelta cambia solo il footprint della scheda ospitante. Il modello 3D della board resta fedele alla foto.": {"it": "La scelta cambia solo il footprint della scheda ospitante. Il modello 3D della board resta fedele alla foto.", "en": "This choice only changes the host-board footprint. The board's 3D model remains faithful to the photo.", "fr": "Ce choix modifie uniquement l’empreinte de la carte principale. Le modèle 3D du module reste fidèle à la photo.", "de": "Diese Auswahl ändert nur den Footprint der Trägerplatine. Das 3D-Modell des Moduls bleibt dem Foto treu."},

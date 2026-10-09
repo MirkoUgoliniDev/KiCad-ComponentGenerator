@@ -14,6 +14,8 @@ def _tips(window):
     """Tooltip of every copper item and pad number of the scene, by kind."""
     copper, numbers = [], []
     for item in window.preview_scene.items():
+        if item.data(0) == 'pin-function':
+            continue
         if not item.toolTip():
             continue
         (numbers if isinstance(item, QGraphicsSimpleTextItem) else copper).append(item.toolTip())

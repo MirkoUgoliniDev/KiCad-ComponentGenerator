@@ -33,6 +33,30 @@ def rs485(right_width, left_width=AssumedSize(3.0), length=AssumedSize(2.0)):
                                contact_style=CONTACT_HALF_HOLE)])
 
 
+@pytest.mark.parametrize('length', [1.0, 1.4])
+def test_estimated_land_shorter_than_overhang_uses_module_reference(length):
+    from tests.test_host_mounting import module
+    from kicadgen.generators.host_mounting import header_footprint_params
+    params = module()
+    params.sides[1].pad_length = AssumedSize(length)
+    params.validate()
+    assert params.pad_sizes()[1].length == float(params.pad_length)
+    assert float(params.sides[1].pad_length) == length
+    assert any('sbalzo' in note and 'Quota da verificare' in note
+               for note in params.geometry_notes())
+    assert len(header_footprint_params(params, 1.3, .5).pins) == 7
+    params.sides[1].pad_length = length
+    with pytest.raises(ValueError, match='sbalzo'):
+        params.validate()
+
+
+def test_no_usable_reference_still_rejects_incompatible_estimate():
+    params = rs485(AssumedSize(1.8), length=AssumedSize(1.0))
+    params.pad_length = AssumedSize(1.2)
+    with pytest.raises(ValueError, match='sbalzo'):
+        params.validate()
+
+
 def smallest_gap(params, first_edge=None, second_edge=None):
     """Smallest copper gap between two contacts with different numbers, mm."""
     placements = list(pad_positions(params))

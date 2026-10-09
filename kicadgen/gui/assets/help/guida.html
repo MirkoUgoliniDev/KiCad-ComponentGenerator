@@ -130,6 +130,13 @@ modello 3D.</p>
 </ol>
 
 <h2 id="documenti">4. Caricare i documenti</h2>
+<p>La scheda <span class="ui">Progetto</span> guida la preparazione in due passi:
+<span class="ui">Documenti</span> e <span class="ui">Montaggio e analisi</span>.
+Usa <span class="ui">Continua</span> e <span class="ui">Indietro</span> per spostarti:
+questi pulsanti non avviano l'analisi. Nel primo passo,
+<span class="ui">Torna ai progetti</span> salva il progetto e torna alla schermata
+con Nuovo, Apri e progetti recenti. Nome e area di lavoro sono nel pannello
+richiudibile <span class="ui">Dati del progetto</span>, sopra i documenti.</p>
 <p>Nella scheda <span class="ui">Progetto</span>, il riquadro della documentazione ha
 una scheda per ogni file caricato. Per ogni file spunti <strong>tutti</strong> i ruoli che
 contiene: un datasheet PDF, per esempio, è spesso pinout, quote e piazzole consigliate insieme: per questo un PDF è sempre un
@@ -176,7 +183,8 @@ prospettiva: una foto inclinata viene rifiutata, e la scheda del ruolo lo
 segnala.</div>
 
 <h2 id="tipologia">5. Scegliere la tipologia del componente</h2>
-<p>Nella scheda <span class="ui">Progetto</span>, <span class="ui">Tipologia
+<p>Nel passo <span class="ui">Montaggio e analisi</span> della scheda
+<span class="ui">Progetto</span>, <span class="ui">Tipologia
 componente</span> dice al modello che cosa sta leggendo, e quindi quali quote
 cercare.</p>
 <table>
@@ -194,7 +202,9 @@ cercare.</p>
 <p>Per i <strong>componenti singoli</strong> l'inventario fotografico non viene
 eseguito: niente rilevatore dei corpi, niente revisione dei corpi, niente pausa
 dopo l'inventario.</p>
-<p>Il riquadro <span class="ui">Strumenti AI</span> contiene le altre scelte:</p>
+<p>Il riquadro <span class="ui">Strumenti AI</span> è chiuso inizialmente:
+il riepilogo mostra rilevatore e modello attivi. Aprilo con la freccia per
+vedere o modificare le altre scelte:</p>
 <ul>
   <li><span class="ui">Rilevamento foto</span> (conta solo per le schede):
     <span class="ui">YOLO locale + verifica AI</span> (il rilevatore sul tuo
@@ -305,6 +315,26 @@ o interruzione si chiude da sola e l'errore viene mostrato.</p>
 <p>La scheda <span class="ui">Anteprima footprint</span> mostra il disegno 2D in
 scala con le quote, i numeri dei pin e la <span class="ui">Griglia</span> (passo
 1 mm oppure 0.1 in); l'icona della tabella apre il pinout.</p>
+<p>Per le schede, il riquadro <span class="ui">Footprint sulla scheda ospitante</span>
+permette di scegliere il montaggio direttamente dall'anteprima, senza tornare
+all'inizio o ripetere l'analisi:</p>
+<ul>
+  <li><span class="ui">Saldatura diretta / piazzole del modulo</span> conserva
+  la geometria delle piazzole del modulo, compresi i contatti castellated.</li>
+  <li><span class="ui">Strip header / pad circolari con foro</span> usa i fori
+  passanti per i connettori. Regola <span class="ui">Pad Ø:</span> e
+  <span class="ui">Foro Ø:</span> in millimetri. Il foro deve essere più piccolo
+  del pad; diametri incompatibili con la distanza fra contatti vengono segnalati.
+  Nei footprint a matrice il pad 1 resta quadrato per riconoscerlo.</li>
+</ul>
+<p>L'anteprima cambia subito. Per scrivere il file, premi l'icona di aggiornamento
+con il tooltip <span class="ui">Aggiorna solo il footprint</span>: occorrono
+dati già acquisiti o un footprint esistente. Questa azione non richiama l'AI
+e non rigenera il modello 3D. Le scelte sono sincronizzate con quelle del passo
+<span class="ui">Montaggio e analisi</span>.</p>
+<p>Il montaggio riguarda il footprint sulla scheda ospitante: la geometria fisica
+del modulo 3D, ricavata dalla foto, resta invariata. Un contatto castellated
+che possiede soltanto un mezzo foro non viene trasformato in un foro passante.</p>
 
 <h2 id="modello3d">9. La scheda «Modello 3D»</h2>
 <p>Il modello si ruota con il mouse; il cubo di navigazione porta sulle viste
@@ -352,12 +382,23 @@ del componente.</p>
 
 <h2 id="pin">11. Pin maschi sotto la scheda</h2>
 <p>Per le due tipologie <span class="ui">Scheda con componenti</span>, la spunta
-<span class="ui">Pin quadrati per il collegamento alla scheda principale (solo modello
-3D)</span> nella scheda <span class="ui">Progetto</span> aggiunge sotto la scheda gli
+<span class="ui">Mostra gli header nel modello 3D</span> nel passo
+<span class="ui">Montaggio e analisi</span> della scheda <span class="ui">Progetto</span>
+oppure nella barra della scheda <span class="ui">Modello 3D</span>
+aggiunge sotto la scheda gli
 strip maschi a pin quadrati, come una scheda con gli strip già saldati. Sulle
 schede castellated vengono messi solo sui contatti con foro passante.</p>
-<p>Non cambia né l'analisi né il footprint: dopo averla cambiata basta
-rigenerare il modello 3D.</p>
+<p>È una scelta separata dal montaggio del footprint sulla scheda ospitante.
+Non cambia né l'analisi né il footprint: dopo averla cambiata basta rigenerare
+il modello 3D con l'icona accanto alla spunta. Le due spunte restano sincronizzate.
+Il corpo del modulo, con rame e fori ricavati dalla foto,
+non cambia in base al tipo di montaggio scelto.</p>
+<p>Quando cambi soltanto questa spunta, la rigenerazione riutilizza i modelli
+dei componenti scelti nell'ultima generazione riuscita: salta il confronto
+con i consolidati e la ricerca nella libreria KiCad. Rimane la costruzione
+e il salvataggio del solido con FreeCAD. Il riuso viene preparato dalla prima
+generazione completa con questa versione; se cambiano anche quote, componenti,
+annotazioni o file dei modelli, viene eseguita nuovamente la procedura completa.</p>
 
 <h2 id="kicad">12. La scheda «KiCad»: prova e installazione</h2>
 <p>La scheda elenca i file pronti (footprint e modello STEP) e offre tre

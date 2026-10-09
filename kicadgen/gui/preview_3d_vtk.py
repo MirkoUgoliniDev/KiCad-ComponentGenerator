@@ -204,6 +204,41 @@ class _MeshPrepareJob(QRunnable):
         self.signals.finished.emit(self.token, self.key, scene, error)
 
 
+def _pin_text_mesh(points, labels):
+    """View-only planar text, with one shared reading direction on the pin face."""
+    import pyvista as pv
+    span = np.ptp(points[:, :2], axis=0)
+    along_x = span[0] >= span[1]
+    # Text normal faces -Z, so names read correctly from the underside.
+    horizontal = np.array([0., -1., 0.] if along_x else [1., 0., 0.])
+    vertical = np.array([-1., 0., 0.] if along_x else [0., -1., 0.])
+    across = span[1] if along_x else span[0]
+    across_axis = 1 if along_x else 0
+    middle = (points[:, across_axis].min() + points[:, across_axis].max()) / 2
+    gap = min(.8, across * .08)
+    max_width = max(1.0, across * .42 - gap)
+    pieces = []
+    for point, label in zip(points, labels):
+        text = pv.Text3D(label, depth=0, height=.65)
+        coords = text.points.copy()
+        coords -= (coords.min(axis=0) + coords.max(axis=0)) / 2
+        width = np.ptp(coords[:, 0])
+        if width > max_width:
+            coords *= max_width / width
+        # Anchors already include an inward clearance. Bring the text 3 mm
+        # closer to the strip without changing its size or reading direction.
+        origin = point.copy()
+        if across > 1e-6:
+            inward = 1 if point[across_axis] < middle else -1
+            outward_adjustment = min(3.0, across * .225)
+            origin[across_axis] += inward * (
+                np.ptp(coords[:, 0]) / 2 + gap - outward_adjustment)
+        text.points = (origin + coords[:, 0, None] * horizontal
+                       + coords[:, 1, None] * vertical)
+        pieces.append(text)
+    return pv.merge(pieces, merge_points=False)
+
+
 def _spaced_label(label, vertices):
     """Keep legacy mesh labels away from the contact, without changing CAD."""
     point = np.asarray(label, dtype=float).copy()
@@ -211,7 +246,7 @@ def _spaced_label(label, vertices):
     direction = point[:2] - centre[:2]
     distance = np.linalg.norm(direction)
     if distance > 1e-6:
-        point[:2] += 1.2 * direction / distance
+        point[:2] += 3.2 * direction / distance
     return point
 
 
@@ -751,6 +786,8 @@ class Preview3DVtk(QtInteractor):
         self._shown_mesh_key = None
         self._mesh_anchors = ()
         self.stop_camera_animation()
+        self._pin_label_anchors = ()
+        self._label_actor = None
         super().clear()
 
     # -- «Copia formato»: which body was copied, which ones were pasted -----
@@ -845,18 +882,36 @@ class Preview3DVtk(QtInteractor):
 
     def _add_pin_labels(self, anchors) -> None:
         """Numeri centrati sugli ancoraggi, visibili solo dal lato piedini."""
+        self._pin_label_anchors = tuple(anchors)
         self._label_actor = None
         if not self.show_pin_numbers or not anchors:
             return
         import numpy as np
 
         points = np.array([[x, y, z] for _, x, y, z in anchors], dtype=float)
-        labels = [str(pin) for pin, _, _, _ in anchors]
-        self._label_actor = self.add_point_labels(
-            points, labels, font_size=13, bold=True, text_color=_LABEL_COLOR,
-            shape=None, show_points=False, always_visible=True,
-            justification_horizontal="center", justification_vertical="center",
+        names = getattr(self, '_pin_functions', {})
+        labels = [f"{pin} ({names[str(pin)]})" if names.get(str(pin)) else str(pin)
+                  for pin, _, _, _ in anchors]
+        self._label_actor = self.add_mesh(
+            _pin_text_mesh(points, labels), color=_LABEL_COLOR,
+            lighting=False, pickable=False, name='pin-labels',
+            reset_camera=False, render=False,
         )
+
+    def set_pin_functions(self, pinout) -> None:
+        """Update view-only pin functions without rebuilding CAD or moving the camera."""
+        names = {str(row['pin']).strip(): str(row.get('name') or '').strip()
+                 for row in pinout or () if isinstance(row, dict) and 'pin' in row}
+        if names == getattr(self, '_pin_functions', {}):
+            return
+        self._pin_functions = names
+        anchors = getattr(self, '_pin_label_anchors', ())
+        if getattr(self, '_label_actor', None) is not None:
+            self.remove_actor(self._label_actor, reset_camera=False, render=False)
+            self._label_actor = None
+        if anchors:
+            self._add_pin_labels(anchors)
+            self._update_label_visibility()
 
     def _reset(self) -> None:
         self.clear()

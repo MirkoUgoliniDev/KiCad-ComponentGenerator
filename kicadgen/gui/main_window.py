@@ -1246,9 +1246,11 @@ class MainWindow(QMainWindow):
                 self.i18n.text('Attendi la conclusione dell’operazione prima di chiudere.'))
             event.ignore()
         else:
-            self._window_closed = True
             # Le ultime modifiche non aspettano il prossimo giro del salvataggio.
-            self._flush_project_config()
+            if not self._can_leave_project():
+                event.ignore()
+                return
+            self._window_closed = True
             self.ai_account.detach()
             # Una finestra chiusa davvero sta solo per essere distrutta, e
             # distruggendola Qt svuota elenchi, testi e schede: i figli
@@ -2920,11 +2922,7 @@ class MainWindow(QMainWindow):
         """@brief Save the current project and return to New/Open/Recent projects."""
         if self._project_change_blocked():
             return
-        self._flush_project_config()
-        state = self._project_state_text()
-        if self._named() and (state is None or state != self._last_saved_project_state):
-            QMessageBox.warning(self, self.i18n.text("Progetto"), self.i18n.text(
-                "Impossibile salvare le impostazioni: il progetto resta aperto."))
+        if not self._can_leave_project():
             return
         self._switch_project("", self._general_project_state)
 
@@ -3083,6 +3081,7 @@ class MainWindow(QMainWindow):
         self.chk_header_pins.setChecked(self._show_pins_3d())
         self.chk_header_pins.blockSignals(blocked)
         self.chk_header_pins.setVisible(board is True)
+        self._sync_header_pins_3d()
         self.group_mounting.setVisible(board is True)
         self._sync_preview_mounting()
         if getattr(self, "_ai_form", None) is not None:
@@ -3095,8 +3094,21 @@ class MainWindow(QMainWindow):
         @param checked New state of the checkbox.
         """
         self._set_project_option("show_pins_3d", checked)
+        self._sync_header_pins_3d()
         self._save_config_safely()
         self._invalidate_generated_mesh()
+
+    def _sync_header_pins_3d(self) -> None:
+        """@brief Mirror the optional headers in the 3D toolbar without changing host pads."""
+        checkbox = getattr(self, "chk_header_pins_3d", None)
+        if checkbox is None:
+            return
+        blocked = checkbox.blockSignals(True)
+        checkbox.setChecked(self._show_pins_3d())
+        checkbox.blockSignals(blocked)
+        checkbox.setVisible(bool(self._selected_family()) and self._photo_inventory_family() is True)
+        checkbox.setEnabled(self.package_geometry is None
+                            and not bool(self.btn_regen_3d.property("workflow_busy")))
 
     def _refresh_pcb_thickness_row(self) -> None:
         """@brief Show the PCB thickness in use and where it comes from.
@@ -3478,6 +3490,7 @@ class MainWindow(QMainWindow):
         stack = getattr(self, "central_stack", None)
         if stack is None:
             return
+        self.start_page.set_library_root(self._library_root())
         self._refresh_open_project_commands()
         if self._component_name():
             stack.setCurrentWidget(self.tabs)
@@ -3564,10 +3577,15 @@ class MainWindow(QMainWindow):
         if getattr(self, "_open_project_folder", None) == folder:
             self._refresh_start_page()
             return
-        self._flush_project_config()
+        if not self._can_leave_project():
+            return
         if folder.parent != self._library_root():
+            previous = self.field_library_root.blockSignals(True)
             self.field_library_root.setText(str(folder.parent))
-        self._open_project_at(folder)
+            self.field_library_root.blockSignals(previous)
+            self._update_project_path_label()
+            self._switch_project("", self._general_project_state)
+        self._open_project_at(folder, save_current=False)
 
     def _refresh_window_title(self) -> None:
         """@brief Show the open project and the product version in the title bar.
@@ -5903,6 +5921,11 @@ class MainWindow(QMainWindow):
         @note Il testo integrale continua ad andare nel log: qui arriva solo
             cio' che si legge a colpo d'occhio mentre si aspetta.
         """
+        if tool == 'headers':
+            self.analysis_overlay.set_steps(GENERATION_STEPS[-1:])
+            self._generation_step_of = {'freecad': 0}
+            self._append_log(detail)
+            tool = 'freecad'
         self.analysis_overlay.set_tool(tool, detail)
         self.analysis_overlay.set_progress(done, total, tx("componenti"))
         # Fuori da una generazione la mappa non c'e' (o la modale non ha passi):
@@ -6588,6 +6611,29 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_project_autosave"):
             self._save_project_config()
 
+    def _can_leave_project(self, folder: Path | None = None) -> bool:
+        """Save pending edits before navigation; a failed write retains the open project."""
+        if not self._named():
+            return True
+        if folder is None:
+            self._flush_project_config()
+        else:
+            self._write_open_project_config(folder)
+        state = self._project_state_text()
+        if state is not None and state == self._last_saved_project_state:
+            return True
+        current = folder or getattr(self, "_open_project_folder", None)
+        if current is not None and current == self._project_config_refused:
+            answer = QMessageBox.question(
+                self, self.i18n.text("Progetto"), self.i18n.text(
+                    "Il file di progetto non e' modificabile. Abbandonare le modifiche non salvate?"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            return answer == QMessageBox.StandardButton.Yes
+        QMessageBox.warning(self, self.i18n.text("Progetto"), self.i18n.text(
+            "Impossibile salvare le impostazioni: il progetto resta aperto."))
+        return False
+
     def _on_library_root_changed(self, _text: str = "") -> None:
         """@brief Cambiare la cartella di lavoro salva e chiude il progetto aperto.
 
@@ -6609,11 +6655,20 @@ class MainWindow(QMainWindow):
             self.field_library_root.setText(str(folder.parent))
             self.field_library_root.blockSignals(False)
             self._update_project_path_label()
+            self._refresh_start_page()
+            self.ai_account.refresh()
             self._project_change_blocked()
             return
         # Il salvataggio normale guarda `_project_dir()`, che adesso punta
         # all'altra cartella: si scrive esplicitamente in quella del progetto.
-        self._write_open_project_config(folder)
+        if not self._can_leave_project(folder):
+            previous = self.field_library_root.blockSignals(True)
+            self.field_library_root.setText(str(folder.parent))
+            self.field_library_root.blockSignals(previous)
+            self._update_project_path_label()
+            self._refresh_start_page()
+            self.ai_account.refresh()
+            return
         self._switch_project("", self._general_project_state)
         self._append_log(tx("Cartella di lavoro cambiata: progetto {name} salvato in {folder} e "
                             "chiuso.",
@@ -6675,12 +6730,13 @@ class MainWindow(QMainWindow):
         if problem:
             QMessageBox.warning(self, self.i18n.text("Nuovo progetto"), self.i18n.text(problem))
             return
+        if not self._can_leave_project():
+            return
         try:
             (self._library_root() / name / DOCS_SUBDIR).mkdir(parents=True, exist_ok=False)
         except OSError as exc:
             QMessageBox.warning(self, self.i18n.text("Nuovo progetto"), str(exc))
             return
-        self._flush_project_config()
         # Un progetto nuovo parte dalle impostazioni generali, non da quelle
         # del progetto aperto prima (decisione dell'utente del 2026-09-24).
         self._switch_project(name, self._general_project_state)
@@ -6703,7 +6759,7 @@ class MainWindow(QMainWindow):
             return
         self._open_project_at(self._library_root() / dialog.selected_name())
 
-    def _open_project_at(self, folder: Path) -> None:
+    def _open_project_at(self, folder: Path, *, save_current: bool = True) -> None:
         """@brief Open the project `folder` of the current working folder.
 
         @param folder Project folder; its parent must be `_library_root()`,
@@ -6711,7 +6767,8 @@ class MainWindow(QMainWindow):
         @note Applies the project's own settings when its project_config.json
             is readable; a refused file is neither applied nor overwritten.
         """
-        self._flush_project_config()
+        if save_current and not self._can_leave_project():
+            return
         name = folder.name
         from .project_state import ProjectConfigError, read_project_config
         try:
@@ -9568,7 +9625,20 @@ class MainWindow(QMainWindow):
     def _show_pinout_dialog(self) -> None:
         dialog = PinoutDialog(self.pinout, self._component_name(), self)
         self.i18n.retranslate_widgets(dialog)
-        dialog.exec()
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        edited = dialog.edited_pinout()
+        if edited == self.pinout:
+            return
+        previous = self.pinout
+        self.pinout = edited
+        if not self._save_project_config(force=True):
+            self.pinout = previous
+            QMessageBox.warning(self, self.i18n.text("Errore"), self.i18n.text(
+                "Pinout non salvato. Le modifiche non sono state applicate."))
+            return
+        self._draw_preview()
+        self._sync_3d_pin_functions()
 
     # ── Tab 5: Modello 3D ──────────────────────────────────────────
 
@@ -9747,6 +9817,11 @@ class MainWindow(QMainWindow):
         # Nascosta finche' il modulo non e' castellated con almeno un lato:
         # la accende `_sync_contact_style_bar`, che la tiene allineata ai lati.
         self.contact_style_bar_3d.hide()
+        self.chk_header_pins_3d = QCheckBox("Mostra gli header nel modello 3D")
+        self.chk_header_pins_3d.setToolTip(self.chk_header_pins.toolTip())
+        self.chk_header_pins_3d.toggled.connect(self.chk_header_pins.setChecked)
+        toolbar.addWidget(self.chk_header_pins_3d)
+        self._sync_header_pins_3d()
         toolbar.addWidget(self.btn_regen_3d)
 
         self.btn_terminal_detail = QPushButton("Rileva terminali dalla foto...")
@@ -9951,6 +10026,7 @@ class MainWindow(QMainWindow):
         unsupported = self.package_geometry is not None
         button.setEnabled(not busy and not unsupported)
         button.setProperty("workflow_busy", bool(busy))
+        self._sync_header_pins_3d()
         button.setProperty(
             "workflow_title_source",
             "Generazione in corso (FreeCAD)..." if busy
@@ -10401,6 +10477,7 @@ class MainWindow(QMainWindow):
             the viewer finds the scene in its cache and only builds actors.
         """
         try:
+            self._sync_3d_pin_functions()
             self.preview_3d.render_mesh(mesh_path)
             self._last_mesh_path = mesh_path
             self._set_3d_status(
@@ -11045,6 +11122,45 @@ class MainWindow(QMainWindow):
                     return tx("Pin {number}: {name}", number=key, name=name)
         return tx("Pin {number}", number=key)
 
+    def _add_preview_pin_function(self, number, side, bounds, fallback="", max_length=None):
+        """Draw the documented function inward, separate from the pad number.
+
+        This is a preview annotation, not a change to the electrical pad ID.
+        Top/bottom rows use vertical text to leave adjacent pins readable.
+        """
+        name = next((str(row.get("name") or "").strip() for row in self.pinout or ()
+                     if isinstance(row, dict)
+                     and str(row.get("pin", "")).strip() == str(number).strip()), fallback)
+        if not name:
+            return
+        label = self.preview_scene.addSimpleText(f"({name})")
+        label.setData(0, "pin-function")
+        label.setData(1, str(number))
+        label.setBrush(QBrush(QColor(TEXT)))
+        font = label.font()
+        font.setPointSizeF(9)
+        label.setFont(font)
+        if side in ("top", "bottom"):
+            label.setRotation(90)
+        rect = label.mapRectToScene(label.boundingRect())
+        length = rect.height() if side in ("top", "bottom") else rect.width()
+        if max_length and length > max_length:
+            label.setScale(max_length / length)
+            rect = label.mapRectToScene(label.boundingRect())
+        label.setToolTip(name)
+        x = bounds.center().x() - rect.width() / 2
+        y = bounds.center().y() - rect.height() / 2
+        if side == "top":
+            y = bounds.bottom() + 4
+        elif side == "bottom":
+            y = bounds.top() - rect.height() - 4
+        elif side == "left":
+            x = bounds.right() + 4
+        else:
+            x = bounds.left() - rect.width() - 4
+        label.setPos(x - rect.left(), y - rect.top())
+        label.setZValue(5)
+
     def _draw_preview_castellated(self, p: CastellatedModuleParams) -> None:
         """Anteprima del modulo castellated: corpo, piazzole e quote d'ingombro.
 
@@ -11096,6 +11212,12 @@ class MainWindow(QMainWindow):
             rect = number.boundingRect()
             number.setPos(x - rect.width() / 2, y - rect.height() / 2)
             number.setZValue(5)
+            bounds = number.sceneBoundingRect()
+            if copper is not None:
+                bounds = bounds.united(copper.sceneBoundingRect())
+            self._add_preview_pin_function(placement.number, placement.edge, bounds,
+                max_length=(p.body_width if placement.edge in ("top", "bottom")
+                            else p.body_length) * mm_to_px * .3)
 
         if xs_px and ys_px:
             left, right = min(xs_px + [-half_l]), max(xs_px + [half_l])
@@ -11224,20 +11346,39 @@ class MainWindow(QMainWindow):
         self.preview_scene.clear()
 
         mm_to_px = 20.0
-        margin = 1.0
+        margin = p.margin
         row_spacing = p.effective_row_spacing()
         width = (p.cols - 1) * p.pitch
         height = (p.rows - 1) * row_spacing
 
-        self._draw_grid(mm_to_px, width, height, margin)
-
+        from ..core.footprint import FpLine, FpRect, FpCircle
+        try:
+            footprint = build_pin_header(p)
+        except (ValueError, TypeError, OverflowError) as exc:
+            self._set_mounting_error(str(exc))
+            return
+        courtyard = next(g for g in footprint.graphics if g.layer == "F.CrtYd")
+        # The generator's courtyard encloses the body AND populated copper.
+        # Remove its clearance to dimension the actual component envelope.
+        x0, y0 = courtyard.start[0] + margin, courtyard.start[1] + margin
+        x1, y1 = courtyard.end[0] - margin, courtyard.end[1] - margin
+        self._draw_grid(mm_to_px, x1 - x0, y1 - y0, max(margin, 1), x0=x0, y0=y0)
         silk_pen = QPen(QColor(TEXT))
         silk_pen.setWidthF(1.5)
-        self.preview_scene.addRect(
-            -margin * mm_to_px, -margin * mm_to_px,
-            (width + 2 * margin) * mm_to_px, (height + 2 * margin) * mm_to_px,
-            silk_pen,
-        )
+        for graphic in footprint.graphics:
+            if graphic.layer != "F.SilkS":
+                continue
+            if isinstance(graphic, FpLine):
+                self.preview_scene.addLine(*(v * mm_to_px for v in (*graphic.start, *graphic.end)), silk_pen)
+            elif isinstance(graphic, FpRect):
+                self.preview_scene.addRect(graphic.start[0] * mm_to_px, graphic.start[1] * mm_to_px,
+                                           (graphic.end[0] - graphic.start[0]) * mm_to_px,
+                                           (graphic.end[1] - graphic.start[1]) * mm_to_px, silk_pen)
+            elif isinstance(graphic, FpCircle):
+                r = graphic.radius * mm_to_px
+                self.preview_scene.addEllipse(graphic.center[0] * mm_to_px - r,
+                                              graphic.center[1] * mm_to_px - r, 2 * r, 2 * r,
+                                              silk_pen, QBrush(QColor(TEXT)) if graphic.fill else QBrush())
 
         pad_pen = QPen(QColor(SURFACE1))
         pad_brush = QBrush(QColor(BLUE))
@@ -11245,7 +11386,7 @@ class MainWindow(QMainWindow):
         # Stessa funzione usata dal generatore 2D e da quello 3D: l'anteprima non
         # deve poter divergere dal footprint realmente prodotto (e cosi' rispetta
         # anche la mappa esplicita dei pin letta dal datasheet).
-        xs_px, ys_px = [], []
+        xs_px, ys_px, label_bounds = [], [], []
         r = (p.pad_diameter / 2) * mm_to_px
         for pin, x_mm, y_mm in pin_positions(p):
             x, y = x_mm * mm_to_px, y_mm * mm_to_px
@@ -11263,56 +11404,69 @@ class MainWindow(QMainWindow):
             item.setToolTip(self._pad_tooltip(pin))
             self.preview_scene.addItem(item)
 
-            # Numero del pin sul pad: scuro sul blu del pad, e insieme alla
-            # tabella pinout rende verificabile la corrispondenza con il
-            # datasheet senza aprire KiCad.
+            hole_r = p.drill * mm_to_px / 2
+            hole = self.preview_scene.addEllipse(
+                x - hole_r, y - hole_r, 2 * hole_r, 2 * hole_r,
+                QPen(QColor(SURFACE1)), QBrush(QColor(BASE)))
+            hole.setZValue(1)
+
+            # Keep the exported drill visible in the grid-header path too.
             number = self.preview_scene.addSimpleText(str(pin))
             number.setToolTip(item.toolTip())
-            number.setBrush(QBrush(QColor(BASE)))
+            number.setBrush(QBrush(QColor(TEXT)))
             font = number.font()
             font.setPointSizeF(max(6.0, r * 0.55))
             font.setBold(True)
             number.setFont(font)
             number_rect = number.boundingRect()
-            number.setPos(x - number_rect.width() / 2, y - number_rect.height() / 2)
+            number.setPos(x - number_rect.width() / 2,
+                          y - r - number_rect.height() - 3 if y_mm <= height / 2 else
+                          y + r + 3)
             number.setZValue(5)
+            label_bounds.append(number.sceneBoundingRect())
 
-        left = -margin * mm_to_px
-        right = (width + margin) * mm_to_px
-        top = -margin * mm_to_px
-        bottom = (height + margin) * mm_to_px
+        left, right = x0 * mm_to_px, x1 * mm_to_px
+        top, bottom = y0 * mm_to_px, y1 * mm_to_px
 
         # Quota vicina al componente: passo (in alto) e distanza righe (a sinistra)
+        labels_top = min((rect.top() for rect in label_bounds), default=top)
+        labels_bottom = max((rect.bottom() for rect in label_bounds), default=bottom)
         if p.cols >= 2:
-            self._add_dim_h(0, p.pitch * mm_to_px, top - 20, self._dim_label("dim.pitch", p.pitch))
+            self._add_dim_h(0, p.pitch * mm_to_px, min(top, labels_top) - 20,
+                            self._dim_label("dim.pitch", p.pitch))
         if p.rows >= 2:
-            self._add_dim_v(0, row_spacing * mm_to_px, left - 20, self._dim_label("dim.row_spacing", row_spacing))
+            self._add_dim_v(0, row_spacing * mm_to_px, left - 40, self._dim_label("dim.row_spacing", row_spacing))
 
         # Catena di quote: margine sinistro / span pin / margine destro (sotto)
+        def chain_fits(start, end):
+            from PyQt6.QtWidgets import QGraphicsSimpleTextItem
+            label = QGraphicsSimpleTextItem(f"{(end - start) / mm_to_px:.2f} mm")
+            return end - start >= label.boundingRect().width() + 10
+
         if xs_px:
             leftmost_x, rightmost_x = min(xs_px), max(xs_px)
-            chain_y = bottom + 25
-            if leftmost_x - left > 1:
+            chain_y = max(bottom, labels_bottom) + 25
+            if chain_fits(left, leftmost_x):
                 self._add_dim_h(left, leftmost_x, chain_y, f"{(leftmost_x - left) / mm_to_px:.2f} mm")
-            if rightmost_x - leftmost_x > 1:
+            if chain_fits(leftmost_x, rightmost_x):
                 self._add_dim_h(leftmost_x, rightmost_x, chain_y, f"{(rightmost_x - leftmost_x) / mm_to_px:.2f} mm")
-            if right - rightmost_x > 1:
+            if chain_fits(rightmost_x, right):
                 self._add_dim_h(rightmost_x, right, chain_y, f"{(right - rightmost_x) / mm_to_px:.2f} mm")
 
         # Catena di quote: margine superiore / span pin / margine inferiore (a destra)
         if ys_px:
             topmost_y, bottommost_y = min(ys_px), max(ys_px)
             chain_x = right + 25
-            if topmost_y - top > 1:
+            if chain_fits(top, topmost_y):
                 self._add_dim_v(top, topmost_y, chain_x, f"{(topmost_y - top) / mm_to_px:.2f} mm")
-            if bottommost_y - topmost_y > 1:
+            if chain_fits(topmost_y, bottommost_y):
                 self._add_dim_v(topmost_y, bottommost_y, chain_x, f"{(bottommost_y - topmost_y) / mm_to_px:.2f} mm")
-            if bottom - bottommost_y > 1:
+            if chain_fits(bottommost_y, bottom):
                 self._add_dim_v(bottommost_y, bottom, chain_x, f"{(bottom - bottommost_y) / mm_to_px:.2f} mm")
 
-        # Quote totali (piu' lontane): larghezza/altezza silkscreen
-        self._add_dim_h(left, right, bottom + 60, self._dim_label("dim.total", width + 2 * margin))
-        self._add_dim_v(top, bottom, right + 60, self._dim_label("dim.total", height + 2 * margin))
+        # Actual body/copper envelope, excluding courtyard clearance.
+        self._add_dim_h(left, right, max(bottom, labels_bottom) + 60, self._dim_label("dim.total", x1 - x0))
+        self._add_dim_v(top, bottom, right + 60, self._dim_label("dim.total", y1 - y0))
 
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
@@ -11343,7 +11497,10 @@ class MainWindow(QMainWindow):
             )
         pad_pen = QPen(QColor(SURFACE1))
         pad_brush = QBrush(QColor(BLUE))
-        xs, ys = [], []
+        # Display margin only pads the grid, never the measured component.
+        extent = ([-body_l / 2, -body_w / 2, body_l / 2, body_w / 2]
+                  if package.body_length_mm and package.body_width_mm else
+                  [math.inf, math.inf, -math.inf, -math.inf])
         for pin in pins:
             x, y = pin.x_mm * mm_to_px, pin.y_mm * mm_to_px
             w, h = pin.pad_length_mm * mm_to_px, pin.pad_width_mm * mm_to_px
@@ -11368,7 +11525,20 @@ class MainWindow(QMainWindow):
                     x - diameter / 2, y - diameter / 2, diameter, diameter,
                     QPen(QColor(SURFACE1)), QBrush(QColor(BASE)))
                 hole.setZValue(1)
-            xs.append(x); ys.append(y)
+            angle = math.radians(pin.rotation_deg)
+            ca, sa = abs(math.cos(angle)), abs(math.sin(angle))
+            a, b = pin.pad_length_mm / 2, pin.pad_width_mm / 2
+            if pin.shape == "circle":
+                dx, dy = math.hypot(a * ca, b * sa), math.hypot(a * sa, b * ca)
+            else:
+                radius = min(a, b) * (1 if pin.shape == "oval" else
+                                         .5 if pin.shape == "roundrect" else 0)
+                dx = (a - radius) * ca + (b - radius) * sa + radius
+                dy = (a - radius) * sa + (b - radius) * ca + radius
+            if drilled:
+                dx, dy = max(dx, pin.drill_mm / 2), max(dy, pin.drill_mm / 2)
+            extent = [min(extent[0], pin.x_mm - dx), min(extent[1], pin.y_mm - dy),
+                      max(extent[2], pin.x_mm + dx), max(extent[3], pin.y_mm + dy)]
             number = self.preview_scene.addSimpleText(str(pin.number))
             number.setToolTip(item.toolTip())
             number.setBrush(QBrush(QColor(TEXT if drilled else BASE)))
@@ -11390,14 +11560,15 @@ class MainWindow(QMainWindow):
                     label_y = bounds.top() - rect.height() - 3
             number.setPos(label_x, label_y)
             number.setZValue(5)
-        left = (-body_l / 2 - margin) * mm_to_px
-        top = (-body_w / 2 - margin) * mm_to_px
-        right = (body_l / 2 + margin) * mm_to_px
-        bottom = (body_w / 2 + margin) * mm_to_px
+            if pin.side in ("top", "bottom", "left", "right"):
+                self._add_preview_pin_function(pin.number, pin.side,
+                    number.sceneBoundingRect().united(item.sceneBoundingRect()), pin.name,
+                    max_length=(body_w if pin.side in ("top", "bottom") else body_l) * mm_to_px * .3)
+        left, top, right, bottom = [value * mm_to_px for value in extent]
         self._draw_grid(mm_to_px, body_l, body_w, margin,
                         x0=-body_l / 2, y0=-body_w / 2)
-        self._add_dim_h(left, right, bottom + 40, self._dim_label("dim.total", body_l + 2 * margin))
-        self._add_dim_v(top, bottom, right + 40, self._dim_label("dim.total", body_w + 2 * margin))
+        self._add_dim_h(left, right, bottom + 40, self._dim_label("dim.total", extent[2] - extent[0]))
+        self._add_dim_v(top, bottom, right + 40, self._dim_label("dim.total", extent[3] - extent[1]))
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
 
@@ -11457,12 +11628,18 @@ class MainWindow(QMainWindow):
         rect = label.boundingRect()
         label.setPos(x + 6, (y1 + y2) / 2 + rect.width() / 2)
 
+    def _sync_3d_pin_functions(self):
+        setter = getattr(self.preview_3d, 'set_pin_functions', None)
+        if callable(setter):
+            setter(self.pinout)
+
     def _draw_preview_3d(self, mesh_failed: bool = False) -> None:
         """@brief Draw the generated mesh when there is one, else the cheap preview.
 
         @param mesh_failed True when the mesh was just found unreadable (off-thread
             preparation failed and was logged): it is not tried again here.
         """
+        self._sync_3d_pin_functions()
         # Never replace a generated model with a synthetic matrix preview
         # simply because the user revisits the 3D tab.
         if not mesh_failed and self._last_mesh_path and Path(self._last_mesh_path).is_file():

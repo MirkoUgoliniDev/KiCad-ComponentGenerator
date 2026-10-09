@@ -49,10 +49,11 @@ def test_progress_is_visible_on_project_tab_and_literal(window):
     assert window.analysis_overlay.status.text() == "Crop 1: <b>R1</b> & C1"
 
 
-def test_extraction_action_is_centered_below_separate_tools(window):
+def test_extraction_action_stays_in_wizard_footer_below_separate_tools(window, app):
     assert window.group_component_analysis.isAncestorOf(window.combo_component_type)
     assert window.group_component_analysis.isAncestorOf(window.group_ai_tools)
-    assert window.group_component_analysis.isAncestorOf(window.btn_extract_ai)
+    assert not window.group_component_analysis.isAncestorOf(window.btn_extract_ai)
+    assert window.project_wizard.isAncestorOf(window.btn_extract_ai)
     assert not window.group_component_analysis.isAncestorOf(window.docs_list)
     assert window.group_ai_tools.isAncestorOf(window.combo_model)
     assert window.group_ai_tools.isAncestorOf(window.btn_pick_model)
@@ -80,17 +81,27 @@ def test_extraction_action_is_centered_below_separate_tools(window):
     assert layout_contains(window.project_action_bar, window.btn_component_review_top)
     assert review.text().strip()
     assert 'Non avvia la generazione' in review.toolTip()
-    tools_layout = window.group_ai_tools.layout()
-    assert tools_layout.contentsMargins().bottom() >= 12
     # Tolto di proposito il controllo sulla spaziatura della seconda riga di
     # «Strumenti AI» (Log AI e Modifica prompt): quella riga non esiste piu',
     # i due comandi sono saliti nella barra in alto (utente, 2026-09-24).
     assert not window.group_ai_tools.isAncestorOf(window.btn_extract_ai)
-    layout = window.btn_extract_ai.parentWidget().layout()
-    tools_index = layout.indexOf(window.group_ai_tools)
-    action_index = layout.indexOf(window.btn_extract_ai)
-    assert tools_index < action_index
-    assert layout.itemAt(action_index).alignment() & Qt.AlignmentFlag.AlignHCenter
+    wizard = window.project_wizard
+    footer = wizard.layout().itemAt(wizard.layout().count() - 1).layout()
+    assert layout_contains(footer, window.btn_extract_ai)
+    assert layout_contains(footer, wizard.back)
+    assert all(not scroll.isAncestorOf(window.btn_extract_ai) for scroll in wizard.scrolls)
+    window.show()
+    wizard.set_page(0)
+    app.processEvents()
+    assert not window.btn_extract_ai.isVisible()
+    assert wizard.next.isVisible()
+    wizard.set_page(1)
+    app.processEvents()
+    assert window.btn_extract_ai.isVisible()
+    assert not wizard.next.isVisible()
+    action_rect = window.btn_extract_ai.geometry()
+    assert action_rect.top() >= wizard.stack.geometry().bottom()
+    assert abs(action_rect.center().y() - wizard.back.geometry().center().y()) <= 1
     assert not window.btn_extract_ai.icon().isNull()
     assert window.btn_extract_ai.minimumHeight() >= 44
     window._on_extract_finished()

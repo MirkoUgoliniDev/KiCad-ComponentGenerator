@@ -1,5 +1,79 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+- **09/10 — Checkpoint autorizzato dall'utente:** commit/push delle modifiche
+  di revisione, header/riuso, stime pad, pinout editabile, etichette 2D/3D e
+  relativi test/guida; merge in main e ritorno su ADVANCED. Database locale,
+  rows_none_rev.pkl e work/ esclusi. I riepiloghi NON COMMITTATO sotto sono
+  cronologia antecedente al checkpoint; hash/esito effettivo nel log Git.
+
+- **09/10 — Posizione testi NON COMMITTATO:** ulteriore 1 mm verso i
+  terminali (correzione totale 3 mm); font, dimensione e verso invariati.
+
+- **09/10 — Ritocco posizione testi NON COMMITTATO:** etichette 3D riportate
+  2 mm verso gli strip; font/dimensione/verso preservati come richiesto.
+
+- **09/10 — Distanza nomi/strip NON COMMITTATO:** intera etichetta verso
+  l'interno dell'ancoraggio, ulteriore margine 0.8 mm, niente testo centrato
+  che torni sotto il connettore. 38 test passati; solo preview.
+
+- **09/10 — Orientamento etichette NON COMMITTATO:** dopo chiarimento utente,
+  testi planari solidali alla scheda, stesso verso sulle due file; sostituiti
+  billboard orizzontali schermo che nascondevano pin adiacenti. Solo preview,
+  38 test passati, nessun export CAD modificato.
+
+- **09/10 — Etichette 3D NON COMMITTATO:** corsivo disattivato esplicitamente,
+  distacco aggiuntivo dai contatti aumentato da 1.2 a 3.2 mm. Solo preview,
+  nessuna rigenerazione CAD. 38 test passati.
+
+- **09/10 — Pinout editabile + etichette 3D NON COMMITTATO:** Funzione
+  modificabile con Applica/Annulla, ID fissi, salvataggio verificato prima
+  del refresh. Vista 3D mostra numero (funzione) senza rigenerare solido;
+  camera preservata. 47 test vista, 38 finali editor/cache/etichette/i18n.
+
+- **09/10 — Funzioni pin in anteprima NON COMMITTATO:** etichette tra parentesi
+  verticali top/bottom in castellated e package/header, senza cambiare ID pad.
+  23 test passati. Verificati nomi rispetto a docs/Pinout.png; numerazione
+  assegnata dal progetto. Solo GUI: export simboli schematici non implementato.
+
+- **09/10 — Fix stima pad/sbalzo NON COMMITTATO:** una lunghezza stimata
+  1.0 mm era incompatibile con lo sbalzo 1.4 mm. Fallback al riferimento
+  modulo se utilizzabile, nota esplicita tradotta, controlli di clearance
+  mantenuti; misure dichiarate mai corrette automaticamente. 83 test passati,
+  37 ricontrollati dopo traduzioni, diff pulito. Dettagli in MEMORY.md.
+
+- **09/10 — Fix cache con foto, NON COMMITTATO:** i descrittori OpenCV bytes
+  nei ComponentBox impedivano l'impronta; aggiunta codifica base64 con tag.
+  Test per bytes/bytearray e invalidazione dopo cambio descrittore; 124 integrati
+  passati, verifica isolata con stato/foto reali riuscita. Serve riavvio e
+  una generazione completa per creare la cache mai salvata dal vecchio codice.
+
+- **09/10 — Cambio soli strip piu' rapido, NON COMMITTATO:** riusa gli
+  abbinamenti dell'ultima generazione riuscita saltando consolidati/KiCad;
+  resta il passaggio FreeCAD per produrre STEP/mesh. Snapshot locale preparato
+  dalla prima generazione completa con il nuovo codice. Impronte di input e
+  file invalidano il riuso quando cambia altro. Modale mostra un solo passo.
+  Nuovo header_reuse.py e test_header_model_reuse.py; 122 test passati,
+  compilazione/diff puliti. Dettagli iniziali MEMORY.md. Nessun commit/push.
+
+- **09/10 — Strip anche nella vista 3D, NON COMMITTATO:** spunta nella toolbar
+  accanto a Rigenera, sincronizzata con quella del wizard e show_pins_3d.
+  Per applicare usare l'icona di rigenerazione: solo 3D, niente AI o footprint.
+  153 test passati; nuova regressione test_header_pins_3d_control.py.
+  Guida aggiornata. Tutte le correzioni precedenti rimangono non committate.
+
+- **09/10 — Revisione con tre agenti completata, fix NON COMMITTATI.**
+  Baseline ADVANCED a0942d7, main merge 7d91f75 gia' pubblicati; branch
+  attuale ADVANCED. Protezione salvataggio su tutti i cambi progetto/chiusura,
+  collisioni pad circolari corrette, host THT per board a pad espliciti,
+  anteprima fori/contorni/quote allineata all'export. 3D fisico preservato.
+  Guida e test obsoleti aggiornati. Dettagli nel primo riepilogo MEMORY.md.
+  Suite completa iniziale 6790 passati/5 falliti/11 skipped/2 xfailed;
+  cinque segnalazioni risolte e ricontrollate in nuovo processo: finale
+  integrato 309 passati/1 skipped; account/costi/rilancio 240 passati.
+  QA visiva, compileall e diff --check riusciti. Tre nuovi file di test review.
+  Database locale modificato preesistente, rows_none_rev.pkl e work/ preservati.
+  Non committare/pushare/mergiare senza una nuova richiesta dell'utente.
+
 - **09/10 — Checkpoint wizard autorizzato:** commit/push delle modifiche UI,
   generatori e regressioni, merge in main e ritorno su ADVANCED richiesti
   dall'utente. Include icona con tooltip nell'anteprima. I riepiloghi "non
