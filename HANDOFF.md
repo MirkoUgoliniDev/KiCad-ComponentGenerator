@@ -1,5 +1,42 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+- **09/10/2026 ? COMMIT DELLE CORREZIONI autorizzato dall'utente**, insieme
+  a push e merge in main; confermato il funzionamento. Questo aggiornamento
+  supera lo stato di pausa/non committato riportato sotto, conservato come
+  cronologia. Inclusi fix, regressioni, regole e memoria, e lo stato corrente
+  del database profili. Escluso `rows_none_rev.pkl`. Verifiche precedenti
+  riportate sotto; diff --check pulito. Pubblicazione e merge da verificare
+  nel log Git; al termine ritorno su ADVANCED. Nessun commit successivo
+  autorizzato da questa richiesta.
+
+- **PAUSA richiesta dall'utente: riprendere la mattina del 09/10/2026.**
+  Memoria di ripresa salvata all'inizio di MEMORY.md. Fix e test completati,
+  nessuna nuova operazione Git autorizzata: tutto il lavoro successivo al
+  checkpoint resta non committato. Alla ripresa preservare anche la modifica
+  osservata in `data/analysis_profiles.sqlite3` (origine non verificata) e il
+  file diagnostico preesistente `rows_none_rev.pkl`.
+- **NON COMMITTATO — correzioni della revisione 08/10/2026 su ADVANCED.**
+  Checkpoint pubblicato `3270158`, merge pubblicato in main `8c45366`.
+  Come richiesto dall'utente, i fix seguenti DEVONO restare nel working tree
+  fino a una nuova istruzione esplicita di commit (vedi AGENTS.md).
+  - Package: geometria completa salvata/ripristinata; blocco rigenerazione e
+    anteprima parametrica 3D quando il package non e' supportato.
+  - Geometria: passo THT conservato anche con pin mancanti; foro metallizzato
+    contenuto nel rame; offset rame dei footprint rispettato; pad custom privi
+    di primitive rifiutati anche nello schema AI.
+  - Foto: revisione esplicitamente vuota rispettata e salvata con un marker
+    persistente (la cache non ripristina i corpi rifiutati); revisione riapribile
+    per disegnare nuove proposte, rilancio AI bloccato se vuota. Foto del bundle
+    versionata e manifest atomico; GIF supportate in import/pretest/inventario.
+  - API: risposte HTTP incomplete registrate come chiamate a costo ignoto per
+    OpenRouter e DeepSeek. Regressioni offline e traduzioni aggiunte.
+  Verifica: suite completa in due processi, prima meta' 4202 passati + 8 saltati
+  + 19 sottotest e un solo fallimento nel controllo @brief del nuovo helper
+  saved_package_geometry, CORRETTO e ricontrollato (2 test documentazione verdi);
+  seconda meta' 2555 passati + 2 saltati + 2 xfail. Dopo il completamento della
+  revisione vuota persistente, batteria finale di 211 test TUTTI PASSATI su
+  documentazione, i18n, package/progetti, bundle, riapertura, pipeline globale,
+  YOLO e pause. Nessun fallimento residuo; git diff --check pulito.
 - **Checkpoint revisione 08/10/2026, prima delle correzioni:** revisione con tre
   agenti completata; dieci difetti riprodotti in geometria/export, stato GUI,
   pipeline fotografica e contabilizzazione delle risposte HTTP interrotte.

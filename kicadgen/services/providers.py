@@ -20,6 +20,7 @@ are reduced to the fixed categories of `openrouter._safe_error_text`.
 from __future__ import annotations
 
 import json
+from http.client import IncompleteRead
 import math
 import os
 import urllib.error
@@ -254,7 +255,7 @@ def deepseek_request(url: str, body: Optional[dict] = None, timeout: int = _HTTP
                               retry_after=_retry_after(exc) if transient else None)
         error.status = exc.code
         raise error from None
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+    except (urllib.error.URLError, OSError, ValueError, IncompleteRead) as exc:
         # URLError: nothing was sent (urllib wraps every failure while
         # sending). A bare TimeoutError / OSError while waiting for or reading
         # the answer, or an undecodable body, come AFTER the request was sent:
@@ -262,9 +263,9 @@ def deepseek_request(url: str, body: Optional[dict] = None, timeout: int = _HTTP
         sent = not isinstance(exc, urllib.error.URLError)
         error = ProviderError(_redact(tx("Connessione a DeepSeek fallita: {reason}",
                                          reason=_network_reason(exc)), key),
-                              unreachable=not isinstance(exc, ValueError))
+                              unreachable=not isinstance(exc, (ValueError, IncompleteRead)))
         error.possibly_billed = sent and body is not None and (
-            isinstance(exc, (TimeoutError, ValueError)))
+            isinstance(exc, (TimeoutError, ValueError, IncompleteRead)))
         raise error from None
 
 

@@ -9,6 +9,20 @@ from kicadgen.services import photo_inventory as inv
 from kicadgen.services.openrouter import OpenRouterError
 
 
+def test_gif_photo_uses_first_frame_even_without_opencv_gif_support(tmp_path, monkeypatch):
+    import cv2
+    from PIL import Image
+
+    path = tmp_path / 'animated.gif'
+    first = Image.new('RGB', (20, 10), 'red')
+    second = Image.new('RGB', (20, 10), 'blue')
+    first.save(path, save_all=True, append_images=[second], duration=100, loop=0)
+    monkeypatch.setattr(cv2, 'imdecode', lambda *args: pytest.fail('OpenCV GIF decoder used'))
+    image = inv.read_photo(path)
+    assert image.shape == (10, 20, 3)
+    assert np.all(image == [0, 0, 255])
+
+
 def detection(**updates):
     item = dict(name="R", kind="resistor", bbox=[.1,.2,.3,.4],
                 height_mm=.5, rotation_deg=0, color_hex="#303030", marking="",

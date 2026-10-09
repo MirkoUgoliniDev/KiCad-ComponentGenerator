@@ -20,7 +20,8 @@ PACKAGE_FAMILIES = {
     "castellated", "custom",
 }
 PAD_TYPES = {"smd", "thru_hole", "np_thru_hole", "connect"}
-PAD_SHAPES = {"circle", "rect", "oval", "roundrect", "trapezoid", "custom"}
+# Custom pads require an anchor and primitives, which PinSpec cannot describe.
+PAD_SHAPES = {"circle", "rect", "oval", "roundrect", "trapezoid"}
 
 #: Declared pad-coordinate origins. Only "body_center" says where the body is;
 #: for the others the body centre is estimated (see PackageGeometry.body_frame_offset).
@@ -81,6 +82,10 @@ class PinSpec:
             if self.drill_mm is None:
                 raise ValueError(tx("il pin {number} richiede drill_mm", number=self.number))
             _finite(self.drill_mm, "drill_mm", True)
+            if (self.pad_type == "thru_hole"
+                    and float(self.drill_mm) >= min(float(self.pad_length_mm), float(self.pad_width_mm))):
+                raise ValueError(tx("Il foro del pin {number} deve essere minore di entrambe le dimensioni del pad.",
+                                    number=self.number))
 
 
 @dataclass

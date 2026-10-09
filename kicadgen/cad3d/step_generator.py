@@ -1046,7 +1046,9 @@ def _generate_populated_tht(params, body, pins, output_dir, **options):
                        # Una scheda popolata si collega con strip maschi saldati
                        # sotto (utente, 2026-09-26): pin quadrati e distanziale
                        # nero, non cilindri (vedi header_geometry).
-                       "pin_style": "male_header"},
+                       "pin_style": "male_header",
+                       # Missing positions do not change the physical header pitch.
+                       "header_pitches": [params.pitch] * len(pins)},
         **options)
     result["warnings"] = overlap_warnings + result.get("warnings", [])
     result["notes"] = ([] if progress else notes) + placement_notes + list(result.get("notes", []))

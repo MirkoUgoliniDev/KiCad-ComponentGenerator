@@ -36,6 +36,23 @@ class ProjectConfigError(ValueError):
     """@brief A project file that exists but must not be applied."""
 
 
+def saved_package_geometry(value):
+    """@brief Restore explicit pads from a saved project, or None for legacy projects.
+
+    @param value Package mapping, or None when the project has no explicit package.
+    @return Validated PackageGeometry, or None for an absent optional field.
+    @throws ProjectConfigError For malformed geometry: the project remains
+        protected from autosave instead of silently becoming a pin-header project.
+    """
+    if value is None:
+        return None
+    from ..core.package_geometry import package_from_mapping
+    try:
+        return package_from_mapping(value)
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise ProjectConfigError(f"package_geometry: {exc}") from exc
+
+
 def widget_value(widget):
     """@brief JSON-friendly value of an input widget.
 
@@ -137,6 +154,7 @@ def read_project_config(project_dir):
     state = document.get("state")
     if not isinstance(state, dict):
         raise ProjectConfigError(tx("{name} senza impostazioni", name=path.name))
+    saved_package_geometry(state.get("package_geometry"))
     return state
 
 

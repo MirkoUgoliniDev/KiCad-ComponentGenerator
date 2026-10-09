@@ -3902,7 +3902,7 @@ class MainWindow(QMainWindow):
 
     #: Estensioni delle foto che l'inventario prova come vista dall'alto
     #: (stesso filtro di `photo_inventory.extract_inventory`).
-    _PRETEST_PHOTO_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
+    _PRETEST_PHOTO_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
     @classmethod
     def _pretest_top_views(cls, doc_paths, document_roles) -> list:
@@ -4343,7 +4343,7 @@ class MainWindow(QMainWindow):
             return save_review_bundle(root if root is not None else self._project_dir(),
                                       proposals, photo_png, length, width,
                                       detector=detector, source_json=source_json,
-                                      reviewed=reviewed)
+                                      reviewed=reviewed, allow_empty=reviewed and not proposals)
         except (OSError, ValueError) as exc:
             self._append_log(tx("ATTENZIONE proposte non salvate nella cartella del componente: {exc}", exc=exc))
             return None
@@ -4435,12 +4435,13 @@ class MainWindow(QMainWindow):
     def _refresh_reopen_review_button(self) -> None:
         """@brief Abilita revisione (gratuita) e rilancio (a pagamento) quando c'e' cosa riaprire.
 
-        @note Entrambi seguono la stessa condizione: un pacchetto valido nella
-            cartella del componente (quote positive e almeno una proposta),
+        @note La revisione richiede un pacchetto valido nella
+            cartella del componente (anche svuotato esplicitamente),
             oppure -- ripiego di sessione -- proposte fresche in cache con le
             quote dell'ultima estrazione. Senza nome non c'e' cartella, quindi
             entrambi spenti. Non serve un'estrazione in questa sessione:
             appena il nome punta a una cartella con il pacchetto, si riapre.
+            Il rilancio a pagamento richiede anche almeno una proposta.
         """
         if self._pretest_mode():
             # Con «Solo YOLO locale» la riga riguarda il pretest (audit 25/09,
@@ -4455,9 +4456,11 @@ class MainWindow(QMainWindow):
             # Senza foto calibrata i riquadri non si possono ne' vedere ne'
             # riconciliare: pulsanti spenti invece di un avviso al clic.
             available = bundle.photo_path is not None or bool(self._photo_png)
+            relaunch = available and bool(bundle.proposals)
         else:
             available = self._fresh_cache_evidence() is not None
-        self._set_review_buttons_enabled(available)
+            relaunch = available
+        self._set_review_buttons_available(available, relaunch)
 
     def _pretest_mode(self) -> bool:
         """@brief True when the detector choice is the free «Solo YOLO locale» pretest."""
@@ -4585,8 +4588,8 @@ class MainWindow(QMainWindow):
 
         @param reopen True when «Riapri revisione» has a bundle to open.
         @param relaunch True when the paid relaunch has an extraction bundle.
-        @note The two differ only in pretest mode, where the reopened bundle
-            is the pretest's and nothing may be paid (audit 25/09, B2). The
+        @note A pretest or an explicitly empty review can be reopened for
+            editing, but cannot start a paid reconciliation. The
             copies of each command still move together.
         """
         self._review_bundle_available = bool(reopen)
@@ -4861,7 +4864,7 @@ class MainWindow(QMainWindow):
         if self._background_work_running() or self._automatic_generation_active:
             return
         bundle = self._ensure_review_bundle()
-        if bundle is None:
+        if bundle is None or not bundle.proposals:
             self._refresh_reopen_review_button()
             return
         photo_png = self._review_photo(bundle)
@@ -5699,10 +5702,6 @@ class MainWindow(QMainWindow):
         """
         if not pretest:
             self._reviewed_this_extraction = True
-        if not kept:
-            self._append_log(tx("Revisione dei corpi: nessuna proposta tenuta, pacchetto photo-review "
-                                "non scritto (le proposte grezze non vengono copiate)."))
-            return
         path = self._write_review_bundle([dict(p) for p in kept], photo_png, length_mm, width_mm,
                                          detector=detector,
                                          root=self._pretest_root() if pretest else None)
@@ -6100,6 +6099,9 @@ class MainWindow(QMainWindow):
                 widgets[name] = widget_value(widget)
         return {
             "widgets": widgets,
+            "package_geometry": ({**asdict(self.package_geometry),
+                                  "name": self._component_name()}
+                                 if self.package_geometry is not None else None),
             "models": {"session_model": getattr(self, "_session_model", None),
                        "vlm_model": getattr(self, "_vlm_model", None)},
             "sides": self._serialised_sides(),
@@ -6139,8 +6141,14 @@ class MainWindow(QMainWindow):
             non le cambia dalle Opzioni di generazione. Un'opzione che lo
             stato non dichiara torna al valore generale.
         """
-        from .project_state import set_widget_value
+        from .project_state import set_widget_value, saved_package_geometry
         from ..cad3d.annotations import EdgeFilletAnnotation, FaceTextAnnotation
+        # Validate before changing fields. Files read from disk have already
+        # passed this check; direct callers must obey the same contract.
+        package_geometry = saved_package_geometry(state.get("package_geometry"))
+        if package_geometry is not None:
+            # The folder is the project's identity, including after a rename.
+            package_geometry.name = self._component_name()
         skipped = []
         for name in PROJECT_WIDGETS:
             widget = getattr(self, name, None)
@@ -6241,6 +6249,8 @@ class MainWindow(QMainWindow):
         self._pcb_thickness_source, self._analysis_pcb_thickness = _saved_pcb_thickness(
             state.get("pcb_thickness"))
         self._refresh_type_effect()
+        self.package_geometry = package_geometry
+        self._set_regen_busy(False)
         if skipped:
             self._append_log(tx("Impostazioni del progetto non applicate (valori non validi): ")
                              + ", ".join(skipped) + ".")
@@ -7112,6 +7122,7 @@ class MainWindow(QMainWindow):
                     self._append_log(tx("ATTENZIONE: {note}", note=note))
             except (KeyError, TypeError, ValueError) as exc:
                 self._append_log(tx("ATTENZIONE geometria package ignorata: {exc}", exc=exc))
+        self._set_regen_busy(False)
 
         # Le due disposizioni riempiono gruppi di campi diversi; tutto il
         # resto (corpo 3D, pinout, colori, fillet, riepilogo) e' comune.
@@ -9697,11 +9708,14 @@ class MainWindow(QMainWindow):
             corso (FreeCAD)...». The progress modal is open meanwhile anyway.
         """
         button = self.btn_regen_3d
-        button.setEnabled(not busy)
+        unsupported = self.package_geometry is not None
+        button.setEnabled(not busy and not unsupported)
         button.setProperty("workflow_busy", bool(busy))
         button.setProperty(
             "workflow_title_source",
             "Generazione in corso (FreeCAD)..." if busy
+            else "Il generatore 3D non supporta ancora la geometria a pad espliciti."
+            if unsupported
             else button.property("workflow_idle_title_source"))
         button.setIcon(self._asset_icon(
             "wf-loading.svg" if busy else button.property("workflow_icon")))
@@ -9902,6 +9916,12 @@ class MainWindow(QMainWindow):
     def _regenerate_3d(self) -> None:
         """Rigenera solo lo STEP con le annotazioni correnti (il footprint resta com'e')."""
         if self._background_work_running() or self._automatic_generation_active:
+            return
+
+        if self.package_geometry is not None:
+            self._set_3d_status(self.i18n.text(
+                "Il generatore 3D non supporta ancora la geometria a pad espliciti."),
+                STATUS_WARNING)
             return
 
         body = self._current_body_params()
@@ -11179,6 +11199,12 @@ class MainWindow(QMainWindow):
                 return
             except Exception as exc:
                 self._append_log(tx("Anteprima mesh non disponibile: {exc}", exc=exc))
+        if self.package_geometry is not None:
+            self.preview_3d.clear_preview()
+            self._set_3d_status(self.i18n.text(
+                "Il generatore 3D non supporta ancora la geometria a pad espliciti."),
+                STATUS_WARNING)
+            return
         if self._is_castellated():
             # Per i moduli non esiste un'approssimazione parametrica da
             # disegnare al volo (il solido nasce dal taglio dei semi-fori):

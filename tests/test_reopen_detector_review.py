@@ -514,22 +514,69 @@ def test_extraction_without_review_dialog_still_copies_the_cache_rows(prepared):
     assert [r['_id'] for r in inv.load_review_bundle(window._project_dir()).proposals] == [1, 2]
 
 
-def test_review_that_keeps_nothing_marks_the_extraction_reviewed_and_copies_nothing(prepared, monkeypatch):
-    """@brief Tenere zero proposte non scrive il pacchetto e non lascia copiare la cache."""
-    window, cache, *_ = prepared
+@pytest.mark.parametrize('detector', ['yolo', 'yolo_smd'])
+def test_empty_review_replaces_old_bundle_and_survives_project_reopen(prepared, monkeypatch, detector):
+    """@brief An explicit empty review replaces old rows and prevents stale-cache recovery."""
+    window, cache, calls, *_ = prepared
+    folder = window._project_dir()
+    inv.save_review_bundle(folder, [_proposal(9)], _photo_png(), LENGTH, WIDTH)
     window._extraction_started_stamp = '20260101-000000'
     window._reviewed_this_extraction = False
     _save_evidence(cache, [_proposal(1)])
     _answer(monkeypatch, QDialog.DialogCode.Accepted, [])
     delivered = []
-    monkeypatch.setattr(window, '_extract_worker', _fake_extract_worker(delivered))
+    monkeypatch.setattr(window, '_extract_worker', _fake_extract_worker(delivered, detector))
     window._on_review_requested(_photo_png(), [_proposal(1)], LENGTH, WIDTH)
     assert delivered == [[]]
     assert window._reviewed_this_extraction is True
-    assert not (_bundle_dir(window) / 'proposals.json').exists()
-    assert 'nessuna proposta tenuta' in window.ai_progress_text.toPlainText()
-    window._on_extracted(_params())
-    assert not (_bundle_dir(window) / 'proposals.json').exists(), 'la cache grezza non va copiata'
+    bundle = inv.load_review_bundle(folder)
+    assert bundle is not None and bundle.proposals == []
+    assert bundle.photo_path.read_bytes() == _photo_png()
+    params = _params()
+    params.components_3d = []  # Result of the service's review-kept-none branch.
+    window._on_extracted(params)
+    assert inv.load_review_bundle(folder).proposals == []
+    window._save_project_config(force=True)
+    window._switch_project('OtherProject', window._general_project_state)
+    window._open_project_at(folder)
+    # Make even the session cache fallback usable: the committed empty bundle wins.
+    window._last_extracted = params
+    assert window._fresh_cache_evidence() is not None
+    assert window._ensure_review_bundle().proposals == []
+    window._refresh_reopen_review_button()
+    assert window.btn_component_review.isEnabled()
+    assert not window.btn_relaunch_inventory.isEnabled()
+    monkeypatch.setattr(window, '_ensure_api_key', lambda: pytest.fail('empty review must not request AI'))
+    window._relaunch_inventory()
+    assert window._reconcile_worker is None and calls == []
+
+
+def test_reopened_review_can_clear_everything_and_then_draw_new_proposals(prepared, monkeypatch):
+    """@brief A saved empty detector review stays editable without paying or recovering old rows."""
+    window, _cache, calls, *_ = prepared
+    folder = window._project_dir()
+    inv.save_review_bundle(folder, [_proposal(1)], _photo_png(), LENGTH, WIDTH)
+
+    with monkeypatch.context() as empty_answer:
+        # The dialog's result is the user's explicit rejection of all rows.
+        empty_answer.setattr(review_module.PhotoReviewDialog, 'kept_components', lambda self: [])
+        empty_answer.setattr(review_module.PhotoReviewDialog, 'exec', lambda self: QDialog.DialogCode.Accepted)
+        window._reopen_detector_review()
+    assert inv.load_review_bundle(folder).proposals == []
+    assert not window.btn_relaunch_inventory.isEnabled()
+
+    def draw_into_empty(dialog):
+        assert dialog.kept_components() == []
+        dialog.add_component((0, 0, 4, 2))
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(review_module.PhotoReviewDialog, 'exec', draw_into_empty)
+    window._reopen_detector_review()
+    restored = inv.load_review_bundle(folder)
+    assert len(restored.proposals) == 1
+    assert restored.proposals[0]['_yolo_manual_box'] is True
+    assert window.btn_relaunch_inventory.isEnabled()
+    assert calls == []
 
 
 def test_cancelled_in_extraction_review_writes_nothing(prepared, monkeypatch):
@@ -717,7 +764,7 @@ def test_bundle_without_photo_disables_both_buttons_and_warns_neutrally(prepared
     """@brief Senza foto calibrata (ne' su disco ne' in memoria) i pulsanti restano spenti."""
     window, _cache, _calls, _started, warnings = prepared
     inv.save_review_bundle(window._project_dir(), [_proposal(1)], _photo_png(), LENGTH, WIDTH)
-    (_bundle_dir(window) / 'photo.png').unlink()
+    inv.load_review_bundle(window._project_dir()).photo_path.unlink()
     assert not list(_bundle_dir(window).glob('*.png'))
     window._photo_png = None
     _retype_name(window)
