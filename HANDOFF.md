@@ -1,5 +1,29 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 2026-10-09 - Pubblicazione verifica KiCad e suggerimenti AI
+
+- Utente autorizza commit, push e merge in main del checkpoint corrente;
+  ritorno su ADVANCED. Le note NON COMMITTATO sottostanti sono incluse.
+- Verifica finale: 167 test passati; importazione STEP ESP32 provata con KiCad 10.
+  Chiamate AI simulate nei test, nessuna richiesta a pagamento eseguita.
+- Esclusi e preservati database locale, rows_none_rev.pkl e work/.
+
+## 2026-10-09 - Verifica componente e tipi pin AI (NON COMMITTATO)
+
+- Nuova icona nel tab KiCad: verifica in QThread, report copiabile con
+  OK/errori/avvisi/non verificato. CLI reale per SVG footprint/simbolo e STEP
+  senza scheda in progetto temporaneo; pin-pad da file reale, NPTH esclusi.
+  Simbolo applicato distinto da bozza e file esportato. Nessuna installazione.
+- Provata lettura footprint e STEP ESP32-S3-DEVKIT-NXRX con KiCad 10; simbolo
+  temporaneo di prova leggibile. STEP invalido rifiutato nel test negativo.
+- Icona AI nel simbolo: invio esplicito da dialogo di pinout/datasheet al modello
+  configurato, contabilizzazione progetto e wrapper chiamate esistente.
+  Proposte con fonte/motivo; identita' e tipi validati, fonti sconosciute =>
+  irrisolto. Conferma selettiva, tipi gia' revisionati non preselezionati;
+  inserimento in bozza annullabile senza cambiare geometria. Nessuna chiamata
+  AI a pagamento eseguita durante i test (provider simulato).
+- Ultimo checkpoint resta 8249ec4 ADVANCED / 8a6ac10 main.
+
 ## 2026-10-09 - Checkpoint editor avanzato e navigazione footprint
 
 - Utente autorizza commit di tutto il lavoro, push, merge in main e ritorno
