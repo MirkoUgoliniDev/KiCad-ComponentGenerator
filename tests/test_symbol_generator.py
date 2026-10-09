@@ -31,7 +31,7 @@ def test_pin_identity_and_types_survive_layout_and_export():
 @pytest.mark.parametrize('pins', [[], [SymbolPin('', 'GND')],
     [SymbolPin('1', 'GND'), SymbolPin(' 1 ', 'GND')],
     [SymbolPin('1\n', 'GND')], [SymbolPin('1', 'G\x00ND')],
-    [SymbolPin('1', 'GND', side='top')]])
+    [SymbolPin('1', 'GND', side='diagonal')]])
 def test_invalid_identity_never_exports(tmp_path, pins):
     path = tmp_path / 'module.kicad_sym'
     path.write_text('previous', encoding='utf-8')
@@ -88,7 +88,8 @@ def test_user_strings_are_quoted():
     assert '"GPIO\\"2\\\\x"' in text
 
 
-def test_real_kicad_can_load_all_electrical_types_and_export_svg(tmp_path):
+@pytest.mark.parametrize('free_positions', [False, True])
+def test_real_kicad_can_load_all_electrical_types_and_export_svg(tmp_path, free_positions):
     cli = shutil.which('kicad-cli')
     if not cli:
         candidate = Path('C:/Program Files/KiCad/10.0/bin/kicad-cli.exe')
@@ -96,7 +97,9 @@ def test_real_kicad_can_load_all_electrical_types_and_export_svg(tmp_path):
     if not cli:
         pytest.skip('KiCad CLI not installed')
     pins = [SymbolPin(str(i), 'GND' if i % 2 else 'GPIO"1\\test', kind,
-                      'left' if i < 6 else 'right')
+                      ('left', 'right', 'top', 'bottom')[(i - 1) // 3],
+                      position=(round((i - 6) * 5.08, 4), -25.4) if free_positions else None,
+                      angle=(i % 4) * 90 if free_positions else None)
             for i, kind in enumerate(ELECTRICAL_TYPES, 1)]
     path = export_symbol(tmp_path / 'module.kicad_sym', 'Module', pins,
                          footprint='MyLib:MyFootprint')
@@ -104,3 +107,46 @@ def test_real_kicad_can_load_all_electrical_types_and_export_svg(tmp_path):
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     assert list((tmp_path / 'svg').glob('*.svg'))
+
+
+def test_custom_four_side_layout_and_export():
+    import re
+    pins = [SymbolPin(str(i), 'GPIO' + str(i), 'input', side, 2.54)
+            for i, side in enumerate(('left', 'right', 'top', 'bottom'), 1)]
+    layout = layout_symbol(pins, [30.48, 20.32])
+    assert [(p.x, p.y, p.angle) for p in layout.pins] == [
+        (-17.78, 2.54, 0), (17.78, 2.54, 180), (2.54, 12.7, 270), (2.54, -12.7, 90)]
+    text = serialize_symbol('Custom', pins, body=[30.48, 20.32])
+    assert '(start -15.24 10.16) (end 15.24 -10.16)' in text
+    positions = re.findall(r'\(pin input line \(at ([-\d.]+) ([-\d.]+) (\d+)\)', text)
+    assert [(float(x), float(y), int(a)) for x, y, a in positions] == [
+        (p.x, p.y, p.angle) for p in layout.pins]
+
+
+@pytest.mark.parametrize('pins,body', [
+    ([SymbolPin('1', 'A', offset=1.27)], [20.32, 20.32]),
+    ([SymbolPin('1', 'A', offset=float('nan'))], [20.32, 20.32]),
+    ([SymbolPin('1', 'A', offset=10.16)], [20.32, 20.32]),
+    ([SymbolPin('1', 'A', offset=0), SymbolPin('2', 'B', offset=0)], [20.32, 20.32]),
+    ([SymbolPin('1', 'A')], [20, 20.32]),
+    ([SymbolPin('1', 'A')], [float('inf'), 20.32]),
+])
+def test_invalid_custom_geometry_does_not_replace_export(tmp_path, pins, body):
+    target = tmp_path / 'custom.kicad_sym'
+    target.write_text('previous')
+    with pytest.raises(ValueError):
+        export_symbol(target, 'Custom', pins, body=body)
+    assert target.read_text() == 'previous'
+
+
+@pytest.mark.parametrize('angle', [0, 90, 180, 270])
+def test_free_pin_export_keeps_terminal_and_orientation(angle):
+    pin = SymbolPin('42', 'GPIO', 'input', position=(50.8, -25.4), angle=angle)
+    assert f'(at 50.8 -25.4 {angle})' in serialize_symbol('Free', [pin], body=[10.16, 10.16])
+
+
+@pytest.mark.parametrize('position,angle', [((1, 2.54), 0), ((float('nan'), 0), 0),
+    ((0, 0), 45), ((0,), 90), ((0, 0), None)])
+def test_invalid_free_pin_is_rejected(position, angle):
+    with pytest.raises(ValueError):
+        layout_symbol([SymbolPin('1', 'A', position=position, angle=angle)])

@@ -1,5 +1,111 @@
 # Memoria delle decisioni del progetto
 
+## 2026-10-09 — Pubblicazione autorizzata editor grafico
+
+- Utente autorizza commit di tutto il lavoro editor, push, merge main e
+  ritorno su ADVANCED. Inclusi codice, icone, test, traduzioni e guida.
+- Database locale, rows_none_rev.pkl e work/ esclusi e preservati come nei
+  checkpoint precedenti. Hash/esito nel log Git; le voci non committate
+  seguenti descrivono la cronologia precedente a questa pubblicazione.
+
+- Tabella pin chiusa di default, prima icona toolbar per mostra/nascondi
+  con tooltip tradotto e stato attivo; larghezza conservata e dati intatti.
+  39 test passati e verifica Qt espansione/collasso. Non committato.
+
+- Aggiunta anche rotazione -180 nel menu pin, con icona speculare e tooltip
+  tradotto. 19 test passati; non committato.
+
+- Menu destro pin semplificato su richiesta: solo rotazioni con icona e
+  +90/-90/180 gradi, descrizione nel tooltip. Tolta voce proprieta' numeriche
+  dal menu (resta nella toolbar). 19 test passati; non committato.
+
+## 2026-10-09 — Revisione finale editor con tre agenti (NON COMMITTATO)
+
+- Richiesta esplicita utente di agenti esperti: interazioni, export/salvataggio,
+  visuale/i18n. Barra unica QAction con overflow funzionante alle larghezze
+  ridotte, Function 150 px, icone undo/redo distinte, tooltip e accessibilita'.
+- Drag/pan annullati correttamente con Esc, hide o cambio progetto; clic su
+  maniglia e proprieta' numeriche senza cambiamenti non sporcano il progetto.
+- Applica conserva undo/redo. Fallimento disco conserva bozza e cronologia
+  ripristinando baseline; retry testato. Export diretto blocca bozze pendenti.
+- Chiusura/cambio progetto con modifiche simbolo non applicate vengono
+  bloccati con indicazione Applica/Annulla: niente perdita silenziosa.
+- Verifica complessiva: 200 test passati, 1 saltato. KiCad CLI reale sui pin
+  liberi nei quattro orientamenti. QA Qt con font reale in IT/DE 1350/1000/800
+  px; screenshot work/editor-final.png e work/editor-de-1000.png.
+- Nessun commit, push o merge di questo lavoro. DB locale/pickle/work preservati.
+
+- Editor simbolo: aggiunte proprieta' numeriche XY/angolo dal menu destro
+  e icona sliders (abilitata con selezione), snap e validazione atomica.
+  Frecce spostano un passo, R ruota orario, Shift+R antiorario nella vista.
+  Undo/redo anche per modifica numerica unica. 38 test passati, non committato.
+
+- Toolbar simbolo unificata (non committato): tutti i comandi con icone e
+  tooltip tradotti sopra la vista, inclusi reset/annulla/applica/export.
+  Griglia toggle con icona, istruzioni nel tooltip Info. 37 test passati,
+  controllo visivo e verifica icone/tooltip/segnale export riusciti.
+
+- Rettifica colonna Funzione: 150 px espliciti, ridimensionabile, niente
+  Stretch; tabella massimo 405 px per evitare riallargamento automatico.
+
+## 2026-10-09 — Colonna Funzione piu' stretta (NON COMMITTATO)
+
+- Pannello tabella simbolo da 550 a 400 px: spazio sottratto alla colonna
+  Funzione elastica (circa dimezzata), Pin/Tipo invariati; editor ampliato.
+
+## 2026-10-09 — Navigazione CAD simbolo (NON COMMITTATO)
+
+- Preferenza aggiornata utente: sinistro premuto sullo spazio vuoto fa pan;
+  rotella zoom centrato sul cursore. Anche trascinamento centrale disponibile.
+- Area navigabile separata dai limiti del simbolo; Adatta inquadra solo il
+  contenuto. Pan/zoom non modificano pin o cronologia. Sinistro su pin e
+  maniglie mantiene editing, destro mantiene rotazione. 37 test passati.
+
+## 2026-10-09 — Pin liberi e menu rotazione (NON COMMITTATO)
+
+- Chiarimento utente: pin liberi sui nodi, non vincolati ai lati; rotazione
+  dal menu destro. Implementati posizione XY e angolo indipendenti.
+- Drag conserva orientamento e distanza dal punto afferrato (anche nome);
+  snap 2.54 mm, scambio su nodo occupato. Resize corpo lascia fermi i pin.
+- Menu contestuale: 90 antiorario, 90 orario, 180; pivot sul terminale.
+  Metadati symbol_position/symbol_angle condivisi da preview e .kicad_sym,
+  compatibilita' con layout precedenti, undo/redo e ripristino mantenuti.
+- 122 test passati: menu Qt, coordinate, angoli, persistenza, esportazione,
+  regressioni editor, traduzioni e guida. Nessun commit/push.
+
+## 2026-10-09 — Correzione trascinamento simbolo (NON COMMITTATO)
+
+- Utente segnala pin giallo ma fermo. Riprodotto blocco sulle file piene:
+  il gesto rifiutava ogni destinazione occupata. Ora scambia origine e
+  destinazione; anteprima calcolata dall'inizio del gesto evita scambi a
+  catena attraversando pin intermedi. Identita' e tipi rimangono intatti.
+- Mouse tracking e cattura esplicita viewport; posizione finale elaborata
+  anche al rilascio (move coalescenti). Un semplice clic non sporca il progetto.
+- 111 test passati: fila 44 pin, scambio 25/27 passando per 26, release senza
+  ultimo move, undo/redo, Esc, solo selezione, export, i18n e guida.
+- Controllo nativo tentato con skill Computer Use: helper non disponibile
+  (native pipe unavailable), anche dopo reset. Verifica effettuata con Qt.
+
+## 2026-10-09 — Editor grafico simbolo (NON COMMITTATO)
+
+- Richiesta utente: togliere colonna Lato, trascinare pin e ridimensionare
+  rettangolo partendo dal layout iniziale. Tabella ora Pin/Funzione/Tipo.
+- Trascinamento da terminale, numero o nome sui quattro lati; selezione
+  sincronizzata con tabella. Otto maniglie ridimensionano il corpo rispetto
+  al centro; pin seguono il bordo e conservano la coordinata lungo il lato.
+- Snap 2.54 mm obbligatorio anche con griglia nascosta. Posizioni occupate,
+  pin fuori bordo e geometrie non valide rifiutati da core e UI/export.
+- Cronologia 100 stati (un trascinamento = una modifica), Annulla/Ripeti,
+  Ctrl+Z/Ctrl+Shift+Z/Ctrl+Y nella vista, Esc annulla gesto. Ripristina
+  disposizione conserva nomi/tipi. Applica salva; Annulla torna all'applicato.
+- Metadati pinout symbol_offset e symbol_body [larghezza,altezza] salvano
+  geometria insieme a symbol_side (ora anche top/bottom). Core condiviso
+  anteprima/export; numeri mai modificati. Nessuna rigenerazione AI/3D.
+- 173 test passati, 1 saltato: mouse Qt, history, vincoli, persistenza,
+  export e parser KiCad reale sui quattro lati. QA visiva 44 pin in
+  work/symbol-editor-review.png. Guida e traduzioni aggiornate.
+- Nessun commit/push richiesto per questo nuovo lavoro; dati locali preservati.
+
 ## 2026-10-09 — Pubblicazione autorizzata griglia simbolo
 
 - Utente autorizza commit, push, merge main e ritorno su ADVANCED del

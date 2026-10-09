@@ -1,5 +1,56 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+- **09/10 — Pubblicazione editor autorizzata:** commit/push, merge main e
+  ritorno ADVANCED. Include editor grafico completo, menu rotazioni e tabella
+  collassabile. DB locale/pickle/work esclusi; hash/esito nel log Git.
+  Le voci NON COMMITTATO sotto sono cronologia antecedente al checkpoint.
+
+- Tabella pin NON COMMITTATO: collassata di default, toggle prima icona
+  toolbar con tooltip, larghezza preservata. 39 test passati.
+
+- Menu pin: aggiunta -180 con icona e tooltip, NON COMMITTATO.
+
+- Menu pin NON COMMITTATO: icone +90/-90/180, tooltip; rimossa ultima voce
+  proprieta' dal menu destro. 19 test passati.
+
+- **09/10 — Editor revisionato con 3 agenti, NON COMMITTATO:** toolbar
+  responsive con overflow, gesti annullabili, undo dopo Apply, bozza mantenuta
+  su errore disco, blocco navigazione/export su bozza pendente. 200 passati,
+  1 skipped; KiCad CLI e QA IT/DE fino a 800 px. work/editor-final.png.
+  Nessuna pubblicazione autorizzata per queste modifiche.
+
+- Editor NON COMMITTATO: proprieta' pin XY/angolo, frecce passo griglia,
+  R/Shift+R rotazione; barra unica icone confermata. 38 test passati.
+
+- Toolbar simbolo NON COMMITTATO: una riga sopra la vista, sole icone con
+  tooltip; rimossi pulsanti inferiori e seconda riga. 37 test e QA visiva.
+
+- Rettifica Funzione: larghezza esplicita 150 px, tabella max 405 px.
+
+- **09/10 — Colonna Funzione NON COMMITTATO:** tabella da 550 a 400 px,
+  circa meta' larghezza per Funzione, spazio recuperato per editor.
+
+- **09/10 — Pan/zoom NON COMMITTATO:** sinistro su spazio vuoto sposta la
+  vista (preferenza finale utente), rotella zoom sul cursore, Adatta sul
+  contenuto. Centrale disponibile; editing separato. 37 test passati.
+
+- **09/10 — Pin liberi NON COMMITTATO:** XY con snap 100 mil e angolo
+  indipendente, menu destro 90/-90/180 sul punto di connessione. Resize
+  corpo non muove pin; salvataggio/export e undo/redo coerenti. 122 test
+  passati. Supera il precedente vincolo ai lati; nessun commit richiesto.
+
+- **09/10 — Fix drag NON COMMITTATO:** file occupate ora permettono scambio
+  dei due pin, senza scambi intermedi; cattura mouse e rilascio finale
+  gestiti esplicitamente. Solo clic lascia progetto pulito. 111 test passati.
+  Helper desktop indisponibile: QA tramite eventi Qt, dettagli MEMORY.md.
+
+- **09/10 — Editor grafico simbolo NON COMMITTATO:** rimossa colonna Lato;
+  drag pin sui quattro lati, otto maniglie per resize centrato, snap 100 mil,
+  controlli collisioni/bordi, undo/redo ed Esc. Layout persistito nei metadati
+  pinout, condiviso con export. 173 test passati/1 skipped e QA visiva.
+  Ultima pubblicazione: ADVANCED 048b5cf, merge main bf0a7e9. Nessuna nuova
+  autorizzazione a commit/push; DB locale, pickle e work/ preservati.
+
 - **09/10 — Pubblicazione griglia autorizzata:** commit/push e merge main,
   poi ritorno ADVANCED. Include griglia visibile e pin allineati 100 mil;
   dati locali esclusi. Hash/esito nel log Git; voci sotto antecedenti.

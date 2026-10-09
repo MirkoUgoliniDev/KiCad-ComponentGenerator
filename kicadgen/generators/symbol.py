@@ -31,6 +31,9 @@ class SymbolPin:
     name: str
     electrical_type: str = 'passive'
     side: str = 'left'
+    offset: float | None = None
+    position: tuple[float, float] | None = None
+    angle: int | None = None
 
 
 @dataclass(frozen=True)
@@ -73,7 +76,7 @@ def normalize_pins(pins: Iterable[SymbolPin]) -> tuple[SymbolPin, ...]:
             raise ValueError(f'Duplicate pin number: {number}')
         seen.add(number)
         name = _text(pin.name, f'Pin {number} name')
-        if pin.side not in ('left', 'right'):
+        if pin.side not in ('left', 'right', 'top', 'bottom'):
             raise ValueError(f'Pin {number}: invalid side')
         electrical_type = pin.electrical_type if pin.electrical_type in ELECTRICAL_TYPES else 'passive'
         result.append(replace(pin, number=number, name=name, electrical_type=electrical_type))
@@ -82,34 +85,97 @@ def normalize_pins(pins: Iterable[SymbolPin]) -> tuple[SymbolPin, ...]:
     return tuple(result)
 
 
-def layout_symbol(pins: Iterable[SymbolPin]) -> SymbolLayout:
-    """Deterministic 100 mil spacing, connection points on the 100 mil grid.
+def symbol_inputs(rows):
+    """Decode project metadata without discarding pin identities or electrical roles."""
+    pins = [SymbolPin(str(row.get('pin', '')), str(row.get('name') or ''),
+                      row.get('electrical_type', 'passive'),
+                      row.get('symbol_side', 'left'), row.get('symbol_offset'),
+                      row.get('symbol_position'), row.get('symbol_angle')) for row in rows]
+    bodies = [row['symbol_body'] for row in rows if 'symbol_body' in row]
+    if bodies and any(body != bodies[0] for body in bodies):
+        raise ValueError('Inconsistent symbol body dimensions')
+    return pins, bodies[0] if bodies else None
 
-    Both columns retain input order from top to bottom. Width grows with the
-    longest names on each side instead of shrinking text or overlapping labels.
+
+def layout_symbol(pins: Iterable[SymbolPin], body=None) -> SymbolLayout:
+    """Shared geometry for editor and export; every terminal is on the 100 mil grid.
+
+    Custom offsets are y coordinates for left/right and x for top/bottom.
+    The body stays centred; dimensions are multiples of two grid steps.
     """
     pins = normalize_pins(pins)
     spacing = PIN_GRID_MM
-    sides = {side: [p for p in pins if p.side == side] for side in ('left', 'right')}
-    # Conservative full-em estimate accommodates Unicode and wide glyphs.
-    lengths = [max((len(p.name) for p in group), default=0) for group in sides.values()]
-    half_width = max(5.08, math.ceil((sum(lengths) * TEXT_SIZE + 5.08) / 5.08) * 2.54)
-    rows = max(map(len, sides.values()))
-    height = (rows + 1) * spacing
-    # With an even row count exact centring offsets every pin by half a
-    # grid step. Prefer on-grid connections to exact visual symmetry.
-    first_y = (rows // 2) * spacing
-    counters = {'left': 0, 'right': 0}
-    positioned = []
+    sides = {side: [p for p in pins if p.side == side]
+             for side in ('left', 'right', 'top', 'bottom')}
+    lengths = [max((len(p.name) for p in sides[side]), default=0) for side in ('left', 'right')]
+    half_width = max(5.08, math.ceil((sum(lengths) * TEXT_SIZE + 5.08) / 5.08) * spacing,
+                     math.ceil((max(len(sides['top']), len(sides['bottom'])) + 1) / 2) * spacing)
+    half_height = max(5.08, math.ceil((max(len(sides['left']), len(sides['right'])) + 1) / 2) * spacing)
+    if body is not None:
+        if not isinstance(body, (list, tuple)) or len(body) != 2:
+            raise ValueError('Invalid symbol body dimensions')
+        try:
+            width, height = map(float, body)
+        except (TypeError, ValueError):
+            raise ValueError('Invalid symbol body dimensions') from None
+        for value in (width, height):
+            if not math.isfinite(value) or value < 4 * spacing or value > 1000:
+                raise ValueError('Symbol body dimensions must be between 10.16 and 1000 mm')
+            if not math.isclose(value / (2 * spacing), round(value / (2 * spacing)), abs_tol=1e-7):
+                raise ValueError('Symbol body must align to the grid')
+        half_width, half_height = width / 2, height / 2
+    positioned, occupied = [], set()
+    counters = dict.fromkeys(sides, 0)
+    vertical_rows = max(len(sides['left']), len(sides['right']))
+    horizontal_rows = max(len(sides['top']), len(sides['bottom']))
     for pin in pins:
+        if pin.position is not None:
+            if not isinstance(pin.position, (list, tuple)) or len(pin.position) != 2:
+                raise ValueError('Invalid pin position')
+            try:
+                x, y = map(float, pin.position)
+            except (TypeError, ValueError):
+                raise ValueError('Invalid pin position') from None
+            for value in (x, y):
+                if not math.isfinite(value) or abs(value) > 1000 or not math.isclose(
+                        value / spacing, round(value / spacing), abs_tol=1e-7):
+                    raise ValueError('Pin connection must align to the grid')
+            angle = pin.angle
+            if angle not in (0, 90, 180, 270):
+                raise ValueError('Invalid pin angle')
+            positioned.append(PositionedPin(pin, round(x, 4), round(y, 4), int(angle)))
+            continue
+        vertical = pin.side in ('left', 'right')
+        count = vertical_rows if vertical else horizontal_rows
         index = counters[pin.side]
         counters[pin.side] += 1
-        x = half_width + spacing
-        if pin.side == 'left':
-            x = -x
-        positioned.append(PositionedPin(pin, x, round(first_y - index * spacing, 4),
-                                        0 if pin.side == 'left' else 180))
-    return SymbolLayout(half_width * 2, height, spacing, spacing, tuple(positioned))
+        offset = ((count // 2) - index) * spacing
+        if not vertical:
+            offset = -offset
+        if pin.offset is not None:
+            try:
+                offset = float(pin.offset)
+            except (TypeError, ValueError):
+                raise ValueError('Invalid pin offset') from None
+        if not math.isfinite(offset) or not math.isclose(offset / spacing, round(offset / spacing), abs_tol=1e-7):
+            raise ValueError('Pin connection must align to the grid')
+        offset = round(offset, 4)
+        if abs(offset) >= (half_height if vertical else half_width):
+            raise ValueError('Pin must remain inside its body edge')
+        if (pin.side, offset) in occupied:
+            raise ValueError('Two pins cannot occupy the same position')
+        occupied.add((pin.side, offset))
+        x, y, angle = {
+            'left': (-half_width - spacing, offset, 0),
+            'right': (half_width + spacing, offset, 180),
+            'top': (offset, half_height + spacing, 270),
+            'bottom': (offset, -half_height - spacing, 90),
+        }[pin.side]
+        positioned.append(PositionedPin(pin, round(x, 4), round(y, 4), angle))
+    points = [(p.x, p.y) for p in positioned]
+    if len(points) != len(set(points)):
+        raise ValueError('Two pins cannot occupy the same position')
+    return SymbolLayout(half_width * 2, half_height * 2, spacing, spacing, tuple(positioned))
 
 
 def _quote(value: str) -> str:
@@ -121,14 +187,14 @@ def _num(value: float) -> str:
 
 
 def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
-                     footprint: str = '', reference: str = 'U') -> str:
+                     footprint: str = '', reference: str = 'U', body=None) -> str:
     """Return a KiCad 6+ symbol library with a single, single-unit symbol."""
     name = _text(name, 'Symbol name', required=True)
     if ':' in name:
         raise ValueError('Symbol name must not contain a library separator (:).')
     footprint = _text(footprint, 'Footprint')
     reference = _text(reference, 'Reference', required=True)
-    layout = layout_symbol(pins)
+    layout = layout_symbol(pins, body)
     w, h = layout.width / 2, layout.height / 2
     effects = '(effects (font (size 1.27 1.27)))'
     lines = ['(kicad_symbol_lib (version 20211014) (generator kicadgen)',
@@ -155,9 +221,9 @@ def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
 
 
 def export_symbol(path: str | Path, name: str, pins: Iterable[SymbolPin], *,
-                  footprint: str = '', reference: str = 'U') -> Path:
+                  footprint: str = '', reference: str = 'U', body=None) -> Path:
     """Validate before touching disk and atomically replace an explicitly chosen file."""
-    text = serialize_symbol(name, pins, footprint=footprint, reference=reference)
+    text = serialize_symbol(name, pins, footprint=footprint, reference=reference, body=body)
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix='.' + target.name + '.', suffix='.tmp', dir=target.parent)
