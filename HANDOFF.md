@@ -1,5 +1,20 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+- **09/10 — Simbolo elettrico: pubblicazione autorizzata.** Commit/push,
+  merge in main e ritorno su ADVANCED richiesti dall'utente. Inclusi codice,
+  test, icona, traduzioni e guida; dati locali e work/ esclusi e preservati.
+  I riepiloghi NON COMMITTATO sotto sono cronologia precedente al checkpoint.
+  Consultare Git per hash ed esito della pubblicazione.
+
+- **09/10 — Simbolo elettrico NON COMMITTATO:** nuovo terzo tab, editor nomi,
+  tipi elettrici/lati e preview; export atomico .kicad_sym validato da KiCad10.
+  Pin ID dai pad reali, NPTH esclusi, salvataggio progetto con rollback errori.
+  Tipi iniziali passive da verificare. Ctrl+3 simbolo, Ctrl+4 3D, Ctrl+5 KiCad.
+  Export separato da installazione footprint/3D. 155 passati/1 skipped,
+  39 finali dopo affinamenti, QA visiva. Tre agenti coinvolti su richiesta.
+  Ultimo checkpoint precedente 1afe0bb ADVANCED, merge main13daa5b: nessuna
+  autorizzazione a committare questo nuovo lavoro. Dettagli MEMORY.md.
+
 - **09/10 — Checkpoint autorizzato dall'utente:** commit/push delle modifiche
   di revisione, header/riuso, stime pad, pinout editabile, etichette 2D/3D e
   relativi test/guida; merge in main e ritorno su ADVANCED. Database locale,

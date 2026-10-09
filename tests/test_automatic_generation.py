@@ -45,7 +45,7 @@ def begin(window, monkeypatch):
     window._extract_with_ai()
 
 
-def test_only_the_four_workflow_tabs_exist(window):
+def test_five_workflow_tabs_include_electrical_symbol(window):
     """@brief I tab Footprint 2D e Genera sono stati cancellati (utente, 2026-09-26).
 
     Positivo: restano Progetto, Anteprima, Modello 3D e KiCad, negli indici
@@ -53,8 +53,8 @@ def test_only_the_four_workflow_tabs_exist(window):
     parametri sono valori non grafici con gli stessi limiti degli editor.
     """
     from kicadgen.gui.component_state import BoundedValue
-    assert window.tabs.count() == 4
-    assert (gui.TAB_PROJECT, gui.TAB_PREVIEW, gui.TAB_MODEL_3D, gui.TAB_KICAD) == (0, 1, 2, 3)
+    assert window.tabs.count() == 5
+    assert (gui.TAB_PROJECT, gui.TAB_PREVIEW, gui.TAB_SYMBOL, gui.TAB_MODEL_3D, gui.TAB_KICAD) == (0, 1, 2, 3, 4)
     assert window.tabs.tabText(gui.TAB_MODEL_3D) == window.i18n.tr("tab.model3d.name")
     for name in ('footprint_subtabs', 'label_summary', 'btn_generate', 'table_sides',
                  'table_components', 'table_annotations', 'log_text',
@@ -290,7 +290,7 @@ def test_an_old_advanced_preference_is_ignored(window, monkeypatch):
     monkeypatch.setattr(gui, 'load_config', app_config.load_config)
     restored = gui.MainWindow()
     try:
-        assert restored.tabs.count() == 4
+        assert restored.tabs.count() == 5
     finally:
         # Destroyed now, not by a later GC pass inside another test.
         dispose_window(restored)
