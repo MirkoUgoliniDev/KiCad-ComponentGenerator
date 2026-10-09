@@ -1,5 +1,27 @@
 # Memoria delle decisioni del progetto
 
+## 2026-10-09 — Pubblicazione autorizzata griglia simbolo
+
+- Utente autorizza commit, push, merge main e ritorno su ADVANCED del
+  checkpoint griglia e allineamento pin documentato sotto. Dati locali
+  esclusi e preservati. Hash ed esito nel log Git; le voci non committate
+  seguenti descrivono lo stato precedente a questa pubblicazione.
+
+## 2026-10-09 — Pin simbolo sui nodi della griglia (non committato)
+
+- Corretto centraggio delle file con numero pari di pin: prima erano
+  sfalsate di 1.27 mm rispetto alla griglia visibile da 2.54 mm.
+- Layout condiviso anteprima/export ora allinea tutte le connessioni a
+  100 mil; passo della griglia UI ricavato dalla stessa costante del core.
+- 25 test simbolo/core/UI/integrazione passati, inclusa lettura con CLI
+  KiCad. Per i file gia' esportati occorre riesportare .kicad_sym.
+
+## 2026-10-09 — Griglia simbolo (non committato)
+
+- Anteprima simbolo con griglia 0.1 in / 2.54 mm visibile di default,
+  checkbox Griglia nella toolbar. Disegnata sullo sfondo in coordinate
+  scena: segue zoom/pan senza influire sul simbolo o sul file esportato.
+
 ## 2026-10-09 — Pubblicazione autorizzata del simbolo elettrico
 
 - L'utente richiede commit di tutto il lavoro sul simbolo, push, merge main

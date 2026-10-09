@@ -2,16 +2,20 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from PyQt6.QtCore import Qt, pyqtSignal
+import math
+from PyQt6.QtCore import Qt, pyqtSignal, QLineF
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QComboBox, QGraphicsScene, QGraphicsView, QHBoxLayout,
+    QAbstractItemView, QCheckBox, QComboBox, QGraphicsScene, QGraphicsView, QHBoxLayout,
     QHeaderView, QLabel, QPushButton, QSplitter, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from ..generators.symbol import ELECTRICAL_TYPES, SymbolPin, layout_symbol
+from ..generators.symbol import ELECTRICAL_TYPES, PIN_GRID_MM, SymbolPin, layout_symbol
 from .pinout_dialog import pin_sort_key
+
+SCENE_UNITS_PER_MM = 10.0
+GRID_MM = PIN_GRID_MM
 
 _TYPE_LABELS = {
     'input': 'Ingresso', 'output': 'Uscita', 'bidirectional': 'Bidirezionale',
@@ -31,6 +35,28 @@ class _SymbolView(QGraphicsView):
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setBackgroundBrush(QColor('#181825'))
         self.auto_fit = True
+        self.show_grid = True
+
+    def set_grid_visible(self, visible):
+        self.show_grid = bool(visible)
+        self.viewport().update()
+
+    def drawBackground(self, painter, rect):
+        super().drawBackground(painter, rect)
+        if not self.show_grid:
+            return
+        step = GRID_MM * SCENE_UNITS_PER_MM
+        pen = QPen(QColor('#36364b'))
+        pen.setCosmetic(True)
+        painter.save()
+        painter.setPen(pen)
+        for index in range(math.floor(rect.left() / step), math.ceil(rect.right() / step) + 1):
+            x = index * step
+            painter.drawLine(QLineF(x, rect.top(), x, rect.bottom()))
+        for index in range(math.floor(rect.top() / step), math.ceil(rect.bottom() / step) + 1):
+            y = index * step
+            painter.drawLine(QLineF(rect.left(), y, rect.right(), y))
+        painter.restore()
 
     def fit(self):
         self.auto_fit = True
@@ -107,6 +133,11 @@ class SymbolTab(QWidget):
         toolbar.addStretch()
         preview_layout.addLayout(toolbar)
         self.view = _SymbolView()
+        self.grid_check = QCheckBox(self.tx('Griglia'))
+        self.grid_check.setChecked(True)
+        self.grid_check.toggled.connect(self.view.set_grid_visible)
+        toolbar.addWidget(self.grid_check)
+        toolbar.addWidget(QLabel('0.1 in (2.54 mm)'))
         preview_layout.addWidget(self.view)
         splitter.addWidget(preview)
         splitter.setSizes([550, 650])
@@ -263,7 +294,7 @@ class SymbolTab(QWidget):
         scene.clear()
         if symbol is None:
             return
-        scale = 10.0
+        scale = SCENE_UNITS_PER_MM
         pen = QPen(QColor('#89b4fa'), 1.3)
         text_color = QColor('#cdd6f4')
         font = QFont(self.font())

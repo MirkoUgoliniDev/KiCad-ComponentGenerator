@@ -18,8 +18,8 @@ def test_pin_identity_and_types_survive_layout_and_export():
     layout = layout_symbol(pins)
     assert [p.pin.number for p in layout.pins] == [str(n) for n in range(1, 45)]
     assert len({(p.x, p.y) for p in layout.pins}) == 44
-    assert all(abs(p.x / 1.27 - round(p.x / 1.27)) < 1e-9 for p in layout.pins)
-    assert all(abs(p.y / 1.27 - round(p.y / 1.27)) < 1e-9 for p in layout.pins)
+    assert all(abs(p.x / 2.54 - round(p.x / 2.54)) < 1e-9 for p in layout.pins)
+    assert all(abs(p.y / 2.54 - round(p.y / 2.54)) < 1e-9 for p in layout.pins)
     assert layout.pins[0].y == layout.pins[22].y
     text = serialize_symbol('ESP32', pins, footprint='ESP32:ESP32')
     assert text.count('(pin power_in line') == 22
@@ -43,6 +43,23 @@ def test_invalid_identity_never_exports(tmp_path, pins):
 def test_unknown_electrical_role_is_never_guessed():
     result = normalize_pins([SymbolPin('A1', 'GPIO2', 'invented'), SymbolPin('A2', '5V')])
     assert [p.electrical_type for p in result] == ['passive', 'passive']
+
+
+@pytest.mark.parametrize('left,right', [(1, 0), (2, 2), (3, 3), (22, 22), (4, 1), (0, 6)])
+def test_exported_connection_points_match_visible_grid(left, right):
+    import re
+    from kicadgen.gui.symbol_tab import GRID_MM
+    pins = [SymbolPin(str(n), 'GPIO', side='left' if n < left else 'right')
+            for n in range(left + right)]
+    layout = layout_symbol(pins)
+    exported = serialize_symbol('Board', pins)
+    points = re.findall(r'\(pin \w+ line \(at ([-\d.]+) ([-\d.]+) (\d+)\)', exported)
+    assert len(points) == len(pins)
+    for placed, (x, y, angle) in zip(layout.pins, points):
+        assert (float(x), float(y), int(angle)) == (placed.x, placed.y, placed.angle)
+        for value in (float(x), float(y)):
+            assert value / GRID_MM == pytest.approx(round(value / GRID_MM))
+        assert abs(placed.y) < layout.height / 2
 
 
 def test_long_names_expand_body_without_changing_grid():

@@ -22,6 +22,7 @@ ELECTRICAL_TYPES = (
 )
 TEXT_SIZE = 1.27
 PIN_NAME_OFFSET = 0.508
+PIN_GRID_MM = 2.54
 
 
 @dataclass(frozen=True)
@@ -82,20 +83,22 @@ def normalize_pins(pins: Iterable[SymbolPin]) -> tuple[SymbolPin, ...]:
 
 
 def layout_symbol(pins: Iterable[SymbolPin]) -> SymbolLayout:
-    """Deterministic 100 mil spacing, connection points on the 50 mil grid.
+    """Deterministic 100 mil spacing, connection points on the 100 mil grid.
 
     Both columns retain input order from top to bottom. Width grows with the
     longest names on each side instead of shrinking text or overlapping labels.
     """
     pins = normalize_pins(pins)
-    spacing = 2.54
+    spacing = PIN_GRID_MM
     sides = {side: [p for p in pins if p.side == side] for side in ('left', 'right')}
     # Conservative full-em estimate accommodates Unicode and wide glyphs.
     lengths = [max((len(p.name) for p in group), default=0) for group in sides.values()]
     half_width = max(5.08, math.ceil((sum(lengths) * TEXT_SIZE + 5.08) / 5.08) * 2.54)
     rows = max(map(len, sides.values()))
     height = (rows + 1) * spacing
-    first_y = (rows - 1) * spacing / 2
+    # With an even row count exact centring offsets every pin by half a
+    # grid step. Prefer on-grid connections to exact visual symmetry.
+    first_y = (rows // 2) * spacing
     counters = {'left': 0, 'right': 0}
     positioned = []
     for pin in pins:
