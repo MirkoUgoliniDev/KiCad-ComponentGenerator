@@ -8419,7 +8419,11 @@ class MainWindow(QMainWindow):
             "kicad-test.svg", "Prova in KiCad...",
             "Apre un progetto temporaneo: non installa e non modifica librerie KiCad")
         self.btn_test_kicad.clicked.connect(self._test_in_kicad)
-        review_layout.addLayout(self._note_with_icons(review_note, self.btn_test_kicad))
+        self.btn_verify_component = self._workflow_tool_button(
+            'wf-review.svg', 'Verifica componente per KiCad',
+            'Controlla footprint, simbolo, corrispondenza pin-pad e importazione 3D con KiCad')
+        self.btn_verify_component.clicked.connect(self._verify_component)
+        review_layout.addLayout(self._note_with_icons(review_note, self.btn_verify_component, self.btn_test_kicad))
         outer.addWidget(review_group)
 
         install_group = QGroupBox("Installazione nella libreria")
@@ -8460,6 +8464,14 @@ class MainWindow(QMainWindow):
         outer.addStretch()
         self._refresh_output_actions()
         return tab
+
+    def _verify_component(self):
+        from .component_check_dialog import ComponentCheckDialog
+        pending = self.symbol_tab.has_pending_edits()
+        args = dict(directory=self._project_dir(), name=self._component_name(),
+                    rows=deepcopy(self.symbol_tab.rows()), pending=pending,
+                    issues=self.symbol_tab.review_issues() if not pending else ())
+        ComponentCheckDialog(args, self, tx=self.i18n.text).exec()
 
     @staticmethod
     def _note_with_icons(note, *buttons) -> QHBoxLayout:
@@ -9650,7 +9662,37 @@ class MainWindow(QMainWindow):
         self.symbol_tab = SymbolTab(tx=self.i18n.text)
         self.symbol_tab.edits_applied.connect(self._apply_symbol_pinout)
         self.symbol_tab.export_requested.connect(self._export_electrical_symbol)
+        self.symbol_tab.pin_types_ai_requested.connect(self._suggest_pin_types)
         return self.symbol_tab
+
+    def _suggest_pin_types(self):
+        from .pin_type_dialog import PinTypeDialog
+        if self._background_work_running() or self._automatic_generation_active:
+            QMessageBox.information(self, self.i18n.text('Suggerisci tipi pin con AI'),
+                                    self.i18n.text('Attendi la fine del lavoro in corso.'))
+            return
+        try:
+            paths, roles = self._selected_documents()
+            documents = [p for p in paths if set(roles.get(p.name, ())) & {'pinout', 'datasheet'}]
+            if not documents:
+                raise ValueError(self.i18n.text('Seleziona un documento pinout o datasheet nel progetto.'))
+        except (ValueError, OSError, RuntimeError) as exc:
+            QMessageBox.warning(self, self.i18n.text('Suggerisci tipi pin con AI'), str(exc))
+            return
+        if not self._ensure_api_key():
+            return
+        snapshot = self.symbol_tab.draft_rows()
+        dialog = PinTypeDialog(dict(name=self._component_name(), rows=snapshot,
+                                   documents=documents, model=self._vision_model()), self, tx=self.i18n.text)
+        account = getattr(self, 'ai_account', None)
+        if account:
+            account.bind_run_project(self._project_dir_or_none())
+        try:
+            if dialog.exec() == QDialog.DialogCode.Accepted and snapshot == self.symbol_tab.draft_rows():
+                self.symbol_tab.use_pin_type_suggestions(dialog.selected())
+        finally:
+            if account:
+                account.release_run_project()
 
     def _symbol_pad_ids(self):
         """Electrical identities come from the actual footprint, never row indices."""

@@ -253,6 +253,7 @@ class SymbolTab(QWidget):
     The owner persists edits_applied and performs export_requested.
     """
     edits_applied = pyqtSignal(list)
+    pin_types_ai_requested = pyqtSignal()
     export_requested = pyqtSignal()
 
     def __init__(self, parent=None, tx=None):
@@ -381,6 +382,7 @@ class SymbolTab(QWidget):
         self.lock_button.defaultAction().setCheckable(True)
         self.lock_button.defaultAction().toggled.connect(self._set_body_locked)
         self.review_button = icon_button('wf-review.svg', 'Controlla simbolo', self.show_review)
+        self.pin_types_ai_button = icon_button('wf-relaunch-ai.svg', 'Suggerisci tipi pin con AI', self.pin_types_ai_requested.emit)
         self.recovery_button = icon_button('project-open.svg', 'Recupera bozza', self.recover_draft)
         self.recovery_button.defaultAction().setEnabled(False)
         self.properties_button = icon_button('sliders.svg', 'Posizione e orientamento del pin', self._edit_selected_pin)
@@ -486,6 +488,7 @@ class SymbolTab(QWidget):
     def _type_changed(self, index):
         if not self._loading:
             self._draft[index]['electrical_type_reviewed'] = True
+            self._draft[index].pop('electrical_type_evidence', None)
             self._changed()
 
     def set_recovery_path(self, path):
@@ -574,6 +577,18 @@ class SymbolTab(QWidget):
     def rows(self):
         """Return independent applied rows for persistence/export."""
         return deepcopy(self._baseline)
+
+    def use_pin_type_suggestions(self, proposals):
+        """One undoable draft operation, preserving all pin and body geometry."""
+        rows = self.draft_rows()
+        by_number = {str(p['pin']): p for p in proposals}
+        for row in rows:
+            proposal = by_number.get(str(row['pin']))
+            if proposal and proposal['electrical_type'] in ELECTRICAL_TYPES:
+                row['electrical_type'] = proposal['electrical_type']
+                row['electrical_type_reviewed'] = True
+                row['electrical_type_evidence'] = {'source': proposal['source'], 'reason': proposal['reason']}
+        self._populate(rows)
 
     def retranslate(self):
         """Refresh dynamic labels without losing unapplied edits."""

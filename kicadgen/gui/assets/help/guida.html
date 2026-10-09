@@ -539,6 +539,21 @@ programma.</p>
   questo esistono la revisione e <span class="ui">Modifica componenti…</span>.</li>
 </ul>
 
+<h2>Verifica del componente e tipi elettrici AI</h2>
+<p>Nel tab <span class="ui">KiCad</span>, l'icona <span class="ui">Verifica componente per KiCad</span>
+controlla i file generati, la corrispondenza dei numeri pin-pad e prova la lettura di footprint,
+simbolo e STEP con KiCad CLI, usando una cartella temporanea. Il rapporto copiabile distingue
+controlli superati, errori, avvisi e controlli non eseguiti. Il simbolo applicato viene provato
+anche se non ancora esportato; le bozze non applicate sono escluse e segnalate.
+Questa verifica non certifica pinout, misure, allineamento visivo 3D o librerie installate;
+ERC e DRC vanno eseguiti sullo schema e sulla scheda finali.</p>
+<p>Nel tab <span class="ui">Simbolo elettrico</span>, <span class="ui">Suggerisci tipi pin con AI</span>
+usa i documenti dichiarati pinout o datasheet e il modello AI configurato. Prima della chiamata
+sono mostrati modello e documenti; l'analisi può comportare costi. Le proposte includono fonte
+e motivazione: controllarle e selezionare quelle da usare. I casi incerti restano da verificare;
+i tipi già confermati non sono preselezionati. Le modifiche entrano nella bozza come una sola
+operazione annullabile e vengono salvate con <span class="ui">Applica</span>.</p>
+
 <footer>KiCadGen — guida d'uso. Il programma è distribuito con licenza GNU AGPL-3.0;
 le licenze dei componenti di terze parti sono nel menu
 <span class="ui">? → Licenze</span>.</footer>
