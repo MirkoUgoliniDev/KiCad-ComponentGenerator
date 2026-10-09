@@ -1,5 +1,40 @@
 # Memoria delle decisioni del progetto
 
+## 2026-10-09 - Checkpoint editor avanzato e navigazione footprint
+
+- Utente autorizza commit di tutto il lavoro, push, merge in main e ritorno
+  su ADVANCED. Include funzioni avanzate del simbolo e griglia/zoom/pan footprint.
+- Esclusi dati locali: data/analysis_profiles.sqlite3, rows_none_rev.pkl, work/.
+- Le sezioni NON COMMITTATO sottostanti descrivono il lavoro incluso in questo
+  checkpoint; non rappresentano nuove modifiche successive alla pubblicazione.
+
+- **09/10 - Footprint (NON COMMITTATO):** griglia ancorata al primo pad,
+  senza modificare coordinate o interassi; coincidenza degli altri pad solo
+  quando compatibili con il passo. FootprintView con zoom al cursore,
+  pan sinistro/centrale e icone zoom/Adatta. Test geometrie compatibili e
+  incompatibili, navigazione Qt e conservazione vista al cambio griglia.
+
+## 2026-10-09 — Funzioni avanzate editor (NON COMMITTATO)
+
+- Dopo checkpoint 1b03cc6 (merge main c6ead84), utente autorizza le sei
+  proposte: selezione multipla, allinea/distribuisci, coordinate/zoom,
+  blocco corpo, controllo export, recupero bozza. Nessun nuovo commit richiesto.
+- Ctrl+clic e Maiusc+rettangolo (Ctrl+Maiusc aggiunge); icona selezione modalita'
+  rettangolo. Trasformazioni gruppo atomiche su griglia, collisioni rifiutate;
+  rotazione attorno al pin attivo. Distribuzione passo intero regolare dal primo.
+- Lucchetto corpo rimuove maniglie senza cambiare dati. Readout cursore,
+  coordinate/angolo pin attivo, zoom e conteggio selezione sotto canvas.
+- Controlla simbolo segnala nomi vuoti, tipi passive/unspecified non verificati,
+  sovrapposizione bounding box dei testi effettivamente renderizzati. Modifica
+  combo marca ruolo verificato. Prima export dialogo con Annulla/Esporta comunque.
+- .symbol-draft.json locale salva atomicamente ogni modifica conclusa; fingerprint
+  baseline e identita' pin impediscono recuperi su revisione diversa. Icona
+  Recupera bozza propone ripristino senza applicare. Cancel/successful Apply
+  puliscono file; errore disco conserva versione precedente e segnala problema.
+- Nuovi moduli generators/symbol_edit.py e services/symbol_draft.py; test nuovi
+  test_symbol_advanced.py. 210 test passati/1 skipped; screenshot Qt
+  work/editor-advanced.png. Dati locali precedenti preservati.
+
 ## 2026-10-09 — Pubblicazione autorizzata editor grafico
 
 - Utente autorizza commit di tutto il lavoro editor, push, merge main e
