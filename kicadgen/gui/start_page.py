@@ -42,11 +42,12 @@ NO_PROJECTS_TOOLTIP = ("Nessun progetto nell'area di lavoro: crea prima un proge
 SUMMARY_ROLE = Qt.ItemDataRole.UserRole + 1
 
 #: Widest the page column may grow, in average character widths of the page
-#: font. A reading choice: about 96 characters (some 670 logical pixels at
-#: 10 pt) show a typical project path whole while the column does not stretch
+#: font. A reading choice: about 120 characters (some 840 logical pixels at
+#: 10 pt) leave room for the German introduction on one line and project paths,
+#: while the column does not stretch
 #: across a maximised wide window. It is measured in characters, not pixels,
 #: so it follows the font; logical pixels then follow the display scaling.
-COLUMN_WIDTH_CHARS = 96
+COLUMN_WIDTH_CHARS = 120
 
 #: Side of the application icon above the title, in logical pixels (Qt scales
 #: logical pixels with the display, so it stays proportionate at 200%).

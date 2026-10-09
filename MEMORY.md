@@ -1,5 +1,76 @@
 # Memoria delle decisioni del progetto
 
+## 2026-10-09 — Checkpoint wizard autorizzato per commit, push e merge
+
+- L'utente ha richiesto commit e push, merge in main e ritorno su ADVANCED.
+  Questo checkpoint comprende wizard, navigazione, montaggio/diametri dal
+  progetto e dall'anteprima, fori visibili e pagina iniziale piu' larga.
+- Pulsante dell'anteprima ridotto a icona wf-regenerate.svg con tooltip
+  tradotto "Aggiorna solo il footprint". Ultima verifica dedicata: 29 test.
+- Esclusi il database locale modificato data/analysis_profiles.sqlite3,
+  rows_none_rev.pkl e work/: restano locali. Non autorizzati nuovi commit
+  per modifiche successive. Esito della pubblicazione verificabile nel log Git.
+
+## 2026-10-09 — Montaggio modificabile dall'anteprima (non committato)
+
+- Nell'anteprima footprint aggiunti scelta montaggio diretto/header, diametro
+  pad e foro e Aggiorna solo il footprint. Controlli sincronizzati con il
+  wizard e con il ripristino del progetto; errori visibili anche qui.
+  Anteprima immediata, esportazione senza AI/CAD, geometria fisica 3D invariata.
+- Schermata iniziale allargata da 96 a 120 caratteri per il testo tedesco.
+- Verifica: 91 test mirati passati; compilazione e diff --check puliti.
+  Nessun nuovo commit/push/merge. Database e rows_none_rev.pkl lasciati intatti.
+
+## 2026-10-09 — Wizard B e montaggio sulla scheda ospitante (non committato)
+
+- Navigazione affinata su richiesta dell'utente: tornando indietro si deve
+  raggiungere la schermata iniziale Nuovo/Apri/Recenti. Eliminata la tappa
+  isolata "Progetto" (quasi vuota): nome/cartella nel pannello richiudibile
+  Dati del progetto, sopra i Documenti. Il percorso ora e' Documenti ->
+  Montaggio e analisi; da Documenti "Torna ai progetti" salva e chiude il
+  progetto corrente. Se il salvataggio fallisce o c'e' un lavoro in corso,
+  non abbandona il progetto. Nessuna modifica a footprint o modello 3D.
+
+- Correzione successiva segnalata dall'utente: l'anteprima PackageGeometry
+  disegnava ogni pad come rettangolo pieno, ignorando forma e drill. Ora
+  disegna cerchi/ovali/roundrect e fori; numeri esterni ai pad forati per non
+  coprire l'apertura. File ESP32 verificato in sola lettura: gia' presenti
+  44 pad THT circolari e 44 drill da 1 mm. Nessuna modifica al 3D o ai file
+  generati dell'utente. Nuove regressioni test_package_preview_drills.py;
+  61 test mirati passati e cattura Qt verificata in work/qa/header-holes-fixed.png.
+
+- Pubblicazione precedente completata: commit ADVANCED `18561b6`, merge main
+  `5762554`, entrambi sul remoto. Tornati su ADVANCED.
+- L'utente ha scelto il mockup B e autorizzato l'implementazione, da affinare
+  dopo. Nessuna nuova autorizzazione a commit, push o merge.
+- Il tab Progetto ora ha due pagine: Documenti, Montaggio e analisi.
+  Indietro/Continua non avviano AI. Il pulsante di analisi e' fuori dallo
+  scorrimento nella seconda pagina. Strumenti AI e' chiuso di default, con
+  riepilogo del rilevatore/modello; si apre per gli errori di configurazione.
+- Decisione esplicita: il 3D della BOARD resta fedele alla foto, rame e fori
+  compresi. Il tipo di montaggio NON cambia quel modello. La visualizzazione
+  opzionale degli header resta una scelta separata (`show_pins_3d`).
+- `host_mounting` in project_config.json sceglie le piazzole della scheda
+  ospitante: comportamento precedente per saldatura diretta oppure pad
+  circolari THT ai centri dei fori chiusi per gli header. Diametro pad/foro
+  editabili, inizialmente 1,7/1,0 mm da verificare. Nessun foro inventato sui
+  contatti che hanno soltanto un mezzo foro; nessuna modifica ai parametri
+  fisici del modulo. Le vecchie configurazioni restano in modalita' diretta.
+- `GenerateWorker.footprint_params` separa l'esportazione 2D dai parametri
+  fisici passati al 3D. Il pulsante Aggiorna solo il footprint evita AI e CAD:
+  conserva STEP e mesh esistenti e richiede dati gia' acquisiti.
+- Nuove regressioni in test_host_mounting.py e test_project_wizard.py:
+  coordinate/numeri invariati, nessuna mutazione del modulo, worker 3D con
+  geometria originale, STEP/mesh conservati, navigazione, persistenza e
+  configurazioni legacy. Test di visibilita' SMD adattato al pannello chiuso.
+- Mockup e cattura della GUI implementata sotto work/ (non tracciati).
+  `rows_none_rev.pkl` resta il diagnostico preesistente: non includerlo.
+- Verifica finale delle suite interessate: 339 passati, 2 saltati; controllo
+  compilazione e git diff --check puliti. GUI verificata anche con cattura Qt
+  e tema reale. Nessuna chiamata AI o ricostruzione FreeCAD reale nei test.
+- A fine lavoro compare nuovamente modificato `data/analysis_profiles.sqlite3`:
+  origine non verificata, preservato. Nessun commit eseguito.
+
 ## 2026-10-09 ? Pubblicazione delle correzioni
 
 L'utente ha confermato il funzionamento e richiesto esplicitamente commit,
