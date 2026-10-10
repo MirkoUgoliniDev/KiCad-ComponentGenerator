@@ -1,4 +1,4 @@
-"""Reuse the last successful model choices when only optional headers change."""
+"""@brief Reuse the last successful model choices when only optional headers change."""
 
 from dataclasses import asdict, is_dataclass
 from copy import deepcopy
@@ -39,7 +39,7 @@ def _stamp(path):
 
 
 class HeaderModelReuse:
-    """A project-local snapshot, valid only for a headers-only change.
+    """@brief A project-local snapshot, valid only for a headers-only change.
 
     Normal regeneration still searches the libraries. A changed body, contact,
     annotation, model file or generated output invalidates the snapshot.
@@ -60,7 +60,7 @@ class HeaderModelReuse:
             pass
 
     def load(self):
-        """Return copied resolved components, or None when reuse is not proven."""
+        """@brief Return copied resolved components, or None when reuse is not proven."""
         if self.key is None:
             return None
         try:
@@ -107,7 +107,7 @@ class HeaderModelReuse:
         return _digest(inputs)
 
     def save(self, components, result):
-        """Publish a snapshot only after a successful STEP exists; best effort."""
+        """@brief Publish a snapshot only after a successful STEP exists; best effort."""
         if self.key is None or not result.get('step_path'):
             return
         temporary = None

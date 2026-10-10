@@ -88,7 +88,7 @@ class PinoutDialog(QDialog):
         layout.addWidget(buttons)
 
     def edited_pinout(self) -> list[dict]:
-        """Copy edited functions, preserving original pin IDs, order and metadata."""
+        """@brief Copy edited functions, preserving original pin IDs, order and metadata."""
         result = deepcopy(self._entries)
         for row, index in enumerate(self._row_indices):
             result[index]['name'] = self.table.item(row, 1).text().strip()

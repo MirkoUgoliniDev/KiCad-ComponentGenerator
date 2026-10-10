@@ -14,7 +14,7 @@ from kicadgen.gui import main_window as gui
 
 
 def _prepare(window, monkeypatch, validate):
-    monkeypatch.setattr(window, "_component_name", lambda: "TEST")
+    window.field_name.setText("TEST")
     monkeypatch.setattr(window, "_extract_block_reason", lambda: None)
     module = ModuleType("kicadgen.services.photo_yolo")
     module.validate_yolo_setup = validate

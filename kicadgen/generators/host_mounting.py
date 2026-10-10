@@ -18,22 +18,27 @@ def _validate_header_clearance(pins, pad_diameter):
                 raise ValueError(tx("Le piazzole degli header sono troppo grandi per la distanza fra i contatti."))
 
 
-def header_footprint_params(params, pad_diameter=1.7, drill=1.0):
+def header_footprint_params(params, pad_diameter=1.7, drill=1.0, shape="circle",
+                           pad_overrides=None):
     """@brief Build independent host lands at the module's closed-hole centres.
 
     @param params Physical module parameters, never modified.
     @param pad_diameter Host copper diameter in mm, chosen by the user.
     @param drill Host drill diameter in mm, chosen for the header pins.
+    @param shape Host copper shape (circle or square/rect).
     @return Independent parameters used only by footprint export and 2D preview.
     @throws ValueError For missing closed holes, invalid sizes or overlapping lands.
     """
     if any(isinstance(v, bool) or not isinstance(v, (int, float))
            or not isfinite(v) or v <= 0 for v in (pad_diameter, drill)):
-        raise ValueError(tx("Diametro pad e foro degli header devono essere positivi."))
+        raise ValueError(tx("Dimensione pad e foro degli header devono essere positivi."))
+    if shape not in {"circle", "rect"}:
+        raise ValueError(tx("Forma pad header non valida."))
     if drill >= pad_diameter:
-        raise ValueError(tx("Il foro degli header deve essere minore del diametro del pad."))
+        raise ValueError(tx("Il foro degli header deve essere minore del lato/dimensione del pad."))
     if isinstance(params, PinHeaderParams):
-        result = replace(params, pad_diameter=pad_diameter, drill=drill)
+        result = replace(params, pad_diameter=pad_diameter, drill=drill,
+                         pad_shape=shape, pad_overrides=dict(pad_overrides or {}))
         result.validate()
         return result
     if isinstance(params, PackageGeometry):
@@ -48,11 +53,17 @@ def header_footprint_params(params, pad_diameter=1.7, drill=1.0):
         _validate_header_clearance(electrical, pad_diameter)
         # Preserve the declared source frame, numbering and mechanical holes.
         # Only already-drilled electrical lands receive the host dimensions.
-        result = replace(params, pins=[
-            pin if pin.pad_type == "np_thru_hole" else replace(
-                pin, pad_length_mm=pad_diameter, pad_width_mm=pad_diameter,
-                shape="circle", drill_mm=drill)
-            for pin in params.pins])
+        result_pins = []
+        for pin in params.pins:
+            if pin.pad_type == "np_thru_hole":
+                result_pins.append(pin)
+                continue
+            override = (pad_overrides or {}).get(str(pin.number), {})
+            size = float(override.get("size", pad_diameter))
+            result_pins.append(replace(
+                pin, pad_length_mm=size, pad_width_mm=size,
+                shape=override.get("shape", shape), drill_mm=drill))
+        result = replace(params, pins=result_pins)
         result.validate()
         return result
     if not isinstance(params, CastellatedModuleParams):
@@ -65,10 +76,13 @@ def header_footprint_params(params, pad_diameter=1.7, drill=1.0):
             raise ValueError(tx("Il contatto {number} non ha un foro passante per gli header.",
                                 number=placement.number))
         x, y = params.thru_hole_centre(placement)
+        override = (pad_overrides or {}).get(str(placement.number), {})
+        size = float(override.get("size", pad_diameter))
         pins.append(PinSpec(number=placement.number, x_mm=x, y_mm=y,
-                            pad_length_mm=pad_diameter, pad_width_mm=pad_diameter,
+                            pad_length_mm=size, pad_width_mm=size,
                             side=placement.edge, name=params.silk_labels.get(placement.number, ""),
-                            pad_type="thru_hole", shape="circle", drill_mm=drill))
+                            pad_type="thru_hole", shape=override.get("shape", shape),
+                            drill_mm=drill))
     _validate_header_clearance(pins, pad_diameter)
     result = PackageGeometry(name=params.name, family="module",
                              body_length_mm=params.body_length,

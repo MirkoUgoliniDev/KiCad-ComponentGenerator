@@ -61,6 +61,8 @@ class PinHeaderParams:
     row_spacing: Optional[float] = None
     pad_diameter: float = 1.7
     drill: float = 1.0
+    pad_shape: str = "circle"
+    pad_overrides: Optional[dict] = field(default=None)
     margin: float = 1.0
     populated_pins: Optional[set] = field(default=None)
     # Posizione esplicita dei pin: {numero_pin: (riga, colonna)}. Serve quando la
@@ -106,6 +108,20 @@ class PinHeaderParams:
             raise ValueError(tx("Il drill deve essere > 0."))
         if self.pad_diameter <= self.drill:
             raise ValueError(tx("Il diametro pad deve essere maggiore del drill."))
+        if self.pad_shape not in {"circle", "rect"}:
+            raise ValueError(tx("La forma dei pad header deve essere circle o rect."))
+        if self.pad_overrides:
+            positions = {str(pin) for pin, _, _ in pin_positions(self)}
+            for number, override in self.pad_overrides.items():
+                if str(number) not in positions or not isinstance(override, dict):
+                    raise ValueError(tx("Override pad header non valido: {number}.", number=number))
+                shape = override.get("shape")
+                size = override.get("size")
+                if shape not in {"circle", "rect"} or isinstance(size, bool) \
+                        or not isinstance(size, (int, float)) or not isfinite(size) \
+                        or size <= self.drill:
+                    raise ValueError(tx("Forma o dimensione non valida per il pad {number}.",
+                                        number=number))
         if self.populated_pins is not None:
             max_pin = self.rows * self.cols
             for p in self.populated_pins:
@@ -157,38 +173,53 @@ class PinHeaderParams:
         The pads actually emitted are checked (pin_positions), so a sparse
         pin map with a small grid pitch is accepted when the populated pads
         are far apart, and a full grid is checked along the pitch, the row
-        spacing and the diagonal alike. Pin 1 is a square pad (see
-        build_pin_header): its corner reaches further than a circle.
+        spacing and the diagonal alike. Square header pads use their corners
+        when checking copper clearance.
         """
         radius = self.pad_diameter / 2
         pads = sorted(pin_positions(self), key=lambda item: item[1])
         for index, (pin_a, xa, ya) in enumerate(pads):
             for pin_b, xb, yb in pads[index + 1:]:
-                if xb - xa >= 2 * radius + MIN_PAD_GAP_MM:
-                    break  # sorted by x: every later pad is further along X
-                gap = _pad_gap(xa, ya, pin_a == 1, xb, yb, pin_b == 1, radius)
+                size_a = float((self.pad_overrides or {}).get(str(pin_a), {}).get(
+                    "size", self.pad_diameter))
+                size_b = float((self.pad_overrides or {}).get(str(pin_b), {}).get(
+                    "size", self.pad_diameter))
+                radius_a, radius_b = size_a / 2, size_b / 2
+                if xb - xa >= radius_a + radius_b + MIN_PAD_GAP_MM:
+                    continue
+                shape_a = (self.pad_overrides or {}).get(str(pin_a), {}).get(
+                    "shape", "rect" if self.pad_shape == "rect" or pin_a == 1 else "circle")
+                shape_b = (self.pad_overrides or {}).get(str(pin_b), {}).get(
+                    "shape", "rect" if self.pad_shape == "rect" or pin_b == 1 else "circle")
+                gap = _pad_gap_variable(xa, ya, shape_a, radius_a,
+                                        xb, yb, shape_b, radius_b)
                 if gap < MIN_PAD_GAP_MM - 1e-9:
                     distance = hypot(xb - xa, yb - ya)
                     raise ValueError(tx(
-                        "Pad {a} e {b}: piazzole di {pad:.2f} mm con i centri a {distance:.2f} "
+                        "Pad {a} e {b}: piazzole di lato/dimensione {pad:.2f} mm con i centri a {distance:.2f} "
                         "mm lasciano {gap:.2f} mm di rame libero, meno del minimo di "
-                        "{minimum:.2f} mm (si toccherebbero o quasi). Riduci il diametro del "
+                        "{minimum:.2f} mm (si toccherebbero o quasi). Riduci la dimensione del "
                         "pad o controlla passo e distanza tra righe.",
                         a=pin_a, b=pin_b, pad=self.pad_diameter, distance=distance,
                         gap=max(gap, 0.0), minimum=MIN_PAD_GAP_MM))
 
 
-def _pad_gap(xa, ya, square_a, xb, yb, square_b, radius) -> float:
-    """Free copper between two pads of the same size (circle, or square for pin 1)."""
+def _pad_gap_variable(xa, ya, shape_a, radius_a, xb, yb, shape_b, radius_b) -> float:
+    """Minimum copper clearance between circular and square pads."""
+    square_a, square_b = shape_a == "rect", shape_b == "rect"
     if not square_a and not square_b:
-        return hypot(xb - xa, yb - ya) - 2 * radius
+        return hypot(xb - xa, yb - ya) - radius_a - radius_b
     if square_a and square_b:
-        dx, dy = abs(xb - xa) - 2 * radius, abs(yb - ya) - 2 * radius
+        dx, dy = abs(xb - xa) - radius_a - radius_b, abs(yb - ya) - radius_a - radius_b
         return hypot(dx, dy) if dx > 0 and dy > 0 else max(dx, dy)
-    # Square (half side = radius) against a circle of the same radius.
-    dx = max(0.0, abs(xb - xa) - radius)
-    dy = max(0.0, abs(yb - ya) - radius)
-    return hypot(dx, dy) - radius
+    # Distance from the circular centre to the nearest point on the square.
+    if square_a:
+        dx = max(0.0, abs(xb - xa) - radius_a)
+        dy = max(0.0, abs(yb - ya) - radius_a)
+        return hypot(dx, dy) - radius_b
+    dx = max(0.0, abs(xb - xa) - radius_b)
+    dy = max(0.0, abs(yb - ya) - radius_b)
+    return hypot(dx, dy) - radius_a
 
 
 def pin_positions(params: PinHeaderParams) -> Iterator[Tuple[int, float, float]]:
@@ -282,13 +313,16 @@ def build_pin_header(params: PinHeaderParams) -> Footprint:
     fp.add_graphic(_pin_one_marker(start, end, positions, radius))
 
     for pin, x, y in positions:
-        shape = "rect" if pin == 1 else "circle"
+        override = (params.pad_overrides or {}).get(str(pin), {})
+        shape = override.get("shape", "rect" if pin == 1 and params.pad_shape == "circle"
+                             else params.pad_shape)
+        size = float(override.get("size", params.pad_diameter))
         fp.add_pad(Pad(
             number=str(pin),
             pad_type="thru_hole",
             shape=shape,
             at=(x, y),
-            size=(params.pad_diameter, params.pad_diameter),
+            size=(size, size),
             drill=params.drill,
             layers=["*.Cu", "*.Mask"],
         ))

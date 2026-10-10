@@ -121,9 +121,10 @@ def test_open_3dshapes_dir_reports_a_refused_folder(window, monkeypatch, tmp_pat
     monkeypatch.setattr(gui.webbrowser, "open", lambda url: opened.append(url))
     blocker = tmp_path / "blocker"
     blocker.write_text("a file where a folder is needed")
-    monkeypatch.setattr(window, "_project_dir", lambda: blocker / "Project")
-    lines_before = len(window._log_lines)
-    window._open_3dshapes_dir()
+    with monkeypatch.context() as operation:
+        operation.setattr(window, "_project_dir", lambda: blocker / "Project")
+        lines_before = len(window._log_lines)
+        window._open_3dshapes_dir()
     assert opened == []
     # The component log lives in the same refused folder, so it may add its own line.
     assert any(".3dshapes" in line for line in window._log_lines[lines_before:])
@@ -133,10 +134,11 @@ def test_open_3dshapes_dir_opens_a_creatable_folder(window, monkeypatch):  # noq
     """@brief Negative: a creatable folder is created and opened without log lines."""
     opened = []
     monkeypatch.setattr(gui.webbrowser, "open", lambda url: opened.append(url))
-    monkeypatch.setattr(window, "_project_dir", lambda: window._library_root() / "Shapes")
-    monkeypatch.setattr(window, "_component_name", lambda: "Part")
-    lines_before = len(window._log_lines)
-    window._open_3dshapes_dir()
+    with monkeypatch.context() as operation:
+        operation.setattr(window, "_project_dir", lambda: window._library_root() / "Shapes")
+        operation.setattr(window, "_component_name", lambda: "Part")
+        lines_before = len(window._log_lines)
+        window._open_3dshapes_dir()
     assert len(opened) == 1 and (window._library_root() / "Shapes" / "Part.3dshapes").is_dir()
     assert window._log_lines[lines_before:] == []
 

@@ -38,7 +38,8 @@ def test_footprint_without_step_is_not_completed(window, tmp_path):  # noqa: F81
     window.field_library_root.setText(str(tmp_path))
     _outputs(tmp_path, "SCHEDA", step=False)
     window.field_name.setText("SCHEDA")
-    assert not window.tabs.isTabEnabled(KICAD)
+    assert window.tabs.isTabEnabled(KICAD)
+    assert not window.btn_test_kicad.isEnabledTo(window.tabs.widget(KICAD))
 
 
 def test_leaving_a_completed_project_moves_off_the_kicad_tab(window, tmp_path):  # noqa: F811

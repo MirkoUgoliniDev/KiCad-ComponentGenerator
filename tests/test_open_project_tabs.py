@@ -176,7 +176,8 @@ def test_files_deleted_outside_say_so_and_close_the_kicad_tab(window, tmp_path, 
     monkeypatch.setattr(QMessageBox, "warning", lambda *a: warnings.append(a))
     window._test_in_kicad()
     assert warnings, "il comando deve dire che cosa manca"
-    assert not window.tabs.isTabEnabled(kicad) and window.tabs.currentIndex() != kicad
+    assert window.tabs.isTabEnabled(kicad)
+    assert not window.btn_test_kicad.isEnabledTo(window.tabs.widget(kicad))
 
 
 def test_coming_back_to_the_window_rechecks_the_files(window, tmp_path, monkeypatch):  # noqa: F811
@@ -188,7 +189,8 @@ def test_coming_back_to_the_window_rechecks_the_files(window, tmp_path, monkeypa
     (folder / "FINITO.3dshapes" / "FINITO.step").unlink()
     monkeypatch.setattr(window, "isActiveWindow", lambda: True)
     window.changeEvent(QEvent(QEvent.Type.ActivationChange))
-    assert not window.tabs.isTabEnabled(window.KICAD_TAB_INDEX)
+    assert window.tabs.isTabEnabled(window.KICAD_TAB_INDEX)
+    assert not window.btn_test_kicad.isEnabledTo(window.tabs.widget(window.KICAD_TAB_INDEX))
 
 
 @pytest.mark.parametrize("step_is_older", [True, False])

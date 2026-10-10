@@ -1,4 +1,4 @@
-"""Project-local crash recovery; separate from the applied component configuration."""
+"""@brief Project-local crash recovery; separate from the applied component configuration."""
 import hashlib
 import json
 import os
@@ -8,10 +8,12 @@ from ..fsutil import replace_file
 
 
 def fingerprint(rows):
+    """@brief Hash applied row data to bind recovery drafts to an exact baseline."""
     return hashlib.sha256(json.dumps(rows, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()
 
 
 def save_draft(path, baseline, rows):
+    """@brief Atomically persist recovery rows and the applied-baseline fingerprint."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps({'version': 1, 'baseline': fingerprint(baseline), 'rows': rows}, ensure_ascii=False)
@@ -27,6 +29,7 @@ def save_draft(path, baseline, rows):
 
 
 def load_draft(path, baseline):
+    """@brief Read a bounded recovery file only when its baseline and pin identities match."""
     path = Path(path)
     if not path.is_file() or path.stat().st_size > 2000000:
         return None
