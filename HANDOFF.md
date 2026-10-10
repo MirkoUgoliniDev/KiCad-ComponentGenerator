@@ -9,7 +9,7 @@
   fixture conftest per il wizard. Esclusi rows_none_rev.pkl, tmp/, work/.
   Inclusi docs/VE12H-K/ e il database profili (controllo segreti: nessuna
   chiave). La palette di elementi grafici resta da fare (sezione sotto).
-- Suite completa prima delle ultime tre modifiche (blocco pad espliciti,
+- Commit ADVANCED: cc912c9. Suite completa prima delle ultime tre modifiche (blocco pad espliciti,
   didascalia, numeri sui package): 7097 passati; suite mirate dopo: verdi.
 
 ## 2026-10-10 - Palette di elementi grafici nel simbolo (IN CORSO)
