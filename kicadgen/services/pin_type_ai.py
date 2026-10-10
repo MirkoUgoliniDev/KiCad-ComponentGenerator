@@ -1,6 +1,7 @@
-"""Document-backed suggestions only; never change pin identity or geometry."""
+"""@brief Document-backed suggestions only; never change pin identity or geometry."""
 import json
 from pathlib import Path
+from .messages import tx
 from ..generators.symbol import ELECTRICAL_TYPES
 from .datasheet_extractor import _file_to_content_block
 from .openrouter import call_tool
@@ -9,40 +10,56 @@ from .providers import ensure_providers_ready
 
 
 def validate_suggestions(data, rows, sources):
-    allowed = {str(row['pin']) for row in rows}
+    """@brief Validate proposal identities and evidence, leaving unresolved pins unknown."""
+    ordered = [str(row['pin']) for row in rows]
+    allowed = set(ordered)
     proposals = data.get('pins') if isinstance(data, dict) else None
     if not isinstance(proposals, list):
-        raise ValueError('Risposta AI priva della lista pin.')
+        raise ValueError(tx('Risposta AI priva della lista pin.'))
     result, seen = [], set()
     for item in proposals:
         if not isinstance(item, dict):
-            raise ValueError('Proposta pin non valida.')
-        number = str(item.get('pin', ''))
+            raise ValueError(tx('Proposta pin non valida.'))
+        number = item.get('pin', '')
         kind = item.get('electrical_type')
-        if number not in allowed or number in seen or kind not in (*ELECTRICAL_TYPES, 'unknown'):
-            raise ValueError('Risposta AI con pin duplicati, sconosciuti o tipi non validi.')
+        if not isinstance(number, str) or number not in allowed or number in seen or kind not in (*ELECTRICAL_TYPES, 'unknown'):
+            raise ValueError(tx('Risposta AI con pin duplicati, sconosciuti o tipi non validi.'))
         seen.add(number)
-        source = str(item.get('source', ''))
-        reason = str(item.get('reason', '')).strip()
+        source = item.get('source', '')
+        reason = item.get('reason', '')
+        if not isinstance(source, str) or not isinstance(reason, str):
+            raise ValueError(tx('Fonte e motivazione AI devono essere testo.'))
+        reason = reason.strip()
         # A model confidence score cannot replace documentary evidence.
         if kind != 'unknown' and (source not in sources or not reason):
             kind = 'unknown'
         result.append(dict(pin=number, electrical_type=kind, source=source, reason=reason))
-    for number in allowed - seen:
-        result.append(dict(pin=number, electrical_type='unknown', source='', reason='Nessuna proposta.'))
+    for number in ordered:
+        if number in seen:
+            continue
+        result.append(dict(pin=number, electrical_type='unknown', source='', reason=tx('Nessuna proposta.')))
     return result
 
 
 def suggest_pin_types(name, rows, documents, model, *, progress=None, cancelled=None):
+    """@brief Request document-backed electrical role proposals without changing project rows."""
+    def check_cancel():
+        if cancelled is not None:
+            cancelled()
+
+    check_cancel()
     if not documents:
-        raise ValueError('Seleziona un documento pinout o datasheet nel progetto.')
+        raise ValueError(tx('Seleziona un documento pinout o datasheet nel progetto.'))
     if not rows:
-        raise ValueError('Nessun pin da analizzare.')
+        raise ValueError(tx('Nessun pin da analizzare.'))
     sources = [Path(p).name for p in documents]
+    if len(set(sources)) != len(sources):
+        raise ValueError(tx('I documenti devono avere nomi distinti per identificare le fonti.'))
     blocks = [{'type': 'text', 'text': json.dumps({'component': name, 'pins': [
         {'pin': str(r['pin']), 'name': r.get('name', ''), 'current_type': r.get('electrical_type', 'passive')}
         for r in rows]}, ensure_ascii=False)}]
     for document in documents:
+        check_cancel()
         blocks.append({'type': 'text', 'text': 'Document: ' + Path(document).name})
         blocks.append(_file_to_content_block(Path(document)))
     tool = {'type': 'function', 'function': {'name': 'suggest_pin_types',
@@ -65,6 +82,8 @@ def suggest_pin_types(name, rows, documents, model, *, progress=None, cancelled=
         'Existing types may be manually chosen: suggestions are for review, not authoritative corrections.')
     call = make_logged_call(call_tool, progress, cancel=cancelled)
     ensure_providers_ready([model], progress)
+    check_cancel()
     data = call(model=model, system_prompt=prompt, content_blocks=blocks, tool=tool,
                 max_tokens=8192, has_pdf=any(Path(p).suffix.lower() == '.pdf' for p in documents))
+    check_cancel()
     return validate_suggestions(data, rows, sources)

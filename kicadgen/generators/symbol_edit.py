@@ -1,9 +1,10 @@
-"""Grid-safe batch transforms; callers validate all pins before accepting a batch."""
+"""@brief Grid-safe batch transforms; callers validate all pins before accepting a batch."""
 from copy import deepcopy
 from .symbol import PIN_GRID_MM, layout_symbol, symbol_inputs
 
 
 def transform_selection(rows, numbers, primary, operation, values=()):
+    """@brief Return an atomic grid-aligned transform of selected pins."""
     result = deepcopy(rows)
     chosen = [r for r in result if str(r['pin']) in numbers]
     if not chosen:

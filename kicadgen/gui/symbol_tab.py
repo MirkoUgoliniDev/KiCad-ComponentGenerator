@@ -1,4 +1,4 @@
-"""Editable electrical pin mapping and a preview of the exported symbol layout."""
+"""@brief Editable electrical pin mapping and a preview of the exported symbol layout."""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -245,7 +245,7 @@ class _SymbolView(QGraphicsView):
 
 
 class SymbolTab(QWidget):
-    """Draft edits are local until Apply; exports always use applied rows.
+    """@brief Draft edits are local until Apply; exports always use applied rows.
 
     ``set_data`` accepts existing pinout dictionaries (``pin``, ``name``),
     preserving their metadata. Pin IDs cannot be edited. ``pad_ids`` optionally
@@ -255,6 +255,7 @@ class SymbolTab(QWidget):
     edits_applied = pyqtSignal(list)
     pin_types_ai_requested = pyqtSignal()
     export_requested = pyqtSignal()
+    export_enabled_changed = pyqtSignal(bool)
 
     def __init__(self, parent=None, tx=None):
         super().__init__(parent)
@@ -302,7 +303,7 @@ class SymbolTab(QWidget):
         self.table.setMaximumWidth(405)
         self.table.setMinimumWidth(260)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed | QAbstractItemView.EditTrigger.SelectedClicked)
-        self.table.itemChanged.connect(self._changed)
+        self.table.itemChanged.connect(self._name_changed)
         self.table.itemSelectionChanged.connect(self._table_selection)
         splitter.addWidget(self.table)
         preview = QWidget()
@@ -365,6 +366,11 @@ class SymbolTab(QWidget):
         self.cancel_button = icon_button('cancel.svg', 'Annulla', lambda: self._populate(self._baseline))
         self.apply_button = icon_button('confirm-use.svg', 'Applica', self.apply)
         self.export_button = icon_button('install-project.svg', 'Esporta simbolo KiCad…', lambda: self.export_requested.emit())
+        # The export command is hosted by the dedicated KiCad tab. Keep this
+        # action as the editor's validity state for that button, but don't show
+        # a duplicate command in the symbol toolbar.
+        self.export_button.hide()
+        self.export_button.defaultAction().setVisible(False)
         separator()
         self.selection_button = icon_button('tool-select.svg', 'Selezione multipla (Maiusc + trascina)')
         self.selection_button.defaultAction().setCheckable(True)
@@ -429,6 +435,7 @@ class SymbolTab(QWidget):
             self._splitter.setSizes([self._table_width, max(260, self._splitter.width() - self._table_width)])
 
     def set_data(self, name, pinout, footprint='', pad_ids=None, force=False):
+        """@brief Load a changed project baseline while preserving drafts for unchanged inputs."""
         key = deepcopy((name, pinout, footprint, list(pad_ids) if pad_ids is not None else None))
         if not force and key == self._source_key:
             return
@@ -456,6 +463,8 @@ class SymbolTab(QWidget):
             row.setdefault('electrical_type', 'passive')
             if row['electrical_type'] not in ELECTRICAL_TYPES:
                 row['electrical_type'] = 'passive'
+                row['electrical_type_reviewed'] = False
+                row.pop('electrical_type_evidence', None)
             row.setdefault('symbol_side', 'left' if index < (len(source) + 1) // 2 else 'right')
         self._history = []
         self._history_index = -1
@@ -481,8 +490,24 @@ class SymbolTab(QWidget):
             types.setToolTip(self.tx('Il tipo elettrico viene usato da KiCad per il controllo ERC.'))
             types.setCurrentIndex(max(0, types.findData(row.get('electrical_type', 'passive'))))
             types.currentIndexChanged.connect(lambda value, i=index: self._type_changed(i))
+            # Re-selecting the existing default is an explicit confirmation too.
+            types.activated.connect(lambda value, i=index: self._type_changed(i))
             self.table.setCellWidget(index, 2, types)
         self._loading = False
+        self._changed()
+
+    def _name_changed(self, item):
+        if self._loading:
+            return
+        if item.column() == 1:
+            row = self._draft[item.row()]
+            name = item.text().strip()
+            if name != str(row.get('name', '')).strip():
+                # A reviewed role/source describes the previous function, not
+                # just this terminal number. Keep the choice, revoke its proof.
+                row['name'] = name
+                row['electrical_type_reviewed'] = False
+                row.pop('electrical_type_evidence', None)
         self._changed()
 
     def _type_changed(self, index):
@@ -492,6 +517,7 @@ class SymbolTab(QWidget):
             self._changed()
 
     def set_recovery_path(self, path):
+        """@brief Locate a recovery draft matching the current applied baseline."""
         path = Path(path) if path else None
         if path == self._recovery_path:
             return
@@ -508,6 +534,7 @@ class SymbolTab(QWidget):
             self.set_status(self.tx('Bozza disponibile: usa Recupera bozza per riprenderla.'))
 
     def recover_draft(self):
+        """@brief Restore recovery rows as an editable, unapplied draft."""
         if self._recoverable is not None:
             rows = deepcopy(self._recoverable)
             self._recoverable = None
@@ -529,6 +556,7 @@ class SymbolTab(QWidget):
             self.set_status(self.tx('Bozza non salvata: verifica lo spazio e i permessi della cartella.'))
 
     def review_issues(self):
+        """@brief Report invalid geometry, missing names, unreviewed roles and overlapping labels."""
         issues = []
         rows = self.draft_rows()
         if not rows or self._symbol is None or self._error:
@@ -537,7 +565,9 @@ class SymbolTab(QWidget):
             number = str(row.get('pin', ''))
             if not str(row.get('name') or '').strip():
                 issues.append(f"{self.tx('Nome mancante')}: {number}")
-            if row.get('electrical_type', 'passive') in ('passive', 'unspecified') and not row.get('electrical_type_reviewed'):
+            if (row.get('electrical_type_reviewed') is False or
+                    row.get('electrical_type', 'passive') in ('passive', 'unspecified')
+                    and not row.get('electrical_type_reviewed')):
                 issues.append(f"{self.tx('Tipo elettrico da verificare')}: {number}")
         overlaps = set()
         for index, (number, rect) in enumerate(self._text_bounds):
@@ -549,6 +579,7 @@ class SymbolTab(QWidget):
         return issues
 
     def show_review(self, exporting=False):
+        """@brief Display symbol findings and return whether export may continue."""
         issues = self.review_issues()
         if exporting and not issues:
             return True
@@ -572,14 +603,15 @@ class SymbolTab(QWidget):
             dialog.deleteLater()
 
     def confirm_export_review(self):
+        """@brief Require acceptance of outstanding symbol findings before export."""
         return self.show_review(exporting=True)
 
     def rows(self):
-        """Return independent applied rows for persistence/export."""
+        """@brief Return independent applied rows for persistence/export."""
         return deepcopy(self._baseline)
 
     def use_pin_type_suggestions(self, proposals):
-        """One undoable draft operation, preserving all pin and body geometry."""
+        """@brief One undoable draft operation, preserving all pin and body geometry."""
         rows = self.draft_rows()
         by_number = {str(p['pin']): p for p in proposals}
         for row in rows:
@@ -591,7 +623,7 @@ class SymbolTab(QWidget):
         self._populate(rows)
 
     def retranslate(self):
-        """Refresh dynamic labels without losing unapplied edits."""
+        """@brief Refresh dynamic labels without losing unapplied edits."""
         self.title.setText(f"{self.tx('Simbolo elettrico')} · {self._name}" if self._name else self.tx('Simbolo elettrico'))
         self.footprint_label.setText(f"{self.tx('Footprint associato')}: {self._footprint}" if self._footprint else '')
         for button, source in self._icon_buttons:
@@ -612,6 +644,7 @@ class SymbolTab(QWidget):
         self._changed()
 
     def draft_rows(self):
+        """@brief Copy draft metadata and merge table names and electrical types."""
         result = deepcopy(self._draft)
         for index, row in enumerate(result):
             row['name'] = self.table.item(index, 1).text().strip()
@@ -619,20 +652,24 @@ class SymbolTab(QWidget):
         return result
 
     def has_pending_edits(self):
+        """@brief Compare editable rows with the applied baseline."""
         return self.draft_rows() != self._baseline
 
     def footprint(self):
+        """@brief Return the associated footprint library identifier."""
         return self._footprint
 
     def set_error(self, message):
+        """@brief Record a blocking error and refresh editor action states."""
         self._error = str(message)
         self._changed()
 
     def set_status(self, message):
-        """Show a nonblocking export result without changing draft validity."""
+        """@brief Show a nonblocking export result without changing draft validity."""
         self.status.setText(str(message))
 
     def apply(self):
+        """@brief Publish valid draft rows for persistence while retaining a rollback baseline."""
         if not self.apply_button.isEnabled():
             return
         self._applying = True
@@ -644,14 +681,14 @@ class SymbolTab(QWidget):
         self._checkpoint_draft()
 
     def reject_apply(self, message):
-        """Keep the editable draft and its history when persistence fails."""
+        """@brief Keep the editable draft and its history when persistence fails."""
         self._applying = False
         self._baseline = deepcopy(self._apply_previous_baseline)
         self._changed()
         self.set_status(message)
 
     def accept_apply(self):
-        """Synchronize the saved source without throwing away undo history."""
+        """@brief Synchronize the saved source without throwing away undo history."""
         if self._source_key is not None:
             name, _, footprint, pad_ids = self._source_key
             self._source_key = deepcopy((name, self._baseline, footprint, pad_ids))
@@ -676,7 +713,9 @@ class SymbolTab(QWidget):
         self.apply_button.defaultAction().setEnabled(valid and dirty)
         self.cancel_button.defaultAction().setEnabled(dirty)
         self.reset_button.defaultAction().setEnabled(bool(rows) and rows != self._original)
-        self.export_button.defaultAction().setEnabled(valid and not dirty)
+        export_enabled = valid and not dirty
+        self.export_button.defaultAction().setEnabled(export_enabled)
+        self.export_enabled_changed.emit(export_enabled)
         self._symbol = symbol
         if not self._replaying and self._gesture_before is None:
             self._record(rows)
@@ -705,12 +744,15 @@ class SymbolTab(QWidget):
             self._replaying = False
 
     def undo(self):
+        """@brief Restore the preceding draft snapshot from local edit history."""
         self._restore_history(self._history_index - 1)
 
     def redo(self):
+        """@brief Restore the next draft snapshot from local edit history."""
         self._restore_history(self._history_index + 1)
 
     def reset_layout(self):
+        """@brief Restore two-column placement while preserving pin identities and roles."""
         rows = self.draft_rows()
         for index, row in enumerate(rows):
             row.pop('symbol_body', None)
@@ -837,6 +879,7 @@ class SymbolTab(QWidget):
         return True
 
     def move_pin(self, number, side, offset, *, swap=False):
+        """@brief Snap a pin to a body side and offset, optionally swapping an occupied position."""
         if self._symbol is None:
             return False
         # Rebuild each drag preview from its starting state, so crossing occupied
@@ -871,6 +914,7 @@ class SymbolTab(QWidget):
         return rows
 
     def place_pin(self, number, x, y):
+        """@brief Place a pin at snapped free coordinates and swap any occupied terminal."""
         if self._symbol is None:
             return False
         source = self._gesture_before if self._gesture_before is not None else self.draft_rows()
@@ -891,6 +935,7 @@ class SymbolTab(QWidget):
         return self._accept_geometry(rows)
 
     def rotate_pin(self, number, degrees):
+        """@brief Rotate a pin or selected group in grid-preserving quarter turns."""
         if self._symbol is None or self._gesture_before is not None:
             return False
         if number in self._selection_ids() and len(self._selection_ids()) > 1:
@@ -912,6 +957,7 @@ class SymbolTab(QWidget):
             self.place_pin(pin.pin.number, pin.x + dx * GRID_MM, pin.y + dy * GRID_MM)
 
     def set_pin_geometry(self, number, x, y, angle):
+        """@brief Validate and apply a terminal position and orientation as one edit."""
         if self._symbol is None or self._gesture_before is not None:
             return False
         rows = self._free_rows(self.draft_rows(), self._symbol)
@@ -990,6 +1036,7 @@ class SymbolTab(QWidget):
             menu.deleteLater()
 
     def resize_body(self, width, height):
+        """@brief Resize the unlocked body on the grid while preserving free pin positions."""
         if self._symbol is None or self._body_locked:
             return False
         source = self._gesture_before if self._gesture_before is not None else self.draft_rows()

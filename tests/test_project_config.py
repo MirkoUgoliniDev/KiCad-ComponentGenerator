@@ -11,7 +11,7 @@ import json
 
 import pytest
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
-                             QGroupBox, QLineEdit, QSpinBox, QTextEdit)
+                             QGroupBox, QLineEdit, QMessageBox, QSpinBox, QTextEdit)
 
 from test_photo_inventory_gui import gui
 from kicadgen.gui.project_dialogs import OpenProjectDialog, ProjectNameDialog
@@ -185,6 +185,10 @@ def test_an_unreadable_file_is_neither_applied_nor_overwritten(window, monkeypat
     window.field_tags.setText("una modifica")
     assert not window._save_project_config()
     assert broken.read_text(encoding="utf-8") == "{ rotto"
+    # Closing an unreadable project now explicitly asks to discard edits.
+    # The fixture closes this window after the test; accept that discard only,
+    # while keeping the real save/leave protection active.
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes)
 
 
 def test_the_settings_follow_a_rename(window, monkeypatch):  # noqa: F811
@@ -210,9 +214,12 @@ def test_a_failure_while_reading_the_state_never_reaches_the_timer(window, monke
 
     def broken():
         raise KeyError("campo sparito")
-    monkeypatch.setattr(window, "_project_state", broken)
-    assert window._save_project_config() is False
-    assert "non leggibili" in window.ai_progress_text.toPlainText()
+    # Scope the injected read failure to this operation: real window teardown
+    # must be able to read/save state, rather than trigger an unrelated modal.
+    with monkeypatch.context() as failure:
+        failure.setattr(window, "_project_state", broken)
+        assert window._save_project_config() is False
+        assert "non leggibili" in window.ai_progress_text.toPlainText()
 
 
 def test_opening_a_project_without_the_file_creates_it(window, monkeypatch):  # noqa: F811

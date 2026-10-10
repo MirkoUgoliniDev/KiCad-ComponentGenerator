@@ -899,7 +899,7 @@ class Preview3DVtk(QtInteractor):
         )
 
     def set_pin_functions(self, pinout) -> None:
-        """Update view-only pin functions without rebuilding CAD or moving the camera."""
+        """@brief Update view-only pin functions without rebuilding CAD or moving the camera."""
         names = {str(row['pin']).strip(): str(row.get('name') or '').strip()
                  for row in pinout or () if isinstance(row, dict) and 'pin' in row}
         if names == getattr(self, '_pin_functions', {}):

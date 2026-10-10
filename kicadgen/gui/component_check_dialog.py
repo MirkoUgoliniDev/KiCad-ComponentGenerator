@@ -1,7 +1,11 @@
-"""Background component verification with a copyable, explicit report."""
-from PyQt6.QtCore import QThread, pyqtSignal, QTimer
+"""@brief Background component verification with a concise verdict and details."""
+import re
+from pathlib import Path
+from PyQt6.QtCore import QThread, pyqtSignal, QTimer, Qt, QSize
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QLabel,
-                             QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout)
+                             QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout,
+                             QToolButton, QHBoxLayout, QGroupBox)
 from ..services.component_check import verify_component, Check
 
 
@@ -20,21 +24,60 @@ class _CheckWorker(QThread):
 
 
 class ComponentCheckDialog(QDialog):
+    """@brief Run artifact checks in a worker and present a copyable report."""
     def __init__(self, args, parent=None, tx=lambda s: s):
         super().__init__(parent)
         self.tx = tx
         self.results = []
         self.setWindowTitle(tx('Verifica componente per KiCad'))
-        self.resize(820, 570)
+        self.resize(820, 470)
         layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.status = QLabel(tx('Verifica in corso: ogni comando KiCad ha un limite di 60 secondi.'))
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
+        verdict_row = QHBoxLayout()
+        self.verdict_icon = QLabel()
+        self.verdict_icon.setFixedSize(48, 48)
+        verdict_row.addWidget(self.verdict_icon)
+        self.verdict = QLabel(tx('Sto verificando il componente…'))
+        self.verdict.setStyleSheet('font-size: 18px; font-weight: bold;')
+        verdict_row.addWidget(self.verdict)
+        verdict_row.addStretch()
+        layout.addLayout(verdict_row)
+        self.recommendation = QLabel()
+        self.recommendation.setWordWrap(True)
+        layout.addWidget(self.recommendation)
+        self.actions_group = QGroupBox(tx('Cosa completare per l’uso finale'))
+        actions_layout = QVBoxLayout(self.actions_group)
+        self.actions_label = QLabel()
+        self.actions_label.setWordWrap(True)
+        actions_layout.addWidget(self.actions_label)
+        self.ai_review_requested = False
+        self.ai_review_button = QPushButton(tx('Suggerisci tipi pin con AI'))
+        self.ai_review_button.setObjectName('primary')
+        self.ai_review_button.clicked.connect(self._request_ai_pin_review)
+        self.ai_review_button.hide()
+        actions_layout.addWidget(self.ai_review_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(self.actions_group)
+        self.actions_group.hide()
+        self.summary = QLabel()
+        self.summary.setWordWrap(True)
+        layout.addWidget(self.summary)
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
         layout.addWidget(self.progress)
+        self.details_toggle = QToolButton()
+        self.details_toggle.setText(tx('Mostra dettagli tecnici'))
+        self.details_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.details_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.details_toggle.setCheckable(True)
+        self.details_toggle.toggled.connect(self._toggle_details)
+        layout.addWidget(self.details_toggle)
         self.report = QPlainTextEdit()
         self.report.setReadOnly(True)
+        self.report.setMaximumHeight(0)
+        self.report.hide()
         layout.addWidget(self.report)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         self.close_button = buttons.button(QDialogButtonBox.StandardButton.Close)
@@ -52,24 +95,184 @@ class ComponentCheckDialog(QDialog):
 
     def _result(self, result):
         self.results.append(result)
+        self.report.setPlainText(self._format_report())
+
+    def _toggle_details(self, expanded):
+        self.report.setVisible(expanded)
+        self.report.setMaximumHeight(260 if expanded else 0)
+        self.details_toggle.setArrowType(
+            Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+        self.details_toggle.setText(self.tx(
+            'Nascondi dettagli tecnici' if expanded else 'Mostra dettagli tecnici'))
+        self.resize(self.width(), 650 if expanded else 470)
+
+    @staticmethod
+    def _pin_ranges(values):
+        numeric = sorted({int(value) for value in values if value.isdigit()})
+        other = sorted({value for value in values if not value.isdigit()})
+        parts = []
+        if numeric:
+            start = previous = numeric[0]
+            for value in numeric[1:]:
+                if value == previous + 1:
+                    previous = value
+                    continue
+                parts.append(str(start) if start == previous else f'{start}–{previous}')
+                start = previous = value
+            parts.append(str(start) if start == previous else f'{start}–{previous}')
+        return ', '.join(parts + other)
+
+    def _format_report(self):
         labels = {'OK': 'Superato', 'ERROR': 'Errore', 'WARN': 'Avviso', 'SKIP': 'Non verificato'}
-        self.report.appendPlainText(f'[{self.tx(labels[result.status])}] {self.tx(result.title)}\n{self.tx(result.detail)}\n')
+        lines = []
+        electrical_pins = []
+        review_title = self.tx('Revisione simbolo')
+        type_template = self.tx('Tipo elettrico da verificare: {number}')
+        type_prefix = type_template.partition('{number}')[0]
+        type_suffix = type_template.partition('{number}')[2]
+        for result in self.results:
+            match = re.fullmatch(re.escape(type_prefix) + r'(.+?)' + re.escape(type_suffix), result.detail)
+            if result.title == review_title and match:
+                electrical_pins.append(match.group(1).strip())
+                continue
+            lines.append(f'[{self.tx(labels[result.status])}] {self.tx(result.title)}\n'
+                         f'{self.tx(result.detail)}\n')
+        if electrical_pins:
+            detail = self.tx('Tipi elettrici da revisionare: {count} pin ({pins}).').format(
+                count=len(set(electrical_pins)), pins=self._pin_ranges(electrical_pins))
+            lines.append(f'[{self.tx(labels["WARN"])}] {review_title}\n{detail}\n')
+        report = '\n'.join(lines)
+        if not getattr(self, '_running', True):
+            report = (f'{self.verdict.text()}\n{self.recommendation.text()}\n'
+                      f'{self.actions_group.title()}\n{self.actions_label.text()}\n\n'
+                      f'{self.summary.text()}\n\n{report}')
+        return report
+
+    def _set_verdict(self):
+        counts = {status: sum(result.status == status for result in self.results)
+                  for status in ('OK', 'ERROR', 'WARN', 'SKIP')}
+        manual_only_warning = all(
+            result.status != 'WARN' or result.title == self.tx('Verifiche manuali')
+            for result in self.results)
+        if counts['ERROR']:
+            title = 'NON USARE'
+            recommendation = 'No. Correggi gli errori tecnici e ripeti la verifica prima di usarlo.'
+            color = '#f38ba8'
+        elif counts['SKIP']:
+            title = 'ESITO NON CONCLUSIVO'
+            recommendation = 'Non posso confermare che sia pronto: alcuni controlli non sono stati eseguiti.'
+            color = '#f9e2af'
+        elif counts['WARN'] and not manual_only_warning:
+            title = 'UTILIZZABILE CON RISERVE'
+            recommendation = ('Sì, per prove e prototipi. Prima dell’uso finale, completa le revisioni '
+                              'indicate ed esegui ERC e DRC in KiCad.')
+            color = '#f9e2af'
+        elif counts['WARN']:
+            title = 'PRONTO PER LE PROVE'
+            recommendation = ('Sì. I controlli automatici sono superati; prima del rilascio finale '
+                              'esegui comunque ERC e DRC in KiCad.')
+            color = '#f9e2af'
+        else:
+            title = 'PRONTO PER L’USO'
+            recommendation = 'Sì. I controlli automatici sono superati.'
+            color = '#a6e3a1'
+        self.verdict.setText(self.tx(title))
+        self.verdict.setStyleSheet(f'font-size: 16px; font-weight: bold; color: {color};')
+        icon_name = ('check-status-red.svg' if counts['ERROR'] else
+                     'check-status-yellow.svg' if counts['WARN'] or counts['SKIP'] else
+                     'check-status-green.svg')
+        self.verdict_icon.setPixmap(QIcon(str(Path(__file__).parent / 'assets' / icon_name))
+                                    .pixmap(QSize(44, 44)))
+        self.recommendation.setText(self.tx(recommendation))
+        parts = [f'{counts[key]} {self.tx(label)}' for key, label in
+                 [('OK', 'controlli superati'), ('ERROR', 'errori'),
+                  ('WARN', 'avvisi'), ('SKIP', 'non verificati')]]
+        notes = []
+        passed = {r.title for r in self.results if r.status == 'OK'}
+        loaded = [self.tx(source) for source in (
+            'Lettura footprint in KiCad', 'Simbolo applicato: lettura in KiCad',
+            'Integrità STEP', 'Importazione 3D in KiCad') if self.tx(source) in passed]
+        if loaded:
+            notes.append(self.tx('KiCad ha letto correttamente: {items}.').format(
+                items=', '.join(loaded)))
+        pads = next((r.detail for r in self.results
+                     if r.title == self.tx('Corrispondenza pin-pad') and r.status == 'OK'), None)
+        if pads:
+            notes.append(pads)
+        review_title = self.tx('Revisione simbolo')
+        type_template = self.tx('Tipo elettrico da verificare: {number}')
+        type_pattern = re.escape(type_template.partition('{number}')[0]) + r'(.+?)' + re.escape(type_template.partition('{number}')[2])
+        electrical_pins = [match.group(1).strip() for r in self.results
+                           if r.title == review_title
+                           for match in [re.fullmatch(type_pattern, r.detail)]
+                           if match]
+        if electrical_pins:
+            notes.append(self.tx('{count} tipi elettrici da confermare (pin {pins}).').format(
+                count=len(set(electrical_pins)), pins=self._pin_ranges(electrical_pins)))
+        if counts['ERROR']:
+            notes.append(self.tx('Correggi gli errori indicati nei dettagli prima di usare il componente.'))
+        elif counts['WARN'] or counts['SKIP']:
+            notes.append(self.tx('Controlla gli avvisi; ERC dello schema e DRC della scheda non sono inclusi.'))
+        self.summary.setText(' · '.join(parts) + ('\n' + '\n'.join(notes) if notes else ''))
+        actions = []
+        if electrical_pins:
+            actions.append(self.tx(
+                'Conferma i tipi elettrici dei pin {pins} consultando il datasheet.').format(
+                    pins=self._pin_ranges(electrical_pins)))
+        missing_symbol = self.tx(
+            'Nessun .kicad_sym nella cartella componente; verificata la versione applicata in memoria.')
+        missing_3d = self.tx(
+            'Il footprint su disco non contiene un riferimento 3D; il test di importazione lo aggiunge soltanto nella copia temporanea.')
+        for result in self.results:
+            if result.status == 'WARN' and result.title == self.tx('Simbolo esportato') \
+                    and result.detail == missing_symbol:
+                actions.append(self.tx(
+                    'Esporta il simbolo .kicad_sym nella cartella del componente dal tab KiCad.'))
+            elif result.status == 'WARN' and result.title == self.tx('Collegamento 3D originale') \
+                    and result.detail == missing_3d:
+                actions.append(self.tx(
+                    'Installa la libreria dal tab KiCad e verifica il modello 3D nella libreria installata.'))
+            elif result.status == 'ERROR':
+                actions.append(self.tx('Apri i dettagli tecnici e correggi: {item}.').format(
+                    item=result.title))
+            elif result.status == 'SKIP':
+                actions.append(self.tx('Completa il controllo non eseguito: {item}.').format(
+                    item=result.title))
+            elif result.status == 'WARN' and result.title not in {
+                    self.tx('Revisione simbolo'), self.tx('Verifiche manuali'),
+                    self.tx('Simbolo esportato'), self.tx('Collegamento 3D originale')}:
+                actions.append(self.tx('Rivedi l’avviso: {item}.').format(item=result.title))
+        if any(result.title == self.tx('Verifiche manuali') for result in self.results):
+            actions.append(self.tx(
+                'In KiCad esegui ERC sullo schema e DRC sulla scheda prima della produzione.'))
+        self.actions_label.setText('\n'.join(f'• {item}' for item in dict.fromkeys(actions)))
+        self.ai_review_button.setVisible(bool(electrical_pins))
+        self.actions_group.setVisible(bool(actions))
+
+    def _request_ai_pin_review(self):
+        """Close the finished report and hand off pin review to the parent window."""
+        if self._running:
+            return
+        self.ai_review_requested = True
+        self.accept()
 
     def _finished(self):
         self._running = False
-        self.progress.setRange(0, 1)
-        self.progress.setValue(1)
-        counts = {status: sum(r.status == status for r in self.results) for status in ('OK', 'ERROR', 'WARN', 'SKIP')}
-        self.status.setText(self.tx('Verifica terminata') + ': ' + ', '.join(
-            f'{self.tx(label)}: {counts[key]}' for key, label in
-            [('OK', 'Superato'), ('ERROR', 'Errore'), ('WARN', 'Avviso'), ('SKIP', 'Non verificato')]))
+        self.progress.hide()
+        self._set_verdict()
+        self.report.setPlainText(self._format_report())
+        self.status.hide()
+        if not self.details_toggle.isChecked():
+            self.resize(self.width(), 470)
         self.close_button.setEnabled(True)
 
     def reject(self):
+        """@brief Allow dismissal only after the verification worker finishes."""
         if not self._running:
             super().reject()
 
     def closeEvent(self, event):
+        """@brief Keep the dialog alive while its verification thread runs."""
         if self._running:
             event.ignore()
         else:

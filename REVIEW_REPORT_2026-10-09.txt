@@ -1,0 +1,70 @@
+REVISIONE AVVERSARIA - KICADGEN - 9 OTTOBRE 2026
+
+Ambito: verifica componente KiCad, suggerimenti AI per tipi elettrici,
+editor del simbolo, navigazione footprint e integrazione progetto.
+Tre agenti specialisti, con seconda lettura incrociata del validatore.
+Base: ADVANCED 7138ba5; main 2e6f5ed. Correzioni non committate.
+
+CORREZIONI
+
+Verifica KiCad
+- Rifiutati footprint con piu espressioni root o contenuto estraneo.
+- Controllati coordinate/dimensioni finite, dimensioni positive, fori e layer.
+- Segnalati pad di rame senza numero, prima esclusi silenziosamente.
+- Validato il nome componente prima di costruire i percorsi.
+- Controllati riferimenti 3D originali separatamente dalla copia di prova;
+  percorsi relativi e variabili irrisolte non vengono dichiarati verificati.
+- Errori nelle trasformazioni 3D originali non sono piu nascosti dalla
+  normalizzazione del progetto temporaneo. Trasformazioni non standard
+  sono esplicitamente da verificare.
+- Errori KiCad con codice uscita zero diventano ERROR, anche per messaggi
+  localizzati IT/EN/FR/DE. Non basta un file di output non vuoto.
+- Revisione dei tipi e nomi applicati anche quando esiste una bozza diversa.
+
+Suggerimenti AI
+- Annullamento cooperativo: nessun nuovo tentativo e risposta scartata;
+  la richiesta gia inviata termina normalmente per conservarne il costo.
+- Dopo errore si puo riprovare. Accettazione solo con proposte selezionate.
+- Pin non testuali, evidenze null/oggetto/lista e nomi fonte ambigui rifiutati.
+- Ordine dei pin non proposti stabile; stato visualizzato come testo semplice.
+- Contabilizzazione legata solo alla fase di analisi, non alla lettura del dialogo.
+
+Editor e integrazione
+- Rinomina di un pin revoca conferma e fonte del suo tipo precedente.
+- La normalizzazione di un tipo invalido non conserva una falsa conferma.
+- Reselezionare lo stesso tipo (es. Passivo) ora lo conferma esplicitamente.
+- Undo/redo e recupero bozza preservano le informazioni di revisione.
+- Dialoghi di verifica/AI riconosciuti come lavoro attivo: blocco delle
+  operazioni concorrenti, del cambio progetto e della chiusura distruttiva.
+- Verifica raggiungibile nel tab KiCad quando c'e il footprint senza STEP;
+  i comandi di installazione restano protetti.
+- Aggiornati i test storici che attendevano quattro tab: ora sono cinque.
+- Aggiornati i test delle etichette alla resa 3D approvata, senza cambiarla.
+- Isolati i mock di test che restavano attivi durante la chiusura del progetto.
+- Completati 71 docstring e 48 messaggi tradotti IT/EN/FR/DE.
+
+VERIFICHE
+- Suite completa offline: 7002 passati, 11 saltati, 2 fallimenti attesi,
+  19 subtest passati; rilevati 12 fallimenti e 6 errori di teardown.
+- Tutti i 18 casi iniziali corretti e rieseguiti: verifica combinata finale
+  di 16 file, inclusi nuovi test avversari, 262 passati e 1 saltato in 39.67 s.
+  Non e stata rieseguita integralmente la suite dopo queste ultime correzioni.
+- Prova reale con KiCad 10 sul componente ESP32-S3-DEVKIT-NXRX:
+  footprint e simbolo letti, 44 numeri pin-pad corrispondenti, STEP importato.
+  Segnalazioni corrette: tipi ancora da confermare, .kicad_sym non esportato,
+  riferimento 3D assente dal footprint originale (aggiunto nella copia test).
+- git diff --check senza errori di spaziatura.
+Nessuna richiesta AI a pagamento eseguita: risposte simulate nei test.
+
+LIMITI ESPLICITI
+La lettura KiCad non certifica la corrispondenza del pinout al datasheet,
+la geometria rispetto all'oggetto reale o l'allineamento visivo 3D.
+ERC e DRC completi richiedono schema e scheda finali.
+Una richiesta AI gia in rete non viene terminata forzatamente.
+
+CONSERVAZIONE
+Database locale, rows_none_rev.pkl e cartella work preservati.
+Nessun commit/push/merge delle correzioni di questa revisione.
+Spegnimento richiesto dall'utente: verifiche concluse; comando senza /f,
+ritardato di 60 secondi per consentire la consegna del riepilogo.
+Le applicazioni con dati non salvati possono impedire lo spegnimento.

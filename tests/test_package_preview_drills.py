@@ -19,8 +19,12 @@ def test_header_preview_has_44_circular_pads_and_visible_drill_openings(window):
     holes = [item for item in items if isinstance(item, QGraphicsEllipseItem)
              and item.brush().color().name() == BASE]
     labels = [item for item in items if isinstance(item, QGraphicsSimpleTextItem)
-              and item.toolTip()]
+              and item.toolTip() and item.data(0) != 'pin-function']
     assert len(copper) == len(holes) == len(labels) == 44
+    assert {item.text() for item in labels} == {str(n) for n in range(1, 45)}
+    annotations = [item for item in items if isinstance(item, QGraphicsSimpleTextItem)
+                   and item.data(0) == 'pin-function']
+    assert all(item.data(1) in {str(n) for n in range(1, 45)} for item in annotations)
     exported = build_package(host)
     for pad in exported.pads:
         center = (pad.at[0] * 20, pad.at[1] * 20)
@@ -33,7 +37,7 @@ def test_header_preview_has_44_circular_pads_and_visible_drill_openings(window):
         assert hole.rect().width() == pytest.approx(pad.drill * 20)
         assert hole.zValue() > ring.zValue()
         assert not any(label.sceneBoundingRect().intersects(hole.sceneBoundingRect())
-                       for label in labels)
+                       for label in labels + annotations)
 
 
 @pytest.mark.parametrize('shape', ['oval', 'roundrect'])

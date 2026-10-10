@@ -1,4 +1,4 @@
-"""Electrical symbols: one shared millimetre layout for preview and KiCad export.
+"""@brief Electrical symbols: one shared millimetre layout for preview and KiCad export.
 
 Pin IDs are footprint pad IDs, never renumbered. Electrical types must be reviewed
 by the user; a GPIO name alone is not evidence of an electrical configuration.
@@ -27,6 +27,7 @@ PIN_GRID_MM = 2.54
 
 @dataclass(frozen=True)
 class SymbolPin:
+    """@brief Store a pin identity, electrical role and optional editor placement."""
     number: str
     name: str
     electrical_type: str = 'passive'
@@ -38,6 +39,7 @@ class SymbolPin:
 
 @dataclass(frozen=True)
 class PositionedPin:
+    """@brief Pair a symbol pin with its resolved terminal coordinates and angle."""
     pin: SymbolPin
     x: float
     y: float
@@ -46,6 +48,7 @@ class PositionedPin:
 
 @dataclass(frozen=True)
 class SymbolLayout:
+    """@brief Describe the shared body and pin geometry used for preview and export."""
     width: float
     height: float
     pin_length: float
@@ -65,7 +68,7 @@ def _text(value: str, field: str, *, required: bool = False) -> str:
 
 
 def normalize_pins(pins: Iterable[SymbolPin]) -> tuple[SymbolPin, ...]:
-    """Validate identities; preserve names/order and default unknown types passive."""
+    """@brief Validate identities; preserve names/order and default unknown types passive."""
     result = []
     seen = set()
     for pin in pins:
@@ -86,7 +89,7 @@ def normalize_pins(pins: Iterable[SymbolPin]) -> tuple[SymbolPin, ...]:
 
 
 def symbol_inputs(rows):
-    """Decode project metadata without discarding pin identities or electrical roles."""
+    """@brief Decode project metadata without discarding pin identities or electrical roles."""
     pins = [SymbolPin(str(row.get('pin', '')), str(row.get('name') or ''),
                       row.get('electrical_type', 'passive'),
                       row.get('symbol_side', 'left'), row.get('symbol_offset'),
@@ -98,7 +101,7 @@ def symbol_inputs(rows):
 
 
 def layout_symbol(pins: Iterable[SymbolPin], body=None) -> SymbolLayout:
-    """Shared geometry for editor and export; every terminal is on the 100 mil grid.
+    """@brief Shared geometry for editor and export; every terminal is on the 100 mil grid.
 
     Custom offsets are y coordinates for left/right and x for top/bottom.
     The body stays centred; dimensions are multiples of two grid steps.
@@ -188,7 +191,7 @@ def _num(value: float) -> str:
 
 def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
                      footprint: str = '', reference: str = 'U', body=None) -> str:
-    """Return a KiCad 6+ symbol library with a single, single-unit symbol."""
+    """@brief Return a KiCad 6+ symbol library with a single, single-unit symbol."""
     name = _text(name, 'Symbol name', required=True)
     if ':' in name:
         raise ValueError('Symbol name must not contain a library separator (:).')
@@ -222,7 +225,7 @@ def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
 
 def export_symbol(path: str | Path, name: str, pins: Iterable[SymbolPin], *,
                   footprint: str = '', reference: str = 'U', body=None) -> Path:
-    """Validate before touching disk and atomically replace an explicitly chosen file."""
+    """@brief Validate before touching disk and atomically replace an explicitly chosen file."""
     text = serialize_symbol(name, pins, footprint=footprint, reference=reference, body=body)
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)

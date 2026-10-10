@@ -1,5 +1,26 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 2026-10-09 - Audit avversario con tre agenti (NON COMMITTATO)
+
+- Richiesta utente: revisione con agenti esperti, fix, report finale e spegnimento
+  PC al termine. Nessun commit/push/merge autorizzato per queste correzioni.
+- Verifica KiCad: parsing root unica, dimensioni/fori/layer dei pad, nome sicuro;
+  riferimenti/trasformazioni 3D originali separati dalla copia normalizzata;
+  errori CLI anche con exit0 e log IT/EN/FR/DE, revisione dei pin applicati.
+- AI: annullamento cooperativo senza perdere contabilizzazione della richiesta
+  in corso, retry dopo errore, accettazione solo con selezione valida;
+  evidenze strutturate/non testuali e fonti ambigue rifiutate; ordine stabile.
+- Editor: cambio funzione pin revoca conferma/evidenza, normalizzazione tipo
+  invalido revoca conferma, selezione stessa voce conferma esplicitamente.
+- Integrazione: dialoghi contano come lavoro attivo; guard cambio progetto e
+  chiusura; contabilizzazione AI limitata all'analisi; tab KiCad disponibile
+  con footprint anche se STEP mancante. Test storici aggiornati ai cinque tab.
+- Ultima pubblicazione: 7138ba5 ADVANCED, merge main 2e6f5ed.
+- Suite offline: 7002 passati; 12 fallimenti e 6 errori corretti, poi verifica
+  combinata finale 262 passati/1 saltato (tutti i casi falliti inclusi).
+- Prova reale KiCad 10: footprint/simbolo, 44 pin-pad e import STEP OK.
+- Report: REVIEW_REPORT_2026-10-09.txt. Spegnimento richiesto, senza /f.
+
 ## 2026-10-09 - Pubblicazione verifica KiCad e suggerimenti AI
 
 - Utente autorizza commit, push e merge in main del checkpoint corrente;

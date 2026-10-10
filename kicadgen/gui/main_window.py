@@ -8,6 +8,7 @@ preview, electrical symbol editing, 3D review and KiCad installation.
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 from html import escape
 import json
 from functools import partial
@@ -22,7 +23,7 @@ import webbrowser
 from pathlib import Path
 
 from PyQt6.QtCore import QEvent, QEventLoop, QObject, QPointF, QRectF, QThread, QTimer, Qt, QSize
-from PyQt6.QtGui import (QBrush, QColor, QIcon, QKeySequence, QPainterPath, QPen, QPixmap,
+from PyQt6.QtGui import (QBrush, QColor, QIcon, QKeySequence, QPainter, QPainterPath, QPen, QPixmap,
                          QPolygonF, QShortcut, QTextCursor)
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
@@ -30,7 +31,7 @@ from PyQt6.QtWidgets import (
     QGraphicsView, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
     QDialog, QListWidget, QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea,
     QSplitter, QListWidgetItem, QStackedWidget, QTabWidget, QTextEdit, QVBoxLayout,
-    QToolButton, QWidget,
+    QToolButton, QWidget, QTableWidget, QTableWidgetItem, QHeaderView, QWizard, QWizardPage,
 )
 
 from ..cad3d.annotations import (ANNOTATION_CONVENTION, EdgeFilletAnnotation,
@@ -65,6 +66,8 @@ from ..services.kicad_library import (
     install_component_library,
     launch_preview,
 )
+from ..services.kicad_export_history import load_history as load_kicad_export_history
+from ..services.kicad_export_history import record_export as record_kicad_export
 from .app_config import config_path, load_config, save_config
 from .accepted_models_dialog import AcceptedModelsDialog, ConsolidateDialog
 from ..app_paths import default_projects_dir, install_dir, is_frozen, logs_dir, resource_path, user_data_dir
@@ -800,6 +803,7 @@ class MainWindow(QMainWindow):
         #: what «Ripristina» goes back to.
         self._analysis_pcb_thickness = None
         self.pin_map: dict | None = None
+        self.header_pad_overrides: dict[str, dict] = {}
         self._last_mesh_path: Path | None = None
         self._model_revision = 0
         #: Revisione dell'analisi AI, gemella di `_model_revision` per i
@@ -1188,6 +1192,8 @@ class MainWindow(QMainWindow):
         return None
 
     def _background_work_running(self):
+        if getattr(self, '_component_review_dialog', None) is not None:
+            return True
         return any(worker is not None and worker.isRunning() for worker in
                    (self._worker, self._extract_worker, self._cad3d_worker, self._terminal_worker,
                     self._reconcile_worker))
@@ -2450,6 +2456,7 @@ class MainWindow(QMainWindow):
         self.combo_mounting = QComboBox()
         self.combo_mounting.addItem("Saldatura diretta / piazzole del modulo", "direct")
         self.combo_mounting.addItem("Strip header / pad circolari con foro", "headers")
+        self.combo_mounting.addItem("Strip header / pad quadrati con foro", "headers_square")
         mounting_layout.addWidget(self.combo_mounting)
         mounting_note = QLabel(
             "La scelta cambia solo il footprint della scheda ospitante. "
@@ -2461,6 +2468,7 @@ class MainWindow(QMainWindow):
         dimensions_form = QFormLayout(self.header_dimensions)
         self.spin_header_pad = QDoubleSpinBox()
         self.spin_header_drill = QDoubleSpinBox()
+        self.header_pad_label = QLabel("Diametro pad sulla scheda ospitante:")
         for spin, value in ((self.spin_header_pad, 1.7), (self.spin_header_drill, 1.0)):
             spin.setRange(0.1, 10.0)
             spin.setDecimals(2)
@@ -2469,7 +2477,7 @@ class MainWindow(QMainWindow):
             spin.setKeyboardTracking(False)
             spin.setValue(value)
             spin.valueChanged.connect(self._on_mounting_changed)
-        dimensions_form.addRow("Diametro pad sulla scheda ospitante:", self.spin_header_pad)
+        dimensions_form.addRow(self.header_pad_label, self.spin_header_pad)
         dimensions_form.addRow("Diametro foro per il pin:", self.spin_header_drill)
         dimensions_note = QLabel("Valori iniziali da verificare con gli header utilizzati.")
         dimensions_note.setWordWrap(True)
@@ -2941,19 +2949,28 @@ class MainWindow(QMainWindow):
         """@brief Serialize the host mounting independently from the physical board."""
         return {"mode": self.combo_mounting.currentData(),
                 "pad_diameter": self.spin_header_pad.value(),
-                "drill": self.spin_header_drill.value()}
+                "drill": self.spin_header_drill.value(),
+                "pad_overrides": deepcopy(self.header_pad_overrides)}
 
     def _host_footprint_params(self, params):
         """@brief Derive host pads only; callers retain params for the photo-faithful 3D."""
-        if (self.combo_mounting.currentData() != "headers"
+        mode = self.combo_mounting.currentData()
+        if (mode not in {"headers", "headers_square"}
                 or self._photo_inventory_family() is not True):
             return params
+        shape = "rect" if mode == "headers_square" else "circle"
         return header_footprint_params(params, self.spin_header_pad.value(),
-                                      self.spin_header_drill.value())
+                                      self.spin_header_drill.value(), shape=shape,
+                                      pad_overrides=self.header_pad_overrides)
 
     def _on_mounting_changed(self, *_args) -> None:
         """@brief Refresh the footprint preview without invalidating the board mesh."""
-        self.header_dimensions.setVisible(self.combo_mounting.currentData() == "headers")
+        square = self.combo_mounting.currentData() == "headers_square"
+        self.header_pad_label.setText(self.i18n.text(
+            "Lato pad sulla scheda ospitante:" if square else
+            "Diametro pad sulla scheda ospitante:"))
+        self.header_dimensions.setVisible(
+            self.combo_mounting.currentData() in {"headers", "headers_square"})
         self._set_mounting_error("")
         self._sync_preview_mounting()
         if getattr(self, "_restoring_project", False):
@@ -2996,7 +3013,10 @@ class MainWindow(QMainWindow):
             else:
                 target.setValue(source.value())
             target.blockSignals(blocked)
-        self.preview_header_dimensions.setVisible(self.combo_mounting.currentData() == "headers")
+        square = self.combo_mounting.currentData() == "headers_square"
+        self.preview_header_pad_label.setText(self.i18n.text("Lato:" if square else "Pad Ø:"))
+        self.preview_header_dimensions.setVisible(
+            self.combo_mounting.currentData() in {"headers", "headers_square"})
 
     def _restore_mounting_state(self, state) -> None:
         """@brief Restore host settings, defaulting legacy projects to their original lands."""
@@ -3016,7 +3036,25 @@ class MainWindow(QMainWindow):
                          and math.isfinite(value) and widget.minimum() <= value <= widget.maximum())
                 widget.setValue(value if valid else fallback)
             widget.blockSignals(blocked)
-        self.header_dimensions.setVisible(self.combo_mounting.currentData() == "headers")
+        self.header_pad_overrides = {}
+        raw_overrides = state.get("pad_overrides", {})
+        if isinstance(raw_overrides, dict):
+            for number, override in raw_overrides.items():
+                if not isinstance(override, dict) or override.get("shape") not in {"circle", "rect"}:
+                    continue
+                try:
+                    size = float(override.get("size"))
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(size) and 0.1 <= size <= 10.0:
+                    self.header_pad_overrides[str(number)] = {
+                        "shape": override["shape"], "size": size}
+        square = self.combo_mounting.currentData() == "headers_square"
+        self.header_pad_label.setText(self.i18n.text(
+            "Lato pad sulla scheda ospitante:" if square else
+            "Diametro pad sulla scheda ospitante:"))
+        self.header_dimensions.setVisible(
+            self.combo_mounting.currentData() in {"headers", "headers_square"})
         self._set_mounting_error("")
         self._sync_preview_mounting()
 
@@ -3373,12 +3411,13 @@ class MainWindow(QMainWindow):
             project = self._project_dir()
             footprint = project / f"{name}.pretty" / f"{name}.kicad_mod"
             step = project / f"{name}.3dshapes" / f"{name}.step"
+            symbol = project / f"{name}.kicad_sym"
             footprint_available = footprint.is_file()
             complete_available = footprint_available and step.is_file()
         else:
             # Senza nome non c'e' una cartella, quindi niente da aprire ne' da
             # installare: nessun percorso da mostrare e nessun file da cercare.
-            footprint = step = None
+            footprint = step = symbol = None
             footprint_available = complete_available = False
         for attr in ("btn_open_output", "action_open_output"):
             action = getattr(self, attr, None)
@@ -3414,14 +3453,35 @@ class MainWindow(QMainWindow):
                     action.setProperty("i18n_tooltip_source", source)
                     action.setProperty("i18n_tooltip_rendered", rendered)
                 action.setToolTip(rendered)
-        self._refresh_kicad_tab(complete_available)
+        # Verification must remain reachable when a footprint lacks its STEP.
+        self._refresh_kicad_tab(footprint_available)
         if hasattr(self, "tabs"):
             self._refresh_preview_tabs(footprint_available)
         if hasattr(self, "label_kicad_footprint"):
-            self.label_kicad_footprint.setText(
-                str(footprint) if footprint_available else "—")
-            self.label_kicad_step.setText(
-                str(step) if (step is not None and step.is_file()) else "—")
+            step_available = step is not None and step.is_file()
+            symbol_available = symbol is not None and symbol.is_file()
+            self.label_kicad_footprint.setText(footprint.name if footprint_available else "—")
+            self.label_kicad_footprint.setToolTip(str(footprint) if footprint_available else "")
+            self.label_kicad_step.setText(step.name if step_available else "—")
+            self.label_kicad_step.setToolTip(str(step) if step_available else "")
+            self.label_kicad_symbol.setText(
+                symbol.name if symbol_available else self.i18n.text("Da esportare"))
+            self.label_kicad_symbol.setToolTip(
+                str(symbol) if symbol is not None else self.i18n.text(
+                    "Imposta il nome del componente per preparare il simbolo."))
+            if hasattr(self, "label_kicad_footprint_path"):
+                footprint_path_text = ("Percorso footprint: " + str(footprint)
+                                        if footprint_available else "Percorso footprint: —")
+                step_path_text = ("Percorso modello STEP: " + str(step)
+                                  if step_available else "Percorso modello STEP: —")
+                symbol_path_text = ("Percorso simbolo elettrico: " + str(symbol)
+                                    if symbol_available else
+                                    "Percorso simbolo elettrico previsto: " + str(symbol)
+                                    if symbol is not None else
+                                    "Percorso simbolo elettrico: —")
+                self.label_kicad_footprint_path.setText(footprint_path_text)
+                self.label_kicad_step_path.setText(step_path_text)
+                self.label_kicad_symbol_path.setText(symbol_path_text)
             status = (self.i18n.text("Footprint e modello STEP pronti per la verifica.")
                       if complete_available else
                       self.i18n.text("Genera footprint e modello STEP per continuare."))
@@ -3437,15 +3497,9 @@ class MainWindow(QMainWindow):
     KICAD_TAB_INDEX = TAB_KICAD
 
     def _refresh_kicad_tab(self, complete: bool) -> None:
-        """@brief Let the «KiCad» tab be chosen only for a completed project.
+        """@brief A footprint enables verification even if STEP is missing.
 
-        @param complete True when the current project folder holds both the
-            footprint and the STEP model: exactly what every operation of the
-            tab needs (test in KiCad, project and global installation).
-        @note User, 2026-09-24: at start-up, with no project, the tab could be
-            opened and showed only dashes and disabled commands. A tab being
-            shown when it gets disabled hands over to «Project», so the window
-            never sits on a tab that cannot be chosen.
+        Installation and visual preview retain their own complete-file guards.
         """
         tabs = getattr(self, "tabs", None)
         index = self.KICAD_TAB_INDEX
@@ -3455,7 +3509,7 @@ class MainWindow(QMainWindow):
             tabs.setCurrentIndex(0)
         tabs.setTabEnabled(index, complete)
         tabs.setTabToolTip(index, "" if complete else self.i18n.text(
-            "Disponibile quando il progetto ha footprint e modello STEP generati."))
+            "Disponibile quando il progetto ha un footprint generato."))
 
     def _on_name_changed(self, text: str) -> None:
         """@brief Il nome e' la cartella: da qui in avanti il progetto aperto e' quella.
@@ -6506,6 +6560,19 @@ class MainWindow(QMainWindow):
             self._restoring_project = False
         # Le schede di anteprima seguono cio' che il progetto aperto contiene.
         self._refresh_output_actions()
+        # Il simbolo applicato fa parte degli artefatti del componente. Nei
+        # progetti gia' generati lo creiamo se manca, senza toccare un file
+        # .kicad_sym eventualmente gia' esportato o personalizzato.
+        self._refresh_symbol_tab(force=True)
+        component = self._component_name()
+        if (component and self._project_has_footprint()
+                and not (self._project_dir() / f"{component}.kicad_sym").is_file()):
+            self._save_applied_electrical_symbol(quiet=True)
+        # Older runs persisted per-pad choices but the castellated host
+        # generator ignored them. Rebuild once on project open so those saved
+        # choices reach the .kicad_mod without asking the user to edit the pad again.
+        if self.header_pad_overrides and self._project_has_footprint():
+            self._generate(footprint_only=True)
         # La scheda aperta mostra il progetto nuovo, non quello chiuso: senza,
         # restava il disegno del precedente e il 3D non si ridisegnava (audit
         # 25/09). Le altre schede si ridisegnano all'ingresso, come sempre.
@@ -6621,6 +6688,8 @@ class MainWindow(QMainWindow):
 
     def _can_leave_project(self, folder: Path | None = None) -> bool:
         """Save pending edits before navigation; a failed write retains the open project."""
+        if getattr(self, '_component_review_dialog', None) is not None:
+            return False
         symbol = getattr(self, 'symbol_tab', None)
         if symbol is not None and symbol.has_pending_edits():
             self.tabs.setCurrentIndex(TAB_SYMBOL)
@@ -8401,8 +8470,49 @@ class MainWindow(QMainWindow):
         self.label_kicad_step.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
         self.label_kicad_step.setWordWrap(True)
+        self.label_kicad_symbol = QLabel("Da esportare")
+        self.label_kicad_symbol.setProperty("i18n_skip", True)
+        self.label_kicad_symbol.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.label_kicad_symbol.setWordWrap(True)
         artifacts_form.addRow("Footprint:", self.label_kicad_footprint)
+        symbol_row = QWidget()
+        symbol_row_layout = QHBoxLayout(symbol_row)
+        symbol_row_layout.setContentsMargins(0, 0, 0, 0)
+        symbol_row_layout.setSpacing(8)
+        symbol_row_layout.addWidget(self.label_kicad_symbol, 1)
+        self.btn_export_symbol = self._workflow_tool_button(
+            "tab-symbol.svg", "Esporta simbolo KiCad…",
+            "Esporta il simbolo elettrico applicato in un file .kicad_sym")
+        self.btn_export_symbol.clicked.connect(self.symbol_tab.export_requested.emit)
+        symbol_row_layout.addWidget(self.btn_export_symbol)
+        artifacts_form.addRow("Simbolo elettrico:", symbol_row)
         artifacts_form.addRow("Modello STEP:", self.label_kicad_step)
+        self.file_paths_toggle = QToolButton()
+        self.file_paths_toggle.setText("Mostra percorsi completi")
+        self.file_paths_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.file_paths_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.file_paths_toggle.setCheckable(True)
+        self.file_paths_toggle.setProperty("i18n_skip", True)
+        self.file_paths_toggle.toggled.connect(self._toggle_kicad_file_paths)
+        artifacts_form.addRow(self.file_paths_toggle)
+        self.file_paths_detail = QWidget()
+        paths_layout = QVBoxLayout(self.file_paths_detail)
+        paths_layout.setContentsMargins(18, 2, 4, 4)
+        paths_layout.setSpacing(3)
+        self.label_kicad_footprint_path = QLabel("Percorso footprint: —")
+        self.label_kicad_symbol_path = QLabel("Percorso simbolo elettrico: —")
+        self.label_kicad_step_path = QLabel("Percorso modello STEP: —")
+        for path_label in (self.label_kicad_footprint_path, self.label_kicad_symbol_path,
+                           self.label_kicad_step_path):
+            path_label.setWordWrap(True)
+            path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            path_label.setProperty("i18n_skip", True)
+            paths_layout.addWidget(path_label)
+        self.file_paths_detail.hide()
+        artifacts_form.addRow(self.file_paths_detail)
+        self.symbol_tab.export_enabled_changed.connect(self.btn_export_symbol.setEnabled)
+        self.btn_export_symbol.setEnabled(self.symbol_tab.export_button.isEnabled())
         _align_form_labels(artifacts_form)
         outer.addWidget(artifacts_group)
 
@@ -8423,7 +8533,12 @@ class MainWindow(QMainWindow):
             'wf-review.svg', 'Verifica componente per KiCad',
             'Controlla footprint, simbolo, corrispondenza pin-pad e importazione 3D con KiCad')
         self.btn_verify_component.clicked.connect(self._verify_component)
-        review_layout.addLayout(self._note_with_icons(review_note, self.btn_verify_component, self.btn_test_kicad))
+        self.btn_kicad_guide = self._workflow_tool_button(
+            'info.svg', 'Guida rapida per usare il componente in KiCad',
+            'Apri la procedura guidata per installare e usare footprint e simbolo')
+        self.btn_kicad_guide.clicked.connect(self._show_kicad_usage_wizard)
+        review_layout.addLayout(self._note_with_icons(
+            review_note, self.btn_kicad_guide, self.btn_verify_component, self.btn_test_kicad))
         outer.addWidget(review_group)
 
         install_group = QGroupBox("Installazione nella libreria")
@@ -8444,6 +8559,28 @@ class MainWindow(QMainWindow):
         install_layout.addLayout(
             self._note_with_icons(install_note, self.btn_export, self.btn_install_global))
         outer.addWidget(install_group)
+
+        history_group = QGroupBox("Componenti esportati in KiCad")
+        history_layout = QVBoxLayout(history_group)
+        self.kicad_export_table = QTableWidget(0, 4)
+        self.kicad_export_table.setHorizontalHeaderLabels(
+            ["Componente", "Esportazione", "Destinazione", "Data"])
+        self.kicad_export_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.kicad_export_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.kicad_export_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.kicad_export_table.verticalHeader().setVisible(False)
+        self.kicad_export_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents)
+        self.kicad_export_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents)
+        self.kicad_export_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.Stretch)
+        self.kicad_export_table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.ResizeToContents)
+        self.kicad_export_table.setMaximumHeight(190)
+        history_layout.addWidget(self.kicad_export_table)
+        self._refresh_kicad_export_history()
+        outer.addWidget(history_group)
 
         # La riga in fondo sta in un riquadro come le altre (utente,
         # 2026-09-24). Lo stato resta TESTO: e' un esito da leggere subito, non
@@ -8467,11 +8604,108 @@ class MainWindow(QMainWindow):
 
     def _verify_component(self):
         from .component_check_dialog import ComponentCheckDialog
+        if self._background_work_running() or self._automatic_generation_active:
+            QMessageBox.information(self, self.i18n.text('Verifica componente per KiCad'),
+                                    self.i18n.text('Attendi la fine del lavoro in corso.'))
+            return
+        if not self.symbol_tab.has_pending_edits():
+            self._refresh_symbol_tab()
         pending = self.symbol_tab.has_pending_edits()
         args = dict(directory=self._project_dir(), name=self._component_name(),
                     rows=deepcopy(self.symbol_tab.rows()), pending=pending,
                     issues=self.symbol_tab.review_issues() if not pending else ())
-        ComponentCheckDialog(args, self, tx=self.i18n.text).exec()
+        dialog = ComponentCheckDialog(args, self, tx=self.i18n.text)
+        self._component_review_dialog = dialog
+        try:
+            dialog.exec()
+        finally:
+            self._component_review_dialog = None
+        if dialog.ai_review_requested:
+            self.tabs.setCurrentIndex(TAB_SYMBOL)
+            self._suggest_pin_types()
+
+    def _toggle_kicad_file_paths(self, expanded: bool) -> None:
+        """Show or collapse the full generated-file paths in the KiCad tab."""
+        self.file_paths_detail.setVisible(expanded)
+        self.file_paths_toggle.setArrowType(
+            Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+        self.file_paths_toggle.setText(
+            self.i18n.text("Nascondi percorsi completi" if expanded
+                           else "Mostra percorsi completi"))
+
+    def _refresh_kicad_export_history(self) -> None:
+        """Refresh the concise, persistent list of KiCad exports."""
+        table = getattr(self, "kicad_export_table", None)
+        if table is None:
+            return
+        records = load_kicad_export_history()
+        table.setRowCount(min(len(records), 12))
+        for row, record in enumerate(records[:12]):
+            destination = record.get("destination", "")
+            values = (record.get("component", ""), record.get("kind", ""),
+                      Path(destination).name or destination,
+                      record.get("timestamp", "").replace("T", " ")[:19])
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setToolTip(str(destination) if column == 2 else str(value))
+                table.setItem(row, column, item)
+
+    def _show_kicad_usage_wizard(self) -> None:
+        """Guide the user through installing and using the generated component."""
+        wizard = QWizard(self)
+        wizard.setWindowTitle(self.i18n.text("Guida rapida: usare il componente in KiCad"))
+        wizard.setWizardStyle(QWizard.WizardStyle.ModernStyle)
+        wizard.setMinimumWidth(650)
+
+        def add_page(title, description, actions=()):
+            page = QWizardPage(wizard)
+            page.setTitle(self.i18n.text(title))
+            layout = QVBoxLayout(page)
+            label = QLabel(self.i18n.text(description))
+            label.setWordWrap(True)
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            layout.addWidget(label)
+            for caption, callback in actions:
+                button = QPushButton(self.i18n.text(caption), page)
+                button.clicked.connect(callback)
+                layout.addWidget(button)
+            layout.addStretch()
+            wizard.addPage(page)
+
+        add_page(
+            "1. Installa la libreria del componente",
+            "La libreria di progetto è consigliata se il componente serve solo in questo progetto. "
+            "La libreria globale è disponibile in tutti i progetti di questo computer. "
+            "L’installazione registra footprint e modello 3D in KiCad.",
+            (("Installa nel progetto KiCad…", self._install_project_library),
+             ("Installa come libreria globale…", self._install_global_library)),
+        )
+        add_page(
+            "2. Posiziona il footprint sul PCB",
+            "Apri il PCB Editor del progetto. Scegli Posiziona > Aggiungi footprint, "
+            "cerca KiCadGen:" + self._component_name() + " e posiziona il componente. "
+            "Se non compare, verifica di aver installato la libreria nel progetto giusto.",
+        )
+        add_page(
+            "3. Esporta e registra il simbolo elettrico",
+            "Esporta il simbolo .kicad_sym, poi in KiCad apri Gestisci librerie di simboli "
+            "e aggiungi il file alla tabella del progetto o a quella globale.",
+            (("Esporta simbolo KiCad…", self.btn_export_symbol.click),),
+        )
+        add_page(
+            "4. Collega simbolo e footprint",
+            "Nello Schematic Editor aggiungi il simbolo dalla libreria registrata. "
+            "Apri le proprietà del simbolo e imposta Footprint su KiCadGen:" +
+            self._component_name() + ". Salva lo schema.",
+        )
+        add_page(
+            "5. Aggiorna e verifica il PCB",
+            "Nel PCB Editor aggiorna la scheda dallo schema con F8, controlla le "
+            "connessioni e apri la vista 3D con Alt+3 per verificare il modello. "
+            "La scheda KiCadGen conserva lo storico delle esportazioni effettuate da questo tool.",
+        )
+        self.i18n.retranslate_widgets(wizard)
+        wizard.exec()
 
     @staticmethod
     def _note_with_icons(note, *buttons) -> QHBoxLayout:
@@ -8692,6 +8926,14 @@ class MainWindow(QMainWindow):
         message = self.i18n.tr(
             "kicad.install_complete", identifier=result.identifier,
             footprint=result.footprint_path, table=result.table_path)
+        kind = "Libreria di progetto" if project_library else "Libreria globale"
+        if record_kicad_export(component=artifacts.name, kind=kind,
+                               source=str(artifacts.component_dir),
+                               destination=str(destination)):
+            self._refresh_kicad_export_history()
+        else:
+            self._append_log(self.i18n.text(
+                "Installazione riuscita, ma non è stato possibile aggiornare lo storico KiCad."))
         self._append_log(message)
         self.label_kicad_status.setText(message)
         QMessageBox.information(
@@ -8937,6 +9179,7 @@ class MainWindow(QMainWindow):
             row_spacing=self.field_row_spacing.value(),
             pad_diameter=self.field_pad.value(),
             drill=self.field_drill.value(),
+            pad_overrides=deepcopy(self.header_pad_overrides),
             populated_pins=self._parse_populated_pins(),
             pin_map=self.pin_map,
             body_length=self.field_body_length.value() if self.group_3d.isChecked() else None,
@@ -9481,6 +9724,7 @@ class MainWindow(QMainWindow):
     def _on_generated(self, path: str) -> None:
         if self._automatic_generation_active:
             self._automatic_footprint_done = True
+        self._save_applied_electrical_symbol(quiet=True)
         self._refresh_output_actions()
         self._append_log(f"OK -> {path}")
         if not self._cad_result_is_current():
@@ -9571,6 +9815,10 @@ class MainWindow(QMainWindow):
 
         header = QHBoxLayout()
         header.addWidget(QLabel("Anteprima 2D (silkscreen + pad, con quote):"))
+        self.preview_pad_hint = QLabel(self.i18n.text(
+            "Tasto destro su un pad per modificarne forma e dimensioni."))
+        self.preview_pad_hint.setProperty("i18n_skip", True)
+        header.addWidget(self.preview_pad_hint)
         header.addStretch()
         for asset, tooltip, callback in (
             ('zoom-in.svg', 'Ingrandisci', lambda: self.preview_view.zoom(1.2)),
@@ -9606,8 +9854,15 @@ class MainWindow(QMainWindow):
         self.preview_scene = QGraphicsScene()
         from .footprint_view import FootprintView
         self.preview_view = FootprintView(self.preview_scene)
+        self.preview_view.pad_context_requested.connect(self._edit_preview_pad)
         self.preview_view.setMinimumHeight(500)
-        self.preview_view.setRenderHints(self.preview_view.renderHints())
+        # The footprint is drawn at a relatively high scene scale (20 px/mm).
+        # Without these hints circles, square-pad corners and small pin labels
+        # look visibly jagged in the dark preview even though KiCad's exported
+        # geometry is correct.
+        self.preview_view.setRenderHints(
+            QPainter.RenderHint.Antialiasing | QPainter.RenderHint.TextAntialiasing
+        )
         self.preview_mounting_group = QGroupBox("Footprint sulla scheda ospitante")
         mounting_layout = QVBoxLayout(self.preview_mounting_group)
         mounting_row = QHBoxLayout()
@@ -9631,8 +9886,11 @@ class MainWindow(QMainWindow):
         dimensions.setContentsMargins(0, 0, 0, 0)
         self.spin_preview_header_pad = QDoubleSpinBox()
         self.spin_preview_header_drill = QDoubleSpinBox()
-        for spin, source, text in ((self.spin_preview_header_pad, self.spin_header_pad, "Pad Ø:"),
-                                   (self.spin_preview_header_drill, self.spin_header_drill, "Foro Ø:")):
+        self.preview_header_pad_label = QLabel("Pad Ø:")
+        for spin, source, label in ((self.spin_preview_header_pad, self.spin_header_pad,
+                                     self.preview_header_pad_label),
+                                    (self.spin_preview_header_drill, self.spin_header_drill,
+                                     QLabel("Foro Ø:"))):
             spin.setRange(source.minimum(), source.maximum())
             spin.setDecimals(source.decimals())
             spin.setSingleStep(source.singleStep())
@@ -9640,7 +9898,6 @@ class MainWindow(QMainWindow):
             spin.setKeyboardTracking(False)
             spin.setValue(source.value())
             spin.valueChanged.connect(source.setValue)
-            label = QLabel(text)
             label.setBuddy(spin)
             dimensions.addWidget(label)
             dimensions.addWidget(spin)
@@ -9686,13 +9943,15 @@ class MainWindow(QMainWindow):
                                    documents=documents, model=self._vision_model()), self, tx=self.i18n.text)
         account = getattr(self, 'ai_account', None)
         if account:
-            account.bind_run_project(self._project_dir_or_none())
+            project = self._project_dir_or_none()
+            dialog.analysis_started.connect(lambda: account.bind_run_project(project))
+            dialog.analysis_finished.connect(account.release_run_project)
+        self._component_review_dialog = dialog
         try:
             if dialog.exec() == QDialog.DialogCode.Accepted and snapshot == self.symbol_tab.draft_rows():
                 self.symbol_tab.use_pin_type_suggestions(dialog.selected())
         finally:
-            if account:
-                account.release_run_project()
+            self._component_review_dialog = None
 
     def _symbol_pad_ids(self):
         """Electrical identities come from the actual footprint, never row indices."""
@@ -9733,14 +9992,13 @@ class MainWindow(QMainWindow):
         self._draw_preview()
         self._sync_3d_pin_functions()
         self.symbol_tab.accept_apply()
+        self._save_applied_electrical_symbol(quiet=True)
 
-    def _export_electrical_symbol(self):
+    def _save_applied_electrical_symbol(self, path=None, *, quiet=False):
+        """Write the applied electrical symbol beside the component artifacts."""
         from ..generators.symbol import symbol_inputs, export_symbol
-        # Keep direct invocations as safe as the disabled toolbar button: an
-        # export must never silently use older geometry than the visible draft.
         if self.symbol_tab.has_pending_edits():
-            self.symbol_tab.set_status(self.i18n.text("Modifiche non applicate."))
-            return
+            return None
         try:
             rows = self.symbol_tab.rows()
             ids = self._symbol_pad_ids()
@@ -9749,6 +10007,25 @@ class MainWindow(QMainWindow):
                 raise ValueError(self.i18n.text(
                     "I numeri del simbolo devono corrispondere ai pad elettrici del footprint."))
             pins, body = symbol_inputs(rows)
+            target = Path(path) if path else (
+                self._project_dir() / f'{self._component_name()}.kicad_sym')
+            return export_symbol(target, self._component_name(), pins,
+                                 footprint=self.symbol_tab.footprint(), body=body)
+        except (OSError, ValueError, TypeError) as exc:
+            if not quiet:
+                self.symbol_tab.set_status(str(exc))
+            else:
+                self._append_log(self.i18n.text(
+                    "Simbolo elettrico non salvato automaticamente: {error}").format(error=exc))
+            return None
+
+    def _export_electrical_symbol(self):
+        # Keep direct invocations as safe as the disabled toolbar button: an
+        # export must never silently use older geometry than the visible draft.
+        if self.symbol_tab.has_pending_edits():
+            self.symbol_tab.set_status(self.i18n.text("Modifiche non applicate."))
+            return
+        try:
             if not self.symbol_tab.confirm_export_review():
                 return
             path, _ = QFileDialog.getSaveFileName(self,
@@ -9759,12 +10036,21 @@ class MainWindow(QMainWindow):
                 return
             if not path.lower().endswith('.kicad_sym'):
                 path += '.kicad_sym'
-            footprint = self.symbol_tab.footprint()
-            export_symbol(Path(path), self._component_name(), pins, footprint=footprint, body=body)
+            exported = self._save_applied_electrical_symbol(path)
+            if exported is None:
+                return
         except (OSError, ValueError, TypeError) as exc:
             self.symbol_tab.set_status(str(exc))
             return
+        path = str(exported)
         message = self.i18n.text("Simbolo esportato: {path}").format(path=path)
+        if record_kicad_export(component=self._component_name(), kind="File simbolo",
+                               source=str(self._project_dir()), destination=str(Path(path))):
+            self._refresh_kicad_export_history()
+        else:
+            self._append_log(self.i18n.text(
+                "Simbolo esportato, ma non è stato possibile aggiornare lo storico KiCad."))
+        self._refresh_output_actions()
         self.symbol_tab.set_status(message)
         self._append_log(message)
 
@@ -11167,6 +11453,12 @@ class MainWindow(QMainWindow):
         self._config["show_grid"] = checked
         self._save_config_safely()
         self.combo_grid_unit.setEnabled(checked)
+        view = getattr(self, "preview_view", None)
+        spec = getattr(self, "_preview_grid_spec", None)
+        if view is not None and spec is not None:
+            step = (2.54 if self.combo_grid_unit.currentData() == "inch" else 1.0) * spec["mm_to_px"]
+            origin = tuple(value * spec["mm_to_px"] for value in spec["origin"])
+            view.set_grid(step, origin, checked)
         # Grid visibility is not a request to redraw/refit the footprint.
         for item in self.preview_scene.items():
             if item.data(_GRID_ITEM):
@@ -11224,6 +11516,11 @@ class MainWindow(QMainWindow):
         self._preview_grid_spec = dict(mm_to_px=mm_to_px, width=width, height=height,
                                        margin=margin, x0=x0, y0=y0, origin=origin)
         step = 2.54 if self.combo_grid_unit.currentData() == "inch" else 1.0
+        self.preview_view.set_grid(
+            step * mm_to_px,
+            tuple(value * mm_to_px for value in origin),
+            self.chk_grid.isChecked(),
+        )
 
         minor = QPen(QColor(SURFACE1))
         minor.setWidthF(0.5)
@@ -11469,7 +11766,7 @@ class MainWindow(QMainWindow):
             params = self._host_footprint_params(params)
             self._set_mounting_error("")
         except (ValueError, TypeError) as exc:
-            if self.combo_mounting.currentData() == "headers":
+            if self.combo_mounting.currentData() in {"headers", "headers_square"}:
                 self._set_mounting_error(str(exc))
             # Campi incompleti o stato di progetto non coerente: nessun
             # disegno, mai un'eccezione fuori da un gestore Qt.
@@ -11483,6 +11780,8 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "preview_scene"):
             return
         params = self._preview_params()
+        if hasattr(self, "preview_pad_hint"):
+            self.preview_pad_hint.setVisible(isinstance(params, PackageGeometry))
         if params is None:
             self.preview_scene.clear()
             return
@@ -11543,16 +11842,24 @@ class MainWindow(QMainWindow):
             x, y = x_mm * mm_to_px, y_mm * mm_to_px
             xs_px.append(x)
             ys_px.append(y)
-
-            if pin == 1:
+            override = (p.pad_overrides or {}).get(str(pin), {})
+            size = float(override.get("size", p.pad_diameter))
+            radius = size * mm_to_px / 2
+            pad_shape = override.get("shape", "rect" if pin == 1 or p.pad_shape == "rect"
+                                     else "circle")
+            if pad_shape == "rect":
                 item: QGraphicsRectItem | QGraphicsEllipseItem = QGraphicsRectItem(
                     x - r, y - r, 2 * r, 2 * r
                 )
             else:
-                item = QGraphicsEllipseItem(x - r, y - r, 2 * r, 2 * r)
+                item = QGraphicsEllipseItem(x - radius, y - radius,
+                                            2 * radius, 2 * radius)
+            if pad_shape == "rect":
+                item.setRect(x - radius, y - radius, 2 * radius, 2 * radius)
             item.setPen(pad_pen)
             item.setBrush(pad_brush)
             item.setToolTip(self._pad_tooltip(pin))
+            item.setData(0x504144, f"header:{pin}")
             self.preview_scene.addItem(item)
 
             hole_r = p.drill * mm_to_px / 2
@@ -11566,13 +11873,13 @@ class MainWindow(QMainWindow):
             number.setToolTip(item.toolTip())
             number.setBrush(QBrush(QColor(TEXT)))
             font = number.font()
-            font.setPointSizeF(max(6.0, r * 0.55))
+            font.setPointSizeF(max(6.0, radius * 0.55))
             font.setBold(True)
             number.setFont(font)
             number_rect = number.boundingRect()
             number.setPos(x - number_rect.width() / 2,
-                          y - r - number_rect.height() - 3 if y_mm <= height / 2 else
-                          y + r + 3)
+                          y - radius - number_rect.height() - 3 if y_mm <= height / 2 else
+                          y + radius + 3)
             number.setZValue(5)
             label_bounds.append(number.sceneBoundingRect())
 
@@ -11652,7 +11959,7 @@ class MainWindow(QMainWindow):
         extent = ([-body_l / 2, -body_w / 2, body_l / 2, body_w / 2]
                   if package.body_length_mm and package.body_width_mm else
                   [math.inf, math.inf, -math.inf, -math.inf])
-        for pin in pins:
+        for pad_index, pin in enumerate(pins):
             x, y = pin.x_mm * mm_to_px, pin.y_mm * mm_to_px
             w, h = pin.pad_length_mm * mm_to_px, pin.pad_width_mm * mm_to_px
             if pin.shape == "circle":
@@ -11669,6 +11976,7 @@ class MainWindow(QMainWindow):
             item.setPen(pad_pen)
             item.setBrush(pad_brush)
             item.setToolTip(self._pad_tooltip(pin.number))
+            item.setData(0x504144, f"package:{pad_index}:{pin.number}")
             drilled = pin.pad_type in ("thru_hole", "np_thru_hole") and pin.drill_mm
             if drilled:
                 diameter = pin.drill_mm * mm_to_px
@@ -11723,6 +12031,154 @@ class MainWindow(QMainWindow):
         self._add_dim_v(top, bottom, right + 40, self._dim_label("dim.total", extent[3] - extent[1]))
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
+
+    def _edit_preview_pad(self, token: str) -> None:
+        parts = str(token).split(":", 2)
+        mode = self.combo_mounting.currentData()
+        if parts[0] == "header" and len(parts) == 2:
+            self._edit_header_pad(parts[1])
+        elif parts[0] == "package" and len(parts) == 3:
+            if mode in {"headers", "headers_square"}:
+                self._edit_header_pad(parts[2])
+            else:
+                self._edit_package_pad(int(parts[1]))
+
+    def _edit_header_pad(self, number: str) -> None:
+        """Set an individual circular or square land in the header footprint."""
+        number = str(number)
+        mode = self.combo_mounting.currentData()
+        base_shape = "rect" if mode == "headers_square" or (mode == "headers" and number == "1") else "circle"
+        current = self.header_pad_overrides.get(number, {})
+        current_shape = current.get("shape", base_shape)
+        current_size = float(current.get("size", self.spin_header_pad.value()))
+        from PyQt6.QtWidgets import QDialogButtonBox
+        dialog = QDialog(self)
+        dialog.setWindowTitle(self.i18n.text("Modifica pad {number}").format(number=number))
+        form = QFormLayout(dialog)
+        shape = QComboBox(dialog)
+        shape.addItem(self.i18n.text("Predefinito"), "default")
+        shape.addItem(self.i18n.text("Cerchio"), "circle")
+        shape.addItem(self.i18n.text("Quadrato"), "rect")
+        if number in self.header_pad_overrides:
+            shape.setCurrentIndex(shape.findData(current_shape))
+        else:
+            shape.setCurrentIndex(0)
+        form.addRow(self.i18n.text("Forma del pad:"), shape)
+        dimension_label = QLabel()
+        size = QDoubleSpinBox(dialog)
+        size.setRange(0.1, 10.0)
+        size.setDecimals(2)
+        size.setSingleStep(0.1)
+        size.setSuffix(" mm")
+        size.setValue(current_size)
+        form.addRow(dimension_label, size)
+
+        def update_dimension_label():
+            selected = shape.currentData()
+            effective_shape = (base_shape if selected == "default" else selected)
+            dimension_label.setText(self.i18n.text(
+                "Lato pad:" if effective_shape == "rect" else "Diametro pad:"))
+            size.setEnabled(selected != "default")
+
+        shape.currentIndexChanged.connect(update_dimension_label)
+        update_dimension_label()
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                   QDialogButtonBox.StandardButton.Cancel, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        updated = deepcopy(self.header_pad_overrides)
+        if shape.currentData() == "default":
+            updated.pop(number, None)
+        else:
+            pad_size = size.value()
+            if pad_size <= self.spin_header_drill.value():
+                QMessageBox.warning(self, self.i18n.text("Dimensione pad non valida"),
+                                    self.i18n.text("Il pad deve essere più grande del foro."))
+                return
+            updated[number] = {"shape": shape.currentData(), "size": pad_size}
+        previous = deepcopy(self.header_pad_overrides)
+        self.header_pad_overrides = updated
+        if not self._save_project_config(force=True):
+            self.header_pad_overrides = previous
+            QMessageBox.warning(self, self.i18n.text("Errore"), self.i18n.text(
+                "Modifica pad non salvata."))
+            return
+        self._draw_preview()
+        # The selected land is an edit to the generated host footprint, so
+        # write the updated .kicad_mod immediately after persisting the choice.
+        self._generate(footprint_only=True)
+
+    def _edit_package_pad(self, pad_index: int) -> None:
+        """Edit the selected package pad's shape and dimensions from its context click."""
+        package = self.package_geometry
+        if package is None or not 0 <= pad_index < len(package.pins):
+            return
+        pin = package.pins[pad_index]
+        from PyQt6.QtWidgets import QDialogButtonBox
+        dialog = QDialog(self)
+        dialog.setWindowTitle(self.i18n.text("Modifica pad {number}").format(number=pin.number))
+        form = QFormLayout(dialog)
+        shape = QComboBox(dialog)
+        choices = (
+            ("Cerchio", "circle"), ("Quadrato", "square"),
+            ("Rettangolo", "rect"), ("Ovale", "oval"),
+            ("Rettangolo arrotondato", "roundrect"), ("Trapezio", "trapezoid"),
+        )
+        for label, value in choices:
+            shape.addItem(self.i18n.text(label), value)
+        current_shape = ("square" if pin.shape == "rect" and
+                         abs(pin.pad_length_mm - pin.pad_width_mm) < 1e-9 else pin.shape)
+        shape_index = shape.findData(current_shape)
+        shape.setCurrentIndex(max(shape_index, 0))
+        form.addRow(self.i18n.text("Forma del pad:"), shape)
+
+        def size_control(value):
+            control = QDoubleSpinBox(dialog)
+            control.setRange(0.05, 100.0)
+            control.setDecimals(3)
+            control.setSingleStep(0.1)
+            control.setSuffix(" mm")
+            control.setValue(float(value))
+            return control
+
+        width = size_control(pin.pad_length_mm)
+        height = size_control(pin.pad_width_mm)
+        form.addRow(self.i18n.text("Larghezza:"), width)
+        form.addRow(self.i18n.text("Altezza:"), height)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                   QDialogButtonBox.StandardButton.Cancel, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        selected_shape = shape.currentData()
+        pad_width, pad_height = width.value(), height.value()
+        if selected_shape == "square":
+            selected_shape = "rect"
+            pad_height = pad_width
+        updated = replace(pin, shape=selected_shape,
+                          pad_length_mm=pad_width, pad_width_mm=pad_height)
+        old_pins = package.pins
+        package.pins = list(package.pins)
+        package.pins[pad_index] = updated
+        try:
+            package.validate()
+        except (TypeError, ValueError) as exc:
+            package.pins = old_pins
+            QMessageBox.warning(self, self.i18n.text("Dimensione pad non valida"), str(exc))
+            return
+        if not self._save_project_config(force=True):
+            package.pins = old_pins
+            QMessageBox.warning(self, self.i18n.text("Errore"), self.i18n.text(
+                "Modifica pad non salvata; il valore precedente è stato ripristinato."))
+            return
+        self._draw_preview()
+        self._generate(footprint_only=True)
 
     #: Italian fallbacks of the dimension-label keys, used only until the
     #: catalogue carries them: `I18n.tr` would otherwise show the bare key.
