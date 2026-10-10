@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 2026-10-10 - Fili ancorati e editor piu' CAD (IN CORSO, con agenti)
+## 2026-10-10 - Fili ancorati e editor piu' CAD (FATTO, commit e575af2)
 
 - Utente: «i fili devono restare agganciati: spostando un elemento si porta
   dietro il filo; procedi scatenando agenti; deve essere un CAD un po' come
