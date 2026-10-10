@@ -8,7 +8,7 @@
   fili, aggancio dei pin ai terminali, esportazione degli elementi nel
   .kicad_sym, tema di anteprima «Colori come KiCad». Esclusi
   rows_none_rev.pkl, tmp/, work/; database profili incluso (nessuna chiave).
-- Suite simbolo/palette/traduzioni/documentazione: verdi (75 + 14).
+- Commit ADVANCED: 84e3129. Suite simbolo/palette/traduzioni/documentazione: verdi (75 + 14).
 
 ## 2026-10-10 - Pubblicazione: revisione avversariale, prompt dedicato, controllo pad
 
