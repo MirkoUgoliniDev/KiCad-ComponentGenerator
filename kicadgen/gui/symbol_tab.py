@@ -282,8 +282,9 @@ class _SymbolView(QGraphicsView):
     #: A click while placing a glyph (scene point), or None when placing is cancelled.
     place_requested = pyqtSignal(object)
     graphic_context_requested = pyqtSignal(int, object)
-    #: A click while drawing a wire (scene point).
-    wire_point = pyqtSignal(object)
+    #: A click while drawing a wire: (scene point, Shift held). Shift frees
+    #: the segment from the orthogonal constraint, as in KiCad.
+    wire_point = pyqtSignal(object, bool)
     #: The wire is finished (True) or abandoned (False).
     wire_finished = pyqtSignal(bool)
 
@@ -323,7 +324,8 @@ class _SymbolView(QGraphicsView):
 
     def mousePressEvent(self, event):
         if self.wiring and event.button() == Qt.MouseButton.LeftButton:
-            self.wire_point.emit(self.mapToScene(event.pos()))
+            self.wire_point.emit(self.mapToScene(event.pos()),
+                                 bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier))
             event.accept()
             return
         if self.wiring and event.button() == Qt.MouseButton.RightButton:
@@ -584,9 +586,13 @@ class SymbolTab(QWidget):
         self._selected_graphic = None
         #: Canvas theme key: 'dark' (application) or 'kicad' (schematic colours).
         self._theme_key = 'dark'
-        #: Points (symbol mm) of the wire being drawn, [] when none.
+        #: Points of the wire being drawn, [] when none: `[x, y]` (symbol mm)
+        #: for a free grid point, `{"x", "y", "anchor"}` for a point attached
+        #: to a pin's inner end or an element terminal (symbol_glyphs anchors).
         self._wire_points = []
         self._wire_cursor_item = None
+        #: True: each new wire segment is horizontal or vertical (Shift frees it).
+        self._wire_orthogonal = True
         layout = QVBoxLayout(self)
         self.title = QLabel(self.tx('Simbolo elettrico'))
         layout.addWidget(self.title)
@@ -728,6 +734,12 @@ class SymbolTab(QWidget):
         # element terminal, or between any grid points.
         self.wire_button = icon_button('wf-contact.svg', 'Filo: clic sui punti, doppio clic o tasto destro per chiudere, Esc per annullare', self.start_wire)
         self.wire_button.defaultAction().setCheckable(True)
+        # Orthogonal wires like KiCad (user, 2026-10-10: «deve essere un CAD
+        # un po' come KiCad»): each segment horizontal or vertical, Shift frees it.
+        self.orthogonal_button = icon_button('symbol-align.svg', 'Fili ortogonali (Maiusc libera il segmento)')
+        self.orthogonal_button.defaultAction().setCheckable(True)
+        self.orthogonal_button.defaultAction().setChecked(True)
+        self.orthogonal_button.defaultAction().toggled.connect(self.set_wire_orthogonal)
         icon_button('info.svg', 'Trascina i pin sulla griglia. Tasto destro per ruotare. Maniglie per ridimensionare; Esc annulla.')
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -797,6 +809,9 @@ class SymbolTab(QWidget):
         self.recovery_button.defaultAction().setEnabled(False)
         self._source_key = key
         self._error = ''
+        # The previous layout belongs to this project only when the name is
+        # the same: another project's pins must not freeze this one's wires.
+        same_project = self._symbol is not None and str(name) == self._name
         self._name, self._footprint = str(name), str(footprint)
         self.footprint_label.setText(f"{self.tx('Footprint associato')}: {footprint}" if footprint else '')
         source = [deepcopy(row) for row in pinout if isinstance(row, dict)]
@@ -818,6 +833,37 @@ class SymbolTab(QWidget):
                 row['electrical_type_reviewed'] = False
                 row.pop('electrical_type_evidence', None)
             row.setdefault('symbol_side', 'left' if index < (len(source) + 1) // 2 else 'right')
+        # Legacy records (no `id`) get their stable id HERE, before the
+        # baseline is copied: baseline and draft must agree on the ids, or an
+        # untouched project would load dirty (Apply enabled, Export disabled)
+        # and Cancel would regenerate the ids.
+        graphics = self._graphics(source)
+        # Wires anchored to a pin the new pinout no longer has keep its last
+        # position as a fixed point. Only the layout of the SAME project can
+        # tell where that pin was; at the first load, or coming from another
+        # project, nothing is frozen and the anchor falls back to its stored
+        # x/y, refreshed at every commit (`refresh_wire_anchors`).
+        if same_project and graphics:
+            from ..generators.symbol_glyphs import freeze_pin_anchors, pin_inner_ends
+            previous_ends = pin_inner_ends(self._symbol)
+            new_numbers = {str(row.get('pin', '')) for row in source}
+            dropped = [number for number in previous_ends if number not in new_numbers]
+            if dropped:
+                for number in dropped:
+                    freeze_pin_anchors(graphics, number, previous_ends)
+                source = self._with_graphics(source, graphics)
+        # Wires drawn before anchors existed: a free point that coincides
+        # with a pin end or a terminal end was snapped there on purpose and
+        # becomes anchored now, still before the baseline (not «modified»).
+        if graphics:
+            from ..generators.symbol_glyphs import adopt_coincident_anchors, pin_inner_ends
+            try:
+                pins, body = symbol_inputs(source)
+                ends = pin_inner_ends(layout_symbol(pins, body)) if pins else {}
+            except ValueError:
+                ends = {}
+            if adopt_coincident_anchors(graphics, ends):
+                source = self._with_graphics(source, graphics)
         self._history = []
         self._history_index = -1
         self._selected_pin = None
@@ -830,6 +876,10 @@ class SymbolTab(QWidget):
     def _populate(self, rows):
         self._loading = True
         self._draft = deepcopy(rows)
+        # Legacy records get their stable id here, in place, before the first
+        # history entry is recorded: wire anchors name elements by id, and an
+        # undo must never reach a draft whose ids differ.
+        self._graphics(self._draft)
         self.table.setRowCount(len(rows))
         for index, row in enumerate(rows):
             number = QTableWidgetItem(str(row.get('pin', '')))
@@ -1055,52 +1105,114 @@ class SymbolTab(QWidget):
         self.set_status(self.tx('Filo: clicca i punti (si agganciano a pin e terminali); doppio clic, Invio o tasto destro per chiudere, Esc per annullare.'))
         self._draw(self._symbol)
 
-    def _wire_snap_targets(self):
-        """Points a wire end snaps to: inner ends of pins and of element terminals."""
-        from ..generators.symbol_glyphs import placed_terminals
-        direction = {0: (1, 0), 90: (0, 1), 180: (-1, 0), 270: (0, -1)}
-        targets = []
-        if self._symbol is not None:
-            for p in self._symbol.pins:
-                vx, vy = direction[p.angle % 360]
-                targets.append((round(p.x + vx * self._symbol.pin_length, 4),
-                                round(p.y + vy * self._symbol.pin_length, 4)))
-        for instance in self._graphics():
-            for t in placed_terminals(instance):
-                vx, vy = direction[t.angle % 360]
-                targets.append((round(t.x + vx * t.length, 4), round(t.y + vy * t.length, 4)))
-        return targets
+    @staticmethod
+    def _xy(point):
+        """The (x, y) of a wire point, stored as `[x, y]` or `{"x", "y", "anchor"?}`."""
+        if isinstance(point, dict):
+            return (float(point.get('x', 0.0)), float(point.get('y', 0.0)))
+        return (float(point[0]), float(point[1]))
 
-    def _wire_snap(self, x, y):
-        """A wire point: the nearest snap target within half a grid step, else the grid point."""
-        from ..generators.symbol_glyphs import TERMINAL_SNAP_MM
-        best, best_distance = None, TERMINAL_SNAP_MM
-        for tx_, ty_ in self._wire_snap_targets():
-            distance = math.hypot(tx_ - x, ty_ - y)
-            if distance <= best_distance:
-                best, best_distance = (tx_, ty_), distance
-        if best is not None:
-            return list(best)
+    def _pin_ends(self):
+        """`pin_inner_ends` of the current layout, {} without a symbol."""
+        from ..generators.symbol_glyphs import pin_inner_ends
+        return pin_inner_ends(self._symbol) if self._symbol is not None else {}
+
+    def _wire_snap(self, x, y, graphics=None):
+        """A wire point: anchored to the pin end or element terminal within the snap
+        tolerance (`anchor_for_point`), else the free grid point `[x, y]`.
+
+        @param graphics The records to anchor to; None reads the draft.
+        """
+        from ..generators.symbol_glyphs import anchor_for_point
+        found = anchor_for_point(self._graphics() if graphics is None else graphics, self._pin_ends(), x, y)
+        if found is not None:
+            anchor, (px, py) = found
+            return {'x': px, 'y': py, 'anchor': anchor}
         return [round(round(v / GRID_MM) * GRID_MM, 4) for v in (x, y)]
 
-    def add_wire_point(self, x, y):
+    def _exact_attachment(self, x, y, graphics):
+        """A computed wire point (projection or corner): anchored when it falls
+        EXACTLY on a pin end or terminal (tolerance 1e-6 mm, no snapping), so
+        the element drags it afterwards; else the free `[x, y]`."""
+        from ..generators.symbol_glyphs import anchor_for_point
+        found = anchor_for_point(graphics, self._pin_ends(), x, y, tolerance=1e-6)
+        if found is not None:
+            anchor, (px, py) = found
+            return {'x': px, 'y': py, 'anchor': anchor}
+        return [round(x, 4), round(y, 4)]
+
+    def _next_wire_points(self, x, y, free=False):
+        """The point(s) a click at (x, y) appends to the wire being drawn.
+
+        With the orthogonal constraint on (and Shift not held) the segment
+        from the last point is horizontal or vertical: a free target is
+        projected on the longer axis of its offset; an anchored target that is
+        not on the same row/column gets a corner before it, so the attachment
+        stays where the pin or terminal is. The corner is chosen so that the
+        LAST segment enters the attachment along the pin's own axis: a
+        horizontal pin or terminal (angle 0/180) is reached horizontally, a
+        vertical one (90/270) vertically; when the direction is unknown the
+        corner is horizontal-first. A projection or corner that lands exactly
+        on a pin end or terminal is stored anchored (`_exact_attachment`).
+        @return [] when nothing changes (the target repeats the last point).
+        """
+        from ..generators.symbol_glyphs import anchor_direction
+        graphics = self._graphics()
+        point = self._wire_snap(float(x), float(y), graphics)
+        if not self._wire_points:
+            return [point]
+        lx, ly = self._xy(self._wire_points[-1])
+        px, py = self._xy(point)
+        if self._wire_orthogonal and not free:
+            dx, dy = px - lx, py - ly
+            aligned = math.isclose(dx, 0.0, abs_tol=1e-6) or math.isclose(dy, 0.0, abs_tol=1e-6)
+            if isinstance(point, dict):
+                if not aligned:
+                    direction = anchor_direction(point.get('anchor'), graphics, self._symbol)
+                    corner = (lx, py) if direction in (0, 180) else (px, ly)
+                    return [self._exact_attachment(corner[0], corner[1], graphics), point]
+            elif not aligned:
+                corner = (px, ly) if abs(dx) >= abs(dy) else (lx, py)
+                point = self._exact_attachment(corner[0], corner[1], graphics)
+                px, py = self._xy(point)
+        if math.isclose(px, lx, abs_tol=1e-6) and math.isclose(py, ly, abs_tol=1e-6):
+            return []
+        return [point]
+
+    def set_wire_orthogonal(self, enabled):
+        """@brief Constrain new wire segments to horizontal/vertical (True) or draw them free.
+
+        @param enabled The constraint state; the toolbar action follows it.
+        """
+        self._wire_orthogonal = bool(enabled)
+        action = self.orthogonal_button.defaultAction()
+        if action.isChecked() != self._wire_orthogonal:
+            blocked = action.blockSignals(True)
+            action.setChecked(self._wire_orthogonal)
+            action.blockSignals(blocked)
+
+    def add_wire_point(self, x, y, free=False):
         """@brief Add a point (symbol mm, Y up) to the wire being drawn, snapped; True when added.
 
         @param x Symbol X in mm.
         @param y Symbol Y in mm.
+        @param free True (Shift held) lets the segment be diagonal even with
+            the orthogonal constraint on.
         @return False when no wire is being drawn or the point repeats the last one.
+        @note A point within the snap tolerance of a pin's inner end or of an
+            element terminal is stored anchored to it and follows it afterwards.
         """
         if not self.view.wiring and not self._wire_points and self._symbol is None:
             return False
-        point = self._wire_snap(float(x), float(y))
-        if self._wire_points and self._wire_points[-1] == point:
+        added = self._next_wire_points(x, y, free)
+        if not added:
             return False
-        self._wire_points.append(point)
+        self._wire_points.extend(added)
         self._draw(self._symbol)
         return True
 
-    def _wire_point(self, point):
-        self.add_wire_point(point.x() / SCENE_UNITS_PER_MM, -point.y() / SCENE_UNITS_PER_MM)
+    def _wire_point(self, point, free=False):
+        self.add_wire_point(point.x() / SCENE_UNITS_PER_MM, -point.y() / SCENE_UNITS_PER_MM, free)
 
     def finish_wire(self, commit=True):
         """@brief Close the wire being drawn: with two or more points it becomes a graphic element.
@@ -1117,11 +1229,15 @@ class SymbolTab(QWidget):
             self.set_status('')
             self._draw(self._symbol)
             return False
+        from ..generators.symbol_glyphs import WIRE_KEY, new_instance_id
         rows = self._free_rows(self.draft_rows(), self._symbol)
+        # `_free_rows` ran `symbol_graphics` on the rows: every element the
+        # anchors name carries its id in the rows being committed.
         graphics = self._graphics(rows) + [{
-            'key': 'wire', 'label': 'Filo', 'source': 'wire', 'x': 0.0, 'y': 0.0,
+            'id': new_instance_id(),
+            'key': WIRE_KEY, 'label': 'Filo', 'source': 'wire', 'x': 0.0, 'y': 0.0,
             'rotation': 0, 'mirror': False,
-            'primitives': [{'kind': 'polyline', 'points': [list(p) for p in points], 'radius': 0.0,
+            'primitives': [{'kind': 'polyline', 'points': [deepcopy(p) for p in points], 'radius': 0.0,
                             'fill': 'none', 'width': 0.254}],
             'terminals': []}]
         if not self._accept_geometry(self._with_graphics(rows, graphics)):
@@ -1194,7 +1310,14 @@ class SymbolTab(QWidget):
         self._draw(self._symbol)
 
     def _edit_graphic(self, index, operation, value=None):
-        """@brief Turn, mirror, move or delete one placed glyph; an unknown index does nothing."""
+        """@brief Turn, mirror, move or delete one placed glyph; an unknown index does nothing.
+
+        @return True when the draft was updated; False for an unknown index or
+            operation, and for 'rotate'/'mirror' on a wire: its free vertices
+            would turn about the wire's origin while the anchored ends stayed
+            on their pins and terminals, destroying the shape.
+        """
+        from ..generators.symbol_glyphs import is_wire
         if self._symbol is None or self._gesture_before is not None:
             return False
         rows = self._free_rows(self.draft_rows(), self._symbol)
@@ -1202,6 +1325,8 @@ class SymbolTab(QWidget):
         if index is None or not 0 <= index < len(graphics):
             return False
         instance = graphics[index]
+        if operation in ('rotate', 'mirror') and is_wire(instance):
+            return False
         if operation == 'rotate':
             instance['rotation'] = (int(instance.get('rotation', 0)) + int(value)) % 360
         elif operation == 'mirror':
@@ -1209,11 +1334,62 @@ class SymbolTab(QWidget):
         elif operation == 'move':
             instance['x'], instance['y'] = float(value[0]), float(value[1])
         elif operation == 'delete':
+            # Wires attached to the element keep their ends where they are.
+            from ..generators.symbol_glyphs import freeze_wire_anchors
+            freeze_wire_anchors(graphics, str(instance.get('id', '')), self._pin_ends())
             del graphics[index]
             self._selected_graphic = None
         else:
             return False
         return self._accept_geometry(self._with_graphics(rows, graphics))
+
+    def move_wire_vertex(self, index, position, x, y):
+        """@brief Move one vertex of a wire: anchored within the snap tolerance of a pin end or
+        element terminal, else free on the grid.
+
+        @param index Index of the wire in the draft's graphics.
+        @param position Index of the vertex in the wire's polyline.
+        @param x Target symbol X in mm.
+        @param y Target symbol Y in mm (Y up).
+        @return True when the draft was updated (also when nothing changed).
+        @note Inside a drag gesture the edit is rebuilt from the gesture's
+            starting rows, so the drop point alone decides the result; a free
+            vertex is stored in the wire's own frame (its x/y/rotation/mirror).
+        """
+        from ..generators.symbol_glyphs import is_wire
+        if self._symbol is None:
+            return False
+        source = self._gesture_before if self._gesture_before is not None else self.draft_rows()
+        symbol = self._gesture_layout if self._gesture_before is not None else self._symbol
+        rows = self._free_rows(source, symbol)
+        graphics = self._graphics(rows)
+        if not 0 <= index < len(graphics) or not is_wire(graphics[index]):
+            return False
+        wire = graphics[index]
+        points = (wire.get('primitives') or [{}])[0].get('points', [])
+        if not 0 <= position < len(points):
+            return False
+        point = self._wire_snap(float(x), float(y), graphics)
+        if isinstance(point, list):
+            point = list(self._wire_local(wire, *point))
+        else:
+            # The anchored point's fallback, like a free vertex, lives in the
+            # wire's own frame (`refresh_wire_anchors` keeps it there).
+            point['x'], point['y'] = self._wire_local(wire, point['x'], point['y'])
+        if points[position] == point:
+            self._draft = deepcopy(source)
+            self._changed()
+            return True
+        points[position] = point
+        return self._accept_geometry(self._with_graphics(rows, graphics))
+
+    @staticmethod
+    def _wire_local(wire, x, y):
+        """The wire-frame coordinates of an absolute point: the inverse of the
+        move/rotate/mirror `placed_primitives` applies to a free point
+        (`symbol_glyphs.wire_local_point`)."""
+        from ..generators.symbol_glyphs import wire_local_point
+        return wire_local_point(wire, x, y)
 
     def fit_body_to_graphic(self, index):
         """@brief Resize the body to the outline the library symbol had, when it had one."""
@@ -1244,17 +1420,21 @@ class SymbolTab(QWidget):
         title.setEnabled(False)
         menu.addSeparator()
         menu.setToolTipsVisible(True)
-        for asset, label, operation, value in [
+        from ..generators.symbol_glyphs import catalogue, is_wire
+        wire = is_wire(graphics[index])
+        # A wire is reshaped by dragging its vertices: turning or mirroring it
+        # would detach its shape from the anchored ends (see `_edit_graphic`).
+        entries = [] if wire else [
             ('rotate-ccw.svg', 'Ruota di 90 gradi (antiorario)', 'rotate', 90),
             ('rotate-cw.svg', 'Ruota di 90 gradi (orario)', 'rotate', -90),
             ('format-painter.svg', 'Specchia', 'mirror', None),
-            ('delete.svg', 'Elimina elemento', 'delete', None),
-        ]:
+        ]
+        entries.append(('delete.svg', 'Elimina elemento', 'delete', None))
+        for asset, label, operation, value in entries:
             action = menu.addAction(QIcon(str(Path(__file__).parent / 'assets' / asset)), self.tx(label))
             action.setIconVisibleInMenu(True)
             action.triggered.connect(lambda checked=False, op=operation, v=value: self._edit_graphic(index, op, v))
-        from ..generators.symbol_glyphs import catalogue
-        glyph = next((g for g in catalogue() if g.key == graphics[index].get('key')), None)
+        glyph = None if wire else next((g for g in catalogue() if g.key == graphics[index].get('key')), None)
         if glyph is not None and glyph.body_hint is not None:
             fit = menu.addAction(self.tx('Adatta il rettangolo del corpo all’elemento'))
             fit.triggered.connect(lambda checked=False: self.fit_body_to_graphic(index))
@@ -1465,11 +1645,17 @@ class SymbolTab(QWidget):
             self._cursor_position = point
             item = self._wire_cursor_item
             if item is not None and self._wire_points and self.view.wiring:
-                # The segment from the last wire point follows the cursor.
-                last = self._wire_points[-1]
-                snapped = self._wire_snap(point.x() / SCENE_UNITS_PER_MM, -point.y() / SCENE_UNITS_PER_MM)
-                item.setLine(last[0] * SCENE_UNITS_PER_MM, -last[1] * SCENE_UNITS_PER_MM,
-                             snapped[0] * SCENE_UNITS_PER_MM, -snapped[1] * SCENE_UNITS_PER_MM)
+                # The rubber band from the last wire point follows the cursor
+                # with the same constraint a click would apply (corner included).
+                from PyQt6.QtGui import QPainterPath
+                from PyQt6.QtWidgets import QApplication
+                free = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+                lx, ly = self._xy(self._wire_points[-1])
+                path = QPainterPath(QPointF(lx * SCENE_UNITS_PER_MM, -ly * SCENE_UNITS_PER_MM))
+                for x, y in map(self._xy, self._next_wire_points(
+                        point.x() / SCENE_UNITS_PER_MM, -point.y() / SCENE_UNITS_PER_MM, free)):
+                    path.lineTo(x * SCENE_UNITS_PER_MM, -y * SCENE_UNITS_PER_MM)
+                item.setPath(path)
         cursor = self._cursor_position
         value = '' if cursor is None else f'X {cursor.x()/10:.2f}  Y {-cursor.y()/10:.2f} mm  |  '
         value += f'{self.view.transform().m11()*100:.0f}%'
@@ -1516,6 +1702,8 @@ class SymbolTab(QWidget):
             self._gesture_graphic_origin = ((graphics[index]['x'], graphics[index]['y'])
                                             if 0 <= index < len(graphics) else None)
             self._select_graphic(index)
+        elif target[0] == 'vertex':
+            self._select_graphic(target[1])
 
     def _editable_rows(self, rows, symbol):
         rows = deepcopy(rows)
@@ -1529,10 +1717,18 @@ class SymbolTab(QWidget):
     def _accept_geometry(self, rows):
         try:
             pins, body = symbol_inputs(rows)
-            layout_symbol(pins, body)
+            layout = layout_symbol(pins, body)
         except ValueError:
             self.status.setText(self.tx('Posizione non valida: verifica griglia e punti di connessione.'))
             return False
+        # Every committed draft carries, in each anchored wire point, the
+        # position the anchor resolves to against the geometry just accepted:
+        # the fallback a reload without that pin or element will use.
+        graphics = self._graphics(rows)
+        if graphics:
+            from ..generators.symbol_glyphs import pin_inner_ends, refresh_wire_anchors
+            refresh_wire_anchors(graphics, pin_inner_ends(layout))
+            rows = self._with_graphics(rows, graphics)
         # Geometry changes do not rebuild the table or interrupt its editor.
         self._draft = deepcopy(rows)
         self._changed()
@@ -1567,6 +1763,9 @@ class SymbolTab(QWidget):
 
     def _free_rows(self, rows, symbol):
         graphics = self._graphics(rows)
+        if graphics:
+            from ..generators.symbol_glyphs import pin_inner_ends, refresh_wire_anchors
+            refresh_wire_anchors(graphics, pin_inner_ends(symbol))
         rows = deepcopy(rows)
         for row, placed in zip(rows, symbol.pins):
             row['symbol_position'] = [placed.x, placed.y]
@@ -1730,6 +1929,13 @@ class SymbolTab(QWidget):
             return
         symbol = self._gesture_layout
         if target[0] == 'graphic':
+            # Dragging a record translates its placement (x, y). For a glyph
+            # that moves the whole drawing. For a wire the semantics are:
+            # MOVE when no point is anchored (every vertex translates, the
+            # wire keeps its shape); STRETCH when at least one end is anchored
+            # (free vertices translate, anchored ends stay on their pin or
+            # terminal, since a resolved anchor is absolute). Detaching an end
+            # is a deliberate act: drag its vertex handle away instead.
             origin = getattr(self, '_gesture_graphic_origin', None)
             if origin is None:
                 return
@@ -1741,6 +1947,9 @@ class SymbolTab(QWidget):
             if 0 <= target[1] < len(graphics):
                 graphics[target[1]]['x'], graphics[target[1]]['y'] = x, y
                 self._accept_geometry(self._with_graphics(rows, graphics))
+            return
+        if target[0] == 'vertex':
+            self.move_wire_vertex(target[1], target[2], point.x() / SCENE_UNITS_PER_MM, -point.y() / SCENE_UNITS_PER_MM)
             return
         if target[0] == 'pin':
             placed = next(p for p in symbol.pins if p.pin.number == target[1])
@@ -1770,13 +1979,30 @@ class SymbolTab(QWidget):
         """Draw every placed glyph (primitives and terminals), tagged for selection and dragging."""
         from PyQt6.QtGui import QPainterPath
         from ..generators.symbol_glyphs import arc_points, placed_primitives, placed_terminals
+        from ..generators.symbol_glyphs import elements_by_id, is_wire
         graphics = self._graphics()
+        # Resolved once per draw and shared by every wire.
+        pin_ends = self._pin_ends()
+        by_id = elements_by_id(graphics)
         for index, instance in enumerate(graphics):
             selected = index == self._selected_graphic
             theme = self.theme
             pen = QPen(QColor(theme['selected']) if selected else QColor(theme['graphic']), 2.2 if selected else 1.3)
             items = []
-            for p in placed_primitives(instance):
+            # Anchored wire points are resolved against the current elements
+            # and pins: a moved element or pin drags its wires along.
+            primitives = placed_primitives(instance, graphics=graphics, pin_ends=pin_ends, by_id=by_id)
+            if selected and is_wire(instance) and primitives:
+                # Vertices of the selected wire: small squares to drag on
+                # the grid, onto a terminal/pin (anchors) or away (frees).
+                for position, (x, y) in enumerate(primitives[0].points):
+                    square = scene.addRect(x * scale - 3.5, -y * scale - 3.5, 7, 7,
+                                           QPen(QColor(theme['selected']), 1.0), QColor(theme['handle']))
+                    square.setZValue(12)
+                    square.setData(0, ('vertex', index, position))
+                    square.setCursor(Qt.CursorShape.CrossCursor)
+                    square.setToolTip(self.tx('Vertice del filo: trascinalo; su un pin o un terminale si aggancia.'))
+            for p in primitives:
                 if p.kind in ('polyline', 'arc'):
                     points = p.points if p.kind == 'polyline' else arc_points(*p.points)
                     path = QPainterPath()
@@ -1810,10 +2036,12 @@ class SymbolTab(QWidget):
                 dot.setToolTip(self.tx('Terminale dell’elemento: trascina qui un pin per agganciarlo.')
                                + (f' ({terminal.name or terminal.number})' if terminal.name or terminal.number else ''))
                 dot.setZValue(5)
+            hint = self.tx('Filo: trascinalo per spostarlo; se ha estremi agganciati si spostano solo i vertici liberi.') \
+                if is_wire(instance) else self.tx(str(instance.get('label', '')))
             for item in items:
                 item.setData(0, ('graphic', index))
                 item.setCursor(Qt.CursorShape.SizeAllCursor)
-                item.setToolTip(self.tx(str(instance.get('label', ''))))
+                item.setToolTip(hint)
 
     def _draw(self, symbol):
         self.properties_button.defaultAction().setEnabled(symbol is not None and any(
@@ -1838,14 +2066,16 @@ class SymbolTab(QWidget):
         scene.addRect(-width / 2, -height / 2, width, height, pen, QColor(theme['body_fill']))
         self._draw_graphics(scene, scale)
         if self._wire_points:
+            from PyQt6.QtGui import QPainterPath
             wire_pen = QPen(QColor(theme['wire']), 1.6, Qt.PenStyle.DashLine)
-            for (x0, y0), (x1, y1) in zip(self._wire_points, self._wire_points[1:]):
+            points = [self._xy(p) for p in self._wire_points]
+            for (x0, y0), (x1, y1) in zip(points, points[1:]):
                 scene.addLine(x0 * scale, -y0 * scale, x1 * scale, -y1 * scale, wire_pen)
-            for x, y in self._wire_points:
+            for x, y in points:
                 scene.addEllipse(x * scale - 2.5, -y * scale - 2.5, 5, 5, wire_pen, QColor(theme['wire']))
-            last = self._wire_points[-1]
-            self._wire_cursor_item = scene.addLine(last[0] * scale, -last[1] * scale,
-                                                   last[0] * scale, -last[1] * scale, wire_pen)
+            last = points[-1]
+            self._wire_cursor_item = scene.addPath(
+                QPainterPath(QPointF(last[0] * scale, -last[1] * scale)), wire_pen, QColor(0, 0, 0, 0))
         else:
             self._wire_cursor_item = None
 

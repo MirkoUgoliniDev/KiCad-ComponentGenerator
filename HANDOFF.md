@@ -1,5 +1,92 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 2026-10-10 - Fili ancorati e editor piu' CAD (IN CORSO, con agenti)
+
+- Utente: «i fili devono restare agganciati: spostando un elemento si porta
+  dietro il filo; procedi scatenando agenti; deve essere un CAD un po' come
+  KiCad». Ultimo commit pubblicato: merge 49bbaf7 su main.
+- Piano, file disgiunti, in sequenza:
+  A (modello, `generators/symbol_glyphs.py` + `generators/symbol.py` +
+    `tests/test_symbol_glyphs.py`): `id` stabile per ogni istanza
+    (`ensure_instance_ids` per i progetti vecchi), punti di filo con ancora
+    {"kind":"terminal","element":id,"index":k} o {"kind":"pin","number":n},
+    `pin_inner_ends(layout)`, `terminal_inner_end`, `anchor_for_point`,
+    `resolve_wire_points`, `placed_primitives(instance, graphics, pins)`
+    retrocompatibile, `freeze_wire_anchors` alla cancellazione di un
+    elemento, `serialize_graphics(..., pins=)` con coordinate risolte,
+    `validate_instances` che accetta le ancore.
+  B (editor, `gui/symbol_tab.py` + `tests/test_symbol_palette_gui.py` +
+    `services/i18n.py`): ancore salvate al clic, ridisegno che risolve le
+    ancore (spostare/ruotare/specchiare un elemento o un pin trascina il
+    filo), cancellazione che congela i punti, modo ortogonale (segmenti
+    orizzontali/verticali, Shift per libero), vertici del filo
+    trascinabili, selezione/eliminazione del filo come oggi.
+  C (revisione in sola lettura su A+B), poi integrazione e suite.
+- A FATTO (agente): API in symbol_glyphs come da piano (WIRE_KEY, is_wire,
+  new_instance_id, ensure_instance_ids, terminal_inner_end, pin_inner_ends,
+  anchor_for_point, resolve_wire_points, placed_primitives(graphics,
+  pin_ends), freeze_wire_anchors, freeze_pin_anchors, serialize_graphics
+  (pin_ends), validate_instances con ancore; symbol.serialize_symbol passa
+  pin_inner_ends). 8 test. Limite: un'ancora risolta e' assoluta (ignora la
+  trasformazione del filo).
+- B FATTO (agente): symbol_tab con `_wire_snap` via anchor_for_point,
+  `_next_wire_points` ortogonale (Maiusc libera; pulsante «Fili ortogonali»),
+  `set_wire_orthogonal`, ids persistiti in `_populate` senza voce di undo,
+  freeze alla cancellazione e in `set_data` per pin spariti (non al primo
+  caricamento), vertici del filo trascinabili (`move_wire_vertex`,
+  `_wire_local` inversa), rubber band come QGraphicsPathItem. 7 test;
+  103 passati sulle suite del simbolo. Verifica del coordinatore: filo da
+  pin 2 alla bobina segue la bobina spostata (rendering). Limiti: ruota/
+  specchia dal menu su un filo ruotano solo i punti liberi; angolo
+  automatico sempre orizzontale-prima; ortogonale non persistito.
+- C FATTO (revisore): 8 rilevazioni, tutte corrette da un quarto agente:
+  (1) progetto vecchio aperto gia' «modificato» (ids assegnati prima della
+  baseline); (2) x/y di ripiego mai aggiornati e freeze con il layout di un
+  altro progetto (`refresh_wire_anchors` in `_free_rows`/`_accept_geometry`,
+  ripiego nel sistema del filo `wire_local_point`, freeze solo stesso
+  progetto); (3) ruota/specchia rifiutati sui fili e tolti dal menu;
+  (4) proiezioni e angoli che cadono su un attacco vengono ancorati
+  (`_exact_attachment`); (5) trascinare un filo: MOVE se senza ancore,
+  STRETCH se ancorato (documentato + tooltip); (6) angolo automatico che
+  entra nell'attacco lungo l'asse del pin (`anchor_direction`); (8) mappa
+  elementi e estremi dei pin calcolati una volta per disegno. 11 test
+  nuovi; 114 passati sulle suite del simbolo. NON committato.
+- Utente (sera, dopo il riavvio): «questi dovrebbero essere agganciati, non
+  e' cosi'». DIAGNOSI dal progetto VE12H-K (project_config.json): 5 fili;
+  4 disegnati PRIMA della funzione (punti liberi che coincidono con pallini
+  e pin: p.es. (-5.08,-5.08), (2.54,10.16)); il quinto, nuovo, agganciato
+  al pin 2 ma NON alla bobina: l'estremo (-5.08,10.16) e' ESATTAMENTE il
+  pallino A1 della bobina (terminale esterno), mentre `anchor_for_point`
+  e `_resolve_anchor` considerano solo l'estremo INTERNO del terminale
+  (`terminal_inner_end`, dove lo stelo incontra il corpo). Il pallino e la
+  guida punteggiata sono disegnati sull'estremo esterno: l'utente clicca li'.
+  Difetto di classe (ogni glifo con terminali), non del rele'.
+- PIANO (prima del codice): (a) ancora di terminale con campo `end`
+  ("outer" = pallino, "inner" = attacco al corpo; assente = inner, per i
+  file gia' salvati); `anchor_for_point` offre entrambi gli estremi,
+  `_resolve_anchor`/`anchor_direction`/validazione li onorano;
+  (b) migrazione dei fili vecchi all'apertura: un punto libero che coincide
+  (1e-4 mm) con un pin o un estremo di terminale viene ancorato PRIMA della
+  baseline (non sporca il progetto): l'editor aggancia sempre entro 1.27 mm,
+  quindi una coincidenza esatta e' un attacco voluto; (c) test positivi e
+  negativi su glifi (outer/inner, migrazione si'/no) e GUI (clic sul
+  pallino -> ancora outer, spostando la bobina il filo segue).
+- FATTO (sera, NON committato): symbol_glyphs: `TERMINAL_ENDS`,
+  `terminal_end(terminal, end)`; `anchor_for_point` offre pallino (outer) e
+  attacco al corpo (inner) e scrive `end` nell'ancora; `_resolve_anchor` e
+  la validazione onorano `end` (assente = inner); `adopt_coincident_anchors`
+  (migrazione: punto libero a 1e-4 mm da un pin o da un estremo di
+  terminale -> ancorato; idempotente). symbol_tab.set_data: migrazione
+  dopo il freeze dei pin spariti e PRIMA della baseline (progetto non
+  «modificato»). Test +2 glifi (outer/inner/legacy/rotazione/validazione;
+  migrazione con corner e punto vicino-ma-non-sopra lasciati liberi) e +2
+  GUI (clic vicino al pallino -> ancora outer e il filo segue la bobina;
+  progetto con punti liberi sugli attacchi apre ancorato e pulito).
+  167 verdi (simbolo, palette, progetto, traduzioni, documentazione).
+  REPLAY in memoria sul VE12H-K salvato: 8 punti ancorati su 10; resta
+  libero (-12.7,-5.08), che e' 2.54 mm corto rispetto al pin 3 (-15.24):
+  il filo non arrivava al pin, giusto non agganciarlo. App da riavviare.
+
 ## 2026-10-10 - Pubblicazione: palette grafica del simbolo
 
 - Utente (18:00 circa): «committa tutto, pusha e mergia in main». Include la

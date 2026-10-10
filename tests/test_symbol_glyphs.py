@@ -146,3 +146,258 @@ def test_every_catalogue_entry_has_a_known_group_and_the_grouping_covers_all():
     grouped = g.grouped_catalogue()
     assert sum(len(glyphs) for _k, _l, glyphs in grouped) == len(g.catalogue())
     assert grouped[0][0] == "relay" and grouped[0][2][0].key == "relay_coil"
+
+
+# ── Anchored wires (user, 2026-10-10) ───────────────────────────────────────
+
+def _two_terminal_glyph():
+    """A bar with a terminal on each end: pin outer end 3 mm out, 2 mm long, pointing inwards."""
+    return g.Glyph("t", "t", (g.Primitive("polyline", ((-1, 0), (1, 0))),),
+                   (g.Terminal(-3, 0, 0, 2.0, "A", "1"), g.Terminal(3, 0, 180, 2.0, "B", "2")), "builtin")
+
+
+def _wire(points):
+    return {"key": "wire", "label": "Filo", "source": "wire", "x": 0.0, "y": 0.0, "rotation": 0,
+            "mirror": False, "terminals": [],
+            "primitives": [{"kind": "polyline", "points": points, "radius": 0.0, "fill": "none", "width": 0.254}]}
+
+
+def _layout_with_pins():
+    from kicadgen.generators.symbol import layout_symbol
+    return layout_symbol([SymbolPin("1", "A"), SymbolPin("2", "B", side="right"), SymbolPin("3", "C", side="top")])
+
+
+def _legacy_record():
+    return {"x": 0, "y": 0, "primitives": [{"kind": "polyline", "points": [[0, 0], [1, 0]]}]}
+
+
+def test_placed_records_get_a_stable_id_and_legacy_records_are_given_one():
+    glyph = _two_terminal_glyph()
+    first, second = g.instance_from_glyph(glyph, 0, 0), g.instance_from_glyph(glyph, 5, 0)
+    assert first["id"] and second["id"] and first["id"] != second["id"]
+    legacy = _legacy_record()
+    duplicate = dict(first)
+    records = [first, legacy, duplicate]
+    assert g.ensure_instance_ids(records) is records
+    assert first["id"] == records[0]["id"], "an existing id is kept"
+    assert legacy["id"] and duplicate["id"] != first["id"], "a missing or repeated id gets a fresh one"
+    # Rows carry the same list: ids are assigned positionally so the rows keep agreeing.
+    rows = [{"pin": "1", "symbol_graphics": [_legacy_record()]}, {"pin": "2", "symbol_graphics": [_legacy_record()]}]
+    ident = g.symbol_graphics(rows)[0]["id"]
+    assert rows[0]["symbol_graphics"][0]["id"] == ident == rows[1]["symbol_graphics"][0]["id"]
+    assert g.symbol_graphics(rows)[0]["id"] == ident, "a second reading keeps the id"
+    with pytest.raises(ValueError):
+        g.validate_instances([{"id": 7, "x": 0, "y": 0, "primitives": [{}]}])
+
+
+def test_pin_and_terminal_inner_ends_follow_the_pin_direction():
+    layout = _layout_with_pins()
+    ends = g.pin_inner_ends(layout)
+    left, right, top = ([p for p in layout.pins if p.pin.number == n][0] for n in ("1", "2", "3"))
+    assert ends["1"] == (round(left.x + layout.pin_length, 4), left.y), "angle 0 points right"
+    assert ends["2"] == (round(right.x - layout.pin_length, 4), right.y), "angle 180 points left"
+    assert ends["3"] == (top.x, round(top.y - layout.pin_length, 4)), "angle 270 points down"
+    assert g.terminal_inner_end(g.Terminal(0, 5, 270, 2.54)) == (0, 2.46)
+    assert g.terminal_inner_end(g.Terminal(0, -5, 90, 2.54)) == (0, -2.46)
+
+
+def test_anchor_for_point_picks_the_nearest_within_tolerance_and_none_beyond():
+    element = g.instance_from_glyph(_two_terminal_glyph(), 0, 0)   # inner ends at (-1, 0) and (1, 0)
+    pin_ends = {"7": (1.5, 0.0)}
+    anchor, point = g.anchor_for_point([element], pin_ends, 0.9, 0.2)
+    assert anchor == {"kind": "terminal", "element": element["id"], "index": 1, "end": "inner"} and point == (1, 0)
+    anchor, point = g.anchor_for_point([element], pin_ends, 1.45, 0.0)
+    assert anchor == {"kind": "pin", "number": "7"} and point == (1.5, 0.0), "the pin is nearer"
+    assert g.anchor_for_point([element], pin_ends, 0.0, 3.0) is None, "beyond the tolerance"
+    assert g.anchor_for_point([element], None, -1.0, 1.0, tolerance=0.5) is None
+    unidentified = {k: v for k, v in element.items() if k != "id"}
+    assert g.anchor_for_point([unidentified], None, 1.0, 0.0) is None, "no id: nothing to anchor to"
+
+
+def test_a_wire_anchored_to_a_terminal_follows_the_element_while_a_fixed_point_stays():
+    element = g.instance_from_glyph(_two_terminal_glyph(), 0, 0)
+    wire = _wire([{"x": 1.0, "y": 0.0, "anchor": {"kind": "terminal", "element": element["id"], "index": 1}},
+                  [4.0, 0.0]])
+    graphics = [element, wire]
+    assert g.resolve_wire_points(wire, graphics, None) == [(1, 0), (4, 0)]
+    element["x"], element["y"] = 10.0, 5.0                      # move: the anchored end follows
+    assert g.resolve_wire_points(wire, graphics, None) == [(11, 5), (4, 0)]
+    element["rotation"] = 90                                      # turn: terminal B goes up
+    assert g.resolve_wire_points(wire, graphics, None) == [(10, 6), (4, 0)]
+    element["rotation"], element["mirror"] = 0, True              # mirror: terminal B goes left
+    assert g.resolve_wire_points(wire, graphics, None) == [(9, 5), (4, 0)]
+    # placed_primitives with the graphics resolves; without them it keeps the stored x/y.
+    assert g.placed_primitives(wire, graphics=graphics)[0].points == ((9, 5), (4, 0))
+    assert g.placed_primitives(wire)[0].points == ((1, 0), (4, 0))
+    assert wire["primitives"][0]["points"][0]["x"] == 1.0, "resolution never rewrites the record"
+
+
+def test_a_wire_anchored_to_a_pin_follows_the_pin_ends_and_falls_back_when_gone():
+    element = g.instance_from_glyph(_two_terminal_glyph(), 0, 0)
+    wire = _wire([{"x": -5.0, "y": 0.0, "anchor": {"kind": "pin", "number": "3"}},
+                  {"x": 1.0, "y": 0.0, "anchor": {"kind": "terminal", "element": element["id"], "index": 1}}])
+    assert g.resolve_wire_points(wire, [element, wire], {"3": (-7.62, 2.54)}) == [(-7.62, 2.54), (1, 0)]
+    assert g.resolve_wire_points(wire, [element, wire], {"3": (-7.62, 5.08)})[0] == (-7.62, 5.08)
+    # Pin removed, element removed, terminal index out of range: the stored x/y stand in.
+    assert g.resolve_wire_points(wire, [element, wire], {"4": (0, 0)})[0] == (-5, 0)
+    assert g.resolve_wire_points(wire, [wire], None) == [(-5, 0), (1, 0)]
+    wire["primitives"][0]["points"][1]["anchor"]["index"] = 9
+    assert g.resolve_wire_points(wire, [element, wire], None)[1] == (1, 0)
+
+
+def test_deleting_an_element_or_a_pin_freezes_the_anchored_wire_points_in_place():
+    element = g.instance_from_glyph(_two_terminal_glyph(), 10, 5)
+    other = g.instance_from_glyph(_two_terminal_glyph(), 0, -10)
+    wire = _wire([{"x": 0.0, "y": 0.0, "anchor": {"kind": "terminal", "element": element["id"], "index": 0}},
+                  {"x": 0.0, "y": 0.0, "anchor": {"kind": "pin", "number": "2"}},
+                  {"x": 0.0, "y": 0.0, "anchor": {"kind": "terminal", "element": other["id"], "index": 1}}])
+    graphics = [element, other, wire]
+    pin_ends = {"2": (20.0, 0.0)}
+    g.freeze_wire_anchors(graphics, element["id"], pin_ends)
+    points = wire["primitives"][0]["points"]
+    assert points[0] == [9, 5], "fixed where the terminal was"
+    assert isinstance(points[1], dict) and isinstance(points[2], dict), "other anchors untouched"
+    del graphics[0]
+    assert g.resolve_wire_points(wire, graphics, pin_ends) == [(9, 5), (20, 0), (1, -10)]
+    g.freeze_pin_anchors(graphics, "2", pin_ends)
+    assert points[1] == [20, 0] and isinstance(points[2], dict)
+    assert g.resolve_wire_points(wire, graphics, None) == [(9, 5), (20, 0), (1, -10)]
+
+
+def test_the_export_carries_the_resolved_wire_coordinates():
+    layout = _layout_with_pins()
+    ends = g.pin_inner_ends(layout)
+    element = g.instance_from_glyph(_two_terminal_glyph(), 0, 0)
+    element["x"] = 2.54                                           # moved after the wire was drawn
+    wire = _wire([{"x": -99.0, "y": -99.0, "anchor": {"kind": "pin", "number": "1"}},
+                  {"x": -99.0, "y": -99.0, "anchor": {"kind": "terminal", "element": element["id"], "index": 0}},
+                  [0.0, 2.54]])
+    text = serialize_symbol("Part", [SymbolPin("1", "A"), SymbolPin("2", "B", side="right"),
+                                     SymbolPin("3", "C", side="top")], graphics=[element, wire])
+    unit = text.split('(symbol "Part_0_1"')[1].split('(symbol "Part_1_1"')[0]
+    x1, y1 = ends["1"]
+    assert f"(polyline (pts (xy {g._num(x1)} {g._num(y1)}) (xy 1.54 0) (xy 0 2.54))" in unit
+    assert "-99" not in unit
+    assert "(xy 1.54 0) (xy 3.54 0)" in unit, "the element's own bar is where the element is"
+
+
+def test_legacy_wires_without_anchors_and_malformed_anchors():
+    wire = _wire([[0.0, 0.0], [2.54, 0.0], [2.54, 2.54]])
+    assert g.validate_instances([wire]) == [wire]
+    assert g.resolve_wire_points(wire, [wire], {"1": (0, 0)}) == [(0, 0), (2.54, 0), (2.54, 2.54)]
+    assert g.placed_primitives(wire, graphics=[wire])[0].points == ((0, 0), (2.54, 0), (2.54, 2.54))
+    assert "(polyline (pts (xy 0 0) (xy 2.54 0) (xy 2.54 2.54))" in "\n".join(g.serialize_graphics([wire]))
+    for bad in ({"x": 0, "y": 0, "anchor": {"kind": "nowhere"}},
+                {"x": 0, "y": 0, "anchor": {"kind": "terminal", "element": 3, "index": 0}},
+                {"x": 0, "y": 0, "anchor": {"kind": "terminal", "element": "a", "index": -1}},
+                {"x": 0, "y": 0, "anchor": {"kind": "pin", "number": 3}},
+                {"x": float("inf"), "y": 0}, [1.0], [0.0, float("nan")]):
+        with pytest.raises(ValueError):
+            g.validate_instances([_wire([bad, [0.0, 0.0]])])
+
+
+# ── Adversarial review of the anchored wires (2026-10-10) ───────────────────
+
+def test_refresh_writes_the_resolved_position_as_the_fallback_and_keeps_the_anchor():
+    element = g.instance_from_glyph(_two_terminal_glyph(), 0, 0)
+    wire = _wire([{"x": -99.0, "y": -99.0, "anchor": {"kind": "pin", "number": "1"}},
+                  {"x": -99.0, "y": -99.0, "anchor": {"kind": "terminal", "element": element["id"], "index": 1}},
+                  {"x": 7.0, "y": 7.0, "anchor": {"kind": "pin", "number": "gone"}},
+                  [4.0, 0.0]])
+    graphics = [element, wire]
+    g.refresh_wire_anchors(graphics, {"1": (-7.62, 2.54)})
+    points = wire["primitives"][0]["points"]
+    assert (points[0]["x"], points[0]["y"]) == (-7.62, 2.54) and points[0]["anchor"] == {"kind": "pin", "number": "1"}
+    assert (points[1]["x"], points[1]["y"]) == (1.0, 0.0) and points[1]["anchor"]["kind"] == "terminal"
+    assert (points[2]["x"], points[2]["y"]) == (7.0, 7.0), "an anchor that does not resolve keeps its fallback"
+    assert points[3] == [4.0, 0.0], "free points are not touched"
+    # Positive: with the pin gone, the wire end is where the pin last was.
+    assert g.resolve_wire_points(wire, graphics, None)[0] == (-7.62, 2.54)
+    # Negative: with the pin present the anchor still wins over the fallback.
+    assert g.resolve_wire_points(wire, graphics, {"1": (-7.62, 5.08)})[0] == (-7.62, 5.08)
+
+
+def test_the_fallback_lives_in_the_wire_frame_so_a_moved_wire_keeps_it_in_place():
+    element = g.instance_from_glyph(_two_terminal_glyph(), 0, 0)
+    wire = _wire([{"x": 0.0, "y": 0.0, "anchor": {"kind": "terminal", "element": element["id"], "index": 1}},
+                  [4.0, 0.0]])
+    wire["x"], wire["y"], wire["rotation"] = 2.54, 5.08, 90        # the wire itself was moved and turned
+    graphics = [element, wire]
+    assert g.wire_local_point(wire, 1.0, 0.0) == (-5.08, 1.54)
+    assert g.resolve_wire_points(wire, graphics, None)[0] == (1.0, 0.0), "the anchor is absolute"
+    g.refresh_wire_anchors(graphics, None)
+    point = wire["primitives"][0]["points"][0]
+    assert (point["x"], point["y"]) == (-5.08, 1.54), "stored in the wire frame"
+    assert g.resolve_wire_points(wire, [wire], None)[0] == (1.0, 0.0), "element gone: same absolute place"
+    g.freeze_wire_anchors(graphics, element["id"], None)
+    assert wire["primitives"][0]["points"][0] == [-5.08, 1.54]
+    assert g.resolve_wire_points(wire, [wire], None)[0] == (1.0, 0.0), "frozen where it was, not transformed twice"
+
+
+def test_anchor_direction_reads_the_pin_or_the_turned_terminal_and_none_otherwise():
+    layout = _layout_with_pins()
+    element = g.instance_from_glyph(_two_terminal_glyph(), 0, 0)
+    assert g.anchor_direction({"kind": "pin", "number": "1"}, [element], layout) == 0, "left pin points right"
+    assert g.anchor_direction({"kind": "pin", "number": "2"}, [element], layout) == 180
+    assert g.anchor_direction({"kind": "pin", "number": "3"}, [element], layout) == 270, "top pin points down"
+    assert g.anchor_direction({"kind": "terminal", "element": element["id"], "index": 1}, [element], layout) == 180
+    element["rotation"] = 90
+    assert g.anchor_direction({"kind": "terminal", "element": element["id"], "index": 1}, [element], layout) == 270
+    assert g.anchor_direction({"kind": "pin", "number": "9"}, [element], layout) is None
+    assert g.anchor_direction({"kind": "pin", "number": "1"}, [element], None) is None
+    assert g.anchor_direction({"kind": "terminal", "element": "nope", "index": 0}, [element], layout) is None
+    assert g.anchor_direction({"kind": "terminal", "element": element["id"], "index": 5}, [element], layout) is None
+    assert g.anchor_direction(None, [element], layout) is None
+
+
+def test_a_precomputed_elements_map_gives_the_same_resolution():
+    element = g.instance_from_glyph(_two_terminal_glyph(), 3, 0)
+    wire = _wire([{"x": 0.0, "y": 0.0, "anchor": {"kind": "terminal", "element": element["id"], "index": 0}},
+                  [9.0, 9.0]])
+    graphics = [element, wire]
+    by_id = g.elements_by_id(graphics)
+    assert set(by_id) == {element["id"]}, "wires are not anchorable"
+    assert g.resolve_wire_points(wire, graphics, None, by_id) == g.resolve_wire_points(wire, graphics, None)
+    assert g.placed_primitives(wire, graphics, None, by_id)[0].points == ((2.0, 0.0), (9.0, 9.0))
+
+
+def test_the_terminal_dot_is_anchorable_and_an_anchor_without_end_means_inner():
+    """User, 2026-10-10: a wire drawn to the coil's dot (outer end) must follow the coil."""
+    element = g.instance_from_glyph(_two_terminal_glyph(), 0, 0)   # dots at (-3, 0) and (3, 0)
+    anchor, point = g.anchor_for_point([element], None, 2.9, 0.1)
+    assert anchor == {"kind": "terminal", "element": element["id"], "index": 1, "end": "outer"}
+    assert point == (3, 0)
+    outer = _wire([{"x": 3.0, "y": 0.0, "anchor": anchor}, [6.0, 0.0]])
+    legacy = _wire([{"x": 1.0, "y": 0.0, "anchor": {"kind": "terminal", "element": element["id"], "index": 1}},
+                    [6.0, 0.0]])
+    moved = dict(element, x=2.0)
+    assert g.resolve_wire_points(outer, [moved, outer], None)[0] == (5.0, 0.0), "the dot moved with the element"
+    assert g.resolve_wire_points(legacy, [moved, legacy], None)[0] == (3.0, 0.0), "no end = inner, as saved before"
+    rotated = dict(element, rotation=90)
+    assert g.resolve_wire_points(outer, [rotated, outer], None)[0] == (0.0, 3.0)
+    assert g.anchor_direction(anchor, [rotated], None) == 270, "the terminal's own axis, turned"
+    g.validate_instances([outer, legacy])
+    bad = _wire([{"x": 3.0, "y": 0.0, "anchor": dict(anchor, end="middle")}, [6.0, 0.0]])
+    with pytest.raises(ValueError):
+        g.validate_instances([bad])
+
+
+def test_free_points_on_an_attachment_are_adopted_as_anchors_and_others_stay_free():
+    """Migration of wires drawn before anchors existed: exact coincidence only."""
+    element = g.instance_from_glyph(_two_terminal_glyph(), 0, 0)
+    pin_ends = {"1": (-6.0, 4.0)}
+    wire = _wire([[-6.0, 4.0], [-6.0, 0.0], [-3.0, 0.0]])          # pin end, corner, dot
+    near = _wire([[1.0, 0.3], [6.0, 0.3]])                           # 0.3 mm from the inner end: not on it
+    already = _wire([{"x": 1.0, "y": 0.0, "anchor": {"kind": "terminal", "element": element["id"], "index": 1}},
+                     [6.0, 0.0]])
+    graphics = [element, wire, near, already]
+    assert g.adopt_coincident_anchors(graphics, pin_ends) == 2
+    points = wire["primitives"][0]["points"]
+    assert points[0] == {"x": -6.0, "y": 4.0, "anchor": {"kind": "pin", "number": "1"}}
+    assert points[1] == [-6.0, 0.0], "a corner stays free"
+    assert points[2]["anchor"] == {"kind": "terminal", "element": element["id"], "index": 0, "end": "outer"}
+    assert near["primitives"][0]["points"] == [[1.0, 0.3], [6.0, 0.3]]
+    assert already["primitives"][0]["points"][0]["anchor"] == {"kind": "terminal", "element": element["id"], "index": 1}
+    assert g.adopt_coincident_anchors(graphics, pin_ends) == 0, "idempotent"
+    moved = dict(element, x=1.0)
+    assert g.resolve_wire_points(wire, [moved, wire], pin_ends)[2] == (-2.0, 0.0), "the adopted end follows"

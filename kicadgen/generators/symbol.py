@@ -194,7 +194,9 @@ def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
     """@brief Return a KiCad 6+ symbol library with a single, single-unit symbol.
 
     @param graphics Placed glyph records (`symbol_glyphs.instance_from_glyph`)
-        drawn inside the body, after the body rectangle; None or [] for none.
+        and wires drawn inside the body, after the body rectangle; None or []
+        for none. Wire points anchored to pins or element terminals are
+        exported at their resolved position (`symbol_glyphs.pin_inner_ends`).
     """
     name = _text(name, 'Symbol name', required=True)
     if ':' in name:
@@ -218,8 +220,8 @@ def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
                   f'      (rectangle (start {_num(-w)} {_num(h)}) (end {_num(w)} {_num(-h)})',
                   '        (stroke (width 0.254) (type default)) (fill (type background)))'))
     if graphics:
-        from .symbol_glyphs import serialize_graphics, validate_instances
-        lines.extend(serialize_graphics(validate_instances(graphics)))
+        from .symbol_glyphs import pin_inner_ends, serialize_graphics, validate_instances
+        lines.extend(serialize_graphics(validate_instances(graphics), pin_ends=pin_inner_ends(layout)))
     lines.extend(('    )', f'    (symbol {_quote(name + "_1_1")}'))
     for item in layout.pins:
         pin = item.pin
