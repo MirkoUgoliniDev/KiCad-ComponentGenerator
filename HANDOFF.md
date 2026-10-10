@@ -8,7 +8,8 @@
   tutte le correzioni della sezione seguente. Esclusi rows_none_rev.pkl, tmp/,
   work/. Inclusi docs/MFG_TEL-8-2411WI/ (come gli altri docs/ di componenti) e
   data/analysis_profiles.sqlite3 (controllo segreti: nessuna chiave).
-- Suite: 689 passati sulle 24 suite toccate + 12/12 localizzazione da sola.
+- Commit ADVANCED: 2fca745. Suite: 689 passati sulle 24 suite toccate + 12/12
+  localizzazione da sola.
 
 ## 2026-10-10 - Verifica TEL 8-2411WI: pin popolati con mappa esplicita (NON COMMITTATO)
 
