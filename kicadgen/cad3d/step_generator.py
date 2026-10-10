@@ -1045,29 +1045,40 @@ def generate_single_package_3d_model(
                        components=[], populated_board=False, show_pins_3d=True)
     leads = []
     terminals = []
+    drills = []
     for pin in pins:
         if pin.pad_type == "thru_hole":
-            diameter = min(float(pin.drill_mm) * 0.65, 0.8)
+            drills.append(float(pin.drill_mm))
             leads.append([str(pin.number), pin.x_mm, pin.y_mm])
         elif pin.pad_type == "smd":
             terminals.append({
                 "name": f"Terminal_{pin.number}",
                 "x": pin.x_mm - pin.pad_length_mm / 2,
                 "y": pin.y_mm - pin.pad_width_mm / 2,
-                "z": -0.04,
+                # On the board surface, under the body: a terminal below
+                # z = 0 would sit inside the PCB in KiCad's viewer (review B).
+                "z": 0.0,
                 "length_mm": pin.pad_length_mm,
                 "width_mm": pin.pad_width_mm,
-                "height_mm": 0.04,
+                "height_mm": SMD_TERMINAL_THICKNESS_MM,
                 "rotation_deg": pin.rotation_deg,
                 "color_hex": body.pin_color_hex,
             })
     if leads:
-        centered = replace(centered, pin_diameter_mm=diameter)
+        # One lead diameter for the whole part (the FreeCAD payload has one):
+        # an ESTIMATE from the SMALLEST hole, so a mounting hole never widens
+        # every lead and no lead is wider than its hole. LEAD_OF_DRILL_FRACTION
+        # and LEAD_MAX_DIAMETER_MM are declared in this module.
+        centered = replace(centered, pin_diameter_mm=min(
+            min(drills) * LEAD_OF_DRILL_FRACTION, LEAD_MAX_DIAMETER_MM))
+    texts = list(face_texts or [])
+    if body.pin_numbers_3d and leads:
+        texts.extend(pin_number_labels([(n, x, y) for n, x, y in leads], centered))
     if progress:
         progress(tx("Modello 3D generico del componente: nessuna ricerca nelle librerie KiCad."))
     result = _run_freecad(
         package.name or "Package", leads, centered, output_dir,
-        freecadcmd_path=freecadcmd_path, fillets=fillets, face_texts=face_texts,
+        freecadcmd_path=freecadcmd_path, fillets=fillets, face_texts=texts,
         font_file=font_file, extra_boxes=terminals, progress=progress, cancel=cancel,
     )
     result.setdefault("notes", []).append(tx(
@@ -1076,6 +1087,15 @@ def generate_single_package_3d_model(
     return result
 
 
+#: Lead diameter of a generic through-hole part as a fraction of its hole:
+#: an ESTIMATE (a hole is usually the lead plus 0.2-0.3 mm) used only to draw
+#: the lead cylinders of a part whose documents give no lead size.
+LEAD_OF_DRILL_FRACTION = 0.65
+#: Largest lead diameter drawn from a hole, in mm: beyond it the hole is a
+#: mounting hole, not a lead's.
+LEAD_MAX_DIAMETER_MM = 0.8
+#: Thickness, in mm, of the box standing for an SMD terminal on the board.
+SMD_TERMINAL_THICKNESS_MM = 0.04
 #: Glyph width of the FreeCAD font as a fraction of the font size: an
 #: ESTIMATE used only to keep a label clear of its pin and inside the body
 #: (Arial digits are about 0.55 of the size; 0.65 leaves a margin). A label
@@ -1087,47 +1107,68 @@ PIN_LABEL_GAP_MM = 0.25
 PIN_LABEL_MAX_SIZE_MM = 1.0
 
 
-def pin_number_face_texts(pin_params: PinHeaderParams, body: Body3DParams) -> list:
-    """@brief Pin numbers printed on the bottom face of a single THT part, one per lead.
+#: Below this font size a pin number is a smudge; a label is still placed
+#: (the user asked for numbers) but never smaller.
+PIN_LABEL_MIN_SIZE_MM = 0.3
 
-    @param pin_params Validated pin grid of the part (positions, pitch, numbering).
-    @param body Body dimensions and offset; the pin diameter is the lead's.
-    @return FaceTextAnnotation list on face «bottom», one per populated pin,
-        centred beside the lead; empty when the grid has no pins.
+
+def pin_number_labels(leads, body: Body3DParams) -> list:
+    """@brief Pin numbers on the bottom face, one beside each lead of any single part.
+
+    @param leads (number, x_mm, y_mm) of every lead, footprint coordinates.
+    @param body Body dimensions, offset and lead diameter.
+    @return FaceTextAnnotation list on face «bottom», one per lead, centred
+        beside it; empty without leads.
     @note Placement rule, the same for every part: the label moves from the
-        lead towards the centre of the body along the axis with fewer
-        distinct lead coordinates (Y for a DIP-style module and for a single
-        row, X for a single column), so it never sits between two
-        neighbouring leads. Font size: the largest of PIN_LABEL_MAX_SIZE_MM that
-        keeps the longest number, at GLYPH_WIDTH_FRACTION, within the free
-        space between the lead and the body centre on that axis. The label is
-        then clamped inside the body outline. Numbers only, no names: the
-        names are the symbol's job and would not fit beside a lead.
+        lead along the axis with fewer distinct lead coordinates (Y for a
+        DIP-style module and for a single row, X for a single column),
+        towards the body centre, or towards the farther edge when the lead
+        lies on the centre line. The room is measured to the NEAREST obstacle
+        in that direction: the midpoint to the next line of leads, or the
+        body edge (review B of 2026-10-10: measured to the centre, a centred
+        single row always got the smallest size). The font size is the
+        largest of PIN_LABEL_MAX_SIZE_MM that keeps the longest number, at
+        GLYPH_WIDTH_FRACTION, within that room AND within the spacing of the
+        neighbouring leads on the other axis, so labels never overlap each
+        other; never below PIN_LABEL_MIN_SIZE_MM. The label is then clamped
+        inside the body outline. Numbers only, no names.
     """
-    pins = list(pin_positions(pin_params))
-    if not pins:
+    leads = [(number, float(x), float(y)) for number, x, y in leads]
+    if not leads:
         return []
-    cx = body.offset_x_mm + body.length_mm / 2
-    cy = body.offset_y_mm + body.width_mm / 2
-    xs = sorted({round(x, 6) for _, x, _ in pins})
-    ys = sorted({round(y, 6) for _, _, y in pins})
-    along_y = len(ys) <= len(xs)   # rows apart on Y: label between the rows
+    xs = sorted({round(x, 6) for _, x, _ in leads})
+    ys = sorted({round(y, 6) for _, _, y in leads})
+    along_y = len(ys) <= len(xs)
+    lines = ys if along_y else xs                 # lead lines along the travel axis
+    across = xs if along_y else ys                # neighbours on the other axis
+    across_gap = min(b - a for a, b in zip(across, across[1:])) if len(across) > 1 else None
+    low = body.offset_y_mm if along_y else body.offset_x_mm
+    high = low + (body.width_mm if along_y else body.length_mm)
+    centre = (low + high) / 2
     lead_r = body.pin_diameter_mm / 2
-    longest = max(len(str(pin)) for pin, _, _ in pins)
+    longest = max(len(str(number)) for number, _, _ in leads)
+    width_per_mm = GLYPH_WIDTH_FRACTION * longest   # label width per mm of size
     labels = []
-    for pin, x, y in pins:
-        text = str(pin)
-        if along_y:
-            direction = 1.0 if y <= cy else -1.0
-            room = abs(cy - y) - lead_r - PIN_LABEL_GAP_MM
+    for number, x, y in leads:
+        c = y if along_y else x
+        if abs(c - centre) < 1e-6:
+            direction = 1.0 if high - c >= c - low else -1.0
         else:
-            direction = 1.0 if x <= cx else -1.0
-            room = abs(cx - x) - lead_r - PIN_LABEL_GAP_MM
-        # Extent of the label along the direction of travel: its height when
-        # moving along Y, its width when moving along X.
-        extent_per_mm = 1.0 if along_y else GLYPH_WIDTH_FRACTION * longest
-        size = min(PIN_LABEL_MAX_SIZE_MM, max(0.3, room / extent_per_mm))
-        half_w = GLYPH_WIDTH_FRACTION * longest * size / 2
+            direction = 1.0 if c < centre else -1.0
+        beyond = [v for v in lines if (v - c) * direction > 1e-6]
+        limit = ((c + min(beyond, key=lambda v: abs(v - c))) / 2 if beyond
+                 else (high if direction > 0 else low))
+        room = abs(limit - c) - lead_r - PIN_LABEL_GAP_MM
+        # Extent along the travel axis: the label height when moving along
+        # Y, its width when moving along X; the other extent must fit
+        # between neighbouring leads.
+        travel_per_mm = 1.0 if along_y else width_per_mm
+        across_per_mm = width_per_mm if along_y else 1.0
+        size = min(PIN_LABEL_MAX_SIZE_MM, room / travel_per_mm)
+        if across_gap is not None:
+            size = min(size, (across_gap - 2 * PIN_LABEL_GAP_MM) / across_per_mm)
+        size = max(PIN_LABEL_MIN_SIZE_MM, size)
+        half_w = width_per_mm * size / 2
         half_h = size / 2
         if along_y:
             ax, ay = x, y + direction * (lead_r + PIN_LABEL_GAP_MM + half_h)
@@ -1135,9 +1176,19 @@ def pin_number_face_texts(pin_params: PinHeaderParams, body: Body3DParams) -> li
             ax, ay = x + direction * (lead_r + PIN_LABEL_GAP_MM + half_w), y
         ax = min(max(ax, body.offset_x_mm + half_w), body.offset_x_mm + body.length_mm - half_w)
         ay = min(max(ay, body.offset_y_mm + half_h), body.offset_y_mm + body.width_mm - half_h)
-        labels.append(FaceTextAnnotation(face="bottom", text=text, size_mm=round(size, 3),
+        labels.append(FaceTextAnnotation(face="bottom", text=str(number), size_mm=round(size, 3),
                                          x_mm=round(ax, 3), y_mm=round(ay, 3)))
     return labels
+
+
+def pin_number_face_texts(pin_params: PinHeaderParams, body: Body3DParams) -> list:
+    """@brief Pin numbers of a pin grid on the bottom face (see `pin_number_labels`).
+
+    @param pin_params Validated pin grid of the part (positions, pitch, numbering).
+    @param body Body dimensions and offset; the pin diameter is the lead's.
+    @return FaceTextAnnotation list, one per populated pin; empty without pins.
+    """
+    return pin_number_labels(list(pin_positions(pin_params)), body)
 
 
 def generate_single_tht_3d_model(

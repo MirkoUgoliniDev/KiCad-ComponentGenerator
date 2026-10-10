@@ -108,6 +108,11 @@ class FaceTextAnnotation:
                    or not math.isfinite(float(a)) for a in anchors):
                 raise ValueError(tx("Posizione della scritta non valida: servono x_mm e y_mm "
                                     "finiti, oppure nessuno dei due."))
+            if self.face not in ("top", "bottom"):
+                # The anchor is a point of the top or bottom face; on a side
+                # face it would be silently ignored by the script (review B).
+                raise ValueError(tx("Posizione della scritta ammessa solo sulle facce top e "
+                                    "bottom, non su '{face}'.", face=self.face))
         if self.face not in FACE_NAMES:
             raise ValueError(tx("Faccia non valida: {face!r} (ammesse: {FACE_NAMES})",
                                 face=self.face,

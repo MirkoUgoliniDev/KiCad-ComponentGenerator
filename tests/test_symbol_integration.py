@@ -13,6 +13,10 @@ def setup_board(window, monkeypatch):
     window.pinout = [{'pin': n, 'name': 'GND' if n == 1 else f'GPIO{n}'} for n in range(1, 8)]
     window._open_project_folder = window._project_dir()
     window._restoring_project = False
+    # An extraction happened in this session: the preview tabs stay open
+    # through `_refresh_output_actions` (which the export now calls) even
+    # before a footprint file exists.
+    window._acquisition_completed = True
     window._set_acquisition_tabs_enabled(True)
     window._refresh_symbol_tab()
     return params

@@ -150,17 +150,21 @@ class ProfileEditor(QDialog):
                     inner = QVBoxLayout(child)
                     sub.addTab(child, caption)
                     self._add_field(inner, field, overrides)
-            elif index == 0 and self.is_type:
+            elif index == 0:
                 sub = QTabWidget()
                 column.addWidget(sub, 1)
-                base = QWidget()
-                inner = QVBoxLayout(base)
-                sub.addTab(base, 'Prompt base')
-                self._add_field(inner, prompt, overrides)
-                self.instructions = QTextEdit()
-                self.instructions.setAcceptRichText(False)
-                self.instructions.setPlainText(row['instructions'] if row else '')
-                sub.addTab(self.instructions, 'Istruzioni tipologia')
+                for field, caption in ((prompt, 'Schede e moduli'),
+                                       ('system_prompt_single', 'Componente singolo'),
+                                       ('numbering_prompt', 'Numerazione pin')):
+                    child = QWidget()
+                    inner = QVBoxLayout(child)
+                    sub.addTab(child, caption)
+                    self._add_field(inner, field, overrides)
+                if self.is_type:
+                    self.instructions = QTextEdit()
+                    self.instructions.setAcceptRichText(False)
+                    self.instructions.setPlainText(row['instructions'] if row else '')
+                    sub.addTab(self.instructions, 'Istruzioni tipologia')
             else:
                 column.addWidget(QLabel('Prompt base:'))
                 self._add_field(column, prompt, overrides)

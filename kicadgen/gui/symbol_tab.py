@@ -365,12 +365,18 @@ class SymbolTab(QWidget):
         separator()
         self.cancel_button = icon_button('cancel.svg', 'Annulla', lambda: self._populate(self._baseline))
         self.apply_button = icon_button('confirm-use.svg', 'Applica', self.apply)
-        self.export_button = icon_button('install-project.svg', 'Esporta simbolo KiCad…', lambda: self.export_requested.emit())
-        # The export command is hosted by the dedicated KiCad tab. Keep this
-        # action as the editor's validity state for that button, but don't show
-        # a duplicate command in the symbol toolbar.
+        # The export command is hosted by the dedicated KiCad tab. This button
+        # is NOT in the toolbar (no duplicate command, nothing in the overflow
+        # menu) and stays hidden; its action carries the editor's validity
+        # state for the KiCad tab. It is not an invisible toolbar action
+        # because Qt reports an invisible action as disabled, and the validity
+        # read False whatever the rows (review of 2026-10-10: six symbol tests).
+        export_action = QAction(QIcon(str(Path(__file__).parent / 'assets' / 'install-project.svg')),
+                                self.tx('Esporta simbolo KiCad…'), self)
+        export_action.triggered.connect(lambda: self.export_requested.emit())
+        self.export_button = QToolButton(self)
+        self.export_button.setDefaultAction(export_action)
         self.export_button.hide()
-        self.export_button.defaultAction().setVisible(False)
         separator()
         self.selection_button = icon_button('tool-select.svg', 'Selezione multipla (Maiusc + trascina)')
         self.selection_button.defaultAction().setCheckable(True)

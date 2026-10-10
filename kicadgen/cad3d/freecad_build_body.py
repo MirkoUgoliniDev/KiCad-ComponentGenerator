@@ -328,6 +328,13 @@ def _try_fillet_groups(shape, groups, bounds):
     return shape, applied, failed
 
 
+#: Margin, in mm, kept between a face text and the edges of its face.
+TEXT_FACE_MARGIN_MM = 0.2
+#: Below this font size a printed text is a smudge: the fit still applies
+#: (overflowing is worse) but the script says so.
+TEXT_LEGIBLE_SIZE_MM = 0.3
+
+
 def _build_face_text_solids(shape, texts, bounds, font_file):
     """Costruisce le scritte come solidi sottili APPOGGIATI sulle facce.
 
@@ -358,6 +365,28 @@ def _build_face_text_solids(shape, texts, bounds, font_file):
             _warn("scritta '{text}' non costruibile con il font {font}", text=t["text"],
                   font=font_file)
             continue
+        # Fitted to the face it lies on, like the silk labels (`_place_text`
+        # with bounds): a writing longer than the body was simply overflowing
+        # (review B of 2026-10-10). Available extent along the reading
+        # direction and the text's up direction, a margin on each side.
+        face_box = face.BoundBox
+        if abs(normal.z) > 0.9:
+            available = (face_box.XLength, face_box.YLength)
+        else:
+            available = (max(face_box.XLength, face_box.YLength), face_box.ZLength)
+        text_box = solid.BoundBox
+        factor = min(1.0,
+                     max(available[0] - 2 * TEXT_FACE_MARGIN_MM, 0.0) / max(text_box.XLength, 1e-9),
+                     max(available[1] - 2 * TEXT_FACE_MARGIN_MM, 0.0) / max(text_box.YLength, 1e-9))
+        if factor < 1.0:
+            fitted = _text_solid(t["text"], t["size_mm"] * factor, thickness + sink, font_file)
+            if fitted is None:
+                continue
+            solid = fitted
+            if t["size_mm"] * factor < TEXT_LEGIBLE_SIZE_MM:
+                _warn("scritta '{text}' ridotta a {size:.2f} mm per stare nella faccia "
+                      "'{face}': poco leggibile", text=t["text"], size=t["size_mm"] * factor,
+                      face=t["face"])
 
         # Centra il blocco di testo sull'origine XY, con la base a Z=0.
         text_bbox = solid.BoundBox
@@ -614,6 +643,14 @@ def _flip_y(data):
             through["y"] = -float(through["y"])
     for box in data.get("extra_boxes", []):
         box["y"] = -(box["y"] + box["width_mm"])
+        # A box turned about Z is reflected like a component: the angle
+        # changes sign with the axis (review B of 2026-10-10: an SMD terminal
+        # at 30 degrees came out at -30, the mirror image of its pad).
+        if "rotation_deg" in box:
+            try:
+                box["rotation_deg"] = -float(box["rotation_deg"])
+            except (TypeError, ValueError, OverflowError):
+                pass
     # Anchored face texts (pin numbers beside the leads) are positions in the
     # footprint system like the pins: same reflection, or the label would
     # land on the far side of the body (seen on the TEL8 try, 2026-10-10).

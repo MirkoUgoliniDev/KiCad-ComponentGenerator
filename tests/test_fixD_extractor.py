@@ -80,12 +80,15 @@ def test_populated_pins_named_by_the_pin_map_are_kept_beyond_rows_times_cols():
     assert sorted(entry["pin"] for entry in params.pin_map) == [1, 7, 8, 9, 10, 16]
 
 
-def test_populated_pins_absent_from_the_pin_map_are_dropped_with_a_note():
-    """Negative: a number the map does not place is not a pin, even if <= rows*cols."""
+def test_a_populated_pin_the_map_does_not_place_makes_the_map_partial_and_blocks():
+    """Negative: the map no longer covers the populated set, so it is anchors only; on a
+    2x3 grid the six anchors fit no standard convention, and the generation is blocked
+    (review A, 2026-10-10: a partial map must never define which pins exist)."""
     params = _params_from_tool_arguments(matrix(
         rows=2, cols=3, pin_map=_u_numbered_dip(), populated_pins=[1, 2, 16]))
-    assert params.populated_pins == [1, 16]
-    assert "populated_pins" in params.notes and "[2]" in params.notes
+    assert params.pin_map is None
+    assert params.populated_pins == [1, 2], "automatic numbering: bounded by rows*cols"
+    assert params.pin_map_conflict and "nessuna convenzione" in params.pin_map_conflict
 
 
 def test_populated_pins_without_a_map_stay_bounded_by_the_grid():

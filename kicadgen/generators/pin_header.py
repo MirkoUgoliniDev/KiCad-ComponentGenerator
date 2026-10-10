@@ -110,6 +110,30 @@ class PinHeaderParams:
             raise ValueError(tx("Il diametro pad deve essere maggiore del drill."))
         if self.pad_shape not in {"circle", "rect"}:
             raise ValueError(tx("La forma dei pad header deve essere circle o rect."))
+        if self.pin_map:
+            seen = {}
+            for pin, position in self.pin_map.items():
+                row, col = position
+                if not (0 <= row < self.rows) or not (0 <= col < self.cols):
+                    raise ValueError(
+                        tx("Pin {pin}: posizione (riga {row}, colonna {col}) fuori dalla matrice "
+                           "{rows}x{cols}.",
+                           pin=pin,
+                           row=row,
+                           col=col,
+                           rows=self.rows,
+                           cols=self.cols)
+                    )
+                if position in seen:
+                    raise ValueError(
+                        tx("Pin {pin} e pin {seen} occupano la stessa posizione (riga {row}, "
+                           "colonna {col}).",
+                           pin=pin,
+                           seen=seen[position],
+                           row=row,
+                           col=col)
+                    )
+                seen[position] = pin
         if self.pad_overrides:
             positions = {str(pin) for pin, _, _ in pin_positions(self)}
             for number, override in self.pad_overrides.items():
@@ -147,30 +171,6 @@ class PinHeaderParams:
                            "dei pin.",
                            pins=", ".join(str(pin) for pin in missing))
                     )
-        if self.pin_map:
-            seen = {}
-            for pin, position in self.pin_map.items():
-                row, col = position
-                if not (0 <= row < self.rows) or not (0 <= col < self.cols):
-                    raise ValueError(
-                        tx("Pin {pin}: posizione (riga {row}, colonna {col}) fuori dalla matrice "
-                           "{rows}x{cols}.",
-                           pin=pin,
-                           row=row,
-                           col=col,
-                           rows=self.rows,
-                           cols=self.cols)
-                    )
-                if position in seen:
-                    raise ValueError(
-                        tx("Pin {pin} e pin {seen} occupano la stessa posizione (riga {row}, "
-                           "colonna {col}).",
-                           pin=pin,
-                           seen=seen[position],
-                           row=row,
-                           col=col)
-                    )
-                seen[position] = pin
         self._validate_pad_clearance()
 
     def _validate_pad_clearance(self) -> None:

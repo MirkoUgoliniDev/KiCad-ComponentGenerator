@@ -807,3 +807,37 @@ def pytest_collection_finish(session):
     """
     gc.collect()
     gc.freeze()
+
+
+@pytest.fixture(autouse=True)
+def project_kind_dialog_accepts(monkeypatch):
+    """@brief The project-kind wizard never waits for a click in a test.
+
+    `ProjectKindDialog` (2026-10-09) opens with `exec()` from `_new_project`
+    and from `_open_project_at` when a project has no kind: tests written
+    before it patch only the name dialog and hung for TEST_WATCHDOG_S on the
+    wizard (full suite of 2026-10-10 stopped at 45%). Here it accepts with
+    the type it was given, or the window's current type, or the historical
+    default: a test about the wizard itself patches `exec`/`selected_type`
+    and its patch, applied later, wins.
+    """
+    from PyQt6.QtWidgets import QDialog
+    from kicadgen.gui import project_dialogs
+
+    original_init = project_dialogs.ProjectKindDialog.__init__
+
+    def init(self, tr=None, selected="", parent=None):
+        original_init(self, tr=tr, selected=selected, parent=parent)
+        self._test_parent = parent
+
+    def selected_type(self):
+        if getattr(self, "_selected_key", ""):
+            return self._selected_key
+        parent = getattr(self, "_test_parent", None)
+        key = parent._profile_key() if parent is not None and hasattr(parent, "_profile_key") else ""
+        return key or "aggregate_castellated"
+
+    monkeypatch.setattr(project_dialogs.ProjectKindDialog, "__init__", init)
+    monkeypatch.setattr(project_dialogs.ProjectKindDialog, "exec",
+                        lambda self: QDialog.DialogCode.Accepted)
+    monkeypatch.setattr(project_dialogs.ProjectKindDialog, "selected_type", selected_type)

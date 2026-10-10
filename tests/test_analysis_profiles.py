@@ -466,7 +466,7 @@ def test_v4_database_receives_a_blank_crop_model_and_keeps_every_user_text(tmp_p
     assert upgraded.overrides(key) == {'crop_prompt': 'type crop', 'vision_model': 'type/photo'}
     assert upgraded.resolve(key)['crop_model'] == ''
     with sqlite3.connect(store.path) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION == 5
+        assert db.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION == 6
 
 
 def test_a_crop_model_the_user_already_set_is_never_replaced(tmp_path):

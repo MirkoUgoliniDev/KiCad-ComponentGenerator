@@ -20,7 +20,8 @@ def test_new_profile_save_inheritance_and_cancel(app, store):
         # Prompts only: the model is one for every analysis (user, 2026-10-02).
         assert set(dialog.fields) == {'system_prompt', 'grounding_prompt', 'image_instructions',
                                       'terminal_prompt', 'lead_prompt', 'crop_prompt',
-                                      'verification_prompt'}
+                                      'verification_prompt', 'system_prompt_single',
+                                      'numbering_prompt'}
         assert all(check.isChecked() for check in dialog.inherit.values())
         dialog.name.setText('My module')
         dialog.family.setCurrentIndex(dialog.family.findData('aggregate_castellated'))
