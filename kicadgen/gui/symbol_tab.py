@@ -4,9 +4,9 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 import math
-from PyQt6.QtCore import Qt, pyqtSignal, QLineF, QSize, QRect, QItemSelectionModel
-from PyQt6.QtGui import QAction, QColor, QFont, QPainter, QPen, QShortcut, QKeySequence, QIcon
-from PyQt6.QtWidgets import (
+from PyQt6.QtCore import Qt, pyqtSignal, QLineF, QSize, QRect, QRectF, QPointF, QItemSelectionModel
+from PyQt6.QtGui import QPalette, QAction, QColor, QFont, QPainter, QPen, QShortcut, QKeySequence, QIcon
+from PyQt6.QtWidgets import (QHBoxLayout, QGridLayout, QFrame, QScrollArea, 
     QAbstractItemView, QComboBox, QGraphicsScene, QGraphicsView,
     QHeaderView, QDialog, QDialogButtonBox, QPushButton, QDoubleSpinBox, QFormLayout, QLabel, QMenu, QToolButton, QSplitter, QTableWidget,
     QTableWidgetItem, QListWidget, QRubberBand, QToolBar, QSizePolicy, QVBoxLayout, QWidget,
@@ -28,6 +28,248 @@ _TYPE_LABELS = {
 }
 
 
+def glyph_icon(glyph, size: int = 36) -> QIcon:
+    """@brief Icon of a palette element, drawn from its own primitives (no asset file).
+
+    @param glyph Catalogue glyph.
+    @param size Icon side in pixels.
+    @return A transparent icon with the glyph's polylines, arcs, circles and
+        rectangles scaled to fit, light strokes, and its terminals as dots:
+        the stylised picture of what will be inserted (user, 2026-10-10:
+        «una palette grafica stilizzata»).
+    """
+    from PyQt6.QtGui import QPixmap, QPainterPath
+    from ..generators.symbol_glyphs import arc_points, instance_from_glyph, placed_primitives, placed_terminals
+    instance = instance_from_glyph(glyph, 0, 0)
+    primitives = placed_primitives(instance)
+    terminals = placed_terminals(instance)
+    xs, ys = [], []
+    for p in primitives:
+        for x, y in p.points:
+            xs.append(x)
+            ys.append(y)
+        if p.kind == 'circle':
+            (cx, cy), r = p.points[0], p.radius
+            xs.extend((cx - r, cx + r))
+            ys.extend((cy - r, cy + r))
+    for t in terminals:
+        xs.append(t.x)
+        ys.append(t.y)
+    pixmap = QPixmap(size, size)
+    pixmap.fill(QColor(0, 0, 0, 0))
+    if not xs:
+        return QIcon(pixmap)
+    span = max(max(xs) - min(xs), max(ys) - min(ys), 1e-6)
+    margin = 4
+    scale = (size - 2 * margin) / span
+    cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+
+    def to_px(x, y):
+        return (size / 2 + (x - cx) * scale, size / 2 - (y - cy) * scale)
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor('#cdd6f4'), 1.4)
+    painter.setPen(pen)
+    for p in primitives:
+        fill = QColor('#cdd6f4') if p.fill == 'outline' else QColor(0, 0, 0, 0)
+        painter.setBrush(fill)
+        if p.kind in ('polyline', 'arc'):
+            points = p.points if p.kind == 'polyline' else arc_points(*p.points)
+            path = QPainterPath()
+            path.moveTo(*to_px(*points[0]))
+            for x, y in points[1:]:
+                path.lineTo(*to_px(x, y))
+            painter.drawPath(path)
+        elif p.kind == 'circle':
+            (x, y), r = p.points[0], p.radius * scale
+            px, py = to_px(x, y)
+            painter.drawEllipse(QPointF(px, py), r, r)
+        elif p.kind == 'rectangle':
+            (x0, y0), (x1, y1) = p.points
+            left, top = to_px(min(x0, x1), max(y0, y1))
+            painter.drawRect(QRectF(left, top, abs(x1 - x0) * scale, abs(y1 - y0) * scale))
+    painter.setPen(QPen(QColor('#a6e3a1'), 1.0))
+    painter.setBrush(QColor('#a6e3a1'))
+    for t in terminals:
+        px, py = to_px(t.x, t.y)
+        painter.drawEllipse(QPointF(px, py), 1.6, 1.6)
+    painter.end()
+    return QIcon(pixmap)
+
+
+#: Colours of the symbol canvas. "dark": the application's own theme.
+#: "kicad": the default colour scheme of KiCad's schematic editor, so the
+#: preview shows what the schematic will (user, 2026-10-10: body yellow
+#: with dark drawings, as in KiCad).
+CANVAS_THEMES = {
+    'dark': {
+        'canvas': '#181825', 'grid': '#36364b', 'body_fill': '#242438', 'outline': '#89b4fa',
+        'graphic': '#cdd6f4', 'graphic_fill': '#242438', 'pin': '#89b4fa', 'pin_name': '#cdd6f4',
+        'pin_number': '#cdd6f4', 'selected': '#f9e2af', 'terminal': '#a6e3a1', 'handle': '#a6e3a1',
+        'wire': '#f9e2af',
+    },
+    'kicad': {
+        'canvas': '#ffffff', 'grid': '#d9d9d9', 'body_fill': '#ffffc2', 'outline': '#840000',
+        'graphic': '#840000', 'graphic_fill': '#ffffc2', 'pin': '#840000', 'pin_name': '#008484',
+        'pin_number': '#840000', 'selected': '#0a7bd6', 'terminal': '#2e8b57', 'handle': '#2e8b57',
+        'wire': '#0a7bd6',
+    },
+}
+
+
+class PalettePanel(QWidget):
+    """@brief Vertical palette with collapsible groups of element icons (user, 2026-10-10).
+
+    @note One checkable action per element; choosing one emits `chosen(key)`
+        and leaves it checked until `release()`. Groups open and close
+        independently; the state lives for the session only.
+    """
+    chosen = pyqtSignal(str)
+    #: A tool of the palette was clicked ("wire").
+    tool_chosen = pyqtSignal(str)
+
+    def __init__(self, tx, parent=None):
+        """@brief Build the panel from the catalogue.
+
+        @param tx Translation callable for labels.
+        @param parent Parent widget.
+        """
+        super().__init__(parent)
+        self.tx = tx
+        self._actions = []
+        self._tool_actions = {}
+        self._groups = {}
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._content = QWidget()
+        # The content never asks for more width than the panel: long group
+        # titles elide instead of widening the hidden-scroll area, which
+        # pushed the icon columns out of view (offscreen check, 2026-10-10).
+        self._content.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._content_layout = QVBoxLayout(self._content)
+        self._content_layout.setContentsMargins(2, 2, 2, 2)
+        self._content_layout.setSpacing(2)
+        self.scroll.setWidget(self._content)
+        outer.addWidget(self.scroll)
+        self.setFixedWidth(150)
+        # Same dark ground as the canvas, whatever the application style: the
+        # element strokes are light and would vanish on a light panel.
+        for widget in (self.scroll.viewport(), self._content):
+            widget.setAutoFillBackground(True)
+            palette = widget.palette()
+            palette.setColor(QPalette.ColorRole.Window, QColor('#181825'))
+            palette.setColor(QPalette.ColorRole.WindowText, QColor('#cdd6f4'))
+            palette.setColor(QPalette.ColorRole.ButtonText, QColor('#cdd6f4'))
+            widget.setPalette(palette)
+        self.rebuild()
+
+    def rebuild(self):
+        """@brief Fill (again) the groups and icons from the catalogue, keeping open/closed states."""
+        from ..generators.symbol_glyphs import grouped_catalogue
+        open_state = {key: section.isChecked() for key, (section, _body) in self._groups.items()}
+        while self._content_layout.count():
+            item = self._content_layout.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        self._actions = []
+        self._tool_actions = {}
+        self._groups = {}
+        # Tools first (user, 2026-10-10: «il filo lo vorrei nella palette»).
+        from ..generators.symbol_glyphs import Glyph, Primitive
+        wire_glyph = Glyph('wire', 'Filo', (Primitive('polyline', ((0, 0), (2.54, 0), (2.54, 2.54), (5.08, 2.54)),
+                                                      0.0, 'none', 0.254),), (), 'tool')
+        self._add_section('tools', 'Collegamenti', [wire_glyph], open_state.get('tools', True), tool=True)
+        for key, label, glyphs in grouped_catalogue():
+            self._add_section(key, label, glyphs, open_state.get(key, True))
+        self._content_layout.addStretch(1)
+
+    def _add_section(self, key, label, glyphs, is_open, tool=False):
+        """One collapsible group: a header and a grid of icon buttons (elements or tools)."""
+        if True:
+            header = QToolButton()
+            header.setText(self.tx(label))
+            header.setCheckable(True)
+            header.setChecked(is_open)
+            header.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            header.setArrowType(Qt.ArrowType.DownArrow if header.isChecked() else Qt.ArrowType.RightArrow)
+            header.setAutoRaise(True)
+            header.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            header.setMinimumWidth(0)
+            header.setProperty('i18n_skip', True)
+            body = QWidget()
+            body.setAutoFillBackground(True)
+            body.setPalette(self._content.palette())
+            grid = QGridLayout(body)
+            grid.setContentsMargins(4, 0, 0, 4)
+            grid.setSpacing(2)
+            grid.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            for index, glyph in enumerate(glyphs):
+                action = QAction(glyph_icon(glyph), self.tx(glyph.label), self)
+                action.setCheckable(True)
+                action.setData(glyph.key)
+                action.setToolTip(self.tx(glyph.label) + ' — ' + self.tx('clicca, poi clicca nel simbolo'))
+                if tool:
+                    action.setToolTip(self.tx('Filo: clicca i punti nel simbolo; doppio clic o tasto destro per chiudere'))
+                    action.triggered.connect(lambda checked=False, k=glyph.key: self.tool_chosen.emit(k))
+                else:
+                    action.triggered.connect(lambda checked=False, k=glyph.key: self._pick(k))
+                button = QToolButton()
+                button.setDefaultAction(action)
+                button.setIconSize(QSize(36, 36))
+                button.setFixedSize(42, 42)
+                button.setAutoRaise(True)
+                button.setProperty('i18n_skip', True)
+                button.setAccessibleName(self.tx(glyph.label))
+                grid.addWidget(button, index // 3, index % 3, Qt.AlignmentFlag.AlignLeft)
+                if tool:
+                    self._tool_actions[glyph.key] = action
+                else:
+                    self._actions.append(action)
+            body.setVisible(header.isChecked())
+            header.toggled.connect(lambda checked, b=body, h=header: (
+                b.setVisible(checked),
+                h.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow)))
+            self._content_layout.addWidget(header)
+            self._content_layout.addWidget(body)
+            self._groups[key] = (header, body)
+
+    def set_tool_checked(self, key, checked):
+        """@brief Show a palette tool as active or not; unknown keys are ignored."""
+        action = self._tool_actions.get(key)
+        if action is not None:
+            action.setChecked(bool(checked))
+
+    def _pick(self, key):
+        for action in self._actions:
+            action.setChecked(action.data() == key)
+        self.chosen.emit(key)
+
+    def actions(self):
+        """@brief Every element action, in palette order (checkable, data = catalogue key)."""
+        return list(self._actions)
+
+    def release(self):
+        """@brief Uncheck every element (placement done or cancelled)."""
+        for action in self._actions:
+            action.setChecked(False)
+
+    def set_group_open(self, key, open_):
+        """@brief Open or close one group; unknown keys are ignored."""
+        section = self._groups.get(key)
+        if section is not None:
+            section[0].setChecked(bool(open_))
+
+    def group_is_open(self, key):
+        """@brief Whether a group is open; False for an unknown key."""
+        section = self._groups.get(key)
+        return bool(section is not None and section[0].isChecked())
+
+
 class _SymbolView(QGraphicsView):
     selection_toggled = pyqtSignal(str)
     region_selected = pyqtSignal(object, bool)
@@ -37,10 +279,21 @@ class _SymbolView(QGraphicsView):
     pin_context_requested = pyqtSignal(str, object)
     gesture_moved = pyqtSignal(object, object)
     gesture_finished = pyqtSignal(bool)
+    #: A click while placing a glyph (scene point), or None when placing is cancelled.
+    place_requested = pyqtSignal(object)
+    graphic_context_requested = pyqtSignal(int, object)
+    #: A click while drawing a wire (scene point).
+    wire_point = pyqtSignal(object)
+    #: The wire is finished (True) or abandoned (False).
+    wire_finished = pyqtSignal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setScene(QGraphicsScene(self))
+        #: True while the next left click places the chosen glyph.
+        self.placing = False
+        #: True while left clicks add wire points.
+        self.wiring = False
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
@@ -52,14 +305,41 @@ class _SymbolView(QGraphicsView):
         self.selection_mode = False
         self._rubber_start = None
         self._rubber = QRubberBand(QRubberBand.Shape.Rectangle, self.viewport())
-        self.setBackgroundBrush(QColor('#181825'))
+        self.theme = CANVAS_THEMES['dark']
+        self.setBackgroundBrush(QColor(self.theme['canvas']))
         self.auto_fit = True
         self.show_grid = True
         self.gesture = None
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
 
+    def mouseDoubleClickEvent(self, event):
+        if self.wiring and event.button() == Qt.MouseButton.LeftButton:
+            self.wiring = False
+            self.wire_finished.emit(True)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
     def mousePressEvent(self, event):
+        if self.wiring and event.button() == Qt.MouseButton.LeftButton:
+            self.wire_point.emit(self.mapToScene(event.pos()))
+            event.accept()
+            return
+        if self.wiring and event.button() == Qt.MouseButton.RightButton:
+            self.wiring = False
+            self.wire_finished.emit(True)
+            event.accept()
+            return
+        if self.placing and event.button() == Qt.MouseButton.LeftButton:
+            self.place_requested.emit(self.mapToScene(event.pos()))
+            event.accept()
+            return
+        if self.placing and event.button() == Qt.MouseButton.RightButton:
+            self.placing = False
+            self.place_requested.emit(None)
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton and self.gesture is None:
             if self.selection_mode or event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                 self._rubber_start = event.pos()
@@ -114,6 +394,10 @@ class _SymbolView(QGraphicsView):
                 self.pin_context_requested.emit(target[1], event.globalPos())
                 event.accept()
                 return
+            if target is not None and target[0] == 'graphic':
+                self.graphic_context_requested.emit(target[1], event.globalPos())
+                event.accept()
+                return
         event.ignore()
 
     def _pan_to(self, point):
@@ -165,6 +449,21 @@ class _SymbolView(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event):
+        if self.wiring and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.wiring = False
+            self.wire_finished.emit(True)
+            event.accept()
+            return
+        if self.wiring and event.key() == Qt.Key.Key_Escape:
+            self.wiring = False
+            self.wire_finished.emit(False)
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Escape and self.placing:
+            self.placing = False
+            self.place_requested.emit(None)
+            event.accept()
+            return
         if event.key() == Qt.Key.Key_Escape and (self.gesture is not None or self._pan_last is not None or self._rubber_start is not None):
             self.cancel_interaction()
             event.accept()
@@ -198,7 +497,7 @@ class _SymbolView(QGraphicsView):
         if not self.show_grid:
             return
         step = GRID_MM * SCENE_UNITS_PER_MM
-        pen = QPen(QColor('#36364b'))
+        pen = QPen(QColor(self.theme['grid']))
         pen.setCosmetic(True)
         painter.save()
         painter.setPen(pen)
@@ -281,6 +580,13 @@ class SymbolTab(QWidget):
         self._applying = False
         self._text_bounds = []
         self._symbol = None
+        #: Index of the selected placed glyph in the rows' `symbol_graphics`, or None.
+        self._selected_graphic = None
+        #: Canvas theme key: 'dark' (application) or 'kicad' (schematic colours).
+        self._theme_key = 'dark'
+        #: Points (symbol mm) of the wire being drawn, [] when none.
+        self._wire_points = []
+        self._wire_cursor_item = None
         layout = QVBoxLayout(self)
         self.title = QLabel(self.tx('Simbolo elettrico'))
         layout.addWidget(self.title)
@@ -342,6 +648,10 @@ class SymbolTab(QWidget):
         self.view.pin_context_requested.connect(self._pin_context_menu)
         self.view.gesture_moved.connect(self._move_gesture)
         self.view.gesture_finished.connect(self._end_gesture)
+        self.view.place_requested.connect(self._place_requested)
+        self.view.graphic_context_requested.connect(self._graphic_context_menu)
+        self.view.wire_point.connect(self._wire_point)
+        self.view.wire_finished.connect(self.finish_wire)
         self.view.setToolTip(self.tx('Sinistro sullo spazio vuoto: sposta la vista. Rotella: zoom sul cursore. Adatta: mostra tutto.'))
         self.table_toggle = icon_button('pinout-table.svg', 'Mostra/nascondi tabella pin')
         self.table_toggle.defaultAction().setCheckable(True)
@@ -390,6 +700,9 @@ class SymbolTab(QWidget):
             action.triggered.connect(lambda checked=False, op=operation: self._transform_selected(op))
         self.align_button.defaultAction().setMenu(align_menu)
         self.align_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.theme_button = icon_button('tab-kicad.svg', 'Colori come KiCad (anteprima con il tema dello schema)')
+        self.theme_button.defaultAction().setCheckable(True)
+        self.theme_button.defaultAction().toggled.connect(self.set_kicad_colors)
         self.lock_button = icon_button('symbol-lock.svg', 'Blocca/sblocca rettangolo')
         self.lock_button.defaultAction().setCheckable(True)
         self.lock_button.defaultAction().toggled.connect(self._set_body_locked)
@@ -398,6 +711,23 @@ class SymbolTab(QWidget):
         self.recovery_button = icon_button('project-open.svg', 'Recupera bozza', self.recover_draft)
         self.recovery_button.defaultAction().setEnabled(False)
         self.properties_button = icon_button('sliders.svg', 'Posizione e orientamento del pin', self._edit_selected_pin)
+        separator()
+        # Palette of graphic elements (user, 2026-10-10): KiCad's own drawings
+        # when KiCad is installed, standard shapes otherwise. One click on
+        # «Inserisci», one click in the symbol.
+        # The chosen element lives in a hidden combo (one source of truth for
+        # tests and for placement); the user sees a strip of icons, each the
+        # stylised drawing of its element, below the main toolbar.
+        self.glyph_combo = QComboBox()
+        self.glyph_combo.setToolTip(self.tx('Elemento grafico da inserire nel simbolo'))
+        self.glyph_combo.setProperty('i18n_skip', True)
+        self.glyph_combo.hide()
+        self._fill_glyph_combo()
+        self.glyph_insert_button = icon_button('tool-draw.svg', 'Inserisci elemento grafico', self._start_placing)
+        # Wires (user, 2026-10-10): polylines from a pin's inner end to an
+        # element terminal, or between any grid points.
+        self.wire_button = icon_button('wf-contact.svg', 'Filo: clic sui punti, doppio clic o tasto destro per chiudere, Esc per annullare', self.start_wire)
+        self.wire_button.defaultAction().setCheckable(True)
         icon_button('info.svg', 'Trascina i pin sulla griglia. Tasto destro per ruotare. Maniglie per ridimensionare; Esc annulla.')
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -405,7 +735,17 @@ class SymbolTab(QWidget):
         self.dimensions = QLabel()
         self.dimensions.setProperty('i18n_skip', True)
         toolbar.addWidget(self.dimensions)
-        preview_layout.addWidget(self.view)
+        # Vertical palette on the left of the canvas, groups that open and
+        # close independently (user, 2026-10-10).
+        self.palette = PalettePanel(self.tx)
+        self.palette.setToolTip(self.tx('Palette: clicca un elemento, poi clicca nel simbolo per inserirlo.'))
+        self.palette.chosen.connect(self._palette_chosen)
+        self.palette.tool_chosen.connect(lambda key: self.start_wire() if key == 'wire' else None)
+        canvas_row = QHBoxLayout()
+        canvas_row.setContentsMargins(0, 0, 0, 0)
+        canvas_row.addWidget(self.view, 1)
+        canvas_row.addWidget(self.palette)       # on the right (user, 2026-10-10)
+        preview_layout.addLayout(canvas_row, 1)
         for key, callback in [('Ctrl+Z', self.undo), ('Ctrl+Shift+Z', self.redo), ('Ctrl+Y', self.redo)]:
             shortcut = QShortcut(QKeySequence(key), self.view)
             shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
@@ -417,7 +757,13 @@ class SymbolTab(QWidget):
         for key, degrees in [('R', -90), ('Shift+R', 90)]:
             shortcut = QShortcut(QKeySequence(key), self.view)
             shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
-            shortcut.activated.connect(lambda d=degrees: self.rotate_pin(self._selected_pin, d))
+            shortcut.activated.connect(lambda d=degrees: (
+                self._edit_graphic(self._selected_graphic, 'rotate', d)
+                if self._selected_pin is None and self._selected_graphic is not None
+                else self.rotate_pin(self._selected_pin, d)))
+        delete_shortcut = QShortcut(QKeySequence('Delete'), self.view)
+        delete_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        delete_shortcut.activated.connect(self._delete_selected_graphic)
         splitter.addWidget(preview)
         splitter.setSizes([400, 800])
         splitter.setStretchFactor(1, 1)
@@ -628,8 +974,301 @@ class SymbolTab(QWidget):
                 row['electrical_type_evidence'] = {'source': proposal['source'], 'reason': proposal['reason']}
         self._populate(rows)
 
+    def _fill_glyph_combo(self):
+        """Fill the palette selector from the catalogue, keeping the chosen entry."""
+        from ..generators.symbol_glyphs import catalogue
+        current = self.glyph_combo.currentData()
+        blocked = self.glyph_combo.blockSignals(True)
+        self.glyph_combo.clear()
+        for glyph in catalogue():
+            self.glyph_combo.addItem(self.tx(glyph.label), glyph.key)
+        index = self.glyph_combo.findData(current)
+        self.glyph_combo.setCurrentIndex(max(0, index))
+        self.glyph_combo.blockSignals(blocked)
+
+    def _fill_palette(self):
+        """Rebuild the palette panel from the catalogue (language change)."""
+        self.palette.rebuild()
+
+    def palette_actions(self):
+        """@brief The element actions of the palette, in order."""
+        return self.palette.actions()
+
+    def _palette_chosen(self, key):
+        """@brief A palette icon was clicked: choose that element and arm the placement."""
+        index = self.glyph_combo.findData(key)
+        if index >= 0:
+            self.glyph_combo.setCurrentIndex(index)
+        self._start_placing()
+
+    def _graphics(self, rows=None):
+        """The placed glyphs the draft carries (validated), [] when none or malformed."""
+        from ..generators.symbol_glyphs import symbol_graphics
+        try:
+            return symbol_graphics(self.draft_rows() if rows is None else rows)
+        except ValueError:
+            return []
+
+    @staticmethod
+    def _with_graphics(rows, graphics):
+        """Rows with `symbol_graphics` set to the same list on every row (like `symbol_body`)."""
+        rows = deepcopy(rows)
+        for row in rows:
+            row['symbol_graphics'] = deepcopy(graphics)
+        return rows
+
+    @property
+    def theme(self):
+        """@brief The colour table of the canvas in use (see CANVAS_THEMES)."""
+        return CANVAS_THEMES[self._theme_key]
+
+    def set_kicad_colors(self, enabled):
+        """@brief Draw the preview with KiCad's schematic colours (True) or the app's (False).
+
+        @param enabled True for the KiCad scheme.
+        @note Display only: the exported symbol keeps «fill background» and
+            takes the colours of the schematic's own theme in KiCad.
+        """
+        self._theme_key = 'kicad' if enabled else 'dark'
+        self.view.theme = self.theme
+        self.view.setBackgroundBrush(QColor(self.theme['canvas']))
+        self.view.viewport().update()
+        action = self.theme_button.defaultAction()
+        if action.isChecked() != bool(enabled):
+            blocked = action.blockSignals(True)
+            action.setChecked(bool(enabled))
+            action.blockSignals(blocked)
+        self._draw(self._symbol)
+
+    def start_wire(self):
+        """@brief Arm the wire tool: every click adds a point until the wire is closed."""
+        if self._symbol is None:
+            self.wire_button.defaultAction().setChecked(False)
+            return
+        self.view.cancel_interaction()
+        self.view.placing = False
+        self.view.wiring = True
+        self.wire_button.defaultAction().setChecked(True)
+        self.palette.set_tool_checked('wire', True)
+        self._wire_points = []
+        self.view.setFocus()
+        self.set_status(self.tx('Filo: clicca i punti (si agganciano a pin e terminali); doppio clic, Invio o tasto destro per chiudere, Esc per annullare.'))
+        self._draw(self._symbol)
+
+    def _wire_snap_targets(self):
+        """Points a wire end snaps to: inner ends of pins and of element terminals."""
+        from ..generators.symbol_glyphs import placed_terminals
+        direction = {0: (1, 0), 90: (0, 1), 180: (-1, 0), 270: (0, -1)}
+        targets = []
+        if self._symbol is not None:
+            for p in self._symbol.pins:
+                vx, vy = direction[p.angle % 360]
+                targets.append((round(p.x + vx * self._symbol.pin_length, 4),
+                                round(p.y + vy * self._symbol.pin_length, 4)))
+        for instance in self._graphics():
+            for t in placed_terminals(instance):
+                vx, vy = direction[t.angle % 360]
+                targets.append((round(t.x + vx * t.length, 4), round(t.y + vy * t.length, 4)))
+        return targets
+
+    def _wire_snap(self, x, y):
+        """A wire point: the nearest snap target within half a grid step, else the grid point."""
+        from ..generators.symbol_glyphs import TERMINAL_SNAP_MM
+        best, best_distance = None, TERMINAL_SNAP_MM
+        for tx_, ty_ in self._wire_snap_targets():
+            distance = math.hypot(tx_ - x, ty_ - y)
+            if distance <= best_distance:
+                best, best_distance = (tx_, ty_), distance
+        if best is not None:
+            return list(best)
+        return [round(round(v / GRID_MM) * GRID_MM, 4) for v in (x, y)]
+
+    def add_wire_point(self, x, y):
+        """@brief Add a point (symbol mm, Y up) to the wire being drawn, snapped; True when added.
+
+        @param x Symbol X in mm.
+        @param y Symbol Y in mm.
+        @return False when no wire is being drawn or the point repeats the last one.
+        """
+        if not self.view.wiring and not self._wire_points and self._symbol is None:
+            return False
+        point = self._wire_snap(float(x), float(y))
+        if self._wire_points and self._wire_points[-1] == point:
+            return False
+        self._wire_points.append(point)
+        self._draw(self._symbol)
+        return True
+
+    def _wire_point(self, point):
+        self.add_wire_point(point.x() / SCENE_UNITS_PER_MM, -point.y() / SCENE_UNITS_PER_MM)
+
+    def finish_wire(self, commit=True):
+        """@brief Close the wire being drawn: with two or more points it becomes a graphic element.
+
+        @param commit False abandons the points.
+        @return True when a wire was added.
+        """
+        points, self._wire_points = self._wire_points, []
+        self.view.wiring = False
+        self.wire_button.defaultAction().setChecked(False)
+        self.palette.set_tool_checked('wire', False)
+        self._wire_cursor_item = None
+        if not commit or len(points) < 2 or self._symbol is None:
+            self.set_status('')
+            self._draw(self._symbol)
+            return False
+        rows = self._free_rows(self.draft_rows(), self._symbol)
+        graphics = self._graphics(rows) + [{
+            'key': 'wire', 'label': 'Filo', 'source': 'wire', 'x': 0.0, 'y': 0.0,
+            'rotation': 0, 'mirror': False,
+            'primitives': [{'kind': 'polyline', 'points': [list(p) for p in points], 'radius': 0.0,
+                            'fill': 'none', 'width': 0.254}],
+            'terminals': []}]
+        if not self._accept_geometry(self._with_graphics(rows, graphics)):
+            return False
+        self.set_status(self.tx('Filo inserito.'))
+        self._select_graphic(len(graphics) - 1)
+        return True
+
+    def _start_placing(self):
+        """@brief Arm the next click in the symbol to place the chosen glyph."""
+        if self._symbol is None or self.glyph_combo.currentData() is None:
+            return
+        self.view.cancel_interaction()
+        self.view.placing = True
+        self.view.setFocus()
+        self.set_status(self.tx('Clicca nel simbolo dove posizionare l’elemento; Esc o tasto destro per annullare.'))
+
+    def _place_requested(self, point):
+        """@brief Place the chosen glyph at a scene point snapped to the grid; None cancels."""
+        self.view.placing = False
+        if hasattr(self, 'palette'):
+            self.palette.release()
+        if point is None or self._symbol is None:
+            self.set_status('')
+            return
+        from ..generators.symbol_glyphs import catalogue, instance_from_glyph
+        key = self.glyph_combo.currentData()
+        glyph = next((g for g in catalogue() if g.key == key), None)
+        if glyph is None:
+            return
+        x = round(round(point.x() / SCENE_UNITS_PER_MM / GRID_MM) * GRID_MM, 4)
+        y = round(round(-point.y() / SCENE_UNITS_PER_MM / GRID_MM) * GRID_MM, 4)
+        rows = self._free_rows(self.draft_rows(), self._symbol)
+        graphics = self._graphics(rows) + [instance_from_glyph(glyph, x, y)]
+        if self._accept_geometry(self._with_graphics(rows, graphics)):
+            self._select_graphic(len(graphics) - 1)
+            self.set_status(self.tx('Elemento inserito: trascinalo per spostarlo, tasto destro per ruotare, specchiare o eliminare; i pin trascinati sui suoi terminali vi si agganciano.'))
+
+    def place_glyph(self, key, x, y, rotation=0, mirror=False):
+        """@brief Place a catalogue glyph programmatically (tests and automation).
+
+        @param key Catalogue key.
+        @param x Symbol X in mm (snapped to the grid).
+        @param y Symbol Y in mm, Y up (snapped to the grid).
+        @param rotation Quarter turns in degrees.
+        @param mirror Mirror about the vertical axis.
+        @return True when placed.
+        """
+        from ..generators.symbol_glyphs import catalogue, instance_from_glyph
+        glyph = next((g for g in catalogue() if g.key == key), None)
+        if glyph is None or self._symbol is None:
+            return False
+        rows = self._free_rows(self.draft_rows(), self._symbol)
+        snapped = [round(round(v / GRID_MM) * GRID_MM, 4) for v in (x, y)]
+        graphics = self._graphics(rows) + [instance_from_glyph(glyph, snapped[0], snapped[1], rotation, mirror)]
+        if not self._accept_geometry(self._with_graphics(rows, graphics)):
+            return False
+        self._select_graphic(len(graphics) - 1)
+        return True
+
+    def graphics(self):
+        """@brief The placed glyph records of the current draft."""
+        return self._graphics()
+
+    def _select_graphic(self, index):
+        self._selected_graphic = index
+        if index is not None:
+            self._selected_pins = set()
+            self._selected_pin = None
+        self._draw(self._symbol)
+
+    def _edit_graphic(self, index, operation, value=None):
+        """@brief Turn, mirror, move or delete one placed glyph; an unknown index does nothing."""
+        if self._symbol is None or self._gesture_before is not None:
+            return False
+        rows = self._free_rows(self.draft_rows(), self._symbol)
+        graphics = self._graphics(rows)
+        if index is None or not 0 <= index < len(graphics):
+            return False
+        instance = graphics[index]
+        if operation == 'rotate':
+            instance['rotation'] = (int(instance.get('rotation', 0)) + int(value)) % 360
+        elif operation == 'mirror':
+            instance['mirror'] = not bool(instance.get('mirror', False))
+        elif operation == 'move':
+            instance['x'], instance['y'] = float(value[0]), float(value[1])
+        elif operation == 'delete':
+            del graphics[index]
+            self._selected_graphic = None
+        else:
+            return False
+        return self._accept_geometry(self._with_graphics(rows, graphics))
+
+    def fit_body_to_graphic(self, index):
+        """@brief Resize the body to the outline the library symbol had, when it had one."""
+        graphics = self._graphics()
+        if not 0 <= index < len(graphics):
+            return False
+        from ..generators.symbol_glyphs import catalogue
+        glyph = next((g for g in catalogue() if g.key == graphics[index].get('key')), None)
+        if glyph is None or glyph.body_hint is None:
+            return False
+        width, height = glyph.body_hint
+        if int(graphics[index].get('rotation', 0)) % 180:
+            width, height = height, width
+        return self.resize_body(width, height)
+
+    def _delete_selected_graphic(self):
+        if self._selected_graphic is not None:
+            self._edit_graphic(self._selected_graphic, 'delete')
+
+    def _graphic_context_menu(self, index, global_pos):
+        """@brief Rotate, mirror, delete a placed glyph, or fit the body to it."""
+        self._select_graphic(index)
+        graphics = self._graphics()
+        if not 0 <= index < len(graphics):
+            return
+        menu = QMenu(self)
+        title = menu.addAction(self.tx(str(graphics[index].get('label', ''))))
+        title.setEnabled(False)
+        menu.addSeparator()
+        menu.setToolTipsVisible(True)
+        for asset, label, operation, value in [
+            ('rotate-ccw.svg', 'Ruota di 90 gradi (antiorario)', 'rotate', 90),
+            ('rotate-cw.svg', 'Ruota di 90 gradi (orario)', 'rotate', -90),
+            ('format-painter.svg', 'Specchia', 'mirror', None),
+            ('delete.svg', 'Elimina elemento', 'delete', None),
+        ]:
+            action = menu.addAction(QIcon(str(Path(__file__).parent / 'assets' / asset)), self.tx(label))
+            action.setIconVisibleInMenu(True)
+            action.triggered.connect(lambda checked=False, op=operation, v=value: self._edit_graphic(index, op, v))
+        from ..generators.symbol_glyphs import catalogue
+        glyph = next((g for g in catalogue() if g.key == graphics[index].get('key')), None)
+        if glyph is not None and glyph.body_hint is not None:
+            fit = menu.addAction(self.tx('Adatta il rettangolo del corpo all’elemento'))
+            fit.triggered.connect(lambda checked=False: self.fit_body_to_graphic(index))
+        try:
+            menu.exec(global_pos)
+        finally:
+            menu.deleteLater()
+
     def retranslate(self):
         """@brief Refresh dynamic labels without losing unapplied edits."""
+        if hasattr(self, 'glyph_combo'):
+            self._fill_glyph_combo()
+        if hasattr(self, 'palette'):
+            self._fill_palette()
         self.title.setText(f"{self.tx('Simbolo elettrico')} · {self._name}" if self._name else self.tx('Simbolo elettrico'))
         self.footprint_label.setText(f"{self.tx('Footprint associato')}: {self._footprint}" if self._footprint else '')
         for button, source in self._icon_buttons:
@@ -778,6 +1417,8 @@ class SymbolTab(QWidget):
             return
         valid = {p.pin.number for p in self._symbol.pins}
         self._selected_pins = set(numbers) & valid
+        if self._selected_pins:
+            self._selected_graphic = None
         self._selected_pin = primary if primary in self._selected_pins else next(
             (p.pin.number for p in self._symbol.pins if p.pin.number in self._selected_pins), None)
         self._syncing_selection = True
@@ -822,6 +1463,13 @@ class SymbolTab(QWidget):
     def _update_readout(self, point=None):
         if point is not None:
             self._cursor_position = point
+            item = self._wire_cursor_item
+            if item is not None and self._wire_points and self.view.wiring:
+                # The segment from the last wire point follows the cursor.
+                last = self._wire_points[-1]
+                snapped = self._wire_snap(point.x() / SCENE_UNITS_PER_MM, -point.y() / SCENE_UNITS_PER_MM)
+                item.setLine(last[0] * SCENE_UNITS_PER_MM, -last[1] * SCENE_UNITS_PER_MM,
+                             snapped[0] * SCENE_UNITS_PER_MM, -snapped[1] * SCENE_UNITS_PER_MM)
         cursor = self._cursor_position
         value = '' if cursor is None else f'X {cursor.x()/10:.2f}  Y {-cursor.y()/10:.2f} mm  |  '
         value += f'{self.view.transform().m11()*100:.0f}%'
@@ -862,6 +1510,12 @@ class SymbolTab(QWidget):
             if target[1] not in chosen:
                 chosen = {target[1]}
             self._select_pins(chosen, target[1])
+        elif target[0] == 'graphic':
+            graphics = self._graphics(self._gesture_before)
+            index = target[1]
+            self._gesture_graphic_origin = ((graphics[index]['x'], graphics[index]['y'])
+                                            if 0 <= index < len(graphics) else None)
+            self._select_graphic(index)
 
     def _editable_rows(self, rows, symbol):
         rows = deepcopy(rows)
@@ -912,11 +1566,13 @@ class SymbolTab(QWidget):
         return self._accept_geometry(rows)
 
     def _free_rows(self, rows, symbol):
+        graphics = self._graphics(rows)
         rows = deepcopy(rows)
         for row, placed in zip(rows, symbol.pins):
             row['symbol_position'] = [placed.x, placed.y]
             row['symbol_angle'] = placed.angle
             row['symbol_body'] = [symbol.width, symbol.height]
+            row['symbol_graphics'] = deepcopy(graphics)
         return rows
 
     def place_pin(self, number, x, y):
@@ -930,7 +1586,15 @@ class SymbolTab(QWidget):
         if row is None:
             return False
         position = [round(round(v / GRID_MM) * GRID_MM, 4) for v in (x, y)]
-        if position == row['symbol_position']:
+        # A pin dropped on a glyph terminal takes the terminal's place and
+        # direction (the pin position KiCad's own symbol used).
+        from ..generators.symbol_glyphs import snap_to_terminal
+        terminal = snap_to_terminal(self._graphics(rows), x, y)
+        angle = row.get('symbol_angle')
+        if terminal is not None:
+            position = [round(terminal.x, 4), round(terminal.y, 4)]
+            angle = terminal.angle
+        if position == row['symbol_position'] and angle == row.get('symbol_angle'):
             self._draft = deepcopy(source)
             self._changed()
             return True
@@ -938,6 +1602,8 @@ class SymbolTab(QWidget):
         if occupied is not None:
             occupied['symbol_position'] = row['symbol_position'][:]
         row['symbol_position'] = position
+        if terminal is not None:
+            row['symbol_angle'] = angle
         return self._accept_geometry(rows)
 
     def rotate_pin(self, number, degrees):
@@ -1063,6 +1729,19 @@ class SymbolTab(QWidget):
         if self._gesture_before is None:
             return
         symbol = self._gesture_layout
+        if target[0] == 'graphic':
+            origin = getattr(self, '_gesture_graphic_origin', None)
+            if origin is None:
+                return
+            delta = point - self._gesture_start
+            x = round(round((origin[0] + delta.x() / SCENE_UNITS_PER_MM) / GRID_MM) * GRID_MM, 4)
+            y = round(round((origin[1] - delta.y() / SCENE_UNITS_PER_MM) / GRID_MM) * GRID_MM, 4)
+            rows = self._free_rows(self._gesture_before, symbol)
+            graphics = self._graphics(rows)
+            if 0 <= target[1] < len(graphics):
+                graphics[target[1]]['x'], graphics[target[1]]['y'] = x, y
+                self._accept_geometry(self._with_graphics(rows, graphics))
+            return
         if target[0] == 'pin':
             placed = next(p for p in symbol.pins if p.pin.number == target[1])
             delta = point - self._gesture_start
@@ -1087,6 +1766,55 @@ class SymbolTab(QWidget):
         else:
             self._changed()
 
+    def _draw_graphics(self, scene, scale):
+        """Draw every placed glyph (primitives and terminals), tagged for selection and dragging."""
+        from PyQt6.QtGui import QPainterPath
+        from ..generators.symbol_glyphs import arc_points, placed_primitives, placed_terminals
+        graphics = self._graphics()
+        for index, instance in enumerate(graphics):
+            selected = index == self._selected_graphic
+            theme = self.theme
+            pen = QPen(QColor(theme['selected']) if selected else QColor(theme['graphic']), 2.2 if selected else 1.3)
+            items = []
+            for p in placed_primitives(instance):
+                if p.kind in ('polyline', 'arc'):
+                    points = p.points if p.kind == 'polyline' else arc_points(*p.points)
+                    path = QPainterPath()
+                    path.moveTo(points[0][0] * scale, -points[0][1] * scale)
+                    for x, y in points[1:]:
+                        path.lineTo(x * scale, -y * scale)
+                    brush = QColor(theme['graphic']) if p.fill == 'outline' else QColor(theme['graphic_fill']) if p.fill == 'background' else QColor(0, 0, 0, 0)
+                    items.append(scene.addPath(path, pen, brush))
+                elif p.kind == 'circle':
+                    (cx, cy), r = p.points[0], p.radius * scale
+                    brush = QColor(theme['graphic']) if p.fill == 'outline' else QColor(theme['graphic_fill']) if p.fill == 'background' else QColor(0, 0, 0, 0)
+                    items.append(scene.addEllipse(cx * scale - r, -cy * scale - r, 2 * r, 2 * r, pen, brush))
+                elif p.kind == 'rectangle':
+                    (x0, y0), (x1, y1) = p.points
+                    left, top = min(x0, x1) * scale, -max(y0, y1) * scale
+                    brush = QColor(theme['graphic']) if p.fill == 'outline' else QColor(theme['graphic_fill']) if p.fill == 'background' else QColor(0, 0, 0, 0)
+                    items.append(scene.addRect(left, top, abs(x1 - x0) * scale, abs(y1 - y0) * scale, pen, brush))
+            occupied = {(round(p.x, 4), round(p.y, 4)) for p in (self._symbol.pins if self._symbol else ())}
+            for terminal in placed_terminals(instance):
+                if (round(terminal.x, 4), round(terminal.y, 4)) not in occupied:
+                    # The terminal is the OUTER end of the pin to come: until a
+                    # pin sits there, a dotted guide shows the pin's place
+                    # between the dot and the drawing (user, 2026-10-10).
+                    vx, vy = {0: (1, 0), 90: (0, 1), 180: (-1, 0), 270: (0, -1)}[terminal.angle % 360]
+                    guide = QPen(QColor(theme['terminal']), 1.0, Qt.PenStyle.DotLine)
+                    scene.addLine(terminal.x * scale, -terminal.y * scale,
+                                  (terminal.x + vx * terminal.length) * scale,
+                                  -(terminal.y + vy * terminal.length) * scale, guide)
+                dot = scene.addEllipse(terminal.x * scale - 3, -terminal.y * scale - 3, 6, 6,
+                                       QPen(QColor(theme['terminal']), 1.0), QColor(0, 0, 0, 0))
+                dot.setToolTip(self.tx('Terminale dell’elemento: trascina qui un pin per agganciarlo.')
+                               + (f' ({terminal.name or terminal.number})' if terminal.name or terminal.number else ''))
+                dot.setZValue(5)
+            for item in items:
+                item.setData(0, ('graphic', index))
+                item.setCursor(Qt.CursorShape.SizeAllCursor)
+                item.setToolTip(self.tx(str(instance.get('label', ''))))
+
     def _draw(self, symbol):
         self.properties_button.defaultAction().setEnabled(symbol is not None and any(
             p.pin.number == self._selected_pin for p in symbol.pins))
@@ -1099,14 +1827,27 @@ class SymbolTab(QWidget):
         if symbol is None:
             return
         scale = SCENE_UNITS_PER_MM
-        pen = QPen(QColor('#89b4fa'), 1.3)
-        text_color = QColor('#cdd6f4')
+        theme = self.theme
+        pen = QPen(QColor(theme['outline']), 1.3)
+        text_color = QColor(theme['pin_name'])
         font = QFont(self.font())
         font.setPixelSize(12)
         small_font = QFont(font)
         small_font.setPixelSize(10)
         width, height = symbol.width * scale, symbol.height * scale
-        scene.addRect(-width / 2, -height / 2, width, height, pen, QColor('#242438'))
+        scene.addRect(-width / 2, -height / 2, width, height, pen, QColor(theme['body_fill']))
+        self._draw_graphics(scene, scale)
+        if self._wire_points:
+            wire_pen = QPen(QColor(theme['wire']), 1.6, Qt.PenStyle.DashLine)
+            for (x0, y0), (x1, y1) in zip(self._wire_points, self._wire_points[1:]):
+                scene.addLine(x0 * scale, -y0 * scale, x1 * scale, -y1 * scale, wire_pen)
+            for x, y in self._wire_points:
+                scene.addEllipse(x * scale - 2.5, -y * scale - 2.5, 5, 5, wire_pen, QColor(theme['wire']))
+            last = self._wire_points[-1]
+            self._wire_cursor_item = scene.addLine(last[0] * scale, -last[1] * scale,
+                                                   last[0] * scale, -last[1] * scale, wire_pen)
+        else:
+            self._wire_cursor_item = None
 
         def tag(item, target):
             item.setData(0, target)
@@ -1117,7 +1858,7 @@ class SymbolTab(QWidget):
 
         def label(value, x, y, align='left', small=False, target=None, rotate=False):
             item = scene.addSimpleText(value, small_font if small else font)
-            item.setBrush(text_color)
+            item.setBrush(QColor(theme['pin_number']) if small else text_color)
             bounds = item.boundingRect()
             dx = bounds.width() if align == 'right' else bounds.width() / 2 if align == 'center' else 0
             if rotate:
@@ -1138,7 +1879,7 @@ class SymbolTab(QWidget):
             end_x, end_y = x + vx * symbol.pin_length * scale, y + vy * symbol.pin_length * scale
             target = ('pin', pin.number)
             selected = pin.number in self._selection_ids()
-            pin_pen = QPen(QColor('#f9e2af') if selected else QColor('#89b4fa'), 2.8 if selected else 1.3)
+            pin_pen = QPen(QColor(theme['selected']) if selected else QColor(theme['pin']), 2.8 if selected else 1.3)
             tag(scene.addLine(x, y, end_x, end_y, pin_pen), target)
             tag(scene.addEllipse(x - 3, y - 3, 6, 6, pin_pen), target)
             # Broad transparent target makes thin pin lines easy to grab.
@@ -1153,7 +1894,7 @@ class SymbolTab(QWidget):
         handles = [] if self._body_locked else [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)]
         for hx, hy in handles:
             x, y = hx * width / 2, hy * height / 2
-            item = tag(scene.addRect(x - 4, y - 4, 8, 8, pen, QColor('#a6e3a1')), ('resize', hx, hy))
+            item = tag(scene.addRect(x - 4, y - 4, 8, 8, pen, QColor(theme['handle'])), ('resize', hx, hy))
             item.setZValue(10)
             item.setCursor(Qt.CursorShape.SizeHorCursor if not hy else Qt.CursorShape.SizeVerCursor if not hx else
                            Qt.CursorShape.SizeFDiagCursor if hx == hy else Qt.CursorShape.SizeBDiagCursor)

@@ -10553,10 +10553,12 @@ class MainWindow(QMainWindow):
             if mismatch:
                 raise ValueError(mismatch)
             pins, body = symbol_inputs(rows)
+            from ..generators.symbol_glyphs import symbol_graphics
+            graphics = symbol_graphics(rows)
             target = Path(path) if path else (
                 self._project_dir() / f'{self._component_name()}.kicad_sym')
             return export_symbol(target, self._component_name(), pins,
-                                 footprint=self.symbol_tab.footprint(), body=body)
+                                 footprint=self.symbol_tab.footprint(), body=body, graphics=graphics)
         except (OSError, ValueError, TypeError) as exc:
             if not quiet:
                 self.symbol_tab.set_status(str(exc))
