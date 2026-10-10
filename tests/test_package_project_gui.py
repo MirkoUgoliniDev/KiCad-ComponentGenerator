@@ -129,21 +129,41 @@ def test_invalid_package_file_is_not_rewritten_by_autosave(window, monkeypatch):
 
 
 def test_package_regeneration_and_preview_never_use_matrix(window, monkeypatch):
+    """@brief A package with its body quotes regenerates through ITS geometry, never the pin grid.
+
+    Until 2026-10-09 a package had no 3D path at all and the button stayed off;
+    now `generate_single_package_3d_model` builds it, so the contract is: the
+    worker receives the PackageGeometry, and the matrix preview is never drawn.
+    """
     acquire(window)
-    monkeypatch.setattr(gui, "Cad3DWorker", Mock(side_effect=AssertionError("unexpected CAD")))
+    started = []
+
+    class FakeWorker:
+        def __init__(self, params, body, project_dir, fillets, face_texts, **options):
+            started.append((params, body, options))
+            self._model_revision = None
+            self.photo_scale_px_per_mm = None
+        def __getattr__(self, name):
+            return Mock()
+        def start(self):
+            pass
+
+    monkeypatch.setattr(gui, "Cad3DWorker", FakeWorker)
     render = Mock(side_effect=AssertionError("unexpected matrix preview"))
     monkeypatch.setattr(window.preview_3d, "render_params", render)
     clear = Mock()
     monkeypatch.setattr(window.preview_3d, "clear_preview", clear)
 
-    assert not window.btn_regen_3d.isEnabled()
-    window.btn_regen_3d.click()
-    # Also protect programmatic/pending regeneration, not only the disabled button.
+    assert window.btn_regen_3d.isEnabled(), "the package has its quotes: a 3D can be built"
     window._regenerate_3d()
+    # The package path is chosen by the type of the params (PackageGeometry),
+    # whatever the project kind says: that is what keeps the grid out.
+    assert started and isinstance(started[0][0], PackageGeometry)
+    assert started[0][1].length_mm == 5 and started[0][1].width_mm == 4
+    window._cad3d_worker = None
     window._enter_3d_tab()
     assert clear.called
     render.assert_not_called()
-    assert window._cad3d_worker is None
 
 
 def test_package_can_still_display_an_existing_mesh(window, monkeypatch, tmp_path):

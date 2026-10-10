@@ -1,5 +1,229 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 2026-10-10 - Pubblicazione: revisione avversariale, prompt dedicato, controllo pad
+
+- Utente (17:00 circa): «intanto committa, pusha e mergia il lavoro fatto fin
+  qui». Include: correzioni dei tre rapporti A/B/C, prompt e strumento
+  dedicati ai componenti singoli (schema profili v6), seconda lettura delle
+  posizioni dei pad con blocco, didascalia «vista dall'alto» nell'anteprima,
+  fixture conftest per il wizard. Esclusi rows_none_rev.pkl, tmp/, work/.
+  Inclusi docs/VE12H-K/ e il database profili (controllo segreti: nessuna
+  chiave). La palette di elementi grafici resta da fare (sezione sotto).
+- Suite completa prima delle ultime tre modifiche (blocco pad espliciti,
+  didascalia, numeri sui package): 7097 passati; suite mirate dopo: verdi.
+
+## 2026-10-10 - Palette di elementi grafici nel simbolo (IN CORSO)
+
+- Utente: «la palette con elementi grafici presi da KiCad, proviamo». Intento
+  confermato: nell'editor del simbolo una barra con elementi standard
+  (bobina, contatti NO/NC/scambio, resistenza, condensatore, diodo, LED,
+  induttore...) con disegni presi dalle librerie di simboli di KiCad
+  installate (Device.kicad_sym, Relay.kicad_sym) e un ripiego incorporato
+  quando KiCad non c'e'; inserimento con un clic sulla griglia, sposta/ruota/
+  specchia/elimina con annulla; terminali di aggancio per i pin;
+  esportazione come linee/archi/cerchi nel .kicad_sym; salvataggio nel
+  progetto. Proposta automatica dei gruppi (bobina 2-3 ecc.) con conferma:
+  fase successiva, non in questo giro.
+- Prima di scrivere: lettura dell'architettura dell'editor (symbol_tab,
+  symbol_editor, generators/symbol, export) e del lettore di .kicad_sym.
+
+## 2026-10-10 - Seconda lettura dedicata delle posizioni dei pad (FATTA, NON COMMITTATA)
+
+- Rele' VE12H-K: due analisi (16:33, 16:41) con lo stesso prompt dedicato
+  hanno dato due disposizioni dei fori diverse, entrambe sbagliate rispetto al
+  disegno (contatti in diagonale a (2.54,0), (5.08,5.08), (0,7.62); bobina a
+  (17.78,0) e (17.78,7.62)). Il programma le ha rese fedelmente. Utente:
+  «proviamo con 2» = seconda chiamata dedicata alle posizioni dei fori.
+- Piano: per i componenti singoli con pad espliciti, dopo la risposta
+  principale e prima della canonicalizzazione, una chiamata con il solo
+  disegno ingrandito e lo strumento `report_pad_positions` (unita', vista,
+  elenco numero/x/y). Confronto per DISTANZE fra coppie di pad con lo stesso
+  numero (invariante rispetto all'origine scelta dalle due letture), entrambe
+  portate in mm; tolleranza di lettura dichiarata PAD_READING_TOLERANCE_MM
+  0.1. Coincidono su tutte le coppie: «confermate»; sottoinsieme: nota;
+  almeno una coppia diversa, o vista discorde: `_pin_map_conflict` con le due
+  letture -> blocco della generazione automatica (stesso campo della
+  numerazione). Fallimento della chiamata: resta la principale con nota.
+  Prompt in codice (DEFAULT_PAD_POSITIONS_PROMPT), non ancora nel profilo.
+- Implementato in `datasheet_extractor`: `_PAD_POSITIONS_TOOL`
+  (report_pad_positions), `read_pad_positions` (unita' convertita, voci non
+  valide o ripetute scartate), `apply_dedicated_pads` (regole a/b/c sopra,
+  conflitto in `_pin_map_conflict` -> blocco GUI esistente), ramo in
+  `_validate_main_response` per famiglie singole con pad espliciti e un
+  documento Quote/Pinout immagine. 12 stringhe i18n. Test in
+  test_single_component_prompt.py (7 nuovi: distanze uguali da origine
+  diversa, distanza diversa -> blocco senza scegliere, unita', sottoinsieme/
+  vista/fallimento, lettore, end-to-end a due chiamate, no-sample-data).
+  Suite estrazione/pipeline/traduzioni: 349 passati. App da riavviare.
+- Prova utente 16:47: il controllo ha visto il disaccordo (1-4: 7.62 contro
+  5.08 ecc.) ma la generazione e' partita lo stesso: il blocco su
+  `pin_map_conflict` stava nel ramo matrice di `_validate_automatic_input`,
+  dopo il `return` anticipato dei pad espliciti. Spostato in testa alla
+  funzione, test aggiunto. Entrambe le letture di deepseek-flash restano
+  sbagliate rispetto al disegno (contatti a (2.54,0), (5.08,5.08), (0,7.62);
+  bobina (17.78,0), (17.78,7.62)): da provare un modello piu' capace.
+- Utente: «specifica che questa e' la vista da TOP»: didascalia gialla sopra
+  il disegno dell'anteprima footprint (`_add_view_caption`, nei tre percorsi),
+  tradotta, con test.
+
+## 2026-10-10 - Prompt e strumento dedicati ai componenti singoli (FATTO, NON COMMITTATO)
+
+- Utente (16:30 circa): «procedi in modo preciso». Decisione: nel dialogo
+  «Modello e prompt di sistema LLM», tab Datasheet, un selettore a tre voci
+  (Schede e moduli / Componente singolo / Numerazione dei pin) con tre testi
+  separati in config.json (`system_prompt`, `system_prompt_single`,
+  `numbering_prompt`), ciascuno con default, digest superati e «Ripristina
+  default». La GUI sceglie il prompt dalla famiglia della tipologia
+  (single_tht/single_smd -> singolo; altrimenti schede). L'estrattore, per le
+  famiglie singole, usa uno STRUMENTO dedicato `report_single_component`
+  (pad per pad come forma principale, griglia solo come scorciatoia
+  dichiarata, corpo, lead_*, vista, unita', pinout, value_sources) e converte
+  la risposta nel `data` gia' consumato da `_validate_main_response`
+  (pad -> package_geometry; griglia -> campi matrice), cosi' validazioni,
+  seconda chiamata, footprint a pad espliciti e 3D restano invariati.
+- Prova prevista dall'utente: TEL8 e rele' VE12H-K (docs/VE12H-K), stesso
+  modello, confronto dei footprint.
+- Implementato: `datasheet_extractor`: SINGLE_COMPONENT_FAMILIES,
+  DEFAULT_SINGLE_SYSTEM_PROMPT (senza numeri d'esempio), `_single_component_tool()`
+  (report_single_component: pads/pads_origin, grid facoltativa, corpo, lead_*,
+  vista, unita', pinout, value_sources; frammenti condivisi con lo schema
+  principale), `single_answer_to_data` (pads -> package_geometry family
+  unknown/origin/source_view/needs_review; grid -> campi matrice; forma
+  principale passata invariata; ne' pads ne' grid -> ExtractionError),
+  scelta prompt/strumento in `main_call` per famiglia, SUPERSEDED_*_DIGESTS
+  per i due prompt nuovi. `analysis_profiles`: PROFILE_FIELDS +
+  system_prompt_single, numbering_prompt; SCHEMA_VERSION 6 con INSERT OR
+  IGNORE; `_replace_superseded_texts` esteso. `settings_dialog`: selettore
+  «Prompt di sistema per:» a tre voci su un unico editor (`_prompt_texts`),
+  riga d'uso per famiglia, `single_prompt()`/`numbering_prompt()`, ripristino
+  della sola voce mostrata. `main_window`: salva/carica i due campi, sceglie
+  il prompt per famiglia in `_start_extract_worker`, passa numbering_prompt;
+  `workers.ExtractWorker(numbering_prompt=)`. `profile_dialog`: tab Datasheet
+  con sotto-schede Schede e moduli / Componente singolo / Numerazione pin
+  (+ Istruzioni tipologia). i18n: 9 stringhe. Test:
+  tests/test_single_component_prompt.py (14) + contratti aggiornati
+  (profile dialog, router finto delle pipeline, versione schema).
+  Suite toccate: verdi. App da riavviare; prova reale con VE12H-K dall'utente.
+- Prova VE12H-K (16:33, deepseek-flash, strumento dedicato): 5 pad espliciti
+  letti, footprint generato; 3D RINVIATO per body_height_mm omesso: il prompt
+  chiedeva l'altezza «solo da una vista laterale» e il modello, davanti alla
+  vista FRONTALE con il corpo alto 20.5, l'ha omessa dicendolo nelle note.
+  Prompt corretto (altezza = quota verticale del corpo in una vista frontale
+  o laterale, esclusa la sporgenza dei terminali); digest del primo testo in
+  SUPERSEDED_SINGLE_PROMPT_DIGESTS, cosi' il database gia' migrato a v6 lo
+  sostituisce al prossimo avvio. Da notare per il revisore: il modello si
+  contraddice fra note (bobina Ø1.0) e pads (pin 5 Ø1.0): lettura del modello.
+
+## 2026-10-10 - Revisione avversariale del lavoro di oggi (IN CORSO)
+
+- Utente: «revisione approfondita avversariale, voglio che non emergano
+  problemi». Intervallo: 2e6f5ed..main (merge f396f14 e 59a9c57). Tre agenti
+  in sola lettura su ambiti disgiunti: A estrazione (datasheet_extractor,
+  openrouter/providers toccati, test); B CAD (annotations, body_params,
+  step_generator, freecad_build_body, workers, test); C GUI e servizi
+  (main_window, project_dialogs, footprint_view, kicad_export_history, i18n,
+  test). Il coordinatore integra le correzioni, un file alla volta, con test
+  di riproduzione. Nessuna chiamata AI reale.
+- Rapporto A (estrazione), 10 rilevazioni: (1) BLOCCANTE mappa parziale (solo
+  numeri stampati, es. header con «1» e «16») usata come insieme completo dei
+  pin -> 2 pad su 16, e populated filtrata contro la mappa; (2) vista dedicata
+  diversa dalla principale ignorata e «confermata»; (3) PNG con trasparenza
+  ingrandito -> tutto nero (convert RGB senza fondo); (4) pin letto dalla
+  chiamata dedicata ma assente da populated scartato come «convenzione»;
+  (5) «confermata» anche con sottoinsieme; (6) foro sollevato con corona
+  troppo sottile; (7) annuncio della chiamata prima di validare rows/cols,
+  note indistinte; (8) PDF-only senza nota; (9) max_tokens fisso 2048;
+  (10) test mancanti.
+- Correzioni A applicate: `_resolve_pin_numbering` (mappa COMPLETA = decide i
+  pin; mappa PARZIALE = ancore completate solo se UNA convenzione standard
+  (`_numbering_conventions`: colonna, colonna specchiata, U, U specchiata)
+  le rispetta tutte, nota «DERIVATO»; altrimenti nessuna mappa + blocco in
+  `pin_map_conflict`); pin della lettura dedicata assenti da populated ->
+  aggiunti (`_dedicated_map`); vista discorde = conflitto, vince la dedicata;
+  conferma solo se copre tutti i pin, altrimenti «solo N su M»; PNG con
+  trasparenza composto su bianco; corona minima MIN_ANNULAR_RING_MM 0.15;
+  griglia validata prima dell'annuncio, esiti distinti (failed/discarded/
+  nessun numero/non eseguita), nota per disegno solo in PDF, max_tokens dalla
+  griglia; test no-sample-data anche sul prompt dedicato. Test aggiunti in
+  test_pin_numbering_call.py e test_fixD_extractor.py (323 passati).
+- Rapporto B (CAD), 10 rilevazioni: (1) ALTA rotazione extra_boxes non
+  riflessa da `_flip_y` -> terminali SMD specchiati per angoli non multipli
+  di 90; (2) spazio etichette misurato al centro: fila centrata sempre a 0.3;
+  (3) larghezza etichette non limitata dal passo: sovrapposizioni a 1.27;
+  (4) scritta superiore mai adattata alla faccia; (5) modale senza fase
+  FreeCAD per componente singolo; (6) package: euristiche non dichiarate,
+  diametro «ultimo pin vince», terminali sotto z=0; (7) ancore su facce
+  laterali ignorate in silenzio; (8) test mancanti; (9) ordine controlli in
+  validate; (10) numeri sotto ignorati dal percorso package.
+- Correzioni B applicate: `_flip_y` nega rotation_deg degli extra_boxes
+  (prova reale: vertice terminale a 30 gradi ora (3.991, +0.283) come il pad);
+  `pin_number_labels(leads, body)` con spazio al prossimo ostacolo (meta'
+  verso la fila successiva o bordo del corpo), limite dal passo dei vicini,
+  minimo PIN_LABEL_MIN_SIZE_MM dichiarato; usata anche dal percorso package;
+  `_build_face_text_solids` adatta la scritta alla faccia (TEXT_FACE_MARGIN_MM
+  0.2, avviso sotto TEXT_LEGIBLE_SIZE_MM; prova reale: scritta lunga entro il
+  corpo); ancore solo su top/bottom; fase «freecad» emessa per il componente
+  singolo; package: LEAD_OF_DRILL_FRACTION/LEAD_MAX_DIAMETER_MM dichiarati,
+  foro minimo, terminali a z=0; `validate` controlla pin_map prima dei pad
+  override; GUI: scritta limitata anche dalla larghezza. Test in
+  test_single_tht_face_texts.py (225 passati con generatori e documentazione).
+- Rapporto C (GUI), 13 rilevazioni: (1) ALTA progetti nuovi senza scritta
+  (snapshot generale con top_text ''); (2) scritta dimensionata sui campi e
+  non sul corpo del package; (3) risposta SMD senza geometria buttata via;
+  (4) footprint riscritto a ogni apertura con pad override; (5) .kicad_sym
+  non revisionato scritto all'apertura e salvataggio dopo generazione con
+  righe stantie; (6) spin «Piazzole THT» stantie; (7) editor pad con
+  riferimenti dell'host in modalita' diretta; (8) editingFinished invariato
+  invalida la mesh; (9) suggerimento «Rigenera footprint» per tipologie
+  senza il pulsante; (10) project_kind None -> wizard a ogni apertura;
+  (11) ValueError non gestito in slot Qt; (12) pagine wizard e voci storico
+  non tradotte; (13) predicati «componente singolo» incoerenti.
+- Correzioni C applicate: top_text tolto dallo snapshot generale e da
+  `_state_for_project_type`; `_face_texts_for_3d` su `_current_body_params()`
+  e `_is_single_component_project()` (anche `_sync_header_pins_3d`); nessun
+  raise per SMD senza geometria (blocco solo in `_validate_automatic_input`);
+  niente rigenerazione ne' salvataggio simbolo all'apertura; `_on_generated`
+  aggiorna il tab simbolo prima del salvataggio silenzioso;
+  `_sync_single_tht_pad_controls` agganciato a field_pad/field_drill;
+  `_edited_pad_reference()` dal footprint disegnato; `_applied_top_text`;
+  testo del conflitto generico («rigenerando footprint e 3D»);
+  `_needs_project_kind`/`_saved_component_type`: si chiede solo senza tipo e
+  senza kind; `_state_for_project_type` gestito (log/avviso); pagine 2 e 4
+  del wizard con segnaposto {name} tradotte. NON fatto: voci dello storico
+  esportazioni («Libreria di progetto», «File simbolo») salvate in italiano
+  (12, bassa): servirebbe una chiave e la traduzione in tabella.
+  Test aggiunti in test_single_tht_face_texts.py (25 passati).
+- Suite completa: il processo unico si blocca al 45% (HANDOFF 113); in due
+  meta': prima meta' 3194 passati, 3 falliti GIA' A HEAD e corretti qui:
+  `test_bad_analysis_never_autogenerates...[missing_body]` (contratto superato
+  dal 3D opzionale: ora test dedicato «solo footprint»), `[unsafe_name]` (il
+  nome proposto non viene applicato: `_validate_automatic_input` valida il
+  nome IN USO, test sul campo), `test_verification_is_guarded...` (dialogo
+  finto senza `ai_review_requested`: `getattr` nel codice). Seconda meta': il
+  processo muore in silenzio subito dopo `test_message_localization.py` (12/12
+  da solo) e, senza quel file, al 9%: ricerca del file che uccide il processo
+  in corso a blocchi di ~40 file.
+- Trovato: i «crash» erano il watchdog di conftest (300 s) su MODALI non
+  previste: `ProjectKindDialog.exec()` aperto da `_new_project`/
+  `_open_project_at` (wizard del 09/10) in test scritti prima (project_config,
+  navigation_review). Aggiunta in conftest la fixture autouse
+  `project_kind_dialog_accepts` (accetta con il tipo dato, quello corrente o
+  «aggregate_castellated»; i test del wizard la sovrascrivono). Poi:
+  `_switch_project` risincronizza il blocco tipologia nel prompt SOLO se il
+  prompt ne contiene uno (il testo proprio del progetto torna identico);
+  simbolo: `export_button` fuori dalla toolbar (azione invisibile = disabilitata
+  per Qt: sei test); `_symbol_pad_mismatch()` controllato PRIMA del dialogo
+  di esportazione; test setup con `_acquisition_completed = True`.
+  `test_message_localization.py` termina il processo alla fine (12/12): va
+  eseguito da solo.
+- SUITE COMPLETA in 4 blocchi paralleli + localizzazione da sola: 7082
+  passati, 11 saltati, 2 xfail, 19 sottotest; 1 fallito gia' a HEAD
+  (`test_package_regeneration_and_preview_never_use_matrix`: presumeva
+  «nessun 3D per i package», ora il package ha il suo generatore) ->
+  contratto riallineato: il worker riceve la PackageGeometry, mai la griglia.
+  Stato: tutte le rilevazioni A/B/C corrette tranne C12 (voci storico in
+  italiano, bassa). Nessun commit.
+
 ## 2026-10-10 - Pubblicazione: chiamata dedicata alla numerazione
 
 - Utente: «ora mi pare corretto», autorizza commit, push, merge in main e

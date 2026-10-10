@@ -366,6 +366,9 @@ class _Cad3DRunWorker(QThread):
             comincia davvero.
         """
         if self.single_component and not isinstance(self.params, PackageGeometry):
+            # No component lines come from FreeCAD for a single part, so the
+            # phase is announced here (review B: the modal stayed on step 0).
+            self.phase.emit('freecad', tx("costruzione del solido 3D"), 0, 0)
             generator = _patch_point("generate_single_tht_3d_model")
             return generator(
                 self.params, self.body, self.project_dir,
@@ -677,6 +680,7 @@ class ExtractWorker(QThread):
         crop_prompt: str | None = None,
         crop_model: str | None = None,
         smd_model_path: Path | None = None,
+        numbering_prompt: str | None = None,
     ):
         """@brief Snapshot extraction settings before starting background work.
 
@@ -708,6 +712,8 @@ class ExtractWorker(QThread):
         super().__init__()
         self.doc_paths = doc_paths
         self.system_prompt = system_prompt
+        #: Prompt of the dedicated pin-numbering call; None = factory default.
+        self.numbering_prompt = numbering_prompt
         self.extra_instructions = extra_instructions
         self.include_nc_pins = include_nc_pins
         self.model = model
@@ -810,6 +816,7 @@ class ExtractWorker(QThread):
                                   yolo_settings=self.yolo_settings,
                                   crop_prompt=self.crop_prompt,
                                   crop_model=self.crop_model,
+                                  numbering_prompt=self.numbering_prompt,
                                   cancel=self.cancel_event),
                 **phase_kwargs(extract, self._forward_phase),
             )

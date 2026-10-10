@@ -191,7 +191,7 @@ def test_castellated_missing_overall_height_starts_generation(window, monkeypatc
     assert window._worker.body.height_mm == window.field_cast_pcb.value()
 
 
-@pytest.mark.parametrize('failure', ['missing_body', 'invalid_footprint', 'failed_extraction', 'invalid_package', 'unsafe_name'])
+@pytest.mark.parametrize('failure', ['invalid_footprint', 'failed_extraction', 'invalid_package', 'unsafe_name'])
 def test_bad_analysis_never_autogenerates_or_reuses_old_body(window, monkeypatch, failure):
     warnings = []
     monkeypatch.setattr(QMessageBox, 'warning', lambda *args: warnings.append(args))
@@ -200,18 +200,44 @@ def test_bad_analysis_never_autogenerates_or_reuses_old_body(window, monkeypatch
     if failure == 'failed_extraction':
         window._on_extract_error('offline failure')
     else:
-        if failure == 'missing_body': params.body_height_mm = None
         if failure == 'invalid_footprint': params.drill_mm = 2  # Greater than pad size.
         # Negativo della prova sui pad espliciti: una geometria scartata non deve
         # far generare il footprint a griglia al suo posto.
         if failure == 'invalid_package': params.package_geometry = {'family': 'qfn'}
-        if failure == 'unsafe_name': params.name = '../outside'
+        # Il nome che conta e' quello in uso: l'analisi propone il suo, non lo
+        # applica (File > Rinomina progetto), quindi e' il campo a essere unsafe.
+        if failure == 'unsafe_name': window.field_name.setText('../outside')
         window._on_extracted(params)
     window._on_extract_finished()
     assert window._worker is None
     assert window.btn_extract_ai.isEnabled()
     assert not window._automatic_generation_active and window.analysis_overlay.isHidden()
     assert warnings
+
+
+def test_an_unsafe_proposed_name_does_not_block_a_generation_that_never_uses_it(window, monkeypatch):
+    """Negative of the case above: the proposal is shown, the files carry the name in use."""
+    warnings = []
+    monkeypatch.setattr(QMessageBox, 'warning', lambda *args: warnings.append(args))
+    begin(window, monkeypatch)
+    params = acquired()
+    params.name = '../outside'
+    window._on_extracted(params)
+    window._on_extract_finished()
+    assert window._worker is not None and not warnings
+    assert '..' not in window._component_name()
+
+
+def test_a_missing_body_height_generates_the_footprint_only(window, monkeypatch):
+    """The 3D is optional, the footprint is not: a missing quote defers the 3D, never
+    reuses an old body and never blocks the .kicad_mod (2026-10-09 relaxation)."""
+    begin(window, monkeypatch)
+    params = acquired()
+    params.body_height_mm = None
+    window._on_extracted(params)
+    window._on_extract_finished()
+    assert window._worker is not None and window._worker.body is None
+    assert window._automatic_3d_expected is False
 
 
 @pytest.mark.parametrize('overwrite', [False, True])

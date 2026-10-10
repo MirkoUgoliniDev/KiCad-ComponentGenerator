@@ -715,11 +715,14 @@ def test_settings_preserve_legacy_defaults_but_runtime_uses_one_model(window, mo
     saved = []
     class SettingsStub:
         def __init__(self, prompt, model, parent, *, current_vision_model,
-                     current_grounding_prompt, current_verification_prompt, current_verification_model):
+                     current_grounding_prompt, current_verification_prompt, current_verification_model,
+                     current_single_prompt=None, current_numbering_prompt=None, current_family=None):
             assert current_vision_model == "vendor/old-photo"
             assert parent is window
         def exec(self): return QDialog.DialogCode.Accepted
         def prompt(self): return "prompt"
+        def single_prompt(self): return "single"
+        def numbering_prompt(self): return "numbering"
         def model(self): return "vendor/new-datasheet"
         def vision_model(self): return "vendor/new-photo"
         def verification_model(self): return "vendor/new-verify"

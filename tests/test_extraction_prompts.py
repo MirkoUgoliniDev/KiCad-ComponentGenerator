@@ -82,6 +82,13 @@ def test_the_system_prompt_and_the_schema_carry_no_sample_data():
     assert _sample_tokens_in(_schema_text()) == []
 
 
+def test_the_dedicated_numbering_prompt_and_tool_carry_no_sample_data():
+    """Review A, 10: the second call anchors the model as little as the first."""
+    import json
+    assert _sample_tokens_in(ext.DEFAULT_PIN_NUMBERING_PROMPT) == []
+    assert _sample_tokens_in(json.dumps(ext._PIN_NUMBERING_TOOL, ensure_ascii=False)) == []
+
+
 @pytest.mark.parametrize("component_type", component_types.COMPONENT_TYPES, ids=lambda t: t.key)
 def test_no_type_instruction_carries_sample_data(component_type):
     assert _sample_tokens_in(component_type.prompt) == []

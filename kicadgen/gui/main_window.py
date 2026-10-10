@@ -1083,6 +1083,9 @@ class MainWindow(QMainWindow):
             current_grounding_prompt=defaults["grounding_prompt"],
             current_verification_prompt=defaults["verification_prompt"],
             current_verification_model=defaults["verification_model"],
+            current_single_prompt=defaults.get("system_prompt_single"),
+            current_numbering_prompt=defaults.get("numbering_prompt"),
+            current_family=self._selected_family(),
         )
         self.i18n.retranslate_widgets(dialog)
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -1092,7 +1095,9 @@ class MainWindow(QMainWindow):
             self.profile_store.save_defaults(dict(
                 system_prompt=dialog.prompt() or DEFAULT_SYSTEM_PROMPT, model=dialog.model(),
                 vision_model=dialog.vision_model(), verification_model=dialog.verification_model(),
-                grounding_prompt=dialog.grounding_prompt(), verification_prompt=dialog.verification_prompt()))
+                grounding_prompt=dialog.grounding_prompt(), verification_prompt=dialog.verification_prompt(),
+                system_prompt_single=dialog.single_prompt(),
+                numbering_prompt=dialog.numbering_prompt()))
         except (ProfileError, sqlite3.Error, OSError) as exc:
             QMessageBox.warning(
                 self, self.i18n.text("Impostazioni non salvate"), str(exc))
@@ -3248,7 +3253,7 @@ class MainWindow(QMainWindow):
         checkbox.setVisible(bool(self._selected_family()) and self._photo_inventory_family() is True)
         checkbox.setEnabled(not bool(self.btn_regen_3d.property("workflow_busy")))
         busy = bool(self.btn_regen_3d.property("workflow_busy"))
-        single = bool(self._selected_family()) and self._photo_inventory_family() is not True
+        single = self._is_single_component_project()
         bar = getattr(self, "top_text_bar_3d", None)
         if bar is not None:
             bar.setVisible(single)
@@ -4252,7 +4257,12 @@ class MainWindow(QMainWindow):
             # Stessi parametri del pretest (utente, 2026-09-25: «la scelta dei
             # parametri rimane quando scelgo la modalità YOLO + AI»).
             yolo_settings=(self._chosen_yolo_settings() if photo_detector in ("yolo", "yolo_smd") else None),
-            system_prompt=profile['system_prompt'],
+            # The datasheet prompt follows the family of the type: one part reads
+            # its drawing pad by pad, a board reads its contacts and its photo.
+            system_prompt=(profile.get('system_prompt_single') or None
+                           if self._selected_family() in _SINGLE_COMPONENT_FAMILIES
+                           else profile['system_prompt']),
+            numbering_prompt=profile.get('numbering_prompt') or None,
             extra_instructions=self.field_component_prompt.toPlainText().strip() or None,
             include_nc_pins=self._include_nc_pins(),
         )
@@ -6461,6 +6471,10 @@ class MainWindow(QMainWindow):
         self._project_options = {}
         self._open_project_folder = None
         self._general_project_state = self._project_state()
+        # '' in `top_text` means «no writing» (a choice); the snapshot of a
+        # window without a project is not a choice, so a new project starts
+        # without the key and gets the component name (review C, 1).
+        self._general_project_state.pop("top_text", None)
         # Collegato qui e non alla costruzione del campo: prima della
         # fotografia generale non c'e' un progetto da salvare e chiudere.
         self.field_library_root.textChanged.connect(self._on_library_root_changed)
@@ -6700,7 +6714,14 @@ class MainWindow(QMainWindow):
             selected_key, selected_row["label"], selected_row["instructions"])
             if selected_row else None)
         old_prompt = self.field_component_prompt.toPlainText()
-        restored_prompt = component_types.apply_block(old_prompt, selected_type)
+        # Only a prompt that CARRIES a generated block is resynchronised (a
+        # stale castellated block in a THT project); a prompt without one is
+        # the project's own text, saved as such, and must come back verbatim
+        # (contract of test_project_config since 2026-09-24).
+        if component_types.BLOCK_START in old_prompt:
+            restored_prompt = component_types.apply_block(old_prompt, selected_type)
+        else:
+            restored_prompt = old_prompt
         prompt_was_normalized = restored_prompt != old_prompt
         self.field_component_prompt.setPlainText(restored_prompt)
         # Ripristinare i widget non emette sempre il segnale del tipo
@@ -6716,16 +6737,11 @@ class MainWindow(QMainWindow):
         # Il simbolo applicato fa parte degli artefatti del componente. Nei
         # progetti gia' generati lo creiamo se manca, senza toccare un file
         # .kicad_sym eventualmente gia' esportato o personalizzato.
+        # The symbol is written by a generation or by the user's export, never
+        # on open (review C, 5: an unreviewed .kicad_sym with default rows
+        # bypassed the export review), and the footprint is never rebuilt on
+        # open (review C, 4: every open overwrote the .kicad_mod).
         self._refresh_symbol_tab(force=True)
-        component = self._component_name()
-        if (component and self._project_has_footprint()
-                and not (self._project_dir() / f"{component}.kicad_sym").is_file()):
-            self._save_applied_electrical_symbol(quiet=True)
-        # Older runs persisted per-pad choices but the castellated host
-        # generator ignored them. Rebuild once on project open so those saved
-        # choices reach the .kicad_mod without asking the user to edit the pad again.
-        if self.header_pad_overrides and self._project_has_footprint():
-            self._generate(footprint_only=True)
         # La scheda aperta mostra il progetto nuovo, non quello chiuso: senza,
         # restava il disegno del precedente e il 3D non si ridisegnava (audit
         # 25/09). Le altre schede si ridisegnano all'ingresso, come sempre.
@@ -6985,7 +7001,11 @@ class MainWindow(QMainWindow):
             return
         # Un progetto nuovo parte dalle impostazioni generali, non da quelle
         # del progetto aperto prima (decisione dell'utente del 2026-09-24).
-        initial_state = self._state_for_project_type(self._general_project_state, selected_type)
+        try:
+            initial_state = self._state_for_project_type(self._general_project_state, selected_type)
+        except ValueError as exc:
+            QMessageBox.warning(self, self.i18n.text("Nuovo progetto"), str(exc))
+            return
         self._switch_project(name, initial_state)
         self._save_project_config(force=True)
         self._append_log(tx("Nuovo progetto: {project_dir}", project_dir=self._project_dir()))
@@ -7027,26 +7047,24 @@ class MainWindow(QMainWindow):
             self._project_config_refused = folder
             self._append_log(tx("ATTENZIONE impostazioni del progetto non applicate: {exc}", exc=exc))
         config_loaded = isinstance(saved, dict)
-        saved_kind = saved.get("project_kind") if config_loaded else None
-        needs_kind = not isinstance(saved_kind, str) or saved_kind not in _PROJECT_KINDS
+        current_type = self._saved_component_type(saved) if config_loaded else ""
+        needs_kind = self._needs_project_kind(saved if config_loaded else None, current_type)
         kind_migrated = needs_kind and self._project_config_refused is None
         if needs_kind:
             from .project_dialogs import ProjectKindDialog
-            current_type = ""
-            if isinstance(saved, dict):
-                widget_values = saved.get("widgets")
-                raw_type = widget_values.get("combo_component_type") if isinstance(widget_values, dict) else None
-                if isinstance(raw_type, dict) and isinstance(raw_type.get("data"), str):
-                    current_type = raw_type["data"]
-            if not current_type:
-                current_type = self._profile_key()
             kind_dialog = ProjectKindDialog(
                 tr=lambda key: self.i18n.tr("ui:" + key, default=key),
-                selected=current_type, parent=self)
+                selected=current_type or self._profile_key(), parent=self)
             if kind_dialog.exec() != QDialog.DialogCode.Accepted:
                 return
             base_state = saved if isinstance(saved, dict) else self._general_project_state
-            saved = self._state_for_project_type(base_state, kind_dialog.selected_type())
+            try:
+                saved = self._state_for_project_type(base_state, kind_dialog.selected_type())
+            except ValueError as exc:
+                # A built-in type missing from the profile store: say it and
+                # open with what the project carries (review C, 11).
+                self._append_log(tx("ATTENZIONE tipologia non applicata: {exc}", exc=exc))
+                saved = base_state
         # Senza file (progetto nato prima di project_config.json) valgono le
         # impostazioni generali, non quelle del progetto aperto prima.
         self._switch_project(name, saved if saved is not None else self._general_project_state)
@@ -7057,9 +7075,35 @@ class MainWindow(QMainWindow):
         self._append_log(tx("Progetto aperto: {folder}", folder=self._project_dir())
                          + (tx(" (impostazioni del progetto applicate).") if config_loaded else ""))
 
+    @staticmethod
+    def _saved_component_type(saved: dict) -> str:
+        """@brief The component type key a saved project state carries, '' when none."""
+        widget_values = saved.get("widgets") if isinstance(saved, dict) else None
+        raw_type = widget_values.get("combo_component_type") if isinstance(widget_values, dict) else None
+        if isinstance(raw_type, dict) and isinstance(raw_type.get("data"), str):
+            return raw_type["data"]
+        return ""
+
+    @staticmethod
+    def _needs_project_kind(saved, current_type: str) -> bool:
+        """@brief Whether opening a project must ask its kind (board or single component).
+
+        @param saved The saved project state, or None without a config file.
+        @param current_type The component type key the state carries, '' when none.
+        @return True only when nothing says the kind: no saved kind AND no
+            component type. A project with a type keeps it (the kind follows
+            the type's family, None for a custom family) instead of being
+            asked on every open and overwritten by a built-in type (review C, 10).
+        """
+        saved_kind = saved.get("project_kind") if isinstance(saved, dict) else None
+        if isinstance(saved_kind, str) and saved_kind in _PROJECT_KINDS:
+            return False
+        return not current_type
+
     def _state_for_project_type(self, state: dict, type_key: str) -> dict:
         """Return a project-state copy with the selected workflow/profile persisted."""
         result = deepcopy(state)
+        result.pop("top_text", None)
         row = self.profile_store.get_type(type_key)
         if row is None:
             raise ValueError(tx("Tipo componente non disponibile: {type_key}", type_key=type_key))
@@ -7575,11 +7619,10 @@ class MainWindow(QMainWindow):
     def _apply_extracted_result(self, params: ExtractedParams) -> None:
         self._hide_analysis_overlay()
         validated_package_geometry = None
-        if self._selected_family() == "single_smd":
-            if not params.package_geometry:
-                raise ValueError(tx(
-                    "Componente SMD: manca la geometria esplicita delle piazzole. "
-                    "Completa il datasheet e ripeti l'analisi."))
+        if self._selected_family() == "single_smd" and params.package_geometry:
+            # Without pad geometry the result is still applied and shown: the
+            # block is `_validate_automatic_input`'s, so nothing paid is lost
+            # (review C, 3).
             try:
                 geometry_data = dict(params.package_geometry)
                 geometry_data.setdefault("name", params.name or self._component_name())
@@ -8227,6 +8270,10 @@ class MainWindow(QMainWindow):
         self.field_populated_pins = TextValue()
         self.field_pad = BoundedValue(1.7, 0.01, MAX_LENGTH_MM)
         self.field_drill = BoundedValue(1.0, 0.01, MAX_LENGTH_MM)
+        # The spin boxes of «Piazzole del componente THT» mirror these fields
+        # whenever they change (project open, type change: review C, 6).
+        self.field_pad.on_change(lambda _value: self._sync_single_tht_pad_controls())
+        self.field_drill.on_change(lambda _value: self._sync_single_tht_pad_controls())
 
         # Modulo castellated. La matrice e i moduli castellated si escludono:
         # in un modulo ogni lato ha il suo numero di contatti e il suo passo,
@@ -8635,6 +8682,7 @@ class MainWindow(QMainWindow):
         blocked = field.blockSignals(True)
         field.setText(text)
         field.blockSignals(blocked)
+        self._applied_top_text = text.strip()
 
     def _pin_numbers_3d(self) -> bool:
         """@brief Tell whether a single THT part prints its pin numbers on the bottom face.
@@ -8663,10 +8711,19 @@ class MainWindow(QMainWindow):
         """
         texts = list(self.face_text_annotations)
         text = self._top_text_3d()
-        if text and self._photo_inventory_family() is not True and self.group_3d.isChecked():
-            length = self.field_body_length.value()
-            size = min(2.0, max(0.3, 0.8 * length / (0.65 * len(text))))
-            texts.append(FaceTextAnnotation(face="top", text=text, size_mm=round(size, 3)))
+        if not text or not self._is_single_component_project() or not self.group_3d.isChecked():
+            return texts
+        body = self._current_body_params()
+        if body is None:
+            return texts
+        # Sized on the SAME body FreeCAD receives (a package takes its
+        # dimensions from package_geometry, not from the fields: review C, 2).
+        # Both extents of the face: 80% of the length for the width of the
+        # text, 80% of the width for its height; the script fits the solid
+        # again and says when it gets illegible.
+        size = min(2.0, max(0.3, 0.8 * body.length_mm / (0.65 * len(text))),
+                   max(0.3, 0.8 * body.width_mm))
+        texts.append(FaceTextAnnotation(face="top", text=text, size_mm=round(size, 3)))
         return texts
 
     def _on_pin_numbers_3d_toggled(self, checked: bool) -> None:
@@ -8679,7 +8736,16 @@ class MainWindow(QMainWindow):
         self._invalidate_generated_mesh()
 
     def _on_top_text_edited(self) -> None:
-        """@brief The top-face writing changed: keep it with the project, the solid is stale."""
+        """@brief The top-face writing changed: keep it with the project, the solid is stale.
+
+        @note `editingFinished` also fires on Enter or focus loss without a
+            change: then nothing is stale and a running 3D build is not
+            discarded (review C, 8).
+        """
+        text = self._top_text_3d()
+        if text == getattr(self, "_applied_top_text", None):
+            return
+        self._applied_top_text = text
         self._invalidate_generated_mesh()
         self._save_project_config()
 
@@ -8900,7 +8966,7 @@ class MainWindow(QMainWindow):
             dialog.exec()
         finally:
             self._component_review_dialog = None
-        if dialog.ai_review_requested:
+        if getattr(dialog, "ai_review_requested", False):
             self.tabs.setCurrentIndex(TAB_SYMBOL)
             self._suggest_pin_types()
 
@@ -8962,9 +9028,11 @@ class MainWindow(QMainWindow):
         )
         add_page(
             "2. Posiziona il footprint sul PCB",
-            "Apri il PCB Editor del progetto. Scegli Posiziona > Aggiungi footprint, "
-            "cerca KiCadGen:" + self._component_name() + " e posiziona il componente. "
-            "Se non compare, verifica di aver installato la libreria nel progetto giusto.",
+            self.i18n.text(
+                "Apri il PCB Editor del progetto. Scegli Posiziona > Aggiungi footprint, "
+                "cerca KiCadGen:{name} e posiziona il componente. Se non compare, verifica "
+                "di aver installato la libreria nel progetto giusto.").format(
+                    name=self._component_name()),
         )
         add_page(
             "3. Esporta e registra il simbolo elettrico",
@@ -8974,9 +9042,10 @@ class MainWindow(QMainWindow):
         )
         add_page(
             "4. Collega simbolo e footprint",
-            "Nello Schematic Editor aggiungi il simbolo dalla libreria registrata. "
-            "Apri le proprietà del simbolo e imposta Footprint su KiCadGen:" +
-            self._component_name() + ". Salva lo schema.",
+            self.i18n.text(
+                "Nello Schematic Editor aggiungi il simbolo dalla libreria registrata. "
+                "Apri le proprietà del simbolo e imposta Footprint su KiCadGen:{name}. "
+                "Salva lo schema.").format(name=self._component_name()),
         )
         add_page(
             "5. Aggiorna e verifica il PCB",
@@ -9503,6 +9572,9 @@ class MainWindow(QMainWindow):
                 pin_length_mm=self.field_pin_length_3d.value(),
                 color_hex=self.field_body_color.text().strip(),
                 pin_color_hex=self.field_pin_color.text().strip(),
+                # The package path prints the numbers beside its through-hole
+                # leads too (VE12H-K relay, 2026-10-10: the choice was lost here).
+                pin_numbers_3d=self._pin_numbers_3d(),
             )
         if self._is_castellated():
             # Il PCB del modulo e' centrato sull'origine come il footprint:
@@ -9576,7 +9648,24 @@ class MainWindow(QMainWindow):
             raise ValueError(tx("Il nome del componente non è un nome di file valido."))
 
     def _validate_automatic_input(self, params, *, require_body_dimensions=True):
-        self._validate_output_name(params.name or self._component_name())
+        """@brief Refuse an extraction the automatic generation cannot use safely.
+
+        @param params Extracted parameters.
+        @param require_body_dimensions Whether the 3D body quotes are mandatory.
+        @throws ValueError With the reason shown to the user; nothing is written.
+        @note The name validated is the one the files will carry: the name the
+            analysis proposes is only shown («File > Rinomina progetto»), so an
+            unsafe proposal cannot block a generation that never uses it.
+        """
+        self._validate_output_name(self._component_name())
+        conflict = getattr(params, "pin_map_conflict", None)
+        if conflict:
+            # Two readings of the contacts that disagree (numbering of a grid,
+            # or positions of explicit pads): the user checks before any file
+            # is written (user, 2026-10-10: «ti ferma e ti fa controllare»).
+            # Checked FIRST: the explicit-pad branch below returns early, and
+            # the VE12H-K run of 16:47 generated despite the disagreement.
+            raise ValueError(conflict)
         if self._selected_family() == "single_smd" and not params.package_geometry:
             raise ValueError(tx(
                 "Componente SMD: manca la geometria esplicita delle piazzole. "
@@ -9651,12 +9740,6 @@ class MainWindow(QMainWindow):
             if params.rows > 1:
                 self._require_extent(params.rows, params.row_spacing_mm, 'rows')
             self._require_leads_inside_a_bottom_exit_body(params)
-            conflict = getattr(params, "pin_map_conflict", None)
-            if conflict:
-                # Two readings of the numbering that disagree: the dedicated
-                # one is in the fields, but the user checks before any file
-                # is written (user, 2026-10-10: «ti ferma e ti fa controllare»).
-                raise ValueError(conflict)
 
     @staticmethod
     def _require_leads_inside_a_bottom_exit_body(params) -> None:
@@ -10159,8 +10242,15 @@ class MainWindow(QMainWindow):
                 self._hold_completed_overlay("Completato: footprint generato.")
 
     def _on_generated(self, path: str) -> None:
+        """@brief A footprint was written: keep the symbol rows in step and save the symbol.
+
+        @param path Path of the footprint written.
+        """
         if self._automatic_generation_active:
             self._automatic_footprint_done = True
+        # The rows must follow the pads just written, or the quiet save
+        # refuses a stale baseline after every first generation (review C, 5).
+        self._refresh_symbol_tab()
         self._save_applied_electrical_symbol(quiet=True)
         self._refresh_output_actions()
         self._append_log(f"OK -> {path}")
@@ -10431,18 +10521,37 @@ class MainWindow(QMainWindow):
         self.symbol_tab.accept_apply()
         self._save_applied_electrical_symbol(quiet=True)
 
+    def _symbol_pad_mismatch(self) -> str:
+        """@brief Why the applied symbol rows do not match the footprint pads, '' when they do.
+
+        @return The message to show, or '' when every electrical pad has exactly
+            one row and no row is without a pad.
+        """
+        try:
+            ids = self._symbol_pad_ids()
+        except (ValueError, TypeError) as exc:
+            return str(exc)
+        numbers = [str(row.get('pin', '')).strip() for row in self.symbol_tab.rows()]
+        if len(set(numbers)) != len(numbers) or set(numbers) != set(ids) or not ids:
+            return self.i18n.text(
+                "I numeri del simbolo devono corrispondere ai pad elettrici del footprint.")
+        return ""
+
     def _save_applied_electrical_symbol(self, path=None, *, quiet=False):
-        """Write the applied electrical symbol beside the component artifacts."""
+        """@brief Write the applied electrical symbol beside the component artifacts.
+
+        @param path Target file; None means `<project>/<name>.kicad_sym`.
+        @param quiet True logs a failure instead of showing it in the symbol tab.
+        @return The written path, or None when nothing was written.
+        """
         from ..generators.symbol import symbol_inputs, export_symbol
         if self.symbol_tab.has_pending_edits():
             return None
         try:
             rows = self.symbol_tab.rows()
-            ids = self._symbol_pad_ids()
-            numbers = [str(row.get('pin', '')).strip() for row in rows]
-            if len(set(numbers)) != len(numbers) or set(numbers) != set(ids) or not ids:
-                raise ValueError(self.i18n.text(
-                    "I numeri del simbolo devono corrispondere ai pad elettrici del footprint."))
+            mismatch = self._symbol_pad_mismatch()
+            if mismatch:
+                raise ValueError(mismatch)
             pins, body = symbol_inputs(rows)
             target = Path(path) if path else (
                 self._project_dir() / f'{self._component_name()}.kicad_sym')
@@ -10461,6 +10570,13 @@ class MainWindow(QMainWindow):
         # export must never silently use older geometry than the visible draft.
         if self.symbol_tab.has_pending_edits():
             self.symbol_tab.set_status(self.i18n.text("Modifiche non applicate."))
+            return
+        mismatch = self._symbol_pad_mismatch()
+        if mismatch:
+            # Checked BEFORE the file dialog: the physical mapping may have
+            # changed since the rows were applied (pads regenerated), and a
+            # dialog for a file that will be refused is a trap.
+            self.symbol_tab.set_status(mismatch)
             return
         try:
             if not self.symbol_tab.confirm_export_review():
@@ -12137,6 +12253,7 @@ class MainWindow(QMainWindow):
             self._add_dim_v(-half_w, half_w, left - 40, self._dim_label("dim.body", p.body_width))
             self._add_dim_h(left, right, bottom + 60, self._dim_label("dim.total", (right - left) / mm_to_px))
 
+        self._add_view_caption()
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
 
@@ -12390,6 +12507,7 @@ class MainWindow(QMainWindow):
         self._add_dim_h(left, right, max(bottom, labels_bottom) + 60, self._dim_label("dim.total", x1 - x0))
         self._add_dim_v(top, bottom, right + 60, self._dim_label("dim.total", y1 - y0))
 
+        self._add_view_caption()
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
 
@@ -12493,6 +12611,7 @@ class MainWindow(QMainWindow):
                         origin=next(((pin.x_mm, pin.y_mm) for pin in pins if str(pin.number).strip()), (0., 0.)))
         self._add_dim_h(left, right, bottom + 40, self._dim_label("dim.total", extent[2] - extent[0]))
         self._add_dim_v(top, bottom, right + 40, self._dim_label("dim.total", extent[3] - extent[1]))
+        self._add_view_caption()
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
 
@@ -12507,6 +12626,20 @@ class MainWindow(QMainWindow):
             else:
                 self._edit_package_pad(int(parts[1]))
 
+    def _edited_pad_reference(self) -> tuple:
+        """@brief Pad diameter and drill the pad editor compares with.
+
+        @return (pad_mm, drill_mm) of the component's own pin grid when the
+            preview draws it (direct mode of a THT part), else of the host header.
+        """
+        try:
+            drawn = self._preview_params()
+        except Exception:  # noqa: BLE001 - a preview that cannot be built has no reference
+            drawn = None
+        if isinstance(drawn, PinHeaderParams):
+            return float(drawn.pad_diameter), float(drawn.drill)
+        return float(self.spin_header_pad.value()), float(self.spin_header_drill.value())
+
     def _edit_header_pad(self, number: str) -> None:
         """Set an individual circular or square land in the header footprint."""
         number = str(number)
@@ -12514,7 +12647,10 @@ class MainWindow(QMainWindow):
         base_shape = "rect" if mode == "headers_square" or (mode == "headers" and number == "1") else "circle"
         current = self.header_pad_overrides.get(number, {})
         current_shape = current.get("shape", base_shape)
-        current_size = float(current.get("size", self.spin_header_pad.value()))
+        # Reference pad and drill of the footprint actually drawn: in direct
+        # mode they are the component's own, not the host header's (review C, 7).
+        reference_pad, reference_drill = self._edited_pad_reference()
+        current_size = float(current.get("size", reference_pad))
         from PyQt6.QtWidgets import QDialogButtonBox
         dialog = QDialog(self)
         dialog.setWindowTitle(self.i18n.text("Modifica pad {number}").format(number=number))
@@ -12558,7 +12694,7 @@ class MainWindow(QMainWindow):
             updated.pop(number, None)
         else:
             pad_size = size.value()
-            if pad_size <= self.spin_header_drill.value():
+            if pad_size <= reference_drill:
                 QMessageBox.warning(self, self.i18n.text("Dimensione pad non valida"),
                                     self.i18n.text("Il pad deve essere più grande del foro."))
                 return
@@ -12665,6 +12801,26 @@ class MainWindow(QMainWindow):
             entry itself (`{value:.2f}`), so every language keeps two decimals.
         """
         return self.i18n.tr(key, self._DIM_LABEL_FALLBACKS.get(key), value=float(value_mm))
+
+    def _add_view_caption(self) -> None:
+        """@brief Write above the drawing which side the footprint is seen from.
+
+        @note The preview, like a KiCad footprint, is the view from ABOVE the
+            board (component side): a datasheet's BOTTOM VIEW was mirrored to
+            get here. Said on the drawing itself (user, 2026-10-10), not only
+            in the log, so a drawing compared with a bottom-view datasheet is
+            not read as wrong.
+        """
+        from PyQt6.QtWidgets import QGraphicsSimpleTextItem
+        rect = self.preview_scene.itemsBoundingRect()
+        if rect.isNull():
+            return
+        caption = QGraphicsSimpleTextItem(self.i18n.text(
+            "VISTA DALL'ALTO (lato componenti): il footprint e' visto da sopra la scheda, "
+            "come in KiCad; un disegno «BOTTOM VIEW» del datasheet appare specchiato."))
+        caption.setBrush(QBrush(QColor(YELLOW)))
+        caption.setPos(rect.left(), rect.top() - caption.boundingRect().height() - 24)
+        self.preview_scene.addItem(caption)
 
     def _add_dim_h(self, x1: float, x2: float, y: float, text: str) -> None:
         """Disegna una linea di quota orizzontale con tacche e testo centrato."""

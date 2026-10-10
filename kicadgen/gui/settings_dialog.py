@@ -15,7 +15,8 @@ from PyQt6.QtWidgets import (
     QPushButton, QTextEdit, QVBoxLayout, QTabWidget, QWidget,
 )
 
-from ..services.datasheet_extractor import DEFAULT_SYSTEM_PROMPT
+from ..services.datasheet_extractor import (DEFAULT_SYSTEM_PROMPT, DEFAULT_SINGLE_SYSTEM_PROMPT,
+                                            DEFAULT_PIN_NUMBERING_PROMPT, SINGLE_COMPONENT_FAMILIES)
 from ..services.messages import tx
 from ..services.openrouter import DEFAULT_MODEL
 from ..services.photo_grounding import GROUNDING_PROMPT, VERIFICATION_PROMPT
@@ -44,10 +45,29 @@ class LlmSettingsDialog(QDialog):
         con chi salva i default: restituiscono lo stesso modello unico.
     """
 
+    #: Entries of the «Prompt di sistema per» selector of the Datasheet tab:
+    #: (profile field, label, factory default). Order = selector order.
+    PROMPT_KINDS = (
+        ("system_prompt", "Schede e moduli", DEFAULT_SYSTEM_PROMPT),
+        ("system_prompt_single", "Componente singolo", DEFAULT_SINGLE_SYSTEM_PROMPT),
+        ("numbering_prompt", "Numerazione dei pin (chiamata dedicata)", DEFAULT_PIN_NUMBERING_PROMPT),
+    )
+
     def __init__(self, current_prompt: str, current_model: str | None = None, parent=None,
                  current_vision_model: str | None = None,
                  current_grounding_prompt=None, current_verification_prompt=None,
-                 current_verification_model=None):
+                 current_verification_model=None, current_single_prompt=None,
+                 current_numbering_prompt=None, current_family: str | None = None):
+        """@brief Build the LLM settings dialog.
+
+        @param current_prompt Datasheet prompt of boards and modules.
+        @param current_single_prompt Datasheet prompt of a single component
+            (None: factory default).
+        @param current_numbering_prompt Prompt of the dedicated pin-numbering
+            call (None: factory default).
+        @param current_family Family of the open project's component type, to
+            say which datasheet prompt that project uses; None/'' says nothing.
+        """
         super().__init__(parent)
         self.i18n = getattr(parent, 'i18n', None)
         self.setWindowTitle("Modello e prompt di sistema LLM")
@@ -138,7 +158,34 @@ class LlmSettingsDialog(QDialog):
             prompt_layout.addLayout(header)
         self.editor = QTextEdit()
         self.editor.setAcceptRichText(False)
-        self.editor.setPlainText(current_prompt)
+        # Three texts behind one editor: the selector says which one is shown
+        # and edited; the others are kept in `_prompt_texts` (user, 2026-10-10).
+        self._prompt_texts = {
+            "system_prompt": current_prompt,
+            "system_prompt_single": current_single_prompt or DEFAULT_SINGLE_SYSTEM_PROMPT,
+            "numbering_prompt": current_numbering_prompt or DEFAULT_PIN_NUMBERING_PROMPT,
+        }
+        selector_row = QHBoxLayout()
+        selector_row.addWidget(QLabel("Prompt di sistema per:"))
+        self.combo_prompt_kind = QComboBox()
+        for field, label, _default in self.PROMPT_KINDS:
+            self.combo_prompt_kind.addItem(label, field)
+        self.combo_prompt_kind.currentIndexChanged.connect(self._on_prompt_kind_changed)
+        selector_row.addWidget(self.combo_prompt_kind, 1)
+        datasheet_layout.addLayout(selector_row)
+        self.prompt_usage = QLabel()
+        self.prompt_usage.setWordWrap(True)
+        if current_family in SINGLE_COMPONENT_FAMILIES:
+            self.prompt_usage.setText("Il progetto aperto (componente singolo) usa: Componente singolo, "
+                                      "piu' Numerazione dei pin per la chiamata dedicata.")
+        elif current_family:
+            self.prompt_usage.setText("Il progetto aperto (scheda o modulo) usa: Schede e moduli.")
+        else:
+            self.prompt_usage.setText("Il prompt usato dipende dalla tipologia del progetto: "
+                                      "schede e moduli, oppure componente singolo.")
+        datasheet_layout.addWidget(self.prompt_usage)
+        self._shown_prompt_kind = "system_prompt"
+        self.editor.setPlainText(self._prompt_texts["system_prompt"])
         datasheet_layout.addWidget(self.editor)
         self.grounding_editor = QTextEdit()
         self.grounding_editor.setAcceptRichText(False)
@@ -268,7 +315,9 @@ class LlmSettingsDialog(QDialog):
             self.combo_source.blockSignals(blocked)
             self._refresh_key_state()
         elif index == 1:
-            self.editor.setPlainText(DEFAULT_SYSTEM_PROMPT)
+            # Only the prompt the selector shows (the three are independent).
+            default = dict((field, factory) for field, _label, factory in self.PROMPT_KINDS)
+            self.editor.setPlainText(default[self._shown_prompt_kind])
         elif index == 2:
             self.grounding_editor.setPlainText(GROUNDING_PROMPT)
         else:
@@ -290,9 +339,29 @@ class LlmSettingsDialog(QDialog):
         """@brief The single model (kept for callers that save the default per stage)."""
         return self.model()
 
+    def _on_prompt_kind_changed(self, _index: int) -> None:
+        """@brief Keep the text of the entry being left, show the text of the entry chosen."""
+        self._prompt_texts[self._shown_prompt_kind] = self.editor.toPlainText()
+        self._shown_prompt_kind = self.combo_prompt_kind.currentData() or "system_prompt"
+        self.editor.setPlainText(self._prompt_texts[self._shown_prompt_kind])
+
+    def _prompt_text(self, field: str) -> str:
+        """The current text of one prompt entry, shown or kept."""
+        if field == self._shown_prompt_kind:
+            return self.editor.toPlainText()
+        return self._prompt_texts[field]
+
     def prompt(self) -> str:
-        """@brief Return the edited extraction system prompt, stripped."""
-        return self.editor.toPlainText().strip()
+        """@brief Return the edited datasheet prompt of boards and modules, stripped."""
+        return self._prompt_text("system_prompt").strip()
+
+    def single_prompt(self) -> str:
+        """@brief Return the edited single-component prompt, or the factory one when left empty."""
+        return self._prompt_text("system_prompt_single").strip() or DEFAULT_SINGLE_SYSTEM_PROMPT
+
+    def numbering_prompt(self) -> str:
+        """@brief Return the edited pin-numbering prompt, or the factory one when left empty."""
+        return self._prompt_text("numbering_prompt").strip() or DEFAULT_PIN_NUMBERING_PROMPT
 
     def model(self) -> str:
         """@brief Return the single chosen model, or DEFAULT_MODEL when empty."""

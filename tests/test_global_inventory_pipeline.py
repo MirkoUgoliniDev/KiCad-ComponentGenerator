@@ -133,7 +133,10 @@ def pipeline(monkeypatch, tmp_path):
             state['crop_requests'].append(deepcopy(kwargs))
             return deepcopy(state['crop_reading'])
         state['requests'].append(deepcopy(kwargs))
-        if name == extractor._openai_tool()['function']['name']:
+        if name in (extractor._openai_tool()['function']['name'],
+                    extractor._single_component_tool()['function']['name']):
+            # A single part reads through its own tool (2026-10-10); the
+            # main-shaped fixture answer passes through `single_answer_to_data`.
             return deepcopy(state['main'])
         assert name == 'report_global_inventory', f'Unexpected extra semantic call: {name}'
         return deepcopy(state['inventory'])

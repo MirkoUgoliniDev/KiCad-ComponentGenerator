@@ -16,7 +16,10 @@ from .messages import tx
 
 PROFILE_FIELDS = ('model','vision_model','verification_model','system_prompt','grounding_prompt',
                   'verification_prompt','terminal_prompt','lead_prompt','crop_prompt',
-                  'crop_model','image_instructions')
+                  'crop_model','image_instructions','system_prompt_single','numbering_prompt')
+#: 'system_prompt_single' is the datasheet prompt of a single component
+#: (families single_tht/single_smd), 'numbering_prompt' the prompt of the
+#: dedicated pin-numbering call (both 2026-10-10, schema 6).
 #: Model identifier fields: stored stripped, never composed with instructions.
 #: 'crop_model' (HANDOFF 150) is the model of the per-body crop reading; its
 #: factory value is EMPTY and means «the model of the paid call on the
@@ -36,7 +39,7 @@ FAMILIES = {t.key:t.label for t in COMPONENT_TYPES}
 #: Database schema version. 2: verification_model; 3: translations table;
 #: 4: crop_prompt (per-body crop reading prompt, HANDOFF 146); 5: crop_model
 #: (model of that reading, blank = photo model, HANDOFF 150).
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def _default_translations():
@@ -75,7 +78,10 @@ def _replace_superseded_texts(db):
         in its condition, so a concurrent edit is never overwritten.
     """
     from .component_types import SUPERSEDED_INSTRUCTION_DIGESTS, get as builtin_type, text_digest
-    from .datasheet_extractor import DEFAULT_SYSTEM_PROMPT, SUPERSEDED_SYSTEM_PROMPT_DIGESTS
+    from .datasheet_extractor import (
+        DEFAULT_SYSTEM_PROMPT, SUPERSEDED_SYSTEM_PROMPT_DIGESTS, DEFAULT_SINGLE_SYSTEM_PROMPT,
+        SUPERSEDED_SINGLE_PROMPT_DIGESTS, DEFAULT_PIN_NUMBERING_PROMPT,
+        SUPERSEDED_NUMBERING_PROMPT_DIGESTS)
     rows = db.execute('SELECT key,instructions FROM component_types WHERE builtin=1').fetchall()
     for key, instructions in rows:
         current = builtin_type(key)
@@ -87,6 +93,8 @@ def _replace_superseded_texts(db):
     from .photo_crop_reading import SUPERSEDED_CROP_PROMPT_DIGESTS, SYSTEM_PROMPT as CROP_PROMPT
     for name, current, superseded in (
             ('system_prompt', DEFAULT_SYSTEM_PROMPT, SUPERSEDED_SYSTEM_PROMPT_DIGESTS),
+            ('system_prompt_single', DEFAULT_SINGLE_SYSTEM_PROMPT, SUPERSEDED_SINGLE_PROMPT_DIGESTS),
+            ('numbering_prompt', DEFAULT_PIN_NUMBERING_PROMPT, SUPERSEDED_NUMBERING_PROMPT_DIGESTS),
             ('crop_prompt', CROP_PROMPT, SUPERSEDED_CROP_PROMPT_DIGESTS)):
         row = db.execute('SELECT value FROM ai_defaults WHERE name=?', (name,)).fetchone()
         if row is not None and row[0] != current and text_digest(row[0]) in superseded:
@@ -96,7 +104,8 @@ def _replace_superseded_texts(db):
 
 def factory_defaults():
     """@brief Return the built-in AI defaults (models and prompts) used to seed the profile database."""
-    from .datasheet_extractor import DEFAULT_SYSTEM_PROMPT
+    from .datasheet_extractor import (DEFAULT_SYSTEM_PROMPT, DEFAULT_SINGLE_SYSTEM_PROMPT,
+                                      DEFAULT_PIN_NUMBERING_PROMPT)
     from .openrouter import DEFAULT_MODEL
     from .photo_grounding import DEFAULT_VISION_MODEL, GROUNDING_PROMPT, VERIFICATION_PROMPT
     from .photo_terminals import PROMPT as TERMINAL_PROMPT
@@ -105,7 +114,9 @@ def factory_defaults():
     return dict(model=DEFAULT_MODEL,vision_model=DEFAULT_VISION_MODEL,verification_model=DEFAULT_MODEL,
         system_prompt=DEFAULT_SYSTEM_PROMPT,grounding_prompt=GROUNDING_PROMPT,
         verification_prompt=VERIFICATION_PROMPT,terminal_prompt=TERMINAL_PROMPT,
-        lead_prompt=LEAD_PROMPT,crop_prompt=CROP_PROMPT,crop_model='',image_instructions='')
+        lead_prompt=LEAD_PROMPT,crop_prompt=CROP_PROMPT,crop_model='',image_instructions='',
+        system_prompt_single=DEFAULT_SINGLE_SYSTEM_PROMPT,
+        numbering_prompt=DEFAULT_PIN_NUMBERING_PROMPT)
 
 
 class ProfileError(ValueError):
@@ -177,6 +188,16 @@ class ProfileStore:
                            ('crop_model', factory_defaults()['crop_model']))
                 db.execute('PRAGMA user_version=5')
                 version = 5
+            if version == 5:
+                # Datasheet prompt of a single component and prompt of the
+                # dedicated numbering call (2026-10-10): factory texts become
+                # the global defaults, rows already there are never replaced,
+                # no per-type override is created.
+                for name in ('system_prompt_single', 'numbering_prompt'):
+                    db.execute('INSERT OR IGNORE INTO ai_defaults VALUES (?,?)',
+                               (name, factory_defaults()[name]))
+                db.execute('PRAGMA user_version=6')
+                version = 6
             if version == SCHEMA_VERSION:
                 # Fail explicitly on a damaged schema; never silently reset user profiles.
                 db.execute('SELECT key,label,family,instructions,active,builtin,position FROM component_types LIMIT 1')

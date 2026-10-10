@@ -927,6 +927,17 @@ def numbering_documents(doc_paths, document_roles) -> list:
                     for role in _declared_role_keys(document_roles.get(path.name) or ()))]
 
 
+def _numbering_only_in_pdf(doc_paths, document_roles) -> bool:
+    """True when a drawing or pinout role is declared only on PDF files (no image to enlarge)."""
+    if document_roles is None:
+        return False
+    return (not numbering_documents(doc_paths, document_roles)
+            and any(path.suffix.lower() == ".pdf"
+                    and any(role in NUMBERING_DOCUMENT_ROLES
+                            for role in _declared_role_keys(document_roles.get(path.name) or ()))
+                    for path in doc_paths))
+
+
 def read_pin_numbering(documents, *, rows, cols, model, call, prompt=None,
                        progress=None) -> Optional[dict]:
     """@brief Ask the model, alone, where each printed pin number sits on the rows x cols grid.
@@ -938,16 +949,21 @@ def read_pin_numbering(documents, *, rows, cols, model, call, prompt=None,
     @param call The logged, cancellable call wrapper of the analysis.
     @param prompt System prompt; None means DEFAULT_PIN_NUMBERING_PROMPT.
     @param progress Optional log callback.
-    @return {"view": "top"|"bottom"|"unknown", "pins": [{"pin", "row", "col"}, ...],
+    @return None without documents or grid (no call made); otherwise
+        {"view": "top"|"bottom"|"unknown", "pins": [{"pin", "row", "col"}, ...],
         "notes": str} with the entries validated against the grid (row < rows,
-        col < cols, no pin or position twice), or None when the call failed or
-        returned nothing usable: the main answer then stands, with a note.
+        col < cols, no pin or position twice); "pins" is empty and "failed"
+        (call error) or "discarded" (unusable answer) says why, so the note
+        of `apply_dedicated_numbering` names the real outcome.
     @note Best-effort by design: a failure of this paid call must never lose
         the main answer. The result is in DRAWING coordinates, mirrored later
         by `_pin_map_seen_from_top` with the declared view, like pin_map.
     """
     if not documents or not rows or not cols:
         return None
+    #: Output budget sized on the grid: about 30 tokens per entry when every
+    #: position carries a printed number, plus room for the view and notes.
+    max_tokens = int(min(8192, max(1024, 512 + 30 * int(rows) * int(cols))))
     blocks = []
     for index, path in enumerate(documents):
         blocks.append({"type": "text", "text": f"FILE {index}: {path.name}"})
@@ -959,14 +975,15 @@ def read_pin_numbering(documents, *, rows, cols, model, call, prompt=None,
     try:
         data = call(model=model, system_prompt=prompt or DEFAULT_PIN_NUMBERING_PROMPT,
                     content_blocks=blocks, tool=_pin_numbering_tool(),
-                    max_tokens=2048, has_pdf=False)
+                    max_tokens=max_tokens, has_pdf=False)
     except (OpenRouterError, ToolArgumentsError) as exc:
         if progress:
             progress(tx("Lettura dedicata della numerazione non riuscita ({exc}): resta la "
                         "numerazione della risposta principale.", exc=exc))
-        return None
+        return {"view": "unknown", "pins": [], "notes": "", "failed": str(exc)}
     if not isinstance(data, dict):
-        return None
+        return {"view": "unknown", "pins": [], "notes": "",
+                "discarded": tx("risposta non strutturata")}
     view = data.get("contacts_view")
     view = view if view in ("top", "bottom", "unknown") else "unknown"
     try:
@@ -975,10 +992,214 @@ def read_pin_numbering(documents, *, rows, cols, model, call, prompt=None,
         if progress:
             progress(tx("Lettura dedicata della numerazione scartata ({exc}): resta la "
                         "numerazione della risposta principale.", exc=exc))
-        return None
+        return {"view": view, "pins": [], "notes": "", "discarded": str(exc)}
     notes = data.get("notes")
     return {"view": view, "pins": entries or [],
             "notes": notes if isinstance(notes, str) else ""}
+
+
+#: System prompt of the DEDICATED pad-position call of a single part with
+#: explicit pads (user, 2026-10-10: two readings of the VE12H-K relay drawing
+#: placed the holes differently, both wrong, and nothing noticed).
+DEFAULT_PAD_POSITIONS_PROMPT = (
+    "Sei un lettore di disegni meccanici. Ti viene mostrato il disegno quotato dei fori o "
+    "delle piazzole di UN SOLO componente. Il tuo UNICO compito e' riportare, per ogni foro o "
+    "piazzola che porta un NUMERO stampato (o che si riconosce dalla vista del pinout), le "
+    "coordinate del centro rispetto a un'origine che scegli tu: ricava ogni coordinata "
+    "SOMMANDO le quote lette lungo la catena di quote, mai a occhio. Dichiara in drawing_unit "
+    "l'unita' delle quote e in contacts_view se il disegno e' una vista dal basso (BOTTOM VIEW, "
+    "lato saldature) o dall'alto. Non specchiare e non ruotare nulla. Se un foro non ha un "
+    "numero e non si riconosce, ometti la voce. Rispondi SOLO chiamando lo strumento."
+)
+
+_PAD_POSITIONS_TOOL = {
+    "name": "report_pad_positions",
+    "description": "Centro di ogni foro o piazzola numerata del disegno, nell'unita' dichiarata.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "drawing_unit": {"type": "string", "enum": ["mm", "inch", "mil"]},
+            "contacts_view": {"type": "string", "enum": ["top", "bottom", "unknown"]},
+            "pads": {
+                "type": "array",
+                "items": {"type": "object", "properties": {
+                    "number": {"type": "string"},
+                    "x_mm": {"type": "number", "description": "Centro lungo X, dall'origine scelta."},
+                    "y_mm": {"type": "number", "description": "Centro lungo Y (verso il basso nel disegno)."},
+                }, "required": ["number", "x_mm", "y_mm"]},
+            },
+            "notes": {"type": "string"},
+        },
+        "required": ["drawing_unit", "contacts_view", "pads"],
+    },
+}
+
+#: Reading tolerance, in mm, between two readings of the same distance: the
+#: rounding of a quote read twice (two decimals in mm, three in inches), not
+#: a margin on the part. Beyond it the two readings disagree.
+PAD_READING_TOLERANCE_MM = 0.1
+
+
+def _pad_positions_tool() -> dict:
+    """The dedicated pad-position schema in OpenRouter's "function" wrapper."""
+    return {"type": "function", "function": {
+        "name": _PAD_POSITIONS_TOOL["name"],
+        "description": _PAD_POSITIONS_TOOL["description"],
+        "parameters": _PAD_POSITIONS_TOOL["input_schema"]}}
+
+
+def read_pad_positions(documents, *, model, call, prompt=None, progress=None) -> Optional[dict]:
+    """@brief Ask the model, alone, where every numbered pad of the drawing sits.
+
+    @param documents Image documents of `numbering_documents`.
+    @param model Model identifier of the analysis.
+    @param call The logged, cancellable call wrapper of the analysis.
+    @param prompt System prompt; None means DEFAULT_PAD_POSITIONS_PROMPT.
+    @param progress Optional log callback.
+    @return None without documents; otherwise {"view", "pads": {number: (x, y) in mm},
+        "notes"} plus "failed" or "discarded" with the reason when "pads" is empty.
+    @note Best-effort: a failure never loses the main answer. Coordinates are
+        converted to millimetres here with the declared unit; the origin is
+        the model's own and is never compared, only distances are.
+    """
+    if not documents:
+        return None
+    blocks = []
+    for index, path in enumerate(documents):
+        blocks.append({"type": "text", "text": f"FILE {index}: {path.name}"})
+        blocks.append(_file_to_content_block(path, model))
+    blocks.append({"type": "text", "text": (
+        "Riporta le coordinate del centro di ogni foro o piazzola numerata del disegno e "
+        "chiama lo strumento.")})
+    try:
+        data = call(model=model, system_prompt=prompt or DEFAULT_PAD_POSITIONS_PROMPT,
+                    content_blocks=blocks, tool=_pad_positions_tool(),
+                    max_tokens=4096, has_pdf=False)
+    except (OpenRouterError, ToolArgumentsError) as exc:
+        if progress:
+            progress(tx("Lettura dedicata delle posizioni dei pad non riuscita ({exc}): resta la "
+                        "disposizione della risposta principale.", exc=exc))
+        return {"view": "unknown", "pads": {}, "notes": "", "failed": str(exc)}
+    if not isinstance(data, dict):
+        return {"view": "unknown", "pads": {}, "notes": "", "discarded": tx("risposta non strutturata")}
+    view = data.get("contacts_view")
+    view = view if view in ("top", "bottom", "unknown") else "unknown"
+    factor = _UNIT_TO_MM.get(data.get("drawing_unit"), 1.0)
+    pads = {}
+    for entry in data.get("pads") or []:
+        if not isinstance(entry, dict):
+            continue
+        number = str(entry.get("number", "")).strip()
+        x = _optional_number(entry.get("x_mm"))
+        y = _optional_number(entry.get("y_mm"))
+        if not number or x is None or y is None or number in pads:
+            continue
+        pads[number] = (x * factor, y * factor)
+    notes = data.get("notes")
+    return {"view": view, "pads": pads, "notes": notes if isinstance(notes, str) else ""}
+
+
+def _pad_summary(pads: dict) -> str:
+    """'1@(2.54,0.00), 4@(0.00,7.62)' for the log and the conflict message."""
+    return ", ".join(f"{number}@({x:.2f},{y:.2f})"
+                     for number, (x, y) in sorted(pads.items(), key=lambda item: item[0]))
+
+
+def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None) -> None:
+    """@brief Confront the dedicated pad reading with the explicit pads of the main answer.
+
+    @param data Main answer with `package_geometry` pins, still in drawing
+        units and view (before `_canonicalize_answer`).
+    @param reading Result of `read_pad_positions`, or None.
+    @param progress Optional log callback.
+    @note Rules, the same for every part: the two readings choose their own
+        origins, so DISTANCES between pads of the same number are compared,
+        both in millimetres, within PAD_READING_TOLERANCE_MM. (a) no reading
+        or no pad read: the main pads stand, a note says they are unconfirmed;
+        (b) every common pair agrees and the declared views agree: confirmed
+        (fully, or for the pads read when the dedicated call read fewer);
+        (c) a pair differs beyond the tolerance, or the views differ: the
+        main pads STAY (two readings, no reason to prefer one) and
+        `_pin_map_conflict` carries both, so the GUI blocks the automatic
+        generation and shows them. Two readings wrong in the same way still
+        pass: this is a check, not a reading.
+    """
+    geometry = data.get("package_geometry")
+    pins = geometry.get("pins") if isinstance(geometry, dict) else None
+    if not isinstance(pins, (list, tuple)) or not pins:
+        return
+    if not reading or not reading["pads"]:
+        if reading and reading.get("failed"):
+            why = tx("chiamata non riuscita: {exc}", exc=reading["failed"])
+        elif reading and reading.get("discarded"):
+            why = tx("risposta scartata: {exc}", exc=reading["discarded"])
+        elif reading is None:
+            why = tx("lettura non eseguita")
+        else:
+            why = tx("nessun pad letto")
+        data["_numbering_note"] = tx(
+            "Posizioni dei pad NON confermate dalla lettura dedicata ({why}): verificare la "
+            "disposizione sul disegno.", why=why)
+        if progress:
+            progress(data["_numbering_note"])
+        return
+    factor = _UNIT_TO_MM.get(data.get("drawing_unit"), 1.0)
+    main = {}
+    for pin in pins:
+        if not isinstance(pin, dict):
+            continue
+        x = _optional_number(pin.get("x_mm"))
+        y = _optional_number(pin.get("y_mm"))
+        number = str(pin.get("number", "")).strip()
+        if number and x is not None and y is not None:
+            main[number] = (x * factor, y * factor)
+    dedicated = reading["pads"]
+    common = sorted(set(main) & set(dedicated))
+    disagreements = []
+    for i, a in enumerate(common):
+        for b in common[i + 1:]:
+            d_main = math.dist(main[a], main[b])
+            d_dedicated = math.dist(dedicated[a], dedicated[b])
+            if abs(d_main - d_dedicated) > PAD_READING_TOLERANCE_MM:
+                disagreements.append((a, b, d_main, d_dedicated))
+    main_view = data.get("contacts_view")
+    views_differ = (main_view in ("top", "bottom") and reading["view"] in ("top", "bottom")
+                    and main_view != reading["view"])
+    if len(common) < 2:
+        note = tx("Posizioni dei pad NON confermate: la lettura dedicata ha in comune con la "
+                  "risposta principale meno di due pad numerati ({read}). Verificare la "
+                  "disposizione sul disegno.", read=", ".join(sorted(dedicated)) or tx("nessuno"))
+        data["_numbering_note"] = note
+        if progress:
+            progress(note)
+        return
+    if not disagreements and not views_differ:
+        if set(main) <= set(dedicated):
+            note = tx("Posizioni dei pad confermate dalla lettura dedicata ({count} pad, "
+                      "distanze entro {tolerance} mm).", count=len(common),
+                      tolerance=PAD_READING_TOLERANCE_MM)
+        else:
+            note = tx("Posizioni dei pad confermate solo per {read} pad su {total} (quelli che "
+                      "la lettura dedicata ha trovato); gli altri non sono verificati: "
+                      "controllarli sul disegno.", read=len(common), total=len(main))
+        data["_numbering_note"] = note
+        if progress:
+            progress(note)
+        return
+    pairs = "; ".join(
+        tx("{a}-{b}: {main:.2f} mm contro {dedicated:.2f} mm", a=a, b=b, main=dm, dedicated=dd)
+        for a, b, dm, dd in disagreements[:6])
+    data["_pin_map_conflict"] = tx(
+        "Le due letture delle posizioni dei pad non coincidono{views}. Distanze diverse: {pairs}. "
+        "Risposta principale ({main_view}): {main}. Lettura dedicata ({dedicated_view}): "
+        "{dedicated}. Nessuna delle due e' stata scelta: controlla il disegno, poi ripeti "
+        "l'analisi o usa un modello piu' capace.",
+        views=tx(" (e dichiarano viste diverse)") if views_differ else "",
+        pairs=pairs or tx("nessuna"), main_view=main_view or "unknown",
+        dedicated_view=reading["view"], main=_pad_summary(main), dedicated=_pad_summary(dedicated))
+    data["_numbering_note"] = data["_pin_map_conflict"]
+    if progress:
+        progress(data["_pin_map_conflict"])
 
 
 def _numbering_summary(entries) -> str:
@@ -1008,9 +1229,17 @@ def apply_dedicated_numbering(data: dict, reading: Optional[dict], progress=None
         populated_pins rule.
     """
     if not reading or not reading["pins"]:
+        if reading and reading.get("failed"):
+            why = tx("chiamata non riuscita: {exc}", exc=reading["failed"])
+        elif reading and reading.get("discarded"):
+            why = tx("risposta scartata: {exc}", exc=reading["discarded"])
+        elif reading is None:
+            why = tx("lettura non eseguita")
+        else:
+            why = tx("nessun numero letto")
         data["_numbering_note"] = tx(
-            "Numerazione dei pin NON confermata dalla lettura dedicata (nessun numero letto): "
-            "verificare la posizione dei pin sul disegno.")
+            "Numerazione dei pin NON confermata dalla lettura dedicata ({why}): "
+            "verificare la posizione dei pin sul disegno.", why=why)
         if progress:
             progress(data["_numbering_note"])
         return
@@ -1023,23 +1252,39 @@ def apply_dedicated_numbering(data: dict, reading: Optional[dict], progress=None
                 main[int(entry["pin"])] = (int(entry["row"]), int(entry["col"]))
             except (KeyError, TypeError, ValueError):
                 continue
-    if data.get("contacts_view") not in ("top", "bottom") and reading["view"] in ("top", "bottom"):
+    main_view = data.get("contacts_view")
+    views_differ = (main_view in ("top", "bottom") and reading["view"] in ("top", "bottom")
+                    and main_view != reading["view"])
+    if main_view not in ("top", "bottom") and reading["view"] in ("top", "bottom"):
         data["contacts_view"] = reading["view"]
-    same = bool(main) and all(main.get(pin) == position for pin, position in dedicated.items())
-    if same:
-        data["_numbering_note"] = tx(
-            "Numerazione dei pin confermata dalla lettura dedicata ({count} numeri letti).",
-            count=len(dedicated))
+    agree = all(main.get(pin) == position for pin, position in dedicated.items())
+    if main and agree and not views_differ:
+        if set(main) <= set(dedicated):
+            note = tx("Numerazione dei pin confermata dalla lettura dedicata ({count} numeri "
+                      "letti).", count=len(dedicated))
+        else:
+            note = tx("Numerazione dei pin confermata solo per {read} pin su {total} (i numeri "
+                      "stampati); le altre posizioni seguono la risposta principale, non "
+                      "verificate: controllarle sul disegno.", read=len(dedicated), total=len(main))
+        data["_numbering_note"] = note
         if progress:
-            progress(data["_numbering_note"])
+            progress(note)
         return
     data["pin_map"] = list(reading["pins"])
-    if main:
+    data["_dedicated_map"] = True
+    if views_differ:
+        # The dedicated call looked at the drawing alone: its view wins, and
+        # the disagreement is said, never silently resolved (review A, 2).
+        data["contacts_view"] = reading["view"]
+    if main or views_differ:
         data["_pin_map_conflict"] = tx(
-            "Le due letture della numerazione non coincidono. Risposta principale: {main}. "
-            "Lettura dedicata del disegno (usata): {dedicated}. Controlla il footprint sul "
-            "disegno: «Rigenera footprint» per accettarla, oppure ripeti l'analisi.",
-            main=_numbering_summary([{"pin": p, "row": r, "col": c} for p, (r, c) in main.items()]),
+            "Le due letture della numerazione non coincidono. Risposta principale ({main_view}): "
+            "{main}. Lettura dedicata del disegno ({dedicated_view}, usata): {dedicated}. "
+            "Controlla il footprint sul disegno: accettala rigenerando footprint e 3D, "
+            "oppure ripeti l'analisi.",
+            main_view=main_view or "unknown", dedicated_view=reading["view"],
+            main=_numbering_summary([{"pin": p, "row": r, "col": c} for p, (r, c) in main.items()])
+            or tx("nessuna"),
             dedicated=_numbering_summary(reading["pins"]))
         note = data["_pin_map_conflict"]
     else:
@@ -1048,6 +1293,198 @@ def apply_dedicated_numbering(data: dict, reading: Optional[dict], progress=None
     data["_numbering_note"] = note
     if progress:
         progress(note)
+
+
+#: Component families that are ONE part, not a populated board: they get
+#: the dedicated prompt and tool below (user, 2026-10-10).
+SINGLE_COMPONENT_FAMILIES = ("single_tht", "single_smd")
+
+#: System prompt of the single-component analysis. Short and about one
+#: thing: reading the mechanical drawing of one part. No board photo, no
+#: component inventory, no castellated sides; the pads are described one by
+#: one, the regular grid is only a declared shortcut.
+DEFAULT_SINGLE_SYSTEM_PROMPT = (
+    "Sei un lettore di disegni meccanici di UN SOLO componente elettronico (connettore, "
+    "rele', trasformatore, convertitore, circuito integrato, passivo): dal datasheet o dal "
+    "disegno quotato ricavi le quote che servono per il footprint KiCad e per un solido 3D "
+    "semplificato. Riporta le quote COSI' COME LE LEGGI: dichiara in drawing_unit l'unita' del "
+    "disegno (mm, inch o mil) e in contacts_view da che lato e' vista la disposizione dei "
+    "terminali (top, bottom o unknown); conversione e specchiatura le fa il programma. "
+    "TERMINALI: descrivili uno per uno in pads, con il numero STAMPATO nel disegno, le "
+    "coordinate del centro rispetto a un'origine che scegli e dichiari in pads_origin, il "
+    "tipo (thru_hole con drill_mm, oppure smd), e la piazzola consigliata (pad_length_mm e "
+    "pad_width_mm; per un foro circolare i due valori coincidono). Usa grid SOLO se TUTTI i "
+    "terminali stanno su una griglia a passo costante e lo dichiari: rows e cols sono le "
+    "posizioni della griglia intera, vuote comprese, e populated_pins elenca quelle "
+    "occupate. Distanze fra terminali che non sono multipli di un passo unico significano "
+    "che la griglia NON esiste: usa pads. NUMERAZIONE: solo i numeri stampati accanto ai "
+    "terminali; non estenderla per convenzione (pin header, DIP) e non inventare numeri per "
+    "posizioni senza numero. FORI: se il disegno quota solo il diametro del terminale, "
+    "riportalo in lead_diameter_mm e stima il foro come terminale piu' il gioco e la "
+    "piazzola come foro piu' la corona, dichiarando entrambi \"estimated\". In lead_exit di' "
+    "da quale faccia escono i terminali (bottom: dritti dal fondo; side: dai fianchi e "
+    "piegati; unknown). CORPO: body_length_mm e body_width_mm sono le due quote in pianta "
+    "(dalla vista dall'alto o dal basso, oppure le larghezze delle viste frontale e laterale); "
+    "body_height_mm e' la quota VERTICALE del corpo in una vista frontale o laterale, dal "
+    "piano di appoggio alla sommita', esclusa la sporgenza dei terminali: se nessuna vista "
+    "mostra il corpo di profilo, ometti il campo invece di indovinarlo. pin_length_3d_mm e' la "
+    "sporgenza dei terminali sotto il corpo. Per ogni quota dichiara in value_sources se l'hai letta (\"read\"), "
+    "ricavata da quote lette (\"derived\") o stimata (\"estimated\"); una stima non deve mai "
+    "sembrare una lettura. Se c'e' una foto del pezzo, da essa ricava solo body_color_hex, "
+    "text_color_hex ed edge_fillets. Compila pinout con la funzione di ogni terminale se il "
+    "documento la riporta. Scrivi in notes dubbi e incongruenze. Rispondi SOLO chiamando lo "
+    "strumento."
+)
+
+#: Digests of former single-component defaults, replaced in the profile
+#: database when still stored verbatim (see analysis_profiles).
+SUPERSEDED_SINGLE_PROMPT_DIGESTS = frozenset({
+    # 2026-10-10, first text: the height was asked from a side view only and
+    # a front view with the body height quoted (VE12H-K relay) was omitted.
+    "7e842bb65b2a4271b9d2700e72e86680984cec8a478bd2642b7ac831f47f1354",
+})
+#: Digests of former pin-numbering defaults (none yet: first version).
+SUPERSEDED_NUMBERING_PROMPT_DIGESTS = frozenset()
+
+
+def _single_component_tool() -> dict:
+    """@brief The OpenRouter "function" tool of the single-component analysis.
+
+    @return Tool definition `report_single_component`: the pads one by one as
+        the primary form, an optional declared grid, body, lead and view
+        fields, pinout, provenance. Built from the main schema's shared
+        fragments (edge_fillets, pinout, value_sources) so the three stay one.
+    """
+    main = _EXTRACTION_TOOL["input_schema"]["properties"]
+    pad = {
+        "type": "object",
+        "properties": {
+            "number": {"type": "string", "description": "Numero STAMPATO accanto al terminale."},
+            "name": {"type": "string", "description": "Funzione, se il documento la riporta."},
+            "x_mm": {"type": "number", "description": "Centro, asse X, nell'unita' di drawing_unit."},
+            "y_mm": {"type": "number", "description": "Centro, asse Y (verso il basso nella vista dichiarata)."},
+            "pad_type": {"type": "string", "enum": ["thru_hole", "smd"]},
+            "drill_mm": {"type": "number", "exclusiveMinimum": 0,
+                         "description": "Foro, solo per thru_hole."},
+            "pad_length_mm": {"type": "number", "exclusiveMinimum": 0,
+                              "description": "Piazzola lungo X; diametro per una piazzola circolare."},
+            "pad_width_mm": {"type": "number", "exclusiveMinimum": 0,
+                             "description": "Piazzola lungo Y; diametro per una piazzola circolare."},
+            "shape": {"type": "string", "enum": ["circle", "rect", "oval", "roundrect"]},
+        },
+        "required": ["number", "x_mm", "y_mm", "pad_type", "pad_length_mm", "pad_width_mm"],
+    }
+    grid = {
+        "type": "object",
+        "description": (
+            "SOLO se tutti i terminali stanno su una griglia a passo costante. rows e cols "
+            "sono le posizioni della griglia intera, vuote comprese; populated_pins le "
+            "posizioni occupate; pin_map la posizione di ogni numero stampato."),
+        "properties": {
+            "rows": main["rows"], "cols": main["cols"], "pitch_mm": main["pitch_mm"],
+            "row_spacing_mm": main["row_spacing_mm"], "pad_diameter_mm": main["pad_diameter_mm"],
+            "drill_mm": main["drill_mm"], "populated_pins": main["populated_pins"],
+            "pin_map": main["pin_map"],
+            "body_offset_x_mm": main["body_offset_x_mm"],
+            "body_offset_y_mm": main["body_offset_y_mm"],
+        },
+        "required": ["rows", "cols", "pad_diameter_mm", "drill_mm"],
+    }
+    properties = {
+        "name": main["name"], "description": main["description"], "tags": main["tags"],
+        "drawing_unit": main["drawing_unit"], "contacts_view": main["contacts_view"],
+        "pads": {"type": "array", "items": pad,
+                 "description": "Un elemento per terminale, nelle coordinate dichiarate in pads_origin."},
+        "pads_origin": {"type": "string", "enum": ["body_center", "pin1", "custom"],
+                        "description": "Origine delle coordinate di pads: centro del corpo, "
+                                       "terminale 1, oppure un punto del disegno descritto in notes."},
+        "grid": grid,
+        "body_length_mm": main["body_length_mm"], "body_width_mm": main["body_width_mm"],
+        "body_height_mm": main["body_height_mm"], "pin_length_3d_mm": main["pin_length_3d_mm"],
+        "lead_diameter_mm": main["lead_diameter_mm"], "lead_exit": main["lead_exit"],
+        "body_color_hex": main["body_color_hex"], "text_color_hex": main["text_color_hex"],
+        "edge_fillets": main["edge_fillets"], "pinout": main["pinout"],
+        "value_sources": main["value_sources"],
+        "confidence": main["confidence"], "notes": main["notes"],
+    }
+    return {"type": "function", "function": {
+        "name": "report_single_component",
+        "description": ("Quote di un singolo componente per footprint e 3D: terminali uno per uno "
+                        "(pads) oppure, solo se dichiarata, una griglia a passo costante (grid)."),
+        "parameters": {"type": "object", "properties": properties,
+                       "required": ["drawing_unit", "contacts_view", "confidence"]}}}
+
+
+def single_answer_to_data(answer: dict) -> dict:
+    """@brief Bring an answer of `report_single_component` to the main answer's shape.
+
+    @param answer The tool arguments as returned by the model.
+    @return A dict in the shape of `report_pin_header_params` answers, so
+        every step after the call (canonicalisation, validation, dedicated
+        numbering, ExtractedParams) stays the same: `pads` becomes
+        `package_geometry` (family unknown, origin from pads_origin, the
+        declared view as source_view), `grid` is flattened into the matrix
+        fields with layout «matrix».
+    @throws ExtractionError When the answer has neither pads nor grid, or
+        both, or is not an object: nothing to build a footprint from.
+    @note Through-hole pads with one size are circular: pad_length = pad_width
+        = the diameter the model gave, shape circle unless it said otherwise.
+    """
+    if not isinstance(answer, dict):
+        raise ExtractionError(tx("Risposta AI non strutturata."))
+    pads = answer.get("pads")
+    grid = answer.get("grid")
+    has_pads = isinstance(pads, (list, tuple)) and len(pads) > 0
+    has_grid = isinstance(grid, dict) and bool(grid)
+    if not has_pads and not has_grid and any(
+            key in answer for key in ("rows", "package_geometry", "castellated_sides")):
+        # The main answer's shape, which the model may still produce beside
+        # the schema (extra properties are not refused): taken as it is.
+        return dict(answer)
+    if has_pads == has_grid:
+        raise ExtractionError(tx(
+            "La risposta deve descrivere i terminali in pads OPPURE una griglia in grid "
+            "(trovati: pads={pads}, grid={grid}).", pads=has_pads, grid=has_grid))
+    data = {"layout": "matrix"}
+    for key in ("name", "description", "tags", "drawing_unit", "contacts_view", "body_length_mm",
+                "body_width_mm", "body_height_mm", "pin_length_3d_mm", "lead_diameter_mm",
+                "lead_exit", "body_color_hex", "text_color_hex", "edge_fillets", "pinout",
+                "value_sources", "confidence", "notes"):
+        if key in answer:
+            data[key] = answer[key]
+    if has_grid:
+        for key in ("rows", "cols", "pitch_mm", "row_spacing_mm", "pad_diameter_mm", "drill_mm",
+                    "populated_pins", "pin_map", "body_offset_x_mm", "body_offset_y_mm"):
+            if key in grid:
+                data[key] = grid[key]
+        return data
+    view = answer.get("contacts_view")
+    pins = []
+    for entry in pads:
+        if not isinstance(entry, dict):
+            continue
+        pin = {"number": str(entry.get("number", "")).strip(), "x_mm": entry.get("x_mm"),
+               "y_mm": entry.get("y_mm"), "pad_length_mm": entry.get("pad_length_mm"),
+               "pad_width_mm": entry.get("pad_width_mm"),
+               "pad_type": entry.get("pad_type", "thru_hole")}
+        if entry.get("name"):
+            pin["name"] = str(entry["name"])
+        if entry.get("drill_mm") is not None:
+            pin["drill_mm"] = entry["drill_mm"]
+        pin["shape"] = entry.get("shape") or ("circle" if pin["pad_type"] == "thru_hole" else "roundrect")
+        pins.append(pin)
+    data["package_geometry"] = {
+        "family": "unknown",
+        "origin": answer.get("pads_origin") or "custom",
+        "source_view": view if view in ("top", "bottom") else "top",
+        "confidence": answer.get("confidence", "low"),
+        "needs_review": True,
+        "pins": pins,
+    }
+    for key in ("body_length_mm", "body_width_mm", "body_height_mm"):
+        if answer.get(key) is not None:
+            data["package_geometry"][key] = answer[key]
+    return data
 
 
 def _openai_tool() -> dict:
@@ -1476,6 +1913,12 @@ def _enlarged_image_bytes(data: bytes, model: Optional[str]) -> bytes:
                         math.sqrt(limits.max_pixels / (width * height)))
             if scale <= 1.0:
                 return data
+            # A transparent background (RGBA, LA, palette with transparency:
+            # the usual export of a vector drawing) would turn black through
+            # convert("RGB"); it is composited on white first (review A, 3).
+            if image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info):
+                rgba = image.convert("RGBA")
+                image = Image.alpha_composite(Image.new("RGBA", rgba.size, "white"), rgba)
             enlarged = image.convert("RGB").resize(
                 (max(1, int(width * scale)), max(1, int(height * scale))),
                 resample=Image.BICUBIC)
@@ -2373,16 +2816,25 @@ def extract_pin_header_params(
 
     has_pdf = any(p.suffix.lower() == ".pdf" for p in doc_paths)
 
+    single_part = component_family in SINGLE_COMPONENT_FAMILIES
+
     def main_call():
-        """The paid reading of the documents (same request on a retry)."""
-        return diagnostic_call(
+        """The paid reading of the documents (same request on a retry).
+
+        A single part gets its own prompt and tool (pads one by one); the
+        answer is brought to the main shape right here, so a retry and
+        every later step see one shape only.
+        """
+        answer = diagnostic_call(
             model=model or DEFAULT_MODEL,
-            system_prompt=system_prompt or _SYSTEM_PROMPT,
+            system_prompt=system_prompt or (DEFAULT_SINGLE_SYSTEM_PROMPT if single_part
+                                            else _SYSTEM_PROMPT),
             content_blocks=content_blocks,
-            tool=_openai_tool(),
+            tool=_single_component_tool() if single_part else _openai_tool(),
             max_tokens=16384,
             has_pdf=has_pdf,
         )
+        return single_answer_to_data(answer) if single_part else answer
     try:
         try:
             data = main_call()
@@ -2420,6 +2872,7 @@ def extract_pin_header_params(
         _validate_main_response(data, content_blocks, diagnostic_call, model, system_prompt,
                                 has_pdf, progress,
                                 numbering={"documents": numbering_documents(doc_paths, document_roles),
+                                           "pdf_only": _numbering_only_in_pdf(doc_paths, document_roles),
                                            "component_family": component_family,
                                            "announce": announce, "check_cancel": check_cancel,
                                            "prompt": numbering_prompt})
@@ -3254,17 +3707,43 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
         # the drawing alone, one question. Before the canonicalisation, so
         # both readings are in the drawing's own view and get mirrored once.
         documents = numbering["documents"]
+        rows = _optional_number(data.get("rows"), positive=True, integer=True)
+        cols = _optional_number(data.get("cols"), positive=True, integer=True)
+        if rows and cols:
+            numbering["check_cancel"]()
+            numbering["announce"]("llm", model or DEFAULT_MODEL)
+            if progress:
+                progress(tx("Lettura dedicata della numerazione dei pin su {names}.",
+                            names=", ".join(p.name for p in documents)))
+            reading = read_pin_numbering(
+                documents, rows=rows, cols=cols, model=model or DEFAULT_MODEL,
+                call=diagnostic_call, prompt=numbering.get("prompt"), progress=progress)
+        else:
+            reading = {"view": "unknown", "pins": [], "notes": "",
+                       "discarded": tx("griglia righe x colonne non valida, nessuna chiamata")}
+        apply_dedicated_numbering(data, reading, progress)
+    elif (numbering and numbering.get("documents") and _has_explicit_pads(data)
+            and numbering.get("component_family") in SINGLE_COMPONENT_FAMILIES):
+        # Explicit pads of a single part: a second, dedicated reading of the
+        # hole positions, compared by distances (user, 2026-10-10, VE12H-K).
+        documents = numbering["documents"]
         numbering["check_cancel"]()
         numbering["announce"]("llm", model or DEFAULT_MODEL)
         if progress:
-            progress(tx("Lettura dedicata della numerazione dei pin su {names}.",
+            progress(tx("Lettura dedicata delle posizioni dei pad su {names}.",
                         names=", ".join(p.name for p in documents)))
-        reading = read_pin_numbering(
-            documents, rows=_optional_number(data.get("rows"), positive=True, integer=True),
-            cols=_optional_number(data.get("cols"), positive=True, integer=True),
-            model=model or DEFAULT_MODEL, call=diagnostic_call,
-            prompt=numbering.get("prompt"), progress=progress)
-        apply_dedicated_numbering(data, reading, progress)
+        reading = read_pad_positions(documents, model=model or DEFAULT_MODEL,
+                                     call=diagnostic_call, progress=progress)
+        apply_dedicated_pads(data, reading, progress)
+    elif (numbering and numbering.get("pdf_only")
+            and (data.get("layout") or "matrix") == "matrix" and not data.get("package_geometry")
+            and numbering.get("component_family") != "aggregate_tht"):
+        data["_numbering_note"] = tx(
+            "Numerazione dei pin NON confermata da una lettura dedicata: il disegno e' "
+            "disponibile solo in PDF, che non si puo' ingrandire. Verificare la posizione dei "
+            "pin sul disegno.")
+        if progress:
+            progress(data["_numbering_note"])
     if (data.get("layout") or "matrix") in ("matrix", "castellated"):
         # After the numbering repair, which compares sides in the drawing's own
         # unit and view, and before the photo stage, which calibrates on the
@@ -4097,6 +4576,130 @@ def _required_matrix_value(data: dict, key: str):
     return value
 
 
+def _numbering_conventions(rows: int, cols: int) -> dict:
+    """@brief The standard pin-numbering conventions of a rows x cols grid, seen from above.
+
+    @param rows Rows of the grid.
+    @param cols Columns of the grid.
+    @return {name: {pin: (row, col)}} covering every position once:
+        "column" (pin headers: 1,2 down the first column, then the next) and
+        its mirror image "column_mirrored" (the same convention read on a
+        bottom view), and for two rows "u" (DIP-style: 1..cols along row 0,
+        then back along row 1) and "u_mirrored". A single row has the two
+        reading directions only.
+    @note These are the conventions a drawing implies when it prints only
+        some numbers (a header prints «1», a DIP prints «1» and «N»); they
+        are declared here, not tuned: completing a map with one of them is
+        done only when exactly one fits every printed number.
+    """
+    column = {col * rows + row + 1: (row, col) for col in range(cols) for row in range(rows)}
+    conventions = {
+        "column": column,
+        "column_mirrored": {pin: (row, cols - 1 - col) for pin, (row, col) in column.items()},
+    }
+    if rows == 2:
+        u = {col + 1: (0, col) for col in range(cols)}
+        u.update({2 * cols - col: (1, col) for col in range(cols)})
+        conventions["u"] = u
+        conventions["u_mirrored"] = {pin: (row, cols - 1 - col) for pin, (row, col) in u.items()}
+    return conventions
+
+
+def _resolve_pin_numbering(pin_map, raw_populated, rows, cols, max_pin, *, dedicated: bool,
+                           notes: list):
+    """@brief Decide the pin map and the populated pins of a matrix answer, map complete or not.
+
+    @param pin_map Validated entries seen from above, or None.
+    @param raw_populated The populated_pins of the answer, unvalidated.
+    @param rows Rows of the grid (None when unknown).
+    @param cols Columns of the grid (None when unknown).
+    @param max_pin rows x cols, or None.
+    @param dedicated True when the map comes from the dedicated numbering
+        call (every entry is a number printed beside a position).
+    @param notes Notes of the result.
+    @return (pin_map, populated_pins, block_text): block_text is None, or the
+        reason the automatic generation must stop (a partial map that no
+        single convention completes).
+    @note Rules, the same for every part (review A of 2026-10-10, finding 1:
+        the prompts now ask for the PRINTED numbers only, so a map may be
+        partial -- a header prints «1», a DIP «1» and «N» -- and a partial
+        map must never define which pins exist):
+        - COMPLETE map (it places every populated pin, or every position
+          when no populated_pins is given): the map decides which numbers
+          exist, whatever rows x cols (a U-numbered DIP keeps pin 16 on a
+          2x3 grid of populated positions). Entries of a MAIN map for pins
+          absent from populated_pins are a convention, not a reading, and
+          are dropped with a note; entries of a DEDICATED map are printed
+          numbers, so the pins are added to populated_pins with a note.
+        - PARTIAL map (anchors): populated_pins is validated against
+          1..rows x cols; the anchors are matched against the standard
+          conventions (`_numbering_conventions`); exactly one fitting every
+          anchor completes the map, declared «derived» in the notes; none or
+          several: no map, automatic numbering, and a block text.
+    """
+    loose = _validated_populated_pins(raw_populated, None, [], None) or []
+    mapped = {entry["pin"] for entry in pin_map} if pin_map else set()
+    if pin_map:
+        if loose:
+            complete = set(loose) <= mapped
+        else:
+            complete = max_pin is not None and len(mapped) >= max_pin
+    else:
+        complete = False
+    if pin_map and complete:
+        populated = _validated_populated_pins(raw_populated, max_pin, notes, mapped=sorted(mapped))
+        if populated:
+            extra = sorted(pin for pin in mapped if pin not in populated)
+            if extra and dedicated:
+                populated = sorted(set(populated) | set(extra))
+                notes.append(tx("pin_map: i pin {pins} hanno un numero stampato nel disegno ma "
+                                "mancavano da populated_pins: aggiunti ai pin presenti. "
+                                "Verificare sul disegno.", pins=", ".join(str(p) for p in extra)))
+            elif extra:
+                pin_map = [entry for entry in pin_map if entry["pin"] in populated]
+                notes.append(tx("pin_map: scartate le posizioni dei pin {pins}, assenti da "
+                                "populated_pins: nel disegno non c'e' un pin da leggere li', "
+                                "quindi erano una convenzione e non una lettura. Verificare "
+                                "sul disegno la posizione dei pin presenti.",
+                                pins=", ".join(str(p) for p in extra)))
+        return pin_map, populated, None
+    populated = _validated_populated_pins(raw_populated, max_pin, notes, None)
+    if not pin_map:
+        return None, populated, None
+    expected = len(populated) if populated else (max_pin or 0)
+    anchors = {entry["pin"]: (entry["row"], entry["col"]) for entry in pin_map}
+    fitting = [name for name, convention in _numbering_conventions(int(rows), int(cols)).items()
+               if all(convention.get(pin) == position for pin, position in anchors.items())]
+    summary = ", ".join(f"{pin}@({r},{c})" for pin, (r, c) in sorted(anchors.items()))
+    if len(fitting) == 1:
+        convention = _numbering_conventions(int(rows), int(cols))[fitting[0]]
+        completed = [{"pin": pin, "row": row, "col": col}
+                     for pin, (row, col) in sorted(convention.items())]
+        if populated:
+            missing = sorted(pin for pin in populated if pin not in convention)
+            if missing:
+                return None, populated, tx(
+                    "Numerazione letta per {read} pin su {expected} ({anchors}); la convenzione "
+                    "{name} che li completa non prevede i pin {missing}: numerazione da "
+                    "verificare sul disegno prima di generare.",
+                    read=len(anchors), expected=expected, anchors=summary, name=fitting[0],
+                    missing=", ".join(str(p) for p in missing))
+        notes.append(tx("Numerazione letta per {read} pin su {expected} ({anchors}): completata "
+                        "con la convenzione {name}, l'unica coerente con i numeri stampati. "
+                        "Valore DERIVATO, da verificare sul disegno.",
+                        read=len(anchors), expected=expected, anchors=summary, name=fitting[0]))
+        return completed, populated, None
+    reason = (tx("nessuna convenzione standard e' coerente con i numeri stampati")
+              if not fitting else
+              tx("piu' convenzioni sono coerenti con i numeri stampati ({names})",
+                 names=", ".join(fitting)))
+    return None, populated, tx(
+        "Numerazione letta per {read} pin su {expected} ({anchors}) e {reason}: le altre "
+        "posizioni non hanno un numero stampato. Numerazione automatica colonna per colonna "
+        "nei campi, da verificare sul disegno prima di generare.",
+        read=len(anchors), expected=expected, anchors=summary, reason=reason)
+
+
 def _validated_populated_pins(raw, max_pin: Optional[int], notes: list,
                               mapped: Optional[Sequence[int]] = None) -> Optional[list]:
     """Optional populated_pins: keep the valid, in-range pin numbers once each.
@@ -4296,29 +4899,16 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
             notes.append(tx("ATTENZIONE pin_map scartata ({exc}): numerazione automatica colonna "
                             "per colonna, da verificare sul pinout.", exc=exc))
 
-    # The map decides which numbers exist (a DIP numbered in a U keeps pin 16
-    # on a 2x3 grid of populated positions); only the automatic numbering is
-    # bounded by rows x cols. TEL8WI case, 2026-10-10: filtering against
-    # rows x cols left a single pad in the footprint.
     max_pin = rows * cols if layout == "matrix" and rows and cols else None
-    populated = _validated_populated_pins(
-        data.get("populated_pins"), max_pin, notes,
-        mapped=[entry["pin"] for entry in pin_map] if pin_map else None)
-    if pin_map and populated:
-        # A position of a pin that does not exist was not read from the
-        # drawing (there is no number beside an empty position): it is a
-        # numbering convention the model applied, and the TEL8 run of
-        # 2026-10-10 14:14 shows such a convention overriding the six numbers
-        # that were printed. Those entries are dropped so the log counts the
-        # pins really read; the mapped positions of existing pins are kept.
-        invented = sorted(entry["pin"] for entry in pin_map if entry["pin"] not in populated)
-        if invented:
-            pin_map = [entry for entry in pin_map if entry["pin"] in populated]
-            notes.append(tx("pin_map: scartate le posizioni dei pin {pins}, assenti da "
-                            "populated_pins: nel disegno non c'e' un pin da leggere li', "
-                            "quindi erano una convenzione e non una lettura. Verificare "
-                            "sul disegno la posizione dei pin presenti.",
-                            pins=", ".join(str(p) for p in invented)))
+    pin_map_conflict = (data.get("_pin_map_conflict")
+                        if isinstance(data.get("_pin_map_conflict"), str) else None)
+    pin_map, populated, completion = _resolve_pin_numbering(
+        pin_map, data.get("populated_pins"), rows, cols, max_pin,
+        dedicated=bool(data.get("_dedicated_map")), notes=notes)
+    if completion:
+        # A partial map that no single convention completes: the GUI blocks
+        # the automatic generation with this text, the user checks.
+        pin_map_conflict = completion if not pin_map_conflict else pin_map_conflict + "\n" + completion
 
     body_length = _opt_float("body_length_mm")
     confidence = data.get("confidence", "low")
@@ -4363,8 +4953,7 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         package_geometry=package_geometry,
         lead_diameter_mm=_opt_float("lead_diameter_mm"),
         lead_exit=_validated_lead_exit(data.get("lead_exit"), notes),
-        pin_map_conflict=(data.get("_pin_map_conflict")
-                          if isinstance(data.get("_pin_map_conflict"), str) else None),
+        pin_map_conflict=pin_map_conflict,
     )
     if isinstance(data.get("_numbering_note"), str) and data["_numbering_note"]:
         notes.append(data["_numbering_note"])
@@ -4399,6 +4988,10 @@ def _validated_lead_exit(raw, notes: list) -> Optional[str]:
 LEAD_TO_HOLE_CLEARANCE_MM = 0.25
 #: Annular copper, in mm, added to an estimated hole for an estimated pad.
 HOLE_TO_PAD_ANNULUS_MM = 0.8
+#: Smallest copper ring per side, in mm, a through-hole pad must keep around
+#: a lifted hole for the pad to be solderable: a declared manufacturing
+#: minimum (IPC-7251 level B order of magnitude), not a value tuned to a part.
+MIN_ANNULAR_RING_MM = 0.15
 
 
 def _lift_drill_above_the_lead(params: "ExtractedParams", notes: list) -> None:
@@ -4434,7 +5027,7 @@ def _lift_drill_above_the_lead(params: "ExtractedParams", notes: list) -> None:
     params.drill_mm = lifted
     sources["drill_mm"] = "estimated"
     pad = params.pad_diameter_mm
-    if isinstance(pad, (int, float)) and pad <= lifted:
+    if isinstance(pad, (int, float)) and pad < lifted + 2 * MIN_ANNULAR_RING_MM:
         params.pad_diameter_mm = round(lifted + HOLE_TO_PAD_ANNULUS_MM, 3)
         sources["pad_diameter_mm"] = "estimated"
         notes.append(tx("Piazzola {pad:.2f} mm non piu' larga del foro corretto: portata a "

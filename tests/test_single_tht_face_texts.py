@@ -248,3 +248,189 @@ def test_bottom_exit_leads_inside_the_body_pass(window):
         window._validate_automatic_input(
             _tel8_extracted(row_spacing_mm=10.16, body_offset_y_mm=-5.0),
             require_body_dimensions=False)
+
+
+# -- review B (2026-10-10) ---------------------------------------------------------------
+
+def test_a_centred_single_row_gets_room_to_the_body_edge_not_to_the_centre():
+    """Review B, 2: room measured to the nearest obstacle, so a centred row is not floored."""
+    params = PinHeaderParams(name="SIP", rows=1, cols=3, pitch=2.54)
+    body = Body3DParams(10.0, 4.0, 5.0, offset_x_mm=-1.5, offset_y_mm=-2.0,
+                        pin_diameter_mm=0.5, pin_numbers_3d=True)
+    labels = step_generator.pin_number_face_texts(params, body)
+    assert all(label.size_mm > step_generator.PIN_LABEL_MIN_SIZE_MM for label in labels)
+    assert all(label.size_mm <= step_generator.PIN_LABEL_MAX_SIZE_MM for label in labels)
+
+
+def test_two_rows_still_stop_at_the_midpoint_between_them():
+    """Negative: with a second row beyond the centre the room ends halfway to it."""
+    params = PinHeaderParams(name="DIP", rows=2, cols=4, pitch=2.54, row_spacing=2.0)
+    body = Body3DParams(12.0, 8.0, 5.0, offset_x_mm=-1.5, offset_y_mm=-3.0,
+                        pin_diameter_mm=0.5, pin_numbers_3d=True)
+    for label, (_, x, y) in zip(step_generator.pin_number_face_texts(params, body),
+                                step_generator.pin_positions(params)):
+        assert abs(label.y_mm - y) <= 1.0 + 1e-6, "never past the midpoint (1.0 mm away)"
+
+
+def test_labels_never_overlap_neighbouring_leads_along_the_row():
+    """Review B, 3: two-digit numbers on a 1.27 mm pitch are narrowed to the pitch."""
+    params = PinHeaderParams(name="FINE", rows=2, cols=10, pitch=1.27, row_spacing=5.08)
+    body = Body3DParams(14.0, 8.0, 3.0, offset_x_mm=-1.0, offset_y_mm=-1.5,
+                        pin_diameter_mm=0.6, pin_numbers_3d=True)
+    labels = step_generator.pin_number_face_texts(params, body)
+    half = {label.text: step_generator.GLYPH_WIDTH_FRACTION * 2 * label.size_mm / 2
+            for label in labels}
+    rows = {}
+    for label in labels:
+        rows.setdefault(label.y_mm, []).append(label)
+    for row in rows.values():
+        row.sort(key=lambda l: l.x_mm)
+        for a, b in zip(row, row[1:]):
+            assert a.x_mm + half[a.text] <= b.x_mm - half[b.text] + 1e-6, (a, b)
+    wide = PinHeaderParams(name="COARSE", rows=2, cols=4, pitch=2.54, row_spacing=5.08)
+    assert all(l.size_mm == step_generator.PIN_LABEL_MAX_SIZE_MM
+               for l in step_generator.pin_number_face_texts(wide, body)), "negative: no cap"
+
+
+def test_an_anchor_on_a_side_face_is_refused():
+    """Review B, 7: the script would ignore it silently."""
+    with pytest.raises(ValueError, match="top e bottom"):
+        FaceTextAnnotation(face="left", text="1", x_mm=1.0, y_mm=2.0).validate()
+    FaceTextAnnotation(face="bottom", text="1", x_mm=1.0, y_mm=2.0).validate()
+
+
+def test_flip_y_negates_the_rotation_of_extra_boxes_like_components():
+    """Review B, 1: an SMD terminal at +30 degrees came out mirrored."""
+    import ast
+    script = Path("kicadgen/cad3d/freecad_build_body.py")
+    tree = ast.parse(script.read_text(encoding="utf-8"))
+    body = [n for n in tree.body
+            if (isinstance(n, ast.FunctionDef) and n.name == "_flip_y")
+            or (isinstance(n, ast.Assign)
+                and any(getattr(t, "id", "") == "_FB_SWAP" for t in n.targets))]
+    namespace = {}
+    exec(compile(ast.Module(body=body, type_ignores=[]), "<flip>", "exec"), namespace)
+    data = {"body": {"offset_y_mm": -5.0, "width_mm": 10.0}, "pins": [],
+            "extra_boxes": [{"x": 2.0, "y": -0.25, "length_mm": 2.0, "width_mm": 0.5,
+                             "height_mm": 0.04, "rotation_deg": 30.0}],
+            "components": [{"x": 0, "y": 1.0, "rotation_deg": 30.0}]}
+    namespace["_flip_y"](data)
+    assert data["extra_boxes"][0]["rotation_deg"] == -30.0
+    assert data["components"][0]["rotation_deg"] == -30.0, "same convention as components"
+
+
+def test_the_package_generator_uses_the_smallest_hole_and_prints_the_numbers(monkeypatch, tmp_path):
+    """Review B, 6 and 10: last-pin-wins diameter, terminals inside the PCB, no numbers."""
+    from kicadgen.core.package_geometry import PackageGeometry, PinSpec
+    captured = {}
+
+    def fake_run(name, pins, body_, output_dir, **options):
+        captured.update(options, pins=pins, body=body_)
+        return {"step_path": tmp_path / "x.step", "warnings": [], "notes": []}
+
+    monkeypatch.setattr(step_generator, "_run_freecad", fake_run)
+    package = PackageGeometry(name="PKG", body_length_mm=10.0, body_width_mm=6.0,
+                              body_height_mm=4.0, pins=[
+        PinSpec(number="1", x_mm=-3.0, y_mm=-2.0, pad_type="thru_hole", drill_mm=0.8,
+                pad_length_mm=1.5, pad_width_mm=1.5),
+        PinSpec(number="2", x_mm=3.0, y_mm=-2.0, pad_type="thru_hole", drill_mm=3.2,
+                pad_length_mm=4.0, pad_width_mm=4.0),
+        PinSpec(number="3", x_mm=0.0, y_mm=2.0, pad_type="smd", pad_length_mm=2.0,
+                pad_width_mm=0.5, rotation_deg=30.0)])
+    body = Body3DParams(10.0, 6.0, 4.0, pin_numbers_3d=True)
+    step_generator.generate_single_package_3d_model(package, body, tmp_path)
+    assert captured["body"].pin_diameter_mm == pytest.approx(0.8 * 0.65)
+    assert captured["extra_boxes"][0]["z"] == 0.0
+    assert captured["extra_boxes"][0]["rotation_deg"] == 30.0
+    assert [t.text for t in captured["face_texts"]] == ["1", "2"]
+    body.pin_numbers_3d = False
+    step_generator.generate_single_package_3d_model(package, body, tmp_path)
+    assert captured["face_texts"] == []
+
+
+# -- review C (2026-10-10) ---------------------------------------------------------------
+
+def test_a_new_project_from_the_general_state_gets_the_component_name_as_writing(window):
+    """Review C, 1: the general snapshot carried '' («no writing»)."""
+    assert "top_text" not in window._general_project_state
+    state = window._state_for_project_type(window._general_project_state, "single_tht")
+    assert "top_text" not in state
+    window._switch_project("NEWX", state)
+    assert window.field_top_text_3d.text() == "NEWX"
+
+
+def test_the_writing_is_sized_on_the_body_freecad_receives(window, monkeypatch):
+    """Review C, 2: a package body of 2 mm must not get a 2 mm font from a 20 mm field."""
+    _select_single_tht(window)
+    window.group_3d.setChecked(True)
+    window.field_body_length.setValue(20.0)
+    window.field_body_width.setValue(10.0)
+    window.field_top_text_3d.setText("ABCDEFGH")
+    monkeypatch.setattr(window, "_current_body_params",
+                        lambda: Body3DParams(2.0, 1.0, 1.0))
+    texts = window._face_texts_for_3d()
+    assert 0.65 * 8 * texts[0].size_mm <= 0.8 * 2.0 + 0.01, "within 80% of the 2 mm body"
+    assert texts[0].size_mm < 0.4, "not the 2 mm the 20 mm field would allow"
+
+
+def test_an_unchanged_writing_does_not_invalidate_the_solid(window):
+    """Review C, 8: Enter in the field without a change kept discarding the 3D."""
+    _select_single_tht(window)
+    window.field_top_text_3d.setText("same")
+    window._on_top_text_edited()
+    revision = window._model_revision
+    window._on_top_text_edited()
+    assert window._model_revision == revision
+    window.field_top_text_3d.setText("other")
+    window._on_top_text_edited()
+    assert window._model_revision == revision + 1
+
+
+def test_the_tht_pad_spin_boxes_follow_the_fields(window):
+    """Review C, 6: the spin boxes showed the previous project's values."""
+    _select_single_tht(window)
+    window.field_pad.setValue(1.9)
+    window.field_drill.setValue(0.95)
+    assert window.spin_single_tht_pad.value() == pytest.approx(1.9)
+    assert window.spin_single_tht_drill.value() == pytest.approx(0.95)
+
+
+def test_the_project_kind_is_asked_only_when_nothing_says_it():
+    """Review C, 10: a saved type decides the kind; None is not «ask again»."""
+    from kicadgen.gui.main_window import MainWindow, _PROJECT_KIND_SINGLE
+    assert MainWindow._needs_project_kind(None, "") is True
+    assert MainWindow._needs_project_kind({"project_kind": None}, "single_tht") is False
+    assert MainWindow._needs_project_kind({"project_kind": _PROJECT_KIND_SINGLE}, "") is False
+    assert MainWindow._needs_project_kind({"project_kind": "bogus"}, "") is True
+    assert MainWindow._saved_component_type(
+        {"widgets": {"combo_component_type": {"data": "single_smd", "text": "x"}}}) == "single_smd"
+    assert MainWindow._saved_component_type({"widgets": {}}) == ""
+
+
+def test_a_package_body_carries_the_pin_numbers_choice(window):
+    """VE12H-K relay (2026-10-10): explicit pads, numbers ticked, none printed."""
+    from kicadgen.core.package_geometry import PackageGeometry, PinSpec
+    _select_single_tht(window)
+    window.group_3d.setChecked(True)
+    window.package_geometry = PackageGeometry(
+        name="VE", body_length_mm=20.5, body_width_mm=10.5, body_height_mm=20.5, pins=[
+            PinSpec(number="1", x_mm=0.0, y_mm=0.0, pad_type="thru_hole", drill_mm=1.2,
+                    pad_length_mm=2.0, pad_width_mm=2.0)])
+    assert window._current_body_params().pin_numbers_3d is True
+    window.chk_pin_numbers_3d.setChecked(False)
+    assert window._current_body_params().pin_numbers_3d is False
+
+
+def test_the_footprint_preview_says_it_is_the_top_view(window):
+    """User, 2026-10-10: the drawing must state which side it shows."""
+    from PyQt6.QtWidgets import QGraphicsSimpleTextItem
+    _select_single_tht(window)
+    window._draw_preview()
+    captions = [item.text() for item in window.preview_scene.items()
+                if isinstance(item, QGraphicsSimpleTextItem) and "VISTA DALL'ALTO" in item.text()]
+    assert len(captions) == 1
+    top = min(item.sceneBoundingRect().top() for item in window.preview_scene.items()
+              if not (isinstance(item, QGraphicsSimpleTextItem) and "VISTA DALL'ALTO" in item.text()))
+    caption = next(item for item in window.preview_scene.items()
+                   if isinstance(item, QGraphicsSimpleTextItem) and "VISTA DALL'ALTO" in item.text())
+    assert caption.sceneBoundingRect().bottom() <= top, "above everything else"
