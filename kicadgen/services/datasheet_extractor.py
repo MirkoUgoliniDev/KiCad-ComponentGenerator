@@ -480,7 +480,11 @@ _EXTRACTION_TOOL = {
                     "tipico dei pin header: i package DIP-style numerano a U (1..N "
                     "lungo una fila, poi a ritroso sull'altra). Se la numerazione segue "
                     "l'ordine delle colonne puoi ometterla: contacts_view vale comunque, "
-                    "e una bottom view viene specchiata anche senza pin_map."
+                    "e una bottom view viene specchiata anche senza pin_map. Elenca SOLO "
+                    "i pin il cui numero e' SCRITTO nel disegno accanto alla posizione: "
+                    "non estendere la numerazione alle posizioni senza numero e non "
+                    "applicare una convenzione (pin header o DIP) al posto della lettura; "
+                    "una posizione senza numero nel disegno non va in pin_map."
                 ),
                 "items": {
                     "type": "object",
@@ -844,6 +848,208 @@ _EXTRACTION_TOOL = {
     },
 }
 
+#: System prompt of the DEDICATED pin-numbering call (user, 2026-10-10:
+#: «separa, vediamo se in quel modo funziona»). One perceptual task only: the
+#: main call reads every quote well and invents the pin numbering (a zig-zag
+#: convention over the six numbers printed on the TEL8 drawing), so the
+#: numbering is asked again, alone, with the drawing alone.
+DEFAULT_PIN_NUMBERING_PROMPT = (
+    "Sei un lettore di disegni meccanici. Ti viene mostrato il disegno quotato di un "
+    "componente con i suoi pin disposti su una griglia regolare. Il tuo UNICO compito e' "
+    "riportare, per ogni NUMERO DI PIN STAMPATO nel disegno accanto a una posizione, la "
+    "riga e la colonna di quella posizione sulla griglia. Conta righe e colonne COSI' COME "
+    "APPAIONO nel disegno: riga 0 la fila piu' in alto, colonna 0 la posizione piu' a "
+    "sinistra della griglia intera a passo costante, posizioni vuote comprese (due pin "
+    "distanti un multiplo del passo sono tante colonne piu' in la' quanti sono i passi). "
+    "Non specchiare e non ruotare nulla: dichiara in contacts_view se il disegno e' una "
+    "vista dal basso (BOTTOM VIEW) o dall'alto, e il programma fara' la specchiatura. "
+    "Riporta SOLO i numeri che leggi stampati: non estendere la numerazione alle posizioni "
+    "senza numero e non applicare alcuna convenzione (pin header, DIP). Se non leggi "
+    "nessun numero, rispondi con un elenco vuoto. Rispondi SOLO chiamando lo strumento."
+)
+
+_PIN_NUMBERING_TOOL = {
+    "name": "report_pin_numbering",
+    "description": "Posizione sulla griglia di ogni numero di pin stampato nel disegno.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "contacts_view": {
+                "type": "string", "enum": ["top", "bottom", "unknown"],
+                "description": "Da che lato e' visto il disegno dei pin (titolo BOTTOM VIEW = bottom).",
+            },
+            "pins": {
+                "type": "array",
+                "description": "Un elemento per ogni numero di pin STAMPATO nel disegno, nessun altro.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "pin": {"type": "integer", "description": "Numero stampato accanto alla posizione."},
+                        "row": {"type": "integer", "description": "Indice riga: 0 = fila piu' in alto nel disegno."},
+                        "col": {"type": "integer", "description": "Indice colonna: 0 = posizione piu' a sinistra nel disegno."},
+                    },
+                    "required": ["pin", "row", "col"],
+                },
+            },
+            "notes": {"type": "string", "description": "Dubbi di lettura, in breve."},
+        },
+        "required": ["contacts_view", "pins"],
+    },
+}
+
+#: Roles of the documents the dedicated numbering call looks at: the
+#: dimensioned drawing and the pinout drawing, the only places where a pin
+#: number is printed beside a position.
+NUMBERING_DOCUMENT_ROLES = ("top", "pinout")
+
+
+def _pin_numbering_tool() -> dict:
+    """The dedicated numbering schema in OpenRouter's "function" wrapper."""
+    return {"type": "function", "function": {
+        "name": _PIN_NUMBERING_TOOL["name"],
+        "description": _PIN_NUMBERING_TOOL["description"],
+        "parameters": _PIN_NUMBERING_TOOL["input_schema"]}}
+
+
+def numbering_documents(doc_paths, document_roles) -> list:
+    """@brief The documents a pin number can be read from: those declared drawing or pinout.
+
+    @param doc_paths Documents of the analysis.
+    @param document_roles Normalized roles (file name -> tuple of keys), or None.
+    @return The paths carrying a role in NUMBERING_DOCUMENT_ROLES, images only
+        (a PDF cannot be enlarged and is read by the main call); [] without roles.
+    """
+    if document_roles is None:
+        return []
+    return [path for path in doc_paths
+            if path.suffix.lower() != ".pdf"
+            and any(role in NUMBERING_DOCUMENT_ROLES
+                    for role in _declared_role_keys(document_roles.get(path.name) or ()))]
+
+
+def read_pin_numbering(documents, *, rows, cols, model, call, prompt=None,
+                       progress=None) -> Optional[dict]:
+    """@brief Ask the model, alone, where each printed pin number sits on the rows x cols grid.
+
+    @param documents Image documents of `numbering_documents`.
+    @param rows Rows of the grid of the main answer (drawing orientation).
+    @param cols Columns of the grid of the main answer.
+    @param model Model identifier of the analysis (its provider sizes the image).
+    @param call The logged, cancellable call wrapper of the analysis.
+    @param prompt System prompt; None means DEFAULT_PIN_NUMBERING_PROMPT.
+    @param progress Optional log callback.
+    @return {"view": "top"|"bottom"|"unknown", "pins": [{"pin", "row", "col"}, ...],
+        "notes": str} with the entries validated against the grid (row < rows,
+        col < cols, no pin or position twice), or None when the call failed or
+        returned nothing usable: the main answer then stands, with a note.
+    @note Best-effort by design: a failure of this paid call must never lose
+        the main answer. The result is in DRAWING coordinates, mirrored later
+        by `_pin_map_seen_from_top` with the declared view, like pin_map.
+    """
+    if not documents or not rows or not cols:
+        return None
+    blocks = []
+    for index, path in enumerate(documents):
+        blocks.append({"type": "text", "text": f"FILE {index}: {path.name}"})
+        blocks.append(_file_to_content_block(path, model))
+    blocks.append({"type": "text", "text": (
+        f"La griglia dei pin ha {int(rows)} file (righe) e {int(cols)} posizioni per fila "
+        f"(colonne) a passo costante. Riporta la posizione di ogni numero di pin stampato "
+        f"nel disegno e chiama lo strumento.")})
+    try:
+        data = call(model=model, system_prompt=prompt or DEFAULT_PIN_NUMBERING_PROMPT,
+                    content_blocks=blocks, tool=_pin_numbering_tool(),
+                    max_tokens=2048, has_pdf=False)
+    except (OpenRouterError, ToolArgumentsError) as exc:
+        if progress:
+            progress(tx("Lettura dedicata della numerazione non riuscita ({exc}): resta la "
+                        "numerazione della risposta principale.", exc=exc))
+        return None
+    if not isinstance(data, dict):
+        return None
+    view = data.get("contacts_view")
+    view = view if view in ("top", "bottom", "unknown") else "unknown"
+    try:
+        entries = _pin_map_seen_from_top(data.get("pins") or [], int(cols), "top", int(rows))
+    except ExtractionError as exc:
+        if progress:
+            progress(tx("Lettura dedicata della numerazione scartata ({exc}): resta la "
+                        "numerazione della risposta principale.", exc=exc))
+        return None
+    notes = data.get("notes")
+    return {"view": view, "pins": entries or [],
+            "notes": notes if isinstance(notes, str) else ""}
+
+
+def _numbering_summary(entries) -> str:
+    """'1@(0,0), 7@(0,6)' for the log and the conflict message."""
+    return ", ".join(f"{e['pin']}@({e['row']},{e['col']})"
+                     for e in sorted(entries, key=lambda e: int(e["pin"])))
+
+
+def apply_dedicated_numbering(data: dict, reading: Optional[dict], progress=None) -> None:
+    """@brief Confront the dedicated numbering with the main answer's pin_map, before canonicalisation.
+
+    @param data Main answer, still in drawing coordinates (`_canonicalize_answer`
+        mirrors pin_map afterwards according to contacts_view).
+    @param reading Result of `read_pin_numbering`, or None.
+    @param progress Optional log callback.
+    @note Rules, the same for every part: (a) no reading, or a reading with
+        no printed number: the main pin_map stands and a note says the
+        numbering was not confirmed; (b) the two readings place every pin
+        the same way: confirmed; (c) they differ, or the main answer has no
+        pin_map: the DEDICATED reading becomes pin_map (one task, read from
+        the drawing alone), its view becomes contacts_view when the main
+        answer left it unknown, and `_pin_map_conflict` carries both readings
+        so the GUI blocks the automatic generation and shows them. The
+        dedicated reading is compared only on the pins it read: pins of the
+        main map that the dedicated call did not see are not a disagreement
+        (an empty position cannot be read), they are dropped later by the
+        populated_pins rule.
+    """
+    if not reading or not reading["pins"]:
+        data["_numbering_note"] = tx(
+            "Numerazione dei pin NON confermata dalla lettura dedicata (nessun numero letto): "
+            "verificare la posizione dei pin sul disegno.")
+        if progress:
+            progress(data["_numbering_note"])
+        return
+    dedicated = {int(e["pin"]): (int(e["row"]), int(e["col"])) for e in reading["pins"]}
+    main_entries = data.get("pin_map") if isinstance(data.get("pin_map"), (list, tuple)) else []
+    main = {}
+    for entry in main_entries:
+        if isinstance(entry, dict):
+            try:
+                main[int(entry["pin"])] = (int(entry["row"]), int(entry["col"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+    if data.get("contacts_view") not in ("top", "bottom") and reading["view"] in ("top", "bottom"):
+        data["contacts_view"] = reading["view"]
+    same = bool(main) and all(main.get(pin) == position for pin, position in dedicated.items())
+    if same:
+        data["_numbering_note"] = tx(
+            "Numerazione dei pin confermata dalla lettura dedicata ({count} numeri letti).",
+            count=len(dedicated))
+        if progress:
+            progress(data["_numbering_note"])
+        return
+    data["pin_map"] = list(reading["pins"])
+    if main:
+        data["_pin_map_conflict"] = tx(
+            "Le due letture della numerazione non coincidono. Risposta principale: {main}. "
+            "Lettura dedicata del disegno (usata): {dedicated}. Controlla il footprint sul "
+            "disegno: «Rigenera footprint» per accettarla, oppure ripeti l'analisi.",
+            main=_numbering_summary([{"pin": p, "row": r, "col": c} for p, (r, c) in main.items()]),
+            dedicated=_numbering_summary(reading["pins"]))
+        note = data["_pin_map_conflict"]
+    else:
+        note = tx("Numerazione dei pin letta dalla chiamata dedicata ({count} numeri): la "
+                  "risposta principale non ne dava una.", count=len(dedicated))
+    data["_numbering_note"] = note
+    if progress:
+        progress(note)
+
+
 def _openai_tool() -> dict:
     """Lo stesso schema nel formato "function" richiesto da OpenRouter.
 
@@ -1043,6 +1249,10 @@ class ExtractedParams:
     value_sources: Optional[dict] = None
     #: Lead diameter read from the drawing (mm), None when not given.
     lead_diameter_mm: Optional[float] = None
+    #: Both readings of the pin numbering when they disagree (the dedicated
+    #: one is in pin_map); None when confirmed or not checked. The GUI blocks
+    #: the automatic generation on it.
+    pin_map_conflict: Optional[str] = None
     #: One of LEAD_EXITS, None when the model did not say.
     lead_exit: Optional[str] = None
 
@@ -1940,8 +2150,12 @@ def extract_pin_header_params(
     phase: Optional[Callable[..., None]] = None,
     review_proposals: Optional[Callable[..., object]] = None,
     cancel: Optional[object] = None,
+    numbering_prompt: Optional[str] = None,
 ) -> ExtractedParams:
     """@brief Extract dimensions and pinout, optionally using local YOLO photo proposals.
+
+    @param numbering_prompt System prompt of the dedicated pin-numbering call
+        (`read_pin_numbering`); None means DEFAULT_PIN_NUMBERING_PROMPT.
 
     @param cancel Optional cancellation channel: a threading.Event (or any
         object with is_set()) or a zero-argument callable returning True when
@@ -2204,7 +2418,11 @@ def extract_pin_header_params(
     raw_main = copy.deepcopy(data)
     try:
         _validate_main_response(data, content_blocks, diagnostic_call, model, system_prompt,
-                                has_pdf, progress)
+                                has_pdf, progress,
+                                numbering={"documents": numbering_documents(doc_paths, document_roles),
+                                           "component_family": component_family,
+                                           "announce": announce, "check_cancel": check_cancel,
+                                           "prompt": numbering_prompt})
     except ExtractionCancelled:
         raise
     except ExtractionError as exc:
@@ -2952,8 +3170,13 @@ def _cancel_predicate(cancel):
 
 
 def _validate_main_response(data, content_blocks, diagnostic_call, model, system_prompt,
-                            has_pdf, progress) -> None:
+                            has_pdf, progress, numbering=None) -> None:
     """Sanitize and validate the main answer in place; ExtractionError when unusable.
+
+    `numbering`: None, or the inputs of the dedicated pin-numbering call
+    (`read_pin_numbering`): documents, component_family, announce,
+    check_cancel, prompt. The call is made for a matrix answer of a single
+    part when there is a drawing to read.
 
     Body dimensions are sanitized with a note; castellated sides that
     contradict themselves (count against pin_names, contacts longer than
@@ -3024,6 +3247,24 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
                     progress(warning)
             except (OpenRouterError, AttributeError) as repair_error:
                 raise ExtractionError(tx("Correzione numerazione non riuscita; analisi foto non avviata.")) from repair_error
+    if (numbering and numbering.get("documents")
+            and (data.get("layout") or "matrix") == "matrix" and not data.get("package_geometry")
+            and numbering.get("component_family") != "aggregate_tht"):
+        # Second, dedicated reading of the pin numbering (user, 2026-10-10):
+        # the drawing alone, one question. Before the canonicalisation, so
+        # both readings are in the drawing's own view and get mirrored once.
+        documents = numbering["documents"]
+        numbering["check_cancel"]()
+        numbering["announce"]("llm", model or DEFAULT_MODEL)
+        if progress:
+            progress(tx("Lettura dedicata della numerazione dei pin su {names}.",
+                        names=", ".join(p.name for p in documents)))
+        reading = read_pin_numbering(
+            documents, rows=_optional_number(data.get("rows"), positive=True, integer=True),
+            cols=_optional_number(data.get("cols"), positive=True, integer=True),
+            model=model or DEFAULT_MODEL, call=diagnostic_call,
+            prompt=numbering.get("prompt"), progress=progress)
+        apply_dedicated_numbering(data, reading, progress)
     if (data.get("layout") or "matrix") in ("matrix", "castellated"):
         # After the numbering repair, which compares sides in the drawing's own
         # unit and view, and before the photo stage, which calibrates on the
@@ -4063,6 +4304,21 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
     populated = _validated_populated_pins(
         data.get("populated_pins"), max_pin, notes,
         mapped=[entry["pin"] for entry in pin_map] if pin_map else None)
+    if pin_map and populated:
+        # A position of a pin that does not exist was not read from the
+        # drawing (there is no number beside an empty position): it is a
+        # numbering convention the model applied, and the TEL8 run of
+        # 2026-10-10 14:14 shows such a convention overriding the six numbers
+        # that were printed. Those entries are dropped so the log counts the
+        # pins really read; the mapped positions of existing pins are kept.
+        invented = sorted(entry["pin"] for entry in pin_map if entry["pin"] not in populated)
+        if invented:
+            pin_map = [entry for entry in pin_map if entry["pin"] in populated]
+            notes.append(tx("pin_map: scartate le posizioni dei pin {pins}, assenti da "
+                            "populated_pins: nel disegno non c'e' un pin da leggere li', "
+                            "quindi erano una convenzione e non una lettura. Verificare "
+                            "sul disegno la posizione dei pin presenti.",
+                            pins=", ".join(str(p) for p in invented)))
 
     body_length = _opt_float("body_length_mm")
     confidence = data.get("confidence", "low")
@@ -4107,7 +4363,11 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         package_geometry=package_geometry,
         lead_diameter_mm=_opt_float("lead_diameter_mm"),
         lead_exit=_validated_lead_exit(data.get("lead_exit"), notes),
+        pin_map_conflict=(data.get("_pin_map_conflict")
+                          if isinstance(data.get("_pin_map_conflict"), str) else None),
     )
+    if isinstance(data.get("_numbering_note"), str) and data["_numbering_note"]:
+        notes.append(data["_numbering_note"])
     params.value_sources = _value_sources(data, params, sides, notes)
     if layout == "castellated":
         _drop_unread_row_spacing(params, notes)

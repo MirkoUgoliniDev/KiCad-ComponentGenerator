@@ -9651,6 +9651,12 @@ class MainWindow(QMainWindow):
             if params.rows > 1:
                 self._require_extent(params.rows, params.row_spacing_mm, 'rows')
             self._require_leads_inside_a_bottom_exit_body(params)
+            conflict = getattr(params, "pin_map_conflict", None)
+            if conflict:
+                # Two readings of the numbering that disagree: the dedicated
+                # one is in the fields, but the user checks before any file
+                # is written (user, 2026-10-10: «ti ferma e ti fa controllare»).
+                raise ValueError(conflict)
 
     @staticmethod
     def _require_leads_inside_a_bottom_exit_body(params) -> None:

@@ -1,5 +1,59 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 2026-10-10 - Pubblicazione: chiamata dedicata alla numerazione
+
+- Utente: «ora mi pare corretto», autorizza commit, push, merge in main e
+  ritorno su ADVANCED. Esclusi rows_none_rev.pkl, tmp/, work/. Il database dei
+  profili e' incluso (controllo segreti: nessuna chiave).
+- Commit ADVANCED: 37cfcf0. Contenuto: seconda chiamata dedicata alla numerazione dei pin con confronto
+  e blocco, pin_map limitata ai pin presenti, numeri sotto accesi per default.
+
+## 2026-10-10 - Seconda chiamata dedicata alla numerazione dei pin (FATTA, NON COMMITTATA)
+
+- Utente (14:40 circa): «separa, vediamo se in quel modo funziona». Piano:
+  dopo la risposta principale (layout matrix, componente singolo, documento
+  con ruolo Quote o Pinout) una seconda chiamata allo stesso modello con il
+  solo disegno ingrandito e uno strumento con un compito solo: per ogni numero
+  di pin STAMPATO nel disegno, riga e colonna sulla griglia rows x cols data,
+  piu' contacts_view. Specchiatura col codice come per pin_map. Confronto con
+  la pin_map della risposta principale: se coincidono, nota; se la lettura
+  dedicata copre i pin presenti e differisce, la lettura dedicata vince e la
+  generazione automatica viene BLOCCATA con entrambe le letture nel messaggio
+  (accettare con «Rigenera footprint» o ripetere l'analisi); se la seconda
+  chiamata fallisce o non legge nulla, resta la principale con una nota.
+  Prompt della seconda chiamata come costante in codice (DEFAULT_*), non ancora
+  campo del profilo: da fare se la prova convince.
+- Stesso wrapper della chiamata principale: log AI_CALL_*, costo, annullamento.
+- Implementato in `datasheet_extractor`: `DEFAULT_PIN_NUMBERING_PROMPT`,
+  `_PIN_NUMBERING_TOOL` (report_pin_numbering: contacts_view + pins), 
+  `numbering_documents` (immagini con ruolo top/pinout, PDF esclusi),
+  `read_pin_numbering` (best effort, validata con `_pin_map_seen_from_top`),
+  `apply_dedicated_numbering` (regole a/b/c), chiamata da
+  `_validate_main_response(..., numbering=...)` prima di `_canonicalize_answer`
+  per layout matrix, senza package_geometry, famiglia != aggregate_tht;
+  parametro `numbering_prompt` di `extract_pin_header_params`.
+  `ExtractedParams.pin_map_conflict`; la GUI blocca la generazione automatica
+  in `_validate_automatic_input` quando valorizzato. 7 stringhe i18n.
+  Test: `tests/test_pin_numbering_call.py` (13, chiamate simulate). Suite
+  estrazione/prompt/documentazione: 323 passati. App da riavviare; NON ancora
+  provato con una chiamata reale: la prova la fa l'utente sul TEL8.
+
+## 2026-10-10 - Pinout sbagliato dopo la pubblicazione (NON COMMITTATO)
+
+- Run utente 14:14 (deepseek-flash, prompt nuovo): quote tutte giuste
+  (2x8, passo 2.54, interasse 10.16, corpo 23.8x13.7x8, offset -3.0/-1.77,
+  terminale 0.5, foro 0.8), ma `pin_map` con 16 voci numerate a zig-zag
+  colonna per colonna (1,2 / 3,4 ...) invece dei 6 numeri scritti nel disegno
+  (a U: 1,7,8 sopra; 16,10,9 sotto). Il modello ha applicato una convenzione
+  al posto di leggere: 9 e 8 scambiati, 16 dalla parte opposta.
+- Correzione (classe, non caso): lo schema di pin_map chiede SOLO i pin il cui
+  numero e' scritto nel disegno, mai estesi per convenzione; l'estrattore
+  scarta con nota le voci di pin_map per pin non in populated_pins (nel
+  disegno non c'e' un pin da leggere) e il log dice quanti pin sono davvero
+  letti. Non puo' correggere una lettura sbagliata dei 6 pin visibili: quella
+  resta del modello, e con deepseek-flash e' cambiata a ogni giro. Consigliato
+  un modello piu' capace (OpenRouter) per questo passo.
+
 ## 2026-10-10 - Pubblicazione: pin popolati, documenti ingranditi, scritte 3D, lead_*
 
 - Utente autorizza commit di tutto, push, merge in main e ritorno su ADVANCED.
